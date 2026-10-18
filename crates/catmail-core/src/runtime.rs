@@ -32,7 +32,6 @@ impl Runtime {
     }
 
     /// Runs `fut` on the engine runtime. The returned future can be polled by any executor.
-    #[expect(dead_code, reason = "used by the IMAP sync engine from M1 on")]
     pub(crate) async fn run<F, T>(&self, fut: F) -> Result<T>
     where
         F: Future<Output = Result<T>> + Send + 'static,
@@ -61,7 +60,7 @@ impl Drop for Runtime {
     }
 }
 
-fn join_error(e: JoinError) -> Error {
+pub(crate) fn join_error(e: JoinError) -> Error {
     if e.is_panic() {
         let payload = e.into_panic();
         let msg = payload

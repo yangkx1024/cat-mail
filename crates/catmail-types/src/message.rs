@@ -61,6 +61,17 @@ impl BitOrAssign for Flags {
     }
 }
 
+/// The server's current flags for a message in one mailbox.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlagState {
+    pub uid: u32,
+    pub flags: Flags,
+    /// Non-system flags such as `$Junk` or `$Forwarded`.
+    pub keywords: Vec<String>,
+    /// MODSEQ, with CONDSTORE.
+    pub modseq: Option<u64>,
+}
+
 /// What a message list row needs; bodies and attachments are loaded separately.
 /// Describes the message as it is in `folder_id`; `flags` are that copy's flags.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

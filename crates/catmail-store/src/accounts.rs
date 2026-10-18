@@ -1,9 +1,7 @@
-use std::str::FromStr;
-
 use catmail_types::{Account, AccountId, NewAccount, ServerConfig};
-use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Row, named_params};
 
+use crate::columns::parse_text;
 use crate::error::is_unique_violation;
 use crate::{Error, Result};
 
@@ -127,18 +125,10 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Account> {
     })
 }
 
-/// Reads a TEXT column holding an enum's string form.
-fn parse_text<T: FromStr<Err = String>>(row: &Row<'_>, col: &str) -> rusqlite::Result<T> {
-    let value: String = row.get(col)?;
-    value.parse().map_err(|e: String| {
-        let idx = row.as_ref().column_index(col).unwrap_or_default();
-        rusqlite::Error::FromSqlConversionFailure(idx, Type::Text, e.into())
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use catmail_types::{AuthKind, Security};
+    use rusqlite::types::Type;
 
     use super::*;
     use crate::Store;

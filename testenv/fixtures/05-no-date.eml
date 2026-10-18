@@ -1,0 +1,6 @@
+From: noreply@example.com
+To: catmail@example.com
+Subject: No Date header
+Message-ID: <nodate@example.com>
+
+The list falls back to INTERNALDATE.

@@ -4,7 +4,10 @@
 
 mod accounts;
 mod blob;
+mod columns;
 mod error;
+mod folders;
+mod messages;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -15,6 +18,8 @@ use rusqlite_migration::{M, Migrations};
 pub use accounts::Accounts;
 pub use blob::BlobStore;
 pub use error::{Error, Result};
+pub use folders::{FolderSyncState, Folders, RemoteFolder};
+pub use messages::{Messages, NewMessage};
 
 const MIGRATIONS: &[M<'static>] = &[M::up(include_str!("../migrations/0001_init.sql"))];
 
@@ -41,6 +46,14 @@ pub struct Db<'c> {
 impl<'c> Db<'c> {
     pub fn accounts(&self) -> Accounts<'c> {
         Accounts::new(self.conn)
+    }
+
+    pub fn folders(&self) -> Folders<'c> {
+        Folders::new(self.conn)
+    }
+
+    pub fn messages(&self) -> Messages<'c> {
+        Messages::new(self.conn)
     }
 }
 
@@ -98,6 +111,33 @@ impl Store {
 }
 
 #[cfg(test)]
+pub(crate) mod test_util {
+    use catmail_types::{AccountId, AuthKind, NewAccount, Security, ServerConfig};
+
+    use crate::Store;
+
+    pub(crate) fn account(store: &Store, email: &str) -> AccountId {
+        let server = ServerConfig {
+            host: "localhost".into(),
+            port: 993,
+            security: Security::Tls,
+        };
+        let new = NewAccount {
+            email: email.into(),
+            display_name: None,
+            username: email.into(),
+            imap: server.clone(),
+            smtp: server,
+            auth: AuthKind::Password,
+        };
+        store
+            .write(|db| db.accounts().insert(&new, &format!("key:{email}")))
+            .unwrap()
+            .id
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -107,8 +147,9 @@ mod tests {
                                    smtp_host, smtp_port, smtp_security, auth_kind, secret_key)
              VALUES (1, 'a@example.com', 'a', 'imap', 993, 'tls', 'smtp', 465, 'tls', 'password', 'ka'),
                     (2, 'b@example.com', 'b', 'imap', 993, 'tls', 'smtp', 465, 'tls', 'password', 'kb');
-             INSERT INTO folders (id, account_id, name, uidvalidity) VALUES (20, 1, 'INBOX', 7),
-                                                                           (21, 2, 'INBOX', 7);",
+             INSERT INTO folders (id, account_id, remote_name, name, uidvalidity)
+             VALUES (20, 1, 'INBOX', 'INBOX', 7),
+                    (21, 2, 'INBOX', 'INBOX', 7);",
         )
         .unwrap();
     }
@@ -179,7 +220,7 @@ mod tests {
         let conn = store.conn();
         seed(&conn);
         conn.execute_batch(
-            "INSERT INTO folders (id, account_id, name) VALUES (22, 1, 'Archive');
+            "INSERT INTO folders (id, account_id, remote_name, name) VALUES (22, 1, 'Archive', 'Archive');
              INSERT INTO messages (account_id, folder_id, uid, flags) VALUES (1, 20, 5, 1);
              INSERT INTO messages (account_id, folder_id, uid, flags) VALUES (1, 22, 5, 0);",
         )

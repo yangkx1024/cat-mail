@@ -1,0 +1,8 @@
+From: Alice Example <alice@example.com>
+To: catmail@example.com
+Subject: Plain ASCII message
+Date: Fri, 16 Oct 2026 08:00:00 +0000
+Message-ID: <plain@example.com>
+Content-Type: text/plain; charset=us-ascii
+
+Hello from the fixtures.

@@ -1,15 +1,19 @@
 use std::fs::{self, File, TryLockError};
 use std::sync::Arc;
 
+use catmail_proto::TlsConfig;
 use catmail_store::{BlobStore, Store};
-use catmail_types::{Account, AccountId, Event, NewAccount};
+use catmail_types::{
+    Account, AccountId, Event, Folder, FolderId, MessageSummary, NewAccount, SyncReport,
+};
 use tokio::runtime::Handle;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::engine::{Engine, blocking};
 use crate::runtime::Runtime;
 use crate::secrets::{KeyringSecrets, SecretStore};
-use crate::{Config, Error, Result};
+use crate::{Config, Error, Result, sync};
 
 const EVENT_CAPACITY: usize = 256;
 
@@ -22,35 +26,11 @@ pub struct MailClient {
     engine: Arc<Engine>,
 }
 
-struct Engine {
-    config: Config,
-    /// Exclusive lock on the data directory, held for the engine's lifetime: one engine
-    /// per data directory, so sync workers, the outbox and events are never split
-    /// across processes. Other frontends will reach the running engine over IPC.
-    _data_dir_lock: File,
-    store: Store,
-    #[expect(
-        dead_code,
-        reason = "used by attachment and outbox services from M2 on"
-    )]
-    blobs: BlobStore,
-    secrets: Arc<dyn SecretStore>,
-    events: broadcast::Sender<Event>,
-}
-
-impl Engine {
-    /// Called from inside the task performing the mutation, so dropping the caller's
-    /// future can't suppress the notification for a change that did happen.
-    fn emit(&self, event: Event) {
-        // No subscribers is fine.
-        let _ = self.events.send(event);
-    }
-}
-
 pub struct MailClientBuilder {
     config: Config,
     runtime: Option<Handle>,
     secrets: Option<Arc<dyn SecretStore>>,
+    tls: Option<TlsConfig>,
 }
 
 impl MailClientBuilder {
@@ -64,6 +44,12 @@ impl MailClientBuilder {
     /// Replace the OS keyring, e.g. with [`crate::MemorySecrets`] in tests.
     pub fn secrets(mut self, secrets: Arc<dyn SecretStore>) -> Self {
         self.secrets = Some(secrets);
+        self
+    }
+
+    /// How server certificates are verified [default: the platform verifier].
+    pub fn tls(mut self, tls: TlsConfig) -> Self {
+        self.tls = Some(tls);
         self
     }
 
@@ -85,14 +71,15 @@ impl MailClientBuilder {
 
         Ok(MailClient {
             rt: Arc::new(rt),
-            engine: Arc::new(Engine {
-                config: self.config,
-                _data_dir_lock: data_dir_lock,
+            engine: Arc::new(Engine::new(
+                self.config,
+                data_dir_lock,
                 store,
                 blobs,
                 secrets,
                 events,
-            }),
+                self.tls,
+            )),
         })
     }
 }
@@ -103,6 +90,7 @@ impl MailClient {
             config,
             runtime: None,
             secrets: None,
+            tls: None,
         }
     }
 
@@ -142,7 +130,8 @@ impl MailClient {
             .await
     }
 
-    /// Stores the account and its password. Does not contact the server yet.
+    /// Stores the account and its password. Does not contact the server; the first
+    /// [`sync_account`](Self::sync_account) does.
     pub async fn add_account(&self, new: NewAccount, password: String) -> Result<Account> {
         validate_new_account(&new)?;
         if password.is_empty() {
@@ -178,19 +167,89 @@ impl MailClient {
     }
 
     /// Removes the account, all local data cached for it, and its stored password.
+    /// A sync of the account that is running is cancelled first.
     pub async fn remove_account(&self, id: AccountId) -> Result<()> {
         let engine = self.engine.clone();
         self.rt
-            .run_blocking(move || {
-                let Some(secret_key) = engine.store.write(|db| db.accounts().delete(id))? else {
-                    return Err(Error::AccountNotFound(id.to_string()));
-                };
-                // The account is already gone; an orphaned keyring entry is only clutter.
-                if let Err(e) = engine.secrets.delete(&secret_key) {
-                    tracing::warn!(account = %id, error = %e, "failed to delete stored password");
-                }
-                engine.emit(Event::AccountRemoved { account: id });
-                Ok(())
+            .run(async move {
+                let _stopped = engine.stop_syncing(id).await;
+                let result = blocking({
+                    let engine = engine.clone();
+                    move || {
+                        let Some(secret_key) = engine.store.write(|db| db.accounts().delete(id))?
+                        else {
+                            return Err(Error::AccountNotFound(id.to_string()));
+                        };
+                        // The account is already gone; an orphaned keyring entry is only
+                        // clutter.
+                        if let Err(e) = engine.secrets.delete(&secret_key) {
+                            tracing::warn!(account = %id, error = %e,
+                                "failed to delete stored password");
+                        }
+                        engine.emit(Event::AccountRemoved { account: id });
+                        Ok(())
+                    }
+                })
+                .await;
+                engine.forget_sync(id);
+                result
+            })
+            .await
+    }
+
+    /// Brings the account's folders and message headers up to date with the server.
+    /// Waits if the account is already syncing. Progress is committed as it goes, so
+    /// a sync that fails (or whose future is dropped) leaves what it fetched, and the
+    /// next one resumes. A folder the server refuses is reported in its
+    /// [`FolderSyncReport`](crate::FolderSyncReport); losing the connection fails the
+    /// whole call.
+    pub async fn sync_account(&self, id: AccountId) -> Result<SyncReport> {
+        self.rt
+            .run(sync::sync_account(self.engine.clone(), id))
+            .await
+    }
+
+    /// The account's folders, INBOX first.
+    pub async fn list_folders(&self, account: AccountId) -> Result<Vec<Folder>> {
+        let engine = self.engine.clone();
+        self.rt
+            .run(async move { engine.read(move |db| db.folders().list(account)).await })
+            .await
+    }
+
+    pub async fn get_folder(&self, id: FolderId) -> Result<Option<Folder>> {
+        let engine = self.engine.clone();
+        self.rt
+            .run(async move { engine.read(move |db| db.folders().get(id)).await })
+            .await
+    }
+
+    /// By display name (`已发送`), server name (`&XfJT0ZAB-`), or `inbox` in any case.
+    pub async fn find_folder(&self, account: AccountId, name: &str) -> Result<Option<Folder>> {
+        let engine = self.engine.clone();
+        let name = name.to_owned();
+        self.rt
+            .run(async move {
+                engine
+                    .read(move |db| db.folders().find_by_name(account, &name))
+                    .await
+            })
+            .await
+    }
+
+    /// Messages in the folder, newest first.
+    pub async fn list_messages(
+        &self,
+        folder: FolderId,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<MessageSummary>> {
+        let engine = self.engine.clone();
+        self.rt
+            .run(async move {
+                engine
+                    .read(move |db| db.messages().list(folder, limit, offset))
+                    .await
             })
             .await
     }

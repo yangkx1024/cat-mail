@@ -1,0 +1,55 @@
+# Throwaway Dovecot for cat-mail's real-server tests; run.sh fills in the @...@ values.
+# Runs as the invoking user, plaintext on loopback only.
+dovecot_config_version = 2.4.5
+dovecot_storage_version = 2.4.5
+
+base_dir = @RUN@
+state_dir = @WORK@/state
+log_path = /dev/stderr
+protocols = imap
+listen = 127.0.0.1
+
+default_internal_user = @USER@
+default_internal_group = @GROUP@
+default_login_user = @USER@
+
+auth_allow_cleartext = yes
+auth_mechanisms = plain login
+ssl = no
+
+passdb passwd-file {
+  passwd_file_path = @WORK@/users
+}
+userdb passwd-file {
+  passwd_file_path = @WORK@/users
+}
+
+mail_driver = maildir
+mail_home = @WORK@/mail/%{user}
+mail_path = ~/Maildir
+
+namespace inbox {
+  inbox = yes
+  separator = /
+  mailbox Sent {
+    special_use = \Sent
+    auto = create
+  }
+  mailbox Trash {
+    special_use = \Trash
+    auto = create
+  }
+}
+
+service imap-login {
+  chroot =
+  inet_listener imap {
+    port = @PORT@
+  }
+  inet_listener imaps {
+    port = 0
+  }
+}
+service anvil {
+  chroot =
+}
