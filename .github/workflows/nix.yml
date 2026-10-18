@@ -1,0 +1,42 @@
+name: Nix
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "flake.nix"
+      - "flake.lock"
+      - ".github/workflows/nix.yml"
+  pull_request:
+    paths:
+      - "flake.nix"
+      - "flake.lock"
+      - ".github/workflows/nix.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nix-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: Nix Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: cachix/install-nix-action@v31
+
+      - name: Check formatting
+        run: nix fmt -- --ci
+
+      - name: Flake check
+        run: nix flake check
+
+      # The dev shell is the documented way to build; make sure it still provides a
+      # working toolchain.
+      - name: Dev shell
+        run: nix develop -c cargo --version

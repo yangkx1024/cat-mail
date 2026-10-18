@@ -1,0 +1,19 @@
+[package]
+name = "catmail-store"
+description = "SQLite persistence and content-addressed blob storage for cat-mail"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+catmail-types.workspace = true
+hex.workspace = true
+rusqlite.workspace = true
+rusqlite_migration.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,214 @@
+-- Initial schema.
+--
+-- Conventions:
+--   * Timestamps are unix seconds (INTEGER).
+--   * Enum-like columns are TEXT without CHECK constraints so new variants don't need a
+--     table rebuild; the Rust side validates them when reading.
+--   * Address lists are JSON arrays of {"name": ..., "email": ...}.
+--   * Blob hashes are lowercase hex SHA-256 pointing into the on-disk BlobStore. There is
+--     no blob table; see BlobStore for the GC contract.
+--   * Secrets (passwords, OAuth tokens) never live here; they go to the OS keyring.
+--   * Tables whose ids leave the database (frontends, keyring keys) use AUTOINCREMENT so
+--     a deleted id is never handed out again.
+--   * Rows that belong to an account and point at another account-owned row use a
+--     composite foreign key over (id, account_id), so they cannot cross accounts.
+--     Where that is impossible (ON DELETE SET NULL would also null account_id), the
+--     repository checks it.
+
+CREATE TABLE accounts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    email         TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+    display_name  TEXT,
+    username      TEXT    NOT NULL,
+    imap_host     TEXT    NOT NULL,
+    imap_port     INTEGER NOT NULL,
+    imap_security TEXT    NOT NULL,
+    smtp_host     TEXT    NOT NULL,
+    smtp_port     INTEGER NOT NULL,
+    smtp_security TEXT    NOT NULL,
+    auth_kind     TEXT    NOT NULL,
+    -- Keyring entry holding the password. Random and globally unique; written before
+    -- the row exists, so anyone who sees the row also sees the secret.
+    secret_key    TEXT    NOT NULL UNIQUE,
+    created_at    INTEGER NOT NULL DEFAULT (unixepoch())
+) STRICT;
+
+-- One row per remote IMAP mailbox, plus the sync cursor for that mailbox.
+--
+-- Invariant: every row in `messages` for a folder belongs to the folder's current
+-- `uidvalidity`. When the server reports a new UIDVALIDITY, the folder's messages are
+-- deleted and `uidvalidity` is updated in the same transaction.
+CREATE TABLE folders (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id     INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    name           TEXT    NOT NULL,
+    delimiter      TEXT,
+    role           TEXT,
+    uidvalidity    INTEGER,
+    uidnext        INTEGER,
+    highest_modseq INTEGER,
+    unread_count   INTEGER NOT NULL DEFAULT 0,
+    total_count    INTEGER NOT NULL DEFAULT 0,
+    last_synced_at INTEGER,
+    UNIQUE (account_id, name),
+    UNIQUE (id, account_id)
+) STRICT;
+
+-- One row per message *in a mailbox* (an IMAP (mailbox, UID) pair). A copy of the same
+-- email in another folder is another row with its own flags, as on the server. Identical
+-- raw content is still stored once, because the BlobStore is content-addressed.
+-- Cross-folder grouping of copies (e.g. via RFC 8474 EMAILID) can be added later as a
+-- nullable column; it must never replace per-row state.
+CREATE TABLE messages (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id      INTEGER NOT NULL,
+    folder_id       INTEGER NOT NULL,
+    uid             INTEGER NOT NULL,
+    -- Mutable per-mailbox state.
+    flags           INTEGER NOT NULL DEFAULT 0, -- system flags bitset, see catmail_types::Flags
+    keywords_json   TEXT    NOT NULL DEFAULT '[]', -- non-system flags, e.g. ["$Junk"]
+    modseq          INTEGER,
+    -- Immutable for the lifetime of the (folder, uid) pair.
+    internal_date   INTEGER,
+    size            INTEGER,
+    message_id_hdr  TEXT,
+    in_reply_to     TEXT,
+    references_hdr  TEXT,
+    subject         TEXT,
+    from_json       TEXT    NOT NULL DEFAULT '[]',
+    to_json         TEXT    NOT NULL DEFAULT '[]',
+    cc_json         TEXT    NOT NULL DEFAULT '[]',
+    date            INTEGER, -- the Date header
+    snippet         TEXT,
+    has_attachments INTEGER NOT NULL DEFAULT 0,
+    body_state      TEXT    NOT NULL DEFAULT 'headers', -- headers | full
+    thread_id       INTEGER,
+    UNIQUE (folder_id, uid),
+    UNIQUE (id, account_id),
+    FOREIGN KEY (folder_id, account_id) REFERENCES folders(id, account_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE INDEX messages_folder_date ON messages (folder_id, date DESC);
+CREATE INDEX messages_account_date ON messages (account_id, date DESC);
+CREATE INDEX messages_thread ON messages (thread_id);
+CREATE INDEX messages_message_id_hdr ON messages (account_id, message_id_hdr);
+
+CREATE TABLE message_bodies (
+    message_id    INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    text_plain    TEXT,
+    text_html     TEXT, -- already sanitized
+    raw_blob_hash TEXT
+) STRICT;
+
+CREATE TABLE attachments (
+    id           INTEGER PRIMARY KEY,
+    message_id   INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    part_section TEXT    NOT NULL, -- IMAP body section, e.g. '1.2'
+    filename     TEXT,
+    mime_type    TEXT    NOT NULL,
+    size         INTEGER,
+    content_id   TEXT,
+    is_inline    INTEGER NOT NULL DEFAULT 0,
+    blob_hash    TEXT              -- NULL until downloaded
+) STRICT;
+
+CREATE INDEX attachments_message ON attachments (message_id);
+
+CREATE TABLE drafts (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id          INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    -- Same-account only; checked by the repository (SET NULL rules out a composite FK).
+    reply_to_message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+    subject             TEXT,
+    to_json             TEXT    NOT NULL DEFAULT '[]',
+    cc_json             TEXT    NOT NULL DEFAULT '[]',
+    bcc_json            TEXT    NOT NULL DEFAULT '[]',
+    body_text           TEXT,
+    body_html           TEXT,
+    -- Copy uploaded to the server's Drafts folder. A UID means nothing without the
+    -- mailbox and its UIDVALIDITY, so the three are set and cleared together.
+    remote_folder_id    INTEGER REFERENCES folders(id) ON DELETE SET NULL,
+    remote_uidvalidity  INTEGER,
+    remote_uid          INTEGER,
+    updated_at          INTEGER NOT NULL DEFAULT (unixepoch())
+) STRICT;
+
+CREATE TABLE draft_attachments (
+    id        INTEGER PRIMARY KEY,
+    draft_id  INTEGER NOT NULL REFERENCES drafts(id) ON DELETE CASCADE,
+    blob_hash TEXT    NOT NULL,
+    filename  TEXT    NOT NULL,
+    mime_type TEXT    NOT NULL
+) STRICT;
+
+CREATE INDEX draft_attachments_draft ON draft_attachments (draft_id);
+
+-- Messages handed to "send". Each row is a self-contained snapshot: retries never
+-- re-read the draft. The SMTP envelope is stored separately from the MIME because Bcc
+-- recipients are not in the headers.
+--
+-- status:
+--   queued    waiting for an attempt (next_attempt_at)
+--   sending   SMTP transaction in progress
+--   accepted  server accepted the message (250 after DATA); saving to Sent is pending.
+--             Only the APPEND is retried from here, never the SMTP send.
+--   unknown   connection lost after the final DATA dot, outcome unknown. Never retried
+--             automatically, since resending may deliver twice; the user decides.
+--   done      sent and, where needed, saved to Sent
+--   failed    permanently rejected (e.g. 5xx); last_error says why
+CREATE TABLE outbox (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id      INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    draft_id        INTEGER REFERENCES drafts(id) ON DELETE SET NULL,
+    raw_blob_hash   TEXT    NOT NULL,
+    envelope_from   TEXT    NOT NULL, -- MAIL FROM
+    recipients_json TEXT    NOT NULL, -- every RCPT TO address, Bcc included
+    status          TEXT    NOT NULL DEFAULT 'queued',
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at INTEGER,
+    last_error      TEXT,
+    created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+    updated_at      INTEGER NOT NULL DEFAULT (unixepoch())
+) STRICT;
+
+CREATE INDEX outbox_status ON outbox (status, next_attempt_at);
+
+-- Local changes already applied optimistically, waiting to be replayed on the server.
+-- Written in the same transaction as the local change they describe.
+--
+-- UIDs are only meaningful within one UIDVALIDITY generation of one mailbox. An op is
+-- replayed only after SELECT reports the same `uidvalidity`; otherwise it goes to
+-- reconciliation instead of touching whatever message now has that UID.
+CREATE TABLE pending_ops (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT, -- also the replay order
+    account_id   INTEGER NOT NULL,
+    folder_id    INTEGER NOT NULL,
+    uidvalidity  INTEGER NOT NULL,
+    kind         TEXT    NOT NULL, -- set_flags | move | delete | append
+    payload_json TEXT    NOT NULL, -- UIDs and kind-specific arguments
+    status       TEXT    NOT NULL DEFAULT 'pending', -- pending | failed | conflict
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    last_error   TEXT,
+    created_at   INTEGER NOT NULL DEFAULT (unixepoch()),
+    FOREIGN KEY (folder_id, account_id) REFERENCES folders(id, account_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE INDEX pending_ops_queue ON pending_ops (account_id, folder_id, status, id);
+
+-- Full-text index keyed by messages.id (rowid). Contentless: the text lives in messages
+-- and message_bodies, the index only stores tokens. CJK text will be pre-segmented on the
+-- Rust side before indexing and querying (M2), since unicode61 treats a run of CJK
+-- characters as a single token.
+CREATE VIRTUAL TABLE messages_fts USING fts5 (
+    subject,
+    from_text,
+    to_text,
+    body,
+    content = '',
+    contentless_delete = 1,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
+
+CREATE TRIGGER messages_fts_delete AFTER DELETE ON messages BEGIN
+    DELETE FROM messages_fts WHERE rowid = old.id;
+END;

@@ -1,0 +1,552 @@
+use std::fs::{self, File, TryLockError};
+use std::sync::Arc;
+
+use catmail_store::{BlobStore, Store};
+use catmail_types::{Account, AccountId, Event, NewAccount};
+use tokio::runtime::Handle;
+use tokio::sync::broadcast;
+use uuid::Uuid;
+
+use crate::runtime::Runtime;
+use crate::secrets::{KeyringSecrets, SecretStore};
+use crate::{Config, Error, Result};
+
+const EVENT_CAPACITY: usize = 256;
+
+/// The only entry point frontends use. Cheap to clone; all clones share one engine.
+#[derive(Clone)]
+pub struct MailClient {
+    // Kept apart from `Engine` so tasks running on the runtime never hold the last
+    // reference to the runtime itself.
+    rt: Arc<Runtime>,
+    engine: Arc<Engine>,
+}
+
+struct Engine {
+    config: Config,
+    /// Exclusive lock on the data directory, held for the engine's lifetime: one engine
+    /// per data directory, so sync workers, the outbox and events are never split
+    /// across processes. Other frontends will reach the running engine over IPC.
+    _data_dir_lock: File,
+    store: Store,
+    #[expect(
+        dead_code,
+        reason = "used by attachment and outbox services from M2 on"
+    )]
+    blobs: BlobStore,
+    secrets: Arc<dyn SecretStore>,
+    events: broadcast::Sender<Event>,
+}
+
+impl Engine {
+    /// Called from inside the task performing the mutation, so dropping the caller's
+    /// future can't suppress the notification for a change that did happen.
+    fn emit(&self, event: Event) {
+        // No subscribers is fine.
+        let _ = self.events.send(event);
+    }
+}
+
+pub struct MailClientBuilder {
+    config: Config,
+    runtime: Option<Handle>,
+    secrets: Option<Arc<dyn SecretStore>>,
+}
+
+impl MailClientBuilder {
+    /// Run engine work on an existing tokio runtime instead of creating one.
+    /// Use this when the caller already lives inside tokio (e.g. the CLI).
+    pub fn runtime(mut self, handle: Handle) -> Self {
+        self.runtime = Some(handle);
+        self
+    }
+
+    /// Replace the OS keyring, e.g. with [`crate::MemorySecrets`] in tests.
+    pub fn secrets(mut self, secrets: Arc<dyn SecretStore>) -> Self {
+        self.secrets = Some(secrets);
+        self
+    }
+
+    /// Locks the data directory, then opens the database (migrating it if needed) and
+    /// the blob store. Blocks briefly. Fails with [`Error::AlreadyRunning`] if another
+    /// engine, in this or another process, has the directory open.
+    pub fn open(self) -> Result<MailClient> {
+        let data_dir_lock = lock_data_dir(&self.config)?;
+        let rt = match self.runtime {
+            Some(handle) => Runtime::shared(handle),
+            None => Runtime::owned()?,
+        };
+        let store = Store::open(&self.config.db_path())?;
+        let blobs = BlobStore::open(self.config.blob_dir())?;
+        let secrets = self
+            .secrets
+            .unwrap_or_else(|| Arc::new(KeyringSecrets::default()));
+        let (events, _) = broadcast::channel(EVENT_CAPACITY);
+
+        Ok(MailClient {
+            rt: Arc::new(rt),
+            engine: Arc::new(Engine {
+                config: self.config,
+                _data_dir_lock: data_dir_lock,
+                store,
+                blobs,
+                secrets,
+                events,
+            }),
+        })
+    }
+}
+
+impl MailClient {
+    pub fn builder(config: Config) -> MailClientBuilder {
+        MailClientBuilder {
+            config,
+            runtime: None,
+            secrets: None,
+        }
+    }
+
+    pub fn config(&self) -> &Config {
+        &self.engine.config
+    }
+
+    /// Change notifications. Receivers that fall behind get `RecvError::Lagged` and
+    /// should refresh whatever they display.
+    pub fn subscribe(&self) -> broadcast::Receiver<Event> {
+        self.engine.events.subscribe()
+    }
+
+    pub async fn list_accounts(&self) -> Result<Vec<Account>> {
+        let engine = self.engine.clone();
+        self.rt
+            .run_blocking(move || Ok(engine.store.read(|db| db.accounts().list())?))
+            .await
+    }
+
+    pub async fn get_account(&self, id: AccountId) -> Result<Option<Account>> {
+        let engine = self.engine.clone();
+        self.rt
+            .run_blocking(move || Ok(engine.store.read(|db| db.accounts().get(id))?))
+            .await
+    }
+
+    pub async fn find_account_by_email(&self, email: &str) -> Result<Option<Account>> {
+        let engine = self.engine.clone();
+        let email = email.to_owned();
+        self.rt
+            .run_blocking(move || {
+                Ok(engine
+                    .store
+                    .read(|db| db.accounts().find_by_email(&email))?)
+            })
+            .await
+    }
+
+    /// Stores the account and its password. Does not contact the server yet.
+    pub async fn add_account(&self, new: NewAccount, password: String) -> Result<Account> {
+        validate_new_account(&new)?;
+        if password.is_empty() {
+            return Err(Error::InvalidInput("password must not be empty".into()));
+        }
+        let engine = self.engine.clone();
+        self.rt
+            .run_blocking(move || {
+                // Secret first, row second: whoever can see the row can also see its
+                // secret, so a concurrent removal always finds and deletes it. The random
+                // key keeps data directories apart.
+                let secret_key = format!("account:{}:{}", new.email, Uuid::new_v4().simple());
+                engine.secrets.set(&secret_key, &password)?;
+                let account = match engine
+                    .store
+                    .write(|db| db.accounts().insert(&new, &secret_key))
+                {
+                    Ok(account) => account,
+                    Err(e) => {
+                        if let Err(cleanup) = engine.secrets.delete(&secret_key) {
+                            tracing::warn!(error = %cleanup,
+                                "failed to delete password after account insert failed");
+                        }
+                        return Err(e.into());
+                    }
+                };
+                engine.emit(Event::AccountAdded {
+                    account: account.id,
+                });
+                Ok(account)
+            })
+            .await
+    }
+
+    /// Removes the account, all local data cached for it, and its stored password.
+    pub async fn remove_account(&self, id: AccountId) -> Result<()> {
+        let engine = self.engine.clone();
+        self.rt
+            .run_blocking(move || {
+                let Some(secret_key) = engine.store.write(|db| db.accounts().delete(id))? else {
+                    return Err(Error::AccountNotFound(id.to_string()));
+                };
+                // The account is already gone; an orphaned keyring entry is only clutter.
+                if let Err(e) = engine.secrets.delete(&secret_key) {
+                    tracing::warn!(account = %id, error = %e, "failed to delete stored password");
+                }
+                engine.emit(Event::AccountRemoved { account: id });
+                Ok(())
+            })
+            .await
+    }
+}
+
+fn lock_data_dir(config: &Config) -> Result<File> {
+    fs::create_dir_all(config.data_dir())?;
+    let file = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(config.lock_path())?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => {
+            Err(Error::AlreadyRunning(config.data_dir().to_path_buf()))
+        }
+        Err(TryLockError::Error(e)) => Err(e.into()),
+    }
+}
+
+fn validate_new_account(new: &NewAccount) -> Result<()> {
+    let invalid = |msg: &str| Err(Error::InvalidInput(msg.into()));
+    let Some((local, domain)) = new.email.split_once('@') else {
+        return invalid("email must contain `@`");
+    };
+    if local.is_empty() || domain.is_empty() {
+        return invalid("email must have a local part and a domain");
+    }
+    if new.username.is_empty() {
+        return invalid("username must not be empty");
+    }
+    for (proto, server) in [("IMAP", &new.imap), ("SMTP", &new.smtp)] {
+        if server.host.is_empty() {
+            return Err(Error::InvalidInput(format!(
+                "{proto} host must not be empty"
+            )));
+        }
+        if server.port == 0 {
+            return Err(Error::InvalidInput(format!("{proto} port must not be 0")));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use catmail_types::{AuthKind, Security, ServerConfig};
+
+    use std::sync::Mutex;
+
+    use super::*;
+    use crate::MemorySecrets;
+
+    fn secret_key(client: &MailClient, id: AccountId) -> String {
+        client
+            .engine
+            .store
+            .read(|db| db.accounts().secret_key(id))
+            .unwrap()
+            .unwrap()
+    }
+
+    fn new_account(email: &str) -> NewAccount {
+        NewAccount {
+            email: email.into(),
+            display_name: None,
+            username: email.into(),
+            imap: ServerConfig {
+                host: "imap.example.com".into(),
+                port: 993,
+                security: Security::Tls,
+            },
+            smtp: ServerConfig {
+                host: "smtp.example.com".into(),
+                port: 465,
+                security: Security::Tls,
+            },
+            auth: AuthKind::Password,
+        }
+    }
+
+    /// Blocks inside `set` until the test releases it, to widen race windows.
+    struct GatedSecrets {
+        inner: MemorySecrets,
+        entered: Arc<tokio::sync::Notify>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl GatedSecrets {
+        fn new() -> (Arc<Self>, std::sync::mpsc::Sender<()>) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let secrets = Arc::new(Self {
+                inner: MemorySecrets::default(),
+                entered: Arc::default(),
+                release: Mutex::new(rx),
+            });
+            (secrets, tx)
+        }
+    }
+
+    impl SecretStore for GatedSecrets {
+        fn set(&self, key: &str, secret: &str) -> Result<()> {
+            self.entered.notify_one();
+            self.release.lock().unwrap().recv().unwrap();
+            self.inner.set(key, secret)
+        }
+        fn get(&self, key: &str) -> Result<Option<String>> {
+            self.inner.get(key)
+        }
+        fn delete(&self, key: &str) -> Result<()> {
+            self.inner.delete(key)
+        }
+    }
+
+    fn open_client(dir: &std::path::Path, secrets: Arc<dyn SecretStore>) -> MailClient {
+        MailClient::builder(Config::with_data_dir(dir))
+            .runtime(Handle::current())
+            .secrets(secrets)
+            .open()
+            .unwrap()
+    }
+
+    struct FailingSecrets;
+
+    impl SecretStore for FailingSecrets {
+        fn set(&self, _: &str, _: &str) -> Result<()> {
+            Err(Error::Secrets("locked".into()))
+        }
+        fn get(&self, _: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+        fn delete(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn account_lifecycle_on_shared_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(MemorySecrets::default());
+        let client = MailClient::builder(Config::with_data_dir(dir.path()))
+            .runtime(Handle::current())
+            .secrets(secrets.clone())
+            .open()
+            .unwrap();
+        let mut events = client.subscribe();
+
+        let account = client
+            .add_account(new_account("a@example.com"), "hunter2".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            events.recv().await.unwrap(),
+            Event::AccountAdded {
+                account: account.id
+            }
+        );
+        let key = secret_key(&client, account.id);
+        assert_eq!(secrets.get(&key).unwrap().as_deref(), Some("hunter2"));
+        assert_eq!(client.list_accounts().await.unwrap(), vec![account.clone()]);
+
+        client.remove_account(account.id).await.unwrap();
+        assert_eq!(
+            events.recv().await.unwrap(),
+            Event::AccountRemoved {
+                account: account.id
+            }
+        );
+        assert!(secrets.get(&key).unwrap().is_none());
+        assert!(matches!(
+            client.remove_account(account.id).await,
+            Err(Error::AccountNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn owned_runtime_is_usable_from_a_foreign_executor() {
+        // Mirrors the GUI: futures are polled by a non-tokio executor.
+        let dir = tempfile::tempdir().unwrap();
+        let client = MailClient::builder(Config::with_data_dir(dir.path()))
+            .secrets(Arc::new(MemorySecrets::default()))
+            .open()
+            .unwrap();
+
+        let accounts = pollster::block_on(async {
+            client
+                .add_account(new_account("a@example.com"), "pw".into())
+                .await?;
+            client.list_accounts().await
+        })
+        .unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert!(
+            client.config().db_path().exists(),
+            "database is created on disk"
+        );
+    }
+
+    #[test]
+    fn secret_store_failure_rolls_back_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = MailClient::builder(Config::with_data_dir(dir.path()))
+            .secrets(Arc::new(FailingSecrets))
+            .open()
+            .unwrap();
+
+        let result =
+            pollster::block_on(client.add_account(new_account("a@example.com"), "pw".into()));
+        assert!(matches!(result, Err(Error::Secrets(_))));
+        assert!(
+            pollster::block_on(client.list_accounts())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = MailClient::builder(Config::with_data_dir(dir.path()))
+            .secrets(Arc::new(MemorySecrets::default()))
+            .open()
+            .unwrap();
+
+        let mut bad = new_account("no-at-sign");
+        let r = pollster::block_on(client.add_account(bad.clone(), "pw".into()));
+        assert!(matches!(r, Err(Error::InvalidInput(_))));
+
+        bad.email = "a@example.com".into();
+        bad.imap.port = 0;
+        let r = pollster::block_on(client.add_account(bad, "pw".into()));
+        assert!(matches!(r, Err(Error::InvalidInput(_))));
+
+        let r = pollster::block_on(client.add_account(new_account("a@example.com"), String::new()));
+        assert!(matches!(r, Err(Error::InvalidInput(_))));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn data_dirs_do_not_share_credentials() {
+        let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let secrets = Arc::new(MemorySecrets::default());
+        let a = open_client(dir_a.path(), secrets.clone());
+        let b = open_client(dir_b.path(), secrets.clone());
+
+        let acc_a = a
+            .add_account(new_account("a@example.com"), "pw-a".into())
+            .await
+            .unwrap();
+        let acc_b = b
+            .add_account(new_account("b@example.com"), "pw-b".into())
+            .await
+            .unwrap();
+        assert_eq!(acc_a.id, acc_b.id, "both databases start at the same id");
+
+        b.remove_account(acc_b.id).await.unwrap();
+        assert_eq!(
+            secrets.get(&secret_key(&a, acc_a.id)).unwrap().as_deref(),
+            Some("pw-a")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remove_during_add_leaves_no_orphaned_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let (secrets, release) = GatedSecrets::new();
+        let client = open_client(dir.path(), secrets.clone());
+
+        let add = tokio::spawn({
+            let client = client.clone();
+            async move {
+                client
+                    .add_account(new_account("a@example.com"), "pw".into())
+                    .await
+            }
+        });
+        // The password write is in flight; the row must not be visible yet.
+        secrets.entered.notified().await;
+        let id = AccountId(1);
+        assert!(matches!(
+            client.remove_account(id).await,
+            Err(Error::AccountNotFound(_))
+        ));
+        release.send(()).unwrap();
+        assert_eq!(add.await.unwrap().unwrap().id, id);
+
+        client.remove_account(id).await.unwrap();
+        assert_eq!(secrets.inner.len(), 0, "no orphaned credential");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_engine_per_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(MemorySecrets::default());
+        let first = open_client(dir.path(), secrets.clone());
+
+        let second = MailClient::builder(Config::with_data_dir(dir.path()))
+            .runtime(Handle::current())
+            .secrets(secrets.clone())
+            .open();
+        assert!(matches!(second, Err(Error::AlreadyRunning(_))));
+
+        // A clone shares the engine; dropping every handle releases the lock.
+        let clone = first.clone();
+        drop(first);
+        drop(clone);
+        open_client(dir.path(), secrets);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_insert_deletes_the_new_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(MemorySecrets::default());
+        let client = open_client(dir.path(), secrets.clone());
+
+        client
+            .add_account(new_account("a@example.com"), "pw".into())
+            .await
+            .unwrap();
+        let dup = client
+            .add_account(new_account("A@example.com"), "pw".into())
+            .await;
+        assert!(
+            matches!(
+                dup,
+                Err(Error::Store(catmail_store::Error::AlreadyExists(_)))
+            ),
+            "{dup:?}"
+        );
+        assert_eq!(secrets.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dropping_the_caller_future_still_emits_the_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let (secrets, release) = GatedSecrets::new();
+        let client = open_client(dir.path(), secrets.clone());
+        let mut events = client.subscribe();
+
+        tokio::select! {
+            _ = client.add_account(new_account("a@example.com"), "pw".into()) => {
+                unreachable!("set() is gated")
+            }
+            _ = secrets.entered.notified() => {} // drops the add_account future
+        }
+        release.send(()).unwrap();
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .expect("event was not emitted")
+            .unwrap();
+        assert_eq!(
+            event,
+            Event::AccountAdded {
+                account: AccountId(1)
+            }
+        );
+    }
+}

@@ -1,0 +1,16 @@
+[package]
+name = "catmail-types"
+description = "Domain types shared across cat-mail layers (no IO)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

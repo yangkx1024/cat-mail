@@ -1,0 +1,18 @@
+[package]
+name = "catmail-proto"
+description = "Remote mail protocol adapters (IMAP, SMTP) for cat-mail"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+catmail-types.workspace = true
+imap-next.workspace = true
+# Workaround: imap-codec 2.0.0-alpha.9 uses nom's `alloc`-gated combinators but depends on
+# nom with default features off, so it only builds when something else enables them.
+nom = { version = "7", default-features = false, features = ["alloc"] }
+thiserror.workspace = true
+
+[lints]
+workspace = true

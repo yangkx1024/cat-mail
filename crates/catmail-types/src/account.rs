@@ -1,0 +1,122 @@
+use std::fmt;
+use std::str::FromStr;
+
+use serde::{Deserialize, Serialize};
+
+use crate::AccountId;
+
+/// Transport security for an IMAP or SMTP connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Security {
+    /// TLS from the first byte (IMAPS 993, SMTPS 465).
+    Tls,
+    /// Plain connection upgraded with STARTTLS (IMAP 143, submission 587).
+    StartTls,
+    /// No encryption. Only meant for local test servers.
+    Plain,
+}
+
+impl Security {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tls => "tls",
+            Self::StartTls => "starttls",
+            Self::Plain => "plain",
+        }
+    }
+
+    pub fn default_imap_port(self) -> u16 {
+        match self {
+            Self::Tls => 993,
+            Self::StartTls | Self::Plain => 143,
+        }
+    }
+
+    pub fn default_smtp_port(self) -> u16 {
+        match self {
+            Self::Tls => 465,
+            Self::StartTls => 587,
+            Self::Plain => 25,
+        }
+    }
+}
+
+impl fmt::Display for Security {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Security {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "tls" => Ok(Self::Tls),
+            "starttls" => Ok(Self::StartTls),
+            "plain" => Ok(Self::Plain),
+            other => Err(format!(
+                "unknown security mode `{other}` (expected tls, starttls or plain)"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerConfig {
+    pub host: String,
+    pub port: u16,
+    pub security: Security,
+}
+
+/// How the account authenticates. The secret itself never lives in the database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthKind {
+    Password,
+}
+
+impl AuthKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Password => "password",
+        }
+    }
+}
+
+impl FromStr for AuthKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "password" => Ok(Self::Password),
+            other => Err(format!("unknown auth kind `{other}`")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Account {
+    pub id: AccountId,
+    pub email: String,
+    pub display_name: Option<String>,
+    /// Login name for IMAP/SMTP; usually but not always the email address.
+    pub username: String,
+    pub imap: ServerConfig,
+    pub smtp: ServerConfig,
+    pub auth: AuthKind,
+    /// Unix timestamp, seconds.
+    pub created_at: i64,
+}
+
+/// Input for creating an account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewAccount {
+    pub email: String,
+    pub display_name: Option<String>,
+    pub username: String,
+    pub imap: ServerConfig,
+    pub smtp: ServerConfig,
+    pub auth: AuthKind,
+}

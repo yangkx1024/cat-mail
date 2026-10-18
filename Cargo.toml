@@ -1,0 +1,41 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+catmail-types = { path = "crates/catmail-types" }
+catmail-store = { path = "crates/catmail-store" }
+catmail-proto = { path = "crates/catmail-proto" }
+catmail-core = { path = "crates/catmail-core" }
+
+anyhow = "1"
+clap = { version = "4.6", features = ["derive", "env"] }
+directories = "6"
+hex = "0.4"
+imap-next = { version = "0.3.4", features = ["starttls", "ext_condstore_qresync"] }
+keyring = "4.2"
+pollster = "1"
+rpassword = "7"
+rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite_migration = "2.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tempfile = "3"
+thiserror = "2"
+tokio = "1.53"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.28", features = ["v4"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
