@@ -282,13 +282,15 @@ impl<'c> Outbox<'c> {
         Ok(true)
     }
 
-    /// Entries a process left `sending` never got to the end of their message (that
-    /// is marked `unknown` first), so the server discarded them: back to the queue.
-    pub fn recover_interrupted(&self, now: i64) -> Result<usize> {
+    /// Entries left `sending` (of `account`, or of every account) by an attempt that
+    /// is over never got to the end of their message (that is marked `unknown` first),
+    /// so the server discarded them: back to the queue. Only for when no attempt can be
+    /// running: at start-up, or under the account's send permit.
+    pub fn recover_interrupted(&self, account: Option<AccountId>, now: i64) -> Result<usize> {
         Ok(self.conn.execute(
             "UPDATE outbox SET status = 'queued', next_attempt_at = ?1, updated_at = ?1
-             WHERE status = 'sending'",
-            [now],
+             WHERE status = 'sending' AND (?2 IS NULL OR account_id = ?2)",
+            params![now, account.map(|a| a.0)],
         )?)
     }
 
@@ -643,11 +645,19 @@ mod tests {
 
     #[test]
     fn interrupted_sends_go_back_to_the_queue() {
-        let (store, _, _, id) = setup();
+        let (store, account, _, id) = setup();
         store.write(|db| db.outbox().begin_send(id, 11)).unwrap();
+        let other = AccountId(account.0 + 1);
         assert_eq!(
             store
-                .write(|db| db.outbox().recover_interrupted(20))
+                .write(|db| db.outbox().recover_interrupted(Some(other), 20))
+                .unwrap(),
+            0,
+            "another account's"
+        );
+        assert_eq!(
+            store
+                .write(|db| db.outbox().recover_interrupted(Some(account), 20))
                 .unwrap(),
             1
         );
@@ -660,7 +670,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             store
-                .write(|db| db.outbox().recover_interrupted(30))
+                .write(|db| db.outbox().recover_interrupted(None, 30))
                 .unwrap(),
             0
         );

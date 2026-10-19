@@ -57,6 +57,8 @@ pub(crate) async fn queue_draft(engine: &Arc<Engine>, id: DraftId) -> Result<Out
             "draft {id} is already in the outbox (entry {outbox})"
         )));
     }
+    // The account's own address goes into MAIL FROM and the Message-ID.
+    drafts::check_address(&account.email)?;
     let content = &snapshot.draft.content;
     drafts::validate(content)?;
     let recipients = envelope_recipients(content.recipients());
@@ -137,14 +139,14 @@ pub(crate) async fn queue_draft(engine: &Arc<Engine>, id: DraftId) -> Result<Out
 
 /// Works through the account's outbox: sends what is queued, saving each message to
 /// Sent as soon as it is accepted, then saves what an earlier pass couldn't. With
-/// `due_only`, only entries whose backoff has run out. Returns the entries worked on, as
-/// they ended up (`Done` for those that are gone).
+/// `due_only`, only entries whose backoff has run out. Returns the entries worked on
+/// (postponed ones included), as they ended up (`Done` for those that are gone).
 pub(crate) async fn flush(
     engine: Arc<Engine>,
     account: AccountId,
     due_only: bool,
 ) -> Result<Vec<OutboxEntry>> {
-    let mut permit = engine.send_permit(account).await;
+    let mut permit = idle_outbox(&engine, account).await?;
     if permit.is_cancelled() {
         return Err(Error::AccountNotFound(account.to_string()));
     }
@@ -160,17 +162,18 @@ async fn run(engine: &Arc<Engine>, account: AccountId, due_only: bool) -> Result
         engine.read(move |db| db.outbox().pending(account, status, due))
     };
     let mut results = Vec::new();
-    let mut postponed = false;
 
     let mut smtp = Smtp::default();
     for id in pending(OutboxStatus::Queued).await? {
         if let Some(down) = &smtp.down {
-            // The server couldn't be reached for an earlier entry; this one would fail
-            // the same way.
-            let (next, error) = (now() + FIRST_BACKOFF, down.clone());
-            postponed |= engine
-                .write(move |db| db.outbox().postpone(id, next, &error, now()))
-                .await?;
+            // The server couldn't be reached for the entry before; this one would fail
+            // the same way. It waits as long as that one, so the backoff still grows.
+            let next = results
+                .last()
+                .and_then(|e: &OutboxEntry| e.next_attempt_at)
+                .unwrap_or_else(|| now() + FIRST_BACKOFF);
+            let error = down.clone();
+            results.extend(record(engine, id, move |o| o.postpone(id, next, &error, now())).await?);
             continue;
         }
         let Some(job) = engine
@@ -191,17 +194,33 @@ async fn run(engine: &Arc<Engine>, account: AccountId, due_only: bool) -> Result
             continue;
         }
         let Some(job) = engine
-            .write(move |db| db.outbox().begin_save(id, now()))
+            .write_durable(move |db| db.outbox().begin_save(id, now()))
             .await?
         else {
             continue;
         };
         results.extend(save_one(engine, job, None).await?);
     }
-    if !results.is_empty() || postponed {
+    if !results.is_empty() {
         engine.emit(Event::OutboxChanged { account });
     }
     Ok(results)
+}
+
+/// The account's send permit, with nothing in the middle of being sent. An entry that
+/// is still `sending` once the permit is ours belongs to an attempt that ended without
+/// recording how (a failed write, a cancelled flush). It never got to the end of its
+/// message, which would have made it `unknown`, so it goes back to the queue.
+async fn idle_outbox(engine: &Arc<Engine>, account: AccountId) -> Result<Permit> {
+    let permit = engine.send_permit(account).await;
+    let requeued = engine
+        .write(move |db| db.outbox().recover_interrupted(Some(account), now()))
+        .await?;
+    if requeued > 0 {
+        tracing::info!(%account, requeued, "requeued sends that were left unfinished");
+        engine.emit(Event::OutboxChanged { account });
+    }
+    Ok(permit)
 }
 
 /// The SMTP connection of one pass over the outbox, reused from message to message.
@@ -249,8 +268,9 @@ async fn send_one(
     let now = now();
     match attempt_send(engine, smtp, &job).await {
         Outcome::Accepted(raw) => {
+            // Durable like every count of an attempt to save: see `attempt_save`.
             let save = engine
-                .write(move |db| {
+                .write_durable(move |db| {
                     db.outbox().mark_accepted(id, now)?;
                     db.outbox().begin_save(id, now)
                 })
@@ -328,8 +348,10 @@ async fn transact(
     }
     // From here on the server may accept the message at any moment.
     let id = job.entry.id;
+    // On disk before the end marker goes out: a commit lost to a power cut would leave
+    // the entry `sending`, which is sent again.
     match engine
-        .write(move |db| db.outbox().mark_unknown(id, None, now()))
+        .write_durable(move |db| db.outbox().mark_unknown(id, None, now()))
         .await
     {
         Ok(true) => {}
@@ -391,11 +413,11 @@ async fn attempt_save(engine: &Arc<Engine>, job: &OutboxJob, raw: Option<Vec<u8>
         job.raw.clone(),
         job.entry.message_id.clone(),
     );
-    // Counted before each try, so past the first one an APPEND may have gone through.
-    let mut tries = job.entry.attempts;
+    // Attempts are counted before they are made, so past the first one (or after a
+    // retry on a new connection within this one) an APPEND may have gone through.
+    let mut may_be_there = job.entry.attempts > 1;
     let saved = with_session(engine, account, move |session| {
-        tries += 1;
-        let check_first = tries > 1;
+        let check_first = std::mem::replace(&mut may_be_there, true);
         let (engine, hash, message_id) = (engine2.clone(), hash.clone(), message_id.clone());
         let (known, raw) = (known.clone(), raw.clone());
         Box::pin(async move {
@@ -453,7 +475,8 @@ fn is_permanent(e: &Error) -> bool {
         Error::Smtp(e) => e.is_permanent(),
         // Lifted out of `Error::Smtp` (see `Error::from`).
         Error::AuthFailed(_) | Error::Unsupported(_) => true,
-        Error::Secrets(_) | Error::Tls(_) | Error::Conflict(_) | Error::AccountNotFound(_) => true,
+        // Not `Secrets`: a keyring that is locked or not running yet comes back.
+        Error::Tls(_) | Error::Conflict(_) | Error::AccountNotFound(_) => true,
         _ => false,
     }
 }
@@ -522,7 +545,7 @@ async fn decision_permit(engine: &Arc<Engine>, id: OutboxId) -> Result<Permit> {
         .await?
         .ok_or(Error::OutboxNotFound(id))?
         .account_id;
-    Ok(engine.send_permit(account).await)
+    idle_outbox(engine, account).await
 }
 
 /// Sends whatever comes due, for as long as the engine exists. Holds the engine only

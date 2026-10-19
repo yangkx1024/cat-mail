@@ -121,6 +121,9 @@ impl Session {
         Ok(())
     }
 
+    /// Every mailbox. A listing without INBOX is `Incomplete` if the user has one after
+    /// all: it was cut short or mangled, and the mailboxes it leaves out must not be
+    /// taken for deleted ones.
     pub async fn list(&mut self) -> Result<Vec<ListedMailbox>> {
         let body = CommandBody::list("", ListMailbox::try_from("*").expect("valid wildcard"))
             .expect("valid LIST arguments");
@@ -160,7 +163,25 @@ impl Session {
                 special_use: attributes.iter().find_map(|a| special_use(a)),
             });
         }
+        if !mailboxes.iter().any(|m| m.raw_name == "INBOX") && self.has_inbox().await? {
+            return Err(Error::Incomplete("LIST"));
+        }
         Ok(mailboxes)
+    }
+
+    /// RFC 3501 §6.3.8 lists INBOX unless the user has none, which is when selecting it
+    /// fails. Asks the server that way, read-only. Leaves no mailbox selected.
+    async fn has_inbox(&mut self) -> Result<bool> {
+        self.selected = None;
+        let examine = CommandBody::Examine {
+            mailbox: Mailbox::Inbox,
+            parameters: Vec::new(),
+        };
+        match self.conn.execute(examine).await {
+            Ok(_) => Ok(true),
+            Err(Error::Command { .. }) => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     /// Opens `raw_name` read-only. With CONDSTORE, also enables MODSEQ reporting.

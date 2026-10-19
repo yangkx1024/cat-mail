@@ -218,10 +218,15 @@ impl Session {
     pub async fn end_message(&mut self) -> Result<()> {
         self.write(b".\r\n").await?;
         let reply = self.read_reply(END_OF_DATA_TIMEOUT).await?;
-        if reply.code == 250 {
-            Ok(())
-        } else {
-            Err(reply_error("message", reply))
+        match reply.code {
+            // RFC 5321 only has 250 here; any positive completion means the same.
+            200..300 => Ok(()),
+            400..600 => Err(reply_error("message", reply)),
+            // Neither yes nor no, so whether the server kept the message can't be told.
+            code => Err(Error::Protocol(format!(
+                "unexpected reply to the end of the message: {code} {}",
+                reply.text()
+            ))),
         }
     }
 
@@ -241,9 +246,12 @@ impl Session {
 
     async fn ehlo(&mut self) -> Result<()> {
         let reply = self.send_line(&format!("EHLO {CLIENT_NAME}")).await?;
-        if reply.code != 250 {
+        match reply.code {
+            250 => {}
+            // Busy or rate limited (421): worth trying again later.
+            400..500 => return Err(reply_error("EHLO", reply)),
             // Every submission server speaks ESMTP; without it there is no AUTH either.
-            return Err(Error::Unsupported("EHLO"));
+            _ => return Err(Error::Unsupported("EHLO")),
         }
         // The first line is the server's greeting, the rest one extension each.
         self.extensions = reply

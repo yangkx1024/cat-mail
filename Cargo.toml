@@ -37,6 +37,9 @@ keyring = "4.2"
 mail-builder = { version = "1.0.0", default-features = false }
 mail-parser = { version = "0.11.9", features = ["full_encoding"] }
 mime_guess = "2.0.5"
+# Workaround: imap-codec 2.0.0-alpha.9 uses nom's `alloc`-gated combinators but depends on
+# nom with default features off, so it only builds when something else enables them.
+nom = { version = "7.1.3", default-features = false, features = ["alloc"] }
 pollster = "1"
 rcgen = "0.14"
 rpassword = "7"

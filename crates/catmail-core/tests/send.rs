@@ -107,6 +107,7 @@ async fn sends_and_saves_to_sent() {
         "nothing is sent until the outbox is flushed"
     );
 
+    let start = env.fake.state().log.len();
     assert_eq!(env.flush().await, [(OutboxStatus::Done, 1)]);
     assert!(env.outbox().await.is_empty());
     let draft = entry.draft_id.unwrap();
@@ -129,6 +130,13 @@ async fn sends_and_saves_to_sent() {
 
     let sent = env.sent_folder();
     assert_eq!(sent, [received.data], "the same bytes, saved once");
+    let commands = env.commands_since(start);
+    assert!(
+        !commands
+            .iter()
+            .any(|c| c.starts_with("EXAMINE") || c.contains("SEARCH")),
+        "a first APPEND can't have been made already: {commands:?}"
+    );
     assert_eq!(
         env.fake.state().mailbox_mut("Sent").messages[0].flags,
         ["\\Seen"]
@@ -297,7 +305,10 @@ async fn unreachable_server_postpones_the_rest_of_the_queue() {
     env.queue("two").await;
 
     // The second would fail the same way: it isn't attempted, nor counted.
-    assert_eq!(env.flush().await, [(OutboxStatus::Queued, 1)]);
+    assert_eq!(
+        env.flush().await,
+        [(OutboxStatus::Queued, 1), (OutboxStatus::Queued, 0)]
+    );
     let outbox = env.outbox().await;
     assert_eq!(
         outbox
@@ -315,6 +326,47 @@ async fn unreachable_server_postpones_the_rest_of_the_queue() {
     );
     assert_eq!(env.delivered(), 2);
     assert_eq!(env.smtp.state().connections, 2, "one connection per pass");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn postponed_entries_back_off_with_the_one_attempted() {
+    let mut smtp = SmtpState::new("alice", "pw");
+    smtp.faults.unavailable = 2;
+    let env = env_with(state(), smtp, false).await;
+    env.queue("one").await;
+    env.queue("two").await;
+    env.flush().await;
+    env.flush().await;
+
+    // Postponed by as much as the first, or they would take turns at reconnecting
+    // every 30 seconds.
+    let outbox = env.outbox().await;
+    let (first, second) = (&outbox[0], &outbox[1]);
+    assert_eq!((first.attempts, second.attempts), (2, 0));
+    let next = |e: &OutboxEntry| e.next_attempt_at.unwrap();
+    assert!(next(first) - first.created_at >= 55, "{first:?}");
+    assert_eq!(next(first), next(second));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn odd_reply_to_the_end_is_not_taken_as_a_refusal() {
+    let mut smtp = SmtpState::new("alice", "pw");
+    smtp.faults.end_of_data_replies = vec![354];
+    let env = env_with(state(), smtp, false).await;
+    env.queue("hi").await;
+
+    // Neither 2xx nor a refusal: the server may have kept it.
+    assert_eq!(env.flush().await, [(OutboxStatus::Unknown, 1)]);
+    assert!(env.flush().await.is_empty(), "not resent on its own");
+    assert_eq!(
+        env.smtp
+            .state()
+            .log
+            .iter()
+            .filter(|c| c.line == "DATA")
+            .count(),
+        1
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
