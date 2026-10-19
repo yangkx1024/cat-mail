@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+ammonia.workspace = true
 base64.workspace = true
 catmail-types.workspace = true
 imap-next.workspace = true
@@ -20,6 +21,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "net", "time"] }
 tokio-rustls.workspace = true
 tracing.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 catmail-testkit.workspace = true

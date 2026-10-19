@@ -1,0 +1,41 @@
+From: =?UTF-8?B?5byg5LiJ?= <zhang@example.com>
+To: catmail@example.com
+Subject: =?UTF-8?B?5pyI5bqm5oql6KGo?=
+Date: Sat, 17 Oct 2026 12:00:00 +0800
+Message-ID: <html@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="outer"
+
+--outer
+Content-Type: multipart/related; boundary="rel"
+
+--rel
+Content-Type: multipart/alternative; boundary="alt"
+
+--alt
+Content-Type: text/plain; charset=gbk
+Content-Transfer-Encoding: base64
+
+x+uy6crVuL28/qGj
+--alt
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+<table width=3D"600"><tr><td style=3D"color:#333">=E8=AF=B7=E6=9F=A5=E6=
+=94=B6=E9=99=84=E4=BB=B6=E3=80=82<img src=3D"cid:logo@example.com"></td></tr></t=
+able><script>alert(1)</script>
+--alt--
+--rel
+Content-Type: image/png
+Content-ID: <logo@example.com>
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgo=
+--rel--
+--outer
+Content-Type: text/csv; charset=gbk
+Content-Disposition: attachment; filename*=gbk''%B1%A8%B1%ED.csv
+
+a,b
+1,2
+--outer--

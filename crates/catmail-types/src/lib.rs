@@ -9,11 +9,13 @@ mod event;
 mod folder;
 mod ids;
 mod message;
+mod search;
 mod sync;
 
 pub use account::{Account, AuthKind, NewAccount, Security, ServerConfig};
 pub use event::Event;
 pub use folder::{Folder, FolderRole};
-pub use ids::{AccountId, BlobHash, FolderId, MessageId};
-pub use message::{Address, FlagState, Flags, MessageSummary};
-pub use sync::{FolderSyncReport, SyncReport};
+pub use ids::{AccountId, AttachmentId, BlobHash, FolderId, MessageId};
+pub use message::{Address, Attachment, FlagState, Flags, Message, MessageBody, MessageSummary};
+pub use search::SearchQuery;
+pub use sync::{FolderSyncReport, GcReport, SyncReport};

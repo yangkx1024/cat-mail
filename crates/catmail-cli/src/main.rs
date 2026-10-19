@@ -1,16 +1,21 @@
-use std::borrow::Cow;
-use std::io::{self, BufRead, IsTerminal};
+mod files;
+mod output;
+
+use std::collections::{BTreeSet, HashMap};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use catmail_core::{
-    Account, AccountId, AuthKind, Config, Flags, Folder, MailClient, MessageSummary, NewAccount,
-    Security, ServerConfig, SyncReport,
+    Account, AccountId, Address, AttachmentId, AuthKind, Config, Flags, Folder, FolderId,
+    MailClient, Message, MessageId, MessageSummary, NewAccount, SearchQuery, Security,
+    ServerConfig, SyncReport, safe_filename,
 };
 use clap::{Args, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+use crate::output::{print_table, printable, printable_text, truncate};
 
 #[derive(Parser)]
 #[command(name = "catmail", version, about = "cat-mail from the terminal")]
@@ -39,6 +44,61 @@ enum Command {
     },
     /// List folders, or the messages in a folder
     Ls(Ls),
+    /// Show a message, downloading its body first (it stays unread on the server)
+    Read(Read),
+    /// Save an attachment, downloading it first if needed
+    Attachment(SaveAttachment),
+    /// Search subjects, addresses and downloaded bodies
+    Search(Search),
+    /// Delete stored bodies and attachments that nothing refers to any more
+    Gc,
+}
+
+#[derive(Args)]
+struct Read {
+    /// Message id, as shown by `catmail ls`
+    id: i64,
+    /// Print the sanitized HTML part instead of the text
+    #[arg(long, conflicts_with = "raw")]
+    html: bool,
+    /// Print the raw message source (the .eml)
+    #[arg(long)]
+    raw: bool,
+    /// Save the attachments into this directory
+    #[arg(long, value_name = "DIR")]
+    save: Option<PathBuf>,
+    /// Don't contact the server; show only what is stored
+    #[arg(long, conflicts_with_all = ["raw", "save"])]
+    offline: bool,
+}
+
+#[derive(Args)]
+struct SaveAttachment {
+    /// Attachment id, as shown by `catmail read`
+    id: i64,
+    /// Where to write it [default: stdout, unless that is a terminal]
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct Search {
+    /// Words or "quoted phrases", all of which must match; prefix with from:, to: or
+    /// subject: to search one field. Chinese, Japanese and Korean match as substrings
+    #[arg(required = true, num_args = 1..)]
+    query: Vec<String>,
+    /// Account id or email address [default: every account]
+    #[arg(short, long)]
+    account: Option<String>,
+    /// Only this folder (needs --account if there are several accounts)
+    #[arg(long)]
+    folder: Option<String>,
+    /// Maximum number of messages
+    #[arg(short = 'n', long, default_value_t = 50)]
+    limit: u32,
+    /// Skip this many of the newest matches
+    #[arg(long, default_value_t = 0)]
+    offset: u32,
 }
 
 #[derive(Args)]
@@ -137,6 +197,10 @@ async fn run() -> Result<()> {
         Command::Account(cmd) => account(&client, cmd, cli.json).await,
         Command::Sync { account } => sync(&client, account.as_deref(), cli.json).await,
         Command::Ls(args) => ls(&client, args, cli.json).await,
+        Command::Read(args) => read(&client, args, cli.json).await,
+        Command::Attachment(args) => save_attachment(&client, args).await,
+        Command::Search(args) => search(&client, args, cli.json).await,
+        Command::Gc => gc(&client, cli.json).await,
     }
 }
 
@@ -260,17 +324,7 @@ fn print_sync_report(report: &SyncReport) {
 }
 
 async fn ls(client: &MailClient, args: Ls, json: bool) -> Result<()> {
-    let account = match &args.account {
-        Some(selector) => resolve_account(client, selector).await?,
-        None => {
-            let mut accounts = client.list_accounts().await?;
-            match accounts.len() {
-                0 => bail!("no accounts; add one with `catmail account add`"),
-                1 => accounts.remove(0),
-                _ => bail!("there are several accounts; choose one with --account"),
-            }
-        }
-    };
+    let account = one_account(client, args.account.as_deref()).await?;
     let Some(name) = args.folder else {
         let folders = client.list_folders(account.id).await?;
         if json {
@@ -294,9 +348,196 @@ async fn ls(client: &MailClient, args: Ls, json: bool) -> Result<()> {
     } else if messages.is_empty() {
         println!("No messages in {}.", printable(&folder.name));
     } else {
-        print_messages(&messages);
+        print_message_table(&messages, None);
     }
     Ok(())
+}
+
+async fn read(client: &MailClient, args: Read, json: bool) -> Result<()> {
+    let id = MessageId(args.id);
+    if args.raw {
+        let raw = client.raw_message(id).await?;
+        let mut stdout = io::stdout().lock();
+        if stdout.is_terminal() {
+            write!(stdout, "{}", printable_text(&String::from_utf8_lossy(&raw)))?;
+        } else {
+            stdout.write_all(&raw)?;
+        }
+        return Ok(());
+    }
+    let message = if args.offline {
+        client
+            .get_message(id)
+            .await?
+            .with_context(|| format!("no message {id}"))?
+    } else {
+        client.download_message(id).await?
+    };
+    let mut saved = Vec::new();
+    if let Some(dir) = &args.save {
+        std::fs::create_dir_all(dir)?;
+        // The ones listed; inline images are part of the HTML.
+        for a in message
+            .body
+            .iter()
+            .flat_map(|b| &b.attachments)
+            .filter(|a| !a.inline)
+        {
+            let data = client.attachment_content(a.id).await?;
+            let name = safe_filename(a.filename.as_deref(), &format!("attachment-{}", a.id));
+            let path = files::write_new(dir, &name, &data)
+                .with_context(|| format!("failed to save into {}", dir.display()))?;
+            saved.push(path);
+        }
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&message)?);
+        return Ok(());
+    }
+    print_message(&message, args.html);
+    for path in saved {
+        println!("Saved {}", printable(&path.display().to_string()));
+    }
+    Ok(())
+}
+
+fn print_message(message: &Message, html: bool) {
+    let m = &message.summary;
+    let header = |name: &str, value: &str| {
+        if !value.is_empty() {
+            println!("{name:<9}{}", printable(value));
+        }
+    };
+    header("From:", &addresses(&m.from));
+    header("To:", &addresses(&message.to));
+    header("Cc:", &addresses(&message.cc));
+    header("Date:", &output::date(m.date));
+    header("Subject:", m.subject.as_deref().unwrap_or("(no subject)"));
+    println!();
+    let Some(body) = &message.body else {
+        println!("(body not downloaded; run without --offline)");
+        return;
+    };
+    let text = if html {
+        body.html.as_deref().or(body.text.as_deref())
+    } else {
+        body.text.as_deref()
+    };
+    match text {
+        Some(text) => println!("{}", printable_text(text.trim_end())),
+        None => println!("(no text)"),
+    }
+    let attachments: Vec<_> = body.attachments.iter().filter(|a| !a.inline).collect();
+    if !attachments.is_empty() {
+        println!();
+        let rows = attachments
+            .iter()
+            .map(|a| {
+                vec![
+                    a.id.to_string(),
+                    a.filename.clone().unwrap_or_else(|| "(unnamed)".into()),
+                    a.mime_type.clone(),
+                    match a.size {
+                        Some(size) if a.downloaded => output::size(size.into()),
+                        Some(size) => format!("~{}", output::size(size.into())),
+                        None => String::new(),
+                    },
+                ]
+            })
+            .collect();
+        print_table(&["ATTACHMENT", "NAME", "TYPE", "SIZE"], rows);
+    }
+}
+
+fn addresses(list: &[Address]) -> String {
+    list.iter()
+        .map(|a| match &a.name {
+            Some(name) => format!("{name} <{}>", a.email),
+            None => a.email.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+async fn save_attachment(client: &MailClient, args: SaveAttachment) -> Result<()> {
+    let data = client.attachment_content(AttachmentId(args.id)).await?;
+    match args.output {
+        Some(path) => std::fs::write(&path, &data)
+            .with_context(|| format!("failed to write {}", path.display()))?,
+        None => {
+            let mut stdout = io::stdout().lock();
+            if stdout.is_terminal() {
+                bail!("refusing to write an attachment to the terminal; use --output");
+            }
+            stdout.write_all(&data)?;
+        }
+    }
+    Ok(())
+}
+
+async fn search(client: &MailClient, args: Search, json: bool) -> Result<()> {
+    let mut query = SearchQuery::new(args.query.join(" "));
+    query.limit = args.limit;
+    query.offset = args.offset;
+    if let Some(name) = &args.folder {
+        let account = one_account(client, args.account.as_deref()).await?;
+        let folder = client
+            .find_folder(account.id, name)
+            .await?
+            .with_context(|| format!("no folder `{name}` in {}", account.email))?;
+        query.account = Some(account.id);
+        query.folder = Some(folder.id);
+    } else if let Some(selector) = &args.account {
+        query.account = Some(resolve_account(client, selector).await?.id);
+    }
+    let messages = client.search(query).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&messages)?);
+        return Ok(());
+    }
+    if messages.is_empty() {
+        println!("No matches.");
+        return Ok(());
+    }
+    // Folder names for the FOLDER column.
+    let mut folders: HashMap<FolderId, String> = HashMap::new();
+    let accounts: BTreeSet<AccountId> = messages.iter().map(|m| m.account_id).collect();
+    for account in accounts {
+        for folder in client.list_folders(account).await? {
+            folders.insert(folder.id, folder.name);
+        }
+    }
+    print_message_table(&messages, Some(&folders));
+    Ok(())
+}
+
+async fn gc(client: &MailClient, json: bool) -> Result<()> {
+    let report = client.collect_garbage().await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "Removed {} unreferenced files ({}).",
+            report.removed,
+            output::size(report.bytes)
+        );
+    }
+    Ok(())
+}
+
+/// The account `selector` names, or the only account there is.
+async fn one_account(client: &MailClient, selector: Option<&str>) -> Result<Account> {
+    match selector {
+        Some(selector) => resolve_account(client, selector).await,
+        None => {
+            let mut accounts = client.list_accounts().await?;
+            match accounts.len() {
+                0 => bail!("no accounts; add one with `catmail account add`"),
+                1 => Ok(accounts.remove(0)),
+                _ => bail!("there are several accounts; choose one with --account"),
+            }
+        }
+    }
 }
 
 /// Accepts either a numeric id or an email address.
@@ -364,8 +605,8 @@ fn print_folders(folders: &[Folder]) {
     print_table(&["FOLDER", "ROLE", "UNREAD", "TOTAL"], rows);
 }
 
-fn print_messages(messages: &[MessageSummary]) {
-    let tz = jiff::tz::TimeZone::system();
+/// With `folders`, adds a FOLDER column.
+fn print_message_table(messages: &[MessageSummary], folders: Option<&HashMap<FolderId, String>>) {
     let rows = messages
         .iter()
         .map(|m| {
@@ -381,126 +622,24 @@ fn print_messages(messages: &[MessageSummary]) {
                 ' '
             });
             marks.push(if m.has_attachments { '@' } else { ' ' });
-            let date = m
-                .date
-                .and_then(|t| jiff::Timestamp::from_second(t).ok())
-                .map(|t| {
-                    t.to_zoned(tz.clone())
-                        .strftime("%Y-%m-%d %H:%M")
-                        .to_string()
-                })
-                .unwrap_or_default();
             let from = m
                 .from
                 .first()
                 .map(|a| a.name.clone().unwrap_or_else(|| a.email.clone()))
                 .unwrap_or_default();
-            vec![
-                m.id.to_string(),
-                marks,
-                date,
-                truncate(&from, 24),
-                m.subject.clone().unwrap_or_else(|| "(no subject)".into()),
-            ]
+            let mut row = vec![m.id.to_string(), marks, output::date(m.date)];
+            if let Some(folders) = folders {
+                let name = folders.get(&m.folder_id).cloned().unwrap_or_default();
+                row.push(truncate(&name, 16));
+            }
+            row.push(truncate(&from, 24));
+            row.push(m.subject.clone().unwrap_or_else(|| "(no subject)".into()));
+            row
         })
         .collect();
-    print_table(&["ID", "", "DATE", "FROM", "SUBJECT"], rows);
-}
-
-/// Shortens to at most `width` terminal columns, marking the cut with `…`.
-fn truncate(s: &str, width: usize) -> String {
-    if s.width() <= width {
-        return s.to_owned();
-    }
-    let mut out = String::new();
-    let mut used = 0;
-    for c in s.chars() {
-        let w = c.width().unwrap_or(0);
-        if used + w + 1 > width {
-            break;
-        }
-        out.push(c);
-        used += w;
-    }
-    out.push('…');
-    out
-}
-
-/// Escapes characters that a terminal would act on rather than show: C0/C1 controls
-/// (ESC sequences, line breaks) and bidi overrides that reorder the rest of the line.
-/// Subjects, names and server messages come from strangers.
-fn printable(s: &str) -> Cow<'_, str> {
-    let is_unsafe = |c: char| {
-        c.is_control()
-            || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+    let header: &[&str] = match folders {
+        Some(_) => &["ID", "", "DATE", "FOLDER", "FROM", "SUBJECT"],
+        None => &["ID", "", "DATE", "FROM", "SUBJECT"],
     };
-    if !s.chars().any(is_unsafe) {
-        return Cow::Borrowed(s);
-    }
-    let mut out = String::with_capacity(s.len() + 16);
-    for c in s.chars() {
-        if is_unsafe(c) {
-            out.extend(c.escape_unicode());
-        } else {
-            out.push(c);
-        }
-    }
-    Cow::Owned(out)
-}
-
-/// Left-aligned columns, padded by display width so CJK text lines up. Cells are
-/// escaped with [`printable`] before measuring.
-fn print_table(header: &[&str], rows: Vec<Vec<String>>) {
-    let rows: Vec<Vec<String>> = rows
-        .into_iter()
-        .map(|row| {
-            row.into_iter()
-                .map(|cell| match printable(&cell) {
-                    Cow::Owned(escaped) => escaped,
-                    Cow::Borrowed(_) => cell,
-                })
-                .collect()
-        })
-        .collect();
-    let header: Vec<String> = header.iter().map(|h| h.to_string()).collect();
-    let widths: Vec<usize> = (0..header.len())
-        .map(|i| {
-            rows.iter()
-                .chain([&header])
-                .map(|r| r[i].width())
-                .max()
-                .unwrap_or(0)
-        })
-        .collect();
-    for row in [&header].into_iter().chain(&rows) {
-        let line: Vec<String> = row
-            .iter()
-            .zip(&widths)
-            .map(|(cell, w)| format!("{cell}{}", " ".repeat(w - cell.width())))
-            .collect();
-        println!("{}", line.join("  ").trim_end());
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn printable_escapes_terminal_controls() {
-        // =?UTF-8?B?G1sySnNwb29m?= decodes to ESC [2J followed by "spoof".
-        assert_eq!(printable("\u{1b}[2Jspoof"), "\\u{1b}[2Jspoof");
-        assert_eq!(printable("a\nb\tc\u{9b}"), "a\\u{a}b\\u{9}c\\u{9b}");
-        assert_eq!(printable("evil\u{202e}fdp.exe"), "evil\\u{202e}fdp.exe");
-        assert!(matches!(
-            printable("你好，世界 ok"),
-            Cow::Borrowed("你好，世界 ok")
-        ));
-    }
-
-    #[test]
-    fn truncate_counts_display_width() {
-        assert_eq!(truncate("张三丰", 5), "张三…");
-        assert_eq!(truncate("abc", 5), "abc");
-    }
+    print_table(header, rows);
 }

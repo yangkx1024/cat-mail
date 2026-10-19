@@ -26,6 +26,17 @@ pub enum Error {
     #[error("account {0} not found")]
     AccountNotFound(String),
 
+    #[error("message {0} not found")]
+    MessageNotFound(catmail_types::MessageId),
+
+    #[error("attachment {0} not found")]
+    AttachmentNotFound(catmail_types::AttachmentId),
+
+    /// The local copy no longer matches the server: the message was expunged, or its
+    /// folder got a new UIDVALIDITY. The next sync brings it up to date.
+    #[error("{0}; sync the account and try again")]
+    OutOfSync(&'static str),
+
     /// The account was removed while the operation ran.
     #[error("cancelled")]
     Cancelled,

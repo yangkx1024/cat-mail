@@ -8,7 +8,7 @@
 
 数据存储在本地 SQLite，离线可用；密码保存在系统密钥环中，不进数据库。
 
-> 项目处于早期开发阶段（M1 已完成），接口和数据库结构仍会变化。
+> 项目处于早期开发阶段（M2 进行中），接口和数据库结构仍会变化。
 
 架构设计见 [docs/architecture.md](docs/architecture.md)。
 
@@ -24,7 +24,7 @@
 |---|---|---|
 | M0 | workspace；types；store（迁移、事务接口）；BlobStore；keyring；数据目录锁；`MailClient` 门面；`catmail account` | ✅ 完成 |
 | M1 | IMAP 只读同步（文件夹、邮件头）；认证接口；协议测试环境；`catmail sync` / `catmail ls` | ✅ 完成 |
-| M2 | 正文与附件按需下载；中文分词 + 全文搜索；blob GC；最小读信窗口；`catmail read` / `catmail search` | |
+| M2 | 正文与附件按需下载；中文分词 + 全文搜索；blob GC；最小读信窗口；`catmail read` / `catmail search` | 进行中：除读信窗口外已完成 |
 | M3 | 草稿；SMTP 发信与 outbox 状态机；保存到 Sent | |
 | M4 | 离线操作队列（标记 / 移动 / 删除）；IDLE 推送 | |
 | M5 | 图形界面：三栏布局、读信、写信 | |
@@ -43,7 +43,7 @@
 
 ## 使用
 
-目前可以管理账户、同步文件夹和邮件头、列出邮件（只读，还不能看正文）：
+目前可以管理账户、同步文件夹和邮件头、列出和阅读邮件、搜索（只读，不改服务器上的状态）：
 
 ```sh
 # 添加账户（交互输入密码；脚本里用 --password-stdin）
@@ -56,10 +56,23 @@ catmail account remove me@example.com
 catmail sync                    # 同步所有账户；也可以指定 id 或邮箱
 catmail ls                      # 列出文件夹（多个账户时用 -a 选择）
 catmail ls INBOX -n 20          # 最新的 20 封邮件；文件夹名可以是中文，如 `catmail ls 已发送`
+
+catmail read 42                 # 阅读 ID 为 42 的邮件（第一次会下载正文）
+catmail read 42 --html          # 清洗后的 HTML；--raw 输出原文（.eml）
+catmail read 42 --save ~/下载    # 同时把附件保存到目录（重名不覆盖）
+catmail attachment 7 -o a.pdf   # 保存单个附件（ID 见 `catmail read` 的附件列表）
+
+catmail search 季度报告          # 搜索主题、收发件人和已下载的正文
+catmail search from:张三 "quarterly report" -a me@example.com --folder INBOX
+catmail gc                      # 回收不再被引用的正文与附件文件
 ```
 
 `catmail ls <文件夹>` 的标记列：`*` 未读，`!` 已加星标，`@` 有附件。同步只读（EXAMINE），
 不会改动服务器上的任何状态；中途中断（断网、Ctrl-C）后再次运行会从断点继续。
+
+正文在第一次阅读时下载，阅读不会把邮件标为已读。不超过 2 MiB 的邮件整封下载（附件一并
+保存）；更大的邮件只下载正文，附件在第一次打开时再下载。搜索时中日韩文字按子串匹配，其他
+文字按整词匹配；正文只有下载过的才能搜到。
 
 端口默认按加密方式推断：IMAP `tls` 为 993、`starttls` / `plain` 为 143；SMTP `tls` 为 465、
 `starttls` 为 587、`plain` 为 25。

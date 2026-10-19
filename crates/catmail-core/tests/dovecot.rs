@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use catmail_core::{
-    AuthKind, Config, Flags, FolderRole, MailClient, MemorySecrets, NewAccount, Security,
-    ServerConfig, SyncReport,
+    AuthKind, Config, Flags, FolderRole, MailClient, MemorySecrets, MessageSummary, NewAccount,
+    SearchQuery, Security, ServerConfig, SyncReport,
 };
 use tokio::runtime::Handle;
 
@@ -91,7 +91,7 @@ async fn syncs_against_dovecot() {
     deliver(&folder_dir, "2.b", "second");
 
     let report = client.sync_account(account).await.unwrap();
-    assert_eq!(added(&report, "INBOX"), (5, 0, 0));
+    assert_eq!(added(&report, "INBOX"), (6, 0, 0));
     assert_eq!(added(&report, &run), (2, 0, 0));
 
     let folders = client.list_folders(account).await.unwrap();
@@ -107,7 +107,7 @@ async fn syncs_against_dovecot() {
     assert_eq!(find("Archive/2026").total_count, 1);
     assert_eq!(find("Archive/2026").delimiter, Some('/'));
     let inbox = find("INBOX");
-    assert_eq!((inbox.unread_count, inbox.total_count), (4, 5));
+    assert_eq!((inbox.unread_count, inbox.total_count), (5, 6));
 
     let messages = client.list_messages(inbox.id, 10, 0).await.unwrap();
     let rows: Vec<_> = messages
@@ -143,11 +143,14 @@ async fn syncs_against_dovecot() {
         [
             "No Date header",
             "Quarterly report",
+            "月度报表",
             "测试邮件",
             "你好，世界",
             "Plain ASCII message"
         ]
     );
+
+    check_bodies(&client, &messages).await;
 
     let report = client.sync_account(account).await.unwrap();
     assert!(
@@ -188,5 +191,120 @@ async fn syncs_against_dovecot() {
         ]
     );
 
+    // Over the whole-message limit: fetched as BODYSTRUCTURE plus text parts, with the
+    // attachment (named in RFC 2231 form) left on the server until opened.
+    let video = vec![7u8; 3 * 1024 * 1024];
+    fs::write(folder_dir.join("new").join("4.d"), large_message(&video)).unwrap();
+    client.sync_account(account).await.unwrap();
+    let big = client.list_messages(folder.id, 10, 0).await.unwrap()[0].clone();
+    assert_eq!(big.subject.as_deref(), Some("large"));
+    let message = client.download_message(big.id).await.unwrap();
+    let body = message.body.unwrap();
+    assert_eq!(body.text.as_deref().map(str::trim), Some("See the clip."));
+    let clip = &body.attachments[0];
+    assert_eq!(clip.filename.as_deref(), Some("视频.mp4"));
+    assert!(!clip.downloaded);
+    assert_eq!(client.attachment_content(clip.id).await.unwrap(), video);
+
     fs::remove_dir_all(&folder_dir).unwrap();
+}
+
+fn large_message(attachment: &[u8]) -> Vec<u8> {
+    use base64::Engine;
+    let mut raw = b"From: Test <test@example.com>\r\nSubject: large\r\n\
+        Date: Sun, 18 Oct 2026 13:00:00 +0000\r\n\
+        Content-Type: multipart/mixed; boundary=\"b\"\r\n\r\n\
+        --b\r\nContent-Type: text/plain\r\n\r\nSee the clip.\r\n\
+        --b\r\nContent-Type: video/mp4\r\n\
+        Content-Disposition: attachment; filename*=utf-8''%E8%A7%86%E9%A2%91.mp4\r\n\
+        Content-Transfer-Encoding: base64\r\n\r\n"
+        .to_vec();
+    let encoded = base64::prelude::BASE64_STANDARD.encode(attachment);
+    for line in encoded.as_bytes().chunks(76) {
+        raw.extend_from_slice(line);
+        raw.extend_from_slice(b"\r\n");
+    }
+    raw.extend_from_slice(b"--b--\r\n");
+    raw
+}
+
+/// Downloads the fixture bodies (all under the whole-message limit) and searches them.
+async fn check_bodies(client: &MailClient, inbox: &[MessageSummary]) {
+    let id = |subject: &str| {
+        inbox
+            .iter()
+            .find(|m| m.subject.as_deref() == Some(subject))
+            .unwrap()
+            .id
+    };
+    assert!(
+        client
+            .search(SearchQuery::new("请查收"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let report = client
+        .download_message(id("Quarterly report"))
+        .await
+        .unwrap();
+    let body = report.body.unwrap();
+    assert_eq!(body.text.as_deref().map(str::trim), Some("See attached."));
+    let pdf = &body.attachments[0];
+    assert_eq!(pdf.filename.as_deref(), Some("report.pdf"));
+    assert_eq!(
+        client.attachment_content(pdf.id).await.unwrap(),
+        b"%PDF-1.4\n"
+    );
+
+    let html = client.download_message(id("月度报表")).await.unwrap();
+    let body = html.body.unwrap();
+    assert_eq!(body.text.as_deref(), Some("请查收附件。"), "GBK, base64");
+    let markup = body.html.unwrap();
+    assert!(
+        markup.contains("请查收附件。"),
+        "quoted-printable: {markup}"
+    );
+    assert!(markup.contains(r#"<table width="600">"#), "{markup}");
+    assert!(markup.contains(r#"src="cid:logo@example.com""#), "{markup}");
+    assert!(!markup.contains("script"), "{markup}");
+    let parts: Vec<_> = body
+        .attachments
+        .iter()
+        .map(|a| (a.filename.as_deref(), a.mime_type.as_str(), a.inline))
+        .collect();
+    assert_eq!(
+        parts,
+        [
+            (None, "image/png", true),
+            (Some("报表.csv"), "text/csv", false)
+        ]
+    );
+    assert!(html.summary.has_attachments);
+    let csv = client
+        .attachment_content(body.attachments[1].id)
+        .await
+        .unwrap();
+    assert_eq!(csv, b"a,b\r\n1,2");
+
+    let gb2312 = client.download_message(id("测试邮件")).await.unwrap();
+    assert_eq!(
+        gb2312.body.unwrap().text.as_deref().map(str::trim),
+        Some("test")
+    );
+
+    let found: Vec<_> = client
+        .search(SearchQuery::new("请查收"))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|m| m.subject.unwrap())
+        .collect();
+    assert_eq!(found, ["月度报表"]);
+    let found = client
+        .search(SearchQuery::new("from:张三 报表"))
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 1);
 }

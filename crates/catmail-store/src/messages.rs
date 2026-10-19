@@ -1,8 +1,13 @@
-use catmail_types::{AccountId, Address, FlagState, Flags, FolderId, MessageId, MessageSummary};
-use rusqlite::{Connection, Row, named_params, params};
+use catmail_types::{
+    AccountId, Address, BlobHash, FlagState, Flags, FolderId, Message, MessageBody, MessageId,
+    MessageSummary, SearchQuery,
+};
+use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
 use crate::Result;
-use crate::columns::{json, to_json};
+use crate::attachments::{Attachments, NewAttachment};
+use crate::columns::{json, parse_opt_text, to_json};
+use crate::fts;
 
 const SUMMARY_COLUMNS: &str = "id, account_id, folder_id, thread_id, subject, from_json, date, snippet, flags, has_attachments";
 
@@ -22,6 +27,36 @@ pub struct NewMessage {
     /// The Date header; INTERNALDATE is used when it is missing.
     pub date: Option<i64>,
     pub has_attachments: bool,
+}
+
+/// A downloaded body, stored in one go with its attachments.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NewBody {
+    pub text: Option<String>,
+    /// Already sanitized.
+    pub html: Option<String>,
+    /// The whole raw message, if it was fetched whole.
+    pub raw: Option<BlobHash>,
+    pub snippet: Option<String>,
+    pub attachments: Vec<NewAttachment>,
+}
+
+/// Where a message lives on the server, and what of it is stored locally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageLocation {
+    pub id: MessageId,
+    pub account: AccountId,
+    pub folder: FolderId,
+    /// The folder's name on the server.
+    pub remote_name: String,
+    /// The folder's current UIDVALIDITY; `uid` is only meaningful within it.
+    pub uidvalidity: Option<u32>,
+    pub uid: u32,
+    /// RFC822.SIZE.
+    pub size: Option<u32>,
+    /// Whether the body is stored.
+    pub downloaded: bool,
+    pub raw: Option<BlobHash>,
 }
 
 pub struct Messages<'c> {
@@ -97,6 +132,7 @@ impl<'c> Messages<'c> {
             })?;
             if added > 0 {
                 inserted += 1;
+                self.reindex(self.conn.last_insert_rowid())?;
             } else {
                 self.update_flags(folder, std::slice::from_ref(&m.state))?;
             }
@@ -147,6 +183,191 @@ impl<'c> Messages<'c> {
         let rows = stmt.query_map(params![folder.0, limit, offset], summary_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
+
+    /// Messages matching the query, newest first. Bodies are only searched once
+    /// downloaded; subjects and addresses always.
+    pub fn search(&self, query: &SearchQuery) -> Result<Vec<MessageSummary>> {
+        let Some(expr) = fts::match_expression(&query.text) else {
+            return Ok(Vec::new());
+        };
+        let sql = format!(
+            "SELECT {SUMMARY_COLUMNS} FROM messages
+             WHERE id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH :expr)
+               AND (:account IS NULL OR account_id = :account)
+               AND (:folder IS NULL OR folder_id = :folder)
+             ORDER BY date DESC, id DESC LIMIT :limit OFFSET :offset"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(
+            named_params! {
+                ":expr": expr,
+                ":account": query.account.map(|a| a.0),
+                ":folder": query.folder.map(|f| f.0),
+                ":limit": query.limit,
+                ":offset": query.offset,
+            },
+            summary_from_row,
+        )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn location(&self, id: MessageId) -> Result<Option<MessageLocation>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT m.account_id, m.folder_id, f.remote_name, f.uidvalidity, m.uid, m.size,
+                        m.body_state = 'full', b.raw_blob_hash
+                 FROM messages m
+                 JOIN folders f ON f.id = m.folder_id
+                 LEFT JOIN message_bodies b ON b.message_id = m.id
+                 WHERE m.id = ?1",
+                [id.0],
+                |r| {
+                    Ok(MessageLocation {
+                        id,
+                        account: AccountId(r.get(0)?),
+                        folder: FolderId(r.get(1)?),
+                        remote_name: r.get(2)?,
+                        uidvalidity: r.get(3)?,
+                        uid: r.get(4)?,
+                        size: r.get(5)?,
+                        downloaded: r.get(6)?,
+                        raw: parse_opt_text(r, "raw_blob_hash")?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// The message with its full headers, and its body and attachments if downloaded.
+    pub fn get(&self, id: MessageId) -> Result<Option<Message>> {
+        let sql = format!(
+            "SELECT {SUMMARY_COLUMNS}, to_json, cc_json, message_id_hdr, size,
+                    b.message_id IS NOT NULL AS has_body, b.text_plain, b.text_html
+             FROM messages LEFT JOIN message_bodies b ON b.message_id = messages.id
+             WHERE id = ?1"
+        );
+        let found = self
+            .conn
+            .query_row(&sql, [id.0], |row| {
+                let body = row
+                    .get::<_, bool>("has_body")?
+                    .then(|| -> rusqlite::Result<_> {
+                        Ok(MessageBody {
+                            text: row.get("text_plain")?,
+                            html: row.get("text_html")?,
+                            attachments: Vec::new(),
+                        })
+                    })
+                    .transpose()?;
+                Ok(Message {
+                    summary: summary_from_row(row)?,
+                    to: json(row, "to_json")?,
+                    cc: json(row, "cc_json")?,
+                    message_id: row.get("message_id_hdr")?,
+                    size: row.get("size")?,
+                    body,
+                })
+            })
+            .optional()?;
+        let Some(mut message) = found else {
+            return Ok(None);
+        };
+        if let Some(body) = &mut message.body {
+            body.attachments = Attachments::new(self.conn).list(id)?;
+        }
+        Ok(Some(message))
+    }
+
+    /// Stores the body, its attachments, the snippet and the recomputed attachment flag,
+    /// and indexes the body text. Returns false, changing nothing, if the message is
+    /// gone or its body is already stored.
+    pub fn store_body(&self, id: MessageId, body: &NewBody) -> Result<bool> {
+        let has_attachments = body.attachments.iter().any(|a| !a.inline);
+        let updated = self.conn.execute(
+            "UPDATE messages SET body_state = 'full', snippet = ?2, has_attachments = ?3
+             WHERE id = ?1 AND body_state <> 'full'",
+            params![id.0, body.snippet, has_attachments],
+        )?;
+        if updated == 0 {
+            return Ok(false);
+        }
+        self.conn.execute(
+            "INSERT INTO message_bodies (message_id, text_plain, text_html, raw_blob_hash)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                id.0,
+                body.text,
+                body.html,
+                body.raw.as_ref().map(BlobHash::as_str)
+            ],
+        )?;
+        Attachments::new(self.conn).insert(id, &body.attachments)?;
+
+        self.reindex(id.0)?;
+        Ok(true)
+    }
+
+    /// Records the raw message of an already downloaded body. Returns false if the
+    /// body is gone.
+    pub fn set_raw(&self, id: MessageId, raw: &BlobHash) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE message_bodies SET raw_blob_hash = ?2 WHERE message_id = ?1",
+            params![id.0, raw.as_str()],
+        )? > 0)
+    }
+
+    /// Writes the message's index entry from what is stored now, replacing any old one.
+    /// Every change to indexed text (a new message, its body) goes through here; deletes
+    /// are handled by a trigger.
+    fn reindex(&self, id: i64) -> Result<()> {
+        let mut read = self.conn.prepare_cached(
+            "SELECT m.subject, m.from_json, m.to_json, m.cc_json, b.text_plain
+             FROM messages m LEFT JOIN message_bodies b ON b.message_id = m.id
+             WHERE m.id = ?1",
+        )?;
+        // Subject, sender, recipients, body.
+        let [subject, from, to, body]: [String; 4] = read.query_row([id], |r| {
+            let (to, cc): (Vec<Address>, Vec<Address>) = (json(r, "to_json")?, json(r, "cc_json")?);
+            Ok([
+                r.get::<_, Option<String>>("subject")?.unwrap_or_default(),
+                address_text(&json::<Vec<Address>>(r, "from_json")?),
+                address_text(to.iter().chain(&cc)),
+                r.get::<_, Option<String>>("text_plain")?
+                    .unwrap_or_default(),
+            ])
+        })?;
+        self.conn
+            .prepare_cached("DELETE FROM messages_fts WHERE rowid = ?1")?
+            .execute([id])?;
+        self.conn
+            .prepare_cached(
+                "INSERT INTO messages_fts (rowid, subject, from_text, to_text, body)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?
+            .execute(params![
+                id,
+                fts::segment(&subject),
+                fts::segment(&from),
+                fts::segment(&to),
+                fts::segment(&body),
+            ])?;
+        Ok(())
+    }
+}
+
+/// Names and addresses, so either finds the message.
+fn address_text<'a>(addresses: impl IntoIterator<Item = &'a Address>) -> String {
+    let mut out = String::new();
+    for a in addresses {
+        if let Some(name) = &a.name {
+            out.push_str(name);
+            out.push(' ');
+        }
+        out.push_str(&a.email);
+        out.push(' ');
+    }
+    out
 }
 
 fn summary_from_row(row: &Row<'_>) -> rusqlite::Result<MessageSummary> {
@@ -166,6 +387,8 @@ fn summary_from_row(row: &Row<'_>) -> rusqlite::Result<MessageSummary> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use catmail_types::Folder;
 
     use super::*;
@@ -328,5 +551,218 @@ mod tests {
             })
             .unwrap();
         assert_eq!(keywords, r#"["$Junk"]"#);
+    }
+
+    fn hash(c: char) -> BlobHash {
+        BlobHash::parse(&c.to_string().repeat(64)).unwrap()
+    }
+
+    fn body() -> NewBody {
+        NewBody {
+            text: Some("请查收第三季度报告。\nThe numbers are final.".into()),
+            html: Some("<p>请查收</p>".into()),
+            raw: Some(hash('a')),
+            snippet: Some("请查收第三季度报告。".into()),
+            attachments: vec![
+                NewAttachment {
+                    section: "2".into(),
+                    transfer_encoding: Some("base64".into()),
+                    filename: Some("报告.pdf".into()),
+                    mime_type: "application/pdf".into(),
+                    size: Some(10),
+                    blob: Some(hash('b')),
+                    ..Default::default()
+                },
+                NewAttachment {
+                    section: "3".into(),
+                    mime_type: "image/png".into(),
+                    content_id: Some("logo@x".into()),
+                    inline: true,
+                    ..Default::default()
+                },
+            ],
+        }
+    }
+
+    fn search(store: &Store, text: &str) -> Vec<Option<String>> {
+        store
+            .read(|db| db.messages().search(&SearchQuery::new(text)))
+            .unwrap()
+            .into_iter()
+            .map(|m| m.subject)
+            .collect()
+    }
+
+    #[test]
+    fn stores_body_attachments_and_index() {
+        let (store, account, folder) = setup();
+        let mut m = message(1, Some(5_000), Flags::empty());
+        m.subject = Some("Quarterly report".into());
+        m.cc = vec![Address {
+            name: Some("王五".into()),
+            email: "wang@example.com".into(),
+        }];
+        store
+            .write(|db| {
+                db.messages()
+                    .upsert(account, folder.id, &[m, message(2, None, Flags::empty())])
+            })
+            .unwrap();
+        let id = store
+            .read(|db| db.messages().list(folder.id, 1, 0))
+            .unwrap()[0]
+            .id;
+        assert_eq!(
+            search(&store, "quarterly"),
+            [Some("Quarterly report".into())]
+        );
+        assert_eq!(search(&store, "to:王五"), [Some("Quarterly report".into())]);
+        assert!(
+            search(&store, "季度报告").is_empty(),
+            "body not downloaded yet"
+        );
+
+        let location = store
+            .read(|db| db.messages().location(id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (location.uid, location.downloaded, location.raw),
+            (1, false, None)
+        );
+        assert!(
+            store
+                .read(|db| db.messages().get(id))
+                .unwrap()
+                .unwrap()
+                .body
+                .is_none()
+        );
+
+        assert!(
+            store
+                .write(|db| db.messages().store_body(id, &body()))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .write(|db| db.messages().store_body(id, &body()))
+                .unwrap(),
+            "stored once"
+        );
+        assert!(
+            !store
+                .write(|db| db.messages().store_body(MessageId(999), &body()))
+                .unwrap()
+        );
+
+        let message = store.read(|db| db.messages().get(id)).unwrap().unwrap();
+        assert_eq!(message.cc[0].email, "wang@example.com");
+        assert!(message.summary.has_attachments, "the PDF is not inline");
+        assert_eq!(
+            message.summary.snippet.as_deref(),
+            Some("请查收第三季度报告。")
+        );
+        let body = message.body.unwrap();
+        assert_eq!(body.html.as_deref(), Some("<p>请查收</p>"));
+        let parts: Vec<_> = body
+            .attachments
+            .iter()
+            .map(|a| (a.filename.clone(), a.inline, a.downloaded))
+            .collect();
+        assert_eq!(
+            parts,
+            [(Some("报告.pdf".into()), false, true), (None, true, false)]
+        );
+
+        assert_eq!(
+            search(&store, "季度报告"),
+            [Some("Quarterly report".into())]
+        );
+        assert_eq!(
+            search(&store, "numbers final"),
+            [Some("Quarterly report".into())]
+        );
+        assert_eq!(
+            search(&store, "subject:report"),
+            [Some("Quarterly report".into())]
+        );
+        assert!(search(&store, "from:report").is_empty());
+
+        // The inline image is fetched later.
+        let png = body.attachments[1].id;
+        let source = store
+            .read(|db| db.attachments().source(png))
+            .unwrap()
+            .unwrap();
+        assert_eq!((source.section.as_str(), source.blob.clone()), ("3", None));
+        assert_eq!(source.message.uid, 1);
+        assert!(
+            store
+                .write(|db| db.attachments().set_blob(png, &hash('c'), 42))
+                .unwrap()
+        );
+        assert!(
+            store
+                .write(|db| db.messages().set_raw(id, &hash('d')))
+                .unwrap()
+        );
+        assert_eq!(
+            store.read(|db| db.blob_references()).unwrap(),
+            HashSet::from([hash('b'), hash('c'), hash('d')])
+        );
+
+        store
+            .write(|db| db.messages().delete_uids(folder.id, &[1]))
+            .unwrap();
+        assert!(store.read(|db| db.blob_references()).unwrap().is_empty());
+        assert!(
+            store
+                .read(|db| db.attachments().source(png))
+                .unwrap()
+                .is_none()
+        );
+        assert!(search(&store, "quarterly").is_empty());
+    }
+
+    #[test]
+    fn search_filters_by_account_and_folder() {
+        let (store, account, folder) = setup();
+        let other = test_util::account(&store, "b@example.com");
+        let inbox = RemoteFolder {
+            remote_name: "INBOX".into(),
+            name: "INBOX".into(),
+            delimiter: None,
+            role: None,
+            selectable: true,
+        };
+        store
+            .write(|db| db.folders().reconcile(other, &[inbox]))
+            .unwrap();
+        let other_folder = store.read(|db| db.folders().list(other)).unwrap()[0].id;
+        store
+            .write(|db| {
+                db.messages()
+                    .upsert(account, folder.id, &[message(1, Some(1), Flags::empty())])?;
+                db.messages()
+                    .upsert(other, other_folder, &[message(7, Some(2), Flags::empty())])
+            })
+            .unwrap();
+
+        let run = |account, folder| {
+            let mut q = SearchQuery::new("alice");
+            q.account = account;
+            q.folder = folder;
+            store
+                .read(|db| db.messages().search(&q))
+                .unwrap()
+                .into_iter()
+                .map(|m| m.subject.unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(run(None, None), ["subject 7", "subject 1"]);
+        assert_eq!(run(Some(account), None), ["subject 1"]);
+        assert_eq!(run(None, Some(other_folder)), ["subject 7"]);
+        assert!(run(Some(account), Some(other_folder)).is_empty());
     }
 }

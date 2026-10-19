@@ -87,7 +87,7 @@ CREATE TABLE messages (
     date            INTEGER, -- the Date header, else INTERNALDATE; the list sort key
     snippet         TEXT,
     has_attachments INTEGER NOT NULL DEFAULT 0,
-    body_state      TEXT    NOT NULL DEFAULT 'headers', -- headers | full
+    body_state      TEXT    NOT NULL DEFAULT 'headers', -- headers | full (see message_bodies)
     thread_id       INTEGER,
     UNIQUE (folder_id, uid),
     UNIQUE (id, account_id),
@@ -119,26 +119,31 @@ WHEN (old.flags & 1) <> (new.flags & 1) BEGIN
     WHERE id = new.folder_id;
 END;
 
+-- The downloaded body of a message; exists iff messages.body_state = 'full'. Written in
+-- one transaction with the message's attachments rows, its snippet and its FTS entry.
 CREATE TABLE message_bodies (
     message_id    INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
     text_plain    TEXT,
     text_html     TEXT, -- already sanitized
-    raw_blob_hash TEXT
+    raw_blob_hash TEXT  -- the whole raw message; only kept for messages fetched whole
 ) STRICT;
 
+-- Attachments and inline parts of a downloaded message. Small messages are fetched whole
+-- and their parts stored at once; for large ones only the text is fetched, and a part
+-- is fetched by its section (and decoded per transfer_encoding) when first opened.
 CREATE TABLE attachments (
-    id           INTEGER PRIMARY KEY,
-    message_id   INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-    part_section TEXT    NOT NULL, -- IMAP body section, e.g. '1.2'
-    filename     TEXT,
-    mime_type    TEXT    NOT NULL,
-    size         INTEGER,
-    content_id   TEXT,
-    is_inline    INTEGER NOT NULL DEFAULT 0,
-    blob_hash    TEXT              -- NULL until downloaded
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id        INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    part_section      TEXT    NOT NULL, -- IMAP body section, e.g. '1.2'
+    transfer_encoding TEXT,             -- as in BODYSTRUCTURE, e.g. 'base64'
+    filename          TEXT,
+    mime_type         TEXT    NOT NULL,
+    size              INTEGER,          -- decoded; an estimate until downloaded
+    content_id        TEXT,
+    is_inline         INTEGER NOT NULL DEFAULT 0,
+    blob_hash         TEXT,             -- NULL until downloaded
+    UNIQUE (message_id, part_section)
 ) STRICT;
-
-CREATE INDEX attachments_message ON attachments (message_id);
 
 CREATE TABLE drafts (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -227,9 +232,10 @@ CREATE TABLE pending_ops (
 CREATE INDEX pending_ops_queue ON pending_ops (account_id, folder_id, status, id);
 
 -- Full-text index keyed by messages.id (rowid). Contentless: the text lives in messages
--- and message_bodies, the index only stores tokens. CJK text will be pre-segmented on the
--- Rust side before indexing and querying (M2), since unicode61 treats a run of CJK
--- characters as a single token.
+-- and message_bodies, the index only stores tokens. The Messages repository writes a row
+-- when a message is inserted and rewrites it when the body arrives. CJK text is
+-- pre-segmented on the Rust side, for indexing and querying alike (see fts.rs), since
+-- unicode61 treats a run of CJK characters as a single token.
 CREATE VIRTUAL TABLE messages_fts USING fts5 (
     subject,
     from_text,

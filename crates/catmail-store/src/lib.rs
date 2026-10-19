@@ -3,23 +3,35 @@
 //! Everything here is synchronous. `catmail-core` calls into it from blocking tasks.
 
 mod accounts;
+mod attachments;
 mod blob;
 mod columns;
 mod error;
 mod folders;
+mod fts;
 mod messages;
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use catmail_types::BlobHash;
 use rusqlite::{Connection, TransactionBehavior};
 use rusqlite_migration::{M, Migrations};
 
 pub use accounts::Accounts;
+pub use attachments::{AttachmentSource, Attachments, NewAttachment};
 pub use blob::BlobStore;
 pub use error::{Error, Result};
 pub use folders::{FolderSyncState, Folders, RemoteFolder};
-pub use messages::{Messages, NewMessage};
+pub use messages::{MessageLocation, Messages, NewBody, NewMessage};
+
+/// Every `*_blob_hash` column (a test checks none is missing).
+const BLOB_REFERENCES: &str = "
+    SELECT raw_blob_hash AS hash FROM message_bodies WHERE raw_blob_hash IS NOT NULL
+    UNION ALL SELECT blob_hash FROM attachments WHERE blob_hash IS NOT NULL
+    UNION ALL SELECT blob_hash FROM draft_attachments
+    UNION ALL SELECT raw_blob_hash FROM outbox";
 
 const MIGRATIONS: &[M<'static>] = &[M::up(include_str!("../migrations/0001_init.sql"))];
 
@@ -54,6 +66,18 @@ impl<'c> Db<'c> {
 
     pub fn messages(&self) -> Messages<'c> {
         Messages::new(self.conn)
+    }
+
+    pub fn attachments(&self) -> Attachments<'c> {
+        Attachments::new(self.conn)
+    }
+
+    /// Every blob some row refers to, for [`BlobStore::collect_garbage`]. A new
+    /// `*_blob_hash` column must be added here, or GC deletes what it points to.
+    pub fn blob_references(&self) -> Result<HashSet<BlobHash>> {
+        let mut stmt = self.conn.prepare(BLOB_REFERENCES)?;
+        let rows = stmt.query_map([], |r| columns::parse_text(r, "hash"))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 }
 
@@ -156,6 +180,35 @@ mod tests {
 
     fn is_constraint_violation(err: &rusqlite::Error) -> bool {
         err.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation)
+    }
+
+    #[test]
+    fn blob_references_cover_every_blob_column() {
+        // GC deletes any blob whose column is missing from the query.
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        let columns: Vec<(String, String)> = conn
+            .prepare(
+                "SELECT m.name, p.name FROM sqlite_master m, pragma_table_info(m.name) p
+                 WHERE m.type = 'table' AND p.name LIKE '%blob_hash'",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(columns.len(), 4, "{columns:?}");
+        let sql = BLOB_REFERENCES
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for (table, column) in columns {
+            assert!(
+                sql.contains(&format!("SELECT {column} FROM {table}"))
+                    || sql.contains(&format!("SELECT {column} AS hash FROM {table}")),
+                "{table}.{column} is not in BLOB_REFERENCES"
+            );
+        }
     }
 
     #[test]

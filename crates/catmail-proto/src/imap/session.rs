@@ -1,13 +1,12 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::{NonZeroU32, NonZeroU64};
 use std::time::Duration;
 
 use catmail_types::{FlagState, Flags, FolderRole, Security, ServerConfig};
 use imap_next::imap_types::auth::AuthMechanism;
-use imap_next::imap_types::body::{BodyStructure, SpecificFields};
 use imap_next::imap_types::command::{CommandBody, FetchModifier, SelectParameter};
 use imap_next::imap_types::core::{AString, Vec1};
-use imap_next::imap_types::fetch::{MessageDataItem, MessageDataItemName, Section};
+use imap_next::imap_types::fetch::{MessageDataItem, MessageDataItemName, Part, Section};
 use imap_next::imap_types::flag::{Flag, FlagFetch};
 use imap_next::imap_types::mailbox::{ListMailbox, Mailbox};
 use imap_next::imap_types::response::{Code, Data, GreetingKind};
@@ -21,10 +20,10 @@ use super::{
     Capabilities, Credentials, Error, FetchedMessage, ListedMailbox, MailboxStatus, Result, utf7,
 };
 use crate::TlsConfig;
-use crate::mime::{Headers, SUMMARY_HEADER_FIELDS, parse_headers};
+use crate::mime::{Headers, MimeNode, SUMMARY_HEADER_FIELDS, parse_headers};
 
 /// An IMAP connection, from greeting to logout. Read-only for now: mailboxes are opened
-/// with EXAMINE.
+/// with EXAMINE, and bodies fetched with `BODY.PEEK`, which leaves `\Seen` alone.
 pub struct Session {
     conn: Connection,
     caps: Capabilities,
@@ -294,20 +293,16 @@ impl Session {
             MessageDataItemName::InternalDate,
             MessageDataItemName::Rfc822Size,
             MessageDataItemName::BodyStructure,
-            MessageDataItemName::BodyExt {
-                section: Some(Section::HeaderFields(
-                    None,
-                    Vec1::try_from(
-                        SUMMARY_HEADER_FIELDS
-                            .iter()
-                            .map(|f| AString::try_from(*f).expect("valid header field name"))
-                            .collect::<Vec<_>>(),
-                    )
-                    .expect("non-empty field list"),
-                )),
-                partial: None,
-                peek: true,
-            },
+            body_peek(Some(Section::HeaderFields(
+                None,
+                Vec1::try_from(
+                    SUMMARY_HEADER_FIELDS
+                        .iter()
+                        .map(|f| AString::try_from(*f).expect("valid header field name"))
+                        .collect::<Vec<_>>(),
+                )
+                .expect("non-empty field list"),
+            ))),
         ];
         if self.modseq_enabled() {
             items.push(MessageDataItemName::ModSeq);
@@ -369,6 +364,88 @@ impl Session {
             .collect())
     }
 
+    /// The whole raw message, or `None` if the selected mailbox has no message with
+    /// this UID (any more).
+    pub async fn fetch_raw(&mut self, uid: u32) -> Result<Option<Vec<u8>>> {
+        let Some(items) = self.fetch_one(uid, vec![body_peek(None)]).await? else {
+            return Ok(None);
+        };
+        Ok(items.into_iter().find_map(|item| match item {
+            MessageDataItem::BodyExt {
+                section: None,
+                data,
+                ..
+            } => data.0.map(|d| d.into_inner().into_owned()),
+            _ => None,
+        }))
+    }
+
+    /// The message's MIME structure, or `None` if there is no message with this UID.
+    pub async fn fetch_structure(&mut self, uid: u32) -> Result<Option<MimeNode>> {
+        let items = self
+            .fetch_one(uid, vec![MessageDataItemName::BodyStructure])
+            .await?;
+        Ok(items.and_then(|items| {
+            items.into_iter().find_map(|item| match item {
+                MessageDataItem::BodyStructure(structure) => {
+                    Some(super::body::mime_node(&structure))
+                }
+                _ => None,
+            })
+        }))
+    }
+
+    /// Body parts by section (`1.2`), still transfer-encoded, or `None` if there is no
+    /// message with this UID. A section the server returns no content for is absent.
+    pub async fn fetch_sections(
+        &mut self,
+        uid: u32,
+        sections: &[String],
+    ) -> Result<Option<HashMap<String, Vec<u8>>>> {
+        let items = sections
+            .iter()
+            .map(|section| Ok(body_peek(Some(Section::Part(part(section)?)))))
+            .collect::<Result<Vec<_>>>()?;
+        let Some(fetched) = self.fetch_one(uid, items).await? else {
+            return Ok(None);
+        };
+        Ok(Some(
+            fetched
+                .into_iter()
+                .filter_map(|item| match item {
+                    MessageDataItem::BodyExt {
+                        section: Some(Section::Part(Part(numbers))),
+                        data,
+                        ..
+                    } => {
+                        let section = numbers
+                            .as_ref()
+                            .iter()
+                            .map(|n| n.to_string())
+                            .collect::<Vec<_>>()
+                            .join(".");
+                        Some((section, data.0?.into_inner().into_owned()))
+                    }
+                    _ => None,
+                })
+                .collect(),
+        ))
+    }
+
+    /// Items about one message, merged across FETCH responses; `None` if the server sent
+    /// nothing about it. Strict: a body part that couldn't be parsed fails the command.
+    async fn fetch_one(
+        &mut self,
+        uid: u32,
+        mut items: Vec<MessageDataItemName<'static>>,
+    ) -> Result<Option<Vec<MessageDataItem<'static>>>> {
+        let uid = NonZeroU32::new(uid).ok_or_else(|| Error::Protocol("UID 0".into()))?;
+        items.insert(0, MessageDataItemName::Uid);
+        let set = SequenceSet::from(Sequence::from(uid));
+        let response = self.conn.execute(uid_fetch(set, items, Vec::new())).await?;
+        Ok(group_fetches(response, |u| u == uid.get()).remove(&uid.get()))
+    }
+
     /// Ends the session politely. Errors are not interesting at this point.
     pub async fn logout(mut self) {
         if let Err(e) = self.conn.execute(CommandBody::Logout).await {
@@ -388,6 +465,25 @@ impl Session {
         self.selected
             .ok_or_else(|| Error::Protocol("no mailbox selected".into()))
     }
+}
+
+fn body_peek(section: Option<Section<'static>>) -> MessageDataItemName<'static> {
+    MessageDataItemName::BodyExt {
+        section,
+        partial: None,
+        peek: true,
+    }
+}
+
+/// `1.2` → the part specifier `[1, 2]`.
+fn part(section: &str) -> Result<Part> {
+    let numbers = section
+        .split('.')
+        .map(|n| n.parse::<NonZeroU32>().ok())
+        .collect::<Option<Vec<_>>>()
+        .and_then(|n| Vec1::try_from(n).ok())
+        .ok_or_else(|| Error::Protocol(format!("invalid body section `{section}`")))?;
+    Ok(Part(numbers))
 }
 
 fn uid_fetch(
@@ -456,7 +552,43 @@ impl MergedFetch {
 /// Groups FETCH responses by UID, for the UIDs `wanted` accepts. Responses without a UID
 /// are unsolicited updates about some other message and are ignored.
 fn merge_fetches(response: Response, wanted: impl Fn(u32) -> bool) -> BTreeMap<u32, MergedFetch> {
-    let mut merged: BTreeMap<u32, MergedFetch> = BTreeMap::new();
+    group_fetches(response, wanted)
+        .into_iter()
+        .map(|(uid, items)| {
+            let mut m = MergedFetch::default();
+            for item in items {
+                match item {
+                    MessageDataItem::Flags(flags) => m.flags = Some(convert_flags(&flags)),
+                    MessageDataItem::ModSeq(v) => m.modseq = Some(v.get()),
+                    MessageDataItem::InternalDate(d) => {
+                        m.internal_date = Some(d.as_ref().timestamp())
+                    }
+                    MessageDataItem::Rfc822Size(n) => m.size = Some(n),
+                    MessageDataItem::BodyStructure(bs) => {
+                        m.has_attachments = super::body::mime_node(&bs).has_attachments()
+                    }
+                    MessageDataItem::BodyExt { data, .. } => {
+                        m.headers = Some(Box::new(parse_headers(
+                            data.0.as_ref().map_or(&[][..], |d| d.as_ref()),
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+            (uid, m)
+        })
+        .collect()
+}
+
+/// FETCH items by UID, for the UIDs `wanted` accepts, in response order. A server may
+/// split one message's items across several responses (RFC 9051 §7.5.2) and repeat
+/// them; later values come later. Responses without a UID are unsolicited updates about
+/// some other message and are ignored.
+fn group_fetches(
+    response: Response,
+    wanted: impl Fn(u32) -> bool,
+) -> BTreeMap<u32, Vec<MessageDataItem<'static>>> {
+    let mut grouped: BTreeMap<u32, Vec<MessageDataItem<'static>>> = BTreeMap::new();
     for data in response.data {
         let Data::Fetch { items, .. } = data else {
             continue;
@@ -468,27 +600,11 @@ fn merge_fetches(response: Response, wanted: impl Fn(u32) -> bool) -> BTreeMap<u
         }) else {
             continue;
         };
-        if !wanted(uid) {
-            continue;
-        }
-        let m = merged.entry(uid).or_default();
-        for item in items {
-            match item {
-                MessageDataItem::Flags(flags) => m.flags = Some(convert_flags(&flags)),
-                MessageDataItem::ModSeq(v) => m.modseq = Some(v.get()),
-                MessageDataItem::InternalDate(d) => m.internal_date = Some(d.as_ref().timestamp()),
-                MessageDataItem::Rfc822Size(n) => m.size = Some(n),
-                MessageDataItem::BodyStructure(bs) => m.has_attachments = has_attachments(&bs),
-                MessageDataItem::BodyExt { data, .. } => {
-                    m.headers = Some(Box::new(parse_headers(
-                        data.0.as_ref().map_or(&[][..], |d| d.as_ref()),
-                    )));
-                }
-                _ => {}
-            }
+        if wanted(uid) {
+            grouped.entry(uid).or_default().extend(items);
         }
     }
-    merged
+    grouped
 }
 
 /// A SPECIAL-USE attribute (RFC 6154), lower-cased. The role names match; `\\Inbox` is
@@ -520,40 +636,6 @@ fn convert_flags(flags: &[FlagFetch<'_>]) -> (Flags, Vec<String>) {
     keywords.sort();
     keywords.dedup();
     (out, keywords)
-}
-
-/// Whether any part is an attachment: an explicit `attachment` disposition, an
-/// attached message, or a named non-inline part. M2 recomputes this from the full MIME
-/// tree when the body is downloaded.
-fn has_attachments(bs: &BodyStructure<'_>) -> bool {
-    match bs {
-        BodyStructure::Multi { bodies, .. } => bodies.as_ref().iter().any(has_attachments),
-        BodyStructure::Single {
-            body,
-            extension_data,
-        } => {
-            let disposition = extension_data
-                .as_ref()
-                .and_then(|e| e.tail.as_ref())
-                .and_then(|d| d.disposition.as_ref());
-            let is = |s: &[u8], expected: &str| s.eq_ignore_ascii_case(expected.as_bytes());
-            match disposition {
-                Some((kind, _)) if is(kind.as_ref(), "attachment") => return true,
-                Some((kind, _)) if is(kind.as_ref(), "inline") => return false,
-                _ => {}
-            }
-            if matches!(body.specific, SpecificFields::Message { .. }) {
-                return true;
-            }
-            let named = body
-                .basic
-                .parameter_list
-                .iter()
-                .chain(disposition.iter().flat_map(|(_, params)| params))
-                .any(|(k, _)| is(k.as_ref(), "name") || is(k.as_ref(), "filename"));
-            named && !matches!(body.specific, SpecificFields::Text { .. })
-        }
-    }
 }
 
 /// Compresses UIDs into ranges: `[1, 2, 3, 7]` → `1:3,7`.

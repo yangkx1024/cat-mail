@@ -30,6 +30,10 @@ row_id!(
     /// pair. A copy in another folder has its own id; a move yields a new id.
     MessageId
 );
+row_id!(
+    /// Local identifier of an attachment (or inline part) of a downloaded message.
+    AttachmentId
+);
 
 /// Lowercase hex SHA-256 of a blob's contents.
 ///
@@ -56,6 +60,14 @@ impl TryFrom<String> for BlobHash {
 
     fn try_from(s: String) -> Result<Self, Self::Error> {
         Self::parse(&s).ok_or_else(|| format!("invalid blob hash `{s}`"))
+    }
+}
+
+impl std::str::FromStr for BlobHash {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s).ok_or_else(|| format!("invalid blob hash `{s}`"))
     }
 }
 

@@ -28,6 +28,7 @@ cp "$fixtures/02-utf8-subject.eml" "$maildir/cur/1792200002.fixture02:2,F"
 cp "$fixtures/03-attachment.eml"   "$maildir/new/1792200003.fixture03"
 cp "$fixtures/04-gb2312.eml"       "$maildir/new/1792200004.fixture04"
 cp "$fixtures/05-no-date.eml"      "$maildir/new/1792200005.fixture05"
+cp "$fixtures/06-html-inline.eml"  "$maildir/new/1792200006.fixture06"
 touch -d @1792300000 "$maildir/new/1792200005.fixture05" # its INTERNALDATE, 2026-10-18
 cp "$fixtures/01-plain.eml"        "$maildir/.Archive.2026/cur/1792100000.archived:2,S"
 
