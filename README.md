@@ -174,7 +174,8 @@ CI（GitHub Actions）：
   代码）。全部测试在 PR 上只在 Linux 跑，合并到 main 后三个平台都跑（私有仓库的 macOS 分钟
   按 10 倍、Windows 按 2 倍计费）；需要时可以在分支上手动触发工作流，在三个平台上跑测试。
   目前只发布 Linux 版，但核心层必须保持跨平台，所以从一开始就在三个平台上检查。
-  另有一个 Linux job 对 Dovecot 和 mailpit 跑真实服务器测试。只改文档（`*.md`、`docs/`、`.agents/`、
+  Linux 上的测试同时对 Dovecot 和 mailpit 跑真实服务器测试（服务器来自 flake 的 `testenv`，
+  cargo 仍用 job 自己的工具链，复用同一份编译缓存）。只改文档（`*.md`、`docs/`、`.agents/`、
   许可证）时不触发。
 - `nix.yml`：`flake.nix` / `flake.lock` 变更时检查 Nix 格式、`nix flake check`，并确认开发
   环境可用。
