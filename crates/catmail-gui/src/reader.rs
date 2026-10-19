@@ -5,7 +5,7 @@
 //! [`crate::html`]): inline parts and `data:` URLs show, remote images never load.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, anyhow};
@@ -259,6 +259,7 @@ impl Reader {
             return;
         };
         let title = open.subject.clone();
+        let dir = self.client.config().handoff_dir();
         let inline = open
             .images
             .inline
@@ -274,7 +275,7 @@ impl Reader {
         cx.spawn_in(window, async move |this, cx| {
             let written = cx
                 .background_spawn(async move {
-                    write_browser_page(&html::browser_page(&title, &body, inline))
+                    write_browser_page(&dir, &html::browser_page(&title, &body, inline))
                 })
                 .await;
             this.update_in(cx, |_, window, cx| match written {
@@ -309,14 +310,15 @@ fn raster_format(mime_type: &str) -> Option<ImageFormat> {
     ImageFormat::from_mime_type(mime_type).filter(|f| !matches!(f, ImageFormat::Svg))
 }
 
-/// The page lives in the temporary directory (readable by this user only) and is left
-/// there: the browser reads it after this returns.
-fn write_browser_page(page: &str) -> anyhow::Result<PathBuf> {
+/// The page is left in `dir` (readable by this user only): the browser reads it after
+/// this returns. The engine empties the directory when it next opens.
+fn write_browser_page(dir: &Path, page: &str) -> anyhow::Result<PathBuf> {
     use std::io::Write as _;
+    std::fs::create_dir_all(dir)?;
     let mut file = tempfile::Builder::new()
-        .prefix("catmail-message-")
+        .prefix("message-")
         .suffix(".html")
-        .tempfile()?;
+        .tempfile_in(dir)?;
     file.write_all(page.as_bytes())?;
     let (_, path) = file.keep()?;
     Ok(path)
@@ -588,5 +590,16 @@ mod tests {
         assert!(matches!(images.source(&svg.into()), ImageSource::Custom(_)));
         let png = "data:image/png;base64,iVBORw0KGgo=";
         assert!(matches!(images.source(&png.into()), ImageSource::Image(_)));
+    }
+
+    #[test]
+    fn browser_pages_go_to_the_handoff_dir() {
+        let data = tempfile::tempdir().unwrap();
+        let dir = catmail_core::Config::with_data_dir(data.path()).handoff_dir();
+        let first = write_browser_page(&dir, "<p>one</p>").unwrap();
+        let second = write_browser_page(&dir, "<p>two</p>").unwrap();
+        assert_ne!(first, second);
+        assert!(first.starts_with(&dir));
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "<p>two</p>");
     }
 }

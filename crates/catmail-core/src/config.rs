@@ -40,4 +40,10 @@ impl Config {
     pub fn lock_path(&self) -> PathBuf {
         self.data_dir.join("lock")
     }
+
+    /// Files a frontend hands to other programs, such as a message page for the browser.
+    /// Opening the engine empties it.
+    pub fn handoff_dir(&self) -> PathBuf {
+        self.data_dir.join("handoff")
+    }
 }
