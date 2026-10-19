@@ -577,6 +577,36 @@ async fn mailbox_deleted_under_its_children_is_emptied() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn listing_without_inbox_deletes_nothing() {
+    let mut state = state_with(&["one"]);
+    state.mailboxes.push(FakeMailbox::new("Archive"));
+    let env = env(state).await;
+    env.sync().await;
+
+    // A LIST answer missing its INBOX line, from a server that has one.
+    env.fake.state().faults.omit = Some("INBOX".into());
+    let failed = env.client.sync_account(env.account).await;
+    assert!(failed.is_err(), "{failed:?}");
+    assert_eq!(env.subjects("INBOX").await, ["one"]);
+    env.folder("Archive").await;
+
+    env.sync().await;
+    assert_eq!(env.subjects("INBOX").await, ["one"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn account_without_inbox_syncs() {
+    // RFC 3501 §6.3.8: a user the server keeps no INBOX for gets none listed.
+    let mut state = ServerState::new("alice", "pw");
+    state.mailboxes = vec![FakeMailbox::new("Archive")];
+    state.mailbox_mut("Archive").append_simple("kept");
+    let env = env(state).await;
+    let report = env.sync().await;
+    assert_eq!(folder_report(&report, "Archive").added, 1);
+    assert_eq!(env.subjects("Archive").await, ["kept"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn incomplete_examine_never_deletes_local_messages() {
     // EXISTS drives both the no-change fast path and the empty-mailbox shortcut; a
     // lost or missing EXISTS line read as 0 would empty the folder.

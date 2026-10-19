@@ -1,6 +1,6 @@
 //! `catmail-gui`, the desktop frontend. So far it is the minimal reading window planned
-//! for M2: browse folders, read messages as text or HTML, save attachments. Like the CLI
-//! it changes nothing on the server.
+//! for M2: browse folders, read messages as text or HTML, save attachments. It changes
+//! nothing on the server; writing and sending come in M5.
 
 mod add_account;
 mod assets;

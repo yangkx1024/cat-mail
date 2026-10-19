@@ -39,8 +39,11 @@ pub struct SmtpFaults {
     /// Close the connection when MAIL FROM arrives, this many times.
     pub drop_on_mail: usize,
     /// Replies to the end of successive messages instead of 250, e.g. 451 or 554; such
-    /// a message is not delivered.
+    /// a message is delivered only if the code is 2xx.
     pub end_of_data_replies: Vec<u16>,
+    /// Answer EHLO with 421 and close the connection this many times, as a busy or
+    /// rate-limiting server does.
+    pub ehlo_busy: usize,
     /// Deliver this many messages, but close the connection instead of confirming
     /// them: the confirmation is lost.
     pub drop_after_data: usize,
@@ -62,6 +65,7 @@ impl Default for SmtpFaults {
             busy: 0,
             drop_on_mail: 0,
             end_of_data_replies: Vec::new(),
+            ehlo_busy: 0,
             drop_after_data: 0,
             inject_after_starttls: false,
             end_of_data_gate: None,
@@ -192,12 +196,7 @@ async fn serve(
     let mut io = BufReader::new(stream);
     let mut authenticated = false;
     let mut tx = Transaction::default();
-    let unavailable = {
-        let faults = &mut lock(&state).faults;
-        let down = faults.unavailable > 0;
-        faults.unavailable = faults.unavailable.saturating_sub(1);
-        down
-    };
+    let unavailable = take(&mut lock(&state).faults.unavailable);
     if unavailable {
         io.get_mut()
             .write_all(b"421 4.3.2 Service not available\r\n")
@@ -217,6 +216,13 @@ async fn serve(
         let verb = verb.to_ascii_uppercase();
         let reply: String = match verb.as_str() {
             "EHLO" => {
+                let busy = take(&mut lock(&state).faults.ehlo_busy);
+                if busy {
+                    io.get_mut()
+                        .write_all(b"421 4.7.0 Too many connections, try later\r\n")
+                        .await?;
+                    return Ok(());
+                }
                 let st = lock(&state);
                 let mut lines = vec!["fake.example".to_owned(), "8BITMIME".into()];
                 if let Some(limit) = st.faults.size_limit {
@@ -291,12 +297,10 @@ async fn serve(
             }
             "MAIL" => {
                 let st = &mut *lock(&state);
-                if st.faults.drop_on_mail > 0 {
-                    st.faults.drop_on_mail -= 1;
+                if take(&mut st.faults.drop_on_mail) {
                     return Ok(());
                 }
-                if st.faults.busy > 0 {
-                    st.faults.busy -= 1;
+                if take(&mut st.faults.busy) {
                     "451 4.3.0 Try again later\r\n".into()
                 } else if let Some(size) = param(arg, "SIZE").and_then(|s| s.parse::<u64>().ok())
                     && st.faults.size_limit.is_some_and(|limit| size > limit)
@@ -341,15 +345,19 @@ async fn serve(
                     data,
                 };
                 let st = &mut *lock(&state);
-                if st.faults.drop_after_data > 0 {
-                    st.faults.drop_after_data -= 1;
+                if take(&mut st.faults.drop_after_data) {
                     st.received.push(message);
                     return Ok(());
                 }
                 match (!st.faults.end_of_data_replies.is_empty())
                     .then(|| st.faults.end_of_data_replies.remove(0))
                 {
-                    Some(code) => format!("{code} Not accepted\r\n"),
+                    Some(code) => {
+                        if (200..300).contains(&code) {
+                            st.received.push(message);
+                        }
+                        format!("{code} Fake verdict\r\n")
+                    }
                     None => {
                         st.received.push(message);
                         "250 2.0.0 OK queued\r\n".into()
@@ -361,6 +369,13 @@ async fn serve(
         io.get_mut().write_all(reply.as_bytes()).await?;
         io.get_mut().flush().await?;
     }
+}
+
+/// Uses up one of a fault's remaining occurrences, if there is one left.
+fn take(remaining: &mut usize) -> bool {
+    let fires = *remaining > 0;
+    *remaining = remaining.saturating_sub(1);
+    fires
 }
 
 /// One line without its CRLF; `None` at EOF.

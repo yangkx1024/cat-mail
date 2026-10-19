@@ -316,6 +316,20 @@ async fn unparsable_lines_make_authoritative_answers_fail() {
     let (_fake, mut session) = garbled("* LIST").await;
     check(session.list().await.unwrap_err(), "LIST");
 
+    // Left out rather than garbled: only the missing INBOX gives it away, since the
+    // user does have one.
+    let mut state = sample_state();
+    state.faults.omit = Some("INBOX".into());
+    let fake = FakeImap::start(state).await;
+    check(login(&fake).await.list().await.unwrap_err(), "LIST");
+
+    // A user without INBOX: the same listing is complete (RFC 3501 §6.3.8).
+    let mut state = sample_state();
+    state.mailboxes.retain(|m| m.name != "INBOX");
+    let fake = FakeImap::start(state).await;
+    let listed = login(&fake).await.list().await.unwrap();
+    assert!(!listed.is_empty() && listed.iter().all(|m| m.raw_name != "INBOX"));
+
     let (_fake, mut session) = garbled("* SEARCH").await;
     session.examine("INBOX").await.unwrap();
     check(session.uid_search_all().await.unwrap_err(), "SEARCH");

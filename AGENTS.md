@@ -80,7 +80,8 @@ fake-server test, with a fault injected if the change is about recovering from o
 - **Message bodies** are fetched with EXAMINE and `BODY.PEEK` only; nothing that reads
   mail may change server state (flags included) before M4's operation queue.
 - **Outbox sends are never repeated behind the user's back.** `unknown` is committed
-  *before* the final dot of SMTP DATA, and only the user moves an entry out of it.
+  *before* the final dot of SMTP DATA, with `write_durable` (a plain commit can be lost
+  to a power cut), and only the user moves an entry out of it.
   Retries before that point are safe (the server discards an unfinished message);
   saving to Sent never resends. Keep the attempt count bumped before each APPEND, so a
   retry checks Sent first.

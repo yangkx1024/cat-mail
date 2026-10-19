@@ -273,7 +273,9 @@ async fn account(client: &MailClient, cmd: AccountCommand, json: bool) -> Result
         AccountCommand::Remove { account } => {
             let account = resolve_account(client, &account).await?;
             client.remove_account(account.id).await?;
-            if !json {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&account)?);
+            } else {
                 println!("Removed account {} ({})", account.id, account.email);
             }
         }
@@ -418,7 +420,12 @@ async fn read(client: &MailClient, args: Read, json: bool) -> Result<()> {
         }
     }
     if json {
-        println!("{}", serde_json::to_string_pretty(&message)?);
+        let mut value = serde_json::to_value(&message)?;
+        if args.save.is_some() {
+            // Where each one went: a name already taken gets a number.
+            value["saved"] = serde_json::to_value(&saved)?;
+        }
+        println!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(());
     }
     print_message(&message, args.html);

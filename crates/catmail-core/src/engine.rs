@@ -142,6 +142,16 @@ impl Engine {
         blocking(move || Ok(engine.store.write(f)?)).await
     }
 
+    /// [`write`](Self::write), on disk even across a power cut; see
+    /// [`Store::write_durable`](catmail_store::Store::write_durable).
+    pub async fn write_durable<T: Send + 'static>(
+        self: &Arc<Self>,
+        f: impl FnOnce(&Db<'_>) -> catmail_store::Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let engine = self.clone();
+        blocking(move || Ok(engine.store.write_durable(f)?)).await
+    }
+
     pub fn tls(&self) -> Result<TlsConfig> {
         if let Some(tls) = self.tls.get() {
             return Ok(tls.clone());

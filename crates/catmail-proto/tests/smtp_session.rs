@@ -204,3 +204,33 @@ async fn starttls_is_required_when_configured() {
         .unwrap();
     assert!(matches!(err, Error::Unsupported("STARTTLS")), "{err:?}");
 }
+
+#[tokio::test]
+async fn busy_ehlo_is_temporary() {
+    let mut state = SmtpState::new("alice", "pw");
+    state.faults.ehlo_busy = 1;
+    let fake = FakeSmtp::start(state).await;
+    let tls = TlsConfig::with_roots_only([]).unwrap();
+    let err = Session::connect(&server(fake.port(), Security::Plain), &tls, TIMEOUT)
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(err, Error::Reply { code: 421, .. }), "{err:?}");
+    assert!(!err.is_permanent());
+    login(&fake).await;
+}
+
+#[tokio::test]
+async fn end_of_message_verdicts() {
+    let mut state = SmtpState::new("alice", "pw");
+    state.faults.end_of_data_replies = vec![251, 354];
+    let fake = FakeSmtp::start(state).await;
+    let mut session = login(&fake).await;
+
+    // Any positive completion is an acceptance.
+    send(&mut session, &["bob@example.com"]).await.unwrap();
+    // Neither acceptance nor refusal: not something to take as "not delivered".
+    let err = send(&mut session, &["bob@example.com"]).await.unwrap_err();
+    assert!(!matches!(err, Error::Reply { .. }), "{err:?}");
+    assert!(err.is_fatal() && !err.is_permanent(), "{err:?}");
+}

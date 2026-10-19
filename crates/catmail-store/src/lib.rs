@@ -101,6 +101,7 @@ impl Store {
         }
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        // Commits survive the app crashing, not a power cut; see `write_durable`.
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         Self::init(conn)
     }
@@ -131,7 +132,23 @@ impl Store {
     /// Notify observers (events) after this returns, never from inside `f`: the change
     /// isn't visible until the commit.
     pub fn write<T>(&self, f: impl FnOnce(&Db<'_>) -> Result<T>) -> Result<T> {
+        Self::transact(&mut self.conn(), f)
+    }
+
+    /// Like [`write`](Self::write), but the commit is on disk when this returns, even if
+    /// the power fails or the OS crashes next; a plain write may be lost to those (not
+    /// to the app crashing). Earlier commits are synced along with it. For commits that
+    /// something irreversible follows, such as the end of a message being sent.
+    pub fn write_durable<T>(&self, f: impl FnOnce(&Db<'_>) -> Result<T>) -> Result<T> {
         let mut conn = self.conn();
+        conn.pragma_update(None, "synchronous", "FULL")?;
+        let out = Self::transact(&mut conn, f);
+        // Failing to switch back only costs speed: later commits get synced too.
+        let _ = conn.pragma_update(None, "synchronous", "NORMAL");
+        out
+    }
+
+    fn transact<T>(conn: &mut Connection, f: impl FnOnce(&Db<'_>) -> Result<T>) -> Result<T> {
         // IMMEDIATE takes the write lock up front instead of failing on upgrade later.
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let out = f(&Db { conn: &tx })?;
@@ -192,6 +209,28 @@ mod tests {
 
     fn is_constraint_violation(err: &rusqlite::Error) -> bool {
         err.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation)
+    }
+
+    #[test]
+    fn durable_writes_are_synced() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("catmail.db")).unwrap();
+        let synchronous = |conn: &Connection| -> i64 {
+            conn.pragma_query_value(None, "synchronous", |r| r.get(0))
+                .unwrap()
+        };
+        let journal: String = store
+            .conn()
+            .pragma_query_value(None, "journal_mode", |r| r.get(0))
+            .unwrap();
+        assert_eq!(journal, "wal");
+        // NORMAL is 1, FULL 2.
+        assert_eq!(store.write(|db| Ok(synchronous(db.conn))).unwrap(), 1);
+        assert_eq!(
+            store.write_durable(|db| Ok(synchronous(db.conn))).unwrap(),
+            2
+        );
+        assert_eq!(synchronous(&store.conn()), 1, "only for that commit");
     }
 
     #[test]

@@ -14,9 +14,8 @@ html5ever.workspace = true
 imap-next.workspace = true
 mail-builder.workspace = true
 mail-parser.workspace = true
-# Workaround: imap-codec 2.0.0-alpha.9 uses nom's `alloc`-gated combinators but depends on
-# nom with default features off, so it only builds when something else enables them.
-nom = { version = "7", default-features = false, features = ["alloc"] }
+# Only for its features; see the workspace manifest.
+nom.workspace = true
 rustls.workspace = true
 rustls-platform-verifier.workspace = true
 thiserror.workspace = true

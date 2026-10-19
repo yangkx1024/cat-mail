@@ -85,7 +85,7 @@ impl MailClientBuilder {
         };
         let store = Store::open(&self.config.db_path())?;
         // The lock means no engine is sending; see Outbox::recover_interrupted.
-        let interrupted = store.write(|db| db.outbox().recover_interrupted(now()))?;
+        let interrupted = store.write(|db| db.outbox().recover_interrupted(None, now()))?;
         if interrupted > 0 {
             tracing::info!(
                 interrupted,
@@ -504,7 +504,7 @@ impl MailClient {
 }
 
 fn lock_data_dir(config: &Config) -> Result<File> {
-    fs::create_dir_all(config.data_dir())?;
+    create_data_dir(config.data_dir())?;
     let file = File::options()
         .create(true)
         .truncate(false)
@@ -516,6 +516,22 @@ fn lock_data_dir(config: &Config) -> Result<File> {
             Err(Error::AlreadyRunning(config.data_dir().to_path_buf()))
         }
         Err(TryLockError::Error(e)) => Err(e.into()),
+    }
+}
+
+/// Creates the data directory readable by the user alone: the database holds every
+/// message's headers and text, and the drafts. Parent directories are made as usual. An
+/// existing directory is left as it is.
+fn create_data_dir(dir: &Path) -> std::io::Result<()> {
+    if let Some(parent) = dir.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    match builder.create(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => Ok(()),
+        result => result,
     }
 }
 
@@ -849,15 +865,22 @@ mod tests {
         assert!(!reopened.config().handoff_dir().exists());
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn sends_interrupted_before_the_end_go_back_to_the_queue() {
-        let dir = tempfile::tempdir().unwrap();
-        let secrets = Arc::new(MemorySecrets::default());
-        let client = open_client(dir.path(), secrets.clone());
+    /// A client on `dir` with one account, `email`.
+    async fn client_with_account(
+        dir: &std::path::Path,
+        secrets: Arc<dyn SecretStore>,
+        email: &str,
+    ) -> (MailClient, AccountId) {
+        let client = open_client(dir, secrets);
         let account = client
-            .add_account(new_account("a@example.com"), "pw".into())
+            .add_account(new_account(email), "pw".into())
             .await
             .unwrap();
+        (client, account.id)
+    }
+
+    /// A draft to `b@example.com`.
+    async fn draft_to_b(client: &MailClient, account: AccountId) -> catmail_types::Draft {
         let content = catmail_types::DraftContent {
             to: vec![catmail_types::Address {
                 name: None,
@@ -865,13 +888,23 @@ mod tests {
             }],
             ..Default::default()
         };
+        client.create_draft(account, content).await.unwrap()
+    }
+
+    async fn queue_one(client: &MailClient, account: AccountId) -> catmail_types::OutboxEntry {
+        let draft = draft_to_b(client, account).await;
+        client.send_draft(draft.id).await.unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sends_interrupted_before_the_end_go_back_to_the_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(MemorySecrets::default());
+        let (client, account) =
+            client_with_account(dir.path(), secrets.clone(), "a@example.com").await;
         let mut entries = Vec::new();
         for _ in 0..2 {
-            let draft = client
-                .create_draft(account.id, content.clone())
-                .await
-                .unwrap();
-            entries.push(client.send_draft(draft.id).await.unwrap().id);
+            entries.push(queue_one(&client, account).await.id);
         }
         // The process dies sending both: the first before the end of the message, the
         // second after.
@@ -901,6 +934,86 @@ mod tests {
                 catmail_types::OutboxStatus::Unknown
             ]
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sends_left_unfinished_are_requeued_without_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(MemorySecrets::default());
+        let (client, account) = client_with_account(dir.path(), secrets, "a@example.com").await;
+        let entry = queue_one(&client, account).await;
+        // An attempt that couldn't record how it ended, e.g. a failed write.
+        client
+            .engine
+            .store
+            .write(|db| db.outbox().begin_send(entry.id, 1))
+            .unwrap();
+
+        let cancelled = client.cancel_outbox(entry.id).await.unwrap();
+        assert_eq!(cancelled.status, catmail_types::OutboxStatus::Queued);
+        assert!(client.list_outbox(None).await.unwrap().is_empty());
+    }
+
+    /// Like a Secret Service whose collection is locked: works once unlocked.
+    #[derive(Default)]
+    struct LockableSecrets {
+        inner: MemorySecrets,
+        locked: std::sync::atomic::AtomicBool,
+    }
+
+    impl SecretStore for LockableSecrets {
+        fn set(&self, key: &str, secret: &str) -> Result<()> {
+            self.inner.set(key, secret)
+        }
+        fn get(&self, key: &str) -> Result<Option<String>> {
+            if self.locked.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(Error::Secrets("collection is locked".into()));
+            }
+            self.inner.get(key)
+        }
+        fn delete(&self, key: &str) -> Result<()> {
+            self.inner.delete(key)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn locked_keyring_postpones_sending() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(LockableSecrets::default());
+        let (client, account) =
+            client_with_account(dir.path(), secrets.clone(), "a@example.com").await;
+        queue_one(&client, account).await;
+        secrets
+            .locked
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        // Fails before any connection is made, so the fake host doesn't matter.
+        let flushed = client.flush_outbox(account).await.unwrap();
+        assert_eq!(flushed.len(), 1);
+        assert_eq!(flushed[0].status, catmail_types::OutboxStatus::Queued);
+        assert!(flushed[0].last_error.as_deref().unwrap().contains("locked"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn account_address_is_checked_before_queueing() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(MemorySecrets::default());
+        let (client, account) = client_with_account(dir.path(), secrets, "张三@example.com").await;
+        let draft = draft_to_b(&client, account).await;
+        let queued = client.send_draft(draft.id).await;
+        assert!(matches!(queued, Err(Error::InvalidInput(_))), "{queued:?}");
+        assert!(client.list_outbox(None).await.unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn data_dir_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("new").join("catmail");
+        open_client(&data, Arc::new(MemorySecrets::default()));
+        let mode = fs::metadata(&data).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "{mode:o}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -85,6 +85,9 @@ M1 先实现按需的只读同步 `MailClient::sync_account`：一条连接，�
 超时。见 `crates/catmail-core/src/engine.rs`、`sync.rs`。
 
 1. `LIST "" "*"` 对账文件夹：新增、更新属性、删除服务器上已不存在的文件夹（连同邮件）。
+   RFC 3501 §6.3.8 规定只要用户有 INBOX（即 SELECT INBOX 会成功）就要列出它。LIST 结果里
+   没有 INBOX 时，`Session::list` 用 EXAMINE INBOX 问一次：成功说明响应被截断或损坏，返回
+   `Incomplete`，整次同步报错、什么也不删；失败说明这个用户确实没有 INBOX，结果照常使用。
    角色依次取：名为 INBOX → SPECIAL-USE 属性 → 常见名称（`Sent Items`、`已发送`、`垃圾邮件`
    等），按名称猜测只用于没有任何文件夹通过 SPECIAL-USE 声明的角色，且每个角色只猜一个。
    `\Noselect` 的层级节点也保存（`selectable = 0`），但不同步。可选中的邮箱变成层级节点时
@@ -353,7 +356,7 @@ Service / macOS Keychain / Windows Credential Manager），service 为 `cat-mail
 |---|---|---|
 | `queued` | 等待发送（`next_attempt_at`） | → `sending`（算一次尝试） |
 | `sending` | SMTP 事务进行中，结束标记还没发 | 失败：可重试 → `queued`，永久 → `failed`；发结束标记**之前**先提交 → `unknown` |
-| `unknown` | 结束标记已发（或正要发），还没收到答复 | 250 → `accepted`；拒绝（4xx / 5xx）→ `queued` / `failed`；断线、超时、进程崩溃都**停在这里**，不自动重发 |
+| `unknown` | 结束标记已发（或正要发），还没收到答复 | 2xx → `accepted`；拒绝（4xx / 5xx）→ `queued` / `failed`；其他答复、断线、超时、进程崩溃都**停在这里**，不自动重发 |
 | `accepted` | 服务器已接受，待保存到 Sent | 只重试 APPEND，**绝不重发 SMTP** → done |
 | `failed` | 被永久拒绝，原因在 `last_error` | 由用户处理 |
 | done | 已发送，需要时已保存到 Sent | 删除这一行和草稿 |
@@ -364,7 +367,15 @@ Service / macOS Keychain / Windows Credential Manager），service 为 `cat-mail
 （`mark_outbox_sent`，之后只保存到 Sent）或取消。这些决定先拿该账户的发送锁：发送中的条目
 在等服务器答复时就是 `unknown`，此时改动它，随后到来的 250 就记不下来了，所以等这次尝试
 结束，决定作用于它留下的状态。打开引擎时（拿到数据目录锁后）残留的
-`sending` 行说明上一个进程死在结束标记之前，退回 `queued`。
+`sending` 行说明上一个进程死在结束标记之前，退回 `queued`；拿到某账户的发送锁时也这样处理
+该账户的 `sending` 行（尝试没能记下结果就结束了，如写库失败、flush 被取消），不必等到重启，
+用户也能马上取消或重试。
+
+这一切依赖提交真正落盘。SQLite 平时用 WAL + `synchronous=NORMAL`：进程崩溃不丢提交，断电
+或系统崩溃却可能丢掉最近几次，`unknown` 会退回 `sending`，重启后被当成没发出去而重发。所以
+`unknown` 和保存到 Sent 的尝试计数用 `Store::write_durable` 提交（只对这次提交 `FULL`，
+之前的提交一并落盘）；不全局开 `FULL`，因为同步时每批邮件都要提交，单连接上的读会排在
+fsync 后面。
 
 **SMTP 客户端**（`catmail-proto/src/smtp/`）自己实现，没用 lettre：状态机要区分"结束标记发出
 之前 / 之后"的失败，lettre 的 `send` 不暴露这一点；自己实现还能共用 `TlsConfig`、超时和
@@ -380,17 +391,25 @@ STARTTLS 的处理。一次事务拆成 `begin`（MAIL FROM、逐个 RCPT TO、D
   EHLO 识别用户。
 - 服务器声明 SIZE 时，超出的邮件不发送直接失败；有 SIZE 时在 MAIL FROM 带上大小。
 - 服务器不提供 AUTH 时不登录（本地中继）；STARTTLS 配置了就必须成功，所以不会被剥离。
+- EHLO 回 4xx（服务器忙、限流）是暂时失败；5xx 才算不支持 ESMTP。
+- 结束标记之后：2xx 都算接受（RFC 5321 只规定了 250）；4xx / 5xx 是拒绝，服务器已丢弃邮件；
+  其他答复说不清服务器是否留下了邮件，按结果未知处理。
 
 **重试。** 4xx、断线、超时属于暂时失败，按 30 秒起、每次翻倍、最多 30 分钟的间隔一直重试，
-`last_error` 随时可见；5xx、认证失败、服务器缺少所需能力、邮件过大属于永久失败。一轮处理里
-连接服务器失败时，剩下排队的邮件不再逐个尝试，只推迟（不计尝试次数）。同一轮里的多封邮件
+`last_error` 随时可见；5xx、认证失败、服务器缺少所需能力、邮件过大属于永久失败。读不到
+密码（密钥环被锁或还没启动，也包括密码不见了）是暂时的。这是权宜之计：连接时的失败（连不上、
+登录、密码、TLS）属于账户而不是某一封信，现在却记在队首那封上，密码错误时每轮让一封变成
+`failed`。M5 开启后台发送前改成整轮推迟、在账户上报告。一轮处理里连接服务器失败时，剩下排队的邮件不再逐个
+尝试，只推迟到和失败的那封同一时刻（不计尝试次数）：推迟得更早的话，下一轮由它们轮流去连，
+退避就失效了。被推迟的条目也算在这一轮的结果里。同一轮里的多封邮件
 复用一条 SMTP 连接。每账户一把发送锁（`Engine::send_permit`），后台发送和手动 flush 不会同时
 处理同一条。
 
 **保存到 Sent。** 被接受后立即（同一轮里，邮件还在内存中）用 APPEND（带 `\Seen`）存进 Sent，
 失败的留到之后几轮重试：优先用本地已知的 Sent 角色文件夹；
 账户还没同步过时用 LIST 和同步相同的角色判断现找；服务器没有 Sent 文件夹就跳过。APPEND 的
-答复也可能丢失（APPEND 成功但连接断了），所以尝试次数在每次尝试**之前**加一，第二次起先
+答复也可能丢失（APPEND 成功但连接断了），所以尝试次数在每次尝试**之前**加一，第一次直接
+APPEND，第二次起（包括同一次尝试里换新连接重来）先
 EXAMINE Sent、按 Message-ID `UID SEARCH HEADER`，已经在了就不再 APPEND。APPEND 走按需下载的
 连接池。已知问题：Gmail、Outlook 等服务器会自动把发出的邮件存进已发送，再 APPEND 会重复；
 它们需要 OAuth2，留到 M6 时按服务器关掉这一步。
@@ -533,7 +552,9 @@ zed-industries/zed#60155（同症状的 #64123 作为重复关闭，#64783 指�
 
 `Config::platform_default()`（`directories`）：Linux `~/.local/share/catmail`，
 macOS `~/Library/Application Support/dev.CatMail.CatMail`，Windows `%APPDATA%\CatMail\CatMail\data`。
-CLI 可用 `--data-dir` 或 `CATMAIL_DATA_DIR` 覆盖。目录内：`catmail.db`、`blobs/`、`lock`，以及前端交给其他程序的文件 `handoff/`（如给浏览器的邮件页面）。
+CLI 和 GUI 都可用 `--data-dir` 或 `CATMAIL_DATA_DIR` 覆盖。数据目录新建时只有本用户可访问
+（Unix 上 0700；只设置目录本身，上级目录照常创建，已存在的目录不改），数据库里有全部邮件头、
+正文和草稿。目录内：`catmail.db`、`blobs/`、`lock`，以及前端交给其他程序的文件 `handoff/`（如给浏览器的邮件页面）。
 `MailClient::open` 拿到锁之后清空 `handoff/`：锁保证没有前端还在往里写，各前端不必各自清理、
 也不必管调用顺序。在打开时而不是关闭时清：关闭时别的程序可能还在读，macOS 上应用退出也不执行
 析构。

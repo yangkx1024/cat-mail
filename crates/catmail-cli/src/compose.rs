@@ -122,8 +122,10 @@ pub(crate) async fn compose(client: &MailClient, args: Compose, json: bool) -> R
 }
 
 pub(crate) async fn reply(client: &MailClient, args: Reply, json: bool) -> Result<()> {
+    // Before the draft exists, so a missing file doesn't leave one behind.
+    let text = read_body(args.body, args.body_file.as_ref())?;
     let mut draft = client.reply(MessageId(args.id), args.all).await?;
-    if let Some(text) = read_body(args.body, args.body_file.as_ref())? {
+    if let Some(text) = text {
         let mut content = draft.content.clone();
         content.text = format!("{}{}", text.trim_end(), content.text);
         draft = client.update_draft(draft.id, content).await?;
@@ -131,7 +133,9 @@ pub(crate) async fn reply(client: &MailClient, args: Reply, json: bool) -> Resul
     finish_draft(client, draft, &args.attach, args.send, json).await
 }
 
-/// Attaches the files, then sends the draft or shows it.
+/// Attaches the files, then sends the draft or shows it. If a file can't be attached,
+/// the command fails as a whole and the new draft goes: the user, who was never told its
+/// id, would only run the command again and get another one.
 async fn finish_draft(
     client: &MailClient,
     mut draft: Draft,
@@ -140,10 +144,14 @@ async fn finish_draft(
     json: bool,
 ) -> Result<()> {
     for path in attach {
-        client
-            .attach_file(draft.id, path)
-            .await
-            .with_context(|| format!("failed to attach {}", path.display()))?;
+        if let Err(e) = client.attach_file(draft.id, path).await {
+            let mut error =
+                anyhow::Error::new(e).context(format!("failed to attach {}", path.display()));
+            if let Err(e) = client.delete_draft(draft.id).await {
+                error = error.context(format!("kept as draft {} ({e})", draft.id));
+            }
+            return Err(error);
+        }
     }
     if send_now {
         return send(client, draft.id, json).await;
@@ -209,6 +217,7 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
             }
         }
         DraftCommand::Attach { id, files } => {
+            let mut attached = Vec::new();
             for path in files {
                 let a = client
                     .attach_file(DraftId(id), &path)
@@ -222,6 +231,10 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
                         a.id
                     );
                 }
+                attached.push(a);
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&attached)?);
             }
         }
         DraftCommand::Detach { attachment } => {
@@ -273,17 +286,28 @@ pub(crate) async fn outbox(client: &MailClient, cmd: OutboxCommand, json: bool) 
                 let client = client.clone();
                 flushes.spawn(async move { client.flush_outbox(account.id).await });
             }
-            let mut results = Vec::new();
+            // One account failing doesn't hide what happened to the others' mail.
+            let (mut results, mut errors) = (Vec::new(), Vec::new());
             for flushed in flushes.join_all().await {
-                results.extend(flushed?);
+                match flushed {
+                    Ok(entries) => results.extend(entries),
+                    Err(e) => errors.push(e.to_string()),
+                }
             }
             results.sort_by_key(|e| e.id);
             if json {
                 println!("{}", serde_json::to_string_pretty(&results)?);
-            } else if results.is_empty() {
-                println!("Nothing to send.");
-            } else {
+            } else if !results.is_empty() {
                 print_outbox(&results);
+            } else if errors.is_empty() {
+                println!("Nothing to send.");
+            }
+            // Like `catmail send`: an error unless everything went out.
+            if !results.iter().all(|e| went_out(e.status)) {
+                errors.push("not everything was sent; `catmail outbox` shows why".into());
+            }
+            if !errors.is_empty() {
+                bail!("{}", errors.join("\n"));
             }
         }
         OutboxCommand::Retry { id } => {
@@ -296,7 +320,9 @@ pub(crate) async fn outbox(client: &MailClient, cmd: OutboxCommand, json: bool) 
         }
         OutboxCommand::Cancel { id } => {
             let entry = client.cancel_outbox(OutboxId(id)).await?;
-            if !json {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&entry)?);
+            } else {
                 match entry {
                     OutboxEntry {
                         status: OutboxStatus::Accepted,
@@ -312,6 +338,12 @@ pub(crate) async fn outbox(client: &MailClient, cmd: OutboxCommand, json: bool) 
         }
     }
     Ok(())
+}
+
+/// The message was sent; at most saving it to Sent is left. Anything else is what
+/// [`report`] turns into an error.
+fn went_out(status: OutboxStatus) -> bool {
+    matches!(status, OutboxStatus::Done | OutboxStatus::Accepted)
 }
 
 /// Tells the user how a send went and what they can do; an error unless it went out.
@@ -479,5 +511,80 @@ fn subject(subject: &str) -> &str {
         "(no subject)"
     } else {
         subject
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use catmail_core::{AuthKind, Config, MemorySecrets, NewAccount, Security, ServerConfig};
+    use tokio::runtime::Handle;
+
+    use super::*;
+
+    async fn client_with_account(dir: &std::path::Path) -> MailClient {
+        let client = MailClient::builder(Config::with_data_dir(dir))
+            .runtime(Handle::current())
+            .secrets(Arc::new(MemorySecrets::default()))
+            .open()
+            .unwrap();
+        let server = |host: &str| ServerConfig {
+            host: host.into(),
+            port: 993,
+            security: Security::Tls,
+        };
+        client
+            .add_account(
+                NewAccount {
+                    email: "a@example.com".into(),
+                    display_name: None,
+                    username: "a".into(),
+                    imap: server("imap.example.com"),
+                    smtp: server("smtp.example.com"),
+                    auth: AuthKind::Password,
+                },
+                "pw".into(),
+            )
+            .await
+            .unwrap();
+        client
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_command_leaves_no_draft() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = client_with_account(dir.path()).await;
+        let missing = dir.path().join("missing.pdf");
+
+        let args = Compose {
+            account: None,
+            fields: Fields {
+                to: Some("b@example.com".into()),
+                cc: None,
+                bcc: None,
+                subject: Some("hi".into()),
+                body: None,
+                body_file: None,
+            },
+            attach: vec![missing.clone()],
+            send: true,
+        };
+        let err = compose(&client, args, false).await.unwrap_err();
+        assert!(format!("{err:#}").contains("missing.pdf"), "{err:#}");
+
+        let args = Reply {
+            id: 1,
+            all: false,
+            body: None,
+            body_file: Some(missing),
+            attach: Vec::new(),
+            send: false,
+        };
+        let err = reply(&client, args, false).await.unwrap_err();
+        assert!(format!("{err:#}").contains("failed to read"), "{err:#}");
+
+        let account = client.list_accounts().await.unwrap()[0].id;
+        assert!(client.list_drafts(account).await.unwrap().is_empty());
     }
 }
