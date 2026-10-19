@@ -3,640 +3,131 @@
 跨平台（Linux → Windows / macOS）邮件客户端。核心是一个与 UI 无关的邮件引擎，对外只暴露
 `MailClient` 门面；CLI 与 GUI 是平级的两个前端。
 
-本文只描述架构设计。项目范围、里程碑与进度见 [README](../README.md)。
+本文只讲整体结构和贯穿各子系统的设计决定，实现细节见[子系统文档](#子系统)。项目范围、里程碑
+与进度见 [README](../README.md)。
 
 ## 分层
-
-自上而下，上层只依赖下层：
 
 | 层 | crate | 内容 |
 |---|---|---|
 | Frontends | `catmail-cli`、`catmail-gui` | 命令行（clap）；图形界面（gpui-kit） |
 | Facade | `catmail-core` | `MailClient`：async 方法 + 事件订阅，前端唯一依赖 |
-| Services / Engine | `catmail-core` | Account / Folder / Message / Draft / Send / Attachment 服务；每账户一个 SyncWorker actor、OpQueue、Outbox；运行时桥接、凭据存储 |
+| Services / Engine | `catmail-core` | 同步、操作队列回放、按需下载、Outbox；每账户状态；运行时桥接；凭据 |
 | Storage | `catmail-store` | SQLite schema 与迁移、事务化 Repository、FTS5、内容寻址 `BlobStore`；全部同步 API |
-| Protocol | `catmail-proto` | IMAP（imap-next）、SMTP（自己实现的提交客户端）、MIME 解析（mail-parser）与构建（mail-builder） |
-| Domain | `catmail-types` | `Account`、`Folder`、`MessageSummary`、`Flags`、`Event`、`SyncReport`、ID 类型；纯数据，无 IO |
+| Protocol | `catmail-proto` | IMAP（imap-next）、SMTP（自己实现）、MIME 解析（mail-parser）与构建（mail-builder）、HTML 清洗 |
+| Domain | `catmail-types` | `Account`、`Folder`、`MessageSummary`、`Flags`、`Event`、ID 类型；纯数据，无 IO |
 
-Storage 与 Protocol 是同一层的两个并列模块，彼此不依赖。依赖方向：
-`types ← store, proto ← core ← cli / gui`。前端不得直接依赖 `store` / `proto`，需要的类型由
-`catmail-core` 重新导出。`catmail-testkit`（假 IMAP / SMTP 服务器）不在这条链上，只作为
-dev-dependency 使用。
+依赖方向 `types ← store, proto ← core ← cli / gui`：store 与 proto 并列、互不依赖；前端不直接
+依赖 store / proto，需要的类型由 `catmail-core` 重新导出。`catmail-testkit`（假 IMAP / SMTP
+服务器）只作为 dev-dependency。
 
-## 关键决策
+## 关键设计
 
 ### 每个数据目录一个引擎
 
-`MailClient::open` 对 `<data>/lock` 加独占文件锁（`std::fs::File::try_lock`），整个引擎生命
-周期内持有；已被占用时返回 `Error::AlreadyRunning`。同一个数据目录因此只有一个引擎在跑
-SyncWorker、消费 Outbox、发事件，不需要跨进程的任务领取、租约或变更通知。
+`MailClient::open` 对 `<data>/lock` 加独占文件锁并持有到引擎关闭，已被占用时返回
+`Error::AlreadyRunning`。同一个数据目录只有一个引擎在同步、发信、发事件，因此不需要跨进程的
+任务领取、租约或变更通知。
 
-代价：GUI 运行时，CLI 不能打开同一个数据目录。之后让其他前端通过 IPC 连接正在运行的引擎，
+代价是 GUI 运行时 CLI 不能打开同一个数据目录。以后让其他前端通过 IPC 连接正在运行的引擎，
 而不是各自打开数据库。
 
 ### 运行时桥接
 
-GPUI 用自己的 executor，不是 tokio；而 IMAP/SMTP 栈依赖 tokio reactor。`MailClient` 持有
+GPUI 有自己的 executor，不是 tokio；IMAP / SMTP 栈却依赖 tokio reactor。`MailClient` 持有
 （GUI：`MailClient::builder(cfg).open()` 自建）或借用（CLI：`.runtime(Handle::current())`）
-一个 tokio runtime。每个公开 async 方法内部把工作 `spawn` / `spawn_blocking` 到该 runtime
-上再 await `JoinHandle`，因此返回的 future 可以被任意 executor poll。
-见 `crates/catmail-core/src/runtime.rs`，测试 `owned_runtime_is_usable_from_a_foreign_executor`。
+一个 tokio runtime，每个公开方法把工作 `spawn` / `spawn_blocking` 到该 runtime 上再 await
+`JoinHandle`，返回的 future 因此可以被任意 executor poll（`catmail-core/src/runtime.rs`）。
 
-- `Runtime` 与 `Engine` 分开放在两个 `Arc` 里，后台任务只持有 `Engine`，避免在 runtime
-  自己的线程上 drop 最后一个 runtime 引用。
-- 自建 runtime 在 drop 时 `shutdown_background()`，不等待任务；状态都已落 SQLite。
-- 后台任务 panic 转换为 `Error::Task`，不让 GUI 进程跟着崩。
+- `Runtime` 与 `Engine` 分放在两个 `Arc` 里，后台任务只持有 `Engine`，不会在 runtime 自己的
+  线程上 drop 最后一个 runtime 引用。
+- 自建 runtime drop 时 `shutdown_background()`，不等待任务：状态都已落 SQLite。
+- 后台任务 panic 转成 `Error::Task`，GUI 进程不跟着崩。
 
 ### 事务与事件
 
-所有数据库访问都经过 `Store::read` / `Store::write`：闭包拿到一个 `Db`，其上各个 repository
-共用同一个事务。`write` 是 `IMMEDIATE` 事务，闭包返回 `Ok` 才提交。
+数据库访问只经过 `Store::read` / `Store::write`：闭包里的各个 repository 共用同一个事务；
+`write` 是 `IMMEDIATE` 事务，闭包返回 `Ok` 才提交。必须原子的东西（本地改动与它的
+`pending_ops` 行、同步来的邮件与文件夹游标）放在同一个闭包里。
 
 事件（`tokio::sync::broadcast<Event>`）的规则：
 
-1. **先提交，再发事件**，绝不在 `write` 闭包内发事件，否则订阅者可能读到尚未提交的状态。
-2. 事件在执行变更的后台任务内部发出，调用方中途 drop future 也不会丢事件。
-3. 事件只携带 ID（"某账户的某文件夹变了"），前端收到后重新查询；`RecvError::Lagged` 时整体
-   刷新即可，不会丢状态。草稿和发件箱的变化是 `DraftsChanged` / `OutboxChanged`，服务器接受了
-   一封邮件时另有 `MessageSent`（给"已发送"之类的提示用）。
-
-### 离线优先 + 操作队列
-
-用户操作（标记、移动、删除，`MailClient::set_flags` / `move_messages` / `delete_messages`）
-在**同一个 `write` 事务**里完成两件事：修改本地数据（乐观更新）、每封邮件插入一条
-`pending_ops` 记录；提交后再发事件（`MessagesChanged`、`PendingOpsChanged`）。这样不会出现
-"界面已改，但服务器永远收不到操作"。实现在 `catmail-store/src/ops.rs`（本地效果与队列的
-簿记）和 `catmail-core/src/ops.rs`（回放）。
-
-- **标记**：只记录真正改变的位（已读的再标已读不入队），回放用 `+FLAGS.SILENT` /
-  `-FLAGS.SILENT`，从不整体替换，其他客户端同时改的 flags 不受影响；失败时也能精确撤销。
-  用户只能改 `\Seen`、`\Flagged`、`\Answered`。
-- **移动**：邮件行立刻移到目标文件夹，`uid` 置空（`messages.uid` 可空，只有本地移动过来、
-  服务器还没移动的邮件才没有 UID），正文、附件、全文索引随行保留，离线也能读。服务器仍按
-  op 记录的 (文件夹, UID) 找到它，所以没下载的正文照样能下载（`Messages::location`）。回放
-  时有 MOVE 用 `UID MOVE`，否则 `UID COPY` + `\Deleted` + 删除；服务器给出 COPYUID 时这一行
-  得到新 UID、**`MessageId` 不变**，否则删掉这一行，由下次同步重新拉取。同步只比较有 UID 的行。
-- **删除**：不在 Trash 里的邮件移到账户的 Trash；已在 Trash 里或指定永久删除时 `\Deleted`
-  + `UID EXPUNGE`。服务器不支持 UIDPLUS 时只能用普通 EXPUNGE，会一并清除别人标了
-  `\Deleted` 的邮件——这正是那个标记的含义，各客户端都这样做。没有 Trash 文件夹的账户只能
-  永久删除，不会悄悄变成永久删除。
-- 邮件回复发出（服务器接受，或用户确认已送达）时给原信加 `\Answered`，同样走队列。
-
-`pending_ops` 每条记录绑定 `folder_id` + `uidvalidity` + `uid`，UID 只在这个代际内有意义。
-回放规则：
-
-- 按文件夹分组，`SELECT` 后确认服务器的 UIDVALIDITY 与记录一致才执行；不一致时什么也
-  不做，随后同步这个文件夹时开始新代际，把它们标为 `conflict`（移动留下的无 UID 行随之
-  删除），绝不在新代际里按旧 UID 操作。
-- 同一文件夹里先回放标记，再回放移动和删除：对已在本地移走的邮件改标记，记录在它服务器上
-  的位置，要在它离开那个文件夹之前到达。标记只需保持同一封邮件的先后，所以分轮回放：每封
-  邮件的第一条、再每封的第二条……，轮内按改动分组，交替"标已读、加星标"也只需每种改动一条
-  命令。移动和删除按目标分组（一封邮件
-  最多只有一条待回放的移动或删除，再次移动、删除改写的是那一条，所以可以调换顺序），交替
-  "归档、删除、归档"也只需每个目标一条命令；相邻的同类操作合并成一条命令。
-- 服务器拒绝（NO/BAD）时标为 `failed` 并撤销本地改动。标记：每条操作记的是它实际改变的
-  位，所以把这封邮件待回放的操作连同被拒绝的那条按从新到旧逆推，正好得到它们之前的
-  flags，再把仍待回放的重新作用上去，并按现在实际改变的位重新记录（以后再被拒绝也能精确
-  撤销）。只撤销被拒绝的那一条是不对的：先标已读、再标未读，两条都被拒绝，结果会是已读。
-  移动的邮件回到原处；删除没法在本地恢复，邮件行已经没了，下次同步把它拉回来。断线则保持
-  `pending`、记下尝试次数，之后重来。标记、删除和 MOVE 执行两次都无害（服务器跳过不存在的
-  UID），答复丢失只需重做：MOVE 已经做了而答复丢了，重做时找不到邮件、没有 COPYUID，本地
-  行删掉，同步再拉。
-- **没有 MOVE 的服务器**用 COPY + `\Deleted` + 删除，而 COPY 重做会多出一份，所以 COPY
-  要像发信的结束标记一样处理（`ops::copy_move`）：
-  - 每次 COPY **之前**，用 `write_durable` 记下检查点：目标文件夹、它的 UIDVALIDITY 和
-    UIDNEXT（`pending_ops.copy_*`，用 STATUS 取，不必离开选中的文件夹）。这次 COPY 造出的
-    副本，UID 只可能不小于这个 UIDNEXT。
-  - 有检查点的 op 在这个文件夹里**先于一切**核对，不论之后被改成了什么（移到别处、移回
-    原处、永久删除）：否则移回原处在本地结算、删除直接执行，丢了答复的副本会留在目标里。
-    核对就是在目标里 UID ≥ 检查点的邮件中找与原邮件**原文逐字节相同**的（每个副本只认领
-    一次；先比 RFC822.SIZE，只下载大小相同的）：
-    - 找到了：邮件已经在目标里。删除原处的，op 像回放期间被改动的移动一样跟到副本那里：
-      移回原处变成从目标移回，删除变成删除副本，回放随即再处理那个文件夹。
-    - 没找到：COPY 没做成（或副本已被别人删掉），清掉检查点，op 照现在的样子继续。
-    - 原邮件已经不在：它是在 COPY 确认之后才删的，无事可做。
-
-    不按 Message-ID 判断：目标里可能早有一封 Message-ID 相同而内容不同的邮件（把它当成副本
-    会删掉原邮件、丢信），没有 Message-ID 的邮件也没法找。
-  - 无法判断时（目标在此期间被重建或删除），这条 op 标为 `failed`，**原邮件留在原处**，
-    不再自动重试，由用户决定：宁可让用户看到可能多出的一份，也不丢信、不在背后复制第二份。
-  - COPY 被拒绝时什么也没复制（RFC 3501），照常失败；复制成功但删除原邮件被拒绝时，op 失败，
-    邮件两边都有。
-- 文件夹从服务器上消失时，它的 op 随之级联删除；之前先撤销本地效果：从它移出的邮件行一并
-  删除，移入它的邮件回到原处。这些以及新代际造成的冲突都会改动**别的**文件夹里的行，
-  repository 返回受影响的文件夹（`Touched`），同步提交后为它们发 `MessagesChanged` 和
-  `PendingOpsChanged`，打开着的视图不会留着已经删掉的邮件。回放同理：哪些文件夹的邮件行
-  变了由 repository 返回（撤销标记、移回原处、得到 UID 或被删的行），core 不猜；只是 op 被
-  删除时不发 `MessagesChanged`，每次回放结束时发一次 `PendingOpsChanged`。`failed` / `conflict` 的记录留给用户查看
-  （`MailClient::list_pending`、`catmail ops`），由用户清除；`pending` 的不能清除，本地已经改了。
-
-回放发生在两处，都持有该账户的同步锁，用同一个 `ops::replay`：同步对账完文件夹之后、
-同步任何文件夹**之前**，把所有待回放的文件夹回放一遍（同步看到的是改动之后的服务器，
-包括移进它的邮件），以及 `MailClient::replay_pending`（只回放、不同步，用连接池里的连接；
-复用的连接已断开时在新连接上整个重来，已完成的不再是 pending）。服务器打不开的文件夹跳过，
-留给同步处理。CLI 像 `catmail send` 一样
-当场回放；后台回放随 M4 的每账户 actor 到来。
-
-草稿的远端副本同理：`drafts.remote_folder_id` / `remote_uidvalidity` / `remote_uid` 三者
-同时设置、同时清空。删除文件夹或 UIDVALIDITY 变化时由 repository 一起清空；表上的 CHECK
-约束保证单纯的 `ON DELETE SET NULL` 会失败，而不是留下一个悬空的 UID。
-
-### 同步
-
-目标形态是每账户一个 actor：1 条 IDLE 连接 + 1~2 条工作连接，通过 mpsc 接收命令（M4）。
-M1 先实现按需的只读同步 `MailClient::sync_account`：一条连接，逐个文件夹 EXAMINE（只读，
-不改 `\Recent`、不会误改服务器状态）。同一账户的同步由每账户一把锁串行化；删除账户时先
-发取消信号并等锁释放，再删除数据，正在进行的同步立即返回 `Error::Cancelled`，不用等网络
-超时。见 `crates/catmail-core/src/engine.rs`、`sync.rs`。
-
-1. `LIST "" "*"` 对账文件夹：新增、更新属性、删除服务器上已不存在的文件夹（连同邮件）。
-   RFC 3501 §6.3.8 规定只要用户有 INBOX（即 SELECT INBOX 会成功）就要列出它。LIST 结果里
-   没有 INBOX 时，`Session::list` 用 EXAMINE INBOX 问一次：成功说明响应被截断或损坏，返回
-   `Incomplete`，整次同步报错、什么也不删；失败说明这个用户确实没有 INBOX，结果照常使用。
-   角色依次取：名为 INBOX → SPECIAL-USE 属性 → 常见名称（`Sent Items`、`已发送`、`垃圾邮件`
-   等），按名称猜测只用于没有任何文件夹通过 SPECIAL-USE 声明的角色，且每个角色只猜一个。
-   `\Noselect` 的层级节点也保存（`selectable = 0`），但不同步。可选中的邮箱变成层级节点时
-   （按 RFC 3501，删除有子文件夹的邮箱会清空它并保留名字为 `\Noselect`），按"这一代 UID
-   结束"处理：删除邮件、清空 UIDVALIDITY 与游标、离线操作标为 `conflict`，只保留这一行。
-2. 对每个可选中的文件夹 EXAMINE（服务器支持时带 `CONDSTORE`），比对 UIDVALIDITY：
-   - 变化（或第一次同步）：在同一个事务里删除该文件夹的所有邮件、写入新的 UIDVALIDITY、
-     清空游标，把旧代际的 `pending_ops` 标为 `conflict`，并清掉按旧 UID 指向它的草稿远端副本。
-   - 一致：照常继续。`pending_ops` 已在同步各文件夹之前用 SELECT 回放（见上文）。
-3. 新邮件与已删除邮件：
-   - 游标里的 UIDNEXT 与服务器相同、本地条数等于 EXISTS：既没有新邮件也没有删除，不发 SEARCH。
-   - 否则先 `UID SEARCH UID <游标>:*` 只取游标之后的 UID；若"本地条数 + 新邮件数 = EXISTS"，
-     说明没有删除，大文件夹的完整 UID 列表不必传输。
-   - 仍对不上（有删除，或没有游标）时才 `UID SEARCH ALL`，与本地 UID 列表（两者都有序）求差集。
-4. 已有邮件的 flags：`UID FETCH 1:<本地最大 UID> (FLAGS)`，有 CONDSTORE 时加
-   `(CHANGEDSINCE <游标>)`，HIGHESTMODSEQ 没变则整个跳过；没有 CONDSTORE（或文件夹报告
-   NOMODSEQ）时每次全量拉 flags。
-5. 拉取新邮件：从新到旧，每批 200 封
-   `UID FETCH (UID FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (…)])`，
-   每批一个事务，提交后发 `MessagesChanged`，界面先看到最新的邮件。
-6. 文件夹全部完成后才写游标（UIDNEXT、HIGHESTMODSEQ，取自 EXAMINE 时刻）。如果某批拿回的
-   邮件比请求的少（SEARCH 之后被删除，或响应无法解析），不写游标，下次完整求差集。
-
-**游标与断点续传。** M0 的设想是"每批结果与游标在同一个事务里提交"，M1 改为"游标只代表
-一次完整的同步"：从新到旧拉取时 UIDNEXT 无法按批推进，而已经入库的邮件行本身就是进度——
-中断后下一次同步重新求差集，只会拉缺的那些（`upsert` 遇到已有 UID 只刷新 flags，重复的批次
-不会产生重复行）。HIGHESTMODSEQ 用的是 EXAMINE 时刻的值，之后发生的变化 modseq 更大，下次
-`CHANGEDSINCE` 一定能拿到。
-
-认证失败、服务器缺少设置要求的能力（如 STARTTLS）在 core 里转换成 `Error::AuthFailed` /
-`Error::Unsupported`，错误信息里带给用户的建议，前端直接显示即可。
-
-**容错。** 服务器对某个文件夹回 NO/BAD（例如 LIST 之后被删除）只记在该文件夹的报告里，其余
-文件夹照常同步；断线、超时、BYE 等让整个同步失败，已提交的进度保留。重复或乱序的 FETCH 响应
-按 UID 去重；不带 UID 的主动 FETCH（其他客户端改了 flags）和不在请求集合里的 UID 都忽略；
-同一封邮件的属性分在几条 FETCH 响应里时按 UID 合并（RFC 9051 允许）。无法解析的行由连接层
-计数，**默认严格**：`Connection::execute` 只要丢弃过一行就返回 `Incomplete`，因为 LIST、
-SEARCH、EXAMINE、flags 这类结果缺一行就会被当成文件夹被删、邮件被删（EXISTS 当成 0）、
-flags 变化被 HIGHESTMODSEQ 跳过（该文件夹失败，LIST 则整个同步失败，本地状态不动）。新命令
-默认就是安全的。EXAMINE 缺少 UIDVALIDITY 或 EXISTS 同样只让该文件夹失败。只有拉邮件头显式
-使用 `execute_lossy`：一条 FETCH 响应解析失败时整行丢失，典型的原因是 imap-codec 不接受
-服务器发来的 BODYSTRUCTURE，而这每次都会重现。所以有行被丢弃时，缺失的 UID 立即再取一次，不带
-BODYSTRUCTURE（`has_attachments` 先记为否，下载正文后重算；下载本身不依赖同步时的
-BODYSTRUCTURE）。仍然缺失的邮件只是不出现在结果里，那一批算作不完整、不推进游标，下次
-再拉。每次网络读写超时 60 秒。
-
-有未回放的标记操作时，flags 同步把它们叠加在服务器的 flags 上（`Messages::update_flags`）；
-只有 MODSEQ 变化（例如移动过来的邮件第一次被同步）不算作 flags 更新。
-
-**APPEND 被提前拒绝。** 带 literal 的命令（APPEND）发出第一行后，服务器可以不回 `+` 而直接回
-tagged NO（Dovecot 无法写入时就是这样）。imap-next 只在 BAD 时放弃这条命令，收到 NO 后仍等着
-发送剩下的 literal，之后排队的命令永远发不出去。所以命令在完整发出之前就收到 NO/BAD 时返回
-`Error::Aborted`（致命），连接不再放回连接池；`Connection` 自己也记下这一点，之后的命令立即
-失败，不依赖调用方检查。连接池只在复用的连接确实断开（`Error::is_disconnected`）时换新连接
-重试，被拒绝的命令不会再发一遍。
-
-IMAP 库选 `imap-next`（sans-IO，基于 `imap-codec`），启用 `starttls` 与
-`ext_condstore_qresync`，不启用它自带的 `stream`：`catmail-proto` 自己驱动 sans-IO 状态机，
-底层可以是任意 `AsyncRead + AsyncWrite`，便于 STARTTLS 升级和测试。注意：
-`imap-codec 2.0.0-alpha.9` 未开启 `nom/alloc`，`catmail-proto` 里显式依赖 `nom` 补上（见其
-`Cargo.toml` 注释），上游修复后可移除。
-
-**文件夹名。** 不支持 UTF8=ACCEPT 的服务器用修改版 UTF-7 传输非 ASCII 名称（`&XfJT0ZAB-` =
-`已发送`）。`folders.remote_name` 原样保存服务器发来的名称，命令里只用它；`name` 是解码后的
-显示名，解码失败时等于原名。
-
-**邮件头。** 只拉 `HEADER.FIELDS (DATE FROM TO CC SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES)`，
-用 `mail-parser`（`full_encoding`）解析，RFC 2047 编码字和 GBK、GB2312、Big5 等旧字符集都转成
-UTF-8。没有（或无法解析）Date 头时用 INTERNALDATE 作为列表的排序时间。`has_attachments` 先由
-BODYSTRUCTURE 粗略判断（`MimeNode::has_attachments`，与按部分下载共用同一个 BODYSTRUCTURE
-转换），下载正文后按完整 MIME 树重算（见下一节）。
-
-### 正文与附件
-
-正文按需下载（`MailClient::download_message`），不在同步时预取。按 RFC822.SIZE 分两条路径：
-
-- **≤ 2 MiB：整封下载。** `UID FETCH <uid> (BODY.PEEK[])`，原文存入 BlobStore
-  （`message_bodies.raw_blob_hash`），用 mail-parser 解析，附件随即解码入库。绝大多数邮件
-  走这条路：完整原文最不依赖服务器 BODYSTRUCTURE 的正确性，也留下了 `.eml`（转发、
-  "查看原文"、以后换解析器重建）。
-- **> 2 MiB：按部分下载。** 先取 BODYSTRUCTURE，只取会作为正文显示的部分（单个不超过
-  2 MiB；"会显示"由 mail-parser 在不含任何数据的替身邮件上判定，与显示时同一套规则，见
-  下文），附件只记录 section、
-  传输编码和估算大小，第一次打开时再 `BODY.PEEK[<section>]` 下载、解码、入库
-  （`MailClient::attachment_content`）。BODYSTRUCTURE 解析失败（有的服务器会发错），或服务器
-  对某个要取的正文部分回 NIL、干脆不回时，退回整封下载：缺了正文的结果一旦按"已下载"存下，
-  就再也不会重取。`raw_message` 遇到尚未下载的大邮件时直接整封下载一次，同时存下正文。
-
-两条路径共用一套提取逻辑：按部分下载时，用 BODYSTRUCTURE 和取回的部分**重建一封结构相同
-的替身邮件**（没取的部分是空的 base64 正文），交给 mail-parser 按同样方式解析。于是两条
-路径选出的正文部分、字符集与传输编码的解码、RFC 2047 / 2231 文件名的解码完全一致。
-BODYSTRUCTURE 里的值来自服务器，写进替身邮件头之前去掉换行、token 只保留合法字符，
-不能伪造邮件头；叶子部分即使自称 `multipart` 也按 `application` 写出、去掉 `boundary`
-参数，否则它会吞掉后面的部分、打乱 section 编号。替身邮件解析出的部分如果对不上
-BODYSTRUCTURE 的 section，一律视为未下载。超过 2 MiB 的正文部分不随正文下载，而是和附件
-一起列出（`text/plain` 或 `text/html`，没有文件名），打开时按 section 单独下载，避免内容
-无处可看。IMAP section 编号按 RFC 3501 §6.4.5 从解析结果计算，附加的邮件
-（message/rfc822）算一个部分。
-
-正文的组成：`text` 为所有正文文本部分（只有 HTML 时由 HTML 转换）；`html` 只在有真正的
-HTML 部分时存在，经 `ammonia` 清洗（去掉脚本、样式表、表单、iframe、事件属性和
-`javascript:` 链接；保留表格布局属性和行内 `style`，但可能加载资源的 style（`url(`、
-`image-set(`、`@import`、CSS 转义）整个去掉；链接只允许 http、https、mailto、cid，`data:`
-只允许出现在 `img src`，判断时像 URL 解析器一样忽略其中的制表符、换行和开头的控制字符）。图片地址（远程、`cid:`）原样保留，是否加载由渲染端决定，
-默认应拦截远程图片。"内嵌"（`inline`）指 HTML 用 `cid:` 引用了它（按 RFC 2392 取出完整的
-引用值、百分号解码后精确比较，`cid:logo-long` 不会让 `logo` 也算内嵌）；没被引用的图片无论放在
-哪里都算附件，`has_attachments` 只统计非内嵌的部分。
-
-**正确性。**
-
-- 只用 EXAMINE 和 `BODY.PEEK`，下载不会把邮件标为已读，也不改服务器上的任何状态。改服务器
-  状态的只有操作队列的回放（SELECT）和保存到 Sent（APPEND）。
-- 用 UID 之前先 EXAMINE 并比对 UIDVALIDITY；不一致或服务器已没有这封邮件时返回
-  `Error::OutOfSync`，不在新代际里按旧 UID 取邮件，交给下一次同步处理。
-- 写入时只检查邮件行是否还在：message id 不复用，UIDVALIDITY 变化会删除旧代际的行，所以
-  行还在就说明它仍是下载开始时的那个（文件夹, UID）。正文、附件行、摘要、
-  `has_attachments` 和全文索引在同一个事务里写入（`Messages::store_body`）；两个并发
-  下载同一封邮件时只有一个写入，另一个直接读结果。
-- 每账户一份引擎状态（`AccountState`：同步锁、"已删除"标记、空闲连接）。删除账户时先
-  置"已删除"、清空连接池，再删除数据；删除成功后这份状态作为墓碑保留（账户 id 不复用），
-  之后对它的任何操作立即取消，不必像以前那样"先订阅取消信号、再确认一遍邮件还在"。进行中
-  的同步和下载立即返回 `Error::Cancelled`，不用等网络超时；删除后才开始的同步返回
-  `AccountNotFound`。删除失败（如 id 不存在）时撤掉标记，以后得到这个 id 的账户不受影响。
-  所有按需操作经过同一个入口（`body.rs` 的 `on_server`）：取连接、EXAMINE 比对
-  UIDVALIDITY、在取消信号上 select。
-
-**连接。** 按需下载使用每账户最多 2 条空闲连接的小连接池（同步仍用自己的连接，打开邮件
-不必等同步结束），空闲超过 5 分钟的连接不再复用。复用的连接已断开时（服务器或 NAT 关掉了
-空闲连接）自动换一条**新建**的连接重试一次（不再从池里取，池里其余的连接多半也已断开）；
-新连接上的失败直接返回。归还连接时在连接池的锁内检查"已删除"标记，而删除是先置标记
-再取这把锁清空连接池，所以不会有连接在账户删除后留在池里。M4 的每账户 actor 会接管这部分。
-复用的连接仍然每次 EXAMINE：省掉这一个往返要依赖服务器绝不在选中期间改变 UIDVALIDITY，
-而这正是 UIDVALIDITY 检查要防的情况。
-
-### 认证
-
-`catmail_proto::Credentials` 是协议层看到的全部，IMAP 和 SMTP 共用：目前只有
-`Password { username, password }`。IMAP 登录时服务器支持 `AUTH=PLAIN` 就用
-`AUTHENTICATE PLAIN`，否则用 `LOGIN`（`LOGINDISABLED` 时报错）；SMTP 优先 `AUTH PLAIN`，
-其次 `AUTH LOGIN`。凭据从哪来由 `catmail-core/src/auth.rs` 按 `AuthKind` 决定（密码账户读
-keyring）。加 OAuth2（M6）只需新增 `AuthKind` 和 `Credentials` 的变体（XOAUTH2 /
-OAUTHBEARER）以及刷新 token 的那一个分支，同步和发信代码不变。
-
-### TLS
-
-`rustls`，crypto provider 用 `ring`（不用默认的 aws-lc-rs，Windows CI 不需要 cmake / NASM）。
-证书校验用 `rustls-platform-verifier`，即操作系统的信任库与校验逻辑，企业内部 CA 与浏览器
-表现一致。`MailClientBuilder::tls` 可以替换，例如 `TlsConfig::with_roots_only(<DER 证书>)`
-只信任自签名证书；接口只收字节，前端不需要依赖 rustls。
-
-- `tls`：从第一个字节开始 TLS。
-- `starttls`：服务器不支持 STARTTLS 就报错，绝不降级为明文；升级后丢弃明文阶段的一切状态
-  （包括可能被注入的、跟在 `OK` 后面的字节）并重新获取 CAPABILITY；PREAUTH 视为不支持。
-  SMTP 同理：升级后丢掉缓冲区里的明文字节，重新 EHLO。
-- `tls` / `plain` 下的 PREAUTH 问候表示已认证，`login` 直接返回。
-- `plain`：明文，只用于本地测试服务器。
-
-### 存储
-
-- SQLite（`rusqlite` bundled，三平台行为一致、自带 FTS5），WAL，`foreign_keys=ON`。
-  目前单连接 + Mutex；读写竞争出现后拆成 1 写 + 读池。
-- 迁移在 `crates/catmail-store/migrations/`，由 `rusqlite_migration`（`user_version`）执行。
-  发布之后，迁移文件不可修改，改 schema 一律新增文件。
-- 约定：时间为 unix 秒；枚举列为 TEXT 不加 CHECK（新增变体无需重建表）；地址列表为 JSON；
-  外部可见的 ID（accounts / folders / messages / drafts）用 `AUTOINCREMENT`，删除后不复用。
-
-**邮件模型。** `messages` 的一行是"某个文件夹里的一封邮件"，即一个 IMAP（mailbox, UID）对，
-与服务器的语义一致：
-
-- flags、keywords、MODSEQ 都是这一行自己的状态。同一封邮件在 Inbox 已读、在 Archive 未读，
-  就是两行、各自的 flags。
-- 移动到别的文件夹得到新的 UID：服务器给出 COPYUID 时同一行改为新的 (文件夹, UID)，
-  否则旧行删除、同步时成为新的一行。
-- 不按 Message-ID 合并不同文件夹里的副本（它不可靠）。正文不需要专门共享：BlobStore 按内容
-  存储，相同的原始邮件在磁盘上只有一份。
-- 以后支持 Gmail 时，可加可空的 `X-GM-MSGID` / `EMAILID`（RFC 8474）列来关联副本，但它只用于
-  分组，不能替代每一行自己的状态。
-
-**计数。** `folders.unread_count` / `total_count` 由 `messages` 上的触发器维护（插入、删除、
-`\Seen` 变化各 O(1)），不论变化来自同步、本地操作还是级联删除，写入方都不用记得刷新。
-
-**跨账户约束。** 引用其他账户内数据的行，用 `(id, account_id)` 复合外键约束，数据库层面就
-不可能把账户 A 的邮件挂到账户 B 的文件夹下（`messages`、`pending_ops` → `folders`）。
-`ON DELETE SET NULL` 的关联（如 `drafts.reply_to_message_id`）没法用复合外键，因为
-SET NULL 会连 `account_id` 一起置空，这类关联由 repository 校验。
-
-**全文搜索。** `messages_fts` 为 contentless FTS5（`contentless_delete=1`），rowid =
-`messages.id`，列为主题、发件人（姓名和地址）、收件人与抄送、正文。`Messages` repository
-在插入邮件时写入（此时正文为空），正文下载后在同一事务里删除并重写这一行；删除邮件（含
-级联删除）由触发器删除索引。所以邮件头总能搜到，正文只有下载过的才能搜到。
-
-unicode61 分词器会把连续的中日韩文字当成一个词，trigram 又不支持两个字的查询，所以在
-Rust 侧预先切分（`crates/catmail-store/src/fts.rs`）：一段连续的 CJK 文字写成它的相邻双字，
-后面再跟单字，如 `季度报告` → `季度 度报 报告 季 度 报 告`。查询时一个字匹配单字，两个字
-匹配双字，三个字以上变成相邻双字组成的短语（`"季度 度报 报告"`）；同一段的双字位置连续，
-所以短语恰好匹配原来的子串，不会跨段误配。其他文字交给 unicode61（忽略大小写和变音
-符号，按整词匹配）。全角 ASCII 折叠成半角。查询语法（`SearchQuery`）：空格分隔的词或
-`"短语"` 都要匹配，可加 `from:`、`to:`（含抄送）、`subject:` 前缀；每个词都放进 FTS5
-字符串里，用户输入不会被当成 FTS5 语法。混合文字的词（`iPhone手机`）拆成几段分别匹配。
-结果按日期倒序。
-
-### 附件 / BlobStore
-
-内容寻址：`<data>/blobs/ab/cdef…`（SHA-256）。写入先进 `blobs/tmp`、fsync 后 rename，读者
-看不到半成品；相同内容只存一份。rename 从不覆盖已有文件（`persist_noclobber`）：同一内容
-可能被两次下载同时写入，而 Windows 上覆盖一个正被别人覆盖或打开的文件会失败；目标已存在就
-说明别人已经存好了，刷新 mtime 即可。DB 只存 hash，没有 blob 表。收信附件见上文"正文与附件"
-（imap-next 会把整条响应读进内存，所以附件是取回后再写入，不是流式落盘）；写信附件在添加
-时即复制入库，原文件移动/删除不影响草稿。
-
-**GC 约定。** 从 `put` 返回到引用它的数据库行提交之间有一个窗口，而且 `put` 可能
-返回一个早已存在的 hash。因此只删除"没有被任何 `*_blob_hash` 列引用，**并且** mtime 早于
-宽限期"的文件，删除前再检查一次 mtime。宽限期要远大于任何写事务的时长。`put` 遇到已存在的
-blob 时会刷新它的 mtime，让宽限期重新计时。
-
-实现（`BlobStore::collect_garbage`，入口 `MailClient::collect_garbage` / `catmail gc`）：先在
-一个读事务里取出所有引用（`Db::blob_references`；有测试枚举所有 `*_blob_hash` 列，漏加会失败），再
-遍历目录找出未引用且足够旧的候选，逐个在写锁下重查 mtime 后删除。`put` 刷新或创建 blob 时
-持有同一把锁的读锁，所以"GC 判定为旧"与"`put` 刚刚刷新"不会交错。宽限期 1 小时；`tmp`
-里中断写入留下的旧文件一并清理。删除账户、UIDVALIDITY 变化等删除邮件之后，它们的 blob
-由下一次 GC 回收。
-
-### 凭据
-
-密码不进数据库。`SecretStore` trait，默认 `KeyringSecrets`（`keyring` 4：Linux Secret
-Service / macOS Keychain / Windows Credential Manager），service 为 `cat-mail`，键为
-`account:{email}:{随机 uuid}`，存在 `accounts.secret_key` 列。随机键保证不同数据目录的凭据
-互不覆盖。
-
-顺序是正确性的关键：
-- 添加：先写密钥，再插入行；插入失败则删除刚写的密钥。
-- 删除：`DELETE … RETURNING secret_key` 原子地删行并取得键，再删密钥。
-
-任何能看到这一行的人也一定能看到它的密钥，所以并发删除不会留下孤立凭据。唯一的残留窗口是
-进程恰好在"写密钥"与"插入行"之间崩溃，只会留下一条无害的孤立条目。待办：无 Secret Service
-的环境（纯 TTY）提供加密文件降级。
-
-### 草稿与发信
-
-**草稿只在本地。** `drafts` 一行是正在写的一封信（收件人、抄送、密送、主题、纯文本正文），
-附件在添加时复制进 BlobStore（`draft_attachments`），原文件之后改动或删除都不影响。回复时把
-原信的 Message-ID 和 References 复制进草稿（`in_reply_to` / `references_hdr`），原信之后被删除
-也不会断开会话；回复发出后经操作队列给 `reply_to_message_id` 指向的原信加 `\Answered`。草稿上传到服务器的 Drafts
-文件夹（`remote_*` 列）要在每次保存时删除上一份副本，这属于 M4 的操作队列，M3 不做。
-
-回复（`MailClient::reply`）：发给原信的 Reply-To，没有时发给发件人；回复自己发出的信则发给
-原收件人。回复全部再加上原信的收件人和抄送，去掉自己、去重（地址不分大小写）。主题加
-`Re: `（已经以 `Re:` / `回复：` / `答复：` 开头的不再加），正文引用原文（`> `）。正文没下载时
-先下载。
-
-地址在保存草稿时就检查（`parse_addresses` 解析输入框里的地址列表：逗号或分号分隔，每一项
-只能是裸地址或"显示名 <地址>"，严格解析而不用宽松的邮件头解析器，任何一项不合规就报错，
-不会悄悄少一个收件人）：必须能原样放进 SMTP 的 `MAIL FROM:<…>` /
-`RCPT TO:<…>`。非 ASCII 地址需要 SMTPUTF8，暂不支持，直接拒绝。
-
-**Outbox 快照。** `send_draft` 把草稿冻结成 outbox 的一行：完整的 MIME 原文在此时构建
-（mail-builder：7-bit、CRLF、RFC 2047 头、RFC 2231 文件名，Message-ID 为
-`<uuid@发件人域名>`，不泄露主机名；收到的邮件里不合法的 msg-id（mail-parser 会保留其中的裸 CR，发出时它会变成换行、注入
-邮件头）在解析邮件头时就丢掉，入库的都是干净的；构建邮件时再按同一规则检查一遍）、存成 blob，之后每次尝试都发送这同一份字节，重试不再读
-草稿。SMTP 信封 `envelope_from` 和 `recipients_json`（所有 RCPT TO，含密送；密送不在 MIME 头
-里）单独存。构建在事务外进行，入队时检查草稿的 `revision` 没变（每次修改、增删附件都会加一），
-期间被改过就报 `Conflict`，不会把旧内容发出去。草稿有 outbox 行时被锁定：不能编辑、删除，
-不在草稿列表里；发完后随 outbox 行一起删除，取消没发出去的发送则只删 outbox 行，草稿回到
-可编辑状态。
-
-**状态机**（`crates/catmail-core/src/send.rs`，转换都是 `Outbox` repository 里的条件 UPDATE）：
-
-| 状态 | 含义 | 之后 |
-|---|---|---|
-| `queued` | 等待发送（`next_attempt_at`） | → `sending`（算一次尝试） |
-| `sending` | SMTP 事务进行中，结束标记还没发 | 失败：可重试 → `queued`，永久 → `failed`；发结束标记**之前**先提交 → `unknown` |
-| `unknown` | 结束标记已发（或正要发），还没收到答复 | 2xx → `accepted`；拒绝（4xx / 5xx）→ `queued` / `failed`；其他答复、断线、超时、进程崩溃都**停在这里**，不自动重发 |
-| `accepted` | 服务器已接受，待保存到 Sent | 只重试 APPEND，**绝不重发 SMTP** → done |
-| `failed` | 被永久拒绝，原因在 `last_error` | 由用户处理 |
-| done | 已发送，需要时已保存到 Sent | 删除这一行和草稿 |
-
-关键在 `unknown` 是**先写**的：服务器只有收到结束标记 `.` 才可能接受邮件，所以在那之前出的任何
-错都可以安全重试（服务器会丢弃没结束的事务）；从写下 `unknown` 起，不论之后断线、超时还是
-进程被杀，都不会自动重发，避免重复投递。用户可以重试（可能收到两封）、确认已送达
-（`mark_outbox_sent`，之后只保存到 Sent）或取消。这些决定先拿该账户的发送锁：发送中的条目
-在等服务器答复时就是 `unknown`，此时改动它，随后到来的 250 就记不下来了，所以等这次尝试
-结束，决定作用于它留下的状态。打开引擎时（拿到数据目录锁后）残留的
-`sending` 行说明上一个进程死在结束标记之前，退回 `queued`；拿到某账户的发送锁时也这样处理
-该账户的 `sending` 行（尝试没能记下结果就结束了，如写库失败、flush 被取消），不必等到重启，
-用户也能马上取消或重试。
-
-这一切依赖提交真正落盘。SQLite 平时用 WAL + `synchronous=NORMAL`：进程崩溃不丢提交，断电
-或系统崩溃却可能丢掉最近几次，`unknown` 会退回 `sending`，重启后被当成没发出去而重发。所以
-`unknown` 和保存到 Sent 的尝试计数用 `Store::write_durable` 提交（只对这次提交 `FULL`，
-之前的提交一并落盘）；不全局开 `FULL`，因为同步时每批邮件都要提交，单连接上的读会排在
-fsync 后面。
-
-**SMTP 客户端**（`catmail-proto/src/smtp/`）自己实现，没用 lettre：状态机要区分"结束标记发出
-之前 / 之后"的失败，lettre 的 `send` 不暴露这一点；自己实现还能共用 `TlsConfig`、超时和
-STARTTLS 的处理。一次事务拆成 `begin`（MAIL FROM、逐个 RCPT TO、DATA）、`write_message`
-（点填充后的正文，不含结束标记）、`end_message`（结束标记并等答复，RFC 5321 允许服务器想
-10 分钟），调用方在后两步之间提交 `unknown`。
-
-- 任何一个收件人被拒绝就 RSET 整个事务，错误里带上那个地址：不会出现一部分人收到、一部分
-  人没收到。
-- 正文里孤立的 CR 或 LF 一律改成 CRLF 再做点填充，没有服务器能在别处看到结束标记（SMTP
-  smuggling）。
-- EHLO 用 `[127.0.0.1]`：地址字面量合法，又不暴露主机名和内网地址；提交服务器靠认证而不是
-  EHLO 识别用户。
-- 服务器声明 SIZE 时，超出的邮件不发送直接失败；有 SIZE 时在 MAIL FROM 带上大小。
-- 服务器不提供 AUTH 时不登录（本地中继）；STARTTLS 配置了就必须成功，所以不会被剥离。
-- EHLO 回 4xx（服务器忙、限流）是暂时失败；5xx 才算不支持 ESMTP。
-- 结束标记之后：2xx 都算接受（RFC 5321 只规定了 250）；4xx / 5xx 是拒绝，服务器已丢弃邮件；
-  其他答复说不清服务器是否留下了邮件，按结果未知处理。
-
-**重试。** 4xx、断线、超时属于暂时失败，按 30 秒起、每次翻倍、最多 30 分钟的间隔一直重试，
-`last_error` 随时可见；5xx、认证失败、服务器缺少所需能力、邮件过大属于永久失败。读不到
-密码（密钥环被锁或还没启动，也包括密码不见了）是暂时的。这是权宜之计：连接时的失败（连不上、
-登录、密码、TLS）属于账户而不是某一封信，现在却记在队首那封上，密码错误时每轮让一封变成
-`failed`。M5 开启后台发送前改成整轮推迟、在账户上报告。一轮处理里连接服务器失败时，剩下排队的邮件不再逐个
-尝试，只推迟到和失败的那封同一时刻（不计尝试次数）：推迟得更早的话，下一轮由它们轮流去连，
-退避就失效了。被推迟的条目也算在这一轮的结果里。同一轮里的多封邮件
-复用一条 SMTP 连接。每账户一把发送锁（`Engine::send_permit`），后台发送和手动 flush 不会同时
-处理同一条。
-
-**保存到 Sent。** 被接受后立即（同一轮里，邮件还在内存中）用 APPEND（带 `\Seen`）存进 Sent，
-失败的留到之后几轮重试：优先用本地已知的 Sent 角色文件夹；
-账户还没同步过时用 LIST 和同步相同的角色判断现找；服务器没有 Sent 文件夹就跳过。APPEND 的
-答复也可能丢失（APPEND 成功但连接断了），所以尝试次数在每次尝试**之前**加一，第一次直接
-APPEND，第二次起（包括同一次尝试里换新连接重来）先
-EXAMINE Sent、按 Message-ID `UID SEARCH HEADER`，已经在了就不再 APPEND。APPEND 走按需下载的
-连接池。已知问题：Gmail、Outlook 等服务器会自动把发出的邮件存进已发送，再 APPEND 会重复；
-它们需要 OAuth2，留到 M6 时按服务器关掉这一步。
-
-**谁来发。** `MailClientBuilder::send_in_background(true)` 时引擎起一个后台任务，按
-`next_attempt_at` 和入队、重试的通知处理到期的条目（GUI 用，M5）；它只持有 `Weak<Engine>`，
-不会让数据目录锁一直被占着。CLI 不开后台发送，免得一个无关的命令在背后发信：`catmail send`
-入队后立即 `flush_outbox`，失败的留给 `catmail outbox flush`。
-
-### GUI
-
-`catmail-gui`，基于 `gpui-kit`（longbridge）：虚拟列表 / Table / 编辑器 / 原生 HTML 渲染，
-无 WebView。gpui-kit 构建在 `gpui-pre-*` 快照上并精确 pin 版本，应用只依赖 `gpui-kit`
-（`use gpui_kit::*` 就是 GPUI），不直接依赖 `gpui`，否则会链接两份 GPUI。gpui-kit 官方的
-编码与设计规范作为 skill 放在 `crates/catmail-gui/.claude/skills/`，改 GUI 前先读。
-
-M2 的最小读信窗口（`crates/catmail-gui/src/`）：
-
-- **结构。** `Mailbox`（根视图：侧栏的账户与文件夹树、同步按钮、三栏 `h_resizable`；登录页
-  打开时整个替换三栏）、`AddAccount`（登录页）、
-  `MessageList`（gpui-kit `List` 的 delegate，选择、键盘导航、滚动到底分页加载由 List
-  负责）、`Reader`（读信）。纯逻辑（文件夹树、日期格式、HTML 的图片 / 链接策略）在
-  `folders.rs`、`format.rs`、`html.rs`，不依赖 GPUI，单测覆盖。
-- **运行时。** `MailClient::builder(cfg).open()` 自建 tokio runtime；视图里只在
-  `cx.spawn` / `spawn_in` 中 await 门面方法，从不碰 tokio。事件订阅的 `broadcast::Receiver`
-  不依赖 reactor，直接在 GPUI 的 executor 上 `recv`；`Lagged` 时整体刷新，`Closed` 时退出。
-- **事件。** `FoldersChanged` / 账户增删重读侧栏；`MessagesChanged` 重读侧栏（计数）并在是
-  当前文件夹时重读已显示的行，按 MessageId 保持选中；选中的邮件在刷新后不见了（被删除、UIDVALIDITY 改变）时，列表发出
-  和按 Escape 取消选择相同的 `ListEvent::Cancel`，读信区随之清空。同步期间事件比读取快得多，所以读侧栏和
-  刷新列表都合并请求：同一时间最多一次读取，期间再有事件只记一个"过期"标记，完成后补读一次。
-  （只替换 GPUI 侧的任务不够：已经交给引擎的读取照样会做完。）切换文件夹则直接替换任务，并带
-  代际号丢弃过期结果。
-- **正文。** 默认显示纯文本（`SelectableText`，可选择复制），有 HTML 部分时可切换，选择在
-  切换邮件时保留。打开时把正文、标题、头部和附件列表一次准备好（`OpenMessage`），正文作为
-  同一个 `SharedString` 每帧交给视图，既不复制也不必再比较内容。HTML 用 `gpui_base::text::TextView`（不用 component 层的包装，因为只有
-  base 层暴露 `image_source`；主题样式由 component 安装的 `TextViewDefaults` 提供）。
-- **图片。** `image_source` 决定每张图：`cid:` 按 `content_id_from_url`（与引擎判断"内嵌"
-  同一条 RFC 2392 规则）查已加载的内嵌部分；`data:` 图片用 `data-url`（gpui-kit 自己用的同一个
-  WHATWG 解析器）解码；其他（远程、`file:`、相对路径）返回立即失败的 `ImageSource::Custom`，
-  不发任何请求，占位为空。**SVG 一律不显示**（`data:` 和 `cid:` 都是）：GPUI 用默认选项把 SVG
-  交给 usvg，它会把嵌套的 `<image href>` 当本地路径直接读文件，绕过 `image_source`，邮件就能
-  显示本地图片，或读 `/dev/zero` 耗尽内存。浏览器里的 `<img>` SVG 没有这个问题。每个 URL 只解析一次后缓存，因为视图每帧都会问每张图。"远程图片
-  未加载"的提示由 `catmail_core::html::image_sources` 判断：它复用清洗用的同一个 ammonia
-  配置，按解析结果而不是文本扫描列出 `img src`，在后台线程运行。内嵌图片在正文显示后再逐个取
-  （大邮件会按 section 下载）。
-- **链接。** 只把 `http` / `https` / `mailto` 交给系统打开；`cid:` 等其他链接点了无反应
-  （gpui-kit 默认会 `open_url` 任何链接）。
-- **在浏览器打开。** 把清洗后的 HTML 写成独立页面：`catmail_core::html::embed_inline_images`
-  把内嵌图片换成 `data:` URL（浏览器不认 `cid:`；用的是读信窗口已加载的图片，不再取一次），加 CSP `default-src 'none'; img-src data:; style-src 'unsafe-inline'` 和
-  `no-referrer`，远程图片在浏览器里同样被拦截。页面写在数据目录的 `handoff/`（`Config::handoff_dir`，
-  仅本用户可读）并保留，因为浏览器在函数返回后才读它；引擎下次打开时清空（见"数据目录"）。不放
-  系统临时目录：那里没人清理，整封邮件会一直留在磁盘上。替换在 proto 里随清洗的同一次解析完成，`data:` URL 也
-  由 proto 构造（MIME 类型只留合法字符）：ammonia 不会再检查属性过滤器返回的值，所以不接受调用方
-  给的任意字符串。
-- **登录页。** 没有账户时自动打开（不能取消），侧栏"Add account…"也能打开。先调用
-  `MailClient::check_login`（连接、登录、LOGOUT，不写数据库也不写密钥环），成功后才
-  `add_account`，再同步这个账户；所以密码或服务器填错不会留下账户行或孤立的密钥环条目。
-  登录进行中"Cancel"不可用：`add_account` 一旦开始就会写入（引擎的阻塞任务不随窗口的任务取消），
-  此时离开只会让新账户错过首次同步。空的端口和用户名取与 CLI 相同的默认值（按加密方式推断端口、用户名等于邮箱）；表单只检查端口
-  格式，其余由 `check_login` 里与 `add_account` 相同的校验负责。凭据由
-  `auth::new_account_credentials` 按 `AuthKind` 构造，加 OAuth2 时只改这一处。
-- **附件。** 列出非内嵌部分，点击后弹系统保存对话框（文件名经 `safe_filename`），需要时先
-  下载；覆盖确认由系统对话框负责。
-- **图标。** gpui-kit 默认资源只含组件用到的图标，其余 Lucide 图标用 `icon_assets!` 只嵌入
-  用到的几个，与默认资源组合（`assets.rs`，有测试检查视图用到的图标都在）。
-
-**HTML 渲染的验证结果。** 用测试邮件离屏截图（见下文"测试"）：段落、标题、列表、真正的数据
-表格、链接、`cid:` 内嵌图片、中英混排换行都正常。布局表格原本不行：营销邮件普遍用
-`<table width=600><tr><td>` 套整个正文，而 gpui-kit 的表格单元格只是一个行内段落（gpui-base
-`text/format/html.rs` 的 `parse_table_cell`），标题、段落、内层表格、列表全被压成一段。
-
-**展开布局表格。** 所以交给 `TextView` 的 HTML 先经过 `catmail_core::html::unwrap_layout_tables`
-（proto 的 `mime/layout.rs`）：某个单元格里有块元素（标题、段落、列表、表格等），或者每行至多
-一个单元格的表格，连同它的 `tbody` / `tr` / `td` 改成嵌套的 `div`，属性原样保留；其余表格是
-数据表格，保持不变（它们的单元格里只有行内内容，gpui-kit 能排）。gpui-kit 的块元素表里缺、却能通过清洗的
-块元素（`center`、`dd`、`dt`、`hgroup`，对照 gpui-kit 0.7.3）不论在哪都改成 `div`，否则同样被当
-行内压平；营销邮件常用 `center` 包住布局表格。多列布局（左图右文）因此变成上下排列，对窄的读信区
-反而合适。没有可改的内容时（多数非营销邮件）直接借用原字符串，不做后面的解析。
-- 这是绕开 gpui-kit 的限制。升级 gpui-kit 时对照 `parse_table_cell` 和它的块元素表：单元格能放
-  块元素后，表格部分就该删掉（否则多列布局会无谓地变成上下排列），表里补上的元素也从
-  `INLINE_BLOCKS` 去掉。
-- 只用于读信区。浏览器自己会排表格，"在浏览器打开"用的仍是原样清洗后的 HTML；数据库里存的
-  也是原样清洗后的版本，展开在打开邮件时于后台线程做。
-- 实现：清洗后的 HTML 是从 DOM 序列化出来的，标签必然正确嵌套，所以用 html5ever 的 tokenizer
-  读成记号流即可（不用 tree builder，它会再搬动内容），先一遍判断每个表格，再一遍用 html5ever
-  的 serializer 写出（转义由它负责）。html5ever 用与 ammonia 相同的版本，不多一份解析器。ammonia
-  的 DOM（`Document::to_dom_node`）要 `--cfg ammonia_unstable` 才能用，所以没走那条路。结果再过
-  一遍同一个 sanitizer，这一步不可能交出清洗不允许的东西。
-- 嵌入 `wry` 仍是备选，但目前看转换就够了。
-
-**字重（已知问题，上游）。** Linux 上可变字体的字重不起作用：GPUI（`gpui-pre-wgpu` 0.3.9 的
-`cosmic_text_system.rs`）栅格化字形时不设 `wght` 轴坐标（`render_glyph_image`，`RenderGlyphParams`
-里也没有字重），可变字体一律按默认实例渲染。系统只装了 Noto Sans CJK 可变字体（`NotoSansCJK-VF`）
-时，中文按它偏细的默认实例显示，加粗、`SEMIBOLD` 都无效，纯文本和 HTML 都一样；界面拉丁字体若解析到
-可变的 Noto Sans，加粗同样无效，只是默认实例是 Regular、不显眼。只给静态字体（`FONTCONFIG_FILE`
-指向只含 DejaVu、MiSans 的配置）时同一份代码字重正常，已在真实窗口和离屏截图里核对。上游跟踪：
-zed-industries/zed#60155（同症状的 #64123 作为重复关闭，#64783 指向同一处代码）。我们这边不绕开：
-打包静态 CJK 字体每个字重数 MB；用户侧可改装静态版（如 nixpkgs 的 `noto-fonts-cjk-sans-static`）。
-升级 gpui-kit 时检查这几个 issue。
-
-**依赖锁定。** Cargo 解析锁文件时会把 `dep?/feature` 里提到的可选依赖也算进去，所以开启
-`gpui-kit/test-support` 会让 `gpui-fast-*` 进入 `Cargo.lock`（不会编译）。它们精确 pin 了
-`cocoa = 0.26.0` 和 `unicode-properties = 0.1.3`，锁文件里这两个必须保持这些版本，否则无法
-解析；升级 gpui-kit 时对照它自带的 `Cargo.lock`。
-
-## 测试环境
-
-- **假 IMAP 服务器**（`crates/catmail-testkit`，只作为 dev-dependency）：进程内、可修改邮箱
-  内容，支持明文 / TLS / STARTTLS，可注入故障：断线（第 n 次拉邮件头时）、拉取时挂起、重复
-  或倒序的 FETCH 响应、不带 UID 的主动 FETCH、没有 CONDSTORE、UIDVALIDITY 改变、STARTTLS 之后
-  的明文注入、拒绝登录、拉正文时断线、挂起或按闸门放行、section 回 NIL、关闭当前所有连接、
-  拒绝 APPEND（回 NO，或不要 literal 直接回 NO）、APPEND 存下后不答复就断开；SELECT 可写，
-  支持 `UID STORE` / `COPY` / `MOVE`（带 COPYUID）/ `EXPUNGE`，可关掉 MOVE 和 UIDPLUS、
-  拒绝修改、修改后不答复就断开。BODYSTRUCTURE 和各 section 由每封邮件的
-  原文推导（mail-parser），所以测试邮件就是普通的 `.eml`。直接按字节写响应，故障可以精确
-  到线上格式。三个平台的 CI 都跑。
-- **假 SMTP 服务器**（同一个 crate）：明文 / TLS / STARTTLS，AUTH PLAIN / LOGIN，记录投递的
-  信封和正文（已去掉点填充）。故障：服务不可用（421 问候）、拒绝登录、SIZE 上限、拒绝指定
-  收件人（4xx / 5xx）、MAIL FROM 回 451、MAIL FROM 时断线、对结束标记回指定的错误码、
-  **收下邮件后不答复就断开**（确认丢失）、STARTTLS 之后的明文注入。
-- **真实服务器**：`testenv/dovecot/run.sh` 以当前用户在临时目录里启动 Dovecot（来自 flake 的
-  `testenv` 开发环境，版本随 `flake.lock` 固定），预置 `testenv/fixtures/` 里的邮件，包括中文
-  文件夹、层级文件夹、各种编码、HTML 加内嵌图片与 RFC 2231 文件名；测试还会投递一封超过
-  2 MiB 的邮件，走按部分下载的路径。发信经假 SMTP 服务器，保存到 Dovecot 的 Sent：先把
-  Sent 的 `tmp/` 设为只读让第一次 APPEND 失败，第二次就会先按 Message-ID 搜索，所以 APPEND
-  和 `SEARCH HEADER` 都在真实服务器上验证过（因此不能以 root 运行）。操作队列也在 Dovecot
-  上走一遍：改 flags、MOVE（Dovecot 给 COPYUID，同步后不重复拉取）、永久删除，结果直接看
-  maildir 的文件名和内容。`crates/catmail-core/tests/dovecot.rs` 在设置了
-  `run.sh` 打印的变量时运行，CI 里有单独的 Linux job。
-- **真实 SMTP**：同一个 Dovecot 开着 submission 服务（STARTTLS 与隐式 TLS 各一个端口，
-  `run.sh` 用 openssl 生成 127.0.0.1 的自签名证书，测试只信任它），`submission_max_mail_size`
-  设为 1 MiB；它把邮件转发给 mailpit（SMTP 收信端，带 HTTP API）。`tests/submission.rs` 发信
-  并从 mailpit 读回：信封收件人（密送只在信封里）、原文与存进 Dovecot Sent 的副本逐字节一致
-  （服务器只在前面加 trace 头），以及真实服务器上的收件人被拒（mailpit 只收 `@example.com`，
-  Dovecot 把它对 RCPT 的拒绝转回来）、超过 SIZE、密码错误。mailpit 存信时会给只在信封里的
-  收件人加一行 `Bcc:`，所以"邮件里没有 Bcc"看的是 Sent 的副本。每次运行的邮件按 Message-ID
-  或带时间戳的主题区分，可以对同一组服务器重复运行；它以单独的 `sender` 用户登录，和
-  `dovecot.rs` 的 `catmail` 用户互不影响，两组测试可以同时跑。两个测试文件共用
-  `tests/testenv/`：读 `run.sh` 打印的变量（没有就跳过，`CATMAIL_TESTENV_REQUIRED=1` 时失败）、
-  建客户端和账户、在 Sent 里找邮件。
-
-- **GUI**：`catmail-gui` 的 UI 集成测试（`#[gpui_kit::test]`，GPUI 的测试平台，无需显示器
-  或 GPU，三个平台都跑）用假服务器加载 `testenv/fixtures/` 和 `crates/catmail-gui/fixtures/`
-  的邮件，驱动真实的窗口：点击、键盘、切换 HTML，以及"另一处同步后窗口靠事件更新且保持
-  选中"。引擎在自己的线程上运行，GPUI 的测试调度器看不到，所以测试在 `run_until_parked` 之间
-  按真实时间等待（`test_support::wait_until`）。`mailbox::tests::screenshots`（`#[ignore]`）
-  用 WGPU 离屏渲染把几封邮件截成 PNG，供人看排版：
-  `CATMAIL_SCREENSHOTS=<目录> cargo test -p catmail-gui -- --ignored screenshots`。
-
-覆盖不到、留给后续的：进程在同步或发信中途被杀（同步用"断线后重新同步"近似，事务边界
-相同；发信的重启恢复由单元测试直接构造中断时的数据库状态）。
+1. **先提交，再发事件**，绝不在 `write` 闭包内发，否则订阅者可能读到尚未提交的状态。
+2. 由执行变更的后台任务发出，调用方中途 drop future 也不会丢事件。
+3. 只携带 ID（"某账户的某文件夹变了"），前端收到后重新查询；`RecvError::Lagged` 时整体刷新，
+   不会丢状态。
+
+### 邮件按文件夹存储，UID 绑定 UIDVALIDITY
+
+`messages` 的一行是一个 IMAP（文件夹, UID）对，与服务器的语义一致：flags、keywords、MODSEQ
+都是这一行自己的状态，同一封信在 Inbox 已读、在 Archive 未读就是两行。不按 Message-ID 合并
+不同文件夹里的副本（它不可靠）；相同的原文由内容寻址的 BlobStore 自然只存一份。
+
+UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UID 的东西（操作队列、草稿的远端
+副本）都同时记下文件夹和它的 UIDVALIDITY，使用前核对。UIDVALIDITY 变化时这个文件夹的旧代际
+整体作废：本地邮件删除重拉，指向它的操作标为冲突，绝不在新代际里按旧 UID 操作。
+
+### 读不改服务器，改动走操作队列
+
+同步和下载正文只用 EXAMINE 与 `BODY.PEEK`，不会把邮件标为已读，也不改服务器上的任何状态。
+改动服务器的只有两条路：
+
+- 用户对邮件的操作（标记、移动、删除）：在同一个事务里修改本地数据并写入 `pending_ops`，
+  之后在 SELECT 下核对 UIDVALIDITY 再回放。离线照常可用，服务器拒绝时撤销本地改动。
+- 发信后用 APPEND 保存到 Sent。
+
+### 发信绝不在背后重复
+
+发信先把草稿冻结成 outbox 里的一份 MIME 快照，之后每次尝试都发同一份字节。SMTP 发出结束标记
+`.` 之前，先用 `write_durable` 提交 `unknown` 状态：在那之前的失败都能安全重试（服务器会丢弃
+没结束的事务），从那之后不论断线、超时还是进程被杀都不自动重发，只由用户决定。保存到 Sent
+失败只重试 APPEND，不会重发邮件。
+
+### 每账户状态
+
+引擎为每个账户保留一份 `AccountState`：同步锁（同步与操作回放串行）、发送锁（同一条 outbox
+不会被同时处理）、按需下载用的小连接池、"已删除"标记。删除账户时先置标记、清空连接池，进行中
+的同步和下载立即返回 `Error::Cancelled`，不用等网络超时，然后才删除数据；这份状态作为墓碑
+保留（账户 id 不复用），之后对它的任何操作立即取消。
+
+目标形态是每账户一个 actor（1 条 IDLE 连接 + 1~2 条工作连接，通过 mpsc 接收命令），接管
+同步、后台回放和连接池。
+
+### 安全边界
+
+- **凭据**：密码只在系统密钥环里，不进 SQLite。添加账户先写密钥再插入行；删除先删行
+  （`RETURNING secret_key`）再删密钥，并发删除不会留下孤立凭据。
+- **TLS**：rustls + 操作系统的信任库；配置了 STARTTLS 就必须成功，绝不降级为明文。
+- **邮件内容不可信**：HTML 入库前经 ammonia 清洗；远程图片默认不加载，GUI 读信不发出任何网络
+  请求；服务器给的值（BODYSTRUCTURE、msg-id）写进邮件头之前都要校验。
+- **本地数据**：数据目录只有本用户可访问，交给其他程序的文件也放在里面。
+
+## 子系统
+
+| 文档 | 内容 |
+|---|---|
+| [同步](architecture/sync.md) | 文件夹对账、UIDVALIDITY、增量拉取、游标与断点续传、容错、邮件头 |
+| [操作队列](architecture/op-queue.md) | 标记 / 移动 / 删除的本地效果、回放顺序、拒绝时的撤销、无 MOVE 服务器上的 COPY |
+| [正文与附件](architecture/bodies.md) | 按需下载的两条路径、正文提取、HTML 清洗、内嵌图片 |
+| [草稿与发信](architecture/sending.md) | 草稿与回复、outbox 状态机、SMTP 客户端、重试、保存到 Sent |
+| [IMAP / SMTP 连接](architecture/protocol.md) | imap-next、连接层的严格解析、连接池、认证、TLS |
+| [存储](architecture/storage.md) | SQLite 约定、计数、跨账户约束、全文搜索、BlobStore 与 GC、凭据 |
+| [GUI](architecture/gui.md) | 视图结构、事件刷新、HTML 渲染与图片策略、已知问题 |
+| [测试](architecture/testing.md) | 假 IMAP / SMTP 服务器、真实 Dovecot 与 mailpit、GUI 测试 |
 
 ## 数据目录
 
-`Config::platform_default()`（`directories`）：Linux `~/.local/share/catmail`，
-macOS `~/Library/Application Support/dev.CatMail.CatMail`，Windows `%APPDATA%\CatMail\CatMail\data`。
-CLI 和 GUI 都可用 `--data-dir` 或 `CATMAIL_DATA_DIR` 覆盖。数据目录新建时只有本用户可访问
-（Unix 上 0700；只设置目录本身，上级目录照常创建，已存在的目录不改），数据库里有全部邮件头、
-正文和草稿。目录内：`catmail.db`、`blobs/`、`lock`，以及前端交给其他程序的文件 `handoff/`（如给浏览器的邮件页面）。
-`MailClient::open` 拿到锁之后清空 `handoff/`：锁保证没有前端还在往里写，各前端不必各自清理、
-也不必管调用顺序。在打开时而不是关闭时清：关闭时别的程序可能还在读，macOS 上应用退出也不执行
-析构。
+`Config::platform_default()`（`directories`）：Linux `~/.local/share/catmail`，macOS
+`~/Library/Application Support/dev.CatMail.CatMail`，Windows `%APPDATA%\CatMail\CatMail\data`。
+CLI 和 GUI 都可用 `--data-dir` 或 `CATMAIL_DATA_DIR` 覆盖。
+
+| 路径 | 内容 |
+|---|---|
+| `catmail.db` | SQLite：账户、文件夹、邮件头与正文、草稿、队列 |
+| `blobs/` | 原文、附件等内容寻址文件 |
+| `lock` | 引擎的独占锁 |
+| `handoff/` | 前端交给其他程序的文件（如给浏览器的邮件页面） |
+
+目录新建时只有本用户可访问（Unix 上 0700；只设置目录本身，已存在的不改）。`MailClient::open`
+拿到锁之后清空 `handoff/`：锁保证没有前端还在往里写，各前端不必各自清理。在打开时而不是关闭时
+清，是因为关闭时别的程序可能还在读，macOS 上应用退出也不执行析构。

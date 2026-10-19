@@ -1,0 +1,78 @@
+# 存储
+
+[← 架构](../architecture.md)
+
+## SQLite
+
+- `rusqlite`（bundled：三平台行为一致、自带 FTS5），WAL，`foreign_keys=ON`。目前单连接 + Mutex；
+  读写竞争出现后拆成 1 写 + 读池。
+- 迁移在 `crates/catmail-store/migrations/`，由 `rusqlite_migration`（`user_version`）执行。发布
+  之后迁移文件不可修改，改 schema 一律新增文件。
+- 约定：时间为 unix 秒；枚举列为 TEXT 不加 CHECK（新增变体无需重建表）；地址列表为 JSON；外部可见
+  的 ID（accounts / folders / messages / drafts）用 `AUTOINCREMENT`，删除后不复用。
+
+## 邮件行
+
+一行是一个（文件夹, UID）对，见[架构](../architecture.md#邮件按文件夹存储uid-绑定-uidvalidity)。
+补充：
+
+- 移动得到新的 UID：服务器给出 COPYUID 时同一行改为新的（文件夹, UID），否则旧行删除、同步时成为
+  新的一行。本地移动过来、服务器还没移动的行 `uid` 为空。
+- 以后支持 Gmail 时，可加可空的 `X-GM-MSGID` / `EMAILID`（RFC 8474）列来关联副本，但只用于分组，
+  不能替代每一行自己的状态。
+
+**计数。** `folders.unread_count` / `total_count` 由 `messages` 上的触发器维护（插入、删除、
+`\Seen` 变化各 O(1)），不论变化来自同步、本地操作还是级联删除，写入方都不用记得刷新。
+
+**跨账户约束。** 引用其他账户内数据的行用 `(id, account_id)` 复合外键（`messages`、`pending_ops`
+→ `folders`），数据库层面就不可能把账户 A 的邮件挂到账户 B 的文件夹下。`ON DELETE SET NULL` 的关联
+（如 `drafts.reply_to_message_id`）没法用复合外键，因为 SET NULL 会连 `account_id` 一起置空，这类
+关联由 repository 校验。
+
+## 全文搜索
+
+`messages_fts` 为 contentless FTS5（`contentless_delete=1`），rowid = `messages.id`，列为主题、
+发件人（姓名和地址）、收件人与抄送、正文。插入邮件时写入（正文为空），正文下载后在同一事务里删除
+并重写这一行；删除邮件（含级联删除）由触发器删除索引。所以邮件头总能搜到，正文只有下载过的才能搜到。
+
+**中日韩分词。** unicode61 会把连续的 CJK 文字当成一个词，trigram 又不支持两个字的查询，所以在 Rust
+侧预先切分（`crates/catmail-store/src/fts.rs`）：一段连续的 CJK 文字写成相邻双字，后面再跟单字，
+如 `季度报告` → `季度 度报 报告 季 度 报 告`。查询时一个字匹配单字，两个字匹配双字，三个字以上变成
+相邻双字组成的短语（`"季度 度报 报告"`）；同一段的双字位置连续，所以短语恰好匹配原来的子串，不会
+跨段误配。其他文字交给 unicode61（忽略大小写和变音符号，按整词匹配）；全角 ASCII 折叠成半角；混合
+文字的词（`iPhone手机`）拆成几段分别匹配。
+
+**查询语法**（`SearchQuery`）：空格分隔的词或 `"短语"` 都要匹配，可加 `from:`、`to:`（含抄送）、
+`subject:` 前缀。每个词都放进 FTS5 字符串里，用户输入不会被当成 FTS5 语法。结果按日期倒序。
+
+## BlobStore
+
+内容寻址：`<data>/blobs/ab/cdef…`（SHA-256），相同内容只存一份。DB 只存 hash，没有 blob 表。
+
+- 写入先进 `blobs/tmp`、fsync 后 rename，读者看不到半成品。
+- rename 从不覆盖已有文件（`persist_noclobber`）：同一内容可能被两次下载同时写入，而 Windows 上覆盖
+  一个正被别人覆盖或打开的文件会失败。目标已存在说明别人已经存好了，刷新 mtime 即可。
+
+**GC 约定。** 从 `put` 返回到引用它的数据库行提交之间有一个窗口，而且 `put` 可能返回一个早已存在的
+hash。因此只删除"没有被任何 `*_blob_hash` 列引用，**并且** mtime 早于宽限期"的文件，删除前再查一次
+mtime。宽限期要远大于任何写事务的时长；`put` 遇到已存在的 blob 会刷新 mtime，宽限期重新计时。
+
+**实现**（`BlobStore::collect_garbage`，入口 `MailClient::collect_garbage` / `catmail gc`）：先在一个
+读事务里取出所有引用（`Db::blob_references`；有测试枚举所有 `*_blob_hash` 列，漏加会失败），再遍历
+目录找出未引用且足够旧的候选，逐个在写锁下重查 mtime 后删除。`put` 刷新或创建 blob 时持有同一把锁
+的读锁，"GC 判定为旧"与"`put` 刚刚刷新"不会交错。宽限期 1 小时；`tmp` 里中断写入留下的旧文件一并
+清理。删除账户、UIDVALIDITY 变化等删除邮件之后，它们的 blob 由下一次 GC 回收。
+
+## 凭据
+
+`SecretStore` trait，默认 `KeyringSecrets`（`keyring` 4：Linux Secret Service / macOS Keychain /
+Windows Credential Manager），service 为 `cat-mail`，键为 `account:{email}:{随机 uuid}`，存在
+`accounts.secret_key` 列。随机键保证不同数据目录的凭据互不覆盖。
+
+- 添加：先写密钥，再插入行；插入失败则删除刚写的密钥。
+- 删除：`DELETE … RETURNING secret_key` 原子地删行并取得键，再删密钥。
+
+任何能看到这一行的人也一定能看到它的密钥，所以并发删除不会留下孤立凭据。唯一的残留窗口是进程恰好
+在"写密钥"与"插入行"之间崩溃，只会留下一条无害的孤立条目。
+
+待办：无 Secret Service 的环境（纯 TTY）提供加密文件降级。

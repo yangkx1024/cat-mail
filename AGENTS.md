@@ -5,9 +5,11 @@ A UI-independent engine exposes a single `MailClient` facade; the `catmail` CLI 
 GPUI/gpui-kit GUI are peer frontends on top of it.
 
 - Scope, roadmap and status: [README.md](README.md)
-- Architecture and the reasoning behind it: [docs/architecture.md](docs/architecture.md) —
-  read the relevant section before changing a subsystem, and update it when a design
-  decision changes.
+- Architecture and the reasoning behind it: [docs/architecture.md](docs/architecture.md)
+  holds the layering and the cross-cutting design; each subsystem's details live in
+  [docs/architecture/](docs/architecture/). Read the relevant document before changing a
+  subsystem, and update it when a design decision changes. Keep `architecture.md` high
+  level: implementation details go in the subsystem documents.
 
 ## Build and test
 
