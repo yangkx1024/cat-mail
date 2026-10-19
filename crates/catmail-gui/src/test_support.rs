@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use catmail_core::{
-    AccountId, AuthKind, Config, MailClient, MemorySecrets, NewAccount, Security, ServerConfig,
+    AccountId, AuthKind, Config, MailClient, MemorySecrets, Message, NewAccount, Security,
+    ServerConfig,
 };
 use catmail_testkit::{FakeImap, ServerState};
 
@@ -96,6 +97,23 @@ impl TestMail {
             port: self.fake.port(),
             security: Security::Plain,
         }
+    }
+
+    /// INBOX's message with this subject, its body downloaded.
+    pub fn download(&self, subject: &str) -> Message {
+        pollster::block_on(async {
+            let inbox = self
+                .client
+                .find_folder(self.account.unwrap(), "inbox")
+                .await;
+            let inbox = inbox.unwrap().unwrap();
+            let listed = self.client.list_messages(inbox.id, 100, 0).await.unwrap();
+            let summary = listed
+                .into_iter()
+                .find(|m| m.subject.as_deref() == Some(subject))
+                .unwrap();
+            self.client.download_message(summary.id).await.unwrap()
+        })
     }
 
     /// Expunges INBOX's message `uid` on the server and syncs.

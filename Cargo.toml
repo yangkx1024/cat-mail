@@ -25,6 +25,8 @@ directories = "6"
 # Pins the matching gpui-pre-* crates; never depend on GPUI directly (two copies would link).
 gpui-kit = "0.7.3"
 hex = "0.4"
+# The version ammonia uses, so the sanitizer and the layout pass share one parser.
+html5ever = "0.40.1"
 jiff = "0.2.38"
 # Without the default `stream` feature: catmail-proto drives the sans-IO client itself,
 # over any AsyncRead + AsyncWrite (TLS, STARTTLS upgrades, in-memory test pipes).
