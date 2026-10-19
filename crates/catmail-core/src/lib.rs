@@ -4,12 +4,17 @@
 //! executor-agnostic: work runs on a tokio runtime owned by (or handed to) the client,
 //! so the futures can be awaited from GPUI's executor as well as from tokio.
 
+mod auth;
 mod client;
 mod config;
+mod engine;
 mod error;
 mod runtime;
 mod secrets;
+mod sync;
 
+pub use catmail_proto::TlsConfig;
+pub use catmail_proto::imap::Error as ImapError;
 pub use catmail_types::*;
 pub use client::{MailClient, MailClientBuilder};
 pub use config::Config;

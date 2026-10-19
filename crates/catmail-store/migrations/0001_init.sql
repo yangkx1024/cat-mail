@@ -38,19 +38,25 @@ CREATE TABLE accounts (
 -- Invariant: every row in `messages` for a folder belongs to the folder's current
 -- `uidvalidity`. When the server reports a new UIDVALIDITY, the folder's messages are
 -- deleted and `uidvalidity` is updated in the same transaction.
+--
+-- The sync cursor (uidnext, highest_modseq) is only written once the folder is fully
+-- in sync with the server as of that cursor. Progress within an interrupted sync is
+-- the set of message rows itself: the next sync diffs local UIDs against the server's.
 CREATE TABLE folders (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id     INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-    name           TEXT    NOT NULL,
+    remote_name    TEXT    NOT NULL, -- exactly as the server sends it (modified UTF-7); used in commands
+    name           TEXT    NOT NULL, -- decoded for display
     delimiter      TEXT,
     role           TEXT,
+    selectable     INTEGER NOT NULL DEFAULT 1, -- 0 for \Noselect hierarchy nodes
     uidvalidity    INTEGER,
     uidnext        INTEGER,
     highest_modseq INTEGER,
-    unread_count   INTEGER NOT NULL DEFAULT 0,
+    unread_count   INTEGER NOT NULL DEFAULT 0, -- kept by the messages_count_* triggers
     total_count    INTEGER NOT NULL DEFAULT 0,
     last_synced_at INTEGER,
-    UNIQUE (account_id, name),
+    UNIQUE (account_id, remote_name),
     UNIQUE (id, account_id)
 ) STRICT;
 
@@ -78,7 +84,7 @@ CREATE TABLE messages (
     from_json       TEXT    NOT NULL DEFAULT '[]',
     to_json         TEXT    NOT NULL DEFAULT '[]',
     cc_json         TEXT    NOT NULL DEFAULT '[]',
-    date            INTEGER, -- the Date header
+    date            INTEGER, -- the Date header, else INTERNALDATE; the list sort key
     snippet         TEXT,
     has_attachments INTEGER NOT NULL DEFAULT 0,
     body_state      TEXT    NOT NULL DEFAULT 'headers', -- headers | full
@@ -88,10 +94,30 @@ CREATE TABLE messages (
     FOREIGN KEY (folder_id, account_id) REFERENCES folders(id, account_id) ON DELETE CASCADE
 ) STRICT;
 
-CREATE INDEX messages_folder_date ON messages (folder_id, date DESC);
+CREATE INDEX messages_folder_date ON messages (folder_id, date DESC, uid DESC);
 CREATE INDEX messages_account_date ON messages (account_id, date DESC);
 CREATE INDEX messages_thread ON messages (thread_id);
 CREATE INDEX messages_message_id_hdr ON messages (account_id, message_id_hdr);
+
+-- Folder counts follow every change to `messages`, whoever makes it (sync, local flag
+-- changes, cascading deletes), so no writer can forget them. Unread = no \Seen (bit 0).
+CREATE TRIGGER messages_count_insert AFTER INSERT ON messages BEGIN
+    UPDATE folders SET total_count = total_count + 1,
+                       unread_count = unread_count + (new.flags & 1 = 0)
+    WHERE id = new.folder_id;
+END;
+
+CREATE TRIGGER messages_count_delete AFTER DELETE ON messages BEGIN
+    UPDATE folders SET total_count = total_count - 1,
+                       unread_count = unread_count - (old.flags & 1 = 0)
+    WHERE id = old.folder_id;
+END;
+
+CREATE TRIGGER messages_count_flags AFTER UPDATE OF flags ON messages
+WHEN (old.flags & 1) <> (new.flags & 1) BEGIN
+    UPDATE folders SET unread_count = unread_count + (new.flags & 1 = 0) - (old.flags & 1 = 0)
+    WHERE id = new.folder_id;
+END;
 
 CREATE TABLE message_bodies (
     message_id    INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
@@ -127,10 +153,15 @@ CREATE TABLE drafts (
     body_html           TEXT,
     -- Copy uploaded to the server's Drafts folder. A UID means nothing without the
     -- mailbox and its UIDVALIDITY, so the three are set and cleared together.
+    -- The repository clears all three before deleting a folder or changing its
+    -- UIDVALIDITY; the CHECK makes a bare ON DELETE SET NULL fail instead of leaving a
+    -- dangling UID behind.
     remote_folder_id    INTEGER REFERENCES folders(id) ON DELETE SET NULL,
     remote_uidvalidity  INTEGER,
     remote_uid          INTEGER,
-    updated_at          INTEGER NOT NULL DEFAULT (unixepoch())
+    updated_at          INTEGER NOT NULL DEFAULT (unixepoch()),
+    CHECK ((remote_folder_id IS NULL) = (remote_uidvalidity IS NULL)
+       AND (remote_folder_id IS NULL) = (remote_uid IS NULL))
 ) STRICT;
 
 CREATE TABLE draft_attachments (

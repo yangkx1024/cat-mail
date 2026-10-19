@@ -55,10 +55,15 @@ impl FromStr for FolderRole {
 pub struct Folder {
     pub id: FolderId,
     pub account_id: AccountId,
-    /// Full remote mailbox name, e.g. `INBOX` or `Archive/2026`.
+    /// Full mailbox name for display, e.g. `INBOX` or `Archive/2026`; hierarchy levels
+    /// are separated by `delimiter`.
     pub name: String,
     pub delimiter: Option<char>,
     pub role: Option<FolderRole>,
+    /// False for hierarchy-only nodes (`\Noselect`) that cannot hold messages.
+    pub selectable: bool,
     pub unread_count: u32,
     pub total_count: u32,
+    /// Unix timestamp, seconds, of the last completed sync.
+    pub last_synced_at: Option<i64>,
 }

@@ -1,0 +1,596 @@
+use std::collections::{BTreeMap, HashSet};
+use std::num::{NonZeroU32, NonZeroU64};
+use std::time::Duration;
+
+use catmail_types::{FlagState, Flags, FolderRole, Security, ServerConfig};
+use imap_next::imap_types::auth::AuthMechanism;
+use imap_next::imap_types::body::{BodyStructure, SpecificFields};
+use imap_next::imap_types::command::{CommandBody, FetchModifier, SelectParameter};
+use imap_next::imap_types::core::{AString, Vec1};
+use imap_next::imap_types::fetch::{MessageDataItem, MessageDataItemName, Section};
+use imap_next::imap_types::flag::{Flag, FlagFetch};
+use imap_next::imap_types::mailbox::{ListMailbox, Mailbox};
+use imap_next::imap_types::response::{Code, Data, GreetingKind};
+use imap_next::imap_types::search::SearchKey;
+use imap_next::imap_types::sequence::{Sequence, SequenceSet};
+use rustls::pki_types::ServerName;
+use tokio::net::TcpStream;
+
+use super::connection::{Connection, Response, with_timeout};
+use super::{
+    Capabilities, Credentials, Error, FetchedMessage, ListedMailbox, MailboxStatus, Result, utf7,
+};
+use crate::TlsConfig;
+use crate::mime::{Headers, SUMMARY_HEADER_FIELDS, parse_headers};
+
+/// An IMAP connection, from greeting to logout. Read-only for now: mailboxes are opened
+/// with EXAMINE.
+pub struct Session {
+    conn: Connection,
+    caps: Capabilities,
+    /// From a PREAUTH greeting, or after `login`.
+    authenticated: bool,
+    selected: Option<MailboxStatus>,
+}
+
+impl Session {
+    /// Connects and secures the connection as `server.security` demands. With STARTTLS,
+    /// a server that doesn't offer it is an error; there is no silent downgrade.
+    pub async fn connect(
+        server: &ServerConfig,
+        tls: &TlsConfig,
+        timeout: Duration,
+    ) -> Result<Self> {
+        let tcp = with_timeout(
+            timeout,
+            TcpStream::connect((server.host.as_str(), server.port)),
+        )
+        .await?;
+        tcp.set_nodelay(true)?;
+        let server_name = ServerName::try_from(server.host.clone())
+            .map_err(|_| Error::InvalidServerName(server.host.clone()))?;
+
+        let stream: Box<dyn super::connection::Stream> = match server.security {
+            Security::Tls => Box::new(
+                with_timeout(timeout, tls.connector().connect(server_name.clone(), tcp)).await?,
+            ),
+            Security::StartTls | Security::Plain => Box::new(tcp),
+        };
+        let mut conn = Connection::new(stream, true, timeout);
+        let greeting = conn.greeting().await?;
+        let mut caps = match greeting.code {
+            Some(Code::Capability(caps)) => capabilities(caps.as_ref()),
+            _ => Capabilities::default(),
+        };
+        let authenticated = match greeting.kind {
+            GreetingKind::Ok => false,
+            GreetingKind::Bye => return Err(Error::Rejected(greeting.text.to_string())),
+            // Already authenticated, so STARTTLS is no longer possible.
+            GreetingKind::PreAuth if server.security == Security::StartTls => {
+                return Err(Error::Unsupported("STARTTLS (server sent PREAUTH)"));
+            }
+            GreetingKind::PreAuth => true,
+        };
+
+        if server.security == Security::StartTls {
+            if caps.is_empty() {
+                caps = request_capabilities(&mut conn).await?;
+            }
+            if !caps.has("STARTTLS") {
+                return Err(Error::Unsupported("STARTTLS"));
+            }
+            conn.execute(CommandBody::StartTLS).await?;
+            let tls_stream = with_timeout(
+                timeout,
+                tls.connector().connect(server_name, conn.into_stream()),
+            )
+            .await?;
+            conn = Connection::new(Box::new(tls_stream), false, timeout);
+            // Anything learned before TLS may have been tampered with.
+            caps = Capabilities::default();
+        }
+        if caps.is_empty() {
+            caps = request_capabilities(&mut conn).await?;
+        }
+        Ok(Self {
+            conn,
+            caps,
+            authenticated,
+            selected: None,
+        })
+    }
+
+    pub fn capabilities(&self) -> &Capabilities {
+        &self.caps
+    }
+
+    /// Authenticates, unless the server already did so with a PREAUTH greeting.
+    pub async fn login(&mut self, credentials: &Credentials) -> Result<()> {
+        if self.authenticated {
+            return Ok(());
+        }
+        let response = match credentials {
+            Credentials::Password { username, password } => {
+                if self.caps.has("AUTH=PLAIN") {
+                    let mut initial = Vec::with_capacity(username.len() + password.len() + 2);
+                    initial.push(0);
+                    initial.extend_from_slice(username.as_bytes());
+                    initial.push(0);
+                    initial.extend_from_slice(password.as_bytes());
+                    self.conn
+                        .authenticate(AuthMechanism::Plain, initial)
+                        .await?
+                } else if self.caps.has("LOGINDISABLED") {
+                    return Err(Error::Unsupported("a password login mechanism"));
+                } else {
+                    let body =
+                        CommandBody::login(username.clone(), password.clone()).map_err(|_| {
+                            Error::AuthFailed(
+                                "username or password contains a NUL or line break".into(),
+                            )
+                        })?;
+                    self.conn.execute(body).await.map_err(|e| match e {
+                        Error::Command { text, .. } => Error::AuthFailed(text),
+                        other => other,
+                    })?
+                }
+            }
+        };
+        // Capabilities usually change after login; servers often include them in the OK.
+        self.caps = match capabilities_in(&response) {
+            Some(caps) => caps,
+            None => request_capabilities(&mut self.conn).await?,
+        };
+        self.authenticated = true;
+        Ok(())
+    }
+
+    pub async fn list(&mut self) -> Result<Vec<ListedMailbox>> {
+        let body = CommandBody::list("", ListMailbox::try_from("*").expect("valid wildcard"))
+            .expect("valid LIST arguments");
+        let response = self.conn.execute(body).await?;
+        let mut mailboxes = Vec::new();
+        for data in response.data {
+            let Data::List {
+                items,
+                delimiter,
+                mailbox,
+            } = data
+            else {
+                continue;
+            };
+            let raw_name = match mailbox {
+                Mailbox::Inbox => "INBOX".to_owned(),
+                Mailbox::Other(other) => match std::str::from_utf8(other.inner().as_ref()) {
+                    Ok(name) => name.to_owned(),
+                    Err(_) => {
+                        tracing::warn!("skipping mailbox with a non-UTF-8 name");
+                        continue;
+                    }
+                },
+            };
+            let attributes: Vec<String> = items
+                .iter()
+                .map(|attr| attr.to_string().to_ascii_lowercase())
+                .collect();
+            let selectable = !attributes
+                .iter()
+                .any(|a| a == "\\noselect" || a == "\\nonexistent");
+            mailboxes.push(ListedMailbox {
+                name: utf7::decode(&raw_name).unwrap_or_else(|| raw_name.clone()),
+                raw_name,
+                delimiter: delimiter.map(|d| d.inner()),
+                selectable,
+                special_use: attributes.iter().find_map(|a| special_use(a)),
+            });
+        }
+        Ok(mailboxes)
+    }
+
+    /// Opens `raw_name` read-only. With CONDSTORE, also enables MODSEQ reporting.
+    pub async fn examine(&mut self, raw_name: &str) -> Result<MailboxStatus> {
+        self.selected = None;
+        let mailbox = Mailbox::try_from(raw_name.to_owned())
+            .map_err(|_| Error::Protocol(format!("invalid mailbox name `{raw_name}`")))?;
+        let parameters = if self.condstore() {
+            vec![SelectParameter::CondStore]
+        } else {
+            Vec::new()
+        };
+        let response = self
+            .conn
+            .execute(CommandBody::Examine {
+                mailbox,
+                parameters,
+            })
+            .await?;
+
+        let (mut uidvalidity, mut uidnext, mut highest_modseq, mut no_modseq) =
+            (None, None, None, false);
+        for code in &response.codes {
+            match code {
+                Code::UidValidity(v) => uidvalidity = Some(v.get()),
+                Code::UidNext(n) => uidnext = Some(n.get()),
+                Code::HighestModSeq(m) => highest_modseq = Some(m.get()),
+                Code::NoModSeq => no_modseq = true,
+                _ => {}
+            }
+        }
+        // EXISTS decides whether messages were expunged; guessing 0 would empty the
+        // folder.
+        let exists = response
+            .data
+            .iter()
+            .filter_map(|d| match d {
+                Data::Exists(n) => Some(*n),
+                _ => None,
+            })
+            .next_back();
+        let missing = |what: &str| Error::Command {
+            command: "EXAMINE",
+            text: format!("the server sent no {what} for `{raw_name}`"),
+        };
+        let status = MailboxStatus {
+            uidvalidity: uidvalidity.ok_or_else(|| missing("UIDVALIDITY"))?,
+            uidnext,
+            exists: exists.ok_or_else(|| missing("EXISTS"))?,
+            highest_modseq: highest_modseq.filter(|_| self.condstore() && !no_modseq),
+        };
+        self.selected = Some(status);
+        Ok(status)
+    }
+
+    /// Every UID in the selected mailbox, ascending.
+    pub async fn uid_search_all(&mut self) -> Result<Vec<u32>> {
+        self.uid_search(SearchKey::All).await
+    }
+
+    /// UIDs from `first` on, ascending. (`first:*` also matches the highest UID when that
+    /// is below `first`; such a UID is not returned.)
+    pub async fn uid_search_from(&mut self, first: u32) -> Result<Vec<u32>> {
+        let Some(first) = NonZeroU32::new(first) else {
+            return self.uid_search_all().await;
+        };
+        let set = SequenceSet::from(Sequence::from(first..));
+        let mut uids = self.uid_search(SearchKey::Uid(set)).await?;
+        uids.retain(|&uid| uid >= first.get());
+        Ok(uids)
+    }
+
+    async fn uid_search(&mut self, key: SearchKey<'static>) -> Result<Vec<u32>> {
+        if self.selected_status()?.exists == 0 {
+            return Ok(Vec::new());
+        }
+        let response = self
+            .conn
+            .execute(CommandBody::search(None, Vec1::from(key), true))
+            .await?;
+        let mut uids: Vec<u32> = response
+            .data
+            .into_iter()
+            .filter_map(|d| match d {
+                Data::Search(uids, ..) => Some(uids),
+                _ => None,
+            })
+            .flatten()
+            .map(NonZeroU32::get)
+            .collect();
+        uids.sort_unstable();
+        uids.dedup();
+        Ok(uids)
+    }
+
+    /// Flags, dates, size, summary headers and attachment presence for `uids`; the
+    /// caller batches long lists. Messages the server no longer has, or whose answer
+    /// couldn't be parsed, are simply absent; responses for UIDs that weren't asked for
+    /// are ignored.
+    pub async fn fetch_summaries(&mut self, uids: &[u32]) -> Result<Vec<FetchedMessage>> {
+        let Some(set) = uid_set(uids) else {
+            return Ok(Vec::new());
+        };
+        let mut items = vec![
+            MessageDataItemName::Uid,
+            MessageDataItemName::Flags,
+            MessageDataItemName::InternalDate,
+            MessageDataItemName::Rfc822Size,
+            MessageDataItemName::BodyStructure,
+            MessageDataItemName::BodyExt {
+                section: Some(Section::HeaderFields(
+                    None,
+                    Vec1::try_from(
+                        SUMMARY_HEADER_FIELDS
+                            .iter()
+                            .map(|f| AString::try_from(*f).expect("valid header field name"))
+                            .collect::<Vec<_>>(),
+                    )
+                    .expect("non-empty field list"),
+                )),
+                partial: None,
+                peek: true,
+            },
+        ];
+        if self.modseq_enabled() {
+            items.push(MessageDataItemName::ModSeq);
+        }
+        // Lossy: a message whose answer can't be parsed is just missing, and the caller
+        // notices the gap.
+        let response = self
+            .conn
+            .execute_lossy(uid_fetch(set, items, Vec::new()))
+            .await?;
+
+        let wanted: HashSet<u32> = uids.iter().copied().collect();
+        Ok(merge_fetches(response, |uid| wanted.contains(&uid))
+            .into_iter()
+            .filter_map(|(uid, m)| {
+                // Without FLAGS or the headers the message would be stored wrongly;
+                // leave it out so the caller sees the gap.
+                Some(FetchedMessage {
+                    state: m.state(uid)?,
+                    internal_date: m.internal_date,
+                    size: m.size,
+                    headers: *m.headers?,
+                    has_attachments: m.has_attachments,
+                })
+            })
+            .collect())
+    }
+
+    /// Current flags of messages with UIDs up to `last_uid`, or with CONDSTORE only of
+    /// those changed since `changed_since`.
+    pub async fn fetch_flags(
+        &mut self,
+        last_uid: u32,
+        changed_since: Option<u64>,
+    ) -> Result<Vec<FlagState>> {
+        let Some(last_uid) = NonZeroU32::new(last_uid) else {
+            return Ok(Vec::new());
+        };
+        if self.selected_status()?.exists == 0 {
+            return Ok(Vec::new());
+        }
+        let mut items = vec![MessageDataItemName::Uid, MessageDataItemName::Flags];
+        let mut modifiers = Vec::new();
+        if self.modseq_enabled() {
+            items.push(MessageDataItemName::ModSeq);
+            if let Some(since) = changed_since.and_then(NonZeroU64::new) {
+                modifiers.push(FetchModifier::ChangedSince(since));
+            }
+        }
+        let set = SequenceSet::from(Sequence::from(NonZeroU32::MIN..=last_uid));
+        // Strict: a lost line would hide a flag change for good once the caller stores
+        // the new HIGHESTMODSEQ.
+        let response = self.conn.execute(uid_fetch(set, items, modifiers)).await?;
+
+        // `1:n` matches the highest UID even if it's above n; skip that one.
+        Ok(merge_fetches(response, |uid| uid <= last_uid.get())
+            .into_iter()
+            .filter_map(|(uid, m)| m.state(uid))
+            .collect())
+    }
+
+    /// Ends the session politely. Errors are not interesting at this point.
+    pub async fn logout(mut self) {
+        if let Err(e) = self.conn.execute(CommandBody::Logout).await {
+            tracing::debug!(error = %e, "LOGOUT failed");
+        }
+    }
+
+    fn condstore(&self) -> bool {
+        self.caps.has("CONDSTORE") || self.caps.has("QRESYNC")
+    }
+
+    fn modseq_enabled(&self) -> bool {
+        self.selected.is_some_and(|s| s.highest_modseq.is_some())
+    }
+
+    fn selected_status(&self) -> Result<MailboxStatus> {
+        self.selected
+            .ok_or_else(|| Error::Protocol("no mailbox selected".into()))
+    }
+}
+
+fn uid_fetch(
+    sequence_set: SequenceSet,
+    items: Vec<MessageDataItemName<'static>>,
+    modifiers: Vec<FetchModifier>,
+) -> CommandBody<'static> {
+    CommandBody::Fetch {
+        sequence_set,
+        macro_or_item_names: items.into(),
+        uid: true,
+        modifiers,
+    }
+}
+
+async fn request_capabilities(conn: &mut Connection) -> Result<Capabilities> {
+    let response = conn.execute(CommandBody::Capability).await?;
+    capabilities_in(&response).ok_or_else(|| Error::Protocol("no CAPABILITY response".into()))
+}
+
+fn capabilities_in(response: &Response) -> Option<Capabilities> {
+    let from_data = response.data.iter().find_map(|d| match d {
+        Data::Capability(caps) => Some(caps.as_ref()),
+        _ => None,
+    });
+    let from_code = || {
+        response.codes.iter().find_map(|c| match c {
+            Code::Capability(caps) => Some(caps.as_ref()),
+            _ => None,
+        })
+    };
+    from_data.or_else(from_code).map(capabilities)
+}
+
+fn capabilities(caps: &[imap_next::imap_types::response::Capability<'_>]) -> Capabilities {
+    caps.iter().map(|c| c.to_string()).collect()
+}
+
+/// What the FETCH responses for one UID said, combined. A server may split one
+/// message's items across several responses (RFC 9051 §7.5.2), and repeat them; later
+/// values win.
+#[derive(Default)]
+struct MergedFetch {
+    flags: Option<(Flags, Vec<String>)>,
+    modseq: Option<u64>,
+    internal_date: Option<i64>,
+    size: Option<u32>,
+    /// Boxed: flag-only fetches cover the whole mailbox and never set it.
+    headers: Option<Box<Headers>>,
+    has_attachments: bool,
+}
+
+impl MergedFetch {
+    /// `None` if the server never sent FLAGS for the message.
+    fn state(&self, uid: u32) -> Option<FlagState> {
+        let (flags, keywords) = self.flags.clone()?;
+        Some(FlagState {
+            uid,
+            flags,
+            keywords,
+            modseq: self.modseq,
+        })
+    }
+}
+
+/// Groups FETCH responses by UID, for the UIDs `wanted` accepts. Responses without a UID
+/// are unsolicited updates about some other message and are ignored.
+fn merge_fetches(response: Response, wanted: impl Fn(u32) -> bool) -> BTreeMap<u32, MergedFetch> {
+    let mut merged: BTreeMap<u32, MergedFetch> = BTreeMap::new();
+    for data in response.data {
+        let Data::Fetch { items, .. } = data else {
+            continue;
+        };
+        let items = items.into_inner();
+        let Some(uid) = items.iter().find_map(|item| match item {
+            MessageDataItem::Uid(uid) => Some(uid.get()),
+            _ => None,
+        }) else {
+            continue;
+        };
+        if !wanted(uid) {
+            continue;
+        }
+        let m = merged.entry(uid).or_default();
+        for item in items {
+            match item {
+                MessageDataItem::Flags(flags) => m.flags = Some(convert_flags(&flags)),
+                MessageDataItem::ModSeq(v) => m.modseq = Some(v.get()),
+                MessageDataItem::InternalDate(d) => m.internal_date = Some(d.as_ref().timestamp()),
+                MessageDataItem::Rfc822Size(n) => m.size = Some(n),
+                MessageDataItem::BodyStructure(bs) => m.has_attachments = has_attachments(&bs),
+                MessageDataItem::BodyExt { data, .. } => {
+                    m.headers = Some(Box::new(parse_headers(
+                        data.0.as_ref().map_or(&[][..], |d| d.as_ref()),
+                    )));
+                }
+                _ => {}
+            }
+        }
+    }
+    merged
+}
+
+/// A SPECIAL-USE attribute (RFC 6154), lower-cased. The role names match; `\\Inbox` is
+/// not one of the attributes.
+fn special_use(attribute: &str) -> Option<FolderRole> {
+    attribute
+        .strip_prefix('\\')?
+        .parse()
+        .ok()
+        .filter(|role| *role != FolderRole::Inbox)
+}
+
+fn convert_flags(flags: &[FlagFetch<'_>]) -> (Flags, Vec<String>) {
+    let mut out = Flags::empty();
+    let mut keywords = Vec::new();
+    for flag in flags {
+        let FlagFetch::Flag(flag) = flag else {
+            continue; // \Recent is per-session and meaningless to store.
+        };
+        match flag {
+            Flag::Seen => out.insert(Flags::SEEN),
+            Flag::Flagged => out.insert(Flags::FLAGGED),
+            Flag::Answered => out.insert(Flags::ANSWERED),
+            Flag::Draft => out.insert(Flags::DRAFT),
+            Flag::Deleted => out.insert(Flags::DELETED),
+            other => keywords.push(other.to_string()),
+        }
+    }
+    keywords.sort();
+    keywords.dedup();
+    (out, keywords)
+}
+
+/// Whether any part is an attachment: an explicit `attachment` disposition, an
+/// attached message, or a named non-inline part. M2 recomputes this from the full MIME
+/// tree when the body is downloaded.
+fn has_attachments(bs: &BodyStructure<'_>) -> bool {
+    match bs {
+        BodyStructure::Multi { bodies, .. } => bodies.as_ref().iter().any(has_attachments),
+        BodyStructure::Single {
+            body,
+            extension_data,
+        } => {
+            let disposition = extension_data
+                .as_ref()
+                .and_then(|e| e.tail.as_ref())
+                .and_then(|d| d.disposition.as_ref());
+            let is = |s: &[u8], expected: &str| s.eq_ignore_ascii_case(expected.as_bytes());
+            match disposition {
+                Some((kind, _)) if is(kind.as_ref(), "attachment") => return true,
+                Some((kind, _)) if is(kind.as_ref(), "inline") => return false,
+                _ => {}
+            }
+            if matches!(body.specific, SpecificFields::Message { .. }) {
+                return true;
+            }
+            let named = body
+                .basic
+                .parameter_list
+                .iter()
+                .chain(disposition.iter().flat_map(|(_, params)| params))
+                .any(|(k, _)| is(k.as_ref(), "name") || is(k.as_ref(), "filename"));
+            named && !matches!(body.specific, SpecificFields::Text { .. })
+        }
+    }
+}
+
+/// Compresses UIDs into ranges: `[1, 2, 3, 7]` → `1:3,7`.
+fn uid_set(uids: &[u32]) -> Option<SequenceSet> {
+    let mut sorted: Vec<NonZeroU32> = uids.iter().filter_map(|&u| NonZeroU32::new(u)).collect();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut sequences = Vec::new();
+    let mut iter = sorted.into_iter().peekable();
+    while let Some(start) = iter.next() {
+        let mut end = start;
+        while let Some(&next) = iter.peek() {
+            if next.get() != end.get() + 1 {
+                break;
+            }
+            end = next;
+            iter.next();
+        }
+        sequences.push(if start == end {
+            Sequence::from(start)
+        } else {
+            Sequence::from(start..=end)
+        });
+    }
+    SequenceSet::try_from(sequences).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compresses_uid_sets() {
+        let ranges = |uids: &[u32]| uid_set(uids).map(|s| s.0.as_ref().len());
+        assert_eq!(ranges(&[]), None);
+        assert_eq!(ranges(&[0]), None);
+        assert_eq!(ranges(&[7, 1, 2, 3, 3]), Some(2));
+        assert_eq!(ranges(&[1, 3, 5]), Some(3));
+    }
+}

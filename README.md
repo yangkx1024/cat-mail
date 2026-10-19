@@ -8,7 +8,7 @@
 
 数据存储在本地 SQLite，离线可用；密码保存在系统密钥环中，不进数据库。
 
-> 项目处于早期开发阶段（M0 已完成），接口和数据库结构仍会变化。
+> 项目处于早期开发阶段（M1 已完成），接口和数据库结构仍会变化。
 
 架构设计见 [docs/architecture.md](docs/architecture.md)。
 
@@ -23,7 +23,7 @@
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | M0 | workspace；types；store（迁移、事务接口）；BlobStore；keyring；数据目录锁；`MailClient` 门面；`catmail account` | ✅ 完成 |
-| M1 | IMAP 只读同步（文件夹、邮件头）；认证接口；协议测试环境；`catmail sync` / `catmail ls` | |
+| M1 | IMAP 只读同步（文件夹、邮件头）；认证接口；协议测试环境；`catmail sync` / `catmail ls` | ✅ 完成 |
 | M2 | 正文与附件按需下载；中文分词 + 全文搜索；blob GC；最小读信窗口；`catmail read` / `catmail search` | |
 | M3 | 草稿；SMTP 发信与 outbox 状态机；保存到 Sent | |
 | M4 | 离线操作队列（标记 / 移动 / 删除）；IDLE 推送 | |
@@ -34,15 +34,16 @@
 
 - **最小读信窗口放在 M2。** gpui-kit 的 HTML 渲染定位为简单 HTML，而真实邮件大量使用表格
   布局和内联样式。一拿到正文就用真实邮件验证表格、`cid:` 内嵌图片和中文排版，不等到 M5。
-- **协议测试环境从 M1 开始建。** 用 docker 跑 Stalwart 或 Dovecot，再加故障注入，覆盖断线、
-  UIDVALIDITY 改变、重复或乱序响应、服务器缺少 CONDSTORE/QRESYNC、进程在同步中途重启。
+- **协议测试环境从 M1 开始建。** 一个可注入故障的进程内假 IMAP 服务器（`catmail-testkit`，
+  三个平台的 CI 都跑），覆盖断线、UIDVALIDITY 改变、重复或乱序响应、服务器缺少 CONDSTORE、
+  STARTTLS 明文注入、同步中途中断后续传；再加一个真实的 Dovecot（Nix 提供，不需要 docker）。
   M3 加入 SMTP 确认丢失和保存到 Sent 失败的场景。
 - **IPC 待定。** 同一个数据目录同时只允许一个引擎（见架构文档），所以目前 GUI 运行时 CLI
   不能打开同一个数据目录。之后让其他前端通过 IPC 连接正在运行的引擎。
 
 ## 使用
 
-目前只能管理账户，还不会连接服务器：
+目前可以管理账户、同步文件夹和邮件头、列出邮件（只读，还不能看正文）：
 
 ```sh
 # 添加账户（交互输入密码；脚本里用 --password-stdin）
@@ -51,7 +52,14 @@ catmail account add --email me@example.com --name "Me" \
 
 catmail account list            # 加 --json 输出 JSON
 catmail account remove me@example.com
+
+catmail sync                    # 同步所有账户；也可以指定 id 或邮箱
+catmail ls                      # 列出文件夹（多个账户时用 -a 选择）
+catmail ls INBOX -n 20          # 最新的 20 封邮件；文件夹名可以是中文，如 `catmail ls 已发送`
 ```
+
+`catmail ls <文件夹>` 的标记列：`*` 未读，`!` 已加星标，`@` 有附件。同步只读（EXAMINE），
+不会改动服务器上的任何状态；中途中断（断网、Ctrl-C）后再次运行会从断点继续。
 
 端口默认按加密方式推断：IMAP `tls` 为 993、`starttls` / `plain` 为 143；SMTP `tls` 为 465、
 `starttls` 为 587、`plain` 为 25。
@@ -77,11 +85,22 @@ cargo run -p catmail-cli -- account list
 flake 只能看到 git 跟踪的文件，新加的文件需要先 `git add -N`。不用 Nix 时，装好
 `rust-toolchain.toml` 指定的 stable 工具链即可。
 
+对真实的 IMAP 服务器测试（Linux）：
+
+```sh
+nix develop .#imap -c testenv/dovecot/run.sh        # 在 127.0.0.1:10143 启动临时 Dovecot
+# 另一个终端里，先执行它打印的 export，再：
+cargo test -p catmail-core --test dovecot
+```
+
+不设置这些环境变量时该测试自动跳过；其余协议测试用进程内的假服务器，不需要外部依赖。
+
 CI（GitHub Actions）：
 
 - `ci.yml`：rustfmt 检查；在 Linux、macOS、Windows 上分别跑 clippy（`-D warnings`）和全部
   测试。目前只发布 Linux 版，但核心层必须保持跨平台，所以从一开始就在三个平台上测试。
-  只改文档（`*.md`、`docs/`、`.agents/`、许可证）时不触发。
+  另有一个 Linux job 对 Dovecot 跑真实服务器测试。只改文档（`*.md`、`docs/`、`.agents/`、
+  许可证）时不触发。
 - `nix.yml`：`flake.nix` / `flake.lock` 变更时检查 Nix 格式、`nix flake check`，并确认开发
   环境可用。
 
@@ -92,6 +111,7 @@ CI（GitHub Actions）：
 | `catmail-proto` | IMAP / SMTP / MIME 适配 |
 | `catmail-core` | 引擎与 `MailClient` 门面，前端唯一依赖 |
 | `catmail-cli` | `catmail` 命令行 |
+| `catmail-testkit` | 测试用的假 IMAP 服务器（故障注入），只作为 dev-dependency |
 
 参与开发（包括 AI agent）请先阅读 [AGENTS.md](AGENTS.md)。
 

@@ -1,0 +1,19 @@
+From: Bob <bob@example.com>
+To: catmail@example.com
+Subject: Quarterly report
+Date: Sat, 17 Oct 2026 10:00:00 +0000
+Message-ID: <attachment@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="b1"
+
+--b1
+Content-Type: text/plain; charset=us-ascii
+
+See attached.
+--b1
+Content-Type: application/pdf; name="report.pdf"
+Content-Disposition: attachment; filename="report.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQK
+--b1--

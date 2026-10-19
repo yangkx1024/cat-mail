@@ -14,9 +14,12 @@ pub enum Event {
     AccountRemoved {
         account: AccountId,
     },
+    /// Folders were added, removed or renamed.
     FoldersChanged {
         account: AccountId,
     },
+    /// Messages in the folder were added, removed or changed, and with them possibly the
+    /// folder's unread and total counts.
     MessagesChanged {
         account: AccountId,
         folder: FolderId,

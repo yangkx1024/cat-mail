@@ -13,14 +13,14 @@ catmail-proto.workspace = true
 directories.workspace = true
 keyring.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+catmail-testkit.workspace = true
 pollster.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "time"] }
 
 [lints]
 workspace = true

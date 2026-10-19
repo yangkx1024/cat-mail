@@ -40,8 +40,13 @@ code or tests. `nix.yml` checks `flake.nix` formatting (`nix fmt`) and the dev s
 | `catmail-proto` | IMAP (`imap-next`), SMTP, MIME adapters |
 | `catmail-core` | Engine, services, runtime bridge, secrets, the `MailClient` facade |
 | `catmail-cli` | The `catmail` binary |
+| `catmail-testkit` | Fake IMAP server with fault injection; dev-dependency only |
 
 Frontends depend on `catmail-core` only; it re-exports the types they need.
+
+Protocol behaviour is tested against `catmail-testkit`'s fake server (every OS) and a real
+Dovecot (`testenv/dovecot/run.sh`, Linux CI job). New sync or protocol behaviour gets a
+fake-server test, with a fault injected if the change is about recovering from one.
 
 ## Rules that are easy to break
 
