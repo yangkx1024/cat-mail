@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use mail_parser::parsers::MessageStream;
 use mail_parser::{Encoding, Message, MessageParser, MimeHeaders, PartType};
@@ -46,7 +46,7 @@ pub struct Part {
 /// make sense of has no content.
 pub fn parse_message(raw: &[u8]) -> Content {
     match MessageParser::new().parse(raw) {
-        Some(message) => extract(&message, raw),
+        Some(message) => extract(&message, raw, &[]),
         None => Content::default(),
     }
 }
@@ -70,8 +70,9 @@ pub fn decode_transfer(encoding: Option<&str>, data: &[u8]) -> Vec<u8> {
 
 /// `raw` is what `message` was parsed from. Binary parts come decoded from the parser;
 /// text parts and attached messages are cut from `raw` and decoded again, so text keeps
-/// its original bytes and charset (the parser converts it to UTF-8).
-pub(super) fn extract(message: &Message<'_>, raw: &[u8]) -> Content {
+/// its original bytes and charset (the parser converts it to UTF-8). The parts with ids
+/// in `also_listed` are listed with the attachments even if they belong to the body.
+pub(super) fn extract(message: &Message<'_>, raw: &[u8], also_listed: &[u32]) -> Content {
     let text = joined(
         (0..message.text_body_count()).filter_map(|i| message.body_text(i)),
         "\n",
@@ -92,10 +93,17 @@ pub(super) fn extract(message: &Message<'_>, raw: &[u8]) -> Content {
 
     let referenced = html.as_deref().map(cid_references).unwrap_or_default();
     let sections = sections(message);
-    let parts = message
+    // Part ids follow MIME order. A set, not `contains` on each part: a message may
+    // have thousands of parts.
+    let listed: BTreeSet<u32> = message
         .attachments
         .iter()
-        .filter_map(|&id| {
+        .chain(also_listed)
+        .copied()
+        .collect();
+    let parts = listed
+        .into_iter()
+        .filter_map(|id| {
             let part = &message.parts[id as usize];
             let data = match &part.body {
                 PartType::Binary(data) | PartType::InlineBinary(data) => Some(data.to_vec()),

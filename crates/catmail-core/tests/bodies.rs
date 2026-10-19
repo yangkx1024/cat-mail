@@ -262,6 +262,42 @@ async fn large_messages_leave_attachments_on_the_server_until_opened() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn text_too_large_to_fetch_can_be_opened_as_an_attachment() {
+    let mut log = Vec::new();
+    for i in 0..(3 * 1024 * 1024 / 64) {
+        log.extend_from_slice(format!("{i:>8} 构建日志 {}\r\n", "x".repeat(40)).as_bytes());
+    }
+    let header = b"From: Bob <bob@example.com>\r\n\
+        Subject: Nightly log\r\n\
+        Content-Type: text/plain; charset=utf-8\r\n\r\n";
+    let raw = [&header[..], &log].concat();
+    let env = env(state(&[&raw])).await;
+    let id = env.id(0).await;
+    let start = env.log_len();
+
+    let message = env.client.download_message(id).await.unwrap();
+    assert!(
+        !env.commands_since(start)
+            .iter()
+            .any(|c| c.contains("BODY.PEEK[1]") || c.contains("BODY.PEEK[]")),
+        "the text is too large to fetch with the body"
+    );
+    assert!(message.summary.has_attachments);
+    let b = body(&message);
+    assert_eq!(b.text, None);
+    let [text] = &b.attachments[..] else {
+        panic!("{:?}", b.attachments)
+    };
+    assert_eq!(
+        (text.mime_type.as_str(), text.inline, text.downloaded),
+        ("text/plain", false, false)
+    );
+
+    let data = env.client.attachment_content(text.id).await.unwrap();
+    assert_eq!(data, log);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn raw_message_of_a_large_message_fetches_it_whole_once() {
     let raw = large_message();
     let env = env(state(&[&raw])).await;

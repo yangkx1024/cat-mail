@@ -152,6 +152,9 @@ pub struct Faults {
     pub omit: Option<String>,
     /// Split each FETCH response in two: UID + FLAGS + MODSEQ, then UID + the rest.
     pub split_fetch: bool,
+    /// UIDs whose BODYSTRUCTURE is sent in a form no parser accepts, every time (unlike
+    /// `garble`, which fires once). The rest of their FETCH responses is well-formed.
+    pub broken_bodystructure: Vec<u32>,
 }
 
 impl Default for Faults {
@@ -174,6 +177,7 @@ impl Default for Faults {
             garble: None,
             omit: None,
             split_fetch: false,
+            broken_bodystructure: Vec::new(),
         }
     }
 }
@@ -790,7 +794,11 @@ fn fetch(mb: &FakeMailbox, args: &[Tok], condstore: bool, faults: &Faults, tag: 
         }
         if wants("BODYSTRUCTURE") {
             let mut part = b"BODYSTRUCTURE ".to_vec();
-            part.extend(mime::body_structure(&msg.raw));
+            if faults.broken_bodystructure.contains(&msg.uid) {
+                part.extend(b"(\"TEXT\")");
+            } else {
+                part.extend(mime::body_structure(&msg.raw));
+            }
             parts.push(part);
         }
         for spec in items.iter().filter_map(|i| body_section(i)) {

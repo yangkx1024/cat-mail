@@ -124,7 +124,10 @@ M1 先实现按需的只读同步 `MailClient::sync_account`：一条连接，�
 SEARCH、EXAMINE、flags 这类结果缺一行就会被当成文件夹被删、邮件被删（EXISTS 当成 0）、
 flags 变化被 HIGHESTMODSEQ 跳过（该文件夹失败，LIST 则整个同步失败，本地状态不动）。新命令
 默认就是安全的。EXAMINE 缺少 UIDVALIDITY 或 EXISTS 同样只让该文件夹失败。只有拉邮件头显式
-使用 `execute_lossy`：丢失的邮件只是不出现在结果里，那一批算作不完整、不推进游标，下次
+使用 `execute_lossy`：一条 FETCH 响应解析失败时整行丢失，典型的原因是 imap-codec 不接受
+服务器发来的 BODYSTRUCTURE，而这每次都会重现。所以有行被丢弃时，缺失的 UID 立即再取一次，不带
+BODYSTRUCTURE（`has_attachments` 先记为否，下载正文后重算；下载本身不依赖同步时的
+BODYSTRUCTURE）。仍然缺失的邮件只是不出现在结果里，那一批算作不完整、不推进游标，下次
 再拉。每次网络读写超时 60 秒。
 
 待办（M4）：有未回放的 `pending_ops` 时，flags 同步不能覆盖本地的乐观修改。
@@ -167,8 +170,9 @@ BODYSTRUCTURE 粗略判断（`MimeNode::has_attachments`，与按部分下载共
 BODYSTRUCTURE 里的值来自服务器，写进替身邮件头之前去掉换行、token 只保留合法字符，
 不能伪造邮件头；叶子部分即使自称 `multipart` 也按 `application` 写出、去掉 `boundary`
 参数，否则它会吞掉后面的部分、打乱 section 编号。替身邮件解析出的部分如果对不上
-BODYSTRUCTURE 的 section，一律视为未下载。超过 2 MiB 的文本部分既不下载也不作为附件
-列出（已知限制）。IMAP section 编号按 RFC 3501 §6.4.5 从解析结果计算，附加的邮件
+BODYSTRUCTURE 的 section，一律视为未下载。超过 2 MiB 的正文部分不随正文下载，而是和附件
+一起列出（`text/plain` 或 `text/html`，没有文件名），打开时按 section 单独下载，避免内容
+无处可看。IMAP section 编号按 RFC 3501 §6.4.5 从解析结果计算，附加的邮件
 （message/rfc822）算一个部分。
 
 正文的组成：`text` 为所有正文文本部分（只有 HTML 时由 HTML 转换）；`html` 只在有真正的

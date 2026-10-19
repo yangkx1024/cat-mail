@@ -284,15 +284,33 @@ impl Session {
     /// couldn't be parsed, are simply absent; responses for UIDs that weren't asked for
     /// are ignored.
     pub async fn fetch_summaries(&mut self, uids: &[u32]) -> Result<Vec<FetchedMessage>> {
+        let (mut fetched, skipped) = self.fetch_summaries_once(uids, true).await?;
+        // A FETCH line that can't be parsed is lost whole, typically because of a
+        // BODYSTRUCTURE the parser rejects. Without asking for it again, such a message
+        // is never stored and the folder never gets a complete sync. Attachment presence
+        // is then unknown until the body is downloaded, which doesn't depend on it.
+        if skipped > 0 {
+            let got: HashSet<u32> = fetched.iter().map(|m| m.state.uid).collect();
+            let missing: Vec<u32> = uids.iter().copied().filter(|u| !got.contains(u)).collect();
+            fetched.extend(self.fetch_summaries_once(&missing, false).await?.0);
+        }
+        Ok(fetched)
+    }
+
+    /// The summaries, and how many response lines couldn't be parsed.
+    async fn fetch_summaries_once(
+        &mut self,
+        uids: &[u32],
+        structure: bool,
+    ) -> Result<(Vec<FetchedMessage>, usize)> {
         let Some(set) = uid_set(uids) else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), 0));
         };
         let mut items = vec![
             MessageDataItemName::Uid,
             MessageDataItemName::Flags,
             MessageDataItemName::InternalDate,
             MessageDataItemName::Rfc822Size,
-            MessageDataItemName::BodyStructure,
             body_peek(Some(Section::HeaderFields(
                 None,
                 Vec1::try_from(
@@ -304,6 +322,9 @@ impl Session {
                 .expect("non-empty field list"),
             ))),
         ];
+        if structure {
+            items.push(MessageDataItemName::BodyStructure);
+        }
         if self.modseq_enabled() {
             items.push(MessageDataItemName::ModSeq);
         }
@@ -314,8 +335,9 @@ impl Session {
             .execute_lossy(uid_fetch(set, items, Vec::new()))
             .await?;
 
+        let skipped = response.skipped;
         let wanted: HashSet<u32> = uids.iter().copied().collect();
-        Ok(merge_fetches(response, |uid| wanted.contains(&uid))
+        let fetched = merge_fetches(response, |uid| wanted.contains(&uid))
             .into_iter()
             .filter_map(|(uid, m)| {
                 // Without FLAGS or the headers the message would be stored wrongly;
@@ -328,7 +350,8 @@ impl Session {
                     has_attachments: m.has_attachments,
                 })
             })
-            .collect())
+            .collect();
+        Ok((fetched, skipped))
     }
 
     /// Current flags of messages with UIDs up to `last_uid`, or with CONDSTORE only of
