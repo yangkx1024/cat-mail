@@ -15,12 +15,12 @@
 | Facade | `catmail-core` | `MailClient`：async 方法 + 事件订阅，前端唯一依赖 |
 | Services / Engine | `catmail-core` | Account / Folder / Message / Draft / Send / Attachment 服务；每账户一个 SyncWorker actor、OpQueue、Outbox；运行时桥接、凭据存储 |
 | Storage | `catmail-store` | SQLite schema 与迁移、事务化 Repository、FTS5、内容寻址 `BlobStore`；全部同步 API |
-| Protocol | `catmail-proto` | IMAP（imap-next）、SMTP、MIME 解析与构建 |
+| Protocol | `catmail-proto` | IMAP（imap-next）、SMTP（自己实现的提交客户端）、MIME 解析（mail-parser）与构建（mail-builder） |
 | Domain | `catmail-types` | `Account`、`Folder`、`MessageSummary`、`Flags`、`Event`、`SyncReport`、ID 类型；纯数据，无 IO |
 
 Storage 与 Protocol 是同一层的两个并列模块，彼此不依赖。依赖方向：
 `types ← store, proto ← core ← cli / gui`。前端不得直接依赖 `store` / `proto`，需要的类型由
-`catmail-core` 重新导出。`catmail-testkit`（假 IMAP 服务器）不在这条链上，只作为
+`catmail-core` 重新导出。`catmail-testkit`（假 IMAP / SMTP 服务器）不在这条链上，只作为
 dev-dependency 使用。
 
 ## 关键决策
@@ -57,7 +57,8 @@ GPUI 用自己的 executor，不是 tokio；而 IMAP/SMTP 栈依赖 tokio reacto
 1. **先提交，再发事件**，绝不在 `write` 闭包内发事件，否则订阅者可能读到尚未提交的状态。
 2. 事件在执行变更的后台任务内部发出，调用方中途 drop future 也不会丢事件。
 3. 事件只携带 ID（"某账户的某文件夹变了"），前端收到后重新查询；`RecvError::Lagged` 时整体
-   刷新即可，不会丢状态。
+   刷新即可，不会丢状态。草稿和发件箱的变化是 `DraftsChanged` / `OutboxChanged`，服务器接受了
+   一封邮件时另有 `MessageSent`（给"已发送"之类的提示用）。
 
 ### 离线优先 + 操作队列
 
@@ -131,6 +132,13 @@ BODYSTRUCTURE）。仍然缺失的邮件只是不出现在结果里，那一批�
 再拉。每次网络读写超时 60 秒。
 
 待办（M4）：有未回放的 `pending_ops` 时，flags 同步不能覆盖本地的乐观修改。
+
+**APPEND 被提前拒绝。** 带 literal 的命令（APPEND）发出第一行后，服务器可以不回 `+` 而直接回
+tagged NO（Dovecot 无法写入时就是这样）。imap-next 只在 BAD 时放弃这条命令，收到 NO 后仍等着
+发送剩下的 literal，之后排队的命令永远发不出去。所以命令在完整发出之前就收到 NO/BAD 时返回
+`Error::Aborted`（致命），连接不再放回连接池；`Connection` 自己也记下这一点，之后的命令立即
+失败，不依赖调用方检查。连接池只在复用的连接确实断开（`Error::is_disconnected`）时换新连接
+重试，被拒绝的命令不会再发一遍。
 
 IMAP 库选 `imap-next`（sans-IO，基于 `imap-codec`），启用 `starttls` 与
 `ext_condstore_qresync`，不启用它自带的 `stream`：`catmail-proto` 自己驱动 sans-IO 状态机，
@@ -211,11 +219,12 @@ HTML 部分时存在，经 `ammonia` 清洗（去掉脚本、样式表、表单�
 
 ### 认证
 
-`catmail_proto::imap::Credentials` 是协议层看到的全部：目前只有
-`Password { username, password }`，登录时服务器支持 `AUTH=PLAIN` 就用 `AUTHENTICATE PLAIN`，
-否则用 `LOGIN`（`LOGINDISABLED` 时报错）。凭据从哪来由 `catmail-core/src/auth.rs` 按
-`AuthKind` 决定（密码账户读 keyring）。加 OAuth2（M6）只需新增 `AuthKind` 和 `Credentials`
-的变体（XOAUTH2 / OAUTHBEARER）以及刷新 token 的那一个分支，同步代码不变。
+`catmail_proto::Credentials` 是协议层看到的全部，IMAP 和 SMTP 共用：目前只有
+`Password { username, password }`。IMAP 登录时服务器支持 `AUTH=PLAIN` 就用
+`AUTHENTICATE PLAIN`，否则用 `LOGIN`（`LOGINDISABLED` 时报错）；SMTP 优先 `AUTH PLAIN`，
+其次 `AUTH LOGIN`。凭据从哪来由 `catmail-core/src/auth.rs` 按 `AuthKind` 决定（密码账户读
+keyring）。加 OAuth2（M6）只需新增 `AuthKind` 和 `Credentials` 的变体（XOAUTH2 /
+OAUTHBEARER）以及刷新 token 的那一个分支，同步和发信代码不变。
 
 ### TLS
 
@@ -227,6 +236,7 @@ HTML 部分时存在，经 `ammonia` 清洗（去掉脚本、样式表、表单�
 - `tls`：从第一个字节开始 TLS。
 - `starttls`：服务器不支持 STARTTLS 就报错，绝不降级为明文；升级后丢弃明文阶段的一切状态
   （包括可能被注入的、跟在 `OK` 后面的字节）并重新获取 CAPABILITY；PREAUTH 视为不支持。
+  SMTP 同理：升级后丢掉缓冲区里的明文字节，重新 EHLO。
 - `tls` / `plain` 下的 PREAUTH 问候表示已认证，`login` 直接返回。
 - `plain`：明文，只用于本地测试服务器。
 
@@ -309,22 +319,86 @@ Service / macOS Keychain / Windows Credential Manager），service 为 `cat-mail
 进程恰好在"写密钥"与"插入行"之间崩溃，只会留下一条无害的孤立条目。待办：无 Secret Service
 的环境（纯 TTY）提供加密文件降级。
 
-### 发信
+### 草稿与发信
 
-Outbox 的每一行是一份自包含的发送快照，重试时不再读取草稿：MIME 原文（blob），加上单独存储
-的 SMTP 信封 `envelope_from` 与 `recipients_json`（所有 RCPT TO，包括密送；密送收件人不在
-MIME 头里）。
+**草稿只在本地。** `drafts` 一行是正在写的一封信（收件人、抄送、密送、主题、纯文本正文），
+附件在添加时复制进 BlobStore（`draft_attachments`），原文件之后改动或删除都不影响。回复时把
+原信的 Message-ID 和 References 复制进草稿（`in_reply_to` / `references_hdr`），原信之后被删除
+也不会断开会话；`reply_to_message_id` 留给 M4 标记 `\Answered`。草稿上传到服务器的 Drafts
+文件夹（`remote_*` 列）要在每次保存时删除上一份副本，这属于 M4 的操作队列，M3 不做。
 
-状态机：
+回复（`MailClient::reply`）：发给原信的 Reply-To，没有时发给发件人；回复自己发出的信则发给
+原收件人。回复全部再加上原信的收件人和抄送，去掉自己、去重（地址不分大小写）。主题加
+`Re: `（已经以 `Re:` / `回复：` / `答复：` 开头的不再加），正文引用原文（`> `）。正文没下载时
+先下载。
+
+地址在保存草稿时就检查（`parse_addresses` 解析输入框里的地址列表：逗号或分号分隔，每一项
+只能是裸地址或"显示名 <地址>"，严格解析而不用宽松的邮件头解析器，任何一项不合规就报错，
+不会悄悄少一个收件人）：必须能原样放进 SMTP 的 `MAIL FROM:<…>` /
+`RCPT TO:<…>`。非 ASCII 地址需要 SMTPUTF8，暂不支持，直接拒绝。
+
+**Outbox 快照。** `send_draft` 把草稿冻结成 outbox 的一行：完整的 MIME 原文在此时构建
+（mail-builder：7-bit、CRLF、RFC 2047 头、RFC 2231 文件名，Message-ID 为
+`<uuid@发件人域名>`，不泄露主机名；收到的邮件里不合法的 msg-id（mail-parser 会保留其中的裸 CR，发出时它会变成换行、注入
+邮件头）在解析邮件头时就丢掉，入库的都是干净的；构建邮件时再按同一规则检查一遍）、存成 blob，之后每次尝试都发送这同一份字节，重试不再读
+草稿。SMTP 信封 `envelope_from` 和 `recipients_json`（所有 RCPT TO，含密送；密送不在 MIME 头
+里）单独存。构建在事务外进行，入队时检查草稿的 `revision` 没变（每次修改、增删附件都会加一），
+期间被改过就报 `Conflict`，不会把旧内容发出去。草稿有 outbox 行时被锁定：不能编辑、删除，
+不在草稿列表里；发完后随 outbox 行一起删除，取消没发出去的发送则只删 outbox 行，草稿回到
+可编辑状态。
+
+**状态机**（`crates/catmail-core/src/send.rs`，转换都是 `Outbox` repository 里的条件 UPDATE）：
 
 | 状态 | 含义 | 之后 |
 |---|---|---|
-| `queued` | 等待发送（`next_attempt_at`） | → `sending` |
-| `sending` | SMTP 事务进行中 | 成功 → `accepted`；DATA 完成前可重试的失败 → `queued`；5xx → `failed`；DATA 结束后连接断开 → `unknown` |
-| `accepted` | 服务器已接受（DATA 后返回 250），待保存到 Sent | 只重试 APPEND，**绝不重发 SMTP** → `done` |
-| `unknown` | 发送结果未知 | **不自动重试**（重发可能导致重复投递），由用户决定 |
-| `done` | 已发送，且需要时已保存到 Sent | 删除草稿，发 `MessageSent` 事件 |
+| `queued` | 等待发送（`next_attempt_at`） | → `sending`（算一次尝试） |
+| `sending` | SMTP 事务进行中，结束标记还没发 | 失败：可重试 → `queued`，永久 → `failed`；发结束标记**之前**先提交 → `unknown` |
+| `unknown` | 结束标记已发（或正要发），还没收到答复 | 250 → `accepted`；拒绝（4xx / 5xx）→ `queued` / `failed`；断线、超时、进程崩溃都**停在这里**，不自动重发 |
+| `accepted` | 服务器已接受，待保存到 Sent | 只重试 APPEND，**绝不重发 SMTP** → done |
 | `failed` | 被永久拒绝，原因在 `last_error` | 由用户处理 |
+| done | 已发送，需要时已保存到 Sent | 删除这一行和草稿 |
+
+关键在 `unknown` 是**先写**的：服务器只有收到结束标记 `.` 才可能接受邮件，所以在那之前出的任何
+错都可以安全重试（服务器会丢弃没结束的事务）；从写下 `unknown` 起，不论之后断线、超时还是
+进程被杀，都不会自动重发，避免重复投递。用户可以重试（可能收到两封）、确认已送达
+（`mark_outbox_sent`，之后只保存到 Sent）或取消。这些决定先拿该账户的发送锁：发送中的条目
+在等服务器答复时就是 `unknown`，此时改动它，随后到来的 250 就记不下来了，所以等这次尝试
+结束，决定作用于它留下的状态。打开引擎时（拿到数据目录锁后）残留的
+`sending` 行说明上一个进程死在结束标记之前，退回 `queued`。
+
+**SMTP 客户端**（`catmail-proto/src/smtp/`）自己实现，没用 lettre：状态机要区分"结束标记发出
+之前 / 之后"的失败，lettre 的 `send` 不暴露这一点；自己实现还能共用 `TlsConfig`、超时和
+STARTTLS 的处理。一次事务拆成 `begin`（MAIL FROM、逐个 RCPT TO、DATA）、`write_message`
+（点填充后的正文，不含结束标记）、`end_message`（结束标记并等答复，RFC 5321 允许服务器想
+10 分钟），调用方在后两步之间提交 `unknown`。
+
+- 任何一个收件人被拒绝就 RSET 整个事务，错误里带上那个地址：不会出现一部分人收到、一部分
+  人没收到。
+- 正文里孤立的 CR 或 LF 一律改成 CRLF 再做点填充，没有服务器能在别处看到结束标记（SMTP
+  smuggling）。
+- EHLO 用 `[127.0.0.1]`：地址字面量合法，又不暴露主机名和内网地址；提交服务器靠认证而不是
+  EHLO 识别用户。
+- 服务器声明 SIZE 时，超出的邮件不发送直接失败；有 SIZE 时在 MAIL FROM 带上大小。
+- 服务器不提供 AUTH 时不登录（本地中继）；STARTTLS 配置了就必须成功，所以不会被剥离。
+
+**重试。** 4xx、断线、超时属于暂时失败，按 30 秒起、每次翻倍、最多 30 分钟的间隔一直重试，
+`last_error` 随时可见；5xx、认证失败、服务器缺少所需能力、邮件过大属于永久失败。一轮处理里
+连接服务器失败时，剩下排队的邮件不再逐个尝试，只推迟（不计尝试次数）。同一轮里的多封邮件
+复用一条 SMTP 连接。每账户一把发送锁（`Engine::send_permit`），后台发送和手动 flush 不会同时
+处理同一条。
+
+**保存到 Sent。** 被接受后立即（同一轮里，邮件还在内存中）用 APPEND（带 `\Seen`）存进 Sent，
+失败的留到之后几轮重试：优先用本地已知的 Sent 角色文件夹；
+账户还没同步过时用 LIST 和同步相同的角色判断现找；服务器没有 Sent 文件夹就跳过。APPEND 的
+答复也可能丢失（APPEND 成功但连接断了），所以尝试次数在每次尝试**之前**加一，第二次起先
+EXAMINE Sent、按 Message-ID `UID SEARCH HEADER`，已经在了就不再 APPEND。APPEND 走按需下载的
+连接池。已知问题：Gmail、Outlook 等服务器会自动把发出的邮件存进已发送，再 APPEND 会重复；
+它们需要 OAuth2，留到 M6 时按服务器关掉这一步。
+
+**谁来发。** `MailClientBuilder::send_in_background(true)` 时引擎起一个后台任务，按
+`next_attempt_at` 和入队、重试的通知处理到期的条目（GUI 用，M5）；它只持有 `Weak<Engine>`，
+不会让数据目录锁一直被占着。CLI 不开后台发送，免得一个无关的命令在背后发信：`catmail send`
+入队后立即 `flush_outbox`，失败的留给 `catmail outbox flush`。
 
 ### GUI
 
@@ -427,13 +501,20 @@ zed-industries/zed#60155（同症状的 #64123 作为重复关闭，#64783 指�
 - **假 IMAP 服务器**（`crates/catmail-testkit`，只作为 dev-dependency）：进程内、可修改邮箱
   内容，支持明文 / TLS / STARTTLS，可注入故障：断线（第 n 次拉邮件头时）、拉取时挂起、重复
   或倒序的 FETCH 响应、不带 UID 的主动 FETCH、没有 CONDSTORE、UIDVALIDITY 改变、STARTTLS 之后
-  的明文注入、拒绝登录、拉正文时断线、挂起或按闸门放行、section 回 NIL、关闭当前所有连接。BODYSTRUCTURE 和各 section 由每封邮件的
+  的明文注入、拒绝登录、拉正文时断线、挂起或按闸门放行、section 回 NIL、关闭当前所有连接、
+  拒绝 APPEND（回 NO，或不要 literal 直接回 NO）、APPEND 存下后不答复就断开。BODYSTRUCTURE 和各 section 由每封邮件的
   原文推导（mail-parser），所以测试邮件就是普通的 `.eml`。直接按字节写响应，故障可以精确
   到线上格式。三个平台的 CI 都跑。
+- **假 SMTP 服务器**（同一个 crate）：明文 / TLS / STARTTLS，AUTH PLAIN / LOGIN，记录投递的
+  信封和正文（已去掉点填充）。故障：服务不可用（421 问候）、拒绝登录、SIZE 上限、拒绝指定
+  收件人（4xx / 5xx）、MAIL FROM 回 451、MAIL FROM 时断线、对结束标记回指定的错误码、
+  **收下邮件后不答复就断开**（确认丢失）、STARTTLS 之后的明文注入。
 - **真实服务器**：`testenv/dovecot/run.sh` 以当前用户在临时目录里启动 Dovecot（来自 flake 的
   `imap` 开发环境，版本随 `flake.lock` 固定），预置 `testenv/fixtures/` 里的邮件，包括中文
   文件夹、层级文件夹、各种编码、HTML 加内嵌图片与 RFC 2231 文件名；测试还会投递一封超过
-  2 MiB 的邮件，走按部分下载的路径。`crates/catmail-core/tests/dovecot.rs` 在设置了
+  2 MiB 的邮件，走按部分下载的路径。发信经假 SMTP 服务器，保存到 Dovecot 的 Sent：先把
+  Sent 的 `tmp/` 设为只读让第一次 APPEND 失败，第二次就会先按 Message-ID 搜索，所以 APPEND
+  和 `SEARCH HEADER` 都在真实服务器上验证过（因此不能以 root 运行）。`crates/catmail-core/tests/dovecot.rs` 在设置了
   `CATMAIL_TEST_IMAP` 时运行，CI 里有单独的 Linux job。
 
 - **GUI**：`catmail-gui` 的 UI 集成测试（`#[gpui_kit::test]`，GPUI 的测试平台，无需显示器
@@ -444,8 +525,9 @@ zed-industries/zed#60155（同症状的 #64123 作为重复关闭，#64783 指�
   用 WGPU 离屏渲染把几封邮件截成 PNG，供人看排版：
   `CATMAIL_SCREENSHOTS=<目录> cargo test -p catmail-gui -- --ignored screenshots`。
 
-覆盖不到、留给后续的：进程在同步中途被杀（目前用"断线后重新同步"近似，事务边界相同）；
-M3 的 SMTP 确认丢失、保存到 Sent 失败。
+覆盖不到、留给后续的：进程在同步或发信中途被杀（同步用"断线后重新同步"近似，事务边界
+相同；发信的重启恢复由单元测试直接构造中断时的数据库状态）；真实的 SMTP 服务器（目前只有
+假服务器）。
 
 ## 数据目录
 

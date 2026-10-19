@@ -1,3 +1,4 @@
+mod compose;
 mod files;
 mod output;
 
@@ -8,7 +9,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use catmail_core::{
-    Account, AccountId, Address, AttachmentId, AuthKind, Config, Flags, Folder, FolderId,
+    Account, AccountId, Address, AttachmentId, AuthKind, Config, DraftId, Flags, Folder, FolderId,
     MailClient, Message, MessageId, MessageSummary, NewAccount, SearchQuery, Security,
     ServerConfig, SyncReport, safe_filename,
 };
@@ -50,6 +51,23 @@ enum Command {
     Attachment(SaveAttachment),
     /// Search subjects, addresses and downloaded bodies
     Search(Search),
+    /// Write a new message, kept as a draft unless sent with --send
+    Compose(compose::Compose),
+    /// Reply to a message, quoting it; kept as a draft unless sent with --send
+    Reply(compose::Reply),
+    /// List, show, edit or delete drafts
+    #[command(subcommand)]
+    Draft(compose::DraftCommand),
+    /// Send a draft now, and save it to the Sent folder
+    Send {
+        /// Draft id, as shown by `catmail draft list`
+        draft: i64,
+    },
+    /// Messages handed to "send" that aren't sent and saved yet [default: list]
+    Outbox {
+        #[command(subcommand)]
+        command: Option<compose::OutboxCommand>,
+    },
     /// Delete stored bodies and attachments that nothing refers to any more
     Gc,
 }
@@ -167,9 +185,10 @@ struct AddAccount {
 async fn main() -> ExitCode {
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
-        // Errors can carry server-supplied text, so they go through `printable` too.
+        // Errors can carry server-supplied text, so they are escaped too; line breaks
+        // stay, for the hints some errors end with.
         Err(e) => {
-            eprintln!("Error: {}", printable(&format!("{e:#}")));
+            eprintln!("Error: {}", printable_text(&format!("{e:#}")));
             ExitCode::FAILURE
         }
     }
@@ -200,6 +219,14 @@ async fn run() -> Result<()> {
         Command::Read(args) => read(&client, args, cli.json).await,
         Command::Attachment(args) => save_attachment(&client, args).await,
         Command::Search(args) => search(&client, args, cli.json).await,
+        Command::Compose(args) => compose::compose(&client, args, cli.json).await,
+        Command::Reply(args) => compose::reply(&client, args, cli.json).await,
+        Command::Draft(cmd) => compose::draft(&client, cmd, cli.json).await,
+        Command::Send { draft } => compose::send(&client, DraftId(draft), cli.json).await,
+        Command::Outbox { command } => {
+            let command = command.unwrap_or(compose::OutboxCommand::List);
+            compose::outbox(&client, command, cli.json).await
+        }
         Command::Gc => gc(&client, cli.json).await,
     }
 }
@@ -451,10 +478,7 @@ fn print_message(message: &Message, html: bool) {
 
 fn addresses(list: &[Address]) -> String {
     list.iter()
-        .map(|a| match &a.name {
-            Some(name) => format!("{name} <{}>", a.email),
-            None => a.email.clone(),
-        })
+        .map(Address::to_string)
         .collect::<Vec<_>>()
         .join(", ")
 }

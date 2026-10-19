@@ -1,12 +1,19 @@
 //! Remote protocol adapters for cat-mail.
 //!
-//! - [`imap`]: a read-only IMAP session (M1, bodies in M2); writes and IDLE come in M4
-//! - [`mime`]: header parsing and message content (text, sanitized HTML, attachments);
-//!   building messages comes in M3
-//! - SMTP comes in M3
+//! - [`imap`]: an IMAP session: read-only sync and bodies, plus APPEND (saving sent
+//!   messages); flag changes and IDLE come in M4
+//! - [`smtp`]: an SMTP submission client
+//! - [`mime`]: header parsing, message content (text, sanitized HTML, attachments), and
+//!   building outgoing messages
 
+mod credentials;
 pub mod imap;
 pub mod mime;
+mod net;
+pub mod smtp;
 mod tls;
 
+pub use credentials::Credentials;
 pub use tls::TlsConfig;
+
+pub(crate) use net::Stream;

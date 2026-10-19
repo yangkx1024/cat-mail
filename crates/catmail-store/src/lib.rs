@@ -6,10 +6,12 @@ mod accounts;
 mod attachments;
 mod blob;
 mod columns;
+mod drafts;
 mod error;
 mod folders;
 mod fts;
 mod messages;
+mod outbox;
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -22,9 +24,11 @@ use rusqlite_migration::{M, Migrations};
 pub use accounts::Accounts;
 pub use attachments::{AttachmentSource, Attachments, NewAttachment};
 pub use blob::BlobStore;
+pub use drafts::{DraftReply, DraftSnapshot, Drafts, NewDraftAttachment};
 pub use error::{Error, Result};
 pub use folders::{FolderSyncState, Folders, RemoteFolder};
 pub use messages::{MessageLocation, Messages, NewBody, NewMessage};
+pub use outbox::{NewOutboxEntry, Outbox, OutboxJob};
 
 /// Every `*_blob_hash` column (a test checks none is missing).
 const BLOB_REFERENCES: &str = "
@@ -70,6 +74,14 @@ impl<'c> Db<'c> {
 
     pub fn attachments(&self) -> Attachments<'c> {
         Attachments::new(self.conn)
+    }
+
+    pub fn drafts(&self) -> Drafts<'c> {
+        Drafts::new(self.conn)
+    }
+
+    pub fn outbox(&self) -> Outbox<'c> {
+        Outbox::new(self.conn)
     }
 
     /// Every blob some row refers to, for [`BlobStore::collect_garbage`]. A new

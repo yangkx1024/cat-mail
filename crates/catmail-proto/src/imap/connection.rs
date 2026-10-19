@@ -8,13 +8,12 @@ use imap_next::imap_types::command::{Command, CommandBody};
 use imap_next::imap_types::core::Tag;
 use imap_next::imap_types::response::{Code, Data, Greeting, Status, StatusKind};
 use imap_next::{Interrupt, Io, State};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::{Error, Result};
 
-/// A byte stream an IMAP connection can run over: TCP, TLS, or an in-memory pipe.
-pub(crate) trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
-impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
+pub(crate) use crate::Stream;
+use crate::net::with_timeout;
 
 /// What the server sent while a command ran, up to and including its tagged OK.
 #[derive(Debug, Default)]
@@ -33,6 +32,9 @@ pub(crate) struct Connection {
     last_tag: u32,
     buf: Box<[u8]>,
     timeout: Duration,
+    /// Set once the server refused a command before all of it was sent: imap-next still
+    /// waits to send the rest, so nothing sent after it would ever go out.
+    out_of_step: bool,
 }
 
 impl Connection {
@@ -48,6 +50,7 @@ impl Connection {
             last_tag: 0,
             buf: vec![0; 64 * 1024].into_boxed_slice(),
             timeout,
+            out_of_step: false,
         }
     }
 
@@ -86,15 +89,17 @@ impl Connection {
     /// whose caller notices what is missing.
     pub async fn execute_lossy(&mut self, body: CommandBody<'static>) -> Result<Response> {
         let command = body.name();
+        self.check_in_step()?;
         let tag = self.next_tag();
         self.client.enqueue_command(Command {
             tag: tag.clone(),
             body,
         });
         let mut response = Response::default();
+        let mut sent = false;
         loop {
             match self.next_event(&mut response.skipped).await? {
-                Event::CommandSent { .. } => {}
+                Event::CommandSent { .. } => sent = true,
                 Event::CommandRejected { status, .. } => {
                     return Err(Error::Command {
                         command,
@@ -103,8 +108,16 @@ impl Connection {
                 }
                 Event::DataReceived { data } => response.data.push(data),
                 Event::StatusReceived { status } => {
-                    if let Some(result) = self.on_status(&tag, command, status, &mut response) {
-                        return result.map(|()| response);
+                    match self.on_status(&tag, command, status, &mut response) {
+                        // imap-next only gives up a command with a pending literal on
+                        // BAD (`CommandRejected`); after a NO it still waits to send
+                        // the rest, ahead of anything queued later.
+                        Some(Err(Error::Command { command, text })) if !sent => {
+                            self.out_of_step = true;
+                            return Err(Error::Aborted { command, text });
+                        }
+                        Some(result) => return result.map(|()| response),
+                        None => {}
                     }
                 }
                 Event::ContinuationRequestReceived { .. } => {
@@ -126,6 +139,7 @@ impl Connection {
         mechanism: AuthMechanism<'static>,
         initial: Vec<u8>,
     ) -> Result<Response> {
+        self.check_in_step()?;
         let tag = self.next_tag();
         self.client.enqueue_command(Command {
             tag: tag.clone(),
@@ -172,6 +186,17 @@ impl Connection {
                 }
             }
         }
+    }
+
+    /// Fails every command once the connection is out of step (see `out_of_step`), so it
+    /// can't be used by mistake even by a caller that kept it after the error.
+    fn check_in_step(&self) -> Result<()> {
+        if self.out_of_step {
+            return Err(Error::Protocol(
+                "connection unusable after a command was refused half-way".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn next_tag(&mut self) -> Tag<'static> {
@@ -249,15 +274,5 @@ impl Connection {
                 }
             }
         }
-    }
-}
-
-pub(super) async fn with_timeout<T>(
-    timeout: Duration,
-    fut: impl Future<Output = std::io::Result<T>>,
-) -> Result<T> {
-    match tokio::time::timeout(timeout, fut).await {
-        Ok(result) => Ok(result?),
-        Err(_) => Err(Error::Timeout),
     }
 }

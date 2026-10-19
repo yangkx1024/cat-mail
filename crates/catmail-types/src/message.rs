@@ -1,3 +1,4 @@
+use std::fmt;
 use std::ops::{BitOr, BitOrAssign};
 
 use serde::{Deserialize, Serialize};
@@ -8,6 +9,17 @@ use crate::{AccountId, AttachmentId, FolderId, MessageId};
 pub struct Address {
     pub name: Option<String>,
     pub email: String,
+}
+
+/// `Name <a@example.com>`, or just the address. For showing, not for headers: the name
+/// is not quoted.
+impl fmt::Display for Address {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.name {
+            Some(name) => write!(f, "{name} <{}>", self.email),
+            None => f.write_str(&self.email),
+        }
+    }
 }
 
 /// IMAP system flags as a bitset; stored as an INTEGER column.
@@ -97,8 +109,12 @@ pub struct Message {
     pub summary: MessageSummary,
     pub to: Vec<Address>,
     pub cc: Vec<Address>,
+    /// Where replies should go instead of the sender, e.g. a mailing list.
+    pub reply_to: Vec<Address>,
     /// The Message-ID header, without angle brackets.
     pub message_id: Option<String>,
+    /// The References header: Message-IDs of the thread so far, oldest first.
+    pub references: Vec<String>,
     /// RFC822.SIZE: the raw message in octets.
     pub size: Option<u32>,
     /// `None` until downloaded.

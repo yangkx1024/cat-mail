@@ -32,6 +32,12 @@ pub enum Error {
     #[error("{command} failed: {text}")]
     Command { command: &'static str, text: String },
 
+    /// The server refused a command before all of it was sent (an APPEND, instead of
+    /// asking for its message). The client is still in the middle of that command, so
+    /// the connection can't be used any more.
+    #[error("{command} refused: {text}")]
+    Aborted { command: &'static str, text: String },
+
     /// Part of the answer to a command couldn't be parsed. Results count only when
     /// whole (a missing LIST, SEARCH or EXISTS line would read as something deleted),
     /// so this is the default for every command but the header FETCH. The connection
@@ -52,5 +58,26 @@ impl Error {
             self,
             Self::Command { .. } | Self::Incomplete(_) | Self::InvalidServerName(_)
         )
+    }
+
+    /// Whether the connection was gone, rather than the command refused: the error an
+    /// idle connection that the server or a NAT box closed meanwhile shows. Trying again
+    /// on a new connection may work.
+    pub fn is_disconnected(&self) -> bool {
+        matches!(
+            self,
+            Self::Io(_) | Self::Timeout | Self::Closed | Self::Bye(_)
+        )
+    }
+}
+
+impl From<crate::net::NetError> for Error {
+    fn from(e: crate::net::NetError) -> Self {
+        use crate::net::NetError;
+        match e {
+            NetError::Io(e) => Self::Io(e),
+            NetError::Timeout => Self::Timeout,
+            NetError::InvalidServerName(name) => Self::InvalidServerName(name),
+        }
     }
 }

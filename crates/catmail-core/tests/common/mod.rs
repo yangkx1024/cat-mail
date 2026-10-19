@@ -1,32 +1,43 @@
-//! Shared setup for the integration tests against the fake IMAP server.
+//! Shared setup for the integration tests against the fake IMAP and SMTP servers.
 
 use std::sync::Arc;
 
 use catmail_core::{
     AccountId, AuthKind, Config, MailClient, MemorySecrets, NewAccount, Security, ServerConfig,
 };
-use catmail_testkit::{FakeImap, ServerState};
+use catmail_testkit::{FakeImap, FakeSmtp, ServerState, SmtpState};
 use tokio::runtime::Handle;
 
-/// A fake server and a client with one account on it (alice / pw), not yet synced.
+/// Fake servers and a client with one account on them (alice@example.com, logging in
+/// as alice / pw), not yet synced.
 pub struct Env {
     pub fake: FakeImap,
+    // Only the send tests look at it; the others just keep it running.
+    #[allow(dead_code)]
+    pub smtp: FakeSmtp,
     pub client: MailClient,
     pub account: AccountId,
     _dir: tempfile::TempDir,
 }
 
 pub async fn env(state: ServerState) -> Env {
+    env_with(state, SmtpState::new("alice", "pw"), false).await
+}
+
+/// With `background`, the client sends queued messages on its own.
+pub async fn env_with(state: ServerState, smtp: SmtpState, background: bool) -> Env {
     let fake = FakeImap::start(state).await;
+    let smtp = FakeSmtp::start(smtp).await;
     let dir = tempfile::tempdir().unwrap();
     let client = MailClient::builder(Config::with_data_dir(dir.path()))
         .runtime(Handle::current())
         .secrets(Arc::new(MemorySecrets::default()))
+        .send_in_background(background)
         .open()
         .unwrap();
-    let server = ServerConfig {
+    let server = |port| ServerConfig {
         host: "127.0.0.1".into(),
-        port: fake.port(),
+        port,
         security: Security::Plain,
     };
     let account = client
@@ -35,8 +46,8 @@ pub async fn env(state: ServerState) -> Env {
                 email: "alice@example.com".into(),
                 display_name: None,
                 username: "alice".into(),
-                imap: server.clone(),
-                smtp: server,
+                imap: server(fake.port()),
+                smtp: server(smtp.port()),
                 auth: AuthKind::Password,
             },
             "pw".into(),
@@ -46,6 +57,7 @@ pub async fn env(state: ServerState) -> Env {
         .id;
     Env {
         fake,
+        smtp,
         client,
         account,
         _dir: dir,

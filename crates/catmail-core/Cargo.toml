@@ -11,7 +11,9 @@ catmail-types.workspace = true
 catmail-store.workspace = true
 catmail-proto.workspace = true
 directories.workspace = true
+jiff.workspace = true
 keyring.workspace = true
+mime_guess.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing.workspace = true
@@ -20,6 +22,7 @@ uuid.workspace = true
 [dev-dependencies]
 base64.workspace = true
 catmail-testkit.workspace = true
+mail-parser.workspace = true
 pollster.workspace = true
 tempfile.workspace = true
 

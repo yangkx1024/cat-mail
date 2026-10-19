@@ -155,6 +155,16 @@ pub struct Faults {
     /// UIDs whose BODYSTRUCTURE is sent in a form no parser accepts, every time (unlike
     /// `garble`, which fires once). The rest of their FETCH responses is well-formed.
     pub broken_bodystructure: Vec<u32>,
+    /// Advertise UIDPLUS and answer APPEND with APPENDUID.
+    pub uidplus: bool,
+    /// Refuse this many APPENDs (with NO) before accepting them again.
+    pub reject_appends: usize,
+    /// Refuse APPENDs with NO right away, instead of asking for the message (`+`), as
+    /// Dovecot does when it can't store anything.
+    pub reject_append_literal: bool,
+    /// Store the next APPENDed message, then close the connection without answering:
+    /// the client can't tell whether it was saved. Fires once.
+    pub drop_after_append: bool,
 }
 
 impl Default for Faults {
@@ -178,6 +188,10 @@ impl Default for Faults {
             omit: None,
             split_fetch: false,
             broken_bodystructure: Vec::new(),
+            uidplus: true,
+            reject_appends: 0,
+            reject_append_literal: false,
+            drop_after_append: false,
         }
     }
 }
@@ -378,10 +392,11 @@ async fn serve(
         io.get_mut().write_all(b"* OK fake IMAP ready\r\n").await?;
     }
     loop {
-        let Some(line) = read_command(&mut io).await? else {
+        let refuse = lock(&state).faults.reject_append_literal;
+        let Some((line, literals)) = read_command(&mut io, refuse).await? else {
             return Ok(());
         };
-        match handle(&mut io, &mut session, &state, &line).await? {
+        match handle(&mut io, &mut session, &state, &line, literals).await? {
             Next::Continue => {}
             Next::Close => return Ok(()),
             Next::StartTls => {
@@ -396,9 +411,15 @@ async fn serve(
     }
 }
 
-/// Reads one command line, inlining `{n}` / `{n+}` literals. `None` at EOF.
-async fn read_command(io: &mut BufReader<Box<dyn Stream>>) -> std::io::Result<Option<Vec<u8>>> {
+/// Reads one command line, inlining `{n}` / `{n+}` literals, which are also returned as
+/// they came (APPEND needs the exact bytes). `None` at EOF. With `refuse_append`, an
+/// APPEND is answered with NO instead of being asked for its message, and skipped.
+async fn read_command(
+    io: &mut BufReader<Box<dyn Stream>>,
+    refuse_append: bool,
+) -> std::io::Result<Option<(Vec<u8>, Vec<Vec<u8>>)>> {
     let mut line = Vec::new();
+    let mut literals = Vec::new();
     loop {
         let mut chunk = Vec::new();
         if io.read_until(b'\n', &mut chunk).await? == 0 {
@@ -411,6 +432,17 @@ async fn read_command(io: &mut BufReader<Box<dyn Stream>>) -> std::io::Result<Op
         match literal {
             Some((len, non_sync, prefix_len)) => {
                 line.extend_from_slice(&chunk[..prefix_len]);
+                let text = String::from_utf8_lossy(&line).to_ascii_uppercase();
+                if refuse_append && !non_sync && text.split(' ').nth(1) == Some("APPEND") {
+                    let tag = text.split(' ').next().unwrap_or_default();
+                    io.get_mut()
+                        .write_all(format!("{tag} NO [SERVERBUG] Internal error\r\n").as_bytes())
+                        .await?;
+                    // Answered; read the next command instead.
+                    line.clear();
+                    literals.clear();
+                    continue;
+                }
                 if !non_sync {
                     io.get_mut()
                         .write_all(b"+ Ready for literal data\r\n")
@@ -420,17 +452,18 @@ async fn read_command(io: &mut BufReader<Box<dyn Stream>>) -> std::io::Result<Op
                 io.read_exact(&mut data).await?;
                 // Inline as a quoted string so the tokenizer sees one token.
                 line.push(b'"');
-                for b in data {
+                for &b in &data {
                     if b == b'"' || b == b'\\' {
                         line.push(b'\\');
                     }
                     line.push(b);
                 }
                 line.push(b'"');
+                literals.push(data);
             }
             None => {
                 line.extend_from_slice(&chunk);
-                return Ok(Some(line));
+                return Ok(Some((line, literals)));
             }
         }
     }
@@ -537,6 +570,9 @@ fn capabilities(state: &ServerState, session: &Session) -> String {
     if state.faults.condstore {
         caps.push("CONDSTORE");
     }
+    if state.faults.uidplus {
+        caps.push("UIDPLUS");
+    }
     caps.join(" ")
 }
 
@@ -545,6 +581,7 @@ async fn handle(
     session: &mut Session,
     state: &Arc<Mutex<ServerState>>,
     raw: &[u8],
+    literals: Vec<Vec<u8>>,
 ) -> std::io::Result<Next> {
     let line = String::from_utf8_lossy(raw).into_owned();
     let (tag, rest) = line.split_once(' ').unwrap_or((&line, ""));
@@ -668,22 +705,59 @@ async fn handle(
                 }
             }
         }
+        "APPEND" => {
+            let st = &mut *lock(state);
+            let name = args.first().map(Tok::text).unwrap_or_default();
+            let flags: Vec<String> = match args.get(1) {
+                Some(Tok::List(flags)) => flags.iter().map(Tok::text).collect(),
+                _ => Vec::new(),
+            };
+            match (st.find(&name), literals.last()) {
+                (Some(_), Some(_)) if st.faults.reject_appends > 0 => {
+                    st.faults.reject_appends -= 1;
+                    out += &format!("{tag} NO [OVERQUOTA] Quota exceeded\r\n");
+                }
+                (Some(i), Some(raw)) => {
+                    let mb = &mut st.mailboxes[i];
+                    let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+                    let uid = mb.append(raw, &flags);
+                    if std::mem::take(&mut st.faults.drop_after_append) {
+                        return Ok(Next::Close);
+                    }
+                    let code = if st.faults.uidplus {
+                        format!("[APPENDUID {} {uid}] ", st.mailboxes[i].uidvalidity)
+                    } else {
+                        String::new()
+                    };
+                    out += &format!("{tag} OK {code}APPEND completed\r\n");
+                }
+                (None, _) => out += &format!("{tag} NO [TRYCREATE] No such mailbox\r\n"),
+                (_, None) => out += &format!("{tag} BAD Missing message\r\n"),
+            }
+        }
         "UID SEARCH" => {
             let st = lock(state);
             match session.selected.and_then(|i| st.mailboxes.get(i)) {
                 Some(mb) => {
-                    // `ALL`, or `UID <set>`.
-                    let set = args
-                        .first()
-                        .is_some_and(|t| t.text().eq_ignore_ascii_case("UID"))
-                        .then(|| args.get(1).map(Tok::text))
-                        .flatten();
+                    // `ALL`, `UID <set>`, or `HEADER <field> <substring>`.
+                    let key = |i: usize| args.get(i).map(Tok::text);
+                    let first = key(0).unwrap_or_default().to_ascii_uppercase();
+                    let set = (first == "UID").then(|| key(1)).flatten();
+                    let header = (first == "HEADER").then(|| key(1).zip(key(2))).flatten();
                     let uids: Vec<String> = mb
                         .messages
                         .iter()
                         .filter(|m| {
                             set.as_ref()
                                 .is_none_or(|set| uid_set_contains(set, m.uid, mb))
+                        })
+                        .filter(|m| {
+                            header.as_ref().is_none_or(|(field, value)| {
+                                let found = filter_headers(&m.raw, &[field.to_ascii_lowercase()]);
+                                String::from_utf8_lossy(&found)
+                                    .to_ascii_lowercase()
+                                    .contains(&value.to_ascii_lowercase())
+                            })
                         })
                         .map(|m| m.uid.to_string())
                         .collect();

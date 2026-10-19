@@ -442,3 +442,89 @@ async fn fetches_bodies_without_marking_them_seen() {
     assert!(fetches.iter().any(|c| c.line.contains("BODY.PEEK[2]")));
     assert!(fetches.iter().any(|c| c.line.contains("BODY.PEEK[]")));
 }
+
+#[tokio::test]
+async fn appends_and_finds_by_message_id() {
+    let mut state = sample_state();
+    state.faults.reject_appends = 1;
+    let fake = FakeImap::start(state).await;
+    let mut session = login(&fake).await;
+    let raw = b"From: alice@example.com\r\nMessage-ID: <sent.1@example.com>\r\n\r\nhi\r\n";
+
+    let err = session
+        .append("&XfJT0ZAB-", Flags::SEEN, raw)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Command { .. }), "{err:?}");
+    assert!(!err.is_fatal());
+
+    let appended = session
+        .append("&XfJT0ZAB-", Flags::SEEN, raw)
+        .await
+        .unwrap();
+    assert_eq!(appended, Some((1, 1)), "APPENDUID");
+    {
+        let mut state = fake.state();
+        let sent = state.mailbox_mut("&XfJT0ZAB-");
+        assert_eq!(sent.messages[0].raw, raw, "stored byte for byte");
+        assert_eq!(sent.messages[0].flags, ["\\Seen"]);
+    }
+
+    session.examine("&XfJT0ZAB-").await.unwrap();
+    assert_eq!(
+        session
+            .uid_search_message_id("sent.1@example.com")
+            .await
+            .unwrap(),
+        [1]
+    );
+    assert!(
+        session
+            .uid_search_message_id("sent.2@example.com")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    fake.state().faults.uidplus = false;
+    let mut session = login(&fake).await;
+    assert_eq!(
+        session.append("INBOX", Flags::empty(), raw).await.unwrap(),
+        None
+    );
+    let err = session
+        .append("Missing", Flags::empty(), raw)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Command { .. }), "{err:?}");
+}
+
+#[tokio::test]
+async fn append_refused_before_the_message_fails_at_once() {
+    let mut state = sample_state();
+    state.faults.reject_append_literal = true;
+    let fake = FakeImap::start(state).await;
+    let mut session = login(&fake).await;
+    let raw = b"Subject: x\r\n\r\nhi\r\n";
+    let err = tokio::time::timeout(
+        Duration::from_secs(5),
+        session.append("&XfJT0ZAB-", Flags::SEEN, raw),
+    )
+    .await
+    .expect("answered at once")
+    .unwrap_err();
+    assert!(matches!(err, Error::Aborted { .. }), "{err:?}");
+    assert!(
+        err.is_fatal(),
+        "the client is still in the middle of the command"
+    );
+    assert!(
+        !err.is_disconnected(),
+        "not worth retrying on a new connection"
+    );
+    // Anything else on this connection fails at once instead of waiting forever.
+    let next = tokio::time::timeout(Duration::from_secs(5), session.examine("INBOX"))
+        .await
+        .expect("fails at once");
+    assert!(next.is_err());
+}

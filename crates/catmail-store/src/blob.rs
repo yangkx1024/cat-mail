@@ -101,6 +101,11 @@ impl BlobStore {
         self.path(hash).is_file()
     }
 
+    /// The whole content; `NotFound` if it is missing.
+    pub fn read(&self, hash: &BlobHash) -> io::Result<Vec<u8>> {
+        fs::read(self.path(hash))
+    }
+
     pub fn open_blob(&self, hash: &BlobHash) -> io::Result<File> {
         File::open(self.path(hash))
     }

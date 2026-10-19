@@ -8,7 +8,7 @@
 
 数据存储在本地 SQLite，离线可用；密码保存在系统密钥环中，不进数据库。
 
-> 项目处于早期开发阶段（M2 已完成），接口和数据库结构仍会变化。
+> 项目处于早期开发阶段（M3 已完成），接口和数据库结构仍会变化。
 
 架构设计见 [docs/architecture.md](docs/architecture.md)。
 
@@ -25,7 +25,7 @@
 | M0 | workspace；types；store（迁移、事务接口）；BlobStore；keyring；数据目录锁；`MailClient` 门面；`catmail account` | ✅ 完成 |
 | M1 | IMAP 只读同步（文件夹、邮件头）；认证接口；协议测试环境；`catmail sync` / `catmail ls` | ✅ 完成 |
 | M2 | 正文与附件按需下载；中文分词 + 全文搜索；blob GC；最小读信窗口；`catmail read` / `catmail search` | ✅ 完成 |
-| M3 | 草稿；SMTP 发信与 outbox 状态机；保存到 Sent | |
+| M3 | 草稿；SMTP 发信与 outbox 状态机；保存到 Sent；`catmail compose` / `reply` / `send` / `outbox` | ✅ 完成 |
 | M4 | 离线操作队列（标记 / 移动 / 删除）；IDLE 推送 | |
 | M5 | 图形界面：三栏布局、读信、写信 | |
 | M6 | OAuth2（Gmail / Microsoft 365）；Windows / macOS 打包 | |
@@ -39,13 +39,17 @@
 - **协议测试环境从 M1 开始建。** 一个可注入故障的进程内假 IMAP 服务器（`catmail-testkit`，
   三个平台的 CI 都跑），覆盖断线、UIDVALIDITY 改变、重复或乱序响应、服务器缺少 CONDSTORE、
   STARTTLS 明文注入、同步中途中断后续传；再加一个真实的 Dovecot（Nix 提供，不需要 docker）。
-  M3 加入 SMTP 确认丢失和保存到 Sent 失败的场景。
+  M3 加入了假 SMTP 服务器，覆盖 SMTP 确认丢失、连接中断、收件人被拒、保存到 Sent 失败和
+  APPEND 答复丢失等场景。
+- **草稿暂时只在本地。** 把草稿同步到服务器的"草稿箱"需要每次保存都删除旧副本，留到 M4 的
+  离线操作队列。
 - **IPC 待定。** 同一个数据目录同时只允许一个引擎（见架构文档），所以目前 GUI 运行时 CLI
   不能打开同一个数据目录。之后让其他前端通过 IPC 连接正在运行的引擎。
 
 ## 使用
 
-目前可以管理账户、同步文件夹和邮件头、列出和阅读邮件、搜索（只读，不改服务器上的状态）：
+目前可以管理账户、同步文件夹和邮件头、列出和阅读邮件、搜索（只读，不改服务器上的状态），
+以及写信、回复和发信：
 
 ```sh
 # 添加账户（交互输入密码；脚本里用 --password-stdin）
@@ -67,10 +71,26 @@ catmail attachment 7 -o a.pdf   # 保存单个附件（ID 见 `catmail read` 的
 catmail search 季度报告          # 搜索主题、收发件人和已下载的正文
 catmail search from:张三 "quarterly report" -a me@example.com --folder INBOX
 catmail gc                      # 回收不再被引用的正文与附件文件
+
+# 写信：先存成草稿，--send 则直接发送
+catmail compose --to '张三 <zhang@example.com>, li@example.com' --bcc boss@example.com \
+    -s 周报 --body-file report.txt --attach 报表.xlsx
+catmail reply 42 --all --body '收到，谢谢！'   # 回复（全部），引用原文
+catmail draft list                # 草稿；draft show / edit / attach / detach / rm
+catmail send 3                    # 发送草稿 3，并存到"已发送"
+catmail outbox                    # 还没发完的邮件；outbox flush / retry / mark-sent / cancel
 ```
 
 `catmail ls <文件夹>` 的标记列：`*` 未读，`!` 已加星标，`@` 有附件。同步只读（EXAMINE），
 不会改动服务器上的任何状态；中途中断（断网、Ctrl-C）后再次运行会从断点继续。
+
+发信先把草稿冻结成 outbox 里的一份快照，再经 SMTP 发出、用 APPEND 存进服务器的"已发送"
+（服务器没有这个文件夹就不存）。暂时失败（断网、4xx）会按递增的间隔重试，`catmail outbox`
+可以看到原因；服务器永久拒绝（如收件人不存在）的需要用户处理：`outbox cancel` 把它变回草稿
+修改后再发，`outbox retry` 原样重发。发出邮件后、收到服务器确认前连接断了的，无法知道对方
+是否收到，**不会自动重发**，由用户确认后选择 `mark-sent`、`retry`（可能重复）或 `cancel`。
+保存到"已发送"失败只重试保存，不会重发邮件。命令行不在后台发信：`catmail send` 当场发送，
+没发出去的用 `catmail outbox flush` 再试。
 
 正文在第一次阅读时下载，阅读不会把邮件标为已读。不超过 2 MiB 的邮件整封下载（附件一并
 保存）；更大的邮件只下载正文，附件在第一次打开时再下载，其中超过 2 MiB 的正文部分也作为
@@ -132,6 +152,7 @@ cargo test -p catmail-core --test dovecot
 ```
 
 不设置这些环境变量时该测试自动跳过；其余协议测试用进程内的假服务器，不需要外部依赖。
+该测试会让一次 APPEND 因目录只读而失败，所以不能以 root 运行。
 
 CI（GitHub Actions）：
 
@@ -150,7 +171,7 @@ CI（GitHub Actions）：
 | `catmail-core` | 引擎与 `MailClient` 门面，前端唯一依赖 |
 | `catmail-cli` | `catmail` 命令行 |
 | `catmail-gui` | `catmail-gui` 图形界面（gpui-kit） |
-| `catmail-testkit` | 测试用的假 IMAP 服务器（故障注入），只作为 dev-dependency |
+| `catmail-testkit` | 测试用的假 IMAP / SMTP 服务器（故障注入），只作为 dev-dependency |
 
 参与开发（包括 AI agent）请先阅读 [AGENTS.md](AGENTS.md)。
 

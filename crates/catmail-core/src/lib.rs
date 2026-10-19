@@ -9,6 +9,7 @@ mod body;
 mod client;
 mod config;
 mod connection;
+mod drafts;
 mod engine;
 mod error;
 mod filename;
@@ -21,13 +22,16 @@ pub mod html {
 }
 mod runtime;
 mod secrets;
+mod send;
 mod sync;
 
 pub use catmail_proto::TlsConfig;
 pub use catmail_proto::imap::Error as ImapError;
+pub use catmail_proto::smtp::Error as SmtpError;
 pub use catmail_types::*;
 pub use client::{MailClient, MailClientBuilder};
 pub use config::Config;
+pub use drafts::parse_addresses;
 pub use error::{Error, Result};
 pub use filename::safe_filename;
 pub use secrets::{KeyringSecrets, MemorySecrets, SecretStore};

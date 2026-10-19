@@ -6,10 +6,7 @@ use jiff::{Timestamp, Zoned, tz::TimeZone};
 /// `Name <a@example.com>` for each address, comma separated.
 pub fn addresses(list: &[Address]) -> String {
     list.iter()
-        .map(|a| match &a.name {
-            Some(name) => format!("{name} <{}>", a.email),
-            None => a.email.clone(),
-        })
+        .map(Address::to_string)
         .collect::<Vec<_>>()
         .join(", ")
 }

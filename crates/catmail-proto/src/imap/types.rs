@@ -1,28 +1,8 @@
 use std::collections::BTreeSet;
-use std::fmt;
 
 use catmail_types::{FlagState, FolderRole};
 
 use crate::mime::Headers;
-
-/// How to log in. Each variant maps to a SASL mechanism (or LOGIN), so supporting a new
-/// kind of credential (OAuth2 in M6) adds a variant here and leaves sync code alone.
-#[derive(Clone)]
-#[non_exhaustive]
-pub enum Credentials {
-    Password { username: String, password: String },
-}
-
-impl fmt::Debug for Credentials {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Password { username, .. } => f
-                .debug_struct("Password")
-                .field("username", username)
-                .finish_non_exhaustive(),
-        }
-    }
-}
 
 /// Server capabilities, upper-cased (`IMAP4REV1`, `AUTH=PLAIN`, `CONDSTORE`, …).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

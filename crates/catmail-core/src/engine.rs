@@ -7,7 +7,7 @@ use catmail_proto::TlsConfig;
 use catmail_proto::imap::Session;
 use catmail_store::{BlobStore, Db, Store};
 use catmail_types::{AccountId, Event};
-use tokio::sync::{OwnedMutexGuard, broadcast, watch};
+use tokio::sync::{Notify, OwnedMutexGuard, broadcast, watch};
 
 use crate::secrets::SecretStore;
 use crate::{Config, Error, Result};
@@ -25,6 +25,8 @@ pub(crate) struct Engine {
     pub events: broadcast::Sender<Event>,
     /// Set by the builder, else the platform verifier, created on first use.
     tls: OnceLock<TlsConfig>,
+    /// Wakes the outbox worker, if one runs: something became due.
+    pub outbox_kick: Arc<Notify>,
     accounts: Mutex<HashMap<AccountId, Arc<AccountState>>>,
 }
 
@@ -48,6 +50,8 @@ const IDLE_SESSIONS_PER_ACCOUNT: usize = 2;
 struct AccountState {
     /// Serializes syncs.
     sync: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes work on the outbox, so an entry is never sent or saved twice at once.
+    send: Arc<tokio::sync::Mutex<()>>,
     /// Set when removal starts; cancels running syncs and on-demand fetches.
     removed: watch::Sender<bool>,
     /// Logged-in connections for on-demand fetches, kept between requests so opening
@@ -55,14 +59,14 @@ struct AccountState {
     idle: Mutex<Vec<IdleSession>>,
 }
 
-/// Held while syncing an account.
-pub(crate) struct SyncPermit {
+/// Held while syncing an account, or while working on its outbox.
+pub(crate) struct Permit {
     _guard: OwnedMutexGuard<()>,
     cancellation: Cancellation,
 }
 
-impl SyncPermit {
-    /// The account was removed before the sync could start.
+impl Permit {
+    /// The account was removed before the work could start.
     pub fn is_cancelled(&self) -> bool {
         self.cancellation.is_cancelled()
     }
@@ -108,6 +112,7 @@ impl Engine {
             secrets,
             events,
             tls: tls.map(OnceLock::from).unwrap_or_default(),
+            outbox_kick: Arc::default(),
             accounts: Mutex::default(),
         }
     }
@@ -146,11 +151,24 @@ impl Engine {
     }
 
     /// Waits for any other sync of `account` to finish.
-    pub async fn sync_permit(&self, account: AccountId) -> SyncPermit {
+    pub async fn sync_permit(&self, account: AccountId) -> Permit {
+        self.permit(account, |state| &state.sync).await
+    }
+
+    /// Waits for any other work on `account`'s outbox to finish.
+    pub async fn send_permit(&self, account: AccountId) -> Permit {
+        self.permit(account, |state| &state.send).await
+    }
+
+    async fn permit(
+        &self,
+        account: AccountId,
+        lock: impl FnOnce(&AccountState) -> &Arc<tokio::sync::Mutex<()>>,
+    ) -> Permit {
         let state = self.account(account);
         let cancellation = Cancellation(state.removed.subscribe());
-        let guard = state.sync.clone().lock_owned().await;
-        SyncPermit {
+        let guard = lock(&state).clone().lock_owned().await;
+        Permit {
             _guard: guard,
             cancellation,
         }
@@ -208,6 +226,7 @@ impl Engine {
             .or_insert_with(|| {
                 Arc::new(AccountState {
                     sync: Arc::default(),
+                    send: Arc::default(),
                     removed: watch::Sender::new(false),
                     idle: Mutex::default(),
                 })
@@ -228,4 +247,11 @@ pub(crate) async fn blocking<T: Send + 'static>(
     tokio::task::spawn_blocking(f)
         .await
         .map_err(crate::runtime::join_error)?
+}
+
+/// Now, in unix seconds.
+pub(crate) fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
 }
