@@ -4,6 +4,7 @@
 //! HTML is rendered by GPUI Kit's text view with images resolved here (see
 //! [`crate::html`]): inline parts and `data:` URLs show, remote images never load.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -75,23 +76,32 @@ impl OpenMessage {
         .filter(|(_, value)| !value.is_empty())
         .map(|(name, value)| (name, value.into()))
         .collect();
-        let body = message.body;
-        let browser_html = body.as_ref().and_then(|b| b.html.clone());
+        let (text, browser_html, attachments) = match message.body {
+            Some(body) => (
+                body.text.map(SharedString::from),
+                body.html.map(SharedString::from),
+                body.attachments.into_iter().filter(|a| !a.inline).collect(),
+            ),
+            None => (None, None, Vec::new()),
+        };
+        // Most HTML has no layout to unwrap; the view then shares the browser's string.
+        let html = browser_html
+            .as_ref()
+            .map(|source| match unwrap_layout_tables(source) {
+                Cow::Borrowed(_) => source.clone(),
+                Cow::Owned(unwrapped) => unwrapped.into(),
+            });
         Self {
             id: summary.id,
             subject: format::subject(summary).into(),
             headers,
-            text: body.as_ref().and_then(|b| b.text.clone()).map(Into::into),
-            html: browser_html
-                .as_deref()
-                .map(|html| unwrap_layout_tables(html).into()),
+            text,
+            html,
             blocked_images: browser_html
                 .as_deref()
                 .is_some_and(html::has_blocked_images),
-            browser_html: browser_html.map(Into::into),
-            attachments: body
-                .map(|b| b.attachments.into_iter().filter(|a| !a.inline).collect())
-                .unwrap_or_default(),
+            browser_html,
+            attachments,
             images: Arc::default(),
         }
     }

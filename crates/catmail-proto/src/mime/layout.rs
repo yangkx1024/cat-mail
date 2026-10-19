@@ -1,8 +1,11 @@
-//! Layout tables, for renderers that can't lay them out.
+//! Layout tables and other blocks, for renderers that can't lay them out.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
+use std::io::Write;
 
 use html5ever::serialize::{HtmlSerializer, SerializeOpts, Serializer as _};
+use html5ever::tendril::StrTendril;
 use html5ever::tokenizer::{
     BufferQueue, Tag, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer, TokenizerOpts,
 };
@@ -48,6 +51,11 @@ const BLOCK_ELEMENTS: &[&str] = &[
     "ul",
 ];
 
+/// Blocks that a simple view lays out as inline text, so they become `div`s wherever they
+/// are. Checked against GPUI Kit 0.7.3's text view, whose block list has `div` but not
+/// these; newsletters center their layout tables with `center`.
+const INLINE_BLOCKS: &[&str] = &["center", "dd", "dt", "hgroup"];
+
 /// Elements without an end tag.
 const VOID_ELEMENTS: &[&str] = &[
     "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track",
@@ -59,20 +67,33 @@ const VOID_ELEMENTS: &[&str] = &[
 /// browser). Most newsletters wrap the whole body in tables whose cells hold headings,
 /// paragraphs, lists and more tables; such a renderer flattens all of it into one
 /// paragraph. A table becomes nested `div`s when one of its cells holds a block or it
-/// has at most one cell per row; other tables, which hold data, stay. `center` becomes a
-/// `div` too: it is a block, and newsletters center their layout tables with it.
-pub fn unwrap_layout_tables(html: &str) -> String {
+/// has at most one cell per row; other tables, which hold data, stay. The blocks such a
+/// renderer takes for inline elements (`center`, `dd`, `dt`, `hgroup`) become `div`s too.
+/// Borrows `html` when nothing changes, which is most mail that isn't a newsletter.
+pub fn unwrap_layout_tables(html: &str) -> Cow<'_, str> {
+    // The sanitizer writes tag names in lower case.
+    let mentions = |name: &str| html.contains(&format!("<{name}"));
+    if !mentions("table") && !INLINE_BLOCKS.iter().any(|name| mentions(name)) {
+        return Cow::Borrowed(html);
+    }
     let items = tokenize(html);
     let layout = layout_tables(&items);
+    let renames = layout.contains(&true)
+        || items
+            .iter()
+            .any(|item| matches!(item, Item::Start(tag) if is_inline_block(&tag.name)));
+    if !renames {
+        return Cow::Borrowed(html);
+    }
     // Only element names change, but the result goes through the sanitizer again so this
     // pass can't hand a renderer anything the sanitizer wouldn't.
-    sanitize_html(&rewrite(&items, &layout))
+    Cow::Owned(sanitize_html(&rewrite(&items, &layout)))
 }
 
 enum Item {
     Start(Tag),
     End(LocalName),
-    Text(String),
+    Text(StrTendril),
 }
 
 /// The sanitizer's output is serialized from a DOM, so its tags nest properly and a
@@ -85,19 +106,14 @@ fn tokenize(html: &str) -> Vec<Item> {
         type Handle = ();
 
         fn process_token(&self, token: Token, _line: u64) -> TokenSinkResult<()> {
-            let mut items = self.0.borrow_mut();
-            match token {
-                Token::TagToken(tag) if tag.kind == TagKind::StartTag => {
-                    items.push(Item::Start(tag));
-                }
-                Token::TagToken(tag) => items.push(Item::End(tag.name)),
-                Token::CharacterTokens(text) => match items.last_mut() {
-                    Some(Item::Text(last)) => last.push_str(&text),
-                    _ => items.push(Item::Text(text.to_string())),
-                },
+            let item = match token {
+                Token::TagToken(tag) if tag.kind == TagKind::StartTag => Item::Start(tag),
+                Token::TagToken(tag) => Item::End(tag.name),
+                Token::CharacterTokens(text) => Item::Text(text),
                 // The sanitizer leaves no comments or doctypes.
-                _ => {}
-            }
+                _ => return TokenSinkResult::Continue,
+            };
+            self.0.borrow_mut().push(item);
             TokenSinkResult::Continue
         }
     }
@@ -112,6 +128,10 @@ fn tokenize(html: &str) -> Vec<Item> {
 
 fn is_void(name: &LocalName) -> bool {
     VOID_ELEMENTS.contains(&&**name)
+}
+
+fn is_inline_block(name: &LocalName) -> bool {
+    INLINE_BLOCKS.contains(&&**name)
 }
 
 /// Whether each table, in document order, is a layout table.
@@ -174,27 +194,30 @@ fn layout_tables(items: &[Item]) -> Vec<bool> {
         .collect()
 }
 
+/// An element `rewrite` has opened.
+struct Open {
+    name: LocalName,
+    /// The name it was written with, `None` if it was left out.
+    written: Option<LocalName>,
+    /// For a table, whether it is a layout table.
+    layout_table: Option<bool>,
+}
+
 fn rewrite(items: &[Item], layout: &[bool]) -> String {
-    let html = |name: LocalName| QualName::new(None, ns!(html), name);
     let mut out = Vec::new();
     let mut serializer = HtmlSerializer::new(&mut out, SerializeOpts::default());
-    // Open elements as written (`None` for one left out), and whether each is a table.
-    let mut open: Vec<(LocalName, Option<LocalName>, bool)> = Vec::new();
-    // Whether each open table is a layout table, innermost last.
-    let mut tables: Vec<bool> = Vec::new();
-    let mut next_table = 0;
-    // Writing to a `Vec` can't fail.
+    let mut open: Vec<Open> = Vec::new();
+    let mut layout = layout.iter().copied();
     for item in items {
         match item {
             Item::Start(tag) => {
-                let is_table = tag.name == local_name!("table");
-                if is_table {
-                    tables.push(layout.get(next_table).copied().unwrap_or(false));
-                    next_table += 1;
-                }
-                let in_layout = tables.last().copied().unwrap_or(false);
+                let layout_table = (tag.name == local_name!("table"))
+                    .then(|| layout.next().expect("one flag per table"));
+                let in_layout = layout_table
+                    .or_else(|| open.iter().rev().find_map(|o| o.layout_table))
+                    .unwrap_or(false);
                 let written = match tag.name {
-                    local_name!("center") => Some(local_name!("div")),
+                    _ if is_inline_block(&tag.name) => Some(local_name!("div")),
                     local_name!("table")
                     | local_name!("caption")
                     | local_name!("thead")
@@ -213,43 +236,43 @@ fn rewrite(items: &[Item], layout: &[bool]) -> String {
                 };
                 if let Some(name) = &written {
                     let attrs = tag.attrs.iter().map(|a| (&a.name, &*a.value));
-                    serializer.start_elem(html(name.clone()), attrs).unwrap();
+                    serializer.start_elem(html_name(name), attrs).unwrap();
                 }
+                open.push(Open {
+                    name: tag.name.clone(),
+                    written,
+                    layout_table,
+                });
+                // The serializer pairs every start, even of a void element, with an end.
                 if is_void(&tag.name) {
-                    // The serializer pairs every start, even of a void element, with an end.
-                    if let Some(name) = written {
-                        serializer.end_elem(html(name)).unwrap();
-                    }
-                    if is_table {
-                        tables.pop();
-                    }
-                } else {
-                    open.push((tag.name.clone(), written, is_table));
+                    let last = open.len() - 1;
+                    close(&mut serializer, &mut open, last);
                 }
             }
             Item::End(name) => {
-                let Some(at) = open.iter().rposition(|(open, ..)| open == name) else {
-                    continue;
-                };
-                for (_, written, is_table) in open.drain(at..).rev() {
-                    if let Some(name) = written {
-                        serializer.end_elem(html(name)).unwrap();
-                    }
-                    if is_table {
-                        tables.pop();
-                    }
+                if let Some(at) = open.iter().rposition(|o| o.name == *name) {
+                    close(&mut serializer, &mut open, at);
                 }
             }
             Item::Text(text) => serializer.write_text(text).unwrap(),
         }
     }
-    for (_, written, _) in open.into_iter().rev() {
-        if let Some(name) = written {
-            serializer.end_elem(html(name)).unwrap();
-        }
-    }
+    close(&mut serializer, &mut open, 0);
     drop(serializer);
     String::from_utf8(out).expect("the serializer writes UTF-8")
+}
+
+/// Ends the open elements from `at` on, innermost first. Writing to a `Vec` can't fail.
+fn close(serializer: &mut HtmlSerializer<impl Write>, open: &mut Vec<Open>, at: usize) {
+    for element in open.drain(at..).rev() {
+        if let Some(name) = element.written {
+            serializer.end_elem(html_name(&name)).unwrap();
+        }
+    }
+}
+
+fn html_name(name: &LocalName) -> QualName {
+    QualName::new(None, ns!(html), name.clone())
 }
 
 #[cfg(test)]
@@ -299,7 +322,7 @@ mod tests {
             "<table><colgroup><col width=\"50%\"></colgroup>\
              <tr><td><b>a</b> <a href=\"https://example.com\">x</a></td><td>b</td></tr></table>",
         );
-        assert_eq!(unwrap_layout_tables(&data), data);
+        assert!(matches!(unwrap_layout_tables(&data), Cow::Borrowed(_)));
         let layout = sanitize_html(
             "<table><colgroup><col width=\"50%\"></colgroup><tr><td><p>a</p></td><td>b</td></tr></table>",
         );
@@ -330,8 +353,19 @@ mod tests {
     }
 
     #[test]
-    fn html_without_tables_is_unchanged() {
+    fn html_without_tables_is_borrowed() {
         let html = sanitize_html("<p>你好 <b>world</b></p><ul><li>x</li></ul><img src=\"cid:a\">");
-        assert_eq!(unwrap_layout_tables(&html), html);
+        assert!(matches!(unwrap_layout_tables(&html), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn blocks_taken_for_inline_become_divs() {
+        let html = sanitize_html(
+            "<hgroup><h1>a</h1></hgroup><dl><dt>b</dt><dd class=\"x\">c</dd></dl><center>d</center>",
+        );
+        assert_eq!(
+            unwrap_layout_tables(&html),
+            "<div><h1>a</h1></div><dl><div>b</div><div class=\"x\">c</div></dl><div>d</div>"
+        );
     }
 }

@@ -102,11 +102,9 @@ impl TestMail {
     /// INBOX's message with this subject, its body downloaded.
     pub fn download(&self, subject: &str) -> Message {
         pollster::block_on(async {
-            let inbox = self
-                .client
-                .find_folder(self.account.unwrap(), "inbox")
-                .await;
-            let inbox = inbox.unwrap().unwrap();
+            let account = self.account.unwrap();
+            let inbox = self.client.find_folder(account, "inbox").await.unwrap();
+            let inbox = inbox.unwrap();
             let listed = self.client.list_messages(inbox.id, 100, 0).await.unwrap();
             let summary = listed
                 .into_iter()
