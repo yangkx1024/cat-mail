@@ -1,11 +1,11 @@
 //! Where login credentials come from.
 //!
-//! The sync engine asks for [`Credentials`] and hands them to the protocol session; it
-//! never looks at how an account authenticates. Password accounts read the keyring
+//! The sync engine and the outbox ask for [`Credentials`] and hand them to the IMAP or
+//! SMTP session; they never look at how an account authenticates. Password accounts read the keyring
 //! here. OAuth2 (M6) adds an [`AuthKind`] variant whose arm refreshes the access token
 //! and returns an XOAUTH2/OAUTHBEARER credential, without touching sync code.
 
-use catmail_proto::imap::Credentials;
+use catmail_proto::Credentials;
 use catmail_types::{Account, AuthKind, NewAccount};
 
 use crate::secrets::SecretStore;

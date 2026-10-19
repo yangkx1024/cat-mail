@@ -82,6 +82,23 @@ impl<'c> Folders<'c> {
             .optional()?)
     }
 
+    /// The server name of the account's selectable folder with `role`, if it has one.
+    pub fn remote_name_by_role(
+        &self,
+        account: AccountId,
+        role: FolderRole,
+    ) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT remote_name FROM folders
+                 WHERE account_id = ?1 AND role = ?2 AND selectable ORDER BY id LIMIT 1",
+                params![account.0, role.as_str()],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     pub fn sync_states(&self, account: AccountId) -> Result<Vec<FolderSyncState>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, remote_name, name, selectable, uidvalidity, uidnext, highest_modseq,
@@ -283,6 +300,13 @@ mod tests {
         assert_eq!(names, ["INBOX", "Sent", "已发送"]);
         assert_eq!(folders[0].delimiter, Some('/'));
         assert_eq!(folders[2].role, Some(FolderRole::Sent));
+        let by_role = |role| {
+            store
+                .read(|db| db.folders().remote_name_by_role(account, role))
+                .unwrap()
+        };
+        assert_eq!(by_role(FolderRole::Sent).as_deref(), Some("&XfJT0ZAB-"));
+        assert_eq!(by_role(FolderRole::Trash), None);
 
         // "Sent" gains a role, the UTF-7 folder disappears together with its messages.
         let sent_utf7 = folders[2].id;

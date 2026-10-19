@@ -6,7 +6,7 @@ use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
 use crate::Result;
 use crate::attachments::{Attachments, NewAttachment};
-use crate::columns::{json, parse_opt_text, to_json};
+use crate::columns::{id_list, json, parse_opt_text, to_id_list, to_json};
 use crate::fts;
 
 const SUMMARY_COLUMNS: &str = "id, account_id, folder_id, thread_id, subject, from_json, date, snippet, flags, has_attachments";
@@ -24,6 +24,7 @@ pub struct NewMessage {
     pub from: Vec<Address>,
     pub to: Vec<Address>,
     pub cc: Vec<Address>,
+    pub reply_to: Vec<Address>,
     /// The Date header; INTERNALDATE is used when it is missing.
     pub date: Option<i64>,
     pub has_attachments: bool,
@@ -102,11 +103,12 @@ impl<'c> Messages<'c> {
         let mut insert = self.conn.prepare_cached(
             "INSERT INTO messages (account_id, folder_id, uid, flags, keywords_json, modseq,
                                    internal_date, size, message_id_hdr, in_reply_to,
-                                   references_hdr, subject, from_json, to_json, cc_json, date,
-                                   has_attachments)
+                                   references_hdr, subject, from_json, to_json, cc_json,
+                                   reply_to_json, date, has_attachments)
              VALUES (:account, :folder, :uid, :flags, :keywords, :modseq,
                      :internal_date, :size, :message_id, :in_reply_to,
-                     :references, :subject, :from, :to, :cc, :date, :has_attachments)
+                     :references, :subject, :from, :to, :cc, :reply_to, :date,
+                     :has_attachments)
              ON CONFLICT (folder_id, uid) DO NOTHING",
         )?;
         let mut inserted = 0;
@@ -122,11 +124,12 @@ impl<'c> Messages<'c> {
                 ":size": m.size,
                 ":message_id": m.message_id,
                 ":in_reply_to": m.in_reply_to,
-                ":references": (!m.references.is_empty()).then(|| m.references.join(" ")),
+                ":references": to_id_list(&m.references),
                 ":subject": m.subject,
                 ":from": to_json(&m.from),
                 ":to": to_json(&m.to),
                 ":cc": to_json(&m.cc),
+                ":reply_to": to_json(&m.reply_to),
                 ":date": m.date.or(m.internal_date),
                 ":has_attachments": m.has_attachments,
             })?;
@@ -242,7 +245,8 @@ impl<'c> Messages<'c> {
     /// The message with its full headers, and its body and attachments if downloaded.
     pub fn get(&self, id: MessageId) -> Result<Option<Message>> {
         let sql = format!(
-            "SELECT {SUMMARY_COLUMNS}, to_json, cc_json, message_id_hdr, size,
+            "SELECT {SUMMARY_COLUMNS}, to_json, cc_json, reply_to_json, message_id_hdr,
+                    references_hdr, size,
                     b.message_id IS NOT NULL AS has_body, b.text_plain, b.text_html
              FROM messages LEFT JOIN message_bodies b ON b.message_id = messages.id
              WHERE id = ?1"
@@ -264,7 +268,9 @@ impl<'c> Messages<'c> {
                     summary: summary_from_row(row)?,
                     to: json(row, "to_json")?,
                     cc: json(row, "cc_json")?,
+                    reply_to: json(row, "reply_to_json")?,
                     message_id: row.get("message_id_hdr")?,
+                    references: id_list(row, "references_hdr")?,
                     size: row.get("size")?,
                     body,
                 })

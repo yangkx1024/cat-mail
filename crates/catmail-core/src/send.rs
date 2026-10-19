@@ -1,0 +1,603 @@
+//! The outbox: queueing drafts, sending them over SMTP, saving them to Sent.
+//!
+//! Queueing builds the whole message once and stores it as a blob; every attempt sends
+//! exactly those bytes. An entry is worked on under the account's send permit, one
+//! step at a time, each step committed before the next starts:
+//!
+//! - `queued` → `sending` (counted as an attempt) → MAIL / RCPT / DATA and the message
+//!   body. A failure here can't have delivered anything: back to `queued` with backoff,
+//!   or `failed` if the server refused for good.
+//! - `unknown` is committed *before* the final dot. The server's 250 makes it
+//!   `accepted`; a refusal makes it `queued` or `failed`; anything else (lost
+//!   connection, timeout, crash) leaves it `unknown`, and only the user resends it.
+//! - `accepted` → APPEND to the Sent folder (at once, then retried with backoff),
+//!   checking first whether an earlier APPEND arrived after all → done: the entry and
+//!   its draft go.
+
+use std::sync::{Arc, Weak};
+use std::time::Duration;
+
+use catmail_proto::imap::Session;
+use catmail_proto::mime::{Outgoing, OutgoingAttachment, build_message};
+use catmail_proto::smtp;
+use catmail_store::{NewOutboxEntry, Outbox, OutboxJob};
+use catmail_types::{
+    AccountId, Address, BlobHash, DraftId, Event, Flags, FolderRole, OutboxEntry, OutboxId,
+    OutboxStatus,
+};
+use tokio::sync::Notify;
+use uuid::Uuid;
+
+use crate::connection::{self, SessionFuture, with_session};
+use crate::engine::{Engine, Permit, blocking, now};
+use crate::{Error, Result, body, drafts, sync};
+
+/// First retry after this long, doubling up to [`MAX_BACKOFF`].
+const FIRST_BACKOFF: i64 = 30;
+const MAX_BACKOFF: i64 = 30 * 60;
+
+/// Freezes the draft into an outbox entry: the message is built and stored now, with
+/// its Message-ID and Date, and the draft is locked until the entry is done or
+/// cancelled.
+pub(crate) async fn queue_draft(engine: &Arc<Engine>, id: DraftId) -> Result<OutboxEntry> {
+    let (snapshot, account) = engine
+        .read(move |db| {
+            let Some(snapshot) = db.drafts().snapshot(id)? else {
+                return Ok(None);
+            };
+            let account = db.accounts().get(snapshot.draft.account_id)?;
+            Ok(Some((snapshot, account)))
+        })
+        .await?
+        .ok_or(Error::DraftNotFound(id))?;
+    let account_id = snapshot.draft.account_id;
+    let account = account.ok_or_else(|| Error::AccountNotFound(account_id.to_string()))?;
+    if let Some(outbox) = snapshot.draft.outbox {
+        return Err(Error::Conflict(format!(
+            "draft {id} is already in the outbox (entry {outbox})"
+        )));
+    }
+    let content = &snapshot.draft.content;
+    drafts::validate(content)?;
+    let recipients = envelope_recipients(content.recipients());
+    if recipients.is_empty() {
+        return Err(Error::InvalidInput("the draft has no recipients".into()));
+    }
+
+    let domain = account
+        .email
+        .rsplit_once('@')
+        .map_or("localhost", |(_, d)| d);
+    let message_id = format!("{}@{domain}", Uuid::new_v4().simple());
+    let (revision, subject) = (snapshot.revision, content.subject.clone());
+    let envelope_from = account.email.clone();
+    let engine2 = engine.clone();
+    let message_id2 = message_id.clone();
+    let raw = blocking(move || {
+        let data = snapshot
+            .blobs
+            .iter()
+            .map(|blob| engine2.blobs.read(blob))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let draft = &snapshot.draft;
+        let from = Address {
+            name: account.display_name,
+            email: account.email,
+        };
+        let raw = build_message(&Outgoing {
+            from: &from,
+            to: &draft.content.to,
+            cc: &draft.content.cc,
+            subject: &draft.content.subject,
+            text: &draft.content.text,
+            message_id: &message_id2,
+            in_reply_to: draft.in_reply_to.as_deref(),
+            references: &draft.references,
+            date: now(),
+            attachments: draft
+                .attachments
+                .iter()
+                .zip(&data)
+                .map(|(a, data)| OutgoingAttachment {
+                    filename: &a.filename,
+                    mime_type: &a.mime_type,
+                    data,
+                })
+                .collect(),
+        });
+        Ok(engine2.blobs.put_bytes(&raw)?)
+    })
+    .await?;
+    let entry = NewOutboxEntry {
+        account: account_id,
+        draft: id,
+        revision,
+        raw,
+        message_id,
+        subject,
+        envelope_from,
+        recipients,
+    };
+    let entry = engine
+        .write(move |db| {
+            let id = db.outbox().queue(&entry, now())?;
+            db.outbox().get(id)
+        })
+        .await?
+        .expect("just queued");
+    engine.emit(Event::DraftsChanged {
+        account: account_id,
+    });
+    engine.emit(Event::OutboxChanged {
+        account: account_id,
+    });
+    engine.outbox_kick.notify_one();
+    Ok(entry)
+}
+
+/// Works through the account's outbox: sends what is queued, saving each message to
+/// Sent as soon as it is accepted, then saves what an earlier pass couldn't. With
+/// `due_only`, only entries whose backoff has run out. Returns the entries worked on, as
+/// they ended up (`Done` for those that are gone).
+pub(crate) async fn flush(
+    engine: Arc<Engine>,
+    account: AccountId,
+    due_only: bool,
+) -> Result<Vec<OutboxEntry>> {
+    let mut permit = engine.send_permit(account).await;
+    if permit.is_cancelled() {
+        return Err(Error::AccountNotFound(account.to_string()));
+    }
+    tokio::select! {
+        result = run(&engine, account, due_only) => result,
+        () = permit.cancelled() => Err(Error::Cancelled),
+    }
+}
+
+async fn run(engine: &Arc<Engine>, account: AccountId, due_only: bool) -> Result<Vec<OutboxEntry>> {
+    let pending = |status| {
+        let due = due_only.then(now);
+        engine.read(move |db| db.outbox().pending(account, status, due))
+    };
+    let mut results = Vec::new();
+    let mut postponed = false;
+
+    let mut smtp = Smtp::default();
+    for id in pending(OutboxStatus::Queued).await? {
+        if let Some(down) = &smtp.down {
+            // The server couldn't be reached for an earlier entry; this one would fail
+            // the same way.
+            let (next, error) = (now() + FIRST_BACKOFF, down.clone());
+            postponed |= engine
+                .write(move |db| db.outbox().postpone(id, next, &error, now()))
+                .await?;
+            continue;
+        }
+        let Some(job) = engine
+            .write(move |db| db.outbox().begin_send(id, now()))
+            .await?
+        else {
+            continue; // Cancelled meanwhile.
+        };
+        results.extend(send_one(engine, &mut smtp, job).await?);
+    }
+    if let Some(session) = smtp.session.take() {
+        session.quit().await;
+    }
+
+    // Saves that failed in an earlier pass; this pass's were tried already.
+    for id in pending(OutboxStatus::Accepted).await? {
+        if results.iter().any(|e: &OutboxEntry| e.id == id) {
+            continue;
+        }
+        let Some(job) = engine
+            .write(move |db| db.outbox().begin_save(id, now()))
+            .await?
+        else {
+            continue;
+        };
+        results.extend(save_one(engine, job, None).await?);
+    }
+    if !results.is_empty() || postponed {
+        engine.emit(Event::OutboxChanged { account });
+    }
+    Ok(results)
+}
+
+/// The SMTP connection of one pass over the outbox, reused from message to message.
+#[derive(Default)]
+struct Smtp {
+    session: Option<smtp::Session>,
+    /// Why connecting failed, which ends the sending part of the pass.
+    down: Option<String>,
+}
+
+/// How an attempt at sending ended.
+enum Outcome {
+    /// With the message, for saving it to Sent.
+    Accepted(Vec<u8>),
+    /// Nothing can have been delivered: try again later, or give up for good.
+    NotSent(Error),
+    /// Lost after the end of the message was sent.
+    Unknown(Error),
+    /// The entry went away (its account is being removed); nothing to record.
+    Gone,
+}
+
+/// Applies a transition and returns the entry as it is now stored, `None` if it is gone.
+async fn record(
+    engine: &Arc<Engine>,
+    id: OutboxId,
+    transition: impl FnOnce(&Outbox<'_>) -> catmail_store::Result<bool> + Send + 'static,
+) -> Result<Option<OutboxEntry>> {
+    engine
+        .write(move |db| {
+            transition(&db.outbox())?;
+            db.outbox().get(id)
+        })
+        .await
+}
+
+/// The entry as the attempt left it; one the server accepted is saved to Sent right
+/// away, with the message still at hand.
+async fn send_one(
+    engine: &Arc<Engine>,
+    smtp: &mut Smtp,
+    job: OutboxJob,
+) -> Result<Option<OutboxEntry>> {
+    let (id, account, attempts) = (job.entry.id, job.entry.account_id, job.entry.attempts);
+    let now = now();
+    match attempt_send(engine, smtp, &job).await {
+        Outcome::Accepted(raw) => {
+            let save = engine
+                .write(move |db| {
+                    db.outbox().mark_accepted(id, now)?;
+                    db.outbox().begin_save(id, now)
+                })
+                .await?;
+            engine.emit(Event::MessageSent {
+                account,
+                outbox: id,
+            });
+            match save {
+                Some(job) => save_one(engine, job, Some(raw)).await,
+                None => engine.read(move |db| db.outbox().get(id)).await,
+            }
+        }
+        Outcome::NotSent(e) if is_permanent(&e) => {
+            tracing::warn!(%id, error = %e, "message refused");
+            let error = e.to_string();
+            record(engine, id, move |o| o.fail(id, &error, now)).await
+        }
+        Outcome::NotSent(e) => {
+            tracing::info!(%id, error = %e, "sending failed; will retry");
+            let (next, error) = (now + backoff(attempts), e.to_string());
+            record(engine, id, move |o| o.requeue(id, next, &error, now)).await
+        }
+        Outcome::Unknown(e) => {
+            tracing::warn!(%id, error = %e, "no answer to the end of the message; outcome unknown");
+            let error = e.to_string();
+            record(engine, id, move |o| o.mark_unknown(id, Some(&error), now)).await
+        }
+        Outcome::Gone => Ok(None),
+    }
+}
+
+async fn attempt_send(engine: &Arc<Engine>, smtp: &mut Smtp, job: &OutboxJob) -> Outcome {
+    // Connect first: if the server is down, there is no need to read the message.
+    let mut session = match smtp.session.take() {
+        Some(session) => session,
+        None => match connection::connect_smtp(engine, job.entry.account_id).await {
+            Ok(session) => session,
+            Err(e) => {
+                smtp.down = Some(e.to_string());
+                return Outcome::NotSent(e);
+            }
+        },
+    };
+    let raw = match read_raw(engine, job.raw.clone()).await {
+        Ok(raw) => raw,
+        Err(e) => {
+            smtp.session = Some(session);
+            return Outcome::NotSent(e);
+        }
+    };
+    let (outcome, usable) = transact(engine, &mut session, job, raw).await;
+    if usable {
+        smtp.session = Some(session);
+    }
+    outcome
+}
+
+/// One SMTP transaction. Also returns whether the connection can be used again.
+async fn transact(
+    engine: &Arc<Engine>,
+    session: &mut smtp::Session,
+    job: &OutboxJob,
+    raw: Vec<u8>,
+) -> (Outcome, bool) {
+    let sent = async {
+        session
+            .begin(&job.envelope_from, &job.entry.recipients, &raw)
+            .await?;
+        session.write_message(&raw).await
+    };
+    if let Err(e) = sent.await {
+        let usable = !e.is_fatal();
+        return (Outcome::NotSent(e.into()), usable);
+    }
+    // From here on the server may accept the message at any moment.
+    let id = job.entry.id;
+    match engine
+        .write(move |db| db.outbox().mark_unknown(id, None, now()))
+        .await
+    {
+        Ok(true) => {}
+        // The server discards the message once the connection drops without the end
+        // marker.
+        Ok(false) => return (Outcome::Gone, false),
+        Err(e) => return (Outcome::NotSent(e), false),
+    }
+    match session.end_message().await {
+        Ok(()) => (Outcome::Accepted(raw), true),
+        // A reply, even a refusal, is a verdict: the server has dropped the message.
+        Err(e @ smtp::Error::Reply { .. }) => (Outcome::NotSent(e.into()), true),
+        Err(e) => (Outcome::Unknown(e.into()), false),
+    }
+}
+
+/// `raw` is the message if the caller has it at hand. Returns the entry as it ended
+/// up, `None` if it is gone.
+async fn save_one(
+    engine: &Arc<Engine>,
+    job: OutboxJob,
+    raw: Option<Vec<u8>>,
+) -> Result<Option<OutboxEntry>> {
+    let id = job.entry.id;
+    let now = now();
+    match attempt_save(engine, &job, raw).await {
+        Ok(()) => {
+            if !engine.write(move |db| db.outbox().finish(id)).await? {
+                return Ok(None);
+            }
+            engine.emit(Event::DraftsChanged {
+                account: job.entry.account_id,
+            });
+            Ok(Some(OutboxEntry {
+                status: OutboxStatus::Done,
+                next_attempt_at: None,
+                last_error: None,
+                ..job.entry
+            }))
+        }
+        Err(e) => {
+            tracing::info!(%id, error = %e, "saving to Sent failed; will retry");
+            let (next, error) = (now + backoff(job.entry.attempts), e.to_string());
+            record(engine, id, move |o| o.save_later(id, next, &error, now)).await
+        }
+    }
+}
+
+/// APPENDs the message to the account's Sent folder, unless an earlier attempt that
+/// went unanswered put it there already. Without a Sent folder there is nothing to do.
+async fn attempt_save(engine: &Arc<Engine>, job: &OutboxJob, raw: Option<Vec<u8>>) -> Result<()> {
+    let account = job.entry.account_id;
+    let known = engine
+        .read(move |db| db.folders().remote_name_by_role(account, FolderRole::Sent))
+        .await?;
+    let raw = raw.map(Arc::new);
+    let (engine2, hash, message_id) = (
+        engine.clone(),
+        job.raw.clone(),
+        job.entry.message_id.clone(),
+    );
+    // Counted before each try, so past the first one an APPEND may have gone through.
+    let mut tries = job.entry.attempts;
+    let saved = with_session(engine, account, move |session| {
+        tries += 1;
+        let check_first = tries > 1;
+        let (engine, hash, message_id) = (engine2.clone(), hash.clone(), message_id.clone());
+        let (known, raw) = (known.clone(), raw.clone());
+        Box::pin(async move {
+            let sent = match known {
+                Some(name) => Some(name),
+                None => find_sent(session).await?,
+            };
+            let Some(sent) = sent else {
+                return Ok(false);
+            };
+            if check_first {
+                session.examine(&sent).await?;
+                if !session.uid_search_message_id(&message_id).await?.is_empty() {
+                    tracing::debug!(%message_id, "already in Sent");
+                    return Ok(true);
+                }
+            }
+            // Read only now that it is needed.
+            let raw = match raw {
+                Some(raw) => raw,
+                None => Arc::new(read_raw(&engine, hash).await?),
+            };
+            session.append(&sent, Flags::SEEN, &raw).await?;
+            Ok(true)
+        }) as SessionFuture<'_, bool>
+    })
+    .await?;
+    if !saved {
+        tracing::info!(%account, "the account has no Sent folder; not saving a copy");
+    }
+    Ok(())
+}
+
+/// The Sent folder by the server's say, for an account that hasn't been synced.
+async fn find_sent(session: &mut Session) -> Result<Option<String>> {
+    Ok(sync::remote_folders(session.list().await?)
+        .into_iter()
+        .find(|f| f.role == Some(FolderRole::Sent) && f.selectable)
+        .map(|f| f.remote_name))
+}
+
+/// The message as it was queued.
+async fn read_raw(engine: &Arc<Engine>, hash: BlobHash) -> Result<Vec<u8>> {
+    body::read_blob(engine, hash).await?.ok_or_else(|| {
+        Error::Conflict(
+            "the stored message is missing; cancel this entry and send the draft again".into(),
+        )
+    })
+}
+
+/// Trying again can't help: the server refused the message for good, or the settings
+/// or the message are wrong. Network trouble and 4xx replies are temporary.
+fn is_permanent(e: &Error) -> bool {
+    match e {
+        Error::Smtp(e) => e.is_permanent(),
+        // Lifted out of `Error::Smtp` (see `Error::from`).
+        Error::AuthFailed(_) | Error::Unsupported(_) => true,
+        Error::Secrets(_) | Error::Tls(_) | Error::Conflict(_) | Error::AccountNotFound(_) => true,
+        _ => false,
+    }
+}
+
+/// Seconds to wait after the `attempts`-th failed attempt.
+fn backoff(attempts: u32) -> i64 {
+    (FIRST_BACKOFF << attempts.saturating_sub(1).min(16)).min(MAX_BACKOFF)
+}
+
+/// Every address once (ignoring case), in order.
+fn envelope_recipients<'a>(addresses: impl IntoIterator<Item = &'a Address>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    addresses
+        .into_iter()
+        .filter(|a| seen.insert(a.email.to_ascii_lowercase()))
+        .map(|a| a.email.clone())
+        .collect()
+}
+
+/// The user asks for another attempt now.
+pub(crate) async fn retry(engine: &Arc<Engine>, id: OutboxId) -> Result<OutboxEntry> {
+    let entry = user_decision(engine, id, move |o| o.retry(id, now())).await?;
+    engine.outbox_kick.notify_one();
+    Ok(entry)
+}
+
+/// The user confirmed that a message with an unknown outcome was delivered.
+pub(crate) async fn mark_sent(engine: &Arc<Engine>, id: OutboxId) -> Result<OutboxEntry> {
+    let entry = user_decision(engine, id, move |o| o.mark_sent(id, now())).await?;
+    engine.outbox_kick.notify_one();
+    Ok(entry)
+}
+
+/// Returns the entry as it was before it was removed.
+pub(crate) async fn cancel(engine: &Arc<Engine>, id: OutboxId) -> Result<OutboxEntry> {
+    let entry = user_decision(engine, id, move |o| o.cancel(id)).await?;
+    engine.emit(Event::DraftsChanged {
+        account: entry.account_id,
+    });
+    Ok(entry)
+}
+
+/// Applies what the user decided about an entry, once no attempt is working on it.
+async fn user_decision(
+    engine: &Arc<Engine>,
+    id: OutboxId,
+    decide: impl FnOnce(&Outbox<'_>) -> catmail_store::Result<Option<OutboxEntry>> + Send + 'static,
+) -> Result<OutboxEntry> {
+    let _permit = decision_permit(engine, id).await?;
+    let entry = engine
+        .write(move |db| decide(&db.outbox()))
+        .await?
+        .ok_or(Error::OutboxNotFound(id))?;
+    engine.emit(Event::OutboxChanged {
+        account: entry.account_id,
+    });
+    Ok(entry)
+}
+
+/// Waits for work on the entry's outbox to pause. A user's decision applies to where an
+/// attempt left the entry: an `unknown` one may well be accepted the next moment, and
+/// changing it meanwhile would leave the attempt unable to record that.
+async fn decision_permit(engine: &Arc<Engine>, id: OutboxId) -> Result<Permit> {
+    let account = engine
+        .read(move |db| db.outbox().get(id))
+        .await?
+        .ok_or(Error::OutboxNotFound(id))?
+        .account_id;
+    Ok(engine.send_permit(account).await)
+}
+
+/// Sends whatever comes due, for as long as the engine exists. Holds the engine only
+/// while working, so it never keeps the data directory locked on its own.
+pub(crate) async fn worker(engine: Weak<Engine>, kick: Arc<Notify>) {
+    loop {
+        let Some(strong) = engine.upgrade() else {
+            return;
+        };
+        let wait = match work_due(&strong).await {
+            Ok(Some(next)) => (next - now()).max(1),
+            Ok(None) => i64::MAX,
+            Err(e) => {
+                tracing::warn!(error = %e, "outbox worker failed; trying again in a minute");
+                60
+            }
+        };
+        drop(strong);
+        let wait = Duration::from_secs(wait.min(MAX_BACKOFF) as u64);
+        tokio::select! {
+            () = kick.notified() => {}
+            () = tokio::time::sleep(wait) => {}
+        }
+    }
+}
+
+/// Works on every account with something due, all at once: one unreachable server
+/// doesn't hold up the others. Returns when the next entry is due.
+async fn work_due(engine: &Arc<Engine>) -> Result<Option<i64>> {
+    let due = now();
+    let accounts = engine.read(move |db| db.outbox().accounts_due(due)).await?;
+    let mut flushes = tokio::task::JoinSet::new();
+    for account in accounts {
+        let engine = engine.clone();
+        flushes.spawn(async move { (account, flush(engine, account, true).await) });
+    }
+    let mut failed = None;
+    while let Some(joined) = flushes.join_next().await {
+        match joined {
+            Ok((_, Ok(_) | Err(Error::Cancelled | Error::AccountNotFound(_)))) => {}
+            Ok((account, Err(e))) => {
+                tracing::warn!(%account, error = %e, "working on the outbox failed");
+                failed = Some(e);
+            }
+            Err(e) => failed = Some(crate::runtime::join_error(e)),
+        }
+    }
+    match failed {
+        Some(e) => Err(e),
+        None => engine.read(|db| db.outbox().next_attempt_at()).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backs_off_exponentially_up_to_a_cap() {
+        let waits: Vec<_> = (1..=8).map(backoff).collect();
+        assert_eq!(waits, [30, 60, 120, 240, 480, 960, 1800, 1800]);
+        assert_eq!(backoff(0), 30);
+        assert_eq!(backoff(u32::MAX), MAX_BACKOFF);
+    }
+
+    #[test]
+    fn envelope_has_every_recipient_once() {
+        let a = |email: &str| Address {
+            name: None,
+            email: email.into(),
+        };
+        let list = [a("x@example.com"), a("y@example.com"), a("X@Example.com")];
+        assert_eq!(
+            envelope_recipients(&list),
+            ["x@example.com", "y@example.com"]
+        );
+    }
+}

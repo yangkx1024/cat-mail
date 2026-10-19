@@ -3,16 +3,19 @@
 //! Skipped unless `CATMAIL_TEST_IMAP` (host:port) and `CATMAIL_TEST_MAILDIR` are set;
 //! `CATMAIL_TEST_IMAP_REQUIRED=1` turns the skip into a failure (CI).
 //! The fixture folders are only read; changes happen in a fresh folder per run, written
-//! straight into the maildir, so the test can be rerun against the same server.
+//! straight into the maildir, and in Sent, where the test finds its message by subject,
+//! so it can be rerun against the same server.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use catmail_core::{
-    AuthKind, Config, Flags, FolderRole, MailClient, MemorySecrets, MessageSummary, NewAccount,
-    SearchQuery, Security, ServerConfig, SyncReport,
+    AccountId, Address, AuthKind, Config, DraftContent, Flags, FolderRole, MailClient,
+    MemorySecrets, MessageSummary, NewAccount, OutboxStatus, SearchQuery, Security, ServerConfig,
+    SyncReport,
 };
+use catmail_testkit::{FakeSmtp, SmtpState};
 use tokio::runtime::Handle;
 
 fn target() -> Option<(String, u16, PathBuf)> {
@@ -69,7 +72,7 @@ async fn syncs_against_dovecot() {
                 display_name: None,
                 username: "catmail".into(),
                 imap: server.clone(),
-                smtp: server,
+                smtp: server.clone(),
                 auth: AuthKind::Password,
             },
             "catmail".into(),
@@ -207,6 +210,96 @@ async fn syncs_against_dovecot() {
     assert_eq!(client.attachment_content(clip.id).await.unwrap(), video);
 
     fs::remove_dir_all(&folder_dir).unwrap();
+
+    check_saving_to_sent(&client, account, server, &maildir, &run).await;
+}
+
+/// Sends through the fake SMTP server (Dovecot here only does IMAP) and saves to
+/// Dovecot's Sent folder: the first APPEND fails, so the second one first searches Sent
+/// for the message, against a real server too. The failure comes from a read-only
+/// directory, so this can't run as root.
+async fn check_saving_to_sent(
+    client: &MailClient,
+    reader: AccountId,
+    imap: ServerConfig,
+    maildir: &Path,
+    run: &str,
+) {
+    let smtp = FakeSmtp::start(SmtpState::new("catmail", "catmail")).await;
+    // Never synced: the Sent folder comes from LIST.
+    let sender = client
+        .add_account(
+            NewAccount {
+                email: "sender@example.com".into(),
+                display_name: Some("发件人".into()),
+                username: "catmail".into(),
+                imap,
+                smtp: ServerConfig {
+                    host: "127.0.0.1".into(),
+                    port: smtp.port(),
+                    security: Security::Plain,
+                },
+                auth: AuthKind::Password,
+            },
+            "catmail".into(),
+        )
+        .await
+        .unwrap()
+        .id;
+    let subject = format!("sent {run}");
+    let draft = client
+        .create_draft(
+            sender,
+            DraftContent {
+                subject: subject.clone(),
+                to: vec![Address {
+                    name: None,
+                    email: "bob@example.com".into(),
+                }],
+                text: "发送测试".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    client.send_draft(draft.id).await.unwrap();
+
+    let tmp = maildir.join(".Sent").join("tmp");
+    let writable = fs::metadata(&tmp).unwrap().permissions();
+    let mut readonly = writable.clone();
+    readonly.set_readonly(true);
+    fs::set_permissions(&tmp, readonly).unwrap();
+    let first = client.flush_outbox(sender).await;
+    fs::set_permissions(&tmp, writable).unwrap();
+    let first = first.unwrap();
+    assert_eq!(first[0].status, OutboxStatus::Accepted, "{first:?}");
+    assert!(first[0].last_error.is_some());
+    assert_eq!(smtp.state().received.len(), 1);
+
+    let second = client.flush_outbox(sender).await.unwrap();
+    assert_eq!(
+        (second[0].status, second[0].attempts),
+        (OutboxStatus::Done, 2),
+        "{second:?}"
+    );
+    assert_eq!(smtp.state().received.len(), 1, "sent once");
+
+    client.sync_account(reader).await.unwrap();
+    let sent = client.find_folder(reader, "Sent").await.unwrap().unwrap();
+    let copies: Vec<_> = client
+        .list_messages(sent.id, 1000, 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|m| m.subject.as_deref() == Some(subject.as_str()))
+        .collect();
+    assert_eq!(copies.len(), 1, "saved once");
+    assert!(copies[0].flags.contains(Flags::SEEN));
+    let from = &copies[0].from[0];
+    assert_eq!(
+        (from.name.as_deref(), from.email.as_str()),
+        (Some("发件人"), "sender@example.com")
+    );
 }
 
 fn large_message(attachment: &[u8]) -> Vec<u8> {

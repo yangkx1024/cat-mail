@@ -33,6 +33,19 @@ pub(crate) fn to_json<T: Serialize + ?Sized>(value: &T) -> String {
     serde_json::to_string(value).expect("plain data serializes")
 }
 
+/// Reads a Message-ID list (References), stored space-separated without brackets.
+pub(crate) fn id_list(row: &Row<'_>, col: &str) -> rusqlite::Result<Vec<String>> {
+    let value: Option<String> = row.get(col)?;
+    Ok(value
+        .map(|ids| ids.split_whitespace().map(String::from).collect())
+        .unwrap_or_default())
+}
+
+/// NULL for an empty list.
+pub(crate) fn to_id_list(ids: &[String]) -> Option<String> {
+    (!ids.is_empty()).then(|| ids.join(" "))
+}
+
 fn parse_value<T: FromStr<Err = String>>(
     row: &Row<'_>,
     col: &str,

@@ -12,18 +12,17 @@ use imap_next::imap_types::mailbox::{ListMailbox, Mailbox};
 use imap_next::imap_types::response::{Code, Data, GreetingKind};
 use imap_next::imap_types::search::SearchKey;
 use imap_next::imap_types::sequence::{Sequence, SequenceSet};
-use rustls::pki_types::ServerName;
-use tokio::net::TcpStream;
 
-use super::connection::{Connection, Response, with_timeout};
+use super::connection::{Connection, Response};
 use super::{
     Capabilities, Credentials, Error, FetchedMessage, ListedMailbox, MailboxStatus, Result, utf7,
 };
-use crate::TlsConfig;
 use crate::mime::{Headers, MimeNode, SUMMARY_HEADER_FIELDS, parse_headers};
+use crate::{TlsConfig, net};
 
-/// An IMAP connection, from greeting to logout. Read-only for now: mailboxes are opened
-/// with EXAMINE, and bodies fetched with `BODY.PEEK`, which leaves `\Seen` alone.
+/// An IMAP connection, from greeting to logout. Reading never changes the server:
+/// mailboxes are opened with EXAMINE, and bodies fetched with `BODY.PEEK`, which leaves
+/// `\Seen` alone. The one write is [`append`](Self::append), for saving sent messages.
 pub struct Session {
     conn: Connection,
     caps: Capabilities,
@@ -40,21 +39,7 @@ impl Session {
         tls: &TlsConfig,
         timeout: Duration,
     ) -> Result<Self> {
-        let tcp = with_timeout(
-            timeout,
-            TcpStream::connect((server.host.as_str(), server.port)),
-        )
-        .await?;
-        tcp.set_nodelay(true)?;
-        let server_name = ServerName::try_from(server.host.clone())
-            .map_err(|_| Error::InvalidServerName(server.host.clone()))?;
-
-        let stream: Box<dyn super::connection::Stream> = match server.security {
-            Security::Tls => Box::new(
-                with_timeout(timeout, tls.connector().connect(server_name.clone(), tcp)).await?,
-            ),
-            Security::StartTls | Security::Plain => Box::new(tcp),
-        };
+        let (stream, server_name) = net::connect(server, tls, timeout).await?;
         let mut conn = Connection::new(stream, true, timeout);
         let greeting = conn.greeting().await?;
         let mut caps = match greeting.code {
@@ -79,11 +64,7 @@ impl Session {
                 return Err(Error::Unsupported("STARTTLS"));
             }
             conn.execute(CommandBody::StartTLS).await?;
-            let tls_stream = with_timeout(
-                timeout,
-                tls.connector().connect(server_name, conn.into_stream()),
-            )
-            .await?;
+            let tls_stream = net::start_tls(conn.into_stream(), &server_name, tls, timeout).await?;
             conn = Connection::new(Box::new(tls_stream), false, timeout);
             // Anything learned before TLS may have been tampered with.
             caps = Capabilities::default();
@@ -111,11 +92,7 @@ impl Session {
         let response = match credentials {
             Credentials::Password { username, password } => {
                 if self.caps.has("AUTH=PLAIN") {
-                    let mut initial = Vec::with_capacity(username.len() + password.len() + 2);
-                    initial.push(0);
-                    initial.extend_from_slice(username.as_bytes());
-                    initial.push(0);
-                    initial.extend_from_slice(password.as_bytes());
+                    let initial = Credentials::sasl_plain(username, password);
                     self.conn
                         .authenticate(AuthMechanism::Plain, initial)
                         .await?
@@ -237,6 +214,39 @@ impl Session {
         };
         self.selected = Some(status);
         Ok(status)
+    }
+
+    /// Adds `message` to the mailbox `raw_name`. Returns its UIDVALIDITY and UID if the
+    /// server says (UIDPLUS).
+    pub async fn append(
+        &mut self,
+        raw_name: &str,
+        flags: Flags,
+        message: &[u8],
+    ) -> Result<Option<(u32, u32)>> {
+        let flags = SYSTEM_FLAGS
+            .into_iter()
+            .filter(|(bit, _)| flags.contains(*bit))
+            .map(|(_, flag)| flag)
+            .collect();
+        let body = CommandBody::append(raw_name.to_owned(), flags, None, message.to_vec())
+            .map_err(|e| Error::Protocol(format!("can't APPEND to `{raw_name}`: {e:?}")))?;
+        let response = self.conn.execute(body).await?;
+        Ok(response.codes.iter().find_map(|code| match code {
+            Code::AppendUid { uid_validity, uid } => Some((uid_validity.get(), uid.get())),
+            _ => None,
+        }))
+    }
+
+    /// UIDs of messages in the selected mailbox with this Message-ID (without angle
+    /// brackets), ascending.
+    pub async fn uid_search_message_id(&mut self, message_id: &str) -> Result<Vec<u32>> {
+        let key = SearchKey::Header(
+            AString::try_from("Message-ID").expect("valid header name"),
+            AString::try_from(format!("<{message_id}>"))
+                .map_err(|_| Error::Protocol(format!("invalid Message-ID `{message_id}`")))?,
+        );
+        self.uid_search(key).await
     }
 
     /// Every UID in the selected mailbox, ascending.
@@ -640,6 +650,15 @@ fn special_use(attribute: &str) -> Option<FolderRole> {
         .filter(|role| *role != FolderRole::Inbox)
 }
 
+/// The system flags stored as [`Flags`] bits.
+const SYSTEM_FLAGS: [(Flags, Flag<'static>); 5] = [
+    (Flags::SEEN, Flag::Seen),
+    (Flags::FLAGGED, Flag::Flagged),
+    (Flags::ANSWERED, Flag::Answered),
+    (Flags::DRAFT, Flag::Draft),
+    (Flags::DELETED, Flag::Deleted),
+];
+
 fn convert_flags(flags: &[FlagFetch<'_>]) -> (Flags, Vec<String>) {
     let mut out = Flags::empty();
     let mut keywords = Vec::new();
@@ -647,13 +666,9 @@ fn convert_flags(flags: &[FlagFetch<'_>]) -> (Flags, Vec<String>) {
         let FlagFetch::Flag(flag) = flag else {
             continue; // \Recent is per-session and meaningless to store.
         };
-        match flag {
-            Flag::Seen => out.insert(Flags::SEEN),
-            Flag::Flagged => out.insert(Flags::FLAGGED),
-            Flag::Answered => out.insert(Flags::ANSWERED),
-            Flag::Draft => out.insert(Flags::DRAFT),
-            Flag::Deleted => out.insert(Flags::DELETED),
-            other => keywords.push(other.to_string()),
+        match SYSTEM_FLAGS.iter().find(|(_, f)| f == flag) {
+            Some((bit, _)) => out.insert(*bit),
+            None => keywords.push(flag.to_string()),
         }
     }
     keywords.sort();

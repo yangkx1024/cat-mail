@@ -1,7 +1,8 @@
 //! MIME helpers on top of `mail-parser`: summary headers, and the readable content of
 //! a message (text, sanitized HTML, attachments), from the raw message or from its
-//! BODYSTRUCTURE plus selected parts.
+//! BODYSTRUCTURE plus selected parts. Outgoing messages are built with `mail-builder`.
 
+mod build;
 mod content;
 mod html;
 mod layout;
@@ -10,6 +11,7 @@ mod structure;
 use catmail_types::Address;
 use mail_parser::{HeaderValue, MessageParser};
 
+pub use build::{Outgoing, OutgoingAttachment, build_message};
 pub use content::{Content, Part, content_id_from_url, decode_transfer, parse_message};
 pub use html::{InlineImage, embed_inline_images, image_sources, sanitize_html};
 pub use layout::unwrap_layout_tables;
@@ -25,6 +27,7 @@ pub const SUMMARY_HEADER_FIELDS: &[&str] = &[
     "MESSAGE-ID",
     "IN-REPLY-TO",
     "REFERENCES",
+    "REPLY-TO",
 ];
 
 /// Decoded summary headers. RFC 2047 encoded words and legacy charsets (GBK, Big5,
@@ -35,6 +38,7 @@ pub struct Headers {
     pub from: Vec<Address>,
     pub to: Vec<Address>,
     pub cc: Vec<Address>,
+    pub reply_to: Vec<Address>,
     /// The Date header as unix seconds.
     pub date: Option<i64>,
     /// Without angle brackets.
@@ -72,8 +76,12 @@ pub fn parse_headers(raw: &[u8]) -> Headers {
         from: addresses(msg.from()),
         to: addresses(msg.to()),
         cc: addresses(msg.cc()),
+        reply_to: addresses(msg.reply_to()),
         date: msg.date().map(|d| d.to_timestamp()),
-        message_id: msg.message_id().map(String::from),
+        message_id: msg
+            .message_id()
+            .filter(|id| fits_in_angle_brackets(id))
+            .map(String::from),
         in_reply_to: id_list(msg.in_reply_to()),
         references: id_list(msg.references()),
     }
@@ -82,8 +90,23 @@ pub fn parse_headers(raw: &[u8]) -> Headers {
 fn id_list(value: &HeaderValue<'_>) -> Vec<String> {
     value
         .as_text_list()
-        .map(|ids| ids.iter().map(|id| id.to_string()).collect())
+        .map(|ids| {
+            ids.iter()
+                .filter(|id| fits_in_angle_brackets(id))
+                .map(|id| id.to_string())
+                .collect()
+        })
         .unwrap_or_default()
+}
+
+/// What may stand between `<` and `>` in a header or an SMTP command: visible ASCII
+/// other than the brackets. mail-parser keeps control characters in Message-IDs, and a
+/// bare CR would become a line break on the way out (SMTP and IMAP want CRLF), starting
+/// a header or command of the sender's choosing.
+pub(crate) fn fits_in_angle_brackets(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_graphic() && !matches!(b, b'<' | b'>'))
 }
 
 #[cfg(test)]
@@ -100,6 +123,7 @@ mod tests {
             Message-ID: <abc@example.com>\r\n\
             In-Reply-To: <parent@example.com>\r\n\
             References: <root@example.com>\r\n <parent@example.com>\r\n\
+            Reply-To: list@example.com\r\n\
             \r\n";
         let h = parse_headers(raw);
         assert_eq!(h.subject.as_deref(), Some("你好 world"));
@@ -113,10 +137,21 @@ mod tests {
         let emails = |v: &[Address]| v.iter().map(|a| a.email.clone()).collect::<Vec<_>>();
         assert_eq!(emails(&h.to), ["a@example.com", "b@example.com"]);
         assert_eq!(emails(&h.cc), ["c@example.com", "d@example.com"]);
+        assert_eq!(emails(&h.reply_to), ["list@example.com"]);
         assert_eq!(h.date, Some(1_792_200_600));
         assert_eq!(h.message_id.as_deref(), Some("abc@example.com"));
         assert_eq!(h.in_reply_to, ["parent@example.com"]);
         assert_eq!(h.references, ["root@example.com", "parent@example.com"]);
+    }
+
+    #[test]
+    fn drops_message_ids_that_could_break_a_line() {
+        let h = parse_headers(
+            b"Message-ID: <evil\rX-Injected: yes@x>\r\n\
+              References: <ok@x> <r1\rX-R: 1@x>\r\n\r\n",
+        );
+        assert_eq!(h.message_id, None);
+        assert_eq!(h.references, ["ok@x"]);
     }
 
     #[test]

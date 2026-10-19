@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{AccountId, FolderId};
+use crate::{AccountId, FolderId, OutboxId};
 
 /// Change notifications broadcast by the engine. Frontends subscribe and re-query the
 /// affected data instead of receiving full payloads, so a lagging subscriber can always
@@ -23,5 +23,18 @@ pub enum Event {
     MessagesChanged {
         account: AccountId,
         folder: FolderId,
+    },
+    /// Drafts were created, changed, queued for sending or deleted.
+    DraftsChanged {
+        account: AccountId,
+    },
+    /// Entries in the outbox changed state, appeared or went away.
+    OutboxChanged {
+        account: AccountId,
+    },
+    /// The server accepted a message for delivery.
+    MessageSent {
+        account: AccountId,
+        outbox: OutboxId,
     },
 }

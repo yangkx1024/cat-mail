@@ -13,6 +13,11 @@ pub enum Error {
 
     #[error("{0} already exists")]
     AlreadyExists(String),
+
+    /// The row is in a state that doesn't allow the change, e.g. editing a draft that is
+    /// being sent. The text says why.
+    #[error("{0}")]
+    Conflict(String),
 }
 
 pub(crate) fn is_unique_violation(err: &rusqlite::Error) -> bool {

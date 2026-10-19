@@ -41,7 +41,7 @@ code or tests. `nix.yml` checks `flake.nix` formatting (`nix fmt`) and the dev s
 | `catmail-core` | Engine, services, runtime bridge, secrets, the `MailClient` facade |
 | `catmail-cli` | The `catmail` binary |
 | `catmail-gui` | The `catmail-gui` desktop binary, on GPUI Kit |
-| `catmail-testkit` | Fake IMAP server with fault injection; dev-dependency only |
+| `catmail-testkit` | Fake IMAP and SMTP servers with fault injection; dev-dependency only |
 
 Frontends depend on `catmail-core` only; it re-exports the types they need.
 
@@ -50,8 +50,8 @@ read the vendored GPUI Kit skills in `crates/catmail-gui/.claude/skills/` (`gpui
 the Coding Guides, `gpui-kit-design-guides` the Design Guides; see their `README.md` for
 the upstream commit).
 
-Protocol behaviour is tested against `catmail-testkit`'s fake server (every OS) and a real
-Dovecot (`testenv/dovecot/run.sh`, Linux CI job). New sync or protocol behaviour gets a
+Protocol behaviour is tested against `catmail-testkit`'s fake servers (every OS) and a real
+Dovecot (`testenv/dovecot/run.sh`, Linux CI job; IMAP only, SMTP stays on the fake). New sync or protocol behaviour gets a
 fake-server test, with a fault injected if the change is about recovering from one.
 
 ## Rules that are easy to break
@@ -79,6 +79,11 @@ fake-server test, with a fault injected if the change is about recovering from o
   `Db::blob_references` (a test enumerates them), or GC deletes what it points to.
 - **Message bodies** are fetched with EXAMINE and `BODY.PEEK` only; nothing that reads
   mail may change server state (flags included) before M4's operation queue.
+- **Outbox sends are never repeated behind the user's back.** `unknown` is committed
+  *before* the final dot of SMTP DATA, and only the user moves an entry out of it.
+  Retries before that point are safe (the server discards an unfinished message);
+  saving to Sent never resends. Keep the attempt count bumped before each APPEND, so a
+  retry checks Sent first.
 - **One engine per data directory**, enforced by the lock file. Don't add code paths that
   open the database without going through `MailClient`.
 

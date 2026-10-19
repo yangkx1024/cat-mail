@@ -284,9 +284,9 @@ async fn attachment_source(engine: &Arc<Engine>, id: AttachmentId) -> Result<Att
 }
 
 /// `None` if the blob has gone missing from disk, so the caller fetches it again.
-async fn read_blob(engine: &Arc<Engine>, hash: BlobHash) -> Result<Option<Vec<u8>>> {
+pub(crate) async fn read_blob(engine: &Arc<Engine>, hash: BlobHash) -> Result<Option<Vec<u8>>> {
     let engine = engine.clone();
-    blocking(move || match std::fs::read(engine.blobs.path(&hash)) {
+    blocking(move || match engine.blobs.read(&hash) {
         Ok(data) => Ok(Some(data)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             tracing::warn!(%hash, "referenced blob is missing; fetching again");

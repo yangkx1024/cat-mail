@@ -3,11 +3,15 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
-    Store(#[from] catmail_store::Error),
+    Store(catmail_store::Error),
 
-    /// Any other protocol or network failure.
+    /// Any other IMAP or network failure.
     #[error(transparent)]
     Imap(catmail_proto::imap::Error),
+
+    /// Any other SMTP failure.
+    #[error(transparent)]
+    Smtp(catmail_proto::smtp::Error),
 
     /// The server rejected the credentials.
     #[error("login rejected by the server ({0}); check the username and password")]
@@ -31,6 +35,20 @@ pub enum Error {
 
     #[error("attachment {0} not found")]
     AttachmentNotFound(catmail_types::AttachmentId),
+
+    #[error("draft {0} not found")]
+    DraftNotFound(catmail_types::DraftId),
+
+    #[error("draft attachment {0} not found")]
+    DraftAttachmentNotFound(catmail_types::DraftAttachmentId),
+
+    #[error("outbox entry {0} not found")]
+    OutboxNotFound(catmail_types::OutboxId),
+
+    /// The draft or outbox entry is in a state that doesn't allow this, e.g. editing a
+    /// draft that is being sent. The text says why.
+    #[error("{0}")]
+    Conflict(String),
 
     /// The local copy no longer matches the server: the message was expunged, or its
     /// folder got a new UIDVALIDITY. The next sync brings it up to date.
@@ -66,6 +84,27 @@ impl From<catmail_proto::imap::Error> for Error {
             E::AuthFailed(text) => Self::AuthFailed(text),
             E::Unsupported(what) => Self::Unsupported(what),
             other => Self::Imap(other),
+        }
+    }
+}
+
+impl From<catmail_proto::smtp::Error> for Error {
+    /// Lifts the failures a user can act on, as for IMAP.
+    fn from(e: catmail_proto::smtp::Error) -> Self {
+        use catmail_proto::smtp::Error as E;
+        match e {
+            E::AuthFailed(text) => Self::AuthFailed(text),
+            E::Unsupported(what) => Self::Unsupported(what),
+            other => Self::Smtp(other),
+        }
+    }
+}
+
+impl From<catmail_store::Error> for Error {
+    fn from(e: catmail_store::Error) -> Self {
+        match e {
+            catmail_store::Error::Conflict(text) => Self::Conflict(text),
+            other => Self::Store(other),
         }
     }
 }

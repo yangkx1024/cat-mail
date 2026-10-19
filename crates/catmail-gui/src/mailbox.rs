@@ -114,6 +114,10 @@ impl Mailbox {
                         .update(cx, |list, cx| message_list::refresh(list, window, cx));
                 }
             }
+            // No composing in the reading window yet (M5).
+            Event::DraftsChanged { .. }
+            | Event::OutboxChanged { .. }
+            | Event::MessageSent { .. } => {}
         }
     }
 

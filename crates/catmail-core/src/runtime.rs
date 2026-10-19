@@ -40,6 +40,14 @@ impl Runtime {
         self.handle.spawn(fut).await.map_err(join_error)?
     }
 
+    /// Starts `fut` on the engine runtime and leaves it running.
+    pub(crate) fn spawn<F>(&self, fut: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.handle.spawn(fut);
+    }
+
     /// Runs blocking work (SQLite, keyring) on the runtime's blocking pool.
     pub(crate) async fn run_blocking<F, T>(&self, f: F) -> Result<T>
     where

@@ -84,6 +84,7 @@ CREATE TABLE messages (
     from_json       TEXT    NOT NULL DEFAULT '[]',
     to_json         TEXT    NOT NULL DEFAULT '[]',
     cc_json         TEXT    NOT NULL DEFAULT '[]',
+    reply_to_json   TEXT    NOT NULL DEFAULT '[]',
     date            INTEGER, -- the Date header, else INTERNALDATE; the list sort key
     snippet         TEXT,
     has_attachments INTEGER NOT NULL DEFAULT 0,
@@ -145,17 +146,27 @@ CREATE TABLE attachments (
     UNIQUE (message_id, part_section)
 ) STRICT;
 
+-- Messages being written. Local only for now: the copy on the server's Drafts folder
+-- (remote_*) needs deleting the previous copy on every save, which waits for the
+-- operation queue (M4).
 CREATE TABLE drafts (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id          INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
     -- Same-account only; checked by the repository (SET NULL rules out a composite FK).
     reply_to_message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
-    subject             TEXT,
+    -- Threading headers of the reply, copied from the original when the draft was
+    -- created, so deleting the original doesn't break the thread. Without brackets;
+    -- references_hdr is space-separated.
+    in_reply_to         TEXT,
+    references_hdr      TEXT,
+    subject             TEXT    NOT NULL DEFAULT '',
     to_json             TEXT    NOT NULL DEFAULT '[]',
     cc_json             TEXT    NOT NULL DEFAULT '[]',
     bcc_json            TEXT    NOT NULL DEFAULT '[]',
-    body_text           TEXT,
-    body_html           TEXT,
+    body_text           TEXT    NOT NULL DEFAULT '',
+    -- Bumped by every change, attachments included. Sending builds the message outside
+    -- the transaction that queues it, and queues only if this hasn't moved meanwhile.
+    revision            INTEGER NOT NULL DEFAULT 0,
     -- Copy uploaded to the server's Drafts folder. A UID means nothing without the
     -- mailbox and its UIDVALIDITY, so the three are set and cleared together.
     -- The repository clears all three before deleting a folder or changing its
@@ -169,12 +180,16 @@ CREATE TABLE drafts (
        AND (remote_folder_id IS NULL) = (remote_uid IS NULL))
 ) STRICT;
 
+CREATE INDEX drafts_account ON drafts (account_id, updated_at DESC);
+
+-- Files attached to a draft, copied into the blob store when added.
 CREATE TABLE draft_attachments (
-    id        INTEGER PRIMARY KEY,
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
     draft_id  INTEGER NOT NULL REFERENCES drafts(id) ON DELETE CASCADE,
     blob_hash TEXT    NOT NULL,
     filename  TEXT    NOT NULL,
-    mime_type TEXT    NOT NULL
+    mime_type TEXT    NOT NULL,
+    size      INTEGER NOT NULL
 ) STRICT;
 
 CREATE INDEX draft_attachments_draft ON draft_attachments (draft_id);
@@ -183,20 +198,35 @@ CREATE INDEX draft_attachments_draft ON draft_attachments (draft_id);
 -- re-read the draft. The SMTP envelope is stored separately from the MIME because Bcc
 -- recipients are not in the headers.
 --
+-- A draft with an outbox row is locked: it can't be edited, and it is deleted with the
+-- row once sent. Cancelling a send that never went out deletes the row only, which
+-- hands the draft back for editing.
+--
 -- status:
 --   queued    waiting for an attempt (next_attempt_at)
---   sending   SMTP transaction in progress
+--   sending   SMTP transaction in progress, the final dot not sent yet. Found at
+--             startup, it means the process died before the server could have
+--             accepted anything, so it goes back to queued.
+--   unknown   the final dot is (about to be) sent and the server's verdict hasn't
+--             arrived: written *before* sending the dot, so a crash or a lost
+--             connection from then on can't lead to an automatic resend, which might
+--             deliver twice. The user decides: retry, mark sent, or cancel.
 --   accepted  server accepted the message (250 after DATA); saving to Sent is pending.
 --             Only the APPEND is retried from here, never the SMTP send.
---   unknown   connection lost after the final DATA dot, outcome unknown. Never retried
---             automatically, since resending may deliver twice; the user decides.
---   done      sent and, where needed, saved to Sent
 --   failed    permanently rejected (e.g. 5xx); last_error says why
+--   (done)    sent and, where needed, saved to Sent: the row and its draft are deleted.
+--
+-- attempts counts tries at the current step and is bumped *before* each try: SMTP
+-- sends while queued, APPENDs once accepted (reset on acceptance). An APPEND with
+-- attempts > 1 first searches Sent for message_id_hdr, since an earlier one may have
+-- succeeded without the answer arriving.
 CREATE TABLE outbox (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id      INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
     draft_id        INTEGER REFERENCES drafts(id) ON DELETE SET NULL,
     raw_blob_hash   TEXT    NOT NULL,
+    message_id_hdr  TEXT    NOT NULL, -- without brackets
+    subject         TEXT    NOT NULL,
     envelope_from   TEXT    NOT NULL, -- MAIL FROM
     recipients_json TEXT    NOT NULL, -- every RCPT TO address, Bcc included
     status          TEXT    NOT NULL DEFAULT 'queued',
@@ -208,6 +238,7 @@ CREATE TABLE outbox (
 ) STRICT;
 
 CREATE INDEX outbox_status ON outbox (status, next_attempt_at);
+CREATE UNIQUE INDEX outbox_draft ON outbox (draft_id);
 
 -- Local changes already applied optimistically, waiting to be replayed on the server.
 -- Written in the same transaction as the local change they describe.

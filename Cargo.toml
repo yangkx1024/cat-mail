@@ -32,7 +32,11 @@ jiff = "0.2.38"
 # over any AsyncRead + AsyncWrite (TLS, STARTTLS upgrades, in-memory test pipes).
 imap-next = { version = "0.3.4", default-features = false, features = ["starttls", "ext_condstore_qresync"] }
 keyring = "4.2"
+# Builds outgoing messages; the same family as mail-parser. Without `gethostname`:
+# Message-IDs come from the sender's domain, not the machine's name.
+mail-builder = { version = "1.0.0", default-features = false }
 mail-parser = { version = "0.11.9", features = ["full_encoding"] }
+mime_guess = "2.0.5"
 pollster = "1"
 rcgen = "0.14"
 rpassword = "7"

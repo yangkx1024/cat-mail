@@ -1,22 +1,23 @@
 use std::fs::{self, File, TryLockError};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use catmail_proto::TlsConfig;
 use catmail_store::{BlobStore, Store};
 use catmail_types::{
-    Account, AccountId, AttachmentId, Event, Folder, FolderId, GcReport, Message, MessageId,
-    MessageSummary, NewAccount, SearchQuery, SyncReport,
+    Account, AccountId, AttachmentId, Draft, DraftAttachment, DraftAttachmentId, DraftContent,
+    DraftId, Event, Folder, FolderId, GcReport, Message, MessageId, MessageSummary, NewAccount,
+    OutboxEntry, OutboxId, SearchQuery, SyncReport,
 };
 use tokio::runtime::Handle;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use crate::engine::{Engine, blocking};
+use crate::engine::{Engine, blocking, now};
 use crate::runtime::Runtime;
 use crate::secrets::{KeyringSecrets, SecretStore};
-use crate::{Config, Error, Result, auth, body, connection, sync};
+use crate::{Config, Error, Result, auth, body, connection, drafts, send, sync};
 
 const EVENT_CAPACITY: usize = 256;
 
@@ -38,6 +39,7 @@ pub struct MailClientBuilder {
     runtime: Option<Handle>,
     secrets: Option<Arc<dyn SecretStore>>,
     tls: Option<TlsConfig>,
+    send_in_background: bool,
 }
 
 impl MailClientBuilder {
@@ -60,9 +62,20 @@ impl MailClientBuilder {
         self
     }
 
+    /// Send queued messages in the background as they come due, retrying with backoff,
+    /// for as long as the client exists [default: off]. For long-running frontends
+    /// (the GUI); a short-lived one calls [`MailClient::flush_outbox`] instead, so that
+    /// nothing is sent behind the user's back by an unrelated command.
+    pub fn send_in_background(mut self, on: bool) -> Self {
+        self.send_in_background = on;
+        self
+    }
+
     /// Locks the data directory, empties [`Config::handoff_dir`], then opens the database
-    /// (migrating it if needed) and the blob store. Blocks briefly. Fails with [`Error::AlreadyRunning`] if another
-    /// engine, in this or another process, has the directory open.
+    /// (migrating it if needed) and the blob store. Blocks briefly. Fails with
+    /// [`Error::AlreadyRunning`] if another engine, in this or another process, has the
+    /// directory open. Sends a previous engine left unfinished before the end of the
+    /// message go back to the queue.
     pub fn open(self) -> Result<MailClient> {
         let data_dir_lock = lock_data_dir(&self.config)?;
         clear_handoff_dir(&self.config.handoff_dir());
@@ -71,13 +84,21 @@ impl MailClientBuilder {
             None => Runtime::owned()?,
         };
         let store = Store::open(&self.config.db_path())?;
+        // The lock means no engine is sending; see Outbox::recover_interrupted.
+        let interrupted = store.write(|db| db.outbox().recover_interrupted(now()))?;
+        if interrupted > 0 {
+            tracing::info!(
+                interrupted,
+                "requeued sends interrupted before the message ended"
+            );
+        }
         let blobs = BlobStore::open(self.config.blob_dir())?;
         let secrets = self
             .secrets
             .unwrap_or_else(|| Arc::new(KeyringSecrets::default()));
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
 
-        Ok(MailClient {
+        let client = MailClient {
             rt: Arc::new(rt),
             engine: Arc::new(Engine::new(
                 self.config,
@@ -88,7 +109,14 @@ impl MailClientBuilder {
                 events,
                 self.tls,
             )),
-        })
+        };
+        if self.send_in_background {
+            client.rt.spawn(send::worker(
+                Arc::downgrade(&client.engine),
+                client.engine.outbox_kick.clone(),
+            ));
+        }
+        Ok(client)
     }
 }
 
@@ -99,6 +127,7 @@ impl MailClient {
             runtime: None,
             secrets: None,
             tls: None,
+            send_in_background: false,
         }
     }
 
@@ -326,6 +355,137 @@ impl MailClient {
         let engine = self.engine.clone();
         self.rt
             .run(async move { engine.read(move |db| db.messages().search(&query)).await })
+            .await
+    }
+
+    /// A new draft. Addresses are checked as they will be needed for sending.
+    pub async fn create_draft(&self, account: AccountId, content: DraftContent) -> Result<Draft> {
+        let engine = self.engine.clone();
+        self.rt
+            .run(async move { drafts::create(&engine, account, content).await })
+            .await
+    }
+
+    /// A new draft answering the message, to its sender (or Reply-To) and, with `all`,
+    /// to everyone else it went to, quoting its text and threaded to it. Downloads the
+    /// body first if needed.
+    pub async fn reply(&self, message: MessageId, all: bool) -> Result<Draft> {
+        let engine = self.engine.clone();
+        self.rt
+            .run(async move { drafts::reply(&engine, message, all).await })
+            .await
+    }
+
+    /// Replaces what the draft says. Fails with [`Error::Conflict`] while it is in the
+    /// outbox.
+    pub async fn update_draft(&self, id: DraftId, content: DraftContent) -> Result<Draft> {
+        let engine = self.engine.clone();
+        self.rt
+            .run(async move { drafts::update(&engine, id, content).await })
+            .await
+    }
+
+    pub async fn get_draft(&self, id: DraftId) -> Result<Option<Draft>> {
+        let engine = self.engine.clone();
+        self.rt
+            .run(async move { engine.read(move |db| db.drafts().get(id)).await })
+            .await
+    }
+
+    /// The account's drafts, most recently changed first. Drafts being sent are not
+    /// among them; see [`list_outbox`](Self::list_outbox).
+    pub async fn list_drafts(&self, account: AccountId) -> Result<Vec<Draft>> {
+        let engine = self.engine.clone();
+        self.rt
+            .run(async move { engine.read(move |db| db.drafts().list(account)).await })
+            .await
+    }
+
+    pub async fn delete_draft(&self, id: DraftId) -> Result<()> {
+        let engine = self.engine.clone();
+        self.rt
+            .run(async move { drafts::delete(&engine, id).await })
+            .await
+    }
+
+    /// Attaches a copy of the file: changing or deleting the file afterwards doesn't
+    /// affect the draft.
+    pub async fn attach_file(
+        &self,
+        draft: DraftId,
+        path: impl Into<PathBuf>,
+    ) -> Result<DraftAttachment> {
+        let engine = self.engine.clone();
+        let path = path.into();
+        self.rt
+            .run(async move { drafts::attach_file(&engine, draft, path).await })
+            .await
+    }
+
+    pub async fn remove_draft_attachment(&self, id: DraftAttachmentId) -> Result<()> {
+        let engine = self.engine.clone();
+        self.rt
+            .run(async move { drafts::remove_attachment(&engine, id).await })
+            .await
+    }
+
+    /// Hands the draft to the outbox. The message is built now, exactly as it will be
+    /// sent; the draft stays locked until it is sent (then it is deleted) or the send is
+    /// cancelled. Sending happens in the background if the client was built with
+    /// [`MailClientBuilder::send_in_background`], else on
+    /// [`flush_outbox`](Self::flush_outbox).
+    pub async fn send_draft(&self, id: DraftId) -> Result<OutboxEntry> {
+        let engine = self.engine.clone();
+        self.rt
+            .run(async move { send::queue_draft(&engine, id).await })
+            .await
+    }
+
+    /// Every entry still in the outbox (sent ones are gone), oldest first; all
+    /// accounts' with `None`.
+    pub async fn list_outbox(&self, account: Option<AccountId>) -> Result<Vec<OutboxEntry>> {
+        let engine = self.engine.clone();
+        self.rt
+            .run(async move { engine.read(move |db| db.outbox().list(account)).await })
+            .await
+    }
+
+    /// Sends everything queued and saves what was sent to Sent, now, without waiting
+    /// for backoff. Waits for background sending of the account to pause first. Returns
+    /// the entries worked on, as they ended up; failures are recorded in them, not
+    /// returned.
+    pub async fn flush_outbox(&self, account: AccountId) -> Result<Vec<OutboxEntry>> {
+        self.rt
+            .run(send::flush(self.engine.clone(), account, false))
+            .await
+    }
+
+    /// Tries a failed or unknown send again (an unknown one may then arrive twice), or
+    /// saving an accepted one to Sent. Due at once.
+    pub async fn retry_outbox(&self, id: OutboxId) -> Result<OutboxEntry> {
+        let engine = self.engine.clone();
+        self.rt
+            .run(async move { send::retry(&engine, id).await })
+            .await
+    }
+
+    /// For a send with an unknown outcome that the user found was delivered: it is only
+    /// saved to Sent from now on.
+    pub async fn mark_outbox_sent(&self, id: OutboxId) -> Result<OutboxEntry> {
+        let engine = self.engine.clone();
+        self.rt
+            .run(async move { send::mark_sent(&engine, id).await })
+            .await
+    }
+
+    /// Removes the entry. If the message never went out (queued, failed, unknown), its
+    /// draft can be edited again; if it was sent, this only gives up saving it to Sent.
+    /// A send in progress is waited for, and the decision applies to where it left the
+    /// entry. Returns the entry as it was.
+    pub async fn cancel_outbox(&self, id: OutboxId) -> Result<OutboxEntry> {
+        let engine = self.engine.clone();
+        self.rt
+            .run(async move { send::cancel(&engine, id).await })
             .await
     }
 
@@ -687,6 +847,60 @@ mod tests {
         let reopened = open_client(dir.path(), secrets);
         assert!(!page.exists());
         assert!(!reopened.config().handoff_dir().exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sends_interrupted_before_the_end_go_back_to_the_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(MemorySecrets::default());
+        let client = open_client(dir.path(), secrets.clone());
+        let account = client
+            .add_account(new_account("a@example.com"), "pw".into())
+            .await
+            .unwrap();
+        let content = catmail_types::DraftContent {
+            to: vec![catmail_types::Address {
+                name: None,
+                email: "b@example.com".into(),
+            }],
+            ..Default::default()
+        };
+        let mut entries = Vec::new();
+        for _ in 0..2 {
+            let draft = client
+                .create_draft(account.id, content.clone())
+                .await
+                .unwrap();
+            entries.push(client.send_draft(draft.id).await.unwrap().id);
+        }
+        // The process dies sending both: the first before the end of the message, the
+        // second after.
+        client
+            .engine
+            .store
+            .write(|db| {
+                db.outbox().begin_send(entries[0], 1)?;
+                db.outbox().begin_send(entries[1], 1)?;
+                db.outbox().mark_unknown(entries[1], None, 1)
+            })
+            .unwrap();
+        drop(client);
+
+        let client = open_client(dir.path(), secrets);
+        let statuses: Vec<_> = client
+            .list_outbox(None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.status)
+            .collect();
+        assert_eq!(
+            statuses,
+            [
+                catmail_types::OutboxStatus::Queued,
+                catmail_types::OutboxStatus::Unknown
+            ]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

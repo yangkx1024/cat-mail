@@ -208,7 +208,7 @@ fn sorted_difference(a: &[u32], b: &[u32]) -> Vec<u32> {
 
 /// Assigns roles: INBOX by name, then SPECIAL-USE attributes, then well-known names for
 /// roles no folder claimed via SPECIAL-USE.
-fn remote_folders(listed: Vec<ListedMailbox>) -> Vec<RemoteFolder> {
+pub(crate) fn remote_folders(listed: Vec<ListedMailbox>) -> Vec<RemoteFolder> {
     let claimed: HashSet<FolderRole> = listed.iter().filter_map(|m| m.special_use).collect();
     let mut guessed = HashSet::new();
     listed
@@ -265,6 +265,7 @@ fn new_message(m: FetchedMessage) -> NewMessage {
         from: h.from,
         to: h.to,
         cc: h.cc,
+        reply_to: h.reply_to,
         date: h.date,
         has_attachments: m.has_attachments,
     }

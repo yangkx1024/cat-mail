@@ -5,17 +5,23 @@
 //! these types (re-exported through `catmail-core`).
 
 mod account;
+mod draft;
 mod event;
 mod folder;
 mod ids;
 mod message;
+mod outbox;
 mod search;
 mod sync;
 
 pub use account::{Account, AuthKind, NewAccount, Security, ServerConfig};
+pub use draft::{Draft, DraftAttachment, DraftContent};
 pub use event::Event;
 pub use folder::{Folder, FolderRole};
-pub use ids::{AccountId, AttachmentId, BlobHash, FolderId, MessageId};
+pub use ids::{
+    AccountId, AttachmentId, BlobHash, DraftAttachmentId, DraftId, FolderId, MessageId, OutboxId,
+};
 pub use message::{Address, Attachment, FlagState, Flags, Message, MessageBody, MessageSummary};
+pub use outbox::{OutboxEntry, OutboxStatus};
 pub use search::SearchQuery;
 pub use sync::{FolderSyncReport, GcReport, SyncReport};

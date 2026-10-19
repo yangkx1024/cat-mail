@@ -34,6 +34,18 @@ row_id!(
     /// Local identifier of an attachment (or inline part) of a downloaded message.
     AttachmentId
 );
+row_id!(
+    /// Local identifier of a draft.
+    DraftId
+);
+row_id!(
+    /// Local identifier of a file attached to a draft.
+    DraftAttachmentId
+);
+row_id!(
+    /// Local identifier of a message handed to the outbox for sending.
+    OutboxId
+);
 
 /// Lowercase hex SHA-256 of a blob's contents.
 ///

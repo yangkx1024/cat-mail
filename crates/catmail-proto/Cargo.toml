@@ -12,6 +12,7 @@ base64.workspace = true
 catmail-types.workspace = true
 html5ever.workspace = true
 imap-next.workspace = true
+mail-builder.workspace = true
 mail-parser.workspace = true
 # Workaround: imap-codec 2.0.0-alpha.9 uses nom's `alloc`-gated combinators but depends on
 # nom with default features off, so it only builds when something else enables them.
