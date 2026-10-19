@@ -51,7 +51,8 @@ the Coding Guides, `gpui-kit-design-guides` the Design Guides; see their `README
 the upstream commit).
 
 Protocol behaviour is tested against `catmail-testkit`'s fake servers (every OS) and a real
-Dovecot (`testenv/dovecot/run.sh`, Linux CI job; IMAP only, SMTP stays on the fake). New sync or protocol behaviour gets a
+Dovecot (`testenv/dovecot/run.sh`, Linux CI job; IMAP, and SMTP submission relaying to a
+mailpit sink). New sync or protocol behaviour gets a
 fake-server test, with a fault injected if the change is about recovering from one.
 
 ## Rules that are easy to break

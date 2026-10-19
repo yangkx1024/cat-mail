@@ -69,19 +69,20 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
-  # The fake server covers faults on every OS; this checks the client against a real
-  # server. Dovecot comes from the flake's `imap` dev shell, so Linux only.
+  # The fake servers cover faults on every OS; this checks the client against real ones:
+  # Dovecot for IMAP and SMTP submission, relaying to mailpit. They come from the
+  # flake's `testenv` dev shell, so Linux only.
   dovecot:
-    name: Real-server tests (Dovecot)
+    name: Real-server tests (Dovecot, mailpit)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
       - uses: cachix/install-nix-action@v31
 
-      - name: Start Dovecot
+      - name: Start the servers
         run: |
-          nix develop .#imap -c testenv/dovecot/run.sh > dovecot.log 2>&1 &
+          nix develop .#testenv -c testenv/dovecot/run.sh > dovecot.log 2>&1 &
           for _ in $(seq 1 120); do
             grep -q "starting up" dovecot.log && break
             sleep 1
@@ -91,5 +92,7 @@ jobs:
 
       - name: Test
         env:
-          CATMAIL_TEST_IMAP_REQUIRED: "1" # fail instead of skipping
-        run: nix develop .#imap -c cargo test -p catmail-core --test dovecot --locked -- --nocapture
+          CATMAIL_TESTENV_REQUIRED: "1" # fail instead of skipping
+        run: >-
+          nix develop .#testenv -c cargo test -p catmail-core --test dovecot --test submission
+          --locked -- --nocapture

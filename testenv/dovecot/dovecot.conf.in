@@ -1,13 +1,15 @@
 # Throwaway Dovecot for cat-mail's real-server tests; run.sh fills in the @...@ values.
-# Runs as the invoking user, plaintext on loopback only.
+# Runs as the invoking user, on loopback only: IMAP in plaintext, and the submission
+# service (SMTP) with STARTTLS and implicit TLS, relaying to a mailpit sink.
 dovecot_config_version = 2.4.5
 dovecot_storage_version = 2.4.5
 
 base_dir = @RUN@
 state_dir = @WORK@/state
 log_path = /dev/stderr
-protocols = imap
+protocols = imap submission
 listen = 127.0.0.1
+hostname = catmail-test.localhost
 
 default_internal_user = @USER@
 default_internal_group = @GROUP@
@@ -15,7 +17,16 @@ default_login_user = @USER@
 
 auth_allow_cleartext = yes
 auth_mechanisms = plain login
-ssl = no
+# A self-signed certificate for 127.0.0.1, which the tests trust. IMAP stays on
+# plaintext logins.
+ssl = yes
+ssl_server_cert_file = @WORK@/cert.pem
+ssl_server_key_file = @WORK@/key.pem
+
+submission_relay_host = 127.0.0.1
+submission_relay_port = @RELAY@
+# Advertised as SIZE; small, so a test can go over it.
+submission_max_mail_size = 1M
 
 passdb passwd-file {
   passwd_file_path = @WORK@/users
@@ -48,6 +59,16 @@ service imap-login {
   }
   inet_listener imaps {
     port = 0
+  }
+}
+service submission-login {
+  chroot =
+  inet_listener submission {
+    port = @SUBMISSION@
+  }
+  inet_listener submissions {
+    port = @SUBMISSIONS@
+    ssl = yes
   }
 }
 service anvil {

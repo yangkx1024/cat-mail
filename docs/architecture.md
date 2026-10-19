@@ -510,12 +510,23 @@ zed-industries/zed#60155（同症状的 #64123 作为重复关闭，#64783 指�
   收件人（4xx / 5xx）、MAIL FROM 回 451、MAIL FROM 时断线、对结束标记回指定的错误码、
   **收下邮件后不答复就断开**（确认丢失）、STARTTLS 之后的明文注入。
 - **真实服务器**：`testenv/dovecot/run.sh` 以当前用户在临时目录里启动 Dovecot（来自 flake 的
-  `imap` 开发环境，版本随 `flake.lock` 固定），预置 `testenv/fixtures/` 里的邮件，包括中文
+  `testenv` 开发环境，版本随 `flake.lock` 固定），预置 `testenv/fixtures/` 里的邮件，包括中文
   文件夹、层级文件夹、各种编码、HTML 加内嵌图片与 RFC 2231 文件名；测试还会投递一封超过
   2 MiB 的邮件，走按部分下载的路径。发信经假 SMTP 服务器，保存到 Dovecot 的 Sent：先把
   Sent 的 `tmp/` 设为只读让第一次 APPEND 失败，第二次就会先按 Message-ID 搜索，所以 APPEND
   和 `SEARCH HEADER` 都在真实服务器上验证过（因此不能以 root 运行）。`crates/catmail-core/tests/dovecot.rs` 在设置了
-  `CATMAIL_TEST_IMAP` 时运行，CI 里有单独的 Linux job。
+  `run.sh` 打印的变量时运行，CI 里有单独的 Linux job。
+- **真实 SMTP**：同一个 Dovecot 开着 submission 服务（STARTTLS 与隐式 TLS 各一个端口，
+  `run.sh` 用 openssl 生成 127.0.0.1 的自签名证书，测试只信任它），`submission_max_mail_size`
+  设为 1 MiB；它把邮件转发给 mailpit（SMTP 收信端，带 HTTP API）。`tests/submission.rs` 发信
+  并从 mailpit 读回：信封收件人（密送只在信封里）、原文与存进 Dovecot Sent 的副本逐字节一致
+  （服务器只在前面加 trace 头），以及真实服务器上的收件人被拒（mailpit 只收 `@example.com`，
+  Dovecot 把它对 RCPT 的拒绝转回来）、超过 SIZE、密码错误。mailpit 存信时会给只在信封里的
+  收件人加一行 `Bcc:`，所以"邮件里没有 Bcc"看的是 Sent 的副本。每次运行的邮件按 Message-ID
+  或带时间戳的主题区分，可以对同一组服务器重复运行；它以单独的 `sender` 用户登录，和
+  `dovecot.rs` 的 `catmail` 用户互不影响，两组测试可以同时跑。两个测试文件共用
+  `tests/testenv/`：读 `run.sh` 打印的变量（没有就跳过，`CATMAIL_TESTENV_REQUIRED=1` 时失败）、
+  建客户端和账户、在 Sent 里找邮件。
 
 - **GUI**：`catmail-gui` 的 UI 集成测试（`#[gpui_kit::test]`，GPUI 的测试平台，无需显示器
   或 GPU，三个平台都跑）用假服务器加载 `testenv/fixtures/` 和 `crates/catmail-gui/fixtures/`
@@ -526,8 +537,7 @@ zed-industries/zed#60155（同症状的 #64123 作为重复关闭，#64783 指�
   `CATMAIL_SCREENSHOTS=<目录> cargo test -p catmail-gui -- --ignored screenshots`。
 
 覆盖不到、留给后续的：进程在同步或发信中途被杀（同步用"断线后重新同步"近似，事务边界
-相同；发信的重启恢复由单元测试直接构造中断时的数据库状态）；真实的 SMTP 服务器（目前只有
-假服务器）。
+相同；发信的重启恢复由单元测试直接构造中断时的数据库状态）。
 
 ## 数据目录
 
