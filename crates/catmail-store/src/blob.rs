@@ -12,8 +12,8 @@ use tempfile::NamedTempFile;
 /// Content-addressed file storage for raw messages and attachments.
 ///
 /// A blob with hash `abcdef…` lives at `<root>/ab/cdef…`. Writes go to `<root>/tmp` first
-/// and are renamed into place, so readers never observe a partial blob. Identical content
-/// is stored once.
+/// and are renamed into place, never over an existing file, so readers never observe a
+/// partial blob. Identical content is stored once.
 ///
 /// # GC contract
 ///
@@ -74,8 +74,18 @@ impl BlobStore {
         }
         tmp.as_file().sync_all()?;
         fs::create_dir_all(dest.parent().expect("blob path has a parent"))?;
-        tmp.persist(&dest).map_err(|e| e.error)?;
-        Ok(hash)
+        // Never replace a blob: a concurrent `put` of the same content may be storing it
+        // too, and on Windows replacing a file that is being replaced or is open fails.
+        match tmp.persist_noclobber(&dest) {
+            Ok(_) => Ok(hash),
+            // Same hash, same content: whoever stored it first did our job. (The error
+            // still owns the temp file and removes it.)
+            Err(_) if dest.is_file() => {
+                touch(&dest)?;
+                Ok(hash)
+            }
+            Err(e) => Err(e.error),
+        }
     }
 
     pub fn put_bytes(&self, bytes: &[u8]) -> io::Result<BlobHash> {
@@ -205,6 +215,33 @@ fn touch(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_puts_of_the_same_content_all_succeed() {
+        // Two downloads of one message store the same blobs at the same time. Replacing
+        // a file that another thread is replacing fails on Windows (os error 5).
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::open(dir.path()).unwrap();
+        for round in 0..50u32 {
+            let content = round.to_le_bytes();
+            let start = std::sync::Barrier::new(8);
+            let hashes: Vec<BlobHash> = std::thread::scope(|s| {
+                let puts: Vec<_> = (0..8)
+                    .map(|_| {
+                        s.spawn(|| {
+                            start.wait();
+                            store.put_bytes(&content)
+                        })
+                    })
+                    .collect();
+                puts.into_iter()
+                    .map(|p| p.join().unwrap().unwrap())
+                    .collect()
+            });
+            assert!(hashes.windows(2).all(|w| w[0] == w[1]));
+            assert_eq!(fs::read(store.path(&hashes[0])).unwrap(), content);
+        }
+    }
 
     #[test]
     fn put_read_remove() {
