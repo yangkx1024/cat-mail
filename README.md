@@ -35,7 +35,7 @@
 - **最小读信窗口放在 M2。** gpui-kit 的 HTML 渲染定位为简单 HTML，而真实邮件大量使用表格
   布局和内联样式。一拿到正文就用真实邮件验证表格、`cid:` 内嵌图片和中文排版，不等到 M5。
   结果：段落、数据表格、内嵌图片和中文排版正常；用表格做布局的邮件（多数营销邮件）原本会被
-  压成一段，现在渲染前先把布局表格展开成块（见架构文档"GUI"一节），"在浏览器打开"作为兜底。
+  压成一段，现在渲染前先把布局表格展开成块（见 [docs/architecture/gui.md](docs/architecture/gui.md)），"在浏览器打开"作为兜底。
 - **协议测试环境从 M1 开始建。** 一个可注入故障的进程内假 IMAP 服务器（`catmail-testkit`，
   三个平台的 CI 都跑），覆盖断线、UIDVALIDITY 改变、重复或乱序响应、服务器缺少 CONDSTORE、
   STARTTLS 明文注入、同步中途中断后续传；再加一个真实的 Dovecot（Nix 提供，不需要 docker）。
@@ -174,7 +174,8 @@ CI（GitHub Actions）：
   代码）。全部测试在 PR 上只在 Linux 跑，合并到 main 后三个平台都跑（私有仓库的 macOS 分钟
   按 10 倍、Windows 按 2 倍计费）；需要时可以在分支上手动触发工作流，在三个平台上跑测试。
   目前只发布 Linux 版，但核心层必须保持跨平台，所以从一开始就在三个平台上检查。
-  另有一个 Linux job 对 Dovecot 和 mailpit 跑真实服务器测试。只改文档（`*.md`、`docs/`、`.agents/`、
+  Linux 上的测试同时对 Dovecot 和 mailpit 跑真实服务器测试（服务器来自 flake 的 `testenv`，
+  cargo 仍用 job 自己的工具链，复用同一份编译缓存）。只改文档（`*.md`、`docs/`、`.agents/`、
   许可证）时不触发。
 - `nix.yml`：`flake.nix` / `flake.lock` 变更时检查 Nix 格式、`nix flake check`，并确认开发
   环境可用。

@@ -43,6 +43,11 @@ jobs:
   # start, even though only Linux is shipped for now. Pull requests run the tests on Linux
   # only: macOS and Windows still compile them (clippy covers all targets) but run them
   # once merged, on main, where macOS minutes cost 10x and Windows ones 2x.
+  #
+  # On Linux the tests also run against real servers: Dovecot for IMAP and SMTP
+  # submission, relaying to mailpit (the fake servers cover faults on every OS). Only the
+  # servers come from the flake's `testenv` dev shell; cargo stays on this job's toolchain
+  # so the real-server tests reuse its cached build instead of compiling from scratch.
   check:
     name: Clippy & Test (${{ matrix.os }})
     strategy:
@@ -61,6 +66,14 @@ jobs:
           Get-MpComputerStatus | Select-Object RealTimeProtectionEnabled
 
       - uses: actions/checkout@v7
+
+      - uses: cachix/install-nix-action@v31
+        if: runner.os == 'Linux'
+
+      # In the background, so fetching the dev shell overlaps the cache restore and clippy.
+      - name: Start the real servers
+        if: runner.os == 'Linux'
+        run: nix develop .#testenv -c testenv/dovecot/run.sh > dovecot.log 2>&1 &
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -85,34 +98,21 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      - name: Test
-        if: runner.os == 'Linux' || github.event_name != 'pull_request'
-        run: cargo test --workspace --locked
-
-  # The fake servers cover faults on every OS; this checks the client against real ones:
-  # Dovecot for IMAP and SMTP submission, relaying to mailpit. They come from the
-  # flake's `testenv` dev shell, so Linux only.
-  dovecot:
-    name: Real-server tests (Dovecot, mailpit)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: cachix/install-nix-action@v31
-
-      - name: Start the servers
+      # Exports what run.sh prints, so `dovecot` and `submission` in the test run below
+      # use the servers. Only here: the tests treat CATMAIL_TESTENV_REQUIRED as set even
+      # when empty, so it must not reach the other OSes.
+      - name: Wait for the real servers
+        if: runner.os == 'Linux'
         run: |
-          nix develop .#testenv -c testenv/dovecot/run.sh > dovecot.log 2>&1 &
           for _ in $(seq 1 120); do
             grep -q "starting up" dovecot.log && break
             sleep 1
           done
           cat dovecot.log
+          grep -q "starting up" dovecot.log
           grep '^export ' dovecot.log | sed 's/^export //' | tr ' ' '\n' >> "$GITHUB_ENV"
+          echo "CATMAIL_TESTENV_REQUIRED=1" >> "$GITHUB_ENV" # fail instead of skipping
 
       - name: Test
-        env:
-          CATMAIL_TESTENV_REQUIRED: "1" # fail instead of skipping
-        run: >-
-          nix develop .#testenv -c cargo test -p catmail-core --test dovecot --test submission
-          --locked -- --nocapture
+        if: runner.os == 'Linux' || github.event_name != 'pull_request'
+        run: cargo test --workspace --locked
