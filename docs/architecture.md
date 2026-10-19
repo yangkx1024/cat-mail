@@ -406,6 +406,16 @@ M2 的最小读信窗口（`crates/catmail-gui/src/`）：
   一遍同一个 sanitizer，这一步不可能交出清洗不允许的东西。
 - 嵌入 `wry` 仍是备选，但目前看转换就够了。
 
+**字重（已知问题，上游）。** Linux 上可变字体的字重不起作用：GPUI（`gpui-pre-wgpu` 0.3.9 的
+`cosmic_text_system.rs`）栅格化字形时不设 `wght` 轴坐标（`render_glyph_image`，`RenderGlyphParams`
+里也没有字重），可变字体一律按默认实例渲染。系统只装了 Noto Sans CJK 可变字体（`NotoSansCJK-VF`）
+时，中文按它偏细的默认实例显示，加粗、`SEMIBOLD` 都无效，纯文本和 HTML 都一样；界面拉丁字体若解析到
+可变的 Noto Sans，加粗同样无效，只是默认实例是 Regular、不显眼。只给静态字体（`FONTCONFIG_FILE`
+指向只含 DejaVu、MiSans 的配置）时同一份代码字重正常，已在真实窗口和离屏截图里核对。上游跟踪：
+zed-industries/zed#60155（同症状的 #64123 作为重复关闭，#64783 指向同一处代码）。我们这边不绕开：
+打包静态 CJK 字体每个字重数 MB；用户侧可改装静态版（如 nixpkgs 的 `noto-fonts-cjk-sans-static`）。
+升级 gpui-kit 时检查这几个 issue。
+
 **依赖锁定。** Cargo 解析锁文件时会把 `dep?/feature` 里提到的可选依赖也算进去，所以开启
 `gpui-kit/test-support` 会让 `gpui-fast-*` 进入 `Cargo.lock`（不会编译）。它们精确 pin 了
 `cocoa = 0.26.0` 和 `unicode-properties = 0.1.3`，锁文件里这两个必须保持这些版本，否则无法
