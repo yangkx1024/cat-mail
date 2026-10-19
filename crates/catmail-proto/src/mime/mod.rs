@@ -1,7 +1,17 @@
-//! MIME helpers on top of `mail-parser`.
+//! MIME helpers on top of `mail-parser`: summary headers, and the readable content of
+//! a message (text, sanitized HTML, attachments), from the raw message or from its
+//! BODYSTRUCTURE plus selected parts.
+
+mod content;
+mod html;
+mod structure;
 
 use catmail_types::Address;
 use mail_parser::{HeaderValue, MessageParser};
+
+pub use content::{Content, Part, decode_transfer, parse_message};
+pub use html::sanitize_html;
+pub use structure::{Leaf, MimeNode, Params};
 
 /// The header fields the sync engine fetches for message lists (`HEADER.FIELDS`).
 pub const SUMMARY_HEADER_FIELDS: &[&str] = &[

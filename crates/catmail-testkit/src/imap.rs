@@ -5,9 +5,11 @@ use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
 use crate::TestCert;
+use crate::mime;
 
 /// One message in a [`FakeMailbox`].
 #[derive(Debug, Clone)]
@@ -16,12 +18,10 @@ pub struct FakeMessage {
     /// Wire form, e.g. `\Seen` or `$Junk`.
     pub flags: Vec<String>,
     pub modseq: u64,
-    /// The raw message; only the header part is ever served.
+    /// The raw message. BODYSTRUCTURE and body sections are derived from it.
     pub raw: Vec<u8>,
     /// IMAP date-time, e.g. `17-Oct-2026 09:30:00 +0800`.
     pub internal_date: String,
-    /// Serve a multipart/mixed BODYSTRUCTURE with a PDF attachment.
-    pub attachment: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -64,7 +64,6 @@ impl FakeMailbox {
             modseq: self.highest_modseq,
             raw: raw.to_vec(),
             internal_date: "17-Oct-2026 09:30:00 +0800".into(),
-            attachment: false,
         });
         uid
     }
@@ -124,6 +123,16 @@ pub struct Faults {
     pub drop_on_fetch: Option<usize>,
     /// Never answer header FETCHes; the connection stays open.
     pub hang_on_fetch: bool,
+    /// Like `drop_on_fetch`, for FETCHes of body content (`BODY.PEEK[]`,
+    /// `BODY.PEEK[<section>]`).
+    pub drop_on_body_fetch: Option<usize>,
+    /// Never answer body FETCHes; the connection stays open.
+    pub hang_on_body_fetch: bool,
+    /// Hold each body FETCH until it gets a permit, e.g. to keep several connections
+    /// busy at once.
+    pub body_fetch_gate: Option<Arc<Semaphore>>,
+    /// Answer `BODY.PEEK[<section>]` with NIL, as if the part had no content.
+    pub nil_sections: bool,
     /// Send every FETCH response twice.
     pub duplicate_fetch: bool,
     /// Send FETCH responses in descending UID order.
@@ -152,6 +161,10 @@ impl Default for Faults {
             auth_plain: false,
             drop_on_fetch: None,
             hang_on_fetch: false,
+            drop_on_body_fetch: None,
+            hang_on_body_fetch: false,
+            body_fetch_gate: None,
+            nil_sections: false,
             duplicate_fetch: false,
             reverse_fetch: false,
             unsolicited: false,
@@ -182,6 +195,9 @@ pub struct ServerState {
     pub log: Vec<LoggedCommand>,
     pub connections: usize,
     header_fetches: usize,
+    body_fetches: usize,
+    /// Connections numbered up to this one are closed at their next command.
+    dropped_through: usize,
 }
 
 impl ServerState {
@@ -194,6 +210,8 @@ impl ServerState {
             log: Vec::new(),
             connections: 0,
             header_fetches: 0,
+            body_fetches: 0,
+            dropped_through: 0,
         }
     }
 
@@ -202,6 +220,12 @@ impl ServerState {
             .iter_mut()
             .find(|m| m.name == name)
             .unwrap_or_else(|| panic!("no mailbox {name}"))
+    }
+
+    /// Closes every connection open now, as a server or NAT box does with idle ones:
+    /// each answers its next command by hanging up.
+    pub fn drop_open_connections(&mut self) {
+        self.dropped_through = self.connections;
     }
 
     pub fn inbox(&mut self) -> &mut FakeMailbox {
@@ -262,15 +286,21 @@ impl FakeImap {
                     let state = state.clone();
                     let cert = cert.clone();
                     tokio::spawn(async move {
-                        lock(&state).connections += 1;
+                        let id = {
+                            let mut st = lock(&state);
+                            st.connections += 1;
+                            st.connections
+                        };
                         let result = match (mode, &cert) {
                             (TlsMode::Implicit, Some(cert)) => {
                                 match cert.acceptor().accept(tcp).await {
-                                    Ok(tls) => serve(Box::new(tls), true, mode, None, state).await,
+                                    Ok(tls) => {
+                                        serve(Box::new(tls), id, true, mode, None, state).await
+                                    }
                                     Err(e) => Err(e),
                                 }
                             }
-                            _ => serve(Box::new(tcp), false, mode, cert, state).await,
+                            _ => serve(Box::new(tcp), id, false, mode, cert, state).await,
                         };
                         if let Err(e) = result {
                             tracing::debug!(error = %e, "fake IMAP connection ended");
@@ -304,6 +334,7 @@ trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
 
 struct Session {
+    id: usize,
     tls: bool,
     mode: TlsMode,
     authenticated: bool,
@@ -319,6 +350,7 @@ enum Next {
 
 async fn serve(
     stream: Box<dyn Stream>,
+    id: usize,
     tls: bool,
     mode: TlsMode,
     cert: Option<TestCert>,
@@ -326,6 +358,7 @@ async fn serve(
 ) -> std::io::Result<()> {
     let mut io = BufReader::new(stream);
     let mut session = Session {
+        id,
         tls,
         mode,
         authenticated: false,
@@ -512,6 +545,9 @@ async fn handle(
     let line = String::from_utf8_lossy(raw).into_owned();
     let (tag, rest) = line.split_once(' ').unwrap_or((&line, ""));
     let tag = tag.to_owned();
+    if session.id <= lock(state).dropped_through {
+        return Ok(Next::Close);
+    }
     lock(state).log.push(LoggedCommand {
         tls: session.tls,
         line: rest.to_owned(),
@@ -655,7 +691,8 @@ async fn handle(
             }
         }
         "UID FETCH" => {
-            if header_item(&fetch_items(args)).is_some() {
+            let items = fetch_items(args);
+            if header_item(&items).is_some() {
                 let hang = {
                     let mut st = lock(state);
                     st.header_fetches += 1;
@@ -667,6 +704,24 @@ async fn handle(
                 };
                 if hang {
                     std::future::pending::<()>().await;
+                }
+            }
+            if items.iter().any(|i| body_section(i).is_some()) {
+                let hang = {
+                    let mut st = lock(state);
+                    st.body_fetches += 1;
+                    if st.faults.drop_on_body_fetch == Some(st.body_fetches) {
+                        st.faults.drop_on_body_fetch = None;
+                        return Ok(Next::Close);
+                    }
+                    st.faults.hang_on_body_fetch
+                };
+                if hang {
+                    std::future::pending::<()>().await;
+                }
+                let gate = lock(state).faults.body_fetch_gate.clone();
+                if let Some(gate) = gate {
+                    gate.acquire().await.expect("gate open").forget();
                 }
             }
             let st = lock(state);
@@ -711,28 +766,38 @@ fn fetch(mb: &FakeMailbox, args: &[Tok], condstore: bool, faults: &Faults, tag: 
         if !in_set(msg.uid) || changed_since.is_some_and(|since| msg.modseq <= since) {
             continue;
         }
-        let mut parts = vec![format!("UID {}", msg.uid)];
+        let mut parts: Vec<Vec<u8>> = vec![format!("UID {}", msg.uid).into_bytes()];
         if wants("FLAGS") {
-            parts.push(format!("FLAGS ({})", msg.flags.join(" ")));
+            parts.push(format!("FLAGS ({})", msg.flags.join(" ")).into_bytes());
         }
         if condstore && (wants("MODSEQ") || changed_since.is_some()) {
-            parts.push(format!("MODSEQ ({})", msg.modseq));
+            parts.push(format!("MODSEQ ({})", msg.modseq).into_bytes());
         }
         if faults.split_fetch && parts.len() > 1 && (header_item.is_some() || wants("INTERNALDATE"))
         {
-            responses.push(format!("* {} FETCH ({})\r\n", i + 1, parts.join(" ")).into_bytes());
+            responses.push(fetch_response(i + 1, &parts));
             parts.truncate(1);
         }
         if wants("INTERNALDATE") {
-            parts.push(format!("INTERNALDATE \"{}\"", msg.internal_date));
+            parts.push(format!("INTERNALDATE \"{}\"", msg.internal_date).into_bytes());
         }
         if wants("RFC822.SIZE") {
-            parts.push(format!("RFC822.SIZE {}", msg.raw.len()));
+            parts.push(format!("RFC822.SIZE {}", msg.raw.len()).into_bytes());
         }
         if wants("BODYSTRUCTURE") {
-            parts.push(format!("BODYSTRUCTURE {}", bodystructure(msg)));
+            let mut part = b"BODYSTRUCTURE ".to_vec();
+            part.extend(mime::body_structure(&msg.raw));
+            parts.push(part);
         }
-        let mut literal = None;
+        for spec in items.iter().filter_map(|i| body_section(i)) {
+            let mut part = format!("BODY[{spec}] ").into_bytes();
+            match mime::section(&msg.raw, spec) {
+                Some(_) if faults.nil_sections && !spec.is_empty() => part.extend(b"NIL"),
+                Some(data) => part.extend(literal(&data)),
+                None => part.extend(b"NIL"),
+            }
+            parts.push(part);
+        }
         if let Some(item) = header_item {
             let spec = &item["BODY.PEEK".len()..];
             let fields: Vec<String> = spec
@@ -742,17 +807,11 @@ fn fetch(mb: &FakeMailbox, args: &[Tok], condstore: bool, faults: &Faults, tag: 
                 .map(str::to_ascii_lowercase)
                 .collect();
             let headers = filter_headers(&msg.raw, &fields);
-            parts.push(format!("BODY{spec} {{{}}}", headers.len()));
-            literal = Some(headers);
+            let mut part = format!("BODY{spec} ").into_bytes();
+            part.extend(literal(&headers));
+            parts.push(part);
         }
-        let mut response = format!("* {} FETCH ({}", i + 1, parts.join(" ")).into_bytes();
-        // The literal comes last, so the closing paren follows it.
-        if let Some(data) = literal {
-            response.extend_from_slice(b"\r\n");
-            response.extend_from_slice(&data);
-        }
-        response.extend_from_slice(b")\r\n");
-        responses.push(response);
+        responses.push(fetch_response(i + 1, &parts));
     }
     if faults.reverse_fetch {
         responses.reverse();
@@ -772,6 +831,32 @@ fn fetch(mb: &FakeMailbox, args: &[Tok], condstore: bool, faults: &Faults, tag: 
     }
     out.extend_from_slice(format!("{tag} OK FETCH completed\r\n").as_bytes());
     out
+}
+
+fn fetch_response(seq: usize, items: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = format!("* {seq} FETCH (").into_bytes();
+    out.extend(items.join(&b' '));
+    out.extend(b")\r\n");
+    out
+}
+
+fn literal(data: &[u8]) -> Vec<u8> {
+    let mut out = format!("{{{}}}\r\n", data.len()).into_bytes();
+    out.extend(data);
+    out
+}
+
+/// `BODY.PEEK[]` → `""`, `BODY.PEEK[1.2]` → `"1.2"`; `None` for other items, including
+/// `BODY.PEEK[HEADER.FIELDS …]`.
+fn body_section(item: &str) -> Option<&str> {
+    let spec = item
+        .get(.."BODY.PEEK[".len())
+        .filter(|p| p.eq_ignore_ascii_case("BODY.PEEK["))
+        .map(|_| &item["BODY.PEEK[".len()..])?
+        .strip_suffix(']')?;
+    spec.bytes()
+        .all(|b| b.is_ascii_digit() || b == b'.')
+        .then_some(spec)
 }
 
 /// The item list of `UID FETCH <set> (<items>) [modifiers]`.
@@ -836,21 +921,6 @@ fn uid_set_contains(set: &str, uid: u32, mb: &FakeMailbox) -> bool {
         }
         None => bound(part) == uid,
     })
-}
-
-fn bodystructure(msg: &FakeMessage) -> String {
-    let text = format!(
-        "(\"TEXT\" \"PLAIN\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" {} 1 NIL NIL NIL NIL)",
-        msg.raw.len()
-    );
-    if msg.attachment {
-        format!(
-            "({text}(\"APPLICATION\" \"PDF\" (\"NAME\" \"report.pdf\") NIL NIL \"BASE64\" 1024 NIL \
-             (\"ATTACHMENT\" (\"FILENAME\" \"report.pdf\")) NIL NIL) \"MIXED\" (\"BOUNDARY\" \"b1\") NIL NIL NIL)"
-        )
-    } else {
-        text
-    }
 }
 
 /// The header lines (with continuations) whose names are in `fields`, plus the blank

@@ -2,7 +2,7 @@ use std::ops::{BitOr, BitOrAssign};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AccountId, FolderId, MessageId};
+use crate::{AccountId, AttachmentId, FolderId, MessageId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Address {
@@ -87,6 +87,52 @@ pub struct MessageSummary {
     pub snippet: Option<String>,
     pub flags: Flags,
     pub has_attachments: bool,
+}
+
+/// A message for reading: the list summary plus the full headers, and the body once it
+/// has been downloaded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Message {
+    #[serde(flatten)]
+    pub summary: MessageSummary,
+    pub to: Vec<Address>,
+    pub cc: Vec<Address>,
+    /// The Message-ID header, without angle brackets.
+    pub message_id: Option<String>,
+    /// RFC822.SIZE: the raw message in octets.
+    pub size: Option<u32>,
+    /// `None` until downloaded.
+    pub body: Option<MessageBody>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageBody {
+    /// Plain text; converted from the HTML part if the message has no text part.
+    pub text: Option<String>,
+    /// Sanitized HTML, if the message has an HTML part. Scripts, forms and event
+    /// handlers are gone; image URLs (`cid:`, remote) are left for the renderer to
+    /// resolve or block.
+    pub html: Option<String>,
+    /// Attachments and inline parts (images referenced by `cid:`), in MIME order.
+    pub attachments: Vec<Attachment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    pub id: AttachmentId,
+    pub message_id: MessageId,
+    pub filename: Option<String>,
+    /// Lower-case `type/subtype`.
+    pub mime_type: String,
+    /// Decoded size in bytes; estimated from the encoded size until downloaded.
+    pub size: Option<u32>,
+    /// Without angle brackets; what `cid:` URLs in the HTML refer to.
+    pub content_id: Option<String>,
+    /// Shown within the body rather than offered as a file.
+    pub inline: bool,
+    /// Whether the content is stored locally. Large messages are downloaded without
+    /// their attachments, which are fetched when first opened.
+    pub downloaded: bool,
 }
 
 #[cfg(test)]

@@ -34,6 +34,21 @@ async fn login(fake: &FakeImap) -> Session {
     session
 }
 
+/// Text plus an attachment whose decoded name is not ASCII, so the fake server sends it
+/// as a literal inside BODYSTRUCTURE.
+const MULTIPART: &[u8] = b"From: Bob <bob@example.com>\r\n\
+    Subject: second\r\n\
+    Content-Type: multipart/mixed; boundary=\"b1\"\r\n\r\n\
+    --b1\r\n\
+    Content-Type: text/plain; charset=utf-8\r\n\r\n\
+    See attached.\r\n\
+    --b1\r\n\
+    Content-Type: application/pdf; name=\"=?UTF-8?B?5oql5ZGKLnBkZg==?=\"\r\n\
+    Content-Disposition: attachment; filename=\"=?UTF-8?B?5oql5ZGKLnBkZg==?=\"\r\n\
+    Content-Transfer-Encoding: base64\r\n\r\n\
+    JVBERi0xLjQK\r\n\
+    --b1--\r\n";
+
 fn sample_state() -> ServerState {
     let mut state = ServerState::new("alice", "pw");
     let inbox = state.inbox();
@@ -42,8 +57,7 @@ fn sample_state() -> ServerState {
                Subject: =?UTF-8?B?5L2g5aW9?=\r\n\
                X-Not-Requested: nope\r\n\r\nbody";
     inbox.append(raw.as_bytes(), &["\\Seen", "$Forwarded"]);
-    let uid = inbox.append_simple("second");
-    inbox.message_mut(uid).attachment = true;
+    inbox.append(MULTIPART, &[]);
     state
         .mailboxes
         .push(FakeMailbox::new("&XfJT0ZAB-").with_attribute("\\Sent"));
@@ -370,4 +384,43 @@ async fn preauth_skips_login() {
     session.login(&creds("pw")).await.unwrap();
     assert_eq!(session.list().await.unwrap().len(), 3);
     assert!(!fake.state().log.iter().any(|c| c.line.starts_with("LOGIN")));
+}
+
+#[tokio::test]
+async fn fetches_bodies_without_marking_them_seen() {
+    let fake = FakeImap::start(sample_state()).await;
+    let mut session = login(&fake).await;
+    session.examine("INBOX").await.unwrap();
+
+    assert_eq!(session.fetch_raw(2).await.unwrap().unwrap(), MULTIPART);
+    assert_eq!(session.fetch_raw(99).await.unwrap(), None);
+
+    let structure = session.fetch_structure(2).await.unwrap().unwrap();
+    assert_eq!(structure.text_sections(1_000), ["1"]);
+    let fetched = session
+        .fetch_sections(2, &["1".into(), "2".into(), "7".into()])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetched["1"], b"See attached.");
+    assert_eq!(fetched["2"], b"JVBERi0xLjQK");
+    assert!(
+        !fetched.contains_key("7"),
+        "NIL for a section that doesn't exist"
+    );
+
+    let content = structure.content(&fetched);
+    assert_eq!(content.text.as_deref(), Some("See attached."));
+    assert_eq!(content.parts[0].filename.as_deref(), Some("报告.pdf"));
+    assert_eq!(content.parts[0].data.as_deref(), Some(&b"%PDF-1.4\n"[..]));
+    assert_eq!(session.fetch_structure(99).await.unwrap(), None);
+
+    let log = fake.state().log.clone();
+    let fetches: Vec<_> = log.iter().filter(|c| c.line.contains("FETCH")).collect();
+    assert!(
+        fetches.iter().all(|c| !c.line.contains("BODY[")),
+        "{fetches:?}"
+    );
+    assert!(fetches.iter().any(|c| c.line.contains("BODY.PEEK[2]")));
+    assert!(fetches.iter().any(|c| c.line.contains("BODY.PEEK[]")));
 }

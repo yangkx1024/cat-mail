@@ -1,5 +1,6 @@
 //! Read-only IMAP client on top of `imap-next`.
 
+mod body;
 mod connection;
 mod error;
 mod session;

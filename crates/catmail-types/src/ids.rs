@@ -30,6 +30,10 @@ row_id!(
     /// pair. A copy in another folder has its own id; a move yields a new id.
     MessageId
 );
+row_id!(
+    /// Local identifier of an attachment (or inline part) of a downloaded message.
+    AttachmentId
+);
 
 /// Lowercase hex SHA-256 of a blob's contents.
 ///

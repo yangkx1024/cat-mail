@@ -38,3 +38,10 @@ impl FolderSyncReport {
         }
     }
 }
+
+/// What a blob garbage collection removed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcReport {
+    pub removed: u64,
+    pub bytes: u64,
+}

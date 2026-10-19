@@ -142,7 +142,60 @@ IMAP 库选 `imap-next`（sans-IO，基于 `imap-codec`），启用 `starttls` �
 **邮件头。** 只拉 `HEADER.FIELDS (DATE FROM TO CC SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES)`，
 用 `mail-parser`（`full_encoding`）解析，RFC 2047 编码字和 GBK、GB2312、Big5 等旧字符集都转成
 UTF-8。没有（或无法解析）Date 头时用 INTERNALDATE 作为列表的排序时间。`has_attachments` 先由
-BODYSTRUCTURE 粗略判断，M2 下载正文后按完整 MIME 树重算。
+BODYSTRUCTURE 粗略判断，下载正文后按完整 MIME 树重算（见下一节）。
+
+### 正文与附件
+
+正文按需下载（`MailClient::download_message`），不在同步时预取。按 RFC822.SIZE 分两条路径：
+
+- **≤ 2 MiB：整封下载。** `UID FETCH <uid> (BODY.PEEK[])`，原文存入 BlobStore
+  （`message_bodies.raw_blob_hash`），用 mail-parser 解析，附件随即解码入库。绝大多数邮件
+  走这条路：完整原文最不依赖服务器 BODYSTRUCTURE 的正确性，也留下了 `.eml`（转发、
+  "查看原文"、以后换解析器重建）。
+- **> 2 MiB：按部分下载。** 先取 BODYSTRUCTURE，只取可能作为正文的部分（不是
+  `attachment` 的 text/plain、text/html，单个不超过 2 MiB），附件只记录 section、
+  传输编码和估算大小，第一次打开时再 `BODY.PEEK[<section>]` 下载、解码、入库
+  （`MailClient::attachment_content`）。BODYSTRUCTURE 解析失败（有的服务器会发错），或服务器
+  对某个要取的正文部分回 NIL、干脆不回时，退回整封下载：缺了正文的结果一旦按"已下载"存下，
+  就再也不会重取。
+
+两条路径共用一套提取逻辑：按部分下载时，用 BODYSTRUCTURE 和取回的部分**重建一封结构相同
+的替身邮件**（没取的部分是空的 base64 正文），交给 mail-parser 按同样方式解析。于是两条
+路径选出的正文部分、字符集与传输编码的解码、RFC 2047 / 2231 文件名的解码完全一致。
+BODYSTRUCTURE 里的值来自服务器，写进替身邮件头之前去掉换行、token 只保留合法字符，
+不能伪造邮件头；叶子部分即使自称 `multipart` 也按 `application` 写出、去掉 `boundary`
+参数，否则它会吞掉后面的部分、打乱 section 编号。替身邮件解析出的部分如果对不上
+BODYSTRUCTURE 的 section，一律视为未下载。超过 2 MiB 的文本部分既不下载也不作为附件
+列出（已知限制）。IMAP section 编号按 RFC 3501 §6.4.5 从解析结果计算，附加的邮件
+（message/rfc822）算一个部分。
+
+正文的组成：`text` 为所有正文文本部分（只有 HTML 时由 HTML 转换）；`html` 只在有真正的
+HTML 部分时存在，经 `ammonia` 清洗（去掉脚本、样式表、表单、iframe、事件属性和
+`javascript:` 链接；保留表格布局属性和行内 `style`，但可能加载资源的 style（`url(`、
+`image-set(`、`@import`、CSS 转义）整个去掉；链接只允许 http、https、mailto、cid，`data:`
+只允许出现在 `img src`，判断时像 URL 解析器一样忽略其中的制表符、换行和开头的控制字符）。图片地址（远程、`cid:`）原样保留，是否加载由渲染端决定，
+默认应拦截远程图片。"内嵌"（`inline`）指 HTML 用 `cid:` 引用了它（按 RFC 2392 取出完整的
+引用值、百分号解码后精确比较，`cid:logo-long` 不会让 `logo` 也算内嵌）；没被引用的图片无论放在
+哪里都算附件，`has_attachments` 只统计非内嵌的部分。
+
+**正确性。**
+
+- 只用 EXAMINE 和 `BODY.PEEK`，下载不会把邮件标为已读，也不改服务器上的任何状态。
+- 用 UID 之前先 EXAMINE 并比对 UIDVALIDITY；不一致或服务器已没有这封邮件时返回
+  `Error::OutOfSync`，不在新代际里按旧 UID 取邮件，交给下一次同步处理。
+- 写入时只检查邮件行是否还在：message id 不复用，UIDVALIDITY 变化会删除旧代际的行，所以
+  行还在就说明它仍是下载开始时的那个（文件夹, UID）。正文、附件行、摘要、
+  `has_attachments` 和全文索引在同一个事务里写入（`Messages::store_body`）；两个并发
+  下载同一封邮件时只有一个写入，另一个直接读结果。
+- 下载先取得账户的取消信号，再确认邮件还在；删除账户会让进行中的下载立即返回
+  `Error::Cancelled`，不用等网络超时。
+
+**连接。** 按需下载使用每账户最多 2 条空闲连接的小连接池（同步仍用自己的连接，打开邮件
+不必等同步结束），空闲超过 5 分钟的连接不再复用。复用的连接已断开时（服务器或 NAT 关掉了
+空闲连接）自动换一条**新建**的连接重试一次（不再从池里取，池里其余的连接多半也已断开）；
+新连接上的失败直接返回。删除账户先发取消信号再清空
+连接池，归还连接时在连接池的锁内检查取消信号，所以不会有连接在账户删除后留在池里。M4 的每账户 actor 会接管
+这部分。
 
 ### 认证
 
@@ -194,20 +247,38 @@ BODYSTRUCTURE 粗略判断，M2 下载正文后按完整 MIME 树重算。
 SET NULL 会连 `account_id` 一起置空，这类关联由 repository 校验。
 
 **全文搜索。** `messages_fts` 为 contentless FTS5（`contentless_delete=1`），rowid =
-`messages.id`，由触发器随 `messages` 删除（含级联删除）。unicode61 分词器会把连续的中文
-当成一个词，trigram 又不支持两个字的查询，所以在 Rust 侧对中日韩文字预先切分（单字 +
-相邻双字），写入索引和查询时用同一套切分。
+`messages.id`，列为主题、发件人（姓名和地址）、收件人与抄送、正文。`Messages` repository
+在插入邮件时写入（此时正文为空），正文下载后在同一事务里删除并重写这一行；删除邮件（含
+级联删除）由触发器删除索引。所以邮件头总能搜到，正文只有下载过的才能搜到。
+
+unicode61 分词器会把连续的中日韩文字当成一个词，trigram 又不支持两个字的查询，所以在
+Rust 侧预先切分（`crates/catmail-store/src/fts.rs`）：一段连续的 CJK 文字写成它的相邻双字，
+后面再跟单字，如 `季度报告` → `季度 度报 报告 季 度 报 告`。查询时一个字匹配单字，两个字
+匹配双字，三个字以上变成相邻双字组成的短语（`"季度 度报 报告"`）；同一段的双字位置连续，
+所以短语恰好匹配原来的子串，不会跨段误配。其他文字交给 unicode61（忽略大小写和变音
+符号，按整词匹配）。全角 ASCII 折叠成半角。查询语法（`SearchQuery`）：空格分隔的词或
+`"短语"` 都要匹配，可加 `from:`、`to:`（含抄送）、`subject:` 前缀；每个词都放进 FTS5
+字符串里，用户输入不会被当成 FTS5 语法。混合文字的词（`iPhone手机`）拆成几段分别匹配。
+结果按日期倒序。
 
 ### 附件 / BlobStore
 
 内容寻址：`<data>/blobs/ab/cdef…`（SHA-256）。写入先进 `blobs/tmp`、fsync 后 rename，读者
-看不到半成品；相同内容只存一份。DB 只存 hash，没有 blob 表。收信附件用
-`BODY.PEEK[section]` 流式落盘；写信附件在添加时即复制入库，原文件移动/删除不影响草稿。
+看不到半成品；相同内容只存一份。DB 只存 hash，没有 blob 表。收信附件见上文"正文与附件"
+（imap-next 会把整条响应读进内存，所以附件是取回后再写入，不是流式落盘）；写信附件在添加
+时即复制入库，原文件移动/删除不影响草稿。
 
 **GC 约定。** 从 `put` 返回到引用它的数据库行提交之间有一个窗口，而且 `put` 可能
 返回一个早已存在的 hash。因此只删除"没有被任何 `*_blob_hash` 列引用，**并且** mtime 早于
 宽限期"的文件，删除前再检查一次 mtime。宽限期要远大于任何写事务的时长。`put` 遇到已存在的
 blob 时会刷新它的 mtime，让宽限期重新计时。
+
+实现（`BlobStore::collect_garbage`，入口 `MailClient::collect_garbage` / `catmail gc`）：先在
+一个读事务里取出所有引用（`Db::blob_references`，新增 `*_blob_hash` 列必须加到这里），再
+遍历目录找出未引用且足够旧的候选，逐个在写锁下重查 mtime 后删除。`put` 刷新或创建 blob 时
+持有同一把锁的读锁，所以"GC 判定为旧"与"`put` 刚刚刷新"不会交错。宽限期 1 小时；`tmp`
+里中断写入留下的旧文件一并清理。删除账户、UIDVALIDITY 变化等删除邮件之后，它们的 blob
+由下一次 GC 回收。
 
 ### 凭据
 
@@ -249,16 +320,21 @@ MIME 头里）。
 HTML 邮件是主要风险：gpui-kit 的 HTML 渲染定位为简单 HTML，需要尽早用真实邮件验证表格、
 `cid:` 内嵌图片和中文排版。默认优先 `text/plain`，HTML 经 `ammonia` 清洗后交给 gpui-kit
 渲染，默认拦截远程图片，提供"在浏览器打开"兜底；效果不够时再评估嵌入 `wry` 或专用转换器。
+清洗后的 HTML 仍保留远程图片地址和行内样式，浏览器兜底打开时要加 CSP（`default-src 'none';
+img-src cid: data:; style-src 'unsafe-inline'`），否则浏览器会替用户加载远程内容。
 
 ## 测试环境
 
 - **假 IMAP 服务器**（`crates/catmail-testkit`，只作为 dev-dependency）：进程内、可修改邮箱
   内容，支持明文 / TLS / STARTTLS，可注入故障：断线（第 n 次拉邮件头时）、拉取时挂起、重复
   或倒序的 FETCH 响应、不带 UID 的主动 FETCH、没有 CONDSTORE、UIDVALIDITY 改变、STARTTLS 之后
-  的明文注入、拒绝登录。直接按字节写响应，故障可以精确到线上格式。三个平台的 CI 都跑。
+  的明文注入、拒绝登录、拉正文时断线、挂起或按闸门放行、section 回 NIL、关闭当前所有连接。BODYSTRUCTURE 和各 section 由每封邮件的
+  原文推导（mail-parser），所以测试邮件就是普通的 `.eml`。直接按字节写响应，故障可以精确
+  到线上格式。三个平台的 CI 都跑。
 - **真实服务器**：`testenv/dovecot/run.sh` 以当前用户在临时目录里启动 Dovecot（来自 flake 的
   `imap` 开发环境，版本随 `flake.lock` 固定），预置 `testenv/fixtures/` 里的邮件，包括中文
-  文件夹、层级文件夹、各种编码。`crates/catmail-core/tests/dovecot.rs` 在设置了
+  文件夹、层级文件夹、各种编码、HTML 加内嵌图片与 RFC 2231 文件名；测试还会投递一封超过
+  2 MiB 的邮件，走按部分下载的路径。`crates/catmail-core/tests/dovecot.rs` 在设置了
   `CATMAIL_TEST_IMAP` 时运行，CI 里有单独的 Linux job。
 
 覆盖不到、留给后续的：进程在同步中途被杀（目前用"断线后重新同步"近似，事务边界相同）；

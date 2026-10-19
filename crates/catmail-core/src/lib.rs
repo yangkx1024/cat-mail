@@ -5,8 +5,10 @@
 //! so the futures can be awaited from GPUI's executor as well as from tokio.
 
 mod auth;
+mod body;
 mod client;
 mod config;
+mod connection;
 mod engine;
 mod error;
 mod runtime;

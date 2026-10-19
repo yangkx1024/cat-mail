@@ -9,17 +9,13 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
 
 use catmail_proto::imap::{FetchedMessage, ListedMailbox, MailboxStatus, Session};
 use catmail_store::{FolderSyncState, NewMessage, RemoteFolder};
 use catmail_types::{AccountId, Event, FolderId, FolderRole, FolderSyncReport, SyncReport};
 
-use crate::engine::{Engine, blocking};
-use crate::{Error, Result, auth};
-
-/// Per network read or write, not per command.
-const IO_TIMEOUT: Duration = Duration::from_secs(60);
+use crate::engine::Engine;
+use crate::{Error, Result, connection};
 
 /// New messages per UID FETCH, and per transaction.
 const FETCH_BATCH: usize = 200;
@@ -33,22 +29,7 @@ pub(crate) async fn sync_account(engine: Arc<Engine>, account_id: AccountId) -> 
 }
 
 async fn run(engine: &Arc<Engine>, account_id: AccountId) -> Result<SyncReport> {
-    let (account, secret_key) = engine
-        .read(move |db| {
-            let accounts = db.accounts();
-            Ok(accounts
-                .get(account_id)?
-                .zip(accounts.secret_key(account_id)?))
-        })
-        .await?
-        .ok_or_else(|| Error::AccountNotFound(account_id.to_string()))?;
-    let credentials = {
-        let (engine, account) = (engine.clone(), account.clone());
-        blocking(move || auth::credentials(&account, &secret_key, engine.secrets.as_ref())).await?
-    };
-
-    let mut session = Session::connect(&account.imap, &engine.tls()?, IO_TIMEOUT).await?;
-    session.login(&credentials).await?;
+    let mut session = connection::connect(engine, account_id).await?;
 
     let remote = remote_folders(session.list().await?);
     if engine

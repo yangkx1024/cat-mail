@@ -1,9 +1,11 @@
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::sync::{PoisonError, RwLock};
+use std::time::{Duration, SystemTime};
 
-use catmail_types::BlobHash;
+use catmail_types::{BlobHash, GcReport};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
@@ -20,16 +22,23 @@ use tempfile::NamedTempFile;
 /// must therefore only delete a blob that is both unreferenced *and* has an mtime older
 /// than a grace period well above any write transaction's duration, re-checking the
 /// mtime immediately before deleting. `put` refreshes the mtime of an existing blob to
-/// restart that grace period.
+/// restart that grace period. [`collect_garbage`](Self::collect_garbage) does all that.
 pub struct BlobStore {
     root: PathBuf,
+    /// Shared while `put` refreshes or creates a blob, exclusive while GC re-checks one
+    /// blob's age and deletes it. Otherwise `put` could refresh a blob right after GC
+    /// found it old, and hand out a hash GC is about to delete.
+    gc: RwLock<()>,
 }
 
 impl BlobStore {
     pub fn open(root: impl Into<PathBuf>) -> io::Result<Self> {
         let root = root.into();
         fs::create_dir_all(root.join("tmp"))?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            gc: RwLock::new(()),
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -55,6 +64,7 @@ impl BlobStore {
             .expect("hex-encoded SHA-256 is a valid BlobHash");
 
         let dest = self.path(&hash);
+        let _gc = self.gc.read().unwrap_or_else(PoisonError::into_inner);
         // Already stored: keep it alive for the GC grace period. The temp file is removed
         // on drop. If it vanished in between, fall through and store it again.
         match touch(&dest) {
@@ -93,6 +103,93 @@ impl BlobStore {
             Err(e) => Err(e),
         }
     }
+
+    /// Deletes blobs that are not in `referenced` and were last written or refreshed
+    /// more than `grace` ago, and temp files left behind by interrupted writes.
+    ///
+    /// `referenced` must be read from the database *before* this is called: a blob
+    /// referenced by a row committed later was `put` within the grace period (which
+    /// must be far longer than any write transaction), so it is still too young.
+    pub fn collect_garbage(
+        &self,
+        referenced: &HashSet<BlobHash>,
+        grace: Duration,
+    ) -> io::Result<GcReport> {
+        let mut report = GcReport::default();
+        for hash in self.gc_candidates(referenced, grace)? {
+            if let Some(len) = self.remove_if_older(&hash, grace)? {
+                report.removed += 1;
+                report.bytes += len;
+            }
+        }
+        for file in fs::read_dir(self.root.join("tmp"))? {
+            let path = file?.path();
+            if let Some(len) = removable(&path, grace)? {
+                match fs::remove_file(&path) {
+                    Ok(()) => report.bytes += len,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    /// Unreferenced blobs that looked older than `grace` at the time.
+    fn gc_candidates(
+        &self,
+        referenced: &HashSet<BlobHash>,
+        grace: Duration,
+    ) -> io::Result<Vec<BlobHash>> {
+        let mut candidates = Vec::new();
+        for dir in fs::read_dir(&self.root)? {
+            let dir = dir?;
+            let Some(prefix) = dir.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if prefix.len() != 2 || !dir.file_type()?.is_dir() {
+                continue; // `tmp`, or something that isn't ours
+            }
+            for file in fs::read_dir(dir.path())? {
+                let file = file?;
+                let name = file.file_name();
+                let Some(hash) = name
+                    .to_str()
+                    .and_then(|rest| BlobHash::parse(&format!("{prefix}{rest}")))
+                else {
+                    continue;
+                };
+                if !referenced.contains(&hash) && removable(&file.path(), grace)?.is_some() {
+                    candidates.push(hash);
+                }
+            }
+        }
+        Ok(candidates)
+    }
+
+    /// Removes the blob if it is still older than `grace`: `put` may have refreshed it
+    /// since it became a candidate. Returns its size if removed.
+    fn remove_if_older(&self, hash: &BlobHash, grace: Duration) -> io::Result<Option<u64>> {
+        let _gc = self.gc.write().unwrap_or_else(PoisonError::into_inner);
+        let Some(len) = removable(&self.path(hash), grace)? else {
+            return Ok(None);
+        };
+        Ok(self.remove(hash)?.then_some(len))
+    }
+}
+
+/// The file's size, if it was last modified more than `grace` ago. A file that is
+/// already gone, or whose mtime lies in the future, is not removable.
+fn removable(path: &Path, grace: Duration) -> io::Result<Option<u64>> {
+    let meta = match fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let age = SystemTime::now()
+        .duration_since(meta.modified()?)
+        .unwrap_or_default();
+    Ok((meta.is_file() && age > grace).then_some(meta.len()))
 }
 
 fn touch(path: &Path) -> io::Result<()> {
@@ -168,5 +265,68 @@ mod tests {
         let hash = blobs.put(&data[..]).unwrap();
         assert_eq!(hash.as_str(), hex::encode(Sha256::digest(&data)));
         assert_eq!(fs::read(blobs.path(&hash)).unwrap(), data);
+    }
+
+    fn set_mtime(path: &Path, secs_ago: u64) {
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(secs_ago))
+            .unwrap();
+    }
+
+    #[test]
+    fn gc_removes_only_old_unreferenced_blobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let blobs = BlobStore::open(dir.path()).unwrap();
+        let grace = Duration::from_secs(3600);
+        let kept_ref = blobs.put_bytes(b"referenced").unwrap();
+        let old = blobs.put_bytes(b"old and unreferenced").unwrap();
+        let young = blobs.put_bytes(b"young").unwrap();
+        for hash in [&kept_ref, &old] {
+            set_mtime(&blobs.path(hash), 7200);
+        }
+        let stale_tmp = dir.path().join("tmp").join("partial");
+        fs::write(&stale_tmp, b"half a blob").unwrap();
+        set_mtime(&stale_tmp, 7200);
+        fs::write(dir.path().join("stray.txt"), b"not ours").unwrap();
+
+        let referenced = HashSet::from([kept_ref.clone()]);
+        let report = blobs.collect_garbage(&referenced, grace).unwrap();
+        assert_eq!(report.removed, 1);
+        assert_eq!(
+            report.bytes,
+            (b"old and unreferenced".len() + b"half a blob".len()) as u64
+        );
+        assert!(blobs.contains(&kept_ref));
+        assert!(!blobs.contains(&old));
+        assert!(blobs.contains(&young));
+        assert!(!stale_tmp.exists());
+        assert!(dir.path().join("stray.txt").exists());
+
+        // Putting the content again brings it back.
+        assert_eq!(blobs.put_bytes(b"old and unreferenced").unwrap(), old);
+        assert!(blobs.contains(&old));
+        assert_eq!(
+            blobs.collect_garbage(&referenced, grace).unwrap(),
+            GcReport::default()
+        );
+    }
+
+    #[test]
+    fn gc_spares_a_blob_put_again_after_the_first_look() {
+        let dir = tempfile::tempdir().unwrap();
+        let blobs = BlobStore::open(dir.path()).unwrap();
+        let grace = Duration::from_secs(3600);
+        let hash = blobs.put_bytes(b"x").unwrap();
+        set_mtime(&blobs.path(&hash), 7200);
+        let candidates = blobs.gc_candidates(&HashSet::new(), grace).unwrap();
+        assert_eq!(candidates, std::slice::from_ref(&hash));
+
+        // A row is about to refer to it again.
+        blobs.put_bytes(b"x").unwrap();
+        assert_eq!(blobs.remove_if_older(&hash, grace).unwrap(), None);
+        assert!(blobs.contains(&hash));
     }
 }

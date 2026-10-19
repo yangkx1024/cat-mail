@@ -3,23 +3,28 @@
 //! Everything here is synchronous. `catmail-core` calls into it from blocking tasks.
 
 mod accounts;
+mod attachments;
 mod blob;
 mod columns;
 mod error;
 mod folders;
+mod fts;
 mod messages;
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use catmail_types::BlobHash;
 use rusqlite::{Connection, TransactionBehavior};
 use rusqlite_migration::{M, Migrations};
 
 pub use accounts::Accounts;
+pub use attachments::{AttachmentSource, Attachments, NewAttachment};
 pub use blob::BlobStore;
 pub use error::{Error, Result};
 pub use folders::{FolderSyncState, Folders, RemoteFolder};
-pub use messages::{Messages, NewMessage};
+pub use messages::{MessageLocation, Messages, NewBody, NewMessage};
 
 const MIGRATIONS: &[M<'static>] = &[M::up(include_str!("../migrations/0001_init.sql"))];
 
@@ -54,6 +59,23 @@ impl<'c> Db<'c> {
 
     pub fn messages(&self) -> Messages<'c> {
         Messages::new(self.conn)
+    }
+
+    pub fn attachments(&self) -> Attachments<'c> {
+        Attachments::new(self.conn)
+    }
+
+    /// Every blob some row refers to, for [`BlobStore::collect_garbage`]. A new
+    /// `*_blob_hash` column must be added here, or GC deletes what it points to.
+    pub fn blob_references(&self) -> Result<HashSet<BlobHash>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT raw_blob_hash FROM message_bodies WHERE raw_blob_hash IS NOT NULL
+             UNION SELECT blob_hash FROM attachments WHERE blob_hash IS NOT NULL
+             UNION SELECT blob_hash FROM draft_attachments
+             UNION SELECT raw_blob_hash FROM outbox",
+        )?;
+        let rows = stmt.query_map([], |r| columns::blob_hash_at(r, 0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 }
 

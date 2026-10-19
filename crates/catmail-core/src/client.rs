@@ -1,10 +1,12 @@
 use std::fs::{self, File, TryLockError};
 use std::sync::Arc;
+use std::time::Duration;
 
 use catmail_proto::TlsConfig;
 use catmail_store::{BlobStore, Store};
 use catmail_types::{
-    Account, AccountId, Event, Folder, FolderId, MessageSummary, NewAccount, SyncReport,
+    Account, AccountId, AttachmentId, Event, Folder, FolderId, GcReport, Message, MessageId,
+    MessageSummary, NewAccount, SearchQuery, SyncReport,
 };
 use tokio::runtime::Handle;
 use tokio::sync::broadcast;
@@ -13,9 +15,13 @@ use uuid::Uuid;
 use crate::engine::{Engine, blocking};
 use crate::runtime::Runtime;
 use crate::secrets::{KeyringSecrets, SecretStore};
-use crate::{Config, Error, Result, sync};
+use crate::{Config, Error, Result, body, sync};
 
 const EVENT_CAPACITY: usize = 256;
+
+/// How long an unreferenced blob survives. Far longer than the gap between storing a
+/// blob and committing the row that refers to it, which is what GC must not cut into.
+const BLOB_GRACE: Duration = Duration::from_secs(60 * 60);
 
 /// The only entry point frontends use. Cheap to clone; all clones share one engine.
 #[derive(Clone)]
@@ -173,6 +179,7 @@ impl MailClient {
         self.rt
             .run(async move {
                 let _stopped = engine.stop_syncing(id).await;
+                engine.forget_sessions(id);
                 let result = blocking({
                     let engine = engine.clone();
                     move || {
@@ -250,6 +257,61 @@ impl MailClient {
                 engine
                     .read(move |db| db.messages().list(folder, limit, offset))
                     .await
+            })
+            .await
+    }
+
+    /// The message as stored locally; `body` is `None` until downloaded.
+    pub async fn get_message(&self, id: MessageId) -> Result<Option<Message>> {
+        let engine = self.engine.clone();
+        self.rt
+            .run(async move { engine.read(move |db| db.messages().get(id)).await })
+            .await
+    }
+
+    /// The message with its body, downloading it first if needed (which leaves the
+    /// message unread on the server). Fails with [`Error::OutOfSync`] if the server no
+    /// longer has the message as it was synced.
+    pub async fn download_message(&self, id: MessageId) -> Result<Message> {
+        self.rt
+            .run(body::download_message(self.engine.clone(), id))
+            .await
+    }
+
+    /// The decoded content of an attachment or inline part, downloading it first if
+    /// needed.
+    pub async fn attachment_content(&self, id: AttachmentId) -> Result<Vec<u8>> {
+        self.rt
+            .run(body::attachment_content(self.engine.clone(), id))
+            .await
+    }
+
+    /// The message exactly as the server stores it (the `.eml`), downloading it first if
+    /// needed.
+    pub async fn raw_message(&self, id: MessageId) -> Result<Vec<u8>> {
+        self.rt
+            .run(body::raw_message(self.engine.clone(), id))
+            .await
+    }
+
+    /// Searches subjects, senders and recipients of all synced messages, and the text
+    /// of downloaded bodies. Newest first.
+    pub async fn search(&self, query: SearchQuery) -> Result<Vec<MessageSummary>> {
+        let engine = self.engine.clone();
+        self.rt
+            .run(async move { engine.read(move |db| db.messages().search(&query)).await })
+            .await
+    }
+
+    /// Deletes stored bodies and attachments nothing refers to any more (after messages
+    /// or accounts were removed). Safe to run at any time.
+    pub async fn collect_garbage(&self) -> Result<GcReport> {
+        let engine = self.engine.clone();
+        self.rt
+            .run_blocking(move || {
+                // References first: see BlobStore::collect_garbage.
+                let referenced = engine.store.read(|db| db.blob_references())?;
+                Ok(engine.blobs.collect_garbage(&referenced, BLOB_GRACE)?)
             })
             .await
     }
