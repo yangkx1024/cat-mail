@@ -45,6 +45,8 @@ tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 unicode-width = "0.2.2"
+# The URL parser ammonia uses; the sanitizer's own checks must agree with it.
+url = "2.5.8"
 uuid = { version = "1.28", features = ["v4"] }
 
 [workspace.lints.rust]

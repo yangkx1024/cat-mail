@@ -6,7 +6,7 @@ use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
 use crate::Result;
 use crate::attachments::{Attachments, NewAttachment};
-use crate::columns::{json, opt_blob_hash, to_json};
+use crate::columns::{json, parse_opt_text, to_json};
 use crate::fts;
 
 const SUMMARY_COLUMNS: &str = "id, account_id, folder_id, thread_id, subject, from_json, date, snippet, flags, has_attachments";
@@ -132,9 +132,7 @@ impl<'c> Messages<'c> {
             })?;
             if added > 0 {
                 inserted += 1;
-                let id = self.conn.last_insert_rowid();
-                let to: Vec<&Address> = m.to.iter().chain(&m.cc).collect();
-                self.write_index(id, m.subject.as_deref(), &m.from, &to, None)?;
+                self.reindex(self.conn.last_insert_rowid())?;
             } else {
                 self.update_flags(folder, std::slice::from_ref(&m.state))?;
             }
@@ -199,7 +197,7 @@ impl<'c> Messages<'c> {
                AND (:folder IS NULL OR folder_id = :folder)
              ORDER BY date DESC, id DESC LIMIT :limit OFFSET :offset"
         );
-        let mut stmt = self.conn.prepare(&sql)?;
+        let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(
             named_params! {
                 ":expr": expr,
@@ -234,7 +232,7 @@ impl<'c> Messages<'c> {
                         uid: r.get(4)?,
                         size: r.get(5)?,
                         downloaded: r.get(6)?,
-                        raw: opt_blob_hash(r, "raw_blob_hash")?,
+                        raw: parse_opt_text(r, "raw_blob_hash")?,
                     })
                 },
             )
@@ -306,23 +304,7 @@ impl<'c> Messages<'c> {
         )?;
         Attachments::new(self.conn).insert(id, &body.attachments)?;
 
-        let (subject, from, to, cc): (Option<String>, Vec<Address>, Vec<Address>, Vec<Address>) =
-            self.conn.query_row(
-                "SELECT subject, from_json, to_json, cc_json FROM messages WHERE id = ?1",
-                [id.0],
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        json(r, "from_json")?,
-                        json(r, "to_json")?,
-                        json(r, "cc_json")?,
-                    ))
-                },
-            )?;
-        let to: Vec<&Address> = to.iter().chain(&cc).collect();
-        self.conn
-            .execute("DELETE FROM messages_fts WHERE rowid = ?1", [id.0])?;
-        self.write_index(id.0, subject.as_deref(), &from, &to, body.text.as_deref())?;
+        self.reindex(id.0)?;
         Ok(true)
     }
 
@@ -335,31 +317,47 @@ impl<'c> Messages<'c> {
         )? > 0)
     }
 
-    fn write_index(
-        &self,
-        id: i64,
-        subject: Option<&str>,
-        from: &[Address],
-        to: &[&Address],
-        body: Option<&str>,
-    ) -> Result<()> {
-        let mut insert = self.conn.prepare_cached(
-            "INSERT INTO messages_fts (rowid, subject, from_text, to_text, body)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+    /// Writes the message's index entry from what is stored now, replacing any old one.
+    /// Every change to indexed text (a new message, its body) goes through here; deletes
+    /// are handled by a trigger.
+    fn reindex(&self, id: i64) -> Result<()> {
+        let mut read = self.conn.prepare_cached(
+            "SELECT m.subject, m.from_json, m.to_json, m.cc_json, b.text_plain
+             FROM messages m LEFT JOIN message_bodies b ON b.message_id = m.id
+             WHERE m.id = ?1",
         )?;
-        insert.execute(params![
-            id,
-            fts::segment(subject.unwrap_or_default()),
-            fts::segment(&address_text(from.iter())),
-            fts::segment(&address_text(to.iter().copied())),
-            fts::segment(body.unwrap_or_default()),
-        ])?;
+        // Subject, sender, recipients, body.
+        let [subject, from, to, body]: [String; 4] = read.query_row([id], |r| {
+            let (to, cc): (Vec<Address>, Vec<Address>) = (json(r, "to_json")?, json(r, "cc_json")?);
+            Ok([
+                r.get::<_, Option<String>>("subject")?.unwrap_or_default(),
+                address_text(&json::<Vec<Address>>(r, "from_json")?),
+                address_text(to.iter().chain(&cc)),
+                r.get::<_, Option<String>>("text_plain")?
+                    .unwrap_or_default(),
+            ])
+        })?;
+        self.conn
+            .prepare_cached("DELETE FROM messages_fts WHERE rowid = ?1")?
+            .execute([id])?;
+        self.conn
+            .prepare_cached(
+                "INSERT INTO messages_fts (rowid, subject, from_text, to_text, body)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?
+            .execute(params![
+                id,
+                fts::segment(&subject),
+                fts::segment(&from),
+                fts::segment(&to),
+                fts::segment(&body),
+            ])?;
         Ok(())
     }
 }
 
 /// Names and addresses, so either finds the message.
-fn address_text<'a>(addresses: impl Iterator<Item = &'a Address>) -> String {
+fn address_text<'a>(addresses: impl IntoIterator<Item = &'a Address>) -> String {
     let mut out = String::new();
     for a in addresses {
         if let Some(name) = &a.name {

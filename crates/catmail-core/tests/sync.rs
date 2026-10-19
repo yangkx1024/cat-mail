@@ -1,57 +1,13 @@
 //! Sync engine against the fake IMAP server, including injected faults.
 
-use std::sync::Arc;
 use std::time::Duration;
 
-use catmail_core::{
-    AccountId, AuthKind, Config, Error, Event, Flags, Folder, FolderRole, ImapError, MailClient,
-    MemorySecrets, NewAccount, Security, ServerConfig, SyncReport,
-};
-use catmail_testkit::{FakeImap, FakeMailbox, ServerState};
-use tokio::runtime::Handle;
+use catmail_core::{Error, Event, Flags, Folder, FolderRole, ImapError, SyncReport};
+use catmail_testkit::{FakeMailbox, ServerState};
 
-struct Env {
-    fake: FakeImap,
-    client: MailClient,
-    account: AccountId,
-    _dir: tempfile::TempDir,
-}
+mod common;
 
-async fn env(state: ServerState) -> Env {
-    let fake = FakeImap::start(state).await;
-    let dir = tempfile::tempdir().unwrap();
-    let client = MailClient::builder(Config::with_data_dir(dir.path()))
-        .runtime(Handle::current())
-        .secrets(Arc::new(MemorySecrets::default()))
-        .open()
-        .unwrap();
-    let server = ServerConfig {
-        host: "127.0.0.1".into(),
-        port: fake.port(),
-        security: Security::Plain,
-    };
-    let account = client
-        .add_account(
-            NewAccount {
-                email: "alice@example.com".into(),
-                display_name: None,
-                username: "alice".into(),
-                imap: server.clone(),
-                smtp: server,
-                auth: AuthKind::Password,
-            },
-            "pw".into(),
-        )
-        .await
-        .unwrap()
-        .id;
-    Env {
-        fake,
-        client,
-        account,
-        _dir: dir,
-    }
-}
+use common::{Env, env};
 
 fn state_with(inbox_subjects: &[&str]) -> ServerState {
     let mut state = ServerState::new("alice", "pw");
@@ -88,13 +44,6 @@ impl Env {
 
     async fn subjects(&self, name: &str) -> Vec<String> {
         self.messages(name).await.into_iter().map(|m| m.0).collect()
-    }
-
-    fn commands_since(&self, start: usize) -> Vec<String> {
-        self.fake.state().log[start..]
-            .iter()
-            .map(|c| c.line.clone())
-            .collect()
     }
 }
 

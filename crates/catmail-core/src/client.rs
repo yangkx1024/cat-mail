@@ -178,8 +178,7 @@ impl MailClient {
         let engine = self.engine.clone();
         self.rt
             .run(async move {
-                let _stopped = engine.stop_syncing(id).await;
-                engine.forget_sessions(id);
+                let _stopped = engine.start_removal(id).await;
                 let result = blocking({
                     let engine = engine.clone();
                     move || {
@@ -198,7 +197,10 @@ impl MailClient {
                     }
                 })
                 .await;
-                engine.forget_sync(id);
+                if result.is_err() {
+                    // Nothing was removed.
+                    engine.cancel_removal(id);
+                }
                 result
             })
             .await
@@ -597,6 +599,10 @@ mod tests {
         ));
         release.send(()).unwrap();
         assert_eq!(add.await.unwrap().unwrap().id, id);
+        assert!(
+            !client.engine.cancellation(id).is_cancelled(),
+            "the failed removal must not leave the new account marked removed"
+        );
 
         client.remove_account(id).await.unwrap();
         assert_eq!(secrets.inner.len(), 0, "no orphaned credential");

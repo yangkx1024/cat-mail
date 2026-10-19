@@ -21,6 +21,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "net", "time"] }
 tokio-rustls.workspace = true
 tracing.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 catmail-testkit.workspace = true

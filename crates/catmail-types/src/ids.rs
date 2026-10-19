@@ -63,6 +63,14 @@ impl TryFrom<String> for BlobHash {
     }
 }
 
+impl std::str::FromStr for BlobHash {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s).ok_or_else(|| format!("invalid blob hash `{s}`"))
+    }
+}
+
 impl From<BlobHash> for String {
     fn from(hash: BlobHash) -> Self {
         hash.0

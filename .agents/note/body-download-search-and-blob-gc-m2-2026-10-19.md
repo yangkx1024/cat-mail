@@ -60,6 +60,24 @@ M1 只同步邮件头，不能看正文。M2 要能按需下载正文和附件�
   - 摘要在一个词恰好到第 200 个字符时，分隔空格让计数越过上限，之后整篇正文都进了
     摘要。现在加分隔符前检查是否还放得下下一个字符。
   - 假服务器为此新增：正文 FETCH 闸门、section 回 NIL、关闭当前所有连接。
+- **/simplify 整理**（复用、简化、效率、层次四个角度的 review）：
+  - 每账户的同步锁、取消信号、空闲连接合并为一个 `AccountState`，删除后保留为墓碑；
+    删除流程从三个协调调用变成"开始删除 / 撤销"，按需操作不再需要两次查找。
+  - 三个按需入口共用 `on_server`（连接、EXAMINE 与 UIDVALIDITY 检查、取消）和
+    `store_blob`；`with_session` 改为直线代码；`raw_message` 对未下载的大邮件只整封取一次。
+  - 要取哪些正文部分改由替身邮件 + mail-parser 判定，与显示用同一规则；同步时的
+    `has_attachments` 也改走 `MimeNode`，只剩一个 BODYSTRUCTURE 转换；FETCH 按 UID 分组
+    合并为 `group_fetches`。
+  - 全文索引只剩一个写入入口 `Messages::reindex`；没有 CJK 的文本不再重建字符串。
+    `BlobHash` 实现 `FromStr`，去掉两个专用列转换函数；`blob_references` 用 `UNION ALL`，
+    并加测试枚举所有 `*_blob_hash` 列。
+  - 传输解码直接调用 mail-parser 的宽松解码器，不再拼假邮件；二进制附件不再二次解码；
+    取回的 IMAP 数据移动而非复制。`data:` 判断改用 ammonia 同款的 `url` 解析器。
+  - `safe_filename` 移到 core（GUI 保存附件也要用）；测试的公共环境移到
+    `tests/common`；假服务器复用 `quote`/`literal`，合并两段相同的故障代码。
+  - 没采纳：复用连接时跳过 EXAMINE（要信任服务器不在选中期间改 UIDVALIDITY，正是我们
+    要防的）；小邮件原文与附件重复存储、附件流式 API、用服务器的 `.MIME` 头代替替身邮件、
+    CSS 属性白名单、从 DOM 收集 cid 引用——都是设计层面的改动，留待以后。
 - 模式未发布，直接修改 `0001_init.sql`：`attachments` 加 `transfer_encoding`、
   `UNIQUE (message_id, part_section)`，id 改为 AUTOINCREMENT（会交给前端）。
 

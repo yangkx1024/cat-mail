@@ -694,30 +694,34 @@ async fn handle(
             let items = fetch_items(args);
             if header_item(&items).is_some() {
                 let hang = {
-                    let mut st = lock(state);
-                    st.header_fetches += 1;
-                    if st.faults.drop_on_fetch == Some(st.header_fetches) {
-                        st.faults.drop_on_fetch = None;
-                        return Ok(Next::Close);
-                    }
-                    st.faults.hang_on_fetch
+                    let st = &mut *lock(state);
+                    let f = &mut st.faults;
+                    count_fetch(
+                        &mut st.header_fetches,
+                        &mut f.drop_on_fetch,
+                        f.hang_on_fetch,
+                    )
                 };
-                if hang {
-                    std::future::pending::<()>().await;
+                match hang {
+                    None => return Ok(Next::Close),
+                    Some(true) => std::future::pending::<()>().await,
+                    Some(false) => {}
                 }
             }
             if items.iter().any(|i| body_section(i).is_some()) {
                 let hang = {
-                    let mut st = lock(state);
-                    st.body_fetches += 1;
-                    if st.faults.drop_on_body_fetch == Some(st.body_fetches) {
-                        st.faults.drop_on_body_fetch = None;
-                        return Ok(Next::Close);
-                    }
-                    st.faults.hang_on_body_fetch
+                    let st = &mut *lock(state);
+                    let f = &mut st.faults;
+                    count_fetch(
+                        &mut st.body_fetches,
+                        &mut f.drop_on_body_fetch,
+                        f.hang_on_body_fetch,
+                    )
                 };
-                if hang {
-                    std::future::pending::<()>().await;
+                match hang {
+                    None => return Ok(Next::Close),
+                    Some(true) => std::future::pending::<()>().await,
+                    Some(false) => {}
                 }
                 let gate = lock(state).faults.body_fetch_gate.clone();
                 if let Some(gate) = gate {
@@ -840,7 +844,18 @@ fn fetch_response(seq: usize, items: &[Vec<u8>]) -> Vec<u8> {
     out
 }
 
-fn literal(data: &[u8]) -> Vec<u8> {
+/// Counts a FETCH for the drop and hang faults: `None` to drop the connection (once, at
+/// the `drop_on`-th), else whether to hang.
+fn count_fetch(count: &mut usize, drop_on: &mut Option<usize>, hang: bool) -> Option<bool> {
+    *count += 1;
+    if *drop_on == Some(*count) {
+        *drop_on = None;
+        return None;
+    }
+    Some(hang)
+}
+
+pub(crate) fn literal(data: &[u8]) -> Vec<u8> {
     let mut out = format!("{{{}}}\r\n", data.len()).into_bytes();
     out.extend(data);
     out
@@ -849,10 +864,11 @@ fn literal(data: &[u8]) -> Vec<u8> {
 /// `BODY.PEEK[]` → `""`, `BODY.PEEK[1.2]` → `"1.2"`; `None` for other items, including
 /// `BODY.PEEK[HEADER.FIELDS …]`.
 fn body_section(item: &str) -> Option<&str> {
+    const PREFIX: &str = "BODY.PEEK[";
     let spec = item
-        .get(.."BODY.PEEK[".len())
-        .filter(|p| p.eq_ignore_ascii_case("BODY.PEEK["))
-        .map(|_| &item["BODY.PEEK[".len()..])?
+        .get(..PREFIX.len())?
+        .eq_ignore_ascii_case(PREFIX)
+        .then(|| &item[PREFIX.len()..])?
         .strip_suffix(']')?;
     spec.bytes()
         .all(|b| b.is_ascii_digit() || b == b'.')
@@ -945,7 +961,7 @@ fn filter_headers(raw: &[u8], fields: &[String]) -> Vec<u8> {
     out
 }
 
-fn quote(s: &str) -> String {
+pub(crate) fn quote(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 

@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use mail_parser::parsers::MessageStream;
 use mail_parser::{Encoding, Message, MessageParser, MimeHeaders, PartType};
 
 use super::html::sanitize_html;
@@ -53,26 +54,23 @@ pub fn parse_message(raw: &[u8]) -> Content {
 /// Undoes a Content-Transfer-Encoding (`base64`, `quoted-printable`; anything else is
 /// returned as is), as leniently as mail-parser does for whole messages.
 pub fn decode_transfer(encoding: Option<&str>, data: &[u8]) -> Vec<u8> {
-    let Some(encoding) = encoding
-        .map(str::to_ascii_lowercase)
-        .filter(|e| e == "base64" || e == "quoted-printable")
-    else {
-        return data.to_vec();
+    let mut stream = MessageStream::new(data);
+    let (end, decoded) = match encoding.map(str::to_ascii_lowercase).as_deref() {
+        Some("base64") => stream.decode_base64_mime(b""),
+        Some("quoted-printable") => stream.decode_quoted_printable_mime(b""),
+        _ => return data.to_vec(),
     };
-    // mail-parser's lenient decoders only run on message bodies, so give it one.
-    let mut message = format!(
-        "Content-Type: application/octet-stream\r\nContent-Transfer-Encoding: {encoding}\r\n\r\n"
-    )
-    .into_bytes();
-    message.extend_from_slice(data);
-    MessageParser::new()
-        .parse(&message)
-        .and_then(|m| m.parts.first().map(|p| p.contents().to_vec()))
-        .unwrap_or_else(|| data.to_vec())
+    // Undecodable: keep the bytes, as mail-parser does for a message body.
+    if end == usize::MAX {
+        data.to_vec()
+    } else {
+        decoded.into_owned()
+    }
 }
 
-/// `raw` is what `message` was parsed from; part contents are cut from it and decoded,
-/// so text attachments keep their original bytes and charset.
+/// `raw` is what `message` was parsed from. Binary parts come decoded from the parser;
+/// text parts and attached messages are cut from `raw` and decoded again, so text keeps
+/// its original bytes and charset (the parser converts it to UTF-8).
 pub(super) fn extract(message: &Message<'_>, raw: &[u8]) -> Content {
     let text = joined(
         (0..message.text_body_count()).filter_map(|i| message.body_text(i)),
@@ -99,16 +97,19 @@ pub(super) fn extract(message: &Message<'_>, raw: &[u8]) -> Content {
         .iter()
         .filter_map(|&id| {
             let part = &message.parts[id as usize];
-            let data = raw
-                .get(part.offset_body as usize..part.offset_end as usize)
-                .map(|encoded| {
-                    let encoding = match part.encoding {
-                        Encoding::Base64 => Some("base64"),
-                        Encoding::QuotedPrintable => Some("quoted-printable"),
-                        Encoding::None => None,
-                    };
-                    decode_transfer(encoding, encoded)
-                });
+            let data = match &part.body {
+                PartType::Binary(data) | PartType::InlineBinary(data) => Some(data.to_vec()),
+                _ => raw
+                    .get(part.offset_body as usize..part.offset_end as usize)
+                    .map(|encoded| {
+                        let encoding = match part.encoding {
+                            Encoding::Base64 => Some("base64"),
+                            Encoding::QuotedPrintable => Some("quoted-printable"),
+                            Encoding::None => None,
+                        };
+                        decode_transfer(encoding, encoded)
+                    }),
+            };
             let content_id = part
                 .content_id()
                 .map(|id| id.trim().trim_start_matches('<').trim_end_matches('>'))
@@ -196,7 +197,7 @@ fn percent_decode(s: &str) -> String {
 /// IMAP section numbers of the parts of `message` (RFC 3501 §6.4.5): the children of a
 /// multipart are numbered from 1 below its own number, and a message that isn't
 /// multipart has the single part `1`. Attached messages count as one part.
-fn sections(message: &Message<'_>) -> HashMap<u32, String> {
+pub(super) fn sections(message: &Message<'_>) -> HashMap<u32, String> {
     fn number(message: &Message<'_>, id: u32, section: String, out: &mut HashMap<u32, String>) {
         if let Some(children) = message.parts[id as usize].sub_parts() {
             for (i, &child) in children.iter().enumerate() {
@@ -410,6 +411,10 @@ mod tests {
             "café!".as_bytes()
         );
         assert_eq!(decode_transfer(Some("7bit"), b"as is"), b"as is");
+        assert_eq!(
+            decode_transfer(Some("base64"), b"not base64!"),
+            b"not base64!"
+        );
         assert_eq!(decode_transfer(None, b"as is"), b"as is");
     }
 

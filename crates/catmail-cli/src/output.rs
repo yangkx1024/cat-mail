@@ -75,9 +75,9 @@ pub(crate) fn print_table(header: &[&str], rows: Vec<Vec<String>>) {
     }
 }
 
-/// C0/C1 controls and bidi overrides: what a terminal (or a file manager) would act on
-/// or reorder rather than show.
-pub(crate) fn is_unsafe(c: char) -> bool {
+/// C0/C1 controls and bidi overrides: what a terminal would act on or reorder rather
+/// than show.
+fn is_unsafe(c: char) -> bool {
     c.is_control()
         || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
 }

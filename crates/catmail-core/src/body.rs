@@ -12,15 +12,14 @@
 //! existing row is still the same (folder, UID) as when the download started.
 
 use std::collections::HashMap;
-use std::io::Read;
 use std::sync::Arc;
 
 use catmail_proto::imap::{Error as ImapError, Session};
 use catmail_proto::mime::{self, Content};
-use catmail_store::{MessageLocation, NewAttachment, NewBody};
+use catmail_store::{AttachmentSource, Db, MessageLocation, NewAttachment, NewBody};
 use catmail_types::{AttachmentId, BlobHash, Event, Message, MessageId};
 
-use crate::connection::with_session;
+use crate::connection::{SessionFuture, with_session};
 use crate::engine::{Engine, blocking};
 use crate::{Error, Result};
 
@@ -28,19 +27,10 @@ use crate::{Error, Result};
 /// left on the server until opened. Text parts above it are not fetched at all.
 pub(crate) const WHOLE_MESSAGE_LIMIT: u32 = 2 * 1024 * 1024;
 
+const GONE: Error = Error::OutOfSync("the message is no longer on the server");
+
 pub(crate) async fn download_message(engine: Arc<Engine>, id: MessageId) -> Result<Message> {
-    let location = locate(&engine, id).await?;
-    if !location.downloaded {
-        let mut cancellation = engine.cancellation(location.account);
-        // Again, now that a removal of the account would be noticed.
-        let location = locate(&engine, id).await?;
-        if !location.downloaded {
-            tokio::select! {
-                result = fetch_and_store(&engine, location) => result?,
-                () = cancellation.cancelled() => return Err(Error::Cancelled),
-            }
-        }
-    }
+    ensure_downloaded(&engine, id, false).await?;
     engine
         .read(move |db| db.messages().get(id))
         .await?
@@ -49,50 +39,35 @@ pub(crate) async fn download_message(engine: Arc<Engine>, id: MessageId) -> Resu
 
 /// The decoded content, downloading it first if needed.
 pub(crate) async fn attachment_content(engine: Arc<Engine>, id: AttachmentId) -> Result<Vec<u8>> {
-    let source = || {
-        let engine = engine.clone();
-        async move {
-            engine
-                .read(move |db| db.attachments().source(id))
-                .await?
-                .ok_or(Error::AttachmentNotFound(id))
-        }
-    };
-    let first = source().await?;
-    if let Some(blob) = &first.blob
+    let source = attachment_source(&engine, id).await?;
+    if let Some(blob) = &source.blob
         && let Some(data) = read_blob(&engine, blob.clone()).await?
     {
         return Ok(data);
     }
-    let mut cancellation = engine.cancellation(first.message.account);
-    let source = source().await?;
-    let location = source.message.clone();
     let section = source.section.clone();
-    let encoded = tokio::select! {
-        result = with_session(&engine, location.account, move |session| {
-            let (location, section) = (location.clone(), section.clone());
-            Box::pin(async move {
-                examine(session, &location).await?;
-                session
-                    .fetch_sections(location.uid, std::slice::from_ref(&section))
-                    .await?
-                    .and_then(|mut parts| parts.remove(&section))
-                    .ok_or(GONE)
-            })
-        }) => result?,
-        () = cancellation.cancelled() => return Err(Error::Cancelled),
-    };
-    let engine2 = engine.clone();
+    let encoded = on_server(&engine, source.message.clone(), move |session, location| {
+        let section = section.clone();
+        Box::pin(async move {
+            session
+                .fetch_sections(location.uid, std::slice::from_ref(&section))
+                .await?
+                .and_then(|mut parts| parts.remove(&section))
+                .ok_or(GONE)
+        })
+    })
+    .await?;
+    let engine = engine.clone();
     blocking(move || {
         let data = mime::decode_transfer(source.transfer_encoding.as_deref(), &encoded);
-        let hash = engine2.blobs.put_bytes(&data)?;
+        drop(encoded);
         let size = data.len() as u32;
-        if !engine2
-            .store
-            .write(|db| db.attachments().set_blob(id, &hash, size))?
-        {
-            return Err(Error::AttachmentNotFound(id));
-        }
+        store_blob(
+            &engine,
+            &data,
+            |db, hash| db.attachments().set_blob(id, hash, size),
+            Error::AttachmentNotFound(id),
+        )?;
         Ok(data)
     })
     .await
@@ -100,48 +75,75 @@ pub(crate) async fn attachment_content(engine: Arc<Engine>, id: AttachmentId) ->
 
 /// The raw message, fetching it if only its parts were downloaded.
 pub(crate) async fn raw_message(engine: Arc<Engine>, id: MessageId) -> Result<Vec<u8>> {
-    download_message(engine.clone(), id).await?;
+    // Not downloaded yet: fetch it whole, which stores the raw message too.
+    ensure_downloaded(&engine, id, true).await?;
     let location = locate(&engine, id).await?;
     if let Some(raw) = &location.raw
         && let Some(data) = read_blob(&engine, raw.clone()).await?
     {
         return Ok(data);
     }
-    let mut cancellation = engine.cancellation(location.account);
-    let account = location.account;
-    let raw = tokio::select! {
-        result = with_session(&engine, account, move |session| {
-            let location = location.clone();
-            Box::pin(async move {
-                examine(session, &location).await?;
-                session.fetch_raw(location.uid).await?.ok_or(GONE)
-            })
-        }) => result?,
-        () = cancellation.cancelled() => return Err(Error::Cancelled),
-    };
-    let engine2 = engine.clone();
+    let raw = on_server(&engine, location, |session, location| {
+        Box::pin(async move { session.fetch_raw(location.uid).await?.ok_or(GONE) })
+    })
+    .await?;
+    let engine = engine.clone();
     blocking(move || {
-        let hash = engine2.blobs.put_bytes(&raw)?;
-        if !engine2.store.write(|db| db.messages().set_raw(id, &hash))? {
-            return Err(Error::MessageNotFound(id));
-        }
+        store_blob(
+            &engine,
+            &raw,
+            |db, hash| db.messages().set_raw(id, hash),
+            Error::MessageNotFound(id),
+        )?;
         Ok(raw)
     })
     .await
 }
 
-const GONE: Error = Error::OutOfSync("the message is no longer on the server");
+/// Runs `op` against the message's folder on the server: on one of the account's
+/// connections, after EXAMINE has confirmed the UIDVALIDITY, and cancelled if the
+/// account is removed meanwhile. Every on-demand fetch goes through here.
+///
+/// The caller looked up `location` before calling, and the cancellation is obtained
+/// after that: a removal that started earlier left the account marked removed, which
+/// cancels at once, and one that starts later is noticed.
+async fn on_server<T: Send + 'static>(
+    engine: &Arc<Engine>,
+    location: MessageLocation,
+    op: impl for<'s> Fn(&'s mut Session, &'s MessageLocation) -> SessionFuture<'s, T>
+    + Clone
+    + Send
+    + 'static,
+) -> Result<T> {
+    let mut cancellation = engine.cancellation(location.account);
+    let account = location.account;
+    tokio::select! {
+        result = with_session(engine, account, move |session| {
+            let (location, op) = (location.clone(), op.clone());
+            Box::pin(async move {
+                examine(session, &location).await?;
+                op(session, &location).await
+            })
+        }) => result,
+        () = cancellation.cancelled() => Err(Error::Cancelled),
+    }
+}
 
 enum Fetched {
     Whole(Vec<u8>),
     Parts(mime::MimeNode, HashMap<String, Vec<u8>>),
 }
 
-async fn fetch_and_store(engine: &Arc<Engine>, location: MessageLocation) -> Result<()> {
-    let (id, account, folder) = (location.id, location.account, location.folder);
-    let fetched = with_session(engine, account, move |session| {
-        let location = location.clone();
-        Box::pin(async move { fetch(session, &location).await })
+/// Downloads and stores the body unless it is stored already. `whole` fetches even a
+/// large message whole, for its raw form.
+async fn ensure_downloaded(engine: &Arc<Engine>, id: MessageId, whole: bool) -> Result<()> {
+    let location = locate(engine, id).await?;
+    if location.downloaded {
+        return Ok(());
+    }
+    let (account, folder) = (location.account, location.folder);
+    let fetched = on_server(engine, location, move |session, location| {
+        Box::pin(fetch(session, location, whole))
     })
     .await?;
 
@@ -173,10 +175,10 @@ async fn fetch_and_store(engine: &Arc<Engine>, location: MessageLocation) -> Res
     Ok(())
 }
 
-async fn fetch(session: &mut Session, location: &MessageLocation) -> Result<Fetched> {
-    examine(session, location).await?;
+/// Runs after [`examine`] (see [`on_server`]).
+async fn fetch(session: &mut Session, location: &MessageLocation, whole: bool) -> Result<Fetched> {
     let uid = location.uid;
-    if location.size.is_some_and(|size| size > WHOLE_MESSAGE_LIMIT) {
+    if !whole && location.size.is_some_and(|size| size > WHOLE_MESSAGE_LIMIT) {
         match session.fetch_structure(uid).await {
             Ok(Some(structure)) => {
                 let sections = structure.text_sections(WHOLE_MESSAGE_LIMIT);
@@ -251,6 +253,22 @@ fn new_body(engine: &Engine, content: Content, raw: Option<&[u8]>) -> Result<New
     })
 }
 
+/// Stores `data` and records it with `record`, which returns false if the row it
+/// belongs to is gone (then `gone` is the error).
+fn store_blob(
+    engine: &Engine,
+    data: &[u8],
+    record: impl FnOnce(&Db<'_>, &BlobHash) -> catmail_store::Result<bool>,
+    gone: Error,
+) -> Result<()> {
+    let hash = engine.blobs.put_bytes(data)?;
+    if engine.store.write(|db| record(db, &hash))? {
+        Ok(())
+    } else {
+        Err(gone)
+    }
+}
+
 async fn locate(engine: &Arc<Engine>, id: MessageId) -> Result<MessageLocation> {
     engine
         .read(move |db| db.messages().location(id))
@@ -258,15 +276,18 @@ async fn locate(engine: &Arc<Engine>, id: MessageId) -> Result<MessageLocation> 
         .ok_or(Error::MessageNotFound(id))
 }
 
+async fn attachment_source(engine: &Arc<Engine>, id: AttachmentId) -> Result<AttachmentSource> {
+    engine
+        .read(move |db| db.attachments().source(id))
+        .await?
+        .ok_or(Error::AttachmentNotFound(id))
+}
+
 /// `None` if the blob has gone missing from disk, so the caller fetches it again.
 async fn read_blob(engine: &Arc<Engine>, hash: BlobHash) -> Result<Option<Vec<u8>>> {
     let engine = engine.clone();
-    blocking(move || match engine.blobs.open_blob(&hash) {
-        Ok(mut file) => {
-            let mut data = Vec::new();
-            file.read_to_end(&mut data)?;
-            Ok(Some(data))
-        }
+    blocking(move || match std::fs::read(engine.blobs.path(&hash)) {
+        Ok(data) => Ok(Some(data)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             tracing::warn!(%hash, "referenced blob is missing; fetching again");
             Ok(None)

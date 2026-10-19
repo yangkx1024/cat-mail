@@ -1,7 +1,7 @@
 mod files;
 mod output;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use catmail_core::{
     Account, AccountId, Address, AttachmentId, AuthKind, Config, Flags, Folder, FolderId,
     MailClient, Message, MessageId, MessageSummary, NewAccount, SearchQuery, Security,
-    ServerConfig, SyncReport,
+    ServerConfig, SyncReport, safe_filename,
 };
 use clap::{Args, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
@@ -348,7 +348,7 @@ async fn ls(client: &MailClient, args: Ls, json: bool) -> Result<()> {
     } else if messages.is_empty() {
         println!("No messages in {}.", printable(&folder.name));
     } else {
-        print_messages(&messages);
+        print_message_table(&messages, None);
     }
     Ok(())
 }
@@ -384,7 +384,7 @@ async fn read(client: &MailClient, args: Read, json: bool) -> Result<()> {
             .filter(|a| !a.inline)
         {
             let data = client.attachment_content(a.id).await?;
-            let name = files::safe_filename(a.filename.as_deref(), &format!("attachment-{}", a.id));
+            let name = safe_filename(a.filename.as_deref(), &format!("attachment-{}", a.id));
             let path = files::write_new(dir, &name, &data)
                 .with_context(|| format!("failed to save into {}", dir.display()))?;
             saved.push(path);
@@ -437,16 +437,11 @@ fn print_message(message: &Message, html: bool) {
                     a.id.to_string(),
                     a.filename.clone().unwrap_or_else(|| "(unnamed)".into()),
                     a.mime_type.clone(),
-                    a.size
-                        .map(|s| {
-                            let size = output::size(s.into());
-                            if a.downloaded {
-                                size
-                            } else {
-                                format!("~{size}")
-                            }
-                        })
-                        .unwrap_or_default(),
+                    match a.size {
+                        Some(size) if a.downloaded => output::size(size.into()),
+                        Some(size) => format!("~{}", output::size(size.into())),
+                        None => String::new(),
+                    },
                 ]
             })
             .collect();
@@ -484,9 +479,6 @@ async fn search(client: &MailClient, args: Search, json: bool) -> Result<()> {
     let mut query = SearchQuery::new(args.query.join(" "));
     query.limit = args.limit;
     query.offset = args.offset;
-    if let Some(selector) = &args.account {
-        query.account = Some(resolve_account(client, selector).await?.id);
-    }
     if let Some(name) = &args.folder {
         let account = one_account(client, args.account.as_deref()).await?;
         let folder = client
@@ -495,6 +487,8 @@ async fn search(client: &MailClient, args: Search, json: bool) -> Result<()> {
             .with_context(|| format!("no folder `{name}` in {}", account.email))?;
         query.account = Some(account.id);
         query.folder = Some(folder.id);
+    } else if let Some(selector) = &args.account {
+        query.account = Some(resolve_account(client, selector).await?.id);
     }
     let messages = client.search(query).await?;
     if json {
@@ -507,9 +501,7 @@ async fn search(client: &MailClient, args: Search, json: bool) -> Result<()> {
     }
     // Folder names for the FOLDER column.
     let mut folders: HashMap<FolderId, String> = HashMap::new();
-    let mut accounts: Vec<AccountId> = messages.iter().map(|m| m.account_id).collect();
-    accounts.sort();
-    accounts.dedup();
+    let accounts: BTreeSet<AccountId> = messages.iter().map(|m| m.account_id).collect();
     for account in accounts {
         for folder in client.list_folders(account).await? {
             folders.insert(folder.id, folder.name);
@@ -611,10 +603,6 @@ fn print_folders(folders: &[Folder]) {
         })
         .collect();
     print_table(&["FOLDER", "ROLE", "UNREAD", "TOTAL"], rows);
-}
-
-fn print_messages(messages: &[MessageSummary]) {
-    print_message_table(messages, None);
 }
 
 /// With `folders`, adds a FOLDER column.

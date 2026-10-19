@@ -26,6 +26,13 @@ pub use error::{Error, Result};
 pub use folders::{FolderSyncState, Folders, RemoteFolder};
 pub use messages::{MessageLocation, Messages, NewBody, NewMessage};
 
+/// Every `*_blob_hash` column (a test checks none is missing).
+const BLOB_REFERENCES: &str = "
+    SELECT raw_blob_hash AS hash FROM message_bodies WHERE raw_blob_hash IS NOT NULL
+    UNION ALL SELECT blob_hash FROM attachments WHERE blob_hash IS NOT NULL
+    UNION ALL SELECT blob_hash FROM draft_attachments
+    UNION ALL SELECT raw_blob_hash FROM outbox";
+
 const MIGRATIONS: &[M<'static>] = &[M::up(include_str!("../migrations/0001_init.sql"))];
 
 /// Handle to the SQLite database. Cheap to clone.
@@ -68,13 +75,8 @@ impl<'c> Db<'c> {
     /// Every blob some row refers to, for [`BlobStore::collect_garbage`]. A new
     /// `*_blob_hash` column must be added here, or GC deletes what it points to.
     pub fn blob_references(&self) -> Result<HashSet<BlobHash>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT raw_blob_hash FROM message_bodies WHERE raw_blob_hash IS NOT NULL
-             UNION SELECT blob_hash FROM attachments WHERE blob_hash IS NOT NULL
-             UNION SELECT blob_hash FROM draft_attachments
-             UNION SELECT raw_blob_hash FROM outbox",
-        )?;
-        let rows = stmt.query_map([], |r| columns::blob_hash_at(r, 0))?;
+        let mut stmt = self.conn.prepare(BLOB_REFERENCES)?;
+        let rows = stmt.query_map([], |r| columns::parse_text(r, "hash"))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 }
@@ -178,6 +180,35 @@ mod tests {
 
     fn is_constraint_violation(err: &rusqlite::Error) -> bool {
         err.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation)
+    }
+
+    #[test]
+    fn blob_references_cover_every_blob_column() {
+        // GC deletes any blob whose column is missing from the query.
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        let columns: Vec<(String, String)> = conn
+            .prepare(
+                "SELECT m.name, p.name FROM sqlite_master m, pragma_table_info(m.name) p
+                 WHERE m.type = 'table' AND p.name LIKE '%blob_hash'",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(columns.len(), 4, "{columns:?}");
+        let sql = BLOB_REFERENCES
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for (table, column) in columns {
+            assert!(
+                sql.contains(&format!("SELECT {column} FROM {table}"))
+                    || sql.contains(&format!("SELECT {column} AS hash FROM {table}")),
+                "{table}.{column} is not in BLOB_REFERENCES"
+            );
+        }
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use mail_parser::MessageParser;
 
-use super::content::{Content, extract};
+use super::content::{Content, extract, sections};
 
 /// A message's MIME structure as IMAP BODYSTRUCTURE describes it. Strings are bytes as
 /// the server sent them; parameter values may still be RFC 2047 or RFC 2231 encoded.
@@ -39,12 +39,6 @@ impl Leaf {
             && self.subtype.eq_ignore_ascii_case(subtype.as_bytes())
     }
 
-    fn is_attachment(&self) -> bool {
-        self.disposition
-            .as_ref()
-            .is_some_and(|(kind, _)| kind.eq_ignore_ascii_case(b"attachment"))
-    }
-
     /// Decoded size, roughly: base64 carries 57 bytes per 78-octet line.
     fn estimated_size(&self) -> u32 {
         if self.encoding.eq_ignore_ascii_case(b"base64") {
@@ -56,18 +50,56 @@ impl Leaf {
 }
 
 impl MimeNode {
-    /// Sections of the parts that may be shown as the body: text/plain and text/html
-    /// parts that aren't attachments, up to `max_size` octets each.
+    /// Whether any part is an attachment, judged from the structure alone (for message
+    /// lists, before the body is downloaded): an explicit `attachment` disposition, an
+    /// attached message, or a named part that isn't text and isn't marked inline.
+    pub fn has_attachments(&self) -> bool {
+        self.leaves().into_iter().any(|(_, leaf)| {
+            let disposition = leaf.disposition.as_ref();
+            match disposition.map(|(kind, _)| kind.to_ascii_lowercase()) {
+                Some(kind) if kind == b"attachment" => return true,
+                Some(kind) if kind == b"inline" => return false,
+                _ => {}
+            }
+            if leaf.is("message", "rfc822") {
+                return true;
+            }
+            let named = leaf
+                .params
+                .iter()
+                .chain(disposition.iter().flat_map(|(_, params)| params))
+                .any(|(name, _)| {
+                    name.eq_ignore_ascii_case(b"name") || name.eq_ignore_ascii_case(b"filename")
+                });
+            named && !leaf.media_type.eq_ignore_ascii_case(b"text")
+        })
+    }
+
+    /// Sections of the parts that will be shown as the body, up to `max_size` octets
+    /// each. Decided on the stand-in message with nothing fetched, so what is fetched and
+    /// what [`content`](Self::content) shows follow the same rule.
     pub fn text_sections(&self, max_size: u32) -> Vec<String> {
-        self.leaves()
-            .into_iter()
-            .filter(|(_, leaf)| {
-                (leaf.is("text", "plain") || leaf.is("text", "html"))
-                    && !leaf.is_attachment()
-                    && leaf.size <= max_size
+        let raw = self.stand_in(&HashMap::new());
+        let Some(message) = MessageParser::new().parse(&raw) else {
+            return Vec::new();
+        };
+        let sections = sections(&message);
+        let leaves: HashMap<String, &Leaf> = self.leaves().into_iter().collect();
+        let mut wanted: Vec<String> = message
+            .text_body
+            .iter()
+            .chain(&message.html_body)
+            .filter_map(|id| sections.get(id))
+            .filter(|section| {
+                leaves.get(*section).is_some_and(|leaf| {
+                    (leaf.is("text", "plain") || leaf.is("text", "html")) && leaf.size <= max_size
+                })
             })
-            .map(|(section, _)| section)
-            .collect()
+            .cloned()
+            .collect();
+        wanted.sort();
+        wanted.dedup();
+        wanted
     }
 
     /// The content of the message, from its structure and the parts in `fetched` (by
@@ -77,16 +109,7 @@ impl MimeNode {
     /// the others empty, and parses that the same way as a whole raw message, so both
     /// ways of downloading choose the same body parts and decode them the same way.
     pub fn content(&self, fetched: &HashMap<String, Vec<u8>>) -> Content {
-        let mut raw = Vec::new();
-        let boundary = boundary(fetched);
-        let mut counter = 0;
-        match self {
-            MimeNode::Multipart { .. } => {
-                raw.extend_from_slice(b"MIME-Version: 1.0\r\n");
-                self.write(&mut raw, "", fetched, &boundary, &mut counter);
-            }
-            MimeNode::Leaf(_) => self.write(&mut raw, "1", fetched, &boundary, &mut counter),
-        }
+        let raw = self.stand_in(fetched);
         let Some(message) = MessageParser::new().parse(&raw) else {
             return Content::default();
         };
@@ -100,13 +123,28 @@ impl MimeNode {
                 continue;
             };
             part.transfer_encoding =
-                Some(lossy(&leaf.encoding).to_ascii_lowercase()).filter(|e| !e.is_empty());
+                Some(String::from_utf8_lossy(&leaf.encoding).to_ascii_lowercase())
+                    .filter(|e| !e.is_empty());
             if !fetched.contains_key(&part.section) {
                 part.data = None;
                 part.size = Some(leaf.estimated_size());
             }
         }
         content
+    }
+
+    fn stand_in(&self, fetched: &HashMap<String, Vec<u8>>) -> Vec<u8> {
+        let mut raw = Vec::new();
+        let boundary = boundary(fetched);
+        let mut counter = 0;
+        match self {
+            MimeNode::Multipart { .. } => {
+                raw.extend_from_slice(b"MIME-Version: 1.0\r\n");
+                self.write(&mut raw, "", fetched, &boundary, &mut counter);
+            }
+            MimeNode::Leaf(_) => self.write(&mut raw, "1", fetched, &boundary, &mut counter),
+        }
+        raw
     }
 
     /// Leaves with their sections; a lone leaf at the top is section `1`.
@@ -116,13 +154,7 @@ impl MimeNode {
                 MimeNode::Leaf(leaf) => out.push((section, leaf)),
                 MimeNode::Multipart { children, .. } => {
                     for (i, child) in children.iter().enumerate() {
-                        let n = i + 1;
-                        let child_section = if section.is_empty() {
-                            n.to_string()
-                        } else {
-                            format!("{section}.{n}")
-                        };
-                        walk(child, child_section, out);
+                        walk(child, child_section(&section, i), out);
                     }
                 }
             }
@@ -151,14 +183,8 @@ impl MimeNode {
                 out.extend_from_slice(&token(subtype, b"mixed"));
                 out.extend_from_slice(format!("; boundary=\"{boundary_here}\"\r\n\r\n").as_bytes());
                 for (i, child) in children.iter().enumerate() {
-                    let n = i + 1;
-                    let child_section = if section.is_empty() {
-                        n.to_string()
-                    } else {
-                        format!("{section}.{n}")
-                    };
                     out.extend_from_slice(format!("--{boundary_here}\r\n").as_bytes());
-                    child.write(out, &child_section, fetched, boundary, counter);
+                    child.write(out, &child_section(section, i), fetched, boundary, counter);
                     out.extend_from_slice(b"\r\n");
                 }
                 out.extend_from_slice(format!("--{boundary_here}--\r\n").as_bytes());
@@ -272,8 +298,15 @@ fn single_line(value: &[u8]) -> Vec<u8> {
         .collect()
 }
 
-fn lossy(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
+/// The section of the `index`-th (0-based) child of the multipart at `parent` (`""` for
+/// the top level).
+fn child_section(parent: &str, index: usize) -> String {
+    let n = index + 1;
+    if parent.is_empty() {
+        n.to_string()
+    } else {
+        format!("{parent}.{n}")
+    }
 }
 
 #[cfg(test)]

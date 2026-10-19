@@ -142,7 +142,8 @@ IMAP 库选 `imap-next`（sans-IO，基于 `imap-codec`），启用 `starttls` �
 **邮件头。** 只拉 `HEADER.FIELDS (DATE FROM TO CC SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES)`，
 用 `mail-parser`（`full_encoding`）解析，RFC 2047 编码字和 GBK、GB2312、Big5 等旧字符集都转成
 UTF-8。没有（或无法解析）Date 头时用 INTERNALDATE 作为列表的排序时间。`has_attachments` 先由
-BODYSTRUCTURE 粗略判断，下载正文后按完整 MIME 树重算（见下一节）。
+BODYSTRUCTURE 粗略判断（`MimeNode::has_attachments`，与按部分下载共用同一个 BODYSTRUCTURE
+转换），下载正文后按完整 MIME 树重算（见下一节）。
 
 ### 正文与附件
 
@@ -152,12 +153,13 @@ BODYSTRUCTURE 粗略判断，下载正文后按完整 MIME 树重算（见下一
   （`message_bodies.raw_blob_hash`），用 mail-parser 解析，附件随即解码入库。绝大多数邮件
   走这条路：完整原文最不依赖服务器 BODYSTRUCTURE 的正确性，也留下了 `.eml`（转发、
   "查看原文"、以后换解析器重建）。
-- **> 2 MiB：按部分下载。** 先取 BODYSTRUCTURE，只取可能作为正文的部分（不是
-  `attachment` 的 text/plain、text/html，单个不超过 2 MiB），附件只记录 section、
+- **> 2 MiB：按部分下载。** 先取 BODYSTRUCTURE，只取会作为正文显示的部分（单个不超过
+  2 MiB；"会显示"由 mail-parser 在不含任何数据的替身邮件上判定，与显示时同一套规则，见
+  下文），附件只记录 section、
   传输编码和估算大小，第一次打开时再 `BODY.PEEK[<section>]` 下载、解码、入库
   （`MailClient::attachment_content`）。BODYSTRUCTURE 解析失败（有的服务器会发错），或服务器
   对某个要取的正文部分回 NIL、干脆不回时，退回整封下载：缺了正文的结果一旦按"已下载"存下，
-  就再也不会重取。
+  就再也不会重取。`raw_message` 遇到尚未下载的大邮件时直接整封下载一次，同时存下正文。
 
 两条路径共用一套提取逻辑：按部分下载时，用 BODYSTRUCTURE 和取回的部分**重建一封结构相同
 的替身邮件**（没取的部分是空的 base64 正文），交给 mail-parser 按同样方式解析。于是两条
@@ -187,15 +189,21 @@ HTML 部分时存在，经 `ammonia` 清洗（去掉脚本、样式表、表单�
   行还在就说明它仍是下载开始时的那个（文件夹, UID）。正文、附件行、摘要、
   `has_attachments` 和全文索引在同一个事务里写入（`Messages::store_body`）；两个并发
   下载同一封邮件时只有一个写入，另一个直接读结果。
-- 下载先取得账户的取消信号，再确认邮件还在；删除账户会让进行中的下载立即返回
-  `Error::Cancelled`，不用等网络超时。
+- 每账户一份引擎状态（`AccountState`：同步锁、"已删除"标记、空闲连接）。删除账户时先
+  置"已删除"、清空连接池，再删除数据；删除成功后这份状态作为墓碑保留（账户 id 不复用），
+  之后对它的任何操作立即取消，不必像以前那样"先订阅取消信号、再确认一遍邮件还在"。进行中
+  的同步和下载立即返回 `Error::Cancelled`，不用等网络超时；删除后才开始的同步返回
+  `AccountNotFound`。删除失败（如 id 不存在）时撤掉标记，以后得到这个 id 的账户不受影响。
+  所有按需操作经过同一个入口（`body.rs` 的 `on_server`）：取连接、EXAMINE 比对
+  UIDVALIDITY、在取消信号上 select。
 
 **连接。** 按需下载使用每账户最多 2 条空闲连接的小连接池（同步仍用自己的连接，打开邮件
 不必等同步结束），空闲超过 5 分钟的连接不再复用。复用的连接已断开时（服务器或 NAT 关掉了
 空闲连接）自动换一条**新建**的连接重试一次（不再从池里取，池里其余的连接多半也已断开）；
-新连接上的失败直接返回。删除账户先发取消信号再清空
-连接池，归还连接时在连接池的锁内检查取消信号，所以不会有连接在账户删除后留在池里。M4 的每账户 actor 会接管
-这部分。
+新连接上的失败直接返回。归还连接时在连接池的锁内检查"已删除"标记，而删除是先置标记
+再取这把锁清空连接池，所以不会有连接在账户删除后留在池里。M4 的每账户 actor 会接管这部分。
+复用的连接仍然每次 EXAMINE：省掉这一个往返要依赖服务器绝不在选中期间改变 UIDVALIDITY，
+而这正是 UIDVALIDITY 检查要防的情况。
 
 ### 认证
 
@@ -274,7 +282,7 @@ Rust 侧预先切分（`crates/catmail-store/src/fts.rs`）：一段连续的 CJ
 blob 时会刷新它的 mtime，让宽限期重新计时。
 
 实现（`BlobStore::collect_garbage`，入口 `MailClient::collect_garbage` / `catmail gc`）：先在
-一个读事务里取出所有引用（`Db::blob_references`，新增 `*_blob_hash` 列必须加到这里），再
+一个读事务里取出所有引用（`Db::blob_references`；有测试枚举所有 `*_blob_hash` 列，漏加会失败），再
 遍历目录找出未引用且足够旧的候选，逐个在写锁下重查 mtime 后删除。`put` 刷新或创建 blob 时
 持有同一把锁的读锁，所以"GC 判定为旧"与"`put` 刚刚刷新"不会交错。宽限期 1 小时；`tmp`
 里中断写入留下的旧文件一并清理。删除账户、UIDVALIDITY 变化等删除邮件之后，它们的 blob

@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use catmail_types::{FlagState, Flags, FolderRole, Security, ServerConfig};
 use imap_next::imap_types::auth::AuthMechanism;
-use imap_next::imap_types::body::{BodyStructure, SpecificFields};
 use imap_next::imap_types::command::{CommandBody, FetchModifier, SelectParameter};
 use imap_next::imap_types::core::{AString, Vec1};
 use imap_next::imap_types::fetch::{MessageDataItem, MessageDataItemName, Part, Section};
@@ -294,20 +293,16 @@ impl Session {
             MessageDataItemName::InternalDate,
             MessageDataItemName::Rfc822Size,
             MessageDataItemName::BodyStructure,
-            MessageDataItemName::BodyExt {
-                section: Some(Section::HeaderFields(
-                    None,
-                    Vec1::try_from(
-                        SUMMARY_HEADER_FIELDS
-                            .iter()
-                            .map(|f| AString::try_from(*f).expect("valid header field name"))
-                            .collect::<Vec<_>>(),
-                    )
-                    .expect("non-empty field list"),
-                )),
-                partial: None,
-                peek: true,
-            },
+            body_peek(Some(Section::HeaderFields(
+                None,
+                Vec1::try_from(
+                    SUMMARY_HEADER_FIELDS
+                        .iter()
+                        .map(|f| AString::try_from(*f).expect("valid header field name"))
+                        .collect::<Vec<_>>(),
+                )
+                .expect("non-empty field list"),
+            ))),
         ];
         if self.modseq_enabled() {
             items.push(MessageDataItemName::ModSeq);
@@ -380,7 +375,7 @@ impl Session {
                 section: None,
                 data,
                 ..
-            } => data.0.map(|d| d.as_ref().to_vec()),
+            } => data.0.map(|d| d.into_inner().into_owned()),
             _ => None,
         }))
     }
@@ -429,7 +424,7 @@ impl Session {
                             .map(|n| n.to_string())
                             .collect::<Vec<_>>()
                             .join(".");
-                        Some((section, data.0?.as_ref().to_vec()))
+                        Some((section, data.0?.into_inner().into_owned()))
                     }
                     _ => None,
                 })
@@ -448,20 +443,7 @@ impl Session {
         items.insert(0, MessageDataItemName::Uid);
         let set = SequenceSet::from(Sequence::from(uid));
         let response = self.conn.execute(uid_fetch(set, items, Vec::new())).await?;
-        let mut found: Option<Vec<MessageDataItem<'static>>> = None;
-        for data in response.data {
-            let Data::Fetch { items, .. } = data else {
-                continue;
-            };
-            let items = items.into_inner();
-            if items
-                .iter()
-                .any(|item| matches!(item, MessageDataItem::Uid(u) if *u == uid))
-            {
-                found.get_or_insert_with(Vec::new).extend(items);
-            }
-        }
-        Ok(found)
+        Ok(group_fetches(response, |u| u == uid.get()).remove(&uid.get()))
     }
 
     /// Ends the session politely. Errors are not interesting at this point.
@@ -570,7 +552,43 @@ impl MergedFetch {
 /// Groups FETCH responses by UID, for the UIDs `wanted` accepts. Responses without a UID
 /// are unsolicited updates about some other message and are ignored.
 fn merge_fetches(response: Response, wanted: impl Fn(u32) -> bool) -> BTreeMap<u32, MergedFetch> {
-    let mut merged: BTreeMap<u32, MergedFetch> = BTreeMap::new();
+    group_fetches(response, wanted)
+        .into_iter()
+        .map(|(uid, items)| {
+            let mut m = MergedFetch::default();
+            for item in items {
+                match item {
+                    MessageDataItem::Flags(flags) => m.flags = Some(convert_flags(&flags)),
+                    MessageDataItem::ModSeq(v) => m.modseq = Some(v.get()),
+                    MessageDataItem::InternalDate(d) => {
+                        m.internal_date = Some(d.as_ref().timestamp())
+                    }
+                    MessageDataItem::Rfc822Size(n) => m.size = Some(n),
+                    MessageDataItem::BodyStructure(bs) => {
+                        m.has_attachments = super::body::mime_node(&bs).has_attachments()
+                    }
+                    MessageDataItem::BodyExt { data, .. } => {
+                        m.headers = Some(Box::new(parse_headers(
+                            data.0.as_ref().map_or(&[][..], |d| d.as_ref()),
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+            (uid, m)
+        })
+        .collect()
+}
+
+/// FETCH items by UID, for the UIDs `wanted` accepts, in response order. A server may
+/// split one message's items across several responses (RFC 9051 §7.5.2) and repeat
+/// them; later values come later. Responses without a UID are unsolicited updates about
+/// some other message and are ignored.
+fn group_fetches(
+    response: Response,
+    wanted: impl Fn(u32) -> bool,
+) -> BTreeMap<u32, Vec<MessageDataItem<'static>>> {
+    let mut grouped: BTreeMap<u32, Vec<MessageDataItem<'static>>> = BTreeMap::new();
     for data in response.data {
         let Data::Fetch { items, .. } = data else {
             continue;
@@ -582,27 +600,11 @@ fn merge_fetches(response: Response, wanted: impl Fn(u32) -> bool) -> BTreeMap<u
         }) else {
             continue;
         };
-        if !wanted(uid) {
-            continue;
-        }
-        let m = merged.entry(uid).or_default();
-        for item in items {
-            match item {
-                MessageDataItem::Flags(flags) => m.flags = Some(convert_flags(&flags)),
-                MessageDataItem::ModSeq(v) => m.modseq = Some(v.get()),
-                MessageDataItem::InternalDate(d) => m.internal_date = Some(d.as_ref().timestamp()),
-                MessageDataItem::Rfc822Size(n) => m.size = Some(n),
-                MessageDataItem::BodyStructure(bs) => m.has_attachments = has_attachments(&bs),
-                MessageDataItem::BodyExt { data, .. } => {
-                    m.headers = Some(Box::new(parse_headers(
-                        data.0.as_ref().map_or(&[][..], |d| d.as_ref()),
-                    )));
-                }
-                _ => {}
-            }
+        if wanted(uid) {
+            grouped.entry(uid).or_default().extend(items);
         }
     }
-    merged
+    grouped
 }
 
 /// A SPECIAL-USE attribute (RFC 6154), lower-cased. The role names match; `\\Inbox` is
@@ -634,40 +636,6 @@ fn convert_flags(flags: &[FlagFetch<'_>]) -> (Flags, Vec<String>) {
     keywords.sort();
     keywords.dedup();
     (out, keywords)
-}
-
-/// Whether any part is an attachment: an explicit `attachment` disposition, an
-/// attached message, or a named non-inline part. M2 recomputes this from the full MIME
-/// tree when the body is downloaded.
-fn has_attachments(bs: &BodyStructure<'_>) -> bool {
-    match bs {
-        BodyStructure::Multi { bodies, .. } => bodies.as_ref().iter().any(has_attachments),
-        BodyStructure::Single {
-            body,
-            extension_data,
-        } => {
-            let disposition = extension_data
-                .as_ref()
-                .and_then(|e| e.tail.as_ref())
-                .and_then(|d| d.disposition.as_ref());
-            let is = |s: &[u8], expected: &str| s.eq_ignore_ascii_case(expected.as_bytes());
-            match disposition {
-                Some((kind, _)) if is(kind.as_ref(), "attachment") => return true,
-                Some((kind, _)) if is(kind.as_ref(), "inline") => return false,
-                _ => {}
-            }
-            if matches!(body.specific, SpecificFields::Message { .. }) {
-                return true;
-            }
-            let named = body
-                .basic
-                .parameter_list
-                .iter()
-                .chain(disposition.iter().flat_map(|(_, params)| params))
-                .any(|(k, _)| is(k.as_ref(), "name") || is(k.as_ref(), "filename"));
-            named && !matches!(body.specific, SpecificFields::Text { .. })
-        }
-    }
 }
 
 /// Compresses UIDs into ranges: `[1, 2, 3, 7]` → `1:3,7`.

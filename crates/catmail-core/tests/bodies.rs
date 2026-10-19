@@ -5,55 +5,18 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use catmail_core::{
-    AccountId, AuthKind, Config, Error, Event, MailClient, MemorySecrets, Message, MessageId,
-    NewAccount, SearchQuery, Security, ServerConfig,
-};
-use catmail_testkit::{FakeImap, ServerState};
-use tokio::runtime::Handle;
+use catmail_core::{Error, Event, Message, MessageId, SearchQuery};
+use catmail_testkit::ServerState;
 
-struct Env {
-    fake: FakeImap,
-    client: MailClient,
-    account: AccountId,
-    dir: tempfile::TempDir,
-}
+mod common;
 
+use common::Env;
+
+/// Synced, unlike the plain shared one.
 async fn env(state: ServerState) -> Env {
-    let fake = FakeImap::start(state).await;
-    let dir = tempfile::tempdir().unwrap();
-    let client = MailClient::builder(Config::with_data_dir(dir.path()))
-        .runtime(Handle::current())
-        .secrets(Arc::new(MemorySecrets::default()))
-        .open()
-        .unwrap();
-    let server = ServerConfig {
-        host: "127.0.0.1".into(),
-        port: fake.port(),
-        security: Security::Plain,
-    };
-    let account = client
-        .add_account(
-            NewAccount {
-                email: "alice@example.com".into(),
-                display_name: None,
-                username: "alice".into(),
-                imap: server.clone(),
-                smtp: server,
-                auth: AuthKind::Password,
-            },
-            "pw".into(),
-        )
-        .await
-        .unwrap()
-        .id;
-    client.sync_account(account).await.unwrap();
-    Env {
-        fake,
-        client,
-        account,
-        dir,
-    }
+    let env = common::env(state).await;
+    env.client.sync_account(env.account).await.unwrap();
+    env
 }
 
 impl Env {
@@ -68,13 +31,6 @@ impl Env {
         let mut list = self.client.list_messages(inbox.id, 1000, 0).await.unwrap();
         list.reverse(); // oldest (lowest UID) first; the fake gives every message one date
         list[uid_order].id
-    }
-
-    fn commands_since(&self, start: usize) -> Vec<String> {
-        self.fake.state().log[start..]
-            .iter()
-            .map(|c| c.line.clone())
-            .collect()
     }
 
     fn log_len(&self) -> usize {
@@ -306,6 +262,28 @@ async fn large_messages_leave_attachments_on_the_server_until_opened() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn raw_message_of_a_large_message_fetches_it_whole_once() {
+    let raw = large_message();
+    let env = env(state(&[&raw])).await;
+    let id = env.id(0).await;
+    let start = env.log_len();
+
+    assert_eq!(env.client.raw_message(id).await.unwrap(), raw);
+    let fetches: Vec<_> = env
+        .commands_since(start)
+        .into_iter()
+        .filter(|c| c.contains("FETCH"))
+        .collect();
+    assert_eq!(fetches.len(), 1, "{fetches:?}");
+    assert!(fetches[0].contains("BODY.PEEK[]"));
+    let message = env.client.get_message(id).await.unwrap().unwrap();
+    assert!(
+        body(&message).attachments[0].downloaded,
+        "stored from the whole message"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn unparsable_bodystructure_falls_back_to_the_whole_message() {
     let raw = large_message();
     let env = env(state(&[&raw])).await;
@@ -504,7 +482,7 @@ async fn removing_the_account_cancels_a_download() {
 async fn gc_frees_the_blobs_of_removed_accounts() {
     let env = env(state(&[NEWSLETTER])).await;
     env.client.download_message(env.id(0).await).await.unwrap();
-    let blobs = env.dir.path().join("blobs");
+    let blobs = env.client.config().blob_dir();
     age_files(&blobs);
     assert_eq!(
         env.client.collect_garbage().await.unwrap().removed,

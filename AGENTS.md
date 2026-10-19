@@ -70,7 +70,7 @@ fake-server test, with a fault injected if the change is about recovering from o
   row; removal deletes the row (`RETURNING secret_key`) before the keyring entry.
 - **Blob GC** may only delete unreferenced blobs older than the grace period
   (see `BlobStore` docs). A new `*_blob_hash` column must be added to
-  `Db::blob_references`, or GC deletes what it points to.
+  `Db::blob_references` (a test enumerates them), or GC deletes what it points to.
 - **Message bodies** are fetched with EXAMINE and `BODY.PEEK` only; nothing that reads
   mail may change server state (flags included) before M4's operation queue.
 - **One engine per data directory**, enforced by the lock file. Don't add code paths that

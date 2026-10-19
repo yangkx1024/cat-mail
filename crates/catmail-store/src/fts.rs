@@ -17,6 +17,9 @@
 
 /// Rewrites `text` for indexing: CJK runs segmented, everything else unchanged.
 pub(crate) fn segment(text: &str) -> String {
+    if !text.chars().any(|c| is_cjk(c) || is_wide(c)) {
+        return text.to_owned();
+    }
     let mut out = String::with_capacity(text.len() * 2);
     let mut run = Vec::new();
     for c in text.chars().map(fold_width) {
@@ -107,24 +110,21 @@ fn phrases(term: &str) -> Vec<String> {
     let mut phrases = Vec::new();
     let mut other = String::new();
     let mut run = Vec::new();
+    let push_run = |phrases: &mut Vec<String>, run: &mut Vec<char>| {
+        let mut segmented = String::new();
+        flush_run(&mut segmented, run, false);
+        push_phrase(phrases, segmented);
+    };
     for c in term.chars().map(fold_width) {
         if is_cjk(c) {
             push_phrase(&mut phrases, std::mem::take(&mut other));
             run.push(c);
         } else {
-            if !run.is_empty() {
-                let mut segmented = String::new();
-                flush_run(&mut segmented, &mut run, false);
-                push_phrase(&mut phrases, segmented);
-            }
+            push_run(&mut phrases, &mut run);
             other.push(c);
         }
     }
-    if !run.is_empty() {
-        let mut segmented = String::new();
-        flush_run(&mut segmented, &mut run, false);
-        push_phrase(&mut phrases, segmented);
-    }
+    push_run(&mut phrases, &mut run);
     push_phrase(&mut phrases, other);
     phrases
 }
@@ -161,6 +161,10 @@ fn flush_run(out: &mut String, run: &mut Vec<char>, index: bool) {
     }
     out.push(' ');
     run.clear();
+}
+
+fn is_wide(c: char) -> bool {
+    fold_width(c) != c
 }
 
 /// Full-width ASCII (`ｉＰｈｏｎｅ`, `，`) as typed with CJK input methods, folded to

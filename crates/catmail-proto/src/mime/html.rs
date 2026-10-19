@@ -45,16 +45,11 @@ static SANITIZER: LazyLock<Builder<'static>> = LazyLock::new(|| {
     builder
 });
 
-/// Whether `value` is a `data:` URL as a URL parser sees it: tabs and line breaks
-/// anywhere, and leading control characters and spaces, are ignored (`&#1;da&#9;ta:`).
+/// Whether `value` is a `data:` URL, as judged by the parser ammonia checks schemes with
+/// (which ignores tabs and line breaks anywhere and leading control characters, as in
+/// `&#1;da&#9;ta:`), so the two can't disagree.
 fn is_data_url(value: &str) -> bool {
-    let scheme: String = value
-        .chars()
-        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
-        .skip_while(|c| *c <= ' ')
-        .take(5)
-        .collect();
-    scheme.eq_ignore_ascii_case("data:")
+    url::Url::parse(value).is_ok_and(|u| u.scheme() == "data")
 }
 
 /// Whether CSS could fetch something: `url(…)`, `image-set(…)`, `@import`, or escapes

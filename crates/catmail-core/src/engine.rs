@@ -25,10 +25,7 @@ pub(crate) struct Engine {
     pub events: broadcast::Sender<Event>,
     /// Set by the builder, else the platform verifier, created on first use.
     tls: OnceLock<TlsConfig>,
-    syncs: Mutex<HashMap<AccountId, Arc<AccountSync>>>,
-    /// Logged-in connections for on-demand fetches, kept between requests so opening
-    /// messages one after another doesn't log in each time. Sync uses its own.
-    idle_sessions: Mutex<HashMap<AccountId, Vec<IdleSession>>>,
+    accounts: Mutex<HashMap<AccountId, Arc<AccountState>>>,
 }
 
 struct IdleSession {
@@ -43,11 +40,19 @@ const IDLE_SESSION_TTL: Duration = Duration::from_secs(5 * 60);
 /// Enough for a message and one of its attachments at once.
 const IDLE_SESSIONS_PER_ACCOUNT: usize = 2;
 
-/// Serializes syncs of one account and lets account removal stop a running one, and
-/// any on-demand fetch. Replaced by the per-account actor once IDLE arrives (M4).
-struct AccountSync {
-    lock: Arc<tokio::sync::Mutex<()>>,
-    cancel: watch::Sender<bool>,
+/// What the engine keeps per account. Replaced by the per-account actor once IDLE
+/// arrives (M4).
+///
+/// A removed account keeps its entry, marked `removed`, so work that looks at it later
+/// is cancelled at once rather than racing the removal. Account ids are never reused.
+struct AccountState {
+    /// Serializes syncs.
+    sync: Arc<tokio::sync::Mutex<()>>,
+    /// Set when removal starts; cancels running syncs and on-demand fetches.
+    removed: watch::Sender<bool>,
+    /// Logged-in connections for on-demand fetches, kept between requests so opening
+    /// messages one after another doesn't log in each time. Sync uses its own.
+    idle: Mutex<Vec<IdleSession>>,
 }
 
 /// Held while syncing an account.
@@ -57,6 +62,11 @@ pub(crate) struct SyncPermit {
 }
 
 impl SyncPermit {
+    /// The account was removed before the sync could start.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+
     /// Resolves once the account is being removed.
     pub async fn cancelled(&mut self) {
         self.cancellation.cancelled().await;
@@ -67,6 +77,10 @@ impl SyncPermit {
 pub(crate) struct Cancellation(watch::Receiver<bool>);
 
 impl Cancellation {
+    pub fn is_cancelled(&self) -> bool {
+        *self.0.borrow()
+    }
+
     /// Resolves once the account is being removed (at once if it already is).
     pub async fn cancelled(&mut self) {
         // Err means the sender is gone, which only happens once nobody can cancel.
@@ -94,8 +108,7 @@ impl Engine {
             secrets,
             events,
             tls: tls.map(OnceLock::from).unwrap_or_default(),
-            syncs: Mutex::default(),
-            idle_sessions: Mutex::default(),
+            accounts: Mutex::default(),
         }
     }
 
@@ -134,9 +147,9 @@ impl Engine {
 
     /// Waits for any other sync of `account` to finish.
     pub async fn sync_permit(&self, account: AccountId) -> SyncPermit {
-        let sync = self.account_sync(account);
-        let cancellation = Cancellation(sync.cancel.subscribe());
-        let guard = sync.lock.clone().lock_owned().await;
+        let state = self.account(account);
+        let cancellation = Cancellation(state.removed.subscribe());
+        let guard = state.sync.clone().lock_owned().await;
         SyncPermit {
             _guard: guard,
             cancellation,
@@ -144,86 +157,68 @@ impl Engine {
     }
 
     /// For work on `account` other than sync. Obtain it before checking that the
-    /// account (or the row worked on) still exists: a removal that starts afterwards
-    /// is then always seen.
+    /// account (or the row worked on) still exists: a removal is then seen whether it
+    /// started before or after.
     pub fn cancellation(&self, account: AccountId) -> Cancellation {
-        Cancellation(self.account_sync(account).cancel.subscribe())
+        Cancellation(self.account(account).removed.subscribe())
     }
 
     /// A logged-in connection that was recently in use, if there is one.
     pub fn take_session(&self, account: AccountId) -> Option<Session> {
-        let mut idle = self
-            .idle_sessions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let sessions = idle.get_mut(&account)?;
-        sessions.retain(|s| s.since.elapsed() < IDLE_SESSION_TTL);
-        sessions.pop().map(|s| s.session)
+        let state = self.account(account);
+        let mut idle = lock(&state.idle);
+        idle.retain(|s| s.since.elapsed() < IDLE_SESSION_TTL);
+        idle.pop().map(|s| s.session)
     }
 
     /// Keeps a connection that is still usable for the next request, unless the account
     /// is being removed.
     pub fn return_session(&self, account: AccountId, session: Session) {
-        let mut idle = self
-            .idle_sessions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        // Checked under the pool lock: removal cancels before it empties the pool, so a
-        // connection returned after that sees the cancellation and is dropped.
-        let removing = self
-            .syncs
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&account)
-            .is_none_or(|sync| *sync.cancel.borrow());
-        if removing {
+        let state = self.account(account);
+        let mut idle = lock(&state.idle);
+        // Checked under the pool lock, which removal takes after setting the flag, so a
+        // connection can't slip back in after the pool was emptied.
+        if *state.removed.borrow() || idle.len() >= IDLE_SESSIONS_PER_ACCOUNT {
             return;
         }
-        let sessions = idle.entry(account).or_default();
-        if sessions.len() < IDLE_SESSIONS_PER_ACCOUNT {
-            sessions.push(IdleSession {
-                session,
-                since: Instant::now(),
-            });
-        }
+        idle.push(IdleSession {
+            session,
+            since: Instant::now(),
+        });
     }
 
-    /// Closes the account's idle connections.
-    pub fn forget_sessions(&self, account: AccountId) {
-        self.idle_sessions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&account);
+    /// Marks `account` removed: running syncs and fetches are cancelled, idle connections
+    /// closed. Waits until a running sync has stopped.
+    pub async fn start_removal(&self, account: AccountId) -> OwnedMutexGuard<()> {
+        let state = self.account(account);
+        state.removed.send_replace(true);
+        lock(&state.idle).clear();
+        state.sync.clone().lock_owned().await
     }
 
-    /// Cancels a running sync of `account` and waits until it has stopped. Syncs that
-    /// start afterwards find the account gone.
-    pub async fn stop_syncing(&self, account: AccountId) -> OwnedMutexGuard<()> {
-        let sync = self.account_sync(account);
-        sync.cancel.send_replace(true);
-        sync.lock.clone().lock_owned().await
+    /// After [`start_removal`](Self::start_removal) found no such account: forget the
+    /// mark, or the account that gets this id later would start out removed.
+    pub fn cancel_removal(&self, account: AccountId) {
+        lock(&self.accounts).remove(&account);
     }
 
-    pub fn forget_sync(&self, account: AccountId) {
-        self.syncs
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&account);
-    }
-
-    fn account_sync(&self, account: AccountId) -> Arc<AccountSync> {
-        self.syncs
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+    fn account(&self, account: AccountId) -> Arc<AccountState> {
+        lock(&self.accounts)
             .entry(account)
             .or_insert_with(|| {
-                Arc::new(AccountSync {
-                    lock: Arc::default(),
-                    cancel: watch::Sender::new(false),
+                Arc::new(AccountState {
+                    sync: Arc::default(),
+                    removed: watch::Sender::new(false),
+                    idle: Mutex::default(),
                 })
             })
             .clone()
     }
+}
+
+/// A panic while holding one of these locks can't leave the data inconsistent.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Runs blocking work (SQLite, keyring) on the current runtime's blocking pool.

@@ -1,6 +1,8 @@
 //! What a server derives from a raw message: BODYSTRUCTURE and body sections.
 
-use mail_parser::{Message, MessageParser, MessagePart, MimeHeaders, PartType};
+use mail_parser::{Attribute, Message, MessageParser, MessagePart, MimeHeaders, PartType};
+
+use crate::imap::{literal, quote};
 
 /// The BODYSTRUCTURE of `raw`, in wire form (may contain literals).
 pub(crate) fn body_structure(raw: &[u8]) -> Vec<u8> {
@@ -53,14 +55,7 @@ fn node(message: &Message<'_>, id: u32, raw: &[u8]) -> Vec<u8> {
     out.push(b' ');
     out.extend(string(&sub));
     out.push(b' ');
-    let params: Vec<(&str, &str)> = part
-        .content_type()
-        .and_then(|ct| ct.attributes())
-        .unwrap_or_default()
-        .iter()
-        .map(|a| (a.name.as_ref(), a.value.as_ref()))
-        .collect();
-    out.extend(list(&params));
+    out.extend(list(part.content_type().and_then(|ct| ct.attributes())));
     out.push(b' ');
     out.extend(nstring(
         part.content_id().map(|id| format!("<{id}>")).as_deref(),
@@ -86,13 +81,7 @@ fn node(message: &Message<'_>, id: u32, raw: &[u8]) -> Vec<u8> {
             out.push(b'(');
             out.extend(string(d.ctype()));
             out.push(b' ');
-            let params: Vec<(&str, &str)> = d
-                .attributes()
-                .unwrap_or_default()
-                .iter()
-                .map(|a| (a.name.as_ref(), a.value.as_ref()))
-                .collect();
-            out.extend(list(&params));
+            out.extend(list(d.attributes()));
             out.push(b')');
         }
         None => out.extend(b"NIL"),
@@ -105,18 +94,18 @@ fn subtype(part: &MessagePart<'_>) -> Option<String> {
     part.content_type()?.subtype().map(str::to_owned)
 }
 
-fn list(pairs: &[(&str, &str)]) -> Vec<u8> {
-    if pairs.is_empty() {
+fn list(attributes: Option<&[Attribute<'_>]>) -> Vec<u8> {
+    let Some(attributes) = attributes.filter(|a| !a.is_empty()) else {
         return b"NIL".to_vec();
-    }
+    };
     let mut out = b"(".to_vec();
-    for (i, (k, v)) in pairs.iter().enumerate() {
+    for (i, a) in attributes.iter().enumerate() {
         if i > 0 {
             out.push(b' ');
         }
-        out.extend(string(k));
+        out.extend(string(&a.name));
         out.push(b' ');
-        out.extend(string(v));
+        out.extend(string(&a.value));
     }
     out.push(b')');
     out
@@ -130,11 +119,9 @@ fn nstring(s: Option<&str>) -> Vec<u8> {
 /// file names).
 fn string(s: &str) -> Vec<u8> {
     if s.bytes().all(|b| b.is_ascii() && b != b'\r' && b != b'\n') {
-        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")).into_bytes()
+        quote(s).into_bytes()
     } else {
-        let mut out = format!("{{{}}}\r\n", s.len()).into_bytes();
-        out.extend(s.as_bytes());
-        out
+        literal(s.as_bytes())
     }
 }
 

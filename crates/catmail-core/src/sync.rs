@@ -22,6 +22,9 @@ const FETCH_BATCH: usize = 200;
 
 pub(crate) async fn sync_account(engine: Arc<Engine>, account_id: AccountId) -> Result<SyncReport> {
     let mut permit = engine.sync_permit(account_id).await;
+    if permit.is_cancelled() {
+        return Err(Error::AccountNotFound(account_id.to_string()));
+    }
     tokio::select! {
         result = run(&engine, account_id) => result,
         () = permit.cancelled() => Err(Error::Cancelled),

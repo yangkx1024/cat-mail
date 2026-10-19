@@ -97,11 +97,7 @@ impl BlobStore {
 
     /// Returns whether a blob was removed.
     pub fn remove(&self, hash: &BlobHash) -> io::Result<bool> {
-        match fs::remove_file(self.path(hash)) {
-            Ok(()) => Ok(true),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(e),
-        }
+        remove_if_exists(&self.path(hash))
     }
 
     /// Deletes blobs that are not in `referenced` and were last written or refreshed
@@ -124,12 +120,10 @@ impl BlobStore {
         }
         for file in fs::read_dir(self.root.join("tmp"))? {
             let path = file?.path();
-            if let Some(len) = removable(&path, grace)? {
-                match fs::remove_file(&path) {
-                    Ok(()) => report.bytes += len,
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e),
-                }
+            if let Some(len) = removable(&path, grace)?
+                && remove_if_exists(&path)?
+            {
+                report.bytes += len;
             }
         }
         Ok(report)
@@ -190,6 +184,15 @@ fn removable(path: &Path, grace: Duration) -> io::Result<Option<u64>> {
         .duration_since(meta.modified()?)
         .unwrap_or_default();
     Ok((meta.is_file() && age > grace).then_some(meta.len()))
+}
+
+/// Returns whether the file was there.
+fn remove_if_exists(path: &Path) -> io::Result<bool> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 fn touch(path: &Path) -> io::Result<()> {

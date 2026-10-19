@@ -44,32 +44,23 @@ pub(crate) async fn with_session<T>(
     account: AccountId,
     mut op: impl for<'s> FnMut(&'s mut Session) -> SessionFuture<'s, T>,
 ) -> Result<T> {
-    let mut retried = false;
-    loop {
-        // After a dead idle connection, the others in the pool are suspect too.
-        let pooled = if retried {
-            None
-        } else {
-            engine.take_session(account)
-        };
-        let (mut session, reused) = match pooled {
-            Some(session) => (session, true),
-            None => (connect(engine, account).await?, false),
-        };
+    if let Some(mut session) = engine.take_session(account) {
         match op(&mut session).await {
+            // A fresh connection, not another idle one: those are likely dead too.
             Err(Error::Imap(e)) if e.is_fatal() => {
-                if reused && !retried {
-                    tracing::debug!(%account, error = %e, "idle connection was dead; reconnecting");
-                    retried = true;
-                    continue;
-                }
-                return Err(Error::Imap(e));
+                tracing::debug!(%account, error = %e, "idle connection was dead; reconnecting");
             }
-            // Anything else leaves the connection in a known state.
             result => {
                 engine.return_session(account, session);
                 return result;
             }
         }
     }
+    let mut session = connect(engine, account).await?;
+    let result = op(&mut session).await;
+    if !matches!(&result, Err(Error::Imap(e)) if e.is_fatal()) {
+        // Anything else leaves the connection in a known state.
+        engine.return_session(account, session);
+    }
+    result
 }
