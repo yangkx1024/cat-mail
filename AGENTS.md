@@ -82,8 +82,9 @@ fake-server test, with a fault injected if the change is about recovering from o
 - **Blob GC** may only delete unreferenced blobs older than the grace period
   (see `BlobStore` docs). A new `*_blob_hash` column must be added to
   `Db::blob_references` (a test enumerates them), or GC deletes what it points to.
-- **Message bodies** are fetched with EXAMINE and `BODY.PEEK` only; nothing that reads
-  mail may change server state (flags included) before M4's operation queue.
+- **Reading never changes the server.** Sync and bodies use EXAMINE and `BODY.PEEK`
+  only. Changes to messages go through the operation queue (`pending_ops`, replayed
+  under SELECT after checking UIDVALIDITY), never straight to the server.
 - **Outbox sends are never repeated behind the user's back.** `unknown` is committed
   *before* the final dot of SMTP DATA, with `write_durable` (a plain commit can be lost
   to a power cut), and only the user moves an entry out of it.

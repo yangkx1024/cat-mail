@@ -32,6 +32,11 @@ pub enum Event {
     OutboxChanged {
         account: AccountId,
     },
+    /// Changes to messages were queued for the server, made there, refused, or became
+    /// conflicts; see `MailClient::list_pending`.
+    PendingOpsChanged {
+        account: AccountId,
+    },
     /// The server accepted a message for delivery.
     MessageSent {
         account: AccountId,

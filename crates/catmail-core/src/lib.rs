@@ -20,6 +20,7 @@ pub mod html {
         InlineImage, content_id_from_url, embed_inline_images, image_sources, unwrap_layout_tables,
     };
 }
+mod ops;
 mod runtime;
 mod secrets;
 mod send;

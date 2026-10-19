@@ -1,6 +1,7 @@
-//! Read-only IMAP sync of folders and message headers.
+//! IMAP sync of folders and message headers.
 //!
-//! Per folder: EXAMINE, compare UIDVALIDITY, diff UIDs to find new and vanished
+//! First the queued local changes are replayed (see `ops`). Then per folder: EXAMINE,
+//! compare UIDVALIDITY, diff UIDs to find new and vanished
 //! messages, refresh flags of known messages (only the changed ones with CONDSTORE),
 //! then fetch new headers newest first in batches. Every batch is its own transaction,
 //! so an interrupted sync keeps what it fetched and the next one only diffs again. The
@@ -15,7 +16,7 @@ use catmail_store::{FolderSyncState, NewMessage, RemoteFolder};
 use catmail_types::{AccountId, Event, FolderId, FolderRole, FolderSyncReport, SyncReport};
 
 use crate::engine::Engine;
-use crate::{Error, Result, connection};
+use crate::{Error, Result, connection, ops};
 
 /// New messages per UID FETCH, and per transaction.
 const FETCH_BATCH: usize = 200;
@@ -35,14 +36,21 @@ async fn run(engine: &Arc<Engine>, account_id: AccountId) -> Result<SyncReport> 
     let mut session = connection::connect(engine, account_id).await?;
 
     let remote = remote_folders(session.list().await?);
-    if engine
+    let reconciled = engine
         .write(move |db| db.folders().reconcile(account_id, &remote))
-        .await?
-    {
+        .await?;
+    if reconciled.changed {
         engine.emit(Event::FoldersChanged {
             account: account_id,
         });
     }
+    ops::announce(engine, &reconciled.touched);
+
+    // Local changes first, so the sync sees the server with them made.
+    let pending = engine
+        .read(move |db| db.ops().pending_folders(account_id))
+        .await?;
+    let mut replayed = ops::replay(engine, &mut session, account_id, &pending).await?;
 
     let folders = engine
         .read(move |db| db.folders().sync_states(account_id))
@@ -53,6 +61,9 @@ async fn run(engine: &Arc<Engine>, account_id: AccountId) -> Result<SyncReport> 
     };
     for folder in folders.into_iter().filter(|f| f.selectable) {
         let mut folder_report = FolderSyncReport::new(folder.id, &folder.name);
+        if let Some(r) = replayed.remove(&folder.id) {
+            (folder_report.ops_applied, folder_report.ops_failed) = (r.applied, r.failed);
+        }
         match sync_folder(
             engine,
             &mut session,
@@ -98,9 +109,11 @@ async fn sync_folder(
     if folder.uidvalidity != Some(status.uidvalidity) {
         // UIDs of the old generation now name different messages (or nothing).
         let uidvalidity = status.uidvalidity;
-        engine
+        let touched = engine
             .write(move |db| db.folders().reset_uidvalidity(id, uidvalidity))
             .await?;
+        // Messages moved out of it locally are gone from where they were moved to.
+        ops::announce(engine, &touched);
         report.uidvalidity_changed = folder.uidvalidity.is_some();
         if report.uidvalidity_changed {
             changed();

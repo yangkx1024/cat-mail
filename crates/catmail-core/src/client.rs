@@ -7,8 +7,9 @@ use catmail_proto::TlsConfig;
 use catmail_store::{BlobStore, Store};
 use catmail_types::{
     Account, AccountId, AttachmentId, Draft, DraftAttachment, DraftAttachmentId, DraftContent,
-    DraftId, Event, Folder, FolderId, GcReport, Message, MessageId, MessageSummary, NewAccount,
-    OutboxEntry, OutboxId, SearchQuery, SyncReport,
+    DraftId, Event, Flags, Folder, FolderId, GcReport, Message, MessageId, MessageSummary,
+    NewAccount, OutboxEntry, OutboxId, PendingOp, PendingOpId, ReplayReport, SearchQuery,
+    SyncReport,
 };
 use tokio::runtime::Handle;
 use tokio::sync::broadcast;
@@ -17,7 +18,7 @@ use uuid::Uuid;
 use crate::engine::{Engine, blocking, now};
 use crate::runtime::Runtime;
 use crate::secrets::{KeyringSecrets, SecretStore};
-use crate::{Config, Error, Result, auth, body, connection, drafts, send, sync};
+use crate::{Config, Error, Result, auth, body, connection, drafts, ops, send, sync};
 
 const EVENT_CAPACITY: usize = 256;
 
@@ -347,6 +348,71 @@ impl MailClient {
         self.rt
             .run(body::raw_message(self.engine.clone(), id))
             .await
+    }
+
+    /// Sets `add` and clears `remove` (`\Seen`, `\Flagged`, `\Answered`) on the
+    /// messages. The change is made locally at once and reaches the server at the next
+    /// sync or [`replay_pending`](Self::replay_pending); one the server refuses is
+    /// undone. Fails, changing nothing, if a message doesn't exist. Returns the accounts
+    /// whose messages changed.
+    pub async fn set_flags(
+        &self,
+        messages: Vec<MessageId>,
+        add: Flags,
+        remove: Flags,
+    ) -> Result<Vec<AccountId>> {
+        self.rt
+            .run(ops::set_flags(self.engine.clone(), messages, add, remove))
+            .await
+    }
+
+    /// Moves the messages to `to`, a folder of their account. They show there at once;
+    /// the server follows as with [`set_flags`](Self::set_flags).
+    pub async fn move_messages(
+        &self,
+        messages: Vec<MessageId>,
+        to: FolderId,
+    ) -> Result<Vec<AccountId>> {
+        self.rt
+            .run(ops::move_messages(self.engine.clone(), messages, to))
+            .await
+    }
+
+    /// Moves the messages to their account's Trash, or deletes them for good if they
+    /// are in Trash already or `permanently` is set. An account without a Trash folder
+    /// only allows the latter. The server follows as with [`set_flags`](Self::set_flags).
+    pub async fn delete_messages(
+        &self,
+        messages: Vec<MessageId>,
+        permanently: bool,
+    ) -> Result<Vec<AccountId>> {
+        self.rt
+            .run(ops::delete_messages(
+                self.engine.clone(),
+                messages,
+                permanently,
+            ))
+            .await
+    }
+
+    /// Makes the account's queued changes on the server now, without syncing. Waits for
+    /// a sync of the account to finish first (it replays them too). Losing the
+    /// connection fails the call and leaves the rest queued.
+    pub async fn replay_pending(&self, account: AccountId) -> Result<ReplayReport> {
+        self.rt
+            .run(ops::replay_account(self.engine.clone(), account))
+            .await
+    }
+
+    /// Changes not yet made on the server, and those it refused or that no longer
+    /// apply, oldest first; all accounts' with `None`.
+    pub async fn list_pending(&self, account: Option<AccountId>) -> Result<Vec<PendingOp>> {
+        self.rt.run(ops::list(self.engine.clone(), account)).await
+    }
+
+    /// Forgets a failed or conflicting change. Pending ones can't be dismissed.
+    pub async fn dismiss_pending(&self, id: PendingOpId) -> Result<()> {
+        self.rt.run(ops::dismiss(self.engine.clone(), id)).await
     }
 
     /// Searches subjects, senders and recipients of all synced messages, and the text

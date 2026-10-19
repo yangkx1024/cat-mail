@@ -22,6 +22,7 @@ tracing-subscriber.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]
+catmail-testkit.workspace = true
 tempfile.workspace = true
 
 [lints]

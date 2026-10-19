@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use catmail_types::{
     AccountId, Address, BlobHash, FlagState, Flags, FolderId, Message, MessageBody, MessageId,
     MessageSummary, SearchQuery,
@@ -8,6 +10,7 @@ use crate::Result;
 use crate::attachments::{Attachments, NewAttachment};
 use crate::columns::{id_list, json, parse_opt_text, to_id_list, to_json};
 use crate::fts;
+use crate::ops::MOVING;
 
 const SUMMARY_COLUMNS: &str = "id, account_id, folder_id, thread_id, subject, from_json, date, snippet, flags, has_attachments";
 
@@ -47,10 +50,12 @@ pub struct NewBody {
 pub struct MessageLocation {
     pub id: MessageId,
     pub account: AccountId,
+    /// Where the message shows locally. For a message moved here and not yet on the
+    /// server, the rest describes the folder it is moving from.
     pub folder: FolderId,
-    /// The folder's name on the server.
+    /// The name on the server of the folder that has the message.
     pub remote_name: String,
-    /// The folder's current UIDVALIDITY; `uid` is only meaningful within it.
+    /// That folder's current UIDVALIDITY; `uid` is only meaningful within it.
     pub uidvalidity: Option<u32>,
     pub uid: u32,
     /// RFC822.SIZE.
@@ -92,7 +97,8 @@ impl<'c> Messages<'c> {
     }
 
     /// Inserts messages, or refreshes the flags of ones already stored (a repeated batch
-    /// after an interrupted sync). Immutable header fields are never rewritten.
+    /// after an interrupted sync). Immutable header fields are never rewritten. A
+    /// message moved or deleted locally, whose op is still pending, is not brought back.
     /// Returns how many rows were new.
     pub fn upsert(
         &self,
@@ -105,10 +111,14 @@ impl<'c> Messages<'c> {
                                    internal_date, size, message_id_hdr, in_reply_to,
                                    references_hdr, subject, from_json, to_json, cc_json,
                                    reply_to_json, date, has_attachments)
-             VALUES (:account, :folder, :uid, :flags, :keywords, :modseq,
-                     :internal_date, :size, :message_id, :in_reply_to,
-                     :references, :subject, :from, :to, :cc, :reply_to, :date,
-                     :has_attachments)
+             SELECT :account, :folder, :uid, :flags, :keywords, :modseq,
+                    :internal_date, :size, :message_id, :in_reply_to,
+                    :references, :subject, :from, :to, :cc, :reply_to, :date,
+                    :has_attachments
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM pending_ops
+                 WHERE folder_id = :folder AND status = 'pending' AND uid = :uid
+                   AND kind IN ('move', 'delete'))
              ON CONFLICT (folder_id, uid) DO NOTHING",
         )?;
         let mut inserted = 0;
@@ -144,22 +154,58 @@ impl<'c> Messages<'c> {
     }
 
     /// Applies the server's flags to stored messages; UIDs not stored are ignored.
-    /// Returns how many rows actually changed.
+    /// Flag changes made locally and not yet replayed are applied on top, so a sync
+    /// doesn't undo them. Returns how many rows' flags or keywords changed.
     pub fn update_flags(&self, folder: FolderId, states: &[FlagState]) -> Result<usize> {
+        let mut local: HashMap<u32, Vec<(Flags, Flags)>> = HashMap::new();
+        let mut pending = self.conn.prepare_cached(
+            "SELECT uid, flags_add, flags_remove FROM pending_ops
+             WHERE folder_id = ?1 AND status = 'pending' AND kind = 'flags' ORDER BY id",
+        )?;
+        for row in pending.query_map([folder.0], |r| {
+            Ok((
+                r.get(0)?,
+                Flags::from_bits(r.get(1)?),
+                Flags::from_bits(r.get(2)?),
+            ))
+        })? {
+            let (uid, add, remove) = row?;
+            local.entry(uid).or_default().push((add, remove));
+        }
         let mut update = self.conn.prepare_cached(
             "UPDATE messages SET flags = :flags, keywords_json = :keywords, modseq = :modseq
              WHERE folder_id = :folder AND uid = :uid
-               AND (flags, keywords_json, modseq) IS NOT (:flags, :keywords, :modseq)",
+               AND (flags, keywords_json) IS NOT (:flags, :keywords)",
+        )?;
+        // A new MODSEQ alone is no change worth counting (a message moved here locally
+        // has none until the server reports it).
+        let mut update_modseq = self.conn.prepare_cached(
+            "UPDATE messages SET modseq = :modseq
+             WHERE folder_id = :folder AND uid = :uid AND modseq IS NOT :modseq",
         )?;
         let mut changed = 0;
         for s in states {
-            changed += update.execute(named_params! {
+            let flags = local.get(&s.uid).map_or(s.flags, |changes| {
+                changes
+                    .iter()
+                    .fold(s.flags, |flags, &(add, remove)| flags.apply(add, remove))
+            });
+            let modseq = s.modseq.map(|v| v as i64);
+            let updated = update.execute(named_params! {
                 ":folder": folder.0,
                 ":uid": s.uid,
-                ":flags": s.flags.bits(),
+                ":flags": flags.bits(),
                 ":keywords": to_json(&s.keywords),
-                ":modseq": s.modseq.map(|v| v as i64),
+                ":modseq": modseq,
             })?;
+            if updated == 0 && modseq.is_some() {
+                update_modseq.execute(named_params! {
+                    ":folder": folder.0,
+                    ":uid": s.uid,
+                    ":modseq": modseq,
+                })?;
+            }
+            changed += updated;
         }
         Ok(changed)
     }
@@ -214,16 +260,23 @@ impl<'c> Messages<'c> {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// `None` if the message is gone. A message moved locally is where the server has
+    /// it until the move is made: in the folder its pending move is from.
     pub fn location(&self, id: MessageId) -> Result<Option<MessageLocation>> {
         Ok(self
             .conn
             .query_row(
-                "SELECT m.account_id, m.folder_id, f.remote_name, f.uidvalidity, m.uid, m.size,
-                        m.body_state = 'full', b.raw_blob_hash
-                 FROM messages m
-                 JOIN folders f ON f.id = m.folder_id
-                 LEFT JOIN message_bodies b ON b.message_id = m.id
-                 WHERE m.id = ?1",
+                &format!(
+                    "SELECT m.account_id, m.folder_id, f.remote_name,
+                            iif(o.id IS NULL, f.uidvalidity, o.uidvalidity),
+                            coalesce(m.uid, o.uid), m.size, m.body_state = 'full',
+                            b.raw_blob_hash
+                     FROM messages m
+                     {MOVING}
+                     JOIN folders f ON f.id = coalesce(o.folder_id, m.folder_id)
+                     LEFT JOIN message_bodies b ON b.message_id = m.id
+                     WHERE m.id = ?1 AND coalesce(m.uid, o.uid) IS NOT NULL"
+                ),
                 [id.0],
                 |r| {
                     Ok(MessageLocation {

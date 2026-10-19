@@ -65,11 +65,16 @@ CREATE TABLE folders (
 -- raw content is still stored once, because the BlobStore is content-addressed.
 -- Cross-folder grouping of copies (e.g. via RFC 8474 EMAILID) can be added later as a
 -- nullable column; it must never replace per-row state.
+--
+-- A message moved here locally has no UID until the server makes the move: uid is NULL,
+-- and the pending move (pending_ops.message_id = id) says where the server has it
+-- meanwhile. The UID comes from COPYUID once moved; without one the row is dropped and
+-- the next sync fetches the message. Sync only ever compares the rows with a UID.
 CREATE TABLE messages (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id      INTEGER NOT NULL,
     folder_id       INTEGER NOT NULL,
-    uid             INTEGER NOT NULL,
+    uid             INTEGER,
     -- Mutable per-mailbox state.
     flags           INTEGER NOT NULL DEFAULT 0, -- system flags bitset, see catmail_types::Flags
     keywords_json   TEXT    NOT NULL DEFAULT '[]', -- non-system flags, e.g. ["$Junk"]
@@ -117,6 +122,19 @@ END;
 CREATE TRIGGER messages_count_flags AFTER UPDATE OF flags ON messages
 WHEN (old.flags & 1) <> (new.flags & 1) BEGIN
     UPDATE folders SET unread_count = unread_count + (new.flags & 1 = 0) - (old.flags & 1 = 0)
+    WHERE id = new.folder_id;
+END;
+
+-- A local move. Together with messages_count_flags this stays right even if one UPDATE
+-- changed both columns: the old folder loses the old state, the new one gains it, and
+-- the flags trigger moves the new folder from the old state to the new.
+CREATE TRIGGER messages_count_move AFTER UPDATE OF folder_id ON messages
+WHEN old.folder_id <> new.folder_id BEGIN
+    UPDATE folders SET total_count = total_count - 1,
+                       unread_count = unread_count - (old.flags & 1 = 0)
+    WHERE id = old.folder_id;
+    UPDATE folders SET total_count = total_count + 1,
+                       unread_count = unread_count + (old.flags & 1 = 0)
     WHERE id = new.folder_id;
 END;
 
@@ -240,27 +258,66 @@ CREATE TABLE outbox (
 CREATE INDEX outbox_status ON outbox (status, next_attempt_at);
 CREATE UNIQUE INDEX outbox_draft ON outbox (draft_id);
 
--- Local changes already applied optimistically, waiting to be replayed on the server.
--- Written in the same transaction as the local change they describe.
+-- Local changes already applied optimistically, waiting to be replayed on the server:
+-- one row per message, written in the same transaction as the local change.
 --
--- UIDs are only meaningful within one UIDVALIDITY generation of one mailbox. An op is
--- replayed only after SELECT reports the same `uidvalidity`; otherwise it goes to
--- reconciliation instead of touching whatever message now has that UID.
+-- (folder_id, uidvalidity, uid) is the message on the server. UIDs are only meaningful
+-- within one UIDVALIDITY generation of one mailbox: an op is replayed only after SELECT
+-- reports the same `uidvalidity`; a new generation turns the folder's ops into
+-- conflicts instead of touching whatever message now has that UID.
+--
+-- kind:
+--   flags   set flags_add, clear flags_remove: only bits that changed locally, so a
+--           refused op can be undone exactly, and flags other clients change meanwhile
+--           are left alone (+FLAGS / -FLAGS, never a replace).
+--   move    to target_folder_id. message_id is the row now shown there, without a UID
+--           (see messages); moving or deleting that row again rewrites this op.
+--           A move back to its own folder is resolved locally at replay.
+--   delete  \Deleted plus expunge. The row is gone.
+--
+-- Within a folder, flag changes are replayed before moves and deletes: a flag change
+-- recorded for a message already moved locally (its row is the move's) then reaches
+-- the server before the message leaves the folder.
+--
+-- status: pending | failed (refused by the server; the local change was undone where
+-- nothing later depends on it) | conflict (the UIDs it names are gone with their
+-- generation). Failed and conflict rows stay for the user to see, until dismissed.
 CREATE TABLE pending_ops (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT, -- also the replay order
-    account_id   INTEGER NOT NULL,
-    folder_id    INTEGER NOT NULL,
-    uidvalidity  INTEGER NOT NULL,
-    kind         TEXT    NOT NULL, -- set_flags | move | delete | append
-    payload_json TEXT    NOT NULL, -- UIDs and kind-specific arguments
-    status       TEXT    NOT NULL DEFAULT 'pending', -- pending | failed | conflict
-    attempts     INTEGER NOT NULL DEFAULT 0,
-    last_error   TEXT,
-    created_at   INTEGER NOT NULL DEFAULT (unixepoch()),
-    FOREIGN KEY (folder_id, account_id) REFERENCES folders(id, account_id) ON DELETE CASCADE
+    id               INTEGER PRIMARY KEY AUTOINCREMENT, -- also the replay order
+    account_id       INTEGER NOT NULL,
+    folder_id        INTEGER NOT NULL,
+    uidvalidity      INTEGER NOT NULL,
+    uid              INTEGER NOT NULL,
+    kind             TEXT    NOT NULL,
+    flags_add        INTEGER NOT NULL DEFAULT 0,
+    flags_remove     INTEGER NOT NULL DEFAULT 0,
+    target_folder_id INTEGER,
+    -- Same-account only; checked by the repository (SET NULL rules out a composite FK).
+    message_id       INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+    -- A move on a server without MOVE is COPY, then delete, and a COPY repeated after its
+    -- answer was lost makes a second copy. So before each COPY the target, its
+    -- UIDVALIDITY and UIDNEXT are committed here: a copy it made can only be at or above
+    -- that UIDNEXT, and a retry looks there for one byte-identical to the original. If
+    -- that can't be told (the target was rebuilt), the op fails, leaving the original.
+    -- No FK: a target deleted since is just one where the copy can't be looked for.
+    copy_folder_id   INTEGER,
+    copy_uidvalidity INTEGER,
+    copy_uidnext     INTEGER,
+    status           TEXT    NOT NULL DEFAULT 'pending',
+    attempts         INTEGER NOT NULL DEFAULT 0,
+    last_error       TEXT,
+    created_at       INTEGER NOT NULL DEFAULT (unixepoch()),
+    -- Folders and their ops go together. Before a folder is deleted the repository undoes
+    -- what its ops did locally (messages moved out of it, moves into it).
+    FOREIGN KEY (folder_id, account_id) REFERENCES folders(id, account_id) ON DELETE CASCADE,
+    FOREIGN KEY (target_folder_id, account_id) REFERENCES folders(id, account_id)
+        ON DELETE CASCADE
 ) STRICT;
 
-CREATE INDEX pending_ops_queue ON pending_ops (account_id, folder_id, status, id);
+CREATE INDEX pending_ops_queue ON pending_ops (folder_id, status, uid);
+CREATE INDEX pending_ops_message ON pending_ops (message_id);
+CREATE INDEX pending_ops_target ON pending_ops (target_folder_id);
+CREATE INDEX pending_ops_account ON pending_ops (account_id, status);
 
 -- Full-text index keyed by messages.id (rowid). Contentless: the text lives in messages
 -- and message_bodies, the index only stores tokens. The Messages repository writes a row

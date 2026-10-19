@@ -14,6 +14,14 @@ pub enum Error {
     #[error("{0} already exists")]
     AlreadyExists(String),
 
+    #[error("message {0} not found")]
+    MessageNotFound(catmail_types::MessageId),
+
+    /// The request makes no sense as given, e.g. moving a message to another account's
+    /// folder. The text says why.
+    #[error("{0}")]
+    Invalid(String),
+
     /// The row is in a state that doesn't allow the change, e.g. editing a draft that is
     /// being sent. The text says why.
     #[error("{0}")]

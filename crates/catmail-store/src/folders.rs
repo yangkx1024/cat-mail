@@ -5,6 +5,7 @@ use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
 use crate::Result;
 use crate::columns::parse_opt_text;
+use crate::ops::{PendingOps, Touched};
 
 const COLUMNS: &str = "id, account_id, name, delimiter, role, selectable,
     unread_count, total_count, last_synced_at";
@@ -17,6 +18,16 @@ pub struct RemoteFolder {
     pub delimiter: Option<char>,
     pub role: Option<FolderRole>,
     pub selectable: bool,
+}
+
+/// What [`Folders::reconcile`] changed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Reconciled {
+    /// Folders were added, removed or changed.
+    pub changed: bool,
+    /// Other folders whose messages changed with them, and the accounts whose queued
+    /// changes did: messages moved locally into a deleted folder go back.
+    pub touched: Touched,
 }
 
 /// What the sync engine needs to resume a folder.
@@ -82,27 +93,32 @@ impl<'c> Folders<'c> {
             .optional()?)
     }
 
-    /// The server name of the account's selectable folder with `role`, if it has one.
-    pub fn remote_name_by_role(
+    /// The account's selectable folder with `role` (id and server name), if it has one.
+    pub fn by_role(
         &self,
         account: AccountId,
         role: FolderRole,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<(FolderId, String)>> {
         Ok(self
             .conn
-            .query_row(
-                "SELECT remote_name FROM folders
+            .prepare_cached(
+                "SELECT id, remote_name FROM folders
                  WHERE account_id = ?1 AND role = ?2 AND selectable ORDER BY id LIMIT 1",
-                params![account.0, role.as_str()],
-                |r| r.get(0),
-            )
+            )?
+            .query_row(params![account.0, role.as_str()], |r| {
+                Ok((FolderId(r.get(0)?), r.get(1)?))
+            })
             .optional()?)
     }
 
+    /// INBOX first, then by id.
     pub fn sync_states(&self, account: AccountId) -> Result<Vec<FolderSyncState>> {
+        // Messages moved here locally and not yet on the server have no UID; sync leaves
+        // them out of its counts.
         let mut stmt = self.conn.prepare(
             "SELECT id, remote_name, name, selectable, uidvalidity, uidnext, highest_modseq,
-                    total_count,
+                    total_count - (SELECT count(*) FROM messages
+                                   WHERE folder_id = folders.id AND uid IS NULL),
                     (SELECT ifnull(max(uid), 0) FROM messages WHERE folder_id = folders.id)
              FROM folders WHERE account_id = ?1
              ORDER BY remote_name <> 'INBOX', id",
@@ -125,9 +141,9 @@ impl<'c> Folders<'c> {
 
     /// Makes the account's folders match `remote`: inserts new ones, updates changed
     /// attributes, and deletes folders the server no longer lists (with their messages).
-    /// Returns whether anything changed.
-    pub fn reconcile(&self, account: AccountId, remote: &[RemoteFolder]) -> Result<bool> {
+    pub fn reconcile(&self, account: AccountId, remote: &[RemoteFolder]) -> Result<Reconciled> {
         let mut changed = false;
+        let mut touched = Touched::new();
         let mut upsert = self.conn.prepare(
             "INSERT INTO folders (account_id, remote_name, name, delimiter, role, selectable)
              VALUES (:account, :remote_name, :name, :delimiter, :role, :selectable)
@@ -156,6 +172,7 @@ impl<'c> Folders<'c> {
             .map(|f| f.id.0)
             .collect();
         for id in gone {
+            touched.extend(PendingOps::new(self.conn).forget_folder(FolderId(id))?);
             self.forget_remote_draft_copies(FolderId(id), None)?;
             self.conn
                 .execute("DELETE FROM folders WHERE id = ?1", [id])?;
@@ -174,36 +191,34 @@ impl<'c> Folders<'c> {
             .query_map([account.0], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         for id in emptied {
-            self.end_generation(FolderId(id), None)?;
+            touched.extend(self.end_generation(FolderId(id), None)?);
             changed = true;
         }
-        Ok(changed)
+        Ok(Reconciled { changed, touched })
     }
 
     /// Starts a new UIDVALIDITY generation (or the first one): every message row and
     /// cursor of the old generation is dropped, pending operations against old UIDs
     /// become conflicts, and draft copies addressed by old UIDs are forgotten.
-    pub fn reset_uidvalidity(&self, folder: FolderId, uidvalidity: u32) -> Result<()> {
+    /// Returns the folders whose messages or queued changes this changed, besides
+    /// `folder`'s own messages: local moves out of it are undone.
+    pub fn reset_uidvalidity(&self, folder: FolderId, uidvalidity: u32) -> Result<Touched> {
         self.end_generation(folder, Some(uidvalidity))
     }
 
     /// Drops everything tied to the folder's UIDs except what belongs to `next`, the
     /// generation that replaces it (`None`: the folder no longer holds messages at all).
-    fn end_generation(&self, folder: FolderId, next: Option<u32>) -> Result<()> {
+    fn end_generation(&self, folder: FolderId, next: Option<u32>) -> Result<Touched> {
         self.conn
             .execute("DELETE FROM messages WHERE folder_id = ?1", [folder.0])?;
-        self.conn.execute(
-            "UPDATE pending_ops SET status = 'conflict'
-             WHERE folder_id = ?1 AND uidvalidity IS NOT ?2 AND status = 'pending'",
-            params![folder.0, next],
-        )?;
+        let touched = PendingOps::new(self.conn).end_generation(folder, next)?;
         self.forget_remote_draft_copies(folder, next)?;
         self.conn.execute(
             "UPDATE folders SET uidvalidity = ?2, uidnext = NULL, highest_modseq = NULL
              WHERE id = ?1",
             params![folder.0, next],
         )?;
-        Ok(())
+        Ok(touched)
     }
 
     /// Records a completed sync.
@@ -288,11 +303,13 @@ mod tests {
             store
                 .write(|db| db.folders().reconcile(account, &listed))
                 .unwrap()
+                .changed
         );
         assert!(
             !store
                 .write(|db| db.folders().reconcile(account, &listed))
                 .unwrap()
+                .changed
         );
 
         let folders = store.read(|db| db.folders().list(account)).unwrap();
@@ -302,8 +319,9 @@ mod tests {
         assert_eq!(folders[2].role, Some(FolderRole::Sent));
         let by_role = |role| {
             store
-                .read(|db| db.folders().remote_name_by_role(account, role))
+                .read(|db| db.folders().by_role(account, role))
                 .unwrap()
+                .map(|(_, remote_name)| remote_name)
         };
         assert_eq!(by_role(FolderRole::Sent).as_deref(), Some("&XfJT0ZAB-"));
         assert_eq!(by_role(FolderRole::Trash), None);
@@ -321,6 +339,7 @@ mod tests {
             store
                 .write(|db| db.folders().reconcile(account, &listed))
                 .unwrap()
+                .changed
         );
         let folders = store.read(|db| db.folders().list(account)).unwrap();
         assert_eq!(folders.len(), 2);
@@ -344,11 +363,12 @@ mod tests {
         store
             .write(|db| {
                 db.folders().reset_uidvalidity(folder, 7)?;
-                db.messages().upsert(account, folder, &[message(1), message(2)])?;
+                db.messages()
+                    .upsert(account, folder, &[message(1), message(2)])?;
                 db.folders().set_synced(folder, Some(3), Some(10))?;
                 db.conn.execute(
-                    "INSERT INTO pending_ops (account_id, folder_id, uidvalidity, kind, payload_json)
-                     VALUES (?1, ?2, 7, 'set_flags', '{}')",
+                    "INSERT INTO pending_ops (account_id, folder_id, uidvalidity, uid, kind)
+                     VALUES (?1, ?2, 7, 1, 'flags')",
                     rusqlite::params![account.0, folder.0],
                 )?;
                 Ok(())
@@ -361,6 +381,7 @@ mod tests {
             store
                 .write(|db| db.folders().reconcile(account, &[node]))
                 .unwrap()
+                .changed
         );
         store
             .read(|db| {
@@ -432,8 +453,8 @@ mod tests {
         store
             .write(|db| {
                 db.conn.execute_batch(&format!(
-                    "INSERT INTO pending_ops (account_id, folder_id, uidvalidity, kind, payload_json)
-                     VALUES ({a}, {f}, 7, 'set_flags', '{{}}'), ({a}, {f}, 9, 'set_flags', '{{}}');
+                    "INSERT INTO pending_ops (account_id, folder_id, uidvalidity, uid, kind)
+                     VALUES ({a}, {f}, 7, 1, 'flags'), ({a}, {f}, 9, 1, 'flags');
                      INSERT INTO drafts (account_id, remote_folder_id, remote_uidvalidity, remote_uid)
                      VALUES ({a}, {f}, 7, 1);",
                     a = account.0,

@@ -99,6 +99,47 @@ impl FakeMailbox {
         self.highest_modseq += 1;
     }
 
+    /// Sets or clears `flag` on the message, bumping MODSEQ if that changed anything.
+    fn change_flag(&mut self, uid: u32, flag: &str, on: bool) -> bool {
+        let msg = self.message_mut(uid);
+        let has = msg.flags.iter().any(|f| f.eq_ignore_ascii_case(flag));
+        if has == on {
+            return false;
+        }
+        if on {
+            msg.flags.push(flag.to_owned());
+        } else {
+            msg.flags.retain(|f| !f.eq_ignore_ascii_case(flag));
+        }
+        self.highest_modseq += 1;
+        let modseq = self.highest_modseq;
+        self.message_mut(uid).modseq = modseq;
+        true
+    }
+
+    /// Removes the messages with UIDs in `uids` (all of them if `None`) that have
+    /// `\Deleted`, and returns the `* n EXPUNGE` lines announcing it.
+    fn expunge_deleted(&mut self, uids: Option<&[u32]>) -> String {
+        let mut out = String::new();
+        // Each EXPUNGE renumbers the messages after it, so announce from the end.
+        for i in (0..self.messages.len()).rev() {
+            let msg = &self.messages[i];
+            if msg
+                .flags
+                .iter()
+                .any(|f| f.eq_ignore_ascii_case("\\Deleted"))
+                && uids.is_none_or(|uids| uids.contains(&msg.uid))
+            {
+                self.messages.remove(i);
+                out += &format!("* {} EXPUNGE\r\n", i + 1);
+            }
+        }
+        if !out.is_empty() {
+            self.highest_modseq += 1;
+        }
+        out
+    }
+
     /// Simulates the server rebuilding the mailbox: new UIDVALIDITY, UIDs renumbered
     /// from 1.
     pub fn reset_uidvalidity(&mut self, uidvalidity: u32) {
@@ -165,6 +206,16 @@ pub struct Faults {
     /// Store the next APPENDed message, then close the connection without answering:
     /// the client can't tell whether it was saved. Fires once.
     pub drop_after_append: bool,
+    /// Advertise MOVE (otherwise clients have to COPY, mark `\Deleted` and expunge).
+    pub move_command: bool,
+    /// Refuse STORE, COPY and MOVE with `NO <text>`, e.g. `[CANNOT] Permission denied`.
+    pub refuse_changes: Option<String>,
+    /// Make the next STORE, COPY, MOVE or EXPUNGE, then close the connection without
+    /// answering. Fires once.
+    pub drop_after_change: bool,
+    /// Close the connection when the next STORE, COPY, MOVE or EXPUNGE arrives, without
+    /// making it. Fires once.
+    pub drop_before_change: bool,
 }
 
 impl Default for Faults {
@@ -192,6 +243,10 @@ impl Default for Faults {
             reject_appends: 0,
             reject_append_literal: false,
             drop_after_append: false,
+            move_command: true,
+            refuse_changes: None,
+            drop_after_change: false,
+            drop_before_change: false,
         }
     }
 }
@@ -357,6 +412,8 @@ struct Session {
     mode: TlsMode,
     authenticated: bool,
     selected: Option<usize>,
+    /// Opened with SELECT rather than EXAMINE.
+    writable: bool,
     condstore_enabled: bool,
 }
 
@@ -381,6 +438,7 @@ async fn serve(
         mode,
         authenticated: false,
         selected: None,
+        writable: false,
         condstore_enabled: false,
     };
     if lock(&state).faults.preauth {
@@ -573,6 +631,9 @@ fn capabilities(state: &ServerState, session: &Session) -> String {
     if state.faults.uidplus {
         caps.push("UIDPLUS");
     }
+    if state.faults.move_command {
+        caps.push("MOVE");
+    }
     caps.join(" ")
 }
 
@@ -686,6 +747,7 @@ async fn handle(
                 {
                     let mb = &st.mailboxes[i];
                     session.selected = Some(i);
+                    session.writable = command == "SELECT";
                     session.condstore_enabled = st.faults.condstore
                         && args
                             .get(1)
@@ -697,7 +759,12 @@ async fn handle(
                     if st.faults.condstore {
                         out += &format!("* OK [HIGHESTMODSEQ {}] Highest\r\n", mb.highest_modseq);
                     }
-                    out += &format!("{tag} OK [READ-ONLY] {command} completed\r\n");
+                    let access = if session.writable {
+                        "READ-WRITE"
+                    } else {
+                        "READ-ONLY"
+                    };
+                    out += &format!("{tag} OK [{access}] {command} completed\r\n");
                 }
                 _ => {
                     session.selected = None;
@@ -735,6 +802,22 @@ async fn handle(
                 (_, None) => out += &format!("{tag} BAD Missing message\r\n"),
             }
         }
+        "STATUS" => {
+            let st = lock(state);
+            let name = args.first().map(Tok::text).unwrap_or_default();
+            match st.find(&name) {
+                Some(i) => {
+                    let mb = &st.mailboxes[i];
+                    out += &format!(
+                        "* STATUS {} (UIDVALIDITY {} UIDNEXT {})\r\n{tag} OK STATUS completed\r\n",
+                        quote(&mb.name),
+                        mb.uidvalidity,
+                        mb.uidnext
+                    );
+                }
+                None => out += &format!("{tag} NO Mailbox doesn't exist: {name}\r\n"),
+            }
+        }
         "UID SEARCH" => {
             let st = lock(state);
             match session.selected.and_then(|i| st.mailboxes.get(i)) {
@@ -766,6 +849,28 @@ async fn handle(
                     out += &format!("{tag} OK SEARCH completed\r\n");
                 }
                 None => out += &format!("{tag} BAD No mailbox selected\r\n"),
+            }
+        }
+        "UID STORE" | "UID COPY" | "UID MOVE" | "UID EXPUNGE" | "EXPUNGE" => {
+            let st = &mut *lock(state);
+            let refusal = st.faults.refuse_changes.clone();
+            match session.selected {
+                None => out += &format!("{tag} BAD No mailbox selected\r\n"),
+                Some(_) if !session.writable => {
+                    out += &format!("{tag} NO [READ-ONLY] Mailbox is read-only\r\n");
+                }
+                Some(_) if refusal.is_some() && !command.ends_with("EXPUNGE") => {
+                    out += &format!("{tag} NO {}\r\n", refusal.unwrap_or_default());
+                }
+                Some(_) if std::mem::take(&mut st.faults.drop_before_change) => {
+                    return Ok(Next::Close);
+                }
+                Some(i) => {
+                    out += &change(st, i, &command, args, &tag);
+                    if std::mem::take(&mut st.faults.drop_after_change) {
+                        return Ok(Next::Close);
+                    }
+                }
             }
         }
         "UID FETCH" => {
@@ -824,6 +929,111 @@ async fn handle(
     io.get_mut().write_all(&out).await?;
     io.get_mut().flush().await?;
     Ok(next)
+}
+
+/// STORE, COPY, MOVE and EXPUNGE (all but the last by UID) on mailbox `selected`.
+fn change(st: &mut ServerState, selected: usize, command: &str, args: &[Tok], tag: &str) -> String {
+    let set = args.first().map(Tok::text).unwrap_or_default();
+    let uids: Vec<u32> = {
+        let mb = &st.mailboxes[selected];
+        mb.messages
+            .iter()
+            .map(|m| m.uid)
+            .filter(|&uid| uid_set_contains(&set, uid, mb))
+            .collect()
+    };
+    let mut out = String::new();
+    match command {
+        "UID STORE" => {
+            // `+FLAGS.SILENT (\Seen)`, `-FLAGS (\Flagged)`, `FLAGS (…)`.
+            let item = args
+                .get(1)
+                .map(Tok::text)
+                .unwrap_or_default()
+                .to_ascii_uppercase();
+            let flags: Vec<String> = match args.get(2) {
+                Some(Tok::List(flags)) => flags.iter().map(Tok::text).collect(),
+                Some(other) => vec![other.text()],
+                None => Vec::new(),
+            };
+            let mb = &mut st.mailboxes[selected];
+            for &uid in &uids {
+                if item.starts_with("FLAGS") {
+                    let keep: Vec<&str> = flags.iter().map(String::as_str).collect();
+                    mb.set_flags(uid, &keep);
+                } else {
+                    for flag in &flags {
+                        mb.change_flag(uid, flag, item.starts_with('+'));
+                    }
+                }
+                if !item.ends_with(".SILENT") {
+                    let seq = mb.messages.iter().position(|m| m.uid == uid).unwrap() + 1;
+                    let msg = mb.message_mut(uid);
+                    out += &format!(
+                        "* {seq} FETCH (UID {uid} FLAGS ({}))\r\n",
+                        msg.flags.join(" ")
+                    );
+                }
+            }
+            out += &format!("{tag} OK STORE completed\r\n");
+        }
+        "UID COPY" | "UID MOVE" => {
+            let name = args.get(1).map(Tok::text).unwrap_or_default();
+            let Some(target) = st.find(&name) else {
+                return format!("{tag} NO [TRYCREATE] No such mailbox\r\n");
+            };
+            let copies: Vec<FakeMessage> = st.mailboxes[selected]
+                .messages
+                .iter()
+                .filter(|m| uids.contains(&m.uid))
+                .cloned()
+                .collect();
+            let mut new_uids = Vec::new();
+            for copy in copies {
+                let flags: Vec<&str> = copy.flags.iter().map(String::as_str).collect();
+                new_uids.push(st.mailboxes[target].append(&copy.raw, &flags));
+            }
+            let list = |uids: &[u32]| {
+                uids.iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            let code = if st.faults.uidplus && !uids.is_empty() {
+                format!(
+                    "[COPYUID {} {} {}] ",
+                    st.mailboxes[target].uidvalidity,
+                    list(&uids),
+                    list(&new_uids)
+                )
+            } else {
+                String::new()
+            };
+            if command == "UID MOVE" {
+                // RFC 6851: COPYUID comes untagged, before the expunges.
+                if !code.is_empty() {
+                    out += &format!("* OK {code}Moved\r\n");
+                }
+                let mb = &mut st.mailboxes[selected];
+                for &uid in &uids {
+                    mb.change_flag(uid, "\\Deleted", true);
+                }
+                out += &mb.expunge_deleted(Some(&uids));
+                out += &format!("{tag} OK MOVE completed\r\n");
+            } else {
+                out += &format!("{tag} OK {code}COPY completed\r\n");
+            }
+        }
+        "UID EXPUNGE" => {
+            out += &st.mailboxes[selected].expunge_deleted(Some(&uids));
+            out += &format!("{tag} OK EXPUNGE completed\r\n");
+        }
+        _ => {
+            out += &st.mailboxes[selected].expunge_deleted(None);
+            out += &format!("{tag} OK EXPUNGE completed\r\n");
+        }
+    }
+    out
 }
 
 fn fetch(mb: &FakeMailbox, args: &[Tok], condstore: bool, faults: &Faults, tag: &str) -> Vec<u8> {

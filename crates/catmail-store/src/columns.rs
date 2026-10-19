@@ -56,8 +56,8 @@ fn parse_value<T: FromStr<Err = String>>(
         .map_err(|e: String| conversion_error(row, col, e.into()))
 }
 
-/// All conventions here are TEXT columns.
-fn conversion_error(
+/// A TEXT column holding a value that doesn't parse.
+pub(crate) fn conversion_error(
     row: &Row<'_>,
     col: &str,
     err: Box<dyn std::error::Error + Send + Sync>,

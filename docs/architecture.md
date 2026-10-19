@@ -62,15 +62,80 @@ GPUI 用自己的 executor，不是 tokio；而 IMAP/SMTP 栈依赖 tokio reacto
 
 ### 离线优先 + 操作队列
 
-用户操作（标记、移动、删除）在**同一个 `write` 事务**里完成两件事：修改本地数据（乐观更新）、
-插入 `pending_ops` 记录；提交后再发事件。这样不会出现"界面已改，但服务器永远收不到操作"。
+用户操作（标记、移动、删除，`MailClient::set_flags` / `move_messages` / `delete_messages`）
+在**同一个 `write` 事务**里完成两件事：修改本地数据（乐观更新）、每封邮件插入一条
+`pending_ops` 记录；提交后再发事件（`MessagesChanged`、`PendingOpsChanged`）。这样不会出现
+"界面已改，但服务器永远收不到操作"。实现在 `catmail-store/src/ops.rs`（本地效果与队列的
+簿记）和 `catmail-core/src/ops.rs`（回放）。
 
-`pending_ops` 每条记录绑定 `folder_id` + `uidvalidity`，UID 只在这个代际内有意义。回放规则：
+- **标记**：只记录真正改变的位（已读的再标已读不入队），回放用 `+FLAGS.SILENT` /
+  `-FLAGS.SILENT`，从不整体替换，其他客户端同时改的 flags 不受影响；失败时也能精确撤销。
+  用户只能改 `\Seen`、`\Flagged`、`\Answered`。
+- **移动**：邮件行立刻移到目标文件夹，`uid` 置空（`messages.uid` 可空，只有本地移动过来、
+  服务器还没移动的邮件才没有 UID），正文、附件、全文索引随行保留，离线也能读。服务器仍按
+  op 记录的 (文件夹, UID) 找到它，所以没下载的正文照样能下载（`Messages::location`）。回放
+  时有 MOVE 用 `UID MOVE`，否则 `UID COPY` + `\Deleted` + 删除；服务器给出 COPYUID 时这一行
+  得到新 UID、**`MessageId` 不变**，否则删掉这一行，由下次同步重新拉取。同步只比较有 UID 的行。
+- **删除**：不在 Trash 里的邮件移到账户的 Trash；已在 Trash 里或指定永久删除时 `\Deleted`
+  + `UID EXPUNGE`。服务器不支持 UIDPLUS 时只能用普通 EXPUNGE，会一并清除别人标了
+  `\Deleted` 的邮件——这正是那个标记的含义，各客户端都这样做。没有 Trash 文件夹的账户只能
+  永久删除，不会悄悄变成永久删除。
+- 邮件回复发出（服务器接受，或用户确认已送达）时给原信加 `\Answered`，同样走队列。
 
-- 按文件夹分组，`SELECT` 后确认服务器的 UIDVALIDITY 与记录一致才执行；不一致则标记为
-  `conflict`，进入重新对账，绝不在新代际里按旧 UID 操作。
-- 按 `id` 顺序回放。永久失败时的回滚只撤销这条操作自己的改动，且仅当之后没有其他操作改过
-  同一封邮件时才回滚，避免较早的失败覆盖用户后来的修改。
+`pending_ops` 每条记录绑定 `folder_id` + `uidvalidity` + `uid`，UID 只在这个代际内有意义。
+回放规则：
+
+- 按文件夹分组，`SELECT` 后确认服务器的 UIDVALIDITY 与记录一致才执行；不一致时什么也
+  不做，随后同步这个文件夹时开始新代际，把它们标为 `conflict`（移动留下的无 UID 行随之
+  删除），绝不在新代际里按旧 UID 操作。
+- 同一文件夹里先回放标记，再回放移动和删除：对已在本地移走的邮件改标记，记录在它服务器上
+  的位置，要在它离开那个文件夹之前到达。标记只需保持同一封邮件的先后，所以分轮回放：每封
+  邮件的第一条、再每封的第二条……，轮内按改动分组，交替"标已读、加星标"也只需每种改动一条
+  命令。移动和删除按目标分组（一封邮件
+  最多只有一条待回放的移动或删除，再次移动、删除改写的是那一条，所以可以调换顺序），交替
+  "归档、删除、归档"也只需每个目标一条命令；相邻的同类操作合并成一条命令。
+- 服务器拒绝（NO/BAD）时标为 `failed` 并撤销本地改动。标记：每条操作记的是它实际改变的
+  位，所以把这封邮件待回放的操作连同被拒绝的那条按从新到旧逆推，正好得到它们之前的
+  flags，再把仍待回放的重新作用上去，并按现在实际改变的位重新记录（以后再被拒绝也能精确
+  撤销）。只撤销被拒绝的那一条是不对的：先标已读、再标未读，两条都被拒绝，结果会是已读。
+  移动的邮件回到原处；删除没法在本地恢复，邮件行已经没了，下次同步把它拉回来。断线则保持
+  `pending`、记下尝试次数，之后重来。标记、删除和 MOVE 执行两次都无害（服务器跳过不存在的
+  UID），答复丢失只需重做：MOVE 已经做了而答复丢了，重做时找不到邮件、没有 COPYUID，本地
+  行删掉，同步再拉。
+- **没有 MOVE 的服务器**用 COPY + `\Deleted` + 删除，而 COPY 重做会多出一份，所以 COPY
+  要像发信的结束标记一样处理（`ops::copy_move`）：
+  - 每次 COPY **之前**，用 `write_durable` 记下检查点：目标文件夹、它的 UIDVALIDITY 和
+    UIDNEXT（`pending_ops.copy_*`，用 STATUS 取，不必离开选中的文件夹）。这次 COPY 造出的
+    副本，UID 只可能不小于这个 UIDNEXT。
+  - 有检查点的 op 在这个文件夹里**先于一切**核对，不论之后被改成了什么（移到别处、移回
+    原处、永久删除）：否则移回原处在本地结算、删除直接执行，丢了答复的副本会留在目标里。
+    核对就是在目标里 UID ≥ 检查点的邮件中找与原邮件**原文逐字节相同**的（每个副本只认领
+    一次；先比 RFC822.SIZE，只下载大小相同的）：
+    - 找到了：邮件已经在目标里。删除原处的，op 像回放期间被改动的移动一样跟到副本那里：
+      移回原处变成从目标移回，删除变成删除副本，回放随即再处理那个文件夹。
+    - 没找到：COPY 没做成（或副本已被别人删掉），清掉检查点，op 照现在的样子继续。
+    - 原邮件已经不在：它是在 COPY 确认之后才删的，无事可做。
+
+    不按 Message-ID 判断：目标里可能早有一封 Message-ID 相同而内容不同的邮件（把它当成副本
+    会删掉原邮件、丢信），没有 Message-ID 的邮件也没法找。
+  - 无法判断时（目标在此期间被重建或删除），这条 op 标为 `failed`，**原邮件留在原处**，
+    不再自动重试，由用户决定：宁可让用户看到可能多出的一份，也不丢信、不在背后复制第二份。
+  - COPY 被拒绝时什么也没复制（RFC 3501），照常失败；复制成功但删除原邮件被拒绝时，op 失败，
+    邮件两边都有。
+- 文件夹从服务器上消失时，它的 op 随之级联删除；之前先撤销本地效果：从它移出的邮件行一并
+  删除，移入它的邮件回到原处。这些以及新代际造成的冲突都会改动**别的**文件夹里的行，
+  repository 返回受影响的文件夹（`Touched`），同步提交后为它们发 `MessagesChanged` 和
+  `PendingOpsChanged`，打开着的视图不会留着已经删掉的邮件。回放同理：哪些文件夹的邮件行
+  变了由 repository 返回（撤销标记、移回原处、得到 UID 或被删的行），core 不猜；只是 op 被
+  删除时不发 `MessagesChanged`，每次回放结束时发一次 `PendingOpsChanged`。`failed` / `conflict` 的记录留给用户查看
+  （`MailClient::list_pending`、`catmail ops`），由用户清除；`pending` 的不能清除，本地已经改了。
+
+回放发生在两处，都持有该账户的同步锁，用同一个 `ops::replay`：同步对账完文件夹之后、
+同步任何文件夹**之前**，把所有待回放的文件夹回放一遍（同步看到的是改动之后的服务器，
+包括移进它的邮件），以及 `MailClient::replay_pending`（只回放、不同步，用连接池里的连接；
+复用的连接已断开时在新连接上整个重来，已完成的不再是 pending）。服务器打不开的文件夹跳过，
+留给同步处理。CLI 像 `catmail send` 一样
+当场回放；后台回放随 M4 的每账户 actor 到来。
 
 草稿的远端副本同理：`drafts.remote_folder_id` / `remote_uidvalidity` / `remote_uid` 三者
 同时设置、同时清空。删除文件夹或 UIDVALIDITY 变化时由 repository 一起清空；表上的 CHECK
@@ -96,7 +161,7 @@ M1 先实现按需的只读同步 `MailClient::sync_account`：一条连接，�
 2. 对每个可选中的文件夹 EXAMINE（服务器支持时带 `CONDSTORE`），比对 UIDVALIDITY：
    - 变化（或第一次同步）：在同一个事务里删除该文件夹的所有邮件、写入新的 UIDVALIDITY、
      清空游标，把旧代际的 `pending_ops` 标为 `conflict`，并清掉按旧 UID 指向它的草稿远端副本。
-   - 一致：M4 起在这里回放该文件夹的 `pending_ops`。
+   - 一致：照常继续。`pending_ops` 已在同步各文件夹之前用 SELECT 回放（见上文）。
 3. 新邮件与已删除邮件：
    - 游标里的 UIDNEXT 与服务器相同、本地条数等于 EXISTS：既没有新邮件也没有删除，不发 SEARCH。
    - 否则先 `UID SEARCH UID <游标>:*` 只取游标之后的 UID；若"本地条数 + 新邮件数 = EXISTS"，
@@ -134,7 +199,8 @@ BODYSTRUCTURE（`has_attachments` 先记为否，下载正文后重算；下载�
 BODYSTRUCTURE）。仍然缺失的邮件只是不出现在结果里，那一批算作不完整、不推进游标，下次
 再拉。每次网络读写超时 60 秒。
 
-待办（M4）：有未回放的 `pending_ops` 时，flags 同步不能覆盖本地的乐观修改。
+有未回放的标记操作时，flags 同步把它们叠加在服务器的 flags 上（`Messages::update_flags`）；
+只有 MODSEQ 变化（例如移动过来的邮件第一次被同步）不算作 flags 更新。
 
 **APPEND 被提前拒绝。** 带 literal 的命令（APPEND）发出第一行后，服务器可以不回 `+` 而直接回
 tagged NO（Dovecot 无法写入时就是这样）。imap-next 只在 BAD 时放弃这条命令，收到 NO 后仍等着
@@ -197,7 +263,8 @@ HTML 部分时存在，经 `ammonia` 清洗（去掉脚本、样式表、表单�
 
 **正确性。**
 
-- 只用 EXAMINE 和 `BODY.PEEK`，下载不会把邮件标为已读，也不改服务器上的任何状态。
+- 只用 EXAMINE 和 `BODY.PEEK`，下载不会把邮件标为已读，也不改服务器上的任何状态。改服务器
+  状态的只有操作队列的回放（SELECT）和保存到 Sent（APPEND）。
 - 用 UID 之前先 EXAMINE 并比对 UIDVALIDITY；不一致或服务器已没有这封邮件时返回
   `Error::OutOfSync`，不在新代际里按旧 UID 取邮件，交给下一次同步处理。
 - 写入时只检查邮件行是否还在：message id 不复用，UIDVALIDITY 变化会删除旧代际的行，所以
@@ -257,7 +324,8 @@ OAUTHBEARER）以及刷新 token 的那一个分支，同步和发信代码不�
 
 - flags、keywords、MODSEQ 都是这一行自己的状态。同一封邮件在 Inbox 已读、在 Archive 未读，
   就是两行、各自的 flags。
-- 移动到别的文件夹得到新的 UID，也就是新的一行。
+- 移动到别的文件夹得到新的 UID：服务器给出 COPYUID 时同一行改为新的 (文件夹, UID)，
+  否则旧行删除、同步时成为新的一行。
 - 不按 Message-ID 合并不同文件夹里的副本（它不可靠）。正文不需要专门共享：BlobStore 按内容
   存储，相同的原始邮件在磁盘上只有一份。
 - 以后支持 Gmail 时，可加可空的 `X-GM-MSGID` / `EMAILID`（RFC 8474）列来关联副本，但它只用于
@@ -327,7 +395,7 @@ Service / macOS Keychain / Windows Credential Manager），service 为 `cat-mail
 **草稿只在本地。** `drafts` 一行是正在写的一封信（收件人、抄送、密送、主题、纯文本正文），
 附件在添加时复制进 BlobStore（`draft_attachments`），原文件之后改动或删除都不影响。回复时把
 原信的 Message-ID 和 References 复制进草稿（`in_reply_to` / `references_hdr`），原信之后被删除
-也不会断开会话；`reply_to_message_id` 留给 M4 标记 `\Answered`。草稿上传到服务器的 Drafts
+也不会断开会话；回复发出后经操作队列给 `reply_to_message_id` 指向的原信加 `\Answered`。草稿上传到服务器的 Drafts
 文件夹（`remote_*` 列）要在每次保存时删除上一份副本，这属于 M4 的操作队列，M3 不做。
 
 回复（`MailClient::reply`）：发给原信的 Reply-To，没有时发给发件人；回复自己发出的信则发给
@@ -521,7 +589,9 @@ zed-industries/zed#60155（同症状的 #64123 作为重复关闭，#64783 指�
   内容，支持明文 / TLS / STARTTLS，可注入故障：断线（第 n 次拉邮件头时）、拉取时挂起、重复
   或倒序的 FETCH 响应、不带 UID 的主动 FETCH、没有 CONDSTORE、UIDVALIDITY 改变、STARTTLS 之后
   的明文注入、拒绝登录、拉正文时断线、挂起或按闸门放行、section 回 NIL、关闭当前所有连接、
-  拒绝 APPEND（回 NO，或不要 literal 直接回 NO）、APPEND 存下后不答复就断开。BODYSTRUCTURE 和各 section 由每封邮件的
+  拒绝 APPEND（回 NO，或不要 literal 直接回 NO）、APPEND 存下后不答复就断开；SELECT 可写，
+  支持 `UID STORE` / `COPY` / `MOVE`（带 COPYUID）/ `EXPUNGE`，可关掉 MOVE 和 UIDPLUS、
+  拒绝修改、修改后不答复就断开。BODYSTRUCTURE 和各 section 由每封邮件的
   原文推导（mail-parser），所以测试邮件就是普通的 `.eml`。直接按字节写响应，故障可以精确
   到线上格式。三个平台的 CI 都跑。
 - **假 SMTP 服务器**（同一个 crate）：明文 / TLS / STARTTLS，AUTH PLAIN / LOGIN，记录投递的
@@ -533,7 +603,9 @@ zed-industries/zed#60155（同症状的 #64123 作为重复关闭，#64783 指�
   文件夹、层级文件夹、各种编码、HTML 加内嵌图片与 RFC 2231 文件名；测试还会投递一封超过
   2 MiB 的邮件，走按部分下载的路径。发信经假 SMTP 服务器，保存到 Dovecot 的 Sent：先把
   Sent 的 `tmp/` 设为只读让第一次 APPEND 失败，第二次就会先按 Message-ID 搜索，所以 APPEND
-  和 `SEARCH HEADER` 都在真实服务器上验证过（因此不能以 root 运行）。`crates/catmail-core/tests/dovecot.rs` 在设置了
+  和 `SEARCH HEADER` 都在真实服务器上验证过（因此不能以 root 运行）。操作队列也在 Dovecot
+  上走一遍：改 flags、MOVE（Dovecot 给 COPYUID，同步后不重复拉取）、永久删除，结果直接看
+  maildir 的文件名和内容。`crates/catmail-core/tests/dovecot.rs` 在设置了
   `run.sh` 打印的变量时运行，CI 里有单独的 Linux job。
 - **真实 SMTP**：同一个 Dovecot 开着 submission 服务（STARTTLS 与隐式 TLS 各一个端口，
   `run.sh` 用 openssl 生成 127.0.0.1 的自签名证书，测试只信任它），`submission_max_mail_size`

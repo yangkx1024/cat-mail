@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use catmail_core::{
-    AccountId, AuthKind, Config, MailClient, MemorySecrets, NewAccount, Security, ServerConfig,
+    AccountId, AuthKind, Config, Flags, Folder, MailClient, MemorySecrets, NewAccount, Security,
+    ServerConfig,
 };
 use catmail_testkit::{FakeImap, FakeSmtp, ServerState, SmtpState};
 use tokio::runtime::Handle;
@@ -22,6 +23,14 @@ pub struct Env {
 
 pub async fn env(state: ServerState) -> Env {
     env_with(state, SmtpState::new("alice", "pw"), false).await
+}
+
+/// [`env`], synced once.
+#[allow(dead_code)]
+pub async fn synced_env(state: ServerState) -> Env {
+    let env = env(state).await;
+    env.client.sync_account(env.account).await.unwrap();
+    env
 }
 
 /// With `background`, the client sends queued messages on its own.
@@ -65,6 +74,28 @@ pub async fn env_with(state: ServerState, smtp: SmtpState, background: bool) -> 
 }
 
 impl Env {
+    /// (subject, flags) of the folder's messages, newest first.
+    #[allow(dead_code)]
+    pub async fn messages(&self, name: &str) -> Vec<(String, Flags)> {
+        let folder = self.folder(name).await;
+        self.client
+            .list_messages(folder.id, 10_000, 0)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| (m.subject.unwrap_or_default(), m.flags))
+            .collect()
+    }
+
+    #[allow(dead_code)]
+    pub async fn folder(&self, name: &str) -> Folder {
+        self.client
+            .find_folder(self.account, name)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("no folder {name}"))
+    }
+
     /// Commands the server received from the `start`-th on, without tags.
     pub fn commands_since(&self, start: usize) -> Vec<String> {
         self.fake.state().log[start..]

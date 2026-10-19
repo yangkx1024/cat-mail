@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use catmail_core::{Error, Event, Flags, Folder, FolderRole, ImapError, SyncReport};
+use catmail_core::{Error, Event, Flags, FolderRole, ImapError, SyncReport};
 use catmail_testkit::{FakeMailbox, ServerState};
 
 mod common;
@@ -20,26 +20,6 @@ fn state_with(inbox_subjects: &[&str]) -> ServerState {
 impl Env {
     async fn sync(&self) -> SyncReport {
         self.client.sync_account(self.account).await.unwrap()
-    }
-
-    async fn folder(&self, name: &str) -> Folder {
-        self.client
-            .find_folder(self.account, name)
-            .await
-            .unwrap()
-            .unwrap_or_else(|| panic!("no folder {name}"))
-    }
-
-    /// (subject, flags), newest first.
-    async fn messages(&self, name: &str) -> Vec<(String, Flags)> {
-        let folder = self.folder(name).await;
-        self.client
-            .list_messages(folder.id, 10_000, 0)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|m| (m.subject.unwrap_or_default(), m.flags))
-            .collect()
     }
 
     async fn subjects(&self, name: &str) -> Vec<String> {
