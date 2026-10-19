@@ -526,9 +526,16 @@ fn create_data_dir(dir: &Path) -> std::io::Result<()> {
     if let Some(parent) = dir.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    let builder = {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(0o700);
+        builder
+    };
+    // Windows: the new directory inherits the user profile's ACL.
+    #[cfg(not(unix))]
+    let builder = fs::DirBuilder::new();
     match builder.create(dir) {
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => Ok(()),
         result => result,
