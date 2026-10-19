@@ -143,25 +143,25 @@ fn layout_tables(items: &[Item]) -> Vec<bool> {
         max_cells: usize,
     }
 
+    /// Where an element's content is: the innermost table around it, and whether it is in
+    /// one of that table's cells.
+    #[derive(Clone, Copy, Default)]
+    struct Context {
+        table: Option<usize>,
+        in_cell: bool,
+    }
+
     let mut tables: Vec<Table> = Vec::new();
-    // Open elements, each with its table's index if it is a table.
-    let mut open: Vec<(LocalName, Option<usize>)> = Vec::new();
+    // Open elements with the context of their content. Each inherits its parent's, so no
+    // start tag has to search its ancestors (mail can nest elements thousands deep).
+    let mut open: Vec<(LocalName, Context)> = Vec::new();
     for item in items {
         match item {
             Item::Start(tag) => {
-                // The innermost open table, and whether a cell of it is open.
-                let mut owner = None;
-                let mut in_cell = false;
-                for (name, table) in open.iter().rev() {
-                    if let Some(table) = table {
-                        owner = Some(*table);
-                        break;
-                    }
-                    in_cell |= matches!(*name, local_name!("td") | local_name!("th"));
-                }
-                if let Some(table) = owner.map(|t| &mut tables[t]) {
+                let context = open.last().map_or(Context::default(), |(_, c)| *c);
+                if let Some(table) = context.table.map(|t| &mut tables[t]) {
                     match tag.name {
-                        _ if in_cell && BLOCK_ELEMENTS.contains(&&*tag.name) => {
+                        _ if context.in_cell && BLOCK_ELEMENTS.contains(&&*tag.name) => {
                             table.has_block = true;
                         }
                         local_name!("tr") => table.cells_in_row = 0,
@@ -172,14 +172,25 @@ fn layout_tables(items: &[Item]) -> Vec<bool> {
                         _ => {}
                     }
                 }
-                let index = (tag.name == local_name!("table")).then(|| {
-                    tables.push(Table::default());
-                    tables.len() - 1
-                });
+                let inner = match tag.name {
+                    local_name!("table") => {
+                        tables.push(Table::default());
+                        Context {
+                            table: Some(tables.len() - 1),
+                            in_cell: false,
+                        }
+                    }
+                    local_name!("td") | local_name!("th") => Context {
+                        in_cell: context.table.is_some(),
+                        ..context
+                    },
+                    _ => context,
+                };
                 if !is_void(&tag.name) {
-                    open.push((tag.name.clone(), index));
+                    open.push((tag.name.clone(), inner));
                 }
             }
+            // The tags nest properly, so this finds the innermost element at once.
             Item::End(name) => {
                 if let Some(at) = open.iter().rposition(|(open, _)| open == name) {
                     open.truncate(at);
@@ -199,8 +210,9 @@ struct Open {
     name: LocalName,
     /// The name it was written with, `None` if it was left out.
     written: Option<LocalName>,
-    /// For a table, whether it is a layout table.
-    layout_table: Option<bool>,
+    /// Whether its content is in a layout table: inherited, so no start tag searches its
+    /// ancestors for the innermost table.
+    in_layout: bool,
 }
 
 fn rewrite(items: &[Item], layout: &[bool]) -> String {
@@ -211,11 +223,11 @@ fn rewrite(items: &[Item], layout: &[bool]) -> String {
     for item in items {
         match item {
             Item::Start(tag) => {
-                let layout_table = (tag.name == local_name!("table"))
-                    .then(|| layout.next().expect("one flag per table"));
-                let in_layout = layout_table
-                    .or_else(|| open.iter().rev().find_map(|o| o.layout_table))
-                    .unwrap_or(false);
+                let in_layout = if tag.name == local_name!("table") {
+                    layout.next().expect("one flag per table")
+                } else {
+                    open.last().is_some_and(|o| o.in_layout)
+                };
                 let written = match tag.name {
                     _ if is_inline_block(&tag.name) => Some(local_name!("div")),
                     local_name!("table")
@@ -241,7 +253,7 @@ fn rewrite(items: &[Item], layout: &[bool]) -> String {
                 open.push(Open {
                     name: tag.name.clone(),
                     written,
-                    layout_table,
+                    in_layout,
                 });
                 // The serializer pairs every start, even of a void element, with an end.
                 if is_void(&tag.name) {
@@ -350,6 +362,28 @@ mod tests {
             "{unwrapped}"
         );
         assert!(unwrapped.contains(r#"src="cid:a&quot;b""#), "{unwrapped}");
+    }
+
+    #[test]
+    fn deep_nesting_takes_linear_time() {
+        // Each start tag used to search its ancestors for the innermost table, so a
+        // message nesting elements thousands deep inside a table took seconds. Timed
+        // against the sanitizer's own (linear) pass over the same HTML, so the bound
+        // doesn't depend on the machine.
+        let depth = 50_000;
+        let html = sanitize_html(&format!(
+            "<center><table><tr><td>{}x{}</td></tr></table></center>",
+            "<span>".repeat(depth),
+            "</span>".repeat(depth)
+        ));
+        let start = std::time::Instant::now();
+        sanitize_html(&html);
+        let sanitize = start.elapsed();
+        let start = std::time::Instant::now();
+        let unwrapped = unwrap_layout_tables(&html);
+        let unwrap = start.elapsed();
+        assert!(unwrapped.starts_with("<div><div><div><div><div><span>"));
+        assert!(unwrap < sanitize * 10, "{unwrap:?} vs {sanitize:?}");
     }
 
     #[test]
