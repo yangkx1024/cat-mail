@@ -272,7 +272,9 @@ Rust 侧预先切分（`crates/catmail-store/src/fts.rs`）：一段连续的 CJ
 ### 附件 / BlobStore
 
 内容寻址：`<data>/blobs/ab/cdef…`（SHA-256）。写入先进 `blobs/tmp`、fsync 后 rename，读者
-看不到半成品；相同内容只存一份。DB 只存 hash，没有 blob 表。收信附件见上文"正文与附件"
+看不到半成品；相同内容只存一份。rename 从不覆盖已有文件（`persist_noclobber`）：同一内容
+可能被两次下载同时写入，而 Windows 上覆盖一个正被别人覆盖或打开的文件会失败；目标已存在就
+说明别人已经存好了，刷新 mtime 即可。DB 只存 hash，没有 blob 表。收信附件见上文"正文与附件"
 （imap-next 会把整条响应读进内存，所以附件是取回后再写入，不是流式落盘）；写信附件在添加
 时即复制入库，原文件移动/删除不影响草稿。
 
