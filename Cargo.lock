@@ -1008,6 +1008,7 @@ dependencies = [
  "base64 0.22.1",
  "catmail-testkit",
  "catmail-types",
+ "html5ever 0.40.1",
  "imap-next",
  "mail-parser",
  "nom 7.1.3",

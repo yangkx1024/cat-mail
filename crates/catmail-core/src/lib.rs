@@ -12,10 +12,11 @@ mod connection;
 mod engine;
 mod error;
 mod filename;
-/// What renderers of [`MessageBody::html`] need to resolve and block its images.
+/// What renderers of [`MessageBody::html`] need to resolve and block its images, and to
+/// lay it out without a browser.
 pub mod html {
     pub use catmail_proto::mime::{
-        InlineImage, content_id_from_url, embed_inline_images, image_sources,
+        InlineImage, content_id_from_url, embed_inline_images, image_sources, unwrap_layout_tables,
     };
 }
 mod runtime;

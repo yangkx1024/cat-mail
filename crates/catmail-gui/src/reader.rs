@@ -4,12 +4,13 @@
 //! HTML is rendered by GPUI Kit's text view with images resolved here (see
 //! [`crate::html`]): inline parts and `data:` URLs show, remote images never load.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, anyhow};
-use catmail_core::html::{InlineImage, content_id_from_url};
+use catmail_core::html::{InlineImage, content_id_from_url, unwrap_layout_tables};
 use catmail_core::{Attachment, MailClient, Message, MessageId, safe_filename};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::base::SelectableText;
@@ -50,7 +51,11 @@ struct OpenMessage {
     /// From, To, Cc and Date, those that are present.
     headers: Vec<(&'static str, SharedString)>,
     text: Option<SharedString>,
+    /// The HTML as the text view gets it: layout tables unwrapped, since it lays a table
+    /// cell out as inline text.
     html: Option<SharedString>,
+    /// The HTML as sanitized, for the browser, which lays out tables itself.
+    browser_html: Option<SharedString>,
     /// Attachments offered as files, not the inline images.
     attachments: Vec<Attachment>,
     images: Arc<Images>,
@@ -58,6 +63,7 @@ struct OpenMessage {
 }
 
 impl OpenMessage {
+    /// Parses the whole HTML; not for the UI thread.
     fn new(message: Message) -> Self {
         let summary = &message.summary;
         let headers = [
@@ -70,18 +76,33 @@ impl OpenMessage {
         .filter(|(_, value)| !value.is_empty())
         .map(|(name, value)| (name, value.into()))
         .collect();
-        let body = message.body;
+        let (text, browser_html, attachments) = match message.body {
+            Some(body) => (
+                body.text.map(SharedString::from),
+                body.html.map(SharedString::from),
+                body.attachments.into_iter().filter(|a| !a.inline).collect(),
+            ),
+            None => (None, None, Vec::new()),
+        };
+        // Most HTML has no layout to unwrap; the view then shares the browser's string.
+        let html = browser_html
+            .as_ref()
+            .map(|source| match unwrap_layout_tables(source) {
+                Cow::Borrowed(_) => source.clone(),
+                Cow::Owned(unwrapped) => unwrapped.into(),
+            });
         Self {
             id: summary.id,
             subject: format::subject(summary).into(),
             headers,
-            text: body.as_ref().and_then(|b| b.text.clone()).map(Into::into),
-            html: body.as_ref().and_then(|b| b.html.clone()).map(Into::into),
-            attachments: body
-                .map(|b| b.attachments.into_iter().filter(|a| !a.inline).collect())
-                .unwrap_or_default(),
+            text,
+            html,
+            blocked_images: browser_html
+                .as_deref()
+                .is_some_and(html::has_blocked_images),
+            browser_html,
+            attachments,
             images: Arc::default(),
-            blocked_images: false,
         }
     }
 }
@@ -143,13 +164,9 @@ impl Reader {
             let (state, inline) = match client.download_message(id).await {
                 Ok(message) => {
                     let inline = inline_images(&message);
-                    let mut open = OpenMessage::new(message);
-                    if let Some(body) = open.html.clone() {
-                        // Parses the whole HTML; not on the UI thread.
-                        open.blocked_images = cx
-                            .background_spawn(async move { html::has_blocked_images(&body) })
-                            .await;
-                    }
+                    let open = cx
+                        .background_spawn(async move { OpenMessage::new(message) })
+                        .await;
                     (ReaderState::Open(Box::new(open)), inline)
                 }
                 Err(e) => {
@@ -255,7 +272,7 @@ impl Reader {
         let ReaderState::Open(open) = &self.state else {
             return;
         };
-        let Some(body) = open.html.clone() else {
+        let Some(body) = open.browser_html.clone() else {
             return;
         };
         let title = open.subject.clone();
@@ -590,6 +607,19 @@ mod tests {
         assert!(matches!(images.source(&svg.into()), ImageSource::Custom(_)));
         let png = "data:image/png;base64,iVBORw0KGgo=";
         assert!(matches!(images.source(&png.into()), ImageSource::Image(_)));
+    }
+
+    #[test]
+    fn the_text_view_gets_layout_tables_unwrapped() {
+        let mail = crate::test_support::TestMail::start();
+        let open = OpenMessage::new(mail.download("十月产品更新：新功能一览"));
+        let (view, browser) = (open.html.unwrap(), open.browser_html.unwrap());
+        // The newsletter nests its body in two layout tables around one data table.
+        assert_eq!(browser.matches("<table").count(), 3, "{browser}");
+        assert_eq!(view.matches("<table").count(), 1, "{view}");
+        assert!(view.contains("<th align=\"left\">功能</th>"), "{view}");
+        assert!(view.contains("十月产品更新</h1>"), "{view}");
+        assert!(open.blocked_images, "the tracking pixel is still found");
     }
 
     #[test]

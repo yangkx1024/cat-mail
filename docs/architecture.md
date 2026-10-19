@@ -384,12 +384,38 @@ M2 的最小读信窗口（`crates/catmail-gui/src/`）：
   用到的几个，与默认资源组合（`assets.rs`，有测试检查视图用到的图标都在）。
 
 **HTML 渲染的验证结果。** 用测试邮件离屏截图（见下文"测试"）：段落、标题、列表、真正的数据
-表格、链接、`cid:` 内嵌图片、中英混排换行都正常。**但布局表格不行**：营销邮件普遍用
-`<table width=600><tr><td>` 套整个正文，gpui-kit 把单元格内容当行内文本，标题、段落、内层
-表格、列表全被压成一段。去掉外层布局表格后同一封邮件显示正常，所以下一步是在渲染前把布局
-表格（单列、嵌套、只用于排版的表格）展开成块元素；在那之前用"在浏览器打开"兜底。展开应当放在
-proto 清洗时的 DOM 处理里（与 `image_sources` 同一层），不要在前端对 HTML 文本做字符串替换。嵌入 `wry`
-仍是备选，但目前看转换就够了。
+表格、链接、`cid:` 内嵌图片、中英混排换行都正常。布局表格原本不行：营销邮件普遍用
+`<table width=600><tr><td>` 套整个正文，而 gpui-kit 的表格单元格只是一个行内段落（gpui-base
+`text/format/html.rs` 的 `parse_table_cell`），标题、段落、内层表格、列表全被压成一段。
+
+**展开布局表格。** 所以交给 `TextView` 的 HTML 先经过 `catmail_core::html::unwrap_layout_tables`
+（proto 的 `mime/layout.rs`）：某个单元格里有块元素（标题、段落、列表、表格等），或者每行至多
+一个单元格的表格，连同它的 `tbody` / `tr` / `td` 改成嵌套的 `div`，属性原样保留；其余表格是
+数据表格，保持不变（它们的单元格里只有行内内容，gpui-kit 能排）。gpui-kit 的块元素表里缺、却能通过清洗的
+块元素（`center`、`dd`、`dt`、`hgroup`，对照 gpui-kit 0.7.3）不论在哪都改成 `div`，否则同样被当
+行内压平；营销邮件常用 `center` 包住布局表格。多列布局（左图右文）因此变成上下排列，对窄的读信区
+反而合适。没有可改的内容时（多数非营销邮件）直接借用原字符串，不做后面的解析。
+- 这是绕开 gpui-kit 的限制。升级 gpui-kit 时对照 `parse_table_cell` 和它的块元素表：单元格能放
+  块元素后，表格部分就该删掉（否则多列布局会无谓地变成上下排列），表里补上的元素也从
+  `INLINE_BLOCKS` 去掉。
+- 只用于读信区。浏览器自己会排表格，"在浏览器打开"用的仍是原样清洗后的 HTML；数据库里存的
+  也是原样清洗后的版本，展开在打开邮件时于后台线程做。
+- 实现：清洗后的 HTML 是从 DOM 序列化出来的，标签必然正确嵌套，所以用 html5ever 的 tokenizer
+  读成记号流即可（不用 tree builder，它会再搬动内容），先一遍判断每个表格，再一遍用 html5ever
+  的 serializer 写出（转义由它负责）。html5ever 用与 ammonia 相同的版本，不多一份解析器。ammonia
+  的 DOM（`Document::to_dom_node`）要 `--cfg ammonia_unstable` 才能用，所以没走那条路。结果再过
+  一遍同一个 sanitizer，这一步不可能交出清洗不允许的东西。
+- 嵌入 `wry` 仍是备选，但目前看转换就够了。
+
+**字重（已知问题，上游）。** Linux 上可变字体的字重不起作用：GPUI（`gpui-pre-wgpu` 0.3.9 的
+`cosmic_text_system.rs`）栅格化字形时不设 `wght` 轴坐标（`render_glyph_image`，`RenderGlyphParams`
+里也没有字重），可变字体一律按默认实例渲染。系统只装了 Noto Sans CJK 可变字体（`NotoSansCJK-VF`）
+时，中文按它偏细的默认实例显示，加粗、`SEMIBOLD` 都无效，纯文本和 HTML 都一样；界面拉丁字体若解析到
+可变的 Noto Sans，加粗同样无效，只是默认实例是 Regular、不显眼。只给静态字体（`FONTCONFIG_FILE`
+指向只含 DejaVu、MiSans 的配置）时同一份代码字重正常，已在真实窗口和离屏截图里核对。上游跟踪：
+zed-industries/zed#60155（同症状的 #64123 作为重复关闭，#64783 指向同一处代码）。我们这边不绕开：
+打包静态 CJK 字体每个字重数 MB；用户侧可改装静态版（如 nixpkgs 的 `noto-fonts-cjk-sans-static`）。
+升级 gpui-kit 时检查这几个 issue。
 
 **依赖锁定。** Cargo 解析锁文件时会把 `dep?/feature` 里提到的可选依赖也算进去，所以开启
 `gpui-kit/test-support` 会让 `gpui-fast-*` 进入 `Cargo.lock`（不会编译）。它们精确 pin 了
