@@ -366,8 +366,9 @@ M2 的最小读信窗口（`crates/catmail-gui/src/`）：
   （gpui-kit 默认会 `open_url` 任何链接）。
 - **在浏览器打开。** 把清洗后的 HTML 写成独立页面：`catmail_core::html::embed_inline_images`
   把内嵌图片换成 `data:` URL（浏览器不认 `cid:`；用的是读信窗口已加载的图片，不再取一次），加 CSP `default-src 'none'; img-src data:; style-src 'unsafe-inline'` 和
-  `no-referrer`，远程图片在浏览器里同样被拦截。页面写在临时目录（`tempfile`，仅本用户可读）
-  并保留，因为浏览器在函数返回后才读它。替换在 proto 里随清洗的同一次解析完成，`data:` URL 也
+  `no-referrer`，远程图片在浏览器里同样被拦截。页面写在数据目录的 `handoff/`（`Config::handoff_dir`，
+  仅本用户可读）并保留，因为浏览器在函数返回后才读它；引擎下次打开时清空（见"数据目录"）。不放
+  系统临时目录：那里没人清理，整封邮件会一直留在磁盘上。替换在 proto 里随清洗的同一次解析完成，`data:` URL 也
   由 proto 构造（MIME 类型只留合法字符）：ammonia 不会再检查属性过滤器返回的值，所以不接受调用方
   给的任意字符串。
 - **登录页。** 没有账户时自动打开（不能取消），侧栏"Add account…"也能打开。先调用
@@ -450,4 +451,7 @@ M3 的 SMTP 确认丢失、保存到 Sent 失败。
 
 `Config::platform_default()`（`directories`）：Linux `~/.local/share/catmail`，
 macOS `~/Library/Application Support/dev.CatMail.CatMail`，Windows `%APPDATA%\CatMail\CatMail\data`。
-CLI 可用 `--data-dir` 或 `CATMAIL_DATA_DIR` 覆盖。目录内：`catmail.db`、`blobs/`、`lock`。
+CLI 可用 `--data-dir` 或 `CATMAIL_DATA_DIR` 覆盖。目录内：`catmail.db`、`blobs/`、`lock`，以及前端交给其他程序的文件 `handoff/`（如给浏览器的邮件页面）。
+`MailClient::open` 拿到锁之后清空 `handoff/`：锁保证没有前端还在往里写，各前端不必各自清理、
+也不必管调用顺序。在打开时而不是关闭时清：关闭时别的程序可能还在读，macOS 上应用退出也不执行
+析构。

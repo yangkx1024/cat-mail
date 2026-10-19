@@ -1,4 +1,5 @@
 use std::fs::{self, File, TryLockError};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -59,11 +60,12 @@ impl MailClientBuilder {
         self
     }
 
-    /// Locks the data directory, then opens the database (migrating it if needed) and
-    /// the blob store. Blocks briefly. Fails with [`Error::AlreadyRunning`] if another
+    /// Locks the data directory, empties [`Config::handoff_dir`], then opens the database
+    /// (migrating it if needed) and the blob store. Blocks briefly. Fails with [`Error::AlreadyRunning`] if another
     /// engine, in this or another process, has the directory open.
     pub fn open(self) -> Result<MailClient> {
         let data_dir_lock = lock_data_dir(&self.config)?;
+        clear_handoff_dir(&self.config.handoff_dir());
         let rt = match self.runtime {
             Some(handle) => Runtime::shared(handle),
             None => Runtime::owned()?,
@@ -357,6 +359,20 @@ fn lock_data_dir(config: &Config) -> Result<File> {
     }
 }
 
+/// Files handed to other programs in earlier sessions hold whole messages. The lock just
+/// taken means no frontend is writing them any more. Cleared at start rather than on
+/// close: another program may still be reading them then, and destructors don't always
+/// run (macOS terminates the app). Failing only costs disk space.
+fn clear_handoff_dir(dir: &Path) {
+    match fs::remove_dir_all(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            tracing::warn!(error = %e, dir = %dir.display(), "couldn't clear handed-off files")
+        }
+    }
+}
+
 fn validate_new_account(new: &NewAccount) -> Result<()> {
     let invalid = |msg: &str| Err(Error::InvalidInput(msg.into()));
     let Some((local, domain)) = new.email.split_once('@') else {
@@ -647,6 +663,30 @@ mod tests {
         drop(first);
         drop(clone);
         open_client(dir.path(), secrets);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handed_off_files_last_until_the_next_engine_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(MemorySecrets::default());
+        let first = open_client(dir.path(), secrets.clone());
+        let handoff = first.config().handoff_dir();
+        fs::create_dir_all(&handoff).unwrap();
+        let page = handoff.join("message.html");
+        fs::write(&page, "<p>hi</p>").unwrap();
+
+        // An engine that can't take the lock leaves them alone.
+        let second = MailClient::builder(Config::with_data_dir(dir.path()))
+            .runtime(Handle::current())
+            .secrets(secrets.clone())
+            .open();
+        assert!(matches!(second, Err(Error::AlreadyRunning(_))));
+        assert!(page.exists());
+
+        drop(first);
+        let reopened = open_client(dir.path(), secrets);
+        assert!(!page.exists());
+        assert!(!reopened.config().handoff_dir().exists());
     }
 
     #[tokio::test(flavor = "multi_thread")]
