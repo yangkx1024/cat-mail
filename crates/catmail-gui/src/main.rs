@@ -52,6 +52,10 @@ fn main() {
             Ok(Config::with_data_dir(dir))
         })
         .and_then(|config| MailClient::builder(config).open());
+    if let Ok(client) = &client {
+        // Before the window exists, so it can't remove a page this session writes.
+        reader::clear_browser_pages(&client.config().page_dir());
+    }
 
     gpui_kit::application()
         .with_assets(assets::Assets)
