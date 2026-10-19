@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use mail_parser::MessageParser;
+use mail_parser::{Message, MessageParser};
 
 use super::content::{Content, extract, sections};
 
@@ -54,7 +54,7 @@ impl MimeNode {
     /// lists, before the body is downloaded): an explicit `attachment` disposition, an
     /// attached message, or a named part that isn't text and isn't marked inline.
     pub fn has_attachments(&self) -> bool {
-        self.leaves().into_iter().any(|(_, leaf)| {
+        self.leaves().values().any(|leaf| {
             let disposition = leaf.disposition.as_ref();
             match disposition.map(|(kind, _)| kind.to_ascii_lowercase()) {
                 Some(kind) if kind == b"attachment" => return true,
@@ -83,19 +83,11 @@ impl MimeNode {
         let Some(message) = MessageParser::new().parse(&raw) else {
             return Vec::new();
         };
-        let sections = sections(&message);
-        let leaves: HashMap<String, &Leaf> = self.leaves().into_iter().collect();
-        let mut wanted: Vec<String> = message
-            .text_body
-            .iter()
-            .chain(&message.html_body)
-            .filter_map(|id| sections.get(id))
-            .filter(|section| {
-                leaves.get(*section).is_some_and(|leaf| {
-                    (leaf.is("text", "plain") || leaf.is("text", "html")) && leaf.size <= max_size
-                })
-            })
-            .cloned()
+        let leaves = self.leaves();
+        let mut wanted: Vec<String> = body_text(&message, &leaves)
+            .into_iter()
+            .filter(|(_, _, leaf)| leaf.size <= max_size)
+            .map(|(_, section, _)| section)
             .collect();
         wanted.sort();
         wanted.dedup();
@@ -103,7 +95,9 @@ impl MimeNode {
     }
 
     /// The content of the message, from its structure and the parts in `fetched` (by
-    /// section, still transfer-encoded). Parts that weren't fetched have no data.
+    /// section, still transfer-encoded). Parts that weren't fetched have no data; body
+    /// text that wasn't fetched (too large) is listed with the attachments, so it can
+    /// still be fetched on its own.
     ///
     /// Builds a stand-in message with the same structure, the fetched parts in place and
     /// the others empty, and parses that the same way as a whole raw message, so both
@@ -113,8 +107,13 @@ impl MimeNode {
         let Some(message) = MessageParser::new().parse(&raw) else {
             return Content::default();
         };
-        let mut content = extract(&message, &raw);
-        let leaves: HashMap<String, &Leaf> = self.leaves().into_iter().collect();
+        let leaves = self.leaves();
+        let unfetched: Vec<u32> = body_text(&message, &leaves)
+            .into_iter()
+            .filter(|(_, section, _)| !fetched.contains_key(section))
+            .map(|(id, _, _)| id)
+            .collect();
+        let mut content = extract(&message, &raw, &unfetched);
         for part in &mut content.parts {
             let Some(leaf) = leaves.get(&part.section) else {
                 // The stand-in didn't parse like the structure; whatever this is, it
@@ -147,8 +146,8 @@ impl MimeNode {
         raw
     }
 
-    /// Leaves with their sections; a lone leaf at the top is section `1`.
-    fn leaves(&self) -> Vec<(String, &Leaf)> {
+    /// Leaves by section; a lone leaf at the top is section `1`.
+    fn leaves(&self) -> HashMap<String, &Leaf> {
         fn walk<'a>(node: &'a MimeNode, section: String, out: &mut Vec<(String, &'a Leaf)>) {
             match node {
                 MimeNode::Leaf(leaf) => out.push((section, leaf)),
@@ -164,7 +163,7 @@ impl MimeNode {
             MimeNode::Leaf(leaf) => out.push(("1".to_owned(), leaf)),
             MimeNode::Multipart { .. } => walk(self, String::new(), &mut out),
         }
-        out
+        out.into_iter().collect()
     }
 
     fn write(
@@ -235,6 +234,27 @@ impl MimeNode {
             }
         }
     }
+}
+
+/// The plain text and HTML parts that `message`, the stand-in for the structure with
+/// these `leaves`, shows as its body: mail-parser part id, section and leaf. May repeat
+/// a part.
+fn body_text<'a>(
+    message: &Message<'_>,
+    leaves: &HashMap<String, &'a Leaf>,
+) -> Vec<(u32, String, &'a Leaf)> {
+    let sections = sections(message);
+    message
+        .text_body
+        .iter()
+        .chain(&message.html_body)
+        .filter_map(|&id| {
+            let section = sections.get(&id)?;
+            let leaf = *leaves.get(section)?;
+            (leaf.is("text", "plain") || leaf.is("text", "html"))
+                .then(|| (id, section.clone(), leaf))
+        })
+        .collect()
 }
 
 /// A boundary that occurs in none of the fetched parts.
@@ -441,6 +461,61 @@ mod tests {
             ]
         );
         assert_eq!(content.parts[1].content_id.as_deref(), Some("logo@x"));
+    }
+
+    #[test]
+    fn text_too_large_to_fetch_is_offered_as_an_attachment() {
+        // Listed as not fetched and not inline.
+        fn parts(content: &Content) -> Vec<(&str, &str, Option<&str>, Option<u32>)> {
+            assert!(content.parts.iter().all(|p| !p.inline && p.data.is_none()));
+            content
+                .parts
+                .iter()
+                .map(|p| {
+                    let encoding = p.transfer_encoding.as_deref();
+                    (p.section.as_str(), p.mime_type.as_str(), encoding, p.size)
+                })
+                .collect()
+        }
+
+        // The HTML alternative is too large; the plain text is shown.
+        let alternative = MimeNode::Multipart {
+            subtype: b"alternative".to_vec(),
+            children: vec![
+                MimeNode::Leaf(leaf("text", "plain", "7bit", 2)),
+                MimeNode::Leaf(leaf("text", "html", "quoted-printable", 3_000_000)),
+            ],
+        };
+        assert_eq!(alternative.text_sections(1_000), ["1"]);
+        let fetched = HashMap::from([("1".to_owned(), b"Hi".to_vec())]);
+        let content = alternative.content(&fetched);
+        assert_eq!(content.text.as_deref(), Some("Hi"));
+        assert_eq!(content.html, None);
+        assert_eq!(
+            parts(&content),
+            [("2", "text/html", Some("quoted-printable"), Some(3_000_000))]
+        );
+
+        // The only text is too large: nothing to show, but it is listed, in MIME order.
+        let mut pdf = leaf("application", "pdf", "base64", 78);
+        pdf.params = params(&[("name", b"a.pdf")]);
+        let mixed = MimeNode::Multipart {
+            subtype: b"mixed".to_vec(),
+            children: vec![
+                MimeNode::Leaf(leaf("text", "plain", "base64", 3_000_000)),
+                MimeNode::Leaf(pdf),
+            ],
+        };
+        assert!(mixed.text_sections(1_000).is_empty());
+        let content = mixed.content(&HashMap::new());
+        assert_eq!((&content.text, &content.snippet), (&None, &None));
+        assert_eq!(
+            parts(&content),
+            [
+                ("1", "text/plain", Some("base64"), Some(2_192_307)),
+                ("2", "application/pdf", Some("base64"), Some(57)),
+            ]
+        );
     }
 
     #[test]

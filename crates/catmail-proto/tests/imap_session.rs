@@ -324,14 +324,32 @@ async fn unparsable_lines_make_authoritative_answers_fail() {
     session.examine("INBOX").await.unwrap();
     check(session.fetch_flags(2, None).await.unwrap_err(), "FETCH");
 
-    // For summaries a missing message is merely absent; the caller notices the gap.
-    let (_fake, mut session) = garbled("FETCH (UID 1 ").await;
+    // For summaries a lost line has the missing messages asked for again, without the
+    // BODYSTRUCTURE that usually makes an answer unparsable. What is still missing (here
+    // UID 9, which doesn't exist) is merely absent; the caller notices the gap.
+    let (fake, mut session) = garbled("FETCH (UID 1 ").await;
     session.examine("INBOX").await.unwrap();
-    let messages = session.fetch_summaries(&[1, 2]).await.unwrap();
-    assert_eq!(
-        messages.iter().map(|m| m.state.uid).collect::<Vec<_>>(),
-        [2]
+    let start = fake.state().log.len();
+    let messages = session.fetch_summaries(&[1, 2, 9]).await.unwrap();
+    let mut uids: Vec<u32> = messages.iter().map(|m| m.state.uid).collect();
+    uids.sort_unstable();
+    assert_eq!(uids, [1, 2]);
+    let fetches: Vec<String> = fake.state().log[start..]
+        .iter()
+        .map(|c| c.line.clone())
+        .collect();
+    assert_eq!(fetches.len(), 2, "{fetches:?}");
+    assert!(fetches[0].contains("BODYSTRUCTURE"), "{fetches:?}");
+    assert!(
+        fetches[1].starts_with("UID FETCH 1,9 ") && !fetches[1].contains("BODYSTRUCTURE"),
+        "{fetches:?}"
     );
+
+    // Without a lost line, a missing message is simply gone: no second FETCH.
+    let start = fake.state().log.len();
+    let messages = session.fetch_summaries(&[2, 9]).await.unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(fake.state().log.len(), start + 1);
 }
 
 #[tokio::test]

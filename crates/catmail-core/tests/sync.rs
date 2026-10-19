@@ -459,6 +459,46 @@ async fn unparsable_answers_never_delete_local_state() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn unparsable_bodystructure_does_not_hide_the_message() {
+    let mut state = state_with(&["one", "two", "three"]);
+    state.inbox().message_mut(2).raw = b"Subject: two\r\nContent-Type: multipart/mixed; \
+        boundary=b\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nHello\r\n--b\r\n\
+        Content-Type: application/pdf; name=a.pdf\r\n\r\n%PDF\r\n--b--\r\n"
+        .to_vec();
+    state.faults.broken_bodystructure = vec![2];
+    let env = env(state).await;
+    let report = env.sync().await;
+    let inbox = folder_report(&report, "INBOX");
+    assert_eq!((inbox.added, inbox.error.as_deref()), (3, None));
+    assert_eq!(
+        env.subjects("INBOX").await,
+        newest_first(&["one", "two", "three"])
+    );
+
+    // Complete, so the cursor moved: nothing new means no SEARCH and no FETCH.
+    let start = env.fake.state().log.len();
+    env.sync().await;
+    let commands = env.commands_since(start);
+    assert!(
+        !commands
+            .iter()
+            .any(|c| c.starts_with("UID SEARCH") || c.starts_with("UID FETCH")),
+        "{commands:?}"
+    );
+
+    // Unknown until the body is downloaded, which doesn't need the BODYSTRUCTURE.
+    let inbox = env.folder("INBOX").await;
+    let list = env.client.list_messages(inbox.id, 10, 0).await.unwrap();
+    let two = list
+        .iter()
+        .find(|m| m.subject.as_deref() == Some("two"))
+        .unwrap();
+    assert!(!two.has_attachments);
+    let message = env.client.download_message(two.id).await.unwrap();
+    assert!(message.summary.has_attachments);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn split_fetch_responses_keep_their_flags() {
     let mut state = state_with(&["one"]);
     state.inbox().set_flags(1, &["\\Seen", "\\Flagged"]);
