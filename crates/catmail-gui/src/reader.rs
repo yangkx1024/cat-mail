@@ -259,7 +259,7 @@ impl Reader {
             return;
         };
         let title = open.subject.clone();
-        let dir = self.client.config().page_dir();
+        let dir = self.client.config().handoff_dir();
         let inline = open
             .images
             .inline
@@ -311,7 +311,7 @@ fn raster_format(mime_type: &str) -> Option<ImageFormat> {
 }
 
 /// The page is left in `dir` (readable by this user only): the browser reads it after
-/// this returns. [`clear_browser_pages`] removes it at the next start.
+/// this returns. The engine empties the directory when it next opens.
 fn write_browser_page(dir: &Path, page: &str) -> anyhow::Result<PathBuf> {
     use std::io::Write as _;
     std::fs::create_dir_all(dir)?;
@@ -322,17 +322,6 @@ fn write_browser_page(dir: &Path, page: &str) -> anyhow::Result<PathBuf> {
     file.write_all(page.as_bytes())?;
     let (_, path) = file.keep()?;
     Ok(path)
-}
-
-/// Removes the pages earlier sessions wrote, which hold whole messages. Done at start
-/// rather than on quit: a browser may still be reading them then, and on macOS the app
-/// exits without running destructors.
-pub fn clear_browser_pages(dir: &Path) {
-    match std::fs::remove_dir_all(dir) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => tracing::warn!(error = %e, dir = %dir.display(), "couldn't clear browser pages"),
-    }
 }
 
 fn download_dir() -> PathBuf {
@@ -604,19 +593,13 @@ mod tests {
     }
 
     #[test]
-    fn browser_pages_stay_in_the_data_dir_until_the_next_start() {
+    fn browser_pages_go_to_the_handoff_dir() {
         let data = tempfile::tempdir().unwrap();
-        let dir = catmail_core::Config::with_data_dir(data.path()).page_dir();
+        let dir = catmail_core::Config::with_data_dir(data.path()).handoff_dir();
         let first = write_browser_page(&dir, "<p>one</p>").unwrap();
         let second = write_browser_page(&dir, "<p>two</p>").unwrap();
         assert_ne!(first, second);
         assert!(first.starts_with(&dir));
         assert_eq!(std::fs::read_to_string(&second).unwrap(), "<p>two</p>");
-
-        clear_browser_pages(&dir);
-        assert!(!first.exists() && !second.exists());
-        // Nothing to clear is not an error, and pages can be written again.
-        clear_browser_pages(&dir);
-        assert!(write_browser_page(&dir, "<p>three</p>").unwrap().exists());
     }
 }
