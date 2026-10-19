@@ -344,6 +344,38 @@ async fn wrong_password_is_an_auth_error() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn check_login_logs_in_and_stores_nothing() {
+    let env = env(state_with(&[])).await;
+    let account = env.client.get_account(env.account).await.unwrap().unwrap();
+    let new = catmail_core::NewAccount {
+        email: "alice@example.org".into(),
+        display_name: None,
+        username: account.username,
+        imap: account.imap,
+        smtp: account.smtp,
+        auth: account.auth,
+    };
+
+    let start = env.fake.state().log.len();
+    env.client.check_login(&new, "pw").await.unwrap();
+    let commands = env.commands_since(start);
+    assert!(
+        commands
+            .iter()
+            .any(|c| c.starts_with("AUTHENTICATE") || c.starts_with("LOGIN"))
+    );
+    assert_eq!(commands.last().map(String::as_str), Some("LOGOUT"));
+
+    let err = env.client.check_login(&new, "wrong").await.unwrap_err();
+    assert!(matches!(err, Error::AuthFailed(_)), "{err:?}");
+    let err = env.client.check_login(&new, "").await.unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
+
+    let accounts = env.client.list_accounts().await.unwrap();
+    assert_eq!(accounts.len(), 1, "only the account the test set up");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn concurrent_syncs_of_one_account_are_serialized() {
     let env = env(state_with(&["one", "two", "three"])).await;
     let (a, b) = tokio::join!(

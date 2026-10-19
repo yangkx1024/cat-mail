@@ -4,11 +4,11 @@
 附件），对外只暴露 `MailClient` 门面；在它之上有两个平级的前端：
 
 - **`catmail`**：命令行，可直接在终端使用，也支持 `--json` 供脚本调用
-- **图形界面**：基于 [GPUI](https://www.gpui.rs/) 与 [gpui-kit](https://github.com/longbridge/gpui-kit)（规划中）
+- **`catmail-gui`**：图形界面，基于 [GPUI](https://www.gpui.rs/) 与 [gpui-kit](https://github.com/longbridge/gpui-kit)（目前只有最小读信窗口）
 
 数据存储在本地 SQLite，离线可用；密码保存在系统密钥环中，不进数据库。
 
-> 项目处于早期开发阶段（M2 进行中），接口和数据库结构仍会变化。
+> 项目处于早期开发阶段（M2 已完成），接口和数据库结构仍会变化。
 
 架构设计见 [docs/architecture.md](docs/architecture.md)。
 
@@ -24,7 +24,7 @@
 |---|---|---|
 | M0 | workspace；types；store（迁移、事务接口）；BlobStore；keyring；数据目录锁；`MailClient` 门面；`catmail account` | ✅ 完成 |
 | M1 | IMAP 只读同步（文件夹、邮件头）；认证接口；协议测试环境；`catmail sync` / `catmail ls` | ✅ 完成 |
-| M2 | 正文与附件按需下载；中文分词 + 全文搜索；blob GC；最小读信窗口；`catmail read` / `catmail search` | 进行中：除读信窗口外已完成 |
+| M2 | 正文与附件按需下载；中文分词 + 全文搜索；blob GC；最小读信窗口；`catmail read` / `catmail search` | ✅ 完成 |
 | M3 | 草稿；SMTP 发信与 outbox 状态机；保存到 Sent | |
 | M4 | 离线操作队列（标记 / 移动 / 删除）；IDLE 推送 | |
 | M5 | 图形界面：三栏布局、读信、写信 | |
@@ -34,6 +34,8 @@
 
 - **最小读信窗口放在 M2。** gpui-kit 的 HTML 渲染定位为简单 HTML，而真实邮件大量使用表格
   布局和内联样式。一拿到正文就用真实邮件验证表格、`cid:` 内嵌图片和中文排版，不等到 M5。
+  结果：段落、数据表格、内嵌图片和中文排版正常，但用表格做布局的邮件（多数营销邮件）会被
+  压成一段，需要在渲染前展开布局表格（见架构文档"GUI"一节），目前用"在浏览器打开"兜底。
 - **协议测试环境从 M1 开始建。** 一个可注入故障的进程内假 IMAP 服务器（`catmail-testkit`，
   三个平台的 CI 都跑），覆盖断线、UIDVALIDITY 改变、重复或乱序响应、服务器缺少 CONDSTORE、
   STARTTLS 明文注入、同步中途中断后续传；再加一个真实的 Dovecot（Nix 提供，不需要 docker）。
@@ -75,6 +77,20 @@ catmail gc                      # 回收不再被引用的正文与附件文件
 附件列出、打开时下载。搜索时中日韩文字按子串匹配，其他文字按整词匹配；正文只有下载过的
 才能搜到。
 
+### 图形界面
+
+```sh
+catmail-gui                     # 打开窗口；同样支持 --data-dir / CATMAIL_DATA_DIR
+```
+
+目前是最小读信窗口：没有账户时先显示登录页（也可以从侧栏的"Add account…"再添加），填写
+邮箱、密码和收发服务器；会先实际登录 IMAP 服务器检查设置，成功后才保存并开始同步，密码错误
+不会留下任何账户或密钥环条目。之后左侧账户与文件夹，中间邮件列表（方向键切换），右侧读信。和 CLI 一样只读，
+阅读不会标为已读。默认显示纯文本，有 HTML 时可以切换；HTML 里只显示邮件自带的图片（`cid:`
+内嵌图片、`data:`），远程图片一律不加载；排版不对时用"Open in browser"在浏览器里看（同样
+拦截远程内容）。点附件可以保存。窗口运行时
+CLI 不能打开同一个数据目录（反之亦然），见上文"IPC 待定"。
+
 端口默认按加密方式推断：IMAP `tls` 为 993、`starttls` / `plain` 为 143；SMTP `tls` 为 465、
 `starttls` 为 587、`plain` 为 25。
 
@@ -82,7 +98,8 @@ catmail gc                      # 回收不再被引用的正文与附件文件
 `~/Library/Application Support/dev.CatMail.CatMail`、Windows `%APPDATA%\CatMail\CatMail\data`，
 可用 `--data-dir` 或环境变量 `CATMAIL_DATA_DIR` 覆盖。
 
-Linux 上需要一个 Secret Service 提供者（如 gnome-keyring、KeePassXC）来保存密码。
+Linux 上需要一个 Secret Service 提供者（如 gnome-keyring、KeePassXC）来保存密码；图形界面
+需要 Wayland 或 X11，以及 Vulkan 驱动（没有时 wgpu 退回 OpenGL）。
 
 ## 开发
 
@@ -97,7 +114,14 @@ cargo run -p catmail-cli -- account list
 ```
 
 flake 只能看到 git 跟踪的文件，新加的文件需要先 `git add -N`。不用 Nix 时，装好
-`rust-toolchain.toml` 指定的 stable 工具链即可。
+`rust-toolchain.toml` 指定的 stable 工具链，Linux 上再装 fontconfig、freetype、libxkbcommon、
+libxcb 的开发包（CI 里的包名见 `.github/workflows/ci.yml`）。
+
+图形界面的离屏截图（看 HTML 排版，需要 GPU 或 Mesa lavapipe）：
+
+```sh
+CATMAIL_SCREENSHOTS=/tmp/shots cargo test -p catmail-gui -- --ignored screenshots
+```
 
 对真实的 IMAP 服务器测试（Linux）：
 
@@ -125,6 +149,7 @@ CI（GitHub Actions）：
 | `catmail-proto` | IMAP / SMTP / MIME 适配 |
 | `catmail-core` | 引擎与 `MailClient` 门面，前端唯一依赖 |
 | `catmail-cli` | `catmail` 命令行 |
+| `catmail-gui` | `catmail-gui` 图形界面（gpui-kit） |
 | `catmail-testkit` | 测试用的假 IMAP 服务器（故障注入），只作为 dev-dependency |
 
 参与开发（包括 AI agent）请先阅读 [AGENTS.md](AGENTS.md)。

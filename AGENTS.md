@@ -40,9 +40,15 @@ code or tests. `nix.yml` checks `flake.nix` formatting (`nix fmt`) and the dev s
 | `catmail-proto` | IMAP (`imap-next`), SMTP, MIME adapters |
 | `catmail-core` | Engine, services, runtime bridge, secrets, the `MailClient` facade |
 | `catmail-cli` | The `catmail` binary |
+| `catmail-gui` | The `catmail-gui` desktop binary, on GPUI Kit |
 | `catmail-testkit` | Fake IMAP server with fault injection; dev-dependency only |
 
 Frontends depend on `catmail-core` only; it re-exports the types they need.
+
+`catmail-gui` depends on `gpui-kit` alone, never on `gpui` directly. Before changing it,
+read the vendored GPUI Kit skills in `crates/catmail-gui/.claude/skills/` (`gpui-kit` holds
+the Coding Guides, `gpui-kit-design-guides` the Design Guides; see their `README.md` for
+the upstream commit).
 
 Protocol behaviour is tested against `catmail-testkit`'s fake server (every OS) and a real
 Dovecot (`testenv/dovecot/run.sh`, Linux CI job). New sync or protocol behaviour gets a

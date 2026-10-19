@@ -12,6 +12,12 @@ mod connection;
 mod engine;
 mod error;
 mod filename;
+/// What renderers of [`MessageBody::html`] need to resolve and block its images.
+pub mod html {
+    pub use catmail_proto::mime::{
+        InlineImage, content_id_from_url, embed_inline_images, image_sources,
+    };
+}
 mod runtime;
 mod secrets;
 mod sync;
@@ -24,3 +30,6 @@ pub use config::Config;
 pub use error::{Error, Result};
 pub use filename::safe_filename;
 pub use secrets::{KeyringSecrets, MemorySecrets, SecretStore};
+/// What [`MailClient::subscribe`]'s receiver returns when it falls behind or the engine
+/// is gone.
+pub use tokio::sync::broadcast::error::RecvError;

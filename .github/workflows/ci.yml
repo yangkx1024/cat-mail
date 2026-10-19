@@ -54,6 +54,15 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # What catmail-gui (GPUI) links against on Linux. Its tests run on GPUI's test
+      # platform, so no display or GPU is needed.
+      - name: Install GUI libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 

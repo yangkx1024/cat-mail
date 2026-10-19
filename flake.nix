@@ -16,18 +16,38 @@
       devShells = forAllSystems (
         pkgs:
         let
+          # What catmail-gui (GPUI) links against.
+          guiLibs = with pkgs; [
+            fontconfig
+            freetype
+            libxkbcommon
+            libxcb
+          ];
+          # What GPUI loads at runtime with dlopen: the Wayland client and the Vulkan
+          # loader (with the GL fallback wgpu tries when there is no Vulkan driver).
+          guiRuntimeLibs = with pkgs; [
+            wayland
+            vulkan-loader
+            libGL
+            libX11
+          ];
+
           default = pkgs.mkShell {
-            packages = with pkgs; [
-              cargo
-              rustc
-              clippy
-              rustfmt
-              rust-analyzer
-              pkg-config
-              sqlite-interactive
-            ];
+            packages =
+              with pkgs;
+              [
+                cargo
+                rustc
+                clippy
+                rustfmt
+                rust-analyzer
+                pkg-config
+                sqlite-interactive
+              ]
+              ++ guiLibs;
 
             RUST_SRC_PATH = pkgs.rustPlatform.rustLibSrc;
+            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (guiLibs ++ guiRuntimeLibs);
           };
         in
         {
@@ -37,7 +57,7 @@
           imap = pkgs.mkShell {
             inputsFrom = [ default ];
             packages = [ pkgs.dovecot ];
-            inherit (default) RUST_SRC_PATH;
+            inherit (default) RUST_SRC_PATH LD_LIBRARY_PATH;
           };
         }
       );

@@ -9,8 +9,8 @@ mod structure;
 use catmail_types::Address;
 use mail_parser::{HeaderValue, MessageParser};
 
-pub use content::{Content, Part, decode_transfer, parse_message};
-pub use html::sanitize_html;
+pub use content::{Content, Part, content_id_from_url, decode_transfer, parse_message};
+pub use html::{InlineImage, embed_inline_images, image_sources, sanitize_html};
 pub use structure::{Leaf, MimeNode, Params};
 
 /// The header fields the sync engine fetches for message lists (`HEADER.FIELDS`).

@@ -328,14 +328,72 @@ MIME 头里）。
 
 ### GUI
 
-`gpui-kit`（longbridge）：虚拟列表 / Table / 编辑器 / 原生 HTML 渲染，无 WebView。
-它构建在 `gpui-pre-*` 快照上并精确 pin 版本，`gpui` 依赖需与其保持一致，否则会链接两份 GPUI。
+`catmail-gui`，基于 `gpui-kit`（longbridge）：虚拟列表 / Table / 编辑器 / 原生 HTML 渲染，
+无 WebView。gpui-kit 构建在 `gpui-pre-*` 快照上并精确 pin 版本，应用只依赖 `gpui-kit`
+（`use gpui_kit::*` 就是 GPUI），不直接依赖 `gpui`，否则会链接两份 GPUI。gpui-kit 官方的
+编码与设计规范作为 skill 放在 `crates/catmail-gui/.claude/skills/`，改 GUI 前先读。
 
-HTML 邮件是主要风险：gpui-kit 的 HTML 渲染定位为简单 HTML，需要尽早用真实邮件验证表格、
-`cid:` 内嵌图片和中文排版。默认优先 `text/plain`，HTML 经 `ammonia` 清洗后交给 gpui-kit
-渲染，默认拦截远程图片，提供"在浏览器打开"兜底；效果不够时再评估嵌入 `wry` 或专用转换器。
-清洗后的 HTML 仍保留远程图片地址和行内样式，浏览器兜底打开时要加 CSP（`default-src 'none';
-img-src cid: data:; style-src 'unsafe-inline'`），否则浏览器会替用户加载远程内容。
+M2 的最小读信窗口（`crates/catmail-gui/src/`）：
+
+- **结构。** `Mailbox`（根视图：侧栏的账户与文件夹树、同步按钮、三栏 `h_resizable`；登录页
+  打开时整个替换三栏）、`AddAccount`（登录页）、
+  `MessageList`（gpui-kit `List` 的 delegate，选择、键盘导航、滚动到底分页加载由 List
+  负责）、`Reader`（读信）。纯逻辑（文件夹树、日期格式、HTML 的图片 / 链接策略）在
+  `folders.rs`、`format.rs`、`html.rs`，不依赖 GPUI，单测覆盖。
+- **运行时。** `MailClient::builder(cfg).open()` 自建 tokio runtime；视图里只在
+  `cx.spawn` / `spawn_in` 中 await 门面方法，从不碰 tokio。事件订阅的 `broadcast::Receiver`
+  不依赖 reactor，直接在 GPUI 的 executor 上 `recv`；`Lagged` 时整体刷新，`Closed` 时退出。
+- **事件。** `FoldersChanged` / 账户增删重读侧栏；`MessagesChanged` 重读侧栏（计数）并在是
+  当前文件夹时重读已显示的行，按 MessageId 保持选中；选中的邮件在刷新后不见了（被删除、UIDVALIDITY 改变）时，列表发出
+  和按 Escape 取消选择相同的 `ListEvent::Cancel`，读信区随之清空。同步期间事件比读取快得多，所以读侧栏和
+  刷新列表都合并请求：同一时间最多一次读取，期间再有事件只记一个"过期"标记，完成后补读一次。
+  （只替换 GPUI 侧的任务不够：已经交给引擎的读取照样会做完。）切换文件夹则直接替换任务，并带
+  代际号丢弃过期结果。
+- **正文。** 默认显示纯文本（`SelectableText`，可选择复制），有 HTML 部分时可切换，选择在
+  切换邮件时保留。打开时把正文、标题、头部和附件列表一次准备好（`OpenMessage`），正文作为
+  同一个 `SharedString` 每帧交给视图，既不复制也不必再比较内容。HTML 用 `gpui_base::text::TextView`（不用 component 层的包装，因为只有
+  base 层暴露 `image_source`；主题样式由 component 安装的 `TextViewDefaults` 提供）。
+- **图片。** `image_source` 决定每张图：`cid:` 按 `content_id_from_url`（与引擎判断"内嵌"
+  同一条 RFC 2392 规则）查已加载的内嵌部分；`data:` 图片用 `data-url`（gpui-kit 自己用的同一个
+  WHATWG 解析器）解码；其他（远程、`file:`、相对路径）返回立即失败的 `ImageSource::Custom`，
+  不发任何请求，占位为空。**SVG 一律不显示**（`data:` 和 `cid:` 都是）：GPUI 用默认选项把 SVG
+  交给 usvg，它会把嵌套的 `<image href>` 当本地路径直接读文件，绕过 `image_source`，邮件就能
+  显示本地图片，或读 `/dev/zero` 耗尽内存。浏览器里的 `<img>` SVG 没有这个问题。每个 URL 只解析一次后缓存，因为视图每帧都会问每张图。"远程图片
+  未加载"的提示由 `catmail_core::html::image_sources` 判断：它复用清洗用的同一个 ammonia
+  配置，按解析结果而不是文本扫描列出 `img src`，在后台线程运行。内嵌图片在正文显示后再逐个取
+  （大邮件会按 section 下载）。
+- **链接。** 只把 `http` / `https` / `mailto` 交给系统打开；`cid:` 等其他链接点了无反应
+  （gpui-kit 默认会 `open_url` 任何链接）。
+- **在浏览器打开。** 把清洗后的 HTML 写成独立页面：`catmail_core::html::embed_inline_images`
+  把内嵌图片换成 `data:` URL（浏览器不认 `cid:`；用的是读信窗口已加载的图片，不再取一次），加 CSP `default-src 'none'; img-src data:; style-src 'unsafe-inline'` 和
+  `no-referrer`，远程图片在浏览器里同样被拦截。页面写在临时目录（`tempfile`，仅本用户可读）
+  并保留，因为浏览器在函数返回后才读它。替换在 proto 里随清洗的同一次解析完成，`data:` URL 也
+  由 proto 构造（MIME 类型只留合法字符）：ammonia 不会再检查属性过滤器返回的值，所以不接受调用方
+  给的任意字符串。
+- **登录页。** 没有账户时自动打开（不能取消），侧栏"Add account…"也能打开。先调用
+  `MailClient::check_login`（连接、登录、LOGOUT，不写数据库也不写密钥环），成功后才
+  `add_account`，再同步这个账户；所以密码或服务器填错不会留下账户行或孤立的密钥环条目。
+  登录进行中"Cancel"不可用：`add_account` 一旦开始就会写入（引擎的阻塞任务不随窗口的任务取消），
+  此时离开只会让新账户错过首次同步。空的端口和用户名取与 CLI 相同的默认值（按加密方式推断端口、用户名等于邮箱）；表单只检查端口
+  格式，其余由 `check_login` 里与 `add_account` 相同的校验负责。凭据由
+  `auth::new_account_credentials` 按 `AuthKind` 构造，加 OAuth2 时只改这一处。
+- **附件。** 列出非内嵌部分，点击后弹系统保存对话框（文件名经 `safe_filename`），需要时先
+  下载；覆盖确认由系统对话框负责。
+- **图标。** gpui-kit 默认资源只含组件用到的图标，其余 Lucide 图标用 `icon_assets!` 只嵌入
+  用到的几个，与默认资源组合（`assets.rs`，有测试检查视图用到的图标都在）。
+
+**HTML 渲染的验证结果。** 用测试邮件离屏截图（见下文"测试"）：段落、标题、列表、真正的数据
+表格、链接、`cid:` 内嵌图片、中英混排换行都正常。**但布局表格不行**：营销邮件普遍用
+`<table width=600><tr><td>` 套整个正文，gpui-kit 把单元格内容当行内文本，标题、段落、内层
+表格、列表全被压成一段。去掉外层布局表格后同一封邮件显示正常，所以下一步是在渲染前把布局
+表格（单列、嵌套、只用于排版的表格）展开成块元素；在那之前用"在浏览器打开"兜底。展开应当放在
+proto 清洗时的 DOM 处理里（与 `image_sources` 同一层），不要在前端对 HTML 文本做字符串替换。嵌入 `wry`
+仍是备选，但目前看转换就够了。
+
+**依赖锁定。** Cargo 解析锁文件时会把 `dep?/feature` 里提到的可选依赖也算进去，所以开启
+`gpui-kit/test-support` 会让 `gpui-fast-*` 进入 `Cargo.lock`（不会编译）。它们精确 pin 了
+`cocoa = 0.26.0` 和 `unicode-properties = 0.1.3`，锁文件里这两个必须保持这些版本，否则无法
+解析；升级 gpui-kit 时对照它自带的 `Cargo.lock`。
 
 ## 测试环境
 
@@ -350,6 +408,14 @@ img-src cid: data:; style-src 'unsafe-inline'`），否则浏览器会替用户�
   文件夹、层级文件夹、各种编码、HTML 加内嵌图片与 RFC 2231 文件名；测试还会投递一封超过
   2 MiB 的邮件，走按部分下载的路径。`crates/catmail-core/tests/dovecot.rs` 在设置了
   `CATMAIL_TEST_IMAP` 时运行，CI 里有单独的 Linux job。
+
+- **GUI**：`catmail-gui` 的 UI 集成测试（`#[gpui_kit::test]`，GPUI 的测试平台，无需显示器
+  或 GPU，三个平台都跑）用假服务器加载 `testenv/fixtures/` 和 `crates/catmail-gui/fixtures/`
+  的邮件，驱动真实的窗口：点击、键盘、切换 HTML，以及"另一处同步后窗口靠事件更新且保持
+  选中"。引擎在自己的线程上运行，GPUI 的测试调度器看不到，所以测试在 `run_until_parked` 之间
+  按真实时间等待（`test_support::wait_until`）。`mailbox::tests::screenshots`（`#[ignore]`）
+  用 WGPU 离屏渲染把几封邮件截成 PNG，供人看排版：
+  `CATMAIL_SCREENSHOTS=<目录> cargo test -p catmail-gui -- --ignored screenshots`。
 
 覆盖不到、留给后续的：进程在同步中途被杀（目前用"断线后重新同步"近似，事务边界相同）；
 M3 的 SMTP 确认丢失、保存到 Sent 失败。

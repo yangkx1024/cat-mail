@@ -19,7 +19,11 @@ ammonia = "4.2.4"
 anyhow = "1"
 base64 = "0.22.1"
 clap = { version = "4.6", features = ["derive", "env"] }
+# WHATWG data: URL parsing; the one gpui-kit uses for the same job.
+data-url = "0.3.2"
 directories = "6"
+# Pins the matching gpui-pre-* crates; never depend on GPUI directly (two copies would link).
+gpui-kit = "0.7.3"
 hex = "0.4"
 jiff = "0.2.38"
 # Without the default `stream` feature: catmail-proto drives the sans-IO client itself,
