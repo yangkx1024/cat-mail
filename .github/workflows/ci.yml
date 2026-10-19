@@ -40,7 +40,9 @@ jobs:
         run: cargo fmt --all --check
 
   # The core must stay platform-neutral, so lint and test on every target OS from the
-  # start, even though only Linux is shipped for now.
+  # start, even though only Linux is shipped for now. Pull requests run the tests on Linux
+  # only: macOS and Windows still compile them (clippy covers all targets) but run them
+  # once merged, on main, where macOS minutes cost 10x and Windows ones 2x.
   check:
     name: Clippy & Test (${{ matrix.os }})
     strategy:
@@ -84,6 +86,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Test
+        if: runner.os == 'Linux' || github.event_name != 'pull_request'
         run: cargo test --workspace --locked
 
   # The fake servers cover faults on every OS; this checks the client against real ones:

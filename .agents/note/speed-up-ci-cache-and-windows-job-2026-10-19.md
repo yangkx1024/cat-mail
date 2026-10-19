@@ -1,4 +1,4 @@
-# 加快 CI：缓存只在 main 保存、减小调试信息、Windows 关闭实时扫描
+# 加快 CI：缓存只在 main 保存、减小调试信息、Windows 关闭实时扫描、PR 只在 Linux 跑测试
 
 - 日期：2026-10-19
 - 类型：重构
@@ -28,11 +28,19 @@ Windows 的 Clippy & Test job 每次结束时 `Post Run Swatinem/rust-cache` 要
 - **Windows job 先关闭 Defender 实时扫描**：编译、链接和解包缓存时每个文件都会被扫描；
   runner 用完即弃，关掉没有安全上的顾虑。效果没有单独测量，这一步也打印
   `RealTimeProtectionEnabled`，便于确认它真的生效。
+- **PR 上只在 Linux 跑测试**，macOS 和 Windows 只跑 clippy（`--all-targets`，测试代码仍然
+  编译），合并到 main 后三个平台都跑全部测试。原因：仓库是私有的，标准 runner 上 macOS 的
+  分钟按 10 倍、Windows 按 2 倍计费；Windows 冷构建的 clippy 就要 6 分钟。代价是平台相关的
+  测试失败（如 M3 里 Windows 上附件"是目录"的检查）要到合并后才看到，所以 AGENTS.md 要求
+  改到路径、文件或 `cfg` 时，合并前用 `gh workflow run ci.yml --ref <分支>` 手动在三个平台
+  上跑（手动触发的运行跑全部测试，但不保存缓存）。
 - 加了新的 `CARGO_` 环境变量后，rust-cache 的键会变，这个 PR 的运行和合并后 main 的第一次
   运行都拿不到旧缓存，是一次性的代价。
 
 ## 方案
 
-只改 `.github/workflows/ci.yml`：全局 `env` 加 `CARGO_PROFILE_DEV_DEBUG`；check job 开头
-加 Windows 专用的关闭实时扫描步骤；rust-cache 加 `save-if`。用 actionlint 检查过工作流。
+`.github/workflows/ci.yml`：全局 `env` 加 `CARGO_PROFILE_DEV_DEBUG`；check job 开头加
+Windows 专用的关闭实时扫描步骤；rust-cache 加 `save-if`；Test 步骤加
+`if: runner.os == 'Linux' || github.event_name != 'pull_request'`。AGENTS.md 与 README 的
+CI 说明随之更新。用 actionlint 检查过工作流。
 验证看合并后的运行：PR 上 Windows job 的 post 步骤应接近 0，main 只保留三份缓存。
