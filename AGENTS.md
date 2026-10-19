@@ -24,8 +24,12 @@ Flakes only see git-tracked files: `git add -N` new files before `nix develop` /
 Before reporting work as done, `cargo fmt`, `clippy -D warnings` and the full test suite
 must pass. Say so explicitly if any of them could not be run.
 
-CI (`.github/workflows/ci.yml`) runs clippy and the tests on Linux, macOS and Windows.
-Only Linux is shipped for now, but code must build and pass everywhere: put
+CI (`.github/workflows/ci.yml`) runs clippy on Linux, macOS and Windows; pull requests
+run the tests on Linux only, and `main` runs them on all three. A platform-specific
+failure can therefore first show up after merging: when a change touches paths, files
+or anything behind `cfg`, run the macOS / Windows tests before merging with
+`gh workflow run ci.yml --ref <branch>`. Only Linux is shipped for now, but code must build and
+pass everywhere: put
 platform-specific code behind `cfg`, and don't assume Unix paths or file semantics in
 code or tests. `nix.yml` checks `flake.nix` formatting (`nix fmt`) and the dev shell.
 

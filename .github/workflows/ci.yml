@@ -21,6 +21,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # File and line in backtraces, without the full debug info: a third smaller target
+  # directory, so a smaller cache to pack, upload and unpack.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   fmt:
@@ -37,7 +40,9 @@ jobs:
         run: cargo fmt --all --check
 
   # The core must stay platform-neutral, so lint and test on every target OS from the
-  # start, even though only Linux is shipped for now.
+  # start, even though only Linux is shipped for now. Pull requests run the tests on Linux
+  # only: macOS and Windows still compile them (clippy covers all targets) but run them
+  # once merged, on main, where macOS minutes cost 10x and Windows ones 2x.
   check:
     name: Clippy & Test (${{ matrix.os }})
     strategy:
@@ -46,13 +51,27 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
+      # Real-time scanning of every file compiled, linked and unpacked from the cache
+      # slows the Windows job down; the runner is thrown away after it.
+      - name: Turn off Defender real-time scanning
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $true
+          Get-MpComputerStatus | Select-Object RealTimeProtectionEnabled
+
       - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
 
+      # Saved from main only; pull requests restore main's. A cache saved for a pull
+      # request is scoped to it, and each one (over 1 GB per OS) pushed main's out of the
+      # repository's 10 GB, leaving later runs with partial hits that saved again.
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # What catmail-gui (GPUI) links against on Linux. Its tests run on GPUI's test
       # platform, so no display or GPU is needed.
@@ -67,6 +86,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Test
+        if: runner.os == 'Linux' || github.event_name != 'pull_request'
         run: cargo test --workspace --locked
 
   # The fake servers cover faults on every OS; this checks the client against real ones:
