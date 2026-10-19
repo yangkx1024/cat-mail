@@ -21,6 +21,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # File and line in backtraces, without the full debug info: a third smaller target
+  # directory, so a smaller cache to pack, upload and unpack.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   fmt:
@@ -46,13 +49,27 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
+      # Real-time scanning of every file compiled, linked and unpacked from the cache
+      # slows the Windows job down; the runner is thrown away after it.
+      - name: Turn off Defender real-time scanning
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $true
+          Get-MpComputerStatus | Select-Object RealTimeProtectionEnabled
+
       - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
 
+      # Saved from main only; pull requests restore main's. A cache saved for a pull
+      # request is scoped to it, and each one (over 1 GB per OS) pushed main's out of the
+      # repository's 10 GB, leaving later runs with partial hits that saved again.
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # What catmail-gui (GPUI) links against on Linux. Its tests run on GPUI's test
       # platform, so no display or GPU is needed.
