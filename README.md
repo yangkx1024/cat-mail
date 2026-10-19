@@ -40,7 +40,8 @@
   三个平台的 CI 都跑），覆盖断线、UIDVALIDITY 改变、重复或乱序响应、服务器缺少 CONDSTORE、
   STARTTLS 明文注入、同步中途中断后续传；再加一个真实的 Dovecot（Nix 提供，不需要 docker）。
   M3 加入了假 SMTP 服务器，覆盖 SMTP 确认丢失、连接中断、收件人被拒、保存到 Sent 失败和
-  APPEND 答复丢失等场景。
+  APPEND 答复丢失等场景；发信也对真实服务器测试：Dovecot 的 submission 服务（STARTTLS、
+  隐式 TLS、AUTH、SIZE），转发给 mailpit 核对收到的内容。
 - **草稿暂时只在本地。** 把草稿同步到服务器的"草稿箱"需要每次保存都删除旧副本，留到 M4 的
   离线操作队列。
 - **IPC 待定。** 同一个数据目录同时只允许一个引擎（见架构文档），所以目前 GUI 运行时 CLI
@@ -143,22 +144,22 @@ libxcb 的开发包（CI 里的包名见 `.github/workflows/ci.yml`）。
 CATMAIL_SCREENSHOTS=/tmp/shots cargo test -p catmail-gui -- --ignored screenshots
 ```
 
-对真实的 IMAP 服务器测试（Linux）：
+对真实的 IMAP / SMTP 服务器测试（Linux）：
 
 ```sh
-nix develop .#imap -c testenv/dovecot/run.sh        # 在 127.0.0.1:10143 启动临时 Dovecot
+nix develop .#testenv -c testenv/dovecot/run.sh     # 启动临时 Dovecot（IMAP 10143、提交 10587 / 10465）和 mailpit
 # 另一个终端里，先执行它打印的 export，再：
-cargo test -p catmail-core --test dovecot
+cargo test -p catmail-core --test dovecot --test submission
 ```
 
-不设置这些环境变量时该测试自动跳过；其余协议测试用进程内的假服务器，不需要外部依赖。
-该测试会让一次 APPEND 因目录只读而失败，所以不能以 root 运行。
+不设置这些环境变量时这些测试自动跳过；其余协议测试用进程内的假服务器，不需要外部依赖。
+`dovecot` 测试会让一次 APPEND 因目录只读而失败，所以不能以 root 运行。
 
 CI（GitHub Actions）：
 
 - `ci.yml`：rustfmt 检查；在 Linux、macOS、Windows 上分别跑 clippy（`-D warnings`）和全部
   测试。目前只发布 Linux 版，但核心层必须保持跨平台，所以从一开始就在三个平台上测试。
-  另有一个 Linux job 对 Dovecot 跑真实服务器测试。只改文档（`*.md`、`docs/`、`.agents/`、
+  另有一个 Linux job 对 Dovecot 和 mailpit 跑真实服务器测试。只改文档（`*.md`、`docs/`、`.agents/`、
   许可证）时不触发。
 - `nix.yml`：`flake.nix` / `flake.lock` 变更时检查 Nix 格式、`nix flake check`，并确认开发
   环境可用。

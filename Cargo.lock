@@ -977,6 +977,7 @@ dependencies = [
  "mail-parser",
  "mime_guess",
  "pollster 1.0.1",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

@@ -53,10 +53,14 @@
         {
           inherit default;
 
-          # The default shell plus Dovecot, for testenv/dovecot/run.sh.
-          imap = pkgs.mkShell {
+          # The default shell plus the real servers for testenv/dovecot/run.sh.
+          testenv = pkgs.mkShell {
             inputsFrom = [ default ];
-            packages = [ pkgs.dovecot ];
+            packages = [
+              pkgs.dovecot
+              pkgs.mailpit
+              pkgs.openssl
+            ];
             inherit (default) RUST_SRC_PATH LD_LIBRARY_PATH;
           };
         }
