@@ -23,6 +23,15 @@ fn message(subject: &str) -> String {
     )
 }
 
+/// Creates the folder the way Maildir++ lays it out, and returns its directory.
+fn maildir_folder(maildir: &Path, name: &str) -> PathBuf {
+    let dir = maildir.join(format!(".{name}"));
+    for sub in ["cur", "new", "tmp"] {
+        fs::create_dir_all(dir.join(sub)).unwrap();
+    }
+    dir
+}
+
 fn added(report: &SyncReport, name: &str) -> (u32, u32, u32) {
     let f = report
         .folders
@@ -52,12 +61,9 @@ async fn syncs_against_dovecot() {
     )
     .await;
 
-    // A folder of our own for the changes, created the way Maildir++ lays it out.
+    // A folder of our own for the changes.
     let run = run_tag();
-    let folder_dir = maildir.join(format!(".{run}"));
-    for sub in ["cur", "new", "tmp"] {
-        fs::create_dir_all(folder_dir.join(sub)).unwrap();
-    }
+    let folder_dir = maildir_folder(&maildir, &run);
     let deliver = |dir: &Path, name: &str, subject: &str| {
         fs::write(dir.join("new").join(name), message(subject)).unwrap();
     };
@@ -180,9 +186,79 @@ async fn syncs_against_dovecot() {
     assert!(!clip.downloaded);
     assert_eq!(client.attachment_content(clip.id).await.unwrap(), video);
 
+    check_changes(&client, account, &maildir, &run).await;
     fs::remove_dir_all(&folder_dir).unwrap();
 
     check_saving_to_sent(&client, account, server, &maildir, &run).await;
+}
+
+/// Flags, a move (MOVE with COPYUID on Dovecot) and a deletion, made locally and then on
+/// the server; checked in the maildir. The run's folder has "third", "first" (read) and
+/// "large".
+async fn check_changes(client: &MailClient, account: AccountId, maildir: &Path, run: &str) {
+    let target = format!("{run}-moved");
+    let target_dir = maildir_folder(maildir, &target);
+    client.sync_account(account).await.unwrap();
+    let folder = client.find_folder(account, run).await.unwrap().unwrap();
+    let moved_to = client.find_folder(account, &target).await.unwrap().unwrap();
+    let messages = client.list_messages(folder.id, 10, 0).await.unwrap();
+    let id = |subject: &str| {
+        messages
+            .iter()
+            .find(|m| m.subject.as_deref() == Some(subject))
+            .unwrap()
+            .id
+    };
+    let (third, first, large) = (id("third"), id("first"), id("large"));
+
+    client
+        .set_flags(vec![third], Flags::FLAGGED, Flags::empty())
+        .await
+        .unwrap();
+    client
+        .set_flags(vec![first], Flags::empty(), Flags::SEEN)
+        .await
+        .unwrap();
+    client
+        .move_messages(vec![third], moved_to.id)
+        .await
+        .unwrap();
+    client.delete_messages(vec![large], true).await.unwrap();
+    let report = client.replay_pending(account).await.unwrap();
+    assert_eq!((report.applied, report.failed, report.pending), (4, 0, 0));
+
+    // Maildir keeps flags in the file name: `<name>:2,<flags>`.
+    let files = |dir: &Path| -> Vec<(String, String)> {
+        ["new", "cur"]
+            .iter()
+            .flat_map(|sub| fs::read_dir(dir.join(sub)).unwrap())
+            .map(|e| e.unwrap().path())
+            .map(|p| {
+                let text = fs::read_to_string(&p).unwrap_or_default();
+                let subject = text
+                    .lines()
+                    .find_map(|l| l.strip_prefix("Subject: "))
+                    .unwrap_or_default()
+                    .to_owned();
+                let name = p.file_name().unwrap().to_string_lossy().into_owned();
+                let flags = name.rsplit_once(":2,").map_or("", |(_, f)| f).to_owned();
+                (subject, flags)
+            })
+            .collect()
+    };
+    let folder_dir = maildir.join(format!(".{run}"));
+    assert_eq!(files(&folder_dir), [("first".into(), String::new())]);
+    assert_eq!(files(&target_dir), [("third".into(), "F".into())]);
+
+    // Dovecot said where the message went, so the sync finds it already in place.
+    let report = client.sync_account(account).await.unwrap();
+    assert_eq!(added(&report, &target), (0, 0, 0));
+    let moved = client.list_messages(moved_to.id, 10, 0).await.unwrap();
+    assert_eq!(
+        (moved.len(), moved[0].id, moved[0].flags),
+        (1, third, Flags::FLAGGED)
+    );
+    fs::remove_dir_all(&target_dir).unwrap();
 }
 
 /// Sends through the fake SMTP server and saves to Dovecot's Sent folder (sending through

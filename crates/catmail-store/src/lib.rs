@@ -11,6 +11,7 @@ mod error;
 mod folders;
 mod fts;
 mod messages;
+mod ops;
 mod outbox;
 
 use std::collections::HashSet;
@@ -26,8 +27,9 @@ pub use attachments::{AttachmentSource, Attachments, NewAttachment};
 pub use blob::BlobStore;
 pub use drafts::{DraftReply, DraftSnapshot, Drafts, NewDraftAttachment};
 pub use error::{Error, Result};
-pub use folders::{FolderSyncState, Folders, RemoteFolder};
+pub use folders::{FolderSyncState, Folders, Reconciled, RemoteFolder};
 pub use messages::{MessageLocation, Messages, NewBody, NewMessage};
+pub use ops::{CopyCheckpoint, Moved, PendingOps, ReplayFolder, ReplayKind, ReplayOp, Touched};
 pub use outbox::{NewOutboxEntry, Outbox, OutboxJob};
 
 /// Every `*_blob_hash` column (a test checks none is missing).
@@ -82,6 +84,10 @@ impl<'c> Db<'c> {
 
     pub fn outbox(&self) -> Outbox<'c> {
         Outbox::new(self.conn)
+    }
+
+    pub fn ops(&self) -> PendingOps<'c> {
+        PendingOps::new(self.conn)
     }
 
     /// Every blob some row refers to, for [`BlobStore::collect_garbage`]. A new
@@ -305,8 +311,11 @@ mod tests {
         // Folder 21 belongs to account 2.
         for sql in [
             "INSERT INTO messages (account_id, folder_id, uid) VALUES (1, 21, 1)",
-            "INSERT INTO pending_ops (account_id, folder_id, uidvalidity, kind, payload_json)
-             VALUES (1, 21, 7, 'delete', '{}')",
+            "INSERT INTO pending_ops (account_id, folder_id, uidvalidity, uid, kind)
+             VALUES (1, 21, 7, 1, 'delete')",
+            "INSERT INTO pending_ops (account_id, folder_id, uidvalidity, uid, kind,
+                                      target_folder_id)
+             VALUES (1, 20, 7, 1, 'move', 21)",
         ] {
             let err = conn.execute(sql, []).unwrap_err();
             assert!(is_constraint_violation(&err), "{sql}: {err}");

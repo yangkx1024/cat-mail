@@ -104,6 +104,8 @@ impl From<catmail_store::Error> for Error {
     fn from(e: catmail_store::Error) -> Self {
         match e {
             catmail_store::Error::Conflict(text) => Self::Conflict(text),
+            catmail_store::Error::MessageNotFound(id) => Self::MessageNotFound(id),
+            catmail_store::Error::Invalid(text) => Self::InvalidInput(text),
             other => Self::Store(other),
         }
     }

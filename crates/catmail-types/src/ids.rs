@@ -27,7 +27,9 @@ row_id!(
 );
 row_id!(
     /// Local identifier of a message in one folder, i.e. of one IMAP (mailbox, UID)
-    /// pair. A copy in another folder has its own id; a move yields a new id.
+    /// pair. A copy in another folder has its own id. A message moved here keeps its id
+    /// if the server tells its new UID (UIDPLUS); otherwise the next sync gives it a new
+    /// one.
     MessageId
 );
 row_id!(
@@ -45,6 +47,10 @@ row_id!(
 row_id!(
     /// Local identifier of a message handed to the outbox for sending.
     OutboxId
+);
+row_id!(
+    /// Local identifier of a change queued for the server.
+    PendingOpId
 );
 
 /// Lowercase hex SHA-256 of a blob's contents.

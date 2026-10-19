@@ -1,5 +1,6 @@
 mod compose;
 mod files;
+mod ops;
 mod output;
 
 use std::collections::{BTreeSet, HashMap};
@@ -51,6 +52,19 @@ enum Command {
     Attachment(SaveAttachment),
     /// Search subjects, addresses and downloaded bodies
     Search(Search),
+    /// Mark messages read or unread, flagged or not
+    Mark(ops::Mark),
+    /// Move messages to another folder
+    #[command(name = "mv")]
+    Move(ops::Move),
+    /// Move messages to Trash, or delete them for good
+    #[command(name = "rm")]
+    Remove(ops::Remove),
+    /// Changes to messages not made on the server yet [default: list]
+    Ops {
+        #[command(subcommand)]
+        command: Option<ops::OpsCommand>,
+    },
     /// Write a new message, kept as a draft unless sent with --send
     Compose(compose::Compose),
     /// Reply to a message, quoting it; kept as a draft unless sent with --send
@@ -219,6 +233,13 @@ async fn run() -> Result<()> {
         Command::Read(args) => read(&client, args, cli.json).await,
         Command::Attachment(args) => save_attachment(&client, args).await,
         Command::Search(args) => search(&client, args, cli.json).await,
+        Command::Mark(args) => ops::mark(&client, args, cli.json).await,
+        Command::Move(args) => ops::move_messages(&client, args, cli.json).await,
+        Command::Remove(args) => ops::remove(&client, args, cli.json).await,
+        Command::Ops { command } => {
+            let command = command.unwrap_or(ops::OpsCommand::List);
+            ops::ops(&client, command, cli.json).await
+        }
         Command::Compose(args) => compose::compose(&client, args, cli.json).await,
         Command::Reply(args) => compose::reply(&client, args, cli.json).await,
         Command::Draft(cmd) => compose::draft(&client, cmd, cli.json).await,
@@ -327,6 +348,11 @@ fn print_sync_report(report: &SyncReport) {
             parts.push("UIDVALIDITY changed, refetched".to_owned());
         }
         for (n, what) in [
+            (folder.ops_applied, "local changes made"),
+            (
+                folder.ops_failed,
+                "local changes refused and undone (see `catmail ops`)",
+            ),
             (folder.added, "new"),
             (folder.updated, "updated"),
             (folder.removed, "removed"),
@@ -530,16 +556,24 @@ async fn search(client: &MailClient, args: Search, json: bool) -> Result<()> {
         println!("No matches.");
         return Ok(());
     }
-    // Folder names for the FOLDER column.
-    let mut folders: HashMap<FolderId, String> = HashMap::new();
     let accounts: BTreeSet<AccountId> = messages.iter().map(|m| m.account_id).collect();
+    let folders = folder_names(client, accounts).await?;
+    print_message_table(&messages, Some(&folders));
+    Ok(())
+}
+
+/// Display names of the accounts' folders, for FOLDER columns.
+async fn folder_names(
+    client: &MailClient,
+    accounts: impl IntoIterator<Item = AccountId>,
+) -> Result<HashMap<FolderId, String>> {
+    let mut folders = HashMap::new();
     for account in accounts {
         for folder in client.list_folders(account).await? {
             folders.insert(folder.id, folder.name);
         }
     }
-    print_message_table(&messages, Some(&folders));
-    Ok(())
+    Ok(folders)
 }
 
 async fn gc(client: &MailClient, json: bool) -> Result<()> {

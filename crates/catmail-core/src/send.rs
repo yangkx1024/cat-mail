@@ -20,7 +20,7 @@ use std::time::Duration;
 use catmail_proto::imap::Session;
 use catmail_proto::mime::{Outgoing, OutgoingAttachment, build_message};
 use catmail_proto::smtp;
-use catmail_store::{NewOutboxEntry, Outbox, OutboxJob};
+use catmail_store::{NewOutboxEntry, Outbox, OutboxJob, Touched};
 use catmail_types::{
     AccountId, Address, BlobHash, DraftId, Event, Flags, FolderRole, OutboxEntry, OutboxId,
     OutboxStatus,
@@ -30,7 +30,7 @@ use uuid::Uuid;
 
 use crate::connection::{self, SessionFuture, with_session};
 use crate::engine::{Engine, Permit, blocking, now};
-use crate::{Error, Result, body, drafts, sync};
+use crate::{Error, Result, body, drafts, ops, sync};
 
 /// First retry after this long, doubling up to [`MAX_BACKOFF`].
 const FIRST_BACKOFF: i64 = 30;
@@ -269,16 +269,17 @@ async fn send_one(
     match attempt_send(engine, smtp, &job).await {
         Outcome::Accepted(raw) => {
             // Durable like every count of an attempt to save: see `attempt_save`.
-            let save = engine
+            let (save, replied) = engine
                 .write_durable(move |db| {
-                    db.outbox().mark_accepted(id, now)?;
-                    db.outbox().begin_save(id, now)
+                    let replied = db.outbox().mark_accepted(id, now)?.unwrap_or_default();
+                    Ok((db.outbox().begin_save(id, now)?, replied))
                 })
                 .await?;
             engine.emit(Event::MessageSent {
                 account,
                 outbox: id,
             });
+            ops::announce(engine, &replied);
             match save {
                 Some(job) => save_one(engine, job, Some(raw)).await,
                 None => engine.read(move |db| db.outbox().get(id)).await,
@@ -405,8 +406,9 @@ async fn save_one(
 async fn attempt_save(engine: &Arc<Engine>, job: &OutboxJob, raw: Option<Vec<u8>>) -> Result<()> {
     let account = job.entry.account_id;
     let known = engine
-        .read(move |db| db.folders().remote_name_by_role(account, FolderRole::Sent))
-        .await?;
+        .read(move |db| db.folders().by_role(account, FolderRole::Sent))
+        .await?
+        .map(|(_, remote_name)| remote_name);
     let raw = raw.map(Arc::new);
     let (engine2, hash, message_id) = (
         engine.clone(),
@@ -498,7 +500,10 @@ fn envelope_recipients<'a>(addresses: impl IntoIterator<Item = &'a Address>) -> 
 
 /// The user asks for another attempt now.
 pub(crate) async fn retry(engine: &Arc<Engine>, id: OutboxId) -> Result<OutboxEntry> {
-    let entry = user_decision(engine, id, move |o| o.retry(id, now())).await?;
+    let entry = user_decision(engine, id, move |o| {
+        Ok(o.retry(id, now())?.map(|e| (e, Touched::new())))
+    })
+    .await?;
     engine.outbox_kick.notify_one();
     Ok(entry)
 }
@@ -512,7 +517,10 @@ pub(crate) async fn mark_sent(engine: &Arc<Engine>, id: OutboxId) -> Result<Outb
 
 /// Returns the entry as it was before it was removed.
 pub(crate) async fn cancel(engine: &Arc<Engine>, id: OutboxId) -> Result<OutboxEntry> {
-    let entry = user_decision(engine, id, move |o| o.cancel(id)).await?;
+    let entry = user_decision(engine, id, move |o| {
+        Ok(o.cancel(id)?.map(|e| (e, Touched::new())))
+    })
+    .await?;
     engine.emit(Event::DraftsChanged {
         account: entry.account_id,
     });
@@ -520,19 +528,23 @@ pub(crate) async fn cancel(engine: &Arc<Engine>, id: OutboxId) -> Result<OutboxE
 }
 
 /// Applies what the user decided about an entry, once no attempt is working on it.
+/// `decide` also returns the messages it changed (marking a reply's original answered).
 async fn user_decision(
     engine: &Arc<Engine>,
     id: OutboxId,
-    decide: impl FnOnce(&Outbox<'_>) -> catmail_store::Result<Option<OutboxEntry>> + Send + 'static,
+    decide: impl FnOnce(&Outbox<'_>) -> catmail_store::Result<Option<(OutboxEntry, Touched)>>
+    + Send
+    + 'static,
 ) -> Result<OutboxEntry> {
     let _permit = decision_permit(engine, id).await?;
-    let entry = engine
+    let (entry, touched) = engine
         .write(move |db| decide(&db.outbox()))
         .await?
         .ok_or(Error::OutboxNotFound(id))?;
     engine.emit(Event::OutboxChanged {
         account: entry.account_id,
     });
+    ops::announce(engine, &touched);
     Ok(entry)
 }
 

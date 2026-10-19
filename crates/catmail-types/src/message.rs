@@ -46,6 +46,25 @@ impl Flags {
         self.0
     }
 
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// The flags in both.
+    pub const fn intersection(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+
+    /// The flags in `self` but not in `other`.
+    pub const fn difference(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
+
+    /// These flags with `add` set and then `remove` cleared.
+    pub const fn apply(self, add: Self, remove: Self) -> Self {
+        Self((self.0 | add.0) & !remove.0)
+    }
+
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
@@ -164,5 +183,12 @@ mod tests {
         assert_eq!(f, Flags::FLAGGED);
         f.insert(Flags::DELETED);
         assert_eq!(Flags::from_bits(f.bits()), f);
+        assert_eq!(f.difference(Flags::FLAGGED), Flags::DELETED);
+        assert_eq!(f.intersection(Flags::FLAGGED | Flags::SEEN), Flags::FLAGGED);
+        assert!(Flags::empty().is_empty() && !f.is_empty());
+        assert_eq!(
+            f.apply(Flags::SEEN, Flags::FLAGGED),
+            Flags::SEEN | Flags::DELETED
+        );
     }
 }

@@ -8,7 +8,7 @@
 
 数据存储在本地 SQLite，离线可用；密码保存在系统密钥环中，不进数据库。
 
-> 项目处于早期开发阶段（M3 已完成），接口和数据库结构仍会变化。
+> 项目处于早期开发阶段（M3 已完成，M4 进行中），接口和数据库结构仍会变化。
 
 架构设计见 [docs/architecture.md](docs/architecture.md)。
 
@@ -26,7 +26,7 @@
 | M1 | IMAP 只读同步（文件夹、邮件头）；认证接口；协议测试环境；`catmail sync` / `catmail ls` | ✅ 完成 |
 | M2 | 正文与附件按需下载；中文分词 + 全文搜索；blob GC；最小读信窗口；`catmail read` / `catmail search` | ✅ 完成 |
 | M3 | 草稿；SMTP 发信与 outbox 状态机；保存到 Sent；`catmail compose` / `reply` / `send` / `outbox` | ✅ 完成 |
-| M4 | 离线操作队列（标记 / 移动 / 删除）；IDLE 推送 | |
+| M4 | 离线操作队列（标记 / 移动 / 删除）✅；IDLE 推送；草稿同步到服务器 | 进行中 |
 | M5 | 图形界面：三栏布局、读信、写信 | |
 | M6 | OAuth2（Gmail / Microsoft 365）；Windows / macOS 打包 | |
 
@@ -49,8 +49,8 @@
 
 ## 使用
 
-目前可以管理账户、同步文件夹和邮件头、列出和阅读邮件、搜索（只读，不改服务器上的状态），
-以及写信、回复和发信：
+目前可以管理账户、同步文件夹和邮件头、列出和阅读邮件、搜索，写信、回复和发信，以及标记、
+移动和删除邮件：
 
 ```sh
 # 添加账户（交互输入密码；脚本里用 --password-stdin）
@@ -80,10 +80,22 @@ catmail reply 42 --all --body '收到，谢谢！'   # 回复（全部），引�
 catmail draft list                # 草稿；draft show / edit / attach / detach / rm
 catmail send 3                    # 发送草稿 3，并存到"已发送"
 catmail outbox                    # 还没发完的邮件；outbox flush / retry / mark-sent / cancel
+
+# 标记、移动、删除：先改本地，再当场同步到服务器
+catmail mark 42 43 --read --flag  # 也有 --unread / --unflag
+catmail mv 42 --to Archive
+catmail rm 42                     # 移到"已删除"；已在其中或加 --permanent 则永久删除
+catmail ops                       # 还没同步到服务器的改动，以及被拒绝的；ops flush / dismiss
 ```
 
-`catmail ls <文件夹>` 的标记列：`*` 未读，`!` 已加星标，`@` 有附件。同步只读（EXAMINE），
-不会改动服务器上的任何状态；中途中断（断网、Ctrl-C）后再次运行会从断点继续。
+`catmail ls <文件夹>` 的标记列：`*` 未读，`!` 已加星标，`@` 有附件。同步本身只读（EXAMINE），
+中途中断（断网、Ctrl-C）后再次运行会从断点继续。
+
+标记、移动、删除离线也能用：改动立刻反映在本地（移动的邮件马上出现在目标文件夹，已下载的
+正文随之保留），同时记入队列，`catmail mark` / `mv` / `rm` 随即把它同步到服务器；连不上时
+改动保留，由下一次 `catmail sync` 或 `catmail ops flush` 完成（这时命令以非零状态退出）。
+服务器拒绝的改动会在本地撤销，`catmail ops` 可以看到原因。文件夹在服务器上被重建
+（UIDVALIDITY 改变）时，还没完成的改动作废，以服务器为准。回复发出后原信标记为"已回复"。
 
 发信先把草稿冻结成 outbox 里的一份快照，再经 SMTP 发出、用 APPEND 存进服务器的"已发送"
 （服务器没有这个文件夹就不存）。暂时失败（断网、4xx）会按递增的间隔重试，`catmail outbox`
@@ -94,7 +106,7 @@ catmail outbox                    # 还没发完的邮件；outbox flush / retry
 没发出去的用 `catmail outbox flush` 再试；两者在有邮件没发出去时以非零状态退出，便于脚本判断。
 `compose` / `reply` 失败（如附件不存在）不会留下草稿。
 
-正文在第一次阅读时下载，阅读不会把邮件标为已读。不超过 2 MiB 的邮件整封下载（附件一并
+正文在第一次阅读时下载，阅读不会把邮件标为已读（用 `catmail mark --read`）。不超过 2 MiB 的邮件整封下载（附件一并
 保存）；更大的邮件只下载正文，附件在第一次打开时再下载，其中超过 2 MiB 的正文部分也作为
 附件列出、打开时下载。搜索时中日韩文字按子串匹配，其他文字按整词匹配；正文只有下载过的
 才能搜到。

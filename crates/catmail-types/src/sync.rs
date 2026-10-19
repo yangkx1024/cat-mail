@@ -19,6 +19,10 @@ pub struct FolderSyncReport {
     pub updated: u32,
     /// Messages gone from the server.
     pub removed: u32,
+    /// Queued local changes made on the server first.
+    pub ops_applied: u32,
+    /// Queued local changes the server refused; they were undone locally.
+    pub ops_failed: u32,
     /// The server reported a new UIDVALIDITY, so the folder was refetched from scratch.
     pub uidvalidity_changed: bool,
     /// Set if this folder failed while the rest of the account synced.
@@ -33,6 +37,8 @@ impl FolderSyncReport {
             added: 0,
             updated: 0,
             removed: 0,
+            ops_applied: 0,
+            ops_failed: 0,
             uidvalidity_changed: false,
             error: None,
         }

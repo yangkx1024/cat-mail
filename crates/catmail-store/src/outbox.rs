@@ -1,7 +1,10 @@
-use catmail_types::{AccountId, BlobHash, DraftId, OutboxEntry, OutboxId, OutboxStatus};
+use catmail_types::{
+    AccountId, BlobHash, DraftId, Flags, MessageId, OutboxEntry, OutboxId, OutboxStatus,
+};
 use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
 use crate::columns::{json, parse_text, to_json};
+use crate::ops::{PendingOps, Touched};
 use crate::{Error, Result};
 
 const COLUMNS: &str = "id, account_id, draft_id, subject, recipients_json, message_id_hdr, status,
@@ -201,15 +204,40 @@ impl<'c> Outbox<'c> {
         )
     }
 
-    /// The server accepted the message; saving to Sent comes next, at once.
-    pub fn mark_accepted(&self, id: OutboxId, now: i64) -> Result<bool> {
+    /// The server accepted the message; saving to Sent comes next, at once. A reply
+    /// marks the message it answers `\Answered` (locally and through the queue), if that
+    /// is still there. Returns what that touched, or `None` if the entry wasn't being sent.
+    pub fn mark_accepted(&self, id: OutboxId, now: i64) -> Result<Option<Touched>> {
         let updated = self.conn.execute(
             "UPDATE outbox SET status = 'accepted', attempts = 0, next_attempt_at = ?2,
                                last_error = NULL, updated_at = ?2
              WHERE id = ?1 AND status IN ('sending', 'unknown')",
             params![id.0, now],
         )?;
-        Ok(updated > 0)
+        if updated == 0 {
+            return Ok(None);
+        }
+        let original: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT m.id FROM outbox o
+                 JOIN drafts d ON d.id = o.draft_id
+                 JOIN messages m ON m.id = d.reply_to_message_id
+                 WHERE o.id = ?1",
+                [id.0],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let touched = match original {
+            Some(m) => PendingOps::new(self.conn).set_flags(
+                &[MessageId(m)],
+                Flags::ANSWERED,
+                Flags::empty(),
+                now,
+            )?,
+            None => Touched::new(),
+        };
+        Ok(Some(touched))
     }
 
     /// A temporary failure before the server accepted anything: try again at `next`.
@@ -316,15 +344,15 @@ impl<'c> Outbox<'c> {
     }
 
     /// The user confirmed a message with an unknown outcome arrived: save it to Sent.
-    pub fn mark_sent(&self, id: OutboxId, now: i64) -> Result<Option<OutboxEntry>> {
+    pub fn mark_sent(&self, id: OutboxId, now: i64) -> Result<Option<(OutboxEntry, Touched)>> {
         let Some(entry) = self.get(id)? else {
             return Ok(None);
         };
         if entry.status != OutboxStatus::Unknown {
             return Err(conflict(id, entry.status, "marked sent"));
         }
-        self.mark_accepted(id, now)?;
-        self.get(id)
+        let touched = self.mark_accepted(id, now)?.unwrap_or_default();
+        Ok(self.get(id)?.map(|entry| (entry, touched)))
     }
 
     /// Removes the entry. One that never went out hands its draft back for editing;
@@ -502,7 +530,12 @@ mod tests {
                 .write(|db| db.outbox().mark_unknown(id, None, 12))
                 .unwrap()
         );
-        assert!(store.write(|db| db.outbox().mark_accepted(id, 13)).unwrap());
+        assert!(
+            store
+                .write(|db| db.outbox().mark_accepted(id, 13))
+                .unwrap()
+                .is_some()
+        );
         assert!(
             store
                 .write(|db| db.outbox().begin_send(id, 13))
@@ -613,7 +646,7 @@ mod tests {
         store
             .write(|db| db.outbox().mark_unknown(id, Some("connection closed"), 42))
             .unwrap();
-        let sent = store
+        let (sent, _) = store
             .write(|db| db.outbox().mark_sent(id, 43))
             .unwrap()
             .unwrap();

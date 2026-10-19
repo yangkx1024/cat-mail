@@ -6,12 +6,14 @@ use catmail_types::{FlagState, Flags, FolderRole, Security, ServerConfig};
 use imap_next::imap_types::auth::AuthMechanism;
 use imap_next::imap_types::command::{CommandBody, FetchModifier, SelectParameter};
 use imap_next::imap_types::core::{AString, Vec1};
+use imap_next::imap_types::extensions::uidplus::{UidElement, UidSet};
 use imap_next::imap_types::fetch::{MessageDataItem, MessageDataItemName, Part, Section};
-use imap_next::imap_types::flag::{Flag, FlagFetch};
+use imap_next::imap_types::flag::{Flag, FlagFetch, StoreResponse, StoreType};
 use imap_next::imap_types::mailbox::{ListMailbox, Mailbox};
 use imap_next::imap_types::response::{Code, Data, GreetingKind};
 use imap_next::imap_types::search::SearchKey;
 use imap_next::imap_types::sequence::{Sequence, SequenceSet};
+use imap_next::imap_types::status::{StatusDataItem, StatusDataItemName};
 
 use super::connection::{Connection, Response};
 use super::{
@@ -22,13 +24,25 @@ use crate::{TlsConfig, net};
 
 /// An IMAP connection, from greeting to logout. Reading never changes the server:
 /// mailboxes are opened with EXAMINE, and bodies fetched with `BODY.PEEK`, which leaves
-/// `\Seen` alone. The one write is [`append`](Self::append), for saving sent messages.
+/// `\Seen` alone. Changes take a mailbox opened with [`select`](Self::select) (flags,
+/// moves, deletions), or [`append`](Self::append).
 pub struct Session {
     conn: Connection,
     caps: Capabilities,
     /// From a PREAUTH greeting, or after `login`.
     authenticated: bool,
     selected: Option<MailboxStatus>,
+    /// Whether `selected` was opened with SELECT rather than EXAMINE.
+    writable: bool,
+}
+
+/// Where a COPY or MOVE put the messages (COPYUID, RFC 4315).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopyUid {
+    /// Of the target mailbox.
+    pub uidvalidity: u32,
+    /// (old UID, new UID).
+    pub uids: Vec<(u32, u32)>,
 }
 
 impl Session {
@@ -77,6 +91,7 @@ impl Session {
             caps,
             authenticated,
             selected: None,
+            writable: false,
         })
     }
 
@@ -186,21 +201,37 @@ impl Session {
 
     /// Opens `raw_name` read-only. With CONDSTORE, also enables MODSEQ reporting.
     pub async fn examine(&mut self, raw_name: &str) -> Result<MailboxStatus> {
+        self.open(raw_name, false).await
+    }
+
+    /// Opens `raw_name` read-write, for [`uid_store`](Self::uid_store),
+    /// [`uid_move`](Self::uid_move) and [`uid_delete`](Self::uid_delete). Unlike
+    /// EXAMINE this may clear `\Recent`, which nothing here relies on.
+    pub async fn select(&mut self, raw_name: &str) -> Result<MailboxStatus> {
+        self.open(raw_name, true).await
+    }
+
+    async fn open(&mut self, raw_name: &str, writable: bool) -> Result<MailboxStatus> {
         self.selected = None;
-        let mailbox = Mailbox::try_from(raw_name.to_owned())
-            .map_err(|_| Error::Protocol(format!("invalid mailbox name `{raw_name}`")))?;
+        let mailbox = mailbox(raw_name)?;
         let parameters = if self.condstore() {
             vec![SelectParameter::CondStore]
         } else {
             Vec::new()
         };
-        let response = self
-            .conn
-            .execute(CommandBody::Examine {
+        let body = if writable {
+            CommandBody::Select {
                 mailbox,
                 parameters,
-            })
-            .await?;
+            }
+        } else {
+            CommandBody::Examine {
+                mailbox,
+                parameters,
+            }
+        };
+        let command = body.name();
+        let response = self.conn.execute(body).await?;
 
         let (mut uidvalidity, mut uidnext, mut highest_modseq, mut no_modseq) =
             (None, None, None, false);
@@ -224,7 +255,7 @@ impl Session {
             })
             .next_back();
         let missing = |what: &str| Error::Command {
-            command: "EXAMINE",
+            command,
             text: format!("the server sent no {what} for `{raw_name}`"),
         };
         let status = MailboxStatus {
@@ -234,7 +265,148 @@ impl Session {
             highest_modseq: highest_modseq.filter(|_| self.condstore() && !no_modseq),
         };
         self.selected = Some(status);
+        self.writable = writable;
         Ok(status)
+    }
+
+    /// Sets `add` and clears `remove` on messages of the selected mailbox, leaving their
+    /// other flags alone. UIDs the mailbox doesn't have are skipped, as IMAP does.
+    pub async fn uid_store(&mut self, uids: &[u32], add: Flags, remove: Flags) -> Result<()> {
+        let Some(set) = uid_set(uids) else {
+            return Ok(());
+        };
+        for (kind, flags) in [(StoreType::Add, add), (StoreType::Remove, remove)] {
+            if flags.is_empty() {
+                continue;
+            }
+            self.change(CommandBody::Store {
+                sequence_set: set.clone(),
+                kind,
+                response: StoreResponse::Silent,
+                flags: system_flags(flags),
+                uid: true,
+                modifiers: Vec::new(),
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Whether [`uid_move`](Self::uid_move) is available (MOVE, RFC 6851).
+    pub fn can_move(&self) -> bool {
+        self.caps.has("MOVE")
+    }
+
+    /// UIDVALIDITY and UIDNEXT of `raw_name`, without opening it (STATUS); not for the
+    /// selected mailbox.
+    pub async fn status(&mut self, raw_name: &str) -> Result<(u32, u32)> {
+        let body = CommandBody::Status {
+            mailbox: mailbox(raw_name)?,
+            item_names: vec![StatusDataItemName::UidValidity, StatusDataItemName::UidNext].into(),
+        };
+        let response = self.conn.execute(body).await?;
+        let (mut uidvalidity, mut uidnext) = (None, None);
+        for data in &response.data {
+            let Data::Status { items, .. } = data else {
+                continue;
+            };
+            for item in items.iter() {
+                match item {
+                    StatusDataItem::UidValidity(v) => uidvalidity = Some(v.get()),
+                    StatusDataItem::UidNext(n) => uidnext = Some(n.get()),
+                    _ => {}
+                }
+            }
+        }
+        uidvalidity.zip(uidnext).ok_or_else(|| Error::Command {
+            command: "STATUS",
+            text: format!("the server sent no UIDVALIDITY or UIDNEXT for `{raw_name}`"),
+        })
+    }
+
+    /// Moves messages of the selected mailbox to `to` (MOVE, RFC 6851; see
+    /// [`can_move`](Self::can_move)). Returns where they went if the server says (UIDPLUS). UIDs the
+    /// mailbox doesn't have are skipped, so a move is safe to repeat.
+    pub async fn uid_move(&mut self, uids: &[u32], to: &str) -> Result<Option<CopyUid>> {
+        if !self.can_move() {
+            return Err(Error::Unsupported("MOVE"));
+        }
+        self.copy_or_move(uids, to, true).await
+    }
+
+    /// Copies messages of the selected mailbox to `to`; with [`uid_delete`](Self::uid_delete)
+    /// a move for servers without MOVE. Unlike a move, a copy repeated after its answer
+    /// was lost makes a second one. Returns where they went if the server says (UIDPLUS).
+    pub async fn uid_copy(&mut self, uids: &[u32], to: &str) -> Result<Option<CopyUid>> {
+        self.copy_or_move(uids, to, false).await
+    }
+
+    async fn copy_or_move(
+        &mut self,
+        uids: &[u32],
+        to: &str,
+        r#move: bool,
+    ) -> Result<Option<CopyUid>> {
+        let Some(sequence_set) = uid_set(uids) else {
+            return Ok(None);
+        };
+        let mailbox = mailbox(to)?;
+        let body = if r#move {
+            CommandBody::Move {
+                sequence_set,
+                mailbox,
+                uid: true,
+            }
+        } else {
+            CommandBody::Copy {
+                sequence_set,
+                mailbox,
+                uid: true,
+            }
+        };
+        Ok(copy_uid(&self.change(body).await?))
+    }
+
+    /// Deletes messages of the selected mailbox for good: `\Deleted`, then UID EXPUNGE
+    /// (UIDPLUS). A server without UIDPLUS only has the plain EXPUNGE, which also removes
+    /// any other message someone marked `\Deleted` in this mailbox; as in every client,
+    /// that is what the mark asks for.
+    pub async fn uid_delete(&mut self, uids: &[u32]) -> Result<()> {
+        let Some(sequence_set) = uid_set(uids) else {
+            return Ok(());
+        };
+        self.uid_store(uids, Flags::DELETED, Flags::empty()).await?;
+        let expunge = if self.caps.has("UIDPLUS") {
+            CommandBody::ExpungeUid { sequence_set }
+        } else {
+            CommandBody::Expunge
+        };
+        self.change(expunge).await?;
+        Ok(())
+    }
+
+    /// Runs a command that changes the selected mailbox. Its answer only matters for
+    /// the status and COPYUID, so an unparsable line (an unsolicited FETCH, say) doesn't
+    /// fail it: that would make a change that happened look refused.
+    async fn change(&mut self, body: CommandBody<'static>) -> Result<Response> {
+        if !self.writable {
+            return Err(Error::Protocol(format!(
+                "{} needs a mailbox opened with SELECT",
+                body.name()
+            )));
+        }
+        let response = self.conn.execute_lossy(body).await?;
+        // Keep EXISTS current: searches skip a mailbox it says is empty.
+        if let Some(status) = &mut self.selected {
+            for data in &response.data {
+                match data {
+                    Data::Exists(n) => status.exists = *n,
+                    Data::Expunge(_) => status.exists = status.exists.saturating_sub(1),
+                    _ => {}
+                }
+            }
+        }
+        Ok(response)
     }
 
     /// Adds `message` to the mailbox `raw_name`. Returns its UIDVALIDITY and UID if the
@@ -245,13 +417,13 @@ impl Session {
         flags: Flags,
         message: &[u8],
     ) -> Result<Option<(u32, u32)>> {
-        let flags = SYSTEM_FLAGS
-            .into_iter()
-            .filter(|(bit, _)| flags.contains(*bit))
-            .map(|(_, flag)| flag)
-            .collect();
-        let body = CommandBody::append(raw_name.to_owned(), flags, None, message.to_vec())
-            .map_err(|e| Error::Protocol(format!("can't APPEND to `{raw_name}`: {e:?}")))?;
+        let body = CommandBody::append(
+            raw_name.to_owned(),
+            system_flags(flags),
+            None,
+            message.to_vec(),
+        )
+        .map_err(|e| Error::Protocol(format!("can't APPEND to `{raw_name}`: {e:?}")))?;
         let response = self.conn.execute(body).await?;
         Ok(response.codes.iter().find_map(|code| match code {
             Code::AppendUid { uid_validity, uid } => Some((uid_validity.get(), uid.get())),
@@ -418,6 +590,21 @@ impl Session {
             .collect())
     }
 
+    /// RFC822.SIZE of the messages of the selected mailbox with these UIDs; ones it
+    /// doesn't have are absent.
+    pub async fn fetch_sizes(&mut self, uids: &[u32]) -> Result<HashMap<u32, u32>> {
+        let Some(set) = uid_set(uids) else {
+            return Ok(HashMap::new());
+        };
+        let items = vec![MessageDataItemName::Uid, MessageDataItemName::Rfc822Size];
+        let response = self.conn.execute(uid_fetch(set, items, Vec::new())).await?;
+        let wanted: HashSet<u32> = uids.iter().copied().collect();
+        Ok(merge_fetches(response, |uid| wanted.contains(&uid))
+            .into_iter()
+            .filter_map(|(uid, m)| Some((uid, m.size?)))
+            .collect())
+    }
+
     /// The whole raw message, or `None` if the selected mailbox has no message with
     /// this UID (any more).
     pub async fn fetch_raw(&mut self, uid: u32) -> Result<Option<Vec<u8>>> {
@@ -519,6 +706,51 @@ impl Session {
         self.selected
             .ok_or_else(|| Error::Protocol("no mailbox selected".into()))
     }
+}
+
+fn mailbox(raw_name: &str) -> Result<Mailbox<'static>> {
+    Mailbox::try_from(raw_name.to_owned())
+        .map_err(|_| Error::Protocol(format!("invalid mailbox name `{raw_name}`")))
+}
+
+fn system_flags(flags: Flags) -> Vec<Flag<'static>> {
+    SYSTEM_FLAGS
+        .into_iter()
+        .filter(|(bit, _)| flags.contains(*bit))
+        .map(|(_, flag)| flag)
+        .collect()
+}
+
+/// The COPYUID in an answer to COPY or MOVE (MOVE sends it untagged). `None` if there is
+/// none, or its UID sets don't pair up.
+fn copy_uid(response: &Response) -> Option<CopyUid> {
+    response.codes.iter().find_map(|code| {
+        let Code::CopyUid {
+            uid_validity,
+            source,
+            destination,
+        } = code
+        else {
+            return None;
+        };
+        // RFC 4315: both sets list the UIDs in the same order; a range covers the UIDs
+        // between its ends, whichever comes first.
+        let expand = |set: &UidSet| -> Vec<u32> {
+            set.0
+                .as_ref()
+                .iter()
+                .flat_map(|element| match *element {
+                    UidElement::Single(uid) => uid.get()..=uid.get(),
+                    UidElement::Range(a, b) => a.min(b).get()..=a.max(b).get(),
+                })
+                .collect()
+        };
+        let (old, new) = (expand(source), expand(destination));
+        (old.len() == new.len()).then(|| CopyUid {
+            uidvalidity: uid_validity.get(),
+            uids: old.into_iter().zip(new).collect(),
+        })
+    })
 }
 
 fn body_peek(section: Option<Section<'static>>) -> MessageDataItemName<'static> {

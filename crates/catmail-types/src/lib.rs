@@ -10,6 +10,7 @@ mod event;
 mod folder;
 mod ids;
 mod message;
+mod ops;
 mod outbox;
 mod search;
 mod sync;
@@ -20,8 +21,10 @@ pub use event::Event;
 pub use folder::{Folder, FolderRole};
 pub use ids::{
     AccountId, AttachmentId, BlobHash, DraftAttachmentId, DraftId, FolderId, MessageId, OutboxId,
+    PendingOpId,
 };
 pub use message::{Address, Attachment, FlagState, Flags, Message, MessageBody, MessageSummary};
+pub use ops::{OpKind, OpStatus, PendingOp, ReplayReport};
 pub use outbox::{OutboxEntry, OutboxStatus};
 pub use search::SearchQuery;
 pub use sync::{FolderSyncReport, GcReport, SyncReport};

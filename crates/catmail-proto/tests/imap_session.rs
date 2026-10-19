@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use catmail_proto::TlsConfig;
-use catmail_proto::imap::{Credentials, Error, Session};
+use catmail_proto::imap::{CopyUid, Credentials, Error, Session};
 use catmail_testkit::{FakeImap, FakeMailbox, ServerState, TestCert};
 use catmail_types::{Flags, FolderRole, Security, ServerConfig};
 
@@ -541,4 +541,131 @@ async fn append_refused_before_the_message_fails_at_once() {
         .await
         .expect("fails at once");
     assert!(next.is_err());
+}
+
+/// INBOX with UIDs 1..=3, and an Archive.
+fn three_messages() -> ServerState {
+    let mut state = ServerState::new("alice", "pw");
+    for subject in ["a", "b", "c"] {
+        state.inbox().append_simple(subject);
+    }
+    let mut archive = FakeMailbox::new("Archive");
+    archive.uidvalidity = 9;
+    archive.append_simple("old");
+    state.mailboxes.push(archive);
+    state
+}
+
+fn uids(fake: &FakeImap, mailbox: &str) -> Vec<(u32, Vec<String>)> {
+    fake.state()
+        .mailbox_mut(mailbox)
+        .messages
+        .iter()
+        .map(|m| (m.uid, m.flags.clone()))
+        .collect()
+}
+
+#[tokio::test]
+async fn changes_flags_moves_and_deletes() {
+    let fake = FakeImap::start(three_messages()).await;
+    let mut session = login(&fake).await;
+
+    // EXAMINE is read-only; the session doesn't even ask.
+    session.examine("INBOX").await.unwrap();
+    let err = session
+        .uid_store(&[1], Flags::SEEN, Flags::empty())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Protocol(_)), "{err}");
+
+    let status = session.select("INBOX").await.unwrap();
+    assert_eq!(status.exists, 3);
+    fake.state().inbox().set_flags(2, &["\\Flagged"]);
+    session
+        .uid_store(&[1, 2, 99], Flags::SEEN, Flags::FLAGGED)
+        .await
+        .unwrap();
+    assert_eq!(
+        uids(&fake, "INBOX"),
+        [
+            (1, vec!["\\Seen".into()]),
+            (2, vec!["\\Seen".into()]),
+            (3, vec![])
+        ]
+    );
+
+    assert_eq!(session.status("Archive").await.unwrap(), (9, 2));
+    let copied = session.uid_move(&[2, 3], "Archive").await.unwrap();
+    assert_eq!(
+        copied,
+        Some(CopyUid {
+            uidvalidity: 9,
+            uids: vec![(2, 2), (3, 3)]
+        })
+    );
+    assert_eq!(uids(&fake, "INBOX"), [(1, vec!["\\Seen".into()])]);
+    assert_eq!(uids(&fake, "Archive")[1], (2, vec!["\\Seen".into()]));
+
+    session.uid_delete(&[1]).await.unwrap();
+    assert!(uids(&fake, "INBOX").is_empty());
+    // EXISTS followed the expunges, so a search knows the mailbox is empty.
+    assert!(session.uid_search_all().await.unwrap().is_empty());
+    let log = fake
+        .state()
+        .log
+        .iter()
+        .map(|c| c.line.clone())
+        .collect::<Vec<_>>();
+    assert!(log.contains(&"UID MOVE 2:3 Archive".to_owned()), "{log:?}");
+    assert!(log.contains(&"UID EXPUNGE 1".to_owned()), "{log:?}");
+}
+
+#[tokio::test]
+async fn copies_and_deletes_without_move_or_uidplus() {
+    let mut state = three_messages();
+    state.faults.move_command = false;
+    state.faults.uidplus = false;
+    // Someone else marked 3 deleted; without UIDPLUS the expunge takes it along.
+    state.inbox().set_flags(3, &["\\Deleted"]);
+    let fake = FakeImap::start(state).await;
+    let mut session = login(&fake).await;
+    session.select("INBOX").await.unwrap();
+
+    let err = session.uid_move(&[1], "Archive").await.unwrap_err();
+    assert!(matches!(err, Error::Unsupported("MOVE")), "{err}");
+    assert_eq!(session.uid_copy(&[1], "Archive").await.unwrap(), None);
+    session.uid_delete(&[1]).await.unwrap();
+    assert_eq!(uids(&fake, "INBOX"), [(2, vec![])]);
+    assert_eq!(uids(&fake, "Archive").len(), 2);
+    let log = fake
+        .state()
+        .log
+        .iter()
+        .map(|c| c.line.clone())
+        .collect::<Vec<_>>();
+    assert!(
+        log.ends_with(&[
+            "UID COPY 1 Archive".into(),
+            "UID STORE 1 +FLAGS.SILENT (\\Deleted)".into(),
+            "EXPUNGE".into()
+        ]),
+        "{log:?}"
+    );
+}
+
+#[tokio::test]
+async fn refused_changes_leave_the_connection_usable() {
+    let mut state = three_messages();
+    state.faults.refuse_changes = Some("[CANNOT] Permission denied".into());
+    let fake = FakeImap::start(state).await;
+    let mut session = login(&fake).await;
+    session.select("INBOX").await.unwrap();
+    let err = session.uid_move(&[1], "Archive").await.unwrap_err();
+    assert!(
+        matches!(err, Error::Command { .. }) && !err.is_fatal(),
+        "{err}"
+    );
+    let err = session.uid_move(&[1], "Nowhere").await.unwrap_err();
+    assert!(matches!(err, Error::Command { .. }), "{err}");
+    assert_eq!(session.uid_search_all().await.unwrap(), [1, 2, 3]);
 }

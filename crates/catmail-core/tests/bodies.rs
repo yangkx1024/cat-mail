@@ -10,14 +10,7 @@ use catmail_testkit::ServerState;
 
 mod common;
 
-use common::Env;
-
-/// Synced, unlike the plain shared one.
-async fn env(state: ServerState) -> Env {
-    let env = common::env(state).await;
-    env.client.sync_account(env.account).await.unwrap();
-    env
-}
+use common::{Env, synced_env as env};
 
 impl Env {
     /// Message ids in INBOX, by UID.
