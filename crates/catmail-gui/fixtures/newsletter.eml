@@ -1,0 +1,38 @@
+From: =?utf-8?b?5Lqn5ZOB5Zui6Zif?= <news@example.com>
+To: catmail@example.com
+Subject: =?utf-8?b?5Y2B5pyI5Lqn5ZOB5pu05paw77ya5paw5Yqf6IO95LiA6KeI?=
+Date: Sun, 19 Oct 2026 09:30:00 +0800
+Message-ID: <newsletter-1@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/related; boundary="rel"
+
+--rel
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+<html><body style="margin:0;background:#f4f4f4">
+<table width="100%" cellpadding="0" cellspacing="0" bgcolor="#f4f4f4"><tr><td align="center">
+<table width="600" cellpadding="16" cellspacing="0" bgcolor="#ffffff" style="border:1px solid #ddd">
+<tr><td><img src="https://tracker.example.com/open.gif?u=42" width="1" height="1" alt=""><img src="cid:logo@example.com" width="48" height="48" alt="logo">
+<h1 style="font-size:22px;color:#222">十月产品更新</h1>
+<p style="color:#444;line-height:1.6">你好，这是本月的产品更新摘要。我们改进了<b>全文搜索</b>，现在支持中文子串匹配；还修复了大附件下载时的若干问题。</p>
+<table width="100%" cellpadding="8" cellspacing="0" style="border-collapse:collapse">
+<tr><th align="left">功能</th><th align="left">状态</th><th align="right">版本</th></tr>
+<tr><td>中文分词搜索</td><td>已发布</td><td align="right">0.2.0</td></tr>
+<tr><td>正文按需下载</td><td>已发布</td><td align="right">0.2.0</td></tr>
+<tr><td>离线操作队列</td><td>开发中</td><td align="right">—</td></tr>
+</table>
+<p><a href="https://example.com/changelog" style="color:#0a66c2">查看完整更新日志</a> · <a href="mailto:support@example.com">联系我们</a></p>
+<ul><li>Long English text wraps normally inside the table cell without overflowing the reading pane.</li><li>第二项：混排 English 与中文。</li></ul>
+<p style="font-size:12px;color:#888">如果不想再收到此类邮件，请<a href="https://example.com/unsubscribe">退订</a>。</p>
+</td></tr></table></td></tr></table></body></html>
+--rel
+Content-Type: image/png
+Content-ID: <logo@example.com>
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAAhElEQVR42u3ZwRHAIAhEUcuxxLSc
+KuKkBBUE1r8z3vfdBFojhJA/79O/2Ve2eAqIRfEwiEf5IwjP4u6Qk+XNERHlTRGlAZHltxEZym8h
+SgMylV9ClAZkLD+FAAAAAAAAAAAAuBnAd5qhhpFSZCvBYuv29SLbabn7gMyFRuJGJnOlJKR4BkE6
+UB26V81bAAAAAElFTkSuQmCC
+--rel--

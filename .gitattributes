@@ -1,2 +1,3 @@
 # Raw RFC 5322 fixtures: keep their CRLF line endings byte for byte.
 testenv/fixtures/*.eml -text
+crates/catmail-gui/fixtures/*.eml -text

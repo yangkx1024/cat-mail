@@ -6,10 +6,20 @@
 //! and returns an XOAUTH2/OAUTHBEARER credential, without touching sync code.
 
 use catmail_proto::imap::Credentials;
-use catmail_types::{Account, AuthKind};
+use catmail_types::{Account, AuthKind, NewAccount};
 
 use crate::secrets::SecretStore;
 use crate::{Error, Result};
+
+/// For an account that isn't stored yet, from the secret the user just entered.
+pub(crate) fn new_account_credentials(new: &NewAccount, secret: &str) -> Credentials {
+    match new.auth {
+        AuthKind::Password => Credentials::Password {
+            username: new.username.clone(),
+            password: secret.to_owned(),
+        },
+    }
+}
 
 /// Blocking: may talk to the OS keyring.
 pub(crate) fn credentials(

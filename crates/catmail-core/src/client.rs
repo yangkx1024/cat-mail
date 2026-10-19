@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::engine::{Engine, blocking};
 use crate::runtime::Runtime;
 use crate::secrets::{KeyringSecrets, SecretStore};
-use crate::{Config, Error, Result, body, sync};
+use crate::{Config, Error, Result, auth, body, connection, sync};
 
 const EVENT_CAPACITY: usize = 256;
 
@@ -132,6 +132,28 @@ impl MailClient {
                 Ok(engine
                     .store
                     .read(|db| db.accounts().find_by_email(&email))?)
+            })
+            .await
+    }
+
+    /// Connects to the IMAP server and logs in with these settings, storing nothing, so a
+    /// frontend can reject a wrong password or server before the account exists. Fails as
+    /// a sync would: [`Error::AuthFailed`], [`Error::Unsupported`], or a network error.
+    pub async fn check_login(&self, new: &NewAccount, password: &str) -> Result<()> {
+        validate_new_account(new)?;
+        if password.is_empty() {
+            return Err(Error::InvalidInput("password must not be empty".into()));
+        }
+        let engine = self.engine.clone();
+        let imap = new.imap.clone();
+        let credentials = auth::new_account_credentials(new, password);
+        self.rt
+            .run(async move {
+                connection::login(&engine, &imap, &credentials)
+                    .await?
+                    .logout()
+                    .await;
+                Ok(())
             })
             .await
     }

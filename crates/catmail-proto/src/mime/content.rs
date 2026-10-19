@@ -162,21 +162,31 @@ fn joined<S: AsRef<str>>(pieces: impl Iterator<Item = S>, separator: &str) -> Op
     (!pieces.is_empty()).then(|| pieces.join(separator))
 }
 
-/// The Content-IDs that `cid:` URLs in the HTML refer to (RFC 2392: the scheme in any
-/// case, the rest percent-encoded).
+/// The Content-IDs that `cid:` URLs in the HTML refer to.
 fn cid_references(html: &str) -> HashSet<String> {
     let lower = html.to_ascii_lowercase();
     lower
         .match_indices("cid:")
-        .map(|(start, _)| {
+        .filter_map(|(start, _)| {
             let rest = &html[start + 4..];
             let end = rest
                 .find(|c: char| c.is_whitespace() || "\"'()<>".contains(c))
                 .unwrap_or(rest.len());
-            percent_decode(&rest[..end])
+            content_id_from_url(&html[start..start + 4 + end])
         })
-        .filter(|id| !id.is_empty())
         .collect()
+}
+
+/// The Content-ID a `cid:` URL refers to (RFC 2392: the scheme in any case, the rest
+/// percent-encoded), or `None` for any other URL. Renderers resolve inline images with
+/// this, so they agree with what [`Part::inline`] counts as referenced.
+pub fn content_id_from_url(url: &str) -> Option<String> {
+    let scheme = url.get(..4)?;
+    if !scheme.eq_ignore_ascii_case("cid:") {
+        return None;
+    }
+    let id = percent_decode(&url[4..]);
+    (!id.is_empty()).then_some(id)
 }
 
 fn percent_decode(s: &str) -> String {
@@ -458,6 +468,17 @@ mod tests {
                 ("a@b".to_owned(), true), // RFC 2392: case-insensitive scheme, %-encoded
             ]
         );
+    }
+
+    #[test]
+    fn content_id_from_url_accepts_only_cid_urls() {
+        assert_eq!(content_id_from_url("CID:a%40b").as_deref(), Some("a@b"));
+        assert_eq!(content_id_from_url("cid:logo").as_deref(), Some("logo"));
+        assert_eq!(content_id_from_url("cid:"), None);
+        assert_eq!(content_id_from_url("https://x/cid:logo"), None);
+        assert_eq!(content_id_from_url("ci"), None);
+        // Multi-byte input shorter than the scheme must not panic on a char boundary.
+        assert_eq!(content_id_from_url("图片"), None);
     }
 
     #[test]

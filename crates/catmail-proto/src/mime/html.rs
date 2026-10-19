@@ -1,8 +1,12 @@
 use std::borrow::Cow;
-use std::collections::HashSet;
-use std::sync::LazyLock;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use ammonia::{Builder, UrlRelative};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
+
+use super::content_id_from_url;
 
 /// Presentation attributes that table-based email layouts depend on.
 const LAYOUT_ATTRIBUTES: &[&str] = &[
@@ -22,7 +26,14 @@ const LAYOUT_ATTRIBUTES: &[&str] = &[
     "width",
 ];
 
-static SANITIZER: LazyLock<Builder<'static>> = LazyLock::new(|| {
+/// Rewrites an `img src` value, or keeps it (`None`).
+type ImageHook = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
+static SANITIZER: LazyLock<Builder<'static>> = LazyLock::new(|| sanitizer(None));
+
+/// The one sanitizer configuration; `on_image` lets a renderer see or replace image
+/// sources during the same parse, instead of scanning the HTML text afterwards.
+fn sanitizer(on_image: Option<ImageHook>) -> Builder<'static> {
     let mut builder = Builder::default();
     builder
         .add_tags(["font"])
@@ -30,20 +41,25 @@ static SANITIZER: LazyLock<Builder<'static>> = LazyLock::new(|| {
         .url_schemes(HashSet::from(["http", "https", "mailto", "cid", "data"]))
         // Relative URLs have no base in an email.
         .url_relative(UrlRelative::Deny)
-        .attribute_filter(|element, attribute, value| {
+        .attribute_filter(move |element, attribute, value| {
             let url_attribute = matches!(attribute, "href" | "src" | "cite" | "action");
-            if url_attribute && is_data_url(value) && !(element == "img" && attribute == "src") {
+            let image = element == "img" && attribute == "src";
+            if url_attribute && is_data_url(value) && !image {
                 // Inline images may be data: URLs; a data: link could carry a whole page.
                 None
             } else if attribute == "style" && loads_resources(value) {
                 // Remote images must stay blockable, also as CSS backgrounds.
                 None
+            } else if let Some(replaced) =
+                on_image.as_ref().filter(|_| image).and_then(|f| f(value))
+            {
+                Some(Cow::Owned(replaced))
             } else {
                 Some(Cow::Borrowed(value))
             }
         });
     builder
-});
+}
 
 /// Whether `value` is a `data:` URL, as judged by the parser ammonia checks schemes with
 /// (which ignores tabs and line breaks anywhere and leading control characters, as in
@@ -74,6 +90,58 @@ fn loads_resources(css: &str) -> bool {
 /// is the renderer's decision, and it should block them by default.
 pub fn sanitize_html(html: &str) -> String {
     SANITIZER.clean(html).to_string()
+}
+
+/// The image URLs in HTML that [`sanitize_html`] produced, in document order.
+pub fn image_sources(html: &str) -> Vec<String> {
+    let found = Arc::new(Mutex::new(Vec::new()));
+    let sink = found.clone();
+    sanitizer(Some(Box::new(move |src| {
+        sink.lock().unwrap().push(src.to_owned());
+        None
+    })))
+    .clean(html);
+    Arc::try_unwrap(found).unwrap().into_inner().unwrap()
+}
+
+/// An inline part's content, to embed in place of its `cid:` URL.
+pub struct InlineImage {
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
+}
+
+/// HTML that [`sanitize_html`] produced, with each `cid:` image whose Content-ID is in
+/// `inline` replaced by a `data:` URL of the part, for a renderer that can't resolve
+/// `cid:` (a browser). The values ammonia's filter returns are not checked again, so the
+/// URL is built here rather than taken from the caller.
+pub fn embed_inline_images(html: &str, inline: HashMap<String, InlineImage>) -> String {
+    sanitizer(Some(Box::new(move |src| {
+        let image = content_id_from_url(src).and_then(|id| inline.get(&id))?;
+        Some(format!(
+            "data:{};base64,{}",
+            media_type(&image.mime_type),
+            STANDARD.encode(&image.bytes)
+        ))
+    })))
+    .clean(html)
+    .to_string()
+}
+
+/// The MIME type as it may appear in a `data:` URL; it comes from the message, so anything
+/// unusual is replaced.
+fn media_type(mime_type: &str) -> &str {
+    let valid = mime_type.split_once('/').is_some_and(|(t, s)| {
+        !t.is_empty()
+            && !s.is_empty()
+            && mime_type
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"/.+-".contains(&b))
+    });
+    if valid {
+        mime_type
+    } else {
+        "application/octet-stream"
+    }
 }
 
 #[cfg(test)]
@@ -145,5 +213,49 @@ mod tests {
             );
         }
         assert!(sanitize_html("<p style=\"color:red\">x</p>").contains("style=\"color:red\""));
+    }
+
+    #[test]
+    fn finds_and_embeds_images_by_parsing() {
+        let clean = sanitize_html(
+            r#"<p>src="cid:in-text"</p><img src="cid:logo" alt="a"><img data-src="https://x/a.gif">
+            <img src="https://tracker.example/p.gif"><a href="cid:logo">link</a>"#,
+        );
+        assert_eq!(
+            image_sources(&clean),
+            ["cid:logo", "https://tracker.example/p.gif"]
+        );
+
+        let inline = HashMap::from([
+            (
+                "logo".to_owned(),
+                InlineImage {
+                    mime_type: "image/png".into(),
+                    bytes: b"hi".to_vec(),
+                },
+            ),
+            (
+                "odd".to_owned(),
+                InlineImage {
+                    mime_type: "image/gif\"><script>".into(),
+                    bytes: b"gif".to_vec(),
+                },
+            ),
+        ]);
+        let clean = format!("{clean}<img src=\"cid:odd\"><img src=\"cid:missing\">");
+        let embedded = embed_inline_images(&clean, inline);
+        assert!(embedded.contains(r#"<img src="data:image/png;base64,aGk=" alt="a">"#));
+        assert!(embedded.contains(r#"<img src="data:application/octet-stream;base64,Z2lm">"#));
+        assert!(embedded.contains(r#"<img src="cid:missing">"#));
+        assert!(
+            embedded.contains(r#"src="cid:in-text""#),
+            "text is not an attribute"
+        );
+        assert!(
+            embedded.contains(r#"href="cid:logo""#),
+            "only images are replaced"
+        );
+        assert!(embedded.contains("https://tracker.example/p.gif"));
+        assert!(!embedded.contains("<script>"));
     }
 }

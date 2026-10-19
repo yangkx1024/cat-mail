@@ -5,8 +5,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use catmail_proto::imap::Session;
-use catmail_types::AccountId;
+use catmail_proto::imap::{Credentials, Session};
+use catmail_types::{AccountId, ServerConfig};
 
 use crate::engine::{Engine, blocking};
 use crate::{Error, Result, auth};
@@ -31,8 +31,17 @@ pub(crate) async fn connect(engine: &Arc<Engine>, account_id: AccountId) -> Resu
         let (engine, account) = (engine.clone(), account.clone());
         blocking(move || auth::credentials(&account, &secret_key, engine.secrets.as_ref())).await?
     };
-    let mut session = Session::connect(&account.imap, &engine.tls()?, IO_TIMEOUT).await?;
-    session.login(&credentials).await?;
+    login(engine, &account.imap, &credentials).await
+}
+
+/// Opens a new connection to `server` and logs in.
+pub(crate) async fn login(
+    engine: &Engine,
+    server: &ServerConfig,
+    credentials: &Credentials,
+) -> Result<Session> {
+    let mut session = Session::connect(server, &engine.tls()?, IO_TIMEOUT).await?;
+    session.login(credentials).await?;
     Ok(session)
 }
 
