@@ -1,8 +1,8 @@
 //! Sync against a real Dovecot started by `testenv/dovecot/run.sh` (see `testenv`).
 //!
 //! The fixture folders are only read; changes happen in a fresh folder per run, written
-//! straight into the maildir, and in Sent, where the test finds its message by subject,
-//! so it can be rerun against the same server.
+//! straight into the maildir, and in Sent and Drafts, where the tests find their
+//! messages by subject, so they can be rerun against the same server.
 
 mod testenv;
 
@@ -31,6 +31,37 @@ fn maildir_folder(maildir: &Path, name: &str) -> PathBuf {
         fs::create_dir_all(dir.join(sub)).unwrap();
     }
     dir
+}
+
+/// (subject, flags) of the messages in a maildir folder. Maildir keeps flags in the file
+/// name: `<name>:2,<flags>`.
+fn files(dir: &Path) -> Vec<(String, String)> {
+    ["new", "cur"]
+        .iter()
+        .flat_map(|sub| fs::read_dir(dir.join(sub)).unwrap())
+        .map(|e| e.unwrap().path())
+        .map(|p| {
+            let text = fs::read_to_string(&p).unwrap_or_default();
+            let subject = text
+                .lines()
+                .find_map(|l| l.strip_prefix("Subject: "))
+                .unwrap_or_default()
+                .to_owned();
+            let name = p.file_name().unwrap().to_string_lossy().into_owned();
+            let flags = name.rsplit_once(":2,").map_or("", |(_, f)| f).to_owned();
+            (subject, flags)
+        })
+        .collect()
+}
+
+/// Another user's maildir: `<work>/mail/catmail/Maildir` → `<work>/mail/<user>/Maildir`.
+fn user_maildir(maildir: &Path, user: &str) -> PathBuf {
+    maildir
+        .parent()
+        .and_then(Path::parent)
+        .unwrap()
+        .join(user)
+        .join("Maildir")
 }
 
 fn added(report: &SyncReport, name: &str) -> (u32, u32, u32) {
@@ -228,25 +259,6 @@ async fn check_changes(client: &MailClient, account: AccountId, maildir: &Path, 
     let report = client.replay_pending(account).await.unwrap();
     assert_eq!((report.applied, report.failed, report.pending), (4, 0, 0));
 
-    // Maildir keeps flags in the file name: `<name>:2,<flags>`.
-    let files = |dir: &Path| -> Vec<(String, String)> {
-        ["new", "cur"]
-            .iter()
-            .flat_map(|sub| fs::read_dir(dir.join(sub)).unwrap())
-            .map(|e| e.unwrap().path())
-            .map(|p| {
-                let text = fs::read_to_string(&p).unwrap_or_default();
-                let subject = text
-                    .lines()
-                    .find_map(|l| l.strip_prefix("Subject: "))
-                    .unwrap_or_default()
-                    .to_owned();
-                let name = p.file_name().unwrap().to_string_lossy().into_owned();
-                let flags = name.rsplit_once(":2,").map_or("", |(_, f)| f).to_owned();
-                (subject, flags)
-            })
-            .collect()
-    };
     let folder_dir = maildir.join(format!(".{run}"));
     assert_eq!(files(&folder_dir), [("first".into(), String::new())]);
     assert_eq!(files(&target_dir), [("third".into(), "F".into())]);
@@ -445,14 +457,7 @@ async fn new_mail_is_pushed_by_dovecot() {
     let Some(env) = testenv::testenv() else {
         return;
     };
-    // `<work>/mail/catmail/Maildir` → `<work>/mail/push/Maildir`.
-    let maildir = env
-        .maildir
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("push/Maildir");
+    let maildir = user_maildir(&env.maildir, "push");
     let dir = tempfile::tempdir().unwrap();
     let schedule = catmail_core::SyncSchedule {
         full_sync: Duration::from_secs(3600),
@@ -503,4 +508,63 @@ async fn new_mail_is_pushed_by_dovecot() {
     })
     .await;
     assert!(arrived.is_ok(), "the new message never showed up");
+}
+
+/// Drafts kept in Dovecot's Drafts folder: each change replaces the copy, and deleting
+/// the draft deletes it. In the `drafts` user's mailbox, so the syncs of the fixtures
+/// see nothing change.
+#[tokio::test(flavor = "multi_thread")]
+async fn drafts_are_kept_in_dovecots_drafts_folder() {
+    let Some(env) = testenv::testenv() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let client = open_client(dir.path(), None);
+    let account = add_account(
+        &client,
+        "drafts",
+        "drafts",
+        None,
+        None,
+        env.imap.clone(),
+        env.imap.clone(),
+    )
+    .await;
+    client.sync_account(account).await.unwrap();
+
+    let run = run_tag();
+    let drafts_dir = user_maildir(&env.maildir, "drafts").join(".Drafts");
+    let copies = || -> Vec<(String, String)> {
+        files(&drafts_dir)
+            .into_iter()
+            .filter(|(subject, _)| subject.starts_with(&run))
+            .collect()
+    };
+    let content = |subject: &str| DraftContent {
+        subject: format!("{run} {subject}"),
+        ..Default::default()
+    };
+    let draft = client.create_draft(account, content("one")).await.unwrap();
+    let report = client.replay_pending(account).await.unwrap();
+    assert_eq!((report.drafts_uploaded, report.drafts_failed), (1, 0));
+    assert_eq!(copies(), [(format!("{run} one"), "DS".into())]);
+
+    client.update_draft(draft.id, content("two")).await.unwrap();
+    client.replay_pending(account).await.unwrap();
+    assert_eq!(copies(), [(format!("{run} two"), "DS".into())]);
+
+    let report = client.sync_account(account).await.unwrap();
+    assert_eq!(added(&report, "Drafts").0, 1);
+    let folder = client
+        .find_folder(account, "Drafts")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(folder.role, Some(FolderRole::Drafts), "SPECIAL-USE");
+    assert!(client.get_draft(draft.id).await.unwrap().unwrap().on_server);
+
+    client.delete_draft(draft.id).await.unwrap();
+    let report = client.replay_pending(account).await.unwrap();
+    assert_eq!((report.applied, report.pending), (1, 0));
+    assert_eq!(copies(), []);
 }

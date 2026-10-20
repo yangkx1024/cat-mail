@@ -74,7 +74,9 @@ UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UI
 
 - 用户对邮件的操作（标记、移动、删除）：在同一个事务里修改本地数据并写入 `pending_ops`，
   之后在 SELECT 下核对 UIDVALIDITY 再回放。离线照常可用，服务器拒绝时撤销本地改动。
-- 发信后用 APPEND 保存到 Sent。
+- 用 APPEND 写入新邮件：发信后保存到 Sent；草稿每次修改后上传到 Drafts，它替换掉的旧副本经
+  操作队列删除。APPEND 的答复可能丢失，所以每次 APPEND 都能事后按 Message-ID 查到，重试不会
+  多出一份。
 
 ### 发信绝不在背后重复
 
@@ -112,7 +114,7 @@ UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UI
 | [同步](architecture/sync.md) | 文件夹对账、UIDVALIDITY、增量拉取、游标与断点续传、容错、邮件头 |
 | [操作队列](architecture/op-queue.md) | 标记 / 移动 / 删除的本地效果、回放顺序、拒绝时的撤销、无 MOVE 服务器上的 COPY |
 | [正文与附件](architecture/bodies.md) | 按需下载的两条路径、正文提取、HTML 清洗、内嵌图片 |
-| [草稿与发信](architecture/sending.md) | 草稿与回复、outbox 状态机、SMTP 客户端、重试、保存到 Sent |
+| [草稿与发信](architecture/sending.md) | 草稿与回复、草稿同步到服务器、outbox 状态机、SMTP 客户端、重试、保存到 Sent |
 | [IMAP / SMTP 连接](architecture/protocol.md) | imap-next、连接层的严格解析、连接池、认证、TLS |
 | [存储](architecture/storage.md) | SQLite 约定、计数、跨账户约束、全文搜索、BlobStore 与 GC、凭据 |
 | [GUI](architecture/gui.md) | 视图结构、事件刷新、HTML 渲染与图片策略、已知问题 |

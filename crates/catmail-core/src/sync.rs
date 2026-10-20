@@ -1,6 +1,6 @@
 //! IMAP sync of folders and message headers.
 //!
-//! First the queued local changes are replayed (see `ops`). Then per folder: EXAMINE,
+//! First changed drafts are uploaded and the queued local changes replayed (see `ops`). Then per folder: EXAMINE,
 //! compare UIDVALIDITY, diff UIDs to find new and vanished
 //! messages, refresh flags of known messages (only the changed ones with CONDSTORE),
 //! then fetch new headers newest first in batches. Every batch is its own transaction,
@@ -51,10 +51,9 @@ pub(crate) async fn run(
     ops::announce(engine, &reconciled.touched);
 
     // Local changes first, so the sync sees the server with them made.
-    let pending = engine
-        .read(move |db| db.ops().pending_folders(account_id))
-        .await?;
-    let mut replayed = ops::replay(engine, session, account_id, &pending).await?;
+    let mut replayed = ops::replay_queued(engine, session, account_id)
+        .await?
+        .folders;
 
     let folders = engine
         .read(move |db| db.folders().sync_states(account_id))

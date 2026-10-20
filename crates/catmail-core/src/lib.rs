@@ -9,6 +9,7 @@ mod body;
 mod client;
 mod config;
 mod connection;
+mod draft_sync;
 mod drafts;
 mod engine;
 mod error;

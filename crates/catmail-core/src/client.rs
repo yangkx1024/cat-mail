@@ -424,9 +424,10 @@ impl MailClient {
             .await
     }
 
-    /// Makes the account's queued changes on the server now, without syncing. Waits for
-    /// a sync of the account to finish first (it replays them too). Losing the
-    /// connection fails the call and leaves the rest queued.
+    /// Makes the account's queued changes on the server now, without syncing, and saves
+    /// changed drafts to its Drafts folder. Waits for a sync of the account to finish
+    /// first (it does the same). Losing the connection fails the call and leaves the rest
+    /// queued.
     pub async fn replay_pending(&self, account: AccountId) -> Result<ReplayReport> {
         self.rt
             .run(ops::replay_account(self.engine.clone(), account))
@@ -454,6 +455,10 @@ impl MailClient {
     }
 
     /// A new draft. Addresses are checked as they will be needed for sending.
+    ///
+    /// Drafts are copied to the account's Drafts folder, the copy replaced after every
+    /// change, at the next sync or [`replay_pending`](Self::replay_pending), or right
+    /// away with [`sync_in_background`](MailClientBuilder::sync_in_background).
     pub async fn create_draft(&self, account: AccountId, content: DraftContent) -> Result<Draft> {
         let engine = self.engine.clone();
         self.rt
@@ -496,6 +501,8 @@ impl MailClient {
             .await
     }
 
+    /// Deletes the draft, and its copy on the server the way changes to messages are
+    /// made.
     pub async fn delete_draft(&self, id: DraftId) -> Result<()> {
         let engine = self.engine.clone();
         self.rt
@@ -517,7 +524,8 @@ impl MailClient {
             .await
     }
 
-    pub async fn remove_draft_attachment(&self, id: DraftAttachmentId) -> Result<()> {
+    /// Returns the draft as it is now.
+    pub async fn remove_draft_attachment(&self, id: DraftAttachmentId) -> Result<Draft> {
         let engine = self.engine.clone();
         self.rt
             .run(async move { drafts::remove_attachment(&engine, id).await })

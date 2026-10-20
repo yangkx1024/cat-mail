@@ -164,9 +164,9 @@ CREATE TABLE attachments (
     UNIQUE (message_id, part_section)
 ) STRICT;
 
--- Messages being written. Local only for now: the copy on the server's Drafts folder
--- (remote_*) needs deleting the previous copy on every save, which waits for the
--- operation queue (M4).
+-- Messages being written. Each is also kept as a message in the server's Drafts
+-- folder (remote_*): a draft whose revision differs from remote_revision is uploaded
+-- anew (see draft_uploads), and the copy it replaces is deleted through pending_ops.
 CREATE TABLE drafts (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id          INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -185,20 +185,50 @@ CREATE TABLE drafts (
     -- Bumped by every change, attachments included. Sending builds the message outside
     -- the transaction that queues it, and queues only if this hasn't moved meanwhile.
     revision            INTEGER NOT NULL DEFAULT 0,
-    -- Copy uploaded to the server's Drafts folder. A UID means nothing without the
-    -- mailbox and its UIDVALIDITY, so the three are set and cleared together.
-    -- The repository clears all three before deleting a folder or changing its
-    -- UIDVALIDITY; the CHECK makes a bare ON DELETE SET NULL fail instead of leaving a
-    -- dangling UID behind.
+    -- Copy uploaded to the server's Drafts folder: where it is, its Message-ID and the
+    -- revision it holds. A UID means nothing without the mailbox and its UIDVALIDITY,
+    -- so these are set and cleared together. The repository clears them before
+    -- deleting a folder or changing its UIDVALIDITY; for a new generation it turns the
+    -- copy into an upload to settle, which finds it again by its Message-ID. The CHECK
+    -- makes a bare ON DELETE SET NULL fail instead of leaving a dangling UID behind.
     remote_folder_id    INTEGER REFERENCES folders(id) ON DELETE SET NULL,
     remote_uidvalidity  INTEGER,
     remote_uid          INTEGER,
+    remote_message_id   TEXT,
+    remote_revision     INTEGER,
+    -- Why the server refused the last upload; cleared by one that succeeds.
+    upload_error        TEXT,
     updated_at          INTEGER NOT NULL DEFAULT (unixepoch()),
     CHECK ((remote_folder_id IS NULL) = (remote_uidvalidity IS NULL)
-       AND (remote_folder_id IS NULL) = (remote_uid IS NULL))
+       AND (remote_folder_id IS NULL) = (remote_uid IS NULL)
+       AND (remote_folder_id IS NULL) = (remote_message_id IS NULL)
+       AND (remote_folder_id IS NULL) = (remote_revision IS NULL))
 ) STRICT;
 
 CREATE INDEX drafts_account ON drafts (account_id, updated_at DESC);
+
+-- An APPEND of a draft to the Drafts folder whose outcome isn't recorded yet. Each
+-- upload has a Message-ID of its own, and the row is committed before the APPEND: if
+-- the answer is lost, searching the folder for that Message-ID tells whether the copy
+-- was made, so a retry never leaves two. Settled before anything else is uploaded.
+-- A copy whose folder got a new UIDVALIDITY comes back here too, to be found again.
+-- An upload older than the draft's copy only deletes what it finds.
+--
+-- draft_id goes NULL when the draft is deleted or sent meanwhile: a copy the upload
+-- made is then deleted. Same-account only; checked by the repository (SET NULL rules
+-- out a composite FK).
+CREATE TABLE draft_uploads (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id     INTEGER NOT NULL,
+    draft_id       INTEGER REFERENCES drafts(id) ON DELETE SET NULL,
+    folder_id      INTEGER NOT NULL,
+    message_id_hdr TEXT    NOT NULL, -- without brackets
+    revision       INTEGER NOT NULL,
+    FOREIGN KEY (folder_id, account_id) REFERENCES folders(id, account_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE INDEX draft_uploads_account ON draft_uploads (account_id);
+CREATE INDEX draft_uploads_draft ON draft_uploads (draft_id);
 
 -- Files attached to a draft, copied into the blob store when added.
 CREATE TABLE draft_attachments (

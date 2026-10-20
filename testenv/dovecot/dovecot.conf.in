@@ -50,6 +50,10 @@ namespace inbox {
     special_use = \Trash
     auto = create
   }
+  mailbox Drafts {
+    special_use = \Drafts
+    auto = create
+  }
 }
 
 service imap-login {

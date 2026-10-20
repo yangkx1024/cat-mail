@@ -18,7 +18,6 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use catmail_proto::imap::Session;
-use catmail_proto::mime::{Outgoing, OutgoingAttachment, build_message};
 use catmail_proto::smtp;
 use catmail_store::{NewOutboxEntry, Outbox, OutboxJob, Touched};
 use catmail_types::{
@@ -26,7 +25,6 @@ use catmail_types::{
     OutboxStatus,
 };
 use tokio::sync::Notify;
-use uuid::Uuid;
 
 use crate::connection::{self, SessionFuture, with_session};
 use crate::engine::{Engine, Permit, blocking, now};
@@ -66,47 +64,14 @@ pub(crate) async fn queue_draft(engine: &Arc<Engine>, id: DraftId) -> Result<Out
         return Err(Error::InvalidInput("the draft has no recipients".into()));
     }
 
-    let domain = account
-        .email
-        .rsplit_once('@')
-        .map_or("localhost", |(_, d)| d);
-    let message_id = format!("{}@{domain}", Uuid::new_v4().simple());
+    let message_id = drafts::new_message_id(&account.email);
     let (revision, subject) = (snapshot.revision, content.subject.clone());
     let envelope_from = account.email.clone();
     let engine2 = engine.clone();
     let message_id2 = message_id.clone();
     let raw = blocking(move || {
-        let data = snapshot
-            .blobs
-            .iter()
-            .map(|blob| engine2.blobs.read(blob))
-            .collect::<std::io::Result<Vec<_>>>()?;
-        let draft = &snapshot.draft;
-        let from = Address {
-            name: account.display_name,
-            email: account.email,
-        };
-        let raw = build_message(&Outgoing {
-            from: &from,
-            to: &draft.content.to,
-            cc: &draft.content.cc,
-            subject: &draft.content.subject,
-            text: &draft.content.text,
-            message_id: &message_id2,
-            in_reply_to: draft.in_reply_to.as_deref(),
-            references: &draft.references,
-            date: now(),
-            attachments: draft
-                .attachments
-                .iter()
-                .zip(&data)
-                .map(|(a, data)| OutgoingAttachment {
-                    filename: &a.filename,
-                    mime_type: &a.mime_type,
-                    data,
-                })
-                .collect(),
-        });
+        // Bcc only in the envelope.
+        let raw = drafts::build(&engine2, &account, &snapshot, &message_id2, false)?;
         Ok(engine2.blobs.put_bytes(&raw)?)
     })
     .await?;
@@ -377,9 +342,8 @@ async fn save_one(
             if !engine.write(move |db| db.outbox().finish(id)).await? {
                 return Ok(None);
             }
-            engine.emit(Event::DraftsChanged {
-                account: job.entry.account_id,
-            });
+            // The draft is gone, and its copy on the server goes next.
+            drafts::changed(engine, job.entry.account_id);
             Ok(Some(OutboxEntry {
                 status: OutboxStatus::Done,
                 next_attempt_at: None,
@@ -516,9 +480,8 @@ pub(crate) async fn cancel(engine: &Arc<Engine>, id: OutboxId) -> Result<OutboxE
         Ok(o.cancel(id)?.map(|e| (e, Touched::new())))
     })
     .await?;
-    engine.emit(Event::DraftsChanged {
-        account: entry.account_id,
-    });
+    // Editable again, and maybe changed since its copy on the server was made.
+    drafts::changed(engine, entry.account_id);
     Ok(entry)
 }
 

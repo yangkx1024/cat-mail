@@ -183,6 +183,8 @@ async fn replay(
                     "applied": r.applied,
                     "failed": r.failed,
                     "pending": r.pending,
+                    "drafts_uploaded": r.drafts_uploaded,
+                    "drafts_failed": r.drafts_failed,
                 })
             })
             .collect();
@@ -195,17 +197,29 @@ async fn replay(
             "the server refused {failed} change(s), which were undone; `catmail ops` shows why"
         ));
     }
+    let drafts_failed: u32 = results.iter().map(|(_, r)| r.drafts_failed).sum();
+    if drafts_failed > 0 {
+        errors.push(refused_drafts(drafts_failed));
+    }
     if !errors.is_empty() || pending > 0 {
-        errors.push(
-            "changes not made on the server yet are kept, and made by the next \
-             `catmail sync` or `catmail ops flush`"
-                .into(),
-        );
+        errors.push(format!(
+            "changes not made on the server yet are kept, and made by {NEXT_FLUSH}"
+        ));
     }
     if !errors.is_empty() {
         bail!("{}", errors.join("\n"));
     }
     Ok(())
+}
+
+/// What makes on the server whatever couldn't be made there yet.
+pub(crate) const NEXT_FLUSH: &str = "the next `catmail sync` or `catmail ops flush`";
+
+pub(crate) fn refused_drafts(count: u32) -> String {
+    format!(
+        "the server refused to store {count} draft(s) in its Drafts folder; \
+         `catmail draft show` says why"
+    )
 }
 
 async fn print_ops(client: &MailClient, ops: &[PendingOp]) -> Result<()> {

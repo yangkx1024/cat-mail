@@ -9,13 +9,15 @@ use mail_builder::headers::message_id::MessageId;
 
 use super::fits_in_angle_brackets;
 
-/// A message to send. Bcc recipients are not part of it: they only go into the SMTP
-/// envelope.
+/// A message to send, or a draft to store.
 #[derive(Debug, Clone)]
 pub struct Outgoing<'a> {
     pub from: &'a Address,
     pub to: &'a [Address],
     pub cc: &'a [Address],
+    /// Only for a draft. A message to send leaves them out: they only go into the SMTP
+    /// envelope.
+    pub bcc: &'a [Address],
     pub subject: &'a str,
     /// Plain text; line breaks may be LF or CRLF.
     pub text: &'a str,
@@ -50,6 +52,9 @@ pub fn build_message(message: &Outgoing<'_>) -> Vec<u8> {
     }
     if !message.cc.is_empty() {
         builder = builder.cc(address_list(message.cc));
+    }
+    if !message.bcc.is_empty() {
+        builder = builder.bcc(address_list(message.bcc));
     }
     // Threading IDs come from received mail: copy only what a msg-id can hold, whatever
     // the caller passes.
@@ -140,6 +145,7 @@ mod tests {
             from: &from,
             to: &to,
             cc: &[addr(None, "d@example.com")],
+            bcc: &[],
             subject: "季度报告\r\nBcc: injected@evil.example",
             text: "第一行\n.\nlast line with trailing space ",
             message_id: "abc.123@example.com",
@@ -214,6 +220,7 @@ mod tests {
             from: &from,
             to: &[addr(None, "b@example.com")],
             cc: &[],
+            bcc: &[],
             subject: "Re: hi",
             text: "hi",
             message_id: "m@example.com",
@@ -230,6 +237,31 @@ mod tests {
         assert!(m.header("X-Injected").is_none() && m.header("X-R").is_none());
         assert!(m.in_reply_to().is_empty());
         assert_eq!(m.references().as_text(), Some("ok@x"));
+    }
+
+    #[test]
+    fn drafts_keep_bcc() {
+        let from = addr(None, "a@example.com");
+        let raw = build_message(&Outgoing {
+            from: &from,
+            to: &[],
+            cc: &[],
+            bcc: &[addr(Some("Dave\r\nX-Evil: 1"), "d@example.com")],
+            subject: "",
+            text: "",
+            message_id: "m@example.com",
+            in_reply_to: None,
+            references: &[],
+            date: 0,
+            attachments: Vec::new(),
+        });
+        let m = MessageParser::new().parse(&raw).unwrap();
+        let bcc = m.bcc().unwrap().first().unwrap();
+        assert_eq!(
+            (bcc.name(), bcc.address()),
+            (Some("Dave X-Evil: 1"), Some("d@example.com"))
+        );
+        assert!(m.to().is_none() && m.header("X-Evil").is_none());
     }
 
     #[test]
