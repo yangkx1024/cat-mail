@@ -4,6 +4,8 @@ use std::time::Duration;
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use catmail_types::{Security, ServerConfig};
+use secrecy::ExposeSecret;
+use secrecy::zeroize::Zeroizing;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 use super::{Error, Result};
@@ -112,9 +114,10 @@ impl Session {
         let reply = match credentials {
             Credentials::Password { username, password } => {
                 if has("PLAIN") {
-                    let initial =
-                        BASE64_STANDARD.encode(Credentials::sasl_plain(username, password));
-                    let reply = self.send_line(&format!("AUTH PLAIN {initial}")).await?;
+                    let initial = Zeroizing::new(
+                        BASE64_STANDARD.encode(Credentials::sasl_plain(username, password)),
+                    );
+                    let reply = self.send_parts(&["AUTH PLAIN ", &initial]).await?;
                     if reply.code == 334 {
                         // A server that wants the response on its own line (RFC 4954 allows
                         // either) gets it again.
@@ -124,11 +127,12 @@ impl Session {
                     }
                 } else if has("LOGIN") {
                     let mut reply = self.send_line("AUTH LOGIN").await?;
-                    for answer in [username, password] {
+                    for answer in [username.as_str(), password.expose_secret()] {
                         if reply.code != 334 {
                             break;
                         }
-                        reply = self.send_line(&BASE64_STANDARD.encode(answer)).await?;
+                        let answer = Zeroizing::new(BASE64_STANDARD.encode(answer));
+                        reply = self.send_line(&answer).await?;
                     }
                     reply
                 } else {
@@ -281,7 +285,19 @@ impl Session {
     }
 
     async fn send_line(&mut self, line: &str) -> Result<Reply> {
-        self.write(format!("{line}\r\n").as_bytes()).await?;
+        self.send_parts(&[line]).await
+    }
+
+    /// Sends the parts as one line. It is put together in one buffer of its final size,
+    /// zeroed when dropped: the line may carry an AUTH answer.
+    async fn send_parts(&mut self, parts: &[&str]) -> Result<Reply> {
+        let len = parts.iter().map(|part| part.len()).sum::<usize>() + 2;
+        let mut line = Zeroizing::new(String::with_capacity(len));
+        for part in parts {
+            line.push_str(part);
+        }
+        line.push_str("\r\n");
+        self.write(line.as_bytes()).await?;
         self.read_reply(self.timeout).await
     }
 

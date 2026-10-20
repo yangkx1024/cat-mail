@@ -1,4 +1,5 @@
 use std::fs::{self, File, TryLockError};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,6 +12,7 @@ use catmail_types::{
     MessageId, MessageSummary, NewAccount, OutboxEntry, OutboxId, PendingOp, PendingOpId,
     ReplayReport, SearchQuery, SyncReport,
 };
+use secrecy::{ExposeSecret, SecretString};
 use tokio::runtime::Handle;
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -233,9 +235,9 @@ impl MailClient {
     /// Connects to the IMAP server and logs in with these settings, storing nothing, so a
     /// frontend can reject a wrong password or server before the account exists. Fails as
     /// a sync would: [`Error::AuthFailed`], [`Error::Unsupported`], or a network error.
-    pub async fn check_login(&self, new: &NewAccount, password: &str) -> Result<()> {
+    pub async fn check_login(&self, new: &NewAccount, password: &SecretString) -> Result<()> {
         validate_new_account(new)?;
-        if password.is_empty() {
+        if password.expose_secret().is_empty() {
             return Err(Error::InvalidInput("password must not be empty".into()));
         }
         let engine = self.engine.clone();
@@ -254,9 +256,9 @@ impl MailClient {
 
     /// Stores the account and its password. Does not contact the server; the first
     /// [`sync_account`](Self::sync_account) does.
-    pub async fn add_account(&self, new: NewAccount, password: String) -> Result<Account> {
+    pub async fn add_account(&self, new: NewAccount, password: SecretString) -> Result<Account> {
         validate_new_account(&new)?;
-        if password.is_empty() {
+        if password.expose_secret().is_empty() {
             return Err(Error::InvalidInput("password must not be empty".into()));
         }
         let engine = self.engine.clone();
@@ -672,7 +674,33 @@ impl MailClient {
         let engine = self.engine.clone();
         self.rt.run_blocking(move || gc::collect(&engine)).await
     }
+
+    /// Writes `contents` to a new file in [`Config::handoff_dir`], readable by this user
+    /// only, for another program (a browser) to open, and returns its path. The file is
+    /// left there: the other program reads it after this returns. It goes when the engine
+    /// next opens, or when a later hand-off finds it older than ten minutes.
+    pub async fn hand_off(&self, extension: &str, contents: Vec<u8>) -> Result<PathBuf> {
+        let dir = self.config().handoff_dir();
+        let suffix = format!(".{extension}");
+        self.rt
+            .run_blocking(move || {
+                remove_old_files(&dir, KEEP_HANDED_OFF);
+                let mut file = tempfile::Builder::new()
+                    .prefix("catmail-")
+                    .suffix(&suffix)
+                    .tempfile_in(&dir)?;
+                file.write_all(&contents)?;
+                let (_, path) = file.keep().map_err(|e| e.error)?;
+                Ok(path)
+            })
+            .await
+    }
 }
+
+/// How long a handed-off file is kept within a session. The other program reads it as
+/// soon as it opens it; after that it is only a copy of a message lying on disk, and a
+/// GUI left open for days would otherwise keep days of them.
+const KEEP_HANDED_OFF: Duration = Duration::from_secs(10 * 60);
 
 fn lock_data_dir(config: &Config) -> Result<File> {
     create_data_dir(config.data_dir())?;
@@ -740,6 +768,28 @@ fn clear_handoff_dir(dir: &Path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
             tracing::warn!(error = %e, dir = %dir.display(), "couldn't clear handed-off files")
+        }
+    }
+}
+
+/// Deletes the files in `dir` last written more than `age` ago. Failing only costs disk
+/// space (Windows refuses while another program still has the file open).
+fn remove_old_files(dir: &Path, age: Duration) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let old = entry.metadata().is_ok_and(|meta| {
+            meta.is_file()
+                && meta
+                    .modified()
+                    .ok()
+                    .and_then(|modified| modified.elapsed().ok())
+                    .is_some_and(|elapsed| elapsed > age)
+        });
+        if old && let Err(e) = fs::remove_file(entry.path()) {
+            tracing::debug!(error = %e, path = %entry.path().display(),
+                "couldn't remove handed-off file");
         }
     }
 }
@@ -825,17 +875,22 @@ mod tests {
     }
 
     impl SecretStore for GatedSecrets {
-        fn set(&self, key: &str, secret: &str) -> Result<()> {
+        fn set(&self, key: &str, secret: &SecretString) -> Result<()> {
             self.entered.notify_one();
             self.release.lock().unwrap().recv().unwrap();
             self.inner.set(key, secret)
         }
-        fn get(&self, key: &str) -> Result<Option<String>> {
+        fn get(&self, key: &str) -> Result<Option<SecretString>> {
             self.inner.get(key)
         }
         fn delete(&self, key: &str) -> Result<()> {
             self.inner.delete(key)
         }
+    }
+
+    fn stored(secrets: &MemorySecrets, key: &str) -> Option<String> {
+        let secret = secrets.get(key).unwrap()?;
+        Some(secret.expose_secret().to_owned())
     }
 
     fn open_client(dir: &std::path::Path, secrets: Arc<dyn SecretStore>) -> MailClient {
@@ -849,10 +904,10 @@ mod tests {
     struct FailingSecrets;
 
     impl SecretStore for FailingSecrets {
-        fn set(&self, _: &str, _: &str) -> Result<()> {
+        fn set(&self, _: &str, _: &SecretString) -> Result<()> {
             Err(Error::Secrets("locked".into()))
         }
-        fn get(&self, _: &str) -> Result<Option<String>> {
+        fn get(&self, _: &str) -> Result<Option<SecretString>> {
             Ok(None)
         }
         fn delete(&self, _: &str) -> Result<()> {
@@ -882,7 +937,7 @@ mod tests {
             }
         );
         let key = secret_key(&client, account.id);
-        assert_eq!(secrets.get(&key).unwrap().as_deref(), Some("hunter2"));
+        assert_eq!(stored(&secrets, &key).as_deref(), Some("hunter2"));
         assert_eq!(client.list_accounts().await.unwrap(), vec![account.clone()]);
 
         client.remove_account(account.id).await.unwrap();
@@ -957,7 +1012,7 @@ mod tests {
         let r = pollster::block_on(client.add_account(bad, "pw".into()));
         assert!(matches!(r, Err(Error::InvalidInput(_))));
 
-        let r = pollster::block_on(client.add_account(new_account("a@example.com"), String::new()));
+        let r = pollster::block_on(client.add_account(new_account("a@example.com"), "".into()));
         assert!(matches!(r, Err(Error::InvalidInput(_))));
     }
 
@@ -980,7 +1035,7 @@ mod tests {
 
         b.remove_account(acc_b.id).await.unwrap();
         assert_eq!(
-            secrets.get(&secret_key(&a, acc_a.id)).unwrap().as_deref(),
+            stored(&secrets, &secret_key(&a, acc_a.id)).as_deref(),
             Some("pw-a")
         );
     }
@@ -1034,6 +1089,38 @@ mod tests {
         drop(first);
         drop(clone);
         open_client(dir.path(), secrets);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handed_off_files_are_removed_once_old() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = open_client(dir.path(), Arc::new(MemorySecrets::default()));
+        let old = client
+            .hand_off("html", b"<p>old</p>".to_vec())
+            .await
+            .unwrap();
+        let recent = client
+            .hand_off("html", b"<p>recent</p>".to_vec())
+            .await
+            .unwrap();
+        assert!(old.starts_with(client.config().handoff_dir()));
+        assert_eq!(old.extension().unwrap(), "html");
+        assert_ne!(old, recent);
+        let written = std::time::SystemTime::now() - KEEP_HANDED_OFF - Duration::from_secs(60);
+        File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(written)
+            .unwrap();
+
+        let new = client
+            .hand_off("html", b"<p>new</p>".to_vec())
+            .await
+            .unwrap();
+        assert!(!old.exists());
+        assert_eq!(fs::read_to_string(&recent).unwrap(), "<p>recent</p>");
+        assert_eq!(fs::read_to_string(&new).unwrap(), "<p>new</p>");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1157,10 +1244,10 @@ mod tests {
     }
 
     impl SecretStore for LockableSecrets {
-        fn set(&self, key: &str, secret: &str) -> Result<()> {
+        fn set(&self, key: &str, secret: &SecretString) -> Result<()> {
             self.inner.set(key, secret)
         }
-        fn get(&self, key: &str) -> Result<Option<String>> {
+        fn get(&self, key: &str) -> Result<Option<SecretString>> {
             if self.locked.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(Error::Secrets("collection is locked".into()));
             }

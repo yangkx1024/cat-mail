@@ -7,16 +7,17 @@
 
 use catmail_proto::Credentials;
 use catmail_types::{Account, AuthKind, NewAccount};
+use secrecy::SecretString;
 
 use crate::secrets::SecretStore;
 use crate::{Error, Result};
 
 /// For an account that isn't stored yet, from the secret the user just entered.
-pub(crate) fn new_account_credentials(new: &NewAccount, secret: &str) -> Credentials {
+pub(crate) fn new_account_credentials(new: &NewAccount, secret: &SecretString) -> Credentials {
     match new.auth {
         AuthKind::Password => Credentials::Password {
             username: new.username.clone(),
-            password: secret.to_owned(),
+            password: secret.clone(),
         },
     }
 }

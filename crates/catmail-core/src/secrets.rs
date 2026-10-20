@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use secrecy::{ExposeSecret, SecretString};
+
 use crate::{Error, Result};
 
 /// Storage for account secrets (passwords, later OAuth tokens). Calls may block.
 pub trait SecretStore: Send + Sync {
-    fn set(&self, key: &str, secret: &str) -> Result<()>;
-    fn get(&self, key: &str) -> Result<Option<String>>;
+    fn set(&self, key: &str, secret: &SecretString) -> Result<()>;
+    fn get(&self, key: &str) -> Result<Option<SecretString>>;
     /// Deleting a missing key is not an error.
     fn delete(&self, key: &str) -> Result<()>;
 }
@@ -36,13 +38,15 @@ impl Default for KeyringSecrets {
 }
 
 impl SecretStore for KeyringSecrets {
-    fn set(&self, key: &str, secret: &str) -> Result<()> {
-        self.entry(key)?.set_password(secret).map_err(keyring_error)
+    fn set(&self, key: &str, secret: &SecretString) -> Result<()> {
+        self.entry(key)?
+            .set_password(secret.expose_secret())
+            .map_err(keyring_error)
     }
 
-    fn get(&self, key: &str) -> Result<Option<String>> {
+    fn get(&self, key: &str) -> Result<Option<SecretString>> {
         match self.entry(key)?.get_password() {
-            Ok(secret) => Ok(Some(secret)),
+            Ok(secret) => Ok(Some(secret.into())),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(e) => Err(keyring_error(e)),
         }
@@ -69,7 +73,7 @@ fn keyring_error(e: keyring::Error) -> Error {
 /// In-process secret store. Nothing is persisted; meant for tests.
 #[derive(Default)]
 pub struct MemorySecrets {
-    secrets: Mutex<HashMap<String, String>>,
+    secrets: Mutex<HashMap<String, SecretString>>,
 }
 
 impl MemorySecrets {
@@ -80,15 +84,15 @@ impl MemorySecrets {
 }
 
 impl SecretStore for MemorySecrets {
-    fn set(&self, key: &str, secret: &str) -> Result<()> {
+    fn set(&self, key: &str, secret: &SecretString) -> Result<()> {
         self.secrets
             .lock()
             .unwrap()
-            .insert(key.into(), secret.into());
+            .insert(key.into(), secret.clone());
         Ok(())
     }
 
-    fn get(&self, key: &str) -> Result<Option<String>> {
+    fn get(&self, key: &str) -> Result<Option<SecretString>> {
         Ok(self.secrets.lock().unwrap().get(key).cloned())
     }
 

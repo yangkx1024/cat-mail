@@ -29,6 +29,11 @@ STARTTLS 升级和测试。`imap-codec 2.0.0-alpha.9` 未开启 `nom/alloc`，`c
   （Dovecot 无法写入时就这样）。imap-next 只在 BAD 时放弃这条命令，收到 NO 后仍等着发送剩下的
   literal，之后排队的命令永远发不出去。所以命令完整发出之前收到 NO/BAD 时返回 `Error::Aborted`
   （致命）：连接不再放回连接池，`Connection` 自己也记下，之后的命令立即失败。
+- **一条命令的回答总量有上限。** imap-next 只限制单条响应 100 MiB，不限条数，而一条命令的全部 untagged
+  响应要攒到 tagged 完成才返回。所以连接层按字节计数，一条命令读到超过 256 MiB 就返回 `Error::Protocol`
+  并把连接标成不可用（剩下的回答不能被当成下一条命令的）。我们要的最大回答是一整封邮件，正常服务器碰不到。
+- **错误和日志里不放 imap-next 的事件本身**，只放变体名（`connection.rs` 的 `event_name`）：事件可能
+  带着含凭据的命令，而 imap-types 的 `Secret` 只在 release 构建里脱敏。
 - 每次网络读写超时 60 秒。
 - TCP keepalive：安静 60 秒后开始探测，间隔 15 秒（`net::configure`，经 socket2；tokio 不暴露）。NAT
   无声地忘掉连接时几分钟内就能发现，而不是等到下一条命令或 IDLE 到期。
@@ -69,6 +74,11 @@ VANISHED、FETCH）、`stop` 完成或过了 `max`，然后发 DONE、等 tagged
 `catmail_proto::Credentials` 是协议层看到的全部，IMAP 和 SMTP 共用，目前只有
 `Password { username, password }`。IMAP 有 `AUTH=PLAIN` 就用 `AUTHENTICATE PLAIN`，否则 `LOGIN`
 （`LOGINDISABLED` 时报错）；SMTP 优先 `AUTH PLAIN`，其次 `AUTH LOGIN`。
+
+密码一路是 `secrecy::SecretString`（core 重新导出）：从 CLI / GUI 读入、`MailClient::add_account`、
+`SecretStore`、`Credentials` 到 SASL 响应和 SMTP 的 AUTH 行（`Zeroizing`），`Debug` 输出不含它，释放时
+清零。交给 imap-next 的副本和 GUI 输入框里的文本不归我们管，这只是尽力而为：目标是不让密码散落在
+日志和随手的格式化里，而不是对抗能读进程内存的人。
 
 凭据从哪来由 `catmail-core/src/auth.rs` 按 `AuthKind` 决定（密码账户读 keyring）。加 OAuth2 只需
 新增 `AuthKind` 和 `Credentials` 的变体（XOAUTH2 / OAUTHBEARER）以及刷新 token 的分支，同步和发信

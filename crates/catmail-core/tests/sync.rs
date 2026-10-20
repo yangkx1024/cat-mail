@@ -334,7 +334,7 @@ async fn check_login_logs_in_and_stores_nothing() {
     };
 
     let start = env.fake.state().log.len();
-    env.client.check_login(&new, "pw").await.unwrap();
+    env.client.check_login(&new, &"pw".into()).await.unwrap();
     let commands = env.commands_since(start);
     assert!(
         commands
@@ -343,9 +343,13 @@ async fn check_login_logs_in_and_stores_nothing() {
     );
     assert_eq!(commands.last().map(String::as_str), Some("LOGOUT"));
 
-    let err = env.client.check_login(&new, "wrong").await.unwrap_err();
+    let err = env
+        .client
+        .check_login(&new, &"wrong".into())
+        .await
+        .unwrap_err();
     assert!(matches!(err, Error::AuthFailed(_)), "{err:?}");
-    let err = env.client.check_login(&new, "").await.unwrap_err();
+    let err = env.client.check_login(&new, &"".into()).await.unwrap_err();
     assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
 
     let accounts = env.client.list_accounts().await.unwrap();
