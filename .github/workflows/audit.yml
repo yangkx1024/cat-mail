@@ -1,0 +1,65 @@
+name: Audit
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore: &docs-only
+      - "**.md"
+      - "docs/**"
+      - ".agents/**"
+      - "LICENSE-*"
+  pull_request:
+    paths-ignore: *docs-only
+  # Advisories are published whether or not we push: check main every Monday, so a new
+  # one doesn't wait for the next change to show up.
+  schedule:
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Dependency checks against deny.toml: RustSec advisories, the license allowlist, banned
+  # crates (a second TLS or crypto stack) and where crates come from. Nothing is compiled,
+  # but cargo metadata still downloads every crate in Cargo.lock.
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write # the SARIF upload below
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Licenses, bans and sources
+        run: cargo deny --locked check bans licenses sources
+
+      - name: Advisories
+        run: cargo deny --locked check advisories
+
+      # Open advisories also go to the repository's Security tab (code scanning), where
+      # they stay listed until fixed or ignored in deny.toml. Not from pull requests: one
+      # from a fork has no permission to upload, and main's alerts are the ones to track.
+      - name: Export advisories for code scanning
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        run: cargo deny --locked --format sarif check advisories > cargo-deny.sarif || true
+
+      - uses: github/codeql-action/upload-sarif@v4
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        with:
+          sarif_file: cargo-deny.sarif
+          category: cargo-deny

@@ -1,0 +1,82 @@
+# cargo-deny: run in CI by .github/workflows/audit.yml, locally with
+# `nix develop -c cargo deny check`.
+
+[graph]
+# The targets CI builds and the ones we ship to, so platform-only crates (windows-sys,
+# objc2, ...) are checked too, and nothing that only builds for other targets is.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+all-features = true
+
+[advisories]
+# Vulnerabilities, unsound and unmaintained crates all fail the check. An advisory that
+# doesn't affect us goes here with the reason, and is revisited when its crate updates.
+ignore = [
+    # Unmaintained, no known vulnerability, and only reachable through gpui-kit's own
+    # dependencies (fonts, SVG, accessibility, D-Bus); they go when gpui-kit drops them.
+    { id = "RUSTSEC-2024-0384", reason = "instant, via gpui-kit" },
+    { id = "RUSTSEC-2024-0436", reason = "paste, via gpui-kit, metal and exr" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser, via gpui-kit's font stack" },
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz, via gpui-kit's SVG renderer" },
+    # zbus_names, zvariant and zvariant_derive were merged into zbus 6; we get zbus 5
+    # through gpui-kit and keyring's Secret Service store, until both move to zbus 6.
+    { id = "RUSTSEC-2026-0370", reason = "zvariant, via zbus" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names, via zbus" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive, via zbus" },
+]
+
+[licenses]
+# Permissive licenses only, so binaries can ship under MIT OR Apache-2.0. MPL-2.0 is
+# file-level copyleft: fine as long as those crates' own sources stay MPL.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[licenses.private]
+# The workspace crates are not published to a registry; their license is the workspace's.
+ignore = true
+
+[bans]
+# GPUI alone pulls in many duplicate versions we can't unify, so duplicates are allowed;
+# what must not come in twice is a TLS or crypto stack (see the rustls entry in Cargo.toml).
+multiple-versions = "allow"
+wildcards = "allow"
+deny = [
+    # rustls runs on ring; aws-lc-rs would be a second provider (and needs cmake/NASM on
+    # Windows), and rustls panics at runtime if both are enabled without choosing one.
+    { crate = "aws-lc-rs", reason = "rustls uses ring; a second crypto provider" },
+    { crate = "aws-lc-sys", reason = "rustls uses ring; a second crypto provider" },
+    { crate = "aws-lc-fips-sys", reason = "rustls uses ring; a second crypto provider" },
+    # TLS is rustls only; OpenSSL would be a second stack to keep patched.
+    { crate = "openssl", reason = "TLS is rustls only" },
+    { crate = "openssl-sys", reason = "TLS is rustls only" },
+    { crate = "native-tls", reason = "TLS is rustls only" },
+    { crate = "boring", reason = "TLS is rustls only" },
+    { crate = "boring-sys", reason = "TLS is rustls only" },
+]
+
+[sources]
+# crates.io only: a git or other registry dependency has to be added here on purpose.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
