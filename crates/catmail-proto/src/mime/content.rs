@@ -28,6 +28,9 @@ pub struct Part {
     pub section: String,
     /// Content-Transfer-Encoding, lower-case.
     pub transfer_encoding: Option<String>,
+    /// As the sender wrote it, for display only: it may hold path separators, control
+    /// characters or a reserved name. Clean it before using it as a file name
+    /// (`catmail_core::safe_filename`).
     pub filename: Option<String>,
     /// Lower-case `type/subtype`.
     pub mime_type: String,

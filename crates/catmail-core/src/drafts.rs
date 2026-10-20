@@ -264,7 +264,7 @@ pub(crate) fn build(
         name: account.display_name.clone(),
         email: account.email.clone(),
     };
-    Ok(build_message(&Outgoing {
+    build_message(&Outgoing {
         from: &from,
         to: &draft.content.to,
         cc: &draft.content.cc,
@@ -285,7 +285,8 @@ pub(crate) fn build(
                 data,
             })
             .collect(),
-    }))
+    })
+    .map_err(|e| Error::InvalidInput(e.to_string()))
 }
 
 /// Parses what a user types into a To / Cc / Bcc field: addresses separated by commas
