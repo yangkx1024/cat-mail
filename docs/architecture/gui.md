@@ -3,8 +3,10 @@
 [← 架构](../architecture.md)
 
 `catmail-gui`，基于 `gpui-kit`（longbridge）：虚拟列表、Table、编辑器、原生 HTML 渲染，无 WebView。
-gpui-kit 构建在 `gpui-pre-*` 快照上并精确 pin 版本，应用只依赖 `gpui-kit`（`use gpui_kit::*` 就是
-GPUI），不直接依赖 `gpui`，否则会链接两份 GPUI。gpui-kit 的编码与设计规范作为 skill 放在
+gpui-kit 精确 pin 它所用的 GPUI，应用只依赖 `gpui-kit`（`use gpui_kit::*` 就是 GPUI），不直接依赖
+`gpui`，否则会链接两份 GPUI。我们开启 gpui-kit 的 `gpui-fast` feature，后端从默认的 `gpui-pre-*` 快照
+换成 GPUI Fast（`gpui-fast-*`，渲染和布局上的优化），导入路径不变；feature 是叠加的，`gpui-pre-*`
+仍会编译，但应用只看到 GPUI Fast 的类型。gpui-kit 的编码与设计规范作为 skill 放在
 `crates/catmail-gui/.claude/skills/`，改 GUI 前先读。
 
 M5 的界面设计稿（三栏、写信窗口、发件箱、设置与主题导入、配色映射表）见 Claude Design 画布
@@ -190,7 +192,7 @@ gpui-kit 的表格单元格只是一个行内段落（gpui-base `text/format/htm
 - 某个单元格里有块元素，或者每行至多一个单元格的表格，连同 `tbody` / `tr` / `td` 改成嵌套的 `div`，
   属性原样保留；其余是数据表格，保持不变（单元格里只有行内内容，gpui-kit 能排）。多列布局因此变成
   上下排列，对窄的读信区反而合适。
-- gpui-kit 块元素表里缺、却能通过清洗的块元素（`center`、`dd`、`dt`、`hgroup`，对照 gpui-kit 0.7.3）
+- gpui-kit 块元素表里缺、却能通过清洗的块元素（`center`、`dd`、`dt`、`hgroup`，对照 gpui-kit 0.8.0）
   不论在哪都改成 `div`，否则同样被压平。
 - 没有可改的内容时直接借用原字符串，不解析。
 - 只用于读信区：数据库里和"在浏览器打开"用的都是原样清洗后的 HTML，展开在打开邮件时于后台线程做。
@@ -211,12 +213,10 @@ Lucide 图标（勾、箭头、关闭、搜索……）在资源加载时按路�
 
 ## 已知问题与升级须知
 
-- **可变字体的字重（上游）。** Linux 上 GPUI（`gpui-pre-wgpu` 0.3.9 的 `cosmic_text_system.rs`）栅格化
-  字形时不设 `wght` 轴坐标，可变字体一律按默认实例渲染。系统只有 Noto Sans CJK 可变字体时，中文偏细、
-  加粗无效；只给静态字体时字重正常。上游跟踪 zed-industries/zed#60155（#64123、#64783 同一处）。我们
+- **可变字体的字重（上游）。** Linux 上 GPUI（`gpui-fast-wgpu` 0.1.10 的 `cosmic_text_system.rs`，
+  与 `gpui-pre-wgpu` 0.3.9 的相同）栅格化字形时不设 `wght` 轴坐标，可变字体一律按默认实例渲染。系统
+  只有 Noto Sans CJK 可变字体时，中文偏细、加粗无效；只给静态字体时字重正常。上游跟踪 zed-industries/zed#60155（#64123、#64783 同一处）。我们
   不绕开（打包静态 CJK 字体每个字重数 MB），用户可改装静态版（如 nixpkgs 的
   `noto-fonts-cjk-sans-static`）。升级 gpui-kit 时检查这几个 issue。
-- **依赖锁定。** Cargo 解析锁文件时会把 `dep?/feature` 里的可选依赖也算进去，开启
-  `gpui-kit/test-support` 会让 `gpui-fast-*` 进入 `Cargo.lock`（不编译）。它们精确 pin 了
-  `cocoa = 0.26.0` 和 `unicode-properties = 0.1.3`，锁文件里这两个必须保持这些版本；升级 gpui-kit 时
-  对照它自带的 `Cargo.lock`。
+- **依赖锁定。** `gpui-fast-*` 精确 pin 了 `cocoa = 0.26.0` 和 `unicode-properties = 0.1.3`，锁文件里
+  这两个必须保持这些版本；升级 gpui-kit 时对照它自带的 `Cargo.lock`。
