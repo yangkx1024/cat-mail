@@ -13,6 +13,7 @@ mod fts;
 mod messages;
 mod ops;
 mod outbox;
+mod private;
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -31,6 +32,7 @@ pub use folders::{FolderSyncState, Folders, Reconciled, RemoteFolder};
 pub use messages::{MessageLocation, Messages, NewBody, NewMessage};
 pub use ops::{CopyCheckpoint, Moved, PendingOps, ReplayFolder, ReplayKind, ReplayOp, Touched};
 pub use outbox::{NewOutboxEntry, Outbox, OutboxJob};
+pub use private::create_private_dir;
 
 /// Every `*_blob_hash` column (a test checks none is missing).
 const BLOB_REFERENCES: &str = "
@@ -100,15 +102,28 @@ impl<'c> Db<'c> {
 }
 
 impl Store {
-    /// Opens (creating if needed) the database at `path` and migrates it to the latest schema.
+    /// Opens (creating if needed) the database at `path` and migrates it to the latest
+    /// schema. The database and its WAL files are made readable by the user alone.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
+        }
+        private::new_file(path)?;
+        // SQLite gives the WAL files it creates the database's mode; ones left from an
+        // earlier session keep theirs.
+        for suffix in ["", "-wal", "-shm"] {
+            let mut file = path.as_os_str().to_owned();
+            file.push(suffix);
+            private::make_private(Path::new(&file))?;
         }
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         // Commits survive the app crashing, not a power cut; see `write_durable`.
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        // Zeroes deleted rows and freed pages, so a removed account's or message's text
+        // doesn't linger in the file. Costs writing the freed pages (through the WAL),
+        // also those FTS merges free.
+        conn.pragma_update(None, "secure_delete", true)?;
         Self::init(conn)
     }
 
@@ -215,6 +230,43 @@ mod tests {
 
     fn is_constraint_violation(err: &rusqlite::Error) -> bool {
         err.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn database_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catmail.db");
+        let wal = dir.path().join("catmail.db-wal");
+        // As left by a version that didn't restrict them.
+        for file in [&path, &wal] {
+            std::fs::write(file, b"").unwrap();
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        store
+            .write(|db| {
+                seed(db.conn);
+                Ok(())
+            })
+            .unwrap();
+        for suffix in ["", "-wal", "-shm"] {
+            let file = dir.path().join(format!("catmail.db{suffix}"));
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "{suffix}: {mode:o}");
+        }
+    }
+
+    #[test]
+    fn deleted_content_is_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("catmail.db")).unwrap();
+        let secure_delete: i64 = store
+            .conn()
+            .pragma_query_value(None, "secure_delete", |r| r.get(0))
+            .unwrap();
+        assert_eq!(secure_delete, 1);
     }
 
     #[test]

@@ -248,10 +248,10 @@ impl Reader {
 }
 
 /// The page is left in `dir` (readable by this user only): the browser reads it after
-/// this returns. The engine empties the directory when it next opens.
+/// this returns. The engine creates the directory, private, and empties it when it next
+/// opens.
 fn write_browser_page(dir: &Path, page: &str) -> anyhow::Result<PathBuf> {
     use std::io::Write as _;
-    std::fs::create_dir_all(dir)?;
     let mut file = tempfile::Builder::new()
         .prefix("message-")
         .suffix(".html")
@@ -279,6 +279,7 @@ mod tests {
     fn browser_pages_go_to_the_handoff_dir() {
         let data = tempfile::tempdir().unwrap();
         let dir = catmail_core::Config::with_data_dir(data.path()).handoff_dir();
+        std::fs::create_dir(&dir).unwrap();
         let first = write_browser_page(&dir, "<p>one</p>").unwrap();
         let second = write_browser_page(&dir, "<p>two</p>").unwrap();
         assert_ne!(first, second);

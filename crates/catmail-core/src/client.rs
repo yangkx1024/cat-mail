@@ -105,11 +105,14 @@ impl MailClientBuilder {
     /// Locks the data directory, empties [`Config::handoff_dir`], then opens the database
     /// (migrating it if needed) and the blob store. Blocks briefly. Fails with
     /// [`Error::AlreadyRunning`] if another engine, in this or another process, has the
-    /// directory open. Sends a previous engine left unfinished before the end of the
-    /// message go back to the queue.
+    /// directory open, and with [`Error::DataDirNotOwned`] if it belongs to another user.
+    /// Sends a previous engine left unfinished before the end of the message go back to
+    /// the queue.
     pub fn open(self) -> Result<MailClient> {
         let data_dir_lock = lock_data_dir(&self.config)?;
-        clear_handoff_dir(&self.config.handoff_dir());
+        let handoff_dir = self.config.handoff_dir();
+        clear_handoff_dir(&handoff_dir);
+        catmail_store::create_private_dir(&handoff_dir)?;
         let rt = match self.runtime {
             Some(handle) => Runtime::shared(handle),
             None => Runtime::owned()?,
@@ -689,25 +692,42 @@ fn lock_data_dir(config: &Config) -> Result<File> {
 
 /// Creates the data directory readable by the user alone: the database holds every
 /// message's headers and text, and the drafts. Parent directories are made as usual. An
-/// existing directory is left as it is.
-fn create_data_dir(dir: &Path) -> std::io::Result<()> {
+/// existing directory is left as it is (it may be one the user chose, such as their
+/// home; the files the engine makes in it are private anyway), but it must belong to
+/// this user.
+fn create_data_dir(dir: &Path) -> Result<()> {
     if let Some(parent) = dir.parent() {
         fs::create_dir_all(parent)?;
     }
-    #[cfg(unix)]
-    let builder = {
-        use std::os::unix::fs::DirBuilderExt;
-        let mut builder = fs::DirBuilder::new();
-        builder.mode(0o700);
-        builder
-    };
     // Windows: the new directory inherits the user profile's ACL.
-    #[cfg(not(unix))]
-    let builder = fs::DirBuilder::new();
-    match builder.create(dir) {
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => Ok(()),
-        result => result,
+    catmail_store::create_private_dir(dir)?;
+    check_data_dir_owner(dir)
+}
+
+/// Its owner could swap the files in it, and a symbolic link someone else planted where
+/// the directory was expected (in a shared location) points to one they own. A link to
+/// a directory of the user's own is fine. Windows: the directory's ACL is the user's to
+/// set.
+fn check_data_dir_owner(dir: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::metadata(dir)?;
+        if metadata.uid() != rustix::process::geteuid().as_raw() {
+            return Err(Error::DataDirNotOwned(dir.to_path_buf()));
+        }
+        let mode = metadata.mode() & 0o777;
+        if mode & 0o077 != 0 {
+            tracing::warn!(
+                dir = %dir.display(),
+                mode = format!("{mode:o}"),
+                "other users can list the data directory; the files in it are private"
+            );
+        }
     }
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
 }
 
 /// Files handed to other programs in earlier sessions hold whole messages. The lock just
@@ -1022,7 +1042,6 @@ mod tests {
         let secrets = Arc::new(MemorySecrets::default());
         let first = open_client(dir.path(), secrets.clone());
         let handoff = first.config().handoff_dir();
-        fs::create_dir_all(&handoff).unwrap();
         let page = handoff.join("message.html");
         fs::write(&page, "<p>hi</p>").unwrap();
 
@@ -1037,7 +1056,8 @@ mod tests {
         drop(first);
         let reopened = open_client(dir.path(), secrets);
         assert!(!page.exists());
-        assert!(!reopened.config().handoff_dir().exists());
+        let handoff = reopened.config().handoff_dir();
+        assert_eq!(fs::read_dir(handoff).unwrap().count(), 0);
     }
 
     /// A client on `dir` with one account, `email`.
@@ -1189,6 +1209,47 @@ mod tests {
         open_client(&data, Arc::new(MemorySecrets::default()));
         let mode = fs::metadata(&data).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700, "{mode:o}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn files_in_a_shared_data_dir_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("shared");
+        fs::create_dir(&data).unwrap();
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o755)).unwrap();
+        let client = open_client(&data, Arc::new(MemorySecrets::default()));
+        let config = client.config();
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&data), 0o755, "the user's directory is left as it is");
+        assert_eq!(mode(&config.db_path()), 0o600);
+        assert_eq!(mode(&config.handoff_dir()), 0o700);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn data_dir_of_another_user_is_refused() {
+        if rustix::process::geteuid().is_root() {
+            return; // Root owns the directory below.
+        }
+        // As if someone planted a link to a directory of theirs in a shared location.
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("catmail");
+        std::os::unix::fs::symlink("/", &data).unwrap();
+        let opened = MailClient::builder(Config::with_data_dir(&data))
+            .runtime(Handle::current())
+            .secrets(Arc::new(MemorySecrets::default()))
+            .open();
+        assert!(matches!(opened, Err(Error::DataDirNotOwned(_))));
+
+        // A link to a directory of the user's own is fine.
+        let own = dir.path().join("own");
+        fs::create_dir(&own).unwrap();
+        fs::remove_file(&data).unwrap();
+        std::os::unix::fs::symlink(&own, &data).unwrap();
+        open_client(&data, Arc::new(MemorySecrets::default()));
+        assert!(own.join("catmail.db").exists());
     }
 
     #[tokio::test(flavor = "multi_thread")]
