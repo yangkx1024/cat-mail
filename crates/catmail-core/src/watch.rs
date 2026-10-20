@@ -4,10 +4,10 @@
 //! One task per account, with one connection, started when the engine opens or the
 //! account is added. It syncs every folder now and then, and in
 //! between watches INBOX: with IDLE the server says when something changes, without it
-//! INBOX is checked at an interval. Queued local changes wake it to make them on the
-//! server at once. Its work takes the account's sync permit like any sync, but its
-//! waiting doesn't: a sync or replay the user asks for meanwhile runs on a connection of
-//! its own.
+//! INBOX is checked at an interval. Queued local changes, and changes to drafts, wake
+//! it to make them on the server at once. Its work takes the account's sync permit
+//! like any sync, but its waiting doesn't: a sync or replay the user asks for meanwhile
+//! runs on a connection of its own.
 //!
 //! The tasks hold the engine weakly, so dropping the last client ends them, and with
 //! them their connections.
@@ -193,8 +193,8 @@ fn full_sync_in(engine: &Engine, account: AccountId, schedule: &SyncSchedule) ->
     })
 }
 
-/// Syncs every folder if that is due, else makes queued local changes on the server;
-/// then syncs INBOX. On the connection there, or a new one (see
+/// Syncs every folder if that is due, else makes queued local changes on the server
+/// (changed drafts included); then syncs INBOX. On the connection there, or a new one (see
 /// [`on_session`](connection::on_session)).
 async fn step(
     engine: &Arc<Engine>,
@@ -223,12 +223,7 @@ async fn work(
             if full_sync_in(engine, account, schedule).is_zero() {
                 sync::run(engine, session, account).await?;
             } else {
-                let pending = engine
-                    .read(move |db| db.ops().pending_folders(account))
-                    .await?;
-                if !pending.is_empty() {
-                    ops::replay(engine, session, account, &pending).await?;
-                }
+                ops::replay_queued(engine, session, account).await?;
             }
             // Last, so that it is the selected mailbox to IDLE on.
             match sync::sync_inbox(engine, session, account).await {

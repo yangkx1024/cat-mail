@@ -25,7 +25,7 @@ use rusqlite_migration::{M, Migrations};
 pub use accounts::Accounts;
 pub use attachments::{AttachmentSource, Attachments, NewAttachment};
 pub use blob::BlobStore;
-pub use drafts::{DraftReply, DraftSnapshot, Drafts, NewDraftAttachment};
+pub use drafts::{DraftReply, DraftSnapshot, DraftUpload, Drafts, NewDraftAttachment};
 pub use error::{Error, Result};
 pub use folders::{FolderSyncState, Folders, Reconciled, RemoteFolder};
 pub use messages::{MessageLocation, Messages, NewBody, NewMessage};

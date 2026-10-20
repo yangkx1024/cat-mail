@@ -5,6 +5,7 @@ use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
 use crate::Result;
 use crate::columns::parse_opt_text;
+use crate::drafts::Drafts;
 use crate::ops::{PendingOps, Touched};
 
 const COLUMNS: &str = "id, account_id, name, delimiter, role, selectable,
@@ -185,7 +186,7 @@ impl<'c> Folders<'c> {
             .collect();
         for id in gone {
             touched.extend(PendingOps::new(self.conn).forget_folder(FolderId(id))?);
-            self.forget_remote_draft_copies(FolderId(id), None)?;
+            Drafts::new(self.conn).end_generation(FolderId(id), None)?;
             self.conn
                 .execute("DELETE FROM folders WHERE id = ?1", [id])?;
             changed = true;
@@ -224,7 +225,7 @@ impl<'c> Folders<'c> {
         self.conn
             .execute("DELETE FROM messages WHERE folder_id = ?1", [folder.0])?;
         let touched = PendingOps::new(self.conn).end_generation(folder, next)?;
-        self.forget_remote_draft_copies(folder, next)?;
+        Drafts::new(self.conn).end_generation(folder, next)?;
         self.conn.execute(
             "UPDATE folders SET uidvalidity = ?2, uidnext = NULL, highest_modseq = NULL
              WHERE id = ?1",
@@ -244,18 +245,6 @@ impl<'c> Folders<'c> {
             "UPDATE folders SET uidnext = ?2, highest_modseq = ?3, last_synced_at = unixepoch()
              WHERE id = ?1",
             params![folder.0, uidnext, highest_modseq.map(|m| m as i64)],
-        )?;
-        Ok(())
-    }
-
-    /// A draft's remote UID is meaningless once its folder is gone or has a new
-    /// UIDVALIDITY; folder, UIDVALIDITY and UID are cleared together.
-    fn forget_remote_draft_copies(&self, folder: FolderId, keep: Option<u32>) -> Result<()> {
-        self.conn.execute(
-            "UPDATE drafts
-             SET remote_folder_id = NULL, remote_uidvalidity = NULL, remote_uid = NULL
-             WHERE remote_folder_id = ?1 AND remote_uidvalidity IS NOT ?2",
-            params![folder.0, keep],
         )?;
         Ok(())
     }
@@ -467,8 +456,9 @@ mod tests {
                 db.conn.execute_batch(&format!(
                     "INSERT INTO pending_ops (account_id, folder_id, uidvalidity, uid, kind)
                      VALUES ({a}, {f}, 7, 1, 'flags'), ({a}, {f}, 9, 1, 'flags');
-                     INSERT INTO drafts (account_id, remote_folder_id, remote_uidvalidity, remote_uid)
-                     VALUES ({a}, {f}, 7, 1);",
+                     INSERT INTO drafts (account_id, remote_folder_id, remote_uidvalidity, remote_uid,
+                                         remote_message_id, remote_revision)
+                     VALUES ({a}, {f}, 7, 1, 'd@x', 0);",
                     a = account.0,
                     f = folder.0
                 ))?;
@@ -494,12 +484,20 @@ mod tests {
                     .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
                     .collect::<rusqlite::Result<_>>()?;
                 assert_eq!(ops, [(7, "conflict".into()), (9, "pending".into())]);
-                let draft: (Option<i64>, Option<i64>, Option<i64>) = db.conn.query_row(
-                    "SELECT remote_folder_id, remote_uidvalidity, remote_uid FROM drafts",
+                let draft: (Option<i64>, Option<i64>, Option<i64>, Option<i64>) =
+                    db.conn.query_row(
+                        "SELECT remote_folder_id, remote_uidvalidity, remote_uid, remote_revision
+                         FROM drafts",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    )?;
+                assert_eq!(draft, (None, None, None, None));
+                let found_again: (i64, String, i64) = db.conn.query_row(
+                    "SELECT folder_id, message_id_hdr, revision FROM draft_uploads",
                     [],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )?;
-                assert_eq!(draft, (None, None, None));
+                assert_eq!(found_again, (folder.0, "d@x".into(), 0), "looked for again");
                 Ok(())
             })
             .unwrap();
@@ -517,8 +515,9 @@ mod tests {
             .unwrap();
         let folder = store.read(|db| db.folders().list(account)).unwrap()[0].id;
         let insert_draft = format!(
-            "INSERT INTO drafts (account_id, remote_folder_id, remote_uidvalidity, remote_uid)
-             VALUES ({}, {}, 7, 1)",
+            "INSERT INTO drafts (account_id, remote_folder_id, remote_uidvalidity, remote_uid,
+                                 remote_message_id, remote_revision)
+             VALUES ({}, {}, 7, 1, 'd@x', 0)",
             account.0, folder.0
         );
         store

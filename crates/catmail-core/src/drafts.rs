@@ -1,15 +1,18 @@
-//! Drafts: written and kept locally, sent through the outbox (`send.rs`).
+//! Drafts: written and kept locally, copied to the server's Drafts folder
+//! (`draft_sync.rs`), sent through the outbox (`send.rs`).
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use catmail_proto::mime::{Outgoing, OutgoingAttachment, build_message};
 use catmail_proto::smtp;
-use catmail_store::{DraftReply, NewDraftAttachment};
+use catmail_store::{DraftReply, DraftSnapshot, NewDraftAttachment};
 use catmail_types::{
-    AccountId, Address, Draft, DraftAttachment, DraftAttachmentId, DraftContent, DraftId, Event,
-    Message, MessageId,
+    Account, AccountId, Address, Draft, DraftAttachment, DraftAttachmentId, DraftContent, DraftId,
+    Event, Message, MessageId,
 };
+use uuid::Uuid;
 
 use crate::engine::{Engine, blocking, now};
 use crate::{Error, Result, body};
@@ -38,12 +41,11 @@ pub(crate) async fn update(
         })
         .await?
         .ok_or(Error::DraftNotFound(id))?;
-    engine.emit(Event::DraftsChanged {
-        account: draft.account_id,
-    });
+    changed(engine, draft.account_id);
     Ok(draft)
 }
 
+/// Deletes the draft; its copy on the server goes with the next upload pass.
 pub(crate) async fn delete(engine: &Arc<Engine>, id: DraftId) -> Result<()> {
     let account = engine
         .write(move |db| {
@@ -55,8 +57,15 @@ pub(crate) async fn delete(engine: &Arc<Engine>, id: DraftId) -> Result<()> {
         })
         .await?
         .ok_or(Error::DraftNotFound(id))?;
-    engine.emit(Event::DraftsChanged { account });
+    changed(engine, account);
     Ok(())
+}
+
+/// Announces a change to the account's drafts, and wakes its background sync to make it
+/// on the server.
+pub(crate) fn changed(engine: &Engine, account: AccountId) {
+    engine.emit(Event::DraftsChanged { account });
+    engine.wake(account);
 }
 
 /// Copies the file into the blob store and attaches it; later changes to the file
@@ -104,22 +113,26 @@ pub(crate) async fn attach_file(
     })
     .await?;
     let (account, attachment) = attachment.ok_or(Error::DraftNotFound(draft))?;
-    engine.emit(Event::DraftsChanged { account });
+    changed(engine, account);
     Ok(attachment)
 }
 
-pub(crate) async fn remove_attachment(engine: &Arc<Engine>, id: DraftAttachmentId) -> Result<()> {
-    let account = engine
+/// Returns the draft as it is now.
+pub(crate) async fn remove_attachment(
+    engine: &Arc<Engine>,
+    id: DraftAttachmentId,
+) -> Result<Draft> {
+    let draft = engine
         .write(move |db| {
             let Some(draft) = db.drafts().remove_attachment(id, now())? else {
                 return Ok(None);
             };
-            db.drafts().account_of(draft)
+            db.drafts().get(draft)
         })
         .await?
         .ok_or(Error::DraftAttachmentNotFound(id))?;
-    engine.emit(Event::DraftsChanged { account });
-    Ok(())
+    changed(engine, draft.account_id);
+    Ok(draft)
 }
 
 /// A new draft answering `message`: to its sender (or Reply-To), and with `all` to its
@@ -164,8 +177,58 @@ async fn insert(
         })
         .await?
         .ok_or_else(|| Error::AccountNotFound(account.to_string()))?;
-    engine.emit(Event::DraftsChanged { account });
+    changed(engine, account);
     Ok(draft)
+}
+
+/// A new Message-ID, from the account's domain. Random, so it gives nothing away.
+pub(crate) fn new_message_id(email: &str) -> String {
+    let domain = email.rsplit_once('@').map_or("localhost", |(_, d)| d);
+    format!("{}@{domain}", Uuid::new_v4().simple())
+}
+
+/// The draft as a message from the account, dated now, its attachments read from the
+/// blob store. Bcc recipients go into the headers only `with_bcc`, for the draft's copy
+/// on the server. Blocking.
+pub(crate) fn build(
+    engine: &Engine,
+    account: &Account,
+    snapshot: &DraftSnapshot,
+    message_id: &str,
+    with_bcc: bool,
+) -> Result<Vec<u8>> {
+    let data = snapshot
+        .blobs
+        .iter()
+        .map(|blob| engine.blobs.read(blob))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let draft = &snapshot.draft;
+    let from = Address {
+        name: account.display_name.clone(),
+        email: account.email.clone(),
+    };
+    Ok(build_message(&Outgoing {
+        from: &from,
+        to: &draft.content.to,
+        cc: &draft.content.cc,
+        bcc: if with_bcc { &draft.content.bcc } else { &[] },
+        subject: &draft.content.subject,
+        text: &draft.content.text,
+        message_id,
+        in_reply_to: draft.in_reply_to.as_deref(),
+        references: &draft.references,
+        date: now(),
+        attachments: draft
+            .attachments
+            .iter()
+            .zip(&data)
+            .map(|(a, data)| OutgoingAttachment {
+                filename: &a.filename,
+                mime_type: &a.mime_type,
+                data,
+            })
+            .collect(),
+    }))
 }
 
 /// Parses what a user types into a To / Cc / Bcc field: addresses separated by commas

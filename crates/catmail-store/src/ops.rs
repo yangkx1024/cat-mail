@@ -226,6 +226,51 @@ impl<'c> PendingOps<'c> {
         Ok(touched)
     }
 
+    /// Deletes for good the message the server has at `uid` in `folder`, under
+    /// `uidvalidity`, whether or not a sync has stored it: a draft's copy that a newer
+    /// one replaces, say. Its row goes too, if it is of that generation. Left alone if
+    /// the user moved or deleted it already. Returns the folder if an op was queued,
+    /// even if no row changed: announcing it gets the op replayed.
+    pub(crate) fn delete_on_server(
+        &self,
+        account: AccountId,
+        folder: FolderId,
+        uidvalidity: u32,
+        uid: u32,
+        now: i64,
+    ) -> Result<Touched> {
+        let taken: bool = self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pending_ops
+                            WHERE folder_id = ?1 AND uidvalidity = ?2 AND uid = ?3
+                              AND kind <> 'flags' AND status = 'pending')",
+            params![folder.0, uidvalidity, uid],
+            |r| r.get(0),
+        )?;
+        if taken {
+            return Ok(Touched::new());
+        }
+        let row: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT m.id FROM messages m JOIN folders f ON f.id = m.folder_id
+                 WHERE m.folder_id = ?1 AND m.uid = ?3 AND f.uidvalidity = ?2",
+                params![folder.0, uidvalidity, uid],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(row) = row {
+            return self.delete_messages(&[MessageId(row)], true, now);
+        }
+        self.insert(
+            account,
+            (folder, uidvalidity, uid),
+            OpKind::Delete,
+            None,
+            now,
+        )?;
+        Ok(Touched::from([(account, folder)]))
+    }
+
     fn move_one(&self, m: &Local, to: FolderId, now: i64) -> Result<()> {
         if m.folder == to {
             return Ok(());
@@ -252,12 +297,25 @@ impl<'c> PendingOps<'c> {
     /// Queues `kind` for the message, where the server has it.
     fn queue(&self, m: &Local, kind: OpKind, now: i64) -> Result<()> {
         // Every row has a UID or a pending move; the repository keeps it so.
-        let (folder, uidvalidity, uid) = m.server.ok_or_else(|| {
+        let server = m.server.ok_or_else(|| {
             Error::Conflict(format!(
                 "message {} is not on the server any more; sync and try again",
                 m.id
             ))
         })?;
+        self.insert(m.account, server, kind, Some(m.id), now)
+    }
+
+    /// Queues `kind` for the message the server has at `(folder, UIDVALIDITY, UID)`,
+    /// shown locally as `message` if there is such a row.
+    fn insert(
+        &self,
+        account: AccountId,
+        (folder, uidvalidity, uid): (FolderId, u32, u32),
+        kind: OpKind,
+        message: Option<MessageId>,
+        now: i64,
+    ) -> Result<()> {
         let (name, add, remove, target) = match kind {
             OpKind::Flags { add, remove } => ("flags", add, remove, None),
             OpKind::Move { to } => ("move", Flags::empty(), Flags::empty(), Some(to.0)),
@@ -270,7 +328,7 @@ impl<'c> PendingOps<'c> {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             )?
             .execute(params![
-                m.account.0,
+                account.0,
                 folder.0,
                 uidvalidity,
                 uid,
@@ -278,7 +336,7 @@ impl<'c> PendingOps<'c> {
                 add.bits(),
                 remove.bits(),
                 target,
-                m.id.0,
+                message.map(|m| m.0),
                 now
             ])?;
         Ok(())
@@ -950,6 +1008,41 @@ mod tests {
         fn ops(&self) -> Vec<PendingOp> {
             self.store.read(|db| db.ops().list(None)).unwrap()
         }
+    }
+
+    #[test]
+    fn deleting_by_server_location_leaves_what_the_user_moved() {
+        let f = setup();
+        let (inbox, account) = (f.inbox, f.account);
+        let m2 = f.message(inbox, 2);
+        f.write(|db| db.ops().move_messages(&[m2], f.archive, 1));
+        let delete = |uid| f.write(|db| db.ops().delete_on_server(account, inbox, 7, uid, 2));
+
+        assert!(delete(2).is_empty(), "moved by the user meanwhile");
+        // A row of that generation goes with it; a UID never synced is queued all the same.
+        assert_eq!(delete(3), Touched::from([(account, inbox)]));
+        assert_eq!(f.row(f.message(inbox, 1)).map(|r| r.1), Some(Some(1)));
+        assert_eq!(delete(9), Touched::from([(account, inbox)]));
+        assert_eq!(f.counts(inbox), (1, 0));
+        let kinds: Vec<(u32, ReplayKind)> = f
+            .pending(inbox)
+            .into_iter()
+            .map(|op| (op.uid, op.kind))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                (3, ReplayKind::Delete),
+                (9, ReplayKind::Delete),
+                (
+                    2,
+                    ReplayKind::Move {
+                        to: f.archive,
+                        remote_name: "Archive".into()
+                    }
+                ),
+            ]
+        );
     }
 
     fn moved(uidvalidity: u32, uids: &[(u32, u32)]) -> Moved {

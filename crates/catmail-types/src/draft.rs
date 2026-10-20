@@ -21,7 +21,8 @@ impl DraftContent {
     }
 }
 
-/// A message being written. Stored locally only; it is sent through the outbox.
+/// A message being written. Stored locally, with a copy in the server's Drafts folder
+/// that follows each change; it is sent through the outbox.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Draft {
     pub id: DraftId,
@@ -39,6 +40,11 @@ pub struct Draft {
     /// Set while the draft is in the outbox: it can't be changed until the send is
     /// cancelled, and is deleted once sent.
     pub outbox: Option<OutboxId>,
+    /// The server's Drafts folder has this version of it. Uploads happen at the next
+    /// sync or replay of queued changes, and only if the account has a Drafts folder.
+    pub on_server: bool,
+    /// Why the server refused the last upload, until one succeeds.
+    pub upload_error: Option<String>,
     /// Unix timestamp, seconds.
     pub updated_at: i64,
 }

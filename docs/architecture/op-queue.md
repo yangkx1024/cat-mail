@@ -86,6 +86,13 @@ COPY 重做会多出一份，所以 COPY 像发信的结束标记一样处理（
 
 ## 草稿的远端副本
 
-同样绑定 UIDVALIDITY：`drafts.remote_folder_id` / `remote_uidvalidity` / `remote_uid` 三者同时
-设置、同时清空，删除文件夹或 UIDVALIDITY 变化时由 repository 一起清空。表上的 CHECK 约束让单纯的
+同样绑定 UIDVALIDITY：`drafts.remote_*`（文件夹、UIDVALIDITY、UID、Message-ID、版本）同时设置、同时
+清空，删除文件夹或 UIDVALIDITY 变化时由 repository 一起清空。表上的 CHECK 约束让单纯的
 `ON DELETE SET NULL` 失败，而不是留下一个悬空的 UID。
+
+不再需要的副本经这个队列删除（`PendingOps::delete_on_server`，按服务器上的位置入队一条永久删除；
+同步过的邮件行一并删除）。用户已经移走或删除了那封邮件时不再入队：一封邮件最多一条移动或删除。
+只按服务器**刚刚报告的** UIDVALIDITY 下的 UID 入队（APPENDUID，或结算时的 EXAMINE）：本地记下的
+代际可能已经过时，还没有同步发现，按它入队的删除之后只会变成冲突、副本留在服务器上。所以其余情况
+（删除或发出的草稿、另一代际或另一文件夹里被替换的副本）都先按 Message-ID 找到它，见
+[草稿与发信](sending.md#同步到服务器)。

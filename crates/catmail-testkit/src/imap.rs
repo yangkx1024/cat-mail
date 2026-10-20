@@ -206,6 +206,9 @@ pub struct Faults {
     /// Store the next APPENDed message, then close the connection without answering:
     /// the client can't tell whether it was saved. Fires once.
     pub drop_after_append: bool,
+    /// Store the next APPENDed message and answer OK, but with a line no parser accepts
+    /// before that. Fires once.
+    pub garble_append: bool,
     /// Advertise MOVE (otherwise clients have to COPY, mark `\Deleted` and expunge).
     pub move_command: bool,
     /// Refuse STORE, COPY and MOVE with `NO <text>`, e.g. `[CANNOT] Permission denied`.
@@ -247,6 +250,7 @@ impl Default for Faults {
             reject_appends: 0,
             reject_append_literal: false,
             drop_after_append: false,
+            garble_append: false,
             move_command: true,
             refuse_changes: None,
             drop_after_change: false,
@@ -887,6 +891,9 @@ async fn handle(
                     let uid = mb.append(raw, &flags);
                     if std::mem::take(&mut st.faults.drop_after_append) {
                         return Ok(Next::Close);
+                    }
+                    if std::mem::take(&mut st.faults.garble_append) {
+                        out += "* GARBLED (((\r\n";
                     }
                     let code = if st.faults.uidplus {
                         format!("[APPENDUID {} {uid}] ", st.mailboxes[i].uidvalidity)

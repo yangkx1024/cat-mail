@@ -1,15 +1,20 @@
 //! Writing and sending: `compose`, `reply`, `draft`, `send` and `outbox`.
+//!
+//! Drafts are saved to the server's Drafts folder at once, like changes to messages
+//! (`ops.rs`); if that can't be done, the draft is still saved locally, and the next
+//! `catmail sync` or `catmail ops flush` uploads it.
 
 use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use catmail_core::{
-    Draft, DraftAttachmentId, DraftContent, DraftId, MailClient, MessageId, OutboxEntry, OutboxId,
-    OutboxStatus, parse_addresses,
+    AccountId, Draft, DraftAttachmentId, DraftContent, DraftId, MailClient, MessageId, OutboxEntry,
+    OutboxId, OutboxStatus, parse_addresses,
 };
 use clap::{Args, Subcommand};
 
+use crate::ops::{self, NEXT_FLUSH};
 use crate::output::{print_table, printable, printable_text, truncate};
 use crate::{addresses, one_account, output};
 
@@ -156,12 +161,11 @@ async fn finish_draft(
     if send_now {
         return send(client, draft.id, json).await;
     }
-    if !attach.is_empty() {
-        draft = client
-            .get_draft(draft.id)
-            .await?
-            .context("draft vanished")?;
-    }
+    save_to_server(client, draft.account_id).await;
+    draft = client
+        .get_draft(draft.id)
+        .await?
+        .context("draft vanished")?;
     if json {
         println!("{}", serde_json::to_string_pretty(&draft)?);
     } else {
@@ -174,7 +178,8 @@ async fn finish_draft(
 }
 
 pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) -> Result<()> {
-    match cmd {
+    // The account whose drafts changed, to save them to the server.
+    let changed = match cmd {
         DraftCommand::List { account } => {
             let account = one_account(client, account.as_deref()).await?;
             let drafts = client.list_drafts(account.id).await?;
@@ -189,14 +194,16 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
                         vec![
                             d.id.to_string(),
                             output::date(Some(d.updated_at)),
+                            server_status(d).into(),
                             truncate(&recipients(&d.content), 30),
                             if d.attachments.is_empty() { "" } else { "@" }.into(),
                             subject(&d.content.subject).to_owned(),
                         ]
                     })
                     .collect();
-                print_table(&["ID", "CHANGED", "TO", "", "SUBJECT"], rows);
+                print_table(&["ID", "CHANGED", "SERVER", "TO", "", "SUBJECT"], rows);
             }
+            None
         }
         DraftCommand::Show { id } => {
             let draft = get_draft(client, id).await?;
@@ -205,6 +212,7 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
             } else {
                 print_draft(&draft);
             }
+            None
         }
         DraftCommand::Edit { id, fields } => {
             let draft = get_draft(client, id).await?;
@@ -215,8 +223,10 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
             } else {
                 println!("Saved draft {}.", draft.id);
             }
+            Some(draft.account_id)
         }
         DraftCommand::Attach { id, files } => {
+            let account = get_draft(client, id).await?.account_id;
             let mut attached = Vec::new();
             for path in files {
                 let a = client
@@ -236,27 +246,54 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
             if json {
                 println!("{}", serde_json::to_string_pretty(&attached)?);
             }
+            Some(account)
         }
         DraftCommand::Detach { attachment } => {
-            client
+            let draft = client
                 .remove_draft_attachment(DraftAttachmentId(attachment))
                 .await?;
+            Some(draft.account_id)
         }
         DraftCommand::Rm { id } => {
+            let account = get_draft(client, id).await?.account_id;
             client.delete_draft(DraftId(id)).await?;
             if !json {
                 println!("Deleted draft {id}.");
             }
+            Some(account)
         }
+    };
+    if let Some(account) = changed {
+        save_to_server(client, account).await;
     }
     Ok(())
+}
+
+/// Saves the account's changed drafts to its Drafts folder, deleting what they replace
+/// there (and making its other queued changes), warning if that can't be done: the
+/// drafts are saved locally all the same.
+async fn save_to_server(client: &MailClient, account: AccountId) {
+    match client.replay_pending(account).await {
+        Ok(report) if report.drafts_failed > 0 => {
+            eprintln!("warning: {}", ops::refused_drafts(report.drafts_failed));
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!(
+            "warning: the draft is saved here, but not in the server's Drafts folder yet \
+             ({e}); {NEXT_FLUSH} puts it there"
+        ),
+    }
 }
 
 /// Queues the draft and works through its account's outbox, reporting how this
 /// message fared.
 pub(crate) async fn send(client: &MailClient, id: DraftId, json: bool) -> Result<()> {
     let queued = client.send_draft(id).await?;
-    flush_and_report(client, queued, json).await
+    let account = queued.account_id;
+    flush_and_report(client, queued, json).await?;
+    // The draft's copy on the server goes now that it is sent.
+    save_to_server(client, account).await;
+    Ok(())
 }
 
 /// Works through the entry's outbox and tells the user how the entry fared.
@@ -452,6 +489,11 @@ fn print_draft(draft: &Draft) {
     if let Some(outbox) = draft.outbox {
         header("Status:", &format!("being sent (outbox entry {outbox})"));
     }
+    match &draft.upload_error {
+        Some(error) => header("Server:", &format!("refused to store it: {error}")),
+        None if !draft.on_server => header("Server:", "not in the Drafts folder yet"),
+        None => {}
+    }
     println!();
     println!("{}", printable_text(c.text.trim_end()));
     if !draft.attachments.is_empty() {
@@ -469,6 +511,15 @@ fn print_draft(draft: &Draft) {
             })
             .collect();
         print_table(&["ATTACHMENT", "NAME", "TYPE", "SIZE"], rows);
+    }
+}
+
+/// Whether the server's Drafts folder has the draft as it is.
+fn server_status(draft: &Draft) -> &'static str {
+    match (draft.on_server, &draft.upload_error) {
+        (true, _) => "saved",
+        (false, Some(_)) => "refused",
+        (false, None) => "",
     }
 }
 

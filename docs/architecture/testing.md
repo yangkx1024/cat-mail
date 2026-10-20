@@ -37,7 +37,8 @@
   搜索，所以 APPEND 和 `SEARCH HEADER` 都在真实服务器上验证过（因此不能以 root 运行）。操作队列也走
   一遍：改 flags、MOVE（同步后不重复拉取）、永久删除，结果直接看 maildir 的文件名和内容。后台同步
   以单独的 `push` 用户登录，在它 IDLE 时直接往 maildir 投递，新邮件不经同步出现在本地（Dovecot 用
-  inotify 发现，通常不到一秒）。
+  inotify 发现，通常不到一秒）。草稿同步用单独的 `drafts` 用户（不影响对预置邮件的同步断言）：上传、
+  修改后替换、删除，看 Drafts 的 maildir 里只有一份且带 `DS` 标记。
 - **SMTP**（`tests/submission.rs`）：Dovecot 的 submission 服务（STARTTLS 与隐式 TLS 各一个端口，
   `run.sh` 用 openssl 生成 127.0.0.1 的自签名证书，测试只信任它；`submission_max_mail_size` 为 1 MiB）
   转发给 mailpit，测试从 mailpit 的 HTTP API 读回：信封收件人（密送只在信封里）、原文与 Sent 里的副本

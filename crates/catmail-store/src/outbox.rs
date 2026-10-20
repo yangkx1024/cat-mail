@@ -4,6 +4,7 @@ use catmail_types::{
 use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
 use crate::columns::{json, parse_text, to_json};
+use crate::drafts::Drafts;
 use crate::ops::{PendingOps, Touched};
 use crate::{Error, Result};
 
@@ -289,8 +290,9 @@ impl<'c> Outbox<'c> {
         )
     }
 
-    /// Sent and saved: deletes the entry and the draft it came from. Returns false if
-    /// the entry is gone (cancelled meanwhile).
+    /// Sent and saved: deletes the entry and the draft it came from (whose copy on the
+    /// server goes with the next upload pass). Returns false if the entry is gone
+    /// (cancelled meanwhile).
     pub fn finish(&self, id: OutboxId) -> Result<bool> {
         let draft: Option<Option<i64>> = self
             .conn
@@ -304,8 +306,7 @@ impl<'c> Outbox<'c> {
             return Ok(false);
         };
         if let Some(draft) = draft {
-            self.conn
-                .execute("DELETE FROM drafts WHERE id = ?1", [draft])?;
+            Drafts::new(self.conn).remove(DraftId(draft))?;
         }
         Ok(true)
     }

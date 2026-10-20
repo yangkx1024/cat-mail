@@ -10,7 +10,8 @@
 //!
 //! Replay of an account is serialized with its sync by the sync permit. A sync replays
 //! everything first, so that it sees the server with the changes made, moves into
-//! folders it syncs included.
+//! folders it syncs included. Changed drafts are uploaded right before (`draft_sync`),
+//! so the copies they replace are deleted in the same replay.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -23,7 +24,7 @@ use catmail_types::{
 
 use crate::connection::with_session;
 use crate::engine::{Engine, now};
-use crate::{Error, Result};
+use crate::{Error, Result, draft_sync};
 
 /// Ops per command; UID sets of scattered messages get long.
 const BATCH: usize = 500;
@@ -105,27 +106,32 @@ pub(crate) async fn dismiss(engine: Arc<Engine>, id: PendingOpId) -> Result<()> 
     Ok(())
 }
 
-/// Replays the account's queued changes now, without syncing, on a pooled connection.
-/// Waits for a running sync of the account, which replays them too.
+/// Replays the account's queued changes now, without syncing, on a pooled connection,
+/// uploading changed drafts first. Waits for a running sync of the account, which does
+/// the same.
 pub(crate) async fn replay_account(
     engine: Arc<Engine>,
     account: AccountId,
 ) -> Result<ReplayReport> {
     let permit = engine.sync_permit(account).await;
     let run = async {
-        let folders = engine
-            .read(move |db| db.ops().pending_folders(account))
-            .await?;
-        let mut report = ReplayReport::default();
-        if !folders.is_empty() {
-            // Safe to run again on a new connection if a reused one turns out dead: what
-            // went through is no longer pending.
-            let replayed = with_session(&engine, account, |session| {
-                let (engine, folders) = (engine.clone(), folders.clone());
-                Box::pin(async move { replay(&engine, session, account, &folders).await })
+        let needed = engine
+            .read(move |db| {
+                Ok(!db.ops().pending_folders(account)?.is_empty()
+                    || db.drafts().need_upload(account)?)
             })
             .await?;
-            for r in replayed.values() {
+        let mut report = ReplayReport::default();
+        if needed {
+            // Safe to run again on a new connection if a reused one turns out dead: what
+            // went through is no longer pending, and uploads left unsettled settle first.
+            let replayed = with_session(&engine, account, |session| {
+                let engine = engine.clone();
+                Box::pin(async move { replay_queued(&engine, session, account).await })
+            })
+            .await?;
+            report = replayed.drafts;
+            for r in replayed.folders.values() {
                 report.applied += r.applied;
                 report.failed += r.failed;
             }
@@ -138,11 +144,34 @@ pub(crate) async fn replay_account(
     permit.run(run).await
 }
 
+/// What [`replay_queued`] did.
+pub(crate) struct Replayed {
+    /// `drafts_uploaded` and `drafts_failed`.
+    pub drafts: ReplayReport,
+    /// By folder, `applied` and `failed`.
+    pub folders: HashMap<FolderId, ReplayReport>,
+}
+
+/// Uploads the account's changed drafts, then replays all its queued ops, deleting the
+/// copies those drafts replace among them. Call with the account's sync permit.
+pub(crate) async fn replay_queued(
+    engine: &Arc<Engine>,
+    session: &mut Session,
+    account: AccountId,
+) -> Result<Replayed> {
+    let drafts = draft_sync::upload(engine, session, account).await?;
+    let pending = engine
+        .read(move |db| db.ops().pending_folders(account))
+        .await?;
+    let folders = replay(engine, session, account, &pending).await?;
+    Ok(Replayed { drafts, folders })
+}
+
 /// Replays the ops of `folders` on `session`, one folder after the other, and returns
 /// what happened in each (`pending` is not filled in). Call with the account's sync
 /// permit. A folder the server won't open is skipped; the sync finds out what became of
 /// it.
-pub(crate) async fn replay(
+async fn replay(
     engine: &Arc<Engine>,
     session: &mut Session,
     account: AccountId,
@@ -189,13 +218,20 @@ pub(crate) async fn replay(
         };
     }
     // Whatever was committed before a failure too.
-    for &(account, folder) in &touched {
-        engine.emit(Event::MessagesChanged { account, folder });
-    }
     if !folders.is_empty() {
-        engine.emit(Event::PendingOpsChanged { account });
+        replayed(engine, account, &touched);
     }
     result.map(|()| reports)
+}
+
+/// Emits the events for a replay's changes: to the account's queue, and to the messages
+/// of the folders in `touched`. Unlike [`announce`] it wakes nobody: the replay is what
+/// a wake would ask for.
+pub(crate) fn replayed(engine: &Engine, account: AccountId, touched: &Touched) {
+    for &(account, folder) in touched {
+        engine.emit(Event::MessagesChanged { account, folder });
+    }
+    engine.emit(Event::PendingOpsChanged { account });
 }
 
 /// Runs the folder's pending ops on `session`, recording the folders whose messages
