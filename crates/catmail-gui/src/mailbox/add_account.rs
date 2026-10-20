@@ -2,7 +2,9 @@
 //! IMAP server before anything is stored, so a typo leaves no account (or keyring entry)
 //! behind. Like `catmail account add`, password accounts only.
 
-use catmail_core::{Account, AuthKind, MailClient, NewAccount, Security, ServerConfig};
+use catmail_core::{
+    Account, AuthKind, MailClient, NewAccount, SecretString, Security, ServerConfig,
+};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::form::{Field, Form};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -59,7 +61,8 @@ impl ServerValues {
 #[derive(Debug, Clone)]
 struct Values {
     email: String,
-    password: String,
+    /// Redacted in `Debug` output.
+    password: SecretString,
     name: String,
     username: String,
     imap: ServerValues,
@@ -225,7 +228,7 @@ impl AddAccount {
         let text = |input: &Entity<InputState>| input.read(cx).value().to_string();
         Values {
             email: text(&self.email),
-            password: text(&self.password),
+            password: text(&self.password).into(),
             name: text(&self.name),
             username: text(&self.username),
             imap: self.imap.values(cx),
@@ -423,6 +426,17 @@ mod tests {
             imap: server("imap.example.com", Security::Tls),
             smtp: server("smtp.example.com", Security::StartTls),
         }
+    }
+
+    #[test]
+    fn debug_output_leaves_out_the_password() {
+        let values = Values {
+            password: "hunter2".into(),
+            ..filled()
+        };
+        let shown = format!("{values:?}");
+        assert!(shown.contains("me@example.com"), "{shown}");
+        assert!(!shown.contains("hunter2"), "{shown}");
     }
 
     #[test]

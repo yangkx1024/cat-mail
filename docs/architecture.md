@@ -141,4 +141,5 @@ CLI 和 GUI 都可用 `--data-dir` 或 `CATMAIL_DATA_DIR` 覆盖。
 东西不依赖外层目录：`catmail.db` 及其 WAL 文件是 0600，`blobs/`、`blobs/tmp`、`handoff/` 是 0700，
 已存在的在打开时收紧，blob 和交接文件本身是 0600。Windows 上一律继承父目录的 ACL。`MailClient::open`
 拿到锁之后清空并重建 `handoff/`：锁保证没有前端还在往里写，各前端不必各自清理。在打开时而不是关闭时
-清，是因为关闭时别的程序可能还在读，macOS 上应用退出也不执行析构。
+清，是因为关闭时别的程序可能还在读，macOS 上应用退出也不执行析构。前端不自己写这个目录，而是调
+`MailClient::hand_off`：它建 0600 的文件，并顺手删掉超过 10 分钟的旧文件，免得 GUI 开几天就留下几天的邮件。

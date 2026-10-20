@@ -9,7 +9,7 @@ mod message;
 mod view;
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context as _;
@@ -214,10 +214,10 @@ impl Reader {
             return;
         };
         let title = open.subject.clone();
-        let dir = self.client.config().handoff_dir();
+        let client = self.client.clone();
         let images = open.images.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let written = cx
+            let page = cx
                 .background_spawn(async move {
                     // Copied here, off the UI thread: they can be large.
                     let inline = images
@@ -231,9 +231,10 @@ impl Reader {
                             (content_id.clone(), image)
                         })
                         .collect();
-                    write_browser_page(&dir, &html::browser_page(&title, &body, inline))
+                    html::browser_page(&title, &body, inline)
                 })
                 .await;
+            let written = client.hand_off("html", page.into_bytes()).await;
             this.update_in(cx, |_, window, cx| match written {
                 Ok(path) => cx.open_with_system(&path),
                 Err(e) => window.push_notification(
@@ -247,20 +248,6 @@ impl Reader {
     }
 }
 
-/// The page is left in `dir` (readable by this user only): the browser reads it after
-/// this returns. The engine creates the directory, private, and empties it when it next
-/// opens.
-fn write_browser_page(dir: &Path, page: &str) -> anyhow::Result<PathBuf> {
-    use std::io::Write as _;
-    let mut file = tempfile::Builder::new()
-        .prefix("message-")
-        .suffix(".html")
-        .tempfile_in(dir)?;
-    file.write_all(page.as_bytes())?;
-    let (_, path) = file.keep()?;
-    Ok(path)
-}
-
 fn download_dir() -> PathBuf {
     directories::UserDirs::new()
         .and_then(|dirs| {
@@ -269,21 +256,4 @@ fn download_dir() -> PathBuf {
                 .or_else(|| Some(dirs.home_dir().to_path_buf()))
         })
         .unwrap_or_else(std::env::temp_dir)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn browser_pages_go_to_the_handoff_dir() {
-        let data = tempfile::tempdir().unwrap();
-        let dir = catmail_core::Config::with_data_dir(data.path()).handoff_dir();
-        std::fs::create_dir(&dir).unwrap();
-        let first = write_browser_page(&dir, "<p>one</p>").unwrap();
-        let second = write_browser_page(&dir, "<p>two</p>").unwrap();
-        assert_ne!(first, second);
-        assert!(first.starts_with(&dir));
-        assert_eq!(std::fs::read_to_string(&second).unwrap(), "<p>two</p>");
-    }
 }

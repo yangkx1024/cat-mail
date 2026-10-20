@@ -14,6 +14,8 @@ directories.workspace = true
 jiff.workspace = true
 keyring.workspace = true
 mime_guess.workspace = true
+secrecy.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing.workspace = true
@@ -29,7 +31,6 @@ mail-parser.workspace = true
 pollster.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true
-tempfile.workspace = true
 
 [lints]
 workspace = true

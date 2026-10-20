@@ -40,6 +40,7 @@ pub use engine::DEFAULT_DRAFT_UPLOAD_DELAY;
 pub use error::{Error, Result};
 pub use filename::safe_filename;
 pub use gc::DEFAULT_GC_INTERVAL;
+pub use secrecy::{ExposeSecret, SecretString};
 pub use secrets::{KeyringSecrets, MemorySecrets, SecretStore};
 /// What [`MailClient::subscribe`]'s receiver returns when it falls behind or the engine
 /// is gone.

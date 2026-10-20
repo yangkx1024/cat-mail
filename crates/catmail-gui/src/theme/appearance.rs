@@ -206,10 +206,25 @@ pub struct ImportCandidate {
     pub themes: Vec<ImportedTheme>,
 }
 
+/// The largest file [`read_import`] reads. Theme files that hold dozens of themes stay
+/// in the hundreds of KiB; parsing makes copies, so a file picked by mistake shouldn't be
+/// read whole.
+const MAX_IMPORT_SIZE: u64 = 4 * 1024 * 1024;
+
 /// Reads and parses a color scheme file; not for the UI thread.
 pub fn read_import(path: &Path) -> Result<ImportCandidate, String> {
+    use std::io::Read as _;
     let file_name = file_name(path);
-    let bytes = std::fs::read(path).map_err(|e| format!("Couldn't read it: {e}."))?;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(MAX_IMPORT_SIZE + 1).read_to_end(&mut bytes))
+        .map_err(|e| format!("Couldn't read it: {e}."))?;
+    if bytes.len() as u64 > MAX_IMPORT_SIZE {
+        return Err(format!(
+            "It's too large to be a color scheme (over {} MiB).",
+            MAX_IMPORT_SIZE / (1024 * 1024)
+        ));
+    }
     let contents = String::from_utf8(bytes).map_err(|_| ImportError::Unrecognized.to_string())?;
     let themes = import(&file_name, &contents).map_err(|e| e.to_string())?;
     Ok(ImportCandidate { file_name, themes })
@@ -374,6 +389,17 @@ mod tests {
         let find = |name: &str| read.iter().find(|(c, _)| c.name == name).unwrap().0.clone();
         assert_eq!(find("X").colors.background, new_x.colors.background);
         assert_eq!(find("Y").colors.background, y.colors.background);
+    }
+
+    #[test]
+    fn oversized_files_are_not_imported() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.json");
+        std::fs::write(&path, vec![b' '; MAX_IMPORT_SIZE as usize + 1]).unwrap();
+        let Err(e) = read_import(&path) else {
+            panic!("imported an oversized file");
+        };
+        assert!(e.contains("too large"), "{e}");
     }
 
     #[test]

@@ -16,6 +16,7 @@ use imap_next::imap_types::response::{Code, Data, GreetingKind};
 use imap_next::imap_types::search::SearchKey;
 use imap_next::imap_types::sequence::{Sequence, SequenceSet};
 use imap_next::imap_types::status::{StatusDataItem, StatusDataItemName};
+use secrecy::ExposeSecret;
 
 use super::connection::{Connection, Response};
 use super::{
@@ -117,7 +118,8 @@ impl Session {
                     return Err(Error::Unsupported("a password login mechanism"));
                 } else {
                     let body =
-                        CommandBody::login(username.clone(), password.clone()).map_err(|_| {
+                        CommandBody::login(username.clone(), password.expose_secret().to_owned())
+                            .map_err(|_| {
                             Error::AuthFailed(
                                 "username or password contains a NUL or line break".into(),
                             )

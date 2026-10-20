@@ -9,6 +9,7 @@ use imap_next::imap_types::command::{Command, CommandBody};
 use imap_next::imap_types::core::Tag;
 use imap_next::imap_types::response::{Code, Data, Greeting, Status, StatusKind};
 use imap_next::{Interrupt, Io, State};
+use secrecy::zeroize::Zeroizing;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::quirks::Quirks;
@@ -16,6 +17,12 @@ use super::{Error, Result};
 
 pub(crate) use crate::Stream;
 use crate::net::with_timeout;
+
+/// How many bytes the server may send in answer to one command. imap-next caps each
+/// response at 100 MiB, but not how many there are, and a command's whole answer is kept
+/// until it completes. The largest answer we ask for is one whole message, so only a
+/// broken or hostile server gets near this.
+const MAX_ANSWER: usize = 256 * 1024 * 1024;
 
 /// What the server sent while a command ran, up to and including its tagged OK.
 #[derive(Debug, Default)]
@@ -36,8 +43,14 @@ pub(crate) struct Connection {
     last_tag: u32,
     buf: Box<[u8]>,
     timeout: Duration,
+    /// Bytes read since the current command was sent, and how many it may have
+    /// ([`MAX_ANSWER`] but in tests).
+    received: usize,
+    max_answer: usize,
     /// Set once the server refused a command before all of it was sent: imap-next still
-    /// waits to send the rest, so nothing sent after it would ever go out.
+    /// waits to send the rest, so nothing sent after it would ever go out. Also set when
+    /// a command is given up half-way through its answer, so the rest can't be taken for
+    /// the answer to the next one.
     out_of_step: bool,
     /// What the server said about the selected mailbox in passing, in the answers to any
     /// command (servers report new mail and expunges whenever they can): the last EXISTS
@@ -62,6 +75,8 @@ impl Connection {
             last_tag: 0,
             buf: vec![0; 64 * 1024].into_boxed_slice(),
             timeout,
+            received: 0,
+            max_answer: MAX_ANSWER,
             out_of_step: false,
             exists: 0,
             changed: false,
@@ -79,7 +94,9 @@ impl Connection {
         loop {
             match self.next_event(&mut 0).await? {
                 Event::GreetingReceived { greeting } => return Ok(greeting),
-                other => tracing::debug!(?other, "ignoring event before greeting"),
+                other => {
+                    tracing::debug!(event = event_name(&other), "ignoring event before greeting")
+                }
             }
         }
     }
@@ -137,7 +154,8 @@ impl Connection {
                 }
                 other => {
                     return Err(Error::Protocol(format!(
-                        "unexpected event during {command}: {other:?}"
+                        "unexpected {} during {command}",
+                        event_name(&other)
                     )));
                 }
             }
@@ -184,7 +202,8 @@ impl Connection {
                 }
                 Ok(other) => {
                     return Err(Error::Protocol(format!(
-                        "unexpected event during IDLE: {other:?}"
+                        "unexpected {} during IDLE",
+                        event_name(&other)
                     )));
                 }
                 Err(Interrupt::Io(Io::Output(bytes))) => self.write(&bytes).await?,
@@ -216,7 +235,7 @@ impl Connection {
     pub async fn authenticate(
         &mut self,
         mechanism: AuthMechanism<'static>,
-        initial: Vec<u8>,
+        initial: Zeroizing<Vec<u8>>,
     ) -> Result<Response> {
         let tag = self.begin(CommandBody::authenticate(mechanism))?;
         let mut initial = Some(initial);
@@ -229,7 +248,8 @@ impl Connection {
                     // A second challenge means the server didn't like the answer (XOAUTH2
                     // sends an error this way); cancel and let it send the tagged NO.
                     let data = match initial.take() {
-                        Some(data) => AuthenticateData::r#continue(data),
+                        // imap-next takes its own copy, which it doesn't zero.
+                        Some(data) => AuthenticateData::r#continue(data.to_vec()),
                         None => AuthenticateData::Cancel,
                     };
                     self.client
@@ -258,7 +278,8 @@ impl Connection {
                 }
                 other => {
                     return Err(Error::Protocol(format!(
-                        "unexpected event during AUTHENTICATE: {other:?}"
+                        "unexpected {} during AUTHENTICATE",
+                        event_name(&other)
                     )));
                 }
             }
@@ -270,7 +291,7 @@ impl Connection {
     fn check_in_step(&self) -> Result<()> {
         if self.out_of_step {
             return Err(Error::Protocol(
-                "connection unusable after a command was refused half-way".into(),
+                "connection unusable after a command was given up half-way".into(),
             ));
         }
         Ok(())
@@ -279,6 +300,7 @@ impl Connection {
     /// Queues a command under a new tag, which it returns.
     fn begin(&mut self, body: CommandBody<'static>) -> Result<Tag<'static>> {
         self.check_in_step()?;
+        self.received = 0;
         self.last_tag += 1;
         let tag = Tag::try_from(format!("C{}", self.last_tag)).expect("valid tag");
         self.client.enqueue_command(Command {
@@ -368,7 +390,16 @@ impl Connection {
                 // Commands are small and sent whole before reading, so writing and
                 // reading in turn can't deadlock against a server that does the same.
                 Err(Interrupt::Io(Io::Output(bytes))) => self.write(&bytes).await?,
-                Err(Interrupt::Io(Io::NeedMoreInput)) => self.read().await?,
+                Err(Interrupt::Io(Io::NeedMoreInput)) => {
+                    self.read().await?;
+                    if self.received > self.max_answer {
+                        self.out_of_step = true;
+                        return Err(Error::Protocol(format!(
+                            "server sent more than {} MiB in answer to one command",
+                            self.max_answer / (1024 * 1024)
+                        )));
+                    }
+                }
                 // The client has already skipped the offending line. One response we
                 // can't parse (a buggy BODYSTRUCTURE, say) shouldn't take the whole
                 // session down, but the command's result may now be incomplete.
@@ -403,11 +434,92 @@ impl Connection {
         if n == 0 {
             return Err(Error::Closed);
         }
+        self.received = self.received.saturating_add(n);
         // Nothing while a line is still incomplete; the client then asks for more.
         let input = self.quirks.push(&self.buf[..n]);
         if !input.is_empty() {
             self.client.enqueue_input(input);
         }
         Ok(())
+    }
+}
+
+/// An event's variant, for error messages and logs. Not the event itself: it may hold a
+/// command with credentials in it, and imap-types only redacts those in release builds.
+fn event_name(event: &Event) -> &'static str {
+    match event {
+        Event::GreetingReceived { .. } => "greeting",
+        Event::CommandSent { .. } => "command sent",
+        Event::CommandRejected { .. } => "command rejected",
+        Event::AuthenticateStarted { .. } => "AUTHENTICATE started",
+        Event::AuthenticateContinuationRequestReceived { .. } => {
+            "AUTHENTICATE continuation request"
+        }
+        Event::AuthenticateStatusReceived { .. } => "AUTHENTICATE status",
+        Event::IdleCommandSent { .. } => "IDLE sent",
+        Event::IdleAccepted { .. } => "IDLE accepted",
+        Event::IdleRejected { .. } => "IDLE rejected",
+        Event::IdleDoneSent { .. } => "DONE sent",
+        Event::DataReceived { .. } => "data",
+        Event::StatusReceived { .. } => "status",
+        Event::ContinuationRequestReceived { .. } => "continuation request",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn an_answer_over_the_limit_is_given_up() {
+        let (ours, theirs) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            let mut theirs = BufReader::new(theirs);
+            let mut command = String::new();
+            theirs.read_line(&mut command).await.unwrap();
+            assert_eq!(command, "C1 NOOP\r\n");
+            // 12 KiB of untagged responses, each well-formed and small.
+            let flood = b"* 1 EXISTS\r\n".repeat(1024);
+            _ = theirs.get_mut().write_all(&flood).await;
+            _ = theirs.get_mut().write_all(b"C1 OK done\r\n").await;
+        });
+        let mut conn = Connection::new(Box::new(ours), false, Duration::from_secs(10));
+        conn.max_answer = 4096;
+
+        let err = conn.execute(CommandBody::Noop).await.unwrap_err();
+        assert!(
+            matches!(&err, Error::Protocol(text) if text.contains("more than")),
+            "{err}"
+        );
+        // What is left of the answer must not be read as the next command's.
+        let err = conn.execute(CommandBody::Noop).await.unwrap_err();
+        assert!(
+            matches!(&err, Error::Protocol(text) if text.contains("half-way")),
+            "{err}"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_limit_is_per_command() {
+        let (ours, theirs) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            let mut theirs = BufReader::new(theirs);
+            for tag in ["C1", "C2", "C3"] {
+                let mut command = String::new();
+                theirs.read_line(&mut command).await.unwrap();
+                let answer = format!("{}{tag} OK done\r\n", "* 1 EXISTS\r\n".repeat(200));
+                theirs.get_mut().write_all(answer.as_bytes()).await.unwrap();
+            }
+        });
+        let mut conn = Connection::new(Box::new(ours), false, Duration::from_secs(10));
+        conn.max_answer = 4096;
+        for _ in 0..3 {
+            let response = conn.execute(CommandBody::Noop).await.unwrap();
+            assert_eq!(response.data.len(), 200);
+        }
+        server.await.unwrap();
     }
 }

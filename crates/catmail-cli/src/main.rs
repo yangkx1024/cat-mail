@@ -14,8 +14,9 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use catmail_core::{
     Account, AccountId, Address, AttachmentId, AuthKind, Config, DEFAULT_GC_INTERVAL, DraftId,
-    Flags, Folder, FolderId, MailClient, Message, MessageId, MessageSummary, NewAccount,
-    SearchQuery, Security, ServerConfig, SyncReport, SyncSchedule, safe_filename,
+    ExposeSecret, Flags, Folder, FolderId, MailClient, Message, MessageId, MessageSummary,
+    NewAccount, SearchQuery, SecretString, Security, ServerConfig, SyncReport, SyncSchedule,
+    safe_filename,
 };
 use clap::{Args, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
@@ -637,18 +638,21 @@ async fn resolve_account(client: &MailClient, selector: &str) -> Result<Account>
     found.with_context(|| format!("no account matches `{selector}`"))
 }
 
-fn read_password(email: &str, from_stdin: bool) -> Result<String> {
+fn read_password(email: &str, from_stdin: bool) -> Result<SecretString> {
     let password = if from_stdin {
         let mut line = String::new();
         io::stdin().lock().read_line(&mut line)?;
-        line.trim_end_matches(['\r', '\n']).to_owned()
+        // Trimmed in place, so no copy is left behind unzeroed.
+        let len = line.trim_end_matches(['\r', '\n']).len();
+        line.truncate(len);
+        SecretString::from(line)
     } else {
         if !io::stdin().is_terminal() {
             bail!("stdin is not a terminal; use --password-stdin to pipe the password");
         }
-        rpassword::prompt_password(format!("Password for {email}: "))?
+        rpassword::prompt_password(format!("Password for {email}: "))?.into()
     };
-    if password.is_empty() {
+    if password.expose_secret().is_empty() {
         bail!("password must not be empty");
     }
     Ok(password)
