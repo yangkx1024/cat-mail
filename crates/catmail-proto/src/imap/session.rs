@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::num::{NonZeroU32, NonZeroU64};
+use std::ops::RangeInclusive;
 use std::time::Duration;
 
 use catmail_types::{FlagState, Flags, FolderRole, Security, ServerConfig};
@@ -389,7 +390,7 @@ impl Session {
                 uid: true,
             }
         };
-        Ok(copy_uid(&self.change(body).await?))
+        Ok(copy_uid(&self.change(body).await?, uids.len()))
     }
 
     /// Deletes messages of the selected mailbox for good: `\Deleted`, then UID EXPUNGE
@@ -743,8 +744,8 @@ fn system_flags(flags: Flags) -> Vec<Flag<'static>> {
 }
 
 /// The COPYUID in an answer to COPY or MOVE (MOVE sends it untagged). `None` if there is
-/// none, or its UID sets don't pair up.
-fn copy_uid(response: &Response) -> Option<CopyUid> {
+/// none, its UID sets don't pair up, or they name more than the `requested` UIDs.
+fn copy_uid(response: &Response, requested: usize) -> Option<CopyUid> {
     response.codes.iter().find_map(|code| {
         let Code::CopyUid {
             uid_validity,
@@ -756,20 +757,33 @@ fn copy_uid(response: &Response) -> Option<CopyUid> {
         };
         // RFC 4315: both sets list the UIDs in the same order; a range covers the UIDs
         // between its ends, whichever comes first.
-        let expand = |set: &UidSet| -> Vec<u32> {
+        let ranges = |set: &UidSet| {
             set.0
                 .as_ref()
                 .iter()
-                .flat_map(|element| match *element {
+                .map(|element| match *element {
                     UidElement::Single(uid) => uid.get()..=uid.get(),
                     UidElement::Range(a, b) => a.min(b).get()..=a.max(b).get(),
                 })
-                .collect()
+                .collect::<Vec<_>>()
         };
-        let (old, new) = (expand(source), expand(destination));
-        (old.len() == new.len()).then(|| CopyUid {
+        // The ends come from the server: count before expanding, or `1:4294967295`
+        // asks for gigabytes. The copies can't outnumber the UIDs asked for.
+        let count = |ranges: &[RangeInclusive<u32>]| {
+            ranges
+                .iter()
+                .map(|r| u64::from(r.end() - r.start()) + 1)
+                .sum::<u64>()
+        };
+        let (old, new) = (ranges(source), ranges(destination));
+        let n = count(&old);
+        (n == count(&new) && n <= requested as u64).then(|| CopyUid {
             uidvalidity: uid_validity.get(),
-            uids: old.into_iter().zip(new).collect(),
+            uids: old
+                .into_iter()
+                .flatten()
+                .zip(new.into_iter().flatten())
+                .collect(),
         })
     })
 }
