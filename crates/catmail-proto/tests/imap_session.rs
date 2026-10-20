@@ -305,6 +305,27 @@ async fn starttls_ignores_plaintext_injection() {
 }
 
 #[tokio::test]
+async fn mailbox_names_with_line_breaks_go_as_literals() {
+    // Names come from the server and are used as they are, so a CR LF in one must not
+    // end the command early: the rest would run as a command of its own.
+    let name = "Inbox\r\nX";
+    let mut state = sample_state();
+    state.mailboxes.push(FakeMailbox::new(name));
+    let fake = FakeImap::start(state).await;
+    let mut session = login(&fake).await;
+    let start = fake.state().log.len();
+    session.examine(name).await.unwrap();
+
+    // The fake ends a command at a line break unless a literal carries it, so the name
+    // arriving whole, in one command, means it went as a literal.
+    let lines: Vec<_> = fake.state().log[start..]
+        .iter()
+        .map(|c| c.line.clone())
+        .collect();
+    assert_eq!(lines, [format!("EXAMINE \"{name}\" (CONDSTORE)")]);
+}
+
+#[tokio::test]
 async fn starttls_is_required_when_configured() {
     let fake = FakeImap::start(sample_state()).await;
     let err = Session::connect(&server(fake.port(), Security::StartTls), &no_tls(), TIMEOUT)

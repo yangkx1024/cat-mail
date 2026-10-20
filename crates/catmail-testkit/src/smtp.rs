@@ -47,7 +47,8 @@ pub struct SmtpFaults {
     /// Deliver this many messages, but close the connection instead of confirming
     /// them: the confirmation is lost.
     pub drop_after_data: usize,
-    /// Right after `220 Ready to start TLS`, also send a forged reply in plaintext.
+    /// Right after `220 Ready to start TLS`, also send in plaintext a forged EHLO reply
+    /// advertising `SIZE 1`, which the real one only does with `size_limit`.
     pub inject_after_starttls: bool,
     /// Hold the reply to the end of each message until it gets a permit, e.g. to act
     /// while the client waits for the verdict.
@@ -238,7 +239,7 @@ async fn serve(
             "STARTTLS" if mode == TlsMode::StartTls && !tls => {
                 let mut reply = "220 Ready to start TLS\r\n".to_owned();
                 if lock(&state).faults.inject_after_starttls {
-                    reply += "250-forged\r\n250 AUTH PLAIN\r\n";
+                    reply += "250-forged\r\n250 SIZE 1\r\n";
                 }
                 io.get_mut().write_all(reply.as_bytes()).await?;
                 let cert = cert.as_ref().expect("STARTTLS needs a certificate");
