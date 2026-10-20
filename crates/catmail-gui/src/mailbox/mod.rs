@@ -247,7 +247,8 @@ impl Mailbox {
                 refresh_if(self, shown, window, cx);
             }
             Event::DraftsChanged { account } => {
-                self.load_folders(window, cx);
+                // Every pause in typing saves a draft: only the count can have changed.
+                self.count_drafts(account, window, cx);
                 refresh_if(self, source == Some(Source::Drafts(account)), window, cx);
             }
             Event::OutboxChanged { account } => {
@@ -335,6 +336,25 @@ impl Mailbox {
             })
             .ok();
         });
+    }
+
+    fn count_drafts(&mut self, account: AccountId, window: &mut Window, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(drafts) = client.count_drafts(account).await else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                if let Some(entry) = this.account_mut(account)
+                    && entry.drafts != drafts
+                {
+                    entry.drafts = drafts;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn set_accounts(

@@ -85,7 +85,7 @@ impl Composer {
             return false;
         }
         // What the fields hold, not `dirty`: the last keys may not have been seen yet.
-        if !self.busy() && content == self.saved && !(self.created_here && !self.edited) {
+        if !self.busy() && content == self.saved && !self.untouched() {
             self.unregister(cx);
             return true;
         }
@@ -131,10 +131,8 @@ impl Composer {
             return;
         };
         let (content, _) = self.content(cx);
-        // Untouched and made for this window: closing leaves nothing behind. Sending it
-        // as it is (a reply that needs no words) still sends.
-        let delete =
-            how == Finish::Discard || (how == Finish::Close && self.created_here && !self.edited);
+        // Sending an untouched draft (a reply that needs no words) still sends.
+        let delete = how == Finish::Discard || (how == Finish::Close && self.untouched());
         let save = !delete && content != self.saved;
         let client = self.client.clone();
         let id = self.draft;
@@ -202,7 +200,7 @@ impl Composer {
             self.show_cc_bcc = true;
         }
         let input = match field {
-            Field::To | Field::Body => &self.to,
+            Field::To => &self.to,
             Field::Cc => &self.cc,
             Field::Bcc => &self.bcc,
         };

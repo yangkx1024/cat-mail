@@ -180,15 +180,7 @@ pub(super) fn outbox_row(entry: &OutboxEntry, cx: &App) -> ListItem {
         Some(Severity::Danger) => theme.danger_badge(),
         None => (theme.muted, theme.muted_foreground),
     };
-    let badge = h_flex().child(
-        div()
-            .px_1p5()
-            .rounded(theme.radius)
-            .text_xs()
-            .bg(bg)
-            .text_color(fg)
-            .child(status),
-    );
+    let badge = h_flex().child(crate::layout::badge(status, (bg, fg), cx));
     ListItem::new(("outbox", entry.id.0 as u64))
         .accessibility_label(format!("{subject}, {to}, {status}"))
         .child(three_lines(

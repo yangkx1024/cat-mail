@@ -117,6 +117,33 @@ fn a_message_gone_from_the_server_leaves_the_reader(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_removal_still_waiting_doesnt_move_on_from_another_message(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    // A move of this one, not done yet when the user goes on to another.
+    let report = click_message(cx, window, &mailbox, "月度报表");
+    cx.update(|cx| {
+        let list = mailbox.read(cx).messages.clone();
+        list.update(cx, |list, _| list.delegate_mut().expect_removal(report));
+    });
+    // The second fixture, UID 2.
+    click_message(cx, window, &mailbox, "你好，世界");
+
+    // Gone from the server: the reader clears, as for any message, rather than opening
+    // the next one as if the user had moved this one.
+    mail.expunge_and_sync(2);
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| subjects(&mailbox, cx).len() == 5)
+    });
+    cx.read(|cx| {
+        assert_eq!(mailbox.read(cx).messages.read(cx).selected_index(), None);
+        assert_eq!(shown_in_reader(&mailbox, cx), None);
+    });
+}
+
+#[gpui_kit::test]
 fn shows_what_a_sync_brings_without_losing_the_selection(cx: &mut TestAppContext) {
     let mail = TestMail::start();
     let (window, mailbox) = open(cx, &mail);

@@ -22,9 +22,8 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::input::{InputEvent, InputState, Position, TextareaState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable, Global,
-    PathPromptOptions, SharedString, Subscription, Task, TitlebarOptions, WeakEntity, Window,
-    WindowBounds, WindowOptions, px, size,
+    AnyWindowHandle, App, AppContext as _, Context, Entity, FocusHandle, Focusable, Global,
+    PathPromptOptions, SharedString, Subscription, Task, WeakEntity, Window, px, size,
 };
 
 /// How long typing has to pause before the draft is saved.
@@ -119,9 +118,10 @@ pub fn open(client: MailClient, from: ComposeFrom, window: &mut Window, cx: &mut
                     }
                     ComposeFrom::Reply { message, all } => client.reply(message, all).await?,
                     ComposeFrom::Forward(message) => client.forward(message).await?,
-                    ComposeFrom::Draft(id) => client.get_draft(id).await?.ok_or_else(|| {
-                        catmail_core::Error::InvalidInput("the draft is gone".into())
-                    })?,
+                    ComposeFrom::Draft(id) => client
+                        .get_draft(id)
+                        .await?
+                        .ok_or(catmail_core::Error::DraftNotFound(id))?,
                 };
                 let account = client.get_account(draft.account_id).await?.ok_or_else(|| {
                     catmail_core::Error::AccountNotFound(draft.account_id.to_string())
@@ -134,12 +134,15 @@ pub fn open(client: MailClient, from: ComposeFrom, window: &mut Window, cx: &mut
                 Ok((draft, _)) if activate(draft.id, cx) => {}
                 Ok((draft, account)) => {
                     let created_here = !matches!(from, ComposeFrom::Draft(_));
-                    let focus = match from {
-                        ComposeFrom::Reply { .. } => Field::Body,
-                        ComposeFrom::Draft(_) if !draft.content.to.is_empty() => Field::Body,
-                        _ => Field::To,
+                    // Where the writing starts: the text once there is someone to send to.
+                    let focus_body = match from {
+                        ComposeFrom::Reply { .. } => true,
+                        ComposeFrom::Draft(_) => !draft.content.to.is_empty(),
+                        _ => false,
                     };
-                    if let Err(e) = open_window(client, account, draft, created_here, focus, cx) {
+                    if let Err(e) =
+                        open_window(client, account, draft, created_here, focus_body, cx)
+                    {
                         window.push_notification(
                             Notification::error(format!("Couldn't open a window: {e:#}")),
                             cx,
@@ -161,31 +164,23 @@ fn open_window(
     account: Account,
     draft: Draft,
     created_here: bool,
-    focus: Field,
+    focus_body: bool,
     cx: &mut App,
-) -> anyhow::Result<AnyWindowHandle> {
+) -> anyhow::Result<()> {
     let id = draft.id;
-    let options = WindowOptions {
-        titlebar: Some(TitlebarOptions {
-            title: Some(window_title(&draft.content.subject).into()),
-            ..Default::default()
-        }),
-        // Window geometry is in device-independent pixels, not the rem scale.
-        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-            None,
-            size(px(760.), px(680.)),
-            cx,
-        ))),
-        window_min_size: Some(size(px(480.), px(360.))),
-        ..Default::default()
-    };
+    let options = crate::layout::window_options(
+        window_title(&draft.content.subject),
+        size(px(760.), px(680.)),
+        size(px(480.), px(360.)),
+        cx,
+    );
     let (handle, composer) = gpui_kit::open_window(options, cx, |window, cx| {
-        cx.new(|cx| Composer::new(client, account, draft, created_here, focus, window, cx))
+        cx.new(|cx| Composer::new(client, account, draft, created_here, focus_body, window, cx))
     })?;
     cx.default_global::<OpenComposers>()
         .windows
         .insert(id, (handle, composer.downgrade()));
-    Ok(handle)
+    Ok(())
 }
 
 fn window_title(subject: &str) -> String {
@@ -195,12 +190,12 @@ fn window_title(subject: &str) -> String {
     }
 }
 
+/// An address field, which an error is shown under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Field {
     To,
     Cc,
     Bcc,
-    Body,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -268,7 +263,7 @@ impl Composer {
         account: Account,
         draft: Draft,
         created_here: bool,
-        focus: Field,
+        focus_body: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -307,15 +302,14 @@ impl Composer {
                 .unwrap_or(true)
         });
 
-        match focus {
-            Field::Body => {
-                body.update(cx, |body, cx| {
-                    body.focus(window, cx);
-                    // Above the quote.
-                    body.set_cursor_position(Position::new(0, 0), window, cx);
-                });
-            }
-            _ => to.update(cx, |to, cx| to.focus(window, cx)),
+        if focus_body {
+            body.update(cx, |body, cx| {
+                body.focus(window, cx);
+                // Above the quote.
+                body.set_cursor_position(Position::new(0, 0), window, cx);
+            });
+        } else {
+            to.update(cx, |to, cx| to.focus(window, cx));
         }
 
         Self {
@@ -479,6 +473,11 @@ impl Composer {
     /// Something for this draft is with the engine.
     fn busy(&self) -> bool {
         self.saving || self.attaching > 0
+    }
+
+    /// Made for this window and never changed: closing it leaves nothing behind.
+    fn untouched(&self) -> bool {
+        self.created_here && !self.edited
     }
 
     fn remove_attachment(

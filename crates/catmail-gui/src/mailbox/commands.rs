@@ -189,7 +189,7 @@ impl Mailbox {
             return;
         };
         self.messages
-            .update(cx, |list, _| list.delegate_mut().expect_removal());
+            .update(cx, |list, _| list.delegate_mut().expect_removal(message.id));
         let client = self.client.clone();
         report_failure(
             "move the message",
@@ -241,7 +241,7 @@ impl Mailbox {
         cx: &mut Context<Self>,
     ) {
         self.messages
-            .update(cx, |list, _| list.delegate_mut().expect_removal());
+            .update(cx, |list, _| list.delegate_mut().expect_removal(id));
         let client = self.client.clone();
         report_failure(
             "delete the message",

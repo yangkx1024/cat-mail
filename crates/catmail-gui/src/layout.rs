@@ -2,12 +2,32 @@
 
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex};
 use gpui_kit::{
-    App, Div, ElementId, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, div, rems,
+    App, Bounds, Div, ElementId, FontWeight, Hsla, InteractiveElement as _, IntoElement,
+    ParentElement as _, Pixels, SharedString, Size, Stateful, StatefulInteractiveElement as _,
+    Styled as _, TitlebarOptions, WindowBounds, WindowOptions, div, rems,
 };
 
 use crate::assets::Hero;
 use crate::format;
+
+/// A window centered on the screen. Its geometry is in device-independent pixels, not
+/// the rem scale.
+pub fn window_options(
+    title: impl Into<SharedString>,
+    size: Size<Pixels>,
+    min_size: Size<Pixels>,
+    cx: &App,
+) -> WindowOptions {
+    WindowOptions {
+        titlebar: Some(TitlebarOptions {
+            title: Some(title.into()),
+            ..Default::default()
+        }),
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size, cx))),
+        window_min_size: Some(min_size),
+        ..Default::default()
+    }
+}
 
 /// The bar of commands at the top of a pane or window; the same height whatever it holds.
 pub fn toolbar(cx: &App) -> Div {
@@ -18,6 +38,16 @@ pub fn toolbar(cx: &App) -> Div {
         .gap_1()
         .border_b_1()
         .border_color(cx.theme().border)
+}
+
+/// What a pane or list shows when it has nothing to show: a quiet line in its middle.
+pub fn empty(text: impl Into<SharedString>, cx: &App) -> Div {
+    h_flex()
+        .size_full()
+        .justify_center()
+        .text_sm()
+        .text_color(cx.theme().muted_foreground)
+        .child(text.into())
 }
 
 /// A page of the right pane, `content` starting with its [`page_title`]: it scrolls as a
@@ -50,6 +80,17 @@ pub fn labelled(name: impl IntoElement, value: impl IntoElement, cx: &App) -> Di
                 .child(name),
         )
         .child(div().flex_1().min_w_0().child(value))
+}
+
+/// A short status beside a name, on the background and in the text color given.
+pub fn badge(text: impl Into<SharedString>, (bg, fg): (Hsla, Hsla), cx: &App) -> Div {
+    div()
+        .px_1p5()
+        .rounded(cx.theme().radius)
+        .text_xs()
+        .bg(bg)
+        .text_color(fg)
+        .child(text.into())
 }
 
 /// An attachment of a draft: its name and size.

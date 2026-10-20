@@ -2,7 +2,6 @@
 
 use catmail_core::Account;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
-use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, Context, ElementId, IntoElement, ParentElement as _, Styled as _, Window, div,
@@ -27,10 +26,8 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) {
         let client = self.client.clone();
-        let this = cx.entity().downgrade();
         window.open_alert_dialog(cx, move |alert, _, _| {
             let client = client.clone();
-            let this = this.clone();
             let id = account.id;
             alert
                 .title(format!("Remove “{}”?", account.email))
@@ -43,25 +40,12 @@ impl SettingsView {
                 .ok_variant(ButtonVariant::Danger)
                 .on_ok(move |_, window, cx| {
                     let client = client.clone();
-                    let this = this.clone();
-                    window
-                        .spawn(cx, async move |cx| {
-                            let removed = client.remove_account(id).await;
-                            cx.update(|window, cx| {
-                                if let Err(e) = removed {
-                                    window.push_notification(
-                                        Notification::error(format!(
-                                            "Couldn't remove the account: {e}"
-                                        )),
-                                        cx,
-                                    );
-                                }
-                                this.update(cx, |this, cx| this.load_accounts(window, cx))
-                                    .ok();
-                            })
-                            .ok();
-                        })
-                        .detach();
+                    crate::mailbox::report_failure(
+                        "remove the account",
+                        async move { client.remove_account(id).await },
+                        window,
+                        cx,
+                    );
                     true
                 })
         });
@@ -69,6 +53,14 @@ impl SettingsView {
 
     pub(super) fn render_accounts(&self, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
+        let accounts: Vec<Account> = self
+            .mailbox
+            .upgrade()
+            .and_then(|mailbox| {
+                let entries = mailbox.read(cx).accounts.as_ref()?;
+                Some(entries.iter().map(|e| e.account.clone()).collect())
+            })
+            .unwrap_or_default();
         v_flex()
             .gap_4()
             .child(section_title(
@@ -76,7 +68,7 @@ impl SettingsView {
                 "Removing an account deletes only what is kept on this computer.",
                 cx,
             ))
-            .child(v_flex().children(self.accounts.iter().map(|account| {
+            .child(v_flex().children(accounts.iter().map(|account| {
                 let remove = account.clone();
                 h_flex()
                     .gap_3()

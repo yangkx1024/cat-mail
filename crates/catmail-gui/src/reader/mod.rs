@@ -215,21 +215,22 @@ impl Reader {
         };
         let title = open.subject.clone();
         let dir = self.client.config().handoff_dir();
-        let inline = open
-            .images
-            .inline
-            .iter()
-            .map(|(content_id, image)| {
-                let image = InlineImage {
-                    mime_type: image.format().mime_type().to_owned(),
-                    bytes: image.bytes().to_vec(),
-                };
-                (content_id.clone(), image)
-            })
-            .collect();
+        let images = open.images.clone();
         cx.spawn_in(window, async move |this, cx| {
             let written = cx
                 .background_spawn(async move {
+                    // Copied here, off the UI thread: they can be large.
+                    let inline = images
+                        .inline
+                        .iter()
+                        .map(|(content_id, image)| {
+                            let image = InlineImage {
+                                mime_type: image.format().mime_type().to_owned(),
+                                bytes: image.bytes().to_vec(),
+                            };
+                            (content_id.clone(), image)
+                        })
+                        .collect();
                     write_browser_page(&dir, &html::browser_page(&title, &body, inline))
                 })
                 .await;

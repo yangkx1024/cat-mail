@@ -4,7 +4,7 @@
 mod accounts;
 mod themes;
 
-use catmail_core::{Account, MailClient};
+use catmail_core::MailClient;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::select::{SelectEvent, SelectState};
 use gpui_kit::component::switch::Switch;
@@ -14,7 +14,7 @@ use gpui_kit::component::{
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, WeakEntity, Window, div, rems,
+    Styled as _, Subscription, WeakEntity, Window, div, rems,
 };
 
 use crate::assets::Hero;
@@ -49,8 +49,6 @@ pub struct SettingsView {
     section: Section,
     text_size: Entity<SelectState<Vec<SharedString>>>,
     import: Option<Import>,
-    accounts: Vec<Account>,
-    _load: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -75,7 +73,7 @@ impl SettingsView {
         let selected = TEXT_SIZES.iter().position(|(size, _)| *size == current);
         let text_size =
             cx.new(|cx| SelectState::new(labels, selected.map(IndexPath::new), window, cx));
-        let subscriptions = vec![cx.subscribe_in(
+        let mut subscriptions = vec![cx.subscribe_in(
             &text_size,
             window,
             |_, _, event: &SelectEvent<Vec<SharedString>>, _, cx| {
@@ -88,31 +86,18 @@ impl SettingsView {
                 }
             },
         )];
-        let mut view = Self {
+        // The accounts listed are the mailbox's, which follows the engine's events.
+        if let Some(mailbox) = mailbox.upgrade() {
+            subscriptions.push(cx.observe(&mailbox, |_, _, cx| cx.notify()));
+        }
+        Self {
             client,
             mailbox,
             section: Section::Appearance,
             text_size,
             import: None,
-            accounts: Vec::new(),
-            _load: Task::ready(()),
             _subscriptions: subscriptions,
-        };
-        view.load_accounts(window, cx);
-        view
-    }
-
-    fn load_accounts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let client = self.client.clone();
-        self._load = cx.spawn_in(window, async move |this, cx| {
-            if let Ok(accounts) = client.list_accounts().await {
-                this.update(cx, |this, cx| {
-                    this.accounts = accounts;
-                    cx.notify();
-                })
-                .ok();
-            }
-        });
+        }
     }
 
     fn set_appearance(&mut self, appearance: Appearance, cx: &mut Context<Self>) {
@@ -133,7 +118,7 @@ impl SettingsView {
 }
 
 impl Render for SettingsView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let nav = v_flex()
             .flex_none()
             .w(rems(10.))
@@ -155,7 +140,7 @@ impl Render for SettingsView {
                     }))
             }));
         let content = match self.section {
-            Section::Appearance => self.render_appearance(window, cx),
+            Section::Appearance => self.render_appearance(cx),
             Section::Accounts => self.render_accounts(cx),
             Section::Reading => self.render_reading(cx),
         };

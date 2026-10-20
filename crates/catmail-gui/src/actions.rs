@@ -27,7 +27,7 @@ gpui_kit::actions!(
     ]
 );
 
-gpui_kit::actions!(composer, [Send, Attach, CloseComposer, DiscardDraft]);
+gpui_kit::actions!(composer, [Send, Attach, CloseComposer]);
 
 /// The main window's key context.
 pub const MAILBOX: &str = "Mailbox";

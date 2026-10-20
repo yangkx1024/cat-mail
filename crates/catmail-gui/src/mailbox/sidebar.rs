@@ -15,7 +15,6 @@ use super::message_list::outbox_status;
 use super::{AccountEntry, Mailbox, Place};
 use crate::actions::{self, NewMessage, OpenSettings, Sync};
 use crate::assets::Hero;
-use crate::theme::colors::ThemeColors as _;
 
 fn role_icon(role: Option<FolderRole>) -> Hero {
     match role {
@@ -45,7 +44,7 @@ fn count(
                 this.child(
                     Icon::new(Hero::ExclamationTriangle)
                         .xsmall()
-                        .text_color(cx.theme().flag()),
+                        .text_color(cx.theme().warning),
                 )
             })
             .child(n.to_string())

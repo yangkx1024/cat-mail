@@ -88,8 +88,7 @@ impl Settings {
 /// The settings in effect, as a GPUI global, and where they are kept.
 pub struct Preferences {
     settings: Settings,
-    /// `None` keeps them in memory only (tests).
-    config_dir: Option<PathBuf>,
+    /// Writes them to the config directory; `None` keeps them in memory only (tests).
     writer: Option<Arc<Writer>>,
 }
 
@@ -113,8 +112,7 @@ impl Preferences {
         };
         Self {
             settings,
-            writer: Some(Arc::new(Writer::new(config_dir.clone()))),
-            config_dir: Some(config_dir),
+            writer: Some(Arc::new(Writer::new(config_dir))),
         }
     }
 
@@ -122,7 +120,6 @@ impl Preferences {
     pub fn load_nowhere() -> Self {
         Self {
             settings: Settings::default(),
-            config_dir: None,
             writer: None,
         }
     }
@@ -134,9 +131,9 @@ impl Preferences {
     /// Where imported themes are kept, if anywhere.
     pub fn themes_dir(cx: &App) -> Option<PathBuf> {
         cx.global::<Self>()
-            .config_dir
+            .writer
             .as_ref()
-            .map(|dir| dir.join("themes"))
+            .map(|writer| writer.dir.join("themes"))
     }
 
     /// Changes the settings and writes them out in the background. Observers of this

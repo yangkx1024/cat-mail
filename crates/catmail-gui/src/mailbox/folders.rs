@@ -1,6 +1,6 @@
 //! The sidebar's folder hierarchy, built from the flat list the engine stores.
 
-use catmail_core::{Folder, FolderRole};
+use catmail_core::{Folder, FolderId, FolderRole};
 
 /// The order of the folders with a role, which come first under an account whatever
 /// their names and nesting. Drafts is not among them: the sidebar's Drafts lists the
@@ -22,6 +22,8 @@ pub struct AccountFolders {
     pub roles: Vec<FolderNode>,
     /// The rest, as nested on the server.
     pub others: Vec<FolderNode>,
+    /// The folders named for their role rather than as on the server: the first of each.
+    named_for_role: Vec<FolderId>,
 }
 
 impl AccountFolders {
@@ -41,17 +43,21 @@ impl AccountFolders {
             }
         }
         let mut labelled = Vec::new();
+        let mut named_for_role = Vec::new();
         for node in &mut kept {
-            if let Some(role) = node.role()
+            if let Some(folder) = &node.folder
+                && let Some(role) = folder.role
                 && !labelled.contains(&role)
             {
                 labelled.push(role);
+                named_for_role.push(folder.id);
                 node.label = role_label(role).into();
             }
         }
         Self {
             roles: kept,
             others,
+            named_for_role,
         }
     }
 
@@ -74,24 +80,13 @@ impl AccountFolders {
     /// folder the sidebar names for a role by that name, the rest by their path on the
     /// server (`Clients / Invoices`).
     pub fn paths(&self) -> Vec<(&Folder, String)> {
-        let mut roles = Vec::new();
-        let named: Vec<_> = self
-            .roles
-            .iter()
-            .filter_map(|node| {
-                let folder = node.selectable()?;
-                let role = folder.role?;
-                (!roles.contains(&role)).then(|| {
-                    roles.push(role);
-                    folder.id
-                })
-            })
-            .collect();
         self.nodes()
             .filter_map(FolderNode::selectable)
             .map(|folder| {
                 let path = match (folder.role, folder.delimiter) {
-                    (Some(role), _) if named.contains(&folder.id) => role_label(role).into(),
+                    (Some(role), _) if self.named_for_role.contains(&folder.id) => {
+                        role_label(role).into()
+                    }
                     (_, Some(delimiter)) => {
                         folder.name.split(delimiter).collect::<Vec<_>>().join(" / ")
                     }
@@ -110,7 +105,7 @@ impl AccountFolders {
     }
 
     /// The node of the selectable folder.
-    pub fn find(&self, id: catmail_core::FolderId) -> Option<&FolderNode> {
+    pub fn find(&self, id: FolderId) -> Option<&FolderNode> {
         self.nodes()
             .find(|node| node.selectable().is_some_and(|f| f.id == id))
     }

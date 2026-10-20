@@ -45,10 +45,7 @@ impl SettingsView {
                 this.import = Some(match read {
                     Ok(candidate) => Import::Ready(candidate),
                     Err(error) => Import::Failed {
-                        file_name: path
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default(),
+                        file_name: appearance::file_name(&path),
                         error,
                     },
                 });
@@ -93,7 +90,7 @@ impl SettingsView {
         cx.open_with_system(&dir);
     }
 
-    pub(super) fn render_appearance(&self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_appearance(&self, cx: &mut Context<Self>) -> AnyElement {
         let settings = Preferences::get(cx).clone();
         if let Some(import) = &self.import {
             return self.render_import(import, cx);
@@ -409,14 +406,11 @@ fn theme_card(
                         .child(name.to_owned()),
                 )
                 .when(imported, |this| {
-                    this.child(
-                        div()
-                            .px_1()
-                            .rounded(theme.radius)
-                            .bg(theme.muted)
-                            .text_color(theme.muted_foreground)
-                            .child("Imported"),
-                    )
+                    this.child(crate::layout::badge(
+                        "Imported",
+                        (theme.muted, theme.muted_foreground),
+                        cx,
+                    ))
                 })
                 .when(selected, |this| {
                     this.child(Icon::new(Hero::Check).xsmall().text_color(theme.primary))

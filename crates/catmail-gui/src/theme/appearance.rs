@@ -208,14 +208,18 @@ pub struct ImportCandidate {
 
 /// Reads and parses a color scheme file; not for the UI thread.
 pub fn read_import(path: &Path) -> Result<ImportCandidate, String> {
-    let file_name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let file_name = file_name(path);
     let bytes = std::fs::read(path).map_err(|e| format!("Couldn't read it: {e}."))?;
     let contents = String::from_utf8(bytes).map_err(|_| ImportError::Unrecognized.to_string())?;
     let themes = import(&file_name, &contents).map_err(|e| e.to_string())?;
     Ok(ImportCandidate { file_name, themes })
+}
+
+/// The name of the file at `path`, for showing.
+pub fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// Writes the imported themes into the themes folder and offers them. A name taken by a

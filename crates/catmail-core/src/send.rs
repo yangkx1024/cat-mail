@@ -92,6 +92,8 @@ pub(crate) async fn queue_draft(engine: &Arc<Engine>, id: DraftId) -> Result<Out
         })
         .await?
         .expect("just queued");
+    // Nothing more for background sync to hold back: the outbox has it now.
+    engine.draft_gone(account_id, id);
     engine.emit(Event::DraftsChanged {
         account: account_id,
     });

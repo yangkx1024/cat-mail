@@ -9,7 +9,7 @@ use gpui_kit::{
     Render, SharedString, Styled as _, Window, div, prelude::FluentBuilder as _, rems,
 };
 
-use crate::actions::{self, Attach, CloseComposer, DiscardDraft, Send};
+use crate::actions::{self, Attach, CloseComposer, Send};
 use crate::assets::Hero;
 use crate::layout;
 
@@ -17,29 +17,21 @@ use super::*;
 
 /// A line of the header: the field's name in a column, then the field.
 fn field_row(label: &'static str, field: impl IntoElement, cx: &App) -> gpui_kit::Div {
-    h_flex()
+    layout::labelled(div().text_sm().child(label), field, cx)
+        .items_center()
         .h_10()
         .gap_3()
-        .child(
-            div()
-                .w_16()
-                .flex_none()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child(label),
-        )
-        .child(div().flex_1().min_w_0().child(field))
 }
 
 /// A text field of the header, borderless in its row. Read-only while the window is
 /// ending: what it is saving or sending was taken when that began.
-fn header_input(label: &'static str, input: &Entity<InputState>, busy: bool) -> Input {
+fn header_input(label: &'static str, input: &Entity<InputState>, ending: bool) -> Input {
     let id: SharedString = format!("composer-{}", label.to_lowercase()).into();
     Input::new(input)
         .id(id)
         .appearance(false)
         .p_0()
-        .readonly(busy)
+        .readonly(ending)
 }
 
 impl Composer {
@@ -70,7 +62,8 @@ impl Composer {
             .children(error.map(|error| {
                 div()
                     .pb_2()
-                    // Under the field, past the label column (`w_16`) and its gap (`gap_3`).
+                    // Under the field, past the label column (`w_16`, see `layout::labelled`)
+                    // and the row's gap (`gap_3`).
                     .pl(rems(4.75))
                     .text_xs()
                     .text_color(cx.theme().danger)
@@ -82,9 +75,9 @@ impl Composer {
 impl Render for Composer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let busy = self.finishing.is_some();
+        let ending = self.finishing.is_some();
         let sending = self.finishing == Some(Finish::Send);
-        let status: Option<SharedString> = match (&self.save_state, self.saving && !busy) {
+        let status: Option<SharedString> = match (&self.save_state, self.saving && !ending) {
             (_, true) => Some("Saving…".into()),
             (SaveState::Saved, _) if !self.dirty => Some("Draft saved".into()),
             (SaveState::Failed(e), _) => Some(format!("Not saved: {e}").into()),
@@ -99,7 +92,7 @@ impl Render for Composer {
                     .icon(Hero::PaperAirplane)
                     .label("Send")
                     .loading(sending)
-                    .disabled(busy)
+                    .disabled(ending)
                     .tooltip_with_action("Send", &Send, Some(actions::COMPOSER))
                     .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
             )
@@ -109,7 +102,7 @@ impl Render for Composer {
                     .small()
                     .icon(Hero::PaperClip)
                     .label("Attach…")
-                    .disabled(busy)
+                    .disabled(ending)
                     .tooltip_with_action("Attach files", &Attach, Some(actions::COMPOSER))
                     .on_click(cx.listener(|this, _, window, cx| this.attach(window, cx))),
             )
@@ -125,7 +118,7 @@ impl Render for Composer {
                     .ghost()
                     .small()
                     .icon(Hero::Trash)
-                    .disabled(busy)
+                    .disabled(ending)
                     .tooltip("Discard draft…")
                     .on_click(cx.listener(|this, _, window, cx| this.discard(window, cx))),
             );
@@ -142,10 +135,11 @@ impl Render for Composer {
                 }))
                 .into_any_element()
         });
-        let from = match &self.account.display_name {
-            Some(name) => format!("{name} <{}>", self.account.email),
-            None => self.account.email.clone(),
-        };
+        let from = catmail_core::Address {
+            name: self.account.display_name.clone(),
+            email: self.account.email.clone(),
+        }
+        .to_string();
         let fields = v_flex()
             .flex_none()
             .px_5()
@@ -160,9 +154,13 @@ impl Render for Composer {
                     .child(self.address_row("Bcc", Field::Bcc, &self.bcc, None, cx))
             })
             .child(
-                field_row("Subject", header_input("Subject", &self.subject, busy), cx)
-                    .border_b_1()
-                    .border_color(theme.border),
+                field_row(
+                    "Subject",
+                    header_input("Subject", &self.subject, ending),
+                    cx,
+                )
+                .border_b_1()
+                .border_color(theme.border),
             )
             .when(!self.attachments.is_empty(), |this| {
                 this.child(
@@ -186,7 +184,7 @@ impl Render for Composer {
                                     .xsmall()
                                     .icon(Hero::XMark)
                                     .tooltip(format!("Remove {}", attachment.filename))
-                                    .disabled(busy)
+                                    .disabled(ending)
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.remove_attachment(id, window, cx)
                                     })),
@@ -202,7 +200,6 @@ impl Render for Composer {
             .on_action(cx.listener(|this, _: &Send, window, cx| this.send(window, cx)))
             .on_action(cx.listener(|this, _: &CloseComposer, window, cx| this.close(window, cx)))
             .on_action(cx.listener(|this, _: &Attach, window, cx| this.attach(window, cx)))
-            .on_action(cx.listener(|this, _: &DiscardDraft, window, cx| this.discard(window, cx)))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 this.attach_paths(paths.paths().to_vec(), window, cx)
             }))
@@ -221,7 +218,7 @@ impl Render for Composer {
                 div().flex_1().min_h_0().px_3().py_2().child(
                     Textarea::new(&self.body)
                         .appearance(false)
-                        .readonly(busy)
+                        .readonly(ending)
                         .h_full(),
                 ),
             )

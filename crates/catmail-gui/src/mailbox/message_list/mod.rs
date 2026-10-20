@@ -3,11 +3,12 @@
 //! (`ListState`) owns selection, keyboard navigation and scrolling; the delegate here
 //! owns the rows.
 
+use std::rc::Rc;
+
 use catmail_core::{
     AccountId, Draft, DraftId, FolderId, MailClient, MessageId, MessageSummary, OutboxEntry,
     OutboxId, SearchQuery,
 };
-use gpui_kit::component::h_flex;
 use gpui_kit::component::list::{ListDelegate, ListEvent, ListItem, ListState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, IndexPath, Sizable as _, WindowExt as _};
@@ -39,7 +40,8 @@ pub enum Source {
 #[derive(Debug, Clone)]
 pub enum Row {
     Message(MessageSummary),
-    Draft(Draft),
+    /// Shared: the right pane shows it, and a draft can hold a whole forwarded message.
+    Draft(Rc<Draft>),
     Outbox(OutboxEntry),
 }
 
@@ -80,9 +82,9 @@ pub struct MessageList {
     has_more: bool,
     /// Bumped when the source changes, so rows fetched for the previous one are dropped.
     generation: u64,
-    /// Set when the user moved or deleted the selected message: once it is gone, the
-    /// row now at this index is selected, so the next message opens.
-    select_after_removal: Option<usize>,
+    /// The message the user moved or deleted: once it is gone while still selected, the
+    /// row now at its index is selected, so the next message opens.
+    removing: Option<MessageId>,
     _load: Task<()>,
 }
 
@@ -97,7 +99,7 @@ impl MessageList {
             stale: false,
             has_more: false,
             generation: 0,
-            select_after_removal: None,
+            removing: None,
             _load: Task::ready(()),
         }
     }
@@ -128,9 +130,9 @@ impl MessageList {
         self.rows.get(ix)?.message()
     }
 
-    /// Selects the next row once the selected one goes away.
-    pub fn expect_removal(&mut self) {
-        self.select_after_removal = self.selected;
+    /// Selects the next row once `id`, the selected message, goes away.
+    pub fn expect_removal(&mut self, id: MessageId) {
+        self.removing = Some(id);
     }
 }
 
@@ -146,7 +148,7 @@ pub fn show(
     delegate.rows.clear();
     delegate.has_more = false;
     delegate.stale = false;
-    delegate.select_after_removal = None;
+    delegate.removing = None;
     delegate.generation += 1;
     list.set_selected_index(None, window, cx);
     list.scroll_to_item(IndexPath::new(0), gpui_kit::ScrollStrategy::Top, window, cx);
@@ -197,7 +199,8 @@ async fn fetch(
         }
         Source::Drafts(account) => {
             let drafts = client.list_drafts(*account).await?;
-            (drafts.into_iter().map(Row::Draft).collect(), false)
+            let rows = drafts.into_iter().map(|d| Row::Draft(Rc::new(d))).collect();
+            (rows, false)
         }
         Source::Outbox(account) => {
             let entries = client.list_outbox(Some(*account)).await?;
@@ -267,7 +270,12 @@ fn replace_rows(
 ) {
     let delegate = list.delegate_mut();
     let selected = delegate.selected_row().map(Row::id);
-    let removed_at = delegate.select_after_removal.take();
+    // Only while the message is still the one selected: the user may have moved on.
+    let removing = delegate
+        .removing
+        .take()
+        .filter(|id| selected == Some(RowId::Message(*id)));
+    let removed_at = removing.and(delegate.selected);
     delegate.rows = rows;
     let ix = selected.and_then(|id| delegate.rows.iter().position(|r| r.id() == id));
     match (selected, ix, removed_at) {
@@ -283,10 +291,11 @@ fn replace_rows(
             list.set_selected_index(None, window, cx);
             cx.emit(ListEvent::Cancel);
         }
-        (_, ix, removed_at) => {
+        (_, ix, _) => {
             list.set_selected_index(ix.map(IndexPath::new), window, cx);
-            // Still there (a move the server refused, say): keep waiting.
-            list.delegate_mut().select_after_removal = removed_at.filter(|_| ix.is_some());
+            // Still there (a page read before the change committed, or the change
+            // failed): keep waiting.
+            list.delegate_mut().removing = removing;
         }
     }
 }
@@ -326,12 +335,7 @@ impl ListDelegate for MessageList {
             Some(Source::Drafts(_)) => "No drafts",
             Some(Source::Outbox(_)) => "Nothing waiting to be sent",
         };
-        h_flex()
-            .size_full()
-            .justify_center()
-            .text_sm()
-            .text_color(cx.theme().muted_foreground)
-            .child(text)
+        crate::layout::empty(text, cx)
     }
 
     fn loading(&self, _: &App) -> bool {

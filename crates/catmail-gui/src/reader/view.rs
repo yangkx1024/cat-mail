@@ -20,9 +20,9 @@ use crate::theme::colors::ThemeColors as _;
 use super::*;
 
 impl Render for Reader {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content: AnyElement = match &self.state {
-            ReaderState::Empty => placeholder("No message selected", cx).into_any_element(),
+            ReaderState::Empty => layout::empty("No message selected", cx).into_any_element(),
             ReaderState::Loading(_) => h_flex()
                 .size_full()
                 .justify_center()
@@ -46,19 +46,14 @@ impl Render for Reader {
                         .on_click(cx.listener(|this, _, window, cx| this.retry(window, cx))),
                 )
                 .into_any_element(),
-            ReaderState::Open(open) => self.render_message(open, window, cx).into_any_element(),
+            ReaderState::Open(open) => self.render_message(open, cx).into_any_element(),
         };
         div().size_full().bg(cx.theme().background).child(content)
     }
 }
 
 impl Reader {
-    fn render_message(
-        &self,
-        open: &OpenMessage,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_message(&self, open: &OpenMessage, cx: &mut Context<Self>) -> impl IntoElement {
         let (text, html) = (&open.text, &open.html);
         let format = match (self.preferred, text, html) {
             (BodyFormat::Html, _, Some(_)) | (_, None, Some(_)) => BodyFormat::Html,
@@ -268,13 +263,4 @@ impl Reader {
         )
         .size_full()
     }
-}
-
-fn placeholder(text: &'static str, cx: &Context<Reader>) -> impl IntoElement + use<> {
-    h_flex()
-        .size_full()
-        .justify_center()
-        .text_sm()
-        .text_color(cx.theme().muted_foreground)
-        .child(text)
 }

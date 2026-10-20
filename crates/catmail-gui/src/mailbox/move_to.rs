@@ -85,12 +85,7 @@ impl ListDelegate for FolderPicker {
         _: &mut Window,
         cx: &mut Context<ListState<Self>>,
     ) -> impl IntoElement {
-        h_flex()
-            .size_full()
-            .justify_center()
-            .text_sm()
-            .text_color(cx.theme().muted_foreground)
-            .child("No folder by that name")
+        crate::layout::empty("No folder by that name", cx)
     }
 
     fn set_selected_index(

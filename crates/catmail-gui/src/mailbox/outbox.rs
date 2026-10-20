@@ -5,10 +5,7 @@ use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
-use gpui_kit::{
-    AnyElement, Context, IntoElement, ParentElement as _, Styled as _, Window, div,
-    prelude::FluentBuilder as _,
-};
+use gpui_kit::{AnyElement, Context, IntoElement, ParentElement as _, Styled as _, Window, div};
 
 use super::message_list::outbox_status;
 use super::{Mailbox, report_failure};
@@ -60,6 +57,13 @@ impl Mailbox {
                 }))
         };
         let reason = entry.last_error.clone().unwrap_or_default();
+        // Why it is where it is, under the state's own words.
+        let note = (!reason.is_empty()).then(|| {
+            div()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(reason.clone())
+        });
         let (status, _) = outbox_status(entry);
         let actions = h_flex().gap_2().flex_wrap();
         match entry.status {
@@ -116,14 +120,7 @@ impl Mailbox {
                         .text_sm()
                         .child("Sent. A copy is still to be saved to the Sent folder."),
                 )
-                .when(!reason.is_empty(), |this| {
-                    this.child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(reason),
-                    )
-                })
+                .children(note)
                 .child(
                     actions
                         .child(
@@ -153,14 +150,7 @@ impl Mailbox {
             OutboxStatus::Queued | OutboxStatus::Done => v_flex()
                 .gap_3()
                 .child(div().text_sm().child(status))
-                .when(!reason.is_empty(), |this| {
-                    this.child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(reason),
-                    )
-                })
+                .children(note)
                 .child(
                     actions
                         .child(

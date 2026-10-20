@@ -31,14 +31,11 @@ fn window_options() -> WindowOptions {
 /// Opens the mailbox in `cx`, which is a `TestAppContext` or a `HeadlessAppContext`,
 /// set up as `main` sets up the app.
 fn open_mailbox(cx: &mut App, mail: &TestMail) -> (AnyWindowHandle, Entity<Mailbox>) {
-    gpui_kit::init(cx);
+    crate::init_app(Preferences::load_nowhere(), cx);
     // Dialogs slide in, and hit testing follows them: on a slow machine a click meant
     // for a dialog's button lands where it was a frame ago. (Tests never read the
     // system's setting, so it is set here.)
     cx.set_reduce_motion(true);
-    cx.set_global(Preferences::load_nowhere());
-    crate::theme::appearance::init(cx);
-    actions::bind_keys(cx);
     let client = mail.client.clone();
     gpui_kit::open_window(window_options(), cx, |window, cx| {
         cx.new(|cx| Mailbox::new(client, window, cx))

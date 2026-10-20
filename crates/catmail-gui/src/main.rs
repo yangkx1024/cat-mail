@@ -21,8 +21,8 @@ use catmail_core::{Config, DEFAULT_GC_INTERVAL, MailClient, SyncSchedule};
 use clap::Parser;
 use gpui_kit::component::{ActiveTheme as _, StyledExt as _, v_flex};
 use gpui_kit::{
-    App, AppContext as _, Bounds, Context, IntoElement, ParentElement as _, Render, SharedString,
-    Styled as _, TitlebarOptions, Window, WindowBounds, WindowOptions, div, px, size,
+    App, AppContext as _, Context, IntoElement, ParentElement as _, Render, SharedString,
+    Styled as _, Window, WindowOptions, div, px, size,
 };
 use settings::{Preferences, Settings};
 use tracing_subscriber::EnvFilter;
@@ -71,27 +71,13 @@ fn main() {
     gpui_kit::application()
         .with_assets(assets::Assets)
         .run(move |cx| {
-            gpui_kit::init(cx);
-            cx.set_global(match config_dir {
-                Some(dir) => Preferences::load(dir),
-                None => Preferences::load_nowhere(),
-            });
-            theme::appearance::init(cx);
-            actions::bind_keys(cx);
-            cx.on_action(|_: &actions::Quit, cx| composer::quit(cx));
-            // Text size applies to every window, so it is the app's to handle.
-            cx.on_action(|_: &actions::TextLarger, cx| step_text_size(1, cx));
-            cx.on_action(|_: &actions::TextSmaller, cx| step_text_size(-1, cx));
-            cx.on_action(|_: &actions::TextReset, cx| {
-                Preferences::update(cx, |s| s.text_size = Settings::default().text_size);
-            });
-            cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
-
+            init_app(
+                match config_dir {
+                    Some(dir) => Preferences::load(dir),
+                    None => Preferences::load_nowhere(),
+                },
+                cx,
+            );
             let opened = match client {
                 Ok(client) => gpui_kit::open_window(window_options(cx), cx, |window, cx| {
                     cx.new(|cx| Mailbox::new(client, window, cx))
@@ -113,26 +99,40 @@ fn main() {
         });
 }
 
+/// Sets up the app before its first window: components, settings, theme, keys and the
+/// app-wide actions.
+fn init_app(preferences: Preferences, cx: &mut App) {
+    gpui_kit::init(cx);
+    cx.set_global(preferences);
+    theme::appearance::init(cx);
+    actions::bind_keys(cx);
+    cx.on_action(|_: &actions::Quit, cx| composer::quit(cx));
+    // Text size applies to every window, so it is the app's to handle.
+    cx.on_action(|_: &actions::TextLarger, cx| step_text_size(1, cx));
+    cx.on_action(|_: &actions::TextSmaller, cx| step_text_size(-1, cx));
+    cx.on_action(|_: &actions::TextReset, cx| {
+        Preferences::update(cx, |s| s.text_size = Settings::default().text_size);
+    });
+    cx.on_window_closed(|cx, _| {
+        if cx.windows().is_empty() {
+            cx.quit();
+        }
+    })
+    .detach();
+}
+
 fn step_text_size(step: isize, cx: &mut App) {
     let size = Preferences::get(cx).stepped_text_size(step);
     Preferences::update(cx, |s| s.text_size = size);
 }
 
 fn window_options(cx: &App) -> WindowOptions {
-    WindowOptions {
-        titlebar: Some(TitlebarOptions {
-            title: Some("cat-mail".into()),
-            ..Default::default()
-        }),
-        // Window geometry is in device-independent pixels, not the rem scale.
-        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-            None,
-            size(px(1280.), px(800.)),
-            cx,
-        ))),
-        window_min_size: Some(size(px(720.), px(480.))),
-        ..Default::default()
-    }
+    layout::window_options(
+        "cat-mail",
+        size(px(1280.), px(800.)),
+        size(px(720.), px(480.)),
+        cx,
+    )
 }
 
 /// Shown instead of the mailbox when the data directory can't be opened, typically because
