@@ -15,7 +15,7 @@ mod test_support;
 
 use std::path::PathBuf;
 
-use catmail_core::{Config, MailClient};
+use catmail_core::{Config, MailClient, SyncSchedule};
 use clap::Parser;
 use gpui_kit::component::{ActiveTheme as _, StyledExt as _, v_flex};
 use gpui_kit::{
@@ -45,13 +45,18 @@ fn main() {
         .init();
     let cli = Cli::parse();
     // Without `.runtime(..)` the engine runs its own tokio runtime: GPUI's executor is
-    // not tokio, and the client's futures don't need it to be.
+    // not tokio, and the client's futures don't need it to be. New mail shows up as the
+    // server announces it, through the engine's events.
     let client = cli
         .data_dir
         .map_or_else(Config::platform_default, |dir| {
             Ok(Config::with_data_dir(dir))
         })
-        .and_then(|config| MailClient::builder(config).open());
+        .and_then(|config| {
+            MailClient::builder(config)
+                .sync_in_background(Some(SyncSchedule::default()))
+                .open()
+        });
 
     gpui_kit::application()
         .with_assets(assets::Assets)

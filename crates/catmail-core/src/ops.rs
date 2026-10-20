@@ -72,7 +72,8 @@ async fn change(
     Ok(announce(engine, &touched))
 }
 
-/// Emits the events for `touched`, and returns its accounts.
+/// Emits the events for `touched`, and wakes the accounts' background sync to make any
+/// ops queued on the server. Returns its accounts.
 pub(crate) fn announce(engine: &Engine, touched: &Touched) -> Vec<AccountId> {
     for &(account, folder) in touched {
         engine.emit(Event::MessagesChanged { account, folder });
@@ -81,6 +82,9 @@ pub(crate) fn announce(engine: &Engine, touched: &Touched) -> Vec<AccountId> {
     accounts.dedup();
     for &account in &accounts {
         engine.emit(Event::PendingOpsChanged { account });
+        // Sync's own conflicts come through here too; that costs a needless look at the
+        // queue, rarely.
+        engine.wake(account);
     }
     accounts
 }
@@ -107,10 +111,7 @@ pub(crate) async fn replay_account(
     engine: Arc<Engine>,
     account: AccountId,
 ) -> Result<ReplayReport> {
-    let mut permit = engine.sync_permit(account).await;
-    if permit.is_cancelled() {
-        return Err(Error::AccountNotFound(account.to_string()));
-    }
+    let permit = engine.sync_permit(account).await;
     let run = async {
         let folders = engine
             .read(move |db| db.ops().pending_folders(account))
@@ -134,10 +135,7 @@ pub(crate) async fn replay_account(
             .await?;
         Ok(report)
     };
-    tokio::select! {
-        result = run => result,
-        () = permit.cancelled() => Err(Error::Cancelled),
-    }
+    permit.run(run).await
 }
 
 /// Replays the ops of `folders` on `session`, one folder after the other, and returns

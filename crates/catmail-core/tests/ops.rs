@@ -1,8 +1,6 @@
 //! Local changes (flags, moves, deletions) and their replay against the fake IMAP server.
 
-use catmail_core::{
-    DraftContent, Error, Event, Flags, MessageId, MessageSummary, OpKind, OpStatus,
-};
+use catmail_core::{DraftContent, Error, Event, Flags, MessageId, OpKind, OpStatus};
 use catmail_testkit::{FakeMailbox, ServerState};
 
 mod common;
@@ -25,20 +23,6 @@ fn state() -> ServerState {
 }
 
 impl Env {
-    async fn list(&self, name: &str) -> Vec<MessageSummary> {
-        let folder = self.folder(name).await;
-        self.client.list_messages(folder.id, 100, 0).await.unwrap()
-    }
-
-    async fn id(&self, name: &str, subject: &str) -> MessageId {
-        self.list(name)
-            .await
-            .into_iter()
-            .find(|m| m.subject.as_deref() == Some(subject))
-            .unwrap_or_else(|| panic!("no {subject} in {name}"))
-            .id
-    }
-
     /// (subject, flags) in the local folder, by subject.
     async fn local(&self, name: &str) -> Vec<(String, Flags)> {
         let mut messages = self.messages(name).await;
@@ -89,7 +73,10 @@ fn names(list: &[(String, Vec<String>)]) -> Vec<&str> {
 #[tokio::test(flavor = "multi_thread")]
 async fn flags_change_locally_then_on_the_server() {
     let env = synced_env(state()).await;
-    let (one, two) = (env.id("INBOX", "one").await, env.id("INBOX", "two").await);
+    let (one, two) = (
+        env.id_of("INBOX", "one").await,
+        env.id_of("INBOX", "two").await,
+    );
     let mut events = env.client.subscribe();
     let inbox = env.folder("INBOX").await;
 
@@ -128,7 +115,7 @@ async fn flags_change_locally_then_on_the_server() {
     assert!(env.pending().await.is_empty());
 
     // Clearing a flag that isn't set changes nothing and queues nothing.
-    let three = env.id("INBOX", "three").await;
+    let three = env.id_of("INBOX", "three").await;
     env.client
         .set_flags(vec![three], Flags::empty(), Flags::SEEN)
         .await
@@ -159,7 +146,7 @@ async fn flags_change_locally_then_on_the_server() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sync_replays_first_and_keeps_what_others_changed() {
     let env = synced_env(state()).await;
-    let one = env.id("INBOX", "one").await;
+    let one = env.id_of("INBOX", "one").await;
     env.client
         .set_flags(vec![one], Flags::SEEN, Flags::empty())
         .await
@@ -177,7 +164,7 @@ async fn sync_replays_first_and_keeps_what_others_changed() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_moved_message_keeps_its_body_and_id() {
     let env = synced_env(state()).await;
-    let two = env.id("INBOX", "two").await;
+    let two = env.id_of("INBOX", "two").await;
     env.client.download_message(two).await.unwrap();
     let archive = env.folder("Archive").await;
 
@@ -218,7 +205,7 @@ async fn without_uidplus_moved_messages_are_fetched_again() {
     state.faults.uidplus = false;
     state.faults.move_command = false;
     let env = synced_env(state).await;
-    let two = env.id("INBOX", "two").await;
+    let two = env.id_of("INBOX", "two").await;
     let archive = env.folder("Archive").await;
     env.client
         .move_messages(vec![two], archive.id)
@@ -242,7 +229,7 @@ async fn without_uidplus_moved_messages_are_fetched_again() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_message_moved_offline_downloads_from_where_it_was() {
     let env = synced_env(state()).await;
-    let two = env.id("INBOX", "two").await;
+    let two = env.id_of("INBOX", "two").await;
     let archive = env.folder("Archive").await;
     env.client
         .move_messages(vec![two], archive.id)
@@ -255,15 +242,15 @@ async fn a_message_moved_offline_downloads_from_where_it_was() {
 #[tokio::test(flavor = "multi_thread")]
 async fn deleting_goes_through_trash() {
     let env = synced_env(state()).await;
-    let one = env.id("INBOX", "one").await;
+    let one = env.id_of("INBOX", "one").await;
     env.client.delete_messages(vec![one], false).await.unwrap();
     assert_eq!(subjects(&env.local("Trash").await), ["one"]);
     env.client.sync_account(env.account).await.unwrap();
     assert_eq!(names(&env.remote("Trash")), ["one"]);
 
-    let one = env.id("Trash", "one").await;
+    let one = env.id_of("Trash", "one").await;
     env.client.delete_messages(vec![one], false).await.unwrap();
-    let three = env.id("INBOX", "three").await;
+    let three = env.id_of("INBOX", "three").await;
     env.client.delete_messages(vec![three], true).await.unwrap();
     assert!(env.local("Trash").await.is_empty());
     env.client.sync_account(env.account).await.unwrap();
@@ -276,7 +263,10 @@ async fn deleting_goes_through_trash() {
 #[tokio::test(flavor = "multi_thread")]
 async fn refused_changes_are_undone() {
     let env = synced_env(state()).await;
-    let (one, two) = (env.id("INBOX", "one").await, env.id("INBOX", "two").await);
+    let (one, two) = (
+        env.id_of("INBOX", "one").await,
+        env.id_of("INBOX", "two").await,
+    );
     let archive = env.folder("Archive").await;
     env.client
         .set_flags(vec![one], Flags::FLAGGED, Flags::empty())
@@ -298,7 +288,7 @@ async fn refused_changes_are_undone() {
             ("two".into(), Flags::empty())
         ]
     );
-    assert_eq!(env.id("INBOX", "two").await, two, "back where it was");
+    assert_eq!(env.id_of("INBOX", "two").await, two, "back where it was");
     let ops = env.client.list_pending(None).await.unwrap();
     assert!(ops.iter().all(|op| {
         op.status == OpStatus::Failed
@@ -318,7 +308,10 @@ async fn refused_changes_are_undone() {
 #[tokio::test(flavor = "multi_thread")]
 async fn changes_whose_answer_is_lost_are_made_once() {
     let env = synced_env(state()).await;
-    let (one, two) = (env.id("INBOX", "one").await, env.id("INBOX", "two").await);
+    let (one, two) = (
+        env.id_of("INBOX", "one").await,
+        env.id_of("INBOX", "two").await,
+    );
     let archive = env.folder("Archive").await;
 
     // The flag change is made, but the connection drops before the answer.
@@ -357,7 +350,10 @@ async fn changes_whose_answer_is_lost_are_made_once() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rebuilt_folder_turns_changes_into_conflicts() {
     let env = synced_env(state()).await;
-    let (one, two) = (env.id("INBOX", "one").await, env.id("INBOX", "two").await);
+    let (one, two) = (
+        env.id_of("INBOX", "one").await,
+        env.id_of("INBOX", "two").await,
+    );
     let archive = env.folder("Archive").await;
     env.client
         .set_flags(vec![one], Flags::SEEN, Flags::empty())
@@ -422,7 +418,7 @@ async fn copy_move_env(message_id: bool) -> (Env, MessageId) {
     }
     state.mailboxes.push(FakeMailbox::new("Archive"));
     let env = synced_env(state).await;
-    let two = env.id("INBOX", "two").await;
+    let two = env.id_of("INBOX", "two").await;
     let archive = env.folder("Archive").await;
     env.client
         .move_messages(vec![two], archive.id)
@@ -515,7 +511,7 @@ async fn an_unknowable_copy_leaves_the_original() {
     let report = env.client.replay_pending(env.account).await.unwrap();
     assert_eq!((report.applied, report.failed, report.pending), (0, 1, 0));
     assert_eq!(names(&env.remote("INBOX")), ["one", "two"], "original kept");
-    assert_eq!(env.id("INBOX", "two").await, two);
+    assert_eq!(env.id_of("INBOX", "two").await, two);
     let ops = env.client.list_pending(None).await.unwrap();
     assert_eq!(ops[0].status, OpStatus::Failed);
     assert!(
@@ -530,7 +526,7 @@ async fn an_unknowable_copy_leaves_the_original() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sent_replies_mark_the_original_answered() {
     let env = synced_env(state()).await;
-    let one = env.id("INBOX", "one").await;
+    let one = env.id_of("INBOX", "one").await;
     let draft = env.client.reply(one, false).await.unwrap();
     env.client
         .update_draft(

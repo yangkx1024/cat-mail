@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::future::Future;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::time::Duration;
 
@@ -266,7 +267,31 @@ impl Session {
         };
         self.selected = Some(status);
         self.writable = writable;
+        self.conn.mailbox_opened(status.exists);
         Ok(status)
+    }
+
+    /// Whether [`idle`](Self::idle) is available (IDLE, RFC 2177).
+    pub fn can_idle(&self) -> bool {
+        self.caps.has("IDLE")
+    }
+
+    /// Waits for the selected mailbox to change on the server (IDLE; see
+    /// [`can_idle`](Self::can_idle)), for `stop` to resolve, or for `max` to pass,
+    /// whichever comes first. Returns whether the server reported a change: new or
+    /// expunged messages, or changed flags. Changes it already reported in answers to
+    /// earlier commands since the mailbox was opened count too (and return at once):
+    /// a server says so only once, so they would otherwise go unnoticed until the next
+    /// one. Changes this session made count as well.
+    pub async fn idle(&mut self, stop: impl Future<Output = ()>, max: Duration) -> Result<bool> {
+        if !self.can_idle() {
+            return Err(Error::Unsupported("IDLE"));
+        }
+        self.selected_status()?;
+        if self.conn.mailbox_changed() {
+            return Ok(true);
+        }
+        self.conn.idle(stop, max).await
     }
 
     /// Sets `add` and clears `remove` on messages of the selected mailbox, leaving their
@@ -395,18 +420,7 @@ impl Session {
                 body.name()
             )));
         }
-        let response = self.conn.execute_lossy(body).await?;
-        // Keep EXISTS current: searches skip a mailbox it says is empty.
-        if let Some(status) = &mut self.selected {
-            for data in &response.data {
-                match data {
-                    Data::Exists(n) => status.exists = *n,
-                    Data::Expunge(_) => status.exists = status.exists.saturating_sub(1),
-                    _ => {}
-                }
-            }
-        }
-        Ok(response)
+        self.conn.execute_lossy(body).await
     }
 
     /// Adds `message` to the mailbox `raw_name`. Returns its UIDVALIDITY and UID if the
@@ -460,7 +474,7 @@ impl Session {
     }
 
     async fn uid_search(&mut self, key: SearchKey<'static>) -> Result<Vec<u32>> {
-        if self.selected_status()?.exists == 0 {
+        if self.selected_exists()? == 0 {
             return Ok(Vec::new());
         }
         let response = self
@@ -567,7 +581,7 @@ impl Session {
         let Some(last_uid) = NonZeroU32::new(last_uid) else {
             return Ok(Vec::new());
         };
-        if self.selected_status()?.exists == 0 {
+        if self.selected_exists()? == 0 {
             return Ok(Vec::new());
         }
         let mut items = vec![MessageDataItemName::Uid, MessageDataItemName::Flags];
@@ -705,6 +719,13 @@ impl Session {
     fn selected_status(&self) -> Result<MailboxStatus> {
         self.selected
             .ok_or_else(|| Error::Protocol("no mailbox selected".into()))
+    }
+
+    /// Messages in the selected mailbox, as of the server's last word: searches skip a
+    /// mailbox that is empty.
+    fn selected_exists(&self) -> Result<u32> {
+        self.selected_status()?;
+        Ok(self.conn.exists())
     }
 }
 

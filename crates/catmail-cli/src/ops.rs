@@ -265,42 +265,10 @@ fn change(kind: OpKind, folder: &impl Fn(FolderId) -> String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use catmail_core::{AuthKind, Config, MemorySecrets, NewAccount, Security, ServerConfig};
     use catmail_testkit::{FakeImap, FakeMailbox, ServerState};
 
     use super::*;
-
-    async fn synced(fake: &FakeImap, dir: &std::path::Path) -> (MailClient, AccountId) {
-        let client = MailClient::builder(Config::with_data_dir(dir))
-            .runtime(tokio::runtime::Handle::current())
-            .secrets(Arc::new(MemorySecrets::default()))
-            .open()
-            .unwrap();
-        let server = ServerConfig {
-            host: "127.0.0.1".into(),
-            port: fake.port(),
-            security: Security::Plain,
-        };
-        let account = client
-            .add_account(
-                NewAccount {
-                    email: "alice@example.com".into(),
-                    display_name: None,
-                    username: "alice".into(),
-                    imap: server.clone(),
-                    smtp: server,
-                    auth: AuthKind::Password,
-                },
-                "pw".into(),
-            )
-            .await
-            .unwrap()
-            .id;
-        client.sync_account(account).await.unwrap();
-        (client, account)
-    }
+    use crate::test_support::synced;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn changes_reach_the_server_or_stay_queued() {

@@ -24,6 +24,9 @@ GPUI），不直接依赖 `gpui`，否则会链接两份 GPUI。gpui-kit 的编�
 方法，从不碰 tokio。事件的 `broadcast::Receiver` 不依赖 reactor，直接在 GPUI 的 executor 上 `recv`；
 `Lagged` 时整体刷新，`Closed` 时退出。
 
+客户端开启了后台同步（`sync_in_background`）：服务器推送的新邮件同样经 `MessagesChanged` 出现。启动和
+添加账户时仍手动同步一次，把错误显示成通知；后台同步的错误只记日志。
+
 - `FoldersChanged` / 账户增删：重读侧栏。
 - `MessagesChanged`：重读侧栏（计数）；是当前文件夹时重读已显示的行，按 MessageId 保持选中。选中的
   邮件刷新后不见了（被删除、UIDVALIDITY 改变）时，列表发出 `ListEvent::Cancel`（与按 Escape 相同），

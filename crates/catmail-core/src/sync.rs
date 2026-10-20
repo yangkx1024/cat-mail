@@ -22,19 +22,23 @@ use crate::{Error, Result, connection, ops};
 const FETCH_BATCH: usize = 200;
 
 pub(crate) async fn sync_account(engine: Arc<Engine>, account_id: AccountId) -> Result<SyncReport> {
-    let mut permit = engine.sync_permit(account_id).await;
-    if permit.is_cancelled() {
-        return Err(Error::AccountNotFound(account_id.to_string()));
-    }
-    tokio::select! {
-        result = run(&engine, account_id) => result,
-        () = permit.cancelled() => Err(Error::Cancelled),
-    }
+    let permit = engine.sync_permit(account_id).await;
+    permit
+        .run(async {
+            let mut session = connection::connect(&engine, account_id).await?;
+            let report = run(&engine, &mut session, account_id).await?;
+            session.logout().await;
+            Ok(report)
+        })
+        .await
 }
 
-async fn run(engine: &Arc<Engine>, account_id: AccountId) -> Result<SyncReport> {
-    let mut session = connection::connect(engine, account_id).await?;
-
+/// Syncs every folder of the account on `session`. Call with the account's sync permit.
+pub(crate) async fn run(
+    engine: &Arc<Engine>,
+    session: &mut Session,
+    account_id: AccountId,
+) -> Result<SyncReport> {
     let remote = remote_folders(session.list().await?);
     let reconciled = engine
         .write(move |db| db.folders().reconcile(account_id, &remote))
@@ -50,7 +54,7 @@ async fn run(engine: &Arc<Engine>, account_id: AccountId) -> Result<SyncReport> 
     let pending = engine
         .read(move |db| db.ops().pending_folders(account_id))
         .await?;
-    let mut replayed = ops::replay(engine, &mut session, account_id, &pending).await?;
+    let mut replayed = ops::replay(engine, session, account_id, &pending).await?;
 
     let folders = engine
         .read(move |db| db.folders().sync_states(account_id))
@@ -64,15 +68,7 @@ async fn run(engine: &Arc<Engine>, account_id: AccountId) -> Result<SyncReport> 
         if let Some(r) = replayed.remove(&folder.id) {
             (folder_report.ops_applied, folder_report.ops_failed) = (r.applied, r.failed);
         }
-        match sync_folder(
-            engine,
-            &mut session,
-            account_id,
-            &folder,
-            &mut folder_report,
-        )
-        .await
-        {
+        match sync_folder(engine, session, account_id, &folder, &mut folder_report).await {
             Ok(()) => {}
             // The server refused something about this folder (it may have been deleted
             // since LIST); the others can still sync.
@@ -84,8 +80,33 @@ async fn run(engine: &Arc<Engine>, account_id: AccountId) -> Result<SyncReport> 
         }
         report.folders.push(folder_report);
     }
-    session.logout().await;
+    engine.set_synced(account_id);
     Ok(report)
+}
+
+/// Syncs INBOX alone on `session`, leaving it selected (read-only). False if the account
+/// has no INBOX to sync (or doesn't know of one yet). Call with the account's sync
+/// permit.
+pub(crate) async fn sync_inbox(
+    engine: &Arc<Engine>,
+    session: &mut Session,
+    account_id: AccountId,
+) -> Result<bool> {
+    let inbox = engine
+        .read(move |db| {
+            let folders = db.folders();
+            match folders.by_role(account_id, FolderRole::Inbox)? {
+                Some((id, _)) => folders.sync_state(id),
+                None => Ok(None),
+            }
+        })
+        .await?;
+    let Some(inbox) = inbox else {
+        return Ok(false);
+    };
+    let mut report = FolderSyncReport::new(inbox.id, &inbox.name);
+    sync_folder(engine, session, account_id, &inbox, &mut report).await?;
+    Ok(true)
 }
 
 async fn sync_folder(

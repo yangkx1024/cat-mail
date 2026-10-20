@@ -2,6 +2,9 @@ mod compose;
 mod files;
 mod ops;
 mod output;
+#[cfg(test)]
+mod test_support;
+mod watch;
 
 use std::collections::{BTreeSet, HashMap};
 use std::io::{self, BufRead, IsTerminal, Write};
@@ -12,7 +15,7 @@ use anyhow::{Context, Result, bail};
 use catmail_core::{
     Account, AccountId, Address, AttachmentId, AuthKind, Config, DraftId, Flags, Folder, FolderId,
     MailClient, Message, MessageId, MessageSummary, NewAccount, SearchQuery, Security,
-    ServerConfig, SyncReport, safe_filename,
+    ServerConfig, SyncReport, SyncSchedule, safe_filename,
 };
 use clap::{Args, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
@@ -44,6 +47,10 @@ enum Command {
         /// Account id or email address [default: every account]
         account: Option<String>,
     },
+    /// Keep every account in sync until interrupted, printing what changes: new mail
+    /// arrives as the server announces it (IDLE), other folders are synced every 15
+    /// minutes, and changes to messages reach the server at once
+    Watch,
     /// List folders, or the messages in a folder
     Ls(Ls),
     /// Show a message, downloading its body first (it stays unread on the server)
@@ -221,14 +228,25 @@ async fn run() -> Result<()> {
         Some(dir) => Config::with_data_dir(dir),
         None => Config::platform_default()?,
     };
+    let watching = matches!(cli.command, Command::Watch);
     let client = MailClient::builder(config)
         .runtime(tokio::runtime::Handle::current())
+        .sync_in_background(watching.then(SyncSchedule::default))
         .open()
         .context("failed to open the local mail store")?;
 
     match cli.command {
         Command::Account(cmd) => account(&client, cmd, cli.json).await,
         Command::Sync { account } => sync(&client, account.as_deref(), cli.json).await,
+        Command::Watch => {
+            let interrupted = async {
+                if let Err(e) = tokio::signal::ctrl_c().await {
+                    tracing::warn!(error = %e, "can't wait for Ctrl-C");
+                    std::future::pending::<()>().await;
+                }
+            };
+            watch::watch(&client, cli.json, interrupted).await
+        }
         Command::Ls(args) => ls(&client, args, cli.json).await,
         Command::Read(args) => read(&client, args, cli.json).await,
         Command::Attachment(args) => save_attachment(&client, args).await,

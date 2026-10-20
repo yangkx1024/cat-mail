@@ -59,6 +59,38 @@ flags，重复的批次不产生重复行）。HIGHESTMODSEQ 用 EXAMINE 时刻�
 - 认证失败、服务器缺少设置要求的能力（如 STARTTLS）在 core 里转成 `Error::AuthFailed` /
   `Error::Unsupported`，错误信息带给用户的建议，前端直接显示。
 
+## 后台同步与 IDLE
+
+`MailClientBuilder::sync_in_background(Some(SyncSchedule))` 时（GUI、`catmail watch`），引擎为每个
+账户起一个后台任务（`crates/catmail-core/src/watch.rs`），它只有一条连接。间隔都在 `SyncSchedule`
+里，括号里是默认值。
+
+- **同步什么。** 每隔 `full_sync`（15 分钟）同步全部文件夹（`sync::run`，与 `sync_account` 相同；
+  任何一次完整同步都算，包括用户手动的），其间只盯 INBOX：服务器支持 IDLE 时在 INBOX 上 IDLE，
+  等服务器报告变化；不支持或拒绝 IDLE 时每隔 `poll`（2 分钟）检查一次。每一步最后同步 INBOX、让它
+  保持选中，然后 IDLE。只盯 INBOX，是因为一条连接只能 IDLE 一个文件夹，而 NOTIFY（RFC 5465）支持的
+  服务器太少；其他文件夹靠定时的完整同步。
+- **本地改动立即回放。** 标记、移动、删除以及回复后的 `\Answered` 入队后唤醒任务
+  （`Engine::wake`；任务正忙时唤醒留到它下次等待），它结束 IDLE、回放队列、再同步 INBOX。
+- **锁。** 每一步持有账户的同步锁，与手动同步、`replay_pending` 串行；等待（IDLE、轮询和重试的间隔）
+  时不持有，所以用户要求的同步不必等 IDLE 结束，它用自己的连接。连接在拿锁之前建好：服务器连不上时
+  不挡住手动同步。
+- **IDLE 之前的变化。** 服务器只把一次变化告诉一次，可能在同步 INBOX 时顺带在别的命令的答复里说了
+  （例如 FETCH 中间的 `* 12 EXISTS`）。连接层记下每个答复里的这类报告（见[连接 / IDLE](protocol.md#idle)），
+  `Session::idle` 发现打开 INBOX 以来已经有过变化就立即返回，任务再同步一遍。
+- **重新 IDLE。** 每次 IDLE 最长 `idle`（10 分钟，RFC 2177 要求不超过 29 分钟）。期间什么也没发生
+  就直接再 IDLE，不同步：IDLE 与 DONE 的往返已经说明连接还活着，无声断开的连接（NAT 忘了它）在那时
+  超时。没有 CONDSTORE 的服务器上同步 INBOX 要拉全部 flags，不该每 10 分钟做一次。
+- **失败。** IDLE 中连接断开（服务器或 NAT 关掉了它）立即重连；但 IDLE 开始后不到一分钟就断开、而且
+  连续发生（例如代理每次都关掉 IDLE 的连接）时，从第二次起按下面的间隔退避，否则会不停地登录、同步；一步开始时复用的连接已断开，也立即换
+  新连接重来一次（与连接池同一条规则，`connection::on_session`）。其他失败（连不上、认证失败）从 `retry`（30 秒）起翻倍等待，最长 `full_sync`；
+  有本地改动入队时立即再试。错误只记日志：前端想显示错误就自己调用 `sync_account`（GUI 启动时这样做）。
+- **生命周期。** 引擎打开时为已有账户、`add_account` 时为新账户启动任务（账户 id 不复用，每个账户只
+  启动一次）。账户删除时任务结束，IDLE 中也立即结束，删除不必等它。任务只持有引擎的弱引用；等待时
+  用账户的取消信号，它在账户删除或引擎不在时（发送端随引擎 drop）都会触发：最后一个 `MailClient`
+  drop 后任务结束并关闭连接，不会让引擎和数据目录锁多活一个 IDLE 周期。
+- **找 INBOX** 按角色（对账时按名称不分大小写认定），只读这一个文件夹的同步状态。
+
 ## 文件夹名
 
 不支持 UTF8=ACCEPT 的服务器用修改版 UTF-7 传输非 ASCII 名称（`&XfJT0ZAB-` = `已发送`）。

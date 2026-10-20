@@ -23,6 +23,21 @@ STARTTLS 升级和测试。`imap-codec 2.0.0-alpha.9` 未开启 `nom/alloc`，`c
   （致命）：连接不再放回连接池，`Connection` 自己也记下，之后的命令立即失败。
 - 每次网络读写超时 60 秒。
 
+## IDLE
+
+`Session::idle(stop, max)`（RFC 2177）在选中的文件夹上 IDLE，直到服务器报告变化（EXISTS、EXPUNGE、
+VANISHED、FETCH）、`stop` 完成或过了 `max`，然后发 DONE、等 tagged OK，返回是否有变化。
+
+- IDLE 期间的读不设 60 秒超时（安静正是目的），由 `max` 兜底；DONE 之后恢复正常超时。等待与读取用
+  `select!`：读取可以取消，已读到的字节留在缓冲区里，不会丢。
+- 服务器自己结束 IDLE（tagged OK）算正常结束；回 NO 是 `Error::Command`，后台同步改为轮询。IDLE 期间
+  无法解析的行当作"有变化"。
+- **顺带报告的变化。** 服务器可以在任何命令的答复里报告选中文件夹的变化，而且只说一次。连接层对每个
+  答复记下 EXISTS（数量变了才算）、EXPUNGE、VANISHED，`Session` 打开文件夹时让它从头记起
+  （`Connection::mailbox_opened`）：打开以来已有变化时 `idle` 立即返回 true，不发 IDLE。IDLE 以外的
+  FETCH 不算（那通常是自己的 FETCH 的答复），别的客户端同时改的 flags 要等下一次同步。同一份 EXISTS
+  也让 SEARCH 知道文件夹是否已空。
+
 ## 连接池
 
 按需操作（下载正文、附件、APPEND、`replay_pending`）用每账户最多 2 条空闲连接的小连接池；同步用

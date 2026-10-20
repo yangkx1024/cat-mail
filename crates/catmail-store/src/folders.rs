@@ -47,6 +47,29 @@ pub struct FolderSyncState {
     pub max_uid: u32,
 }
 
+/// Messages moved here locally and not yet on the server have no UID; sync leaves them
+/// out of its counts.
+const SYNC_STATE: &str = "
+    SELECT id, remote_name, name, selectable, uidvalidity, uidnext, highest_modseq,
+           total_count - (SELECT count(*) FROM messages
+                          WHERE folder_id = folders.id AND uid IS NULL),
+           (SELECT ifnull(max(uid), 0) FROM messages WHERE folder_id = folders.id)
+    FROM folders";
+
+fn sync_state(r: &rusqlite::Row<'_>) -> rusqlite::Result<FolderSyncState> {
+    Ok(FolderSyncState {
+        id: FolderId(r.get(0)?),
+        remote_name: r.get(1)?,
+        name: r.get(2)?,
+        selectable: r.get(3)?,
+        uidvalidity: r.get(4)?,
+        uidnext: r.get(5)?,
+        highest_modseq: r.get::<_, Option<i64>>(6)?.map(|m| m as u64),
+        message_count: r.get(7)?,
+        max_uid: r.get(8)?,
+    })
+}
+
 pub struct Folders<'c> {
     conn: &'c Connection,
 }
@@ -113,30 +136,19 @@ impl<'c> Folders<'c> {
 
     /// INBOX first, then by id.
     pub fn sync_states(&self, account: AccountId) -> Result<Vec<FolderSyncState>> {
-        // Messages moved here locally and not yet on the server have no UID; sync leaves
-        // them out of its counts.
-        let mut stmt = self.conn.prepare(
-            "SELECT id, remote_name, name, selectable, uidvalidity, uidnext, highest_modseq,
-                    total_count - (SELECT count(*) FROM messages
-                                   WHERE folder_id = folders.id AND uid IS NULL),
-                    (SELECT ifnull(max(uid), 0) FROM messages WHERE folder_id = folders.id)
-             FROM folders WHERE account_id = ?1
-             ORDER BY remote_name <> 'INBOX', id",
-        )?;
-        let rows = stmt.query_map([account.0], |r| {
-            Ok(FolderSyncState {
-                id: FolderId(r.get(0)?),
-                remote_name: r.get(1)?,
-                name: r.get(2)?,
-                selectable: r.get(3)?,
-                uidvalidity: r.get(4)?,
-                uidnext: r.get(5)?,
-                highest_modseq: r.get::<_, Option<i64>>(6)?.map(|m| m as u64),
-                message_count: r.get(7)?,
-                max_uid: r.get(8)?,
-            })
-        })?;
+        let mut stmt = self.conn.prepare(&format!(
+            "{SYNC_STATE} WHERE account_id = ?1 ORDER BY remote_name <> 'INBOX', id"
+        ))?;
+        let rows = stmt.query_map([account.0], sync_state)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn sync_state(&self, id: FolderId) -> Result<Option<FolderSyncState>> {
+        Ok(self
+            .conn
+            .prepare_cached(&format!("{SYNC_STATE} WHERE id = ?1"))?
+            .query_row([id.0], sync_state)
+            .optional()?)
     }
 
     /// Makes the account's folders match `remote`: inserts new ones, updates changed
