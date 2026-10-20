@@ -38,23 +38,31 @@ pub struct OutgoingAttachment<'a> {
     pub data: &'a [u8],
 }
 
+/// An address or Message-ID that can't go between `<` and `>` in a header.
+#[derive(Debug, thiserror::Error)]
+#[error("invalid {field} {value:?}")]
+pub struct InvalidHeader {
+    field: &'static str,
+    value: String,
+}
+
 /// The message in wire form: CRLF line endings, 7-bit clean (headers as RFC 2047
 /// encoded words, bodies as quoted-printable or base64 where needed).
-pub fn build_message(message: &Outgoing<'_>) -> Vec<u8> {
+pub fn build_message(message: &Outgoing<'_>) -> Result<Vec<u8>, InvalidHeader> {
     let mut builder = MessageBuilder::new()
-        .message_id(message.message_id)
+        .message_id(bracketed("Message-ID", message.message_id)?)
         .date(message.date)
         .subject(one_line(message.subject))
         .text_body(message.text)
-        .from(address(message.from));
+        .from(address(message.from)?);
     if !message.to.is_empty() {
-        builder = builder.to(address_list(message.to));
+        builder = builder.to(address_list(message.to)?);
     }
     if !message.cc.is_empty() {
-        builder = builder.cc(address_list(message.cc));
+        builder = builder.cc(address_list(message.cc)?);
     }
     if !message.bcc.is_empty() {
-        builder = builder.bcc(address_list(message.bcc));
+        builder = builder.bcc(address_list(message.bcc)?);
     }
     // Threading IDs come from received mail: copy only what a msg-id can hold, whatever
     // the caller passes.
@@ -77,20 +85,35 @@ pub fn build_message(message: &Outgoing<'_>) -> Vec<u8> {
             a.data,
         );
     }
-    builder
+    Ok(builder
         .write_to_vec()
-        .expect("writing into a Vec can't fail")
+        .expect("writing into a Vec can't fail"))
 }
 
-fn address(a: &Address) -> BuilderAddress<'_> {
-    BuilderAddress::new_address(
+fn address(a: &Address) -> Result<BuilderAddress<'_>, InvalidHeader> {
+    Ok(BuilderAddress::new_address(
         a.name.as_deref().map(|n| one_line(n).into_owned()),
-        a.email.as_str(),
-    )
+        bracketed("address", &a.email)?,
+    ))
 }
 
-fn address_list(list: &[Address]) -> BuilderAddress<'_> {
-    BuilderAddress::new_list(list.iter().map(address).collect())
+fn address_list(list: &[Address]) -> Result<BuilderAddress<'_>, InvalidHeader> {
+    let list = list.iter().map(address).collect::<Result<_, _>>()?;
+    Ok(BuilderAddress::new_list(list))
+}
+
+/// mail-builder writes addresses and the Message-ID between angle brackets as they are,
+/// and a bare CR in one becomes a line break on the way out, starting a header of the
+/// sender's choosing. Unlike threading IDs, they can't just be left out.
+fn bracketed<'a>(field: &'static str, value: &'a str) -> Result<&'a str, InvalidHeader> {
+    if fits_in_angle_brackets(value) {
+        Ok(value)
+    } else {
+        Err(InvalidHeader {
+            field,
+            value: value.to_owned(),
+        })
+    }
 }
 
 /// Header text can't contain line breaks: they would end the header, and what follows
@@ -157,7 +180,8 @@ mod tests {
                 mime_type: "application/pdf",
                 data: b"%PDF-1.4\x00\xff",
             }],
-        });
+        })
+        .unwrap();
         assert!(raw.is_ascii(), "7-bit clean");
         assert!(
             !String::from_utf8_lossy(&raw).contains("\nBcc:"),
@@ -228,7 +252,8 @@ mod tests {
             references: &references,
             date: 0,
             attachments: Vec::new(),
-        });
+        })
+        .unwrap();
         assert!(
             raw.windows(2).all(|w| w[0] != b'\r' || w[1] == b'\n'),
             "no bare CR"
@@ -237,6 +262,38 @@ mod tests {
         assert!(m.header("X-Injected").is_none() && m.header("X-R").is_none());
         assert!(m.in_reply_to().is_empty());
         assert_eq!(m.references().as_text(), Some("ok@x"));
+    }
+
+    #[test]
+    fn addresses_and_message_id_cant_inject_headers() {
+        let from = addr(None, "a@example.com");
+        let evil = addr(None, "a\rBcc: x@evil.example");
+        let to = [from.clone()];
+        let bad_to = [from.clone(), evil.clone()];
+        let outgoing = |from, to, message_id| Outgoing {
+            from,
+            to,
+            cc: &[],
+            bcc: &[],
+            subject: "hi",
+            text: "hi",
+            message_id,
+            in_reply_to: None,
+            references: &[],
+            date: 0,
+            attachments: Vec::new(),
+        };
+        let cases: [(&Address, &[Address], &str, &str); 4] = [
+            (&evil, &to, "m@x", "address"),
+            (&from, &bad_to, "m@x", "address"),
+            (&from, &to, "id\rX-Inj: 1@x", "Message-ID"),
+            (&from, &to, "a>b@x", "Message-ID"),
+        ];
+        for (from, to, message_id, field) in cases {
+            let err = build_message(&outgoing(from, to, message_id)).unwrap_err();
+            assert_eq!(err.field, field, "{err}");
+        }
+        assert!(build_message(&outgoing(&from, &to, "m@x")).is_ok());
     }
 
     #[test]
@@ -254,7 +311,8 @@ mod tests {
             references: &[],
             date: 0,
             attachments: Vec::new(),
-        });
+        })
+        .unwrap();
         let m = MessageParser::new().parse(&raw).unwrap();
         let bcc = m.bcc().unwrap().first().unwrap();
         assert_eq!(

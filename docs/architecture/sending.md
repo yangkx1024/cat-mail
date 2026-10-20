@@ -71,7 +71,9 @@ outbox 里时，上传一份新的，再删除旧的：
 `send_draft` 把草稿冻结成 outbox 的一行：
 
 - 完整的 MIME 原文此时构建（mail-builder：7-bit、CRLF、RFC 2047 头、RFC 2231 文件名；
-  Message-ID 为 `<uuid@发件人域名>`，不泄露主机名；msg-id 再按收信时的规则检查一遍）并存成 blob，
+  Message-ID 为 `<uuid@发件人域名>`，不泄露主机名；In-Reply-To / References 里的 msg-id 再按收信时
+  的规则检查一遍，不合规的丢掉；地址和本信的 Message-ID 丢不得，放不进 `<>`（裸 CR 等）就直接报错，
+  不靠调用方先校验）并存成 blob，
   之后每次尝试都发这同一份字节，重试不再读草稿。
 - SMTP 信封 `envelope_from` 和 `recipients_json`（所有 RCPT TO，含不在 MIME 头里的密送）单独存。
 - 构建在事务外进行，入队时检查草稿的 `revision`（每次修改、增删附件都加一）没变，期间被改过就报
