@@ -60,6 +60,17 @@ flags，重复的批次不产生重复行）。HIGHESTMODSEQ 用 EXAMINE 时刻�
 - 认证失败、服务器缺少设置要求的能力（如 STARTTLS）在 core 里转成 `Error::AuthFailed` /
   `Error::Unsupported`，错误信息带给用户的建议，前端直接显示。
 
+## 打开的文件夹
+
+`MailClient::sync_folder(folder, max_age)` 只同步一个文件夹：持有账户的同步锁，在连接池的连接上先回放
+操作队列（以及停止编辑够久的草稿，与后台同步相同），再同步这个文件夹，结果是它的 `FolderSyncReport`；服务器
+拒绝这个文件夹时记在报告里，不算失败。它在 `max_age` 内完成过同步（`last_synced_at`）就什么也不做，返回
+`None`；这个检查在拿到锁之后，所以等着的那次完整同步刚同步过它时不会再来一遍。只有真的连了服务器的
+同步才计入账户状态：跳过的那次什么也没说明，不能清掉侧栏里的连接问题，更不能清掉"登录被拒"（那会唤醒
+后台同步、绕过它的重试间隔）。GUI 在用户打开文件夹时
+调用（见 [GUI](gui.md)）：服务器无法告诉我们 INBOX 以外的变化（见下一节），用户正在看的文件夹不该等到下一次
+完整同步。
+
 ## 后台同步与 IDLE
 
 `MailClientBuilder::sync_in_background(Some(SyncSchedule))` 时（GUI、`catmail watch`），引擎为每个
@@ -70,7 +81,7 @@ flags，重复的批次不产生重复行）。HIGHESTMODSEQ 用 EXAMINE 时刻�
   任何一次完整同步都算，包括用户手动的），其间只盯 INBOX：服务器支持 IDLE 时在 INBOX 上 IDLE，
   等服务器报告变化；不支持或拒绝 IDLE 时每隔 `poll`（2 分钟）检查一次。每一步最后同步 INBOX、让它
   保持选中，然后 IDLE。只盯 INBOX，是因为一条连接只能 IDLE 一个文件夹，而 NOTIFY（RFC 5465）支持的
-  服务器太少；其他文件夹靠定时的完整同步。
+  服务器太少；其他文件夹靠定时的完整同步，和用户打开它时的同步（见[打开的文件夹](#打开的文件夹)）。
 - **本地改动立即回放。** 标记、移动、删除以及回复后的 `\Answered` 入队后唤醒任务
   （`Engine::wake`；任务正忙时唤醒留到它下次等待），它结束 IDLE、回放队列、再同步 INBOX。改过的
   草稿例外：要在 `draft_upload_delay` 内没再改才上传（见[草稿同步](sending.md#同步到服务器)），

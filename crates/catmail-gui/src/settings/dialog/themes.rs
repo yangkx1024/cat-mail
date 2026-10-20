@@ -182,7 +182,7 @@ impl SettingsView {
                                     .outline()
                                     .small()
                                     .icon(Hero::ArrowDownTray)
-                                    .label("Import theme…")
+                                    .label("Import theme")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.pick_import(window, cx)
                                     })),
@@ -397,6 +397,9 @@ fn theme_card(
                 .px_2p5()
                 .py_2()
                 .text_xs()
+                // The card is a base Button, whose line height is the font size: the
+                // name's `truncate` would cut off descenders (the p in Catppuccin).
+                .line_height(rems(1.))
                 .child(
                     div()
                         .flex_1()

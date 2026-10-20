@@ -1,6 +1,7 @@
 //! How message metadata reads in the window.
 
 use catmail_core::Address;
+use jiff::civil::Date;
 use jiff::{Timestamp, Zoned, tz::TimeZone};
 
 /// `Name <a@example.com>` for each address, comma separated.
@@ -39,30 +40,56 @@ pub fn sender(from: &[Address]) -> String {
 
 /// The full date, as in the reader's header: `2026-10-19 14:05`.
 pub fn date(timestamp: Option<i64>) -> String {
+    local(timestamp, "%Y-%m-%d %H:%M")
+}
+
+/// The time of day, as a list row shows it under its day's heading: `14:05`.
+pub fn time(timestamp: Option<i64>) -> String {
+    local(timestamp, "%H:%M")
+}
+
+fn local(timestamp: Option<i64>, format: &str) -> String {
     zoned(timestamp, &TimeZone::system())
-        .map(|t| t.strftime("%Y-%m-%d %H:%M").to_string())
+        .map(|t| t.strftime(format).to_string())
         .unwrap_or_default()
 }
 
-/// The date as a list row shows it: the time for today, the day for this year, the full
-/// date otherwise.
-pub fn short_date(timestamp: Option<i64>) -> String {
-    let tz = TimeZone::system();
-    short_date_at(timestamp, &Zoned::now().with_time_zone(tz.clone()), &tz)
+/// The local calendar as of one moment, to put many rows under day headings with one
+/// look at the clock and the time zone.
+pub struct Calendar {
+    tz: TimeZone,
+    today: Date,
 }
 
-fn short_date_at(timestamp: Option<i64>, now: &Zoned, tz: &TimeZone) -> String {
-    let Some(t) = zoned(timestamp, tz) else {
-        return String::new();
-    };
-    let format = if t.date() == now.date() {
-        "%H:%M"
-    } else if t.year() == now.year() {
-        "%m-%d"
-    } else {
-        "%Y-%m-%d"
-    };
-    t.strftime(format).to_string()
+impl Calendar {
+    pub fn now() -> Self {
+        let tz = TimeZone::system();
+        let today = Zoned::now().with_time_zone(tz.clone()).date();
+        Self { tz, today }
+    }
+
+    /// The local day `timestamp` falls on.
+    pub fn day(&self, timestamp: Option<i64>) -> Option<Date> {
+        zoned(timestamp, &self.tz).map(|t| t.date())
+    }
+
+    /// The heading over a day's rows: `Today`, `Yesterday`, the weekday and date this
+    /// year (`Monday, October 12`), with the year before that (`October 12, 2025`).
+    /// Rows without a date go under `No date`.
+    pub fn heading(&self, day: Option<Date>) -> String {
+        let Some(day) = day else {
+            return "No date".into();
+        };
+        if day == self.today {
+            "Today".into()
+        } else if self.today.yesterday().is_ok_and(|y| y == day) {
+            "Yesterday".into()
+        } else if day.year() == self.today.year() {
+            day.strftime("%A, %B %-d").to_string()
+        } else {
+            day.strftime("%B %-d, %Y").to_string()
+        }
+    }
 }
 
 fn zoned(timestamp: Option<i64>, tz: &TimeZone) -> Option<Zoned> {
@@ -94,19 +121,23 @@ mod tests {
     }
 
     #[test]
-    fn short_date_depends_on_how_long_ago() {
+    fn day_headings_depend_on_how_long_ago() {
         let tz = TimeZone::fixed(jiff::tz::offset(8));
-        let now = "2026-10-19T15:00:00+08:00"
+        let today = "2026-10-19T15:00:00+08:00"
             .parse::<Timestamp>()
             .unwrap()
-            .to_zoned(tz.clone());
-        let short = |s| short_date_at(Some(at(s)), &now, &tz);
-        assert_eq!(short("2026-10-19T01:30:00+08:00"), "01:30");
+            .to_zoned(tz.clone())
+            .date();
+        let calendar = Calendar { tz, today };
+        let day = |s| calendar.heading(calendar.day(Some(at(s))));
+        assert_eq!(day("2026-10-19T01:30:00+08:00"), "Today");
         // Still the 18th in UTC+8, though the 19th in UTC: the day is the local one.
-        assert_eq!(short("2026-10-18T15:59:00Z"), "10-18");
-        assert_eq!(short("2026-10-18T16:01:00Z"), "00:01");
-        assert_eq!(short("2025-12-31T09:00:00+08:00"), "2025-12-31");
-        assert_eq!(short_date_at(None, &now, &tz), "");
+        assert_eq!(day("2026-10-18T15:59:00Z"), "Yesterday");
+        assert_eq!(day("2026-10-18T16:01:00Z"), "Today");
+        assert_eq!(day("2026-10-17T23:59:00+08:00"), "Saturday, October 17");
+        assert_eq!(day("2026-01-01T00:00:00+08:00"), "Thursday, January 1");
+        assert_eq!(day("2025-12-31T09:00:00+08:00"), "December 31, 2025");
+        assert_eq!(calendar.heading(calendar.day(None)), "No date");
     }
 
     #[test]

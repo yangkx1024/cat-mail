@@ -10,13 +10,17 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use catmail_proto::imap::{FetchedMessage, ListedMailbox, MailboxStatus, Session};
 use catmail_store::{FolderSyncState, NewMessage, RemoteFolder};
-use catmail_types::{AccountId, Event, FolderId, FolderRole, FolderSyncReport, SyncReport};
+use catmail_types::{
+    AccountId, Event, FolderId, FolderRole, FolderSyncReport, ReplayReport, SyncReport,
+};
 
+use crate::connection::with_session;
 use crate::draft_sync::Uploads;
-use crate::engine::{Activity, Engine};
+use crate::engine::{Activity, Engine, now};
 use crate::{Error, Result, connection, ops};
 
 /// New messages per UID FETCH, and per transaction.
@@ -34,6 +38,58 @@ pub(crate) async fn sync_account(engine: Arc<Engine>, account_id: AccountId) -> 
         .await;
     engine.report(account_id, Activity::Sync, &result);
     result
+}
+
+/// Syncs one folder, after making queued local changes (and settled drafts) on the
+/// server, unless it completed a sync less than `max_age` ago. `None` if it didn't sync:
+/// the folder was fresh enough or can't hold messages. Only a sync that went to the
+/// server says anything about it in the account's status.
+pub(crate) async fn sync_one(
+    engine: Arc<Engine>,
+    folder: FolderId,
+    max_age: Duration,
+) -> Result<Option<FolderSyncReport>> {
+    let account = engine
+        .read(move |db| db.folders().get(folder))
+        .await?
+        .ok_or(Error::FolderNotFound(folder))?
+        .account_id;
+    let permit = engine.sync_permit(account).await;
+    permit
+        .run(async {
+            // Checked under the permit: a full sync that held it may just have done this.
+            // A clock set back counts as just synced.
+            let current = engine
+                .read(move |db| db.folders().get(folder))
+                .await?
+                .ok_or(Error::FolderNotFound(folder))?;
+            let fresh = current
+                .last_synced_at
+                .is_some_and(|t| now() - t < max_age.as_secs() as i64);
+            if !current.selectable || fresh {
+                return Ok(None);
+            }
+            // Safe to run again on a new connection if a reused one turns out dead: what
+            // was replayed is no longer pending, and the sync resumes from what it stored.
+            let synced = with_session(&engine, account, |session| {
+                let engine = engine.clone();
+                Box::pin(async move {
+                    // Local changes first, as for a full sync.
+                    let replayed =
+                        ops::replay_queued(&engine, session, account, Uploads::Settled).await?;
+                    let state = engine
+                        .read(move |db| db.folders().sync_state(folder))
+                        .await?
+                        .ok_or(Error::FolderNotFound(folder))?;
+                    let replayed = replayed.folders.get(&folder);
+                    sync_reported(&engine, session, account, &state, replayed).await
+                })
+            })
+            .await;
+            engine.report(account, Activity::Sync, &synced);
+            synced.map(Some)
+        })
+        .await
 }
 
 /// Syncs every folder of the account on `session`, making queued local changes and
@@ -69,23 +125,37 @@ pub(crate) async fn run(
         folders: Vec::new(),
     };
     for folder in folders.into_iter().filter(|f| f.selectable) {
-        let mut folder_report = FolderSyncReport::new(folder.id, &folder.name);
-        if let Some(r) = replayed.remove(&folder.id) {
-            (folder_report.ops_applied, folder_report.ops_failed) = (r.applied, r.failed);
-        }
-        match sync_folder(engine, session, account_id, &folder, &mut folder_report).await {
-            Ok(()) => {}
-            // The server refused something about this folder (it may have been deleted
-            // since LIST); the others can still sync.
-            Err(Error::Imap(e)) if !e.is_fatal() => {
-                tracing::warn!(folder = %folder.name, error = %e, "folder sync failed");
-                folder_report.error = Some(e.to_string());
-            }
-            Err(e) => return Err(e),
-        }
+        let replayed = replayed.remove(&folder.id);
+        let folder_report =
+            sync_reported(engine, session, account_id, &folder, replayed.as_ref()).await?;
         report.folders.push(folder_report);
     }
     engine.set_synced(account_id);
+    Ok(report)
+}
+
+/// Syncs `folder` and reports how it went, with what replaying its queued changes did.
+/// The server refusing something about the folder (it may have been deleted since LIST)
+/// goes in the report, so other folders can still sync; only a fatal error fails.
+async fn sync_reported(
+    engine: &Arc<Engine>,
+    session: &mut Session,
+    account: AccountId,
+    folder: &FolderSyncState,
+    replayed: Option<&ReplayReport>,
+) -> Result<FolderSyncReport> {
+    let mut report = FolderSyncReport::new(folder.id, &folder.name);
+    if let Some(r) = replayed {
+        (report.ops_applied, report.ops_failed) = (r.applied, r.failed);
+    }
+    match sync_folder(engine, session, account, folder, &mut report).await {
+        Ok(()) => {}
+        Err(Error::Imap(e)) if !e.is_fatal() => {
+            tracing::warn!(folder = %folder.name, error = %e, "folder sync failed");
+            report.error = Some(e.to_string());
+        }
+        Err(e) => return Err(e),
+    }
     Ok(report)
 }
 

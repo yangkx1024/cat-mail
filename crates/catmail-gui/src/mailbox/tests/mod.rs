@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use catmail_core::{MessageId, MessageSummary};
-use gpui_kit::component::list::ListDelegate as _;
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
@@ -56,8 +55,10 @@ fn open(cx: &mut TestAppContext, mail: &TestMail) -> (AnyWindowHandle, Entity<Ma
 /// The messages listed, top to bottom.
 fn listed(mailbox: &Entity<Mailbox>, cx: &App) -> Vec<MessageSummary> {
     let list = mailbox.read(cx).messages.read(cx).delegate();
-    (0..list.items_count(0, cx))
-        .filter_map(|row| list.message(row).cloned())
+    list.rows()
+        .iter()
+        .filter_map(Row::message)
+        .cloned()
         .collect()
 }
 

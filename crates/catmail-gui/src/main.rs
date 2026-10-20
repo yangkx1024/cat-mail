@@ -5,6 +5,7 @@
 mod actions;
 mod assets;
 mod composer;
+mod fonts;
 mod format;
 mod html;
 mod layout;
@@ -103,6 +104,7 @@ fn main() {
 /// app-wide actions.
 fn init_app(preferences: Preferences, cx: &mut App) {
     gpui_kit::init(cx);
+    fonts::init(cx);
     cx.set_global(preferences);
     theme::appearance::init(cx);
     actions::bind_keys(cx);

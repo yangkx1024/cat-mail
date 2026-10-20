@@ -50,7 +50,7 @@ impl Mailbox {
                             .ghost()
                             .small()
                             .icon(Hero::Trash)
-                            .tooltip("Delete draft…")
+                            .tooltip("Delete draft")
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.confirm_delete_draft(
                                     id,

@@ -101,7 +101,7 @@ impl Render for Composer {
                     .ghost()
                     .small()
                     .icon(Hero::PaperClip)
-                    .label("Attach…")
+                    .label("Attach")
                     .disabled(ending)
                     .tooltip_with_action("Attach files", &Attach, Some(actions::COMPOSER))
                     .on_click(cx.listener(|this, _, window, cx| this.attach(window, cx))),
@@ -119,7 +119,7 @@ impl Render for Composer {
                     .small()
                     .icon(Hero::Trash)
                     .disabled(ending)
-                    .tooltip("Discard draft…")
+                    .tooltip("Discard draft")
                     .on_click(cx.listener(|this, _, window, cx| this.discard(window, cx))),
             );
 

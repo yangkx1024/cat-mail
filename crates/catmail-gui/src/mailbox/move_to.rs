@@ -1,4 +1,4 @@
-//! "Move to…": a dialog listing the account's folders, filtered as you type.
+//! "Move to": a dialog listing the account's folders, filtered as you type.
 
 use std::rc::Rc;
 

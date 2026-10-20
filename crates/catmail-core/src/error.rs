@@ -30,6 +30,9 @@ pub enum Error {
     #[error("account {0} not found")]
     AccountNotFound(String),
 
+    #[error("folder {0} not found")]
+    FolderNotFound(catmail_types::FolderId),
+
     #[error("message {0} not found")]
     MessageNotFound(catmail_types::MessageId),
 

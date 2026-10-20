@@ -174,6 +174,27 @@ async fn tolerates_duplicate_reordered_and_unsolicited_responses() {
 }
 
 #[tokio::test]
+async fn reads_internaldate_with_a_one_digit_day() {
+    // QQ Mail leaves out the space RFC 3501 puts before a one-digit day.
+    let mut state = sample_state();
+    state.inbox().message_mut(2).internal_date = "2-Oct-2026 08:13:27 +0800".into();
+    let fake = FakeImap::start(state).await;
+    let mut session = login(&fake).await;
+    session.examine("INBOX").await.unwrap();
+
+    let messages = session.fetch_summaries(&[1, 2]).await.unwrap();
+    assert_eq!(
+        messages.iter().map(|m| m.state.uid).collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(messages[1].internal_date, Some(1_790_900_007));
+    assert!(
+        messages[1].has_attachments,
+        "the rest of the response is read too"
+    );
+}
+
+#[tokio::test]
 async fn dropped_connection_is_fatal() {
     let mut state = sample_state();
     state.faults.drop_on_fetch = Some(1);

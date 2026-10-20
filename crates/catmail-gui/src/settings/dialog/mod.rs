@@ -5,12 +5,10 @@ mod accounts;
 mod themes;
 
 use catmail_core::MailClient;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::select::{SelectEvent, SelectState};
+use gpui_kit::component::sidebar::{SidebarItem as _, SidebarMenu, SidebarMenuItem};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{
-    ActiveTheme as _, IndexPath, Selectable as _, WindowExt as _, h_flex, v_flex,
-};
+use gpui_kit::component::{ActiveTheme as _, Icon, IndexPath, WindowExt as _, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
@@ -118,27 +116,28 @@ impl SettingsView {
 }
 
 impl Render for SettingsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let nav = v_flex()
-            .flex_none()
-            .w(rems(10.))
-            .gap_0p5()
-            .pr_3()
-            .border_r_1()
-            .border_color(cx.theme().border)
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let border = cx.theme().border;
+        // As GPUI Kit's own settings page draws its pages. The items are
+        // `settings-sections-<index>`.
+        let sections = SidebarMenu::new()
             .children(Section::ALL.iter().map(|&(section, label, icon)| {
-                Button::new(("settings-section", section as u64))
-                    .ghost()
-                    .justify_start()
-                    .w_full()
-                    .icon(icon)
-                    .label(label)
-                    .selected(self.section == section)
+                SidebarMenuItem::new(label)
+                    .icon(Icon::new(icon))
+                    .active(self.section == section)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.section = section;
                         cx.notify();
                     }))
-            }));
+            }))
+            .render("settings-sections", window, cx);
+        let nav = div()
+            .flex_none()
+            .w(rems(10.))
+            .pr_3()
+            .border_r_1()
+            .border_color(border)
+            .child(sections);
         let content = match self.section {
             Section::Appearance => self.render_appearance(cx),
             Section::Accounts => self.render_accounts(cx),

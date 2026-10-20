@@ -44,6 +44,10 @@ use message_list::{MessageList, Row, Source};
 /// How long typing in the search field pauses before it searches.
 const SEARCH_DELAY: Duration = Duration::from_millis(200);
 
+/// Opening a folder synced longer ago than this syncs it. Background sync keeps only
+/// INBOX current between full syncs; the server can't tell us about the others.
+const SYNC_ON_OPEN_AFTER: Duration = Duration::from_secs(60);
+
 /// Where the sidebar's selection is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Place {
@@ -88,6 +92,8 @@ pub struct Mailbox {
     pub(crate) place: Option<Place>,
     /// Syncs in flight.
     pub(crate) syncing: usize,
+    /// [`SYNC_ON_OPEN_AFTER`], except in tests that open folders synced just now.
+    pub(crate) sync_on_open_after: Duration,
     /// The sign-in form, shown instead of the mailbox while it is open.
     adding_account: Option<(Entity<AddAccount>, Subscription)>,
     pub(crate) search: Entity<InputState>,
@@ -167,6 +173,7 @@ impl Mailbox {
             accounts: None,
             place: None,
             syncing: 0,
+            sync_on_open_after: SYNC_ON_OPEN_AFTER,
             adding_account: None,
             search,
             messages,
@@ -199,7 +206,7 @@ impl Mailbox {
                 return;
             }
         };
-        let Some(row) = list.read(cx).delegate().row(ix.row).cloned() else {
+        let Some(row) = list.read(cx).delegate().row_at(ix).cloned() else {
             return;
         };
         match row {
@@ -434,7 +441,26 @@ impl Mailbox {
         });
         self.reader.update(cx, |reader, cx| reader.clear(cx));
         window.set_window_title(&self.title());
+        if let Some(Place::Folder(folder)) = place {
+            self.sync_on_open(folder, cx);
+        }
         cx.notify();
+    }
+
+    /// What it brings shows through the engine's events. A server that can't be reached
+    /// already shows in the sidebar, so a failure here only goes to the log.
+    fn sync_on_open(&self, folder: FolderId, cx: &mut Context<Self>) {
+        let (client, max_age) = (self.client.clone(), self.sync_on_open_after);
+        cx.background_spawn(async move {
+            let error = match client.sync_folder(folder, max_age).await {
+                Ok(report) => report.and_then(|r| r.error),
+                Err(e) => Some(e.to_string()),
+            };
+            if let Some(error) = error {
+                tracing::warn!(%folder, %error, "couldn't sync the opened folder");
+            }
+        })
+        .detach();
     }
 
     fn title(&self) -> String {

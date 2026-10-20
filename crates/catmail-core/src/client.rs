@@ -7,9 +7,9 @@ use catmail_proto::TlsConfig;
 use catmail_store::{BlobStore, Store};
 use catmail_types::{
     Account, AccountId, AccountStatus, AttachmentId, Draft, DraftAttachment, DraftAttachmentId,
-    DraftContent, DraftId, Event, Flags, Folder, FolderId, GcReport, Message, MessageId,
-    MessageSummary, NewAccount, OutboxEntry, OutboxId, PendingOp, PendingOpId, ReplayReport,
-    SearchQuery, SyncReport,
+    DraftContent, DraftId, Event, Flags, Folder, FolderId, FolderSyncReport, GcReport, Message,
+    MessageId, MessageSummary, NewAccount, OutboxEntry, OutboxId, PendingOp, PendingOpId,
+    ReplayReport, SearchQuery, SyncReport,
 };
 use tokio::runtime::Handle;
 use tokio::sync::broadcast;
@@ -333,6 +333,21 @@ impl MailClient {
     pub async fn sync_account(&self, id: AccountId) -> Result<SyncReport> {
         self.rt
             .run(sync::sync_account(self.engine.clone(), id))
+            .await
+    }
+
+    /// Brings one folder up to date with the server, as [`sync_account`](Self::sync_account)
+    /// does for each (queued local changes go first), unless it completed a sync less than
+    /// `max_age` ago, e.g. in the account's sync this call waited for. `None` if it didn't
+    /// sync: the folder was fresh enough or can't hold messages. For a folder the user
+    /// opens: background sync keeps only INBOX current between full syncs.
+    pub async fn sync_folder(
+        &self,
+        folder: FolderId,
+        max_age: Duration,
+    ) -> Result<Option<FolderSyncReport>> {
+        self.rt
+            .run(sync::sync_one(self.engine.clone(), folder, max_age))
             .await
     }
 

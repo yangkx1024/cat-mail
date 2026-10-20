@@ -11,6 +11,7 @@ use imap_next::imap_types::response::{Code, Data, Greeting, Status, StatusKind};
 use imap_next::{Interrupt, Io, State};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use super::quirks::Quirks;
 use super::{Error, Result};
 
 pub(crate) use crate::Stream;
@@ -30,6 +31,8 @@ pub(crate) struct Response {
 pub(crate) struct Connection {
     stream: Box<dyn Stream>,
     client: Client,
+    /// Repairs what the server sends before `client` parses it.
+    quirks: Quirks,
     last_tag: u32,
     buf: Box<[u8]>,
     timeout: Duration,
@@ -55,6 +58,7 @@ impl Connection {
         Self {
             stream,
             client: Client::new(options),
+            quirks: Quirks::default(),
             last_tag: 0,
             buf: vec![0; 64 * 1024].into_boxed_slice(),
             timeout,
@@ -399,7 +403,11 @@ impl Connection {
         if n == 0 {
             return Err(Error::Closed);
         }
-        self.client.enqueue_input(&self.buf[..n]);
+        // Nothing while a line is still incomplete; the client then asks for more.
+        let input = self.quirks.push(&self.buf[..n]);
+        if !input.is_empty() {
+            self.client.enqueue_input(input);
+        }
         Ok(())
     }
 }

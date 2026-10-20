@@ -36,9 +36,9 @@ fn reads_a_message_through_the_window(cx: &mut TestAppContext) {
 
     // The list keeps keyboard focus: the next message opens with the arrow key.
     let next = cx.read(|cx| {
-        let list = mailbox.read(cx).messages.read(cx);
-        let row = list.selected_index().unwrap().row;
-        list.delegate().message(row + 1).unwrap().id
+        let listed = listed(&mailbox, cx);
+        let at = listed.iter().position(|m| m.id == report).unwrap();
+        listed[at + 1].id
     });
     assert_ne!(next, report);
     cx.update_window(window, |_, window, cx| window.press("down", cx))
@@ -178,8 +178,33 @@ fn shows_what_a_sync_brings_without_losing_the_selection(cx: &mut TestAppContext
     });
     cx.read(|cx| {
         let list = mailbox.read(cx).messages.read(cx);
-        let row = list.selected_index().unwrap().row;
-        assert_eq!(list.delegate().message(row).unwrap().id, hello);
+        assert_eq!(list.delegate().selected_message().unwrap().id, hello);
         assert_eq!(shown_in_reader(&mailbox, cx), Some(hello));
+    });
+}
+
+#[gpui_kit::test]
+fn opening_a_folder_syncs_it(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    // Synced as the test began: every open counts as late enough.
+    cx.update(|cx| mailbox.update(cx, |m, _| m.sync_on_open_after = Duration::ZERO));
+    let archive = pollster::block_on(mail.client.find_folder(mail.account(), "Archive"))
+        .unwrap()
+        .unwrap()
+        .id;
+    // Filed by another client; only INBOX is watched between full syncs.
+    mail.deliver("Archive", "Filed elsewhere");
+
+    cx.update_window(window, |_, window, cx| {
+        mailbox.update(cx, |mailbox, cx| {
+            mailbox.select_place(Some(Place::Folder(archive)), window, cx)
+        })
+    })
+    .unwrap();
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| subjects(&mailbox, cx) == ["Filed elsewhere"])
     });
 }

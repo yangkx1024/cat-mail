@@ -17,6 +17,14 @@ STARTTLS 升级和测试。`imap-codec 2.0.0-alpha.9` 未开启 `nom/alloc`，`c
   `Incomplete`：LIST、SEARCH、EXAMINE、flags 这类结果缺一行就会被误当成删除或"没变化"。新命令
   默认就是安全的；只有明确能处理缺行的调用（拉邮件头）用 `execute_lossy`，见
   [同步 / 容错](sync.md#容错)。
+- **修补已知的服务器错误。** imap-codec 遇到不合语法的字段会丢掉整条响应，同一封邮件每次同步都会
+  丢。连接层在 imap-next 解析之前修补读到的字节（`imap/quirks.rs`）：只改响应行，literal（邮件内容）
+  原样通过，按 imap-codec 的 fragmentizer 的规则（行尾 `{n}` / `{n+}`）判断 literal 从哪里开始，两边
+  才不会错位。目前只有一项：QQ 邮箱的 `INTERNALDATE "2-Oct-2026 …"` 缺少一位日期前的空格（RFC 3501
+  要求 `" 2"` 或 `"02"`），每月 1–9 号的邮件因此全部拉不到。修补层按行缓存，但一行超过 64 KiB 还没结束时
+  先把前面的部分交给 imap-next（只留最后 15 字节，够看到一个被截断的修补位置），不然一个不换行的服务器
+  能让缓存无限增长，绕过 imap-next 对单个响应 100 MiB 的上限。行是否声明了 literal 不从缓存里看，而是
+  逐字节跟踪（与 fragmentizer 同一个状态机）：`{n}` 的长度可以带任意多个前导零，不能指望它留在缓存里。
 - **APPEND 被提前拒绝。** 带 literal 的命令发出第一行后，服务器可以不回 `+` 而直接回 tagged NO
   （Dovecot 无法写入时就这样）。imap-next 只在 BAD 时放弃这条命令，收到 NO 后仍等着发送剩下的
   literal，之后排队的命令永远发不出去。所以命令完整发出之前收到 NO/BAD 时返回 `Error::Aborted`
