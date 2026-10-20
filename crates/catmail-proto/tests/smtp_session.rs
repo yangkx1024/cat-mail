@@ -176,9 +176,7 @@ async fn implicit_tls_and_starttls() {
     session.login(&creds("pw")).await.unwrap();
     send(&mut session, &["bob@example.com"]).await.unwrap();
 
-    let mut state = SmtpState::new("alice", "pw");
-    state.faults.inject_after_starttls = true;
-    let fake = FakeSmtp::start_starttls(state, &cert).await;
+    let fake = FakeSmtp::start_starttls(SmtpState::new("alice", "pw"), &cert).await;
     let mut session = Session::connect(&server(fake.port(), Security::StartTls), &tls, TIMEOUT)
         .await
         .unwrap();
@@ -192,6 +190,26 @@ async fn implicit_tls_and_starttls() {
         .find(|c| c.line.starts_with("AUTH"))
         .unwrap();
     assert!(auth.tls, "credentials only travel inside TLS");
+}
+
+#[tokio::test]
+async fn starttls_ignores_plaintext_injection() {
+    let cert = TestCert::generate();
+    let tls = TlsConfig::with_roots_only([cert.cert_der()]).unwrap();
+    let mut state = SmtpState::new("alice", "pw");
+    state.faults.inject_after_starttls = true;
+    let fake = FakeSmtp::start_starttls(state, &cert).await;
+    // Failing the handshake is as acceptable as ignoring the bytes; trusting them is not.
+    let Ok(mut session) =
+        Session::connect(&server(fake.port(), Security::StartTls), &tls, TIMEOUT).await
+    else {
+        return;
+    };
+    assert_eq!(session.max_size(), None, "the forged EHLO reply was taken");
+    // Replies stay paired with their commands.
+    session.login(&creds("pw")).await.unwrap();
+    send(&mut session, &["bob@example.com"]).await.unwrap();
+    assert_eq!(fake.state().received.len(), 1);
 }
 
 #[tokio::test]
