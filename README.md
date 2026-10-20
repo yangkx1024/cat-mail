@@ -4,11 +4,11 @@
 附件），对外只暴露 `MailClient` 门面；在它之上有两个平级的前端：
 
 - **`catmail`**：命令行，可直接在终端使用，也支持 `--json` 供脚本调用
-- **`catmail-gui`**：图形界面，基于 [GPUI](https://www.gpui.rs/) 与 [gpui-kit](https://github.com/longbridge/gpui-kit)（目前只有最小读信窗口）
+- **`catmail-gui`**：图形界面，基于 [GPUI](https://www.gpui.rs/) 与 [gpui-kit](https://github.com/longbridge/gpui-kit)（三栏读信、独立窗口写信、可导入终端配色的主题）
 
 数据存储在本地 SQLite，离线可用；密码保存在系统密钥环中，不进数据库。
 
-> 项目处于早期开发阶段（M4 已完成，下一步是 M5 的图形界面），接口和数据库结构仍会变化。
+> 项目处于早期开发阶段（M5 已完成，下一步是 M6 的 OAuth2 与打包），接口和数据库结构仍会变化。
 
 架构设计见 [docs/architecture.md](docs/architecture.md)。
 
@@ -27,7 +27,7 @@
 | M2 | 正文与附件按需下载；中文分词 + 全文搜索；blob GC；最小读信窗口；`catmail read` / `catmail search` | ✅ 完成 |
 | M3 | 草稿；SMTP 发信与 outbox 状态机；保存到 Sent；`catmail compose` / `reply` / `send` / `outbox` | ✅ 完成 |
 | M4 | 离线操作队列（标记 / 移动 / 删除）；IDLE 推送与后台同步；草稿同步到服务器 | ✅ 完成 |
-| M5 | 图形界面：三栏布局、读信、写信 | |
+| M5 | 图形界面：三栏布局、读信、写信（回复、转发、附件）、标记 / 归档 / 移动 / 删除、发件箱、设置与主题（导入终端配色）；`catmail forward` | ✅ 完成 |
 | M6 | OAuth2（Gmail / Microsoft 365）；Windows / macOS 打包 | |
 
 几个安排上的考虑：
@@ -50,7 +50,7 @@
 
 ## 使用
 
-目前可以管理账户、同步文件夹和邮件头、列出和阅读邮件、搜索，写信、回复和发信，以及标记、
+目前可以管理账户、同步文件夹和邮件头、列出和阅读邮件、搜索，写信、回复、转发和发信，以及标记、
 移动和删除邮件：
 
 ```sh
@@ -79,6 +79,7 @@ catmail gc                      # 回收不再被引用的正文与附件文件
 catmail compose --to '张三 <zhang@example.com>, li@example.com' --bcc boss@example.com \
     -s 周报 --body-file report.txt --attach 报表.xlsx
 catmail reply 42 --all --body '收到，谢谢！'   # 回复（全部），引用原文
+catmail forward 42 --to li@example.com --body '转给你看看'   # 转发，带上原信的附件
 catmail draft list                # 草稿；draft show / edit / attach / detach / rm
 catmail send 3                    # 发送草稿 3，并存到"已发送"
 catmail outbox                    # 还没发完的邮件；outbox flush / retry / mark-sent / cancel
@@ -106,9 +107,10 @@ catmail ops                       # 还没同步到服务器的改动，以及�
 （UIDVALIDITY 改变）时，还没完成的改动作废，以服务器为准。回复发出后原信标记为"已回复"。
 
 草稿同时保存在服务器的"草稿箱"里（账户有这个文件夹时），每次修改换成新的一份，删除草稿或发出后
-副本随之删除。`compose` / `reply` / `draft edit` 等命令当场上传；连不上时草稿照样保存在本地，只给出
+副本随之删除。`compose` / `reply` / `forward` / `draft edit` 等命令当场上传；连不上时草稿照样保存在本地，只给出
 警告，由下一次 `catmail sync` 或 `catmail ops flush` 上传。`catmail draft list` 的 SERVER 列显示
-服务器上是否已是最新版本，服务器拒绝保存（如超出配额）时 `catmail draft show` 显示原因。
+服务器上是否已是最新版本，服务器拒绝保存（如超出配额）时 `catmail draft show` 显示原因。后台同步
+（图形界面）等草稿停止修改 15 秒后才上传，边写边自动保存不会每次都换一份副本。
 
 发信先把草稿冻结成 outbox 里的一份快照，再经 SMTP 发出、用 APPEND 存进服务器的"已发送"
 （服务器没有这个文件夹就不存）。暂时失败（断网、4xx）会按递增的间隔重试，`catmail outbox`
@@ -117,7 +119,7 @@ catmail ops                       # 还没同步到服务器的改动，以及�
 是否收到，**不会自动重发**，由用户确认后选择 `mark-sent`、`retry`（可能重复）或 `cancel`。
 保存到"已发送"失败只重试保存，不会重发邮件。命令行不在后台发信：`catmail send` 当场发送，
 没发出去的用 `catmail outbox flush` 再试；两者在有邮件没发出去时以非零状态退出，便于脚本判断。
-`compose` / `reply` 失败（如附件不存在）不会留下草稿。
+`compose` / `reply` / `forward` 失败（如附件不存在、转发时原信的附件下载不了）不会留下草稿。
 
 正文在第一次阅读时下载，阅读不会把邮件标为已读（用 `catmail mark --read`）。不超过 2 MiB 的邮件整封下载（附件一并
 保存）；更大的邮件只下载正文，附件在第一次打开时再下载，其中超过 2 MiB 的正文部分也作为
@@ -130,14 +132,39 @@ catmail ops                       # 还没同步到服务器的改动，以及�
 catmail-gui                     # 打开窗口；同样支持 --data-dir / CATMAIL_DATA_DIR
 ```
 
-目前是最小读信窗口：没有账户时先显示登录页（也可以从侧栏的"Add account…"再添加），填写
-邮箱、密码和收发服务器；会先实际登录 IMAP 服务器检查设置，成功后才保存并开始同步，密码错误
-不会留下任何账户或密钥环条目。之后左侧账户与文件夹，中间邮件列表（方向键切换），右侧读信。窗口打开期间在后台保持同步，新邮件
-由服务器推送，与 `catmail watch` 相同，并且同样定期回收不再引用的文件。只读（写信
-在 M5），阅读不会标为已读。默认显示纯文本，有 HTML 时可以切换；HTML 里只显示邮件自带的图片（`cid:`
-内嵌图片、`data:`），远程图片一律不加载；排版不对时用"Open in browser"在浏览器里看（同样
-拦截远程内容）。点附件可以保存。窗口运行时
-CLI 不能打开同一个数据目录（反之亦然），见上文"IPC 待定"。
+没有账户时先显示登录页，填写邮箱、密码和收发服务器；会先实际登录 IMAP 服务器检查设置，成功后
+才保存并开始同步，密码错误不会留下任何账户或密钥环条目（之后在 Settings › Accounts 添加或移除
+账户）。
+
+主窗口三栏：左侧是"New message"和各账户的位置（Inbox、Drafts、Outbox、Sent、Archive、Junk、
+Trash，然后是其他文件夹），中间是列表和搜索框，右侧是选中的邮件、草稿或待发邮件。窗口打开期间在
+后台保持同步和发信，新邮件由服务器推送，与 `catmail watch` 相同，也同样定期回收不再引用的文件。
+
+- **读信**：打开即标为已读（Settings › Reading 可关闭），改动经操作队列同步到服务器。默认显示纯
+  文本，有 HTML 时可以切换；HTML 里只显示邮件自带的图片（`cid:`、`data:`），远程图片一律不加载；
+  排版不对时用"Open in browser"在浏览器里看（同样拦截远程内容）。点附件可以保存。
+- **处理邮件**：工具栏上的 Reply、Reply all、Forward、Archive、Delete、Move to…，更多操作（标为
+  未读、旗标、在浏览器打开）在"⋯"菜单里。归档或删除后自动打开下一封；已在 Trash 里的邮件删除前
+  会确认（不能恢复）。
+- **写信**：每封信一个独立窗口。新邮件、回复和转发一开始就是草稿，停止输入片刻后自动保存（服务器
+  上的副本在停止修改 15 秒后才更新）；关闭窗口不丢内容，什么都没改的草稿关闭时删除。地址写错时
+  发送或关闭会在该栏下提示。附件可以选择文件或直接拖进窗口。Drafts 里列出本机的草稿，回车或
+  "Edit"继续写。
+- **发件箱**：还没发完的邮件出现在 Outbox。被服务器拒绝的可以改回草稿或重试；发出后没收到确认的
+  不会自动重发，由你选择"Mark as sent""Send again…"或"Back to drafts"。
+- **主题**：Settings › Appearance 选择跟随系统、浅色或深色，并分别为浅色和深色选主题。内置
+  cat-mail、Catppuccin、Gruvbox、Solarized、Nord、Tokyo Night、Dracula；"Import theme…"可以导入
+  Alacritty、kitty、Ghostty、WezTerm、Windows Terminal、iTerm2、foot、Xresources、base16 / base24
+  的配色文件或 GPUI Kit 主题 JSON，按终端调色板推导出整套界面颜色，存进主题目录（可手工修改）。
+  文字大小在同一页，或用 Ctrl + / Ctrl − / Ctrl 0。
+- **快捷键**：Ctrl N 新邮件、Ctrl R 回复、Ctrl Shift R 全部回复、Ctrl Shift F 转发、E 归档、
+  Delete 删除、Ctrl Shift U 已读 / 未读、Ctrl Shift L 旗标、Ctrl Shift M 移动、Ctrl F 搜索、
+  F5 同步、Ctrl , 设置；写信窗口里 Ctrl Enter 发送、Esc 关闭（macOS 上 Ctrl 换成 Cmd）。
+
+设置和导入的主题保存在配置目录：Linux `~/.config/catmail`、macOS
+`~/Library/Application Support/dev.CatMail.CatMail`、Windows `%APPDATA%\CatMail\CatMail\config`，
+可用 `--config-dir` 或环境变量 `CATMAIL_CONFIG_DIR` 覆盖。窗口运行时 CLI 不能打开同一个数据目录
+（反之亦然），见上文"IPC 待定"。
 
 端口默认按加密方式推断：IMAP `tls` 为 993、`starttls` / `plain` 为 143；SMTP `tls` 为 465、
 `starttls` 为 587、`plain` 为 25。
@@ -165,7 +192,7 @@ flake 只能看到 git 跟踪的文件，新加的文件需要先 `git add -N`�
 `rust-toolchain.toml` 指定的 stable 工具链，Linux 上再装 fontconfig、freetype、libxkbcommon、
 libxcb 的开发包（CI 里的包名见 `.github/workflows/ci.yml`）。
 
-图形界面的离屏截图（看 HTML 排版，需要 GPU 或 Mesa lavapipe）：
+图形界面的离屏截图（看排版和各个主题，需要 GPU 或 Mesa lavapipe）：
 
 ```sh
 CATMAIL_SCREENSHOTS=/tmp/shots cargo test -p catmail-gui -- --ignored screenshots

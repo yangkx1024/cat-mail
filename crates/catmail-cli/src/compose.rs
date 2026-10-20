@@ -1,4 +1,4 @@
-//! Writing and sending: `compose`, `reply`, `draft`, `send` and `outbox`.
+//! Writing and sending: `compose`, `reply`, `forward`, `draft`, `send` and `outbox`.
 //!
 //! Drafts are saved to the server's Drafts folder at once, like changes to messages
 //! (`ops.rs`); if that can't be done, the draft is still saved locally, and the next
@@ -9,8 +9,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use catmail_core::{
-    AccountId, Draft, DraftAttachmentId, DraftContent, DraftId, MailClient, MessageId, OutboxEntry,
-    OutboxId, OutboxStatus, parse_addresses,
+    AccountId, Address, Draft, DraftAttachmentId, DraftContent, DraftId, MailClient, MessageId,
+    OutboxEntry, OutboxId, OutboxStatus, parse_addresses,
 };
 use clap::{Args, Subcommand};
 
@@ -36,14 +36,8 @@ pub(crate) struct Compose {
 /// What `compose` and `draft edit` set. In `draft edit`, only the options given change.
 #[derive(Args)]
 pub(crate) struct Fields {
-    /// Recipients, separated by commas or semicolons: `a@example.com, 张三 <zhang@example.com>`
-    #[arg(long)]
-    to: Option<String>,
-    #[arg(long)]
-    cc: Option<String>,
-    /// Get the message without being shown to the other recipients
-    #[arg(long)]
-    bcc: Option<String>,
+    #[command(flatten)]
+    recipients: Recipients,
     #[arg(short, long)]
     subject: Option<String>,
     /// The text of the message
@@ -52,6 +46,18 @@ pub(crate) struct Fields {
     /// Read the text from a file, or from stdin with `-`
     #[arg(long, value_name = "FILE")]
     body_file: Option<PathBuf>,
+}
+
+#[derive(Args)]
+pub(crate) struct Recipients {
+    /// Recipients, separated by commas or semicolons: `a@example.com, 张三 <zhang@example.com>`
+    #[arg(long)]
+    to: Option<String>,
+    #[arg(long)]
+    cc: Option<String>,
+    /// Get the message without being shown to the other recipients
+    #[arg(long)]
+    bcc: Option<String>,
 }
 
 #[derive(Args)]
@@ -68,6 +74,26 @@ pub(crate) struct Reply {
     #[arg(long, value_name = "FILE")]
     body_file: Option<PathBuf>,
     /// Attach a file (repeatable)
+    #[arg(long, value_name = "FILE")]
+    attach: Vec<PathBuf>,
+    /// Send it right away instead of keeping it as a draft
+    #[arg(long)]
+    send: bool,
+}
+
+#[derive(Args)]
+pub(crate) struct Forward {
+    /// Message id, as shown by `catmail ls`
+    id: i64,
+    #[command(flatten)]
+    recipients: Recipients,
+    /// Your text, written above the forwarded message
+    #[arg(long, conflicts_with = "body_file")]
+    body: Option<String>,
+    /// Read your text from a file, or from stdin with `-`
+    #[arg(long, value_name = "FILE")]
+    body_file: Option<PathBuf>,
+    /// Attach a file (repeatable), besides the message's own attachments
     #[arg(long, value_name = "FILE")]
     attach: Vec<PathBuf>,
     /// Send it right away instead of keeping it as a draft
@@ -132,7 +158,26 @@ pub(crate) async fn reply(client: &MailClient, args: Reply, json: bool) -> Resul
     let mut draft = client.reply(MessageId(args.id), args.all).await?;
     if let Some(text) = text {
         let mut content = draft.content.clone();
-        content.text = format!("{}{}", text.trim_end(), content.text);
+        write_above(&text, &mut content);
+        draft = client.update_draft(draft.id, content).await?;
+    }
+    finish_draft(client, draft, &args.attach, args.send, json).await
+}
+
+pub(crate) async fn forward(client: &MailClient, args: Forward, json: bool) -> Result<()> {
+    // Before the draft exists, so a mistake doesn't leave one behind.
+    let text = read_body(args.body, args.body_file.as_ref())?;
+    let recipients = args.recipients.parse()?;
+    if args.send && recipients.iter().flatten().all(Vec::is_empty) {
+        bail!("--send needs a recipient: --to, --cc or --bcc");
+    }
+    let mut draft = client.forward(MessageId(args.id)).await?;
+    if text.is_some() || recipients.iter().any(Option::is_some) {
+        let mut content = draft.content.clone();
+        if let Some(text) = text {
+            write_above(&text, &mut content);
+        }
+        set_recipients(recipients, &mut content);
         draft = client.update_draft(draft.id, content).await?;
     }
     finish_draft(client, draft, &args.attach, args.send, json).await
@@ -427,18 +472,37 @@ fn report(entry: &OutboxEntry, json: bool) -> Result<()> {
     }
 }
 
+/// To, Cc and Bcc, each `None` if it wasn't given.
+type ParsedRecipients = [Option<Vec<Address>>; 3];
+
+impl Recipients {
+    fn parse(self) -> Result<ParsedRecipients> {
+        let parse = |field: Option<String>| field.as_deref().map(parse_addresses).transpose();
+        Ok([parse(self.to)?, parse(self.cc)?, parse(self.bcc)?])
+    }
+}
+
+/// Replaces the recipients that were given.
+fn set_recipients(recipients: ParsedRecipients, content: &mut DraftContent) {
+    for (field, value) in [&mut content.to, &mut content.cc, &mut content.bcc]
+        .into_iter()
+        .zip(recipients)
+    {
+        if let Some(value) = value {
+            *field = value;
+        }
+    }
+}
+
+/// The user's text in front of what a reply or forward starts with.
+fn write_above(text: &str, content: &mut DraftContent) {
+    content.text = format!("{}{}", text.trim_end(), content.text);
+}
+
 impl Fields {
     /// `content` with the fields that were given replaced.
     fn apply(self, mut content: DraftContent) -> Result<DraftContent> {
-        for (field, value) in [
-            (&mut content.to, self.to),
-            (&mut content.cc, self.cc),
-            (&mut content.bcc, self.bcc),
-        ] {
-            if let Some(value) = value {
-                *field = parse_addresses(&value)?;
-            }
-        }
+        set_recipients(self.recipients.parse()?, &mut content);
         if let Some(subject) = self.subject {
             content.subject = subject;
         }
@@ -611,9 +675,11 @@ mod tests {
         let args = Compose {
             account: None,
             fields: Fields {
-                to: Some("b@example.com".into()),
-                cc: None,
-                bcc: None,
+                recipients: Recipients {
+                    to: Some("b@example.com".into()),
+                    cc: None,
+                    bcc: None,
+                },
                 subject: Some("hi".into()),
                 body: None,
                 body_file: None,
@@ -628,12 +694,48 @@ mod tests {
             id: 1,
             all: false,
             body: None,
-            body_file: Some(missing),
+            body_file: Some(missing.clone()),
             attach: Vec::new(),
             send: false,
         };
         let err = reply(&client, args, false).await.unwrap_err();
         assert!(format!("{err:#}").contains("failed to read"), "{err:#}");
+
+        let forwarding = |to: Option<&str>, body_file: Option<PathBuf>, send| Forward {
+            id: 1,
+            recipients: Recipients {
+                to: to.map(Into::into),
+                cc: None,
+                bcc: None,
+            },
+            body: None,
+            body_file,
+            attach: Vec::new(),
+            send,
+        };
+        let err = forward(
+            &client,
+            forwarding(Some("b@example.com"), Some(missing.clone()), false),
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("failed to read"), "{err:#}");
+        let err = forward(
+            &client,
+            forwarding(Some("not an address"), None, false),
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not an email address"),
+            "{err:#}"
+        );
+        let err = forward(&client, forwarding(None, None, true), false)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("needs a recipient"), "{err:#}");
 
         let account = client.list_accounts().await.unwrap()[0].id;
         assert!(client.list_drafts(account).await.unwrap().is_empty());

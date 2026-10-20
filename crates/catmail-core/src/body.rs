@@ -79,6 +79,29 @@ pub(crate) async fn attachment_content(engine: Arc<Engine>, id: AttachmentId) ->
     Ok(data)
 }
 
+/// The attachment's blob and size, downloading it first if needed. Its GC grace period
+/// restarts, as with `put`, so a row referring to it may follow.
+pub(crate) async fn attachment_blob(
+    engine: Arc<Engine>,
+    id: AttachmentId,
+) -> Result<(BlobHash, u64)> {
+    if let Some(stored) = stored_blob(&engine, id).await? {
+        return Ok(stored);
+    }
+    attachment_content(engine.clone(), id).await?;
+    stored_blob(&engine, id)
+        .await?
+        .ok_or(Error::AttachmentNotFound(id))
+}
+
+async fn stored_blob(engine: &Arc<Engine>, id: AttachmentId) -> Result<Option<(BlobHash, u64)>> {
+    let Some(blob) = attachment_source(engine, id).await?.blob else {
+        return Ok(None);
+    };
+    let engine = engine.clone();
+    blocking(move || Ok(engine.blobs.refresh(&blob)?.map(|size| (blob, size)))).await
+}
+
 /// The raw message, fetching it if only its parts were downloaded.
 pub(crate) async fn raw_message(engine: Arc<Engine>, id: MessageId) -> Result<Vec<u8>> {
     // Not downloaded yet: fetch it whole, which stores the raw message too.

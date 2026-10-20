@@ -1,5 +1,5 @@
-//! A fake IMAP server holding the repository's fixture messages, and a client synced to
-//! it, for tests that drive the real views.
+//! Fake IMAP and SMTP servers holding the repository's fixture messages, and a client
+//! synced to them, for tests that drive the real views.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -8,7 +8,7 @@ use catmail_core::{
     AccountId, AuthKind, Config, MailClient, MemorySecrets, Message, NewAccount, Security,
     ServerConfig,
 };
-use catmail_testkit::{FakeImap, ServerState};
+use catmail_testkit::{FakeImap, FakeMailbox, FakeSmtp, ServerState, SmtpState};
 
 /// INBOX, in UID order, with their IMAP flags.
 const FIXTURES: &[(&[u8], &[&str])] = &[
@@ -35,10 +35,19 @@ const FIXTURES: &[(&[u8], &[&str])] = &[
     (include_bytes!("../fixtures/newsletter.eml"), &[]),
 ];
 
+/// The server's folders besides INBOX, with their special-use attributes.
+const FOLDERS: &[(&str, &str)] = &[
+    ("Archive", "\\Archive"),
+    ("Drafts", "\\Drafts"),
+    ("Sent", "\\Sent"),
+    ("Trash", "\\Trash"),
+];
+
 pub struct TestMail {
     pub client: MailClient,
     account: Option<AccountId>,
     fake: FakeImap,
+    smtp: FakeSmtp,
     // Hosts the fake server only; the client runs its own runtime, as in the app.
     _server_runtime: tokio::runtime::Runtime,
     _dir: tempfile::TempDir,
@@ -47,13 +56,18 @@ pub struct TestMail {
 impl TestMail {
     /// One account (`alice@example.com`), synced.
     pub fn start() -> Self {
-        let mut mail = Self::without_account();
+        Self::start_with_folders(FOLDERS)
+    }
+
+    /// [`start`](Self::start), with only these folders besides INBOX.
+    pub fn start_with_folders(folders: &[(&str, &str)]) -> Self {
+        let mut mail = Self::with_folders(folders);
         let new = NewAccount {
             email: "alice@example.com".into(),
             display_name: None,
             username: "alice".into(),
             imap: mail.server(),
-            smtp: mail.server(),
+            smtp: mail.smtp_server(),
             auth: AuthKind::Password,
         };
         mail.account = Some(pollster::block_on(async {
@@ -66,6 +80,10 @@ impl TestMail {
 
     /// The server (user `alice`, password `pw`) and a client with no accounts.
     pub fn without_account() -> Self {
+        Self::with_folders(FOLDERS)
+    }
+
+    fn with_folders(folders: &[(&str, &str)]) -> Self {
         let server_runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
@@ -75,16 +93,26 @@ impl TestMail {
         for (raw, flags) in FIXTURES {
             state.inbox().append(raw, flags);
         }
+        for (name, attribute) in folders {
+            state
+                .mailboxes
+                .push(FakeMailbox::new(name).with_attribute(attribute));
+        }
         let fake = server_runtime.block_on(FakeImap::start(state));
+        let smtp = server_runtime.block_on(FakeSmtp::start(SmtpState::new("alice", "pw")));
         let dir = tempfile::tempdir().unwrap();
+        // Sends in the background, as the app does; syncs only when told to, so tests
+        // decide when the server is looked at.
         let client = MailClient::builder(Config::with_data_dir(dir.path()))
             .secrets(Arc::new(MemorySecrets::default()))
+            .send_in_background(true)
             .open()
             .unwrap();
         Self {
             client,
             account: None,
             fake,
+            smtp,
             _server_runtime: server_runtime,
             _dir: dir,
         }
@@ -97,6 +125,46 @@ impl TestMail {
             port: self.fake.port(),
             security: Security::Plain,
         }
+    }
+
+    /// Where the fake SMTP server listens; plain, like the IMAP one.
+    pub fn smtp_server(&self) -> ServerConfig {
+        ServerConfig {
+            host: "127.0.0.1".into(),
+            port: self.smtp.port(),
+            security: Security::Plain,
+        }
+    }
+
+    pub fn account(&self) -> AccountId {
+        self.account.unwrap()
+    }
+
+    /// The messages the SMTP server took, as sent.
+    pub fn sent(&self) -> Vec<String> {
+        self.smtp
+            .state()
+            .received
+            .iter()
+            .map(|m| String::from_utf8_lossy(&m.data).into_owned())
+            .collect()
+    }
+
+    /// The server's flags on a message in `mailbox`, by UID.
+    pub fn server_flags(&self, mailbox: &str, uid: u32) -> Vec<String> {
+        let mut state = self.fake.state();
+        state.mailbox_mut(mailbox).message_mut(uid).flags.clone()
+    }
+
+    /// The UIDs in a mailbox on the server.
+    pub fn server_uids(&self, mailbox: &str) -> Vec<u32> {
+        let mut state = self.fake.state();
+        state
+            .mailbox_mut(mailbox)
+            .messages
+            .iter()
+            .map(|m| m.uid)
+            .collect()
     }
 
     /// INBOX's message with this subject, its body downloaded.

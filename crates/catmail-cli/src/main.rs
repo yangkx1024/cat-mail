@@ -76,6 +76,8 @@ enum Command {
     Compose(compose::Compose),
     /// Reply to a message, quoting it; kept as a draft unless sent with --send
     Reply(compose::Reply),
+    /// Forward a message with its attachments; kept as a draft unless sent with --send
+    Forward(compose::Forward),
     /// List, show, edit or delete drafts
     #[command(subcommand)]
     Draft(compose::DraftCommand),
@@ -262,6 +264,7 @@ async fn run() -> Result<()> {
         }
         Command::Compose(args) => compose::compose(&client, args, cli.json).await,
         Command::Reply(args) => compose::reply(&client, args, cli.json).await,
+        Command::Forward(args) => compose::forward(&client, args, cli.json).await,
         Command::Draft(cmd) => compose::draft(&client, cmd, cli.json).await,
         Command::Send { draft } => compose::send(&client, DraftId(draft), cli.json).await,
         Command::Outbox { command } => {

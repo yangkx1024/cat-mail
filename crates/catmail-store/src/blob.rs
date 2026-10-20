@@ -92,6 +92,19 @@ impl BlobStore {
         self.put(bytes)
     }
 
+    /// What `put` of a blob's content does when it is already stored, without the
+    /// content: restarts its GC grace period. Returns its size, or `None` if it is
+    /// missing.
+    pub fn refresh(&self, hash: &BlobHash) -> io::Result<Option<u64>> {
+        let path = self.path(hash);
+        let _gc = self.gc.read().unwrap_or_else(PoisonError::into_inner);
+        match touch(&path) {
+            Ok(()) => Ok(Some(fs::metadata(&path)?.len())),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn path(&self, hash: &BlobHash) -> PathBuf {
         let (prefix, rest) = hash.as_str().split_at(2);
         self.root.join(prefix).join(rest)
@@ -299,6 +312,27 @@ mod tests {
         let mtime = fs::metadata(blobs.path(&hash)).unwrap().modified().unwrap();
         assert!(mtime > old + std::time::Duration::from_secs(86_400));
         assert_eq!(fs::read(blobs.path(&hash)).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn refreshing_restarts_the_grace_period() {
+        let dir = tempfile::tempdir().unwrap();
+        let blobs = BlobStore::open(dir.path()).unwrap();
+        let hash = blobs.put_bytes(b"hello").unwrap();
+        let old = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        File::options()
+            .write(true)
+            .open(blobs.path(&hash))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        assert_eq!(blobs.refresh(&hash).unwrap(), Some(5));
+        let mtime = fs::metadata(blobs.path(&hash)).unwrap().modified().unwrap();
+        assert!(mtime > old + std::time::Duration::from_secs(86_400));
+
+        blobs.remove(&hash).unwrap();
+        assert_eq!(blobs.refresh(&hash).unwrap(), None);
     }
 
     #[test]

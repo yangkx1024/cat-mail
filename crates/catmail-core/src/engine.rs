@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use catmail_proto::TlsConfig;
 use catmail_proto::imap::Session;
 use catmail_store::{BlobStore, Db, Store};
-use catmail_types::{AccountId, AccountStatus, Event, ServerProblem};
+use catmail_types::{AccountId, AccountStatus, DraftId, Event, ServerProblem};
 use tokio::sync::{Notify, OwnedMutexGuard, broadcast, watch};
 
 use crate::secrets::SecretStore;
@@ -31,6 +31,9 @@ pub(crate) struct Engine {
     pub outbox_kick: Arc<Notify>,
     /// Set if every account is kept in sync in the background (see `watch`).
     pub sync_in_background: Option<SyncSchedule>,
+    /// How long background sync leaves a draft alone after it changed before uploading
+    /// it (see [`held_drafts`](Self::held_drafts)).
+    pub draft_upload_delay: Duration,
     accounts: Mutex<HashMap<AccountId, Arc<AccountState>>>,
 }
 
@@ -38,6 +41,9 @@ struct IdleSession {
     session: Session,
     since: Instant,
 }
+
+/// [`Engine::draft_upload_delay`] unless the builder sets it.
+pub const DEFAULT_DRAFT_UPLOAD_DELAY: Duration = Duration::from_secs(15);
 
 /// Idle connections older than this are dropped rather than reused: servers and NAT
 /// boxes close quiet connections, and a dead one costs a timeout to discover.
@@ -66,6 +72,9 @@ struct AccountState {
     /// When the last sync of every folder finished.
     synced: Mutex<Option<Instant>>,
     status: Mutex<AccountStatus>,
+    /// When drafts were last changed, for holding back their upload while they are
+    /// being written. Entries older than the delay are dropped as they are found.
+    draft_edits: Mutex<HashMap<DraftId, Instant>>,
 }
 
 /// What an attempt that [`Engine::report`] records was doing.
@@ -133,6 +142,7 @@ impl Engine {
             tls: tls.map(OnceLock::from).unwrap_or_default(),
             outbox_kick: Arc::default(),
             sync_in_background: None,
+            draft_upload_delay: DEFAULT_DRAFT_UPLOAD_DELAY,
             accounts: Mutex::default(),
         }
     }
@@ -223,6 +233,49 @@ impl Engine {
     /// What [`wake`](Self::wake) notifies.
     pub fn wake_signal(&self, account: AccountId) -> Arc<Notify> {
         self.account(account).wake.clone()
+    }
+
+    /// Records that the draft was just changed (or created), so background sync leaves
+    /// it for [`draft_upload_delay`](Self::draft_upload_delay): a frontend saving as the
+    /// user types would otherwise replace the copy on the server with each keystroke.
+    /// Returns whether it was not held back already.
+    pub fn draft_edited(&self, account: AccountId, draft: DraftId) -> bool {
+        lock(&self.account(account).draft_edits)
+            .insert(draft, Instant::now())
+            .is_none_or(|at| at.elapsed() >= self.draft_upload_delay)
+    }
+
+    /// Forgets the draft's last change, once it is deleted or being sent.
+    pub fn draft_gone(&self, account: AccountId, draft: DraftId) {
+        lock(&self.account(account).draft_edits).remove(&draft);
+    }
+
+    /// The account's drafts changed within the last
+    /// [`draft_upload_delay`](Self::draft_upload_delay), which background sync doesn't
+    /// upload yet. Uploads the user asks for don't wait.
+    pub fn held_drafts(&self, account: AccountId) -> HashSet<DraftId> {
+        lock(&self.account(account).draft_edits)
+            .iter()
+            .filter(|(_, at)| at.elapsed() < self.draft_upload_delay)
+            .map(|(draft, _)| *draft)
+            .collect()
+    }
+
+    /// How long until the first draft held back is due for upload; zero for one that
+    /// became due after the last [`forget_settled_drafts`](Self::forget_settled_drafts)
+    /// (during a sync that left it alone, say), which the next one uploads.
+    pub fn next_draft_due(&self, account: AccountId) -> Option<Duration> {
+        lock(&self.account(account).draft_edits)
+            .values()
+            .map(|at| self.draft_upload_delay.saturating_sub(at.elapsed()))
+            .min()
+    }
+
+    /// Forgets the drafts no longer held back, as background sync begins a step, which
+    /// uploads them.
+    pub fn forget_settled_drafts(&self, account: AccountId) {
+        lock(&self.account(account).draft_edits)
+            .retain(|_, at| at.elapsed() < self.draft_upload_delay);
     }
 
     /// Records that every folder of the account was just synced.
@@ -353,6 +406,7 @@ impl Engine {
                     wake: Arc::default(),
                     synced: Mutex::default(),
                     status: Mutex::default(),
+                    draft_edits: Mutex::default(),
                 })
             })
             .clone()

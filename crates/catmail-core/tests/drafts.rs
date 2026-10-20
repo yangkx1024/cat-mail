@@ -1,15 +1,16 @@
 //! Drafts copied to the server's Drafts folder, against the fake IMAP server: uploads
 //! replacing the copy, deletion with the draft or once it is sent, lost and refused
-//! APPENDs, a rebuilt folder, and uploads made in the background.
+//! APPENDs, a rebuilt folder, and uploads made in the background once a draft settles.
+//! Also forwards, which copy the original's attachments into the draft.
 
 mod common;
 
 use std::time::Duration;
 
-use catmail_core::{Address, DraftContent, DraftId, ReplayReport, SyncSchedule};
+use catmail_core::{Address, DraftContent, DraftId, MailClientBuilder, ReplayReport, SyncSchedule};
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 use common::{Env, env, env_built, eventually, synced_env};
-use mail_parser::MessageParser;
+use mail_parser::{MessageParser, MimeHeaders};
 
 fn content(subject: &str) -> DraftContent {
     DraftContent {
@@ -299,16 +300,12 @@ async fn a_rebuilt_drafts_folder_keeps_one_copy() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn background_sync_uploads_changes_at_once() {
-    let schedule = SyncSchedule {
-        full_sync: Duration::from_secs(3600),
-        poll: Duration::from_millis(50),
-        idle: Duration::from_secs(3600),
-        retry: Duration::from_millis(50),
-    };
-    let env = env_built(state(), SmtpState::new("alice", "pw"), |b| {
-        b.sync_in_background(Some(schedule))
-    })
+async fn background_sync_uploads_changes() {
+    let env = env_built(
+        state(),
+        SmtpState::new("alice", "pw"),
+        background(Duration::ZERO),
+    )
     .await;
     let id = env.draft("one").await;
     eventually("the draft on the server", async || {
@@ -437,4 +434,213 @@ async fn a_reply_quoting_a_nul_doesnt_stop_the_sync() {
         (draft.content.subject.as_str(), draft.content.text.as_str()),
         ("nulsubject", "ab")
     );
+}
+
+/// Text and HTML showing an inline image, and a PDF attached.
+const REPORT: &[u8] = b"From: Zhang <zhang@example.com>\r\n\
+    To: alice@example.com\r\n\
+    Subject: Report\r\n\
+    Date: Sat, 17 Oct 2026 09:30:00 +0800\r\n\
+    MIME-Version: 1.0\r\n\
+    Content-Type: multipart/mixed; boundary=\"outer\"\r\n\r\n\
+    --outer\r\n\
+    Content-Type: multipart/related; boundary=\"rel\"\r\n\r\n\
+    --rel\r\n\
+    Content-Type: multipart/alternative; boundary=\"alt\"\r\n\r\n\
+    --alt\r\n\
+    Content-Type: text/plain\r\n\r\n\
+    See the report.\r\n\
+    --alt\r\n\
+    Content-Type: text/html\r\n\r\n\
+    <p>See the report.<img src=\"cid:logo@x\"></p>\r\n\
+    --alt--\r\n\
+    --rel\r\n\
+    Content-Type: image/png\r\n\
+    Content-ID: <logo@x>\r\n\
+    Content-Transfer-Encoding: base64\r\n\r\n\
+    iVBORw0KGgo=\r\n\
+    --rel--\r\n\
+    --outer\r\n\
+    Content-Type: application/pdf; name=\"report.pdf\"\r\n\
+    Content-Disposition: attachment; filename=\"report.pdf\"\r\n\
+    Content-Transfer-Encoding: base64\r\n\r\n\
+    JVBERi0xLjQK\r\n\
+    --outer--\r\n";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forward_carries_the_attachments_but_not_the_inline_images() {
+    let mut state = state();
+    state.inbox().append(REPORT, &[]);
+    let env = synced_env(state).await;
+    let id = env.id_of("INBOX", "Report").await;
+    assert!(
+        env.client
+            .get_message(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .body
+            .is_none()
+    );
+
+    let draft = env.client.forward(id).await.unwrap();
+    assert_eq!(draft.content.subject, "Fwd: Report");
+    assert!(draft.content.recipients().next().is_none());
+    assert!(draft.in_reply_to.is_none() && draft.references.is_empty());
+    let text = &draft.content.text;
+    assert!(
+        text.starts_with(
+            "\n\n---------- Forwarded message ---------\nFrom: Zhang <zhang@example.com>\nDate: 2026-"
+        ),
+        "{text:?}"
+    );
+    assert!(
+        text.ends_with("Subject: Report\nTo: alice@example.com\n\nSee the report.\n"),
+        "{text:?}"
+    );
+    let attachments: Vec<_> = draft
+        .attachments
+        .iter()
+        .map(|a| (a.filename.as_str(), a.mime_type.as_str(), a.size))
+        .collect();
+    assert_eq!(attachments, [("report.pdf", "application/pdf", 9)]);
+    assert_eq!(env.client.list_drafts(env.account).await.unwrap(), [draft]);
+
+    // As it goes out: the copy on the server is built like the message sent.
+    env.replay().await;
+    let raw = env.fake.state().mailbox_mut("Drafts").messages[0]
+        .raw
+        .clone();
+    let parsed = MessageParser::new().parse(&raw).unwrap();
+    assert_eq!(parsed.attachment_count(), 1);
+    let pdf = parsed.attachment(0).unwrap();
+    assert_eq!(pdf.attachment_name(), Some("report.pdf"));
+    assert_eq!(pdf.contents(), b"%PDF-1.4\n");
+}
+
+/// Over the whole-message limit, so its attachment is fetched on its own when needed.
+fn large_message() -> Vec<u8> {
+    let mut raw = b"From: Bob <bob@example.com>\r\n\
+        Subject: Big file\r\n\
+        Content-Type: multipart/mixed; boundary=\"b\"\r\n\r\n\
+        --b\r\n\
+        Content-Type: text/plain\r\n\r\n\
+        The video is attached.\r\n\
+        --b\r\n\
+        Content-Type: video/mp4; name=\"clip.mp4\"\r\n\
+        Content-Disposition: attachment; filename=\"clip.mp4\"\r\n\
+        Content-Transfer-Encoding: base64\r\n\r\n"
+        .to_vec();
+    // 3 MiB of 'A' encodes to zeros.
+    for _ in 0..(3 * 1024 * 1024 / 76) {
+        raw.extend_from_slice(&[b'A'; 76]);
+        raw.extend_from_slice(b"\r\n");
+    }
+    raw.extend_from_slice(b"--b--\r\n");
+    raw
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forward_without_its_attachment_leaves_no_draft() {
+    let mut state = state();
+    state.inbox().append(&large_message(), &[]);
+    let env = synced_env(state).await;
+    let id = env.id_of("INBOX", "Big file").await;
+    env.client.download_message(id).await.unwrap();
+
+    // The body is here; the attachment, still on the server, can't be had.
+    env.fake.state().faults.nil_sections = true;
+    env.client.forward(id).await.unwrap_err();
+    assert!(
+        env.client
+            .list_drafts(env.account)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    env.fake.state().faults.nil_sections = false;
+    let draft = env.client.forward(id).await.unwrap();
+    assert_eq!(draft.attachments.len(), 1);
+    assert_eq!(draft.attachments[0].size, 3 * 1024 * 1024 / 76 * 57);
+}
+
+/// Syncing in the background, a draft uploaded once it was left alone for `delay`.
+fn background(delay: Duration) -> impl FnOnce(MailClientBuilder) -> MailClientBuilder {
+    let schedule = SyncSchedule {
+        full_sync: Duration::from_secs(3600),
+        poll: Duration::from_millis(50),
+        idle: Duration::from_secs(3600),
+        retry: Duration::from_millis(50),
+    };
+    move |b| {
+        b.sync_in_background(Some(schedule))
+            .draft_upload_delay(delay)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn background_sync_waits_for_a_draft_to_settle() {
+    let env = env_built(
+        state(),
+        SmtpState::new("alice", "pw"),
+        background(Duration::from_secs(1)),
+    )
+    .await;
+    env.fake.wait_until(|st| st.received("IDLE") >= 1).await;
+
+    // Saved as it is typed: the first save wakes background sync, which leaves the
+    // draft alone; later saves only put its upload off, without a sync each.
+    let id = env.draft("o").await;
+    env.fake.wait_until(|st| st.received("IDLE") >= 2).await;
+    let idles = env.fake.state().received("IDLE");
+    for subject in ["on", "one"] {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        env.client.update_draft(id, content(subject)).await.unwrap();
+    }
+    assert_eq!(env.fake.state().received("IDLE"), idles);
+    assert_eq!(env.appends(), 0);
+    eventually("the draft on the server", async || {
+        subjects(&env.server_drafts()) == ["one"]
+    })
+    .await;
+    assert_eq!(env.appends(), 1, "uploaded once, when it settled");
+    assert!(env.on_server(id).await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_draft_that_settles_during_a_sync_is_uploaded_after_it() {
+    let env = env_built(
+        state(),
+        SmtpState::new("alice", "pw"),
+        background(Duration::from_secs(1)),
+    )
+    .await;
+    env.fake.wait_until(|st| st.received("IDLE") >= 1).await;
+
+    // The sync the draft wakes leaves it alone, and outlasts its delay: nothing else
+    // would wake background sync before the next full sync, an hour away.
+    env.fake.state().faults.slow = Some(("EXAMINE".into(), Duration::from_millis(1500)));
+    let id = env.draft("one").await;
+    eventually("the draft on the server", async || env.on_server(id).await).await;
+    assert_eq!(subjects(&env.server_drafts()), ["one"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn uploads_asked_for_dont_wait_for_a_draft_to_settle() {
+    let env = env_built(
+        state(),
+        SmtpState::new("alice", "pw"),
+        background(Duration::from_secs(3600)),
+    )
+    .await;
+    env.client.sync_account(env.account).await.unwrap();
+    let id = env.draft("one").await;
+    let report = env.replay().await;
+    assert_eq!(report.drafts_uploaded, 1);
+    assert!(env.on_server(id).await);
+
+    env.client.update_draft(id, content("two")).await.unwrap();
+    env.client.sync_account(env.account).await.unwrap();
+    assert_eq!(subjects(&env.server_drafts()), ["two"]);
 }

@@ -151,6 +151,18 @@ impl<'c> Drafts<'c> {
         Ok(drafts)
     }
 
+    /// How many drafts [`list`](Self::list) returns, without reading them.
+    pub fn count(&self, account: AccountId) -> Result<usize> {
+        let n: i64 = self
+            .conn
+            .prepare_cached(
+                "SELECT COUNT(*) FROM drafts d LEFT JOIN outbox o ON o.draft_id = d.id
+             WHERE d.account_id = ?1 AND o.id IS NULL",
+            )?
+            .query_row([account.0], |row| row.get(0))?;
+        Ok(n as usize)
+    }
+
     /// The draft with its revision and attachment blobs.
     pub fn snapshot(&self, id: DraftId) -> Result<Option<DraftSnapshot>> {
         let sql = format!(
@@ -723,6 +735,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        assert_eq!(store.read(|db| db.drafts().count(account)).unwrap(), 0);
         assert!(locked(store.write(|db| db.drafts().update(
             id,
             &content("x"),
@@ -746,6 +759,7 @@ mod tests {
             .unwrap();
         assert_eq!(entry.status, OutboxStatus::Queued);
         assert_eq!(store.read(|db| db.drafts().list(account)).unwrap().len(), 1);
+        assert_eq!(store.read(|db| db.drafts().count(account)).unwrap(), 1);
         assert!(
             store
                 .write(|db| db.drafts().update(id, &content("x"), 3))

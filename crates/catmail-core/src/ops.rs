@@ -23,6 +23,7 @@ use catmail_types::{
 };
 
 use crate::connection::with_session;
+use crate::draft_sync::Uploads;
 use crate::engine::{Activity, Engine, now};
 use crate::{Error, Result, draft_sync};
 
@@ -127,7 +128,9 @@ pub(crate) async fn replay_account(
             // went through is no longer pending, and uploads left unsettled settle first.
             let replayed = with_session(&engine, account, |session| {
                 let engine = engine.clone();
-                Box::pin(async move { replay_queued(&engine, session, account).await })
+                Box::pin(
+                    async move { replay_queued(&engine, session, account, Uploads::All).await },
+                )
             })
             .await;
             engine.report(account, Activity::Sync, &replayed);
@@ -154,14 +157,15 @@ pub(crate) struct Replayed {
     pub folders: HashMap<FolderId, ReplayReport>,
 }
 
-/// Uploads the account's changed drafts, then replays all its queued ops, deleting the
+/// Uploads the account's changed drafts (those `uploads` takes), then replays all its queued ops, deleting the
 /// copies those drafts replace among them. Call with the account's sync permit.
 pub(crate) async fn replay_queued(
     engine: &Arc<Engine>,
     session: &mut Session,
     account: AccountId,
+    uploads: Uploads,
 ) -> Result<Replayed> {
-    let drafts = draft_sync::upload(engine, session, account).await?;
+    let drafts = draft_sync::upload(engine, session, account, uploads).await?;
     let pending = engine
         .read(move |db| db.ops().pending_folders(account))
         .await?;

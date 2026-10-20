@@ -236,6 +236,8 @@ pub struct Faults {
     pub end_idle_early: bool,
     /// Accept every IDLE, then send a line no parser accepts.
     pub garble_idle: bool,
+    /// Answer each command that starts with this text (`EXAMINE`) only after this long.
+    pub slow: Option<(String, std::time::Duration)>,
 }
 
 impl Default for Faults {
@@ -275,6 +277,7 @@ impl Default for Faults {
             drop_on_idle: false,
             end_idle_early: false,
             garble_idle: false,
+            slow: None,
         }
     }
 }
@@ -770,6 +773,14 @@ async fn handle(
         tls: session.tls,
         line: rest.to_owned(),
     });
+    let slow = lock(state)
+        .faults
+        .slow
+        .clone()
+        .filter(|(prefix, _)| rest.starts_with(prefix.as_str()));
+    if let Some((_, delay)) = slow {
+        tokio::time::sleep(delay).await;
+    }
     let toks = tokenize(rest);
     let word = |i: usize| {
         toks.get(i)
