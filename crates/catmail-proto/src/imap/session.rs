@@ -437,7 +437,7 @@ impl Session {
             None,
             message.to_vec(),
         )
-        .map_err(|e| Error::Protocol(format!("can't APPEND to `{raw_name}`: {e:?}")))?;
+        .map_err(|e| Error::InvalidInput(format!("can't APPEND to `{raw_name}`: {e:?}")))?;
         let response = self.conn.execute(body).await?;
         Ok(response.codes.iter().find_map(|code| match code {
             Code::AppendUid { uid_validity, uid } => Some((uid_validity.get(), uid.get())),

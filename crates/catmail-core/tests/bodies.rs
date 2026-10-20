@@ -1,16 +1,16 @@
 //! Body and attachment downloads, search and blob GC against the fake IMAP server.
 
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use catmail_core::{Error, Event, Message, MessageId, SearchQuery};
-use catmail_testkit::ServerState;
+use catmail_testkit::{ServerState, SmtpState};
 
 mod common;
 
-use common::{Env, synced_env as env};
+use common::{Env, drain, env_built, eventually, synced_env as env};
 
 impl Env {
     /// Message ids in INBOX, by UID.
@@ -227,11 +227,21 @@ async fn large_messages_leave_attachments_on_the_server_until_opened() {
     assert!(estimate.abs_diff(decoded) < decoded / 100, "{estimate}");
 
     let start = env.log_len();
+    let mut events = env.client.subscribe();
     let data = env.client.attachment_content(video.id).await.unwrap();
     assert!(
         env.commands_since(start)
             .iter()
             .any(|c| c.contains("BODY.PEEK[2]"))
+    );
+    // Other views of the message learn that it is stored, and its exact size.
+    let folder = message.summary.folder_id;
+    assert_eq!(
+        events.try_recv().unwrap(),
+        Event::MessagesChanged {
+            account: env.account,
+            folder
+        }
     );
     assert_eq!(data.len() as u32, decoded);
     assert!(data.iter().all(|&b| b == 0));
@@ -252,6 +262,10 @@ async fn large_messages_leave_attachments_on_the_server_until_opened() {
             .iter()
             .any(|c| c.contains("BODY.PEEK[]"))
     );
+    assert!(drain(&mut events).contains(&Event::MessagesChanged {
+        account: env.account,
+        folder
+    }));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -526,19 +540,49 @@ async fn gc_frees_the_blobs_of_removed_accounts() {
     assert_eq!(env.client.collect_garbage().await.unwrap().removed, 0);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn gc_runs_in_the_background_when_asked_to() {
+    let env = env_built(state(&[NEWSLETTER]), SmtpState::new("alice", "pw"), |b| {
+        b.collect_garbage_every(Some(Duration::from_millis(50)))
+    })
+    .await;
+    env.client.sync_account(env.account).await.unwrap();
+    env.client.download_message(env.id(0).await).await.unwrap();
+    let blobs = env.client.config().blob_dir();
+    age_files(&blobs);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(count_files(&blobs), 3, "all referenced");
+
+    env.client.remove_account(env.account).await.unwrap();
+    eventually("the blobs to go", async || count_files(&blobs) == 0).await;
+}
+
+fn count_files(dir: &Path) -> usize {
+    files(dir).len()
+}
+
 /// Backdates every file under `dir` past the GC grace period.
 fn age_files(dir: &Path) {
+    for path in files(dir) {
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(7 * 24 * 3600))
+            .unwrap();
+    }
+}
+
+/// Every file under `dir`.
+fn files(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
         if path.is_dir() {
-            age_files(&path);
+            files.extend(self::files(&path));
         } else {
-            File::options()
-                .write(true)
-                .open(&path)
-                .unwrap()
-                .set_modified(SystemTime::now() - Duration::from_secs(7 * 24 * 3600))
-                .unwrap();
+            files.push(path);
         }
     }
+    files
 }

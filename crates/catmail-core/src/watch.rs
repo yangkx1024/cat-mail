@@ -19,7 +19,7 @@ use catmail_proto::imap::Session;
 use catmail_types::AccountId;
 use tokio::sync::Notify;
 
-use crate::engine::{Cancellation, Engine, backoff};
+use crate::engine::{Activity, Cancellation, Engine, backoff};
 use crate::{Error, Result, connection, ops, sync};
 
 /// When background sync does what.
@@ -35,7 +35,9 @@ pub struct SyncSchedule {
     /// without a word (a NAT box forgetting it, say) is noticed [10 minutes].
     pub idle: Duration,
     /// How long to wait after a failure before trying again, doubling with each failure
-    /// in a row, up to `full_sync` [30 seconds]. Queued local changes try again at once.
+    /// in a row, up to `full_sync` [30 seconds]. Queued local changes try again at once,
+    /// except after the server rejected the login: that waits `full_sync`, whatever is
+    /// queued, or until a sync asked for gets through.
     pub retry: Duration,
 }
 
@@ -59,8 +61,29 @@ pub(crate) fn spawn(engine: &Arc<Engine>, account: AccountId) {
 }
 
 /// An IDLE that loses its connection sooner than this after it began counts towards
-/// backing off.
+/// backing off; so does one that ends with a change this soon, past [`BUSY`].
 const SHORT_IDLE: Duration = Duration::from_secs(60);
+
+/// IDLEs in a row that may end with a change soon after they began before syncing INBOX
+/// waits a little in between. Without it, a server that reports something at once every
+/// time (or sends a line that can't be parsed, which counts as a change) would have
+/// INBOX synced in a loop.
+const BUSY: u32 = 10;
+
+/// IDLEs in a row the server may end on its own as soon as they began, without a change,
+/// before INBOX is checked at intervals instead.
+const CUT_SHORT: u32 = 3;
+
+/// How an IDLE ended.
+enum Idled {
+    /// The server reported a change.
+    Changed,
+    /// Local changes are queued, the account is removed or the engine is gone, or every
+    /// folder is due to be synced.
+    Stopped,
+    /// The server ends each IDLE as soon as it begins.
+    CutShort,
+}
 
 /// What the connection does between steps.
 enum Wait {
@@ -79,10 +102,11 @@ pub(crate) async fn run(engine: Weak<Engine>, account: AccountId, schedule: Sync
         return;
     };
     let mut session: Option<Session> = None;
-    let mut failures = 0;
     // IDLEs in a row that the connection was lost in soon after they began.
     let mut idle_losses = 0;
-    // Cleared if the server refuses IDLE even though it offers it.
+    // IDLEs in a row that ended with a change soon after they began.
+    let mut busy = 0;
+    // Cleared if the server refuses IDLE even though it offers it, or cuts it short.
     let mut idle_works = true;
     loop {
         let Some(strong) = engine.upgrade() else {
@@ -92,59 +116,82 @@ pub(crate) async fn run(engine: Weak<Engine>, account: AccountId, schedule: Sync
             return;
         }
         let result = step(&strong, &mut session, account, schedule).await;
+        let failures = strong.report(account, Activity::Sync, &result);
         let full_sync_due = full_sync_in(&strong, account, &schedule);
         drop(strong);
 
         let pause = match result {
-            Ok(wait) => {
-                failures = 0;
-                match (wait, session.as_mut()) {
-                    (Wait::Idle, Some(s)) if idle_works => {
-                        let start = Instant::now();
-                        match idle(s, &wake, &mut cancellation, &schedule, full_sync_due).await {
-                            Ok(()) => {
-                                idle_losses = 0;
+            Ok(wait) => match (wait, session.as_mut()) {
+                (Wait::Idle, Some(s)) if idle_works => {
+                    let start = Instant::now();
+                    match idle(s, &wake, &mut cancellation, &schedule, full_sync_due).await {
+                        Ok(Idled::Stopped) => {
+                            (idle_losses, busy) = (0, 0);
+                            continue;
+                        }
+                        Ok(Idled::Changed) => {
+                            idle_losses = 0;
+                            busy = if start.elapsed() < SHORT_IDLE {
+                                busy + 1
+                            } else {
+                                0
+                            };
+                            if busy <= BUSY {
                                 continue;
                             }
-                            Err(catmail_proto::imap::Error::Command { text, .. }) => {
-                                tracing::info!(%account, %text,
-                                    "server refused IDLE; checking INBOX at intervals");
-                                idle_works = false;
+                            let delay = backoff(schedule.retry, busy - BUSY, schedule.poll);
+                            tracing::debug!(%account, ?delay, "INBOX keeps changing; slowing down");
+                            delay
+                        }
+                        Ok(Idled::CutShort) => {
+                            tracing::info!(%account,
+                                "server ends IDLE at once; checking INBOX at intervals");
+                            idle_works = false;
+                            continue;
+                        }
+                        Err(catmail_proto::imap::Error::Command { text, .. }) => {
+                            tracing::info!(%account, %text,
+                                "server refused IDLE; checking INBOX at intervals");
+                            idle_works = false;
+                            continue;
+                        }
+                        // Servers and NAT boxes close connections that idled a while:
+                        // reconnect at once. One lost again and again soon after
+                        // IDLE begins backs off like a failure, or this would log
+                        // in and sync in a loop.
+                        Err(e) => {
+                            session = None;
+                            let short = start.elapsed() < SHORT_IDLE;
+                            idle_losses = if short { idle_losses + 1 } else { 1 };
+                            if idle_losses == 1 {
+                                tracing::debug!(%account, error = %e, "IDLE connection lost");
                                 continue;
                             }
-                            // Servers and NAT boxes close connections that idled a while:
-                            // reconnect at once. One lost again and again soon after
-                            // IDLE begins backs off like a failure, or this would log
-                            // in and sync in a loop.
-                            Err(e) => {
-                                session = None;
-                                let short = start.elapsed() < SHORT_IDLE;
-                                idle_losses = if short { idle_losses + 1 } else { 1 };
-                                if idle_losses == 1 {
-                                    tracing::debug!(%account, error = %e, "IDLE connection lost");
-                                    continue;
-                                }
-                                let delay =
-                                    backoff(schedule.retry, idle_losses - 1, schedule.full_sync);
-                                tracing::warn!(%account, error = %e, ?delay,
-                                    "IDLE connection keeps getting lost; trying again later");
-                                delay
-                            }
+                            let delay =
+                                backoff(schedule.retry, idle_losses - 1, schedule.full_sync);
+                            tracing::warn!(%account, error = %e, ?delay,
+                                "IDLE connection keeps getting lost; trying again later");
+                            delay
                         }
                     }
-                    _ => schedule.poll.min(full_sync_due),
                 }
-            }
+                _ => schedule.poll.min(full_sync_due),
+            },
             Err(Error::AccountNotFound(_) | Error::Cancelled) => return,
             Err(e) => {
                 session = None;
-                failures += 1;
-                let delay = backoff(schedule.retry, failures, schedule.full_sync);
+                let delay = match e {
+                    // Each try is another rejected login, which servers count towards
+                    // locking the account.
+                    Error::AuthFailed(_) => schedule.full_sync,
+                    _ => backoff(schedule.retry, failures, schedule.full_sync),
+                };
                 tracing::warn!(%account, error = %e, ?delay,
                     "background sync failed; trying again later");
                 delay
             }
         };
+        // After a rejected login, queued changes don't wake it (see `Engine::wake`).
         tokio::select! {
             () = stopped(&wake, &mut cancellation) => {}
             () = tokio::time::sleep(pause) => {}
@@ -162,8 +209,9 @@ async fn idle(
     cancellation: &mut Cancellation,
     schedule: &SyncSchedule,
     full_sync_due: Duration,
-) -> catmail_proto::imap::Result<()> {
+) -> catmail_proto::imap::Result<Idled> {
     let start = Instant::now();
+    let mut cut_short = 0;
     loop {
         let left = full_sync_due.saturating_sub(start.elapsed());
         let mut stop = false;
@@ -171,9 +219,21 @@ async fn idle(
             stopped(wake, cancellation).await;
             stop = true;
         };
-        let changed = session.idle(stopping, schedule.idle.min(left)).await?;
-        if changed || stop || left <= schedule.idle {
-            return Ok(());
+        let (began, max) = (Instant::now(), schedule.idle.min(left));
+        if session.idle(stopping, max).await? {
+            return Ok(Idled::Changed);
+        }
+        if stop || start.elapsed() >= full_sync_due {
+            return Ok(Idled::Stopped);
+        }
+        // Ended quietly long before it was due: by the server.
+        cut_short = if began.elapsed() < SHORT_IDLE.min(max / 2) {
+            cut_short + 1
+        } else {
+            0
+        };
+        if cut_short >= CUT_SHORT {
+            return Ok(Idled::CutShort);
         }
     }
 }

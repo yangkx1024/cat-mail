@@ -15,7 +15,7 @@ use catmail_proto::imap::{FetchedMessage, ListedMailbox, MailboxStatus, Session}
 use catmail_store::{FolderSyncState, NewMessage, RemoteFolder};
 use catmail_types::{AccountId, Event, FolderId, FolderRole, FolderSyncReport, SyncReport};
 
-use crate::engine::Engine;
+use crate::engine::{Activity, Engine};
 use crate::{Error, Result, connection, ops};
 
 /// New messages per UID FETCH, and per transaction.
@@ -23,14 +23,16 @@ const FETCH_BATCH: usize = 200;
 
 pub(crate) async fn sync_account(engine: Arc<Engine>, account_id: AccountId) -> Result<SyncReport> {
     let permit = engine.sync_permit(account_id).await;
-    permit
+    let result = permit
         .run(async {
             let mut session = connection::connect(&engine, account_id).await?;
             let report = run(&engine, &mut session, account_id).await?;
             session.logout().await;
             Ok(report)
         })
-        .await
+        .await;
+    engine.report(account_id, Activity::Sync, &result);
+    result
 }
 
 /// Syncs every folder of the account on `session`. Call with the account's sync permit.

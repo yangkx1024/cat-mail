@@ -141,8 +141,8 @@ async fn upload_one(
         .await
     {
         Ok(appended) => appended,
-        // A refused APPEND stores nothing.
-        Err(e @ ImapError::Command { .. }) => {
+        // A refused APPEND stores nothing, nor does one that couldn't be sent.
+        Err(e @ (ImapError::Command { .. } | ImapError::InvalidInput(_))) => {
             return failed(engine, draft, Some(upload), e.to_string()).await;
         }
         // Refused before the message was sent (Dovecot does that when it can't store

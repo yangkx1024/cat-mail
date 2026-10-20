@@ -514,6 +514,21 @@ async fn appends_and_finds_by_message_id() {
 }
 
 #[tokio::test]
+async fn a_message_imap_cant_carry_is_not_sent() {
+    let fake = FakeImap::start(sample_state()).await;
+    let mut session = login(&fake).await;
+    let err = session
+        .append("INBOX", Flags::empty(), b"Subject: x\r\n\r\na\0b\r\n")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
+    assert!(!err.is_fatal());
+    assert_eq!(fake.state().received("APPEND"), 0);
+    // The connection is as it was.
+    session.examine("INBOX").await.unwrap();
+}
+
+#[tokio::test]
 async fn append_refused_before_the_message_fails_at_once() {
     let mut state = sample_state();
     state.faults.reject_append_literal = true;

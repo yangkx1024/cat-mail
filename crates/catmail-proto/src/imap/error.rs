@@ -45,6 +45,11 @@ pub enum Error {
     #[error("{0} response from the server could not be parsed completely")]
     Incomplete(&'static str),
 
+    /// The command can't carry this input (a NUL in a message to APPEND, say). Nothing
+    /// was sent; the connection is still usable.
+    #[error("{0}")]
+    InvalidInput(String),
+
     #[error("protocol error: {0}")]
     Protocol(String),
 }
@@ -56,7 +61,10 @@ impl Error {
     pub fn is_fatal(&self) -> bool {
         !matches!(
             self,
-            Self::Command { .. } | Self::Incomplete(_) | Self::InvalidServerName(_)
+            Self::Command { .. }
+                | Self::Incomplete(_)
+                | Self::InvalidServerName(_)
+                | Self::InvalidInput(_)
         )
     }
 

@@ -120,3 +120,28 @@ pub struct NewAccount {
     pub smtp: ServerConfig,
     pub auth: AuthKind,
 }
+
+/// Whether the engine gets through to an account's servers, as its latest attempts
+/// found: background sync, syncs and replays asked for, and sending. Kept in memory
+/// only; an engine starts out knowing of no problem.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountStatus {
+    /// Syncing with the IMAP server failed.
+    pub sync: Option<ServerProblem>,
+    /// Reaching the SMTP server to send failed. Queued messages wait meanwhile, without
+    /// any of them counting it as an attempt.
+    pub send: Option<ServerProblem>,
+}
+
+/// Failures in a row reaching a server, or working with it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerProblem {
+    /// The latest error.
+    pub error: String,
+    /// The server rejected the login (the latest time). Retrying is slowed down, since
+    /// servers lock accounts after repeated failed logins: the password needs fixing.
+    pub auth_failed: bool,
+    /// When the first of these failures happened, in unix seconds.
+    pub since: i64,
+    pub failures: u32,
+}

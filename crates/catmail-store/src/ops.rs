@@ -40,6 +40,8 @@ pub struct ReplayOp {
     pub kind: ReplayKind,
     /// For a move on a server without MOVE: where an earlier COPY may have put it.
     pub copy: Option<CopyCheckpoint>,
+    /// With `copy`: the copy's UID there, if the COPY was answered with COPYUID.
+    pub copy_uid: Option<u32>,
 }
 
 /// The target of a COPY as it was right before the COPY was sent.
@@ -453,7 +455,7 @@ impl<'c> PendingOps<'c> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT o.id, o.uid, o.kind, o.flags_add, o.flags_remove, o.target_folder_id,
                     t.remote_name, o.copy_folder_id, c.remote_name AS copy_remote_name,
-                    o.copy_uidvalidity, o.copy_uidnext
+                    o.copy_uidvalidity, o.copy_uidnext, o.copy_uid
              FROM pending_ops o
              LEFT JOIN folders t ON t.id = o.target_folder_id
              LEFT JOIN folders c ON c.id = o.copy_folder_id
@@ -484,6 +486,7 @@ impl<'c> PendingOps<'c> {
                     }),
                     None => None,
                 },
+                copy_uid: r.get("copy_uid")?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -556,7 +559,7 @@ impl<'c> PendingOps<'c> {
                         .prepare_cached(
                             "UPDATE pending_ops SET folder_id = ?4, uidvalidity = ?5, uid = ?6,
                                  copy_folder_id = NULL, copy_uidvalidity = NULL,
-                                 copy_uidnext = NULL
+                                 copy_uidnext = NULL, copy_uid = NULL
                              WHERE folder_id = ?1 AND uidvalidity = ?2 AND uid = ?3
                                AND status = 'pending'",
                         )?
@@ -621,7 +624,8 @@ impl<'c> PendingOps<'c> {
     /// Commit it durably: it is what keeps a retry from copying again.
     pub fn before_copy(&self, ops: &[ReplayOp], checkpoint: &CopyCheckpoint) -> Result<()> {
         let mut update = self.conn.prepare_cached(
-            "UPDATE pending_ops SET copy_folder_id = ?2, copy_uidvalidity = ?3, copy_uidnext = ?4
+            "UPDATE pending_ops SET copy_folder_id = ?2, copy_uidvalidity = ?3, copy_uidnext = ?4,
+                 copy_uid = NULL
              WHERE id = ?1 AND status = 'pending'",
         )?;
         for op in ops {
@@ -635,11 +639,26 @@ impl<'c> PendingOps<'c> {
         Ok(())
     }
 
+    /// Records where the COPY after [`before_copy`](Self::before_copy) put these
+    /// messages, by (op, UID of the copy) under the checkpoint's UIDVALIDITY. Commit it
+    /// durably, before the originals are deleted.
+    pub fn copied(&self, copies: &[(PendingOpId, u32)]) -> Result<()> {
+        let mut update = self.conn.prepare_cached(
+            "UPDATE pending_ops SET copy_uid = ?2
+             WHERE id = ?1 AND status = 'pending' AND copy_folder_id IS NOT NULL",
+        )?;
+        for &(op, uid) in copies {
+            update.execute(params![op.0, uid])?;
+        }
+        Ok(())
+    }
+
     /// No earlier COPY made these messages' copies: the checkpoints have done their job.
     pub fn forget_checkpoints(&self, ops: &[ReplayOp]) -> Result<()> {
         let mut update = self.conn.prepare_cached(
             "UPDATE pending_ops
-             SET copy_folder_id = NULL, copy_uidvalidity = NULL, copy_uidnext = NULL
+             SET copy_folder_id = NULL, copy_uidvalidity = NULL, copy_uidnext = NULL,
+                 copy_uid = NULL
              WHERE id = ?1",
         )?;
         for op in ops {
@@ -1445,6 +1464,21 @@ mod tests {
         assert!(f.ops().iter().all(|op| op.status == OpStatus::Conflict));
         assert!(f.pending(f.inbox).is_empty());
         assert_eq!(f.counts(f.archive), (0, 0));
+    }
+
+    #[test]
+    fn a_new_generation_keeps_messages_on_their_way_in() {
+        let f = setup();
+        let m2 = f.message(f.inbox, 2);
+        f.write(|db| db.ops().move_messages(&[m2], f.archive, 0));
+        // The target is rebuilt: the move names INBOX's UID, which still holds.
+        f.write(|db| db.folders().reset_uidvalidity(f.archive, 8));
+        assert_eq!(f.row(m2), Some((f.archive, None, Flags::empty())));
+        assert_eq!(f.counts(f.archive), (1, 1));
+        let ops = f.ops();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].status, OpStatus::Pending);
+        assert_eq!(ops[0].message_id, Some(m2));
     }
 
     #[test]

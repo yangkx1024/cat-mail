@@ -197,6 +197,31 @@ async fn a_lost_append_answer_leaves_one_copy() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_draft_edited_before_its_lost_upload_is_settled_keeps_the_latest() {
+    let env = synced_env(state()).await;
+    let id = env.draft("one").await;
+    env.replay().await;
+
+    // "two" is stored, the answer lost, and the replay gives up: it can't log in again.
+    env.client.update_draft(id, content("two")).await.unwrap();
+    {
+        let mut state = env.fake.state();
+        state.faults.drop_after_append = true;
+        state.faults.reject_login = true;
+    }
+    assert!(env.client.replay_pending(env.account).await.is_err());
+    assert_eq!(subjects(&env.server_drafts()), ["one", "two"]);
+
+    env.client.update_draft(id, content("three")).await.unwrap();
+    env.fake.state().faults.reject_login = false;
+    let report = env.replay().await;
+    assert_eq!((report.drafts_uploaded, report.drafts_failed), (1, 0));
+    assert_eq!(subjects(&env.server_drafts()), ["three"]);
+    assert!(env.on_server(id).await);
+    assert_eq!(env.appends(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_draft_deleted_before_its_lost_upload_is_settled_leaves_nothing() {
     let mut state = state();
     state.faults.drop_after_append = true;
@@ -381,4 +406,35 @@ async fn a_copy_replaced_or_deleted_before_a_rebuild_is_synced_goes() {
             "no conflicts left"
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_quoting_a_nul_doesnt_stop_the_sync() {
+    // A NUL can't go into an APPEND. Quoted from a message that has one (`=00`), it
+    // would fail the draft's upload, and with it every sync of the account.
+    let mut state = state();
+    state.inbox().append(
+        b"From: carol@example.com\r\nSubject: odd\r\nMessage-ID: <odd@example.com>\r\n\
+          Content-Type: text/plain\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n\
+          before=00after\r\n",
+        &[],
+    );
+    let env = synced_env(state).await;
+    let odd = env.id_of("INBOX", "odd").await;
+    let draft = env.client.reply(odd, false).await.unwrap();
+    assert!(draft.content.text.contains("beforeafter"), "{draft:?}");
+
+    let report = env.replay().await;
+    assert_eq!((report.drafts_uploaded, report.drafts_failed), (1, 0));
+    assert!(env.on_server(draft.id).await);
+    env.client.sync_account(env.account).await.unwrap();
+
+    // Nor can it be typed in.
+    let mut nul = content("nul\0subject");
+    nul.text = "a\0b".into();
+    let draft = env.client.create_draft(env.account, nul).await.unwrap();
+    assert_eq!(
+        (draft.content.subject.as_str(), draft.content.text.as_str()),
+        ("nulsubject", "ab")
+    );
 }

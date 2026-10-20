@@ -27,7 +27,7 @@ use catmail_types::{
 use tokio::sync::Notify;
 
 use crate::connection::{self, SessionFuture, with_session};
-use crate::engine::{Engine, Permit, blocking, now};
+use crate::engine::{Activity, Engine, Permit, blocking, now};
 use crate::{Error, Result, body, drafts, ops, sync};
 
 /// First retry after this long, doubling up to [`MAX_BACKOFF`].
@@ -116,34 +116,69 @@ pub(crate) async fn flush(
 }
 
 async fn run(engine: &Arc<Engine>, account: AccountId, due_only: bool) -> Result<Vec<OutboxEntry>> {
+    let mut results = Vec::new();
+    let outcome = pass(engine, account, due_only, &mut results).await;
+    // What changed before a failure too.
+    if !results.is_empty() || outcome.is_err() {
+        engine.emit(Event::OutboxChanged { account });
+    }
+    outcome.map(|()| results)
+}
+
+/// [`run`], adding the entries worked on to `results` as it goes.
+async fn pass(
+    engine: &Arc<Engine>,
+    account: AccountId,
+    due_only: bool,
+    results: &mut Vec<OutboxEntry>,
+) -> Result<()> {
     let pending = |status| {
         let due = due_only.then(now);
         engine.read(move |db| db.outbox().pending(account, status, due))
     };
-    let mut results = Vec::new();
-
-    let mut smtp = Smtp::default();
+    let mut smtp = Smtp::None;
     for id in pending(OutboxStatus::Queued).await? {
-        if let Some(down) = &smtp.down {
-            // The server couldn't be reached for the entry before; this one would fail
-            // the same way. It waits as long as that one, so the backoff still grows.
-            let next = results
-                .last()
-                .and_then(|e: &OutboxEntry| e.next_attempt_at)
-                .unwrap_or_else(|| now() + FIRST_BACKOFF);
-            let error = down.clone();
-            results.extend(record(engine, id, move |o| o.postpone(id, next, &error, now())).await?);
-            continue;
+        if let Smtp::None = smtp {
+            // Before the entry counts an attempt: failing to connect or log in is the
+            // account's trouble, not this message's.
+            let connected = connection::connect_smtp(engine, account).await;
+            let failures = engine.report(account, Activity::Send, &connected);
+            smtp = match connected {
+                Ok(session) => Smtp::Up(session),
+                Err(e @ (Error::Cancelled | Error::AccountNotFound(_))) => return Err(e),
+                Err(e) => {
+                    tracing::info!(%account, error = %e, "can't reach the SMTP server");
+                    Smtp::Down {
+                        error: e.to_string(),
+                        next: now() + backoff(failures),
+                    }
+                }
+            };
         }
+        let session = match &mut smtp {
+            Smtp::Up(session) => session,
+            // Everything waits as long as the account's backoff says.
+            Smtp::Down { error, next } => {
+                let (error, next) = (error.clone(), *next);
+                let postponed = record(engine, id, move |o| o.postpone(id, next, &error, now()));
+                results.extend(postponed.await?);
+                continue;
+            }
+            Smtp::None => unreachable!("connected above"),
+        };
         let Some(job) = engine
             .write(move |db| db.outbox().begin_send(id, now()))
             .await?
         else {
             continue; // Cancelled meanwhile.
         };
-        results.extend(send_one(engine, &mut smtp, job).await?);
+        let (entry, usable) = send_one(engine, session, job).await?;
+        results.extend(entry);
+        if !usable {
+            smtp = Smtp::None;
+        }
     }
-    if let Some(session) = smtp.session.take() {
+    if let Smtp::Up(session) = smtp {
         session.quit().await;
     }
 
@@ -160,10 +195,7 @@ async fn run(engine: &Arc<Engine>, account: AccountId, due_only: bool) -> Result
         };
         results.extend(save_one(engine, job, None).await?);
     }
-    if !results.is_empty() {
-        engine.emit(Event::OutboxChanged { account });
-    }
-    Ok(results)
+    Ok(())
 }
 
 /// The account's send permit, with nothing in the middle of being sent. An entry that
@@ -183,11 +215,16 @@ async fn idle_outbox(engine: &Arc<Engine>, account: AccountId) -> Result<Permit>
 }
 
 /// The SMTP connection of one pass over the outbox, reused from message to message.
-#[derive(Default)]
-struct Smtp {
-    session: Option<smtp::Session>,
-    /// Why connecting failed, which ends the sending part of the pass.
-    down: Option<String>,
+enum Smtp {
+    /// Not connected (yet, or again after a failure made the connection unusable).
+    None,
+    Up(smtp::Session),
+    /// Connecting failed, which ends the sending part of the pass: why, and when to try
+    /// again.
+    Down {
+        error: String,
+        next: i64,
+    },
 }
 
 /// How an attempt at sending ended.
@@ -217,15 +254,17 @@ async fn record(
 }
 
 /// The entry as the attempt left it; one the server accepted is saved to Sent right
-/// away, with the message still at hand.
+/// away, with the message still at hand. Also returns whether `session` can be used
+/// again.
 async fn send_one(
     engine: &Arc<Engine>,
-    smtp: &mut Smtp,
+    session: &mut smtp::Session,
     job: OutboxJob,
-) -> Result<Option<OutboxEntry>> {
+) -> Result<(Option<OutboxEntry>, bool)> {
     let (id, account, attempts) = (job.entry.id, job.entry.account_id, job.entry.attempts);
     let now = now();
-    match attempt_send(engine, smtp, &job).await {
+    let (outcome, usable) = attempt_send(engine, session, &job).await;
+    let entry = match outcome {
         Outcome::Accepted(raw) => {
             // Durable like every count of an attempt to save: see `attempt_save`.
             let (save, replied) = engine
@@ -260,33 +299,20 @@ async fn send_one(
             record(engine, id, move |o| o.mark_unknown(id, Some(&error), now)).await
         }
         Outcome::Gone => Ok(None),
-    }
+    };
+    Ok((entry?, usable))
 }
 
-async fn attempt_send(engine: &Arc<Engine>, smtp: &mut Smtp, job: &OutboxJob) -> Outcome {
-    // Connect first: if the server is down, there is no need to read the message.
-    let mut session = match smtp.session.take() {
-        Some(session) => session,
-        None => match connection::connect_smtp(engine, job.entry.account_id).await {
-            Ok(session) => session,
-            Err(e) => {
-                smtp.down = Some(e.to_string());
-                return Outcome::NotSent(e);
-            }
-        },
-    };
-    let raw = match read_raw(engine, job.raw.clone()).await {
-        Ok(raw) => raw,
-        Err(e) => {
-            smtp.session = Some(session);
-            return Outcome::NotSent(e);
-        }
-    };
-    let (outcome, usable) = transact(engine, &mut session, job, raw).await;
-    if usable {
-        smtp.session = Some(session);
+/// One attempt on the pass's connection. Also returns whether it can be used again.
+async fn attempt_send(
+    engine: &Arc<Engine>,
+    session: &mut smtp::Session,
+    job: &OutboxJob,
+) -> (Outcome, bool) {
+    match read_raw(engine, job.raw.clone()).await {
+        Ok(raw) => transact(engine, session, job, raw).await,
+        Err(e) => (Outcome::NotSent(e), true),
     }
-    outcome
 }
 
 /// One SMTP transaction. Also returns whether the connection can be used again.
@@ -433,10 +459,9 @@ async fn read_raw(engine: &Arc<Engine>, hash: BlobHash) -> Result<Vec<u8>> {
 fn is_permanent(e: &Error) -> bool {
     match e {
         Error::Smtp(e) => e.is_permanent(),
-        // Lifted out of `Error::Smtp` (see `Error::from`).
-        Error::AuthFailed(_) | Error::Unsupported(_) => true,
-        // Not `Secrets`: a keyring that is locked or not running yet comes back.
-        Error::Tls(_) | Error::Conflict(_) | Error::AccountNotFound(_) => true,
+        // The stored message is missing. (What the account's settings get wrong fails
+        // logging in, before any attempt.)
+        Error::Conflict(_) => true,
         _ => false,
     }
 }
@@ -476,10 +501,22 @@ pub(crate) async fn mark_sent(engine: &Arc<Engine>, id: OutboxId) -> Result<Outb
 
 /// Returns the entry as it was before it was removed.
 pub(crate) async fn cancel(engine: &Arc<Engine>, id: OutboxId) -> Result<OutboxEntry> {
-    let entry = user_decision(engine, id, move |o| {
-        Ok(o.cancel(id)?.map(|e| (e, Touched::new())))
-    })
-    .await?;
+    // Waiting its turn, it goes at once, not after whatever the pass sends before it:
+    // by then the pass would have sent it too.
+    let entry = match engine.write(move |db| db.outbox().withdraw(id)).await? {
+        Some(entry) => {
+            engine.emit(Event::OutboxChanged {
+                account: entry.account_id,
+            });
+            entry
+        }
+        None => {
+            user_decision(engine, id, move |o| {
+                Ok(o.cancel(id)?.map(|e| (e, Touched::new())))
+            })
+            .await?
+        }
+    };
     // Editable again, and maybe changed since its copy on the server was made.
     drafts::changed(engine, entry.account_id);
     Ok(entry)

@@ -356,6 +356,19 @@ impl<'c> Outbox<'c> {
         Ok(self.get(id)?.map(|entry| (entry, touched)))
     }
 
+    /// [`cancel`](Self::cancel), if no attempt can be working on the entry: it is
+    /// queued or failed. An attempt only ever starts on a queued entry, and atomically
+    /// ([`begin_send`](Self::begin_send)), so this needs no send permit. `None` if the
+    /// entry is in another state, or gone.
+    pub fn withdraw(&self, id: OutboxId) -> Result<Option<OutboxEntry>> {
+        match self.get(id)? {
+            Some(entry) if matches!(entry.status, OutboxStatus::Queued | OutboxStatus::Failed) => {
+                self.cancel(id)
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Removes the entry. One that never went out hands its draft back for editing;
     /// for an accepted one this gives up saving it to Sent, and its draft is deleted.
     /// A send in progress can't be cancelled (the engine waits for it to end first).

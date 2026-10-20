@@ -63,6 +63,10 @@ mtime。宽限期要远大于任何写事务的时长；`put` 遇到已存在的
 的读锁，"GC 判定为旧"与"`put` 刚刚刷新"不会交错。宽限期 1 小时；`tmp` 里中断写入留下的旧文件一并
 清理。删除账户、UIDVALIDITY 变化等删除邮件之后，它们的 blob 由下一次 GC 回收。
 
+**谁来运行。** `catmail gc` 打不开别的前端正占着的数据目录，所以长期运行的前端让引擎定期运行
+（`MailClientBuilder::collect_garbage_every`，`gc.rs`）：打开后最多 5 分钟第一次（不与启动时的同步
+抢，也赶在只开一会儿的窗口关掉之前），之后按给定间隔。GUI 和 `catmail watch` 每 6 小时一次。
+
 ## 凭据
 
 `SecretStore` trait，默认 `KeyringSecrets`（`keyring` 4：Linux Secret Service / macOS Keychain /

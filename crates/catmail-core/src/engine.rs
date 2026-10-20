@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use catmail_proto::TlsConfig;
 use catmail_proto::imap::Session;
 use catmail_store::{BlobStore, Db, Store};
-use catmail_types::{AccountId, Event};
+use catmail_types::{AccountId, AccountStatus, Event, ServerProblem};
 use tokio::sync::{Notify, OwnedMutexGuard, broadcast, watch};
 
 use crate::secrets::SecretStore;
@@ -65,6 +65,14 @@ struct AccountState {
     wake: Arc<Notify>,
     /// When the last sync of every folder finished.
     synced: Mutex<Option<Instant>>,
+    status: Mutex<AccountStatus>,
+}
+
+/// What an attempt that [`Engine::report`] records was doing.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Activity {
+    Sync,
+    Send,
 }
 
 /// Held while syncing an account, or while working on its outbox.
@@ -198,9 +206,18 @@ impl Engine {
     }
 
     /// Wakes the account's background sync, if one runs, to make queued local changes
-    /// on the server. A wake while it is busy is kept for when it next waits.
+    /// on the server. A wake while it is busy is kept for when it next waits. Not while
+    /// the server rejects the login: the changes wait for one that works, since each try
+    /// is another rejected login, which servers count towards locking the account.
     pub fn wake(&self, account: AccountId) {
-        self.account(account).wake.notify_one();
+        let state = self.account(account);
+        let rejected = lock(&state.status)
+            .sync
+            .as_ref()
+            .is_some_and(|p| p.auth_failed);
+        if !rejected {
+            state.wake.notify_one();
+        }
     }
 
     /// What [`wake`](Self::wake) notifies.
@@ -217,6 +234,65 @@ impl Engine {
     /// started.
     pub fn synced(&self, account: AccountId) -> Option<Instant> {
         *lock(&self.account(account).synced)
+    }
+
+    /// Records how an attempt to get through to the account's server for `activity`
+    /// ended, and announces what that changes in [`status`](Self::status). Returns the
+    /// failures in a row, this one included (0 for a success). The account being removed
+    /// says nothing about the server, and isn't recorded.
+    pub fn report<T>(&self, account: AccountId, activity: Activity, outcome: &Result<T>) -> u32 {
+        let e = match outcome {
+            Err(Error::Cancelled | Error::AccountNotFound(_)) => return 0,
+            Err(e) => Some(e),
+            Ok(_) => None,
+        };
+        let state = self.account(account);
+        // Whether the status changed, and for a success, whether the login had been rejected.
+        let (changed, rejected, failures) = {
+            let mut status = lock(&state.status);
+            let slot = match activity {
+                Activity::Sync => &mut status.sync,
+                Activity::Send => &mut status.send,
+            };
+            match e {
+                None => {
+                    let cleared = slot.take();
+                    let rejected = cleared.as_ref().is_some_and(|p| p.auth_failed);
+                    (cleared.is_some(), rejected, 0)
+                }
+                Some(e) => {
+                    let (error, auth_failed) = (e.to_string(), matches!(e, Error::AuthFailed(_)));
+                    // Not each failure: what is wrong is what frontends show.
+                    let changed = slot
+                        .as_ref()
+                        .is_none_or(|p| p.error != error || p.auth_failed != auth_failed);
+                    let problem = slot.get_or_insert_with(|| ServerProblem {
+                        error: String::new(),
+                        auth_failed,
+                        since: now(),
+                        failures: 0,
+                    });
+                    problem.failures += 1;
+                    problem.error = error;
+                    problem.auth_failed = auth_failed;
+                    (changed, false, problem.failures)
+                }
+            }
+        };
+        if changed {
+            self.emit(Event::AccountStatusChanged { account });
+        }
+        // Background sync stopped retrying when the login was rejected (see `wake`):
+        // through again, it needn't wait any longer.
+        if let (Activity::Sync, true) = (activity, rejected) {
+            state.wake.notify_one();
+        }
+        failures
+    }
+
+    /// What the latest attempts to get through to the account's servers found.
+    pub fn status(&self, account: AccountId) -> AccountStatus {
+        lock(&self.account(account).status).clone()
     }
 
     /// For work on `account` other than sync. Obtain it before checking that the
@@ -276,6 +352,7 @@ impl Engine {
                     idle: Mutex::default(),
                     wake: Arc::default(),
                     synced: Mutex::default(),
+                    status: Mutex::default(),
                 })
             })
             .clone()

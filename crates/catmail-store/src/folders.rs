@@ -210,8 +210,8 @@ impl<'c> Folders<'c> {
         Ok(Reconciled { changed, touched })
     }
 
-    /// Starts a new UIDVALIDITY generation (or the first one): every message row and
-    /// cursor of the old generation is dropped, pending operations against old UIDs
+    /// Starts a new UIDVALIDITY generation (or the first one): every message row with a
+    /// UID and the cursor of the old generation are dropped, pending operations against old UIDs
     /// become conflicts, and draft copies addressed by old UIDs are forgotten.
     /// Returns the folders whose messages or queued changes this changed, besides
     /// `folder`'s own messages: local moves out of it are undone.
@@ -221,9 +221,13 @@ impl<'c> Folders<'c> {
 
     /// Drops everything tied to the folder's UIDs except what belongs to `next`, the
     /// generation that replaces it (`None`: the folder no longer holds messages at all).
+    /// Messages moved here locally stay: they have no UID here yet, and their moves name
+    /// where the server has them now.
     fn end_generation(&self, folder: FolderId, next: Option<u32>) -> Result<Touched> {
-        self.conn
-            .execute("DELETE FROM messages WHERE folder_id = ?1", [folder.0])?;
+        self.conn.execute(
+            "DELETE FROM messages WHERE folder_id = ?1 AND uid IS NOT NULL",
+            [folder.0],
+        )?;
         let touched = PendingOps::new(self.conn).end_generation(folder, next)?;
         Drafts::new(self.conn).end_generation(folder, next)?;
         self.conn.execute(

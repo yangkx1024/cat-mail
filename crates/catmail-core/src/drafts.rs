@@ -32,6 +32,7 @@ pub(crate) async fn update(
     content: DraftContent,
 ) -> Result<Draft> {
     validate(&content)?;
+    let content = without_nul(content);
     let draft = engine
         .write(move |db| {
             if !db.drafts().update(id, &content, now())? {
@@ -165,6 +166,7 @@ async fn insert(
     content: DraftContent,
     reply: Option<DraftReply>,
 ) -> Result<Draft> {
+    let content = without_nul(content);
     let draft = engine
         .write(move |db| {
             if db.accounts().get(account)?.is_none() {
@@ -311,6 +313,26 @@ fn parse_entry(entry: &str) -> Option<Address> {
         name: (!name.is_empty()).then_some(name),
         email: email.to_owned(),
     })
+}
+
+/// A NUL means nothing in text, and no message stored on the server can contain one
+/// (IMAP literals can't carry it), so drafts never keep one: quoted from a message that
+/// has one (`=00`), it would fail every upload of the draft.
+fn without_nul(mut content: DraftContent) -> DraftContent {
+    let strip = |s: &mut String| s.retain(|c| c != '\0');
+    strip(&mut content.subject);
+    strip(&mut content.text);
+    for address in content
+        .to
+        .iter_mut()
+        .chain(&mut content.cc)
+        .chain(&mut content.bcc)
+    {
+        if let Some(name) = &mut address.name {
+            strip(name);
+        }
+    }
+    content
 }
 
 /// Addresses must be usable as they are in the SMTP envelope. Checked when saving, so a

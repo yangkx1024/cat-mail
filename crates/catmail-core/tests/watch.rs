@@ -4,13 +4,13 @@
 
 use std::time::Duration;
 
-use catmail_core::{Config, Flags, MailClient, SyncSchedule};
+use catmail_core::{Config, Event, Flags, MailClient, SyncSchedule};
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 use tokio::runtime::Handle;
 
 mod common;
 
-use common::{Env, env_built, eventually};
+use common::{Env, drain, env_built, eventually};
 
 const HOUR: Duration = Duration::from_secs(3600);
 
@@ -187,11 +187,108 @@ async fn syncs_every_folder_on_schedule() {
 async fn tries_again_after_a_failure() {
     let mut state = state();
     state.faults.reject_login = true;
-    let env = watching(state, schedule(HOUR, HOUR)).await;
+    // A rejected login is tried again as often as every folder is synced.
+    let env = watching(state, schedule(Duration::from_millis(100), HOUR)).await;
     env.fake.wait_until(|st| st.received("LOGIN") >= 2).await;
 
     env.fake.state().faults.reject_login = false;
     env.wait_for_subjects("INBOX", &["one", "two"]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rejected_login_is_reported_and_not_retried_for_each_change() {
+    let mut state = state();
+    state.faults.reject_login = true;
+    let env = watching(state, schedule(HOUR, HOUR)).await;
+    let mut events = env.client.subscribe();
+    env.fake.wait_until(|st| st.received("LOGIN") >= 1).await;
+    eventually("the failure to be reported", async || {
+        env.client
+            .account_status(env.account)
+            .sync
+            .is_some_and(|p| p.auth_failed)
+    })
+    .await;
+
+    // Each change wakes background sync, which would log in again: servers lock
+    // accounts that fail too many logins.
+    for i in 0..5 {
+        env.client
+            .create_draft(env.account, Default::default())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20 * i)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(env.fake.state().received("LOGIN"), 1);
+
+    // The password works again, as a sync asked for finds: background sync goes on.
+    env.fake.state().faults.reject_login = false;
+    env.client.sync_account(env.account).await.unwrap();
+    assert_eq!(env.client.account_status(env.account), Default::default());
+    env.wait_for_idle(1).await;
+    let changed = drain(&mut events)
+        .into_iter()
+        .filter(|e| {
+            *e == Event::AccountStatusChanged {
+                account: env.account,
+            }
+        })
+        .count();
+    assert_eq!(changed, 2, "failing, then through again");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_the_server_cuts_short_turns_into_polling() {
+    let mut state = state();
+    state.faults.end_idle_early = true;
+    let env = watching(state, schedule(HOUR, HOUR)).await;
+    env.wait_for_idle(3).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        env.fake.state().received("IDLE"),
+        3,
+        "not IDLE again and again"
+    );
+
+    env.fake.state().inbox().append_simple("three");
+    env.wait_for_subjects("INBOX", &["one", "three", "two"])
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_ending_at_once_every_time_slows_down() {
+    // A line that can't be parsed counts as a change, so each IDLE ends at once.
+    let mut state = state();
+    state.faults.garble_idle = true;
+    let schedule = SyncSchedule {
+        poll: Duration::from_secs(1),
+        ..schedule(HOUR, HOUR)
+    };
+    let env = watching(state, schedule).await;
+    env.wait_for_idle(1).await;
+    // Ten at once, then 50, 100, 200, 400, 800 ms apart, and a second.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let idles = env.fake.state().received("IDLE");
+    assert!(idles <= 20, "INBOX synced in a loop: {idles} IDLEs");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_removal_keeps_the_account_in_sync() {
+    let env = watching(state(), schedule(HOUR, HOUR)).await;
+    env.wait_for_idle(1).await;
+
+    env.sql(
+        "CREATE TRIGGER full_disk BEFORE DELETE ON accounts
+         BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END;",
+    );
+    assert!(env.client.remove_account(env.account).await.is_err());
+    env.sql("DROP TRIGGER full_disk;");
+    assert!(env.client.get_account(env.account).await.unwrap().is_some());
+
+    env.fake.state().inbox().append_simple("three");
+    env.wait_for_subjects("INBOX", &["one", "three", "two"])
+        .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
