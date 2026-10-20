@@ -71,6 +71,10 @@ pub enum Error {
     #[error("another cat-mail instance is already using {}", .0.display())]
     AlreadyRunning(std::path::PathBuf),
 
+    /// Whoever owns the data directory could read or replace what is stored in it.
+    #[error("{} belongs to another user; choose a data directory of your own", .0.display())]
+    DataDirNotOwned(std::path::PathBuf),
+
     #[error("background task failed: {0}")]
     Task(String),
 

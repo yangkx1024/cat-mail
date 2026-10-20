@@ -9,6 +9,8 @@ use catmail_types::{BlobHash, GcReport};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
+use crate::private;
+
 /// Content-addressed file storage for raw messages and attachments.
 ///
 /// A blob with hash `abcdef…` lives at `<root>/ab/cdef…`. Writes go to `<root>/tmp` first
@@ -32,9 +34,17 @@ pub struct BlobStore {
 }
 
 impl BlobStore {
+    /// Opens the store at `root`, creating it if needed. `root` and the directories in it
+    /// are readable by the user alone, as are the blobs (temp files are).
     pub fn open(root: impl Into<PathBuf>) -> io::Result<Self> {
         let root = root.into();
-        fs::create_dir_all(root.join("tmp"))?;
+        if let Some(parent) = root.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        for dir in [root.clone(), root.join("tmp")] {
+            private::create_private_dir(&dir)?;
+            private::make_private(&dir)?;
+        }
         Ok(Self {
             root,
             gc: RwLock::new(()),
@@ -73,7 +83,7 @@ impl BlobStore {
             Err(e) => return Err(e),
         }
         tmp.as_file().sync_all()?;
-        fs::create_dir_all(dest.parent().expect("blob path has a parent"))?;
+        private::create_private_dir(dest.parent().expect("blob path has a parent"))?;
         // Never replace a blob: a concurrent `put` of the same content may be storing it
         // too, and on Windows replacing a file that is being replaced or is open fails.
         match tmp.persist_noclobber(&dest) {
@@ -233,6 +243,29 @@ fn touch(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn blobs_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("blobs");
+        // As left by a version that didn't restrict it.
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        let blobs = BlobStore::open(&root).unwrap();
+        let blob = blobs.path(&blobs.put_bytes(b"hello").unwrap());
+        let prefix = blob.parent().unwrap();
+        for (path, expected) in [
+            (&*root, 0o700),
+            (&root.join("tmp"), 0o700),
+            (prefix, 0o700),
+            (&blob, 0o600),
+        ] {
+            let mode = fs::metadata(path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, expected, "{}: {mode:o}", path.display());
+        }
+    }
 
     #[test]
     fn concurrent_puts_of_the_same_content_all_succeed() {

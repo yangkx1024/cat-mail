@@ -51,6 +51,8 @@ rusqlite_migration = "2.6"
 # ring instead of the default aws-lc-rs: no cmake/NASM needed on Windows CI.
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-platform-verifier = "0.7.1"
+# The current user, to check who owns the data directory (std has no safe getuid).
+rustix = { version = "1.1.5", features = ["process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"

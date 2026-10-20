@@ -6,6 +6,8 @@
 
 - `rusqlite`（bundled：三平台行为一致、自带 FTS5），WAL，`foreign_keys=ON`。目前单连接 + Mutex；
   读写竞争出现后拆成 1 写 + 读池。
+- `secure_delete=ON`：删除账户、UIDVALIDITY 重建、GC 之后，正文不会留在空闲页里等着被覆盖。代价是
+  被释放的页都要（经 WAL）写一遍零，包括 FTS 合并释放的。没有用 `FAST`：它不清零进入空闲列表的溢出页，而大段正文正在溢出页里。
 - 迁移在 `crates/catmail-store/migrations/`，由 `rusqlite_migration`（`user_version`）执行。发布
   之后迁移文件不可修改，改 schema 一律新增文件。
 - 约定：时间为 unix 秒；枚举列为 TEXT 不加 CHECK（新增变体无需重建表）；地址列表为 JSON；外部可见
