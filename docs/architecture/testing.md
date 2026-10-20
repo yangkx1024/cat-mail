@@ -15,11 +15,13 @@
   任何命令的答复里顺带报告新邮件（`* n EXISTS`），IDLE 时（每 10 ms 看一次）报告 EXPUNGE、EXISTS 和
   flags 变化（`FETCH`），UIDVALIDITY 改变时回 BYE 并断开。记录当前打开的连接数。可注入的故障：
   - 连接：拉邮件头时断线（第 n 次）或挂起，拉正文时断线、挂起或按闸门放行，关闭当前所有连接
-    （IDLE 中的也立即断开），每次 IDLE 一开始就断开，拒绝登录；
-  - 响应：重复或倒序的 FETCH、不带 UID 的主动 FETCH、section 回 NIL、STARTTLS 之后的明文注入；
+    （IDLE 中的也立即断开），每次 IDLE 一开始就断开、立即用 OK 结束或发一行无法解析的数据，拒绝登录；
+  - 响应：重复或倒序的 FETCH、不带 UID 的主动 FETCH、section 回 NIL、比原文多一字节的 RFC822.SIZE、
+    STARTTLS 之后的明文注入；
   - 能力与状态：没有 CONDSTORE，关掉 MOVE、UIDPLUS 和 IDLE，UIDVALIDITY 改变；
   - 写操作：拒绝 APPEND（回 NO，或不要 literal 直接回 NO）、APPEND 存下后不答复就断开，拒绝修改、
-    修改后不答复就断开。
+    修改后不答复就断开（或只在 EXPUNGE 后断开），COPY 之前先往目标投递一封。
+- 测试还可以直接在客户端的数据库里加触发器，让某条写入失败，模拟磁盘满（`tests/common` 的 `sql`）。
 - **SMTP**：明文 / TLS / STARTTLS，AUTH PLAIN / LOGIN，记录投递的信封和正文（已去掉点填充）。故障：
   421 问候、拒绝登录、SIZE 上限、拒绝指定收件人（4xx / 5xx）、MAIL FROM 回 451 或断线、对结束标记回
   指定的错误码、**收下邮件后不答复就断开**、STARTTLS 之后的明文注入。

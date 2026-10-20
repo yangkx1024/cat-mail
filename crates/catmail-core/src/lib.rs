@@ -14,6 +14,7 @@ mod drafts;
 mod engine;
 mod error;
 mod filename;
+mod gc;
 /// What renderers of [`MessageBody::html`] need to resolve and block its images, and to
 /// lay it out without a browser.
 pub mod html {
@@ -37,6 +38,7 @@ pub use config::Config;
 pub use drafts::parse_addresses;
 pub use error::{Error, Result};
 pub use filename::safe_filename;
+pub use gc::DEFAULT_GC_INTERVAL;
 pub use secrets::{KeyringSecrets, MemorySecrets, SecretStore};
 /// What [`MailClient::subscribe`]'s receiver returns when it falls behind or the engine
 /// is gone.

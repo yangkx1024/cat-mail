@@ -80,6 +80,13 @@ async fn describe(
             ))
         }
         Event::FoldersChanged { account } => Some(format!("{}: folders changed", email(account))),
+        // Sending happens in other commands, so only syncing.
+        Event::AccountStatusChanged { account } => {
+            Some(match client.account_status(account).sync {
+                Some(problem) => format!("{}: can't sync: {}", email(account), problem.error),
+                None => format!("{}: syncing", email(account)),
+            })
+        }
         _ => None,
     })
 }
@@ -123,6 +130,17 @@ mod tests {
             account: account.id,
         };
         assert_eq!(describe(&client, &emails, &sent).await.unwrap(), None);
+
+        fake.state().faults.reject_login = true;
+        assert!(client.sync_account(account.id).await.is_err());
+        let status = Event::AccountStatusChanged {
+            account: account.id,
+        };
+        let line = describe(&client, &emails, &status).await.unwrap().unwrap();
+        assert!(
+            line.starts_with("alice@example.com: can't sync: login rejected"),
+            "{line}"
+        );
 
         // Returns when told to.
         watch(&client, false, async {}).await.unwrap();

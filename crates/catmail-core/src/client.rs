@@ -6,10 +6,10 @@ use std::time::Duration;
 use catmail_proto::TlsConfig;
 use catmail_store::{BlobStore, Store};
 use catmail_types::{
-    Account, AccountId, AttachmentId, Draft, DraftAttachment, DraftAttachmentId, DraftContent,
-    DraftId, Event, Flags, Folder, FolderId, GcReport, Message, MessageId, MessageSummary,
-    NewAccount, OutboxEntry, OutboxId, PendingOp, PendingOpId, ReplayReport, SearchQuery,
-    SyncReport,
+    Account, AccountId, AccountStatus, AttachmentId, Draft, DraftAttachment, DraftAttachmentId,
+    DraftContent, DraftId, Event, Flags, Folder, FolderId, GcReport, Message, MessageId,
+    MessageSummary, NewAccount, OutboxEntry, OutboxId, PendingOp, PendingOpId, ReplayReport,
+    SearchQuery, SyncReport,
 };
 use tokio::runtime::Handle;
 use tokio::sync::broadcast;
@@ -19,13 +19,9 @@ use crate::engine::{Engine, blocking, now};
 use crate::runtime::Runtime;
 use crate::secrets::{KeyringSecrets, SecretStore};
 use crate::watch::{self, SyncSchedule};
-use crate::{Config, Error, Result, auth, body, connection, drafts, ops, send, sync};
+use crate::{Config, Error, Result, auth, body, connection, drafts, gc, ops, send, sync};
 
 const EVENT_CAPACITY: usize = 256;
-
-/// How long an unreferenced blob survives. Far longer than the gap between storing a
-/// blob and committing the row that refers to it, which is what GC must not cut into.
-const BLOB_GRACE: Duration = Duration::from_secs(60 * 60);
 
 /// The only entry point frontends use. Cheap to clone; all clones share one engine.
 #[derive(Clone)]
@@ -43,6 +39,7 @@ pub struct MailClientBuilder {
     tls: Option<TlsConfig>,
     send_in_background: bool,
     sync_in_background: Option<SyncSchedule>,
+    collect_garbage_every: Option<Duration>,
 }
 
 impl MailClientBuilder {
@@ -82,6 +79,15 @@ impl MailClientBuilder {
     /// [`SyncSchedule`] says how often, `SyncSchedule::default()` for the usual.
     pub fn sync_in_background(mut self, schedule: Option<SyncSchedule>) -> Self {
         self.sync_in_background = schedule;
+        self
+    }
+
+    /// Delete stored bodies and attachments nothing refers to any more (see
+    /// [`MailClient::collect_garbage`]) this often, for as long as the client exists,
+    /// starting a few minutes after it opens [default: never]. For long-running
+    /// frontends: while one has the data directory, nothing else can do it.
+    pub fn collect_garbage_every(mut self, every: Option<Duration>) -> Self {
+        self.collect_garbage_every = every;
         self
     }
 
@@ -137,6 +143,11 @@ impl MailClientBuilder {
                 client.engine.outbox_kick.clone(),
             ));
         }
+        if let Some(every) = self.collect_garbage_every {
+            client
+                .rt
+                .spawn(gc::run(Arc::downgrade(&client.engine), every));
+        }
         if let Some(schedule) = self.sync_in_background {
             for account in watched {
                 let engine = Arc::downgrade(&client.engine);
@@ -156,11 +167,19 @@ impl MailClient {
             tls: None,
             send_in_background: false,
             sync_in_background: None,
+            collect_garbage_every: None,
         }
     }
 
     pub fn config(&self) -> &Config {
         &self.engine.config
+    }
+
+    /// Whether the engine gets through to the account's servers, as its latest attempts
+    /// found (in the background, or asked for). Changes are announced with
+    /// [`Event::AccountStatusChanged`].
+    pub fn account_status(&self, id: AccountId) -> AccountStatus {
+        self.engine.status(id)
     }
 
     /// Change notifications. Receivers that fall behind get `RecvError::Lagged` and
@@ -279,9 +298,13 @@ impl MailClient {
                     }
                 })
                 .await;
-                if result.is_err() {
+                if let Err(e) = &result {
                     // Nothing was removed.
                     engine.cancel_removal(id);
+                    // Its background sync stopped for the removal; the account stays.
+                    if !matches!(e, Error::AccountNotFound(_)) {
+                        watch::spawn(&engine, id);
+                    }
                 }
                 result
             })
@@ -583,8 +606,9 @@ impl MailClient {
 
     /// Removes the entry. If the message never went out (queued, failed, unknown), its
     /// draft can be edited again; if it was sent, this only gives up saving it to Sent.
-    /// A send in progress is waited for, and the decision applies to where it left the
-    /// entry. Returns the entry as it was.
+    /// A send of this entry in progress is waited for, and the decision applies to where
+    /// it left the entry; one still waiting its turn goes at once. Returns the entry as
+    /// it was.
     pub async fn cancel_outbox(&self, id: OutboxId) -> Result<OutboxEntry> {
         let engine = self.engine.clone();
         self.rt
@@ -596,13 +620,7 @@ impl MailClient {
     /// or accounts were removed). Safe to run at any time.
     pub async fn collect_garbage(&self) -> Result<GcReport> {
         let engine = self.engine.clone();
-        self.rt
-            .run_blocking(move || {
-                // References first: see BlobStore::collect_garbage.
-                let referenced = engine.store.read(|db| db.blob_references())?;
-                Ok(engine.blobs.collect_garbage(&referenced, BLOB_GRACE)?)
-            })
-            .await
+        self.rt.run_blocking(move || gc::collect(&engine)).await
     }
 }
 

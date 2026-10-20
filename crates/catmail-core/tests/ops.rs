@@ -5,7 +5,7 @@ use catmail_testkit::{FakeMailbox, ServerState};
 
 mod common;
 
-use common::{Env, synced_env};
+use common::{Env, drain, synced_env};
 
 /// INBOX with "one", "two", "three" (UIDs 1..=3), plus Archive and Trash.
 fn state() -> ServerState {
@@ -200,6 +200,34 @@ async fn a_moved_message_keeps_its_body_and_id() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_message_expunged_elsewhere_drops_out_of_a_move() {
+    // "one" and "two" are moved in one command, but another client expunged "two" first:
+    // COPYUID covers "one" only.
+    let env = synced_env(state()).await;
+    let (one, two) = (
+        env.id_of("INBOX", "one").await,
+        env.id_of("INBOX", "two").await,
+    );
+    let archive = env.folder("Archive").await;
+    env.client
+        .move_messages(vec![one, two], archive.id)
+        .await
+        .unwrap();
+    env.fake.state().inbox().expunge(2);
+
+    let report = env.client.replay_pending(env.account).await.unwrap();
+    assert_eq!((report.applied, report.failed, report.pending), (2, 0, 0));
+    assert_eq!(names(&env.remote("Archive")), ["one"]);
+    let list = env.list("Archive").await;
+    assert_eq!(list.iter().map(|m| m.id).collect::<Vec<_>>(), [one]);
+
+    env.client.sync_account(env.account).await.unwrap();
+    assert_eq!(subjects(&env.local("Archive").await), ["one"]);
+    assert_eq!(subjects(&env.local("INBOX").await), ["three"]);
+    assert!(env.pending().await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn without_uidplus_moved_messages_are_fetched_again() {
     let mut state = state();
     state.faults.uidplus = false;
@@ -387,10 +415,7 @@ async fn a_rebuilt_folder_turns_changes_into_conflicts() {
     assert_eq!(subjects(&env.local("INBOX").await), ["one", "three", "two"]);
     assert!(env.local("Archive").await.is_empty());
     // The message moved to Archive is gone from there too, and views are told so.
-    let mut seen = Vec::new();
-    while let Ok(event) = events.try_recv() {
-        seen.push(event);
-    }
+    let seen = drain(&mut events);
     assert!(
         seen.contains(&Event::MessagesChanged {
             account: env.account,
@@ -429,21 +454,29 @@ async fn copy_move_env(message_id: bool) -> (Env, MessageId) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_copy_whose_answer_was_lost_is_not_made_again() {
-    // Without a Message-ID to look for, too.
-    let (env, two) = copy_move_env(false).await;
-    env.fake.state().faults.drop_after_change = true;
-    assert!(env.client.replay_pending(env.account).await.is_err());
-    assert_eq!(names(&env.remote("Archive")), ["two"]);
-    assert_eq!(names(&env.remote("INBOX")), ["one", "two"]);
+    // Without a Message-ID to look for, too; and on a server whose RFC822.SIZE isn't the
+    // number of bytes it sends.
+    for inexact_sizes in [false, true] {
+        let (env, two) = copy_move_env(false).await;
+        env.fake.state().faults.inexact_sizes = inexact_sizes;
+        env.fake.state().faults.drop_after_change = true;
+        assert!(env.client.replay_pending(env.account).await.is_err());
+        assert_eq!(names(&env.remote("Archive")), ["two"]);
+        assert_eq!(names(&env.remote("INBOX")), ["one", "two"]);
 
-    let report = env.client.replay_pending(env.account).await.unwrap();
-    assert_eq!((report.applied, report.pending), (1, 0));
-    assert_eq!(names(&env.remote("Archive")), ["two"], "copied once");
-    assert_eq!(names(&env.remote("INBOX")), ["one"]);
-    // The copy was found, so the message keeps its row and id.
-    assert_eq!(env.list("Archive").await[0].id, two);
-    env.client.sync_account(env.account).await.unwrap();
-    assert_eq!(subjects(&env.local("Archive").await), ["two"]);
+        let report = env.client.replay_pending(env.account).await.unwrap();
+        assert_eq!((report.applied, report.pending), (1, 0));
+        assert_eq!(
+            names(&env.remote("Archive")),
+            ["two"],
+            "copied once; inexact sizes: {inexact_sizes}"
+        );
+        assert_eq!(names(&env.remote("INBOX")), ["one"]);
+        // The copy was found, so the message keeps its row and id.
+        assert_eq!(env.list("Archive").await[0].id, two);
+        env.client.sync_account(env.account).await.unwrap();
+        assert_eq!(subjects(&env.local("Archive").await), ["two"]);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -476,6 +509,102 @@ async fn a_lost_copy_is_undone_when_the_move_is() {
         assert_eq!(subjects(&env.local("INBOX").await), inbox);
         assert!(env.local("Archive").await.is_empty());
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_whose_expunge_answer_was_lost_finds_the_copy() {
+    // Copied and the original expunged, but the answer to the EXPUNGE is lost. Then the
+    // move stays, is undone, or becomes a deletion: the copy is the one COPYUID named.
+    for (change, archive, inbox) in [
+        ("none", vec!["two"], vec!["one"]),
+        ("back", vec![], vec!["one", "two"]),
+        ("delete", vec![], vec!["one"]),
+    ] {
+        let (env, two) = copy_move_env(true).await;
+        env.fake.state().faults.drop_after_expunge = true;
+        assert!(env.client.replay_pending(env.account).await.is_err());
+        assert_eq!(names(&env.remote("Archive")), ["two"]);
+        assert_eq!(names(&env.remote("INBOX")), ["one"]);
+
+        match change {
+            "back" => {
+                let inbox = env.folder("INBOX").await;
+                env.client.move_messages(vec![two], inbox.id).await.unwrap();
+            }
+            "delete" => {
+                env.client.delete_messages(vec![two], true).await.unwrap();
+            }
+            _ => {}
+        }
+        let report = env.client.replay_pending(env.account).await.unwrap();
+        assert_eq!((report.failed, report.pending), (0, 0), "{change}");
+        assert_eq!(names(&env.remote("Archive")), archive, "{change}");
+        assert_eq!(names(&env.remote("INBOX")), inbox, "{change}");
+        assert!(env.pending().await.is_empty());
+        if change == "none" {
+            // The row got the copy's UID: no need to fetch the message again.
+            assert_eq!(env.list("Archive").await[0].id, two);
+        }
+
+        env.client.sync_account(env.account).await.unwrap();
+        assert_eq!(subjects(&env.local("Archive").await), archive, "{change}");
+        assert_eq!(subjects(&env.local("INBOX").await), inbox, "{change}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lost_expunge_answer_without_copyuid_is_reported() {
+    // As above, but the server didn't say where the copy went (no UIDPLUS): deleting the
+    // message fails, saying where it may still be, rather than leaving it to turn up
+    // there, or deleting another message taken for the copy.
+    let (env, two) = copy_move_env(true).await;
+    env.fake.state().faults.uidplus = false;
+    env.fake.state().faults.drop_after_expunge = true;
+    assert!(env.client.replay_pending(env.account).await.is_err());
+    env.client.delete_messages(vec![two], true).await.unwrap();
+
+    let report = env.client.replay_pending(env.account).await.unwrap();
+    assert_eq!((report.applied, report.failed, report.pending), (0, 1, 0));
+    let ops = env.client.list_pending(None).await.unwrap();
+    assert_eq!(ops[0].status, OpStatus::Failed);
+    assert!(
+        ops[0]
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("check that folder"),
+        "{ops:?}"
+    );
+    assert_eq!(names(&env.remote("Archive")), ["two"], "nothing deleted");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_namesake_arriving_with_the_copy_is_left_alone() {
+    // Another message with the same Message-ID and size arrives in Archive right before
+    // the COPY, whose EXPUNGE answer is then lost. Deleting the moved message deletes
+    // its copy, not the other one.
+    let (env, two) = copy_move_env(true).await;
+    let other =
+        b"From: a@example.com\r\nSubject: two\r\nMessage-ID: <two@example.com>\r\n\r\nJello\r\n";
+    {
+        let mut state = env.fake.state();
+        state.faults.deliver_before_copy = Some(("Archive".into(), other.to_vec()));
+        state.faults.drop_after_expunge = true;
+    }
+    assert!(env.client.replay_pending(env.account).await.is_err());
+    env.client.delete_messages(vec![two], true).await.unwrap();
+
+    let report = env.client.replay_pending(env.account).await.unwrap();
+    assert_eq!((report.failed, report.pending), (0, 0));
+    let archive: Vec<Vec<u8>> = env
+        .fake
+        .state()
+        .mailbox_mut("Archive")
+        .messages
+        .iter()
+        .map(|m| m.raw.clone())
+        .collect();
+    assert_eq!(archive, [other.to_vec()]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

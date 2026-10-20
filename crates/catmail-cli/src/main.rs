@@ -13,9 +13,9 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use catmail_core::{
-    Account, AccountId, Address, AttachmentId, AuthKind, Config, DraftId, Flags, Folder, FolderId,
-    MailClient, Message, MessageId, MessageSummary, NewAccount, SearchQuery, Security,
-    ServerConfig, SyncReport, SyncSchedule, safe_filename,
+    Account, AccountId, Address, AttachmentId, AuthKind, Config, DEFAULT_GC_INTERVAL, DraftId,
+    Flags, Folder, FolderId, MailClient, Message, MessageId, MessageSummary, NewAccount,
+    SearchQuery, Security, ServerConfig, SyncReport, SyncSchedule, safe_filename,
 };
 use clap::{Args, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
@@ -232,6 +232,8 @@ async fn run() -> Result<()> {
     let client = MailClient::builder(config)
         .runtime(tokio::runtime::Handle::current())
         .sync_in_background(watching.then(SyncSchedule::default))
+        // While this holds the data directory, `catmail gc` can't run.
+        .collect_garbage_every(watching.then_some(DEFAULT_GC_INTERVAL))
         .open()
         .context("failed to open the local mail store")?;
 

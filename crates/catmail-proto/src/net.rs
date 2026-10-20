@@ -32,7 +32,8 @@ impl From<io::Error> for NetError {
 }
 
 /// An open connection to `server`, already in TLS for [`Security::Tls`]; a STARTTLS
-/// connection is upgraded later with [`start_tls`] and the returned name.
+/// connection is upgraded later with [`start_tls`] and the returned name. TCP keepalive
+/// is on.
 pub(crate) async fn connect(
     server: &ServerConfig,
     tls: &TlsConfig,
@@ -43,7 +44,7 @@ pub(crate) async fn connect(
         TcpStream::connect((server.host.as_str(), server.port)),
     )
     .await?;
-    tcp.set_nodelay(true)?;
+    configure(&tcp)?;
     let name = ServerName::try_from(server.host.clone())
         .map_err(|_| NetError::InvalidServerName(server.host.clone()))?;
     let stream: Box<dyn Stream> = match server.security {
@@ -51,6 +52,16 @@ pub(crate) async fn connect(
         Security::StartTls | Security::Plain => Box::new(tcp),
     };
     Ok((stream, name))
+}
+
+fn configure(tcp: &TcpStream) -> io::Result<()> {
+    tcp.set_nodelay(true)?;
+    // A NAT box that forgets a quiet connection drops it without a word. Probes find
+    // that out in a few minutes, rather than at the next command: an IDLE lasts 10.
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(Duration::from_secs(60))
+        .with_interval(Duration::from_secs(15));
+    socket2::SockRef::from(tcp).set_tcp_keepalive(&keepalive)
 }
 
 /// Wraps `stream` in TLS, verifying the server as `name`.
@@ -70,5 +81,20 @@ pub(crate) async fn with_timeout<T>(
     match tokio::time::timeout(timeout, fut).await {
         Ok(result) => Ok(result?),
         Err(_) => Err(NetError::Timeout),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn connections_are_kept_alive() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tcp = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        configure(&tcp).unwrap();
+        assert!(socket2::SockRef::from(&tcp).keepalive().unwrap());
     }
 }

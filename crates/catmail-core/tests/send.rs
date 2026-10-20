@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use catmail_core::{Address, DraftContent, Error, Event, OutboxEntry, OutboxStatus, RecvError};
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
-use common::{Env, env, env_with, eventually};
+use common::{Env, drain, env, env_with, eventually};
 use mail_parser::{MessageParser, MimeHeaders};
 use tokio::sync::Semaphore;
 
@@ -142,10 +142,7 @@ async fn sends_and_saves_to_sent() {
         ["\\Seen"]
     );
 
-    let mut seen = Vec::new();
-    while let Ok(event) = events.try_recv() {
-        seen.push(event);
-    }
+    let seen = drain(&mut events);
     for expected in [
         Event::DraftsChanged {
             account: env.account,
@@ -267,6 +264,63 @@ async fn decisions_wait_for_the_send_in_progress() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_queued_message_is_cancelled_while_another_is_sent() {
+    let gate = Arc::new(Semaphore::new(0));
+    let mut smtp = SmtpState::new("alice", "pw");
+    smtp.faults.end_of_data_gate = Some(gate.clone());
+    let env = env_with(state(), smtp, false).await;
+    env.queue("first").await;
+    let second = env.queue("second").await;
+
+    let flush = tokio::spawn({
+        let (client, account) = (env.client.clone(), env.account);
+        async move { client.flush_outbox(account).await }
+    });
+    eventually("the first to be out", async || {
+        env.outbox().await[0].status == OutboxStatus::Unknown
+    })
+    .await;
+    // Not after the pass: it would have sent the second by then.
+    let cancelled =
+        tokio::time::timeout(Duration::from_secs(5), env.client.cancel_outbox(second.id))
+            .await
+            .expect("doesn't wait for the pass")
+            .unwrap();
+    assert_eq!(cancelled.id, second.id);
+
+    gate.add_permits(1);
+    let results: Vec<_> = flush.await.unwrap().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(env.delivered(), 1);
+    let drafts = env.client.list_drafts(env.account).await.unwrap();
+    assert_eq!(drafts.len(), 1, "the second is a draft again");
+    assert_eq!(drafts[0].outbox, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pass_that_fails_still_announces_what_it_did() {
+    let env = env_with(state(), SmtpState::new("alice", "pw"), false).await;
+    env.queue("one").await;
+    env.queue("two").await;
+    // Starting on the second fails, as with a full disk.
+    env.sql(
+        "CREATE TRIGGER full_disk BEFORE UPDATE OF status ON outbox
+         WHEN new.status = 'sending' AND old.subject = 'two'
+         BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END;",
+    );
+    let mut events = env.client.subscribe();
+    assert!(env.client.flush_outbox(env.account).await.is_err());
+    assert_eq!(env.delivered(), 1);
+    let changed = Event::OutboxChanged {
+        account: env.account,
+    };
+    assert!(
+        drain(&mut events).contains(&changed),
+        "the first is gone from the outbox"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn temporary_failures_are_retried_with_backoff() {
     let mut smtp = SmtpState::new("alice", "pw");
     smtp.faults.busy = 1;
@@ -304,21 +358,18 @@ async fn unreachable_server_postpones_the_rest_of_the_queue() {
     env.queue("one").await;
     env.queue("two").await;
 
-    // The second would fail the same way: it isn't attempted, nor counted.
+    // The account's trouble, not the messages': neither counts an attempt.
     assert_eq!(
         env.flush().await,
-        [(OutboxStatus::Queued, 1), (OutboxStatus::Queued, 0)]
+        [(OutboxStatus::Queued, 0), (OutboxStatus::Queued, 0)]
     );
     let outbox = env.outbox().await;
-    assert_eq!(
-        outbox
-            .iter()
-            .map(|e| (e.status, e.attempts))
-            .collect::<Vec<_>>(),
-        [(OutboxStatus::Queued, 1), (OutboxStatus::Queued, 0)]
-    );
     assert!(outbox[1].last_error.as_deref().unwrap().contains("421"));
     assert!(outbox[1].next_attempt_at > Some(outbox[1].created_at));
+    let problem = env.client.account_status(env.account).send.unwrap();
+    assert!(problem.error.contains("421"), "{problem:?}");
+    assert!(!problem.auth_failed);
+    assert!(env.client.account_status(env.account).sync.is_none());
 
     assert_eq!(
         env.flush().await,
@@ -326,6 +377,7 @@ async fn unreachable_server_postpones_the_rest_of_the_queue() {
     );
     assert_eq!(env.delivered(), 2);
     assert_eq!(env.smtp.state().connections, 2, "one connection per pass");
+    assert!(env.client.account_status(env.account).send.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -338,14 +390,15 @@ async fn postponed_entries_back_off_with_the_one_attempted() {
     env.flush().await;
     env.flush().await;
 
-    // Postponed by as much as the first, or they would take turns at reconnecting
-    // every 30 seconds.
+    // Backing off as the account's failures add up, all of them alike.
     let outbox = env.outbox().await;
     let (first, second) = (&outbox[0], &outbox[1]);
-    assert_eq!((first.attempts, second.attempts), (2, 0));
+    assert_eq!((first.attempts, second.attempts), (0, 0));
     let next = |e: &OutboxEntry| e.next_attempt_at.unwrap();
     assert!(next(first) - first.created_at >= 55, "{first:?}");
     assert_eq!(next(first), next(second));
+    let problem = env.client.account_status(env.account).send.unwrap();
+    assert_eq!(problem.failures, 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -420,19 +473,48 @@ async fn refused_messages_fail_and_can_be_fixed() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn wrong_password_fails_the_send() {
+async fn wrong_password_holds_the_queue_and_is_reported() {
     let mut smtp = SmtpState::new("alice", "pw");
     smtp.faults.reject_login = true;
     let env = env_with(state(), smtp, false).await;
-    env.queue("hi").await;
-    assert_eq!(env.flush().await, [(OutboxStatus::Failed, 1)]);
+    let mut events = env.client.subscribe();
+    env.queue("one").await;
+    env.queue("two").await;
+    // Not a message failed each time the queue is tried, but the account.
+    for _ in 0..2 {
+        assert_eq!(
+            env.flush().await,
+            [(OutboxStatus::Queued, 0), (OutboxStatus::Queued, 0)]
+        );
+    }
+    let outbox = env.outbox().await;
     assert!(
-        env.outbox().await[0]
+        outbox[0]
             .last_error
             .as_deref()
             .unwrap()
             .contains("login rejected")
     );
+    let problem = env.client.account_status(env.account).send.unwrap();
+    assert!(problem.auth_failed);
+    assert!(problem.error.contains("login rejected"), "{problem:?}");
+    assert_eq!(problem.failures, 2);
+    let changed = drain(&mut events)
+        .into_iter()
+        .filter(|e| {
+            *e == Event::AccountStatusChanged {
+                account: env.account,
+            }
+        })
+        .count();
+    assert_eq!(changed, 1, "announced once, not for each failure");
+
+    env.smtp.state().faults.reject_login = false;
+    assert_eq!(
+        env.flush().await,
+        [(OutboxStatus::Done, 1), (OutboxStatus::Done, 1)]
+    );
+    assert!(env.client.account_status(env.account).send.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]

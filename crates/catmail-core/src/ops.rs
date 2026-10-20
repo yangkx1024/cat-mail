@@ -23,7 +23,7 @@ use catmail_types::{
 };
 
 use crate::connection::with_session;
-use crate::engine::{Engine, now};
+use crate::engine::{Activity, Engine, now};
 use crate::{Error, Result, draft_sync};
 
 /// Ops per command; UID sets of scattered messages get long.
@@ -129,7 +129,9 @@ pub(crate) async fn replay_account(
                 let engine = engine.clone();
                 Box::pin(async move { replay_queued(&engine, session, account).await })
             })
-            .await?;
+            .await;
+            engine.report(account, Activity::Sync, &replayed);
+            let replayed = replayed?;
             report = replayed.drafts;
             for r in replayed.folders.values() {
                 report.applied += r.applied;
@@ -410,7 +412,7 @@ async fn copy_move(
         },
         Err(e) => return done.outcome(ops, Err(e)).await,
     };
-    let checkpointed = ops.to_vec();
+    let (checkpointed, copy_uidvalidity) = (ops.to_vec(), checkpoint.uidvalidity);
     done.engine
         .write_durable(move |db| db.ops().before_copy(&checkpointed, &checkpoint))
         .await?;
@@ -420,6 +422,21 @@ async fn copy_move(
         Ok(copied) => copied,
         Err(e) => return done.outcome(ops, Err(e)).await,
     };
+    // Which message is the copy, for when the answer to the delete is lost: the original
+    // is gone then, and nothing else tells the copy apart.
+    if let Some(copied) = copied
+        .as_ref()
+        .filter(|c| c.uidvalidity == copy_uidvalidity)
+    {
+        let by_uid: HashMap<u32, u32> = copied.uids.iter().copied().collect();
+        let recorded: Vec<(PendingOpId, u32)> = ops
+            .iter()
+            .filter_map(|op| Some((op.id, *by_uid.get(&op.uid)?)))
+            .collect();
+        done.engine
+            .write_durable(move |db| db.ops().copied(&recorded))
+            .await?;
+    }
     let outcome = match session.uid_delete(&uids).await {
         Ok(()) => Ok(Outcome::Moved(to, copied.map(moved))),
         // Copied, but the original stays: the op fails and the message shows in both.
@@ -460,6 +477,10 @@ async fn settle_copies(
                    again if it isn't in the target";
     done.settle(&found.unknown, Outcome::Refused(unknown.into()))
         .await?;
+    let lost = "the message was being moved when the connection dropped, and its copy in the \
+                target folder can't be told apart from other messages there: check that folder";
+    done.settle(&found.lost, Outcome::Refused(lost.into()))
+        .await?;
     // Copied, or deleted after the copy was made: what is left is deleting it.
     let settled: Vec<ReplayOp> = found
         .copied
@@ -495,17 +516,33 @@ struct Copies {
     copied: Vec<Copied>,
     /// Not in the target: no copy was made (or it was removed since).
     absent: Vec<ReplayOp>,
-    /// By the target of the copy: the original is gone, deleted after its copy was made
-    /// (or by someone else).
+    /// By the target of the copy: the original is gone, and so is the copy (or the op is
+    /// still the move that made it, which the next sync of the target catches up with).
     gone: BTreeMap<FolderId, Vec<ReplayOp>>,
+    /// The original is gone, and the op was changed since (moved back or on, deleted),
+    /// but which message is the copy isn't known: it may be in the target still.
+    lost: Vec<ReplayOp>,
     /// The target was rebuilt or deleted since: no telling.
     unknown: Vec<ReplayOp>,
 }
 
+/// The originals of ops with one checkpoint.
+#[derive(Default)]
+struct Target {
+    /// Whose COPY was answered with the copy's UID: that UID, and whether the original is
+    /// still there.
+    recorded: Vec<(ReplayOp, u32, bool)>,
+    /// Still there, the answer to their COPY (if one was sent) lost: with their sizes.
+    present: Vec<(ReplayOp, u32)>,
+}
+
 /// Looks for each message's copy among the target's messages from the checkpoint on.
-/// A copy has the original's raw bytes; sizes are compared first, so only messages that
-/// might be one are downloaded. Each copy is claimed once. Leaves `folder` selected
-/// again; `None` if it was rebuilt on the server meanwhile.
+/// One the COPY's answer named (COPYUID) is that one, if it is still there. Otherwise a
+/// copy has the original's raw bytes; sizes are compared first, so only messages that
+/// might be one are downloaded, and each copy is claimed once. An original that is gone
+/// without such an answer can't be matched safely: nothing else tells its copy apart
+/// from another message (with the same Message-ID, say). Leaves `folder` selected again;
+/// `None` if it was rebuilt on the server meanwhile.
 async fn find_copies(
     session: &mut Session,
     folder: &ReplayFolder,
@@ -515,16 +552,26 @@ async fn find_copies(
     let mut copies = Copies::default();
     let uids: Vec<u32> = ops.iter().map(|(op, _)| op.uid).collect();
     let sizes = session.fetch_sizes(&uids).await?;
-    let mut by_target: BTreeMap<CopyCheckpoint, Vec<(ReplayOp, u32)>> = BTreeMap::new();
+    let mut by_target: BTreeMap<CopyCheckpoint, Target> = BTreeMap::new();
     for (op, checkpoint) in ops {
-        match sizes.get(&op.uid) {
-            Some(&size) => by_target.entry(checkpoint).or_default().push((op, size)),
-            None => copies.gone.entry(checkpoint.folder).or_default().push(op),
+        let size = sizes.get(&op.uid).copied();
+        match (op.copy_uid, size) {
+            (Some(copy), _) => {
+                let target = by_target.entry(checkpoint).or_default();
+                target.recorded.push((op, copy, size.is_some()));
+            }
+            (None, Some(size)) => by_target
+                .entry(checkpoint)
+                .or_default()
+                .present
+                .push((op, size)),
+            (None, None) => gone_unseen(&mut copies, &checkpoint, op),
         }
     }
-    // (checkpoint, originals and their sizes, candidates with theirs and their bytes)
+    // (checkpoint, originals to compare, candidates with their sizes and bytes, ops whose
+    // copies were found, and where)
     let mut targets = Vec::new();
-    for (checkpoint, originals) in by_target {
+    for (checkpoint, target) in by_target {
         let unknown = match &checkpoint.remote_name {
             Some(name) => match session.examine(name).await {
                 Ok(status) => status.uidvalidity != checkpoint.uidvalidity,
@@ -534,40 +581,65 @@ async fn find_copies(
             None => true,
         };
         if unknown {
+            for (op, _, present) in target.recorded {
+                if present {
+                    copies.unknown.push(op);
+                } else {
+                    gone_unseen(&mut copies, &checkpoint, op);
+                }
+            }
             copies
                 .unknown
-                .extend(originals.into_iter().map(|(op, _)| op));
+                .extend(target.present.into_iter().map(|(op, _)| op));
             continue;
         }
-        let wanted: HashSet<u32> = originals.iter().map(|(_, size)| *size).collect();
-        let arrived = session.uid_search_from(checkpoint.uidnext).await?;
-        let mut candidates = Vec::new();
-        for (uid, size) in session.fetch_sizes(&arrived).await? {
-            if wanted.contains(&size)
-                && let Some(raw) = session.fetch_raw(uid).await?
-            {
-                candidates.push((uid, raw));
+        let arrived: HashSet<u32> = session
+            .uid_search_from(checkpoint.uidnext)
+            .await?
+            .into_iter()
+            .collect();
+        let (mut found, mut moved) = (Vec::new(), HashMap::new());
+        for (op, copy, present) in target.recorded {
+            if arrived.contains(&copy) {
+                moved.insert(op.uid, copy);
+                found.push(op);
+            } else if present {
+                // Removed since: as if it had never been made.
+                copies.absent.push(op);
+            } else {
+                copies.gone.entry(checkpoint.folder).or_default().push(op);
             }
         }
-        targets.push((checkpoint, originals, candidates));
+        let wanted: HashSet<u32> = target.present.iter().map(|(_, size)| *size).collect();
+        let mut candidates = Vec::new();
+        if !wanted.is_empty() {
+            let claimed: HashSet<u32> = moved.values().copied().collect();
+            let unclaimed: Vec<u32> = arrived.difference(&claimed).copied().collect();
+            for (uid, size) in session.fetch_sizes(&unclaimed).await? {
+                if wanted.contains(&size)
+                    && let Some(raw) = session.fetch_raw(uid).await?
+                {
+                    candidates.push((uid, size, raw));
+                }
+            }
+        }
+        targets.push((checkpoint, target.present, candidates, found, moved));
     }
     if session.select(&folder.remote_name).await?.uidvalidity != uidvalidity {
         return Ok(None);
     }
-    for (checkpoint, originals, mut candidates) in targets {
-        let mut found = Vec::new();
-        let mut uids = HashMap::new();
-        for (op, size) in originals {
+    for (checkpoint, present, mut candidates, mut found, mut uids) in targets {
+        for (op, size) in present {
             // Nothing of its size arrived: no copy, and no need to download it.
-            if !candidates.iter().any(|(_, c)| c.len() == size as usize) {
+            if !candidates.iter().any(|(_, s, _)| *s == size) {
                 copies.absent.push(op);
                 continue;
             }
             let Some(raw) = session.fetch_raw(op.uid).await? else {
-                copies.gone.entry(checkpoint.folder).or_default().push(op);
+                gone_unseen(&mut copies, &checkpoint, op);
                 continue;
             };
-            match candidates.iter().position(|(_, c)| *c == raw) {
+            match candidates.iter().position(|(_, _, c)| *c == raw) {
                 Some(i) => {
                     uids.insert(op.uid, candidates.swap_remove(i).0);
                     found.push(op);
@@ -589,6 +661,18 @@ async fn find_copies(
     Ok(Some(copies))
 }
 
+/// Files an op whose original is gone, when its copy can't be looked for. If the op is
+/// still the move that made the copy, the next sync of the target finds it there; if it
+/// was changed since, the copy may be left behind.
+fn gone_unseen(copies: &mut Copies, checkpoint: &CopyCheckpoint, op: ReplayOp) {
+    match op.kind {
+        ReplayKind::Move { to, .. } if to == checkpoint.folder => {
+            copies.gone.entry(checkpoint.folder).or_default().push(op);
+        }
+        _ => copies.lost.push(op),
+    }
+}
+
 /// Runs of consecutive ops that one command can make: the same change, at most
 /// [`BATCH`] long.
 fn batches(ops: &[ReplayOp]) -> impl Iterator<Item = &[ReplayOp]> {
@@ -607,6 +691,7 @@ mod tests {
             uid: id as u32,
             kind: kind.clone(),
             copy: None,
+            copy_uid: None,
         };
         let read = ReplayKind::Flags {
             add: Flags::SEEN,

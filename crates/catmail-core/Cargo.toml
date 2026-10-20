@@ -24,6 +24,7 @@ base64.workspace = true
 catmail-testkit.workspace = true
 mail-parser.workspace = true
 pollster.workspace = true
+rusqlite.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 

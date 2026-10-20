@@ -15,7 +15,9 @@ mod outbox;
 mod search;
 mod sync;
 
-pub use account::{Account, AuthKind, NewAccount, Security, ServerConfig};
+pub use account::{
+    Account, AccountStatus, AuthKind, NewAccount, Security, ServerConfig, ServerProblem,
+};
 pub use draft::{Draft, DraftAttachment, DraftContent};
 pub use event::Event;
 pub use folder::{Folder, FolderRole};

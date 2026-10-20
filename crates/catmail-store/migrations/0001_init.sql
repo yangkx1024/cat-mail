@@ -191,6 +191,8 @@ CREATE TABLE drafts (
     -- deleting a folder or changing its UIDVALIDITY; for a new generation it turns the
     -- copy into an upload to settle, which finds it again by its Message-ID. The CHECK
     -- makes a bare ON DELETE SET NULL fail instead of leaving a dangling UID behind.
+    -- Same-account only (SET NULL rules out a composite FK): it is only ever set from an
+    -- upload of the draft, whose folder the draft_uploads FK ties to the draft's account.
     remote_folder_id    INTEGER REFERENCES folders(id) ON DELETE SET NULL,
     remote_uidvalidity  INTEGER,
     remote_uid          INTEGER,
@@ -329,10 +331,15 @@ CREATE TABLE pending_ops (
     -- UIDVALIDITY and UIDNEXT are committed here: a copy it made can only be at or above
     -- that UIDNEXT, and a retry looks there for one byte-identical to the original. If
     -- that can't be told (the target was rebuilt), the op fails, leaving the original.
+    -- Once the COPY is answered with COPYUID, the copy's UID (under copy_uidvalidity) is
+    -- committed too, before the original is deleted: if that delete's answer is lost,
+    -- the original is gone, and only this says which message is the copy (a Message-ID
+    -- can't: another message with it may have arrived meanwhile).
     -- No FK: a target deleted since is just one where the copy can't be looked for.
     copy_folder_id   INTEGER,
     copy_uidvalidity INTEGER,
     copy_uidnext     INTEGER,
+    copy_uid         INTEGER,
     status           TEXT    NOT NULL DEFAULT 'pending',
     attempts         INTEGER NOT NULL DEFAULT 0,
     last_error       TEXT,

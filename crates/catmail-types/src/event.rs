@@ -14,6 +14,11 @@ pub enum Event {
     AccountRemoved {
         account: AccountId,
     },
+    /// Whether the engine gets through to the account's servers changed; see
+    /// `MailClient::account_status`.
+    AccountStatusChanged {
+        account: AccountId,
+    },
     /// Folders were added, removed or renamed.
     FoldersChanged {
         account: AccountId,

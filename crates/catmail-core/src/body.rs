@@ -57,20 +57,26 @@ pub(crate) async fn attachment_content(engine: Arc<Engine>, id: AttachmentId) ->
         })
     })
     .await?;
-    let engine = engine.clone();
-    blocking(move || {
-        let data = mime::decode_transfer(source.transfer_encoding.as_deref(), &encoded);
-        drop(encoded);
-        let size = data.len() as u32;
-        store_blob(
-            &engine,
-            &data,
-            |db, hash| db.attachments().set_blob(id, hash, size),
-            Error::AttachmentNotFound(id),
-        )?;
-        Ok(data)
+    let (account, folder) = (source.message.account, source.message.folder);
+    let data = blocking({
+        let engine = engine.clone();
+        move || {
+            let data = mime::decode_transfer(source.transfer_encoding.as_deref(), &encoded);
+            drop(encoded);
+            let size = data.len() as u32;
+            store_blob(
+                &engine,
+                &data,
+                |db, hash| db.attachments().set_blob(id, hash, size),
+                Error::AttachmentNotFound(id),
+            )?;
+            Ok(data)
+        }
     })
-    .await
+    .await?;
+    // Stored now, with its size as decoded.
+    engine.emit(Event::MessagesChanged { account, folder });
+    Ok(data)
 }
 
 /// The raw message, fetching it if only its parts were downloaded.
@@ -83,21 +89,26 @@ pub(crate) async fn raw_message(engine: Arc<Engine>, id: MessageId) -> Result<Ve
     {
         return Ok(data);
     }
+    let (account, folder) = (location.account, location.folder);
     let raw = on_server(&engine, location, |session, location| {
         Box::pin(async move { session.fetch_raw(location.uid).await?.ok_or(GONE) })
     })
     .await?;
-    let engine = engine.clone();
-    blocking(move || {
-        store_blob(
-            &engine,
-            &raw,
-            |db, hash| db.messages().set_raw(id, hash),
-            Error::MessageNotFound(id),
-        )?;
-        Ok(raw)
+    let raw = blocking({
+        let engine = engine.clone();
+        move || {
+            store_blob(
+                &engine,
+                &raw,
+                |db, hash| db.messages().set_raw(id, hash),
+                Error::MessageNotFound(id),
+            )?;
+            Ok(raw)
+        }
     })
-    .await
+    .await?;
+    engine.emit(Event::MessagesChanged { account, folder });
+    Ok(raw)
 }
 
 /// Runs `op` against the message's folder on the server: on one of the account's

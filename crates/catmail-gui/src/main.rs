@@ -15,7 +15,7 @@ mod test_support;
 
 use std::path::PathBuf;
 
-use catmail_core::{Config, MailClient, SyncSchedule};
+use catmail_core::{Config, DEFAULT_GC_INTERVAL, MailClient, SyncSchedule};
 use clap::Parser;
 use gpui_kit::component::{ActiveTheme as _, StyledExt as _, v_flex};
 use gpui_kit::{
@@ -55,6 +55,7 @@ fn main() {
         .and_then(|config| {
             MailClient::builder(config)
                 .sync_in_background(Some(SyncSchedule::default()))
+                .collect_garbage_every(Some(DEFAULT_GC_INTERVAL))
                 .open()
         });
 

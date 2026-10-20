@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use catmail_core::{
-    AccountId, AuthKind, Config, Flags, Folder, MailClient, MailClientBuilder, MemorySecrets,
-    MessageId, MessageSummary, NewAccount, Security, ServerConfig,
+    AccountId, AuthKind, Config, Event, Flags, Folder, MailClient, MailClientBuilder,
+    MemorySecrets, MessageId, MessageSummary, NewAccount, Security, ServerConfig,
 };
 use catmail_testkit::{FakeImap, FakeSmtp, ServerState, SmtpState};
 use tokio::runtime::Handle;
@@ -28,6 +28,12 @@ pub struct Env {
 
 pub async fn env(state: ServerState) -> Env {
     env_with(state, SmtpState::new("alice", "pw"), false).await
+}
+
+/// The events received and not read yet.
+#[allow(dead_code)]
+pub fn drain(events: &mut tokio::sync::broadcast::Receiver<Event>) -> Vec<Event> {
+    std::iter::from_fn(|| events.try_recv().ok()).collect()
 }
 
 /// [`env`], synced once.
@@ -109,6 +115,16 @@ pub async fn eventually(what: &str, mut ready: impl AsyncFnMut() -> bool) {
 }
 
 impl Env {
+    /// Runs SQL on the client's database behind its back, e.g. to add a trigger that
+    /// makes some writes fail, as a full disk would.
+    #[allow(dead_code)]
+    pub fn sql(&self, sql: &str) {
+        rusqlite::Connection::open(self.client.config().db_path())
+            .unwrap()
+            .execute_batch(sql)
+            .unwrap();
+    }
+
     #[allow(dead_code)]
     pub async fn list(&self, name: &str) -> Vec<MessageSummary> {
         let folder = self.folder(name).await;

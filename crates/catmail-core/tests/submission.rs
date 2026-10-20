@@ -210,13 +210,20 @@ async fn message_over_the_size_limit_is_not_sent() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn wrong_password_fails_the_send() {
+async fn wrong_password_holds_the_message_and_is_reported() {
     let Some(env) = testenv::testenv() else {
         return;
     };
     let (client, account, _dir) = client(&env, &env.starttls, "wrong").await;
     let entry = send(&client, account, note("wrong password"), None).await;
-    assert_eq!(entry.status, OutboxStatus::Failed, "{entry:?}");
+    // The account's trouble: the message waits, without counting an attempt.
+    assert_eq!(
+        (entry.status, entry.attempts),
+        (OutboxStatus::Queued, 0),
+        "{entry:?}"
+    );
     let error = entry.last_error.unwrap();
     assert!(error.contains("login rejected"), "{error}");
+    let problem = client.account_status(account).send.unwrap();
+    assert!(problem.auth_failed, "{problem:?}");
 }

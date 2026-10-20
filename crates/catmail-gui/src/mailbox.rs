@@ -114,11 +114,13 @@ impl Mailbox {
                         .update(cx, |list, cx| message_list::refresh(list, window, cx));
                 }
             }
-            // No composing, and no changing messages, in the reading window yet (M5).
+            // No composing, no changing messages, and no account status in the reading
+            // window yet (M5).
             Event::DraftsChanged { .. }
             | Event::OutboxChanged { .. }
             | Event::MessageSent { .. }
-            | Event::PendingOpsChanged { .. } => {}
+            | Event::PendingOpsChanged { .. }
+            | Event::AccountStatusChanged { .. } => {}
         }
     }
 

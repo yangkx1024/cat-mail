@@ -7,7 +7,7 @@ use catmail_testkit::{FakeMailbox, ServerState};
 
 mod common;
 
-use common::{Env, env};
+use common::{Env, drain, env};
 
 fn state_with(inbox_subjects: &[&str]) -> ServerState {
     let mut state = ServerState::new("alice", "pw");
@@ -94,10 +94,7 @@ async fn initial_sync_fetches_folders_and_headers() {
     assert_eq!(env.messages("inbox").await[2].1, Flags::SEEN);
 
     let inbox = env.folder("INBOX").await.id;
-    let mut seen = Vec::new();
-    while let Ok(event) = events.try_recv() {
-        seen.push(event);
-    }
+    let seen = drain(&mut events);
     assert!(seen.contains(&Event::FoldersChanged {
         account: env.account
     }));

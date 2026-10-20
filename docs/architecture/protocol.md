@@ -22,6 +22,10 @@ STARTTLS 升级和测试。`imap-codec 2.0.0-alpha.9` 未开启 `nom/alloc`，`c
   literal，之后排队的命令永远发不出去。所以命令完整发出之前收到 NO/BAD 时返回 `Error::Aborted`
   （致命）：连接不再放回连接池，`Connection` 自己也记下，之后的命令立即失败。
 - 每次网络读写超时 60 秒。
+- TCP keepalive：安静 60 秒后开始探测，间隔 15 秒（`net::configure`，经 socket2；tokio 不暴露）。NAT
+  无声地忘掉连接时几分钟内就能发现，而不是等到下一条命令或 IDLE 到期。
+- 命令装不下的输入（APPEND 的邮件里有 NUL，IMAP literal 不能带）返回 `Error::InvalidInput`：什么也没
+  发出，连接照常可用，不是致命错误。
 
 ## IDLE
 
@@ -30,8 +34,9 @@ VANISHED、FETCH）、`stop` 完成或过了 `max`，然后发 DONE、等 tagged
 
 - IDLE 期间的读不设 60 秒超时（安静正是目的），由 `max` 兜底；DONE 之后恢复正常超时。等待与读取用
   `select!`：读取可以取消，已读到的字节留在缓冲区里，不会丢。
-- 服务器自己结束 IDLE（tagged OK）算正常结束；回 NO 是 `Error::Command`，后台同步改为轮询。IDLE 期间
-  无法解析的行当作"有变化"。
+- 服务器自己结束 IDLE（tagged OK）算正常结束（总是这样时后台同步改为轮询，见
+  [后台同步](sync.md#后台同步与-idle)）；回 NO 是 `Error::Command`，后台同步改为轮询。IDLE 期间无法解析
+  的行当作"有变化"。
 - **顺带报告的变化。** 服务器可以在任何命令的答复里报告选中文件夹的变化，而且只说一次。连接层对每个
   答复记下 EXISTS（数量变了才算）、EXPUNGE、VANISHED，`Session` 打开文件夹时让它从头记起
   （`Connection::mailbox_opened`）：打开以来已有变化时 `idle` 立即返回 true，不发 IDLE。IDLE 以外的

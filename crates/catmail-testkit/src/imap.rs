@@ -176,6 +176,9 @@ pub struct Faults {
     pub nil_sections: bool,
     /// Send every FETCH response twice.
     pub duplicate_fetch: bool,
+    /// Report each RFC822.SIZE one byte larger than the message, as some servers count
+    /// differently than the bytes they send.
+    pub inexact_sizes: bool,
     /// Send FETCH responses in descending UID order.
     pub reverse_fetch: bool,
     /// Interleave unsolicited `* n FETCH (FLAGS …)` without UID, and `* n EXISTS`.
@@ -219,10 +222,20 @@ pub struct Faults {
     /// Close the connection when the next STORE, COPY, MOVE or EXPUNGE arrives, without
     /// making it. Fires once.
     pub drop_before_change: bool,
+    /// Like `drop_after_change`, but only for the next EXPUNGE (or UID EXPUNGE): the
+    /// changes before it are answered. Fires once.
+    pub drop_after_expunge: bool,
+    /// When the next UID COPY arrives, first add this message to the mailbox with this
+    /// name, as another client might right then. Fires once.
+    pub deliver_before_copy: Option<(String, Vec<u8>)>,
     /// Advertise IDLE, and report changes to the selected mailbox while idling.
     pub idle: bool,
     /// Accept every IDLE, then close the connection, as a misbehaving proxy might.
     pub drop_on_idle: bool,
+    /// Accept every IDLE, then end it at once with OK, before the client's DONE.
+    pub end_idle_early: bool,
+    /// Accept every IDLE, then send a line no parser accepts.
+    pub garble_idle: bool,
 }
 
 impl Default for Faults {
@@ -237,6 +250,7 @@ impl Default for Faults {
             body_fetch_gate: None,
             nil_sections: false,
             duplicate_fetch: false,
+            inexact_sizes: false,
             reverse_fetch: false,
             unsolicited: false,
             inject_after_starttls: false,
@@ -255,8 +269,12 @@ impl Default for Faults {
             refuse_changes: None,
             drop_after_change: false,
             drop_before_change: false,
+            drop_after_expunge: false,
+            deliver_before_copy: None,
             idle: true,
             drop_on_idle: false,
+            end_idle_early: false,
+            garble_idle: false,
         }
     }
 }
@@ -957,6 +975,11 @@ async fn handle(
         }
         "UID STORE" | "UID COPY" | "UID MOVE" | "UID EXPUNGE" | "EXPUNGE" => {
             let st = &mut *lock(state);
+            if command == "UID COPY"
+                && let Some((mailbox, raw)) = st.faults.deliver_before_copy.take()
+            {
+                st.mailbox_mut(&mailbox).append(&raw, &[]);
+            }
             let refusal = st.faults.refuse_changes.clone();
             match session.selected {
                 None => out += &format!("{tag} BAD No mailbox selected\r\n"),
@@ -973,7 +996,10 @@ async fn handle(
                     out += &change(st, i, &command, args, &tag);
                     // Its own changes are in the answer (or silent, as asked).
                     session.view = Some(View::of(&st.mailboxes[i]));
-                    if std::mem::take(&mut st.faults.drop_after_change) {
+                    if std::mem::take(&mut st.faults.drop_after_change)
+                        || (command.ends_with("EXPUNGE")
+                            && std::mem::take(&mut st.faults.drop_after_expunge))
+                    {
                         return Ok(Next::Close);
                     }
                 }
@@ -1086,8 +1112,19 @@ async fn idle(
 ) -> std::io::Result<Next> {
     io.get_mut().write_all(b"+ idling\r\n").await?;
     io.get_mut().flush().await?;
-    if lock(state).faults.drop_on_idle {
+    let faults = lock(state).faults.clone();
+    if faults.drop_on_idle {
         return Ok(Next::Close);
+    }
+    if faults.end_idle_early {
+        let answer = format!("{tag} OK IDLE terminated\r\n");
+        io.get_mut().write_all(answer.as_bytes()).await?;
+        io.get_mut().flush().await?;
+        return Ok(Next::Continue);
+    }
+    if faults.garble_idle {
+        io.get_mut().write_all(b"* GARBLED (((\r\n").await?;
+        io.get_mut().flush().await?;
     }
     loop {
         let (out, next) = {
@@ -1278,7 +1315,8 @@ fn fetch(mb: &FakeMailbox, args: &[Tok], condstore: bool, faults: &Faults, tag: 
             parts.push(format!("INTERNALDATE \"{}\"", msg.internal_date).into_bytes());
         }
         if wants("RFC822.SIZE") {
-            parts.push(format!("RFC822.SIZE {}", msg.raw.len()).into_bytes());
+            let size = msg.raw.len() + usize::from(faults.inexact_sizes);
+            parts.push(format!("RFC822.SIZE {size}").into_bytes());
         }
         if wants("BODYSTRUCTURE") {
             let mut part = b"BODYSTRUCTURE ".to_vec();
