@@ -1,0 +1,510 @@
+//! The main window: accounts and their folders, the list of what is selected, and the
+//! pane that shows one item of it. Follows the engine's change events, so a sync
+//! (started here or not), a sent message or a change made elsewhere shows up as it
+//! commits. The commands on messages live in `commands.rs`: the toolbar, the menus and
+//! the keys all call the same methods.
+
+mod add_account;
+mod commands;
+mod draft;
+mod folders;
+mod message_list;
+mod move_to;
+mod outbox;
+mod panes;
+mod sidebar;
+#[cfg(test)]
+mod tests;
+
+pub(crate) use commands::report_failure;
+
+use std::time::Duration;
+
+use catmail_core::{
+    Account, AccountId, AccountStatus, Event, Flags, FolderId, FolderRole, MailClient, OutboxEntry,
+    RecvError,
+};
+use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::list::{ListEvent, ListState};
+use gpui_kit::component::notification::Notification;
+use gpui_kit::component::{ActiveTheme as _, WindowExt as _};
+use gpui_kit::{
+    AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, Styled as _, Subscription, Task, Window, div,
+};
+
+use crate::actions::{self, *};
+use crate::composer::{self, ComposeFrom};
+use crate::reader::Reader;
+use crate::settings::Preferences;
+use add_account::{AddAccount, AddAccountEvent};
+use folders::AccountFolders;
+use message_list::{MessageList, Row, Source};
+
+/// How long typing in the search field pauses before it searches.
+const SEARCH_DELAY: Duration = Duration::from_millis(200);
+
+/// Where the sidebar's selection is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place {
+    Folder(FolderId),
+    /// The drafts kept here (the server's Drafts folder holds copies of them).
+    Drafts(AccountId),
+    Outbox(AccountId),
+}
+
+impl Place {
+    fn source(self) -> Source {
+        match self {
+            Place::Folder(id) => Source::Folder(id),
+            Place::Drafts(account) => Source::Drafts(account),
+            Place::Outbox(account) => Source::Outbox(account),
+        }
+    }
+
+    /// The account the place belongs to, among these.
+    fn account_in(self, accounts: &[AccountEntry]) -> Option<&AccountEntry> {
+        accounts.iter().find(|a| match self {
+            Place::Folder(id) => a.folders.find(id).is_some(),
+            Place::Drafts(account) | Place::Outbox(account) => a.account.id == account,
+        })
+    }
+}
+
+/// One account as the sidebar shows it.
+pub struct AccountEntry {
+    pub account: Account,
+    pub folders: AccountFolders,
+    pub drafts: usize,
+    /// Still to be sent (sent ones leave the outbox).
+    pub outbox: Vec<OutboxEntry>,
+    pub status: AccountStatus,
+}
+
+pub struct Mailbox {
+    pub(crate) client: MailClient,
+    /// `None` until the first load finishes.
+    pub(crate) accounts: Option<Vec<AccountEntry>>,
+    pub(crate) place: Option<Place>,
+    /// Syncs in flight.
+    pub(crate) syncing: usize,
+    /// The sign-in form, shown instead of the mailbox while it is open.
+    adding_account: Option<(Entity<AddAccount>, Subscription)>,
+    pub(crate) search: Entity<InputState>,
+    pub(crate) messages: Entity<ListState<MessageList>>,
+    pub(crate) reader: Entity<Reader>,
+    focus_handle: FocusHandle,
+    /// Folders are being read; `folders_stale` asks for one more read after that.
+    loading_folders: bool,
+    folders_stale: bool,
+    _load_folders: Task<()>,
+    _search: Task<()>,
+    _events: Task<()>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl Focusable for Mailbox {
+    fn focus_handle(&self, _: &gpui_kit::App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Mailbox {
+    pub fn new(client: MailClient, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let messages = cx.new(|cx| ListState::new(MessageList::new(client.clone()), window, cx));
+        let reader = cx.new(|_| Reader::new(client.clone()));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let subscriptions = vec![
+            cx.subscribe_in(&messages, window, Self::on_list_event),
+            cx.subscribe_in(
+                &search,
+                window,
+                |this, search, event, window, cx| match event {
+                    InputEvent::Change => {
+                        let text = search.read(cx).value().trim().to_owned();
+                        // After a pause in typing, not for every key. Replacing the task
+                        // cancels the previous wait.
+                        this._search = cx.spawn_in(window, async move |this, cx| {
+                            cx.background_executor().timer(SEARCH_DELAY).await;
+                            this.update_in(cx, |this, window, cx| {
+                                this.search_for(text, window, cx)
+                            })
+                            .ok();
+                        });
+                    }
+                    InputEvent::PressEnter { .. } => {
+                        this.messages.update(cx, |list, cx| list.focus(window, cx));
+                    }
+                    InputEvent::Focus | InputEvent::Blur => {}
+                },
+            ),
+            cx.observe_window_appearance(window, |_, window, cx| {
+                crate::theme::appearance::system_appearance_changed(window, cx);
+            }),
+        ];
+        crate::theme::appearance::system_appearance_changed(window, cx);
+
+        let mut events = client.subscribe();
+        let events = cx.spawn_in(window, async move |this, cx| {
+            loop {
+                let event = events.recv().await;
+                if event == Err(RecvError::Closed) {
+                    break;
+                }
+                let updated = this.update_in(cx, |this, window, cx| match event {
+                    Ok(event) => this.on_engine_event(event, window, cx),
+                    // Missed some: everything shown may be stale.
+                    Err(_) => this.reload(window, cx),
+                });
+                if updated.is_err() {
+                    break; // The window is gone.
+                }
+            }
+        });
+
+        let mut mailbox = Self {
+            client,
+            accounts: None,
+            place: None,
+            syncing: 0,
+            adding_account: None,
+            search,
+            messages,
+            reader,
+            focus_handle: cx.focus_handle(),
+            loading_folders: false,
+            folders_stale: false,
+            _load_folders: Task::ready(()),
+            _search: Task::ready(()),
+            _events: events,
+            _subscriptions: subscriptions,
+        };
+        mailbox.load_folders(window, cx);
+        mailbox
+    }
+
+    fn on_list_event(
+        &mut self,
+        list: &Entity<ListState<MessageList>>,
+        event: &ListEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (ix, confirmed) = match event {
+            ListEvent::Select(ix) => (*ix, false),
+            ListEvent::Confirm(ix) => (*ix, true),
+            ListEvent::Cancel => {
+                self.reader.update(cx, |reader, cx| reader.clear(cx));
+                cx.notify();
+                return;
+            }
+        };
+        let Some(row) = list.read(cx).delegate().row(ix.row).cloned() else {
+            return;
+        };
+        match row {
+            Row::Message(message) => {
+                self.reader
+                    .update(cx, |reader, cx| reader.open(message.id, window, cx));
+                if Preferences::get(cx).mark_read_on_open && !message.flags.contains(Flags::SEEN) {
+                    self.set_flags(vec![message.id], Flags::SEEN, Flags::empty(), window, cx);
+                }
+            }
+            Row::Draft(draft) => {
+                self.reader.update(cx, |reader, cx| reader.clear(cx));
+                if confirmed {
+                    composer::open(
+                        self.client.clone(),
+                        ComposeFrom::Draft(draft.id),
+                        window,
+                        cx,
+                    );
+                }
+            }
+            Row::Outbox(_) => self.reader.update(cx, |reader, cx| reader.clear(cx)),
+        }
+        cx.notify();
+    }
+
+    fn on_engine_event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
+        let source = self.messages.read(cx).delegate().source().cloned();
+        let refresh_if =
+            |this: &mut Self, shown: bool, window: &mut Window, cx: &mut Context<Self>| {
+                if shown {
+                    this.messages
+                        .update(cx, |list, cx| message_list::refresh(list, window, cx));
+                }
+            };
+        match event {
+            Event::AccountAdded { .. }
+            | Event::AccountRemoved { .. }
+            | Event::FoldersChanged { .. } => self.load_folders(window, cx),
+            Event::MessagesChanged { folder, .. } => {
+                // Unread and total counts may have changed too.
+                self.load_folders(window, cx);
+                let shown = matches!(&source, Some(Source::Folder(f)) if *f == folder)
+                    || matches!(source, Some(Source::Search(_)));
+                refresh_if(self, shown, window, cx);
+            }
+            Event::DraftsChanged { account } => {
+                self.load_folders(window, cx);
+                refresh_if(self, source == Some(Source::Drafts(account)), window, cx);
+            }
+            Event::OutboxChanged { account } => {
+                self.load_folders(window, cx);
+                refresh_if(self, source == Some(Source::Outbox(account)), window, cx);
+            }
+            Event::AccountStatusChanged { account } => {
+                let status = self.client.account_status(account);
+                if let Some(entry) = self.account_mut(account) {
+                    entry.status = status;
+                    cx.notify();
+                }
+            }
+            Event::PendingOpsChanged { account } => {
+                self.report_refused_changes(account, window, cx)
+            }
+            Event::MessageSent { .. } => {}
+        }
+    }
+
+    fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.load_folders(window, cx);
+        self.messages
+            .update(cx, |list, cx| message_list::refresh(list, window, cx));
+    }
+
+    fn account_mut(&mut self, id: AccountId) -> Option<&mut AccountEntry> {
+        self.accounts
+            .as_mut()?
+            .iter_mut()
+            .find(|a| a.account.id == id)
+    }
+
+    pub(crate) fn account(&self, id: AccountId) -> Option<&AccountEntry> {
+        self.accounts.as_ref()?.iter().find(|a| a.account.id == id)
+    }
+
+    /// The account the selected place belongs to.
+    pub(crate) fn current_account(&self) -> Option<&AccountEntry> {
+        self.place?.account_in(self.accounts.as_deref()?)
+    }
+
+    /// Reads the accounts, their folders, drafts and outbox again. During a sync, events
+    /// arrive faster than this completes, so requests are coalesced: at most one read
+    /// runs, and one more follows if anything changed meanwhile.
+    fn load_folders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.loading_folders {
+            self.folders_stale = true;
+            return;
+        }
+        self.loading_folders = true;
+        let client = self.client.clone();
+        self._load_folders = cx.spawn_in(window, async move |this, cx| {
+            let loaded = async {
+                let mut outbox = client.list_outbox(None).await?;
+                let mut loaded = Vec::new();
+                for account in client.list_accounts().await? {
+                    let folders = AccountFolders::new(&client.list_folders(account.id).await?);
+                    let drafts = client.count_drafts(account.id).await?;
+                    let (own, rest) = outbox.into_iter().partition(|e| e.account_id == account.id);
+                    outbox = rest;
+                    loaded.push(AccountEntry {
+                        status: client.account_status(account.id),
+                        account,
+                        folders,
+                        drafts,
+                        outbox: own,
+                    });
+                }
+                Ok::<_, catmail_core::Error>(loaded)
+            }
+            .await;
+            this.update_in(cx, |this, window, cx| {
+                this.loading_folders = false;
+                match loaded {
+                    Ok(accounts) => this.set_accounts(accounts, window, cx),
+                    Err(e) => window.push_notification(
+                        Notification::error(format!("Couldn't load folders: {e}")),
+                        cx,
+                    ),
+                }
+                if std::mem::take(&mut this.folders_stale) {
+                    this.load_folders(window, cx);
+                }
+            })
+            .ok();
+        });
+    }
+
+    fn set_accounts(
+        &mut self,
+        accounts: Vec<AccountEntry>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let first_load = self.accounts.is_none();
+        let still_there = self
+            .place
+            .is_some_and(|place| place.account_in(&accounts).is_some());
+        self.accounts = Some(accounts);
+        if !still_there {
+            let inbox = self
+                .accounts
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .find_map(|a| {
+                    a.folders
+                        .with_role(FolderRole::Inbox)
+                        .or_else(|| a.folders.nodes().find_map(|n| n.selectable()))
+                        .map(|f| Place::Folder(f.id))
+                });
+            self.select_place(inbox, window, cx);
+        }
+        let no_accounts = self.accounts.as_ref().is_some_and(Vec::is_empty);
+        if no_accounts && self.adding_account.is_none() {
+            self.add_account(false, window, cx);
+        } else if first_load {
+            self.messages.update(cx, |list, cx| list.focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Opens the sign-in form; `cancellable` is false when there is no mailbox to go back to.
+    pub(crate) fn add_account(
+        &mut self,
+        cancellable: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let client = self.client.clone();
+        let form = cx.new(|cx| AddAccount::new(client, cancellable, window, cx));
+        let subscription = cx.subscribe_in(&form, window, |this, _, event, window, cx| {
+            this.adding_account = None;
+            match event {
+                // Its folders and messages appear through the engine's events.
+                AddAccountEvent::Added(account) => {
+                    this.sync_accounts(vec![account.clone()], window, cx);
+                    this.messages.update(cx, |list, cx| list.focus(window, cx));
+                }
+                AddAccountEvent::Cancelled => {}
+            }
+            cx.notify();
+        });
+        self.adding_account = Some((form, subscription));
+        cx.notify();
+    }
+
+    pub(crate) fn select_place(
+        &mut self,
+        place: Option<Place>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.place == place && place.is_some() && !self.is_searching(cx) {
+            return;
+        }
+        self.place = place;
+        // Leaving a search for a folder: the folder's messages, not the results.
+        self.search
+            .update(cx, |search, cx| search.set_value("", window, cx));
+        self.messages.update(cx, |list, cx| {
+            message_list::show(list, place.map(Place::source), window, cx)
+        });
+        self.reader.update(cx, |reader, cx| reader.clear(cx));
+        window.set_window_title(&self.title());
+        cx.notify();
+    }
+
+    fn title(&self) -> String {
+        match self.place_label() {
+            Some(label) => format!("{label} — cat-mail"),
+            None => "cat-mail".into(),
+        }
+    }
+
+    /// The selected place's name, as the sidebar shows it.
+    pub(crate) fn place_label(&self) -> Option<String> {
+        let place = self.place?;
+        Some(match place {
+            Place::Folder(id) => place
+                .account_in(self.accounts.as_deref()?)?
+                .folders
+                .find(id)?
+                .label
+                .clone(),
+            Place::Drafts(_) => "Drafts".into(),
+            Place::Outbox(_) => "Outbox".into(),
+        })
+    }
+
+    pub(crate) fn is_searching(&self, cx: &gpui_kit::App) -> bool {
+        matches!(
+            self.messages.read(cx).delegate().source(),
+            Some(Source::Search(_))
+        )
+    }
+
+    fn search_for(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        let source = if text.is_empty() {
+            self.place.map(Place::source)
+        } else {
+            Some(Source::Search(text))
+        };
+        if self.messages.read(cx).delegate().source() == source.as_ref() {
+            return;
+        }
+        self.messages
+            .update(cx, |list, cx| message_list::show(list, source, window, cx));
+        self.reader.update(cx, |reader, cx| reader.clear(cx));
+        cx.notify();
+    }
+}
+
+impl Render for Mailbox {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let content = if let Some((form, _)) = &self.adding_account {
+            form.clone().into_any_element()
+        } else {
+            self.render_panes(window, cx).into_any_element()
+        };
+        div()
+            .id("mailbox")
+            .key_context(actions::MAILBOX)
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|this, _: &NewMessage, window, cx| this.new_message(window, cx)))
+            .on_action(cx.listener(|this, _: &Reply, window, cx| this.reply(false, window, cx)))
+            .on_action(cx.listener(|this, _: &ReplyAll, window, cx| this.reply(true, window, cx)))
+            .on_action(cx.listener(|this, _: &Forward, window, cx| this.forward(window, cx)))
+            .on_action(cx.listener(|this, _: &Archive, window, cx| this.archive(window, cx)))
+            .on_action(cx.listener(|this, _: &Delete, window, cx| this.delete(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &ToggleRead, window, cx| {
+                    this.toggle(Flags::SEEN, window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &ToggleFlag, window, cx| {
+                this.toggle(Flags::FLAGGED, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &MoveToFolder, window, cx| this.move_to_folder(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &OpenInBrowser, window, cx| {
+                this.reader
+                    .update(cx, |reader, cx| reader.open_in_browser(window, cx))
+            }))
+            .on_action(cx.listener(|this, _: &Sync, window, cx| this.sync(window, cx)))
+            .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
+                this.search
+                    .update(cx, |search, cx| search.focus(window, cx))
+            }))
+            .on_action(
+                cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
+            )
+            .size_full()
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .child(content)
+    }
+}

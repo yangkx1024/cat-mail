@@ -119,7 +119,7 @@ UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UI
 | [草稿与发信](architecture/sending.md) | 草稿与回复、草稿同步到服务器、outbox 状态机、SMTP 客户端、重试、保存到 Sent |
 | [IMAP / SMTP 连接](architecture/protocol.md) | imap-next、连接层的严格解析、连接池、认证、TLS |
 | [存储](architecture/storage.md) | SQLite 约定、计数、跨账户约束、全文搜索、BlobStore 与 GC、凭据 |
-| [GUI](architecture/gui.md) | 视图结构、事件刷新、HTML 渲染与图片策略、已知问题 |
+| [GUI](architecture/gui.md) | 视图结构、事件刷新、读信与写信窗口、发件箱、主题与设置、HTML 渲染与图片策略、已知问题 |
 | [测试](architecture/testing.md) | 假 IMAP / SMTP 服务器、真实 Dovecot 与 mailpit、GUI 测试 |
 
 ## 数据目录

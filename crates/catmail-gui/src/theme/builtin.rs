@@ -128,7 +128,6 @@ pub(crate) fn palettes() -> Vec<TerminalPalette> {
             ansi: ansi.map(rgb),
             cursor: None,
             selection_background: None,
-            selection_foreground: None,
         })
         .collect()
 }

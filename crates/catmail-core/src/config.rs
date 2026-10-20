@@ -15,8 +15,15 @@ impl Config {
     /// `~/Library/Application Support/dev.CatMail.CatMail` on macOS,
     /// `%APPDATA%\CatMail\CatMail\data` on Windows.
     pub fn platform_default() -> Result<Self> {
-        let dirs = ProjectDirs::from("dev", "CatMail", "CatMail").ok_or(Error::NoDataDir)?;
+        let dirs = project_dirs().ok_or(Error::NoDataDir)?;
         Ok(Self::with_data_dir(dirs.data_dir()))
+    }
+
+    /// Where frontends keep their settings: `$XDG_CONFIG_HOME/catmail` on Linux,
+    /// `~/Library/Application Support/dev.CatMail.CatMail` on macOS,
+    /// `%APPDATA%\CatMail\CatMail\config` on Windows.
+    pub fn platform_config_dir() -> Option<PathBuf> {
+        project_dirs().map(|dirs| dirs.config_dir().to_path_buf())
     }
 
     pub fn with_data_dir(data_dir: impl Into<PathBuf>) -> Self {
@@ -46,4 +53,8 @@ impl Config {
     pub fn handoff_dir(&self) -> PathBuf {
         self.data_dir.join("handoff")
     }
+}
+
+fn project_dirs() -> Option<ProjectDirs> {
+    ProjectDirs::from("dev", "CatMail", "CatMail")
 }

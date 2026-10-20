@@ -1002,6 +1002,7 @@ dependencies = [
  "jiff",
  "pollster 1.0.1",
  "quick-xml",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",

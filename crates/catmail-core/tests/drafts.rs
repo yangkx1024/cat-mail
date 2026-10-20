@@ -584,17 +584,21 @@ async fn background_sync_waits_for_a_draft_to_settle() {
     let env = env_built(
         state(),
         SmtpState::new("alice", "pw"),
-        background(Duration::from_millis(400)),
+        background(Duration::from_secs(1)),
     )
     .await;
     env.fake.wait_until(|st| st.received("IDLE") >= 1).await;
 
-    // Saved as it is typed: each save wakes background sync, which leaves it alone.
+    // Saved as it is typed: the first save wakes background sync, which leaves the
+    // draft alone; later saves only put its upload off, without a sync each.
     let id = env.draft("o").await;
+    env.fake.wait_until(|st| st.received("IDLE") >= 2).await;
+    let idles = env.fake.state().received("IDLE");
     for subject in ["on", "one"] {
         tokio::time::sleep(Duration::from_millis(150)).await;
         env.client.update_draft(id, content(subject)).await.unwrap();
     }
+    assert_eq!(env.fake.state().received("IDLE"), idles);
     assert_eq!(env.appends(), 0);
     eventually("the draft on the server", async || {
         subjects(&env.server_drafts()) == ["one"]

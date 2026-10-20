@@ -1,15 +1,16 @@
-//! `catmail-gui`, the desktop frontend. So far it is the minimal reading window planned
-//! for M2: browse folders, read messages as text or HTML, save attachments. It changes
-//! nothing on the server; writing and sending come in M5.
+//! `catmail-gui`, the desktop frontend: a three-pane mailbox (accounts and folders,
+//! messages, the message), composer windows, and settings with themes that can come
+//! from a terminal's color scheme.
 
-mod add_account;
+mod actions;
 mod assets;
-mod folders;
+mod composer;
 mod format;
 mod html;
+mod layout;
 mod mailbox;
-mod message_list;
 mod reader;
+mod settings;
 #[cfg(test)]
 mod test_support;
 mod theme;
@@ -20,9 +21,10 @@ use catmail_core::{Config, DEFAULT_GC_INTERVAL, MailClient, SyncSchedule};
 use clap::Parser;
 use gpui_kit::component::{ActiveTheme as _, StyledExt as _, v_flex};
 use gpui_kit::{
-    App, AppContext as _, Bounds, Context, IntoElement, KeyBinding, ParentElement as _, Render,
-    SharedString, Styled as _, TitlebarOptions, Window, WindowBounds, WindowOptions, div, px, size,
+    App, AppContext as _, Bounds, Context, IntoElement, ParentElement as _, Render, SharedString,
+    Styled as _, TitlebarOptions, Window, WindowBounds, WindowOptions, div, px, size,
 };
+use settings::{Preferences, Settings};
 use tracing_subscriber::EnvFilter;
 
 use crate::mailbox::Mailbox;
@@ -33,9 +35,10 @@ struct Cli {
     /// Directory for the database and blobs [default: platform data dir]
     #[arg(long, env = "CATMAIL_DATA_DIR")]
     data_dir: Option<PathBuf>,
+    /// Directory for settings and imported themes [default: platform config dir]
+    #[arg(long, env = "CATMAIL_CONFIG_DIR")]
+    config_dir: Option<PathBuf>,
 }
-
-gpui_kit::actions!(catmail, [Quit]);
 
 fn main() {
     tracing_subscriber::fmt()
@@ -45,6 +48,10 @@ fn main() {
         .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();
+    let config_dir = cli
+        .config_dir
+        .clone()
+        .or_else(catmail_core::Config::platform_config_dir);
     // Without `.runtime(..)` the engine runs its own tokio runtime: GPUI's executor is
     // not tokio, and the client's futures don't need it to be. New mail shows up as the
     // server announces it, through the engine's events.
@@ -56,6 +63,7 @@ fn main() {
         .and_then(|config| {
             MailClient::builder(config)
                 .sync_in_background(Some(SyncSchedule::default()))
+                .send_in_background(true)
                 .collect_garbage_every(Some(DEFAULT_GC_INTERVAL))
                 .open()
         });
@@ -64,8 +72,19 @@ fn main() {
         .with_assets(assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
-            cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
-            cx.on_action(|_: &Quit, cx| cx.quit());
+            cx.set_global(match config_dir {
+                Some(dir) => Preferences::load(dir),
+                None => Preferences::load_nowhere(),
+            });
+            theme::appearance::init(cx);
+            actions::bind_keys(cx);
+            cx.on_action(|_: &actions::Quit, cx| composer::quit(cx));
+            // Text size applies to every window, so it is the app's to handle.
+            cx.on_action(|_: &actions::TextLarger, cx| step_text_size(1, cx));
+            cx.on_action(|_: &actions::TextSmaller, cx| step_text_size(-1, cx));
+            cx.on_action(|_: &actions::TextReset, cx| {
+                Preferences::update(cx, |s| s.text_size = Settings::default().text_size);
+            });
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();
@@ -92,6 +111,11 @@ fn main() {
                 cx.quit();
             }
         });
+}
+
+fn step_text_size(step: isize, cx: &mut App) {
+    let size = Preferences::get(cx).stepped_text_size(step);
+    Preferences::update(cx, |s| s.text_size = size);
 }
 
 fn window_options(cx: &App) -> WindowOptions {

@@ -238,8 +238,11 @@ impl Engine {
     /// Records that the draft was just changed (or created), so background sync leaves
     /// it for [`draft_upload_delay`](Self::draft_upload_delay): a frontend saving as the
     /// user types would otherwise replace the copy on the server with each keystroke.
-    pub fn draft_edited(&self, account: AccountId, draft: DraftId) {
-        lock(&self.account(account).draft_edits).insert(draft, Instant::now());
+    /// Returns whether it was not held back already.
+    pub fn draft_edited(&self, account: AccountId, draft: DraftId) -> bool {
+        lock(&self.account(account).draft_edits)
+            .insert(draft, Instant::now())
+            .is_none_or(|at| at.elapsed() >= self.draft_upload_delay)
     }
 
     /// Forgets the draft's last change, once it is deleted or being sent.

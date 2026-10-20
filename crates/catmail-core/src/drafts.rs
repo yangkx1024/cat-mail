@@ -9,8 +9,8 @@ use catmail_proto::mime::{Outgoing, OutgoingAttachment, build_message};
 use catmail_proto::smtp;
 use catmail_store::{DraftReply, DraftSnapshot, NewDraftAttachment};
 use catmail_types::{
-    Account, AccountId, Address, Attachment, Draft, DraftAttachment, DraftAttachmentId,
-    DraftContent, DraftId, Event, Message, MessageId,
+    Account, AccountId, Address, Draft, DraftAttachment, DraftAttachmentId, DraftContent, DraftId,
+    Event, Message, MessageId,
 };
 use uuid::Uuid;
 
@@ -23,7 +23,7 @@ pub(crate) async fn create(
     content: DraftContent,
 ) -> Result<Draft> {
     validate(&content)?;
-    insert(engine, account, content, None).await
+    insert(engine, account, content, None, Vec::new()).await
 }
 
 pub(crate) async fn update(
@@ -71,10 +71,14 @@ pub(crate) fn changed(engine: &Engine, account: AccountId) {
 }
 
 /// [`changed`], for a change to one draft that may be followed by more: background sync
-/// holds its upload back for a while (see [`Engine::draft_edited`]).
+/// holds its upload back for a while (see [`Engine::draft_edited`]). Only the first
+/// change wakes it, to learn when the upload is due: it finds out about later ones then,
+/// rather than syncing for nothing at every pause in typing.
 pub(crate) fn edited(engine: &Engine, account: AccountId, draft: DraftId) {
-    engine.draft_edited(account, draft);
-    changed(engine, account);
+    engine.emit(Event::DraftsChanged { account });
+    if engine.draft_edited(account, draft) {
+        engine.wake(account);
+    }
 }
 
 /// Copies the file into the blob store and attaches it; later changes to the file
@@ -161,66 +165,42 @@ pub(crate) async fn reply(engine: &Arc<Engine>, id: MessageId, all: bool) -> Res
         in_reply_to: message.message_id.clone(),
         references,
     };
-    insert(engine, account_id, content, Some(reply)).await
+    insert(engine, account_id, content, Some(reply), Vec::new()).await
 }
 
-/// A new draft forwarding `message` to no one yet, with copies of its attachments.
-/// Everything is downloaded first and stored in one transaction, so a failure leaves no
-/// draft behind.
+/// A new draft forwarding `message` to no one yet, with its attachments. Everything is
+/// downloaded first and stored in one transaction, so a failure leaves no draft behind.
 pub(crate) async fn forward(engine: &Arc<Engine>, id: MessageId) -> Result<Draft> {
     let message = with_body(engine, id).await?;
-    let account = message.summary.account_id;
-    let originals: Vec<Attachment> = message
-        .body
-        .iter()
-        .flat_map(|b| &b.attachments)
-        .filter(|a| !a.inline)
-        .cloned()
-        .collect();
-    let mut contents = Vec::with_capacity(originals.len());
-    for attachment in &originals {
-        contents.push(body::attachment_content(engine.clone(), attachment.id).await?);
+    let mut attachments = Vec::new();
+    for original in message.body.iter().flat_map(|b| &b.attachments) {
+        if original.inline {
+            continue;
+        }
+        // The blob the message already has, its GC grace period restarted to cover the
+        // gap until the transaction below refers to it.
+        let (blob, size) = body::attachment_blob(engine.clone(), original.id).await?;
+        attachments.push(NewDraftAttachment {
+            blob,
+            filename: original
+                .filename
+                .as_deref()
+                .map(|name| name.replace('\0', ""))
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| "attachment".into()),
+            mime_type: original.mime_type.clone(),
+            size,
+        });
     }
-    // Into the blob store right before the transaction that refers to them, so GC's
-    // grace period covers the gap (`put` restarts it for content stored before).
-    let engine2 = engine.clone();
-    let attachments = blocking(move || {
-        originals
-            .iter()
-            .zip(contents)
-            .map(|(original, data)| {
-                Ok(NewDraftAttachment {
-                    blob: engine2.blobs.put(data.as_slice())?,
-                    filename: original
-                        .filename
-                        .as_deref()
-                        .map(|name| name.replace('\0', ""))
-                        .filter(|name| !name.trim().is_empty())
-                        .unwrap_or_else(|| "attachment".into()),
-                    mime_type: original.mime_type.clone(),
-                    size: data.len() as u64,
-                })
-            })
-            .collect::<Result<Vec<_>>>()
-    })
-    .await?;
-    let content = without_nul(forward_content(&message));
-    let draft = engine
-        .write(move |db| {
-            if db.accounts().get(account)?.is_none() {
-                return Ok(None);
-            }
-            let now = now();
-            let id = db.drafts().insert(account, &content, None, now)?;
-            for attachment in &attachments {
-                db.drafts().add_attachment(id, attachment, now)?;
-            }
-            db.drafts().get(id)
-        })
-        .await?
-        .ok_or_else(|| Error::AccountNotFound(account.to_string()))?;
-    edited(engine, account, draft.id);
-    Ok(draft)
+    let content = forward_content(&message);
+    insert(
+        engine,
+        message.summary.account_id,
+        content,
+        None,
+        attachments,
+    )
+    .await
 }
 
 /// The message with its body, downloading it if needed.
@@ -237,6 +217,7 @@ async fn insert(
     account: AccountId,
     content: DraftContent,
     reply: Option<DraftReply>,
+    attachments: Vec<NewDraftAttachment>,
 ) -> Result<Draft> {
     let content = without_nul(content);
     let draft = engine
@@ -244,9 +225,11 @@ async fn insert(
             if db.accounts().get(account)?.is_none() {
                 return Ok(None);
             }
-            let id = db
-                .drafts()
-                .insert(account, &content, reply.as_ref(), now())?;
+            let now = now();
+            let id = db.drafts().insert(account, &content, reply.as_ref(), now)?;
+            for attachment in &attachments {
+                db.drafts().add_attachment(id, attachment, now)?;
+            }
             db.drafts().get(id)
         })
         .await?
@@ -325,6 +308,25 @@ pub fn parse_addresses(input: &str) -> Result<Vec<Address>> {
             Ok(address)
         })
         .collect()
+}
+
+/// The addresses as a To / Cc / Bcc field shows them, so that [`parse_addresses`] reads
+/// them back: a name with a separator, quote, bracket or backslash in it is quoted
+/// (`"Doe, Jane" <jane@example.com>`).
+pub fn format_addresses(list: &[Address]) -> String {
+    list.iter()
+        .map(
+            |a| match a.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+                None => a.email.clone(),
+                Some(name) if name.contains([',', ';', '"', '<', '>', '\\']) => {
+                    let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+                    format!("\"{escaped}\" <{}>", a.email)
+                }
+                Some(name) => format!("{name} <{}>", a.email),
+            },
+        )
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// `input` split at the commas and semicolons that separate addresses, not those inside
@@ -469,41 +471,66 @@ fn reply_content(message: &Message, me: &str, all: bool) -> DraftContent {
 }
 
 fn reply_subject(subject: &str) -> String {
+    prefixed(
+        subject,
+        "Re",
+        &["re:", "re：", "回复:", "回复：", "答复:", "答复："],
+    )
+}
+
+fn forward_subject(subject: &str) -> String {
+    prefixed(
+        subject,
+        "Fwd",
+        &["fwd:", "fw:", "fwd：", "fw：", "转发:", "转发："],
+    )
+}
+
+/// `subject` with `prefix: ` in front, unless it starts with one of the `known` ways
+/// (lowercase) of writing it already.
+fn prefixed(subject: &str, prefix: &str, known: &[&str]) -> String {
     let subject = subject.trim();
     let lower = subject.to_lowercase();
-    let is_reply = ["re:", "re：", "回复:", "回复：", "答复:", "答复："]
-        .iter()
-        .any(|prefix| lower.starts_with(prefix));
-    if is_reply {
+    if known.iter().any(|known| lower.starts_with(known)) {
         subject.to_owned()
     } else {
-        format!("Re: {subject}")
+        format!("{prefix}: {subject}")
     }
 }
 
-/// An empty line to write on, then the attribution and the original text, `> `-quoted.
-fn quote(message: &Message) -> String {
-    let text = message
+/// The text of the message, without trailing whitespace; empty if it has none.
+fn text_of(message: &Message) -> &str {
+    message
         .body
         .as_ref()
         .and_then(|b| b.text.as_deref())
         .unwrap_or_default()
-        .trim_end();
-    let sender = message
-        .summary
-        .from
-        .first()
-        .map_or_else(|| "someone".into(), Address::to_string);
-    let date = message
+        .trim_end()
+}
+
+/// The message's date in local time, formatted; empty if it has none.
+fn local_date(message: &Message, format: &str) -> String {
+    message
         .summary
         .date
         .and_then(|t| jiff::Timestamp::from_second(t).ok())
         .map(|t| {
             t.to_zoned(jiff::tz::TimeZone::system())
-                .strftime("On %Y-%m-%d %H:%M, ")
+                .strftime(format)
                 .to_string()
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+/// An empty line to write on, then the attribution and the original text, `> `-quoted.
+fn quote(message: &Message) -> String {
+    let text = text_of(message);
+    let sender = message
+        .summary
+        .from
+        .first()
+        .map_or_else(|| "someone".into(), Address::to_string);
+    let date = local_date(message, "On %Y-%m-%d %H:%M, ");
     let mut out = format!("\n\n{date}{sender} wrote:\n");
     for line in text.lines() {
         if line.is_empty() {
@@ -527,16 +554,7 @@ fn forward_content(message: &Message) -> DraftContent {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    let date = message
-        .summary
-        .date
-        .and_then(|t| jiff::Timestamp::from_second(t).ok())
-        .map(|t| {
-            t.to_zoned(jiff::tz::TimeZone::system())
-                .strftime("%Y-%m-%d %H:%M")
-                .to_string()
-        })
-        .unwrap_or_default();
+    let date = local_date(message, "%Y-%m-%d %H:%M");
     let mut text = String::from("\n\n---------- Forwarded message ---------\n");
     for (name, value) in [
         ("From", addresses(&message.summary.from)),
@@ -550,12 +568,7 @@ fn forward_content(message: &Message) -> DraftContent {
         }
     }
     text.push('\n');
-    let original = message
-        .body
-        .as_ref()
-        .and_then(|b| b.text.as_deref())
-        .unwrap_or_default()
-        .trim_end();
+    let original = text_of(message);
     if !original.is_empty() {
         text.push_str(original);
         text.push('\n');
@@ -564,19 +577,6 @@ fn forward_content(message: &Message) -> DraftContent {
         subject: forward_subject(subject),
         text,
         ..Default::default()
-    }
-}
-
-fn forward_subject(subject: &str) -> String {
-    let subject = subject.trim();
-    let lower = subject.to_lowercase();
-    let is_forward = ["fwd:", "fw:", "fwd：", "fw：", "转发:", "转发："]
-        .iter()
-        .any(|prefix| lower.starts_with(prefix));
-    if is_forward {
-        subject.to_owned()
-    } else {
-        format!("Fwd: {subject}")
     }
 }
 
@@ -752,6 +752,24 @@ mod tests {
         ] {
             assert!(parse_addresses(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn formatted_addresses_parse_back() {
+        let list = [
+            addr(Some("Doe, Jane"), "jane@example.com"),
+            addr(Some("O\"Brien"), "o@example.com"),
+            addr(Some(r"back\slash"), "b@example.com"),
+            addr(Some("semi;colon <x>"), "s@example.com"),
+            addr(Some("张三"), "zhang@example.com"),
+            addr(None, "plain@example.com"),
+        ];
+        let field = format_addresses(&list);
+        assert!(
+            field.starts_with(r#""Doe, Jane" <jane@example.com>, "O\"Brien""#),
+            "{field}"
+        );
+        assert_eq!(parse_addresses(&field).unwrap(), list);
     }
 
     #[test]

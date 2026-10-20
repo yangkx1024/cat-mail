@@ -19,8 +19,9 @@ M4 的笔记已记为已知问题：M5 的 GUI 写信时大约每秒自动保存
 - **仍按状态对齐**：被留下的草稿只是这一轮跳过（`draft_sync::Uploads::Settled` 过滤 `stale` 的结果），
   不入队任何东西。
 - **到期自己醒来**：后台任务每步之后算出最早一份被留下的草稿还差多久，IDLE（或轮询）的时限取它与下一次
-  完整同步中较早的一个；到时结束 IDLE，下一步正常回放和上传。每次修改仍会唤醒任务（回放标记等其他改动
-  不能等），它发现草稿还没到期就重新 IDLE。
+  完整同步中较早的一个；到时结束 IDLE，下一步正常回放和上传。只有草稿开始被留下时才唤醒任务
+  （`draft_edited` 返回是否新留下），让它算出到期时间；接着的修改只推后时间，任务到期醒来时重新算。
+  最初每次修改都唤醒，结果每次停顿打字都结束 IDLE、回放、同步 INBOX 一遍，什么也不上传。
 
 ## 方案
 
@@ -31,7 +32,8 @@ M4 的笔记已记为已知问题：M5 的 GUI 写信时大约每秒自动保存
 - 文档：`docs/architecture/sending.md`"同步到服务器"、`docs/architecture/sync.md`"后台同步与 IDLE"，
   README 删去已知问题、补一句说明。
 
-验证：假服务器测试 `background_sync_waits_for_a_draft_to_settle`（400 ms 延迟，期间改三次，没有 APPEND，
-停下后只 APPEND 一次）；去掉过滤后该测试失败（APPEND 2 次）。`uploads_asked_for_dont_wait_for_a_draft_to_settle`
+验证：假服务器测试 `background_sync_waits_for_a_draft_to_settle`（1 秒延迟，期间改三次，没有 APPEND，
+第一次之后的修改不再引起 IDLE，停下后只 APPEND 一次）；去掉过滤后该测试失败（APPEND 2 次），每次修改都
+唤醒时也失败（多一次 IDLE）。`uploads_asked_for_dont_wait_for_a_draft_to_settle`
 （延迟 1 小时，`replay_pending` 与 `sync_account` 仍立即上传）。原
 `background_sync_uploads_changes_at_once` 改为零延迟并改名 `background_sync_uploads_changes`。

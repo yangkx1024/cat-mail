@@ -121,10 +121,11 @@ pub(crate) async fn run(engine: Weak<Engine>, account: AccountId, schedule: Sync
         let failures = strong.report(account, Activity::Sync, &result);
         // Drafts held back while they are being written are uploaded once they settle:
         // the step runs again by then.
-        let due = match strong.held_drafts(account).1 {
-            Some(drafts) => full_sync_in(&strong, account, &schedule).min(drafts),
-            None => full_sync_in(&strong, account, &schedule),
-        };
+        let full = full_sync_in(&strong, account, &schedule);
+        let due = strong
+            .held_drafts(account)
+            .1
+            .map_or(full, |drafts| full.min(drafts));
         drop(strong);
 
         let pause = match result {

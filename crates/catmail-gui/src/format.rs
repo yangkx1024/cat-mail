@@ -1,6 +1,6 @@
 //! How message metadata reads in the window.
 
-use catmail_core::{Address, MessageSummary};
+use catmail_core::Address;
 use jiff::{Timestamp, Zoned, tz::TimeZone};
 
 /// `Name <a@example.com>` for each address, comma separated.
@@ -11,18 +11,30 @@ pub fn addresses(list: &[Address]) -> String {
         .join(", ")
 }
 
-pub fn subject(message: &MessageSummary) -> String {
-    message
-        .subject
+/// The name, or the address where there is none.
+fn name(address: &Address) -> String {
+    address
+        .name
         .clone()
-        .unwrap_or_else(|| "(no subject)".into())
+        .unwrap_or_else(|| address.email.clone())
+}
+
+/// The names alone (addresses where there is no name), comma separated: `Bob, Carol`.
+pub fn names<'a>(list: impl IntoIterator<Item = &'a Address>) -> String {
+    list.into_iter().map(name).collect::<Vec<_>>().join(", ")
+}
+
+/// The subject, or a placeholder for none.
+pub fn subject(subject: Option<&str>) -> String {
+    match subject.map(str::trim) {
+        Some(subject) if !subject.is_empty() => subject.to_owned(),
+        _ => "(no subject)".into(),
+    }
 }
 
 /// The sender as a list row shows it: the first name, or its address.
 pub fn sender(from: &[Address]) -> String {
-    from.first()
-        .map(|a| a.name.clone().unwrap_or_else(|| a.email.clone()))
-        .unwrap_or_default()
+    from.first().map(name).unwrap_or_default()
 }
 
 /// The full date, as in the reader's header: `2026-10-19 14:05`.
