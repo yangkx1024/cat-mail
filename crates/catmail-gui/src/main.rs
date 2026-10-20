@@ -12,6 +12,7 @@ mod message_list;
 mod reader;
 #[cfg(test)]
 mod test_support;
+mod theme;
 
 use std::path::PathBuf;
 
