@@ -394,3 +394,17 @@ fn json_comment_stripping_keeps_strings() {
     assert_eq!(value["a"], "http://x//y");
     assert_eq!(value["b"], serde_json::json!([1, 2]));
 }
+
+#[test]
+fn json_trailing_commas_go_also_before_a_comment() {
+    let stripped = strip_json_comments("{\"name\": \"Scheme\", // c\n}");
+    let value: Value = serde_json::from_str(&stripped).unwrap();
+    assert_eq!(value["name"], "Scheme");
+    let stripped = strip_json_comments("{\"b\": [1, /* c */], /* c */\n// c\n}");
+    let value: Value = serde_json::from_str(&stripped).unwrap();
+    assert_eq!(value["b"], serde_json::json!([1]));
+    // Not in a string.
+    let stripped = strip_json_comments("{\"a\": \",}\"}");
+    let value: Value = serde_json::from_str(&stripped).unwrap();
+    assert_eq!(value["a"], ",}");
+}

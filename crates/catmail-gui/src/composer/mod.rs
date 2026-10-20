@@ -89,6 +89,17 @@ pub fn quit(cx: &mut App) {
     }
 }
 
+/// The text of each open composer.
+#[cfg(test)]
+pub(crate) fn texts(cx: &App) -> Vec<String> {
+    cx.try_global::<OpenComposers>()
+        .into_iter()
+        .flat_map(|open| open.windows.values())
+        .filter_map(|(_, composer)| composer.upgrade())
+        .map(|composer| composer.read(cx).body.read(cx).value().to_string())
+        .collect()
+}
+
 /// Opens a composer window for `from`. The draft is made (or read) first; failures are
 /// reported in `window`, the one asking.
 pub fn open(client: MailClient, from: ComposeFrom, window: &mut Window, cx: &mut App) {
@@ -348,6 +359,7 @@ impl Composer {
     }
 
     fn changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The fields are read-only by then (see `header_input`).
         if self.finishing.is_some() {
             return;
         }

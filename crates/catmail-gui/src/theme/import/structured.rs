@@ -209,6 +209,12 @@ pub(super) fn windows_terminal(scheme: &Value) -> Result<TerminalPalette> {
 
 /// Windows Terminal's settings file is JSON with comments and trailing commas.
 pub(super) fn strip_json_comments(json: &str) -> String {
+    // Comments first: one may stand between a trailing comma and its `}`.
+    drop_trailing_commas(&drop_comments(json))
+}
+
+/// Drops `//` and `/* */` comments outside strings; a line comment keeps its newline.
+fn drop_comments(json: &str) -> String {
     let mut out = String::with_capacity(json.len());
     let mut chars = json.chars().peekable();
     let mut in_string = false;
@@ -245,15 +251,47 @@ pub(super) fn strip_json_comments(json: &str) -> String {
                     last = c;
                 }
             }
-            (',', _) => {
-                // A trailing comma: only whitespace before the closing `}` or `]`.
-                let rest: String = chars.clone().collect();
-                let next = rest.trim_start().chars().next();
-                if !matches!(next, Some('}' | ']')) {
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Drops the commas outside strings with only whitespace before the closing `}` or `]`.
+fn drop_trailing_commas(json: &str) -> String {
+    let mut out = String::with_capacity(json.len());
+    let mut chars = json.chars();
+    // Where in `out` the last comma is, while only whitespace has followed it.
+    let mut comma = None;
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                comma = None;
+                out.push(c);
+                while let Some(c) = chars.next() {
                     out.push(c);
+                    match c {
+                        '\\' => out.extend(chars.next()),
+                        '"' => break,
+                        _ => {}
+                    }
                 }
             }
-            _ => out.push(c),
+            ',' => {
+                comma = Some(out.len());
+                out.push(c);
+            }
+            '}' | ']' => {
+                if let Some(at) = comma.take() {
+                    out.remove(at);
+                }
+                out.push(c);
+            }
+            c if c.is_whitespace() => out.push(c),
+            _ => {
+                comma = None;
+                out.push(c);
+            }
         }
     }
     out

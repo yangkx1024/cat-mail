@@ -31,10 +31,15 @@ fn field_row(label: &'static str, field: impl IntoElement, cx: &App) -> gpui_kit
         .child(div().flex_1().min_w_0().child(field))
 }
 
-/// A text field of the header, borderless in its row.
-fn header_input(label: &'static str, input: &Entity<InputState>) -> Input {
+/// A text field of the header, borderless in its row. Read-only while the window is
+/// ending: what it is saving or sending was taken when that began.
+fn header_input(label: &'static str, input: &Entity<InputState>, busy: bool) -> Input {
     let id: SharedString = format!("composer-{}", label.to_lowercase()).into();
-    Input::new(input).id(id).appearance(false).p_0()
+    Input::new(input)
+        .id(id)
+        .appearance(false)
+        .p_0()
+        .readonly(busy)
 }
 
 impl Composer {
@@ -54,7 +59,14 @@ impl Composer {
         v_flex()
             .border_b_1()
             .border_color(cx.theme().border)
-            .child(field_row(label, header_input(label, input), cx).children(trailing))
+            .child(
+                field_row(
+                    label,
+                    header_input(label, input, self.finishing.is_some()),
+                    cx,
+                )
+                .children(trailing),
+            )
             .children(error.map(|error| {
                 div()
                     .pb_2()
@@ -148,7 +160,7 @@ impl Render for Composer {
                     .child(self.address_row("Bcc", Field::Bcc, &self.bcc, None, cx))
             })
             .child(
-                field_row("Subject", header_input("Subject", &self.subject), cx)
+                field_row("Subject", header_input("Subject", &self.subject, busy), cx)
                     .border_b_1()
                     .border_color(theme.border),
             )
@@ -206,12 +218,12 @@ impl Render for Composer {
             }))
             .child(fields)
             .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .px_3()
-                    .py_2()
-                    .child(Textarea::new(&self.body).appearance(false).h_full()),
+                div().flex_1().min_h_0().px_3().py_2().child(
+                    Textarea::new(&self.body)
+                        .appearance(false)
+                        .readonly(busy)
+                        .h_full(),
+                ),
             )
     }
 }

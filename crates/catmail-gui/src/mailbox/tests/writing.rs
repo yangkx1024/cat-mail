@@ -198,6 +198,41 @@ fn an_attachment_dropped_just_before_sending_goes_with_it(cx: &mut TestAppContex
 }
 
 #[gpui_kit::test]
+fn nothing_can_be_typed_while_the_message_goes(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("minutes.txt");
+    // The send waits for it, long enough to type.
+    std::fs::write(&file, "minutes of the meeting\n".repeat(400_000)).unwrap();
+    let (_, composer) = reply_window(cx, &mail);
+    cx.update_window(composer, |_, window, cx| {
+        window.render_frame(cx);
+        window.input("Sent", cx);
+        let position = point(px(300.), px(400.));
+        window.dispatch_event(
+            PlatformInput::FileDrop(FileDropEvent::Entered {
+                position,
+                paths: ExternalPaths(vec![file].into()),
+            }),
+            cx,
+        );
+        window.dispatch_event(
+            PlatformInput::FileDrop(FileDropEvent::Submit { position }),
+            cx,
+        );
+        window.press("secondary-enter", cx);
+        window.render_frame(cx);
+        // What the send took is all there is: this would be lost with the window.
+        window.input(" and lost", cx);
+    })
+    .unwrap();
+    let texts = cx.read(crate::composer::texts);
+    assert!(texts[0].starts_with("Sent\n"), "{texts:?}");
+    wait_for_one_window(cx);
+    wait_until(|| mail.sent().len() == 1);
+}
+
+#[gpui_kit::test]
 fn an_attachment_that_fails_stops_the_send(cx: &mut TestAppContext) {
     let mail = TestMail::start();
     // A folder can't be attached.

@@ -609,6 +609,24 @@ async fn background_sync_waits_for_a_draft_to_settle() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_draft_that_settles_during_a_sync_is_uploaded_after_it() {
+    let env = env_built(
+        state(),
+        SmtpState::new("alice", "pw"),
+        background(Duration::from_secs(1)),
+    )
+    .await;
+    env.fake.wait_until(|st| st.received("IDLE") >= 1).await;
+
+    // The sync the draft wakes leaves it alone, and outlasts its delay: nothing else
+    // would wake background sync before the next full sync, an hour away.
+    env.fake.state().faults.slow = Some(("EXAMINE".into(), Duration::from_millis(1500)));
+    let id = env.draft("one").await;
+    eventually("the draft on the server", async || env.on_server(id).await).await;
+    assert_eq!(subjects(&env.server_drafts()), ["one"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn uploads_asked_for_dont_wait_for_a_draft_to_settle() {
     let env = env_built(
         state(),

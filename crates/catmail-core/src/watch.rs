@@ -120,15 +120,15 @@ pub(crate) async fn run(engine: Weak<Engine>, account: AccountId, schedule: Sync
         let result = step(&strong, &mut session, account, schedule).await;
         let failures = strong.report(account, Activity::Sync, &result);
         // Drafts held back while they are being written are uploaded once they settle:
-        // the step runs again by then.
+        // the step runs again by then, at once for one that settled while it ran.
         let full = full_sync_in(&strong, account, &schedule);
         let due = strong
-            .held_drafts(account)
-            .1
+            .next_draft_due(account)
             .map_or(full, |drafts| full.min(drafts));
         drop(strong);
 
         let pause = match result {
+            Ok(_) if due.is_zero() => continue,
             Ok(wait) => match (wait, session.as_mut()) {
                 (Wait::Idle, Some(s)) if idle_works => {
                     let start = Instant::now();
@@ -288,6 +288,9 @@ async fn work(
     let permit = engine.sync_permit(account).await;
     permit
         .run(async {
+            // The drafts that settled by now are uploaded below; those that settle later
+            // keep the next step due.
+            engine.forget_settled_drafts(account);
             if full_sync_in(engine, account, schedule).is_zero() {
                 sync::run(engine, session, account, Uploads::Settled).await?;
             } else {

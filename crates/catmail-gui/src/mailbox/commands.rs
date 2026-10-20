@@ -260,11 +260,10 @@ impl Mailbox {
         };
         let folders = account
             .folders
-            .nodes()
-            .filter_map(|node| {
-                let folder = node.selectable()?;
-                (folder.id != message.folder_id).then(|| (folder.id, node.label.clone()))
-            })
+            .paths()
+            .into_iter()
+            .filter(|(folder, _)| folder.id != message.folder_id)
+            .map(|(folder, path)| (folder.id, path))
             .collect();
         let this = cx.entity().downgrade();
         move_to::open(folders, window, cx, move |folder, window, cx| {

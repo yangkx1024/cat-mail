@@ -252,17 +252,30 @@ impl Engine {
 
     /// The account's drafts changed within the last
     /// [`draft_upload_delay`](Self::draft_upload_delay), which background sync doesn't
-    /// upload yet, and how long until the first of them is due. Uploads the user asks
-    /// for don't wait.
-    pub fn held_drafts(&self, account: AccountId) -> (HashSet<DraftId>, Option<Duration>) {
-        let state = self.account(account);
-        let mut edits = lock(&state.draft_edits);
-        edits.retain(|_, at| at.elapsed() < self.draft_upload_delay);
-        let due = edits
+    /// upload yet. Uploads the user asks for don't wait.
+    pub fn held_drafts(&self, account: AccountId) -> HashSet<DraftId> {
+        lock(&self.account(account).draft_edits)
+            .iter()
+            .filter(|(_, at)| at.elapsed() < self.draft_upload_delay)
+            .map(|(draft, _)| *draft)
+            .collect()
+    }
+
+    /// How long until the first draft held back is due for upload; zero for one that
+    /// became due after the last [`forget_settled_drafts`](Self::forget_settled_drafts)
+    /// (during a sync that left it alone, say), which the next one uploads.
+    pub fn next_draft_due(&self, account: AccountId) -> Option<Duration> {
+        lock(&self.account(account).draft_edits)
             .values()
             .map(|at| self.draft_upload_delay.saturating_sub(at.elapsed()))
-            .min();
-        (edits.keys().copied().collect(), due)
+            .min()
+    }
+
+    /// Forgets the drafts no longer held back, as background sync begins a step, which
+    /// uploads them.
+    pub fn forget_settled_drafts(&self, account: AccountId) {
+        lock(&self.account(account).draft_edits)
+            .retain(|_, at| at.elapsed() < self.draft_upload_delay);
     }
 
     /// Records that every folder of the account was just synced.

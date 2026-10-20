@@ -95,7 +95,7 @@ async fn run(
     let stale = engine.read(move |db| db.drafts().stale(account)).await?;
     let held = match uploads {
         Uploads::All => HashSet::new(),
-        Uploads::Settled => engine.held_drafts(account).0,
+        Uploads::Settled => engine.held_drafts(account),
     };
     for draft in stale.into_iter().filter(|d| !held.contains(d)) {
         match upload_one(engine, session, &owner, draft, (folder, &remote_name)).await? {

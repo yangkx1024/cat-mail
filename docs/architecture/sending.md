@@ -38,7 +38,9 @@ outbox 里时，上传一份新的，再删除旧的：
 - **后台上传等草稿停下来**：GUI 边写边自动保存，每次保存都换一份副本没有意义。后台同步只上传
   `draft_upload_delay`（默认 15 秒，`MailClientBuilder::draft_upload_delay`）内没改过的草稿，被留下的
   草稿到期时后台任务自己醒来（IDLE 的时限取它和下一次完整同步中较早的一个）。最后修改时间只记在内存里
-  （`Engine::draft_edited`，按草稿），重启后没有记录的草稿直接上传。用户要求的上传
+  （`Engine::draft_edited`，按草稿），重启后没有记录的草稿直接上传。记录只在后台同步的一步**开始时**
+  清掉已到期的（`forget_settled_drafts`，这一步会上传它们）；在一步进行中才到期的留到这一步之后，
+  使下一步立即开始，否则它要等到下一次完整同步。用户要求的上传
   （`replay_pending`、`sync_account`）不等，CLI 的行为不变。
 - **上传**：完整的 MIME（与发信同一个构建函数，但**保留 Bcc 头**，否则重新打开草稿会丢掉密送），
   flags 为 `\Draft \Seen`，每次一个新的 Message-ID。先 APPEND 新的、再删旧的，服务器上始终有一份。

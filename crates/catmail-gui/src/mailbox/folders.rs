@@ -69,6 +69,39 @@ impl AccountFolders {
         out.into_iter()
     }
 
+    /// Every selectable folder in sidebar order, named for a flat list where the tree's
+    /// labels won't do (two may be alike, and subfolders of Drafts sit at the top): the
+    /// folder the sidebar names for a role by that name, the rest by their path on the
+    /// server (`Clients / Invoices`).
+    pub fn paths(&self) -> Vec<(&Folder, String)> {
+        let mut roles = Vec::new();
+        let named: Vec<_> = self
+            .roles
+            .iter()
+            .filter_map(|node| {
+                let folder = node.selectable()?;
+                let role = folder.role?;
+                (!roles.contains(&role)).then(|| {
+                    roles.push(role);
+                    folder.id
+                })
+            })
+            .collect();
+        self.nodes()
+            .filter_map(FolderNode::selectable)
+            .map(|folder| {
+                let path = match (folder.role, folder.delimiter) {
+                    (Some(role), _) if named.contains(&folder.id) => role_label(role).into(),
+                    (_, Some(delimiter)) => {
+                        folder.name.split(delimiter).collect::<Vec<_>>().join(" / ")
+                    }
+                    (_, None) => folder.name.clone(),
+                };
+                (folder, path)
+            })
+            .collect()
+    }
+
     /// The selectable folder with this role, if the account has one.
     pub fn with_role(&self, role: FolderRole) -> Option<&Folder> {
         self.nodes()
@@ -316,5 +349,44 @@ mod tests {
         let tree = folder_tree(&[parent, folder(2, "Lists/rust", Some('/'))]);
         assert!(tree[0].selectable().is_none());
         assert!(tree[0].children[0].selectable().is_some());
+    }
+
+    #[test]
+    fn paths_tell_folders_of_the_same_name_apart() {
+        let mut lists = folder(4, "Lists", Some('.'));
+        lists.selectable = false;
+        let account = AccountFolders::new(&[
+            with_role(1, "INBOX", FolderRole::Inbox),
+            folder(2, "Clients.Invoices", Some('.')),
+            folder(3, "Personal.Invoices", Some('.')),
+            lists,
+            folder(5, "Lists.rust", Some('.')),
+            with_role(6, "Drafts", FolderRole::Drafts),
+            folder(7, "Drafts.Templates", Some('.')),
+            folder(8, "Templates", Some('.')),
+            with_role(9, "INBOX.Trash", FolderRole::Trash),
+            with_role(10, "Old.Trash", FolderRole::Trash),
+        ]);
+        let paths: Vec<_> = account
+            .paths()
+            .into_iter()
+            .map(|(folder, path)| (folder.id.0, path))
+            .collect();
+        // Placeholders and `\Noselect` folders aren't destinations, but name the way; so
+        // does Drafts, whose subfolder the sidebar shows at the top. A second folder with
+        // a role isn't the one the sidebar names for it.
+        assert_eq!(
+            paths,
+            [
+                (1, "Inbox".into()),
+                (9, "Trash".into()),
+                (10, "Old / Trash".into()),
+                (2, "Clients / Invoices".into()),
+                (3, "Personal / Invoices".into()),
+                (5, "Lists / rust".into()),
+                (8, "Templates".into()),
+                (7, "Drafts / Templates".into()),
+            ]
+        );
     }
 }
