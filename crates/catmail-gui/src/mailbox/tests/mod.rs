@@ -32,6 +32,10 @@ fn window_options() -> WindowOptions {
 /// set up as `main` sets up the app.
 fn open_mailbox(cx: &mut App, mail: &TestMail) -> (AnyWindowHandle, Entity<Mailbox>) {
     gpui_kit::init(cx);
+    // Dialogs slide in, and hit testing follows them: on a slow machine a click meant
+    // for a dialog's button lands where it was a frame ago. (Tests never read the
+    // system's setting, so it is set here.)
+    cx.set_reduce_motion(true);
     cx.set_global(Preferences::load_nowhere());
     crate::theme::appearance::init(cx);
     actions::bind_keys(cx);

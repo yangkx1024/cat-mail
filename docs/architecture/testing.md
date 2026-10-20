@@ -58,6 +58,8 @@ Trash）和假 SMTP 服务器，驱动真实的窗口：点击、键盘、切换
 "另一处同步后窗口靠事件更新且保持选中"。客户端与应用一样在后台发信，但不在后台同步，由测试决定何时
 看服务器。引擎在自己的线程上运行，GPUI 的测试调度器看不到，所以
 测试在 `run_until_parked` 之间按真实时间等待（`test_support::wait_until`）。
+测试打开"减少动态效果"（`set_reduce_motion(true)`）：对话框会滑入，命中测试跟着移动，在慢的 CI 机器上
+点对话框里的按钮会落在上一帧的位置；测试调度器下 gpui-kit 不读系统设置，只能由测试自己设。
 
 `mailbox::tests::screenshots`（`mailbox/tests/screenshots.rs`，`#[ignore]`）用 WGPU 离屏渲染把几封邮件、每个内置主题、设置和写信窗口
 截成 PNG，供人检查排版。
