@@ -25,6 +25,7 @@ mod runtime;
 mod secrets;
 mod send;
 mod sync;
+mod watch;
 
 pub use catmail_proto::TlsConfig;
 pub use catmail_proto::imap::Error as ImapError;
@@ -39,3 +40,4 @@ pub use secrets::{KeyringSecrets, MemorySecrets, SecretStore};
 /// What [`MailClient::subscribe`]'s receiver returns when it falls behind or the engine
 /// is gone.
 pub use tokio::sync::broadcast::error::RecvError;
+pub use watch::SyncSchedule;

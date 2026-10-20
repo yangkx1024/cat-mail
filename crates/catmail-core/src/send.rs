@@ -146,14 +146,8 @@ pub(crate) async fn flush(
     account: AccountId,
     due_only: bool,
 ) -> Result<Vec<OutboxEntry>> {
-    let mut permit = idle_outbox(&engine, account).await?;
-    if permit.is_cancelled() {
-        return Err(Error::AccountNotFound(account.to_string()));
-    }
-    tokio::select! {
-        result = run(&engine, account, due_only) => result,
-        () = permit.cancelled() => Err(Error::Cancelled),
-    }
+    let permit = idle_outbox(&engine, account).await?;
+    permit.run(run(&engine, account, due_only)).await
 }
 
 async fn run(engine: &Arc<Engine>, account: AccountId, due_only: bool) -> Result<Vec<OutboxEntry>> {
@@ -485,7 +479,8 @@ fn is_permanent(e: &Error) -> bool {
 
 /// Seconds to wait after the `attempts`-th failed attempt.
 fn backoff(attempts: u32) -> i64 {
-    (FIRST_BACKOFF << attempts.saturating_sub(1).min(16)).min(MAX_BACKOFF)
+    let secs = |s: i64| Duration::from_secs(s as u64);
+    crate::engine::backoff(secs(FIRST_BACKOFF), attempts, secs(MAX_BACKOFF)).as_secs() as i64
 }
 
 /// Every address once (ignoring case), in order.

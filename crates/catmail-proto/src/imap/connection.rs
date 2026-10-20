@@ -1,5 +1,6 @@
 //! Drives imap-next's sans-IO client over any async byte stream.
 
+use std::future::Future;
 use std::time::Duration;
 
 use imap_next::client::{Client, Event, Options};
@@ -35,6 +36,13 @@ pub(crate) struct Connection {
     /// Set once the server refused a command before all of it was sent: imap-next still
     /// waits to send the rest, so nothing sent after it would ever go out.
     out_of_step: bool,
+    /// What the server said about the selected mailbox in passing, in the answers to any
+    /// command (servers report new mail and expunges whenever they can): the last EXISTS
+    /// less the EXPUNGEs since, and whether it reported a change since the mailbox was
+    /// opened. A change is an EXISTS with a new count, an EXPUNGE, a VANISHED, and while
+    /// idling a FETCH (outside IDLE that is usually the answer to our own FETCH).
+    exists: u32,
+    changed: bool,
 }
 
 impl Connection {
@@ -51,6 +59,8 @@ impl Connection {
             buf: vec![0; 64 * 1024].into_boxed_slice(),
             timeout,
             out_of_step: false,
+            exists: 0,
+            changed: false,
         }
     }
 
@@ -89,12 +99,7 @@ impl Connection {
     /// whose caller notices what is missing.
     pub async fn execute_lossy(&mut self, body: CommandBody<'static>) -> Result<Response> {
         let command = body.name();
-        self.check_in_step()?;
-        let tag = self.next_tag();
-        self.client.enqueue_command(Command {
-            tag: tag.clone(),
-            body,
-        });
+        let tag = self.begin(body)?;
         let mut response = Response::default();
         let mut sent = false;
         loop {
@@ -106,7 +111,10 @@ impl Connection {
                         text: status.text().to_string(),
                     });
                 }
-                Event::DataReceived { data } => response.data.push(data),
+                Event::DataReceived { data } => {
+                    self.track(&data, false);
+                    response.data.push(data);
+                }
                 Event::StatusReceived { status } => {
                     match self.on_status(&tag, command, status, &mut response) {
                         // imap-next only gives up a command with a pending literal on
@@ -132,6 +140,73 @@ impl Connection {
         }
     }
 
+    /// Runs IDLE (RFC 2177) until the server reports a change to the selected mailbox,
+    /// `stop` resolves or `max` passes, then ends it with DONE. Returns whether the server
+    /// reported a change. Reads while idling have no timeout but `max`: a quiet server is
+    /// the point.
+    pub async fn idle(&mut self, stop: impl Future<Output = ()>, max: Duration) -> Result<bool> {
+        let tag = self.begin(CommandBody::Idle)?;
+        // `sleep` copes with any `max`; adding it to an instant may overflow.
+        let mut timer = std::pin::pin!(tokio::time::sleep(max));
+        let mut stop = std::pin::pin!(stop);
+        // Between the server's `+` and our DONE.
+        let mut idling = false;
+        let mut response = Response::default();
+        loop {
+            match self.client.next() {
+                Ok(Event::IdleCommandSent { .. } | Event::IdleDoneSent { .. }) => {}
+                Ok(Event::IdleAccepted { .. }) => idling = true,
+                // imap-next reports a server ending IDLE on its own (a tagged OK before
+                // DONE) this way too.
+                Ok(Event::IdleRejected { status, .. }) => {
+                    return match status {
+                        Status::Tagged(tagged) if tagged.body.kind == StatusKind::Ok => {
+                            Ok(self.changed)
+                        }
+                        other => Err(Error::Command {
+                            command: "IDLE",
+                            text: other.text().to_string(),
+                        }),
+                    };
+                }
+                Ok(Event::DataReceived { data }) => self.track(&data, true),
+                Ok(Event::StatusReceived { status }) => {
+                    if let Some(result) = self.on_status(&tag, "IDLE", status, &mut response) {
+                        return result.map(|()| self.changed);
+                    }
+                }
+                Ok(Event::ContinuationRequestReceived { .. }) => {
+                    tracing::debug!("ignoring unexpected continuation request during IDLE");
+                }
+                Ok(other) => {
+                    return Err(Error::Protocol(format!(
+                        "unexpected event during IDLE: {other:?}"
+                    )));
+                }
+                Err(Interrupt::Io(Io::Output(bytes))) => self.write(&bytes).await?,
+                Err(Interrupt::Io(Io::NeedMoreInput)) if !idling => self.read().await?,
+                Err(Interrupt::Io(Io::NeedMoreInput)) => {
+                    // Reading is cancel-safe: nothing read is lost if `stop` wins.
+                    let done = self.changed
+                        || tokio::select! {
+                            read = self.read_untimed() => { read?; false }
+                            () = &mut stop => true,
+                            () = &mut timer => true,
+                        };
+                    if done {
+                        self.client.set_idle_done();
+                        idling = false;
+                    }
+                }
+                // Whatever it was, look at the mailbox again.
+                Err(Interrupt::Error(e)) => {
+                    tracing::warn!(error = %e, "skipping malformed server response during IDLE");
+                    self.changed = true;
+                }
+            }
+        }
+    }
+
     /// Runs `AUTHENTICATE <mechanism>`, answering the first challenge with `initial`.
     /// A rejection becomes [`Error::AuthFailed`].
     pub async fn authenticate(
@@ -139,12 +214,7 @@ impl Connection {
         mechanism: AuthMechanism<'static>,
         initial: Vec<u8>,
     ) -> Result<Response> {
-        self.check_in_step()?;
-        let tag = self.next_tag();
-        self.client.enqueue_command(Command {
-            tag: tag.clone(),
-            body: CommandBody::authenticate(mechanism),
-        });
+        let tag = self.begin(CommandBody::authenticate(mechanism))?;
         let mut initial = Some(initial);
         let mut response = Response::default();
         loop {
@@ -171,7 +241,10 @@ impl Connection {
                         other => Err(Error::AuthFailed(other.text().to_string())),
                     };
                 }
-                Event::DataReceived { data } => response.data.push(data),
+                Event::DataReceived { data } => {
+                    self.track(&data, false);
+                    response.data.push(data);
+                }
                 Event::StatusReceived { status } => {
                     if let Some(result) =
                         self.on_status(&tag, "AUTHENTICATE", status, &mut response)
@@ -199,9 +272,33 @@ impl Connection {
         Ok(())
     }
 
-    fn next_tag(&mut self) -> Tag<'static> {
+    /// Queues a command under a new tag, which it returns.
+    fn begin(&mut self, body: CommandBody<'static>) -> Result<Tag<'static>> {
+        self.check_in_step()?;
         self.last_tag += 1;
-        Tag::try_from(format!("C{}", self.last_tag)).expect("valid tag")
+        let tag = Tag::try_from(format!("C{}", self.last_tag)).expect("valid tag");
+        self.client.enqueue_command(Command {
+            tag: tag.clone(),
+            body,
+        });
+        Ok(tag)
+    }
+
+    /// A mailbox was just opened, with `exists` messages: reported changes count from
+    /// here.
+    pub fn mailbox_opened(&mut self, exists: u32) {
+        self.exists = exists;
+        self.changed = false;
+    }
+
+    /// The selected mailbox's message count, as of the server's last word.
+    pub fn exists(&self) -> u32 {
+        self.exists
+    }
+
+    /// Whether the server reported a change to the selected mailbox since it was opened.
+    pub fn mailbox_changed(&self) -> bool {
+        self.changed
     }
 
     /// Returns `Some` once the command identified by `tag` has completed.
@@ -243,6 +340,22 @@ impl Connection {
         }
     }
 
+    fn track(&mut self, data: &Data<'_>, idling: bool) {
+        match data {
+            Data::Exists(n) => {
+                self.changed |= self.exists != *n;
+                self.exists = *n;
+            }
+            Data::Expunge(_) => {
+                self.exists = self.exists.saturating_sub(1);
+                self.changed = true;
+            }
+            Data::Vanished { .. } => self.changed = true,
+            Data::Fetch { .. } if idling => self.changed = true,
+            _ => {}
+        }
+    }
+
     /// Counts lines it had to skip in `skipped`.
     async fn next_event(&mut self, skipped: &mut usize) -> Result<Event> {
         loop {
@@ -250,21 +363,8 @@ impl Connection {
                 Ok(event) => return Ok(event),
                 // Commands are small and sent whole before reading, so writing and
                 // reading in turn can't deadlock against a server that does the same.
-                Err(Interrupt::Io(Io::Output(bytes))) => {
-                    let stream = &mut self.stream;
-                    with_timeout(self.timeout, async {
-                        stream.write_all(&bytes).await?;
-                        stream.flush().await
-                    })
-                    .await?;
-                }
-                Err(Interrupt::Io(Io::NeedMoreInput)) => {
-                    let n = with_timeout(self.timeout, self.stream.read(&mut self.buf)).await?;
-                    if n == 0 {
-                        return Err(Error::Closed);
-                    }
-                    self.client.enqueue_input(&self.buf[..n]);
-                }
+                Err(Interrupt::Io(Io::Output(bytes))) => self.write(&bytes).await?,
+                Err(Interrupt::Io(Io::NeedMoreInput)) => self.read().await?,
                 // The client has already skipped the offending line. One response we
                 // can't parse (a buggy BODYSTRUCTURE, say) shouldn't take the whole
                 // session down, but the command's result may now be incomplete.
@@ -274,5 +374,32 @@ impl Connection {
                 }
             }
         }
+    }
+
+    async fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        let stream = &mut self.stream;
+        with_timeout(self.timeout, async {
+            stream.write_all(bytes).await?;
+            stream.flush().await
+        })
+        .await?;
+        Ok(())
+    }
+
+    /// Hands the next bytes from the server to the client.
+    async fn read(&mut self) -> Result<()> {
+        match tokio::time::timeout(self.timeout, self.read_untimed()).await {
+            Ok(result) => result,
+            Err(_) => Err(Error::Timeout),
+        }
+    }
+
+    async fn read_untimed(&mut self) -> Result<()> {
+        let n = self.stream.read(&mut self.buf).await?;
+        if n == 0 {
+            return Err(Error::Closed);
+        }
+        self.client.enqueue_input(&self.buf[..n]);
+        Ok(())
     }
 }

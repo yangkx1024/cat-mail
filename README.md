@@ -26,7 +26,7 @@
 | M1 | IMAP 只读同步（文件夹、邮件头）；认证接口；协议测试环境；`catmail sync` / `catmail ls` | ✅ 完成 |
 | M2 | 正文与附件按需下载；中文分词 + 全文搜索；blob GC；最小读信窗口；`catmail read` / `catmail search` | ✅ 完成 |
 | M3 | 草稿；SMTP 发信与 outbox 状态机；保存到 Sent；`catmail compose` / `reply` / `send` / `outbox` | ✅ 完成 |
-| M4 | 离线操作队列（标记 / 移动 / 删除）✅；IDLE 推送；草稿同步到服务器 | 进行中 |
+| M4 | 离线操作队列（标记 / 移动 / 删除）✅；IDLE 推送与后台同步 ✅；草稿同步到服务器 | 进行中 |
 | M5 | 图形界面：三栏布局、读信、写信 | |
 | M6 | OAuth2（Gmail / Microsoft 365）；Windows / macOS 打包 | |
 
@@ -61,6 +61,7 @@ catmail account list            # 加 --json 输出 JSON
 catmail account remove me@example.com
 
 catmail sync                    # 同步所有账户；也可以指定 id 或邮箱
+catmail watch                   # 保持同步直到 Ctrl-C，打印变化（见下文）
 catmail ls                      # 列出文件夹（多个账户时用 -a 选择）
 catmail ls INBOX -n 20          # 最新的 20 封邮件；文件夹名可以是中文，如 `catmail ls 已发送`
 
@@ -87,6 +88,10 @@ catmail mv 42 --to Archive
 catmail rm 42                     # 移到"已删除"；已在其中或加 --permanent 则永久删除
 catmail ops                       # 还没同步到服务器的改动，以及被拒绝的；ops flush / dismiss
 ```
+
+`catmail watch` 在前台持续同步所有账户：收件箱的新邮件、删除和标记变化由服务器推送（IDLE，不支持时
+每 2 分钟检查一次），其他文件夹每 15 分钟同步一次，标记、移动、删除立即同步到服务器；断线后自动重连。
+它占用数据目录，运行期间不能再用别的 `catmail` 命令。
 
 `catmail ls <文件夹>` 的标记列：`*` 未读，`!` 已加星标，`@` 有附件。同步本身只读（EXAMINE），
 中途中断（断网、Ctrl-C）后再次运行会从断点继续。
@@ -119,7 +124,8 @@ catmail-gui                     # 打开窗口；同样支持 --data-dir / CATMA
 
 目前是最小读信窗口：没有账户时先显示登录页（也可以从侧栏的"Add account…"再添加），填写
 邮箱、密码和收发服务器；会先实际登录 IMAP 服务器检查设置，成功后才保存并开始同步，密码错误
-不会留下任何账户或密钥环条目。之后左侧账户与文件夹，中间邮件列表（方向键切换），右侧读信。只读（写信
+不会留下任何账户或密钥环条目。之后左侧账户与文件夹，中间邮件列表（方向键切换），右侧读信。窗口打开期间在后台保持同步，新邮件
+由服务器推送，与 `catmail watch` 相同。只读（写信
 在 M5），阅读不会标为已读。默认显示纯文本，有 HTML 时可以切换；HTML 里只显示邮件自带的图片（`cid:`
 内嵌图片、`data:`），远程图片一律不加载；排版不对时用"Open in browser"在浏览器里看（同样
 拦截远程内容）。点附件可以保存。窗口运行时

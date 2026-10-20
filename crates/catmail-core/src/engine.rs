@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs::File;
+use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -10,6 +11,7 @@ use catmail_types::{AccountId, Event};
 use tokio::sync::{Notify, OwnedMutexGuard, broadcast, watch};
 
 use crate::secrets::SecretStore;
+use crate::watch::SyncSchedule;
 use crate::{Config, Error, Result};
 
 /// State shared by every `MailClient` clone and every engine task.
@@ -27,6 +29,8 @@ pub(crate) struct Engine {
     tls: OnceLock<TlsConfig>,
     /// Wakes the outbox worker, if one runs: something became due.
     pub outbox_kick: Arc<Notify>,
+    /// Set if every account is kept in sync in the background (see `watch`).
+    pub sync_in_background: Option<SyncSchedule>,
     accounts: Mutex<HashMap<AccountId, Arc<AccountState>>>,
 }
 
@@ -42,8 +46,7 @@ const IDLE_SESSION_TTL: Duration = Duration::from_secs(5 * 60);
 /// Enough for a message and one of its attachments at once.
 const IDLE_SESSIONS_PER_ACCOUNT: usize = 2;
 
-/// What the engine keeps per account. Replaced by the per-account actor once IDLE
-/// arrives (M4).
+/// What the engine keeps per account.
 ///
 /// A removed account keeps its entry, marked `removed`, so work that looks at it later
 /// is cancelled at once rather than racing the removal. Account ids are never reused.
@@ -57,23 +60,32 @@ struct AccountState {
     /// Logged-in connections for on-demand fetches, kept between requests so opening
     /// messages one after another doesn't log in each time. Sync uses its own.
     idle: Mutex<Vec<IdleSession>>,
+    /// Wakes the account's background sync, if one runs: local changes are waiting for
+    /// the server.
+    wake: Arc<Notify>,
+    /// When the last sync of every folder finished.
+    synced: Mutex<Option<Instant>>,
 }
 
 /// Held while syncing an account, or while working on its outbox.
 pub(crate) struct Permit {
     _guard: OwnedMutexGuard<()>,
+    account: AccountId,
     cancellation: Cancellation,
 }
 
 impl Permit {
-    /// The account was removed before the work could start.
-    pub fn is_cancelled(&self) -> bool {
-        self.cancellation.is_cancelled()
-    }
-
-    /// Resolves once the account is being removed.
-    pub async fn cancelled(&mut self) {
-        self.cancellation.cancelled().await;
+    /// Runs `work` holding the permit. Fails with [`Error::AccountNotFound`] if the
+    /// account was removed before, and stops it with [`Error::Cancelled`] if it is
+    /// removed meanwhile.
+    pub async fn run<T>(mut self, work: impl Future<Output = Result<T>>) -> Result<T> {
+        if self.cancellation.is_cancelled() {
+            return Err(Error::AccountNotFound(self.account.to_string()));
+        }
+        tokio::select! {
+            result = work => result,
+            () = self.cancellation.cancelled() => Err(Error::Cancelled),
+        }
     }
 }
 
@@ -85,12 +97,11 @@ impl Cancellation {
         *self.0.borrow()
     }
 
-    /// Resolves once the account is being removed (at once if it already is).
+    /// Resolves once the account is being removed (at once if it already is), or the
+    /// engine is gone: work holding the engine only weakly stops then too.
     pub async fn cancelled(&mut self) {
-        // Err means the sender is gone, which only happens once nobody can cancel.
-        if self.0.wait_for(|c| *c).await.is_err() {
-            std::future::pending::<()>().await;
-        }
+        // Err: the sender, owned by the engine, is gone.
+        let _ = self.0.wait_for(|c| *c).await;
     }
 }
 
@@ -113,6 +124,7 @@ impl Engine {
             events,
             tls: tls.map(OnceLock::from).unwrap_or_default(),
             outbox_kick: Arc::default(),
+            sync_in_background: None,
             accounts: Mutex::default(),
         }
     }
@@ -180,8 +192,31 @@ impl Engine {
         let guard = lock(&state).clone().lock_owned().await;
         Permit {
             _guard: guard,
+            account,
             cancellation,
         }
+    }
+
+    /// Wakes the account's background sync, if one runs, to make queued local changes
+    /// on the server. A wake while it is busy is kept for when it next waits.
+    pub fn wake(&self, account: AccountId) {
+        self.account(account).wake.notify_one();
+    }
+
+    /// What [`wake`](Self::wake) notifies.
+    pub fn wake_signal(&self, account: AccountId) -> Arc<Notify> {
+        self.account(account).wake.clone()
+    }
+
+    /// Records that every folder of the account was just synced.
+    pub fn set_synced(&self, account: AccountId) {
+        *lock(&self.account(account).synced) = Some(Instant::now());
+    }
+
+    /// When every folder of the account was last synced, if ever since the engine
+    /// started.
+    pub fn synced(&self, account: AccountId) -> Option<Instant> {
+        *lock(&self.account(account).synced)
     }
 
     /// For work on `account` other than sync. Obtain it before checking that the
@@ -239,6 +274,8 @@ impl Engine {
                     send: Arc::default(),
                     removed: watch::Sender::new(false),
                     idle: Mutex::default(),
+                    wake: Arc::default(),
+                    synced: Mutex::default(),
                 })
             })
             .clone()
@@ -257,6 +294,13 @@ pub(crate) async fn blocking<T: Send + 'static>(
     tokio::task::spawn_blocking(f)
         .await
         .map_err(crate::runtime::join_error)?
+}
+
+/// `first`, doubled for each failure in a row after the first, up to `max`.
+pub(crate) fn backoff(first: Duration, failures: u32, max: Duration) -> Duration {
+    first
+        .saturating_mul(1 << failures.saturating_sub(1).min(16))
+        .min(max)
 }
 
 /// Now, in unix seconds.

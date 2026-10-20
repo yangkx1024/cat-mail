@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use catmail_core::{Address, DraftContent, Error, Event, OutboxEntry, OutboxStatus, RecvError};
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
-use common::{Env, env, env_with};
+use common::{Env, env, env_with, eventually};
 use mail_parser::{MessageParser, MimeHeaders};
 use tokio::sync::Semaphore;
 
@@ -654,21 +654,6 @@ async fn background_sending_needs_no_flush() {
     // Saved right after.
     eventually("saving to Sent", async || env.outbox().await.is_empty()).await;
     assert_eq!(env.sent_folder().len(), 1);
-}
-
-/// Polls `ready` until it holds; fails the test after 10 seconds.
-async fn eventually(what: &str, mut ready: impl AsyncFnMut() -> bool) {
-    let poll = async {
-        while !ready().await {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    };
-    if tokio::time::timeout(Duration::from_secs(10), poll)
-        .await
-        .is_err()
-    {
-        panic!("timed out waiting for {what}");
-    }
 }
 
 async fn wait_for_sent(

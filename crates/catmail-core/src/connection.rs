@@ -67,38 +67,42 @@ pub(crate) async fn login(
 }
 
 /// Runs `op` on one of the account's idle connections, or a new one, and keeps the
-/// connection for next time unless it failed. If a reused connection turns out to be
-/// dead (disconnected, not merely unusable after a refusal), `op` runs once more on a
-/// fresh one.
+/// connection for next time unless it failed; see [`on_session`].
 pub(crate) async fn with_session<T>(
     engine: &Arc<Engine>,
     account: AccountId,
-    mut op: impl for<'s> FnMut(&'s mut Session) -> SessionFuture<'s, T>,
+    op: impl for<'s> FnMut(&'s mut Session) -> SessionFuture<'s, T>,
 ) -> Result<T> {
-    if let Some(mut session) = engine.take_session(account) {
-        match op(&mut session).await {
-            // A fresh connection, not another idle one: those are likely dead too.
-            Err(Error::Imap(e)) if e.is_disconnected() => {
-                tracing::debug!(%account, error = %e, "idle connection was dead; reconnecting");
-            }
-            result => return keep_usable(engine, account, session, result),
-        }
-    }
-    let mut session = connect(engine, account).await?;
-    let result = op(&mut session).await;
-    keep_usable(engine, account, session, result)
-}
-
-/// Puts the connection back in the pool unless `result` left it unusable.
-fn keep_usable<T>(
-    engine: &Engine,
-    account: AccountId,
-    session: Session,
-    result: Result<T>,
-) -> Result<T> {
-    if !matches!(&result, Err(Error::Imap(e)) if e.is_fatal()) {
-        // Anything else leaves the connection in a known state.
+    let mut slot = engine.take_session(account);
+    let result = on_session(engine, account, &mut slot, op).await;
+    // Anything but a fatal error leaves the connection in a known state.
+    if let Some(session) = slot
+        && !matches!(&result, Err(Error::Imap(e)) if e.is_fatal())
+    {
         engine.return_session(account, session);
     }
     result
+}
+
+/// Runs `op` on the connection in `slot`, or on a new one put there. If the one there
+/// turns out to be dead (disconnected, not merely unusable after a refusal), `op` runs
+/// once more on a fresh one.
+pub(crate) async fn on_session<T>(
+    engine: &Arc<Engine>,
+    account: AccountId,
+    slot: &mut Option<Session>,
+    mut op: impl for<'s> FnMut(&'s mut Session) -> SessionFuture<'s, T>,
+) -> Result<T> {
+    if let Some(session) = slot {
+        match op(session).await {
+            // A fresh connection, not another idle one: those are likely dead too.
+            Err(Error::Imap(e)) if e.is_disconnected() => {
+                tracing::debug!(%account, error = %e, "reused connection was dead; reconnecting");
+            }
+            result => return result,
+        }
+    }
+    *slot = None;
+    let session = slot.insert(connect(engine, account).await?);
+    op(session).await
 }

@@ -216,6 +216,10 @@ pub struct Faults {
     /// Close the connection when the next STORE, COPY, MOVE or EXPUNGE arrives, without
     /// making it. Fires once.
     pub drop_before_change: bool,
+    /// Advertise IDLE, and report changes to the selected mailbox while idling.
+    pub idle: bool,
+    /// Accept every IDLE, then close the connection, as a misbehaving proxy might.
+    pub drop_on_idle: bool,
 }
 
 impl Default for Faults {
@@ -247,6 +251,8 @@ impl Default for Faults {
             refuse_changes: None,
             drop_after_change: false,
             drop_before_change: false,
+            idle: true,
+            drop_on_idle: false,
         }
     }
 }
@@ -266,7 +272,10 @@ pub struct ServerState {
     pub mailboxes: Vec<FakeMailbox>,
     pub faults: Faults,
     pub log: Vec<LoggedCommand>,
+    /// Connections accepted so far.
     pub connections: usize,
+    /// Connections open now.
+    pub open_connections: usize,
     header_fetches: usize,
     body_fetches: usize,
     /// Connections numbered up to this one are closed at their next command.
@@ -282,6 +291,7 @@ impl ServerState {
             faults: Faults::default(),
             log: Vec::new(),
             connections: 0,
+            open_connections: 0,
             header_fetches: 0,
             body_fetches: 0,
             dropped_through: 0,
@@ -303,6 +313,14 @@ impl ServerState {
 
     pub fn inbox(&mut self) -> &mut FakeMailbox {
         self.mailbox_mut("INBOX")
+    }
+
+    /// How many commands the server received that start with `prefix` (`IDLE`, `LIST`).
+    pub fn received(&self, prefix: &str) -> usize {
+        self.log
+            .iter()
+            .filter(|c| c.line.starts_with(prefix))
+            .count()
     }
 
     fn find(&self, name: &str) -> Option<usize> {
@@ -362,19 +380,22 @@ impl FakeImap {
                         let id = {
                             let mut st = lock(&state);
                             st.connections += 1;
+                            st.open_connections += 1;
                             st.connections
                         };
                         let result = match (mode, &cert) {
                             (TlsMode::Implicit, Some(cert)) => {
                                 match cert.acceptor().accept(tcp).await {
                                     Ok(tls) => {
-                                        serve(Box::new(tls), id, true, mode, None, state).await
+                                        serve(Box::new(tls), id, true, mode, None, state.clone())
+                                            .await
                                     }
                                     Err(e) => Err(e),
                                 }
                             }
-                            _ => serve(Box::new(tcp), id, false, mode, cert, state).await,
+                            _ => serve(Box::new(tcp), id, false, mode, cert, state.clone()).await,
                         };
+                        lock(&state).open_connections -= 1;
                         if let Err(e) = result {
                             tracing::debug!(error = %e, "fake IMAP connection ended");
                         }
@@ -397,6 +418,22 @@ impl FakeImap {
     pub fn state(&self) -> MutexGuard<'_, ServerState> {
         lock(&self.state)
     }
+
+    /// Waits until `ready` holds for the server state, looking every few milliseconds.
+    /// Panics after 10 seconds.
+    pub async fn wait_until(&self, ready: impl Fn(&ServerState) -> bool) {
+        let poll = async {
+            while !ready(&self.state()) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        };
+        if tokio::time::timeout(std::time::Duration::from_secs(10), poll)
+            .await
+            .is_err()
+        {
+            panic!("the server never got into the state waited for");
+        }
+    }
 }
 
 fn lock(state: &Mutex<ServerState>) -> MutexGuard<'_, ServerState> {
@@ -415,6 +452,59 @@ struct Session {
     /// Opened with SELECT rather than EXAMINE.
     writable: bool,
     condstore_enabled: bool,
+    /// The selected mailbox as this connection was last told about it.
+    view: Option<View>,
+}
+
+/// What a connection knows about its selected mailbox. Changes others make since are
+/// reported like a server does: new messages with the answer to any command, the rest
+/// while idling.
+#[derive(Debug, Clone, PartialEq)]
+struct View {
+    uidvalidity: u32,
+    /// (UID, flags), in mailbox order.
+    messages: Vec<(u32, Vec<String>)>,
+}
+
+impl View {
+    fn of(mb: &FakeMailbox) -> Self {
+        Self {
+            uidvalidity: mb.uidvalidity,
+            messages: mb
+                .messages
+                .iter()
+                .map(|m| (m.uid, m.flags.clone()))
+                .collect(),
+        }
+    }
+
+    /// The untagged responses that bring this view up to `now`, which it then becomes:
+    /// EXPUNGEs, then EXISTS, then FETCH for changed flags.
+    fn catch_up(&mut self, now: View) -> String {
+        let mut out = String::new();
+        for i in (0..self.messages.len()).rev() {
+            let uid = self.messages[i].0;
+            if !now.messages.iter().any(|(u, _)| *u == uid) {
+                self.messages.remove(i);
+                out += &format!("* {} EXPUNGE\r\n", i + 1);
+            }
+        }
+        if now.messages.len() != self.messages.len() {
+            out += &format!("* {} EXISTS\r\n", now.messages.len());
+        }
+        for (i, (uid, flags)) in now.messages.iter().enumerate() {
+            let known = self.messages.iter().find(|(u, _)| u == uid);
+            if known.is_some_and(|(_, f)| f != flags) {
+                out += &format!(
+                    "* {} FETCH (UID {uid} FLAGS ({}))\r\n",
+                    i + 1,
+                    flags.join(" ")
+                );
+            }
+        }
+        *self = now;
+        out
+    }
 }
 
 enum Next {
@@ -440,6 +530,7 @@ async fn serve(
         selected: None,
         writable: false,
         condstore_enabled: false,
+        view: None,
     };
     if lock(&state).faults.preauth {
         session.authenticated = true;
@@ -634,6 +725,9 @@ fn capabilities(state: &ServerState, session: &Session) -> String {
     if state.faults.move_command {
         caps.push("MOVE");
     }
+    if state.faults.idle {
+        caps.push("IDLE");
+    }
     caps.join(" ")
 }
 
@@ -727,6 +821,7 @@ async fn handle(
             }
         }
         _ if !session.authenticated => out += &format!("{tag} NO Not authenticated\r\n"),
+        "IDLE" if lock(state).faults.idle => return idle(io, session, state, &tag).await,
         "LIST" => {
             let st = lock(state);
             for mb in &st.mailboxes {
@@ -747,6 +842,7 @@ async fn handle(
                 {
                     let mb = &st.mailboxes[i];
                     session.selected = Some(i);
+                    session.view = Some(View::of(mb));
                     session.writable = command == "SELECT";
                     session.condstore_enabled = st.faults.condstore
                         && args
@@ -768,6 +864,7 @@ async fn handle(
                 }
                 _ => {
                     session.selected = None;
+                    session.view = None;
                     out += &format!("{tag} NO Mailbox doesn't exist: {name}\r\n");
                 }
             }
@@ -867,6 +964,8 @@ async fn handle(
                 }
                 Some(i) => {
                     out += &change(st, i, &command, args, &tag);
+                    // Its own changes are in the answer (or silent, as asked).
+                    session.view = Some(View::of(&st.mailboxes[i]));
                     if std::mem::take(&mut st.faults.drop_after_change) {
                         return Ok(Next::Close);
                     }
@@ -922,13 +1021,111 @@ async fn handle(
         }
         _ => out += &format!("{tag} BAD Unknown command\r\n"),
     }
-    let out = garble(
-        &mut lock(state),
-        fetched.unwrap_or_else(|| out.into_bytes()),
-    );
+    let mut out = fetched.unwrap_or_else(|| out.into_bytes());
+    if !matches!(command.as_str(), "EXAMINE" | "SELECT" | "LOGOUT") {
+        let arrived = new_messages(session, &lock(state));
+        insert_before_last_line(&mut out, arrived.as_bytes());
+    }
+    let out = garble(&mut lock(state), out);
     io.get_mut().write_all(&out).await?;
     io.get_mut().flush().await?;
     Ok(next)
+}
+
+/// `* n EXISTS` if messages arrived in the selected mailbox since the connection was last
+/// told, as servers report new mail with the answer to any command. (Other changes wait
+/// for IDLE: a server can't announce expunges during FETCH, STORE or SEARCH.)
+fn new_messages(session: &mut Session, st: &ServerState) -> String {
+    let (Some(i), Some(view)) = (session.selected, &mut session.view) else {
+        return String::new();
+    };
+    let Some(mb) = st.mailboxes.get(i) else {
+        return String::new();
+    };
+    let new: Vec<_> = mb
+        .messages
+        .iter()
+        .filter(|m| m.uid > view.messages.last().map_or(0, |(u, _)| *u))
+        .map(|m| (m.uid, m.flags.clone()))
+        .collect();
+    if new.is_empty() || mb.uidvalidity != view.uidvalidity {
+        return String::new();
+    }
+    view.messages.extend(new);
+    format!("* {} EXISTS\r\n", view.messages.len())
+}
+
+/// Inserts `lines` before the last line of `out`, the tagged answer.
+fn insert_before_last_line(out: &mut Vec<u8>, lines: &[u8]) {
+    if lines.is_empty() {
+        return;
+    }
+    let body = &out[..out.len().saturating_sub(2)];
+    let at = body
+        .windows(2)
+        .rposition(|w| w == b"\r\n")
+        .map_or(0, |i| i + 2);
+    out.splice(at..at, lines.iter().copied());
+}
+
+/// IDLE until DONE: reports changes to the selected mailbox as they happen. A new
+/// UIDVALIDITY ends the connection with BYE, as Dovecot does; so does
+/// [`ServerState::drop_open_connections`] (without the BYE).
+async fn idle(
+    io: &mut BufReader<Box<dyn Stream>>,
+    session: &mut Session,
+    state: &Arc<Mutex<ServerState>>,
+    tag: &str,
+) -> std::io::Result<Next> {
+    io.get_mut().write_all(b"+ idling\r\n").await?;
+    io.get_mut().flush().await?;
+    if lock(state).faults.drop_on_idle {
+        return Ok(Next::Close);
+    }
+    loop {
+        let (out, next) = {
+            let st = lock(state);
+            if session.id <= st.dropped_through {
+                return Ok(Next::Close);
+            }
+            match (
+                session.selected.and_then(|i| st.mailboxes.get(i)),
+                &mut session.view,
+            ) {
+                (Some(mb), Some(view)) if mb.uidvalidity != view.uidvalidity => {
+                    ("* BYE UIDVALIDITY changed\r\n".to_owned(), Next::Close)
+                }
+                (Some(mb), Some(view)) => (view.catch_up(View::of(mb)), Next::Continue),
+                _ => (String::new(), Next::Continue),
+            }
+        };
+        if !out.is_empty() {
+            io.get_mut().write_all(out.as_bytes()).await?;
+            io.get_mut().flush().await?;
+        }
+        if let Next::Close = next {
+            return Ok(next);
+        }
+        // `fill_buf` keeps what it read if the timer wins.
+        tokio::select! {
+            ready = io.fill_buf() => {
+                if ready?.is_empty() {
+                    return Ok(Next::Close);
+                }
+                let mut line = String::new();
+                io.read_line(&mut line).await?;
+                let answer = if line.trim_end().eq_ignore_ascii_case("DONE") {
+                    format!("{tag} OK IDLE terminated\r\n")
+                } else {
+                    format!("{tag} BAD Expected DONE\r\n")
+                };
+                io.get_mut().write_all(answer.as_bytes()).await?;
+                io.get_mut().flush().await?;
+                return Ok(Next::Continue);
+            }
+            () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+        }
+    }
 }
 
 /// STORE, COPY, MOVE and EXPUNGE (all but the last by UID) on mailbox `selected`.

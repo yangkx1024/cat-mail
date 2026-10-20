@@ -61,8 +61,10 @@ touch -d @1792300000 "$maildir/new/1792200005.fixture05" # its INTERNALDATE, 202
 cp "$fixtures/01-plain.eml"        "$maildir/.Archive.2026/cur/1792100000.archived:2,S"
 
 # `catmail` has the fixtures (tests/dovecot.rs); `sender` sends through submission
-# (tests/submission.rs), so the two never change the same mailbox.
-for user in catmail sender; do
+# (tests/submission.rs), so the two never change the same mailbox; `push` gets mail
+# delivered while a client idles on its INBOX (tests/dovecot.rs).
+mkfolder "$work/mail/push/Maildir"
+for user in catmail sender push; do
     echo "$user:{PLAIN}$user:$(id -u):$(id -g)::$work/mail/$user::"
 done > "$work/users"
 sed -e "s|@WORK@|$work|g" -e "s|@RUN@|$run|g" -e "s|@PORT@|$port|g" \

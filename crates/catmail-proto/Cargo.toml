@@ -19,7 +19,7 @@ nom.workspace = true
 rustls.workspace = true
 rustls-platform-verifier.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["io-util", "net", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "time"] }
 tokio-rustls.workspace = true
 tracing.workspace = true
 url.workspace = true

@@ -12,7 +12,7 @@
 |---|---|---|
 | Frontends | `catmail-cli`、`catmail-gui` | 命令行（clap）；图形界面（gpui-kit） |
 | Facade | `catmail-core` | `MailClient`：async 方法 + 事件订阅，前端唯一依赖 |
-| Services / Engine | `catmail-core` | 同步、操作队列回放、按需下载、Outbox；每账户状态；运行时桥接；凭据 |
+| Services / Engine | `catmail-core` | 同步、后台同步（IDLE）、操作队列回放、按需下载、Outbox；每账户状态；运行时桥接；凭据 |
 | Storage | `catmail-store` | SQLite schema 与迁移、事务化 Repository、FTS5、内容寻址 `BlobStore`；全部同步 API |
 | Protocol | `catmail-proto` | IMAP（imap-next）、SMTP（自己实现）、MIME 解析（mail-parser）与构建（mail-builder）、HTML 清洗 |
 | Domain | `catmail-types` | `Account`、`Folder`、`MessageSummary`、`Flags`、`Event`、ID 类型；纯数据，无 IO |
@@ -85,13 +85,16 @@ UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UI
 
 ### 每账户状态
 
-引擎为每个账户保留一份 `AccountState`：同步锁（同步与操作回放串行）、发送锁（同一条 outbox
-不会被同时处理）、按需下载用的小连接池、"已删除"标记。删除账户时先置标记、清空连接池，进行中
+引擎为每个账户保留一份 `AccountState`：同步锁（同步、操作回放与后台同步的每一步串行）、发送锁
+（同一条 outbox 不会被同时处理）、按需下载用的小连接池、唤醒后台同步的信号、"已删除"标记。删除账户时先置标记、清空连接池，进行中
 的同步和下载立即返回 `Error::Cancelled`，不用等网络超时，然后才删除数据；这份状态作为墓碑
 保留（账户 id 不复用），之后对它的任何操作立即取消。
 
-目标形态是每账户一个 actor（1 条 IDLE 连接 + 1~2 条工作连接，通过 mpsc 接收命令），接管
-同步、后台回放和连接池。
+开启后台同步（GUI、`catmail watch`）时，每个账户还有一个后台任务和它自己的一条连接：定时同步全部
+文件夹，其间在 INBOX 上 IDLE（服务器不支持时轮询），本地改动入队后立即回放（见
+[同步 / 后台同步](architecture/sync.md#后台同步与-idle)）。它与手动操作共用上面这些锁，而不是做成独占
+全部连接、经 mpsc 接收命令的 actor：门面的方法已经按锁串行，按需下载有连接池，都经一个 actor 转发
+不增加任何保证，反而让打开邮件排在同步后面。
 
 ### 安全边界
 

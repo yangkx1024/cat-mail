@@ -8,6 +8,7 @@ mod testenv;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use catmail_core::{
     AccountId, Address, DraftContent, Flags, FolderRole, MailClient, MessageSummary, OutboxStatus,
@@ -435,4 +436,71 @@ async fn check_bodies(client: &MailClient, inbox: &[MessageSummary]) {
         .await
         .unwrap();
     assert_eq!(found.len(), 1);
+}
+
+/// Background sync: mail delivered to INBOX while the client idles on it shows up without
+/// a sync. In the `push` user's mailbox, so it doesn't disturb the fixtures.
+#[tokio::test(flavor = "multi_thread")]
+async fn new_mail_is_pushed_by_dovecot() {
+    let Some(env) = testenv::testenv() else {
+        return;
+    };
+    // `<work>/mail/catmail/Maildir` → `<work>/mail/push/Maildir`.
+    let maildir = env
+        .maildir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("push/Maildir");
+    let dir = tempfile::tempdir().unwrap();
+    let schedule = catmail_core::SyncSchedule {
+        full_sync: Duration::from_secs(3600),
+        idle: Duration::from_secs(3600),
+        ..Default::default()
+    };
+    let client = MailClient::builder(catmail_core::Config::with_data_dir(dir.path()))
+        .runtime(tokio::runtime::Handle::current())
+        .secrets(std::sync::Arc::new(catmail_core::MemorySecrets::default()))
+        .sync_in_background(Some(schedule))
+        .open()
+        .unwrap();
+    let mut events = client.subscribe();
+    let account = add_account(
+        &client,
+        "push",
+        "push",
+        None,
+        None,
+        env.imap.clone(),
+        env.imap,
+    )
+    .await;
+
+    // Synced once, and given a moment to start idling.
+    let inbox = loop {
+        events.recv().await.unwrap();
+        if let Some(inbox) = client.find_folder(account, "INBOX").await.unwrap() {
+            break inbox;
+        }
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let subject = run_tag();
+    fs::write(maildir.join("new").join(&subject), message(&subject)).unwrap();
+    // Dovecot notices at once with inotify, else within mailbox_idle_check_interval (30 s).
+    let arrived = tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            let messages = client.list_messages(inbox.id, 100, 0).await.unwrap();
+            if messages
+                .iter()
+                .any(|m| m.subject.as_deref() == Some(&subject))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    assert!(arrived.is_ok(), "the new message never showed up");
 }

@@ -669,3 +669,104 @@ async fn refused_changes_leave_the_connection_usable() {
     assert!(matches!(err, Error::Command { .. }), "{err}");
     assert_eq!(session.uid_search_all().await.unwrap(), [1, 2, 3]);
 }
+
+/// Runs IDLE until the server reports a change, making `change` once the server has
+/// received the `n`-th IDLE.
+async fn idle_while(
+    fake: &FakeImap,
+    session: &mut Session,
+    n: usize,
+    change: impl FnOnce(&mut ServerState),
+) -> catmail_proto::imap::Result<bool> {
+    let (result, ()) = tokio::join!(session.idle(std::future::pending(), TIMEOUT), async {
+        fake.wait_until(|st| st.received("IDLE") >= n).await;
+        change(&mut fake.state());
+    });
+    result
+}
+
+#[tokio::test]
+async fn idle_reports_changes_until_stopped() {
+    let fake = FakeImap::start(three_messages()).await;
+    let mut session = login(&fake).await;
+    assert!(session.can_idle());
+    session.examine("INBOX").await.unwrap();
+
+    // New mail.
+    let arrive = |st: &mut ServerState| {
+        st.inbox().append_simple("four");
+    };
+    assert!(idle_while(&fake, &mut session, 1, arrive).await.unwrap());
+    assert_eq!(session.uid_search_all().await.unwrap(), [1, 2, 3, 4]);
+
+    // Another client's flag change, then an expunge.
+    session.examine("INBOX").await.unwrap();
+    let flag = |st: &mut ServerState| st.inbox().set_flags(2, &["\\Seen"]);
+    assert!(idle_while(&fake, &mut session, 2, flag).await.unwrap());
+    session.examine("INBOX").await.unwrap();
+    let expunge = |st: &mut ServerState| st.inbox().expunge(1);
+    assert!(idle_while(&fake, &mut session, 3, expunge).await.unwrap());
+
+    // Nothing happens: `stop` or `max` ends it, and the connection goes on.
+    session.examine("INBOX").await.unwrap();
+    let stop = tokio::time::sleep(Duration::from_millis(50));
+    assert!(!session.idle(stop, TIMEOUT).await.unwrap());
+    assert!(
+        !session
+            .idle(std::future::pending(), Duration::from_millis(50))
+            .await
+            .unwrap()
+    );
+    assert_eq!(session.uid_search_all().await.unwrap(), [2, 3, 4]);
+    assert_eq!(fake.state().received("DONE"), 0, "DONE is not a command");
+    assert_eq!(fake.state().received("IDLE"), 5);
+}
+
+#[tokio::test]
+async fn idle_returns_at_once_for_changes_reported_earlier() {
+    let fake = FakeImap::start(three_messages()).await;
+    let mut session = login(&fake).await;
+    session.examine("INBOX").await.unwrap();
+    fake.state().inbox().append_simple("four");
+    // The server mentions the new message in passing, with the answer to the SEARCH.
+    assert_eq!(session.uid_search_all().await.unwrap(), [1, 2, 3, 4]);
+    assert!(session.idle(std::future::pending(), TIMEOUT).await.unwrap());
+    assert_eq!(fake.state().received("IDLE"), 0);
+
+    // Opening the mailbox again starts afresh.
+    session.examine("INBOX").await.unwrap();
+    let stop = tokio::time::sleep(Duration::from_millis(50));
+    assert!(!session.idle(stop, TIMEOUT).await.unwrap());
+}
+
+#[tokio::test]
+async fn idle_ends_with_the_connection() {
+    let fake = FakeImap::start(three_messages()).await;
+    let mut session = login(&fake).await;
+    session.examine("INBOX").await.unwrap();
+    let drop = ServerState::drop_open_connections;
+    let err = idle_while(&fake, &mut session, 1, drop).await.unwrap_err();
+    assert!(err.is_disconnected(), "{err:?}");
+
+    // A new UIDVALIDITY ends it with BYE.
+    let mut session = login(&fake).await;
+    session.examine("INBOX").await.unwrap();
+    let reset = |st: &mut ServerState| st.inbox().reset_uidvalidity(9);
+    let err = idle_while(&fake, &mut session, 2, reset).await.unwrap_err();
+    assert!(matches!(err, Error::Bye(_)), "{err:?}");
+}
+
+#[tokio::test]
+async fn idle_needs_server_support() {
+    let mut state = three_messages();
+    state.faults.idle = false;
+    let fake = FakeImap::start(state).await;
+    let mut session = login(&fake).await;
+    session.examine("INBOX").await.unwrap();
+    assert!(!session.can_idle());
+    let err = session
+        .idle(std::future::pending(), TIMEOUT)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Unsupported("IDLE")), "{err:?}");
+}

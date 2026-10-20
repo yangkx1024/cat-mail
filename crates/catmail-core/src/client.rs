@@ -18,6 +18,7 @@ use uuid::Uuid;
 use crate::engine::{Engine, blocking, now};
 use crate::runtime::Runtime;
 use crate::secrets::{KeyringSecrets, SecretStore};
+use crate::watch::{self, SyncSchedule};
 use crate::{Config, Error, Result, auth, body, connection, drafts, ops, send, sync};
 
 const EVENT_CAPACITY: usize = 256;
@@ -41,6 +42,7 @@ pub struct MailClientBuilder {
     secrets: Option<Arc<dyn SecretStore>>,
     tls: Option<TlsConfig>,
     send_in_background: bool,
+    sync_in_background: Option<SyncSchedule>,
 }
 
 impl MailClientBuilder {
@@ -72,6 +74,17 @@ impl MailClientBuilder {
         self
     }
 
+    /// Keep every account in sync in the background for as long as the client exists
+    /// [default: off]: all folders now and then, INBOX as it changes (pushed by the
+    /// server with IDLE, else checked often), and changes to messages made on the server
+    /// as soon as they are queued. For long-running frontends; a short-lived one calls
+    /// [`MailClient::sync_account`] and [`MailClient::replay_pending`] instead. The
+    /// [`SyncSchedule`] says how often, `SyncSchedule::default()` for the usual.
+    pub fn sync_in_background(mut self, schedule: Option<SyncSchedule>) -> Self {
+        self.sync_in_background = schedule;
+        self
+    }
+
     /// Locks the data directory, empties [`Config::handoff_dir`], then opens the database
     /// (migrating it if needed) and the blob store. Blocks briefly. Fails with
     /// [`Error::AlreadyRunning`] if another engine, in this or another process, has the
@@ -93,29 +106,42 @@ impl MailClientBuilder {
                 "requeued sends interrupted before the message ended"
             );
         }
+        // Read now: no account can be added before the client exists.
+        let watched = match self.sync_in_background {
+            Some(_) => store.read(|db| db.accounts().list())?,
+            None => Vec::new(),
+        };
         let blobs = BlobStore::open(self.config.blob_dir())?;
         let secrets = self
             .secrets
             .unwrap_or_else(|| Arc::new(KeyringSecrets::default()));
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
 
+        let mut engine = Engine::new(
+            self.config,
+            data_dir_lock,
+            store,
+            blobs,
+            secrets,
+            events,
+            self.tls,
+        );
+        engine.sync_in_background = self.sync_in_background;
         let client = MailClient {
             rt: Arc::new(rt),
-            engine: Arc::new(Engine::new(
-                self.config,
-                data_dir_lock,
-                store,
-                blobs,
-                secrets,
-                events,
-                self.tls,
-            )),
+            engine: Arc::new(engine),
         };
         if self.send_in_background {
             client.rt.spawn(send::worker(
                 Arc::downgrade(&client.engine),
                 client.engine.outbox_kick.clone(),
             ));
+        }
+        if let Some(schedule) = self.sync_in_background {
+            for account in watched {
+                let engine = Arc::downgrade(&client.engine);
+                client.rt.spawn(watch::run(engine, account.id, schedule));
+            }
         }
         Ok(client)
     }
@@ -129,6 +155,7 @@ impl MailClient {
             secrets: None,
             tls: None,
             send_in_background: false,
+            sync_in_background: None,
         }
     }
 
@@ -221,6 +248,7 @@ impl MailClient {
                 engine.emit(Event::AccountAdded {
                     account: account.id,
                 });
+                watch::spawn(&engine, account.id);
                 Ok(account)
             })
             .await
@@ -352,9 +380,10 @@ impl MailClient {
 
     /// Sets `add` and clears `remove` (`\Seen`, `\Flagged`, `\Answered`) on the
     /// messages. The change is made locally at once and reaches the server at the next
-    /// sync or [`replay_pending`](Self::replay_pending); one the server refuses is
-    /// undone. Fails, changing nothing, if a message doesn't exist. Returns the accounts
-    /// whose messages changed.
+    /// sync or [`replay_pending`](Self::replay_pending), or right away with
+    /// [`sync_in_background`](MailClientBuilder::sync_in_background); one the server
+    /// refuses is undone. Fails, changing nothing, if a message doesn't exist. Returns
+    /// the accounts whose messages changed.
     pub async fn set_flags(
         &self,
         messages: Vec<MessageId>,
