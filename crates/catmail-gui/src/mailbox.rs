@@ -697,6 +697,12 @@ mod tests {
             window.click(("message", hello.0 as u64), cx);
         })
         .unwrap();
+        // The body downloads on the engine's threads; a sync finishing first must not be
+        // taken for the reader losing it.
+        wait_until(|| {
+            cx.run_until_parked();
+            cx.read(|cx| shown_in_reader(&mailbox, cx) == Some(hello))
+        });
         let unread = |cx: &App| {
             let mailbox = mailbox.read(cx);
             let folder = mailbox.selected_folder.unwrap();
