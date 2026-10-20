@@ -228,6 +228,9 @@ pub struct Faults {
     /// When the next UID COPY arrives, first add this message to the mailbox with this
     /// name, as another client might right then. Fires once.
     pub deliver_before_copy: Option<(String, Vec<u8>)>,
+    /// Answer COPY and MOVE with `[COPYUID <this>]` instead of the true one, e.g.
+    /// `"1 1:4294967295 1:4294967295"`.
+    pub forged_copyuid: Option<String>,
     /// Advertise IDLE, and report changes to the selected mailbox while idling.
     pub idle: bool,
     /// Accept every IDLE, then close the connection, as a misbehaving proxy might.
@@ -273,6 +276,7 @@ impl Default for Faults {
             drop_before_change: false,
             drop_after_expunge: false,
             deliver_before_copy: None,
+            forged_copyuid: None,
             idle: true,
             drop_on_idle: false,
             end_idle_early: false,
@@ -1251,7 +1255,9 @@ fn change(st: &mut ServerState, selected: usize, command: &str, args: &[Tok], ta
                     .collect::<Vec<_>>()
                     .join(",")
             };
-            let code = if st.faults.uidplus && !uids.is_empty() {
+            let code = if let Some(forged) = &st.faults.forged_copyuid {
+                format!("[COPYUID {forged}] ")
+            } else if st.faults.uidplus && !uids.is_empty() {
                 format!(
                     "[COPYUID {} {} {}] ",
                     st.mailboxes[target].uidvalidity,

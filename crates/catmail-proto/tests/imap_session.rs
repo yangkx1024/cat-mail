@@ -657,6 +657,29 @@ async fn changes_flags_moves_and_deletes() {
 }
 
 #[tokio::test]
+async fn ignores_a_copyuid_naming_more_uids_than_were_moved() {
+    let fake = FakeImap::start(three_messages()).await;
+    let mut session = login(&fake).await;
+    session.select("INBOX").await.unwrap();
+
+    // Expanded, these ranges would be two 16 GiB vectors: the process would abort.
+    fake.state().faults.forged_copyuid = Some("9 1:4294967295 1:4294967295".into());
+    assert_eq!(session.uid_move(&[1], "Archive").await.unwrap(), None);
+    // The sets pair up, but name UIDs that weren't asked for.
+    fake.state().faults.forged_copyuid = Some("9 2:3 5:6".into());
+    assert_eq!(session.uid_copy(&[2], "Archive").await.unwrap(), None);
+    // Within bounds, a range is paired in order, whichever end comes first.
+    fake.state().faults.forged_copyuid = Some("9 3:2 7,6".into());
+    assert_eq!(
+        session.uid_copy(&[2, 3], "Archive").await.unwrap(),
+        Some(CopyUid {
+            uidvalidity: 9,
+            uids: vec![(2, 7), (3, 6)]
+        })
+    );
+}
+
+#[tokio::test]
 async fn copies_and_deletes_without_move_or_uidplus() {
     let mut state = three_messages();
     state.faults.move_command = false;
