@@ -184,7 +184,7 @@ impl Mailbox {
                     .ghost()
                     .small()
                     .icon(Hero::FolderArrowDown)
-                    .tooltip_with_action("Move to…", &MoveToFolder, context)
+                    .tooltip_with_action("Move to", &MoveToFolder, context)
                     .on_click(cx.listener(|this, _, window, cx| this.move_to_folder(window, cx))),
             )
             .child(

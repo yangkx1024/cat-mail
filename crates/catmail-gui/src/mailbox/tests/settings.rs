@@ -105,7 +105,7 @@ fn cancel_is_off_once_signing_in_has_started(cx: &mut TestAppContext) {
     // Settings › Accounts › Add account.
     open_settings(cx, window);
     cx.update_window(window, |_, window, cx| {
-        window.click(("settings-section", 1u64), cx);
+        window.click("settings-sections-1", cx);
         window.render_frame(cx);
         window.click("settings-add-account", cx);
     })

@@ -4,63 +4,48 @@ use catmail_core::{Draft, Flags, MessageSummary, OutboxEntry, OutboxStatus};
 use gpui_kit::component::Icon;
 use gpui_kit::component::list::ListItem;
 use gpui_kit::component::{h_flex, v_flex};
-use gpui_kit::{App, FontWeight, Hsla, IntoElement, SharedString, div};
+use gpui_kit::{App, FontWeight, IntoElement, SharedString, div};
 
 use crate::assets::Hero;
 use crate::format;
 
 use super::*;
 
-/// Every row has the same three lines: the list requires one row height. The leading
-/// lane holds the unread dot; it is there (empty) on read rows too, so text lines up.
+/// Every row has the same three lines: the list requires one row height. The time is
+/// all a row says of when: its day is the heading above it.
 fn three_lines(
-    dot: Option<Hsla>,
     top: (SharedString, SharedString, bool),
     middle: impl IntoElement,
     bottom: impl IntoElement,
     cx: &App,
 ) -> impl IntoElement {
     let (title, trailing, strong) = top;
-    h_flex()
+    v_flex()
         .w_full()
-        .items_start()
-        .gap_2()
+        .min_w_0()
+        .gap_0p5()
         .child(
-            div().flex_none().w_2().pt_2().child(
-                div()
-                    .size_1p5()
-                    .rounded_full()
-                    .when_some(dot, |this, color| this.bg(color)),
-            ),
-        )
-        .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .gap_0p5()
+            h_flex()
+                .gap_2()
                 .child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_sm()
-                                .when(strong, |this| this.font_weight(FontWeight::SEMIBOLD))
-                                .child(title),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(trailing),
-                        ),
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_sm()
+                        .when(strong, |this| this.font_weight(FontWeight::BOLD))
+                        .child(title),
                 )
-                .child(middle)
-                .child(bottom),
+                .child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(trailing),
+                ),
         )
+        .child(middle)
+        .child(bottom)
 }
 
 fn snippet(text: Option<&str>, cx: &App) -> impl IntoElement + use<> {
@@ -81,7 +66,7 @@ pub(super) fn message_row(message: &MessageSummary, cx: &App) -> ListItem {
     let flagged = message.flags.contains(Flags::FLAGGED);
     let sender = format::sender(&message.from);
     let subject = format::subject(message.subject.as_deref());
-    let date = format::short_date(message.date);
+    let date = format::time(message.date);
     let muted = cx.theme().muted_foreground;
     let label = format!(
         "{sender}, {subject}, {date}{}{}{}",
@@ -101,7 +86,8 @@ pub(super) fn message_row(message: &MessageSummary, cx: &App) -> ListItem {
                 .min_w_0()
                 .truncate()
                 .text_sm()
-                .when(unread, |this| this.font_weight(FontWeight::SEMIBOLD))
+                // Unread is told by weight alone: sender and subject in bold.
+                .when(unread, |this| this.font_weight(FontWeight::BOLD))
                 .child(subject),
         )
         .when(message.has_attachments, |this| {
@@ -117,7 +103,6 @@ pub(super) fn message_row(message: &MessageSummary, cx: &App) -> ListItem {
     ListItem::new(("message", message.id.0 as u64))
         .accessibility_label(label)
         .child(three_lines(
-            unread.then(|| cx.theme().primary),
             (sender.into(), date.into(), unread),
             middle,
             snippet(message.snippet.as_deref(), cx),
@@ -133,7 +118,7 @@ pub(super) fn draft_row(draft: &Draft, cx: &App) -> ListItem {
         format!("To {to}")
     };
     let subject = format::subject(Some(&draft.content.subject));
-    let date = format::short_date(Some(draft.updated_at));
+    let date = format::time(Some(draft.updated_at));
     let muted = cx.theme().muted_foreground;
     let middle = h_flex()
         .gap_1p5()
@@ -142,7 +127,6 @@ pub(super) fn draft_row(draft: &Draft, cx: &App) -> ListItem {
             this.child(Icon::new(Hero::PaperClip).xsmall().text_color(muted))
         });
     ListItem::new(("draft", draft.id.0 as u64)).child(three_lines(
-        None,
         (to.into(), date.into(), false),
         middle,
         snippet(Some(&draft.content.text), cx),
@@ -173,7 +157,7 @@ pub(super) fn outbox_row(entry: &OutboxEntry, cx: &App) -> ListItem {
     let (status, severity) = outbox_status(entry);
     let to = format!("To {}", entry.recipients.join(", "));
     let subject = format::subject(Some(&entry.subject));
-    let date = format::short_date(Some(entry.created_at));
+    let date = format::time(Some(entry.created_at));
     let theme = cx.theme();
     let (bg, fg) = match severity {
         Some(Severity::Warning) => theme.warning_badge(),
@@ -184,7 +168,6 @@ pub(super) fn outbox_row(entry: &OutboxEntry, cx: &App) -> ListItem {
     ListItem::new(("outbox", entry.id.0 as u64))
         .accessibility_label(format!("{subject}, {to}, {status}"))
         .child(three_lines(
-            None,
             (subject.into(), date.into(), severity.is_some()),
             div()
                 .truncate()

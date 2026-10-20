@@ -175,7 +175,7 @@ fn apply(cx: &mut App) {
         themes
             .find(name)
             .or_else(|| themes.find(fallback))
-            .map(|e| e.config.clone())
+            .map(|e| Rc::new(crate::fonts::with_ui_font(&e.config)))
     };
     let (Some(light), Some(dark)) = (
         pick(&settings.light_theme, DEFAULT_LIGHT),

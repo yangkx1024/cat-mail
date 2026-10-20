@@ -610,3 +610,100 @@ async fn incomplete_examine_never_deletes_local_messages() {
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_folder_brings_one_folder_up_to_date() {
+    let mut state = state_with(&["one"]);
+    state.mailboxes.push(FakeMailbox::new("Archive"));
+    state.mailbox_mut("Archive").append_simple("old");
+    let env = env(state).await;
+    env.sync().await;
+    let archive = env.folder("Archive").await.id;
+    {
+        let mut st = env.fake.state();
+        st.inbox().append_simple("two");
+        st.mailbox_mut("Archive").append_simple("new");
+    }
+    // A change made here goes to the server first, as in a full sync.
+    let old = env.id_of("Archive", "old").await;
+    env.client
+        .set_flags(vec![old], Flags::SEEN, Flags::empty())
+        .await
+        .unwrap();
+
+    let report = env
+        .client
+        .sync_folder(archive, Duration::ZERO)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (report.added, report.ops_applied, report.error),
+        (1, 1, None)
+    );
+    assert_eq!(env.subjects("Archive").await, ["new", "old"]);
+    assert_eq!(
+        env.fake.state().mailbox_mut("Archive").messages[0].flags,
+        ["\\Seen"]
+    );
+    assert_eq!(
+        env.subjects("INBOX").await,
+        ["one"],
+        "only the folder asked for"
+    );
+
+    // Synced just now: nothing to do, not even a connection's worth.
+    let start = env.fake.state().log.len();
+    let skipped = env
+        .client
+        .sync_folder(archive, Duration::from_secs(60))
+        .await;
+    assert_eq!(skipped.unwrap(), None);
+    assert!(env.commands_since(start).is_empty());
+
+    let missing = catmail_core::FolderId(archive.0 + 100);
+    assert!(matches!(
+        env.client.sync_folder(missing, Duration::ZERO).await,
+        Err(Error::FolderNotFound(id)) if id == missing
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_folder_reports_a_folder_the_server_refuses() {
+    let mut state = state_with(&["one"]);
+    state.mailboxes.push(FakeMailbox::new("Archive"));
+    let env = env(state).await;
+    env.sync().await;
+    let archive = env.folder("Archive").await.id;
+    // Deleted on the server since the last LIST: EXAMINE fails, the call doesn't.
+    env.fake.state().mailboxes.retain(|m| m.name != "Archive");
+
+    let report = env
+        .client
+        .sync_folder(archive, Duration::ZERO)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(report.error.is_some(), "{report:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_skipped_folder_sync_leaves_the_account_status_alone() {
+    let mut state = state_with(&["one"]);
+    state.mailboxes.push(FakeMailbox::new("Archive"));
+    let env = env(state).await;
+    env.sync().await;
+    let archive = env.folder("Archive").await.id;
+    env.fake.state().faults.reject_login = true;
+    assert!(env.client.sync_account(env.account).await.is_err());
+    assert!(env.client.account_status(env.account).sync.is_some());
+
+    // Synced just now, so not looked at: that says nothing about the server.
+    let skipped = env
+        .client
+        .sync_folder(archive, Duration::from_secs(60))
+        .await;
+    assert_eq!(skipped.unwrap(), None);
+    let problem = env.client.account_status(env.account).sync;
+    assert!(problem.is_some_and(|p| p.auth_failed));
+}

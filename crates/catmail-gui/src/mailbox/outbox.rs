@@ -91,7 +91,7 @@ impl Mailbox {
                         .child(
                             Button::new("send-again")
                                 .outline()
-                                .label("Send again…")
+                                .label("Send again")
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.confirm_send_again(id, window, cx)
                                 })),

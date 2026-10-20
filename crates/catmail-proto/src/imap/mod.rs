@@ -3,6 +3,7 @@
 mod body;
 mod connection;
 mod error;
+mod quirks;
 mod session;
 mod types;
 pub mod utf7;

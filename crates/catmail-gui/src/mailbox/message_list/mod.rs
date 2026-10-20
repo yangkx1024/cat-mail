@@ -1,7 +1,7 @@
 //! The middle pane: a folder's messages (loaded a page at a time as the list scrolls),
-//! search results, the drafts kept here, or what is waiting in the outbox. The list
-//! (`ListState`) owns selection, keyboard navigation and scrolling; the delegate here
-//! owns the rows.
+//! search results, the drafts kept here, or what is waiting in the outbox, newest first
+//! under a heading for each day. The list (`ListState`) owns selection, keyboard
+//! navigation and scrolling; the delegate here owns the rows.
 
 use std::rc::Rc;
 
@@ -13,10 +13,12 @@ use gpui_kit::component::list::{ListDelegate, ListEvent, ListItem, ListState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, IndexPath, Sizable as _, WindowExt as _};
 use gpui_kit::{
-    App, Context, IntoElement, ParentElement as _, Styled as _, Task, Window,
-    prelude::FluentBuilder as _,
+    App, Context, FontWeight, IntoElement, ParentElement as _, SharedString, Styled as _, Task,
+    Window, div, prelude::FluentBuilder as _,
 };
+use jiff::civil::Date;
 
+use crate::format::Calendar;
 use crate::theme::colors::ThemeColors as _;
 
 mod rows;
@@ -68,12 +70,86 @@ impl Row {
             _ => None,
         }
     }
+
+    /// When it happened, as far as the list goes: a message's date, when a draft was last
+    /// changed, when an entry was put in the outbox.
+    fn date(&self) -> Option<i64> {
+        match self {
+            Row::Message(m) => m.date,
+            Row::Draft(d) => Some(d.updated_at),
+            Row::Outbox(e) => Some(e.created_at),
+        }
+    }
+}
+
+/// A run of rows from the same day, shown under its heading.
+#[derive(Debug, Clone)]
+struct Day {
+    day: Option<Date>,
+    label: SharedString,
+    start: usize,
+    len: usize,
+}
+
+/// The rows grouped by day: the list's sections. Rows are counted top to bottom
+/// (`flat`), the list counts within a section (`IndexPath`).
+#[derive(Debug, Default)]
+struct Days(Vec<Day>);
+
+impl Days {
+    fn new(rows: &[Row]) -> Self {
+        let mut days = Self::default();
+        days.extend(rows, 0);
+        days
+    }
+
+    /// Groups `rows[from..]`, the rows after those already grouped. The rows are newest
+    /// first, so a day is one run; if they weren't, a day would just get a heading more
+    /// than once.
+    fn extend(&mut self, rows: &[Row], from: usize) {
+        let calendar = Calendar::now();
+        for (ix, row) in rows.iter().enumerate().skip(from) {
+            let day = calendar.day(row.date());
+            match self.0.last_mut() {
+                Some(last) if last.day == day => last.len += 1,
+                _ => self.0.push(Day {
+                    day,
+                    label: calendar.heading(day).into(),
+                    start: ix,
+                    len: 1,
+                }),
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn get(&self, section: usize) -> Option<&Day> {
+        self.0.get(section)
+    }
+
+    fn flat(&self, ix: IndexPath) -> Option<usize> {
+        let day = self.0.get(ix.section)?;
+        (ix.row < day.len).then_some(day.start + ix.row)
+    }
+
+    fn path(&self, flat: usize) -> Option<IndexPath> {
+        let section = self.0.partition_point(|d| d.start <= flat).checked_sub(1)?;
+        let row = flat - self.0[section].start;
+        (row < self.0[section].len).then(|| IndexPath::new(row).section(section))
+    }
 }
 
 pub struct MessageList {
     client: MailClient,
     source: Option<Source>,
+    /// Indexed as shown, top to bottom; `selected` too. The list itself counts by
+    /// section (`IndexPath`).
     rows: Vec<Row>,
+    /// Regrouped whenever `rows` changes.
+    days: Days,
     selected: Option<usize>,
     /// A page is being fetched; `load_more` and `refresh` wait for it.
     loading: bool,
@@ -94,6 +170,7 @@ impl MessageList {
             client,
             source: None,
             rows: Vec::new(),
+            days: Days::default(),
             selected: None,
             loading: false,
             stale: false,
@@ -104,8 +181,8 @@ impl MessageList {
         }
     }
 
-    pub fn row(&self, ix: usize) -> Option<&Row> {
-        self.rows.get(ix)
+    pub fn row_at(&self, ix: IndexPath) -> Option<&Row> {
+        self.rows.get(self.days.flat(ix)?)
     }
 
     pub fn source(&self) -> Option<&Source> {
@@ -125,11 +202,6 @@ impl MessageList {
         &self.rows
     }
 
-    #[cfg(test)]
-    pub fn message(&self, ix: usize) -> Option<&MessageSummary> {
-        self.rows.get(ix)?.message()
-    }
-
     /// Selects the next row once `id`, the selected message, goes away.
     pub fn expect_removal(&mut self, id: MessageId) {
         self.removing = Some(id);
@@ -146,6 +218,7 @@ pub fn show(
     let delegate = list.delegate_mut();
     delegate.source = source;
     delegate.rows.clear();
+    delegate.days = Days::default();
     delegate.has_more = false;
     delegate.stale = false;
     delegate.removing = None;
@@ -242,7 +315,9 @@ fn load(
                 Ok((rows, more)) => {
                     delegate.has_more = more;
                     if offset > 0 {
+                        let from = delegate.rows.len();
                         delegate.rows.extend(rows);
+                        delegate.days.extend(&delegate.rows, from);
                     } else {
                         replace_rows(list, rows, window, cx);
                     }
@@ -276,12 +351,15 @@ fn replace_rows(
         .take()
         .filter(|id| selected == Some(RowId::Message(*id)));
     let removed_at = removing.and(delegate.selected);
+    delegate.days = Days::new(&rows);
     delegate.rows = rows;
     let ix = selected.and_then(|id| delegate.rows.iter().position(|r| r.id() == id));
     match (selected, ix, removed_at) {
         (Some(_), None, Some(at)) if !delegate.rows.is_empty() => {
             // The user moved or deleted it: on to the next one, as the list stands now.
-            let next = IndexPath::new(at.min(delegate.rows.len() - 1));
+            let Some(next) = delegate.days.path(at.min(delegate.rows.len() - 1)) else {
+                return;
+            };
             list.set_selected_index(Some(next), window, cx);
             cx.emit(ListEvent::Select(next));
         }
@@ -292,7 +370,8 @@ fn replace_rows(
             cx.emit(ListEvent::Cancel);
         }
         (_, ix, _) => {
-            list.set_selected_index(ix.map(IndexPath::new), window, cx);
+            let ix = ix.and_then(|ix| list.delegate().days.path(ix));
+            list.set_selected_index(ix, window, cx);
             // Still there (a page read before the change committed, or the change
             // failed): keep waiting.
             list.delegate_mut().removing = removing;
@@ -303,8 +382,32 @@ fn replace_rows(
 impl ListDelegate for MessageList {
     type Item = ListItem;
 
-    fn items_count(&self, _: usize, _: &App) -> usize {
-        self.rows.len()
+    fn sections_count(&self, _: &App) -> usize {
+        self.days.len()
+    }
+
+    fn items_count(&self, section: usize, _: &App) -> usize {
+        self.days.get(section).map_or(0, |d| d.len)
+    }
+
+    fn render_section_header(
+        &mut self,
+        section: usize,
+        _: &mut Window,
+        cx: &mut Context<ListState<Self>>,
+    ) -> Option<impl IntoElement> {
+        let label = self.days.get(section)?.label.clone();
+        // Lined up with the rows' text (their padding).
+        Some(
+            div()
+                .px_2()
+                .pt_3()
+                .pb_1()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(cx.theme().muted_foreground)
+                .child(label),
+        )
     }
 
     fn render_item(
@@ -313,14 +416,22 @@ impl ListDelegate for MessageList {
         _: &mut Window,
         cx: &mut Context<ListState<Self>>,
     ) -> Option<ListItem> {
-        let row = self.rows.get(ix.row)?;
-        let selected = self.selected == Some(ix.row);
+        let ix = self.days.flat(ix)?;
+        let row = self.rows.get(ix)?;
+        let selected = self.selected == Some(ix);
         let item = match row {
             Row::Message(message) => message_row(message, cx),
             Row::Draft(draft) => draft_row(draft, cx),
             Row::Outbox(entry) => outbox_row(entry, cx),
         };
-        Some(item.selected(selected).rounded(cx.theme().radius_lg).px_2())
+        // The virtual list has no gap between rows; the margin keeps a selected row's
+        // background apart from a hovered neighbour's.
+        Some(
+            item.selected(selected)
+                .rounded(cx.theme().radius_lg)
+                .px_2()
+                .my_0p5(),
+        )
     }
 
     fn render_empty(
@@ -349,7 +460,7 @@ impl ListDelegate for MessageList {
         _: &mut Window,
         _: &mut Context<ListState<Self>>,
     ) {
-        self.selected = ix.map(|ix| ix.row);
+        self.selected = ix.and_then(|ix| self.days.flat(ix));
     }
 
     fn has_more(&self, _: &App) -> bool {
@@ -366,5 +477,68 @@ impl ListDelegate for MessageList {
                 load(list, Load::Append, window, cx);
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use catmail_core::{AccountId, Flags};
+
+    use super::*;
+
+    /// Midday UTC: the same calendar day in nearly every time zone the test runs in.
+    fn message(id: i64, date: Option<&str>) -> Row {
+        let date = date.map(|d| {
+            format!("{d}T12:00:00Z")
+                .parse::<jiff::Timestamp>()
+                .unwrap()
+                .as_second()
+        });
+        Row::Message(MessageSummary {
+            id: MessageId(id),
+            account_id: AccountId(1),
+            folder_id: FolderId(1),
+            thread_id: None,
+            subject: None,
+            from: Vec::new(),
+            date,
+            snippet: None,
+            flags: Flags::empty(),
+            has_attachments: false,
+        })
+    }
+
+    #[test]
+    fn rows_are_grouped_by_day_and_indexed_both_ways() {
+        let rows = vec![
+            message(1, Some("2020-03-02")),
+            message(2, Some("2020-03-02")),
+            message(3, Some("2020-03-01")),
+            message(4, None),
+            message(5, None),
+        ];
+        let days = Days::new(&rows);
+        let shape: Vec<_> = days
+            .0
+            .iter()
+            .map(|s| (s.label.to_string(), s.start, s.len))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("March 2, 2020".to_owned(), 0, 2),
+                ("March 1, 2020".to_owned(), 2, 1),
+                ("No date".to_owned(), 3, 2),
+            ]
+        );
+        for flat in 0..5 {
+            let path = days.path(flat).unwrap();
+            assert_eq!(days.flat(path), Some(flat), "{path:?}");
+        }
+        assert_eq!(days.path(3), Some(IndexPath::new(0).section(2)));
+        assert_eq!(days.path(5), None);
+        assert_eq!(days.flat(IndexPath::new(1).section(1)), None);
+        assert_eq!(days.flat(IndexPath::new(0).section(3)), None);
+        assert!(Days::new(&[]).path(0).is_none());
     }
 }

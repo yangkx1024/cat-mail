@@ -3,11 +3,13 @@
 
 use catmail_core::FolderRole;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, h_flex};
+use gpui_kit::component::sidebar::{Sidebar, SidebarItem, SidebarMenu, SidebarMenuItem};
+use gpui_kit::component::{
+    ActiveTheme as _, Collapsible, Disableable as _, Icon, Sizable as _, h_flex, v_flex,
+};
 use gpui_kit::{
-    App, Context, IntoElement, ParentElement as _, SharedString, Styled as _, div,
-    prelude::FluentBuilder as _,
+    App, Context, ElementId, FontWeight, IntoElement, ParentElement as _, SharedString,
+    Styled as _, Window, div, prelude::FluentBuilder as _,
 };
 
 use super::folders::FolderNode;
@@ -71,7 +73,7 @@ impl Mailbox {
                     .ghost()
                     .small()
                     .icon(Hero::Cog6Tooth)
-                    .label("Settings…")
+                    .label("Settings")
                     .tooltip_with_action("Settings", &OpenSettings, Some(actions::MAILBOX))
                     .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
             )
@@ -98,9 +100,10 @@ impl Mailbox {
             .w_full()
             .header(header)
             .footer(footer)
-            .children(accounts.iter().map(|entry| {
-                SidebarGroup::new(entry.account.email.clone())
-                    .child(SidebarMenu::new().children(self.account_items(entry, cx)))
+            .children(accounts.iter().map(|entry| AccountGroup {
+                email: entry.account.email.clone().into(),
+                items: self.account_items(entry, cx),
+                collapsed: false,
             }))
     }
 
@@ -217,5 +220,59 @@ impl Mailbox {
             }
         }
         item
+    }
+}
+
+/// An account's places under its address. `SidebarGroup` would do, but draws its label
+/// small and faint, as for a section; the address names whose mail this is, so it is a
+/// heading.
+#[derive(Clone)]
+struct AccountGroup {
+    email: SharedString,
+    items: Vec<SidebarMenuItem>,
+    collapsed: bool,
+}
+
+impl Collapsible for AccountGroup {
+    fn is_collapsed(&self) -> bool {
+        self.collapsed
+    }
+
+    fn collapsed(mut self, collapsed: bool) -> Self {
+        self.collapsed = collapsed;
+        self
+    }
+}
+
+impl SidebarItem for AccountGroup {
+    fn render(
+        self,
+        id: impl Into<ElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> impl IntoElement {
+        let id = id.into();
+        v_flex()
+            .when(!self.collapsed, |this| {
+                this.child(
+                    div()
+                        .px_2()
+                        .h_8()
+                        .flex()
+                        .items_center()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(cx.theme().sidebar_foreground)
+                        .truncate()
+                        .child(self.email),
+                )
+            })
+            // The id SidebarGroup gives its first child, so the items keep theirs.
+            .child(
+                SidebarMenu::new()
+                    .children(self.items)
+                    .collapsed(self.collapsed)
+                    .render(format!("{id}-0"), window, cx),
+            )
     }
 }

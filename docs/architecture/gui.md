@@ -29,7 +29,7 @@ src/
     sidebar.rs panes.rs draft.rs outbox.rs   侧栏；三栏与邮件工具栏；草稿、发件箱的右栏
     message_list/    中栏列表（mod.rs：来源、加载、选中；rows.rs：三种行的样子）
     folders.rs       文件夹分区（纯逻辑）
-    move_to.rs add_account.rs   "Move to…"对话框；登录表单
+    move_to.rs add_account.rs   "Move to"对话框；登录表单
     tests/           驱动窗口的集成测试，按读信、写信、设置分文件，另有截图
   reader/            读信：mod.rs 状态与操作，message.rs 打开的邮件，images.rs 内嵌图片，view.rs 渲染
   composer/          写信窗口：mod.rs 打开与编辑，lifecycle.rs 保存 / 发送 / 关闭，view.rs 渲染
@@ -57,6 +57,32 @@ Junk、Trash），名字用角色名而不是服务器上的名字（`已发送`
   不能编辑。代价是其他客户端写的草稿在 GUI 里看不到（CLI 的 `catmail ls Drafts` 仍能看到）。
 - **Outbox 只在有待发邮件时出现**，有被拒绝或未确认的条目时带警告图标。
 - Sent、Junk、Trash 不显示未读数。底部一行说明连接问题（同步中、登录被拒、连不上、发不出去）。
+
+## 字体（Linux）
+
+GPUI 的 Linux 后端（cosmic-text）只在一个字族的多个独立字面里按字重挑选，可变字体只有一个字面，总是
+按默认字重绘制；发行版现在多数只装可变的 Noto Sans 和 Noto Sans CJK，于是所有加粗都失效，CJK 还偏细。
+`fonts.rs` 因此：
+
+- **自带静态的 Noto Sans**（Regular、Medium、SemiBold、Bold，SIL OFL，`assets/fonts/noto-sans/`，
+  约 1.7 MB，只在 Linux 编入），并写进每个应用的主题配置的 `font_family`：应用主题会设置它指定的字体，
+  只改全局主题会在切换主题时被覆盖。
+- **CJK 回退字体**：启动时从常见字族（Noto Sans CJK、思源黑体、MiSans、HarmonyOS Sans 等）里挑出已安装
+  且常规和粗体是不同字面的（即非可变字体），作为 `FontFallbacks` 由一个 `RootPlugin` 设在每个窗口的根上，
+  对话框、通知也在其中；回退字体按主字体的字重匹配。都不满足时 CJK 仍由 GPUI 自己挑。不自带 CJK 字体：
+  每个字重十几 MB。
+
+macOS、Windows 用系统字体，不受影响。
+
+## 邮件列表
+
+- **按天分组**：列表（邮件、搜索结果、草稿、Outbox 都是新的在前）按本地日期分成 gpui-kit `List` 的
+  section，标题是 Today、Yesterday、今年的"Monday, October 12"、更早的"October 12, 2025"，没有日期的
+  归到 No date；行里只显示时间。分组只合并相邻的同一天，顺序不是按日期时一天会出现两次标题，而不会
+  错位。`List` 按 `IndexPath { section, row }` 计数，`rows` 和选中项仍按从上到下的序号，两者由
+  `message_list::Days` 换算。标题在加载、刷新时重算：窗口跨过午夜后，下一次刷新才把"Today"改成
+  "Yesterday"。
+- **未读只靠字重**：未读邮件的发件人和主题加粗，不再有左侧的圆点。
 
 ## 读与改
 
@@ -99,7 +125,7 @@ Junk、Trash），名字用角色名而不是服务器上的名字（`已发送`
 客户端开启 `send_in_background`。条目的状态决定右栏给出的选择：排队中可以"Send now"
 （`flush_outbox`）或"Back to drafts"（`cancel_outbox`）；被拒绝的可以改回草稿或重试；已发出但
 没存进 Sent 的可以重试保存或放弃；**发出后未确认（unknown）的从不自动重发**，由用户选"Mark as sent"、
-"Send again…"（确认可能重复）或"Back to drafts"。
+"Send again"（确认可能重复）或"Back to drafts"。
 
 ## 主题与设置
 
@@ -130,7 +156,9 @@ Junk、Trash），名字用角色名而不是服务器上的名字（`已发送`
 `Lagged` 时整体刷新，`Closed` 时退出。
 
 客户端开启了后台同步（`sync_in_background`）：服务器推送的新邮件同样经 `MessagesChanged` 出现。启动和
-添加账户时仍手动同步一次，把错误显示成通知；后台同步的错误只记日志。
+添加账户时仍手动同步一次，把错误显示成通知；后台同步的错误只记日志。后台同步在两次完整同步之间只盯
+INBOX，所以打开一个文件夹时同步它（`MailClient::sync_folder`，一分钟内同步过的跳过，见
+[同步 / 打开的文件夹](sync.md#打开的文件夹)）；失败只记日志，连不上服务器已由侧栏底部说明。
 
 - `FoldersChanged` / 账户增删：重读侧栏。
 - `MessagesChanged`：重读侧栏（计数）；列表显示的是这个文件夹或搜索结果时重读已显示的行，按行的
@@ -174,7 +202,7 @@ Junk、Trash），名字用角色名而不是服务器上的名字（`已发送`
 
 ## 登录页
 
-没有账户时自动打开（不能取消），Settings › Accounts 的"Add account…"也能打开。先调用 `MailClient::check_login`
+没有账户时自动打开（不能取消），Settings › Accounts 的"Add account"也能打开。先调用 `MailClient::check_login`
 （连接、登录、LOGOUT，不写数据库也不写密钥环），成功后才 `add_account`，再同步这个账户；密码或服务器
 填错不会留下账户行或孤立的密钥环条目。
 
@@ -215,8 +243,9 @@ Lucide 图标（勾、箭头、关闭、搜索……）在资源加载时按路�
 
 - **可变字体的字重（上游）。** Linux 上 GPUI（`gpui-fast-wgpu` 0.1.10 的 `cosmic_text_system.rs`，
   与 `gpui-pre-wgpu` 0.3.9 的相同）栅格化字形时不设 `wght` 轴坐标，可变字体一律按默认实例渲染。系统
-  只有 Noto Sans CJK 可变字体时，中文偏细、加粗无效；只给静态字体时字重正常。上游跟踪 zed-industries/zed#60155（#64123、#64783 同一处）。我们
-  不绕开（打包静态 CJK 字体每个字重数 MB），用户可改装静态版（如 nixpkgs 的
-  `noto-fonts-cjk-sans-static`）。升级 gpui-kit 时检查这几个 issue。
+  只有 Noto Sans CJK 可变字体时，中文偏细、加粗无效；只给静态字体时字重正常。上游跟踪 zed-industries/zed#60155（#64123、#64783 同一处）。界面
+  文字用自带的静态 Noto Sans 绕开，CJK 只在装有静态字面的字族里挑回退字体（见[字体](#字体linux)）；只有
+  可变 CJK 字体的系统，中文仍然没有粗体，用户可改装静态版（如 nixpkgs 的 `noto-fonts-cjk-sans-static`）。
+  升级 gpui-kit 时检查这几个 issue：修好后可以去掉自带字体和 `fonts.rs` 的回退挑选。
 - **依赖锁定。** `gpui-fast-*` 精确 pin 了 `cocoa = 0.26.0` 和 `unicode-properties = 0.1.3`，锁文件里
   这两个必须保持这些版本；升级 gpui-kit 时对照它自带的 `Cargo.lock`。

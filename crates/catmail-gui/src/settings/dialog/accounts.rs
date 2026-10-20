@@ -92,7 +92,7 @@ impl SettingsView {
                         Button::new(ElementId::from(("remove-account", account.id.0 as u64)))
                             .ghost()
                             .small()
-                            .label("Remove…")
+                            .label("Remove")
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.confirm_remove_account(remove.clone(), window, cx)
                             })),
@@ -104,7 +104,7 @@ impl SettingsView {
                         .outline()
                         .small()
                         .icon(Hero::Plus)
-                        .label("Add account…")
+                        .label("Add account")
                         .on_click(cx.listener(|this, _, window, cx| this.add_account(window, cx))),
                 ),
             )

@@ -138,12 +138,13 @@ catmail-gui                     # 打开窗口；同样支持 --data-dir / CATMA
 
 主窗口三栏：左侧是"New message"和各账户的位置（Inbox、Drafts、Outbox、Sent、Archive、Junk、
 Trash，然后是其他文件夹），中间是列表和搜索框，右侧是选中的邮件、草稿或待发邮件。窗口打开期间在
-后台保持同步和发信，新邮件由服务器推送，与 `catmail watch` 相同，也同样定期回收不再引用的文件。
+后台保持同步和发信，新邮件由服务器推送，与 `catmail watch` 相同，也同样定期回收不再引用的文件；
+打开一个文件夹时立即同步它。
 
 - **读信**：打开即标为已读（Settings › Reading 可关闭），改动经操作队列同步到服务器。默认显示纯
   文本，有 HTML 时可以切换；HTML 里只显示邮件自带的图片（`cid:`、`data:`），远程图片一律不加载；
   排版不对时用"Open in browser"在浏览器里看（同样拦截远程内容）。点附件可以保存。
-- **处理邮件**：工具栏上的 Reply、Reply all、Forward、Archive、Delete、Move to…，更多操作（标为
+- **处理邮件**：工具栏上的 Reply、Reply all、Forward、Archive、Delete、Move to，更多操作（标为
   未读、旗标、在浏览器打开）在"⋯"菜单里。归档或删除后自动打开下一封；已在 Trash 里的邮件删除前
   会确认（不能恢复）。
 - **写信**：每封信一个独立窗口。新邮件、回复和转发一开始就是草稿，停止输入片刻后自动保存（服务器
@@ -151,9 +152,9 @@ Trash，然后是其他文件夹），中间是列表和搜索框，右侧是选
   发送或关闭会在该栏下提示。附件可以选择文件或直接拖进窗口。Drafts 里列出本机的草稿，回车或
   "Edit"继续写。
 - **发件箱**：还没发完的邮件出现在 Outbox。被服务器拒绝的可以改回草稿或重试；发出后没收到确认的
-  不会自动重发，由你选择"Mark as sent""Send again…"或"Back to drafts"。
+  不会自动重发，由你选择"Mark as sent""Send again"或"Back to drafts"。
 - **主题**：Settings › Appearance 选择跟随系统、浅色或深色，并分别为浅色和深色选主题。内置
-  cat-mail、Catppuccin、Gruvbox、Solarized、Nord、Tokyo Night、Dracula；"Import theme…"可以导入
+  cat-mail、Catppuccin、Gruvbox、Solarized、Nord、Tokyo Night、Dracula；"Import theme"可以导入
   Alacritty、kitty、Ghostty、WezTerm、Windows Terminal、iTerm2、foot、Xresources、base16 / base24
   的配色文件或 GPUI Kit 主题 JSON，按终端调色板推导出整套界面颜色，存进主题目录（可手工修改）。
   文字大小在同一页，或用 Ctrl + / Ctrl − / Ctrl 0。

@@ -167,7 +167,7 @@ impl Reader {
                         .small()
                         .icon(icon)
                         .label(label)
-                        .tooltip(format!("Save “{name}”…"))
+                        .tooltip(format!("Save “{name}”"))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.save_attachment(attachment.clone(), window, cx)
                         }))

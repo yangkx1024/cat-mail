@@ -188,10 +188,18 @@ impl TestMail {
         pollster::block_on(self.client.sync_account(self.account.unwrap())).unwrap();
     }
 
+    /// Puts a new message into one of the server's mailboxes, without syncing.
+    pub fn deliver(&self, mailbox: &str, subject: &str) {
+        self.fake
+            .state()
+            .mailbox_mut(mailbox)
+            .append_simple(subject);
+    }
+
     /// Puts a new message into the server's INBOX and syncs, as another client's sync
     /// would; the window learns about it only through the engine's events.
     pub fn deliver_and_sync(&self, subject: &str) {
-        self.fake.state().inbox().append_simple(subject);
+        self.deliver("INBOX", subject);
         pollster::block_on(self.client.sync_account(self.account.unwrap())).unwrap();
     }
 }
