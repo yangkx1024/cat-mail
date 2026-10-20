@@ -50,7 +50,7 @@
 
 ## 使用
 
-目前可以管理账户、同步文件夹和邮件头、列出和阅读邮件、搜索，写信、回复和发信，以及标记、
+目前可以管理账户、同步文件夹和邮件头、列出和阅读邮件、搜索，写信、回复、转发和发信，以及标记、
 移动和删除邮件：
 
 ```sh
@@ -79,6 +79,7 @@ catmail gc                      # 回收不再被引用的正文与附件文件
 catmail compose --to '张三 <zhang@example.com>, li@example.com' --bcc boss@example.com \
     -s 周报 --body-file report.txt --attach 报表.xlsx
 catmail reply 42 --all --body '收到，谢谢！'   # 回复（全部），引用原文
+catmail forward 42 --to li@example.com --body '转给你看看'   # 转发，带上原信的附件
 catmail draft list                # 草稿；draft show / edit / attach / detach / rm
 catmail send 3                    # 发送草稿 3，并存到"已发送"
 catmail outbox                    # 还没发完的邮件；outbox flush / retry / mark-sent / cancel
@@ -106,9 +107,10 @@ catmail ops                       # 还没同步到服务器的改动，以及�
 （UIDVALIDITY 改变）时，还没完成的改动作废，以服务器为准。回复发出后原信标记为"已回复"。
 
 草稿同时保存在服务器的"草稿箱"里（账户有这个文件夹时），每次修改换成新的一份，删除草稿或发出后
-副本随之删除。`compose` / `reply` / `draft edit` 等命令当场上传；连不上时草稿照样保存在本地，只给出
+副本随之删除。`compose` / `reply` / `forward` / `draft edit` 等命令当场上传；连不上时草稿照样保存在本地，只给出
 警告，由下一次 `catmail sync` 或 `catmail ops flush` 上传。`catmail draft list` 的 SERVER 列显示
-服务器上是否已是最新版本，服务器拒绝保存（如超出配额）时 `catmail draft show` 显示原因。
+服务器上是否已是最新版本，服务器拒绝保存（如超出配额）时 `catmail draft show` 显示原因。后台同步
+（图形界面）等草稿停止修改 15 秒后才上传，边写边自动保存不会每次都换一份副本。
 
 发信先把草稿冻结成 outbox 里的一份快照，再经 SMTP 发出、用 APPEND 存进服务器的"已发送"
 （服务器没有这个文件夹就不存）。暂时失败（断网、4xx）会按递增的间隔重试，`catmail outbox`
@@ -117,7 +119,7 @@ catmail ops                       # 还没同步到服务器的改动，以及�
 是否收到，**不会自动重发**，由用户确认后选择 `mark-sent`、`retry`（可能重复）或 `cancel`。
 保存到"已发送"失败只重试保存，不会重发邮件。命令行不在后台发信：`catmail send` 当场发送，
 没发出去的用 `catmail outbox flush` 再试；两者在有邮件没发出去时以非零状态退出，便于脚本判断。
-`compose` / `reply` 失败（如附件不存在）不会留下草稿。
+`compose` / `reply` / `forward` 失败（如附件不存在、转发时原信的附件下载不了）不会留下草稿。
 
 正文在第一次阅读时下载，阅读不会把邮件标为已读（用 `catmail mark --read`）。不超过 2 MiB 的邮件整封下载（附件一并
 保存）；更大的邮件只下载正文，附件在第一次打开时再下载，其中超过 2 MiB 的正文部分也作为

@@ -15,7 +15,7 @@ use tokio::runtime::Handle;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use crate::engine::{Engine, blocking, now};
+use crate::engine::{DEFAULT_DRAFT_UPLOAD_DELAY, Engine, blocking, now};
 use crate::runtime::Runtime;
 use crate::secrets::{KeyringSecrets, SecretStore};
 use crate::watch::{self, SyncSchedule};
@@ -40,6 +40,7 @@ pub struct MailClientBuilder {
     send_in_background: bool,
     sync_in_background: Option<SyncSchedule>,
     collect_garbage_every: Option<Duration>,
+    draft_upload_delay: Duration,
 }
 
 impl MailClientBuilder {
@@ -91,6 +92,16 @@ impl MailClientBuilder {
         self
     }
 
+    /// How long background sync waits after a draft last changed before copying it to
+    /// the server's Drafts folder [default: [`DEFAULT_DRAFT_UPLOAD_DELAY`], 15 seconds],
+    /// so that a frontend saving as the user types doesn't replace the copy with each
+    /// save. Uploads asked for ([`MailClient::replay_pending`],
+    /// [`MailClient::sync_account`]) don't wait.
+    pub fn draft_upload_delay(mut self, delay: Duration) -> Self {
+        self.draft_upload_delay = delay;
+        self
+    }
+
     /// Locks the data directory, empties [`Config::handoff_dir`], then opens the database
     /// (migrating it if needed) and the blob store. Blocks briefly. Fails with
     /// [`Error::AlreadyRunning`] if another engine, in this or another process, has the
@@ -133,6 +144,7 @@ impl MailClientBuilder {
             self.tls,
         );
         engine.sync_in_background = self.sync_in_background;
+        engine.draft_upload_delay = self.draft_upload_delay;
         let client = MailClient {
             rt: Arc::new(rt),
             engine: Arc::new(engine),
@@ -168,6 +180,7 @@ impl MailClient {
             send_in_background: false,
             sync_in_background: None,
             collect_garbage_every: None,
+            draft_upload_delay: DEFAULT_DRAFT_UPLOAD_DELAY,
         }
     }
 
@@ -496,6 +509,17 @@ impl MailClient {
         let engine = self.engine.clone();
         self.rt
             .run(async move { drafts::reply(&engine, message, all).await })
+            .await
+    }
+
+    /// A new draft forwarding the message, to no one yet: `Fwd:` and its subject, its
+    /// headers and text below an empty start, and copies of its attachments (not the
+    /// images shown within it). Downloads the body and attachments first if needed;
+    /// fails, creating nothing, if one can't be had.
+    pub async fn forward(&self, message: MessageId) -> Result<Draft> {
+        let engine = self.engine.clone();
+        self.rt
+            .run(async move { drafts::forward(&engine, message).await })
             .await
     }
 

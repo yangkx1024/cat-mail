@@ -5,7 +5,8 @@
 //! account is added. It syncs every folder now and then, and in
 //! between watches INBOX: with IDLE the server says when something changes, without it
 //! INBOX is checked at an interval. Queued local changes, and changes to drafts, wake
-//! it to make them on the server at once. Its work takes the account's sync permit
+//! it to make them on the server at once; a changed draft only once it has been left
+//! alone for the engine's draft upload delay, while it may still be being written. Its work takes the account's sync permit
 //! like any sync, but its waiting doesn't: a sync or replay the user asks for meanwhile
 //! runs on a connection of its own.
 //!
@@ -19,6 +20,7 @@ use catmail_proto::imap::Session;
 use catmail_types::AccountId;
 use tokio::sync::Notify;
 
+use crate::draft_sync::Uploads;
 use crate::engine::{Activity, Cancellation, Engine, backoff};
 use crate::{Error, Result, connection, ops, sync};
 
@@ -78,8 +80,8 @@ const CUT_SHORT: u32 = 3;
 enum Idled {
     /// The server reported a change.
     Changed,
-    /// Local changes are queued, the account is removed or the engine is gone, or every
-    /// folder is due to be synced.
+    /// Local changes are queued, the account is removed or the engine is gone, or the
+    /// next step is due (every folder to be synced, or a held-back draft to be uploaded).
     Stopped,
     /// The server ends each IDLE as soon as it begins.
     CutShort,
@@ -117,14 +119,19 @@ pub(crate) async fn run(engine: Weak<Engine>, account: AccountId, schedule: Sync
         }
         let result = step(&strong, &mut session, account, schedule).await;
         let failures = strong.report(account, Activity::Sync, &result);
-        let full_sync_due = full_sync_in(&strong, account, &schedule);
+        // Drafts held back while they are being written are uploaded once they settle:
+        // the step runs again by then.
+        let due = match strong.held_drafts(account).1 {
+            Some(drafts) => full_sync_in(&strong, account, &schedule).min(drafts),
+            None => full_sync_in(&strong, account, &schedule),
+        };
         drop(strong);
 
         let pause = match result {
             Ok(wait) => match (wait, session.as_mut()) {
                 (Wait::Idle, Some(s)) if idle_works => {
                     let start = Instant::now();
-                    match idle(s, &wake, &mut cancellation, &schedule, full_sync_due).await {
+                    match idle(s, &wake, &mut cancellation, &schedule, due).await {
                         Ok(Idled::Stopped) => {
                             (idle_losses, busy) = (0, 0);
                             continue;
@@ -175,7 +182,7 @@ pub(crate) async fn run(engine: Weak<Engine>, account: AccountId, schedule: Sync
                         }
                     }
                 }
-                _ => schedule.poll.min(full_sync_due),
+                _ => schedule.poll.min(due),
             },
             Err(Error::AccountNotFound(_) | Error::Cancelled) => return,
             Err(e) => {
@@ -200,20 +207,20 @@ pub(crate) async fn run(engine: Weak<Engine>, account: AccountId, schedule: Sync
 }
 
 /// IDLEs until the server reports a change, local changes are queued, the account is
-/// removed or the engine is gone, or every folder is due to be synced (in
-/// `full_sync_due`). An IDLE that ends quietly is started over: its round trip showed
-/// the connection alive.
+/// removed or the engine is gone, or the next step is due (in `due`: every folder to be
+/// synced, or a draft to be uploaded). An IDLE that ends quietly is started over: its
+/// round trip showed the connection alive.
 async fn idle(
     session: &mut Session,
     wake: &Notify,
     cancellation: &mut Cancellation,
     schedule: &SyncSchedule,
-    full_sync_due: Duration,
+    due: Duration,
 ) -> catmail_proto::imap::Result<Idled> {
     let start = Instant::now();
     let mut cut_short = 0;
     loop {
-        let left = full_sync_due.saturating_sub(start.elapsed());
+        let left = due.saturating_sub(start.elapsed());
         let mut stop = false;
         let stopping = async {
             stopped(wake, cancellation).await;
@@ -223,7 +230,7 @@ async fn idle(
         if session.idle(stopping, max).await? {
             return Ok(Idled::Changed);
         }
-        if stop || start.elapsed() >= full_sync_due {
+        if stop || start.elapsed() >= due {
             return Ok(Idled::Stopped);
         }
         // Ended quietly long before it was due: by the server.
@@ -281,9 +288,9 @@ async fn work(
     permit
         .run(async {
             if full_sync_in(engine, account, schedule).is_zero() {
-                sync::run(engine, session, account).await?;
+                sync::run(engine, session, account, Uploads::Settled).await?;
             } else {
-                ops::replay_queued(engine, session, account).await?;
+                ops::replay_queued(engine, session, account, Uploads::Settled).await?;
             }
             // Last, so that it is the selected mailbox to IDLE on.
             match sync::sync_inbox(engine, session, account).await {

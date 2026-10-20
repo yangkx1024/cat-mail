@@ -36,6 +36,7 @@ pub use catmail_types::*;
 pub use client::{MailClient, MailClientBuilder};
 pub use config::Config;
 pub use drafts::parse_addresses;
+pub use engine::DEFAULT_DRAFT_UPLOAD_DELAY;
 pub use error::{Error, Result};
 pub use filename::safe_filename;
 pub use gc::DEFAULT_GC_INTERVAL;

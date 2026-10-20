@@ -9,8 +9,8 @@ use catmail_proto::mime::{Outgoing, OutgoingAttachment, build_message};
 use catmail_proto::smtp;
 use catmail_store::{DraftReply, DraftSnapshot, NewDraftAttachment};
 use catmail_types::{
-    Account, AccountId, Address, Draft, DraftAttachment, DraftAttachmentId, DraftContent, DraftId,
-    Event, Message, MessageId,
+    Account, AccountId, Address, Attachment, Draft, DraftAttachment, DraftAttachmentId,
+    DraftContent, DraftId, Event, Message, MessageId,
 };
 use uuid::Uuid;
 
@@ -42,7 +42,7 @@ pub(crate) async fn update(
         })
         .await?
         .ok_or(Error::DraftNotFound(id))?;
-    changed(engine, draft.account_id);
+    edited(engine, draft.account_id, id);
     Ok(draft)
 }
 
@@ -58,6 +58,7 @@ pub(crate) async fn delete(engine: &Arc<Engine>, id: DraftId) -> Result<()> {
         })
         .await?
         .ok_or(Error::DraftNotFound(id))?;
+    engine.draft_gone(account, id);
     changed(engine, account);
     Ok(())
 }
@@ -67,6 +68,13 @@ pub(crate) async fn delete(engine: &Arc<Engine>, id: DraftId) -> Result<()> {
 pub(crate) fn changed(engine: &Engine, account: AccountId) {
     engine.emit(Event::DraftsChanged { account });
     engine.wake(account);
+}
+
+/// [`changed`], for a change to one draft that may be followed by more: background sync
+/// holds its upload back for a while (see [`Engine::draft_edited`]).
+pub(crate) fn edited(engine: &Engine, account: AccountId, draft: DraftId) {
+    engine.draft_edited(account, draft);
+    changed(engine, account);
 }
 
 /// Copies the file into the blob store and attaches it; later changes to the file
@@ -114,7 +122,7 @@ pub(crate) async fn attach_file(
     })
     .await?;
     let (account, attachment) = attachment.ok_or(Error::DraftNotFound(draft))?;
-    changed(engine, account);
+    edited(engine, account, draft);
     Ok(attachment)
 }
 
@@ -132,18 +140,14 @@ pub(crate) async fn remove_attachment(
         })
         .await?
         .ok_or(Error::DraftAttachmentNotFound(id))?;
-    changed(engine, draft.account_id);
+    edited(engine, draft.account_id, draft.id);
     Ok(draft)
 }
 
 /// A new draft answering `message`: to its sender (or Reply-To), and with `all` to its
 /// other recipients too, quoting its text. Downloads the body first if needed.
 pub(crate) async fn reply(engine: &Arc<Engine>, id: MessageId, all: bool) -> Result<Draft> {
-    let message = match engine.read(move |db| db.messages().get(id)).await? {
-        Some(message) if message.body.is_some() => message,
-        Some(_) => body::download_message(engine.clone(), id).await?,
-        None => return Err(Error::MessageNotFound(id)),
-    };
+    let message = with_body(engine, id).await?;
     let account_id = message.summary.account_id;
     let account = engine
         .read(move |db| db.accounts().get(account_id))
@@ -158,6 +162,74 @@ pub(crate) async fn reply(engine: &Arc<Engine>, id: MessageId, all: bool) -> Res
         references,
     };
     insert(engine, account_id, content, Some(reply)).await
+}
+
+/// A new draft forwarding `message` to no one yet, with copies of its attachments.
+/// Everything is downloaded first and stored in one transaction, so a failure leaves no
+/// draft behind.
+pub(crate) async fn forward(engine: &Arc<Engine>, id: MessageId) -> Result<Draft> {
+    let message = with_body(engine, id).await?;
+    let account = message.summary.account_id;
+    let originals: Vec<Attachment> = message
+        .body
+        .iter()
+        .flat_map(|b| &b.attachments)
+        .filter(|a| !a.inline)
+        .cloned()
+        .collect();
+    let mut contents = Vec::with_capacity(originals.len());
+    for attachment in &originals {
+        contents.push(body::attachment_content(engine.clone(), attachment.id).await?);
+    }
+    // Into the blob store right before the transaction that refers to them, so GC's
+    // grace period covers the gap (`put` restarts it for content stored before).
+    let engine2 = engine.clone();
+    let attachments = blocking(move || {
+        originals
+            .iter()
+            .zip(contents)
+            .map(|(original, data)| {
+                Ok(NewDraftAttachment {
+                    blob: engine2.blobs.put(data.as_slice())?,
+                    filename: original
+                        .filename
+                        .as_deref()
+                        .map(|name| name.replace('\0', ""))
+                        .filter(|name| !name.trim().is_empty())
+                        .unwrap_or_else(|| "attachment".into()),
+                    mime_type: original.mime_type.clone(),
+                    size: data.len() as u64,
+                })
+            })
+            .collect::<Result<Vec<_>>>()
+    })
+    .await?;
+    let content = without_nul(forward_content(&message));
+    let draft = engine
+        .write(move |db| {
+            if db.accounts().get(account)?.is_none() {
+                return Ok(None);
+            }
+            let now = now();
+            let id = db.drafts().insert(account, &content, None, now)?;
+            for attachment in &attachments {
+                db.drafts().add_attachment(id, attachment, now)?;
+            }
+            db.drafts().get(id)
+        })
+        .await?
+        .ok_or_else(|| Error::AccountNotFound(account.to_string()))?;
+    edited(engine, account, draft.id);
+    Ok(draft)
+}
+
+/// The message with its body, downloading it if needed.
+async fn with_body(engine: &Arc<Engine>, id: MessageId) -> Result<Message> {
+    match engine.read(move |db| db.messages().get(id)).await? {
+        Some(message) if message.body.is_some() => Ok(message),
+        Some(_) => body::download_message(engine.clone(), id).await,
+        None => Err(Error::MessageNotFound(id)),
+    }
 }
 
 async fn insert(
@@ -179,7 +251,7 @@ async fn insert(
         })
         .await?
         .ok_or_else(|| Error::AccountNotFound(account.to_string()))?;
-    changed(engine, account);
+    edited(engine, account, draft.id);
     Ok(draft)
 }
 
@@ -445,6 +517,69 @@ fn quote(message: &Message) -> String {
     out
 }
 
+/// Subject and text of a forward of `message`: an empty start, then its headers and
+/// text as they were, unquoted.
+fn forward_content(message: &Message) -> DraftContent {
+    let subject = message.summary.subject.as_deref().unwrap_or_default();
+    let addresses = |list: &[Address]| {
+        list.iter()
+            .map(Address::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let date = message
+        .summary
+        .date
+        .and_then(|t| jiff::Timestamp::from_second(t).ok())
+        .map(|t| {
+            t.to_zoned(jiff::tz::TimeZone::system())
+                .strftime("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_default();
+    let mut text = String::from("\n\n---------- Forwarded message ---------\n");
+    for (name, value) in [
+        ("From", addresses(&message.summary.from)),
+        ("Date", date),
+        ("Subject", subject.trim().to_owned()),
+        ("To", addresses(&message.to)),
+        ("Cc", addresses(&message.cc)),
+    ] {
+        if !value.is_empty() {
+            text.push_str(&format!("{name}: {value}\n"));
+        }
+    }
+    text.push('\n');
+    let original = message
+        .body
+        .as_ref()
+        .and_then(|b| b.text.as_deref())
+        .unwrap_or_default()
+        .trim_end();
+    if !original.is_empty() {
+        text.push_str(original);
+        text.push('\n');
+    }
+    DraftContent {
+        subject: forward_subject(subject),
+        text,
+        ..Default::default()
+    }
+}
+
+fn forward_subject(subject: &str) -> String {
+    let subject = subject.trim();
+    let lower = subject.to_lowercase();
+    let is_forward = ["fwd:", "fw:", "fwd：", "fw：", "转发:", "转发："]
+        .iter()
+        .any(|prefix| lower.starts_with(prefix));
+    if is_forward {
+        subject.to_owned()
+    } else {
+        format!("Fwd: {subject}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use catmail_types::{Flags, FolderId, MessageBody, MessageSummary};
@@ -546,6 +681,36 @@ mod tests {
         assert_eq!(reply_subject("RE: hello"), "RE: hello");
         assert_eq!(reply_subject("回复：你好"), "回复：你好");
         assert_eq!(reply_subject(""), "Re: ");
+    }
+
+    #[test]
+    fn forward_subjects() {
+        assert_eq!(forward_subject("hello"), "Fwd: hello");
+        assert_eq!(forward_subject(" FW: hello"), "FW: hello");
+        assert_eq!(forward_subject("Fwd：报告"), "Fwd：报告");
+        assert_eq!(forward_subject("转发：你好"), "转发：你好");
+        assert_eq!(forward_subject("Re: hello"), "Fwd: Re: hello");
+    }
+
+    #[test]
+    fn forward_shows_the_headers_above_the_text_unquoted() {
+        let m = message(
+            addr(Some("张三"), "zhang@example.com"),
+            vec![addr(None, "me@example.com"), addr(None, "li@example.com")],
+            vec![],
+        );
+        let forward = forward_content(&m);
+        assert_eq!(forward.subject, "Fwd: 季度报告");
+        assert!(forward.recipients().next().is_none());
+        assert_eq!(
+            forward.text,
+            "\n\n---------- Forwarded message ---------\n\
+             From: 张三 <zhang@example.com>\n\
+             Subject: 季度报告\n\
+             To: me@example.com, li@example.com\n\
+             \n\
+             第一行\n\nsecond\n"
+        );
     }
 
     #[test]

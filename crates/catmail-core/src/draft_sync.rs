@@ -15,6 +15,7 @@
 //! Runs with the account's sync permit, right before its ops are replayed
 //! ([`ops::replay_queued`](crate::ops::replay_queued)).
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use catmail_proto::imap::{Error as ImapError, Session};
@@ -26,13 +27,25 @@ use catmail_types::{
 use crate::engine::{Engine, blocking, now};
 use crate::{Error, Result, connection, drafts, ops};
 
+/// Which of the drafts to upload an upload pass takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Uploads {
+    /// Every one: the user asked for it.
+    All,
+    /// Those not changed within the engine's
+    /// [`draft_upload_delay`](Engine::draft_upload_delay), for background sync: a draft
+    /// being written is uploaded once the user pauses, not with every save.
+    Settled,
+}
+
 /// Settles the account's unsettled uploads, then uploads its drafts whose copy is
-/// missing or out of date, each once. Fills in `drafts_uploaded` and `drafts_failed`.
-/// Without a Drafts folder the drafts stay local.
+/// missing or out of date (those `uploads` takes), each once. Fills in `drafts_uploaded`
+/// and `drafts_failed`. Without a Drafts folder the drafts stay local.
 pub(crate) async fn upload(
     engine: &Arc<Engine>,
     session: &mut Session,
     account: AccountId,
+    uploads: Uploads,
 ) -> Result<ReplayReport> {
     let mut report = ReplayReport::default();
     if !engine
@@ -42,7 +55,7 @@ pub(crate) async fn upload(
         return Ok(report);
     }
     let mut touched = Touched::new();
-    let result = run(engine, session, account, &mut report, &mut touched).await;
+    let result = run(engine, session, account, uploads, &mut report, &mut touched).await;
     // Whatever was committed before a failure too.
     if !touched.is_empty() {
         ops::replayed(engine, account, &touched);
@@ -55,6 +68,7 @@ async fn run(
     engine: &Arc<Engine>,
     session: &mut Session,
     account: AccountId,
+    uploads: Uploads,
     report: &mut ReplayReport,
     touched: &mut Touched,
 ) -> Result<()> {
@@ -79,7 +93,11 @@ async fn run(
         return Ok(());
     };
     let stale = engine.read(move |db| db.drafts().stale(account)).await?;
-    for draft in stale {
+    let held = match uploads {
+        Uploads::All => HashSet::new(),
+        Uploads::Settled => engine.held_drafts(account).0,
+    };
+    for draft in stale.into_iter().filter(|d| !held.contains(d)) {
         match upload_one(engine, session, &owner, draft, (folder, &remote_name)).await? {
             Outcome::Uploaded(changed) => {
                 report.drafts_uploaded += 1;

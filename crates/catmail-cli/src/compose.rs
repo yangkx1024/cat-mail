@@ -1,4 +1,4 @@
-//! Writing and sending: `compose`, `reply`, `draft`, `send` and `outbox`.
+//! Writing and sending: `compose`, `reply`, `forward`, `draft`, `send` and `outbox`.
 //!
 //! Drafts are saved to the server's Drafts folder at once, like changes to messages
 //! (`ops.rs`); if that can't be done, the draft is still saved locally, and the next
@@ -75,6 +75,32 @@ pub(crate) struct Reply {
     send: bool,
 }
 
+#[derive(Args)]
+pub(crate) struct Forward {
+    /// Message id, as shown by `catmail ls`
+    id: i64,
+    /// Recipients, separated by commas or semicolons: `a@example.com, 张三 <zhang@example.com>`
+    #[arg(long)]
+    to: Option<String>,
+    #[arg(long)]
+    cc: Option<String>,
+    /// Get the message without being shown to the other recipients
+    #[arg(long)]
+    bcc: Option<String>,
+    /// Your text, written above the forwarded message
+    #[arg(long, conflicts_with = "body_file")]
+    body: Option<String>,
+    /// Read your text from a file, or from stdin with `-`
+    #[arg(long, value_name = "FILE")]
+    body_file: Option<PathBuf>,
+    /// Attach a file (repeatable), besides the message's own attachments
+    #[arg(long, value_name = "FILE")]
+    attach: Vec<PathBuf>,
+    /// Send it right away instead of keeping it as a draft
+    #[arg(long)]
+    send: bool,
+}
+
 #[derive(Subcommand)]
 pub(crate) enum DraftCommand {
     /// List drafts (those being sent are in `catmail outbox`)
@@ -133,6 +159,36 @@ pub(crate) async fn reply(client: &MailClient, args: Reply, json: bool) -> Resul
     if let Some(text) = text {
         let mut content = draft.content.clone();
         content.text = format!("{}{}", text.trim_end(), content.text);
+        draft = client.update_draft(draft.id, content).await?;
+    }
+    finish_draft(client, draft, &args.attach, args.send, json).await
+}
+
+pub(crate) async fn forward(client: &MailClient, args: Forward, json: bool) -> Result<()> {
+    // Before the draft exists, so a mistake doesn't leave one behind.
+    let text = read_body(args.body, args.body_file.as_ref())?;
+    let parse = |field: Option<&str>| field.map(parse_addresses).transpose();
+    let (to, cc, bcc) = (
+        parse(args.to.as_deref())?,
+        parse(args.cc.as_deref())?,
+        parse(args.bcc.as_deref())?,
+    );
+    if args.send
+        && [&to, &cc, &bcc]
+            .iter()
+            .all(|f| f.as_ref().is_none_or(Vec::is_empty))
+    {
+        bail!("--send needs a recipient: --to, --cc or --bcc");
+    }
+    let mut draft = client.forward(MessageId(args.id)).await?;
+    if text.is_some() || to.is_some() || cc.is_some() || bcc.is_some() {
+        let mut content = draft.content.clone();
+        if let Some(text) = text {
+            content.text = format!("{}{}", text.trim_end(), content.text);
+        }
+        content.to = to.unwrap_or_default();
+        content.cc = cc.unwrap_or_default();
+        content.bcc = bcc.unwrap_or_default();
         draft = client.update_draft(draft.id, content).await?;
     }
     finish_draft(client, draft, &args.attach, args.send, json).await
@@ -628,12 +684,46 @@ mod tests {
             id: 1,
             all: false,
             body: None,
-            body_file: Some(missing),
+            body_file: Some(missing.clone()),
             attach: Vec::new(),
             send: false,
         };
         let err = reply(&client, args, false).await.unwrap_err();
         assert!(format!("{err:#}").contains("failed to read"), "{err:#}");
+
+        let forwarding = |to: Option<&str>, body_file: Option<PathBuf>, send| Forward {
+            id: 1,
+            to: to.map(Into::into),
+            cc: None,
+            bcc: None,
+            body: None,
+            body_file,
+            attach: Vec::new(),
+            send,
+        };
+        let err = forward(
+            &client,
+            forwarding(Some("b@example.com"), Some(missing.clone()), false),
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("failed to read"), "{err:#}");
+        let err = forward(
+            &client,
+            forwarding(Some("not an address"), None, false),
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not an email address"),
+            "{err:#}"
+        );
+        let err = forward(&client, forwarding(None, None, true), false)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("needs a recipient"), "{err:#}");
 
         let account = client.list_accounts().await.unwrap()[0].id;
         assert!(client.list_drafts(account).await.unwrap().is_empty());

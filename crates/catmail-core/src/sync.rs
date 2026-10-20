@@ -15,6 +15,7 @@ use catmail_proto::imap::{FetchedMessage, ListedMailbox, MailboxStatus, Session}
 use catmail_store::{FolderSyncState, NewMessage, RemoteFolder};
 use catmail_types::{AccountId, Event, FolderId, FolderRole, FolderSyncReport, SyncReport};
 
+use crate::draft_sync::Uploads;
 use crate::engine::{Activity, Engine};
 use crate::{Error, Result, connection, ops};
 
@@ -26,7 +27,7 @@ pub(crate) async fn sync_account(engine: Arc<Engine>, account_id: AccountId) -> 
     let result = permit
         .run(async {
             let mut session = connection::connect(&engine, account_id).await?;
-            let report = run(&engine, &mut session, account_id).await?;
+            let report = run(&engine, &mut session, account_id, Uploads::All).await?;
             session.logout().await;
             Ok(report)
         })
@@ -35,11 +36,14 @@ pub(crate) async fn sync_account(engine: Arc<Engine>, account_id: AccountId) -> 
     result
 }
 
-/// Syncs every folder of the account on `session`. Call with the account's sync permit.
+/// Syncs every folder of the account on `session`, making queued local changes and
+/// uploading changed drafts (those `uploads` takes) first. Call with the account's sync
+/// permit.
 pub(crate) async fn run(
     engine: &Arc<Engine>,
     session: &mut Session,
     account_id: AccountId,
+    uploads: Uploads,
 ) -> Result<SyncReport> {
     let remote = remote_folders(session.list().await?);
     let reconciled = engine
@@ -53,7 +57,7 @@ pub(crate) async fn run(
     ops::announce(engine, &reconciled.touched);
 
     // Local changes first, so the sync sees the server with them made.
-    let mut replayed = ops::replay_queued(engine, session, account_id)
+    let mut replayed = ops::replay_queued(engine, session, account_id, uploads)
         .await?
         .folders;
 
