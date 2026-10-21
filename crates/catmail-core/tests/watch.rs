@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use catmail_core::{Config, Event, Flags, MailClient, SyncSchedule};
+use catmail_core::{Config, ErrorKind, Event, Flags, MailClient, SyncSchedule};
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 use tokio::runtime::Handle;
 
@@ -261,7 +261,7 @@ async fn a_rejected_login_is_reported_and_not_retried_for_each_change() {
         env.client
             .account_status(env.account)
             .sync
-            .is_some_and(|p| p.auth_failed)
+            .is_some_and(|p| p.error.kind == ErrorKind::Auth)
     })
     .await;
 

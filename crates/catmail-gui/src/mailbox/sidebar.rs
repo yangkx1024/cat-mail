@@ -1,7 +1,7 @@
 //! The mailbox's left pane: "New message", each account's places, and at the bottom
 //! Settings, the connection state and Sync.
 
-use catmail_core::FolderRole;
+use catmail_core::{ErrorKind, FolderRole};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::sidebar::{Sidebar, SidebarItem, SidebarMenu, SidebarMenuItem};
 use gpui_kit::component::{
@@ -117,10 +117,14 @@ impl Mailbox {
             let email = &entry.account.email;
             let status = &entry.status;
             match (&status.sync, &status.send) {
-                (Some(problem), _) if problem.auth_failed => {
-                    Some(format!("Can't sign in to {email}").into())
-                }
-                (Some(_), _) => Some(format!("Can't reach {email}").into()),
+                (Some(problem), _) => Some(
+                    match problem.error.kind {
+                        ErrorKind::Auth => format!("Can't sign in to {email}"),
+                        ErrorKind::Network => format!("Can't reach {email}"),
+                        _ => format!("Can't sync {email}"),
+                    }
+                    .into(),
+                ),
                 (None, Some(_)) => Some(format!("Can't send from {email}").into()),
                 (None, None) => None,
             }

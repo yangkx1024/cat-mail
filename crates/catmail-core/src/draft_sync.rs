@@ -213,7 +213,7 @@ async fn try_settle(
 ) -> Result<Option<Touched>> {
     match settle(engine, session, upload, appended).await {
         Ok(touched) => Ok(Some(touched)),
-        Err(Error::Imap(e)) if !e.is_fatal() => {
+        Err(e) if e.is_refusal() => {
             tracing::warn!(folder = %upload.remote_name, error = %e,
                 "can't tell where an uploaded draft is");
             Ok(None)
@@ -233,6 +233,8 @@ async fn settle(
 ) -> Result<Touched> {
     let (uidvalidity, uids) = match appended {
         Some((uidvalidity, uid)) => (uidvalidity, vec![uid]),
+        // Found in the folder as it is now: the UIDs are recorded under its UIDVALIDITY
+        // now, so there is nothing to compare.
         None => {
             let status = session.examine(&upload.remote_name).await?;
             let uids = session.uid_search_message_id(&upload.message_id).await?;

@@ -453,7 +453,7 @@ impl Mailbox {
         let (client, max_age) = (self.client.clone(), self.sync_on_open_after);
         cx.background_spawn(async move {
             let error = match client.sync_folder(folder, max_age).await {
-                Ok(report) => report.and_then(|r| r.error),
+                Ok(report) => report.and_then(|r| r.error).map(|e| e.message),
                 Err(e) => Some(e.to_string()),
             };
             if let Some(error) = error {

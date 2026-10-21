@@ -63,6 +63,8 @@ flags，重复的批次不产生重复行）。HIGHESTMODSEQ 用 EXAMINE 时刻�
   不推进游标。
 - 认证失败、服务器缺少设置要求的能力（如 STARTTLS）在 core 里转成 `Error::AuthFailed` /
   `Error::Unsupported`，错误信息带给用户的建议，前端直接显示。
+- 一个文件夹的命令被拒绝（`Error::is_refusal`，连接仍可用）只记进它的 `FolderSyncReport.error`，
+  其余文件夹照常同步；连接断了才让整次同步失败。
 
 ## 锁
 
@@ -142,8 +144,9 @@ flags，重复的批次不产生重复行）。HIGHESTMODSEQ 用 EXAMINE 时刻�
   了密码）清除这个状态时立即唤醒它继续。
 - **账户状态。** 每一步的结果、用户要求的 `sync_account` / `replay_pending`（真的连了服务器时）都记进
   引擎里每账户的状态（`Engine::report`，`MailClient::account_status` 的 `sync`）：连续失败时记下最近的
-  错误、是否登录被拒绝、从什么时候开始、失败了几次，成功就清空。出现、清除或错误变了时发
-  `AccountStatusChanged`（不是每次失败都发），前端据此显示（`catmail watch` 打印一行；GUI 在 M5）。
+  错误（`ReportedError`，带 `ErrorKind`；登录被拒绝是 `Auth`）、从什么时候开始、失败了几次，成功就
+  清空。出现、清除或错误变了时发 `AccountStatusChanged`（不是每次失败都发），前端据此显示
+  （`catmail watch` 打印一行；GUI 侧栏按种类显示"无法登录 / 连不上 / 无法同步"）。
   状态只在内存里，引擎新打开时什么都不知道。
 - **生命周期。** 引擎打开时为已有账户、`add_account` 时为新账户启动任务（账户 id 不复用，每个账户只
   启动一次）。账户删除时任务结束，IDLE 中也立即结束，删除不必等它。任务只持有引擎的弱引用；等待时

@@ -77,9 +77,9 @@ pub(crate) async fn sync_one(
             }
             // Safe to run again on a new connection if a reused one turns out dead: what
             // was replayed is no longer pending, and the sync resumes from what it stored.
-            let synced = with_session(&engine, account, |session| {
+            let synced = with_session(&engine, account, {
                 let engine = engine.clone();
-                Box::pin(async move {
+                async move |session| {
                     // Local changes first, as for a full sync.
                     let replayed =
                         ops::replay_queued(&engine, session, account, Uploads::Settled).await?;
@@ -89,7 +89,7 @@ pub(crate) async fn sync_one(
                         .ok_or(Error::FolderNotFound(folder))?;
                     let replayed = replayed.folders.get(&folder);
                     sync_reported(&engine, session, account, &state, replayed).await
-                })
+                }
             })
             .await;
             engine.report(account, Activity::Sync, &synced);
@@ -190,9 +190,9 @@ async fn sync_reported(
     let all = ChangedFlags::Unknown;
     match sync_folder(engine, session, account, folder, &all, &mut report).await {
         Ok(()) => {}
-        Err(Error::Imap(e)) if !e.is_fatal() => {
+        Err(e) if e.is_refusal() => {
             tracing::warn!(folder = %folder.name, error = %e, "folder sync failed");
-            report.error = Some(e.to_string());
+            report.error = Some((&e).into());
         }
         Err(e) => return Err(e),
     }
@@ -264,7 +264,7 @@ async fn sync_folder(
 
     let (mut uidnext, mut modseq) = (folder.uidnext, folder.highest_modseq);
     let (mut count, mut max_uid) = (folder.message_count, folder.max_uid);
-    if folder.uidvalidity != Some(status.uidvalidity) {
+    if !status.same_generation(folder.uidvalidity) {
         // UIDs of the old generation now name different messages (or nothing).
         let uidvalidity = status.uidvalidity;
         let touched = engine

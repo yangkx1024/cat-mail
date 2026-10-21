@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 use catmail_proto::TlsConfig;
 use catmail_proto::imap::Session;
 use catmail_store::{BlobStore, Db, Store};
-use catmail_types::{AccountId, AccountStatus, DraftId, Event, FolderId, ServerProblem};
+use catmail_types::{
+    AccountId, AccountStatus, DraftId, ErrorKind, Event, FolderId, ReportedError, ServerProblem,
+};
 use tokio::sync::{Notify, OwnedMutexGuard, broadcast, watch};
 
 use crate::secrets::SecretStore;
@@ -235,7 +237,7 @@ impl Engine {
         let rejected = lock(&state.status)
             .sync
             .as_ref()
-            .is_some_and(|p| p.auth_failed);
+            .is_some_and(|p| p.error.kind == ErrorKind::Auth);
         if !rejected {
             state.wake.notify_one();
         }
@@ -333,25 +335,30 @@ impl Engine {
             match e {
                 None => {
                     let cleared = slot.take();
-                    let rejected = cleared.as_ref().is_some_and(|p| p.auth_failed);
+                    let rejected = cleared
+                        .as_ref()
+                        .is_some_and(|p| p.error.kind == ErrorKind::Auth);
                     (cleared.is_some(), rejected, 0)
                 }
                 Some(e) => {
-                    let (error, auth_failed) = (e.to_string(), matches!(e, Error::AuthFailed(_)));
+                    let error = ReportedError::from(e);
                     // Not each failure: what is wrong is what frontends show.
-                    let changed = slot
-                        .as_ref()
-                        .is_none_or(|p| p.error != error || p.auth_failed != auth_failed);
-                    let problem = slot.get_or_insert_with(|| ServerProblem {
-                        error: String::new(),
-                        auth_failed,
-                        since: now(),
-                        failures: 0,
-                    });
-                    problem.failures += 1;
-                    problem.error = error;
-                    problem.auth_failed = auth_failed;
-                    (changed, false, problem.failures)
+                    match slot {
+                        Some(problem) => {
+                            let changed = problem.error != error;
+                            problem.failures += 1;
+                            problem.error = error;
+                            (changed, false, problem.failures)
+                        }
+                        None => {
+                            *slot = Some(ServerProblem {
+                                error,
+                                since: now(),
+                                failures: 1,
+                            });
+                            (true, false, 1)
+                        }
+                    }
                 }
             }
         };

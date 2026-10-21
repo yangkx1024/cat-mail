@@ -6,6 +6,7 @@
 
 mod account;
 mod draft;
+mod error;
 mod event;
 mod folder;
 mod ids;
@@ -19,6 +20,7 @@ pub use account::{
     Account, AccountStatus, AuthKind, NewAccount, Security, ServerConfig, ServerProblem,
 };
 pub use draft::{Draft, DraftAttachment, DraftContent};
+pub use error::{ErrorKind, ReportedError};
 pub use event::Event;
 pub use folder::{Folder, FolderRole};
 pub use ids::{

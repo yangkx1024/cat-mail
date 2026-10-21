@@ -1354,13 +1354,7 @@ mod tests {
         let dup = client
             .add_account(new_account("A@example.com"), "pw".into())
             .await;
-        assert!(
-            matches!(
-                dup,
-                Err(Error::Store(catmail_store::Error::AlreadyExists(_)))
-            ),
-            "{dup:?}"
-        );
+        assert!(matches!(dup, Err(Error::AlreadyExists(_))), "{dup:?}");
         assert_eq!(secrets.len(), 1);
     }
 

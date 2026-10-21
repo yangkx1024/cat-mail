@@ -21,12 +21,12 @@ use catmail_proto::imap::Session;
 use catmail_proto::smtp;
 use catmail_store::{NewOutboxEntry, Outbox, OutboxJob, Touched};
 use catmail_types::{
-    AccountId, Address, BlobHash, DraftId, Event, Flags, FolderRole, OutboxEntry, OutboxId,
-    OutboxStatus,
+    AccountId, Address, BlobHash, DraftId, ErrorKind, Event, Flags, FolderRole, OutboxEntry,
+    OutboxId, OutboxStatus,
 };
 use tokio::sync::Notify;
 
-use crate::connection::{self, SessionFuture, with_session};
+use crate::connection::{self, with_session};
 use crate::engine::{Activity, Engine, Permit, blocking, now};
 use crate::{Error, Result, body, drafts, ops, sync};
 
@@ -389,48 +389,49 @@ async fn save_one(
 
 /// APPENDs the message to the account's Sent folder, unless an earlier attempt that
 /// went unanswered put it there already. Without a Sent folder there is nothing to do.
-async fn attempt_save(engine: &Arc<Engine>, job: &OutboxJob, raw: Option<Vec<u8>>) -> Result<()> {
+async fn attempt_save(
+    engine: &Arc<Engine>,
+    job: &OutboxJob,
+    mut raw: Option<Vec<u8>>,
+) -> Result<()> {
     let account = job.entry.account_id;
     let known = engine
         .read(move |db| db.folders().by_role(account, FolderRole::Sent))
         .await?
         .map(|(_, remote_name)| remote_name);
-    let raw = raw.map(Arc::new);
+    // Attempts are counted before they are made, so past the first one (or after a
+    // retry on a new connection within this one) an APPEND may have gone through.
+    let mut may_be_there = job.entry.attempts > 1;
     let (engine2, hash, message_id) = (
         engine.clone(),
         job.raw.clone(),
         job.entry.message_id.clone(),
     );
-    // Attempts are counted before they are made, so past the first one (or after a
-    // retry on a new connection within this one) an APPEND may have gone through.
-    let mut may_be_there = job.entry.attempts > 1;
-    let saved = with_session(engine, account, move |session| {
+    let saved = with_session(engine, account, async move |session| {
         let check_first = std::mem::replace(&mut may_be_there, true);
-        let (engine, hash, message_id) = (engine2.clone(), hash.clone(), message_id.clone());
-        let (known, raw) = (known.clone(), raw.clone());
-        Box::pin(async move {
-            let sent = match known {
-                Some(name) => Some(name),
-                None => find_sent(session).await?,
-            };
-            let Some(sent) = sent else {
-                return Ok(false);
-            };
-            if check_first {
-                session.examine(&sent).await?;
-                if !session.uid_search_message_id(&message_id).await?.is_empty() {
-                    tracing::debug!(%message_id, "already in Sent");
-                    return Ok(true);
-                }
+        let sent = match &known {
+            Some(name) => Some(name.clone()),
+            None => find_sent(session).await?,
+        };
+        let Some(sent) = sent else {
+            return Ok(false);
+        };
+        if check_first {
+            // Searched as it is now: a copy under an earlier UIDVALIDITY is there all the
+            // same, so there is nothing to compare.
+            session.examine(&sent).await?;
+            if !session.uid_search_message_id(&message_id).await?.is_empty() {
+                tracing::debug!(%message_id, "already in Sent");
+                return Ok(true);
             }
-            // Read only now that it is needed.
-            let raw = match raw {
-                Some(raw) => raw,
-                None => Arc::new(read_raw(&engine, hash).await?),
-            };
-            session.append(&sent, Flags::SEEN, &raw).await?;
-            Ok(true)
-        }) as SessionFuture<'_, bool>
+        }
+        // Read only now that it is needed, and kept for a retry on a new connection.
+        let raw = match &mut raw {
+            Some(raw) => raw,
+            slot @ None => slot.insert(read_raw(&engine2, hash.clone()).await?),
+        };
+        session.append(&sent, Flags::SEEN, raw).await?;
+        Ok(true)
     })
     .await?;
     if !saved {
@@ -456,16 +457,15 @@ async fn read_raw(engine: &Arc<Engine>, hash: BlobHash) -> Result<Vec<u8>> {
     })
 }
 
-/// Trying again can't help: the server refused the message for good, or the settings
-/// or the message are wrong. Network trouble and 4xx replies are temporary.
+/// Trying again can't help: the server refused the message for good, or the message is
+/// wrong, or the stored message is missing (a conflict). Network trouble and 4xx replies
+/// are temporary, and so is trouble on this machine. (What the account's settings get
+/// wrong fails logging in, before any attempt.)
 fn is_permanent(e: &Error) -> bool {
-    match e {
-        Error::Smtp(e) => e.is_permanent(),
-        // The stored message is missing. (What the account's settings get wrong fails
-        // logging in, before any attempt.)
-        Error::Conflict(_) => true,
-        _ => false,
-    }
+    matches!(
+        e.kind(),
+        ErrorKind::Refused | ErrorKind::Invalid | ErrorKind::Conflict
+    ) && !e.is_transient()
 }
 
 /// Seconds to wait after the `attempts`-th failed attempt.

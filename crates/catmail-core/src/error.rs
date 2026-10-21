@@ -1,17 +1,21 @@
+use catmail_proto::{imap, smtp};
+use catmail_types::{ErrorKind, ReportedError};
+
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// A database failure.
     #[error(transparent)]
-    Store(catmail_store::Error),
+    Store(StoreError),
 
     /// Any other IMAP or network failure.
     #[error(transparent)]
-    Imap(catmail_proto::imap::Error),
+    Imap(ImapError),
 
     /// Any other SMTP failure.
     #[error(transparent)]
-    Smtp(catmail_proto::smtp::Error),
+    Smtp(SmtpError),
 
     /// The server rejected the credentials.
     #[error("login rejected by the server ({0}); check the username and password")]
@@ -48,6 +52,11 @@ pub enum Error {
     #[error("outbox entry {0} not found")]
     OutboxNotFound(catmail_types::OutboxId),
 
+    /// Something with the same identity is stored already, e.g. an account with that
+    /// address.
+    #[error("{0} already exists")]
+    AlreadyExists(String),
+
     /// The draft or outbox entry is in a state that doesn't allow this, e.g. editing a
     /// draft that is being sent. The text says why.
     #[error("{0}")]
@@ -82,38 +91,161 @@ pub enum Error {
     Io(#[from] std::io::Error),
 }
 
-impl From<catmail_proto::imap::Error> for Error {
-    /// Lifts the failures a user can act on, so frontends needn't interpret protocol
-    /// errors.
-    fn from(e: catmail_proto::imap::Error) -> Self {
-        use catmail_proto::imap::Error as E;
-        match e {
-            E::AuthFailed(text) => Self::AuthFailed(text),
-            E::Unsupported(what) => Self::Unsupported(what),
-            other => Self::Imap(other),
+/// A database failure. Its text says what happened; there is nothing to act on but
+/// reporting it.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub struct StoreError(catmail_store::Error);
+
+/// An IMAP failure without a variant of its own. Its text says what happened, and
+/// [`Error::kind`] what to make of it.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub struct ImapError(pub(crate) imap::Error);
+
+/// An SMTP failure without a variant of its own, as for [`ImapError`].
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub struct SmtpError(pub(crate) smtp::Error);
+
+impl Error {
+    pub fn kind(&self) -> ErrorKind {
+        use ErrorKind as K;
+        match self {
+            Self::Store(_) => K::Internal,
+            Self::Imap(ImapError(e)) => e.kind(),
+            Self::Smtp(SmtpError(e)) => e.kind(),
+            Self::AuthFailed(_) => K::Auth,
+            Self::Unsupported(_)
+            | Self::InvalidInput(_)
+            | Self::NoDataDir
+            | Self::DataDirNotOwned(_) => K::Invalid,
+            Self::AccountNotFound(_)
+            | Self::FolderNotFound(_)
+            | Self::MessageNotFound(_)
+            | Self::AttachmentNotFound(_)
+            | Self::DraftNotFound(_)
+            | Self::DraftAttachmentNotFound(_)
+            | Self::OutboxNotFound(_)
+            | Self::Cancelled => K::NotFound,
+            Self::AlreadyExists(_) | Self::Conflict(_) | Self::AlreadyRunning(_) => K::Conflict,
+            Self::OutOfSync(_) => K::OutOfSync,
+            Self::Tls(_) | Self::Secrets(_) | Self::Task(_) | Self::Io(_) => K::Internal,
+        }
+    }
+
+    /// Whether trying the same again later may work, with nothing changed meanwhile: the
+    /// network failed, or the server refused for now (an SMTP 4xx reply).
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Smtp(SmtpError(e)) => !e.is_permanent(),
+            _ => self.kind() == ErrorKind::Network,
+        }
+    }
+
+    /// Whether a command failed but the connection to the server is still usable, so
+    /// whatever else was to be done on it can go on: the server refused the command, or
+    /// its answer couldn't be read completely, or the input was wrong for it.
+    pub fn is_refusal(&self) -> bool {
+        match self {
+            Self::Imap(ImapError(e)) => !e.is_fatal(),
+            Self::Smtp(SmtpError(e)) => !e.is_fatal(),
+            _ => false,
         }
     }
 }
 
-impl From<catmail_proto::smtp::Error> for Error {
-    /// Lifts the failures a user can act on, as for IMAP.
-    fn from(e: catmail_proto::smtp::Error) -> Self {
-        use catmail_proto::smtp::Error as E;
+impl From<&Error> for ReportedError {
+    fn from(e: &Error) -> Self {
+        Self {
+            kind: e.kind(),
+            message: e.to_string(),
+        }
+    }
+}
+
+impl From<imap::Error> for Error {
+    /// Lifts the failures a user can act on, so frontends needn't interpret protocol
+    /// errors.
+    fn from(e: imap::Error) -> Self {
+        use imap::Error as E;
         match e {
             E::AuthFailed(text) => Self::AuthFailed(text),
             E::Unsupported(what) => Self::Unsupported(what),
-            other => Self::Smtp(other),
+            other => Self::Imap(ImapError(other)),
+        }
+    }
+}
+
+impl From<smtp::Error> for Error {
+    /// Lifts the failures a user can act on, as for IMAP.
+    fn from(e: smtp::Error) -> Self {
+        use smtp::Error as E;
+        match e {
+            E::AuthFailed(text) => Self::AuthFailed(text),
+            E::Unsupported(what) => Self::Unsupported(what),
+            other => Self::Smtp(SmtpError(other)),
         }
     }
 }
 
 impl From<catmail_store::Error> for Error {
     fn from(e: catmail_store::Error) -> Self {
+        use catmail_store::Error as E;
         match e {
-            catmail_store::Error::Conflict(text) => Self::Conflict(text),
-            catmail_store::Error::MessageNotFound(id) => Self::MessageNotFound(id),
-            catmail_store::Error::Invalid(text) => Self::InvalidInput(text),
-            other => Self::Store(other),
+            E::AlreadyExists(what) => Self::AlreadyExists(what),
+            E::Conflict(text) => Self::Conflict(text),
+            E::MessageNotFound(id) => Self::MessageNotFound(id),
+            E::Invalid(text) => Self::InvalidInput(text),
+            other => Self::Store(StoreError(other)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn smtp_replies_are_transient_only_below_500() {
+        let reply = |code| {
+            Error::from(smtp::Error::Reply {
+                command: "RCPT",
+                code,
+                text: String::new(),
+            })
+        };
+        let (busy, refused) = (reply(451), reply(550));
+        assert_eq!(
+            (busy.kind(), refused.kind()),
+            (ErrorKind::Refused, ErrorKind::Refused)
+        );
+        assert!(busy.is_transient() && !refused.is_transient());
+        assert!(busy.is_refusal() && refused.is_refusal());
+    }
+
+    #[test]
+    fn a_lost_connection_is_transient_but_no_refusal() {
+        let closed = Error::from(imap::Error::Closed);
+        assert_eq!(closed.kind(), ErrorKind::Network);
+        assert!(closed.is_transient() && !closed.is_refusal());
+
+        let refused = Error::from(imap::Error::Command {
+            command: "SELECT",
+            text: "NO no such mailbox".into(),
+        });
+        assert_eq!(refused.kind(), ErrorKind::Refused);
+        assert!(refused.is_refusal() && !refused.is_transient());
+    }
+
+    #[test]
+    fn user_facing_failures_are_lifted() {
+        let rejected = Error::from(imap::Error::AuthFailed("NO".into()));
+        assert!(matches!(rejected, Error::AuthFailed(_)));
+        assert_eq!(rejected.kind(), ErrorKind::Auth);
+
+        let dup = Error::from(catmail_store::Error::AlreadyExists("account a".into()));
+        assert!(matches!(dup, Error::AlreadyExists(_)));
+        assert_eq!(dup.kind(), ErrorKind::Conflict);
     }
 }

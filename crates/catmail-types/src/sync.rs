@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{AccountId, FolderId};
+use crate::{AccountId, FolderId, ReportedError};
 
 /// What one sync of an account did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,7 +26,7 @@ pub struct FolderSyncReport {
     /// The server reported a new UIDVALIDITY, so the folder was refetched from scratch.
     pub uidvalidity_changed: bool,
     /// Set if this folder failed while the rest of the account synced.
-    pub error: Option<String>,
+    pub error: Option<ReportedError>,
 }
 
 impl FolderSyncReport {

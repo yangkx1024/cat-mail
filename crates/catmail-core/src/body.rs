@@ -14,12 +14,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use catmail_proto::imap::{Error as ImapError, Session};
+use catmail_proto::imap::{self, Session};
 use catmail_proto::mime::{self, Content};
 use catmail_store::{AttachmentSource, Db, MessageLocation, NewAttachment, NewBody};
 use catmail_types::{AttachmentId, BlobHash, Event, Message, MessageId};
 
-use crate::connection::{SessionFuture, with_session};
+use crate::connection::with_session;
 use crate::engine::{Engine, blocking};
 use crate::{Error, Result};
 
@@ -46,16 +46,17 @@ pub(crate) async fn attachment_content(engine: Arc<Engine>, id: AttachmentId) ->
         return Ok(data);
     }
     let section = source.section.clone();
-    let encoded = on_server(&engine, source.message.clone(), move |session, location| {
-        let section = section.clone();
-        Box::pin(async move {
+    let encoded = on_server(
+        &engine,
+        source.message.clone(),
+        async move |session, location| {
             session
                 .fetch_sections(location.uid, std::slice::from_ref(&section))
                 .await?
                 .and_then(|mut parts| parts.remove(&section))
                 .ok_or(GONE)
-        })
-    })
+        },
+    )
     .await?;
     let (account, folder) = (source.message.account, source.message.folder);
     let data = blocking({
@@ -113,8 +114,8 @@ pub(crate) async fn raw_message(engine: Arc<Engine>, id: MessageId) -> Result<Ve
         return Ok(data);
     }
     let (account, folder) = (location.account, location.folder);
-    let raw = on_server(&engine, location, |session, location| {
-        Box::pin(async move { session.fetch_raw(location.uid).await?.ok_or(GONE) })
+    let raw = on_server(&engine, location, async move |session, location| {
+        session.fetch_raw(location.uid).await?.ok_or(GONE)
     })
     .await?;
     let raw = blocking({
@@ -141,23 +142,17 @@ pub(crate) async fn raw_message(engine: Arc<Engine>, id: MessageId) -> Result<Ve
 /// The caller looked up `location` before calling, and the cancellation is obtained
 /// after that: a removal that started earlier left the account marked removed, which
 /// cancels at once, and one that starts later is noticed.
-async fn on_server<T: Send + 'static>(
+async fn on_server<T>(
     engine: &Arc<Engine>,
     location: MessageLocation,
-    op: impl for<'s> Fn(&'s mut Session, &'s MessageLocation) -> SessionFuture<'s, T>
-    + Clone
-    + Send
-    + 'static,
+    op: impl AsyncFn(&mut Session, &MessageLocation) -> Result<T>,
 ) -> Result<T> {
     let mut cancellation = engine.cancellation(location.account);
     let account = location.account;
     tokio::select! {
-        result = with_session(engine, account, move |session| {
-            let (location, op) = (location.clone(), op.clone());
-            Box::pin(async move {
-                examine(session, &location).await?;
-                op(session, &location).await
-            })
+        result = with_session(engine, account, async move |session| {
+            examine(session, &location).await?;
+            op(session, &location).await
         }) => result,
         () = cancellation.cancelled() => Err(Error::Cancelled),
     }
@@ -176,8 +171,8 @@ async fn ensure_downloaded(engine: &Arc<Engine>, id: MessageId, whole: bool) -> 
         return Ok(());
     }
     let (account, folder) = (location.account, location.folder);
-    let fetched = on_server(engine, location, move |session, location| {
-        Box::pin(fetch(session, location, whole))
+    let fetched = on_server(engine, location, async move |session, location| {
+        fetch(session, location, whole).await
     })
     .await?;
 
@@ -233,7 +228,7 @@ async fn fetch(session: &mut Session, location: &MessageLocation, whole: bool) -
             Ok(None) => return Err(GONE),
             // Some servers send BODYSTRUCTUREs that can't be parsed; the raw message
             // can always be.
-            Err(ImapError::Incomplete(_)) => {
+            Err(imap::Error::Incomplete(_)) => {
                 tracing::warn!(uid, "unparsable BODYSTRUCTURE; fetching the whole message");
             }
             Err(e) => return Err(e.into()),
@@ -246,7 +241,7 @@ async fn fetch(session: &mut Session, location: &MessageLocation, whole: bool) -
 /// meant when the message was stored.
 async fn examine(session: &mut Session, location: &MessageLocation) -> Result<()> {
     let status = session.examine(&location.remote_name).await?;
-    if Some(status.uidvalidity) != location.uidvalidity {
+    if !status.same_generation(location.uidvalidity) {
         return Err(Error::OutOfSync(
             "the folder was rebuilt on the server (UIDVALIDITY changed)",
         ));

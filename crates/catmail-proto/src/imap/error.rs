@@ -1,5 +1,7 @@
 use std::io;
 
+use catmail_types::ErrorKind;
+
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug, thiserror::Error)]
@@ -55,6 +57,23 @@ pub enum Error {
 }
 
 impl Error {
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            // A garbled conversation too: a new connection may do better.
+            Self::Io(_)
+            | Self::Timeout
+            | Self::Closed
+            | Self::Bye(_)
+            | Self::Rejected(_)
+            | Self::Protocol(_) => ErrorKind::Network,
+            Self::AuthFailed(_) => ErrorKind::Auth,
+            Self::Command { .. } | Self::Aborted { .. } | Self::Incomplete(_) => ErrorKind::Refused,
+            Self::InvalidServerName(_) | Self::Unsupported(_) | Self::InvalidInput(_) => {
+                ErrorKind::Invalid
+            }
+        }
+    }
+
     /// Whether the connection can no longer be used. Everything except a refused or
     /// incompletely parsed command (and invalid input detected before sending) means it
     /// must be dropped.

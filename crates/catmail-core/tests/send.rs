@@ -5,7 +5,9 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use catmail_core::{Address, DraftContent, Error, Event, OutboxEntry, OutboxStatus, RecvError};
+use catmail_core::{
+    Address, DraftContent, Error, ErrorKind, Event, OutboxEntry, OutboxStatus, RecvError,
+};
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 use common::{Env, drain, env, env_with, eventually};
 use mail_parser::{MessageParser, MimeHeaders};
@@ -367,8 +369,8 @@ async fn unreachable_server_postpones_the_rest_of_the_queue() {
     assert!(outbox[1].last_error.as_deref().unwrap().contains("421"));
     assert!(outbox[1].next_attempt_at > Some(outbox[1].created_at));
     let problem = env.client.account_status(env.account).send.unwrap();
-    assert!(problem.error.contains("421"), "{problem:?}");
-    assert!(!problem.auth_failed);
+    assert!(problem.error.message.contains("421"), "{problem:?}");
+    assert_eq!(problem.error.kind, ErrorKind::Refused);
     assert!(env.client.account_status(env.account).sync.is_none());
 
     assert_eq!(
@@ -496,8 +498,11 @@ async fn wrong_password_holds_the_queue_and_is_reported() {
             .contains("login rejected")
     );
     let problem = env.client.account_status(env.account).send.unwrap();
-    assert!(problem.auth_failed);
-    assert!(problem.error.contains("login rejected"), "{problem:?}");
+    assert_eq!(problem.error.kind, ErrorKind::Auth);
+    assert!(
+        problem.error.message.contains("login rejected"),
+        "{problem:?}"
+    );
     assert_eq!(problem.failures, 2);
     let changed = drain(&mut events)
         .into_iter()

@@ -296,10 +296,9 @@ async fn step(
 ) -> Result<Wait> {
     // Connected before taking the permit: waiting for an unreachable server shouldn't
     // hold up syncs the user asks for.
-    connection::on_session(engine, account, session, |s| {
-        let engine = engine.clone();
-        let changed_flags = changed_flags.clone();
-        Box::pin(async move { work(&engine, s, account, &schedule, &changed_flags).await })
+    connection::on_session(engine, account, session, {
+        let (engine, changed_flags) = (engine.clone(), changed_flags.clone());
+        async move |s| work(&engine, s, account, &schedule, &changed_flags).await
     })
     .await
 }
@@ -332,7 +331,7 @@ async fn work(
             match sync::sync_inbox(engine, session, account, changed_flags).await {
                 Ok(true) if session.can_idle() => Ok(Wait::Idle),
                 Ok(_) => Ok(Wait::Poll),
-                Err(Error::Imap(e)) if !e.is_fatal() => {
+                Err(e) if e.is_refusal() => {
                     tracing::warn!(%account, error = %e, "can't sync INBOX");
                     Ok(Wait::InboxFailed)
                 }
