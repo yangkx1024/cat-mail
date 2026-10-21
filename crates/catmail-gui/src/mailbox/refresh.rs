@@ -30,15 +30,21 @@ impl Refresh {
             list,
         };
         match *event {
+            // Search results may come from the account or folder that went away.
             Event::AccountAdded { .. }
             | Event::AccountRemoved { .. }
-            | Event::FoldersChanged { .. } => sidebar(false),
+            | Event::FoldersChanged { .. } => sidebar(matches!(shown, Some(Source::Search(_)))),
             // Unread and total counts may have changed too. A search looks in every
             // folder of every account.
             Event::MessagesChanged { folder, .. } => sidebar(
                 matches!(shown, Some(Source::Search(_))) || shown == Some(&Source::Folder(folder)),
             ),
-            Event::DraftsChanged { account } => sidebar(shown == Some(&Source::Drafts(account))),
+            // Only the count, which is read on its own (`Mailbox::count_drafts`): every pause
+            // in typing saves a draft.
+            Event::DraftsChanged { account } => Self {
+                sidebar: false,
+                list: shown == Some(&Source::Drafts(account)),
+            },
             Event::OutboxChanged { account } => sidebar(shown == Some(&Source::Outbox(account))),
             Event::AccountStatusChanged { .. }
             | Event::PendingOpsChanged { .. }
@@ -132,6 +138,10 @@ mod tests {
         sidebar: true,
         list: false,
     };
+    const LIST: Refresh = Refresh {
+        sidebar: false,
+        list: true,
+    };
 
     #[test]
     fn events_read_again_what_they_change() {
@@ -146,15 +156,19 @@ mod tests {
             (Some(Event::AccountAdded { account }), Some(Source::Folder(folder)), SIDEBAR),
             (Some(Event::AccountRemoved { account }), None, SIDEBAR),
             (Some(Event::FoldersChanged { account }), Some(Source::Folder(folder)), SIDEBAR),
+            // The results may hold messages of an account or a folder that is gone.
+            (Some(Event::AccountRemoved { account }), Some(search.clone()), Refresh::ALL),
+            (Some(Event::FoldersChanged { account }), Some(search.clone()), Refresh::ALL),
             (Some(messages.clone()), Some(Source::Folder(folder)), Refresh::ALL),
             (Some(messages.clone()), Some(Source::Folder(elsewhere)), SIDEBAR),
             (Some(messages.clone()), Some(Source::Drafts(account)), SIDEBAR),
             (Some(messages.clone()), None, SIDEBAR),
             // Results come from every account.
             (Some(Event::MessagesChanged { account: other, folder: elsewhere }), Some(search.clone()), Refresh::ALL),
-            (Some(Event::DraftsChanged { account }), Some(Source::Drafts(account)), Refresh::ALL),
-            (Some(Event::DraftsChanged { account }), Some(Source::Drafts(other)), SIDEBAR),
-            (Some(Event::DraftsChanged { account }), Some(search.clone()), SIDEBAR),
+            // The draft count is read on its own.
+            (Some(Event::DraftsChanged { account }), Some(Source::Drafts(account)), LIST),
+            (Some(Event::DraftsChanged { account }), Some(Source::Drafts(other)), NOTHING),
+            (Some(Event::DraftsChanged { account }), Some(search.clone()), NOTHING),
             (Some(Event::OutboxChanged { account }), Some(Source::Outbox(account)), Refresh::ALL),
             (Some(Event::OutboxChanged { account }), Some(Source::Outbox(other)), SIDEBAR),
             (Some(Event::AccountStatusChanged { account }), Some(Source::Folder(folder)), NOTHING),
@@ -183,16 +197,12 @@ mod tests {
 
     #[test]
     fn a_burst_is_read_at_once_then_once_per_interval() {
-        let list = Refresh {
-            sidebar: false,
-            list: true,
-        };
         let mut throttle = Throttle::default();
         // Nothing to read starts no interval.
         assert_eq!(throttle.ask(NOTHING), NOTHING);
         assert_eq!(throttle.ask(SIDEBAR), SIDEBAR);
         assert_eq!(throttle.ask(SIDEBAR), NOTHING);
-        assert_eq!(throttle.ask(list), NOTHING);
+        assert_eq!(throttle.ask(LIST), NOTHING);
         assert_eq!(throttle.ask(NOTHING), NOTHING);
         // Everything held back, together.
         assert_eq!(throttle.elapsed(), Refresh::ALL);
@@ -200,7 +210,7 @@ mod tests {
         assert_eq!(throttle.elapsed(), SIDEBAR);
         // A quiet interval ends the waiting: the next change is read at once.
         assert_eq!(throttle.elapsed(), NOTHING);
-        assert_eq!(throttle.ask(list), list);
+        assert_eq!(throttle.ask(LIST), LIST);
         assert_eq!(throttle.elapsed(), NOTHING);
         assert_eq!(throttle.ask(SIDEBAR), SIDEBAR);
     }

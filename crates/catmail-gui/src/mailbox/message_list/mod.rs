@@ -3,6 +3,7 @@
 //! under a heading for each day. The list (`ListState`) owns selection, keyboard
 //! navigation and scrolling; the delegate here owns the rows.
 
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use catmail_core::{
@@ -46,7 +47,7 @@ pub enum Row {
 }
 
 /// A row's identity, which survives reloads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RowId {
     Message(MessageId),
     Draft(DraftId),
@@ -315,8 +316,14 @@ fn load(
                 Ok((rows, more)) => {
                     delegate.has_more = more;
                     if offset > 0 {
+                        // Rows that came in at the top since the last page push the ones
+                        // shown down into this one; the refresh their event brings puts
+                        // the list in order again.
+                        let shown: HashSet<RowId> = delegate.rows.iter().map(Row::id).collect();
                         let from = delegate.rows.len();
-                        delegate.rows.extend(rows);
+                        delegate
+                            .rows
+                            .extend(rows.into_iter().filter(|r| !shown.contains(&r.id())));
                         delegate.days.extend(&delegate.rows, from);
                     } else {
                         replace_rows(list, rows, window, cx);
@@ -348,24 +355,22 @@ fn replace_rows(
     let next = reselect(selected, delegate.removing.take(), &rows);
     delegate.days = Days::new(&rows);
     delegate.rows = rows;
+    if let Reselect::Keep { ix, removing } = next {
+        let ix = ix.and_then(|ix| list.delegate().days.path(ix));
+        list.set_selected_index(ix, window, cx);
+        list.delegate_mut().removing = removing;
+        return;
+    }
+    let next = match next {
+        // Every row has a path; if one hadn't, it would be as good as gone.
+        Reselect::Next(ix) => list.delegate().days.path(ix),
+        _ => None,
+    };
+    list.set_selected_index(next, window, cx);
     match next {
-        Reselect::Keep { ix, removing } => {
-            let ix = ix.and_then(|ix| list.delegate().days.path(ix));
-            list.set_selected_index(ix, window, cx);
-            list.delegate_mut().removing = removing;
-        }
-        Reselect::Next(ix) => {
-            let next = list.delegate().days.path(ix);
-            list.set_selected_index(next, window, cx);
-            if let Some(next) = next {
-                cx.emit(ListEvent::Select(next));
-            }
-        }
-        Reselect::Gone => {
-            // Setting the index emits nothing; deselecting with Escape emits this.
-            list.set_selected_index(None, window, cx);
-            cx.emit(ListEvent::Cancel);
-        }
+        Some(next) => cx.emit(ListEvent::Select(next)),
+        // Setting the index emits nothing; deselecting with Escape emits this.
+        None => cx.emit(ListEvent::Cancel),
     }
 }
 

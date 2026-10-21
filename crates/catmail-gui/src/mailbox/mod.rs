@@ -19,6 +19,7 @@ mod tests;
 
 pub(crate) use commands::report_failure;
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use catmail_core::{
@@ -122,6 +123,10 @@ pub struct Mailbox {
     pub(crate) reader: Entity<Reader>,
     focus_handle: FocusHandle,
     reading_folders: Coalesce,
+    /// `DraftsChanged` events seen, by account. A draft count, or a read of the sidebar,
+    /// started before the latest of them doesn't set the account's draft count: the
+    /// count started for that event does.
+    drafts_changes: HashMap<AccountId, u64>,
     /// Looking for refused changes, coalesced like reading.
     checking_refused: Coalesce,
     _load_folders: Task<()>,
@@ -203,6 +208,7 @@ impl Mailbox {
             reader,
             focus_handle: cx.focus_handle(),
             reading_folders: Coalesce::default(),
+            drafts_changes: HashMap::new(),
             checking_refused: Coalesce::default(),
             _load_folders: Task::ready(()),
             _throttle: Task::ready(()),
@@ -276,6 +282,7 @@ impl Mailbox {
                     cx.notify();
                 }
             }
+            Some(&Event::DraftsChanged { account }) => self.count_drafts(account, window, cx),
             Some(Event::PendingOpsChanged { .. }) | None => self.report_refused_changes(window, cx),
             Some(_) => {}
         }
@@ -326,6 +333,7 @@ impl Mailbox {
         if !self.reading_folders.start() {
             return;
         }
+        let drafts_changes = self.drafts_changes.clone();
         let client = self.client.clone();
         self._load_folders = cx.spawn_in(window, async move |this, cx| {
             let loaded = client.overview().await;
@@ -333,12 +341,19 @@ impl Mailbox {
                 let again = this.reading_folders.finish();
                 match loaded {
                     Ok(accounts) => {
-                        // Not stored: taken now, it is never older than its event.
                         let accounts = accounts
                             .into_iter()
                             .map(|a| {
-                                let status = this.client.account_status(a.account.id);
-                                AccountEntry::new(a, status)
+                                let id = a.account.id;
+                                // Not stored: taken now, it is never older than its event.
+                                let status = this.client.account_status(id);
+                                let mut entry = AccountEntry::new(a, status);
+                                if this.drafts_changes.get(&id) != drafts_changes.get(&id)
+                                    && let Some(shown) = this.account(id)
+                                {
+                                    entry.drafts = shown.drafts;
+                                }
+                                entry
                             })
                             .collect();
                         this.set_accounts(accounts, window, cx)
@@ -354,6 +369,33 @@ impl Mailbox {
             })
             .ok();
         });
+    }
+
+    /// Every pause in typing saves a draft: only the account's draft count can have
+    /// changed, so only that is read again.
+    fn count_drafts(&mut self, account: AccountId, window: &mut Window, cx: &mut Context<Self>) {
+        let change = self.drafts_changes.entry(account).or_default();
+        *change += 1;
+        let change = *change;
+        let client = self.client.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(drafts) = client.count_drafts(account).await else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                if this.drafts_changes.get(&account) != Some(&change) {
+                    return; // A later count is on its way.
+                }
+                if let Some(entry) = this.account_mut(account)
+                    && entry.drafts != drafts
+                {
+                    entry.drafts = drafts;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn set_accounts(

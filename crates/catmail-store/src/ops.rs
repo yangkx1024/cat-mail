@@ -33,6 +33,9 @@ const USER_FLAGS: Flags =
 pub(crate) const MOVING: &str = "LEFT JOIN pending_ops o ON m.uid IS NULL AND o.message_id = m.id
      AND o.kind = 'move' AND o.status = 'pending'";
 
+/// An op `o` of account `?1` (any account if NULL) that failed or conflicted.
+const SETTLED: &str = "o.status <> 'pending' AND (?1 IS NULL OR o.account_id = ?1)";
+
 /// A queued op, as replay needs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayOp {
@@ -418,9 +421,14 @@ impl<'c> PendingOps<'c> {
     /// The account's queued changes: pending ones and those that failed or conflicted,
     /// oldest first; every account's with `None`.
     pub fn list(&self, account: Option<AccountId>) -> Result<Vec<PendingOp>> {
+        self.select("?1 IS NULL OR o.account_id = ?1", account)
+    }
+
+    /// The ops `o` matching `filter`, whose `?1` is `account`, oldest first.
+    fn select(&self, filter: &str, account: Option<AccountId>) -> Result<Vec<PendingOp>> {
         let sql = format!(
             "SELECT {COLUMNS} FROM pending_ops o LEFT JOIN messages m ON m.id = o.message_id
-             WHERE ?1 IS NULL OR o.account_id = ?1 ORDER BY o.id"
+             WHERE {filter} ORDER BY o.id"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt.query_map([account.map(|a| a.0)], from_row)?;
@@ -451,15 +459,22 @@ impl<'c> PendingOps<'c> {
         }
     }
 
+    /// Whether the account (any account with `None`) has failed or conflicting ops.
+    pub fn has_settled(&self, account: Option<AccountId>) -> Result<bool> {
+        let sql = format!("SELECT EXISTS (SELECT 1 FROM pending_ops o WHERE {SETTLED})");
+        Ok(self
+            .conn
+            .prepare_cached(&sql)?
+            .query_row([account.map(|a| a.0)], |r| r.get(0))?)
+    }
+
     /// Forgets every failed or conflicting op of the account (of every account with
     /// `None`), and returns them, oldest first.
     pub fn dismiss_settled(&self, account: Option<AccountId>) -> Result<Vec<PendingOp>> {
-        let mut settled = self.list(account)?;
-        settled.retain(|op| op.status != OpStatus::Pending);
-        let mut stmt = self.conn.prepare_cached(
-            "DELETE FROM pending_ops WHERE status <> ?1 AND (?2 IS NULL OR account_id = ?2)",
-        )?;
-        stmt.execute(params![OpStatus::Pending.as_str(), account.map(|a| a.0)])?;
+        let settled = self.select(SETTLED, account)?;
+        self.conn
+            .prepare_cached(&format!("DELETE FROM pending_ops AS o WHERE {SETTLED}"))?
+            .execute([account.map(|a| a.0)])?;
         Ok(settled)
     }
 
@@ -1657,15 +1672,18 @@ mod tests {
         f.write(|db| db.ops().set_flags(&[m3], Flags::SEEN, Flags::empty(), 0));
 
         let other = AccountId(f.account.0 + 1);
+        assert!(!f.write(|db| db.ops().has_settled(Some(other))));
         assert!(
             f.write(|db| db.ops().dismiss_settled(Some(other)))
                 .is_empty()
         );
+        assert!(f.write(|db| db.ops().has_settled(None)));
         let dismissed = f.write(|db| db.ops().dismiss_settled(None));
         assert_eq!(dismissed.len(), 1);
         assert_eq!(dismissed[0].status, OpStatus::Failed);
         let left = f.ops();
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].status, OpStatus::Pending);
+        assert!(!f.write(|db| db.ops().has_settled(Some(f.account))));
     }
 }

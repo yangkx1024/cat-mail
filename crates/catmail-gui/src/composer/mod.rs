@@ -46,6 +46,9 @@ struct OpenComposers {
     /// Drafts being read for a window: opening one again meanwhile does nothing, the
     /// window is on its way.
     opening: HashSet<DraftId>,
+    /// Opens on their way, for tests to wait for.
+    #[cfg(test)]
+    in_flight: usize,
     /// The app quits once the last of them has closed.
     quitting: bool,
 }
@@ -117,6 +120,10 @@ pub fn open(client: MailClient, from: ComposeFrom, window: &mut Window, cx: &mut
     {
         return;
     }
+    #[cfg(test)]
+    {
+        cx.default_global::<OpenComposers>().in_flight += 1;
+    }
     let asking = window.window_handle();
     // On the app, not the asking window: closing that must not leave the draft marked
     // as being opened.
@@ -145,7 +152,14 @@ pub fn open(client: MailClient, from: ComposeFrom, window: &mut Window, cx: &mut
             if let ComposeFrom::Draft(id) = from {
                 cx.default_global::<OpenComposers>().opening.remove(&id);
             }
+            #[cfg(test)]
+            {
+                cx.default_global::<OpenComposers>().in_flight -= 1;
+            }
             let failure = match opened {
+                // A window for it opened meanwhile: a reply or forward made it, and it
+                // was opened from the drafts before its window came up.
+                Ok((draft, _)) if activate(draft.id, cx) => None,
                 Ok((draft, account)) => {
                     let created_here = !matches!(from, ComposeFrom::Draft(_));
                     // Where the writing starts: the text once there is someone to send to.
@@ -170,6 +184,13 @@ pub fn open(client: MailClient, from: ComposeFrom, window: &mut Window, cx: &mut
         });
     })
     .detach();
+}
+
+/// Whether every [`open`] has finished.
+#[cfg(test)]
+pub(crate) fn opened(cx: &App) -> bool {
+    cx.try_global::<OpenComposers>()
+        .is_none_or(|open| open.in_flight == 0)
 }
 
 /// The error each open composer shows, if any.

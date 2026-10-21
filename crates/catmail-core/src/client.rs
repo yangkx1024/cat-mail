@@ -623,6 +623,14 @@ impl MailClient {
             .await
     }
 
+    /// How many drafts [`list_drafts`](Self::list_drafts) returns.
+    pub async fn count_drafts(&self, account: AccountId) -> Result<usize> {
+        let engine = self.engine.clone();
+        self.rt
+            .run(async move { engine.read(move |db| db.drafts().count(account)).await })
+            .await
+    }
+
     /// Deletes the draft, and its copy on the server the way changes to messages are
     /// made.
     pub async fn delete_draft(&self, id: DraftId) -> Result<()> {

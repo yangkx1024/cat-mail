@@ -121,6 +121,11 @@ pub(crate) async fn dismiss_settled(
     engine: Arc<Engine>,
     account: Option<AccountId>,
 ) -> Result<Vec<PendingOp>> {
+    // Asked after every change to the queue, while a sync may be writing: only take
+    // the write connection when there is something to forget.
+    if !engine.read(move |db| db.ops().has_settled(account)).await? {
+        return Ok(Vec::new());
+    }
     let dismissed = engine
         .write(move |db| db.ops().dismiss_settled(account))
         .await?;
