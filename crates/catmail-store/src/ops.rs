@@ -1142,6 +1142,30 @@ mod tests {
     }
 
     #[test]
+    fn repeated_batch_keeps_unreplayed_flag_changes() {
+        let f = setup();
+        let (m1, m2) = (f.message(f.inbox, 1), f.message(f.inbox, 2));
+        f.write(|db| db.ops().set_flags(&[m2], Flags::SEEN, Flags::empty(), 0));
+        // An interrupted sync fetches the same batch again; someone flagged both.
+        let again: Vec<_> = [1, 2]
+            .map(|uid| NewMessage {
+                state: FlagState {
+                    uid,
+                    flags: Flags::FLAGGED,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into();
+        assert_eq!(
+            f.write(|db| db.messages().upsert(f.account, f.inbox, &again)),
+            0
+        );
+        assert_eq!(f.row(m1).unwrap().2, Flags::FLAGGED);
+        assert_eq!(f.row(m2).unwrap().2, Flags::SEEN | Flags::FLAGGED);
+    }
+
+    #[test]
     fn refused_flag_changes_are_undone_unless_changed_again() {
         let f = setup();
         let (m1, m2) = (f.message(f.inbox, 1), f.message(f.inbox, 2));
