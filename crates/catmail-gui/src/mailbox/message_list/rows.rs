@@ -65,7 +65,7 @@ pub(super) fn message_row(message: &MessageSummary, cx: &App) -> ListItem {
     let unread = !message.flags.contains(Flags::SEEN);
     let flagged = message.flags.contains(Flags::FLAGGED);
     let sender = format::sender(&message.from);
-    let subject = format::subject(message.subject.as_deref());
+    let subject = format::subject(message.subject.as_deref()).to_owned();
     let date = format::time(message.date);
     let muted = cx.theme().muted_foreground;
     let label = format!(
@@ -117,7 +117,7 @@ pub(super) fn draft_row(draft: &Draft, cx: &App) -> ListItem {
     } else {
         format!("To {to}")
     };
-    let subject = format::subject(Some(&draft.content.subject));
+    let subject = format::subject(Some(&draft.content.subject)).to_owned();
     let date = format::time(Some(draft.updated_at));
     let muted = cx.theme().muted_foreground;
     let middle = h_flex()
@@ -134,17 +134,22 @@ pub(super) fn draft_row(draft: &Draft, cx: &App) -> ListItem {
     ))
 }
 
-/// How an outbox entry's state reads, and whether it needs the user.
+/// How an outbox entry's state reads, and how loud it is if it needs the user.
 pub fn outbox_status(entry: &OutboxEntry) -> (&'static str, Option<Severity>) {
-    match entry.status {
-        OutboxStatus::Queued if entry.attempts > 0 => ("Waiting to retry", None),
-        OutboxStatus::Queued => ("Waiting to send", None),
-        OutboxStatus::Sending => ("Sending…", None),
-        OutboxStatus::Accepted => ("Sent · saving to Sent", None),
-        OutboxStatus::Unknown => ("Not confirmed", Some(Severity::Warning)),
-        OutboxStatus::Failed => ("Rejected", Some(Severity::Danger)),
-        OutboxStatus::Done => ("Sent", None),
-    }
+    let text = match entry.status {
+        OutboxStatus::Queued if entry.attempts > 0 => "Waiting to retry",
+        OutboxStatus::Queued => "Waiting to send",
+        OutboxStatus::Sending => "Sending…",
+        OutboxStatus::Accepted => "Sent · saving to Sent",
+        OutboxStatus::Unknown => "Not confirmed",
+        OutboxStatus::Failed => "Rejected",
+        OutboxStatus::Done => "Sent",
+    };
+    let severity = entry.status.needs_user().then_some(match entry.status {
+        OutboxStatus::Failed => Severity::Danger,
+        _ => Severity::Warning,
+    });
+    (text, severity)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -60,6 +60,21 @@ store / IMAP / SMTP 错误包在不透明的 `StoreError` / `ImapError` / `SmtpE
 - `ErrorKind` 故意不加 `#[non_exhaustive]`：以后加种类（如 OAuth 的"需要重新授权"）时，前端的
   `match` 会编译失败，提醒每处都处理。
 
+### 规则在引擎，措辞在前端
+
+前端要预先知道引擎会怎么做（按钮是否可用、要不要先确认），这些判断由 types / core 给出，前端不自己
+推导，否则引擎的规则一变，前端就静默偏离（以后的 IPC 前端还会再抄一遍）：
+
+- 特殊文件夹：`special_folder`（某角色用哪个文件夹：可选中、id 最小）、`DeleteOutcome`（移到 Trash /
+  已在任一 Trash 中永久删除 / 没有 Trash）、`archive_folder`，都作用于账户的文件夹列表。store 的
+  `by_role`、`delete_messages`、`archive_messages` 调用的是同样这几个函数，规则只写一处。
+- outbox：`OutboxStatus::went_out / needs_user / can_retry / can_mark_sent / can_cancel /
+  retry_may_duplicate`，store 的状态转换也用它们判断。
+- `FolderRole::label / counts_unread`，以及 `catmail_core::display`（大小、日期、"姓名否则邮箱"、
+  地址列表、"(no subject)"）。
+
+措辞、图标、布局留在各前端。
+
 ### 事务与事件
 
 数据库访问只经过 `Store::read` / `Store::write`：闭包里的各个 repository 共用同一个事务；

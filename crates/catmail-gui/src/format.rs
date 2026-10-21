@@ -1,57 +1,15 @@
-//! How message metadata reads in the window.
+//! How message metadata reads in the window: what `catmail_core::display` doesn't say,
+//! the time of day and the list's day headings.
 
-use catmail_core::Address;
 use jiff::civil::Date;
 use jiff::{Timestamp, Zoned, tz::TimeZone};
 
-/// `Name <a@example.com>` for each address, comma separated.
-pub fn addresses(list: &[Address]) -> String {
-    list.iter()
-        .map(Address::to_string)
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// The name, or the address where there is none.
-fn name(address: &Address) -> String {
-    address
-        .name
-        .clone()
-        .unwrap_or_else(|| address.email.clone())
-}
-
-/// The names alone (addresses where there is no name), comma separated: `Bob, Carol`.
-pub fn names<'a>(list: impl IntoIterator<Item = &'a Address>) -> String {
-    list.into_iter().map(name).collect::<Vec<_>>().join(", ")
-}
-
-/// The subject, or a placeholder for none.
-pub fn subject(subject: Option<&str>) -> String {
-    match subject.map(str::trim) {
-        Some(subject) if !subject.is_empty() => subject.to_owned(),
-        _ => "(no subject)".into(),
-    }
-}
-
-/// The sender as a list row shows it: the first name, or its address.
-pub fn sender(from: &[Address]) -> String {
-    from.first().map(name).unwrap_or_default()
-}
-
-/// The full date, as in the reader's header: `2026-10-19 14:05`.
-pub fn date(timestamp: Option<i64>) -> String {
-    local(timestamp, "%Y-%m-%d %H:%M")
-}
+/// What reads the same as in the CLI.
+pub use catmail_core::display::{addresses, date, names, sender, size, subject};
 
 /// The time of day, as a list row shows it under its day's heading: `14:05`.
 pub fn time(timestamp: Option<i64>) -> String {
-    local(timestamp, "%H:%M")
-}
-
-fn local(timestamp: Option<i64>, format: &str) -> String {
-    zoned(timestamp, &TimeZone::system())
-        .map(|t| t.strftime(format).to_string())
-        .unwrap_or_default()
+    catmail_core::display::local(timestamp, "%H:%M")
 }
 
 /// The local calendar as of one moment, to put many rows under day headings with one
@@ -97,21 +55,6 @@ fn zoned(timestamp: Option<i64>, tz: &TimeZone) -> Option<Zoned> {
     Some(t.to_zoned(tz.clone()))
 }
 
-/// `512 B`, `1.5 KB`, `12.3 MB` (powers of 1024).
-pub fn size(bytes: u64) -> String {
-    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
-    if bytes < 1024 {
-        return format!("{bytes} B");
-    }
-    let mut value = bytes as f64 / 1024.0;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    format!("{value:.1} {}", UNITS[unit])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,30 +81,5 @@ mod tests {
         assert_eq!(day("2026-01-01T00:00:00+08:00"), "Thursday, January 1");
         assert_eq!(day("2025-12-31T09:00:00+08:00"), "December 31, 2025");
         assert_eq!(calendar.heading(calendar.day(None)), "No date");
-    }
-
-    #[test]
-    fn addresses_and_sender() {
-        let list = [
-            Address {
-                name: Some("张三".into()),
-                email: "zhang@example.com".into(),
-            },
-            Address {
-                name: None,
-                email: "b@example.com".into(),
-            },
-        ];
-        assert_eq!(addresses(&list), "张三 <zhang@example.com>, b@example.com");
-        assert_eq!(sender(&list), "张三");
-        assert_eq!(sender(&list[1..]), "b@example.com");
-        assert_eq!(sender(&[]), "");
-    }
-
-    #[test]
-    fn sizes() {
-        assert_eq!(size(512), "512 B");
-        assert_eq!(size(1536), "1.5 KB");
-        assert_eq!(size(3 * 1024 * 1024), "3.0 MB");
     }
 }

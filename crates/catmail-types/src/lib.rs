@@ -22,7 +22,7 @@ pub use account::{
 pub use draft::{Draft, DraftAttachment, DraftContent};
 pub use error::{ErrorKind, ReportedError};
 pub use event::Event;
-pub use folder::{Folder, FolderRole};
+pub use folder::{DeleteOutcome, Folder, FolderRole, archive_folder, special_folder};
 pub use ids::{
     AccountId, AttachmentId, BlobHash, DraftAttachmentId, DraftId, FolderId, MessageId, OutboxId,
     PendingOpId,

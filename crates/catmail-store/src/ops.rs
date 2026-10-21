@@ -12,11 +12,12 @@
 use std::collections::{BTreeSet, HashMap, hash_map::Entry};
 
 use catmail_types::{
-    AccountId, Flags, FolderId, FolderRole, MessageId, OpKind, OpStatus, PendingOp, PendingOpId,
+    AccountId, DeleteOutcome, Flags, Folder, FolderId, FolderRole, MessageId, OpKind, OpStatus,
+    PendingOp, PendingOpId, archive_folder, special_folder,
 };
 use rusqlite::{Connection, OptionalExtension, Params, Row, params};
 
-use crate::columns::{conversion_error, parse_opt_text, parse_text};
+use crate::columns::{conversion_error, parse_text};
 use crate::folders::Folders;
 use crate::{Error, Result};
 
@@ -102,7 +103,6 @@ struct Local {
     account: AccountId,
     folder: FolderId,
     flags: Flags,
-    role: Option<FolderRole>,
     /// Where the server has it: (folder, UIDVALIDITY, UID).
     server: Option<(FolderId, u32, u32)>,
     /// The pending move that put it here, if it has no UID yet.
@@ -177,9 +177,29 @@ impl<'c> PendingOps<'c> {
         Ok(touched)
     }
 
+    /// Moves the messages to their account's Archive folder, those not in an Archive
+    /// folder already ([`archive_folder`]). Fails, changing nothing, if an account has
+    /// no Archive folder.
+    pub fn archive_messages(&self, messages: &[MessageId], now: i64) -> Result<Touched> {
+        let mut touched = Touched::new();
+        let mut folders = HashMap::new();
+        for &id in messages {
+            let m = self.local(id)?;
+            let folders = self.folders_of(&mut folders, m.account)?;
+            if special_folder(folders, FolderRole::Archive).is_none() {
+                return Err(Error::Invalid("the account has no Archive folder".into()));
+            }
+            if let Some(to) = archive_folder(folders, m.folder) {
+                self.move_one(&m, to, now)?;
+                touched.extend([(m.account, m.folder), (m.account, to)]);
+            }
+        }
+        Ok(touched)
+    }
+
     /// Moves the messages to their account's Trash, or deletes them for good if they are
-    /// in Trash already or `permanently` is set. Without a Trash folder, only permanent
-    /// deletion is possible.
+    /// in Trash already or `permanently` is set ([`DeleteOutcome`]). Without a Trash
+    /// folder, only permanent deletion is possible.
     pub fn delete_messages(
         &self,
         messages: &[MessageId],
@@ -187,27 +207,27 @@ impl<'c> PendingOps<'c> {
         now: i64,
     ) -> Result<Touched> {
         let mut touched = Touched::new();
-        let mut trash: HashMap<AccountId, Option<FolderId>> = HashMap::new();
+        let mut folders = HashMap::new();
         for &id in messages {
             let m = self.local(id)?;
             touched.insert((m.account, m.folder));
-            if !permanently && m.role != Some(FolderRole::Trash) {
-                let found = match trash.entry(m.account) {
-                    Entry::Occupied(e) => *e.get(),
-                    Entry::Vacant(e) => *e.insert(
-                        Folders::new(self.conn)
-                            .by_role(m.account, FolderRole::Trash)?
-                            .map(|(id, _)| id),
-                    ),
-                };
-                let trash = found.ok_or_else(|| {
-                    Error::Invalid(
+            let outcome = if permanently {
+                DeleteOutcome::Permanent
+            } else {
+                DeleteOutcome::of(self.folders_of(&mut folders, m.account)?, m.folder)
+            };
+            match outcome {
+                DeleteOutcome::ToTrash(trash) => {
+                    self.move_one(&m, trash, now)?;
+                    touched.insert((m.account, trash));
+                    continue;
+                }
+                DeleteOutcome::NoTrash => {
+                    return Err(Error::Invalid(
                         "the account has no Trash folder; delete permanently instead".into(),
-                    )
-                })?;
-                self.move_one(&m, trash, now)?;
-                touched.insert((m.account, trash));
-                continue;
+                    ));
+                }
+                DeleteOutcome::Permanent => {}
             }
             match m.moving {
                 // Never made it to the target: delete it where the server still has it.
@@ -271,6 +291,19 @@ impl<'c> PendingOps<'c> {
             now,
         )?;
         Ok(Touched::from([(account, folder)]))
+    }
+
+    /// The account's folders, which the rules about special folders apply to, listed
+    /// once per account.
+    fn folders_of<'a>(
+        &self,
+        cache: &'a mut HashMap<AccountId, Vec<Folder>>,
+        account: AccountId,
+    ) -> Result<&'a [Folder]> {
+        Ok(match cache.entry(account) {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => e.insert(Folders::new(self.conn).list(account)?),
+        })
     }
 
     fn move_one(&self, m: &Local, to: FolderId, now: i64) -> Result<()> {
@@ -347,7 +380,7 @@ impl<'c> PendingOps<'c> {
     fn local(&self, id: MessageId) -> Result<Local> {
         self.conn
             .prepare_cached(&format!(
-                "SELECT m.account_id, m.folder_id, m.uid, m.flags, f.uidvalidity, f.role,
+                "SELECT m.account_id, m.folder_id, m.uid, m.flags, f.uidvalidity,
                         o.id AS op, o.folder_id AS op_folder, o.uidvalidity AS op_uidvalidity,
                         o.uid AS op_uid
                  FROM messages m
@@ -374,7 +407,6 @@ impl<'c> PendingOps<'c> {
                     account: AccountId(r.get(0)?),
                     folder: FolderId(r.get(1)?),
                     flags: Flags::from_bits(r.get(3)?),
-                    role: parse_opt_text(r, "role")?,
                     server,
                     moving: op.map(PendingOpId),
                 })
@@ -1472,6 +1504,29 @@ mod tests {
             Err(Error::Invalid(_))
         ));
         assert!(f.row(m1).is_some());
+    }
+
+    #[test]
+    fn archiving_moves_what_is_not_archived_yet() {
+        let f = setup();
+        let (m1, m2) = (f.message(f.inbox, 1), f.message(f.inbox, 2));
+        f.write(|db| db.ops().archive_messages(&[m1], 0));
+        assert_eq!(f.row(m1), Some((f.archive, None, Flags::SEEN)));
+        // Already there: nothing to do, no op.
+        let touched = f.write(|db| db.ops().archive_messages(&[m1], 0));
+        assert!(touched.is_empty());
+        assert_eq!(f.pending(f.inbox).len(), 1);
+
+        f.write(|db| {
+            db.conn
+                .execute("UPDATE folders SET role = NULL WHERE role = 'archive'", [])?;
+            Ok(())
+        });
+        assert!(matches!(
+            f.store.write(|db| db.ops().archive_messages(&[m2], 0)),
+            Err(Error::Invalid(_))
+        ));
+        assert_eq!(f.row(m2).map(|(folder, ..)| folder), Some(f.inbox));
     }
 
     #[test]

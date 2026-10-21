@@ -53,6 +53,16 @@ pub(crate) async fn move_messages(
     .await
 }
 
+pub(crate) async fn archive_messages(
+    engine: Arc<Engine>,
+    messages: Vec<MessageId>,
+) -> Result<Vec<AccountId>> {
+    change(&engine, move |db| {
+        db.ops().archive_messages(&messages, now())
+    })
+    .await
+}
+
 pub(crate) async fn delete_messages(
     engine: Arc<Engine>,
     messages: Vec<MessageId>,

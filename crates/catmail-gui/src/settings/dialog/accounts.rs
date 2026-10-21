@@ -1,13 +1,14 @@
 //! The Accounts section: the accounts there are, adding one and removing one.
 
 use catmail_core::Account;
-use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, Context, ElementId, IntoElement, ParentElement as _, Styled as _, Window, div,
 };
 
 use crate::assets::Hero;
+use crate::layout;
 
 use super::*;
 
@@ -26,29 +27,24 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) {
         let client = self.client.clone();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let client = client.clone();
-            let id = account.id;
-            alert
-                .title(format!("Remove “{}”?", account.email))
-                .description(
-                    "Its mail, drafts and outbox are deleted from this computer, and its password \
-                     from the keyring. Nothing changes on the server.",
-                )
-                .confirm()
-                .ok_text("Remove")
-                .ok_variant(ButtonVariant::Danger)
-                .on_ok(move |_, window, cx| {
-                    let client = client.clone();
-                    crate::mailbox::report_failure(
-                        "remove the account",
-                        async move { client.remove_account(id).await },
-                        window,
-                        cx,
-                    );
-                    true
-                })
-        });
+        let id = account.id;
+        layout::confirm_danger(
+            format!("Remove “{}”?", account.email),
+            "Its mail, drafts and outbox are deleted from this computer, and its password from \
+             the keyring. Nothing changes on the server.",
+            "Remove",
+            window,
+            cx,
+            move |window, cx| {
+                let client = client.clone();
+                crate::mailbox::report_failure(
+                    "remove the account",
+                    async move { client.remove_account(id).await },
+                    window,
+                    cx,
+                );
+            },
+        );
     }
 
     pub(super) fn render_accounts(&self, cx: &mut Context<Self>) -> AnyElement {

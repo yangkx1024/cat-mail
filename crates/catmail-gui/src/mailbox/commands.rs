@@ -1,14 +1,13 @@
 //! The mailbox's commands: on the selected message (the toolbar, the menus and the keys
 //! all call these), writing, syncing and settings.
 
-use catmail_core::{
-    Account, AccountId, Flags, FolderId, FolderRole, MessageId, OpKind, OpStatus, PendingOp,
-};
+use catmail_core::{Account, AccountId, Flags, FolderId, MessageId, OpKind, OpStatus, PendingOp};
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{App, Context, Window};
 
 use crate::composer::{self, ComposeFrom};
+use crate::layout;
 
 use super::*;
 use crate::settings::dialog as settings_dialog;
@@ -161,20 +160,28 @@ impl Mailbox {
         self.set_flags(vec![message.id], add, remove, window, cx);
     }
 
-    /// The folder Archive moves to, if the selected message's account has one and the
-    /// message isn't in it already.
+    /// The folder Archive moves the selected message to, if its account has one and the
+    /// message isn't archived already.
     pub(crate) fn archive_folder(&self, cx: &gpui_kit::App) -> Option<FolderId> {
         let message = self.selected_message(cx)?;
-        let archive = self
-            .account(message.account_id)?
+        self.account(message.account_id)?
             .folders
-            .with_role(FolderRole::Archive)?;
-        (archive.id != message.folder_id).then_some(archive.id)
+            .archive_folder(message.folder_id)
     }
 
     pub(crate) fn archive(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(folder) = self.archive_folder(cx) {
-            self.move_selected(folder, window, cx);
+        if let Some(message) = self.selected_message(cx)
+            && self
+                .account(message.account_id)
+                .is_some_and(|a| a.folders.archive_folder(message.folder_id).is_some())
+        {
+            self.remove(
+                message.id,
+                "archive the message",
+                window,
+                cx,
+                move |client| async move { client.archive_messages(vec![message.id]).await },
+            );
         }
     }
 
@@ -185,52 +192,65 @@ impl Mailbox {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(message) = self.selected_message(cx) else {
-            return;
-        };
-        self.messages
-            .update(cx, |list, _| list.delegate_mut().expect_removal(message.id));
-        let client = self.client.clone();
-        report_failure(
-            "move the message",
-            async move { client.move_messages(vec![message.id], to).await },
-            window,
-            cx,
-        );
+        if let Some(message) = self.selected_message(cx) {
+            self.remove(
+                message.id,
+                "move the message",
+                window,
+                cx,
+                move |client| async move { client.move_messages(vec![message.id], to).await },
+            );
+        }
     }
 
-    /// To Trash, or for good from Trash or without one. A message deleted for good
+    /// Takes the message out of the list with `call`, selecting the next one once it has
+    /// gone.
+    fn remove<F: Future<Output = catmail_core::Result<Vec<AccountId>>> + 'static>(
+        &mut self,
+        id: MessageId,
+        what: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        call: impl FnOnce(catmail_core::MailClient) -> F,
+    ) {
+        self.messages
+            .update(cx, |list, _| list.delegate_mut().expect_removal(id));
+        report_failure(what, call(self.client.clone()), window, cx);
+    }
+
+    /// To Trash, or for good from Trash or without one, as the engine will
+    /// ([`DeleteOutcome`](catmail_core::DeleteOutcome)). A message deleted for good
     /// can't be brought back, so that asks first.
     pub(crate) fn delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(message) = self.selected_message(cx) else {
             return;
         };
-        let trash = self
-            .account(message.account_id)
-            .and_then(|a| a.folders.with_role(FolderRole::Trash))
-            .map(|f| f.id);
-        if trash.is_some_and(|trash| trash != message.folder_id) {
+        let Some(account) = self.account(message.account_id) else {
+            return;
+        };
+        if !account
+            .folders
+            .delete_outcome(message.folder_id)
+            .is_permanent()
+        {
             self.delete_selected(message.id, false, window, cx);
             return;
         }
         let subject = crate::format::subject(message.subject.as_deref());
         let this = cx.entity().downgrade();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let this = this.clone();
-            alert
-                .title(format!("Delete “{subject}” for good?"))
-                .description("It is removed from the server and can't be brought back.")
-                .confirm()
-                .ok_text("Delete")
-                .ok_variant(gpui_kit::component::button::ButtonVariant::Danger)
-                .on_ok(move |_, window, cx| {
-                    this.update(cx, |this, cx| {
-                        this.delete_selected(message.id, true, window, cx)
-                    })
-                    .ok();
-                    true
+        layout::confirm_danger(
+            format!("Delete “{subject}” for good?"),
+            "It is removed from the server and can't be brought back.",
+            "Delete",
+            window,
+            cx,
+            move |window, cx| {
+                this.update(cx, |this, cx| {
+                    this.delete_selected(message.id, true, window, cx)
                 })
-        });
+                .ok();
+            },
+        );
     }
 
     fn delete_selected(
@@ -240,14 +260,12 @@ impl Mailbox {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.messages
-            .update(cx, |list, _| list.delegate_mut().expect_removal(id));
-        let client = self.client.clone();
-        report_failure(
+        self.remove(
+            id,
             "delete the message",
-            async move { client.delete_messages(vec![id], permanently).await },
             window,
             cx,
+            move |client| async move { client.delete_messages(vec![id], permanently).await },
         );
     }
 

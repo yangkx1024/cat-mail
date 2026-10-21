@@ -3,8 +3,8 @@
 use catmail_core::Draft;
 use gpui_kit::base::SelectableText;
 use gpui_kit::component::alert::Alert;
-use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
     Context, IntoElement, ParentElement as _, SharedString, Styled as _, Window, div,
     prelude::FluentBuilder as _,
@@ -19,7 +19,7 @@ use crate::layout;
 impl Mailbox {
     pub(super) fn render_draft(&self, draft: &Draft, cx: &mut Context<Self>) -> impl IntoElement {
         let id = draft.id;
-        let subject = format::subject(Some(&draft.content.subject));
+        let subject = format::subject(Some(&draft.content.subject)).to_owned();
         let lines: Vec<_> = [
             ("To", &draft.content.to),
             ("Cc", &draft.content.cc),
@@ -105,24 +105,21 @@ impl Mailbox {
         cx: &mut Context<Self>,
     ) {
         let client = self.client.clone();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let client = client.clone();
-            alert
-                .title(format!("Delete the draft “{subject}”?"))
-                .description("Its copy in the server's Drafts folder is deleted too.")
-                .confirm()
-                .ok_text("Delete")
-                .ok_variant(ButtonVariant::Danger)
-                .on_ok(move |_, window, cx| {
-                    let client = client.clone();
-                    report_failure(
-                        "delete the draft",
-                        async move { client.delete_draft(id).await },
-                        window,
-                        cx,
-                    );
-                    true
-                })
-        });
+        layout::confirm_danger(
+            format!("Delete the draft “{subject}”?"),
+            "Its copy in the server's Drafts folder is deleted too.",
+            "Delete",
+            window,
+            cx,
+            move |window, cx| {
+                let client = client.clone();
+                report_failure(
+                    "delete the draft",
+                    async move { client.delete_draft(id).await },
+                    window,
+                    cx,
+                );
+            },
+        );
     }
 }

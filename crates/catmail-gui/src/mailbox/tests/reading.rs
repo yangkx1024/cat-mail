@@ -101,6 +101,42 @@ fn deletes_for_good_without_a_trash_folder(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn deleting_from_trash_asks_first_whichever_trash_it_is(cx: &mut TestAppContext) {
+    // Two Trash folders: the engine moves to the first stored, "Trash", while the
+    // sidebar lists "Old/Bin" first. Deleting from either is for good.
+    let mail = TestMail::start_with_folders(&[("Trash", "\\Trash"), ("Old/Bin", "\\Trash")]);
+    mail.deliver("Trash", "Binned");
+    pollster::block_on(mail.client.sync_account(mail.account())).unwrap();
+    let trash = pollster::block_on(mail.client.find_folder(mail.account(), "Trash"))
+        .unwrap()
+        .unwrap()
+        .id;
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    cx.update_window(window, |_, window, cx| {
+        mailbox.update(cx, |mailbox, cx| {
+            mailbox.select_place(Some(Place::Folder(trash)), window, cx)
+        })
+    })
+    .unwrap();
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| subjects(&mailbox, cx) == ["Binned"])
+    });
+    click_message(cx, window, &mailbox, "Binned");
+
+    cx.update_window(window, |_, window, cx| window.press("delete", cx))
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("ok").is_some(), "no confirmation");
+    })
+    .unwrap();
+    cx.read(|cx| assert!(find(&mailbox, "Binned", cx).is_some()));
+}
+
+#[gpui_kit::test]
 fn a_message_gone_from_the_server_leaves_the_reader(cx: &mut TestAppContext) {
     let mail = TestMail::start();
     let (window, mailbox) = open(cx, &mail);

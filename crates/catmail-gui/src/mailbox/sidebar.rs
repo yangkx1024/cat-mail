@@ -12,25 +12,10 @@ use gpui_kit::{
     Styled as _, Window, div, prelude::FluentBuilder as _,
 };
 
-use super::folders::FolderNode;
-use super::message_list::outbox_status;
+use super::folders::{FolderNode, RoleInfo};
 use super::{AccountEntry, Mailbox, Place};
 use crate::actions::{self, NewMessage, OpenSettings, Sync};
 use crate::assets::Hero;
-
-fn role_icon(role: Option<FolderRole>) -> Hero {
-    match role {
-        Some(FolderRole::Inbox) => Hero::Inbox,
-        Some(FolderRole::Sent) => Hero::PaperAirplane,
-        Some(FolderRole::Drafts) => Hero::DocumentText,
-        Some(FolderRole::Trash) => Hero::Trash,
-        Some(FolderRole::Junk) => Hero::ShieldExclamation,
-        Some(FolderRole::Archive) => Hero::ArchiveBox,
-        Some(FolderRole::All) => Hero::Envelope,
-        Some(FolderRole::Flagged) => Hero::Flag,
-        None => Hero::Folder,
-    }
-}
 
 /// A count at the end of a row; nothing for zero.
 fn count(
@@ -148,14 +133,14 @@ impl Mailbox {
         }
         items.push(self.place_item(
             Place::Drafts(account),
-            "Drafts",
-            Hero::DocumentText,
+            FolderRole::Drafts.label(),
+            RoleInfo::of(FolderRole::Drafts).icon,
             entry.drafts,
             false,
             cx,
         ));
         if !entry.outbox.is_empty() {
-            let attention = entry.outbox.iter().any(|e| outbox_status(e).1.is_some());
+            let attention = entry.outbox.iter().any(|e| e.status.needs_user());
             items.push(self.place_item(
                 Place::Outbox(account),
                 "Outbox",
@@ -203,7 +188,7 @@ impl Mailbox {
     fn folder_item(&self, node: &FolderNode, cx: &mut Context<Self>) -> SidebarMenuItem {
         let role = node.role();
         let mut item = SidebarMenuItem::new(node.label.clone())
-            .icon(Icon::new(role_icon(role)))
+            .icon(Icon::new(RoleInfo::icon(role)))
             .default_open(true)
             .children(
                 node.children

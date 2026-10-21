@@ -10,13 +10,13 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use catmail_core::{
     AccountId, Address, Draft, DraftAttachmentId, DraftContent, DraftId, MailClient, MessageId,
-    OutboxEntry, OutboxId, OutboxStatus, parse_addresses,
+    OutboxEntry, OutboxId, OutboxStatus, display, parse_addresses,
 };
 use clap::{Args, Subcommand};
 
+use crate::one_account;
 use crate::ops::{self, NEXT_FLUSH};
 use crate::output::{print_table, printable, printable_text, truncate};
-use crate::{addresses, one_account, output};
 
 #[derive(Args)]
 pub(crate) struct Compose {
@@ -238,11 +238,11 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
                     .map(|d| {
                         vec![
                             d.id.to_string(),
-                            output::date(Some(d.updated_at)),
+                            display::date(Some(d.updated_at)),
                             server_status(d).into(),
-                            truncate(&recipients(&d.content), 30),
+                            truncate(&display::names(d.content.recipients()), 30),
                             if d.attachments.is_empty() { "" } else { "@" }.into(),
-                            subject(&d.content.subject).to_owned(),
+                            display::subject(Some(&d.content.subject)).to_owned(),
                         ]
                     })
                     .collect();
@@ -282,7 +282,7 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
                     println!(
                         "Attached {} ({}) as {}.",
                         printable(&a.filename),
-                        output::size(a.size),
+                        display::size(a.size),
                         a.id
                     );
                 }
@@ -385,7 +385,7 @@ pub(crate) async fn outbox(client: &MailClient, cmd: OutboxCommand, json: bool) 
                 println!("Nothing to send.");
             }
             // Like `catmail send`: an error unless everything went out.
-            if !results.iter().all(|e| went_out(e.status)) {
+            if !results.iter().all(|e| e.status.went_out()) {
                 errors.push("not everything was sent; `catmail outbox` shows why".into());
             }
             if !errors.is_empty() {
@@ -405,27 +405,17 @@ pub(crate) async fn outbox(client: &MailClient, cmd: OutboxCommand, json: bool) 
             if json {
                 println!("{}", serde_json::to_string_pretty(&entry)?);
             } else {
-                match entry {
-                    OutboxEntry {
-                        status: OutboxStatus::Accepted,
-                        ..
-                    } => println!("Removed {id}; the message was sent but not saved to Sent."),
-                    OutboxEntry {
-                        draft_id: Some(draft),
-                        ..
-                    } => println!("Cancelled {id}; it is draft {draft} again."),
-                    _ => println!("Cancelled {id}."),
+                if entry.status.went_out() {
+                    println!("Removed {id}; the message was sent but not saved to Sent.");
+                } else if let Some(draft) = entry.draft_id {
+                    println!("Cancelled {id}; it is draft {draft} again.");
+                } else {
+                    println!("Cancelled {id}.");
                 }
             }
         }
     }
     Ok(())
-}
-
-/// The message was sent; at most saving it to Sent is left. Anything else is what
-/// [`report`] turns into an error.
-fn went_out(status: OutboxStatus) -> bool {
-    matches!(status, OutboxStatus::Done | OutboxStatus::Accepted)
 }
 
 /// Tells the user how a send went and what they can do; an error unless it went out.
@@ -546,10 +536,10 @@ fn print_draft(draft: &Draft) {
             println!("{name:<9}{}", printable(value));
         }
     };
-    header("To:", &addresses(&c.to));
-    header("Cc:", &addresses(&c.cc));
-    header("Bcc:", &addresses(&c.bcc));
-    header("Subject:", subject(&c.subject));
+    header("To:", &display::addresses(&c.to));
+    header("Cc:", &display::addresses(&c.cc));
+    header("Bcc:", &display::addresses(&c.bcc));
+    header("Subject:", display::subject(Some(&c.subject)));
     if let Some(outbox) = draft.outbox {
         header("Status:", &format!("being sent (outbox entry {outbox})"));
     }
@@ -570,7 +560,7 @@ fn print_draft(draft: &Draft) {
                     a.id.to_string(),
                     a.filename.clone(),
                     a.mime_type.clone(),
-                    output::size(a.size),
+                    display::size(a.size),
                 ]
             })
             .collect();
@@ -597,7 +587,7 @@ fn print_outbox(entries: &[OutboxEntry]) {
         .map(|e| {
             let state = match (e.status, e.next_attempt_at) {
                 (OutboxStatus::Queued | OutboxStatus::Accepted, Some(at)) if e.attempts > 0 => {
-                    format!("{}, next try {}", e.status, output::date(Some(at)))
+                    format!("{}, next try {}", e.status, display::date(Some(at)))
                 }
                 (status, _) => status.to_string(),
             };
@@ -605,28 +595,12 @@ fn print_outbox(entries: &[OutboxEntry]) {
                 e.id.to_string(),
                 state,
                 truncate(&e.recipients.join(", "), 30),
-                truncate(subject(&e.subject), 30),
+                truncate(display::subject(Some(&e.subject)), 30),
                 e.last_error.clone().unwrap_or_default(),
             ]
         })
         .collect();
     print_table(&["ID", "STATUS", "TO", "SUBJECT", "LAST ERROR"], rows);
-}
-
-fn recipients(content: &DraftContent) -> String {
-    content
-        .recipients()
-        .map(|a| a.name.clone().unwrap_or_else(|| a.email.clone()))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn subject(subject: &str) -> &str {
-    if subject.is_empty() {
-        "(no subject)"
-    } else {
-        subject
-    }
 }
 
 #[cfg(test)]

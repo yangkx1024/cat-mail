@@ -329,10 +329,8 @@ impl<'c> Outbox<'c> {
         let Some(entry) = self.get(id)? else {
             return Ok(None);
         };
-        let to = match entry.status {
-            OutboxStatus::Failed | OutboxStatus::Unknown => OutboxStatus::Queued,
-            s @ (OutboxStatus::Accepted | OutboxStatus::Queued) => s,
-            other => return Err(conflict(id, other, "retried")),
+        let Some(to) = entry.status.retry_to() else {
+            return Err(conflict(id, entry.status, "retried"));
         };
         self.conn.execute(
             // Saving keeps its count: past the first attempt, it checks Sent first.
@@ -349,7 +347,7 @@ impl<'c> Outbox<'c> {
         let Some(entry) = self.get(id)? else {
             return Ok(None);
         };
-        if entry.status != OutboxStatus::Unknown {
+        if !entry.status.can_mark_sent() {
             return Err(conflict(id, entry.status, "marked sent"));
         }
         let touched = self.mark_accepted(id, now)?.unwrap_or_default();
@@ -376,15 +374,14 @@ impl<'c> Outbox<'c> {
         let Some(entry) = self.get(id)? else {
             return Ok(None);
         };
-        match entry.status {
-            OutboxStatus::Queued | OutboxStatus::Failed | OutboxStatus::Unknown => {
-                self.conn
-                    .execute("DELETE FROM outbox WHERE id = ?1", [id.0])?;
-            }
-            OutboxStatus::Accepted => {
-                self.finish(id)?;
-            }
-            other => return Err(conflict(id, other, "cancelled")),
+        if !entry.status.can_cancel() {
+            return Err(conflict(id, entry.status, "cancelled"));
+        }
+        if entry.status.went_out() {
+            self.finish(id)?;
+        } else {
+            self.conn
+                .execute("DELETE FROM outbox WHERE id = ?1", [id.0])?;
         }
         Ok(Some(entry))
     }
