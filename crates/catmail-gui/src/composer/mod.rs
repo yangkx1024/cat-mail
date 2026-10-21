@@ -10,7 +10,7 @@
 mod lifecycle;
 mod view;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -43,6 +43,12 @@ pub enum ComposeFrom {
 #[derive(Default)]
 struct OpenComposers {
     windows: HashMap<DraftId, (AnyWindowHandle, WeakEntity<Composer>)>,
+    /// Drafts being read for a window: opening one again meanwhile does nothing, the
+    /// window is on its way.
+    opening: HashSet<DraftId>,
+    /// Opens on their way, for tests to wait for.
+    #[cfg(test)]
+    in_flight: usize,
     /// The app quits once the last of them has closed.
     quitting: bool,
 }
@@ -88,14 +94,21 @@ pub fn quit(cx: &mut App) {
     }
 }
 
-/// The text of each open composer.
+/// The open composers.
 #[cfg(test)]
-pub(crate) fn texts(cx: &App) -> Vec<String> {
+fn composers(cx: &App) -> impl Iterator<Item = &Composer> {
     cx.try_global::<OpenComposers>()
         .into_iter()
         .flat_map(|open| open.windows.values())
         .filter_map(|(_, composer)| composer.upgrade())
-        .map(|composer| composer.read(cx).body.read(cx).value().to_string())
+        .map(|composer| composer.read(cx))
+}
+
+/// The text of each open composer.
+#[cfg(test)]
+pub(crate) fn texts(cx: &App) -> Vec<String> {
+    composers(cx)
+        .map(|composer| composer.body.read(cx).value().to_string())
         .collect()
 }
 
@@ -103,35 +116,50 @@ pub(crate) fn texts(cx: &App) -> Vec<String> {
 /// reported in `window`, the one asking.
 pub fn open(client: MailClient, from: ComposeFrom, window: &mut Window, cx: &mut App) {
     if let ComposeFrom::Draft(id) = from
-        && activate(id, cx)
+        && (activate(id, cx) || !cx.default_global::<OpenComposers>().opening.insert(id))
     {
         return;
     }
-    window
-        .spawn(cx, async move |cx| {
-            let opened = async {
-                let draft = match from {
-                    ComposeFrom::New(account) => {
-                        client
-                            .create_draft(account, DraftContent::default())
-                            .await?
-                    }
-                    ComposeFrom::Reply { message, all } => client.reply(message, all).await?,
-                    ComposeFrom::Forward(message) => client.forward(message).await?,
-                    ComposeFrom::Draft(id) => client
-                        .get_draft(id)
+    #[cfg(test)]
+    {
+        cx.default_global::<OpenComposers>().in_flight += 1;
+    }
+    let asking = window.window_handle();
+    // On the app, not the asking window: closing that must not leave the draft marked
+    // as being opened.
+    cx.spawn(async move |cx| {
+        let opened = async {
+            let draft = match from {
+                ComposeFrom::New(account) => {
+                    client
+                        .create_draft(account, DraftContent::default())
                         .await?
-                        .ok_or(catmail_core::Error::DraftNotFound(id))?,
-                };
-                let account = client.get_account(draft.account_id).await?.ok_or_else(|| {
-                    catmail_core::Error::AccountNotFound(draft.account_id.to_string())
-                })?;
-                Ok::<_, catmail_core::Error>((draft, account))
+                }
+                ComposeFrom::Reply { message, all } => client.reply(message, all).await?,
+                ComposeFrom::Forward(message) => client.forward(message).await?,
+                ComposeFrom::Draft(id) => client
+                    .get_draft(id)
+                    .await?
+                    .ok_or(catmail_core::Error::DraftNotFound(id))?,
+            };
+            let account = client.get_account(draft.account_id).await?.ok_or_else(|| {
+                catmail_core::Error::AccountNotFound(draft.account_id.to_string())
+            })?;
+            Ok::<_, catmail_core::Error>((draft, account))
+        }
+        .await;
+        cx.update(|cx| {
+            if let ComposeFrom::Draft(id) = from {
+                cx.default_global::<OpenComposers>().opening.remove(&id);
             }
-            .await;
-            cx.update(|window, cx| match opened {
-                // Opened again while this one was loading.
-                Ok((draft, _)) if activate(draft.id, cx) => {}
+            #[cfg(test)]
+            {
+                cx.default_global::<OpenComposers>().in_flight -= 1;
+            }
+            let failure = match opened {
+                // A window for it opened meanwhile: a reply or forward made it, and it
+                // was opened from the drafts before its window came up.
+                Ok((draft, _)) if activate(draft.id, cx) => None,
                 Ok((draft, account)) => {
                     let created_here = !matches!(from, ComposeFrom::Draft(_));
                     // Where the writing starts: the text once there is someone to send to.
@@ -140,23 +168,37 @@ pub fn open(client: MailClient, from: ComposeFrom, window: &mut Window, cx: &mut
                         ComposeFrom::Draft(_) => !draft.content.to.is_empty(),
                         _ => false,
                     };
-                    if let Err(e) =
-                        open_window(client, account, draft, created_here, focus_body, cx)
-                    {
-                        window.push_notification(
-                            Notification::error(format!("Couldn't open a window: {e:#}")),
-                            cx,
-                        );
-                    }
+                    open_window(client, account, draft, created_here, focus_body, cx)
+                        .err()
+                        .map(|e| format!("Couldn't open a window: {e:#}"))
                 }
-                Err(e) => window.push_notification(
-                    Notification::error(format!("Couldn't start the message: {e}")),
-                    cx,
-                ),
-            })
-            .ok();
-        })
-        .detach();
+                Err(e) => Some(format!("Couldn't start the message: {e}")),
+            };
+            if let Some(failure) = failure {
+                asking
+                    .update(cx, |_, window, cx| {
+                        window.push_notification(Notification::error(failure), cx)
+                    })
+                    .ok();
+            }
+        });
+    })
+    .detach();
+}
+
+/// Whether every [`open`] has finished.
+#[cfg(test)]
+pub(crate) fn opened(cx: &App) -> bool {
+    cx.try_global::<OpenComposers>()
+        .is_none_or(|open| open.in_flight == 0)
+}
+
+/// The error each open composer shows, if any.
+#[cfg(test)]
+pub(crate) fn errors(cx: &App) -> Vec<Option<String>> {
+    composers(cx)
+        .map(|composer| composer.error.as_ref().map(ToString::to_string))
+        .collect()
 }
 
 fn open_window(

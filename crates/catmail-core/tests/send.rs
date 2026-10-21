@@ -759,3 +759,24 @@ async fn wait_for_sent(
     .await
     .expect("sent in the background");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_overview_counts_drafts_and_lists_the_outbox() {
+    let env = env(state()).await;
+    env.client.sync_account(env.account).await.unwrap();
+    env.client
+        .create_draft(env.account, content("Kept"))
+        .await
+        .unwrap();
+    let queued = env.queue("Queued").await;
+
+    let overview = env.client.overview().await.unwrap();
+    assert_eq!(overview.len(), 1);
+    let account = &overview[0];
+    assert_eq!(account.account.id, env.account);
+    let folders: Vec<_> = account.folders.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(folders, ["INBOX", "Sent"]);
+    // The one handed to "send" is in the outbox, not among the drafts.
+    assert_eq!(account.drafts, 1);
+    assert_eq!(account.outbox, [queued]);
+}

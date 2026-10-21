@@ -3,6 +3,7 @@
 //! under a heading for each day. The list (`ListState`) owns selection, keyboard
 //! navigation and scrolling; the delegate here owns the rows.
 
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use catmail_core::{
@@ -27,8 +28,6 @@ pub use rows::outbox_status;
 use rows::{draft_row, message_row, outbox_row};
 
 const PAGE: u32 = 200;
-/// Search results shown; a search narrow enough to be useful finds fewer.
-const SEARCH_LIMIT: u32 = 500;
 
 /// What the list shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,7 +47,7 @@ pub enum Row {
 }
 
 /// A row's identity, which survives reloads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RowId {
     Message(MessageId),
     Draft(DraftId),
@@ -266,9 +265,11 @@ async fn fetch(
         }
         Source::Search(text) => {
             let mut query = SearchQuery::new(text.clone());
-            query.limit = SEARCH_LIMIT;
+            query.limit = limit;
+            query.offset = offset;
             let found = client.search(query).await?;
-            (found.into_iter().map(Row::Message).collect(), false)
+            let more = found.len() == limit as usize;
+            (found.into_iter().map(Row::Message).collect(), more)
         }
         Source::Drafts(account) => {
             let drafts = client.list_drafts(*account).await?;
@@ -315,8 +316,14 @@ fn load(
                 Ok((rows, more)) => {
                     delegate.has_more = more;
                     if offset > 0 {
+                        // Rows that came in at the top since the last page push the ones
+                        // shown down into this one; the refresh their event brings puts
+                        // the list in order again.
+                        let shown: HashSet<RowId> = delegate.rows.iter().map(Row::id).collect();
                         let from = delegate.rows.len();
-                        delegate.rows.extend(rows);
+                        delegate
+                            .rows
+                            .extend(rows.into_iter().filter(|r| !shown.contains(&r.id())));
                         delegate.days.extend(&delegate.rows, from);
                     } else {
                         replace_rows(list, rows, window, cx);
@@ -344,38 +351,67 @@ fn replace_rows(
     cx: &mut Context<ListState<MessageList>>,
 ) {
     let delegate = list.delegate_mut();
-    let selected = delegate.selected_row().map(Row::id);
-    // Only while the message is still the one selected: the user may have moved on.
-    let removing = delegate
-        .removing
-        .take()
-        .filter(|id| selected == Some(RowId::Message(*id)));
-    let removed_at = removing.and(delegate.selected);
+    let selected = delegate.selected.zip(delegate.selected_row().map(Row::id));
+    let next = reselect(selected, delegate.removing.take(), &rows);
     delegate.days = Days::new(&rows);
     delegate.rows = rows;
-    let ix = selected.and_then(|id| delegate.rows.iter().position(|r| r.id() == id));
-    match (selected, ix, removed_at) {
-        (Some(_), None, Some(at)) if !delegate.rows.is_empty() => {
-            // The user moved or deleted it: on to the next one, as the list stands now.
-            let Some(next) = delegate.days.path(at.min(delegate.rows.len() - 1)) else {
-                return;
-            };
-            list.set_selected_index(Some(next), window, cx);
-            cx.emit(ListEvent::Select(next));
-        }
-        (Some(_), None, _) => {
-            // The open row is gone (expunged, sent, or a new UIDVALIDITY). Setting the
-            // index emits nothing; deselecting with Escape emits this.
-            list.set_selected_index(None, window, cx);
-            cx.emit(ListEvent::Cancel);
-        }
-        (_, ix, _) => {
-            let ix = ix.and_then(|ix| list.delegate().days.path(ix));
-            list.set_selected_index(ix, window, cx);
-            // Still there (a page read before the change committed, or the change
-            // failed): keep waiting.
-            list.delegate_mut().removing = removing;
-        }
+    if let Reselect::Keep { ix, removing } = next {
+        let ix = ix.and_then(|ix| list.delegate().days.path(ix));
+        list.set_selected_index(ix, window, cx);
+        list.delegate_mut().removing = removing;
+        return;
+    }
+    let next = match next {
+        // Every row has a path; if one hadn't, it would be as good as gone.
+        Reselect::Next(ix) => list.delegate().days.path(ix),
+        _ => None,
+    };
+    list.set_selected_index(next, window, cx);
+    match next {
+        Some(next) => cx.emit(ListEvent::Select(next)),
+        // Setting the index emits nothing; deselecting with Escape emits this.
+        None => cx.emit(ListEvent::Cancel),
+    }
+}
+
+/// Where the selection goes when the rows are replaced.
+#[derive(Debug, PartialEq, Eq)]
+enum Reselect {
+    /// The selected row, at its index among the new rows; nothing if nothing was
+    /// selected. `removing` is still waited for: the row is still there (a page read
+    /// before the change committed, or the change failed).
+    Keep {
+        ix: Option<usize>,
+        removing: Option<MessageId>,
+    },
+    /// The user moved or deleted the selected message: on to the row now at its index.
+    Next(usize),
+    /// The selected row is gone (expunged, sent, or a new UIDVALIDITY).
+    Gone,
+}
+
+/// `selected` is the selected row's index and identity in the rows replaced, `removing`
+/// the message the user moved or deleted (see [`MessageList::expect_removal`]).
+fn reselect(
+    selected: Option<(usize, RowId)>,
+    removing: Option<MessageId>,
+    rows: &[Row],
+) -> Reselect {
+    let Some((at, id)) = selected else {
+        return Reselect::Keep {
+            ix: None,
+            removing: None,
+        };
+    };
+    // Only while the message is still the one selected: the user may have moved on.
+    let removing = removing.filter(|m| id == RowId::Message(*m));
+    match rows.iter().position(|r| r.id() == id) {
+        Some(ix) => Reselect::Keep {
+            ix: Some(ix),
+            removing,
+        },
+        None if removing.is_some() && !rows.is_empty() => Reselect::Next(at.min(rows.len() - 1)),
+        None => Reselect::Gone,
     }
 }
 
@@ -506,6 +542,39 @@ mod tests {
             flags: Flags::empty(),
             has_attachments: false,
         })
+    }
+
+    #[test]
+    fn the_selection_follows_the_row_or_moves_on() {
+        use Reselect::*;
+        let m = |id| RowId::Message(MessageId(id));
+        let rows = |ids: &[i64]| -> Vec<Row> { ids.iter().map(|&id| message(id, None)).collect() };
+        let removing = Some(MessageId(2));
+        #[rustfmt::skip]
+        let cases = [
+            // Nothing selected: nothing is, and a removal isn't waited for.
+            (None, removing, &[1, 2][..], Keep { ix: None, removing: None }),
+            // Still there, wherever it is now.
+            (Some((1, m(2))), None, &[0, 1, 2], Keep { ix: Some(2), removing: None }),
+            // Moved but still listed: keep waiting.
+            (Some((1, m(2))), removing, &[1, 2, 3], Keep { ix: Some(1), removing }),
+            // Waiting for another message than the selected one: the user moved on.
+            (Some((0, m(1))), removing, &[1, 3], Keep { ix: Some(0), removing: None }),
+            // Moved away: the row now at its place, or the last one.
+            (Some((1, m(2))), removing, &[1, 3, 4], Next(1)),
+            (Some((2, m(2))), removing, &[1, 3], Next(1)),
+            // Moved away and nothing left, or gone by itself.
+            (Some((0, m(2))), removing, &[], Gone),
+            (Some((1, m(2))), None, &[1, 3], Gone),
+            (Some((0, RowId::Draft(DraftId(2)))), removing, &[1], Gone),
+        ];
+        for (selected, removing, ids, expected) in cases {
+            assert_eq!(
+                reselect(selected, removing, &rows(ids)),
+                expected,
+                "{selected:?} {removing:?} {ids:?}"
+            );
+        }
     }
 
     #[test]

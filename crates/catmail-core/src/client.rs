@@ -7,10 +7,10 @@ use std::time::Duration;
 use catmail_proto::TlsConfig;
 use catmail_store::{BlobStore, Store};
 use catmail_types::{
-    Account, AccountId, AccountStatus, AttachmentId, Draft, DraftAttachment, DraftAttachmentId,
-    DraftContent, DraftId, Event, Flags, Folder, FolderId, FolderSyncReport, GcReport, Message,
-    MessageId, MessageSummary, NewAccount, OutboxEntry, OutboxId, PendingOp, PendingOpId,
-    ReplayReport, SearchQuery, SyncReport,
+    Account, AccountId, AccountOverview, AccountStatus, AttachmentId, Draft, DraftAttachment,
+    DraftAttachmentId, DraftContent, DraftId, Event, Flags, Folder, FolderId, FolderSyncReport,
+    GcReport, Message, MessageId, MessageSummary, NewAccount, OutboxEntry, OutboxId, PendingOp,
+    PendingOpId, ReplayReport, SearchQuery, SyncReport,
 };
 use secrecy::{ExposeSecret, SecretString};
 use tokio::runtime::Handle;
@@ -23,7 +23,9 @@ use crate::secrets::{KeyringSecrets, SecretStore};
 use crate::watch::{self, SyncSchedule};
 use crate::{Config, Error, Result, auth, body, connection, drafts, gc, ops, send, sync};
 
-const EVENT_CAPACITY: usize = 256;
+/// How many events [`MailClient::subscribe`]'s receivers keep unread before the oldest
+/// are dropped and they get `RecvError::Lagged`.
+pub const EVENT_CAPACITY: usize = 256;
 
 /// The only entry point frontends use. Cheap to clone; all clones share one engine.
 #[derive(Clone)]
@@ -210,6 +212,33 @@ impl MailClient {
         let engine = self.engine.clone();
         self.rt
             .run_blocking(move || Ok(engine.store.read(|db| db.accounts().list())?))
+            .await
+    }
+
+    /// Every account with its folders, drafts and outbox, in one read: what a sidebar
+    /// shows, consistent with itself. Their status is
+    /// [`account_status`](Self::account_status), which isn't stored.
+    pub async fn overview(&self) -> Result<Vec<AccountOverview>> {
+        let engine = self.engine.clone();
+        self.rt
+            .run_blocking(move || {
+                Ok(engine.store.read(|db| {
+                    let mut outbox = db.outbox().list(None)?;
+                    let mut accounts = Vec::new();
+                    for account in db.accounts().list()? {
+                        let (own, rest) =
+                            outbox.into_iter().partition(|e| e.account_id == account.id);
+                        outbox = rest;
+                        accounts.push(AccountOverview {
+                            folders: db.folders().list(account.id)?,
+                            drafts: db.drafts().count(account.id)?,
+                            outbox: own,
+                            account,
+                        });
+                    }
+                    Ok(accounts)
+                })?)
+            })
             .await
     }
 
@@ -512,6 +541,14 @@ impl MailClient {
     /// apply, oldest first; all accounts' with `None`.
     pub async fn list_pending(&self, account: Option<AccountId>) -> Result<Vec<PendingOp>> {
         self.rt.run(ops::list(self.engine.clone(), account)).await
+    }
+
+    /// Forgets every failed or conflicting change of the account (of every account with
+    /// `None`), and returns them: what to tell the user about, once.
+    pub async fn dismiss_settled(&self, account: Option<AccountId>) -> Result<Vec<PendingOp>> {
+        self.rt
+            .run(ops::dismiss_settled(self.engine.clone(), account))
+            .await
     }
 
     /// Forgets a failed or conflicting change. Pending ones can't be dismissed.

@@ -60,6 +60,14 @@ Trash）和假 SMTP 服务器，驱动真实的窗口：点击、键盘、切换
 测试在 `run_until_parked` 之间按真实时间等待（`test_support::wait_until`）。
 测试打开"减少动态效果"（`set_reduce_motion(true)`）：对话框会滑入，命中测试跟着移动，在慢的 CI 机器上
 点对话框里的按钮会落在上一帧的位置；测试调度器下 gpui-kit 不读系统设置，只能由测试自己设。
+测试的时钟只在 `advance_clock` 时走，所以主窗口的事件节流间隔（`refresh_interval`）在测试里设为零。
+断言"什么都没发生"时等一个正面的信号（窗口显示了原因、第二次打开同步返回），不固定 sleep。
+测试要点 gpui-kit 自己生成的元素 id（AlertDialog 的 OK、SidebarMenu 的第几项）时，只经
+`layout::CONFIRM`、`settings::dialog::section_item` 取得，升级 gpui-kit 改了命名只需改这两处。
+
+窗口里的决策逻辑抽成纯函数做表驱动测试，不必经过窗口：列表刷新后选中去哪（`message_list::reselect`）、
+哪个事件重读什么及节流（`mailbox::refresh`）、写信窗口关闭时等待 / 提示 / 关闭 / 先保存（`composer::lifecycle`
+的 `closing`、`steps`）。
 
 `mailbox::tests::screenshots`（`mailbox/tests/screenshots.rs`，`#[ignore]`）用 WGPU 离屏渲染把几封邮件、每个内置主题、设置和写信窗口
 截成 PNG，供人检查排版。

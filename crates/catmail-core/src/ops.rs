@@ -13,7 +13,7 @@
 //! folders it syncs included. Changed drafts are uploaded right before (`draft_sync`),
 //! so the copies they replace are deleted in the same replay.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use catmail_proto::imap::{CopyUid, Session};
@@ -115,6 +115,25 @@ pub(crate) async fn dismiss(engine: Arc<Engine>, id: PendingOpId) -> Result<()> 
         .ok_or_else(|| Error::InvalidInput(format!("no operation {id}")))?;
     engine.emit(Event::PendingOpsChanged { account });
     Ok(())
+}
+
+pub(crate) async fn dismiss_settled(
+    engine: Arc<Engine>,
+    account: Option<AccountId>,
+) -> Result<Vec<PendingOp>> {
+    // Asked after every change to the queue, while a sync may be writing: only take
+    // the write connection when there is something to forget.
+    if !engine.read(move |db| db.ops().has_settled(account)).await? {
+        return Ok(Vec::new());
+    }
+    let dismissed = engine
+        .write(move |db| db.ops().dismiss_settled(account))
+        .await?;
+    let accounts: BTreeSet<_> = dismissed.iter().map(|op| op.account_id).collect();
+    for account in accounts {
+        engine.emit(Event::PendingOpsChanged { account });
+    }
+    Ok(dismissed)
 }
 
 /// Replays the account's queued changes now, without syncing, on a pooled connection,

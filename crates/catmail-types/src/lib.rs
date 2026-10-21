@@ -17,7 +17,8 @@ mod search;
 mod sync;
 
 pub use account::{
-    Account, AccountStatus, AuthKind, NewAccount, Security, ServerConfig, ServerProblem,
+    Account, AccountOverview, AccountStatus, AuthKind, NewAccount, Security, ServerConfig,
+    ServerProblem,
 };
 pub use draft::{Draft, DraftAttachment, DraftContent};
 pub use error::{ErrorKind, ReportedError};

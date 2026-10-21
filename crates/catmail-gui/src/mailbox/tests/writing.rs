@@ -255,13 +255,13 @@ fn an_attachment_that_fails_stops_the_send(cx: &mut TestAppContext) {
         window.press("secondary-enter", cx);
     })
     .unwrap();
-    // The window stays, with the reason, and nothing goes out.
-    for _ in 0..50 {
+    // The window stays, with the reason, and nothing goes out: the send is called off
+    // when the reason is shown.
+    let reason = Some("Not sent: check the attachments first.".to_owned());
+    wait_until(|| {
         cx.run_until_parked();
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    std::thread::sleep(Duration::from_millis(200));
-    cx.run_until_parked();
+        cx.read(crate::composer::errors) == [reason.clone()]
+    });
     assert_eq!(cx.update(|cx| cx.windows().len()), 2);
     assert!(mail.sent().is_empty());
 }
@@ -303,10 +303,45 @@ fn a_draft_opened_twice_at_once_gets_one_window(cx: &mut TestAppContext) {
         }
     })
     .unwrap();
+    // The second found the first on its way, and did nothing.
     composer_window(cx, window);
-    for _ in 0..20 {
+    cx.run_until_parked();
+    assert_eq!(cx.update(|cx| cx.windows().len()), 2);
+}
+
+#[gpui_kit::test]
+fn a_reply_opened_from_the_drafts_before_its_window_is_up_gets_one_window(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    let message = cx.read(|cx| id_of(&mailbox, "你好，世界", cx));
+    let reply = ComposeFrom::Reply {
+        message,
+        all: false,
+    };
+    cx.update_window(window, |_, window, cx| {
+        crate::composer::open(mail.client.clone(), reply, window, cx)
+    })
+    .unwrap();
+    // The reply's draft is there before its window: the account is read after it, and
+    // the window comes up only when GPUI runs again.
+    let mut draft = None;
+    wait_until(|| {
+        cx.executor().tick();
+        draft = pollster::block_on(mail.client.list_drafts(mail.account()))
+            .unwrap()
+            .first()
+            .map(|d| d.id);
+        draft.is_some()
+    });
+    cx.update_window(window, |_, window, cx| {
+        let from = ComposeFrom::Draft(draft.unwrap());
+        crate::composer::open(mail.client.clone(), from, window, cx)
+    })
+    .unwrap();
+    wait_until(|| {
         cx.run_until_parked();
-        std::thread::sleep(Duration::from_millis(10));
-    }
+        cx.read(crate::composer::opened)
+    });
     assert_eq!(cx.update(|cx| cx.windows().len()), 2);
 }

@@ -111,6 +111,11 @@ pub fn attachment_chip(filename: impl Into<SharedString>, size: u64, cx: &App) -
         .child(div().text_xs().text_color(muted).child(format::size(size)))
 }
 
+/// The element id of the button that confirms [`confirm_danger`]: GPUI Kit's, for its
+/// alert dialog's OK.
+#[cfg(test)]
+pub const CONFIRM: &str = "ok";
+
 /// Asks before something that can't be undone: `title` asks the question, `description`
 /// says what follows, and the red `ok` button does it with `on_ok`.
 pub fn confirm_danger(
