@@ -69,6 +69,16 @@ pub struct MailboxStatus {
     pub highest_modseq: Option<u64>,
 }
 
+impl MailboxStatus {
+    /// Whether UIDs recorded under `expected` still name the same messages here. Never
+    /// for a mailbox whose UIDVALIDITY wasn't known. Each caller decides what a new
+    /// generation means; one that only takes UIDs from the mailbox as it is now has
+    /// nothing to compare.
+    pub fn same_generation(&self, expected: Option<u32>) -> bool {
+        expected == Some(self.uidvalidity)
+    }
+}
+
 /// A message as needed for list views.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchedMessage {

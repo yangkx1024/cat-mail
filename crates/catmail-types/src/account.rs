@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::AccountId;
+use crate::{AccountId, ReportedError};
 
 /// Transport security for an IMAP or SMTP connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,11 +136,10 @@ pub struct AccountStatus {
 /// Failures in a row reaching a server, or working with it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerProblem {
-    /// The latest error.
-    pub error: String,
-    /// The server rejected the login (the latest time). Retrying is slowed down, since
-    /// servers lock accounts after repeated failed logins: the password needs fixing.
-    pub auth_failed: bool,
+    /// The latest error. If its kind is [`ErrorKind::Auth`](crate::ErrorKind::Auth),
+    /// the server rejected the login: retrying is slowed down, since servers lock
+    /// accounts after repeated failed logins, and the password needs fixing.
+    pub error: ReportedError,
     /// When the first of these failures happened, in unix seconds.
     pub since: i64,
     pub failures: u32,

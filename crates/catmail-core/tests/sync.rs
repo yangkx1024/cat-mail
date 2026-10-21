@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use catmail_core::{Error, Event, Flags, FolderRole, ImapError, SyncReport};
+use catmail_core::{Error, ErrorKind, Event, Flags, FolderRole, SyncReport};
 use catmail_testkit::{FakeMailbox, ServerState};
 
 mod common;
@@ -289,7 +289,7 @@ async fn interrupted_sync_resumes_without_duplicates() {
     let env = env(state).await;
 
     let err = env.client.sync_account(env.account).await.unwrap_err();
-    assert!(matches!(err, Error::Imap(ImapError::Closed)), "{err:?}");
+    assert_eq!(err.kind(), ErrorKind::Network, "{err:?}");
     let partial = env.subjects("INBOX").await;
     assert_eq!(partial.len(), 200, "the first batch was committed");
     assert_eq!(partial[0], "m450", "newest first");
@@ -450,7 +450,7 @@ async fn unparsable_answers_never_delete_local_state() {
     env.fake.state().faults.garble = Some("\"Archive\"".into());
     let err = env.client.sync_account(env.account).await.unwrap_err();
     assert!(
-        matches!(err, Error::Imap(ImapError::Incomplete("LIST"))),
+        err.kind() == ErrorKind::Refused && err.to_string().contains("LIST"),
         "{err:?}"
     );
     assert!(
@@ -471,8 +471,9 @@ async fn unparsable_answers_never_delete_local_state() {
     }
     let report = env.sync().await;
     let inbox = folder_report(&report, "INBOX");
+    let error = inbox.error.as_ref().unwrap();
     assert!(
-        inbox.error.as_deref().unwrap().contains("SEARCH"),
+        error.kind == ErrorKind::Refused && error.message.contains("SEARCH"),
         "{inbox:?}"
     );
     assert_eq!(
@@ -487,7 +488,7 @@ async fn unparsable_answers_never_delete_local_state() {
     let report = env.sync().await;
     let inbox = folder_report(&report, "INBOX");
     assert!(
-        inbox.error.as_deref().unwrap().contains("FETCH"),
+        inbox.error.as_ref().unwrap().message.contains("FETCH"),
         "{inbox:?}"
     );
     assert_eq!(
@@ -496,7 +497,7 @@ async fn unparsable_answers_never_delete_local_state() {
     );
     let report = env.sync().await;
     let inbox = folder_report(&report, "INBOX");
-    assert_eq!((inbox.error.as_deref(), inbox.updated), (None, 1));
+    assert_eq!((inbox.error.as_ref(), inbox.updated), (None, 1));
     assert_eq!(
         env.messages("INBOX").await,
         [
@@ -517,7 +518,7 @@ async fn unparsable_bodystructure_does_not_hide_the_message() {
     let env = env(state).await;
     let report = env.sync().await;
     let inbox = folder_report(&report, "INBOX");
-    assert_eq!((inbox.added, inbox.error.as_deref()), (3, None));
+    assert_eq!((inbox.added, inbox.error.as_ref()), (3, None));
     assert_eq!(
         env.subjects("INBOX").await,
         newest_first(&["one", "two", "three"])
@@ -744,7 +745,7 @@ async fn a_skipped_folder_sync_leaves_the_account_status_alone() {
         .await;
     assert_eq!(skipped.unwrap(), None);
     let problem = env.client.account_status(env.account).sync;
-    assert!(problem.is_some_and(|p| p.auth_failed));
+    assert!(problem.is_some_and(|p| p.error.kind == ErrorKind::Auth));
 }
 
 #[tokio::test(flavor = "multi_thread")]

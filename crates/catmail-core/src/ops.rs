@@ -126,11 +126,9 @@ pub(crate) async fn replay_account(
         if needed {
             // Safe to run again on a new connection if a reused one turns out dead: what
             // went through is no longer pending, and uploads left unsettled settle first.
-            let replayed = with_session(&engine, account, |session| {
+            let replayed = with_session(&engine, account, {
                 let engine = engine.clone();
-                Box::pin(
-                    async move { replay_queued(&engine, session, account, Uploads::All).await },
-                )
+                async move |session| replay_queued(&engine, session, account, Uploads::All).await
             })
             .await;
             engine.report(account, Activity::Sync, &replayed);
@@ -199,7 +197,7 @@ async fn replay(
                     total.applied += report.applied;
                     total.failed += report.failed;
                 }
-                Err(Error::Imap(e)) if !e.is_fatal() => {
+                Err(e) if e.is_refusal() => {
                     tracing::warn!(folder = %folder.name, error = %e,
                         "can't replay changes in folder");
                 }
@@ -254,7 +252,7 @@ async fn replay_folder(
         return Ok(ReplayReport::default());
     }
     let status = session.select(&folder.remote_name).await?;
-    if Some(status.uidvalidity) != folder.uidvalidity {
+    if !status.same_generation(folder.uidvalidity) {
         // Not under the generation they name. The sync of this folder starts the new
         // one, which turns them into conflicts.
         return Ok(ReplayReport::default());
@@ -540,6 +538,20 @@ struct Target {
     present: Vec<(ReplayOp, u32)>,
 }
 
+/// A target that [`find_copies`] searched, before the originals left to compare are
+/// downloaded.
+struct Searched {
+    checkpoint: CopyCheckpoint,
+    /// Originals whose copy is to be told by its bytes, with their sizes.
+    present: Vec<(ReplayOp, u32)>,
+    /// Messages that arrived in the target and might be such a copy: UID, size, bytes.
+    candidates: Vec<(u32, u32, Vec<u8>)>,
+    /// Ops whose copies were found already, by COPYUID.
+    found: Vec<ReplayOp>,
+    /// Where each found op's message is: original UID to the copy's.
+    uids: HashMap<u32, u32>,
+}
+
 /// Looks for each message's copy among the target's messages from the checkpoint on.
 /// One the COPY's answer named (COPYUID) is that one, if it is still there. Otherwise a
 /// copy has the original's raw bytes; sizes are compared first, so only messages that
@@ -572,13 +584,11 @@ async fn find_copies(
             (None, None) => gone_unseen(&mut copies, &checkpoint, op),
         }
     }
-    // (checkpoint, originals to compare, candidates with their sizes and bytes, ops whose
-    // copies were found, and where)
-    let mut targets = Vec::new();
+    let mut searched = Vec::new();
     for (checkpoint, target) in by_target {
         let unknown = match &checkpoint.remote_name {
             Some(name) => match session.examine(name).await {
-                Ok(status) => status.uidvalidity != checkpoint.uidvalidity,
+                Ok(status) => !status.same_generation(Some(checkpoint.uidvalidity)),
                 Err(e) if !e.is_fatal() => true,
                 Err(e) => return Err(e),
             },
@@ -602,10 +612,10 @@ async fn find_copies(
             .await?
             .into_iter()
             .collect();
-        let (mut found, mut moved) = (Vec::new(), HashMap::new());
+        let (mut found, mut uids) = (Vec::new(), HashMap::new());
         for (op, copy, present) in target.recorded {
             if arrived.contains(&copy) {
-                moved.insert(op.uid, copy);
+                uids.insert(op.uid, copy);
                 found.push(op);
             } else if present {
                 // Removed since: as if it had never been made.
@@ -617,7 +627,7 @@ async fn find_copies(
         let wanted: HashSet<u32> = target.present.iter().map(|(_, size)| *size).collect();
         let mut candidates = Vec::new();
         if !wanted.is_empty() {
-            let claimed: HashSet<u32> = moved.values().copied().collect();
+            let claimed: HashSet<u32> = uids.values().copied().collect();
             let unclaimed: Vec<u32> = arrived.difference(&claimed).copied().collect();
             for (uid, size) in session.fetch_sizes(&unclaimed).await? {
                 if wanted.contains(&size)
@@ -627,12 +637,26 @@ async fn find_copies(
                 }
             }
         }
-        targets.push((checkpoint, target.present, candidates, found, moved));
+        searched.push(Searched {
+            checkpoint,
+            present: target.present,
+            candidates,
+            found,
+            uids,
+        });
     }
-    if session.select(&folder.remote_name).await?.uidvalidity != uidvalidity {
+    let reopened = session.select(&folder.remote_name).await?;
+    if !reopened.same_generation(Some(uidvalidity)) {
         return Ok(None);
     }
-    for (checkpoint, present, mut candidates, mut found, mut uids) in targets {
+    for Searched {
+        checkpoint,
+        present,
+        mut candidates,
+        mut found,
+        mut uids,
+    } in searched
+    {
         for (op, size) in present {
             // Nothing of its size arrived: no copy, and no need to download it.
             if !candidates.iter().any(|(_, s, _)| *s == size) {

@@ -30,14 +30,12 @@ mod sync;
 mod watch;
 
 pub use catmail_proto::TlsConfig;
-pub use catmail_proto::imap::Error as ImapError;
-pub use catmail_proto::smtp::Error as SmtpError;
 pub use catmail_types::*;
 pub use client::{MailClient, MailClientBuilder};
 pub use config::Config;
 pub use drafts::{format_addresses, parse_addresses};
 pub use engine::DEFAULT_DRAFT_UPLOAD_DELAY;
-pub use error::{Error, Result};
+pub use error::{Error, ImapError, Result, SmtpError, StoreError};
 pub use filename::safe_filename;
 pub use gc::DEFAULT_GC_INTERVAL;
 pub use secrecy::{ExposeSecret, SecretString};

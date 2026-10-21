@@ -44,6 +44,22 @@ GPUI 有自己的 executor，不是 tokio；IMAP / SMTP 栈却依赖 tokio react
 - 自建 runtime drop 时 `shutdown_background()`，不等待任务：状态都已落 SQLite。
 - 后台任务 panic 转成 `Error::Task`，GUI 进程不跟着崩。
 
+### 错误
+
+`catmail_core::Error` 是前端看到的唯一错误类型。用户能处理的失败有自己的变体（`AuthFailed`、
+`Unsupported`、`AlreadyExists`、`OutOfSync`、各种 `*NotFound` 等），从下层错误里提升上来；其余的
+store / IMAP / SMTP 错误包在不透明的 `StoreError` / `ImapError` / `SmtpError` 里，下层的错误枚举
+不属于公开 API。
+
+- 前端按 `Error::kind()`（`ErrorKind`：`Network`、`Auth`、`Refused`、`OutOfSync`、`NotFound`、
+  `Invalid`、`Conflict`、`Internal`）决定图标和动作，不去解析 `Display` 文本。`is_transient()`：
+  什么都不改、稍后重试可能成功（网络、SMTP 4xx）；`is_refusal()`：命令失败但连接仍可用，同一连接上
+  其余的工作照常继续（引擎内部"记日志、跳过这个文件夹"的判断）。
+- 后台工作的错误以 `ReportedError { kind, message }` 交给前端：`ServerProblem.error`（账户状态）
+  和 `FolderSyncReport.error`。登录被拒绝就是 `kind == Auth`，没有单独的布尔位。
+- `ErrorKind` 故意不加 `#[non_exhaustive]`：以后加种类（如 OAuth 的"需要重新授权"）时，前端的
+  `match` 会编译失败，提醒每处都处理。
+
 ### 事务与事件
 
 数据库访问只经过 `Store::read` / `Store::write`：闭包里的各个 repository 共用同一个事务；

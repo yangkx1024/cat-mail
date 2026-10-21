@@ -1,5 +1,7 @@
 use std::io;
 
+use catmail_types::ErrorKind;
+
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug, thiserror::Error)]
@@ -42,6 +44,19 @@ pub enum Error {
 }
 
 impl Error {
+    /// A refusal is [`ErrorKind::Refused`] whether or not it is
+    /// [permanent](Self::is_permanent).
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            Self::Io(_) | Self::Timeout | Self::Closed | Self::Protocol(_) => ErrorKind::Network,
+            Self::AuthFailed(_) => ErrorKind::Auth,
+            Self::Reply { .. } | Self::TooLarge { .. } => ErrorKind::Refused,
+            Self::InvalidServerName(_) | Self::Unsupported(_) | Self::InvalidAddress(_) => {
+                ErrorKind::Invalid
+            }
+        }
+    }
+
     /// Whether trying again later can't help: the server refused for good (5xx), or the
     /// message or settings are wrong. Network trouble and 4xx replies are temporary.
     pub fn is_permanent(&self) -> bool {
