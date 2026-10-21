@@ -35,7 +35,7 @@ pub(crate) async fn sync_account(engine: Arc<Engine>, account_id: AccountId) -> 
     // `run` takes the permit itself, folder by folder.
     let result = engine
         .cancellation(account_id)
-        .run(account_id, async {
+        .run(async {
             let mut session = connection::connect(&engine, account_id).await?;
             let report = run(&engine, &mut session, account_id, Uploads::All).await?;
             session.logout().await;
@@ -110,7 +110,7 @@ pub(crate) async fn run(
     uploads: Uploads,
 ) -> Result<SyncReport> {
     let permit = engine.sync_permit(account_id).await;
-    let (start, mut replayed, folders) = permit
+    let (start, mut replayed, ids) = permit
         .run(async {
             // Taken holding the permit: a sync completed after this began after it too,
             // and saw the server as it is now or later. One that held the permit before
@@ -131,10 +131,16 @@ pub(crate) async fn run(
             let replayed = ops::replay_queued(engine, session, account_id, uploads)
                 .await?
                 .folders;
-            let folders = engine
+            // Only which folders, in which order: their state is read when each one's
+            // turn comes.
+            let ids: Vec<FolderId> = engine
                 .read(move |db| db.folders().sync_states(account_id))
-                .await?;
-            Ok((start, replayed, folders))
+                .await?
+                .into_iter()
+                .filter(|f| f.selectable)
+                .map(|f| f.id)
+                .collect();
+            Ok((start, replayed, ids))
         })
         .await?;
 
@@ -142,15 +148,13 @@ pub(crate) async fn run(
         account: account_id,
         folders: Vec::new(),
     };
-    for folder in folders.into_iter().filter(|f| f.selectable) {
-        let replayed = replayed.remove(&folder.id);
+    for id in ids {
+        let replayed = replayed.remove(&id);
         let permit = engine.sync_permit(account_id).await;
         let folder_report = permit
             .run(async {
-                // What was read above is stale if another sync went in before this
-                // folder: it may have synced it, started a new UIDVALIDITY, or found it
-                // deleted.
-                let id = folder.id;
+                // Read now, not above: another sync that went in before this folder may
+                // have synced it, started a new UIDVALIDITY, or found it deleted.
                 let current = engine.read(move |db| db.folders().sync_state(id)).await?;
                 let Some(current) = current.filter(|f| f.selectable) else {
                     return Ok(None);

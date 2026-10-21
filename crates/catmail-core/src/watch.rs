@@ -322,6 +322,7 @@ async fn work(
     let permit = engine.sync_permit(account).await;
     permit
         .run(async {
+            // A full sync replayed them first.
             if !full {
                 ops::replay_queued(engine, session, account, Uploads::Settled).await?;
             }

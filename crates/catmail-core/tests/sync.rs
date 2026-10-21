@@ -816,7 +816,12 @@ async fn a_full_sync_doesnt_skip_a_folder_whose_sync_began_before_it() {
     env.fake
         .wait_until(|st| st.received("UID FETCH") > fetches)
         .await;
-    env.fake.state().mailbox_mut("Archive").append_simple("new");
+    {
+        let mut st = env.fake.state();
+        // The FETCH already held stays held; the full sync's needn't be.
+        st.faults.slow = None;
+        st.mailbox_mut("Archive").append_simple("new");
+    }
 
     // Asked for while the folder sync runs, so it has to see the new message.
     let full = env.sync().await;

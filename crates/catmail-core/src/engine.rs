@@ -93,34 +93,33 @@ pub(crate) enum Activity {
 /// Held while syncing (a folder of) an account, or while working on its outbox.
 pub(crate) struct Permit {
     _guard: OwnedMutexGuard<()>,
-    account: AccountId,
     cancellation: Cancellation,
 }
 
 impl Permit {
     /// Runs `work` holding the permit, as [`Cancellation::run`].
     pub async fn run<T>(self, work: impl Future<Output = Result<T>>) -> Result<T> {
-        self.cancellation.run(self.account, work).await
+        self.cancellation.run(work).await
     }
 }
 
 /// Tells work on an account that the account is being removed.
-pub(crate) struct Cancellation(watch::Receiver<bool>);
+pub(crate) struct Cancellation {
+    removed: watch::Receiver<bool>,
+    account: AccountId,
+}
 
 impl Cancellation {
     pub fn is_cancelled(&self) -> bool {
-        *self.0.borrow()
+        *self.removed.borrow()
     }
 
-    /// Runs `work` on `account`. Fails with [`Error::AccountNotFound`] if the account was
-    /// removed before, and stops it with [`Error::Cancelled`] if it is removed meanwhile.
-    pub async fn run<T>(
-        mut self,
-        account: AccountId,
-        work: impl Future<Output = Result<T>>,
-    ) -> Result<T> {
+    /// Runs `work` on the account. Fails with [`Error::AccountNotFound`] if the account
+    /// was removed before, and stops it with [`Error::Cancelled`] if it is removed
+    /// meanwhile.
+    pub async fn run<T>(mut self, work: impl Future<Output = Result<T>>) -> Result<T> {
         if self.is_cancelled() {
-            return Err(Error::AccountNotFound(account.to_string()));
+            return Err(Error::AccountNotFound(self.account.to_string()));
         }
         tokio::select! {
             result = work => result,
@@ -132,7 +131,7 @@ impl Cancellation {
     /// engine is gone: work holding the engine only weakly stops then too.
     pub async fn cancelled(&mut self) {
         // Err: the sender, owned by the engine, is gone.
-        let _ = self.0.wait_for(|c| *c).await;
+        let _ = self.removed.wait_for(|c| *c).await;
     }
 }
 
@@ -219,12 +218,10 @@ impl Engine {
         account: AccountId,
         lock: impl FnOnce(&AccountState) -> &Arc<tokio::sync::Mutex<()>>,
     ) -> Permit {
-        let state = self.account(account);
-        let cancellation = Cancellation(state.removed.subscribe());
-        let guard = lock(&state).clone().lock_owned().await;
+        let cancellation = self.cancellation(account);
+        let guard = lock(&self.account(account)).clone().lock_owned().await;
         Permit {
             _guard: guard,
-            account,
             cancellation,
         }
     }
@@ -378,7 +375,10 @@ impl Engine {
     /// account (or the row worked on) still exists: a removal is then seen whether it
     /// started before or after.
     pub fn cancellation(&self, account: AccountId) -> Cancellation {
-        Cancellation(self.account(account).removed.subscribe())
+        Cancellation {
+            removed: self.account(account).removed.subscribe(),
+            account,
+        }
     }
 
     /// A logged-in connection that was recently in use, if there is one.
