@@ -312,3 +312,37 @@ fn events_missed_meanwhile_read_everything_again(cx: &mut TestAppContext) {
         cx.read(|cx| find(&mailbox, "Missed", cx).is_some())
     });
 }
+
+#[gpui_kit::test]
+fn reading_again_what_hasnt_changed_redraws_nothing(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    let list = cx.read(|cx| mailbox.read(cx).messages.clone());
+    let redraws = std::rc::Rc::new(std::cell::Cell::new(0));
+    let _observing = cx.update(|cx| {
+        let (mine, lists) = (redraws.clone(), redraws.clone());
+        [
+            cx.observe(&mailbox, move |_, _| mine.set(mine.get() + 1)),
+            cx.observe(&list, move |_, _| lists.set(lists.get() + 1)),
+        ]
+    });
+
+    // As after missed events: the sidebar and the list are read again, and both start
+    // right away.
+    cx.update_window(window, |_, window, cx| {
+        mailbox.update(cx, |mailbox, cx| mailbox.on_engine_event(None, window, cx))
+    })
+    .unwrap();
+    cx.read(|cx| {
+        assert!(mailbox.read(cx).reading_folders.is_running());
+        assert!(list.read(cx).delegate().is_loading());
+    });
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| {
+            !mailbox.read(cx).reading_folders.is_running() && !list.read(cx).delegate().is_loading()
+        })
+    });
+    assert_eq!(redraws.get(), 0);
+}

@@ -600,12 +600,13 @@ async fn background_sync_waits_for_a_draft_to_settle() {
     }
     assert_eq!(env.fake.state().received("IDLE"), idles);
     assert_eq!(env.appends(), 0);
+    // The server has the copy before the upload is recorded here: without UIDPLUS the
+    // engine still searches for its UID first.
     eventually("the draft on the server", async || {
-        subjects(&env.server_drafts()) == ["one"]
+        subjects(&env.server_drafts()) == ["one"] && env.on_server(id).await
     })
     .await;
     assert_eq!(env.appends(), 1, "uploaded once, when it settled");
-    assert!(env.on_server(id).await);
 }
 
 #[tokio::test(flavor = "multi_thread")]
