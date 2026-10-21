@@ -122,6 +122,8 @@ impl<'c> Messages<'c> {
              ON CONFLICT (folder_id, uid) DO NOTHING",
         )?;
         let mut inserted = 0;
+        // Refreshed in one go: `update_flags` reads the folder's pending flag ops each call.
+        let mut existing = Vec::new();
         for m in messages {
             let added = insert.execute(named_params! {
                 ":account": account.0,
@@ -147,8 +149,11 @@ impl<'c> Messages<'c> {
                 inserted += 1;
                 self.reindex(self.conn.last_insert_rowid())?;
             } else {
-                self.update_flags(folder, std::slice::from_ref(&m.state))?;
+                existing.push(m.state.clone());
             }
+        }
+        if !existing.is_empty() {
+            self.update_flags(folder, &existing)?;
         }
         Ok(inserted)
     }
