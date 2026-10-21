@@ -238,17 +238,26 @@ impl<'c> Folders<'c> {
         Ok(touched)
     }
 
-    /// Records a completed sync.
+    /// Records the cursor of a sync that stored every message. It counts as a completed
+    /// sync (`last_synced_at`) only with `flags_refreshed`: a sync that left the flags of
+    /// stored messages alone may be behind on them.
     pub fn set_synced(
         &self,
         folder: FolderId,
         uidnext: Option<u32>,
         highest_modseq: Option<u64>,
+        flags_refreshed: bool,
     ) -> Result<()> {
         self.conn.execute(
-            "UPDATE folders SET uidnext = ?2, highest_modseq = ?3, last_synced_at = unixepoch()
+            "UPDATE folders SET uidnext = ?2, highest_modseq = ?3,
+                last_synced_at = CASE WHEN ?4 THEN unixepoch() ELSE last_synced_at END
              WHERE id = ?1",
-            params![folder.0, uidnext, highest_modseq.map(|m| m as i64)],
+            params![
+                folder.0,
+                uidnext,
+                highest_modseq.map(|m| m as i64),
+                flags_refreshed
+            ],
         )?;
         Ok(())
     }
@@ -370,7 +379,7 @@ mod tests {
                 db.folders().reset_uidvalidity(folder, 7)?;
                 db.messages()
                     .upsert(account, folder, &[message(1), message(2)])?;
-                db.folders().set_synced(folder, Some(3), Some(10))?;
+                db.folders().set_synced(folder, Some(3), Some(10), true)?;
                 db.conn.execute(
                     "INSERT INTO pending_ops (account_id, folder_id, uidvalidity, uid, kind)
                      VALUES (?1, ?2, 7, 1, 'flags')",
@@ -437,6 +446,42 @@ mod tests {
     }
 
     #[test]
+    fn a_sync_that_left_the_flags_alone_is_not_completed() {
+        let store = Store::open_in_memory().unwrap();
+        let account = test_util::account(&store, "a@example.com");
+        store
+            .write(|db| {
+                db.folders()
+                    .reconcile(account, &[remote("INBOX", "INBOX", None)])
+            })
+            .unwrap();
+        let folder = store.read(|db| db.folders().list(account)).unwrap()[0].id;
+        let state = || store.read(|db| db.folders().get(folder)).unwrap().unwrap();
+
+        store
+            .write(|db| db.folders().set_synced(folder, Some(3), None, false))
+            .unwrap();
+        assert_eq!(state().last_synced_at, None);
+        assert_eq!(
+            store
+                .read(|db| db.folders().sync_state(folder))
+                .unwrap()
+                .unwrap()
+                .uidnext,
+            Some(3)
+        );
+        store
+            .write(|db| db.folders().set_synced(folder, Some(4), None, true))
+            .unwrap();
+        let synced = state().last_synced_at;
+        assert!(synced.is_some());
+        store
+            .write(|db| db.folders().set_synced(folder, Some(5), None, false))
+            .unwrap();
+        assert_eq!(state().last_synced_at, synced);
+    }
+
+    #[test]
     fn uidvalidity_reset_drops_the_old_generation() {
         let store = Store::open_in_memory().unwrap();
         let account = test_util::account(&store, "a@example.com");
@@ -452,7 +497,7 @@ mod tests {
                 db.folders().reset_uidvalidity(folder, 7)?;
                 db.messages()
                     .upsert(account, folder, &[message(1), message(2)])?;
-                db.folders().set_synced(folder, Some(3), Some(10))
+                db.folders().set_synced(folder, Some(3), Some(10), true)
             })
             .unwrap();
         store

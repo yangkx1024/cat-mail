@@ -97,6 +97,60 @@ async fn new_mail_flag_changes_and_expunges_are_pushed() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn without_condstore_only_changed_flags_refetch_every_flag() {
+    let mut state = state();
+    state.faults.condstore = false;
+    let env = watching(state, schedule(HOUR, HOUR)).await;
+    env.wait_for_idle(1).await;
+    let flags_fetches = || {
+        let st = env.fake.state();
+        st.log
+            .iter()
+            .filter(|c| c.line.ends_with("(UID FLAGS)"))
+            .count()
+    };
+    let before = flags_fetches();
+
+    env.fake.state().inbox().append_simple("three");
+    env.wait_for_subjects("INBOX", &["one", "three", "two"])
+        .await;
+    env.wait_for_idle(2).await;
+    assert_eq!(flags_fetches(), before, "new mail fetches no flags");
+
+    // Another client's flag change, which IDLE reports, does.
+    env.fake.state().inbox().set_flags(1, &["\\Seen"]);
+    eventually("one to be read", async || {
+        env.messages("INBOX")
+            .await
+            .contains(&("one".into(), Flags::SEEN))
+    })
+    .await;
+    assert_eq!(flags_fetches(), before + 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_flags_refresh_is_tried_again() {
+    let mut state = state();
+    state.faults.condstore = false;
+    let env = watching(state, schedule(HOUR, HOUR)).await;
+    env.wait_for_idle(1).await;
+
+    // The answer to the flags FETCH IDLE's report brings can't be parsed, once.
+    {
+        let mut st = env.fake.state();
+        st.faults.garble = Some("UID 1 FLAGS (\\Seen)".into());
+        st.inbox().set_flags(1, &["\\Seen"]);
+    }
+    eventually("one to be read", async || {
+        env.messages("INBOX")
+            .await
+            .contains(&("one".into(), Flags::SEEN))
+    })
+    .await;
+    assert!(env.fake.state().faults.garble.is_none(), "the fault fired");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn queued_changes_reach_the_server_at_once() {
     let env = watching(state(), schedule(HOUR, HOUR)).await;
     env.wait_for_idle(1).await;

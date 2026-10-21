@@ -93,6 +93,9 @@ enum Wait {
     Idle,
     /// Nothing; check again later.
     Poll,
+    /// As `Poll`, but INBOX couldn't be synced: flag changes IDLE reported are still to
+    /// be fetched.
+    InboxFailed,
 }
 
 /// Keeps one account in sync until it is removed or the engine is gone.
@@ -110,6 +113,8 @@ pub(crate) async fn run(engine: Weak<Engine>, account: AccountId, schedule: Sync
     let mut busy = 0;
     // Cleared if the server refuses IDLE even though it offers it, or cuts it short.
     let mut idle_works = true;
+    // IDLE reported changed flags in INBOX that no step has fetched yet.
+    let mut flags_changed = false;
     loop {
         let Some(strong) = engine.upgrade() else {
             return;
@@ -117,7 +122,8 @@ pub(crate) async fn run(engine: Weak<Engine>, account: AccountId, schedule: Sync
         if cancellation.is_cancelled() {
             return;
         }
-        let result = step(&strong, &mut session, account, schedule).await;
+        let result = step(&strong, &mut session, account, schedule, flags_changed).await;
+        flags_changed &= !matches!(result, Ok(Wait::Idle | Wait::Poll));
         let failures = strong.report(account, Activity::Sync, &result);
         // Drafts held back while they are being written are uploaded once they settle:
         // the step runs again by then, at once for one that settled while it ran.
@@ -138,6 +144,7 @@ pub(crate) async fn run(engine: Weak<Engine>, account: AccountId, schedule: Sync
                             continue;
                         }
                         Ok(Idled::Changed) => {
+                            flags_changed |= s.flags_changed();
                             idle_losses = 0;
                             busy = if start.elapsed() < SHORT_IDLE {
                                 busy + 1
@@ -262,19 +269,21 @@ fn full_sync_in(engine: &Engine, account: AccountId, schedule: &SyncSchedule) ->
 }
 
 /// Syncs every folder if that is due, else makes queued local changes on the server
-/// (changed drafts included); then syncs INBOX. On the connection there, or a new one (see
+/// (changed drafts included); then syncs INBOX, refreshing all its flags only if
+/// `flags_changed`. On the connection there, or a new one (see
 /// [`on_session`](connection::on_session)).
 async fn step(
     engine: &Arc<Engine>,
     session: &mut Option<Session>,
     account: AccountId,
     schedule: SyncSchedule,
+    flags_changed: bool,
 ) -> Result<Wait> {
     // Connected before taking the permit: waiting for an unreachable server shouldn't
     // hold up syncs the user asks for.
     connection::on_session(engine, account, session, |s| {
         let engine = engine.clone();
-        Box::pin(async move { work(&engine, s, account, &schedule).await })
+        Box::pin(async move { work(&engine, s, account, &schedule, flags_changed).await })
     })
     .await
 }
@@ -284,6 +293,7 @@ async fn work(
     session: &mut Session,
     account: AccountId,
     schedule: &SyncSchedule,
+    flags_changed: bool,
 ) -> Result<Wait> {
     let permit = engine.sync_permit(account).await;
     permit
@@ -296,13 +306,15 @@ async fn work(
             } else {
                 ops::replay_queued(engine, session, account, Uploads::Settled).await?;
             }
-            // Last, so that it is the selected mailbox to IDLE on.
-            match sync::sync_inbox(engine, session, account).await {
+            // Last, so that it is the selected mailbox to IDLE on. Its flags are fetched
+            // in full only when the server said they changed: without CONDSTORE that is
+            // every message's, too much for each new one.
+            match sync::sync_inbox(engine, session, account, flags_changed).await {
                 Ok(true) if session.can_idle() => Ok(Wait::Idle),
                 Ok(_) => Ok(Wait::Poll),
                 Err(Error::Imap(e)) if !e.is_fatal() => {
                     tracing::warn!(%account, error = %e, "can't sync INBOX");
-                    Ok(Wait::Poll)
+                    Ok(Wait::InboxFailed)
                 }
                 Err(e) => Err(e),
             }

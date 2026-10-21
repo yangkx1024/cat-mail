@@ -53,8 +53,9 @@ VANISHED、FETCH）、`stop` 完成或过了 `max`，然后发 DONE、等 tagged
 - **顺带报告的变化。** 服务器可以在任何命令的答复里报告选中文件夹的变化，而且只说一次。连接层对每个
   答复记下 EXISTS（数量变了才算）、EXPUNGE、VANISHED，`Session` 打开文件夹时让它从头记起
   （`Connection::mailbox_opened`）：打开以来已有变化时 `idle` 立即返回 true，不发 IDLE。IDLE 以外的
-  FETCH 不算（那通常是自己的 FETCH 的答复），别的客户端同时改的 flags 要等下一次同步。同一份 EXISTS
-  也让 SEARCH 知道文件夹是否已空。
+  FETCH 不算（那通常是自己的 FETCH 的答复），别的客户端同时改的 flags 要等下一次同步。IDLE 期间的
+  FETCH（以及无法解析的行）另记为 flags 变化（`Session::flags_changed`），后台同步据此决定没有 CONDSTORE
+  时要不要拉 INBOX 的全部 flags。同一份 EXISTS 也让 SEARCH 知道文件夹是否已空。
 
 ## 连接池
 
