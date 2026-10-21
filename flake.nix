@@ -41,6 +41,7 @@
                 clippy
                 rustfmt
                 rust-analyzer
+                cargo-deny
                 pkg-config
                 sqlite-interactive
               ]

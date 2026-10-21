@@ -19,6 +19,7 @@ The toolchain comes from the Nix flake. Run cargo through it:
 nix develop -c cargo test --workspace
 nix develop -c cargo clippy --workspace --all-targets -- -D warnings
 nix develop -c cargo fmt --all
+nix develop -c cargo deny check   # after changing dependencies
 ```
 
 Flakes only see git-tracked files: `git add -N` new files before `nix develop` / `nix build`.
@@ -33,7 +34,10 @@ or anything behind `cfg`, run the macOS / Windows tests before merging with
 `gh workflow run ci.yml --ref <branch>`. Only Linux is shipped for now, but code must build and
 pass everywhere: put
 platform-specific code behind `cfg`, and don't assume Unix paths or file semantics in
-code or tests. `nix.yml` checks `flake.nix` formatting (`nix fmt`) and the dev shell.
+code or tests. `nix.yml` checks `flake.nix` formatting (`nix fmt`) and the dev shell. `audit.yml` runs
+`cargo deny` against `deny.toml` (advisories, license allowlist, banned TLS/crypto crates,
+crates.io only) on pull requests, `main` and weekly; an advisory that doesn't affect us is
+ignored there with a reason, never by loosening the check.
 
 ## Crates and layering
 

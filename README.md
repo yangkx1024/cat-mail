@@ -186,6 +186,7 @@ nix develop                                         # 进入开发环境（Rust 
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
+cargo deny check                                    # 依赖审计：安全公告、许可证、禁用的 crate、来源
 cargo run -p catmail-cli -- account list
 ```
 
@@ -221,6 +222,10 @@ CI（GitHub Actions）：
   许可证）时不触发。
 - `nix.yml`：`flake.nix` / `flake.lock` 变更时检查 Nix 格式、`nix flake check`，并确认开发
   环境可用。
+- `audit.yml`：按 `deny.toml` 跑 `cargo deny`：RustSec 安全公告、许可证白名单、禁止第二套
+  TLS / 加密实现（aws-lc-rs、OpenSSL 等，rustls 只用 ring）、依赖只能来自 crates.io。PR 和
+  main 都跑，另外每周一定时检查一次安全公告，新披露的漏洞不用等下一次提交；main 上的结果以
+  SARIF 上传到仓库的 Security 页（code scanning）。不影响我们的公告在 `deny.toml` 里带原因忽略。
 
 | crate | 职责 |
 |---|---|
