@@ -21,6 +21,9 @@ Issue #32。`sync_folder`（打开文件夹）、`replay_pending` 和后台同�
   `last_synced_at` 是否晚于本次开始。它原先按秒记，同一秒里稍早（本次开始之前）的同步也会被当成"之后"，
   所以改为毫秒（项目未发布，直接改 `0001_init.sql` 的注释与 `set_synced`）。曾考虑在引擎内存里另记一份
   每个文件夹的 `Instant`，放弃：同一件事两个来源，且 `sync_one` 的新鲜度检查用的是数据库那份。
+- 本次的开始时刻在第一次拿到 permit 之后才取（PR review 指出）：在等锁之前取的话，持锁中的
+  `sync_folder` 可能在完整同步被调用之前就 EXAMINE 了，完成时间却晚于开始时刻，这个文件夹被跳过，
+  其间到达的新邮件这次同步拿不到。
 - 两次完整同步（手动 + 后台）现在按文件夹交替，而不是一个等另一个做完；各自跳过对方在自己开始后做完的，
   合起来大致只同步一遍。后台同步"是否该完整同步"的判断因此挪到拿锁之前。
 - 只同步一个文件夹、只回放的路径仍整次持锁，它们本来就短。
@@ -36,4 +39,6 @@ Issue #32。`sync_folder`（打开文件夹）、`replay_pending` 和后台同�
 - 文档：`docs/architecture/sync.md` 新增"锁"一节，`architecture.md` 的每账户状态一句。
 - 测试：`tests/sync.rs` 的 `sync_folder_goes_in_between_the_folders_of_a_full_sync`，用慢 `EXAMINE INBOX`
   把完整同步卡在第一个文件夹，期间同步最后一个文件夹，检查 EXAMINE 顺序为 INBOX、Later、Archive
-  且完整同步没有再同步 Later。改动前该测试失败。全部测试、clippy、Dovecot 真实服务器测试通过。
+  且完整同步没有再同步 Later。改动前该测试失败。`a_full_sync_doesnt_skip_a_folder_whose_sync_began_before_it`：
+  `sync_folder` 已 EXAMINE、卡在 flags FETCH 时到达新邮件并调用完整同步，完整同步必须拿到它（开始时刻
+  在等锁前取时失败）。全部测试、clippy、Dovecot 真实服务器测试通过。

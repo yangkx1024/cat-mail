@@ -107,10 +107,13 @@ pub(crate) async fn run(
     account_id: AccountId,
     uploads: Uploads,
 ) -> Result<SyncReport> {
-    let start = now_millis();
     let permit = engine.sync_permit(account_id).await;
-    let (mut replayed, folders) = permit
+    let (start, mut replayed, folders) = permit
         .run(async {
+            // Taken holding the permit: a sync completed after this began after it too,
+            // and saw the server as it is now or later. One that held the permit before
+            // may have seen it as it was before this was asked for.
+            let start = now_millis();
             let remote = remote_folders(session.list().await?);
             let reconciled = engine
                 .write(move |db| db.folders().reconcile(account_id, &remote))
@@ -129,7 +132,7 @@ pub(crate) async fn run(
             let folders = engine
                 .read(move |db| db.folders().sync_states(account_id))
                 .await?;
-            Ok((replayed, folders))
+            Ok((start, replayed, folders))
         })
         .await?;
 
