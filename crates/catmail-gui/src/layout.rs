@@ -1,10 +1,13 @@
 //! Layout pieces the panes and windows share, so they line up and look alike.
 
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex};
+use std::rc::Rc;
+
+use gpui_kit::component::button::ButtonVariant;
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, WindowExt as _, h_flex};
 use gpui_kit::{
     App, Bounds, Div, ElementId, FontWeight, Hsla, InteractiveElement as _, IntoElement,
     ParentElement as _, Pixels, SharedString, Size, Stateful, StatefulInteractiveElement as _,
-    Styled as _, TitlebarOptions, WindowBounds, WindowOptions, div, rems,
+    Styled as _, TitlebarOptions, Window, WindowBounds, WindowOptions, div, rems,
 };
 
 use crate::assets::Hero;
@@ -106,4 +109,31 @@ pub fn attachment_chip(filename: impl Into<SharedString>, size: u64, cx: &App) -
         .child(Icon::new(Hero::PaperClip).xsmall().text_color(muted))
         .child(filename.into())
         .child(div().text_xs().text_color(muted).child(format::size(size)))
+}
+
+/// Asks before something that can't be undone: `title` asks the question, `description`
+/// says what follows, and the red `ok` button does it with `on_ok`.
+pub fn confirm_danger(
+    title: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    ok: &'static str,
+    window: &mut Window,
+    cx: &mut App,
+    on_ok: impl Fn(&mut Window, &mut App) + 'static,
+) {
+    let (title, description) = (title.into(), description.into());
+    let on_ok = Rc::new(on_ok);
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        let on_ok = on_ok.clone();
+        alert
+            .title(title.clone())
+            .description(description.clone())
+            .confirm()
+            .ok_text(ok)
+            .ok_variant(ButtonVariant::Danger)
+            .on_ok(move |_, window, cx| {
+                on_ok(window, cx);
+                true
+            })
+    });
 }

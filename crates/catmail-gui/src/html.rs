@@ -16,27 +16,38 @@ use data_url::DataUrl;
 /// embedded as `data:` URLs first.
 const BROWSER_CSP: &str = "default-src 'none'; img-src data:; style-src 'unsafe-inline'";
 
-/// A `data:` URL's image: its MIME type and content.
-pub fn embedded_image(url: &str) -> Option<(String, Vec<u8>)> {
-    let data = DataUrl::process(url).ok()?;
-    let mime = data.mime_type();
-    if mime.type_ != "image" {
-        return None;
+/// An image the message carries itself, the only kind the reader shows.
+pub enum Carried<'a> {
+    /// An inline part, by its Content-ID.
+    Inline(String),
+    /// A `data:` URL of an image type; [`decode`] gives its content.
+    Data(DataUrl<'a>),
+}
+
+impl Carried<'_> {
+    /// What the image at `url` is, or `None` if it isn't shown: anything but an inline
+    /// part or a `data:` image, which the reader blocks.
+    pub fn of(url: &str) -> Option<Carried<'_>> {
+        if let Some(content_id) = content_id_from_url(url) {
+            return Some(Carried::Inline(content_id));
+        }
+        let data = DataUrl::process(url).ok()?;
+        (data.mime_type().type_ == "image").then_some(Carried::Data(data))
     }
+}
+
+/// A `data:` image's MIME type and content.
+pub fn decode(data: &DataUrl<'_>) -> Option<(String, Vec<u8>)> {
+    let mime = data.mime_type();
     let mime_type = format!("{}/{}", mime.type_, mime.subtype);
     Some((mime_type, data.decode_to_vec().ok()?.0))
 }
 
-/// Whether the image at `url` is not shown: anything but an inline part or a `data:`
-/// image.
-fn is_blocked(url: &str) -> bool {
-    content_id_from_url(url).is_none()
-        && !DataUrl::process(url).is_ok_and(|data| data.mime_type().type_ == "image")
-}
-
 /// Whether the HTML refers to images that are not shown.
 pub fn has_blocked_images(html: &str) -> bool {
-    image_sources(html).iter().any(|url| is_blocked(url))
+    image_sources(html)
+        .iter()
+        .any(|url| Carried::of(url).is_none())
 }
 
 /// Links that are handed to the system: web pages and new mail. The sanitizer also lets
@@ -73,6 +84,13 @@ fn escape(text: &str) -> String {
 mod tests {
     use super::*;
 
+    fn embedded_image(url: &str) -> Option<(String, Vec<u8>)> {
+        match Carried::of(url)? {
+            Carried::Data(data) => decode(&data),
+            Carried::Inline(_) => None,
+        }
+    }
+
     #[test]
     fn only_images_the_message_carries_are_shown() {
         assert_eq!(
@@ -83,11 +101,10 @@ mod tests {
             embedded_image("DATA:image/svg+xml;charset=utf-8,%3Csvg%3E"),
             Some(("image/svg+xml".into(), b"<svg>".to_vec()))
         );
-        assert_eq!(embedded_image("data:text/html,<script>"), None);
-        assert_eq!(embedded_image("https://x/a.png"), None);
-
-        assert!(!is_blocked("cid:logo@x"));
-        assert!(!is_blocked("data:image/png;base64,aGk"));
+        assert!(matches!(
+            Carried::of("cid:logo@x"),
+            Some(Carried::Inline(id)) if id == "logo@x"
+        ));
         for blocked in [
             "https://tracker.example/p.gif",
             "http://x/a.png",
@@ -97,7 +114,7 @@ mod tests {
             "data:text/html,<script>",
             "",
         ] {
-            assert!(is_blocked(blocked), "{blocked}");
+            assert!(Carried::of(blocked).is_none(), "{blocked}");
         }
     }
 

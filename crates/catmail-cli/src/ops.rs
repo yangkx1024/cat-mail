@@ -1,4 +1,4 @@
-//! `catmail mark`, `mv`, `rm` and `ops`: changes to messages, made locally and then on
+//! `catmail mark`, `mv`, `archive`, `rm` and `ops`: changes to messages, made locally and then on
 //! the server at once, like `catmail send`. What can't be made on the server waits in
 //! the queue for the next `catmail sync` or `catmail ops flush`.
 
@@ -39,6 +39,13 @@ pub(crate) struct Move {
     /// Folder name (e.g. Archive), in the messages' account
     #[arg(long)]
     to: String,
+}
+
+#[derive(Args)]
+pub(crate) struct Archive {
+    /// Message ids, as shown by `catmail ls`
+    #[arg(required = true)]
+    ids: Vec<i64>,
 }
 
 #[derive(Args)]
@@ -98,6 +105,11 @@ pub(crate) async fn move_messages(client: &MailClient, args: Move, json: bool) -
         client.move_messages(ids.clone(), *folder).await?;
     }
     replay(client, moves.into_iter().map(|(account, ..)| account), json).await
+}
+
+pub(crate) async fn archive(client: &MailClient, args: Archive, json: bool) -> Result<()> {
+    let accounts = client.archive_messages(message_ids(&args.ids)).await?;
+    replay(client, accounts, json).await
 }
 
 pub(crate) async fn remove(client: &MailClient, args: Remove, json: bool) -> Result<()> {

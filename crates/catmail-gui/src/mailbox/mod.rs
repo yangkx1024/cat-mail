@@ -313,7 +313,7 @@ impl Mailbox {
                 let mut outbox = client.list_outbox(None).await?;
                 let mut loaded = Vec::new();
                 for account in client.list_accounts().await? {
-                    let folders = AccountFolders::new(&client.list_folders(account.id).await?);
+                    let folders = AccountFolders::new(client.list_folders(account.id).await?);
                     let drafts = client.count_drafts(account.id).await?;
                     let (own, rest) = outbox.into_iter().partition(|e| e.account_id == account.id);
                     outbox = rest;

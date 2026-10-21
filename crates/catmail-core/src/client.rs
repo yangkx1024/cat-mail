@@ -465,9 +465,25 @@ impl MailClient {
             .await
     }
 
+    /// Moves the messages to their account's Archive folder ([`special_folder`]), those
+    /// not in an Archive folder already ([`archive_folder`] tells which). Fails, changing
+    /// nothing, if an account whose message would move has none. The server follows as
+    /// with [`set_flags`](Self::set_flags).
+    ///
+    /// [`special_folder`]: catmail_types::special_folder
+    /// [`archive_folder`]: catmail_types::archive_folder
+    pub async fn archive_messages(&self, messages: Vec<MessageId>) -> Result<Vec<AccountId>> {
+        self.rt
+            .run(ops::archive_messages(self.engine.clone(), messages))
+            .await
+    }
+
     /// Moves the messages to their account's Trash, or deletes them for good if they
     /// are in Trash already or `permanently` is set. An account without a Trash folder
-    /// only allows the latter. The server follows as with [`set_flags`](Self::set_flags).
+    /// only allows the latter. [`DeleteOutcome`] tells beforehand which it is, to ask the
+    /// user first. The server follows as with [`set_flags`](Self::set_flags).
+    ///
+    /// [`DeleteOutcome`]: catmail_types::DeleteOutcome
     pub async fn delete_messages(
         &self,
         messages: Vec<MessageId>,

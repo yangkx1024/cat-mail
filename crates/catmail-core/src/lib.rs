@@ -9,6 +9,7 @@ mod body;
 mod client;
 mod config;
 mod connection;
+pub mod display;
 mod draft_sync;
 mod drafts;
 mod engine;

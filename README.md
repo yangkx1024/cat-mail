@@ -87,6 +87,7 @@ catmail outbox                    # 还没发完的邮件；outbox flush / retry
 # 标记、移动、删除：先改本地，再当场同步到服务器
 catmail mark 42 43 --read --flag  # 也有 --unread / --unflag
 catmail mv 42 --to Archive
+catmail archive 42                # 移到账户的归档文件夹；已在其中则不动
 catmail rm 42                     # 移到"已删除"；已在其中或加 --permanent 则永久删除
 catmail ops                       # 还没同步到服务器的改动，以及被拒绝的；ops flush / dismiss
 ```
@@ -101,7 +102,7 @@ catmail ops                       # 还没同步到服务器的改动，以及�
 中途中断（断网、Ctrl-C）后再次运行会从断点继续。
 
 标记、移动、删除离线也能用：改动立刻反映在本地（移动的邮件马上出现在目标文件夹，已下载的
-正文随之保留），同时记入队列，`catmail mark` / `mv` / `rm` 随即把它同步到服务器；连不上时
+正文随之保留），同时记入队列，`catmail mark` / `mv` / `archive` / `rm` 随即把它同步到服务器；连不上时
 改动保留，由下一次 `catmail sync` 或 `catmail ops flush` 完成（这时命令以非零状态退出）。
 服务器拒绝的改动会在本地撤销，`catmail ops` 可以看到原因。文件夹在服务器上被重建
 （UIDVALIDITY 改变）时，还没完成的改动作废，以服务器为准。回复发出后原信标记为"已回复"。

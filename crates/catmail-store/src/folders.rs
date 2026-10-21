@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use catmail_types::{AccountId, Folder, FolderId, FolderRole};
+use catmail_types::{AccountId, Folder, FolderId, FolderRole, special_folder};
 use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
 use crate::Result;
@@ -117,22 +117,22 @@ impl<'c> Folders<'c> {
             .optional()?)
     }
 
-    /// The account's selectable folder with `role` (id and server name), if it has one.
+    /// The account's folder for `role` (id and server name), if it has one: the one
+    /// [`special_folder`] picks, as frontends do from the folder list.
     pub fn by_role(
         &self,
         account: AccountId,
         role: FolderRole,
     ) -> Result<Option<(FolderId, String)>> {
+        let Some(id) = special_folder(&self.list(account)?, role).map(|f| f.id) else {
+            return Ok(None);
+        };
         Ok(self
             .conn
-            .prepare_cached(
-                "SELECT id, remote_name FROM folders
-                 WHERE account_id = ?1 AND role = ?2 AND selectable ORDER BY id LIMIT 1",
-            )?
-            .query_row(params![account.0, role.as_str()], |r| {
-                Ok((FolderId(r.get(0)?), r.get(1)?))
-            })
-            .optional()?)
+            .prepare_cached("SELECT remote_name FROM folders WHERE id = ?1")?
+            .query_row([id.0], |r| r.get(0))
+            .optional()?
+            .map(|remote_name| (id, remote_name)))
     }
 
     /// INBOX first, then by id.

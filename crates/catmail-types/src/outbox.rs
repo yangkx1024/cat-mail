@@ -38,6 +38,53 @@ impl OutboxStatus {
             Self::Failed => "failed",
         }
     }
+
+    /// The message went out; at most saving it to Sent is left.
+    pub fn went_out(self) -> bool {
+        matches!(self, Self::Accepted | Self::Done)
+    }
+
+    /// Nothing more happens on its own: the user has to choose what to do.
+    pub fn needs_user(self) -> bool {
+        matches!(self, Self::Unknown | Self::Failed)
+    }
+
+    /// What `MailClient::retry_outbox` makes of an entry in this state, if it applies:
+    /// another attempt now, of the send if it never went out (or may not have), of saving
+    /// to Sent if it did.
+    pub fn retry_to(self) -> Option<Self> {
+        match self {
+            Self::Failed | Self::Unknown => Some(Self::Queued),
+            Self::Queued | Self::Accepted => Some(self),
+            Self::Sending | Self::Done => None,
+        }
+    }
+
+    /// Whether [`retry_to`](Self::retry_to) applies.
+    pub fn can_retry(self) -> bool {
+        self.retry_to().is_some()
+    }
+
+    /// Whether retrying may deliver the message twice: the first attempt may have
+    /// arrived. Worth asking the user first.
+    pub fn retry_may_duplicate(self) -> bool {
+        self == Self::Unknown
+    }
+
+    /// Whether `MailClient::mark_outbox_sent` applies: the user found it was delivered.
+    pub fn can_mark_sent(self) -> bool {
+        self == Self::Unknown
+    }
+
+    /// Whether `MailClient::cancel_outbox` applies: one that never went out becomes a draft
+    /// again; for one that did ([`went_out`](Self::went_out)), this gives up saving it
+    /// to Sent.
+    pub fn can_cancel(self) -> bool {
+        matches!(
+            self,
+            Self::Queued | Self::Failed | Self::Unknown | Self::Accepted
+        )
+    }
 }
 
 impl fmt::Display for OutboxStatus {
@@ -83,4 +130,21 @@ pub struct OutboxEntry {
     pub last_error: Option<String>,
     /// Unix timestamp, seconds.
     pub created_at: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retrying_sends_again_unless_it_went_out() {
+        use OutboxStatus::*;
+        assert_eq!(Failed.retry_to(), Some(Queued));
+        assert_eq!(Unknown.retry_to(), Some(Queued));
+        assert_eq!(Queued.retry_to(), Some(Queued));
+        // Sent already: only saving to Sent is tried again.
+        assert_eq!(Accepted.retry_to(), Some(Accepted));
+        assert_eq!(Sending.retry_to(), None);
+        assert_eq!(Done.retry_to(), None);
+    }
 }

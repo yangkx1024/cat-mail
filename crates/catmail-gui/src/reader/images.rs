@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use anyhow::anyhow;
-use catmail_core::html::content_id_from_url;
 use catmail_core::{Attachment, Message};
 use gpui_kit::{Image, ImageCacheError, ImageFormat, ImageSource, SharedUri};
 
@@ -34,27 +33,26 @@ pub(super) fn raster_format(mime_type: &str) -> Option<ImageFormat> {
 pub(super) struct Images {
     /// Decoded inline parts, by Content-ID.
     pub(super) inline: HashMap<String, Arc<Image>>,
-    /// Every other URL, resolved once: the decoded `data:` image, or `None` for an image
-    /// that isn't shown. The text view asks for every image on every frame.
+    /// Every URL, resolved once: the inline part or decoded `data:` image, or `None` for
+    /// one that isn't shown. The text view asks for every image on every frame.
     pub(super) by_url: Mutex<HashMap<SharedUri, Option<Arc<Image>>>>,
 }
 
 impl Images {
+    /// The image at `url`, if the reader shows it ([`html::Carried`]).
     pub(super) fn source(&self, url: &SharedUri) -> ImageSource {
-        let image = match content_id_from_url(url) {
-            Some(content_id) => self.inline.get(&content_id).cloned(),
-            None => {
-                let mut by_url = self.by_url.lock().unwrap_or_else(|e| e.into_inner());
-                by_url
-                    .entry(url.clone())
-                    .or_insert_with(|| {
-                        let (mime_type, bytes) = html::embedded_image(url)?;
-                        let format = raster_format(&mime_type)?;
-                        Some(Arc::new(Image::from_bytes(format, bytes)))
-                    })
-                    .clone()
-            }
-        };
+        let mut by_url = self.by_url.lock().unwrap_or_else(|e| e.into_inner());
+        let image = by_url
+            .entry(url.clone())
+            .or_insert_with(|| match html::Carried::of(url)? {
+                html::Carried::Inline(content_id) => self.inline.get(&content_id).cloned(),
+                html::Carried::Data(data) => {
+                    let (mime_type, bytes) = html::decode(&data)?;
+                    let format = raster_format(&mime_type)?;
+                    Some(Arc::new(Image::from_bytes(format, bytes)))
+                }
+            })
+            .clone();
         match image {
             Some(image) => ImageSource::Image(image),
             None => not_shown(),

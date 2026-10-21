@@ -1,11 +1,10 @@
 //! Saving, sending, closing and discarding, one engine call at a time: an older save
 //! never lands after what was sent.
 
-use gpui_kit::component::WindowExt as _;
-use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::{App, Context, SharedString, Task, Window};
 
 use super::*;
+use crate::layout;
 
 impl Composer {
     pub(super) fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -95,20 +94,17 @@ impl Composer {
 
     pub(super) fn discard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let this = cx.entity().downgrade();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let this = this.clone();
-            alert
-                .title("Discard this draft?")
-                .description("It is deleted here and from the server's Drafts folder.")
-                .confirm()
-                .ok_text("Discard")
-                .ok_variant(ButtonVariant::Danger)
-                .on_ok(move |_, window, cx| {
-                    this.update(cx, |this, cx| this.finish(Finish::Discard, window, cx))
-                        .ok();
-                    true
-                })
-        });
+        layout::confirm_danger(
+            "Discard this draft?",
+            "It is deleted here and from the server's Drafts folder.",
+            "Discard",
+            window,
+            cx,
+            move |window, cx| {
+                this.update(cx, |this, cx| this.finish(Finish::Discard, window, cx))
+                    .ok();
+            },
+        );
     }
 
     fn finish(&mut self, how: Finish, window: &mut Window, cx: &mut Context<Self>) {

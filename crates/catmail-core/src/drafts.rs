@@ -15,7 +15,7 @@ use catmail_types::{
 use uuid::Uuid;
 
 use crate::engine::{Engine, blocking, now};
-use crate::{Error, Result, body};
+use crate::{Error, Result, body, display};
 
 pub(crate) async fn create(
     engine: &Arc<Engine>,
@@ -509,20 +509,6 @@ fn text_of(message: &Message) -> &str {
         .trim_end()
 }
 
-/// The message's date in local time, formatted; empty if it has none.
-fn local_date(message: &Message, format: &str) -> String {
-    message
-        .summary
-        .date
-        .and_then(|t| jiff::Timestamp::from_second(t).ok())
-        .map(|t| {
-            t.to_zoned(jiff::tz::TimeZone::system())
-                .strftime(format)
-                .to_string()
-        })
-        .unwrap_or_default()
-}
-
 /// An empty line to write on, then the attribution and the original text, `> `-quoted.
 fn quote(message: &Message) -> String {
     let text = text_of(message);
@@ -531,7 +517,7 @@ fn quote(message: &Message) -> String {
         .from
         .first()
         .map_or_else(|| "someone".into(), Address::to_string);
-    let date = local_date(message, "On %Y-%m-%d %H:%M, ");
+    let date = display::local(message.summary.date, "On %Y-%m-%d %H:%M, ");
     let mut out = format!("\n\n{date}{sender} wrote:\n");
     for line in text.lines() {
         if line.is_empty() {
@@ -549,20 +535,14 @@ fn quote(message: &Message) -> String {
 /// text as they were, unquoted.
 fn forward_content(message: &Message) -> DraftContent {
     let subject = message.summary.subject.as_deref().unwrap_or_default();
-    let addresses = |list: &[Address]| {
-        list.iter()
-            .map(Address::to_string)
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let date = local_date(message, "%Y-%m-%d %H:%M");
+    let date = display::date(message.summary.date);
     let mut text = String::from("\n\n---------- Forwarded message ---------\n");
     for (name, value) in [
-        ("From", addresses(&message.summary.from)),
+        ("From", display::addresses(&message.summary.from)),
         ("Date", date),
         ("Subject", subject.trim().to_owned()),
-        ("To", addresses(&message.to)),
-        ("Cc", addresses(&message.cc)),
+        ("To", display::addresses(&message.to)),
+        ("Cc", display::addresses(&message.cc)),
     ] {
         if !value.is_empty() {
             text.push_str(&format!("{name}: {value}\n"));

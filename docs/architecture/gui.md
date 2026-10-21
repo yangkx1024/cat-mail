@@ -21,8 +21,8 @@ src/
   main.rs            启动：设置、主题、快捷键、主窗口
   actions.rs         Action、key context 与快捷键
   assets.rs          资源：Heroicons，及替换 gpui-kit 组件图标
-  format.rs html.rs  日期、地址、邮件主题的显示格式；HTML 渲染策略
-  layout.rs          共用的工具栏、右栏页面、名称与值的行、附件块
+  format.rs html.rs  时刻与日期分组（其余显示格式来自 `catmail_core::display`）；HTML 渲染策略
+  layout.rs          共用的工具栏、右栏页面、名称与值的行、附件块、危险操作的确认框
   mailbox/           主窗口
     mod.rs           状态（账户、Place）、引擎事件、读侧栏、搜索、渲染与 Action 分派
     commands.rs      对邮件的命令（标记、归档、删除、移动）、写信、同步、被拒改动的通知
@@ -49,7 +49,8 @@ src/
 ## 侧栏
 
 每个账户先列有角色的文件夹，顺序固定（Inbox、Drafts、Outbox、Sent、Archive、All Mail、Flagged、
-Junk、Trash），名字用角色名而不是服务器上的名字（`已发送` 显示为 Sent）；不论嵌套在哪（Dovecot 的
+Junk、Trash），名字用角色名（`FolderRole::label`）而不是服务器上的名字（`已发送` 显示为 Sent）；
+图标和顺序在 `folders::RoleInfo` 一张表里；不论嵌套在哪（Dovecot 的
 `INBOX.Sent`）都提到这一层，原父级没有其他内容时去掉（`folders::AccountFolders`）。其余文件夹按
 服务器的层级跟在后面。
 
@@ -91,7 +92,10 @@ macOS、Windows 用系统字体，不受影响。
 - **归档 / 删除 / 移动后打开下一封**：命令先让列表记下要移走的邮件（`expect_removal(id)`），刷新后
   它仍是选中的那封却不在了，就选中同一位置的那一行；服务器那边消失的邮件仍然只清空读信区。标记按邮件
   身份认：用户换了选中，标记即作废，之后别的邮件消失不会被当成"移走后打开下一封"。
-- 已在 Trash（或账户没有 Trash）时删除是永久的，先用 AlertDialog 确认；其余可逆的操作不确认。
+- 已在 Trash（或账户没有 Trash）时删除是永久的，先用 AlertDialog 确认（`layout::confirm_danger`）；
+  其余可逆的操作不确认。是否永久由 `DeleteOutcome` 判断，归档目标由 `archive_folder` 判断，都基于
+  账户的文件夹列表而不是侧栏的顺序：有两个 Trash 时，侧栏先列的不一定是引擎移入的那个，而在任一
+  Trash 里删除都是永久的。
 - 服务器拒绝的改动（`PendingOpsChanged` 后 `list_pending` 里非 pending 的）以通知说明一次，随即
   `dismiss_pending`，避免重复提示。
 
@@ -122,7 +126,8 @@ macOS、Windows 用系统字体，不受影响。
 
 ## 发件箱
 
-客户端开启 `send_in_background`。条目的状态决定右栏给出的选择：排队中可以"Send now"
+客户端开启 `send_in_background`。条目的状态决定右栏给出的选择（哪些可用由 `OutboxStatus::can_*`
+判断，按钮的措辞和先后在 `outbox.rs`）：排队中可以"Send now"
 （`flush_outbox`）或"Back to drafts"（`cancel_outbox`）；被拒绝的可以改回草稿或重试；已发出但
 没存进 Sent 的可以重试保存或放弃；**发出后未确认（unknown）的从不自动重发**，由用户选"Mark as sent"、
 "Send again"（确认可能重复）或"Back to drafts"。
@@ -183,7 +188,8 @@ INBOX，所以打开一个文件夹时同步它（`MailClient::sync_folder`，�
   - 其他（远程、`file:`、相对路径）返回立即失败的 `ImageSource::Custom`，不发任何请求；
   - **SVG 一律不显示**：GPUI 用默认选项把 SVG 交给 usvg，它会把嵌套的 `<image href>` 当本地路径直接
     读文件，绕过 `image_source`，邮件就能显示本地图片，或读 `/dev/zero` 耗尽内存。
-  - 每个 URL 只解析一次后缓存（视图每帧都会问）。"远程图片未加载"的提示由
+  - 显示与否只有一条规则（`html::Carried::of`：内嵌部分或 `data:` 图片），`image_source` 和"远程图片
+    未加载"的提示都用它。`data:` 图片只解码一次后缓存（视图每帧都会问）。"远程图片未加载"的提示由
     `catmail_core::html::image_sources` 判断，复用清洗用的同一个 ammonia 配置按解析结果列出
     `img src`，在后台线程运行。内嵌图片在正文显示后再逐个取。
 - **链接。** 只把 `http` / `https` / `mailto` 交给系统打开；其他链接点了无反应（gpui-kit 默认会

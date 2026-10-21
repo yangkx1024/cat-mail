@@ -1,4 +1,5 @@
-//! Terminal output: escaping text from strangers, aligned tables, dates and sizes.
+//! Terminal output: escaping text from strangers, aligned tables. How dates, sizes and
+//! names read is `catmail_core::display`, shared with the GUI.
 
 use std::borrow::Cow;
 
@@ -98,33 +99,6 @@ pub(crate) fn printable_text(s: &str) -> String {
     out
 }
 
-/// `2026-10-17 09:30` in the local time zone.
-pub(crate) fn date(timestamp: Option<i64>) -> String {
-    timestamp
-        .and_then(|t| jiff::Timestamp::from_second(t).ok())
-        .map(|t| {
-            t.to_zoned(jiff::tz::TimeZone::system())
-                .strftime("%Y-%m-%d %H:%M")
-                .to_string()
-        })
-        .unwrap_or_default()
-}
-
-/// `512 B`, `1.5 KB`, `12.3 MB` (powers of 1024).
-pub(crate) fn size(bytes: u64) -> String {
-    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
-    if bytes < 1024 {
-        return format!("{bytes} B");
-    }
-    let mut value = bytes as f64 / 1024.0;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    format!("{value:.1} {}", UNITS[unit])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,12 +128,5 @@ mod tests {
             "a\nb\tc\n\\u{1b}[31m"
         );
         assert_eq!(printable_text("x\ry"), "x\\u{d}y");
-    }
-
-    #[test]
-    fn sizes() {
-        assert_eq!(size(0), "0 B");
-        assert_eq!(size(1536), "1.5 KB");
-        assert_eq!(size(3 * 1024 * 1024), "3.0 MB");
     }
 }

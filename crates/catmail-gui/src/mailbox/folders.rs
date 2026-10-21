@@ -1,24 +1,47 @@
 //! The sidebar's folder hierarchy, built from the flat list the engine stores.
 
-use catmail_core::{Folder, FolderId, FolderRole};
+use catmail_core::{DeleteOutcome, Folder, FolderId, FolderRole, archive_folder, special_folder};
 
-/// The order of the folders with a role, which come first under an account whatever
-/// their names and nesting. Drafts is not among them: the sidebar's Drafts lists the
+use crate::assets::Hero;
+
+/// What the sidebar adds to a role ([`FolderRole::label`] names it): its icon, and its
+/// place among the folders with a role, which come first under an account in this order
+/// whatever their names and nesting. Drafts has none: the sidebar's Drafts lists the
 /// drafts kept here, of which the server's Drafts folder holds copies.
-const ROLE_ORDER: [FolderRole; 7] = [
-    FolderRole::Inbox,
-    FolderRole::Sent,
-    FolderRole::Archive,
-    FolderRole::All,
-    FolderRole::Flagged,
-    FolderRole::Junk,
-    FolderRole::Trash,
-];
+#[derive(Debug, Clone, Copy)]
+pub struct RoleInfo {
+    pub icon: Hero,
+    pub order: Option<u8>,
+}
+
+impl RoleInfo {
+    pub fn of(role: FolderRole) -> Self {
+        let (icon, order) = match role {
+            FolderRole::Inbox => (Hero::Inbox, Some(0)),
+            FolderRole::Sent => (Hero::PaperAirplane, Some(1)),
+            FolderRole::Archive => (Hero::ArchiveBox, Some(2)),
+            FolderRole::All => (Hero::Envelope, Some(3)),
+            FolderRole::Flagged => (Hero::Flag, Some(4)),
+            FolderRole::Junk => (Hero::ShieldExclamation, Some(5)),
+            FolderRole::Trash => (Hero::Trash, Some(6)),
+            FolderRole::Drafts => (Hero::DocumentText, None),
+        };
+        Self { icon, order }
+    }
+
+    /// The icon of a folder with `role`, or of an ordinary one.
+    pub fn icon(role: Option<FolderRole>) -> Hero {
+        role.map_or(Hero::Folder, |role| Self::of(role).icon)
+    }
+}
 
 /// An account's folders as the sidebar shows them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AccountFolders {
-    /// Folders with a role, in [`ROLE_ORDER`], each with its own subfolders.
+    /// The account's folders as the engine lists them, which its rules about special
+    /// folders apply to.
+    folders: Vec<Folder>,
+    /// Folders with a role, in [`RoleInfo::order`], each with its own subfolders.
     pub roles: Vec<FolderNode>,
     /// The rest, as nested on the server.
     pub others: Vec<FolderNode>,
@@ -27,11 +50,11 @@ pub struct AccountFolders {
 }
 
 impl AccountFolders {
-    pub fn new(folders: &[Folder]) -> Self {
-        let mut others = folder_tree(folders);
+    pub fn new(folders: Vec<Folder>) -> Self {
+        let mut others = folder_tree(&folders);
         let mut roles = Vec::new();
         take_roles(&mut others, &mut roles);
-        roles.sort_by_key(|node| ROLE_ORDER.iter().position(|r| Some(*r) == node.role()));
+        roles.sort_by_key(|node| node.role().and_then(|role| RoleInfo::of(role).order));
         // The Drafts folder itself is replaced by the drafts kept here; its subfolders
         // (rare) are ordinary folders.
         let mut kept = Vec::new();
@@ -51,10 +74,11 @@ impl AccountFolders {
             {
                 labelled.push(role);
                 named_for_role.push(folder.id);
-                node.label = role_label(role).into();
+                node.label = role.label().into();
             }
         }
         Self {
+            folders,
             roles: kept,
             others,
             named_for_role,
@@ -85,7 +109,7 @@ impl AccountFolders {
             .map(|folder| {
                 let path = match (folder.role, folder.delimiter) {
                     (Some(role), _) if self.named_for_role.contains(&folder.id) => {
-                        role_label(role).into()
+                        role.label().into()
                     }
                     (_, Some(delimiter)) => {
                         folder.name.split(delimiter).collect::<Vec<_>>().join(" / ")
@@ -97,31 +121,25 @@ impl AccountFolders {
             .collect()
     }
 
-    /// The selectable folder with this role, if the account has one.
+    /// The folder the engine uses for this role, if the account has one.
     pub fn with_role(&self, role: FolderRole) -> Option<&Folder> {
-        self.nodes()
-            .filter_map(FolderNode::selectable)
-            .find(|f| f.role == Some(role))
+        special_folder(&self.folders, role)
+    }
+
+    /// What Delete does to a message in `folder`.
+    pub fn delete_outcome(&self, folder: FolderId) -> DeleteOutcome {
+        DeleteOutcome::of(&self.folders, folder)
+    }
+
+    /// Where Archive moves a message in `folder`, if anywhere.
+    pub fn archive_folder(&self, folder: FolderId) -> Option<FolderId> {
+        archive_folder(&self.folders, folder)
     }
 
     /// The node of the selectable folder.
     pub fn find(&self, id: FolderId) -> Option<&FolderNode> {
         self.nodes()
             .find(|node| node.selectable().is_some_and(|f| f.id == id))
-    }
-}
-
-/// The names the sidebar gives folders with a role, whatever the server calls them.
-fn role_label(role: FolderRole) -> &'static str {
-    match role {
-        FolderRole::Inbox => "Inbox",
-        FolderRole::Sent => "Sent",
-        FolderRole::Drafts => "Drafts",
-        FolderRole::Trash => "Trash",
-        FolderRole::Junk => "Junk",
-        FolderRole::Archive => "Archive",
-        FolderRole::All => "All Mail",
-        FolderRole::Flagged => "Flagged",
     }
 }
 
@@ -162,10 +180,10 @@ impl FolderNode {
         self.folder.as_ref().and_then(|f| f.role)
     }
 
-    /// The unread count worth showing: unread mail in Sent, Junk or Trash is no news.
+    /// The unread count worth showing ([`FolderRole::counts_unread`]).
     pub fn unread(&self) -> u32 {
         match self.role() {
-            Some(FolderRole::Sent | FolderRole::Junk | FolderRole::Trash) => 0,
+            Some(role) if !role.counts_unread() => 0,
             _ => self.selectable().map_or(0, |f| f.unread_count),
         }
     }
@@ -303,7 +321,7 @@ mod tests {
 
     #[test]
     fn role_folders_come_first_wherever_they_are() {
-        let account = AccountFolders::new(&[
+        let account = AccountFolders::new(vec![
             with_role(1, "INBOX", FolderRole::Inbox),
             with_role(2, "INBOX.Trash", FolderRole::Trash),
             folder(3, "INBOX.Projects", Some('.')),
@@ -350,7 +368,7 @@ mod tests {
     fn paths_tell_folders_of_the_same_name_apart() {
         let mut lists = folder(4, "Lists", Some('.'));
         lists.selectable = false;
-        let account = AccountFolders::new(&[
+        let account = AccountFolders::new(vec![
             with_role(1, "INBOX", FolderRole::Inbox),
             folder(2, "Clients.Invoices", Some('.')),
             folder(3, "Personal.Invoices", Some('.')),

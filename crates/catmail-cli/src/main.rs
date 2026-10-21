@@ -13,9 +13,9 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use catmail_core::{
-    Account, AccountId, Address, AttachmentId, AuthKind, Config, DEFAULT_GC_INTERVAL, DraftId,
-    ExposeSecret, Flags, Folder, FolderId, MailClient, Message, MessageId, MessageSummary,
-    NewAccount, SearchQuery, SecretString, Security, ServerConfig, SyncReport, SyncSchedule,
+    Account, AccountId, AttachmentId, AuthKind, Config, DEFAULT_GC_INTERVAL, DraftId, ExposeSecret,
+    Flags, Folder, FolderId, MailClient, Message, MessageId, MessageSummary, NewAccount,
+    SearchQuery, SecretString, Security, ServerConfig, SyncReport, SyncSchedule, display,
     safe_filename,
 };
 use clap::{Args, Parser, Subcommand};
@@ -65,6 +65,8 @@ enum Command {
     /// Move messages to another folder
     #[command(name = "mv")]
     Move(ops::Move),
+    /// Move messages to their account's Archive folder
+    Archive(ops::Archive),
     /// Move messages to Trash, or delete them for good
     #[command(name = "rm")]
     Remove(ops::Remove),
@@ -258,6 +260,7 @@ async fn run() -> Result<()> {
         Command::Search(args) => search(&client, args, cli.json).await,
         Command::Mark(args) => ops::mark(&client, args, cli.json).await,
         Command::Move(args) => ops::move_messages(&client, args, cli.json).await,
+        Command::Archive(args) => ops::archive(&client, args, cli.json).await,
         Command::Remove(args) => ops::remove(&client, args, cli.json).await,
         Command::Ops { command } => {
             let command = command.unwrap_or(ops::OpsCommand::List);
@@ -492,11 +495,11 @@ fn print_message(message: &Message, html: bool) {
             println!("{name:<9}{}", printable(value));
         }
     };
-    header("From:", &addresses(&m.from));
-    header("To:", &addresses(&message.to));
-    header("Cc:", &addresses(&message.cc));
-    header("Date:", &output::date(m.date));
-    header("Subject:", m.subject.as_deref().unwrap_or("(no subject)"));
+    header("From:", &display::addresses(&m.from));
+    header("To:", &display::addresses(&message.to));
+    header("Cc:", &display::addresses(&message.cc));
+    header("Date:", &display::date(m.date));
+    header("Subject:", display::subject(m.subject.as_deref()));
     println!();
     let Some(body) = &message.body else {
         println!("(body not downloaded; run without --offline)");
@@ -522,8 +525,8 @@ fn print_message(message: &Message, html: bool) {
                     a.filename.clone().unwrap_or_else(|| "(unnamed)".into()),
                     a.mime_type.clone(),
                     match a.size {
-                        Some(size) if a.downloaded => output::size(size.into()),
-                        Some(size) => format!("~{}", output::size(size.into())),
+                        Some(size) if a.downloaded => display::size(size.into()),
+                        Some(size) => format!("~{}", display::size(size.into())),
                         None => String::new(),
                     },
                 ]
@@ -531,13 +534,6 @@ fn print_message(message: &Message, html: bool) {
             .collect();
         print_table(&["ATTACHMENT", "NAME", "TYPE", "SIZE"], rows);
     }
-}
-
-fn addresses(list: &[Address]) -> String {
-    list.iter()
-        .map(Address::to_string)
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 async fn save_attachment(client: &MailClient, args: SaveAttachment) -> Result<()> {
@@ -608,7 +604,7 @@ async fn gc(client: &MailClient, json: bool) -> Result<()> {
         println!(
             "Removed {} unreferenced files ({}).",
             report.removed,
-            output::size(report.bytes)
+            display::size(report.bytes)
         );
     }
     Ok(())
@@ -714,18 +710,13 @@ fn print_message_table(messages: &[MessageSummary], folders: Option<&HashMap<Fol
                 ' '
             });
             marks.push(if m.has_attachments { '@' } else { ' ' });
-            let from = m
-                .from
-                .first()
-                .map(|a| a.name.clone().unwrap_or_else(|| a.email.clone()))
-                .unwrap_or_default();
-            let mut row = vec![m.id.to_string(), marks, output::date(m.date)];
+            let mut row = vec![m.id.to_string(), marks, display::date(m.date)];
             if let Some(folders) = folders {
                 let name = folders.get(&m.folder_id).cloned().unwrap_or_default();
                 row.push(truncate(&name, 16));
             }
-            row.push(truncate(&from, 24));
-            row.push(m.subject.clone().unwrap_or_else(|| "(no subject)".into()));
+            row.push(truncate(display::sender(&m.from), 24));
+            row.push(display::subject(m.subject.as_deref()).to_owned());
             row
         })
         .collect();
