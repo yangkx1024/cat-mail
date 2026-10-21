@@ -128,7 +128,10 @@ impl Env {
     #[allow(dead_code)]
     pub async fn list(&self, name: &str) -> Vec<MessageSummary> {
         let folder = self.folder(name).await;
-        self.client.list_messages(folder.id, 100, 0).await.unwrap()
+        self.client
+            .list_messages(folder.id, 100, None)
+            .await
+            .unwrap()
     }
 
     #[allow(dead_code)]
@@ -146,7 +149,7 @@ impl Env {
     pub async fn messages(&self, name: &str) -> Vec<(String, Flags)> {
         let folder = self.folder(name).await;
         self.client
-            .list_messages(folder.id, 10_000, 0)
+            .list_messages(folder.id, 10_000, None)
             .await
             .unwrap()
             .into_iter()

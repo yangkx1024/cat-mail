@@ -121,7 +121,7 @@ async fn syncs_against_dovecot() {
     let inbox = find("INBOX");
     assert_eq!((inbox.unread_count, inbox.total_count), (5, 6));
 
-    let messages = client.list_messages(inbox.id, 10, 0).await.unwrap();
+    let messages = client.list_messages(inbox.id, 10, None).await.unwrap();
     let rows: Vec<_> = messages
         .iter()
         .map(|m| {
@@ -190,7 +190,7 @@ async fn syncs_against_dovecot() {
     let report = client.sync_account(account).await.unwrap();
     assert_eq!(added(&report, &run), (1, 1, 1));
     let folder = client.find_folder(account, &run).await.unwrap().unwrap();
-    let messages = client.list_messages(folder.id, 10, 0).await.unwrap();
+    let messages = client.list_messages(folder.id, 10, None).await.unwrap();
     let rows: Vec<_> = messages
         .iter()
         .map(|m| (m.subject.clone().unwrap(), m.flags))
@@ -208,7 +208,7 @@ async fn syncs_against_dovecot() {
     let video = vec![7u8; 3 * 1024 * 1024];
     fs::write(folder_dir.join("new").join("4.d"), large_message(&video)).unwrap();
     client.sync_account(account).await.unwrap();
-    let big = client.list_messages(folder.id, 10, 0).await.unwrap()[0].clone();
+    let big = client.list_messages(folder.id, 10, None).await.unwrap()[0].clone();
     assert_eq!(big.subject.as_deref(), Some("large"));
     let message = client.download_message(big.id).await.unwrap();
     let body = message.body.unwrap();
@@ -233,7 +233,7 @@ async fn check_changes(client: &MailClient, account: AccountId, maildir: &Path, 
     client.sync_account(account).await.unwrap();
     let folder = client.find_folder(account, run).await.unwrap().unwrap();
     let moved_to = client.find_folder(account, &target).await.unwrap().unwrap();
-    let messages = client.list_messages(folder.id, 10, 0).await.unwrap();
+    let messages = client.list_messages(folder.id, 10, None).await.unwrap();
     let id = |subject: &str| {
         messages
             .iter()
@@ -266,7 +266,7 @@ async fn check_changes(client: &MailClient, account: AccountId, maildir: &Path, 
     // Dovecot said where the message went, so the sync finds it already in place.
     let report = client.sync_account(account).await.unwrap();
     assert_eq!(added(&report, &target), (0, 0, 0));
-    let moved = client.list_messages(moved_to.id, 10, 0).await.unwrap();
+    let moved = client.list_messages(moved_to.id, 10, None).await.unwrap();
     assert_eq!(
         (moved.len(), moved[0].id, moved[0].flags),
         (1, third, Flags::FLAGGED)
@@ -496,7 +496,7 @@ async fn new_mail_is_pushed_by_dovecot() {
     // Dovecot notices at once with inotify, else within mailbox_idle_check_interval (30 s).
     let arrived = tokio::time::timeout(Duration::from_secs(45), async {
         loop {
-            let messages = client.list_messages(inbox.id, 100, 0).await.unwrap();
+            let messages = client.list_messages(inbox.id, 100, None).await.unwrap();
             if messages
                 .iter()
                 .any(|m| m.subject.as_deref() == Some(&subject))

@@ -20,8 +20,21 @@ pub struct FakeMessage {
     pub modseq: u64,
     /// The raw message. BODYSTRUCTURE and body sections are derived from it.
     pub raw: Vec<u8>,
-    /// IMAP date-time, e.g. `17-Oct-2026 09:30:00 +0800`.
+    /// IMAP date-time, e.g. `17-Oct-2026 09:30:01 +0800`.
     pub internal_date: String,
+}
+
+/// When a message arrived, on 17 Oct 2026 from 09:30: a second apart in UID order, so
+/// newest first is the reverse of UID order, as it is with real mail.
+fn time_of(uid: u32) -> String {
+    let seconds = 9 * 3600 + 30 * 60 + uid;
+    assert!(seconds < 24 * 3600, "UID {uid} would arrive the next day");
+    format!(
+        "{:02}:{:02}:{:02}",
+        seconds / 3600,
+        seconds / 60 % 60,
+        seconds % 60
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -63,18 +76,19 @@ impl FakeMailbox {
             flags: flags.iter().map(|f| f.to_string()).collect(),
             modseq: self.highest_modseq,
             raw: raw.to_vec(),
-            internal_date: "17-Oct-2026 09:30:00 +0800".into(),
+            internal_date: format!("17-Oct-2026 {} +0800", time_of(uid)),
         });
         uid
     }
 
     /// Appends a simple message with the given subject and returns its UID.
     pub fn append_simple(&mut self, subject: &str) -> u32 {
+        let uid = self.uidnext;
         let raw = format!(
             "From: Alice <alice@example.com>\r\nTo: bob@example.com\r\nSubject: {subject}\r\n\
-             Date: Sat, 17 Oct 2026 09:30:00 +0800\r\nMessage-ID: <{}.{subject}@example.com>\r\n\
+             Date: Sat, 17 Oct 2026 {} +0800\r\nMessage-ID: <{uid}.{subject}@example.com>\r\n\
              \r\nHello\r\n",
-            self.uidnext
+            time_of(uid)
         );
         self.append(raw.as_bytes(), &[])
     }

@@ -3,12 +3,11 @@
 //! under a heading for each day. The list (`ListState`) owns selection, keyboard
 //! navigation and scrolling; the delegate here owns the rows.
 
-use std::collections::HashSet;
 use std::rc::Rc;
 
 use catmail_core::{
-    AccountId, Draft, DraftId, FolderId, MailClient, MessageId, MessageSummary, OutboxEntry,
-    OutboxId, SearchQuery,
+    AccountId, Draft, DraftId, FolderId, MailClient, MessageCursor, MessageId, MessageSummary,
+    OutboxEntry, OutboxId, SearchQuery,
 };
 use gpui_kit::component::list::{ListDelegate, ListEvent, ListItem, ListState};
 use gpui_kit::component::notification::Notification;
@@ -252,26 +251,26 @@ pub fn refresh(
 enum Load {
     /// The first `n` rows, replacing what is shown.
     Replace(u32),
-    /// The next page after what is shown.
-    Append,
+    /// The next page, after the last row shown.
+    After(MessageCursor),
 }
 
 async fn fetch(
     client: &MailClient,
     source: &Source,
     limit: u32,
-    offset: u32,
+    after: Option<MessageCursor>,
 ) -> catmail_core::Result<(Vec<Row>, bool)> {
     Ok(match source {
         Source::Folder(folder) => {
-            let page = client.list_messages(*folder, limit, offset).await?;
+            let page = client.list_messages(*folder, limit, after).await?;
             let more = page.len() == limit as usize;
             (page.into_iter().map(Row::Message).collect(), more)
         }
         Source::Search(text) => {
             let mut query = SearchQuery::new(text.clone());
             query.limit = limit;
-            query.offset = offset;
+            query.after = after;
             let found = client.search(query).await?;
             let more = found.len() == limit as usize;
             (found.into_iter().map(Row::Message).collect(), more)
@@ -300,17 +299,18 @@ fn load(
         cx.notify();
         return;
     };
-    let (limit, offset) = match what {
-        Load::Replace(n) => (n, 0),
-        Load::Append => (PAGE, delegate.rows.len() as u32),
+    let (limit, after) = match what {
+        Load::Replace(n) => (n, None),
+        Load::After(cursor) => (PAGE, Some(cursor)),
     };
+    let append = after.is_some();
     let client = delegate.client.clone();
     let generation = delegate.generation;
     delegate.loading = true;
     // Replacing the task drops (cancels) a load still in flight, which only `show` does:
     // the other callers wait for `loading`.
     delegate._load = cx.spawn_in(window, async move |list, cx| {
-        let result = fetch(&client, &source, limit, offset).await;
+        let result = fetch(&client, &source, limit, after).await;
         list.update_in(cx, |list, window, cx| {
             if list.delegate().generation != generation {
                 return;
@@ -322,15 +322,11 @@ fn load(
             match result {
                 Ok((rows, more)) => {
                     let had_more = std::mem::replace(&mut delegate.has_more, more);
-                    if offset > 0 {
-                        // Rows that came in at the top since the last page push the ones
-                        // shown down into this one; the refresh their event brings puts
-                        // the list in order again.
-                        let shown: HashSet<RowId> = delegate.rows.iter().map(Row::id).collect();
+                    if append {
+                        // The page starts after the last row shown, whatever came or went
+                        // above it since; the refresh such a change brings updates those.
                         let from = delegate.rows.len();
-                        delegate
-                            .rows
-                            .extend(rows.into_iter().filter(|r| !shown.contains(&r.id())));
+                        delegate.rows.extend(rows);
                         delegate.days.extend(&delegate.rows, from);
                     } else if !rows.is_empty() && rows == delegate.rows && more == had_more {
                         // A sync's events often bring nothing this list shows. The
@@ -523,8 +519,11 @@ impl ListDelegate for MessageList {
         }
         // `load` needs the list, which is being updated right now.
         cx.defer_in(window, |list, window, cx| {
-            if !list.delegate().loading {
-                load(list, Load::Append, window, cx);
+            let delegate = list.delegate();
+            // Only folders and search results have more pages, and their rows are messages.
+            let last = delegate.rows.last().and_then(Row::message);
+            if let Some(last) = last.filter(|_| !delegate.loading) {
+                load(list, Load::After(last.cursor()), window, cx);
             }
         });
     }

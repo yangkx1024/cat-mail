@@ -307,7 +307,7 @@ mod tests {
         let (client, account) = synced(&fake, dir.path()).await;
         let inbox = client.find_folder(account, "INBOX").await.unwrap().unwrap();
         let ids: Vec<i64> = client
-            .list_messages(inbox.id, 10, 0)
+            .list_messages(inbox.id, 10, None)
             .await
             .unwrap()
             .iter()
@@ -340,7 +340,11 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("Nowhere"), "{err}");
         assert_eq!(
-            client.list_messages(inbox.id, 10, 0).await.unwrap().len(),
+            client
+                .list_messages(inbox.id, 10, None)
+                .await
+                .unwrap()
+                .len(),
             2
         );
 
@@ -353,7 +357,7 @@ mod tests {
         assert!(err.to_string().contains("catmail ops flush"), "{err}");
         assert!(
             client
-                .list_messages(inbox.id, 10, 0)
+                .list_messages(inbox.id, 10, None)
                 .await
                 .unwrap()
                 .is_empty()

@@ -173,7 +173,11 @@ impl TestMail {
             let account = self.account.unwrap();
             let inbox = self.client.find_folder(account, "inbox").await.unwrap();
             let inbox = inbox.unwrap();
-            let listed = self.client.list_messages(inbox.id, 100, 0).await.unwrap();
+            let listed = self
+                .client
+                .list_messages(inbox.id, 100, None)
+                .await
+                .unwrap();
             let summary = listed
                 .into_iter()
                 .find(|m| m.subject.as_deref() == Some(subject))

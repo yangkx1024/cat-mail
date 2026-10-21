@@ -120,6 +120,25 @@ pub struct MessageSummary {
     pub has_attachments: bool,
 }
 
+impl MessageSummary {
+    /// Where a page ending with this message ends: the next page is what comes after it.
+    pub fn cursor(&self) -> MessageCursor {
+        MessageCursor {
+            date: self.date,
+            id: self.id,
+        }
+    }
+}
+
+/// A place in a message list or search results, which are newest first, ties (equal or
+/// missing dates) by id; messages without a date come last. Unlike a count of rows to
+/// skip, it stays put when messages above it come or go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageCursor {
+    pub date: Option<i64>,
+    pub id: MessageId,
+}
+
 /// A message for reading: the list summary plus the full headers, and the body once it
 /// has been downloaded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

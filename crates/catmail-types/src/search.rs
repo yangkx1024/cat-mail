@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{AccountId, FolderId};
+use crate::{AccountId, FolderId, MessageCursor};
 
 /// A full-text search over subjects, addresses and downloaded bodies.
 ///
@@ -16,7 +16,8 @@ pub struct SearchQuery {
     /// Only this folder.
     pub folder: Option<FolderId>,
     pub limit: u32,
-    pub offset: u32,
+    /// Only the matches after this one; the next page after a page ending with it.
+    pub after: Option<MessageCursor>,
 }
 
 impl SearchQuery {
@@ -26,7 +27,7 @@ impl SearchQuery {
             account: None,
             folder: None,
             limit: 50,
-            offset: 0,
+            after: None,
         }
     }
 }

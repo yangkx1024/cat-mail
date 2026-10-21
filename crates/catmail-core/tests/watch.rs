@@ -48,7 +48,11 @@ impl Env {
         let Some(folder) = self.client.find_folder(self.account, folder).await.unwrap() else {
             return Vec::new();
         };
-        let messages = self.client.list_messages(folder.id, 100, 0).await.unwrap();
+        let messages = self
+            .client
+            .list_messages(folder.id, 100, None)
+            .await
+            .unwrap();
         let mut subjects: Vec<_> = messages
             .into_iter()
             .map(|m| m.subject.unwrap_or_default())
@@ -387,7 +391,12 @@ async fn stops_with_the_client_and_starts_with_it() {
         .unwrap();
     let inbox = client.find_folder(account, "INBOX").await.unwrap().unwrap();
     eventually("three to arrive", async || {
-        client.list_messages(inbox.id, 10, 0).await.unwrap().len() == 3
+        client
+            .list_messages(inbox.id, 10, None)
+            .await
+            .unwrap()
+            .len()
+            == 3
     })
     .await;
 }

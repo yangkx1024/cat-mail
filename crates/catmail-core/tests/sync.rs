@@ -245,7 +245,7 @@ async fn uidvalidity_change_refetches_the_folder() {
     let old_ids: Vec<_> = {
         let folder = env.folder("INBOX").await;
         env.client
-            .list_messages(folder.id, 10, 0)
+            .list_messages(folder.id, 10, None)
             .await
             .unwrap()
             .into_iter()
@@ -267,7 +267,7 @@ async fn uidvalidity_change_refetches_the_folder() {
     let folder = env.folder("INBOX").await;
     let new_ids: Vec<_> = env
         .client
-        .list_messages(folder.id, 10, 0)
+        .list_messages(folder.id, 10, None)
         .await
         .unwrap()
         .into_iter()
@@ -537,7 +537,7 @@ async fn unparsable_bodystructure_does_not_hide_the_message() {
 
     // Unknown until the body is downloaded, which doesn't need the BODYSTRUCTURE.
     let inbox = env.folder("INBOX").await;
-    let list = env.client.list_messages(inbox.id, 10, 0).await.unwrap();
+    let list = env.client.list_messages(inbox.id, 10, None).await.unwrap();
     let two = list
         .iter()
         .find(|m| m.subject.as_deref() == Some("two"))

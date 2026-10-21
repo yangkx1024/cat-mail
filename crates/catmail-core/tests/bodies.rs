@@ -13,17 +13,18 @@ mod common;
 use common::{Env, drain, env_built, eventually, synced_env as env};
 
 impl Env {
-    /// Message ids in INBOX, by UID.
+    /// Message ids in INBOX, by UID: the fixtures' dates say nothing about it.
     async fn id(&self, uid_order: usize) -> MessageId {
-        let inbox = self
-            .client
-            .find_folder(self.account, "INBOX")
-            .await
+        let id = rusqlite::Connection::open(self.client.config().db_path())
             .unwrap()
+            .query_row(
+                "SELECT m.id FROM messages m JOIN folders f ON f.id = m.folder_id
+                 WHERE f.remote_name = 'INBOX' ORDER BY m.uid LIMIT 1 OFFSET ?1",
+                [uid_order as i64],
+                |r| r.get(0),
+            )
             .unwrap();
-        let mut list = self.client.list_messages(inbox.id, 1000, 0).await.unwrap();
-        list.reverse(); // oldest (lowest UID) first; the fake gives every message one date
-        list[uid_order].id
+        MessageId(id)
     }
 
     fn log_len(&self) -> usize {
