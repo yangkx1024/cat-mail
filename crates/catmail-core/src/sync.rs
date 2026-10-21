@@ -11,7 +11,7 @@
 use std::collections::HashSet;
 use std::ops::RangeInclusive;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use catmail_proto::imap::{ChangedFlags, FetchedMessage, ListedMailbox, MailboxStatus, Session};
 use catmail_store::{FolderSyncState, NewMessage, RemoteFolder};
@@ -21,7 +21,7 @@ use catmail_types::{
 
 use crate::connection::with_session;
 use crate::draft_sync::Uploads;
-use crate::engine::{Activity, Engine, now_millis};
+use crate::engine::{Activity, Engine, now};
 use crate::{Error, Result, connection, ops};
 
 /// New messages per UID FETCH, and per transaction.
@@ -66,11 +66,13 @@ pub(crate) async fn sync_one(
             // Checked under the permit: a full sync that held it may just have done this.
             // A clock set back counts as just synced.
             let current = engine
-                .read(move |db| db.folders().sync_state(folder))
+                .read(move |db| db.folders().get(folder))
                 .await?
                 .ok_or(Error::FolderNotFound(folder))?;
-            let since = now_millis().saturating_sub(max_age.as_millis() as i64);
-            if !current.selectable || synced_after(&current, since) {
+            let fresh = current
+                .last_synced_at
+                .is_some_and(|t| now() - t < max_age.as_secs() as i64);
+            if !current.selectable || fresh {
                 return Ok(None);
             }
             // Safe to run again on a new connection if a reused one turns out dead: what
@@ -113,7 +115,7 @@ pub(crate) async fn run(
             // Taken holding the permit: a sync completed after this began after it too,
             // and saw the server as it is now or later. One that held the permit before
             // may have seen it as it was before this was asked for.
-            let start = now_millis();
+            let start = Instant::now();
             let remote = remote_folders(session.list().await?);
             let reconciled = engine
                 .write(move |db| db.folders().reconcile(account_id, &remote))
@@ -153,7 +155,10 @@ pub(crate) async fn run(
                 let Some(current) = current.filter(|f| f.selectable) else {
                     return Ok(None);
                 };
-                if synced_after(&current, start) {
+                if engine
+                    .folder_synced(account_id, id)
+                    .is_some_and(|t| t > start)
+                {
                     return Ok(Some(replay_report(&current, replayed.as_ref())));
                 }
                 sync_reported(engine, session, account_id, &current, replayed.as_ref())
@@ -188,12 +193,6 @@ async fn sync_reported(
         Err(e) => return Err(e),
     }
     Ok(report)
-}
-
-/// Whether `folder` completed a sync after `since`, in unix milliseconds. A clock set
-/// back counts as just synced.
-fn synced_after(folder: &FolderSyncState, since: i64) -> bool {
-    folder.last_synced_at.is_some_and(|t| t > since)
 }
 
 /// A report on `folder` that says what replaying its queued changes did, and nothing else
@@ -344,6 +343,9 @@ async fn sync_folder(
         engine
             .write(move |db| db.folders().set_synced(id, uidnext, modseq, all_flags))
             .await?;
+        if all_flags {
+            engine.set_folder_synced(account, id);
+        }
     }
     Ok(())
 }

@@ -46,8 +46,6 @@ pub struct FolderSyncState {
     /// whether anything changed without loading every UID.
     pub message_count: u32,
     pub max_uid: u32,
-    /// Unix milliseconds of the last completed sync.
-    pub last_synced_at: Option<i64>,
 }
 
 /// Messages moved here locally and not yet on the server have no UID; sync leaves them
@@ -56,8 +54,7 @@ const SYNC_STATE: &str = "
     SELECT id, remote_name, name, selectable, uidvalidity, uidnext, highest_modseq,
            total_count - (SELECT count(*) FROM messages
                           WHERE folder_id = folders.id AND uid IS NULL),
-           (SELECT ifnull(max(uid), 0) FROM messages WHERE folder_id = folders.id),
-           last_synced_at
+           (SELECT ifnull(max(uid), 0) FROM messages WHERE folder_id = folders.id)
     FROM folders";
 
 fn sync_state(r: &rusqlite::Row<'_>) -> rusqlite::Result<FolderSyncState> {
@@ -71,7 +68,6 @@ fn sync_state(r: &rusqlite::Row<'_>) -> rusqlite::Result<FolderSyncState> {
         highest_modseq: r.get::<_, Option<i64>>(6)?.map(|m| m as u64),
         message_count: r.get(7)?,
         max_uid: r.get(8)?,
-        last_synced_at: r.get(9)?,
     })
 }
 
@@ -254,8 +250,7 @@ impl<'c> Folders<'c> {
     ) -> Result<()> {
         self.conn.execute(
             "UPDATE folders SET uidnext = ?2, highest_modseq = ?3,
-                last_synced_at = CASE WHEN ?4 THEN CAST(unixepoch('subsec') * 1000 AS INTEGER)
-                                 ELSE last_synced_at END
+                last_synced_at = CASE WHEN ?4 THEN unixepoch() ELSE last_synced_at END
              WHERE id = ?1",
             params![
                 folder.0,

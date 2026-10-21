@@ -824,3 +824,20 @@ async fn a_full_sync_doesnt_skip_a_folder_whose_sync_began_before_it() {
     assert_eq!(folder_report(&full, "Archive").added, 1, "{full:?}");
     assert_eq!(env.subjects("Archive").await, ["new", "old"]);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clock_set_back_doesnt_make_a_full_sync_skip_folders() {
+    let mut state = state_with(&["one"]);
+    state.mailboxes.push(FakeMailbox::new("Archive"));
+    let env = env(state).await;
+    env.sync().await;
+    // Synced before the clock was set back a day: stamped in what is now the future.
+    env.sql(
+        "UPDATE folders SET last_synced_at = last_synced_at + 86400
+         WHERE remote_name = 'Archive'",
+    );
+    env.fake.state().mailbox_mut("Archive").append_simple("new");
+
+    let report = env.sync().await;
+    assert_eq!(folder_report(&report, "Archive").added, 1, "{report:?}");
+}

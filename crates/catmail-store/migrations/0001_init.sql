@@ -55,7 +55,7 @@ CREATE TABLE folders (
     highest_modseq INTEGER,
     unread_count   INTEGER NOT NULL DEFAULT 0, -- kept by the messages_count_* triggers
     total_count    INTEGER NOT NULL DEFAULT 0,
-    last_synced_at INTEGER,                    -- unix ms: syncs a moment apart are ordered
+    last_synced_at INTEGER,
     UNIQUE (account_id, remote_name),
     UNIQUE (id, account_id)
 ) STRICT;

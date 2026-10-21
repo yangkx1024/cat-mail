@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use catmail_proto::TlsConfig;
 use catmail_proto::imap::Session;
 use catmail_store::{BlobStore, Db, Store};
-use catmail_types::{AccountId, AccountStatus, DraftId, Event, ServerProblem};
+use catmail_types::{AccountId, AccountStatus, DraftId, Event, FolderId, ServerProblem};
 use tokio::sync::{Notify, OwnedMutexGuard, broadcast, watch};
 
 use crate::secrets::SecretStore;
@@ -72,6 +72,11 @@ struct AccountState {
     wake: Arc<Notify>,
     /// When the last sync of every folder finished.
     synced: Mutex<Option<Instant>>,
+    /// When each folder last completed a sync, for a sync of every folder to leave out
+    /// those another one completed since it began. Not `last_synced_at`: the wall clock
+    /// can be set back, and a time left in the future would have every full sync skip
+    /// the folder until the clock caught up.
+    folders_synced: Mutex<HashMap<FolderId, Instant>>,
     status: Mutex<AccountStatus>,
     /// When drafts were last changed, for holding back their upload while they are
     /// being written. Entries older than the delay are dropped as they are found.
@@ -298,6 +303,18 @@ impl Engine {
         *lock(&self.account(account).synced)
     }
 
+    /// Records that `folder` just completed a sync: its messages and all their flags.
+    pub fn set_folder_synced(&self, account: AccountId, folder: FolderId) {
+        lock(&self.account(account).folders_synced).insert(folder, Instant::now());
+    }
+
+    /// When `folder` last completed a sync, if ever since the engine started.
+    pub fn folder_synced(&self, account: AccountId, folder: FolderId) -> Option<Instant> {
+        lock(&self.account(account).folders_synced)
+            .get(&folder)
+            .copied()
+    }
+
     /// Records how an attempt to get through to the account's server for `activity`
     /// ended, and announces what that changes in [`status`](Self::status). Returns the
     /// failures in a row, this one included (0 for a success). The account being removed
@@ -414,6 +431,7 @@ impl Engine {
                     idle: Mutex::default(),
                     wake: Arc::default(),
                     synced: Mutex::default(),
+                    folders_synced: Mutex::default(),
                     status: Mutex::default(),
                     draft_edits: Mutex::default(),
                 })
@@ -445,16 +463,7 @@ pub(crate) fn backoff(first: Duration, failures: u32, max: Duration) -> Duration
 
 /// Now, in unix seconds.
 pub(crate) fn now() -> i64 {
-    since_epoch().as_secs() as i64
-}
-
-/// Now, in unix milliseconds.
-pub(crate) fn now_millis() -> i64 {
-    since_epoch().as_millis() as i64
-}
-
-fn since_epoch() -> Duration {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
+        .map_or(0, |d| d.as_secs() as i64)
 }
