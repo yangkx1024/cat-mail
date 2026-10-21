@@ -38,7 +38,7 @@ pub enum Source {
     Outbox(AccountId),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Row {
     Message(MessageSummary),
     /// Shared: the right pane shows it, and a draft can hold a whole forwarded message.
@@ -201,6 +201,11 @@ impl MessageList {
         &self.rows
     }
 
+    #[cfg(test)]
+    pub fn is_loading(&self) -> bool {
+        self.loading
+    }
+
     /// Selects the next row once `id`, the selected message, goes away.
     pub fn expect_removal(&mut self, id: MessageId) {
         self.removing = Some(id);
@@ -312,9 +317,11 @@ fn load(
             }
             let delegate = list.delegate_mut();
             delegate.loading = false;
+            // Whether anything shown changed: the skeleton shows while nothing is listed.
+            let mut changed = true;
             match result {
                 Ok((rows, more)) => {
-                    delegate.has_more = more;
+                    let had_more = std::mem::replace(&mut delegate.has_more, more);
                     if offset > 0 {
                         // Rows that came in at the top since the last page push the ones
                         // shown down into this one; the refresh their event brings puts
@@ -325,6 +332,11 @@ fn load(
                             .rows
                             .extend(rows.into_iter().filter(|r| !shown.contains(&r.id())));
                         delegate.days.extend(&delegate.rows, from);
+                    } else if !rows.is_empty() && rows == delegate.rows && more == had_more {
+                        // A sync's events often bring nothing this list shows. The
+                        // selection stays on the same row, and a removal waited for
+                        // still is.
+                        changed = false;
                     } else {
                         replace_rows(list, rows, window, cx);
                     }
@@ -337,7 +349,9 @@ fn load(
             if std::mem::take(&mut list.delegate_mut().stale) {
                 refresh(list, window, cx);
             }
-            cx.notify();
+            if changed {
+                cx.notify();
+            }
         })
         .ok();
     });

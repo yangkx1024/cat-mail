@@ -1,6 +1,8 @@
 //! Which engine events make the window read what again, and how often.
 
-use catmail_core::Event;
+use std::collections::HashMap;
+
+use catmail_core::{AccountId, Event};
 
 use super::message_list::Source;
 
@@ -122,11 +124,56 @@ impl Coalesce {
         self.running = false;
         std::mem::take(&mut self.again)
     }
+
+    #[cfg(test)]
+    pub fn is_running(&self) -> bool {
+        self.running
+    }
+}
+
+/// Which draft count to show. Every `DraftsChanged` counts its account's drafts again,
+/// and a read of the sidebar counts them too: only a count started after the account's
+/// latest `DraftsChanged` is shown, so an older one landing late can't put back what
+/// the drafts were.
+#[derive(Debug, Default, Clone)]
+pub struct DraftCounts {
+    /// `DraftsChanged` events seen, by account, plus one for each time events were missed.
+    changes: HashMap<AccountId, u64>,
+}
+
+impl DraftCounts {
+    /// `account`'s drafts changed: the change a count started now answers.
+    pub fn changed(&mut self, account: AccountId) -> u64 {
+        let change = self.changes.entry(account).or_default();
+        *change += 1;
+        *change
+    }
+
+    /// Events were missed, a `DraftsChanged` among them maybe: the counts on their way
+    /// may be older than the read of the sidebar that follows. Call it before starting
+    /// that read, or the read is taken for an old one too. Only accounts with a count
+    /// started have one on its way.
+    pub fn missed(&mut self) {
+        for change in self.changes.values_mut() {
+            *change += 1;
+        }
+    }
+
+    /// Whether the count started for `change` is still the latest.
+    pub fn is_latest(&self, account: AccountId, change: u64) -> bool {
+        self.changes.get(&account).copied().unwrap_or_default() == change
+    }
+
+    /// Whether a read of the sidebar started when the counts were `then` has the latest
+    /// count of `account`'s drafts.
+    pub fn read_is_latest(&self, then: &Self, account: AccountId) -> bool {
+        self.changes.get(&account) == then.changes.get(&account)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use catmail_core::{AccountId, FolderId};
+    use catmail_core::FolderId;
 
     use super::*;
 
@@ -213,5 +260,41 @@ mod tests {
         assert_eq!(throttle.ask(LIST), LIST);
         assert_eq!(throttle.elapsed(), NOTHING);
         assert_eq!(throttle.ask(SIDEBAR), SIDEBAR);
+    }
+
+    #[test]
+    fn only_a_count_started_after_the_latest_change_is_shown() {
+        let (account, other) = (AccountId(1), AccountId(2));
+        let mut counts = DraftCounts::default();
+        let read = counts.clone();
+        assert!(counts.read_is_latest(&read, account));
+        let first = counts.changed(account);
+        let second = counts.changed(account);
+        assert!(!counts.is_latest(account, first));
+        assert!(counts.is_latest(account, second));
+        // A read started before the change doesn't count; another account's change
+        // doesn't make it old.
+        assert!(!counts.read_is_latest(&read, account));
+        let read = counts.clone();
+        counts.changed(other);
+        assert!(counts.read_is_latest(&read, account));
+        assert!(!counts.read_is_latest(&read, other));
+    }
+
+    #[test]
+    fn missing_events_outdates_the_counts_on_their_way() {
+        let account = AccountId(1);
+        let mut counts = DraftCounts::default();
+        let change = counts.changed(account);
+        // Missed, then the sidebar is read again: it has the latest count, while the
+        // count started before the events were missed lands late and is dropped.
+        counts.missed();
+        let read = counts.clone();
+        assert!(counts.read_is_latest(&read, account));
+        assert!(!counts.is_latest(account, change));
+        // A change seen afterwards is counted as usual.
+        let change = counts.changed(account);
+        assert!(counts.is_latest(account, change));
+        assert!(!counts.read_is_latest(&read, account));
     }
 }

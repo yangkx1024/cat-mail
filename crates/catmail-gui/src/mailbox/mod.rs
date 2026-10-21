@@ -19,7 +19,6 @@ mod tests;
 
 pub(crate) use commands::report_failure;
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use catmail_core::{
@@ -42,7 +41,7 @@ use crate::settings::Preferences;
 use add_account::{AddAccount, AddAccountEvent};
 use folders::AccountFolders;
 use message_list::{MessageList, Row, Source};
-use refresh::{Coalesce, Refresh, Throttle};
+use refresh::{Coalesce, DraftCounts, Refresh, Throttle};
 
 /// How long typing in the search field pauses before it searches.
 const SEARCH_DELAY: Duration = Duration::from_millis(200);
@@ -83,6 +82,7 @@ impl Place {
 }
 
 /// One account as the sidebar shows it.
+#[derive(PartialEq)]
 pub struct AccountEntry {
     pub account: Account,
     pub folders: AccountFolders,
@@ -122,11 +122,8 @@ pub struct Mailbox {
     pub(crate) messages: Entity<ListState<MessageList>>,
     pub(crate) reader: Entity<Reader>,
     focus_handle: FocusHandle,
-    reading_folders: Coalesce,
-    /// `DraftsChanged` events seen, by account. A draft count, or a read of the sidebar,
-    /// started before the latest of them doesn't set the account's draft count: the
-    /// count started for that event does.
-    drafts_changes: HashMap<AccountId, u64>,
+    pub(crate) reading_folders: Coalesce,
+    draft_counts: DraftCounts,
     /// Looking for refused changes, coalesced like reading.
     checking_refused: Coalesce,
     _load_folders: Task<()>,
@@ -208,7 +205,7 @@ impl Mailbox {
             reader,
             focus_handle: cx.focus_handle(),
             reading_folders: Coalesce::default(),
-            drafts_changes: HashMap::new(),
+            draft_counts: DraftCounts::default(),
             checking_refused: Coalesce::default(),
             _load_folders: Task::ready(()),
             _throttle: Task::ready(()),
@@ -271,6 +268,10 @@ impl Mailbox {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if event.is_none() {
+            // Before reading the sidebar again, so the read isn't taken for an old one.
+            self.draft_counts.missed();
+        }
         let shown = self.messages.read(cx).delegate().source().cloned();
         let refresh = self.throttle.ask(Refresh::after(event, shown.as_ref()));
         self.read_again(refresh, window, cx);
@@ -333,7 +334,7 @@ impl Mailbox {
         if !self.reading_folders.start() {
             return;
         }
-        let drafts_changes = self.drafts_changes.clone();
+        let draft_counts = self.draft_counts.clone();
         let client = self.client.clone();
         self._load_folders = cx.spawn_in(window, async move |this, cx| {
             let loaded = client.overview().await;
@@ -348,7 +349,7 @@ impl Mailbox {
                                 // Not stored: taken now, it is never older than its event.
                                 let status = this.client.account_status(id);
                                 let mut entry = AccountEntry::new(a, status);
-                                if this.drafts_changes.get(&id) != drafts_changes.get(&id)
+                                if !this.draft_counts.read_is_latest(&draft_counts, id)
                                     && let Some(shown) = this.account(id)
                                 {
                                     entry.drafts = shown.drafts;
@@ -374,23 +375,29 @@ impl Mailbox {
     /// Every pause in typing saves a draft: only the account's draft count can have
     /// changed, so only that is read again.
     fn count_drafts(&mut self, account: AccountId, window: &mut Window, cx: &mut Context<Self>) {
-        let change = self.drafts_changes.entry(account).or_default();
-        *change += 1;
-        let change = *change;
+        let change = self.draft_counts.changed(account);
         let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(drafts) = client.count_drafts(account).await else {
-                return;
-            };
-            this.update(cx, |this, cx| {
-                if this.drafts_changes.get(&account) != Some(&change) {
+            let counted = client.count_drafts(account).await;
+            this.update_in(cx, |this, window, cx| {
+                if !this.draft_counts.is_latest(account, change) {
                     return; // A later count is on its way.
                 }
-                if let Some(entry) = this.account_mut(account)
-                    && entry.drafts != drafts
-                {
-                    entry.drafts = drafts;
-                    cx.notify();
+                match counted {
+                    Ok(drafts) => {
+                        if let Some(entry) = this.account_mut(account)
+                            && entry.drafts != drafts
+                        {
+                            entry.drafts = drafts;
+                            cx.notify();
+                        }
+                    }
+                    // No later count would put it right: the sidebar's read counts the
+                    // drafts too, and says so if it fails as well.
+                    Err(e) => {
+                        tracing::warn!(%account, error = %e, "couldn't count the drafts");
+                        this.load_folders(window, cx);
+                    }
                 }
             })
             .ok();
@@ -404,6 +411,10 @@ impl Mailbox {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.accounts.as_ref() == Some(&accounts) {
+            // A sync's events often bring nothing the sidebar shows.
+            return;
+        }
         let first_load = self.accounts.is_none();
         let still_there = self
             .place
