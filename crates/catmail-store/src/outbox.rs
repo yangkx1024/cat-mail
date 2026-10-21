@@ -449,15 +449,16 @@ mod tests {
     use catmail_types::{Address, DraftContent};
 
     use super::*;
-    use crate::{Store, test_util};
+    use crate::Store;
+    use crate::test_util::{self, TestStore};
 
     fn hash(c: char) -> BlobHash {
         BlobHash::parse(&c.to_string().repeat(64)).unwrap()
     }
 
     /// A draft queued for sending.
-    fn setup() -> (Store, AccountId, DraftId, OutboxId) {
-        let store = Store::open_in_memory().unwrap();
+    fn setup() -> (TestStore, AccountId, DraftId, OutboxId) {
+        let store = test_util::store();
         let account = test_util::account(&store, "a@example.com");
         let content = DraftContent {
             subject: "hi".into(),

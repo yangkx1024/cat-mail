@@ -17,10 +17,11 @@ mod private;
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use catmail_types::BlobHash;
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use rusqlite_migration::{M, Migrations};
 
 pub use accounts::Accounts;
@@ -43,6 +44,12 @@ const BLOB_REFERENCES: &str = "
 
 const MIGRATIONS: &[M<'static>] = &[M::up(include_str!("../migrations/0001_init.sql"))];
 
+/// Read connections, opened with the store; further concurrent reads wait for one to
+/// come back.
+const READERS: usize = 4;
+
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Handle to the SQLite database. Cheap to clone.
 ///
 /// All access goes through [`Store::read`] or [`Store::write`], which hand the closure a
@@ -50,12 +57,86 @@ const MIGRATIONS: &[M<'static>] = &[M::up(include_str!("../migrations/0001_init.
 /// plus its `pending_ops` row, synced messages plus the folder cursor) are therefore
 /// committed atomically or not at all.
 ///
-/// A single connection behind a mutex for now; split into one writer plus a reader pool
-/// once sync and UI reads start contending. The closure must not call back into the
-/// same `Store`, or it deadlocks.
+/// One write connection behind a mutex plus a small pool of read-only connections, so
+/// reads (the message list) don't queue behind a sync batch's write transaction: WAL
+/// gives each read the last committed snapshot meanwhile. The closure must still not
+/// call back into the same `Store`: a write inside a write deadlocks, a read inside a
+/// write doesn't see the uncommitted change, and nested reads can exhaust the pool.
 #[derive(Clone)]
 pub struct Store {
-    conn: Arc<Mutex<Connection>>,
+    inner: Arc<Inner>,
+}
+
+struct Inner {
+    // Declared first so readers close first: the last connection to close checkpoints
+    // the WAL, which a read-only one can't.
+    readers: Readers,
+    writer: Mutex<Connection>,
+}
+
+struct Readers {
+    idle: Mutex<Vec<Connection>>,
+    returned: Condvar,
+}
+
+impl Readers {
+    fn open(path: &Path) -> Result<Self> {
+        let open = || -> Result<Connection> {
+            // Read-only, so a write slipped into a `read` closure fails instead of
+            // taking the write lock behind the writer's back.
+            let conn = Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            conn.busy_timeout(BUSY_TIMEOUT)?;
+            Ok(conn)
+        };
+        Ok(Self {
+            idle: Mutex::new((0..READERS).map(|_| open()).collect::<Result<_>>()?),
+            returned: Condvar::new(),
+        })
+    }
+
+    /// Lends an idle connection, waiting for one to be returned if all are lent out.
+    fn get(&self) -> Reader<'_> {
+        let mut idle = self
+            .returned
+            .wait_while(lock(&self.idle), |idle| idle.is_empty())
+            .unwrap_or_else(PoisonError::into_inner);
+        Reader {
+            readers: self,
+            conn: idle.pop(),
+        }
+    }
+}
+
+/// A pooled read connection, returned to the pool when dropped.
+struct Reader<'r> {
+    readers: &'r Readers,
+    /// Only `None` once dropped.
+    conn: Option<Connection>,
+}
+
+impl Reader<'_> {
+    fn conn(&mut self) -> &mut Connection {
+        self.conn.as_mut().expect("lent out while idle")
+    }
+}
+
+impl Drop for Reader<'_> {
+    fn drop(&mut self) {
+        // Any transaction on it ended with its guard, also on a panic.
+        if let Some(conn) = self.conn.take() {
+            lock(&self.readers.idle).push(conn);
+            self.readers.returned.notify_one();
+        }
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    // A panic while holding the lock can't leave a connection inconsistent: any open
+    // transaction is rolled back when its guard drops.
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Repositories bound to one connection and transaction.
@@ -116,7 +197,7 @@ impl Store {
             file.push(suffix);
             private::make_private(Path::new(&file))?;
         }
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         // Commits survive the app crashing, not a power cut; see `write_durable`.
         conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -124,27 +205,27 @@ impl Store {
         // doesn't linger in the file. Costs writing the freed pages (through the WAL),
         // also those FTS merges free.
         conn.pragma_update(None, "secure_delete", true)?;
-        Self::init(conn)
-    }
-
-    pub fn open_in_memory() -> Result<Self> {
-        Self::init(Connection::open_in_memory()?)
-    }
-
-    fn init(mut conn: Connection) -> Result<Self> {
         conn.pragma_update(None, "foreign_keys", true)?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         Migrations::from_slice(MIGRATIONS).to_latest(&mut conn)?;
         Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
+            inner: Arc::new(Inner {
+                // After the migration, so no read sees an older schema.
+                readers: Readers::open(path)?,
+                writer: Mutex::new(conn),
+            }),
         })
     }
 
-    /// Runs `f` against a consistent snapshot. Nothing is written.
+    /// Runs `f` against a consistent snapshot: every query in it sees the database as
+    /// of its first query, so at least everything committed before this call. Nothing
+    /// is written. Doesn't wait for a write in progress.
     pub fn read<T>(&self, f: impl FnOnce(&Db<'_>) -> Result<T>) -> Result<T> {
-        let mut conn = self.conn();
+        let mut reader = self.inner.readers.get();
         // Dropped without commit: a read-only transaction just ends.
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let tx = reader
+            .conn()
+            .transaction_with_behavior(TransactionBehavior::Deferred)?;
         f(&Db { conn: &tx })
     }
 
@@ -177,18 +258,42 @@ impl Store {
         Ok(out)
     }
 
+    /// The write connection.
     fn conn(&self) -> MutexGuard<'_, Connection> {
-        // A panic while holding the lock can't leave the connection itself inconsistent:
-        // any open transaction is rolled back when its guard drops.
-        self.conn.lock().unwrap_or_else(PoisonError::into_inner)
+        lock(&self.inner.writer)
     }
 }
 
 #[cfg(test)]
 pub(crate) mod test_util {
     use catmail_types::{AccountId, AuthKind, NewAccount, Security, ServerConfig};
+    use tempfile::TempDir;
 
     use crate::Store;
+
+    /// A store in a temporary directory, deleted along with it. On a file, not in
+    /// memory: other connections to an in-memory database would open another, empty
+    /// one, so reads couldn't use the pool.
+    pub(crate) struct TestStore {
+        store: Store,
+        _dir: TempDir,
+    }
+
+    impl std::ops::Deref for TestStore {
+        type Target = Store;
+
+        fn deref(&self) -> &Store {
+            &self.store
+        }
+    }
+
+    pub(crate) fn store() -> TestStore {
+        let dir = tempfile::tempdir().unwrap();
+        TestStore {
+            store: Store::open(&dir.path().join("catmail.db")).unwrap(),
+            _dir: dir,
+        }
+    }
 
     pub(crate) fn account(store: &Store, email: &str) -> AccountId {
         let server = ServerConfig {
@@ -260,8 +365,7 @@ mod tests {
 
     #[test]
     fn deleted_content_is_overwritten() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&dir.path().join("catmail.db")).unwrap();
+        let store = test_util::store();
         let secure_delete: i64 = store
             .conn()
             .pragma_query_value(None, "secure_delete", |r| r.get(0))
@@ -271,8 +375,7 @@ mod tests {
 
     #[test]
     fn durable_writes_are_synced() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&dir.path().join("catmail.db")).unwrap();
+        let store = test_util::store();
         let synchronous = |conn: &Connection| -> i64 {
             conn.pragma_query_value(None, "synchronous", |r| r.get(0))
                 .unwrap()
@@ -294,7 +397,7 @@ mod tests {
     #[test]
     fn blob_references_cover_every_blob_column() {
         // GC deletes any blob whose column is missing from the query.
-        let store = Store::open_in_memory().unwrap();
+        let store = test_util::store();
         let conn = store.conn();
         let columns: Vec<(String, String)> = conn
             .prepare(
@@ -327,7 +430,7 @@ mod tests {
 
     #[test]
     fn deleting_account_cascades_to_messages_and_fts() {
-        let store = Store::open_in_memory().unwrap();
+        let store = test_util::store();
         let conn = store.conn();
         seed(&conn);
         conn.execute_batch(
@@ -357,7 +460,7 @@ mod tests {
 
     #[test]
     fn rows_cannot_reference_another_accounts_folder() {
-        let store = Store::open_in_memory().unwrap();
+        let store = test_util::store();
         let conn = store.conn();
         seed(&conn);
         // Folder 21 belongs to account 2.
@@ -381,7 +484,7 @@ mod tests {
 
     #[test]
     fn same_uid_in_two_folders_has_independent_flags() {
-        let store = Store::open_in_memory().unwrap();
+        let store = test_util::store();
         let conn = store.conn();
         seed(&conn);
         conn.execute_batch(
@@ -400,8 +503,85 @@ mod tests {
     }
 
     #[test]
+    fn reads_do_not_wait_for_a_write() {
+        use std::sync::mpsc;
+        let store = test_util::store();
+        test_util::account(&store, "a@example.com");
+        // The read runs inside the write only to hold the write open meanwhile; on
+        // another thread, so a read stuck behind it fails the test instead of hanging.
+        let (done, read) = mpsc::channel();
+        let writer = std::thread::spawn({
+            let store = store.clone();
+            move || {
+                store.write(|db| {
+                    db.conn.execute("DELETE FROM accounts", [])?;
+                    let seen = store.read(|db| db.accounts().list())?.len();
+                    done.send(seen).unwrap();
+                    Ok(())
+                })
+            }
+        });
+        let seen = read
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the read waited for the write");
+        assert_eq!(seen, 1, "the last committed snapshot");
+        writer.join().unwrap().unwrap();
+        assert!(store.read(|db| db.accounts().list()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reads_cannot_write() {
+        let store = test_util::store();
+        let result = store.read(|db| {
+            db.conn
+                .execute("DELETE FROM accounts", [])
+                .map_err(Error::from)
+        });
+        let Err(Error::Sqlite(err)) = result else {
+            panic!("{result:?}");
+        };
+        assert_eq!(
+            err.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::ReadOnly),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn more_concurrent_reads_than_connections() {
+        let store = test_util::store();
+        test_util::account(&store, "a@example.com");
+        let threads = 3 * READERS;
+        let start = Arc::new(std::sync::Barrier::new(threads));
+        let handles: Vec<_> = (0..threads)
+            .map(|i| {
+                let store = store.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    for j in 0..20 {
+                        // Reads during commits mustn't fail with SQLITE_BUSY either.
+                        if i == 0 {
+                            test_util::account(&store, &format!("{j}@example.com"));
+                        }
+                        assert!(!store.read(|db| db.accounts().list()).unwrap().is_empty());
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert_eq!(
+            lock(&store.inner.readers.idle).len(),
+            READERS,
+            "all returned"
+        );
+    }
+
+    #[test]
     fn write_rolls_back_on_error() {
-        let store = Store::open_in_memory().unwrap();
+        let store = test_util::store();
         let result: Result<()> = store.write(|db| {
             db.conn.execute(
                 "INSERT INTO accounts (email, username, imap_host, imap_port, imap_security,

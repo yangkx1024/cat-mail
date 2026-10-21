@@ -73,7 +73,8 @@ fake-server test, with a fault injected if the change is about recovering from o
 - **Database access** goes through `Store::read` / `Store::write`. Everything that must be
   atomic (a local change plus its `pending_ops` row, synced messages plus the folder
   cursor) happens inside one `write` closure. Never call back into the `Store` from inside
-  that closure (single connection, it deadlocks).
+  a `read` or `write` closure (one write connection: a nested write deadlocks, a nested
+  read misses the uncommitted change).
 - **Events** are emitted after the commit, from inside the engine task that made the
   change, never from inside a `write` closure and never after an `.await` in the caller's
   future.

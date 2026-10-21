@@ -108,7 +108,7 @@ outbox 里时，上传一份新的，再删除旧的：
 - **落盘。** SQLite 平时是 WAL + `synchronous=NORMAL`：进程崩溃不丢提交，断电却可能丢掉最近几次，
   `unknown` 会退回 `sending`、重启后被重发。所以 `unknown` 和保存到 Sent 的尝试计数用
   `Store::write_durable` 提交（只对这次提交 `FULL`，之前的提交一并落盘）。不全局开 `FULL`：同步时
-  每批邮件都要提交，单连接上的读会排在 fsync 后面。
+  每批邮件都要提交，每批都等 fsync 会拖慢同步，排在后面的本地操作也要跟着等。
 
 ## SMTP 客户端
 

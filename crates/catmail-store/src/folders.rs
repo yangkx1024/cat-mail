@@ -282,7 +282,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Folder> {
 mod tests {
     use super::*;
     use crate::messages::NewMessage;
-    use crate::{Store, test_util};
+    use crate::test_util;
 
     fn remote(remote_name: &str, name: &str, role: Option<FolderRole>) -> RemoteFolder {
         RemoteFolder {
@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn reconcile_inserts_updates_and_deletes() {
-        let store = Store::open_in_memory().unwrap();
+        let store = test_util::store();
         let account = test_util::account(&store, "a@example.com");
         let listed = vec![
             remote("Sent", "Sent", None),
@@ -365,7 +365,7 @@ mod tests {
     fn becoming_a_hierarchy_node_ends_the_generation() {
         // RFC 3501 DELETE of a mailbox with children empties it and leaves its name as
         // \Noselect, which sync never opens again.
-        let store = Store::open_in_memory().unwrap();
+        let store = test_util::store();
         let account = test_util::account(&store, "a@example.com");
         store
             .write(|db| {
@@ -419,7 +419,7 @@ mod tests {
 
     #[test]
     fn find_by_name() {
-        let store = Store::open_in_memory().unwrap();
+        let store = test_util::store();
         let account = test_util::account(&store, "a@example.com");
         let other = test_util::account(&store, "b@example.com");
         let listed = vec![
@@ -447,7 +447,7 @@ mod tests {
 
     #[test]
     fn a_sync_that_left_the_flags_alone_is_not_completed() {
-        let store = Store::open_in_memory().unwrap();
+        let store = test_util::store();
         let account = test_util::account(&store, "a@example.com");
         store
             .write(|db| {
@@ -483,7 +483,7 @@ mod tests {
 
     #[test]
     fn uidvalidity_reset_drops_the_old_generation() {
-        let store = Store::open_in_memory().unwrap();
+        let store = test_util::store();
         let account = test_util::account(&store, "a@example.com");
         store
             .write(|db| {
@@ -554,7 +554,7 @@ mod tests {
 
     #[test]
     fn deleting_a_folder_forgets_remote_draft_copies() {
-        let store = Store::open_in_memory().unwrap();
+        let store = test_util::store();
         let account = test_util::account(&store, "a@example.com");
         store
             .write(|db| {

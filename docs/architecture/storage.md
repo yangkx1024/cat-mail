@@ -4,8 +4,14 @@
 
 ## SQLite
 
-- `rusqlite`（bundled：三平台行为一致、自带 FTS5），WAL，`foreign_keys=ON`。目前单连接 + Mutex；
-  读写竞争出现后拆成 1 写 + 读池。
+- `rusqlite`（bundled：三平台行为一致、自带 FTS5），WAL，`foreign_keys=ON`。
+- 1 写 + 读池：`Store::write` 走唯一的写连接（Mutex），`Store::read` 从 4 个只读连接的池里借一个，
+  都借出时等别的读归还。WAL 下读不必排在同步每批 200 条的写事务后面；快照在闭包的第一条查询时取得
+  （`DEFERRED`），闭包内所有查询看到同一份已提交的状态，至少包含调用之前的所有提交。
+  只读连接以 `SQLITE_OPEN_READ_ONLY` 打开，`read` 闭包里误写会直接报错；在迁移之后随 `Store::open`
+  一起打开，不会看到旧 schema。没有内存数据库：另开的连接会是另一个空库，读池无从谈起，测试也用临时
+  目录里的文件。闭包不得回调同一个 `Store` 的规则不变：写里套写会死锁，写里套读看不到未提交的改动，
+  读里套读可能把池耗尽。
 - `secure_delete=ON`：删除账户、UIDVALIDITY 重建、GC 之后，正文不会留在空闲页里等着被覆盖。代价是
   被释放的页都要（经 WAL）写一遍零，包括 FTS 合并释放的。没有用 `FAST`：它不清零进入空闲列表的溢出页，而大段正文正在溢出页里。
 - 迁移在 `crates/catmail-store/migrations/`，由 `rusqlite_migration`（`user_version`）执行。发布

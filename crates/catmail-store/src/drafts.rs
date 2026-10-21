@@ -578,11 +578,12 @@ mod tests {
     use catmail_types::{Address, FlagState, OutboxStatus};
 
     use super::*;
+    use crate::Store;
     use crate::folders::RemoteFolder;
     use crate::messages::NewMessage;
     use crate::ops::ReplayKind;
     use crate::outbox::NewOutboxEntry;
-    use crate::{Store, test_util};
+    use crate::test_util::{self, TestStore};
 
     fn content(subject: &str) -> DraftContent {
         DraftContent {
@@ -634,7 +635,7 @@ mod tests {
 
     #[test]
     fn lifecycle() {
-        let store = Store::open_in_memory().unwrap();
+        let store = test_util::store();
         let account = test_util::account(&store, "a@example.com");
         let id = store
             .write(|db| db.drafts().insert(account, &content("one"), None, 1))
@@ -710,7 +711,7 @@ mod tests {
 
     #[test]
     fn queued_drafts_are_locked() {
-        let store = Store::open_in_memory().unwrap();
+        let store = test_util::store();
         let account = test_util::account(&store, "a@example.com");
         let id = store
             .write(|db| db.drafts().insert(account, &content("one"), None, 1))
@@ -769,7 +770,7 @@ mod tests {
 
     #[test]
     fn queueing_needs_the_revision_it_was_built_from() {
-        let store = Store::open_in_memory().unwrap();
+        let store = test_util::store();
         let account = test_util::account(&store, "a@example.com");
         let other = test_util::account(&store, "b@example.com");
         let id = store
@@ -799,7 +800,7 @@ mod tests {
 
     #[test]
     fn replies_keep_their_threading_headers() {
-        let store = Store::open_in_memory().unwrap();
+        let store = test_util::store();
         let account = test_util::account(&store, "a@example.com");
         let other = test_util::account(&store, "b@example.com");
         let message = store
@@ -836,8 +837,8 @@ mod tests {
     }
 
     /// An account with a Drafts folder at UIDVALIDITY 7, and a draft in it.
-    fn with_drafts_folder() -> (Store, AccountId, FolderId, DraftId) {
-        let store = Store::open_in_memory().unwrap();
+    fn with_drafts_folder() -> (TestStore, AccountId, FolderId, DraftId) {
+        let store = test_util::store();
         let account = test_util::account(&store, "a@example.com");
         let (folder, draft) = store
             .write(|db| {
@@ -1047,7 +1048,7 @@ mod tests {
 
     #[test]
     fn without_a_drafts_folder_there_is_nothing_to_upload_to() {
-        let store = Store::open_in_memory().unwrap();
+        let store = test_util::store();
         let account = test_util::account(&store, "a@example.com");
         let draft = store
             .write(|db| db.drafts().insert(account, &content("one"), None, 1))

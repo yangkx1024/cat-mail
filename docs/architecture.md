@@ -47,7 +47,8 @@ GPUI 有自己的 executor，不是 tokio；IMAP / SMTP 栈却依赖 tokio react
 ### 事务与事件
 
 数据库访问只经过 `Store::read` / `Store::write`：闭包里的各个 repository 共用同一个事务；
-`write` 是 `IMMEDIATE` 事务，闭包返回 `Ok` 才提交。必须原子的东西（本地改动与它的
+`write` 是唯一写连接上的 `IMMEDIATE` 事务，闭包返回 `Ok` 才提交；`read` 在只读连接池上读最后一次
+提交的快照，不等进行中的写（见[存储](architecture/storage.md#sqlite)）。必须原子的东西（本地改动与它的
 `pending_ops` 行、同步来的邮件与文件夹游标）放在同一个闭包里。
 
 事件（`tokio::sync::broadcast<Event>`）的规则：
