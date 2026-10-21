@@ -89,7 +89,7 @@ fn deletes_for_good_without_a_trash_folder(cx: &mut TestAppContext) {
     cx.run_until_parked();
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
-        window.click("ok", cx);
+        window.click(crate::layout::CONFIRM, cx);
     })
     .unwrap();
     wait_until(|| {
@@ -130,7 +130,10 @@ fn deleting_from_trash_asks_first_whichever_trash_it_is(cx: &mut TestAppContext)
     cx.run_until_parked();
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
-        assert!(window.try_find("ok").is_some(), "no confirmation");
+        assert!(
+            window.try_find(crate::layout::CONFIRM).is_some(),
+            "no confirmation"
+        );
     })
     .unwrap();
     cx.read(|cx| assert!(find(&mailbox, "Binned", cx).is_some()));
@@ -242,5 +245,70 @@ fn opening_a_folder_syncs_it(cx: &mut TestAppContext) {
     wait_until(|| {
         cx.run_until_parked();
         cx.read(|cx| subjects(&mailbox, cx) == ["Filed elsewhere"])
+    });
+}
+
+#[gpui_kit::test]
+fn a_change_the_server_refuses_is_undone_and_reported(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let (_, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    let id = cx.read(|cx| id_of(&mailbox, "Quarterly report", cx));
+    let flagged = |cx: &mut TestAppContext| {
+        cx.read(|cx| find(&mailbox, "Quarterly report", cx).unwrap().flags)
+            .contains(Flags::FLAGGED)
+    };
+    pollster::block_on(
+        mail.client
+            .set_flags(vec![id], Flags::FLAGGED, Flags::empty()),
+    )
+    .unwrap();
+    wait_until(|| {
+        cx.run_until_parked();
+        flagged(cx)
+    });
+
+    mail.refuse_changes("[CANNOT] Permission denied");
+    let report = pollster::block_on(mail.client.replay_pending(mail.account())).unwrap();
+    assert_eq!(report.failed, 1);
+    // Told once, and so forgotten: nothing is left to report again.
+    wait_until(|| {
+        cx.run_until_parked();
+        pollster::block_on(mail.client.list_pending(None))
+            .unwrap()
+            .is_empty()
+    });
+    wait_until(|| {
+        cx.run_until_parked();
+        !flagged(cx)
+    });
+}
+
+#[gpui_kit::test]
+fn events_missed_meanwhile_read_everything_again(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let (_, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+
+    // While the window isn't looking: a new message, then more events than its receiver
+    // keeps, none of them about INBOX. The one saying INBOX changed is lost.
+    mail.deliver_and_sync("Missed");
+    let client = &mail.client;
+    pollster::block_on(async {
+        let draft = client
+            .create_draft(mail.account(), catmail_core::DraftContent::default())
+            .await
+            .unwrap();
+        for n in 0..=catmail_core::EVENT_CAPACITY {
+            let content = catmail_core::DraftContent {
+                subject: format!("Draft {n}"),
+                ..Default::default()
+            };
+            client.update_draft(draft.id, content).await.unwrap();
+        }
+    });
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| find(&mailbox, "Missed", cx).is_some())
     });
 }

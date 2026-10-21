@@ -86,7 +86,7 @@ impl<'c> Folders<'c> {
             "SELECT {COLUMNS} FROM folders WHERE account_id = ?1
              ORDER BY remote_name <> 'INBOX', name COLLATE NOCASE, id"
         );
-        let mut stmt = self.conn.prepare(&sql)?;
+        let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt.query_map([account.0], from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }

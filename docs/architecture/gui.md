@@ -27,6 +27,7 @@ src/
     mod.rs           状态（账户、Place）、引擎事件、读侧栏、搜索、渲染与 Action 分派
     commands.rs      对邮件的命令（标记、归档、删除、移动）、写信、同步、被拒改动的通知
     sidebar.rs panes.rs draft.rs outbox.rs   侧栏；三栏与邮件工具栏；草稿、发件箱的右栏
+    refresh.rs       哪个引擎事件重读什么、节流（纯逻辑）
     message_list/    中栏列表（mod.rs：来源、加载、选中；rows.rs：三种行的样子）
     folders.rs       文件夹分区（纯逻辑）
     move_to.rs add_account.rs   "Move to"对话框；登录表单
@@ -96,13 +97,14 @@ macOS、Windows 用系统字体，不受影响。
   其余可逆的操作不确认。是否永久由 `DeleteOutcome` 判断，归档目标由 `archive_folder` 判断，都基于
   账户的文件夹列表而不是侧栏的顺序：有两个 Trash 时，侧栏先列的不一定是引擎移入的那个，而在任一
   Trash 里删除都是永久的。
-- 服务器拒绝的改动（`PendingOpsChanged` 后 `list_pending` 里非 pending 的）以通知说明一次，随即
-  `dismiss_pending`，避免重复提示。
+- 服务器拒绝的改动：`PendingOpsChanged` 后 `dismiss_settled` 在一个写事务里取出并忘掉所有失败或冲突的
+  改动，逐条以通知说明，不会重复提示。
 
 ## 写信窗口
 
 每封信一个窗口（`OpenComposers` 全局按草稿记录窗口，再次打开同一草稿时激活已有窗口；读草稿是异步的，
-建窗口前再查一次，连点两次 Edit 也只有一个窗口）。
+正在读的草稿也记下，再次打开直接返回，连点两次 Edit 也只有一个窗口。读草稿的任务挂在应用上而不是发起的
+窗口上：那个窗口先关了也不会让草稿一直处于"正在打开"）。
 
 - **一开始就是草稿**：新邮件 `create_draft`、回复 `reply`、转发 `forward`，窗口编辑的总是一个已存在的
   草稿，不需要"第一次保存时创建"的分支，也不会因并发保存建出两份。窗口里什么都没改就**关闭**时删除它；
@@ -158,23 +160,35 @@ macOS、Windows 用系统字体，不受影响。
 
 `MailClient::builder(cfg).open()` 自建 tokio runtime；视图只在 `cx.spawn` / `spawn_in` 中 await 门面
 方法，从不碰 tokio。事件的 `broadcast::Receiver` 不依赖 reactor，直接在 GPUI 的 executor 上 `recv`；
-`Lagged` 时整体刷新，`Closed` 时退出。
+`Lagged` 时整体刷新（侧栏、列表，并查一次被拒绝的改动），`Closed` 时退出。
 
 客户端开启了后台同步（`sync_in_background`）：服务器推送的新邮件同样经 `MessagesChanged` 出现。启动和
 添加账户时仍手动同步一次，把错误显示成通知；后台同步的错误只记日志。后台同步在两次完整同步之间只盯
 INBOX，所以打开一个文件夹时同步它（`MailClient::sync_folder`，一分钟内同步过的跳过，见
 [同步 / 打开的文件夹](sync.md#打开的文件夹)）；失败只记日志，连不上服务器已由侧栏底部说明。
 
-- `FoldersChanged` / 账户增删：重读侧栏。
-- `MessagesChanged`：重读侧栏（计数）；列表显示的是这个文件夹或搜索结果时重读已显示的行，按行的
-  身份保持选中。选中的邮件刷新后不见了（被删除、UIDVALIDITY 改变）时，列表发出 `ListEvent::Cancel`
-  （与按 Escape 相同），读信区随之清空；用户自己移走的除外（见"读与改"）。
-- `DraftsChanged`：只重数该账户的草稿（`count_drafts`，不读正文）——写信窗口每次停顿都保存，侧栏
-  别的内容不会因此变化；正显示该账户的草稿时刷新列表。`OutboxChanged`：重读侧栏，正显示该账户的发件箱
-  时刷新列表。`AccountStatusChanged`：更新侧栏底部的连接说明。`PendingOpsChanged`：报告被拒绝的改动。
-- 同步期间事件比读取快得多，所以读侧栏和刷新列表都合并请求：同一时间最多一次读取，期间再有事件只记
-  一个"过期"标记，完成后补读一次。只替换 GPUI 侧的任务不够，已交给引擎的读取照样会做完。切换文件夹
-  则直接替换任务，带代际号丢弃过期结果。
+哪个事件重读什么由 `refresh::Refresh::after` 一张表决定：
+
+- **侧栏**一次读完：`MailClient::overview` 在一个读事务里取所有账户的文件夹（含计数）、草稿数和发件箱，
+  不是每个账户 2 次查询、各自一次运行时往返。连接状态不在数据库里，不进快照：结果落到窗口时才取
+  `account_status`，所以不会比它的事件旧。账户增删、`FoldersChanged`、`MessagesChanged`（计数）、
+  `DraftsChanged`、`OutboxChanged` 都重读侧栏。草稿数以前单独 `count_drafts`，但它的结果与侧栏的读取
+  互相没有先后，晚到的旧值会盖住新的；侧栏本身只有一次一读，最后一次读取一定在最后一次变化之后。
+- **列表**：`MessagesChanged` 且列表显示这个文件夹，或显示搜索结果（搜索跨所有账户和文件夹，任何
+  文件夹变了都可能影响结果）；`DraftsChanged` / `OutboxChanged` 且显示该账户的草稿 / 发件箱。重读已
+  显示的行，按行的身份保持选中（`message_list::reselect`）。选中的邮件刷新后不见了（被删除、
+  UIDVALIDITY 改变）时，列表发出 `ListEvent::Cancel`（与按 Escape 相同），读信区随之清空；用户自己
+  移走的除外（见"读与改"）。
+- `AccountStatusChanged`：直接更新侧栏底部的连接说明。`PendingOpsChanged`：报告被拒绝的改动，同一时间
+  只查一次，期间再有事件补查一次（忘掉它们本身也发这个事件）。
+- **节流**（`refresh::Throttle`）：一次读取之后 200 ms 内的事件先攒着，间隔结束时合在一起读一次，然后
+  再等一个间隔；一个间隔里没有事件就回到空闲，下一个事件立即读。单个改动（标记已读）马上显示，一次
+  同步的几十个事件每 200 ms 最多读一轮。不按"同步进行中"去抖：后台同步不经过窗口的 `syncing` 计数。
+- 节流之下，读侧栏和刷新列表各自还合并请求（侧栏和被拒绝的改动用 `refresh::Coalesce`）：同一时间最多一次读取，期间再有事件只记一个"过期"标记，
+  完成后补读一次。只替换 GPUI 侧的任务不够，已交给引擎的读取照样会做完。切换文件夹则直接替换任务，
+  带代际号丢弃过期结果。
+- **搜索结果分页**，和文件夹一样每页 200 条，滚到底再取下一页（`SearchQuery::offset`），不再在
+  500 条处静默截断。
 
 ## 读信
 

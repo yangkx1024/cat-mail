@@ -12,6 +12,7 @@ mod message_list;
 mod move_to;
 mod outbox;
 mod panes;
+mod refresh;
 mod sidebar;
 #[cfg(test)]
 mod tests;
@@ -21,8 +22,8 @@ pub(crate) use commands::report_failure;
 use std::time::Duration;
 
 use catmail_core::{
-    Account, AccountId, AccountStatus, Event, Flags, FolderId, FolderRole, MailClient, OutboxEntry,
-    RecvError,
+    Account, AccountId, AccountOverview, AccountStatus, Event, Flags, FolderId, FolderRole,
+    MailClient, OutboxEntry, RecvError,
 };
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::list::{ListEvent, ListState};
@@ -40,6 +41,7 @@ use crate::settings::Preferences;
 use add_account::{AddAccount, AddAccountEvent};
 use folders::AccountFolders;
 use message_list::{MessageList, Row, Source};
+use refresh::{Coalesce, Refresh, Throttle};
 
 /// How long typing in the search field pauses before it searches.
 const SEARCH_DELAY: Duration = Duration::from_millis(200);
@@ -47,6 +49,10 @@ const SEARCH_DELAY: Duration = Duration::from_millis(200);
 /// Opening a folder synced longer ago than this syncs it. Background sync keeps only
 /// INBOX current between full syncs; the server can't tell us about the others.
 const SYNC_ON_OPEN_AFTER: Duration = Duration::from_secs(60);
+
+/// After reading the sidebar or the list again for the engine's events, how long the
+/// next events wait to be read together. A sync sends one per batch of messages.
+const REFRESH_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Where the sidebar's selection is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +91,18 @@ pub struct AccountEntry {
     pub status: AccountStatus,
 }
 
+impl AccountEntry {
+    fn new(overview: AccountOverview, status: AccountStatus) -> Self {
+        Self {
+            account: overview.account,
+            folders: AccountFolders::new(overview.folders),
+            drafts: overview.drafts,
+            outbox: overview.outbox,
+            status,
+        }
+    }
+}
+
 pub struct Mailbox {
     pub(crate) client: MailClient,
     /// `None` until the first load finishes.
@@ -94,16 +112,21 @@ pub struct Mailbox {
     pub(crate) syncing: usize,
     /// [`SYNC_ON_OPEN_AFTER`], except in tests that open folders synced just now.
     pub(crate) sync_on_open_after: Duration,
+    /// [`REFRESH_INTERVAL`], except in tests, whose clock only moves when told to.
+    pub(crate) refresh_interval: Duration,
+    throttle: Throttle,
     /// The sign-in form, shown instead of the mailbox while it is open.
     adding_account: Option<(Entity<AddAccount>, Subscription)>,
     pub(crate) search: Entity<InputState>,
     pub(crate) messages: Entity<ListState<MessageList>>,
     pub(crate) reader: Entity<Reader>,
     focus_handle: FocusHandle,
-    /// Folders are being read; `folders_stale` asks for one more read after that.
-    loading_folders: bool,
-    folders_stale: bool,
+    reading_folders: Coalesce,
+    /// Looking for refused changes, coalesced like reading.
+    checking_refused: Coalesce,
     _load_folders: Task<()>,
+    _throttle: Task<()>,
+    _refused: Task<()>,
     _search: Task<()>,
     _events: Task<()>,
     _subscriptions: Vec<Subscription>,
@@ -157,10 +180,8 @@ impl Mailbox {
                 if event == Err(RecvError::Closed) {
                     break;
                 }
-                let updated = this.update_in(cx, |this, window, cx| match event {
-                    Ok(event) => this.on_engine_event(event, window, cx),
-                    // Missed some: everything shown may be stale.
-                    Err(_) => this.reload(window, cx),
+                let updated = this.update_in(cx, |this, window, cx| {
+                    this.on_engine_event(event.as_ref().ok(), window, cx)
                 });
                 if updated.is_err() {
                     break; // The window is gone.
@@ -174,14 +195,18 @@ impl Mailbox {
             place: None,
             syncing: 0,
             sync_on_open_after: SYNC_ON_OPEN_AFTER,
+            refresh_interval: REFRESH_INTERVAL,
+            throttle: Throttle::default(),
             adding_account: None,
             search,
             messages,
             reader,
             focus_handle: cx.focus_handle(),
-            loading_folders: false,
-            folders_stale: false,
+            reading_folders: Coalesce::default(),
+            checking_refused: Coalesce::default(),
             _load_folders: Task::ready(()),
+            _throttle: Task::ready(()),
+            _refused: Task::ready(()),
             _search: Task::ready(()),
             _events: events,
             _subscriptions: subscriptions,
@@ -233,53 +258,51 @@ impl Mailbox {
         cx.notify();
     }
 
-    fn on_engine_event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
-        let source = self.messages.read(cx).delegate().source().cloned();
-        let refresh_if =
-            |this: &mut Self, shown: bool, window: &mut Window, cx: &mut Context<Self>| {
-                if shown {
-                    this.messages
-                        .update(cx, |list, cx| message_list::refresh(list, window, cx));
-                }
-            };
+    /// `event` is `None` when some were missed: anything shown may be out of date.
+    fn on_engine_event(
+        &mut self,
+        event: Option<&Event>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let shown = self.messages.read(cx).delegate().source().cloned();
+        let refresh = self.throttle.ask(Refresh::after(event, shown.as_ref()));
+        self.read_again(refresh, window, cx);
         match event {
-            Event::AccountAdded { .. }
-            | Event::AccountRemoved { .. }
-            | Event::FoldersChanged { .. } => self.load_folders(window, cx),
-            Event::MessagesChanged { folder, .. } => {
-                // Unread and total counts may have changed too.
-                self.load_folders(window, cx);
-                let shown = matches!(&source, Some(Source::Folder(f)) if *f == folder)
-                    || matches!(source, Some(Source::Search(_)));
-                refresh_if(self, shown, window, cx);
-            }
-            Event::DraftsChanged { account } => {
-                // Every pause in typing saves a draft: only the count can have changed.
-                self.count_drafts(account, window, cx);
-                refresh_if(self, source == Some(Source::Drafts(account)), window, cx);
-            }
-            Event::OutboxChanged { account } => {
-                self.load_folders(window, cx);
-                refresh_if(self, source == Some(Source::Outbox(account)), window, cx);
-            }
-            Event::AccountStatusChanged { account } => {
+            Some(&Event::AccountStatusChanged { account }) => {
                 let status = self.client.account_status(account);
                 if let Some(entry) = self.account_mut(account) {
                     entry.status = status;
                     cx.notify();
                 }
             }
-            Event::PendingOpsChanged { account } => {
-                self.report_refused_changes(account, window, cx)
-            }
-            Event::MessageSent { .. } => {}
+            Some(Event::PendingOpsChanged { .. }) | None => self.report_refused_changes(window, cx),
+            Some(_) => {}
         }
     }
 
-    fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.load_folders(window, cx);
-        self.messages
-            .update(cx, |list, cx| message_list::refresh(list, window, cx));
+    /// Reads the sidebar or the list again, as [`Throttle::ask`] or
+    /// [`Throttle::elapsed`] said, and waits out an interval after that.
+    fn read_again(&mut self, refresh: Refresh, window: &mut Window, cx: &mut Context<Self>) {
+        if refresh.is_empty() {
+            return;
+        }
+        if refresh.sidebar {
+            self.load_folders(window, cx);
+        }
+        if refresh.list {
+            self.messages
+                .update(cx, |list, cx| message_list::refresh(list, window, cx));
+        }
+        let interval = self.refresh_interval;
+        self._throttle = cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(interval).await;
+            this.update_in(cx, |this, window, cx| {
+                let held = this.throttle.elapsed();
+                this.read_again(held, window, cx);
+            })
+            .ok();
+        });
     }
 
     fn account_mut(&mut self, id: AccountId) -> Option<&mut AccountEntry> {
@@ -298,70 +321,39 @@ impl Mailbox {
         self.place?.account_in(self.accounts.as_deref()?)
     }
 
-    /// Reads the accounts, their folders, drafts and outbox again. During a sync, events
-    /// arrive faster than this completes, so requests are coalesced: at most one read
-    /// runs, and one more follows if anything changed meanwhile.
+    /// Reads the accounts, their folders, drafts and outbox again (see [`Coalesce`]).
     fn load_folders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.loading_folders {
-            self.folders_stale = true;
+        if !self.reading_folders.start() {
             return;
         }
-        self.loading_folders = true;
         let client = self.client.clone();
         self._load_folders = cx.spawn_in(window, async move |this, cx| {
-            let loaded = async {
-                let mut outbox = client.list_outbox(None).await?;
-                let mut loaded = Vec::new();
-                for account in client.list_accounts().await? {
-                    let folders = AccountFolders::new(client.list_folders(account.id).await?);
-                    let drafts = client.count_drafts(account.id).await?;
-                    let (own, rest) = outbox.into_iter().partition(|e| e.account_id == account.id);
-                    outbox = rest;
-                    loaded.push(AccountEntry {
-                        status: client.account_status(account.id),
-                        account,
-                        folders,
-                        drafts,
-                        outbox: own,
-                    });
-                }
-                Ok::<_, catmail_core::Error>(loaded)
-            }
-            .await;
+            let loaded = client.overview().await;
             this.update_in(cx, |this, window, cx| {
-                this.loading_folders = false;
+                let again = this.reading_folders.finish();
                 match loaded {
-                    Ok(accounts) => this.set_accounts(accounts, window, cx),
+                    Ok(accounts) => {
+                        // Not stored: taken now, it is never older than its event.
+                        let accounts = accounts
+                            .into_iter()
+                            .map(|a| {
+                                let status = this.client.account_status(a.account.id);
+                                AccountEntry::new(a, status)
+                            })
+                            .collect();
+                        this.set_accounts(accounts, window, cx)
+                    }
                     Err(e) => window.push_notification(
                         Notification::error(format!("Couldn't load folders: {e}")),
                         cx,
                     ),
                 }
-                if std::mem::take(&mut this.folders_stale) {
+                if again {
                     this.load_folders(window, cx);
                 }
             })
             .ok();
         });
-    }
-
-    fn count_drafts(&mut self, account: AccountId, window: &mut Window, cx: &mut Context<Self>) {
-        let client = self.client.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let Ok(drafts) = client.count_drafts(account).await else {
-                return;
-            };
-            this.update(cx, |this, cx| {
-                if let Some(entry) = this.account_mut(account)
-                    && entry.drafts != drafts
-                {
-                    entry.drafts = drafts;
-                    cx.notify();
-                }
-            })
-            .ok();
-        })
-        .detach();
     }
 
     fn set_accounts(

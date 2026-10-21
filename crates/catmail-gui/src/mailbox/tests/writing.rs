@@ -255,13 +255,13 @@ fn an_attachment_that_fails_stops_the_send(cx: &mut TestAppContext) {
         window.press("secondary-enter", cx);
     })
     .unwrap();
-    // The window stays, with the reason, and nothing goes out.
-    for _ in 0..50 {
+    // The window stays, with the reason, and nothing goes out: the send is called off
+    // when the reason is shown.
+    let reason = Some("Not sent: check the attachments first.".to_owned());
+    wait_until(|| {
         cx.run_until_parked();
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    std::thread::sleep(Duration::from_millis(200));
-    cx.run_until_parked();
+        cx.read(crate::composer::errors) == [reason.clone()]
+    });
     assert_eq!(cx.update(|cx| cx.windows().len()), 2);
     assert!(mail.sent().is_empty());
 }
@@ -303,10 +303,8 @@ fn a_draft_opened_twice_at_once_gets_one_window(cx: &mut TestAppContext) {
         }
     })
     .unwrap();
+    // The second found the first on its way, and did nothing.
     composer_window(cx, window);
-    for _ in 0..20 {
-        cx.run_until_parked();
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    cx.run_until_parked();
     assert_eq!(cx.update(|cx| cx.windows().len()), 2);
 }

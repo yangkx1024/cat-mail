@@ -37,7 +37,12 @@ fn open_mailbox(cx: &mut App, mail: &TestMail) -> (AnyWindowHandle, Entity<Mailb
     cx.set_reduce_motion(true);
     let client = mail.client.clone();
     gpui_kit::open_window(window_options(), cx, |window, cx| {
-        cx.new(|cx| Mailbox::new(client, window, cx))
+        cx.new(|cx| {
+            let mut mailbox = Mailbox::new(client, window, cx);
+            // Nothing waits for an interval: the test clock moves only when told to.
+            mailbox.refresh_interval = Duration::ZERO;
+            mailbox
+        })
     })
     .unwrap()
 }

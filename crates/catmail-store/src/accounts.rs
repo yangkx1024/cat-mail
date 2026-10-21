@@ -73,7 +73,7 @@ impl<'c> Accounts<'c> {
     pub fn list(&self) -> Result<Vec<Account>> {
         let conn = self.conn;
         let sql = format!("SELECT {COLUMNS} FROM accounts ORDER BY id");
-        let mut stmt = conn.prepare(&sql)?;
+        let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map([], from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }

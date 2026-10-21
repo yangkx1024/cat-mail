@@ -20,6 +20,17 @@ use crate::mailbox::Mailbox;
 use crate::settings::{Appearance, Preferences, TEXT_SIZES};
 use crate::theme::appearance::ImportCandidate;
 
+/// The id of the list of sections; GPUI Kit names the items after it (`section_item`).
+const SECTIONS: &str = "settings-sections";
+
+/// The element id of the section labelled `label` in the list of sections: GPUI Kit's
+/// `SidebarMenu` numbers its items.
+#[cfg(test)]
+pub(crate) fn section_item(label: &str) -> String {
+    let ix = Section::ALL.iter().position(|&(_, l, _)| l == label);
+    format!("{SECTIONS}-{}", ix.expect("no such section"))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Section {
     Appearance,
@@ -118,8 +129,7 @@ impl SettingsView {
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let border = cx.theme().border;
-        // As GPUI Kit's own settings page draws its pages. The items are
-        // `settings-sections-<index>`.
+        // As GPUI Kit's own settings page draws its pages.
         let sections = SidebarMenu::new()
             .children(Section::ALL.iter().map(|&(section, label, icon)| {
                 SidebarMenuItem::new(label)
@@ -130,7 +140,7 @@ impl Render for SettingsView {
                         cx.notify();
                     }))
             }))
-            .render("settings-sections", window, cx);
+            .render(SECTIONS, window, cx);
         let nav = div()
             .flex_none()
             .w(rems(10.))

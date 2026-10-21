@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AccountId, ReportedError};
+use crate::{AccountId, Folder, OutboxEntry, ReportedError};
 
 /// Transport security for an IMAP or SMTP connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +131,18 @@ pub struct AccountStatus {
     /// Reaching the SMTP server to send failed. Queued messages wait meanwhile, without
     /// any of them counting it as an attempt.
     pub send: Option<ServerProblem>,
+}
+
+/// An account with what is shown next to it, read at once: its folders, its drafts and
+/// what waits in its outbox.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountOverview {
+    pub account: Account,
+    pub folders: Vec<Folder>,
+    /// Drafts not handed to "send".
+    pub drafts: usize,
+    /// Not sent yet (sent ones leave the outbox), oldest first.
+    pub outbox: Vec<OutboxEntry>,
 }
 
 /// Failures in a row reaching a server, or working with it.

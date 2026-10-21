@@ -451,6 +451,18 @@ impl<'c> PendingOps<'c> {
         }
     }
 
+    /// Forgets every failed or conflicting op of the account (of every account with
+    /// `None`), and returns them, oldest first.
+    pub fn dismiss_settled(&self, account: Option<AccountId>) -> Result<Vec<PendingOp>> {
+        let mut settled = self.list(account)?;
+        settled.retain(|op| op.status != OpStatus::Pending);
+        let mut stmt = self.conn.prepare_cached(
+            "DELETE FROM pending_ops WHERE status <> ?1 AND (?2 IS NULL OR account_id = ?2)",
+        )?;
+        stmt.execute(params![OpStatus::Pending.as_str(), account.map(|a| a.0)])?;
+        Ok(settled)
+    }
+
     pub fn count_pending(&self, account: AccountId) -> Result<u32> {
         Ok(self.conn.query_row(
             "SELECT count(*) FROM pending_ops WHERE account_id = ?1 AND status = 'pending'",
@@ -1633,5 +1645,27 @@ mod tests {
         f.write(|db| db.ops().failed(f.inbox, &ops, "NO"));
         assert_eq!(f.write(|db| db.ops().dismiss(op)), Some(f.account));
         assert_eq!(f.write(|db| db.ops().dismiss(op)), None);
+    }
+
+    #[test]
+    fn settled_ops_are_dismissed_together_and_pending_ones_kept() {
+        let f = setup();
+        let (m2, m3) = (f.message(f.inbox, 2), f.message(f.inbox, 3));
+        f.write(|db| db.ops().set_flags(&[m2], Flags::SEEN, Flags::empty(), 0));
+        let ops = f.pending(f.inbox);
+        f.write(|db| db.ops().failed(f.inbox, &ops, "NO"));
+        f.write(|db| db.ops().set_flags(&[m3], Flags::SEEN, Flags::empty(), 0));
+
+        let other = AccountId(f.account.0 + 1);
+        assert!(
+            f.write(|db| db.ops().dismiss_settled(Some(other)))
+                .is_empty()
+        );
+        let dismissed = f.write(|db| db.ops().dismiss_settled(None));
+        assert_eq!(dismissed.len(), 1);
+        assert_eq!(dismissed[0].status, OpStatus::Failed);
+        let left = f.ops();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].status, OpStatus::Pending);
     }
 }

@@ -90,31 +90,25 @@ impl Mailbox {
     }
 
     /// Changes the server refused are undone locally by the engine; this says so, once
-    /// per change, and forgets them.
-    pub(super) fn report_refused_changes(
-        &mut self,
-        account: AccountId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// per change, and forgets them. Coalesced like reading (dismissing them sends
+    /// another event).
+    pub(super) fn report_refused_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.checking_refused.start() {
+            return;
+        }
         let client = self.client.clone();
-        cx.spawn_in(window, async move |_, cx| {
-            let Ok(ops) = client.list_pending(Some(account)).await else {
-                return;
-            };
-            for op in ops.into_iter().filter(|op| op.status != OpStatus::Pending) {
-                // Dismissing first means a second event can't report it again.
-                if client.dismiss_pending(op.id).await.is_err() {
-                    continue;
+        self._refused = cx.spawn_in(window, async move |this, cx| {
+            let refused = client.dismiss_settled(None).await.unwrap_or_default();
+            this.update_in(cx, |this, window, cx| {
+                for op in &refused {
+                    window.push_notification(Notification::warning(refused_change(op)), cx);
                 }
-                let message = refused_change(&op);
-                cx.update(|window, cx| {
-                    window.push_notification(Notification::warning(message), cx)
-                })
-                .ok();
-            }
-        })
-        .detach();
+                if this.checking_refused.finish() {
+                    this.report_refused_changes(window, cx);
+                }
+            })
+            .ok();
+        });
     }
 
     // Commands on the selected message.

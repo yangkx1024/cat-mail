@@ -188,6 +188,11 @@ impl TestMail {
         pollster::block_on(self.client.sync_account(self.account.unwrap())).unwrap();
     }
 
+    /// From now on the server refuses changes to messages, with this reason.
+    pub fn refuse_changes(&self, reason: &str) {
+        self.fake.state().faults.refuse_changes = Some(reason.into());
+    }
+
     /// Puts a new message into one of the server's mailboxes, without syncing.
     pub fn deliver(&self, mailbox: &str, subject: &str) {
         self.fake
