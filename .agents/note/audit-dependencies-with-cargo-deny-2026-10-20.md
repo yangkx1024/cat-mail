@@ -17,6 +17,9 @@ MIME / HTML 输入，依赖里新披露的漏洞、许可证问题或者混进�
 - 安全公告在 PR 上也阻塞：新公告要么升级依赖，要么在 `deny.toml` 里带原因忽略，不放宽检查。
   每周一定时跑一次，新公告不用等下一次提交。SARIF 只在 main / 定时任务上传（fork 的 PR 没有
   上传权限，跟踪的也应该是 main 的告警）。
+- `unsound` 默认只查直接依赖（`unmaintained` 默认查全部），显式设成 `all`，间接依赖的 unsound
+  公告也会失败。SARIF 导出时 cargo-deny 会丢掉 note 级别的诊断（包括被忽略的公告），所以忽略
+  的公告不会出现在 Security 页，不需要另外过滤。
 - `bans` 不禁止重复版本：GPUI 带来大量无法统一的重复依赖，警告只是噪音。真正要禁止的是第二套
   TLS / 加密实现：aws-lc-rs、OpenSSL、native-tls、boring（rustls 只用 ring，见 `Cargo.toml`）。
 - 许可证白名单按当前依赖树列出的宽松许可证，没出现的不预先放行（cargo-deny 会对没用到的条目

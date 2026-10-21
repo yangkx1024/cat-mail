@@ -17,6 +17,8 @@ all-features = true
 [advisories]
 # Vulnerabilities, unsound and unmaintained crates all fail the check. An advisory that
 # doesn't affect us goes here with the reason, and is revisited when its crate updates.
+# unsound only covers direct dependencies by default; unmaintained already covers all.
+unsound = "all"
 ignore = [
     # Unmaintained, no known vulnerability, and only reachable through gpui-kit's own
     # dependencies (fonts, SVG, accessibility, D-Bus); they go when gpui-kit drops them.
