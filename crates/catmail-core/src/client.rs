@@ -330,11 +330,12 @@ impl MailClient {
     }
 
     /// Brings the account's folders and message headers up to date with the server.
-    /// Waits if the account is already syncing. Progress is committed as it goes, so
-    /// a sync that fails (or whose future is dropped) leaves what it fetched, and the
-    /// next one resumes. A folder the server refuses is reported in its
-    /// [`FolderSyncReport`](crate::FolderSyncReport); losing the connection fails the
-    /// whole call.
+    /// Other syncs of the account go in between its folders, one at a time, and a folder
+    /// one of them completed since this call began isn't synced again. Progress is
+    /// committed as it goes, so a sync that fails (or whose future is dropped) leaves
+    /// what it fetched, and the next one resumes. A folder the server refuses is reported
+    /// in its [`FolderSyncReport`](crate::FolderSyncReport); losing the connection fails
+    /// the whole call.
     pub async fn sync_account(&self, id: AccountId) -> Result<SyncReport> {
         self.rt
             .run(sync::sync_account(self.engine.clone(), id))
@@ -343,9 +344,10 @@ impl MailClient {
 
     /// Brings one folder up to date with the server, as [`sync_account`](Self::sync_account)
     /// does for each (queued local changes go first), unless it completed a sync less than
-    /// `max_age` ago, e.g. in the account's sync this call waited for. `None` if it didn't
-    /// sync: the folder was fresh enough or can't hold messages. For a folder the user
-    /// opens: background sync keeps only INBOX current between full syncs.
+    /// `max_age` ago, e.g. in a sync of the account that was running. That one doesn't
+    /// hold this call up for more than the folder it is syncing. `None` if it didn't sync:
+    /// the folder was fresh enough or can't hold messages. For a folder the user opens:
+    /// background sync keeps only INBOX current between full syncs.
     pub async fn sync_folder(
         &self,
         folder: FolderId,

@@ -64,6 +64,6 @@ pub struct Folder {
     pub selectable: bool,
     pub unread_count: u32,
     pub total_count: u32,
-    /// Unix timestamp, seconds, of the last completed sync.
+    /// Unix timestamp, milliseconds, of the last completed sync.
     pub last_synced_at: Option<i64>,
 }

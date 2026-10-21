@@ -746,3 +746,48 @@ async fn a_skipped_folder_sync_leaves_the_account_status_alone() {
     let problem = env.client.account_status(env.account).sync;
     assert!(problem.is_some_and(|p| p.auth_failed));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_folder_goes_in_between_the_folders_of_a_full_sync() {
+    let mut state = state_with(&["one"]);
+    state.mailboxes.push(FakeMailbox::new("Archive"));
+    state.mailboxes.push(FakeMailbox::new("Later"));
+    let env = env(state).await;
+    env.sync().await;
+    let later = env.folder("Later").await.id;
+    {
+        let mut st = env.fake.state();
+        st.mailbox_mut("Later").append_simple("new");
+        // Holds the full sync in its first folder until the folder sync is waiting.
+        st.faults.slow = Some(("EXAMINE INBOX".into(), Duration::from_millis(500)));
+    }
+    let start = env.fake.state().log.len();
+
+    let (client, account) = (env.client.clone(), env.account);
+    let full = tokio::spawn(async move { client.sync_account(account).await });
+    env.fake
+        .wait_until(|st| st.received("EXAMINE INBOX") >= 2)
+        .await;
+    let report = env
+        .client
+        .sync_folder(later, Duration::ZERO)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.added, 1);
+
+    let full = full.await.unwrap().unwrap();
+    let examined: Vec<_> = env
+        .commands_since(start)
+        .into_iter()
+        .filter_map(|c| Some(c.strip_prefix("EXAMINE ")?.split(' ').next()?.to_owned()))
+        .collect();
+    assert_eq!(
+        examined,
+        ["INBOX", "Later", "Archive"],
+        "the opened folder went next, and the full sync left it alone after"
+    );
+    assert_eq!(full.folders.len(), 3, "{full:?}");
+    assert_eq!(folder_report(&full, "Later").added, 0);
+    assert_eq!(env.subjects("Later").await, ["new"]);
+}

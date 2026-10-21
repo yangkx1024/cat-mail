@@ -57,7 +57,8 @@ const IDLE_SESSIONS_PER_ACCOUNT: usize = 2;
 /// A removed account keeps its entry, marked `removed`, so work that looks at it later
 /// is cancelled at once rather than racing the removal. Account ids are never reused.
 struct AccountState {
-    /// Serializes syncs.
+    /// Serializes syncs. A sync of every folder holds it for one folder at a time (see
+    /// `sync::run`); the lock is fair, so whatever waits for it meanwhile goes next.
     sync: Arc<tokio::sync::Mutex<()>>,
     /// Serializes work on the outbox, so an entry is never sent or saved twice at once.
     send: Arc<tokio::sync::Mutex<()>>,
@@ -84,7 +85,7 @@ pub(crate) enum Activity {
     Send,
 }
 
-/// Held while syncing an account, or while working on its outbox.
+/// Held while syncing (a folder of) an account, or while working on its outbox.
 pub(crate) struct Permit {
     _guard: OwnedMutexGuard<()>,
     account: AccountId,
@@ -92,17 +93,9 @@ pub(crate) struct Permit {
 }
 
 impl Permit {
-    /// Runs `work` holding the permit. Fails with [`Error::AccountNotFound`] if the
-    /// account was removed before, and stops it with [`Error::Cancelled`] if it is
-    /// removed meanwhile.
-    pub async fn run<T>(mut self, work: impl Future<Output = Result<T>>) -> Result<T> {
-        if self.cancellation.is_cancelled() {
-            return Err(Error::AccountNotFound(self.account.to_string()));
-        }
-        tokio::select! {
-            result = work => result,
-            () = self.cancellation.cancelled() => Err(Error::Cancelled),
-        }
+    /// Runs `work` holding the permit, as [`Cancellation::run`].
+    pub async fn run<T>(self, work: impl Future<Output = Result<T>>) -> Result<T> {
+        self.cancellation.run(self.account, work).await
     }
 }
 
@@ -112,6 +105,22 @@ pub(crate) struct Cancellation(watch::Receiver<bool>);
 impl Cancellation {
     pub fn is_cancelled(&self) -> bool {
         *self.0.borrow()
+    }
+
+    /// Runs `work` on `account`. Fails with [`Error::AccountNotFound`] if the account was
+    /// removed before, and stops it with [`Error::Cancelled`] if it is removed meanwhile.
+    pub async fn run<T>(
+        mut self,
+        account: AccountId,
+        work: impl Future<Output = Result<T>>,
+    ) -> Result<T> {
+        if self.is_cancelled() {
+            return Err(Error::AccountNotFound(account.to_string()));
+        }
+        tokio::select! {
+            result = work => result,
+            () = self.cancelled() => Err(Error::Cancelled),
+        }
     }
 
     /// Resolves once the account is being removed (at once if it already is), or the
@@ -348,7 +357,7 @@ impl Engine {
         lock(&self.account(account).status).clone()
     }
 
-    /// For work on `account` other than sync. Obtain it before checking that the
+    /// For work on `account` without a permit. Obtain it before checking that the
     /// account (or the row worked on) still exists: a removal is then seen whether it
     /// started before or after.
     pub fn cancellation(&self, account: AccountId) -> Cancellation {
@@ -436,7 +445,16 @@ pub(crate) fn backoff(first: Duration, failures: u32, max: Duration) -> Duration
 
 /// Now, in unix seconds.
 pub(crate) fn now() -> i64 {
+    since_epoch().as_secs() as i64
+}
+
+/// Now, in unix milliseconds.
+pub(crate) fn now_millis() -> i64 {
+    since_epoch().as_millis() as i64
+}
+
+fn since_epoch() -> Duration {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64)
+        .unwrap_or_default()
 }
