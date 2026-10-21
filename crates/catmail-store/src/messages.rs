@@ -451,11 +451,12 @@ mod tests {
     use catmail_types::Folder;
 
     use super::*;
+    use crate::Store;
     use crate::folders::RemoteFolder;
-    use crate::{Store, test_util};
+    use crate::test_util::{self, TestStore};
 
-    fn setup() -> (Store, AccountId, Folder) {
-        let store = Store::open_in_memory().unwrap();
+    fn setup() -> (TestStore, AccountId, Folder) {
+        let store = test_util::store();
         let account = test_util::account(&store, "a@example.com");
         let inbox = RemoteFolder {
             remote_name: "INBOX".into(),

@@ -909,12 +909,13 @@ mod tests {
     use catmail_types::{FlagState, Folder};
 
     use super::*;
+    use crate::Db;
     use crate::folders::RemoteFolder;
     use crate::messages::NewMessage;
-    use crate::{Db, Store, test_util};
+    use crate::test_util::{self, TestStore};
 
     struct Fixture {
-        store: Store,
+        store: TestStore,
         account: AccountId,
         inbox: FolderId,
         archive: FolderId,
@@ -933,7 +934,7 @@ mod tests {
 
     /// INBOX with UIDs 1..=3 (1 is read), an empty Archive and Trash, all synced.
     fn setup() -> Fixture {
-        let store = Store::open_in_memory().unwrap();
+        let store = test_util::store();
         let account = test_util::account(&store, "a@example.com");
         let folders: Vec<Folder> = store
             .write(|db| {

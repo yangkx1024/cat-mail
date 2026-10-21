@@ -131,7 +131,7 @@ mod tests {
     use rusqlite::types::Type;
 
     use super::*;
-    use crate::Store;
+    use crate::test_util;
 
     fn new_account(email: &str) -> NewAccount {
         NewAccount {
@@ -158,7 +158,7 @@ mod tests {
 
     #[test]
     fn insert_get_list_delete() {
-        let store = Store::open_in_memory().unwrap();
+        let store = test_util::store();
         let conn = store.conn();
         let accounts = Accounts::new(&conn);
 
@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn ids_are_not_reused() {
-        let store = Store::open_in_memory().unwrap();
+        let store = test_util::store();
         let a = Accounts::new(&store.conn())
             .insert(&new_account("a@example.com"), &key("a@example.com"))
             .unwrap();
@@ -208,7 +208,7 @@ mod tests {
 
     #[test]
     fn duplicate_email_is_rejected() {
-        let store = Store::open_in_memory().unwrap();
+        let store = test_util::store();
         Accounts::new(&store.conn())
             .insert(&new_account("a@example.com"), &key("a@example.com"))
             .unwrap();
@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn corrupt_enum_is_reported() {
-        let store = Store::open_in_memory().unwrap();
+        let store = test_util::store();
         let a = Accounts::new(&store.conn())
             .insert(&new_account("a@example.com"), &key("a@example.com"))
             .unwrap();
