@@ -1,14 +1,15 @@
 //! IMAP sync of folders and message headers.
 //!
-//! First changed drafts are uploaded and the queued local changes replayed (see `ops`). Then per folder: EXAMINE,
-//! compare UIDVALIDITY, diff UIDs to find new and vanished
-//! messages, refresh flags of known messages (only the changed ones with CONDSTORE),
-//! then fetch new headers newest first in batches. Every batch is its own transaction,
-//! so an interrupted sync keeps what it fetched and the next one only diffs again. The
-//! folder's cursor (UIDNEXT, HIGHESTMODSEQ) is written last, once the folder matches
-//! the server as of the EXAMINE.
+//! First changed drafts are uploaded and the queued local changes replayed (see `ops`).
+//! Then per folder: EXAMINE, compare UIDVALIDITY, diff UIDs to find new and vanished
+//! messages, refresh flags of known messages (only the changed ones with CONDSTORE, else
+//! all of them in windows), then fetch new headers newest first in batches. Every batch
+//! is its own transaction, so an interrupted sync keeps what it fetched and the next one
+//! only diffs again. The folder's cursor (UIDNEXT, HIGHESTMODSEQ) is written last, once
+//! the folder matches the server as of the EXAMINE.
 
 use std::collections::HashSet;
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,6 +26,10 @@ use crate::{Error, Result, connection, ops};
 
 /// New messages per UID FETCH, and per transaction.
 const FETCH_BATCH: usize = 200;
+
+/// Stored messages per flags FETCH, and per transaction, on a server that can't say
+/// which changed: the whole answer is held in memory.
+const FLAGS_WINDOW: usize = 5000;
 
 pub(crate) async fn sync_account(engine: Arc<Engine>, account_id: AccountId) -> Result<SyncReport> {
     let permit = engine.sync_permit(account_id).await;
@@ -148,7 +153,7 @@ async fn sync_reported(
     if let Some(r) = replayed {
         (report.ops_applied, report.ops_failed) = (r.applied, r.failed);
     }
-    match sync_folder(engine, session, account, folder, &mut report).await {
+    match sync_folder(engine, session, account, folder, true, &mut report).await {
         Ok(()) => {}
         Err(Error::Imap(e)) if !e.is_fatal() => {
             tracing::warn!(folder = %folder.name, error = %e, "folder sync failed");
@@ -159,13 +164,15 @@ async fn sync_reported(
     Ok(report)
 }
 
-/// Syncs INBOX alone on `session`, leaving it selected (read-only). False if the account
-/// has no INBOX to sync (or doesn't know of one yet). Call with the account's sync
-/// permit.
+/// Syncs INBOX alone on `session`, leaving it selected (read-only). Without
+/// `refresh_flags`, the flags of stored messages are only refreshed where that is cheap
+/// (CONDSTORE), and the sync doesn't count as completed. False if the account has no
+/// INBOX to sync (or doesn't know of one yet). Call with the account's sync permit.
 pub(crate) async fn sync_inbox(
     engine: &Arc<Engine>,
     session: &mut Session,
     account_id: AccountId,
+    refresh_flags: bool,
 ) -> Result<bool> {
     let inbox = engine
         .read(move |db| {
@@ -180,7 +187,15 @@ pub(crate) async fn sync_inbox(
         return Ok(false);
     };
     let mut report = FolderSyncReport::new(inbox.id, &inbox.name);
-    sync_folder(engine, session, account_id, &inbox, &mut report).await?;
+    sync_folder(
+        engine,
+        session,
+        account_id,
+        &inbox,
+        refresh_flags,
+        &mut report,
+    )
+    .await?;
     Ok(true)
 }
 
@@ -189,6 +204,7 @@ async fn sync_folder(
     session: &mut Session,
     account: AccountId,
     folder: &FolderSyncState,
+    refresh_flags: bool,
     report: &mut FolderSyncReport,
 ) -> Result<()> {
     let id = folder.id;
@@ -227,16 +243,33 @@ async fn sync_folder(
     }
 
     // Flags of messages we already had. With CONDSTORE only what changed since the last
-    // complete sync, and nothing at all if HIGHESTMODSEQ hasn't moved.
+    // complete sync, and nothing at all if HIGHESTMODSEQ hasn't moved. Without it all
+    // of them, unless the caller can do without. Skipping is never right with CONDSTORE:
+    // the cursor written below would claim the changes were seen.
+    let refresh_flags = refresh_flags || status.highest_modseq.is_some();
     let unchanged = modseq.is_some() && modseq == status.highest_modseq;
-    if count > report.removed && !unchanged {
+    if count > report.removed && !unchanged && refresh_flags {
         let since = status.highest_modseq.and(modseq);
-        let states = session.fetch_flags(max_uid, since).await?;
-        report.updated = engine
-            .write(move |db| Ok(db.messages().update_flags(id, &states)? as u32))
-            .await?;
-        if report.updated > 0 {
-            changed();
+        // Only what changed comes back with CHANGEDSINCE; without it, one window of
+        // stored messages at a time, so the answer held in memory stays bounded.
+        let windows = match since {
+            Some(_) => vec![RangeInclusive::new(1, max_uid)],
+            None => engine
+                .read(move |db| db.messages().uids(id))
+                .await?
+                .chunks(FLAGS_WINDOW)
+                .map(|w| w[0]..=w[w.len() - 1])
+                .collect(),
+        };
+        for uids in windows {
+            let states = session.fetch_flags(uids, since).await?;
+            let updated = engine
+                .write(move |db| Ok(db.messages().update_flags(id, &states)? as u32))
+                .await?;
+            if updated > 0 {
+                report.updated += updated;
+                changed();
+            }
         }
     }
 
@@ -262,7 +295,7 @@ async fn sync_folder(
     if complete {
         let (uidnext, modseq) = (status.uidnext, status.highest_modseq);
         engine
-            .write(move |db| db.folders().set_synced(id, uidnext, modseq))
+            .write(move |db| db.folders().set_synced(id, uidnext, modseq, refresh_flags))
             .await?;
     }
     Ok(())

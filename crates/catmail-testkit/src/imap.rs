@@ -1473,10 +1473,12 @@ fn replace_line(pattern: &mut Option<String>, out: Vec<u8>, with: &[u8]) -> Vec<
 /// Whether `uid` is in an IMAP UID set like `1:3,7,9:*`, with `*` meaning the highest
 /// UID in the mailbox (so `5:*` matches it even when it is below 5).
 fn uid_set_contains(set: &str, uid: u32, mb: &FakeMailbox) -> bool {
-    let max_uid = mb.messages.iter().map(|m| m.uid).max().unwrap_or(0);
+    // Called for every message: finding the highest UID each time would make a FETCH
+    // on a large mailbox quadratic.
+    let max_uid = std::cell::OnceCell::new();
     let bound = |s: &str| {
         if s == "*" {
-            max_uid
+            *max_uid.get_or_init(|| mb.messages.iter().map(|m| m.uid).max().unwrap_or(0))
         } else {
             s.parse().unwrap_or(0)
         }

@@ -204,6 +204,41 @@ async fn sync_without_condstore_refetches_all_flags() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn flags_of_a_large_folder_are_fetched_in_windows_without_condstore() {
+    let mut state = ServerState::new("alice", "pw");
+    state.faults.condstore = false;
+    for i in 0..12_000 {
+        state.inbox().append_simple(&format!("m{i}"));
+    }
+    // Sparse UIDs: the windows count stored messages (5000), not UIDs.
+    for uid in (2..=4000).step_by(2) {
+        state.inbox().expunge(uid);
+    }
+    let env = env(state).await;
+    assert_eq!(folder_report(&env.sync().await, "INBOX").added, 10_000);
+
+    env.fake.state().inbox().set_flags(11_999, &["\\Seen"]);
+    env.fake.state().inbox().set_flags(3, &["\\Flagged"]);
+    let start = env.fake.state().log.len();
+    assert_eq!(folder_report(&env.sync().await, "INBOX").updated, 2);
+    let fetches: Vec<_> = env
+        .commands_since(start)
+        .into_iter()
+        .filter(|c| c.starts_with("UID FETCH"))
+        .collect();
+    assert_eq!(
+        fetches,
+        [
+            "UID FETCH 1:7000 (UID FLAGS)",
+            "UID FETCH 7001:12000 (UID FLAGS)"
+        ]
+    );
+    let messages = env.messages("INBOX").await;
+    assert!(messages.contains(&("m11998".into(), Flags::SEEN)));
+    assert!(messages.contains(&("m2".into(), Flags::FLAGGED)));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn uidvalidity_change_refetches_the_folder() {
     let env = env(state_with(&["one", "two", "three"])).await;
     env.sync().await;

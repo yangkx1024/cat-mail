@@ -56,9 +56,11 @@ pub(crate) struct Connection {
     /// command (servers report new mail and expunges whenever they can): the last EXISTS
     /// less the EXPUNGEs since, and whether it reported a change since the mailbox was
     /// opened. A change is an EXISTS with a new count, an EXPUNGE, a VANISHED, and while
-    /// idling a FETCH (outside IDLE that is usually the answer to our own FETCH).
+    /// idling a FETCH (outside IDLE that is usually the answer to our own FETCH), which
+    /// also counts as changed flags.
     exists: u32,
     changed: bool,
+    flags_changed: bool,
 }
 
 impl Connection {
@@ -80,6 +82,7 @@ impl Connection {
             out_of_step: false,
             exists: 0,
             changed: false,
+            flags_changed: false,
         }
     }
 
@@ -221,10 +224,11 @@ impl Connection {
                         idling = false;
                     }
                 }
-                // Whatever it was, look at the mailbox again.
+                // Whatever it was, look at the mailbox (and its flags) again.
                 Err(Interrupt::Error(e)) => {
                     tracing::warn!(error = %e, "skipping malformed server response during IDLE");
                     self.changed = true;
+                    self.flags_changed = true;
                 }
             }
         }
@@ -315,6 +319,7 @@ impl Connection {
     pub fn mailbox_opened(&mut self, exists: u32) {
         self.exists = exists;
         self.changed = false;
+        self.flags_changed = false;
     }
 
     /// The selected mailbox's message count, as of the server's last word.
@@ -325,6 +330,12 @@ impl Connection {
     /// Whether the server reported a change to the selected mailbox since it was opened.
     pub fn mailbox_changed(&self) -> bool {
         self.changed
+    }
+
+    /// Whether the server reported changed flags in the selected mailbox while idling
+    /// since it was opened.
+    pub fn flags_changed(&self) -> bool {
+        self.flags_changed
     }
 
     /// Returns `Some` once the command identified by `tag` has completed.
@@ -377,7 +388,10 @@ impl Connection {
                 self.changed = true;
             }
             Data::Vanished { .. } => self.changed = true,
-            Data::Fetch { .. } if idling => self.changed = true,
+            Data::Fetch { .. } if idling => {
+                self.changed = true;
+                self.flags_changed = true;
+            }
             _ => {}
         }
     }

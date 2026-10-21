@@ -27,9 +27,13 @@
    - 否则 `UID SEARCH UID <游标>:*` 只取游标之后的 UID；"本地条数 + 新邮件数 = EXISTS" 说明
      没有删除，不必传输大文件夹的完整 UID 列表。
    - 仍对不上（有删除，或没有游标）时才 `UID SEARCH ALL`，与本地 UID 列表求差集。
-5. **已有邮件的 flags。** `UID FETCH 1:<本地最大 UID> (FLAGS)`，有 CONDSTORE 时加
-   `(CHANGEDSINCE <游标>)`，HIGHESTMODSEQ 没变则整个跳过；没有 CONDSTORE（或 NOMODSEQ）时
-   每次全量拉。有未回放的标记操作时，把它们叠加在服务器的 flags 上（`Messages::update_flags`）；
+5. **已有邮件的 flags。** 有 CONDSTORE 时一条 `UID FETCH 1:<本地最大 UID> (FLAGS) (CHANGEDSINCE <游标>)`，
+   HIGHESTMODSEQ 没变则整个跳过。没有 CONDSTORE（或 NOMODSEQ）时只能全量拉：严格命令的答复整个
+   缓冲在内存里，所以把本地 UID 列表每 5000 个分成一个窗口（窗口取其首尾 UID 为范围，UID 再稀疏
+   也不会发出空命令）、一条 FETCH、一个事务，内存有界，断线时已写入的窗口保留。后台同步两次完整
+   同步之间的 INBOX 步骤可以不拉（见[后台同步](#后台同步与-idle)）；这样的同步照样写游标，但不算
+   完成的同步、不更新 `last_synced_at`。有 CONDSTORE 时不能跳过：写入的 HIGHESTMODSEQ 会声称
+   这些变化已经看过。有未回放的标记操作时，把它们叠加在服务器的 flags 上（`Messages::update_flags`）；
    只有 MODSEQ 变化不算 flags 更新。
 6. **拉取新邮件。** 从新到旧，每批 200 封
    `UID FETCH (UID FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (…)])`，
@@ -94,7 +98,12 @@ flags，重复的批次不产生重复行）。HIGHESTMODSEQ 用 EXAMINE 时刻�
   `Session::idle` 发现打开 INBOX 以来已经有过变化就立即返回，任务再同步一遍。
 - **重新 IDLE。** 每次 IDLE 最长 `idle`（10 分钟，RFC 2177 要求不超过 29 分钟）。期间什么也没发生
   就直接再 IDLE，不同步：IDLE 与 DONE 的往返已经说明连接还活着，无声断开的连接（NAT 忘了它）在那时
-  超时。没有 CONDSTORE 的服务器上同步 INBOX 要拉全部 flags，不该每 10 分钟做一次。很多家用 NAT 五分钟
+  超时。没有 CONDSTORE 的服务器上同步 INBOX 要拉全部 flags，不该每 10 分钟做一次。
+- **INBOX 的 flags。** 没有 CONDSTORE 时，两次完整同步之间的 INBOX 步骤只在 IDLE 报告了 flags 变化
+  （IDLE 期间的 FETCH，或无法解析的行，`Session::flags_changed`）时才拉全部 flags；新邮件、删除、
+  本地改动唤醒的步骤和轮询都不拉，否则五万封的收件箱每来一封新邮件就是一次全量 flags 遍历。轮询时
+  其他客户端改的 flags 要等下一次完整同步，或用户打开 INBOX 时的同步（这些步骤不更新
+  `last_synced_at`，所以不会让它显得刚同步过）。刚做完完整同步的那一步也不再拉一遍。很多家用 NAT 五分钟
   左右就忘掉安静的连接，所以连接都开着 TCP keepalive（见[连接层](protocol.md#连接层)），几分钟内发现，
   不必等到这次 IDLE 到期。
 - **不正常的 IDLE。** 服务器自己用 OK 结束 IDLE 算安静地结束，照常再 IDLE；但连续三次一开始就这样

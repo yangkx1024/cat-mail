@@ -297,6 +297,13 @@ impl Session {
         self.conn.idle(stop, max).await
     }
 
+    /// Whether the server reported changed flags in the selected mailbox while idling
+    /// since it was opened. Only IDLE says so: outside it, a FETCH is usually the
+    /// answer to our own.
+    pub fn flags_changed(&self) -> bool {
+        self.conn.flags_changed()
+    }
+
     /// Sets `add` and clears `remove` on messages of the selected mailbox, leaving their
     /// other flags alone. UIDs the mailbox doesn't have are skipped, as IMAP does.
     pub async fn uid_store(&mut self, uids: &[u32], add: Flags, remove: Flags) -> Result<()> {
@@ -574,14 +581,15 @@ impl Session {
         Ok((fetched, skipped))
     }
 
-    /// Current flags of messages with UIDs up to `last_uid`, or with CONDSTORE only of
-    /// those changed since `changed_since`.
+    /// Current flags of messages with UIDs in `uids`, or with CONDSTORE only of those
+    /// changed since `changed_since`.
     pub async fn fetch_flags(
         &mut self,
-        last_uid: u32,
+        uids: RangeInclusive<u32>,
         changed_since: Option<u64>,
     ) -> Result<Vec<FlagState>> {
-        let Some(last_uid) = NonZeroU32::new(last_uid) else {
+        let first = NonZeroU32::new(*uids.start()).unwrap_or(NonZeroU32::MIN);
+        let Some(last) = NonZeroU32::new(*uids.end()).filter(|&last| last >= first) else {
             return Ok(Vec::new());
         };
         if self.selected_exists()? == 0 {
@@ -595,13 +603,13 @@ impl Session {
                 modifiers.push(FetchModifier::ChangedSince(since));
             }
         }
-        let set = SequenceSet::from(Sequence::from(NonZeroU32::MIN..=last_uid));
+        let set = SequenceSet::from(Sequence::from(first..=last));
         // Strict: a lost line would hide a flag change for good once the caller stores
         // the new HIGHESTMODSEQ.
         let response = self.conn.execute(uid_fetch(set, items, modifiers)).await?;
 
-        // `1:n` matches the highest UID even if it's above n; skip that one.
-        Ok(merge_fetches(response, |uid| uid <= last_uid.get())
+        // Some servers answer a range above the highest UID with that one, as for `n:*`.
+        Ok(merge_fetches(response, |uid| uids.contains(&uid))
             .into_iter()
             .filter_map(|(uid, m)| m.state(uid))
             .collect())
