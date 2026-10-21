@@ -746,3 +746,103 @@ async fn a_skipped_folder_sync_leaves_the_account_status_alone() {
     let problem = env.client.account_status(env.account).sync;
     assert!(problem.is_some_and(|p| p.auth_failed));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_folder_goes_in_between_the_folders_of_a_full_sync() {
+    let mut state = state_with(&["one"]);
+    state.mailboxes.push(FakeMailbox::new("Archive"));
+    state.mailboxes.push(FakeMailbox::new("Later"));
+    let env = env(state).await;
+    env.sync().await;
+    let later = env.folder("Later").await.id;
+    {
+        let mut st = env.fake.state();
+        st.mailbox_mut("Later").append_simple("new");
+        // Holds the full sync in its first folder until the folder sync is waiting.
+        st.faults.slow = Some(("EXAMINE INBOX".into(), Duration::from_millis(500)));
+    }
+    let start = env.fake.state().log.len();
+
+    let (client, account) = (env.client.clone(), env.account);
+    let full = tokio::spawn(async move { client.sync_account(account).await });
+    env.fake
+        .wait_until(|st| st.received("EXAMINE INBOX") >= 2)
+        .await;
+    let report = env
+        .client
+        .sync_folder(later, Duration::ZERO)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.added, 1);
+
+    let full = full.await.unwrap().unwrap();
+    let examined: Vec<_> = env
+        .commands_since(start)
+        .into_iter()
+        .filter_map(|c| Some(c.strip_prefix("EXAMINE ")?.split(' ').next()?.to_owned()))
+        .collect();
+    assert_eq!(
+        examined,
+        ["INBOX", "Later", "Archive"],
+        "the opened folder went next, and the full sync left it alone after"
+    );
+    assert_eq!(full.folders.len(), 3, "{full:?}");
+    assert_eq!(folder_report(&full, "Later").added, 0);
+    assert_eq!(env.subjects("Later").await, ["new"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_sync_doesnt_skip_a_folder_whose_sync_began_before_it() {
+    let mut state = state_with(&[]);
+    // Without CONDSTORE every sync fetches the flags, which is where it is held up.
+    state.faults.condstore = false;
+    state.mailboxes.push(FakeMailbox::new("Archive"));
+    state.mailbox_mut("Archive").append_simple("old");
+    let env = env(state).await;
+    env.sync().await;
+    let archive = env.folder("Archive").await.id;
+    let fetches = {
+        let mut st = env.fake.state();
+        st.faults.slow = Some(("UID FETCH".into(), Duration::from_millis(500)));
+        st.received("UID FETCH")
+    };
+
+    let folder_sync = tokio::spawn({
+        let client = env.client.clone();
+        async move { client.sync_folder(archive, Duration::ZERO).await }
+    });
+    // Past its EXAMINE: what arrives now is news to it.
+    env.fake
+        .wait_until(|st| st.received("UID FETCH") > fetches)
+        .await;
+    {
+        let mut st = env.fake.state();
+        // The FETCH already held stays held; the full sync's needn't be.
+        st.faults.slow = None;
+        st.mailbox_mut("Archive").append_simple("new");
+    }
+
+    // Asked for while the folder sync runs, so it has to see the new message.
+    let full = env.sync().await;
+    folder_sync.await.unwrap().unwrap();
+    assert_eq!(folder_report(&full, "Archive").added, 1, "{full:?}");
+    assert_eq!(env.subjects("Archive").await, ["new", "old"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clock_set_back_doesnt_make_a_full_sync_skip_folders() {
+    let mut state = state_with(&["one"]);
+    state.mailboxes.push(FakeMailbox::new("Archive"));
+    let env = env(state).await;
+    env.sync().await;
+    // Synced before the clock was set back a day: stamped in what is now the future.
+    env.sql(
+        "UPDATE folders SET last_synced_at = last_synced_at + 86400
+         WHERE remote_name = 'Archive'",
+    );
+    env.fake.state().mailbox_mut("Archive").append_simple("new");
+
+    let report = env.sync().await;
+    assert_eq!(folder_report(&report, "Archive").added, 1, "{report:?}");
+}

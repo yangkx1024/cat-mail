@@ -11,7 +11,7 @@
 use std::collections::HashSet;
 use std::ops::RangeInclusive;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use catmail_proto::imap::{ChangedFlags, FetchedMessage, ListedMailbox, MailboxStatus, Session};
 use catmail_store::{FolderSyncState, NewMessage, RemoteFolder};
@@ -32,8 +32,9 @@ const FETCH_BATCH: usize = 200;
 const FLAGS_WINDOW: usize = 5000;
 
 pub(crate) async fn sync_account(engine: Arc<Engine>, account_id: AccountId) -> Result<SyncReport> {
-    let permit = engine.sync_permit(account_id).await;
-    let result = permit
+    // `run` takes the permit itself, folder by folder.
+    let result = engine
+        .cancellation(account_id)
         .run(async {
             let mut session = connection::connect(&engine, account_id).await?;
             let report = run(&engine, &mut session, account_id, Uploads::All).await?;
@@ -98,42 +99,78 @@ pub(crate) async fn sync_one(
 }
 
 /// Syncs every folder of the account on `session`, making queued local changes and
-/// uploading changed drafts (those `uploads` takes) first. Call with the account's sync
-/// permit.
+/// uploading changed drafts (those `uploads` takes) first. Call without the account's
+/// sync permit: it is taken for each folder rather than for the whole run, so a sync
+/// waiting for it (of the folder the user opened, say) goes in between folders instead
+/// of waiting for every one, and a folder it completed meanwhile isn't synced again.
 pub(crate) async fn run(
     engine: &Arc<Engine>,
     session: &mut Session,
     account_id: AccountId,
     uploads: Uploads,
 ) -> Result<SyncReport> {
-    let remote = remote_folders(session.list().await?);
-    let reconciled = engine
-        .write(move |db| db.folders().reconcile(account_id, &remote))
-        .await?;
-    if reconciled.changed {
-        engine.emit(Event::FoldersChanged {
-            account: account_id,
-        });
-    }
-    ops::announce(engine, &reconciled.touched);
+    let permit = engine.sync_permit(account_id).await;
+    let (start, mut replayed, ids) = permit
+        .run(async {
+            // Taken holding the permit: a sync completed after this began after it too,
+            // and saw the server as it is now or later. One that held the permit before
+            // may have seen it as it was before this was asked for.
+            let start = Instant::now();
+            let remote = remote_folders(session.list().await?);
+            let reconciled = engine
+                .write(move |db| db.folders().reconcile(account_id, &remote))
+                .await?;
+            if reconciled.changed {
+                engine.emit(Event::FoldersChanged {
+                    account: account_id,
+                });
+            }
+            ops::announce(engine, &reconciled.touched);
 
-    // Local changes first, so the sync sees the server with them made.
-    let mut replayed = ops::replay_queued(engine, session, account_id, uploads)
-        .await?
-        .folders;
-
-    let folders = engine
-        .read(move |db| db.folders().sync_states(account_id))
+            // Local changes first, so the sync sees the server with them made.
+            let replayed = ops::replay_queued(engine, session, account_id, uploads)
+                .await?
+                .folders;
+            // Only which folders, in which order: their state is read when each one's
+            // turn comes.
+            let ids: Vec<FolderId> = engine
+                .read(move |db| db.folders().sync_states(account_id))
+                .await?
+                .into_iter()
+                .filter(|f| f.selectable)
+                .map(|f| f.id)
+                .collect();
+            Ok((start, replayed, ids))
+        })
         .await?;
+
     let mut report = SyncReport {
         account: account_id,
         folders: Vec::new(),
     };
-    for folder in folders.into_iter().filter(|f| f.selectable) {
-        let replayed = replayed.remove(&folder.id);
-        let folder_report =
-            sync_reported(engine, session, account_id, &folder, replayed.as_ref()).await?;
-        report.folders.push(folder_report);
+    for id in ids {
+        let replayed = replayed.remove(&id);
+        let permit = engine.sync_permit(account_id).await;
+        let folder_report = permit
+            .run(async {
+                // Read now, not above: another sync that went in before this folder may
+                // have synced it, started a new UIDVALIDITY, or found it deleted.
+                let current = engine.read(move |db| db.folders().sync_state(id)).await?;
+                let Some(current) = current.filter(|f| f.selectable) else {
+                    return Ok(None);
+                };
+                if engine
+                    .folder_synced(account_id, id)
+                    .is_some_and(|t| t > start)
+                {
+                    return Ok(Some(replay_report(&current, replayed.as_ref())));
+                }
+                sync_reported(engine, session, account_id, &current, replayed.as_ref())
+                    .await
+                    .map(Some)
+            })
+            .await?;
+        report.folders.extend(folder_report);
     }
     engine.set_synced(account_id);
     Ok(report)
@@ -149,10 +186,7 @@ async fn sync_reported(
     folder: &FolderSyncState,
     replayed: Option<&ReplayReport>,
 ) -> Result<FolderSyncReport> {
-    let mut report = FolderSyncReport::new(folder.id, &folder.name);
-    if let Some(r) = replayed {
-        (report.ops_applied, report.ops_failed) = (r.applied, r.failed);
-    }
+    let mut report = replay_report(folder, replayed);
     let all = ChangedFlags::Unknown;
     match sync_folder(engine, session, account, folder, &all, &mut report).await {
         Ok(()) => {}
@@ -163,6 +197,16 @@ async fn sync_reported(
         Err(e) => return Err(e),
     }
     Ok(report)
+}
+
+/// A report on `folder` that says what replaying its queued changes did, and nothing else
+/// yet.
+fn replay_report(folder: &FolderSyncState, replayed: Option<&ReplayReport>) -> FolderSyncReport {
+    let mut report = FolderSyncReport::new(folder.id, &folder.name);
+    if let Some(r) = replayed {
+        (report.ops_applied, report.ops_failed) = (r.applied, r.failed);
+    }
+    report
 }
 
 /// Syncs INBOX alone on `session`, leaving it selected (read-only). Of the flags of
@@ -303,6 +347,9 @@ async fn sync_folder(
         engine
             .write(move |db| db.folders().set_synced(id, uidnext, modseq, all_flags))
             .await?;
+        if all_flags {
+            engine.set_folder_synced(account, id);
+        }
     }
     Ok(())
 }

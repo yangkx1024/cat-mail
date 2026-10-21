@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use catmail_proto::TlsConfig;
 use catmail_proto::imap::Session;
 use catmail_store::{BlobStore, Db, Store};
-use catmail_types::{AccountId, AccountStatus, DraftId, Event, ServerProblem};
+use catmail_types::{AccountId, AccountStatus, DraftId, Event, FolderId, ServerProblem};
 use tokio::sync::{Notify, OwnedMutexGuard, broadcast, watch};
 
 use crate::secrets::SecretStore;
@@ -57,7 +57,8 @@ const IDLE_SESSIONS_PER_ACCOUNT: usize = 2;
 /// A removed account keeps its entry, marked `removed`, so work that looks at it later
 /// is cancelled at once rather than racing the removal. Account ids are never reused.
 struct AccountState {
-    /// Serializes syncs.
+    /// Serializes syncs. A sync of every folder holds it for one folder at a time (see
+    /// `sync::run`); the lock is fair, so whatever waits for it meanwhile goes next.
     sync: Arc<tokio::sync::Mutex<()>>,
     /// Serializes work on the outbox, so an entry is never sent or saved twice at once.
     send: Arc<tokio::sync::Mutex<()>>,
@@ -71,6 +72,11 @@ struct AccountState {
     wake: Arc<Notify>,
     /// When the last sync of every folder finished.
     synced: Mutex<Option<Instant>>,
+    /// When each folder last completed a sync, for a sync of every folder to leave out
+    /// those another one completed since it began. Not `last_synced_at`: the wall clock
+    /// can be set back, and a time left in the future would have every full sync skip
+    /// the folder until the clock caught up.
+    folders_synced: Mutex<HashMap<FolderId, Instant>>,
     status: Mutex<AccountStatus>,
     /// When drafts were last changed, for holding back their upload while they are
     /// being written. Entries older than the delay are dropped as they are found.
@@ -84,41 +90,48 @@ pub(crate) enum Activity {
     Send,
 }
 
-/// Held while syncing an account, or while working on its outbox.
+/// Held while syncing (a folder of) an account, or while working on its outbox.
 pub(crate) struct Permit {
     _guard: OwnedMutexGuard<()>,
-    account: AccountId,
     cancellation: Cancellation,
 }
 
 impl Permit {
-    /// Runs `work` holding the permit. Fails with [`Error::AccountNotFound`] if the
-    /// account was removed before, and stops it with [`Error::Cancelled`] if it is
-    /// removed meanwhile.
-    pub async fn run<T>(mut self, work: impl Future<Output = Result<T>>) -> Result<T> {
-        if self.cancellation.is_cancelled() {
-            return Err(Error::AccountNotFound(self.account.to_string()));
-        }
-        tokio::select! {
-            result = work => result,
-            () = self.cancellation.cancelled() => Err(Error::Cancelled),
-        }
+    /// Runs `work` holding the permit, as [`Cancellation::run`].
+    pub async fn run<T>(self, work: impl Future<Output = Result<T>>) -> Result<T> {
+        self.cancellation.run(work).await
     }
 }
 
 /// Tells work on an account that the account is being removed.
-pub(crate) struct Cancellation(watch::Receiver<bool>);
+pub(crate) struct Cancellation {
+    removed: watch::Receiver<bool>,
+    account: AccountId,
+}
 
 impl Cancellation {
     pub fn is_cancelled(&self) -> bool {
-        *self.0.borrow()
+        *self.removed.borrow()
+    }
+
+    /// Runs `work` on the account. Fails with [`Error::AccountNotFound`] if the account
+    /// was removed before, and stops it with [`Error::Cancelled`] if it is removed
+    /// meanwhile.
+    pub async fn run<T>(mut self, work: impl Future<Output = Result<T>>) -> Result<T> {
+        if self.is_cancelled() {
+            return Err(Error::AccountNotFound(self.account.to_string()));
+        }
+        tokio::select! {
+            result = work => result,
+            () = self.cancelled() => Err(Error::Cancelled),
+        }
     }
 
     /// Resolves once the account is being removed (at once if it already is), or the
     /// engine is gone: work holding the engine only weakly stops then too.
     pub async fn cancelled(&mut self) {
         // Err: the sender, owned by the engine, is gone.
-        let _ = self.0.wait_for(|c| *c).await;
+        let _ = self.removed.wait_for(|c| *c).await;
     }
 }
 
@@ -205,12 +218,10 @@ impl Engine {
         account: AccountId,
         lock: impl FnOnce(&AccountState) -> &Arc<tokio::sync::Mutex<()>>,
     ) -> Permit {
-        let state = self.account(account);
-        let cancellation = Cancellation(state.removed.subscribe());
-        let guard = lock(&state).clone().lock_owned().await;
+        let cancellation = self.cancellation(account);
+        let guard = lock(&self.account(account)).clone().lock_owned().await;
         Permit {
             _guard: guard,
-            account,
             cancellation,
         }
     }
@@ -289,6 +300,18 @@ impl Engine {
         *lock(&self.account(account).synced)
     }
 
+    /// Records that `folder` just completed a sync: its messages and all their flags.
+    pub fn set_folder_synced(&self, account: AccountId, folder: FolderId) {
+        lock(&self.account(account).folders_synced).insert(folder, Instant::now());
+    }
+
+    /// When `folder` last completed a sync, if ever since the engine started.
+    pub fn folder_synced(&self, account: AccountId, folder: FolderId) -> Option<Instant> {
+        lock(&self.account(account).folders_synced)
+            .get(&folder)
+            .copied()
+    }
+
     /// Records how an attempt to get through to the account's server for `activity`
     /// ended, and announces what that changes in [`status`](Self::status). Returns the
     /// failures in a row, this one included (0 for a success). The account being removed
@@ -348,11 +371,14 @@ impl Engine {
         lock(&self.account(account).status).clone()
     }
 
-    /// For work on `account` other than sync. Obtain it before checking that the
+    /// For work on `account` without a permit. Obtain it before checking that the
     /// account (or the row worked on) still exists: a removal is then seen whether it
     /// started before or after.
     pub fn cancellation(&self, account: AccountId) -> Cancellation {
-        Cancellation(self.account(account).removed.subscribe())
+        Cancellation {
+            removed: self.account(account).removed.subscribe(),
+            account,
+        }
     }
 
     /// A logged-in connection that was recently in use, if there is one.
@@ -405,6 +431,7 @@ impl Engine {
                     idle: Mutex::default(),
                     wake: Arc::default(),
                     synced: Mutex::default(),
+                    folders_synced: Mutex::default(),
                     status: Mutex::default(),
                     draft_edits: Mutex::default(),
                 })

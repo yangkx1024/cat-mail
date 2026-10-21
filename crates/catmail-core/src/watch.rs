@@ -311,15 +311,19 @@ async fn work(
     schedule: &SyncSchedule,
     changed_flags: &ChangedFlags,
 ) -> Result<Wait> {
+    // The drafts that settled by now are uploaded below; those that settle later keep
+    // the next step due.
+    engine.forget_settled_drafts(account);
+    let full = full_sync_in(engine, account, schedule).is_zero();
+    if full {
+        // Takes the permit folder by folder, so syncs asked for meanwhile go in between.
+        sync::run(engine, session, account, Uploads::Settled).await?;
+    }
     let permit = engine.sync_permit(account).await;
     permit
         .run(async {
-            // The drafts that settled by now are uploaded below; those that settle later
-            // keep the next step due.
-            engine.forget_settled_drafts(account);
-            if full_sync_in(engine, account, schedule).is_zero() {
-                sync::run(engine, session, account, Uploads::Settled).await?;
-            } else {
+            // A full sync replayed them first.
+            if !full {
                 ops::replay_queued(engine, session, account, Uploads::Settled).await?;
             }
             // Last, so that it is the selected mailbox to IDLE on. Only the flags the
