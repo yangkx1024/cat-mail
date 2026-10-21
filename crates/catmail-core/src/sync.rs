@@ -13,7 +13,7 @@ use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::Duration;
 
-use catmail_proto::imap::{FetchedMessage, ListedMailbox, MailboxStatus, Session};
+use catmail_proto::imap::{ChangedFlags, FetchedMessage, ListedMailbox, MailboxStatus, Session};
 use catmail_store::{FolderSyncState, NewMessage, RemoteFolder};
 use catmail_types::{
     AccountId, Event, FolderId, FolderRole, FolderSyncReport, ReplayReport, SyncReport,
@@ -153,7 +153,8 @@ async fn sync_reported(
     if let Some(r) = replayed {
         (report.ops_applied, report.ops_failed) = (r.applied, r.failed);
     }
-    match sync_folder(engine, session, account, folder, true, &mut report).await {
+    let all = ChangedFlags::Unknown;
+    match sync_folder(engine, session, account, folder, &all, &mut report).await {
         Ok(()) => {}
         Err(Error::Imap(e)) if !e.is_fatal() => {
             tracing::warn!(folder = %folder.name, error = %e, "folder sync failed");
@@ -164,15 +165,16 @@ async fn sync_reported(
     Ok(report)
 }
 
-/// Syncs INBOX alone on `session`, leaving it selected (read-only). Without
-/// `refresh_flags`, the flags of stored messages are only refreshed where that is cheap
-/// (CONDSTORE), and the sync doesn't count as completed. False if the account has no
-/// INBOX to sync (or doesn't know of one yet). Call with the account's sync permit.
+/// Syncs INBOX alone on `session`, leaving it selected (read-only). Of the flags of
+/// stored messages, only those `changed_flags` names are refreshed, besides what
+/// CONDSTORE says changed; unless that is all of them, the sync doesn't count as
+/// completed. False if the account has no INBOX to sync (or doesn't know of one yet).
+/// Call with the account's sync permit.
 pub(crate) async fn sync_inbox(
     engine: &Arc<Engine>,
     session: &mut Session,
     account_id: AccountId,
-    refresh_flags: bool,
+    changed_flags: &ChangedFlags,
 ) -> Result<bool> {
     let inbox = engine
         .read(move |db| {
@@ -192,7 +194,7 @@ pub(crate) async fn sync_inbox(
         session,
         account_id,
         &inbox,
-        refresh_flags,
+        changed_flags,
         &mut report,
     )
     .await?;
@@ -204,7 +206,7 @@ async fn sync_folder(
     session: &mut Session,
     account: AccountId,
     folder: &FolderSyncState,
-    refresh_flags: bool,
+    changed_flags: &ChangedFlags,
     report: &mut FolderSyncReport,
 ) -> Result<()> {
     let id = folder.id;
@@ -243,26 +245,30 @@ async fn sync_folder(
     }
 
     // Flags of messages we already had. With CONDSTORE only what changed since the last
-    // complete sync, and nothing at all if HIGHESTMODSEQ hasn't moved. Without it all
-    // of them, unless the caller can do without. Skipping is never right with CONDSTORE:
-    // the cursor written below would claim the changes were seen.
-    let refresh_flags = refresh_flags || status.highest_modseq.is_some();
+    // complete sync, and nothing at all if HIGHESTMODSEQ hasn't moved. Without it, of
+    // those the caller says changed: all of them unless it knows which. Never fewer
+    // with CONDSTORE: the cursor written below would claim the changes were seen.
+    let all_flags = status.highest_modseq.is_some() || *changed_flags == ChangedFlags::Unknown;
     let unchanged = modseq.is_some() && modseq == status.highest_modseq;
-    if count > report.removed && !unchanged && refresh_flags {
+    if count > report.removed && !unchanged {
         let since = status.highest_modseq.and(modseq);
         // Only what changed comes back with CHANGEDSINCE; without it, one window of
         // stored messages at a time, so the answer held in memory stays bounded.
-        let windows = match since {
-            Some(_) => vec![RangeInclusive::new(1, max_uid)],
-            None => engine
+        let windows: Vec<Vec<RangeInclusive<u32>>> = match (since, changed_flags) {
+            (Some(_), _) => vec![vec![RangeInclusive::new(1, max_uid)]],
+            (None, ChangedFlags::Uids(uids)) if !all_flags => uids
+                .chunks(FLAGS_WINDOW)
+                .map(|w| w.iter().map(|&uid| uid..=uid).collect())
+                .collect(),
+            (None, _) => engine
                 .read(move |db| db.messages().uids(id))
                 .await?
                 .chunks(FLAGS_WINDOW)
-                .map(|w| w[0]..=w[w.len() - 1])
+                .map(|w| vec![RangeInclusive::new(w[0], w[w.len() - 1])])
                 .collect(),
         };
         for uids in windows {
-            let states = session.fetch_flags(uids, since).await?;
+            let states = session.fetch_flags(&uids, since).await?;
             let updated = engine
                 .write(move |db| Ok(db.messages().update_flags(id, &states)? as u32))
                 .await?;
@@ -295,7 +301,7 @@ async fn sync_folder(
     if complete {
         let (uidnext, modseq) = (status.uidnext, status.highest_modseq);
         engine
-            .write(move |db| db.folders().set_synced(id, uidnext, modseq, refresh_flags))
+            .write(move |db| db.folders().set_synced(id, uidnext, modseq, all_flags))
             .await?;
     }
     Ok(())

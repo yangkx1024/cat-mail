@@ -24,6 +24,10 @@ use crate::net::with_timeout;
 /// broken or hostile server gets near this.
 const MAX_ANSWER: usize = 256 * 1024 * 1024;
 
+/// How many messages with changed flags a connection keeps track of while idling; past
+/// that it only remembers that flags changed.
+const MAX_CHANGED_FLAGS: usize = 1000;
+
 /// What the server sent while a command ran, up to and including its tagged OK.
 #[derive(Debug, Default)]
 pub(crate) struct Response {
@@ -56,11 +60,13 @@ pub(crate) struct Connection {
     /// command (servers report new mail and expunges whenever they can): the last EXISTS
     /// less the EXPUNGEs since, and whether it reported a change since the mailbox was
     /// opened. A change is an EXISTS with a new count, an EXPUNGE, a VANISHED, and while
-    /// idling a FETCH (outside IDLE that is usually the answer to our own FETCH), which
-    /// also counts as changed flags.
+    /// idling a FETCH (outside IDLE that is usually the answer to our own FETCH).
     exists: u32,
     changed: bool,
-    flags_changed: bool,
+    /// The sequence numbers of those FETCHes, ascending, kept up to date with EXPUNGEs;
+    /// `None` once it can't tell which messages they were (too many, a VANISHED, a line
+    /// it couldn't parse).
+    changed_flags: Option<Vec<u32>>,
 }
 
 impl Connection {
@@ -82,7 +88,7 @@ impl Connection {
             out_of_step: false,
             exists: 0,
             changed: false,
-            flags_changed: false,
+            changed_flags: Some(Vec::new()),
         }
     }
 
@@ -228,7 +234,7 @@ impl Connection {
                 Err(Interrupt::Error(e)) => {
                     tracing::warn!(error = %e, "skipping malformed server response during IDLE");
                     self.changed = true;
-                    self.flags_changed = true;
+                    self.changed_flags = None;
                 }
             }
         }
@@ -319,7 +325,7 @@ impl Connection {
     pub fn mailbox_opened(&mut self, exists: u32) {
         self.exists = exists;
         self.changed = false;
-        self.flags_changed = false;
+        self.changed_flags = Some(Vec::new());
     }
 
     /// The selected mailbox's message count, as of the server's last word.
@@ -332,10 +338,11 @@ impl Connection {
         self.changed
     }
 
-    /// Whether the server reported changed flags in the selected mailbox while idling
-    /// since it was opened.
-    pub fn flags_changed(&self) -> bool {
-        self.flags_changed
+    /// The sequence numbers of the messages whose flags the server reported changed in
+    /// the selected mailbox while idling, since it was opened or this was last called;
+    /// `None` if flags changed but it can't tell where.
+    pub fn take_changed_flags(&mut self) -> Option<Vec<u32>> {
+        self.changed_flags.replace(Vec::new())
     }
 
     /// Returns `Some` once the command identified by `tag` has completed.
@@ -383,14 +390,36 @@ impl Connection {
                 self.changed |= self.exists != *n;
                 self.exists = *n;
             }
-            Data::Expunge(_) => {
+            Data::Expunge(seq) => {
                 self.exists = self.exists.saturating_sub(1);
                 self.changed = true;
+                // Later messages move down one.
+                let seq = seq.get();
+                if let Some(changed) = &mut self.changed_flags {
+                    let i = changed.partition_point(|&n| n < seq);
+                    if changed.get(i) == Some(&seq) {
+                        changed.remove(i);
+                    }
+                    changed[i..].iter_mut().for_each(|n| *n -= 1);
+                }
             }
-            Data::Vanished { .. } => self.changed = true,
-            Data::Fetch { .. } if idling => {
+            Data::Vanished { .. } => {
                 self.changed = true;
-                self.flags_changed = true;
+                // Renumbers by UIDs, which the sequence numbers can't be matched with.
+                if self.changed_flags.as_ref().is_some_and(|c| !c.is_empty()) {
+                    self.changed_flags = None;
+                }
+            }
+            Data::Fetch { seq, .. } if idling => {
+                self.changed = true;
+                if let Some(changed) = &mut self.changed_flags
+                    && let Err(i) = changed.binary_search(&seq.get())
+                {
+                    changed.insert(i, seq.get());
+                    if changed.len() > MAX_CHANGED_FLAGS {
+                        self.changed_flags = None;
+                    }
+                }
             }
             _ => {}
         }
@@ -513,6 +542,40 @@ mod tests {
             matches!(&err, Error::Protocol(text) if text.contains("half-way")),
             "{err}"
         );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn changed_flags_follow_expunges() {
+        let (ours, theirs) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            let mut theirs = BufReader::new(theirs);
+            let mut command = String::new();
+            theirs.read_line(&mut command).await.unwrap();
+            assert_eq!(command, "C1 IDLE\r\n");
+            let reports = "+ idling\r\n* 3 FETCH (FLAGS (\\Seen))\r\n* 4 FETCH (FLAGS ())\r\n\
+                           * 1 EXPUNGE\r\n* 2 EXPUNGE\r\n";
+            theirs
+                .get_mut()
+                .write_all(reports.as_bytes())
+                .await
+                .unwrap();
+            command.clear();
+            theirs.read_line(&mut command).await.unwrap();
+            assert_eq!(command, "DONE\r\n");
+            theirs.get_mut().write_all(b"C1 OK done\r\n").await.unwrap();
+        });
+        let mut conn = Connection::new(Box::new(ours), false, Duration::from_secs(10));
+        conn.mailbox_opened(5);
+
+        assert!(
+            conn.idle(std::future::pending(), Duration::from_secs(10))
+                .await
+                .unwrap()
+        );
+        // 3 became 2 and then went; 4 became 3 and then 2.
+        assert_eq!(conn.take_changed_flags(), Some(vec![2]));
+        assert_eq!(conn.take_changed_flags(), Some(Vec::new()));
         server.await.unwrap();
     }
 

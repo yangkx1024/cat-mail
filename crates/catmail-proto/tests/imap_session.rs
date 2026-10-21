@@ -1,7 +1,10 @@
+// `fetch_flags(&[1..=2], …)` is a UID set of one range, not a range meant to be collected.
+#![allow(clippy::single_range_in_vec_init)]
+
 use std::time::Duration;
 
 use catmail_proto::TlsConfig;
-use catmail_proto::imap::{CopyUid, Credentials, Error, Session};
+use catmail_proto::imap::{ChangedFlags, CopyUid, Credentials, Error, Session};
 use catmail_testkit::{FakeImap, FakeMailbox, ServerState, TestCert};
 use catmail_types::{Flags, FolderRole, Security, ServerConfig};
 
@@ -92,11 +95,17 @@ async fn reads_folders_and_messages() {
     // `3:*` matches UID 2, the highest; it must not be reported as new.
     assert!(session.uid_search_from(3).await.unwrap().is_empty());
     // Likewise `1:1` returning more than UID 1 would be wrong.
-    let flags = session.fetch_flags(1..=1, None).await.unwrap();
+    let flags = session.fetch_flags(&[1..=1], None).await.unwrap();
     assert_eq!(flags.iter().map(|f| f.uid).collect::<Vec<_>>(), [1]);
-    let flags = session.fetch_flags(2..=9, None).await.unwrap();
+    let flags = session.fetch_flags(&[2..=9], None).await.unwrap();
     assert_eq!(flags.iter().map(|f| f.uid).collect::<Vec<_>>(), [2]);
-    assert!(session.fetch_flags(3..=9, None).await.unwrap().is_empty());
+    assert!(
+        session
+            .fetch_flags(&[3..=9], None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     let messages = session.fetch_summaries(&[1, 2]).await.unwrap();
     assert_eq!(messages.len(), 2);
     let first = &messages[0];
@@ -127,9 +136,9 @@ async fn changed_since_only_returns_changed_flags() {
     let modseq = session.examine("INBOX").await.unwrap().highest_modseq;
     fake.state().inbox().set_flags(2, &["\\Flagged"]);
 
-    let all = session.fetch_flags(1..=2, None).await.unwrap();
+    let all = session.fetch_flags(&[1..=2], None).await.unwrap();
     assert_eq!(all.len(), 2);
-    let changed = session.fetch_flags(1..=2, modseq).await.unwrap();
+    let changed = session.fetch_flags(&[1..=2], modseq).await.unwrap();
     assert_eq!(changed.len(), 1);
     assert_eq!(changed[0].uid, 2);
     assert_eq!(changed[0].flags, Flags::FLAGGED);
@@ -143,7 +152,7 @@ async fn works_without_condstore() {
     let mut session = login(&fake).await;
     let status = session.examine("INBOX").await.unwrap();
     assert_eq!(status.highest_modseq, None);
-    let flags = session.fetch_flags(1..=2, Some(1)).await.unwrap();
+    let flags = session.fetch_flags(&[1..=2], Some(1)).await.unwrap();
     assert_eq!(flags.len(), 2, "no CHANGEDSINCE without CONDSTORE");
     assert!(flags.iter().all(|f| f.modseq.is_none()));
     assert!(
@@ -172,7 +181,7 @@ async fn tolerates_duplicate_reordered_and_unsolicited_responses() {
     );
     let only = session.fetch_summaries(&[1]).await.unwrap();
     assert_eq!(only.iter().map(|m| m.state.uid).collect::<Vec<_>>(), [1]);
-    let flags = session.fetch_flags(1..=2, None).await.unwrap();
+    let flags = session.fetch_flags(&[1..=2], None).await.unwrap();
     assert_eq!(flags.iter().map(|f| f.uid).collect::<Vec<_>>(), [1, 2]);
 }
 
@@ -381,7 +390,10 @@ async fn unparsable_lines_make_authoritative_answers_fail() {
 
     let (_fake, mut session) = garbled("FETCH (UID 2 FLAGS").await;
     session.examine("INBOX").await.unwrap();
-    check(session.fetch_flags(1..=2, None).await.unwrap_err(), "FETCH");
+    check(
+        session.fetch_flags(&[1..=2], None).await.unwrap_err(),
+        "FETCH",
+    );
 
     // For summaries a lost line has the missing messages asked for again, without the
     // BODYSTRUCTURE that usually makes an answer unparsable. What is still missing (here
@@ -780,19 +792,17 @@ async fn idle_reports_changes_until_stopped() {
         st.inbox().append_simple("four");
     };
     assert!(idle_while(&fake, &mut session, 1, arrive).await.unwrap());
-    assert!(!session.flags_changed());
+    assert_eq!(session.changed_flags(), &ChangedFlags::default());
     assert_eq!(session.uid_search_all().await.unwrap(), [1, 2, 3, 4]);
-    // The answer to our own FETCH is no change.
-    session.fetch_flags(1..=4, None).await.unwrap();
-    assert!(!session.flags_changed());
 
     // Another client's flag change, then an expunge.
     session.examine("INBOX").await.unwrap();
     let flag = |st: &mut ServerState| st.inbox().set_flags(2, &["\\Seen"]);
     assert!(idle_while(&fake, &mut session, 2, flag).await.unwrap());
-    assert!(session.flags_changed());
+    // With CONDSTORE, MODSEQs tell which.
+    assert_eq!(session.changed_flags(), &ChangedFlags::Unknown);
     session.examine("INBOX").await.unwrap();
-    assert!(!session.flags_changed());
+    assert_eq!(session.changed_flags(), &ChangedFlags::default());
     let expunge = |st: &mut ServerState| st.inbox().expunge(1);
     assert!(idle_while(&fake, &mut session, 3, expunge).await.unwrap());
 
@@ -809,6 +819,32 @@ async fn idle_reports_changes_until_stopped() {
     assert_eq!(session.uid_search_all().await.unwrap(), [2, 3, 4]);
     assert_eq!(fake.state().received("DONE"), 0, "DONE is not a command");
     assert_eq!(fake.state().received("IDLE"), 5);
+}
+
+#[tokio::test]
+async fn idle_names_messages_with_changed_flags_by_uid() {
+    let mut state = three_messages();
+    state.faults.condstore = false;
+    let fake = FakeImap::start(state).await;
+    let mut session = login(&fake).await;
+    session.examine("INBOX").await.unwrap();
+
+    // Reported as `* 2 FETCH` after `* 1 EXPUNGE`: UID 3.
+    let change = |st: &mut ServerState| {
+        st.inbox().expunge(1);
+        st.inbox().set_flags(3, &["\\Seen"]);
+    };
+    assert!(idle_while(&fake, &mut session, 1, change).await.unwrap());
+    assert_eq!(session.changed_flags(), &ChangedFlags::Uids(vec![3]));
+    // The answer to our own FETCH is no change.
+    session.fetch_flags(&[1..=3], None).await.unwrap();
+    assert_eq!(session.changed_flags(), &ChangedFlags::Uids(vec![3]));
+
+    // A line it can't parse might have been anything.
+    session.examine("INBOX").await.unwrap();
+    fake.state().faults.garble_idle = true;
+    assert!(session.idle(std::future::pending(), TIMEOUT).await.unwrap());
+    assert_eq!(session.changed_flags(), &ChangedFlags::Unknown);
 }
 
 #[tokio::test]
