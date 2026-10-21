@@ -103,7 +103,8 @@ flags，重复的批次不产生重复行）。HIGHESTMODSEQ 用 EXAMINE 时刻�
   （IDLE 期间的 FETCH，或无法解析的行，`Session::flags_changed`）时才拉全部 flags；新邮件、删除、
   本地改动唤醒的步骤和轮询都不拉，否则五万封的收件箱每来一封新邮件就是一次全量 flags 遍历。轮询时
   其他客户端改的 flags 要等下一次完整同步，或用户打开 INBOX 时的同步（这些步骤不更新
-  `last_synced_at`，所以不会让它显得刚同步过）。刚做完完整同步的那一步也不再拉一遍。很多家用 NAT 五分钟
+  `last_synced_at`，所以不会让它显得刚同步过）。IDLE 报告的 flags 变化记到 INBOX 真的同步成功为止：
+  这一步失败（包括只让 INBOX 失败的非致命错误）时，下一步还会拉。很多家用 NAT 五分钟
   左右就忘掉安静的连接，所以连接都开着 TCP keepalive（见[连接层](protocol.md#连接层)），几分钟内发现，
   不必等到这次 IDLE 到期。
 - **不正常的 IDLE。** 服务器自己用 OK 结束 IDLE 算安静地结束，照常再 IDLE；但连续三次一开始就这样

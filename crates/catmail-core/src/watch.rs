@@ -93,6 +93,9 @@ enum Wait {
     Idle,
     /// Nothing; check again later.
     Poll,
+    /// As `Poll`, but INBOX couldn't be synced: flag changes IDLE reported are still to
+    /// be fetched.
+    InboxFailed,
 }
 
 /// Keeps one account in sync until it is removed or the engine is gone.
@@ -120,7 +123,7 @@ pub(crate) async fn run(engine: Weak<Engine>, account: AccountId, schedule: Sync
             return;
         }
         let result = step(&strong, &mut session, account, schedule, flags_changed).await;
-        flags_changed &= result.is_err();
+        flags_changed &= !matches!(result, Ok(Wait::Idle | Wait::Poll));
         let failures = strong.report(account, Activity::Sync, &result);
         // Drafts held back while they are being written are uploaded once they settle:
         // the step runs again by then, at once for one that settled while it ran.
@@ -298,22 +301,20 @@ async fn work(
             // The drafts that settled by now are uploaded below; those that settle later
             // keep the next step due.
             engine.forget_settled_drafts(account);
-            let full = full_sync_in(engine, account, schedule).is_zero();
-            if full {
+            if full_sync_in(engine, account, schedule).is_zero() {
                 sync::run(engine, session, account, Uploads::Settled).await?;
             } else {
                 ops::replay_queued(engine, session, account, Uploads::Settled).await?;
             }
             // Last, so that it is the selected mailbox to IDLE on. Its flags are fetched
-            // in full only when the server said they changed and a full sync didn't just
-            // do it: without CONDSTORE that is every message's, too much for each new one.
-            let refresh_flags = flags_changed && !full;
-            match sync::sync_inbox(engine, session, account, refresh_flags).await {
+            // in full only when the server said they changed: without CONDSTORE that is
+            // every message's, too much for each new one.
+            match sync::sync_inbox(engine, session, account, flags_changed).await {
                 Ok(true) if session.can_idle() => Ok(Wait::Idle),
                 Ok(_) => Ok(Wait::Poll),
                 Err(Error::Imap(e)) if !e.is_fatal() => {
                     tracing::warn!(%account, error = %e, "can't sync INBOX");
-                    Ok(Wait::Poll)
+                    Ok(Wait::InboxFailed)
                 }
                 Err(e) => Err(e),
             }

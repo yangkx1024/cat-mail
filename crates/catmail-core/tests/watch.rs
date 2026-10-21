@@ -129,6 +129,28 @@ async fn without_condstore_only_changed_flags_refetch_every_flag() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_failed_flags_refresh_is_tried_again() {
+    let mut state = state();
+    state.faults.condstore = false;
+    let env = watching(state, schedule(HOUR, HOUR)).await;
+    env.wait_for_idle(1).await;
+
+    // The answer to the flags FETCH IDLE's report brings can't be parsed, once.
+    {
+        let mut st = env.fake.state();
+        st.faults.garble = Some("UID 1 FLAGS (\\Seen)".into());
+        st.inbox().set_flags(1, &["\\Seen"]);
+    }
+    eventually("one to be read", async || {
+        env.messages("INBOX")
+            .await
+            .contains(&("one".into(), Flags::SEEN))
+    })
+    .await;
+    assert!(env.fake.state().faults.garble.is_none(), "the fault fired");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn queued_changes_reach_the_server_at_once() {
     let env = watching(state(), schedule(HOUR, HOUR)).await;
     env.wait_for_idle(1).await;
