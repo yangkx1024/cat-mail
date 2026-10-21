@@ -16,7 +16,7 @@
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
-use catmail_proto::imap::Session;
+use catmail_proto::imap::{ChangedFlags, Session};
 use catmail_types::AccountId;
 use tokio::sync::Notify;
 
@@ -113,8 +113,8 @@ pub(crate) async fn run(engine: Weak<Engine>, account: AccountId, schedule: Sync
     let mut busy = 0;
     // Cleared if the server refuses IDLE even though it offers it, or cuts it short.
     let mut idle_works = true;
-    // IDLE reported changed flags in INBOX that no step has fetched yet.
-    let mut flags_changed = false;
+    // Flags in INBOX that IDLE reported changed and no step has fetched yet.
+    let mut changed_flags = ChangedFlags::default();
     loop {
         let Some(strong) = engine.upgrade() else {
             return;
@@ -122,8 +122,10 @@ pub(crate) async fn run(engine: Weak<Engine>, account: AccountId, schedule: Sync
         if cancellation.is_cancelled() {
             return;
         }
-        let result = step(&strong, &mut session, account, schedule, flags_changed).await;
-        flags_changed &= !matches!(result, Ok(Wait::Idle | Wait::Poll));
+        let result = step(&strong, &mut session, account, schedule, &changed_flags).await;
+        if matches!(result, Ok(Wait::Idle | Wait::Poll)) {
+            changed_flags = ChangedFlags::default();
+        }
         let failures = strong.report(account, Activity::Sync, &result);
         // Drafts held back while they are being written are uploaded once they settle:
         // the step runs again by then, at once for one that settled while it ran.
@@ -144,7 +146,7 @@ pub(crate) async fn run(engine: Weak<Engine>, account: AccountId, schedule: Sync
                             continue;
                         }
                         Ok(Idled::Changed) => {
-                            flags_changed |= s.flags_changed();
+                            add_changed_flags(&mut changed_flags, s.changed_flags());
                             idle_losses = 0;
                             busy = if start.elapsed() < SHORT_IDLE {
                                 busy + 1
@@ -261,6 +263,19 @@ async fn stopped(wake: &Notify, cancellation: &mut Cancellation) {
     }
 }
 
+/// Adds flag changes IDLE `reported` to those no step has fetched yet.
+fn add_changed_flags(pending: &mut ChangedFlags, reported: &ChangedFlags) {
+    match (&mut *pending, reported) {
+        (ChangedFlags::Uids(uids), ChangedFlags::Uids(more)) => {
+            uids.extend(more);
+            uids.sort_unstable();
+            uids.dedup();
+        }
+        (_, ChangedFlags::Unknown) => *pending = ChangedFlags::Unknown,
+        (ChangedFlags::Unknown, ChangedFlags::Uids(_)) => {}
+    }
+}
+
 /// How long until every folder is due to be synced again; zero if it is.
 fn full_sync_in(engine: &Engine, account: AccountId, schedule: &SyncSchedule) -> Duration {
     engine.synced(account).map_or(Duration::ZERO, |t| {
@@ -269,21 +284,22 @@ fn full_sync_in(engine: &Engine, account: AccountId, schedule: &SyncSchedule) ->
 }
 
 /// Syncs every folder if that is due, else makes queued local changes on the server
-/// (changed drafts included); then syncs INBOX, refreshing all its flags only if
-/// `flags_changed`. On the connection there, or a new one (see
+/// (changed drafts included); then syncs INBOX, refreshing the flags `changed_flags`
+/// names. On the connection there, or a new one (see
 /// [`on_session`](connection::on_session)).
 async fn step(
     engine: &Arc<Engine>,
     session: &mut Option<Session>,
     account: AccountId,
     schedule: SyncSchedule,
-    flags_changed: bool,
+    changed_flags: &ChangedFlags,
 ) -> Result<Wait> {
     // Connected before taking the permit: waiting for an unreachable server shouldn't
     // hold up syncs the user asks for.
     connection::on_session(engine, account, session, |s| {
         let engine = engine.clone();
-        Box::pin(async move { work(&engine, s, account, &schedule, flags_changed).await })
+        let changed_flags = changed_flags.clone();
+        Box::pin(async move { work(&engine, s, account, &schedule, &changed_flags).await })
     })
     .await
 }
@@ -293,7 +309,7 @@ async fn work(
     session: &mut Session,
     account: AccountId,
     schedule: &SyncSchedule,
-    flags_changed: bool,
+    changed_flags: &ChangedFlags,
 ) -> Result<Wait> {
     let permit = engine.sync_permit(account).await;
     permit
@@ -306,10 +322,10 @@ async fn work(
             } else {
                 ops::replay_queued(engine, session, account, Uploads::Settled).await?;
             }
-            // Last, so that it is the selected mailbox to IDLE on. Its flags are fetched
-            // in full only when the server said they changed: without CONDSTORE that is
-            // every message's, too much for each new one.
-            match sync::sync_inbox(engine, session, account, flags_changed).await {
+            // Last, so that it is the selected mailbox to IDLE on. Only the flags the
+            // server said changed are fetched: without CONDSTORE the rest would be every
+            // message's, too much for each new one.
+            match sync::sync_inbox(engine, session, account, changed_flags).await {
                 Ok(true) if session.can_idle() => Ok(Wait::Idle),
                 Ok(_) => Ok(Wait::Poll),
                 Err(Error::Imap(e)) if !e.is_fatal() => {

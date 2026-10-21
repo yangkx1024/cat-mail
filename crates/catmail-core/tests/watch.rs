@@ -97,7 +97,7 @@ async fn new_mail_flag_changes_and_expunges_are_pushed() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn without_condstore_only_changed_flags_refetch_every_flag() {
+async fn without_condstore_only_the_flags_idle_reports_are_fetched() {
     let mut state = state();
     state.faults.condstore = false;
     let env = watching(state, schedule(HOUR, HOUR)).await;
@@ -107,7 +107,8 @@ async fn without_condstore_only_changed_flags_refetch_every_flag() {
         st.log
             .iter()
             .filter(|c| c.line.ends_with("(UID FLAGS)"))
-            .count()
+            .map(|c| c.line.clone())
+            .collect::<Vec<_>>()
     };
     let before = flags_fetches();
 
@@ -117,15 +118,15 @@ async fn without_condstore_only_changed_flags_refetch_every_flag() {
     env.wait_for_idle(2).await;
     assert_eq!(flags_fetches(), before, "new mail fetches no flags");
 
-    // Another client's flag change, which IDLE reports, does.
-    env.fake.state().inbox().set_flags(1, &["\\Seen"]);
-    eventually("one to be read", async || {
+    // Another client's flag change, which IDLE reports: only that message's.
+    env.fake.state().inbox().set_flags(2, &["\\Seen"]);
+    eventually("two to be read", async || {
         env.messages("INBOX")
             .await
-            .contains(&("one".into(), Flags::SEEN))
+            .contains(&("two".into(), Flags::SEEN))
     })
     .await;
-    assert_eq!(flags_fetches(), before + 1);
+    assert_eq!(flags_fetches()[before.len()..], ["UID FETCH 2 (UID FLAGS)"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

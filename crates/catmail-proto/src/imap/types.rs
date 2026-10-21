@@ -28,6 +28,22 @@ impl<S: AsRef<str>> FromIterator<S> for Capabilities {
     }
 }
 
+/// Messages of the selected mailbox whose flags the server reported changed while
+/// idling (see [`Session::changed_flags`](crate::imap::Session::changed_flags)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChangedFlags {
+    /// These, by UID, ascending; none if nothing changed.
+    Uids(Vec<u32>),
+    /// Some, but it can't tell which.
+    Unknown,
+}
+
+impl Default for ChangedFlags {
+    fn default() -> Self {
+        Self::Uids(Vec::new())
+    }
+}
+
 /// One mailbox from LIST.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListedMailbox {

@@ -20,7 +20,8 @@ use secrecy::ExposeSecret;
 
 use super::connection::{Connection, Response};
 use super::{
-    Capabilities, Credentials, Error, FetchedMessage, ListedMailbox, MailboxStatus, Result, utf7,
+    Capabilities, ChangedFlags, Credentials, Error, FetchedMessage, ListedMailbox, MailboxStatus,
+    Result, utf7,
 };
 use crate::mime::{Headers, MimeNode, SUMMARY_HEADER_FIELDS, parse_headers};
 use crate::{TlsConfig, net};
@@ -37,6 +38,8 @@ pub struct Session {
     selected: Option<MailboxStatus>,
     /// Whether `selected` was opened with SELECT rather than EXAMINE.
     writable: bool,
+    /// What IDLE reported about flags in `selected`.
+    changed_flags: ChangedFlags,
 }
 
 /// Where a COPY or MOVE put the messages (COPYUID, RFC 4315).
@@ -95,6 +98,7 @@ impl Session {
             authenticated,
             selected: None,
             writable: false,
+            changed_flags: ChangedFlags::default(),
         })
     }
 
@@ -192,6 +196,7 @@ impl Session {
     /// fails. Asks the server that way, read-only. Leaves no mailbox selected.
     async fn has_inbox(&mut self) -> Result<bool> {
         self.selected = None;
+        self.changed_flags = ChangedFlags::default();
         let examine = CommandBody::Examine {
             mailbox: Mailbox::Inbox,
             parameters: Vec::new(),
@@ -217,6 +222,7 @@ impl Session {
 
     async fn open(&mut self, raw_name: &str, writable: bool) -> Result<MailboxStatus> {
         self.selected = None;
+        self.changed_flags = ChangedFlags::default();
         let mailbox = mailbox(raw_name)?;
         let parameters = if self.condstore() {
             vec![SelectParameter::CondStore]
@@ -294,14 +300,52 @@ impl Session {
         if self.conn.mailbox_changed() {
             return Ok(true);
         }
-        self.conn.idle(stop, max).await
+        let changed = self.conn.idle(stop, max).await?;
+        self.resolve_changed_flags().await?;
+        Ok(changed)
     }
 
-    /// Whether the server reported changed flags in the selected mailbox while idling
-    /// since it was opened. Only IDLE says so: outside it, a FETCH is usually the
-    /// answer to our own.
-    pub fn flags_changed(&self) -> bool {
-        self.conn.flags_changed()
+    /// The messages whose flags the server reported changed in the selected mailbox in
+    /// the last [`idle`](Self::idle) since it was opened. Only IDLE says so: outside it,
+    /// a FETCH is usually the answer to our own. Always `Unknown` for a change with
+    /// CONDSTORE, where what changed is found by MODSEQ instead.
+    pub fn changed_flags(&self) -> &ChangedFlags {
+        &self.changed_flags
+    }
+
+    /// Sets `changed_flags` to the messages the connection saw flags change on, by UID.
+    /// It knows them by sequence number, which the next EXPUNGE may change and the next
+    /// command may bring one: but not a FETCH by sequence number (RFC 3501 §7.4.1).
+    async fn resolve_changed_flags(&mut self) -> Result<()> {
+        self.changed_flags = ChangedFlags::Unknown;
+        let seqs = match self.conn.take_changed_flags() {
+            Some(seqs) if seqs.is_empty() => {
+                self.changed_flags = ChangedFlags::default();
+                return Ok(());
+            }
+            Some(seqs) if !self.modseq_enabled() => seqs,
+            _ => return Ok(()),
+        };
+        let Some(set) = uid_set(&seqs) else {
+            return Ok(());
+        };
+        let fetch = CommandBody::Fetch {
+            sequence_set: set,
+            macro_or_item_names: vec![MessageDataItemName::Uid].into(),
+            uid: false,
+            modifiers: Vec::new(),
+        };
+        match self.conn.execute(fetch).await {
+            Ok(response) => {
+                let uids = group_fetches(response, |_| true).into_keys().collect();
+                self.changed_flags = ChangedFlags::Uids(uids);
+            }
+            Err(e) if !e.is_fatal() => {
+                tracing::debug!(error = %e, "can't tell whose flags changed");
+            }
+            Err(e) => return Err(e),
+        }
+        Ok(())
     }
 
     /// Sets `add` and clears `remove` on messages of the selected mailbox, leaving their
@@ -581,15 +625,15 @@ impl Session {
         Ok((fetched, skipped))
     }
 
-    /// Current flags of messages with UIDs in `uids`, or with CONDSTORE only of those
-    /// changed since `changed_since`.
+    /// Current flags of messages with UIDs in these ranges, or with CONDSTORE only of
+    /// those changed since `changed_since`.
     pub async fn fetch_flags(
         &mut self,
-        uids: RangeInclusive<u32>,
+        uids: &[RangeInclusive<u32>],
         changed_since: Option<u64>,
     ) -> Result<Vec<FlagState>> {
-        let first = NonZeroU32::new(*uids.start()).unwrap_or(NonZeroU32::MIN);
-        let Some(last) = NonZeroU32::new(*uids.end()).filter(|&last| last >= first) else {
+        let uids = merge_ranges(uids.iter().cloned());
+        let Some(set) = sequence_set(&uids) else {
             return Ok(Vec::new());
         };
         if self.selected_exists()? == 0 {
@@ -603,13 +647,16 @@ impl Session {
                 modifiers.push(FetchModifier::ChangedSince(since));
             }
         }
-        let set = SequenceSet::from(Sequence::from(first..=last));
         // Strict: a lost line would hide a flag change for good once the caller stores
         // the new HIGHESTMODSEQ.
         let response = self.conn.execute(uid_fetch(set, items, modifiers)).await?;
 
         // Some servers answer a range above the highest UID with that one, as for `n:*`.
-        Ok(merge_fetches(response, |uid| uids.contains(&uid))
+        let wanted = |uid| {
+            let i = uids.partition_point(|r| *r.end() < uid);
+            uids.get(i).is_some_and(|r| r.contains(&uid))
+        };
+        Ok(merge_fetches(response, wanted)
             .into_iter()
             .filter_map(|(uid, m)| m.state(uid))
             .collect())
@@ -976,26 +1023,43 @@ fn convert_flags(flags: &[FlagFetch<'_>]) -> (Flags, Vec<String>) {
 
 /// Compresses UIDs into ranges: `[1, 2, 3, 7]` → `1:3,7`.
 fn uid_set(uids: &[u32]) -> Option<SequenceSet> {
-    let mut sorted: Vec<NonZeroU32> = uids.iter().filter_map(|&u| NonZeroU32::new(u)).collect();
-    sorted.sort_unstable();
-    sorted.dedup();
-    let mut sequences = Vec::new();
-    let mut iter = sorted.into_iter().peekable();
-    while let Some(start) = iter.next() {
-        let mut end = start;
-        while let Some(&next) = iter.peek() {
-            if next.get() != end.get() + 1 {
-                break;
+    sequence_set(&merge_ranges(uids.iter().map(|&uid| uid..=uid)))
+}
+
+/// The ranges sorted, overlapping and adjacent ones joined; 0, which no UID or sequence
+/// number is, left out.
+fn merge_ranges(ranges: impl IntoIterator<Item = RangeInclusive<u32>>) -> Vec<RangeInclusive<u32>> {
+    let mut ranges: Vec<_> = ranges
+        .into_iter()
+        .map(|r| (*r.start()).max(1)..=*r.end())
+        .filter(|r| !r.is_empty())
+        .collect();
+    ranges.sort_unstable_by_key(|r| *r.start());
+    let mut merged: Vec<RangeInclusive<u32>> = Vec::with_capacity(ranges.len());
+    for r in ranges {
+        match merged.last_mut() {
+            Some(last) if *r.start() <= last.end().saturating_add(1) => {
+                *last = *last.start()..=*last.end().max(r.end());
             }
-            end = next;
-            iter.next();
+            _ => merged.push(r),
         }
-        sequences.push(if start == end {
-            Sequence::from(start)
-        } else {
-            Sequence::from(start..=end)
-        });
     }
+    merged
+}
+
+/// The sequence set of ranges as [`merge_ranges`] leaves them; `None` for none.
+fn sequence_set(ranges: &[RangeInclusive<u32>]) -> Option<SequenceSet> {
+    let sequences: Vec<Sequence> = ranges
+        .iter()
+        .filter_map(|r| {
+            let (first, last) = (NonZeroU32::new(*r.start())?, NonZeroU32::new(*r.end())?);
+            Some(if first == last {
+                Sequence::from(first)
+            } else {
+                Sequence::from(first..=last)
+            })
+        })
+        .collect();
     SequenceSet::try_from(sequences).ok()
 }
 
@@ -1010,5 +1074,15 @@ mod tests {
         assert_eq!(ranges(&[0]), None);
         assert_eq!(ranges(&[7, 1, 2, 3, 3]), Some(2));
         assert_eq!(ranges(&[1, 3, 5]), Some(3));
+    }
+
+    #[test]
+    fn merges_ranges() {
+        let empty = RangeInclusive::new(6, 5);
+        assert_eq!(
+            merge_ranges([7..=9, 1..=1, 0..=0, 2..=3, 3..=4, empty, 11..=11]),
+            [1..=4, 7..=9, 11..=11]
+        );
+        assert_eq!(merge_ranges([0..=2, 3..=3]), [RangeInclusive::new(1, 3)]);
     }
 }

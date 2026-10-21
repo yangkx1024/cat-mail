@@ -1020,6 +1020,26 @@ async fn handle(
                 }
             }
         }
+        // By sequence number, as the client knows them (it may not have been told of
+        // every expunge yet); only UID.
+        "FETCH" => match &session.view {
+            Some(view)
+                if fetch_items(args)
+                    .iter()
+                    .all(|i| i.eq_ignore_ascii_case("UID")) =>
+            {
+                let set = args.first().map(Tok::text).unwrap_or_default();
+                for (i, (uid, _)) in view.messages.iter().enumerate() {
+                    let seq = i as u32 + 1;
+                    if set_contains(&set, seq, || view.messages.len() as u32) {
+                        out += &format!("* {seq} FETCH (UID {uid})\r\n");
+                    }
+                }
+                out += &format!("{tag} OK FETCH completed\r\n");
+            }
+            Some(_) => out += &format!("{tag} BAD Only UID by sequence number\r\n"),
+            None => out += &format!("{tag} BAD No mailbox selected\r\n"),
+        },
         "UID FETCH" => {
             let items = fetch_items(args);
             if header_item(&items).is_some() {
@@ -1476,9 +1496,16 @@ fn uid_set_contains(set: &str, uid: u32, mb: &FakeMailbox) -> bool {
     // Called for every message: finding the highest UID each time would make a FETCH
     // on a large mailbox quadratic.
     let max_uid = std::cell::OnceCell::new();
+    set_contains(set, uid, || {
+        *max_uid.get_or_init(|| mb.messages.iter().map(|m| m.uid).max().unwrap_or(0))
+    })
+}
+
+/// Whether the sequence set or UID set `set` has `n`; `star` is what `*` stands for.
+fn set_contains(set: &str, n: u32, star: impl Fn() -> u32) -> bool {
     let bound = |s: &str| {
         if s == "*" {
-            *max_uid.get_or_init(|| mb.messages.iter().map(|m| m.uid).max().unwrap_or(0))
+            star()
         } else {
             s.parse().unwrap_or(0)
         }
@@ -1486,9 +1513,9 @@ fn uid_set_contains(set: &str, uid: u32, mb: &FakeMailbox) -> bool {
     set.split(',').any(|part| match part.split_once(':') {
         Some((a, b)) => {
             let (a, b) = (bound(a), bound(b));
-            (a.min(b)..=a.max(b)).contains(&uid)
+            (a.min(b)..=a.max(b)).contains(&n)
         }
-        None => bound(part) == uid,
+        None => bound(part) == n,
     })
 }
 
