@@ -16,11 +16,13 @@ mod outbox;
 mod private;
 
 use std::collections::HashSet;
-use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::ops::{Deref, DerefMut};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use catmail_types::BlobHash;
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use rusqlite_migration::{M, Migrations};
 
 pub use accounts::Accounts;
@@ -43,6 +45,11 @@ const BLOB_REFERENCES: &str = "
 
 const MIGRATIONS: &[M<'static>] = &[M::up(include_str!("../migrations/0001_init.sql"))];
 
+/// Read connections kept open at most; further reads wait for one to come back.
+const MAX_READERS: usize = 4;
+
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Handle to the SQLite database. Cheap to clone.
 ///
 /// All access goes through [`Store::read`] or [`Store::write`], which hand the closure a
@@ -50,12 +57,119 @@ const MIGRATIONS: &[M<'static>] = &[M::up(include_str!("../migrations/0001_init.
 /// plus its `pending_ops` row, synced messages plus the folder cursor) are therefore
 /// committed atomically or not at all.
 ///
-/// A single connection behind a mutex for now; split into one writer plus a reader pool
-/// once sync and UI reads start contending. The closure must not call back into the
-/// same `Store`, or it deadlocks.
+/// One write connection behind a mutex plus a small pool of read-only connections, so
+/// reads (the message list) don't queue behind a sync batch's write transaction: WAL
+/// gives each read the last committed snapshot meanwhile. The closure must still not
+/// call back into the same `Store`: a write inside a write deadlocks, a read inside a
+/// write doesn't see the uncommitted change, and nested reads can exhaust the pool.
 #[derive(Clone)]
 pub struct Store {
-    conn: Arc<Mutex<Connection>>,
+    inner: Arc<Inner>,
+}
+
+struct Inner {
+    // Declared first so readers close first: the last connection to close checkpoints
+    // the WAL, which a read-only one can't.
+    /// `None` for an in-memory database, where another connection would open a second,
+    /// empty database; reads use the writer instead.
+    readers: Option<Readers>,
+    writer: Mutex<Connection>,
+}
+
+struct Readers {
+    path: PathBuf,
+    pool: Mutex<Pool>,
+    returned: Condvar,
+}
+
+struct Pool {
+    idle: Vec<Connection>,
+    /// Idle plus lent out.
+    open: usize,
+}
+
+impl Readers {
+    /// Lends an idle connection, opens one if fewer than [`MAX_READERS`] are open, or
+    /// waits for one to be returned.
+    fn get(&self) -> Result<Reader<'_>> {
+        let mut pool = lock(&self.pool);
+        loop {
+            if let Some(conn) = pool.idle.pop() {
+                return Ok(Reader {
+                    readers: self,
+                    conn: Some(conn),
+                });
+            }
+            if pool.open < MAX_READERS {
+                break;
+            }
+            pool = self
+                .returned
+                .wait(pool)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        pool.open += 1;
+        // Opening touches the file; don't make other reads wait for it.
+        drop(pool);
+        match Self::open(&self.path) {
+            Ok(conn) => Ok(Reader {
+                readers: self,
+                conn: Some(conn),
+            }),
+            Err(e) => {
+                lock(&self.pool).open -= 1;
+                self.returned.notify_one();
+                Err(e)
+            }
+        }
+    }
+
+    fn open(path: &Path) -> Result<Connection> {
+        // Read-only, so a write slipped into a `read` closure fails instead of taking
+        // the write lock behind the writer's back.
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        Ok(conn)
+    }
+}
+
+/// A pooled read connection, returned to the pool when dropped.
+struct Reader<'r> {
+    readers: &'r Readers,
+    conn: Option<Connection>,
+}
+
+impl Deref for Reader<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        self.conn.as_ref().expect("taken only on drop")
+    }
+}
+
+impl DerefMut for Reader<'_> {
+    fn deref_mut(&mut self) -> &mut Connection {
+        self.conn.as_mut().expect("taken only on drop")
+    }
+}
+
+impl Drop for Reader<'_> {
+    fn drop(&mut self) {
+        // Any transaction on it ended with its guard, also on a panic.
+        if let Some(conn) = self.conn.take() {
+            lock(&self.readers.pool).idle.push(conn);
+            self.readers.returned.notify_one();
+        }
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    // A panic while holding the lock can't leave a connection inconsistent: any open
+    // transaction is rolled back when its guard drops.
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Repositories bound to one connection and transaction.
@@ -124,25 +238,45 @@ impl Store {
         // doesn't linger in the file. Costs writing the freed pages (through the WAL),
         // also those FTS merges free.
         conn.pragma_update(None, "secure_delete", true)?;
-        Self::init(conn)
+        // Readers are opened after the migration, so they never see an older schema.
+        let readers = Readers {
+            path: path.to_owned(),
+            pool: Mutex::new(Pool {
+                idle: Vec::new(),
+                open: 0,
+            }),
+            returned: Condvar::new(),
+        };
+        Self::init(conn, Some(readers))
     }
 
     pub fn open_in_memory() -> Result<Self> {
-        Self::init(Connection::open_in_memory()?)
+        Self::init(Connection::open_in_memory()?, None)
     }
 
-    fn init(mut conn: Connection) -> Result<Self> {
+    fn init(mut conn: Connection, readers: Option<Readers>) -> Result<Self> {
         conn.pragma_update(None, "foreign_keys", true)?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         Migrations::from_slice(MIGRATIONS).to_latest(&mut conn)?;
         Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
+            inner: Arc::new(Inner {
+                readers,
+                writer: Mutex::new(conn),
+            }),
         })
     }
 
-    /// Runs `f` against a consistent snapshot. Nothing is written.
+    /// Runs `f` against a consistent snapshot: everything committed before it starts,
+    /// nothing committed while it runs. Nothing is written. Doesn't wait for a write in
+    /// progress (except on an in-memory database).
     pub fn read<T>(&self, f: impl FnOnce(&Db<'_>) -> Result<T>) -> Result<T> {
-        let mut conn = self.conn();
+        match &self.inner.readers {
+            Some(readers) => Self::snapshot(&mut *readers.get()?, f),
+            None => Self::snapshot(&mut self.conn(), f),
+        }
+    }
+
+    fn snapshot<T>(conn: &mut Connection, f: impl FnOnce(&Db<'_>) -> Result<T>) -> Result<T> {
         // Dropped without commit: a read-only transaction just ends.
         let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
         f(&Db { conn: &tx })
@@ -177,10 +311,9 @@ impl Store {
         Ok(out)
     }
 
+    /// The write connection.
     fn conn(&self) -> MutexGuard<'_, Connection> {
-        // A panic while holding the lock can't leave the connection itself inconsistent:
-        // any open transaction is rolled back when its guard drops.
-        self.conn.lock().unwrap_or_else(PoisonError::into_inner)
+        lock(&self.inner.writer)
     }
 }
 
@@ -397,6 +530,96 @@ mod tests {
             )
             .unwrap_err();
         assert!(is_constraint_violation(&err), "{err}");
+    }
+
+    fn file_store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("catmail.db")).unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn reads_do_not_wait_for_a_write() {
+        use std::sync::mpsc;
+        let (_dir, store) = file_store();
+        test_util::account(&store, "a@example.com");
+        let (written, write_started) = mpsc::channel();
+        let (finish, may_finish) = mpsc::channel::<()>();
+        let writer = std::thread::spawn({
+            let store = store.clone();
+            move || {
+                store.write(|db| {
+                    db.conn.execute("DELETE FROM accounts", [])?;
+                    written.send(()).unwrap();
+                    may_finish.recv().unwrap();
+                    Ok(())
+                })
+            }
+        });
+        write_started.recv().unwrap();
+
+        // On another thread, so a read stuck behind the write fails the test instead of
+        // hanging it.
+        let (done, read) = mpsc::channel();
+        std::thread::spawn({
+            let store = store.clone();
+            move || done.send(store.read(|db| db.accounts().list()).map(|a| a.len()))
+        });
+        let seen = read
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the read waited for the write");
+        assert_eq!(seen.unwrap(), 1, "the last committed snapshot");
+
+        finish.send(()).unwrap();
+        writer.join().unwrap().unwrap();
+        assert!(store.read(|db| db.accounts().list()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reads_cannot_write() {
+        let (_dir, store) = file_store();
+        let result = store.read(|db| {
+            db.conn
+                .execute("DELETE FROM accounts", [])
+                .map_err(Error::from)
+        });
+        let Err(Error::Sqlite(err)) = result else {
+            panic!("{result:?}");
+        };
+        assert_eq!(
+            err.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::ReadOnly),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn more_concurrent_reads_than_connections() {
+        let (_dir, store) = file_store();
+        test_util::account(&store, "a@example.com");
+        let threads = 3 * MAX_READERS;
+        let start = Arc::new(std::sync::Barrier::new(threads));
+        let handles: Vec<_> = (0..threads)
+            .map(|i| {
+                let store = store.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    for j in 0..20 {
+                        if i == 0 {
+                            test_util::account(&store, &format!("{j}@example.com"));
+                        }
+                        assert!(!store.read(|db| db.accounts().list()).unwrap().is_empty());
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let pool = lock(&store.inner.readers.as_ref().unwrap().pool);
+        assert!(pool.open <= MAX_READERS, "{}", pool.open);
+        assert_eq!(pool.idle.len(), pool.open, "all returned");
     }
 
     #[test]
