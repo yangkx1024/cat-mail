@@ -3,8 +3,9 @@
 //!
 //! GPUI Kit's own text view lays out a subset of HTML; the engine here lays out the whole
 //! page as a browser would. Each open [`Document`] lives on a thread of its own and
-//! answers requests for its height at a width, a strip of its pixels, or the link under
-//! a point. Nothing here depends on the UI toolkit. Blitz is the one engine; litehtml was
+//! answers requests for its height at a width, a strip of its pixels, what is under a
+//! point, or the text between two places ([`Selection`]). Nothing here depends on the UI
+//! toolkit. Blitz is the one engine; litehtml was
 //! compared and dropped (see `docs/architecture/gui.md`), and another would plug in as a
 //! `worker::Page` and an opener.
 //!
@@ -16,6 +17,7 @@
 
 mod blitz;
 mod pixels;
+mod selection;
 mod worker;
 
 use std::fmt;
@@ -105,6 +107,92 @@ impl fmt::Debug for Tile {
     }
 }
 
+/// A rectangle of a page, in CSS pixels from its top left.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Rect {
+    fn right(&self) -> f32 {
+        self.x + self.width
+    }
+
+    fn bottom(&self) -> f32 {
+        self.y + self.height
+    }
+
+    fn contains(&self, x: f32, y: f32) -> bool {
+        (self.x..self.right()).contains(&x) && (self.y..self.bottom()).contains(&y)
+    }
+}
+
+/// What is under a point of a page.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Hit {
+    /// The `href` of the link there.
+    pub link: Option<String>,
+    /// Whether it is on a letter.
+    pub text: bool,
+}
+
+/// One end of a [`Selection`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SelectionEnd {
+    /// Before the page's first letter.
+    Start,
+    /// The place in the text nearest a point, in CSS pixels from the top left of the
+    /// page: one between two paragraphs, or past the end of a line, is still in the text.
+    At(f32, f32),
+    /// After the page's last letter.
+    End,
+}
+
+/// What to select.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Span {
+    /// The text between two places, in either order.
+    Between(SelectionEnd, SelectionEnd),
+    /// The word or paragraph at a point, in CSS pixels from the top left of the page;
+    /// nothing if it is on no paragraph.
+    Around(f32, f32, Unit),
+}
+
+impl Span {
+    /// The same span, with its points in units `factor` times as large (window pixels to
+    /// CSS pixels, at a zoom).
+    pub fn scaled_down(self, factor: f32) -> Self {
+        let end = |end| match end {
+            SelectionEnd::At(x, y) => SelectionEnd::At(x / factor, y / factor),
+            end => end,
+        };
+        match self {
+            Span::Between(from, to) => Span::Between(end(from), end(to)),
+            Span::Around(x, y, unit) => Span::Around(x / factor, y / factor, unit),
+        }
+    }
+}
+
+/// What a double or triple click selects around the point it is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unit {
+    Word,
+    /// The run of text the point is in, between two blocks or line breaks.
+    Paragraph,
+}
+
+/// The text between two places of a page, and where it is.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Selection {
+    /// What to highlight: a rectangle for each line of each paragraph.
+    pub rects: Vec<Rect>,
+    /// The paragraphs, a line each.
+    pub text: String,
+}
+
 /// The document's thread has stopped: the engine panicked on the page.
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 #[error("the engine stopped on this message")]
@@ -118,6 +206,7 @@ mod tests {
     use pollster::block_on;
 
     use super::*;
+    use SelectionEnd::{At, End, Start};
 
     const WIDTH: f32 = 300.0;
 
@@ -206,7 +295,8 @@ mod tests {
             <div style="height:30px"><a href="mailto:a@example.com"
                 style="display:block;height:30px">block</a></div></body>"#;
         let document = open(source(html), Appearance::default(), 1.0);
-        let link = |x, y| block_on(document.link_at(WIDTH, x, y)).unwrap();
+        let hit = |x, y| block_on(document.hit(WIDTH, x, y)).unwrap();
+        let link = |x, y| hit(x, y).link;
         assert_eq!(
             link(10.0, 15.0).as_deref(),
             Some("https://example.com/x?y=1")
@@ -214,6 +304,141 @@ mod tests {
         assert_eq!(link(290.0, 15.0), None, "past the end of the line");
         assert_eq!(link(250.0, 45.0).as_deref(), Some("mailto:a@example.com"));
         assert_eq!(link(10.0, 200.0), None, "below the page");
+
+        assert!(hit(10.0, 15.0).text);
+        assert!(!hit(290.0, 15.0).text);
+    }
+
+    /// What `span` selects in `document`, laid out `WIDTH` wide.
+    fn select(document: &Document, span: Span) -> Selection {
+        block_on(document.select(WIDTH, span)).unwrap()
+    }
+
+    /// The text `span` selects in `document`.
+    fn text(document: &Document, span: Span) -> String {
+        select(document, span).text
+    }
+
+    /// Two paragraphs a line each, 30 px apart: 0..30 and 60..90, and a table below.
+    const PARAGRAPHS: &str = r#"<body style="margin:0;font-size:20px;line-height:30px">
+        <p style="margin:0 0 30px">alpha beta</p><p style="margin:0">gamma delta<br>epsilon</p>
+        <table cellspacing="0" cellpadding="0"><tr><td>left</td><td>right</td></tr></table>
+        </body>"#;
+
+    #[test]
+    fn selects_the_text_between_two_places() {
+        let document = open(source(PARAGRAPHS), Appearance::default(), 1.0);
+        let between = |from, to| select(&document, Span::Between(from, to));
+
+        let all = between(Start, End);
+        assert_eq!(all.text, "alpha beta\ngamma delta\nepsilon\nleft\nright");
+        let first = all.rects[0];
+        assert_eq!((first.x, first.y, first.height), (0.0, 0.0, 30.0));
+        assert!((60.0..150.0).contains(&first.width), "{first:?}");
+        assert_eq!(all.rects[1].y, 60.0, "{:?}", all.rects);
+
+        // From the first letter into the gap below, whichever way it is dragged.
+        let first = between(At(1.0, 15.0), At(10.0, 45.0));
+        assert_eq!(first.text, "alpha beta");
+        assert_eq!(between(At(10.0, 45.0), At(1.0, 15.0)), first);
+        // From past the end of a line to before the start of the next: the line break.
+        assert_eq!(between(At(290.0, 75.0), At(0.0, 105.0)).text, "\n");
+        // Off the side of a paragraph, the nearest end of its line.
+        assert_eq!(between(At(-5.0, 75.0), At(290.0, 75.0)).text, "gamma delta");
+        // Above or below all the text.
+        assert_eq!(between(At(10.0, -20.0), At(1.0, 15.0)).text, "");
+        assert_eq!(between(At(1.0, 135.0), At(10.0, 900.0)).text, "left\nright");
+
+        let none = open(source("<p></p>"), Appearance::default(), 1.0);
+        let nothing = select(&none, Span::Between(Start, End));
+        assert_eq!(nothing, Selection::default());
+    }
+
+    #[test]
+    fn an_inline_block_is_selected_where_it_sits_in_its_line() {
+        let html = r#"<body style="margin:0;font-size:20px;line-height:30px">
+            <p style="margin:0">before <span style="display:inline-block">INNER</span> after</p>
+            <p style="margin:0">next</p></body>"#;
+        let document = open(source(html), Appearance::default(), 1.0);
+        let between = |from, to| text(&document, Span::Between(from, to));
+        assert_eq!(between(Start, End), "before INNER after\nnext");
+        assert_eq!(
+            between(At(1.0, 15.0), At(299.0, 15.0)),
+            "before INNER after"
+        );
+        // Its own words are found inside it, not in the line around it.
+        let word = text(&document, Span::Around(90.0, 15.0, Unit::Word));
+        assert_eq!(word, "INNER");
+
+        // It is highlighted once, by its own text, not by the line around it too.
+        let all = select(&document, Span::Between(Start, End));
+        for (i, a) in all.rects.iter().enumerate() {
+            for b in &all.rects[i + 1..] {
+                let overlap = (a.right().min(b.right()) - a.x.max(b.x))
+                    .min(a.bottom().min(b.bottom()) - a.y.max(b.y));
+                assert!(overlap <= 0.5, "{a:?} and {b:?} overlap");
+            }
+        }
+        let inner = all.rects[1];
+        let after = select(
+            &document,
+            Span::Between(At(inner.right() + 1.0, 15.0), At(299.0, 15.0)),
+        );
+        assert_eq!(after.text, " after");
+        for rect in &after.rects {
+            assert!(rect.x >= inner.right() - 0.5, "{rect:?} covers {inner:?}");
+        }
+    }
+
+    #[test]
+    fn an_inline_block_at_either_end_of_a_line_is_in_it() {
+        // One ends the first line, the other starts the second.
+        let html = r#"<body style="margin:0;font-size:20px;line-height:30px">
+            <p style="margin:0">before <span style="display:inline-block">INNER</span></p>
+            <p style="margin:0"><span style="display:inline-block">FIRST</span> after</p>
+            </body>"#;
+        let document = open(source(html), Appearance::default(), 1.0);
+        let between = |from, to| text(&document, Span::Between(from, to));
+        let around = |x, y, unit| text(&document, Span::Around(x, y, unit));
+        assert_eq!(between(Start, End), "before INNER\nFIRST after");
+        // Dragged across the whole line, past the block, or to before it.
+        assert_eq!(between(At(1.0, 15.0), At(299.0, 15.0)), "before INNER");
+        let two_lines = between(At(1.0, 15.0), At(299.0, 45.0));
+        assert_eq!(two_lines, "before INNER\nFIRST after");
+        // From after the first block: nothing of its line, so no line break either.
+        assert_eq!(between(At(299.0, 15.0), At(299.0, 45.0)), "FIRST after");
+        // A paragraph has its blocks; a word next to one doesn't.
+        assert_eq!(around(5.0, 15.0, Unit::Paragraph), "before INNER");
+        assert_eq!(around(200.0, 45.0, Unit::Paragraph), "FIRST after");
+        assert_eq!(around(5.0, 15.0, Unit::Word), "before");
+        assert_eq!(around(200.0, 45.0, Unit::Word), "after");
+    }
+
+    #[test]
+    fn what_is_not_painted_is_not_selected() {
+        // Blitz paints nothing inside a hidden or transparent element, even what sets
+        // itself visible again.
+        let html = r#"<p style="visibility:hidden">HIDDEN</p><p>VISIBLE</p>
+            <p style="opacity:0">TRANSPARENT</p>
+            <div style="visibility:hidden"><p style="visibility:visible">INSIDE</p></div>"#;
+        let document = open(source(html), Appearance::default(), 1.0);
+        let all = select(&document, Span::Between(Start, End));
+        assert_eq!(all.text, "VISIBLE");
+        assert_eq!(all.rects.len(), 1);
+    }
+
+    #[test]
+    fn selects_the_word_or_paragraph_at_a_point() {
+        let document = open(source(PARAGRAPHS), Appearance::default(), 1.0);
+        let around = |x, y, unit| select(&document, Span::Around(x, y, unit));
+        assert_eq!(around(5.0, 15.0, Unit::Word).text, "alpha");
+        assert_eq!(around(5.0, 75.0, Unit::Paragraph).text, "gamma delta");
+        assert_eq!(around(5.0, 105.0, Unit::Paragraph).text, "epsilon");
+        assert_eq!(
+            around(5.0, 45.0, Unit::Word),
+            Selection::default(),
+            "between"
+        );
     }
 
     #[test]

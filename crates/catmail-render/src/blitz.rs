@@ -17,8 +17,9 @@ use blitz_html::HtmlDocument;
 use blitz_traits::net::{NetHandler, NetProvider, Request};
 use blitz_traits::shell::{ColorScheme, Viewport};
 
+use crate::selection::Text;
 use crate::worker::{Page, Pixmap, VIEWPORT_HEIGHT};
-use crate::{Appearance, Resolver, Source};
+use crate::{Appearance, Hit, Resolver, Selection, Source, Span};
 
 /// Unstyled mail reads like the rest of the app, not in the browsers' Times. A user-agent
 /// sheet, so the message's own styles win.
@@ -62,6 +63,7 @@ pub(crate) fn open(source: &Source, appearance: &Appearance, scale: f32) -> Box<
         scheme,
         width: 0.0,
         rasterizer: None,
+        text: None,
     })
 }
 
@@ -85,6 +87,17 @@ struct BlitzPage {
     width: f32,
     /// Kept between strips, which are all the same size but the last.
     rasterizer: Option<((u32, u32), VelloCpuImageRenderer)>,
+    /// The paragraphs of the last layout, once something was selected in it.
+    text: Option<Text>,
+}
+
+impl BlitzPage {
+    fn text(&mut self) -> (&BaseDocument, &Text) {
+        // Positions are on the page, not in the strip last painted.
+        self.document.set_viewport_scroll(Point { x: 0.0, y: 0.0 });
+        let text = (self.text).get_or_insert_with(|| Text::of(&self.document));
+        (&self.document, text)
+    }
 }
 
 impl Page for BlitzPage {
@@ -97,6 +110,7 @@ impl Page for BlitzPage {
         self.document
             .set_viewport(viewport(width, self.scale, self.scheme));
         self.document.resolve(0.0);
+        self.text = None;
         self.document.root_element().scroll_height()
     }
 
@@ -141,19 +155,31 @@ impl Page for BlitzPage {
         }
     }
 
-    fn link_at(&mut self, x: f32, y: f32) -> Option<String> {
+    fn hit(&mut self, x: f32, y: f32) -> Hit {
         self.document.set_viewport_scroll(Point { x: 0.0, y: 0.0 });
-        let hit = self.document.hit(x, y)?;
+        let Some(hit) = self.document.hit(x, y) else {
+            return Hit::default();
+        };
+        let mut link = None;
         let mut node = self.document.get_node(hit.node_id);
         while let Some(current) = node {
             if current.data.is_element_with_tag_name(&local_name!("a"))
                 && let Some(href) = current.attr(local_name!("href"))
             {
-                return Some(href.to_owned());
+                link = Some(href.to_owned());
+                break;
             }
             node = current.parent.and_then(|id| self.document.get_node(id));
         }
-        None
+        Hit {
+            link,
+            text: hit.is_text,
+        }
+    }
+
+    fn select(&mut self, span: Span) -> Selection {
+        let (document, text) = self.text();
+        text.select(document, span)
     }
 }
 
