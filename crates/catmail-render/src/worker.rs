@@ -16,7 +16,7 @@ use std::thread;
 
 use futures_channel::oneshot;
 
-use crate::{Appearance, Engine, Source, Stopped, Tile, pixels};
+use crate::{Appearance, Engine, Resolver, Source, Stopped, Tile, pixels};
 
 /// The height that viewport units and full-height pages resolve against. The pane's own
 /// height would relayout the page whenever the window is resized; a page is shown whole,
@@ -30,6 +30,10 @@ pub(crate) const MAX_HEIGHT: f32 = 200_000.0;
 /// An engine's page, as its thread has it: laid out at a width, painted at the scale it
 /// was opened with.
 pub(crate) trait Page {
+    /// Asks `images` from now on, and now for the images still waiting for an answer;
+    /// returns whether it answered any. They show from the next layout.
+    fn set_images(&mut self, images: Resolver) -> bool;
+
     /// Lays the document out `width` CSS pixels wide; returns its height.
     fn layout(&mut self, width: f32) -> f32;
 
@@ -86,6 +90,16 @@ impl Document {
         Ok(Self { jobs })
     }
 
+    /// Asks `images` instead of the source's resolver from now on, and now for each image
+    /// the page refers to that had no answer yet: images that came after the document
+    /// opened (inline parts downloaded, remote images fetched) show from the next
+    /// [`layout`](Self::layout), without laying the page out from scratch. `images`
+    /// should answer what the last resolver did.
+    pub fn set_images(&self, images: Resolver) {
+        // A thread that stopped has nothing to show them on.
+        let _ = self.jobs.send(Job::Images(images));
+    }
+
     /// The document's height when laid out `width` CSS pixels wide.
     pub fn layout(&self, width: f32) -> impl Future<Output = Result<f32, Stopped>> + use<> {
         self.ask(width, Ask::Layout)
@@ -120,7 +134,7 @@ impl Document {
     ) -> impl Future<Output = Result<T, Stopped>> + use<T, F> {
         let (reply, answer) = oneshot::channel();
         // A thread that stopped (it panicked) drops the request, and so the answer.
-        let _ = self.jobs.send(Job {
+        let _ = self.jobs.send(Job::At {
             width,
             ask: ask(reply),
         });
@@ -128,10 +142,13 @@ impl Document {
     }
 }
 
-/// A request, at the width the document should be laid out at for it.
-struct Job {
-    width: f32,
-    ask: Ask,
+enum Job {
+    /// A request, at the width the document should be laid out at for it.
+    At {
+        width: f32,
+        ask: Ask,
+    },
+    Images(Resolver),
 }
 
 enum Ask {
@@ -162,7 +179,16 @@ impl Ask {
 fn serve(mut page: Box<dyn Page>, canvas: [u8; 3], jobs: &mpsc::Receiver<Job>) {
     // The width and height of the last layout.
     let mut laid_out: Option<(f32, f32)> = None;
-    while let Ok(Job { width, ask }) = jobs.recv() {
+    while let Ok(job) = jobs.recv() {
+        let (width, ask) = match job {
+            Job::At { width, ask } => (width, ask),
+            Job::Images(images) => {
+                if page.set_images(images) {
+                    laid_out = None;
+                }
+                continue;
+            }
+        };
         if ask.is_canceled() {
             continue;
         }
@@ -196,6 +222,10 @@ mod tests {
     struct Slow(u64);
 
     impl Page for Slow {
+        fn set_images(&mut self, _: Resolver) -> bool {
+            false
+        }
+
         fn layout(&mut self, _: f32) -> f32 {
             thread::sleep(Duration::from_millis(self.0));
             1e9

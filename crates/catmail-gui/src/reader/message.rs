@@ -3,12 +3,11 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use catmail_core::html::{ColorUsage, color_usage, unwrap_layout_tables};
+use catmail_core::html::{ColorUsage, color_usage, remote_image_urls, unwrap_layout_tables};
 use catmail_core::{Attachment, Message, MessageId};
 use gpui_kit::SharedString;
 
 use crate::format;
-use crate::html;
 
 use super::*;
 
@@ -40,7 +39,10 @@ pub(super) struct OpenMessage {
     /// Attachments offered as files, not the inline images.
     pub(super) attachments: Vec<Attachment>,
     pub(super) images: Arc<Images>,
-    pub(super) blocked_images: bool,
+    /// The remote images the HTML refers to (`remote_image_urls`) that aren't shown yet:
+    /// the cached ones show at once, the others when the user asks.
+    pub(super) remote_images: Vec<String>,
+    pub(super) loading_remote: bool,
 }
 
 impl OpenMessage {
@@ -95,9 +97,11 @@ impl OpenMessage {
             headers,
             text,
             html,
-            blocked_images: browser_html
+            remote_images: browser_html
                 .as_deref()
-                .is_some_and(html::has_blocked_images),
+                .map(remote_image_urls)
+                .unwrap_or_default(),
+            loading_remote: false,
             colors: browser_html
                 .as_deref()
                 .map_or(ColorUsage::Unset, color_usage),
@@ -122,6 +126,10 @@ mod tests {
         assert_eq!(view.matches("<table").count(), 1, "{view}");
         assert!(view.contains("<th align=\"left\">功能</th>"), "{view}");
         assert!(view.contains("十月产品更新</h1>"), "{view}");
-        assert!(open.blocked_images, "the tracking pixel is still found");
+        assert_eq!(
+            open.remote_images.len(),
+            1,
+            "the tracking pixel is still found"
+        );
     }
 }

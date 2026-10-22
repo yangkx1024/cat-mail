@@ -18,10 +18,12 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::engine::{DEFAULT_DRAFT_UPLOAD_DELAY, Engine, blocking, now};
+use crate::html::RemoteImage;
+use crate::images::RemoteImageStream;
 use crate::runtime::Runtime;
 use crate::secrets::{KeyringSecrets, SecretStore};
 use crate::watch::{self, SyncSchedule};
-use crate::{Config, Error, Result, auth, body, connection, drafts, gc, ops, send, sync};
+use crate::{Config, Error, Result, auth, body, connection, drafts, gc, images, ops, send, sync};
 
 /// How many events [`MailClient::subscribe`]'s receivers keep unread before the oldest
 /// are dropped and they get `RecvError::Lagged`.
@@ -456,6 +458,48 @@ impl MailClient {
         self.rt
             .run(body::attachment_content(self.engine.clone(), id))
             .await
+    }
+
+    /// Starts fetching the remote images (`http`, `https`) that a message's HTML refers
+    /// to, for a reader showing them because the user asked: loading one tells the sender
+    /// the message was read, and from where, so nothing calls this on its own. Images in
+    /// the cache come from it at once, with no request; the others are fetched with no
+    /// cookies and no referrer, a few at a time, each given up on after 30 seconds or
+    /// 10 MiB, and cached. At most 200 of them. The stream gives each URL with its image, or why it couldn't be had, as it
+    /// finishes; dropping it stops the rest. Fails only if the HTTP client can't be set
+    /// up.
+    pub async fn fetch_remote_images(&self, urls: Vec<String>) -> Result<RemoteImageStream> {
+        let engine = self.engine.clone();
+        let fetcher = self.rt.run(async move { engine.image_fetcher() }).await?;
+        let cache = self.engine.image_cache.clone();
+        Ok(images::fetch(&self.rt, fetcher, cache, urls))
+    }
+
+    /// The remote images among `urls` that were shown before and are still cached, with
+    /// no request: they may show without asking the user again, as loading them tells
+    /// nobody anything.
+    pub async fn cached_remote_images(
+        &self,
+        urls: Vec<String>,
+    ) -> Result<Vec<(String, RemoteImage)>> {
+        let cache = self.engine.image_cache.clone();
+        self.rt
+            .run_blocking(move || Ok(cache.get_many(&urls)))
+            .await
+    }
+
+    /// The bytes the cache of remote images takes on disk. It keeps at most 256 MiB,
+    /// dropping the images used longest ago.
+    pub async fn image_cache_size(&self) -> Result<u64> {
+        let cache = self.engine.image_cache.clone();
+        self.rt.run_blocking(move || Ok(cache.size()?)).await
+    }
+
+    /// Deletes every cached remote image; returns the bytes freed. Messages show their
+    /// remote images again only when asked.
+    pub async fn clear_image_cache(&self) -> Result<u64> {
+        let cache = self.engine.image_cache.clone();
+        self.rt.run_blocking(move || Ok(cache.clear()?)).await
     }
 
     /// The message exactly as the server stores it (the `.eml`), downloading it first if

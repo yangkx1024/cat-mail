@@ -47,7 +47,7 @@ ignored there with a reason, never by loosening the check.
 |---|---|
 | `catmail-types` | Domain types. Pure data: no IO, no async |
 | `catmail-store` | SQLite schema, migrations, repositories, content-addressed `BlobStore`. Synchronous |
-| `catmail-proto` | IMAP (`imap-next`), SMTP, MIME adapters |
+| `catmail-proto` | IMAP (`imap-next`), SMTP, MIME adapters; remote images over HTTP |
 | `catmail-core` | Engine, services, runtime bridge, secrets, the `MailClient` facade |
 | `catmail-cli` | The `catmail` binary |
 | `catmail-gui` | The `catmail-gui` desktop binary, on GPUI Kit |

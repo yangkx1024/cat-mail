@@ -148,3 +148,41 @@ fn cancel_is_off_once_signing_in_has_started(cx: &mut TestAppContext) {
         2
     );
 }
+
+#[gpui_kit::test]
+fn clears_the_image_cache(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let images = mail.serve_images();
+    let url = images.url("/red.png");
+    let cached = |mail: &TestMail| {
+        pollster::block_on(mail.client.cached_remote_images(vec![url.clone()]))
+            .unwrap()
+            .len()
+    };
+    pollster::block_on(async {
+        let urls = vec![url.clone()];
+        let mut fetching = mail.client.fetch_remote_images(urls).await.unwrap();
+        while fetching.next().await.is_some() {}
+    });
+    assert_eq!(cached(&mail), 1);
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+
+    // Settings › Reading › Clear image cache, once the dialog knows there is one.
+    open_settings(cx, window);
+    cx.update_window(window, |_, window, cx| {
+        window.click(crate::settings::dialog::section_item("Reading"), cx);
+    })
+    .unwrap();
+    wait_until(|| {
+        cx.run_until_parked();
+        click(cx, window, "clear-image-cache");
+        cx.run_until_parked();
+        cached(&mail) == 0
+    });
+    assert_eq!(
+        pollster::block_on(mail.client.image_cache_size()).unwrap(),
+        0
+    );
+    assert_eq!(images.requests(), 1);
+}

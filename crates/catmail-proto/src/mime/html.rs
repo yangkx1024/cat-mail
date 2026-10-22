@@ -230,6 +230,38 @@ pub fn image_sources(html: &str) -> Vec<String> {
     Arc::try_unwrap(found).unwrap().into_inner().unwrap()
 }
 
+/// More remote images than any message needs to show; the rest of a longer list is left
+/// out.
+pub const MAX_REMOTE_IMAGES: usize = 200;
+
+/// The remote images in HTML that [`sanitize_html`] produced, as [`remote_image_url`]
+/// writes them, each once, in document order, at most [`MAX_REMOTE_IMAGES`]: what a
+/// reader fetches when the user asks for them. Other URLs that aren't the message's own
+/// (`file:`, relative) never load.
+pub fn remote_image_urls(html: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    for url in image_sources(html) {
+        if let Some(url) = remote_image_url(&url)
+            && !urls.contains(&url)
+        {
+            urls.push(url);
+            if urls.len() == MAX_REMOTE_IMAGES {
+                break;
+            }
+        }
+    }
+    urls
+}
+
+/// The URL of a remote (`http`, `https`) image, normalized as a URL parser writes it, or
+/// `None` for anything else. Renderers ask for an image by its URL as they found it
+/// (Blitz parses it first, others don't), so remote images are fetched, cached and
+/// looked up by this one spelling.
+pub fn remote_image_url(url: &str) -> Option<String> {
+    let url = url::Url::parse(url.trim()).ok()?;
+    matches!(url.scheme(), "http" | "https").then(|| url.into())
+}
+
 /// An inline part's content, to embed in place of its `cid:` URL.
 pub struct InlineImage {
     pub mime_type: String,
@@ -505,5 +537,31 @@ mod tests {
         );
         assert!(embedded.contains("https://tracker.example/p.gif"));
         assert!(!embedded.contains("<script>"));
+    }
+
+    #[test]
+    fn finds_remote_images() {
+        assert_eq!(
+            remote_image_urls(
+                r#"<p>hi</p><img src="https://Tracker.example/p.gif?a=1&amp;b=2" alt="">
+                <img src="cid:logo"><img src="data:image/png;base64,aGk"><a href="https://x">x</a>
+                <img src="http://x.example/a b.png"><img src="file:///etc/passwd"><img src="a.png">
+                <img src="https://tracker.example/p.gif?a=1&b=2">"#
+            ),
+            [
+                "https://tracker.example/p.gif?a=1&b=2",
+                "http://x.example/a%20b.png"
+            ]
+        );
+        assert!(remote_image_urls(r#"<img src="cid:logo"><img src="//x/a.png">"#).is_empty());
+        let many: String = (0..MAX_REMOTE_IMAGES + 5)
+            .map(|i| format!(r#"<img src="https://x.example/{i}.png">"#))
+            .collect();
+        assert_eq!(remote_image_urls(&many).len(), MAX_REMOTE_IMAGES);
+        assert_eq!(remote_image_url("cid:logo"), None);
+        assert_eq!(
+            remote_image_url("HTTPS://x.example/a b.png").as_deref(),
+            Some("https://x.example/a%20b.png")
+        );
     }
 }

@@ -4,11 +4,12 @@
 //! The engine has already removed scripts, styles that load resources and dangerous
 //! links, but leaves image URLs alone. Loading a remote image tells the sender the
 //! message was read (and from where), so only images carried by the message itself are
-//! shown: inline parts (`cid:`) and `data:` URLs.
+//! shown (inline parts, `cid:`, and `data:` URLs) until the user asks for the remote
+//! ones of a message (`catmail_core::html::remote_image_urls`).
 
 use std::collections::HashMap;
 
-use catmail_core::html::{InlineImage, content_id_from_url, embed_inline_images, image_sources};
+use catmail_core::html::{InlineImage, content_id_from_url, embed_inline_images};
 use data_url::DataUrl;
 
 /// Content-Security-Policy of the browser page: nothing may load except the images
@@ -41,13 +42,6 @@ pub fn decode(data: &DataUrl<'_>) -> Option<(String, Vec<u8>)> {
     let mime = data.mime_type();
     let mime_type = format!("{}/{}", mime.type_, mime.subtype);
     Some((mime_type, data.decode_to_vec().ok()?.0))
-}
-
-/// Whether the HTML refers to images that are not shown.
-pub fn has_blocked_images(html: &str) -> bool {
-    image_sources(html)
-        .iter()
-        .any(|url| Carried::of(url).is_none())
 }
 
 /// Links that are handed to the system: web pages and new mail. The sanitizer also lets
@@ -126,16 +120,6 @@ mod tests {
         assert!(!is_openable_link("cid:part1"));
         assert!(!is_openable_link("file:///etc/passwd"));
         assert!(!is_openable_link("example.com"));
-    }
-
-    #[test]
-    fn finds_blocked_images() {
-        assert!(has_blocked_images(
-            r#"<p>hi</p><img src="https://tracker.example/p.gif" alt="">"#
-        ));
-        assert!(!has_blocked_images(
-            r#"<img src="cid:logo"><img src="data:image/png;base64,aGk"><a href="https://x">x</a>"#
-        ));
     }
 
     #[test]

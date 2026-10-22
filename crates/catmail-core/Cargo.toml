@@ -11,10 +11,12 @@ catmail-types.workspace = true
 catmail-store.workspace = true
 catmail-proto.workspace = true
 directories.workspace = true
+hex.workspace = true
 jiff.workspace = true
 keyring.workspace = true
 mime_guess.workspace = true
 secrecy.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }

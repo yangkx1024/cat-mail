@@ -1,5 +1,5 @@
 //! Fake IMAP and SMTP servers holding the repository's fixture messages, and a client
-//! synced to them, for tests that drive the real views.
+//! synced to them, for tests that drive the real views; a web server for remote images.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -8,7 +8,9 @@ use catmail_core::{
     AccountId, AuthKind, Config, MailClient, MemorySecrets, Message, NewAccount, Security,
     ServerConfig,
 };
-use catmail_testkit::{FakeImap, FakeMailbox, FakeSmtp, ServerState, SmtpState};
+use catmail_testkit::{
+    FakeHttp, FakeImap, FakeMailbox, FakeSmtp, Reply, ServerState, SmtpState, response,
+};
 
 /// INBOX, in UID order, with their IMAP flags.
 const FIXTURES: &[(&[u8], &[&str])] = &[
@@ -211,12 +213,43 @@ impl TestMail {
         pollster::block_on(self.client.sync_account(self.account.unwrap())).unwrap();
     }
 
+    /// A web server answering every request with a red 40 px square, `/slow.png` only once
+    /// [released](FakeHttp::release).
+    pub fn serve_images(&self) -> FakeHttp {
+        let reply = response(
+            "200 OK",
+            &["Content-Type: image/png"],
+            &solid_png(40, 40, [255, 0, 0]),
+        );
+        self._server_runtime.block_on(FakeHttp::start(move |path| {
+            let reply = reply.clone();
+            match path {
+                "/slow.png" => Reply::Held(reply),
+                _ => Reply::Send(reply),
+            }
+        }))
+    }
+
     /// Puts a new message into the server's INBOX and syncs, as another client's sync
     /// would; the window learns about it only through the engine's events.
     pub fn deliver_and_sync(&self, subject: &str) {
         self.deliver("INBOX", subject);
         pollster::block_on(self.client.sync_account(self.account.unwrap())).unwrap();
     }
+}
+
+/// A PNG all of one color.
+pub fn solid_png(width: u32, height: u32, rgb: [u8; 3]) -> Vec<u8> {
+    let mut png = Vec::new();
+    image::ImageEncoder::write_image(
+        image::codecs::png::PngEncoder::new(&mut png),
+        &rgb.repeat((width * height) as usize),
+        width,
+        height,
+        image::ExtendedColorType::Rgb8,
+    )
+    .unwrap();
+    png
 }
 
 /// Calls `step` until it returns true; `step` should let GPUI run its queued work first.

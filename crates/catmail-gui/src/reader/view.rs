@@ -4,7 +4,7 @@ use gpui_kit::base::SelectableText;
 use gpui_kit::base::text::TextView;
 use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants as _};
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{ActiveTheme as _, Icon, Selectable as _, Sizable as _};
+use gpui_kit::component::{ActiveTheme as _, Selectable as _, Sizable as _};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
     AnyElement, Context, FontWeight, IntoElement, ParentElement as _, Render, Styled as _, Window,
@@ -228,16 +228,23 @@ impl Reader {
                         })),
                 )
             })
-            .when(format == BodyFormat::Html && open.blocked_images, |this| {
-                this.child(
-                    h_flex()
-                        .gap_1p5()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(Icon::new(Hero::EyeSlash).xsmall())
-                        .child("Remote images are not loaded"),
-                )
-            })
+            .when(
+                format == BodyFormat::Html && !open.remote_images.is_empty(),
+                |this| {
+                    this.child(
+                        Button::new("show-remote-images")
+                            .ghost()
+                            .xsmall()
+                            .icon(Hero::Photo)
+                            .label("Show remote images")
+                            .tooltip("Loading them tells the sender you read the message.")
+                            .loading(open.loading_remote)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.show_remote_images(window, cx)
+                            })),
+                    )
+                },
+            )
             .child(div().flex_1())
             .when(html.is_some(), |this| {
                 this.child(

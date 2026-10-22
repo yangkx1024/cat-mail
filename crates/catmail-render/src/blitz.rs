@@ -1,11 +1,12 @@
 //! Blitz, painted with vello_cpu.
 //!
 //! The only network Blitz has is the [`NetProvider`] it is given: [`Images`] answers
-//! from the resolver, at once, and drops everything else (stylesheets and fonts never
-//! reach it from sanitized HTML anyway). Built without blitz-dom's `svg` feature, which
+//! from the resolver, at once, and keeps the requests it has no answer for, to answer
+//! from a later resolver (stylesheets and fonts never reach it from sanitized HTML). Built without blitz-dom's `svg` feature, which
 //! hands images to usvg and its resolver of local paths.
 
-use std::sync::{Arc, LazyLock, Mutex};
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use anyrender::ImageRenderer as _;
 use anyrender_vello_cpu::VelloCpuImageRenderer;
@@ -13,7 +14,7 @@ use blitz_dom::{
     BaseDocument, DocumentConfig, FontContext, Point, UserAgentStylesheet, local_name,
 };
 use blitz_html::HtmlDocument;
-use blitz_traits::net::{Bytes, NetHandler, NetProvider, Request};
+use blitz_traits::net::{NetHandler, NetProvider, Request};
 use blitz_traits::shell::{ColorScheme, Viewport};
 
 use crate::worker::{Page, Pixmap, VIEWPORT_HEIGHT};
@@ -42,16 +43,21 @@ pub(crate) fn open(source: &Source, appearance: &Appearance, scale: f32) -> Box<
         ColorScheme::Light
     };
     let fonts = FONTS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let images = Arc::new(Images {
+        resolver: Mutex::new(source.images.clone()),
+        waiting: Mutex::default(),
+    });
     let config = DocumentConfig {
         viewport: Some(viewport(0.0, scale, scheme)),
         ua_stylesheets,
-        net_provider: Some(Arc::new(Images(source.images.clone()))),
+        net_provider: Some(images.clone()),
         font_ctx: Some(fonts),
         ..DocumentConfig::default()
     };
     let document = HtmlDocument::from_html(&source.html, config).into_inner();
     Box::new(BlitzPage {
         document,
+        images,
         scale,
         scheme,
         width: 0.0,
@@ -73,6 +79,7 @@ fn viewport(width: f32, scale: f32, scheme: ColorScheme) -> Viewport {
 
 struct BlitzPage {
     document: BaseDocument,
+    images: Arc<Images>,
     scale: f32,
     scheme: ColorScheme,
     width: f32,
@@ -81,6 +88,10 @@ struct BlitzPage {
 }
 
 impl Page for BlitzPage {
+    fn set_images(&mut self, images: Resolver) -> bool {
+        self.images.answer_waiting(images)
+    }
+
     fn layout(&mut self, width: f32) -> f32 {
         self.width = width;
         self.document
@@ -146,14 +157,53 @@ impl Page for BlitzPage {
     }
 }
 
-/// Serves each image from the resolver, synchronously; nothing else is fetched.
-struct Images(Resolver);
+/// Serves each image from the resolver, synchronously; nothing else is fetched. One it
+/// has no answer for waits for the next resolver.
+struct Images {
+    resolver: Mutex<Resolver>,
+    /// Blitz's handlers for the images not answered yet, by URL: one per element.
+    waiting: Mutex<HashMap<String, Vec<Box<dyn NetHandler>>>>,
+}
+
+impl Images {
+    /// Asks `resolver` from now on, and now for each image waiting. The document takes in
+    /// the images answered at its next layout (the handler decodes them here). Returns
+    /// whether there was any.
+    fn answer_waiting(&self, resolver: Resolver) -> bool {
+        *self.resolver.lock().unwrap_or_else(PoisonError::into_inner) = resolver.clone();
+        let mut waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut answered = false;
+        waiting.retain(|url, handlers| {
+            let Some(bytes) = resolver(url) else {
+                return true;
+            };
+            for handler in handlers.drain(..) {
+                handler.bytes(url.clone(), bytes.clone());
+            }
+            answered = true;
+            false
+        });
+        answered
+    }
+}
 
 impl NetProvider for Images {
     fn fetch(&self, _doc_id: usize, request: Request, handler: Box<dyn NetHandler>) {
         let url = request.url.as_str();
-        if let Some(bytes) = (self.0)(url) {
-            handler.bytes(url.to_owned(), Bytes::from(bytes));
+        let resolver = self
+            .resolver
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        match resolver(url) {
+            Some(bytes) => handler.bytes(url.to_owned(), bytes),
+            None => self
+                .waiting
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(url.to_owned())
+                .or_default()
+                .push(handler),
         }
     }
 }

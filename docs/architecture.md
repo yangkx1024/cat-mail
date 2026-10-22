@@ -15,7 +15,7 @@
 | Facade | `catmail-core` | `MailClient`：async 方法 + 事件订阅，前端唯一依赖 |
 | Services / Engine | `catmail-core` | 同步、后台同步（IDLE）、操作队列回放、按需下载、Outbox；每账户状态；运行时桥接；凭据 |
 | Storage | `catmail-store` | SQLite schema 与迁移、事务化 Repository、FTS5、内容寻址 `BlobStore`；全部同步 API |
-| Protocol | `catmail-proto` | IMAP（imap-next）、SMTP（自己实现）、MIME 解析（mail-parser）与构建（mail-builder）、HTML 清洗 |
+| Protocol | `catmail-proto` | IMAP（imap-next）、SMTP（自己实现）、MIME 解析（mail-parser）与构建（mail-builder）、HTML 清洗、远程图片的 HTTP 下载（reqwest） |
 | Domain | `catmail-types` | `Account`、`Folder`、`MessageSummary`、`Flags`、`Event`、ID 类型；纯数据，无 IO |
 
 依赖方向 `types ← store, proto ← core ← cli / gui`：store 与 proto 并列、互不依赖；前端不直接
@@ -141,7 +141,8 @@ UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UI
 - **TLS**：rustls + 操作系统的信任库；配置了 STARTTLS 就必须成功，绝不降级为明文。
 - **邮件内容不可信**：HTML 入库前经 ammonia 清洗，样式表由 cssparser 逐条重写（不能取资源、
   不能结束 `<style>`）；远程图片默认不加载，GUI 读信不发出任何网络
-  请求（`catmail-render` 的引擎也一样：没有网络栈，一切资源只经读信区给的函数）；服务器给的值（BODYSTRUCTURE、msg-id）写进邮件头之前都要校验。
+  请求，除非用户对这封信点了"Show remote images"，下载也由引擎做（`MailClient::fetch_remote_images`：
+  不带 cookie 和 referrer，只 GET）；`catmail-render` 的引擎没有网络栈，一切资源只经读信区给的函数；服务器给的值（BODYSTRUCTURE、msg-id）写进邮件头之前都要校验。
 - **本地数据**：数据目录只有本用户可访问，交给其他程序的文件也放在里面。
 
 ## 子系统
@@ -169,11 +170,12 @@ CLI 和 GUI 都可用 `--data-dir` 或 `CATMAIL_DATA_DIR` 覆盖。
 | `blobs/` | 原文、附件等内容寻址文件 |
 | `lock` | 引擎的独占锁 |
 | `handoff/` | 前端交给其他程序的文件（如给浏览器的邮件页面） |
+| `remote-images/` | 用户要求显示过的远程图片的缓存（见[正文与附件](architecture/bodies.md)） |
 
 目录新建时只有本用户可访问（Unix 上 0700）。已存在的目录不改权限：它可能是用户指定的位置（比如
 家目录），宽于 0700 时只打一条 warn；但必须属于当前用户，否则拒绝打开（`Error::DataDirNotOwned`），
 这也挡住了别人在共享位置预先放置的、指向他自己目录的符号链接（指向自己目录的链接照常可用）。里面的
-东西不依赖外层目录：`catmail.db` 及其 WAL 文件是 0600，`blobs/`、`blobs/tmp`、`handoff/` 是 0700，
+东西不依赖外层目录：`catmail.db` 及其 WAL 文件是 0600，`blobs/`、`blobs/tmp`、`handoff/`、`remote-images/` 是 0700，
 已存在的在打开时收紧，blob 和交接文件本身是 0600。Windows 上一律继承父目录的 ACL。`MailClient::open`
 拿到锁之后清空并重建 `handoff/`：锁保证没有前端还在往里写，各前端不必各自清理。在打开时而不是关闭时
 清，是因为关闭时别的程序可能还在读，macOS 上应用退出也不执行析构。前端不自己写这个目录，而是调

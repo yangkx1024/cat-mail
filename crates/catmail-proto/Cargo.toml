@@ -17,6 +17,7 @@ mail-builder.workspace = true
 mail-parser.workspace = true
 # Only for its features; see the workspace manifest.
 nom.workspace = true
+reqwest.workspace = true
 rustls.workspace = true
 rustls-platform-verifier.workspace = true
 secrecy.workspace = true

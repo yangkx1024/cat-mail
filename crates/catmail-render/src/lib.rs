@@ -10,7 +10,9 @@
 //!
 //! An engine loads nothing by itself: every image the page refers to is asked of the
 //! [`Source`]'s resolver, which decides what the reader shows. There is no network
-//! provider, stylesheet loader or font loader behind it.
+//! provider, stylesheet loader or font loader behind it. Images the resolver has no answer
+//! for yet can be given to the open document later ([`Document::set_images`]), without
+//! opening it again.
 
 mod blitz;
 mod pixels;
@@ -18,6 +20,8 @@ mod worker;
 
 use std::fmt;
 use std::sync::Arc;
+
+pub use bytes::Bytes;
 
 pub use worker::Document;
 
@@ -43,9 +47,11 @@ impl fmt::Display for Engine {
     }
 }
 
-/// The bytes of the image at a URL, or `None` for one that isn't shown. The only way an
-/// engine gets anything that isn't in the HTML.
-pub type Resolver = Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>;
+/// The bytes of the image at a URL, or `None` for one that isn't shown (or not yet: see
+/// [`Document::set_images`]). The only way an engine gets anything that isn't in the
+/// HTML. `Bytes`, which is what Blitz keeps, so the caller can share its copy instead of
+/// making one each time a document opens.
+pub type Resolver = Arc<dyn Fn(&str) -> Option<Bytes> + Send + Sync>;
 
 /// A page to render.
 #[derive(Clone)]
@@ -214,7 +220,7 @@ mod tests {
     fn images_come_from_the_resolver_only() {
         let html = r#"<body style="margin:0"><img src="cid:logo@x" width="20" height="20"
             style="display:block"><img src="https://tracker.example/p.gif" width="1" height="1"></body>"#;
-        let green = png(20, 20, [0, 255, 0]);
+        let green = Bytes::from(png(20, 20, [0, 255, 0]));
         let asked = Arc::new(Mutex::new(Vec::new()));
         let images: Resolver = Arc::new({
             let asked = asked.clone();
@@ -234,6 +240,40 @@ mod tests {
         let mut asked = asked.lock().unwrap().clone();
         asked.sort();
         assert_eq!(asked, ["cid:logo@x", "https://tracker.example/p.gif"]);
+    }
+
+    #[test]
+    fn images_given_later_show_in_the_open_document() {
+        // No size of its own: the page grows when the image comes.
+        let html = r#"<body style="margin:0"><img src="cid:logo@x" style="display:block">
+            <img src="https://x.example/later.png" style="display:block"></body>"#;
+        let document = open(source(html), Appearance::default(), 1.0);
+        let short = block_on(document.layout(WIDTH)).unwrap();
+
+        let green = Bytes::from(png(20, 30, [0, 255, 0]));
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        document.set_images(Arc::new({
+            let asked = asked.clone();
+            move |url| {
+                asked.lock().unwrap().push(url.to_owned());
+                (url == "cid:logo@x").then(|| green.clone())
+            }
+        }));
+        let tall = block_on(document.layout(WIDTH)).unwrap();
+        assert_eq!(tall, short + 30.0);
+        let tile = block_on(document.paint(WIDTH, 0.0, 30.0)).unwrap();
+        assert_eq!(pixel(&tile, 10, 10), GREEN);
+
+        // Only what was waiting is asked again; what is answered isn't asked twice.
+        let mut asked_now = asked.lock().unwrap().clone();
+        asked_now.sort();
+        assert_eq!(asked_now, ["cid:logo@x", "https://x.example/later.png"]);
+        let red = Bytes::from(png(20, 30, [255, 0, 0]));
+        document.set_images(Arc::new(move |_| Some(red.clone())));
+        assert_eq!(block_on(document.layout(WIDTH)).unwrap(), short + 60.0);
+        let tile = block_on(document.paint(WIDTH, 0.0, 60.0)).unwrap();
+        assert_eq!(pixel(&tile, 10, 10), GREEN, "kept");
+        assert_eq!(pixel(&tile, 10, 40), RED);
     }
 
     #[test]

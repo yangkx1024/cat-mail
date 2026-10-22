@@ -1,18 +1,19 @@
 //! The Settings dialog: appearance (light or dark, the themes for each, importing a
-//! terminal color scheme, text size), accounts, and reading.
+//! terminal color scheme, text size), accounts, and reading (with the cache of remote
+//! images).
 
 mod accounts;
+mod reading;
 mod themes;
 
 use catmail_core::MailClient;
 use gpui_kit::component::select::{SelectEvent, SelectState};
 use gpui_kit::component::sidebar::{SidebarItem as _, SidebarMenu, SidebarMenuItem};
-use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, Icon, IndexPath, WindowExt as _, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, WeakEntity, Window, div, rems,
+    App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Task, WeakEntity, Window, div, rems,
 };
 
 use crate::assets::Hero;
@@ -58,6 +59,10 @@ pub struct SettingsView {
     section: Section,
     text_size: Entity<SelectState<Vec<SharedString>>>,
     import: Option<Import>,
+    /// The bytes the cache of remote images takes, once known.
+    image_cache: Option<u64>,
+    clearing_image_cache: bool,
+    _image_cache: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -105,6 +110,9 @@ impl SettingsView {
             section: Section::Appearance,
             text_size,
             import: None,
+            image_cache: None,
+            clearing_image_cache: false,
+            _image_cache: Task::ready(()),
             _subscriptions: subscriptions,
         }
     }
@@ -135,8 +143,12 @@ impl Render for SettingsView {
                 SidebarMenuItem::new(label)
                     .icon(Icon::new(icon))
                     .active(self.section == section)
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         this.section = section;
+                        if section == Section::Reading {
+                            // It grows as messages show their remote images.
+                            this.measure_image_cache(window, cx);
+                        }
                         cx.notify();
                     }))
             }))
@@ -177,28 +189,4 @@ fn section_title(title: &'static str, help: &'static str, cx: &App) -> impl Into
                 .text_color(cx.theme().muted_foreground)
                 .child(help),
         )
-}
-
-impl SettingsView {
-    fn render_reading(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mark_read = Preferences::get(cx).mark_read_on_open;
-        v_flex()
-            .gap_4()
-            .child(section_title(
-                "Reading",
-                "How messages behave as you read them.",
-                cx,
-            ))
-            .child(
-                Switch::new("mark-read-on-open")
-                    .checked(mark_read)
-                    .label("Mark messages as read when opened")
-                    .on_change(cx.listener(|_, checked: &bool, _, cx| {
-                        let checked = *checked;
-                        Preferences::update(cx, |s| s.mark_read_on_open = checked);
-                        cx.notify();
-                    })),
-            )
-            .into_any_element()
-    }
 }

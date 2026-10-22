@@ -5,8 +5,10 @@
 //! - [`smtp`]: an SMTP submission client
 //! - [`mime`]: header parsing, message content (text, sanitized HTML, attachments), and
 //!   building outgoing messages
+//! - [`http`]: a message's remote images, fetched when the user asks to see them
 
 mod credentials;
+pub mod http;
 pub mod imap;
 pub mod mime;
 mod net;
