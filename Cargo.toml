@@ -101,6 +101,13 @@ unicode-width = "0.2.2"
 url = "2.5.8"
 uuid = { version = "1.28", features = ["v4"] }
 
+# Thin LTO with one codegen unit takes 18-20% off both binaries. Not opt-level "z" (as
+# Zed does for its own crates): our code is a small part of the binaries, and "z" saved
+# under 1% on catmail-gui even with every dependency included.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
