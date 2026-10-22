@@ -1194,10 +1194,11 @@ mod tests {
 
     #[gpui_kit::test]
     fn text_is_selected_and_copied(cx: &mut TestAppContext) {
-        // Two paragraphs a line each, 30 px apart, the second ending in a link.
+        // Two paragraphs a line each, 30 px apart, the second a link. Clicks land at the
+        // start of a line: where a word ends depends on the fonts installed.
         let html = r#"<body style="margin:0;font-size:20px;line-height:30px">
             <p style="margin:0 0 30px">alpha beta</p>
-            <p style="margin:0">gamma <a href="https://example.com/">delta</a></p>"#;
+            <p style="margin:0"><a href="https://example.com/">gamma delta</a></p>"#;
         let (window, view) = open(cx, page(html));
         painted(cx, window, &view, 1);
         let selected = |cx: &mut TestAppContext| {
@@ -1223,13 +1224,13 @@ mod tests {
         assert_eq!(selected(cx), None);
 
         // A double click selects a word, a triple click its paragraph, and a click clears.
-        click(cx, window, point(px(5.), px(75.)), left, 2);
-        wait_until(|| selected(cx).as_deref() == Some("gamma"));
-        click(cx, window, point(px(5.), px(75.)), left, 3);
-        wait_until(|| selected(cx).as_deref() == Some("gamma delta"));
+        click(cx, window, point(px(5.), px(15.)), left, 2);
+        wait_until(|| selected(cx).as_deref() == Some("alpha"));
+        click(cx, window, point(px(5.), px(15.)), left, 3);
+        wait_until(|| selected(cx).as_deref() == Some("alpha beta"));
         assert_eq!(
             copied(cx, window, "secondary-c").as_deref(),
-            Some("gamma delta")
+            Some("alpha beta")
         );
         click(cx, window, point(px(5.), px(15.)), left, 1);
         assert_eq!(selected(cx), None);
@@ -1254,7 +1255,7 @@ mod tests {
         assert_eq!(selected(cx), None);
 
         // A click on the link, with nothing selected, follows it.
-        click(cx, window, point(px(80.), px(75.)), left, 1);
+        click(cx, window, point(px(5.), px(75.)), left, 1);
         wait_until(|| {
             cx.run_until_parked();
             cx.opened_url().is_some()

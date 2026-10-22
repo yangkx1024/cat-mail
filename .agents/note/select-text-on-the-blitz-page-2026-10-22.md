@@ -54,3 +54,6 @@ GPUI Kit 的 HTML 渲染就只剩排版不了时的备选，可以考虑去掉�
   选词和段落、行内块按位置读、隐藏段落不选）；GUI 测试 `a_selection_follows_text_an_image_moves`（图片在固定高度盒子里推动文字后选区跟着走）和 `text_is_selected_and_copied`（拖选后 Ctrl+C、不打开链接、双击、三击、
   点击清除、点击链接仍会打开、右键菜单复制和全选、Ctrl+A、全选后单击清除）；截图测试新增 `html-newsletter-selected` 和
   `html-newsletter-context-menu`，人工看过高亮和菜单。
+- GUI 测试里的点击只落在行首、按行区分，不按词宽取横坐标：字宽随机器上的字体而变，CI 的 Ubuntu 用
+  DejaVu Sans，"gamma " 比本机宽，x=80 落在链接之前，测试超时。用只含 DejaVu 的 `FONTCONFIG_FILE`
+  在本机复现并验证。
