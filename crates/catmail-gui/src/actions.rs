@@ -2,6 +2,7 @@
 //! the same action, so the three can't disagree; the view that owns the command handles
 //! it.
 
+use gpui_kit::base::input::SelectAll;
 use gpui_kit::{App, KeyBinding};
 
 gpui_kit::actions!(
@@ -33,6 +34,8 @@ gpui_kit::actions!(composer, [Send, Attach, CloseComposer]);
 pub const MAILBOX: &str = "Mailbox";
 /// The message list's: single keys work here, where they can't be text being typed.
 pub const MESSAGE_LIST: &str = "MessageList";
+/// A message's page, laid out by an engine: keys for its text.
+pub const READER_PAGE: &str = "ReaderPage";
 /// A composer window's.
 pub const COMPOSER: &str = "Composer";
 
@@ -60,6 +63,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("e", Archive, list),
         KeyBinding::new("delete", Delete, list),
         KeyBinding::new("backspace", Delete, list),
+        KeyBinding::new("secondary-a", SelectAll, Some(READER_PAGE)),
         KeyBinding::new("secondary-enter", Send, composer),
         // Before the fields see it: the text would take it as a new line, then send.
         KeyBinding::new("secondary-enter", Send, Some("Composer > Input")),

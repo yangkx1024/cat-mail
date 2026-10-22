@@ -1,5 +1,7 @@
 //! Offscreen renders for a person to look at.
 
+use gpui_kit::test::TestEventExt as _;
+
 use super::*;
 
 /// Renders windows offscreen to PNG files, to look at the layout and the themes:
@@ -75,7 +77,28 @@ fn screenshots() {
         save(&mut cx, window, name);
     }
 
-    // The newsletter, still open, in GPUI Kit's text view; then back to Blitz.
+    // Text selected on the newsletter's page, still open.
+    cx.update_window(window, |_, window, cx| {
+        window.drag(
+            gpui_kit::point(px(760.), px(420.)),
+            gpui_kit::point(px(1100.), px(560.)),
+            cx,
+        )
+    })
+    .unwrap();
+    save(&mut cx, window, "html-newsletter-selected");
+    // Its context menu.
+    cx.update_window(window, |_, window, cx| {
+        let position = gpui_kit::point(px(900.), px(480.));
+        window.pointer_down(position, gpui_kit::MouseButton::Right, cx);
+        window.pointer_up(position, gpui_kit::MouseButton::Right, cx);
+    })
+    .unwrap();
+    save(&mut cx, window, "html-newsletter-context-menu");
+    cx.update_window(window, |_, window, cx| window.press("escape", cx))
+        .unwrap();
+
+    // The newsletter in GPUI Kit's text view; then back to Blitz.
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
         window.click("engine-kit", cx);

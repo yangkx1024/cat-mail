@@ -16,6 +16,13 @@
 //!
 //! The page zooms with the window's text size, as a browser page zooms: everything on it,
 //! since most mail sets its own font sizes in pixels.
+//!
+//! Its text takes part in the window's text selection, as GPUI Kit's text views do: the
+//! window keeps the two ends a drag left on the page, and copies what the page says is
+//! between them. The engine finds that text, and where it is; the view draws the theme's
+//! highlight over the strips, so a selection never paints the page again. A double or
+//! triple click selects a word or a paragraph, which the window can't find in a page, and
+//! Select all the whole page: the page keeps those selections itself.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -24,18 +31,29 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use catmail_core::html::ColorUsage;
-use catmail_render::{Appearance, Document, Engine, Resolver, Source, Stopped, Tile};
+use catmail_render::{
+    Appearance, Document, Engine, Hit, Rect, Resolver, SelectionEnd, Source, Span, Stopped, Tile,
+    Unit,
+};
+use gpui_kit::base::input::{Copy, SelectAll};
+use gpui_kit::base::{
+    TextSelection, TextSelectionCoverage, TextSelectionEndpoint, TextSelectionEvent,
+    TextSelectionHandle, TextSelectionRegistration, TextSelectionSnapshot,
+};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Theme, h_flex};
 use gpui_kit::{
-    App, Bounds, ClickEvent, Context, FutureExt as _, Hsla, InteractiveElement as _, IntoElement,
+    App, Bounds, ClickEvent, ClipboardItem, Context, EntityId, FocusHandle, FutureExt as _,
+    HitboxBehavior, Hsla, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, ObjectFit, ParentElement as _, Pixels, Point, Render, RenderImage,
-    SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, Task, Timeout,
-    Window, canvas, div, img, prelude::FluentBuilder as _, px,
+    SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription,
+    Task, TestSupportExt as _, Timeout, Window, canvas, div, fill, img, point,
+    prelude::FluentBuilder as _, px, size,
 };
 
-use crate::html;
 use crate::theme::colors::rgb;
+use crate::{actions, html};
 
 /// The height of a strip, in CSS pixels: a few per screen, so scrolling asks for one at a
 /// time and a long message never sits in memory whole.
@@ -125,10 +143,49 @@ struct Layout {
     width: f32,
     height: f32,
     zoom: f32,
+    /// Which of the view's layouts it is: two of the same size can still place the text
+    /// differently (an image came, in a box of fixed height).
+    number: u64,
 }
 
 /// What an engine answered, or why it didn't.
 type Answer<T> = Result<Result<T, Stopped>, Timeout>;
+
+/// The span of the window's selection on the page `me`, in the window's pixels from its
+/// top left: a selection that starts or ends elsewhere takes the page from its start or
+/// to its end.
+fn span_of(snapshot: &TextSelectionSnapshot, me: EntityId) -> Option<Span> {
+    let at = |end: TextSelectionEndpoint| {
+        let point = end.content_point();
+        (end.entity_id() == Some(me)).then(|| SelectionEnd::At(point.x.into(), point.y.into()))
+    };
+    let (anchor, cursor) = (at(snapshot.anchor()), at(snapshot.cursor()));
+    let (from, to) = match snapshot.coverage() {
+        TextSelectionCoverage::Bounded => (anchor?, cursor?),
+        TextSelectionCoverage::FromStart => (SelectionEnd::Start, anchor.or(cursor)?),
+        TextSelectionCoverage::ToEnd => (anchor.or(cursor)?, SelectionEnd::End),
+        TextSelectionCoverage::Full => (SelectionEnd::Start, SelectionEnd::End),
+    };
+    Some(Span::Between(from, to))
+}
+
+/// What the page has selected: a drag's span (the window's selection), or a double or
+/// triple click's, or all of it (the page's own).
+struct Selecting {
+    /// In the window's pixels from the page's top left.
+    span: Span,
+    /// The layout shown when the engine was last asked: another one asks again.
+    asked: Option<Layout>,
+    /// What the engine found.
+    found: Option<Found>,
+}
+
+/// What the engine found selected, at a layout.
+struct Found {
+    layout: Option<Layout>,
+    rects: Arc<[Rect]>,
+    text: String,
+}
 
 pub(super) struct PageView {
     engine: Engine,
@@ -138,6 +195,8 @@ pub(super) struct PageView {
     /// The layout shown, and its strips: the document's, or the last one's until the
     /// strips on screen are painted for the next.
     layout: Option<Layout>,
+    /// How many layouts the view asked for.
+    layouts: u64,
     /// Where the view was last painted, for the pointer's position on the page.
     bounds: Bounds<Pixels>,
     /// The strips wanted on screen, as last measured.
@@ -146,11 +205,18 @@ pub(super) struct PageView {
     next: Option<Next>,
     /// The strips being painted: the next layout's if there is one, else the shown one's.
     painting: HashMap<u32, Task<()>>,
-    /// The `href` of the link under the pointer.
-    hovered: Option<SharedString>,
+    /// What is under the pointer.
+    hovered: Hit,
     error: Option<SharedString>,
+    /// The page's part in the window's text selection.
+    selection: TextSelectionHandle,
+    /// Taken when a selection starts on the page, so that the keys copy it.
+    focus: FocusHandle,
+    selecting: Option<Selecting>,
     _layout: Task<()>,
     _hover: Task<()>,
+    _select: Task<()>,
+    _selection_changes: Subscription,
 }
 
 impl PageView {
@@ -163,21 +229,56 @@ impl PageView {
     ) -> Self {
         cx.on_release_in(window, |this, window, _| this.drop_strips(window))
             .detach();
+        let selection = TextSelectionHandle::new("", cx);
+        let focus = cx.focus_handle();
+        selection.focus_with(
+            {
+                let focus = focus.clone();
+                move |window, cx| focus.focus(window, cx)
+            },
+            cx,
+        );
+        let this = cx.weak_entity();
+        selection.copy_with(
+            {
+                let this = this.clone();
+                move |cx| {
+                    let text = this
+                        .upgrade()
+                        .and_then(|this| this.read(cx).selected_text().map(str::to_owned));
+                    text.unwrap_or_default()
+                }
+            },
+            cx,
+        );
+        let selection_changes = selection.subscribe(
+            move |event, cx| {
+                this.update(cx, |this, cx| this.selection_changed(event, cx))
+                    .ok();
+            },
+            cx,
+        );
         Self {
             engine,
             source,
             colors,
             opened: None,
             layout: None,
+            layouts: 0,
             bounds: Bounds::default(),
             wanted: 0..=0,
             strips: HashMap::new(),
             next: None,
             painting: HashMap::new(),
-            hovered: None,
+            hovered: Hit::default(),
             error: None,
+            selection,
+            focus,
+            selecting: None,
             _layout: Task::ready(()),
             _hover: Task::ready(()),
+            _select: Task::ready(()),
+            _selection_changes: selection_changes,
         }
     }
 
@@ -230,6 +331,23 @@ impl PageView {
         let width = strip.size(0).width.0 as u32;
         let at = ((y * width + x) * 4) as usize;
         strip.as_bytes(0)?.get(at..at + 4)?.try_into().ok()
+    }
+
+    /// The text selected on the page, once the engine found it for the layout shown.
+    pub(super) fn selected_text(&self) -> Option<&str> {
+        self.found().map(|found| found.text.as_str())
+    }
+
+    /// Where the selection is highlighted on the page, in CSS pixels.
+    #[cfg(test)]
+    pub(super) fn highlighted(&self) -> Option<&[Rect]> {
+        self.found().map(|found| &*found.rects)
+    }
+
+    /// What the engine found selected, if it is for the layout shown.
+    fn found(&self) -> Option<&Found> {
+        let found = self.selecting.as_ref()?.found.as_ref()?;
+        (found.layout == self.layout).then_some(found)
     }
 
     fn document(&self) -> Option<&Document> {
@@ -295,12 +413,14 @@ impl PageView {
             let laid_out = document.layout(width);
             self.painting.clear();
             self.next = None;
+            self.layouts += 1;
             self.lay_out(
                 laid_out,
                 Layout {
                     width,
                     height: 0.0,
                     zoom,
+                    number: self.layouts,
                 },
                 window,
                 cx,
@@ -328,6 +448,13 @@ impl PageView {
             let top = index as f32 * STRIP;
             let painted = document.paint(width, top, STRIP.min(height - top));
             self.paint(index, painted, window, cx);
+        }
+        // A selection is found again in a new layout once it is shown.
+        if self.next.is_none()
+            && let Some(selecting) = &self.selecting
+            && selecting.asked != self.layout
+        {
+            self.select(cx);
         }
         // One with no strip to paint on screen (an empty page, or scrolled past its end)
         // is shown as it is, once the frame is drawn.
@@ -470,32 +597,31 @@ impl PageView {
         }
     }
 
-    /// The link at the pointer's position, if it is on the document's page laid out.
-    fn link_at(
+    /// What is at the pointer's position, if it is on the document's page laid out.
+    fn hit(
         &self,
         position: Point<Pixels>,
-    ) -> Option<impl Future<Output = Result<Option<String>, Stopped>> + use<>> {
+    ) -> Option<impl Future<Output = Result<Hit, Stopped>> + use<>> {
         let opened = self.opened.as_ref()?;
         opened.height?;
         let at = position - self.bounds.origin;
         let (x, y) = (f32::from(at.x), f32::from(at.y));
         let document = opened.document.as_ref()?;
-        Some(document.link_at(opened.width?, x / opened.zoom, y / opened.zoom))
+        Some(document.hit(opened.width?, x / opened.zoom, y / opened.zoom))
     }
 
     fn hover(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(link) = self.link_at(position) else {
+        let Some(hit) = self.hit(position) else {
             return;
         };
         // Replacing the task drops the question for where the pointer was before.
         self._hover = cx.spawn_in(window, async move |this, cx| {
-            let Ok(link) = link.await else {
+            let Ok(hit) = hit.await else {
                 return;
             };
             this.update(cx, |this, cx| {
-                let link = link.map(SharedString::from);
-                if this.hovered != link {
-                    this.hovered = link;
+                if this.hovered != hit {
+                    this.hovered = hit;
                     cx.notify();
                 }
             })
@@ -504,17 +630,130 @@ impl PageView {
     }
 
     fn click(&mut self, event: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(link) = self.link_at(event.position()) else {
+        // The end of a drag that selected text on the page, not a click on what it ended on.
+        if self.selection.snapshot(cx).is_some() || self.selection.has_local_selection(cx) {
+            return;
+        }
+        let Some(hit) = self.hit(event.position()) else {
             return;
         };
         cx.spawn_in(window, async move |_, cx| {
-            if let Ok(Some(url)) = link.await
+            if let Ok(Hit {
+                link: Some(url), ..
+            }) = hit.await
                 && html::is_openable_link(&url)
             {
                 cx.update(|_, cx| cx.open_url(&url)).ok();
             }
         })
         .detach();
+    }
+
+    /// Follows the window's selection: the span it has on the page, or none.
+    fn selection_changed(&mut self, event: &TextSelectionEvent, cx: &mut Context<Self>) {
+        let span = match event {
+            TextSelectionEvent::SelectionChanged(Some(snapshot)) => {
+                span_of(snapshot, self.selection.entity_id())
+            }
+            TextSelectionEvent::SelectionChanged(None) | TextSelectionEvent::Cleared => None,
+            _ => return,
+        };
+        let Some(span) = span else {
+            // A click clears the selection before the page makes its own on it: the
+            // news comes after, and is not about the page's own.
+            if self.selection.has_local_selection(cx) {
+                return;
+            }
+            if self.selecting.take().is_some() {
+                self._select = Task::ready(());
+                cx.notify();
+            }
+            return;
+        };
+        // A drag running on past the page moves only its other end.
+        if let Some(selecting) = &self.selecting
+            && selecting.span == span
+            && selecting.asked == self.layout
+        {
+            return;
+        }
+        // The highlight stays until the engine answers for the new span.
+        let found = self.selecting.take().and_then(|selecting| selecting.found);
+        self.selecting = Some(Selecting {
+            span,
+            asked: None,
+            found,
+        });
+        self.select(cx);
+    }
+
+    /// Selects the word under a double click, or the paragraph under a triple one: the
+    /// window's selection has no words or paragraphs in a page.
+    fn press(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let unit = match event.click_count {
+            0 | 1 => return,
+            2 => Unit::Word,
+            _ => Unit::Paragraph,
+        };
+        let at = event.position - self.bounds.origin;
+        self.select_locally(Span::Around(at.x.into(), at.y.into(), unit), window, cx);
+    }
+
+    fn select_all(&mut self, _: &SelectAll, window: &mut Window, cx: &mut Context<Self>) {
+        // A drag's selection goes, as a click would clear it.
+        TextSelection::clear(window, cx);
+        let all = Span::Between(SelectionEnd::Start, SelectionEnd::End);
+        self.select_locally(all, window, cx);
+    }
+
+    /// Makes `span` the page's own selection, which the window copies with the rest.
+    fn select_locally(&mut self, span: Span, window: &mut Window, cx: &mut Context<Self>) {
+        self.selecting = Some(Selecting {
+            span,
+            asked: None,
+            found: None,
+        });
+        self.selection.set_local_selection(true, cx);
+        self.focus.focus(window, cx);
+        self.select(cx);
+        cx.notify();
+    }
+
+    /// Asks the engine for what is selected, in the layout it has.
+    fn select(&mut self, cx: &mut Context<Self>) {
+        // With a layout coming the engine would answer for it, not for the one shown:
+        // `measure` asks again once it is shown.
+        if self.next.is_some() || self.opened.as_ref().is_none_or(|o| o.height.is_none()) {
+            return;
+        }
+        let layout = self.layout;
+        let (Some(selecting), Some(opened)) = (&mut self.selecting, &self.opened) else {
+            return;
+        };
+        let (Some(document), Some(width)) = (&opened.document, opened.width) else {
+            return;
+        };
+        selecting.asked = layout;
+        let selection = document.select(width, selecting.span.scaled_down(opened.zoom));
+        // Replacing the task drops the question for the span the selection had before.
+        self._select = cx.spawn(async move |this, cx| {
+            let selection = selection
+                .with_timeout(PATIENCE, cx.background_executor())
+                .await;
+            this.update(cx, |this, cx| {
+                if let Some(selection) = this.answered(selection)
+                    && let Some(selecting) = &mut this.selecting
+                {
+                    selecting.found = Some(Found {
+                        layout,
+                        rects: selection.rects.into(),
+                        text: selection.text,
+                    });
+                }
+                cx.notify();
+            })
+            .ok();
+        });
     }
 }
 
@@ -532,6 +771,27 @@ fn strips_on_screen(
     (top / STRIP) as u32..=(last / STRIP) as u32
 }
 
+/// Paints the rectangles of a selection, in CSS pixels on a page drawn in `bounds`, that
+/// are on screen.
+fn paint_highlight(
+    rects: &[Rect],
+    zoom: f32,
+    bounds: Bounds<Pixels>,
+    color: Hsla,
+    window: &mut Window,
+) {
+    let visible = window.content_mask().bounds;
+    for rect in rects {
+        let rect = Bounds::new(
+            bounds.origin + point(px(rect.x * zoom), px(rect.y * zoom)),
+            size(px(rect.width * zoom), px(rect.height * zoom)),
+        );
+        if rect.intersects(&visible) {
+            window.paint_quad(fill(rect, color));
+        }
+    }
+}
+
 /// A strip as GPUI draws it. The engine already wrote the BGRA it wants.
 fn render_image(tile: Tile) -> Option<Arc<RenderImage>> {
     let buffer = image::RgbaImage::from_raw(tile.width, tile.height, tile.bgra)?;
@@ -540,18 +800,47 @@ fn render_image(tile: Tile) -> Option<Arc<RenderImage>> {
 
 impl Render for PageView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let shown = self.layout.filter(|_| self.error.is_none());
         let view = cx.entity();
+        // Only a page shown takes part in the selection.
+        let selection = shown.map(|_| self.selection.clone());
+        let registered = selection.clone();
         let measure = canvas(
             move |bounds, window, cx: &mut App| {
                 view.update(cx, |this, cx| this.measure(bounds, window, cx));
+                let Some(selection) = &registered else {
+                    return;
+                };
+                // All of the page takes part, its margins too: a drag there selects the
+                // text nearest the pointer, as in a browser.
+                let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+                let registration = TextSelectionRegistration::new(hitbox, bounds)
+                    .with_text_bounds(vec![bounds])
+                    .with_rendered_element(selection, window, cx);
+                selection.register(registration, window, cx);
             },
-            |_, _, _, _| {},
+            move |_, _, window, _| {
+                let Some(selection) = selection else {
+                    return;
+                };
+                // A press anywhere clears the page's own selection, as it clears the
+                // window's. The window doesn't, the press after a menu item: the item
+                // keeps the release from it, and it waits for one before clearing again.
+                window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+                    if phase.capture()
+                        && event.button == MouseButton::Left
+                        && selection.has_local_selection(cx)
+                    {
+                        TextSelection::clear(window, cx);
+                    }
+                });
+            },
         )
         .absolute()
         .size_full();
 
         // A page given up on says why instead.
-        let Some(layout) = self.layout.filter(|_| self.error.is_none()) else {
+        let Some(layout) = shown else {
             return div()
                 .id("page")
                 .relative()
@@ -569,13 +858,25 @@ impl Render for PageView {
                         .justify_center()
                         .child(Spinner::new())
                         .into_any_element(),
-                });
+                })
+                .into_any_element();
         };
         let Layout {
             width,
             height,
             zoom,
+            ..
         } = layout;
+        // Over the strips, which are opaque: the theme's selection color lets them show.
+        let highlight = self.found().map(|found| {
+            let (rects, color) = (found.rects.clone(), cx.theme().selection);
+            canvas(
+                |_, _, _| {},
+                move |bounds, _, window, _| paint_highlight(&rects, zoom, bounds, color, window),
+            )
+            .absolute()
+            .size_full()
+        });
         let strips = self.strips.iter().map(|(&index, image)| {
             let top = index as f32 * STRIP;
             img(image.clone())
@@ -589,37 +890,91 @@ impl Render for PageView {
         });
         div()
             .id("page")
+            .test_support()
+            .key_context(actions::READER_PAGE)
+            .track_focus(&self.focus)
+            .on_action(cx.listener(Self::select_all))
             .relative()
             .w_full()
             .h(px(height * zoom))
             .child(measure)
             .children(strips)
-            .when(self.hovered.is_some(), |this| this.cursor_pointer())
+            .children(highlight)
+            .map(|this| match &self.hovered {
+                Hit { link: Some(_), .. } => this.cursor_pointer(),
+                Hit { text: true, .. } => this.cursor_text(),
+                _ => this,
+            })
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 this.hover(event.position, window, cx)
             }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event, window, cx| this.press(event, window, cx)),
+            )
             .on_click(cx.listener(|this, event, window, cx| this.click(event, window, cx)))
+            .context_menu({
+                let focus = self.focus.clone();
+                move |menu, window, cx| {
+                    // What the keys would copy, as the menu opens: pressing the menu clears
+                    // the window's selection before the item runs.
+                    let text = TextSelection::selected_text(window, cx).trim().to_owned();
+                    let text = (!text.is_empty()).then_some(text);
+                    // The action only shows the keys that copy.
+                    let copy = PopupMenuItem::new("Copy")
+                        .action(Box::new(Copy))
+                        .disabled(text.is_none())
+                        .on_click(move |_, _, cx| {
+                            if let Some(text) = &text {
+                                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                            }
+                        });
+                    menu.action_context(focus.clone())
+                        .item(copy)
+                        .menu("Select all", Box::new(SelectAll))
+                }
+            })
+            .into_any_element()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::test::{ClickOptions, TestEventExt as _, TestWindowExt as _};
     use gpui_kit::{
         AnyWindowHandle, AppContext as _, Entity, TestAppContext, WindowBounds, WindowOptions,
-        point, size,
     };
 
     use super::*;
     use crate::settings::Preferences;
     use crate::test_support::wait_until;
 
-    /// A page `height` CSS pixels tall.
-    fn source(height: u32) -> Source {
+    /// A page of `html`, with no images to show yet.
+    fn page(html: &str) -> Source {
         Source {
-            html: format!(r#"<body style="margin:0"><div style="height:{height}px"></div>"#).into(),
+            html: html.into(),
             images: Arc::new(|_| None),
         }
+    }
+
+    /// A page `height` CSS pixels tall.
+    fn source(height: u32) -> Source {
+        page(&format!(
+            r#"<body style="margin:0"><div style="height:{height}px"></div>"#
+        ))
+    }
+
+    /// Draws frames until the page shows `strips` strips.
+    fn painted(
+        cx: &mut TestAppContext,
+        window: AnyWindowHandle,
+        view: &Entity<PageView>,
+        strips: usize,
+    ) {
+        wait_until(|| {
+            frame(cx, window, true);
+            cx.read(|cx| view.read(cx).painted_strips()) == strips
+        });
     }
 
     /// A window 800 px tall showing the page of `source` whole.
@@ -671,19 +1026,37 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn a_selection_follows_text_an_image_moves(cx: &mut TestAppContext) {
+        // The image, once it comes, pushes the text down 100 px, in a box that keeps the
+        // page's size.
+        let html = r#"<body style="margin:0"><div style="height:300px">
+            <img src="cid:image" style="display:block"><p style="margin:0">text</p></div>"#;
+        let (window, view) = open(cx, page(html));
+        painted(cx, window, &view, 1);
+        let top = |cx: &mut TestAppContext| {
+            frame(cx, window, true);
+            cx.read(|cx| Some(view.read(cx).highlighted()?.first()?.y))
+        };
+        // The keys are the page's once it is clicked.
+        click(cx, window, point(px(5.), px(5.)), MouseButton::Left, 1);
+        cx.update_window(window, |_, window, cx| window.press("secondary-a", cx))
+            .unwrap();
+        wait_until(|| top(cx) == Some(0.));
+
+        let image: catmail_render::Bytes = crate::test_support::solid_png(40, 100, RED).into();
+        let images: Resolver = Arc::new(move |url| (url == "cid:image").then(|| image.clone()));
+        cx.update(|cx| view.update(cx, |view, cx| view.set_images(images, cx)));
+        wait_until(|| top(cx) == Some(100.));
+        assert_eq!(cx.read(|cx| view.read(cx).shown_height()), Some(300.));
+    }
+
+    #[gpui_kit::test]
     fn images_that_come_replace_the_page_without_a_blank(cx: &mut TestAppContext) {
         // 700 px, and an image with no size of its own: 400 px more once it comes.
         let html = r#"<body style="margin:0"><img src="cid:tall" style="display:block">
             <div style="height:700px"></div>"#;
-        let source = Source {
-            html: html.into(),
-            images: Arc::new(|_| None),
-        };
-        let (window, view) = open(cx, source);
-        wait_until(|| {
-            frame(cx, window, true);
-            cx.read(|cx| view.read(cx).painted_strips()) == 2
-        });
+        let (window, view) = open(cx, page(html));
+        painted(cx, window, &view, 2);
 
         let red = png(RED);
         let images: Resolver = Arc::new(move |url| (url == "cid:tall").then(|| red.clone()));
@@ -710,15 +1083,8 @@ mod tests {
         // Each image, once it comes, pushes the page 400 px down; the blue one goes on top.
         let html = r#"<body style="margin:0"><img src="cid:blue" style="display:block">
             <img src="cid:red" style="display:block"><div style="height:700px"></div>"#;
-        let source = Source {
-            html: html.into(),
-            images: Arc::new(|_| None),
-        };
-        let (window, view) = open(cx, source);
-        wait_until(|| {
-            frame(cx, window, true);
-            cx.read(|cx| view.read(cx).painted_strips()) == 2
-        });
+        let (window, view) = open(cx, page(html));
+        painted(cx, window, &view, 2);
 
         let red = png(RED);
         let images: Resolver = Arc::new(move |url| (url == "cid:red").then(|| red.clone()));
@@ -762,11 +1128,7 @@ mod tests {
         // Wider than the window's 600 px, as a smaller text size makes it, there is no page.
         let html = r#"<style>@media (min-width: 700px) { html { display: none } }</style>
             <body style="margin:0"><div style="height:700px"></div>"#;
-        let source = Source {
-            html: html.into(),
-            images: Arc::new(|_| None),
-        };
-        let (window, view) = open(cx, source);
+        let (window, view) = open(cx, page(html));
         let shown = |cx: &mut TestAppContext| {
             frame(cx, window, true);
             cx.read(|cx| view.read(cx).shown_height())
@@ -787,13 +1149,118 @@ mod tests {
         cx.update(|cx| Preferences::update(cx, |s| s.text_size = 18.));
         wait_until(|| shown(cx) == Some(700. * 18. / 16.));
         let scale = frame(cx, window, true);
-        wait_until(|| {
-            frame(cx, window, true);
-            cx.read(|cx| view.read(cx).painted_strips()) == 2
-        });
+        painted(cx, window, &view, 2);
         for (index, height, wanted) in cx.read(|cx| view.read(cx).strip_heights(scale)) {
             assert_eq!(height, wanted, "strip {index}");
         }
+    }
+
+    /// Clicks the page `offset` from its top left with `button`, the `count`th click in a
+    /// row.
+    fn click(
+        cx: &mut TestAppContext,
+        window: AnyWindowHandle,
+        offset: Point<Pixels>,
+        button: MouseButton,
+        count: usize,
+    ) {
+        let options = ClickOptions::new()
+            .with_offset(offset)
+            .with_button(button)
+            .with_count(count);
+        cx.update_window(window, |_, window, cx| {
+            window.click_with_options("page", options, cx)
+        })
+        .unwrap();
+    }
+
+    /// Opens the page's context menu and clicks its `item`th item.
+    fn menu(cx: &mut TestAppContext, window: AnyWindowHandle, item: usize) {
+        click(cx, window, point(px(40.), px(15.)), MouseButton::Right, 1);
+        frame(cx, window, true);
+        cx.update_window(window, |_, window, cx| {
+            window.within("popup-menu").click(item, cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+
+    /// Presses `keys`, and returns what is on the clipboard then.
+    fn copied(cx: &mut TestAppContext, window: AnyWindowHandle, keys: &str) -> Option<String> {
+        cx.update_window(window, |_, window, cx| window.press(keys, cx))
+            .unwrap();
+        cx.read_from_clipboard().and_then(|item| item.text())
+    }
+
+    #[gpui_kit::test]
+    fn text_is_selected_and_copied(cx: &mut TestAppContext) {
+        // Two paragraphs a line each, 30 px apart, the second a link. Clicks land at the
+        // start of a line: where a word ends depends on the fonts installed.
+        let html = r#"<body style="margin:0;font-size:20px;line-height:30px">
+            <p style="margin:0 0 30px">alpha beta</p>
+            <p style="margin:0"><a href="https://example.com/">gamma delta</a></p>"#;
+        let (window, view) = open(cx, page(html));
+        painted(cx, window, &view, 1);
+        let selected = |cx: &mut TestAppContext| {
+            frame(cx, window, true);
+            cx.read(|cx| view.read(cx).selected_text().map(str::to_owned))
+        };
+        let all = Some("alpha beta\ngamma delta".to_owned());
+        let left = MouseButton::Left;
+
+        // A drag from the first letter to the link selects; it doesn't follow the link.
+        cx.update_window(window, |_, window, cx| {
+            window.drag(point(px(1.), px(15.)), point(px(500.), px(75.)), cx)
+        })
+        .unwrap();
+        wait_until(|| selected(cx) == all);
+        assert_eq!(cx.opened_url(), None);
+        assert_eq!(copied(cx, window, "secondary-c"), all);
+
+        // The context menu's Copy copies it too; the press on the menu clears it.
+        cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
+        menu(cx, window, 0);
+        assert_eq!(cx.read_from_clipboard().and_then(|item| item.text()), all);
+        assert_eq!(selected(cx), None);
+
+        // A double click selects a word, a triple click its paragraph, and a click clears.
+        click(cx, window, point(px(5.), px(15.)), left, 2);
+        wait_until(|| selected(cx).as_deref() == Some("alpha"));
+        click(cx, window, point(px(5.), px(15.)), left, 3);
+        wait_until(|| selected(cx).as_deref() == Some("alpha beta"));
+        assert_eq!(
+            copied(cx, window, "secondary-c").as_deref(),
+            Some("alpha beta")
+        );
+        click(cx, window, point(px(5.), px(15.)), left, 1);
+        assert_eq!(selected(cx), None);
+        assert_eq!(cx.opened_url(), None);
+
+        // Select all, from the context menu with nothing selected (Copy is there, off),
+        // or with the keys. A press anywhere clears it, the first after the menu too.
+        menu(cx, window, 1);
+        wait_until(|| selected(cx) == all);
+        let outside = point(px(5.), px(400.));
+        cx.update_window(window, |_, window, cx| {
+            window.pointer_down(outside, left, cx);
+            window.pointer_up(outside, left, cx);
+        })
+        .unwrap();
+        assert_eq!(selected(cx), None);
+        cx.update_window(window, |_, window, cx| window.press("secondary-a", cx))
+            .unwrap();
+        wait_until(|| selected(cx) == all);
+        assert_eq!(copied(cx, window, "secondary-c"), all);
+        click(cx, window, point(px(5.), px(15.)), left, 1);
+        assert_eq!(selected(cx), None);
+
+        // A click on the link, with nothing selected, follows it.
+        click(cx, window, point(px(5.), px(75.)), left, 1);
+        wait_until(|| {
+            cx.run_until_parked();
+            cx.opened_url().is_some()
+        });
+        assert_eq!(cx.opened_url().as_deref(), Some("https://example.com/"));
     }
 
     fn bounds(top: f32, height: f32) -> Bounds<Pixels> {

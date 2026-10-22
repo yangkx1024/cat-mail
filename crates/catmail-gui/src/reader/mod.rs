@@ -36,7 +36,7 @@ enum BodyFormat {
 }
 
 /// What draws the HTML: an engine laying it out as a browser would (Blitz, the default),
-/// or GPUI Kit's text view, which lays out less but lets the text be selected.
+/// or GPUI Kit's text view, which lays out less.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HtmlEngine {
     Kit,

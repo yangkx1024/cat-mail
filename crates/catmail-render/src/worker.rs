@@ -16,7 +16,7 @@ use std::thread;
 
 use futures_channel::oneshot;
 
-use crate::{Appearance, Engine, Resolver, Source, Stopped, Tile, pixels};
+use crate::{Appearance, Engine, Hit, Resolver, Selection, Source, Span, Stopped, Tile, pixels};
 
 /// The height that viewport units and full-height pages resolve against. The pane's own
 /// height would relayout the page whenever the window is resized; a page is shown whole,
@@ -40,8 +40,11 @@ pub(crate) trait Page {
     /// Paints the rows from `top` to `top + height` of the last layout.
     fn paint(&mut self, top: f32, height: f32) -> Pixmap;
 
-    /// The `href` of the link at a point of the last layout.
-    fn link_at(&mut self, x: f32, y: f32) -> Option<String>;
+    /// What is at a point of the last layout.
+    fn hit(&mut self, x: f32, y: f32) -> Hit;
+
+    /// What `span` selects in the last layout.
+    fn select(&mut self, span: Span) -> Selection;
 }
 
 /// Opens an engine's page, on the thread that keeps it.
@@ -116,15 +119,25 @@ impl Document {
         self.ask(width, move |reply| Ask::Paint { top, height, reply })
     }
 
-    /// The `href` of the link at (`x`, `y`), in CSS pixels from the top left of the
-    /// document laid out `width` CSS pixels wide.
-    pub fn link_at(
+    /// What is at (`x`, `y`), in CSS pixels from the top left of the document laid out
+    /// `width` CSS pixels wide.
+    pub fn hit(
         &self,
         width: f32,
         x: f32,
         y: f32,
-    ) -> impl Future<Output = Result<Option<String>, Stopped>> + use<> {
-        self.ask(width, move |reply| Ask::LinkAt { x, y, reply })
+    ) -> impl Future<Output = Result<Hit, Stopped>> + use<> {
+        self.ask(width, move |reply| Ask::Hit { x, y, reply })
+    }
+
+    /// What `span` selects in the document laid out `width` CSS pixels wide. Nothing is
+    /// kept: the caller keeps the span, and asks again after another layout.
+    pub fn select(
+        &self,
+        width: f32,
+        span: Span,
+    ) -> impl Future<Output = Result<Selection, Stopped>> + use<> {
+        self.ask(width, move |reply| Ask::Select { span, reply })
     }
 
     fn ask<T, F: FnOnce(oneshot::Sender<T>) -> Ask>(
@@ -158,10 +171,14 @@ enum Ask {
         height: f32,
         reply: oneshot::Sender<Tile>,
     },
-    LinkAt {
+    Hit {
         x: f32,
         y: f32,
-        reply: oneshot::Sender<Option<String>>,
+        reply: oneshot::Sender<Hit>,
+    },
+    Select {
+        span: Span,
+        reply: oneshot::Sender<Selection>,
     },
 }
 
@@ -170,7 +187,8 @@ impl Ask {
         match self {
             Ask::Layout(reply) => reply.is_canceled(),
             Ask::Paint { reply, .. } => reply.is_canceled(),
-            Ask::LinkAt { reply, .. } => reply.is_canceled(),
+            Ask::Hit { reply, .. } => reply.is_canceled(),
+            Ask::Select { reply, .. } => reply.is_canceled(),
         }
     }
 }
@@ -205,7 +223,8 @@ fn serve(mut page: Box<dyn Page>, canvas: [u8; 3], jobs: &mpsc::Receiver<Job>) {
             Ask::Paint { top, height, reply } => {
                 drop(reply.send(pixels::tile(page.paint(top, height), canvas)))
             }
-            Ask::LinkAt { x, y, reply } => drop(reply.send(page.link_at(x, y))),
+            Ask::Hit { x, y, reply } => drop(reply.send(page.hit(x, y))),
+            Ask::Select { span, reply } => drop(reply.send(page.select(span))),
         }
     }
 }
@@ -218,7 +237,7 @@ mod tests {
     use super::*;
 
     /// Pages whose layout takes as many milliseconds as their HTML says, and that panic
-    /// when asked for a link.
+    /// when asked what is at a point.
     struct Slow(u64);
 
     impl Page for Slow {
@@ -235,8 +254,12 @@ mod tests {
             unreachable!()
         }
 
-        fn link_at(&mut self, _: f32, _: f32) -> Option<String> {
-            panic!("no links here")
+        fn hit(&mut self, _: f32, _: f32) -> Hit {
+            panic!("nothing here")
+        }
+
+        fn select(&mut self, _: Span) -> Selection {
+            unreachable!()
         }
     }
 
@@ -262,7 +285,7 @@ mod tests {
     #[test]
     fn a_panic_stops_only_its_document() {
         let document = open("0");
-        assert!(pollster::block_on(document.link_at(300.0, 0.0, 0.0)).is_err());
+        assert!(pollster::block_on(document.hit(300.0, 0.0, 0.0)).is_err());
         assert!(pollster::block_on(document.layout(300.0)).is_err());
         assert!(pollster::block_on(open("0").layout(300.0)).is_ok());
     }

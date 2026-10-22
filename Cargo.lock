@@ -1205,7 +1205,9 @@ dependencies = [
  "bytes",
  "futures-channel",
  "image",
+ "parley",
  "pollster 1.0.1",
+ "stylo",
  "thiserror 2.0.21",
  "tracing",
 ]
