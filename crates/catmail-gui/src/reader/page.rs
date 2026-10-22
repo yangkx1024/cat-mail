@@ -6,6 +6,10 @@
 //! changed. Strips are dropped from the window's sprite atlas when they are evicted or
 //! the view is released; GPUI keeps an image there until told otherwise.
 //!
+//! A new layout (another width, theme or zoom, images that came) replaces the page shown
+//! only once the strips on screen are painted for it, all in one frame, so the page never
+//! goes blank or shows strips of two layouts at once.
+//!
 //! In a dark theme the page is dark too when the message allows it ([`Look`]): it sets
 //! no colors, or has dark styles of its own. A message colored for a white page keeps
 //! its white, as a browser would show it.
@@ -20,7 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use catmail_core::html::ColorUsage;
-use catmail_render::{Appearance, Document, Engine, Source, Stopped, Tile};
+use catmail_render::{Appearance, Document, Engine, Resolver, Source, Stopped, Tile};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Theme, h_flex};
 use gpui_kit::{
@@ -104,6 +108,15 @@ struct Opened {
     width: Option<f32>,
     /// Its height at that width, once the engine answered.
     height: Option<f32>,
+    /// Images given since that layout was asked for, kept from the document until its
+    /// next: given at once, they would reflow it under the strips of the layout coming.
+    images: Option<Resolver>,
+}
+
+/// A layout waiting for its strips on screen, to replace the page shown at once.
+struct Next {
+    layout: Layout,
+    strips: HashMap<u32, Arc<RenderImage>>,
 }
 
 /// A page laid out: its size in CSS pixels, and the window's pixels in one.
@@ -122,14 +135,16 @@ pub(super) struct PageView {
     source: Source,
     colors: ColorUsage,
     opened: Option<Opened>,
-    /// The layout shown, and its strips: the document's, or until it has one, the last
-    /// document's.
+    /// The layout shown, and its strips: the document's, or the last one's until the
+    /// strips on screen are painted for the next.
     layout: Option<Layout>,
     /// Where the view was last painted, for the pointer's position on the page.
     bounds: Bounds<Pixels>,
     /// The strips wanted on screen, as last measured.
     wanted: RangeInclusive<u32>,
     strips: HashMap<u32, Arc<RenderImage>>,
+    next: Option<Next>,
+    /// The strips being painted: the next layout's if there is one, else the shown one's.
     painting: HashMap<u32, Task<()>>,
     /// The `href` of the link under the pointer.
     hovered: Option<SharedString>,
@@ -157,6 +172,7 @@ impl PageView {
             bounds: Bounds::default(),
             wanted: 0..=0,
             strips: HashMap::new(),
+            next: None,
             painting: HashMap::new(),
             hovered: None,
             error: None,
@@ -165,13 +181,17 @@ impl PageView {
         }
     }
 
-    /// Shows `source` instead, once it is laid out (the inline images have loaded): the
-    /// page as it is stays until then.
-    pub(super) fn set_source(&mut self, source: Source, cx: &mut Context<Self>) {
-        self.source = source;
-        self.opened = None;
-        self._layout = Task::ready(());
-        cx.notify();
+    /// Resolves the page's images with `images` from now on: images that came (inline
+    /// parts, remote images) go to the open document with its next layout, which it
+    /// makes without starting over; the page as it is stays until then.
+    pub(super) fn set_images(&mut self, images: Resolver, cx: &mut Context<Self>) {
+        self.source.images = images.clone();
+        if let Some(opened) = &mut self.opened
+            && opened.document.is_some()
+        {
+            opened.images = Some(images);
+            cx.notify();
+        }
     }
 
     #[cfg(test)]
@@ -245,8 +265,10 @@ impl PageView {
                 look,
                 width: None,
                 height: None,
+                images: None,
             });
             self.painting.clear();
+            self.next = None;
             // The answer coming is the last document's.
             self._layout = Task::ready(());
         }
@@ -261,11 +283,18 @@ impl PageView {
         if width < 1.0 {
             return;
         }
-        if opened.width != Some(width) {
+        // Images that came are laid out once the last layout is shown, so a stream of
+        // them can't keep the page from ever changing.
+        let refresh = opened.images.is_some() && opened.height.is_some() && self.next.is_none();
+        if opened.width != Some(width) || refresh {
             opened.width = Some(width);
             opened.height = None;
+            if let Some(images) = opened.images.take() {
+                document.set_images(images);
+            }
             let laid_out = document.layout(width);
             self.painting.clear();
+            self.next = None;
             self.lay_out(
                 laid_out,
                 Layout {
@@ -285,9 +314,12 @@ impl PageView {
         };
         let visible = window.content_mask().bounds;
         self.wanted = strips_on_screen(bounds, visible, height, zoom);
-        let ahead = self.wanted.start().saturating_sub(AHEAD)..=*self.wanted.end() + AHEAD;
+        // The next layout needs only the strips on screen before it is shown.
+        let ahead = if self.next.is_some() { 0 } else { AHEAD };
+        let ahead = self.wanted.start().saturating_sub(ahead)..=*self.wanted.end() + ahead;
         for index in ahead.filter(|i| i * (STRIP as u32) < height.ceil() as u32) {
-            if self.strips.contains_key(&index) || self.painting.contains_key(&index) {
+            let strips = self.next.as_ref().map_or(&self.strips, |next| &next.strips);
+            if strips.contains_key(&index) || self.painting.contains_key(&index) {
                 continue;
             }
             let Some(document) = self.document() else {
@@ -296,6 +328,14 @@ impl PageView {
             let top = index as f32 * STRIP;
             let painted = document.paint(width, top, STRIP.min(height - top));
             self.paint(index, painted, window, cx);
+        }
+        // One with no strip to paint on screen (an empty page, or scrolled past its end)
+        // is shown as it is, once the frame is drawn.
+        if self.next_ready() {
+            cx.defer_in(window, |this, window, cx| {
+                this.show_next(window);
+                cx.notify();
+            });
         }
     }
 
@@ -311,15 +351,22 @@ impl PageView {
             let height = laid_out
                 .with_timeout(PATIENCE, cx.background_executor())
                 .await;
-            this.update_in(cx, |this, window, cx| {
+            this.update(cx, |this, cx| {
                 if let Some(height) = this.answered(height) {
                     // Of the document opened: a new one, or a new width, replaces this task.
                     if let Some(opened) = &mut this.opened {
                         opened.height = Some(height);
                     }
-                    // The strips were painted at another width, or of another document.
-                    this.drop_strips(window);
-                    this.layout = Some(Layout { height, ..layout });
+                    let layout = Layout { height, ..layout };
+                    if this.layout.is_some() {
+                        // Shown once painted; one that wasn't yet is replaced, never drawn.
+                        this.next = Some(Next {
+                            layout,
+                            strips: HashMap::new(),
+                        });
+                    } else {
+                        this.layout = Some(layout);
+                    }
                     this.error = None;
                 }
                 cx.notify();
@@ -343,8 +390,16 @@ impl PageView {
                 this.painting.remove(&index);
                 // Of this layout still: a new one dropped the tasks of the last.
                 if let Some(image) = this.answered(tile).and_then(render_image) {
-                    this.strips.insert(index, image);
-                    this.evict(window);
+                    match &mut this.next {
+                        Some(next) => {
+                            next.strips.insert(index, image);
+                            this.show_next(window);
+                        }
+                        None => {
+                            this.strips.insert(index, image);
+                            this.evict(window);
+                        }
+                    }
                 }
                 cx.notify();
             })
@@ -365,8 +420,31 @@ impl PageView {
             opened.document = None;
         }
         self.painting.clear();
+        self.next = None;
         self.error = Some(error.into());
         None
+    }
+
+    /// Shows the next layout in place of the page if the strips on screen are painted for
+    /// it. Not while painting a frame, as for [`evict`](Self::evict).
+    fn show_next(&mut self, window: &mut Window) {
+        let ready = self.next_ready();
+        let Some(next) = self.next.take_if(|_| ready) else {
+            return;
+        };
+        self.drop_strips(window);
+        self.strips = next.strips;
+        self.layout = Some(next.layout);
+    }
+
+    /// Whether there is a next layout, with the strips on screen painted for it.
+    fn next_ready(&self) -> bool {
+        self.next.as_ref().is_some_and(|next| {
+            let height = next.layout.height.ceil() as u32;
+            (self.wanted.clone())
+                .filter(|i| i * (STRIP as u32) < height)
+                .all(|i| next.strips.contains_key(&i))
+        })
     }
 
     /// Drops the strips far from the screen. Not while painting a frame: one dropped
@@ -565,6 +643,19 @@ mod tests {
         })
     }
 
+    const RED: [u8; 3] = [255, 0, 0];
+    const BLUE: [u8; 3] = [0, 0, 255];
+
+    /// An image 40 x 400 px.
+    fn png(rgb: [u8; 3]) -> catmail_render::Bytes {
+        crate::test_support::solid_png(40, 400, rgb).into()
+    }
+
+    /// The BGRA of `rgb`.
+    fn bgra([r, g, b]: [u8; 3]) -> Option<[u8; 4]> {
+        Some([b, g, r, 255])
+    }
+
     /// Draws a frame, then lets the tasks it started run if `settle`.
     fn frame(cx: &mut TestAppContext, window: AnyWindowHandle, settle: bool) -> f32 {
         let scale = cx
@@ -580,29 +671,109 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn a_new_source_is_painted_once_it_is_laid_out(cx: &mut TestAppContext) {
-        // 700 px: a whole strip and one of 188 px.
-        let (window, view) = open(cx, source(700));
+    fn images_that_come_replace_the_page_without_a_blank(cx: &mut TestAppContext) {
+        // 700 px, and an image with no size of its own: 400 px more once it comes.
+        let html = r#"<body style="margin:0"><img src="cid:tall" style="display:block">
+            <div style="height:700px"></div>"#;
+        let source = Source {
+            html: html.into(),
+            images: Arc::new(|_| None),
+        };
+        let (window, view) = open(cx, source);
         wait_until(|| {
             frame(cx, window, true);
-            cx.read(|cx| view.read(cx).layout.is_some())
+            cx.read(|cx| view.read(cx).painted_strips()) == 2
         });
-        // The strips are asked for, and the source changes before they come: at the same
-        // width, the layout of the last one is no answer for the new one.
-        frame(cx, window, false);
-        cx.update(|cx| view.update(cx, |view, cx| view.set_source(source(1500), cx)));
-        frame(cx, window, false);
+
+        let red = png(RED);
+        let images: Resolver = Arc::new(move |url| (url == "cid:tall").then(|| red.clone()));
+        cx.update(|cx| view.update(cx, |view, cx| view.set_images(images, cx)));
+        // Every frame shows one layout whole, the last until the next is painted.
         wait_until(|| {
             let scale = frame(cx, window, true);
-            let strips = cx.read(|cx| view.read(cx).strip_heights(scale));
-            if strips.len() < 3 {
-                return false;
-            }
+            let (strips, height) = cx.read(|cx| {
+                let view = view.read(cx);
+                (view.strip_heights(scale), view.shown_height())
+            });
+            assert!(!strips.is_empty(), "the page went blank");
             for (index, height, wanted) in strips {
                 assert_eq!(height, wanted, "strip {index}");
             }
-            true
+            height == Some(1100.)
         });
+        let pixel = cx.read(|cx| view.read(cx).top_pixel(4, 4));
+        assert_eq!(pixel, bgra(RED));
+    }
+
+    #[gpui_kit::test]
+    fn images_that_come_while_a_layout_is_made_go_to_the_next(cx: &mut TestAppContext) {
+        // Each image, once it comes, pushes the page 400 px down; the blue one goes on top.
+        let html = r#"<body style="margin:0"><img src="cid:blue" style="display:block">
+            <img src="cid:red" style="display:block"><div style="height:700px"></div>"#;
+        let source = Source {
+            html: html.into(),
+            images: Arc::new(|_| None),
+        };
+        let (window, view) = open(cx, source);
+        wait_until(|| {
+            frame(cx, window, true);
+            cx.read(|cx| view.read(cx).painted_strips()) == 2
+        });
+
+        let red = png(RED);
+        let images: Resolver = Arc::new(move |url| (url == "cid:red").then(|| red.clone()));
+        cx.update(|cx| view.update(cx, |view, cx| view.set_images(images, cx)));
+        // Asks for the layout with the red one; the blue one comes before it is made.
+        frame(cx, window, false);
+        let (red, blue) = (png(RED), png(BLUE));
+        let images: Resolver = Arc::new(move |url| match url {
+            "cid:red" => Some(red.clone()),
+            "cid:blue" => Some(blue.clone()),
+            _ => None,
+        });
+        cx.update(|cx| view.update(cx, |view, cx| view.set_images(images, cx)));
+
+        // The layout with the red one shows as it was laid out, then the next with both.
+        let mut shown = Vec::new();
+        wait_until(|| {
+            frame(cx, window, true);
+            let (height, pixel) = cx.read(|cx| {
+                let view = view.read(cx);
+                (view.shown_height(), view.top_pixel(4, 4))
+            });
+            if shown.last() != Some(&(height, pixel)) {
+                shown.push((height, pixel));
+            }
+            height == Some(1500.) && pixel == bgra(BLUE)
+        });
+        let white = Some([255; 4]);
+        assert_eq!(
+            shown,
+            [
+                (Some(700.), white),
+                (Some(1100.), bgra(RED)),
+                (Some(1500.), bgra(BLUE))
+            ]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_page_with_nothing_to_paint_replaces_the_last(cx: &mut TestAppContext) {
+        // Wider than the window's 600 px, as a smaller text size makes it, there is no page.
+        let html = r#"<style>@media (min-width: 700px) { html { display: none } }</style>
+            <body style="margin:0"><div style="height:700px"></div>"#;
+        let source = Source {
+            html: html.into(),
+            images: Arc::new(|_| None),
+        };
+        let (window, view) = open(cx, source);
+        let shown = |cx: &mut TestAppContext| {
+            frame(cx, window, true);
+            cx.read(|cx| view.read(cx).shown_height())
+        };
+        wait_until(|| shown(cx) == Some(700.));
+        cx.update(|cx| Preferences::update(cx, |s| s.text_size = 12.));
+        wait_until(|| shown(cx) == Some(0.));
     }
 
     #[gpui_kit::test]

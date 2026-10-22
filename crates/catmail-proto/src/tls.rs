@@ -42,6 +42,11 @@ impl TlsConfig {
     pub(crate) fn connector(&self) -> tokio_rustls::TlsConnector {
         tokio_rustls::TlsConnector::from(self.0.clone())
     }
+
+    /// For the HTTP client, which takes the configuration by value.
+    pub(crate) fn client_config(&self) -> ClientConfig {
+        (*self.0).clone()
+    }
 }
 
 impl std::fmt::Debug for TlsConfig {

@@ -16,12 +16,15 @@ mod engine;
 mod error;
 mod filename;
 mod gc;
+mod image_cache;
+mod images;
 /// What renderers of [`MessageBody::html`] need to resolve and block its images, and to
 /// lay it out without a browser.
 pub mod html {
+    pub use catmail_proto::http::RemoteImage;
     pub use catmail_proto::mime::{
         ColorUsage, InlineImage, color_usage, content_id_from_url, embed_inline_images,
-        image_sources, unwrap_layout_tables,
+        image_sources, remote_image_url, remote_image_urls, unwrap_layout_tables,
     };
 }
 mod ops;
@@ -37,9 +40,10 @@ pub use client::{EVENT_CAPACITY, MailClient, MailClientBuilder};
 pub use config::Config;
 pub use drafts::{format_addresses, parse_addresses};
 pub use engine::DEFAULT_DRAFT_UPLOAD_DELAY;
-pub use error::{Error, ImapError, Result, SmtpError, StoreError};
+pub use error::{Error, HttpError, ImapError, Result, SmtpError, StoreError};
 pub use filename::safe_filename;
 pub use gc::DEFAULT_GC_INTERVAL;
+pub use images::RemoteImageStream;
 pub use secrecy::{ExposeSecret, SecretString};
 pub use secrets::{KeyringSecrets, MemorySecrets, SecretStore};
 /// What [`MailClient::subscribe`]'s receiver returns when it falls behind or the engine

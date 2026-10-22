@@ -109,6 +109,72 @@ fn shows_html_dark_when_the_message_allows_it(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn shows_remote_images_as_they_come_when_asked(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let images = mail.serve_images();
+    let (red_png, slow_png) = (images.url("/red.png"), images.url("/slow.png"));
+    mail.deliver_raw_and_sync(
+        format!(
+            "From: a@example.com\r\nTo: catmail@example.com\r\nSubject: Remote image\r\n\
+             Date: Mon, 19 Oct 2026 10:00:00 +0800\r\nMIME-Version: 1.0\r\n\
+             Content-Type: text/html; charset=utf-8\r\n\r\n\
+             <img src=\"{red_png}\" width=\"40\" height=\"40\" style=\"display:block\">\
+             <img src=\"{slow_png}\" width=\"40\" height=\"40\" style=\"display:block\">\r\n"
+        )
+        .as_bytes(),
+    );
+    let (window, mailbox) = open(cx, &mail);
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| find(&mailbox, "Remote image", cx).is_some())
+    });
+    // Inside each image, past the page's margin: one under the other, at 8..48 and
+    // 48..88 CSS px.
+    let scale = cx
+        .update_window(window, |_, window, _| window.scale_factor())
+        .unwrap();
+    let at = |css: f32| (css * scale) as u32;
+    let pixels = |cx: &mut TestAppContext| {
+        frame(cx, window);
+        cx.read(|cx| {
+            let reader = mailbox.read(cx).reader.read(cx);
+            let pixel = |y| reader.page_pixel(at(20.), at(y), cx);
+            (pixel(20.), pixel(70.))
+        })
+    };
+    let has_button = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.try_find("show-remote-images").is_some()
+        })
+        .unwrap()
+    };
+    let (white, red) = (Some([255; 4]), Some([0, 0, 255, 255]));
+
+    set_appearance(cx, crate::settings::Appearance::Light);
+    // HTML only, so shown as HTML; the images' places stay blank.
+    click_message(cx, window, &mailbox, "Remote image");
+    wait_until(|| pixels(cx) == (white, white));
+    assert_eq!(images.requests(), 0, "nothing loads on its own");
+
+    // Asked for, each image shows as it comes; the button stays until the last has.
+    click(cx, window, "show-remote-images");
+    wait_until(|| pixels(cx) == (red, white));
+    assert!(has_button(cx));
+    images.release();
+    wait_until(|| pixels(cx) == (red, red));
+    wait_until(|| !has_button(cx));
+    assert_eq!(images.requests(), 2);
+
+    // Shown once, they show again from the cache, unasked and with no request.
+    click_message(cx, window, &mailbox, "月度报表");
+    click_message(cx, window, &mailbox, "Remote image");
+    wait_until(|| pixels(cx) == (red, red));
+    assert!(!has_button(cx));
+    assert_eq!(images.requests(), 2);
+}
+
+#[gpui_kit::test]
 fn archiving_opens_the_next_message(cx: &mut TestAppContext) {
     let mail = TestMail::start();
     let (window, mailbox) = open(cx, &mail);

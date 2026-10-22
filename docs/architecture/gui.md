@@ -33,10 +33,10 @@ src/
     folders.rs       文件夹分区（纯逻辑）
     move_to.rs add_account.rs   "Move to"对话框；登录表单
     tests/           驱动窗口的集成测试，按读信、写信、设置分文件，另有截图
-  reader/            读信：mod.rs 状态与操作，message.rs 打开的邮件，images.rs 内嵌图片，view.rs 渲染，
+  reader/            读信：mod.rs 状态与操作，message.rs 打开的邮件，images.rs 内嵌与远程图片，view.rs 渲染，
                      page.rs Blitz 排版的页面
   composer/          写信窗口：mod.rs 打开与编辑，lifecycle.rs 保存 / 发送 / 关闭，view.rs 渲染
-  settings/          mod.rs 偏好（settings.json）；dialog/ 设置对话框（外观与主题、账户分文件）
+  settings/          mod.rs 偏好（settings.json）；dialog/ 设置对话框（外观与主题、账户、读信分文件）
   theme/             palette / derive / builtin / import/（纯逻辑：调色板、推导、内置、导入）；
                      appearance.rs 可选主题与应用；colors.rs 应用自己的颜色
 ```
@@ -143,6 +143,9 @@ macOS、Windows 用系统字体，不受影响。
 - **设置**（外观、浅色 / 深色各自的主题、文字大小、打开即已读）是这个前端的偏好，存在配置目录的
   `settings.json`（`--config-dir` / `CATMAIL_CONFIG_DIR`），不进引擎的数据库。写入经临时文件替换，
   在后台按顺序进行：每次写持锁取最新的设置，晚到的写不会把旧设置写回去。读不了就用默认值。
+- **远程图片缓存**属于引擎的数据目录，不是偏好：Settings › Reading 显示它占多少（每次切到这一节时重新
+  量，缓存随阅读增长），"Clear image cache"清空；缓存为空时按钮不可用，清空中转圈。已经显示在读信
+  区的图片留在内存里，换一封再回来才重新拦截。
 - **主题都从终端调色板推导**（`theme/`）：背景、前景和 16 个 ANSI 色按设计稿的映射表推导出 gpui-kit
   `ThemeConfig` 的全部颜色键；内置主题也写成调色板，与导入的走同一套规则。导入按内容识别 Alacritty、
   kitty、Ghostty、WezTerm、Windows Terminal、iTerm2、foot、Xresources、base16 / base24 和 gpui-kit
@@ -213,13 +216,27 @@ INBOX，所以打开一个文件夹时同步它（`MailClient::sync_folder`，�
 - **图片。** `image_source` 决定每张图：
   - `cid:` 按 `content_id_from_url`（与引擎判断"内嵌"同一条 RFC 2392 规则）查已加载的内嵌部分；
   - `data:` 用 `data-url`（gpui-kit 自己用的同一个 WHATWG 解析器）解码；
-  - 其他（远程、`file:`、相对路径）返回立即失败的 `ImageSource::Custom`，不发任何请求；
+  - 远程（`http`、`https`）图片在用户点了"Show remote images"之后，查这封信已下载的远程图片；
+  - 其他（未下载的远程图片、`file:`、相对路径）返回立即失败的 `ImageSource::Custom`，不发任何请求；
   - **SVG 一律不显示**：GPUI 用默认选项把 SVG 交给 usvg，它会把嵌套的 `<image href>` 当本地路径直接
     读文件，绕过 `image_source`，邮件就能显示本地图片，或读 `/dev/zero` 耗尽内存。
-  - 显示与否只有一条规则（`html::Carried::of`：内嵌部分或 `data:` 图片），`image_source` 和"远程图片
-    未加载"的提示都用它。`data:` 图片只解码一次后缓存（视图每帧都会问）。"远程图片未加载"的提示由
-    `catmail_core::html::image_sources` 判断，复用清洗用的同一个 ammonia 配置按解析结果列出
-    `img src`，在后台线程运行。内嵌图片在正文显示后再逐个取。
+  - 显示与否只有一条规则（`html::Carried::of`：内嵌部分或 `data:` 图片；再加用户要了的远程图片），
+    `image_source` 和 Blitz 的 resolver 都用它（`Images::image`）。`data:` 图片只解码一次后缓存（视图
+    每帧都会问）。内嵌图片在正文显示后再逐个取。
+- **远程图片。** 打开邮件时在后台线程用 `catmail_core::html::remote_image_urls` 列出正文引用的远程
+  图片（见[正文与附件](bodies.md)），`OpenMessage::remote_images` 记着其中还没显示的，不为空就在格式栏
+  显示"Show remote images"按钮。打开邮件时与内嵌图片并行地查缓存（`cached_remote_images`），缓存里有的
+  直接显示，不必点击，也不发请求；都在缓存里就不显示按钮。点击后把其余 URL 交给 `MailClient::fetch_remote_images`（限制见
+  [正文与附件](bodies.md)），按钮转圈；图片按下载完成的顺序逐批显示：每到一张，连同此刻已到的
+  （`next_ready`）合成一批，换一份 `Images`（保留已到的内嵌和远程图片，内嵌图片后到时同样保留远程的），
+  交给页面（`PageView::set_images`，不重开文档，见[HTML 引擎](#html-引擎)）。新的 `Images`
+  （`with_inline` / `with_remote`）沿用已解析出图片的 URL，`data:` 图片不重新解码。全部结束后按钮消失
+  （失败的留白）；一张也没拿到时提示第一个错误、按钮恢复，可以再试。
+  - 点击只对这一封、这一次打开有效：换邮件时任务被丢弃，流随之丢弃，引擎里还在下载的立即中止；
+    不记住发件人。下载过的图片进引擎的缓存（见[正文与附件](bodies.md)），下次打开直接显示。
+  - URL 按 `remote_image_url`（`url` 解析后的写法）存取：Blitz 先解析 URL 再问（主机名小写、空格
+    转义），`TextView` 原样问，两边都按同一种写法查。
+  - "在浏览器打开"仍按 CSP 拦截远程图片，不带已下载的远程图片。
 - **链接。** 只把 `http` / `https` / `mailto` 交给系统打开；其他链接点了无反应（gpui-kit 默认会
   `open_url` 任何链接）。
 - **在浏览器打开。** 把清洗后的 HTML 写成独立页面：`catmail_core::html::embed_inline_images` 把内嵌
@@ -280,12 +297,19 @@ CSS 引擎）+ Taffy + Parley 排版，vello_cpu 绘制。格式栏 Text / HTML 
   不会堆积工作。丢掉 `Document`，线程答完手头的请求就退出；引擎 panic（Blitz 还在 beta）只让这一个
   文档的请求失败（`Stopped`）。引擎的接口是 `worker::Page` 和一个打开函数，换引擎只换实现。系统字体
   全进程只扫描一次（`FontContext` 的克隆共享扫描结果），同一页面的分块复用光栅化器。
+- **后到的图片。** resolver 暂时答不上的图片（内嵌部分还在下载、远程图片还没取），`NetProvider` 把
+  Blitz 给的 `NetHandler` 按 URL 留着，而不是丢掉。`Document::set_images` 换一个新 resolver（应当答得
+  出旧的答过的一切），线程按顺序收到后用它再问一遍所有还在等的 URL，答上的交给各自的 handler（在
+  渲染线程上解码），下一次排版时 Blitz 收下它们，只重算受影响的样式和布局，不重新解析整页。URL 是
+  Blitz 解析后的写法，读信区按 `remote_image_url` 存远程图片，两边一致。
 - **超时。** 邮件可以故意做得很难排版，线程又停不下来：`PageView` 对每个请求用 GPUI 的
   `with_timeout` 等 10 秒，超时就放弃这个文档并说明原因；它的线程做完手头的工作后自行退出，别的文档
   各有线程，不受影响。页面高度最多 200 000 CSS px，再往下截掉。
 - **不联网。** 引擎能拿到的只有 HTML 和读信区给的 `Resolver`，Blitz 唯一的 `NetProvider` 只问它。
-  `Images::bytes` 与 `TextView` 的 `image_source` 用同一条 `html::Carried` 规则（内嵌部分、`data:`
-  栅格图片），远程图片、样式表、字体一概拿不到。
+  `Images::bytes` 与 `TextView` 的 `image_source` 用同一条规则（内嵌部分、`data:` 栅格图片、用户要了
+  并已下载的远程图片），样式表、字体一概拿不到。`Resolver` 返回 `bytes::Bytes`（Blitz 存图片用的
+  类型）：`Images::bytes` 用 `Bytes::from_owner` 包住 `Arc<Image>`，文档重开（主题或缩放变了）、
+  图片再交给文档时都共用同一份内容，不再复制。
 - **排版。** 宽度取读信区正文宽度（取整，避免亚像素变化反复重排）；视口高度固定 800 CSS px（`vh` 和
   `height:100%` 以它为准），页面整体由读信区滚动，不随窗口高度重排。Blitz 按视口的缩放系数排字，
   所以文档按打开时的缩放系数排版和绘制，缩放系数变了就重新打开。默认字体 sans-serif（用户代理样式
@@ -295,11 +319,19 @@ CSS 引擎）+ Taffy + Parley 排版，vello_cpu 绘制。格式栏 Text / HTML 
   整页缩放而不是只改默认字号，因为多数邮件自己用 px 定字号，只改默认字号几乎没有效果，也破坏了
   文字、间距一起缩放的那条轴。文字大小变了就重新打开文档。
 - **显示（`PageView`）。** 页面按 512 CSS px 一条绘制，转成 BGRA 交给 GPUI 的 `img`。绘制时测量
-  自身：宽度变了才重排，可见区域决定要哪几条（多画上下各一条），远离屏幕三条以外的丢掉。重新打开
-  （内嵌图片到了、缩放系数或外观变了）或换宽度后，旧页面和它的分块继续显示，直到新文档在这个宽度上
-  的排版回来才开始画新分块：分块的高度取决于页面高度，按旧高度画出的末条会被拉伸。GPUI
-  把图片留在窗口的 sprite atlas 里直到 `drop_image`，所以淘汰、重排和视图释放时都要调用；淘汰
-  不能在绘制一帧的过程中做（那一帧已建好的 `img` 会把它放回去），放在分块到达的回调里。
+  自身：宽度变了才重排，可见区域决定要哪几条（多画上下各一条），远离屏幕三条以外的丢掉。
+  - **换页不闪。** 新的排版（换宽度、缩放系数或外观变了而重开、图片到了）回来后先不显示：旧的排版和
+    它的分块继续显示，新排版（`Next`）只画屏幕上的那几条，全部到齐后在同一个回调里换掉旧的分块和
+    排版，所以任何一帧都只显示一个排版的完整分块，不会空白，也不会混着两种高度（分块的高度取决于页面
+    高度，按旧高度画出的末条会被拉伸）。还没画好时又来一个新排版，就直接替换它（它的分块从没画到
+    屏幕上，不用 `drop_image`）。屏幕上没有分块要画的新排版（页面空了，比如媒体查询在更宽时隐藏了
+    正文；或者滚动位置已在新页面之外）等不到分块，测量时发现就在这一帧画完后直接换上（`defer_in`）。
+  - **图片接连到达。** `set_images` 只把新 resolver 记在 `Opened::images`，重新排版时才交给文档，紧接着
+    请求排版（线程按顺序处理，排版一定用上它）。重新排版要等上一个排版已经显示、没有 `Next` 在画，
+    所以连续到达的图片不会让页面一直换不过去，期间到的合并进下一次排版。不能一到就交给文档：线程会
+    作废缓存的排版，之后为 `Next` 画的分块按新图片重排，内容与 `Next` 的高度对不上。
+  - GPUI 把图片留在窗口的 sprite atlas 里直到 `drop_image`，所以淘汰、重排和视图释放时都要调用；
+    淘汰和换页不能在绘制一帧的过程中做（那一帧已建好的 `img` 会把它放回去），放在分块到达的回调里。
   页面画在 `Appearance::canvas` 上（浅色时是白色，邮件按白底写）。
 - **深色。** 深色主题下，正文不设颜色或自带深色样式（`color_usage`：`Unset`、`Adaptive`）时显示成
   深色：`prefers-color-scheme` 回答 dark，画布是窗口背景色，再加一张用户代理样式表给 html 的文字、

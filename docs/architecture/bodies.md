@@ -60,6 +60,33 @@ base64 正文），交给 mail-parser 按同样方式解析。于是两条路径
   - 链接只允许 http、https、mailto、cid，`data:` 只允许出现在 `img src`；判断时像 URL 解析器
     一样忽略其中的制表符、换行和开头的控制字符。
   - 图片地址（远程、`cid:`）原样保留，是否加载由渲染端决定，默认应拦截远程图片。
+- **哪些是远程图片**由 proto 决定（`mime::remote_image_urls`，经 `catmail_core::html` 导出）：清洗用的
+  同一个 ammonia 配置列出 `img src`（`image_sources`），只留 `http` / `https`，按 `url` 解析后的写法
+  （`remote_image_url`）去重，最多 200 张。下载、缓存和读信区都用这一种写法，调用方传别的写法，缓存
+  也会先规范化。
+- **远程图片**只在前端要求时下载（GUI 是用户点"Show remote images"），`MailClient::fetch_remote_images`
+  在引擎运行时上用 `catmail-proto` 的 `http::ImageFetcher`（reqwest，TLS 与邮件服务器共用同一个
+  rustls + ring 配置）：
+  - 只取 `http` / `https`，重定向最多 5 次且只能到这两种 scheme；只发 GET，不存 cookie，不发 `Referer`
+    （重定向时也不发），User-Agent 是 `cat-mail/<版本>`。
+  - 每张 30 秒、10 MiB 为限（先看 `Content-Length`，再边读边数）；一次最多 200 张，同时 6 个。
+  - 类型先按开头字节认常见栅格格式（服务器常标成 `application/octet-stream` 或标错），认不出再用
+    `Content-Type` 的 `image/*`，都不是就算失败。SVG 也算失败：读信区不显示 SVG（解码器会读本地
+    文件），不必缓存。
+  - 返回一个流（`RemoteImageStream`）：每个 URL 下载完（或失败）就给出它的结果，按完成顺序，一张
+    失败不影响其他；`next_ready` 不等待地取已完成的，前端可以把同时到的几张合成一批。流是 tokio 的
+    channel，任何执行器都能等。丢掉流，引擎里还在下载的立即中止（`JoinSet` 随任务丢弃）。
+  - 下载成功的图片进缓存（`image_cache.rs`，下面）；缓存里有的直接从缓存给出，不发请求。
+  - 不拦截局域网和本机地址：与浏览器打开网页相同，且只在用户点击后、只对这封信的图片 GET。
+- **远程图片缓存**在数据目录的 `remote-images/`，一个 URL 一个文件（文件名是 URL 的 SHA-256，内容是
+  MIME 类型、换行、图片字节），第一次存入时建目录（0700，文件 0600）。
+  - 不放进 `BlobStore`：blob 按内容寻址，可能与同内容的附件共用一个文件，只能在 GC 宽限期过后删；
+    清除缓存要求立刻删掉。缓存文件没有别的引用，任何时候删掉都安全（缺了就是没命中）；写入经临时
+    文件（`.tmp` 开头，读时忽略）改名，读到格式不对的文件就删掉当作没命中。
+  - 缓存的图片可以不经用户同意直接显示（`MailClient::cached_remote_images`）：不发请求，发件人得不到
+    任何信号。缓存按 URL，不按邮件：另一封信引用同一个 URL 也直接显示。不看 `Cache-Control`：
+    邮件里的图片基本不变，按 `no-store` 再去取反而又给发件人一次信号。
+  - 总大小上限 256 MiB，有新图片存入的那次下载结束后按最后使用时间（读取时更新 mtime）从最旧的删起。`image_cache_size`、`clear_image_cache` 给设置界面用。
 - **内嵌**（`inline`）指 HTML 用 `cid:` 引用了它：按 RFC 2392 取出完整的引用值、百分号解码后精确
   比较（`cid:logo-long` 不会让 `logo` 也算内嵌）。没被引用的图片都算附件，`has_attachments` 只统计
   非内嵌的部分。

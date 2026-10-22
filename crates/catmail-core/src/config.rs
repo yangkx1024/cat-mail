@@ -53,6 +53,11 @@ impl Config {
     pub fn handoff_dir(&self) -> PathBuf {
         self.data_dir.join("handoff")
     }
+
+    /// Remote images the user chose to show, so they show again without a request.
+    pub fn image_cache_dir(&self) -> PathBuf {
+        self.data_dir.join("remote-images")
+    }
 }
 
 fn project_dirs() -> Option<ProjectDirs> {

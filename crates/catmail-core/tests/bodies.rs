@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use catmail_core::{Error, Event, Message, MessageId, SearchQuery};
-use catmail_testkit::{ServerState, SmtpState};
+use catmail_testkit::{FakeHttp, Reply, ServerState, SmtpState, response};
 
 mod common;
 
@@ -586,4 +586,111 @@ fn files(dir: &Path) -> Vec<PathBuf> {
         }
     }
     files
+}
+
+const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+
+/// A web server where `/logo.png` answers, `/hang` waits forever, and the rest are
+/// missing.
+async fn image_server() -> FakeHttp {
+    FakeHttp::start(|path| match path {
+        "/logo.png" => Reply::Send(response("200 OK", &[], PNG)),
+        "/hang" => Reply::Held(response("200 OK", &[], PNG)),
+        _ => Reply::Send(response("404 Not Found", &[], b"")),
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fetches_remote_images_as_they_come_until_dropped() {
+    let server = image_server().await;
+    let env = env(ServerState::new("alice", "pw")).await;
+    let urls = vec![
+        server.url("/hang"),
+        server.url("/missing.gif"),
+        server.url("/logo.png"),
+        "file:///etc/passwd".to_owned(),
+    ];
+    let mut stream = env.client.fetch_remote_images(urls.clone()).await.unwrap();
+    // All but the one that hangs come, in whatever order they finish.
+    let mut fetched = Vec::new();
+    for _ in 0..3 {
+        fetched.push(stream.next().await.unwrap());
+    }
+    fetched.sort_by_key(|(url, _)| urls.iter().position(|u| u == url));
+    let got: Vec<_> = fetched.iter().map(|(url, _)| url.clone()).collect();
+    assert_eq!(got, urls[1..]);
+    assert!(matches!(&fetched[0].1, Err(Error::Http(_))));
+    let image = fetched[1].1.as_ref().unwrap();
+    assert_eq!(
+        (image.mime_type.as_str(), image.bytes.as_slice()),
+        ("image/png", PNG)
+    );
+    assert!(matches!(&fetched[2].1, Err(e) if e.kind() == catmail_core::ErrorKind::Invalid));
+    assert!(stream.next_ready().is_none());
+
+    // Dropped, it stops the fetch still going instead of waiting out its timeout.
+    drop(stream);
+    eventually("the hanging request to be dropped", async || {
+        server.abandoned() == 1
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_images_shown_once_come_from_the_cache_until_cleared() {
+    let server = image_server().await;
+    let env = env(ServerState::new("alice", "pw")).await;
+    let (logo, missing) = (server.url("/logo.png"), server.url("/missing.gif"));
+    let urls = vec![logo.clone(), missing.clone()];
+    let fetch_all = async |urls: Vec<String>| {
+        let mut stream = env.client.fetch_remote_images(urls).await.unwrap();
+        let mut fetched = Vec::new();
+        while let Some(one) = stream.next().await {
+            fetched.push(one);
+        }
+        fetched
+    };
+
+    assert!(
+        env.client
+            .cached_remote_images(urls.clone())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(env.client.image_cache_size().await.unwrap(), 0);
+    fetch_all(urls.clone()).await;
+    assert_eq!(server.requests(), 2);
+
+    // Kept: it comes from the cache, without a request; what failed isn't kept.
+    let cached = env.client.cached_remote_images(urls.clone()).await.unwrap();
+    assert_eq!(cached.len(), 1);
+    assert_eq!(
+        (cached[0].0.as_str(), cached[0].1.bytes.as_slice()),
+        (logo.as_str(), PNG)
+    );
+    let fetched = fetch_all(urls.clone()).await;
+    assert_eq!(fetched.len(), 2);
+    assert!(
+        fetched
+            .iter()
+            .any(|(url, image)| *url == logo && image.is_ok())
+    );
+    assert_eq!(server.requests(), 3, "only the missing one is asked again");
+    let size = env.client.image_cache_size().await.unwrap();
+    assert!(size > PNG.len() as u64, "{size}");
+
+    // Cleared, it is fetched again.
+    assert_eq!(env.client.clear_image_cache().await.unwrap(), size);
+    assert_eq!(env.client.image_cache_size().await.unwrap(), 0);
+    assert!(
+        env.client
+            .cached_remote_images(urls.clone())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    fetch_all(vec![logo]).await;
+    assert_eq!(server.requests(), 4);
 }

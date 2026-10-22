@@ -16,7 +16,8 @@ use mail_parser::{HeaderValue, MessageParser};
 pub use build::{InvalidHeader, Outgoing, OutgoingAttachment, build_message};
 pub use content::{Content, Part, content_id_from_url, decode_transfer, parse_message};
 pub use html::{
-    ColorUsage, InlineImage, color_usage, embed_inline_images, image_sources, sanitize_html,
+    ColorUsage, InlineImage, MAX_REMOTE_IMAGES, color_usage, embed_inline_images, image_sources,
+    remote_image_url, remote_image_urls, sanitize_html,
 };
 pub use layout::unwrap_layout_tables;
 pub use structure::{Leaf, MimeNode, Params};

@@ -1,4 +1,4 @@
-use catmail_proto::{imap, smtp};
+use catmail_proto::{http, imap, smtp};
 use catmail_types::{ErrorKind, ReportedError};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -16,6 +16,10 @@ pub enum Error {
     /// Any other SMTP failure.
     #[error(transparent)]
     Smtp(SmtpError),
+
+    /// A remote image couldn't be had.
+    #[error(transparent)]
+    Http(HttpError),
 
     /// The server rejected the credentials.
     #[error("login rejected by the server ({0}); check the username and password")]
@@ -108,6 +112,11 @@ pub struct ImapError(pub(crate) imap::Error);
 #[error(transparent)]
 pub struct SmtpError(pub(crate) smtp::Error);
 
+/// A failure to fetch a remote image, as for [`ImapError`].
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub struct HttpError(pub(crate) http::Error);
+
 impl Error {
     pub fn kind(&self) -> ErrorKind {
         use ErrorKind as K;
@@ -115,6 +124,7 @@ impl Error {
             Self::Store(_) => K::Internal,
             Self::Imap(ImapError(e)) => e.kind(),
             Self::Smtp(SmtpError(e)) => e.kind(),
+            Self::Http(HttpError(e)) => e.kind(),
             Self::AuthFailed(_) => K::Auth,
             Self::Unsupported(_)
             | Self::InvalidInput(_)
@@ -186,6 +196,12 @@ impl From<smtp::Error> for Error {
             E::Unsupported(what) => Self::Unsupported(what),
             other => Self::Smtp(SmtpError(other)),
         }
+    }
+}
+
+impl From<http::Error> for Error {
+    fn from(e: http::Error) -> Self {
+        Self::Http(HttpError(e))
     }
 }
 

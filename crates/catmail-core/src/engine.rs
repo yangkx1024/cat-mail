@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use catmail_proto::TlsConfig;
+use catmail_proto::http::ImageFetcher;
 use catmail_proto::imap::Session;
 use catmail_store::{BlobStore, Db, Store};
 use catmail_types::{
@@ -12,6 +13,7 @@ use catmail_types::{
 };
 use tokio::sync::{Notify, OwnedMutexGuard, broadcast, watch};
 
+use crate::image_cache::ImageCache;
 use crate::secrets::SecretStore;
 use crate::watch::SyncSchedule;
 use crate::{Config, Error, Result};
@@ -29,6 +31,9 @@ pub(crate) struct Engine {
     pub events: broadcast::Sender<Event>,
     /// Set by the builder, else the platform verifier, created on first use.
     tls: OnceLock<TlsConfig>,
+    /// Created on first use: most sessions never load a remote image.
+    image_fetcher: OnceLock<ImageFetcher>,
+    pub image_cache: Arc<ImageCache>,
     /// Wakes the outbox worker, if one runs: something became due.
     pub outbox_kick: Arc<Notify>,
     /// Set if every account is kept in sync in the background (see `watch`).
@@ -147,6 +152,7 @@ impl Engine {
         events: broadcast::Sender<Event>,
         tls: Option<TlsConfig>,
     ) -> Self {
+        let image_cache = Arc::new(ImageCache::new(config.image_cache_dir()));
         Self {
             config,
             _data_dir_lock: data_dir_lock,
@@ -155,6 +161,8 @@ impl Engine {
             secrets,
             events,
             tls: tls.map(OnceLock::from).unwrap_or_default(),
+            image_fetcher: OnceLock::new(),
+            image_cache,
             outbox_kick: Arc::default(),
             sync_in_background: None,
             draft_upload_delay: DEFAULT_DRAFT_UPLOAD_DELAY,
@@ -203,6 +211,14 @@ impl Engine {
         }
         let tls = TlsConfig::platform().map_err(|e| Error::Tls(e.to_string()))?;
         Ok(self.tls.get_or_init(|| tls).clone())
+    }
+
+    pub fn image_fetcher(&self) -> Result<ImageFetcher> {
+        if let Some(fetcher) = self.image_fetcher.get() {
+            return Ok(fetcher.clone());
+        }
+        let fetcher = ImageFetcher::new(&self.tls()?)?;
+        Ok(self.image_fetcher.get_or_init(|| fetcher).clone())
     }
 
     /// Waits for any other sync of `account` to finish.
