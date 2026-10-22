@@ -4,16 +4,20 @@
 
 mod build;
 mod content;
+mod css;
 mod html;
 mod layout;
 mod structure;
+mod tokens;
 
 use catmail_types::Address;
 use mail_parser::{HeaderValue, MessageParser};
 
 pub use build::{InvalidHeader, Outgoing, OutgoingAttachment, build_message};
 pub use content::{Content, Part, content_id_from_url, decode_transfer, parse_message};
-pub use html::{InlineImage, embed_inline_images, image_sources, sanitize_html};
+pub use html::{
+    ColorUsage, InlineImage, color_usage, embed_inline_images, image_sources, sanitize_html,
+};
 pub use layout::unwrap_layout_tables;
 pub use structure::{Leaf, MimeNode, Params};
 

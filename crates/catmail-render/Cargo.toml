@@ -1,0 +1,25 @@
+[package]
+name = "catmail-render"
+description = "An HTML engine that lays out and paints a message body off the UI thread, for the reader"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyrender.workspace = true
+anyrender_vello_cpu.workspace = true
+blitz-dom.workspace = true
+blitz-html.workspace = true
+blitz-paint.workspace = true
+blitz-traits.workspace = true
+futures-channel.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+image = { workspace = true, features = ["png"] }
+pollster.workspace = true
+
+[lints]
+workspace = true

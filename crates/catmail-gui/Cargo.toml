@@ -12,11 +12,13 @@ path = "src/main.rs"
 
 [dependencies]
 catmail-core.workspace = true
+catmail-render.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 data-url.workspace = true
 directories.workspace = true
 gpui-kit.workspace = true
+image.workspace = true
 jiff.workspace = true
 quick-xml.workspace = true
 serde.workspace = true

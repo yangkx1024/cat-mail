@@ -38,7 +38,18 @@ base64 正文），交给 mail-parser 按同样方式解析。于是两条路径
 
 - `text`：所有正文文本部分；只有 HTML 时由 HTML 转换。
 - `html`：只在有真正的 HTML 部分时存在，经 `ammonia` 清洗：
-  - 去掉脚本、样式表、表单、iframe、事件属性和 `javascript:` 链接；
+  - 去掉脚本、表单、iframe、事件属性和 `javascript:` 链接；
+  - 样式表不交给 ammonia（它不看 `<style>` 里面，写回时原样输出原始文本）：分词时按树构建器的规则
+    （`script`、`textarea` 等之后切到原始文本，SVG / MathML 里的忽略）取出 `<style>` 的内容，经
+    `mime/css.rs` 用 cssparser 的记号逐条重写，合成一个 `<style>` 放在输出开头。只保留普通规则和
+    `@media` / `@supports`（最多嵌套三层）；值里有 `url()`、`image()`、`image-set()`、`cross-fade()`、
+    `src()`、`element()`、`paint()` 的声明丢掉，规则其余部分保留（转义在分词时已解码，`\75rl(` 就是
+    `url(`）；`@import`、`@font-face` 等其他 at-rule、带 `:has()` 的选择器、嵌套规则都丢掉；最多 64 KB、
+    2000 条规则。输出里没有 `<`（写成 `\3c `），所以样式表不可能结束自己的元素或改变文档结构，变异
+    XSS 不依赖 ammonia 对边角情况的处理。重写是幂等的，读信区对清洗后的 HTML 再清洗不会改变它；规则
+    只作用于之后下载的正文，已入库的正文保持旧规则清洗的结果。
+  - `color_usage` 用同一套分词（`mime/tokens.rs`，展开布局表格也用它）判断正文怎样用颜色（不设、为白底设了颜色、自带深色样式），读信区据此
+    决定能否显示成深色（见 [GUI](gui.md#html-引擎)）；
   - 保留表格布局属性和行内 `style`，但可能加载资源的 style（`url(`、`image-set(`、`@import`、
     CSS 转义）整个去掉；
   - 链接只允许 http、https、mailto、cid，`data:` 只允许出现在 `img src`；判断时像 URL 解析器

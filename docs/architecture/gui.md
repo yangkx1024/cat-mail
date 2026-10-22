@@ -3,6 +3,7 @@
 [← 架构](../architecture.md)
 
 `catmail-gui`，基于 `gpui-kit`（longbridge）：虚拟列表、Table、编辑器、原生 HTML 渲染，无 WebView。
+邮件 HTML 默认由 `catmail-render` 的 Blitz 排版，见 [HTML 引擎](#html-引擎)。
 gpui-kit 精确 pin 它所用的 GPUI，应用只依赖 `gpui-kit`（`use gpui_kit::*` 就是 GPUI），不直接依赖
 `gpui`，否则会链接两份 GPUI。我们开启 gpui-kit 的 `gpui-fast` feature，后端从默认的 `gpui-pre-*` 快照
 换成 GPUI Fast（`gpui-fast-*`，渲染和布局上的优化），导入路径不变；feature 是叠加的，`gpui-pre-*`
@@ -32,7 +33,8 @@ src/
     folders.rs       文件夹分区（纯逻辑）
     move_to.rs add_account.rs   "Move to"对话框；登录表单
     tests/           驱动窗口的集成测试，按读信、写信、设置分文件，另有截图
-  reader/            读信：mod.rs 状态与操作，message.rs 打开的邮件，images.rs 内嵌图片，view.rs 渲染
+  reader/            读信：mod.rs 状态与操作，message.rs 打开的邮件，images.rs 内嵌图片，view.rs 渲染，
+                     page.rs Blitz 排版的页面
   composer/          写信窗口：mod.rs 打开与编辑，lifecycle.rs 保存 / 发送 / 关闭，view.rs 渲染
   settings/          mod.rs 偏好（settings.json）；dialog/ 设置对话框（外观与主题、账户分文件）
   theme/             palette / derive / builtin / import/（纯逻辑：调色板、推导、内置、导入）；
@@ -203,7 +205,8 @@ INBOX，所以打开一个文件夹时同步它（`MailClient::sync_folder`，�
 
 ## 读信
 
-- **正文。** 默认显示纯文本（`SelectableText`），有 HTML 部分时可切换，选择在切换邮件时保留。打开时把
+- **正文。** 默认显示纯文本（`SelectableText`），有 HTML 部分时可切换，选择在切换邮件时保留。HTML
+  由哪个引擎画（Blitz、GPUI Kit）同样可切换、同样保留，见 [HTML 引擎](#html-引擎)。打开时把
   正文、标题、头部和附件列表一次准备好（`OpenMessage`），正文作为同一个 `SharedString` 每帧交给视图。
   HTML 用 `gpui_base::text::TextView`：只有 base 层暴露 `image_source`，主题样式由 component 安装的
   `TextViewDefaults` 提供。
@@ -260,7 +263,68 @@ gpui-kit 的表格单元格只是一个行内段落（gpui-base `text/format/htm
   html5ever 与 ammonia 同版本；ammonia 的 DOM 要 `--cfg ammonia_unstable` 才能用，所以没走那条路。
   结果再过一遍同一个 sanitizer。
 - 这是绕开 gpui-kit 的限制。升级 gpui-kit 时对照 `parse_table_cell` 和它的块元素表：单元格能放块
-  元素后删掉表格部分，表里补上的元素也从 `INLINE_BLOCKS` 去掉。嵌入 `wry` 仍是备选。
+  元素后删掉表格部分，表里补上的元素也从 `INLINE_BLOCKS` 去掉。HTML 默认由下面的 Blitz 排版，这一步只用于
+  GPUI Kit 备选。
+
+## HTML 引擎
+
+gpui-kit 的 `TextView` 只排 HTML 的一个子集（行内 style 基本不读），营销邮件靠展开布局表格勉强可读。
+所以 HTML 默认交给 [Blitz](https://github.com/DioxusLabs/blitz)（`catmail-render`）：Stylo（Firefox 的
+CSS 引擎）+ Taffy + Parley 排版，vello_cpu 绘制。格式栏 Text / HTML 旁边可切换 Blitz / GPUI Kit，
+后者留作能选择文字的备选。不开 blitz-dom 的 `svg` feature：usvg 会按本地路径读嵌套图片，与 GPUI
+不显示 SVG 是同一个原因。选型经过见[下文](#选型记录)。
+
+- **`catmail-render`** 不依赖 GPUI 和邮件类型。每个打开的文档（`Document`）一个线程：Blitz 的文档
+  不是 `Send`（持有不带 `Send` 约束的 provider），只能在打开它的线程上活。请求按顺序回答：某宽度下
+  的高度、一条像素（分块）、某点下的链接；调用方不再等的请求（任务被替换）直接跳过，所以拖动窗口
+  不会堆积工作。丢掉 `Document`，线程答完手头的请求就退出；引擎 panic（Blitz 还在 beta）只让这一个
+  文档的请求失败（`Stopped`）。引擎的接口是 `worker::Page` 和一个打开函数，换引擎只换实现。系统字体
+  全进程只扫描一次（`FontContext` 的克隆共享扫描结果），同一页面的分块复用光栅化器。
+- **超时。** 邮件可以故意做得很难排版，线程又停不下来：`PageView` 对每个请求用 GPUI 的
+  `with_timeout` 等 10 秒，超时就放弃这个文档并说明原因；它的线程做完手头的工作后自行退出，别的文档
+  各有线程，不受影响。页面高度最多 200 000 CSS px，再往下截掉。
+- **不联网。** 引擎能拿到的只有 HTML 和读信区给的 `Resolver`，Blitz 唯一的 `NetProvider` 只问它。
+  `Images::bytes` 与 `TextView` 的 `image_source` 用同一条 `html::Carried` 规则（内嵌部分、`data:`
+  栅格图片），远程图片、样式表、字体一概拿不到。
+- **排版。** 宽度取读信区正文宽度（取整，避免亚像素变化反复重排）；视口高度固定 800 CSS px（`vh` 和
+  `height:100%` 以它为准），页面整体由读信区滚动，不随窗口高度重排。Blitz 按视口的缩放系数排字，
+  所以文档按打开时的缩放系数排版和绘制，缩放系数变了就重新打开。默认字体 sans-serif（用户代理样式
+  表），与界面一致；邮件自己的样式优先。
+- **显示（`PageView`）。** 页面按 512 CSS px 一条绘制，转成 BGRA 交给 GPUI 的 `img`。绘制时测量
+  自身：宽度变了才重排，可见区域决定要哪几条（多画上下各一条），远离屏幕三条以外的丢掉。GPUI
+  把图片留在窗口的 sprite atlas 里直到 `drop_image`，所以淘汰、重排和视图释放时都要调用；淘汰
+  不能在绘制一帧的过程中做（那一帧已建好的 `img` 会把它放回去），放在分块到达的回调里。
+  页面画在 `Appearance::canvas` 上（浅色时是白色，邮件按白底写）。
+- **深色。** 深色主题下，正文不设颜色或自带深色样式（`color_usage`：`Unset`、`Adaptive`）时显示成
+  深色：`prefers-color-scheme` 回答 dark，画布是窗口背景色，再加一张用户代理样式表给 html 的文字、
+  背景和链接配主题色（在邮件自己的样式之下）。为白底设了颜色的正文（`Light`）保持白底，否则深色
+  文字落在深色背景上会看不清，Apple Mail 也是这样。`PageView` 每帧比较主题的这几种颜色，变了就
+  按新外观重新打开文档。
+- **链接。** 悬停时向引擎问指针下的链接（命中测试后沿父节点找 `<a href>`），有就显示手形光标；
+  点击同样先问，再按 `is_openable_link` 交给系统。
+- **还不支持**：选择和复制文字（要复制就切到 Text 或 GPUI Kit）、页内查找、为白底设色的邮件的
+  深色转换（像 Outlook 那样反转亮度，可做成手动开关）。
+
+### 选型记录
+
+2026-10-22 评估，按顺序：
+
+1. **嵌入 WebView（wry / gpui-webview）。** GPUI Fast 有原生视图合成，gpui-webview 已接好 macOS 和
+   Linux X11；但 WebKitGTK 不能嵌进别人的 Wayland surface，Linux 上整个应用得跑在 XWayland 上，
+   Windows 上 WebView2 会盖住弹出层。还要引入 gtk3-rs（RustSec 标为 unmaintained，glib 0.18 unsound）、
+   系统的 webkit2gtk，以及与 rustls 无关的网络栈。放弃。
+2. **进程内引擎画成像素**，Wayland、Windows、macOS 行为一致，且能在 GUI 测试里跑。并排接入
+   litehtml 与 Blitz，用真实邮件对比：
+   - **litehtml**（C++ CSS 2.1 引擎，`litehtml` 0.2.6 绑定，CPU 容器为 tiny-skia + cosmic-text 0.14）：
+     表格布局正确。但绑定的容器在开发机（NixOS，装有可变字体的 Noto CJK 和 Maple Mono NF CN）上
+     把汉字一律回退到等宽的 Maple Mono（汉字步进 1.2 em），指定 `Noto Sans CJK SC` 也不生效，中文
+     字距明显偏大；要用就得自己实现 `DocumentContainer` 和字体选择。它没有读属性的接口，链接只能
+     模拟一次点击、由 `on_anchor_click` 回调给出。另需 C++ 编译（Windows 上 MSVC）。
+   - **Blitz**：表格、中文排版、字体选择（fontique 走 fontconfig）都正常，纯 Rust，现代 CSS。
+     代价是 beta（API 会变、crate 间精确 pin）和 Stylo 的编译时间。
+   选 Blitz，litehtml 删除。
+3. 没有试的：Servo（自带 JS 和网络栈，嵌邮件太重）、各平台各用一套 webview（三套实现，WPE 在
+   crates.io 上没有绑定）、给 `TextView` 补 CSS（上限低）。
 
 ## 图标
 

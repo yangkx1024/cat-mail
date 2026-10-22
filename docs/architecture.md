@@ -11,6 +11,7 @@
 | 层 | crate | 内容 |
 |---|---|---|
 | Frontends | `catmail-cli`、`catmail-gui` | 命令行（clap）；图形界面（gpui-kit） |
+| Rendering | `catmail-render` | 读信区的 HTML 引擎（Blitz）：在自己的线程上排版、分块绘制成像素；不依赖 UI 库和邮件类型 |
 | Facade | `catmail-core` | `MailClient`：async 方法 + 事件订阅，前端唯一依赖 |
 | Services / Engine | `catmail-core` | 同步、后台同步（IDLE）、操作队列回放、按需下载、Outbox；每账户状态；运行时桥接；凭据 |
 | Storage | `catmail-store` | SQLite schema 与迁移、事务化 Repository、FTS5、内容寻址 `BlobStore`；全部同步 API |
@@ -19,7 +20,8 @@
 
 依赖方向 `types ← store, proto ← core ← cli / gui`：store 与 proto 并列、互不依赖；前端不直接
 依赖 store / proto，需要的类型由 `catmail-core` 重新导出。`catmail-testkit`（假 IMAP / SMTP
-服务器）只作为 dev-dependency。
+服务器）只作为 dev-dependency。`catmail-render` 只被 GUI 依赖，它不认识邮件：读信区交给它清洗后的
+HTML 和决定哪些图片可以加载的函数。
 
 ## 关键设计
 
@@ -137,8 +139,9 @@ UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UI
 - **凭据**：密码只在系统密钥环里，不进 SQLite。添加账户先写密钥再插入行；删除先删行
   （`RETURNING secret_key`）再删密钥，并发删除不会留下孤立凭据。
 - **TLS**：rustls + 操作系统的信任库；配置了 STARTTLS 就必须成功，绝不降级为明文。
-- **邮件内容不可信**：HTML 入库前经 ammonia 清洗；远程图片默认不加载，GUI 读信不发出任何网络
-  请求；服务器给的值（BODYSTRUCTURE、msg-id）写进邮件头之前都要校验。
+- **邮件内容不可信**：HTML 入库前经 ammonia 清洗，样式表由 cssparser 逐条重写（不能取资源、
+  不能结束 `<style>`）；远程图片默认不加载，GUI 读信不发出任何网络
+  请求（`catmail-render` 的引擎也一样：没有网络栈，一切资源只经读信区给的函数）；服务器给的值（BODYSTRUCTURE、msg-id）写进邮件头之前都要校验。
 - **本地数据**：数据目录只有本用户可访问，交给其他程序的文件也放在里面。
 
 ## 子系统

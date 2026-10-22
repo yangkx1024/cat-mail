@@ -20,7 +20,8 @@ mod gc;
 /// lay it out without a browser.
 pub mod html {
     pub use catmail_proto::mime::{
-        InlineImage, content_id_from_url, embed_inline_images, image_sources, unwrap_layout_tables,
+        ColorUsage, InlineImage, color_usage, content_id_from_url, embed_inline_images,
+        image_sources, unwrap_layout_tables,
     };
 }
 mod ops;

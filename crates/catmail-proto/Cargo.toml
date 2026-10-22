@@ -10,6 +10,7 @@ license.workspace = true
 ammonia.workspace = true
 base64.workspace = true
 catmail-types.workspace = true
+cssparser.workspace = true
 html5ever.workspace = true
 imap-next.workspace = true
 mail-builder.workspace = true

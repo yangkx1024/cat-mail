@@ -2,8 +2,16 @@
 //! own colors so they follow any theme, imported ones included. Text on them stays the
 //! theme's foreground: the tints are light enough for it to read, whatever the hue.
 
-use gpui_kit::Hsla;
 use gpui_kit::component::{Colorize as _, Theme};
+use gpui_kit::{Hsla, Rgba};
+
+use super::palette::Rgb;
+
+/// A theme color as 8-bit sRGB, without its alpha: for what takes colors outside GPUI.
+pub fn rgb(color: Hsla) -> Rgb {
+    let Rgba { r, g, b, .. } = color.into();
+    Rgb::from_unit(r.into(), g.into(), b.into())
+}
 
 pub trait ThemeColors {
     /// A flagged message's flag.

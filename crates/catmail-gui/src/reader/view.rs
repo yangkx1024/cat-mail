@@ -19,6 +19,14 @@ use crate::theme::colors::ThemeColors as _;
 
 use super::*;
 
+/// The engine's button, by name: tests click it.
+fn engine_id(engine: HtmlEngine) -> &'static str {
+    match engine {
+        HtmlEngine::Kit => "engine-kit",
+        HtmlEngine::Page(Engine::Blitz) => "engine-blitz",
+    }
+}
+
 impl Render for Reader {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content: AnyElement = match &self.state {
@@ -55,10 +63,7 @@ impl Render for Reader {
 impl Reader {
     fn render_message(&self, open: &OpenMessage, cx: &mut Context<Self>) -> impl IntoElement {
         let (text, html) = (&open.text, &open.html);
-        let format = match (self.preferred, text, html) {
-            (BodyFormat::Html, _, Some(_)) | (_, None, Some(_)) => BodyFormat::Html,
-            _ => BodyFormat::Text,
-        };
+        let format = self.format(open);
         let id = open.id;
         let theme = cx.theme();
         let muted = theme.muted_foreground;
@@ -194,11 +199,31 @@ impl Reader {
                                 .label("HTML")
                                 .selected(format == BodyFormat::Html),
                         )
-                        .on_click(cx.listener(|this, selected: &Vec<usize>, _, cx| {
+                        .on_click(cx.listener(|this, selected: &Vec<usize>, window, cx| {
                             match selected.first() {
-                                Some(0) => this.set_format(BodyFormat::Text, cx),
-                                Some(1) => this.set_format(BodyFormat::Html, cx),
+                                Some(0) => this.set_format(BodyFormat::Text, window, cx),
+                                Some(1) => this.set_format(BodyFormat::Html, window, cx),
                                 _ => {}
+                            }
+                        })),
+                )
+            })
+            .when(format == BodyFormat::Html, |this| {
+                this.child(
+                    ButtonGroup::new("html-engine")
+                        .outline()
+                        .xsmall()
+                        .children(HtmlEngine::ALL.map(|engine| {
+                            Button::new(engine_id(engine))
+                                .label(engine.name())
+                                .selected(engine == self.engine)
+                        }))
+                        .on_click(cx.listener(|this, selected: &Vec<usize>, window, cx| {
+                            if let Some(engine) = selected
+                                .first()
+                                .and_then(|&at| HtmlEngine::ALL.get(at).copied())
+                            {
+                                this.set_engine(engine, window, cx);
                             }
                         })),
                 )
@@ -227,7 +252,11 @@ impl Reader {
                 )
             });
 
+        // `show_page` keeps it the open message's, by the chosen engine.
         let body: AnyElement = match (format, text, html) {
+            (BodyFormat::Html, _, Some(_)) if let Some(page) = &self.page => {
+                page.view.clone().into_any_element()
+            }
             (BodyFormat::Html, _, Some(html)) => {
                 let images = open.images.clone();
                 TextView::html(("message-html", id.0 as u64), html.clone())

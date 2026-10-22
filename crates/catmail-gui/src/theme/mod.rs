@@ -13,7 +13,7 @@ mod builtin;
 pub mod colors;
 mod derive;
 mod import;
-mod palette;
+pub(crate) mod palette;
 
 pub use builtin::{DEFAULT_DARK, DEFAULT_LIGHT, builtin_themes};
 pub use derive::theme_set_json;
