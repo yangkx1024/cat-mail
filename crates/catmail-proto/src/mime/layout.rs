@@ -6,12 +6,11 @@ use std::io::Write;
 
 use html5ever::serialize::{HtmlSerializer, SerializeOpts, Serializer as _};
 use html5ever::tendril::StrTendril;
-use html5ever::tokenizer::{
-    BufferQueue, Tag, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer, TokenizerOpts,
-};
+use html5ever::tokenizer::{Tag, TagKind, Token, TokenSink, TokenSinkResult};
 use html5ever::{LocalName, QualName, local_name, ns};
 
 use super::html::sanitize_html;
+use super::tokens;
 
 /// Elements that start a block: inside a table cell, they mean the table lays out a page
 /// rather than holding data.
@@ -97,7 +96,7 @@ enum Item {
 }
 
 /// The sanitizer's output is serialized from a DOM, so its tags nest properly and a
-/// token stream is enough: no tree builder, which would move content around again.
+/// token stream is enough. Its style sheet stays raw text, as written.
 fn tokenize(html: &str) -> Vec<Item> {
     #[derive(Default)]
     struct Collect(RefCell<Vec<Item>>);
@@ -106,24 +105,22 @@ fn tokenize(html: &str) -> Vec<Item> {
         type Handle = ();
 
         fn process_token(&self, token: Token, _line: u64) -> TokenSinkResult<()> {
-            let item = match token {
-                Token::TagToken(tag) if tag.kind == TagKind::StartTag => Item::Start(tag),
-                Token::TagToken(tag) => Item::End(tag.name),
-                Token::CharacterTokens(text) => Item::Text(text),
+            let (item, next) = match token {
+                Token::TagToken(tag) if tag.kind == TagKind::StartTag => {
+                    let next = tokens::after_start_tag(&tag.name);
+                    (Item::Start(tag), next)
+                }
+                Token::TagToken(tag) => (Item::End(tag.name), TokenSinkResult::Continue),
+                Token::CharacterTokens(text) => (Item::Text(text), TokenSinkResult::Continue),
                 // The sanitizer leaves no comments or doctypes.
                 _ => return TokenSinkResult::Continue,
             };
             self.0.borrow_mut().push(item);
-            TokenSinkResult::Continue
+            next
         }
     }
 
-    let input = BufferQueue::default();
-    input.push_back(html.into());
-    let tokenizer = Tokenizer::new(Collect::default(), TokenizerOpts::default());
-    let _ = tokenizer.feed(&input);
-    tokenizer.end();
-    tokenizer.sink.0.into_inner()
+    tokens::tokenize(html, Collect::default()).0.into_inner()
 }
 
 fn is_void(name: &LocalName) -> bool {
@@ -290,6 +287,20 @@ fn html_name(name: &LocalName) -> QualName {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keeps_the_style_sheet_in_front() {
+        let html = sanitize_html(
+            "<style>td > p{color:red;font-family:\"A&B\"}</style>\
+             <table width=600><tr><td><h1>Title</h1><p>x</p></td></tr></table>",
+        );
+        let unwrapped = unwrap_layout_tables(&html);
+        assert!(
+            unwrapped.starts_with("<style>td > p{color:red;font-family:\"A&B\";}</style>"),
+            "{unwrapped}"
+        );
+        assert!(!unwrapped.contains("<table"), "{unwrapped}");
+    }
 
     #[test]
     fn layout_tables_become_blocks_and_data_tables_stay() {

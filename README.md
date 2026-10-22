@@ -143,8 +143,10 @@ Trash，然后是其他文件夹），中间是列表和搜索框，右侧是选
 打开一个文件夹时立即同步它。
 
 - **读信**：打开即标为已读（Settings › Reading 可关闭），改动经操作队列同步到服务器。默认显示纯
-  文本，有 HTML 时可以切换；HTML 里只显示邮件自带的图片（`cid:`、`data:`），远程图片一律不加载；
-  排版不对时用"Open in browser"在浏览器里看（同样拦截远程内容）。点附件可以保存。
+  文本，有 HTML 时可以切换；HTML 默认由 Blitz 按浏览器的方式排版（深色主题下，不设颜色或自带深色样式的邮件也显示成
+  深色），也可换成能选择文字的 GPUI Kit；
+  只显示邮件自带的图片（`cid:`、`data:`），远程图片一律不加载；还可以用"Open in browser"在浏览器
+  里看（同样拦截远程内容）。点附件可以保存。
 - **处理邮件**：工具栏上的 Reply、Reply all、Forward、Archive、Delete、Move to，更多操作（标为
   未读、旗标、在浏览器打开）在"⋯"菜单里。归档或删除后自动打开下一封；已在 Trash 里的邮件删除前
   会确认（不能恢复）。
@@ -236,6 +238,7 @@ CI（GitHub Actions）：
 | `catmail-core` | 引擎与 `MailClient` 门面，前端唯一依赖 |
 | `catmail-cli` | `catmail` 命令行 |
 | `catmail-gui` | `catmail-gui` 图形界面（gpui-kit） |
+| `catmail-render` | 读信区的 HTML 引擎（Blitz），在自己的线程上排版、绘制正文 |
 | `catmail-testkit` | 测试用的假 IMAP / SMTP 服务器（故障注入），只作为 dev-dependency |
 
 参与开发（包括 AI agent）请先阅读 [AGENTS.md](AGENTS.md)。

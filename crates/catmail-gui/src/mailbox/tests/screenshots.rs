@@ -16,7 +16,11 @@ fn screenshots() {
         PathBuf::from(std::env::var_os("CATMAIL_SCREENSHOTS").expect("set CATMAIL_SCREENSHOTS"));
     std::fs::create_dir_all(&dir).unwrap();
     let save = |cx: &mut HeadlessAppContext, window: AnyWindowHandle, name: &str| {
+        // Frames in between: a page Blitz paints shows in the frame after its strips
+        // arrive, and asks for them only when a frame measures it.
         for _ in 0..20 {
+            cx.update_window(window, |_, window, cx| window.render_frame(cx))
+                .unwrap();
             cx.run_until_parked();
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -70,6 +74,19 @@ fn screenshots() {
         }
         save(&mut cx, window, name);
     }
+
+    // The newsletter, still open, in GPUI Kit's text view; then back to Blitz.
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("engine-kit", cx);
+    })
+    .unwrap();
+    save(&mut cx, window, "html-newsletter-kit");
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("engine-blitz", cx);
+    })
+    .unwrap();
 
     // Every built-in theme, dark ones in the dark appearance.
     let themes: Vec<(String, bool)> = cx.update(|cx| {

@@ -41,7 +41,7 @@ ignored there with a reason, never by loosening the check.
 
 ## Crates and layering
 
-`types ← store, proto ← core ← cli / gui`
+`types ← store, proto ← core ← cli / gui`, and `render ← gui`
 
 | Crate | Role |
 |---|---|
@@ -51,9 +51,12 @@ ignored there with a reason, never by loosening the check.
 | `catmail-core` | Engine, services, runtime bridge, secrets, the `MailClient` facade |
 | `catmail-cli` | The `catmail` binary |
 | `catmail-gui` | The `catmail-gui` desktop binary, on GPUI Kit |
+| `catmail-render` | The reader's HTML engine (Blitz): lays out and paints a message body on its own thread. No UI toolkit, no mail types |
 | `catmail-testkit` | Fake IMAP and SMTP servers with fault injection; dev-dependency only |
 
-Frontends depend on `catmail-core` only; it re-exports the types they need.
+Frontends depend on `catmail-core` only; it re-exports the types they need. The GUI also
+depends on `catmail-render`, which knows nothing of mail: the reader gives it sanitized HTML
+and the one function that decides which images load.
 
 `catmail-gui` depends on `gpui-kit` alone, never on `gpui` directly. Before changing it,
 read the vendored GPUI Kit skills in `crates/catmail-gui/.claude/skills/` (`gpui-kit` holds

@@ -95,6 +95,26 @@ fn wait_for_inbox(cx: &mut TestAppContext, mailbox: &Entity<Mailbox>) {
     });
 }
 
+/// Draws a frame, so `id` is where the click lands, then clicks it.
+fn click(cx: &mut TestAppContext, window: AnyWindowHandle, id: &'static str) {
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(id, cx);
+    })
+    .unwrap();
+}
+
+/// Draws a frame and lets the tasks it started run.
+fn frame(cx: &mut TestAppContext, window: AnyWindowHandle) {
+    cx.update_window(window, |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    cx.run_until_parked();
+}
+
+fn set_appearance(cx: &mut TestAppContext, appearance: crate::settings::Appearance) {
+    cx.update(|cx| Preferences::update(cx, |s| s.appearance = appearance));
+}
+
 fn click_message(
     cx: &mut TestAppContext,
     window: AnyWindowHandle,

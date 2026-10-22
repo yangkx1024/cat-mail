@@ -205,6 +205,12 @@ impl TestMail {
             .append_simple(subject);
     }
 
+    /// Puts `raw` into the server's INBOX and syncs.
+    pub fn deliver_raw_and_sync(&self, raw: &[u8]) {
+        self.fake.state().mailbox_mut("INBOX").append(raw, &[]);
+        pollster::block_on(self.client.sync_account(self.account.unwrap())).unwrap();
+    }
+
     /// Puts a new message into the server's INBOX and syncs, as another client's sync
     /// would; the window learns about it only through the engine's events.
     pub fn deliver_and_sync(&self, subject: &str) {

@@ -14,14 +14,28 @@ catmail-store = { path = "crates/catmail-store" }
 catmail-proto = { path = "crates/catmail-proto" }
 catmail-core = { path = "crates/catmail-core" }
 catmail-testkit = { path = "crates/catmail-testkit" }
+catmail-render = { path = "crates/catmail-render" }
 
 ammonia = "4.2.4"
 anyhow = "1"
+# Blitz paints through anyrender; vello_cpu rasterizes on the CPU, off the UI thread.
+anyrender = "0.14.0"
+anyrender_vello_cpu = "0.18.0"
 base64 = "0.22.1"
+# Blitz is still in beta and its crates require each other at exact versions. Without
+# blitz-dom's default `svg` feature: usvg resolves nested images from the local disk.
+blitz-dom = { version = "=0.3.0-beta.4", default-features = false, features = ["floats", "system-fonts"] }
+blitz-html = "=0.3.0-beta.4"
+blitz-paint = { version = "=0.3.0-beta.4", default-features = false }
+blitz-traits = "=0.3.0-beta.4"
 clap = { version = "4.6", features = ["derive", "env"] }
 # WHATWG data: URL parsing; the one gpui-kit uses for the same job.
 data-url = "0.3.2"
 directories = "6"
+# Rewrites message style sheets token by token; the version Stylo (in Blitz) uses.
+cssparser = "0.38.0"
+# Replies from the render threads to the UI's tasks; the version GPUI uses.
+futures-channel = "0.3.34"
 # Pins the matching GPUI crates; never depend on GPUI directly (two copies would link).
 # `gpui-fast` swaps the backend from gpui-pre to GPUI Fast behind the same imports.
 gpui-kit = { version = "0.8.0", features = ["gpui-fast"] }
@@ -29,6 +43,8 @@ hex = "0.4"
 # The version ammonia uses, so the sanitizer and the layout pass share one parser.
 html5ever = "0.40.1"
 jiff = "0.2.38"
+# Wraps rendered pages into GPUI images; the version GPUI uses.
+image = { version = "0.25.10", default-features = false }
 # Without the default `stream` feature: catmail-proto drives the sans-IO client itself,
 # over any AsyncRead + AsyncWrite (TLS, STARTTLS upgrades, in-memory test pipes).
 imap-next = { version = "0.3.4", default-features = false, features = ["starttls", "ext_condstore_qresync"] }

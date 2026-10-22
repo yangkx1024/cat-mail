@@ -35,28 +35,41 @@ pub(super) struct Images {
     pub(super) inline: HashMap<String, Arc<Image>>,
     /// Every URL, resolved once: the inline part or decoded `data:` image, or `None` for
     /// one that isn't shown. The text view asks for every image on every frame.
-    pub(super) by_url: Mutex<HashMap<SharedUri, Option<Arc<Image>>>>,
+    pub(super) by_url: Mutex<HashMap<String, Option<Arc<Image>>>>,
 }
 
 impl Images {
-    /// The image at `url`, if the reader shows it ([`html::Carried`]).
-    pub(super) fn source(&self, url: &SharedUri) -> ImageSource {
+    /// The image at `url`, if the reader shows it ([`html::Carried`]): resolved once, as
+    /// the text view asks for every image on every frame.
+    fn image(&self, url: &str) -> Option<Arc<Image>> {
         let mut by_url = self.by_url.lock().unwrap_or_else(|e| e.into_inner());
-        let image = by_url
-            .entry(url.clone())
-            .or_insert_with(|| match html::Carried::of(url)? {
-                html::Carried::Inline(content_id) => self.inline.get(&content_id).cloned(),
-                html::Carried::Data(data) => {
-                    let (mime_type, bytes) = html::decode(&data)?;
-                    let format = raster_format(&mime_type)?;
-                    Some(Arc::new(Image::from_bytes(format, bytes)))
-                }
-            })
-            .clone();
-        match image {
+        if let Some(image) = by_url.get(url) {
+            return image.clone();
+        }
+        let image = html::Carried::of(url).and_then(|carried| match carried {
+            html::Carried::Inline(content_id) => self.inline.get(&content_id).cloned(),
+            html::Carried::Data(data) => {
+                let (mime_type, bytes) = html::decode(&data)?;
+                let format = raster_format(&mime_type)?;
+                Some(Arc::new(Image::from_bytes(format, bytes)))
+            }
+        });
+        by_url.insert(url.to_owned(), image.clone());
+        image
+    }
+
+    /// The image at `url` for the text view.
+    pub(super) fn source(&self, url: &SharedUri) -> ImageSource {
+        match self.image(url) {
             Some(image) => ImageSource::Image(image),
             None => not_shown(),
         }
+    }
+
+    /// The content of the image at `url` for a page's engine. Not SVG, even mislabelled:
+    /// the engines decode with the `image` crate, which has no SVG decoder.
+    pub(super) fn bytes(&self, url: &str) -> Option<Vec<u8>> {
+        Some(self.image(url)?.bytes().to_vec())
     }
 }
 

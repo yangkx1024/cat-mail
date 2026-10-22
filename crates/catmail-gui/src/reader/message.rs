@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use catmail_core::html::unwrap_layout_tables;
+use catmail_core::html::{ColorUsage, color_usage, unwrap_layout_tables};
 use catmail_core::{Attachment, Message, MessageId};
 use gpui_kit::SharedString;
 
@@ -32,8 +32,11 @@ pub(super) struct OpenMessage {
     /// The HTML as the text view gets it: layout tables unwrapped, since it lays a table
     /// cell out as inline text.
     pub(super) html: Option<SharedString>,
-    /// The HTML as sanitized, for the browser, which lays out tables itself.
-    pub(super) browser_html: Option<SharedString>,
+    /// The HTML as sanitized, for the browser and Blitz, which lay out tables themselves.
+    /// Shared with the text view's when there was no table to unwrap, and with pages.
+    pub(super) browser_html: Option<Arc<str>>,
+    /// How the HTML colors itself: whether Blitz may show it dark.
+    pub(super) colors: ColorUsage,
     /// Attachments offered as files, not the inline images.
     pub(super) attachments: Vec<Attachment>,
     pub(super) images: Arc<Images>,
@@ -69,7 +72,7 @@ impl OpenMessage {
         let (text, browser_html, attachments) = match message.body {
             Some(body) => (
                 body.text.map(SharedString::from),
-                body.html.map(SharedString::from),
+                body.html.map(Arc::from),
                 body.attachments.into_iter().filter(|a| !a.inline).collect(),
             ),
             None => (None, None, Vec::new()),
@@ -78,7 +81,7 @@ impl OpenMessage {
         let html = browser_html
             .as_ref()
             .map(|source| match unwrap_layout_tables(source) {
-                Cow::Borrowed(_) => source.clone(),
+                Cow::Borrowed(_) => SharedString::from(source.clone()),
                 Cow::Owned(unwrapped) => unwrapped.into(),
             });
         Self {
@@ -95,6 +98,9 @@ impl OpenMessage {
             blocked_images: browser_html
                 .as_deref()
                 .is_some_and(html::has_blocked_images),
+            colors: browser_html
+                .as_deref()
+                .map_or(ColorUsage::Unset, color_usage),
             browser_html,
             attachments,
             images: Arc::default(),

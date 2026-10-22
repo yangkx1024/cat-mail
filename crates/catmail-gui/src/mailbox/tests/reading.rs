@@ -50,6 +50,65 @@ fn reads_a_message_through_the_window(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn switches_the_html_between_engines(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    click_message(cx, window, &mailbox, "十月产品更新：新功能一览");
+    let painted = |cx: &mut TestAppContext| {
+        frame(cx, window);
+        cx.read(|cx| mailbox.read(cx).reader.read(cx).painted_strips(cx))
+    };
+    // Blitz lays the newsletter out on its thread and paints the strip on screen.
+    click(cx, window, "format-html");
+    wait_until(|| painted(cx).is_some_and(|strips| strips > 0));
+
+    // The text view's HTML needs no page, and stays chosen for the next message.
+    click(cx, window, "engine-kit");
+    assert_eq!(painted(cx), None);
+    click_message(cx, window, &mailbox, "月度报表");
+    assert_eq!(painted(cx), None);
+
+    // Back to Blitz; Text drops the page.
+    click(cx, window, "engine-blitz");
+    wait_until(|| painted(cx).is_some_and(|strips| strips > 0));
+    click(cx, window, "format-text");
+    assert_eq!(painted(cx), None);
+}
+
+#[gpui_kit::test]
+fn shows_html_dark_when_the_message_allows_it(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    mail.deliver_raw_and_sync(
+        b"From: a@example.com\r\nTo: catmail@example.com\r\nSubject: Plain HTML\r\n\
+          Date: Mon, 19 Oct 2026 10:00:00 +0800\r\nMIME-Version: 1.0\r\n\
+          Content-Type: text/html; charset=utf-8\r\n\r\n<p>No colors of its own</p>\r\n",
+    );
+    let (window, mailbox) = open(cx, &mail);
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| find(&mailbox, "Plain HTML", cx).is_some())
+    });
+    let pixel = |cx: &mut TestAppContext| {
+        frame(cx, window);
+        cx.read(|cx| mailbox.read(cx).reader.read(cx).page_pixel(4, 4, cx))
+    };
+
+    // A message with no colors of its own takes the dark theme's background.
+    set_appearance(cx, crate::settings::Appearance::Dark);
+    click_message(cx, window, &mailbox, "Plain HTML");
+    click(cx, window, "format-html");
+    let background = cx.read(|cx| crate::theme::colors::rgb(cx.theme().background));
+    let dark = [background.b, background.g, background.r, 255];
+    assert_ne!(dark, [255; 4]);
+    wait_until(|| pixel(cx) == Some(dark));
+
+    // The page follows the theme when it changes.
+    set_appearance(cx, crate::settings::Appearance::Light);
+    wait_until(|| pixel(cx) == Some([255; 4]));
+}
+
+#[gpui_kit::test]
 fn archiving_opens_the_next_message(cx: &mut TestAppContext) {
     let mail = TestMail::start();
     let (window, mailbox) = open(cx, &mail);
