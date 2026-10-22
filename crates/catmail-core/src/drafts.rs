@@ -580,7 +580,6 @@ mod tests {
                 id: MessageId(1),
                 account_id: AccountId(1),
                 folder_id: FolderId(1),
-                thread_id: None,
                 subject: Some("季度报告".into()),
                 from: vec![from],
                 date: None,

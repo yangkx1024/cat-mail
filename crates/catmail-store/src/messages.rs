@@ -13,7 +13,8 @@ use crate::columns::{id_list, json, parse_opt_text, to_id_list, to_json};
 use crate::fts;
 use crate::ops::MOVING;
 
-const SUMMARY_COLUMNS: &str = "id, account_id, folder_id, thread_id, subject, from_json, date, snippet, flags, has_attachments";
+const SUMMARY_COLUMNS: &str =
+    "id, account_id, folder_id, subject, from_json, date, snippet, flags, has_attachments";
 
 /// The order of lists and search results, as [`MessageCursor`] describes it.
 /// `list_date` is `date` with a missing one sorted last.
@@ -506,7 +507,6 @@ fn summary_from_row(row: &Row<'_>) -> rusqlite::Result<MessageSummary> {
         id: MessageId(row.get("id")?),
         account_id: AccountId(row.get("account_id")?),
         folder_id: FolderId(row.get("folder_id")?),
-        thread_id: row.get("thread_id")?,
         subject: row.get("subject")?,
         from: json(row, "from_json")?,
         date: row.get("date")?,
