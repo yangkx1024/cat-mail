@@ -50,11 +50,11 @@ fn screenshots() {
     });
 
     let shots = [
-        ("text", "你好，世界", false),
-        ("html-inline-image", "月度报表", true),
-        ("html-newsletter", "十月产品更新：新功能一览", true),
+        ("text", "你好，世界"),
+        ("html-inline-image", "月度报表"),
+        ("html-newsletter", "十月产品更新：新功能一览"),
     ];
-    for (name, subject, html) in shots {
+    for (name, subject) in shots {
         let id = cx.update(|cx| id_of(&mailbox, subject, cx));
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
@@ -65,15 +65,6 @@ fn screenshots() {
             cx.run_until_parked();
             cx.update(|cx| shown_in_reader(&mailbox, cx) == Some(id))
         });
-        if html {
-            cx.update_window(window, |_, window, cx| {
-                window.render_frame(cx);
-                if !mailbox.read(cx).reader.read(cx).prefers_html() {
-                    window.click("format-html", cx);
-                }
-            })
-            .unwrap();
-        }
         save(&mut cx, window, name);
     }
 
@@ -97,19 +88,6 @@ fn screenshots() {
     save(&mut cx, window, "html-newsletter-context-menu");
     cx.update_window(window, |_, window, cx| window.press("escape", cx))
         .unwrap();
-
-    // The newsletter in GPUI Kit's text view; then back to Blitz.
-    cx.update_window(window, |_, window, cx| {
-        window.render_frame(cx);
-        window.click("engine-kit", cx);
-    })
-    .unwrap();
-    save(&mut cx, window, "html-newsletter-kit");
-    cx.update_window(window, |_, window, cx| {
-        window.render_frame(cx);
-        window.click("engine-blitz", cx);
-    })
-    .unwrap();
 
     // Every built-in theme, dark ones in the dark appearance.
     let themes: Vec<(String, bool)> = cx.update(|cx| {

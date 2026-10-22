@@ -1,31 +1,22 @@
-//! How the pane looks: the message's header, attachments, format bar and body.
+//! How the pane looks: the message's header, attachments, toolbar and body.
 
 use gpui_kit::base::SelectableText;
-use gpui_kit::base::text::TextView;
-use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{ActiveTheme as _, Selectable as _, Sizable as _};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, Context, FontWeight, IntoElement, ParentElement as _, Render, Styled as _, Window,
-    div, prelude::FluentBuilder as _,
+    Action, AnyElement, App, ClickEvent, Context, FontWeight, IntoElement, ParentElement as _,
+    Render, Styled as _, Window, div, prelude::FluentBuilder as _,
 };
 
+use crate::actions::{self, Forward, Reply, ReplyAll};
 use crate::assets::Hero;
 use crate::format;
-use crate::html;
 use crate::layout;
 use crate::theme::colors::ThemeColors as _;
 
 use super::*;
-
-/// The engine's button, by name: tests click it.
-fn engine_id(engine: HtmlEngine) -> &'static str {
-    match engine {
-        HtmlEngine::Kit => "engine-kit",
-        HtmlEngine::Page(Engine::Blitz) => "engine-blitz",
-    }
-}
 
 impl Render for Reader {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -61,9 +52,17 @@ impl Render for Reader {
 }
 
 impl Reader {
+    /// Runs one of the mailbox's actions from a button here, wherever the focus is.
+    fn dispatch(
+        &self,
+        action: &dyn Action,
+    ) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
+        let (mailbox, action) = (self.mailbox.clone(), action.boxed_clone());
+        move |_, window, cx| mailbox.dispatch_action(action.as_ref(), window, cx)
+    }
+
     fn render_message(&self, open: &OpenMessage, cx: &mut Context<Self>) -> impl IntoElement {
-        let (text, html) = (&open.text, &open.html);
-        let format = self.format(open);
+        let has_html = open.html.is_some();
         let id = open.id;
         let theme = cx.theme();
         let muted = theme.muted_foreground;
@@ -179,74 +178,54 @@ impl Reader {
                 }))
         });
 
-        let format_bar = h_flex()
+        let context = Some(actions::MAILBOX);
+        let toolbar = h_flex()
             .gap_2()
             .pt_3()
             .border_t_1()
             .border_color(theme.border)
-            .when(text.is_some() && html.is_some(), |this| {
-                this.child(
-                    ButtonGroup::new("body-format")
-                        .outline()
-                        .xsmall()
-                        .child(
-                            Button::new("format-text")
-                                .label("Text")
-                                .selected(format == BodyFormat::Text),
-                        )
-                        .child(
-                            Button::new("format-html")
-                                .label("HTML")
-                                .selected(format == BodyFormat::Html),
-                        )
-                        .on_click(cx.listener(|this, selected: &Vec<usize>, window, cx| {
-                            match selected.first() {
-                                Some(0) => this.set_format(BodyFormat::Text, window, cx),
-                                Some(1) => this.set_format(BodyFormat::Html, window, cx),
-                                _ => {}
-                            }
-                        })),
-                )
-            })
-            .when(format == BodyFormat::Html, |this| {
-                this.child(
-                    ButtonGroup::new("html-engine")
-                        .outline()
-                        .xsmall()
-                        .children(HtmlEngine::ALL.map(|engine| {
-                            Button::new(engine_id(engine))
-                                .label(engine.name())
-                                .selected(engine == self.engine)
-                        }))
-                        .on_click(cx.listener(|this, selected: &Vec<usize>, window, cx| {
-                            if let Some(engine) = selected
-                                .first()
-                                .and_then(|&at| HtmlEngine::ALL.get(at).copied())
-                            {
-                                this.set_engine(engine, window, cx);
-                            }
-                        })),
-                )
-            })
-            .when(
-                format == BodyFormat::Html && !open.remote_images.is_empty(),
-                |this| {
-                    this.child(
-                        Button::new("show-remote-images")
-                            .ghost()
-                            .xsmall()
-                            .icon(Hero::Photo)
-                            .label("Show remote images")
-                            .tooltip("Loading them tells the sender you read the message.")
-                            .loading(open.loading_remote)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.show_remote_images(window, cx)
-                            })),
-                    )
-                },
+            .child(
+                Button::new("reply")
+                    .ghost()
+                    .xsmall()
+                    .icon(Hero::ArrowUturnLeft)
+                    .label("Reply")
+                    .tooltip_with_action("Reply", &Reply, context)
+                    .on_click(self.dispatch(&Reply)),
             )
+            .child(
+                Button::new("reply-all")
+                    .ghost()
+                    .xsmall()
+                    .label("Reply all")
+                    .tooltip_with_action("Reply all", &ReplyAll, context)
+                    .on_click(self.dispatch(&ReplyAll)),
+            )
+            .child(
+                Button::new("forward")
+                    .ghost()
+                    .xsmall()
+                    .icon(Hero::ArrowUturnRight)
+                    .label("Forward")
+                    .tooltip_with_action("Forward", &Forward, context)
+                    .on_click(self.dispatch(&Forward)),
+            )
+            .when(!open.remote_images.is_empty(), |this| {
+                this.child(
+                    Button::new("show-remote-images")
+                        .ghost()
+                        .xsmall()
+                        .icon(Hero::Photo)
+                        .label("Show remote images")
+                        .tooltip("Loading them tells the sender you read the message.")
+                        .loading(open.loading_remote)
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.show_remote_images(window, cx)),
+                        ),
+                )
+            })
             .child(div().flex_1())
-            .when(html.is_some(), |this| {
+            .when(has_html, |this| {
                 this.child(
                     Button::new("open-in-browser")
                         .ghost()
@@ -259,24 +238,10 @@ impl Reader {
                 )
             });
 
-        // `show_page` keeps it the open message's, by the chosen engine.
-        let body: AnyElement = match (format, text, html) {
-            (BodyFormat::Html, _, Some(_)) if let Some(page) = &self.page => {
-                page.view.clone().into_any_element()
-            }
-            (BodyFormat::Html, _, Some(html)) => {
-                let images = open.images.clone();
-                TextView::html(("message-html", id.0 as u64), html.clone())
-                    .selectable(true)
-                    .image_source(move |url| images.source(url))
-                    .on_link_click(|url, _, _, cx| {
-                        if html::is_openable_link(url) {
-                            cx.open_url(url);
-                        }
-                    })
-                    .into_any_element()
-            }
-            (_, Some(text), _) => {
+        // `show_page` keeps it the open message's.
+        let body: AnyElement = match (&self.page, &open.text) {
+            (Some(page), _) => page.view.clone().into_any_element(),
+            (None, Some(text)) => {
                 SelectableText::new(("message-text", id.0 as u64), text.clone()).into_any_element()
             }
             _ => div()
@@ -294,7 +259,7 @@ impl Reader {
                 .child(sender)
                 .children(details)
                 .children(attachments)
-                .child(format_bar)
+                .child(toolbar)
                 .child(body),
         )
         .size_full()

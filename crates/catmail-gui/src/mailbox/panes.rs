@@ -135,33 +135,7 @@ impl Mailbox {
         let can_archive = self.archive_folder(cx).is_some();
         let context = Some(actions::MAILBOX);
         layout::toolbar(cx)
-            .child(
-                Button::new("reply")
-                    .ghost()
-                    .small()
-                    .icon(Hero::ArrowUturnLeft)
-                    .label("Reply")
-                    .tooltip_with_action("Reply", &Reply, context)
-                    .on_click(cx.listener(|this, _, window, cx| this.reply(false, window, cx))),
-            )
-            .child(
-                Button::new("reply-all")
-                    .ghost()
-                    .small()
-                    .label("Reply all")
-                    .tooltip_with_action("Reply all", &ReplyAll, context)
-                    .on_click(cx.listener(|this, _, window, cx| this.reply(true, window, cx))),
-            )
-            .child(
-                Button::new("forward")
-                    .ghost()
-                    .small()
-                    .icon(Hero::ArrowUturnRight)
-                    .label("Forward")
-                    .tooltip_with_action("Forward", &Forward, context)
-                    .on_click(cx.listener(|this, _, window, cx| this.forward(window, cx))),
-            )
-            .child(div().flex_1())
+            .justify_end()
             .child(
                 Button::new("archive")
                     .ghost()

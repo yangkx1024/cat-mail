@@ -6,7 +6,6 @@ mod build;
 mod content;
 mod css;
 mod html;
-mod layout;
 mod structure;
 mod tokens;
 
@@ -19,7 +18,6 @@ pub use html::{
     ColorUsage, InlineImage, MAX_REMOTE_IMAGES, color_usage, embed_inline_images, image_sources,
     remote_image_url, remote_image_urls, sanitize_html,
 };
-pub use layout::unwrap_layout_tables;
 pub use structure::{Leaf, MimeNode, Params};
 
 /// The header fields the sync engine fetches for message lists (`HEADER.FIELDS`).

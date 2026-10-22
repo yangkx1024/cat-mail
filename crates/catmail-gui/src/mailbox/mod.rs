@@ -143,7 +143,8 @@ impl Focusable for Mailbox {
 impl Mailbox {
     pub fn new(client: MailClient, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let messages = cx.new(|cx| ListState::new(MessageList::new(client.clone()), window, cx));
-        let reader = cx.new(|_| Reader::new(client.clone()));
+        let focus_handle = cx.focus_handle();
+        let reader = cx.new(|_| Reader::new(client.clone(), focus_handle.clone()));
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
         let subscriptions = vec![
             cx.subscribe_in(&messages, window, Self::on_list_event),
@@ -203,7 +204,7 @@ impl Mailbox {
             search,
             messages,
             reader,
-            focus_handle: cx.focus_handle(),
+            focus_handle,
             reading_folders: Coalesce::default(),
             draft_counts: DraftCounts::default(),
             checking_refused: Coalesce::default(),

@@ -1,5 +1,5 @@
-//! A message's HTML as an engine of `catmail-render` lays it out: the page painted in
-//! strips on the engine's thread and shown as images.
+//! A message's HTML as Blitz (`catmail-render`) lays it out: the page painted in strips
+//! on the engine's thread and shown as images.
 //!
 //! The view measures itself while painting (the pane's width decides the layout, the
 //! scroll position which strips are needed) and asks the engine only when one of those

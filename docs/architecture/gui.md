@@ -44,6 +44,8 @@ src/
 - `Mailbox`：根视图。状态是账户列表（每个账户的文件夹、草稿数、发件箱、连接状态）和侧栏选中的位置
   `Place`（文件夹、本机草稿、发件箱）；登录页打开时整个替换三栏。对邮件的命令（回复、归档、删除、
   移动、标记……）都是它的方法（`commands.rs`），工具栏按钮、菜单和快捷键调用同一个方法或 Action。
+  Reply、Reply all、Forward 在读信区正文上方那一行（与 Show remote images、Open in browser 同行），按钮
+  经 `Mailbox` 的焦点句柄派发它的 Action（`FocusHandle::dispatch_action`），焦点不在邮箱里时也能到达。
 - `MessageList`：gpui-kit `List` 的 delegate，一个列表显示四种来源（`Source`）：文件夹（分页）、
   搜索结果、本机草稿、发件箱。行按身份（`RowId`）保持选中。搜索框停顿 200 ms 才搜索，不是每个键都
   读一遍。
@@ -208,21 +210,20 @@ INBOX，所以打开一个文件夹时同步它（`MailClient::sync_folder`，�
 
 ## 读信
 
-- **正文。** 默认显示纯文本（`SelectableText`），有 HTML 部分时可切换，选择在切换邮件时保留。HTML
-  由哪个引擎画（Blitz、GPUI Kit）同样可切换、同样保留，见 [HTML 引擎](#html-引擎)。打开时把
-  正文、标题、头部和附件列表一次准备好（`OpenMessage`），正文作为同一个 `SharedString` 每帧交给视图。
-  HTML 用 `gpui_base::text::TextView`：只有 base 层暴露 `image_source`，主题样式由 component 安装的
-  `TextViewDefaults` 提供。
-- **图片。** `image_source` 决定每张图：
+- **正文。** 有 HTML 部分就由 Blitz 排成页面（见 [HTML 引擎](#html-引擎)），即使也有纯文本部分；
+  只有纯文本时用 `SelectableText`。不提供 Text / HTML、引擎的切换：GPUI Kit 的 `TextView` 排不了多数
+  营销邮件；Blitz 也排不好的邮件用"在浏览器打开"。打开时把正文、标题、
+  头部和附件列表一次准备好（`OpenMessage`），纯文本作为同一个 `SharedString` 每帧交给视图。
+- **图片。** 页面的 resolver（`Images::bytes`）决定每张图：
   - `cid:` 按 `content_id_from_url`（与引擎判断"内嵌"同一条 RFC 2392 规则）查已加载的内嵌部分；
   - `data:` 用 `data-url`（gpui-kit 自己用的同一个 WHATWG 解析器）解码；
   - 远程（`http`、`https`）图片在用户点了"Show remote images"之后，查这封信已下载的远程图片；
-  - 其他（未下载的远程图片、`file:`、相对路径）返回立即失败的 `ImageSource::Custom`，不发任何请求；
-  - **SVG 一律不显示**：GPUI 用默认选项把 SVG 交给 usvg，它会把嵌套的 `<image href>` 当本地路径直接
-    读文件，绕过 `image_source`，邮件就能显示本地图片，或读 `/dev/zero` 耗尽内存。
-  - 显示与否只有一条规则（`html::Carried::of`：内嵌部分或 `data:` 图片；再加用户要了的远程图片），
-    `image_source` 和 Blitz 的 resolver 都用它（`Images::image`）。`data:` 图片只解码一次后缓存（视图
-    每帧都会问）。内嵌图片在正文显示后再逐个取。
+  - 其他（未下载的远程图片、`file:`、相对路径）答 `None`，不发任何请求；
+  - **SVG 一律不显示**：usvg 默认会把嵌套的 `<image href>` 当本地路径直接读文件，绕过 resolver，邮件
+    就能显示本地图片，或读 `/dev/zero` 耗尽内存；Blitz 也不开 `svg` feature。
+  - 显示与否只有一条规则（`html::Carried::of`：内嵌部分或 `data:` 图片；再加用户要了的远程图片，
+    `Images::bytes`）。`data:` 图片每次问都重新解码，不缓存：文档只在打开时问一次。内嵌图片在正文显示
+    后再逐个取；没有 HTML 的邮件不取。
 - **远程图片。** 打开邮件时在后台线程用 `catmail_core::html::remote_image_urls` 列出正文引用的远程
   图片（见[正文与附件](bodies.md)），`OpenMessage::remote_images` 记着其中还没显示的，不为空就在格式栏
   显示"Show remote images"按钮。打开邮件时与内嵌图片并行地查缓存（`cached_remote_images`），缓存里有的
@@ -230,15 +231,14 @@ INBOX，所以打开一个文件夹时同步它（`MailClient::sync_folder`，�
   [正文与附件](bodies.md)），按钮转圈；图片按下载完成的顺序逐批显示：每到一张，连同此刻已到的
   （`next_ready`）合成一批，换一份 `Images`（保留已到的内嵌和远程图片，内嵌图片后到时同样保留远程的），
   交给页面（`PageView::set_images`，不重开文档，见[HTML 引擎](#html-引擎)）。新的 `Images`
-  （`with_inline` / `with_remote`）沿用已解析出图片的 URL，`data:` 图片不重新解码。全部结束后按钮消失
+  （`with_inline` / `with_remote`）保留已到的图片，内容是共享的 `Bytes`，不复制。全部结束后按钮消失
   （失败的留白）；一张也没拿到时提示第一个错误、按钮恢复，可以再试。
   - 点击只对这一封、这一次打开有效：换邮件时任务被丢弃，流随之丢弃，引擎里还在下载的立即中止；
     不记住发件人。下载过的图片进引擎的缓存（见[正文与附件](bodies.md)），下次打开直接显示。
   - URL 按 `remote_image_url`（`url` 解析后的写法）存取：Blitz 先解析 URL 再问（主机名小写、空格
-    转义），`TextView` 原样问，两边都按同一种写法查。
+    转义），原样的写法也按同一种写法查。
   - "在浏览器打开"仍按 CSP 拦截远程图片，不带已下载的远程图片。
-- **链接。** 只把 `http` / `https` / `mailto` 交给系统打开；其他链接点了无反应（gpui-kit 默认会
-  `open_url` 任何链接）。
+- **链接。** 只把 `http` / `https` / `mailto` 交给系统打开（`is_openable_link`）；其他链接点了无反应。
 - **在浏览器打开。** 把清洗后的 HTML 写成独立页面：`catmail_core::html::embed_inline_images` 把内嵌
   图片换成 `data:` URL（浏览器不认 `cid:`；用读信窗口已加载的图片），加 CSP
   `default-src 'none'; img-src data:; style-src 'unsafe-inline'` 和 `no-referrer`。
@@ -262,34 +262,13 @@ INBOX，所以打开一个文件夹时同步它（`MailClient::sync_folder`，�
 - 空的端口和用户名取与 CLI 相同的默认值；表单只检查端口格式，其余由 `check_login` 里与 `add_account`
   相同的校验负责。凭据由 `auth::new_account_credentials` 按 `AuthKind` 构造，加 OAuth2 时只改这一处。
 
-## 展开布局表格
-
-gpui-kit 的表格单元格只是一个行内段落（gpui-base `text/format/html.rs` 的 `parse_table_cell`），而
-营销邮件普遍用 `<table width=600><tr><td>` 套整个正文，标题、段落、内层表格、列表会被压成一段。所以
-交给 `TextView` 的 HTML 先经过 `catmail_core::html::unwrap_layout_tables`（proto 的 `mime/layout.rs`）：
-
-- 某个单元格里有块元素，或者每行至多一个单元格的表格，连同 `tbody` / `tr` / `td` 改成嵌套的 `div`，
-  属性原样保留；其余是数据表格，保持不变（单元格里只有行内内容，gpui-kit 能排）。多列布局因此变成
-  上下排列，对窄的读信区反而合适。
-- gpui-kit 块元素表里缺、却能通过清洗的块元素（`center`、`dd`、`dt`、`hgroup`，对照 gpui-kit 0.8.0）
-  不论在哪都改成 `div`，否则同样被压平。
-- 没有可改的内容时直接借用原字符串，不解析。
-- 只用于读信区：数据库里和"在浏览器打开"用的都是原样清洗后的 HTML，展开在打开邮件时于后台线程做。
-- 实现：清洗后的 HTML 从 DOM 序列化而来，标签必然正确嵌套，所以用 html5ever 的 tokenizer 读成记号流
-  （不用 tree builder，它会搬动内容），一遍判断每个表格，再一遍用 html5ever 的 serializer 写出。
-  html5ever 与 ammonia 同版本；ammonia 的 DOM 要 `--cfg ammonia_unstable` 才能用，所以没走那条路。
-  结果再过一遍同一个 sanitizer。
-- 这是绕开 gpui-kit 的限制。升级 gpui-kit 时对照 `parse_table_cell` 和它的块元素表：单元格能放块
-  元素后删掉表格部分，表里补上的元素也从 `INLINE_BLOCKS` 去掉。HTML 默认由下面的 Blitz 排版，这一步只用于
-  GPUI Kit 备选。
-
 ## HTML 引擎
 
-gpui-kit 的 `TextView` 只排 HTML 的一个子集（行内 style 基本不读），营销邮件靠展开布局表格勉强可读。
-所以 HTML 默认交给 [Blitz](https://github.com/DioxusLabs/blitz)（`catmail-render`）：Stylo（Firefox 的
-CSS 引擎）+ Taffy + Parley 排版，vello_cpu 绘制。格式栏 Text / HTML 旁边可切换 Blitz / GPUI Kit，
-后者是排版不了时的备选（两者都能选择文字）。不开 blitz-dom 的 `svg` feature：usvg 会按本地路径读嵌套图片，与 GPUI
-不显示 SVG 是同一个原因。选型经过见[下文](#选型记录)。
+gpui-kit 的 `TextView` 只排 HTML 的一个子集（行内 style 基本不读），营销邮件只能靠展开布局表格勉强
+可读。所以 HTML 交给 [Blitz](https://github.com/DioxusLabs/blitz)（`catmail-render`）：Stylo（Firefox 的
+CSS 引擎）+ Taffy + Parley 排版，vello_cpu 绘制。起初保留 GPUI Kit 作为可切换的备选（连同为它展开
+布局表格的 `unwrap_layout_tables`），页面能选择文字之后删掉了。不开 blitz-dom 的 `svg` feature：usvg 会按本地路径读嵌套图片（见上文
+"图片"）。选型经过见[下文](#选型记录)。
 
 - **`catmail-render`** 不依赖 GPUI 和邮件类型。每个打开的文档（`Document`）一个线程：Blitz 的文档
   不是 `Send`（持有不带 `Send` 约束的 provider），只能在打开它的线程上活。请求按顺序回答：某宽度下
@@ -306,10 +285,9 @@ CSS 引擎）+ Taffy + Parley 排版，vello_cpu 绘制。格式栏 Text / HTML 
   `with_timeout` 等 10 秒，超时就放弃这个文档并说明原因；它的线程做完手头的工作后自行退出，别的文档
   各有线程，不受影响。页面高度最多 200 000 CSS px，再往下截掉。
 - **不联网。** 引擎能拿到的只有 HTML 和读信区给的 `Resolver`，Blitz 唯一的 `NetProvider` 只问它。
-  `Images::bytes` 与 `TextView` 的 `image_source` 用同一条规则（内嵌部分、`data:` 栅格图片、用户要了
-  并已下载的远程图片），样式表、字体一概拿不到。`Resolver` 返回 `bytes::Bytes`（Blitz 存图片用的
-  类型）：`Images::bytes` 用 `Bytes::from_owner` 包住 `Arc<Image>`，文档重开（主题或缩放变了）、
-  图片再交给文档时都共用同一份内容，不再复制。
+  `Images::bytes` 只答内嵌部分、`data:` 栅格图片、用户要了并已下载的远程图片，样式表、字体一概拿不到。`Resolver` 返回 `bytes::Bytes`（Blitz 存图片用的
+  类型）：`Images` 存的就是 `Bytes`，文档重开（主题或缩放变了）、图片再交给文档时都共用同一份内容，
+  不再复制。
 - **排版。** 宽度取读信区正文宽度（取整，避免亚像素变化反复重排）；视口高度固定 800 CSS px（`vh` 和
   `height:100%` 以它为准），页面整体由读信区滚动，不随窗口高度重排。Blitz 按视口的缩放系数排字，
   所以文档按打开时的缩放系数排版和绘制，缩放系数变了就重新打开。默认字体 sans-serif（用户代理样式
@@ -342,7 +320,7 @@ CSS 引擎）+ Taffy + Parley 排版，vello_cpu 绘制。格式栏 Text / HTML 
   显示手形光标、文字显示 I 形光标；点击同样先问，再按 `is_openable_link` 交给系统。拖选结束在链接上
   时页面上有选区，这次点击不打开链接。
 - **选择文字。** 页面作为一个参与者加入 gpui-base 的窗口级选区（`TextSelectionHandle`，与
-  `TextView`、`SelectableText` 同一套），所以拖选、点别处清除、Ctrl+C（Root 的 `Copy`）、跨参与者的
+  `SelectableText` 同一套），所以拖选、点别处清除、Ctrl+C（Root 的 `Copy`）、跨参与者的
   选区都按窗口的规则走。窗口记下拖动两端在页面上的位置（`TextSelectionSnapshot`；选区从页面外开始或
   结束时按 coverage 取页首或页尾），`PageView` 换算成 CSS px 问引擎 `Document::select`（`Span`：两端之间，或某点周围的词、段落），
   引擎答出高亮矩形和文字；复制时同步回调直接给最近一次答到的文字（渲染线程可能正忙，不能在 UI 线程上
@@ -377,7 +355,7 @@ CSS 引擎）+ Taffy + Parley 排版，vello_cpu 绘制。格式栏 Text / HTML 
     按下第二、三次时问引擎 `select_around`（Parley 的 `word_from_point`、`hard_line_from_point`，
     段落以 `<br>` 或块为界），作为参与者的本地选区（`set_local_selection`）参与复制。窗口在 capture
     阶段清空选区的通知晚于这次按下才到，所以本地选区还在时忽略清空通知。
-  - 选区开始时页面获得焦点（`focus_with`），按键才能经过 Root 复制；与 `TextView` 一样。
+  - 选区开始时页面获得焦点（`focus_with`），按键才能经过 Root 复制。
   - **全选**：`SelectAll`（gpui-base 的 action），页面获得焦点时 Ctrl+A（`READER_PAGE` 键上下文）或
     右键菜单触发。先清掉窗口选区，再以页首到页尾作为页面的本地选区。
   - **右键菜单**：页面上右键弹出 "Copy" 和 "Select all"（`context_menu`），没有选中文字时 "Copy"
