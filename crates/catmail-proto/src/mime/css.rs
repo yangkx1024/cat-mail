@@ -9,7 +9,9 @@
 //! (written `\3c `), so neither `</style>` nor an HTML comment can appear in it, however
 //! the HTML around it is parsed again: the sheet can't change the document's structure.
 
-use cssparser::{Delimiter, ParseError, Parser, ToCss as _, Token, serialize_identifier};
+use cssparser::{
+    Delimiter, ParseError, Parser, ToCss as _, Token, TokenSerializationType, serialize_identifier,
+};
 
 /// The most of a message's style sheets that is kept, in bytes of output: email sheets
 /// are a few kilobytes, a sheet much larger is built to be slow.
@@ -46,10 +48,23 @@ pub(super) struct Stylesheet {
     pub(super) sets_colors: bool,
 }
 
-pub(super) fn sanitize(css: &str) -> Stylesheet {
-    let mut parser = Parser::new(css);
+/// A `<style>` element of a message: its text, and its `media` attribute.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct Element {
+    pub(super) media: Option<String>,
+    pub(super) css: String,
+}
+
+/// A message's style sheets, kept as one: each one parsed on its own (a rule left open
+/// ends with its sheet), the rules of one for some media only inside an `@media` block.
+pub(super) fn sanitize(elements: &[Element]) -> Stylesheet {
     let mut sheet = Sheet::new(MAX_LEN);
-    sheet.rules(&mut parser, 0, false);
+    for element in elements {
+        if sheet.full() {
+            break;
+        }
+        sheet.element(element);
+    }
     Stylesheet {
         css: sheet.out.replace('<', "\\3c "),
         adapts_to_dark: sheet.dark,
@@ -135,6 +150,27 @@ impl Sheet {
         self.out.len() >= self.budget || self.rules >= MAX_RULES
     }
 
+    /// A `<style>` element's rules, under its `media` attribute if it has one. One whose
+    /// attribute isn't a media query list applies nowhere, as in a browser.
+    fn element(&mut self, element: &Element) {
+        let mut rules = Parser::new(&element.css);
+        let Some(media) = element.media.as_deref().filter(|m| !m.trim().is_empty()) else {
+            self.rules(&mut rules, 0, false);
+            return;
+        };
+        let mut query = Parser::new(media);
+        let mut prelude = Css::default();
+        while let Ok(token) = query.next_including_whitespace().cloned() {
+            // A `;` would end the at-rule it is put back in.
+            if token == Token::Semicolon
+                || copy(&mut query, &token, &mut prelude, Context::Prelude).is_err()
+            {
+                return;
+            }
+        }
+        self.conditional("media", &prelude.text, 0, false, &mut rules);
+    }
+
     /// The rules of a sheet or of a conditional block; `dark` inside dark styles.
     fn rules(&mut self, parser: &mut Parser<'_>, depth: usize, dark: bool) {
         while !self.full() {
@@ -151,7 +187,7 @@ impl Sheet {
     }
 
     fn style_rule<'i>(&mut self, parser: &mut Parser<'i>, first: &Token<'i>, dark: bool) {
-        let mut selector = String::new();
+        let mut selector = Css::default();
         let mut kept = copy(parser, first, &mut selector, Context::Selector).is_ok();
         loop {
             // Ended without a block: not a rule.
@@ -170,7 +206,7 @@ impl Sheet {
             declarations.parse(block);
             Ok::<_, ParseError<()>>(())
         });
-        let rule = format!("{}{{{}}}", selector.trim(), declarations.out);
+        let rule = format!("{}{{{}}}", selector.text.trim(), declarations.out);
         if !kept || declarations.out.is_empty() || self.out.len() + rule.len() > self.budget {
             return;
         }
@@ -184,7 +220,7 @@ impl Sheet {
         let conditional =
             name.eq_ignore_ascii_case("media") || name.eq_ignore_ascii_case("supports");
         let mut kept = conditional && depth < MAX_DEPTH;
-        let mut prelude = String::new();
+        let mut prelude = Css::default();
         loop {
             let Ok(token) = parser.next_including_whitespace().cloned() else {
                 return;
@@ -203,17 +239,29 @@ impl Sheet {
         if !kept {
             return;
         }
-        let query = prelude.to_ascii_lowercase();
-        let dark_query = name.eq_ignore_ascii_case("media")
-            && query.contains("prefers-color-scheme")
-            && query.contains("dark");
-        let head = format!("@{} {}{{", name.to_ascii_lowercase(), prelude.trim());
-        let mut inner = Sheet::new(self.budget.saturating_sub(self.out.len() + head.len() + 1));
-        inner.rules = self.rules;
+        let name = name.to_ascii_lowercase();
         let _ = parser.parse_nested_block(|block| {
-            inner.rules(block, depth + 1, dark || dark_query);
+            self.conditional(&name, &prelude.text, depth, dark, block);
             Ok::<_, ParseError<()>>(())
         });
+    }
+
+    /// `@name prelude { … }`, `@media` or `@supports`, with the rules in `block`.
+    fn conditional(
+        &mut self,
+        name: &str,
+        prelude: &str,
+        depth: usize,
+        dark: bool,
+        block: &mut Parser<'_>,
+    ) {
+        let query = prelude.to_ascii_lowercase();
+        let dark_query =
+            name == "media" && query.contains("prefers-color-scheme") && query.contains("dark");
+        let head = format!("@{name} {}{{", prelude.trim());
+        let mut inner = Sheet::new(self.budget.saturating_sub(self.out.len() + head.len() + 1));
+        inner.rules = self.rules;
+        inner.rules(block, depth + 1, dark || dark_query);
         self.rules = inner.rules;
         self.colors |= inner.colors;
         self.dark |= inner.dark || dark_query;
@@ -240,12 +288,12 @@ impl Declarations {
             let _ = parser.parse_until_after(Delimiter::Semicolon, |p| {
                 let name = p.expect_ident()?.clone();
                 p.expect_colon()?;
-                let mut value = String::new();
+                let mut value = Css::default();
                 while let Ok(token) = p.next_including_whitespace().cloned() {
                     copy(p, &token, &mut value, Context::Value)
                         .map_err(|()| ParseError::custom(()))?;
                 }
-                let value = value.trim();
+                let value = value.text.trim();
                 if value.is_empty() {
                     return Err(ParseError::custom(()));
                 }
@@ -274,27 +322,46 @@ enum Context {
     Value,
 }
 
+/// CSS written back token by token. What separated two tokens may be gone (a comment),
+/// and written next to each other they could read as one: `u/**/rl(` as `url(`, `1px/**/2px`
+/// as one dimension. `/**/` keeps them apart where the grammar needs it.
+#[derive(Default)]
+struct Css {
+    text: String,
+    last: TokenSerializationType,
+}
+
+impl Css {
+    fn push(&mut self, token: &Token<'_>) -> Result<(), ()> {
+        let kind = token.serialization_type();
+        if self.last.needs_separator_when_before(kind) {
+            self.text.push_str("/**/");
+        }
+        self.last = kind;
+        token.to_css(&mut self.text).map_err(|_| ())
+    }
+}
+
 /// Writes `token` (and the block it opens) to `out`, or refuses it: anything that
 /// fetches, a nested rule, or what can't be written back faithfully.
 fn copy<'i>(
     parser: &mut Parser<'i>,
     token: &Token<'i>,
-    out: &mut String,
+    out: &mut Css,
     context: Context,
 ) -> Result<(), ()> {
     if is_fetching(token) {
         return Err(());
     }
-    let (open, close) = match token {
+    let close = match token {
         Token::Function(name) => {
             if context == Context::Selector && name.eq_ignore_ascii_case("has") {
                 return Err(());
             }
-            serialize_identifier(name, out).map_err(|_| ())?;
-            ("(", ")")
+            Token::CloseParenthesis
         }
-        Token::ParenthesisBlock => ("(", ")"),
-        Token::SquareBracketBlock => ("[", "]"),
+        Token::ParenthesisBlock => Token::CloseParenthesis,
+        Token::SquareBracketBlock => Token::CloseSquareBracket,
         Token::CurlyBracketBlock
         | Token::BadString(_)
         | Token::CDO
@@ -302,9 +369,9 @@ fn copy<'i>(
         | Token::CloseParenthesis
         | Token::CloseSquareBracket
         | Token::CloseCurlyBracket => return Err(()),
-        token => return token.to_css(out).map_err(|_| ()),
+        token => return out.push(token),
     };
-    out.push_str(open);
+    out.push(token)?;
     parser
         .parse_nested_block(|block| {
             while let Ok(token) = block.next_including_whitespace().cloned() {
@@ -313,16 +380,22 @@ fn copy<'i>(
             Ok::<_, ParseError<()>>(())
         })
         .map_err(|_| ())?;
-    out.push_str(close);
-    Ok(())
+    out.push(&close)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn sheet(source: &str) -> Stylesheet {
+        sanitize(&[Element {
+            media: None,
+            css: source.into(),
+        }])
+    }
+
     fn css(source: &str) -> String {
-        sanitize(source).css
+        sheet(source).css
     }
 
     #[test]
@@ -405,6 +478,61 @@ mod tests {
     }
 
     #[test]
+    fn keeps_tokens_apart_that_a_comment_separated() {
+        // Joined, `u` and `rl(` would be `url(`: a fetch the filter never saw.
+        assert_eq!(
+            css(r#".a{background:u/**/rl("https://t.example/p.gif")}"#),
+            r#".a{background:u/**/rl("https://t.example/p.gif");}"#
+        );
+        assert_eq!(css(".a{margin:1px/**/2px}"), ".a{margin:1px/**/2px;}");
+        assert_eq!(css("div/**/p{color:red}"), "div/**/p{color:red;}");
+        for source in [
+            r#".a{background:u/**/rl("https://t.example/p.gif")}"#,
+            ".a{width:calc(1px/**/+2px)}",
+            "@media scr/**/een{.a{color:red}}",
+        ] {
+            let once = css(source);
+            assert_eq!(css(&once), once, "{source}");
+        }
+    }
+
+    #[test]
+    fn a_sheet_for_some_media_applies_only_to_them() {
+        let element = |media: &str, css: &str| Element {
+            media: Some(media.into()),
+            css: css.into(),
+        };
+        let sheets = sanitize(&[
+            element("print", "p{display:none}"),
+            element(" ", ".a{color:red}"),
+            element("(prefers-color-scheme: dark)", ".b{color:#eee}"),
+        ]);
+        assert_eq!(
+            sheets.css,
+            "@media print{p{display:none;}}.a{color:red;}\
+             @media (prefers-color-scheme: dark){.b{color:#eee;}}"
+        );
+        assert!(sheets.adapts_to_dark);
+        // A rule left open ends with its sheet: it doesn't take in the next one.
+        let sheets = sanitize(&[
+            element("print", "p{display:none"),
+            Element {
+                media: None,
+                css: ".a{color:red}".into(),
+            },
+        ]);
+        assert_eq!(sheets.css, "@media print{p{display:none;}}.a{color:red;}");
+        // Not a media query list: the sheet applies nowhere.
+        for media in ["print;", "print{}.x", "@import x", "url(x)"] {
+            assert_eq!(
+                sanitize(&[element(media, "p{display:none}")]).css,
+                "",
+                "{media}"
+            );
+        }
+    }
+
+    #[test]
     fn stops_at_the_size_limit() {
         // Long rules reach the size limit; short ones, the number of rules.
         let rule = format!(".a{{content:\"{}\";}}", "x".repeat(100));
@@ -444,13 +572,13 @@ mod tests {
 
     #[test]
     fn tells_colors_and_dark_styles_apart() {
-        let plain = sanitize(".a{padding:4px;font-size:14px}");
+        let plain = sheet(".a{padding:4px;font-size:14px}");
         assert!(!plain.sets_colors && !plain.adapts_to_dark);
-        let light = sanitize(".a{color:#333}");
+        let light = sheet(".a{color:#333}");
         assert!(light.sets_colors && !light.adapts_to_dark);
-        let dark_only = sanitize("@media (prefers-color-scheme: dark){.a{color:#eee}}");
+        let dark_only = sheet("@media (prefers-color-scheme: dark){.a{color:#eee}}");
         assert!(!dark_only.sets_colors && dark_only.adapts_to_dark);
-        assert!(sanitize(":root{color-scheme:light dark}").adapts_to_dark);
+        assert!(sheet(":root{color-scheme:light dark}").adapts_to_dark);
 
         assert!(sets_colors("padding:0;background-color:#fff"));
         assert!(!sets_colors("padding:0;font-weight:bold"));

@@ -41,7 +41,12 @@ base64 正文），交给 mail-parser 按同样方式解析。于是两条路径
   - 去掉脚本、表单、iframe、事件属性和 `javascript:` 链接；
   - 样式表不交给 ammonia（它不看 `<style>` 里面，写回时原样输出原始文本）：分词时按树构建器的规则
     （`script`、`textarea` 等之后切到原始文本，SVG / MathML 里的忽略）取出 `<style>` 的内容，经
-    `mime/css.rs` 用 cssparser 的记号逐条重写，合成一个 `<style>` 放在输出开头。只保留普通规则和
+    `mime/css.rs` 用 cssparser 的记号逐条重写，合成一个 `<style>` 放在输出开头。每张表单独解析（没写完
+    的规则随它的表结束，不吞掉下一张）；带 `media` 属性的表包进 `@media <属性值>{…}`，属性值按
+    `@media` 的条件重写，不是媒体查询列表就整张不用（浏览器也当它 `not all`）；`type` 不是空或
+    `text/css` 的（模板等）浏览器不应用，这里也跳过。记号写回时按 cssparser 的
+    `needs_separator_when_before` 在必要处插入 `/**/`：注释在分词时就没了，`u/**/rl(` 直接拼起来会
+    变成没检查过的 `url(`，`1px/**/2px` 会变成一个尺寸。只保留普通规则和
     `@media` / `@supports`（最多嵌套三层）；值里有 `url()`、`image()`、`image-set()`、`cross-fade()`、
     `src()`、`element()`、`paint()` 的声明丢掉，规则其余部分保留（转义在分词时已解码，`\75rl(` 就是
     `url(`）；`@import`、`@font-face` 等其他 at-rule、带 `:has()` 的选择器、嵌套规则都丢掉；最多 64 KB、

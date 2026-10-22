@@ -9,6 +9,9 @@
 //! In a dark theme the page is dark too when the message allows it ([`Look`]): it sets
 //! no colors, or has dark styles of its own. A message colored for a white page keeps
 //! its white, as a browser would show it.
+//!
+//! The page zooms with the window's text size, as a browser page zooms: everything on it,
+//! since most mail sets its own font sizes in pixels.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -38,6 +41,10 @@ const STRIP: f32 = 512.0;
 /// painted again when scrolling back a little.
 const AHEAD: u32 = 1;
 const KEPT: u32 = 3;
+
+/// A browser's text size where the page says nothing, in CSS pixels. At the same text
+/// size a CSS pixel is one of the window's.
+const BROWSER_TEXT_SIZE: f32 = 16.0;
 
 /// How long the engine may take to answer: a message can be built to be slow to lay
 /// out. The document is given up then (its thread ends when done), and the page says so.
@@ -89,10 +96,22 @@ fn shows_dark(colors: ColorUsage, dark_theme: bool) -> bool {
 struct Opened {
     /// `None` once given up on, or if it couldn't be opened.
     document: Option<Document>,
+    /// The window's scale.
     scale: f32,
+    zoom: f32,
     look: Option<Look>,
-    /// The width it was asked to lay out at.
+    /// The width it was asked to lay out at, in CSS pixels.
     width: Option<f32>,
+    /// Its height at that width, once the engine answered.
+    height: Option<f32>,
+}
+
+/// A page laid out: its size in CSS pixels, and the window's pixels in one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Layout {
+    width: f32,
+    height: f32,
+    zoom: f32,
 }
 
 /// What an engine answered, or why it didn't.
@@ -103,8 +122,9 @@ pub(super) struct PageView {
     source: Source,
     colors: ColorUsage,
     opened: Option<Opened>,
-    /// The width the document was laid out at, and its height.
-    layout: Option<(f32, f32)>,
+    /// The layout shown, and its strips: the document's, or until it has one, the last
+    /// document's.
+    layout: Option<Layout>,
     /// Where the view was last painted, for the pointer's position on the page.
     bounds: Bounds<Pixels>,
     /// The strips wanted on screen, as last measured.
@@ -150,12 +170,37 @@ impl PageView {
     pub(super) fn set_source(&mut self, source: Source, cx: &mut Context<Self>) {
         self.source = source;
         self.opened = None;
+        self._layout = Task::ready(());
         cx.notify();
     }
 
     #[cfg(test)]
     pub(super) fn painted_strips(&self) -> usize {
         self.strips.len()
+    }
+
+    /// The painted strips' indices and heights in device pixels, and the height each
+    /// should have for the layout shown.
+    #[cfg(test)]
+    pub(super) fn strip_heights(&self, scale: f32) -> Vec<(u32, u32, u32)> {
+        let Some(layout) = self.layout else {
+            return Vec::new();
+        };
+        let mut strips: Vec<_> = (self.strips.iter())
+            .map(|(&index, image)| {
+                let top = index as f32 * STRIP;
+                let wanted = STRIP.min(layout.height - top) * (scale * layout.zoom);
+                (index, image.size(0).height.0 as u32, wanted.ceil() as u32)
+            })
+            .collect();
+        strips.sort();
+        strips
+    }
+
+    /// The height of the page shown, in the window's pixels.
+    #[cfg(test)]
+    pub(super) fn shown_height(&self) -> Option<f32> {
+        self.layout.map(|layout| layout.height * layout.zoom)
     }
 
     /// The BGRA pixel at (`x`, `y`) device pixels of the top strip, once painted.
@@ -175,16 +220,17 @@ impl PageView {
     fn measure(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         self.bounds = bounds;
         let scale = window.scale_factor();
+        let zoom = f32::from(window.rem_size()) / BROWSER_TEXT_SIZE;
         let look = Look::of(self.colors, cx.theme());
-        let current = self
-            .opened
-            .as_ref()
-            .is_some_and(|opened| opened.scale == scale && opened.look == look);
+        let current = self.opened.as_ref().is_some_and(|opened| {
+            opened.scale == scale && opened.zoom == zoom && opened.look == look
+        });
         if !current {
-            // Opened again at another scale, or in another theme.
+            // Opened again at another scale or text size, or in another theme.
             let appearance = look.map(Look::appearance).unwrap_or_default();
-            let document = match Document::open(self.engine, self.source.clone(), appearance, scale)
-            {
+            let opening =
+                Document::open(self.engine, self.source.clone(), appearance, scale * zoom);
+            let document = match opening {
                 Ok(document) => Some(document),
                 Err(e) => {
                     let error = format!("the {} thread couldn't start: {e}", self.engine);
@@ -195,13 +241,17 @@ impl PageView {
             self.opened = Some(Opened {
                 document,
                 scale,
+                zoom,
                 look,
                 width: None,
+                height: None,
             });
             self.painting.clear();
+            // The answer coming is the last document's.
+            self._layout = Task::ready(());
         }
         // Whole pixels: a fraction would relayout on every subpixel change.
-        let width = f32::from(bounds.size.width).floor();
+        let width = (f32::from(bounds.size.width) / zoom).floor();
         let Some(opened) = self.opened.as_mut() else {
             return;
         };
@@ -213,18 +263,28 @@ impl PageView {
         }
         if opened.width != Some(width) {
             opened.width = Some(width);
+            opened.height = None;
             let laid_out = document.layout(width);
             self.painting.clear();
-            self.lay_out(laid_out, width, window, cx);
+            self.lay_out(
+                laid_out,
+                Layout {
+                    width,
+                    height: 0.0,
+                    zoom,
+                },
+                window,
+                cx,
+            );
+            return;
         }
-        let Some((laid_out, height)) = self.layout else {
+        // Nothing is painted before the document is laid out at this width: the strips
+        // shown until then are of the last layout, and their heights too.
+        let Some(height) = opened.height else {
             return;
         };
-        if laid_out != width {
-            return;
-        }
         let visible = window.content_mask().bounds;
-        self.wanted = strips_on_screen(bounds, visible, height);
+        self.wanted = strips_on_screen(bounds, visible, height, zoom);
         let ahead = self.wanted.start().saturating_sub(AHEAD)..=*self.wanted.end() + AHEAD;
         for index in ahead.filter(|i| i * (STRIP as u32) < height.ceil() as u32) {
             if self.strips.contains_key(&index) || self.painting.contains_key(&index) {
@@ -239,10 +299,11 @@ impl PageView {
         }
     }
 
+    /// Waits for the document's `layout`, which has no height yet.
     fn lay_out(
         &mut self,
         laid_out: impl Future<Output = Result<f32, Stopped>> + 'static,
-        width: f32,
+        layout: Layout,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -252,9 +313,13 @@ impl PageView {
                 .await;
             this.update_in(cx, |this, window, cx| {
                 if let Some(height) = this.answered(height) {
+                    // Of the document opened: a new one, or a new width, replaces this task.
+                    if let Some(opened) = &mut this.opened {
+                        opened.height = Some(height);
+                    }
                     // The strips were painted at another width, or of another document.
                     this.drop_strips(window);
-                    this.layout = Some((width, height));
+                    this.layout = Some(Layout { height, ..layout });
                     this.error = None;
                 }
                 cx.notify();
@@ -327,15 +392,17 @@ impl PageView {
         }
     }
 
-    /// The link at the pointer's position, if it is on a laid-out page.
+    /// The link at the pointer's position, if it is on the document's page laid out.
     fn link_at(
         &self,
         position: Point<Pixels>,
     ) -> Option<impl Future<Output = Result<Option<String>, Stopped>> + use<>> {
-        let (width, _) = self.layout?;
+        let opened = self.opened.as_ref()?;
+        opened.height?;
         let at = position - self.bounds.origin;
-        let document = self.document()?;
-        Some(document.link_at(width, f32::from(at.x), f32::from(at.y)))
+        let (x, y) = (f32::from(at.x), f32::from(at.y));
+        let document = opened.document.as_ref()?;
+        Some(document.link_at(opened.width?, x / opened.zoom, y / opened.zoom))
     }
 
     fn hover(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
@@ -373,14 +440,16 @@ impl PageView {
     }
 }
 
-/// The strips the visible part of the page falls in, by index from the top.
+/// The strips the visible part of the page falls in, by index from the top. `height` is
+/// the page's in CSS pixels, each `zoom` of the window's.
 fn strips_on_screen(
     page: Bounds<Pixels>,
     visible: Bounds<Pixels>,
     height: f32,
+    zoom: f32,
 ) -> RangeInclusive<u32> {
-    let top = f32::from(visible.top() - page.top()).clamp(0.0, height);
-    let bottom = f32::from(visible.bottom() - page.top()).clamp(top, height);
+    let top = (f32::from(visible.top() - page.top()) / zoom).clamp(0.0, height);
+    let bottom = (f32::from(visible.bottom() - page.top()) / zoom).clamp(top, height);
     let last = (bottom - 1.0).max(top);
     (top / STRIP) as u32..=(last / STRIP) as u32
 }
@@ -404,7 +473,7 @@ impl Render for PageView {
         .size_full();
 
         // A page given up on says why instead.
-        let Some((width, height)) = self.layout.filter(|_| self.error.is_none()) else {
+        let Some(layout) = self.layout.filter(|_| self.error.is_none()) else {
             return div()
                 .id("page")
                 .relative()
@@ -424,14 +493,19 @@ impl Render for PageView {
                         .into_any_element(),
                 });
         };
+        let Layout {
+            width,
+            height,
+            zoom,
+        } = layout;
         let strips = self.strips.iter().map(|(&index, image)| {
             let top = index as f32 * STRIP;
             img(image.clone())
                 .absolute()
                 .left_0()
-                .top(px(top))
-                .w(px(width))
-                .h(px(STRIP.min(height - top)))
+                .top(px(top * zoom))
+                .w(px(width * zoom))
+                .h(px(STRIP.min(height - top) * zoom))
                 // A device pixel's rounding of the width must not letterbox the strip.
                 .object_fit(ObjectFit::Fill)
         });
@@ -439,7 +513,7 @@ impl Render for PageView {
             .id("page")
             .relative()
             .w_full()
-            .h(px(height))
+            .h(px(height * zoom))
             .child(measure)
             .children(strips)
             .when(self.hovered.is_some(), |this| this.cursor_pointer())
@@ -452,9 +526,104 @@ impl Render for PageView {
 
 #[cfg(test)]
 mod tests {
-    use gpui_kit::{point, size};
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{
+        AnyWindowHandle, AppContext as _, Entity, TestAppContext, WindowBounds, WindowOptions,
+        point, size,
+    };
 
     use super::*;
+    use crate::settings::Preferences;
+    use crate::test_support::wait_until;
+
+    /// A page `height` CSS pixels tall.
+    fn source(height: u32) -> Source {
+        Source {
+            html: format!(r#"<body style="margin:0"><div style="height:{height}px"></div>"#).into(),
+            images: Arc::new(|_| None),
+        }
+    }
+
+    /// A window 800 px tall showing the page of `source` whole.
+    fn open(cx: &mut TestAppContext, source: Source) -> (AnyWindowHandle, Entity<PageView>) {
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            crate::init_app(Preferences::load_nowhere(), cx);
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                    Default::default(),
+                    size(px(600.), px(800.)),
+                ))),
+                focus: false,
+                show: false,
+                ..Default::default()
+            };
+            gpui_kit::open_window(options, cx, |window, cx| {
+                cx.new(|cx| PageView::new(Engine::Blitz, source, ColorUsage::Unset, window, cx))
+            })
+            .unwrap()
+        })
+    }
+
+    /// Draws a frame, then lets the tasks it started run if `settle`.
+    fn frame(cx: &mut TestAppContext, window: AnyWindowHandle, settle: bool) -> f32 {
+        let scale = cx
+            .update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                window.scale_factor()
+            })
+            .unwrap();
+        if settle {
+            cx.run_until_parked();
+        }
+        scale
+    }
+
+    #[gpui_kit::test]
+    fn a_new_source_is_painted_once_it_is_laid_out(cx: &mut TestAppContext) {
+        // 700 px: a whole strip and one of 188 px.
+        let (window, view) = open(cx, source(700));
+        wait_until(|| {
+            frame(cx, window, true);
+            cx.read(|cx| view.read(cx).layout.is_some())
+        });
+        // The strips are asked for, and the source changes before they come: at the same
+        // width, the layout of the last one is no answer for the new one.
+        frame(cx, window, false);
+        cx.update(|cx| view.update(cx, |view, cx| view.set_source(source(1500), cx)));
+        frame(cx, window, false);
+        wait_until(|| {
+            let scale = frame(cx, window, true);
+            let strips = cx.read(|cx| view.read(cx).strip_heights(scale));
+            if strips.len() < 3 {
+                return false;
+            }
+            for (index, height, wanted) in strips {
+                assert_eq!(height, wanted, "strip {index}");
+            }
+            true
+        });
+    }
+
+    #[gpui_kit::test]
+    fn the_page_zooms_with_the_text_size(cx: &mut TestAppContext) {
+        let (window, view) = open(cx, source(700));
+        let shown = |cx: &mut TestAppContext| {
+            frame(cx, window, true);
+            cx.read(|cx| view.read(cx).shown_height())
+        };
+        wait_until(|| shown(cx) == Some(700.));
+        cx.update(|cx| Preferences::update(cx, |s| s.text_size = 18.));
+        wait_until(|| shown(cx) == Some(700. * 18. / 16.));
+        let scale = frame(cx, window, true);
+        wait_until(|| {
+            frame(cx, window, true);
+            cx.read(|cx| view.read(cx).painted_strips()) == 2
+        });
+        for (index, height, wanted) in cx.read(|cx| view.read(cx).strip_heights(scale)) {
+            assert_eq!(height, wanted, "strip {index}");
+        }
+    }
 
     fn bounds(top: f32, height: f32) -> Bounds<Pixels> {
         Bounds::new(point(px(0.), px(top)), size(px(600.), px(height)))
@@ -474,12 +643,14 @@ mod tests {
     fn asks_for_the_strips_on_screen() {
         // The page starts 200 px down a 700 px pane.
         let page = bounds(200., 5000.);
-        assert_eq!(strips_on_screen(page, bounds(0., 700.), 5000.), 0..=0);
+        assert_eq!(strips_on_screen(page, bounds(0., 700.), 5000., 1.), 0..=0);
         // Scrolled 1000 px: 800..1500 of the page is on screen.
         let page = bounds(-800., 5000.);
-        assert_eq!(strips_on_screen(page, bounds(0., 700.), 5000.), 1..=2);
+        assert_eq!(strips_on_screen(page, bounds(0., 700.), 5000., 1.), 1..=2);
+        // Zoomed twice: 400..750 of the page.
+        assert_eq!(strips_on_screen(page, bounds(0., 700.), 5000., 2.), 0..=1);
         // A short page ends inside the first strip, whatever the pane's height.
         let page = bounds(0., 300.);
-        assert_eq!(strips_on_screen(page, bounds(0., 2000.), 300.), 0..=0);
+        assert_eq!(strips_on_screen(page, bounds(0., 2000.), 300., 1.), 0..=0);
     }
 }

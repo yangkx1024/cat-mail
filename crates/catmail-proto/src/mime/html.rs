@@ -86,7 +86,7 @@ pub fn sanitize_html(html: &str) -> String {
 /// The sanitizer's output with the message's style sheets in front. ammonia drops every
 /// `<style>` with its content: it doesn't look inside, and writes raw text back as it is.
 fn clean(builder: &Builder<'_>, html: &str) -> String {
-    let sheet = css::sanitize(&scan(html, false).css).css;
+    let sheet = css::sanitize(&scan(html, false).sheets).css;
     let mut out = String::new();
     if !sheet.is_empty() {
         out.push_str("<style>");
@@ -111,7 +111,7 @@ pub enum ColorUsage {
 /// How HTML that [`sanitize_html`] produced colors itself.
 pub fn color_usage(html: &str) -> ColorUsage {
     let scanned = scan(html, true);
-    let sheet = css::sanitize(&scanned.css);
+    let sheet = css::sanitize(&scanned.sheets);
     if sheet.adapts_to_dark {
         ColorUsage::Adaptive
     } else if sheet.sets_colors || scanned.colors {
@@ -121,20 +121,23 @@ pub fn color_usage(html: &str) -> ColorUsage {
     }
 }
 
-/// What a tokenizer pass finds in HTML: the text of its style sheets, and whether its
-/// attributes set colors.
+/// What a tokenizer pass finds in HTML: its style sheets, and whether its attributes set
+/// colors.
 struct Scan {
-    css: String,
+    sheets: Vec<css::Element>,
     colors: bool,
 }
 
 /// Tokenizes HTML for [`Scan`], as the tree builder would switch to raw text (so
 /// `<style>` inside `<script>` or `<textarea>` is no style sheet). Style sheets in SVG or
-/// MathML are skipped: the sanitizer drops that content whole. Attributes are looked at
-/// for colors only if `colors`: that parses every `style` attribute.
+/// MathML are skipped: the sanitizer drops that content whole, and so are those of a
+/// `type` other than CSS (templates), which a browser doesn't apply either. Attributes are
+/// looked at for colors only if `colors`: that parses every `style` attribute.
 fn scan(html: &str, colors: bool) -> Scan {
     struct Sink {
-        css: RefCell<String>,
+        sheets: RefCell<Vec<css::Element>>,
+        /// The text taken so far.
+        len: Cell<usize>,
         looks_at_colors: bool,
         colors: Cell<bool>,
         /// `<svg>` and `<math>` elements open.
@@ -162,7 +165,20 @@ fn scan(html: &str, colors: bool) -> Scan {
                             self.foreign.set(self.foreign.get() + 1);
                         }
                     } else if self.foreign.get() == 0 {
-                        self.in_style.set(name == "style");
+                        let attribute = |name: &str| {
+                            let attr = tag.attrs.iter().find(|a| &*a.name.local == name);
+                            attr.map(|a| a.value.to_string())
+                        };
+                        let css = attribute("type")
+                            .is_none_or(|t| t.is_empty() || t.eq_ignore_ascii_case("text/css"));
+                        let sheet = name == "style" && css;
+                        if sheet {
+                            self.sheets.borrow_mut().push(css::Element {
+                                media: attribute("media"),
+                                css: String::new(),
+                            });
+                        }
+                        self.in_style.set(sheet);
                         return tokens::after_start_tag(name);
                     }
                 }
@@ -170,16 +186,15 @@ fn scan(html: &str, colors: bool) -> Scan {
                     if matches!(&*tag.name, "svg" | "math") {
                         self.foreign.set(self.foreign.get().saturating_sub(1));
                     }
-                    if self.in_style.replace(false) {
-                        // Sheets are joined: one may end in the middle of a rule.
-                        self.css.borrow_mut().push('\n');
-                    }
+                    self.in_style.set(false);
                 }
                 Token::CharacterTokens(text) if self.in_style.get() => {
-                    let mut css = self.css.borrow_mut();
                     // The sanitizer would keep no more than this anyway.
-                    if css.len() < 4 * css::MAX_LEN {
-                        css.push_str(&text);
+                    if self.len.get() < 4 * css::MAX_LEN
+                        && let Some(sheet) = self.sheets.borrow_mut().last_mut()
+                    {
+                        sheet.css.push_str(&text);
+                        self.len.set(self.len.get() + text.len());
                     }
                 }
                 _ => {}
@@ -189,7 +204,8 @@ fn scan(html: &str, colors: bool) -> Scan {
     }
 
     let sink = Sink {
-        css: RefCell::default(),
+        sheets: RefCell::default(),
+        len: Cell::new(0),
         looks_at_colors: colors,
         colors: Cell::new(false),
         foreign: Cell::new(0),
@@ -197,7 +213,7 @@ fn scan(html: &str, colors: bool) -> Scan {
     };
     let sink = tokens::tokenize(html, sink);
     Scan {
-        css: sink.css.into_inner(),
+        sheets: sink.sheets.into_inner(),
         colors: sink.colors.get(),
     }
 }
@@ -294,6 +310,34 @@ mod tests {
                 assert!(!css.contains('<'), "{dirty}: {clean}");
             }
         }
+    }
+
+    #[test]
+    fn style_sheets_keep_their_media_and_type() {
+        let clean = sanitize_html(
+            r#"<style media="print">p{display:none}</style><style media="screen and (max-width:600px)">.a{width:100%}</style><p>Hello</p>"#,
+        );
+        assert!(
+            clean.starts_with(
+                "<style>@media print{p{display:none;}}@media screen and (max-width:600px){.a{width:100%;}}</style>"
+            ),
+            "{clean}"
+        );
+        assert_eq!(sanitize_html(&clean), clean);
+        // A template is no style sheet; `text/css` in any case is one.
+        let clean = sanitize_html(
+            r#"<style type="text/x-template">p{display:none}</style><style type="TEXT/CSS">.a{color:red}</style>"#,
+        );
+        assert!(
+            clean.starts_with("<style>.a{color:red;}</style>"),
+            "{clean}"
+        );
+        assert_eq!(
+            color_usage(&sanitize_html(
+                r#"<style media="(prefers-color-scheme: dark)">.a{color:#eee}</style><p class=a style="color:#333">x</p>"#
+            )),
+            ColorUsage::Adaptive
+        );
     }
 
     #[test]
