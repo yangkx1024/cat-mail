@@ -103,6 +103,8 @@ fake-server test, with a fault injected if the change is about recovering from o
   retry checks Sent first.
 - **One engine per data directory**, enforced by the lock file. Don't add code paths that
   open the database without going through `MailClient`.
+- **UI design**, avoid unnecessary secondary labels and descriptions. Let the layout do the
+  explaining.
 
 ## Migrations
 
