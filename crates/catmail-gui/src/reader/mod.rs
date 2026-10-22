@@ -1,10 +1,9 @@
 //! The reading pane: one message's headers, body (plain text or HTML), and attachments.
 //!
 //! Opening a message downloads its body if needed, which leaves it unread on the server.
-//! HTML is rendered by GPUI Kit's text view, or laid out as a page by one of the engines
-//! of `catmail-render` ([`HtmlEngine`]), with images resolved here (see [`crate::html`]):
-//! inline parts and `data:` URLs show, remote images only when the user asks for them,
-//! one message at a time.
+//! HTML, when the message has it, is laid out as a page by Blitz (`catmail-render`), with
+//! images resolved here (see [`crate::html`]): inline parts and `data:` URLs show, remote
+//! images only when the user asks for them, one message at a time.
 
 mod images;
 mod message;
@@ -21,46 +20,17 @@ use catmail_core::{Attachment, MailClient, MessageId, safe_filename};
 use catmail_render::{Engine, Resolver, Source};
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
-use gpui_kit::{AppContext as _, Context, Entity, Image, SharedString, Task, Window};
+use gpui_kit::{AppContext as _, Context, Entity, FocusHandle, SharedString, Task, Window};
 
 use crate::html;
 
-use images::{Images, inline_images};
+use images::{ImageData, Images, inline_images};
 use message::OpenMessage;
 use page::PageView;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BodyFormat {
-    Text,
-    Html,
-}
-
-/// What draws the HTML: an engine laying it out as a browser would (Blitz, the default),
-/// or GPUI Kit's text view, which lays out less.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HtmlEngine {
-    Kit,
-    Page(Engine),
-}
-
-impl HtmlEngine {
-    /// In the order the format bar offers them.
-    const ALL: [HtmlEngine; 2] = [HtmlEngine::Page(Engine::Blitz), HtmlEngine::Kit];
-
-    fn name(self) -> &'static str {
-        match self {
-            HtmlEngine::Kit => "GPUI Kit",
-            HtmlEngine::Page(engine) => engine.name(),
-        }
-    }
-}
-
-/// The page shown, with what it shows: a message's HTML by an engine, with the inline
-/// images as they were when it was made.
+/// The page shown, and the message whose HTML it shows.
 struct ShownPage {
     message: MessageId,
-    engine: Engine,
-    images: Arc<Images>,
     view: Entity<PageView>,
 }
 
@@ -73,11 +43,9 @@ enum ReaderState {
 
 pub struct Reader {
     client: MailClient,
+    /// The mailbox's: replying and forwarding are its actions, dispatched from here.
+    mailbox: FocusHandle,
     state: ReaderState,
-    /// The format last chosen; kept while moving between messages.
-    preferred: BodyFormat,
-    /// The engine last chosen for HTML; kept the same way.
-    engine: HtmlEngine,
     page: Option<ShownPage>,
     /// Every header in full, instead of the one-line summary.
     show_details: bool,
@@ -87,12 +55,11 @@ pub struct Reader {
 }
 
 impl Reader {
-    pub fn new(client: MailClient) -> Self {
+    pub fn new(client: MailClient, mailbox: FocusHandle) -> Self {
         Self {
             client,
+            mailbox,
             state: ReaderState::Empty,
-            preferred: BodyFormat::Text,
-            engine: HtmlEngine::Page(Engine::Blitz),
             page: None,
             show_details: false,
             _load: Task::ready(()),
@@ -109,12 +76,7 @@ impl Reader {
         }
     }
 
-    #[cfg(test)]
-    pub fn prefers_html(&self) -> bool {
-        self.preferred == BodyFormat::Html
-    }
-
-    /// The strips of the page an engine has painted so far, if it shows one.
+    /// The strips of the page Blitz has painted so far, if it shows one.
     #[cfg(test)]
     pub fn painted_strips(&self, cx: &gpui_kit::App) -> Option<usize> {
         let page = self.page.as_ref()?;
@@ -129,7 +91,7 @@ impl Reader {
 
     /// Whether the open message has HTML, which "Open in browser" needs.
     pub fn has_html(&self) -> bool {
-        matches!(&self.state, ReaderState::Open(open) if open.browser_html.is_some())
+        matches!(&self.state, ReaderState::Open(open) if open.html.is_some())
     }
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
@@ -181,13 +143,17 @@ impl Reader {
             // The text shows first; inline images follow (a large message downloads them
             // part by part).
             let mut images = HashMap::new();
-            for (attachment, format) in inline {
+            for attachment in inline {
                 let Some(content_id) = attachment.content_id.clone() else {
                     continue;
                 };
                 match client.attachment_content(attachment.id).await {
                     Ok(bytes) => {
-                        images.insert(content_id, Arc::new(Image::from_bytes(format, bytes)));
+                        let image = ImageData {
+                            mime_type: attachment.mime_type,
+                            bytes: bytes.into(),
+                        };
+                        images.insert(content_id, image);
                     }
                     Err(e) => tracing::warn!(attachment = %attachment.id, error = %e,
                         "failed to load inline image"),
@@ -322,7 +288,6 @@ impl Reader {
         }
         open.remote_images
             .retain(|url| !fetched.iter().any(|(had, _)| had == url));
-        // Not decoded yet: GPUI decodes an image when it first draws it.
         open.images = Arc::new(open.images.with_remote(fetched));
         self.show_page(window, cx);
         cx.notify();
@@ -335,69 +300,33 @@ impl Reader {
         }
     }
 
-    fn set_format(&mut self, format: BodyFormat, window: &mut Window, cx: &mut Context<Self>) {
-        self.preferred = format;
-        self.show_page(window, cx);
-        cx.notify();
-    }
-
-    fn set_engine(&mut self, engine: HtmlEngine, window: &mut Window, cx: &mut Context<Self>) {
-        self.engine = engine;
-        self.show_page(window, cx);
-        cx.notify();
-    }
-
-    /// The format shown for `open`: the one chosen, if the message has it.
-    fn format(&self, open: &OpenMessage) -> BodyFormat {
-        match (self.preferred, &open.text, &open.html) {
-            (BodyFormat::Html, _, Some(_)) | (_, None, Some(_)) => BodyFormat::Html,
-            _ => BodyFormat::Text,
-        }
-    }
-
-    /// Makes the page match what the pane shows: the open message's HTML by the chosen
-    /// engine, or no page. A new message or engine makes a new one; inline images that
-    /// arrived since it was made go to the page it has.
+    /// Makes the page match what the pane shows: the open message's HTML, or no page. A
+    /// new message makes a new one; otherwise the page gets the images that arrived.
     fn show_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let wanted = match (&self.state, self.engine) {
-            (ReaderState::Open(open), HtmlEngine::Page(engine))
-                if self.format(open) == BodyFormat::Html =>
-            {
-                open.browser_html.as_ref().map(|html| (open, engine, html))
-            }
+        let wanted = match &self.state {
+            ReaderState::Open(open) => open.html.as_ref().map(|html| (open, html)),
             _ => None,
         };
-        let Some((open, engine, html)) = wanted else {
+        let Some((open, html)) = wanted else {
             self.page = None;
             return;
         };
-        let (message, images, colors) = (open.id, open.images.clone(), open.colors);
-        let resolver: Resolver = {
-            let images = images.clone();
-            Arc::new(move |url| images.bytes(url))
-        };
-        if let Some(page) = &mut self.page
+        let (message, colors) = (open.id, open.colors);
+        let images = open.images.clone();
+        let resolver: Resolver = Arc::new(move |url| images.bytes(url));
+        if let Some(page) = &self.page
             && page.message == message
-            && page.engine == engine
         {
-            if !Arc::ptr_eq(&page.images, &images) {
-                page.images = images;
-                page.view
-                    .update(cx, |view, cx| view.set_images(resolver, cx));
-            }
+            page.view
+                .update(cx, |view, cx| view.set_images(resolver, cx));
             return;
         }
         let source = Source {
             html: html.clone(),
             images: resolver,
         };
-        let view = cx.new(|cx| PageView::new(engine, source, colors, window, cx));
-        self.page = Some(ShownPage {
-            message,
-            engine,
-            images,
-            view,
-        });
+        let view = cx.new(|cx| PageView::new(Engine::Blitz, source, colors, window, cx));
+        self.page = Some(ShownPage { message, view });
     }
 
     /// Asks where to save the attachment, then writes it there (downloading it first if
@@ -443,12 +372,12 @@ impl Reader {
     }
 
     /// Writes the message as a standalone page and hands it to the system browser, for
-    /// HTML the text view can't lay out. Inline images go in as loaded for the pane.
+    /// HTML the pane can't lay out. Inline images go in as loaded for the pane.
     pub(crate) fn open_in_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let ReaderState::Open(open) = &self.state else {
             return;
         };
-        let Some(body) = open.browser_html.clone() else {
+        let Some(body) = open.html.clone() else {
             return;
         };
         let title = open.subject.clone();
@@ -462,8 +391,8 @@ impl Reader {
                         .inline()
                         .map(|(content_id, image)| {
                             let image = InlineImage {
-                                mime_type: image.format().mime_type().to_owned(),
-                                bytes: image.bytes().to_vec(),
+                                mime_type: image.mime_type.clone(),
+                                bytes: image.bytes.to_vec(),
                             };
                             (content_id.clone(), image)
                         })

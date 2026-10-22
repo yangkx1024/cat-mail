@@ -18,13 +18,12 @@ mod filename;
 mod gc;
 mod image_cache;
 mod images;
-/// What renderers of [`MessageBody::html`] need to resolve and block its images, and to
-/// lay it out without a browser.
+/// What renderers of [`MessageBody::html`] need to resolve and block its images.
 pub mod html {
     pub use catmail_proto::http::RemoteImage;
     pub use catmail_proto::mime::{
         ColorUsage, InlineImage, color_usage, content_id_from_url, embed_inline_images,
-        image_sources, remote_image_url, remote_image_urls, unwrap_layout_tables,
+        image_sources, remote_image_url, remote_image_urls,
     };
 }
 mod ops;

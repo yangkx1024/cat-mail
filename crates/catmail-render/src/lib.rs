@@ -1,13 +1,11 @@
-//! An HTML engine for the reader: a message body laid out and painted into pixels, off
-//! the UI thread.
+//! An HTML engine for the reader: a message body laid out as a browser would and painted
+//! into pixels, off the UI thread.
 //!
-//! GPUI Kit's own text view lays out a subset of HTML; the engine here lays out the whole
-//! page as a browser would. Each open [`Document`] lives on a thread of its own and
-//! answers requests for its height at a width, a strip of its pixels, what is under a
-//! point, or the text between two places ([`Selection`]). Nothing here depends on the UI
-//! toolkit. Blitz is the one engine; litehtml was
-//! compared and dropped (see `docs/architecture/gui.md`), and another would plug in as a
-//! `worker::Page` and an opener.
+//! Each open [`Document`] lives on a thread of its own and answers requests for its
+//! height at a width, a strip of its pixels, what is under a point, or the text between
+//! two places ([`Selection`]). Nothing here depends on the UI toolkit. Blitz is the one
+//! engine; litehtml was compared and dropped (see `docs/architecture/gui.md`), and another
+//! would plug in as a `worker::Page` and an opener.
 //!
 //! An engine loads nothing by itself: every image the page refers to is asked of the
 //! [`Source`]'s resolver, which decides what the reader shows. There is no network
