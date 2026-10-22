@@ -28,7 +28,9 @@ pub use ids::{
     AccountId, AttachmentId, BlobHash, DraftAttachmentId, DraftId, FolderId, MessageId, OutboxId,
     PendingOpId,
 };
-pub use message::{Address, Attachment, FlagState, Flags, Message, MessageBody, MessageSummary};
+pub use message::{
+    Address, Attachment, FlagState, Flags, Message, MessageBody, MessageCursor, MessageSummary,
+};
 pub use ops::{OpKind, OpStatus, PendingOp, ReplayReport};
 pub use outbox::{OutboxEntry, OutboxStatus};
 pub use search::SearchQuery;

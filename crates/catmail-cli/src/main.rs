@@ -14,9 +14,9 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use catmail_core::{
     Account, AccountId, AttachmentId, AuthKind, Config, DEFAULT_GC_INTERVAL, DraftId, ExposeSecret,
-    Flags, Folder, FolderId, MailClient, Message, MessageId, MessageSummary, NewAccount,
-    SearchQuery, SecretString, Security, ServerConfig, SyncReport, SyncSchedule, display,
-    safe_filename,
+    Flags, Folder, FolderId, MailClient, Message, MessageCursor, MessageId, MessageSummary,
+    NewAccount, SearchQuery, SecretString, Security, ServerConfig, SyncReport, SyncSchedule,
+    display, safe_filename,
 };
 use clap::{Args, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
@@ -140,9 +140,9 @@ struct Search {
     /// Maximum number of messages
     #[arg(short = 'n', long, default_value_t = 50)]
     limit: u32,
-    /// Skip this many of the newest matches
-    #[arg(long, default_value_t = 0)]
-    offset: u32,
+    /// Only the matches after this message id, the last one of the previous page
+    #[arg(long)]
+    after: Option<i64>,
 }
 
 #[derive(Args)]
@@ -155,9 +155,9 @@ struct Ls {
     /// Maximum number of messages
     #[arg(short = 'n', long, default_value_t = 50)]
     limit: u32,
-    /// Skip this many of the newest messages
-    #[arg(long, default_value_t = 0)]
-    offset: u32,
+    /// Only the messages after this message id, the last one of the previous page
+    #[arg(long)]
+    after: Option<i64>,
 }
 
 #[derive(Subcommand)]
@@ -422,9 +422,8 @@ async fn ls(client: &MailClient, args: Ls, json: bool) -> Result<()> {
         .find_folder(account.id, &name)
         .await?
         .with_context(|| format!("no folder `{name}` in {}", account.email))?;
-    let messages = client
-        .list_messages(folder.id, args.limit, args.offset)
-        .await?;
+    let after = cursor_after(client, args.after).await?;
+    let messages = client.list_messages(folder.id, args.limit, after).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&messages)?);
     } else if messages.is_empty() {
@@ -552,10 +551,22 @@ async fn save_attachment(client: &MailClient, args: SaveAttachment) -> Result<()
     Ok(())
 }
 
+/// Where the page after message `id` starts.
+async fn cursor_after(client: &MailClient, id: Option<i64>) -> Result<Option<MessageCursor>> {
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    let message = client
+        .get_message(MessageId(id))
+        .await?
+        .with_context(|| format!("no message {id}"))?;
+    Ok(Some(message.summary.cursor()))
+}
+
 async fn search(client: &MailClient, args: Search, json: bool) -> Result<()> {
     let mut query = SearchQuery::new(args.query.join(" "));
     query.limit = args.limit;
-    query.offset = args.offset;
+    query.after = cursor_after(client, args.after).await?;
     if let Some(name) = &args.folder {
         let account = one_account(client, args.account.as_deref()).await?;
         let folder = client

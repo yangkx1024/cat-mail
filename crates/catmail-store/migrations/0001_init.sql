@@ -95,12 +95,19 @@ CREATE TABLE messages (
     has_attachments INTEGER NOT NULL DEFAULT 0,
     body_state      TEXT    NOT NULL DEFAULT 'headers', -- headers | full (see message_bodies)
     thread_id       INTEGER,
+    -- The list sort key: `date`, with a missing one sorted last. Lists are ordered by
+    -- (list_date, id) and paged by a cursor on it (see catmail_store::messages); never
+    -- NULL, so the cursor compares as a row value and seeks in messages_folder_date.
+    list_date       INTEGER NOT NULL
+                    GENERATED ALWAYS AS (ifnull(date, -9223372036854775808)) VIRTUAL,
     UNIQUE (folder_id, uid),
     UNIQUE (id, account_id),
     FOREIGN KEY (folder_id, account_id) REFERENCES folders(id, account_id) ON DELETE CASCADE
 ) STRICT;
 
-CREATE INDEX messages_folder_date ON messages (folder_id, date DESC, uid DESC);
+-- Read backwards for (list_date DESC, id DESC): every index ends with the rowid (`id`),
+-- so listing it again would only store it twice.
+CREATE INDEX messages_folder_date ON messages (folder_id, list_date);
 CREATE INDEX messages_account_date ON messages (account_id, date DESC);
 CREATE INDEX messages_thread ON messages (thread_id);
 CREATE INDEX messages_message_id_hdr ON messages (account_id, message_id_hdr);

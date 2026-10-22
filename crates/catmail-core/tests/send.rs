@@ -555,7 +555,7 @@ async fn append_refused_before_the_message_does_not_stall_the_connection() {
         .await
         .unwrap()
         .unwrap();
-    let hello = env.client.list_messages(inbox.id, 1, 0).await.unwrap()[0].id;
+    let hello = env.client.list_messages(inbox.id, 1, None).await.unwrap()[0].id;
     env.client.download_message(hello).await.unwrap();
     env.queue("hi").await;
 
@@ -629,13 +629,7 @@ async fn replies_are_threaded_and_quoted() {
     state.inbox().append(raw, &[]);
     let env = env(state).await;
     env.client.sync_account(env.account).await.unwrap();
-    let inbox = env
-        .client
-        .find_folder(env.account, "INBOX")
-        .await
-        .unwrap()
-        .unwrap();
-    let original = env.client.list_messages(inbox.id, 1, 0).await.unwrap()[0].id;
+    let original = env.id_of("INBOX", "季度报告").await;
 
     let draft = env.client.reply(original, true).await.unwrap();
     assert_eq!(draft.content.subject, "Re: 季度报告");

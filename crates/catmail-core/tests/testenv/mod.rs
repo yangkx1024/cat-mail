@@ -114,7 +114,7 @@ pub async fn sent_copies(
     client.sync_account(account).await.unwrap();
     let sent = client.find_folder(account, "Sent").await.unwrap().unwrap();
     client
-        .list_messages(sent.id, u32::MAX, 0)
+        .list_messages(sent.id, u32::MAX, None)
         .await
         .unwrap()
         .into_iter()

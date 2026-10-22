@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use catmail_types::{
-    AccountId, Address, BlobHash, FlagState, Flags, FolderId, Message, MessageBody, MessageId,
-    MessageSummary, SearchQuery,
+    AccountId, Address, BlobHash, FlagState, Flags, FolderId, Message, MessageBody, MessageCursor,
+    MessageId, MessageSummary, SearchQuery,
 };
 use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
@@ -13,6 +14,44 @@ use crate::fts;
 use crate::ops::MOVING;
 
 const SUMMARY_COLUMNS: &str = "id, account_id, folder_id, thread_id, subject, from_json, date, snippet, flags, has_attachments";
+
+/// The order of lists and search results, as [`MessageCursor`] describes it.
+/// `list_date` is `date` with a missing one sorted last.
+const NEWEST_FIRST: &str = "list_date DESC, id DESC";
+
+/// The rows after the cursor bound by [`cursor_params`], in [`NEWEST_FIRST`] order. Only
+/// for search, which sorts all its matches anyway: in an index, SQLite seeks on
+/// `list_date` alone and steps over every newer id of the cursor's date.
+const AFTER: &str = "(list_date, id) < (:after_date, :after_id)";
+
+/// A page of a folder ([`Messages::list`]) is two index seeks: the rest of the cursor's
+/// date, then the older dates. With [`AFTER`], each page of a large group of equal dates
+/// (or of messages without one) would step over the whole group above it.
+static LIST_SAME_DATE: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "SELECT {SUMMARY_COLUMNS} FROM messages
+         WHERE folder_id = :folder AND list_date = :after_date AND id < :after_id
+         ORDER BY id DESC LIMIT :limit"
+    )
+});
+
+/// See [`LIST_SAME_DATE`].
+static LIST_OLDER: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "SELECT {SUMMARY_COLUMNS} FROM messages
+         WHERE folder_id = :folder AND list_date < :after_date
+         ORDER BY {NEWEST_FIRST} LIMIT :limit"
+    )
+});
+
+/// `:after_date` and `:after_id`; without a cursor, before every row.
+fn cursor_params(cursor: Option<MessageCursor>) -> (i64, i64) {
+    match cursor {
+        // What `list_date` holds for a missing date.
+        Some(c) => (c.date.unwrap_or(i64::MIN), c.id.0),
+        None => (i64::MAX, i64::MAX),
+    }
+}
 
 /// A message as first seen during sync: header summary plus its current flags.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -227,18 +266,44 @@ impl<'c> Messages<'c> {
         Ok(deleted)
     }
 
-    /// Newest first; ties (equal or missing dates) by UID, i.e. arrival order.
-    pub fn list(&self, folder: FolderId, limit: u32, offset: u32) -> Result<Vec<MessageSummary>> {
-        let sql = format!(
-            "SELECT {SUMMARY_COLUMNS} FROM messages WHERE folder_id = ?1
-             ORDER BY date DESC, uid DESC LIMIT ?2 OFFSET ?3"
-        );
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![folder.0, limit, offset], summary_from_row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    /// Newest first (see [`MessageCursor`]): the first `limit`, or the `limit` after
+    /// `after`.
+    pub fn list(
+        &self,
+        folder: FolderId,
+        limit: u32,
+        after: Option<MessageCursor>,
+    ) -> Result<Vec<MessageSummary>> {
+        let (after_date, after_id) = cursor_params(after);
+        let mut same_date = self.conn.prepare_cached(&LIST_SAME_DATE)?;
+        let mut page = same_date
+            .query_map(
+                named_params! {
+                    ":folder": folder.0,
+                    ":after_date": after_date,
+                    ":after_id": after_id,
+                    ":limit": limit,
+                },
+                summary_from_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let left = limit - page.len() as u32;
+        if left > 0 {
+            let mut older = self.conn.prepare_cached(&LIST_OLDER)?;
+            let rows = older.query_map(
+                named_params! {
+                    ":folder": folder.0,
+                    ":after_date": after_date,
+                    ":limit": left,
+                },
+                summary_from_row,
+            )?;
+            page.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
+        }
+        Ok(page)
     }
 
-    /// Messages matching the query, newest first. Bodies are only searched once
+    /// Messages matching the query, newest first (see [`MessageCursor`]). Bodies are only searched once
     /// downloaded; subjects and addresses always.
     pub fn search(&self, query: &SearchQuery) -> Result<Vec<MessageSummary>> {
         let Some(expr) = fts::match_expression(&query.text) else {
@@ -248,17 +313,19 @@ impl<'c> Messages<'c> {
             "SELECT {SUMMARY_COLUMNS} FROM messages
              WHERE id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH :expr)
                AND (:account IS NULL OR account_id = :account)
-               AND (:folder IS NULL OR folder_id = :folder)
-             ORDER BY date DESC, id DESC LIMIT :limit OFFSET :offset"
+               AND (:folder IS NULL OR folder_id = :folder) AND {AFTER}
+             ORDER BY {NEWEST_FIRST} LIMIT :limit"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
+        let (after_date, after_id) = cursor_params(query.after);
         let rows = stmt.query_map(
             named_params! {
                 ":expr": expr,
                 ":account": query.account.map(|a| a.0),
                 ":folder": query.folder.map(|f| f.0),
+                ":after_date": after_date,
+                ":after_id": after_id,
                 ":limit": query.limit,
-                ":offset": query.offset,
             },
             summary_from_row,
         )?;
@@ -524,7 +591,7 @@ mod tests {
         );
 
         let list = store
-            .read(|db| db.messages().list(folder.id, 10, 0))
+            .read(|db| db.messages().list(folder.id, 10, None))
             .unwrap();
         // UID 2 has no Date header and sorts by its INTERNALDATE (1002).
         let order: Vec<_> = list
@@ -546,15 +613,126 @@ mod tests {
         );
         assert_eq!(list[0].from[0].email, "alice@example.com");
         assert_eq!(
-            store
-                .read(|db| db.messages().list(folder.id, 1, 1))
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(
             store.read(|db| db.messages().uids(folder.id)).unwrap(),
             [1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn pages_follow_the_last_row_across_equal_and_missing_dates() {
+        let (store, account, folder) = setup();
+        // Stored as ids 1 to 6.
+        let dates = [
+            Some(2_000),
+            None,
+            Some(3_000),
+            Some(2_000),
+            None,
+            Some(1_000),
+        ];
+        let batch: Vec<_> = (1..)
+            .zip(dates)
+            .map(|(uid, date)| NewMessage {
+                internal_date: None,
+                ..message(uid, date, Flags::empty())
+            })
+            .collect();
+        store
+            .write(|db| db.messages().upsert(account, folder.id, &batch))
+            .unwrap();
+        let ids = |rows: Vec<MessageSummary>| rows.iter().map(|m| m.id.0).collect::<Vec<_>>();
+        let list = |limit, after| {
+            store
+                .read(|db| db.messages().list(folder.id, limit, after))
+                .unwrap()
+        };
+        let search = |limit, after| {
+            let mut query = SearchQuery::new("subject");
+            query.limit = limit;
+            query.after = after;
+            ids(store.read(|db| db.messages().search(&query)).unwrap())
+        };
+
+        // Newest first, equal dates by id, no date last.
+        let all = list(10, None);
+        let order = [3, 4, 1, 6, 5, 2];
+        assert_eq!(ids(all.clone()), order);
+        assert_eq!(search(10, None), order);
+        for (ix, m) in all.iter().enumerate() {
+            let page = ids(list(2, Some(m.cursor())));
+            assert_eq!(
+                page,
+                order[ix + 1..].iter().take(2).copied().collect::<Vec<_>>(),
+                "after {}",
+                m.id.0
+            );
+            assert_eq!(search(2, Some(m.cursor())), page, "after {}", m.id.0);
+        }
+
+        // A newer message comes in and one already shown goes away: the next page still
+        // starts right after the last row shown.
+        store
+            .write(|db| {
+                db.messages().upsert(
+                    account,
+                    folder.id,
+                    &[message(7, Some(5_000), Flags::empty())],
+                )?;
+                db.messages().delete_uids(folder.id, &[3])
+            })
+            .unwrap();
+        assert_eq!(ids(list(2, Some(all[1].cursor()))), [1, 6]);
+        assert_eq!(ids(list(10, None)), [7, 4, 1, 6, 5, 2]);
+    }
+
+    /// Paging through a large group of equal dates, each page seeks to its cursor: the
+    /// last page is no more work than the first.
+    #[test]
+    fn a_page_seeks_to_its_cursor() {
+        let (store, account, folder) = setup();
+        let batch: Vec<_> = (1..=2_000)
+            .map(|uid| message(uid, Some(1_000), Flags::empty()))
+            .chain([message(2_001, Some(500), Flags::empty())])
+            .collect();
+        store
+            .write(|db| db.messages().upsert(account, folder.id, &batch))
+            .unwrap();
+        // The first row stored, the oldest of the group: one row of it is left after
+        // the second, then the older row.
+        let second = MessageCursor {
+            date: Some(1_000),
+            id: MessageId(2),
+        };
+        let page = store
+            .read(|db| db.messages().list(folder.id, 2, Some(second)))
+            .unwrap();
+        let ids: Vec<_> = page.iter().map(|m| m.id.0).collect();
+        assert_eq!(ids, [1, 2_001]);
+
+        // VM steps `list` takes, at the start and at the end of the group: its cached
+        // statements keep counting across runs until reset.
+        let work = |after| {
+            store
+                .read(|db| {
+                    let steps = |sql: &str| -> Result<i32> {
+                        let stmt = db.conn.prepare_cached(sql)?;
+                        Ok(stmt.reset_status(rusqlite::StatementStatus::VmStep))
+                    };
+                    steps(&LIST_SAME_DATE)?;
+                    steps(&LIST_OLDER)?;
+                    db.messages().list(folder.id, 2, Some(after))?;
+                    Ok(steps(&LIST_SAME_DATE)? + steps(&LIST_OLDER)?)
+                })
+                .unwrap()
+        };
+        let first = MessageCursor {
+            date: Some(1_000),
+            id: MessageId(2_000),
+        };
+        let (start, end) = (work(first), work(second));
+        assert!(
+            end <= start * 2,
+            "{end} steps at the end, {start} at the start"
         );
     }
 
@@ -674,7 +852,7 @@ mod tests {
             })
             .unwrap();
         let id = store
-            .read(|db| db.messages().list(folder.id, 1, 0))
+            .read(|db| db.messages().list(folder.id, 1, None))
             .unwrap()[0]
             .id;
         assert_eq!(

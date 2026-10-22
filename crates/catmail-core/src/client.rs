@@ -9,8 +9,8 @@ use catmail_store::{BlobStore, Store};
 use catmail_types::{
     Account, AccountId, AccountOverview, AccountStatus, AttachmentId, Draft, DraftAttachment,
     DraftAttachmentId, DraftContent, DraftId, Event, Flags, Folder, FolderId, FolderSyncReport,
-    GcReport, Message, MessageId, MessageSummary, NewAccount, OutboxEntry, OutboxId, PendingOp,
-    PendingOpId, ReplayReport, SearchQuery, SyncReport,
+    GcReport, Message, MessageCursor, MessageId, MessageSummary, NewAccount, OutboxEntry, OutboxId,
+    PendingOp, PendingOpId, ReplayReport, SearchQuery, SyncReport,
 };
 use secrecy::{ExposeSecret, SecretString};
 use tokio::runtime::Handle;
@@ -415,18 +415,19 @@ impl MailClient {
             .await
     }
 
-    /// Messages in the folder, newest first.
+    /// Messages in the folder, newest first: the first `limit`, or the `limit` after
+    /// `after` (the cursor of the last one shown, for the next page).
     pub async fn list_messages(
         &self,
         folder: FolderId,
         limit: u32,
-        offset: u32,
+        after: Option<MessageCursor>,
     ) -> Result<Vec<MessageSummary>> {
         let engine = self.engine.clone();
         self.rt
             .run(async move {
                 engine
-                    .read(move |db| db.messages().list(folder, limit, offset))
+                    .read(move |db| db.messages().list(folder, limit, after))
                     .await
             })
             .await

@@ -114,7 +114,8 @@ async fn reads_folders_and_messages() {
     assert_eq!(first.state.keywords, ["$Forwarded"]);
     assert_eq!(first.headers.subject.as_deref(), Some("你好"));
     assert_eq!(first.headers.from[0].name.as_deref(), Some("张三"));
-    assert_eq!(first.internal_date, Some(1_792_200_600));
+    // 17-Oct-2026 09:30:01 +0800
+    assert_eq!(first.internal_date, Some(1_792_200_601));
     assert!(first.state.modseq.is_some());
     assert!(!first.has_attachments);
     assert!(messages[1].has_attachments);
