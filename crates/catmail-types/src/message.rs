@@ -110,7 +110,6 @@ pub struct MessageSummary {
     pub id: MessageId,
     pub account_id: AccountId,
     pub folder_id: FolderId,
-    pub thread_id: Option<i64>,
     pub subject: Option<String>,
     pub from: Vec<Address>,
     /// Unix timestamp, seconds.

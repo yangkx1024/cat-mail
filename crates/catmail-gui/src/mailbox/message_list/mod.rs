@@ -547,7 +547,6 @@ mod tests {
             id: MessageId(id),
             account_id: AccountId(1),
             folder_id: FolderId(1),
-            thread_id: None,
             subject: None,
             from: Vec::new(),
             date,
