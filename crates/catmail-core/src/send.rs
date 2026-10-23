@@ -25,9 +25,10 @@ use catmail_types::{
     AccountId, Address, BlobHash, DraftId, ErrorKind, Event, Flags, FlushReport, FolderRole,
     IdentityId, OutboxEntry, OutboxId, OutboxStatus, ReportedError,
 };
+use futures_util::future::join_all;
 use tokio::sync::Notify;
 
-use crate::connection::{self, with_session};
+use crate::connection::{self, SmtpLogin, with_session};
 use crate::engine::{Activity, Closing, Engine, Permit, blocking, now};
 use crate::{Error, Result, body, drafts, ops, sync};
 
@@ -50,7 +51,7 @@ pub(crate) async fn queue_draft(engine: &Arc<Engine>, id: DraftId) -> Result<Out
         )));
     }
     // The sender's address goes into MAIL FROM and the Message-ID.
-    drafts::check_address(&sender.from.email)?;
+    drafts::check_address(&sender.email)?;
     let content = &snapshot.draft.content;
     drafts::validate(content)?;
     let recipients = envelope_recipients(content.recipients());
@@ -58,14 +59,14 @@ pub(crate) async fn queue_draft(engine: &Arc<Engine>, id: DraftId) -> Result<Out
         return Err(Error::InvalidInput("the draft has no recipients".into()));
     }
 
-    let message_id = drafts::new_message_id(&sender.from.email);
+    let message_id = drafts::new_message_id(&sender.email);
     let (revision, subject) = (snapshot.revision, content.subject.clone());
-    let envelope_from = sender.from.email.clone();
+    let envelope_from = sender.email.clone();
     let engine2 = engine.clone();
     let message_id2 = message_id.clone();
     let raw = blocking(move || {
         // Bcc only in the envelope.
-        let raw = drafts::build(&engine2, &sender.from, &snapshot, &message_id2, false)?;
+        let raw = drafts::build(&engine2, &sender, &snapshot, &message_id2, false)?;
         Ok(engine2.blobs.put_bytes(&raw)?)
     })
     .await?;
@@ -133,58 +134,23 @@ async fn pass(
         let due = due_only.then(now);
         engine.read(move |db| db.outbox().pending(account, status, due))
     };
-    // One connection per identity's server.
-    let mut connections: HashMap<IdentityId, Smtp> = HashMap::new();
-    for (id, identity) in pending(OutboxStatus::Queued).await? {
-        let smtp = connections.entry(identity).or_insert(Smtp::None);
-        if let Smtp::None = smtp {
-            // Before the entry counts an attempt: failing to connect or log in is the
-            // sender's trouble, not this message's.
-            let connected = connection::connect_smtp(engine, account, identity).await;
-            let failures = engine.report(account, Activity::Send(identity), &connected);
-            *smtp = match connected {
-                Ok(session) => Smtp::Up(session),
-                Err(e @ (Error::Cancelled | Error::AccountNotFound(_))) => return Err(e),
-                Err(e) => {
-                    tracing::info!(%account, error = %e, "can't reach the SMTP server");
-                    let error = ReportedError::from(&e);
-                    let down = Smtp::Down {
-                        error: error.message.clone(),
-                        next: now() + backoff(failures),
-                    };
-                    report.errors.insert(identity, error);
-                    down
-                }
-            };
-        }
-        let session = match smtp {
-            Smtp::Up(session) => session,
-            // Everything it sends waits as long as the sender's backoff says.
-            Smtp::Down { error, next } => {
-                let (error, next) = (error.clone(), *next);
-                let postponed = record(engine, id, move |o| o.postpone(id, next, &error, now()));
-                report.entries.extend(postponed.await?);
-                continue;
-            }
-            Smtp::None => unreachable!("connected above"),
-        };
-        let Some(job) = engine
-            .write(move |db| db.outbox().begin_send(id, now()))
-            .await?
-        else {
-            continue; // Cancelled meanwhile.
-        };
-        let (entry, usable) = send_one(engine, session, job).await?;
-        report.entries.extend(entry);
-        if !usable {
-            *smtp = Smtp::None;
-        }
+    // Each login's messages on their own, all at once: a server that doesn't answer
+    // holds up only what goes through it.
+    let routes = routes(engine, account, pending(OutboxStatus::Queued).await?).await?;
+    let sent = join_all(routes.into_iter().map(|route| async move {
+        let mut report = FlushReport::default();
+        let outcome = send_route(engine, account, route, &mut report).await;
+        (report, outcome)
+    }))
+    .await;
+    let mut outcome = Ok(());
+    for (part, result) in sent {
+        report.entries.extend(part.entries);
+        report.errors.extend(part.errors);
+        outcome = outcome.and(result);
     }
-    for smtp in connections.into_values() {
-        if let Smtp::Up(session) = smtp {
-            session.quit().await;
-        }
-    }
+    report.entries.sort_by_key(|e| e.id);
+    outcome?;
 
     // Saves that failed in an earlier pass; this pass's were tried already.
     for (id, _) in pending(OutboxStatus::Accepted).await? {
@@ -200,6 +166,129 @@ async fn pass(
         report.entries.extend(save_one(engine, job, None).await?);
     }
     Ok(())
+}
+
+/// Queued entries that go out over one SMTP login, oldest first.
+struct Route {
+    /// Why there is none, for the identity that has no login.
+    login: std::result::Result<SmtpLogin, (IdentityId, Error)>,
+    entries: Vec<OutboxId>,
+}
+
+/// The queued entries, by the login they go out over.
+async fn routes(
+    engine: &Arc<Engine>,
+    account: AccountId,
+    queued: Vec<(OutboxId, IdentityId)>,
+) -> Result<Vec<Route>> {
+    let mut identities: Vec<_> = queued.iter().map(|&(_, identity)| identity).collect();
+    identities.sort_unstable();
+    identities.dedup();
+    let logins = connection::smtp_logins(engine, account, identities).await?;
+    let mut route_of = HashMap::new();
+    for (route, login) in logins.iter().enumerate() {
+        match login {
+            Ok(login) => route_of.extend(login.identities().map(|i| (i, route))),
+            Err((identity, _)) => route_of.extend([(*identity, route)]),
+        }
+    }
+    let mut routes: Vec<_> = logins
+        .into_iter()
+        .map(|login| Route {
+            login,
+            entries: Vec::new(),
+        })
+        .collect();
+    for (id, identity) in queued {
+        routes[route_of[&identity]].entries.push(id);
+    }
+    Ok(routes)
+}
+
+/// Sends a route's entries over one connection, reused from message to message.
+async fn send_route(
+    engine: &Arc<Engine>,
+    account: AccountId,
+    route: Route,
+    report: &mut FlushReport,
+) -> Result<()> {
+    let mut login = match route.login {
+        Ok(login) => login,
+        Err((identity, e)) => {
+            if let Smtp::Down(down) = connected(engine, account, &[identity], Err(e), report)? {
+                for id in route.entries {
+                    down.postpone(engine, id, report).await?;
+                }
+            }
+            return Ok(());
+        }
+    };
+    let identities: Vec<_> = login.identities().collect();
+    let mut smtp = Smtp::None;
+    for id in route.entries {
+        if let Smtp::None = smtp {
+            // Before the entry counts an attempt: failing to connect or log in is the
+            // sender's trouble, not this message's.
+            let session = login.connect(engine).await;
+            smtp = connected(engine, account, &identities, session, report)?;
+        }
+        let session = match &mut smtp {
+            Smtp::Up(session) => session,
+            Smtp::Down(down) => {
+                down.postpone(engine, id, report).await?;
+                continue;
+            }
+            Smtp::None => unreachable!("connected above"),
+        };
+        let Some(job) = engine
+            .write(move |db| db.outbox().begin_send(id, now()))
+            .await?
+        else {
+            continue; // Cancelled meanwhile.
+        };
+        let (entry, usable) = send_one(engine, session, job).await?;
+        report.entries.extend(entry);
+        if !usable {
+            smtp = Smtp::None;
+        }
+    }
+    if let Smtp::Up(session) = smtp {
+        session.quit().await;
+    }
+    Ok(())
+}
+
+/// Records for each of `identities` how connecting for them ended, and returns the
+/// connection they now have.
+fn connected(
+    engine: &Arc<Engine>,
+    account: AccountId,
+    identities: &[IdentityId],
+    connected: Result<smtp::Session>,
+    report: &mut FlushReport,
+) -> Result<Smtp> {
+    // A login shared since its last failure has failed as often as the most failed of
+    // its identities.
+    let failures = identities
+        .iter()
+        .map(|&identity| engine.report(account, Activity::Send(identity), &connected))
+        .max()
+        .unwrap_or_default();
+    match connected {
+        Ok(session) => Ok(Smtp::Up(session)),
+        Err(e @ (Error::Cancelled | Error::AccountNotFound(_))) => Err(e),
+        Err(e) => {
+            tracing::info!(%account, ?identities, error = %e, "can't reach the SMTP server");
+            let error = ReportedError::from(&e);
+            for &identity in identities {
+                report.errors.insert(identity, error.clone());
+            }
+            Ok(Smtp::Down(Down {
+                error: error.message,
+                next: now() + backoff(failures),
+            }))
+        }
+    }
 }
 
 /// The account's send permit, with nothing in the middle of being sent. An entry that
@@ -218,17 +307,34 @@ async fn idle_outbox(engine: &Arc<Engine>, account: AccountId) -> Result<Permit>
     Ok(permit)
 }
 
-/// The SMTP connection of one pass over the outbox, reused from message to message.
+/// The SMTP connection of a route in one pass over the outbox.
 enum Smtp {
     /// Not connected (yet, or again after a failure made the connection unusable).
     None,
     Up(smtp::Session),
-    /// Connecting failed, which ends the sending part of the pass: why, and when to try
-    /// again.
-    Down {
-        error: String,
-        next: i64,
-    },
+    /// Connecting failed, which ends the route's part of the pass.
+    Down(Down),
+}
+
+/// Why connecting failed, and when to try again.
+struct Down {
+    error: String,
+    next: i64,
+}
+
+impl Down {
+    /// Everything the route sends waits as long as the sender's backoff says.
+    async fn postpone(
+        &self,
+        engine: &Arc<Engine>,
+        id: OutboxId,
+        report: &mut FlushReport,
+    ) -> Result<()> {
+        let (error, next) = (self.error.clone(), self.next);
+        let postponed = record(engine, id, move |o| o.postpone(id, next, &error, now()));
+        report.entries.extend(postponed.await?);
+        Ok(())
+    }
 }
 
 /// How an attempt at sending ended.

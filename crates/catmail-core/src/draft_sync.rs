@@ -152,12 +152,11 @@ async fn upload_one(
         return Ok(Outcome::Skipped);
     };
     // As it will be sent.
-    let message_id = drafts::new_message_id(&sender.from.email);
+    let message_id = drafts::new_message_id(&sender.email);
     let (engine2, message_id2) = (engine.clone(), message_id.clone());
     let revision = snapshot.revision;
     let built =
-        blocking(move || drafts::build(&engine2, &sender.from, &snapshot, &message_id2, true))
-            .await;
+        blocking(move || drafts::build(&engine2, &sender, &snapshot, &message_id2, true)).await;
     let raw = match built {
         Ok(raw) => raw,
         // A local problem (an attachment's blob gone, say): the rest can still go.

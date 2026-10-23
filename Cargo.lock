@@ -1123,6 +1123,7 @@ dependencies = [
  "catmail-testkit",
  "catmail-types",
  "directories",
+ "futures-util",
  "hex",
  "jiff",
  "keyring",

@@ -1,13 +1,14 @@
 //! Logged-in IMAP (and SMTP) connections for an account.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use catmail_proto::Credentials;
 use catmail_proto::imap::Session;
+use catmail_proto::{Credentials, smtp};
 use catmail_store::{Db, DraftSnapshot};
 use catmail_types::{Account, AccountId, Address, DraftId, IdentityId, ServerConfig};
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 
 use crate::engine::{Engine, blocking};
 use crate::error::ImapError;
@@ -46,48 +47,39 @@ async fn remember_limit(
     announced: Option<u64>,
     record: impl FnOnce(&Db<'_>, Option<u64>) -> catmail_store::Result<()> + Send + 'static,
 ) {
-    if recorded == announced {
-        return;
+    if recorded != announced {
+        record_limit(engine, move |db| record(db, announced)).await;
     }
-    if let Err(e) = engine.write(move |db| record(db, announced)).await {
+}
+
+/// Writes a size limit with `record`, which only logs failing to: see [`remember_limit`].
+async fn record_limit(
+    engine: &Arc<Engine>,
+    record: impl FnOnce(&Db<'_>) -> catmail_store::Result<()> + Send + 'static,
+) {
+    if let Err(e) = engine.write(record).await {
         tracing::warn!(error = %e, "couldn't record the server's size limit");
     }
 }
 
-/// Who a message is sent as, and the SMTP server that sends it.
-pub(crate) struct Sender {
-    pub from: Address,
-    /// The SIZE the server announced when last connected to.
-    pub smtp_max_size: Option<u64>,
-    smtp: ServerConfig,
-    username: String,
-    login_key: String,
-}
-
-/// The account's identity `identity`, its default with `None`. `None` if the account or
-/// the identity is gone.
+/// The address the account's identity `identity` sends as, its default's with `None`.
+/// `None` if the account or the identity is gone.
 pub(crate) fn sender(
     db: &Db<'_>,
     account: AccountId,
     identity: Option<IdentityId>,
-) -> catmail_store::Result<Option<Sender>> {
+) -> catmail_store::Result<Option<Address>> {
     Ok(db
         .identities()
         .sending(account, identity)?
-        .map(|sending| Sender {
-            from: sending.identity.address(),
-            smtp_max_size: sending.smtp_max_size,
-            smtp: sending.identity.smtp,
-            username: sending.identity.username,
-            login_key: sending.login_key,
-        }))
+        .map(|sending| sending.identity.address()))
 }
 
 /// The draft as it is now, and who it is from; `None` if it is gone.
 pub(crate) fn draft_sender(
     db: &Db<'_>,
     draft: DraftId,
-) -> catmail_store::Result<Option<(DraftSnapshot, Sender)>> {
+) -> catmail_store::Result<Option<(DraftSnapshot, Address)>> {
     let Some(snapshot) = db.drafts().snapshot(draft)? else {
         return Ok(None);
     };
@@ -96,30 +88,100 @@ pub(crate) fn draft_sender(
     Ok(sender.map(|sender| (snapshot, sender)))
 }
 
-/// Opens a new connection to the SMTP server that sends as `identity`, and logs in.
-pub(crate) async fn connect_smtp(
+/// Identities of an account that send over the same SMTP login: the same server,
+/// username and password, as aliases set up at one provider are.
+pub(crate) struct SmtpLogin {
+    /// With the SIZE recorded for each.
+    identities: Vec<(IdentityId, Option<u64>)>,
+    server: ServerConfig,
+    credentials: Credentials,
+}
+
+impl SmtpLogin {
+    pub fn identities(&self) -> impl Iterator<Item = IdentityId> + '_ {
+        self.identities.iter().map(|&(identity, _)| identity)
+    }
+
+    /// Opens a new connection and logs in. The SIZE the server announces is recorded for
+    /// every identity sending over it, as [`remember_limit`] does.
+    pub async fn connect(&mut self, engine: &Arc<Engine>) -> Result<smtp::Session> {
+        let session = smtp_login(engine, &self.server, &self.credentials).await?;
+        let announced = session.max_size();
+        let changed: Vec<_> = self
+            .identities
+            .iter_mut()
+            .filter(|(_, recorded)| *recorded != announced)
+            .map(|(identity, recorded)| {
+                *recorded = announced;
+                *identity
+            })
+            .collect();
+        if !changed.is_empty() {
+            record_limit(engine, move |db| {
+                changed
+                    .into_iter()
+                    .try_for_each(|identity| db.identities().set_smtp_max_size(identity, announced))
+            })
+            .await;
+        }
+        Ok(session)
+    }
+}
+
+/// The logins that send as the account's `identities`, each identity in exactly one, in
+/// the order of the first identity of each. One that is gone, or whose password can't be
+/// read, comes back with why.
+///
+/// Identities with the same server and username but different passwords stay apart: one
+/// of the passwords is out of date, and logging in with it mustn't hold back the other.
+pub(crate) async fn smtp_logins(
     engine: &Arc<Engine>,
     account: AccountId,
-    identity: IdentityId,
-) -> Result<catmail_proto::smtp::Session> {
-    let sender = engine
-        .read(move |db| sender(db, account, Some(identity)))
-        .await?
-        .ok_or(Error::IdentityNotFound(identity))?;
-    let password = password(engine, sender.login_key, &sender.from.email).await?;
-    let credentials = Credentials {
-        username: sender.username,
-        password,
-    };
-    let session = smtp_login(engine, &sender.smtp, &credentials).await?;
-    remember_limit(
-        engine,
-        sender.smtp_max_size,
-        session.max_size(),
-        move |db, limit| db.identities().set_smtp_max_size(identity, limit),
-    )
-    .await;
-    Ok(session)
+    identities: Vec<IdentityId>,
+) -> Result<Vec<std::result::Result<SmtpLogin, (IdentityId, Error)>>> {
+    let found = engine
+        .read(move |db| {
+            identities
+                .into_iter()
+                .map(|identity| Ok((identity, db.identities().sending(account, Some(identity))?)))
+                .collect::<catmail_store::Result<Vec<_>>>()
+        })
+        .await?;
+    let mut logins: Vec<std::result::Result<SmtpLogin, _>> = Vec::new();
+    // Each keyring entry read once: the account's serves every identity without its own.
+    let mut passwords: HashMap<String, SecretString> = HashMap::new();
+    for (identity, sending) in found {
+        let Some(sending) = sending else {
+            logins.push(Err((identity, Error::IdentityNotFound(identity))));
+            continue;
+        };
+        let key = sending.login_key;
+        let password = match passwords.get(&key) {
+            Some(password) => password.clone(),
+            None => match password(engine, key.clone(), &sending.identity.email).await {
+                Ok(password) => passwords.entry(key).or_insert(password).clone(),
+                Err(e) => {
+                    logins.push(Err((identity, e)));
+                    continue;
+                }
+            },
+        };
+        let (server, username) = (sending.identity.smtp, sending.identity.username);
+        let shared = logins.iter_mut().flatten().find(|login| {
+            login.server == server
+                && login.credentials.username == username
+                && login.credentials.password.expose_secret() == password.expose_secret()
+        });
+        match shared {
+            Some(login) => login.identities.push((identity, sending.smtp_max_size)),
+            None => logins.push(Ok(SmtpLogin {
+                identities: vec![(identity, sending.smtp_max_size)],
+                server,
+                credentials: Credentials { username, password },
+            })),
+        }
+    }
+    Ok(logins)
 }
 
 /// Opens a new connection to the SMTP server `server` and logs in.
@@ -127,9 +189,8 @@ pub(crate) async fn smtp_login(
     engine: &Engine,
     server: &ServerConfig,
     credentials: &Credentials,
-) -> Result<catmail_proto::smtp::Session> {
-    let mut session =
-        catmail_proto::smtp::Session::connect(server, &engine.tls()?, IO_TIMEOUT).await?;
+) -> Result<smtp::Session> {
+    let mut session = smtp::Session::connect(server, &engine.tls()?, IO_TIMEOUT).await?;
     session.login(credentials).await?;
     Ok(session)
 }

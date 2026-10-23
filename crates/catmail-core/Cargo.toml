@@ -11,6 +11,7 @@ catmail-types.workspace = true
 catmail-store.workspace = true
 catmail-proto.workspace = true
 directories.workspace = true
+futures-util.workspace = true
 hex.workspace = true
 jiff.workspace = true
 keyring.workspace = true
