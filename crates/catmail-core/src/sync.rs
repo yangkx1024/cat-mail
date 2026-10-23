@@ -24,9 +24,6 @@ use crate::draft_sync::Uploads;
 use crate::engine::{Activity, Engine, now};
 use crate::{Error, Result, connection, ops};
 
-/// New messages per UID FETCH, and per transaction.
-const FETCH_BATCH: usize = 200;
-
 /// Stored messages per flags FETCH, and per transaction, on a server that can't say
 /// which changed: the whole answer is held in memory.
 const FLAGS_WINDOW: usize = 5000;
@@ -325,7 +322,7 @@ async fn sync_folder(
 
     // Newest first, so the top of the list fills in before the backlog.
     let mut complete = true;
-    for batch in new.rchunks(FETCH_BATCH) {
+    for batch in new.rchunks(engine.tuning.fetch_batch) {
         let messages: Vec<NewMessage> = session
             .fetch_summaries(batch)
             .await?

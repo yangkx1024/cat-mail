@@ -17,7 +17,7 @@ use tokio::runtime::Handle;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use crate::engine::{DEFAULT_DRAFT_UPLOAD_DELAY, Engine, blocking, now};
+use crate::engine::{DEFAULT_DRAFT_UPLOAD_DELAY, Engine, EngineTuning, blocking, now};
 use crate::html::RemoteImage;
 use crate::images::RemoteImageStream;
 use crate::runtime::Runtime;
@@ -47,6 +47,17 @@ pub struct MailClientBuilder {
     sync_in_background: Option<SyncSchedule>,
     collect_garbage_every: Option<Duration>,
     draft_upload_delay: Duration,
+    tuning: EngineTuning,
+}
+
+/// What [`MailClientBuilder::open_engine`] opened, for [`MailClient::start`]. Background
+/// sync is the engine's to know: it starts for accounts added later too.
+struct Opened {
+    engine: Engine,
+    /// The accounts to keep in sync in the background.
+    watched: Vec<Account>,
+    send_in_background: bool,
+    collect_garbage_every: Option<Duration>,
 }
 
 impl MailClientBuilder {
@@ -108,21 +119,47 @@ impl MailClientBuilder {
         self
     }
 
+    /// Batch sizes and the whole-message limit [default: `EngineTuning::default()`].
+    /// Batch sizes below 1 count as 1.
+    pub fn tuning(mut self, tuning: EngineTuning) -> Self {
+        self.tuning = tuning.checked();
+        self
+    }
+
     /// Locks the data directory, empties [`Config::handoff_dir`], then opens the database
-    /// (migrating it if needed) and the blob store. Blocks briefly. Fails with
-    /// [`Error::AlreadyRunning`] if another engine, in this or another process, has the
-    /// directory open, and with [`Error::DataDirNotOwned`] if it belongs to another user.
-    /// Sends a previous engine left unfinished before the end of the message go back to
-    /// the queue.
-    pub fn open(self) -> Result<MailClient> {
+    /// (migrating it if needed) and the blob store. Blocks the calling thread meanwhile,
+    /// which a migration can make take a while: a frontend with a UI thread uses
+    /// [`open_async`](Self::open_async). Fails with [`Error::AlreadyRunning`] if another
+    /// engine, in this or another process, has the directory open, and with
+    /// [`Error::DataDirNotOwned`] if it belongs to another user. Sends a previous engine
+    /// left unfinished before the end of the message go back to the queue.
+    pub fn open(mut self) -> Result<MailClient> {
+        let rt = self.take_runtime()?;
+        let opened = self.open_engine()?;
+        Ok(MailClient::start(rt, opened))
+    }
+
+    /// [`open`](Self::open), on the engine runtime's blocking pool. Like the client's
+    /// methods, the future can be polled by any executor.
+    pub async fn open_async(mut self) -> Result<MailClient> {
+        let rt = self.take_runtime()?;
+        let opened = rt.run_blocking(move || self.open_engine()).await?;
+        Ok(MailClient::start(rt, opened))
+    }
+
+    fn take_runtime(&mut self) -> Result<Runtime> {
+        match self.runtime.take() {
+            Some(handle) => Ok(Runtime::shared(handle)),
+            None => Runtime::owned(),
+        }
+    }
+
+    /// Blocking.
+    fn open_engine(self) -> Result<Opened> {
         let data_dir_lock = lock_data_dir(&self.config)?;
         let handoff_dir = self.config.handoff_dir();
         clear_handoff_dir(&handoff_dir);
         catmail_store::create_private_dir(&handoff_dir)?;
-        let rt = match self.runtime {
-            Some(handle) => Runtime::shared(handle),
-            None => Runtime::owned()?,
-        };
         let store = Store::open(&self.config.db_path())?;
         // The lock means no engine is sending; see Outbox::recover_interrupted.
         let interrupted = store.write(|db| db.outbox().recover_interrupted(None, now()))?;
@@ -154,28 +191,13 @@ impl MailClientBuilder {
         );
         engine.sync_in_background = self.sync_in_background;
         engine.draft_upload_delay = self.draft_upload_delay;
-        let client = MailClient {
-            rt: Arc::new(rt),
-            engine: Arc::new(engine),
-        };
-        if self.send_in_background {
-            client.rt.spawn(send::worker(
-                Arc::downgrade(&client.engine),
-                client.engine.outbox_kick.clone(),
-            ));
-        }
-        if let Some(every) = self.collect_garbage_every {
-            client
-                .rt
-                .spawn(gc::run(Arc::downgrade(&client.engine), every));
-        }
-        if let Some(schedule) = self.sync_in_background {
-            for account in watched {
-                let engine = Arc::downgrade(&client.engine);
-                client.rt.spawn(watch::run(engine, account.id, schedule));
-            }
-        }
-        Ok(client)
+        engine.tuning = self.tuning;
+        Ok(Opened {
+            engine,
+            watched,
+            send_in_background: self.send_in_background,
+            collect_garbage_every: self.collect_garbage_every,
+        })
     }
 }
 
@@ -190,7 +212,37 @@ impl MailClient {
             sync_in_background: None,
             collect_garbage_every: None,
             draft_upload_delay: DEFAULT_DRAFT_UPLOAD_DELAY,
+            tuning: EngineTuning::default(),
         }
+    }
+
+    /// Starts the background work asked for on the engine just opened.
+    fn start(rt: Runtime, opened: Opened) -> Self {
+        let client = MailClient {
+            rt: Arc::new(rt),
+            engine: Arc::new(opened.engine),
+        };
+        if opened.send_in_background {
+            client.rt.spawn(send::worker(
+                Arc::downgrade(&client.engine),
+                client.engine.outbox_kick.clone(),
+                client.engine.closing(),
+            ));
+        }
+        if let Some(every) = opened.collect_garbage_every {
+            client.rt.spawn(gc::run(
+                Arc::downgrade(&client.engine),
+                every,
+                client.engine.closing(),
+            ));
+        }
+        if let Some(schedule) = client.engine.sync_in_background {
+            for account in opened.watched {
+                let engine = Arc::downgrade(&client.engine);
+                client.rt.spawn(watch::run(engine, account.id, schedule));
+            }
+        }
+        client
     }
 
     pub fn config(&self) -> &Config {
@@ -1054,6 +1106,78 @@ mod tests {
             client.remove_account(account.id).await,
             Err(Error::AccountNotFound(_))
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn background_tasks_end_with_the_client_on_a_shared_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let metrics = Handle::current().metrics();
+        let before = metrics.num_alive_tasks();
+        let client = MailClient::builder(Config::with_data_dir(dir.path()))
+            .runtime(Handle::current())
+            .secrets(Arc::new(MemorySecrets::default()))
+            .send_in_background(true)
+            .collect_garbage_every(Some(crate::DEFAULT_GC_INTERVAL))
+            .open()
+            .unwrap();
+        assert_eq!(metrics.num_alive_tasks(), before + 2);
+        // Waiting: the outbox is empty, and the first collection is minutes away.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        drop(client);
+        let ended = async {
+            while metrics.num_alive_tasks() > before {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), ended)
+            .await
+            .expect("the outbox worker and GC end once the client is gone");
+    }
+
+    #[test]
+    fn open_async_from_a_foreign_executor() {
+        let dir = tempfile::tempdir().unwrap();
+        let builder = || {
+            MailClient::builder(Config::with_data_dir(dir.path()))
+                .secrets(Arc::new(MemorySecrets::default()))
+        };
+        let client = pollster::block_on(builder().open_async()).unwrap();
+        pollster::block_on(client.add_account(new_account("a@example.com"), "pw".into())).unwrap();
+        assert!(matches!(
+            pollster::block_on(builder().open_async()),
+            Err(Error::AlreadyRunning(_))
+        ));
+        drop(client);
+        let client = pollster::block_on(builder().open_async()).unwrap();
+        assert_eq!(pollster::block_on(client.list_accounts()).unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn asking_about_an_account_keeps_nothing_for_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = open_client(dir.path(), Arc::new(MemorySecrets::default()));
+        assert_eq!(
+            client.account_status(AccountId(42)),
+            AccountStatus::default()
+        );
+        assert_eq!(client.engine.tracked_accounts(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drafts_are_not_held_back_without_background_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = open_client(dir.path(), Arc::new(MemorySecrets::default()));
+        let account = client
+            .add_account(new_account("a@example.com"), "pw".into())
+            .await
+            .unwrap()
+            .id;
+        client
+            .create_draft(account, DraftContent::default())
+            .await
+            .unwrap();
+        assert_eq!(client.engine.tracked_draft_edits(account), 0);
     }
 
     #[test]

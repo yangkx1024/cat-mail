@@ -167,7 +167,8 @@ macOS、Windows 用系统字体，不受影响。
 
 ## 运行时与事件
 
-`MailClient::builder(cfg).open()` 自建 tokio runtime；视图只在 `cx.spawn` / `spawn_in` 中 await 门面
+`MailClient::builder(cfg).open_async()` 自建 tokio runtime：主窗口先打开、留空，数据目录打开（可能
+要跑一次迁移）后再换成邮箱，打不开时显示原因。视图只在 `cx.spawn` / `spawn_in` 中 await 门面
 方法，从不碰 tokio。事件的 `broadcast::Receiver` 不依赖 reactor，直接在 GPUI 的 executor 上 `recv`；
 `Lagged` 时整体刷新（侧栏、列表，并查一次被拒绝的改动），`Closed` 时退出。
 

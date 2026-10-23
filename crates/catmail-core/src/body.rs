@@ -1,6 +1,7 @@
 //! On-demand download of message bodies and attachments.
 //!
-//! A message up to [`WHOLE_MESSAGE_LIMIT`] is fetched whole (`BODY.PEEK[]`), kept as a
+//! A message up to the whole-message limit (see
+//! [`EngineTuning`](crate::EngineTuning)) is fetched whole (`BODY.PEEK[]`), kept as a
 //! raw blob, and its attachments stored at once. A larger one is fetched as its
 //! BODYSTRUCTURE plus the text parts; each attachment is fetched by section when it is
 //! first opened. Either way the mailbox is opened with EXAMINE and bodies are fetched
@@ -22,10 +23,6 @@ use catmail_types::{AttachmentId, BlobHash, Event, Message, MessageId};
 use crate::connection::with_session;
 use crate::engine::{Engine, blocking};
 use crate::{Error, Result};
-
-/// Messages up to this size (RFC822.SIZE) are fetched whole; above it, attachments are
-/// left on the server until opened. Text parts above it are not fetched at all.
-pub(crate) const WHOLE_MESSAGE_LIMIT: u32 = 2 * 1024 * 1024;
 
 const GONE: Error = Error::OutOfSync("the message is no longer on the server");
 
@@ -171,8 +168,13 @@ async fn ensure_downloaded(engine: &Arc<Engine>, id: MessageId, whole: bool) -> 
         return Ok(());
     }
     let (account, folder) = (location.account, location.folder);
+    let limit = if whole {
+        u32::MAX
+    } else {
+        engine.tuning.whole_message_limit
+    };
     let fetched = on_server(engine, location, async move |session, location| {
-        fetch(session, location, whole).await
+        fetch(session, location, limit).await
     })
     .await?;
 
@@ -204,13 +206,14 @@ async fn ensure_downloaded(engine: &Arc<Engine>, id: MessageId, whole: bool) -> 
     Ok(())
 }
 
-/// Runs after [`examine`] (see [`on_server`]).
-async fn fetch(session: &mut Session, location: &MessageLocation, whole: bool) -> Result<Fetched> {
+/// Runs after [`examine`] (see [`on_server`]). Fetches a message larger than `limit` in
+/// parts.
+async fn fetch(session: &mut Session, location: &MessageLocation, limit: u32) -> Result<Fetched> {
     let uid = location.uid;
-    if !whole && location.size.is_some_and(|size| size > WHOLE_MESSAGE_LIMIT) {
+    if location.size.is_some_and(|size| size > limit) {
         match session.fetch_structure(uid).await {
             Ok(Some(structure)) => {
-                let sections = structure.text_sections(WHOLE_MESSAGE_LIMIT);
+                let sections = structure.text_sections(limit);
                 let parts = if sections.is_empty() {
                     HashMap::new()
                 } else {

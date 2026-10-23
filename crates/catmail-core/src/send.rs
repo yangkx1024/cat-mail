@@ -27,7 +27,7 @@ use catmail_types::{
 use tokio::sync::Notify;
 
 use crate::connection::{self, with_session};
-use crate::engine::{Activity, Engine, Permit, blocking, now};
+use crate::engine::{Activity, Closing, Engine, Permit, blocking, now};
 use crate::{Error, Result, body, drafts, ops, sync};
 
 /// First retry after this long, doubling up to [`MAX_BACKOFF`].
@@ -559,7 +559,7 @@ async fn decision_permit(engine: &Arc<Engine>, id: OutboxId) -> Result<Permit> {
 
 /// Sends whatever comes due, for as long as the engine exists. Holds the engine only
 /// while working, so it never keeps the data directory locked on its own.
-pub(crate) async fn worker(engine: Weak<Engine>, kick: Arc<Notify>) {
+pub(crate) async fn worker(engine: Weak<Engine>, kick: Arc<Notify>, mut closing: Closing) {
     loop {
         let Some(strong) = engine.upgrade() else {
             return;
@@ -577,6 +577,7 @@ pub(crate) async fn worker(engine: Weak<Engine>, kick: Arc<Notify>) {
         tokio::select! {
             () = kick.notified() => {}
             () = tokio::time::sleep(wait) => {}
+            () = closing.closed() => return,
         }
     }
 }

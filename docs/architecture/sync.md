@@ -35,7 +35,7 @@
    写游标，但不算完成的同步、不更新 `last_synced_at`。有 CONDSTORE 时不能跳过：写入的 HIGHESTMODSEQ 会声称
    这些变化已经看过。有未回放的标记操作时，把它们叠加在服务器的 flags 上（`Messages::update_flags`）；
    只有 MODSEQ 变化不算 flags 更新。
-6. **拉取新邮件。** 从新到旧，每批 200 封
+6. **拉取新邮件。** 从新到旧，每批 200 封（`EngineTuning::fetch_batch`）
    `UID FETCH (UID FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (…)])`，
    每批一个事务，提交后发 `MessagesChanged`，界面先看到最新的邮件。
 7. **写游标。** 文件夹全部完成后才写（UIDNEXT、HIGHESTMODSEQ，取自 EXAMINE 时刻）。某批拿回的

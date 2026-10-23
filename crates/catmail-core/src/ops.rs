@@ -28,9 +28,6 @@ use crate::draft_sync::{Uploaded, Uploads};
 use crate::engine::{Activity, Engine, lock, now};
 use crate::{Error, Result, draft_sync};
 
-/// Ops per command; UID sets of scattered messages get long.
-const BATCH: usize = 500;
-
 pub(crate) async fn set_flags(
     engine: Arc<Engine>,
     messages: Vec<MessageId>,
@@ -322,7 +319,7 @@ async fn replay_folder(
         }
         engine.read(move |db| db.ops().pending(id)).await?
     };
-    for batch in batches(&ops) {
+    for batch in batches(&ops, engine.tuning.replay_batch) {
         let uids: Vec<u32> = batch.iter().map(|op| op.uid).collect();
         let outcome = match &batch[0].kind {
             ReplayKind::Flags { add, remove } => session
@@ -744,11 +741,11 @@ fn gone_unseen(copies: &mut Copies, checkpoint: &CopyCheckpoint, op: ReplayOp) {
     }
 }
 
-/// Runs of consecutive ops that one command can make: the same change, at most
-/// [`BATCH`] long.
-fn batches(ops: &[ReplayOp]) -> impl Iterator<Item = &[ReplayOp]> {
+/// Runs of consecutive ops that one command can make: the same change, at most `size`
+/// long.
+fn batches(ops: &[ReplayOp], size: usize) -> impl Iterator<Item = &[ReplayOp]> {
     ops.chunk_by(|a, b| a.kind == b.kind)
-        .flat_map(|run| run.chunks(BATCH))
+        .flat_map(move |run| run.chunks(size))
 }
 
 #[cfg(test)]
@@ -772,11 +769,11 @@ mod tests {
             to: FolderId(id),
             remote_name: format!("F{id}"),
         };
-        let mut ops: Vec<ReplayOp> = (1..=BATCH as i64 + 1).map(|id| op(id, &read)).collect();
+        let mut ops: Vec<ReplayOp> = (1..=3).map(|id| op(id, &read)).collect();
         ops.push(op(1000, &ReplayKind::Delete));
         ops.push(op(1001, &to(1)));
         ops.push(op(1002, &to(2)));
-        let sizes: Vec<usize> = batches(&ops).map(<[ReplayOp]>::len).collect();
-        assert_eq!(sizes, [BATCH, 1, 1, 1, 1]);
+        let sizes: Vec<usize> = batches(&ops, 2).map(<[ReplayOp]>::len).collect();
+        assert_eq!(sizes, [2, 1, 1, 1, 1]);
     }
 }
