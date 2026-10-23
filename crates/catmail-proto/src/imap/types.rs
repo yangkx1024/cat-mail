@@ -16,6 +16,17 @@ impl Capabilities {
     pub(crate) fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// The largest message the server takes in APPEND, if it names one for all its
+    /// mailboxes (`APPENDLIMIT=<n>`, RFC 7889). A bare `APPENDLIMIT` names one per mailbox,
+    /// in STATUS, which this leaves out. 0 is no APPEND at all (RFC 7889 §5), unlike
+    /// SMTP's `SIZE 0`.
+    pub fn append_limit(&self) -> Option<u64> {
+        self.0
+            .iter()
+            .find_map(|c| c.strip_prefix("APPENDLIMIT="))
+            .and_then(|limit| limit.parse().ok())
+    }
 }
 
 impl<S: AsRef<str>> FromIterator<S> for Capabilities {
@@ -88,4 +99,25 @@ pub struct FetchedMessage {
     pub size: Option<u32>,
     pub headers: Headers,
     pub has_attachments: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn append_limit_is_the_one_for_every_mailbox() {
+        let caps = |list: &[&str]| list.iter().collect::<Capabilities>();
+        assert_eq!(
+            caps(&["IMAP4rev1", "appendlimit=35882577"]).append_limit(),
+            Some(35_882_577)
+        );
+        assert_eq!(caps(&["APPENDLIMIT"]).append_limit(), None, "per mailbox");
+        assert_eq!(
+            caps(&["APPENDLIMIT=0"]).append_limit(),
+            Some(0),
+            "no APPEND"
+        );
+        assert_eq!(caps(&["IMAP4rev1"]).append_limit(), None);
+    }
 }

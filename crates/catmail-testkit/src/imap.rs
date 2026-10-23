@@ -250,6 +250,8 @@ pub struct Faults {
     pub forged_copyuid: Option<String>,
     /// Advertise IDLE, and report changes to the selected mailbox while idling.
     pub idle: bool,
+    /// Advertise `APPENDLIMIT=<n>` (RFC 7889). Larger APPENDs are not refused.
+    pub append_limit: Option<u64>,
     /// Accept every IDLE, then close the connection, as a misbehaving proxy might.
     pub drop_on_idle: bool,
     /// Accept every IDLE, then end it at once with OK, before the client's DONE.
@@ -296,6 +298,7 @@ impl Default for Faults {
             deliver_before_copy: None,
             forged_copyuid: None,
             idle: true,
+            append_limit: None,
             drop_on_idle: false,
             end_idle_early: false,
             garble_idle: false,
@@ -756,6 +759,10 @@ fn tokenize(input: &str) -> Vec<Tok> {
 }
 
 fn capabilities(state: &ServerState, session: &Session) -> String {
+    let append_limit = state
+        .faults
+        .append_limit
+        .map(|l| format!("APPENDLIMIT={l}"));
     let mut caps = vec!["IMAP4rev1"];
     if session.mode == TlsMode::StartTls && !session.tls {
         caps.extend(["STARTTLS", "LOGINDISABLED"]);
@@ -775,6 +782,7 @@ fn capabilities(state: &ServerState, session: &Session) -> String {
     if state.faults.idle {
         caps.push("IDLE");
     }
+    caps.extend(append_limit.as_deref());
     caps.join(" ")
 }
 

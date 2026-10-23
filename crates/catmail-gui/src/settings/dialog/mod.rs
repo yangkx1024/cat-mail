@@ -3,6 +3,7 @@
 //! images).
 
 mod accounts;
+mod identity;
 mod reading;
 mod themes;
 
@@ -59,6 +60,9 @@ pub struct SettingsView {
     section: Section,
     text_size: Entity<SelectState<Vec<SharedString>>>,
     import: Option<Import>,
+    /// The form for another address of an account, shown in place of the accounts while
+    /// it is open.
+    identity_form: Option<(Entity<identity::AddIdentity>, Subscription)>,
     /// The bytes the cache of remote images takes, once known.
     image_cache: Option<u64>,
     clearing_image_cache: bool,
@@ -71,7 +75,12 @@ pub fn open(client: MailClient, mailbox: WeakEntity<Mailbox>, window: &mut Windo
     let view = cx.new(|cx| SettingsView::new(client, mailbox, window, cx));
     let width = rems(50.).to_pixels(window.rem_size());
     window.open_dialog(cx, move |dialog, _, _| {
-        dialog.title("Settings").w(width).child(view.clone())
+        // Nothing to confirm: Enter in a field (adding an address) mustn't close it.
+        dialog
+            .title("Settings")
+            .w(width)
+            .on_ok(|_, _, _| false)
+            .child(view.clone())
     });
 }
 
@@ -110,6 +119,7 @@ impl SettingsView {
             section: Section::Appearance,
             text_size,
             import: None,
+            identity_form: None,
             image_cache: None,
             clearing_image_cache: false,
             _image_cache: Task::ready(()),

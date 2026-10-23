@@ -42,6 +42,112 @@ fn replies_from_a_composer_window(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_message_goes_from_the_address_chosen(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let account = mail.account();
+    // The same server and login, for another address.
+    pollster::block_on(mail.client.add_identity(
+        account,
+        catmail_core::NewIdentity {
+            email: "alice@example.org".into(),
+            display_name: Some("Alice".into()),
+            username: "alice".into(),
+            smtp: mail.smtp_server(),
+        },
+        "pw".into(),
+    ))
+    .unwrap();
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    click(cx, window, "new-message");
+    let composer = composer_window(cx, window);
+
+    // The second choice: the account's own address comes first.
+    click(cx, composer, "composer-from");
+    frame(cx, composer);
+    cx.update_window(composer, |_, window, cx| {
+        window.press("down", cx);
+        window.render_frame(cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    // Sending saves it first, with the choice.
+    cx.update_window(composer, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("composer-to", cx);
+        window.input("bob@example.com", cx);
+        window.press("secondary-enter", cx);
+    })
+    .unwrap();
+    wait_for_one_window(cx);
+    wait_until(|| mail.sent().len() == 1);
+    assert!(
+        mail.sent()[0].contains("From: \"Alice\" <alice@example.org>")
+            || mail.sent()[0].contains("From: Alice <alice@example.org>"),
+        "{}",
+        mail.sent()[0]
+    );
+}
+
+#[gpui_kit::test]
+fn an_open_message_follows_its_address_being_replaced(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let account = mail.account();
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    click(cx, window, "new-message");
+    let composer = composer_window(cx, window);
+    cx.update_window(composer, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("composer-to", cx);
+        window.input("bob@example.com", cx);
+    })
+    .unwrap();
+
+    // Meanwhile, in Settings: another address, made the default, and the first one gone.
+    let identities = || pollster::block_on(mail.client.list_identities(account)).unwrap();
+    let first = identities()[0].id;
+    let other = pollster::block_on(mail.client.add_identity(
+        account,
+        catmail_core::NewIdentity {
+            email: "alice@example.org".into(),
+            display_name: None,
+            username: "alice".into(),
+            smtp: mail.smtp_server(),
+        },
+        "pw".into(),
+    ))
+    .unwrap();
+    pollster::block_on(mail.client.set_default_identity(other.id)).unwrap();
+    pollster::block_on(mail.client.remove_identity(first)).unwrap();
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| {
+            mailbox.read(cx).accounts.as_deref().unwrap_or_default()[0]
+                .identities
+                .iter()
+                .map(|i| i.id)
+                .eq([other.id])
+        })
+    });
+    cx.run_until_parked();
+
+    // It saves, and goes, from the address left.
+    cx.update_window(composer, |_, window, cx| {
+        window.render_frame(cx);
+        window.press("secondary-enter", cx);
+    })
+    .unwrap();
+    wait_for_one_window(cx);
+    wait_until(|| mail.sent().len() == 1);
+    assert!(
+        mail.sent()[0].contains("From: <alice@example.org>"),
+        "{}",
+        mail.sent()[0]
+    );
+}
+
+#[gpui_kit::test]
 fn an_untouched_new_message_leaves_no_draft(cx: &mut TestAppContext) {
     let mail = TestMail::start();
     let (window, mailbox) = open(cx, &mail);

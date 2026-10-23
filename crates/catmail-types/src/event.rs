@@ -19,6 +19,10 @@ pub enum Event {
     AccountStatusChanged {
         account: AccountId,
     },
+    /// Identities were added to the account or removed.
+    IdentitiesChanged {
+        account: AccountId,
+    },
     /// Folders were added, removed or renamed.
     FoldersChanged {
         account: AccountId,

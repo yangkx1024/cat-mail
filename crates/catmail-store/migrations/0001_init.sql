@@ -23,14 +23,43 @@ CREATE TABLE accounts (
     imap_host     TEXT    NOT NULL,
     imap_port     INTEGER NOT NULL,
     imap_security TEXT    NOT NULL,
-    smtp_host     TEXT    NOT NULL,
-    smtp_port     INTEGER NOT NULL,
-    smtp_security TEXT    NOT NULL,
     -- Keyring entry holding the password. Random and globally unique; written before
     -- the row exists, so anyone who sees the row also sees the secret.
     secret_key    TEXT    NOT NULL UNIQUE,
+    -- The largest message the IMAP server said it takes in APPEND (RFC 7889) when last
+    -- connected to, which limits a draft's attachments (the copies in Drafts and Sent).
+    -- NULL: not connected to yet, or no limit announced.
+    imap_append_limit INTEGER,
     created_at    INTEGER NOT NULL DEFAULT (unixepoch())
 ) STRICT;
+
+-- The addresses an account sends as, each through an SMTP server and login of its own.
+-- One is made with the account (its address and SMTP server); others are added, e.g. a
+-- sending service. Exactly one per account is the default, which new drafts are from:
+-- it can be changed, not deleted.
+CREATE TABLE identities (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id    INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    email         TEXT    NOT NULL COLLATE NOCASE,
+    display_name  TEXT,
+    username      TEXT    NOT NULL,
+    smtp_host     TEXT    NOT NULL,
+    smtp_port     INTEGER NOT NULL,
+    smtp_security TEXT    NOT NULL,
+    -- Keyring entry holding the SMTP password, as for accounts.secret_key: written before
+    -- the row, deleted after it. NULL: the account's (the identity made with it).
+    secret_key    TEXT    UNIQUE,
+    is_default    INTEGER NOT NULL DEFAULT 0,
+    -- The largest message the SMTP server said it accepts (SIZE, RFC 1870) when last
+    -- connected to, which limits a draft's attachments. NULL as for imap_append_limit.
+    smtp_max_size INTEGER,
+    created_at    INTEGER NOT NULL DEFAULT (unixepoch()),
+    -- The same address through the same server and login twice is one.
+    UNIQUE (account_id, email, smtp_host, smtp_port, username),
+    UNIQUE (id, account_id)
+) STRICT;
+
+CREATE UNIQUE INDEX identities_default ON identities (account_id) WHERE is_default;
 
 -- One row per remote IMAP mailbox, plus the sync cursor for that mailbox.
 --
@@ -175,6 +204,9 @@ CREATE TABLE drafts (
     account_id          INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
     -- Same-account only; checked by the repository (SET NULL rules out a composite FK).
     reply_to_message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+    -- Sent as this identity. Removing the identity hands its drafts to the account's
+    -- default first (the repository; the default itself can't be removed).
+    identity_id         INTEGER NOT NULL,
     -- Threading headers of the reply, copied from the original when the draft was
     -- created, so deleting the original doesn't break the thread. Without brackets;
     -- references_hdr is space-separated.
@@ -207,10 +239,12 @@ CREATE TABLE drafts (
     CHECK ((remote_folder_id IS NULL) = (remote_uidvalidity IS NULL)
        AND (remote_folder_id IS NULL) = (remote_uid IS NULL)
        AND (remote_folder_id IS NULL) = (remote_message_id IS NULL)
-       AND (remote_folder_id IS NULL) = (remote_revision IS NULL))
+       AND (remote_folder_id IS NULL) = (remote_revision IS NULL)),
+    FOREIGN KEY (identity_id, account_id) REFERENCES identities(id, account_id)
 ) STRICT;
 
 CREATE INDEX drafts_account ON drafts (account_id, updated_at DESC);
+CREATE INDEX drafts_identity ON drafts (identity_id);
 
 -- An APPEND of a draft to the Drafts folder whose outcome isn't recorded yet. Each
 -- upload has a Message-ID of its own, and the row is committed before the APPEND: if
@@ -277,6 +311,9 @@ CREATE TABLE outbox (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id      INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
     draft_id        INTEGER REFERENCES drafts(id) ON DELETE SET NULL,
+    -- Sent through this identity's server. An identity can't be removed while entries
+    -- use it.
+    identity_id     INTEGER NOT NULL,
     raw_blob_hash   TEXT    NOT NULL,
     message_id_hdr  TEXT    NOT NULL, -- without brackets
     subject         TEXT    NOT NULL,
@@ -287,10 +324,12 @@ CREATE TABLE outbox (
     next_attempt_at INTEGER,
     last_error      TEXT,
     created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
-    updated_at      INTEGER NOT NULL DEFAULT (unixepoch())
+    updated_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+    FOREIGN KEY (identity_id, account_id) REFERENCES identities(id, account_id)
 ) STRICT;
 
 CREATE INDEX outbox_status ON outbox (status, next_attempt_at);
+CREATE INDEX outbox_identity ON outbox (identity_id);
 CREATE UNIQUE INDEX outbox_draft ON outbox (draft_id);
 
 -- Local changes already applied optimistically, waiting to be replayed on the server:

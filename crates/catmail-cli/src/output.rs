@@ -6,8 +6,8 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use catmail_core::{
-    Account, Draft, Flags, Folder, FolderId, Message, MessageSummary, OpKind, OpStatus,
-    OutboxEntry, OutboxStatus, PendingOp, SyncReport, display,
+    Account, Draft, Flags, Folder, FolderId, Identity, Message, MessageSummary, OpKind, OpStatus,
+    OutboxEntry, OutboxStatus, PendingOp, ServerConfig, SyncReport, display,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -105,23 +105,50 @@ pub(crate) fn printable_text(s: &str) -> String {
     out
 }
 
-pub(crate) fn print_accounts(accounts: &[Account]) {
+/// Each with its identities: SMTP is its default's.
+pub(crate) fn print_accounts(accounts: &[(Account, Vec<Identity>)]) {
     if accounts.is_empty() {
         println!("No accounts. Add one with `catmail account add`.");
         return;
     }
     let rows = accounts
         .iter()
-        .map(|a| {
+        .map(|(a, identities)| {
+            let smtp = identities.iter().find(|i| i.is_default);
             vec![
                 a.id.to_string(),
                 a.email.clone(),
-                format!("{}:{} ({})", a.imap.host, a.imap.port, a.imap.security),
-                format!("{}:{} ({})", a.smtp.host, a.smtp.port, a.smtp.security),
+                server(&a.imap),
+                smtp.map(|i| server(&i.smtp)).unwrap_or_default(),
             ]
         })
         .collect();
     print_table(&["ID", "EMAIL", "IMAP", "SMTP"], rows);
+}
+
+/// `host:port (security)`.
+fn server(s: &ServerConfig) -> String {
+    format!("{}:{} ({})", s.host, s.port, s.security)
+}
+
+pub(crate) fn print_identities(identities: &[Identity]) {
+    if identities.is_empty() {
+        println!("No identities. Add one with `catmail identity add`.");
+        return;
+    }
+    let rows = identities
+        .iter()
+        .map(|i| {
+            let default = if i.is_default { "*" } else { "" };
+            vec![
+                i.id.to_string(),
+                i.email.clone(),
+                server(&i.smtp),
+                default.into(),
+            ]
+        })
+        .collect();
+    print_table(&["ID", "EMAIL", "SMTP", "DEFAULT"], rows);
 }
 
 pub(crate) fn print_sync_report(report: &SyncReport) {
@@ -341,13 +368,17 @@ pub(crate) fn print_drafts(drafts: &[Draft]) {
     print_table(&["ID", "CHANGED", "SERVER", "TO", "", "SUBJECT"], rows);
 }
 
-pub(crate) fn print_draft(draft: &Draft) {
+/// `from` is the identity it is sent as.
+pub(crate) fn print_draft(draft: &Draft, from: Option<&Identity>) {
     let c = &draft.content;
     let header = |name: &str, value: &str| {
         if !value.is_empty() {
             println!("{name:<9}{}", printable(value));
         }
     };
+    if let Some(from) = from {
+        header("From:", &from.email);
+    }
     header("To:", &display::addresses(&c.to));
     header("Cc:", &display::addresses(&c.cc));
     header("Bcc:", &display::addresses(&c.bcc));

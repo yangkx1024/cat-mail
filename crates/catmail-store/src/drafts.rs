@@ -1,16 +1,18 @@
 use catmail_types::{
     AccountId, BlobHash, Draft, DraftAttachment, DraftAttachmentId, DraftContent, DraftId,
-    FolderId, FolderRole, MessageId, OutboxId,
+    FolderId, FolderRole, IdentityId, MessageId, OutboxId,
 };
 use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
-use crate::columns::{id_list, json, parse_text, to_id_list, to_json};
+use crate::columns::{id_list, json, parse_text, size_limit, to_id_list, to_json};
 use crate::folders::Folders;
+use crate::identities::Identities;
 use crate::ops::{PendingOps, Touched};
 use crate::{Error, Result};
 
 const COLUMNS: &str = "d.id, d.account_id, d.reply_to_message_id, d.in_reply_to, d.references_hdr,
-    d.subject, d.to_json, d.cc_json, d.bcc_json, d.body_text, d.revision, d.updated_at,
+    d.identity_id, d.subject, d.to_json, d.cc_json, d.bcc_json, d.body_text, d.revision,
+    d.updated_at,
     d.remote_revision IS d.revision AS on_server, d.upload_error, o.id AS outbox_id";
 
 /// Drafts whose copy on the server is missing or out of date, and that may be uploaded:
@@ -71,7 +73,7 @@ impl<'c> Drafts<'c> {
         Self { conn }
     }
 
-    /// The account must own the message replied to.
+    /// The account must own the message replied to, and the identity sent as.
     pub fn insert(
         &self,
         account: AccountId,
@@ -95,15 +97,18 @@ impl<'c> Drafts<'c> {
                 )));
             }
         }
+        let identity = Identities::new(self.conn).resolve(account, content.identity)?;
         self.conn
             .prepare_cached(
                 "INSERT INTO drafts (account_id, reply_to_message_id, in_reply_to, references_hdr,
-                                     subject, to_json, cc_json, bcc_json, body_text, updated_at)
+                                     identity_id, subject, to_json, cc_json, bcc_json, body_text,
+                                     updated_at)
                  VALUES (:account, (SELECT id FROM messages WHERE id = :reply), :in_reply_to,
-                         :references, :subject, :to, :cc, :bcc, :text, :now)",
+                         :references, :identity, :subject, :to, :cc, :bcc, :text, :now)",
             )?
             .execute(named_params! {
                 ":account": account.0,
+                ":identity": identity.0,
                 ":reply": reply.map(|r| r.message.0),
                 ":in_reply_to": reply.and_then(|r| r.in_reply_to.as_deref()),
                 ":references": reply.and_then(|r| to_id_list(&r.references)),
@@ -186,20 +191,31 @@ impl<'c> Drafts<'c> {
         }))
     }
 
-    /// Replaces what the user wrote. Returns false if there is no such draft.
+    /// Replaces what the user wrote. Returns false if there is no such draft. The
+    /// identity sent as must be one of the account's; one removed since leaves the draft
+    /// from the identity it has.
     pub fn update(&self, id: DraftId, content: &DraftContent, now: i64) -> Result<bool> {
-        if !self.check_editable(id)? {
+        let Some(account) = self.editable(id)? else {
             return Ok(false);
-        }
+        };
+        let identities = Identities::new(self.conn);
+        let identity = match content.identity {
+            // Removed since it was read: the draft is from the default now, which
+            // `Identities::delete` made it. Ids aren't reused.
+            Some(id) if !identities.exists(id)? => None,
+            id => Some(identities.resolve(account, id)?),
+        };
         self.conn
             .prepare_cached(
-                "UPDATE drafts SET subject = :subject, to_json = :to, cc_json = :cc,
-                                   bcc_json = :bcc, body_text = :text,
+                "UPDATE drafts SET identity_id = coalesce(:identity, identity_id),
+                                   subject = :subject, to_json = :to,
+                                   cc_json = :cc, bcc_json = :bcc, body_text = :text,
                                    revision = revision + 1, updated_at = :now
                  WHERE id = :id",
             )?
             .execute(named_params! {
                 ":id": id.0,
+                ":identity": identity.map(|i| i.0),
                 ":subject": content.subject,
                 ":to": to_json(&content.to),
                 ":cc": to_json(&content.cc),
@@ -213,7 +229,7 @@ impl<'c> Drafts<'c> {
     /// Deletes the draft; its copy on the server is deleted by the next upload pass.
     /// Returns false if there is no such draft.
     pub fn delete(&self, id: DraftId) -> Result<bool> {
-        if !self.check_editable(id)? {
+        if self.editable(id)?.is_none() {
             return Ok(false);
         }
         self.remove(id)?;
@@ -440,7 +456,7 @@ impl<'c> Drafts<'c> {
         attachment: &NewDraftAttachment,
         now: i64,
     ) -> Result<Option<DraftAttachment>> {
-        if !self.check_editable(draft)? {
+        if self.editable(draft)?.is_none() {
             return Ok(None);
         }
         self.conn.execute(
@@ -462,6 +478,22 @@ impl<'c> Drafts<'c> {
             mime_type: attachment.mime_type.clone(),
             size: attachment.size,
         }))
+    }
+
+    /// The SIZE of the SMTP server that sends the draft and the APPENDLIMIT of its
+    /// account's IMAP server, as last announced; `None` if there is no such draft.
+    pub fn size_limits(&self, draft: DraftId) -> Result<Option<(Option<u64>, Option<u64>)>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT i.smtp_max_size, a.imap_append_limit FROM drafts d
+                 JOIN identities i ON i.id = d.identity_id
+                 JOIN accounts a ON a.id = d.account_id
+                 WHERE d.id = ?1",
+                [draft.0],
+                |r| Ok((size_limit(r, 0)?, size_limit(r, 1)?)),
+            )
+            .optional()?)
     }
 
     /// The size of the draft's attachments together; 0 if there is no such draft.
@@ -487,31 +519,47 @@ impl<'c> Drafts<'c> {
         let Some(draft) = draft.map(DraftId) else {
             return Ok(None);
         };
-        self.check_editable(draft)?;
+        self.editable(draft)?;
         self.conn
             .execute("DELETE FROM draft_attachments WHERE id = ?1", [id.0])?;
         self.touch(draft, now)?;
         Ok(Some(draft))
     }
 
-    /// False if there is no such draft; an error if it is being sent.
-    fn check_editable(&self, id: DraftId) -> Result<bool> {
-        let outbox: Option<Option<i64>> = self
+    /// The draft's account; `None` if there is no such draft, an error if it is being
+    /// sent.
+    pub fn editable(&self, id: DraftId) -> Result<Option<AccountId>> {
+        let found: Option<(i64, Option<i64>)> = self
             .conn
             .query_row(
-                "SELECT o.id FROM drafts d LEFT JOIN outbox o ON o.draft_id = d.id
+                "SELECT d.account_id, o.id FROM drafts d LEFT JOIN outbox o ON o.draft_id = d.id
                  WHERE d.id = ?1",
                 [id.0],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        match outbox {
-            None => Ok(false),
-            Some(None) => Ok(true),
-            Some(Some(outbox)) => Err(Error::Conflict(format!(
+        match found {
+            None => Ok(None),
+            Some((account, None)) => Ok(Some(AccountId(account))),
+            Some((_, Some(outbox))) => Err(Error::Conflict(format!(
                 "draft {id} is in the outbox (entry {outbox}); cancel the send to edit it"
             ))),
         }
+    }
+
+    /// Drafts written as `from` are written as `to`: each changes, and its next upload
+    /// is from `to`'s address. Returns how many there were.
+    pub(crate) fn reassign_identity(
+        &self,
+        from: IdentityId,
+        to: IdentityId,
+        now: i64,
+    ) -> Result<usize> {
+        Ok(self.conn.execute(
+            "UPDATE drafts SET identity_id = ?2, revision = revision + 1, updated_at = ?3
+             WHERE identity_id = ?1",
+            params![from.0, to.0, now],
+        )?)
     }
 
     fn touch(&self, id: DraftId, now: i64) -> Result<()> {
@@ -569,6 +617,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Draft> {
             cc: json(row, "cc_json")?,
             bcc: json(row, "bcc_json")?,
             text: row.get("body_text")?,
+            identity: Some(IdentityId(row.get("identity_id")?)),
         },
         attachments: Vec::new(),
         reply_to: row
@@ -655,7 +704,17 @@ mod tests {
             .unwrap();
 
         let draft = store.read(|db| db.drafts().get(id)).unwrap().unwrap();
-        assert_eq!(draft.content, content("one"));
+        let default = store
+            .read(|db| db.identities().default_of(account))
+            .unwrap();
+        assert_eq!(draft.content.identity, default, "the account's default");
+        assert_eq!(
+            draft.content,
+            DraftContent {
+                identity: default,
+                ..content("one")
+            }
+        );
         assert_eq!(
             (draft.reply_to, draft.outbox, draft.updated_at),
             (None, None, 1)

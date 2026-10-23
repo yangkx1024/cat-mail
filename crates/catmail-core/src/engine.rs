@@ -9,7 +9,8 @@ use catmail_proto::http::ImageFetcher;
 use catmail_proto::imap::Session;
 use catmail_store::{BlobStore, Db, Store};
 use catmail_types::{
-    AccountId, AccountStatus, DraftId, ErrorKind, Event, FolderId, ReportedError, ServerProblem,
+    AccountId, AccountStatus, DraftId, ErrorKind, Event, FolderId, IdentityId, ReportedError,
+    ServerProblem,
 };
 use tokio::sync::{Notify, OwnedMutexGuard, broadcast, watch};
 
@@ -136,7 +137,8 @@ struct AccountState {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Activity {
     Sync,
-    Send,
+    /// As this identity of the account.
+    Send(IdentityId),
 }
 
 /// Held while syncing (a folder of) an account, or while working on its outbox.
@@ -408,7 +410,9 @@ impl Engine {
     /// says nothing about the server, and isn't recorded.
     pub fn report<T>(&self, account: AccountId, activity: Activity, outcome: &Result<T>) -> u32 {
         let e = match outcome {
-            Err(Error::Cancelled | Error::AccountNotFound(_)) => return 0,
+            Err(Error::Cancelled | Error::AccountNotFound(_) | Error::IdentityNotFound(_)) => {
+                return 0;
+            }
             Err(e) => Some(e),
             Ok(_) => None,
         };
@@ -416,37 +420,15 @@ impl Engine {
         // Whether the status changed, and for a success, whether the login had been rejected.
         let (changed, rejected, failures) = {
             let mut status = lock(&state.status);
-            let slot = match activity {
-                Activity::Sync => &mut status.sync,
-                Activity::Send => &mut status.send,
-            };
-            match e {
-                None => {
-                    let cleared = slot.take();
-                    let rejected = cleared
-                        .as_ref()
-                        .is_some_and(|p| p.error.kind == ErrorKind::Auth);
-                    (cleared.is_some(), rejected, 0)
-                }
-                Some(e) => {
-                    let error = ReportedError::from(e);
-                    // Not each failure: what is wrong is what frontends show.
-                    match slot {
-                        Some(problem) => {
-                            let changed = problem.error != error;
-                            problem.failures += 1;
-                            problem.error = error;
-                            (changed, false, problem.failures)
-                        }
-                        None => {
-                            *slot = Some(ServerProblem {
-                                error,
-                                since: now(),
-                                failures: 1,
-                            });
-                            (true, false, 1)
-                        }
+            match activity {
+                Activity::Sync => record(&mut status.sync, e),
+                Activity::Send(identity) => {
+                    let mut slot = status.send.remove(&identity);
+                    let recorded = record(&mut slot, e);
+                    if let Some(problem) = slot {
+                        status.send.insert(identity, problem);
                     }
+                    recorded
                 }
             }
         };
@@ -459,6 +441,16 @@ impl Engine {
             state.wake.notify_one();
         }
         failures
+    }
+
+    /// Drops what was found about sending as an identity that is gone.
+    pub fn forget_identity(&self, account: AccountId, identity: IdentityId) {
+        let Some(state) = self.existing(account) else {
+            return;
+        };
+        if lock(&state.status).send.remove(&identity).is_some() {
+            self.emit(Event::AccountStatusChanged { account });
+        }
     }
 
     /// What the latest attempts to get through to the account's servers found.
@@ -567,6 +559,41 @@ pub(crate) async fn blocking<T: Send + 'static>(
     tokio::task::spawn_blocking(f)
         .await
         .map_err(crate::runtime::join_error)?
+}
+
+/// Records an attempt's outcome (`None`: success) in what is known of a server. Returns
+/// whether that changed, whether a success follows a rejected login, and the failures in
+/// a row.
+fn record(slot: &mut Option<ServerProblem>, e: Option<&Error>) -> (bool, bool, u32) {
+    match e {
+        None => {
+            let cleared = slot.take();
+            let rejected = cleared
+                .as_ref()
+                .is_some_and(|p| p.error.kind == ErrorKind::Auth);
+            (cleared.is_some(), rejected, 0)
+        }
+        Some(e) => {
+            let error = ReportedError::from(e);
+            // Not each failure: what is wrong is what frontends show.
+            match slot {
+                Some(problem) => {
+                    let changed = problem.error != error;
+                    problem.failures += 1;
+                    problem.error = error;
+                    (changed, false, problem.failures)
+                }
+                None => {
+                    *slot = Some(ServerProblem {
+                        error,
+                        since: now(),
+                        failures: 1,
+                    });
+                    (true, false, 1)
+                }
+            }
+        }
+    }
 }
 
 /// `first`, doubled for each failure in a row after the first, up to `max`.

@@ -9,6 +9,7 @@ mod fonts;
 mod format;
 mod html;
 mod layout;
+mod login_form;
 mod mailbox;
 mod reader;
 mod settings;

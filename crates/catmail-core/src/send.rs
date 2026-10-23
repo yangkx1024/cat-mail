@@ -14,6 +14,7 @@
 //!   checking first whether an earlier APPEND arrived after all → done: the entry and
 //!   its draft go.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -22,7 +23,7 @@ use catmail_proto::smtp;
 use catmail_store::{NewOutboxEntry, Outbox, OutboxJob, Touched};
 use catmail_types::{
     AccountId, Address, BlobHash, DraftId, ErrorKind, Event, Flags, FlushReport, FolderRole,
-    OutboxEntry, OutboxId, OutboxStatus, ReportedError,
+    IdentityId, OutboxEntry, OutboxId, OutboxStatus, ReportedError,
 };
 use tokio::sync::Notify;
 
@@ -38,25 +39,18 @@ const MAX_BACKOFF: i64 = 30 * 60;
 /// its Message-ID and Date, and the draft is locked until the entry is done or
 /// cancelled.
 pub(crate) async fn queue_draft(engine: &Arc<Engine>, id: DraftId) -> Result<OutboxEntry> {
-    let (snapshot, account) = engine
-        .read(move |db| {
-            let Some(snapshot) = db.drafts().snapshot(id)? else {
-                return Ok(None);
-            };
-            let account = db.accounts().get(snapshot.draft.account_id)?;
-            Ok(Some((snapshot, account)))
-        })
+    let (snapshot, sender) = engine
+        .read(move |db| connection::draft_sender(db, id))
         .await?
         .ok_or(Error::DraftNotFound(id))?;
     let account_id = snapshot.draft.account_id;
-    let account = account.ok_or_else(|| Error::AccountNotFound(account_id.to_string()))?;
     if let Some(outbox) = snapshot.draft.outbox {
         return Err(Error::Conflict(format!(
             "draft {id} is already in the outbox (entry {outbox})"
         )));
     }
-    // The account's own address goes into MAIL FROM and the Message-ID.
-    drafts::check_address(&account.email)?;
+    // The sender's address goes into MAIL FROM and the Message-ID.
+    drafts::check_address(&sender.from.email)?;
     let content = &snapshot.draft.content;
     drafts::validate(content)?;
     let recipients = envelope_recipients(content.recipients());
@@ -64,14 +58,14 @@ pub(crate) async fn queue_draft(engine: &Arc<Engine>, id: DraftId) -> Result<Out
         return Err(Error::InvalidInput("the draft has no recipients".into()));
     }
 
-    let message_id = drafts::new_message_id(&account.email);
+    let message_id = drafts::new_message_id(&sender.from.email);
     let (revision, subject) = (snapshot.revision, content.subject.clone());
-    let envelope_from = account.email.clone();
+    let envelope_from = sender.from.email.clone();
     let engine2 = engine.clone();
     let message_id2 = message_id.clone();
     let raw = blocking(move || {
         // Bcc only in the envelope.
-        let raw = drafts::build(&engine2, &account, &snapshot, &message_id2, false)?;
+        let raw = drafts::build(&engine2, &sender.from, &snapshot, &message_id2, false)?;
         Ok(engine2.blobs.put_bytes(&raw)?)
     })
     .await?;
@@ -139,14 +133,16 @@ async fn pass(
         let due = due_only.then(now);
         engine.read(move |db| db.outbox().pending(account, status, due))
     };
-    let mut smtp = Smtp::None;
-    for id in pending(OutboxStatus::Queued).await? {
+    // One connection per identity's server.
+    let mut connections: HashMap<IdentityId, Smtp> = HashMap::new();
+    for (id, identity) in pending(OutboxStatus::Queued).await? {
+        let smtp = connections.entry(identity).or_insert(Smtp::None);
         if let Smtp::None = smtp {
             // Before the entry counts an attempt: failing to connect or log in is the
-            // account's trouble, not this message's.
-            let connected = connection::connect_smtp(engine, account).await;
-            let failures = engine.report(account, Activity::Send, &connected);
-            smtp = match connected {
+            // sender's trouble, not this message's.
+            let connected = connection::connect_smtp(engine, account, identity).await;
+            let failures = engine.report(account, Activity::Send(identity), &connected);
+            *smtp = match connected {
                 Ok(session) => Smtp::Up(session),
                 Err(e @ (Error::Cancelled | Error::AccountNotFound(_))) => return Err(e),
                 Err(e) => {
@@ -156,14 +152,14 @@ async fn pass(
                         error: error.message.clone(),
                         next: now() + backoff(failures),
                     };
-                    report.error = Some(error);
+                    report.errors.insert(identity, error);
                     down
                 }
             };
         }
-        let session = match &mut smtp {
+        let session = match smtp {
             Smtp::Up(session) => session,
-            // Everything waits as long as the account's backoff says.
+            // Everything it sends waits as long as the sender's backoff says.
             Smtp::Down { error, next } => {
                 let (error, next) = (error.clone(), *next);
                 let postponed = record(engine, id, move |o| o.postpone(id, next, &error, now()));
@@ -181,15 +177,17 @@ async fn pass(
         let (entry, usable) = send_one(engine, session, job).await?;
         report.entries.extend(entry);
         if !usable {
-            smtp = Smtp::None;
+            *smtp = Smtp::None;
         }
     }
-    if let Smtp::Up(session) = smtp {
-        session.quit().await;
+    for smtp in connections.into_values() {
+        if let Smtp::Up(session) = smtp {
+            session.quit().await;
+        }
     }
 
     // Saves that failed in an earlier pass; this pass's were tried already.
-    for id in pending(OutboxStatus::Accepted).await? {
+    for (id, _) in pending(OutboxStatus::Accepted).await? {
         if report.entries.iter().any(|e| e.id == id) {
             continue;
         }

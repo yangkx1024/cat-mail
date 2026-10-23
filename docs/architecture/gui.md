@@ -31,7 +31,7 @@ src/
     refresh.rs       哪个引擎事件重读什么、节流（纯逻辑）
     message_list/    中栏列表（mod.rs：来源、加载、选中；rows.rs：三种行的样子）
     folders.rs       文件夹分区（纯逻辑）
-    move_to.rs add_account.rs   "Move to"对话框；登录表单
+    move_to.rs add_account.rs   "Move to"对话框；登录页
     tests/           驱动窗口的集成测试，按读信、写信、设置分文件，另有截图
   reader/            读信：mod.rs 状态与操作，message.rs 打开的邮件，images.rs 内嵌与远程图片，view.rs 渲染，
                      page.rs Blitz 排版的页面
@@ -127,6 +127,11 @@ macOS、Windows 用系统字体，不受影响。
   解析不了的栏保留上次存下的值；发送时报错；关闭时只要有解析不了的栏就提示并不关窗（存下的总能解析，
   所以解析不了就是没存下的输入），自动保存之后也一样。关不关看各栏内容与存下的是否相同，不看"改过"
   标记：最后几个键的事件可能还没处理。
+- **From**：账户有不止一个身份时是一个下拉框（默认的在最前），选了就像其他栏一样自动保存；同一个
+  地址出现两次（走两台服务器）时后面附上服务器。只有一个时只显示地址。窗口打开时读一次身份列表，之后
+  自己订阅引擎事件，收到本账户的 `IdentitiesChanged`（或漏了事件）就重读：选着的身份还在就留着，被删了就
+  换成默认身份，已输入的内容不动。在那之前的保存也不会失败：存草稿时传来的身份已被删除，引擎就保留草稿
+  现在的身份（删除时已改成默认身份；身份 id 不重用）。
 - 窗口边框的关闭按钮经 `on_window_should_close` 走同一流程（需要先保存时返回 false，存完自己关）。
 - Ctrl Enter 绑在 `Composer > Input` 上直接是 `Send`：多行输入框自己处理时会先插一个换行，再随信发出。
   附件可选文件或拖进窗口（`ExternalPaths`）。
@@ -255,14 +260,21 @@ INBOX，所以打开一个文件夹时同步它（`MailClient::sync_folder`，�
 
 ## 登录页
 
-没有账户时自动打开（不能取消），Settings › Accounts 的"Add account"也能打开。先调用 `MailClient::check_login`
-（连接、登录、LOGOUT，不写数据库也不写密钥环），成功后才 `add_account`，再同步这个账户；密码或服务器
+没有账户时自动打开（不能取消），Settings › Accounts 的"Add account"也能打开。调用 `MailClient::add_account_checked`
+（先像 `check_login` 那样连接、登录、LOGOUT，不写数据库也不写密钥环，成功后才存下账户），再同步这个账户；密码或服务器
 填错不会留下账户行或孤立的密钥环条目。
 
 - 登录进行中"Cancel"不可用：`add_account` 一旦开始就会写入（引擎的阻塞任务不随窗口的任务取消），
   此时离开只会让新账户错过首次同步。
-- 空的端口和用户名取与 CLI 相同的默认值；表单只检查端口格式，其余由 `check_login` 里与 `add_account`
-  相同的校验负责。
+- 空的端口和用户名取与 CLI 相同的默认值；表单只检查端口格式，其余由引擎的校验负责。登录也检查
+  SMTP，所以 SMTP 填错同样当场报出。邮箱、密码、名字、用户名和服务器字段在 `login_form.rs`（`LoginFields`、
+  `ServerFields`），与发件身份的表单共用。
+- **发件身份**在 Settings › Accounts 里，列在各自账户下面（包括随账户建出的那个），默认的标着"Default"，
+  其余可以"Make default"或删除；"Add sending address"在设置对话框里
+  原地换成身份的表单（地址、密码、名字、用户名和 SMTP 服务器，字段与登录页共用），
+  `add_identity_checked`，完成或取消后回到列表。设置对话框没有要确认的东西，
+  它的 `on_ok` 不关闭，否则字段里按 Enter 会关掉整个设置、丢下正在添加的身份；表单和登录页一样，
+  任一字段按 Enter 提交（`login_form::submit_on_enter`）。
 
 ## HTML 引擎
 

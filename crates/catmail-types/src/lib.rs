@@ -17,15 +17,16 @@ mod search;
 mod sync;
 
 pub use account::{
-    Account, AccountOverview, AccountStatus, NewAccount, Security, ServerConfig, ServerProblem,
+    Account, AccountOverview, AccountStatus, Identity, NewAccount, NewIdentity, Security,
+    ServerConfig, ServerProblem,
 };
 pub use draft::{Draft, DraftAttachment, DraftContent};
 pub use error::{ErrorKind, ReportedError};
 pub use event::Event;
 pub use folder::{DeleteOutcome, Folder, FolderRole, archive_folder, special_folder};
 pub use ids::{
-    AccountId, AttachmentId, BlobHash, DraftAttachmentId, DraftId, FolderId, MessageId, OutboxId,
-    PendingOpId,
+    AccountId, AttachmentId, BlobHash, DraftAttachmentId, DraftId, FolderId, IdentityId, MessageId,
+    OutboxId, PendingOpId,
 };
 pub use message::{
     Address, Attachment, FlagState, Flags, Message, MessageBody, MessageCursor, MessageSummary,

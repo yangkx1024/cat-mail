@@ -10,6 +10,7 @@ mod drafts;
 mod error;
 mod folders;
 mod fts;
+mod identities;
 mod messages;
 mod ops;
 mod outbox;
@@ -30,6 +31,7 @@ pub use blob::BlobStore;
 pub use drafts::{DraftReply, DraftSnapshot, DraftUpload, Drafts, NewDraftAttachment};
 pub use error::{Error, Result};
 pub use folders::{FolderSyncState, Folders, Reconciled, RemoteFolder};
+pub use identities::{DeletedIdentity, Identities, Sending};
 pub use messages::{MessageLocation, Messages, NewBody, NewMessage};
 pub use ops::{CopyCheckpoint, Moved, PendingOps, ReplayFolder, ReplayKind, ReplayOp, Touched};
 pub use outbox::{NewOutboxEntry, Outbox, OutboxJob};
@@ -163,6 +165,10 @@ impl<'c> Db<'c> {
 
     pub fn drafts(&self) -> Drafts<'c> {
         Drafts::new(self.conn)
+    }
+
+    pub fn identities(&self) -> Identities<'c> {
+        Identities::new(self.conn)
     }
 
     pub fn outbox(&self) -> Outbox<'c> {
@@ -322,9 +328,9 @@ mod tests {
     fn seed(conn: &Connection) {
         conn.execute_batch(
             "INSERT INTO accounts (id, email, username, imap_host, imap_port, imap_security,
-                                   smtp_host, smtp_port, smtp_security, secret_key)
-             VALUES (1, 'a@example.com', 'a', 'imap', 993, 'tls', 'smtp', 465, 'tls', 'ka'),
-                    (2, 'b@example.com', 'b', 'imap', 993, 'tls', 'smtp', 465, 'tls', 'kb');
+                                   secret_key)
+             VALUES (1, 'a@example.com', 'a', 'imap', 993, 'tls', 'ka'),
+                    (2, 'b@example.com', 'b', 'imap', 993, 'tls', 'kb');
              INSERT INTO folders (id, account_id, remote_name, name, uidvalidity)
              VALUES (20, 1, 'INBOX', 'INBOX', 7),
                     (21, 2, 'INBOX', 'INBOX', 7);",

@@ -67,19 +67,14 @@ pub async fn env_built(
     )
     .open()
     .unwrap();
-    let server = |port| ServerConfig {
-        host: "127.0.0.1".into(),
-        port,
-        security: Security::Plain,
-    };
     let account = client
         .add_account(
             NewAccount {
                 email: "alice@example.com".into(),
                 display_name: None,
                 username: "alice".into(),
-                imap: server(fake.port()),
-                smtp: server(smtp.port()),
+                imap: local_server(fake.port()),
+                smtp: local_server(smtp.port()),
             },
             "pw".into(),
         )
@@ -93,6 +88,15 @@ pub async fn env_built(
         account,
         secrets,
         dir,
+    }
+}
+
+/// A fake server on this machine, without TLS.
+pub fn local_server(port: u16) -> ServerConfig {
+    ServerConfig {
+        host: "127.0.0.1".into(),
+        port,
+        security: Security::Plain,
     }
 }
 
@@ -114,6 +118,25 @@ pub async fn eventually(what: &str, mut ready: impl AsyncFnMut() -> bool) {
 }
 
 impl Env {
+    /// Where the fake SMTP server listens.
+    #[allow(dead_code)]
+    pub fn smtp_config(&self) -> ServerConfig {
+        local_server(self.smtp.port())
+    }
+
+    /// Works through the outbox once: each entry worked on, as (status, attempts).
+    #[allow(dead_code)]
+    pub async fn flush(&self) -> Vec<(catmail_core::OutboxStatus, u32)> {
+        self.client
+            .flush_outbox(self.account)
+            .await
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|e| (e.status, e.attempts))
+            .collect()
+    }
+
     /// Runs SQL on the client's database behind its back, e.g. to add a trigger that
     /// makes some writes fail, as a full disk would.
     #[allow(dead_code)]
@@ -178,6 +201,14 @@ impl Env {
             .map(|c| c.line.clone())
             .collect()
     }
+}
+
+/// A sparse file of `size` bytes in `dir`: only what is read gets written.
+#[allow(dead_code)]
+pub fn sparse(dir: &std::path::Path, name: &str, size: u64) -> std::path::PathBuf {
+    let path = dir.join(name);
+    std::fs::File::create(&path).unwrap().set_len(size).unwrap();
+    path
 }
 
 /// Every file under `dir`.

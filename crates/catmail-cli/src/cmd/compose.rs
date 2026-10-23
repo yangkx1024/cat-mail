@@ -9,13 +9,13 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use catmail_core::{
-    AccountId, Address, Draft, DraftAttachmentId, DraftContent, DraftId, MailClient, MessageId,
-    display, parse_addresses,
+    AccountId, Address, Draft, DraftAttachmentId, DraftContent, DraftId, IdentityId, MailClient,
+    MessageId, display, parse_addresses,
 };
 use clap::{Args, Subcommand};
 
 use crate::cmd::ops::{self, NEXT_FLUSH};
-use crate::cmd::{one_account, outbox};
+use crate::cmd::{identity, one_account, outbox};
 use crate::json::{self, JsonDraft, JsonDraftAttachment};
 use crate::output::{print_draft, print_drafts, printable};
 
@@ -42,6 +42,8 @@ pub(crate) struct Compose {
 #[derive(Args)]
 pub(crate) struct Fields {
     #[command(flatten)]
+    from: SendAs,
+    #[command(flatten)]
     recipients: Recipients,
     #[arg(short, long)]
     subject: Option<String>,
@@ -51,6 +53,24 @@ pub(crate) struct Fields {
     /// Read the text from a file, or from stdin with `-`
     #[arg(long, value_name = "FILE")]
     body_file: Option<PathBuf>,
+}
+
+#[derive(Args)]
+pub(crate) struct SendAs {
+    /// Send as one of the account's identities, by address or id [default: its default
+    /// identity]
+    #[arg(long, value_name = "IDENTITY")]
+    from: Option<String>,
+}
+
+impl SendAs {
+    /// The identity named among `account`'s, if one was.
+    async fn resolve(&self, client: &MailClient, account: AccountId) -> Result<Option<IdentityId>> {
+        let Some(from) = &self.from else {
+            return Ok(None);
+        };
+        Ok(Some(identity::resolve_from(client, account, from).await?))
+    }
 }
 
 #[derive(Args)]
@@ -69,6 +89,9 @@ pub(crate) struct Recipients {
 pub(crate) struct Reply {
     /// Message id, as shown by `catmail ls`
     id: i64,
+    /// [default: the address the message was written to]
+    #[command(flatten)]
+    from: SendAs,
     /// Reply to everyone the message went to, not just its sender
     #[arg(long)]
     all: bool,
@@ -90,6 +113,8 @@ pub(crate) struct Reply {
 pub(crate) struct Forward {
     /// Message id, as shown by `catmail ls`
     id: i64,
+    #[command(flatten)]
+    from: SendAs,
     #[command(flatten)]
     recipients: Recipients,
     /// Your text, written above the forwarded message
@@ -136,7 +161,9 @@ pub(crate) enum DraftCommand {
 
 pub(crate) async fn compose(client: &MailClient, args: Compose, json: bool) -> Result<()> {
     let account = one_account(client, args.account.as_deref()).await?;
-    let content = args.fields.apply(DraftContent::default())?;
+    let identity = args.fields.from.resolve(client, account.id).await?;
+    let mut content = args.fields.apply(DraftContent::default())?;
+    content.identity = identity;
     let draft = client.create_draft(account.id, content).await?;
     finish_draft(client, draft, &args.attach, args.send, json).await
 }
@@ -144,10 +171,14 @@ pub(crate) async fn compose(client: &MailClient, args: Compose, json: bool) -> R
 pub(crate) async fn reply(client: &MailClient, args: Reply, json: bool) -> Result<()> {
     // Before the draft exists, so a missing file doesn't leave one behind.
     let text = read_body(args.body, args.body_file.as_ref())?;
+    let from = from_for(client, &args.from, MessageId(args.id)).await?;
     let mut draft = client.reply(MessageId(args.id), args.all).await?;
-    if let Some(text) = text {
+    if text.is_some() || from.is_some() {
         let mut content = draft.content.clone();
-        write_above(&text, &mut content);
+        if let Some(text) = text {
+            write_above(&text, &mut content);
+        }
+        content.identity = from.or(content.identity);
         draft = client.update_draft(draft.id, content).await?;
     }
     finish_draft(client, draft, &args.attach, args.send, json).await
@@ -160,16 +191,36 @@ pub(crate) async fn forward(client: &MailClient, args: Forward, json: bool) -> R
     if args.send && recipients.iter().flatten().all(Vec::is_empty) {
         bail!("--send needs a recipient: --to, --cc or --bcc");
     }
+    let from = from_for(client, &args.from, MessageId(args.id)).await?;
     let mut draft = client.forward(MessageId(args.id)).await?;
-    if text.is_some() || recipients.iter().any(Option::is_some) {
+    if text.is_some() || from.is_some() || recipients.iter().any(Option::is_some) {
         let mut content = draft.content.clone();
         if let Some(text) = text {
             write_above(&text, &mut content);
         }
+        content.identity = from.or(content.identity);
         set_recipients(recipients, &mut content);
         draft = client.update_draft(draft.id, content).await?;
     }
     finish_draft(client, draft, &args.attach, args.send, json).await
+}
+
+/// The identity `from` names for an answer to `message`, among its account's.
+async fn from_for(
+    client: &MailClient,
+    from: &SendAs,
+    message: MessageId,
+) -> Result<Option<IdentityId>> {
+    if from.from.is_none() {
+        return Ok(None);
+    }
+    let account = client
+        .get_message(message)
+        .await?
+        .with_context(|| format!("no message {message}"))?
+        .summary
+        .account_id;
+    from.resolve(client, account).await
 }
 
 /// Attaches the files, then sends the draft or shows it. If a file can't be attached,
@@ -229,13 +280,19 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
             if json {
                 print_draft_json(&draft)?;
             } else {
-                print_draft(&draft);
+                let identities = client.list_identities(draft.account_id).await?;
+                let from = identities
+                    .iter()
+                    .find(|i| Some(i.id) == draft.content.identity);
+                print_draft(&draft, from);
             }
             None
         }
         DraftCommand::Edit { id, fields } => {
             let draft = get_draft(client, id).await?;
-            let content = fields.apply(draft.content)?;
+            let identity = fields.from.resolve(client, draft.account_id).await?;
+            let mut content = fields.apply(draft.content)?;
+            content.identity = identity.or(content.identity);
             let draft = client.update_draft(draft.id, content).await?;
             if json {
                 print_draft_json(&draft)?;
@@ -413,6 +470,59 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn from_picks_one_of_the_accounts_identities() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = client_with_account(dir.path()).await;
+        let account = client.list_accounts().await.unwrap().remove(0);
+        let identity = client
+            .add_identity(
+                account.id,
+                catmail_core::NewIdentity {
+                    email: "news@example.org".into(),
+                    display_name: None,
+                    username: "resend".into(),
+                    smtp: ServerConfig {
+                        host: "smtp.example.org".into(),
+                        port: 465,
+                        security: Security::Tls,
+                    },
+                },
+                "key".into(),
+            )
+            .await
+            .unwrap();
+        let args = |from: &str| Compose {
+            account: None,
+            fields: Fields {
+                from: SendAs {
+                    from: Some(from.into()),
+                },
+                recipients: Recipients {
+                    to: None,
+                    cc: None,
+                    bcc: None,
+                },
+                subject: None,
+                body: None,
+                body_file: None,
+            },
+            attach: Vec::new(),
+            send: false,
+        };
+        let err = compose(&client, args("other@example.org"), false)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("identity list"), "{err:#}");
+        assert!(client.list_drafts(account.id).await.unwrap().is_empty());
+
+        compose(&client, args("news@example.org"), false)
+            .await
+            .unwrap();
+        let drafts = client.list_drafts(account.id).await.unwrap();
+        assert_eq!(drafts[0].content.identity, Some(identity.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn failed_command_leaves_no_draft() {
         let dir = tempfile::tempdir().unwrap();
         let client = client_with_account(dir.path()).await;
@@ -421,6 +531,7 @@ mod tests {
         let args = Compose {
             account: None,
             fields: Fields {
+                from: SendAs { from: None },
                 recipients: Recipients {
                     to: Some("b@example.com".into()),
                     cc: None,
@@ -438,6 +549,7 @@ mod tests {
 
         let args = Reply {
             id: 1,
+            from: SendAs { from: None },
             all: false,
             body: None,
             body_file: Some(missing.clone()),
@@ -449,6 +561,7 @@ mod tests {
 
         let forwarding = |to: Option<&str>, body_file: Option<PathBuf>, send| Forward {
             id: 1,
+            from: SendAs { from: None },
             recipients: Recipients {
                 to: to.map(Into::into),
                 cc: None,

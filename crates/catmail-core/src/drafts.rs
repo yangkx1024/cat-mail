@@ -9,8 +9,8 @@ use catmail_proto::mime::{Outgoing, OutgoingAttachment, build_message};
 use catmail_proto::smtp;
 use catmail_store::{BlobStore, DraftReply, DraftSnapshot, NewDraftAttachment};
 use catmail_types::{
-    Account, AccountId, Address, BlobHash, Draft, DraftAttachment, DraftAttachmentId, DraftContent,
-    DraftId, Event, Message, MessageId,
+    AccountId, Address, BlobHash, Draft, DraftAttachment, DraftAttachmentId, DraftContent, DraftId,
+    Event, IdentityId, Message, MessageId,
 };
 use uuid::Uuid;
 
@@ -81,32 +81,58 @@ pub(crate) fn edited(engine: &Engine, account: AccountId, draft: DraftId) {
     }
 }
 
-/// The most a draft's attached files may add up to: what Gmail and Outlook allow, and
-/// most servers. Encoded, it just fits the message size Gmail announces (`SIZE`).
-const MAX_ATTACHMENTS_SIZE: u64 = 25 * 1024 * 1024;
+/// What a draft's attached files may add up to while the sending server hasn't said what
+/// it accepts: what Gmail and Outlook allow, and most servers. Encoded, it just fits the
+/// message size Gmail announces (`SIZE`).
+const DEFAULT_ATTACHMENTS_SIZE: u64 = 25 * 1024 * 1024;
 
-fn attachments_too_large() -> Error {
+/// The most, whatever the servers accept: the message is built in memory, and copied to
+/// the Drafts folder whole after each change.
+const MAX_ATTACHMENTS_SIZE: u64 = 50 * 1024 * 1024;
+
+/// What a message takes besides its attachments' content: headers, the text, and each
+/// attachment's part headers. Room for a long text; sending still checks the real size.
+const MESSAGE_OVERHEAD: u64 = 64 * 1024;
+
+/// The largest message servers said they accept when last connected to; `None` where not
+/// connected to yet, or no limit announced.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SizeLimits {
+    /// SMTP `SIZE` (RFC 1870) of the server that sends the draft.
+    pub smtp: Option<u64>,
+    /// IMAP `APPENDLIMIT` (RFC 7889) of the account, for the copies in Drafts and Sent.
+    pub append: Option<u64>,
+}
+
+/// What a draft's attached files may add up to, given what the servers said: the SMTP
+/// server that sends it (`SIZE`), and the IMAP server the copies in Drafts and Sent go to
+/// (`APPENDLIMIT`). Attachments are base64-encoded, 57 bytes to a 78-character line.
+fn attachments_limit(limits: SizeLimits) -> u64 {
+    let room = |message: u64| message.saturating_sub(MESSAGE_OVERHEAD) / 78 * 57;
+    let smtp = limits.smtp.map_or(DEFAULT_ATTACHMENTS_SIZE, room);
+    let append = limits.append.map_or(u64::MAX, room);
+    smtp.min(append).min(MAX_ATTACHMENTS_SIZE)
+}
+
+fn attachments_too_large(limit: u64) -> Error {
     Error::InvalidInput(format!(
         "a message's attachments can't add up to more than {}",
-        display::size(MAX_ATTACHMENTS_SIZE)
+        display::size(limit)
     ))
 }
 
-/// Copies `file` into the blob store; returns the blob and its size. Refused if more
-/// than `budget` bytes arrive (reading stops one byte past), rather than stored cut
-/// short: a file can grow while it is read.
+/// Copies `file` into the blob store; returns the blob and its size. `None` if more than
+/// `budget` bytes arrive (reading stops one byte past): refused rather than stored cut
+/// short, as a file can grow while it is read.
 fn copy_within(
     blobs: &BlobStore,
     file: impl std::io::Read,
     budget: u64,
-) -> Result<(BlobHash, u64)> {
+) -> Result<Option<(BlobHash, u64)>> {
     let blob = blobs.put(file.take(budget + 1))?;
     // What was stored, not what the file said when it was opened.
     let size = std::fs::metadata(blobs.path(&blob))?.len();
-    if size > budget {
-        return Err(attachments_too_large());
-    }
-    Ok((blob, size))
+    Ok((size <= budget).then_some((blob, size)))
 }
 
 /// Copies the file into the blob store and attaches it; later changes to the file
@@ -130,16 +156,28 @@ pub(crate) async fn attach_file(
             .map(|n| n.to_string_lossy().into_owned())
             .ok_or_else(|| Error::InvalidInput(format!("{} has no file name", path.display())))?;
         let file = std::fs::File::open(&path)?;
-        let budget = MAX_ATTACHMENTS_SIZE.saturating_sub(
-            engine2
-                .store
-                .read(|db| db.drafts().attachments_size(draft))?,
-        );
+        let (used, limits) = engine2
+            .store
+            .read(|db| {
+                // Before copying the file: a draft being sent can't change.
+                if db.drafts().editable(draft)?.is_none() {
+                    return Ok(None);
+                }
+                let Some((smtp, append)) = db.drafts().size_limits(draft)? else {
+                    return Ok(None);
+                };
+                let used = db.drafts().attachments_size(draft)?;
+                Ok(Some((used, SizeLimits { smtp, append })))
+            })?
+            .ok_or(Error::DraftNotFound(draft))?;
+        let limit = attachments_limit(limits);
+        let budget = limit.saturating_sub(used);
         // Spares copying a file that says it is too large; `copy_within` enforces it.
         if file.metadata()?.len() > budget {
-            return Err(attachments_too_large());
+            return Err(attachments_too_large(limit));
         }
-        let (blob, size) = copy_within(&engine2.blobs, file, budget)?;
+        let (blob, size) = copy_within(&engine2.blobs, file, budget)?
+            .ok_or_else(|| attachments_too_large(limit))?;
         let new = NewDraftAttachment {
             blob,
             mime_type: mime_guess::from_path(&path)
@@ -153,8 +191,8 @@ pub(crate) async fn attach_file(
         // blob for GC.
         engine2.store.write(|db| {
             // Again, for the draft: another file may have been attached meanwhile.
-            if db.drafts().attachments_size(draft)? + size > MAX_ATTACHMENTS_SIZE {
-                return Ok(Err(attachments_too_large()));
+            if db.drafts().attachments_size(draft)? + size > limit {
+                return Ok(Err(attachments_too_large(limit)));
             }
             let Some(attachment) = db.drafts().add_attachment(draft, &new, now())? else {
                 return Ok(Ok(None));
@@ -191,11 +229,23 @@ pub(crate) async fn remove_attachment(
 pub(crate) async fn reply(engine: &Arc<Engine>, id: MessageId, all: bool) -> Result<Draft> {
     let message = with_body(engine, id).await?;
     let account_id = message.summary.account_id;
-    let account = engine
-        .read(move |db| db.accounts().get(account_id))
-        .await?
-        .ok_or_else(|| Error::AccountNotFound(account_id.to_string()))?;
-    let content = reply_content(&message, &account.email, all);
+    let (account, identities) = engine
+        .read(move |db| {
+            Ok((
+                db.accounts().get(account_id)?,
+                db.identities().list(account_id)?,
+            ))
+        })
+        .await?;
+    let account = account.ok_or_else(|| Error::AccountNotFound(account_id.to_string()))?;
+    // The default first: it wins over another identity with the same address. The
+    // account's address is its own even if no identity sends as it any more.
+    let own: Vec<Own<'_>> = identities
+        .iter()
+        .map(|i| (Some(i.id), i.email.as_str()))
+        .chain([(None, account.email.as_str())])
+        .collect();
+    let content = reply_content(&message, &own, all);
     let mut references = message.references.clone();
     references.extend(message.message_id.clone());
     let reply = DraftReply {
@@ -282,12 +332,12 @@ pub(crate) fn new_message_id(email: &str) -> String {
     format!("{}@{domain}", Uuid::new_v4().simple())
 }
 
-/// The draft as a message from the account, dated now, its attachments read from the
+/// The draft as a message `from` its sender, dated now, its attachments read from the
 /// blob store. Bcc recipients go into the headers only `with_bcc`, for the draft's copy
 /// on the server. Blocking.
 pub(crate) fn build(
     engine: &Engine,
-    account: &Account,
+    from: &Address,
     snapshot: &DraftSnapshot,
     message_id: &str,
     with_bcc: bool,
@@ -298,12 +348,8 @@ pub(crate) fn build(
         .map(|blob| engine.blobs.read(blob))
         .collect::<std::io::Result<Vec<_>>>()?;
     let draft = &snapshot.draft;
-    let from = Address {
-        name: account.display_name.clone(),
-        email: account.email.clone(),
-    };
     build_message(&Outgoing {
-        from: &from,
+        from,
         to: &draft.content.to,
         cc: &draft.content.cc,
         bcc: if with_bcc { &draft.content.bcc } else { &[] },
@@ -472,12 +518,27 @@ pub(crate) fn check_address(email: &str) -> Result<()> {
     Ok(())
 }
 
-/// Recipients, subject and quoted text of a reply to `message`, written by `me`.
-fn reply_content(message: &Message, me: &str, all: bool) -> DraftContent {
-    let is_me = |a: &Address| a.email.eq_ignore_ascii_case(me);
+/// An address of the account: an identity's, or its own (`None`, written as the default).
+type Own<'a> = (Option<IdentityId>, &'a str);
+
+/// Recipients, subject, quoted text and sender of a reply to `message`, written by the
+/// account whose addresses are `own`. It is written as the address the message came from
+/// or went to, the first of `own` for an address there twice.
+fn reply_content(message: &Message, own: &[Own<'_>], all: bool) -> DraftContent {
+    let mine = |a: &Address| {
+        own.iter()
+            .find(|(_, email)| a.email.eq_ignore_ascii_case(email))
+            .map(|(identity, _)| *identity)
+    };
+    let is_me = |a: &Address| mine(a).is_some();
     let sender = &message.summary.from;
     // Replying to one's own message continues the conversation with its recipients.
     let from_me = sender.iter().any(is_me);
+    let written_as = if from_me {
+        sender.iter().find_map(mine)
+    } else {
+        message.to.iter().chain(&message.cc).find_map(mine)
+    };
     let to = if from_me {
         message.to.clone()
     } else if !message.reply_to.is_empty() {
@@ -506,6 +567,7 @@ fn reply_content(message: &Message, me: &str, all: bool) -> DraftContent {
         cc,
         bcc: Vec::new(),
         text: quote(message),
+        identity: written_as.flatten(),
     }
 }
 
@@ -609,12 +671,35 @@ mod tests {
     fn a_copy_past_its_budget_is_refused_not_cut_short() {
         let dir = tempfile::tempdir().unwrap();
         let blobs = BlobStore::open(dir.path()).unwrap();
-        assert!(matches!(
-            copy_within(&blobs, &b"12345"[..], 4),
-            Err(Error::InvalidInput(_))
-        ));
-        let (blob, size) = copy_within(&blobs, &b"1234"[..], 4).unwrap();
+        assert_eq!(copy_within(&blobs, &b"12345"[..], 4).unwrap(), None);
+        let (blob, size) = copy_within(&blobs, &b"1234"[..], 4).unwrap().unwrap();
         assert_eq!((blobs.read(&blob).unwrap(), size), (b"1234".to_vec(), 4));
+    }
+
+    #[test]
+    fn attachments_fit_what_the_servers_accept_encoded() {
+        let limit = |smtp, append| attachments_limit(SizeLimits { smtp, append });
+        let encoded = |size: u64| size.div_ceil(57) * 78 + MESSAGE_OVERHEAD;
+        assert_eq!(
+            limit(None, None),
+            DEFAULT_ATTACHMENTS_SIZE,
+            "nothing said yet"
+        );
+        // Gmail's: a little under the default, and it fits.
+        let gmail = 35_882_577;
+        assert!(limit(Some(gmail), None) > DEFAULT_ATTACHMENTS_SIZE - 64 * 1024);
+        assert!(encoded(limit(Some(gmail), None)) <= gmail);
+        // More (Fastmail's 70 MB), up to what is built in memory.
+        let fastmail = limit(Some(70_000_000), None);
+        assert!(fastmail > DEFAULT_ATTACHMENTS_SIZE && fastmail <= MAX_ATTACHMENTS_SIZE);
+        assert_eq!(limit(Some(u64::MAX), None), MAX_ATTACHMENTS_SIZE);
+        // Less (Postfix's default), and APPENDLIMIT for the copies.
+        assert!(encoded(limit(Some(10_240_000), None)) <= 10_240_000);
+        assert_eq!(
+            limit(Some(gmail), Some(1_000_000)),
+            limit(Some(1_000_000), None)
+        );
+        assert_eq!(limit(Some(1000), None), 0);
     }
 
     fn addr(name: Option<&str>, email: &str) -> Address {
@@ -651,6 +736,8 @@ mod tests {
         }
     }
 
+    const ME: &[Own<'_>] = &[(None, "me@example.com")];
+
     fn emails(list: &[Address]) -> Vec<&str> {
         list.iter().map(|a| a.email.as_str()).collect()
     }
@@ -665,7 +752,7 @@ mod tests {
                 addr(None, "Zhang@example.com"),
             ],
         );
-        let reply = reply_content(&m, "me@example.com", false);
+        let reply = reply_content(&m, ME, false);
         assert_eq!(emails(&reply.to), ["zhang@example.com"]);
         assert!(reply.cc.is_empty());
         assert_eq!(reply.subject, "Re: 季度报告");
@@ -674,7 +761,7 @@ mod tests {
             "\n\n张三 <zhang@example.com> wrote:\n> 第一行\n>\n> second\n"
         );
 
-        let all = reply_content(&m, "me@example.com", true);
+        let all = reply_content(&m, ME, true);
         assert_eq!(emails(&all.to), ["zhang@example.com"]);
         assert_eq!(
             emails(&all.cc),
@@ -691,7 +778,7 @@ mod tests {
             vec![],
         );
         m.reply_to = vec![addr(None, "list@example.com")];
-        let reply = reply_content(&m, "me@example.com", true);
+        let reply = reply_content(&m, ME, true);
         assert_eq!(emails(&reply.to), ["list@example.com"]);
         assert!(reply.cc.is_empty());
 
@@ -700,9 +787,58 @@ mod tests {
             vec![addr(None, "zhang@example.com")],
             vec![addr(None, "li@example.com")],
         );
-        let reply = reply_content(&mine, "me@example.com", true);
+        let reply = reply_content(&mine, ME, true);
         assert_eq!(emails(&reply.to), ["zhang@example.com"]);
         assert_eq!(emails(&reply.cc), ["li@example.com"]);
+    }
+
+    #[test]
+    fn replies_are_written_as_the_address_written_to() {
+        // The default, another, the same address as the default, and the account's own.
+        let own = [
+            (Some(IdentityId(1)), "me@example.com"),
+            (Some(IdentityId(2)), "news@example.com"),
+            (Some(IdentityId(3)), "ME@example.com"),
+            (None, "account@example.com"),
+        ];
+        let to = |to: &str, cc: &str| {
+            message(
+                addr(None, "zhang@example.com"),
+                vec![addr(None, to)],
+                vec![addr(None, cc)],
+            )
+        };
+        let as_ = |m: &Message| reply_content(m, &own, true).identity;
+        assert_eq!(
+            as_(&to("News@example.com", "me@example.com")),
+            Some(IdentityId(2))
+        );
+        assert_eq!(
+            as_(&to("li@example.com", "news@example.com")),
+            Some(IdentityId(2))
+        );
+        assert_eq!(
+            as_(&to("me@example.com", "li@example.com")),
+            Some(IdentityId(1)),
+            "the default first"
+        );
+        assert_eq!(as_(&to("account@example.com", "li@example.com")), None);
+        assert_eq!(as_(&to("li@example.com", "wang@example.com")), None);
+        let all = reply_content(&to("li@example.com", "account@example.com"), &own, true);
+        assert_eq!(emails(&all.cc), ["li@example.com"], "the account is me");
+        let all = reply_content(&to("news@example.com", "li@example.com"), &own, true);
+        assert_eq!(emails(&all.cc), ["li@example.com"], "an identity is me too");
+
+        let mine = message(
+            addr(None, "news@example.com"),
+            vec![addr(None, "zhang@example.com")],
+            vec![],
+        );
+        let reply = reply_content(&mine, &own, true);
+        assert_eq!(
+            (emails(&reply.to), reply.identity),
+            (vec!["zhang@example.com"], Some(IdentityId(2)))
+        );
     }
 
     #[test]

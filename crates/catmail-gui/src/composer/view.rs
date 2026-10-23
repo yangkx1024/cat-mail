@@ -3,6 +3,7 @@
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState, Textarea};
+use gpui_kit::component::select::Select;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
     App, Context, Entity, ExternalPaths, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -135,16 +136,24 @@ impl Render for Composer {
                 }))
                 .into_any_element()
         });
-        let from = catmail_core::Address {
-            name: self.account.display_name.clone(),
-            email: self.account.email.clone(),
-        }
-        .to_string();
+        let from = match &self.from {
+            FromField::Choice { senders, .. } => Select::new(senders)
+                .id("composer-from")
+                .appearance(false)
+                .small()
+                .disabled(ending)
+                .into_any_element(),
+            FromField::One(_, title) => div()
+                .text_sm()
+                .truncate()
+                .child(title.clone())
+                .into_any_element(),
+        };
         let fields = v_flex()
             .flex_none()
             .px_5()
             .child(
-                field_row("From", div().text_sm().truncate().child(from), cx)
+                field_row("From", from, cx)
                     .border_b_1()
                     .border_color(theme.border),
             )

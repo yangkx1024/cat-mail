@@ -21,6 +21,10 @@ pub enum Error {
     #[error(transparent)]
     Http(HttpError),
 
+    /// Checking an account's or identity's settings, its SMTP server failed so.
+    #[error("outgoing mail server (SMTP): {0}")]
+    OutgoingServer(Box<Error>),
+
     /// The server rejected the credentials.
     #[error("login rejected by the server ({0}); check the username and password")]
     AuthFailed(String),
@@ -37,6 +41,9 @@ pub enum Error {
 
     #[error("account {0} not found")]
     AccountNotFound(String),
+
+    #[error("identity {0} not found")]
+    IdentityNotFound(catmail_types::IdentityId),
 
     #[error("folder {0} not found")]
     FolderNotFound(catmail_types::FolderId),
@@ -125,12 +132,14 @@ impl Error {
             Self::Imap(ImapError(e)) => e.kind(),
             Self::Smtp(SmtpError(e)) => e.kind(),
             Self::Http(HttpError(e)) => e.kind(),
+            Self::OutgoingServer(e) => e.kind(),
             Self::AuthFailed(_) => K::Auth,
             Self::Unsupported(_)
             | Self::InvalidInput(_)
             | Self::NoDataDir
             | Self::DataDirNotOwned(_) => K::Invalid,
             Self::AccountNotFound(_)
+            | Self::IdentityNotFound(_)
             | Self::FolderNotFound(_)
             | Self::MessageNotFound(_)
             | Self::AttachmentNotFound(_)
@@ -149,6 +158,7 @@ impl Error {
     pub fn is_transient(&self) -> bool {
         match self {
             Self::Smtp(SmtpError(e)) => !e.is_permanent(),
+            Self::OutgoingServer(e) => e.is_transient(),
             _ => self.kind() == ErrorKind::Network,
         }
     }

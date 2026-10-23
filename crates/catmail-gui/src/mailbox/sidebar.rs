@@ -101,18 +101,24 @@ impl Mailbox {
         self.accounts.as_deref()?.iter().find_map(|entry| {
             let email = &entry.account.email;
             let status = &entry.status;
-            match (&status.sync, &status.send) {
-                (Some(problem), _) => Some(
+            if let Some(problem) = &status.sync {
+                return Some(
                     match problem.error.kind {
                         ErrorKind::Auth => format!("Can't sign in to {email}"),
                         ErrorKind::Network => format!("Can't reach {email}"),
                         _ => format!("Can't sync {email}"),
                     }
                     .into(),
-                ),
-                (None, Some(_)) => Some(format!("Can't send from {email}").into()),
-                (None, None) => None,
+                );
             }
+            // The address whose server is out of reach.
+            let (id, _) = status.send_problem()?;
+            let from = entry
+                .identities
+                .iter()
+                .find(|i| i.id == id)
+                .map_or(email, |i| &i.email);
+            Some(format!("Can't send from {from}").into())
         })
     }
 

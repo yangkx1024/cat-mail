@@ -9,14 +9,16 @@ use catmail_store::{BlobStore, Store};
 use catmail_types::{
     Account, AccountId, AccountOverview, AccountStatus, AttachmentId, Draft, DraftAttachment,
     DraftAttachmentId, DraftContent, DraftId, Event, Flags, FlushReport, Folder, FolderId,
-    FolderSyncReport, GcReport, Message, MessageCursor, MessageId, MessageSummary, NewAccount,
-    OutboxEntry, OutboxId, PendingOp, PendingOpId, ReplayReport, SearchQuery, SyncReport,
+    FolderSyncReport, GcReport, Identity, IdentityId, Message, MessageCursor, MessageId,
+    MessageSummary, NewAccount, NewIdentity, OutboxEntry, OutboxId, PendingOp, PendingOpId,
+    ReplayReport, SearchQuery, ServerConfig, SyncReport,
 };
 use secrecy::{ExposeSecret, SecretString};
 use tokio::runtime::Handle;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::drafts::SizeLimits;
 use crate::engine::{DEFAULT_DRAFT_UPLOAD_DELAY, Engine, EngineTuning, blocking, now};
 use crate::html::RemoteImage;
 use crate::images::RemoteImageStream;
@@ -269,7 +271,7 @@ impl MailClient {
             .await
     }
 
-    /// Every account with its folders, drafts and outbox, in one read: what a sidebar
+    /// Every account with its identities, folders, drafts and outbox, in one read: what a sidebar
     /// shows, consistent with itself. Their status is
     /// [`account_status`](Self::account_status), which isn't stored.
     pub async fn overview(&self) -> Result<Vec<AccountOverview>> {
@@ -284,6 +286,7 @@ impl MailClient {
                             outbox.into_iter().partition(|e| e.account_id == account.id);
                         outbox = rest;
                         accounts.push(AccountOverview {
+                            identities: db.identities().list(account.id)?,
                             folders: db.folders().list(account.id)?,
                             drafts: db.drafts().count(account.id)?,
                             outbox: own,
@@ -315,27 +318,45 @@ impl MailClient {
             .await
     }
 
-    /// Connects to the IMAP server and logs in with these settings, storing nothing, so a
-    /// frontend can reject a wrong password or server before the account exists. Fails as
-    /// a sync would: [`Error::AuthFailed`], [`Error::Unsupported`], or a network error.
+    /// Connects to the IMAP server and then the SMTP server and logs in with these
+    /// settings, storing nothing, so a frontend can reject a wrong password or server
+    /// before the account exists. Fails as a sync would: [`Error::AuthFailed`],
+    /// [`Error::Unsupported`], or a network error; what the SMTP server fails with comes
+    /// wrapped in [`Error::OutgoingServer`].
     pub async fn check_login(&self, new: &NewAccount, password: &SecretString) -> Result<()> {
+        self.check_account(new, password).await.map(drop)
+    }
+
+    /// [`check_login`](Self::check_login), returning what the servers said about message
+    /// size.
+    async fn check_account(&self, new: &NewAccount, password: &SecretString) -> Result<SizeLimits> {
         validate_new_account(new)?;
-        if password.expose_secret().is_empty() {
-            return Err(Error::InvalidInput("password must not be empty".into()));
-        }
+        check_password(password)?;
         let engine = self.engine.clone();
-        let imap = new.imap.clone();
+        let (imap, smtp) = (new.imap.clone(), new.smtp.clone());
         let credentials = Credentials {
             username: new.username.clone(),
             password: password.clone(),
         };
         self.rt
             .run(async move {
-                connection::login(&engine, &imap, &credentials)
-                    .await?
-                    .logout()
-                    .await;
-                Ok(())
+                // Both at once. IMAP's failure is the one to report if both fail, and
+                // once it has failed SMTP's answer isn't waited for.
+                let mut imap = std::pin::pin!(async {
+                    let session = connection::login(&engine, &imap, &credentials).await?;
+                    let append = connection::announced_append_limit(session.capabilities());
+                    session.logout().await;
+                    Ok::<_, Error>(append)
+                });
+                let mut smtp = std::pin::pin!(check_smtp(&engine, &smtp, &credentials));
+                let (append, smtp) = tokio::select! {
+                    append = &mut imap => (append?, smtp.await?),
+                    smtp = &mut smtp => {
+                        let append = imap.await?;
+                        (append, smtp?)
+                    }
+                };
+                Ok(SizeLimits { append, smtp })
             })
             .await
     }
@@ -343,36 +364,178 @@ impl MailClient {
     /// Stores the account and its password. Does not contact the server; the first
     /// [`sync_account`](Self::sync_account) does.
     pub async fn add_account(&self, new: NewAccount, password: SecretString) -> Result<Account> {
+        self.store_account(new, password, SizeLimits::default())
+            .await
+    }
+
+    /// [`check_login`](Self::check_login), then [`add_account`](Self::add_account) if it
+    /// worked, keeping what the servers said about message size: attachments are limited
+    /// by it before the first send.
+    pub async fn add_account_checked(
+        &self,
+        new: NewAccount,
+        password: SecretString,
+    ) -> Result<Account> {
+        let limits = self.check_account(&new, &password).await?;
+        self.store_account(new, password, limits).await
+    }
+
+    async fn store_account(
+        &self,
+        new: NewAccount,
+        password: SecretString,
+        limits: SizeLimits,
+    ) -> Result<Account> {
         validate_new_account(&new)?;
-        if password.expose_secret().is_empty() {
-            return Err(Error::InvalidInput("password must not be empty".into()));
-        }
+        check_password(&password)?;
         let engine = self.engine.clone();
         self.rt
             .run_blocking(move || {
-                // Secret first, row second: whoever can see the row can also see its
-                // secret, so a concurrent removal always finds and deletes it. The random
-                // key keeps data directories apart.
-                let secret_key = format!("account:{}:{}", new.email, Uuid::new_v4().simple());
-                engine.secrets.set(&secret_key, &password)?;
-                let account = match engine
-                    .store
-                    .write(|db| db.accounts().insert(&new, &secret_key))
-                {
-                    Ok(account) => account,
-                    Err(e) => {
-                        if let Err(cleanup) = engine.secrets.delete(&secret_key) {
-                            tracing::warn!(error = %cleanup,
-                                "failed to delete password after account insert failed");
-                        }
-                        return Err(e.into());
-                    }
-                };
+                let account =
+                    insert_with_secret(&engine, "account", &new.email, &password, |key| {
+                        Ok(engine.store.write(|db| {
+                            let account = db.accounts().insert(&new, key)?;
+                            db.accounts().set_append_limit(account.id, limits.append)?;
+                            if let Some(own) = db.identities().default_of(account.id)? {
+                                db.identities().set_smtp_max_size(own, limits.smtp)?;
+                            }
+                            Ok(account)
+                        })?)
+                    })?;
                 engine.emit(Event::AccountAdded {
                     account: account.id,
                 });
                 watch::spawn(&engine, account.id);
                 Ok(account)
+            })
+            .await
+    }
+
+    /// The account's identities: the default first, then the others oldest first.
+    pub async fn list_identities(&self, account: AccountId) -> Result<Vec<Identity>> {
+        let engine = self.engine.clone();
+        self.rt
+            .run_blocking(move || Ok(engine.store.read(|db| db.identities().list(account))?))
+            .await
+    }
+
+    /// Connects to the identity's SMTP server and logs in, storing nothing, as
+    /// [`check_login`](Self::check_login) does for an account. The server's failure comes
+    /// wrapped in [`Error::OutgoingServer`].
+    pub async fn check_identity_login(
+        &self,
+        new: &NewIdentity,
+        password: &SecretString,
+    ) -> Result<()> {
+        self.check_identity(new, password).await.map(drop)
+    }
+
+    /// [`check_identity_login`](Self::check_identity_login), returning the SIZE the server
+    /// announced.
+    async fn check_identity(
+        &self,
+        new: &NewIdentity,
+        password: &SecretString,
+    ) -> Result<Option<u64>> {
+        validate_new_identity(new)?;
+        check_password(password)?;
+        let engine = self.engine.clone();
+        let smtp = new.smtp.clone();
+        let credentials = Credentials {
+            username: new.username.clone(),
+            password: password.clone(),
+        };
+        self.rt
+            .run(async move { check_smtp(&engine, &smtp, &credentials).await })
+            .await
+    }
+
+    /// Stores another address the account sends as, with its own SMTP server and
+    /// password. It isn't the default. Does not contact the server.
+    pub async fn add_identity(
+        &self,
+        account: AccountId,
+        new: NewIdentity,
+        password: SecretString,
+    ) -> Result<Identity> {
+        self.store_identity(account, new, password, None).await
+    }
+
+    /// [`check_identity_login`](Self::check_identity_login), then
+    /// [`add_identity`](Self::add_identity) if it worked, keeping the SIZE the server
+    /// announced, as [`add_account_checked`](Self::add_account_checked) does.
+    pub async fn add_identity_checked(
+        &self,
+        account: AccountId,
+        new: NewIdentity,
+        password: SecretString,
+    ) -> Result<Identity> {
+        let smtp_max_size = self.check_identity(&new, &password).await?;
+        self.store_identity(account, new, password, smtp_max_size)
+            .await
+    }
+
+    async fn store_identity(
+        &self,
+        account: AccountId,
+        new: NewIdentity,
+        password: SecretString,
+        smtp_max_size: Option<u64>,
+    ) -> Result<Identity> {
+        validate_new_identity(&new)?;
+        check_password(&password)?;
+        let engine = self.engine.clone();
+        self.rt
+            .run_blocking(move || {
+                let identity =
+                    insert_with_secret(&engine, "identity", &new.email, &password, |key| {
+                        engine
+                            .store
+                            .write(|db| db.identities().insert(account, &new, key, smtp_max_size))?
+                            .ok_or_else(|| Error::AccountNotFound(account.to_string()))
+                    })?;
+                engine.emit(Event::IdentitiesChanged { account });
+                Ok(identity)
+            })
+            .await
+    }
+
+    /// Makes it the account's default: new drafts are from it.
+    pub async fn set_default_identity(&self, id: IdentityId) -> Result<()> {
+        let engine = self.engine.clone();
+        self.rt
+            .run_blocking(move || {
+                let account = engine
+                    .store
+                    .write(|db| db.identities().set_default(id))?
+                    .ok_or(Error::IdentityNotFound(id))?;
+                engine.emit(Event::IdentitiesChanged { account });
+                Ok(())
+            })
+            .await
+    }
+
+    /// Removes the identity and its stored password. Drafts written as it are written as
+    /// the account's default. Refused with [`Error::Conflict`] for the default, and while
+    /// the outbox has messages to send as it.
+    pub async fn remove_identity(&self, id: IdentityId) -> Result<()> {
+        let engine = self.engine.clone();
+        self.rt
+            .run_blocking(move || {
+                let deleted = engine
+                    .store
+                    .write(|db| db.identities().delete(id, now()))?
+                    .ok_or(Error::IdentityNotFound(id))?;
+                if let Some(key) = &deleted.secret_key {
+                    forget_secret(&engine, key);
+                }
+                let account = deleted.account;
+                engine.forget_identity(account, id);
+                engine.emit(Event::IdentitiesChanged { account });
+                if deleted.drafts > 0 {
+                    drafts::changed(&engine, account);
+                }
+                Ok(())
             })
             .await
     }
@@ -387,15 +550,16 @@ impl MailClient {
                 let result = blocking({
                     let engine = engine.clone();
                     move || {
-                        let Some(secret_key) = engine.store.write(|db| db.accounts().delete(id))?
-                        else {
+                        let deleted = engine.store.write(|db| {
+                            // Its identities go with it.
+                            let identities = db.identities().secret_keys(id)?;
+                            Ok(db.accounts().delete(id)?.map(|key| (key, identities)))
+                        })?;
+                        let Some((secret_key, identities)) = deleted else {
                             return Err(Error::AccountNotFound(id.to_string()));
                         };
-                        // The account is already gone; an orphaned keyring entry is only
-                        // clutter.
-                        if let Err(e) = engine.secrets.delete(&secret_key) {
-                            tracing::warn!(account = %id, error = %e,
-                                "failed to delete stored password");
+                        for key in std::iter::once(secret_key).chain(identities) {
+                            forget_secret(&engine, &key);
                         }
                         engine.emit(Event::AccountRemoved { account: id });
                         Ok(())
@@ -951,8 +1115,72 @@ fn remove_old_files(dir: &Path, age: Duration) {
     }
 }
 
+fn check_password(password: &SecretString) -> Result<()> {
+    if password.expose_secret().is_empty() {
+        return Err(Error::InvalidInput("password must not be empty".into()));
+    }
+    Ok(())
+}
+
+/// Logs in to the SMTP server `server` and out again; returns the SIZE it announced. Its
+/// failure as [`Error::OutgoingServer`].
+async fn check_smtp(
+    engine: &Engine,
+    server: &ServerConfig,
+    credentials: &Credentials,
+) -> Result<Option<u64>> {
+    let session = connection::smtp_login(engine, server, credentials)
+        .await
+        .map_err(|e| Error::OutgoingServer(Box::new(e)))?;
+    let limit = session.max_size();
+    session.quit().await;
+    Ok(limit)
+}
+
+/// Stores `password` in the keyring under a new key for a `kind` (`account`, `identity`)
+/// with that address, then runs `insert`, which stores the row naming the key; deletes
+/// the key again if that fails. Secret first, row second: whoever can see the row can
+/// also see its secret, so a concurrent removal always finds and deletes it. The random
+/// key keeps data directories apart.
+fn insert_with_secret<T>(
+    engine: &Engine,
+    kind: &str,
+    email: &str,
+    password: &SecretString,
+    insert: impl FnOnce(&str) -> Result<T>,
+) -> Result<T> {
+    let key = format!("{kind}:{email}:{}", Uuid::new_v4().simple());
+    engine.secrets.set(&key, password)?;
+    let inserted = insert(&key);
+    if inserted.is_err()
+        && let Err(e) = engine.secrets.delete(&key)
+    {
+        tracing::warn!(error = %e, "failed to delete password after {kind} insert failed");
+    }
+    inserted
+}
+
+/// Deletes the keyring entry of a row already deleted: left behind, it would only be
+/// clutter.
+fn forget_secret(engine: &Engine, key: &str) {
+    if let Err(e) = engine.secrets.delete(key) {
+        tracing::warn!(error = %e, "failed to delete stored password");
+    }
+}
+
+fn validate_new_identity(new: &NewIdentity) -> Result<()> {
+    // It goes into MAIL FROM and the From header.
+    drafts::check_address(&new.email)?;
+    if new.username.is_empty() {
+        return Err(Error::InvalidInput("username must not be empty".into()));
+    }
+    validate_server("SMTP", &new.smtp)
+}
+
 fn validate_new_account(new: &NewAccount) -> Result<()> {
     let invalid = |msg: &str| Err(Error::InvalidInput(msg.into()));
+    // Not checked as an address to send from: an account whose address can't be sent
+    // from yet (non-ASCII) still reads its mail, and is refused when queueing.
     let Some((local, domain)) = new.email.split_once('@') else {
         return invalid("email must contain `@`");
     };
@@ -962,15 +1190,18 @@ fn validate_new_account(new: &NewAccount) -> Result<()> {
     if new.username.is_empty() {
         return invalid("username must not be empty");
     }
-    for (proto, server) in [("IMAP", &new.imap), ("SMTP", &new.smtp)] {
-        if server.host.is_empty() {
-            return Err(Error::InvalidInput(format!(
-                "{proto} host must not be empty"
-            )));
-        }
-        if server.port == 0 {
-            return Err(Error::InvalidInput(format!("{proto} port must not be 0")));
-        }
+    validate_server("IMAP", &new.imap)?;
+    validate_server("SMTP", &new.smtp)
+}
+
+fn validate_server(proto: &str, server: &ServerConfig) -> Result<()> {
+    if server.host.is_empty() {
+        return Err(Error::InvalidInput(format!(
+            "{proto} host must not be empty"
+        )));
+    }
+    if server.port == 0 {
+        return Err(Error::InvalidInput(format!("{proto} port must not be 0")));
     }
     Ok(())
 }
@@ -1108,6 +1339,70 @@ mod tests {
             client.remove_account(account.id).await,
             Err(Error::AccountNotFound(_))
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn identity_passwords_are_kept_apart_and_removed_with_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(MemorySecrets::default());
+        let client = open_client(dir.path(), secrets.clone());
+        let account = client
+            .add_account(new_account("a@example.com"), "imap-pw".into())
+            .await
+            .unwrap();
+        let new = NewIdentity {
+            email: "news@example.com".into(),
+            display_name: None,
+            username: "resend".into(),
+            smtp: new_account("a@example.com").smtp,
+        };
+        let identity = client
+            .add_identity(account.id, new.clone(), "api-key".into())
+            .await
+            .unwrap();
+        let key = |id| {
+            client
+                .engine
+                .store
+                .read(|db| db.identities().sending(account.id, Some(id)))
+                .unwrap()
+                .unwrap()
+                .login_key
+        };
+        assert_eq!(
+            stored(&secrets, &key(identity.id)).as_deref(),
+            Some("api-key")
+        );
+        assert_eq!(secrets.len(), 2);
+
+        // A duplicate leaves no password behind, nor does a missing account.
+        let again = client
+            .add_identity(account.id, new.clone(), "other".into())
+            .await;
+        assert!(matches!(again, Err(Error::AlreadyExists(_))), "{again:?}");
+        let missing = client
+            .add_identity(AccountId(99), new.clone(), "other".into())
+            .await;
+        assert!(
+            matches!(missing, Err(Error::AccountNotFound(_))),
+            "{missing:?}"
+        );
+        assert_eq!(secrets.len(), 2);
+
+        client.remove_identity(identity.id).await.unwrap();
+        assert_eq!(secrets.len(), 1);
+        assert!(matches!(
+            client.remove_identity(identity.id).await,
+            Err(Error::IdentityNotFound(_))
+        ));
+
+        client
+            .add_identity(account.id, new, "api-key".into())
+            .await
+            .unwrap();
+        assert_eq!(secrets.len(), 2);
+        client.remove_account(account.id).await.unwrap();
+        assert_eq!(secrets.len(), 0, "the identity's went with the account");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1506,7 +1801,7 @@ mod tests {
         );
         let error = flushed.entries[0].last_error.as_deref().unwrap();
         assert!(error.contains("locked"));
-        assert_eq!(flushed.error.unwrap().message, error);
+        assert_eq!(flushed.errors.into_values().next().unwrap().message, error);
     }
 
     #[tokio::test(flavor = "multi_thread")]
