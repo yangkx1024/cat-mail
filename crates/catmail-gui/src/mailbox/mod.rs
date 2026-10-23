@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use catmail_core::{
     Account, AccountId, AccountOverview, AccountStatus, Event, Flags, FolderId, FolderRole,
-    MailClient, OutboxEntry, RecvError,
+    Identity, MailClient, OutboxEntry, RecvError,
 };
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::list::{ListEvent, ListState};
@@ -85,6 +85,8 @@ impl Place {
 #[derive(PartialEq)]
 pub struct AccountEntry {
     pub account: Account,
+    /// The addresses it sends as, the default first.
+    pub identities: Vec<Identity>,
     pub folders: AccountFolders,
     pub drafts: usize,
     /// Still to be sent (sent ones leave the outbox).
@@ -96,6 +98,7 @@ impl AccountEntry {
     fn new(overview: AccountOverview, status: AccountStatus) -> Self {
         Self {
             account: overview.account,
+            identities: overview.identities,
             folders: AccountFolders::new(overview.folders),
             drafts: overview.drafts,
             outbox: overview.outbox,

@@ -3,7 +3,9 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AccountId, Folder, OutboxEntry, ReportedError};
+use std::collections::BTreeMap;
+
+use crate::{AccountId, Address, Folder, IdentityId, OutboxEntry, ReportedError};
 
 /// Transport security for an IMAP or SMTP connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,26 +72,69 @@ pub struct ServerConfig {
     pub security: Security,
 }
 
+/// A mailbox on an IMAP server. What it sends as, and through which SMTP server, are its
+/// [`Identity`]s.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Account {
     pub id: AccountId,
     pub email: String,
     pub display_name: Option<String>,
-    /// Login name for IMAP/SMTP; usually but not always the email address.
+    /// Login name for IMAP (and for SMTP, with the identity it was added with); usually
+    /// but not always the email address.
     pub username: String,
     pub imap: ServerConfig,
-    pub smtp: ServerConfig,
     /// Unix timestamp, seconds.
     pub created_at: i64,
 }
 
-/// Input for creating an account.
+/// Input for creating an account. `smtp` makes its first identity: its own address,
+/// through that server, logging in as the account does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewAccount {
     pub email: String,
     pub display_name: Option<String>,
     pub username: String,
     pub imap: ServerConfig,
+    pub smtp: ServerConfig,
+}
+
+/// An address an account sends as, through an SMTP server and login of its own. Every
+/// account has one made with it (its own address and SMTP server, its password), and
+/// may add others: a sending service such as Resend, say. One of them is the default,
+/// which new messages are from. Replies and copies still go through the account
+/// (Drafts, Sent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Identity {
+    pub id: IdentityId,
+    pub account_id: AccountId,
+    /// The From address, and MAIL FROM.
+    pub email: String,
+    pub display_name: Option<String>,
+    /// Login name for its SMTP server.
+    pub username: String,
+    pub smtp: ServerConfig,
+    /// New messages are from it. Exactly one of an account's identities is.
+    pub is_default: bool,
+    /// Unix timestamp, seconds.
+    pub created_at: i64,
+}
+
+impl Identity {
+    /// What messages sent as it are from.
+    pub fn address(&self) -> Address {
+        Address {
+            name: self.display_name.clone(),
+            email: self.email.clone(),
+        }
+    }
+}
+
+/// Input for adding an [`Identity`] to an account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewIdentity {
+    pub email: String,
+    pub display_name: Option<String>,
+    pub username: String,
     pub smtp: ServerConfig,
 }
 
@@ -100,9 +145,16 @@ pub struct NewAccount {
 pub struct AccountStatus {
     /// Syncing with the IMAP server failed.
     pub sync: Option<ServerProblem>,
-    /// Reaching the SMTP server to send failed. Queued messages wait meanwhile, without
-    /// any of them counting it as an attempt.
-    pub send: Option<ServerProblem>,
+    /// Reaching an identity's SMTP server to send failed. The messages queued for it wait
+    /// meanwhile, without any of them counting it as an attempt.
+    pub send: BTreeMap<IdentityId, ServerProblem>,
+}
+
+impl AccountStatus {
+    /// An identity whose server couldn't be reached to send, if any.
+    pub fn send_problem(&self) -> Option<(IdentityId, &ServerProblem)> {
+        self.send.iter().next().map(|(id, problem)| (*id, problem))
+    }
 }
 
 /// An account with what is shown next to it, read at once: its folders, its drafts and
@@ -111,6 +163,8 @@ pub struct AccountStatus {
 pub struct AccountOverview {
     pub account: Account,
     pub folders: Vec<Folder>,
+    /// The default first, then the others oldest first.
+    pub identities: Vec<Identity>,
     /// Drafts not handed to "send".
     pub drafts: usize,
     /// Not sent yet (sent ones leave the outbox), oldest first.

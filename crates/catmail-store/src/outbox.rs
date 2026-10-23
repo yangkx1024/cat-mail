@@ -1,5 +1,5 @@
 use catmail_types::{
-    AccountId, BlobHash, DraftId, Flags, MessageId, OutboxEntry, OutboxId, OutboxStatus,
+    AccountId, BlobHash, DraftId, Flags, IdentityId, MessageId, OutboxEntry, OutboxId, OutboxStatus,
 };
 use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
@@ -8,7 +8,8 @@ use crate::drafts::Drafts;
 use crate::ops::{PendingOps, Touched};
 use crate::{Error, Result};
 
-const COLUMNS: &str = "id, account_id, draft_id, subject, recipients_json, message_id_hdr, status,
+const COLUMNS: &str =
+    "id, account_id, identity_id, draft_id, subject, recipients_json, message_id_hdr, status,
     attempts, next_attempt_at, last_error, created_at";
 
 /// A message to queue: its raw form is already in the blob store.
@@ -16,7 +17,7 @@ const COLUMNS: &str = "id, account_id, draft_id, subject, recipients_json, messa
 pub struct NewOutboxEntry {
     pub account: AccountId,
     /// The draft it was built from. Queueing fails if the draft changed since `revision`,
-    /// or is queued already.
+    /// or is queued already. It is sent through the draft's identity.
     pub draft: DraftId,
     pub revision: i64,
     pub raw: BlobHash,
@@ -74,11 +75,11 @@ impl<'c> Outbox<'c> {
         }
         self.conn
             .prepare_cached(
-                "INSERT INTO outbox (account_id, draft_id, raw_blob_hash, message_id_hdr, subject,
-                                     envelope_from, recipients_json, next_attempt_at,
-                                     created_at, updated_at)
-                 VALUES (:account, :draft, :raw, :message_id, :subject, :from, :recipients,
-                         :now, :now, :now)",
+                "INSERT INTO outbox (account_id, identity_id, draft_id, raw_blob_hash,
+                                     message_id_hdr, subject, envelope_from, recipients_json,
+                                     next_attempt_at, created_at, updated_at)
+                 VALUES (:account, (SELECT identity_id FROM drafts WHERE id = :draft), :draft,
+                         :raw, :message_id, :subject, :from, :recipients, :now, :now, :now)",
             )?
             .execute(named_params! {
                 ":account": entry.account.0,
@@ -112,20 +113,21 @@ impl<'c> Outbox<'c> {
     }
 
     /// Entries of `account` with work left in `status` (queued, or accepted and not
-    /// yet saved), oldest first. With `now`, only those due by then.
+    /// yet saved), oldest first, with the identity each is sent as. With `now`, only
+    /// those due by then.
     pub fn pending(
         &self,
         account: AccountId,
         status: OutboxStatus,
         now: Option<i64>,
-    ) -> Result<Vec<OutboxId>> {
+    ) -> Result<Vec<(OutboxId, IdentityId)>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id FROM outbox
+            "SELECT id, identity_id FROM outbox
              WHERE account_id = ?1 AND status = ?2 AND (?3 IS NULL OR next_attempt_at <= ?3)
              ORDER BY id",
         )?;
         let rows = stmt.query_map(params![account.0, status.as_str(), now], |r| {
-            Ok(OutboxId(r.get(0)?))
+            Ok((OutboxId(r.get(0)?), IdentityId(r.get(1)?)))
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -440,6 +442,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<OutboxEntry> {
     Ok(OutboxEntry {
         id: OutboxId(row.get("id")?),
         account_id: AccountId(row.get("account_id")?),
+        identity: IdentityId(row.get("identity_id")?),
         draft_id: row.get::<_, Option<i64>>("draft_id")?.map(DraftId),
         subject: row.get("subject")?,
         recipients: json(row, "recipients_json")?,
@@ -514,6 +517,9 @@ mod tests {
             store
                 .read(|db| db.outbox().pending(account, status, now))
                 .unwrap()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>()
         };
         assert_eq!(pending(OutboxStatus::Queued, Some(9)), []);
         assert_eq!(pending(OutboxStatus::Queued, Some(10)), [id]);

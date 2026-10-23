@@ -387,7 +387,7 @@ async fn check_login_logs_in_and_stores_nothing() {
         display_name: None,
         username: account.username,
         imap: account.imap,
-        smtp: account.smtp,
+        smtp: env.smtp_config(),
     };
 
     let start = env.fake.state().log.len();
@@ -408,6 +408,15 @@ async fn check_login_logs_in_and_stores_nothing() {
     assert!(matches!(err, Error::AuthFailed(_)), "{err:?}");
     let err = env.client.check_login(&new, &"".into()).await.unwrap_err();
     assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
+    // The SMTP server is tried too, and its failure told apart.
+    env.smtp.state().faults.reject_login = true;
+    let err = env
+        .client
+        .check_login(&new, &"pw".into())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::OutgoingServer(_)), "{err:?}");
+    assert_eq!(err.kind(), catmail_core::ErrorKind::Auth);
 
     let accounts = env.client.list_accounts().await.unwrap();
     assert_eq!(accounts.len(), 1, "only the account the test set up");

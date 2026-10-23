@@ -1,18 +1,17 @@
-//! The sign-in form: an account's servers and password. The login is tried against the
-//! IMAP server before anything is stored, so a typo leaves no account (or keyring entry)
+//! The sign-in form: an account's servers and password. The login is tried against both
+//! servers before anything is stored, so a typo leaves no account (or keyring entry)
 //! behind, as with `catmail account add`.
 
-use catmail_core::{Account, MailClient, NewAccount, SecretString, Security, ServerConfig};
+use catmail_core::{Account, MailClient, NewAccount, Security};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::form::{Field, Form};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::radio::RadioGroup;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Task, TestSupportExt as _, Window, div, prelude::FluentBuilder as _, rems,
+    App, Context, EventEmitter, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div,
+    prelude::FluentBuilder as _, rems,
 };
+
+use crate::login_form::{self, LoginFields, LoginValues, ServerFields, ServerValues};
 
 pub enum AddAccountEvent {
     /// The login worked and the account is stored; it has not been synced yet.
@@ -20,135 +19,31 @@ pub enum AddAccountEvent {
     Cancelled,
 }
 
-/// Security choices, in the order the radio groups show them.
-const SECURITY: [(Security, &str); 3] = [
-    (Security::Tls, "TLS"),
-    (Security::StartTls, "STARTTLS"),
-    (Security::Plain, "None"),
-];
-
-/// A server's part of the form, as typed.
-#[derive(Debug, Clone)]
-struct ServerValues {
-    host: String,
-    port: String,
-    security: Security,
-}
-
-impl ServerValues {
-    /// An empty port means the usual one for the security mode, as in the CLI. The rest
-    /// (an empty host, say) is the engine's to reject.
-    fn config(&self, default_port: fn(Security) -> u16) -> Result<ServerConfig, &'static str> {
-        let port = match self.port.trim() {
-            "" => default_port(self.security),
-            port => port
-                .parse::<u16>()
-                .ok()
-                .filter(|&p| p != 0)
-                .ok_or("A port is a number from 1 to 65535.")?,
-        };
-        Ok(ServerConfig {
-            host: self.host.trim().to_owned(),
-            port,
-            security: self.security,
-        })
-    }
-}
-
 /// What the form holds, as typed.
 #[derive(Debug, Clone)]
 struct Values {
-    email: String,
-    /// Redacted in `Debug` output.
-    password: SecretString,
-    name: String,
-    username: String,
+    login: LoginValues,
     imap: ServerValues,
     smtp: ServerValues,
 }
 
 impl Values {
-    /// The account to add. An empty username is the email address, as in the CLI.
+    /// The account to add.
     fn new_account(&self) -> Result<NewAccount, &'static str> {
-        let email = self.email.trim();
-        let username = match self.username.trim() {
-            "" => email,
-            username => username,
-        };
-        let name = self.name.trim();
+        let (email, display_name, username) = self.login.who();
         Ok(NewAccount {
-            email: email.to_owned(),
-            display_name: (!name.is_empty()).then(|| name.to_owned()),
-            username: username.to_owned(),
+            email,
+            display_name,
+            username,
             imap: self.imap.config(Security::default_imap_port)?,
             smtp: self.smtp.config(Security::default_smtp_port)?,
         })
     }
 }
 
-/// The fields of one server, IMAP or SMTP.
-struct ServerFields {
-    /// Prefix of the element ids.
-    id: &'static str,
-    title: &'static str,
-    default_port: fn(Security) -> u16,
-    host: Entity<InputState>,
-    port: Entity<InputState>,
-    security: Security,
-}
-
-impl ServerFields {
-    fn new(
-        id: &'static str,
-        title: &'static str,
-        example_host: &'static str,
-        default_port: fn(Security) -> u16,
-        window: &mut Window,
-        cx: &mut Context<AddAccount>,
-    ) -> Self {
-        let security = Security::Tls;
-        let host = cx.new(|cx| InputState::new(window, cx).placeholder(example_host));
-        let port = cx
-            .new(|cx| InputState::new(window, cx).placeholder(default_port(security).to_string()));
-        Self {
-            id,
-            title,
-            default_port,
-            host,
-            port,
-            security,
-        }
-    }
-
-    fn values(&self, cx: &App) -> ServerValues {
-        ServerValues {
-            host: self.host.read(cx).value().to_string(),
-            port: self.port.read(cx).value().to_string(),
-            security: self.security,
-        }
-    }
-
-    /// Also shows the new mode's usual port as the placeholder.
-    fn set_security(
-        &mut self,
-        security: Security,
-        window: &mut Window,
-        cx: &mut Context<AddAccount>,
-    ) {
-        self.security = security;
-        let port = (self.default_port)(security).to_string();
-        self.port
-            .update(cx, |input, cx| input.set_placeholder(port, window, cx));
-        cx.notify();
-    }
-}
-
 pub struct AddAccount {
     client: MailClient,
-    email: Entity<InputState>,
-    password: Entity<InputState>,
-    name: Entity<InputState>,
-    username: Entity<InputState>,
+    login: LoginFields,
     imap: ServerFields,
     smtp: ServerFields,
     /// False for the first account: there is nothing to go back to.
@@ -168,11 +63,7 @@ impl AddAccount {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let email = cx.new(|cx| InputState::new(window, cx).placeholder("you@example.com"));
-        let password = cx.new(|cx| InputState::new(window, cx).masked(true));
-        let name = cx.new(|cx| InputState::new(window, cx).placeholder("Optional"));
-        let username =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Same as the email address"));
+        let login = LoginFields::new("", None, window, cx);
         let imap = ServerFields::new(
             "imap",
             "Incoming mail (IMAP)",
@@ -190,27 +81,16 @@ impl AddAccount {
             cx,
         );
 
-        // Enter in any field signs in, as in a native login form.
-        let subscriptions = [
-            &email, &password, &name, &username, &imap.host, &imap.port, &smtp.host, &smtp.port,
-        ]
-        .into_iter()
-        .map(|field| {
-            cx.subscribe_in(field, window, |this, _, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
-                    this.sign_in(window, cx);
-                }
-            })
-        })
-        .collect();
-        email.update(cx, |email, cx| email.focus(window, cx));
+        let fields = login
+            .inputs()
+            .into_iter()
+            .chain(imap.inputs())
+            .chain(smtp.inputs());
+        let subscriptions = login_form::submit_on_enter(fields, Self::sign_in, window, cx);
 
         Self {
             client,
-            email,
-            password,
-            name,
-            username,
+            login,
             imap,
             smtp,
             cancellable,
@@ -222,12 +102,8 @@ impl AddAccount {
     }
 
     fn values(&self, cx: &App) -> Values {
-        let text = |input: &Entity<InputState>| input.read(cx).value().to_string();
         Values {
-            email: text(&self.email),
-            password: text(&self.password).into(),
-            name: text(&self.name),
-            username: text(&self.username),
+            login: self.login.values(cx),
             imap: self.imap.values(cx),
             smtp: self.smtp.values(cx),
         }
@@ -250,14 +126,9 @@ impl AddAccount {
         self.error = None;
         cx.notify();
         let client = self.client.clone();
-        let password = values.password;
+        let password = values.login.password;
         self._sign_in = cx.spawn_in(window, async move |this, cx| {
-            // `check_login` also validates the settings, as `add_account` would.
-            let added = async {
-                client.check_login(&new, &password).await?;
-                client.add_account(new, password).await
-            }
-            .await;
+            let added = client.add_account_checked(new, password).await;
             this.update(cx, |this, cx| {
                 this.signing_in = false;
                 match added {
@@ -269,76 +140,10 @@ impl AddAccount {
             .ok();
         });
     }
-
-    fn render_server(
-        &self,
-        server: fn(&mut Self) -> &mut ServerFields,
-        fields: &ServerFields,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let id = fields.id;
-        let selected = SECURITY.iter().position(|(s, _)| *s == fields.security);
-        v_flex()
-            .gap_2()
-            .child(div().text_sm().font_semibold().child(fields.title))
-            .child(
-                Form::new()
-                    .columns(3)
-                    .child(Field::new().label("Server").col_span(2).child(
-                        Input::new(&fields.host).id(SharedString::from(format!("{id}-host"))),
-                    ))
-                    .child(Field::new().label("Port").child(
-                        Input::new(&fields.port).id(SharedString::from(format!("{id}-port"))),
-                    ))
-                    .child(
-                        Field::new()
-                            .label("Security")
-                            .col_span(3)
-                            .when(fields.security == Security::Plain, |field| {
-                                field.description("Unencrypted. Only for local test servers.")
-                            })
-                            .child(
-                                RadioGroup::horizontal(SharedString::from(format!(
-                                    "{id}-security"
-                                )))
-                                .children(SECURITY.iter().map(|(_, label)| *label))
-                                .selected_index(selected)
-                                .on_change(cx.listener(
-                                    move |this, ix: &usize, window, cx| {
-                                        server(this).set_security(SECURITY[*ix].0, window, cx)
-                                    },
-                                )),
-                            ),
-                    ),
-            )
-    }
 }
 
 impl Render for AddAccount {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let account = Form::new()
-            .child(
-                Field::new()
-                    .label("Email")
-                    .child(Input::new(&self.email).id("email")),
-            )
-            .child(
-                Field::new()
-                    .label("Password")
-                    .child(Input::new(&self.password).id("password").mask_toggle()),
-            )
-            .child(
-                Field::new()
-                    .label("Name")
-                    .description("Shown to the people you write to.")
-                    .child(Input::new(&self.name).id("name")),
-            )
-            .child(
-                Field::new()
-                    .label("Username")
-                    .child(Input::new(&self.username).id("username")),
-            );
-
         let actions = h_flex()
             .justify_end()
             .gap_2()
@@ -382,20 +187,11 @@ impl Render for AddAccount {
                                     .child("cat-mail signs in to check these settings before saving them."),
                             ),
                     )
-                    .child(account)
-                    .child(self.render_server(|this| &mut this.imap, &self.imap, cx))
-                    .child(self.render_server(|this| &mut this.smtp, &self.smtp, cx))
+                    .child(self.login.render())
+                    .child(self.imap.render(|this: &mut Self| &mut this.imap, cx))
+                    .child(self.smtp.render(|this: &mut Self| &mut this.smtp, cx))
                     .when_some(self.error.clone(), |this, error| {
-                        this.child(
-                            div()
-                                .id("sign-in-error")
-                                .role(Role::Alert)
-                                .test_support()
-                                .aria_label(error.clone())
-                                .text_sm()
-                                .text_color(cx.theme().danger)
-                                .child(error),
-                        )
+                        this.child(login_form::error("sign-in-error", error, cx))
                     })
                     .child(actions),
             )
@@ -414,12 +210,18 @@ mod tests {
         }
     }
 
-    fn filled() -> Values {
-        Values {
+    fn login() -> LoginValues {
+        LoginValues {
             email: " me@example.com ".into(),
             password: "pw".into(),
             name: String::new(),
             username: String::new(),
+        }
+    }
+
+    fn filled() -> Values {
+        Values {
+            login: login(),
             imap: server("imap.example.com", Security::Tls),
             smtp: server("smtp.example.com", Security::StartTls),
         }
@@ -428,7 +230,10 @@ mod tests {
     #[test]
     fn debug_output_leaves_out_the_password() {
         let values = Values {
-            password: "hunter2".into(),
+            login: LoginValues {
+                password: "hunter2".into(),
+                ..login()
+            },
             ..filled()
         };
         let shown = format!("{values:?}");
@@ -452,8 +257,11 @@ mod tests {
     #[test]
     fn typed_values_win() {
         let new = Values {
-            name: " 张三 ".into(),
-            username: "zhang".into(),
+            login: LoginValues {
+                name: " 张三 ".into(),
+                username: "zhang".into(),
+                ..login()
+            },
             imap: ServerValues {
                 port: "10143".into(),
                 ..server("127.0.0.1", Security::Plain)

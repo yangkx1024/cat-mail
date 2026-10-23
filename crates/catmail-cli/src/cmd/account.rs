@@ -3,7 +3,9 @@
 use std::io::{self, BufRead, IsTerminal};
 
 use anyhow::{Context, Result, bail};
-use catmail_core::{ExposeSecret, MailClient, NewAccount, SecretString, Security, ServerConfig};
+use catmail_core::{
+    Account, ExposeSecret, Identity, MailClient, NewAccount, SecretString, Security, ServerConfig,
+};
 use clap::{Args, Subcommand};
 
 use crate::cmd::resolve_account;
@@ -12,7 +14,7 @@ use crate::output::print_accounts;
 
 #[derive(Subcommand)]
 pub(crate) enum AccountCommand {
-    /// Add an IMAP/SMTP account, once the IMAP server accepts the login
+    /// Add an IMAP/SMTP account, once both servers accept the login
     Add(AddAccount),
     /// List accounts
     List,
@@ -43,42 +45,76 @@ pub(crate) struct AddAccount {
     #[arg(long, default_value = "tls")]
     imap_security: Security,
 
+    #[command(flatten)]
+    smtp: SmtpServer,
+    #[command(flatten)]
+    login: Login,
+}
+
+/// The SMTP server of `account add` and `identity add`.
+#[derive(Args)]
+pub(crate) struct SmtpServer {
     #[arg(long)]
-    smtp_host: String,
+    pub(crate) smtp_host: String,
     /// [default: 465 for tls, 587 for starttls, 25 for plain]
     #[arg(long)]
-    smtp_port: Option<u16>,
+    pub(crate) smtp_port: Option<u16>,
     /// tls | starttls | plain
     #[arg(long, default_value = "tls")]
-    smtp_security: Security,
+    pub(crate) smtp_security: Security,
+}
 
+impl SmtpServer {
+    pub(crate) fn config(self) -> ServerConfig {
+        ServerConfig {
+            host: self.smtp_host,
+            port: self
+                .smtp_port
+                .unwrap_or_else(|| self.smtp_security.default_smtp_port()),
+            security: self.smtp_security,
+        }
+    }
+}
+
+/// How `account add` and `identity add` get the password, and whether they log in first.
+#[derive(Args)]
+pub(crate) struct Login {
     /// Read the password from the first line of stdin instead of prompting
     #[arg(long)]
-    password_stdin: bool,
+    pub(crate) password_stdin: bool,
     /// Add it without logging in first, e.g. while offline
     #[arg(long)]
-    no_verify: bool,
+    pub(crate) no_verify: bool,
 }
 
 pub(crate) async fn account(client: &MailClient, cmd: AccountCommand, json: bool) -> Result<()> {
     match cmd {
         AccountCommand::Add(args) => {
-            let password = read_password(&args.email, args.password_stdin)?;
+            let password = read_password(&args.email, args.login.password_stdin)?;
             add(client, args, password, json).await?;
         }
         AccountCommand::List => {
-            let accounts = client.list_accounts().await?;
+            let mut accounts = Vec::new();
+            for account in client.list_accounts().await? {
+                accounts.push(with_identities(client, account).await?);
+            }
             if json {
-                json::print_list::<JsonAccount, _>("accounts", &accounts)?;
+                let list: Vec<_> = accounts
+                    .iter()
+                    .map(|(a, identities)| JsonAccount::new(a, identities))
+                    .collect();
+                json::print_keyed("accounts", &list)?;
             } else {
                 print_accounts(&accounts);
             }
         }
         AccountCommand::Remove { account } => {
             let account = resolve_account(client, &account).await?;
+            // As it was: it is gone afterwards.
+            let (account, identities) = with_identities(client, account).await?;
             client.remove_account(account.id).await?;
             if json {
-                json::print_keyed("account", &JsonAccount::from(&account))?;
+                json::print_keyed("account", &JsonAccount::new(&account, &identities))?;
             } else {
                 println!("Removed account {} ({})", account.id, account.email);
             }
@@ -106,30 +142,35 @@ async fn add(
                 .unwrap_or_else(|| args.imap_security.default_imap_port()),
             security: args.imap_security,
         },
-        smtp: ServerConfig {
-            host: args.smtp_host,
-            port: args
-                .smtp_port
-                .unwrap_or_else(|| args.smtp_security.default_smtp_port()),
-            security: args.smtp_security,
-        },
+        smtp: args.smtp.config(),
     };
-    if !args.no_verify {
+    let account = if args.login.no_verify {
+        client.add_account(new, password).await?
+    } else {
         client
-            .check_login(&new, &password)
+            .add_account_checked(new, password)
             .await
-            .context("couldn't log in, so the account wasn't added (--no-verify adds it anyway)")?;
-    }
-    let account = client.add_account(new, password).await?;
+            .context("the account wasn't added (--no-verify adds it without logging in)")?
+    };
     if json {
-        json::print_keyed("account", &JsonAccount::from(&account))?;
+        let (account, identities) = with_identities(client, account).await?;
+        json::print_keyed("account", &JsonAccount::new(&account, &identities))?;
     } else {
         println!("Added account {} ({})", account.id, account.email);
     }
     Ok(())
 }
 
-fn read_password(email: &str, from_stdin: bool) -> Result<SecretString> {
+/// The account with the addresses it sends as.
+async fn with_identities(
+    client: &MailClient,
+    account: Account,
+) -> Result<(Account, Vec<Identity>)> {
+    let identities = client.list_identities(account.id).await?;
+    Ok((account, identities))
+}
+
+pub(crate) fn read_password(email: &str, from_stdin: bool) -> Result<SecretString> {
     let password = if from_stdin {
         let mut line = String::new();
         io::stdin().lock().read_line(&mut line)?;
@@ -151,12 +192,12 @@ fn read_password(email: &str, from_stdin: bool) -> Result<SecretString> {
 
 #[cfg(test)]
 mod tests {
-    use catmail_testkit::{FakeImap, ServerState};
+    use catmail_testkit::{FakeImap, FakeSmtp, ServerState, SmtpState};
 
     use super::*;
     use crate::test_support::client;
 
-    fn args(port: u16, no_verify: bool) -> AddAccount {
+    fn args(port: u16, smtp_port: u16, no_verify: bool) -> AddAccount {
         AddAccount {
             email: "alice@example.com".into(),
             name: None,
@@ -164,30 +205,57 @@ mod tests {
             imap_host: "127.0.0.1".into(),
             imap_port: Some(port),
             imap_security: Security::Plain,
-            smtp_host: "127.0.0.1".into(),
-            smtp_port: Some(port),
-            smtp_security: Security::Plain,
-            password_stdin: true,
-            no_verify,
+            smtp: SmtpServer {
+                smtp_host: "127.0.0.1".into(),
+                smtp_port: Some(smtp_port),
+                smtp_security: Security::Plain,
+            },
+            login: Login {
+                password_stdin: true,
+                no_verify,
+            },
         }
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn wrong_password_adds_nothing() {
         let fake = FakeImap::start(ServerState::new("alice", "pw")).await;
+        let smtp = FakeSmtp::start(SmtpState::new("alice", "pw")).await;
         let dir = tempfile::tempdir().unwrap();
         let (client, secrets) = client(dir.path());
 
-        let err = add(&client, args(fake.port(), false), "typo".into(), false)
-            .await
-            .unwrap_err();
+        let err = add(
+            &client,
+            args(fake.port(), smtp.port(), false),
+            "typo".into(),
+            false,
+        )
+        .await
+        .unwrap_err();
         assert!(format!("{err:#}").contains("--no-verify"), "{err:#}");
+        // Nor does a server for sending that doesn't take it.
+        smtp.state().faults.reject_login = true;
+        let err = add(
+            &client,
+            args(fake.port(), smtp.port(), false),
+            "pw".into(),
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("SMTP"), "{err:#}");
         assert!(client.list_accounts().await.unwrap().is_empty());
         assert!(secrets.is_empty());
 
-        add(&client, args(fake.port(), false), "pw".into(), false)
-            .await
-            .unwrap();
+        smtp.state().faults.reject_login = false;
+        add(
+            &client,
+            args(fake.port(), smtp.port(), false),
+            "pw".into(),
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(client.list_accounts().await.unwrap().len(), 1);
 
         // Without asking the server, as before.
@@ -196,7 +264,7 @@ mod tests {
             .await
             .unwrap();
         drop(fake);
-        add(&client, args(1, true), "typo".into(), false)
+        add(&client, args(1, 1, true), "typo".into(), false)
             .await
             .unwrap();
         assert_eq!(client.list_accounts().await.unwrap().len(), 1);

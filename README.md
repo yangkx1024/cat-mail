@@ -83,6 +83,11 @@ catmail reply 42 --all --body '收到，谢谢！'   # 回复（全部），引�
 catmail forward 42 --to li@example.com --body '转给你看看'   # 转发，带上原信的附件
 catmail draft list                # 草稿；draft show / edit / attach / detach / rm
 catmail send 3                    # 发送草稿 3，并存到"已发送"
+
+# 发件身份：另一个地址，经它自己的 SMTP 服务器发信（如 Resend）
+catmail identity add --email news@example.com --username resend --smtp-host smtp.resend.com
+catmail compose --from news@example.com --to li@example.com -s 通知 --body 你好
+catmail identity default 2        # 以后新信都从身份 2 发
 catmail outbox                    # 还没发完的邮件；outbox flush / retry / mark-sent / cancel
 
 # 标记、移动、删除：先改本地，再当场同步到服务器
@@ -122,6 +127,12 @@ catmail ops                       # 还没同步到服务器的改动，以及�
 保存到"已发送"失败只重试保存，不会重发邮件。命令行不在后台发信：`catmail send` 当场发送，
 没发出去的用 `catmail outbox flush` 再试；两者在有邮件没发出去时以非零状态退出，便于脚本判断。
 `compose` / `reply` / `forward` 失败（如附件不存在、转发时原信的附件下载不了）不会留下草稿。
+附件的合计大小按发信服务器公布的上限（SMTP `SIZE`、IMAP `APPENDLIMIT`）估算，还不知道时是 25 MiB，
+最多 50 MiB；添加附件时就会报错，而不是到发送时才失败。
+
+一个账户可以有多个发件身份（`catmail identity`，图形界面在 设置 › 账户）：各自的地址、SMTP 服务器和
+密码，添加账户时填的 SMTP 就是第一个。新信从默认身份发（可以换，例如平时都走 Resend），写信时也可以选
+（`--from`），回复默认用原信寄给的那个地址；收信、草稿和"已发送"仍在账户的 IMAP。
 
 退出码：0 完成，1 失败，2 用法错误，3 没做完但已保留（还在排队，稍后 `catmail sync`、`ops flush`
 或 `outbox flush` 会完成），4 邮件可能已送达也可能没有（需要用户确认）。

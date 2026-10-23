@@ -102,10 +102,13 @@ mtime。宽限期要远大于任何写事务的时长；`put` 遇到已存在的
 
 `SecretStore` trait，默认 `KeyringSecrets`（`keyring` 4：Linux Secret Service / macOS Keychain /
 Windows Credential Manager），service 为 `cat-mail`，键为 `account:{email}:{随机 uuid}`，存在
-`accounts.secret_key` 列。随机键保证不同数据目录的凭据互不覆盖。
+`accounts.secret_key` 列。随机键保证不同数据目录的凭据互不覆盖。之后添加的发件身份（`identities`，见
+[发信](sending.md#发件身份)）各有自己的密码，键为 `identity:{email}:{随机 uuid}`，规则相同；随账户建出的
+那个身份没有自己的条目（`secret_key` 为空），用账户的密码。
 
 - 添加：先写密钥，再插入行；插入失败则删除刚写的密钥。
-- 删除：`DELETE … RETURNING secret_key` 原子地删行并取得键，再删密钥。
+- 删除：`DELETE … RETURNING secret_key` 原子地删行并取得键，再删密钥。删除账户时在同一个事务里先读出
+  它的身份自己的键（身份随账户级联删除），再一并删掉。
 
 任何能看到这一行的人也一定能看到它的密钥，所以并发删除不会留下孤立凭据。唯一的残留窗口是进程恰好
 在"写密钥"与"插入行"之间崩溃，只会留下一条无害的孤立条目。

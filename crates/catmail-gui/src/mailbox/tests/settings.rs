@@ -2,6 +2,9 @@
 
 use super::*;
 
+use catmail_core::Identity;
+use gpui_kit::{ScrollDelta, point, px};
+
 #[gpui_kit::test]
 fn settings_change_the_theme(cx: &mut TestAppContext) {
     let mail = TestMail::start();
@@ -44,6 +47,7 @@ fn signs_in_from_the_window(cx: &mut TestAppContext) {
     });
 
     let port = mail.server().port.to_string();
+    let smtp_port = mail.smtp_server().port.to_string();
     let fill = |window: &mut Window, cx: &mut App, id: &'static str, text: &str| {
         window.click(id, cx);
         window.press("secondary-a", cx);
@@ -58,6 +62,8 @@ fn signs_in_from_the_window(cx: &mut TestAppContext) {
         fill(window, cx, "imap-port", &port);
         window.within("imap-security").click(2usize, cx); // None: the fake server is plain
         fill(window, cx, "smtp-host", "127.0.0.1");
+        fill(window, cx, "smtp-port", &smtp_port);
+        window.within("smtp-security").click(2usize, cx);
         window.click("sign-in", cx);
     })
     .unwrap();
@@ -112,6 +118,7 @@ fn cancel_is_off_once_signing_in_has_started(cx: &mut TestAppContext) {
     .unwrap();
     cx.run_until_parked();
     let port = mail.server().port.to_string();
+    let smtp_port = mail.smtp_server().port.to_string();
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
         for (id, text) in [
@@ -121,11 +128,13 @@ fn cancel_is_off_once_signing_in_has_started(cx: &mut TestAppContext) {
             ("imap-host", "127.0.0.1"),
             ("imap-port", port.as_str()),
             ("smtp-host", "127.0.0.1"),
+            ("smtp-port", smtp_port.as_str()),
         ] {
             window.click(id, cx);
             window.input(text, cx);
         }
         window.within("imap-security").click(2usize, cx);
+        window.within("smtp-security").click(2usize, cx);
         window.click("sign-in", cx);
     })
     .unwrap();
@@ -147,6 +156,87 @@ fn cancel_is_off_once_signing_in_has_started(cx: &mut TestAppContext) {
             .len(),
         2
     );
+}
+
+#[gpui_kit::test]
+fn adds_a_sending_address_and_makes_it_the_default(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let account = mail.account();
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    let identities = || pollster::block_on(mail.client.list_identities(account)).unwrap();
+
+    // Settings › Accounts › Add sending address, in place of the list.
+    open_settings(cx, window);
+    let port = mail.smtp_server().port.to_string();
+    cx.update_window(window, |_, window, cx| {
+        window.click(crate::settings::dialog::section_item("Accounts"), cx);
+        window.render_frame(cx);
+        window.click(("add-identity", account.0 as u64), cx);
+        window.render_frame(cx);
+        let fill = |window: &mut Window, cx: &mut App, id: &'static str, text: &str| {
+            window.click(id, cx);
+            window.input(text, cx);
+        };
+        fill(window, cx, "identity-email", "alice@example.org");
+        fill(window, cx, "identity-password", "pw");
+        fill(window, cx, "identity-username", "alice");
+        // The server's fields are below the fold.
+        window.scroll(
+            "identity-username",
+            ScrollDelta::Pixels(point(px(0.), px(-1000.))),
+            cx,
+        );
+        window.render_frame(cx);
+        window.within("identity-smtp-security").click(2usize, cx);
+        fill(window, cx, "identity-smtp-host", "127.0.0.1");
+        fill(window, cx, "identity-smtp-port", &port);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    wait_until(|| {
+        cx.run_until_parked();
+        identities().len() == 2
+    });
+    let (own, identity) = (identities()[0].clone(), identities()[1].clone());
+    assert_eq!(identity.email, "alice@example.org");
+
+    // Back in the list, under its account; made the default, the first can go.
+    let make_default = ("default-identity", identity.id.0 as u64);
+    let shown = |cx: &mut TestAppContext, id: (&'static str, u64)| {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.try_find(id).is_some()
+        })
+        .unwrap()
+    };
+    wait_until(|| {
+        cx.run_until_parked();
+        shown(cx, make_default)
+    });
+    cx.update_window(window, |_, window, cx| window.click(make_default, cx))
+        .unwrap();
+    let remove = ("remove-identity", own.id.0 as u64);
+    wait_until(|| {
+        cx.run_until_parked();
+        identities()[0].id == identity.id && shown(cx, remove)
+    });
+    cx.update_window(window, |_, window, cx| window.click(remove, cx))
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(crate::layout::CONFIRM, cx);
+    })
+    .unwrap();
+    wait_until(|| {
+        cx.run_until_parked();
+        identities()
+            == [Identity {
+                is_default: true,
+                ..identity.clone()
+            }]
+    });
 }
 
 #[gpui_kit::test]

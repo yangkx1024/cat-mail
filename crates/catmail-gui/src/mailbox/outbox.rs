@@ -255,6 +255,7 @@ mod tests {
         OutboxEntry {
             id: OutboxId(1),
             account_id: AccountId(2),
+            identity: catmail_core::IdentityId(3),
             draft_id: None,
             subject: String::new(),
             recipients: Vec::new(),

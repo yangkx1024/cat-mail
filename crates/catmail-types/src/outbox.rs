@@ -1,9 +1,10 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AccountId, DraftId, OutboxId, ReportedError};
+use crate::{AccountId, DraftId, IdentityId, OutboxId, ReportedError};
 
 /// Where a message handed to "send" is. See [`OutboxEntry`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -114,6 +115,8 @@ impl FromStr for OutboxStatus {
 pub struct OutboxEntry {
     pub id: OutboxId,
     pub account_id: AccountId,
+    /// Sent as this identity of the account, through its SMTP server.
+    pub identity: IdentityId,
     /// Returns to the drafts when the send is cancelled before it went out.
     pub draft_id: Option<DraftId>,
     pub subject: String,
@@ -138,10 +141,10 @@ pub struct FlushReport {
     /// The entries worked on (postponed ones included), as they ended up: `Done` for
     /// those that are gone. A message's own failure is in its `last_error`.
     pub entries: Vec<OutboxEntry>,
-    /// Why the SMTP server couldn't be used: connecting or logging in failed, so the
-    /// queued messages were postponed. `transient` says whether trying again later may
-    /// work, or the account needs fixing first.
-    pub error: Option<ReportedError>,
+    /// Why SMTP servers couldn't be used, by the identity they send as: connecting or
+    /// logging in failed, so the messages queued for it were postponed. `transient` says
+    /// whether trying again later may work, or the identity needs fixing first.
+    pub errors: BTreeMap<IdentityId, ReportedError>,
 }
 
 #[cfg(test)]

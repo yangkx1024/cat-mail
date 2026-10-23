@@ -43,19 +43,20 @@ pub(crate) async fn send(client: &MailClient, id: DraftId, json: bool) -> Result
 
 /// Works through the entry's outbox and tells the user how the entry fared.
 async fn flush_and_report(client: &MailClient, entry: OutboxEntry, json: bool) -> Result<()> {
-    let FlushReport { entries, error } = client.flush_outbox(entry.account_id).await?;
+    let FlushReport { entries, errors } = client.flush_outbox(entry.account_id).await?;
     let entry = entries
         .into_iter()
         .find(|e| e.id == entry.id)
         .unwrap_or(entry);
-    report(&entry, blocked(error).as_ref(), json)
+    let blocked = errors.get(&entry.identity).filter(|e| blocks(e));
+    report(&entry, blocked, json)
 }
 
-/// Why the flush couldn't send at all, if trying again unchanged won't help: the SMTP
-/// server rejected the login, or can't be used as the account is set up. The queued
-/// messages are postponed then, as for a server that is down.
-fn blocked(error: Option<ReportedError>) -> Option<ReportedError> {
-    error.filter(|e| !e.transient)
+/// Whether why the flush couldn't send as an identity at all means trying again unchanged
+/// won't help: its SMTP server rejected the login, or can't be used as it is set up. Its
+/// queued messages are postponed then, as for a server that is down.
+fn blocks(error: &ReportedError) -> bool {
+    !error.transient
 }
 
 pub(crate) async fn outbox(client: &MailClient, cmd: OutboxCommand, json: bool) -> Result<()> {
@@ -80,16 +81,17 @@ pub(crate) async fn outbox(client: &MailClient, cmd: OutboxCommand, json: bool) 
             let mut cant_send = BTreeMap::new();
             for (account, flushed) in flushes.join_all().await {
                 match flushed {
-                    Ok(FlushReport { entries, error }) => {
+                    Ok(FlushReport { entries, errors }) => {
                         results.extend(entries);
-                        cant_send.extend(blocked(error).map(|e| (account, e)));
+                        let blocked = errors.into_iter().filter(|(_, e)| blocks(e));
+                        cant_send.extend(blocked.map(|(identity, e)| (identity, (account, e))));
                     }
                     Err(e) => errors.push(e.to_string()),
                 }
             }
-            for (account, e) in &cant_send {
+            for (identity, (account, e)) in &cant_send {
                 errors.push(format!(
-                    "account {account} can't send: {}",
+                    "account {account} can't send as identity {identity}: {}",
                     printable(&e.message)
                 ));
             }
@@ -105,7 +107,7 @@ pub(crate) async fn outbox(client: &MailClient, cmd: OutboxCommand, json: bool) 
             let failed = (!errors.is_empty()).then_some(Outcome::Failed);
             let unsent = results
                 .iter()
-                .filter_map(|e| unsent(e.status, cant_send.contains_key(&e.account_id)))
+                .filter_map(|e| unsent(e.status, cant_send.contains_key(&e.identity)))
                 .max();
             if unsent.is_some() {
                 errors.push("not everything was sent; `catmail outbox` shows why".into());
@@ -138,21 +140,21 @@ pub(crate) async fn outbox(client: &MailClient, cmd: OutboxCommand, json: bool) 
     Ok(())
 }
 
-/// How a command ends for a message whose send ended in `status`, on an account that
-/// is [`blocked`] or not; `None` if it went out.
+/// How a command ends for a message whose send ended in `status`, sent as an identity
+/// that [`blocks`] or not; `None` if it went out.
 fn unsent(status: OutboxStatus, blocked: bool) -> Option<Outcome> {
     Some(match status {
         _ if status.went_out() => return None,
         OutboxStatus::Failed => Outcome::Failed,
         OutboxStatus::Unknown => Outcome::Unknown,
-        // Still to be sent, but not before the account is fixed.
+        // Still to be sent, but not before the identity is fixed.
         _ if blocked => Outcome::Failed,
         _ => Outcome::Queued,
     })
 }
 
 /// Tells the user how a send went and what they can do; an error unless it went out.
-/// `blocked` is why its account can't send, if it is [`blocked`].
+/// `blocked` is why its identity can't send, if that [`blocks`].
 fn report(entry: &OutboxEntry, blocked: Option<&ReportedError>, json: bool) -> Result<()> {
     if json {
         json::print_keyed("entry", &JsonOutboxEntry::from(entry))?;
@@ -269,5 +271,63 @@ mod tests {
         assert_eq!(outcome(&err), Outcome::Failed, "{err:#}");
         smtp.state().faults.reject_login = false;
         outbox(&client, OutboxCommand::Flush, false).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_flush_says_fix_it_when_one_identity_needs_fixing() {
+        let fake = FakeImap::start(ServerState::new("alice", "pw")).await;
+        let smtp = FakeSmtp::start(SmtpState::new("alice", "pw")).await;
+        let service = FakeSmtp::start(SmtpState::new("resend", "key")).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (client, account) = synced_with_smtp(&fake, smtp.port(), dir.path()).await;
+        let identity = client
+            .add_identity(
+                account,
+                catmail_core::NewIdentity {
+                    email: "news@example.org".into(),
+                    display_name: None,
+                    username: "resend".into(),
+                    smtp: catmail_core::ServerConfig {
+                        host: "127.0.0.1".into(),
+                        port: service.port(),
+                        security: catmail_core::Security::Plain,
+                    },
+                },
+                "key".into(),
+            )
+            .await
+            .unwrap();
+        let queue = |identity| {
+            let content = DraftContent {
+                subject: "hi".into(),
+                to: vec![Address {
+                    name: None,
+                    email: "b@example.com".into(),
+                }],
+                identity,
+                ..DraftContent::default()
+            };
+            let client = client.clone();
+            async move {
+                let draft = client.create_draft(account, content).await.unwrap();
+                client.send_draft(draft.id).await.unwrap();
+            }
+        };
+
+        // The service rejects the login, then the account's own server is down for now:
+        // trying again unchanged won't send everything.
+        service.state().faults.reject_login = true;
+        smtp.state().faults.unavailable = 100;
+        queue(Some(identity.id)).await;
+        queue(None).await;
+        let err = outbox(&client, OutboxCommand::Flush, false)
+            .await
+            .unwrap_err();
+        assert_eq!(outcome(&err), Outcome::Failed, "{err:#}");
+        assert!(
+            err.to_string()
+                .contains(&format!("can't send as identity {}", identity.id)),
+            "{err:#}"
+        );
     }
 }

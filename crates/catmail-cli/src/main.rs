@@ -15,7 +15,7 @@ use catmail_core::{Config, DEFAULT_GC_INTERVAL, DraftId, MailClient, SyncSchedul
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use crate::cmd::{account, compose, gc, ops, outbox, read, search, sync, watch};
+use crate::cmd::{account, compose, gc, identity, ops, outbox, read, search, sync, watch};
 use crate::output::printable_text;
 
 #[derive(Parser)]
@@ -50,6 +50,9 @@ enum Command {
     /// Manage accounts
     #[command(subcommand)]
     Account(account::AccountCommand),
+    /// Manage the other addresses an account sends as
+    #[command(subcommand)]
+    Identity(identity::IdentityCommand),
     /// Fetch folders and message headers from the server
     Sync {
         /// Account id or email address [default: every account]
@@ -142,6 +145,7 @@ async fn run() -> Result<()> {
 
     match cli.command {
         Command::Account(cmd) => account::account(&client, cmd, cli.json).await,
+        Command::Identity(cmd) => identity::identity(&client, cmd, cli.json).await,
         Command::Sync { account } => sync::sync(&client, account.as_deref(), cli.json).await,
         Command::Watch => {
             let interrupted = async {

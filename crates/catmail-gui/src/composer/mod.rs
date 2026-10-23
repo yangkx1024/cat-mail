@@ -15,12 +15,13 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use catmail_core::{
-    Account, AccountId, Draft, DraftAttachment, DraftContent, DraftId, MailClient, MessageId,
-    parse_addresses,
+    AccountId, Draft, DraftAttachment, DraftContent, DraftId, Event, Identity, IdentityId,
+    MailClient, MessageId, RecvError, parse_addresses,
 };
-use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::input::{InputEvent, InputState, Position, TextareaState};
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::select::{SelectEvent, SelectItem, SelectState};
+use gpui_kit::component::{IndexPath, WindowExt as _};
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Context, Entity, FocusHandle, Focusable, Global,
     PathPromptOptions, SharedString, Subscription, Task, WeakEntity, Window, px, size,
@@ -142,10 +143,8 @@ pub fn open(client: MailClient, from: ComposeFrom, window: &mut Window, cx: &mut
                     .await?
                     .ok_or(catmail_core::Error::DraftNotFound(id))?,
             };
-            let account = client.get_account(draft.account_id).await?.ok_or_else(|| {
-                catmail_core::Error::AccountNotFound(draft.account_id.to_string())
-            })?;
-            Ok::<_, catmail_core::Error>((draft, account))
+            let identities = client.list_identities(draft.account_id).await?;
+            Ok::<_, catmail_core::Error>((draft, identities))
         }
         .await;
         cx.update(|cx| {
@@ -159,8 +158,8 @@ pub fn open(client: MailClient, from: ComposeFrom, window: &mut Window, cx: &mut
             let failure = match opened {
                 // A window for it opened meanwhile: a reply or forward made it, and it
                 // was opened from the drafts before its window came up.
-                Ok((draft, _)) if activate(draft.id, cx) => None,
-                Ok((draft, account)) => {
+                Ok((draft, ..)) if activate(draft.id, cx) => None,
+                Ok((draft, identities)) => {
                     let created_here = !matches!(from, ComposeFrom::Draft(_));
                     // Where the writing starts: the text once there is someone to send to.
                     let focus_body = match from {
@@ -168,7 +167,14 @@ pub fn open(client: MailClient, from: ComposeFrom, window: &mut Window, cx: &mut
                         ComposeFrom::Draft(_) => !draft.content.to.is_empty(),
                         _ => false,
                     };
-                    open_window(client, account, draft, created_here, focus_body, cx)
+                    let opening = Opening {
+                        client,
+                        identities,
+                        draft,
+                        created_here,
+                        focus_body,
+                    };
+                    open_window(opening, cx)
                         .err()
                         .map(|e| format!("Couldn't open a window: {e:#}"))
                 }
@@ -201,23 +207,28 @@ pub(crate) fn errors(cx: &App) -> Vec<Option<String>> {
         .collect()
 }
 
-fn open_window(
+/// What a composer window is opened with.
+struct Opening {
     client: MailClient,
-    account: Account,
+    /// The account's identities, to choose From among.
+    identities: Vec<Identity>,
     draft: Draft,
+    /// Made for this window, see [`Composer::created_here`].
     created_here: bool,
+    /// The text has the focus, not To.
     focus_body: bool,
-    cx: &mut App,
-) -> anyhow::Result<()> {
-    let id = draft.id;
+}
+
+fn open_window(opening: Opening, cx: &mut App) -> anyhow::Result<()> {
+    let id = opening.draft.id;
     let options = crate::layout::window_options(
-        window_title(&draft.content.subject),
+        window_title(&opening.draft.content.subject),
         size(px(760.), px(680.)),
         size(px(480.), px(360.)),
         cx,
     );
     let (handle, composer) = gpui_kit::open_window(options, cx, |window, cx| {
-        cx.new(|cx| Composer::new(client, account, draft, created_here, focus_body, window, cx))
+        cx.new(|cx| Composer::new(opening, window, cx))
     })?;
     cx.default_global::<OpenComposers>()
         .windows
@@ -230,6 +241,61 @@ fn window_title(subject: &str) -> String {
         "" => "New message".into(),
         subject => subject.into(),
     }
+}
+
+/// A choice of From: one of the account's identities.
+#[derive(Debug, Clone, PartialEq)]
+struct Sender {
+    identity: IdentityId,
+    title: SharedString,
+}
+
+impl SelectItem for Sender {
+    type Value = IdentityId;
+
+    fn value(&self) -> &Self::Value {
+        &self.identity
+    }
+
+    fn title(&self) -> SharedString {
+        self.title.clone()
+    }
+}
+
+/// The account's identities, as the engine lists them (the default first). An address
+/// there twice (through two servers) is told apart by its server.
+fn senders(identities: &[Identity]) -> Vec<Sender> {
+    identities
+        .iter()
+        .map(|identity| {
+            let address = identity.address();
+            let twice = identities
+                .iter()
+                .filter(|other| other.email.eq_ignore_ascii_case(&identity.email))
+                .count()
+                > 1;
+            let title = if twice {
+                format!("{address} · {}", identity.smtp.host)
+            } else {
+                address.to_string()
+            };
+            Sender {
+                identity: identity.id,
+                title: title.into(),
+            }
+        })
+        .collect()
+}
+
+/// The From line: who the draft is from, or a choice when the account has more than one
+/// identity.
+enum FromField {
+    /// With its identity, kept as it is.
+    One(Option<IdentityId>, SharedString),
+    Choice {
+        senders: Entity<SelectState<Vec<Sender>>>,
+        _changes: Subscription,
+    },
 }
 
 /// An address field, which an error is shown under.
@@ -256,7 +322,7 @@ enum SaveState {
 
 pub struct Composer {
     client: MailClient,
-    account: Account,
+    from: FromField,
     draft: DraftId,
     /// Made for this window (not opened from the drafts): deleted again if nothing was
     /// changed before it closes.
@@ -290,6 +356,8 @@ pub struct Composer {
     focus_handle: FocusHandle,
     _debounce: Task<()>,
     _save: Task<()>,
+    /// Follows the engine's changes to the account's identities.
+    _identities: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -300,15 +368,14 @@ impl Focusable for Composer {
 }
 
 impl Composer {
-    fn new(
-        client: MailClient,
-        account: Account,
-        draft: Draft,
-        created_here: bool,
-        focus_body: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    fn new(opening: Opening, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let Opening {
+            client,
+            identities,
+            draft,
+            created_here,
+            focus_body,
+        } = opening;
         let content = draft.content.clone();
         let address_input = |list: &[catmail_core::Address], window: &mut Window, cx: &mut App| {
             let value = catmail_core::format_addresses(list);
@@ -329,6 +396,8 @@ impl Composer {
             .map(|input| cx.subscribe_in(input, window, Self::on_input_event))
             .collect();
         subscriptions.push(cx.subscribe_in(&body, window, Self::on_input_event));
+        let from = Self::from_field(&identities, content.identity, window, cx);
+        let identities = Self::follow_identities(&client, draft.account_id, window, cx);
         // The window is named after the subject.
         subscriptions.push(
             cx.subscribe_in(&subject, window, |_, subject, event, window, cx| {
@@ -356,7 +425,7 @@ impl Composer {
 
         Self {
             client,
-            account,
+            from,
             draft: draft.id,
             created_here,
             edited: false,
@@ -378,6 +447,7 @@ impl Composer {
             focus_handle: cx.focus_handle(),
             _debounce: Task::ready(()),
             _save: Task::ready(()),
+            _identities: identities,
             _subscriptions: subscriptions,
         }
     }
@@ -434,8 +504,103 @@ impl Composer {
             cc,
             bcc,
             text: self.body.read(cx).value().to_string(),
+            identity: self.sender_identity(cx),
         };
         (content, problem)
+    }
+
+    /// The From line for the account's `identities`, with `selected` chosen.
+    fn from_field(
+        identities: &[Identity],
+        selected: Option<IdentityId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> FromField {
+        let senders = senders(identities);
+        if senders.len() <= 1 {
+            // Every account has its default.
+            let title = senders
+                .into_iter()
+                .next()
+                .map(|s| s.title)
+                .unwrap_or_default();
+            return FromField::One(selected, title);
+        }
+        let position = senders
+            .iter()
+            .position(|s| Some(s.identity) == selected)
+            .map(IndexPath::new);
+        let choice = cx.new(|cx| SelectState::new(senders, position, window, cx));
+        let changes = cx.subscribe_in(
+            &choice,
+            window,
+            |this, _, event: &SelectEvent<Vec<Sender>>, window, cx| {
+                if let SelectEvent::Confirm(Some(identity)) = event
+                    && this.saved.identity != Some(*identity)
+                {
+                    this.changed(window, cx);
+                }
+            },
+        );
+        FromField::Choice {
+            senders: choice,
+            _changes: changes,
+        }
+    }
+
+    fn sender_identity(&self, cx: &App) -> Option<IdentityId> {
+        match &self.from {
+            FromField::One(identity, _) => *identity,
+            FromField::Choice { senders, .. } => senders.read(cx).selected_value().copied(),
+        }
+    }
+
+    /// Reads the account's identities again whenever the engine says they changed (or
+    /// events were missed), for [`set_identities`](Self::set_identities).
+    fn follow_identities(
+        client: &MailClient,
+        account: AccountId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        let (client, mut events) = (client.clone(), client.subscribe());
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                match events.recv().await {
+                    Err(RecvError::Closed) => break,
+                    Ok(Event::IdentitiesChanged { account: changed }) if changed == account => {}
+                    Err(RecvError::Lagged(_)) => {}
+                    Ok(_) => continue,
+                }
+                let Ok(identities) = client.list_identities(account).await else {
+                    continue;
+                };
+                let updated = this.update_in(cx, |this, window, cx| {
+                    this.set_identities(&identities, window, cx)
+                });
+                if updated.is_err() {
+                    break; // The window is gone.
+                }
+            }
+        })
+    }
+
+    /// The account's identities changed: one was added, made the default or removed. One
+    /// removed is replaced by the default, as the engine did in the stored draft; what was
+    /// typed stays.
+    fn set_identities(
+        &mut self,
+        identities: &[Identity],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let default = identities.first().map(|i| i.id);
+        let selected = self
+            .sender_identity(cx)
+            .filter(|id| identities.iter().any(|i| i.id == *id))
+            .or(default);
+        self.from = Self::from_field(identities, selected, window, cx);
+        cx.notify();
     }
 
     fn attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {

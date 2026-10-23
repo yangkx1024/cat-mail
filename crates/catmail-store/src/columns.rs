@@ -2,6 +2,7 @@
 
 use std::str::FromStr;
 
+use catmail_types::ServerConfig;
 use rusqlite::Row;
 use rusqlite::types::Type;
 use serde::Serialize;
@@ -21,6 +22,28 @@ pub(crate) fn parse_opt_text<T: FromStr<Err = String>>(
 ) -> rusqlite::Result<Option<T>> {
     let value: Option<String> = row.get(col)?;
     value.map(|v| parse_value(row, col, v)).transpose()
+}
+
+/// Reads a server's `{prefix}_host`, `{prefix}_port` and `{prefix}_security` columns.
+pub(crate) fn server(row: &Row<'_>, prefix: &str) -> rusqlite::Result<ServerConfig> {
+    Ok(ServerConfig {
+        host: row.get(format!("{prefix}_host").as_str())?,
+        port: row.get(format!("{prefix}_port").as_str())?,
+        security: parse_text(row, &format!("{prefix}_security"))?,
+    })
+}
+
+/// Reads a size limit a server announced (SMTP SIZE, IMAP APPENDLIMIT).
+pub(crate) fn size_limit<I: rusqlite::RowIndex>(
+    row: &Row<'_>,
+    col: I,
+) -> rusqlite::Result<Option<u64>> {
+    Ok(row.get::<_, Option<i64>>(col)?.map(|l| l as u64))
+}
+
+/// A size limit as stored: larger than SQLite holds is no limit worth telling apart.
+pub(crate) fn size_limit_column(limit: Option<u64>) -> Option<i64> {
+    limit.map(|l| i64::try_from(l).unwrap_or(i64::MAX))
 }
 
 /// Reads a TEXT column holding JSON (address lists, keyword lists).

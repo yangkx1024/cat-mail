@@ -51,16 +51,23 @@ types 加变体会编译失败）。
   草稿是 1，断线之前拒绝的也是。
 - `send` / `outbox retry` / `mark-sent` / `outbox flush`：`queued` / `sending` 是 3，`failed` 是 1，
   `unknown` 是 4；`accepted`（已发出、只是没存进 Sent）算成功。连 SMTP 服务器失败时邮件都推迟、仍是
-  `queued`，所以还看这次 flush 的 `FlushReport.error`：问题不是暂时的（登录被拒绝、不支持 STARTTLS）时
-  是 1。不读账户状态：那是全局的，可能是别的发送留下的。`outbox flush` 只看这次处理的条目：
+  `queued`，所以还看这次 flush 的 `FlushReport.errors`：经这台服务器发的信，问题不是暂时的（登录被拒绝、
+  不支持 STARTTLS）时是 1；按身份判断，一个身份暂时连不上不会掩盖另一个要先改的。不读账户状态：那是全局的，可能是别的发送留下的。`outbox flush` 只看这次处理的条目：
   `unknown` 和 `failed` 的等用户处理，不会被它重试，也就不影响它的退出码。
 - `sync` 有账户失败是 1：同步本身没有要排队的东西。
 
 ## 添加账户
 
-`account add` 先 `check_login`（与 GUI 的添加账户对话框相同），登录成功才写 keyring 和账户行，
-拼错的密码不会留下任何东西。`--no-verify` 跳过这一步，用于离线时或脚本里的本地测试服务器；
-这时密码错误要到第一次 `sync` 才发现。只验证 IMAP：SMTP 的登录在第一次发信时才检查。
+`account add` 用 `add_account_checked`（与 GUI 的添加账户对话框相同），IMAP 和 SMTP 都登录成功才写 keyring
+和账户行，拼错的密码不会留下任何东西；SMTP 失败的错误以 "outgoing mail server (SMTP)" 开头，分得清
+是哪一个。`--no-verify` 跳过这一步，用于离线时或脚本里的本地测试服务器；这时密码错误要到第一次
+`sync` 或发信才发现。
+
+`identity add` 给账户加一个发件身份（另一个地址，经它自己的 SMTP 服务器和登录发信，如 Resend），同样
+用 `add_identity_checked` 先登录，`--no-verify` 跳过（`add_identity`）；`identity list`（默认的标 `*`、
+排在最前）、`identity default`、`identity rm`（默认的不能删）。`compose`、`reply`、`forward`、`draft edit`
+的 `--from` 按地址或 id 选身份，几个身份地址相同时取默认的或较早的；不给时新信用默认身份，`reply` 用原信
+寄给的那个地址。`account list` 的 SMTP 列和 `--json` 的 `smtp` 是默认身份的服务器。
 
 ## 写文件
 

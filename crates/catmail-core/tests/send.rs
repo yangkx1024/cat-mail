@@ -9,7 +9,7 @@ use catmail_core::{
     Address, DraftContent, Error, ErrorKind, Event, OutboxEntry, OutboxStatus, RecvError,
 };
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
-use common::{Env, drain, env, env_with, eventually, files};
+use common::{Env, drain, env, env_with, eventually, files, sparse};
 use mail_parser::{MessageParser, MimeHeaders};
 use tokio::sync::Semaphore;
 
@@ -30,6 +30,7 @@ fn content(subject: &str) -> DraftContent {
         cc: vec![addr("carol@example.com")],
         bcc: vec![addr("dave@example.com"), addr("BOB@example.com")],
         text: "你好，\n\n.see you\n".into(),
+        identity: None,
     }
 }
 
@@ -51,17 +52,6 @@ impl Env {
             .await
             .unwrap();
         self.client.send_draft(draft.id).await.unwrap()
-    }
-
-    async fn flush(&self) -> Vec<(OutboxStatus, u32)> {
-        self.client
-            .flush_outbox(self.account)
-            .await
-            .unwrap()
-            .entries
-            .into_iter()
-            .map(|e| (e.status, e.attempts))
-            .collect()
     }
 
     async fn outbox(&self) -> Vec<OutboxEntry> {
@@ -370,7 +360,13 @@ async fn unreachable_server_postpones_the_rest_of_the_queue() {
     let outbox = env.outbox().await;
     assert!(outbox[1].last_error.as_deref().unwrap().contains("421"));
     assert!(outbox[1].next_attempt_at > Some(outbox[1].created_at));
-    let problem = env.client.account_status(env.account).send.unwrap();
+    let problem = env
+        .client
+        .account_status(env.account)
+        .send_problem()
+        .unwrap()
+        .1
+        .clone();
     assert!(problem.error.message.contains("421"), "{problem:?}");
     assert_eq!(problem.error.kind, ErrorKind::Refused);
     assert!(env.client.account_status(env.account).sync.is_none());
@@ -381,7 +377,7 @@ async fn unreachable_server_postpones_the_rest_of_the_queue() {
     );
     assert_eq!(env.delivered(), 2);
     assert_eq!(env.smtp.state().connections, 2, "one connection per pass");
-    assert!(env.client.account_status(env.account).send.is_none());
+    assert!(env.client.account_status(env.account).send.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -401,7 +397,13 @@ async fn postponed_entries_back_off_with_the_one_attempted() {
     let next = |e: &OutboxEntry| e.next_attempt_at.unwrap();
     assert!(next(first) - first.created_at >= 55, "{first:?}");
     assert_eq!(next(first), next(second));
-    let problem = env.client.account_status(env.account).send.unwrap();
+    let problem = env
+        .client
+        .account_status(env.account)
+        .send_problem()
+        .unwrap()
+        .1
+        .clone();
     assert_eq!(problem.failures, 2);
 }
 
@@ -485,18 +487,18 @@ async fn a_flush_reports_why_the_server_was_unusable() {
     // From this flush, not from whatever the account's status says by then.
     env.smtp.state().faults.reject_login = true;
     let rejected = flush().await;
-    let error = rejected.error.unwrap();
+    let error = rejected.errors.into_values().next().unwrap();
     assert_eq!((error.kind, error.transient), (ErrorKind::Auth, false));
     assert_eq!(rejected.entries[0].status, OutboxStatus::Queued);
 
     env.smtp.state().faults.reject_login = false;
     env.smtp.state().faults.unavailable = 1;
     let unavailable = flush().await;
-    assert!(unavailable.error.unwrap().transient);
+    assert!(unavailable.errors.into_values().next().unwrap().transient);
     assert_eq!(unavailable.entries[0].status, OutboxStatus::Queued);
 
     let sent = flush().await;
-    assert_eq!(sent.error, None);
+    assert!(sent.errors.is_empty());
     assert_eq!(sent.entries[0].status, OutboxStatus::Done);
 }
 
@@ -523,7 +525,13 @@ async fn wrong_password_holds_the_queue_and_is_reported() {
             .unwrap()
             .contains("login rejected")
     );
-    let problem = env.client.account_status(env.account).send.unwrap();
+    let problem = env
+        .client
+        .account_status(env.account)
+        .send_problem()
+        .unwrap()
+        .1
+        .clone();
     assert_eq!(problem.error.kind, ErrorKind::Auth);
     assert!(
         problem.error.message.contains("login rejected"),
@@ -545,7 +553,7 @@ async fn wrong_password_holds_the_queue_and_is_reported() {
         env.flush().await,
         [(OutboxStatus::Done, 1), (OutboxStatus::Done, 1)]
     );
-    assert!(env.client.account_status(env.account).send.is_none());
+    assert!(env.client.account_status(env.account).send.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -724,12 +732,7 @@ async fn attachments_are_limited_in_size() {
     const LIMIT: u64 = 25 * 1024 * 1024;
     let env = env(state()).await;
     let dir = tempfile::tempdir().unwrap();
-    let file = |name: &str, size: u64| {
-        let path = dir.path().join(name);
-        // Sparse: only what is read gets written.
-        std::fs::File::create(&path).unwrap().set_len(size).unwrap();
-        path
-    };
+    let file = |name: &str, size: u64| sparse(dir.path(), name, size);
     let draft = env
         .client
         .create_draft(env.account, content("with attachments"))
@@ -779,6 +782,127 @@ async fn attachments_are_limited_in_size() {
     env.client.remove_draft_attachment(most.id).await.unwrap();
     env.client
         .attach_file(draft.id, file("five.txt", 5))
+        .await
+        .unwrap();
+}
+
+/// What attaching `size` bytes to `draft` does: `Some` with the attachment, `None` if
+/// it is refused as too large.
+async fn attach(
+    env: &Env,
+    dir: &std::path::Path,
+    draft: catmail_core::DraftId,
+    size: u64,
+) -> Option<catmail_core::DraftAttachment> {
+    match env
+        .client
+        .attach_file(draft, sparse(dir, &format!("{size}.bin"), size))
+        .await
+    {
+        Ok(attachment) => Some(attachment),
+        Err(Error::InvalidInput(e)) if e.contains("add up to") => None,
+        Err(e) => panic!("{e:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn attachments_follow_the_size_the_server_announces() {
+    const MIB: u64 = 1024 * 1024;
+    let mut smtp = SmtpState::new("alice", "pw");
+    smtp.faults.size_limit = Some(MIB);
+    let env = env_with(state(), smtp, false).await;
+    let dir = tempfile::tempdir().unwrap();
+    let draft = env
+        .client
+        .create_draft(env.account, content("big"))
+        .await
+        .unwrap()
+        .id;
+    // Not connected to yet: the usual limit.
+    let early = attach(&env, dir.path(), draft, 2 * MIB).await.unwrap();
+
+    // Sending tells: it is far less here.
+    env.queue("first").await;
+    env.flush().await;
+    assert!(attach(&env, dir.path(), draft, 1).await.is_none());
+    env.client.remove_draft_attachment(early.id).await.unwrap();
+    assert!(
+        attach(&env, dir.path(), draft, MIB).await.is_none(),
+        "encoded, it wouldn't fit"
+    );
+    let fits = attach(&env, dir.path(), draft, MIB / 2).await.unwrap();
+
+    // The server takes more now, past the usual limit.
+    env.smtp.state().faults.size_limit = Some(60 * MIB);
+    env.queue("second").await;
+    env.flush().await;
+    env.client.remove_draft_attachment(fits.id).await.unwrap();
+    attach(&env, dir.path(), draft, 30 * MIB).await.unwrap();
+
+    // And says nothing any more: the usual limit again.
+    env.smtp.state().faults.size_limit = None;
+    env.queue("third").await;
+    env.flush().await;
+    assert!(attach(&env, dir.path(), draft, 1).await.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn attachments_fit_the_append_limit_learned_by_syncing() {
+    const MIB: u64 = 1024 * 1024;
+    let mut state = state();
+    state.faults.append_limit = Some(MIB);
+    let env = env(state).await;
+    let dir = tempfile::tempdir().unwrap();
+    env.client.sync_account(env.account).await.unwrap();
+    let draft = env
+        .client
+        .create_draft(env.account, content("big"))
+        .await
+        .unwrap()
+        .id;
+    assert!(attach(&env, dir.path(), draft, MIB).await.is_none());
+    attach(&env, dir.path(), draft, MIB / 2).await.unwrap();
+
+    // No APPEND at all is no size: no copy is kept for attachments to fit.
+    env.fake.state().faults.append_limit = Some(0);
+    env.client.sync_account(env.account).await.unwrap();
+    attach(&env, dir.path(), draft, MIB).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_account_added_checked_knows_its_limits_before_the_first_send() {
+    const MIB: u64 = 1024 * 1024;
+    let mut smtp = SmtpState::new("alice", "pw");
+    smtp.faults.size_limit = Some(MIB);
+    let env = env_with(state(), smtp, false).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut new = {
+        let account = env.client.get_account(env.account).await.unwrap().unwrap();
+        catmail_core::NewAccount {
+            email: "alice@example.org".into(),
+            display_name: None,
+            username: account.username,
+            imap: account.imap,
+            smtp: env.smtp_config(),
+        }
+    };
+    let checked = env
+        .client
+        .add_account_checked(new.clone(), "pw".into())
+        .await
+        .unwrap();
+    let draft = env.client.create_draft(checked.id, content("big")).await;
+    assert!(
+        attach(&env, dir.path(), draft.unwrap().id, MIB)
+            .await
+            .is_none()
+    );
+
+    // Added without the check, nothing is known yet.
+    new.email = "alice@example.net".into();
+    let unchecked = env.client.add_account(new, "pw".into()).await.unwrap();
+    let draft = env.client.create_draft(unchecked.id, content("big")).await;
+    attach(&env, dir.path(), draft.unwrap().id, MIB)
         .await
         .unwrap();
 }

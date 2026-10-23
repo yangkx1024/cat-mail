@@ -505,9 +505,10 @@ mod tests {
                 db.conn.execute_batch(&format!(
                     "INSERT INTO pending_ops (account_id, folder_id, uidvalidity, uid, kind)
                      VALUES ({a}, {f}, 7, 1, 'flags'), ({a}, {f}, 9, 1, 'flags');
-                     INSERT INTO drafts (account_id, remote_folder_id, remote_uidvalidity, remote_uid,
-                                         remote_message_id, remote_revision)
-                     VALUES ({a}, {f}, 7, 1, 'd@x', 0);",
+                     INSERT INTO drafts (account_id, identity_id, remote_folder_id,
+                                         remote_uidvalidity, remote_uid, remote_message_id,
+                                         remote_revision)
+                     SELECT {a}, id, {f}, 7, 1, 'd@x', 0 FROM identities WHERE account_id = {a};",
                     a = account.0,
                     f = folder.0
                 ))?;
@@ -564,10 +565,11 @@ mod tests {
             .unwrap();
         let folder = store.read(|db| db.folders().list(account)).unwrap()[0].id;
         let insert_draft = format!(
-            "INSERT INTO drafts (account_id, remote_folder_id, remote_uidvalidity, remote_uid,
-                                 remote_message_id, remote_revision)
-             VALUES ({}, {}, 7, 1, 'd@x', 0)",
-            account.0, folder.0
+            "INSERT INTO drafts (account_id, identity_id, remote_folder_id, remote_uidvalidity,
+                                 remote_uid, remote_message_id, remote_revision)
+             SELECT {a}, id, {f}, 7, 1, 'd@x', 0 FROM identities WHERE account_id = {a}",
+            a = account.0,
+            f = folder.0
         );
         store
             .write(|db| Ok(db.conn.execute(&insert_draft, [])?))

@@ -4,6 +4,7 @@
 pub(crate) mod account;
 pub(crate) mod compose;
 pub(crate) mod gc;
+pub(crate) mod identity;
 pub(crate) mod ops;
 pub(crate) mod outbox;
 pub(crate) mod read;

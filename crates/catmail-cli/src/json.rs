@@ -10,8 +10,9 @@ use std::path::PathBuf;
 use anyhow::Result;
 use catmail_core::{
     Account, Address, Attachment, Draft, DraftAttachment, ErrorKind, Event, Flags, Folder,
-    FolderRole, FolderSyncReport, GcReport, Message, MessageSummary, OpKind, OpStatus, OutboxEntry,
-    OutboxStatus, PendingOp, ReplayReport, ReportedError, Security, ServerConfig, SyncReport,
+    FolderRole, FolderSyncReport, GcReport, Identity, Message, MessageSummary, OpKind, OpStatus,
+    OutboxEntry, OutboxStatus, PendingOp, ReplayReport, ReportedError, Security, ServerConfig,
+    SyncReport,
 };
 use serde::Serialize;
 
@@ -92,20 +93,53 @@ pub(crate) struct JsonAccount {
     display_name: Option<String>,
     username: String,
     imap: JsonServer,
-    smtp: JsonServer,
+    /// Its default identity's.
+    smtp: Option<JsonServer>,
     created_at: Option<String>,
 }
 
-impl From<&Account> for JsonAccount {
-    fn from(a: &Account) -> Self {
+impl JsonAccount {
+    /// `identities` are the account's.
+    pub(crate) fn new(a: &Account, identities: &[Identity]) -> Self {
         Self {
             id: a.id.0,
             email: a.email.clone(),
             display_name: a.display_name.clone(),
             username: a.username.clone(),
             imap: (&a.imap).into(),
-            smtp: (&a.smtp).into(),
+            smtp: identities
+                .iter()
+                .find(|i| i.is_default)
+                .map(|i| (&i.smtp).into()),
             created_at: time(a.created_at),
+        }
+    }
+}
+
+/// An address an account sends as.
+#[derive(Serialize)]
+pub(crate) struct JsonIdentity {
+    id: i64,
+    account: i64,
+    email: String,
+    display_name: Option<String>,
+    username: String,
+    smtp: JsonServer,
+    is_default: bool,
+    created_at: Option<String>,
+}
+
+impl From<&Identity> for JsonIdentity {
+    fn from(i: &Identity) -> Self {
+        Self {
+            id: i.id.0,
+            account: i.account_id.0,
+            email: i.email.clone(),
+            display_name: i.display_name.clone(),
+            username: i.username.clone(),
+            smtp: (&i.smtp).into(),
+            is_default: i.is_default,
+            created_at: time(i.created_at),
         }
     }
 }
@@ -375,6 +409,8 @@ pub(crate) struct JsonRead {
 pub(crate) struct JsonDraft {
     id: i64,
     account: i64,
+    /// Sent as this identity.
+    identity: Option<i64>,
     subject: String,
     to: Vec<JsonAddress>,
     cc: Vec<JsonAddress>,
@@ -396,6 +432,7 @@ impl From<&Draft> for JsonDraft {
         Self {
             id: d.id.0,
             account: d.account_id.0,
+            identity: c.identity.map(|id| id.0),
             subject: c.subject.clone(),
             to: addresses(&c.to),
             cc: addresses(&c.cc),
@@ -436,6 +473,7 @@ impl From<&DraftAttachment> for JsonDraftAttachment {
 pub(crate) struct JsonOutboxEntry {
     id: i64,
     account: i64,
+    identity: i64,
     draft: Option<i64>,
     subject: String,
     recipients: Vec<String>,
@@ -452,6 +490,7 @@ impl From<&OutboxEntry> for JsonOutboxEntry {
         Self {
             id: e.id.0,
             account: e.account_id.0,
+            identity: e.identity.0,
             draft: e.draft_id.map(|id| id.0),
             subject: e.subject.clone(),
             recipients: e.recipients.clone(),
@@ -576,6 +615,7 @@ pub(crate) enum JsonEvent {
     AccountAdded { account: i64 },
     AccountRemoved { account: i64 },
     AccountStatusChanged { account: i64 },
+    IdentitiesChanged { account: i64 },
     FoldersChanged { account: i64 },
     MessagesChanged { account: i64, folder: i64 },
     DraftsChanged { account: i64 },
@@ -593,6 +633,7 @@ impl From<&Event> for JsonEvent {
             Event::AccountStatusChanged { account } => {
                 Self::AccountStatusChanged { account: account.0 }
             }
+            Event::IdentitiesChanged { account } => Self::IdentitiesChanged { account: account.0 },
             Event::FoldersChanged { account } => Self::FoldersChanged { account: account.0 },
             Event::MessagesChanged { account, folder } => Self::MessagesChanged {
                 account: account.0,
@@ -617,8 +658,8 @@ fn list<'a, J: From<&'a T>, T: 'a>(items: impl IntoIterator<Item = &'a T>) -> Ve
 #[cfg(test)]
 mod tests {
     use catmail_core::{
-        AccountId, AttachmentId, DraftAttachmentId, DraftContent, DraftId, FolderId, MessageBody,
-        MessageId, OutboxId, PendingOpId,
+        AccountId, AttachmentId, DraftAttachmentId, DraftContent, DraftId, FolderId, IdentityId,
+        MessageBody, MessageId, OutboxId, PendingOpId,
     };
     use serde_json::json;
 
@@ -746,6 +787,7 @@ mod tests {
                 cc: Vec::new(),
                 bcc: Vec::new(),
                 text: "hello".into(),
+                identity: None,
             },
             attachments: vec![DraftAttachment {
                 id: DraftAttachmentId(9),
@@ -764,6 +806,7 @@ mod tests {
         let entry = OutboxEntry {
             id: OutboxId(2),
             account_id: AccountId(1),
+            identity: IdentityId(3),
             draft_id: Some(DraftId(5)),
             subject: "hi".into(),
             recipients: vec!["b@example.com".into()],
@@ -795,6 +838,7 @@ mod tests {
             json!({
                 "id": 5,
                 "account": 1,
+                "identity": null,
                 "subject": "hi",
                 "to": [{"name": null, "email": "b@example.com"}],
                 "cc": [],
@@ -817,6 +861,7 @@ mod tests {
             json!({
                 "id": 2,
                 "account": 1,
+                "identity": 3,
                 "draft": 5,
                 "subject": "hi",
                 "recipients": ["b@example.com"],

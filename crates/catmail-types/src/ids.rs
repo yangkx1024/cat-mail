@@ -22,6 +22,10 @@ row_id!(
     AccountId
 );
 row_id!(
+    /// Local identifier of an [`Identity`](crate::Identity) an account sends as.
+    IdentityId
+);
+row_id!(
     /// Local identifier of a folder (IMAP mailbox).
     FolderId
 );
