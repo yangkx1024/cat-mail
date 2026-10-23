@@ -136,8 +136,8 @@ pub fn open(client: MailClient, from: ComposeFrom, window: &mut Window, cx: &mut
                         .create_draft(account, None, DraftContent::default())
                         .await?
                 }
-                ComposeFrom::Reply { message, all } => client.reply(message, all).await?,
-                ComposeFrom::Forward(message) => client.forward(message).await?,
+                ComposeFrom::Reply { message, all } => client.reply(message, all, None).await?,
+                ComposeFrom::Forward(message) => client.forward(message, None).await?,
                 ComposeFrom::Draft(id) => client
                     .get_draft(id)
                     .await?

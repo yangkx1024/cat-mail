@@ -651,7 +651,7 @@ async fn replies_are_threaded_and_quoted() {
     env.client.sync_account(env.account).await.unwrap();
     let original = env.id_of("INBOX", "季度报告").await;
 
-    let draft = env.client.reply(original, true).await.unwrap();
+    let draft = env.client.reply(original, true, None).await.unwrap();
     assert_eq!(draft.content.subject, "Re: 季度报告");
     let to: Vec<_> = draft.content.to.iter().map(|a| a.email.as_str()).collect();
     let cc: Vec<_> = draft.content.cc.iter().map(|a| a.email.as_str()).collect();

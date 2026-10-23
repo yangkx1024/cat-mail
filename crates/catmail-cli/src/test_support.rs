@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use catmail_core::{
-    AccountId, Config, MailClient, MemorySecrets, NewAccount, SecretStore, SecretString, Security,
-    ServerConfig, Verify,
+    AccountId, Config, Identity, MailClient, MemorySecrets, NewAccount, NewIdentity, SecretStore,
+    SecretString, Security, ServerConfig, Verify,
 };
 use catmail_testkit::FakeImap;
 
@@ -83,4 +83,22 @@ pub(crate) async fn synced_with_smtp(
         .id;
     client.sync_account(account).await.unwrap();
     (client, account)
+}
+
+/// Adds news@example.org, logging in to `smtp` as `resend`, without checking the login.
+pub(crate) async fn add_news_identity(
+    client: &MailClient,
+    account: AccountId,
+    smtp: ServerConfig,
+) -> Identity {
+    let new = NewIdentity {
+        email: "news@example.org".into(),
+        display_name: None,
+        username: "resend".into(),
+        smtp,
+    };
+    client
+        .add_identity(account, new, "key".into(), Verify::Skip)
+        .await
+        .unwrap()
 }

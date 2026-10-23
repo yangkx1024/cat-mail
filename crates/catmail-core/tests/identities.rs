@@ -474,3 +474,40 @@ async fn a_server_that_doesnt_answer_holds_up_only_its_own_messages() {
     assert_eq!(statuses, [OutboxStatus::Done, OutboxStatus::Done]);
     assert_eq!(resend.state().received.len(), 1);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn answers_are_made_as_the_identity_asked_for_or_written_to() {
+    let mut state = state();
+    state.inbox().append(
+        b"From: carol@example.com\r\nTo: News@example.org\r\nSubject: to the newsletter\r\n\
+          Message-ID: <n@example.com>\r\n\r\nhi\r\n",
+        &[],
+    );
+    let env = env(state).await;
+    let resend = service().await;
+    let identity = add_identity(&env, &resend).await;
+    let own = env.own_identity().await;
+    env.client.sync_account(env.account).await.unwrap();
+    let message = env.id_of("INBOX", "to the newsletter").await;
+    let by_address = |email: &'static str| env.client.identity_by_address(env.account, email);
+    assert_eq!(
+        by_address("NEWS@example.org").await.unwrap(),
+        Some(identity.id)
+    );
+    assert_eq!(by_address("ALICE@example.com").await.unwrap(), Some(own.id));
+    assert_eq!(by_address("carol@example.com").await.unwrap(), None);
+
+    let reply = |from| env.client.reply(message, false, from);
+    assert_eq!(
+        reply(None).await.unwrap().identity,
+        identity.id,
+        "written to"
+    );
+    assert_eq!(reply(Some(own.id)).await.unwrap().identity, own.id);
+    let forward = |from| env.client.forward(message, from);
+    assert_eq!(forward(None).await.unwrap().identity, own.id, "the default");
+    assert_eq!(
+        forward(Some(identity.id)).await.unwrap().identity,
+        identity.id
+    );
+}
