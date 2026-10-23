@@ -7,10 +7,10 @@ use std::sync::Arc;
 
 use catmail_proto::mime::{Outgoing, OutgoingAttachment, build_message};
 use catmail_proto::smtp;
-use catmail_store::{DraftReply, DraftSnapshot, NewDraftAttachment};
+use catmail_store::{BlobStore, DraftReply, DraftSnapshot, NewDraftAttachment};
 use catmail_types::{
-    Account, AccountId, Address, Draft, DraftAttachment, DraftAttachmentId, DraftContent, DraftId,
-    Event, Message, MessageId,
+    Account, AccountId, Address, BlobHash, Draft, DraftAttachment, DraftAttachmentId, DraftContent,
+    DraftId, Event, Message, MessageId,
 };
 use uuid::Uuid;
 
@@ -81,6 +81,34 @@ pub(crate) fn edited(engine: &Engine, account: AccountId, draft: DraftId) {
     }
 }
 
+/// The most a draft's attached files may add up to: what Gmail and Outlook allow, and
+/// most servers. Encoded, it just fits the message size Gmail announces (`SIZE`).
+const MAX_ATTACHMENTS_SIZE: u64 = 25 * 1024 * 1024;
+
+fn attachments_too_large() -> Error {
+    Error::InvalidInput(format!(
+        "a message's attachments can't add up to more than {}",
+        display::size(MAX_ATTACHMENTS_SIZE)
+    ))
+}
+
+/// Copies `file` into the blob store; returns the blob and its size. Refused if more
+/// than `budget` bytes arrive (reading stops one byte past), rather than stored cut
+/// short: a file can grow while it is read.
+fn copy_within(
+    blobs: &BlobStore,
+    file: impl std::io::Read,
+    budget: u64,
+) -> Result<(BlobHash, u64)> {
+    let blob = blobs.put(file.take(budget + 1))?;
+    // What was stored, not what the file said when it was opened.
+    let size = std::fs::metadata(blobs.path(&blob))?.len();
+    if size > budget {
+        return Err(attachments_too_large());
+    }
+    Ok((blob, size))
+}
+
 /// Copies the file into the blob store and attaches it; later changes to the file
 /// don't affect the draft.
 pub(crate) async fn attach_file(
@@ -101,9 +129,17 @@ pub(crate) async fn attach_file(
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .ok_or_else(|| Error::InvalidInput(format!("{} has no file name", path.display())))?;
-        let blob = engine2.blobs.put(std::fs::File::open(&path)?)?;
-        // What was stored, not what the file said when it was opened.
-        let size = std::fs::metadata(engine2.blobs.path(&blob))?.len();
+        let file = std::fs::File::open(&path)?;
+        let budget = MAX_ATTACHMENTS_SIZE.saturating_sub(
+            engine2
+                .store
+                .read(|db| db.drafts().attachments_size(draft))?,
+        );
+        // Spares copying a file that says it is too large; `copy_within` enforces it.
+        if file.metadata()?.len() > budget {
+            return Err(attachments_too_large());
+        }
+        let (blob, size) = copy_within(&engine2.blobs, file, budget)?;
         let new = NewDraftAttachment {
             blob,
             mime_type: mime_guess::from_path(&path)
@@ -113,16 +149,18 @@ pub(crate) async fn attach_file(
             filename,
             size,
         };
-        // An attachment whose draft is gone leaves an unreferenced blob for GC.
-        engine2
-            .store
-            .write(|db| {
-                let Some(attachment) = db.drafts().add_attachment(draft, &new, now())? else {
-                    return Ok(None);
-                };
-                Ok(db.drafts().account_of(draft)?.map(|a| (a, attachment)))
-            })
-            .map_err(Error::from)
+        // An attachment refused here, like one whose draft is gone, leaves an unreferenced
+        // blob for GC.
+        engine2.store.write(|db| {
+            // Again, for the draft: another file may have been attached meanwhile.
+            if db.drafts().attachments_size(draft)? + size > MAX_ATTACHMENTS_SIZE {
+                return Ok(Err(attachments_too_large()));
+            }
+            let Some(attachment) = db.drafts().add_attachment(draft, &new, now())? else {
+                return Ok(Ok(None));
+            };
+            Ok(Ok(db.drafts().account_of(draft)?.map(|a| (a, attachment))))
+        })?
     })
     .await?;
     let (account, attachment) = attachment.ok_or(Error::DraftNotFound(draft))?;
@@ -566,6 +604,18 @@ mod tests {
     use catmail_types::{Flags, FolderId, MessageBody, MessageSummary};
 
     use super::*;
+
+    #[test]
+    fn a_copy_past_its_budget_is_refused_not_cut_short() {
+        let dir = tempfile::tempdir().unwrap();
+        let blobs = BlobStore::open(dir.path()).unwrap();
+        assert!(matches!(
+            copy_within(&blobs, &b"12345"[..], 4),
+            Err(Error::InvalidInput(_))
+        ));
+        let (blob, size) = copy_within(&blobs, &b"1234"[..], 4).unwrap();
+        assert_eq!((blobs.read(&blob).unwrap(), size), (b"1234".to_vec(), 4));
+    }
 
     fn addr(name: Option<&str>, email: &str) -> Address {
         Address {

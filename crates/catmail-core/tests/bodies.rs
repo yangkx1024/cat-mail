@@ -1,7 +1,7 @@
 //! Body and attachment downloads, search and blob GC against the fake IMAP server.
 
 use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -10,7 +10,7 @@ use catmail_testkit::{FakeHttp, Reply, ServerState, SmtpState, response};
 
 mod common;
 
-use common::{Env, drain, env_built, eventually, synced_env as env};
+use common::{Env, drain, env_built, eventually, files, synced_env as env};
 
 impl Env {
     /// Message ids in INBOX, by UID: the fixtures' dates say nothing about it.
@@ -604,20 +604,6 @@ fn age_files(dir: &Path) {
             .set_modified(SystemTime::now() - Duration::from_secs(7 * 24 * 3600))
             .unwrap();
     }
-}
-
-/// Every file under `dir`.
-fn files(dir: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    for entry in std::fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            files.extend(self::files(&path));
-        } else {
-            files.push(path);
-        }
-    }
-    files
 }
 
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";

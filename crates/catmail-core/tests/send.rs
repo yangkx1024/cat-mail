@@ -9,7 +9,7 @@ use catmail_core::{
     Address, DraftContent, Error, ErrorKind, Event, OutboxEntry, OutboxStatus, RecvError,
 };
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
-use common::{Env, drain, env, env_with, eventually};
+use common::{Env, drain, env, env_with, eventually, files};
 use mail_parser::{MessageParser, MimeHeaders};
 use tokio::sync::Semaphore;
 
@@ -717,6 +717,70 @@ async fn attachments_are_copied_when_added() {
     let attachment = m.attachment(0).unwrap();
     assert_eq!(attachment.attachment_name(), Some("报告.pdf"));
     assert_eq!(attachment.contents(), b"%PDF-1.4 first");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn attachments_are_limited_in_size() {
+    const LIMIT: u64 = 25 * 1024 * 1024;
+    let env = env(state()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = |name: &str, size: u64| {
+        let path = dir.path().join(name);
+        // Sparse: only what is read gets written.
+        std::fs::File::create(&path).unwrap().set_len(size).unwrap();
+        path
+    };
+    let draft = env
+        .client
+        .create_draft(env.account, content("with attachments"))
+        .await
+        .unwrap();
+    let blobs = env.client.config().blob_dir();
+    let stored = || {
+        files(&blobs)
+            .iter()
+            .map(|p| p.metadata().unwrap().len())
+            .sum::<u64>()
+    };
+
+    // Refused before it is copied.
+    let before = stored();
+    assert!(matches!(
+        env.client
+            .attach_file(draft.id, file("huge.iso", 4 * LIMIT))
+            .await,
+        Err(Error::InvalidInput(_))
+    ));
+    assert_eq!(stored(), before);
+
+    // The limit is on the draft's attachments together.
+    let most = env
+        .client
+        .attach_file(draft.id, file("most.bin", LIMIT - 4))
+        .await
+        .unwrap();
+    assert!(matches!(
+        env.client.attach_file(draft.id, file("five.txt", 5)).await,
+        Err(Error::InvalidInput(_))
+    ));
+    env.client
+        .attach_file(draft.id, file("four.txt", 4))
+        .await
+        .unwrap();
+    let attached = env.client.get_draft(draft.id).await.unwrap().unwrap();
+    let names: Vec<_> = attached
+        .attachments
+        .iter()
+        .map(|a| a.filename.as_str())
+        .collect();
+    assert_eq!(names, ["most.bin", "four.txt"]);
+
+    // Removing one makes room again.
+    env.client.remove_draft_attachment(most.id).await.unwrap();
+    env.client
+        .attach_file(draft.id, file("five.txt", 5))
+        .await
+        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

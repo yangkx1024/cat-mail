@@ -464,6 +464,16 @@ impl<'c> Drafts<'c> {
         }))
     }
 
+    /// The size of the draft's attachments together; 0 if there is no such draft.
+    pub fn attachments_size(&self, draft: DraftId) -> Result<u64> {
+        let size: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(size), 0) FROM draft_attachments WHERE draft_id = ?1",
+            [draft.0],
+            |r| r.get(0),
+        )?;
+        Ok(size as u64)
+    }
+
     /// Returns the draft it was attached to, or `None` if there is no such attachment.
     pub fn remove_attachment(&self, id: DraftAttachmentId, now: i64) -> Result<Option<DraftId>> {
         let draft: Option<i64> = self
