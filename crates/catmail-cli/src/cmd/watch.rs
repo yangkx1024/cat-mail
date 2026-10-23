@@ -6,6 +6,7 @@ use std::future::Future;
 use anyhow::{Result, bail};
 use catmail_core::{AccountId, Event, MailClient, RecvError};
 
+use crate::json::{self, JsonEvent};
 use crate::output::printable;
 
 /// Prints what changes while background sync keeps every account up to date, until
@@ -50,7 +51,7 @@ pub(crate) async fn watch(
         }
         for event in batch {
             if json {
-                println!("{}", serde_json::to_string(&event)?);
+                json::print_line(&JsonEvent::from(&event))?;
             } else if let Some(line) = describe(client, &emails, &event).await? {
                 let time = jiff::Zoned::now().strftime("%H:%M:%S");
                 println!("{time} {line}");
