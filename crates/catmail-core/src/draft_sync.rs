@@ -97,7 +97,7 @@ async fn run(
         .await?;
     let owner = owner.ok_or_else(|| Error::AccountNotFound(account.to_string()))?;
     for upload in unsettled {
-        touched.extend(
+        touched.merge(
             try_settle(engine, session, &upload, None)
                 .await?
                 .unwrap_or_default(),
@@ -115,7 +115,7 @@ async fn run(
         match upload_one(engine, session, &owner, draft, (folder, &remote_name)).await? {
             Outcome::Uploaded(changed) => {
                 done.saved(draft);
-                touched.extend(changed);
+                touched.merge(changed);
             }
             Outcome::Failed => {
                 done.refused.insert(draft);

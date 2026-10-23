@@ -42,6 +42,12 @@ pub enum Event {
     PendingOpsChanged {
         account: AccountId,
     },
+    /// Some of the account's queued changes were refused by the server or became
+    /// conflicts, and were undone locally. Sent along with `PendingOpsChanged`, only when
+    /// that happened; see `MailClient::dismiss_settled`.
+    ChangesRefused {
+        account: AccountId,
+    },
     /// The server accepted a message for delivery.
     MessageSent {
         account: AccountId,

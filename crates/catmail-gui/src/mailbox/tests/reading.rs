@@ -397,6 +397,37 @@ fn a_change_the_server_refuses_is_undone_and_reported(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_change_refused_before_the_window_opened_is_reported(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let client = &mail.client;
+    pollster::block_on(async {
+        let inbox = client
+            .find_folder(mail.account(), "INBOX")
+            .await
+            .unwrap()
+            .unwrap();
+        let messages = client.list_messages(inbox.id, 1, None).await.unwrap();
+        let ids = messages.iter().map(|m| m.id).collect();
+        client
+            .set_flags(ids, Flags::FLAGGED, Flags::empty())
+            .await
+            .unwrap();
+    });
+    mail.refuse_changes("[CANNOT] Permission denied");
+    let report = pollster::block_on(client.replay_pending(mail.account())).unwrap();
+    assert!(report.failed > 0);
+
+    let (_, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    wait_until(|| {
+        cx.run_until_parked();
+        pollster::block_on(client.list_pending(None))
+            .unwrap()
+            .is_empty()
+    });
+}
+
+#[gpui_kit::test]
 fn events_missed_meanwhile_read_everything_again(cx: &mut TestAppContext) {
     let mail = TestMail::start();
     let (_, mailbox) = open(cx, &mail);

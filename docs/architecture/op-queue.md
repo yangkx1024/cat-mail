@@ -96,6 +96,11 @@ COPY 重做会多出一份，所以 COPY 像发信的结束标记一样处理（
 哪些文件夹的邮件行变了由 repository 返回，core 不猜；只是 op 被删除时不发 `MessagesChanged`，
 每次回放结束时发一次 `PendingOpsChanged`。
 
+`Touched` 还带着哪些账户有 op **变成**了失败或冲突：只有 store 的 `PendingOps::failed`（服务器拒绝）
+和 `conflict`（新代际、`\Noselect`、移动后的位置不明）把 op 标成非 pending，它们把账户记进去。core
+据此在上面的事件之后发 `ChangesRefused`，前端只在这时（以及启动、漏收事件后）去取
+`dismiss_settled`，不必每次 `PendingOpsChanged` 都查一次队列。
+
 ## 草稿的远端副本
 
 同样绑定 UIDVALIDITY：`drafts.remote_*`（文件夹、UIDVALIDITY、UID、Message-ID、版本）同时设置、同时

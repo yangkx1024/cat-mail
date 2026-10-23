@@ -90,8 +90,7 @@ impl Mailbox {
     }
 
     /// Changes the server refused are undone locally by the engine; this says so, once
-    /// per change, and forgets them. Coalesced like reading (dismissing them sends
-    /// another event).
+    /// per change, and forgets them. Coalesced like reading.
     pub(super) fn report_refused_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.checking_refused.start() {
             return;

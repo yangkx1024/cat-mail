@@ -185,7 +185,7 @@ impl<'c> Folders<'c> {
             .map(|f| f.id.0)
             .collect();
         for id in gone {
-            touched.extend(PendingOps::new(self.conn).forget_folder(FolderId(id))?);
+            touched.merge(PendingOps::new(self.conn).forget_folder(FolderId(id))?);
             Drafts::new(self.conn).end_generation(FolderId(id), None)?;
             self.conn
                 .execute("DELETE FROM folders WHERE id = ?1", [id])?;
@@ -204,7 +204,7 @@ impl<'c> Folders<'c> {
             .query_map([account.0], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         for id in emptied {
-            touched.extend(self.end_generation(FolderId(id), None)?);
+            touched.merge(self.end_generation(FolderId(id), None)?);
             changed = true;
         }
         Ok(Reconciled { changed, touched })

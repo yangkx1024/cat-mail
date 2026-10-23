@@ -85,18 +85,30 @@ async fn change(
 /// Emits the events for `touched`, and wakes the accounts' background sync to make any
 /// ops queued on the server. Returns its accounts.
 pub(crate) fn announce(engine: &Engine, touched: &Touched) -> Vec<AccountId> {
-    for &(account, folder) in touched {
+    for &(account, folder) in &touched.folders {
         engine.emit(Event::MessagesChanged { account, folder });
     }
-    let mut accounts: Vec<AccountId> = touched.iter().map(|(a, _)| *a).collect();
-    accounts.dedup();
+    let accounts: BTreeSet<AccountId> = touched
+        .folders
+        .iter()
+        .map(|(a, _)| *a)
+        .chain(touched.refused.iter().copied())
+        .collect();
     for &account in &accounts {
         engine.emit(Event::PendingOpsChanged { account });
         // Sync's own conflicts come through here too; that costs a needless look at the
         // queue, rarely.
         engine.wake(account);
     }
-    accounts
+    emit_refused(engine, touched);
+    accounts.into_iter().collect()
+}
+
+/// Tells about the changes `touched` refused, after the events that show them undone.
+fn emit_refused(engine: &Engine, touched: &Touched) {
+    for &account in &touched.refused {
+        engine.emit(Event::ChangesRefused { account });
+    }
 }
 
 pub(crate) async fn list(
@@ -119,8 +131,8 @@ pub(crate) async fn dismiss_settled(
     engine: Arc<Engine>,
     account: Option<AccountId>,
 ) -> Result<Vec<PendingOp>> {
-    // Asked after every change to the queue, while a sync may be writing: only take
-    // the write connection when there is something to forget.
+    // Asked after missed events too, while a sync may be writing: only take the write
+    // connection when there is something to forget.
     if !engine.read(move |db| db.ops().has_settled(account)).await? {
         return Ok(Vec::new());
     }
@@ -269,10 +281,11 @@ async fn replay(
 /// of the folders in `touched`. Unlike [`announce`] it wakes nobody: the replay is what
 /// a wake would ask for.
 pub(crate) fn replayed(engine: &Engine, account: AccountId, touched: &Touched) {
-    for &(account, folder) in touched {
+    for &(account, folder) in &touched.folders {
         engine.emit(Event::MessagesChanged { account, folder });
     }
     engine.emit(Event::PendingOpsChanged { account });
+    emit_refused(engine, touched);
 }
 
 /// Runs the folder's pending ops on `session`, recording the folders whose messages
@@ -422,7 +435,7 @@ impl Settle<'_> {
                     .await?
             }
         };
-        self.touched.extend(changed);
+        self.touched.merge(changed);
         Ok(())
     }
 }

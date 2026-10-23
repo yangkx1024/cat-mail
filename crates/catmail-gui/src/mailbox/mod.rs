@@ -216,6 +216,8 @@ impl Mailbox {
             _subscriptions: subscriptions,
         };
         mailbox.load_folders(window, cx);
+        // Left from before, or refused while no window was open.
+        mailbox.report_refused_changes(window, cx);
         mailbox
     }
 
@@ -285,7 +287,7 @@ impl Mailbox {
                 }
             }
             Some(&Event::DraftsChanged { account }) => self.count_drafts(account, window, cx),
-            Some(Event::PendingOpsChanged { .. }) | None => self.report_refused_changes(window, cx),
+            Some(Event::ChangesRefused { .. }) | None => self.report_refused_changes(window, cx),
             Some(_) => {}
         }
     }

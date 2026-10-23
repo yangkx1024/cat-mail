@@ -21,8 +21,45 @@ use crate::columns::{conversion_error, parse_text};
 use crate::folders::Folders;
 use crate::{Error, Result};
 
-/// Folders whose messages a change touched, for change events.
-pub type Touched = BTreeSet<(AccountId, FolderId)>;
+/// What a change did, for change events.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Touched {
+    /// Folders whose messages it changed.
+    pub folders: BTreeSet<(AccountId, FolderId)>,
+    /// Accounts some of whose queued changes it made fail or turned into conflicts.
+    pub refused: BTreeSet<AccountId>,
+}
+
+impl Touched {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.folders.is_empty() && self.refused.is_empty()
+    }
+
+    /// Adds what `other` did.
+    pub fn merge(&mut self, other: Touched) {
+        self.folders.extend(other.folders);
+        self.refused.extend(other.refused);
+    }
+}
+
+impl FromIterator<(AccountId, FolderId)> for Touched {
+    fn from_iter<I: IntoIterator<Item = (AccountId, FolderId)>>(folders: I) -> Self {
+        Self {
+            folders: folders.into_iter().collect(),
+            refused: BTreeSet::new(),
+        }
+    }
+}
+
+impl<const N: usize> From<[(AccountId, FolderId); N]> for Touched {
+    fn from(folders: [(AccountId, FolderId); N]) -> Self {
+        folders.into_iter().collect()
+    }
+}
 
 /// The flags a user may change. `\Deleted` goes with deletion and `\Draft` with drafts.
 const USER_FLAGS: Flags =
@@ -153,7 +190,7 @@ impl<'c> PendingOps<'c> {
             // A message moved here locally is still where its move says, and the flag
             // change goes there; it is replayed before the move.
             self.queue(&m, OpKind::Flags { add, remove }, now)?;
-            touched.insert((m.account, m.folder));
+            touched.folders.insert((m.account, m.folder));
         }
         Ok(touched)
     }
@@ -175,7 +212,9 @@ impl<'c> PendingOps<'c> {
                 )));
             }
             self.move_one(&m, to, now)?;
-            touched.extend([(m.account, m.folder), (m.account, to)]);
+            touched
+                .folders
+                .extend([(m.account, m.folder), (m.account, to)]);
         }
         Ok(touched)
     }
@@ -194,7 +233,9 @@ impl<'c> PendingOps<'c> {
             }
             if let Some(to) = archive_folder(folders, m.folder) {
                 self.move_one(&m, to, now)?;
-                touched.extend([(m.account, m.folder), (m.account, to)]);
+                touched
+                    .folders
+                    .extend([(m.account, m.folder), (m.account, to)]);
             }
         }
         Ok(touched)
@@ -213,7 +254,7 @@ impl<'c> PendingOps<'c> {
         let mut folders = HashMap::new();
         for &id in messages {
             let m = self.local(id)?;
-            touched.insert((m.account, m.folder));
+            touched.folders.insert((m.account, m.folder));
             let outcome = if permanently {
                 DeleteOutcome::Permanent
             } else {
@@ -222,7 +263,7 @@ impl<'c> PendingOps<'c> {
             match outcome {
                 DeleteOutcome::ToTrash(trash) => {
                     self.move_one(&m, trash, now)?;
-                    touched.insert((m.account, trash));
+                    touched.folders.insert((m.account, trash));
                     continue;
                 }
                 DeleteOutcome::NoTrash => {
@@ -610,7 +651,11 @@ impl<'c> PendingOps<'c> {
                 .query_row(params![op.id.0, to.0], |r| r.get(0))
                 .optional()?;
             if let Some(Some(row)) = row {
-                touched.extend(self.place(MessageId(row), to, new_place.map(|(_, uid)| uid))?);
+                touched.folders.extend(self.place(
+                    MessageId(row),
+                    to,
+                    new_place.map(|(_, uid)| uid),
+                )?);
             }
             match new_place {
                 Some((new_uidvalidity, new_uid)) => {
@@ -631,7 +676,7 @@ impl<'c> PendingOps<'c> {
                             new_uid
                         ])?;
                 }
-                None => touched.extend(self.conflict(
+                None => touched.merge(self.conflict(
                     "folder_id = ?1 AND uidvalidity = ?2 AND uid = ?3",
                     params![folder.0, uidvalidity, op.uid],
                 )?),
@@ -654,26 +699,31 @@ impl<'c> PendingOps<'c> {
                 ReplayKind::Move { to, .. } => Some(to.0),
                 _ => None,
             };
-            let row: Option<Option<i64>> = self
+            let row: Option<(i64, Option<i64>)> = self
                 .conn
                 .prepare_cached(
                     "UPDATE pending_ops SET status = 'failed', last_error = ?2
                      WHERE id = ?1 AND status = 'pending' AND target_folder_id IS ?3
-                     RETURNING message_id",
+                     RETURNING account_id, message_id",
                 )?
-                .query_row(params![op.id.0, error, target], |r| r.get(0))
+                .query_row(params![op.id.0, error, target], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
                 .optional()?;
-            let Some(Some(row)) = row else {
+            let Some((account, row)) = row else {
                 continue;
             };
-            match op.kind {
-                ReplayKind::Flags { .. } => {
-                    touched.extend(self.unwind_flags(MessageId(row), op.id)?);
+            touched.refused.insert(AccountId(account));
+            match (&op.kind, row) {
+                (ReplayKind::Flags { .. }, Some(row)) => {
+                    touched
+                        .folders
+                        .extend(self.unwind_flags(MessageId(row), op.id)?);
                 }
-                ReplayKind::Move { .. } => {
-                    touched.extend(self.restore(MessageId(row), folder, op.uid)?);
+                (ReplayKind::Move { .. }, Some(row)) => {
+                    touched.merge(self.restore(MessageId(row), folder, op.uid)?);
                 }
-                ReplayKind::Delete => {}
+                _ => {}
             }
         }
         Ok(touched)
@@ -811,9 +861,9 @@ impl<'c> PendingOps<'c> {
             .query_map([folder.0], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<rusqlite::Result<_>>()?;
         for (row, source, uid) in moves_in {
-            touched.extend(self.restore(MessageId(row), FolderId(source), uid)?);
+            touched.merge(self.restore(MessageId(row), FolderId(source), uid)?);
         }
-        touched.retain(|&(_, f)| f != folder);
+        touched.folders.retain(|&(_, f)| f != folder);
         Ok(touched)
     }
 
@@ -829,7 +879,7 @@ impl<'c> PendingOps<'c> {
 
     /// Marks the pending ops matching `filter` conflicts, dropping the rows of moves
     /// among them, whose messages' place on the server is no longer known. Returns the
-    /// folders of those rows and ops.
+    /// folders of those rows and ops, and the ops' accounts as refused.
     fn conflict(&self, filter: &str, params: impl Params + Clone) -> Result<Touched> {
         let mut touched = self.drop_moving_rows(filter, params.clone())?;
         let mut stmt = self.conn.prepare_cached(&format!(
@@ -838,7 +888,9 @@ impl<'c> PendingOps<'c> {
              RETURNING account_id, folder_id"
         ))?;
         for row in stmt.query_map(params, folder_of)? {
-            touched.insert(row?);
+            let (account, folder) = row?;
+            touched.folders.insert((account, folder));
+            touched.refused.insert(account);
         }
         Ok(touched)
     }
@@ -1234,7 +1286,8 @@ mod tests {
             db.ops().set_flags(&[m2], Flags::empty(), Flags::FLAGGED, 0)
         });
         let ops = f.pending(f.inbox);
-        f.write(|db| db.ops().failed(f.inbox, &ops[..2], "NO read-only"));
+        let touched = f.write(|db| db.ops().failed(f.inbox, &ops[..2], "NO read-only"));
+        assert_eq!(touched.refused, BTreeSet::from([f.account]));
         // m1 back to read; m2's later change is still pending, so it keeps it.
         assert_eq!(f.row(m1).unwrap().2, Flags::SEEN);
         assert_eq!(f.row(m2).unwrap().2, Flags::empty());
@@ -1565,7 +1618,8 @@ mod tests {
                 .set_flags(&[m1], Flags::FLAGGED, Flags::empty(), 0)?;
             db.ops().move_messages(&[m2], f.archive, 0)
         });
-        f.write(|db| db.folders().reset_uidvalidity(f.inbox, 8));
+        let touched = f.write(|db| db.folders().reset_uidvalidity(f.inbox, 8));
+        assert_eq!(touched.refused, BTreeSet::from([f.account]));
         // The moved row named an old UID too.
         assert_eq!(f.row(m2), None);
         assert!(f.ops().iter().all(|op| op.status == OpStatus::Conflict));
@@ -1579,7 +1633,8 @@ mod tests {
         let m2 = f.message(f.inbox, 2);
         f.write(|db| db.ops().move_messages(&[m2], f.archive, 0));
         // The target is rebuilt: the move names INBOX's UID, which still holds.
-        f.write(|db| db.folders().reset_uidvalidity(f.archive, 8));
+        let touched = f.write(|db| db.folders().reset_uidvalidity(f.archive, 8));
+        assert!(touched.refused.is_empty());
         assert_eq!(f.row(m2), Some((f.archive, None, Flags::empty())));
         assert_eq!(f.counts(f.archive), (1, 1));
         let ops = f.ops();

@@ -296,6 +296,7 @@ async fn refused_changes_are_undone() {
         env.id_of("INBOX", "two").await,
     );
     let archive = env.folder("Archive").await;
+    let mut events = env.client.subscribe();
     env.client
         .set_flags(vec![one], Flags::FLAGGED, Flags::empty())
         .await
@@ -304,10 +305,13 @@ async fn refused_changes_are_undone() {
         .move_messages(vec![two], archive.id)
         .await
         .unwrap();
+    // Changes made locally are no news of a refusal.
+    assert_eq!(refusals(&drain(&mut events)), 0);
     env.fake.state().faults.refuse_changes = Some("[CANNOT] Permission denied".into());
 
     let report = env.client.replay_pending(env.account).await.unwrap();
     assert_eq!((report.applied, report.failed, report.pending), (0, 2, 0));
+    assert_eq!(refusals(&drain(&mut events)), 1);
     assert_eq!(
         env.local("INBOX").await,
         [
@@ -331,6 +335,15 @@ async fn refused_changes_are_undone() {
         env.client.dismiss_pending(op.id).await.unwrap();
     }
     assert!(env.pending().await.is_empty());
+    assert_eq!(refusals(&drain(&mut events)), 0);
+}
+
+/// How many times `events` say changes were refused.
+fn refusals(events: &[Event]) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(e, Event::ChangesRefused { .. }))
+        .count()
 }
 
 /// A refusal is committed, and undone, at once: the report counts it although the
@@ -501,6 +514,7 @@ async fn a_rebuilt_folder_turns_changes_into_conflicts() {
         }),
         "{seen:?}"
     );
+    assert_eq!(refusals(&seen), 1, "{seen:?}");
 }
 
 /// Without MOVE, with "two" moved locally to Archive. The message "two" has no
