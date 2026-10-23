@@ -4,15 +4,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Result, bail};
-use catmail_core::{
-    AccountId, Flags, FolderId, MailClient, MessageId, OpKind, OpStatus, PendingOp, PendingOpId,
-    ReplayReport,
-};
+use anyhow::Result;
+use catmail_core::{AccountId, Flags, MailClient, MessageId, PendingOpId, ReplayReport};
 use clap::{ArgGroup, Args, Subcommand};
 
-use crate::folder_names;
-use crate::output::{print_table, truncate};
+use crate::cmd::folder_names;
+use crate::exit::{Exit, Outcome};
+use crate::json::{self, JsonPendingOp, JsonReplay};
+use crate::output::print_ops;
 
 #[derive(Args)]
 #[command(group(ArgGroup::new("change").required(true).multiple(true)))]
@@ -124,9 +123,10 @@ pub(crate) async fn ops(client: &MailClient, cmd: OpsCommand, json: bool) -> Res
         OpsCommand::List => {
             let ops = client.list_pending(None).await?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&ops)?);
+                json::print_list::<JsonPendingOp, _>("ops", &ops)?;
             } else {
-                print_ops(client, &ops).await?;
+                let accounts: BTreeSet<AccountId> = ops.iter().map(|op| op.account_id).collect();
+                print_ops(&ops, &folder_names(client, accounts).await?);
             }
             Ok(())
         }
@@ -167,7 +167,7 @@ async fn by_account(
 }
 
 /// Makes the accounts' queued changes on the server, all at once. Fails unless every
-/// change was made, saying why.
+/// change was made, saying why; with [`Outcome::Queued`] if nothing was refused.
 async fn replay(
     client: &MailClient,
     accounts: impl IntoIterator<Item = AccountId>,
@@ -179,38 +179,38 @@ async fn replay(
         replays.spawn(async move { (account, client.replay_pending(account).await) });
     }
     let (mut results, mut errors): (Vec<(AccountId, ReplayReport)>, _) = (Vec::new(), Vec::new());
+    let mut outcome = Outcome::Queued;
     for (account, replayed) in replays.join_all().await {
         match replayed {
             Ok(report) => results.push((account, report)),
-            Err(e) => errors.push(format!("account {account}: {e}")),
+            Err(e) => {
+                // The server wasn't reached: the changes wait for the next try.
+                if !e.is_transient() {
+                    outcome = Outcome::Failed;
+                }
+                errors.push(format!("account {account}: {e}"));
+            }
         }
     }
     results.sort_by_key(|(account, _)| *account);
     if json {
-        let results: Vec<_> = results
+        let accounts: Vec<_> = results
             .iter()
-            .map(|(account, r)| {
-                serde_json::json!({
-                    "account": account,
-                    "applied": r.applied,
-                    "failed": r.failed,
-                    "pending": r.pending,
-                    "drafts_uploaded": r.drafts_uploaded,
-                    "drafts_failed": r.drafts_failed,
-                })
-            })
+            .map(|(account, r)| JsonReplay::new(account.0, r))
             .collect();
-        println!("{}", serde_json::to_string_pretty(&results)?);
+        json::print_keyed("accounts", &accounts)?;
     }
     let failed: u32 = results.iter().map(|(_, r)| r.failed).sum();
     let pending: u32 = results.iter().map(|(_, r)| r.pending).sum();
     if failed > 0 {
+        outcome = Outcome::Failed;
         errors.push(format!(
             "the server refused {failed} change(s), which were undone; `catmail ops` shows why"
         ));
     }
     let drafts_failed: u32 = results.iter().map(|(_, r)| r.drafts_failed).sum();
     if drafts_failed > 0 {
+        outcome = Outcome::Failed;
         errors.push(refused_drafts(drafts_failed));
     }
     if !errors.is_empty() || pending > 0 {
@@ -219,7 +219,7 @@ async fn replay(
         ));
     }
     if !errors.is_empty() {
-        bail!("{}", errors.join("\n"));
+        return Err(Exit::new(outcome, errors.join("\n")).into());
     }
     Ok(())
 }
@@ -232,61 +232,6 @@ pub(crate) fn refused_drafts(count: u32) -> String {
         "the server refused to store {count} draft(s) in its Drafts folder; \
          `catmail draft show` says why"
     )
-}
-
-async fn print_ops(client: &MailClient, ops: &[PendingOp]) -> Result<()> {
-    if ops.is_empty() {
-        println!("No changes waiting for the server.");
-        return Ok(());
-    }
-    let accounts: BTreeSet<AccountId> = ops.iter().map(|op| op.account_id).collect();
-    let folders = folder_names(client, accounts).await?;
-    let name = |id: FolderId| folders.get(&id).cloned().unwrap_or_else(|| id.to_string());
-    let rows = ops
-        .iter()
-        .map(|op| {
-            vec![
-                op.id.to_string(),
-                op.status.to_string(),
-                change(op.kind, &name),
-                name(op.folder_id),
-                truncate(op.subject.as_deref().unwrap_or_default(), 30),
-                match op.status {
-                    OpStatus::Conflict => "folder was rebuilt on the server".into(),
-                    _ => op.last_error.clone().unwrap_or_default(),
-                },
-            ]
-        })
-        .collect();
-    print_table(
-        &["ID", "STATUS", "CHANGE", "FOLDER", "SUBJECT", "LAST ERROR"],
-        rows,
-    );
-    Ok(())
-}
-
-fn change(kind: OpKind, folder: &impl Fn(FolderId) -> String) -> String {
-    match kind {
-        OpKind::Flags { add, remove } => {
-            let names = [
-                (Flags::SEEN, "read"),
-                (Flags::FLAGGED, "flagged"),
-                (Flags::ANSWERED, "answered"),
-            ];
-            let mut parts = Vec::new();
-            for (flag, name) in names {
-                if add.contains(flag) {
-                    parts.push(format!("+{name}"));
-                }
-                if remove.contains(flag) {
-                    parts.push(format!("-{name}"));
-                }
-            }
-            parts.join(" ")
-        }
-        OpKind::Move { to } => format!("move to {}", folder(to)),
-        OpKind::Delete => "delete".into(),
-    }
 }
 
 #[cfg(test)]
@@ -339,6 +284,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("Nowhere"), "{err}");
+        assert_eq!(crate::exit::outcome(&err), Outcome::Failed);
         assert_eq!(
             client
                 .list_messages(inbox.id, 10, None)
@@ -355,6 +301,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("catmail ops flush"), "{err}");
+        assert_eq!(crate::exit::outcome(&err), Outcome::Queued);
         assert!(
             client
                 .list_messages(inbox.id, 10, None)

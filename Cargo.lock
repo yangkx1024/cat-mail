@@ -1104,6 +1104,7 @@ dependencies = [
  "clap",
  "jiff",
  "rpassword",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

@@ -1,8 +1,14 @@
-//! Terminal output: escaping text from strangers, aligned tables. How dates, sizes and
-//! names read is `catmail_core::display`, shared with the GUI.
+//! Terminal output for people: escaping text from strangers, aligned tables, and how
+//! each command shows its results (`json.rs` is the same for scripts). How dates,
+//! sizes and names read is `catmail_core::display`, shared with the GUI.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 
+use catmail_core::{
+    Account, Draft, Flags, Folder, FolderId, Message, MessageSummary, OpKind, OpStatus,
+    OutboxEntry, OutboxStatus, PendingOp, SyncReport, display,
+};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Shortens to at most `width` terminal columns, marking the cut with `…`.
@@ -97,6 +103,316 @@ pub(crate) fn printable_text(s: &str) -> String {
         }
     }
     out
+}
+
+pub(crate) fn print_accounts(accounts: &[Account]) {
+    if accounts.is_empty() {
+        println!("No accounts. Add one with `catmail account add`.");
+        return;
+    }
+    let rows = accounts
+        .iter()
+        .map(|a| {
+            vec![
+                a.id.to_string(),
+                a.email.clone(),
+                format!("{}:{} ({})", a.imap.host, a.imap.port, a.imap.security),
+                format!("{}:{} ({})", a.smtp.host, a.smtp.port, a.smtp.security),
+            ]
+        })
+        .collect();
+    print_table(&["ID", "EMAIL", "IMAP", "SMTP"], rows);
+}
+
+pub(crate) fn print_sync_report(report: &SyncReport) {
+    let mut quiet = true;
+    for folder in &report.folders {
+        let mut parts = Vec::new();
+        if folder.uidvalidity_changed {
+            parts.push("UIDVALIDITY changed, refetched".to_owned());
+        }
+        for (n, what) in [
+            (folder.ops_applied, "local changes made"),
+            (
+                folder.ops_failed,
+                "local changes refused and undone (see `catmail ops`)",
+            ),
+            (folder.added, "new"),
+            (folder.updated, "updated"),
+            (folder.removed, "removed"),
+        ] {
+            if n > 0 {
+                parts.push(format!("{n} {what}"));
+            }
+        }
+        if let Some(error) = &folder.error {
+            parts.push(format!("failed: {error}"));
+        }
+        if !parts.is_empty() {
+            quiet = false;
+            println!(
+                "  {}: {}",
+                printable(&folder.name),
+                printable(&parts.join(", "))
+            );
+        }
+    }
+    if quiet {
+        println!("  up to date ({} folders)", report.folders.len());
+    }
+}
+
+pub(crate) fn print_folders(folders: &[Folder]) {
+    let rows = folders
+        .iter()
+        .map(|f| {
+            let [unread, total] = if f.selectable {
+                [f.unread_count.to_string(), f.total_count.to_string()]
+            } else {
+                ["-".into(), "-".into()]
+            };
+            vec![
+                f.name.clone(),
+                f.role.map(|r| r.as_str().to_owned()).unwrap_or_default(),
+                unread,
+                total,
+            ]
+        })
+        .collect();
+    print_table(&["FOLDER", "ROLE", "UNREAD", "TOTAL"], rows);
+}
+
+/// With `folders`, adds a FOLDER column.
+pub(crate) fn print_message_table(
+    messages: &[MessageSummary],
+    folders: Option<&HashMap<FolderId, String>>,
+) {
+    let rows = messages
+        .iter()
+        .map(|m| {
+            let mut marks = String::new();
+            marks.push(if m.flags.contains(Flags::SEEN) {
+                ' '
+            } else {
+                '*'
+            });
+            marks.push(if m.flags.contains(Flags::FLAGGED) {
+                '!'
+            } else {
+                ' '
+            });
+            marks.push(if m.has_attachments { '@' } else { ' ' });
+            let mut row = vec![m.id.to_string(), marks, display::date(m.date)];
+            if let Some(folders) = folders {
+                let name = folders.get(&m.folder_id).cloned().unwrap_or_default();
+                row.push(truncate(&name, 16));
+            }
+            row.push(truncate(display::sender(&m.from), 24));
+            row.push(display::subject(m.subject.as_deref()).to_owned());
+            row
+        })
+        .collect();
+    let header: &[&str] = match folders {
+        Some(_) => &["ID", "", "DATE", "FOLDER", "FROM", "SUBJECT"],
+        None => &["ID", "", "DATE", "FROM", "SUBJECT"],
+    };
+    print_table(header, rows);
+}
+
+pub(crate) fn print_message(message: &Message, html: bool) {
+    let m = &message.summary;
+    let header = |name: &str, value: &str| {
+        if !value.is_empty() {
+            println!("{name:<9}{}", printable(value));
+        }
+    };
+    header("From:", &display::addresses(&m.from));
+    header("To:", &display::addresses(&message.to));
+    header("Cc:", &display::addresses(&message.cc));
+    header("Date:", &display::date(m.date));
+    header("Subject:", display::subject(m.subject.as_deref()));
+    println!();
+    let Some(body) = &message.body else {
+        println!("(body not downloaded; run without --offline)");
+        return;
+    };
+    let text = if html {
+        body.html.as_deref().or(body.text.as_deref())
+    } else {
+        body.text.as_deref()
+    };
+    match text {
+        Some(text) => println!("{}", printable_text(text.trim_end())),
+        None => println!("(no text)"),
+    }
+    let attachments: Vec<_> = body.attachments.iter().filter(|a| !a.inline).collect();
+    if !attachments.is_empty() {
+        println!();
+        let rows = attachments
+            .iter()
+            .map(|a| {
+                vec![
+                    a.id.to_string(),
+                    a.filename.clone().unwrap_or_else(|| "(unnamed)".into()),
+                    a.mime_type.clone(),
+                    match a.size {
+                        Some(size) if a.downloaded => display::size(size.into()),
+                        Some(size) => format!("~{}", display::size(size.into())),
+                        None => String::new(),
+                    },
+                ]
+            })
+            .collect();
+        print_table(&["ATTACHMENT", "NAME", "TYPE", "SIZE"], rows);
+    }
+}
+
+/// `folders` names the folders the changes are in or move to.
+pub(crate) fn print_ops(ops: &[PendingOp], folders: &HashMap<FolderId, String>) {
+    if ops.is_empty() {
+        println!("No changes waiting for the server.");
+        return;
+    }
+    let name = |id: FolderId| folders.get(&id).cloned().unwrap_or_else(|| id.to_string());
+    let rows = ops
+        .iter()
+        .map(|op| {
+            vec![
+                op.id.to_string(),
+                op.status.to_string(),
+                change(op.kind, &name),
+                name(op.folder_id),
+                truncate(op.subject.as_deref().unwrap_or_default(), 30),
+                match op.status {
+                    OpStatus::Conflict => "folder was rebuilt on the server".into(),
+                    _ => op.last_error.clone().unwrap_or_default(),
+                },
+            ]
+        })
+        .collect();
+    print_table(
+        &["ID", "STATUS", "CHANGE", "FOLDER", "SUBJECT", "LAST ERROR"],
+        rows,
+    );
+}
+
+fn change(kind: OpKind, folder: &impl Fn(FolderId) -> String) -> String {
+    match kind {
+        OpKind::Flags { add, remove } => {
+            let names = [
+                (Flags::SEEN, "read"),
+                (Flags::FLAGGED, "flagged"),
+                (Flags::ANSWERED, "answered"),
+            ];
+            let mut parts = Vec::new();
+            for (flag, name) in names {
+                if add.contains(flag) {
+                    parts.push(format!("+{name}"));
+                }
+                if remove.contains(flag) {
+                    parts.push(format!("-{name}"));
+                }
+            }
+            parts.join(" ")
+        }
+        OpKind::Move { to } => format!("move to {}", folder(to)),
+        OpKind::Delete => "delete".into(),
+    }
+}
+
+pub(crate) fn print_drafts(drafts: &[Draft]) {
+    if drafts.is_empty() {
+        println!("No drafts.");
+        return;
+    }
+    let rows = drafts
+        .iter()
+        .map(|d| {
+            vec![
+                d.id.to_string(),
+                display::date(Some(d.updated_at)),
+                server_status(d).into(),
+                truncate(&display::names(d.content.recipients()), 30),
+                if d.attachments.is_empty() { "" } else { "@" }.into(),
+                display::subject(Some(&d.content.subject)).to_owned(),
+            ]
+        })
+        .collect();
+    print_table(&["ID", "CHANGED", "SERVER", "TO", "", "SUBJECT"], rows);
+}
+
+pub(crate) fn print_draft(draft: &Draft) {
+    let c = &draft.content;
+    let header = |name: &str, value: &str| {
+        if !value.is_empty() {
+            println!("{name:<9}{}", printable(value));
+        }
+    };
+    header("To:", &display::addresses(&c.to));
+    header("Cc:", &display::addresses(&c.cc));
+    header("Bcc:", &display::addresses(&c.bcc));
+    header("Subject:", display::subject(Some(&c.subject)));
+    if let Some(outbox) = draft.outbox {
+        header("Status:", &format!("being sent (outbox entry {outbox})"));
+    }
+    match &draft.upload_error {
+        Some(error) => header("Server:", &format!("refused to store it: {error}")),
+        None if !draft.on_server => header("Server:", "not in the Drafts folder yet"),
+        None => {}
+    }
+    println!();
+    println!("{}", printable_text(c.text.trim_end()));
+    if !draft.attachments.is_empty() {
+        println!();
+        let rows = draft
+            .attachments
+            .iter()
+            .map(|a| {
+                vec![
+                    a.id.to_string(),
+                    a.filename.clone(),
+                    a.mime_type.clone(),
+                    display::size(a.size),
+                ]
+            })
+            .collect();
+        print_table(&["ATTACHMENT", "NAME", "TYPE", "SIZE"], rows);
+    }
+}
+
+/// Whether the server's Drafts folder has the draft as it is.
+fn server_status(draft: &Draft) -> &'static str {
+    match (draft.on_server, &draft.upload_error) {
+        (true, _) => "saved",
+        (false, Some(_)) => "refused",
+        (false, None) => "",
+    }
+}
+
+pub(crate) fn print_outbox(entries: &[OutboxEntry]) {
+    if entries.is_empty() {
+        println!("The outbox is empty.");
+        return;
+    }
+    let rows = entries
+        .iter()
+        .map(|e| {
+            let state = match (e.status, e.next_attempt_at) {
+                (OutboxStatus::Queued | OutboxStatus::Accepted, Some(at)) if e.attempts > 0 => {
+                    format!("{}, next try {}", e.status, display::date(Some(at)))
+                }
+                (status, _) => status.to_string(),
+            };
+            vec![
+                e.id.to_string(),
+                state,
+                truncate(&e.recipients.join(", "), 30),
+                truncate(display::subject(Some(&e.subject)), 30),
+                e.last_error.clone().unwrap_or_default(),
+            ]
+        })
+        .collect();
+    print_table(&["ID", "STATUS", "TO", "SUBJECT", "LAST ERROR"], rows);
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-//! Writing and sending: `compose`, `reply`, `forward`, `draft`, `send` and `outbox`.
+//! Writing: `compose`, `reply`, `forward` and `draft`. Sending is `outbox.rs`.
 //!
 //! Drafts are saved to the server's Drafts folder at once, like changes to messages
 //! (`ops.rs`); if that can't be done, the draft is still saved locally, and the next
@@ -10,13 +10,18 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use catmail_core::{
     AccountId, Address, Draft, DraftAttachmentId, DraftContent, DraftId, MailClient, MessageId,
-    OutboxEntry, OutboxId, OutboxStatus, display, parse_addresses,
+    display, parse_addresses,
 };
 use clap::{Args, Subcommand};
 
-use crate::one_account;
-use crate::ops::{self, NEXT_FLUSH};
-use crate::output::{print_table, printable, printable_text, truncate};
+use crate::cmd::ops::{self, NEXT_FLUSH};
+use crate::cmd::{one_account, outbox};
+use crate::json::{self, JsonDraft, JsonDraftAttachment};
+use crate::output::{print_draft, print_drafts, printable};
+
+fn print_draft_json(draft: &Draft) -> Result<()> {
+    json::print_keyed("draft", &JsonDraft::from(draft))
+}
 
 #[derive(Args)]
 pub(crate) struct Compose {
@@ -129,22 +134,6 @@ pub(crate) enum DraftCommand {
     Rm { id: i64 },
 }
 
-#[derive(Subcommand)]
-pub(crate) enum OutboxCommand {
-    /// List messages that are not sent and saved yet
-    List,
-    /// Send what is queued and save what was sent to Sent, now
-    Flush,
-    /// Try a failed or unknown send again (an unknown one may arrive twice), or saving
-    /// a sent one to Sent
-    Retry { id: i64 },
-    /// Confirm that a message with an unknown outcome arrived; it is then only saved
-    /// to Sent
-    MarkSent { id: i64 },
-    /// Remove an entry. A message that wasn't sent goes back to the drafts
-    Cancel { id: i64 },
-}
-
 pub(crate) async fn compose(client: &MailClient, args: Compose, json: bool) -> Result<()> {
     let account = one_account(client, args.account.as_deref()).await?;
     let content = args.fields.apply(DraftContent::default())?;
@@ -204,7 +193,7 @@ async fn finish_draft(
         }
     }
     if send_now {
-        return send(client, draft.id, json).await;
+        return outbox::send(client, draft.id, json).await;
     }
     save_to_server(client, draft.account_id).await;
     draft = client
@@ -212,7 +201,7 @@ async fn finish_draft(
         .await?
         .context("draft vanished")?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&draft)?);
+        print_draft_json(&draft)?;
     } else {
         println!(
             "Saved draft {}. Send it with `catmail send {}`.",
@@ -229,31 +218,16 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
             let account = one_account(client, account.as_deref()).await?;
             let drafts = client.list_drafts(account.id).await?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&drafts)?);
-            } else if drafts.is_empty() {
-                println!("No drafts.");
+                json::print_list::<JsonDraft, _>("drafts", &drafts)?;
             } else {
-                let rows = drafts
-                    .iter()
-                    .map(|d| {
-                        vec![
-                            d.id.to_string(),
-                            display::date(Some(d.updated_at)),
-                            server_status(d).into(),
-                            truncate(&display::names(d.content.recipients()), 30),
-                            if d.attachments.is_empty() { "" } else { "@" }.into(),
-                            display::subject(Some(&d.content.subject)).to_owned(),
-                        ]
-                    })
-                    .collect();
-                print_table(&["ID", "CHANGED", "SERVER", "TO", "", "SUBJECT"], rows);
+                print_drafts(&drafts);
             }
             None
         }
         DraftCommand::Show { id } => {
             let draft = get_draft(client, id).await?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&draft)?);
+                print_draft_json(&draft)?;
             } else {
                 print_draft(&draft);
             }
@@ -264,7 +238,7 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
             let content = fields.apply(draft.content)?;
             let draft = client.update_draft(draft.id, content).await?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&draft)?);
+                print_draft_json(&draft)?;
             } else {
                 println!("Saved draft {}.", draft.id);
             }
@@ -289,7 +263,7 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
                 attached.push(a);
             }
             if json {
-                println!("{}", serde_json::to_string_pretty(&attached)?);
+                json::print_list::<JsonDraftAttachment, _>("attachments", &attached)?;
             }
             Some(account)
         }
@@ -317,7 +291,7 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
 /// Saves the account's changed drafts to its Drafts folder, deleting what they replace
 /// there (and making its other queued changes), warning if that can't be done: the
 /// drafts are saved locally all the same.
-async fn save_to_server(client: &MailClient, account: AccountId) {
+pub(crate) async fn save_to_server(client: &MailClient, account: AccountId) {
     match client.replay_pending(account).await {
         Ok(report) if report.drafts_failed > 0 => {
             eprintln!("warning: {}", ops::refused_drafts(report.drafts_failed));
@@ -326,138 +300,6 @@ async fn save_to_server(client: &MailClient, account: AccountId) {
         Err(e) => eprintln!(
             "warning: the draft is saved here, but not in the server's Drafts folder yet \
              ({e}); {NEXT_FLUSH} puts it there"
-        ),
-    }
-}
-
-/// Queues the draft and works through its account's outbox, reporting how this
-/// message fared.
-pub(crate) async fn send(client: &MailClient, id: DraftId, json: bool) -> Result<()> {
-    let queued = client.send_draft(id).await?;
-    let account = queued.account_id;
-    flush_and_report(client, queued, json).await?;
-    // The draft's copy on the server goes now that it is sent.
-    save_to_server(client, account).await;
-    Ok(())
-}
-
-/// Works through the entry's outbox and tells the user how the entry fared.
-async fn flush_and_report(client: &MailClient, entry: OutboxEntry, json: bool) -> Result<()> {
-    let results = client.flush_outbox(entry.account_id).await?;
-    let entry = results
-        .into_iter()
-        .find(|e| e.id == entry.id)
-        .unwrap_or(entry);
-    report(&entry, json)
-}
-
-pub(crate) async fn outbox(client: &MailClient, cmd: OutboxCommand, json: bool) -> Result<()> {
-    match cmd {
-        OutboxCommand::List => {
-            let entries = client.list_outbox(None).await?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&entries)?);
-            } else {
-                print_outbox(&entries);
-            }
-        }
-        OutboxCommand::Flush => {
-            // All at once: one unreachable server shouldn't hold up the other accounts.
-            let mut flushes = tokio::task::JoinSet::new();
-            for account in client.list_accounts().await? {
-                let client = client.clone();
-                flushes.spawn(async move { client.flush_outbox(account.id).await });
-            }
-            // One account failing doesn't hide what happened to the others' mail.
-            let (mut results, mut errors) = (Vec::new(), Vec::new());
-            for flushed in flushes.join_all().await {
-                match flushed {
-                    Ok(entries) => results.extend(entries),
-                    Err(e) => errors.push(e.to_string()),
-                }
-            }
-            results.sort_by_key(|e| e.id);
-            if json {
-                println!("{}", serde_json::to_string_pretty(&results)?);
-            } else if !results.is_empty() {
-                print_outbox(&results);
-            } else if errors.is_empty() {
-                println!("Nothing to send.");
-            }
-            // Like `catmail send`: an error unless everything went out.
-            if !results.iter().all(|e| e.status.went_out()) {
-                errors.push("not everything was sent; `catmail outbox` shows why".into());
-            }
-            if !errors.is_empty() {
-                bail!("{}", errors.join("\n"));
-            }
-        }
-        OutboxCommand::Retry { id } => {
-            let entry = client.retry_outbox(OutboxId(id)).await?;
-            flush_and_report(client, entry, json).await?;
-        }
-        OutboxCommand::MarkSent { id } => {
-            let entry = client.mark_outbox_sent(OutboxId(id)).await?;
-            flush_and_report(client, entry, json).await?;
-        }
-        OutboxCommand::Cancel { id } => {
-            let entry = client.cancel_outbox(OutboxId(id)).await?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&entry)?);
-            } else {
-                if entry.status.went_out() {
-                    println!("Removed {id}; the message was sent but not saved to Sent.");
-                } else if let Some(draft) = entry.draft_id {
-                    println!("Cancelled {id}; it is draft {draft} again.");
-                } else {
-                    println!("Cancelled {id}.");
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Tells the user how a send went and what they can do; an error unless it went out.
-fn report(entry: &OutboxEntry, json: bool) -> Result<()> {
-    if json {
-        println!("{}", serde_json::to_string_pretty(entry)?);
-    }
-    let id = entry.id;
-    let error = entry.last_error.as_deref().unwrap_or("unknown error");
-    match entry.status {
-        OutboxStatus::Done => {
-            if !json {
-                println!("Sent.");
-            }
-            Ok(())
-        }
-        OutboxStatus::Accepted => {
-            eprintln!(
-                "Sent, but saving a copy to Sent failed: {}\n\
-                 `catmail outbox flush` tries again.",
-                printable(error)
-            );
-            Ok(())
-        }
-        OutboxStatus::Queued | OutboxStatus::Sending => bail!(
-            "not sent yet: {}\n`catmail outbox flush` tries again; \
-             `catmail outbox cancel {id}` makes it a draft again.",
-            printable(error)
-        ),
-        OutboxStatus::Failed => bail!(
-            "the server refused the message: {}\n\
-             `catmail outbox cancel {id}` makes it a draft again to fix it; \
-             `catmail outbox retry {id}` sends it as it is.",
-            printable(error)
-        ),
-        OutboxStatus::Unknown => bail!(
-            "the connection was lost after the message was handed over, so it may or may \
-             not have been delivered: {}\n\
-             Check with a recipient, then `catmail outbox mark-sent {id}` if it arrived, \
-             `catmail outbox retry {id}` to send it again (it may arrive twice), or \
-             `catmail outbox cancel {id}`.",
-            printable(error)
         ),
     }
 }
@@ -527,80 +369,6 @@ async fn get_draft(client: &MailClient, id: i64) -> Result<Draft> {
         .get_draft(DraftId(id))
         .await?
         .with_context(|| format!("no draft {id}"))
-}
-
-fn print_draft(draft: &Draft) {
-    let c = &draft.content;
-    let header = |name: &str, value: &str| {
-        if !value.is_empty() {
-            println!("{name:<9}{}", printable(value));
-        }
-    };
-    header("To:", &display::addresses(&c.to));
-    header("Cc:", &display::addresses(&c.cc));
-    header("Bcc:", &display::addresses(&c.bcc));
-    header("Subject:", display::subject(Some(&c.subject)));
-    if let Some(outbox) = draft.outbox {
-        header("Status:", &format!("being sent (outbox entry {outbox})"));
-    }
-    match &draft.upload_error {
-        Some(error) => header("Server:", &format!("refused to store it: {error}")),
-        None if !draft.on_server => header("Server:", "not in the Drafts folder yet"),
-        None => {}
-    }
-    println!();
-    println!("{}", printable_text(c.text.trim_end()));
-    if !draft.attachments.is_empty() {
-        println!();
-        let rows = draft
-            .attachments
-            .iter()
-            .map(|a| {
-                vec![
-                    a.id.to_string(),
-                    a.filename.clone(),
-                    a.mime_type.clone(),
-                    display::size(a.size),
-                ]
-            })
-            .collect();
-        print_table(&["ATTACHMENT", "NAME", "TYPE", "SIZE"], rows);
-    }
-}
-
-/// Whether the server's Drafts folder has the draft as it is.
-fn server_status(draft: &Draft) -> &'static str {
-    match (draft.on_server, &draft.upload_error) {
-        (true, _) => "saved",
-        (false, Some(_)) => "refused",
-        (false, None) => "",
-    }
-}
-
-fn print_outbox(entries: &[OutboxEntry]) {
-    if entries.is_empty() {
-        println!("The outbox is empty.");
-        return;
-    }
-    let rows = entries
-        .iter()
-        .map(|e| {
-            let state = match (e.status, e.next_attempt_at) {
-                (OutboxStatus::Queued | OutboxStatus::Accepted, Some(at)) if e.attempts > 0 => {
-                    format!("{}, next try {}", e.status, display::date(Some(at)))
-                }
-                (status, _) => status.to_string(),
-            };
-            vec![
-                e.id.to_string(),
-                state,
-                truncate(&e.recipients.join(", "), 30),
-                truncate(display::subject(Some(&e.subject)), 30),
-                e.last_error.clone().unwrap_or_default(),
-            ]
-        })
-        .collect();
-    print_table(&["ID", "STATUS", "TO", "SUBJECT", "LAST ERROR"], rows);
 }
 
 #[cfg(test)]

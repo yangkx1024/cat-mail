@@ -54,11 +54,11 @@
 移动和删除邮件：
 
 ```sh
-# 添加账户（交互输入密码；脚本里用 --password-stdin）
+# 添加账户（交互输入密码；脚本里用 --password-stdin）。先登录检查，失败不留下账户；--no-verify 跳过
 catmail account add --email me@example.com --name "Me" \
     --imap-host imap.example.com --smtp-host smtp.example.com --smtp-security starttls
 
-catmail account list            # 加 --json 输出 JSON
+catmail account list            # 加 --json 输出 JSON（结构见 docs/architecture/cli.md）
 catmail account remove me@example.com
 
 catmail sync                    # 同步所有账户；也可以指定 id 或邮箱
@@ -69,7 +69,7 @@ catmail ls INBOX -n 20          # 最新的 20 封邮件；文件夹名可以是
 catmail read 42                 # 阅读 ID 为 42 的邮件（第一次会下载正文）
 catmail read 42 --html          # 清洗后的 HTML；--raw 输出原文（.eml）
 catmail read 42 --save ~/下载    # 同时把附件保存到目录（重名不覆盖）
-catmail attachment 7 -o a.pdf   # 保存单个附件（ID 见 `catmail read` 的附件列表）
+catmail attachment 7 -o a.pdf   # 保存单个附件（ID 见 `catmail read` 的附件列表；a.pdf 已存在则报错）
 
 catmail search 季度报告          # 搜索主题、收发件人和已下载的正文
 catmail search from:张三 "quarterly report" -a me@example.com --folder INBOX
@@ -121,6 +121,9 @@ catmail ops                       # 还没同步到服务器的改动，以及�
 保存到"已发送"失败只重试保存，不会重发邮件。命令行不在后台发信：`catmail send` 当场发送，
 没发出去的用 `catmail outbox flush` 再试；两者在有邮件没发出去时以非零状态退出，便于脚本判断。
 `compose` / `reply` / `forward` 失败（如附件不存在、转发时原信的附件下载不了）不会留下草稿。
+
+退出码：0 完成，1 失败，2 用法错误，3 没做完但已保留（还在排队，稍后 `catmail sync`、`ops flush`
+或 `outbox flush` 会完成），4 邮件可能已送达也可能没有（需要用户确认）。
 
 正文在第一次阅读时下载，阅读不会把邮件标为已读（用 `catmail mark --read`）。不超过 2 MiB 的邮件整封下载（附件一并
 保存）；更大的邮件只下载正文，附件在第一次打开时再下载，其中超过 2 MiB 的正文部分也作为
