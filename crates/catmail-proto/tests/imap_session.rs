@@ -3,8 +3,9 @@
 
 use std::time::Duration;
 
+use catmail_proto::Credentials;
 use catmail_proto::TlsConfig;
-use catmail_proto::imap::{ChangedFlags, CopyUid, Credentials, Error, Session};
+use catmail_proto::imap::{ChangedFlags, CopyUid, Error, Session};
 use catmail_testkit::{FakeImap, FakeMailbox, ServerState, TestCert};
 use catmail_types::{Flags, FolderRole, Security, ServerConfig};
 
@@ -19,7 +20,7 @@ fn server(port: u16, security: Security) -> ServerConfig {
 }
 
 fn creds(password: &str) -> Credentials {
-    Credentials::Password {
+    Credentials {
         username: "alice".into(),
         password: password.into(),
     }

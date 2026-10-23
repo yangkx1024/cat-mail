@@ -9,10 +9,9 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use catmail_core::{
-    Account, Address, Attachment, AuthKind, Draft, DraftAttachment, ErrorKind, Event, Flags,
-    Folder, FolderRole, FolderSyncReport, GcReport, Message, MessageSummary, OpKind, OpStatus,
-    OutboxEntry, OutboxStatus, PendingOp, ReplayReport, ReportedError, Security, ServerConfig,
-    SyncReport,
+    Account, Address, Attachment, Draft, DraftAttachment, ErrorKind, Event, Flags, Folder,
+    FolderRole, FolderSyncReport, GcReport, Message, MessageSummary, OpKind, OpStatus, OutboxEntry,
+    OutboxStatus, PendingOp, ReplayReport, ReportedError, Security, ServerConfig, SyncReport,
 };
 use serde::Serialize;
 
@@ -94,7 +93,6 @@ pub(crate) struct JsonAccount {
     username: String,
     imap: JsonServer,
     smtp: JsonServer,
-    auth: &'static str,
     created_at: Option<String>,
 }
 
@@ -107,9 +105,6 @@ impl From<&Account> for JsonAccount {
             username: a.username.clone(),
             imap: (&a.imap).into(),
             smtp: (&a.smtp).into(),
-            auth: match a.auth {
-                AuthKind::Password => "password",
-            },
             created_at: time(a.created_at),
         }
     }

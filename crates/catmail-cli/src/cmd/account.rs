@@ -3,9 +3,7 @@
 use std::io::{self, BufRead, IsTerminal};
 
 use anyhow::{Context, Result, bail};
-use catmail_core::{
-    AuthKind, ExposeSecret, MailClient, NewAccount, SecretString, Security, ServerConfig,
-};
+use catmail_core::{ExposeSecret, MailClient, NewAccount, SecretString, Security, ServerConfig};
 use clap::{Args, Subcommand};
 
 use crate::cmd::resolve_account;
@@ -115,7 +113,6 @@ async fn add(
                 .unwrap_or_else(|| args.smtp_security.default_smtp_port()),
             security: args.smtp_security,
         },
-        auth: AuthKind::Password,
     };
     if !args.no_verify {
         client

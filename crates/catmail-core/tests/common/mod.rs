@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use catmail_core::{
-    AccountId, AuthKind, Config, Event, Flags, Folder, MailClient, MailClientBuilder,
-    MemorySecrets, MessageId, MessageSummary, NewAccount, ReplayReport, Security, ServerConfig,
+    AccountId, Config, Event, Flags, Folder, MailClient, MailClientBuilder, MemorySecrets,
+    MessageId, MessageSummary, NewAccount, ReplayReport, Security, ServerConfig,
 };
 use catmail_testkit::{FakeImap, FakeSmtp, ServerState, SmtpState};
 use tokio::runtime::Handle;
@@ -80,7 +80,6 @@ pub async fn env_built(
                 username: "alice".into(),
                 imap: server(fake.port()),
                 smtp: server(smtp.port()),
-                auth: AuthKind::Password,
             },
             "pw".into(),
         )

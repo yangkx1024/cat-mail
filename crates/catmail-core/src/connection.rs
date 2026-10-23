@@ -9,7 +9,7 @@ use catmail_types::{Account, AccountId, ServerConfig};
 
 use crate::engine::{Engine, blocking};
 use crate::error::ImapError;
-use crate::{Error, Result, auth};
+use crate::{Error, Result};
 
 /// Per network read or write, not per command.
 pub(crate) const IO_TIMEOUT: Duration = Duration::from_secs(60);
@@ -45,9 +45,18 @@ async fn account_credentials(
         })
         .await?
         .ok_or_else(|| Error::AccountNotFound(account_id.to_string()))?;
-    let credentials = {
-        let (engine, account) = (engine.clone(), account.clone());
-        blocking(move || auth::credentials(&account, &secret_key, engine.secrets.as_ref())).await?
+    let engine = engine.clone();
+    let password = blocking(move || engine.secrets.get(&secret_key))
+        .await?
+        .ok_or_else(|| {
+            Error::Secrets(format!(
+                "no stored password for {}; remove and re-add the account",
+                account.email
+            ))
+        })?;
+    let credentials = Credentials {
+        username: account.username.clone(),
+        password,
     };
     Ok((account, credentials))
 }

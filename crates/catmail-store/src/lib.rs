@@ -266,7 +266,7 @@ impl Store {
 
 #[cfg(test)]
 pub(crate) mod test_util {
-    use catmail_types::{AccountId, AuthKind, NewAccount, Security, ServerConfig};
+    use catmail_types::{AccountId, NewAccount, Security, ServerConfig};
     use tempfile::TempDir;
 
     use crate::Store;
@@ -307,7 +307,6 @@ pub(crate) mod test_util {
             username: email.into(),
             imap: server.clone(),
             smtp: server,
-            auth: AuthKind::Password,
         };
         store
             .write(|db| db.accounts().insert(&new, &format!("key:{email}")))
@@ -323,9 +322,9 @@ mod tests {
     fn seed(conn: &Connection) {
         conn.execute_batch(
             "INSERT INTO accounts (id, email, username, imap_host, imap_port, imap_security,
-                                   smtp_host, smtp_port, smtp_security, auth_kind, secret_key)
-             VALUES (1, 'a@example.com', 'a', 'imap', 993, 'tls', 'smtp', 465, 'tls', 'password', 'ka'),
-                    (2, 'b@example.com', 'b', 'imap', 993, 'tls', 'smtp', 465, 'tls', 'password', 'kb');
+                                   smtp_host, smtp_port, smtp_security, secret_key)
+             VALUES (1, 'a@example.com', 'a', 'imap', 993, 'tls', 'smtp', 465, 'tls', 'ka'),
+                    (2, 'b@example.com', 'b', 'imap', 993, 'tls', 'smtp', 465, 'tls', 'kb');
              INSERT INTO folders (id, account_id, remote_name, name, uidvalidity)
              VALUES (20, 1, 'INBOX', 'INBOX', 7),
                     (21, 2, 'INBOX', 'INBOX', 7);",
@@ -585,8 +584,8 @@ mod tests {
         let result: Result<()> = store.write(|db| {
             db.conn.execute(
                 "INSERT INTO accounts (email, username, imap_host, imap_port, imap_security,
-                                       smtp_host, smtp_port, smtp_security, auth_kind, secret_key)
-                 VALUES ('a@example.com', 'a', 'i', 993, 'tls', 's', 465, 'tls', 'password', 'k')",
+                                       smtp_host, smtp_port, smtp_security, secret_key)
+                 VALUES ('a@example.com', 'a', 'i', 993, 'tls', 's', 465, 'tls', 'k')",
                 [],
             )?;
             Err(Error::AlreadyExists(

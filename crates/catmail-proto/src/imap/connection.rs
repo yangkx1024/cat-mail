@@ -255,8 +255,8 @@ impl Connection {
             match self.next_event(&mut response.skipped).await? {
                 Event::AuthenticateStarted { .. } => {}
                 Event::AuthenticateContinuationRequestReceived { .. } => {
-                    // A second challenge means the server didn't like the answer (XOAUTH2
-                    // sends an error this way); cancel and let it send the tagged NO.
+                    // A second challenge means the server didn't take the answer; cancel
+                    // and let it send the tagged NO.
                     let data = match initial.take() {
                         // imap-next takes its own copy, which it doesn't zero.
                         Some(data) => AuthenticateData::r#continue(data.to_vec()),

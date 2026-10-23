@@ -16,7 +16,7 @@ fn server(port: u16, security: Security) -> ServerConfig {
 }
 
 fn creds(password: &str) -> Credentials {
-    Credentials::Password {
+    Credentials {
         username: "alice".into(),
         password: password.into(),
     }

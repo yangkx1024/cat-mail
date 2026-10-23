@@ -64,8 +64,7 @@ store / IMAP / SMTP 错误包在不透明的 `StoreError` / `ImapError` / `SmtpE
 - 后台工作的错误以 `ReportedError { kind, message, transient }` 交给前端：`ServerProblem.error`
   （账户状态）、`FolderSyncReport.error` 和 `ReplayReport.error`。登录被拒绝就是 `kind == Auth`，
   没有单独的布尔位；`transient` 是 `is_transient()` 的结果，因为单看种类分不出 SMTP 的 421 和 554。
-- `ErrorKind` 故意不加 `#[non_exhaustive]`：以后加种类（如 OAuth 的"需要重新授权"）时，前端的
-  `match` 会编译失败，提醒每处都处理。
+- `ErrorKind` 故意不加 `#[non_exhaustive]`：以后加种类时，前端的 `match` 会编译失败，提醒每处都处理。
 
 ### 规则在引擎，措辞在前端
 

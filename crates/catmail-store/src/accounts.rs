@@ -8,7 +8,7 @@ use crate::{Error, Result};
 const COLUMNS: &str = "id, email, display_name, username,
     imap_host, imap_port, imap_security,
     smtp_host, smtp_port, smtp_security,
-    auth_kind, created_at";
+    created_at";
 
 pub struct Accounts<'c> {
     conn: &'c Connection,
@@ -25,10 +25,10 @@ impl<'c> Accounts<'c> {
         let sql = format!(
             "INSERT INTO accounts (email, display_name, username,
                                    imap_host, imap_port, imap_security,
-                                   smtp_host, smtp_port, smtp_security, auth_kind, secret_key)
+                                   smtp_host, smtp_port, smtp_security, secret_key)
              VALUES (:email, :display_name, :username,
                      :imap_host, :imap_port, :imap_security,
-                     :smtp_host, :smtp_port, :smtp_security, :auth_kind, :secret_key)
+                     :smtp_host, :smtp_port, :smtp_security, :secret_key)
              RETURNING {COLUMNS}"
         );
         conn.query_row(
@@ -43,7 +43,6 @@ impl<'c> Accounts<'c> {
                 ":smtp_host": new.smtp.host,
                 ":smtp_port": new.smtp.port,
                 ":smtp_security": new.smtp.security.as_str(),
-                ":auth_kind": new.auth.as_str(),
                 ":secret_key": secret_key,
             },
             from_row,
@@ -120,14 +119,13 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Account> {
             port: row.get("smtp_port")?,
             security: parse_text(row, "smtp_security")?,
         },
-        auth: parse_text(row, "auth_kind")?,
         created_at: row.get("created_at")?,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use catmail_types::{AuthKind, Security};
+    use catmail_types::Security;
     use rusqlite::types::Type;
 
     use super::*;
@@ -148,7 +146,6 @@ mod tests {
                 port: 587,
                 security: Security::StartTls,
             },
-            auth: AuthKind::Password,
         }
     }
 

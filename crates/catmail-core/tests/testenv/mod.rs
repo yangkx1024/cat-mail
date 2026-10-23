@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use catmail_core::{
-    AccountId, AuthKind, Config, MailClient, MemorySecrets, MessageSummary, NewAccount, Security,
+    AccountId, Config, MailClient, MemorySecrets, MessageSummary, NewAccount, Security,
     ServerConfig, TlsConfig,
 };
 use tokio::runtime::Handle;
@@ -96,7 +96,6 @@ pub async fn add_account(
                 username: user.into(),
                 imap,
                 smtp,
-                auth: AuthKind::Password,
             },
             password.into(),
         )

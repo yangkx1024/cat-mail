@@ -1,10 +1,8 @@
 //! The sign-in form: an account's servers and password. The login is tried against the
 //! IMAP server before anything is stored, so a typo leaves no account (or keyring entry)
-//! behind. Like `catmail account add`, password accounts only.
+//! behind, as with `catmail account add`.
 
-use catmail_core::{
-    Account, AuthKind, MailClient, NewAccount, SecretString, Security, ServerConfig,
-};
+use catmail_core::{Account, MailClient, NewAccount, SecretString, Security, ServerConfig};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::form::{Field, Form};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -84,7 +82,6 @@ impl Values {
             username: username.to_owned(),
             imap: self.imap.config(Security::default_imap_port)?,
             smtp: self.smtp.config(Security::default_smtp_port)?,
-            auth: AuthKind::Password,
         })
     }
 }

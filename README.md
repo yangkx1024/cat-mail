@@ -8,27 +8,28 @@
 
 数据存储在本地 SQLite，离线可用；密码保存在系统密钥环中，不进数据库。
 
-> 项目处于早期开发阶段（M5 已完成，下一步是 M6 的 OAuth2 与打包），接口和数据库结构仍会变化。
+> 项目处于早期开发阶段（M5 已完成，下一步是 M6 的 Windows / macOS 打包），接口和数据库结构仍会变化。
 
 架构设计见 [docs/architecture.md](docs/architecture.md)。
 
 ## 范围
 
 - **平台**：先做 Linux，之后支持 Windows 与 macOS。核心层不包含平台相关代码。
-- **第一阶段**：通用 IMAP / SMTP + 密码认证。暂不支持 Gmail 与 Microsoft 365（两者需要
-  OAuth2），认证做成可替换的接口，留到 M6。
+- **认证**：只支持 IMAP / SMTP 密码登录，不做 OAuth2。公开发布的 OAuth2 客户端要通过邮件服务商的
+  审核与认证，而 Gmail 等服务商提供应用专用密码，用它登录即可。只接受 OAuth2 的服务（如
+  Microsoft 365、Outlook.com）不支持。
 
 ## 规划
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | M0 | workspace；types；store（迁移、事务接口）；BlobStore；keyring；数据目录锁；`MailClient` 门面；`catmail account` | ✅ 完成 |
-| M1 | IMAP 只读同步（文件夹、邮件头）；认证接口；协议测试环境；`catmail sync` / `catmail ls` | ✅ 完成 |
+| M1 | IMAP 只读同步（文件夹、邮件头）；密码登录；协议测试环境；`catmail sync` / `catmail ls` | ✅ 完成 |
 | M2 | 正文与附件按需下载；中文分词 + 全文搜索；blob GC；最小读信窗口；`catmail read` / `catmail search` | ✅ 完成 |
 | M3 | 草稿；SMTP 发信与 outbox 状态机；保存到 Sent；`catmail compose` / `reply` / `send` / `outbox` | ✅ 完成 |
 | M4 | 离线操作队列（标记 / 移动 / 删除）；IDLE 推送与后台同步；草稿同步到服务器 | ✅ 完成 |
 | M5 | 图形界面：三栏布局、读信、写信（回复、转发、附件）、标记 / 归档 / 移动 / 删除、发件箱、设置与主题（导入终端配色）；`catmail forward` | ✅ 完成 |
-| M6 | OAuth2（Gmail / Microsoft 365）；Windows / macOS 打包 | |
+| M6 | Windows / macOS 打包 | |
 
 几个安排上的考虑：
 
