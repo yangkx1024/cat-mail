@@ -141,6 +141,17 @@ impl<'c> Outbox<'c> {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Brings forward to `now` every attempt due later than `now + max_wait`, the longest
+    /// any wait is set for: it was set before the clock went back, and would otherwise
+    /// wait until the clock caught up. Returns how many.
+    pub fn bring_forward(&self, now: i64, max_wait: i64) -> Result<usize> {
+        Ok(self.conn.execute(
+            "UPDATE outbox SET next_attempt_at = ?1
+             WHERE status IN ('queued', 'accepted') AND next_attempt_at > ?1 + ?2",
+            [now, max_wait],
+        )?)
+    }
+
     /// When the next automatic attempt of any entry is due.
     pub fn next_attempt_at(&self) -> Result<Option<i64>> {
         Ok(self.conn.query_row(
@@ -595,6 +606,27 @@ mod tests {
         );
         assert!(store.read(|db| db.blob_references()).unwrap().is_empty());
         assert!(!store.write(|db| db.outbox().finish(id)).unwrap());
+    }
+
+    #[test]
+    fn attempts_set_before_the_clock_went_back_are_brought_forward() {
+        let (store, account, _, id) = setup();
+        store.write(|db| db.outbox().begin_send(id, 940)).unwrap();
+        store
+            .write(|db| db.outbox().requeue(id, 1000, "421 busy", 940))
+            .unwrap();
+        let bring_forward = |now| {
+            store
+                .write(|db| db.outbox().bring_forward(now, 60))
+                .unwrap()
+        };
+        assert_eq!(bring_forward(950), 0, "a wait set now");
+        // The clock was set back: no wait set at 100 would end at 1000.
+        assert_eq!(bring_forward(100), 1);
+        assert_eq!(
+            store.read(|db| db.outbox().accounts_due(100)).unwrap(),
+            [account]
+        );
     }
 
     #[test]
