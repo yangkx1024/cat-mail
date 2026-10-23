@@ -22,6 +22,23 @@ impl DraftContent {
     }
 }
 
+/// What a forward starts with besides the message: who it goes to, and the user's text,
+/// written above the forwarded message.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Forwarding {
+    pub to: Vec<Address>,
+    pub cc: Vec<Address>,
+    pub bcc: Vec<Address>,
+    pub text: String,
+}
+
+impl Forwarding {
+    /// To, Cc and Bcc, in that order.
+    pub fn recipients(&self) -> impl Iterator<Item = &Address> {
+        self.to.iter().chain(&self.cc).chain(&self.bcc)
+    }
+}
+
 /// A message being written. Stored locally, with a copy in the server's Drafts folder
 /// that follows each change; it is sent through the outbox.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
