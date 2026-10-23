@@ -629,7 +629,13 @@ async fn fetches_remote_images_as_they_come_until_dropped() {
     assert!(matches!(&fetched[2].1, Err(e) if e.kind() == catmail_core::ErrorKind::Invalid));
     assert!(stream.next_ready().is_none());
 
-    // Dropped, it stops the fetch still going instead of waiting out its timeout.
+    // Dropped, it stops the fetch still going instead of waiting out its timeout. Only
+    // a request the server holds can be seen to be given up on: on a busy machine the
+    // others can all finish before it is even sent.
+    eventually("the hanging request to arrive", async || {
+        server.heads().iter().any(|h| h.starts_with("GET /hang "))
+    })
+    .await;
     drop(stream);
     eventually("the hanging request to be dropped", async || {
         server.abandoned() == 1
