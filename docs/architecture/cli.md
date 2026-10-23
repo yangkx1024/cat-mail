@@ -51,7 +51,8 @@ types 加变体会编译失败）。
   草稿是 1，断线之前拒绝的也是。
 - `send` / `outbox retry` / `mark-sent` / `outbox flush`：`queued` / `sending` 是 3，`failed` 是 1，
   `unknown` 是 4；`accepted`（已发出、只是没存进 Sent）算成功。连 SMTP 服务器失败时邮件都推迟、仍是
-  `queued`，所以还看账户状态：`send` 问题不是暂时的（登录被拒绝、不支持 STARTTLS）时是 1。`outbox flush` 只看这次处理的条目：
+  `queued`，所以还看这次 flush 的 `FlushReport.error`：问题不是暂时的（登录被拒绝、不支持 STARTTLS）时
+  是 1。不读账户状态：那是全局的，可能是别的发送留下的。`outbox flush` 只看这次处理的条目：
   `unknown` 和 `failed` 的等用户处理，不会被它重试，也就不影响它的退出码。
 - `sync` 有账户失败是 1：同步本身没有要排队的东西。
 

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use anyhow::Result;
 use catmail_core::{
-    AccountId, DraftId, MailClient, OutboxEntry, OutboxId, OutboxStatus, ReportedError,
+    DraftId, FlushReport, MailClient, OutboxEntry, OutboxId, OutboxStatus, ReportedError,
 };
 use clap::Subcommand;
 
@@ -43,20 +43,19 @@ pub(crate) async fn send(client: &MailClient, id: DraftId, json: bool) -> Result
 
 /// Works through the entry's outbox and tells the user how the entry fared.
 async fn flush_and_report(client: &MailClient, entry: OutboxEntry, json: bool) -> Result<()> {
-    let results = client.flush_outbox(entry.account_id).await?;
-    let entry = results
+    let FlushReport { entries, error } = client.flush_outbox(entry.account_id).await?;
+    let entry = entries
         .into_iter()
         .find(|e| e.id == entry.id)
         .unwrap_or(entry);
-    report(&entry, blocked(client, entry.account_id).as_ref(), json)
+    report(&entry, blocked(error).as_ref(), json)
 }
 
-/// Why the account can't send at all, if trying again unchanged won't help: the SMTP
-/// server rejected the login, or can't be used as the account is set up. Its queued
+/// Why the flush couldn't send at all, if trying again unchanged won't help: the SMTP
+/// server rejected the login, or can't be used as the account is set up. The queued
 /// messages are postponed then, as for a server that is down.
-fn blocked(client: &MailClient, account: AccountId) -> Option<ReportedError> {
-    let problem = client.account_status(account).send?;
-    (!problem.error.transient).then_some(problem.error)
+fn blocked(error: Option<ReportedError>) -> Option<ReportedError> {
+    error.filter(|e| !e.transient)
 }
 
 pub(crate) async fn outbox(client: &MailClient, cmd: OutboxCommand, json: bool) -> Result<()> {
@@ -74,20 +73,20 @@ pub(crate) async fn outbox(client: &MailClient, cmd: OutboxCommand, json: bool) 
             let mut flushes = tokio::task::JoinSet::new();
             for account in client.list_accounts().await? {
                 let client = client.clone();
-                flushes.spawn(async move { client.flush_outbox(account.id).await });
+                flushes.spawn(async move { (account.id, client.flush_outbox(account.id).await) });
             }
             // One account failing doesn't hide what happened to the others' mail.
             let (mut results, mut errors) = (Vec::new(), Vec::new());
-            for flushed in flushes.join_all().await {
+            let mut cant_send = BTreeMap::new();
+            for (account, flushed) in flushes.join_all().await {
                 match flushed {
-                    Ok(entries) => results.extend(entries),
+                    Ok(FlushReport { entries, error }) => {
+                        results.extend(entries);
+                        cant_send.extend(blocked(error).map(|e| (account, e)));
+                    }
                     Err(e) => errors.push(e.to_string()),
                 }
             }
-            let cant_send: BTreeMap<AccountId, ReportedError> = results
-                .iter()
-                .filter_map(|e| Some((e.account_id, blocked(client, e.account_id)?)))
-                .collect();
             for (account, e) in &cant_send {
                 errors.push(format!(
                     "account {account} can't send: {}",

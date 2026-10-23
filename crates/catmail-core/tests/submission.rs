@@ -73,7 +73,11 @@ async fn send(
     }
     let queued = client.send_draft(draft.id).await.unwrap();
     let flushed = client.flush_outbox(account).await.unwrap();
-    flushed.into_iter().find(|e| e.id == queued.id).unwrap()
+    flushed
+        .entries
+        .into_iter()
+        .find(|e| e.id == queued.id)
+        .unwrap()
 }
 
 /// A GET to mailpit's API; the body.

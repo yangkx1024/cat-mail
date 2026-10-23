@@ -8,9 +8,9 @@ use catmail_proto::TlsConfig;
 use catmail_store::{BlobStore, Store};
 use catmail_types::{
     Account, AccountId, AccountOverview, AccountStatus, AttachmentId, Draft, DraftAttachment,
-    DraftAttachmentId, DraftContent, DraftId, Event, Flags, Folder, FolderId, FolderSyncReport,
-    GcReport, Message, MessageCursor, MessageId, MessageSummary, NewAccount, OutboxEntry, OutboxId,
-    PendingOp, PendingOpId, ReplayReport, SearchQuery, SyncReport,
+    DraftAttachmentId, DraftContent, DraftId, Event, Flags, FlushReport, Folder, FolderId,
+    FolderSyncReport, GcReport, Message, MessageCursor, MessageId, MessageSummary, NewAccount,
+    OutboxEntry, OutboxId, PendingOp, PendingOpId, ReplayReport, SearchQuery, SyncReport,
 };
 use secrecy::{ExposeSecret, SecretString};
 use tokio::runtime::Handle;
@@ -731,10 +731,10 @@ impl MailClient {
     }
 
     /// Sends everything queued and saves what was sent to Sent, now, without waiting
-    /// for backoff. Waits for background sending of the account to pause first. Returns
-    /// the entries worked on, as they ended up; failures are recorded in them, not
-    /// returned.
-    pub async fn flush_outbox(&self, account: AccountId) -> Result<Vec<OutboxEntry>> {
+    /// for backoff. Waits for background sending of the account to pause first. Reports
+    /// the entries worked on, as they ended up, and why the SMTP server couldn't be used
+    /// if it couldn't; failures are recorded there, not returned.
+    pub async fn flush_outbox(&self, account: AccountId) -> Result<FlushReport> {
         self.rt
             .run(send::flush(self.engine.clone(), account, false))
             .await
@@ -1373,9 +1373,14 @@ mod tests {
 
         // Fails before any connection is made, so the fake host doesn't matter.
         let flushed = client.flush_outbox(account).await.unwrap();
-        assert_eq!(flushed.len(), 1);
-        assert_eq!(flushed[0].status, catmail_types::OutboxStatus::Queued);
-        assert!(flushed[0].last_error.as_deref().unwrap().contains("locked"));
+        assert_eq!(flushed.entries.len(), 1);
+        assert_eq!(
+            flushed.entries[0].status,
+            catmail_types::OutboxStatus::Queued
+        );
+        let error = flushed.entries[0].last_error.as_deref().unwrap();
+        assert!(error.contains("locked"));
+        assert_eq!(flushed.error.unwrap().message, error);
     }
 
     #[tokio::test(flavor = "multi_thread")]

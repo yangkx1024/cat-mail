@@ -58,6 +58,7 @@ impl Env {
             .flush_outbox(self.account)
             .await
             .unwrap()
+            .entries
             .into_iter()
             .map(|e| (e.status, e.attempts))
             .collect()
@@ -252,6 +253,7 @@ async fn decisions_wait_for_the_send_in_progress() {
         .await
         .unwrap()
         .unwrap()
+        .entries
         .into_iter()
         .map(|e| e.status)
         .collect();
@@ -291,7 +293,7 @@ async fn a_queued_message_is_cancelled_while_another_is_sent() {
     assert_eq!(cancelled.id, second.id);
 
     gate.add_permits(1);
-    let results: Vec<_> = flush.await.unwrap().unwrap();
+    let results = flush.await.unwrap().unwrap().entries;
     assert_eq!(results.len(), 1);
     assert_eq!(env.delivered(), 1);
     let drafts = env.client.list_drafts(env.account).await.unwrap();
@@ -472,6 +474,30 @@ async fn refused_messages_fail_and_can_be_fixed() {
         env.smtp.state().received[0].recipients,
         ["bob@example.com", "dave@example.com"]
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flush_reports_why_the_server_was_unusable() {
+    let env = env_with(state(), SmtpState::new("alice", "pw"), false).await;
+    env.queue("one").await;
+    let flush = async || env.client.flush_outbox(env.account).await.unwrap();
+
+    // From this flush, not from whatever the account's status says by then.
+    env.smtp.state().faults.reject_login = true;
+    let rejected = flush().await;
+    let error = rejected.error.unwrap();
+    assert_eq!((error.kind, error.transient), (ErrorKind::Auth, false));
+    assert_eq!(rejected.entries[0].status, OutboxStatus::Queued);
+
+    env.smtp.state().faults.reject_login = false;
+    env.smtp.state().faults.unavailable = 1;
+    let unavailable = flush().await;
+    assert!(unavailable.error.unwrap().transient);
+    assert_eq!(unavailable.entries[0].status, OutboxStatus::Queued);
+
+    let sent = flush().await;
+    assert_eq!(sent.error, None);
+    assert_eq!(sent.entries[0].status, OutboxStatus::Done);
 }
 
 #[tokio::test(flavor = "multi_thread")]

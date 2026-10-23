@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AccountId, DraftId, OutboxId};
+use crate::{AccountId, DraftId, OutboxId, ReportedError};
 
 /// Where a message handed to "send" is. See [`OutboxEntry`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -130,6 +130,18 @@ pub struct OutboxEntry {
     pub last_error: Option<String>,
     /// Unix timestamp, seconds.
     pub created_at: i64,
+}
+
+/// What working through an account's outbox did.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlushReport {
+    /// The entries worked on (postponed ones included), as they ended up: `Done` for
+    /// those that are gone. A message's own failure is in its `last_error`.
+    pub entries: Vec<OutboxEntry>,
+    /// Why the SMTP server couldn't be used: connecting or logging in failed, so the
+    /// queued messages were postponed. `transient` says whether trying again later may
+    /// work, or the account needs fixing first.
+    pub error: Option<ReportedError>,
 }
 
 #[cfg(test)]

@@ -327,12 +327,12 @@ async fn check_saving_to_sent(
     fs::set_permissions(&tmp, readonly).unwrap();
     let first = client.flush_outbox(sender).await;
     fs::set_permissions(&tmp, writable).unwrap();
-    let first = first.unwrap();
+    let first = first.unwrap().entries;
     assert_eq!(first[0].status, OutboxStatus::Accepted, "{first:?}");
     assert!(first[0].last_error.is_some());
     assert_eq!(fake.state().received.len(), 1);
 
-    let second = client.flush_outbox(sender).await.unwrap();
+    let second = client.flush_outbox(sender).await.unwrap().entries;
     assert_eq!(
         (second[0].status, second[0].attempts),
         (OutboxStatus::Done, 2),
