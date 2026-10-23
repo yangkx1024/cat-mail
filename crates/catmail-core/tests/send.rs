@@ -763,6 +763,26 @@ async fn background_sending_needs_no_flush() {
     assert_eq!(env.sent_folder().len(), 1);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clock_set_back_doesnt_hold_up_a_retry() {
+    let mut smtp = SmtpState::new("alice", "pw");
+    smtp.faults.busy = 1;
+    let env = env_with(state(), smtp, true).await;
+    let mut events = env.client.subscribe();
+    let busy = env.queue("busy").await;
+    eventually("the first attempt", async || {
+        let entry = &env.outbox().await[0];
+        (entry.status, entry.attempts) == (OutboxStatus::Queued, 1)
+    })
+    .await;
+    // Postponed before the clock was set back a day: due in what is now the future.
+    env.sql("UPDATE outbox SET next_attempt_at = next_attempt_at + 86400");
+
+    // Wakes the worker before the retry's half a minute is up.
+    env.queue("later").await;
+    wait_for_sent(&mut events, busy.id).await;
+}
+
 async fn wait_for_sent(
     events: &mut tokio::sync::broadcast::Receiver<Event>,
     id: catmail_core::OutboxId,

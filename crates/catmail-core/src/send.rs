@@ -589,8 +589,22 @@ pub(crate) async fn worker(engine: Weak<Engine>, kick: Arc<Notify>, mut closing:
 /// Works on every account with something due, all at once: one unreachable server
 /// doesn't hold up the others. Returns when the next entry is due.
 async fn work_due(engine: &Arc<Engine>) -> Result<Option<i64>> {
-    let due = now();
-    let accounts = engine.read(move |db| db.outbox().accounts_due(due)).await?;
+    // Every wait is a `backoff`, so none is longer than MAX_BACKOFF.
+    let (brought_forward, accounts) = engine
+        .write(move |db| {
+            // Read holding the write connection: a wait committed before was set from
+            // this time or an earlier one, so only a clock set back puts it further ahead.
+            let due = now();
+            let outbox = db.outbox();
+            Ok((
+                outbox.bring_forward(due, MAX_BACKOFF)?,
+                outbox.accounts_due(due)?,
+            ))
+        })
+        .await?;
+    if brought_forward > 0 {
+        tracing::info!(brought_forward, "retries set before the clock went back");
+    }
     let mut flushes = tokio::task::JoinSet::new();
     for account in accounts {
         let engine = engine.clone();
