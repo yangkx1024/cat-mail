@@ -17,6 +17,8 @@ Issue #93：`AccountStatus::send` 是按身份记的表，前端却只拿 `send_
 - 只放地址（`email`），不放 `Address`：前端只说"发不出"的是哪个地址，显示名用不上。
 - 一个已删除的身份没有地址可带，但它的连接结果本来就不记（`IdentityNotFound` 直接返回），所以给它留空。
 - 侧栏仍只说第一个有问题的账户（与同步问题一致），但列出它所有发不出的地址。
+- 侧栏底部这一行夹在 Settings 和 Sync 之间、会截断，地址一多后面的就看不到：加一个显示全文的 tooltip
+  （Design Guides：截断要有恢复途径）。没改成换行，底栏那一行放不下多行说明。
 
 ## 方案
 
@@ -24,7 +26,7 @@ Issue #93：`AccountStatus::send` 是按身份记的表，前端却只拿 `send_
 - core：`Activity::Send` 带上地址；`connection::SendAs`（身份和地址）用在 `SmtpLogin` 和连不上的路由里，
   `send.rs` 的 `connected` 按它记状态（日志仍只记 id）；`Engine::report` / `forget_identity` 按有序列表
   增删。
-- GUI：侧栏"Can't send from a, b"，发件箱的提示改看 `send` 是否为空。
+- GUI：侧栏"Can't send from a, b"，截断时悬停看全文；发件箱的提示改看 `send` 是否为空。
 - 文档：`docs/architecture/sending.md`、`gui.md`。
 - 测试：`tests/identities.rs` 的 `an_identity_that_cant_log_in_holds_back_only_its_own_messages` 断言两个
   问题都在、各带自己的地址；其余用到 `send_problem()` 的测试改读 `send[0]`。

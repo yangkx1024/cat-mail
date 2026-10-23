@@ -4,12 +4,14 @@
 use catmail_core::{ErrorKind, FolderRole};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::sidebar::{Sidebar, SidebarItem, SidebarMenu, SidebarMenuItem};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Collapsible, Disableable as _, Icon, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::{
-    App, Context, ElementId, FontWeight, IntoElement, ParentElement as _, SharedString,
-    Styled as _, Window, div, prelude::FluentBuilder as _,
+    App, Context, ElementId, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _,
 };
 
 use super::folders::{FolderNode, RoleInfo};
@@ -42,6 +44,7 @@ fn count(
 impl Mailbox {
     pub(crate) fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let accounts = self.accounts.as_deref().unwrap_or_default();
+        let note = self.connection_note();
         let header = Button::new("new-message")
             .outline()
             .w_full()
@@ -64,12 +67,18 @@ impl Mailbox {
             )
             .child(
                 div()
+                    .id("connection-note")
                     .flex_1()
                     .min_w_0()
                     .truncate()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .children(self.connection_note()),
+                    // All of it, when the line is cut short: every address that can't
+                    // send, say.
+                    .when_some(note.clone(), |this, note| {
+                        this.tooltip(move |window, cx| Tooltip::new(note.clone()).build(window, cx))
+                    })
+                    .children(note),
             )
             .child(
                 Button::new("sync")
