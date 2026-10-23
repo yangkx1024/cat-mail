@@ -182,12 +182,19 @@ async fn replay(
     let mut outcome = Outcome::Queued;
     for (account, replayed) in replays.join_all().await {
         match replayed {
-            Ok(report) => results.push((account, report)),
-            Err(e) => {
-                // The server wasn't reached: the changes wait for the next try.
-                if !e.is_transient() {
-                    outcome = Outcome::Failed;
+            Ok(report) => {
+                // The server wasn't reached, or not to the end: the changes left wait
+                // for the next try. What it refused before is counted below.
+                if let Some(e) = &report.error {
+                    if !e.transient {
+                        outcome = Outcome::Failed;
+                    }
+                    errors.push(format!("account {account}: {e}"));
                 }
+                results.push((account, report));
+            }
+            Err(e) => {
+                outcome = Outcome::Failed;
                 errors.push(format!("account {account}: {e}"));
             }
         }
@@ -241,8 +248,8 @@ mod tests {
     use super::*;
     use crate::test_support::synced;
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn changes_reach_the_server_or_stay_queued() {
+    /// A client synced with INBOX ("one", "two") and Archive, and the INBOX messages' ids.
+    async fn synced_inbox() -> (FakeImap, tempfile::TempDir, MailClient, AccountId, Vec<i64>) {
         let mut state = ServerState::new("alice", "pw");
         state.inbox().append_simple("one");
         state.inbox().append_simple("two");
@@ -258,6 +265,13 @@ mod tests {
             .iter()
             .map(|m| m.id.0)
             .collect();
+        (fake, dir, client, account, ids)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn changes_reach_the_server_or_stay_queued() {
+        let (fake, _dir, client, account, ids) = synced_inbox().await;
+        let inbox = client.find_folder(account, "INBOX").await.unwrap().unwrap();
 
         let read = |ids: Vec<i64>| Mark {
             ids,
@@ -310,5 +324,34 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(client.list_pending(Some(account)).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refusal_before_a_lost_connection_is_a_failure() {
+        let (fake, _dir, client, _, ids) = synced_inbox().await;
+        let to_archive = Move {
+            ids: ids[..1].to_vec(),
+            to: "Archive".into(),
+        };
+        move_messages(&client, to_archive, false).await.unwrap();
+
+        // INBOX refuses its change, then the connection is lost before Archive's: the
+        // refusal is final, so running the command again won't do.
+        {
+            let mut state = fake.state();
+            state.faults.refuse_next_changes = 1;
+            state.faults.drop_before_change = true;
+            state.drop_open_connections();
+        }
+        let flag = Mark {
+            ids,
+            read: false,
+            unread: false,
+            flag: true,
+            unflag: false,
+        };
+        let err = mark(&client, flag, false).await.unwrap_err();
+        assert_eq!(crate::exit::outcome(&err), Outcome::Failed, "{err:#}");
+        assert!(err.to_string().contains("refused 1 change"), "{err:#}");
     }
 }

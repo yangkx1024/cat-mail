@@ -1,6 +1,6 @@
 //! Local changes (flags, moves, deletions) and their replay against the fake IMAP server.
 
-use catmail_core::{DraftContent, Error, Event, Flags, MessageId, OpKind, OpStatus};
+use catmail_core::{DraftContent, Error, ErrorKind, Event, Flags, MessageId, OpKind, OpStatus};
 use catmail_testkit::{FakeMailbox, ServerState};
 
 mod common;
@@ -333,6 +333,81 @@ async fn refused_changes_are_undone() {
     assert!(env.pending().await.is_empty());
 }
 
+/// A refusal is committed, and undone, at once: the report counts it although the
+/// connection is lost after it, in another folder or in the same one.
+#[tokio::test(flavor = "multi_thread")]
+async fn refusals_before_a_lost_connection_are_reported() {
+    for retried in [true, false] {
+        // A change in INBOX, then one in Archive.
+        let env = synced_env(state()).await;
+        let (one, two) = (
+            env.id_of("INBOX", "one").await,
+            env.id_of("INBOX", "two").await,
+        );
+        let archive = env.folder("Archive").await;
+        env.client
+            .move_messages(vec![two], archive.id)
+            .await
+            .unwrap();
+        env.replay().await;
+        env.client
+            .set_flags(vec![one, two], Flags::FLAGGED, Flags::empty())
+            .await
+            .unwrap();
+        refuse_then_lose_the_connection(&env, retried).await;
+
+        // Two in INBOX: the flag change, then the move.
+        let env = synced_env(state()).await;
+        let [one, two, three] = [
+            env.id_of("INBOX", "one").await,
+            env.id_of("INBOX", "two").await,
+            env.id_of("INBOX", "three").await,
+        ];
+        env.client
+            .set_flags(vec![three], Flags::SEEN, Flags::empty())
+            .await
+            .unwrap();
+        env.replay().await;
+        env.client
+            .set_flags(vec![one], Flags::FLAGGED, Flags::empty())
+            .await
+            .unwrap();
+        env.client
+            .move_messages(vec![two], archive.id)
+            .await
+            .unwrap();
+        refuse_then_lose_the_connection(&env, retried).await;
+    }
+}
+
+/// Replays two changes, refusing the first and losing the connection at the second: on
+/// the connection the last replay left in the pool, so that the replay runs again on a
+/// new one, where the second is made (`retried`), or on a new one, the last try.
+async fn refuse_then_lose_the_connection(env: &Env, retried: bool) {
+    {
+        let mut state = env.fake.state();
+        state.faults.refuse_next_changes = 1;
+        state.faults.drop_before_change = true;
+        if !retried {
+            state.drop_open_connections();
+        }
+    }
+    let report = env.replay().await;
+    let counts = (report.applied, report.failed, report.pending);
+    let expected = if retried { (1, 1, 0) } else { (0, 1, 1) };
+    assert_eq!(counts, expected, "retried: {retried}");
+    assert_eq!(
+        report.error.map(|e| e.transient),
+        (!retried).then_some(true)
+    );
+    let statuses: Vec<OpStatus> = env.pending().await.into_iter().map(|op| op.1).collect();
+    let mut expected = vec![OpStatus::Failed];
+    if !retried {
+        expected.push(OpStatus::Pending);
+    }
+    assert_eq!(statuses, expected, "retried: {retried}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn changes_whose_answer_is_lost_are_made_once() {
     let env = synced_env(state()).await;
@@ -348,8 +423,9 @@ async fn changes_whose_answer_is_lost_are_made_once() {
         .await
         .unwrap();
     env.fake.state().faults.drop_after_change = true;
-    let err = env.client.replay_pending(env.account).await.unwrap_err();
-    assert!(matches!(err, Error::Imap(_)), "{err}");
+    let report = env.client.replay_pending(env.account).await.unwrap();
+    let err = report.error.unwrap();
+    assert!(err.kind == ErrorKind::Network && err.transient, "{err:?}");
     assert_eq!(env.remote("INBOX")[0].1, ["\\Seen"]);
     let ops = env.client.list_pending(None).await.unwrap();
     assert_eq!((ops.len(), ops[0].attempts), (1, 1));
@@ -460,7 +536,14 @@ async fn a_copy_whose_answer_was_lost_is_not_made_again() {
         let (env, two) = copy_move_env(false).await;
         env.fake.state().faults.inexact_sizes = inexact_sizes;
         env.fake.state().faults.drop_after_change = true;
-        assert!(env.client.replay_pending(env.account).await.is_err());
+        assert!(
+            env.client
+                .replay_pending(env.account)
+                .await
+                .unwrap()
+                .error
+                .is_some()
+        );
         assert_eq!(names(&env.remote("Archive")), ["two"]);
         assert_eq!(names(&env.remote("INBOX")), ["one", "two"]);
 
@@ -485,7 +568,14 @@ async fn a_lost_copy_is_undone_when_the_move_is() {
     for delete in [false, true] {
         let (env, two) = copy_move_env(false).await;
         env.fake.state().faults.drop_after_change = true;
-        assert!(env.client.replay_pending(env.account).await.is_err());
+        assert!(
+            env.client
+                .replay_pending(env.account)
+                .await
+                .unwrap()
+                .error
+                .is_some()
+        );
         assert_eq!(names(&env.remote("Archive")), ["two"]);
 
         if delete {
@@ -522,7 +612,14 @@ async fn a_move_whose_expunge_answer_was_lost_finds_the_copy() {
     ] {
         let (env, two) = copy_move_env(true).await;
         env.fake.state().faults.drop_after_expunge = true;
-        assert!(env.client.replay_pending(env.account).await.is_err());
+        assert!(
+            env.client
+                .replay_pending(env.account)
+                .await
+                .unwrap()
+                .error
+                .is_some()
+        );
         assert_eq!(names(&env.remote("Archive")), ["two"]);
         assert_eq!(names(&env.remote("INBOX")), ["one"]);
 
@@ -560,7 +657,14 @@ async fn a_lost_expunge_answer_without_copyuid_is_reported() {
     let (env, two) = copy_move_env(true).await;
     env.fake.state().faults.uidplus = false;
     env.fake.state().faults.drop_after_expunge = true;
-    assert!(env.client.replay_pending(env.account).await.is_err());
+    assert!(
+        env.client
+            .replay_pending(env.account)
+            .await
+            .unwrap()
+            .error
+            .is_some()
+    );
     env.client.delete_messages(vec![two], true).await.unwrap();
 
     let report = env.client.replay_pending(env.account).await.unwrap();
@@ -591,7 +695,14 @@ async fn a_namesake_arriving_with_the_copy_is_left_alone() {
         state.faults.deliver_before_copy = Some(("Archive".into(), other.to_vec()));
         state.faults.drop_after_expunge = true;
     }
-    assert!(env.client.replay_pending(env.account).await.is_err());
+    assert!(
+        env.client
+            .replay_pending(env.account)
+            .await
+            .unwrap()
+            .error
+            .is_some()
+    );
     env.client.delete_messages(vec![two], true).await.unwrap();
 
     let report = env.client.replay_pending(env.account).await.unwrap();
@@ -617,7 +728,14 @@ async fn a_copy_that_never_happened_is_made() {
     );
     // The connection drops before the COPY is made.
     env.fake.state().faults.drop_before_change = true;
-    assert!(env.client.replay_pending(env.account).await.is_err());
+    assert!(
+        env.client
+            .replay_pending(env.account)
+            .await
+            .unwrap()
+            .error
+            .is_some()
+    );
     assert_eq!(names(&env.remote("Archive")), ["other"]);
 
     let report = env.client.replay_pending(env.account).await.unwrap();
@@ -630,7 +748,14 @@ async fn a_copy_that_never_happened_is_made() {
 async fn an_unknowable_copy_leaves_the_original() {
     let (env, two) = copy_move_env(true).await;
     env.fake.state().faults.drop_after_change = true;
-    assert!(env.client.replay_pending(env.account).await.is_err());
+    assert!(
+        env.client
+            .replay_pending(env.account)
+            .await
+            .unwrap()
+            .error
+            .is_some()
+    );
     // Archive is rebuilt: the copy, if any, can't be told apart from other mail.
     env.fake
         .state()

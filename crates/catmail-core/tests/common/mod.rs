@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use catmail_core::{
     AccountId, AuthKind, Config, Event, Flags, Folder, MailClient, MailClientBuilder,
-    MemorySecrets, MessageId, MessageSummary, NewAccount, Security, ServerConfig,
+    MemorySecrets, MessageId, MessageSummary, NewAccount, ReplayReport, Security, ServerConfig,
 };
 use catmail_testkit::{FakeImap, FakeSmtp, ServerState, SmtpState};
 use tokio::runtime::Handle;
@@ -164,6 +164,11 @@ impl Env {
             .await
             .unwrap()
             .unwrap_or_else(|| panic!("no folder {name}"))
+    }
+
+    #[allow(dead_code)]
+    pub async fn replay(&self) -> ReplayReport {
+        self.client.replay_pending(self.account).await.unwrap()
     }
 
     /// Commands the server received from the `start`-th on, without tags.

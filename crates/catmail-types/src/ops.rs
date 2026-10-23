@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AccountId, Flags, FolderId, MessageId, PendingOpId};
+use crate::{AccountId, Flags, FolderId, MessageId, PendingOpId, ReportedError};
 
 /// What a queued change does on the server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,10 +93,13 @@ pub struct ReplayReport {
     /// Refused by the server, and undone locally.
     pub failed: u32,
     /// Still pending: their folder couldn't be opened, or was rebuilt on the server and
-    /// needs a sync first.
+    /// needs a sync first, or `error` stopped the replay before them.
     pub pending: u32,
     /// Drafts saved to the server's Drafts folder.
     pub drafts_uploaded: u32,
     /// Drafts the server refused to store; [`Draft::upload_error`](crate::Draft::upload_error) says why.
     pub drafts_failed: u32,
+    /// Why the replay stopped before the end: the server couldn't be reached, the
+    /// connection broke. The counts say what was done before.
+    pub error: Option<ReportedError>,
 }

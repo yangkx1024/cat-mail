@@ -170,6 +170,7 @@ impl From<&Error> for ReportedError {
         Self {
             kind: e.kind(),
             message: e.to_string(),
+            transient: e.is_transient(),
         }
     }
 }

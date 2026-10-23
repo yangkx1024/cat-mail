@@ -50,10 +50,6 @@ impl Env {
             .id
     }
 
-    async fn replay(&self) -> ReplayReport {
-        self.client.replay_pending(self.account).await.unwrap()
-    }
-
     /// (subject, flags) of the messages in the server's Drafts folder.
     fn server_drafts(&self) -> Vec<(String, Vec<String>)> {
         let mut state = self.fake.state();
@@ -210,7 +206,14 @@ async fn a_draft_edited_before_its_lost_upload_is_settled_keeps_the_latest() {
         state.faults.drop_after_append = true;
         state.faults.reject_login = true;
     }
-    assert!(env.client.replay_pending(env.account).await.is_err());
+    assert!(
+        env.client
+            .replay_pending(env.account)
+            .await
+            .unwrap()
+            .error
+            .is_some()
+    );
     assert_eq!(subjects(&env.server_drafts()), ["one", "two"]);
 
     env.client.update_draft(id, content("three")).await.unwrap();
@@ -228,7 +231,14 @@ async fn a_draft_deleted_before_its_lost_upload_is_settled_leaves_nothing() {
     state.faults.drop_after_append = true;
     let env = synced_env(state).await;
     let id = env.draft("one").await;
-    assert!(env.client.replay_pending(env.account).await.is_err());
+    assert!(
+        env.client
+            .replay_pending(env.account)
+            .await
+            .unwrap()
+            .error
+            .is_some()
+    );
     env.client.delete_draft(id).await.unwrap();
     env.replay().await;
     assert!(env.server_drafts().is_empty());
@@ -254,6 +264,41 @@ async fn refused_uploads_are_reported_and_tried_again() {
     assert_eq!((report.drafts_uploaded, report.drafts_failed), (1, 0));
     let draft = env.client.get_draft(id).await.unwrap().unwrap();
     assert!(draft.on_server && draft.upload_error.is_none());
+}
+
+/// A refused upload is counted although the connection is lost after it, unless the
+/// replay runs again on a new connection (the one it reused was dead) and stores it.
+#[tokio::test(flavor = "multi_thread")]
+async fn refused_uploads_before_a_lost_connection_are_reported() {
+    for retried in [true, false] {
+        let env = synced_env(state()).await;
+        let hello = env.id_of("INBOX", "hello").await;
+        let flag = |flags| env.client.set_flags(vec![hello], flags, Default::default());
+        // Leaves its connection in the pool.
+        flag(catmail_core::Flags::SEEN).await.unwrap();
+        env.replay().await;
+        let id = env.draft("one").await;
+        flag(catmail_core::Flags::FLAGGED).await.unwrap();
+        {
+            let mut state = env.fake.state();
+            state.faults.reject_appends = 1;
+            state.faults.drop_before_change = true;
+            if !retried {
+                // The pooled connection fails at once, so the new one is the last try.
+                state.drop_open_connections();
+            }
+        }
+
+        let report = env.replay().await;
+        let counts = (report.drafts_uploaded, report.drafts_failed, report.applied);
+        let expected = if retried { (1, 0, 1) } else { (0, 1, 0) };
+        assert_eq!(counts, expected, "retried: {retried}");
+        assert_eq!(
+            report.error.map(|e| e.transient),
+            (!retried).then_some(true)
+        );
+        assert_eq!(env.on_server(id).await, retried);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

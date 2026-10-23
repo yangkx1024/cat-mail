@@ -542,6 +542,7 @@ pub(crate) struct JsonReplay {
     pending: u32,
     drafts_uploaded: u32,
     drafts_refused: u32,
+    error: Option<JsonError>,
 }
 
 impl JsonReplay {
@@ -553,6 +554,7 @@ impl JsonReplay {
             pending: r.pending,
             drafts_uploaded: r.drafts_uploaded,
             drafts_refused: r.drafts_failed,
+            error: r.error.as_ref().map(JsonError::from),
         }
     }
 }

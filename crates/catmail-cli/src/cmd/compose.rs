@@ -292,15 +292,20 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
 /// there (and making its other queued changes), warning if that can't be done: the
 /// drafts are saved locally all the same.
 pub(crate) async fn save_to_server(client: &MailClient, account: AccountId) {
-    match client.replay_pending(account).await {
-        Ok(report) if report.drafts_failed > 0 => {
-            eprintln!("warning: {}", ops::refused_drafts(report.drafts_failed));
+    let error = match client.replay_pending(account).await {
+        Ok(report) => {
+            if report.drafts_failed > 0 {
+                eprintln!("warning: {}", ops::refused_drafts(report.drafts_failed));
+            }
+            report.error.map(|e| e.to_string())
         }
-        Ok(_) => {}
-        Err(e) => eprintln!(
+        Err(e) => Some(e.to_string()),
+    };
+    if let Some(e) = error {
+        eprintln!(
             "warning: the draft is saved here, but not in the server's Drafts folder yet \
              ({e}); {NEXT_FLUSH} puts it there"
-        ),
+        );
     }
 }
 

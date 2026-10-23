@@ -32,6 +32,10 @@ pub enum ErrorKind {
 pub struct ReportedError {
     pub kind: ErrorKind,
     pub message: String,
+    /// Whether trying the same again later may work, with nothing changed meanwhile
+    /// (`catmail_core::Error::is_transient`). The kind can't tell: a `Refused` SMTP
+    /// server may refuse for now or for good.
+    pub transient: bool,
 }
 
 impl std::fmt::Display for ReportedError {
