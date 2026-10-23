@@ -53,6 +53,9 @@ pub struct SmtpFaults {
     /// Hold the reply to the end of each message until it gets a permit, e.g. to act
     /// while the client waits for the verdict.
     pub end_of_data_gate: Option<Arc<Semaphore>>,
+    /// Hold the greeting of each connection until it gets a permit, as a server that
+    /// doesn't answer does.
+    pub greeting_gate: Option<Arc<Semaphore>>,
 }
 
 impl Default for SmtpFaults {
@@ -70,6 +73,7 @@ impl Default for SmtpFaults {
             drop_after_data: 0,
             inject_after_starttls: false,
             end_of_data_gate: None,
+            greeting_gate: None,
         }
     }
 }
@@ -203,6 +207,10 @@ async fn serve(
             .write_all(b"421 4.3.2 Service not available\r\n")
             .await?;
         return Ok(());
+    }
+    let gate = lock(&state).faults.greeting_gate.clone();
+    if let Some(gate) = gate {
+        gate.acquire().await.expect("gate open").forget();
     }
     io.get_mut().write_all(b"220 fake SMTP ready\r\n").await?;
     loop {

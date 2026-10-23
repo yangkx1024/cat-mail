@@ -38,6 +38,8 @@ directories = "6"
 cssparser = "0.38.0"
 # Replies from the render threads to the UI's tasks; the version GPUI uses.
 futures-channel = "0.3.34"
+# Runs an outbox pass's SMTP connections side by side within the pass's own task.
+futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
 # Pins the matching GPUI crates; never depend on GPUI directly (two copies would link).
 # `gpui-fast` swaps the backend from gpui-pre to GPUI Fast behind the same imports.
 gpui-kit = { version = "0.8.0", features = ["gpui-fast"] }

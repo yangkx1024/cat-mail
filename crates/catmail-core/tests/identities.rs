@@ -8,7 +8,7 @@ use catmail_core::{
     Address, DraftContent, Error, ErrorKind, Event, Identity, NewIdentity, OutboxStatus, Verify,
 };
 use catmail_testkit::{FakeMailbox, FakeSmtp, ServerState, SmtpState};
-use common::{Env, drain, env, local_server, sparse};
+use common::{Env, drain, env, eventually, local_server, sparse};
 use mail_parser::MessageParser;
 
 /// An INBOX, a Sent and a Drafts folder.
@@ -77,6 +77,21 @@ impl Env {
             .await
             .unwrap();
         self.client.send_draft(draft.id).await.unwrap();
+    }
+
+    /// Another address that sends through the account's own SMTP server as `username`
+    /// with `password`, as an alias set up at the provider does.
+    async fn alias(&self, username: &str, password: &str) -> Identity {
+        let new = NewIdentity {
+            email: "alias@example.com".into(),
+            display_name: None,
+            username: username.into(),
+            ..new_identity(&self.smtp)
+        };
+        self.client
+            .add_identity(self.account, new, password.into(), Verify::Skip)
+            .await
+            .unwrap()
     }
 }
 
@@ -362,4 +377,91 @@ async fn attachments_fit_the_server_that_sends_the_draft() {
         .await
         .unwrap();
     env.client.attach_file(own.id, &file).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn identities_with_one_login_share_a_connection() {
+    const MIB: u64 = 1024 * 1024;
+    let env = env(state()).await;
+    env.smtp.state().faults.size_limit = Some(MIB);
+    let alias = env.alias("alice", "pw").await;
+    env.queue_as("from the account", None).await;
+    env.queue_as("from the alias", Some(&alias)).await;
+    env.queue_as("from the account again", None).await;
+
+    assert_eq!(
+        env.flush().await,
+        [(OutboxStatus::Done, 1); 3],
+        "in the order they were queued"
+    );
+    let (connections, from) = {
+        let state = env.smtp.state();
+        let from: Vec<_> = state.received.iter().map(|m| m.from.clone()).collect();
+        (state.connections, from)
+    };
+    assert_eq!(connections, 1);
+    assert_eq!(
+        from,
+        [
+            "alice@example.com",
+            "alias@example.com",
+            "alice@example.com"
+        ]
+    );
+
+    // What the connection learned is the alias's too.
+    let dir = tempfile::tempdir().unwrap();
+    let file = sparse(dir.path(), "big.bin", MIB);
+    let draft = env
+        .client
+        .create_draft(env.account, content("big", Some(&alias)))
+        .await
+        .unwrap();
+    let err = env.client.attach_file(draft.id, &file).await.unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_login_with_another_password_connects_on_its_own() {
+    let env = env(state()).await;
+    // Out of date, say: only the alias has to wait for it to be fixed.
+    let alias = env.alias("alice", "old").await;
+    env.queue_as("from the alias", Some(&alias)).await;
+    env.queue_as("from the account", None).await;
+
+    let report = env.client.flush_outbox(env.account).await.unwrap();
+    let statuses: Vec<_> = report.entries.iter().map(|e| e.status).collect();
+    assert_eq!(statuses, [OutboxStatus::Queued, OutboxStatus::Done]);
+    let errors: Vec<_> = report.errors.keys().copied().collect();
+    assert_eq!(errors, [alias.id]);
+    assert_eq!(env.smtp.state().connections, 2);
+    assert_eq!(env.smtp.state().received[0].from, "alice@example.com");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_that_doesnt_answer_holds_up_only_its_own_messages() {
+    let env = env(state()).await;
+    let resend = service().await;
+    let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    resend.state().faults.greeting_gate = Some(gate.clone());
+    let identity = add_identity(&env, &resend).await;
+    env.queue_as("waits", Some(&identity)).await;
+    env.queue_as("goes", None).await;
+
+    let flush = tokio::spawn({
+        let (client, account) = (env.client.clone(), env.account);
+        async move { client.flush_outbox(account).await }
+    });
+    eventually("the account's message is sent", async || {
+        env.smtp.state().received.len() == 1
+    })
+    .await;
+    assert!(!flush.is_finished(), "still waiting for the other server");
+    assert!(resend.state().received.is_empty());
+
+    gate.add_permits(1);
+    let report = flush.await.unwrap().unwrap();
+    let statuses: Vec<_> = report.entries.iter().map(|e| e.status).collect();
+    assert_eq!(statuses, [OutboxStatus::Done, OutboxStatus::Done]);
+    assert_eq!(resend.state().received.len(), 1);
 }
