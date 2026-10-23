@@ -4,8 +4,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use catmail_core::{
-    AccountId, Config, Event, Flags, Folder, MailClient, MailClientBuilder, MemorySecrets,
-    MessageId, MessageSummary, NewAccount, ReplayReport, Security, ServerConfig, Verify,
+    AccountId, Config, Draft, DraftContent, DraftId, Event, Flags, Folder, MailClient,
+    MailClientBuilder, MemorySecrets, MessageId, MessageSummary, NewAccount, ReplayReport,
+    Security, ServerConfig, Verify,
 };
 use catmail_testkit::{FakeImap, FakeSmtp, ServerState, SmtpState};
 use tokio::runtime::Handle;
@@ -24,6 +25,15 @@ pub struct Env {
     pub secrets: Arc<MemorySecrets>,
     #[allow(dead_code)]
     pub dir: tempfile::TempDir,
+}
+
+impl Env {
+    /// Replaces what the draft says, keeping who it is from.
+    #[allow(dead_code)]
+    pub async fn edit(&self, id: DraftId, content: DraftContent) -> catmail_core::Result<Draft> {
+        let draft = self.client.get_draft(id).await?.expect("the draft");
+        self.client.update_draft(id, draft.identity, content).await
+    }
 }
 
 pub async fn env(state: ServerState) -> Env {

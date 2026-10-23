@@ -20,22 +20,24 @@ use crate::{Error, Result, body, display};
 pub(crate) async fn create(
     engine: &Arc<Engine>,
     account: AccountId,
+    from: Option<IdentityId>,
     content: DraftContent,
 ) -> Result<Draft> {
     validate(&content)?;
-    insert(engine, account, content, None, Vec::new()).await
+    insert(engine, account, from, content, None, Vec::new()).await
 }
 
 pub(crate) async fn update(
     engine: &Arc<Engine>,
     id: DraftId,
+    from: IdentityId,
     content: DraftContent,
 ) -> Result<Draft> {
     validate(&content)?;
     let content = without_nul(content);
     let draft = engine
         .write(move |db| {
-            if !db.drafts().update(id, &content, now())? {
+            if !db.drafts().update(id, from, &content, now())? {
                 return Ok(None);
             }
             db.drafts().get(id)
@@ -245,7 +247,7 @@ pub(crate) async fn reply(engine: &Arc<Engine>, id: MessageId, all: bool) -> Res
         .map(|i| (Some(i.id), i.email.as_str()))
         .chain([(None, account.email.as_str())])
         .collect();
-    let content = reply_content(&message, &own, all);
+    let (content, from) = reply_content(&message, &own, all);
     let mut references = message.references.clone();
     references.extend(message.message_id.clone());
     let reply = DraftReply {
@@ -253,7 +255,7 @@ pub(crate) async fn reply(engine: &Arc<Engine>, id: MessageId, all: bool) -> Res
         in_reply_to: message.message_id.clone(),
         references,
     };
-    insert(engine, account_id, content, Some(reply), Vec::new()).await
+    insert(engine, account_id, from, content, Some(reply), Vec::new()).await
 }
 
 /// A new draft forwarding `message` to no one yet, with its attachments. Everything is
@@ -281,9 +283,11 @@ pub(crate) async fn forward(engine: &Arc<Engine>, id: MessageId) -> Result<Draft
         });
     }
     let content = forward_content(&message);
+    // From the account's default.
     insert(
         engine,
         message.summary.account_id,
+        None,
         content,
         None,
         attachments,
@@ -300,9 +304,11 @@ async fn with_body(engine: &Arc<Engine>, id: MessageId) -> Result<Message> {
     }
 }
 
+/// Sent as `from`, the account's default with `None`.
 async fn insert(
     engine: &Arc<Engine>,
     account: AccountId,
+    from: Option<IdentityId>,
     content: DraftContent,
     reply: Option<DraftReply>,
     attachments: Vec<NewDraftAttachment>,
@@ -314,7 +320,9 @@ async fn insert(
                 return Ok(None);
             }
             let now = now();
-            let id = db.drafts().insert(account, &content, reply.as_ref(), now)?;
+            let id = db
+                .drafts()
+                .insert(account, from, &content, reply.as_ref(), now)?;
             for attachment in &attachments {
                 db.drafts().add_attachment(id, attachment, now)?;
             }
@@ -521,10 +529,15 @@ pub(crate) fn check_address(email: &str) -> Result<()> {
 /// An address of the account: an identity's, or its own (`None`, written as the default).
 type Own<'a> = (Option<IdentityId>, &'a str);
 
-/// Recipients, subject, quoted text and sender of a reply to `message`, written by the
-/// account whose addresses are `own`. It is written as the address the message came from
-/// or went to, the first of `own` for an address there twice.
-fn reply_content(message: &Message, own: &[Own<'_>], all: bool) -> DraftContent {
+/// Recipients, subject and quoted text of a reply to `message`, written by the account
+/// whose addresses are `own`, and the identity it is sent as: that of the address the
+/// message came from or went to, the first of `own` for an address there twice (`None`,
+/// the default, for none).
+fn reply_content(
+    message: &Message,
+    own: &[Own<'_>],
+    all: bool,
+) -> (DraftContent, Option<IdentityId>) {
     let mine = |a: &Address| {
         own.iter()
             .find(|(_, email)| a.email.eq_ignore_ascii_case(email))
@@ -561,14 +574,14 @@ fn reply_content(message: &Message, own: &[Own<'_>], all: bool) -> DraftContent 
     } else {
         Vec::new()
     };
-    DraftContent {
+    let content = DraftContent {
         subject: reply_subject(message.summary.subject.as_deref().unwrap_or_default()),
         to,
         cc,
         bcc: Vec::new(),
         text: quote(message),
-        identity: written_as.flatten(),
-    }
+    };
+    (content, written_as.flatten())
 }
 
 fn reply_subject(subject: &str) -> String {
@@ -752,7 +765,7 @@ mod tests {
                 addr(None, "Zhang@example.com"),
             ],
         );
-        let reply = reply_content(&m, ME, false);
+        let (reply, _) = reply_content(&m, ME, false);
         assert_eq!(emails(&reply.to), ["zhang@example.com"]);
         assert!(reply.cc.is_empty());
         assert_eq!(reply.subject, "Re: 季度报告");
@@ -761,7 +774,7 @@ mod tests {
             "\n\n张三 <zhang@example.com> wrote:\n> 第一行\n>\n> second\n"
         );
 
-        let all = reply_content(&m, ME, true);
+        let (all, _) = reply_content(&m, ME, true);
         assert_eq!(emails(&all.to), ["zhang@example.com"]);
         assert_eq!(
             emails(&all.cc),
@@ -778,7 +791,7 @@ mod tests {
             vec![],
         );
         m.reply_to = vec![addr(None, "list@example.com")];
-        let reply = reply_content(&m, ME, true);
+        let (reply, _) = reply_content(&m, ME, true);
         assert_eq!(emails(&reply.to), ["list@example.com"]);
         assert!(reply.cc.is_empty());
 
@@ -787,7 +800,7 @@ mod tests {
             vec![addr(None, "zhang@example.com")],
             vec![addr(None, "li@example.com")],
         );
-        let reply = reply_content(&mine, ME, true);
+        let (reply, _) = reply_content(&mine, ME, true);
         assert_eq!(emails(&reply.to), ["zhang@example.com"]);
         assert_eq!(emails(&reply.cc), ["li@example.com"]);
     }
@@ -808,7 +821,7 @@ mod tests {
                 vec![addr(None, cc)],
             )
         };
-        let as_ = |m: &Message| reply_content(m, &own, true).identity;
+        let as_ = |m: &Message| reply_content(m, &own, true).1;
         assert_eq!(
             as_(&to("News@example.com", "me@example.com")),
             Some(IdentityId(2))
@@ -824,9 +837,9 @@ mod tests {
         );
         assert_eq!(as_(&to("account@example.com", "li@example.com")), None);
         assert_eq!(as_(&to("li@example.com", "wang@example.com")), None);
-        let all = reply_content(&to("li@example.com", "account@example.com"), &own, true);
+        let (all, _) = reply_content(&to("li@example.com", "account@example.com"), &own, true);
         assert_eq!(emails(&all.cc), ["li@example.com"], "the account is me");
-        let all = reply_content(&to("news@example.com", "li@example.com"), &own, true);
+        let (all, _) = reply_content(&to("news@example.com", "li@example.com"), &own, true);
         assert_eq!(emails(&all.cc), ["li@example.com"], "an identity is me too");
 
         let mine = message(
@@ -834,9 +847,9 @@ mod tests {
             vec![addr(None, "zhang@example.com")],
             vec![],
         );
-        let reply = reply_content(&mine, &own, true);
+        let (reply, from) = reply_content(&mine, &own, true);
         assert_eq!(
-            (emails(&reply.to), reply.identity),
+            (emails(&reply.to), from),
             (vec!["zhang@example.com"], Some(IdentityId(2)))
         );
     }

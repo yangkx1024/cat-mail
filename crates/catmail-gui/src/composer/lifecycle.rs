@@ -11,21 +11,22 @@ impl Composer {
         if self.saving || !self.dirty || self.finishing.is_some() {
             return;
         }
-        let (content, _) = self.content(cx);
+        let (written, _) = self.written(cx);
         self.dirty = false;
-        if content == self.saved {
+        if written == self.saved {
             return;
         }
         self.saving = true;
         let client = self.client.clone();
         let id = self.draft;
         self._save = cx.spawn_in(window, async move |this, cx| {
-            let result = client.update_draft(id, content.clone()).await;
+            let Written { from, content } = written.clone();
+            let result = client.update_draft(id, from, content).await;
             this.update_in(cx, |this, window, cx| {
                 this.saving = false;
                 match result {
                     Ok(_) => {
-                        this.saved = content;
+                        this.saved = written;
                         this.save_state = SaveState::Saved;
                     }
                     Err(e) => {
@@ -47,12 +48,12 @@ impl Composer {
     }
 
     pub(super) fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (content, problem) = self.content(cx);
+        let (written, problem) = self.written(cx);
         if let Some(problem) = problem {
             self.show_field_error(problem, window, cx);
             return;
         }
-        if content.recipients().next().is_none() {
+        if written.content.recipients().next().is_none() {
             self.show_field_error(
                 (Field::To, "Add at least one recipient.".into()),
                 window,
@@ -72,13 +73,13 @@ impl Composer {
     /// Whether the window can close now. If there is something to save first, that starts,
     /// and the window closes itself when it is done.
     pub(super) fn should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let (content, problem) = self.content(cx);
+        let (written, problem) = self.written(cx);
         let closing = closing(CloseState {
             finishing: self.finishing.is_some(),
             unparsed: problem.is_some(),
             busy: self.busy(),
             // What the fields hold, not `dirty`: the last keys may not have been seen yet.
-            unsaved: content != self.saved,
+            unsaved: written != self.saved,
             untouched: self.untouched(),
         });
         match closing {
@@ -135,8 +136,8 @@ impl Composer {
         let Some(how) = self.finishing else {
             return;
         };
-        let (content, _) = self.content(cx);
-        let Steps { delete, save, send } = steps(how, self.untouched(), content != self.saved);
+        let (written, _) = self.written(cx);
+        let Steps { delete, save, send } = steps(how, self.untouched(), written != self.saved);
         let client = self.client.clone();
         let id = self.draft;
         self.saving = true;
@@ -146,7 +147,9 @@ impl Composer {
                     return client.delete_draft(id).await;
                 }
                 if save {
-                    client.update_draft(id, content).await?;
+                    client
+                        .update_draft(id, written.from, written.content)
+                        .await?;
                 }
                 if send {
                     client.send_draft(id).await?;

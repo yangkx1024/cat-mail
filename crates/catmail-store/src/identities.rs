@@ -152,11 +152,7 @@ impl<'c> Identities<'c> {
         Ok(Some(account))
     }
 
-    pub(crate) fn exists(&self, id: IdentityId) -> Result<bool> {
-        Ok(self.account_of(id)?.is_some())
-    }
-
-    fn account_of(&self, id: IdentityId) -> Result<Option<AccountId>> {
+    pub(crate) fn account_of(&self, id: IdentityId) -> Result<Option<AccountId>> {
         Ok(self
             .conn
             .prepare_cached("SELECT account_id FROM identities WHERE id = ?1")?
@@ -164,29 +160,25 @@ impl<'c> Identities<'c> {
             .optional()?)
     }
 
-    /// The account's identity `id`, or its default with `None`; `None` if there is no
-    /// such identity of the account.
-    pub fn sending(&self, account: AccountId, id: Option<IdentityId>) -> Result<Option<Sending>> {
+    /// The account's identity `id`; `None` if there is no such identity of the account.
+    pub fn sending(&self, account: AccountId, id: IdentityId) -> Result<Option<Sending>> {
         let sql = format!(
             "SELECT {COLUMNS}, smtp_max_size,
                     coalesce(secret_key, (SELECT a.secret_key FROM accounts a
                                           WHERE a.id = identities.account_id)) AS login_key
              FROM identities
-             WHERE account_id = :account AND coalesce(id = :id, is_default)"
+             WHERE account_id = :account AND id = :id"
         );
         Ok(self
             .conn
             .prepare_cached(&sql)?
-            .query_row(
-                named_params! { ":account": account.0, ":id": id.map(|i| i.0) },
-                |r| {
-                    Ok(Sending {
-                        identity: from_row(r)?,
-                        smtp_max_size: size_limit(r, "smtp_max_size")?,
-                        login_key: r.get("login_key")?,
-                    })
-                },
-            )
+            .query_row(named_params! { ":account": account.0, ":id": id.0 }, |r| {
+                Ok(Sending {
+                    identity: from_row(r)?,
+                    smtp_max_size: size_limit(r, "smtp_max_size")?,
+                    login_key: r.get("login_key")?,
+                })
+            })
             .optional()?)
     }
 
@@ -324,18 +316,20 @@ mod tests {
     }
 
     fn draft(store: &TestStore, account: AccountId, identity: Option<IdentityId>) -> DraftId {
-        let content = DraftContent {
-            identity,
-            ..DraftContent::default()
-        };
         store
-            .write(|db| db.drafts().insert(account, &content, None, 1))
+            .write(|db| {
+                db.drafts()
+                    .insert(account, identity, &DraftContent::default(), None, 1)
+            })
             .unwrap()
     }
 
-    fn identity_of(store: &TestStore, draft: DraftId) -> Option<IdentityId> {
-        let draft = store.read(|db| db.drafts().get(draft)).unwrap().unwrap();
-        draft.content.identity
+    fn identity_of(store: &TestStore, draft: DraftId) -> IdentityId {
+        store
+            .read(|db| db.drafts().get(draft))
+            .unwrap()
+            .unwrap()
+            .identity
     }
 
     #[test]
@@ -361,17 +355,17 @@ mod tests {
                 .unwrap()
                 .unwrap()
         };
-        assert_eq!(sending(None).identity.id, own, "the default");
+        assert_eq!(sending(own).identity.id, own);
         assert_eq!(
-            sending(Some(first.id)).login_key,
+            sending(first.id).login_key,
             format!("key:{a}:news@example.com"),
             "its own password"
         );
-        assert_eq!(sending(Some(first.id)).smtp_max_size, None);
+        assert_eq!(sending(first.id).smtp_max_size, None);
         store
             .write(|db| db.identities().set_smtp_max_size(first.id, Some(1000)))
             .unwrap();
-        assert_eq!(sending(Some(first.id)).smtp_max_size, Some(1000));
+        assert_eq!(sending(first.id).smtp_max_size, Some(1000));
 
         // The same address, server and login.
         let twice = store.write(|db| {
@@ -396,31 +390,19 @@ mod tests {
         let b = test_util::account(&store, "b@example.com");
         let theirs = add(&store, b, "news@example.com");
         let id = draft(&store, a, None);
-        assert_eq!(identity_of(&store, id), Some(default_of(&store, a)));
+        assert_eq!(identity_of(&store, id), default_of(&store, a));
 
-        let content = DraftContent {
-            identity: Some(theirs.id),
-            ..DraftContent::default()
-        };
-        let insert = store.write(|db| db.drafts().insert(a, &content, None, 1));
+        let content = DraftContent::default();
+        let insert = store.write(|db| db.drafts().insert(a, Some(theirs.id), &content, None, 1));
         assert!(matches!(insert, Err(Error::Invalid(_))), "{insert:?}");
-        let update = store.write(|db| db.drafts().update(id, &content, 2));
+        let update = store.write(|db| db.drafts().update(id, theirs.id, &content, 2));
         assert!(matches!(update, Err(Error::Invalid(_))), "{update:?}");
 
         let mine = add(&store, a, "news@example.com");
-        let as_mine = DraftContent {
-            identity: Some(mine.id),
-            ..DraftContent::default()
-        };
         store
-            .write(|db| db.drafts().update(id, &as_mine, 3))
+            .write(|db| db.drafts().update(id, mine.id, &content, 3))
             .unwrap();
-        assert_eq!(identity_of(&store, id), Some(mine.id));
-        // Updated without one, it is the default's again.
-        store
-            .write(|db| db.drafts().update(id, &DraftContent::default(), 4))
-            .unwrap();
-        assert_eq!(identity_of(&store, id), Some(default_of(&store, a)));
+        assert_eq!(identity_of(&store, id), mine.id);
     }
 
     #[test]
@@ -444,7 +426,7 @@ mod tests {
         assert_eq!((list[1].id, list[1].is_default), (own, false));
         // New drafts are from it, and the first one can go now.
         let id = draft(&store, a, None);
-        assert_eq!(identity_of(&store, id), Some(news.id));
+        assert_eq!(identity_of(&store, id), news.id);
         let deleted = store.write(|db| db.identities().delete(own, 5)).unwrap();
         assert_eq!(
             deleted.map(|d| d.secret_key),
@@ -508,7 +490,7 @@ mod tests {
             })
         );
         let written = store.read(|db| db.drafts().get(written)).unwrap().unwrap();
-        assert_eq!(written.content.identity, Some(default_of(&store, a)));
+        assert_eq!(written.identity, default_of(&store, a));
         assert_eq!(revision(written.id), before + 1, "uploaded again");
         assert_eq!(written.updated_at, 5);
         // Saved by someone who still had the one removed: it stays from the default.
@@ -516,18 +498,15 @@ mod tests {
             subject: "later".into(),
             ..written.content.clone()
         };
-        let stale = DraftContent {
-            identity: Some(identity.id),
-            ..saved.clone()
-        };
         store
-            .write(|db| db.drafts().update(written.id, &stale, 6))
+            .write(|db| db.drafts().update(written.id, identity.id, &saved, 6))
             .unwrap();
         let again = store
             .read(|db| db.drafts().get(written.id))
             .unwrap()
             .unwrap();
         assert_eq!(again.content, saved);
+        assert_eq!(again.identity, default_of(&store, a));
         assert_eq!(
             store
                 .write(|db| db.identities().delete(identity.id, 5))

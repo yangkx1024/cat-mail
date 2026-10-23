@@ -410,7 +410,7 @@ pub(crate) struct JsonDraft {
     id: i64,
     account: i64,
     /// Sent as this identity.
-    identity: Option<i64>,
+    identity: i64,
     subject: String,
     to: Vec<JsonAddress>,
     cc: Vec<JsonAddress>,
@@ -432,7 +432,7 @@ impl From<&Draft> for JsonDraft {
         Self {
             id: d.id.0,
             account: d.account_id.0,
-            identity: c.identity.map(|id| id.0),
+            identity: d.identity.0,
             subject: c.subject.clone(),
             to: addresses(&c.to),
             cc: addresses(&c.cc),
@@ -778,6 +778,7 @@ mod tests {
         let draft = Draft {
             id: DraftId(5),
             account_id: AccountId(1),
+            identity: IdentityId(3),
             content: DraftContent {
                 subject: "hi".into(),
                 to: vec![Address {
@@ -787,7 +788,6 @@ mod tests {
                 cc: Vec::new(),
                 bcc: Vec::new(),
                 text: "hello".into(),
-                identity: None,
             },
             attachments: vec![DraftAttachment {
                 id: DraftAttachmentId(9),
@@ -838,7 +838,7 @@ mod tests {
             json!({
                 "id": 5,
                 "account": 1,
-                "identity": null,
+                "identity": 3,
                 "subject": "hi",
                 "to": [{"name": null, "email": "b@example.com"}],
                 "cc": [],

@@ -62,19 +62,6 @@ async fn record_limit(
     }
 }
 
-/// The address the account's identity `identity` sends as, its default's with `None`.
-/// `None` if the account or the identity is gone.
-pub(crate) fn sender(
-    db: &Db<'_>,
-    account: AccountId,
-    identity: Option<IdentityId>,
-) -> catmail_store::Result<Option<Address>> {
-    Ok(db
-        .identities()
-        .sending(account, identity)?
-        .map(|sending| sending.identity.address()))
-}
-
 /// The draft as it is now, and who it is from; `None` if it is gone.
 pub(crate) fn draft_sender(
     db: &Db<'_>,
@@ -84,8 +71,9 @@ pub(crate) fn draft_sender(
         return Ok(None);
     };
     let d = &snapshot.draft;
-    let sender = sender(db, d.account_id, d.content.identity)?;
-    Ok(sender.map(|sender| (snapshot, sender)))
+    // The composite key keeps the identity the draft's account's.
+    let identity = db.identities().get(d.identity)?;
+    Ok(identity.map(|identity| (snapshot, identity.address())))
 }
 
 /// Identities of an account that send over the same SMTP login: the same server,
@@ -150,7 +138,7 @@ pub(crate) async fn smtp_logins(
         .read(move |db| {
             identities
                 .into_iter()
-                .map(|identity| Ok((identity, db.identities().sending(account, Some(identity))?)))
+                .map(|identity| Ok((identity, db.identities().sending(account, identity)?)))
                 .collect::<catmail_store::Result<Vec<_>>>()
         })
         .await?;

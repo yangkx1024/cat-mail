@@ -30,7 +30,6 @@ fn content(subject: &str) -> DraftContent {
         cc: vec![addr("carol@example.com")],
         bcc: vec![addr("dave@example.com"), addr("BOB@example.com")],
         text: "你好，\n\n.see you\n".into(),
-        identity: None,
     }
 }
 
@@ -48,7 +47,7 @@ impl Env {
     async fn queue(&self, subject: &str) -> OutboxEntry {
         let draft = self
             .client
-            .create_draft(self.account, content(subject))
+            .create_draft(self.account, None, content(subject))
             .await
             .unwrap();
         self.client.send_draft(draft.id).await.unwrap()
@@ -170,7 +169,7 @@ async fn lost_confirmation_is_never_resent_on_its_own() {
     assert!(env.flush().await.is_empty());
     assert_eq!(env.delivered(), 1);
     let draft = entry.draft_id.unwrap();
-    let edit = env.client.update_draft(draft, content("edited")).await;
+    let edit = env.edit(draft, content("edited")).await;
     assert!(matches!(edit, Err(Error::Conflict(_))), "{edit:?}");
 
     // The user found it arrived: only the copy in Sent is still to do.
@@ -204,8 +203,7 @@ async fn unknown_outcome_can_be_resent_or_cancelled() {
     assert_eq!(drafts.len(), 1);
     assert_eq!(drafts[0].id, second.draft_id.unwrap());
     assert_eq!(drafts[0].outbox, None);
-    env.client
-        .update_draft(drafts[0].id, content("second, edited"))
+    env.edit(drafts[0].id, content("second, edited"))
         .await
         .unwrap();
 }
@@ -461,7 +459,7 @@ async fn refused_messages_fail_and_can_be_fixed() {
     let draft = entry.draft_id.unwrap();
     let mut fixed = content("typo");
     fixed.cc.clear();
-    env.client.update_draft(draft, fixed).await.unwrap();
+    env.edit(draft, fixed).await.unwrap();
     env.client.send_draft(draft).await.unwrap();
     assert_eq!(env.flush().await, [(OutboxStatus::Done, 1)]);
     assert_eq!(
@@ -689,7 +687,7 @@ async fn attachments_are_copied_when_added() {
 
     let draft = env
         .client
-        .create_draft(env.account, content("with attachment"))
+        .create_draft(env.account, None, content("with attachment"))
         .await
         .unwrap();
     let pdf = env.client.attach_file(draft.id, &path).await.unwrap();
@@ -723,7 +721,7 @@ async fn attachments_are_limited_in_size() {
     let file = |name: &str, size: u64| sparse(dir.path(), name, size);
     let draft = env
         .client
-        .create_draft(env.account, content("with attachments"))
+        .create_draft(env.account, None, content("with attachments"))
         .await
         .unwrap();
     let blobs = env.client.config().blob_dir();
@@ -802,7 +800,7 @@ async fn attachments_follow_the_size_the_server_announces() {
     let dir = tempfile::tempdir().unwrap();
     let draft = env
         .client
-        .create_draft(env.account, content("big"))
+        .create_draft(env.account, None, content("big"))
         .await
         .unwrap()
         .id;
@@ -844,7 +842,7 @@ async fn attachments_fit_the_append_limit_learned_by_syncing() {
     env.client.sync_account(env.account).await.unwrap();
     let draft = env
         .client
-        .create_draft(env.account, content("big"))
+        .create_draft(env.account, None, content("big"))
         .await
         .unwrap()
         .id;
@@ -879,7 +877,10 @@ async fn an_account_added_checked_knows_its_limits_before_the_first_send() {
         .add_account(new.clone(), "pw".into(), Verify::Login)
         .await
         .unwrap();
-    let draft = env.client.create_draft(checked.id, content("big")).await;
+    let draft = env
+        .client
+        .create_draft(checked.id, None, content("big"))
+        .await;
     assert!(
         attach(&env, dir.path(), draft.unwrap().id, MIB)
             .await
@@ -893,7 +894,10 @@ async fn an_account_added_checked_knows_its_limits_before_the_first_send() {
         .add_account(new, "pw".into(), Verify::Skip)
         .await
         .unwrap();
-    let draft = env.client.create_draft(unchecked.id, content("big")).await;
+    let draft = env
+        .client
+        .create_draft(unchecked.id, None, content("big"))
+        .await;
     attach(&env, dir.path(), draft.unwrap().id, MIB)
         .await
         .unwrap();
@@ -905,13 +909,13 @@ async fn drafts_are_checked_before_sending() {
     let mut bad = content("x");
     bad.to.push(addr("not an address"));
     assert!(matches!(
-        env.client.create_draft(env.account, bad).await,
+        env.client.create_draft(env.account, None, bad).await,
         Err(Error::InvalidInput(_))
     ));
 
     let empty = env
         .client
-        .create_draft(env.account, DraftContent::default())
+        .create_draft(env.account, None, DraftContent::default())
         .await
         .unwrap();
     assert!(matches!(
@@ -985,7 +989,7 @@ async fn the_overview_counts_drafts_and_lists_the_outbox() {
     let env = env(state()).await;
     env.client.sync_account(env.account).await.unwrap();
     env.client
-        .create_draft(env.account, content("Kept"))
+        .create_draft(env.account, None, content("Kept"))
         .await
         .unwrap();
     let queued = env.queue("Queued").await;

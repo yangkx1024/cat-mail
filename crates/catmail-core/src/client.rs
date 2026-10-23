@@ -773,15 +773,21 @@ impl MailClient {
             .await
     }
 
-    /// A new draft. Addresses are checked as they will be needed for sending.
+    /// A new draft, sent as the account's identity `from` (its default with `None`).
+    /// Addresses are checked as they will be needed for sending.
     ///
     /// Drafts are copied to the account's Drafts folder, the copy replaced after every
     /// change, at the next sync or [`replay_pending`](Self::replay_pending), or right
     /// away with [`sync_in_background`](MailClientBuilder::sync_in_background).
-    pub async fn create_draft(&self, account: AccountId, content: DraftContent) -> Result<Draft> {
+    pub async fn create_draft(
+        &self,
+        account: AccountId,
+        from: Option<IdentityId>,
+        content: DraftContent,
+    ) -> Result<Draft> {
         let engine = self.engine.clone();
         self.rt
-            .run(async move { drafts::create(&engine, account, content).await })
+            .run(async move { drafts::create(&engine, account, from, content).await })
             .await
     }
 
@@ -806,12 +812,19 @@ impl MailClient {
             .await
     }
 
-    /// Replaces what the draft says. Fails with [`Error::Conflict`] while it is in the
+    /// Replaces what the draft says, and the identity of its account it is sent as. An
+    /// identity removed meanwhile leaves it from the one it has: the default, which
+    /// removing the identity made it. Fails with [`Error::Conflict`] while it is in the
     /// outbox.
-    pub async fn update_draft(&self, id: DraftId, content: DraftContent) -> Result<Draft> {
+    pub async fn update_draft(
+        &self,
+        id: DraftId,
+        from: IdentityId,
+        content: DraftContent,
+    ) -> Result<Draft> {
         let engine = self.engine.clone();
         self.rt
-            .run(async move { drafts::update(&engine, id, content).await })
+            .run(async move { drafts::update(&engine, id, from, content).await })
             .await
     }
 
@@ -1350,7 +1363,7 @@ mod tests {
             client
                 .engine
                 .store
-                .read(|db| db.identities().sending(account.id, Some(id)))
+                .read(|db| db.identities().sending(account.id, id))
                 .unwrap()
                 .unwrap()
                 .login_key
@@ -1462,7 +1475,7 @@ mod tests {
             .unwrap()
             .id;
         client
-            .create_draft(account, DraftContent::default())
+            .create_draft(account, None, DraftContent::default())
             .await
             .unwrap();
         assert_eq!(client.engine.tracked_draft_edits(account), 0);
@@ -1691,7 +1704,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        client.create_draft(account, content).await.unwrap()
+        client.create_draft(account, None, content).await.unwrap()
     }
 
     async fn queue_one(client: &MailClient, account: AccountId) -> catmail_types::OutboxEntry {

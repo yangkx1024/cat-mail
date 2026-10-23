@@ -73,10 +73,12 @@ impl<'c> Drafts<'c> {
         Self { conn }
     }
 
-    /// The account must own the message replied to, and the identity sent as.
+    /// Sent as `identity`, the account's default with `None`. The account must own the
+    /// message replied to, and the identity.
     pub fn insert(
         &self,
         account: AccountId,
+        identity: Option<IdentityId>,
         content: &DraftContent,
         reply: Option<&DraftReply>,
         now: i64,
@@ -97,7 +99,7 @@ impl<'c> Drafts<'c> {
                 )));
             }
         }
-        let identity = Identities::new(self.conn).resolve(account, content.identity)?;
+        let identity = Identities::new(self.conn).resolve(account, identity)?;
         self.conn
             .prepare_cached(
                 "INSERT INTO drafts (account_id, reply_to_message_id, in_reply_to, references_hdr,
@@ -191,19 +193,29 @@ impl<'c> Drafts<'c> {
         }))
     }
 
-    /// Replaces what the user wrote. Returns false if there is no such draft. The
-    /// identity sent as must be one of the account's; one removed since leaves the draft
-    /// from the identity it has.
-    pub fn update(&self, id: DraftId, content: &DraftContent, now: i64) -> Result<bool> {
+    /// Replaces what the user wrote, and the identity it is sent as. Returns false if
+    /// there is no such draft. The identity must be one of the account's; one removed
+    /// since leaves the draft from the identity it has.
+    pub fn update(
+        &self,
+        id: DraftId,
+        identity: IdentityId,
+        content: &DraftContent,
+        now: i64,
+    ) -> Result<bool> {
         let Some(account) = self.editable(id)? else {
             return Ok(false);
         };
-        let identities = Identities::new(self.conn);
-        let identity = match content.identity {
+        let identity = match Identities::new(self.conn).account_of(identity)? {
+            Some(owner) if owner == account => Some(identity),
+            Some(_) => {
+                return Err(Error::Invalid(format!(
+                    "identity {identity} belongs to another account"
+                )));
+            }
             // Removed since it was read: the draft is from the default now, which
             // `Identities::delete` made it. Ids aren't reused.
-            Some(id) if !identities.exists(id)? => None,
-            id => Some(identities.resolve(account, id)?),
+            None => None,
         };
         self.conn
             .prepare_cached(
@@ -611,13 +623,13 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Draft> {
     Ok(Draft {
         id: DraftId(row.get("id")?),
         account_id: AccountId(row.get("account_id")?),
+        identity: IdentityId(row.get("identity_id")?),
         content: DraftContent {
             subject: row.get("subject")?,
             to: json(row, "to_json")?,
             cc: json(row, "cc_json")?,
             bcc: json(row, "bcc_json")?,
             text: row.get("body_text")?,
-            identity: Some(IdentityId(row.get("identity_id")?)),
         },
         attachments: Vec::new(),
         reply_to: row
@@ -637,12 +649,12 @@ mod tests {
     use catmail_types::{Address, FlagState, OutboxStatus};
 
     use super::*;
-    use crate::Store;
     use crate::folders::RemoteFolder;
     use crate::messages::NewMessage;
     use crate::ops::ReplayKind;
     use crate::outbox::NewOutboxEntry;
     use crate::test_util::{self, TestStore};
+    use crate::{Db, Store};
 
     fn content(subject: &str) -> DraftContent {
         DraftContent {
@@ -658,6 +670,12 @@ mod tests {
             text: "你好".into(),
             ..Default::default()
         }
+    }
+
+    /// Changes what the draft says, keeping who it is from.
+    fn edit(db: &Db<'_>, id: DraftId, content: &DraftContent, now: i64) -> Result<bool> {
+        let identity = db.drafts().get(id)?.map_or(IdentityId(0), |d| d.identity);
+        db.drafts().update(id, identity, content, now)
     }
 
     fn hash(c: char) -> BlobHash {
@@ -697,24 +715,18 @@ mod tests {
         let store = test_util::store();
         let account = test_util::account(&store, "a@example.com");
         let id = store
-            .write(|db| db.drafts().insert(account, &content("one"), None, 1))
+            .write(|db| db.drafts().insert(account, None, &content("one"), None, 1))
             .unwrap();
         let older = store
-            .write(|db| db.drafts().insert(account, &content("two"), None, 0))
+            .write(|db| db.drafts().insert(account, None, &content("two"), None, 0))
             .unwrap();
 
         let draft = store.read(|db| db.drafts().get(id)).unwrap().unwrap();
         let default = store
             .read(|db| db.identities().default_of(account))
             .unwrap();
-        assert_eq!(draft.content.identity, default, "the account's default");
-        assert_eq!(
-            draft.content,
-            DraftContent {
-                identity: default,
-                ..content("one")
-            }
-        );
+        assert_eq!(Some(draft.identity), default, "the account's default");
+        assert_eq!(draft.content, content("one"));
         assert_eq!(
             (draft.reply_to, draft.outbox, draft.updated_at),
             (None, None, 1)
@@ -722,7 +734,7 @@ mod tests {
 
         assert!(
             store
-                .write(|db| db.drafts().update(id, &content("one, edited"), 5))
+                .write(|db| edit(db, id, &content("one, edited"), 5))
                 .unwrap()
         );
         let pdf = store
@@ -761,11 +773,7 @@ mod tests {
         );
         assert!(store.write(|db| db.drafts().delete(id)).unwrap());
         assert!(!store.write(|db| db.drafts().delete(id)).unwrap());
-        assert!(
-            !store
-                .write(|db| db.drafts().update(id, &content("gone"), 8))
-                .unwrap()
-        );
+        assert!(!store.write(|db| edit(db, id, &content("gone"), 8)).unwrap());
         assert!(
             store
                 .write(|db| db.drafts().add_attachment(id, &attachment("x"), 8))
@@ -783,7 +791,7 @@ mod tests {
         let store = test_util::store();
         let account = test_util::account(&store, "a@example.com");
         let id = store
-            .write(|db| db.drafts().insert(account, &content("one"), None, 1))
+            .write(|db| db.drafts().insert(account, None, &content("one"), None, 1))
             .unwrap();
         let pdf = store
             .write(|db| db.drafts().add_attachment(id, &attachment("a.pdf"), 1))
@@ -806,11 +814,7 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(store.read(|db| db.drafts().count(account)).unwrap(), 0);
-        assert!(locked(store.write(|db| db.drafts().update(
-            id,
-            &content("x"),
-            2
-        ))));
+        assert!(locked(store.write(|db| edit(db, id, &content("x"), 2))));
         assert!(locked(store.write(|db| db.drafts().delete(id))));
         assert!(locked(store.write(|db| db.drafts().add_attachment(
             id,
@@ -830,11 +834,7 @@ mod tests {
         assert_eq!(entry.status, OutboxStatus::Queued);
         assert_eq!(store.read(|db| db.drafts().list(account)).unwrap().len(), 1);
         assert_eq!(store.read(|db| db.drafts().count(account)).unwrap(), 1);
-        assert!(
-            store
-                .write(|db| db.drafts().update(id, &content("x"), 3))
-                .unwrap()
-        );
+        assert!(store.write(|db| edit(db, id, &content("x"), 3)).unwrap());
     }
 
     #[test]
@@ -843,7 +843,7 @@ mod tests {
         let account = test_util::account(&store, "a@example.com");
         let other = test_util::account(&store, "b@example.com");
         let id = store
-            .write(|db| db.drafts().insert(account, &content("one"), None, 1))
+            .write(|db| db.drafts().insert(account, None, &content("one"), None, 1))
             .unwrap();
         let entry = |account, revision| NewOutboxEntry {
             account,
@@ -855,9 +855,7 @@ mod tests {
             envelope_from: "a@example.com".into(),
             recipients: vec!["zhang@example.com".into()],
         };
-        store
-            .write(|db| db.drafts().update(id, &content("two"), 2))
-            .unwrap();
+        store.write(|db| edit(db, id, &content("two"), 2)).unwrap();
         for (account, revision) in [(account, 0), (other, 1)] {
             let result = store.write(|db| db.outbox().queue(&entry(account, revision), 3));
             assert!(matches!(result, Err(Error::Conflict(_))), "{result:?}");
@@ -886,11 +884,17 @@ mod tests {
             in_reply_to: Some("parent@x".into()),
             references: vec!["root@x".into(), "parent@x".into()],
         };
-        let result = store.write(|db| db.drafts().insert(other, &content("re"), Some(&reply), 1));
+        let result = store.write(|db| {
+            db.drafts()
+                .insert(other, None, &content("re"), Some(&reply), 1)
+        });
         assert!(matches!(result, Err(Error::Conflict(_))), "{result:?}");
 
         let id = store
-            .write(|db| db.drafts().insert(account, &content("re"), Some(&reply), 1))
+            .write(|db| {
+                db.drafts()
+                    .insert(account, None, &content("re"), Some(&reply), 1)
+            })
             .unwrap();
         let draft = store.read(|db| db.drafts().get(id)).unwrap().unwrap();
         assert_eq!(draft.reply_to, Some(message));
@@ -923,7 +927,8 @@ mod tests {
                 db.folders().reset_uidvalidity(folder, 7)?;
                 Ok((
                     folder,
-                    db.drafts().insert(account, &content("one"), None, 1)?,
+                    db.drafts()
+                        .insert(account, None, &content("one"), None, 1)?,
                 ))
             })
             .unwrap();
@@ -992,7 +997,7 @@ mod tests {
         assert!(deletions(&store, folder).is_empty());
 
         store
-            .write(|db| db.drafts().update(draft, &content("two"), 2))
+            .write(|db| edit(db, draft, &content("two"), 2))
             .unwrap();
         assert!(!get(&store, draft).on_server);
         assert_eq!(stale(&store, account), (vec![draft], true));
@@ -1036,7 +1041,7 @@ mod tests {
         let (store, account, folder, draft) = with_drafts_folder();
         settle(&store, &begin(&store, draft, folder, "one@x"), 7, &[5]);
         store
-            .write(|db| db.drafts().update(draft, &content("two"), 2))
+            .write(|db| edit(db, draft, &content("two"), 2))
             .unwrap();
         settle(&store, &begin(&store, draft, folder, "two@x"), 9, &[1]);
         assert!(get(&store, draft).on_server);
@@ -1074,7 +1079,7 @@ mod tests {
         let (store, _, folder, draft) = with_drafts_folder();
         let older = begin(&store, draft, folder, "one@x");
         store
-            .write(|db| db.drafts().update(draft, &content("two"), 2))
+            .write(|db| edit(db, draft, &content("two"), 2))
             .unwrap();
         let newer = begin(&store, draft, folder, "two@x");
         settle(&store, &newer, 7, &[11]);
@@ -1108,7 +1113,7 @@ mod tests {
         assert_eq!(get(&store, draft).upload_error, None);
 
         store
-            .write(|db| db.drafts().update(draft, &content("two"), 2))
+            .write(|db| edit(db, draft, &content("two"), 2))
             .unwrap();
         queue(&store, account, draft).unwrap();
         assert!(begin_at(1).is_none(), "being sent");
@@ -1120,7 +1125,7 @@ mod tests {
         let store = test_util::store();
         let account = test_util::account(&store, "a@example.com");
         let draft = store
-            .write(|db| db.drafts().insert(account, &content("one"), None, 1))
+            .write(|db| db.drafts().insert(account, None, &content("one"), None, 1))
             .unwrap();
         assert_eq!(stale(&store, account), (vec![draft], false));
     }

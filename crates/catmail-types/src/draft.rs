@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{AccountId, Address, DraftAttachmentId, DraftId, IdentityId, MessageId, OutboxId};
 
-/// What the user writes; everything a draft update replaces.
+/// What the user writes; with the identity it is sent as, everything a draft update
+/// replaces.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DraftContent {
     pub subject: String,
@@ -12,9 +13,6 @@ pub struct DraftContent {
     pub bcc: Vec<Address>,
     /// Plain text.
     pub text: String,
-    /// Sent as this identity of the account. `None` stores the account's default; a
-    /// stored draft always names one.
-    pub identity: Option<IdentityId>,
 }
 
 impl DraftContent {
@@ -30,6 +28,8 @@ impl DraftContent {
 pub struct Draft {
     pub id: DraftId,
     pub account_id: AccountId,
+    /// Sent as this identity of the account.
+    pub identity: IdentityId,
     #[serde(flatten)]
     pub content: DraftContent,
     pub attachments: Vec<DraftAttachment>,

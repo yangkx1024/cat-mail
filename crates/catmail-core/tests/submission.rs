@@ -64,7 +64,7 @@ async fn send(
     content: DraftContent,
     attachment: Option<&[u8]>,
 ) -> OutboxEntry {
-    let draft = client.create_draft(account, content).await.unwrap();
+    let draft = client.create_draft(account, None, content).await.unwrap();
     if let Some(data) = attachment {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("数据.bin");
@@ -138,7 +138,6 @@ async fn sends_with_starttls_and_saves_to_sent() {
         bcc: vec![addr(None, "boss@example.com")],
         subject: subject.clone(),
         text: text.into(),
-        identity: None,
     };
     let entry = send(&client, account, content, Some(&attachment)).await;
     assert_eq!(entry.status, OutboxStatus::Done, "{entry:?}");
