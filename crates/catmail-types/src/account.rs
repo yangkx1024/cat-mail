@@ -70,32 +70,6 @@ pub struct ServerConfig {
     pub security: Security,
 }
 
-/// How the account authenticates. The secret itself never lives in the database.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AuthKind {
-    Password,
-}
-
-impl AuthKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Password => "password",
-        }
-    }
-}
-
-impl FromStr for AuthKind {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "password" => Ok(Self::Password),
-            other => Err(format!("unknown auth kind `{other}`")),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Account {
     pub id: AccountId,
@@ -105,7 +79,6 @@ pub struct Account {
     pub username: String,
     pub imap: ServerConfig,
     pub smtp: ServerConfig,
-    pub auth: AuthKind,
     /// Unix timestamp, seconds.
     pub created_at: i64,
 }
@@ -118,7 +91,6 @@ pub struct NewAccount {
     pub username: String,
     pub imap: ServerConfig,
     pub smtp: ServerConfig,
-    pub auth: AuthKind,
 }
 
 /// Whether the engine gets through to an account's servers, as its latest attempts

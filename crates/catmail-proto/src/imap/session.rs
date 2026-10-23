@@ -20,9 +20,9 @@ use secrecy::ExposeSecret;
 
 use super::connection::{Connection, Response};
 use super::{
-    Capabilities, ChangedFlags, Credentials, Error, FetchedMessage, ListedMailbox, MailboxStatus,
-    Result, utf7,
+    Capabilities, ChangedFlags, Error, FetchedMessage, ListedMailbox, MailboxStatus, Result, utf7,
 };
+use crate::Credentials;
 use crate::mime::{Headers, MimeNode, SUMMARY_HEADER_FIELDS, parse_headers};
 use crate::{TlsConfig, net};
 
@@ -111,29 +111,24 @@ impl Session {
         if self.authenticated {
             return Ok(());
         }
-        let response = match credentials {
-            Credentials::Password { username, password } => {
-                if self.caps.has("AUTH=PLAIN") {
-                    let initial = Credentials::sasl_plain(username, password);
-                    self.conn
-                        .authenticate(AuthMechanism::Plain, initial)
-                        .await?
-                } else if self.caps.has("LOGINDISABLED") {
-                    return Err(Error::Unsupported("a password login mechanism"));
-                } else {
-                    let body =
-                        CommandBody::login(username.clone(), password.expose_secret().to_owned())
-                            .map_err(|_| {
-                            Error::AuthFailed(
-                                "username or password contains a NUL or line break".into(),
-                            )
-                        })?;
-                    self.conn.execute(body).await.map_err(|e| match e {
-                        Error::Command { text, .. } => Error::AuthFailed(text),
-                        other => other,
-                    })?
-                }
-            }
+        let response = if self.caps.has("AUTH=PLAIN") {
+            self.conn
+                .authenticate(AuthMechanism::Plain, credentials.sasl_plain())
+                .await?
+        } else if self.caps.has("LOGINDISABLED") {
+            return Err(Error::Unsupported("a password login mechanism"));
+        } else {
+            let body = CommandBody::login(
+                credentials.username.clone(),
+                credentials.password.expose_secret().to_owned(),
+            )
+            .map_err(|_| {
+                Error::AuthFailed("username or password contains a NUL or line break".into())
+            })?;
+            self.conn.execute(body).await.map_err(|e| match e {
+                Error::Command { text, .. } => Error::AuthFailed(text),
+                other => other,
+            })?
         };
         // Capabilities usually change after login; servers often include them in the OK.
         self.caps = match capabilities_in(&response) {

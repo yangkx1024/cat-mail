@@ -7,7 +7,7 @@
 --   * Address lists are JSON arrays of {"name": ..., "email": ...}.
 --   * Blob hashes are lowercase hex SHA-256 pointing into the on-disk BlobStore. There is
 --     no blob table; see BlobStore for the GC contract.
---   * Secrets (passwords, OAuth tokens) never live here; they go to the OS keyring.
+--   * Secrets (passwords) never live here; they go to the OS keyring.
 --   * Tables whose ids leave the database (frontends, keyring keys) use AUTOINCREMENT so
 --     a deleted id is never handed out again.
 --   * Rows that belong to an account and point at another account-owned row use a
@@ -26,7 +26,6 @@ CREATE TABLE accounts (
     smtp_host     TEXT    NOT NULL,
     smtp_port     INTEGER NOT NULL,
     smtp_security TEXT    NOT NULL,
-    auth_kind     TEXT    NOT NULL,
     -- Keyring entry holding the password. Random and globally unique; written before
     -- the row exists, so anyone who sees the row also sees the secret.
     secret_key    TEXT    NOT NULL UNIQUE,

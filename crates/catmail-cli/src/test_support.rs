@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use catmail_core::{
-    AccountId, AuthKind, Config, MailClient, MemorySecrets, NewAccount, SecretStore, SecretString,
-    Security, ServerConfig,
+    AccountId, Config, MailClient, MemorySecrets, NewAccount, SecretStore, SecretString, Security,
+    ServerConfig,
 };
 use catmail_testkit::FakeImap;
 
@@ -74,7 +74,6 @@ pub(crate) async fn synced_with_smtp(
                 username: "alice".into(),
                 imap: server(fake.port()),
                 smtp: server(smtp_port),
-                auth: AuthKind::Password,
             },
             "pw".into(),
         )

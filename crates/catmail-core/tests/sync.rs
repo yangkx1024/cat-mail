@@ -388,7 +388,6 @@ async fn check_login_logs_in_and_stores_nothing() {
         username: account.username,
         imap: account.imap,
         smtp: account.smtp,
-        auth: account.auth,
     };
 
     let start = env.fake.state().log.len();

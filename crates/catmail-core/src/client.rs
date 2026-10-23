@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use catmail_proto::TlsConfig;
+use catmail_proto::{Credentials, TlsConfig};
 use catmail_store::{BlobStore, Store};
 use catmail_types::{
     Account, AccountId, AccountOverview, AccountStatus, AttachmentId, Draft, DraftAttachment,
@@ -23,7 +23,7 @@ use crate::images::RemoteImageStream;
 use crate::runtime::Runtime;
 use crate::secrets::{KeyringSecrets, SecretStore};
 use crate::watch::{self, SyncSchedule};
-use crate::{Config, Error, Result, auth, body, connection, drafts, gc, images, ops, send, sync};
+use crate::{Config, Error, Result, body, connection, drafts, gc, images, ops, send, sync};
 
 /// How many events [`MailClient::subscribe`]'s receivers keep unread before the oldest
 /// are dropped and they get `RecvError::Lagged`.
@@ -325,7 +325,10 @@ impl MailClient {
         }
         let engine = self.engine.clone();
         let imap = new.imap.clone();
-        let credentials = auth::new_account_credentials(new, password);
+        let credentials = Credentials {
+            username: new.username.clone(),
+            password: password.clone(),
+        };
         self.rt
             .run(async move {
                 connection::login(&engine, &imap, &credentials)
@@ -974,7 +977,7 @@ fn validate_new_account(new: &NewAccount) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use catmail_types::{AuthKind, Security, ServerConfig};
+    use catmail_types::{Security, ServerConfig};
 
     use std::sync::Mutex;
 
@@ -1005,7 +1008,6 @@ mod tests {
                 port: 465,
                 security: Security::Tls,
             },
-            auth: AuthKind::Password,
         }
     }
 

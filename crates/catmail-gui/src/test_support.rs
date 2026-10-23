@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use catmail_core::{
-    AccountId, AuthKind, Config, MailClient, MemorySecrets, NewAccount, Security, ServerConfig,
+    AccountId, Config, MailClient, MemorySecrets, NewAccount, Security, ServerConfig,
 };
 use catmail_testkit::{
     FakeHttp, FakeImap, FakeMailbox, FakeSmtp, Reply, ServerState, SmtpState, response,
@@ -69,7 +69,6 @@ impl TestMail {
             username: "alice".into(),
             imap: mail.server(),
             smtp: mail.smtp_server(),
-            auth: AuthKind::Password,
         };
         mail.account = Some(pollster::block_on(async {
             let account = mail.client.add_account(new, "pw".into()).await.unwrap();

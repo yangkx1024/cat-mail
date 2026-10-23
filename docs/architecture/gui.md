@@ -261,7 +261,7 @@ INBOX，所以打开一个文件夹时同步它（`MailClient::sync_folder`，�
 - 登录进行中"Cancel"不可用：`add_account` 一旦开始就会写入（引擎的阻塞任务不随窗口的任务取消），
   此时离开只会让新账户错过首次同步。
 - 空的端口和用户名取与 CLI 相同的默认值；表单只检查端口格式，其余由 `check_login` 里与 `add_account`
-  相同的校验负责。凭据由 `auth::new_account_credentials` 按 `AuthKind` 构造，加 OAuth2 时只改这一处。
+  相同的校验负责。
 
 ## HTML 引擎
 

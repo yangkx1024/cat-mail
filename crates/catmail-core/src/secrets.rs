@@ -5,7 +5,7 @@ use secrecy::{ExposeSecret, SecretString};
 
 use crate::{Error, Result};
 
-/// Storage for account secrets (passwords, later OAuth tokens). Calls may block.
+/// Storage for account passwords. Calls may block.
 pub trait SecretStore: Send + Sync {
     fn set(&self, key: &str, secret: &SecretString) -> Result<()>;
     fn get(&self, key: &str) -> Result<Option<SecretString>>;

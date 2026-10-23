@@ -151,8 +151,8 @@ lettre 的 `send` 不暴露这一点；自己实现还能共用 `TlsConfig`、�
 APPEND 的答复也可能丢失，所以尝试次数在每次尝试**之前**加一：第一次直接 APPEND，第二次起（包括同一
 次尝试里换新连接重来）先 EXAMINE Sent、按 Message-ID `UID SEARCH HEADER`，已经在了就不再 APPEND。
 
-已知问题：Gmail、Outlook 等会自动把发出的邮件存进已发送，再 APPEND 会重复；它们需要 OAuth2，到时
-按服务器关掉这一步。
+已知问题：Gmail 等会自动把经 SMTP 发出的邮件存进已发送，再 APPEND 会重复，用应用专用密码登录的 Gmail
+账户现在就会遇到；需要按服务器关掉这一步。
 
 ## 谁来发
 

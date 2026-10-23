@@ -78,18 +78,16 @@ VANISHED、FETCH）、`stop` 完成或过了 `max`，然后发 DONE、等 tagged
 
 ## 认证
 
-`catmail_proto::Credentials` 是协议层看到的全部，IMAP 和 SMTP 共用，目前只有
-`Password { username, password }`。IMAP 有 `AUTH=PLAIN` 就用 `AUTHENTICATE PLAIN`，否则 `LOGIN`
-（`LOGINDISABLED` 时报错）；SMTP 优先 `AUTH PLAIN`，其次 `AUTH LOGIN`。
+`catmail_proto::Credentials { username, password }` 是协议层看到的全部，IMAP 和 SMTP 共用。只支持
+密码登录，不做 OAuth2（原因见 README 的"范围"）。IMAP 有 `AUTH=PLAIN` 就用 `AUTHENTICATE PLAIN`，
+否则 `LOGIN`（`LOGINDISABLED` 时报错）；SMTP 优先 `AUTH PLAIN`，其次 `AUTH LOGIN`。
 
 密码一路是 `secrecy::SecretString`（core 重新导出）：从 CLI / GUI 读入、`MailClient::add_account`、
 `SecretStore`、`Credentials` 到 SASL 响应和 SMTP 的 AUTH 行（`Zeroizing`），`Debug` 输出不含它，释放时
 清零。交给 imap-next 的副本和 GUI 输入框里的文本不归我们管，这只是尽力而为：目标是不让密码散落在
 日志和随手的格式化里，而不是对抗能读进程内存的人。
 
-凭据从哪来由 `catmail-core/src/auth.rs` 按 `AuthKind` 决定（密码账户读 keyring）。加 OAuth2 只需
-新增 `AuthKind` 和 `Credentials` 的变体（XOAUTH2 / OAUTHBEARER）以及刷新 token 的分支，同步和发信
-代码不变。
+同步和发信在 `catmail-core/src/connection.rs` 里从 keyring 读出账户的密码，组成 `Credentials`。
 
 ## TLS
 

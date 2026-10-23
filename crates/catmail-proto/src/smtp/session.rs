@@ -111,34 +111,31 @@ impl Session {
             .map(str::to_ascii_uppercase)
             .collect();
         let has = |m: &str| mechanisms.iter().any(|x| x == m);
-        let reply = match credentials {
-            Credentials::Password { username, password } => {
-                if has("PLAIN") {
-                    let initial = Zeroizing::new(
-                        BASE64_STANDARD.encode(Credentials::sasl_plain(username, password)),
-                    );
-                    let reply = self.send_parts(&["AUTH PLAIN ", &initial]).await?;
-                    if reply.code == 334 {
-                        // A server that wants the response on its own line (RFC 4954 allows
-                        // either) gets it again.
-                        self.send_line(&initial).await?
-                    } else {
-                        reply
-                    }
-                } else if has("LOGIN") {
-                    let mut reply = self.send_line("AUTH LOGIN").await?;
-                    for answer in [username.as_str(), password.expose_secret()] {
-                        if reply.code != 334 {
-                            break;
-                        }
-                        let answer = Zeroizing::new(BASE64_STANDARD.encode(answer));
-                        reply = self.send_line(&answer).await?;
-                    }
-                    reply
-                } else {
-                    return Err(Error::Unsupported("a password login mechanism"));
-                }
+        let reply = if has("PLAIN") {
+            let initial = Zeroizing::new(BASE64_STANDARD.encode(credentials.sasl_plain()));
+            let reply = self.send_parts(&["AUTH PLAIN ", &initial]).await?;
+            if reply.code == 334 {
+                // A server that wants the response on its own line (RFC 4954 allows
+                // either) gets it again.
+                self.send_line(&initial).await?
+            } else {
+                reply
             }
+        } else if has("LOGIN") {
+            let mut reply = self.send_line("AUTH LOGIN").await?;
+            for answer in [
+                credentials.username.as_str(),
+                credentials.password.expose_secret(),
+            ] {
+                if reply.code != 334 {
+                    break;
+                }
+                let answer = Zeroizing::new(BASE64_STANDARD.encode(answer));
+                reply = self.send_line(&answer).await?;
+            }
+            reply
+        } else {
+            return Err(Error::Unsupported("a password login mechanism"));
         };
         match reply.code {
             235 => Ok(()),

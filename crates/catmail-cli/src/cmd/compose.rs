@@ -380,7 +380,7 @@ async fn get_draft(client: &MailClient, id: i64) -> Result<Draft> {
 mod tests {
     use std::sync::Arc;
 
-    use catmail_core::{AuthKind, Config, MemorySecrets, NewAccount, Security, ServerConfig};
+    use catmail_core::{Config, MemorySecrets, NewAccount, Security, ServerConfig};
     use tokio::runtime::Handle;
 
     use super::*;
@@ -404,7 +404,6 @@ mod tests {
                     username: "a".into(),
                     imap: server("imap.example.com"),
                     smtp: server("smtp.example.com"),
-                    auth: AuthKind::Password,
                 },
                 "pw".into(),
             )
