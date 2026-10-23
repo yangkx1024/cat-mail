@@ -9,8 +9,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use catmail_core::{
-    AccountId, Address, Draft, DraftAttachmentId, DraftContent, DraftId, IdentityId, MailClient,
-    MessageId, display, parse_addresses,
+    AccountId, Address, Draft, DraftAttachmentId, DraftContent, DraftId, Forwarding, IdentityId,
+    MailClient, MessageId, display, parse_addresses,
 };
 use clap::{Args, Subcommand};
 
@@ -171,36 +171,27 @@ pub(crate) async fn reply(client: &MailClient, args: Reply, json: bool) -> Resul
     // Before the draft exists, so a missing file doesn't leave one behind.
     let text = read_body(args.body, args.body_file.as_ref())?;
     let from = from_for(client, &args.from, MessageId(args.id)).await?;
-    let mut draft = client.reply(MessageId(args.id), args.all, from).await?;
-    if let Some(text) = text {
-        let mut content = draft.content.clone();
-        write_above(&text, &mut content);
-        draft = client
-            .update_draft(draft.id, draft.identity, content)
-            .await?;
-    }
+    let draft = client
+        .reply(MessageId(args.id), args.all, from, text.unwrap_or_default())
+        .await?;
     finish_draft(client, draft, &args.attach, args.send, json).await
 }
 
 pub(crate) async fn forward(client: &MailClient, args: Forward, json: bool) -> Result<()> {
     // Before the draft exists, so a mistake doesn't leave one behind.
     let text = read_body(args.body, args.body_file.as_ref())?;
-    let recipients = args.recipients.parse()?;
-    if args.send && recipients.iter().flatten().all(Vec::is_empty) {
+    let [to, cc, bcc] = args.recipients.parse()?.map(Option::unwrap_or_default);
+    let forwarding = Forwarding {
+        to,
+        cc,
+        bcc,
+        text: text.unwrap_or_default(),
+    };
+    if args.send && forwarding.recipients().next().is_none() {
         bail!("--send needs a recipient: --to, --cc or --bcc");
     }
     let from = from_for(client, &args.from, MessageId(args.id)).await?;
-    let mut draft = client.forward(MessageId(args.id), from).await?;
-    if text.is_some() || recipients.iter().any(Option::is_some) {
-        let mut content = draft.content.clone();
-        if let Some(text) = text {
-            write_above(&text, &mut content);
-        }
-        set_recipients(recipients, &mut content);
-        draft = client
-            .update_draft(draft.id, draft.identity, content)
-            .await?;
-    }
+    let draft = client.forward(MessageId(args.id), from, forwarding).await?;
     finish_draft(client, draft, &args.attach, args.send, json).await
 }
 
@@ -386,11 +377,6 @@ fn set_recipients(recipients: ParsedRecipients, content: &mut DraftContent) {
     }
 }
 
-/// The user's text in front of what a reply or forward starts with.
-fn write_above(text: &str, content: &mut DraftContent) {
-    content.text = format!("{}{}", text.trim_end(), content.text);
-}
-
 impl Fields {
     /// `content` with the fields that were given replaced.
     fn apply(self, mut content: DraftContent) -> Result<DraftContent> {
@@ -551,11 +537,11 @@ mod tests {
                 from: Some(identity.id.to_string()),
             },
             recipients: Recipients {
-                to: None,
+                to: Some("bob@example.com".into()),
                 cc: None,
                 bcc: None,
             },
-            body: None,
+            body: Some("fyi".into()),
             body_file: None,
             attach: Vec::new(),
             send: false,
@@ -565,6 +551,13 @@ mod tests {
         assert_eq!(drafts.len(), 2);
         assert!(
             drafts.iter().all(|d| d.identity == identity.id),
+            "{drafts:?}"
+        );
+        // Most recent first.
+        assert!(drafts[0].content.text.starts_with("fyi\n\n"), "{drafts:?}");
+        assert_eq!(drafts[0].content.to[0].email, "bob@example.com");
+        assert!(
+            drafts[1].content.text.starts_with("thanks\n\n"),
             "{drafts:?}"
         );
     }

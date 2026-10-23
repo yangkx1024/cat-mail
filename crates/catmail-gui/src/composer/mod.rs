@@ -15,8 +15,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use catmail_core::{
-    AccountId, Draft, DraftAttachment, DraftContent, DraftId, Event, Identity, IdentityId,
-    MailClient, MessageId, RecvError, parse_addresses,
+    AccountId, Draft, DraftAttachment, DraftContent, DraftId, Event, Forwarding, Identity,
+    IdentityId, MailClient, MessageId, RecvError, parse_addresses,
 };
 use gpui_kit::component::input::{InputEvent, InputState, Position, TextareaState};
 use gpui_kit::component::notification::Notification;
@@ -136,8 +136,12 @@ pub fn open(client: MailClient, from: ComposeFrom, window: &mut Window, cx: &mut
                         .create_draft(account, None, DraftContent::default())
                         .await?
                 }
-                ComposeFrom::Reply { message, all } => client.reply(message, all, None).await?,
-                ComposeFrom::Forward(message) => client.forward(message, None).await?,
+                ComposeFrom::Reply { message, all } => {
+                    client.reply(message, all, None, String::new()).await?
+                }
+                ComposeFrom::Forward(message) => {
+                    client.forward(message, None, Forwarding::default()).await?
+                }
                 ComposeFrom::Draft(id) => client
                     .get_draft(id)
                     .await?

@@ -10,7 +10,7 @@ use catmail_proto::smtp;
 use catmail_store::{BlobStore, DraftReply, DraftSnapshot, NewDraftAttachment};
 use catmail_types::{
     AccountId, Address, BlobHash, Draft, DraftAttachment, DraftAttachmentId, DraftContent, DraftId,
-    Event, IdentityId, Message, MessageId,
+    Event, Forwarding, IdentityId, Message, MessageId,
 };
 use uuid::Uuid;
 
@@ -227,13 +227,15 @@ pub(crate) async fn remove_attachment(
 }
 
 /// A new draft answering `message`: to its sender (or Reply-To), and with `all` to its
-/// other recipients too, quoting its text. Sent as `from`, else as the account's
-/// identity the message came from or went to. Downloads the body first if needed.
+/// other recipients too, `text` above its quoted text. Sent as `from`, else as the
+/// account's identity the message came from or went to. Downloads the body first if
+/// needed.
 pub(crate) async fn reply(
     engine: &Arc<Engine>,
     id: MessageId,
     all: bool,
     from: Option<IdentityId>,
+    text: String,
 ) -> Result<Draft> {
     let message = with_body(engine, id).await?;
     let account_id = message.summary.account_id;
@@ -265,7 +267,8 @@ pub(crate) async fn reply(
         })
         .await?
         .ok_or_else(|| Error::AccountNotFound(account_id.to_string()))?;
-    let (content, written_as) = reply_content(&message, &own, all);
+    let (mut content, written_as) = reply_content(&message, &own, all);
+    write_above(&text, &mut content);
     let mut references = message.references.clone();
     references.extend(message.message_id.clone());
     let reply = DraftReply {
@@ -277,14 +280,19 @@ pub(crate) async fn reply(
     insert(engine, account_id, from, content, Some(reply), Vec::new()).await
 }
 
-/// A new draft forwarding `message` to no one yet, with its attachments. Everything is
-/// downloaded first and stored in one transaction, so a failure leaves no draft behind.
-/// Sent as `from`, the account's default with `None`.
+/// A new draft forwarding `message`, with its attachments, as `forwarding` says.
+/// Everything is downloaded first and stored in one transaction, so a failure leaves no
+/// draft behind. Sent as `from`, the account's default with `None`.
 pub(crate) async fn forward(
     engine: &Arc<Engine>,
     id: MessageId,
     from: Option<IdentityId>,
+    forwarding: Forwarding,
 ) -> Result<Draft> {
+    // Before downloading anything.
+    for address in forwarding.recipients() {
+        check_address(&address.email)?;
+    }
     let message = with_body(engine, id).await?;
     let mut attachments = Vec::new();
     for original in message.body.iter().flat_map(|b| &b.attachments) {
@@ -306,7 +314,14 @@ pub(crate) async fn forward(
             size,
         });
     }
-    let content = forward_content(&message);
+    let Forwarding { to, cc, bcc, text } = forwarding;
+    let mut content = DraftContent {
+        to,
+        cc,
+        bcc,
+        ..forward_content(&message)
+    };
+    write_above(&text, &mut content);
     insert(
         engine,
         message.summary.account_id,
@@ -316,6 +331,11 @@ pub(crate) async fn forward(
         attachments,
     )
     .await
+}
+
+/// The user's text in front of what a reply or forward starts with.
+fn write_above(text: &str, content: &mut DraftContent) {
+    content.text.insert_str(0, text.trim_end());
 }
 
 /// The message with its body, downloading it if needed.

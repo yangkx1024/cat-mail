@@ -10,9 +10,9 @@ use catmail_store::{BlobStore, Store};
 use catmail_types::{
     Account, AccountId, AccountOverview, AccountStatus, AttachmentId, Draft, DraftAttachment,
     DraftAttachmentId, DraftContent, DraftId, Event, Flags, FlushReport, Folder, FolderId,
-    FolderSyncReport, GcReport, Identity, IdentityId, Message, MessageCursor, MessageId,
-    MessageSummary, NewAccount, NewIdentity, OutboxEntry, OutboxId, PendingOp, PendingOpId,
-    ReplayReport, SearchQuery, ServerConfig, SyncReport,
+    FolderSyncReport, Forwarding, GcReport, Identity, IdentityId, Message, MessageCursor,
+    MessageId, MessageSummary, NewAccount, NewIdentity, OutboxEntry, OutboxId, PendingOp,
+    PendingOpId, ReplayReport, SearchQuery, ServerConfig, SyncReport,
 };
 use secrecy::{ExposeSecret, SecretString};
 use tokio::runtime::Handle;
@@ -814,7 +814,8 @@ impl MailClient {
     /// to everyone else it went to, quoting its text and threaded to it. Sent as `from`,
     /// one of the message's account's identities; with `None`, as the identity the
     /// message came from or went to (see [`identity_by_address`]), else the default.
-    /// Downloads the body first if needed.
+    /// `text`, if not empty, is written above the quote. Downloads the body first if
+    /// needed.
     ///
     /// [`identity_by_address`]: Self::identity_by_address
     pub async fn reply(
@@ -822,22 +823,30 @@ impl MailClient {
         message: MessageId,
         all: bool,
         from: Option<IdentityId>,
+        text: String,
     ) -> Result<Draft> {
         let engine = self.engine.clone();
         self.rt
-            .run(async move { drafts::reply(&engine, message, all, from).await })
+            .run(async move { drafts::reply(&engine, message, all, from, text).await })
             .await
     }
 
-    /// A new draft forwarding the message, to no one yet: `Fwd:` and its subject, its
-    /// headers and text below an empty start, and copies of its attachments (not the
-    /// images shown within it). Downloads the body and attachments first if needed;
-    /// fails, creating nothing, if one can't be had. Sent as `from`, one of the
-    /// message's account's identities, its default with `None`.
-    pub async fn forward(&self, message: MessageId, from: Option<IdentityId>) -> Result<Draft> {
+    /// A new draft forwarding the message to the recipients `forwarding` names (none with
+    /// [`Forwarding::default`]): `Fwd:` and its subject, its headers and text below an
+    /// empty start or `forwarding.text`, and copies of its attachments (not the images
+    /// shown within it). Addresses are checked as in [`create_draft`](Self::create_draft).
+    /// Downloads the body and attachments first if needed; fails, creating nothing, if
+    /// one can't be had. Sent as `from`, one of the message's account's identities, its
+    /// default with `None`.
+    pub async fn forward(
+        &self,
+        message: MessageId,
+        from: Option<IdentityId>,
+        forwarding: Forwarding,
+    ) -> Result<Draft> {
         let engine = self.engine.clone();
         self.rt
-            .run(async move { drafts::forward(&engine, message, from).await })
+            .run(async move { drafts::forward(&engine, message, from, forwarding).await })
             .await
     }
 

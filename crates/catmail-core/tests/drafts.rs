@@ -7,9 +7,11 @@ mod common;
 
 use std::time::Duration;
 
-use catmail_core::{Address, DraftContent, DraftId, MailClientBuilder, ReplayReport, SyncSchedule};
+use catmail_core::{
+    Address, DraftContent, DraftId, Forwarding, MailClientBuilder, ReplayReport, SyncSchedule,
+};
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
-use common::{Env, env, env_built, eventually, synced_env};
+use common::{Env, addr, env, env_built, eventually, synced_env};
 use mail_parser::{MessageParser, MimeHeaders};
 
 fn content(subject: &str) -> DraftContent {
@@ -463,7 +465,11 @@ async fn a_reply_quoting_a_nul_doesnt_stop_the_sync() {
     );
     let env = synced_env(state).await;
     let odd = env.id_of("INBOX", "odd").await;
-    let draft = env.client.reply(odd, false, None).await.unwrap();
+    let draft = env
+        .client
+        .reply(odd, false, None, String::new())
+        .await
+        .unwrap();
     assert!(draft.content.text.contains("beforeafter"), "{draft:?}");
 
     let report = env.replay().await;
@@ -532,7 +538,11 @@ async fn a_forward_carries_the_attachments_but_not_the_inline_images() {
             .is_none()
     );
 
-    let draft = env.client.forward(id, None).await.unwrap();
+    let draft = env
+        .client
+        .forward(id, None, Forwarding::default())
+        .await
+        .unwrap();
     assert_eq!(draft.content.subject, "Fwd: Report");
     assert!(draft.content.recipients().next().is_none());
     assert!(draft.in_reply_to.is_none() && draft.references.is_empty());
@@ -599,7 +609,10 @@ async fn a_forward_without_its_attachment_leaves_no_draft() {
 
     // The body is here; the attachment, still on the server, can't be had.
     env.fake.state().faults.nil_sections = true;
-    env.client.forward(id, None).await.unwrap_err();
+    env.client
+        .forward(id, None, Forwarding::default())
+        .await
+        .unwrap_err();
     assert!(
         env.client
             .list_drafts(env.account)
@@ -609,9 +622,68 @@ async fn a_forward_without_its_attachment_leaves_no_draft() {
     );
 
     env.fake.state().faults.nil_sections = false;
-    let draft = env.client.forward(id, None).await.unwrap();
+    let draft = env
+        .client
+        .forward(id, None, Forwarding::default())
+        .await
+        .unwrap();
     assert_eq!(draft.attachments.len(), 1);
     assert_eq!(draft.attachments[0].size, 3 * 1024 * 1024 / 76 * 57);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn answers_are_made_with_the_users_text_and_recipients() {
+    let mut state = state();
+    state.inbox().append(REPORT, &[]);
+    let env = synced_env(state).await;
+    let id = env.id_of("INBOX", "Report").await;
+    // An address that can't be sent to fails it before anything is downloaded.
+    let wrong = Forwarding {
+        to: vec![addr("not an address")],
+        ..Default::default()
+    };
+    env.client.forward(id, None, wrong).await.unwrap_err();
+    assert!(
+        env.client
+            .get_message(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .body
+            .is_none()
+    );
+    assert!(
+        env.client
+            .list_drafts(env.account)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let forwarding = Forwarding {
+        to: vec![addr("bob@example.com")],
+        cc: Vec::new(),
+        bcc: vec![addr("dave@example.com")],
+        text: "Have a look.\n\n".into(),
+    };
+    let draft = env.client.forward(id, None, forwarding).await.unwrap();
+    assert_eq!(draft.content.to, [addr("bob@example.com")]);
+    assert_eq!(draft.content.bcc, [addr("dave@example.com")]);
+    let text = &draft.content.text;
+    assert!(
+        text.starts_with("Have a look.\n\n---------- Forwarded message"),
+        "{text:?}"
+    );
+    assert_eq!(draft.attachments.len(), 1);
+
+    let draft = env
+        .client
+        .reply(id, false, None, "Thanks!".into())
+        .await
+        .unwrap();
+    let text = &draft.content.text;
+    assert!(text.starts_with("Thanks!\n\nOn "), "{text:?}");
+    assert!(text.ends_with("wrote:\n> See the report.\n"), "{text:?}");
 }
 
 /// Syncing in the background, a draft uploaded once it was left alone for `delay`.

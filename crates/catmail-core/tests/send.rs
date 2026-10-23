@@ -9,16 +9,9 @@ use catmail_core::{
     Address, DraftContent, Error, ErrorKind, Event, OutboxEntry, OutboxStatus, RecvError, Verify,
 };
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
-use common::{Env, drain, env, env_with, eventually, files, sparse};
+use common::{Env, addr, drain, env, env_with, eventually, files, sparse};
 use mail_parser::{MessageParser, MimeHeaders};
 use tokio::sync::Semaphore;
-
-fn addr(email: &str) -> Address {
-    Address {
-        name: None,
-        email: email.into(),
-    }
-}
 
 fn content(subject: &str) -> DraftContent {
     DraftContent {
@@ -651,7 +644,11 @@ async fn replies_are_threaded_and_quoted() {
     env.client.sync_account(env.account).await.unwrap();
     let original = env.id_of("INBOX", "季度报告").await;
 
-    let draft = env.client.reply(original, true, None).await.unwrap();
+    let draft = env
+        .client
+        .reply(original, true, None, String::new())
+        .await
+        .unwrap();
     assert_eq!(draft.content.subject, "Re: 季度报告");
     let to: Vec<_> = draft.content.to.iter().map(|a| a.email.as_str()).collect();
     let cc: Vec<_> = draft.content.cc.iter().map(|a| a.email.as_str()).collect();

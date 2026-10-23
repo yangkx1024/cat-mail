@@ -37,10 +37,12 @@
   就会遇到。
 - **回复**（`MailClient::reply`）：发给原信的 Reply-To，没有时发给发件人；回复自己发出的信则发给
   原收件人。回复全部再加上原信的收件人和抄送，去掉自己、去重（地址不分大小写）。主题加 `Re: `
-  （已以 `Re:` / `回复：` / `答复：` 开头的不加），正文引用原文（`> `），正文没下载时先下载。原信
+  （已以 `Re:` / `回复：` / `答复：` 开头的不加），正文引用原文（`> `），调用方给的文字写在引文上方，
+正文没下载时先下载。原信
   的 Message-ID 和 References 复制进草稿（`in_reply_to` / `references_hdr`），原信之后被删也不会
   断开会话；发出后经操作队列给原信加 `\Answered`。
-- **转发**（`MailClient::forward`）：新草稿，没有收件人；主题加 `Fwd: `（已以 `Fwd:` / `Fw:` /
+- **转发**（`MailClient::forward`）：新草稿，收件人和写在转发内容上方的文字由调用方给（`Forwarding`，
+  默认都为空；地址在下载之前就检查）；主题加 `Fwd: `（已以 `Fwd:` / `Fw:` /
   `转发：` 开头的不加），正文是空的两行、`---------- Forwarded message ---------` 和原信的 From /
   Date / Subject / To / Cc，再接原文（不加 `> `）。原信的附件（不含 HTML 里显示的内嵌图片）复制进草稿；
   正文和附件没下载的先下载。全部下载完、内容放进 BlobStore 之后，草稿和它的附件在**同一个事务**里写入，
@@ -61,7 +63,7 @@
   `DraftContent` 里：只有新建（`create_draft(account, from: Option<IdentityId>, ..)`）可以不指定，存成
   账户当时的默认身份；`update_draft(id, from: IdentityId, ..)` 必须给出，自己拼一个 `DraftContent` 的
   调用方不会无意中把发件人换回默认。`reply`、`forward` 也可以指定身份（`from: Option<IdentityId>`），
-  建草稿时就定下，不再事后 `update_draft`；不指定时回复按原信选，转发用默认身份。存下时由 repository
+  和正文、转发的收件人一样在建草稿时就定下，不再事后 `update_draft`；不指定时回复按原信选，转发用默认身份。存下时由 repository
   检查身份属于草稿的账户（复合外键 `(identity_id, account_id)` 兜底）；改身份和改别的内容一样算一次修改。From 头、MAIL FROM 和
   Message-ID 的域名都来自所选身份；Drafts 里的副本也是。
 - **按地址找身份**只有一处：`Identities::by_email`（`MailClient::identity_by_address`），不分大小写；

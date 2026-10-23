@@ -5,7 +5,8 @@
 mod common;
 
 use catmail_core::{
-    Address, DraftContent, Error, ErrorKind, Event, Identity, NewIdentity, OutboxStatus, Verify,
+    Address, DraftContent, Error, ErrorKind, Event, Forwarding, Identity, NewIdentity,
+    OutboxStatus, Verify,
 };
 use catmail_testkit::{FakeMailbox, FakeSmtp, ServerState, SmtpState};
 use common::{Env, drain, env, eventually, local_server, sparse};
@@ -497,14 +498,14 @@ async fn answers_are_made_as_the_identity_asked_for_or_written_to() {
     assert_eq!(by_address("ALICE@example.com").await.unwrap(), Some(own.id));
     assert_eq!(by_address("carol@example.com").await.unwrap(), None);
 
-    let reply = |from| env.client.reply(message, false, from);
+    let reply = |from| env.client.reply(message, false, from, String::new());
     assert_eq!(
         reply(None).await.unwrap().identity,
         identity.id,
         "written to"
     );
     assert_eq!(reply(Some(own.id)).await.unwrap().identity, own.id);
-    let forward = |from| env.client.forward(message, from);
+    let forward = |from| env.client.forward(message, from, Forwarding::default());
     assert_eq!(forward(None).await.unwrap().identity, own.id, "the default");
     assert_eq!(
         forward(Some(identity.id)).await.unwrap().identity,

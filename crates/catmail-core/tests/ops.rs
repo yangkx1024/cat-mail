@@ -795,7 +795,11 @@ async fn an_unknowable_copy_leaves_the_original() {
 async fn sent_replies_mark_the_original_answered() {
     let env = synced_env(state()).await;
     let one = env.id_of("INBOX", "one").await;
-    let draft = env.client.reply(one, false, None).await.unwrap();
+    let draft = env
+        .client
+        .reply(one, false, None, String::new())
+        .await
+        .unwrap();
     env.edit(
         draft.id,
         DraftContent {

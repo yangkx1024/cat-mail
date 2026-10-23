@@ -20,7 +20,7 @@ pub use account::{
     Account, AccountOverview, AccountStatus, Identity, NewAccount, NewIdentity, Security,
     SendProblem, ServerConfig, ServerProblem,
 };
-pub use draft::{Draft, DraftAttachment, DraftContent};
+pub use draft::{Draft, DraftAttachment, DraftContent, Forwarding};
 pub use error::{ErrorKind, ReportedError};
 pub use event::Event;
 pub use folder::{DeleteOutcome, Folder, FolderRole, archive_folder, special_folder};

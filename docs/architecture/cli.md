@@ -67,8 +67,8 @@ keyring 和账户行，拼错的密码不会留下任何东西；SMTP 失败的�
 用 `add_identity(.., Verify::Login)` 先登录，`--no-verify` 跳过；`identity list`（默认的标 `*`、
 排在最前）、`identity default`、`identity rm`（默认的不能删）。`compose`、`reply`、`forward`、`draft edit`
 的 `--from` 按 id 或地址（`identity_by_address`，几个身份地址相同时取默认的或较早的）选身份；不给时新信用
-默认身份，`reply` 用原信寄给的那个地址。`reply`、`forward` 先读原信得知账户，把身份交给 `reply` /
-`forward` 建草稿，只有给了正文或收件人时才再 `update_draft` 一次。`account list` 的 SMTP 列和 `--json` 的 `smtp` 是默认身份的服务器。
+默认身份，`reply` 用原信寄给的那个地址。`reply`、`forward` 先读原信得知账户，把身份连同 `--body` 和
+`forward` 的收件人一起交给 `reply` / `forward`，草稿一次建成，不再事后 `update_draft`。`account list` 的 SMTP 列和 `--json` 的 `smtp` 是默认身份的服务器。
 
 ## 写文件
 

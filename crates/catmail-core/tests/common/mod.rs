@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use catmail_core::{
-    AccountId, Config, Draft, DraftContent, DraftId, Event, Flags, Folder, MailClient,
+    AccountId, Address, Config, Draft, DraftContent, DraftId, Event, Flags, Folder, MailClient,
     MailClientBuilder, MemorySecrets, MessageId, MessageSummary, NewAccount, ReplayReport,
     Security, ServerConfig, Verify,
 };
@@ -41,6 +41,15 @@ pub async fn env(state: ServerState) -> Env {
 }
 
 /// The events received and not read yet.
+/// A recipient without a display name.
+#[allow(dead_code)]
+pub fn addr(email: &str) -> Address {
+    Address {
+        name: None,
+        email: email.into(),
+    }
+}
+
 #[allow(dead_code)]
 pub fn drain(events: &mut tokio::sync::broadcast::Receiver<Event>) -> Vec<Event> {
     std::iter::from_fn(|| events.try_recv().ok()).collect()
