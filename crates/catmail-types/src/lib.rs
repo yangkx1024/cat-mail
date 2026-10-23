@@ -32,6 +32,6 @@ pub use message::{
     Address, Attachment, FlagState, Flags, Message, MessageBody, MessageCursor, MessageSummary,
 };
 pub use ops::{OpKind, OpStatus, PendingOp, ReplayReport};
-pub use outbox::{OutboxEntry, OutboxStatus};
+pub use outbox::{FlushReport, OutboxEntry, OutboxStatus};
 pub use search::SearchQuery;
 pub use sync::{FolderSyncReport, GcReport, SyncReport};

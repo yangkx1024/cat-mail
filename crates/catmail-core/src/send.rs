@@ -21,8 +21,8 @@ use catmail_proto::imap::Session;
 use catmail_proto::smtp;
 use catmail_store::{NewOutboxEntry, Outbox, OutboxJob, Touched};
 use catmail_types::{
-    AccountId, Address, BlobHash, DraftId, ErrorKind, Event, Flags, FolderRole, OutboxEntry,
-    OutboxId, OutboxStatus,
+    AccountId, Address, BlobHash, DraftId, ErrorKind, Event, Flags, FlushReport, FolderRole,
+    OutboxEntry, OutboxId, OutboxStatus, ReportedError,
 };
 use tokio::sync::Notify;
 
@@ -106,33 +106,34 @@ pub(crate) async fn queue_draft(engine: &Arc<Engine>, id: DraftId) -> Result<Out
 
 /// Works through the account's outbox: sends what is queued, saving each message to
 /// Sent as soon as it is accepted, then saves what an earlier pass couldn't. With
-/// `due_only`, only entries whose backoff has run out. Returns the entries worked on
-/// (postponed ones included), as they ended up (`Done` for those that are gone).
+/// `due_only`, only entries whose backoff has run out. Not reaching the SMTP server
+/// postpones the queued entries and is in the report, not returned: the caller still
+/// learns what became of them.
 pub(crate) async fn flush(
     engine: Arc<Engine>,
     account: AccountId,
     due_only: bool,
-) -> Result<Vec<OutboxEntry>> {
+) -> Result<FlushReport> {
     let permit = idle_outbox(&engine, account).await?;
     permit.run(run(&engine, account, due_only)).await
 }
 
-async fn run(engine: &Arc<Engine>, account: AccountId, due_only: bool) -> Result<Vec<OutboxEntry>> {
-    let mut results = Vec::new();
-    let outcome = pass(engine, account, due_only, &mut results).await;
+async fn run(engine: &Arc<Engine>, account: AccountId, due_only: bool) -> Result<FlushReport> {
+    let mut report = FlushReport::default();
+    let outcome = pass(engine, account, due_only, &mut report).await;
     // What changed before a failure too.
-    if !results.is_empty() || outcome.is_err() {
+    if !report.entries.is_empty() || outcome.is_err() {
         engine.emit(Event::OutboxChanged { account });
     }
-    outcome.map(|()| results)
+    outcome.map(|()| report)
 }
 
-/// [`run`], adding the entries worked on to `results` as it goes.
+/// [`run`], filling in `report` as it goes.
 async fn pass(
     engine: &Arc<Engine>,
     account: AccountId,
     due_only: bool,
-    results: &mut Vec<OutboxEntry>,
+    report: &mut FlushReport,
 ) -> Result<()> {
     let pending = |status| {
         let due = due_only.then(now);
@@ -150,10 +151,13 @@ async fn pass(
                 Err(e @ (Error::Cancelled | Error::AccountNotFound(_))) => return Err(e),
                 Err(e) => {
                     tracing::info!(%account, error = %e, "can't reach the SMTP server");
-                    Smtp::Down {
-                        error: e.to_string(),
+                    let error = ReportedError::from(&e);
+                    let down = Smtp::Down {
+                        error: error.message.clone(),
                         next: now() + backoff(failures),
-                    }
+                    };
+                    report.error = Some(error);
+                    down
                 }
             };
         }
@@ -163,7 +167,7 @@ async fn pass(
             Smtp::Down { error, next } => {
                 let (error, next) = (error.clone(), *next);
                 let postponed = record(engine, id, move |o| o.postpone(id, next, &error, now()));
-                results.extend(postponed.await?);
+                report.entries.extend(postponed.await?);
                 continue;
             }
             Smtp::None => unreachable!("connected above"),
@@ -175,7 +179,7 @@ async fn pass(
             continue; // Cancelled meanwhile.
         };
         let (entry, usable) = send_one(engine, session, job).await?;
-        results.extend(entry);
+        report.entries.extend(entry);
         if !usable {
             smtp = Smtp::None;
         }
@@ -186,7 +190,7 @@ async fn pass(
 
     // Saves that failed in an earlier pass; this pass's were tried already.
     for id in pending(OutboxStatus::Accepted).await? {
-        if results.iter().any(|e: &OutboxEntry| e.id == id) {
+        if report.entries.iter().any(|e| e.id == id) {
             continue;
         }
         let Some(job) = engine
@@ -195,7 +199,7 @@ async fn pass(
         else {
             continue;
         };
-        results.extend(save_one(engine, job, None).await?);
+        report.entries.extend(save_one(engine, job, None).await?);
     }
     Ok(())
 }

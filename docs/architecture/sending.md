@@ -136,6 +136,10 @@ lettre 的 `send` 不暴露这一点；自己实现还能共用 `TlsConfig`、�
   （如 SIZE 超限）、邮件过大是永久失败。
 - **账户状态。** 连接成功或失败都记进引擎的每账户状态（`MailClient::account_status` 的 `send`），变化
   时发 `AccountStatusChanged`，前端据此提示"密码被拒绝"等，不必从某一封信的 `last_error` 去猜。
+- **flush 的结果。** `flush_outbox` 返回 `FlushReport`：处理过的条目（推迟的也算）按最终状态列出，
+  连接失败时 `error` 是那次的原因（带 `transient`）。调用方据此区分"稍后重试即可"和"要先改账户"，
+  不必再读账户状态，那可能是别的发送留下的。连接失败不作为 `Err` 返回：那样调用方就丢了被推迟条目的
+  结果；`Err` 只用于一轮中途出错。
 - 一轮中途出错（例如写库失败）时，已经做完的也照样发 `OutboxChanged`。
 
 ## 保存到 Sent
