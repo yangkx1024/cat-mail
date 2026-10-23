@@ -4,12 +4,14 @@
 use catmail_core::{ErrorKind, FolderRole};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::sidebar::{Sidebar, SidebarItem, SidebarMenu, SidebarMenuItem};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Collapsible, Disableable as _, Icon, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::{
-    App, Context, ElementId, FontWeight, IntoElement, ParentElement as _, SharedString,
-    Styled as _, Window, div, prelude::FluentBuilder as _,
+    App, Context, ElementId, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _,
 };
 
 use super::folders::{FolderNode, RoleInfo};
@@ -42,6 +44,7 @@ fn count(
 impl Mailbox {
     pub(crate) fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let accounts = self.accounts.as_deref().unwrap_or_default();
+        let note = self.connection_note();
         let header = Button::new("new-message")
             .outline()
             .w_full()
@@ -64,12 +67,18 @@ impl Mailbox {
             )
             .child(
                 div()
+                    .id("connection-note")
                     .flex_1()
                     .min_w_0()
                     .truncate()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .children(self.connection_note()),
+                    // All of it, when the line is cut short: every address that can't
+                    // send, say.
+                    .when_some(note.clone(), |this, note| {
+                        this.tooltip(move |window, cx| Tooltip::new(note.clone()).build(window, cx))
+                    })
+                    .children(note),
             )
             .child(
                 Button::new("sync")
@@ -93,7 +102,8 @@ impl Mailbox {
     }
 
     /// One line on what is wrong with the connection, if anything: syncing, or the
-    /// first account the engine can't get through to.
+    /// first account the engine can't get through to (each of its addresses that can't
+    /// send).
     fn connection_note(&self) -> Option<SharedString> {
         if self.syncing > 0 {
             return Some("Syncing…".into());
@@ -111,14 +121,11 @@ impl Mailbox {
                     .into(),
                 );
             }
-            // The address whose server is out of reach.
-            let (id, _) = status.send_problem()?;
-            let from = entry
-                .identities
-                .iter()
-                .find(|i| i.id == id)
-                .map_or(email, |i| &i.email);
-            Some(format!("Can't send from {from}").into())
+            // Every address whose server is out of reach.
+            (!status.send.is_empty()).then(|| {
+                let from: Vec<_> = status.send.iter().map(|p| p.email.as_str()).collect();
+                format!("Can't send from {}", from.join(", ")).into()
+            })
         })
     }
 

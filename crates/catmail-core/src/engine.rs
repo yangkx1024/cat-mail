@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -10,7 +10,7 @@ use catmail_proto::imap::Session;
 use catmail_store::{BlobStore, Db, Store};
 use catmail_types::{
     AccountId, AccountStatus, DraftId, ErrorKind, Event, FolderId, IdentityId, ReportedError,
-    ServerProblem,
+    SendProblem, ServerProblem,
 };
 use tokio::sync::{Notify, OwnedMutexGuard, broadcast, watch};
 
@@ -127,18 +127,25 @@ struct AccountState {
     /// back, and a time left in the future would have both skip the folder until the
     /// clock caught up.
     folders_synced: Mutex<HashMap<FolderId, Instant>>,
-    status: Mutex<AccountStatus>,
+    status: Mutex<Status>,
     /// When drafts were last changed, for holding back their upload while they are
     /// being written. Entries older than the delay are dropped as they are found.
     draft_edits: Mutex<HashMap<DraftId, Instant>>,
 }
 
+/// [`AccountStatus`], with the send problems by identity.
+#[derive(Debug, Default)]
+struct Status {
+    sync: Option<ServerProblem>,
+    send: BTreeMap<IdentityId, SendProblem>,
+}
+
 /// What an attempt that [`Engine::report`] records was doing.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum Activity {
+pub(crate) enum Activity<'a> {
     Sync,
-    /// As this identity of the account.
-    Send(IdentityId),
+    /// As this identity of the account, with the address it sends as.
+    Send(IdentityId, &'a str),
 }
 
 /// Held while syncing (a folder of) an account, or while working on its outbox.
@@ -422,10 +429,16 @@ impl Engine {
             let mut status = lock(&state.status);
             match activity {
                 Activity::Sync => record(&mut status.sync, e),
-                Activity::Send(identity) => {
-                    let mut slot = status.send.remove(&identity);
+                Activity::Send(identity, email) => {
+                    let mut slot = status.send.remove(&identity).map(|p| p.problem);
                     let recorded = record(&mut slot, e);
                     if let Some(problem) = slot {
+                        let email = email.to_owned();
+                        let problem = SendProblem {
+                            identity,
+                            email,
+                            problem,
+                        };
                         status.send.insert(identity, problem);
                     }
                     recorded
@@ -455,9 +468,14 @@ impl Engine {
 
     /// What the latest attempts to get through to the account's servers found.
     pub fn status(&self, account: AccountId) -> AccountStatus {
-        self.existing(account)
-            .map(|state| lock(&state.status).clone())
-            .unwrap_or_default()
+        let Some(state) = self.existing(account) else {
+            return AccountStatus::default();
+        };
+        let status = lock(&state.status);
+        AccountStatus {
+            sync: status.sync.clone(),
+            send: status.send.values().cloned().collect(),
+        }
     }
 
     /// For work on `account` without a permit. Obtain it before checking that the

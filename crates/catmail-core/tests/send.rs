@@ -360,12 +360,8 @@ async fn unreachable_server_postpones_the_rest_of_the_queue() {
     let outbox = env.outbox().await;
     assert!(outbox[1].last_error.as_deref().unwrap().contains("421"));
     assert!(outbox[1].next_attempt_at > Some(outbox[1].created_at));
-    let problem = env
-        .client
-        .account_status(env.account)
-        .send_problem()
-        .unwrap()
-        .1
+    let problem = env.client.account_status(env.account).send[0]
+        .problem
         .clone();
     assert!(problem.error.message.contains("421"), "{problem:?}");
     assert_eq!(problem.error.kind, ErrorKind::Refused);
@@ -397,12 +393,8 @@ async fn postponed_entries_back_off_with_the_one_attempted() {
     let next = |e: &OutboxEntry| e.next_attempt_at.unwrap();
     assert!(next(first) - first.created_at >= 55, "{first:?}");
     assert_eq!(next(first), next(second));
-    let problem = env
-        .client
-        .account_status(env.account)
-        .send_problem()
-        .unwrap()
-        .1
+    let problem = env.client.account_status(env.account).send[0]
+        .problem
         .clone();
     assert_eq!(problem.failures, 2);
 }
@@ -525,12 +517,8 @@ async fn wrong_password_holds_the_queue_and_is_reported() {
             .unwrap()
             .contains("login rejected")
     );
-    let problem = env
-        .client
-        .account_status(env.account)
-        .send_problem()
-        .unwrap()
-        .1
+    let problem = env.client.account_status(env.account).send[0]
+        .problem
         .clone();
     assert_eq!(problem.error.kind, ErrorKind::Auth);
     assert!(

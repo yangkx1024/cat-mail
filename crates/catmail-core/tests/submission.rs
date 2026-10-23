@@ -229,11 +229,6 @@ async fn wrong_password_holds_the_message_and_is_reported() {
     );
     let error = entry.last_error.unwrap();
     assert!(error.contains("login rejected"), "{error}");
-    let problem = client
-        .account_status(account)
-        .send_problem()
-        .unwrap()
-        .1
-        .clone();
+    let problem = client.account_status(account).send[0].problem.clone();
     assert_eq!(problem.error.kind, ErrorKind::Auth, "{problem:?}");
 }

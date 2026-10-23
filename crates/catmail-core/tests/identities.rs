@@ -204,11 +204,21 @@ async fn an_identity_that_cant_log_in_holds_back_only_its_own_messages() {
     assert_eq!(kinds.len(), 2, "{kinds:?}");
     assert_eq!(kinds[0], (identity.id, ErrorKind::Auth, false));
     assert_eq!((kinds[1].0, kinds[1].2), (other.id, true));
-    let status = env.client.account_status(env.account);
-    assert_eq!(status.send.len(), 2, "the account's own server is fine");
-    let problem = &status.send[&identity.id];
-    assert_eq!(problem.error.kind, ErrorKind::Auth);
-    assert_eq!(status.send_problem(), Some((identity.id, problem)));
+    // Both listed, each with the address that can't send.
+    let send = env.client.account_status(env.account).send;
+    let who: Vec<_> = send
+        .iter()
+        .map(|p| (p.identity, p.email.as_str()))
+        .collect();
+    assert_eq!(
+        who,
+        [
+            (identity.id, "news@example.org"),
+            (other.id, "other@example.org")
+        ],
+        "the account's own server is fine"
+    );
+    assert_eq!(send[0].problem.error.kind, ErrorKind::Auth);
 
     resend.state().faults.reject_login = false;
     env.client.retry_outbox(report.entries[2].id).await.unwrap();
