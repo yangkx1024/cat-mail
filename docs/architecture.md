@@ -57,8 +57,9 @@ store / IMAP / SMTP 错误包在不透明的 `StoreError` / `ImapError` / `SmtpE
   `Invalid`、`Conflict`、`Internal`）决定图标和动作，不去解析 `Display` 文本。`is_transient()`：
   什么都不改、稍后重试可能成功（网络、SMTP 4xx）；`is_refusal()`：命令失败但连接仍可用，同一连接上
   其余的工作照常继续（引擎内部"记日志、跳过这个文件夹"的判断）。
-- 后台工作的错误以 `ReportedError { kind, message }` 交给前端：`ServerProblem.error`（账户状态）
-  和 `FolderSyncReport.error`。登录被拒绝就是 `kind == Auth`，没有单独的布尔位。
+- 后台工作的错误以 `ReportedError { kind, message, transient }` 交给前端：`ServerProblem.error`
+  （账户状态）、`FolderSyncReport.error` 和 `ReplayReport.error`。登录被拒绝就是 `kind == Auth`，
+  没有单独的布尔位；`transient` 是 `is_transient()` 的结果，因为单看种类分不出 SMTP 的 421 和 554。
 - `ErrorKind` 故意不加 `#[non_exhaustive]`：以后加种类（如 OAuth 的"需要重新授权"）时，前端的
   `match` 会编译失败，提醒每处都处理。
 

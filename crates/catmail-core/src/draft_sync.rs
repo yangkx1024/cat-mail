@@ -15,14 +15,12 @@
 //! Runs with the account's sync permit, right before its ops are replayed
 //! ([`ops::replay_queued`](crate::ops::replay_queued)).
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
 use catmail_proto::imap::{Error as ImapError, Session};
 use catmail_store::{DraftUpload, Touched};
-use catmail_types::{
-    Account, AccountId, DraftId, Event, Flags, FolderId, FolderRole, ReplayReport,
-};
+use catmail_types::{Account, AccountId, DraftId, Event, Flags, FolderId, FolderRole};
 
 use crate::engine::{Engine, blocking, now};
 use crate::{Error, Result, connection, drafts, ops};
@@ -38,30 +36,46 @@ pub(crate) enum Uploads {
     Settled,
 }
 
+/// The drafts an upload pass, or several in a row, saved to the server and those it
+/// refused.
+#[derive(Debug, Default)]
+pub(crate) struct Uploaded {
+    pub saved: BTreeSet<DraftId>,
+    /// Not saved by a later pass either.
+    pub refused: BTreeSet<DraftId>,
+}
+
+impl Uploaded {
+    fn saved(&mut self, draft: DraftId) {
+        self.refused.remove(&draft);
+        self.saved.insert(draft);
+    }
+}
+
 /// Settles the account's unsettled uploads, then uploads its drafts whose copy is
-/// missing or out of date (those `uploads` takes), each once. Fills in `drafts_uploaded`
-/// and `drafts_failed`. Without a Drafts folder the drafts stay local.
+/// missing or out of date (those `uploads` takes), each once, adding them to `done`
+/// (what was done before a failure too). Without a Drafts folder the drafts stay local.
 pub(crate) async fn upload(
     engine: &Arc<Engine>,
     session: &mut Session,
     account: AccountId,
     uploads: Uploads,
-) -> Result<ReplayReport> {
-    let mut report = ReplayReport::default();
+    done: &mut Uploaded,
+) -> Result<()> {
     if !engine
         .read(move |db| db.drafts().need_upload(account))
         .await?
     {
-        return Ok(report);
+        return Ok(());
     }
     let mut touched = Touched::new();
-    let result = run(engine, session, account, uploads, &mut report, &mut touched).await;
+    let result = run(engine, session, account, uploads, done, &mut touched).await;
     // Whatever was committed before a failure too.
     if !touched.is_empty() {
         ops::replayed(engine, account, &touched);
     }
     engine.emit(Event::DraftsChanged { account });
-    result.map(|()| report)
+    result
 }
 
 async fn run(
@@ -69,7 +83,7 @@ async fn run(
     session: &mut Session,
     account: AccountId,
     uploads: Uploads,
-    report: &mut ReplayReport,
+    done: &mut Uploaded,
     touched: &mut Touched,
 ) -> Result<()> {
     let (unsettled, target, owner) = engine
@@ -100,10 +114,12 @@ async fn run(
     for draft in stale.into_iter().filter(|d| !held.contains(d)) {
         match upload_one(engine, session, &owner, draft, (folder, &remote_name)).await? {
             Outcome::Uploaded(changed) => {
-                report.drafts_uploaded += 1;
+                done.saved(draft);
                 touched.extend(changed);
             }
-            Outcome::Failed => report.drafts_failed += 1,
+            Outcome::Failed => {
+                done.refused.insert(draft);
+            }
             Outcome::Skipped => {}
         }
     }

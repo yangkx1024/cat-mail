@@ -323,7 +323,9 @@ async fn work(
         .run(async {
             // A full sync replayed them first.
             if !full {
-                ops::replay_queued(engine, session, account, Uploads::Settled).await?;
+                let mut replayed = Default::default();
+                ops::replay_queued(engine, session, account, Uploads::Settled, &mut replayed)
+                    .await?;
             }
             // Last, so that it is the selected mailbox to IDLE on. Only the flags the
             // server said changed are fetched: without CONDSTORE the rest would be every

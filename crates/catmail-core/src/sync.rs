@@ -81,8 +81,9 @@ pub(crate) async fn sync_one(
                 let engine = engine.clone();
                 async move |session| {
                     // Local changes first, as for a full sync.
-                    let replayed =
-                        ops::replay_queued(&engine, session, account, Uploads::Settled).await?;
+                    let mut replayed = ops::Replayed::default();
+                    ops::replay_queued(&engine, session, account, Uploads::Settled, &mut replayed)
+                        .await?;
                     let state = engine
                         .read(move |db| db.folders().sync_state(folder))
                         .await?
@@ -128,9 +129,8 @@ pub(crate) async fn run(
             ops::announce(engine, &reconciled.touched);
 
             // Local changes first, so the sync sees the server with them made.
-            let replayed = ops::replay_queued(engine, session, account_id, uploads)
-                .await?
-                .folders;
+            let mut replayed = ops::Replayed::default();
+            ops::replay_queued(engine, session, account_id, uploads, &mut replayed).await?;
             // Only which folders, in which order: their state is read when each one's
             // turn comes.
             let ids: Vec<FolderId> = engine
@@ -140,7 +140,7 @@ pub(crate) async fn run(
                 .filter(|f| f.selectable)
                 .map(|f| f.id)
                 .collect();
-            Ok((start, replayed, ids))
+            Ok((start, replayed.folders, ids))
         })
         .await?;
 

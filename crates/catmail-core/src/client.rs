@@ -574,8 +574,10 @@ impl MailClient {
 
     /// Makes the account's queued changes on the server now, without syncing, and saves
     /// changed drafts to its Drafts folder. Waits for a sync of the account to finish
-    /// first (it does the same). Losing the connection fails the call and leaves the rest
-    /// queued.
+    /// first (it does the same). A failure once it has started (not reaching the server,
+    /// a lost connection) leaves the rest queued and is the report's `error`, which also
+    /// counts what was done before (refusals, already undone, among it). Fails if the
+    /// account is removed, or its queue can't be read to begin with.
     pub async fn replay_pending(&self, account: AccountId) -> Result<ReplayReport> {
         self.rt
             .run(ops::replay_account(self.engine.clone(), account))

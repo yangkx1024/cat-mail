@@ -230,6 +230,9 @@ pub struct Faults {
     pub move_command: bool,
     /// Refuse STORE, COPY and MOVE with `NO <text>`, e.g. `[CANNOT] Permission denied`.
     pub refuse_changes: Option<String>,
+    /// Refuse this many STORE, COPY and MOVE commands, with `NO [CANNOT] Refused`, before
+    /// making them again.
+    pub refuse_next_changes: usize,
     /// Make the next STORE, COPY, MOVE or EXPUNGE, then close the connection without
     /// answering. Fires once.
     pub drop_after_change: bool,
@@ -286,6 +289,7 @@ impl Default for Faults {
             garble_append: false,
             move_command: true,
             refuse_changes: None,
+            refuse_next_changes: 0,
             drop_after_change: false,
             drop_before_change: false,
             drop_after_expunge: false,
@@ -1015,8 +1019,15 @@ async fn handle(
                 Some(_) if !session.writable => {
                     out += &format!("{tag} NO [READ-ONLY] Mailbox is read-only\r\n");
                 }
-                Some(_) if refusal.is_some() && !command.ends_with("EXPUNGE") => {
-                    out += &format!("{tag} NO {}\r\n", refusal.unwrap_or_default());
+                Some(_)
+                    if (refusal.is_some() || st.faults.refuse_next_changes > 0)
+                        && !command.ends_with("EXPUNGE") =>
+                {
+                    let refusal = refusal.unwrap_or_else(|| {
+                        st.faults.refuse_next_changes -= 1;
+                        "[CANNOT] Refused".into()
+                    });
+                    out += &format!("{tag} NO {refusal}\r\n");
                 }
                 Some(_) if std::mem::take(&mut st.faults.drop_before_change) => {
                     return Ok(Next::Close);

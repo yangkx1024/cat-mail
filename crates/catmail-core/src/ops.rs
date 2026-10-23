@@ -14,17 +14,18 @@
 //! so the copies they replace are deleted in the same replay.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use catmail_proto::imap::{CopyUid, Session};
 use catmail_store::{CopyCheckpoint, Moved, ReplayFolder, ReplayKind, ReplayOp, Touched};
 use catmail_types::{
     AccountId, Event, Flags, FolderId, MessageId, PendingOp, PendingOpId, ReplayReport,
+    ReportedError,
 };
 
 use crate::connection::with_session;
-use crate::draft_sync::Uploads;
-use crate::engine::{Activity, Engine, now};
+use crate::draft_sync::{Uploaded, Uploads};
+use crate::engine::{Activity, Engine, lock, now};
 use crate::{Error, Result, draft_sync};
 
 /// Ops per command; UID sets of scattered messages get long.
@@ -138,7 +139,7 @@ pub(crate) async fn dismiss_settled(
 
 /// Replays the account's queued changes now, without syncing, on a pooled connection,
 /// uploading changed drafts first. Waits for a running sync of the account, which does
-/// the same.
+/// the same. A failure on the way is in the report, with what was done before it.
 pub(crate) async fn replay_account(
     engine: Arc<Engine>,
     account: AccountId,
@@ -155,18 +156,30 @@ pub(crate) async fn replay_account(
         if needed {
             // Safe to run again on a new connection if a reused one turns out dead: what
             // went through is no longer pending, and uploads left unsettled settle first.
+            // Every try adds to the same totals, the refusals of one that failed included:
+            // they are committed, and the next try doesn't see them. In a mutex, as the
+            // closure can't borrow them (see `with_session`), taken out for each try.
+            let done = Arc::new(Mutex::new(Replayed::default()));
             let replayed = with_session(&engine, account, {
-                let engine = engine.clone();
-                async move |session| replay_queued(&engine, session, account, Uploads::All).await
+                let (engine, done) = (engine.clone(), done.clone());
+                async move |session| {
+                    let mut replayed = std::mem::take(&mut *lock(&done));
+                    let result =
+                        replay_queued(&engine, session, account, Uploads::All, &mut replayed).await;
+                    *lock(&done) = replayed;
+                    result
+                }
             })
             .await;
             engine.report(account, Activity::Sync, &replayed);
-            let replayed = replayed?;
-            report = replayed.drafts;
-            for r in replayed.folders.values() {
+            let done = lock(&done);
+            report.drafts_uploaded = done.drafts.saved.len() as u32;
+            report.drafts_failed = done.drafts.refused.len() as u32;
+            for r in done.folders.values() {
                 report.applied += r.applied;
                 report.failed += r.failed;
             }
+            report.error = replayed.err().as_ref().map(ReportedError::from);
         }
         report.pending = engine
             .read(move |db| db.ops().count_pending(account))
@@ -177,41 +190,42 @@ pub(crate) async fn replay_account(
 }
 
 /// What [`replay_queued`] did.
+#[derive(Debug, Default)]
 pub(crate) struct Replayed {
-    /// `drafts_uploaded` and `drafts_failed`.
-    pub drafts: ReplayReport,
+    pub drafts: Uploaded,
     /// By folder, `applied` and `failed`.
     pub folders: HashMap<FolderId, ReplayReport>,
 }
 
-/// Uploads the account's changed drafts (those `uploads` takes), then replays all its queued ops, deleting the
-/// copies those drafts replace among them. Call with the account's sync permit.
+/// Uploads the account's changed drafts (those `uploads` takes), then replays all its
+/// queued ops, deleting the copies those drafts replace among them, adding what it did
+/// to `done` (what was done before a failure too). Call with the account's sync permit.
 pub(crate) async fn replay_queued(
     engine: &Arc<Engine>,
     session: &mut Session,
     account: AccountId,
     uploads: Uploads,
-) -> Result<Replayed> {
-    let drafts = draft_sync::upload(engine, session, account, uploads).await?;
+    done: &mut Replayed,
+) -> Result<()> {
+    draft_sync::upload(engine, session, account, uploads, &mut done.drafts).await?;
     let pending = engine
         .read(move |db| db.ops().pending_folders(account))
         .await?;
-    let folders = replay(engine, session, account, &pending).await?;
-    Ok(Replayed { drafts, folders })
+    replay(engine, session, account, &pending, &mut done.folders).await
 }
 
-/// Replays the ops of `folders` on `session`, one folder after the other, and returns
-/// what happened in each (`pending` is not filled in). Call with the account's sync
-/// permit. A folder the server won't open is skipped; the sync finds out what became of
-/// it.
+/// Replays the ops of `folders` on `session`, one folder after the other, adding what
+/// happened in each to `reports` (`pending` is not filled in), what happened before a
+/// failure too. Call with the account's sync permit. A folder the server won't open is
+/// skipped; the sync finds out what became of it.
 async fn replay(
     engine: &Arc<Engine>,
     session: &mut Session,
     account: AccountId,
     folders: &[ReplayFolder],
-) -> Result<HashMap<FolderId, ReplayReport>> {
+    reports: &mut HashMap<FolderId, ReplayReport>,
+) -> Result<()> {
     let mut touched = Touched::new();
-    let mut reports: HashMap<FolderId, ReplayReport> = HashMap::new();
     let mut result = Ok(());
     let mut visited = HashSet::new();
     let mut next = folders.to_vec();
@@ -220,12 +234,9 @@ async fn replay(
     'passes: while !next.is_empty() {
         for folder in next {
             visited.insert(folder.id);
-            match replay_folder(engine, session, &folder, &mut touched).await {
-                Ok(report) => {
-                    let total = reports.entry(folder.id).or_default();
-                    total.applied += report.applied;
-                    total.failed += report.failed;
-                }
+            let report = reports.entry(folder.id).or_default();
+            match replay_folder(engine, session, &folder, &mut touched, report).await {
+                Ok(()) => {}
                 Err(e) if e.is_refusal() => {
                     tracing::warn!(folder = %folder.name, error = %e,
                         "can't replay changes in folder");
@@ -254,7 +265,7 @@ async fn replay(
     if !folders.is_empty() {
         replayed(engine, account, &touched);
     }
-    result.map(|()| reports)
+    result
 }
 
 /// Emits the events for a replay's changes: to the account's queue, and to the messages
@@ -268,30 +279,33 @@ pub(crate) fn replayed(engine: &Engine, account: AccountId, touched: &Touched) {
 }
 
 /// Runs the folder's pending ops on `session`, recording the folders whose messages
-/// changed in `touched`.
+/// changed in `touched`, and adding to `report` how many were made or refused, those
+/// settled before a failure too: a batch refused before a later one loses the
+/// connection is undone already.
 async fn replay_folder(
     engine: &Arc<Engine>,
     session: &mut Session,
     folder: &ReplayFolder,
     touched: &mut Touched,
-) -> Result<ReplayReport> {
+    report: &mut ReplayReport,
+) -> Result<()> {
     let id = folder.id;
     let ops = engine.read(move |db| db.ops().pending(id)).await?;
     if ops.is_empty() {
-        return Ok(ReplayReport::default());
+        return Ok(());
     }
     let status = session.select(&folder.remote_name).await?;
     if !status.same_generation(folder.uidvalidity) {
         // Not under the generation they name. The sync of this folder starts the new
         // one, which turns them into conflicts.
-        return Ok(ReplayReport::default());
+        return Ok(());
     }
     let mut done = Settle {
         engine,
         folder: id,
         uidvalidity: status.uidvalidity,
         touched,
-        report: ReplayReport::default(),
+        report,
     };
     // An earlier COPY may have made a copy, whatever the op was turned into since (moved
     // on, back, or deleted): settle that first, so no copy is left behind.
@@ -304,7 +318,7 @@ async fn replay_folder(
     } else {
         if !settle_copies(&mut done, session, folder, checkpointed).await? {
             // Rebuilt on the server meanwhile: the rest waits for the sync.
-            return Ok(done.report);
+            return Ok(());
         }
         engine.read(move |db| db.ops().pending(id)).await?
     };
@@ -336,7 +350,7 @@ async fn replay_folder(
         };
         done.outcome(batch, outcome).await?;
     }
-    Ok(done.report)
+    Ok(())
 }
 
 /// What became of a batch of ops on the server.
@@ -355,7 +369,7 @@ struct Settle<'a> {
     folder: FolderId,
     uidvalidity: u32,
     touched: &'a mut Touched,
-    report: ReplayReport,
+    report: &'a mut ReplayReport,
 }
 
 impl Settle<'_> {

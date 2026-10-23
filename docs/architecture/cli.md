@@ -28,7 +28,8 @@ types 加变体会编译失败）。
   列表放在对象的一个键下（`{"messages": [...]}`），以后可以并列加分页等信息。
 - 时间是 UTC 的 RFC 3339 字符串；标记是单词数组（`"flags": ["seen", "flagged"]`），状态和类别是
   小写单词；ID 是整数，引用别的对象用对象名作键（`"account": 1`、`"folder": 3`）。
-- `catmail sync` 失败的账户也在输出里，带 `error: {kind, message}`；`catmail read --save` 另有
+- `catmail sync` 失败的账户也在输出里，带 `error: {kind, message}`，`ops flush` 等回放没做完的账户
+  同样；`catmail read --save` 另有
   `saved`（实际写入的路径）；`catmail watch --json` 每行一个对象，用 `event` 区分类型。
 - `json.rs` 的快照测试固定了邮件、草稿、outbox 条目、改动和事件的完整结构；它失败说明输出变了。
 
@@ -45,10 +46,12 @@ types 加变体会编译失败）。
 命令以 `exit::Exit { outcome, message }` 错误表达 3 和 4，其他错误都是 1。一次命令有多种结果时取
 最需要用户处理的：4 > 1 > 3，所以 3 只在"只是还没轮到"时出现，脚本可以放心地稍后重跑。
 
-- `mark` / `mv` / `archive` / `rm` / `ops flush`：连不上服务器（`Error::is_transient`，改动都还在
-  队列里）是 3；登录被拒绝也留着改动，但重跑没用、要先改密码，所以是 1；服务器拒绝了改动或草稿是 1。
+- `mark` / `mv` / `archive` / `rm` / `ops flush`：连不上服务器（`ReplayReport.error` 的 `transient`，
+  改动都还在队列里）是 3；登录被拒绝也留着改动，但重跑没用、要先改密码，所以是 1；服务器拒绝了改动或
+  草稿是 1，断线之前拒绝的也是。
 - `send` / `outbox retry` / `mark-sent` / `outbox flush`：`queued` / `sending` 是 3，`failed` 是 1，
-  `unknown` 是 4；`accepted`（已发出、只是没存进 Sent）算成功。`outbox flush` 只看这次处理的条目：
+  `unknown` 是 4；`accepted`（已发出、只是没存进 Sent）算成功。连 SMTP 服务器失败时邮件都推迟、仍是
+  `queued`，所以还看账户状态：`send` 问题不是暂时的（登录被拒绝、不支持 STARTTLS）时是 1。`outbox flush` 只看这次处理的条目：
   `unknown` 和 `failed` 的等用户处理，不会被它重试，也就不影响它的退出码。
 - `sync` 有账户失败是 1：同步本身没有要排队的东西。
 
