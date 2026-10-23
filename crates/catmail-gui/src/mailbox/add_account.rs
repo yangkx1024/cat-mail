@@ -2,7 +2,7 @@
 //! servers before anything is stored, so a typo leaves no account (or keyring entry)
 //! behind, as with `catmail account add`.
 
-use catmail_core::{Account, MailClient, NewAccount, Security};
+use catmail_core::{Account, MailClient, NewAccount, Security, Verify};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::{
@@ -128,7 +128,7 @@ impl AddAccount {
         let client = self.client.clone();
         let password = values.login.password;
         self._sign_in = cx.spawn_in(window, async move |this, cx| {
-            let added = client.add_account_checked(new, password).await;
+            let added = client.add_account(new, password, Verify::Login).await;
             this.update(cx, |this, cx| {
                 this.signing_in = false;
                 match added {

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use catmail_core::{
     AccountId, Config, MailClient, MemorySecrets, NewAccount, SecretStore, SecretString, Security,
-    ServerConfig,
+    ServerConfig, Verify,
 };
 use catmail_testkit::FakeImap;
 
@@ -76,6 +76,7 @@ pub(crate) async fn synced_with_smtp(
                 smtp: server(smtp_port),
             },
             "pw".into(),
+            Verify::Skip,
         )
         .await
         .unwrap()

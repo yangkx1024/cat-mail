@@ -5,7 +5,7 @@
 mod common;
 
 use catmail_core::{
-    Address, DraftContent, Error, ErrorKind, Event, Identity, NewIdentity, OutboxStatus,
+    Address, DraftContent, Error, ErrorKind, Event, Identity, NewIdentity, OutboxStatus, Verify,
 };
 use catmail_testkit::{FakeMailbox, FakeSmtp, ServerState, SmtpState};
 use common::{Env, drain, env, local_server, sparse};
@@ -39,7 +39,12 @@ fn new_identity(server: &FakeSmtp) -> NewIdentity {
 
 async fn add_identity(env: &Env, server: &FakeSmtp) -> Identity {
     env.client
-        .add_identity(env.account, new_identity(server), "api-key".into())
+        .add_identity(
+            env.account,
+            new_identity(server),
+            "api-key".into(),
+            Verify::Skip,
+        )
         .await
         .unwrap()
 }
@@ -159,6 +164,7 @@ async fn an_identity_that_cant_log_in_holds_back_only_its_own_messages() {
                 ..new_identity(&down)
             },
             "api-key".into(),
+            Verify::Skip,
         )
         .await
         .unwrap();
@@ -242,12 +248,18 @@ async fn drafts_are_written_only_as_the_accounts_identities() {
                 smtp: new_identity(&resend).smtp,
             },
             "pw".into(),
+            Verify::Skip,
         )
         .await
         .unwrap();
     let theirs = env
         .client
-        .add_identity(other.id, new_identity(&resend), "api-key".into())
+        .add_identity(
+            other.id,
+            new_identity(&resend),
+            "api-key".into(),
+            Verify::Skip,
+        )
         .await
         .unwrap();
     let err = env
@@ -259,33 +271,30 @@ async fn drafts_are_written_only_as_the_accounts_identities() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn identity_logins_are_checked_without_storing_anything() {
+async fn identities_are_added_only_once_logged_in() {
     let env = env(state()).await;
     let resend = service().await;
     let new = new_identity(&resend);
-    env.client
-        .check_identity_login(&new, &"api-key".into())
-        .await
-        .unwrap();
-    let err = env
-        .client
-        .check_identity_login(&new, &"wrong".into())
-        .await
-        .unwrap_err();
+    let add = async |new: &NewIdentity, password: &str| {
+        env.client
+            .add_identity(env.account, new.clone(), password.into(), Verify::Login)
+            .await
+    };
+    let err = add(&new, "wrong").await.unwrap_err();
     assert!(matches!(err, Error::OutgoingServer(_)), "{err:?}");
     assert_eq!(err.kind(), ErrorKind::Auth);
     let bad = NewIdentity {
         email: "not an address".into(),
-        ..new
+        ..new.clone()
     };
-    let err = env
-        .client
-        .check_identity_login(&bad, &"api-key".into())
-        .await
-        .unwrap_err();
+    let err = add(&bad, "api-key").await.unwrap_err();
     assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
     let identities = env.client.list_identities(env.account).await.unwrap();
     assert_eq!(identities.len(), 1, "only the account's own");
+
+    add(&new, "api-key").await.unwrap();
+    let identities = env.client.list_identities(env.account).await.unwrap();
+    assert_eq!(identities.len(), 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -329,7 +338,12 @@ async fn attachments_fit_the_server_that_sends_the_draft() {
     // What the check learns stays with the identity.
     let identity = env
         .client
-        .add_identity_checked(env.account, new_identity(&resend), "api-key".into())
+        .add_identity(
+            env.account,
+            new_identity(&resend),
+            "api-key".into(),
+            Verify::Login,
+        )
         .await
         .unwrap();
     let dir = tempfile::tempdir().unwrap();

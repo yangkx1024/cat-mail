@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use catmail_core::{
     AccountId, Config, MailClient, MemorySecrets, MessageSummary, NewAccount, Security,
-    ServerConfig, TlsConfig,
+    ServerConfig, TlsConfig, Verify,
 };
 use tokio::runtime::Handle;
 
@@ -98,6 +98,7 @@ pub async fn add_account(
                 smtp,
             },
             password.into(),
+            Verify::Skip,
         )
         .await
         .unwrap()

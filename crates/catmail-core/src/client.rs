@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use catmail_proto::imap::Session;
 use catmail_proto::{Credentials, TlsConfig};
 use catmail_store::{BlobStore, Store};
 use catmail_types::{
@@ -38,6 +39,16 @@ pub struct MailClient {
     // reference to the runtime itself.
     rt: Arc<Runtime>,
     engine: Arc<Engine>,
+}
+
+/// Whether [`MailClient::add_account`] and [`MailClient::add_identity`] log in to the
+/// servers before storing anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verify {
+    /// Log in first; store nothing if that fails.
+    Login,
+    /// Store without contacting the servers (offline, or a server not up yet).
+    Skip,
 }
 
 pub struct MailClientBuilder {
@@ -318,93 +329,65 @@ impl MailClient {
             .await
     }
 
-    /// Connects to the IMAP server and then the SMTP server and logs in with these
-    /// settings, storing nothing, so a frontend can reject a wrong password or server
-    /// before the account exists. Fails as a sync would: [`Error::AuthFailed`],
-    /// [`Error::Unsupported`], or a network error; what the SMTP server fails with comes
-    /// wrapped in [`Error::OutgoingServer`].
-    pub async fn check_login(&self, new: &NewAccount, password: &SecretString) -> Result<()> {
-        self.check_account(new, password).await.map(drop)
-    }
-
-    /// [`check_login`](Self::check_login), returning what the servers said about message
-    /// size.
-    async fn check_account(&self, new: &NewAccount, password: &SecretString) -> Result<SizeLimits> {
-        validate_new_account(new)?;
-        check_password(password)?;
-        let engine = self.engine.clone();
-        let (imap, smtp) = (new.imap.clone(), new.smtp.clone());
-        let credentials = Credentials {
-            username: new.username.clone(),
-            password: password.clone(),
-        };
-        self.rt
-            .run(async move {
-                // Both at once. IMAP's failure is the one to report if both fail, and
-                // once it has failed SMTP's answer isn't waited for.
-                let mut imap = std::pin::pin!(async {
-                    let session = connection::login(&engine, &imap, &credentials).await?;
-                    let append = connection::announced_append_limit(session.capabilities());
-                    session.logout().await;
-                    Ok::<_, Error>(append)
-                });
-                let mut smtp = std::pin::pin!(check_smtp(&engine, &smtp, &credentials));
-                let (append, smtp) = tokio::select! {
-                    append = &mut imap => (append?, smtp.await?),
-                    smtp = &mut smtp => {
-                        let append = imap.await?;
-                        (append, smtp?)
-                    }
-                };
-                Ok(SizeLimits { append, smtp })
-            })
-            .await
-    }
-
-    /// Stores the account and its password. Does not contact the server; the first
+    /// Stores the account and its password. With [`Verify::Login`] it first connects to
+    /// the IMAP and the SMTP server and logs in, storing nothing if that fails, so that a
+    /// wrong password or server leaves nothing behind. It fails as a sync would:
+    /// [`Error::AuthFailed`], [`Error::Unsupported`], or a network error; what the SMTP
+    /// server fails with comes wrapped in [`Error::OutgoingServer`]. What the servers said
+    /// about message size is kept, so that attachments are limited by it before the
+    /// first send, and the IMAP connection goes on to sync the account. With
+    /// [`Verify::Skip`] the servers aren't contacted; the first
     /// [`sync_account`](Self::sync_account) does.
-    pub async fn add_account(&self, new: NewAccount, password: SecretString) -> Result<Account> {
-        self.store_account(new, password, SizeLimits::default())
-            .await
-    }
-
-    /// [`check_login`](Self::check_login), then [`add_account`](Self::add_account) if it
-    /// worked, keeping what the servers said about message size: attachments are limited
-    /// by it before the first send.
-    pub async fn add_account_checked(
+    pub async fn add_account(
         &self,
         new: NewAccount,
         password: SecretString,
-    ) -> Result<Account> {
-        let limits = self.check_account(&new, &password).await?;
-        self.store_account(new, password, limits).await
-    }
-
-    async fn store_account(
-        &self,
-        new: NewAccount,
-        password: SecretString,
-        limits: SizeLimits,
+        verify: Verify,
     ) -> Result<Account> {
         validate_new_account(&new)?;
         check_password(&password)?;
         let engine = self.engine.clone();
         self.rt
-            .run_blocking(move || {
-                let account =
-                    insert_with_secret(&engine, "account", &new.email, &password, |key| {
-                        Ok(engine.store.write(|db| {
-                            let account = db.accounts().insert(&new, key)?;
-                            db.accounts().set_append_limit(account.id, limits.append)?;
-                            if let Some(own) = db.identities().default_of(account.id)? {
-                                db.identities().set_smtp_max_size(own, limits.smtp)?;
-                            }
-                            Ok(account)
-                        })?)
-                    })?;
+            .run(async move {
+                let (limits, session) = match verify {
+                    Verify::Login => {
+                        let (limits, session) = check_account(&engine, &new, &password).await?;
+                        (limits, Some(session))
+                    }
+                    Verify::Skip => (SizeLimits::default(), None),
+                };
+                let inserted = blocking({
+                    let engine = engine.clone();
+                    move || {
+                        insert_with_secret(&engine, "account", &new.email, &password, |key| {
+                            Ok(engine.store.write(|db| {
+                                let account = db.accounts().insert(&new, key)?;
+                                db.accounts().set_append_limit(account.id, limits.append)?;
+                                if let Some(own) = db.identities().default_of(account.id)? {
+                                    db.identities().set_smtp_max_size(own, limits.smtp)?;
+                                }
+                                Ok(account)
+                            })?)
+                        })
+                    }
+                })
+                .await;
+                let account = match inserted {
+                    Ok(account) => account,
+                    Err(e) => {
+                        if let Some(session) = session {
+                            session.logout().await;
+                        }
+                        return Err(e);
+                    }
+                };
                 engine.emit(Event::AccountAdded {
                     account: account.id,
                 });
+                // For background sync to start on, or the next request.
+                if let Some(session) = session {
+                    engine.return_session(account.id, session);
+                }
                 watch::spawn(&engine, account.id);
                 Ok(account)
             })
@@ -419,81 +402,40 @@ impl MailClient {
             .await
     }
 
-    /// Connects to the identity's SMTP server and logs in, storing nothing, as
-    /// [`check_login`](Self::check_login) does for an account. The server's failure comes
-    /// wrapped in [`Error::OutgoingServer`].
-    pub async fn check_identity_login(
-        &self,
-        new: &NewIdentity,
-        password: &SecretString,
-    ) -> Result<()> {
-        self.check_identity(new, password).await.map(drop)
-    }
-
-    /// [`check_identity_login`](Self::check_identity_login), returning the SIZE the server
-    /// announced.
-    async fn check_identity(
-        &self,
-        new: &NewIdentity,
-        password: &SecretString,
-    ) -> Result<Option<u64>> {
-        validate_new_identity(new)?;
-        check_password(password)?;
-        let engine = self.engine.clone();
-        let smtp = new.smtp.clone();
-        let credentials = Credentials {
-            username: new.username.clone(),
-            password: password.clone(),
-        };
-        self.rt
-            .run(async move { check_smtp(&engine, &smtp, &credentials).await })
-            .await
-    }
-
     /// Stores another address the account sends as, with its own SMTP server and
-    /// password. It isn't the default. Does not contact the server.
+    /// password. It isn't the default. With [`Verify::Login`] it first logs in to the SMTP
+    /// server, as [`add_account`](Self::add_account) does, keeping the SIZE the server
+    /// announced; the server's failure comes wrapped in [`Error::OutgoingServer`].
     pub async fn add_identity(
         &self,
         account: AccountId,
         new: NewIdentity,
         password: SecretString,
-    ) -> Result<Identity> {
-        self.store_identity(account, new, password, None).await
-    }
-
-    /// [`check_identity_login`](Self::check_identity_login), then
-    /// [`add_identity`](Self::add_identity) if it worked, keeping the SIZE the server
-    /// announced, as [`add_account_checked`](Self::add_account_checked) does.
-    pub async fn add_identity_checked(
-        &self,
-        account: AccountId,
-        new: NewIdentity,
-        password: SecretString,
-    ) -> Result<Identity> {
-        let smtp_max_size = self.check_identity(&new, &password).await?;
-        self.store_identity(account, new, password, smtp_max_size)
-            .await
-    }
-
-    async fn store_identity(
-        &self,
-        account: AccountId,
-        new: NewIdentity,
-        password: SecretString,
-        smtp_max_size: Option<u64>,
+        verify: Verify,
     ) -> Result<Identity> {
         validate_new_identity(&new)?;
         check_password(&password)?;
         let engine = self.engine.clone();
         self.rt
-            .run_blocking(move || {
-                let identity =
-                    insert_with_secret(&engine, "identity", &new.email, &password, |key| {
-                        engine
-                            .store
-                            .write(|db| db.identities().insert(account, &new, key, smtp_max_size))?
-                            .ok_or_else(|| Error::AccountNotFound(account.to_string()))
-                    })?;
+            .run(async move {
+                let smtp_max_size = match verify {
+                    Verify::Login => check_identity(&engine, &new, &password).await?,
+                    Verify::Skip => None,
+                };
+                let identity = blocking({
+                    let engine = engine.clone();
+                    move || {
+                        insert_with_secret(&engine, "identity", &new.email, &password, |key| {
+                            engine
+                                .store
+                                .write(|db| {
+                                    db.identities().insert(account, &new, key, smtp_max_size)
+                                })?
+                                .ok_or_else(|| Error::AccountNotFound(account.to_string()))
+                        })
+                    }
+                })
+                .await?;
                 engine.emit(Event::IdentitiesChanged { account });
                 Ok(identity)
             })
@@ -1122,6 +1064,50 @@ fn check_password(password: &SecretString) -> Result<()> {
     Ok(())
 }
 
+/// Logs in to the account's IMAP and SMTP servers, both at once, and out of the SMTP
+/// server again; returns what they said about message size, and the IMAP connection.
+async fn check_account(
+    engine: &Engine,
+    new: &NewAccount,
+    password: &SecretString,
+) -> Result<(SizeLimits, Session)> {
+    let credentials = Credentials {
+        username: new.username.clone(),
+        password: password.clone(),
+    };
+    // IMAP's failure is the one to report if both fail, and once it has failed SMTP's
+    // answer isn't waited for.
+    let mut imap = std::pin::pin!(connection::login(engine, &new.imap, &credentials));
+    let mut smtp = std::pin::pin!(check_smtp(engine, &new.smtp, &credentials));
+    let (session, smtp) = tokio::select! {
+        session = &mut imap => (session?, smtp.await),
+        smtp = &mut smtp => (imap.await?, smtp),
+    };
+    match smtp {
+        Ok(smtp) => {
+            let append = connection::announced_append_limit(session.capabilities());
+            Ok((SizeLimits { append, smtp }, session))
+        }
+        Err(e) => {
+            session.logout().await;
+            Err(e)
+        }
+    }
+}
+
+/// Logs in to the identity's SMTP server and out again; returns the SIZE it announced.
+async fn check_identity(
+    engine: &Engine,
+    new: &NewIdentity,
+    password: &SecretString,
+) -> Result<Option<u64>> {
+    let credentials = Credentials {
+        username: new.username.clone(),
+        password: password.clone(),
+    };
+    check_smtp(engine, &new.smtp, &credentials).await
+}
+
 /// Logs in to the SMTP server `server` and out again; returns the SIZE it announced. Its
 /// failure as [`Error::OutgoingServer`].
 async fn check_smtp(
@@ -1314,7 +1300,7 @@ mod tests {
         let mut events = client.subscribe();
 
         let account = client
-            .add_account(new_account("a@example.com"), "hunter2".into())
+            .add_account(new_account("a@example.com"), "hunter2".into(), Verify::Skip)
             .await
             .unwrap();
         assert_eq!(
@@ -1347,7 +1333,7 @@ mod tests {
         let secrets = Arc::new(MemorySecrets::default());
         let client = open_client(dir.path(), secrets.clone());
         let account = client
-            .add_account(new_account("a@example.com"), "imap-pw".into())
+            .add_account(new_account("a@example.com"), "imap-pw".into(), Verify::Skip)
             .await
             .unwrap();
         let new = NewIdentity {
@@ -1357,7 +1343,7 @@ mod tests {
             smtp: new_account("a@example.com").smtp,
         };
         let identity = client
-            .add_identity(account.id, new.clone(), "api-key".into())
+            .add_identity(account.id, new.clone(), "api-key".into(), Verify::Skip)
             .await
             .unwrap();
         let key = |id| {
@@ -1377,11 +1363,11 @@ mod tests {
 
         // A duplicate leaves no password behind, nor does a missing account.
         let again = client
-            .add_identity(account.id, new.clone(), "other".into())
+            .add_identity(account.id, new.clone(), "other".into(), Verify::Skip)
             .await;
         assert!(matches!(again, Err(Error::AlreadyExists(_))), "{again:?}");
         let missing = client
-            .add_identity(AccountId(99), new.clone(), "other".into())
+            .add_identity(AccountId(99), new.clone(), "other".into(), Verify::Skip)
             .await;
         assert!(
             matches!(missing, Err(Error::AccountNotFound(_))),
@@ -1397,7 +1383,7 @@ mod tests {
         ));
 
         client
-            .add_identity(account.id, new, "api-key".into())
+            .add_identity(account.id, new, "api-key".into(), Verify::Skip)
             .await
             .unwrap();
         assert_eq!(secrets.len(), 2);
@@ -1440,7 +1426,12 @@ mod tests {
                 .secrets(Arc::new(MemorySecrets::default()))
         };
         let client = pollster::block_on(builder().open_async()).unwrap();
-        pollster::block_on(client.add_account(new_account("a@example.com"), "pw".into())).unwrap();
+        pollster::block_on(client.add_account(
+            new_account("a@example.com"),
+            "pw".into(),
+            Verify::Skip,
+        ))
+        .unwrap();
         assert!(matches!(
             pollster::block_on(builder().open_async()),
             Err(Error::AlreadyRunning(_))
@@ -1466,7 +1457,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let client = open_client(dir.path(), Arc::new(MemorySecrets::default()));
         let account = client
-            .add_account(new_account("a@example.com"), "pw".into())
+            .add_account(new_account("a@example.com"), "pw".into(), Verify::Skip)
             .await
             .unwrap()
             .id;
@@ -1488,7 +1479,7 @@ mod tests {
 
         let accounts = pollster::block_on(async {
             client
-                .add_account(new_account("a@example.com"), "pw".into())
+                .add_account(new_account("a@example.com"), "pw".into(), Verify::Skip)
                 .await?;
             client.list_accounts().await
         })
@@ -1508,8 +1499,11 @@ mod tests {
             .open()
             .unwrap();
 
-        let result =
-            pollster::block_on(client.add_account(new_account("a@example.com"), "pw".into()));
+        let result = pollster::block_on(client.add_account(
+            new_account("a@example.com"),
+            "pw".into(),
+            Verify::Skip,
+        ));
         assert!(matches!(result, Err(Error::Secrets(_))));
         assert!(
             pollster::block_on(client.list_accounts())
@@ -1527,15 +1521,19 @@ mod tests {
             .unwrap();
 
         let mut bad = new_account("no-at-sign");
-        let r = pollster::block_on(client.add_account(bad.clone(), "pw".into()));
+        let r = pollster::block_on(client.add_account(bad.clone(), "pw".into(), Verify::Skip));
         assert!(matches!(r, Err(Error::InvalidInput(_))));
 
         bad.email = "a@example.com".into();
         bad.imap.port = 0;
-        let r = pollster::block_on(client.add_account(bad, "pw".into()));
+        let r = pollster::block_on(client.add_account(bad, "pw".into(), Verify::Skip));
         assert!(matches!(r, Err(Error::InvalidInput(_))));
 
-        let r = pollster::block_on(client.add_account(new_account("a@example.com"), "".into()));
+        let r = pollster::block_on(client.add_account(
+            new_account("a@example.com"),
+            "".into(),
+            Verify::Skip,
+        ));
         assert!(matches!(r, Err(Error::InvalidInput(_))));
     }
 
@@ -1547,11 +1545,11 @@ mod tests {
         let b = open_client(dir_b.path(), secrets.clone());
 
         let acc_a = a
-            .add_account(new_account("a@example.com"), "pw-a".into())
+            .add_account(new_account("a@example.com"), "pw-a".into(), Verify::Skip)
             .await
             .unwrap();
         let acc_b = b
-            .add_account(new_account("b@example.com"), "pw-b".into())
+            .add_account(new_account("b@example.com"), "pw-b".into(), Verify::Skip)
             .await
             .unwrap();
         assert_eq!(acc_a.id, acc_b.id, "both databases start at the same id");
@@ -1573,7 +1571,7 @@ mod tests {
             let client = client.clone();
             async move {
                 client
-                    .add_account(new_account("a@example.com"), "pw".into())
+                    .add_account(new_account("a@example.com"), "pw".into(), Verify::Skip)
                     .await
             }
         });
@@ -1678,7 +1676,7 @@ mod tests {
     ) -> (MailClient, AccountId) {
         let client = open_client(dir, secrets);
         let account = client
-            .add_account(new_account(email), "pw".into())
+            .add_account(new_account(email), "pw".into(), Verify::Skip)
             .await
             .unwrap();
         (client, account.id)
@@ -1874,11 +1872,11 @@ mod tests {
         let client = open_client(dir.path(), secrets.clone());
 
         client
-            .add_account(new_account("a@example.com"), "pw".into())
+            .add_account(new_account("a@example.com"), "pw".into(), Verify::Skip)
             .await
             .unwrap();
         let dup = client
-            .add_account(new_account("A@example.com"), "pw".into())
+            .add_account(new_account("A@example.com"), "pw".into(), Verify::Skip)
             .await;
         assert!(matches!(dup, Err(Error::AlreadyExists(_))), "{dup:?}");
         assert_eq!(secrets.len(), 1);
@@ -1892,7 +1890,7 @@ mod tests {
         let mut events = client.subscribe();
 
         tokio::select! {
-            _ = client.add_account(new_account("a@example.com"), "pw".into()) => {
+            _ = client.add_account(new_account("a@example.com"), "pw".into(), Verify::Skip) => {
                 unreachable!("set() is gated")
             }
             _ = secrets.entered.notified() => {} // drops the add_account future

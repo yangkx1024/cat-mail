@@ -26,8 +26,8 @@
     限制附件也帮不上，发信本身不受影响。
   - 值记在 `identities.smtp_max_size` 和 `accounts.imap_append_limit`，**每次连接**都与
     服务器现在说的比较，不同就更新（服务器会调整上限，也会不再公布）：发信连 SMTP、同步等连 IMAP 时。
-    添加时登录检查拿到的值由 `add_account_checked` / `add_identity_checked` 在插入的同一事务里写进去，
-    第一次发信之前就知道；不检查的 `add_account` / `add_identity` 要等第一次连接。记录失败只写日志，
+    添加时登录检查（`Verify::Login`）拿到的值由 `add_account` / `add_identity` 在插入的同一事务里写进去，
+    第一次发信之前就知道；`Verify::Skip` 添加的要等第一次连接。记录失败只写日志，
     不影响连接。身份的 SIZE 由 `connection::sender` 与它的服务器一起读出。
 - **地址**在保存时检查（`parse_addresses`）：逗号或分号分隔，每一项只能是裸地址或
   "显示名 <地址>"，严格解析，任何一项不合规就报错，不会悄悄少一个收件人；地址必须能原样放进
@@ -71,8 +71,8 @@
   那些信就没有服务器了。用它写的草稿在同一事务里改到默认身份（`revision` 加一，重新上传副本），再删行
   （`RETURNING secret_key`）、删它自己的密钥（如果有），并清掉内存里它的发送状态。删除账户时身份随之
   级联删除，密钥见上。
-- `check_identity_login` 只连它的 SMTP 并登录，不存任何东西；`add_identity` 不连服务器；
-  `add_identity_checked` 先检查再添加（两个前端用它，CLI 的 `--no-verify` 用 `add_identity`）。
+- `add_identity` 带 `Verify::Login` 时先连它的 SMTP 并登录，失败什么都不存（两个前端都这样用）；
+  `Verify::Skip` 不连服务器（CLI 的 `--no-verify`）。
 
 ## 同步到服务器
 

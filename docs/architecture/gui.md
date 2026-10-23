@@ -260,8 +260,8 @@ INBOX，所以打开一个文件夹时同步它（`MailClient::sync_folder`，�
 
 ## 登录页
 
-没有账户时自动打开（不能取消），Settings › Accounts 的"Add account"也能打开。调用 `MailClient::add_account_checked`
-（先像 `check_login` 那样连接、登录、LOGOUT，不写数据库也不写密钥环，成功后才存下账户），再同步这个账户；密码或服务器
+没有账户时自动打开（不能取消），Settings › Accounts 的"Add account"也能打开。调用 `MailClient::add_account(.., Verify::Login)`，
+再同步这个账户；密码或服务器
 填错不会留下账户行或孤立的密钥环条目。
 
 - 登录进行中"Cancel"不可用：`add_account` 一旦开始就会写入（引擎的阻塞任务不随窗口的任务取消），
@@ -272,7 +272,7 @@ INBOX，所以打开一个文件夹时同步它（`MailClient::sync_folder`，�
 - **发件身份**在 Settings › Accounts 里，列在各自账户下面（包括随账户建出的那个），默认的标着"Default"，
   其余可以"Make default"或删除；"Add sending address"在设置对话框里
   原地换成身份的表单（地址、密码、名字、用户名和 SMTP 服务器，字段与登录页共用），
-  `add_identity_checked`，完成或取消后回到列表。设置对话框没有要确认的东西，
+  `add_identity(.., Verify::Login)`，完成或取消后回到列表。设置对话框没有要确认的东西，
   它的 `on_ok` 不关闭，否则字段里按 Enter 会关掉整个设置、丢下正在添加的身份；表单和登录页一样，
   任一字段按 Enter 提交（`login_form::submit_on_enter`）。
 

@@ -2,12 +2,12 @@
 
 use std::time::Duration;
 
-use catmail_core::{EngineTuning, Error, ErrorKind, Event, Flags, FolderRole, SyncReport};
+use catmail_core::{EngineTuning, Error, ErrorKind, Event, Flags, FolderRole, SyncReport, Verify};
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 
 mod common;
 
-use common::{Env, drain, env, env_built};
+use common::{Env, drain, env, env_added, env_built};
 
 fn state_with(inbox_subjects: &[&str]) -> ServerState {
     let mut state = ServerState::new("alice", "pw");
@@ -379,7 +379,7 @@ async fn wrong_password_is_an_auth_error() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn check_login_logs_in_and_stores_nothing() {
+async fn an_account_is_added_only_once_logged_in() {
     let env = env(state_with(&[])).await;
     let account = env.client.get_account(env.account).await.unwrap().unwrap();
     let new = catmail_core::NewAccount {
@@ -389,9 +389,23 @@ async fn check_login_logs_in_and_stores_nothing() {
         imap: account.imap,
         smtp: env.smtp_config(),
     };
+    let add = async |new: &catmail_core::NewAccount, password: &str| {
+        env.client
+            .add_account(new.clone(), password.into(), Verify::Login)
+            .await
+    };
 
+    let err = add(&new, "wrong").await.unwrap_err();
+    assert!(matches!(err, Error::AuthFailed(_)), "{err:?}");
+    let err = add(&new, "").await.unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
+    // The SMTP server is tried too, and its failure told apart; the IMAP login that
+    // worked is logged out of.
+    env.smtp.state().faults.reject_login = true;
     let start = env.fake.state().log.len();
-    env.client.check_login(&new, &"pw".into()).await.unwrap();
+    let err = add(&new, "pw").await.unwrap_err();
+    assert!(matches!(err, Error::OutgoingServer(_)), "{err:?}");
+    assert_eq!(err.kind(), catmail_core::ErrorKind::Auth);
     let commands = env.commands_since(start);
     assert!(
         commands
@@ -399,27 +413,42 @@ async fn check_login_logs_in_and_stores_nothing() {
             .any(|c| c.starts_with("AUTHENTICATE") || c.starts_with("LOGIN"))
     );
     assert_eq!(commands.last().map(String::as_str), Some("LOGOUT"));
-
-    let err = env
-        .client
-        .check_login(&new, &"wrong".into())
-        .await
-        .unwrap_err();
-    assert!(matches!(err, Error::AuthFailed(_)), "{err:?}");
-    let err = env.client.check_login(&new, &"".into()).await.unwrap_err();
-    assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
-    // The SMTP server is tried too, and its failure told apart.
-    env.smtp.state().faults.reject_login = true;
-    let err = env
-        .client
-        .check_login(&new, &"pw".into())
-        .await
-        .unwrap_err();
-    assert!(matches!(err, Error::OutgoingServer(_)), "{err:?}");
-    assert_eq!(err.kind(), catmail_core::ErrorKind::Auth);
+    // So is one whose account can't be stored.
+    env.smtp.state().faults.reject_login = false;
+    let start = env.fake.state().log.len();
+    let taken = catmail_core::NewAccount {
+        email: "alice@example.com".into(),
+        ..new
+    };
+    let err = add(&taken, "pw").await.unwrap_err();
+    assert!(matches!(err, Error::AlreadyExists(_)), "{err:?}");
+    let commands = env.commands_since(start);
+    assert_eq!(commands.last().map(String::as_str), Some("LOGOUT"));
 
     let accounts = env.client.list_accounts().await.unwrap();
     assert_eq!(accounts.len(), 1, "only the account the test set up");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_account_added_once_logged_in_keeps_that_connection() {
+    let env = env_added(
+        state_with(&[]),
+        SmtpState::new("alice", "pw"),
+        Verify::Login,
+        |b| b,
+    )
+    .await;
+    assert_eq!(env.fake.state().connections, 1);
+    // A whole sync logs in on a connection of its own; the next request takes the one
+    // the check left.
+    env.client.sync_account(env.account).await.unwrap();
+    let inbox = env.folder("INBOX").await;
+    env.client
+        .sync_folder(inbox.id, Duration::ZERO)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(env.fake.state().connections, 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]

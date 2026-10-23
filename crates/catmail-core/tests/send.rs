@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use catmail_core::{
-    Address, DraftContent, Error, ErrorKind, Event, OutboxEntry, OutboxStatus, RecvError,
+    Address, DraftContent, Error, ErrorKind, Event, OutboxEntry, OutboxStatus, RecvError, Verify,
 };
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 use common::{Env, drain, env, env_with, eventually, files, sparse};
@@ -888,7 +888,7 @@ async fn an_account_added_checked_knows_its_limits_before_the_first_send() {
     };
     let checked = env
         .client
-        .add_account_checked(new.clone(), "pw".into())
+        .add_account(new.clone(), "pw".into(), Verify::Login)
         .await
         .unwrap();
     let draft = env.client.create_draft(checked.id, content("big")).await;
@@ -900,7 +900,11 @@ async fn an_account_added_checked_knows_its_limits_before_the_first_send() {
 
     // Added without the check, nothing is known yet.
     new.email = "alice@example.net".into();
-    let unchecked = env.client.add_account(new, "pw".into()).await.unwrap();
+    let unchecked = env
+        .client
+        .add_account(new, "pw".into(), Verify::Skip)
+        .await
+        .unwrap();
     let draft = env.client.create_draft(unchecked.id, content("big")).await;
     attach(&env, dir.path(), draft.unwrap().id, MIB)
         .await

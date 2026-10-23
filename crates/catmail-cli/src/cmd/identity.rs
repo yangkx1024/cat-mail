@@ -1,7 +1,7 @@
 //! `catmail identity`: other addresses an account sends as, each through an SMTP server
 //! of its own, and `--from`, which picks one for a message.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use catmail_core::{Account, AccountId, IdentityId, MailClient, NewIdentity, SecretString};
 use clap::{Args, Subcommand};
 
@@ -100,14 +100,10 @@ async fn add(
         display_name: args.name,
         smtp: args.smtp.config(),
     };
-    let identity = if args.login.no_verify {
-        client.add_identity(account.id, new, password).await?
-    } else {
-        client
-            .add_identity_checked(account.id, new, password)
-            .await
-            .context("the identity wasn't added (--no-verify adds it without logging in)")?
-    };
+    let added = client
+        .add_identity(account.id, new, password, args.login.verify())
+        .await;
+    let identity = args.login.added("identity", added)?;
     if json {
         json::print_keyed("identity", &JsonIdentity::from(&identity))?;
     } else {

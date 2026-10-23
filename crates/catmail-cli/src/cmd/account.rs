@@ -5,6 +5,7 @@ use std::io::{self, BufRead, IsTerminal};
 use anyhow::{Context, Result, bail};
 use catmail_core::{
     Account, ExposeSecret, Identity, MailClient, NewAccount, SecretString, Security, ServerConfig,
+    Verify,
 };
 use clap::{Args, Subcommand};
 
@@ -87,6 +88,26 @@ pub(crate) struct Login {
     pub(crate) no_verify: bool,
 }
 
+impl Login {
+    pub(crate) fn verify(&self) -> Verify {
+        if self.no_verify {
+            Verify::Skip
+        } else {
+            Verify::Login
+        }
+    }
+
+    /// The `what` added, with a hint about `--no-verify` if it failed after logging in.
+    pub(crate) fn added<T>(&self, what: &str, added: catmail_core::Result<T>) -> Result<T> {
+        if self.no_verify {
+            return Ok(added?);
+        }
+        added.with_context(|| {
+            format!("the {what} wasn't added (--no-verify adds it without logging in)")
+        })
+    }
+}
+
 pub(crate) async fn account(client: &MailClient, cmd: AccountCommand, json: bool) -> Result<()> {
     match cmd {
         AccountCommand::Add(args) => {
@@ -144,14 +165,8 @@ async fn add(
         },
         smtp: args.smtp.config(),
     };
-    let account = if args.login.no_verify {
-        client.add_account(new, password).await?
-    } else {
-        client
-            .add_account_checked(new, password)
-            .await
-            .context("the account wasn't added (--no-verify adds it without logging in)")?
-    };
+    let added = client.add_account(new, password, args.login.verify()).await;
+    let account = args.login.added("account", added)?;
     if json {
         let (account, identities) = with_identities(client, account).await?;
         json::print_keyed("account", &JsonAccount::new(&account, &identities))?;
