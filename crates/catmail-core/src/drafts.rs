@@ -2,6 +2,7 @@
 //! (`draft_sync.rs`), sent through the outbox (`send.rs`).
 
 use std::collections::HashSet;
+use std::io::Read as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -81,6 +82,17 @@ pub(crate) fn edited(engine: &Engine, account: AccountId, draft: DraftId) {
     }
 }
 
+/// The most a draft's attached files may add up to: what Gmail and Outlook allow, and
+/// most servers. Encoded, it just fits the message size Gmail announces (`SIZE`).
+const MAX_ATTACHMENTS_SIZE: u64 = 25 * 1024 * 1024;
+
+fn attachments_too_large() -> Error {
+    Error::InvalidInput(format!(
+        "a message's attachments can't add up to more than {}",
+        display::size(MAX_ATTACHMENTS_SIZE)
+    ))
+}
+
 /// Copies the file into the blob store and attaches it; later changes to the file
 /// don't affect the draft.
 pub(crate) async fn attach_file(
@@ -101,7 +113,18 @@ pub(crate) async fn attach_file(
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .ok_or_else(|| Error::InvalidInput(format!("{} has no file name", path.display())))?;
-        let blob = engine2.blobs.put(std::fs::File::open(&path)?)?;
+        let file = std::fs::File::open(&path)?;
+        let budget = MAX_ATTACHMENTS_SIZE.saturating_sub(
+            engine2
+                .store
+                .read(|db| db.drafts().attachments_size(draft))?,
+        );
+        if file.metadata()?.len() > budget {
+            return Err(attachments_too_large());
+        }
+        // A file that grows while it is read, or was larger than it said, is still copied
+        // no further than one byte past what it may be.
+        let blob = engine2.blobs.put(file.take(budget + 1))?;
         // What was stored, not what the file said when it was opened.
         let size = std::fs::metadata(engine2.blobs.path(&blob))?.len();
         let new = NewDraftAttachment {
@@ -113,16 +136,18 @@ pub(crate) async fn attach_file(
             filename,
             size,
         };
-        // An attachment whose draft is gone leaves an unreferenced blob for GC.
-        engine2
-            .store
-            .write(|db| {
-                let Some(attachment) = db.drafts().add_attachment(draft, &new, now())? else {
-                    return Ok(None);
-                };
-                Ok(db.drafts().account_of(draft)?.map(|a| (a, attachment)))
-            })
-            .map_err(Error::from)
+        // An attachment refused here, like one whose draft is gone, leaves an unreferenced
+        // blob for GC.
+        engine2.store.write(|db| {
+            // Again: another file may have been attached to the draft meanwhile.
+            if db.drafts().attachments_size(draft)? + size > MAX_ATTACHMENTS_SIZE {
+                return Ok(Err(attachments_too_large()));
+            }
+            let Some(attachment) = db.drafts().add_attachment(draft, &new, now())? else {
+                return Ok(Ok(None));
+            };
+            Ok(Ok(db.drafts().account_of(draft)?.map(|a| (a, attachment))))
+        })?
     })
     .await?;
     let (account, attachment) = attachment.ok_or(Error::DraftNotFound(draft))?;

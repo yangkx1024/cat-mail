@@ -179,3 +179,18 @@ impl Env {
             .collect()
     }
 }
+
+/// Every file under `dir`.
+#[allow(dead_code)]
+pub fn files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            files.extend(self::files(&path));
+        } else {
+            files.push(path);
+        }
+    }
+    files
+}
