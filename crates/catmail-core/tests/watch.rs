@@ -4,13 +4,13 @@
 
 use std::time::Duration;
 
-use catmail_core::{Config, ErrorKind, Event, Flags, MailClient, SyncSchedule};
+use catmail_core::{Config, ErrorKind, Event, Flags, MailClient, SyncSchedule, Verify};
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 use tokio::runtime::Handle;
 
 mod common;
 
-use common::{Env, drain, env_built, eventually};
+use common::{Env, drain, env_added, env_built, eventually};
 
 const HOUR: Duration = Duration::from_secs(3600);
 
@@ -98,6 +98,16 @@ async fn new_mail_flag_changes_and_expunges_are_pushed() {
     env.wait_for_subjects("INBOX", &["one", "three"]).await;
     // Only INBOX is watched; the rest waits for the next full sync.
     assert_eq!(env.fake.state().received("LIST"), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_account_added_once_logged_in_is_watched_on_that_connection() {
+    let env = env_added(state(), SmtpState::new("alice", "pw"), Verify::Login, |b| {
+        b.sync_in_background(Some(schedule(HOUR, HOUR)))
+    })
+    .await;
+    env.wait_for_idle(1).await;
+    assert_eq!(env.fake.state().connections, 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

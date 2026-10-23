@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use catmail_core::{MessageId, MessageSummary};
+use catmail_core::{MessageId, MessageSummary, Verify};
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{

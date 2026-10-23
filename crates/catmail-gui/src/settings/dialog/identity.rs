@@ -2,7 +2,7 @@
 //! (a sending service, say). The login is tried before anything is stored, as for an
 //! account.
 
-use catmail_core::{Account, MailClient, NewIdentity, Security};
+use catmail_core::{Account, MailClient, NewIdentity, Security, Verify};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{Disableable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::{
@@ -103,7 +103,9 @@ impl AddIdentity {
         let (client, account) = (self.client.clone(), self.account.id);
         let password = values.login.password;
         self._add = cx.spawn_in(window, async move |this, cx| {
-            let added = client.add_identity_checked(account, new, password).await;
+            let added = client
+                .add_identity(account, new, password, Verify::Login)
+                .await;
             this.update(cx, |this, cx| {
                 this.adding = false;
                 match added {

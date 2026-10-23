@@ -100,13 +100,14 @@ enum Wait {
 
 /// Keeps one account in sync until it is removed or the engine is gone.
 pub(crate) async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
-    let Some((wake, mut cancellation)) = engine
-        .upgrade()
-        .map(|e| (e.wake_signal(account), e.cancellation(account)))
-    else {
+    // An idle connection if there is one: adding an account leaves the one that checked
+    // the password.
+    let Some((wake, mut cancellation, mut session)) = engine.upgrade().map(|e| {
+        let session = e.take_session(account);
+        (e.wake_signal(account), e.cancellation(account), session)
+    }) else {
         return;
     };
-    let mut session: Option<Session> = None;
     // IDLEs in a row that the connection was lost in soon after they began.
     let mut idle_losses = 0;
     // IDLEs in a row that ended with a change soon after they began.

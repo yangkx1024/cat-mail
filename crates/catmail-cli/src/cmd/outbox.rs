@@ -205,7 +205,7 @@ fn report(entry: &OutboxEntry, blocked: Option<&ReportedError>, json: bool) -> R
 
 #[cfg(test)]
 mod tests {
-    use catmail_core::{Address, DraftContent};
+    use catmail_core::{Address, DraftContent, Verify};
     use catmail_testkit::{FakeImap, FakeSmtp, ServerState, SmtpState};
 
     use super::*;
@@ -294,6 +294,7 @@ mod tests {
                     },
                 },
                 "key".into(),
+                Verify::Skip,
             )
             .await
             .unwrap();

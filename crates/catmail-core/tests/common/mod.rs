@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use catmail_core::{
     AccountId, Config, Event, Flags, Folder, MailClient, MailClientBuilder, MemorySecrets,
-    MessageId, MessageSummary, NewAccount, ReplayReport, Security, ServerConfig,
+    MessageId, MessageSummary, NewAccount, ReplayReport, Security, ServerConfig, Verify,
 };
 use catmail_testkit::{FakeImap, FakeSmtp, ServerState, SmtpState};
 use tokio::runtime::Handle;
@@ -56,6 +56,16 @@ pub async fn env_built(
     smtp: SmtpState,
     build: impl FnOnce(MailClientBuilder) -> MailClientBuilder,
 ) -> Env {
+    env_added(state, smtp, Verify::Skip, build).await
+}
+
+/// [`env_built`], the account added with `verify`.
+pub async fn env_added(
+    state: ServerState,
+    smtp: SmtpState,
+    verify: Verify,
+    build: impl FnOnce(MailClientBuilder) -> MailClientBuilder,
+) -> Env {
     let fake = FakeImap::start(state).await;
     let smtp = FakeSmtp::start(smtp).await;
     let dir = tempfile::tempdir().unwrap();
@@ -77,6 +87,7 @@ pub async fn env_built(
                 smtp: local_server(smtp.port()),
             },
             "pw".into(),
+            verify,
         )
         .await
         .unwrap()

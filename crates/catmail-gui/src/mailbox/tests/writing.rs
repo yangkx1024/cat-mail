@@ -55,6 +55,7 @@ fn a_message_goes_from_the_address_chosen(cx: &mut TestAppContext) {
             smtp: mail.smtp_server(),
         },
         "pw".into(),
+        Verify::Skip,
     ))
     .unwrap();
     let (window, mailbox) = open(cx, &mail);
@@ -116,6 +117,7 @@ fn an_open_message_follows_its_address_being_replaced(cx: &mut TestAppContext) {
             smtp: mail.smtp_server(),
         },
         "pw".into(),
+        Verify::Skip,
     ))
     .unwrap();
     pollster::block_on(mail.client.set_default_identity(other.id)).unwrap();
