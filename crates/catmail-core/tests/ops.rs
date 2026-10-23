@@ -796,16 +796,15 @@ async fn sent_replies_mark_the_original_answered() {
     let env = synced_env(state()).await;
     let one = env.id_of("INBOX", "one").await;
     let draft = env.client.reply(one, false).await.unwrap();
-    env.client
-        .update_draft(
-            draft.id,
-            DraftContent {
-                text: "Thanks".into(),
-                ..draft.content
-            },
-        )
-        .await
-        .unwrap();
+    env.edit(
+        draft.id,
+        DraftContent {
+            text: "Thanks".into(),
+            ..draft.content
+        },
+    )
+    .await
+    .unwrap();
     env.client.send_draft(draft.id).await.unwrap();
     env.client.flush_outbox(env.account).await.unwrap();
     assert_eq!(env.local("INBOX").await[0].1, Flags::ANSWERED);

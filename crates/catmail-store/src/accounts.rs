@@ -230,7 +230,7 @@ mod tests {
         assert_eq!(own.username, new.username);
         assert_eq!(
             Identities::new(&conn)
-                .sending(a.id, None)
+                .sending(a.id, own.id)
                 .unwrap()
                 .map(|s| s.login_key)
                 .as_deref(),

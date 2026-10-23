@@ -57,9 +57,11 @@
 - **默认身份**：每个账户恰好一个（`is_default`，部分唯一索引保证），新草稿从它发；可以换
   （`set_default_identity`，在一个事务里先清掉旧的再设新的），不能删除。列出时默认的在最前，其余按添加
   先后。
-- **草稿选身份**：`drafts.identity_id` 必填。输入的 `DraftContent::identity` 为 `None` 时存成账户当时的
-  默认身份（SQL 里 `coalesce`），存下的草稿总带着一个。存下时由 repository 检查身份属于草稿的账户（复合
-  外键 `(identity_id, account_id)` 兜底）；改身份和改别的内容一样算一次修改。From 头、MAIL FROM 和
+- **草稿选身份**：`drafts.identity_id` 必填，读出的 `Draft::identity` 总是一个具体的身份。身份不在
+  `DraftContent` 里：只有新建（`create_draft(account, from: Option<IdentityId>, ..)`）可以不指定，存成
+  账户当时的默认身份；`update_draft(id, from: IdentityId, ..)` 必须给出，自己拼一个 `DraftContent` 的
+  调用方不会无意中把发件人换回默认。回复按原信选好身份直接传入，转发用默认身份。存下时由 repository
+  检查身份属于草稿的账户（复合外键 `(identity_id, account_id)` 兜底）；改身份和改别的内容一样算一次修改。From 头、MAIL FROM 和
   Message-ID 的域名都来自所选身份；Drafts 里的副本也是。
 - **回复**用原信寄给的那个地址：在原信的 To、Cc 里按顺序找第一个是账户身份的地址；回复自己发出的信
   则用它的发件人。几个身份地址相同时用排在前面的（默认的优先）；都不是时用默认身份。账户的地址本身也算

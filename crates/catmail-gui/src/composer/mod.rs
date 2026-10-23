@@ -133,7 +133,7 @@ pub fn open(client: MailClient, from: ComposeFrom, window: &mut Window, cx: &mut
             let draft = match from {
                 ComposeFrom::New(account) => {
                     client
-                        .create_draft(account, DraftContent::default())
+                        .create_draft(account, None, DraftContent::default())
                         .await?
                 }
                 ComposeFrom::Reply { message, all } => client.reply(message, all).await?,
@@ -291,11 +291,18 @@ fn senders(identities: &[Identity]) -> Vec<Sender> {
 /// identity.
 enum FromField {
     /// With its identity, kept as it is.
-    One(Option<IdentityId>, SharedString),
+    One(IdentityId, SharedString),
     Choice {
         senders: Entity<SelectState<Vec<Sender>>>,
         _changes: Subscription,
     },
+}
+
+/// What a save hands to the engine: who the draft is from, and what it says.
+#[derive(Debug, Clone, PartialEq)]
+struct Written {
+    from: IdentityId,
+    content: DraftContent,
 }
 
 /// An address field, which an error is shown under.
@@ -341,7 +348,7 @@ pub struct Composer {
     finishing: Option<Finish>,
     /// What was last handed to the engine. An address field that doesn't parse keeps
     /// this value until it does.
-    saved: DraftContent,
+    saved: Written,
     to: Entity<InputState>,
     cc: Entity<InputState>,
     bcc: Entity<InputState>,
@@ -396,7 +403,7 @@ impl Composer {
             .map(|input| cx.subscribe_in(input, window, Self::on_input_event))
             .collect();
         subscriptions.push(cx.subscribe_in(&body, window, Self::on_input_event));
-        let from = Self::from_field(&identities, content.identity, window, cx);
+        let from = Self::from_field(&identities, draft.identity, window, cx);
         let identities = Self::follow_identities(&client, draft.account_id, window, cx);
         // The window is named after the subject.
         subscriptions.push(
@@ -435,7 +442,10 @@ impl Composer {
             save_state: SaveState::Unchanged,
             finishing: None,
             show_cc_bcc: !content.cc.is_empty() || !content.bcc.is_empty(),
-            saved: content,
+            saved: Written {
+                from: draft.identity,
+                content,
+            },
             to,
             cc,
             bcc,
@@ -481,9 +491,9 @@ impl Composer {
         cx.notify();
     }
 
-    /// The content as typed. An address field that doesn't parse keeps its last saved
+    /// The draft as typed. An address field that doesn't parse keeps its last saved
     /// value, and is reported.
-    fn content(&self, cx: &App) -> (DraftContent, Option<(Field, SharedString)>) {
+    fn written(&self, cx: &App) -> (Written, Option<(Field, SharedString)>) {
         let mut problem = None;
         let mut field =
             |field: Field, input: &Entity<InputState>, saved: &[catmail_core::Address]| {
@@ -495,24 +505,25 @@ impl Composer {
                     }
                 }
             };
-        let to = field(Field::To, &self.to, &self.saved.to);
-        let cc = field(Field::Cc, &self.cc, &self.saved.cc);
-        let bcc = field(Field::Bcc, &self.bcc, &self.saved.bcc);
+        let saved = &self.saved.content;
+        let to = field(Field::To, &self.to, &saved.to);
+        let cc = field(Field::Cc, &self.cc, &saved.cc);
+        let bcc = field(Field::Bcc, &self.bcc, &saved.bcc);
         let content = DraftContent {
             subject: self.subject.read(cx).value().to_string(),
             to,
             cc,
             bcc,
             text: self.body.read(cx).value().to_string(),
-            identity: self.sender_identity(cx),
         };
-        (content, problem)
+        let from = self.sender_identity(cx);
+        (Written { from, content }, problem)
     }
 
     /// The From line for the account's `identities`, with `selected` chosen.
     fn from_field(
         identities: &[Identity],
-        selected: Option<IdentityId>,
+        selected: IdentityId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> FromField {
@@ -528,7 +539,7 @@ impl Composer {
         }
         let position = senders
             .iter()
-            .position(|s| Some(s.identity) == selected)
+            .position(|s| s.identity == selected)
             .map(IndexPath::new);
         let choice = cx.new(|cx| SelectState::new(senders, position, window, cx));
         let changes = cx.subscribe_in(
@@ -536,7 +547,7 @@ impl Composer {
             window,
             |this, _, event: &SelectEvent<Vec<Sender>>, window, cx| {
                 if let SelectEvent::Confirm(Some(identity)) = event
-                    && this.saved.identity != Some(*identity)
+                    && this.saved.from != *identity
                 {
                     this.changed(window, cx);
                 }
@@ -548,10 +559,15 @@ impl Composer {
         }
     }
 
-    fn sender_identity(&self, cx: &App) -> Option<IdentityId> {
+    /// Nothing chosen keeps the one saved.
+    fn sender_identity(&self, cx: &App) -> IdentityId {
         match &self.from {
             FromField::One(identity, _) => *identity,
-            FromField::Choice { senders, .. } => senders.read(cx).selected_value().copied(),
+            FromField::Choice { senders, .. } => senders
+                .read(cx)
+                .selected_value()
+                .copied()
+                .unwrap_or(self.saved.from),
         }
     }
 
@@ -594,11 +610,11 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let default = identities.first().map(|i| i.id);
-        let selected = self
-            .sender_identity(cx)
-            .filter(|id| identities.iter().any(|i| i.id == *id))
-            .or(default);
+        let current = self.sender_identity(cx);
+        let selected = match identities.first() {
+            Some(default) if !identities.iter().any(|i| i.id == current) => default.id,
+            _ => current,
+        };
         self.from = Self::from_field(identities, selected, window, cx);
         cx.notify();
     }

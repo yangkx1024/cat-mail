@@ -306,6 +306,7 @@ async fn check_saving_to_sent(
     let draft = client
         .create_draft(
             sender,
+            None,
             DraftContent {
                 subject: subject.clone(),
                 to: vec![Address {
@@ -544,12 +545,18 @@ async fn drafts_are_kept_in_dovecots_drafts_folder() {
         subject: format!("{run} {subject}"),
         ..Default::default()
     };
-    let draft = client.create_draft(account, content("one")).await.unwrap();
+    let draft = client
+        .create_draft(account, None, content("one"))
+        .await
+        .unwrap();
     let report = client.replay_pending(account).await.unwrap();
     assert_eq!((report.drafts_uploaded, report.drafts_failed), (1, 0));
     assert_eq!(copies(), [(format!("{run} one"), "DS".into())]);
 
-    client.update_draft(draft.id, content("two")).await.unwrap();
+    client
+        .update_draft(draft.id, draft.identity, content("two"))
+        .await
+        .unwrap();
     client.replay_pending(account).await.unwrap();
     assert_eq!(copies(), [(format!("{run} two"), "DS".into())]);
 

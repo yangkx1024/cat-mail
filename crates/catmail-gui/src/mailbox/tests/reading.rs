@@ -439,7 +439,7 @@ fn events_missed_meanwhile_read_everything_again(cx: &mut TestAppContext) {
     let client = &mail.client;
     pollster::block_on(async {
         let draft = client
-            .create_draft(mail.account(), catmail_core::DraftContent::default())
+            .create_draft(mail.account(), None, catmail_core::DraftContent::default())
             .await
             .unwrap();
         for n in 0..=catmail_core::EVENT_CAPACITY {
@@ -447,7 +447,10 @@ fn events_missed_meanwhile_read_everything_again(cx: &mut TestAppContext) {
                 subject: format!("Draft {n}"),
                 ..Default::default()
             };
-            client.update_draft(draft.id, content).await.unwrap();
+            client
+                .update_draft(draft.id, draft.identity, content)
+                .await
+                .unwrap();
         }
     });
     wait_until(|| {

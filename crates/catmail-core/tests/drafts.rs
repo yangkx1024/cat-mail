@@ -44,7 +44,7 @@ fn state() -> ServerState {
 impl Env {
     async fn draft(&self, subject: &str) -> DraftId {
         self.client
-            .create_draft(self.account, content(subject))
+            .create_draft(self.account, None, content(subject))
             .await
             .unwrap()
             .id
@@ -110,7 +110,7 @@ async fn each_change_replaces_the_copy_on_the_server() {
     assert_eq!(env.replay().await, ReplayReport::default());
     assert_eq!(env.fake.state().connections, connections);
 
-    env.client.update_draft(id, content("two")).await.unwrap();
+    env.edit(id, content("two")).await.unwrap();
     assert!(!env.on_server(id).await);
     env.replay().await;
     assert_eq!(
@@ -172,7 +172,7 @@ async fn a_lost_append_answer_leaves_one_copy() {
 
         // Stored, but the answer is lost with the connection. The replay starts over on
         // a new one (the old one came from the pool), and finds the copy there.
-        env.client.update_draft(id, content("two")).await.unwrap();
+        env.edit(id, content("two")).await.unwrap();
         env.fake.state().faults.drop_after_append = true;
         let start = env.fake.state().log.len();
         let report = env.replay().await;
@@ -200,7 +200,7 @@ async fn a_draft_edited_before_its_lost_upload_is_settled_keeps_the_latest() {
     env.replay().await;
 
     // "two" is stored, the answer lost, and the replay gives up: it can't log in again.
-    env.client.update_draft(id, content("two")).await.unwrap();
+    env.edit(id, content("two")).await.unwrap();
     {
         let mut state = env.fake.state();
         state.faults.drop_after_append = true;
@@ -216,7 +216,7 @@ async fn a_draft_edited_before_its_lost_upload_is_settled_keeps_the_latest() {
     );
     assert_eq!(subjects(&env.server_drafts()), ["one", "two"]);
 
-    env.client.update_draft(id, content("three")).await.unwrap();
+    env.edit(id, content("three")).await.unwrap();
     env.fake.state().faults.reject_login = false;
     let report = env.replay().await;
     assert_eq!((report.drafts_uploaded, report.drafts_failed), (1, 0));
@@ -339,7 +339,7 @@ async fn a_rebuilt_drafts_folder_keeps_one_copy() {
     assert_eq!(subjects(&env.server_drafts()), ["one"]);
     assert_eq!(env.appends(), 1);
 
-    env.client.update_draft(id, content("two")).await.unwrap();
+    env.edit(id, content("two")).await.unwrap();
     env.replay().await;
     assert_eq!(subjects(&env.server_drafts()), ["two"]);
 }
@@ -357,7 +357,7 @@ async fn background_sync_uploads_changes() {
         subjects(&env.server_drafts()) == ["one"]
     })
     .await;
-    env.client.update_draft(id, content("two")).await.unwrap();
+    env.edit(id, content("two")).await.unwrap();
     eventually("the new version alone", async || {
         subjects(&env.server_drafts()) == ["two"]
     })
@@ -415,7 +415,7 @@ async fn an_append_answer_not_read_in_full_is_still_settled() {
     assert!(env.on_server(id).await);
 
     // So the next change replaces that copy rather than leaving it behind.
-    env.client.update_draft(id, content("two")).await.unwrap();
+    env.edit(id, content("two")).await.unwrap();
     env.replay().await;
     assert_eq!(subjects(&env.server_drafts()), ["two"]);
     assert_eq!(env.appends(), 2);
@@ -432,7 +432,7 @@ async fn a_copy_replaced_or_deleted_before_a_rebuild_is_synced_goes() {
         if delete {
             env.client.delete_draft(id).await.unwrap();
         } else {
-            env.client.update_draft(id, content("two")).await.unwrap();
+            env.edit(id, content("two")).await.unwrap();
         }
         env.replay().await;
         env.client.sync_account(env.account).await.unwrap();
@@ -474,7 +474,11 @@ async fn a_reply_quoting_a_nul_doesnt_stop_the_sync() {
     // Nor can it be typed in.
     let mut nul = content("nul\0subject");
     nul.text = "a\0b".into();
-    let draft = env.client.create_draft(env.account, nul).await.unwrap();
+    let draft = env
+        .client
+        .create_draft(env.account, None, nul)
+        .await
+        .unwrap();
     assert_eq!(
         (draft.content.subject.as_str(), draft.content.text.as_str()),
         ("nulsubject", "ab")
@@ -641,7 +645,7 @@ async fn background_sync_waits_for_a_draft_to_settle() {
     let idles = env.fake.state().received("IDLE");
     for subject in ["on", "one"] {
         tokio::time::sleep(Duration::from_millis(150)).await;
-        env.client.update_draft(id, content(subject)).await.unwrap();
+        env.edit(id, content(subject)).await.unwrap();
     }
     assert_eq!(env.fake.state().received("IDLE"), idles);
     assert_eq!(env.appends(), 0);
@@ -686,7 +690,7 @@ async fn uploads_asked_for_dont_wait_for_a_draft_to_settle() {
     assert_eq!(report.drafts_uploaded, 1);
     assert!(env.on_server(id).await);
 
-    env.client.update_draft(id, content("two")).await.unwrap();
+    env.edit(id, content("two")).await.unwrap();
     env.client.sync_account(env.account).await.unwrap();
     assert_eq!(subjects(&env.server_drafts()), ["two"]);
 }

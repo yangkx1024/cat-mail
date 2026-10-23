@@ -162,9 +162,8 @@ pub(crate) enum DraftCommand {
 pub(crate) async fn compose(client: &MailClient, args: Compose, json: bool) -> Result<()> {
     let account = one_account(client, args.account.as_deref()).await?;
     let identity = args.fields.from.resolve(client, account.id).await?;
-    let mut content = args.fields.apply(DraftContent::default())?;
-    content.identity = identity;
-    let draft = client.create_draft(account.id, content).await?;
+    let content = args.fields.apply(DraftContent::default())?;
+    let draft = client.create_draft(account.id, identity, content).await?;
     finish_draft(client, draft, &args.attach, args.send, json).await
 }
 
@@ -178,8 +177,8 @@ pub(crate) async fn reply(client: &MailClient, args: Reply, json: bool) -> Resul
         if let Some(text) = text {
             write_above(&text, &mut content);
         }
-        content.identity = from.or(content.identity);
-        draft = client.update_draft(draft.id, content).await?;
+        let from = from.unwrap_or(draft.identity);
+        draft = client.update_draft(draft.id, from, content).await?;
     }
     finish_draft(client, draft, &args.attach, args.send, json).await
 }
@@ -198,9 +197,9 @@ pub(crate) async fn forward(client: &MailClient, args: Forward, json: bool) -> R
         if let Some(text) = text {
             write_above(&text, &mut content);
         }
-        content.identity = from.or(content.identity);
         set_recipients(recipients, &mut content);
-        draft = client.update_draft(draft.id, content).await?;
+        let from = from.unwrap_or(draft.identity);
+        draft = client.update_draft(draft.id, from, content).await?;
     }
     finish_draft(client, draft, &args.attach, args.send, json).await
 }
@@ -281,9 +280,7 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
                 print_draft_json(&draft)?;
             } else {
                 let identities = client.list_identities(draft.account_id).await?;
-                let from = identities
-                    .iter()
-                    .find(|i| Some(i.id) == draft.content.identity);
+                let from = identities.iter().find(|i| i.id == draft.identity);
                 print_draft(&draft, from);
             }
             None
@@ -291,9 +288,9 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
         DraftCommand::Edit { id, fields } => {
             let draft = get_draft(client, id).await?;
             let identity = fields.from.resolve(client, draft.account_id).await?;
-            let mut content = fields.apply(draft.content)?;
-            content.identity = identity.or(content.identity);
-            let draft = client.update_draft(draft.id, content).await?;
+            let from = identity.unwrap_or(draft.identity);
+            let content = fields.apply(draft.content)?;
+            let draft = client.update_draft(draft.id, from, content).await?;
             if json {
                 print_draft_json(&draft)?;
             } else {
@@ -521,7 +518,7 @@ mod tests {
             .await
             .unwrap();
         let drafts = client.list_drafts(account.id).await.unwrap();
-        assert_eq!(drafts[0].content.identity, Some(identity.id));
+        assert_eq!(drafts[0].identity, identity.id);
     }
 
     #[tokio::test(flavor = "multi_thread")]

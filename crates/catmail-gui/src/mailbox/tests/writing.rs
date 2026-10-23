@@ -399,10 +399,11 @@ fn a_draft_opened_twice_at_once_gets_one_window(cx: &mut TestAppContext) {
     let mail = TestMail::start();
     let (window, mailbox) = open(cx, &mail);
     wait_for_inbox(cx, &mailbox);
-    let draft = pollster::block_on(
-        mail.client
-            .create_draft(mail.account(), catmail_core::DraftContent::default()),
-    )
+    let draft = pollster::block_on(mail.client.create_draft(
+        mail.account(),
+        None,
+        catmail_core::DraftContent::default(),
+    ))
     .unwrap();
     cx.update_window(window, |_, window, cx| {
         for _ in 0..2 {

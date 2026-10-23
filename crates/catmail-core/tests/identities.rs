@@ -49,7 +49,7 @@ async fn add_identity(env: &Env, server: &FakeSmtp) -> Identity {
         .unwrap()
 }
 
-fn content(subject: &str, identity: Option<&Identity>) -> DraftContent {
+fn content(subject: &str) -> DraftContent {
     DraftContent {
         subject: subject.into(),
         to: vec![Address {
@@ -57,7 +57,6 @@ fn content(subject: &str, identity: Option<&Identity>) -> DraftContent {
             email: "bob@example.com".into(),
         }],
         text: "hi\n".into(),
-        identity: identity.map(|i| i.id),
         ..Default::default()
     }
 }
@@ -73,7 +72,7 @@ impl Env {
     async fn queue_as(&self, subject: &str, identity: Option<&Identity>) {
         let draft = self
             .client
-            .create_draft(self.account, content(subject, identity))
+            .create_draft(self.account, identity.map(|i| i.id), content(subject))
             .await
             .unwrap();
         self.client.send_draft(draft.id).await.unwrap();
@@ -145,7 +144,7 @@ async fn the_copy_in_drafts_is_from_the_identity() {
     let identity = add_identity(&env, &resend).await;
     env.client.sync_account(env.account).await.unwrap();
     env.client
-        .create_draft(env.account, content("draft", Some(&identity)))
+        .create_draft(env.account, Some(identity.id), content("draft"))
         .await
         .unwrap();
     env.client.replay_pending(env.account).await.unwrap();
@@ -226,7 +225,7 @@ async fn removing_an_identity_hands_its_drafts_to_the_default() {
     let identity = add_identity(&env, &resend).await;
     let draft = env
         .client
-        .create_draft(env.account, content("draft", Some(&identity)))
+        .create_draft(env.account, Some(identity.id), content("draft"))
         .await
         .unwrap();
     env.queue_as("queued", Some(&identity)).await;
@@ -241,7 +240,7 @@ async fn removing_an_identity_hands_its_drafts_to_the_default() {
     let identities = env.client.list_identities(env.account).await.unwrap();
     assert_eq!(identities, std::slice::from_ref(&own));
     let draft = env.client.get_draft(draft.id).await.unwrap().unwrap();
-    assert_eq!(draft.content.identity, Some(own.id));
+    assert_eq!(draft.identity, own.id);
     // And it goes out as the account.
     env.client.send_draft(draft.id).await.unwrap();
     assert_eq!(env.flush().await, [(OutboxStatus::Done, 1)]);
@@ -279,7 +278,7 @@ async fn drafts_are_written_only_as_the_accounts_identities() {
         .unwrap();
     let err = env
         .client
-        .create_draft(env.account, content("x", Some(&theirs)))
+        .create_draft(env.account, Some(theirs.id), content("x"))
         .await
         .unwrap_err();
     assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
@@ -366,14 +365,14 @@ async fn attachments_fit_the_server_that_sends_the_draft() {
 
     let theirs = env
         .client
-        .create_draft(env.account, content("theirs", Some(&identity)))
+        .create_draft(env.account, Some(identity.id), content("theirs"))
         .await
         .unwrap();
     let err = env.client.attach_file(theirs.id, &file).await.unwrap_err();
     assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
     let own = env
         .client
-        .create_draft(env.account, content("own", None))
+        .create_draft(env.account, None, content("own"))
         .await
         .unwrap();
     env.client.attach_file(own.id, &file).await.unwrap();
@@ -414,7 +413,7 @@ async fn identities_with_one_login_share_a_connection() {
     let file = sparse(dir.path(), "big.bin", MIB);
     let draft = env
         .client
-        .create_draft(env.account, content("big", Some(&alias)))
+        .create_draft(env.account, Some(alias.id), content("big"))
         .await
         .unwrap();
     let err = env.client.attach_file(draft.id, &file).await.unwrap_err();

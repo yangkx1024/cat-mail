@@ -481,7 +481,7 @@ mod tests {
         };
         let (draft, outbox) = store
             .write(|db| {
-                let draft = db.drafts().insert(account, &content, None, 1)?;
+                let draft = db.drafts().insert(account, None, &content, None, 1)?;
                 let outbox = db.outbox().queue(
                     &NewOutboxEntry {
                         account,
