@@ -3,15 +3,14 @@
 //! behind, as with `catmail account add`.
 
 use catmail_core::{Account, MailClient, NewAccount, Security, Verify};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::button::Button;
+use gpui_kit::component::{ActiveTheme as _, StyledExt as _, v_flex};
 use gpui_kit::{
     App, Context, EventEmitter, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div,
-    prelude::FluentBuilder as _, rems,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, rems,
 };
 
-use crate::login_form::{self, LoginFields, LoginValues, ServerFields, ServerValues};
+use crate::login_form::{self, LoginFields, LoginValues, ServerFields, ServerValues, Submit};
 
 pub enum AddAccountEvent {
     /// The login worked and the account is stored; it has not been synced yet.
@@ -48,9 +47,7 @@ pub struct AddAccount {
     smtp: ServerFields,
     /// False for the first account: there is nothing to go back to.
     cancellable: bool,
-    signing_in: bool,
-    error: Option<SharedString>,
-    _sign_in: Task<()>,
+    submit: Submit,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -94,9 +91,7 @@ impl AddAccount {
             imap,
             smtp,
             cancellable,
-            signing_in: false,
-            error: None,
-            _sign_in: Task::ready(()),
+            submit: Submit::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -110,59 +105,35 @@ impl AddAccount {
     }
 
     fn sign_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.signing_in {
-            return;
-        }
         let values = self.values(cx);
-        let new = match values.new_account() {
-            Ok(new) => new,
-            Err(problem) => {
-                self.error = Some(problem.into());
-                cx.notify();
-                return;
-            }
-        };
-        self.signing_in = true;
-        self.error = None;
-        cx.notify();
         let client = self.client.clone();
-        let password = values.login.password;
-        self._sign_in = cx.spawn_in(window, async move |this, cx| {
-            let added = client.add_account(new, password, Verify::Login).await;
-            this.update(cx, |this, cx| {
-                this.signing_in = false;
-                match added {
-                    Ok(account) => cx.emit(AddAccountEvent::Added(account)),
-                    Err(e) => this.error = Some(format!("Couldn't sign in: {e}").into()),
-                }
-                cx.notify();
-            })
-            .ok();
+        let request = values.new_account().map(|new| async move {
+            client
+                .add_account(new, values.login.password, Verify::Login)
+                .await
         });
+        self.submit.start(
+            |this: &mut Self| &mut this.submit,
+            request,
+            |account, cx| cx.emit(AddAccountEvent::Added(account)),
+            window,
+            cx,
+        );
     }
 }
 
 impl Render for AddAccount {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let actions = h_flex()
-            .justify_end()
-            .gap_2()
-            .when(self.cancellable, |this| {
-                this.child(
-                    // Once the account is being stored it will be, whatever the window does.
-                    Button::new("cancel")
-                        .label("Cancel")
-                        .disabled(self.signing_in)
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(AddAccountEvent::Cancelled))),
-                )
-            })
-            .child(
-                Button::new("sign-in")
-                    .primary()
-                    .label("Sign in")
-                    .loading(self.signing_in)
-                    .on_click(cx.listener(|this, _, window, cx| this.sign_in(window, cx))),
-            );
+        let actions = self.submit.actions(
+            self.cancellable.then(|| {
+                Button::new("cancel")
+                    .label("Cancel")
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(AddAccountEvent::Cancelled)))
+            }),
+            Button::new("sign-in")
+                .label("Sign in")
+                .on_click(cx.listener(|this, _, window, cx| this.sign_in(window, cx))),
+        );
 
         div()
             .id("add-account")
@@ -190,9 +161,7 @@ impl Render for AddAccount {
                     .child(self.login.render())
                     .child(self.imap.render(|this: &mut Self| &mut this.imap, cx))
                     .child(self.smtp.render(|this: &mut Self| &mut this.smtp, cx))
-                    .when_some(self.error.clone(), |this, error| {
-                        this.child(login_form::error("sign-in-error", error, cx))
-                    })
+                    .children(self.submit.error("sign-in-error", cx))
                     .child(actions),
             )
     }

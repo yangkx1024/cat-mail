@@ -275,6 +275,9 @@ INBOX，所以打开一个文件夹时同步它（`MailClient::sync_folder`，�
   `add_identity(.., Verify::Login)`，完成或取消后回到列表。设置对话框没有要确认的东西，
   它的 `on_ok` 不关闭，否则字段里按 Enter 会关掉整个设置、丢下正在添加的身份；表单和登录页一样，
   任一字段按 Enter 提交（`login_form::submit_on_enter`）。
+- 两个表单的提交流程也共用 `login_form::Submit`：进行中不重复提交、字段校验失败或登录失败显示在按钮
+  上方，以及"Cancel（进行中不可用）+ 主按钮（loading）"这一行按钮。表单只提供字段和要调用的
+  `MailClient` 方法。
 
 ## HTML 引擎
 

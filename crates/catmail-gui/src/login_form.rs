@@ -1,15 +1,19 @@
-//! The fields of a login form, shared by the sign-in page (an account) and the form for
-//! another sending address (an identity): who it is, the password, and a server.
+//! A login form, shared by the sign-in page (an account) and the form for another sending
+//! address (an identity): the fields (who it is, the password, and a server) and the
+//! submission.
+
+use std::future::Future;
 
 use catmail_core::{SecretString, Security, ServerConfig};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::form::{Field, Form};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::radio::RadioGroup;
-use gpui_kit::component::{ActiveTheme as _, StyledExt as _, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::{
     App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, TestSupportExt as _, Window, div, prelude::FluentBuilder as _,
+    Subscription, Task, TestSupportExt as _, Window, div, prelude::FluentBuilder as _,
 };
 
 /// Security choices, in the order the radio groups show them.
@@ -283,14 +287,85 @@ pub fn submit_on_enter<'a, T: 'static>(
         .collect()
 }
 
-/// Why signing in failed, under the form.
-pub fn error(id: &'static str, error: SharedString, cx: &App) -> impl IntoElement + use<> {
-    div()
-        .id(id)
-        .role(Role::Alert)
-        .test_support()
-        .aria_label(error.clone())
-        .text_sm()
-        .text_color(cx.theme().danger)
-        .child(error)
+/// A form's submission: whether one is running, and why the last one failed.
+pub struct Submit {
+    busy: bool,
+    error: Option<SharedString>,
+    _task: Task<()>,
+}
+
+impl Default for Submit {
+    fn default() -> Self {
+        Self {
+            busy: false,
+            error: None,
+            _task: Task::ready(()),
+        }
+    }
+}
+
+impl Submit {
+    /// Runs `request`, unless one is already running, and hands its result to `done`. A
+    /// problem with the values (`Err`) or the request's failure shows as the error;
+    /// `submit` finds this state in the form.
+    pub fn start<T: 'static, R: 'static>(
+        &mut self,
+        submit: fn(&mut T) -> &mut Submit,
+        request: Result<impl Future<Output = catmail_core::Result<R>> + 'static, &'static str>,
+        done: impl FnOnce(R, &mut Context<T>) + 'static,
+        window: &mut Window,
+        cx: &mut Context<T>,
+    ) {
+        if self.busy {
+            return;
+        }
+        cx.notify();
+        let request = match request {
+            Ok(request) => request,
+            Err(problem) => {
+                self.error = Some(problem.into());
+                return;
+            }
+        };
+        self.busy = true;
+        self.error = None;
+        self._task = cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update(cx, |this, cx| {
+                submit(this).busy = false;
+                match result {
+                    Ok(value) => done(value, cx),
+                    Err(e) => submit(this).error = Some(format!("Couldn't sign in: {e}").into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        });
+    }
+
+    /// Why the last submission failed, under the form.
+    pub fn error(&self, id: &'static str, cx: &App) -> Option<impl IntoElement + use<>> {
+        self.error.clone().map(|error| {
+            div()
+                .id(id)
+                .role(Role::Alert)
+                .test_support()
+                .aria_label(error.clone())
+                .text_sm()
+                .text_color(cx.theme().danger)
+                .child(error)
+        })
+    }
+
+    /// The buttons under the form: Cancel, if it has one, and the one that submits it.
+    /// Cancel is off while a submission runs: the engine stores the account or identity
+    /// whatever the window does (its blocking task isn't cancelled with the form's), so
+    /// leaving would only skip what follows.
+    pub fn actions(&self, cancel: Option<Button>, submit: Button) -> impl IntoElement + use<> {
+        h_flex()
+            .justify_end()
+            .gap_2()
+            .children(cancel.map(|cancel| cancel.disabled(self.busy)))
+            .child(submit.primary().loading(self.busy))
+    }
 }

@@ -3,14 +3,14 @@
 //! account.
 
 use catmail_core::{Account, MailClient, NewIdentity, Security, Verify};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{Disableable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::button::Button;
+use gpui_kit::component::{StyledExt as _, v_flex};
 use gpui_kit::{
     App, Context, EventEmitter, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Subscription, Task, Window, div, prelude::FluentBuilder as _,
+    Styled as _, Subscription, Window, div,
 };
 
-use crate::login_form::{self, LoginFields, LoginValues, ServerFields, ServerValues};
+use crate::login_form::{self, LoginFields, LoginValues, ServerFields, ServerValues, Submit};
 
 /// The form is done: the identity was added, or adding it was cancelled.
 pub struct IdentityFormClosed;
@@ -39,9 +39,7 @@ pub struct AddIdentity {
     account: Account,
     login: LoginFields,
     smtp: ServerFields,
-    adding: bool,
-    error: Option<SharedString>,
-    _add: Task<()>,
+    submit: Submit,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -70,9 +68,7 @@ impl AddIdentity {
             account,
             login,
             smtp,
-            adding: false,
-            error: None,
-            _add: Task::ready(()),
+            submit: Submit::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -85,59 +81,35 @@ impl AddIdentity {
     }
 
     fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.adding {
-            return;
-        }
         let values = self.values(cx);
-        let new = match values.new_identity() {
-            Ok(new) => new,
-            Err(problem) => {
-                self.error = Some(problem.into());
-                cx.notify();
-                return;
-            }
-        };
-        self.adding = true;
-        self.error = None;
-        cx.notify();
         let (client, account) = (self.client.clone(), self.account.id);
-        let password = values.login.password;
-        self._add = cx.spawn_in(window, async move |this, cx| {
-            let added = client
-                .add_identity(account, new, password, Verify::Login)
-                .await;
-            this.update(cx, |this, cx| {
-                this.adding = false;
-                match added {
-                    Ok(_) => cx.emit(IdentityFormClosed),
-                    Err(e) => this.error = Some(format!("Couldn't sign in: {e}").into()),
-                }
-                cx.notify();
-            })
-            .ok();
+        let request = values.new_identity().map(|new| async move {
+            client
+                .add_identity(account, new, values.login.password, Verify::Login)
+                .await
         });
+        self.submit.start(
+            |this: &mut Self| &mut this.submit,
+            request,
+            |_, cx| cx.emit(IdentityFormClosed),
+            window,
+            cx,
+        );
     }
 }
 
 impl Render for AddIdentity {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let actions = h_flex()
-            .justify_end()
-            .gap_2()
-            .child(
-                // Once the identity is being stored it will be, whatever the form does.
+        let actions = self.submit.actions(
+            Some(
                 Button::new("identity-cancel")
                     .label("Cancel")
-                    .disabled(self.adding)
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(IdentityFormClosed))),
-            )
-            .child(
-                Button::new("identity-add")
-                    .primary()
-                    .label("Add")
-                    .loading(self.adding)
-                    .on_click(cx.listener(|this, _, window, cx| this.add(window, cx))),
-            );
+            ),
+            Button::new("identity-add")
+                .label("Add")
+                .on_click(cx.listener(|this, _, window, cx| this.add(window, cx))),
+        );
         v_flex()
             .id("add-identity")
             .gap_5()
@@ -148,9 +120,7 @@ impl Render for AddIdentity {
             )
             .child(self.login.render())
             .child(self.smtp.render(|this: &mut Self| &mut this.smtp, cx))
-            .when_some(self.error.clone(), |this, error| {
-                this.child(login_form::error("identity-error", error, cx))
-            })
+            .children(self.submit.error("identity-error", cx))
             .child(actions)
     }
 }
