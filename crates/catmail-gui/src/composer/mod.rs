@@ -133,14 +133,18 @@ pub fn open(client: MailClient, from: ComposeFrom, window: &mut Window, cx: &mut
             let draft = match from {
                 ComposeFrom::New(account) => {
                     client
-                        .create_draft(account, None, DraftContent::default())
+                        .create_draft(account, None, DraftContent::default(), Vec::new())
                         .await?
                 }
                 ComposeFrom::Reply { message, all } => {
-                    client.reply(message, all, None, String::new()).await?
+                    client
+                        .reply(message, all, None, String::new(), Vec::new())
+                        .await?
                 }
                 ComposeFrom::Forward(message) => {
-                    client.forward(message, None, Forwarding::default()).await?
+                    client
+                        .forward(message, None, Forwarding::default(), Vec::new())
+                        .await?
                 }
                 ComposeFrom::Draft(id) => client
                     .get_draft(id)

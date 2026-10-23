@@ -229,7 +229,10 @@ mod tests {
             };
             let client = client.clone();
             async move {
-                let draft = client.create_draft(account, None, content).await.unwrap();
+                let draft = client
+                    .create_draft(account, None, content, Vec::new())
+                    .await
+                    .unwrap();
                 send(&client, draft.id, false).await
             }
         };
@@ -298,7 +301,7 @@ mod tests {
             let client = client.clone();
             async move {
                 let draft = client
-                    .create_draft(account, identity, content)
+                    .create_draft(account, identity, content, Vec::new())
                     .await
                     .unwrap();
                 client.send_draft(draft.id).await.unwrap();

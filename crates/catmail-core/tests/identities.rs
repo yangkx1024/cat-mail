@@ -4,6 +4,9 @@
 
 mod common;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use catmail_core::{
     Address, DraftContent, Error, ErrorKind, Event, Forwarding, Identity, NewIdentity,
     OutboxStatus, Verify,
@@ -73,7 +76,12 @@ impl Env {
     async fn queue_as(&self, subject: &str, identity: Option<&Identity>) {
         let draft = self
             .client
-            .create_draft(self.account, identity.map(|i| i.id), content(subject))
+            .create_draft(
+                self.account,
+                identity.map(|i| i.id),
+                content(subject),
+                Vec::new(),
+            )
             .await
             .unwrap();
         self.client.send_draft(draft.id).await.unwrap();
@@ -145,7 +153,7 @@ async fn the_copy_in_drafts_is_from_the_identity() {
     let identity = add_identity(&env, &resend).await;
     env.client.sync_account(env.account).await.unwrap();
     env.client
-        .create_draft(env.account, Some(identity.id), content("draft"))
+        .create_draft(env.account, Some(identity.id), content("draft"), Vec::new())
         .await
         .unwrap();
     env.client.replay_pending(env.account).await.unwrap();
@@ -236,7 +244,7 @@ async fn removing_an_identity_hands_its_drafts_to_the_default() {
     let identity = add_identity(&env, &resend).await;
     let draft = env
         .client
-        .create_draft(env.account, Some(identity.id), content("draft"))
+        .create_draft(env.account, Some(identity.id), content("draft"), Vec::new())
         .await
         .unwrap();
     env.queue_as("queued", Some(&identity)).await;
@@ -289,7 +297,7 @@ async fn drafts_are_written_only_as_the_accounts_identities() {
         .unwrap();
     let err = env
         .client
-        .create_draft(env.account, Some(theirs.id), content("x"))
+        .create_draft(env.account, Some(theirs.id), content("x"), Vec::new())
         .await
         .unwrap_err();
     assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
@@ -376,17 +384,88 @@ async fn attachments_fit_the_server_that_sends_the_draft() {
 
     let theirs = env
         .client
-        .create_draft(env.account, Some(identity.id), content("theirs"))
+        .create_draft(
+            env.account,
+            Some(identity.id),
+            content("theirs"),
+            Vec::new(),
+        )
         .await
         .unwrap();
     let err = env.client.attach_file(theirs.id, &file).await.unwrap_err();
     assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
     let own = env
         .client
-        .create_draft(env.account, None, content("own"))
+        .create_draft(env.account, None, content("own"), Vec::new())
         .await
         .unwrap();
     env.client.attach_file(own.id, &file).await.unwrap();
+
+    // The same for files given with a new draft.
+    let err = env
+        .client
+        .create_draft(
+            env.account,
+            Some(identity.id),
+            content("theirs"),
+            vec![file.clone()],
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err.kind(), ErrorKind::Invalid), "{err:?}");
+    env.client
+        .create_draft(env.account, None, content("own"), vec![file])
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn files_are_checked_for_the_identity_the_draft_is_made_as() {
+    const MIB: u64 = 1024 * 1024;
+    let env = env(state()).await;
+    let resend = service().await;
+    resend.state().faults.size_limit = Some(MIB);
+    let small = env
+        .client
+        .add_identity(
+            env.account,
+            new_identity(&resend),
+            "api-key".into(),
+            Verify::Login,
+        )
+        .await
+        .unwrap();
+    let own = env.client.list_identities(env.account).await.unwrap();
+    let own = own.iter().find(|i| i.is_default).unwrap().id;
+    let dir = tempfile::tempdir().unwrap();
+    let file = sparse(dir.path(), "big.bin", 20 * MIB);
+
+    // The default changes while the file is copied: the draft is still made as the
+    // identity the file was checked for, not the one that is the default by then.
+    let stop = Arc::new(AtomicBool::new(false));
+    let switching = tokio::spawn({
+        let client = env.client.clone();
+        let stop = stop.clone();
+        async move {
+            while !stop.load(Ordering::Relaxed) {
+                for id in [small.id, own] {
+                    client.set_default_identity(id).await.unwrap();
+                }
+            }
+        }
+    });
+    for _ in 0..20 {
+        let made = env
+            .client
+            .create_draft(env.account, None, content("big"), vec![file.clone()])
+            .await;
+        match made {
+            Ok(draft) => assert_eq!(draft.identity, own),
+            Err(e) => assert_eq!(e.kind(), ErrorKind::Invalid, "{e:?}"),
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    switching.await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -424,7 +503,7 @@ async fn identities_with_one_login_share_a_connection() {
     let file = sparse(dir.path(), "big.bin", MIB);
     let draft = env
         .client
-        .create_draft(env.account, Some(alias.id), content("big"))
+        .create_draft(env.account, Some(alias.id), content("big"), Vec::new())
         .await
         .unwrap();
     let err = env.client.attach_file(draft.id, &file).await.unwrap_err();
@@ -498,14 +577,20 @@ async fn answers_are_made_as_the_identity_asked_for_or_written_to() {
     assert_eq!(by_address("ALICE@example.com").await.unwrap(), Some(own.id));
     assert_eq!(by_address("carol@example.com").await.unwrap(), None);
 
-    let reply = |from| env.client.reply(message, false, from, String::new());
+    let reply = |from| {
+        env.client
+            .reply(message, false, from, String::new(), Vec::new())
+    };
     assert_eq!(
         reply(None).await.unwrap().identity,
         identity.id,
         "written to"
     );
     assert_eq!(reply(Some(own.id)).await.unwrap().identity, own.id);
-    let forward = |from| env.client.forward(message, from, Forwarding::default());
+    let forward = |from| {
+        env.client
+            .forward(message, from, Forwarding::default(), Vec::new())
+    };
     assert_eq!(forward(None).await.unwrap().identity, own.id, "the default");
     assert_eq!(
         forward(Some(identity.id)).await.unwrap().identity,

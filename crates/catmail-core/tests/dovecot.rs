@@ -316,6 +316,7 @@ async fn check_saving_to_sent(
                 text: "发送测试".into(),
                 ..Default::default()
             },
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -546,7 +547,7 @@ async fn drafts_are_kept_in_dovecots_drafts_folder() {
         ..Default::default()
     };
     let draft = client
-        .create_draft(account, None, content("one"))
+        .create_draft(account, None, content("one"), Vec::new())
         .await
         .unwrap();
     let report = client.replay_pending(account).await.unwrap();

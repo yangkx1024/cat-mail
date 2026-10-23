@@ -163,8 +163,10 @@ pub(crate) async fn compose(client: &MailClient, args: Compose, json: bool) -> R
     let account = one_account(client, args.account.as_deref()).await?;
     let identity = args.fields.from.resolve(client, account.id).await?;
     let content = args.fields.apply(DraftContent::default())?;
-    let draft = client.create_draft(account.id, identity, content).await?;
-    finish_draft(client, draft, &args.attach, args.send, json).await
+    let draft = client
+        .create_draft(account.id, identity, content, args.attach)
+        .await?;
+    finish_draft(client, draft, args.send, json).await
 }
 
 pub(crate) async fn reply(client: &MailClient, args: Reply, json: bool) -> Result<()> {
@@ -172,9 +174,15 @@ pub(crate) async fn reply(client: &MailClient, args: Reply, json: bool) -> Resul
     let text = read_body(args.body, args.body_file.as_ref())?;
     let from = from_for(client, &args.from, MessageId(args.id)).await?;
     let draft = client
-        .reply(MessageId(args.id), args.all, from, text.unwrap_or_default())
+        .reply(
+            MessageId(args.id),
+            args.all,
+            from,
+            text.unwrap_or_default(),
+            args.attach,
+        )
         .await?;
-    finish_draft(client, draft, &args.attach, args.send, json).await
+    finish_draft(client, draft, args.send, json).await
 }
 
 pub(crate) async fn forward(client: &MailClient, args: Forward, json: bool) -> Result<()> {
@@ -191,8 +199,10 @@ pub(crate) async fn forward(client: &MailClient, args: Forward, json: bool) -> R
         bail!("--send needs a recipient: --to, --cc or --bcc");
     }
     let from = from_for(client, &args.from, MessageId(args.id)).await?;
-    let draft = client.forward(MessageId(args.id), from, forwarding).await?;
-    finish_draft(client, draft, &args.attach, args.send, json).await
+    let draft = client
+        .forward(MessageId(args.id), from, forwarding, args.attach)
+        .await?;
+    finish_draft(client, draft, args.send, json).await
 }
 
 /// The identity `from` names for an answer to `message`, among its account's: the
@@ -214,26 +224,15 @@ async fn from_for(
     from.resolve(client, account).await
 }
 
-/// Attaches the files, then sends the draft or shows it. If a file can't be attached,
-/// the command fails as a whole and the new draft goes: the user, who was never told its
-/// id, would only run the command again and get another one.
+/// Sends the new draft or shows it. Its files were attached as it was made: a file that
+/// can't be fails the command before there is a draft, which the user, never told its id,
+/// would only make again by running the command again.
 async fn finish_draft(
     client: &MailClient,
     mut draft: Draft,
-    attach: &[PathBuf],
     send_now: bool,
     json: bool,
 ) -> Result<()> {
-    for path in attach {
-        if let Err(e) = client.attach_file(draft.id, path).await {
-            let mut error =
-                anyhow::Error::new(e).context(format!("failed to attach {}", path.display()));
-            if let Err(e) = client.delete_draft(draft.id).await {
-                error = error.context(format!("kept as draft {} ({e})", draft.id));
-            }
-            return Err(error);
-        }
-    }
     if send_now {
         return outbox::send(client, draft.id, json).await;
     }

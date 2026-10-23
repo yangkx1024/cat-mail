@@ -403,6 +403,7 @@ fn a_draft_opened_twice_at_once_gets_one_window(cx: &mut TestAppContext) {
         mail.account(),
         None,
         catmail_core::DraftContent::default(),
+        Vec::new(),
     ))
     .unwrap();
     cx.update_window(window, |_, window, cx| {

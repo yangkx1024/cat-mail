@@ -25,6 +25,13 @@ pub enum Error {
     #[error("outgoing mail server (SMTP): {0}")]
     OutgoingServer(Box<Error>),
 
+    /// Attaching a file to a new draft failed so; no draft was made.
+    #[error("failed to attach {}: {error}", path.display())]
+    Attach {
+        path: std::path::PathBuf,
+        error: Box<Error>,
+    },
+
     /// The server rejected the credentials.
     #[error("login rejected by the server ({0}); check the username and password")]
     AuthFailed(String),
@@ -132,7 +139,7 @@ impl Error {
             Self::Imap(ImapError(e)) => e.kind(),
             Self::Smtp(SmtpError(e)) => e.kind(),
             Self::Http(HttpError(e)) => e.kind(),
-            Self::OutgoingServer(e) => e.kind(),
+            Self::OutgoingServer(e) | Self::Attach { error: e, .. } => e.kind(),
             Self::AuthFailed(_) => K::Auth,
             Self::Unsupported(_)
             | Self::InvalidInput(_)

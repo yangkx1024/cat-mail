@@ -40,7 +40,7 @@ impl Env {
     async fn queue(&self, subject: &str) -> OutboxEntry {
         let draft = self
             .client
-            .create_draft(self.account, None, content(subject))
+            .create_draft(self.account, None, content(subject), Vec::new())
             .await
             .unwrap();
         self.client.send_draft(draft.id).await.unwrap()
@@ -646,7 +646,7 @@ async fn replies_are_threaded_and_quoted() {
 
     let draft = env
         .client
-        .reply(original, true, None, String::new())
+        .reply(original, true, None, String::new(), Vec::new())
         .await
         .unwrap();
     assert_eq!(draft.content.subject, "Re: 季度报告");
@@ -684,7 +684,7 @@ async fn attachments_are_copied_when_added() {
 
     let draft = env
         .client
-        .create_draft(env.account, None, content("with attachment"))
+        .create_draft(env.account, None, content("with attachment"), Vec::new())
         .await
         .unwrap();
     let pdf = env.client.attach_file(draft.id, &path).await.unwrap();
@@ -718,7 +718,7 @@ async fn attachments_are_limited_in_size() {
     let file = |name: &str, size: u64| sparse(dir.path(), name, size);
     let draft = env
         .client
-        .create_draft(env.account, None, content("with attachments"))
+        .create_draft(env.account, None, content("with attachments"), Vec::new())
         .await
         .unwrap();
     let blobs = env.client.config().blob_dir();
@@ -769,6 +769,54 @@ async fn attachments_are_limited_in_size() {
         .unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn files_given_with_a_new_draft_come_with_it_or_no_draft_is_made() {
+    const LIMIT: u64 = 25 * 1024 * 1024;
+    let env = env(state()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = |name: &str, size: u64| sparse(dir.path(), name, size);
+    let create = |files| {
+        env.client
+            .create_draft(env.account, None, content("with files"), files)
+    };
+
+    // The limit is on the files together; the error names the one that doesn't fit.
+    let err = create(vec![file("most.bin", LIMIT - 4), file("five.txt", 5)])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, Error::Attach { path, error }
+            if path.ends_with("five.txt") && matches!(**error, Error::InvalidInput(_))),
+        "{err:?}"
+    );
+    assert_eq!(err.kind(), ErrorKind::Invalid);
+    let missing = dir.path().join("missing.pdf");
+    let err = create(vec![missing.clone()]).await.unwrap_err();
+    assert!(
+        matches!(&err, Error::Attach { path, .. } if *path == missing),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("missing.pdf"), "{err}");
+    assert!(
+        env.client
+            .list_drafts(env.account)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let draft = create(vec![file("most.bin", LIMIT - 4), file("four.txt", 4)])
+        .await
+        .unwrap();
+    let names: Vec<_> = draft
+        .attachments
+        .iter()
+        .map(|a| (a.filename.as_str(), a.size))
+        .collect();
+    assert_eq!(names, [("most.bin", LIMIT - 4), ("four.txt", 4)]);
+    assert_eq!(env.client.list_drafts(env.account).await.unwrap(), [draft]);
+}
+
 /// What attaching `size` bytes to `draft` does: `Some` with the attachment, `None` if
 /// it is refused as too large.
 async fn attach(
@@ -797,7 +845,7 @@ async fn attachments_follow_the_size_the_server_announces() {
     let dir = tempfile::tempdir().unwrap();
     let draft = env
         .client
-        .create_draft(env.account, None, content("big"))
+        .create_draft(env.account, None, content("big"), Vec::new())
         .await
         .unwrap()
         .id;
@@ -839,7 +887,7 @@ async fn attachments_fit_the_append_limit_learned_by_syncing() {
     env.client.sync_account(env.account).await.unwrap();
     let draft = env
         .client
-        .create_draft(env.account, None, content("big"))
+        .create_draft(env.account, None, content("big"), Vec::new())
         .await
         .unwrap()
         .id;
@@ -876,7 +924,7 @@ async fn an_account_added_checked_knows_its_limits_before_the_first_send() {
         .unwrap();
     let draft = env
         .client
-        .create_draft(checked.id, None, content("big"))
+        .create_draft(checked.id, None, content("big"), Vec::new())
         .await;
     assert!(
         attach(&env, dir.path(), draft.unwrap().id, MIB)
@@ -893,7 +941,7 @@ async fn an_account_added_checked_knows_its_limits_before_the_first_send() {
         .unwrap();
     let draft = env
         .client
-        .create_draft(unchecked.id, None, content("big"))
+        .create_draft(unchecked.id, None, content("big"), Vec::new())
         .await;
     attach(&env, dir.path(), draft.unwrap().id, MIB)
         .await
@@ -906,13 +954,15 @@ async fn drafts_are_checked_before_sending() {
     let mut bad = content("x");
     bad.to.push(addr("not an address"));
     assert!(matches!(
-        env.client.create_draft(env.account, None, bad).await,
+        env.client
+            .create_draft(env.account, None, bad, Vec::new())
+            .await,
         Err(Error::InvalidInput(_))
     ));
 
     let empty = env
         .client
-        .create_draft(env.account, None, DraftContent::default())
+        .create_draft(env.account, None, DraftContent::default(), Vec::new())
         .await
         .unwrap();
     assert!(matches!(
@@ -986,7 +1036,7 @@ async fn the_overview_counts_drafts_and_lists_the_outbox() {
     let env = env(state()).await;
     env.client.sync_account(env.account).await.unwrap();
     env.client
-        .create_draft(env.account, None, content("Kept"))
+        .create_draft(env.account, None, content("Kept"), Vec::new())
         .await
         .unwrap();
     let queued = env.queue("Queued").await;
