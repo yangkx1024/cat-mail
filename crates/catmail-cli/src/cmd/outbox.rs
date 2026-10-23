@@ -205,12 +205,12 @@ fn report(entry: &OutboxEntry, blocked: Option<&ReportedError>, json: bool) -> R
 
 #[cfg(test)]
 mod tests {
-    use catmail_core::{Address, DraftContent, Verify};
+    use catmail_core::{Address, DraftContent};
     use catmail_testkit::{FakeImap, FakeSmtp, ServerState, SmtpState};
 
     use super::*;
     use crate::exit::outcome;
-    use crate::test_support::synced_with_smtp;
+    use crate::test_support::{add_news_identity, synced_with_smtp};
 
     #[tokio::test(flavor = "multi_thread")]
     async fn exit_code_says_how_a_send_ended() {
@@ -280,24 +280,12 @@ mod tests {
         let service = FakeSmtp::start(SmtpState::new("resend", "key")).await;
         let dir = tempfile::tempdir().unwrap();
         let (client, account) = synced_with_smtp(&fake, smtp.port(), dir.path()).await;
-        let identity = client
-            .add_identity(
-                account,
-                catmail_core::NewIdentity {
-                    email: "news@example.org".into(),
-                    display_name: None,
-                    username: "resend".into(),
-                    smtp: catmail_core::ServerConfig {
-                        host: "127.0.0.1".into(),
-                        port: service.port(),
-                        security: catmail_core::Security::Plain,
-                    },
-                },
-                "key".into(),
-                Verify::Skip,
-            )
-            .await
-            .unwrap();
+        let through = catmail_core::ServerConfig {
+            host: "127.0.0.1".into(),
+            port: service.port(),
+            security: catmail_core::Security::Plain,
+        };
+        let identity = add_news_identity(&client, account, through).await;
         let queue = |identity| {
             let content = DraftContent {
                 subject: "hi".into(),

@@ -402,6 +402,25 @@ impl MailClient {
             .await
     }
 
+    /// The account's identity that sends as `email`, in any case. For an address two
+    /// identities send as (through different servers), the default if it is one of them,
+    /// else the oldest.
+    pub async fn identity_by_address(
+        &self,
+        account: AccountId,
+        email: &str,
+    ) -> Result<Option<IdentityId>> {
+        let engine = self.engine.clone();
+        let email = email.to_owned();
+        self.rt
+            .run_blocking(move || {
+                Ok(engine
+                    .store
+                    .read(|db| db.identities().by_email(account, &email))?)
+            })
+            .await
+    }
+
     /// Stores another address the account sends as, with its own SMTP server and
     /// password. It isn't the default. With [`Verify::Login`] it first logs in to the SMTP
     /// server, as [`add_account`](Self::add_account) does, keeping the SIZE the server
@@ -792,23 +811,33 @@ impl MailClient {
     }
 
     /// A new draft answering the message, to its sender (or Reply-To) and, with `all`,
-    /// to everyone else it went to, quoting its text and threaded to it. Downloads the
-    /// body first if needed.
-    pub async fn reply(&self, message: MessageId, all: bool) -> Result<Draft> {
+    /// to everyone else it went to, quoting its text and threaded to it. Sent as `from`,
+    /// one of the message's account's identities; with `None`, as the identity the
+    /// message came from or went to (see [`identity_by_address`]), else the default.
+    /// Downloads the body first if needed.
+    ///
+    /// [`identity_by_address`]: Self::identity_by_address
+    pub async fn reply(
+        &self,
+        message: MessageId,
+        all: bool,
+        from: Option<IdentityId>,
+    ) -> Result<Draft> {
         let engine = self.engine.clone();
         self.rt
-            .run(async move { drafts::reply(&engine, message, all).await })
+            .run(async move { drafts::reply(&engine, message, all, from).await })
             .await
     }
 
     /// A new draft forwarding the message, to no one yet: `Fwd:` and its subject, its
     /// headers and text below an empty start, and copies of its attachments (not the
     /// images shown within it). Downloads the body and attachments first if needed;
-    /// fails, creating nothing, if one can't be had.
-    pub async fn forward(&self, message: MessageId) -> Result<Draft> {
+    /// fails, creating nothing, if one can't be had. Sent as `from`, one of the
+    /// message's account's identities, its default with `None`.
+    pub async fn forward(&self, message: MessageId, from: Option<IdentityId>) -> Result<Draft> {
         let engine = self.engine.clone();
         self.rt
-            .run(async move { drafts::forward(&engine, message).await })
+            .run(async move { drafts::forward(&engine, message, from).await })
             .await
     }
 

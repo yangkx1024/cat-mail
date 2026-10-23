@@ -60,11 +60,14 @@
 - **草稿选身份**：`drafts.identity_id` 必填，读出的 `Draft::identity` 总是一个具体的身份。身份不在
   `DraftContent` 里：只有新建（`create_draft(account, from: Option<IdentityId>, ..)`）可以不指定，存成
   账户当时的默认身份；`update_draft(id, from: IdentityId, ..)` 必须给出，自己拼一个 `DraftContent` 的
-  调用方不会无意中把发件人换回默认。回复按原信选好身份直接传入，转发用默认身份。存下时由 repository
+  调用方不会无意中把发件人换回默认。`reply`、`forward` 也可以指定身份（`from: Option<IdentityId>`），
+  建草稿时就定下，不再事后 `update_draft`；不指定时回复按原信选，转发用默认身份。存下时由 repository
   检查身份属于草稿的账户（复合外键 `(identity_id, account_id)` 兜底）；改身份和改别的内容一样算一次修改。From 头、MAIL FROM 和
   Message-ID 的域名都来自所选身份；Drafts 里的副本也是。
+- **按地址找身份**只有一处：`Identities::by_email`（`MailClient::identity_by_address`），不分大小写；
+  几个身份地址相同（经不同服务器）时默认的优先，其次最早添加的。回复和 CLI 的 `--from` 都用它。
 - **回复**用原信寄给的那个地址：在原信的 To、Cc 里按顺序找第一个是账户身份的地址；回复自己发出的信
-  则用它的发件人。几个身份地址相同时用排在前面的（默认的优先）；都不是时用默认身份。账户的地址本身也算
+  则用它的发件人。地址对应的身份按上一条找；都不是时用默认身份。账户的地址本身也算
   "自己"（没有身份再用它时也是），不会被加进回复全部的收件人。
 - **outbox** 入队时从草稿行复制 `identity_id`（必填，与检查 `revision` 在同一事务）。一轮发送按 SMTP 登录
   分组（见[重试](#重试)），连接失败只推迟经这条登录的条目，退避和账户状态仍按身份（`AccountStatus::send`，

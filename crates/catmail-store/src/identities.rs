@@ -127,6 +127,20 @@ impl<'c> Identities<'c> {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The account's identity that sends as `email`, in any case: the default if it is
+    /// one of those (the same address through two servers), else the oldest.
+    pub fn by_email(&self, account: AccountId, email: &str) -> Result<Option<IdentityId>> {
+        // `email` compares without case (`COLLATE NOCASE`).
+        Ok(self
+            .conn
+            .prepare_cached(
+                "SELECT id FROM identities WHERE account_id = ?1 AND email = ?2
+                 ORDER BY is_default DESC, id LIMIT 1",
+            )?
+            .query_row((account.0, email), |r| Ok(IdentityId(r.get(0)?)))
+            .optional()?)
+    }
+
     /// The account's default identity; `None` if there is no such account.
     pub fn default_of(&self, account: AccountId) -> Result<Option<IdentityId>> {
         Ok(self
@@ -439,6 +453,40 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn by_email_prefers_the_default_then_the_oldest() {
+        let store = test_util::store();
+        let a = test_util::account(&store, "a@example.com");
+        let b = test_util::account(&store, "b@example.com");
+        let own = default_of(&store, a);
+        let by_email = |account, email: &str| {
+            store
+                .read(|db| db.identities().by_email(account, email))
+                .unwrap()
+        };
+        let first = add(&store, a, "news@example.com");
+        let second = store
+            .write(|db| {
+                let other_login = NewIdentity {
+                    username: "other".into(),
+                    ..new_identity("news@example.com")
+                };
+                db.identities().insert(a, &other_login, "key:other", None)
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_email(a, "NEWS@example.com"), Some(first.id));
+        store
+            .write(|db| db.identities().set_default(second.id))
+            .unwrap();
+        assert_eq!(by_email(a, "news@example.com"), Some(second.id));
+        // The account's own address through another server: the first identity is older.
+        add(&store, a, "a@example.com");
+        assert_eq!(by_email(a, "a@example.com"), Some(own));
+        assert_eq!(by_email(a, "b@example.com"), None, "another account's");
+        assert_eq!(by_email(b, "news@example.com"), None);
     }
 
     #[test]

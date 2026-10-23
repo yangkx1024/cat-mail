@@ -171,14 +171,13 @@ pub(crate) async fn reply(client: &MailClient, args: Reply, json: bool) -> Resul
     // Before the draft exists, so a missing file doesn't leave one behind.
     let text = read_body(args.body, args.body_file.as_ref())?;
     let from = from_for(client, &args.from, MessageId(args.id)).await?;
-    let mut draft = client.reply(MessageId(args.id), args.all).await?;
-    if text.is_some() || from.is_some() {
+    let mut draft = client.reply(MessageId(args.id), args.all, from).await?;
+    if let Some(text) = text {
         let mut content = draft.content.clone();
-        if let Some(text) = text {
-            write_above(&text, &mut content);
-        }
-        let from = from.unwrap_or(draft.identity);
-        draft = client.update_draft(draft.id, from, content).await?;
+        write_above(&text, &mut content);
+        draft = client
+            .update_draft(draft.id, draft.identity, content)
+            .await?;
     }
     finish_draft(client, draft, &args.attach, args.send, json).await
 }
@@ -191,20 +190,22 @@ pub(crate) async fn forward(client: &MailClient, args: Forward, json: bool) -> R
         bail!("--send needs a recipient: --to, --cc or --bcc");
     }
     let from = from_for(client, &args.from, MessageId(args.id)).await?;
-    let mut draft = client.forward(MessageId(args.id)).await?;
-    if text.is_some() || from.is_some() || recipients.iter().any(Option::is_some) {
+    let mut draft = client.forward(MessageId(args.id), from).await?;
+    if text.is_some() || recipients.iter().any(Option::is_some) {
         let mut content = draft.content.clone();
         if let Some(text) = text {
             write_above(&text, &mut content);
         }
         set_recipients(recipients, &mut content);
-        let from = from.unwrap_or(draft.identity);
-        draft = client.update_draft(draft.id, from, content).await?;
+        draft = client
+            .update_draft(draft.id, draft.identity, content)
+            .await?;
     }
     finish_draft(client, draft, &args.attach, args.send, json).await
 }
 
-/// The identity `from` names for an answer to `message`, among its account's.
+/// The identity `from` names for an answer to `message`, among its account's: the
+/// message is read for its account, so the draft is made as it from the start.
 async fn from_for(
     client: &MailClient,
     from: &SendAs,
@@ -435,9 +436,11 @@ mod tests {
     use std::sync::Arc;
 
     use catmail_core::{Config, MemorySecrets, NewAccount, Security, ServerConfig, Verify};
+    use catmail_testkit::{FakeImap, ServerState};
     use tokio::runtime::Handle;
 
     use super::*;
+    use crate::test_support::{add_news_identity, synced};
 
     async fn client_with_account(dir: &std::path::Path) -> MailClient {
         let client = MailClient::builder(Config::with_data_dir(dir))
@@ -472,24 +475,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let client = client_with_account(dir.path()).await;
         let account = client.list_accounts().await.unwrap().remove(0);
-        let identity = client
-            .add_identity(
-                account.id,
-                catmail_core::NewIdentity {
-                    email: "news@example.org".into(),
-                    display_name: None,
-                    username: "resend".into(),
-                    smtp: ServerConfig {
-                        host: "smtp.example.org".into(),
-                        port: 465,
-                        security: Security::Tls,
-                    },
-                },
-                "key".into(),
-                Verify::Skip,
-            )
-            .await
-            .unwrap();
+        let smtp = ServerConfig {
+            host: "smtp.example.org".into(),
+            port: 465,
+            security: Security::Tls,
+        };
+        let identity = add_news_identity(&client, account.id, smtp).await;
         let args = |from: &str| Compose {
             account: None,
             fields: Fields {
@@ -519,6 +510,63 @@ mod tests {
             .unwrap();
         let drafts = client.list_drafts(account.id).await.unwrap();
         assert_eq!(drafts[0].identity, identity.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn answers_are_made_as_the_identity_from_names() {
+        let mut state = ServerState::new("alice", "pw");
+        state.inbox().append_simple("hello");
+        let fake = FakeImap::start(state).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (client, account) = synced(&fake, dir.path()).await;
+        let smtp = ServerConfig {
+            host: "smtp.example.org".into(),
+            port: 465,
+            security: Security::Tls,
+        };
+        let identity = add_news_identity(&client, account, smtp).await;
+        let replying = |from: &str| Reply {
+            id: 1,
+            from: SendAs {
+                from: Some(from.into()),
+            },
+            all: false,
+            body: Some("thanks".into()),
+            body_file: None,
+            attach: Vec::new(),
+            send: false,
+        };
+        let err = reply(&client, replying("other@example.org"), false)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("identity list"), "{err:#}");
+        assert!(client.list_drafts(account).await.unwrap().is_empty());
+
+        reply(&client, replying("News@example.org"), false)
+            .await
+            .unwrap();
+        let forwarding = Forward {
+            id: 1,
+            from: SendAs {
+                from: Some(identity.id.to_string()),
+            },
+            recipients: Recipients {
+                to: None,
+                cc: None,
+                bcc: None,
+            },
+            body: None,
+            body_file: None,
+            attach: Vec::new(),
+            send: false,
+        };
+        forward(&client, forwarding, false).await.unwrap();
+        let drafts = client.list_drafts(account).await.unwrap();
+        assert_eq!(drafts.len(), 2);
+        assert!(
+            drafts.iter().all(|d| d.identity == identity.id),
+            "{drafts:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

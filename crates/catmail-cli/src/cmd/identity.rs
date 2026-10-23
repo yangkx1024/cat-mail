@@ -1,7 +1,7 @@
 //! `catmail identity`: other addresses an account sends as, each through an SMTP server
 //! of its own, and `--from`, which picks one for a message.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result};
 use catmail_core::{Account, AccountId, IdentityId, MailClient, NewIdentity, SecretString};
 use clap::{Args, Subcommand};
 
@@ -115,23 +115,26 @@ async fn add(
     Ok(())
 }
 
-/// The identity of the account `--from` names, by address or id. For an address two of
-/// them send as, the default if it is one of them, else the oldest.
+/// The identity of the account `--from` names, by id or address (for an address two of
+/// them send as, see [`MailClient::identity_by_address`]).
 pub(crate) async fn resolve_from(
     client: &MailClient,
     account: AccountId,
     from: &str,
 ) -> Result<IdentityId> {
     let from = from.trim();
-    let identities = client.list_identities(account).await?;
-    let id = from.parse::<i64>().ok();
-    match identities
-        .iter()
-        .find(|i| i.email.eq_ignore_ascii_case(from) || Some(i.id.0) == id)
-    {
-        Some(identity) => Ok(identity.id),
-        None => bail!("account {account} has no identity `{from}`; see `catmail identity list`"),
-    }
+    let found = match from.parse::<i64>() {
+        Ok(id) => client
+            .list_identities(account)
+            .await?
+            .into_iter()
+            .find(|i| i.id.0 == id)
+            .map(|i| i.id),
+        Err(_) => client.identity_by_address(account, from).await?,
+    };
+    found.with_context(|| {
+        format!("account {account} has no identity `{from}`; see `catmail identity list`")
+    })
 }
 
 #[cfg(test)]
