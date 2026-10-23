@@ -50,6 +50,7 @@ impl Refresh {
             Event::OutboxChanged { account } => sidebar(shown == Some(&Source::Outbox(account))),
             Event::AccountStatusChanged { .. }
             | Event::PendingOpsChanged { .. }
+            | Event::ChangesRefused { .. }
             | Event::MessageSent { .. } => Self::default(),
         }
     }
@@ -219,7 +220,8 @@ mod tests {
             (Some(Event::OutboxChanged { account }), Some(Source::Outbox(account)), Refresh::ALL),
             (Some(Event::OutboxChanged { account }), Some(Source::Outbox(other)), SIDEBAR),
             (Some(Event::AccountStatusChanged { account }), Some(Source::Folder(folder)), NOTHING),
-            (Some(Event::PendingOpsChanged { account }), Some(search), NOTHING),
+            (Some(Event::PendingOpsChanged { account }), Some(search.clone()), NOTHING),
+            (Some(Event::ChangesRefused { account }), Some(search), NOTHING),
         ];
         for (event, shown, expected) in cases {
             assert_eq!(

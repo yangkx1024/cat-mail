@@ -581,6 +581,7 @@ pub(crate) enum JsonEvent {
     DraftsChanged { account: i64 },
     OutboxChanged { account: i64 },
     PendingOpsChanged { account: i64 },
+    ChangesRefused { account: i64 },
     MessageSent { account: i64, outbox: i64 },
 }
 
@@ -600,6 +601,7 @@ impl From<&Event> for JsonEvent {
             Event::DraftsChanged { account } => Self::DraftsChanged { account: account.0 },
             Event::OutboxChanged { account } => Self::OutboxChanged { account: account.0 },
             Event::PendingOpsChanged { account } => Self::PendingOpsChanged { account: account.0 },
+            Event::ChangesRefused { account } => Self::ChangesRefused { account: account.0 },
             Event::MessageSent { account, outbox } => Self::MessageSent {
                 account: account.0,
                 outbox: outbox.0,

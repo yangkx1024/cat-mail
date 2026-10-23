@@ -81,6 +81,10 @@ async fn describe(
             ))
         }
         Event::FoldersChanged { account } => Some(format!("{}: folders changed", email(account))),
+        Event::ChangesRefused { account } => Some(format!(
+            "{}: changes refused and undone; see `catmail ops list`",
+            email(account)
+        )),
         // Sending happens in other commands, so only syncing.
         Event::AccountStatusChanged { account } => {
             Some(match client.account_status(account).sync {
@@ -131,6 +135,16 @@ mod tests {
             account: account.id,
         };
         assert_eq!(describe(&client, &emails, &sent).await.unwrap(), None);
+        let refused = Event::ChangesRefused {
+            account: account.id,
+        };
+        assert_eq!(
+            describe(&client, &emails, &refused)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("alice@example.com: changes refused and undone; see `catmail ops list`")
+        );
 
         fake.state().faults.reject_login = true;
         assert!(client.sync_account(account.id).await.is_err());

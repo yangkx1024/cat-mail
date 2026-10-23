@@ -383,7 +383,7 @@ impl<'c> Drafts<'c> {
         let ops = PendingOps::new(self.conn);
         let mut touched = Touched::new();
         for (folder, uidvalidity, uid) in delete {
-            touched.extend(ops.delete_on_server(upload.account, folder, uidvalidity, uid, now)?);
+            touched.merge(ops.delete_on_server(upload.account, folder, uidvalidity, uid, now)?);
         }
         Ok(touched)
     }
