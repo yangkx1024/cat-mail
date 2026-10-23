@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -127,10 +127,17 @@ struct AccountState {
     /// back, and a time left in the future would have both skip the folder until the
     /// clock caught up.
     folders_synced: Mutex<HashMap<FolderId, Instant>>,
-    status: Mutex<AccountStatus>,
+    status: Mutex<Status>,
     /// When drafts were last changed, for holding back their upload while they are
     /// being written. Entries older than the delay are dropped as they are found.
     draft_edits: Mutex<HashMap<DraftId, Instant>>,
+}
+
+/// [`AccountStatus`], with the send problems by identity.
+#[derive(Debug, Default)]
+struct Status {
+    sync: Option<ServerProblem>,
+    send: BTreeMap<IdentityId, SendProblem>,
 }
 
 /// What an attempt that [`Engine::report`] records was doing.
@@ -423,21 +430,16 @@ impl Engine {
             match activity {
                 Activity::Sync => record(&mut status.sync, e),
                 Activity::Send(identity, email) => {
-                    let send = &mut status.send;
-                    let at = send.partition_point(|p| p.identity < identity);
-                    let found = send.get(at).is_some_and(|p| p.identity == identity);
-                    let mut slot = found.then(|| send.remove(at).problem);
+                    let mut slot = status.send.remove(&identity).map(|p| p.problem);
                     let recorded = record(&mut slot, e);
                     if let Some(problem) = slot {
                         let email = email.to_owned();
-                        send.insert(
-                            at,
-                            SendProblem {
-                                identity,
-                                email,
-                                problem,
-                            },
-                        );
+                        let problem = SendProblem {
+                            identity,
+                            email,
+                            problem,
+                        };
+                        status.send.insert(identity, problem);
                     }
                     recorded
                 }
@@ -459,22 +461,21 @@ impl Engine {
         let Some(state) = self.existing(account) else {
             return;
         };
-        let forgotten = {
-            let send = &mut lock(&state.status).send;
-            let before = send.len();
-            send.retain(|p| p.identity != identity);
-            send.len() < before
-        };
-        if forgotten {
+        if lock(&state.status).send.remove(&identity).is_some() {
             self.emit(Event::AccountStatusChanged { account });
         }
     }
 
     /// What the latest attempts to get through to the account's servers found.
     pub fn status(&self, account: AccountId) -> AccountStatus {
-        self.existing(account)
-            .map(|state| lock(&state.status).clone())
-            .unwrap_or_default()
+        let Some(state) = self.existing(account) else {
+            return AccountStatus::default();
+        };
+        let status = lock(&state.status);
+        AccountStatus {
+            sync: status.sync.clone(),
+            send: status.send.values().cloned().collect(),
+        }
     }
 
     /// For work on `account` without a permit. Obtain it before checking that the

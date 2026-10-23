@@ -129,7 +129,7 @@ impl SmtpLogin {
 }
 
 /// An identity of an account, with the address it sends as.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct SendAs {
     pub id: IdentityId,
     pub email: String,
@@ -158,23 +158,15 @@ pub(crate) async fn smtp_logins(
     // Each keyring entry read once: the account's serves every identity without its own.
     let mut passwords: HashMap<String, SecretString> = HashMap::new();
     for (identity, sending) in found {
-        let Some(sending) = sending else {
-            // Its address is gone with it, and isn't needed: nothing is recorded about
-            // sending as an identity that is gone.
-            let email = String::new();
-            let gone = Error::IdentityNotFound(identity);
-            logins.push(Err((
-                SendAs {
-                    id: identity,
-                    email,
-                },
-                gone,
-            )));
-            continue;
-        };
+        // One gone has no address, nor needs one: nothing is recorded about sending as it.
+        let email = sending.as_ref().map(|s| s.identity.email.clone());
         let send_as = SendAs {
             id: identity,
-            email: sending.identity.email.clone(),
+            email: email.unwrap_or_default(),
+        };
+        let Some(sending) = sending else {
+            logins.push(Err((send_as, Error::IdentityNotFound(identity))));
+            continue;
         };
         let key = sending.login_key;
         let password = match passwords.get(&key) {

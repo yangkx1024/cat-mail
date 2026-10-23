@@ -24,8 +24,8 @@ Issue #93：`AccountStatus::send` 是按身份记的表，前端却只拿 `send_
 
 - types：`SendProblem`，`AccountStatus::send: Vec<SendProblem>`。
 - core：`Activity::Send` 带上地址；`connection::SendAs`（身份和地址）用在 `SmtpLogin` 和连不上的路由里，
-  `send.rs` 的 `connected` 按它记状态（日志仍只记 id）；`Engine::report` / `forget_identity` 按有序列表
-  增删。
+  `send.rs` 的 `connected` 按它记状态（日志仍只记 id）；引擎内部仍按身份存（`BTreeMap`），
+  `Engine::status` 读出时才排成列表。
 - GUI：侧栏"Can't send from a, b"，截断时悬停看全文；发件箱的提示改看 `send` 是否为空。
 - 文档：`docs/architecture/sending.md`、`gui.md`。
 - 测试：`tests/identities.rs` 的 `an_identity_that_cant_log_in_holds_back_only_its_own_messages` 断言两个

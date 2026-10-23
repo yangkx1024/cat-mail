@@ -122,11 +122,10 @@ impl Mailbox {
                 );
             }
             // Every address whose server is out of reach.
-            if status.send.is_empty() {
-                return None;
-            }
-            let from: Vec<_> = status.send.iter().map(|p| p.email.as_str()).collect();
-            Some(format!("Can't send from {}", from.join(", ")).into())
+            (!status.send.is_empty()).then(|| {
+                let from: Vec<_> = status.send.iter().map(|p| p.email.as_str()).collect();
+                format!("Can't send from {}", from.join(", ")).into()
+            })
         })
     }
 
