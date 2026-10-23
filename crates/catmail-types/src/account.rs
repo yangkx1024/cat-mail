@@ -3,8 +3,6 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use std::collections::BTreeMap;
-
 use crate::{AccountId, Address, Folder, IdentityId, OutboxEntry, ReportedError};
 
 /// Transport security for an IMAP or SMTP connection.
@@ -145,16 +143,18 @@ pub struct NewIdentity {
 pub struct AccountStatus {
     /// Syncing with the IMAP server failed.
     pub sync: Option<ServerProblem>,
-    /// Reaching an identity's SMTP server to send failed. The messages queued for it wait
-    /// meanwhile, without any of them counting it as an attempt.
-    pub send: BTreeMap<IdentityId, ServerProblem>,
+    /// Reaching identities' SMTP servers to send failed, in identity order. The messages
+    /// queued for each wait meanwhile, without any of them counting it as an attempt.
+    pub send: Vec<SendProblem>,
 }
 
-impl AccountStatus {
-    /// An identity whose server couldn't be reached to send, if any.
-    pub fn send_problem(&self) -> Option<(IdentityId, &ServerProblem)> {
-        self.send.iter().next().map(|(id, problem)| (*id, problem))
-    }
+/// An identity whose SMTP server couldn't be reached to send.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SendProblem {
+    pub identity: IdentityId,
+    /// The address it sends as.
+    pub email: String,
+    pub problem: ServerProblem,
 }
 
 /// An account with what is shown next to it, read at once: its folders, its drafts and

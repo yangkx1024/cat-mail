@@ -28,7 +28,7 @@ use catmail_types::{
 use futures_util::future::join_all;
 use tokio::sync::Notify;
 
-use crate::connection::{self, SmtpLogin, with_session};
+use crate::connection::{self, SendAs, SmtpLogin, with_session};
 use crate::engine::{Activity, Closing, Engine, Permit, blocking, now};
 use crate::{Error, Result, body, drafts, ops, sync};
 
@@ -171,7 +171,7 @@ async fn pass(
 /// Queued entries that go out over one SMTP login, oldest first.
 struct Route {
     /// Why there is none, for the identity that has no login.
-    login: std::result::Result<SmtpLogin, (IdentityId, Error)>,
+    login: std::result::Result<SmtpLogin, (SendAs, Error)>,
     entries: Vec<OutboxId>,
 }
 
@@ -188,8 +188,8 @@ async fn routes(
     let mut route_of = HashMap::new();
     for (route, login) in logins.iter().enumerate() {
         match login {
-            Ok(login) => route_of.extend(login.identities().map(|i| (i, route))),
-            Err((identity, _)) => route_of.extend([(*identity, route)]),
+            Ok(login) => route_of.extend(login.identities().map(|i| (i.id, route))),
+            Err((identity, _)) => route_of.extend([(identity.id, route)]),
         }
     }
     let mut routes: Vec<_> = logins
@@ -223,7 +223,7 @@ async fn send_route(
             return Ok(());
         }
     };
-    let identities: Vec<_> = login.identities().collect();
+    let identities: Vec<_> = login.identities().cloned().collect();
     let mut smtp = Smtp::None;
     for id in route.entries {
         if let Smtp::None = smtp {
@@ -263,7 +263,7 @@ async fn send_route(
 fn connected(
     engine: &Arc<Engine>,
     account: AccountId,
-    identities: &[IdentityId],
+    identities: &[SendAs],
     connected: Result<smtp::Session>,
     report: &mut FlushReport,
 ) -> Result<Smtp> {
@@ -271,17 +271,18 @@ fn connected(
     // its identities.
     let failures = identities
         .iter()
-        .map(|&identity| engine.report(account, Activity::Send(identity), &connected))
+        .map(|i| engine.report(account, Activity::Send(i.id, &i.email), &connected))
         .max()
         .unwrap_or_default();
     match connected {
         Ok(session) => Ok(Smtp::Up(session)),
         Err(e @ (Error::Cancelled | Error::AccountNotFound(_))) => Err(e),
         Err(e) => {
-            tracing::info!(%account, ?identities, error = %e, "can't reach the SMTP server");
+            let ids: Vec<_> = identities.iter().map(|i| i.id).collect();
+            tracing::info!(%account, identities = ?ids, error = %e, "can't reach the SMTP server");
             let error = ReportedError::from(&e);
-            for &identity in identities {
-                report.errors.insert(identity, error.clone());
+            for identity in identities {
+                report.errors.insert(identity.id, error.clone());
             }
             Ok(Smtp::Down(Down {
                 error: error.message,

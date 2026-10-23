@@ -10,7 +10,7 @@ use catmail_proto::imap::Session;
 use catmail_store::{BlobStore, Db, Store};
 use catmail_types::{
     AccountId, AccountStatus, DraftId, ErrorKind, Event, FolderId, IdentityId, ReportedError,
-    ServerProblem,
+    SendProblem, ServerProblem,
 };
 use tokio::sync::{Notify, OwnedMutexGuard, broadcast, watch};
 
@@ -135,10 +135,10 @@ struct AccountState {
 
 /// What an attempt that [`Engine::report`] records was doing.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum Activity {
+pub(crate) enum Activity<'a> {
     Sync,
-    /// As this identity of the account.
-    Send(IdentityId),
+    /// As this identity of the account, with the address it sends as.
+    Send(IdentityId, &'a str),
 }
 
 /// Held while syncing (a folder of) an account, or while working on its outbox.
@@ -422,11 +422,22 @@ impl Engine {
             let mut status = lock(&state.status);
             match activity {
                 Activity::Sync => record(&mut status.sync, e),
-                Activity::Send(identity) => {
-                    let mut slot = status.send.remove(&identity);
+                Activity::Send(identity, email) => {
+                    let send = &mut status.send;
+                    let at = send.partition_point(|p| p.identity < identity);
+                    let found = send.get(at).is_some_and(|p| p.identity == identity);
+                    let mut slot = found.then(|| send.remove(at).problem);
                     let recorded = record(&mut slot, e);
                     if let Some(problem) = slot {
-                        status.send.insert(identity, problem);
+                        let email = email.to_owned();
+                        send.insert(
+                            at,
+                            SendProblem {
+                                identity,
+                                email,
+                                problem,
+                            },
+                        );
                     }
                     recorded
                 }
@@ -448,7 +459,13 @@ impl Engine {
         let Some(state) = self.existing(account) else {
             return;
         };
-        if lock(&state.status).send.remove(&identity).is_some() {
+        let forgotten = {
+            let send = &mut lock(&state.status).send;
+            let before = send.len();
+            send.retain(|p| p.identity != identity);
+            send.len() < before
+        };
+        if forgotten {
             self.emit(Event::AccountStatusChanged { account });
         }
     }

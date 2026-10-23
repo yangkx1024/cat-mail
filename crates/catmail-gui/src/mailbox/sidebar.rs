@@ -93,7 +93,8 @@ impl Mailbox {
     }
 
     /// One line on what is wrong with the connection, if anything: syncing, or the
-    /// first account the engine can't get through to.
+    /// first account the engine can't get through to (each of its addresses that can't
+    /// send).
     fn connection_note(&self) -> Option<SharedString> {
         if self.syncing > 0 {
             return Some("Syncing…".into());
@@ -111,14 +112,12 @@ impl Mailbox {
                     .into(),
                 );
             }
-            // The address whose server is out of reach.
-            let (id, _) = status.send_problem()?;
-            let from = entry
-                .identities
-                .iter()
-                .find(|i| i.id == id)
-                .map_or(email, |i| &i.email);
-            Some(format!("Can't send from {from}").into())
+            // Every address whose server is out of reach.
+            if status.send.is_empty() {
+                return None;
+            }
+            let from: Vec<_> = status.send.iter().map(|p| p.email.as_str()).collect();
+            Some(format!("Can't send from {}", from.join(", ")).into())
         })
     }
 

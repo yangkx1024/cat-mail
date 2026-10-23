@@ -61,7 +61,7 @@ impl Mailbox {
                 .map(|n| format!("{n} unread")),
             Some(Source::Outbox(account)) => self
                 .account(*account)
-                .filter(|a| a.status.send_problem().is_some() || a.status.sync.is_some())
+                .filter(|a| !a.status.send.is_empty() || a.status.sync.is_some())
                 .map(|_| "Sending resumes when the connection is back.".to_owned()),
             _ => None,
         };

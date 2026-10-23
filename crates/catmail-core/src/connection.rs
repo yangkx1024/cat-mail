@@ -92,14 +92,14 @@ pub(crate) fn draft_sender(
 /// username and password, as aliases set up at one provider are.
 pub(crate) struct SmtpLogin {
     /// With the SIZE recorded for each.
-    identities: Vec<(IdentityId, Option<u64>)>,
+    identities: Vec<(SendAs, Option<u64>)>,
     server: ServerConfig,
     credentials: Credentials,
 }
 
 impl SmtpLogin {
-    pub fn identities(&self) -> impl Iterator<Item = IdentityId> + '_ {
-        self.identities.iter().map(|&(identity, _)| identity)
+    pub fn identities(&self) -> impl Iterator<Item = &SendAs> {
+        self.identities.iter().map(|(identity, _)| identity)
     }
 
     /// Opens a new connection and logs in. The SIZE the server announces is recorded for
@@ -113,7 +113,7 @@ impl SmtpLogin {
             .filter(|(_, recorded)| *recorded != announced)
             .map(|(identity, recorded)| {
                 *recorded = announced;
-                *identity
+                identity.id
             })
             .collect();
         if !changed.is_empty() {
@@ -128,6 +128,13 @@ impl SmtpLogin {
     }
 }
 
+/// An identity of an account, with the address it sends as.
+#[derive(Debug, Clone)]
+pub(crate) struct SendAs {
+    pub id: IdentityId,
+    pub email: String,
+}
+
 /// The logins that send as the account's `identities`, each identity in exactly one, in
 /// the order of the first identity of each. One that is gone, or whose password can't be
 /// read, comes back with why.
@@ -138,7 +145,7 @@ pub(crate) async fn smtp_logins(
     engine: &Arc<Engine>,
     account: AccountId,
     identities: Vec<IdentityId>,
-) -> Result<Vec<std::result::Result<SmtpLogin, (IdentityId, Error)>>> {
+) -> Result<Vec<std::result::Result<SmtpLogin, (SendAs, Error)>>> {
     let found = engine
         .read(move |db| {
             identities
@@ -152,8 +159,22 @@ pub(crate) async fn smtp_logins(
     let mut passwords: HashMap<String, SecretString> = HashMap::new();
     for (identity, sending) in found {
         let Some(sending) = sending else {
-            logins.push(Err((identity, Error::IdentityNotFound(identity))));
+            // Its address is gone with it, and isn't needed: nothing is recorded about
+            // sending as an identity that is gone.
+            let email = String::new();
+            let gone = Error::IdentityNotFound(identity);
+            logins.push(Err((
+                SendAs {
+                    id: identity,
+                    email,
+                },
+                gone,
+            )));
             continue;
+        };
+        let send_as = SendAs {
+            id: identity,
+            email: sending.identity.email.clone(),
         };
         let key = sending.login_key;
         let password = match passwords.get(&key) {
@@ -161,7 +182,7 @@ pub(crate) async fn smtp_logins(
             None => match password(engine, key.clone(), &sending.identity.email).await {
                 Ok(password) => passwords.entry(key).or_insert(password).clone(),
                 Err(e) => {
-                    logins.push(Err((identity, e)));
+                    logins.push(Err((send_as, e)));
                     continue;
                 }
             },
@@ -173,9 +194,9 @@ pub(crate) async fn smtp_logins(
                 && login.credentials.password.expose_secret() == password.expose_secret()
         });
         match shared {
-            Some(login) => login.identities.push((identity, sending.smtp_max_size)),
+            Some(login) => login.identities.push((send_as, sending.smtp_max_size)),
             None => logins.push(Ok(SmtpLogin {
-                identities: vec![(identity, sending.smtp_max_size)],
+                identities: vec![(send_as, sending.smtp_max_size)],
                 server,
                 credentials: Credentials { username, password },
             })),
