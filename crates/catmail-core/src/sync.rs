@@ -21,7 +21,7 @@ use catmail_types::{
 
 use crate::connection::with_session;
 use crate::draft_sync::Uploads;
-use crate::engine::{Activity, Engine, now};
+use crate::engine::{Activity, Engine};
 use crate::{Error, Result, connection, ops};
 
 /// Stored messages per flags FETCH, and per transaction, on a server that can't say
@@ -61,15 +61,18 @@ pub(crate) async fn sync_one(
     permit
         .run(async {
             // Checked under the permit: a full sync that held it may just have done this.
-            // A clock set back counts as just synced.
+            // Kept in memory only, so after a restart the first open syncs.
+            if engine
+                .folder_synced(account, folder)
+                .is_some_and(|t| t.elapsed() < max_age)
+            {
+                return Ok(None);
+            }
             let current = engine
                 .read(move |db| db.folders().get(folder))
                 .await?
                 .ok_or(Error::FolderNotFound(folder))?;
-            let fresh = current
-                .last_synced_at
-                .is_some_and(|t| now() - t < max_age.as_secs() as i64);
-            if !current.selectable || fresh {
+            if !current.selectable {
                 return Ok(None);
             }
             // Safe to run again on a new connection if a reused one turns out dead: what

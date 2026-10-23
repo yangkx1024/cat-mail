@@ -121,9 +121,10 @@ struct AccountState {
     /// When the last sync of every folder finished.
     synced: Mutex<Option<Instant>>,
     /// When each folder last completed a sync, for a sync of every folder to leave out
-    /// those another one completed since it began. Not `last_synced_at`: the wall clock
-    /// can be set back, and a time left in the future would have every full sync skip
-    /// the folder until the clock caught up.
+    /// those another one completed since it began, and for the sync of an opened folder
+    /// to leave out one synced recently. Not `last_synced_at`: the wall clock can be set
+    /// back, and a time left in the future would have both skip the folder until the
+    /// clock caught up.
     folders_synced: Mutex<HashMap<FolderId, Instant>>,
     status: Mutex<AccountStatus>,
     /// When drafts were last changed, for holding back their upload while they are
