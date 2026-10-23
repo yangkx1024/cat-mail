@@ -22,6 +22,10 @@ const STALE: &str = "SELECT d.id FROM drafts d
        AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.draft_id = d.id)
        AND NOT EXISTS (SELECT 1 FROM draft_uploads u WHERE u.draft_id = d.id)";
 
+/// The SIZE of the SMTP server that sends a draft and the APPENDLIMIT of its account's
+/// IMAP server, as last announced.
+type SizeLimits = (Option<u64>, Option<u64>);
+
 /// What a reply draft keeps of the message it answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DraftReply {
@@ -494,18 +498,43 @@ impl<'c> Drafts<'c> {
 
     /// The SIZE of the SMTP server that sends the draft and the APPENDLIMIT of its
     /// account's IMAP server, as last announced; `None` if there is no such draft.
-    pub fn size_limits(&self, draft: DraftId) -> Result<Option<(Option<u64>, Option<u64>)>> {
-        Ok(self
+    pub fn size_limits(&self, draft: DraftId) -> Result<Option<SizeLimits>> {
+        let identity: Option<i64> = self
             .conn
             .query_row(
-                "SELECT i.smtp_max_size, a.imap_append_limit FROM drafts d
-                 JOIN identities i ON i.id = d.identity_id
-                 JOIN accounts a ON a.id = d.account_id
-                 WHERE d.id = ?1",
+                "SELECT identity_id FROM drafts WHERE id = ?1",
                 [draft.0],
-                |r| Ok((size_limit(r, 0)?, size_limit(r, 1)?)),
+                |r| r.get(0),
             )
-            .optional()?)
+            .optional()?;
+        identity
+            .map(|identity| self.identity_size_limits(IdentityId(identity)))
+            .transpose()
+    }
+
+    /// [`size_limits`](Self::size_limits) for a new draft of the account sent as
+    /// `identity`, its default with `None`, and that identity: the default may change
+    /// before the draft is inserted. Fails as [`insert`](Self::insert) does if there is
+    /// no such identity.
+    pub fn new_size_limits(
+        &self,
+        account: AccountId,
+        identity: Option<IdentityId>,
+    ) -> Result<(IdentityId, SizeLimits)> {
+        let identity = Identities::new(self.conn).resolve(account, identity)?;
+        Ok((identity, self.identity_size_limits(identity)?))
+    }
+
+    /// What a draft sent as `identity` is limited by: its SMTP server's SIZE and its
+    /// account's APPENDLIMIT.
+    fn identity_size_limits(&self, identity: IdentityId) -> Result<SizeLimits> {
+        Ok(self.conn.query_row(
+            "SELECT i.smtp_max_size, a.imap_append_limit FROM identities i
+             JOIN accounts a ON a.id = i.account_id
+             WHERE i.id = ?1",
+            [identity.0],
+            |r| Ok((size_limit(r, 0)?, size_limit(r, 1)?)),
+        )?)
     }
 
     /// The size of the draft's attachments together; 0 if there is no such draft.

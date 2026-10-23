@@ -797,7 +797,7 @@ async fn sent_replies_mark_the_original_answered() {
     let one = env.id_of("INBOX", "one").await;
     let draft = env
         .client
-        .reply(one, false, None, String::new())
+        .reply(one, false, None, String::new(), Vec::new())
         .await
         .unwrap();
     env.edit(

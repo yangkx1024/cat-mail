@@ -283,7 +283,7 @@ async fn a_rejected_login_is_reported_and_not_retried_for_each_change() {
     // accounts that fail too many logins.
     for i in 0..5 {
         env.client
-            .create_draft(env.account, None, Default::default())
+            .create_draft(env.account, None, Default::default(), Vec::new())
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(20 * i)).await;

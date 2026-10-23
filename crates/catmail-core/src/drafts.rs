@@ -2,7 +2,7 @@
 //! (`draft_sync.rs`), sent through the outbox (`send.rs`).
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use catmail_proto::mime::{Outgoing, OutgoingAttachment, build_message};
@@ -22,9 +22,10 @@ pub(crate) async fn create(
     account: AccountId,
     from: Option<IdentityId>,
     content: DraftContent,
+    files: Vec<PathBuf>,
 ) -> Result<Draft> {
     validate(&content)?;
-    insert(engine, account, from, content, None, Vec::new()).await
+    insert(engine, account, from, content, None, Vec::new(), files).await
 }
 
 pub(crate) async fn update(
@@ -137,6 +138,77 @@ fn copy_within(
     Ok((size <= budget).then_some((blob, size)))
 }
 
+/// Copies the file into the blob store, to be attached to a draft whose attachments take
+/// `used` bytes of its `limit`. Blocking.
+fn copy_file(blobs: &BlobStore, path: &Path, used: u64, limit: u64) -> Result<NewDraftAttachment> {
+    let budget = limit.saturating_sub(used);
+    // Before opening: on Windows, opening a directory fails as access denied.
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(Error::InvalidInput(format!(
+            "{} is not a file",
+            path.display()
+        )));
+    }
+    let filename = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| Error::InvalidInput(format!("{} has no file name", path.display())))?;
+    let file = std::fs::File::open(path)?;
+    // Spares copying a file that says it is too large; `copy_within` enforces it.
+    if file.metadata()?.len() > budget {
+        return Err(attachments_too_large(limit));
+    }
+    let (blob, size) =
+        copy_within(blobs, file, budget)?.ok_or_else(|| attachments_too_large(limit))?;
+    Ok(NewDraftAttachment {
+        blob,
+        mime_type: mime_guess::from_path(path)
+            .first_or_octet_stream()
+            .essence_str()
+            .to_owned(),
+        filename,
+        size,
+    })
+}
+
+/// Copies the files to attach to a new draft of `account`, sent as `from`, into the blob
+/// store: within what its attachments may add up to, with `used` taken by those it starts
+/// with. Returns them and the identity they were checked for, which the draft must be
+/// made as: with `None`, the default may change while they are copied. Blocking.
+fn copy_files(
+    engine: &Engine,
+    account: AccountId,
+    from: Option<IdentityId>,
+    mut used: u64,
+    files: &[PathBuf],
+) -> Result<(IdentityId, Vec<NewDraftAttachment>)> {
+    let (identity, (smtp, append)) = engine
+        .store
+        .read(|db| {
+            if db.accounts().get(account)?.is_none() {
+                return Ok(None);
+            }
+            db.drafts().new_size_limits(account, from).map(Some)
+        })?
+        .ok_or_else(|| Error::AccountNotFound(account.to_string()))?;
+    let limit = attachments_limit(SizeLimits { smtp, append });
+    // Unlike `attach_file`, nothing to check again when the draft is stored: nothing else
+    // can attach to it before then. Files copied before one fails are left for GC.
+    let attachments = files
+        .iter()
+        .map(|path| {
+            let attachment =
+                copy_file(&engine.blobs, path, used, limit).map_err(|e| Error::Attach {
+                    path: path.clone(),
+                    error: Box::new(e),
+                })?;
+            used += attachment.size;
+            Ok(attachment)
+        })
+        .collect::<Result<_>>()?;
+    Ok((identity, attachments))
+}
+
 /// Copies the file into the blob store and attaches it; later changes to the file
 /// don't affect the draft.
 pub(crate) async fn attach_file(
@@ -146,18 +218,6 @@ pub(crate) async fn attach_file(
 ) -> Result<DraftAttachment> {
     let engine2 = engine.clone();
     let attachment = blocking(move || {
-        // Before opening: on Windows, opening a directory fails as access denied.
-        if !std::fs::metadata(&path)?.is_file() {
-            return Err(Error::InvalidInput(format!(
-                "{} is not a file",
-                path.display()
-            )));
-        }
-        let filename = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .ok_or_else(|| Error::InvalidInput(format!("{} has no file name", path.display())))?;
-        let file = std::fs::File::open(&path)?;
         let (used, limits) = engine2
             .store
             .read(|db| {
@@ -173,27 +233,12 @@ pub(crate) async fn attach_file(
             })?
             .ok_or(Error::DraftNotFound(draft))?;
         let limit = attachments_limit(limits);
-        let budget = limit.saturating_sub(used);
-        // Spares copying a file that says it is too large; `copy_within` enforces it.
-        if file.metadata()?.len() > budget {
-            return Err(attachments_too_large(limit));
-        }
-        let (blob, size) = copy_within(&engine2.blobs, file, budget)?
-            .ok_or_else(|| attachments_too_large(limit))?;
-        let new = NewDraftAttachment {
-            blob,
-            mime_type: mime_guess::from_path(&path)
-                .first_or_octet_stream()
-                .essence_str()
-                .to_owned(),
-            filename,
-            size,
-        };
+        let new = copy_file(&engine2.blobs, &path, used, limit)?;
         // An attachment refused here, like one whose draft is gone, leaves an unreferenced
         // blob for GC.
         engine2.store.write(|db| {
             // Again, for the draft: another file may have been attached meanwhile.
-            if db.drafts().attachments_size(draft)? + size > limit {
+            if db.drafts().attachments_size(draft)? + new.size > limit {
                 return Ok(Err(attachments_too_large(limit)));
             }
             let Some(attachment) = db.drafts().add_attachment(draft, &new, now())? else {
@@ -236,6 +281,7 @@ pub(crate) async fn reply(
     all: bool,
     from: Option<IdentityId>,
     text: String,
+    files: Vec<PathBuf>,
 ) -> Result<Draft> {
     let message = with_body(engine, id).await?;
     let account_id = message.summary.account_id;
@@ -277,7 +323,16 @@ pub(crate) async fn reply(
         references,
     };
     let from = from.or(written_as);
-    insert(engine, account_id, from, content, Some(reply), Vec::new()).await
+    insert(
+        engine,
+        account_id,
+        from,
+        content,
+        Some(reply),
+        Vec::new(),
+        files,
+    )
+    .await
 }
 
 /// A new draft forwarding `message`, with its attachments, as `forwarding` says.
@@ -288,6 +343,7 @@ pub(crate) async fn forward(
     id: MessageId,
     from: Option<IdentityId>,
     forwarding: Forwarding,
+    files: Vec<PathBuf>,
 ) -> Result<Draft> {
     // Before downloading anything.
     for address in forwarding.recipients() {
@@ -329,6 +385,7 @@ pub(crate) async fn forward(
         content,
         None,
         attachments,
+        files,
     )
     .await
 }
@@ -347,18 +404,28 @@ async fn with_body(engine: &Arc<Engine>, id: MessageId) -> Result<Message> {
     }
 }
 
-/// Sent as `from`, the account's default with `None`.
+/// Sent as `from`, the account's default with `None`. Its `attachments`, then copies of
+/// the `files`, stored with it in one transaction.
 async fn insert(
     engine: &Arc<Engine>,
     account: AccountId,
     from: Option<IdentityId>,
     content: DraftContent,
     reply: Option<DraftReply>,
-    attachments: Vec<NewDraftAttachment>,
+    mut attachments: Vec<NewDraftAttachment>,
+    files: Vec<PathBuf>,
 ) -> Result<Draft> {
     let content = without_nul(content);
-    let draft = engine
-        .write(move |db| {
+    let engine2 = engine.clone();
+    let draft = blocking(move || {
+        let mut from = from;
+        if !files.is_empty() {
+            let used = attachments.iter().map(|a| a.size).sum();
+            let (identity, copied) = copy_files(&engine2, account, from, used, &files)?;
+            from = Some(identity);
+            attachments.extend(copied);
+        }
+        Ok(engine2.store.write(|db| {
             if db.accounts().get(account)?.is_none() {
                 return Ok(None);
             }
@@ -370,9 +437,10 @@ async fn insert(
                 db.drafts().add_attachment(id, attachment, now)?;
             }
             db.drafts().get(id)
-        })
-        .await?
-        .ok_or_else(|| Error::AccountNotFound(account.to_string()))?;
+        })?)
+    })
+    .await?
+    .ok_or_else(|| Error::AccountNotFound(account.to_string()))?;
     edited(engine, account, draft.id);
     Ok(draft)
 }

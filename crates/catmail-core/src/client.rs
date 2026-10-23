@@ -798,15 +798,20 @@ impl MailClient {
     /// Drafts are copied to the account's Drafts folder, the copy replaced after every
     /// change, at the next sync or [`replay_pending`](Self::replay_pending), or right
     /// away with [`sync_in_background`](MailClientBuilder::sync_in_background).
+    ///
+    /// `files` are attached as [`attach_file`](Self::attach_file) would, but along with
+    /// the draft: if one can't be, the error ([`Error::Attach`]) names it and no draft is
+    /// made.
     pub async fn create_draft(
         &self,
         account: AccountId,
         from: Option<IdentityId>,
         content: DraftContent,
+        files: Vec<PathBuf>,
     ) -> Result<Draft> {
         let engine = self.engine.clone();
         self.rt
-            .run(async move { drafts::create(&engine, account, from, content).await })
+            .run(async move { drafts::create(&engine, account, from, content, files).await })
             .await
     }
 
@@ -815,7 +820,7 @@ impl MailClient {
     /// one of the message's account's identities; with `None`, as the identity the
     /// message came from or went to (see [`identity_by_address`]), else the default.
     /// `text`, if not empty, is written above the quote. Downloads the body first if
-    /// needed.
+    /// needed. `files` are attached as in [`create_draft`](Self::create_draft).
     ///
     /// [`identity_by_address`]: Self::identity_by_address
     pub async fn reply(
@@ -824,10 +829,11 @@ impl MailClient {
         all: bool,
         from: Option<IdentityId>,
         text: String,
+        files: Vec<PathBuf>,
     ) -> Result<Draft> {
         let engine = self.engine.clone();
         self.rt
-            .run(async move { drafts::reply(&engine, message, all, from, text).await })
+            .run(async move { drafts::reply(&engine, message, all, from, text, files).await })
             .await
     }
 
@@ -837,16 +843,18 @@ impl MailClient {
     /// shown within it). Addresses are checked as in [`create_draft`](Self::create_draft).
     /// Downloads the body and attachments first if needed; fails, creating nothing, if
     /// one can't be had. Sent as `from`, one of the message's account's identities, its
-    /// default with `None`.
+    /// default with `None`. `files` are attached besides the message's attachments, as in
+    /// [`create_draft`](Self::create_draft).
     pub async fn forward(
         &self,
         message: MessageId,
         from: Option<IdentityId>,
         forwarding: Forwarding,
+        files: Vec<PathBuf>,
     ) -> Result<Draft> {
         let engine = self.engine.clone();
         self.rt
-            .run(async move { drafts::forward(&engine, message, from, forwarding).await })
+            .run(async move { drafts::forward(&engine, message, from, forwarding, files).await })
             .await
     }
 
@@ -1513,7 +1521,7 @@ mod tests {
             .unwrap()
             .id;
         client
-            .create_draft(account, None, DraftContent::default())
+            .create_draft(account, None, DraftContent::default(), Vec::new())
             .await
             .unwrap();
         assert_eq!(client.engine.tracked_draft_edits(account), 0);
@@ -1742,7 +1750,10 @@ mod tests {
             }],
             ..Default::default()
         };
-        client.create_draft(account, None, content).await.unwrap()
+        client
+            .create_draft(account, None, content, Vec::new())
+            .await
+            .unwrap()
     }
 
     async fn queue_one(client: &MailClient, account: AccountId) -> catmail_types::OutboxEntry {

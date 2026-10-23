@@ -46,7 +46,7 @@ fn state() -> ServerState {
 impl Env {
     async fn draft(&self, subject: &str) -> DraftId {
         self.client
-            .create_draft(self.account, None, content(subject))
+            .create_draft(self.account, None, content(subject), Vec::new())
             .await
             .unwrap()
             .id
@@ -467,7 +467,7 @@ async fn a_reply_quoting_a_nul_doesnt_stop_the_sync() {
     let odd = env.id_of("INBOX", "odd").await;
     let draft = env
         .client
-        .reply(odd, false, None, String::new())
+        .reply(odd, false, None, String::new(), Vec::new())
         .await
         .unwrap();
     assert!(draft.content.text.contains("beforeafter"), "{draft:?}");
@@ -482,7 +482,7 @@ async fn a_reply_quoting_a_nul_doesnt_stop_the_sync() {
     nul.text = "a\0b".into();
     let draft = env
         .client
-        .create_draft(env.account, None, nul)
+        .create_draft(env.account, None, nul, Vec::new())
         .await
         .unwrap();
     assert_eq!(
@@ -540,7 +540,7 @@ async fn a_forward_carries_the_attachments_but_not_the_inline_images() {
 
     let draft = env
         .client
-        .forward(id, None, Forwarding::default())
+        .forward(id, None, Forwarding::default(), Vec::new())
         .await
         .unwrap();
     assert_eq!(draft.content.subject, "Fwd: Report");
@@ -610,7 +610,7 @@ async fn a_forward_without_its_attachment_leaves_no_draft() {
     // The body is here; the attachment, still on the server, can't be had.
     env.fake.state().faults.nil_sections = true;
     env.client
-        .forward(id, None, Forwarding::default())
+        .forward(id, None, Forwarding::default(), Vec::new())
         .await
         .unwrap_err();
     assert!(
@@ -624,7 +624,7 @@ async fn a_forward_without_its_attachment_leaves_no_draft() {
     env.fake.state().faults.nil_sections = false;
     let draft = env
         .client
-        .forward(id, None, Forwarding::default())
+        .forward(id, None, Forwarding::default(), Vec::new())
         .await
         .unwrap();
     assert_eq!(draft.attachments.len(), 1);
@@ -642,7 +642,10 @@ async fn answers_are_made_with_the_users_text_and_recipients() {
         to: vec![addr("not an address")],
         ..Default::default()
     };
-    env.client.forward(id, None, wrong).await.unwrap_err();
+    env.client
+        .forward(id, None, wrong, Vec::new())
+        .await
+        .unwrap_err();
     assert!(
         env.client
             .get_message(id)
@@ -666,7 +669,14 @@ async fn answers_are_made_with_the_users_text_and_recipients() {
         bcc: vec![addr("dave@example.com")],
         text: "Have a look.\n\n".into(),
     };
-    let draft = env.client.forward(id, None, forwarding).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let notes = dir.path().join("notes.txt");
+    std::fs::write(&notes, "my notes").unwrap();
+    let draft = env
+        .client
+        .forward(id, None, forwarding, vec![notes.clone()])
+        .await
+        .unwrap();
     assert_eq!(draft.content.to, [addr("bob@example.com")]);
     assert_eq!(draft.content.bcc, [addr("dave@example.com")]);
     let text = &draft.content.text;
@@ -674,16 +684,24 @@ async fn answers_are_made_with_the_users_text_and_recipients() {
         text.starts_with("Have a look.\n\n---------- Forwarded message"),
         "{text:?}"
     );
-    assert_eq!(draft.attachments.len(), 1);
+    let names = |draft: &catmail_core::Draft| -> Vec<String> {
+        draft
+            .attachments
+            .iter()
+            .map(|a| a.filename.clone())
+            .collect()
+    };
+    assert_eq!(names(&draft), ["report.pdf", "notes.txt"]);
 
     let draft = env
         .client
-        .reply(id, false, None, "Thanks!".into())
+        .reply(id, false, None, "Thanks!".into(), vec![notes])
         .await
         .unwrap();
     let text = &draft.content.text;
     assert!(text.starts_with("Thanks!\n\nOn "), "{text:?}");
     assert!(text.ends_with("wrote:\n> See the report.\n"), "{text:?}");
+    assert_eq!(names(&draft), ["notes.txt"]);
 }
 
 /// Syncing in the background, a draft uploaded once it was left alone for `delay`.

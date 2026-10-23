@@ -64,7 +64,10 @@ async fn send(
     content: DraftContent,
     attachment: Option<&[u8]>,
 ) -> OutboxEntry {
-    let draft = client.create_draft(account, None, content).await.unwrap();
+    let draft = client
+        .create_draft(account, None, content, Vec::new())
+        .await
+        .unwrap();
     if let Some(data) = attachment {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("数据.bin");
