@@ -22,8 +22,10 @@ Issue #40：`attach_file` 只检查路径是不是文件，就把整个文件流
 
 - `catmail-store` `Drafts::attachments_size`：草稿附件的合计大小。
 - `catmail-core/src/drafts.rs` `attach_file`：复制前按打开的文件的大小和剩余额度先拒一次，避免复制；
-  复制用 `take(额度 + 1)`，文件读的时候变大或报的大小不对也不会多复制；写入事务里再按存下的大小查一次，
-  防止并发添加超出。被拒的 blob 没有引用，留给 GC。
+  复制（`copy_within`）用 `take(额度 + 1)`，文件读的时候变大或报的大小不对也不会多复制，存下的超过额度
+  就拒绝：只靠事务里的合计检查，期间删掉别的附件会让截断的内容通过（PR 评审发现）。写入事务里再按存下的
+  大小查一次合计，防止并发添加超出。被拒的 blob 没有引用，留给 GC。
 - `docs/architecture/sending.md` 记下这个限制。
+- 单元测试 `a_copy_past_its_budget_is_refused_not_cut_short`：超过额度的内容被拒绝而不是截断后存下。
 - 测试 `tests/send.rs` `attachments_are_limited_in_size`：用稀疏文件，超大的文件被拒且 BlobStore 没变大；
   合计正好到上限可以，多一个字节被拒；删掉一个附件后又能添加。没有修复时这个测试失败。
