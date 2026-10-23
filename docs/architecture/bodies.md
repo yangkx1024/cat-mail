@@ -8,7 +8,8 @@
 
 ## 两条下载路径
 
-按 RFC822.SIZE 分：
+按 RFC822.SIZE 分（界限默认 2 MiB，即 `EngineTuning::whole_message_limit`，测试和按流量计费的
+用户可以在 builder 上调）：
 
 - **≤ 2 MiB：整封下载。** `UID FETCH <uid> (BODY.PEEK[])`，原文存入 BlobStore
   （`message_bodies.raw_blob_hash`），解析后附件随即解码入库。绝大多数邮件走这条路：完整原文

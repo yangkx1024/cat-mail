@@ -22,8 +22,8 @@ use catmail_core::{Config, DEFAULT_GC_INTERVAL, MailClient, SyncSchedule};
 use clap::Parser;
 use gpui_kit::component::{ActiveTheme as _, StyledExt as _, v_flex};
 use gpui_kit::{
-    App, AppContext as _, Context, IntoElement, ParentElement as _, Render, SharedString,
-    Styled as _, Window, WindowOptions, div, px, size,
+    AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
+    SharedString, Styled as _, Task, Window, WindowOptions, div, px, size,
 };
 use settings::{Preferences, Settings};
 use tracing_subscriber::EnvFilter;
@@ -56,22 +56,24 @@ fn main() {
     // Without `.runtime(..)` the engine runs its own tokio runtime: GPUI's executor is
     // not tokio, and the client's futures don't need it to be. New mail shows up as the
     // server announces it, through the engine's events.
-    let client = cli
+    let opening = cli
         .data_dir
         .map_or_else(Config::platform_default, |dir| {
             Ok(Config::with_data_dir(dir))
         })
-        .and_then(|config| {
+        .map(|config| {
             MailClient::builder(config)
                 .sync_in_background(Some(SyncSchedule::default()))
                 .send_in_background(true)
                 .collect_garbage_every(Some(DEFAULT_GC_INTERVAL))
-                .open()
         });
+    let opening = async move { opening?.open_async().await };
 
     gpui_kit::application()
         .with_assets(assets::Assets)
         .run(move |cx| {
+            // Meanwhile the app and its window are set up.
+            let opening = cx.background_executor().spawn(opening);
             init_app(
                 match config_dir {
                     Some(dir) => Preferences::load(dir),
@@ -79,20 +81,9 @@ fn main() {
                 },
                 cx,
             );
-            let opened = match client {
-                Ok(client) => gpui_kit::open_window(window_options(cx), cx, |window, cx| {
-                    cx.new(|cx| Mailbox::new(client, window, cx))
-                })
-                .map(drop),
-                Err(e) => {
-                    tracing::error!(error = %e, "failed to open the data directory");
-                    let message = SharedString::from(e.to_string());
-                    gpui_kit::open_window(window_options(cx), cx, |_, cx| {
-                        cx.new(|_| OpenFailed { message })
-                    })
-                    .map(drop)
-                }
-            };
+            let opened = gpui_kit::open_window(window_options(cx), cx, |window, cx| {
+                cx.new(|cx| Startup::new(opening, window, cx))
+            });
             if let Err(e) = opened {
                 eprintln!("catmail-gui: couldn't open a window: {e:#}");
                 cx.quit();
@@ -137,28 +128,76 @@ fn window_options(cx: &App) -> WindowOptions {
     )
 }
 
-/// Shown instead of the mailbox when the data directory can't be opened, typically because
-/// the CLI or another window is using it.
-struct OpenFailed {
-    message: SharedString,
+/// The main window: empty while the engine opens the data directory (which a migration
+/// can make take a while), then the mailbox.
+struct Startup {
+    state: StartupState,
+    _open: Task<()>,
 }
 
-impl Render for OpenFailed {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .p_4()
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
-            .child(div().font_semibold().child("Couldn't open the mail data"))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(self.message.clone()),
-            )
+enum StartupState {
+    Opening,
+    Open(Entity<Mailbox>),
+    /// The data directory couldn't be opened, typically because the CLI or another
+    /// window is using it.
+    Failed(SharedString),
+}
+
+impl Startup {
+    fn new(
+        opening: Task<catmail_core::Result<MailClient>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let open = cx.spawn_in(window, async move |this, cx| {
+            let opened = opening.await;
+            this.update_in(cx, |this, window, cx| {
+                this.state = match opened {
+                    Ok(client) => StartupState::Open(cx.new(|cx| Mailbox::new(client, window, cx))),
+                    Err(e) => {
+                        tracing::error!(error = %e, "failed to open the data directory");
+                        StartupState::Failed(e.to_string().into())
+                    }
+                };
+                cx.notify();
+            })
+            .ok();
+        });
+        Self {
+            state: StartupState::Opening,
+            _open: open,
+        }
     }
+}
+
+impl Render for Startup {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        match &self.state {
+            StartupState::Opening => div()
+                .size_full()
+                .bg(cx.theme().background)
+                .into_any_element(),
+            StartupState::Open(mailbox) => mailbox.clone().into_any_element(),
+            StartupState::Failed(message) => open_failed(message.clone(), cx),
+        }
+    }
+}
+
+fn open_failed(message: SharedString, cx: &App) -> AnyElement {
+    v_flex()
+        .size_full()
+        .items_center()
+        .justify_center()
+        .gap_2()
+        .p_4()
+        .bg(cx.theme().background)
+        .text_color(cx.theme().foreground)
+        .child(div().font_semibold().child("Couldn't open the mail data"))
+        .child(
+            div()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(message),
+        )
+        .into_any_element()
 }

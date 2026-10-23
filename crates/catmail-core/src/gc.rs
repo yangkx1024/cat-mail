@@ -9,7 +9,7 @@ use std::time::Duration;
 use catmail_types::GcReport;
 
 use crate::Result;
-use crate::engine::{Engine, blocking};
+use crate::engine::{Closing, Engine, blocking};
 
 /// How long an unreferenced blob survives. Far longer than the gap between storing a
 /// blob and committing the row that refers to it, which is what GC must not cut into.
@@ -33,10 +33,13 @@ pub(crate) fn collect(engine: &Engine) -> Result<GcReport> {
 
 /// Collects every `every` for as long as the engine exists, holding it only while
 /// collecting.
-pub(crate) async fn run(engine: Weak<Engine>, every: Duration) {
+pub(crate) async fn run(engine: Weak<Engine>, every: Duration, mut closing: Closing) {
     let mut wait = every.min(FIRST_DELAY);
     loop {
-        tokio::time::sleep(wait).await;
+        tokio::select! {
+            () = tokio::time::sleep(wait) => {}
+            () = closing.closed() => return,
+        }
         let Some(engine) = engine.upgrade() else {
             return;
         };

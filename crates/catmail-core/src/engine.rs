@@ -41,7 +41,48 @@ pub(crate) struct Engine {
     /// How long background sync leaves a draft alone after it changed before uploading
     /// it (see [`held_drafts`](Self::held_drafts)).
     pub draft_upload_delay: Duration,
+    pub tuning: EngineTuning,
+    /// Never sent to: dropped with the engine, which ends the background tasks holding
+    /// it weakly at once (see [`closing`](Self::closing)).
+    closing: watch::Sender<()>,
     accounts: Mutex<HashMap<AccountId, Arc<AccountState>>>,
+}
+
+/// Sizes the engine works in, which tests and users on metered connections may want
+/// other than the defaults. Set with
+/// [`MailClientBuilder::tuning`](crate::MailClientBuilder::tuning).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EngineTuning {
+    /// New messages fetched per UID FETCH, and stored per transaction [200].
+    pub fetch_batch: usize,
+    /// Queued changes made on the server per command: UID sets of scattered messages
+    /// get long [500].
+    pub replay_batch: usize,
+    /// Messages up to this size (RFC822.SIZE) are fetched whole when opened; above it,
+    /// attachments are left on the server until opened, and text parts above it are not
+    /// fetched at all [2 MiB].
+    pub whole_message_limit: u32,
+}
+
+impl Default for EngineTuning {
+    fn default() -> Self {
+        Self {
+            fetch_batch: 200,
+            replay_batch: 500,
+            whole_message_limit: 2 * 1024 * 1024,
+        }
+    }
+}
+
+impl EngineTuning {
+    /// With the batch sizes at least 1, which chunking needs.
+    pub(crate) fn checked(self) -> Self {
+        Self {
+            fetch_batch: self.fetch_batch.max(1),
+            replay_batch: self.replay_batch.max(1),
+            ..self
+        }
+    }
 }
 
 struct IdleSession {
@@ -110,6 +151,17 @@ impl Permit {
     }
 }
 
+/// Tells a task holding the engine weakly that the engine is gone.
+pub(crate) struct Closing(watch::Receiver<()>);
+
+impl Closing {
+    /// Resolves once the engine is gone.
+    pub async fn closed(&mut self) {
+        // Nothing is ever sent: this ends when the sender, owned by the engine, is gone.
+        let _ = self.0.changed().await;
+    }
+}
+
 /// Tells work on an account that the account is being removed.
 pub(crate) struct Cancellation {
     removed: watch::Receiver<bool>,
@@ -166,8 +218,17 @@ impl Engine {
             outbox_kick: Arc::default(),
             sync_in_background: None,
             draft_upload_delay: DEFAULT_DRAFT_UPLOAD_DELAY,
+            tuning: EngineTuning::default(),
+            closing: watch::Sender::new(()),
             accounts: Mutex::default(),
         }
+    }
+
+    /// For background tasks that hold the engine weakly and wait long between rounds: on
+    /// a borrowed runtime they would otherwise outlive the client until their timer
+    /// fired. Per-account tasks have [`Cancellation::cancelled`] instead.
+    pub fn closing(&self) -> Closing {
+        Closing(self.closing.subscribe())
     }
 
     /// Called from inside the task performing the mutation, so dropping the caller's
@@ -267,8 +328,12 @@ impl Engine {
     /// Records that the draft was just changed (or created), so background sync leaves
     /// it for [`draft_upload_delay`](Self::draft_upload_delay): a frontend saving as the
     /// user types would otherwise replace the copy on the server with each keystroke.
-    /// Returns whether it was not held back already.
+    /// Returns whether it was not held back already. Only background sync (`watch`)
+    /// holds drafts back and forgets these: without it, nothing is recorded.
     pub fn draft_edited(&self, account: AccountId, draft: DraftId) -> bool {
+        if self.sync_in_background.is_none() {
+            return true;
+        }
         lock(&self.account(account).draft_edits)
             .insert(draft, Instant::now())
             .is_none_or(|at| at.elapsed() >= self.draft_upload_delay)
@@ -276,14 +341,19 @@ impl Engine {
 
     /// Forgets the draft's last change, once it is deleted or being sent.
     pub fn draft_gone(&self, account: AccountId, draft: DraftId) {
-        lock(&self.account(account).draft_edits).remove(&draft);
+        if let Some(state) = self.existing(account) {
+            lock(&state.draft_edits).remove(&draft);
+        }
     }
 
     /// The account's drafts changed within the last
     /// [`draft_upload_delay`](Self::draft_upload_delay), which background sync doesn't
     /// upload yet. Uploads the user asks for don't wait.
     pub fn held_drafts(&self, account: AccountId) -> HashSet<DraftId> {
-        lock(&self.account(account).draft_edits)
+        let Some(state) = self.existing(account) else {
+            return HashSet::new();
+        };
+        lock(&state.draft_edits)
             .iter()
             .filter(|(_, at)| at.elapsed() < self.draft_upload_delay)
             .map(|(draft, _)| *draft)
@@ -294,7 +364,7 @@ impl Engine {
     /// became due after the last [`forget_settled_drafts`](Self::forget_settled_drafts)
     /// (during a sync that left it alone, say), which the next one uploads.
     pub fn next_draft_due(&self, account: AccountId) -> Option<Duration> {
-        lock(&self.account(account).draft_edits)
+        lock(&self.existing(account)?.draft_edits)
             .values()
             .map(|at| self.draft_upload_delay.saturating_sub(at.elapsed()))
             .min()
@@ -303,8 +373,9 @@ impl Engine {
     /// Forgets the drafts no longer held back, as background sync begins a step, which
     /// uploads them.
     pub fn forget_settled_drafts(&self, account: AccountId) {
-        lock(&self.account(account).draft_edits)
-            .retain(|_, at| at.elapsed() < self.draft_upload_delay);
+        if let Some(state) = self.existing(account) {
+            lock(&state.draft_edits).retain(|_, at| at.elapsed() < self.draft_upload_delay);
+        }
     }
 
     /// Records that every folder of the account was just synced.
@@ -315,7 +386,7 @@ impl Engine {
     /// When every folder of the account was last synced, if ever since the engine
     /// started.
     pub fn synced(&self, account: AccountId) -> Option<Instant> {
-        *lock(&self.account(account).synced)
+        *lock(&self.existing(account)?.synced)
     }
 
     /// Records that `folder` just completed a sync: its messages and all their flags.
@@ -325,7 +396,7 @@ impl Engine {
 
     /// When `folder` last completed a sync, if ever since the engine started.
     pub fn folder_synced(&self, account: AccountId, folder: FolderId) -> Option<Instant> {
-        lock(&self.account(account).folders_synced)
+        lock(&self.existing(account)?.folders_synced)
             .get(&folder)
             .copied()
     }
@@ -391,7 +462,9 @@ impl Engine {
 
     /// What the latest attempts to get through to the account's servers found.
     pub fn status(&self, account: AccountId) -> AccountStatus {
-        lock(&self.account(account).status).clone()
+        self.existing(account)
+            .map(|state| lock(&state.status).clone())
+            .unwrap_or_default()
     }
 
     /// For work on `account` without a permit. Obtain it before checking that the
@@ -406,7 +479,7 @@ impl Engine {
 
     /// A logged-in connection that was recently in use, if there is one.
     pub fn take_session(&self, account: AccountId) -> Option<Session> {
-        let state = self.account(account);
+        let state = self.existing(account)?;
         let mut idle = lock(&state.idle);
         idle.retain(|s| s.since.elapsed() < IDLE_SESSION_TTL);
         idle.pop().map(|s| s.session)
@@ -443,6 +516,8 @@ impl Engine {
         lock(&self.accounts).remove(&account);
     }
 
+    /// The account's state, created on first use. Only what work on the account needs
+    /// creates it: frontends can ask about any id, and the map never shrinks.
     fn account(&self, account: AccountId) -> Arc<AccountState> {
         lock(&self.accounts)
             .entry(account)
@@ -460,6 +535,22 @@ impl Engine {
                 })
             })
             .clone()
+    }
+
+    /// The account's state, if anything created it: what it holds starts out empty.
+    fn existing(&self, account: AccountId) -> Option<Arc<AccountState>> {
+        lock(&self.accounts).get(&account).cloned()
+    }
+
+    #[cfg(test)]
+    pub fn tracked_accounts(&self) -> usize {
+        lock(&self.accounts).len()
+    }
+
+    #[cfg(test)]
+    pub fn tracked_draft_edits(&self, account: AccountId) -> usize {
+        self.existing(account)
+            .map_or(0, |state| lock(&state.draft_edits).len())
     }
 }
 

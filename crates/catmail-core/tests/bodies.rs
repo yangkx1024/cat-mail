@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use catmail_core::{Error, Event, Message, MessageId, SearchQuery};
+use catmail_core::{EngineTuning, Error, Event, Message, MessageId, SearchQuery};
 use catmail_testkit::{FakeHttp, Reply, ServerState, SmtpState, response};
 
 mod common;
@@ -267,6 +267,38 @@ async fn large_messages_leave_attachments_on_the_server_until_opened() {
         account: env.account,
         folder
     }));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_whole_message_limit_is_tunable() {
+    let env = env_built(state(&[NEWSLETTER]), SmtpState::new("alice", "pw"), |b| {
+        b.tuning(EngineTuning {
+            whole_message_limit: 512,
+            ..EngineTuning::default()
+        })
+    })
+    .await;
+    env.client.sync_account(env.account).await.unwrap();
+    let start = env.log_len();
+
+    let message = env.client.download_message(env.id(0).await).await.unwrap();
+    let commands = env.commands_since(start);
+    assert!(
+        commands.iter().any(|c| c.contains("BODYSTRUCTURE")),
+        "{commands:?}"
+    );
+    assert!(
+        !commands.iter().any(|c| c.contains("BODY.PEEK[]")),
+        "{commands:?}"
+    );
+    let b = body(&message);
+    assert!(b.html.as_deref().is_some_and(|h| h.contains("请查收")));
+    let pdf = b
+        .attachments
+        .iter()
+        .find(|a| a.mime_type == "application/pdf")
+        .unwrap();
+    assert!(!pdf.downloaded);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -2,12 +2,12 @@
 
 use std::time::Duration;
 
-use catmail_core::{Error, ErrorKind, Event, Flags, FolderRole, SyncReport};
-use catmail_testkit::{FakeMailbox, ServerState};
+use catmail_core::{EngineTuning, Error, ErrorKind, Event, Flags, FolderRole, SyncReport};
+use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 
 mod common;
 
-use common::{Env, drain, env};
+use common::{Env, drain, env, env_built};
 
 fn state_with(inbox_subjects: &[&str]) -> ServerState {
     let mut state = ServerState::new("alice", "pw");
@@ -201,6 +201,29 @@ async fn sync_without_condstore_refetches_all_flags() {
         "UIDNEXT and the count are unchanged, so no SEARCH: {commands:?}"
     );
     assert_eq!(env.messages("INBOX").await[1], ("one".into(), Flags::SEEN));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn new_messages_are_fetched_in_batches_of_the_tuned_size() {
+    let subjects = ["a", "b", "c", "d", "e"];
+    let env = env_built(state_with(&subjects), SmtpState::new("alice", "pw"), |b| {
+        b.tuning(EngineTuning {
+            fetch_batch: 2,
+            ..EngineTuning::default()
+        })
+    })
+    .await;
+    let start = env.fake.state().log.len();
+    assert_eq!(folder_report(&env.sync().await, "INBOX").added, 5);
+    let fetches: Vec<_> = env
+        .commands_since(start)
+        .into_iter()
+        .filter(|c| c.starts_with("UID FETCH"))
+        .map(|c| c.split(' ').nth(2).unwrap().to_owned())
+        .collect();
+    // Newest first.
+    assert_eq!(fetches, ["4:5", "2:3", "1"]);
+    assert_eq!(env.subjects("INBOX").await, newest_first(&subjects));
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -37,13 +37,17 @@ HTML 和决定哪些图片可以加载的函数。
 ### 运行时桥接
 
 GPUI 有自己的 executor，不是 tokio；IMAP / SMTP 栈却依赖 tokio reactor。`MailClient` 持有
-（GUI：`MailClient::builder(cfg).open()` 自建）或借用（CLI：`.runtime(Handle::current())`）
+（GUI：`MailClient::builder(cfg).open_async()` 自建）或借用（CLI：`.runtime(Handle::current())`）
 一个 tokio runtime，每个公开方法把工作 `spawn` / `spawn_blocking` 到该 runtime 上再 await
 `JoinHandle`，返回的 future 因此可以被任意 executor poll（`catmail-core/src/runtime.rs`）。
 
 - `Runtime` 与 `Engine` 分放在两个 `Arc` 里，后台任务只持有 `Engine`，不会在 runtime 自己的
   线程上 drop 最后一个 runtime 引用。
-- 自建 runtime drop 时 `shutdown_background()`，不等待任务：状态都已落 SQLite。
+- 自建 runtime drop 时 `shutdown_background()`，不等待任务：状态都已落 SQLite。借用的 runtime 不会
+  被关掉，所以只持 `Weak<Engine>` 的后台任务（发信、GC）还 select 引擎的关闭信号（`Engine::closing`，
+  随引擎 drop），客户端一没就结束，不等下一次定时器；每账户的后台同步靠账户的取消信号，同样随引擎 drop。
+- `open` 在调用线程上加锁、迁移数据库、恢复中断的发送；有 UI 线程的前端用 `open_async`，把这些放到
+  runtime 的 blocking pool 上，返回的 future 同样可以被任意 executor poll。
 - 后台任务 panic 转成 `Error::Task`，GUI 进程不跟着崩。
 
 ### 错误
@@ -125,7 +129,8 @@ UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UI
 引擎为每个账户保留一份 `AccountState`：同步锁（同步、操作回放与后台同步的每一步串行；完整同步按文件夹拿锁，等着的同步在文件夹之间插进来）、发送锁
 （同一条 outbox 不会被同时处理）、按需下载用的小连接池、唤醒后台同步的信号、"已删除"标记，以及
 最近几次连接服务器的结果（`MailClient::account_status`：同步、发信各自是否连续失败、是否登录被拒绝，
-变化时发 `AccountStatusChanged`）。连接和登录失败属于账户，不算在某封信或某次操作头上。删除账户时先置标记、清空连接池，进行中
+变化时发 `AccountStatusChanged`）。这份状态只由对账户的实际工作创建：前端查询一个不存在的 id
+（`account_status`）不会留下条目，没有后台同步时也不记录草稿的编辑时间。连接和登录失败属于账户，不算在某封信或某次操作头上。删除账户时先置标记、清空连接池，进行中
 的同步和下载立即返回 `Error::Cancelled`，不用等网络超时，然后才删除数据；这份状态作为墓碑
 保留（账户 id 不复用），之后对它的任何操作立即取消。
 

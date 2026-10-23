@@ -157,7 +157,8 @@ APPEND 的答复也可能丢失，所以尝试次数在每次尝试**之前**加
 ## 谁来发
 
 `MailClientBuilder::send_in_background(true)` 时引擎起一个后台任务，按 `next_attempt_at` 和入队、
-重试的通知处理到期的条目（GUI 用）；它只持有 `Weak<Engine>`，不会让数据目录锁一直被占着。CLI 不开
+重试的通知处理到期的条目（GUI 用）；它只持有 `Weak<Engine>`，不会让数据目录锁一直被占着，并且
+随引擎的关闭信号结束，借用的 runtime 上也不会在客户端没了之后再睡上最长 30 分钟。CLI 不开
 后台发送，免得一个无关的命令在背后发信：`catmail send` 入队后立即 `flush_outbox`，失败的留给
 `catmail outbox flush`。每账户一把发送锁（`Engine::send_permit`），后台发送和手动 flush 不会同时
 处理同一条。
