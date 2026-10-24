@@ -44,14 +44,16 @@ impl Mailbox {
             .flatten()
             .map(|a| a.account.clone())
             .collect();
-        self.sync_accounts(accounts, window, cx);
+        self.sync_accounts(accounts, false, window, cx);
     }
 
-    /// Syncs the accounts in turn. Progress shows as it commits, through the engine's
-    /// events; only failures are reported here.
+    /// Syncs the accounts in turn; `initial` for accounts just added, whose first sync
+    /// background sync is already running (see `MailClient::initial_sync`). Progress
+    /// shows as it commits, through the engine's events; only failures are reported here.
     pub(super) fn sync_accounts(
         &mut self,
         accounts: Vec<Account>,
+        initial: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -61,7 +63,12 @@ impl Mailbox {
         cx.spawn_in(window, async move |this, cx| {
             let mut problems = Vec::new();
             for account in accounts {
-                match client.sync_account(account.id).await {
+                let synced = if initial {
+                    client.initial_sync(account.id).await
+                } else {
+                    client.sync_account(account.id).await
+                };
+                match synced {
                     Ok(report) => {
                         let failed = report.folders.iter().filter(|f| f.error.is_some()).count();
                         if failed > 0 {

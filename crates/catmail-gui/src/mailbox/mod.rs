@@ -463,7 +463,7 @@ impl Mailbox {
             match event {
                 // Its folders and messages appear through the engine's events.
                 AddAccountEvent::Added(account) => {
-                    this.sync_accounts(vec![account.clone()], window, cx);
+                    this.sync_accounts(vec![account.clone()], true, window, cx);
                     this.messages.update(cx, |list, cx| list.focus(window, cx));
                 }
                 AddAccountEvent::Cancelled => {}

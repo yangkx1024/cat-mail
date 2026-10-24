@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use catmail_core::{Config, ErrorKind, Event, Flags, MailClient, SyncSchedule, Verify};
+use catmail_core::{Config, ErrorKind, Event, Flags, MailClient, SyncReport, SyncSchedule, Verify};
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 use tokio::runtime::Handle;
 
@@ -102,12 +102,45 @@ async fn new_mail_flag_changes_and_expunges_are_pushed() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_account_added_once_logged_in_is_watched_on_that_connection() {
-    let env = env_added(state(), SmtpState::new("alice", "pw"), Verify::Login, |b| {
-        b.sync_in_background(Some(schedule(HOUR, HOUR)))
-    })
-    .await;
+    let env = just_added(state()).await;
     env.wait_for_idle(1).await;
     assert_eq!(env.fake.state().connections, 1);
+}
+
+/// Background sync with its first sync of every folder to come, on the connection that
+/// checked the password.
+async fn just_added(state: ServerState) -> Env {
+    env_added(state, SmtpState::new("alice", "pw"), Verify::Login, |b| {
+        b.sync_in_background(Some(schedule(HOUR, HOUR)))
+    })
+    .await
+}
+
+fn synced_folders(report: &SyncReport) -> Vec<&str> {
+    let mut names: Vec<_> = report.folders.iter().map(|f| f.name.as_str()).collect();
+    names.sort_unstable();
+    names
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_initial_sync_after_the_first_background_one_syncs_on_its_own() {
+    let env = just_added(state()).await;
+    env.wait_for_idle(1).await;
+    let report = env.client.initial_sync(env.account).await.unwrap();
+    assert_eq!(synced_folders(&report), ["Archive", "INBOX"]);
+    let st = env.fake.state();
+    assert_eq!((st.connections, st.received("LIST")), (2, 2));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_initial_sync_waiting_for_a_failed_background_one_syncs_on_its_own() {
+    let mut state = state();
+    state.faults.reject_login = true;
+    let env = watching(state, schedule(HOUR, HOUR)).await;
+    let error = env.client.initial_sync(env.account).await.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Auth);
+    // Background sync's, then its own.
+    assert_eq!(env.fake.state().received("LOGIN"), 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]

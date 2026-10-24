@@ -43,6 +43,20 @@ pub(crate) async fn sync_account(engine: Arc<Engine>, account_id: AccountId) -> 
     result
 }
 
+/// An account's first sync: background sync's, if it is running it, else one of its own.
+/// The one joined isn't recorded in the account's status again: it already was, and a
+/// newer outcome may have been since.
+pub(crate) async fn initial_sync(engine: Arc<Engine>, account_id: AccountId) -> Result<SyncReport> {
+    let joined = engine
+        .cancellation(account_id)
+        .run(async { Ok(engine.first_sync(account_id).await) })
+        .await?;
+    match joined {
+        Some(report) => Ok(report),
+        None => sync_account(engine, account_id).await,
+    }
+}
+
 /// Syncs one folder, after making queued local changes (and settled drafts) on the
 /// server, unless it completed a sync less than `max_age` ago. `None` if it didn't sync:
 /// the folder was fresh enough or can't hold messages. Only a sync that went to the

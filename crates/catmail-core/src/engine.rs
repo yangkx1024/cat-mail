@@ -10,7 +10,7 @@ use catmail_proto::imap::Session;
 use catmail_store::{BlobStore, Db, Store};
 use catmail_types::{
     AccountId, AccountStatus, DraftId, ErrorKind, Event, FolderId, IdentityId, ReportedError,
-    SendProblem, ServerProblem,
+    SendProblem, ServerProblem, SyncReport,
 };
 use tokio::sync::{Notify, OwnedMutexGuard, broadcast, watch};
 
@@ -131,6 +131,21 @@ struct AccountState {
     /// When drafts were last changed, for holding back their upload while they are
     /// being written. Entries older than the delay are dropped as they are found.
     draft_edits: Mutex<HashMap<DraftId, Instant>>,
+    /// Background sync's first sync of every folder while it runs, for syncs asked for
+    /// meanwhile to wait for (see [`Engine::first_sync`]).
+    first_sync: Mutex<Option<watch::Sender<Option<SyncReport>>>>,
+}
+
+/// Background sync's first step, from before its task starts until this is dropped. If
+/// that step didn't sync every folder ([`Engine::first_sync_done`]), the syncs waiting
+/// for it sync on their own.
+pub(crate) struct FirstSync(Arc<AccountState>);
+
+impl Drop for FirstSync {
+    fn drop(&mut self) {
+        // Syncs asked for from now on sync on their own too.
+        lock(&self.0.first_sync).take();
+    }
 }
 
 /// [`AccountStatus`], with the send problems by identity.
@@ -393,6 +408,39 @@ impl Engine {
         *lock(&self.account(account).synced) = Some(Instant::now());
     }
 
+    /// Marks the start of background sync's first sync of every folder of the account,
+    /// until it is done or what is returned is dropped. Called before the task is
+    /// spawned, so that a sync asked for right after (once the account is added, say)
+    /// finds it.
+    pub fn start_first_sync(&self, account: AccountId) -> FirstSync {
+        let state = self.account(account);
+        *lock(&state.first_sync) = Some(watch::Sender::new(None));
+        FirstSync(state)
+    }
+
+    /// Background sync synced every folder of the account: the syncs waiting for its first
+    /// sync get `report`. Later full syncs find nobody waiting.
+    pub fn first_sync_done(&self, account: AccountId, report: &SyncReport) {
+        let Some(tx) = self
+            .existing(account)
+            .and_then(|s| lock(&s.first_sync).take())
+        else {
+            return;
+        };
+        if tx.receiver_count() > 0 {
+            tx.send_replace(Some(report.clone()));
+        }
+    }
+
+    /// Waits for background sync's first sync of every folder of the account, if it is
+    /// running, and returns its report. `None` if none is running, or it failed.
+    pub async fn first_sync(&self, account: AccountId) -> Option<SyncReport> {
+        let mut rx = lock(&self.existing(account)?.first_sync)
+            .as_ref()?
+            .subscribe();
+        rx.wait_for(Option::is_some).await.ok()?.clone()
+    }
+
     /// When every folder of the account was last synced, if ever since the engine
     /// started.
     pub fn synced(&self, account: AccountId) -> Option<Instant> {
@@ -543,6 +591,7 @@ impl Engine {
                     folders_synced: Mutex::default(),
                     status: Mutex::default(),
                     draft_edits: Mutex::default(),
+                    first_sync: Mutex::default(),
                 })
             })
             .clone()
@@ -556,6 +605,14 @@ impl Engine {
     #[cfg(test)]
     pub fn tracked_accounts(&self) -> usize {
         lock(&self.accounts).len()
+    }
+
+    /// Calls waiting for background sync's first sync of the account.
+    #[cfg(test)]
+    pub fn first_sync_waiters(&self, account: AccountId) -> usize {
+        self.existing(account)
+            .and_then(|s| lock(&s.first_sync).as_ref().map(|tx| tx.receiver_count()))
+            .unwrap_or(0)
     }
 
     #[cfg(test)]

@@ -178,6 +178,8 @@ pub struct Faults {
     pub drop_on_fetch: Option<usize>,
     /// Never answer header FETCHes; the connection stays open.
     pub hang_on_fetch: bool,
+    /// Hold each header FETCH until it gets a permit, e.g. to keep a sync from finishing.
+    pub fetch_gate: Option<Arc<Semaphore>>,
     /// Like `drop_on_fetch`, for FETCHes of body content (`BODY.PEEK[]`,
     /// `BODY.PEEK[<section>]`).
     pub drop_on_body_fetch: Option<usize>,
@@ -269,6 +271,7 @@ impl Default for Faults {
             auth_plain: false,
             drop_on_fetch: None,
             hang_on_fetch: false,
+            fetch_gate: None,
             drop_on_body_fetch: None,
             hang_on_body_fetch: false,
             body_fetch_gate: None,
@@ -1089,6 +1092,10 @@ async fn handle(
                     None => return Ok(Next::Close),
                     Some(true) => std::future::pending::<()>().await,
                     Some(false) => {}
+                }
+                let gate = lock(state).faults.fetch_gate.clone();
+                if let Some(gate) = gate {
+                    gate.acquire().await.expect("gate open").forget();
                 }
             }
             if items.iter().any(|i| body_section(i).is_some()) {
