@@ -2,7 +2,7 @@
 //! (a sending service, say). The login is tried before anything is stored, as for an
 //! account.
 
-use catmail_core::{Account, MailClient, NewIdentity, Security, Verify};
+use catmail_core::{AccountId, MailClient, NewIdentity, Security, Verify};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{StyledExt as _, v_flex};
 use gpui_kit::{
@@ -36,7 +36,9 @@ impl Values {
 
 pub struct AddIdentity {
     client: MailClient,
-    account: Account,
+    account: AccountId,
+    /// The account's address.
+    email: String,
     login: LoginFields,
     smtp: ServerFields,
     submit: Submit,
@@ -48,11 +50,13 @@ impl EventEmitter<IdentityFormClosed> for AddIdentity {}
 impl AddIdentity {
     pub fn new(
         client: MailClient,
-        account: Account,
+        account: AccountId,
+        email: String,
+        display_name: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let login = LoginFields::new("identity-", account.display_name.clone(), window, cx);
+        let login = LoginFields::new("identity-", display_name, window, cx);
         let smtp = ServerFields::new(
             "identity-smtp",
             "Outgoing mail (SMTP)",
@@ -66,6 +70,7 @@ impl AddIdentity {
         Self {
             client,
             account,
+            email,
             login,
             smtp,
             submit: Submit::default(),
@@ -82,7 +87,7 @@ impl AddIdentity {
 
     fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let values = self.values(cx);
-        let (client, account) = (self.client.clone(), self.account.id);
+        let (client, account) = (self.client.clone(), self.account);
         let request = values.new_identity().map(|new| async move {
             client
                 .add_identity(account, new, values.login.password, Verify::Login)
@@ -116,7 +121,7 @@ impl Render for AddIdentity {
             .child(
                 div()
                     .font_semibold()
-                    .child(format!("New address for {}", self.account.email)),
+                    .child(format!("New address for {}", self.email)),
             )
             .child(self.login.render())
             .child(self.smtp.render(|this: &mut Self| &mut this.smtp, cx))
