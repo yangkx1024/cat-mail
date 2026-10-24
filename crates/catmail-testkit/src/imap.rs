@@ -215,6 +215,10 @@ pub struct Faults {
     /// UIDs whose BODYSTRUCTURE is sent in a form no parser accepts, every time (unlike
     /// `garble`, which fires once). The rest of their FETCH responses is well-formed.
     pub broken_bodystructure: Vec<u32>,
+    /// UIDs whose FLAGS are sent as `NIL`, which no parser takes for flags, every time.
+    pub broken_flags: Vec<u32>,
+    /// Advertise IMAP4rev2 (RFC 9051) instead of IMAP4rev1.
+    pub imap4rev2_only: bool,
     /// Advertise UIDPLUS and answer APPEND with APPENDUID.
     pub uidplus: bool,
     /// Refuse this many APPENDs (with NO) before accepting them again.
@@ -290,6 +294,8 @@ impl Default for Faults {
             omit: None,
             split_fetch: false,
             broken_bodystructure: Vec::new(),
+            broken_flags: Vec::new(),
+            imap4rev2_only: false,
             uidplus: true,
             reject_appends: 0,
             reject_append_literal: false,
@@ -770,7 +776,11 @@ fn capabilities(state: &ServerState, session: &Session) -> String {
         .faults
         .append_limit
         .map(|l| format!("APPENDLIMIT={l}"));
-    let mut caps = vec!["IMAP4rev1"];
+    let mut caps = vec![if state.faults.imap4rev2_only {
+        "IMAP4rev2"
+    } else {
+        "IMAP4rev1"
+    }];
     if session.mode == TlsMode::StartTls && !session.tls {
         caps.extend(["STARTTLS", "LOGINDISABLED"]);
     }
@@ -1385,7 +1395,9 @@ fn fetch(mb: &FakeMailbox, args: &[Tok], condstore: bool, faults: &Faults, tag: 
             continue;
         }
         let mut parts: Vec<Vec<u8>> = vec![format!("UID {}", msg.uid).into_bytes()];
-        if wants("FLAGS") {
+        if wants("FLAGS") && faults.broken_flags.contains(&msg.uid) {
+            parts.push(b"FLAGS NIL".to_vec());
+        } else if wants("FLAGS") {
             parts.push(format!("FLAGS ({})", msg.flags.join(" ")).into_bytes());
         }
         if condstore && (wants("MODSEQ") || changed_since.is_some()) {

@@ -6,62 +6,67 @@ SMTP 客户端见[草稿与发信](sending.md#smtp-客户端)。
 
 ## IMAP 库
 
-**现状：** `imap-next`（sans-IO，基于 `imap-codec`），启用 `starttls` 与 `ext_condstore_qresync`，
-不启用它自带的 `stream`：`catmail-proto` 自己驱动状态机，底层可以是任意 `AsyncRead + AsyncWrite`，
-便于 STARTTLS 升级和测试。`imap-codec 2.0.0-alpha.9` 未开启 `nom/alloc`，`catmail-proto` 显式依赖
-`nom` 补上（见其 `Cargo.toml` 注释）。
+[`imap-proto`](https://github.com/djc/imap-proto) 只解析服务器的响应；命令编码（`imap/command.rs`）、
+分帧（`imap/framing.rs`）和连接的驱动（tag、literal 与续行、AUTHENTICATE、STARTTLS、IDLE / DONE，
+`imap/connection.rs`）由 `catmail-proto` 自己写，底层可以是任意 `AsyncRead + AsyncWrite`，便于 STARTTLS
+升级和测试。
 
-**已决定改为：** 用 [`imap-proto`](https://github.com/djc/imap-proto) 只解析响应，命令编码和连接的
-驱动（分帧、tag、literal 与续行、AUTHENTICATE、STARTTLS、IDLE / DONE）由 `catmail-proto` 自己写。
-`Session` 的接口不变，现有的假服务器和 Dovecot 测试就是回归测试。尚未实现，见
-[位置与标签 / 迁移步骤](labels.md#迁移步骤)。
+**暂时依赖 imap-proto 的 main。** 0.17.0 不还原带引号字符串里的转义（`"\\Inbox"` 解析出来是
+`\\Inbox`），而解析出来的值看不出原来是带引号的字符串还是 literal，在我们这边没法可靠地补。修复
+（djc/imap-proto#209）在未发版的 0.18.0 里，所以工作区用 `[patch.crates-io]` 固定到 main 的一个 commit。
+`cargo deny` 不接受 git 来源，0.18.0 发版、换成 crates.io 的版本之前 audit 的 sources 检查会失败；项目
+未发布，先接受这一点。
+
+为什么不用原来的 imap-next / imap-codec：
 
 - **imap-codec 难以扩展。** imap-types 的命令和响应都是封闭的 enum：`Store` 只能带 flags，FETCH 少一个
   数据项就发不出命令，回答里多一个不认识的项就丢掉整行。每个它不支持的扩展（Gmail 的 `X-GM-*`，以后的
   OBJECTID、PREVIEW 等）都只能等上游，而上游一直是 alpha，每次升级都可能不兼容。
 - **imap-next 的状态机要一再绕过：** APPEND 收到 NO 后仍等着发 literal、只限单条响应的大小、事件里带着
-  只在 release 构建脱敏的凭据（见下文[连接层](#连接层)），以及 `nom/alloc`。它负责的连接部分我们大多已经
-  自己写了。
+  只在 release 构建脱敏的凭据，以及 imap-codec 漏开的 `nom/alloc`。它负责的连接部分我们大多已经自己写了。
 - **imap-proto** 只解析响应，正好是客户端需要的部分：语法里最复杂、安全上最敏感的（BODYSTRUCTURE、
-  ENVELOPE、literal）用它的，最常需要扩展的（发什么命令）由我们控制。0.17.0 已经支持 `X-GM-LABELS` /
+  ENVELOPE、literal）用它的，最常需要扩展的（发什么命令）由我们控制。它已经支持 `X-GM-LABELS` /
   `X-GM-MSGID` / `X-GM-THRID`、`EMAILID` / `THREADID`（RFC 8474）、VANISHED 和 MODSEQ；FETCH 里不认识的
-  项返回 `AttributeValue::Unknown`，不会让整行解析失败。它也是 async-imap（Delta Chat）的解析器，见过
-  大量真实服务器。缺少的响应语法给上游提 PR。
+  项返回 `AttributeValue::Unknown`，不认识的响应码当作文字（连接层按名字记下，如 `[NOMODSEQ]`），都不会让
+  整条响应解析失败。它也是 async-imap（Delta Chat）的解析器，见过大量真实服务器。缺少的响应语法给上游提 PR。
 - 不用 async-imap：它是持有连接的会话层，又会回到在别人的状态机外面打补丁。不自己写响应解析器：IMAP
   响应的语法很大，维护和安全上的负担都不值得。
-- **试用（2026-10-24，真实 Gmail，见[位置与标签 / 验证结果](labels.md#验证结果)）：** imap-proto 0.17.0
-  解析了全部答复，没有一行失败；不认识的响应码（`[NONEXISTENT]` 等）当作文字，不算失败。要处理的两点：
-  - **带引号的字符串不还原转义**：`quoted` 返回引号里的原始字节，`"\\Inbox"` 解析出来是 `\\Inbox`。这影响
-    所有带引号的字符串（LIST 的邮箱名、`X-GM-LABELS`、ENVELOPE 的字段）。给上游提修复，修复发布之前在我们
-    这边还原 `\\` 和 `\"`。
-  - Gmail 只有 `LITERAL-`：超过 4096 字节的 literal 要等服务器的 `+` 再发，命令编码不能一律用非同步
-    literal。
-- 连接层的规则不变：解析失败的响应仍按行计数、让严格的命令返回 `Incomplete`，`quirks.rs` 仍在解析之前
-  修补字节，一条命令的回答总量仍有上限。
+- 试用见[位置与标签 / 验证结果](labels.md#验证结果)：真实 Gmail 的全部答复都能解析。
+- **代价**：imap-proto 把 BODYSTRUCTURE 里的字符串按 UTF-8 有损转换。附件文件名用原始 8 位字节（不按
+  RFC 2231 / 2047 编码，如 GBK）时，按部分下载的大邮件里这个文件名变成 `U+FFFD`；整封下载的邮件不受影响，
+  文件名来自原文。
 
 ## 连接层
 
-- **默认严格。** 无法解析的响应行由连接层计数，`Connection::execute` 只要丢弃过一行就返回
+- **分帧。** 读到的字节按行和 literal 切成完整的响应（行尾 `{n}` / `{n+}` 声明 literal，长度逐字节跟踪，
+  可以带任意多个前导零），literal（邮件内容）原样通过。一条响应超过 100 MiB（声明了还没读到的 literal
+  也算）就放弃这条连接。只有 LF 的行尾补上 CR：有的服务器偶尔这样发，而解析器只认 CRLF。
+- **默认严格。** 无法解析的响应由连接层计数，`Connection::execute` 只要丢弃过一条就返回
   `Incomplete`：LIST、SEARCH、EXAMINE、flags 这类结果缺一行就会被误当成删除或"没变化"。新命令
   默认就是安全的；只有明确能处理缺行的调用（拉邮件头）用 `execute_lossy`，见
   [同步 / 容错](sync.md#容错)。
-- **修补已知的服务器错误。** imap-codec 遇到不合语法的字段会丢掉整条响应，同一封邮件每次同步都会
-  丢。连接层在 imap-next 解析之前修补读到的字节（`imap/quirks.rs`）：只改响应行，literal（邮件内容）
-  原样通过，按 imap-codec 的 fragmentizer 的规则（行尾 `{n}` / `{n+}`）判断 literal 从哪里开始，两边
-  才不会错位。目前只有一项：QQ 邮箱的 `INTERNALDATE "2-Oct-2026 …"` 缺少一位日期前的空格（RFC 3501
-  要求 `" 2"` 或 `"02"`），每月 1–9 号的邮件因此全部拉不到。修补层按行缓存，但一行超过 64 KiB 还没结束时
-  先把前面的部分交给 imap-next（只留最后 15 字节，够看到一个被截断的修补位置），不然一个不换行的服务器
-  能让缓存无限增长，绕过 imap-next 对单个响应 100 MiB 的上限。行是否声明了 literal 不从缓存里看，而是
-  逐字节跟踪（与 fragmentizer 同一个状态机）：`{n}` 的长度可以带任意多个前导零，不能指望它留在缓存里。
+- **请求过的 FETCH 项必须都在。** imap-proto 把格式坏掉的已知项（`FLAGS NIL`、只有类型的
+  BODYSTRUCTURE）也读成 `AttributeValue::Unknown`，整行照样解析成功。所以 `Session` 检查每封有答复的
+  邮件是否带着请求过的每一项，缺了就是 `Incomplete`（flags、大小、整封原文、BODYSTRUCTURE、各 section；
+  NIL 的 section 算在）；拉邮件头时缺了 BODYSTRUCTURE 的邮件不带它再取一次。服务器主动多给的、不认识的
+  扩展项照样忽略。
+- **只有 IMAP4rev2 的服务器。** imap-proto 的 CAPABILITY 解析要求列表里有 IMAP4rev1，只声明 IMAP4rev2
+  （RFC 9051）的服务器整条 CAPABILITY 都解析不了。`* CAPABILITY …` 和响应码 `[CAPABILITY …]` 解析失败时
+  由连接层自己按空格读出能力列表。
+- **宽松地读已知的服务器错误。** QQ 邮箱的 `INTERNALDATE "2-Oct-2026 …"` 缺少一位日期前的空格（RFC 3501
+  要求 `" 2"` 或 `"02"`）。imap-proto 不校验 INTERNALDATE 的写法，日期由我们自己解析（`internal_date`），
+  三种写法都接受，否则每月 1–9 号的邮件全部拉不到。
+- **命令的参数**按字节选最简单的形式：atom（不含 `]`，有的服务器不认），否则带引号的字符串（7 位、没有
+  CR / LF），否则 literal；literal 里不能有 NUL（返回 `Error::InvalidInput`，什么也没发出）。服务器有
+  `LITERAL+` 时 literal 一律不等 `+`（`{n+}`），有 `LITERAL-`（如 Gmail）时 4096 字节以内不等，否则都等。
 - **APPEND 被提前拒绝。** 带 literal 的命令发出第一行后，服务器可以不回 `+` 而直接回 tagged NO
-  （Dovecot 无法写入时就这样）。imap-next 只在 BAD 时放弃这条命令，收到 NO 后仍等着发送剩下的
-  literal，之后排队的命令永远发不出去。所以命令完整发出之前收到 NO/BAD 时返回 `Error::Aborted`
-  （致命）：连接不再放回连接池，`Connection` 自己也记下，之后的命令立即失败。
-- **一条命令的回答总量有上限。** imap-next 只限制单条响应 100 MiB，不限条数，而一条命令的全部 untagged
-  响应要攒到 tagged 完成才返回。所以连接层按字节计数，一条命令读到超过 256 MiB 就返回 `Error::Protocol`
-  并把连接标成不可用（剩下的回答不能被当成下一条命令的）。我们要的最大回答是一整封邮件，正常服务器碰不到。
-- **错误和日志里不放 imap-next 的事件本身**，只放变体名（`connection.rs` 的 `event_name`）：事件可能
-  带着含凭据的命令，而 imap-types 的 `Secret` 只在 release 构建里脱敏。
+  （Dovecot 无法写入时就这样）。这条命令就此结束，剩下的不再发送，是普通的拒绝（`Error::Command`），
+  连接照常可用。
+- **一条命令的回答总量有上限。** 单条响应有上限，条数没有，而一条命令的全部 untagged 响应要攒到 tagged
+  完成才返回。所以连接层按字节计数，一条命令读到超过 256 MiB 就返回 `Error::Protocol` 并把连接标成不可用
+  （剩下的回答不能被当成下一条命令的）。我们要的最大回答是一整封邮件，正常服务器碰不到。IDLE 不攒响应，
+  不计数。
+- **命令不进错误和日志**，只放命令名（`Command::name`）：LOGIN 带着密码。命令的字节在发出后清零。
 - 每次网络读写超时 60 秒。
 - TCP keepalive：安静 60 秒后开始探测，间隔 15 秒（`net::configure`，经 socket2；tokio 不暴露）。NAT
   无声地忘掉连接时几分钟内就能发现，而不是等到下一条命令或 IDLE 到期。
@@ -112,7 +117,7 @@ VANISHED、FETCH）、`stop` 完成或过了 `max`，然后发 DONE、等 tagged
 
 密码一路是 `secrecy::SecretString`（core 重新导出）：从 CLI / GUI 读入、`MailClient::add_account`、
 `SecretStore`、`Credentials` 到 SASL 响应和 SMTP 的 AUTH 行（`Zeroizing`），`Debug` 输出不含它，释放时
-清零。交给 imap-next 的副本和 GUI 输入框里的文本不归我们管，这只是尽力而为：目标是不让密码散落在
+清零。写给 socket 的副本发出后也清零；GUI 输入框里的文本不归我们管，这只是尽力而为：目标是不让密码散落在
 日志和随手的格式化里，而不是对抗能读进程内存的人。
 
 同步和发信在 `catmail-core/src/connection.rs` 里从 keyring 读出账户的密码，组成 `Credentials`。

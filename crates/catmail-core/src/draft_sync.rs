@@ -20,10 +20,10 @@ use std::sync::Arc;
 
 use catmail_proto::imap::{Error as ImapError, Session};
 use catmail_store::{DraftUpload, Touched};
-use catmail_types::{Account, AccountId, DraftId, Event, Flags, FolderId, FolderRole};
+use catmail_types::{AccountId, DraftId, Event, Flags, FolderId, FolderRole};
 
 use crate::engine::{Engine, blocking, now};
-use crate::{Error, Result, connection, drafts, ops};
+use crate::{Result, connection, drafts, ops};
 
 /// Which of the drafts to upload an upload pass takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,16 +86,14 @@ async fn run(
     done: &mut Uploaded,
     touched: &mut Touched,
 ) -> Result<()> {
-    let (unsettled, target, owner) = engine
+    let (unsettled, target) = engine
         .read(move |db| {
             Ok((
                 db.drafts().uploads(account)?,
                 db.folders().by_role(account, FolderRole::Drafts)?,
-                db.accounts().get(account)?,
             ))
         })
         .await?;
-    let owner = owner.ok_or_else(|| Error::AccountNotFound(account.to_string()))?;
     for upload in unsettled {
         touched.merge(
             try_settle(engine, session, &upload, None)
@@ -112,7 +110,7 @@ async fn run(
         Uploads::Settled => engine.held_drafts(account),
     };
     for draft in stale.into_iter().filter(|d| !held.contains(d)) {
-        match upload_one(engine, session, &owner, draft, (folder, &remote_name)).await? {
+        match upload_one(engine, session, draft, (folder, &remote_name)).await? {
             Outcome::Uploaded(changed) => {
                 done.saved(draft);
                 touched.merge(changed);
@@ -141,7 +139,6 @@ enum Outcome {
 async fn upload_one(
     engine: &Arc<Engine>,
     session: &mut Session,
-    owner: &Account,
     draft: DraftId,
     (folder, remote_name): (FolderId, &str),
 ) -> Result<Outcome> {
@@ -179,18 +176,11 @@ async fn upload_one(
         .await
     {
         Ok(appended) => appended,
-        // A refused APPEND stores nothing, nor does one that couldn't be sent.
+        // A refused APPEND stores nothing, nor does one that couldn't be sent: also one
+        // refused before its message went out (Dovecot does that when it can't store
+        // anything).
         Err(e @ (ImapError::Command { .. } | ImapError::InvalidInput(_))) => {
             return failed(engine, draft, Some(upload), e.to_string()).await;
-        }
-        // Refused before the message was sent (Dovecot does that when it can't store
-        // anything): nothing stored either, but the connection is stuck in the command.
-        // Left as it is, this would fail every sync of the account, since uploads come
-        // first.
-        Err(e @ ImapError::Aborted { .. }) => {
-            let outcome = failed(engine, draft, Some(upload), e.to_string()).await?;
-            *session = connection::connect(engine, owner.id).await?;
-            return Ok(outcome);
         }
         // Answered OK, but not all of the answer could be read: stored, at a UID to be
         // found by searching.

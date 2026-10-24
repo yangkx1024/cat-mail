@@ -600,7 +600,7 @@ async fn unanswered_append_is_not_saved_twice() {
     assert_eq!(env.flush().await, [(OutboxStatus::Done, 2)]);
     assert_eq!(env.sent_folder().len(), 1, "one copy");
     let commands = env.commands_since(start);
-    let search = format!("UID SEARCH HEADER Message-ID <{}>", entry.message_id);
+    let search = format!("UID SEARCH HEADER Message-ID \"<{}>\"", entry.message_id);
     assert!(commands.contains(&search), "{commands:?}");
     assert!(
         !commands.iter().any(|c| c.starts_with("APPEND")),

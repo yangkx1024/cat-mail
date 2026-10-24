@@ -34,16 +34,11 @@ pub enum Error {
     #[error("{command} failed: {text}")]
     Command { command: &'static str, text: String },
 
-    /// The server refused a command before all of it was sent (an APPEND, instead of
-    /// asking for its message). The client is still in the middle of that command, so
-    /// the connection can't be used any more.
-    #[error("{command} refused: {text}")]
-    Aborted { command: &'static str, text: String },
-
     /// Part of the answer to a command couldn't be parsed. Results count only when
     /// whole (a missing LIST, SEARCH or EXISTS line would read as something deleted),
-    /// so this is the default for every command but the header FETCH. The connection
-    /// is still usable.
+    /// so this is the default for every command but the header FETCH and the ones that
+    /// change a mailbox (whose answer matters only for its status). The connection is
+    /// still usable.
     #[error("{0} response from the server could not be parsed completely")]
     Incomplete(&'static str),
 
@@ -67,7 +62,7 @@ impl Error {
             | Self::Rejected(_)
             | Self::Protocol(_) => ErrorKind::Network,
             Self::AuthFailed(_) => ErrorKind::Auth,
-            Self::Command { .. } | Self::Aborted { .. } | Self::Incomplete(_) => ErrorKind::Refused,
+            Self::Command { .. } | Self::Incomplete(_) => ErrorKind::Refused,
             Self::InvalidServerName(_) | Self::Unsupported(_) | Self::InvalidInput(_) => {
                 ErrorKind::Invalid
             }

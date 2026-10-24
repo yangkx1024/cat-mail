@@ -12,11 +12,10 @@ base64.workspace = true
 catmail-types.workspace = true
 cssparser.workspace = true
 html5ever.workspace = true
-imap-next.workspace = true
+imap-proto.workspace = true
+jiff.workspace = true
 mail-builder.workspace = true
 mail-parser.workspace = true
-# Only for its features; see the workspace manifest.
-nom.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 rustls-platform-verifier.workspace = true

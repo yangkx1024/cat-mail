@@ -1,25 +1,27 @@
-//! Drives imap-next's sans-IO client over any async byte stream.
+//! One IMAP connection over any async byte stream: writes commands, reads whole responses
+//! and parses them with imap-proto.
 
 use std::future::Future;
 use std::time::Duration;
 
-use imap_next::client::{Client, Event, Options};
-use imap_next::imap_types::auth::{AuthMechanism, AuthenticateData};
-use imap_next::imap_types::command::{Command, CommandBody};
-use imap_next::imap_types::core::Tag;
-use imap_next::imap_types::response::{Code, Data, Greeting, Status, StatusKind};
-use imap_next::{Interrupt, Io, State};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use imap_proto::{Capability, MailboxDatum, Outcome, ResponseCode, Status};
 use secrecy::zeroize::Zeroizing;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::quirks::Quirks;
+use super::command::{Command, Literals};
+use super::framing::{Framer, MAX_RESPONSE};
 use super::{Error, Result};
 
 pub(crate) use crate::Stream;
 use crate::net::with_timeout;
 
-/// How many bytes the server may send in answer to one command. imap-next caps each
-/// response at 100 MiB, but not how many there are, and a command's whole answer is kept
+/// A response other than a status or a continuation request: EXISTS, FETCH, LIST, …
+pub(crate) type Data = imap_proto::Response<'static>;
+
+/// How many bytes the server may send in answer to one command. Each response is capped
+/// at [`MAX_RESPONSE`], but not how many there are, and a command's whole answer is kept
 /// until it completes. The largest answer we ask for is one whole message, so only a
 /// broken or hostile server gets near this.
 const MAX_ANSWER: usize = 256 * 1024 * 1024;
@@ -28,22 +30,65 @@ const MAX_ANSWER: usize = 256 * 1024 * 1024;
 /// that it only remembers that flags changed.
 const MAX_CHANGED_FLAGS: usize = 1000;
 
+/// A response code (`[UIDVALIDITY 7]`), or the name of one imap-proto doesn't know
+/// (`[NOMODSEQ]`), upper-cased.
+#[derive(Debug)]
+pub(crate) enum Code {
+    Known(ResponseCode<'static>),
+    Other(String),
+}
+
+impl Code {
+    fn of(outcome: Outcome<'static>) -> Option<Self> {
+        if let Some(code) = outcome.code {
+            return Some(Self::Known(code));
+        }
+        // imap-proto leaves a code it doesn't know in the text.
+        let code = outcome
+            .information?
+            .strip_prefix('[')?
+            .split(']')
+            .next()?
+            .to_owned();
+        let (name, args) = code.split_once(' ').unwrap_or((&code, ""));
+        if name.eq_ignore_ascii_case("CAPABILITY") {
+            return Some(Self::Known(ResponseCode::Capabilities(capabilities(args))));
+        }
+        (!name.is_empty()).then(|| Self::Other(name.to_ascii_uppercase()))
+    }
+}
+
 /// What the server sent while a command ran, up to and including its tagged OK.
 #[derive(Debug, Default)]
 pub(crate) struct Response {
-    pub data: Vec<Data<'static>>,
+    pub data: Vec<Data>,
     /// Codes from untagged status responses (`* OK [UIDVALIDITY 7]`) and the tagged OK.
-    pub codes: Vec<Code<'static>>,
-    /// Lines that couldn't be parsed and were dropped. Nonzero means `data` may be
+    pub codes: Vec<Code>,
+    /// Responses that couldn't be parsed and were dropped. Nonzero means `data` may be
     /// missing something; only [`Connection::execute_lossy`] returns such a response.
     pub skipped: usize,
 }
 
+/// What is left of a response for the command to decide on.
+enum Step {
+    /// The server asks for the rest of the command (`+`).
+    Continue,
+    /// The command's tagged completion.
+    Done(Status, Outcome<'static>),
+    Other,
+}
+
+/// The server's first words.
+pub(crate) struct Greeting {
+    pub status: Status,
+    pub code: Option<Code>,
+    pub text: String,
+}
+
 pub(crate) struct Connection {
     stream: Box<dyn Stream>,
-    client: Client,
-    /// Repairs what the server sends before `client` parses it.
-    quirks: Quirks,
+    framer: Framer,
+    literals: Literals,
     last_tag: u32,
     buf: Box<[u8]>,
     timeout: Duration,
@@ -51,10 +96,8 @@ pub(crate) struct Connection {
     /// ([`MAX_ANSWER`] but in tests).
     received: usize,
     max_answer: usize,
-    /// Set once the server refused a command before all of it was sent: imap-next still
-    /// waits to send the rest, so nothing sent after it would ever go out. Also set when
-    /// a command is given up half-way through its answer, so the rest can't be taken for
-    /// the answer to the next one.
+    /// Set once a command is given up half-way through its answer, so the rest can't be
+    /// taken for the answer to the next one.
     out_of_step: bool,
     /// What the server said about the selected mailbox in passing, in the answers to any
     /// command (servers report new mail and expunges whenever they can): the last EXISTS
@@ -70,16 +113,11 @@ pub(crate) struct Connection {
 }
 
 impl Connection {
-    /// `expect_greeting` is false after STARTTLS, where the TLS session has no greeting.
-    pub fn new(stream: Box<dyn Stream>, expect_greeting: bool, timeout: Duration) -> Self {
-        let mut options = Options::default();
-        // Real servers occasionally send bare LF; accepting it costs nothing.
-        options.crlf_relaxed = true;
-        options.discard_greeting = !expect_greeting;
+    pub fn new(stream: Box<dyn Stream>, timeout: Duration) -> Self {
         Self {
             stream,
-            client: Client::new(options),
-            quirks: Quirks::default(),
+            framer: Framer::default(),
+            literals: Literals::default(),
             last_tag: 0,
             buf: vec![0; 64 * 1024].into_boxed_slice(),
             timeout,
@@ -93,80 +131,74 @@ impl Connection {
     }
 
     /// Gives up the stream, e.g. to wrap it in TLS. Any bytes the server sent after the
-    /// last response are dropped with the client, so nothing sent in plaintext can be
+    /// last response are dropped with the framer, so nothing sent in plaintext can be
     /// mistaken for a reply inside the TLS session.
     pub fn into_stream(self) -> Box<dyn Stream> {
         self.stream
     }
 
-    pub async fn greeting(&mut self) -> Result<Greeting<'static>> {
-        loop {
-            match self.next_event(&mut 0).await? {
-                Event::GreetingReceived { greeting } => return Ok(greeting),
-                other => {
-                    tracing::debug!(event = event_name(&other), "ignoring event before greeting")
-                }
-            }
+    /// How literals in commands are sent, from the server's capabilities.
+    pub fn set_literals(&mut self, literals: Literals) {
+        self.literals = literals;
+    }
+
+    pub async fn greeting(&mut self) -> Result<Greeting> {
+        let raw = self.next_response(false).await?;
+        match parse(&raw) {
+            Some(Data::Data { status, outcome }) => Ok(Greeting {
+                status,
+                text: text(&outcome),
+                code: Code::of(outcome),
+            }),
+            _ => Err(Error::Protocol("unexpected greeting".into())),
         }
     }
 
     /// Sends one command and collects everything up to its tagged completion.
-    /// NO and BAD become [`Error::Command`]. If any line of the answer couldn't be
-    /// parsed, the answer is [`Error::Incomplete`]: most results (LIST, SEARCH, EXAMINE,
-    /// flags) are only meaningful whole, and a missing line would read as something
-    /// deleted.
-    pub async fn execute(&mut self, body: CommandBody<'static>) -> Result<Response> {
-        let command = body.name();
-        let response = self.execute_lossy(body).await?;
+    /// NO and BAD become [`Error::Command`]. If any response couldn't be parsed, the
+    /// answer is [`Error::Incomplete`]: most results (LIST, SEARCH, EXAMINE, flags) are
+    /// only meaningful whole, and a missing line would read as something deleted.
+    pub async fn execute(&mut self, command: Command) -> Result<Response> {
+        let name = command.name;
+        let response = self.execute_lossy(command).await?;
         if response.skipped > 0 {
-            return Err(Error::Incomplete(command));
+            return Err(Error::Incomplete(name));
         }
         Ok(response)
     }
 
-    /// Like [`execute`](Self::execute), but returns an answer with unparsable lines too,
-    /// counted in [`Response::skipped`]. Only for results that are useful in part and
+    /// Like [`execute`](Self::execute), but returns an answer with unparsable responses
+    /// too, counted in [`Response::skipped`]. Only for results that are useful in part and
     /// whose caller notices what is missing.
-    pub async fn execute_lossy(&mut self, body: CommandBody<'static>) -> Result<Response> {
-        let command = body.name();
-        let tag = self.begin(body)?;
+    pub async fn execute_lossy(&mut self, command: Command) -> Result<Response> {
+        let tag = self.next_tag()?;
+        let mut segments = command.encode(&tag, self.literals).into_iter();
+        self.write(&segments.next().expect("a command has a first line"))
+            .await?;
         let mut response = Response::default();
-        let mut sent = false;
         loop {
-            match self.next_event(&mut response.skipped).await? {
-                Event::CommandSent { .. } => sent = true,
-                Event::CommandRejected { status, .. } => {
+            let raw = self.next_response(true).await?;
+            match self.step(&raw, &tag, command.name, &mut response, false)? {
+                Step::Continue => match segments.next() {
+                    Some(segment) => self.write(&segment).await?,
+                    None => tracing::debug!(
+                        command = command.name,
+                        "ignoring unexpected continuation request"
+                    ),
+                },
+                Step::Done(Status::Ok, outcome) => {
+                    response.codes.extend(Code::of(outcome));
+                    return Ok(response);
+                }
+                // Also a NO before all of the command was sent (an APPEND refused before
+                // its message): the rest is simply not sent.
+                Step::Done(_, outcome) => {
                     return Err(Error::Command {
-                        command,
-                        text: status.text().to_string(),
+                        command: command.name,
+                        text: text(&outcome),
                     });
                 }
-                Event::DataReceived { data } => {
-                    self.track(&data, false);
-                    response.data.push(data);
-                }
-                Event::StatusReceived { status } => {
-                    match self.on_status(&tag, command, status, &mut response) {
-                        // imap-next only gives up a command with a pending literal on
-                        // BAD (`CommandRejected`); after a NO it still waits to send
-                        // the rest, ahead of anything queued later.
-                        Some(Err(Error::Command { command, text })) if !sent => {
-                            self.out_of_step = true;
-                            return Err(Error::Aborted { command, text });
-                        }
-                        Some(result) => return result.map(|()| response),
-                        None => {}
-                    }
-                }
-                Event::ContinuationRequestReceived { .. } => {
-                    tracing::debug!(command, "ignoring unexpected continuation request");
-                }
-                other => {
-                    return Err(Error::Protocol(format!(
-                        "unexpected {} during {command}",
-                        event_name(&other)
-                    )));
-                }
+                Step::Other => {}
             }
         }
     }
@@ -176,66 +208,44 @@ impl Connection {
     /// reported a change. Reads while idling have no timeout but `max`: a quiet server is
     /// the point.
     pub async fn idle(&mut self, stop: impl Future<Output = ()>, max: Duration) -> Result<bool> {
-        let tag = self.begin(CommandBody::Idle)?;
+        let tag = self.next_tag()?;
+        self.write(&[format!("{tag} IDLE\r\n")]).await?;
         // `sleep` copes with any `max`; adding it to an instant may overflow.
         let mut timer = std::pin::pin!(tokio::time::sleep(max));
         let mut stop = std::pin::pin!(stop);
         // Between the server's `+` and our DONE.
         let mut idling = false;
-        let mut response = Response::default();
+        // What IDLE brings counts only as a change.
+        let mut ignored = Response::default();
         loop {
-            match self.client.next() {
-                Ok(Event::IdleCommandSent { .. } | Event::IdleDoneSent { .. }) => {}
-                Ok(Event::IdleAccepted { .. }) => idling = true,
-                // imap-next reports a server ending IDLE on its own (a tagged OK before
-                // DONE) this way too.
-                Ok(Event::IdleRejected { status, .. }) => {
-                    return match status {
-                        Status::Tagged(tagged) if tagged.body.kind == StatusKind::Ok => {
-                            Ok(self.changed)
-                        }
-                        other => Err(Error::Command {
-                            command: "IDLE",
-                            text: other.text().to_string(),
-                        }),
-                    };
+            let raw = if !idling {
+                Some(self.next_response(false).await?)
+            } else if self.changed {
+                None
+            } else {
+                // Reading is cancel-safe: nothing read is lost if `stop` wins.
+                tokio::select! {
+                    raw = self.next_response_untimed() => Some(raw?),
+                    () = &mut stop => None,
+                    () = &mut timer => None,
                 }
-                Ok(Event::DataReceived { data }) => self.track(&data, true),
-                Ok(Event::StatusReceived { status }) => {
-                    if let Some(result) = self.on_status(&tag, "IDLE", status, &mut response) {
-                        return result.map(|()| self.changed);
-                    }
+            };
+            let Some(raw) = raw else {
+                self.write(&[b"DONE\r\n"]).await?;
+                idling = false;
+                continue;
+            };
+            match self.step(&raw, &tag, "IDLE", &mut ignored, true)? {
+                Step::Continue => idling = true,
+                // Also how a server ends IDLE on its own: a tagged OK before DONE.
+                Step::Done(Status::Ok, _) => return Ok(self.changed),
+                Step::Done(_, outcome) => {
+                    return Err(Error::Command {
+                        command: "IDLE",
+                        text: text(&outcome),
+                    });
                 }
-                Ok(Event::ContinuationRequestReceived { .. }) => {
-                    tracing::debug!("ignoring unexpected continuation request during IDLE");
-                }
-                Ok(other) => {
-                    return Err(Error::Protocol(format!(
-                        "unexpected {} during IDLE",
-                        event_name(&other)
-                    )));
-                }
-                Err(Interrupt::Io(Io::Output(bytes))) => self.write(&bytes).await?,
-                Err(Interrupt::Io(Io::NeedMoreInput)) if !idling => self.read().await?,
-                Err(Interrupt::Io(Io::NeedMoreInput)) => {
-                    // Reading is cancel-safe: nothing read is lost if `stop` wins.
-                    let done = self.changed
-                        || tokio::select! {
-                            read = self.read_untimed() => { read?; false }
-                            () = &mut stop => true,
-                            () = &mut timer => true,
-                        };
-                    if done {
-                        self.client.set_idle_done();
-                        idling = false;
-                    }
-                }
-                // Whatever it was, look at the mailbox (and its flags) again.
-                Err(Interrupt::Error(e)) => {
-                    tracing::warn!(error = %e, "skipping malformed server response during IDLE");
-                    self.changed = true;
-                    self.changed_flags = None;
-                }
+                Step::Other => {}
             }
         }
     }
@@ -244,80 +254,106 @@ impl Connection {
     /// A rejection becomes [`Error::AuthFailed`].
     pub async fn authenticate(
         &mut self,
-        mechanism: AuthMechanism<'static>,
+        mechanism: &str,
         initial: Zeroizing<Vec<u8>>,
     ) -> Result<Response> {
-        let tag = self.begin(CommandBody::authenticate(mechanism))?;
+        let tag = self.next_tag()?;
+        self.write(&[format!("{tag} AUTHENTICATE {mechanism}\r\n")])
+            .await?;
         let mut initial = Some(initial);
+        // Nothing in the answer is authoritative, so unparsable responses don't matter.
         let mut response = Response::default();
         loop {
-            // Nothing in the answer is authoritative, so unparsable lines don't matter.
-            match self.next_event(&mut response.skipped).await? {
-                Event::AuthenticateStarted { .. } => {}
-                Event::AuthenticateContinuationRequestReceived { .. } => {
+            let raw = self.next_response(true).await?;
+            match self.step(&raw, &tag, "AUTHENTICATE", &mut response, false)? {
+                Step::Continue => {
                     // A second challenge means the server didn't take the answer; cancel
                     // and let it send the tagged NO.
-                    let data = match initial.take() {
-                        // imap-next takes its own copy, which it doesn't zero.
-                        Some(data) => AuthenticateData::r#continue(data.to_vec()),
-                        None => AuthenticateData::Cancel,
+                    let answer = match initial.take() {
+                        Some(data) => Zeroizing::new(STANDARD.encode(&*data).into_bytes()),
+                        None => Zeroizing::new(b"*".to_vec()),
                     };
-                    self.client
-                        .set_authenticate_data(data)
-                        .map_err(|_| Error::Protocol("AUTHENTICATE out of order".into()))?;
+                    self.write(&[&answer[..], &b"\r\n"[..]]).await?;
                 }
-                Event::AuthenticateStatusReceived { status, .. } => {
-                    return match status {
-                        Status::Tagged(tagged) if tagged.body.kind == StatusKind::Ok => {
-                            response.codes.extend(tagged.body.code);
-                            Ok(response)
-                        }
-                        other => Err(Error::AuthFailed(other.text().to_string())),
-                    };
+                Step::Done(Status::Ok, outcome) => {
+                    response.codes.extend(Code::of(outcome));
+                    return Ok(response);
                 }
-                Event::DataReceived { data } => {
-                    self.track(&data, false);
-                    response.data.push(data);
-                }
-                Event::StatusReceived { status } => {
-                    if let Some(result) =
-                        self.on_status(&tag, "AUTHENTICATE", status, &mut response)
-                    {
-                        return result.map(|()| response);
-                    }
-                }
-                other => {
-                    return Err(Error::Protocol(format!(
-                        "unexpected {} during AUTHENTICATE",
-                        event_name(&other)
-                    )));
-                }
+                Step::Done(_, outcome) => return Err(Error::AuthFailed(text(&outcome))),
+                Step::Other => {}
             }
         }
     }
 
-    /// Fails every command once the connection is out of step (see `out_of_step`), so it
-    /// can't be used by mistake even by a caller that kept it after the error.
-    fn check_in_step(&self) -> Result<()> {
+    /// Takes in one response to the command tagged `tag`, as every command does: keeps
+    /// data in `response` (only tracks it while `idling`) and the codes of untagged
+    /// statuses, counts what can't be parsed, fails on BYE. Returns what is left for
+    /// the command itself.
+    fn step(
+        &mut self,
+        raw: &[u8],
+        tag: &str,
+        command: &'static str,
+        response: &mut Response,
+        idling: bool,
+    ) -> Result<Step> {
+        let Some(data) = parse(raw) else {
+            // One response we can't parse (a buggy BODYSTRUCTURE, say) shouldn't take the
+            // whole session down, but the result may now be incomplete; while idling,
+            // whatever it was, look at the mailbox (and its flags) again.
+            tracing::warn!(
+                command,
+                bytes = raw.len(),
+                "skipping malformed server response"
+            );
+            response.skipped += 1;
+            if idling {
+                self.changed = true;
+                self.changed_flags = None;
+            }
+            return Ok(Step::Other);
+        };
+        match data {
+            Data::Continue(_) => return Ok(Step::Continue),
+            Data::Done {
+                tag: done,
+                status,
+                outcome,
+            } if done.0 == tag => return Ok(Step::Done(status, outcome)),
+            Data::Done { tag, .. } => {
+                tracing::warn!(tag = %tag.0, "ignoring status for an unknown tag");
+            }
+            Data::Data { status, outcome } => {
+                match status {
+                    Status::Bye => return Err(Error::Bye(text(&outcome))),
+                    Status::No | Status::Bad => {
+                        tracing::warn!(command, ?status, text = %text(&outcome), "server warning");
+                    }
+                    Status::Ok | Status::PreAuth => {}
+                }
+                response.codes.extend(Code::of(outcome));
+            }
+            data => {
+                self.track(&data, idling);
+                if !idling {
+                    response.data.push(data);
+                }
+            }
+        }
+        Ok(Step::Other)
+    }
+
+    /// A new tag, once the connection is known to be in step (see `out_of_step`): a caller
+    /// that kept it after such an error can't use it by mistake.
+    fn next_tag(&mut self) -> Result<String> {
         if self.out_of_step {
             return Err(Error::Protocol(
                 "connection unusable after a command was given up half-way".into(),
             ));
         }
-        Ok(())
-    }
-
-    /// Queues a command under a new tag, which it returns.
-    fn begin(&mut self, body: CommandBody<'static>) -> Result<Tag<'static>> {
-        self.check_in_step()?;
         self.received = 0;
         self.last_tag += 1;
-        let tag = Tag::try_from(format!("C{}", self.last_tag)).expect("valid tag");
-        self.client.enqueue_command(Command {
-            tag: tag.clone(),
-            body,
-        });
-        Ok(tag)
+        Ok(format!("C{}", self.last_tag))
     }
 
     /// A mailbox was just opened, with `exists` messages: reported changes count from
@@ -345,48 +381,9 @@ impl Connection {
         self.changed_flags.replace(Vec::new())
     }
 
-    /// Returns `Some` once the command identified by `tag` has completed.
-    fn on_status(
-        &self,
-        tag: &Tag<'static>,
-        command: &'static str,
-        status: Status<'static>,
-        response: &mut Response,
-    ) -> Option<Result<()>> {
-        match status {
-            Status::Tagged(tagged) if &tagged.tag == tag => Some(match tagged.body.kind {
-                StatusKind::Ok => {
-                    response.codes.extend(tagged.body.code);
-                    Ok(())
-                }
-                StatusKind::No | StatusKind::Bad => Err(Error::Command {
-                    command,
-                    text: tagged.body.text.to_string(),
-                }),
-            }),
-            Status::Tagged(tagged) => {
-                tracing::warn!(tag = %tagged.tag.as_ref(), "ignoring status for an unknown tag");
-                None
-            }
-            Status::Untagged(body) => {
-                if body.kind != StatusKind::Ok {
-                    tracing::warn!(command, kind = ?body.kind, text = %body.text, "server warning");
-                }
-                response.codes.extend(body.code);
-                None
-            }
-            // The server closes the connection after BYE, except as part of LOGOUT.
-            Status::Bye(bye) if command == "LOGOUT" => {
-                tracing::debug!(text = %bye.text, "logged out");
-                None
-            }
-            Status::Bye(bye) => Some(Err(Error::Bye(bye.text.to_string()))),
-        }
-    }
-
-    fn track(&mut self, data: &Data<'_>, idling: bool) {
+    fn track(&mut self, data: &Data, idling: bool) {
         match data {
-            Data::Exists(n) => {
+            Data::MailboxData(MailboxDatum::Exists(n)) => {
                 self.changed |= self.exists != *n;
                 self.exists = *n;
             }
@@ -394,7 +391,7 @@ impl Connection {
                 self.exists = self.exists.saturating_sub(1);
                 self.changed = true;
                 // Later messages move down one.
-                let seq = seq.get();
+                let seq = *seq;
                 if let Some(changed) = &mut self.changed_flags {
                     let i = changed.partition_point(|&n| n < seq);
                     if changed.get(i) == Some(&seq) {
@@ -410,12 +407,12 @@ impl Connection {
                     self.changed_flags = None;
                 }
             }
-            Data::Fetch { seq, .. } if idling => {
+            Data::Fetch(seq, _) if idling => {
                 self.changed = true;
                 if let Some(changed) = &mut self.changed_flags
-                    && let Err(i) = changed.binary_search(&seq.get())
+                    && let Err(i) = changed.binary_search(seq)
                 {
-                    changed.insert(i, seq.get());
+                    changed.insert(i, *seq);
                     if changed.len() > MAX_CHANGED_FLAGS {
                         self.changed_flags = None;
                     }
@@ -425,88 +422,106 @@ impl Connection {
         }
     }
 
-    /// Counts lines it had to skip in `skipped`.
-    async fn next_event(&mut self, skipped: &mut usize) -> Result<Event> {
+    /// The next whole response. With `limited`, counts it against the command's answer
+    /// (see [`MAX_ANSWER`]).
+    async fn next_response(&mut self, limited: bool) -> Result<Vec<u8>> {
         loop {
-            match self.client.next() {
-                Ok(event) => return Ok(event),
-                // Commands are small and sent whole before reading, so writing and
-                // reading in turn can't deadlock against a server that does the same.
-                Err(Interrupt::Io(Io::Output(bytes))) => self.write(&bytes).await?,
-                Err(Interrupt::Io(Io::NeedMoreInput)) => {
-                    self.read().await?;
-                    if self.received > self.max_answer {
-                        self.out_of_step = true;
-                        return Err(Error::Protocol(format!(
-                            "server sent more than {} MiB in answer to one command",
-                            self.max_answer / (1024 * 1024)
-                        )));
-                    }
-                }
-                // The client has already skipped the offending line. One response we
-                // can't parse (a buggy BODYSTRUCTURE, say) shouldn't take the whole
-                // session down, but the command's result may now be incomplete.
-                Err(Interrupt::Error(e)) => {
-                    tracing::warn!(error = %e, "skipping malformed server response");
-                    *skipped += 1;
-                }
+            if let Some(raw) = self.framer.next() {
+                return Ok(raw);
+            }
+            match tokio::time::timeout(self.timeout, self.read()).await {
+                Ok(result) => result?,
+                Err(_) => return Err(Error::Timeout),
+            }
+            if limited && self.received > self.max_answer {
+                self.out_of_step = true;
+                return Err(Error::Protocol(format!(
+                    "server sent more than {} MiB in answer to one command",
+                    self.max_answer / (1024 * 1024)
+                )));
             }
         }
     }
 
-    async fn write(&mut self, bytes: &[u8]) -> Result<()> {
+    /// Like `next_response` without a timeout, for IDLE. Cancel-safe.
+    async fn next_response_untimed(&mut self) -> Result<Vec<u8>> {
+        loop {
+            if let Some(raw) = self.framer.next() {
+                return Ok(raw);
+            }
+            self.read().await?;
+        }
+    }
+
+    /// Writes `chunks` one after the other, then flushes.
+    async fn write(&mut self, chunks: &[impl AsRef<[u8]>]) -> Result<()> {
         let stream = &mut self.stream;
         with_timeout(self.timeout, async {
-            stream.write_all(bytes).await?;
+            for chunk in chunks {
+                stream.write_all(chunk.as_ref()).await?;
+            }
             stream.flush().await
         })
         .await?;
         Ok(())
     }
 
-    /// Hands the next bytes from the server to the client.
+    /// Hands the next bytes from the server to the framer. Cancel-safe: the bytes are
+    /// handed over in the same step that reads them.
     async fn read(&mut self) -> Result<()> {
-        match tokio::time::timeout(self.timeout, self.read_untimed()).await {
-            Ok(result) => result,
-            Err(_) => Err(Error::Timeout),
-        }
-    }
-
-    async fn read_untimed(&mut self) -> Result<()> {
         let n = self.stream.read(&mut self.buf).await?;
         if n == 0 {
             return Err(Error::Closed);
         }
         self.received = self.received.saturating_add(n);
-        // Nothing while a line is still incomplete; the client then asks for more.
-        let input = self.quirks.push(&self.buf[..n]);
-        if !input.is_empty() {
-            self.client.enqueue_input(input);
+        if self.framer.push(&self.buf[..n]).is_err() {
+            self.out_of_step = true;
+            return Err(Error::Protocol(format!(
+                "server sent a response over {} MiB",
+                MAX_RESPONSE / (1024 * 1024)
+            )));
         }
         Ok(())
     }
 }
 
-/// An event's variant, for error messages and logs. Not the event itself: it may hold a
-/// command with credentials in it, and imap-types only redacts those in release builds.
-fn event_name(event: &Event) -> &'static str {
-    match event {
-        Event::GreetingReceived { .. } => "greeting",
-        Event::CommandSent { .. } => "command sent",
-        Event::CommandRejected { .. } => "command rejected",
-        Event::AuthenticateStarted { .. } => "AUTHENTICATE started",
-        Event::AuthenticateContinuationRequestReceived { .. } => {
-            "AUTHENTICATE continuation request"
-        }
-        Event::AuthenticateStatusReceived { .. } => "AUTHENTICATE status",
-        Event::IdleCommandSent { .. } => "IDLE sent",
-        Event::IdleAccepted { .. } => "IDLE accepted",
-        Event::IdleRejected { .. } => "IDLE rejected",
-        Event::IdleDoneSent { .. } => "DONE sent",
-        Event::DataReceived { .. } => "data",
-        Event::StatusReceived { .. } => "status",
-        Event::ContinuationRequestReceived { .. } => "continuation request",
+/// The response in `raw`, if imap-proto parses all of it.
+fn parse(raw: &[u8]) -> Option<Data> {
+    match imap_proto::Response::parse(raw) {
+        Ok((&[], response)) => Some(response.into_owned()),
+        _ => capability_data(raw),
     }
+}
+
+/// `* CAPABILITY …`, which imap-proto refuses without IMAP4rev1: a server may offer only
+/// IMAP4rev2 (RFC 9051). Also the code `[CAPABILITY …]`, see [`Code::of`].
+fn capability_data(raw: &[u8]) -> Option<Data> {
+    let line = std::str::from_utf8(raw).ok()?.strip_suffix("\r\n")?;
+    let (star, rest) = line.split_at_checked(13)?;
+    star.eq_ignore_ascii_case("* CAPABILITY ")
+        .then(|| Data::Capabilities(capabilities(rest)))
+}
+
+/// A space-separated capability list.
+fn capabilities(list: &str) -> Vec<Capability<'static>> {
+    list.split(' ')
+        .filter(|c| !c.is_empty())
+        .map(|c| match c.split_at_checked(5) {
+            _ if c.eq_ignore_ascii_case("IMAP4rev1") => Capability::Imap4rev1,
+            Some((auth, mechanism)) if auth.eq_ignore_ascii_case("AUTH=") => {
+                Capability::Auth(mechanism.to_owned().into())
+            }
+            _ => Capability::Atom(c.to_owned().into()),
+        })
+        .collect()
+}
+
+fn text(outcome: &Outcome<'_>) -> String {
+    outcome
+        .information
+        .as_deref()
+        .unwrap_or_default()
+        .to_owned()
 }
 
 #[cfg(test)]
@@ -528,16 +543,16 @@ mod tests {
             _ = theirs.get_mut().write_all(&flood).await;
             _ = theirs.get_mut().write_all(b"C1 OK done\r\n").await;
         });
-        let mut conn = Connection::new(Box::new(ours), false, Duration::from_secs(10));
+        let mut conn = Connection::new(Box::new(ours), Duration::from_secs(10));
         conn.max_answer = 4096;
 
-        let err = conn.execute(CommandBody::Noop).await.unwrap_err();
+        let err = conn.execute(Command::new("NOOP")).await.unwrap_err();
         assert!(
             matches!(&err, Error::Protocol(text) if text.contains("more than")),
             "{err}"
         );
         // What is left of the answer must not be read as the next command's.
-        let err = conn.execute(CommandBody::Noop).await.unwrap_err();
+        let err = conn.execute(Command::new("NOOP")).await.unwrap_err();
         assert!(
             matches!(&err, Error::Protocol(text) if text.contains("half-way")),
             "{err}"
@@ -565,7 +580,7 @@ mod tests {
             assert_eq!(command, "DONE\r\n");
             theirs.get_mut().write_all(b"C1 OK done\r\n").await.unwrap();
         });
-        let mut conn = Connection::new(Box::new(ours), false, Duration::from_secs(10));
+        let mut conn = Connection::new(Box::new(ours), Duration::from_secs(10));
         conn.mailbox_opened(5);
 
         assert!(
@@ -591,12 +606,37 @@ mod tests {
                 theirs.get_mut().write_all(answer.as_bytes()).await.unwrap();
             }
         });
-        let mut conn = Connection::new(Box::new(ours), false, Duration::from_secs(10));
+        let mut conn = Connection::new(Box::new(ours), Duration::from_secs(10));
         conn.max_answer = 4096;
         for _ in 0..3 {
-            let response = conn.execute(CommandBody::Noop).await.unwrap();
+            let response = conn.execute(Command::new("NOOP")).await.unwrap();
             assert_eq!(response.data.len(), 200);
         }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unknown_code_is_kept_by_name() {
+        let (ours, theirs) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            let mut theirs = BufReader::new(theirs);
+            let mut command = String::new();
+            theirs.read_line(&mut command).await.unwrap();
+            let answer =
+                "* OK [NOMODSEQ] Sorry\r\n* OK [UIDNEXT 4] x\r\nC1 OK [READ-ONLY] done\r\n";
+            theirs.get_mut().write_all(answer.as_bytes()).await.unwrap();
+        });
+        let mut conn = Connection::new(Box::new(ours), Duration::from_secs(10));
+        let response = conn.execute(Command::new("NOOP")).await.unwrap();
+        let codes: Vec<String> = response.codes.iter().map(|c| format!("{c:?}")).collect();
+        assert_eq!(
+            codes,
+            [
+                r#"Other("NOMODSEQ")"#,
+                "Known(UidNext(4))",
+                "Known(ReadOnly)"
+            ]
+        );
         server.await.unwrap();
     }
 }

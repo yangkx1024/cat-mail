@@ -376,6 +376,29 @@ async fn unparsable_bodystructure_falls_back_to_the_whole_message() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn malformed_bodystructure_falls_back_to_the_whole_message() {
+    // The line parses, but without the BODYSTRUCTURE asked for: not a message gone.
+    let raw = large_message();
+    let env = env(state(&[&raw])).await;
+    let id = env.id(0).await;
+    env.fake.state().faults.broken_bodystructure = vec![1];
+    let start = env.log_len();
+
+    let message = env.client.download_message(id).await.unwrap();
+    assert!(
+        env.commands_since(start)
+            .iter()
+            .any(|c| c.contains("BODY.PEEK[]"))
+    );
+    let b = body(&message);
+    assert_eq!(
+        b.text.as_deref().map(str::trim),
+        Some("The video is attached.")
+    );
+    assert!(b.attachments[0].downloaded);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn missing_text_sections_fall_back_to_the_whole_message() {
     // A valid answer that leaves out the text (NIL) must not be stored as the body.
     let raw = large_message();
