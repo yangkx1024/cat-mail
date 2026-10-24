@@ -1,13 +1,13 @@
-use catmail_types::{Account, AccountId, NewAccount, NewIdentity};
+use catmail_types::{Account, AccountId, AccountMode, NewAccount, NewIdentity};
 use rusqlite::{Connection, OptionalExtension, Row, named_params};
 
-use crate::columns::{server, size_limit, size_limit_column};
+use crate::columns::{parse_text, server, size_limit, size_limit_column};
 use crate::error::is_unique_violation;
 use crate::identities::Identities;
 use crate::{Error, Result};
 
 const COLUMNS: &str = "id, email, display_name, username,
-    imap_host, imap_port, imap_security,
+    imap_host, imap_port, imap_security, mode,
     created_at";
 
 pub struct Accounts<'c> {
@@ -119,6 +119,16 @@ impl<'c> Accounts<'c> {
         Ok(())
     }
 
+    /// Records the account's mode as found on connecting. Returns whether it changed. Its
+    /// folders and messages are not touched: the caller rebuilds them for the new mode
+    /// in the same transaction.
+    pub fn set_mode(&self, id: AccountId, mode: AccountMode) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE accounts SET mode = ?2 WHERE id = ?1 AND mode <> ?2",
+            (id.0, mode.as_str()),
+        )? > 0)
+    }
+
     /// Deletes the account and, via cascades, everything stored for it.
     /// Returns the deleted account's secret key, or `None` if there was no such account.
     pub fn delete(&self, id: AccountId) -> Result<Option<String>> {
@@ -140,6 +150,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Account> {
         display_name: row.get("display_name")?,
         username: row.get("username")?,
         imap: server(row, "imap")?,
+        mode: parse_text(row, "mode")?,
         created_at: row.get("created_at")?,
     })
 }
@@ -253,6 +264,23 @@ mod tests {
         assert_eq!(accounts.append_limit(a.id).unwrap(), Some(i64::MAX as u64));
         accounts.set_append_limit(a.id, None).unwrap();
         assert_eq!(accounts.append_limit(a.id).unwrap(), None);
+    }
+
+    #[test]
+    fn mode_is_standard_until_found_otherwise() {
+        let store = test_util::store();
+        let conn = store.conn();
+        let accounts = Accounts::new(&conn);
+        let a = accounts
+            .insert(&new_account("a@example.com"), &key("a@example.com"))
+            .unwrap();
+        assert_eq!(a.mode, AccountMode::Standard);
+        assert!(accounts.set_mode(a.id, AccountMode::Gmail).unwrap());
+        assert!(!accounts.set_mode(a.id, AccountMode::Gmail).unwrap());
+        assert_eq!(
+            accounts.get(a.id).unwrap().unwrap().mode,
+            AccountMode::Gmail
+        );
     }
 
     #[test]

@@ -22,6 +22,12 @@ pub struct FakeMessage {
     pub raw: Vec<u8>,
     /// IMAP date-time, e.g. `17-Oct-2026 09:30:01 +0800`.
     pub internal_date: String,
+    /// On a Gmail server ([`ServerState::gmail`]): X-GM-MSGID and X-GM-THRID, given
+    /// when the message is first seen in a location (0 until then), and the labels in
+    /// wire form (`\Inbox`, `Work`).
+    pub gm_msgid: u64,
+    pub gm_thrid: u64,
+    pub labels: Vec<String>,
 }
 
 /// When a message arrived, on 17 Oct 2026 from 09:30: a second apart in UID order, so
@@ -77,6 +83,9 @@ impl FakeMailbox {
             modseq: self.highest_modseq,
             raw: raw.to_vec(),
             internal_date: format!("17-Oct-2026 {} +0800", time_of(uid)),
+            gm_msgid: 0,
+            gm_thrid: 0,
+            labels: Vec::new(),
         });
         uid
     }
@@ -101,11 +110,19 @@ impl FakeMailbox {
     }
 
     pub fn set_flags(&mut self, uid: u32, flags: &[&str]) {
-        self.highest_modseq += 1;
-        let modseq = self.highest_modseq;
-        let msg = self.message_mut(uid);
-        msg.flags = flags.iter().map(|f| f.to_string()).collect();
-        msg.modseq = modseq;
+        self.change(uid, |msg| {
+            msg.flags = flags.iter().map(|f| f.to_string()).collect();
+            true
+        });
+    }
+
+    /// Sets the message's Gmail labels, in wire form (`\\Inbox`, `Work`). Like flags,
+    /// a change of labels raises its MODSEQ.
+    pub fn set_labels(&mut self, uid: u32, labels: &[&str]) {
+        self.change(uid, |msg| {
+            msg.labels = labels.iter().map(|l| l.to_string()).collect();
+            true
+        });
     }
 
     pub fn expunge(&mut self, uid: u32) {
@@ -115,15 +132,18 @@ impl FakeMailbox {
 
     /// Sets or clears `flag` on the message, bumping MODSEQ if that changed anything.
     fn change_flag(&mut self, uid: u32, flag: &str, on: bool) -> bool {
-        let msg = self.message_mut(uid);
-        let has = msg.flags.iter().any(|f| f.eq_ignore_ascii_case(flag));
-        if has == on {
+        self.change(uid, |msg| toggle(&mut msg.flags, flag, on))
+    }
+
+    /// [`change_flag`](Self::change_flag) for a Gmail label.
+    fn change_label(&mut self, uid: u32, label: &str, on: bool) -> bool {
+        self.change(uid, |msg| toggle(&mut msg.labels, label, on))
+    }
+
+    /// Applies `edit` to the message, bumping its MODSEQ if `edit` says it changed it.
+    fn change(&mut self, uid: u32, edit: impl FnOnce(&mut FakeMessage) -> bool) -> bool {
+        if !edit(self.message_mut(uid)) {
             return false;
-        }
-        if on {
-            msg.flags.push(flag.to_owned());
-        } else {
-            msg.flags.retain(|f| !f.eq_ignore_ascii_case(flag));
         }
         self.highest_modseq += 1;
         let modseq = self.highest_modseq;
@@ -138,12 +158,7 @@ impl FakeMailbox {
         // Each EXPUNGE renumbers the messages after it, so announce from the end.
         for i in (0..self.messages.len()).rev() {
             let msg = &self.messages[i];
-            if msg
-                .flags
-                .iter()
-                .any(|f| f.eq_ignore_ascii_case("\\Deleted"))
-                && uids.is_none_or(|uids| uids.contains(&msg.uid))
-            {
+            if has(&msg.flags, "\\Deleted") && uids.is_none_or(|uids| uids.contains(&msg.uid)) {
                 self.messages.remove(i);
                 out += &format!("* {} EXPUNGE\r\n", i + 1);
             }
@@ -152,6 +167,49 @@ impl FakeMailbox {
             self.highest_modseq += 1;
         }
         out
+    }
+
+    fn has_attribute(&self, attribute: &str) -> bool {
+        self.attributes
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case(attribute))
+    }
+
+    /// On Gmail, whether messages are here rather than labelled: All Mail, Trash, Spam.
+    fn is_location(&self) -> bool {
+        ["\\All", "\\Trash", "\\Junk"]
+            .iter()
+            .any(|a| self.has_attribute(a))
+    }
+
+    /// On Gmail, the label a label mailbox shows, in wire form; `None` for a location,
+    /// a `\\Noselect` node, and Starred, which shows `\\Flagged` instead.
+    fn label(&self) -> Option<String> {
+        if self.is_location() || self.has_attribute("\\Noselect") || self.has_attribute("\\Flagged")
+        {
+            return None;
+        }
+        let system = [
+            ("\\Sent", "\\Sent"),
+            ("\\Drafts", "\\Draft"),
+            ("\\Important", "\\Important"),
+        ];
+        Some(if self.name == "INBOX" {
+            "\\Inbox".into()
+        } else {
+            system
+                .iter()
+                .find(|(attribute, _)| self.has_attribute(attribute))
+                .map_or_else(|| self.name.clone(), |(_, label)| label.to_string())
+        })
+    }
+
+    /// Whether a message in All Mail shows here, on Gmail.
+    fn shows(&self, msg: &FakeMessage) -> bool {
+        if self.has_attribute("\\Flagged") {
+            return has(&msg.flags, "\\Flagged");
+        }
+        self.label().is_some_and(|label| has(&msg.labels, &label))
     }
 
     /// Simulates the server rebuilding the mailbox: new UIDVALIDITY, UIDs renumbered
@@ -328,11 +386,31 @@ pub struct LoggedCommand {
     pub line: String,
 }
 
+fn has(list: &[String], item: &str) -> bool {
+    list.iter().any(|i| i.eq_ignore_ascii_case(item))
+}
+
+/// Adds `item` to `list` or removes it, whatever its case. Returns whether that changed it.
+fn toggle(list: &mut Vec<String>, item: &str, on: bool) -> bool {
+    if has(list, item) == on {
+        return false;
+    }
+    if on {
+        list.push(item.to_owned());
+    } else {
+        list.retain(|i| !i.eq_ignore_ascii_case(item));
+    }
+    true
+}
+
 #[derive(Debug)]
 pub struct ServerState {
     pub username: String,
     pub password: String,
     pub mailboxes: Vec<FakeMailbox>,
+    /// Behave as Gmail (X-GM-EXT-1; see [`ServerState::gmail`]).
+    pub gmail: bool,
+    next_gm_msgid: u64,
     pub faults: Faults,
     pub log: Vec<LoggedCommand>,
     /// Connections accepted so far.
@@ -351,6 +429,8 @@ impl ServerState {
             username: username.into(),
             password: password.into(),
             mailboxes: vec![FakeMailbox::new("INBOX")],
+            gmail: false,
+            next_gm_msgid: 1_850_000_000_000_000_001,
             faults: Faults::default(),
             log: Vec::new(),
             connections: 0,
@@ -358,6 +438,157 @@ impl ServerState {
             header_fetches: 0,
             body_fetches: 0,
             dropped_through: 0,
+        }
+    }
+
+    /// A Gmail server, as checked against a real account (`docs/architecture/labels.md`):
+    /// All Mail, Trash and Spam hold the messages; INBOX and the other mailboxes are
+    /// labels, rebuilt from All Mail's labels before each command, each with UIDs of its
+    /// own. Changes go to All Mail (or Trash, Spam), e.g. with
+    /// [`append_simple`](FakeMailbox::append_simple) and
+    /// [`set_labels`](FakeMailbox::set_labels); a change made in a label's mailbox is
+    /// lost. Commands on a label's mailbox act on the message in its location, as on
+    /// Gmail: flags are the message's, `\\Deleted` there removes the label at once (all
+    /// of the message in Drafts), and moving between locations keeps the X-GM-MSGID.
+    pub fn gmail(username: &str, password: &str) -> Self {
+        let mut state = Self::new(username, password);
+        state.gmail = true;
+        let mailbox =
+            |name: &str, attribute: &str| FakeMailbox::new(name).with_attribute(attribute);
+        state.mailboxes.extend([
+            mailbox("[Gmail]", "\\Noselect"),
+            mailbox("[Gmail]/All Mail", "\\All"),
+            mailbox("[Gmail]/Drafts", "\\Drafts"),
+            mailbox("[Gmail]/Important", "\\Important"),
+            mailbox("[Gmail]/Sent Mail", "\\Sent"),
+            mailbox("[Gmail]/Spam", "\\Junk"),
+            mailbox("[Gmail]/Starred", "\\Flagged"),
+            mailbox("[Gmail]/Trash", "\\Trash"),
+        ]);
+        state
+    }
+
+    /// On Gmail, All Mail.
+    pub fn all_mail(&mut self) -> &mut FakeMailbox {
+        let i = self.all_mail_index().expect("a Gmail server has All Mail");
+        &mut self.mailboxes[i]
+    }
+
+    fn all_mail_index(&self) -> Option<usize> {
+        self.mailboxes
+            .iter()
+            .position(|mb| mb.has_attribute("\\All"))
+    }
+
+    /// On Gmail: gives new messages in a location their X-GM-MSGID (and X-GM-THRID), and
+    /// rebuilds every label's mailbox from All Mail. A message keeps its UID in a label
+    /// while it has the label.
+    fn refresh_labels(&mut self) {
+        if !self.gmail {
+            return;
+        }
+        for mb in self.mailboxes.iter_mut().filter(|mb| mb.is_location()) {
+            for msg in mb.messages.iter_mut().filter(|m| m.gm_msgid == 0) {
+                msg.gm_msgid = self.next_gm_msgid;
+                msg.gm_thrid = self.next_gm_msgid;
+                self.next_gm_msgid += 1;
+            }
+        }
+        let Some(all) = self.all_mail_index() else {
+            return;
+        };
+        let all_mail = self.mailboxes[all].clone();
+        for mb in &mut self.mailboxes {
+            if mb.is_location() || mb.has_attribute("\\Noselect") {
+                continue;
+            }
+            let before = std::mem::take(&mut mb.messages);
+            let mut kept: Vec<FakeMessage> = Vec::new();
+            for old in &before {
+                if let Some(msg) = all_mail
+                    .messages
+                    .iter()
+                    .find(|m| m.gm_msgid == old.gm_msgid && mb.shows(m))
+                {
+                    kept.push(FakeMessage {
+                        uid: old.uid,
+                        ..msg.clone()
+                    });
+                }
+            }
+            let mut uidnext = mb.uidnext;
+            for msg in all_mail.messages.iter().filter(|m| mb.shows(m)) {
+                if !kept.iter().any(|k| k.gm_msgid == msg.gm_msgid) {
+                    kept.push(FakeMessage {
+                        uid: uidnext,
+                        ..msg.clone()
+                    });
+                    uidnext += 1;
+                }
+            }
+            mb.uidnext = uidnext;
+            let same = kept.len() == before.len()
+                && kept
+                    .iter()
+                    .zip(&before)
+                    .all(|(a, b)| (a.uid, &a.flags, a.modseq) == (b.uid, &b.flags, b.modseq));
+            // Every change a label shows raises All Mail's, so CHANGEDSINCE finds it.
+            if !same {
+                mb.highest_modseq = mb.highest_modseq.max(all_mail.highest_modseq);
+            }
+            mb.messages = kept;
+        }
+    }
+
+    /// On Gmail, where the message with this X-GM-MSGID is: its location and index there.
+    fn locate(&self, gm_msgid: u64) -> Option<(usize, usize)> {
+        self.mailboxes.iter().enumerate().find_map(|(i, mb)| {
+            mb.is_location()
+                .then(|| mb.messages.iter().position(|m| m.gm_msgid == gm_msgid))
+                .flatten()
+                .map(|at| (i, at))
+        })
+    }
+
+    /// On Gmail, moves the message to location `to`, under a new UID there. Its labels
+    /// go as Gmail takes them: Trash removes `\\Inbox`, Spam also `\\Important`.
+    fn relocate(&mut self, gm_msgid: u64, to: usize) {
+        let Some((from, at)) = self.locate(gm_msgid) else {
+            return;
+        };
+        if from == to {
+            return;
+        }
+        let mut msg = self.mailboxes[from].messages.remove(at);
+        self.mailboxes[from].highest_modseq += 1;
+        let target = &mut self.mailboxes[to];
+        let dropped: &[&str] = if target.has_attribute("\\Trash") {
+            &["\\Inbox"]
+        } else if target.has_attribute("\\Junk") {
+            &["\\Inbox", "\\Important"]
+        } else {
+            &[]
+        };
+        msg.labels
+            .retain(|l| !dropped.iter().any(|d| d.eq_ignore_ascii_case(l)));
+        target.highest_modseq += 1;
+        msg.uid = target.uidnext;
+        msg.modseq = target.highest_modseq;
+        target.uidnext += 1;
+        target.messages.push(msg);
+    }
+
+    /// On Gmail, adds or removes a label of the message; `\\Starred` is `\\Flagged`.
+    fn change_label(&mut self, gm_msgid: u64, label: &str, on: bool) {
+        let Some((i, at)) = self.locate(gm_msgid) else {
+            return;
+        };
+        let mb = &mut self.mailboxes[i];
+        let uid = mb.messages[at].uid;
+        if label.eq_ignore_ascii_case("\\Starred") {
+            mb.change_flag(uid, "\\Flagged", on);
+        } else {
+            mb.change_label(uid, label, on);
         }
     }
 
@@ -799,6 +1030,9 @@ fn capabilities(state: &ServerState, session: &Session) -> String {
     if state.faults.idle {
         caps.push("IDLE");
     }
+    if state.gmail {
+        caps.push("X-GM-EXT-1");
+    }
     caps.extend(append_limit.as_deref());
     caps.join(" ")
 }
@@ -816,10 +1050,14 @@ async fn handle(
     if session.id <= lock(state).dropped_through {
         return Ok(Next::Close);
     }
-    lock(state).log.push(LoggedCommand {
-        tls: session.tls,
-        line: rest.to_owned(),
-    });
+    {
+        let mut st = lock(state);
+        st.log.push(LoggedCommand {
+            tls: session.tls,
+            line: rest.to_owned(),
+        });
+        st.refresh_labels();
+    }
     let slow = lock(state)
         .faults
         .slow
@@ -918,12 +1156,7 @@ async fn handle(
                 return Ok(Next::Close);
             }
             match st.find(&name) {
-                Some(i)
-                    if !st.mailboxes[i]
-                        .attributes
-                        .iter()
-                        .any(|a| a.eq_ignore_ascii_case("\\Noselect")) =>
-                {
+                Some(i) if !st.mailboxes[i].has_attribute("\\Noselect") => {
                     let mb = &st.mailboxes[i];
                     session.selected = Some(i);
                     session.view = Some(View::of(mb));
@@ -966,9 +1199,24 @@ async fn handle(
                     out += &format!("{tag} NO [OVERQUOTA] Quota exceeded\r\n");
                 }
                 (Some(i), Some(raw)) => {
-                    let mb = &mut st.mailboxes[i];
                     let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
-                    let uid = mb.append(raw, &flags);
+                    let label = st.mailboxes[i].label().filter(|_| st.gmail);
+                    let uid = if let Some(label) = label {
+                        // Into All Mail, with the label.
+                        let all_mail = st.all_mail();
+                        let uid = all_mail.append(raw, &flags);
+                        all_mail.message_mut(uid).labels.push(label);
+                        st.refresh_labels();
+                        let msgid = st.all_mail().message_mut(uid).gm_msgid;
+                        st.mailboxes[i]
+                            .messages
+                            .iter()
+                            .find(|m| m.gm_msgid == msgid)
+                            .expect("labelled")
+                            .uid
+                    } else {
+                        st.mailboxes[i].append(raw, &flags)
+                    };
                     if std::mem::take(&mut st.faults.drop_after_append) {
                         return Ok(Next::Close);
                     }
@@ -1006,14 +1254,19 @@ async fn handle(
             let st = lock(state);
             match session.selected.and_then(|i| st.mailboxes.get(i)) {
                 Some(mb) => {
-                    // `ALL`, `UID <set>`, or `HEADER <field> <substring>`.
+                    // `ALL`, `UID <set>`, `HEADER <field> <substring>`, or on Gmail
+                    // `X-GM-MSGID <id>`.
                     let key = |i: usize| args.get(i).map(Tok::text);
                     let first = key(0).unwrap_or_default().to_ascii_uppercase();
                     let set = (first == "UID").then(|| key(1)).flatten();
                     let header = (first == "HEADER").then(|| key(1).zip(key(2))).flatten();
+                    let gm_msgid = (st.gmail && first == "X-GM-MSGID")
+                        .then(|| key(1).and_then(|id| id.parse::<u64>().ok()))
+                        .flatten();
                     let uids: Vec<String> = mb
                         .messages
                         .iter()
+                        .filter(|m| gm_msgid.is_none_or(|id| m.gm_msgid == id))
                         .filter(|m| {
                             set.as_ref()
                                 .is_none_or(|set| uid_set_contains(set, m.uid, mb))
@@ -1062,7 +1315,11 @@ async fn handle(
                     return Ok(Next::Close);
                 }
                 Some(i) => {
-                    out += &change(st, i, &command, args, &tag);
+                    out += &if st.gmail {
+                        gmail_change(st, i, &command, args, &tag)
+                    } else {
+                        change(st, i, &command, args, &tag)
+                    };
                     // Its own changes are in the answer (or silent, as asked).
                     session.view = Some(View::of(&st.mailboxes[i]));
                     if std::mem::take(&mut st.faults.drop_after_change)
@@ -1140,7 +1397,15 @@ async fn handle(
             match session.selected.and_then(|i| st.mailboxes.get(i)) {
                 // Header literals may not be UTF-8, so FETCH output is bytes.
                 Some(mb) => {
-                    fetched = Some(fetch(mb, args, session.condstore_enabled, &st.faults, &tag))
+                    let gmail = st.gmail;
+                    fetched = Some(fetch(
+                        mb,
+                        args,
+                        session.condstore_enabled,
+                        gmail,
+                        &st.faults,
+                        &tag,
+                    ))
                 }
                 None => out += &format!("{tag} BAD No mailbox selected\r\n"),
             }
@@ -1221,7 +1486,8 @@ async fn idle(
     }
     loop {
         let (out, next) = {
-            let st = lock(state);
+            let mut st = lock(state);
+            st.refresh_labels();
             if session.id <= st.dropped_through {
                 return Ok(Next::Close);
             }
@@ -1279,17 +1545,7 @@ fn change(st: &mut ServerState, selected: usize, command: &str, args: &[Tok], ta
     let mut out = String::new();
     match command {
         "UID STORE" => {
-            // `+FLAGS.SILENT (\Seen)`, `-FLAGS (\Flagged)`, `FLAGS (…)`.
-            let item = args
-                .get(1)
-                .map(Tok::text)
-                .unwrap_or_default()
-                .to_ascii_uppercase();
-            let flags: Vec<String> = match args.get(2) {
-                Some(Tok::List(flags)) => flags.iter().map(Tok::text).collect(),
-                Some(other) => vec![other.text()],
-                None => Vec::new(),
-            };
+            let (item, flags) = store_args(args);
             let mb = &mut st.mailboxes[selected];
             for &uid in &uids {
                 if item.starts_with("FLAGS") {
@@ -1322,29 +1578,12 @@ fn change(st: &mut ServerState, selected: usize, command: &str, args: &[Tok], ta
                 .filter(|m| uids.contains(&m.uid))
                 .cloned()
                 .collect();
-            let mut new_uids = Vec::new();
+            let mut pairs = Vec::new();
             for copy in copies {
                 let flags: Vec<&str> = copy.flags.iter().map(String::as_str).collect();
-                new_uids.push(st.mailboxes[target].append(&copy.raw, &flags));
+                pairs.push((copy.uid, st.mailboxes[target].append(&copy.raw, &flags)));
             }
-            let list = |uids: &[u32]| {
-                uids.iter()
-                    .map(u32::to_string)
-                    .collect::<Vec<_>>()
-                    .join(",")
-            };
-            let code = if let Some(forged) = &st.faults.forged_copyuid {
-                format!("[COPYUID {forged}] ")
-            } else if st.faults.uidplus && !uids.is_empty() {
-                format!(
-                    "[COPYUID {} {} {}] ",
-                    st.mailboxes[target].uidvalidity,
-                    list(&uids),
-                    list(&new_uids)
-                )
-            } else {
-                String::new()
-            };
+            let code = copyuid_code(st, target, &pairs);
             if command == "UID MOVE" {
                 // RFC 6851: COPYUID comes untagged, before the expunges.
                 if !code.is_empty() {
@@ -1372,7 +1611,240 @@ fn change(st: &mut ServerState, selected: usize, command: &str, args: &[Tok], ta
     out
 }
 
-fn fetch(mb: &FakeMailbox, args: &[Tok], condstore: bool, faults: &Faults, tag: &str) -> Vec<u8> {
+/// The item and values of `UID STORE <set> <item> <values>`: `+FLAGS.SILENT (\Seen)`,
+/// `-X-GM-LABELS (Work)`, `FLAGS (…)`. The item upper-cased.
+fn store_args(args: &[Tok]) -> (String, Vec<String>) {
+    let item = args
+        .get(1)
+        .map(Tok::text)
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    let values = match args.get(2) {
+        Some(Tok::List(values)) => values.iter().map(Tok::text).collect(),
+        Some(other) => vec![other.text()],
+        None => Vec::new(),
+    };
+    (item, values)
+}
+
+/// `[COPYUID …] ` for messages copied to `target` as these (old UID, new UID) pairs, as
+/// the faults allow; empty without one.
+fn copyuid_code(st: &ServerState, target: usize, pairs: &[(u32, u32)]) -> String {
+    let list = |uids: Vec<u32>| {
+        uids.iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    if let Some(forged) = &st.faults.forged_copyuid {
+        format!("[COPYUID {forged}] ")
+    } else if st.faults.uidplus && !pairs.is_empty() {
+        format!(
+            "[COPYUID {} {} {}] ",
+            st.mailboxes[target].uidvalidity,
+            list(pairs.iter().map(|p| p.0).collect()),
+            list(pairs.iter().map(|p| p.1).collect())
+        )
+    } else {
+        String::new()
+    }
+}
+
+/// [`change`] on Gmail, where a label's mailbox shows messages that are in a location.
+fn gmail_change(
+    st: &mut ServerState,
+    selected: usize,
+    command: &str,
+    args: &[Tok],
+    tag: &str,
+) -> String {
+    let set = args.first().map(Tok::text).unwrap_or_default();
+    let before: Vec<(u32, u64)> = st.mailboxes[selected]
+        .messages
+        .iter()
+        .map(|m| (m.uid, m.gm_msgid))
+        .collect();
+    let chosen: Vec<(u32, u64)> = {
+        let mb = &st.mailboxes[selected];
+        before
+            .iter()
+            .copied()
+            .filter(|&(uid, _)| uid_set_contains(&set, uid, mb))
+            .collect()
+    };
+    let in_label = st.mailboxes[selected].label();
+    let starred = st.mailboxes[selected].has_attribute("\\Flagged");
+    let mut out = String::new();
+    let answer = match command {
+        "UID STORE" => {
+            let (item, values) = store_args(args);
+            let on = item.starts_with('+');
+            let labels = item
+                .trim_start_matches(['+', '-'])
+                .starts_with("X-GM-LABELS");
+            // Auto-expunge: `\Deleted` in a label's mailbox takes the label off at once, or
+            // the whole message in Drafts.
+            let deletes =
+                on && !labels && has(&values, "\\Deleted") && !st.mailboxes[selected].is_location();
+            let drafts = st.mailboxes[selected].has_attribute("\\Drafts");
+            for &(_, msgid) in &chosen {
+                if labels {
+                    for label in &values {
+                        st.change_label(msgid, label, on);
+                    }
+                    continue;
+                }
+                let Some((i, at)) = st.locate(msgid) else {
+                    continue;
+                };
+                let mb = &mut st.mailboxes[i];
+                let uid = mb.messages[at].uid;
+                if item.starts_with("FLAGS") {
+                    let flags: Vec<&str> = values.iter().map(String::as_str).collect();
+                    mb.set_flags(uid, &flags);
+                } else {
+                    for flag in &values {
+                        if !(deletes && flag.eq_ignore_ascii_case("\\Deleted")) {
+                            mb.change_flag(uid, flag, on);
+                        }
+                    }
+                }
+                if deletes && drafts {
+                    st.mailboxes[i].expunge(uid);
+                } else if deletes && starred {
+                    st.mailboxes[i].change_flag(uid, "\\Flagged", false);
+                } else if deletes && let Some(label) = &in_label {
+                    st.change_label(msgid, label, false);
+                }
+            }
+            st.refresh_labels();
+            if !item.ends_with(".SILENT") {
+                let mb = &st.mailboxes[selected];
+                for (seq, msg) in mb.messages.iter().enumerate() {
+                    if chosen.iter().any(|&(uid, _)| uid == msg.uid) {
+                        out += &format!(
+                            "* {} FETCH (UID {} FLAGS ({}))\r\n",
+                            seq + 1,
+                            msg.uid,
+                            msg.flags.join(" ")
+                        );
+                    }
+                }
+            }
+            format!("{tag} OK STORE completed\r\n")
+        }
+        "UID COPY" | "UID MOVE" => {
+            let name = args.get(1).map(Tok::text).unwrap_or_default();
+            let Some(target) = st.find(&name) else {
+                return format!("{tag} NO [TRYCREATE] No such mailbox\r\n");
+            };
+            let moving = command == "UID MOVE";
+            let all = st.all_mail_index();
+            for &(_, msgid) in &chosen {
+                if st.mailboxes[target].is_location() {
+                    // Into All Mail from a label is archiving it: the label goes.
+                    if Some(target) == all
+                        && moving
+                        && st.locate(msgid).map(|l| l.0) == all
+                        && let Some(label) = &in_label
+                    {
+                        st.change_label(msgid, label, false);
+                    }
+                    st.relocate(msgid, target);
+                    continue;
+                }
+                // Into a label: out of Trash or Spam into All Mail first.
+                if let Some(all) = all
+                    && st.locate(msgid).is_some_and(|(i, _)| i != all)
+                {
+                    st.relocate(msgid, all);
+                }
+                if let Some(label) = st.mailboxes[target].label() {
+                    st.change_label(msgid, &label, true);
+                } else if st.mailboxes[target].has_attribute("\\Flagged") {
+                    st.change_label(msgid, "\\Starred", true);
+                }
+                if moving && let Some(label) = &in_label {
+                    st.change_label(msgid, label, false);
+                }
+            }
+            st.refresh_labels();
+            let target_uid = |msgid: u64| {
+                st.mailboxes[target]
+                    .messages
+                    .iter()
+                    .find(|m| m.gm_msgid == msgid)
+                    .map(|m| m.uid)
+            };
+            let pairs: Vec<(u32, u32)> = chosen
+                .iter()
+                .filter_map(|&(uid, msgid)| Some((uid, target_uid(msgid)?)))
+                .collect();
+            let code = copyuid_code(st, target, &pairs);
+            if moving {
+                if !code.is_empty() {
+                    out += &format!("* OK {code}Moved\r\n");
+                }
+                format!("{tag} OK MOVE completed\r\n")
+            } else {
+                format!("{tag} OK {code}COPY completed\r\n")
+            }
+        }
+        // Only a location has messages marked `\Deleted`: the rest were expunged at once.
+        "UID EXPUNGE" => {
+            let uids: Vec<u32> = chosen.iter().map(|&(uid, _)| uid).collect();
+            st.mailboxes[selected].expunge_deleted(Some(&uids));
+            st.refresh_labels();
+            format!("{tag} OK EXPUNGE completed\r\n")
+        }
+        _ => {
+            st.mailboxes[selected].expunge_deleted(None);
+            st.refresh_labels();
+            format!("{tag} OK EXPUNGE completed\r\n")
+        }
+    };
+    // What left the selected mailbox, from the end so each number holds.
+    let after = &st.mailboxes[selected].messages;
+    let mut expunged = String::new();
+    for (i, (uid, _)) in before.iter().enumerate().rev() {
+        if !after.iter().any(|m| m.uid == *uid) {
+            expunged += &format!("* {} EXPUNGE\r\n", i + 1);
+        }
+    }
+    out + &expunged + &answer
+}
+
+/// X-GM-LABELS of a message in `mb`: system labels as quoted strings, as Gmail sends
+/// them, with Starred for `\\Flagged`; not the label `mb` shows itself, which Gmail
+/// leaves out.
+fn gmail_labels(mb: &FakeMailbox, msg: &FakeMessage) -> String {
+    let own = mb.label();
+    let mut labels: Vec<String> = msg
+        .labels
+        .iter()
+        .filter(|l| own.as_ref().is_none_or(|own| !own.eq_ignore_ascii_case(l)))
+        .map(|l| {
+            if l.starts_with('\\') || l.bytes().any(|b| b" ()\"".contains(&b)) {
+                quote(l)
+            } else {
+                l.clone()
+            }
+        })
+        .collect();
+    if has(&msg.flags, "\\Flagged") && !mb.has_attribute("\\Flagged") {
+        labels.push(quote("\\Starred"));
+    }
+    labels.join(" ")
+}
+
+fn fetch(
+    mb: &FakeMailbox,
+    args: &[Tok],
+    condstore: bool,
+    gmail: bool,
+    faults: &Faults,
+    tag: &str,
+) -> Vec<u8> {
     let set = args.first().map(Tok::text).unwrap_or_default();
     let items = fetch_items(args);
     let changed_since: Option<u64> = match args.get(2) {
@@ -1402,6 +1874,15 @@ fn fetch(mb: &FakeMailbox, args: &[Tok], condstore: bool, faults: &Faults, tag: 
         }
         if condstore && (wants("MODSEQ") || changed_since.is_some()) {
             parts.push(format!("MODSEQ ({})", msg.modseq).into_bytes());
+        }
+        if gmail && wants("X-GM-MSGID") {
+            parts.push(format!("X-GM-MSGID {}", msg.gm_msgid).into_bytes());
+        }
+        if gmail && wants("X-GM-THRID") {
+            parts.push(format!("X-GM-THRID {}", msg.gm_thrid).into_bytes());
+        }
+        if gmail && wants("X-GM-LABELS") {
+            parts.push(format!("X-GM-LABELS ({})", gmail_labels(mb, msg)).into_bytes());
         }
         if faults.split_fetch && parts.len() > 1 && (header_item.is_some() || wants("INTERNALDATE"))
         {

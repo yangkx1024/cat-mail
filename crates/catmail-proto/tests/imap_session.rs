@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use catmail_proto::Credentials;
 use catmail_proto::TlsConfig;
-use catmail_proto::imap::{ChangedFlags, CopyUid, Error, Session};
+use catmail_proto::imap::{ChangedFlags, CopyUid, Error, Items, Session};
 use catmail_testkit::{FakeImap, FakeMailbox, ServerState, TestCert};
-use catmail_types::{Flags, FolderRole, Security, ServerConfig};
+use catmail_types::{Flags, FolderRole, GmailLabel, Security, ServerConfig};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -96,18 +96,27 @@ async fn reads_folders_and_messages() {
     // `3:*` matches UID 2, the highest; it must not be reported as new.
     assert!(session.uid_search_from(3).await.unwrap().is_empty());
     // Likewise `1:1` returning more than UID 1 would be wrong.
-    let flags = session.fetch_flags(&[1..=1], None).await.unwrap();
+    let flags = session
+        .fetch_flags(&[1..=1], None, Items::Standard)
+        .await
+        .unwrap();
     assert_eq!(flags.iter().map(|f| f.uid).collect::<Vec<_>>(), [1]);
-    let flags = session.fetch_flags(&[2..=9], None).await.unwrap();
+    let flags = session
+        .fetch_flags(&[2..=9], None, Items::Standard)
+        .await
+        .unwrap();
     assert_eq!(flags.iter().map(|f| f.uid).collect::<Vec<_>>(), [2]);
     assert!(
         session
-            .fetch_flags(&[3..=9], None)
+            .fetch_flags(&[3..=9], None, Items::Standard)
             .await
             .unwrap()
             .is_empty()
     );
-    let messages = session.fetch_summaries(&[1, 2]).await.unwrap();
+    let messages = session
+        .fetch_summaries(&[1, 2], Items::Standard)
+        .await
+        .unwrap();
     assert_eq!(messages.len(), 2);
     let first = &messages[0];
     assert_eq!(first.state.uid, 1);
@@ -138,9 +147,15 @@ async fn changed_since_only_returns_changed_flags() {
     let modseq = session.examine("INBOX").await.unwrap().highest_modseq;
     fake.state().inbox().set_flags(2, &["\\Flagged"]);
 
-    let all = session.fetch_flags(&[1..=2], None).await.unwrap();
+    let all = session
+        .fetch_flags(&[1..=2], None, Items::Standard)
+        .await
+        .unwrap();
     assert_eq!(all.len(), 2);
-    let changed = session.fetch_flags(&[1..=2], modseq).await.unwrap();
+    let changed = session
+        .fetch_flags(&[1..=2], modseq, Items::Standard)
+        .await
+        .unwrap();
     assert_eq!(changed.len(), 1);
     assert_eq!(changed[0].uid, 2);
     assert_eq!(changed[0].flags, Flags::FLAGGED);
@@ -154,7 +169,10 @@ async fn works_without_condstore() {
     let mut session = login(&fake).await;
     let status = session.examine("INBOX").await.unwrap();
     assert_eq!(status.highest_modseq, None);
-    let flags = session.fetch_flags(&[1..=2], Some(1)).await.unwrap();
+    let flags = session
+        .fetch_flags(&[1..=2], Some(1), Items::Standard)
+        .await
+        .unwrap();
     assert_eq!(flags.len(), 2, "no CHANGEDSINCE without CONDSTORE");
     assert!(flags.iter().all(|f| f.modseq.is_none()));
     assert!(
@@ -176,14 +194,23 @@ async fn tolerates_duplicate_reordered_and_unsolicited_responses() {
     let mut session = login(&fake).await;
     session.examine("INBOX").await.unwrap();
 
-    let messages = session.fetch_summaries(&[1, 2]).await.unwrap();
+    let messages = session
+        .fetch_summaries(&[1, 2], Items::Standard)
+        .await
+        .unwrap();
     assert_eq!(
         messages.iter().map(|m| m.state.uid).collect::<Vec<_>>(),
         [1, 2]
     );
-    let only = session.fetch_summaries(&[1]).await.unwrap();
+    let only = session
+        .fetch_summaries(&[1], Items::Standard)
+        .await
+        .unwrap();
     assert_eq!(only.iter().map(|m| m.state.uid).collect::<Vec<_>>(), [1]);
-    let flags = session.fetch_flags(&[1..=2], None).await.unwrap();
+    let flags = session
+        .fetch_flags(&[1..=2], None, Items::Standard)
+        .await
+        .unwrap();
     assert_eq!(flags.iter().map(|f| f.uid).collect::<Vec<_>>(), [1, 2]);
 }
 
@@ -196,7 +223,10 @@ async fn reads_internaldate_with_a_one_digit_day() {
     let mut session = login(&fake).await;
     session.examine("INBOX").await.unwrap();
 
-    let messages = session.fetch_summaries(&[1, 2]).await.unwrap();
+    let messages = session
+        .fetch_summaries(&[1, 2], Items::Standard)
+        .await
+        .unwrap();
     assert_eq!(
         messages.iter().map(|m| m.state.uid).collect::<Vec<_>>(),
         [1, 2]
@@ -215,7 +245,10 @@ async fn dropped_connection_is_fatal() {
     let fake = FakeImap::start(state).await;
     let mut session = login(&fake).await;
     session.examine("INBOX").await.unwrap();
-    let err = session.fetch_summaries(&[1, 2]).await.unwrap_err();
+    let err = session
+        .fetch_summaries(&[1, 2], Items::Standard)
+        .await
+        .unwrap_err();
     assert!(matches!(err, Error::Closed), "{err:?}");
     assert!(err.is_fatal());
 }
@@ -350,13 +383,23 @@ async fn malformed_requested_items_make_answers_incomplete() {
     let mut session = login(&fake).await;
     session.examine("INBOX").await.unwrap();
 
-    let err = session.fetch_flags(&[1..=2], None).await.unwrap_err();
+    let err = session
+        .fetch_flags(&[1..=2], None, Items::Standard)
+        .await
+        .unwrap_err();
     assert!(matches!(err, Error::Incomplete("UID FETCH")), "{err:?}");
     assert!(!err.is_fatal(), "the connection is still usable");
     let err = session.fetch_structure(2).await.unwrap_err();
     assert!(matches!(err, Error::Incomplete("UID FETCH")), "{err:?}");
     assert!(session.fetch_structure(1).await.unwrap().is_some());
-    assert_eq!(session.fetch_flags(&[1..=1], None).await.unwrap().len(), 1);
+    assert_eq!(
+        session
+            .fetch_flags(&[1..=1], None, Items::Standard)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -368,7 +411,10 @@ async fn a_malformed_bodystructure_is_asked_for_again_without() {
     session.examine("INBOX").await.unwrap();
     let start = fake.state().log.len();
 
-    let messages = session.fetch_summaries(&[1, 2]).await.unwrap();
+    let messages = session
+        .fetch_summaries(&[1, 2], Items::Standard)
+        .await
+        .unwrap();
     let second = messages
         .iter()
         .find(|m| m.state.uid == 2)
@@ -470,7 +516,10 @@ async fn unparsable_lines_make_authoritative_answers_fail() {
     let (_fake, mut session) = garbled("FETCH (UID 2 FLAGS").await;
     session.examine("INBOX").await.unwrap();
     check(
-        session.fetch_flags(&[1..=2], None).await.unwrap_err(),
+        session
+            .fetch_flags(&[1..=2], None, Items::Standard)
+            .await
+            .unwrap_err(),
         "UID FETCH",
     );
 
@@ -480,7 +529,10 @@ async fn unparsable_lines_make_authoritative_answers_fail() {
     let (fake, mut session) = garbled("FETCH (UID 1 ").await;
     session.examine("INBOX").await.unwrap();
     let start = fake.state().log.len();
-    let messages = session.fetch_summaries(&[1, 2, 9]).await.unwrap();
+    let messages = session
+        .fetch_summaries(&[1, 2, 9], Items::Standard)
+        .await
+        .unwrap();
     let mut uids: Vec<u32> = messages.iter().map(|m| m.state.uid).collect();
     uids.sort_unstable();
     assert_eq!(uids, [1, 2]);
@@ -497,7 +549,10 @@ async fn unparsable_lines_make_authoritative_answers_fail() {
 
     // Without a lost line, a missing message is simply gone: no second FETCH.
     let start = fake.state().log.len();
-    let messages = session.fetch_summaries(&[2, 9]).await.unwrap();
+    let messages = session
+        .fetch_summaries(&[2, 9], Items::Standard)
+        .await
+        .unwrap();
     assert_eq!(messages.len(), 1);
     assert_eq!(fake.state().log.len(), start + 1);
 }
@@ -533,7 +588,10 @@ async fn merges_fetch_responses_split_across_lines() {
     let fake = FakeImap::start(state).await;
     let mut session = login(&fake).await;
     session.examine("INBOX").await.unwrap();
-    let messages = session.fetch_summaries(&[1, 2]).await.unwrap();
+    let messages = session
+        .fetch_summaries(&[1, 2], Items::Standard)
+        .await
+        .unwrap();
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0].state.flags, Flags::SEEN);
     assert_eq!(messages[0].state.keywords, ["$Forwarded"]);
@@ -906,7 +964,10 @@ async fn idle_names_messages_with_changed_flags_by_uid() {
     assert!(idle_while(&fake, &mut session, 1, change).await.unwrap());
     assert_eq!(session.changed_flags(), &ChangedFlags::Uids(vec![3]));
     // The answer to our own FETCH is no change.
-    session.fetch_flags(&[1..=3], None).await.unwrap();
+    session
+        .fetch_flags(&[1..=3], None, Items::Standard)
+        .await
+        .unwrap();
     assert_eq!(session.changed_flags(), &ChangedFlags::Uids(vec![3]));
 
     // A line it can't parse might have been anything.
@@ -963,4 +1024,255 @@ async fn idle_needs_server_support() {
         .await
         .unwrap_err();
     assert!(matches!(err, Error::Unsupported("IDLE")), "{err:?}");
+}
+
+/// Gmail with "one" (UID 1 in All Mail, INBOX, Important and Work; starred) and "two"
+/// (UID 2, Work and a label hidden from IMAP).
+fn gmail_state() -> ServerState {
+    let mut state = ServerState::gmail("alice", "pw");
+    state.mailboxes.push(FakeMailbox::new("Work"));
+    let all_mail = state.all_mail();
+    all_mail.uidvalidity = 7;
+    let one = all_mail.append_simple("one");
+    all_mail.set_flags(one, &["\\Flagged"]);
+    all_mail.set_labels(one, &["\\Inbox", "\\Important", "Work"]);
+    let two = all_mail.append_simple("two");
+    all_mail.set_labels(two, &["Work", "Hidden"]);
+    state
+}
+
+fn labels(fake: &FakeImap, mailbox: &str) -> Vec<(u32, u64, Vec<String>)> {
+    fake.state()
+        .mailbox_mut(mailbox)
+        .messages
+        .iter()
+        .map(|m| (m.uid, m.gm_msgid, m.labels.clone()))
+        .collect()
+}
+
+fn user(name: &str) -> GmailLabel {
+    GmailLabel::user(name, name)
+}
+
+#[tokio::test]
+async fn fetches_gmail_ids_and_labels() {
+    let fake = FakeImap::start(gmail_state()).await;
+    let mut session = login(&fake).await;
+    assert!(session.is_gmail());
+    let roles: Vec<_> = session
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|m| (m.raw_name, m.special_use))
+        .collect();
+    assert!(roles.contains(&("[Gmail]/Important".into(), Some(FolderRole::Important))));
+    assert!(roles.contains(&("[Gmail]/All Mail".into(), Some(FolderRole::All))));
+
+    session.examine("[Gmail]/All Mail").await.unwrap();
+    let ids = labels(&fake, "[Gmail]/All Mail");
+    let messages = session
+        .fetch_summaries(&[1, 2], Items::Gmail)
+        .await
+        .unwrap();
+    let got: Vec<_> = messages
+        .iter()
+        .map(|m| (m.gm_msgid, m.gm_thrid, m.state.labels.clone()))
+        .collect();
+    let first = [
+        GmailLabel::System(FolderRole::Inbox),
+        GmailLabel::System(FolderRole::Important),
+        user("Work"),
+    ];
+    assert_eq!(
+        got,
+        [
+            (Some(ids[0].1), Some(ids[0].1), Some(first.to_vec())),
+            (
+                Some(ids[1].1),
+                Some(ids[1].1),
+                Some(vec![user("Work"), user("Hidden")])
+            ),
+        ],
+        "Starred is \\Flagged, not a label"
+    );
+    assert!(ids[0].1 > i64::MAX as u64 / 5, "a Gmail-sized id");
+    let standard = session
+        .fetch_summaries(&[1], Items::Standard)
+        .await
+        .unwrap();
+    assert_eq!(
+        (standard[0].gm_msgid, standard[0].state.labels.clone()),
+        (None, None)
+    );
+    let flags = session
+        .fetch_flags(&[1..=2], None, Items::Gmail)
+        .await
+        .unwrap();
+    assert_eq!(flags[0].labels.as_deref(), Some(&first[..]));
+
+    // In a label's mailbox, under UIDs of its own, X-GM-LABELS leaves that label out.
+    session.examine("INBOX").await.unwrap();
+    assert_eq!(
+        session.uid_search_gm_msgid(ids[0].1).await.unwrap(),
+        [1],
+        "found by its X-GM-MSGID"
+    );
+    assert!(
+        session
+            .uid_search_gm_msgid(ids[1].1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let flags = session
+        .fetch_flags(&[1..=1], None, Items::Gmail)
+        .await
+        .unwrap();
+    assert_eq!(flags[0].labels.as_deref(), Some(&first[1..]));
+}
+
+#[tokio::test]
+async fn gmail_labels_are_added_and_removed_never_replaced() {
+    let fake = FakeImap::start(gmail_state()).await;
+    let mut session = login(&fake).await;
+    let status = session.select("[Gmail]/All Mail").await.unwrap();
+    session
+        .uid_store_labels(
+            &[1, 2],
+            &[user("New label"), GmailLabel::System(FolderRole::Important)],
+            &[GmailLabel::System(FolderRole::Inbox), user("Work")],
+        )
+        .await
+        .unwrap();
+    let all_mail = labels(&fake, "[Gmail]/All Mail");
+    assert_eq!(all_mail[0].2, ["\\Important", "New label"]);
+    assert_eq!(all_mail[1].2, ["Hidden", "New label", "\\Important"]);
+    // A change of labels alone raises the MODSEQ.
+    let changed = session
+        .fetch_flags(&[1..=2], status.highest_modseq, Items::Gmail)
+        .await
+        .unwrap();
+    assert_eq!(changed.len(), 2);
+    assert!(labels(&fake, "INBOX").is_empty());
+    let log: Vec<_> = fake.state().log.iter().map(|c| c.line.clone()).collect();
+    assert!(
+        log.contains(&r#"UID STORE 1:2 +X-GM-LABELS ("New label" \Important)"#.to_owned()),
+        "{log:?}"
+    );
+    assert!(
+        log.contains(&r#"UID STORE 1:2 -X-GM-LABELS (\Inbox Work)"#.to_owned()),
+        "{log:?}"
+    );
+
+    // Starred is a flag.
+    let err = session
+        .uid_store_labels(&[1], &[GmailLabel::System(FolderRole::Flagged)], &[])
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)), "{err}");
+    assert!(!err.is_fatal());
+}
+
+#[tokio::test]
+async fn gmail_extensions_need_server_support() {
+    let fake = FakeImap::start(three_messages()).await;
+    let mut session = login(&fake).await;
+    session.select("INBOX").await.unwrap();
+    assert!(!session.is_gmail());
+    let err = session
+        .uid_store_labels(&[1], &[user("Work")], &[])
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Unsupported(_)), "{err}");
+    let err = session.uid_search_gm_msgid(1).await.unwrap_err();
+    assert!(matches!(err, Error::Unsupported(_)), "{err}");
+}
+
+/// The UID and labels of the message with this X-GM-MSGID in `mailbox`.
+async fn labels_in(session: &mut Session, msgid: u64, mailbox: &str) -> (u32, Vec<GmailLabel>) {
+    session.examine(mailbox).await.unwrap();
+    let uids = session.uid_search_gm_msgid(msgid).await.unwrap();
+    let fetched = session.fetch_summaries(&uids, Items::Gmail).await.unwrap();
+    assert_eq!(fetched[0].gm_msgid, Some(msgid), "{mailbox}");
+    (uids[0], fetched[0].state.labels.clone().unwrap())
+}
+
+#[tokio::test]
+async fn gmail_messages_keep_their_id_across_locations() {
+    let fake = FakeImap::start(gmail_state()).await;
+    let mut session = login(&fake).await;
+    let msgid = labels(&fake, "[Gmail]/All Mail")[0].1;
+    session.select("[Gmail]/All Mail").await.unwrap();
+    let to_trash = session.uid_move(&[1], "[Gmail]/Trash").await.unwrap();
+    assert_eq!(to_trash.unwrap().uids, [(1, 1)]);
+    let (uid, trashed) = labels_in(&mut session, msgid, "[Gmail]/Trash").await;
+    assert_eq!(uid, 1);
+    assert_eq!(
+        trashed,
+        [GmailLabel::System(FolderRole::Important), user("Work")],
+        "Trash takes the message out of INBOX"
+    );
+    assert!(labels(&fake, "INBOX").is_empty());
+
+    session.select("[Gmail]/Trash").await.unwrap();
+    session.uid_move(&[1], "[Gmail]/Spam").await.unwrap();
+    let (_, spam) = labels_in(&mut session, msgid, "[Gmail]/Spam").await;
+    assert_eq!(spam, [user("Work")], "Spam takes it out of Important too");
+
+    session.select("[Gmail]/Spam").await.unwrap();
+    let back = session.uid_move(&[1], "[Gmail]/All Mail").await.unwrap();
+    assert_eq!(back.unwrap().uids, [(1, 3)], "a new UID in All Mail");
+    let (uid, kept) = labels_in(&mut session, msgid, "[Gmail]/All Mail").await;
+    assert_eq!((uid, kept), (3, vec![user("Work")]));
+}
+
+#[tokio::test]
+async fn gmail_label_mailboxes_act_on_the_message() {
+    let fake = FakeImap::start(gmail_state()).await;
+    let mut session = login(&fake).await;
+
+    // Flags are the message's.
+    session.select("Work").await.unwrap();
+    session
+        .uid_store(&[2], Flags::SEEN, Flags::empty())
+        .await
+        .unwrap();
+    assert_eq!(
+        fake.state().all_mail().message_mut(2).flags,
+        ["\\Seen"],
+        "UID 2 in Work is UID 2 in All Mail"
+    );
+    // `\Deleted` in a label's mailbox takes the label off at once.
+    session.uid_delete(&[1]).await.unwrap();
+    assert_eq!(
+        labels(&fake, "[Gmail]/All Mail")[0].2,
+        ["\\Inbox", "\\Important"]
+    );
+    assert_eq!(session.uid_search_all().await.unwrap(), [2]);
+
+    // A draft is in All Mail with \Draft, until deleted in Drafts.
+    let appended = session
+        .append(
+            "[Gmail]/Drafts",
+            Flags::DRAFT,
+            b"Subject: draft\r\n\r\nx\r\n",
+        )
+        .await
+        .unwrap();
+    assert_eq!(appended, Some((1, 1)));
+    assert_eq!(labels(&fake, "[Gmail]/All Mail")[2].2, ["\\Draft"]);
+    session.select("[Gmail]/Drafts").await.unwrap();
+    session.uid_delete(&[1]).await.unwrap();
+    assert_eq!(labels(&fake, "[Gmail]/All Mail").len(), 2);
+
+    // Moved from a label into another: the one label for the other.
+    session.select("INBOX").await.unwrap();
+    let moved = session.uid_move(&[1], "Work").await.unwrap();
+    assert_eq!(moved.unwrap().uids, [(1, 3)], "a new UID in Work");
+    assert_eq!(
+        labels(&fake, "[Gmail]/All Mail")[0].2,
+        ["\\Important", "Work"]
+    );
+    assert!(session.uid_search_all().await.unwrap().is_empty());
 }

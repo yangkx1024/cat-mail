@@ -949,6 +949,7 @@ mod tests {
                     name: "Drafts".into(),
                     delimiter: Some('/'),
                     role: Some(FolderRole::Drafts),
+                    kind: catmail_types::FolderKind::Location,
                     selectable: true,
                 };
                 db.folders().reconcile(account, &[remote])?;

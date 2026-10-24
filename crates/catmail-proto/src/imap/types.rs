@@ -90,6 +90,16 @@ impl MailboxStatus {
     }
 }
 
+/// What a FETCH of messages asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Items {
+    Standard,
+    /// Also Gmail's X-GM-MSGID, X-GM-THRID and X-GM-LABELS (X-GM-EXT-1). Only in a
+    /// location (All Mail, Trash, Spam): in a label's mailbox, X-GM-LABELS leaves out
+    /// that label.
+    Gmail,
+}
+
 /// A message as needed for list views.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchedMessage {
@@ -99,6 +109,9 @@ pub struct FetchedMessage {
     pub size: Option<u32>,
     pub headers: Headers,
     pub has_attachments: bool,
+    /// X-GM-MSGID and X-GM-THRID, with [`Items::Gmail`].
+    pub gm_msgid: Option<u64>,
+    pub gm_thrid: Option<u64>,
 }
 
 #[cfg(test)]

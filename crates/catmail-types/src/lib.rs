@@ -17,19 +17,20 @@ mod search;
 mod sync;
 
 pub use account::{
-    Account, AccountOverview, AccountStatus, Identity, NewAccount, NewIdentity, Security,
-    SendProblem, ServerConfig, ServerProblem,
+    Account, AccountMode, AccountOverview, AccountStatus, Identity, NewAccount, NewIdentity,
+    Security, SendProblem, ServerConfig, ServerProblem,
 };
 pub use draft::{Draft, DraftAttachment, DraftContent, Forwarding};
 pub use error::{ErrorKind, ReportedError};
 pub use event::Event;
-pub use folder::{DeleteOutcome, Folder, FolderRole, archive_folder, special_folder};
+pub use folder::{DeleteOutcome, Folder, FolderKind, FolderRole, archive_folder, special_folder};
 pub use ids::{
     AccountId, AttachmentId, BlobHash, DraftAttachmentId, DraftId, FolderId, IdentityId, MessageId,
     OutboxId, PendingOpId,
 };
 pub use message::{
-    Address, Attachment, FlagState, Flags, Message, MessageBody, MessageCursor, MessageSummary,
+    Address, Attachment, FlagState, Flags, GmailLabel, Message, MessageBody, MessageCursor,
+    MessageSummary,
 };
 pub use ops::{OpKind, OpStatus, PendingOp, ReplayReport};
 pub use outbox::{FlushReport, OutboxEntry, OutboxStatus};

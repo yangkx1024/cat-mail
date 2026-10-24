@@ -70,6 +70,39 @@ pub struct ServerConfig {
     pub security: Security,
 }
 
+/// How an account's mailboxes map to messages (see `docs/architecture/labels.md`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AccountMode {
+    /// Every selectable mailbox is a location.
+    #[default]
+    Standard,
+    /// Gmail (`X-GM-EXT-1`, with All Mail listed): All Mail, Trash and Spam are the
+    /// locations, the other mailboxes labels, and a message is one `X-GM-MSGID`.
+    Gmail,
+}
+
+impl AccountMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Gmail => "gmail",
+        }
+    }
+}
+
+impl FromStr for AccountMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "standard" => Ok(Self::Standard),
+            "gmail" => Ok(Self::Gmail),
+            other => Err(format!("unknown account mode `{other}`")),
+        }
+    }
+}
+
 /// A mailbox on an IMAP server. What it sends as, and through which SMTP server, are its
 /// [`Identity`]s.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +114,8 @@ pub struct Account {
     /// but not always the email address.
     pub username: String,
     pub imap: ServerConfig,
+    /// As found when last connected to; standard until then.
+    pub mode: AccountMode,
     /// Unix timestamp, seconds.
     pub created_at: i64,
 }

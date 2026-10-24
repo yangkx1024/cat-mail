@@ -3,7 +3,7 @@ use std::ops::{BitOr, BitOrAssign};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AccountId, AttachmentId, FolderId, MessageId};
+use crate::{AccountId, AttachmentId, FolderId, FolderRole, MessageId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Address {
@@ -101,6 +101,33 @@ pub struct FlagState {
     pub keywords: Vec<String>,
     /// MODSEQ, with CONDSTORE.
     pub modseq: Option<u64>,
+    /// Gmail's labels (X-GM-LABELS), if asked for: only in a location, where they are
+    /// all listed. `None` leaves the stored labels alone.
+    pub labels: Option<Vec<GmailLabel>>,
+}
+
+/// A label on a Gmail message, as X-GM-LABELS names it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum GmailLabel {
+    /// A system label (`\Inbox`, `\Sent`, `\Draft`, `\Important`): the mailbox with
+    /// this role, whatever its name.
+    System(FolderRole),
+    /// A user label: the mailbox of that name.
+    User {
+        /// As the server spells it (modified UTF-7), as in LIST.
+        remote_name: String,
+        /// Decoded for display.
+        name: String,
+    },
+}
+
+impl GmailLabel {
+    pub fn user(remote_name: impl Into<String>, name: impl Into<String>) -> Self {
+        Self::User {
+            remote_name: remote_name.into(),
+            name: name.into(),
+        }
+    }
 }
 
 /// What a message list row needs; bodies and attachments are loaded separately.

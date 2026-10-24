@@ -54,10 +54,32 @@ impl Command {
     /// Appends `text` as it is, after a space: sequence sets, item lists, flags. The
     /// caller makes sure it is valid there.
     pub fn raw(mut self, text: &str) -> Self {
-        let out = self.text();
-        out.push(b' ');
-        out.extend_from_slice(text.as_bytes());
+        self.separate();
+        self.text().extend_from_slice(text.as_bytes());
         self
+    }
+
+    /// Appends a parenthesized list of `items`, each added by `item` (with
+    /// [`raw`](Self::raw), [`astring`](Self::astring) …).
+    pub fn list<T>(
+        self,
+        items: impl IntoIterator<Item = T>,
+        mut item: impl FnMut(Self, T) -> Result<Self>,
+    ) -> Result<Self> {
+        let mut command = self.raw("(");
+        for i in items {
+            command = item(command, i)?;
+        }
+        command.text().push(b')');
+        Ok(command)
+    }
+
+    /// The space before an argument, unless it opens a list.
+    fn separate(&mut self) {
+        let out = self.text();
+        if out.last() != Some(&b'(') {
+            out.push(b' ');
+        }
     }
 
     /// Appends an astring: an atom if it can be one, else a string.
@@ -72,8 +94,9 @@ impl Command {
     /// Appends a string: quoted if it can be, else a literal.
     pub fn string(mut self, value: &[u8]) -> Result<Self> {
         if value.iter().all(|&b| is_text_char(b)) {
+            self.separate();
             let out = self.text();
-            out.extend_from_slice(b" \"");
+            out.push(b'"');
             for &b in value {
                 if b == b'"' || b == b'\\' {
                     out.push(b'\\');
@@ -94,7 +117,7 @@ impl Command {
                 self.name
             )));
         }
-        self.text().push(b' ');
+        self.separate();
         self.parts
             .push(Part::Literal(Zeroizing::new(value.to_vec())));
         self.parts.push(Part::Text(Zeroizing::new(Vec::new())));
@@ -174,6 +197,27 @@ mod tests {
             wire(command, Literals::Synchronizing),
             [r#"C1 SELECT INBOX "[Gmail]/All Mail" "a\"b\\c" "" "%""#.to_owned() + "\r\n"]
         );
+    }
+
+    #[test]
+    fn lists_hold_any_argument() {
+        let command = Command::new("UID STORE")
+            .raw("1:3")
+            .raw("+X-GM-LABELS")
+            .list(["\\Inbox", "Work", "Two words", "已发送"], |c, label| {
+                if label.starts_with('\\') {
+                    Ok(c.raw(label))
+                } else {
+                    c.astring(label.as_bytes())
+                }
+            })
+            .unwrap();
+        assert_eq!(
+            wire(command, Literals::NonSynchronizing),
+            ["C1 UID STORE 1:3 +X-GM-LABELS (\\Inbox Work \"Two words\" {9+}\r\n已发送)\r\n"]
+        );
+        let empty = Command::new("X").list([0; 0], |c, _| Ok(c)).unwrap();
+        assert_eq!(wire(empty, Literals::Synchronizing), ["C1 X ()\r\n"]);
     }
 
     #[test]

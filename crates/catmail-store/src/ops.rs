@@ -1081,6 +1081,7 @@ mod tests {
             name: name.into(),
             delimiter: Some('/'),
             role,
+            kind: catmail_types::FolderKind::Location,
             selectable: true,
         }
     }

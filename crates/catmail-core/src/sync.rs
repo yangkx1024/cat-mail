@@ -13,10 +13,12 @@ use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use catmail_proto::imap::{ChangedFlags, FetchedMessage, ListedMailbox, MailboxStatus, Session};
+use catmail_proto::imap::{
+    ChangedFlags, FetchedMessage, Items, ListedMailbox, MailboxStatus, Session,
+};
 use catmail_store::{FolderSyncState, NewMessage, RemoteFolder, ReplayFolder};
 use catmail_types::{
-    AccountId, Event, FolderId, FolderRole, FolderSyncReport, ReplayReport, SyncReport,
+    AccountId, Event, FolderId, FolderKind, FolderRole, FolderSyncReport, ReplayReport, SyncReport,
 };
 
 use crate::connection::with_session;
@@ -356,7 +358,7 @@ async fn sync_folder(
                 .collect(),
         };
         for uids in windows {
-            let states = session.fetch_flags(&uids, since).await?;
+            let states = session.fetch_flags(&uids, since, Items::Standard).await?;
             let updated = engine
                 .write(move |db| Ok(db.messages().update_flags(id, &states)? as u32))
                 .await?;
@@ -371,7 +373,7 @@ async fn sync_folder(
     let mut complete = true;
     for batch in new.rchunks(engine.tuning.fetch_batch) {
         let messages: Vec<NewMessage> = session
-            .fetch_summaries(batch)
+            .fetch_summaries(batch, Items::Standard)
             .await?
             .into_iter()
             .map(new_message)
@@ -466,6 +468,8 @@ pub(crate) fn remote_folders(listed: Vec<ListedMailbox>) -> Vec<RemoteFolder> {
                 name: m.name,
                 delimiter: m.delimiter,
                 role,
+                // Gmail's labels are still synced as folders (see labels.md).
+                kind: FolderKind::Location,
                 selectable: m.selectable,
             }
         })
@@ -507,6 +511,8 @@ fn new_message(m: FetchedMessage) -> NewMessage {
         reply_to: h.reply_to,
         date: h.date,
         has_attachments: m.has_attachments,
+        gm_msgid: m.gm_msgid,
+        gm_thrid: m.gm_thrid,
     }
 }
 
