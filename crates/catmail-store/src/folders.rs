@@ -8,6 +8,10 @@ use crate::columns::parse_opt_text;
 use crate::drafts::Drafts;
 use crate::ops::{PendingOps, Touched};
 
+/// Accounts with an `\All` mailbox (Gmail), where folders are labels: one message is in
+/// several of them at once, a copy in each, told apart only by Message-ID.
+pub(crate) const LABEL_ACCOUNTS: &str = "SELECT account_id FROM folders WHERE role = 'all'";
+
 const COLUMNS: &str = "id, account_id, name, delimiter, role, selectable,
     unread_count, total_count, last_synced_at";
 

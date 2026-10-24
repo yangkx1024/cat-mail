@@ -17,7 +17,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use catmail_proto::imap::{CopyUid, Session};
-use catmail_store::{CopyCheckpoint, Moved, ReplayFolder, ReplayKind, ReplayOp, Touched};
+use catmail_store::{
+    CopyCheckpoint, LabelCopies, Moved, ReplayFolder, ReplayKind, ReplayOp, Touched,
+};
 use catmail_types::{
     AccountId, Event, Flags, FolderId, MessageId, PendingOp, PendingOpId, ReplayReport,
     ReportedError,
@@ -26,7 +28,7 @@ use catmail_types::{
 use crate::connection::with_session;
 use crate::draft_sync::{Uploaded, Uploads};
 use crate::engine::{Activity, Engine, lock, now};
-use crate::{Error, Result, draft_sync};
+use crate::{Error, Result, draft_sync, sync};
 
 pub(crate) async fn set_flags(
     engine: Arc<Engine>,
@@ -208,7 +210,8 @@ pub(crate) struct Replayed {
 
 /// Uploads the account's changed drafts (those `uploads` takes), then replays all its
 /// queued ops, deleting the copies those drafts replace among them, adding what it did
-/// to `done` (what was done before a failure too). Call with the account's sync permit.
+/// to `done` (what was done before a failure too). Then drops the copies on other Gmail
+/// labels that the moves took with them. Call with the account's sync permit.
 pub(crate) async fn replay_queued(
     engine: &Arc<Engine>,
     session: &mut Session,
@@ -217,10 +220,31 @@ pub(crate) async fn replay_queued(
     done: &mut Replayed,
 ) -> Result<()> {
     draft_sync::upload(engine, session, account, uploads, &mut done.drafts).await?;
-    let pending = engine
-        .read(move |db| db.ops().pending_folders(account))
+    let (pending, label_copies) = engine
+        .read(move |db| {
+            let ops = db.ops();
+            Ok((ops.pending_folders(account)?, ops.label_copies(account)?))
+        })
         .await?;
-    replay(engine, session, account, &pending, &mut done.folders).await
+    // Before the moves are made: a move without COPYUID deletes the row it starts from.
+    engine.add_label_copies(account, label_copies);
+    replay(engine, session, account, &pending, &mut done.folders).await?;
+    // Those of earlier replays too, which failed after their moves were made. On Gmail a
+    // move to Trash takes the message out of every label, and those folders are only
+    // synced in full every so often: until then the copies would show in search and
+    // fail to open.
+    while let Some(LabelCopies { folder, uids }) = engine.next_label_copies(account) {
+        match sync::drop_vanished(engine, session, account, &folder, &uids).await {
+            Ok(()) => {}
+            // Left to the sync.
+            Err(e) if e.is_refusal() => {
+                tracing::warn!(folder = %folder.name, error = %e, "can't look for moved copies");
+            }
+            Err(e) => return Err(e),
+        }
+        engine.looked_for_label_copies(account, folder.id);
+    }
+    Ok(())
 }
 
 /// Replays the ops of `folders` on `session`, one folder after the other, adding what

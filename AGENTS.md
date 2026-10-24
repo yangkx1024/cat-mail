@@ -82,7 +82,10 @@ fake-server test, with a fault injected if the change is about recovering from o
   change, never from inside a `write` closure and never after an `.await` in the caller's
   future.
 - **Messages are per mailbox.** A `messages` row is one IMAP (folder, UID) pair with its own
-  flags. Don't merge copies across folders by Message-ID.
+  flags. Don't merge copies across folders by Message-ID. The one exception is accounts with
+  an `\All` mailbox (`LABEL_ACCOUNTS`, Gmail), where folders are labels: search shows one
+  result per Message-ID, and replay uses Message-ID to pick which UIDs to ask the server
+  about. Rows stay per folder there too.
 - **UIDs are only valid within one UIDVALIDITY.** Anything persisted that refers to a
   remote UID also stores the folder and its UIDVALIDITY, and is checked before use.
 - **Account-owned references** use composite `(id, account_id)` foreign keys; where that is

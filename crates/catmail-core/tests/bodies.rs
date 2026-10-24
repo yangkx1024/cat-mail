@@ -476,10 +476,27 @@ async fn a_failed_download_stores_nothing_and_can_be_retried() {
 async fn refuses_uids_from_an_old_uidvalidity_or_expunged_messages() {
     let env = env(state(&[NEWSLETTER, NEWSLETTER])).await;
     let (first, second) = (env.id(0).await, env.id(1).await);
+    let inbox = env.folder("INBOX").await.id;
+    let mut events = env.client.subscribe();
 
+    // Gone, as the server confirms: the local copy goes, as the next sync would drop it.
     env.fake.state().inbox().expunge(1);
+    let start = env.log_len();
     let err = env.client.download_message(first).await.unwrap_err();
     assert!(matches!(err, Error::OutOfSync(_)), "{err:?}");
+    let commands = env.commands_since(start);
+    assert!(
+        commands.iter().any(|c| c == "UID SEARCH UID 1"),
+        "{commands:?}"
+    );
+    assert!(env.client.get_message(first).await.unwrap().is_none());
+    assert_eq!(
+        drain(&mut events),
+        [Event::MessagesChanged {
+            account: env.account,
+            folder: inbox
+        }]
+    );
 
     // UID 2 now names a different message (or none); it must not be fetched.
     env.fake.state().inbox().reset_uidvalidity(99);

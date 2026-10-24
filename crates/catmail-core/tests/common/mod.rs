@@ -4,11 +4,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use catmail_core::{
-    AccountId, Address, Config, Draft, DraftContent, DraftId, Event, Flags, Folder, MailClient,
-    MailClientBuilder, MemorySecrets, MessageId, MessageSummary, NewAccount, ReplayReport,
-    Security, ServerConfig, Verify,
+    AccountId, Address, Config, Draft, DraftContent, DraftId, Event, Flags, Folder, FolderId,
+    MailClient, MailClientBuilder, MemorySecrets, MessageId, MessageSummary, NewAccount,
+    ReplayReport, SearchQuery, Security, ServerConfig, Verify,
 };
-use catmail_testkit::{FakeImap, FakeSmtp, ServerState, SmtpState};
+use catmail_testkit::{FakeImap, FakeMailbox, FakeSmtp, ServerState, SmtpState};
 use tokio::runtime::Handle;
 
 /// Fake servers and a client with one account on them (alice@example.com, logging in
@@ -209,6 +209,13 @@ impl Env {
             .collect()
     }
 
+    /// The folders of the messages a search finds, newest first.
+    #[allow(dead_code)]
+    pub async fn search_folders(&self, text: &str) -> Vec<FolderId> {
+        let found = self.client.search(SearchQuery::new(text)).await.unwrap();
+        found.into_iter().map(|m| m.folder_id).collect()
+    }
+
     #[allow(dead_code)]
     pub async fn folder(&self, name: &str) -> Folder {
         self.client
@@ -230,6 +237,37 @@ impl Env {
             .iter()
             .map(|c| c.line.clone())
             .collect()
+    }
+}
+
+/// One message in INBOX, Important and All Mail, as Gmail shows its labels, and an empty
+/// Trash; All Mail is marked `\\All` only if `labels`.
+#[allow(dead_code)]
+pub fn labelled(labels: bool) -> ServerState {
+    let mut state = ServerState::new("alice", "pw");
+    state.inbox().append_simple("labelled");
+    let raw = state.inbox().messages[0].raw.clone();
+    let mut all = FakeMailbox::new("All Mail");
+    if labels {
+        all = all.with_attribute("\\All");
+    }
+    for mut mailbox in [all, FakeMailbox::new("Important")] {
+        mailbox.append(&raw, &[]);
+        state.mailboxes.push(mailbox);
+    }
+    state
+        .mailboxes
+        .push(FakeMailbox::new("Trash").with_attribute("\\Trash"));
+    state
+}
+
+/// What Gmail does on the server of [`labelled`] when the message is moved to Trash: it
+/// leaves its other labels too.
+#[allow(dead_code)]
+pub fn gmail_trashes(fake: &FakeImap) {
+    let mut state = fake.state();
+    for name in ["All Mail", "Important"] {
+        state.mailbox_mut(name).expunge(1);
     }
 }
 

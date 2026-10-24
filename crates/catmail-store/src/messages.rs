@@ -10,6 +10,7 @@ use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 use crate::Result;
 use crate::attachments::{Attachments, NewAttachment};
 use crate::columns::{id_list, json, parse_opt_text, to_id_list, to_json};
+use crate::folders::LABEL_ACCOUNTS;
 use crate::fts;
 use crate::ops::MOVING;
 
@@ -44,6 +45,15 @@ static LIST_OLDER: LazyLock<String> = LazyLock::new(|| {
          ORDER BY {NEWEST_FIRST} LIMIT :limit"
     )
 });
+
+/// Which of a message's copies (`m`, in folder `f`) a search shows, best first. One moved
+/// here locally is where the user last put it, and the server doesn't know yet. Then a
+/// folder the message is filed in (Trash too) before one that only gathers messages from
+/// the others (Starred, All Mail).
+const SEARCH_PICK: &str = "m.uid IS NOT NULL,
+    CASE f.role WHEN 'inbox' THEN 0 WHEN 'sent' THEN 1 WHEN 'drafts' THEN 2
+                WHEN 'archive' THEN 3 WHEN 'junk' THEN 5 WHEN 'trash' THEN 6
+                WHEN 'flagged' THEN 7 WHEN 'all' THEN 8 ELSE 4 END";
 
 /// `:after_date` and `:after_id`; without a cursor, before every row.
 fn cursor_params(cursor: Option<MessageCursor>) -> (i64, i64) {
@@ -93,7 +103,9 @@ pub struct MessageLocation {
     /// Where the message shows locally. For a message moved here and not yet on the
     /// server, the rest describes the folder it is moving from.
     pub folder: FolderId,
-    /// The name on the server of the folder that has the message.
+    /// The folder that has the message on the server.
+    pub server_folder: FolderId,
+    /// That folder's name on the server.
     pub remote_name: String,
     /// That folder's current UIDVALIDITY; `uid` is only meaningful within it.
     pub uidvalidity: Option<u32>,
@@ -267,6 +279,26 @@ impl<'c> Messages<'c> {
         Ok(deleted)
     }
 
+    /// Deletes the message the server no longer has at `location`, as a sync would, if
+    /// the row is still that (folder, UIDVALIDITY, UID) on the server. Not one moved
+    /// locally, whose location is where the move is from, nor one whose move was made
+    /// since `location` was looked up: it is in another folder now, though maybe under
+    /// the same UID and UIDVALIDITY. Returns whether it was deleted.
+    pub fn delete_gone(&self, location: &MessageLocation) -> Result<bool> {
+        let deleted = self.conn.execute(
+            "DELETE FROM messages
+             WHERE id = ?1 AND folder_id = ?2 AND uid = ?3
+               AND folder_id IN (SELECT id FROM folders WHERE uidvalidity = ?4)",
+            params![
+                location.id.0,
+                location.server_folder.0,
+                location.uid,
+                location.uidvalidity
+            ],
+        )?;
+        Ok(deleted > 0)
+    }
+
     /// Newest first (see [`MessageCursor`]): the first `limit`, or the `limit` after
     /// `after`.
     pub fn list(
@@ -306,15 +338,31 @@ impl<'c> Messages<'c> {
 
     /// Messages matching the query, newest first (see [`MessageCursor`]). Bodies are only searched once
     /// downloaded; subjects and addresses always.
+    ///
+    /// On an account with an `\All` mailbox (Gmail), folders are labels: one message is
+    /// in several of them at once, so its copies (by Message-ID) are one result, shown
+    /// from the folder [`SEARCH_PICK`] prefers. Elsewhere copies are separate messages.
     pub fn search(&self, query: &SearchQuery) -> Result<Vec<MessageSummary>> {
         let Some(expr) = fts::match_expression(&query.text) else {
             return Ok(Vec::new());
         };
+        // A copy is one result with the others: same Message-ID, or else itself (a TEXT
+        // Message-ID never equals an INTEGER id).
         let sql = format!(
             "SELECT {SUMMARY_COLUMNS} FROM messages
-             WHERE id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH :expr)
-               AND (:account IS NULL OR account_id = :account)
-               AND (:folder IS NULL OR folder_id = :folder) AND {AFTER}
+             WHERE id IN (
+                 SELECT id FROM (
+                     SELECT m.id, row_number() OVER (
+                         PARTITION BY m.account_id, coalesce(
+                             iif(m.account_id IN ({LABEL_ACCOUNTS}), m.message_id_hdr, NULL),
+                             m.id)
+                         ORDER BY {SEARCH_PICK}, m.id) AS n
+                     FROM messages m JOIN folders f ON f.id = m.folder_id
+                     WHERE m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH :expr)
+                       AND (:account IS NULL OR m.account_id = :account)
+                       AND (:folder IS NULL OR m.folder_id = :folder))
+                 WHERE n = 1)
+               AND {AFTER}
              ORDER BY {NEWEST_FIRST} LIMIT :limit"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
@@ -340,7 +388,7 @@ impl<'c> Messages<'c> {
             .conn
             .query_row(
                 &format!(
-                    "SELECT m.account_id, m.folder_id, f.remote_name,
+                    "SELECT m.account_id, m.folder_id, f.id, f.remote_name,
                             iif(o.id IS NULL, f.uidvalidity, o.uidvalidity),
                             coalesce(m.uid, o.uid), m.size, m.body_state = 'full',
                             b.raw_blob_hash
@@ -356,11 +404,12 @@ impl<'c> Messages<'c> {
                         id,
                         account: AccountId(r.get(0)?),
                         folder: FolderId(r.get(1)?),
-                        remote_name: r.get(2)?,
-                        uidvalidity: r.get(3)?,
-                        uid: r.get(4)?,
-                        size: r.get(5)?,
-                        downloaded: r.get(6)?,
+                        server_folder: FolderId(r.get(2)?),
+                        remote_name: r.get(3)?,
+                        uidvalidity: r.get(4)?,
+                        uid: r.get(5)?,
+                        size: r.get(6)?,
+                        downloaded: r.get(7)?,
                         raw: parse_opt_text(r, "raw_blob_hash")?,
                     })
                 },
@@ -520,7 +569,7 @@ fn summary_from_row(row: &Row<'_>) -> rusqlite::Result<MessageSummary> {
 mod tests {
     use std::collections::HashSet;
 
-    use catmail_types::Folder;
+    use catmail_types::{Folder, FolderRole};
 
     use super::*;
     use crate::Store;
@@ -1007,5 +1056,214 @@ mod tests {
         assert_eq!(run(Some(account), None), ["subject 1"]);
         assert_eq!(run(None, Some(other_folder)), ["subject 7"]);
         assert!(run(Some(account), Some(other_folder)).is_empty());
+    }
+
+    /// The account's folders by name, after creating them with these roles (and
+    /// UIDVALIDITY 1).
+    fn folders(
+        store: &Store,
+        account: AccountId,
+        roles: &[(&str, Option<FolderRole>)],
+    ) -> HashMap<String, FolderId> {
+        let remote: Vec<_> = roles
+            .iter()
+            .map(|&(name, role)| RemoteFolder {
+                remote_name: name.into(),
+                name: name.into(),
+                delimiter: None,
+                role,
+                selectable: true,
+            })
+            .collect();
+        store
+            .write(|db| {
+                db.folders().reconcile(account, &remote)?;
+                for folder in db.folders().list(account)? {
+                    db.folders().reset_uidvalidity(folder.id, 1)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let list = store.read(|db| db.folders().list(account)).unwrap();
+        list.into_iter().map(|f| (f.name, f.id)).collect()
+    }
+
+    /// A message dated by its UID, with this Message-ID.
+    fn copy(uid: u32, message_id: Option<&str>) -> NewMessage {
+        NewMessage {
+            message_id: message_id.map(Into::into),
+            ..message(uid, Some(uid as i64), Flags::empty())
+        }
+    }
+
+    #[test]
+    fn search_shows_label_copies_once() {
+        let store = test_util::store();
+        let gmail = test_util::account(&store, "a@gmail.com");
+        let g = folders(
+            &store,
+            gmail,
+            &[
+                ("INBOX", Some(FolderRole::Inbox)),
+                ("All Mail", Some(FolderRole::All)),
+                ("Important", None),
+                ("Trash", Some(FolderRole::Trash)),
+            ],
+        );
+        let other = test_util::account(&store, "b@example.com");
+        let o = folders(
+            &store,
+            other,
+            &[("INBOX", Some(FolderRole::Inbox)), ("Kept", None)],
+        );
+        let put = |account, folder: FolderId, messages: &[NewMessage]| {
+            store
+                .write(|db| db.messages().upsert(account, folder, messages))
+                .unwrap();
+        };
+        put(gmail, g["INBOX"], &[copy(10, Some("inbox"))]);
+        put(
+            gmail,
+            g["All Mail"],
+            &[
+                copy(10, Some("inbox")),
+                copy(20, Some("archived")),
+                copy(30, None),
+                copy(40, Some("trashed")),
+            ],
+        );
+        put(
+            gmail,
+            g["Important"],
+            &[
+                copy(10, Some("inbox")),
+                copy(20, Some("archived")),
+                copy(30, None),
+            ],
+        );
+        put(gmail, g["Trash"], &[copy(40, Some("trashed"))]);
+        put(other, o["INBOX"], &[copy(10, Some("inbox"))]);
+        put(other, o["Kept"], &[copy(10, Some("inbox"))]);
+
+        let names: HashMap<FolderId, &str> = g
+            .iter()
+            .chain(&o)
+            .map(|(name, &id)| (id, name.as_str()))
+            .collect();
+        // Every page of `limit`, as (subject, folder).
+        let run = |account, limit| {
+            let mut found = Vec::new();
+            let mut after = None;
+            loop {
+                let mut q = SearchQuery::new("alice");
+                (q.account, q.limit, q.after) = (Some(account), limit, after);
+                let page = store.read(|db| db.messages().search(&q)).unwrap();
+                let Some(last) = page.last() else {
+                    return found;
+                };
+                after = Some(last.cursor());
+                found.extend(
+                    page.iter()
+                        .map(|m| (m.subject.clone().unwrap(), names[&m.folder_id])),
+                );
+            }
+        };
+        let s = |uid: u32, folder| (format!("subject {uid}"), folder);
+        // Each once, from where it is filed. Without a Message-ID, copies can't be told
+        // from other messages.
+        let expected = [
+            s(40, "Trash"),
+            s(30, "Important"),
+            s(30, "All Mail"),
+            s(20, "Important"),
+            s(10, "INBOX"),
+        ];
+        assert_eq!(run(gmail, 50), expected);
+        assert_eq!(run(gmail, 1), expected);
+        // Elsewhere, copies in two folders are two messages.
+        assert_eq!(run(other, 50), [s(10, "Kept"), s(10, "INBOX")]);
+
+        // Moved locally, it shows where the user put it.
+        let inbox = store
+            .read(|db| db.messages().list(g["INBOX"], 1, None))
+            .unwrap();
+        store
+            .write(|db| db.ops().move_messages(&[inbox[0].id], g["Trash"], 0))
+            .unwrap();
+        assert_eq!(run(gmail, 50)[4], s(10, "Trash"));
+    }
+
+    #[test]
+    fn deletes_a_message_gone_from_the_server_only_if_unchanged() {
+        let store = test_util::store();
+        let account = test_util::account(&store, "a@example.com");
+        let f = folders(
+            &store,
+            account,
+            &[("INBOX", Some(FolderRole::Inbox)), ("Kept", None)],
+        );
+        store
+            .write(|db| {
+                db.messages()
+                    .upsert(account, f["INBOX"], &[copy(1, None), copy(2, None)])
+            })
+            .unwrap();
+        let ids: Vec<_> = store
+            .read(|db| db.messages().list(f["INBOX"], 2, None))
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        let location = |id| {
+            store
+                .read(|db| db.messages().location(id))
+                .unwrap()
+                .unwrap()
+        };
+        let delete = |location: &MessageLocation| {
+            store
+                .write(|db| db.messages().delete_gone(location))
+                .unwrap()
+        };
+
+        // Moved locally: its location is where it is moving from.
+        store
+            .write(|db| db.ops().move_messages(&[ids[1]], f["Kept"], 0))
+            .unwrap();
+        let moving = location(ids[1]);
+        assert!(!delete(&moving));
+        // The move made since, its new UID and UIDVALIDITY the same as where it was.
+        store
+            .write(|db| {
+                db.conn.execute(
+                    "UPDATE messages SET uid = ?2 WHERE id = ?1",
+                    params![ids[1].0, moving.uid],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(!delete(&moving));
+
+        let gone = location(ids[0]);
+        let stale = MessageLocation {
+            uidvalidity: Some(2),
+            ..gone.clone()
+        };
+        assert!(!delete(&stale));
+        assert!(delete(&gone));
+        assert!(!delete(&gone));
+        let left: Vec<_> = store
+            .read(|db| db.messages().list(f["Kept"], 5, None))
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(left, [ids[1]]);
+        assert!(
+            store
+                .read(|db| db.messages().list(f["INBOX"], 5, None))
+                .unwrap()
+                .is_empty()
+        );
     }
 }

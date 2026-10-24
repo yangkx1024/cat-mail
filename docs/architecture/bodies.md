@@ -95,7 +95,11 @@ base64 正文），交给 mail-parser 按同样方式解析。于是两条路径
 ## 正确性
 
 - 用 UID 之前先 EXAMINE 并比对 UIDVALIDITY；不一致或服务器已没有这封邮件时返回
-  `Error::OutOfSync`，交给下一次同步处理。
+  `Error::OutOfSync`，交给下一次同步处理。没有这封邮件时先用 `UID SEARCH UID <uid>` 确认（答复里只是
+  缺了某个部分不算），确认了就像同步那样删掉本地这一行（`Messages::delete_gone`，行仍在服务器上那个文件夹、
+  UIDVALIDITY 和 UID 才删：本地移动过来、还没移动的行不删；查位置之后移动才做成的也不删，它已经在
+  目标文件夹里，UID 和 UIDVALIDITY 可能碰巧相同）并发 `MessagesChanged`：否则它要留在列表和
+  搜索结果里，直到下次同步那个文件夹，每次打开都失败。
 - 写入时只检查邮件行是否还在：message id 不复用，UIDVALIDITY 变化会删除旧代际的行，所以行还在
   就说明它仍是下载开始时的那个（文件夹, UID）。
 - 正文、附件行、摘要、`has_attachments` 和全文索引在同一个事务里写入（`Messages::store_body`）；

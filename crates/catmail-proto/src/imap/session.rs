@@ -522,6 +522,14 @@ impl Session {
         Ok(uids)
     }
 
+    /// Those of `uids` the selected mailbox has, ascending.
+    pub async fn uid_search_uids(&mut self, uids: &[u32]) -> Result<Vec<u32>> {
+        let Some(set) = uid_set(uids) else {
+            return Ok(Vec::new());
+        };
+        self.uid_search(SearchKey::Uid(set)).await
+    }
+
     async fn uid_search(&mut self, key: SearchKey<'static>) -> Result<Vec<u32>> {
         if self.selected_exists()? == 0 {
             return Ok(Vec::new());

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use catmail_proto::imap::{ChangedFlags, FetchedMessage, ListedMailbox, MailboxStatus, Session};
-use catmail_store::{FolderSyncState, NewMessage, RemoteFolder};
+use catmail_store::{FolderSyncState, NewMessage, RemoteFolder, ReplayFolder};
 use catmail_types::{
     AccountId, Event, FolderId, FolderRole, FolderSyncReport, ReplayReport, SyncReport,
 };
@@ -211,6 +211,36 @@ async fn sync_reported(
         Err(e) => return Err(e),
     }
     Ok(report)
+}
+
+/// Deletes those of `uids` that `folder` no longer has, as a sync would, asking the
+/// server about these alone rather than the whole folder. Nothing if the folder has a new
+/// UIDVALIDITY: the sync starts the new generation. Call with the account's sync permit.
+pub(crate) async fn drop_vanished(
+    engine: &Arc<Engine>,
+    session: &mut Session,
+    account: AccountId,
+    folder: &ReplayFolder,
+    uids: &[u32],
+) -> Result<()> {
+    let status = session.examine(&folder.remote_name).await?;
+    if !status.same_generation(folder.uidvalidity) {
+        return Ok(());
+    }
+    let there = session.uid_search_uids(uids).await?;
+    let vanished = sorted_difference(uids, &there);
+    if vanished.is_empty() {
+        return Ok(());
+    }
+    let id = folder.id;
+    engine
+        .write(move |db| db.messages().delete_uids(id, &vanished))
+        .await?;
+    engine.emit(Event::MessagesChanged {
+        account,
+        folder: id,
+    });
+    Ok(())
 }
 
 /// A report on `folder` that says what replaying its queued changes did, and nothing else
