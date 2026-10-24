@@ -278,7 +278,8 @@ INBOX，所以打开一个文件夹时同步它（`MailClient::sync_folder`，�
   `Confirm`，`on_ok` 提交并返回 false；Esc 和 Cancel 是 `Cancel`，只关最上层的这个表单，进行中
   `on_cancel` 拒绝关闭。底部两个按钮各自派发 `Cancel` / `Confirm`，点击处理放在按钮本身，获得焦点时
   空格和 Enter 才能触发它们；对话框把 Enter 绑成 `Confirm`，会在按键按下时抢先，所以按钮带
-  `DialogButton` 键上下文，在那里把 Enter 绑成 `NoAction`，交还给按钮。表单要等对话框打开之后才把焦点
+  `DialogButton` 键上下文，在那里把 Enter 绑成 `NoAction`，交还给按钮。确认框（`layout::confirm_danger`）
+同理不用 `AlertDialog` 默认生成的按钮，自己给 footer，Cancel 和确认按钮带同样的上下文。表单要等对话框打开之后才把焦点
   放进 Email 字段：对话框记下打开时的焦点，关闭时还给它，先聚焦就会还给一个随表单消失的字段，
   再按 Esc 也关不掉设置。登录页不是对话框，任一字段按 Enter 提交靠 `login_form::submit_on_enter`。
 - 两个表单的提交流程也共用 `login_form::Submit`：进行中不重复提交、字段校验失败或登录失败显示在按钮

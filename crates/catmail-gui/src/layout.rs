@@ -2,7 +2,8 @@
 
 use std::rc::Rc;
 
-use gpui_kit::component::button::ButtonVariant;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::dialog::{Cancel, Confirm, DialogFooter};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, WindowExt as _, h_flex};
 use gpui_kit::{
     App, Bounds, Div, ElementId, FontWeight, Hsla, InteractiveElement as _, IntoElement,
@@ -10,6 +11,7 @@ use gpui_kit::{
     Styled as _, TitlebarOptions, Window, WindowBounds, WindowOptions, div, rems,
 };
 
+use crate::actions::DIALOG_BUTTON;
 use crate::assets::Hero;
 use crate::format;
 
@@ -111,10 +113,9 @@ pub fn attachment_chip(filename: impl Into<SharedString>, size: u64, cx: &App) -
         .child(div().text_xs().text_color(muted).child(format::size(size)))
 }
 
-/// The element id of the button that confirms [`confirm_danger`]: GPUI Kit's, for its
-/// alert dialog's OK.
-#[cfg(test)]
-pub const CONFIRM: &str = "ok";
+/// The element ids of the buttons that confirm and cancel [`confirm_danger`].
+pub const CONFIRM: &str = "confirm-ok";
+pub const CANCEL: &str = "confirm-cancel";
 
 /// Asks before something that can't be undone: `title` asks the question, `description`
 /// says what follows, and the red `ok` button does it with `on_ok`.
@@ -130,12 +131,23 @@ pub fn confirm_danger(
     let on_ok = Rc::new(on_ok);
     window.open_alert_dialog(cx, move |alert, _, _| {
         let on_ok = on_ok.clone();
+        // Buttons of our own, not GPUI Kit's: in the `DIALOG_BUTTON` context, Enter on a
+        // focused Cancel cancels instead of being the dialog's Confirm.
+        let cancel = Button::new(CANCEL)
+            .label("Cancel")
+            .key_context(DIALOG_BUTTON)
+            .on_click(|_, window, cx| window.dispatch_action(Box::new(Cancel), cx));
+        let confirm = Button::new(CONFIRM)
+            .label(ok)
+            .danger()
+            .key_context(DIALOG_BUTTON)
+            .on_click(|_, window, cx| {
+                window.dispatch_action(Box::new(Confirm { secondary: false }), cx)
+            });
         alert
             .title(title.clone())
             .description(description.clone())
-            .confirm()
-            .ok_text(ok)
-            .ok_variant(ButtonVariant::Danger)
+            .footer(DialogFooter::new().child(cancel).child(confirm))
             .on_ok(move |_, window, cx| {
                 on_ok(window, cx);
                 true
