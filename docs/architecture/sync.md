@@ -57,7 +57,7 @@ flags，重复的批次不产生重复行）。HIGHESTMODSEQ 用 EXAMINE 时刻�
   邮件的属性分在几条 FETCH 响应里时按 UID 合并（RFC 9051 允许）。
 - 无法解析的响应行默认让命令返回 `Incomplete`（见[连接层](protocol.md#连接层)）：LIST、SEARCH、
   EXAMINE、flags 的结果缺一行，就会被当成文件夹被删、邮件被删或 flags 没变。
-- 只有拉邮件头用 `execute_lossy`。一条 FETCH 解析失败通常是 imap-codec 不接受服务器的
+- 只有拉邮件头用 `execute_lossy`。一条 FETCH 解析失败通常是解析器不接受服务器的
   BODYSTRUCTURE，每次都会重现，所以缺失的 UID 立即再取一次、不带 BODYSTRUCTURE
   （`has_attachments` 先记为否，下载正文后重算）。仍然缺失的不出现在结果里，那一批算不完整、
   不推进游标。

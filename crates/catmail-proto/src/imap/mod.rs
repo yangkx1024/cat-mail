@@ -1,9 +1,11 @@
-//! IMAP client on top of `imap-next`.
+//! IMAP client: our own command encoding and connection driver, with responses parsed
+//! by `imap-proto`.
 
 mod body;
+mod command;
 mod connection;
 mod error;
-mod quirks;
+mod framing;
 mod session;
 mod types;
 pub mod utf7;

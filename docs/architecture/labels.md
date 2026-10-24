@@ -159,7 +159,8 @@
 
 1. ~~记下决定（本文、[IMAP 库](protocol.md#imap-库)、AGENTS.md）。~~
 2. ~~用真实 Gmail 验证上面几点，同时试用 imap-proto。~~
-3. 协议层改用 imap-proto，`Session` 的接口不变，现有的假服务器和 Dovecot 测试做回归。
+3. ~~协议层改用 imap-proto，`Session` 的接口不变，现有的假服务器和 Dovecot 测试做回归。~~ imap-proto 暂时来自
+   main，0.18.0 发版后换成 crates.io 的版本（见 [IMAP 库](protocol.md#imap-库)）。
 4. 存储与同步：`folders.kind` / `listed`、`message_labels`、`gm_msgid` / `gm_thrid`、账户的模式；假服务器
    支持 `X-GM-EXT-1`。CI 里没有真的 Gmail，与真实服务器的行为只能手动验证。
 5. 操作队列：标签操作、动作到操作的映射；删除按 Message-ID 找副本的机制。

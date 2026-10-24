@@ -3,15 +3,6 @@
 version = 4
 
 [[package]]
-name = "abnf-core"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "512117e495e0f6e9b5f0511b344d8e98b0bb77347a2f25ee65e59eacf5f83a9d"
-dependencies = [
- "nom 7.1.3",
-]
-
-[[package]]
 name = "accesskit"
 version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -993,23 +984,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bounded-static"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0beb903daa49b43bcafb5d5eebe633f9ad638d8b16cd08f95fb05ee7bd099321"
-
-[[package]]
-name = "bounded-static-derive"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0af050e27e5d57aa14975f97fe47a134c46a390f91819f23a625319a7111bfa"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "bstr"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1178,10 +1152,10 @@ dependencies = [
  "catmail-types",
  "cssparser",
  "html5ever 0.40.1",
- "imap-next",
+ "imap-proto",
+ "jiff",
  "mail-builder",
  "mail-parser",
- "nom 7.1.3",
  "reqwest",
  "rustls",
  "rustls-platform-verifier",
@@ -4461,41 +4435,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09e54e57b4c48b40f7aec75635392b12b3421fa26fe8b4332e63138ed278459c"
 
 [[package]]
-name = "imap-codec"
-version = "2.0.0-alpha.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d97d123085ef99031a01544307235eb189ecf23df66e37c41a046e3d6614b9f"
+name = "imap-proto"
+version = "0.18.0"
+source = "git+https://github.com/djc/imap-proto?rev=0dac3af59a2cfcd649c30034d5f221c4d8edbf34#0dac3af59a2cfcd649c30034d5f221c4d8edbf34"
 dependencies = [
- "abnf-core",
- "base64 0.22.1",
- "chrono",
- "imap-types",
- "log",
- "nom 7.1.3",
-]
-
-[[package]]
-name = "imap-next"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d88dafacf7bec8e7f4baad4518232144beadfa9b4ea3de4911f879ce74b7316a"
-dependencies = [
- "imap-codec",
- "thiserror 2.0.21",
- "tracing",
-]
-
-[[package]]
-name = "imap-types"
-version = "2.0.0-alpha.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15aa08dfdb68ab0aa77bf3de6de5217bfcae4893f33573c8625be183fca621c8"
-dependencies = [
- "base64 0.22.1",
- "bounded-static",
- "bounded-static-derive",
- "chrono",
- "thiserror 2.0.21",
+ "nom 8.0.0",
 ]
 
 [[package]]

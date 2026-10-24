@@ -15,7 +15,7 @@
 | Facade | `catmail-core` | `MailClient`：async 方法 + 事件订阅，前端唯一依赖 |
 | Services / Engine | `catmail-core` | 同步、后台同步（IDLE）、操作队列回放、按需下载、Outbox；每账户状态；运行时桥接；凭据 |
 | Storage | `catmail-store` | SQLite schema 与迁移、事务化 Repository、FTS5、内容寻址 `BlobStore`；全部同步 API |
-| Protocol | `catmail-proto` | IMAP（imap-next，将改为 imap-proto 解析响应）、SMTP（自己实现）、MIME 解析（mail-parser）与构建（mail-builder）、HTML 清洗、远程图片的 HTTP 下载（reqwest） |
+| Protocol | `catmail-proto` | IMAP（自己的命令编码与连接驱动，imap-proto 解析响应）、SMTP（自己实现）、MIME 解析（mail-parser）与构建（mail-builder）、HTML 清洗、远程图片的 HTTP 下载（reqwest） |
 | Domain | `catmail-types` | `Account`、`Folder`、`MessageSummary`、`Flags`、`Event`、ID 类型；纯数据，无 IO |
 
 依赖方向 `types ← store, proto ← core ← cli / gui`：store 与 proto 并列、互不依赖；前端不直接

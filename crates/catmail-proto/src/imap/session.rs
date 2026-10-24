@@ -1,24 +1,18 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
-use std::num::{NonZeroU32, NonZeroU64};
 use std::ops::RangeInclusive;
 use std::time::Duration;
 
 use catmail_types::{FlagState, Flags, FolderRole, Security, ServerConfig};
-use imap_next::imap_types::auth::AuthMechanism;
-use imap_next::imap_types::command::{CommandBody, FetchModifier, SelectParameter};
-use imap_next::imap_types::core::{AString, Vec1};
-use imap_next::imap_types::extensions::uidplus::{UidElement, UidSet};
-use imap_next::imap_types::fetch::{MessageDataItem, MessageDataItemName, Part, Section};
-use imap_next::imap_types::flag::{Flag, FlagFetch, StoreResponse, StoreType};
-use imap_next::imap_types::mailbox::{ListMailbox, Mailbox};
-use imap_next::imap_types::response::{Code, Data, GreetingKind};
-use imap_next::imap_types::search::SearchKey;
-use imap_next::imap_types::sequence::{Sequence, SequenceSet};
-use imap_next::imap_types::status::{StatusDataItem, StatusDataItemName};
+use imap_proto::rfc4315::UidSetMember;
+use imap_proto::{
+    AttributeValue, Capability, MailboxDatum, NameAttribute, ResponseCode, SectionPath, Status,
+    StatusAttribute,
+};
 use secrecy::ExposeSecret;
 
-use super::connection::{Connection, Response};
+use super::command::{Command, Literals};
+use super::connection::{Code, Connection, Data, Response};
 use super::{
     Capabilities, ChangedFlags, Error, FetchedMessage, ListedMailbox, MailboxStatus, Result, utf7,
 };
@@ -60,20 +54,22 @@ impl Session {
         timeout: Duration,
     ) -> Result<Self> {
         let (stream, server_name) = net::connect(server, tls, timeout).await?;
-        let mut conn = Connection::new(stream, true, timeout);
+        let mut conn = Connection::new(stream, timeout);
         let greeting = conn.greeting().await?;
         let mut caps = match greeting.code {
-            Some(Code::Capability(caps)) => capabilities(caps.as_ref()),
+            Some(Code::Known(ResponseCode::Capabilities(caps))) => capabilities(&caps),
             _ => Capabilities::default(),
         };
-        let authenticated = match greeting.kind {
-            GreetingKind::Ok => false,
-            GreetingKind::Bye => return Err(Error::Rejected(greeting.text.to_string())),
+        let authenticated = match greeting.status {
+            Status::Ok => false,
             // Already authenticated, so STARTTLS is no longer possible.
-            GreetingKind::PreAuth if server.security == Security::StartTls => {
+            Status::PreAuth if server.security == Security::StartTls => {
                 return Err(Error::Unsupported("STARTTLS (server sent PREAUTH)"));
             }
-            GreetingKind::PreAuth => true,
+            Status::PreAuth => true,
+            Status::Bye | Status::No | Status::Bad => {
+                return Err(Error::Rejected(greeting.text));
+            }
         };
 
         if server.security == Security::StartTls {
@@ -83,27 +79,41 @@ impl Session {
             if !caps.has("STARTTLS") {
                 return Err(Error::Unsupported("STARTTLS"));
             }
-            conn.execute(CommandBody::StartTLS).await?;
+            conn.execute(Command::new("STARTTLS")).await?;
             let tls_stream = net::start_tls(conn.into_stream(), &server_name, tls, timeout).await?;
-            conn = Connection::new(Box::new(tls_stream), false, timeout);
+            // The TLS session has no greeting.
+            conn = Connection::new(Box::new(tls_stream), timeout);
             // Anything learned before TLS may have been tampered with.
             caps = Capabilities::default();
         }
         if caps.is_empty() {
             caps = request_capabilities(&mut conn).await?;
         }
-        Ok(Self {
+        let mut session = Self {
             conn,
-            caps,
+            caps: Capabilities::default(),
             authenticated,
             selected: None,
             writable: false,
             changed_flags: ChangedFlags::default(),
-        })
+        };
+        session.set_capabilities(caps);
+        Ok(session)
     }
 
     pub fn capabilities(&self) -> &Capabilities {
         &self.caps
+    }
+
+    fn set_capabilities(&mut self, caps: Capabilities) {
+        self.conn.set_literals(if caps.has("LITERAL+") {
+            Literals::NonSynchronizing
+        } else if caps.has("LITERAL-") {
+            Literals::NonSynchronizingUpTo4k
+        } else {
+            Literals::Synchronizing
+        });
+        self.caps = caps;
     }
 
     /// Authenticates, unless the server already did so with a PREAUTH greeting.
@@ -113,28 +123,26 @@ impl Session {
         }
         let response = if self.caps.has("AUTH=PLAIN") {
             self.conn
-                .authenticate(AuthMechanism::Plain, credentials.sasl_plain())
+                .authenticate("PLAIN", credentials.sasl_plain())
                 .await?
         } else if self.caps.has("LOGINDISABLED") {
             return Err(Error::Unsupported("a password login mechanism"));
         } else {
-            let body = CommandBody::login(
-                credentials.username.clone(),
-                credentials.password.expose_secret().to_owned(),
-            )
-            .map_err(|_| {
-                Error::AuthFailed("username or password contains a NUL or line break".into())
-            })?;
-            self.conn.execute(body).await.map_err(|e| match e {
+            let command = Command::new("LOGIN")
+                .astring(credentials.username.as_bytes())
+                .and_then(|c| c.astring(credentials.password.expose_secret().as_bytes()))
+                .map_err(|_| Error::AuthFailed("username or password contains a NUL".into()))?;
+            self.conn.execute(command).await.map_err(|e| match e {
                 Error::Command { text, .. } => Error::AuthFailed(text),
                 other => other,
             })?
         };
         // Capabilities usually change after login; servers often include them in the OK.
-        self.caps = match capabilities_in(&response) {
+        let caps = match capabilities_in(&response) {
             Some(caps) => caps,
             None => request_capabilities(&mut self.conn).await?,
         };
+        self.set_capabilities(caps);
         self.authenticated = true;
         Ok(())
     }
@@ -143,42 +151,29 @@ impl Session {
     /// all: it was cut short or mangled, and the mailboxes it leaves out must not be
     /// taken for deleted ones.
     pub async fn list(&mut self) -> Result<Vec<ListedMailbox>> {
-        let body = CommandBody::list("", ListMailbox::try_from("*").expect("valid wildcard"))
-            .expect("valid LIST arguments");
-        let response = self.conn.execute(body).await?;
+        let response = self
+            .conn
+            .execute(Command::new("LIST").raw("\"\" \"*\""))
+            .await?;
         let mut mailboxes = Vec::new();
         for data in response.data {
-            let Data::List {
-                items,
-                delimiter,
-                mailbox,
-            } = data
-            else {
+            let Data::MailboxData(MailboxDatum::List(list)) = data else {
                 continue;
             };
-            let raw_name = match mailbox {
-                Mailbox::Inbox => "INBOX".to_owned(),
-                Mailbox::Other(other) => match std::str::from_utf8(other.inner().as_ref()) {
-                    Ok(name) => name.to_owned(),
-                    Err(_) => {
-                        tracing::warn!("skipping mailbox with a non-UTF-8 name");
-                        continue;
-                    }
-                },
+            // INBOX is case-insensitive; the other names are as the server spells them.
+            let raw_name = if list.name.eq_ignore_ascii_case("INBOX") {
+                "INBOX".to_owned()
+            } else {
+                list.name.into_owned()
             };
-            let attributes: Vec<String> = items
-                .iter()
-                .map(|attr| attr.to_string().to_ascii_lowercase())
-                .collect();
-            let selectable = !attributes
-                .iter()
-                .any(|a| a == "\\noselect" || a == "\\nonexistent");
+            let selectable = selectable(&list.name_attributes);
+            let special_use = list.name_attributes.iter().find_map(special_use);
             mailboxes.push(ListedMailbox {
                 name: utf7::decode(&raw_name).unwrap_or_else(|| raw_name.clone()),
                 raw_name,
-                delimiter: delimiter.map(|d| d.inner()),
+                delimiter: list.delimiter.and_then(|d| d.chars().next()),
                 selectable,
-                special_use: attributes.iter().find_map(|a| special_use(a)),
+                special_use,
             });
         }
         if !mailboxes.iter().any(|m| m.raw_name == "INBOX") && self.has_inbox().await? {
@@ -190,13 +185,12 @@ impl Session {
     /// RFC 3501 §6.3.8 lists INBOX unless the user has none, which is when selecting it
     /// fails. Asks the server that way, read-only. Leaves no mailbox selected.
     async fn has_inbox(&mut self) -> Result<bool> {
-        self.selected = None;
-        self.changed_flags = ChangedFlags::default();
-        let examine = CommandBody::Examine {
-            mailbox: Mailbox::Inbox,
-            parameters: Vec::new(),
-        };
-        match self.conn.execute(examine).await {
+        self.deselect();
+        match self
+            .conn
+            .execute(Command::new("EXAMINE").raw("INBOX"))
+            .await
+        {
             Ok(_) => Ok(true),
             Err(Error::Command { .. }) => Ok(false),
             Err(e) => Err(e),
@@ -216,36 +210,22 @@ impl Session {
     }
 
     async fn open(&mut self, raw_name: &str, writable: bool) -> Result<MailboxStatus> {
-        self.selected = None;
-        self.changed_flags = ChangedFlags::default();
-        let mailbox = mailbox(raw_name)?;
-        let parameters = if self.condstore() {
-            vec![SelectParameter::CondStore]
-        } else {
-            Vec::new()
-        };
-        let body = if writable {
-            CommandBody::Select {
-                mailbox,
-                parameters,
-            }
-        } else {
-            CommandBody::Examine {
-                mailbox,
-                parameters,
-            }
-        };
-        let command = body.name();
+        self.deselect();
+        let command = if writable { "SELECT" } else { "EXAMINE" };
+        let mut body = Command::new(command).astring(raw_name.as_bytes())?;
+        if self.condstore() {
+            body = body.raw("(CONDSTORE)");
+        }
         let response = self.conn.execute(body).await?;
 
         let (mut uidvalidity, mut uidnext, mut highest_modseq, mut no_modseq) =
             (None, None, None, false);
         for code in &response.codes {
             match code {
-                Code::UidValidity(v) => uidvalidity = Some(v.get()),
-                Code::UidNext(n) => uidnext = Some(n.get()),
-                Code::HighestModSeq(m) => highest_modseq = Some(m.get()),
-                Code::NoModSeq => no_modseq = true,
+                Code::Known(ResponseCode::UidValidity(v)) => uidvalidity = Some(*v),
+                Code::Known(ResponseCode::UidNext(n)) => uidnext = Some(*n),
+                Code::Known(ResponseCode::HighestModSeq(m)) => highest_modseq = Some(*m),
+                Code::Other(name) if name == "NOMODSEQ" => no_modseq = true,
                 _ => {}
             }
         }
@@ -255,7 +235,7 @@ impl Session {
             .data
             .iter()
             .filter_map(|d| match d {
-                Data::Exists(n) => Some(*n),
+                Data::MailboxData(MailboxDatum::Exists(n)) => Some(*n),
                 _ => None,
             })
             .next_back();
@@ -324,12 +304,7 @@ impl Session {
         let Some(set) = uid_set(&seqs) else {
             return Ok(());
         };
-        let fetch = CommandBody::Fetch {
-            sequence_set: set,
-            macro_or_item_names: vec![MessageDataItemName::Uid].into(),
-            uid: false,
-            modifiers: Vec::new(),
-        };
+        let fetch = Command::new("FETCH").raw(&set).raw("(UID)");
         match self.conn.execute(fetch).await {
             Ok(response) => {
                 let uids = group_fetches(response, |_| true).into_keys().collect();
@@ -349,19 +324,15 @@ impl Session {
         let Some(set) = uid_set(uids) else {
             return Ok(());
         };
-        for (kind, flags) in [(StoreType::Add, add), (StoreType::Remove, remove)] {
+        for (kind, flags) in [("+FLAGS.SILENT", add), ("-FLAGS.SILENT", remove)] {
             if flags.is_empty() {
                 continue;
             }
-            self.change(CommandBody::Store {
-                sequence_set: set.clone(),
-                kind,
-                response: StoreResponse::Silent,
-                flags: system_flags(flags),
-                uid: true,
-                modifiers: Vec::new(),
-            })
-            .await?;
+            let store = Command::new("UID STORE")
+                .raw(&set)
+                .raw(kind)
+                .raw(&format!("({})", system_flags(flags)));
+            self.change(store).await?;
         }
         Ok(())
     }
@@ -374,20 +345,19 @@ impl Session {
     /// UIDVALIDITY and UIDNEXT of `raw_name`, without opening it (STATUS); not for the
     /// selected mailbox.
     pub async fn status(&mut self, raw_name: &str) -> Result<(u32, u32)> {
-        let body = CommandBody::Status {
-            mailbox: mailbox(raw_name)?,
-            item_names: vec![StatusDataItemName::UidValidity, StatusDataItemName::UidNext].into(),
-        };
-        let response = self.conn.execute(body).await?;
+        let command = Command::new("STATUS")
+            .astring(raw_name.as_bytes())?
+            .raw("(UIDVALIDITY UIDNEXT)");
+        let response = self.conn.execute(command).await?;
         let (mut uidvalidity, mut uidnext) = (None, None);
         for data in &response.data {
-            let Data::Status { items, .. } = data else {
+            let Data::MailboxData(MailboxDatum::Status { status, .. }) = data else {
                 continue;
             };
-            for item in items.iter() {
+            for item in status {
                 match item {
-                    StatusDataItem::UidValidity(v) => uidvalidity = Some(v.get()),
-                    StatusDataItem::UidNext(n) => uidnext = Some(n.get()),
+                    StatusAttribute::UidValidity(v) => uidvalidity = Some(*v),
+                    StatusAttribute::UidNext(n) => uidnext = Some(*n),
                     _ => {}
                 }
             }
@@ -405,39 +375,26 @@ impl Session {
         if !self.can_move() {
             return Err(Error::Unsupported("MOVE"));
         }
-        self.copy_or_move(uids, to, true).await
+        self.copy_or_move(uids, to, "UID MOVE").await
     }
 
     /// Copies messages of the selected mailbox to `to`; with [`uid_delete`](Self::uid_delete)
     /// a move for servers without MOVE. Unlike a move, a copy repeated after its answer
     /// was lost makes a second one. Returns where they went if the server says (UIDPLUS).
     pub async fn uid_copy(&mut self, uids: &[u32], to: &str) -> Result<Option<CopyUid>> {
-        self.copy_or_move(uids, to, false).await
+        self.copy_or_move(uids, to, "UID COPY").await
     }
 
     async fn copy_or_move(
         &mut self,
         uids: &[u32],
         to: &str,
-        r#move: bool,
+        command: &'static str,
     ) -> Result<Option<CopyUid>> {
-        let Some(sequence_set) = uid_set(uids) else {
+        let Some(set) = uid_set(uids) else {
             return Ok(None);
         };
-        let mailbox = mailbox(to)?;
-        let body = if r#move {
-            CommandBody::Move {
-                sequence_set,
-                mailbox,
-                uid: true,
-            }
-        } else {
-            CommandBody::Copy {
-                sequence_set,
-                mailbox,
-                uid: true,
-            }
-        };
+        let body = Command::new(command).raw(&set).astring(to.as_bytes())?;
         Ok(copy_uid(&self.change(body).await?, uids.len()))
     }
 
@@ -446,50 +403,51 @@ impl Session {
     /// any other message someone marked `\Deleted` in this mailbox; as in every client,
     /// that is what the mark asks for.
     pub async fn uid_delete(&mut self, uids: &[u32]) -> Result<()> {
-        let Some(sequence_set) = uid_set(uids) else {
+        let Some(set) = uid_set(uids) else {
             return Ok(());
         };
         self.uid_store(uids, Flags::DELETED, Flags::empty()).await?;
         let expunge = if self.caps.has("UIDPLUS") {
-            CommandBody::ExpungeUid { sequence_set }
+            Command::new("UID EXPUNGE").raw(&set)
         } else {
-            CommandBody::Expunge
+            Command::new("EXPUNGE")
         };
         self.change(expunge).await?;
         Ok(())
     }
 
     /// Runs a command that changes the selected mailbox. Its answer only matters for
-    /// the status and COPYUID, so an unparsable line (an unsolicited FETCH, say) doesn't
-    /// fail it: that would make a change that happened look refused.
-    async fn change(&mut self, body: CommandBody<'static>) -> Result<Response> {
+    /// the status and COPYUID, so an unparsable response (an unsolicited FETCH, say)
+    /// doesn't fail it: that would make a change that happened look refused.
+    async fn change(&mut self, command: Command) -> Result<Response> {
         if !self.writable {
             return Err(Error::Protocol(format!(
                 "{} needs a mailbox opened with SELECT",
-                body.name()
+                command.name
             )));
         }
-        self.conn.execute_lossy(body).await
+        self.conn.execute_lossy(command).await
     }
 
     /// Adds `message` to the mailbox `raw_name`. Returns its UIDVALIDITY and UID if the
-    /// server says (UIDPLUS).
+    /// server says (UIDPLUS). A server that refuses it before taking the message ends the
+    /// command all the same: that is a refusal like any other.
     pub async fn append(
         &mut self,
         raw_name: &str,
         flags: Flags,
         message: &[u8],
     ) -> Result<Option<(u32, u32)>> {
-        let body = CommandBody::append(
-            raw_name.to_owned(),
-            system_flags(flags),
-            None,
-            message.to_vec(),
-        )
-        .map_err(|e| Error::InvalidInput(format!("can't APPEND to `{raw_name}`: {e:?}")))?;
-        let response = self.conn.execute(body).await?;
+        let mut command = Command::new("APPEND").astring(raw_name.as_bytes())?;
+        if !flags.is_empty() {
+            command = command.raw(&format!("({})", system_flags(flags)));
+        }
+        let command = command.literal(message)?;
+        let response = self.conn.execute(command).await?;
         Ok(response.codes.iter().find_map(|code| match code {
-            Code::AppendUid { uid_validity, uid } => Some((uid_validity.get(), uid.get())),
+            Code::Known(ResponseCode::AppendUid(uidvalidity, uids)) => {
+                expand(uids).next().map(|uid| (*uidvalidity, uid))
+            }
             _ => None,
         }))
     }
@@ -497,28 +455,27 @@ impl Session {
     /// UIDs of messages in the selected mailbox with this Message-ID (without angle
     /// brackets), ascending.
     pub async fn uid_search_message_id(&mut self, message_id: &str) -> Result<Vec<u32>> {
-        let key = SearchKey::Header(
-            AString::try_from("Message-ID").expect("valid header name"),
-            AString::try_from(format!("<{message_id}>"))
-                .map_err(|_| Error::Protocol(format!("invalid Message-ID `{message_id}`")))?,
-        );
-        self.uid_search(key).await
+        let search = Command::new("UID SEARCH")
+            .raw("HEADER Message-ID")
+            .string(format!("<{message_id}>").as_bytes())
+            .map_err(|_| Error::Protocol(format!("invalid Message-ID `{message_id}`")))?;
+        self.uid_search(search).await
     }
 
     /// Every UID in the selected mailbox, ascending.
     pub async fn uid_search_all(&mut self) -> Result<Vec<u32>> {
-        self.uid_search(SearchKey::All).await
+        self.uid_search(Command::new("UID SEARCH").raw("ALL")).await
     }
 
     /// UIDs from `first` on, ascending. (`first:*` also matches the highest UID when that
     /// is below `first`; such a UID is not returned.)
     pub async fn uid_search_from(&mut self, first: u32) -> Result<Vec<u32>> {
-        let Some(first) = NonZeroU32::new(first) else {
+        if first == 0 {
             return self.uid_search_all().await;
-        };
-        let set = SequenceSet::from(Sequence::from(first..));
-        let mut uids = self.uid_search(SearchKey::Uid(set)).await?;
-        uids.retain(|&uid| uid >= first.get());
+        }
+        let search = Command::new("UID SEARCH").raw(&format!("UID {first}:*"));
+        let mut uids = self.uid_search(search).await?;
+        uids.retain(|&uid| uid >= first);
         Ok(uids)
     }
 
@@ -527,26 +484,24 @@ impl Session {
         let Some(set) = uid_set(uids) else {
             return Ok(Vec::new());
         };
-        self.uid_search(SearchKey::Uid(set)).await
+        self.uid_search(Command::new("UID SEARCH").raw("UID").raw(&set))
+            .await
     }
 
-    async fn uid_search(&mut self, key: SearchKey<'static>) -> Result<Vec<u32>> {
+    async fn uid_search(&mut self, search: Command) -> Result<Vec<u32>> {
         if self.selected_exists()? == 0 {
             return Ok(Vec::new());
         }
-        let response = self
-            .conn
-            .execute(CommandBody::search(None, Vec1::from(key), true))
-            .await?;
+        let response = self.conn.execute(search).await?;
         let mut uids: Vec<u32> = response
             .data
             .into_iter()
             .filter_map(|d| match d {
-                Data::Search(uids, ..) => Some(uids),
+                Data::MailboxData(MailboxDatum::Search(uids)) => Some(uids),
                 _ => None,
             })
             .flatten()
-            .map(NonZeroU32::get)
+            .filter(|&uid| uid != 0)
             .collect();
         uids.sort_unstable();
         uids.dedup();
@@ -559,10 +514,10 @@ impl Session {
     /// are ignored.
     pub async fn fetch_summaries(&mut self, uids: &[u32]) -> Result<Vec<FetchedMessage>> {
         let (mut fetched, skipped) = self.fetch_summaries_once(uids, true).await?;
-        // A FETCH line that can't be parsed is lost whole, typically because of a
-        // BODYSTRUCTURE the parser rejects. Without asking for it again, such a message
-        // is never stored and the folder never gets a complete sync. Attachment presence
-        // is then unknown until the body is downloaded, which doesn't depend on it.
+        // A BODYSTRUCTURE the parser rejects loses the message's answer, whole or just
+        // that item. Without asking for it again, such a message is never stored and the
+        // folder never gets a complete sync. Attachment presence is then unknown until the
+        // body is downloaded, which doesn't depend on it.
         if skipped > 0 {
             let got: HashSet<u32> = fetched.iter().map(|m| m.state.uid).collect();
             let missing: Vec<u32> = uids.iter().copied().filter(|u| !got.contains(u)).collect();
@@ -571,7 +526,7 @@ impl Session {
         Ok(fetched)
     }
 
-    /// The summaries, and how many response lines couldn't be parsed.
+    /// The summaries, and how many responses or BODYSTRUCTUREs couldn't be parsed.
     async fn fetch_summaries_once(
         &mut self,
         uids: &[u32],
@@ -580,48 +535,44 @@ impl Session {
         let Some(set) = uid_set(uids) else {
             return Ok((Vec::new(), 0));
         };
-        let mut items = vec![
-            MessageDataItemName::Uid,
-            MessageDataItemName::Flags,
-            MessageDataItemName::InternalDate,
-            MessageDataItemName::Rfc822Size,
-            body_peek(Some(Section::HeaderFields(
-                None,
-                Vec1::try_from(
-                    SUMMARY_HEADER_FIELDS
-                        .iter()
-                        .map(|f| AString::try_from(*f).expect("valid header field name"))
-                        .collect::<Vec<_>>(),
-                )
-                .expect("non-empty field list"),
-            ))),
-        ];
+        let mut items = format!(
+            "UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS ({})]",
+            SUMMARY_HEADER_FIELDS.join(" ")
+        );
         if structure {
-            items.push(MessageDataItemName::BodyStructure);
+            items.push_str(" BODYSTRUCTURE");
         }
         if self.modseq_enabled() {
-            items.push(MessageDataItemName::ModSeq);
+            items.push_str(" MODSEQ");
         }
         // Lossy: a message whose answer can't be parsed is just missing, and the caller
         // notices the gap.
-        let response = self
-            .conn
-            .execute_lossy(uid_fetch(set, items, Vec::new()))
-            .await?;
+        let response = self.conn.execute_lossy(uid_fetch(&set, &items)).await?;
 
-        let skipped = response.skipped;
+        let mut skipped = response.skipped;
         let wanted: HashSet<u32> = uids.iter().copied().collect();
         let fetched = merge_fetches(response, |uid| wanted.contains(&uid))
             .into_iter()
             .filter_map(|(uid, m)| {
+                // Asked for, so missing only if it couldn't be parsed (imap-proto reads a
+                // malformed item as one it doesn't know).
+                let has_attachments = match m.has_attachments {
+                    Some(has) => has,
+                    None if structure => {
+                        skipped += 1;
+                        return None;
+                    }
+                    None => false,
+                };
                 // Without FLAGS or the headers the message would be stored wrongly;
-                // leave it out so the caller sees the gap.
+                // leave it out so the caller sees the gap. INTERNALDATE and RFC822.SIZE
+                // may go without.
                 Some(FetchedMessage {
                     state: m.state(uid)?,
                     internal_date: m.internal_date,
                     size: m.size,
                     headers: *m.headers?,
-                    has_attachments: m.has_attachments,
+                    has_attachments,
                 })
             })
             .collect();
@@ -642,27 +593,33 @@ impl Session {
         if self.selected_exists()? == 0 {
             return Ok(Vec::new());
         }
-        let mut items = vec![MessageDataItemName::Uid, MessageDataItemName::Flags];
-        let mut modifiers = Vec::new();
-        if self.modseq_enabled() {
-            items.push(MessageDataItemName::ModSeq);
-            if let Some(since) = changed_since.and_then(NonZeroU64::new) {
-                modifiers.push(FetchModifier::ChangedSince(since));
-            }
+        let modseq = self.modseq_enabled();
+        let mut command = uid_fetch(
+            &set,
+            if modseq {
+                "UID FLAGS MODSEQ"
+            } else {
+                "UID FLAGS"
+            },
+        );
+        if let Some(since) = changed_since.filter(|&s| modseq && s > 0) {
+            command = command.raw(&format!("(CHANGEDSINCE {since})"));
         }
         // Strict: a lost line would hide a flag change for good once the caller stores
         // the new HIGHESTMODSEQ.
-        let response = self.conn.execute(uid_fetch(set, items, modifiers)).await?;
+        let response = self.conn.execute(command).await?;
 
         // Some servers answer a range above the highest UID with that one, as for `n:*`.
         let wanted = |uid| {
             let i = uids.partition_point(|r| *r.end() < uid);
             uids.get(i).is_some_and(|r| r.contains(&uid))
         };
-        Ok(merge_fetches(response, wanted)
+        // Every message answered for has its FLAGS: missing, they couldn't be parsed, and
+        // a lost change would stay lost once the caller stores the new HIGHESTMODSEQ.
+        merge_fetches(response, wanted)
             .into_iter()
-            .filter_map(|(uid, m)| m.state(uid))
-            .collect())
+            .map(|(uid, m)| m.state(uid).ok_or(INCOMPLETE_FETCH))
+            .collect()
     }
 
     /// RFC822.SIZE of the messages of the selected mailbox with these UIDs; ones it
@@ -671,44 +628,39 @@ impl Session {
         let Some(set) = uid_set(uids) else {
             return Ok(HashMap::new());
         };
-        let items = vec![MessageDataItemName::Uid, MessageDataItemName::Rfc822Size];
-        let response = self.conn.execute(uid_fetch(set, items, Vec::new())).await?;
+        let response = self
+            .conn
+            .execute(uid_fetch(&set, "UID RFC822.SIZE"))
+            .await?;
         let wanted: HashSet<u32> = uids.iter().copied().collect();
-        Ok(merge_fetches(response, |uid| wanted.contains(&uid))
+        merge_fetches(response, |uid| wanted.contains(&uid))
             .into_iter()
-            .filter_map(|(uid, m)| Some((uid, m.size?)))
-            .collect())
+            .map(|(uid, m)| Ok((uid, m.size.ok_or(INCOMPLETE_FETCH)?)))
+            .collect()
     }
 
     /// The whole raw message, or `None` if the selected mailbox has no message with
     /// this UID (any more).
     pub async fn fetch_raw(&mut self, uid: u32) -> Result<Option<Vec<u8>>> {
-        let Some(items) = self.fetch_one(uid, vec![body_peek(None)]).await? else {
-            return Ok(None);
-        };
-        Ok(items.into_iter().find_map(|item| match item {
-            MessageDataItem::BodyExt {
+        let items = self.fetch_one(uid, "BODY.PEEK[]").await?;
+        let data = requested(items, |item| match item {
+            AttributeValue::BodySection {
                 section: None,
                 data,
                 ..
-            } => data.0.map(|d| d.into_inner().into_owned()),
+            } => Some(data),
             _ => None,
-        }))
+        })?;
+        Ok(data.flatten().map(|d| d.into_owned()))
     }
 
     /// The message's MIME structure, or `None` if there is no message with this UID.
     pub async fn fetch_structure(&mut self, uid: u32) -> Result<Option<MimeNode>> {
-        let items = self
-            .fetch_one(uid, vec![MessageDataItemName::BodyStructure])
-            .await?;
-        Ok(items.and_then(|items| {
-            items.into_iter().find_map(|item| match item {
-                MessageDataItem::BodyStructure(structure) => {
-                    Some(super::body::mime_node(&structure))
-                }
-                _ => None,
-            })
-        }))
+        let items = self.fetch_one(uid, "BODYSTRUCTURE").await?;
+        requested(items, |item| match item {
+            AttributeValue::BodyStructure(structure) => Some(super::body::mime_node(&structure)),
+            _ => None,
+        })
     }
 
     /// Body parts by section (`1.2`), still transfer-encoded, or `None` if there is no
@@ -720,30 +672,36 @@ impl Session {
     ) -> Result<Option<HashMap<String, Vec<u8>>>> {
         let items = sections
             .iter()
-            .map(|section| Ok(body_peek(Some(Section::Part(part(section)?)))))
-            .collect::<Result<Vec<_>>>()?;
-        let Some(fetched) = self.fetch_one(uid, items).await? else {
+            .map(|section| Ok(format!("BODY.PEEK[{}]", part(section)?)))
+            .collect::<Result<Vec<_>>>()?
+            .join(" ");
+        let Some(fetched) = self.fetch_one(uid, &items).await? else {
             return Ok(None);
         };
+        let mut found = HashMap::new();
+        for item in fetched {
+            if let AttributeValue::BodySection {
+                section: Some(SectionPath::Part(numbers, None)),
+                data,
+                ..
+            } = item
+            {
+                let section = numbers
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                found.insert(section, data);
+            }
+        }
+        // Each one asked for is in the answer, if only as NIL; else it couldn't be parsed.
+        if sections.iter().any(|s| !found.contains_key(s)) {
+            return Err(INCOMPLETE_FETCH);
+        }
         Ok(Some(
-            fetched
+            found
                 .into_iter()
-                .filter_map(|item| match item {
-                    MessageDataItem::BodyExt {
-                        section: Some(Section::Part(Part(numbers))),
-                        data,
-                        ..
-                    } => {
-                        let section = numbers
-                            .as_ref()
-                            .iter()
-                            .map(|n| n.to_string())
-                            .collect::<Vec<_>>()
-                            .join(".");
-                        Some((section, data.0?.into_inner().into_owned()))
-                    }
-                    _ => None,
-                })
+                .filter_map(|(section, data)| Some((section, data?.into_owned())))
                 .collect(),
         ))
     }
@@ -753,20 +711,31 @@ impl Session {
     async fn fetch_one(
         &mut self,
         uid: u32,
-        mut items: Vec<MessageDataItemName<'static>>,
-    ) -> Result<Option<Vec<MessageDataItem<'static>>>> {
-        let uid = NonZeroU32::new(uid).ok_or_else(|| Error::Protocol("UID 0".into()))?;
-        items.insert(0, MessageDataItemName::Uid);
-        let set = SequenceSet::from(Sequence::from(uid));
-        let response = self.conn.execute(uid_fetch(set, items, Vec::new())).await?;
-        Ok(group_fetches(response, |u| u == uid.get()).remove(&uid.get()))
+        items: &str,
+    ) -> Result<Option<Vec<AttributeValue<'static>>>> {
+        if uid == 0 {
+            return Err(Error::Protocol("UID 0".into()));
+        }
+        let fetch = uid_fetch(&uid.to_string(), &format!("UID {items}"));
+        let response = self.conn.execute(fetch).await?;
+        Ok(group_fetches(response, |u| u == uid).remove(&uid))
     }
 
     /// Ends the session politely. Errors are not interesting at this point.
     pub async fn logout(mut self) {
-        if let Err(e) = self.conn.execute(CommandBody::Logout).await {
-            tracing::debug!(error = %e, "LOGOUT failed");
+        match self.conn.execute(Command::new("LOGOUT")).await {
+            // The BYE that LOGOUT asks for.
+            Ok(_) | Err(Error::Bye(_)) => {}
+            Err(e) => tracing::debug!(error = %e, "LOGOUT failed"),
         }
+    }
+
+    /// Forgets the selected mailbox, before opening another: if that fails, the server
+    /// has none selected either.
+    fn deselect(&mut self) {
+        self.selected = None;
+        self.writable = false;
+        self.changed_flags = ChangedFlags::default();
     }
 
     fn condstore(&self) -> bool {
@@ -790,117 +759,116 @@ impl Session {
     }
 }
 
-fn mailbox(raw_name: &str) -> Result<Mailbox<'static>> {
-    Mailbox::try_from(raw_name.to_owned())
-        .map_err(|_| Error::Protocol(format!("invalid mailbox name `{raw_name}`")))
-}
-
-fn system_flags(flags: Flags) -> Vec<Flag<'static>> {
+/// `\Seen \Flagged`, for a flag list.
+fn system_flags(flags: Flags) -> String {
     SYSTEM_FLAGS
         .into_iter()
         .filter(|(bit, _)| flags.contains(*bit))
         .map(|(_, flag)| flag)
-        .collect()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The UIDs a UID set from the server names, in its order. A range covers the UIDs
+/// between its ends, whichever comes first (imap-proto puts the smaller first).
+fn expand(set: &[UidSetMember]) -> impl Iterator<Item = u32> + '_ {
+    set.iter().flat_map(|member| match member {
+        UidSetMember::Uid(uid) => *uid..=*uid,
+        UidSetMember::UidRange(range) => range.clone(),
+    })
 }
 
 /// The COPYUID in an answer to COPY or MOVE (MOVE sends it untagged). `None` if there is
 /// none, its UID sets don't pair up, or they name more than the `requested` UIDs.
 fn copy_uid(response: &Response, requested: usize) -> Option<CopyUid> {
     response.codes.iter().find_map(|code| {
-        let Code::CopyUid {
-            uid_validity,
-            source,
-            destination,
-        } = code
-        else {
+        let Code::Known(ResponseCode::CopyUid(uidvalidity, source, destination)) = code else {
             return None;
-        };
-        // RFC 4315: both sets list the UIDs in the same order; a range covers the UIDs
-        // between its ends, whichever comes first.
-        let ranges = |set: &UidSet| {
-            set.0
-                .as_ref()
-                .iter()
-                .map(|element| match *element {
-                    UidElement::Single(uid) => uid.get()..=uid.get(),
-                    UidElement::Range(a, b) => a.min(b).get()..=a.max(b).get(),
-                })
-                .collect::<Vec<_>>()
         };
         // The ends come from the server: count before expanding, or `1:4294967295`
         // asks for gigabytes. The copies can't outnumber the UIDs asked for.
-        let count = |ranges: &[RangeInclusive<u32>]| {
-            ranges
-                .iter()
-                .map(|r| u64::from(r.end() - r.start()) + 1)
+        let count = |set: &[UidSetMember]| {
+            set.iter()
+                .map(|member| match member {
+                    UidSetMember::Uid(_) => 1,
+                    UidSetMember::UidRange(r) => u64::from(r.end() - r.start()) + 1,
+                })
                 .sum::<u64>()
         };
-        let (old, new) = (ranges(source), ranges(destination));
-        let n = count(&old);
-        (n == count(&new) && n <= requested as u64).then(|| CopyUid {
-            uidvalidity: uid_validity.get(),
-            uids: old
-                .into_iter()
-                .flatten()
-                .zip(new.into_iter().flatten())
-                .collect(),
+        let n = count(source);
+        // RFC 4315: both sets list the UIDs in the same order.
+        (n == count(destination) && n <= requested as u64).then(|| CopyUid {
+            uidvalidity: *uidvalidity,
+            uids: expand(source).zip(expand(destination)).collect(),
         })
     })
 }
 
-fn body_peek(section: Option<Section<'static>>) -> MessageDataItemName<'static> {
-    MessageDataItemName::BodyExt {
-        section,
-        partial: None,
-        peek: true,
-    }
-}
-
-/// `1.2` → the part specifier `[1, 2]`.
-fn part(section: &str) -> Result<Part> {
-    let numbers = section
+/// `1.2`, checked to be a part specifier.
+fn part(section: &str) -> Result<&str> {
+    let valid = section
         .split('.')
-        .map(|n| n.parse::<NonZeroU32>().ok())
-        .collect::<Option<Vec<_>>>()
-        .and_then(|n| Vec1::try_from(n).ok())
-        .ok_or_else(|| Error::Protocol(format!("invalid body section `{section}`")))?;
-    Ok(Part(numbers))
+        .all(|n| n.parse::<u32>().is_ok_and(|n| n > 0) && n.bytes().all(|b| b.is_ascii_digit()));
+    if !valid {
+        return Err(Error::Protocol(format!("invalid body section `{section}`")));
+    }
+    Ok(section)
 }
 
-fn uid_fetch(
-    sequence_set: SequenceSet,
-    items: Vec<MessageDataItemName<'static>>,
-    modifiers: Vec<FetchModifier>,
-) -> CommandBody<'static> {
-    CommandBody::Fetch {
-        sequence_set,
-        macro_or_item_names: items.into(),
-        uid: true,
-        modifiers,
+/// A FETCH answered OK without an item it asked for: imap-proto reads a malformed item as
+/// one it doesn't know, so this is how an item that couldn't be parsed shows.
+const INCOMPLETE_FETCH: Error = Error::Incomplete("UID FETCH");
+
+/// The item `pick` takes from the answer about one message (see [`Session::fetch_one`]):
+/// `None` if there was no answer, [`INCOMPLETE_FETCH`] if the item is missing from it.
+fn requested<T>(
+    items: Option<Vec<AttributeValue<'static>>>,
+    pick: impl FnMut(AttributeValue<'static>) -> Option<T>,
+) -> Result<Option<T>> {
+    match items {
+        None => Ok(None),
+        Some(items) => items
+            .into_iter()
+            .find_map(pick)
+            .map(Some)
+            .ok_or(INCOMPLETE_FETCH),
     }
+}
+
+/// `UID FETCH <set> (<items>)`.
+fn uid_fetch(set: &str, items: &str) -> Command {
+    Command::new("UID FETCH")
+        .raw(set)
+        .raw(&format!("({items})"))
 }
 
 async fn request_capabilities(conn: &mut Connection) -> Result<Capabilities> {
-    let response = conn.execute(CommandBody::Capability).await?;
+    let response = conn.execute(Command::new("CAPABILITY")).await?;
     capabilities_in(&response).ok_or_else(|| Error::Protocol("no CAPABILITY response".into()))
 }
 
 fn capabilities_in(response: &Response) -> Option<Capabilities> {
     let from_data = response.data.iter().find_map(|d| match d {
-        Data::Capability(caps) => Some(caps.as_ref()),
+        Data::Capabilities(caps) => Some(caps),
         _ => None,
     });
     let from_code = || {
         response.codes.iter().find_map(|c| match c {
-            Code::Capability(caps) => Some(caps.as_ref()),
+            Code::Known(ResponseCode::Capabilities(caps)) => Some(caps),
             _ => None,
         })
     };
-    from_data.or_else(from_code).map(capabilities)
+    from_data.or_else(from_code).map(|caps| capabilities(caps))
 }
 
-fn capabilities(caps: &[imap_next::imap_types::response::Capability<'_>]) -> Capabilities {
-    caps.iter().map(|c| c.to_string()).collect()
+fn capabilities(caps: &[Capability<'_>]) -> Capabilities {
+    caps.iter()
+        .map(|c| match c {
+            Capability::Imap4rev1 => "IMAP4rev1".to_owned(),
+            Capability::Auth(mechanism) => format!("AUTH={mechanism}"),
+            Capability::Atom(atom) => atom.to_string(),
+        })
+        .collect()
 }
 
 /// What the FETCH responses for one UID said, combined. A server may split one
@@ -914,7 +882,8 @@ struct MergedFetch {
     size: Option<u32>,
     /// Boxed: flag-only fetches cover the whole mailbox and never set it.
     headers: Option<Box<Headers>>,
-    has_attachments: bool,
+    /// From BODYSTRUCTURE, if the server sent one.
+    has_attachments: Option<bool>,
 }
 
 impl MergedFetch {
@@ -939,19 +908,15 @@ fn merge_fetches(response: Response, wanted: impl Fn(u32) -> bool) -> BTreeMap<u
             let mut m = MergedFetch::default();
             for item in items {
                 match item {
-                    MessageDataItem::Flags(flags) => m.flags = Some(convert_flags(&flags)),
-                    MessageDataItem::ModSeq(v) => m.modseq = Some(v.get()),
-                    MessageDataItem::InternalDate(d) => {
-                        m.internal_date = Some(d.as_ref().timestamp())
+                    AttributeValue::Flags(flags) => m.flags = Some(convert_flags(&flags)),
+                    AttributeValue::ModSeq(v) => m.modseq = Some(v),
+                    AttributeValue::InternalDate(d) => m.internal_date = internal_date(&d),
+                    AttributeValue::Rfc822Size(n) => m.size = Some(n),
+                    AttributeValue::BodyStructure(bs) => {
+                        m.has_attachments = Some(super::body::mime_node(&bs).has_attachments())
                     }
-                    MessageDataItem::Rfc822Size(n) => m.size = Some(n),
-                    MessageDataItem::BodyStructure(bs) => {
-                        m.has_attachments = super::body::mime_node(&bs).has_attachments()
-                    }
-                    MessageDataItem::BodyExt { data, .. } => {
-                        m.headers = Some(Box::new(parse_headers(
-                            data.0.as_ref().map_or(&[][..], |d| d.as_ref()),
-                        )));
+                    AttributeValue::BodySection { data, .. } => {
+                        m.headers = Some(Box::new(parse_headers(data.as_deref().unwrap_or(&[]))));
                     }
                     _ => {}
                 }
@@ -968,15 +933,14 @@ fn merge_fetches(response: Response, wanted: impl Fn(u32) -> bool) -> BTreeMap<u
 fn group_fetches(
     response: Response,
     wanted: impl Fn(u32) -> bool,
-) -> BTreeMap<u32, Vec<MessageDataItem<'static>>> {
-    let mut grouped: BTreeMap<u32, Vec<MessageDataItem<'static>>> = BTreeMap::new();
+) -> BTreeMap<u32, Vec<AttributeValue<'static>>> {
+    let mut grouped: BTreeMap<u32, Vec<AttributeValue<'static>>> = BTreeMap::new();
     for data in response.data {
-        let Data::Fetch { items, .. } = data else {
+        let Data::Fetch(_, items) = data else {
             continue;
         };
-        let items = items.into_inner();
         let Some(uid) = items.iter().find_map(|item| match item {
-            MessageDataItem::Uid(uid) => Some(uid.get()),
+            AttributeValue::Uid(uid) => Some(*uid),
             _ => None,
         }) else {
             continue;
@@ -988,35 +952,53 @@ fn group_fetches(
     grouped
 }
 
-/// A SPECIAL-USE attribute (RFC 6154), lower-cased. The role names match; `\\Inbox` is
-/// not one of the attributes.
-fn special_use(attribute: &str) -> Option<FolderRole> {
-    attribute
-        .strip_prefix('\\')?
-        .parse()
-        .ok()
-        .filter(|role| *role != FolderRole::Inbox)
+/// False for `\Noselect` / `\NonExistent` hierarchy nodes.
+fn selectable(attributes: &[NameAttribute<'_>]) -> bool {
+    !attributes.iter().any(|a| match a {
+        NameAttribute::NoSelect => true,
+        NameAttribute::Extension(other) => other.eq_ignore_ascii_case("\\NonExistent"),
+        _ => false,
+    })
+}
+
+/// The role a SPECIAL-USE attribute (RFC 6154) gives a mailbox.
+fn special_use(attribute: &NameAttribute<'_>) -> Option<FolderRole> {
+    Some(match attribute {
+        NameAttribute::All => FolderRole::All,
+        NameAttribute::Archive => FolderRole::Archive,
+        NameAttribute::Drafts => FolderRole::Drafts,
+        NameAttribute::Flagged => FolderRole::Flagged,
+        NameAttribute::Junk => FolderRole::Junk,
+        NameAttribute::Sent => FolderRole::Sent,
+        NameAttribute::Trash => FolderRole::Trash,
+        _ => return None,
+    })
 }
 
 /// The system flags stored as [`Flags`] bits.
-const SYSTEM_FLAGS: [(Flags, Flag<'static>); 5] = [
-    (Flags::SEEN, Flag::Seen),
-    (Flags::FLAGGED, Flag::Flagged),
-    (Flags::ANSWERED, Flag::Answered),
-    (Flags::DRAFT, Flag::Draft),
-    (Flags::DELETED, Flag::Deleted),
+const SYSTEM_FLAGS: [(Flags, &str); 5] = [
+    (Flags::SEEN, "\\Seen"),
+    (Flags::FLAGGED, "\\Flagged"),
+    (Flags::ANSWERED, "\\Answered"),
+    (Flags::DRAFT, "\\Draft"),
+    (Flags::DELETED, "\\Deleted"),
 ];
 
-fn convert_flags(flags: &[FlagFetch<'_>]) -> (Flags, Vec<String>) {
+fn convert_flags<S: AsRef<str>>(flags: &[S]) -> (Flags, Vec<String>) {
     let mut out = Flags::empty();
     let mut keywords = Vec::new();
     for flag in flags {
-        let FlagFetch::Flag(flag) = flag else {
-            continue; // \Recent is per-session and meaningless to store.
-        };
-        match SYSTEM_FLAGS.iter().find(|(_, f)| f == flag) {
+        let flag = flag.as_ref();
+        // \Recent is per-session and meaningless to store.
+        if flag.eq_ignore_ascii_case("\\Recent") {
+            continue;
+        }
+        match SYSTEM_FLAGS
+            .iter()
+            .find(|(_, f)| f.eq_ignore_ascii_case(flag))
+        {
             Some((bit, _)) => out.insert(*bit),
-            None => keywords.push(flag.to_string()),
+            None => keywords.push(flag.to_owned()),
         }
     }
     keywords.sort();
@@ -1024,8 +1006,16 @@ fn convert_flags(flags: &[FlagFetch<'_>]) -> (Flags, Vec<String>) {
     (out, keywords)
 }
 
+/// INTERNALDATE (`17-Jul-1996 02:44:25 -0700`) as unix seconds. The day may come
+/// space-padded (` 2-Jul`), zero-padded (`02-Jul`) or, as QQ Mail sends it against
+/// RFC 3501, bare (`2-Jul`).
+fn internal_date(value: &str) -> Option<i64> {
+    let time = jiff::fmt::strtime::parse("%d-%b-%Y %H:%M:%S %z", value).ok()?;
+    Some(time.to_timestamp().ok()?.as_second())
+}
+
 /// Compresses UIDs into ranges: `[1, 2, 3, 7]` → `1:3,7`.
-fn uid_set(uids: &[u32]) -> Option<SequenceSet> {
+fn uid_set(uids: &[u32]) -> Option<String> {
     sequence_set(&merge_ranges(uids.iter().map(|&uid| uid..=uid)))
 }
 
@@ -1051,19 +1041,18 @@ fn merge_ranges(ranges: impl IntoIterator<Item = RangeInclusive<u32>>) -> Vec<Ra
 }
 
 /// The sequence set of ranges as [`merge_ranges`] leaves them; `None` for none.
-fn sequence_set(ranges: &[RangeInclusive<u32>]) -> Option<SequenceSet> {
-    let sequences: Vec<Sequence> = ranges
+fn sequence_set(ranges: &[RangeInclusive<u32>]) -> Option<String> {
+    let set: Vec<String> = ranges
         .iter()
-        .filter_map(|r| {
-            let (first, last) = (NonZeroU32::new(*r.start())?, NonZeroU32::new(*r.end())?);
-            Some(if first == last {
-                Sequence::from(first)
+        .map(|r| {
+            if r.start() == r.end() {
+                r.start().to_string()
             } else {
-                Sequence::from(first..=last)
-            })
+                format!("{}:{}", r.start(), r.end())
+            }
         })
         .collect();
-    SequenceSet::try_from(sequences).ok()
+    (!set.is_empty()).then(|| set.join(","))
 }
 
 #[cfg(test)]
@@ -1072,11 +1061,10 @@ mod tests {
 
     #[test]
     fn compresses_uid_sets() {
-        let ranges = |uids: &[u32]| uid_set(uids).map(|s| s.0.as_ref().len());
-        assert_eq!(ranges(&[]), None);
-        assert_eq!(ranges(&[0]), None);
-        assert_eq!(ranges(&[7, 1, 2, 3, 3]), Some(2));
-        assert_eq!(ranges(&[1, 3, 5]), Some(3));
+        assert_eq!(uid_set(&[]), None);
+        assert_eq!(uid_set(&[0]), None);
+        assert_eq!(uid_set(&[7, 1, 2, 3, 3]).as_deref(), Some("1:3,7"));
+        assert_eq!(uid_set(&[1, 3, 5]).as_deref(), Some("1,3,5"));
     }
 
     #[test]
@@ -1087,5 +1075,79 @@ mod tests {
             [1..=4, 7..=9, 11..=11]
         );
         assert_eq!(merge_ranges([0..=2, 3..=3]), [RangeInclusive::new(1, 3)]);
+    }
+
+    #[test]
+    fn reads_internaldate() {
+        // 1996-07-17 09:44:25 UTC.
+        assert_eq!(
+            internal_date("17-Jul-1996 02:44:25 -0700"),
+            Some(837_596_665)
+        );
+        let utc = internal_date("02-Oct-2026 00:13:27 +0000");
+        assert_eq!(internal_date(" 2-Oct-2026 08:13:27 +0800"), utc);
+        assert_eq!(internal_date("2-Oct-2026 08:13:27 +0800"), utc, "QQ Mail");
+        assert_eq!(internal_date("02-oct-2026 08:13:27 +0800"), utc);
+        assert_eq!(
+            internal_date("29-Feb-2024 00:00:00 +0000"),
+            Some(1_709_164_800)
+        );
+        for bad in [
+            "",
+            "2-Oct-2026",
+            "32-Oct-2026 08:13:27 +0800",
+            "30-Feb-2026 08:13:27 +0800",
+            "2-Foo-2026 08:13:27 +0800",
+            "2-Oct-2026 08:13:27 0800",
+            "2-Oct-2026 08:13:27 +08",
+            "2-Oct-2026 08:13:27 +0800 x",
+        ] {
+            assert_eq!(internal_date(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn flags_by_name_whatever_their_case() {
+        let (flags, keywords) =
+            convert_flags(&["\\SEEN", "\\flagged", "\\Recent", "$Junk", "$Junk"]);
+        assert_eq!(flags, Flags::SEEN | Flags::FLAGGED);
+        assert_eq!(keywords, ["$Junk"]);
+    }
+
+    #[test]
+    fn list_attributes() {
+        let attributes = |line: &[u8]| {
+            let Ok((_, imap_proto::Response::MailboxData(MailboxDatum::List(list)))) =
+                imap_proto::Response::parse(line)
+            else {
+                panic!("not a LIST");
+            };
+            let roles: Vec<_> = list
+                .name_attributes
+                .iter()
+                .filter_map(special_use)
+                .collect();
+            (selectable(&list.name_attributes), roles)
+        };
+        assert_eq!(
+            attributes(b"* LIST (\\HasNoChildren \\Important \\All) \"/\" a\r\n"),
+            (true, vec![FolderRole::All])
+        );
+        assert_eq!(
+            attributes(b"* LIST (\\Noselect) \"/\" b\r\n"),
+            (false, vec![])
+        );
+        assert_eq!(
+            attributes(b"* LIST (\\NonExistent \\Trash) \"/\" c\r\n"),
+            (false, vec![FolderRole::Trash])
+        );
+    }
+
+    #[test]
+    fn body_sections_must_be_part_numbers() {
+        assert_eq!(part("1.2").unwrap(), "1.2");
+        for bad in ["", "0", "1.", "1.x", "1.HEADER", "+1", "1]"] {
+            assert!(part(bad).is_err(), "{bad:?}");
+        }
     }
 }

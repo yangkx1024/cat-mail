@@ -49,18 +49,14 @@ html5ever = "0.40.1"
 jiff = "0.2.38"
 # Wraps rendered pages into GPUI images; the version GPUI uses.
 image = { version = "0.25.10", default-features = false }
-# Without the default `stream` feature: catmail-proto drives the sans-IO client itself,
-# over any AsyncRead + AsyncWrite (TLS, STARTTLS upgrades, in-memory test pipes).
-imap-next = { version = "0.3.4", default-features = false, features = ["starttls", "ext_condstore_qresync"] }
+# Parses IMAP responses only; catmail-proto encodes commands and drives the connection.
+imap-proto = "0.18.0"
 keyring = "4.2"
 # Builds outgoing messages; the same family as mail-parser. Without `gethostname`:
 # Message-IDs come from the sender's domain, not the machine's name.
 mail-builder = { version = "1.0.0", default-features = false }
 mail-parser = { version = "0.11.9", features = ["full_encoding"] }
 mime_guess = "2.0.5"
-# Workaround: imap-codec 2.0.0-alpha.9 uses nom's `alloc`-gated combinators but depends on
-# nom with default features off, so it only builds when something else enables them.
-nom = { version = "7.1.3", default-features = false, features = ["alloc"] }
 # Blitz lays text out with it; the reader's text selection reads those layouts. The
 # version Blitz uses.
 parley = { version = "0.12.0", default-features = false, features = ["std"] }
@@ -115,3 +111,9 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+
+# Unreleased imap-proto 0.18.0, for its unescaping of quoted strings (djc/imap-proto#209).
+# Replace with the crates.io release once it is out: until then cargo deny's source check
+# fails (accepted while the project is unreleased).
+[patch.crates-io]
+imap-proto = { git = "https://github.com/djc/imap-proto", rev = "0dac3af59a2cfcd649c30034d5f221c4d8edbf34" }

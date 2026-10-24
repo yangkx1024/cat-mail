@@ -5,7 +5,7 @@ use secrecy::{ExposeSecret, SecretString};
 /// where the server offers it, else IMAP LOGIN / SMTP AUTH LOGIN.
 ///
 /// The password is a [`SecretString`]: zeroed when dropped and never in `Debug` output.
-/// Copies handed to imap-next or written to the socket are out of reach.
+/// Copies written to the socket are out of reach.
 #[derive(Clone, Debug)]
 pub struct Credentials {
     pub username: String,

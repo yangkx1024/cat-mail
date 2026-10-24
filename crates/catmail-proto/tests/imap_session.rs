@@ -340,6 +340,83 @@ async fn mailbox_names_with_line_breaks_go_as_literals() {
 }
 
 #[tokio::test]
+async fn malformed_requested_items_make_answers_incomplete() {
+    // imap-proto reads a malformed item it knows as one it doesn't, so the line parses;
+    // an item that was asked for and is missing counts as unparsed all the same.
+    let mut state = sample_state();
+    state.faults.broken_flags = vec![2];
+    state.faults.broken_bodystructure = vec![2];
+    let fake = FakeImap::start(state).await;
+    let mut session = login(&fake).await;
+    session.examine("INBOX").await.unwrap();
+
+    let err = session.fetch_flags(&[1..=2], None).await.unwrap_err();
+    assert!(matches!(err, Error::Incomplete("UID FETCH")), "{err:?}");
+    assert!(!err.is_fatal(), "the connection is still usable");
+    let err = session.fetch_structure(2).await.unwrap_err();
+    assert!(matches!(err, Error::Incomplete("UID FETCH")), "{err:?}");
+    assert!(session.fetch_structure(1).await.unwrap().is_some());
+    assert_eq!(session.fetch_flags(&[1..=1], None).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_malformed_bodystructure_is_asked_for_again_without() {
+    let mut state = sample_state();
+    state.faults.broken_bodystructure = vec![2];
+    let fake = FakeImap::start(state).await;
+    let mut session = login(&fake).await;
+    session.examine("INBOX").await.unwrap();
+    let start = fake.state().log.len();
+
+    let messages = session.fetch_summaries(&[1, 2]).await.unwrap();
+    let second = messages
+        .iter()
+        .find(|m| m.state.uid == 2)
+        .expect("not hidden");
+    assert!(
+        !second.has_attachments,
+        "unknown until the body is downloaded"
+    );
+    let fetches: Vec<String> = fake.state().log[start..]
+        .iter()
+        .map(|c| c.line.clone())
+        .collect();
+    assert_eq!(fetches.len(), 2, "{fetches:?}");
+    assert!(
+        fetches[1].starts_with("UID FETCH 2 ") && !fetches[1].contains("BODYSTRUCTURE"),
+        "{fetches:?}"
+    );
+}
+
+#[tokio::test]
+async fn servers_with_only_imap4rev2() {
+    // imap-proto's CAPABILITY parser insists on IMAP4rev1.
+    for auth_plain in [false, true] {
+        let mut state = sample_state();
+        state.faults.imap4rev2_only = true;
+        state.faults.auth_plain = auth_plain;
+        let fake = FakeImap::start(state).await;
+        let mut session = login(&fake).await;
+        assert!(session.capabilities().has("IMAP4rev2"));
+        assert!(session.capabilities().has("IDLE"));
+        let logged_in = fake
+            .state()
+            .log
+            .iter()
+            .map(|c| c.line.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            logged_in
+                .iter()
+                .any(|l| l.starts_with("AUTHENTICATE PLAIN")),
+            auth_plain,
+            "{logged_in:?}"
+        );
+        assert!(!session.list().await.unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn starttls_is_required_when_configured() {
     let fake = FakeImap::start(sample_state()).await;
     let err = Session::connect(&server(fake.port(), Security::StartTls), &no_tls(), TIMEOUT)
@@ -388,13 +465,13 @@ async fn unparsable_lines_make_authoritative_answers_fail() {
 
     let (_fake, mut session) = garbled("* SEARCH").await;
     session.examine("INBOX").await.unwrap();
-    check(session.uid_search_all().await.unwrap_err(), "SEARCH");
+    check(session.uid_search_all().await.unwrap_err(), "UID SEARCH");
 
     let (_fake, mut session) = garbled("FETCH (UID 2 FLAGS").await;
     session.examine("INBOX").await.unwrap();
     check(
         session.fetch_flags(&[1..=2], None).await.unwrap_err(),
-        "FETCH",
+        "UID FETCH",
     );
 
     // For summaries a lost line has the missing messages asked for again, without the
@@ -588,7 +665,7 @@ async fn a_message_imap_cant_carry_is_not_sent() {
 }
 
 #[tokio::test]
-async fn append_refused_before_the_message_fails_at_once() {
+async fn append_refused_before_the_message_is_a_refusal() {
     let mut state = sample_state();
     state.faults.reject_append_literal = true;
     let fake = FakeImap::start(state).await;
@@ -601,20 +678,10 @@ async fn append_refused_before_the_message_fails_at_once() {
     .await
     .expect("answered at once")
     .unwrap_err();
-    assert!(matches!(err, Error::Aborted { .. }), "{err:?}");
-    assert!(
-        err.is_fatal(),
-        "the client is still in the middle of the command"
-    );
-    assert!(
-        !err.is_disconnected(),
-        "not worth retrying on a new connection"
-    );
-    // Anything else on this connection fails at once instead of waiting forever.
-    let next = tokio::time::timeout(Duration::from_secs(5), session.examine("INBOX"))
-        .await
-        .expect("fails at once");
-    assert!(next.is_err());
+    assert!(matches!(err, Error::Command { .. }), "{err:?}");
+    assert!(!err.is_fatal(), "the message was never sent");
+    // The command is over: the connection goes on.
+    session.examine("INBOX").await.unwrap();
 }
 
 /// INBOX with UIDs 1..=3, and an Archive.
