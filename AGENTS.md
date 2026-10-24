@@ -84,7 +84,7 @@ fake-server test, with a fault injected if the change is about recovering from o
 - **A message row is one server message.** It has exactly one location, a (folder,
   UIDVALIDITY, UID), and its own flags. On a standard IMAP account every selectable mailbox
   is a location: copies in two folders are two messages, never merged by Message-ID (it can
-  be missing or repeated). On a Gmail account (`X-GM-EXT-1`) a row is one `X-GM-MSGID`, located
+  be missing or repeated). On a Gmail account (`X-GM-EXT-1` with All Mail listed) a row is one `X-GM-MSGID`, located
   in All Mail, Trash or Spam; every other mailbox is a label (`message_labels`), never another
   row. See [docs/architecture/labels.md](docs/architecture/labels.md). Not implemented yet:
   until then Gmail labels are still synced as folders, and search and replay match their

@@ -40,3 +40,12 @@
 - AGENTS.md：规则改为 "A message row is one server message"，注明尚未实现、`LABEL_ACCOUNTS` 那套不要再
   扩展；crate 表注明协议层将改用 imap-proto。
 - 只改文档，没有代码改动；用脚本检查了文档里所有相对链接和锚点都能解析。
+- 用测试 Gmail 账户验证了设计依赖的行为（一次性的验证程序，基于 imap-proto，不进仓库），结果记在
+  `labels.md` 的"验证结果"。据此调整了设计：
+  - 只改标签也会让 MODSEQ 变大，标签随 flags 一起用 `CHANGEDSINCE` 拉；
+  - 在"所有邮件"上 IDLE 收不到标签变化，后台同步仍在 INBOX 上 IDLE；
+  - 移出已删除要 MOVE 到"所有邮件"，COPYUID 才是位置的 UID；
+  - "已加星标"是 `\Flagged` 的视图，不存标签行；
+  - 隐藏的标签也建一行（`listed = 0`）；
+  - "所有邮件"不在 IMAP 中显示时按普通账户同步，所以 Gmail 账户要求 LIST 里有 `\All`，AGENTS.md 也跟着改了。
+  - imap-proto 不还原带引号字符串里的转义，写进了 `protocol.md`，第 3 步要处理。
