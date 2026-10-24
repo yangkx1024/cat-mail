@@ -251,8 +251,8 @@ impl MailClient {
         }
         if let Some(schedule) = client.engine.sync_in_background {
             for account in opened.watched {
-                let engine = Arc::downgrade(&client.engine);
-                client.rt.spawn(watch::run(engine, account.id, schedule));
+                let task = watch::task(&client.engine, account.id, schedule);
+                client.rt.spawn(task);
             }
         }
         client
@@ -550,6 +550,19 @@ impl MailClient {
     pub async fn sync_account(&self, id: AccountId) -> Result<SyncReport> {
         self.rt
             .run(sync::sync_account(self.engine.clone(), id))
+            .await
+    }
+
+    /// Loads an account just added, for a frontend to show how that went. While background
+    /// sync runs its first sync of the account (it starts with the engine, or when the
+    /// account is added), waits for that one and returns its report, rather than logging
+    /// in to do the same; else, or if that one fails, this is
+    /// [`sync_account`](Self::sync_account). Not for a refresh the user asks for: that
+    /// sync may have done folders before the call, and it doesn't upload drafts changed
+    /// just now.
+    pub async fn initial_sync(&self, id: AccountId) -> Result<SyncReport> {
+        self.rt
+            .run(sync::initial_sync(self.engine.clone(), id))
             .await
     }
 
@@ -1509,6 +1522,59 @@ mod tests {
             AccountStatus::default()
         );
         assert_eq!(client.engine.tracked_accounts(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_initial_sync_waits_for_the_first_background_one() {
+        let mut state = catmail_testkit::ServerState::new("alice", "pw");
+        state.inbox().append_simple("one");
+        // Holds background sync's first sync until the call waits for it.
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        state.faults.fetch_gate = Some(gate.clone());
+        let fake = catmail_testkit::FakeImap::start(state).await;
+        let dir = tempfile::tempdir().unwrap();
+        let client = MailClient::builder(Config::with_data_dir(dir.path()))
+            .runtime(Handle::current())
+            .secrets(Arc::new(MemorySecrets::default()))
+            .sync_in_background(Some(SyncSchedule::default()))
+            .open()
+            .unwrap();
+        let local = ServerConfig {
+            host: "127.0.0.1".into(),
+            port: fake.port(),
+            security: Security::Plain,
+        };
+        let new = NewAccount {
+            username: "alice".into(),
+            imap: local.clone(),
+            smtp: local,
+            ..new_account("alice@example.com")
+        };
+        let account = client
+            .add_account(new, "pw".into(), Verify::Skip)
+            .await
+            .unwrap()
+            .id;
+
+        let call = tokio::spawn({
+            let client = client.clone();
+            async move { client.initial_sync(account).await }
+        });
+        let joined = async {
+            while client.engine.first_sync_waiters(account) == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), joined)
+            .await
+            .expect("the call to wait for background sync");
+        fake.state().faults.fetch_gate = None;
+        gate.add_permits(10);
+        let report = call.await.unwrap().unwrap();
+        assert_eq!(report.folders.len(), 1);
+        let st = fake.state();
+        // Background sync's connection only.
+        assert_eq!((st.connections, st.received("LIST")), (1, 1));
     }
 
     #[tokio::test(flavor = "multi_thread")]
