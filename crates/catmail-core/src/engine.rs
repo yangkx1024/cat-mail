@@ -1,3 +1,4 @@
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::future::Future;
@@ -7,7 +8,7 @@ use std::time::{Duration, Instant};
 use catmail_proto::TlsConfig;
 use catmail_proto::http::ImageFetcher;
 use catmail_proto::imap::Session;
-use catmail_store::{BlobStore, Db, Store};
+use catmail_store::{BlobStore, Db, LabelCopies, Store};
 use catmail_types::{
     AccountId, AccountStatus, DraftId, ErrorKind, Event, FolderId, IdentityId, ReportedError,
     SendProblem, ServerProblem, SyncReport,
@@ -134,6 +135,12 @@ struct AccountState {
     /// Background sync's first sync of every folder while it runs, for syncs asked for
     /// meanwhile to wait for (see [`Engine::first_sync`]).
     first_sync: Mutex<Option<watch::Sender<Option<SyncReport>>>>,
+    /// Copies on other Gmail labels that moves made may have taken with them, still to
+    /// look for, by folder (see `ops::replay_queued`). Here rather than with the replay:
+    /// once a move is made it is no longer queued, and a replay that failed after it, on
+    /// whichever connection or path, couldn't find them again. Changed only under the
+    /// account's sync permit.
+    label_copies: Mutex<BTreeMap<FolderId, LabelCopies>>,
 }
 
 /// Background sync's first step, from before its task starts until this is dropped. If
@@ -403,6 +410,45 @@ impl Engine {
         }
     }
 
+    /// Adds copies to look for once the moves that may have taken them are made, merged
+    /// with those of the same folder already waiting (a replay that failed before its
+    /// moves were made finds them again).
+    pub fn add_label_copies(&self, account: AccountId, copies: Vec<LabelCopies>) {
+        if copies.is_empty() {
+            return;
+        }
+        let state = self.account(account);
+        let mut waiting = lock(&state.label_copies);
+        for copies in copies {
+            match waiting.entry(copies.folder.id) {
+                Entry::Vacant(e) => {
+                    e.insert(copies);
+                }
+                Entry::Occupied(mut e) => {
+                    let e = e.get_mut();
+                    e.uids.extend(copies.uids);
+                    e.uids.sort_unstable();
+                    e.uids.dedup();
+                    e.folder = copies.folder;
+                }
+            }
+        }
+    }
+
+    /// The copies of one folder still to look for, if any.
+    pub fn next_label_copies(&self, account: AccountId) -> Option<LabelCopies> {
+        let state = self.existing(account)?;
+        let waiting = lock(&state.label_copies);
+        waiting.values().next().cloned()
+    }
+
+    /// Forgets the copies in `folder`: looked for.
+    pub fn looked_for_label_copies(&self, account: AccountId, folder: FolderId) {
+        if let Some(state) = self.existing(account) {
+            lock(&state.label_copies).remove(&folder);
+        }
+    }
+
     /// Records that every folder of the account was just synced.
     pub fn set_synced(&self, account: AccountId) {
         *lock(&self.account(account).synced) = Some(Instant::now());
@@ -592,6 +638,7 @@ impl Engine {
                     status: Mutex::default(),
                     draft_edits: Mutex::default(),
                     first_sync: Mutex::default(),
+                    label_copies: Mutex::default(),
                 })
             })
             .clone()

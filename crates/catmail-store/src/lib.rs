@@ -33,7 +33,9 @@ pub use error::{Error, Result};
 pub use folders::{FolderSyncState, Folders, Reconciled, RemoteFolder};
 pub use identities::{DeletedIdentity, Identities, Sending};
 pub use messages::{MessageLocation, Messages, NewBody, NewMessage};
-pub use ops::{CopyCheckpoint, Moved, PendingOps, ReplayFolder, ReplayKind, ReplayOp, Touched};
+pub use ops::{
+    CopyCheckpoint, LabelCopies, Moved, PendingOps, ReplayFolder, ReplayKind, ReplayOp, Touched,
+};
 pub use outbox::{NewOutboxEntry, Outbox, OutboxJob};
 pub use private::create_private_dir;
 

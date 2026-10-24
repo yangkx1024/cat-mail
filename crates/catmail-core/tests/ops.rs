@@ -5,7 +5,7 @@ use catmail_testkit::{FakeMailbox, ServerState};
 
 mod common;
 
-use common::{Env, drain, synced_env};
+use common::{Env, drain, gmail_trashes, labelled, synced_env};
 
 /// INBOX with "one", "two", "three" (UIDs 1..=3), plus Archive and Trash.
 fn state() -> ServerState {
@@ -265,6 +265,51 @@ async fn a_message_moved_offline_downloads_from_where_it_was() {
         .unwrap();
     let message = env.client.download_message(two).await.unwrap();
     assert_eq!(message.body.unwrap().text.as_deref(), Some("Hello\r\n"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn moving_a_message_drops_its_other_gmail_labels() {
+    let env = synced_env(labelled(true)).await;
+    let search = async || env.search_folders("labelled").await;
+    // One message, however many labels it has.
+    assert_eq!(search().await, [env.folder("INBOX").await.id]);
+
+    let id = env.id_of("INBOX", "labelled").await;
+    env.client.delete_messages(vec![id], false).await.unwrap();
+    let trash = env.folder("Trash").await.id;
+    assert_eq!(search().await, [trash]);
+
+    gmail_trashes(&env.fake);
+    let start = env.fake.state().log.len();
+    assert_eq!(env.replay().await.applied, 1);
+    let commands = env.commands_since(start);
+    for name in ["All Mail", "Important"] {
+        assert!(
+            commands
+                .iter()
+                .any(|c| c.starts_with("EXAMINE") && c.contains(name)),
+            "{commands:?}"
+        );
+        assert!(env.messages(name).await.is_empty(), "{name}");
+    }
+    assert_eq!(search().await, [trash]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn moving_a_message_leaves_its_copies_elsewhere_alone() {
+    let env = synced_env(labelled(false)).await;
+    let id = env.id_of("INBOX", "labelled").await;
+    env.client.delete_messages(vec![id], false).await.unwrap();
+    let start = env.fake.state().log.len();
+    assert_eq!(env.replay().await.applied, 1);
+    let commands = env.commands_since(start);
+    assert!(
+        !commands.iter().any(|c| c.starts_with("EXAMINE")),
+        "{commands:?}"
+    );
+    assert_eq!(env.messages("Important").await.len(), 1);
+    let found = env.search_folders("labelled").await;
+    assert_eq!(found.len(), 3, "copies are messages of their own");
 }
 
 #[tokio::test(flavor = "multi_thread")]

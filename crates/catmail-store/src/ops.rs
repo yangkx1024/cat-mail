@@ -18,7 +18,7 @@ use catmail_types::{
 use rusqlite::{Connection, OptionalExtension, Params, Row, params};
 
 use crate::columns::{conversion_error, parse_text};
-use crate::folders::Folders;
+use crate::folders::{Folders, LABEL_ACCOUNTS};
 use crate::{Error, Result};
 
 /// What a change did, for change events.
@@ -115,6 +115,16 @@ impl ReplayKind {
     }
 }
 
+/// The [`ReplayFolder`] in columns `id, name, remote_name, uidvalidity`.
+fn replay_folder(r: &Row<'_>) -> rusqlite::Result<ReplayFolder> {
+    Ok(ReplayFolder {
+        id: FolderId(r.get(0)?),
+        name: r.get(1)?,
+        remote_name: r.get(2)?,
+        uidvalidity: r.get(3)?,
+    })
+}
+
 /// A folder with ops to replay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayFolder {
@@ -123,6 +133,14 @@ pub struct ReplayFolder {
     pub remote_name: String,
     /// The ops are replayed only if the server still reports this one.
     pub uidvalidity: Option<u32>,
+}
+
+/// Copies in `folder` of messages being moved, which the move may take with them (see
+/// [`PendingOps::label_copies`]).
+#[derive(Debug, Clone)]
+pub struct LabelCopies {
+    pub folder: ReplayFolder,
+    pub uids: Vec<u32>,
 }
 
 /// What the server said a move did (COPYUID): the target's UIDVALIDITY, and the new
@@ -535,15 +553,39 @@ impl<'c> PendingOps<'c> {
                           WHERE account_id = ?1 AND status = 'pending')
              ORDER BY remote_name <> 'INBOX', id",
         )?;
-        let rows = stmt.query_map([account.0], |r| {
-            Ok(ReplayFolder {
-                id: FolderId(r.get(0)?),
-                name: r.get(1)?,
-                remote_name: r.get(2)?,
-                uidvalidity: r.get(3)?,
-            })
-        })?;
+        let rows = stmt.query_map([account.0], replay_folder)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// On a labels account ([`LABEL_ACCOUNTS`]): the other copies of messages with a
+    /// pending move, by folder, UIDs ascending. Moving a message can move those too (to
+    /// Trash, the server takes every label off), so they are looked for once it is made.
+    pub fn label_copies(&self, account: AccountId) -> Result<Vec<LabelCopies>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT DISTINCT f.id, f.name, f.remote_name, f.uidvalidity, c.uid
+             FROM pending_ops o
+             JOIN messages m ON m.id = o.message_id AND m.account_id = o.account_id
+             JOIN messages c ON c.account_id = m.account_id
+                            AND c.message_id_hdr = m.message_id_hdr
+             JOIN folders f ON f.id = c.folder_id
+             WHERE o.account_id = ?1 AND o.status = 'pending' AND o.kind = 'move'
+               AND c.uid IS NOT NULL AND c.folder_id NOT IN (o.folder_id, m.folder_id)
+               AND ?1 IN ({LABEL_ACCOUNTS})
+             ORDER BY f.id, c.uid"
+        ))?;
+        let mut copies: Vec<LabelCopies> = Vec::new();
+        let mut rows = stmt.query([account.0])?;
+        while let Some(r) = rows.next()? {
+            let (id, uid) = (FolderId(r.get(0)?), r.get(4)?);
+            match copies.last_mut() {
+                Some(last) if last.folder.id == id => last.uids.push(uid),
+                _ => copies.push(LabelCopies {
+                    folder: replay_folder(r)?,
+                    uids: vec![uid],
+                }),
+            }
+        }
+        Ok(copies)
     }
 
     /// The folder's ops in replay order, grouped by what they do so that one command can
@@ -1139,6 +1181,51 @@ mod tests {
         fn ops(&self) -> Vec<PendingOp> {
             self.store.read(|db| db.ops().list(None)).unwrap()
         }
+    }
+
+    #[test]
+    fn moves_on_a_labels_account_name_the_other_copies() {
+        let f = setup();
+        let copy = |uid, message_id: &str| NewMessage {
+            state: FlagState {
+                uid,
+                ..Default::default()
+            },
+            message_id: Some(message_id.into()),
+            ..Default::default()
+        };
+        // (folder, uids) of the copies.
+        let copies = |f: &Fixture| -> Vec<(FolderId, Vec<u32>)> {
+            let copies = f.store.read(|db| db.ops().label_copies(f.account)).unwrap();
+            copies.into_iter().map(|c| (c.folder.id, c.uids)).collect()
+        };
+        f.write(|db| {
+            db.messages()
+                .upsert(f.account, f.inbox, &[copy(4, "x"), copy(5, "y")])?;
+            db.messages()
+                .upsert(f.account, f.archive, &[copy(1, "x"), copy(2, "y")])?;
+            db.messages().upsert(f.account, f.trash, &[copy(1, "x")])
+        });
+        let (x, y) = (f.message(f.inbox, 4), f.message(f.inbox, 5));
+        f.write(|db| db.ops().move_messages(&[x], f.trash, 0));
+        f.write(|db| db.ops().set_flags(&[y], Flags::SEEN, Flags::empty(), 0));
+        // Elsewhere, copies are messages of their own.
+        assert!(copies(&f).is_empty());
+
+        f.write(|db| {
+            db.folders().reconcile(
+                f.account,
+                &[
+                    folder("INBOX", Some(FolderRole::Inbox)),
+                    folder("Archive", Some(FolderRole::Archive)),
+                    folder("Trash", Some(FolderRole::Trash)),
+                    folder("All Mail", Some(FolderRole::All)),
+                ],
+            )?;
+            Ok(())
+        });
+        // Not in the folder it is moved from or to; not for a flag change.
+        assert_eq!(copies(&f), [(f.archive, vec![1])]);
     }
 
     #[test]

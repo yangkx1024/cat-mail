@@ -47,11 +47,10 @@ pub(crate) async fn attachment_content(engine: Arc<Engine>, id: AttachmentId) ->
         &engine,
         source.message.clone(),
         async move |session, location| {
-            session
+            Ok(session
                 .fetch_sections(location.uid, std::slice::from_ref(&section))
                 .await?
-                .and_then(|mut parts| parts.remove(&section))
-                .ok_or(GONE)
+                .and_then(|mut parts| parts.remove(&section)))
         },
     )
     .await?;
@@ -112,7 +111,7 @@ pub(crate) async fn raw_message(engine: Arc<Engine>, id: MessageId) -> Result<Ve
     }
     let (account, folder) = (location.account, location.folder);
     let raw = on_server(&engine, location, async move |session, location| {
-        session.fetch_raw(location.uid).await?.ok_or(GONE)
+        Ok(session.fetch_raw(location.uid).await?)
     })
     .await?;
     let raw = blocking({
@@ -136,23 +135,48 @@ pub(crate) async fn raw_message(engine: Arc<Engine>, id: MessageId) -> Result<Ve
 /// connections, after EXAMINE has confirmed the UIDVALIDITY, and cancelled if the
 /// account is removed meanwhile. Every on-demand fetch goes through here.
 ///
+/// `op` returns `None` if the server sent nothing of what it asked for: the message is
+/// gone. If the server confirms it has no such UID, the local copy is deleted, as the
+/// next sync of the folder would: until then it would stay in the list (and in search,
+/// from another Gmail label), failing to open.
+///
 /// The caller looked up `location` before calling, and the cancellation is obtained
 /// after that: a removal that started earlier left the account marked removed, which
 /// cancels at once, and one that starts later is noticed.
 async fn on_server<T>(
     engine: &Arc<Engine>,
     location: MessageLocation,
-    op: impl AsyncFn(&mut Session, &MessageLocation) -> Result<T>,
+    op: impl AsyncFn(&mut Session, &MessageLocation) -> Result<Option<T>>,
 ) -> Result<T> {
     let mut cancellation = engine.cancellation(location.account);
     let account = location.account;
+    let owned = engine.clone();
     tokio::select! {
         result = with_session(engine, account, async move |session| {
             examine(session, &location).await?;
-            op(session, &location).await
+            if let Some(done) = op(session, &location).await? {
+                return Ok(done);
+            }
+            // Not just a part the server left out of its answer.
+            if session.uid_search_uids(&[location.uid]).await?.is_empty() {
+                forget(&owned, location.clone()).await?;
+            }
+            Err(GONE)
         }) => result,
         () = cancellation.cancelled() => Err(Error::Cancelled),
     }
+}
+
+/// Deletes the local copy of a message the server no longer has at `location`.
+async fn forget(engine: &Arc<Engine>, location: MessageLocation) -> Result<()> {
+    let (account, folder) = (location.account, location.folder);
+    let deleted = engine
+        .write(move |db| db.messages().delete_gone(&location))
+        .await?;
+    if deleted {
+        engine.emit(Event::MessagesChanged { account, folder });
+    }
+    Ok(())
 }
 
 enum Fetched {
@@ -207,8 +231,12 @@ async fn ensure_downloaded(engine: &Arc<Engine>, id: MessageId, whole: bool) -> 
 }
 
 /// Runs after [`examine`] (see [`on_server`]). Fetches a message larger than `limit` in
-/// parts.
-async fn fetch(session: &mut Session, location: &MessageLocation, limit: u32) -> Result<Fetched> {
+/// parts. `None` if the message is gone.
+async fn fetch(
+    session: &mut Session,
+    location: &MessageLocation,
+    limit: u32,
+) -> Result<Option<Fetched>> {
     let uid = location.uid;
     if location.size.is_some_and(|size| size > limit) {
         match session.fetch_structure(uid).await {
@@ -217,18 +245,21 @@ async fn fetch(session: &mut Session, location: &MessageLocation, limit: u32) ->
                 let parts = if sections.is_empty() {
                     HashMap::new()
                 } else {
-                    session.fetch_sections(uid, &sections).await?.ok_or(GONE)?
+                    let Some(parts) = session.fetch_sections(uid, &sections).await? else {
+                        return Ok(None);
+                    };
+                    parts
                 };
                 // A body stored without some of its text would never be fetched again.
                 if sections.iter().all(|s| parts.contains_key(s)) {
-                    return Ok(Fetched::Parts(structure, parts));
+                    return Ok(Some(Fetched::Parts(structure, parts)));
                 }
                 tracing::warn!(
                     uid,
                     "server left out text parts; fetching the whole message"
                 );
             }
-            Ok(None) => return Err(GONE),
+            Ok(None) => return Ok(None),
             // Some servers send BODYSTRUCTUREs that can't be parsed; the raw message
             // can always be.
             Err(imap::Error::Incomplete(_)) => {
@@ -237,7 +268,7 @@ async fn fetch(session: &mut Session, location: &MessageLocation, limit: u32) ->
             Err(e) => return Err(e.into()),
         }
     }
-    Ok(Fetched::Whole(session.fetch_raw(uid).await?.ok_or(GONE)?))
+    Ok(session.fetch_raw(uid).await?.map(Fetched::Whole))
 }
 
 /// Opens the message's folder read-only and makes sure its UIDs still mean what they

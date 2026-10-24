@@ -10,7 +10,7 @@ use tokio::runtime::Handle;
 
 mod common;
 
-use common::{Env, drain, env_added, env_built, eventually};
+use common::{Env, drain, env_added, env_built, eventually, gmail_trashes, labelled};
 
 const HOUR: Duration = Duration::from_secs(3600);
 
@@ -220,6 +220,39 @@ async fn queued_changes_reach_the_server_at_once() {
     // And back to IDLE, without a full sync.
     env.wait_for_idle(2).await;
     assert_eq!(env.fake.state().received("LIST"), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_moved_out_leaves_its_other_gmail_labels_at_once() {
+    let env = watching(labelled(true), schedule(HOUR, HOUR)).await;
+    env.wait_for_idle(1).await;
+    let id = env.id_of("INBOX", "labelled").await;
+
+    gmail_trashes(&env.fake);
+    env.client.delete_messages(vec![id], false).await.unwrap();
+    env.wait_for_subjects("Important", &[]).await;
+    env.wait_for_subjects("All Mail", &[]).await;
+    assert_eq!(env.subjects("Trash").await, ["labelled"]);
+    // Without a full sync.
+    env.wait_for_idle(2).await;
+    assert_eq!(env.fake.state().received("LIST"), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn other_gmail_labels_are_looked_at_after_a_drop_past_the_move() {
+    let env = watching(labelled(true), schedule(HOUR, HOUR)).await;
+    env.wait_for_idle(1).await;
+    let id = env.id_of("INBOX", "labelled").await;
+    gmail_trashes(&env.fake);
+    // The move is made and answered; the connection drops looking at the labels.
+    env.fake.state().faults.drop_on_open = Some("All Mail".into());
+
+    env.client.delete_messages(vec![id], false).await.unwrap();
+    env.wait_for_subjects("Important", &[]).await;
+    env.wait_for_subjects("All Mail", &[]).await;
+    assert_eq!(env.subjects("Trash").await, ["labelled"]);
+    assert!(env.fake.state().faults.drop_on_open.is_none(), "dropped");
+    assert_eq!(env.fake.state().received("LIST"), 1, "without a full sync");
 }
 
 #[tokio::test(flavor = "multi_thread")]
