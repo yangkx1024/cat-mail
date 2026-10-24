@@ -2,20 +2,21 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use catmail_types::{
-    AccountId, Address, BlobHash, FlagState, Flags, FolderId, Message, MessageBody, MessageCursor,
-    MessageId, MessageSummary, SearchQuery,
+    AccountId, Address, BlobHash, FlagState, Flags, FolderId, FolderKind, FolderRole, GmailLabel,
+    Message, MessageBody, MessageCursor, MessageId, MessageSummary, SearchQuery,
 };
 use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
 use crate::Result;
 use crate::attachments::{Attachments, NewAttachment};
-use crate::columns::{id_list, json, parse_opt_text, to_id_list, to_json};
-use crate::folders::LABEL_ACCOUNTS;
+use crate::columns::{id_list, json, parse_opt_text, parse_text, to_id_list, to_json};
+use crate::folders::{Folders, LABEL_ACCOUNTS};
 use crate::fts;
 use crate::ops::MOVING;
 
-const SUMMARY_COLUMNS: &str =
-    "id, account_id, folder_id, subject, from_json, date, snippet, flags, has_attachments";
+/// Of `messages m`.
+const SUMMARY_COLUMNS: &str = "m.id, m.account_id, m.folder_id, m.subject, m.from_json, m.date,
+    m.snippet, m.flags, m.has_attachments";
 
 /// The order of lists and search results, as [`MessageCursor`] describes it.
 /// `list_date` is `date` with a missing one sorted last.
@@ -29,20 +30,51 @@ const AFTER: &str = "(list_date, id) < (:after_date, :after_id)";
 /// A page of a folder ([`Messages::list`]) is two index seeks: the rest of the cursor's
 /// date, then the older dates. With [`AFTER`], each page of a large group of equal dates
 /// (or of messages without one) would step over the whole group above it.
-static LIST_SAME_DATE: LazyLock<String> = LazyLock::new(|| {
-    format!(
-        "SELECT {SUMMARY_COLUMNS} FROM messages
-         WHERE folder_id = :folder AND list_date = :after_date AND id < :after_id
-         ORDER BY id DESC LIMIT :limit"
+struct Page {
+    same_date: String,
+    older: String,
+}
+
+impl Page {
+    /// The rows of `from` that `filter` takes, newest first by its `date` and `id`
+    /// columns: those of the index the page seeks in.
+    fn new(from: &str, filter: &str, date: &str, id: &str) -> Self {
+        Self {
+            same_date: format!(
+                "SELECT {SUMMARY_COLUMNS} FROM {from}
+                 WHERE {filter} AND {date} = :after_date AND {id} < :after_id
+                 ORDER BY {id} DESC LIMIT :limit"
+            ),
+            older: format!(
+                "SELECT {SUMMARY_COLUMNS} FROM {from}
+                 WHERE {filter} AND {date} < :after_date
+                 ORDER BY {date} DESC, {id} DESC LIMIT :limit"
+            ),
+        }
+    }
+}
+
+/// A location's messages, in `messages_folder_date`.
+static LIST_FOLDER: LazyLock<Page> =
+    LazyLock::new(|| Page::new("messages m", "m.folder_id = :key", "m.list_date", "m.id"));
+
+/// A label's messages, in `message_labels_list`: those in All Mail.
+static LIST_LABEL: LazyLock<Page> = LazyLock::new(|| {
+    Page::new(
+        "message_labels l JOIN messages m ON m.id = l.message_id",
+        "l.folder_id = :key AND m.folder_id IN all_mail",
+        "l.list_date",
+        "l.message_id",
     )
 });
 
-/// See [`LIST_SAME_DATE`].
-static LIST_OLDER: LazyLock<String> = LazyLock::new(|| {
-    format!(
-        "SELECT {SUMMARY_COLUMNS} FROM messages
-         WHERE folder_id = :folder AND list_date < :after_date
-         ORDER BY {NEWEST_FIRST} LIMIT :limit"
+/// Gmail's Starred, the account's flagged messages in All Mail, in `messages_flagged`.
+static LIST_STARRED: LazyLock<Page> = LazyLock::new(|| {
+    Page::new(
+        "messages m",
+        "m.account_id = :key AND m.flags & 2 <> 0 AND m.folder_id IN all_mail",
+        "m.list_date",
+        "m.id",
     )
 });
 
@@ -81,6 +113,9 @@ pub struct NewMessage {
     /// The Date header; INTERNALDATE is used when it is missing.
     pub date: Option<i64>,
     pub has_attachments: bool,
+    /// X-GM-MSGID and X-GM-THRID, on Gmail.
+    pub gm_msgid: Option<u64>,
+    pub gm_thrid: Option<u64>,
 }
 
 /// A downloaded body, stored in one go with its attachments.
@@ -160,12 +195,12 @@ impl<'c> Messages<'c> {
     ) -> Result<usize> {
         let mut insert = self.conn.prepare_cached(
             "INSERT INTO messages (account_id, folder_id, uid, flags, keywords_json, modseq,
-                                   internal_date, size, message_id_hdr, in_reply_to,
-                                   references_hdr, subject, from_json, to_json, cc_json,
-                                   reply_to_json, date, has_attachments)
+                                   gm_msgid, gm_thrid, internal_date, size, message_id_hdr,
+                                   in_reply_to, references_hdr, subject, from_json, to_json,
+                                   cc_json, reply_to_json, date, has_attachments)
              SELECT :account, :folder, :uid, :flags, :keywords, :modseq,
-                    :internal_date, :size, :message_id, :in_reply_to,
-                    :references, :subject, :from, :to, :cc, :reply_to, :date,
+                    :gm_msgid, :gm_thrid, :internal_date, :size, :message_id,
+                    :in_reply_to, :references, :subject, :from, :to, :cc, :reply_to, :date,
                     :has_attachments
              WHERE NOT EXISTS (
                  SELECT 1 FROM pending_ops
@@ -174,6 +209,7 @@ impl<'c> Messages<'c> {
              ON CONFLICT (folder_id, uid) DO NOTHING",
         )?;
         let mut inserted = 0;
+        let mut labels = LabelFolders::new(self.conn, account);
         // Refreshed in one go: `update_flags` reads the folder's pending flag ops each call.
         let mut existing = Vec::new();
         for m in messages {
@@ -184,6 +220,8 @@ impl<'c> Messages<'c> {
                 ":flags": m.state.flags.bits(),
                 ":keywords": to_json(&m.state.keywords),
                 ":modseq": m.state.modseq.map(|v| v as i64),
+                ":gm_msgid": m.gm_msgid.map(|v| v as i64),
+                ":gm_thrid": m.gm_thrid.map(|v| v as i64),
                 ":internal_date": m.internal_date,
                 ":size": m.size,
                 ":message_id": m.message_id,
@@ -200,6 +238,9 @@ impl<'c> Messages<'c> {
             if added > 0 {
                 inserted += 1;
                 self.reindex(self.conn.last_insert_rowid())?;
+                if let Some(names) = &m.state.labels {
+                    self.set_labels(folder, m.state.uid, &labels.ids(names)?)?;
+                }
             } else {
                 existing.push(m.state.clone());
             }
@@ -210,9 +251,10 @@ impl<'c> Messages<'c> {
         Ok(inserted)
     }
 
-    /// Applies the server's flags to stored messages; UIDs not stored are ignored.
-    /// Flag changes made locally and not yet replayed are applied on top, so a sync
-    /// doesn't undo them. Returns how many rows' flags or keywords changed.
+    /// Applies the server's flags, and labels where given, to stored messages; UIDs not
+    /// stored are ignored. Flag changes made locally and not yet replayed are applied on
+    /// top, so a sync doesn't undo them. Returns how many rows' flags, keywords or labels
+    /// changed.
     pub fn update_flags(&self, folder: FolderId, states: &[FlagState]) -> Result<usize> {
         let mut local: HashMap<u32, Vec<(Flags, Flags)>> = HashMap::new();
         let mut pending = self.conn.prepare_cached(
@@ -240,6 +282,7 @@ impl<'c> Messages<'c> {
             "UPDATE messages SET modseq = :modseq
              WHERE folder_id = :folder AND uid = :uid AND modseq IS NOT :modseq",
         )?;
+        let mut labels = None;
         let mut changed = 0;
         for s in states {
             let flags = local.get(&s.uid).map_or(s.flags, |changes| {
@@ -262,9 +305,42 @@ impl<'c> Messages<'c> {
                     ":modseq": modseq,
                 })?;
             }
-            changed += updated;
+            let relabelled = match &s.labels {
+                Some(names) => {
+                    let labels = match &mut labels {
+                        Some(labels) => labels,
+                        None => labels.insert(LabelFolders::of_folder(self.conn, folder)?),
+                    };
+                    self.set_labels(folder, s.uid, &labels.ids(names)?)?
+                }
+                None => false,
+            };
+            changed += (updated > 0 || relabelled) as usize;
         }
         Ok(changed)
+    }
+
+    /// Makes the labels of the message at `uid` these label folders, adding and removing
+    /// only what differs. Returns whether that changed any.
+    fn set_labels(&self, folder: FolderId, uid: u32, labels: &[FolderId]) -> Result<bool> {
+        let wanted = to_json(&labels.iter().map(|f| f.0).collect::<Vec<_>>());
+        let removed = self
+            .conn
+            .prepare_cached(
+                "DELETE FROM message_labels
+                 WHERE message_id = (SELECT id FROM messages WHERE folder_id = ?1 AND uid = ?2)
+                   AND folder_id NOT IN (SELECT value FROM json_each(?3))",
+            )?
+            .execute(params![folder.0, uid, wanted])?;
+        let added = self
+            .conn
+            .prepare_cached(
+                "INSERT OR IGNORE INTO message_labels (message_id, folder_id, account_id, list_date)
+                 SELECT m.id, j.value, m.account_id, m.list_date
+                 FROM messages m, json_each(?3) j WHERE m.folder_id = ?1 AND m.uid = ?2",
+            )?
+            .execute(params![folder.0, uid, wanted])?;
+        Ok(removed + added > 0)
     }
 
     /// Returns how many rows were deleted.
@@ -300,19 +376,39 @@ impl<'c> Messages<'c> {
     }
 
     /// Newest first (see [`MessageCursor`]): the first `limit`, or the `limit` after
-    /// `after`.
+    /// `after`. A label lists the messages with it that are in All Mail; Starred, on
+    /// Gmail, the flagged ones.
     pub fn list(
         &self,
         folder: FolderId,
         limit: u32,
         after: Option<MessageCursor>,
     ) -> Result<Vec<MessageSummary>> {
+        let Some((account, kind, role)) = self
+            .conn
+            .prepare_cached("SELECT account_id, kind, role FROM folders WHERE id = ?1")?
+            .query_row([folder.0], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    parse_text::<FolderKind>(r, "kind")?,
+                    parse_opt_text::<FolderRole>(r, "role")?,
+                ))
+            })
+            .optional()?
+        else {
+            return Ok(Vec::new());
+        };
+        let (sql, key) = match (kind, role) {
+            (FolderKind::Location, _) => (&*LIST_FOLDER, folder.0),
+            (FolderKind::Label, Some(FolderRole::Flagged)) => (&*LIST_STARRED, account),
+            (FolderKind::Label, _) => (&*LIST_LABEL, folder.0),
+        };
         let (after_date, after_id) = cursor_params(after);
-        let mut same_date = self.conn.prepare_cached(&LIST_SAME_DATE)?;
+        let mut same_date = self.conn.prepare_cached(&sql.same_date)?;
         let mut page = same_date
             .query_map(
                 named_params! {
-                    ":folder": folder.0,
+                    ":key": key,
                     ":after_date": after_date,
                     ":after_id": after_id,
                     ":limit": limit,
@@ -322,10 +418,10 @@ impl<'c> Messages<'c> {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let left = limit - page.len() as u32;
         if left > 0 {
-            let mut older = self.conn.prepare_cached(&LIST_OLDER)?;
+            let mut older = self.conn.prepare_cached(&sql.older)?;
             let rows = older.query_map(
                 named_params! {
-                    ":folder": folder.0,
+                    ":key": key,
                     ":after_date": after_date,
                     ":limit": left,
                 },
@@ -349,7 +445,7 @@ impl<'c> Messages<'c> {
         // A copy is one result with the others: same Message-ID, or else itself (a TEXT
         // Message-ID never equals an INTEGER id).
         let sql = format!(
-            "SELECT {SUMMARY_COLUMNS} FROM messages
+            "SELECT {SUMMARY_COLUMNS} FROM messages m
              WHERE id IN (
                  SELECT id FROM (
                      SELECT m.id, row_number() OVER (
@@ -423,8 +519,8 @@ impl<'c> Messages<'c> {
             "SELECT {SUMMARY_COLUMNS}, to_json, cc_json, reply_to_json, message_id_hdr,
                     references_hdr, size,
                     b.message_id IS NOT NULL AS has_body, b.text_plain, b.text_html
-             FROM messages LEFT JOIN message_bodies b ON b.message_id = messages.id
-             WHERE id = ?1"
+             FROM messages m LEFT JOIN message_bodies b ON b.message_id = m.id
+             WHERE m.id = ?1"
         );
         let found = self
             .conn
@@ -537,6 +633,52 @@ impl<'c> Messages<'c> {
     }
 }
 
+/// The label folders of an account by the labels X-GM-LABELS names, each looked up once:
+/// an account has tens of labels, a batch of messages hundreds.
+struct LabelFolders<'c> {
+    folders: Folders<'c>,
+    account: AccountId,
+    found: HashMap<GmailLabel, Option<FolderId>>,
+}
+
+impl<'c> LabelFolders<'c> {
+    fn new(conn: &'c Connection, account: AccountId) -> Self {
+        Self {
+            folders: Folders::new(conn),
+            account,
+            found: HashMap::new(),
+        }
+    }
+
+    fn of_folder(conn: &'c Connection, folder: FolderId) -> Result<Self> {
+        let account = conn
+            .prepare_cached("SELECT account_id FROM folders WHERE id = ?1")?
+            .query_row([folder.0], |r| r.get(0))?;
+        Ok(Self::new(conn, AccountId(account)))
+    }
+
+    /// The folders of `labels`, each once, in their order; those without one left out.
+    fn ids(&mut self, labels: &[GmailLabel]) -> Result<Vec<FolderId>> {
+        let mut ids = Vec::with_capacity(labels.len());
+        for label in labels {
+            let id = match self.found.get(label) {
+                Some(&id) => id,
+                None => {
+                    let id = self.folders.label(self.account, label)?;
+                    self.found.insert(label.clone(), id);
+                    id
+                }
+            };
+            if let Some(id) = id
+                && !ids.contains(&id)
+            {
+                ids.push(id);
+            }
+        }
+        Ok(ids)
+    }
+}
+
 /// Names and addresses, so either finds the message.
 fn address_text<'a>(addresses: impl IntoIterator<Item = &'a Address>) -> String {
     let mut out = String::new();
@@ -569,7 +711,7 @@ fn summary_from_row(row: &Row<'_>) -> rusqlite::Result<MessageSummary> {
 mod tests {
     use std::collections::HashSet;
 
-    use catmail_types::{Folder, FolderRole};
+    use catmail_types::Folder;
 
     use super::*;
     use crate::Store;
@@ -584,6 +726,7 @@ mod tests {
             name: "INBOX".into(),
             delimiter: None,
             role: None,
+            kind: FolderKind::Location,
             selectable: true,
         };
         store
@@ -767,10 +910,10 @@ mod tests {
                         let stmt = db.conn.prepare_cached(sql)?;
                         Ok(stmt.reset_status(rusqlite::StatementStatus::VmStep))
                     };
-                    steps(&LIST_SAME_DATE)?;
-                    steps(&LIST_OLDER)?;
+                    steps(&LIST_FOLDER.same_date)?;
+                    steps(&LIST_FOLDER.older)?;
                     db.messages().list(folder.id, 2, Some(after))?;
-                    Ok(steps(&LIST_SAME_DATE)? + steps(&LIST_OLDER)?)
+                    Ok(steps(&LIST_FOLDER.same_date)? + steps(&LIST_FOLDER.older)?)
                 })
                 .unwrap()
         };
@@ -801,18 +944,21 @@ mod tests {
                 flags: Flags::SEEN,
                 keywords: vec!["$Junk".into()],
                 modseq: Some(5),
+                labels: None,
             },
             FlagState {
                 uid: 2,
                 flags: Flags::empty(),
                 keywords: vec![],
                 modseq: None,
+                labels: None,
             },
             FlagState {
                 uid: 99,
                 flags: Flags::SEEN,
                 keywords: vec![],
                 modseq: None,
+                labels: None,
             },
         ];
         assert_eq!(
@@ -1026,6 +1172,7 @@ mod tests {
             name: "INBOX".into(),
             delimiter: None,
             role: None,
+            kind: FolderKind::Location,
             selectable: true,
         };
         store
@@ -1072,6 +1219,7 @@ mod tests {
                 name: name.into(),
                 delimiter: None,
                 role,
+                kind: FolderKind::Location,
                 selectable: true,
             })
             .collect();
@@ -1265,5 +1413,352 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// A Gmail account's folders by name: All Mail and Trash are locations (UIDVALIDITY
+    /// 1), the rest labels.
+    fn gmail(store: &Store) -> (AccountId, HashMap<&'static str, FolderId>) {
+        let account = test_util::account(store, "a@gmail.com");
+        let mailboxes = [
+            ("INBOX", Some(FolderRole::Inbox), FolderKind::Label),
+            (
+                "[Gmail]/All Mail",
+                Some(FolderRole::All),
+                FolderKind::Location,
+            ),
+            (
+                "[Gmail]/Trash",
+                Some(FolderRole::Trash),
+                FolderKind::Location,
+            ),
+            (
+                "[Gmail]/Important",
+                Some(FolderRole::Important),
+                FolderKind::Label,
+            ),
+            (
+                "[Gmail]/Starred",
+                Some(FolderRole::Flagged),
+                FolderKind::Label,
+            ),
+            ("Work", None, FolderKind::Label),
+        ];
+        let remote: Vec<_> = mailboxes
+            .iter()
+            .map(|&(name, role, kind)| RemoteFolder {
+                remote_name: name.into(),
+                name: name.into(),
+                delimiter: Some('/'),
+                role,
+                kind,
+                selectable: true,
+            })
+            .collect();
+        let ids = store
+            .write(|db| {
+                db.folders().reconcile(account, &remote)?;
+                let folders = db.folders().list(account)?;
+                let mut ids = HashMap::new();
+                for (name, _, kind) in mailboxes {
+                    let id = folders.iter().find(|f| f.name == name).unwrap().id;
+                    if kind == FolderKind::Location {
+                        db.folders().reset_uidvalidity(id, 1)?;
+                    }
+                    ids.insert(name, id);
+                }
+                Ok(ids)
+            })
+            .unwrap();
+        (account, ids)
+    }
+
+    fn user(name: &str) -> GmailLabel {
+        GmailLabel::user(name, name)
+    }
+
+    /// A Gmail message dated by its UID, its X-GM-MSGID 100 more.
+    fn labelled(uid: u32, flags: Flags, labels: Vec<GmailLabel>) -> NewMessage {
+        let mut m = message(uid, Some(uid as i64), flags);
+        m.state.labels = Some(labels);
+        (m.gm_msgid, m.gm_thrid) = (Some(100 + uid as u64), Some(100 + uid as u64));
+        m
+    }
+
+    fn subjects(store: &Store, folder: FolderId) -> Vec<String> {
+        store
+            .read(|db| db.messages().list(folder, 50, None))
+            .unwrap()
+            .into_iter()
+            .map(|m| m.subject.unwrap())
+            .collect()
+    }
+
+    /// (total, unread) of every folder of the account, checked against counting anew.
+    fn counts(store: &Store, account: AccountId) -> HashMap<String, (u32, u32)> {
+        store
+            .read(|db| {
+                let mut counts = HashMap::new();
+                for f in db.folders().list(account)? {
+                    let shown = db.messages().list(f.id, u32::MAX, None)?;
+                    let unread = shown
+                        .iter()
+                        .filter(|m| !m.flags.contains(Flags::SEEN))
+                        .count() as u32;
+                    assert_eq!(
+                        (f.total_count, f.unread_count),
+                        (shown.len() as u32, unread),
+                        "{}",
+                        f.name
+                    );
+                    counts.insert(f.name, (f.total_count, f.unread_count));
+                }
+                Ok(counts)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn labels_show_and_count_what_is_in_all_mail() {
+        let store = test_util::store();
+        let (account, f) = gmail(&store);
+        let inbox = GmailLabel::System(FolderRole::Inbox);
+        let important = GmailLabel::System(FolderRole::Important);
+        store
+            .write(|db| {
+                db.messages().upsert(
+                    account,
+                    f["[Gmail]/All Mail"],
+                    &[
+                        labelled(
+                            1,
+                            Flags::empty(),
+                            vec![inbox.clone(), important, user("Work")],
+                        ),
+                        labelled(2, Flags::SEEN | Flags::FLAGGED, vec![user("Work")]),
+                        labelled(3, Flags::FLAGGED, vec![user("Hidden")]),
+                    ],
+                )?;
+                // Trashed messages keep their labels, but labels don't show them.
+                db.messages().upsert(
+                    account,
+                    f["[Gmail]/Trash"],
+                    &[labelled(4, Flags::FLAGGED, vec![user("Work")])],
+                )
+            })
+            .unwrap();
+        let s = |uids: &[u32]| {
+            uids.iter()
+                .map(|uid| format!("subject {uid}"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(subjects(&store, f["INBOX"]), s(&[1]));
+        assert_eq!(subjects(&store, f["Work"]), s(&[2, 1]));
+        assert_eq!(subjects(&store, f["[Gmail]/Important"]), s(&[1]));
+        assert_eq!(subjects(&store, f["[Gmail]/Starred"]), s(&[3, 2]));
+        assert_eq!(subjects(&store, f["[Gmail]/All Mail"]), s(&[3, 2, 1]));
+        // A label X-GM-LABELS names that LIST doesn't is kept, not shown.
+        let hidden = store
+            .read(|db| db.folders().find_by_name(account, "Hidden"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (hidden.kind, hidden.listed, hidden.delimiter),
+            (FolderKind::Label, false, Some('/'))
+        );
+        assert_eq!(subjects(&store, hidden.id), s(&[3]));
+        let counted = counts(&store, account);
+        assert_eq!(counted["Work"], (2, 1));
+        assert_eq!(counted["[Gmail]/Starred"], (2, 1));
+        assert_eq!(counted["[Gmail]/Trash"], (1, 1));
+
+        // Labels change with flags; only a change counts.
+        let state = |uid, flags, labels: Vec<GmailLabel>| FlagState {
+            uid,
+            flags,
+            labels: Some(labels),
+            ..Default::default()
+        };
+        let all_mail = f["[Gmail]/All Mail"];
+        let update = |states: &[FlagState]| {
+            store
+                .write(|db| db.messages().update_flags(all_mail, states))
+                .unwrap()
+        };
+        let refreshed = [
+            state(1, Flags::SEEN, vec![inbox.clone(), user("Hidden")]),
+            state(2, Flags::SEEN | Flags::FLAGGED, vec![user("Work")]),
+            state(3, Flags::FLAGGED, vec![user("Hidden"), user("Work")]),
+        ];
+        assert_eq!(update(&refreshed), 2);
+        assert_eq!(update(&refreshed), 0);
+        assert_eq!(subjects(&store, f["Work"]), s(&[3, 2]));
+        assert_eq!(subjects(&store, hidden.id), s(&[3, 1]));
+        assert!(subjects(&store, f["[Gmail]/Important"]).is_empty());
+        // Labels left alone where none are given.
+        let flags_only = FlagState {
+            labels: None,
+            ..state(3, Flags::SEEN | Flags::FLAGGED, vec![])
+        };
+        assert_eq!(update(&[flags_only]), 1);
+        assert_eq!(subjects(&store, f["Work"]), s(&[3, 2]));
+        let counted = counts(&store, account);
+        assert_eq!(counted["Work"], (2, 0));
+        assert_eq!(counted["[Gmail]/Starred"], (2, 0));
+
+        // Moved to Trash and back, as sync will move a row by its X-GM-MSGID.
+        let to = |folder: FolderId| {
+            store
+                .write(|db| {
+                    db.conn.execute(
+                        "UPDATE messages SET folder_id = ?1, flags = ?2 WHERE gm_msgid = 103",
+                        params![folder.0, Flags::FLAGGED.bits()],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+        };
+        to(f["[Gmail]/Trash"]);
+        assert_eq!(subjects(&store, f["Work"]), s(&[2]));
+        assert_eq!(counts(&store, account)["[Gmail]/Starred"], (1, 0));
+        to(all_mail);
+        assert_eq!(subjects(&store, f["Work"]), s(&[3, 2]));
+        assert_eq!(counts(&store, account)["[Gmail]/Starred"], (2, 1));
+
+        // Gone from the server, and with it from its labels.
+        store
+            .write(|db| db.messages().delete_uids(all_mail, &[3]))
+            .unwrap();
+        let counted = counts(&store, account);
+        assert_eq!(counted["Work"], (1, 0));
+        assert_eq!(counted["Hidden"], (1, 0));
+        assert_eq!(counted["[Gmail]/Starred"], (1, 0));
+
+        // A message is one X-GM-MSGID.
+        let again = store.write(|db| {
+            db.messages().upsert(
+                account,
+                f["[Gmail]/Trash"],
+                &[labelled(2, Flags::empty(), vec![])],
+            )
+        });
+        assert!(again.is_err());
+
+        // A folder deleted however it is takes its messages out of the labels first.
+        store
+            .write(|db| {
+                db.conn
+                    .execute("DELETE FROM folders WHERE id = ?1", [all_mail.0])?;
+                Ok(())
+            })
+            .unwrap();
+        let counted = counts(&store, account);
+        assert_eq!(counted["Work"], (0, 0));
+        assert_eq!(counted["[Gmail]/Starred"], (0, 0));
+    }
+
+    /// Starred counts what is flagged in All Mail, also when it is listed only once
+    /// messages are stored: Gmail lets it be hidden from IMAP.
+    #[test]
+    fn starred_listed_later_counts_what_is_flagged() {
+        let store = test_util::store();
+        let (account, f) = gmail(&store);
+        let all: Vec<RemoteFolder> = store
+            .read(|db| db.folders().list(account))
+            .unwrap()
+            .into_iter()
+            .map(|f| RemoteFolder {
+                remote_name: f.name.clone(),
+                name: f.name,
+                delimiter: f.delimiter,
+                role: f.role,
+                kind: f.kind,
+                selectable: f.selectable,
+            })
+            .collect();
+        let hidden: Vec<_> = all
+            .iter()
+            .filter(|f| f.role != Some(FolderRole::Flagged))
+            .cloned()
+            .collect();
+        let reconcile = |remote: &[RemoteFolder]| {
+            store
+                .write(|db| db.folders().reconcile(account, remote))
+                .unwrap()
+        };
+        reconcile(&hidden);
+        let all_mail = f["[Gmail]/All Mail"];
+        store
+            .write(|db| {
+                db.messages().upsert(
+                    account,
+                    all_mail,
+                    &[
+                        labelled(1, Flags::FLAGGED, vec![]),
+                        labelled(2, Flags::FLAGGED | Flags::SEEN, vec![]),
+                    ],
+                )
+            })
+            .unwrap();
+
+        reconcile(&all);
+        assert_eq!(counts(&store, account)["[Gmail]/Starred"], (2, 1));
+        let unflagged = FlagState {
+            uid: 1,
+            ..Default::default()
+        };
+        store
+            .write(|db| db.messages().update_flags(all_mail, &[unflagged]))
+            .unwrap();
+        assert_eq!(counts(&store, account)["[Gmail]/Starred"], (1, 0));
+
+        // Likewise a folder that takes on the role.
+        let renamed: Vec<_> = all
+            .iter()
+            .map(|f| RemoteFolder {
+                role: match f.role {
+                    Some(FolderRole::Flagged) => None,
+                    _ if f.remote_name == "Work" => Some(FolderRole::Flagged),
+                    role => role,
+                },
+                ..f.clone()
+            })
+            .collect();
+        reconcile(&renamed);
+        let counted = counts(&store, account);
+        assert_eq!(
+            (counted["Work"], counted["[Gmail]/Starred"]),
+            ((1, 0), (0, 0))
+        );
+    }
+
+    /// A page of a label or of Starred seeks in its index, as one of a folder does.
+    #[test]
+    fn label_pages_seek_in_their_index() {
+        let store = test_util::store();
+        store
+            .read(|db| {
+                for (page, index) in [
+                    (&*LIST_LABEL, "message_labels_list"),
+                    (&*LIST_STARRED, "messages_flagged"),
+                    (&*LIST_FOLDER, "messages_folder_date"),
+                ] {
+                    for sql in [&page.same_date, &page.older] {
+                        let mut stmt = db.conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+                        for i in 1..=stmt.parameter_count() {
+                            stmt.raw_bind_parameter(i, 1)?;
+                        }
+                        let mut rows = stmt.raw_query();
+                        let mut plan = Vec::new();
+                        while let Some(row) = rows.next()? {
+                            plan.push(row.get::<_, String>(3)?);
+                        }
+                        let plan = plan.join("\n");
+                        assert!(plan.contains(index), "{sql}\n{plan}");
+                        assert!(!plan.contains("TEMP B-TREE"), "{sql}\n{plan}");
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
     }
 }

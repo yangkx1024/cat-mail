@@ -2,9 +2,10 @@
 
 [← 架构](../architecture.md)
 
-**状态：已决定，尚未实现。** 现在的代码里 Gmail 的每个标签仍是一个文件夹，同一封邮件在每个标签下各存
-一行（见[存储 / 全文搜索](storage.md#全文搜索)、[操作队列 / Gmail 的标签](op-queue.md#gmail-的标签)）。
-本文是迁移的目标，按文末的[步骤](#迁移步骤)实现，做完一步就把对应文档改成现状。下面关于 Gmail 行为的
+**状态：部分实现。** 存储和协议已经就绪（[步骤](#迁移步骤) 4 的前半），同步还没用上：现在 Gmail 的每个
+标签仍作为文件夹同步，同一封邮件在每个标签下各存一行（见[存储 / 全文搜索](storage.md#全文搜索)、
+[操作队列 / Gmail 的标签](op-queue.md#gmail-的标签)）。本文是迁移的目标，按文末的步骤实现，做完一步就把
+对应文档改成现状。下面关于 Gmail 行为的
 说法都已在真实账户上验证过（见[验证结果](#验证结果)）。
 
 ## 目标
@@ -61,7 +62,26 @@
   `X-GM-LABELS` 里：也建一行标签，`listed = 0`，界面不显示。用户以后让它显示时只改这个标记，不必重新
   拉一遍"所有邮件"的标签。
 - **"已加星标"是 `\Flagged` 的视图**，不存标签行：Gmail 在邮件有 `\Flagged` 时才在 `X-GM-LABELS` 里列出
-  `\Starred`，两者总是一致，再存一份就要在本地改 flags 时同步维护两处。
+  `\Starred`，两者总是一致，再存一份就要在本地改 flags 时同步维护两处。列出它走部分索引
+  `messages_flagged (account_id, list_date) WHERE flags & 2`，与文件夹一样是两次定位。
+- **标签只显示"所有邮件"里的邮件。** 移到已删除、垃圾邮件的邮件保留标签行（移回时 Gmail 恢复这些标签），
+  但标签和"已加星标"的列表、计数都不算它们，与 Gmail 网页版一致。视图 `all_mail` 给出"所有邮件"这个
+  位置，列表、计数触发器都按它过滤。**这一点没有在真实账户上验证**（见[验证结果](#验证结果)）。
+- **计数触发器**（`labels_count_*`）：标签行的插入、删除，邮件的插入、删除，邮件 `\Seen` / `\Flagged`
+  变化或进出"所有邮件"时更新它所在的标签和"已加星标"。邮件行删除之前（`BEFORE DELETE`）先删它的标签行，
+  这时触发器还看得到邮件；它的位置文件夹也必须还在，所以文件夹删除之前由触发器先删它的邮件，不走级联。
+  视图 `all_mail` 和 `starred` 各有部分索引：每封邮件的变化都要查它们。
+  文件夹计的是什么取决于它的 `kind` 和角色，触发器不管这两列：对账时有文件夹的 `kind` 或角色变了（如账户
+  模式变了），或新出现了"已加星标"（在 IMAP 里隐藏过，它要显示已存的带 `\Flagged` 的邮件），整个账户的
+  计数重算一遍（`Folders::recount`）。新出现的"所有邮件"是空的，不必重算。
+- **对账文件夹**：LIST 里没有了的标签，还有邮件带着就留下、`listed = 0`，没有就删除。位置变成标签时
+  像 `\Noselect` 那样结束它的 UIDVALIDITY 代（邮件删除，待回放的操作成为 `conflict`）；标签变成位置时
+  删掉它的标签行。
+- **"重要"的角色**来自 LIST 属性 `\Important`（RFC 8457，`FolderRole::Important`）。`X-GM-LABELS` 里
+  不认识的系统标签（不在 `\Inbox`、`\Sent`、`\Draft`、`\Important`、`\Starred` 之中）忽略；系统标签
+  找不到对应角色的文件夹（在 Gmail 设置里被隐藏）时也忽略，因为不知道它的邮箱名。
+- **`X-GM-MSGID` / `X-GM-THRID` 是无符号 64 位**，按位存成 SQLite 的 INTEGER（与 MODSEQ 相同），只比较
+  相等，不比较大小。
 
 ## 同步
 
@@ -82,6 +102,19 @@
   `CHANGEDSINCE` 顺带拿到其他标签的变化；只改了其他标签、与 INBOX 无关的变化等下一次完整同步。Gmail 大约
   每 30 秒才推送一次，变化要过二三十秒才到。
 - **打开一个标签**时的同步同样是三个位置的增量同步。
+
+## 协议
+
+- `Session::fetch_summaries` / `fetch_flags` 的 `Items::Gmail` 另带 `X-GM-MSGID X-GM-THRID X-GM-LABELS`
+  （flags 只带 `X-GM-LABELS`）。请求过的项缺了与其他项一样算不完整：拉邮件头时这封邮件不返回，拉 flags
+  时整条命令 `Incomplete`。标签放在 `FlagState::labels`，随 flags 一起走同一条存储路径
+  （`Messages::update_flags`），`None` 表示没有拉，不动已存的标签。
+- `Session::uid_store_labels`：`UID STORE <set> +X-GM-LABELS (…)` / `-X-GM-LABELS (…)`。系统标签按 flag
+  的写法发（`\Inbox`），用户标签按 astring（必要时带引号或 literal）。"已加星标"不是标签，要求给它会返回
+  `InvalidInput`，改用 `\Flagged`。
+- `Session::uid_search_gm_msgid`：`UID SEARCH X-GM-MSGID <id>`。
+- 没有 `X-GM-EXT-1`（`Session::is_gmail`）时，后两者返回 `Unsupported`；`Items::Gmail` 由调用方只在
+  Gmail 账户的位置里使用。
 
 ## 操作队列
 
@@ -151,7 +184,8 @@
 | 多封邮件的 MOVE | COPYUID 按位置配对正确，目标 UID 可能倒序列出（`359:362 337,336,335,334`） |
 | `SEARCH HEADER` | 按词匹配，不是子串；完整的 Message-ID 能搜到 |
 
-没有验证的：经 SMTP 发出的邮件自动进已发送（Gmail 的公开行为，未在本账户上发信）；非默认的删除设置
+没有验证的：标签邮箱里列不列在已删除、垃圾邮件里的邮件（我们按 Gmail 网页版，不列）；经 SMTP 发出的
+邮件自动进已发送（Gmail 的公开行为，未在本账户上发信）；非默认的删除设置
 （"移到已删除"、"立即永久删除"）下标签邮箱里 `\Deleted` 的效果——我们不在标签邮箱里 STORE `\Deleted`，
 不依赖它。
 
@@ -161,7 +195,8 @@
 2. ~~用真实 Gmail 验证上面几点，同时试用 imap-proto。~~
 3. ~~协议层改用 imap-proto，`Session` 的接口不变，现有的假服务器和 Dovecot 测试做回归。~~ imap-proto 暂时来自
    main，0.18.0 发版后换成 crates.io 的版本（见 [IMAP 库](protocol.md#imap-库)）。
-4. 存储与同步：`folders.kind` / `listed`、`message_labels`、`gm_msgid` / `gm_thrid`、账户的模式；假服务器
-   支持 `X-GM-EXT-1`。CI 里没有真的 Gmail，与真实服务器的行为只能手动验证。
+4. 存储与同步：~~`folders.kind` / `listed`、`message_labels`、`gm_msgid` / `gm_thrid`、账户的模式；协议层的
+   `X-GM-*`；假服务器支持 `X-GM-EXT-1`~~（#126）。剩下按三个位置同步（#127）。CI 里没有真的 Gmail，与真实
+   服务器的行为只能手动验证。
 5. 操作队列：标签操作、动作到操作的映射；删除按 Message-ID 找副本的机制。
 6. GUI：侧栏分开位置和标签，显示邮件的标签。

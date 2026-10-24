@@ -1,10 +1,12 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use catmail_types::{AccountId, Folder, FolderId, FolderRole, special_folder};
+use catmail_types::{
+    AccountId, Folder, FolderId, FolderKind, FolderRole, GmailLabel, special_folder,
+};
 use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
 use crate::Result;
-use crate::columns::parse_opt_text;
+use crate::columns::{parse_opt_text, parse_text};
 use crate::drafts::Drafts;
 use crate::ops::{PendingOps, Touched};
 
@@ -12,7 +14,7 @@ use crate::ops::{PendingOps, Touched};
 /// several of them at once, a copy in each, told apart only by Message-ID.
 pub(crate) const LABEL_ACCOUNTS: &str = "SELECT account_id FROM folders WHERE role = 'all'";
 
-const COLUMNS: &str = "id, account_id, name, delimiter, role, selectable,
+const COLUMNS: &str = "id, account_id, name, delimiter, role, kind, listed, selectable,
     unread_count, total_count, last_synced_at";
 
 /// A mailbox as listed by the server.
@@ -22,6 +24,7 @@ pub struct RemoteFolder {
     pub name: String,
     pub delimiter: Option<char>,
     pub role: Option<FolderRole>,
+    pub kind: FolderKind,
     pub selectable: bool,
 }
 
@@ -158,17 +161,49 @@ impl<'c> Folders<'c> {
 
     /// Makes the account's folders match `remote`: inserts new ones, updates changed
     /// attributes, and deletes folders the server no longer lists (with their messages).
+    /// A label that messages still carry stays, unlisted: Gmail leaves the labels hidden
+    /// in its settings out of LIST, not out of X-GM-LABELS.
     pub fn reconcile(&self, account: AccountId, remote: &[RemoteFolder]) -> Result<Reconciled> {
         let mut changed = false;
         let mut touched = Touched::new();
+        // (id, kind, role, whether messages carry it as a label), by remote name.
+        let stored: HashMap<String, (i64, FolderKind, Option<FolderRole>, bool)> = self
+            .conn
+            .prepare(
+                "SELECT remote_name, id, kind, role,
+                        kind = 'label'
+                        AND EXISTS (SELECT 1 FROM message_labels WHERE folder_id = folders.id)
+                 FROM folders WHERE account_id = ?1",
+            )?
+            .query_map([account.0], |r| {
+                Ok((
+                    r.get(0)?,
+                    (
+                        r.get(1)?,
+                        parse_text(r, "kind")?,
+                        parse_opt_text(r, "role")?,
+                        r.get(4)?,
+                    ),
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        // What a folder counts follows from its kind and role, which the count triggers
+        // don't watch: a change of either (the account's mode changed, say), or a new
+        // Starred, which shows messages already stored, is counted anew.
+        let recount = remote.iter().any(|f| match stored.get(&f.remote_name) {
+            Some(&(_, kind, role, _)) => (kind, role) != (f.kind, f.role),
+            None => f.kind == FolderKind::Label && f.role == Some(FolderRole::Flagged),
+        });
         let mut upsert = self.conn.prepare(
-            "INSERT INTO folders (account_id, remote_name, name, delimiter, role, selectable)
-             VALUES (:account, :remote_name, :name, :delimiter, :role, :selectable)
+            "INSERT INTO folders (account_id, remote_name, name, delimiter, role, kind,
+                                  selectable)
+             VALUES (:account, :remote_name, :name, :delimiter, :role, :kind, :selectable)
              ON CONFLICT (account_id, remote_name) DO UPDATE SET
-                 name = excluded.name, delimiter = excluded.delimiter,
-                 role = excluded.role, selectable = excluded.selectable
-             WHERE (name, delimiter, role, selectable)
-                   IS NOT (excluded.name, excluded.delimiter, excluded.role, excluded.selectable)",
+                 name = excluded.name, delimiter = excluded.delimiter, role = excluded.role,
+                 kind = excluded.kind, listed = 1, selectable = excluded.selectable
+             WHERE (name, delimiter, role, kind, listed, selectable)
+                   IS NOT (excluded.name, excluded.delimiter, excluded.role, excluded.kind, 1,
+                           excluded.selectable)",
         )?;
         for folder in remote {
             changed |= upsert.execute(named_params! {
@@ -177,18 +212,23 @@ impl<'c> Folders<'c> {
                 ":name": folder.name,
                 ":delimiter": folder.delimiter.map(String::from),
                 ":role": folder.role.map(FolderRole::as_str),
+                ":kind": folder.kind.as_str(),
                 ":selectable": folder.selectable,
             })? > 0;
         }
 
         let listed: HashSet<&str> = remote.iter().map(|f| f.remote_name.as_str()).collect();
-        let gone: Vec<i64> = self
-            .sync_states(account)?
-            .into_iter()
-            .filter(|f| !listed.contains(f.remote_name.as_str()))
-            .map(|f| f.id.0)
-            .collect();
-        for id in gone {
+        for (remote_name, (id, _, _, carried)) in stored {
+            if listed.contains(remote_name.as_str()) {
+                continue;
+            }
+            if carried {
+                changed |= self.conn.execute(
+                    "UPDATE folders SET listed = 0 WHERE id = ?1 AND listed",
+                    [id],
+                )? > 0;
+                continue;
+            }
             touched.merge(PendingOps::new(self.conn).forget_folder(FolderId(id))?);
             Drafts::new(self.conn).end_generation(FolderId(id), None)?;
             self.conn
@@ -198,12 +238,14 @@ impl<'c> Folders<'c> {
 
         // A mailbox deleted while it had children stays listed as a \Noselect node
         // (RFC 3501 DELETE). Sync never opens such a folder, so its old messages would
-        // linger; the row stays for the hierarchy.
+        // linger; the row stays for the hierarchy. A location that became a label holds
+        // no messages of its own either.
         let emptied: Vec<i64> = self
             .conn
             .prepare(
                 "SELECT id FROM folders
-                 WHERE account_id = ?1 AND selectable = 0 AND uidvalidity IS NOT NULL",
+                 WHERE account_id = ?1 AND (selectable = 0 OR kind = 'label')
+                   AND uidvalidity IS NOT NULL",
             )?
             .query_map([account.0], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
@@ -211,7 +253,85 @@ impl<'c> Folders<'c> {
             touched.merge(self.end_generation(FolderId(id), None)?);
             changed = true;
         }
+        if recount {
+            // A label that became a location is no message's label.
+            self.conn.execute(
+                "DELETE FROM message_labels WHERE folder_id IN (
+                     SELECT id FROM folders WHERE account_id = ?1 AND kind = 'location')",
+                [account.0],
+            )?;
+            self.recount(account)?;
+        }
         Ok(Reconciled { changed, touched })
+    }
+
+    /// Counts the account's folders anew, as the count triggers would have: needed when
+    /// what a folder counts changes (see [`reconcile`](Self::reconcile)).
+    fn recount(&self, account: AccountId) -> Result<()> {
+        for (column, filter) in [("total_count", "1"), ("unread_count", "m.flags & 1 = 0")] {
+            self.conn.execute(
+                &format!(
+                    "UPDATE folders SET {column} = CASE
+                         WHEN kind = 'location' THEN
+                             (SELECT count(*) FROM messages m
+                              WHERE m.folder_id = folders.id AND {filter})
+                         WHEN id IN (SELECT id FROM starred) THEN
+                             (SELECT count(*) FROM messages m
+                              WHERE m.account_id = folders.account_id AND m.flags & 2 <> 0
+                                AND m.folder_id IN all_mail AND {filter})
+                         ELSE
+                             (SELECT count(*) FROM message_labels l
+                              JOIN messages m ON m.id = l.message_id
+                              WHERE l.folder_id = folders.id AND m.folder_id IN all_mail
+                                AND {filter})
+                     END
+                     WHERE account_id = ?1"
+                ),
+                [account.0],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The label folder for a label X-GM-LABELS names. A user label the server doesn't
+    /// list (hidden in Gmail's settings) gets an unlisted folder; a system label without
+    /// a folder has none, nor does Starred: it is `\Flagged`, not a label row.
+    pub fn label(&self, account: AccountId, label: &GmailLabel) -> Result<Option<FolderId>> {
+        let mut by_role = self.conn.prepare_cached(
+            "SELECT id FROM folders WHERE account_id = ?1 AND kind = 'label' AND role = ?2
+             ORDER BY id LIMIT 1",
+        )?;
+        let mut by_name = self.conn.prepare_cached(
+            "SELECT id, kind = 'label' FROM folders WHERE account_id = ?1 AND remote_name = ?2",
+        )?;
+        let mut unlisted = self.conn.prepare_cached(
+            "INSERT INTO folders (account_id, remote_name, name, delimiter, kind, listed)
+             VALUES (?1, ?2, ?3,
+                     (SELECT delimiter FROM folders
+                      WHERE account_id = ?1 AND delimiter IS NOT NULL LIMIT 1),
+                     'label', 0)
+             RETURNING id",
+        )?;
+        let id = match label {
+            GmailLabel::System(FolderRole::Flagged) => None,
+            GmailLabel::System(role) => by_role
+                .query_row(params![account.0, role.as_str()], |r| r.get(0))
+                .optional()?,
+            GmailLabel::User { remote_name, name } => {
+                let found: Option<(i64, bool)> = by_name
+                    .query_row(params![account.0, remote_name], |r| {
+                        Ok((r.get(0)?, r.get(1)?))
+                    })
+                    .optional()?;
+                match found {
+                    Some((id, is_label)) => is_label.then_some(id),
+                    None => Some(
+                        unlisted.query_row(params![account.0, remote_name, name], |r| r.get(0))?,
+                    ),
+                }
+            }
+        };
+        Ok(id.map(FolderId))
     }
 
     /// Starts a new UIDVALIDITY generation (or the first one): every message row with a
@@ -275,6 +395,8 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Folder> {
         name: row.get("name")?,
         delimiter: delimiter.and_then(|d| d.chars().next()),
         role: parse_opt_text(row, "role")?,
+        kind: parse_text(row, "kind")?,
+        listed: row.get("listed")?,
         selectable: row.get("selectable")?,
         unread_count: row.get("unread_count")?,
         total_count: row.get("total_count")?,
@@ -294,6 +416,7 @@ mod tests {
             name: name.into(),
             delimiter: Some('/'),
             role,
+            kind: FolderKind::Location,
             selectable: true,
         }
     }
@@ -596,5 +719,158 @@ mod tests {
             })
             .unwrap();
         assert_eq!(remaining, 1, "the draft survives, without its remote copy");
+    }
+
+    #[test]
+    fn labels_stay_while_carried_and_kinds_keep_their_messages_apart() {
+        let store = test_util::store();
+        let account = test_util::account(&store, "a@gmail.com");
+        let label = |name: &str| RemoteFolder {
+            kind: FolderKind::Label,
+            ..remote(name, name, None)
+        };
+        let all_mail = remote("[Gmail]/All Mail", "All Mail", Some(FolderRole::All));
+        let listed = [all_mail.clone(), label("Work"), label("Old")];
+        store
+            .write(|db| db.folders().reconcile(account, &listed))
+            .unwrap();
+        let id = |name: &str| {
+            store
+                .read(|db| db.folders().find_by_name(account, name))
+                .unwrap()
+                .map(|f| (f.id, f.kind, f.listed))
+        };
+        let (all, ..) = id("All Mail").unwrap();
+        let work = GmailLabel::user("Work", "Work");
+        let mut labelled = message(1);
+        labelled.state.labels = Some(vec![work.clone(), work]);
+        store
+            .write(|db| {
+                db.folders().reset_uidvalidity(all, 7)?;
+                db.messages().upsert(account, all, &[labelled])
+            })
+            .unwrap();
+
+        // Hidden in Gmail's settings: Work still labels a message, Old nothing.
+        assert!(
+            store
+                .write(|db| db
+                    .folders()
+                    .reconcile(account, std::slice::from_ref(&all_mail)))
+                .unwrap()
+                .changed
+        );
+        let (work_id, _, work_listed) = id("Work").unwrap();
+        assert!(!work_listed);
+        assert_eq!(id("Old"), None);
+        assert_eq!(
+            store
+                .read(|db| db.folders().get(work_id))
+                .unwrap()
+                .unwrap()
+                .total_count,
+            1
+        );
+        assert!(
+            !store
+                .write(|db| db
+                    .folders()
+                    .reconcile(account, std::slice::from_ref(&all_mail)))
+                .unwrap()
+                .changed
+        );
+        store
+            .write(|db| {
+                db.folders()
+                    .reconcile(account, &[all_mail.clone(), label("Work")])
+            })
+            .unwrap();
+        assert_eq!(id("Work"), Some((work_id, FolderKind::Label, true)));
+
+        // A label that became a location labels nothing; a location that became a label
+        // holds no messages, nor a generation.
+        let work_location = remote("Work", "Work", None);
+        let all_label = RemoteFolder {
+            kind: FolderKind::Label,
+            ..all_mail
+        };
+        store
+            .write(|db| db.folders().reconcile(account, &[all_label, work_location]))
+            .unwrap();
+        store
+            .read(|db| {
+                assert_eq!(db.folders().get(work_id)?.unwrap().total_count, 0);
+                assert_eq!(db.messages().count(all)?, 0);
+                let state = db.folders().sync_state(all)?.unwrap();
+                assert_eq!(state.uidvalidity, None);
+                let labels: i64 =
+                    db.conn
+                        .query_row("SELECT count(*) FROM message_labels", [], |r| r.get(0))?;
+                assert_eq!(labels, 0);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn labels_are_found_by_role_or_name() {
+        let store = test_util::store();
+        let account = test_util::account(&store, "a@gmail.com");
+        let label = |name: &str, role| RemoteFolder {
+            kind: FolderKind::Label,
+            ..remote(name, name, role)
+        };
+        store
+            .write(|db| {
+                db.folders().reconcile(
+                    account,
+                    &[
+                        label("INBOX", Some(FolderRole::Inbox)),
+                        label("[Gmail]/Wichtig", Some(FolderRole::Important)),
+                        label("[Gmail]/Starred", Some(FolderRole::Flagged)),
+                        remote("[Gmail]/Trash", "Trash", Some(FolderRole::Trash)),
+                        label("&ZeVnLIqe-", None),
+                    ],
+                )
+            })
+            .unwrap();
+        let found: Vec<FolderId> = store
+            .write(|db| {
+                let labels = [
+                    GmailLabel::System(FolderRole::Important),
+                    GmailLabel::System(FolderRole::Inbox),
+                    GmailLabel::System(FolderRole::Flagged),
+                    GmailLabel::System(FolderRole::Sent),
+                    GmailLabel::user("&ZeVnLIqe-", "日本語"),
+                    GmailLabel::user("[Gmail]/Trash", "Trash"),
+                    GmailLabel::user("Hidden/Deep", "Hidden/Deep"),
+                ];
+                let mut found = Vec::new();
+                for label in &labels {
+                    found.extend(db.folders().label(account, label)?);
+                }
+                Ok(found)
+            })
+            .unwrap();
+        let names: Vec<_> = store
+            .read(|db| {
+                found
+                    .iter()
+                    .map(|&id| Ok(db.folders().get(id)?.unwrap()))
+                    .collect::<Result<Vec<_>>>()
+            })
+            .unwrap()
+            .into_iter()
+            .map(|f| (f.name, f.listed))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("[Gmail]/Wichtig".into(), true),
+                ("INBOX".into(), true),
+                ("&ZeVnLIqe-".into(), true),
+                ("Hidden/Deep".into(), false),
+            ]
+        );
     }
 }

@@ -72,6 +72,8 @@ SMTP 客户端见[草稿与发信](sending.md#smtp-客户端)。
   无声地忘掉连接时几分钟内就能发现，而不是等到下一条命令或 IDLE 到期。
 - 命令装不下的输入（APPEND 的邮件里有 NUL，IMAP literal 不能带）返回 `Error::InvalidInput`：什么也没
   发出，连接照常可用，不是致命错误。
+- **Gmail 的扩展**（`X-GM-EXT-1`）：FETCH 的 `Items::Gmail`、`uid_store_labels`、`uid_search_gm_msgid`，
+  见[位置与标签 / 协议](labels.md#协议)。
 
 ## IDLE
 

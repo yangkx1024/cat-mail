@@ -3,7 +3,7 @@ use std::future::Future;
 use std::ops::RangeInclusive;
 use std::time::Duration;
 
-use catmail_types::{FlagState, Flags, FolderRole, Security, ServerConfig};
+use catmail_types::{FlagState, Flags, FolderRole, GmailLabel, Security, ServerConfig};
 use imap_proto::rfc4315::UidSetMember;
 use imap_proto::{
     AttributeValue, Capability, MailboxDatum, NameAttribute, ResponseCode, SectionPath, Status,
@@ -14,7 +14,8 @@ use secrecy::ExposeSecret;
 use super::command::{Command, Literals};
 use super::connection::{Code, Connection, Data, Response};
 use super::{
-    Capabilities, ChangedFlags, Error, FetchedMessage, ListedMailbox, MailboxStatus, Result, utf7,
+    Capabilities, ChangedFlags, Error, FetchedMessage, Items, ListedMailbox, MailboxStatus, Result,
+    utf7,
 };
 use crate::Credentials;
 use crate::mime::{Headers, MimeNode, SUMMARY_HEADER_FIELDS, parse_headers};
@@ -337,6 +338,56 @@ impl Session {
         Ok(())
     }
 
+    /// Whether the server has Gmail's extensions (X-GM-EXT-1): [`Items::Gmail`],
+    /// [`uid_store_labels`](Self::uid_store_labels) and
+    /// [`uid_search_gm_msgid`](Self::uid_search_gm_msgid).
+    pub fn is_gmail(&self) -> bool {
+        self.caps.has("X-GM-EXT-1")
+    }
+
+    fn require_gmail(&self) -> Result<()> {
+        if !self.is_gmail() {
+            return Err(Error::Unsupported("X-GM-EXT-1"));
+        }
+        Ok(())
+    }
+
+    /// Adds `add` to and removes `remove` from the Gmail labels of messages of the
+    /// selected mailbox, leaving their other labels alone (never a replace: labels hidden
+    /// from IMAP stay). Starred is `\Flagged`, set with [`uid_store`](Self::uid_store).
+    pub async fn uid_store_labels(
+        &mut self,
+        uids: &[u32],
+        add: &[GmailLabel],
+        remove: &[GmailLabel],
+    ) -> Result<()> {
+        self.require_gmail()?;
+        let Some(set) = uid_set(uids) else {
+            return Ok(());
+        };
+        for (kind, labels) in [("+X-GM-LABELS", add), ("-X-GM-LABELS", remove)] {
+            if labels.is_empty() {
+                continue;
+            }
+            let store =
+                Command::new("UID STORE")
+                    .raw(&set)
+                    .raw(kind)
+                    .list(labels, |command, label| match label {
+                        GmailLabel::System(role) => system_label(*role)
+                            .map(|name| command.raw(name))
+                            .ok_or_else(|| {
+                                Error::InvalidInput(format!("no Gmail label for {}", role.as_str()))
+                            }),
+                        GmailLabel::User { remote_name, .. } => {
+                            command.astring(remote_name.as_bytes())
+                        }
+                    })?;
+            self.change(store).await?;
+        }
+        Ok(())
+    }
+
     /// Whether [`uid_move`](Self::uid_move) is available (MOVE, RFC 6851).
     pub fn can_move(&self) -> bool {
         self.caps.has("MOVE")
@@ -462,6 +513,14 @@ impl Session {
         self.uid_search(search).await
     }
 
+    /// UIDs of the message with this X-GM-MSGID in the selected mailbox (at most one),
+    /// on Gmail.
+    pub async fn uid_search_gm_msgid(&mut self, msgid: u64) -> Result<Vec<u32>> {
+        self.require_gmail()?;
+        let search = Command::new("UID SEARCH").raw(&format!("X-GM-MSGID {msgid}"));
+        self.uid_search(search).await
+    }
+
     /// Every UID in the selected mailbox, ascending.
     pub async fn uid_search_all(&mut self) -> Result<Vec<u32>> {
         self.uid_search(Command::new("UID SEARCH").raw("ALL")).await
@@ -508,12 +567,16 @@ impl Session {
         Ok(uids)
     }
 
-    /// Flags, dates, size, summary headers and attachment presence for `uids`; the
-    /// caller batches long lists. Messages the server no longer has, or whose answer
-    /// couldn't be parsed, are simply absent; responses for UIDs that weren't asked for
-    /// are ignored.
-    pub async fn fetch_summaries(&mut self, uids: &[u32]) -> Result<Vec<FetchedMessage>> {
-        let (mut fetched, skipped) = self.fetch_summaries_once(uids, true).await?;
+    /// Flags, dates, size, summary headers and attachment presence for `uids`, and what
+    /// `items` adds; the caller batches long lists. Messages the server no longer has, or
+    /// whose answer couldn't be parsed, are simply absent; responses for UIDs that
+    /// weren't asked for are ignored.
+    pub async fn fetch_summaries(
+        &mut self,
+        uids: &[u32],
+        items: Items,
+    ) -> Result<Vec<FetchedMessage>> {
+        let (mut fetched, skipped) = self.fetch_summaries_once(uids, true, items).await?;
         // A BODYSTRUCTURE the parser rejects loses the message's answer, whole or just
         // that item. Without asking for it again, such a message is never stored and the
         // folder never gets a complete sync. Attachment presence is then unknown until the
@@ -521,7 +584,7 @@ impl Session {
         if skipped > 0 {
             let got: HashSet<u32> = fetched.iter().map(|m| m.state.uid).collect();
             let missing: Vec<u32> = uids.iter().copied().filter(|u| !got.contains(u)).collect();
-            fetched.extend(self.fetch_summaries_once(&missing, false).await?.0);
+            fetched.extend(self.fetch_summaries_once(&missing, false, items).await?.0);
         }
         Ok(fetched)
     }
@@ -531,23 +594,27 @@ impl Session {
         &mut self,
         uids: &[u32],
         structure: bool,
+        items: Items,
     ) -> Result<(Vec<FetchedMessage>, usize)> {
         let Some(set) = uid_set(uids) else {
             return Ok((Vec::new(), 0));
         };
-        let mut items = format!(
+        let mut asked = format!(
             "UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS ({})]",
             SUMMARY_HEADER_FIELDS.join(" ")
         );
         if structure {
-            items.push_str(" BODYSTRUCTURE");
+            asked.push_str(" BODYSTRUCTURE");
         }
         if self.modseq_enabled() {
-            items.push_str(" MODSEQ");
+            asked.push_str(" MODSEQ");
+        }
+        if items == Items::Gmail {
+            asked.push_str(" X-GM-MSGID X-GM-THRID X-GM-LABELS");
         }
         // Lossy: a message whose answer can't be parsed is just missing, and the caller
         // notices the gap.
-        let response = self.conn.execute_lossy(uid_fetch(&set, &items)).await?;
+        let response = self.conn.execute_lossy(uid_fetch(&set, &asked)).await?;
 
         let mut skipped = response.skipped;
         let wanted: HashSet<u32> = uids.iter().copied().collect();
@@ -564,15 +631,22 @@ impl Session {
                     }
                     None => false,
                 };
-                // Without FLAGS or the headers the message would be stored wrongly;
-                // leave it out so the caller sees the gap. INTERNALDATE and RFC822.SIZE
-                // may go without.
+                // Without FLAGS, the headers or Gmail's items asked for, the message would
+                // be stored wrongly; leave it out so the caller sees the gap.
+                // INTERNALDATE and RFC822.SIZE may go without.
+                let state = m.state(uid, items)?;
+                let (gm_msgid, gm_thrid) = match items {
+                    Items::Standard => (None, None),
+                    Items::Gmail => (Some(m.gm_msgid?), Some(m.gm_thrid?)),
+                };
                 Some(FetchedMessage {
-                    state: m.state(uid)?,
+                    state,
                     internal_date: m.internal_date,
                     size: m.size,
                     headers: *m.headers?,
                     has_attachments,
+                    gm_msgid,
+                    gm_thrid,
                 })
             })
             .collect();
@@ -580,11 +654,13 @@ impl Session {
     }
 
     /// Current flags of messages with UIDs in these ranges, or with CONDSTORE only of
-    /// those changed since `changed_since`.
+    /// those changed since `changed_since`; with [`Items::Gmail`] their labels too (a
+    /// change of labels alone raises the MODSEQ).
     pub async fn fetch_flags(
         &mut self,
         uids: &[RangeInclusive<u32>],
         changed_since: Option<u64>,
+        items: Items,
     ) -> Result<Vec<FlagState>> {
         let uids = merge_ranges(uids.iter().cloned());
         let Some(set) = sequence_set(&uids) else {
@@ -594,14 +670,14 @@ impl Session {
             return Ok(Vec::new());
         }
         let modseq = self.modseq_enabled();
-        let mut command = uid_fetch(
-            &set,
-            if modseq {
-                "UID FLAGS MODSEQ"
-            } else {
-                "UID FLAGS"
-            },
-        );
+        let mut asked = String::from("UID FLAGS");
+        if modseq {
+            asked.push_str(" MODSEQ");
+        }
+        if items == Items::Gmail {
+            asked.push_str(" X-GM-LABELS");
+        }
+        let mut command = uid_fetch(&set, &asked);
         if let Some(since) = changed_since.filter(|&s| modseq && s > 0) {
             command = command.raw(&format!("(CHANGEDSINCE {since})"));
         }
@@ -614,11 +690,12 @@ impl Session {
             let i = uids.partition_point(|r| *r.end() < uid);
             uids.get(i).is_some_and(|r| r.contains(&uid))
         };
-        // Every message answered for has its FLAGS: missing, they couldn't be parsed, and
-        // a lost change would stay lost once the caller stores the new HIGHESTMODSEQ.
+        // Every message answered for has its FLAGS (and labels): missing, they couldn't be
+        // parsed, and a lost change would stay lost once the caller stores the new
+        // HIGHESTMODSEQ.
         merge_fetches(response, wanted)
             .into_iter()
-            .map(|(uid, m)| m.state(uid).ok_or(INCOMPLETE_FETCH))
+            .map(|(uid, m)| m.state(uid, items).ok_or(INCOMPLETE_FETCH))
             .collect()
     }
 
@@ -884,17 +961,26 @@ struct MergedFetch {
     headers: Option<Box<Headers>>,
     /// From BODYSTRUCTURE, if the server sent one.
     has_attachments: Option<bool>,
+    gm_msgid: Option<u64>,
+    gm_thrid: Option<u64>,
+    labels: Option<Vec<GmailLabel>>,
 }
 
 impl MergedFetch {
-    /// `None` if the server never sent FLAGS for the message.
-    fn state(&self, uid: u32) -> Option<FlagState> {
+    /// `None` if the server never sent FLAGS for the message, or X-GM-LABELS with
+    /// [`Items::Gmail`].
+    fn state(&self, uid: u32, items: Items) -> Option<FlagState> {
         let (flags, keywords) = self.flags.clone()?;
+        let labels = match items {
+            Items::Standard => None,
+            Items::Gmail => Some(self.labels.clone()?),
+        };
         Some(FlagState {
             uid,
             flags,
             keywords,
             modseq: self.modseq,
+            labels,
         })
     }
 }
@@ -917,6 +1003,11 @@ fn merge_fetches(response: Response, wanted: impl Fn(u32) -> bool) -> BTreeMap<u
                     }
                     AttributeValue::BodySection { data, .. } => {
                         m.headers = Some(Box::new(parse_headers(data.as_deref().unwrap_or(&[]))));
+                    }
+                    AttributeValue::GmailMsgId(id) => m.gm_msgid = Some(id),
+                    AttributeValue::GmailThrId(id) => m.gm_thrid = Some(id),
+                    AttributeValue::GmailLabels(labels) => {
+                        m.labels = Some(labels.iter().filter_map(|l| gmail_label(l)).collect());
                     }
                     _ => {}
                 }
@@ -961,7 +1052,8 @@ fn selectable(attributes: &[NameAttribute<'_>]) -> bool {
     })
 }
 
-/// The role a SPECIAL-USE attribute (RFC 6154) gives a mailbox.
+/// The role a SPECIAL-USE attribute (RFC 6154, and `\Important` from RFC 8457) gives a
+/// mailbox.
 fn special_use(attribute: &NameAttribute<'_>) -> Option<FolderRole> {
     Some(match attribute {
         NameAttribute::All => FolderRole::All,
@@ -971,8 +1063,44 @@ fn special_use(attribute: &NameAttribute<'_>) -> Option<FolderRole> {
         NameAttribute::Junk => FolderRole::Junk,
         NameAttribute::Sent => FolderRole::Sent,
         NameAttribute::Trash => FolderRole::Trash,
+        NameAttribute::Extension(other) if other.eq_ignore_ascii_case("\\Important") => {
+            FolderRole::Important
+        }
         _ => return None,
     })
+}
+
+/// Gmail's system labels in X-GM-LABELS, by the role of their mailbox.
+const SYSTEM_LABELS: [(FolderRole, &str); 4] = [
+    (FolderRole::Inbox, "\\Inbox"),
+    (FolderRole::Sent, "\\Sent"),
+    (FolderRole::Drafts, "\\Draft"),
+    (FolderRole::Important, "\\Important"),
+];
+
+fn system_label(role: FolderRole) -> Option<&'static str> {
+    SYSTEM_LABELS
+        .iter()
+        .find(|(r, _)| *r == role)
+        .map(|(_, name)| *name)
+}
+
+/// A label as X-GM-LABELS names it: a system label starts with a backslash (sent as a
+/// quoted string, `"\\Inbox"`), a user label is the mailbox name. `\Starred` is left
+/// out, being `\Flagged`, as are system labels without a mailbox role.
+fn gmail_label(label: &str) -> Option<GmailLabel> {
+    if !label.starts_with('\\') {
+        let name = utf7::decode(label).unwrap_or_else(|| label.to_owned());
+        return Some(GmailLabel::user(label, name));
+    }
+    let found = SYSTEM_LABELS
+        .iter()
+        .find(|(_, name)| name.eq_ignore_ascii_case(label))
+        .map(|(role, _)| GmailLabel::System(*role));
+    if found.is_none() && !label.eq_ignore_ascii_case("\\Starred") {
+        tracing::debug!(label, "unknown Gmail system label");
+    }
+    found
 }
 
 /// The system flags stored as [`Flags`] bits.
@@ -1130,8 +1258,12 @@ mod tests {
             (selectable(&list.name_attributes), roles)
         };
         assert_eq!(
-            attributes(b"* LIST (\\HasNoChildren \\Important \\All) \"/\" a\r\n"),
+            attributes(b"* LIST (\\HasNoChildren \\All) \"/\" a\r\n"),
             (true, vec![FolderRole::All])
+        );
+        assert_eq!(
+            attributes(b"* LIST (\\HasNoChildren \\important) \"/\" i\r\n"),
+            (true, vec![FolderRole::Important])
         );
         assert_eq!(
             attributes(b"* LIST (\\Noselect) \"/\" b\r\n"),
@@ -1141,6 +1273,44 @@ mod tests {
             attributes(b"* LIST (\\NonExistent \\Trash) \"/\" c\r\n"),
             (false, vec![FolderRole::Trash])
         );
+    }
+
+    #[test]
+    fn gmail_labels_by_role_or_name() {
+        let labels = |line: &[u8]| {
+            let Ok((_, imap_proto::Response::Fetch(_, items))) = imap_proto::Response::parse(line)
+            else {
+                panic!("not a FETCH");
+            };
+            items
+                .iter()
+                .find_map(|i| match i {
+                    AttributeValue::GmailLabels(labels) => Some(
+                        labels
+                            .iter()
+                            .filter_map(|l| gmail_label(l))
+                            .collect::<Vec<_>>(),
+                    ),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let user = GmailLabel::user;
+        assert_eq!(
+            labels(
+                b"* 1 FETCH (UID 4 X-GM-LABELS (\"\\\\Inbox\" \"\\\\Important\" \"\\\\Starred\" \
+                  \"\\\\Draft\" \"\\\\Muted\" Work &ZeVnLIqe- \"Two words\"))\r\n"
+            ),
+            [
+                GmailLabel::System(FolderRole::Inbox),
+                GmailLabel::System(FolderRole::Important),
+                GmailLabel::System(FolderRole::Drafts),
+                user("Work", "Work"),
+                user("&ZeVnLIqe-", "日本語"),
+                user("Two words", "Two words"),
+            ]
+        );
+        assert_eq!(labels(b"* 1 FETCH (UID 4 X-GM-LABELS ())\r\n"), []);
     }
 
     #[test]

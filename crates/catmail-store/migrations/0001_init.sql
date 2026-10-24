@@ -30,6 +30,9 @@ CREATE TABLE accounts (
     -- connected to, which limits a draft's attachments (the copies in Drafts and Sent).
     -- NULL: not connected to yet, or no limit announced.
     imap_append_limit INTEGER,
+    -- standard | gmail: which mailboxes are locations and which labels (see
+    -- docs/architecture/labels.md), as found when last connected to.
+    mode          TEXT    NOT NULL DEFAULT 'standard',
     created_at    INTEGER NOT NULL DEFAULT (unixepoch())
 ) STRICT;
 
@@ -63,6 +66,14 @@ CREATE UNIQUE INDEX identities_default ON identities (account_id) WHERE is_defau
 
 -- One row per remote IMAP mailbox, plus the sync cursor for that mailbox.
 --
+-- kind (see docs/architecture/labels.md):
+--   location  holds messages, each under its own UID: every mailbox of a standard
+--             account; All Mail, Trash and Spam on Gmail.
+--   label     a Gmail label: its messages are those with a message_labels row for it
+--             (Starred: those with \Flagged), and it has no UIDVALIDITY or cursor of
+--             its own. One the server doesn't list (hidden in Gmail's settings) that
+--             messages still carry has listed = 0.
+--
 -- Invariant: every row in `messages` for a folder belongs to the folder's current
 -- `uidvalidity`. When the server reports a new UIDVALIDITY, the folder's messages are
 -- deleted and `uidvalidity` is updated in the same transaction.
@@ -77,22 +88,25 @@ CREATE TABLE folders (
     name           TEXT    NOT NULL, -- decoded for display
     delimiter      TEXT,
     role           TEXT,
+    kind           TEXT    NOT NULL DEFAULT 'location',
+    listed         INTEGER NOT NULL DEFAULT 1,
     selectable     INTEGER NOT NULL DEFAULT 1, -- 0 for \Noselect hierarchy nodes
     uidvalidity    INTEGER,
     uidnext        INTEGER,
     highest_modseq INTEGER,
-    unread_count   INTEGER NOT NULL DEFAULT 0, -- kept by the messages_count_* triggers
+    unread_count   INTEGER NOT NULL DEFAULT 0, -- kept by the *_count_* triggers
     total_count    INTEGER NOT NULL DEFAULT 0,
     last_synced_at INTEGER,
     UNIQUE (account_id, remote_name),
     UNIQUE (id, account_id)
 ) STRICT;
 
--- One row per message *in a mailbox* (an IMAP (mailbox, UID) pair). A copy of the same
--- email in another folder is another row with its own flags, as on the server. Identical
--- raw content is still stored once, because the BlobStore is content-addressed.
--- Cross-folder grouping of copies (e.g. via RFC 8474 EMAILID) can be added later as a
--- nullable column; it must never replace per-row state.
+-- One row per message on the server: its location (a folder of kind 'location'), its
+-- UID there, and on Gmail its labels (message_labels). On a standard account a copy of
+-- the same email in another folder is another row with its own flags, as on the server;
+-- identical raw content is still stored once, because the BlobStore is
+-- content-addressed. On Gmail a row is one X-GM-MSGID, whichever of its locations it is
+-- in.
 --
 -- A message moved here locally has no UID until the server makes the move: uid is NULL,
 -- and the pending move (pending_ops.message_id = id) says where the server has it
@@ -107,6 +121,10 @@ CREATE TABLE messages (
     flags           INTEGER NOT NULL DEFAULT 0, -- system flags bitset, see catmail_types::Flags
     keywords_json   TEXT    NOT NULL DEFAULT '[]', -- non-system flags, e.g. ["$Junk"]
     modseq          INTEGER,
+    -- Gmail's X-GM-MSGID and X-GM-THRID (unsigned 64-bit, stored as their bits); NULL
+    -- on a standard account. The message id stays the same in every location.
+    gm_msgid        INTEGER,
+    gm_thrid        INTEGER,
     -- Immutable for the lifetime of the (folder, uid) pair.
     internal_date   INTEGER,
     size            INTEGER,
@@ -136,6 +154,11 @@ CREATE TABLE messages (
 -- so listing it again would only store it twice.
 CREATE INDEX messages_folder_date ON messages (folder_id, list_date);
 CREATE INDEX messages_message_id_hdr ON messages (account_id, message_id_hdr);
+CREATE UNIQUE INDEX messages_gm_msgid ON messages (account_id, gm_msgid)
+    WHERE gm_msgid IS NOT NULL;
+-- Gmail's Starred, which is \Flagged rather than a label row; read like
+-- messages_folder_date.
+CREATE INDEX messages_flagged ON messages (account_id, list_date) WHERE flags & 2 <> 0;
 
 -- Folder counts follow every change to `messages`, whoever makes it (sync, local flag
 -- changes, cascading deletes), so no writer can forget them. Unread = no \Seen (bit 0).
@@ -168,6 +191,88 @@ WHEN old.folder_id <> new.folder_id BEGIN
     UPDATE folders SET total_count = total_count + 1,
                        unread_count = unread_count + (old.flags & 1 = 0)
     WHERE id = new.folder_id;
+END;
+
+-- The labels of a message on Gmail, besides its location: one row per label mailbox it
+-- is in. Starred is \Flagged, never a row here.
+CREATE TABLE message_labels (
+    message_id INTEGER NOT NULL,
+    folder_id  INTEGER NOT NULL,
+    account_id INTEGER NOT NULL,
+    -- The message's list_date (which never changes), so that a page of a label is two
+    -- seeks in message_labels_list as one of a folder is in messages_folder_date.
+    list_date  INTEGER NOT NULL,
+    PRIMARY KEY (message_id, folder_id),
+    FOREIGN KEY (message_id, account_id) REFERENCES messages(id, account_id) ON DELETE CASCADE,
+    FOREIGN KEY (folder_id, account_id) REFERENCES folders(id, account_id) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+
+CREATE INDEX message_labels_list ON message_labels (folder_id, list_date, message_id);
+
+-- The messages a label shows are those in All Mail, as on Gmail: not those in Trash or
+-- Spam, which keep their labels to have them back when moved out again. Starred shows
+-- the flagged ones. Each view has an index, since the triggers below consult them for
+-- every message changed.
+CREATE VIEW all_mail AS SELECT id FROM folders WHERE kind = 'location' AND role = 'all';
+CREATE INDEX folders_all_mail ON folders (id) WHERE kind = 'location' AND role = 'all';
+CREATE VIEW starred AS
+    SELECT id, account_id FROM folders WHERE kind = 'label' AND role = 'flagged';
+CREATE INDEX folders_starred ON folders (account_id) WHERE kind = 'label' AND role = 'flagged';
+
+-- Label counts, like the folder counts above: a message counts in each of its labels,
+-- and in Starred if \Flagged, while it is in All Mail. Each change is O(labels).
+CREATE TRIGGER labels_count_insert AFTER INSERT ON message_labels BEGIN
+    UPDATE folders SET total_count = total_count + 1,
+                       unread_count = unread_count + (m.flags & 1 = 0)
+    FROM messages m
+    WHERE folders.id = new.folder_id AND m.id = new.message_id AND m.folder_id IN all_mail;
+END;
+
+CREATE TRIGGER labels_count_delete AFTER DELETE ON message_labels BEGIN
+    UPDATE folders SET total_count = total_count - 1,
+                       unread_count = unread_count - (m.flags & 1 = 0)
+    FROM messages m
+    WHERE folders.id = old.folder_id AND m.id = old.message_id AND m.folder_id IN all_mail;
+END;
+
+-- Before the message goes, while the label triggers can still see it.
+CREATE TRIGGER labels_count_message_delete BEFORE DELETE ON messages BEGIN
+    DELETE FROM message_labels WHERE message_id = old.id;
+    UPDATE folders SET total_count = total_count - 1,
+                       unread_count = unread_count - (old.flags & 1 = 0)
+    WHERE old.flags & 2 AND old.folder_id IN all_mail
+      AND id IN (SELECT id FROM starred WHERE account_id = old.account_id);
+END;
+
+-- And a folder's messages go before the folder, rather than by cascade: by then the
+-- trigger above could no longer tell whether they were in All Mail.
+CREATE TRIGGER folders_delete_messages BEFORE DELETE ON folders BEGIN
+    DELETE FROM messages WHERE folder_id = old.id;
+END;
+
+CREATE TRIGGER labels_count_message_insert AFTER INSERT ON messages
+WHEN new.flags & 2 AND new.folder_id IN all_mail BEGIN
+    UPDATE folders SET total_count = total_count + 1,
+                       unread_count = unread_count + (new.flags & 1 = 0)
+    WHERE id IN (SELECT id FROM starred WHERE account_id = new.account_id);
+END;
+
+-- \Seen or \Flagged changed, or the message moved into or out of All Mail: it leaves
+-- the labels it was counted in as it was, and joins them as it is.
+CREATE TRIGGER labels_count_message_update AFTER UPDATE OF flags, folder_id ON messages
+WHEN (old.flags & 3) <> (new.flags & 3) OR old.folder_id <> new.folder_id BEGIN
+    UPDATE folders SET total_count = total_count - 1,
+                       unread_count = unread_count - (old.flags & 1 = 0)
+    WHERE old.folder_id IN all_mail
+      AND (id IN (SELECT folder_id FROM message_labels WHERE message_id = old.id)
+           OR (old.flags & 2
+               AND id IN (SELECT id FROM starred WHERE account_id = old.account_id)));
+    UPDATE folders SET total_count = total_count + 1,
+                       unread_count = unread_count + (new.flags & 1 = 0)
+    WHERE new.folder_id IN all_mail
+      AND (id IN (SELECT folder_id FROM message_labels WHERE message_id = new.id)
+           OR (new.flags & 2
+               AND id IN (SELECT id FROM starred WHERE account_id = new.account_id)));
 END;
 
 -- The downloaded body of a message; exists iff messages.body_state = 'full'. Written in

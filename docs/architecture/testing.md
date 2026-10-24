@@ -21,6 +21,14 @@
   - 能力与状态：没有 CONDSTORE，关掉 MOVE、UIDPLUS 和 IDLE，UIDVALIDITY 改变；
   - 写操作：拒绝 APPEND（回 NO，或不要 literal 直接回 NO）、APPEND 存下后不答复就断开，拒绝修改、
     修改后不答复就断开（或只在 EXPUNGE 后断开），COPY 之前先往目标投递一封。
+- **Gmail**（`ServerState::gmail`）：`X-GM-EXT-1`，按[验证结果](labels.md#验证结果)模拟。邮件在"所有邮件"、
+  已删除、垃圾邮件三个位置里，各带 `X-GM-MSGID` / `X-GM-THRID` 和标签；INBOX 等标签邮箱在每条命令（和
+  IDLE 的每次查看）之前按"所有邮件"里的标签重建，各有自己的 UID，邮件带着标签时 UID 不变。测试改
+  "所有邮件"里的邮件（`set_labels` 像 flags 一样让 MODSEQ 变大），直接改标签邮箱的会被重建覆盖。客户端在
+  标签邮箱里的命令作用于邮件本身：flags 是邮件的，`\Deleted` 立即去掉这个标签（在草稿里整封删除），
+  MOVE 到"所有邮件"是去掉标签，在两个标签之间 MOVE 是换标签；位置之间 MOVE 时 `X-GM-MSGID` 不变，已删除
+  去掉 `\Inbox`，垃圾邮件再去掉 `\Important`。FETCH 支持 `X-GM-*`，在标签邮箱里不列它自己的标签；
+  `UID STORE ±X-GM-LABELS`、`UID SEARCH X-GM-MSGID`。
 - 测试还可以直接在客户端的数据库里加触发器，让某条写入失败，模拟磁盘满（`tests/common` 的 `sql`）。
 - **SMTP**：明文 / TLS / STARTTLS，AUTH PLAIN / LOGIN，记录投递的信封和正文（已去掉点填充）。故障：
   421 问候、拒绝登录、SIZE 上限、拒绝指定收件人（4xx / 5xx）、MAIL FROM 回 451 或断线、对结束标记回

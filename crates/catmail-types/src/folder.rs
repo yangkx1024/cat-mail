@@ -16,6 +16,8 @@ pub enum FolderRole {
     Archive,
     All,
     Flagged,
+    /// Gmail's Important (RFC 8457 `\Important`).
+    Important,
 }
 
 impl FolderRole {
@@ -29,6 +31,7 @@ impl FolderRole {
             Self::Archive => "archive",
             Self::All => "all",
             Self::Flagged => "flagged",
+            Self::Important => "important",
         }
     }
 
@@ -43,6 +46,7 @@ impl FolderRole {
             Self::Archive => "Archive",
             Self::All => "All Mail",
             Self::Flagged => "Flagged",
+            Self::Important => "Important",
         }
     }
 
@@ -65,7 +69,42 @@ impl FromStr for FolderRole {
             "archive" => Self::Archive,
             "all" => Self::All,
             "flagged" => Self::Flagged,
+            "important" => Self::Important,
             other => return Err(format!("unknown folder role `{other}`")),
+        })
+    }
+}
+
+/// What a mailbox is to an account (see `docs/architecture/labels.md`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FolderKind {
+    /// Where messages are: each message is in exactly one, under its own UID. Every
+    /// mailbox of a standard IMAP account; All Mail, Trash and Spam on Gmail.
+    #[default]
+    Location,
+    /// A label on messages that are in a location: the other mailboxes on Gmail. Not
+    /// synced itself; its messages are those with the label.
+    Label,
+}
+
+impl FolderKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Location => "location",
+            Self::Label => "label",
+        }
+    }
+}
+
+impl FromStr for FolderKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "location" => Self::Location,
+            "label" => Self::Label,
+            other => return Err(format!("unknown folder kind `{other}`")),
         })
     }
 }
@@ -79,6 +118,10 @@ pub struct Folder {
     pub name: String,
     pub delimiter: Option<char>,
     pub role: Option<FolderRole>,
+    pub kind: FolderKind,
+    /// False for a label the server doesn't list (hidden in Gmail's settings) that
+    /// messages still carry: kept, not shown.
+    pub listed: bool,
     /// False for hierarchy-only nodes (`\Noselect`) that cannot hold messages.
     pub selectable: bool,
     pub unread_count: u32,
@@ -152,6 +195,8 @@ mod tests {
             name: format!("f{id}"),
             delimiter: Some('/'),
             role,
+            kind: FolderKind::Location,
+            listed: true,
             selectable,
             unread_count: 0,
             total_count: 0,

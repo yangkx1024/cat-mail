@@ -21,9 +21,10 @@ impl RoleInfo {
             FolderRole::Sent => (Hero::PaperAirplane, Some(1)),
             FolderRole::Archive => (Hero::ArchiveBox, Some(2)),
             FolderRole::All => (Hero::Envelope, Some(3)),
-            FolderRole::Flagged => (Hero::Flag, Some(4)),
-            FolderRole::Junk => (Hero::ShieldExclamation, Some(5)),
-            FolderRole::Trash => (Hero::Trash, Some(6)),
+            FolderRole::Important => (Hero::Star, Some(4)),
+            FolderRole::Flagged => (Hero::Flag, Some(5)),
+            FolderRole::Junk => (Hero::ShieldExclamation, Some(6)),
+            FolderRole::Trash => (Hero::Trash, Some(7)),
             FolderRole::Drafts => (Hero::DocumentText, None),
         };
         Self { icon, order }
@@ -232,7 +233,7 @@ pub fn folder_tree(folders: &[Folder]) -> Vec<FolderNode> {
 
 #[cfg(test)]
 mod tests {
-    use catmail_core::{AccountId, FolderId};
+    use catmail_core::{AccountId, FolderId, FolderKind};
 
     use super::*;
 
@@ -243,6 +244,8 @@ mod tests {
             name: name.into(),
             delimiter,
             role: (name == "INBOX").then_some(FolderRole::Inbox),
+            kind: FolderKind::Location,
+            listed: true,
             selectable: true,
             unread_count: 0,
             total_count: 0,
@@ -257,6 +260,8 @@ mod tests {
             name: name.into(),
             delimiter: Some('.'),
             role: Some(role),
+            kind: FolderKind::Location,
+            listed: true,
             selectable: true,
             unread_count: 0,
             total_count: 0,

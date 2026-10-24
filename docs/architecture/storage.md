@@ -21,9 +21,10 @@
 
 ## 邮件行
 
-一行是一个（文件夹, UID）对，见[架构](../architecture.md#一行是服务器上的一封邮件uid-绑定-uidvalidity)。
-Gmail 将改为一封邮件一行、其余邮箱作为标签（`message_labels`），见[位置与标签](labels.md)。
-补充：
+一行是服务器上的一封邮件：它的位置（`kind = 'location'` 的文件夹）和那里的 UID，见
+[架构](../architecture.md#一行是服务器上的一封邮件uid-绑定-uidvalidity)。Gmail 上一行是一个 `X-GM-MSGID`
+（`gm_msgid`，账户内唯一），其余邮箱是标签（`message_labels`），见[位置与标签](labels.md#存储)；同步还没有
+按这个模型写入。补充：
 
 - 移动得到新的 UID：服务器给出 COPYUID 时同一行改为新的（文件夹, UID），否则旧行删除、同步时成为
   新的一行。本地移动过来、服务器还没移动的行 `uid` 为空。
@@ -33,7 +34,9 @@ Gmail 将改为一封邮件一行、其余邮箱作为标签（`message_labels`�
   等查询出现时再加对应索引。
 
 **计数。** `folders.unread_count` / `total_count` 由 `messages` 上的触发器维护（插入、删除、
-`\Seen` 变化各 O(1)），不论变化来自同步、本地操作还是级联删除，写入方都不用记得刷新。
+`\Seen` 变化各 O(1)），不论变化来自同步、本地操作还是级联删除，写入方都不用记得刷新。标签的计数由
+`message_labels` 和 `messages` 上的另一组触发器维护，每次变化 O(标签数)，见
+[位置与标签](labels.md#存储)。
 
 **跨账户约束。** 引用其他账户内数据的行用 `(id, account_id)` 复合外键（`messages`、`pending_ops`
 → `folders`），数据库层面就不可能把账户 A 的邮件挂到账户 B 的文件夹下。`ON DELETE SET NULL` 的关联
