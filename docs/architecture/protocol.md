@@ -6,10 +6,38 @@ SMTP 客户端见[草稿与发信](sending.md#smtp-客户端)。
 
 ## IMAP 库
 
-`imap-next`（sans-IO，基于 `imap-codec`），启用 `starttls` 与 `ext_condstore_qresync`，不启用它
-自带的 `stream`：`catmail-proto` 自己驱动状态机，底层可以是任意 `AsyncRead + AsyncWrite`，便于
-STARTTLS 升级和测试。`imap-codec 2.0.0-alpha.9` 未开启 `nom/alloc`，`catmail-proto` 显式依赖
-`nom` 补上（见其 `Cargo.toml` 注释），上游修复后可移除。
+**现状：** `imap-next`（sans-IO，基于 `imap-codec`），启用 `starttls` 与 `ext_condstore_qresync`，
+不启用它自带的 `stream`：`catmail-proto` 自己驱动状态机，底层可以是任意 `AsyncRead + AsyncWrite`，
+便于 STARTTLS 升级和测试。`imap-codec 2.0.0-alpha.9` 未开启 `nom/alloc`，`catmail-proto` 显式依赖
+`nom` 补上（见其 `Cargo.toml` 注释）。
+
+**已决定改为：** 用 [`imap-proto`](https://github.com/djc/imap-proto) 只解析响应，命令编码和连接的
+驱动（分帧、tag、literal 与续行、AUTHENTICATE、STARTTLS、IDLE / DONE）由 `catmail-proto` 自己写。
+`Session` 的接口不变，现有的假服务器和 Dovecot 测试就是回归测试。尚未实现，见
+[位置与标签 / 迁移步骤](labels.md#迁移步骤)。
+
+- **imap-codec 难以扩展。** imap-types 的命令和响应都是封闭的 enum：`Store` 只能带 flags，FETCH 少一个
+  数据项就发不出命令，回答里多一个不认识的项就丢掉整行。每个它不支持的扩展（Gmail 的 `X-GM-*`，以后的
+  OBJECTID、PREVIEW 等）都只能等上游，而上游一直是 alpha，每次升级都可能不兼容。
+- **imap-next 的状态机要一再绕过：** APPEND 收到 NO 后仍等着发 literal、只限单条响应的大小、事件里带着
+  只在 release 构建脱敏的凭据（见下文[连接层](#连接层)），以及 `nom/alloc`。它负责的连接部分我们大多已经
+  自己写了。
+- **imap-proto** 只解析响应，正好是客户端需要的部分：语法里最复杂、安全上最敏感的（BODYSTRUCTURE、
+  ENVELOPE、literal）用它的，最常需要扩展的（发什么命令）由我们控制。0.17.0 已经支持 `X-GM-LABELS` /
+  `X-GM-MSGID` / `X-GM-THRID`、`EMAILID` / `THREADID`（RFC 8474）、VANISHED 和 MODSEQ；FETCH 里不认识的
+  项返回 `AttributeValue::Unknown`，不会让整行解析失败。它也是 async-imap（Delta Chat）的解析器，见过
+  大量真实服务器。缺少的响应语法给上游提 PR。
+- 不用 async-imap：它是持有连接的会话层，又会回到在别人的状态机外面打补丁。不自己写响应解析器：IMAP
+  响应的语法很大，维护和安全上的负担都不值得。
+- **试用（2026-10-24，真实 Gmail，见[位置与标签 / 验证结果](labels.md#验证结果)）：** imap-proto 0.17.0
+  解析了全部答复，没有一行失败；不认识的响应码（`[NONEXISTENT]` 等）当作文字，不算失败。要处理的两点：
+  - **带引号的字符串不还原转义**：`quoted` 返回引号里的原始字节，`"\\Inbox"` 解析出来是 `\\Inbox`。这影响
+    所有带引号的字符串（LIST 的邮箱名、`X-GM-LABELS`、ENVELOPE 的字段）。给上游提修复，修复发布之前在我们
+    这边还原 `\\` 和 `\"`。
+  - Gmail 只有 `LITERAL-`：超过 4096 字节的 literal 要等服务器的 `+` 再发，命令编码不能一律用非同步
+    literal。
+- 连接层的规则不变：解析失败的响应仍按行计数、让严格的命令返回 `Incomplete`，`quirks.rs` 仍在解析之前
+  修补字节，一条命令的回答总量仍有上限。
 
 ## 连接层
 
