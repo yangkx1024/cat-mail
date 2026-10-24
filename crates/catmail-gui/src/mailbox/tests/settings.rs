@@ -289,6 +289,52 @@ fn escape_and_cancel_close_only_the_sending_address_form(cx: &mut TestAppContext
 }
 
 #[gpui_kit::test]
+fn enter_on_cancel_of_a_confirmation_removes_nothing(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let account = mail.account();
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    open_accounts(cx, window);
+    let remove = ("remove-account", account.0 as u64);
+    let confirm_with = |cx: &mut TestAppContext, button: &'static str| {
+        cx.update_window(window, |_, window, cx| window.click(remove, cx))
+            .unwrap();
+        for _ in 0..10 {
+            let focused = cx
+                .update_window(window, |_, window, cx| {
+                    window.render_frame(cx);
+                    window.find(button).focused() == Some(true)
+                })
+                .unwrap();
+            if focused {
+                cx.update_window(window, |_, window, cx| window.press("enter", cx))
+                    .unwrap();
+                return;
+            }
+            cx.update_window(window, |_, window, cx| window.press("tab", cx))
+                .unwrap();
+            cx.run_until_parked();
+        }
+        panic!("Tab never reached {button}");
+    };
+    let accounts = || {
+        pollster::block_on(mail.client.list_accounts())
+            .unwrap()
+            .len()
+    };
+
+    confirm_with(cx, crate::layout::CANCEL);
+    assert!(!shown(cx, window, crate::layout::CANCEL));
+    assert_eq!(accounts(), 1);
+
+    confirm_with(cx, crate::layout::CONFIRM);
+    wait_until(|| {
+        cx.run_until_parked();
+        accounts() == 0
+    });
+}
+
+#[gpui_kit::test]
 fn the_sending_address_form_works_from_the_keyboard(cx: &mut TestAppContext) {
     let mail = TestMail::start();
     let account = mail.account();

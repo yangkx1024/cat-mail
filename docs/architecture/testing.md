@@ -62,8 +62,9 @@ Trash）和假 SMTP 服务器，驱动真实的窗口：点击、键盘、切换
 点对话框里的按钮会落在上一帧的位置；测试调度器下 gpui-kit 不读系统设置，只能由测试自己设。
 测试的时钟只在 `advance_clock` 时走，所以主窗口的事件节流间隔（`refresh_interval`）在测试里设为零。
 断言"什么都没发生"时等一个正面的信号（窗口显示了原因、第二次打开同步返回），不固定 sleep。
-测试要点 gpui-kit 自己生成的元素 id（AlertDialog 的 OK、SidebarMenu 的第几项）时，只经
-`layout::CONFIRM`、`settings::dialog::section_item` 取得，升级 gpui-kit 改了命名只需改这两处。
+测试要点 gpui-kit 自己生成的元素 id（SidebarMenu 的第几项）时，只经 `settings::dialog::section_item`
+取得，升级 gpui-kit 改了命名只需改这一处；确认框的按钮是我们自己的，id 是 `layout::CONFIRM` /
+`layout::CANCEL`。
 
 窗口里的决策逻辑抽成纯函数做表驱动测试，不必经过窗口：列表刷新后选中去哪（`message_list::reselect`）、
 哪个事件重读什么及节流（`mailbox::refresh`）、写信窗口关闭时等待 / 提示 / 关闭 / 先保存（`composer::lifecycle`
