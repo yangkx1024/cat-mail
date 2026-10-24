@@ -125,8 +125,16 @@ fn screenshots() {
     })
     .unwrap();
     save(&mut cx, window, "settings");
+    let account = mail.account();
     cx.update_window(window, |_, window, cx| {
-        window.close_dialog(cx);
+        window.click(crate::settings::dialog::section_item("Accounts"), cx);
+        window.render_frame(cx);
+        window.click(("add-identity", account.0 as u64), cx);
+    })
+    .unwrap();
+    save(&mut cx, window, "settings-add-identity");
+    cx.update_window(window, |_, window, cx| {
+        window.close_all_dialogs(cx);
         window.render_frame(cx);
         window.click("reply", cx);
     })

@@ -3,7 +3,7 @@
 //! it.
 
 use gpui_kit::base::input::SelectAll;
-use gpui_kit::{App, KeyBinding};
+use gpui_kit::{App, KeyBinding, NoAction};
 
 gpui_kit::actions!(
     catmail,
@@ -38,6 +38,8 @@ pub const MESSAGE_LIST: &str = "MessageList";
 pub const READER_PAGE: &str = "ReaderPage";
 /// A composer window's.
 pub const COMPOSER: &str = "Composer";
+/// A button of a dialog's own footer.
+pub const DIALOG_BUTTON: &str = "DialogButton";
 
 pub fn bind_keys(cx: &mut App) {
     let mailbox = Some(MAILBOX);
@@ -70,5 +72,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", CloseComposer, composer),
         KeyBinding::new("secondary-w", CloseComposer, composer),
         KeyBinding::new("secondary-shift-a", Attach, composer),
+        // A dialog binds Enter to its Confirm, which would take it from a focused button
+        // (Cancel, say): unbound here, the button sees it as a click.
+        KeyBinding::new("enter", NoAction, Some(DIALOG_BUTTON)),
     ]);
 }

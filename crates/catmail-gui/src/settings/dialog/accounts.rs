@@ -12,7 +12,6 @@ use crate::assets::Hero;
 use crate::layout;
 use crate::mailbox::AccountEntry;
 
-use super::identity::{AddIdentity, IdentityFormClosed};
 use super::*;
 
 impl SettingsView {
@@ -65,15 +64,7 @@ impl SettingsView {
             entry.account.email.clone(),
             entry.account.display_name.clone(),
         );
-        let client = self.client.clone();
-        let form = cx.new(|cx| AddIdentity::new(client, id, email, name, window, cx));
-        let subscription = cx.subscribe(&form, |this, _, _: &IdentityFormClosed, cx| {
-            // Added, it is listed with the account once the mailbox reads it again.
-            this.identity_form = None;
-            cx.notify();
-        });
-        self.identity_form = Some((form, subscription));
-        cx.notify();
+        identity::open(self.client.clone(), id, &email, name, window, cx);
     }
 
     fn make_default(&mut self, id: IdentityId, window: &mut Window, cx: &mut Context<Self>) {
@@ -127,9 +118,6 @@ impl SettingsView {
     }
 
     pub(super) fn render_accounts(&self, cx: &mut Context<Self>) -> AnyElement {
-        if let Some((form, _)) = &self.identity_form {
-            return form.clone().into_any_element();
-        }
         let muted = cx.theme().muted_foreground;
         // Borrowed for as long as the rows are built: the handlers keep only ids, and
         // look the rest up when clicked.

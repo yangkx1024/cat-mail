@@ -77,7 +77,6 @@ impl LoginFields {
         });
         let username =
             cx.new(|cx| InputState::new(window, cx).placeholder("Same as the email address"));
-        email.update(cx, |email, cx| email.focus(window, cx));
         Self {
             email,
             password,
@@ -89,6 +88,11 @@ impl LoginFields {
 
     pub fn inputs(&self) -> [&Entity<InputState>; 4] {
         [&self.email, &self.password, &self.name, &self.username]
+    }
+
+    /// Puts the cursor in the Email field.
+    pub fn focus(&self, window: &mut Window, cx: &mut App) {
+        self.email.update(cx, |email, cx| email.focus(window, cx));
     }
 
     pub fn values(&self, cx: &App) -> LoginValues {
@@ -264,7 +268,8 @@ impl ServerFields {
     }
 }
 
-/// Enter in any of the fields submits the form, as in a native login form.
+/// Enter in any of the fields submits the form, as in a native login form. A form in a
+/// dialog has the dialog's Confirm instead.
 pub fn submit_on_enter<'a, T: 'static>(
     fields: impl IntoIterator<Item = &'a Entity<InputState>>,
     submit: fn(&mut T, &mut Window, &mut Context<T>),
@@ -312,7 +317,7 @@ impl Submit {
         &mut self,
         submit: fn(&mut T) -> &mut Submit,
         request: Result<impl Future<Output = catmail_core::Result<R>> + 'static, &'static str>,
-        done: impl FnOnce(R, &mut Context<T>) + 'static,
+        done: impl FnOnce(R, &mut Window, &mut Context<T>) + 'static,
         window: &mut Window,
         cx: &mut Context<T>,
     ) {
@@ -331,10 +336,10 @@ impl Submit {
         self.error = None;
         self._task = cx.spawn_in(window, async move |this, cx| {
             let result = request.await;
-            this.update(cx, |this, cx| {
+            this.update_in(cx, |this, window, cx| {
                 submit(this).busy = false;
                 match result {
-                    Ok(value) => done(value, cx),
+                    Ok(value) => done(value, window, cx),
                     Err(e) => submit(this).error = Some(format!("Couldn't sign in: {e}").into()),
                 }
                 cx.notify();
@@ -357,15 +362,29 @@ impl Submit {
         })
     }
 
+    /// Whether a submission is running. Leaving the form then would only skip what
+    /// follows: the engine stores the account or identity whatever the window does (its
+    /// blocking task isn't cancelled with the form's).
+    pub fn busy(&self) -> bool {
+        self.busy
+    }
+
+    /// The form's Cancel button: off while a submission runs.
+    pub fn cancel_button(&self, cancel: Button) -> Button {
+        cancel.disabled(self.busy)
+    }
+
+    /// The button that submits the form.
+    pub fn submit_button(&self, submit: Button) -> Button {
+        submit.primary().loading(self.busy)
+    }
+
     /// The buttons under the form: Cancel, if it has one, and the one that submits it.
-    /// Cancel is off while a submission runs: the engine stores the account or identity
-    /// whatever the window does (its blocking task isn't cancelled with the form's), so
-    /// leaving would only skip what follows.
     pub fn actions(&self, cancel: Option<Button>, submit: Button) -> impl IntoElement + use<> {
         h_flex()
             .justify_end()
             .gap_2()
-            .children(cancel.map(|cancel| cancel.disabled(self.busy)))
-            .child(submit.primary().loading(self.busy))
+            .children(cancel.map(|cancel| self.cancel_button(cancel)))
+            .child(self.submit_button(submit))
     }
 }

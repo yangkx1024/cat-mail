@@ -8,8 +8,8 @@ use catmail_core::{MessageId, MessageSummary, Verify};
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
-    AnyWindowHandle, App, Bounds, HeadlessAppContext, TestAppContext, Window, WindowBounds,
-    WindowOptions, px, size,
+    AnyWindowHandle, App, Bounds, ElementId, HeadlessAppContext, TestAppContext, Window,
+    WindowBounds, WindowOptions, px, size,
 };
 
 use super::*;
@@ -155,6 +155,26 @@ fn open_settings(cx: &mut TestAppContext, window: AnyWindowHandle) {
     cx.run_until_parked();
     cx.update_window(window, |_, window, cx| window.render_frame(cx))
         .unwrap();
+}
+
+/// Opens Settings › Accounts.
+fn open_accounts(cx: &mut TestAppContext, window: AnyWindowHandle) {
+    open_settings(cx, window);
+    cx.update_window(window, |_, window, cx| {
+        window.click(crate::settings::dialog::section_item("Accounts"), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+}
+
+/// Whether the element is drawn, once what is pending has run.
+fn shown(cx: &mut TestAppContext, window: AnyWindowHandle, id: impl Into<ElementId>) -> bool {
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.try_find(id).is_some()
+    })
+    .unwrap()
 }
 
 fn wait_for_one_window(cx: &mut TestAppContext) {
