@@ -61,6 +61,7 @@ impl AddAccount {
         cx: &mut Context<Self>,
     ) -> Self {
         let login = LoginFields::new("", None, window, cx);
+        login.focus(window, cx);
         let imap = ServerFields::new(
             "imap",
             "Incoming mail (IMAP)",
@@ -115,7 +116,7 @@ impl AddAccount {
         self.submit.start(
             |this: &mut Self| &mut this.submit,
             request,
-            |account, cx| cx.emit(AddAccountEvent::Added(account)),
+            |account, _, cx| cx.emit(AddAccountEvent::Added(account)),
             window,
             cx,
         );

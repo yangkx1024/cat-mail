@@ -272,14 +272,18 @@ INBOX，所以打开一个文件夹时同步它（`MailClient::sync_folder`，�
   SMTP，所以 SMTP 填错同样当场报出。邮箱、密码、名字、用户名和服务器字段在 `login_form.rs`（`LoginFields`、
   `ServerFields`），与发件身份的表单共用。
 - **发件身份**在 Settings › Accounts 里，列在各自账户下面（包括随账户建出的那个），默认的标着"Default"，
-  其余可以"Make default"或删除；"Add sending address"在设置对话框里
-  原地换成身份的表单（地址、密码、名字、用户名和 SMTP 服务器，字段与登录页共用），
-  `add_identity(.., Verify::Login)`，完成或取消后回到列表。设置对话框没有要确认的东西，
-  它的 `on_ok` 不关闭，否则字段里按 Enter 会关掉整个设置、丢下正在添加的身份；表单和登录页一样，
-  任一字段按 Enter 提交（`login_form::submit_on_enter`）。
+  其余可以"Make default"或删除；"Add sending address"在设置上面再叠一个对话框放身份的表单（地址、
+  密码、名字、用户名和 SMTP 服务器，字段与登录页共用），`add_identity(.., Verify::Login)`，成功后表单
+  自己关掉这个对话框。Enter、Esc、Cancel 都按对话框的约定：任一字段按 Enter 冒泡成对话框的
+  `Confirm`，`on_ok` 提交并返回 false；Esc 和 Cancel 是 `Cancel`，只关最上层的这个表单，进行中
+  `on_cancel` 拒绝关闭。底部两个按钮各自派发 `Cancel` / `Confirm`，点击处理放在按钮本身，获得焦点时
+  空格和 Enter 才能触发它们；对话框把 Enter 绑成 `Confirm`，会在按键按下时抢先，所以按钮带
+  `DialogButton` 键上下文，在那里把 Enter 绑成 `NoAction`，交还给按钮。表单要等对话框打开之后才把焦点
+  放进 Email 字段：对话框记下打开时的焦点，关闭时还给它，先聚焦就会还给一个随表单消失的字段，
+  再按 Esc 也关不掉设置。登录页不是对话框，任一字段按 Enter 提交靠 `login_form::submit_on_enter`。
 - 两个表单的提交流程也共用 `login_form::Submit`：进行中不重复提交、字段校验失败或登录失败显示在按钮
-  上方，以及"Cancel（进行中不可用）+ 主按钮（loading）"这一行按钮。表单只提供字段和要调用的
-  `MailClient` 方法。
+  上方，以及 Cancel（进行中不可用）和主按钮（loading）的样式；登录页把两个按钮排成一行，身份表单放进
+  `DialogFooter`。表单只提供字段和要调用的 `MailClient` 方法。
 
 ## HTML 引擎
 

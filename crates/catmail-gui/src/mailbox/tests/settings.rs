@@ -109,13 +109,8 @@ fn cancel_is_off_once_signing_in_has_started(cx: &mut TestAppContext) {
     wait_for_inbox(cx, &mailbox);
 
     // Settings › Accounts › Add account.
-    open_settings(cx, window);
-    cx.update_window(window, |_, window, cx| {
-        window.click(crate::settings::dialog::section_item("Accounts"), cx);
-        window.render_frame(cx);
-        window.click("settings-add-account", cx);
-    })
-    .unwrap();
+    open_accounts(cx, window);
+    click(cx, window, "settings-add-account");
     cx.run_until_parked();
     let port = mail.server().port.to_string();
     let smtp_port = mail.smtp_server().port.to_string();
@@ -166,12 +161,10 @@ fn adds_a_sending_address_and_makes_it_the_default(cx: &mut TestAppContext) {
     wait_for_inbox(cx, &mailbox);
     let identities = || pollster::block_on(mail.client.list_identities(account)).unwrap();
 
-    // Settings › Accounts › Add sending address, in place of the list.
-    open_settings(cx, window);
+    // Settings › Accounts › Add sending address; Enter in a field adds it.
+    open_accounts(cx, window);
     let port = mail.smtp_server().port.to_string();
     cx.update_window(window, |_, window, cx| {
-        window.click(crate::settings::dialog::section_item("Accounts"), cx);
-        window.render_frame(cx);
         window.click(("add-identity", account.0 as u64), cx);
         window.render_frame(cx);
         let fill = |window: &mut Window, cx: &mut App, id: &'static str, text: &str| {
@@ -203,24 +196,11 @@ fn adds_a_sending_address_and_makes_it_the_default(cx: &mut TestAppContext) {
 
     // Back in the list, under its account; made the default, the first can go.
     let make_default = ("default-identity", identity.id.0 as u64);
-    let shown = |cx: &mut TestAppContext, id: (&'static str, u64)| {
-        cx.update_window(window, |_, window, cx| {
-            window.render_frame(cx);
-            window.try_find(id).is_some()
-        })
-        .unwrap()
-    };
-    wait_until(|| {
-        cx.run_until_parked();
-        shown(cx, make_default)
-    });
+    wait_until(|| shown(cx, window, make_default));
     cx.update_window(window, |_, window, cx| window.click(make_default, cx))
         .unwrap();
     let remove = ("remove-identity", own.id.0 as u64);
-    wait_until(|| {
-        cx.run_until_parked();
-        identities()[0].id == identity.id && shown(cx, remove)
-    });
+    wait_until(|| shown(cx, window, remove) && identities()[0].id == identity.id);
     cx.update_window(window, |_, window, cx| window.click(remove, cx))
         .unwrap();
     cx.run_until_parked();
@@ -275,4 +255,102 @@ fn clears_the_image_cache(cx: &mut TestAppContext) {
         0
     );
     assert_eq!(images.requests(), 1);
+}
+
+#[gpui_kit::test]
+fn escape_and_cancel_close_only_the_sending_address_form(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let account = mail.account();
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    open_accounts(cx, window);
+    let closes: [fn(&mut Window, &mut App); 2] = [
+        |window, cx| window.press("escape", cx),
+        |window, cx| window.click("identity-cancel", cx),
+    ];
+    for close in closes {
+        cx.update_window(window, |_, window, cx| {
+            window.click(("add-identity", account.0 as u64), cx);
+            window.render_frame(cx);
+            window.click("identity-email", cx);
+            window.input("alice@example.org", cx);
+            close(window, cx);
+        })
+        .unwrap();
+        assert!(!shown(cx, window, "identity-email"));
+        assert!(shown(cx, window, "settings-add-account"));
+    }
+    assert_eq!(
+        pollster::block_on(mail.client.list_identities(account))
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[gpui_kit::test]
+fn the_sending_address_form_works_from_the_keyboard(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let account = mail.account();
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    open_accounts(cx, window);
+    let open_form = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, cx| {
+            window.click(("add-identity", account.0 as u64), cx);
+            window.render_frame(cx);
+            window.input("alice@example.org", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    };
+    // Tab from the email field to the button.
+    let tab_to = |cx: &mut TestAppContext, id: &'static str| {
+        for _ in 0..30 {
+            let focused = cx
+                .update_window(window, |_, window, cx| {
+                    window.render_frame(cx);
+                    window.find(id).focused() == Some(true)
+                })
+                .unwrap();
+            if focused {
+                return;
+            }
+            cx.update_window(window, |_, window, cx| window.press("tab", cx))
+                .unwrap();
+            cx.run_until_parked();
+        }
+        panic!("Tab never reached {id}");
+    };
+    let press = |cx: &mut TestAppContext, key: &'static str| {
+        cx.update_window(window, |_, window, cx| window.press(key, cx))
+            .unwrap();
+        cx.run_until_parked();
+    };
+
+    // Enter on Cancel cancels: nothing is added, and no error from trying.
+    open_form(cx);
+    tab_to(cx, "identity-cancel");
+    press(cx, "enter");
+    assert!(!shown(cx, window, "identity-email"));
+    assert!(!shown(cx, window, "identity-error"));
+
+    // Space on Add adds: here it fails, there being no server.
+    open_form(cx);
+    tab_to(cx, "identity-add");
+    press(cx, "space");
+    wait_until(|| shown(cx, window, "identity-error"));
+
+    // Closed, the form gives focus back to Settings: Escape closes it next.
+    press(cx, "escape");
+    assert!(!shown(cx, window, "identity-email"));
+    assert!(shown(cx, window, "settings-add-account"));
+    press(cx, "escape");
+    assert!(!shown(cx, window, "settings-add-account"));
+    assert_eq!(
+        pollster::block_on(mail.client.list_identities(account))
+            .unwrap()
+            .len(),
+        1
+    );
 }
