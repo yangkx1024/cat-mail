@@ -47,7 +47,7 @@ ignored there with a reason, never by loosening the check.
 |---|---|
 | `catmail-types` | Domain types. Pure data: no IO, no async |
 | `catmail-store` | SQLite schema, migrations, repositories, content-addressed `BlobStore`. Synchronous |
-| `catmail-proto` | IMAP (`imap-next`), SMTP, MIME adapters; remote images over HTTP |
+| `catmail-proto` | IMAP (`imap-next`; moving to `imap-proto` for parsing responses, see `docs/architecture/protocol.md`), SMTP, MIME adapters; remote images over HTTP |
 | `catmail-core` | Engine, services, runtime bridge, secrets, the `MailClient` facade |
 | `catmail-cli` | The `catmail` binary |
 | `catmail-gui` | The `catmail-gui` desktop binary, on GPUI Kit |
@@ -81,11 +81,14 @@ fake-server test, with a fault injected if the change is about recovering from o
 - **Events** are emitted after the commit, from inside the engine task that made the
   change, never from inside a `write` closure and never after an `.await` in the caller's
   future.
-- **Messages are per mailbox.** A `messages` row is one IMAP (folder, UID) pair with its own
-  flags. Don't merge copies across folders by Message-ID. The one exception is accounts with
-  an `\All` mailbox (`LABEL_ACCOUNTS`, Gmail), where folders are labels: search shows one
-  result per Message-ID, and replay uses Message-ID to pick which UIDs to ask the server
-  about. Rows stay per folder there too.
+- **A message row is one server message.** It has exactly one location, a (folder,
+  UIDVALIDITY, UID), and its own flags. On a standard IMAP account every selectable mailbox
+  is a location: copies in two folders are two messages, never merged by Message-ID (it can
+  be missing or repeated). On a Gmail account (`X-GM-EXT-1`) a row is one `X-GM-MSGID`, located
+  in All Mail, Trash or Spam; every other mailbox is a label (`message_labels`), never another
+  row. See [docs/architecture/labels.md](docs/architecture/labels.md). Not implemented yet:
+  until then Gmail labels are still synced as folders, and search and replay match their
+  copies by Message-ID (`LABEL_ACCOUNTS`); don't extend that, it is to be removed.
 - **UIDs are only valid within one UIDVALIDITY.** Anything persisted that refers to a
   remote UID also stores the folder and its UIDVALIDITY, and is checked before use.
 - **Account-owned references** use composite `(id, account_id)` foreign keys; where that is

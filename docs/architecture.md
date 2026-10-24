@@ -15,7 +15,7 @@
 | Facade | `catmail-core` | `MailClient`：async 方法 + 事件订阅，前端唯一依赖 |
 | Services / Engine | `catmail-core` | 同步、后台同步（IDLE）、操作队列回放、按需下载、Outbox；每账户状态；运行时桥接；凭据 |
 | Storage | `catmail-store` | SQLite schema 与迁移、事务化 Repository、FTS5、内容寻址 `BlobStore`；全部同步 API |
-| Protocol | `catmail-proto` | IMAP（imap-next）、SMTP（自己实现）、MIME 解析（mail-parser）与构建（mail-builder）、HTML 清洗、远程图片的 HTTP 下载（reqwest） |
+| Protocol | `catmail-proto` | IMAP（imap-next，将改为 imap-proto 解析响应）、SMTP（自己实现）、MIME 解析（mail-parser）与构建（mail-builder）、HTML 清洗、远程图片的 HTTP 下载（reqwest） |
 | Domain | `catmail-types` | `Account`、`Folder`、`MessageSummary`、`Flags`、`Event`、ID 类型；纯数据，无 IO |
 
 依赖方向 `types ← store, proto ← core ← cli / gui`：store 与 proto 并列、互不依赖；前端不直接
@@ -95,11 +95,16 @@ store / IMAP / SMTP 错误包在不透明的 `StoreError` / `ImapError` / `SmtpE
 3. 只携带 ID（"某账户的某文件夹变了"），前端收到后重新查询；`RecvError::Lagged` 时整体刷新，
    不会丢状态。
 
-### 邮件按文件夹存储，UID 绑定 UIDVALIDITY
+### 一行是服务器上的一封邮件，UID 绑定 UIDVALIDITY
 
-`messages` 的一行是一个 IMAP（文件夹, UID）对，与服务器的语义一致：flags、keywords、MODSEQ
-都是这一行自己的状态，同一封信在 Inbox 已读、在 Archive 未读就是两行。不按 Message-ID 合并
-不同文件夹里的副本（它不可靠）；相同的原文由内容寻址的 BlobStore 自然只存一份。
+`messages` 的一行是服务器上的一封邮件，与服务器的语义一致：flags、keywords、MODSEQ 都是这一行
+自己的状态。普通 IMAP 账户上它就是一个（文件夹, UID）对，同一封信复制到 Inbox 和 Archive 是两封
+邮件、两行，一封已读、一封未读都可以；不按 Message-ID 合并（它不可靠），相同的原文由内容寻址的
+BlobStore 自然只存一份。
+
+Gmail 的文件夹是标签，同一封邮件出现在几个邮箱里。决定改为按 `X-GM-MSGID` 一封一行：它有一个位置
+（"所有邮件"、已删除或垃圾邮件里的 UID），其余邮箱是它的标签。普通账户是没有标签的特例，两者是同一套
+模型。尚未实现，现在 Gmail 的每个标签仍各存一行，见[位置与标签](architecture/labels.md)。
 
 UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UID 的东西（操作队列、草稿的远端
 副本）都同时记下文件夹和它的 UIDVALIDITY，使用前核对。UIDVALIDITY 变化时这个文件夹的旧代际
@@ -158,7 +163,8 @@ UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UI
 | [操作队列](architecture/op-queue.md) | 标记 / 移动 / 删除的本地效果、回放顺序、拒绝时的撤销、无 MOVE 服务器上的 COPY |
 | [正文与附件](architecture/bodies.md) | 按需下载的两条路径、正文提取、HTML 清洗、内嵌图片 |
 | [草稿与发信](architecture/sending.md) | 草稿与回复、草稿同步到服务器、outbox 状态机、SMTP 客户端、重试、保存到 Sent |
-| [IMAP / SMTP 连接](architecture/protocol.md) | imap-next、连接层的严格解析、连接池、认证、TLS |
+| [位置与标签](architecture/labels.md) | Gmail 按标签建模：一封邮件一行、位置与标签、同步与操作（已决定，未实现） |
+| [IMAP / SMTP 连接](architecture/protocol.md) | IMAP 库（改用 imap-proto 的决定）、连接层的严格解析、连接池、认证、TLS |
 | [存储](architecture/storage.md) | SQLite 约定、计数、跨账户约束、全文搜索、BlobStore 与 GC、凭据 |
 | [CLI](architecture/cli.md) | 命令的代码结构、`--json` 的结构与版本、退出码、添加账户前的登录检查、不覆盖文件 |
 | [GUI](architecture/gui.md) | 视图结构、事件刷新、读信与写信窗口、发件箱、主题与设置、HTML 渲染与图片策略、已知问题 |

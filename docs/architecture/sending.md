@@ -228,7 +228,7 @@ APPEND 的答复也可能丢失，所以尝试次数在每次尝试**之前**加
 次尝试里换新连接重来）先 EXAMINE Sent、按 Message-ID `UID SEARCH HEADER`，已经在了就不再 APPEND。
 
 已知问题：Gmail 等会自动把经 SMTP 发出的邮件存进已发送，再 APPEND 会重复，用应用专用密码登录的 Gmail
-账户现在就会遇到；需要按服务器关掉这一步。
+账户现在就会遇到；需要按服务器关掉这一步（Gmail 的做法见[位置与标签](labels.md#草稿与已发送)）。
 
 ## 谁来发
 
