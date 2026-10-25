@@ -270,14 +270,23 @@ async fn a_message_moved_offline_downloads_from_where_it_was() {
 #[tokio::test(flavor = "multi_thread")]
 async fn moving_a_message_drops_its_other_gmail_labels() {
     let env = synced_env(labelled(true)).await;
-    let search = async || env.search_folders("labelled").await;
-    // One message, however many labels it has.
-    assert_eq!(search().await, [env.folder("INBOX").await.id]);
+    let search = async || {
+        let mut found = env.search_folders("labelled").await;
+        found.sort();
+        found
+    };
+    // A copy in each label, but none in All Mail, which only gathers the others.
+    let important = env.folder("Important").await.id;
+    let mut copies = vec![env.folder("INBOX").await.id, important];
+    copies.sort();
+    assert_eq!(search().await, copies);
 
     let id = env.id_of("INBOX", "labelled").await;
     env.client.delete_messages(vec![id], false).await.unwrap();
     let trash = env.folder("Trash").await.id;
-    assert_eq!(search().await, [trash]);
+    let mut copies = vec![trash, important];
+    copies.sort();
+    assert_eq!(search().await, copies);
 
     gmail_trashes(&env.fake);
     let start = env.fake.state().log.len();

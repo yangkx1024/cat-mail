@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use catmail_core::{
     AccountId, Address, Config, Draft, DraftContent, DraftId, Event, Flags, Folder, FolderId,
-    MailClient, MailClientBuilder, MemorySecrets, MessageId, MessageSummary, NewAccount,
-    ReplayReport, SearchQuery, Security, ServerConfig, Verify,
+    FolderSyncReport, MailClient, MailClientBuilder, MemorySecrets, MessageId, MessageSummary,
+    NewAccount, ReplayReport, SearchQuery, Security, ServerConfig, SyncReport, Verify,
 };
 use catmail_testkit::{FakeImap, FakeMailbox, FakeSmtp, ServerState, SmtpState};
 use tokio::runtime::Handle;
@@ -209,6 +209,12 @@ impl Env {
             .collect()
     }
 
+    /// Subjects the folder lists, newest first.
+    #[allow(dead_code)]
+    pub async fn subjects(&self, name: &str) -> Vec<String> {
+        self.messages(name).await.into_iter().map(|m| m.0).collect()
+    }
+
     /// The folders of the messages a search finds, newest first.
     #[allow(dead_code)]
     pub async fn search_folders(&self, text: &str) -> Vec<FolderId> {
@@ -230,6 +236,22 @@ impl Env {
         self.client.replay_pending(self.account).await.unwrap()
     }
 
+    /// Mailboxes the server was asked to EXAMINE, from the `start`-th command on.
+    #[allow(dead_code)]
+    pub fn examined(&self, start: usize) -> Vec<String> {
+        self.commands_since(start)
+            .into_iter()
+            .filter_map(|c| {
+                let name = c.strip_prefix("EXAMINE ")?;
+                let name = match name.strip_prefix('"') {
+                    Some(quoted) => quoted.split('"').next(),
+                    None => name.split(' ').next(),
+                };
+                name.map(str::to_owned)
+            })
+            .collect()
+    }
+
     /// Commands the server received from the `start`-th on, without tags.
     #[allow(dead_code)]
     pub fn commands_since(&self, start: usize) -> Vec<String> {
@@ -238,6 +260,12 @@ impl Env {
             .map(|c| c.line.clone())
             .collect()
     }
+}
+
+/// The report on the folder named `name`.
+#[allow(dead_code)]
+pub fn folder_report<'a>(report: &'a SyncReport, name: &str) -> &'a FolderSyncReport {
+    report.folders.iter().find(|f| f.name == name).unwrap()
 }
 
 /// One message in INBOX, Important and All Mail, as Gmail shows its labels, and an empty

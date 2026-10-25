@@ -19,6 +19,7 @@ use rusqlite::{Connection, OptionalExtension, Params, Row, params};
 
 use crate::columns::{conversion_error, parse_text};
 use crate::folders::{Folders, LABEL_ACCOUNTS};
+use crate::messages::shown;
 use crate::{Error, Result};
 
 /// What a change did, for change events.
@@ -202,6 +203,9 @@ impl<'c> PendingOps<'c> {
             if add.is_empty() && remove.is_empty() {
                 continue;
             }
+            // Starred shows it before or after.
+            let flagged = (m.flags | add).contains(Flags::FLAGGED);
+            self.touch_shown(id, flagged, &mut touched)?;
             self.conn
                 .prepare_cached("UPDATE messages SET flags = ?2 WHERE id = ?1")?
                 .execute(params![id.0, m.flags.apply(add, remove).bits()])?;
@@ -229,10 +233,7 @@ impl<'c> PendingOps<'c> {
                     "message {id} can't move to another account's folder"
                 )));
             }
-            self.move_one(&m, to, now)?;
-            touched
-                .folders
-                .extend([(m.account, m.folder), (m.account, to)]);
+            self.move_one(&m, to, now, &mut touched)?;
         }
         Ok(touched)
     }
@@ -250,10 +251,7 @@ impl<'c> PendingOps<'c> {
                 return Err(Error::Invalid("the account has no Archive folder".into()));
             }
             if let Some(to) = archive_folder(folders, m.folder) {
-                self.move_one(&m, to, now)?;
-                touched
-                    .folders
-                    .extend([(m.account, m.folder), (m.account, to)]);
+                self.move_one(&m, to, now, &mut touched)?;
             }
         }
         Ok(touched)
@@ -280,8 +278,7 @@ impl<'c> PendingOps<'c> {
             };
             match outcome {
                 DeleteOutcome::ToTrash(trash) => {
-                    self.move_one(&m, trash, now)?;
-                    touched.folders.insert((m.account, trash));
+                    self.move_one(&m, trash, now, &mut touched)?;
                     continue;
                 }
                 DeleteOutcome::NoTrash => {
@@ -303,6 +300,7 @@ impl<'c> PendingOps<'c> {
                 }
                 None => self.queue(&m, OpKind::Delete, now)?,
             }
+            self.touch_shown(id, false, &mut touched)?;
             self.conn
                 .prepare_cached("DELETE FROM messages WHERE id = ?1")?
                 .execute([id.0])?;
@@ -368,10 +366,18 @@ impl<'c> PendingOps<'c> {
         })
     }
 
-    fn move_one(&self, m: &Local, to: FolderId, now: i64) -> Result<()> {
+    /// Moves the message to `to`, recording in `touched` the folders that lost and got
+    /// it: on Gmail, a label shows it no more, or again, as it leaves or enters All Mail.
+    fn move_one(&self, m: &Local, to: FolderId, now: i64, touched: &mut Touched) -> Result<()> {
         if m.folder == to {
             return Ok(());
         }
+        touched
+            .folders
+            .extend([(m.account, m.folder), (m.account, to)]);
+        // Its labels and Starred show it no more, or again, as it leaves or enters All
+        // Mail; they are the same either side of the move.
+        self.touch_shown(m.id, false, touched)?;
         match m.moving {
             // Still on its way: send it to the new place instead. Back to where the server
             // has it, the op stays, and is resolved locally at replay; it may be in flight.
@@ -436,6 +442,13 @@ impl<'c> PendingOps<'c> {
                 message.map(|m| m.0),
                 now
             ])?;
+        Ok(())
+    }
+
+    /// Records in `touched` the folders that show the message besides its location
+    /// ([`shown`]), before a change to it.
+    fn touch_shown(&self, id: MessageId, flagged: bool, touched: &mut Touched) -> Result<()> {
+        touched.folders.extend(shown(self.conn, id.0, flagged)?);
         Ok(())
     }
 
@@ -758,9 +771,13 @@ impl<'c> PendingOps<'c> {
             touched.refused.insert(AccountId(account));
             match (&op.kind, row) {
                 (ReplayKind::Flags { .. }, Some(row)) => {
+                    // Starred shows it before or after: its flags as they were, then as
+                    // unwound.
+                    self.touch_shown(MessageId(row), false, &mut touched)?;
                     touched
                         .folders
                         .extend(self.unwind_flags(MessageId(row), op.id)?);
+                    self.touch_shown(MessageId(row), false, &mut touched)?;
                 }
                 (ReplayKind::Move { .. }, Some(row)) => {
                     touched.merge(self.restore(MessageId(row), folder, op.uid)?);
@@ -1002,6 +1019,8 @@ impl<'c> PendingOps<'c> {
         else {
             return Ok(Touched::new());
         };
+        let mut touched = Touched::new();
+        self.touch_shown(row, false, &mut touched)?;
         let restored = self
             .conn
             .prepare_cached(
@@ -1014,9 +1033,10 @@ impl<'c> PendingOps<'c> {
         if restored.is_none() {
             self.drop_unplaced(row)?;
         }
-        Ok(Touched::from_iter(
-            [Some(moved_to), restored].into_iter().flatten(),
-        ))
+        touched
+            .folders
+            .extend([Some(moved_to), restored].into_iter().flatten());
+        Ok(touched)
     }
 }
 
@@ -1357,7 +1377,8 @@ mod tests {
             })
             .into();
         assert_eq!(
-            f.write(|db| db.messages().upsert(f.account, f.inbox, &again)),
+            f.write(|db| db.messages().upsert(f.account, f.inbox, &again))
+                .added,
             0
         );
         assert_eq!(f.row(m1).unwrap().2, Flags::FLAGGED);
@@ -1445,7 +1466,8 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            f.write(|db| db.messages().upsert(f.account, f.inbox, &[again])),
+            f.write(|db| db.messages().upsert(f.account, f.inbox, &[again]))
+                .added,
             0
         );
         let states = f

@@ -10,8 +10,9 @@ use crate::columns::{parse_opt_text, parse_text};
 use crate::drafts::Drafts;
 use crate::ops::{PendingOps, Touched};
 
-/// Accounts with an `\All` mailbox (Gmail), where folders are labels: one message is in
-/// several of them at once, a copy in each, told apart only by Message-ID.
+/// Accounts with an `\All` mailbox (Gmail), whose labels were once synced as folders,
+/// a copy of a message in each, told apart only by Message-ID. Replay still looks for
+/// such copies; to be removed with it (see `docs/architecture/labels.md`).
 pub(crate) const LABEL_ACCOUNTS: &str = "SELECT account_id FROM folders WHERE role = 'all'";
 
 const COLUMNS: &str = "id, account_id, name, delimiter, role, kind, listed, selectable,
@@ -63,6 +64,10 @@ const SYNC_STATE: &str = "
                           WHERE folder_id = folders.id AND uid IS NULL),
            (SELECT ifnull(max(uid), 0) FROM messages WHERE folder_id = folders.id)
     FROM folders";
+
+/// The order sync goes through an account's locations: INBOX first, where new mail is,
+/// then All Mail, then by id.
+const LOCATION_ORDER: &str = "ORDER BY remote_name <> 'INBOX', role IS NOT 'all', id";
 
 fn sync_state(r: &rusqlite::Row<'_>) -> rusqlite::Result<FolderSyncState> {
     Ok(FolderSyncState {
@@ -142,12 +147,24 @@ impl<'c> Folders<'c> {
             .map(|remote_name| (id, remote_name)))
     }
 
-    /// INBOX first, then by id.
+    /// The account's locations, which sync goes through (labels have no sync state), in
+    /// [`LOCATION_ORDER`].
     pub fn sync_states(&self, account: AccountId) -> Result<Vec<FolderSyncState>> {
         let mut stmt = self.conn.prepare(&format!(
-            "{SYNC_STATE} WHERE account_id = ?1 ORDER BY remote_name <> 'INBOX', id"
+            "{SYNC_STATE} WHERE account_id = ?1 AND kind = 'location' {LOCATION_ORDER}"
         ))?;
         let rows = stmt.query_map([account.0], sync_state)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The account's locations that can hold messages, in [`LOCATION_ORDER`]: what a sync
+    /// of every folder goes through, one by one.
+    pub fn location_ids(&self, account: AccountId) -> Result<Vec<FolderId>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT id FROM folders
+             WHERE account_id = ?1 AND kind = 'location' AND selectable {LOCATION_ORDER}"
+        ))?;
+        let rows = stmt.query_map([account.0], |r| Ok(FolderId(r.get(0)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -187,12 +204,29 @@ impl<'c> Folders<'c> {
                 ))
             })?
             .collect::<rusqlite::Result<_>>()?;
+        // A folder that is new, or whose kind or role changed.
+        let changed_kind = |f: &RemoteFolder| {
+            stored
+                .get(&f.remote_name)
+                .map(|&(_, kind, role, _)| (kind, role))
+                != Some((f.kind, f.role))
+        };
         // What a folder counts follows from its kind and role, which the count triggers
         // don't watch: a change of either (the account's mode changed, say), or a new
         // Starred, which shows messages already stored, is counted anew.
-        let recount = remote.iter().any(|f| match stored.get(&f.remote_name) {
-            Some(&(_, kind, role, _)) => (kind, role) != (f.kind, f.role),
-            None => f.kind == FolderKind::Label && f.role == Some(FolderRole::Flagged),
+        let recount = remote.iter().any(|f| {
+            changed_kind(f)
+                && (stored.contains_key(&f.remote_name)
+                    || (f.kind == FolderKind::Label && f.role == Some(FolderRole::Flagged)))
+        });
+        // X-GM-LABELS names a system label by its role, which only a listed mailbox has:
+        // the labels of one hidden until now were dropped, and its showing again changes
+        // no message's MODSEQ. Every location's flags and labels are fetched anew.
+        let relabel = remote.iter().any(|f| {
+            use FolderRole::{Drafts, Important, Inbox, Sent};
+            f.kind == FolderKind::Label
+                && matches!(f.role, Some(Inbox | Sent | Drafts | Important))
+                && changed_kind(f)
         });
         let mut upsert = self.conn.prepare(
             "INSERT INTO folders (account_id, remote_name, name, delimiter, role, kind,
@@ -252,6 +286,13 @@ impl<'c> Folders<'c> {
         for id in emptied {
             touched.merge(self.end_generation(FolderId(id), None)?);
             changed = true;
+        }
+        if relabel {
+            self.conn.execute(
+                "UPDATE folders SET highest_modseq = NULL
+                 WHERE account_id = ?1 AND kind = 'location'",
+                [account.0],
+            )?;
         }
         if recount {
             // A label that became a location is no message's label.
@@ -332,6 +373,20 @@ impl<'c> Folders<'c> {
             }
         };
         Ok(id.map(FolderId))
+    }
+
+    /// Ends the UIDVALIDITY generation of every location of the account, as a new
+    /// UIDVALIDITY would: its mode changed, so what a message row is changed with it, and
+    /// sync fetches them anew. Returns what [`reset_uidvalidity`](Self::reset_uidvalidity)
+    /// does.
+    pub fn end_generations(&self, account: AccountId) -> Result<Touched> {
+        let mut touched = Touched::new();
+        for folder in self.sync_states(account)? {
+            if folder.uidvalidity.is_some() {
+                touched.merge(self.end_generation(folder.id, None)?);
+            }
+        }
+        Ok(touched)
     }
 
     /// Starts a new UIDVALIDITY generation (or the first one): every message row with a

@@ -5,14 +5,21 @@
 `MailClient::sync_account`：一条连接，逐个文件夹 EXAMINE（只读，不改 `\Recent`）。同一账户的
 同步与操作回放由每账户的同步锁串行化（见[锁](#锁)）。代码在 `crates/catmail-core/src/sync.rs`、`engine.rs`。
 
+同步的是**位置**（`folders.kind = 'location'`）：普通账户上是所有可选中的邮箱。Gmail 账户上只有"所有邮件"、
+已删除、垃圾邮件三个，作为一个单元同步，其余邮箱是标签，随邮件的 `X-GM-LABELS` 存下、不 EXAMINE，见
+[位置与标签 / 同步](labels.md#同步)。下面说的流程两者相同，差别都在那一节。
+
 ## 流程
 
 1. **对账文件夹。** `LIST "" "*"`：新增、更新属性、删除服务器上已不存在的文件夹（连同邮件）。
+   按能力和 LIST 定下账户的模式（普通 / Gmail）和每个邮箱是位置还是标签；模式变了，所有位置像
+   UIDVALIDITY 变化那样重来。
    - RFC 3501 §6.3.8 规定只要用户有 INBOX 就要列出它。LIST 结果里没有 INBOX 时，
      `Session::list` 用 EXAMINE INBOX 问一次：成功说明响应被截断或损坏，返回 `Incomplete`，
      整次同步报错、什么也不删；失败说明确实没有 INBOX，结果照常使用。
    - 角色依次取：名为 INBOX → SPECIAL-USE 属性 → 常见名称（`Sent Items`、`已发送`、`垃圾邮件`
-     等）。按名称猜测只用于没有任何文件夹通过 SPECIAL-USE 声明的角色，每个角色只猜一个。
+     等）。按名称猜测只用于没有任何文件夹通过 SPECIAL-USE 声明的角色，每个角色只猜一个；Gmail 上
+     不猜。
    - `\Noselect` 的层级节点也保存（`selectable = 0`），但不同步。可选中的邮箱变成层级节点时
      （删除有子文件夹的邮箱会清空它并保留名字），按"这一代 UID 结束"处理：删除邮件、清空
      UIDVALIDITY 与游标、离线操作标为 `conflict`，只保留这一行。
@@ -88,7 +95,7 @@ flags，重复的批次不产生重复行）。HIGHESTMODSEQ 用 EXAMINE 时刻�
 
 ## 打开的文件夹
 
-`MailClient::sync_folder(folder, max_age)` 只同步一个文件夹：持有账户的同步锁，在连接池的连接上先回放
+`MailClient::sync_folder(folder, max_age)` 只同步一个文件夹（Gmail 上是三个位置，不论打开的是哪个）：持有账户的同步锁，在连接池的连接上先回放
 操作队列（以及停止编辑够久的草稿，与后台同步相同），再同步这个文件夹，结果是它的 `FolderSyncReport`；服务器
 拒绝这个文件夹时记在报告里，不算失败。它在 `max_age` 内完成过同步（`Engine::folder_synced`，与[锁](#锁)
 一节的完整同步用同一个单调时钟）就什么也不做，返回 `None`；这个检查在拿到锁之后，所以正在进行的完整同步
@@ -171,6 +178,8 @@ flags，重复的批次不产生重复行）。HIGHESTMODSEQ 用 EXAMINE 时刻�
   用账户的取消信号，它在账户删除或引擎不在时（发送端随引擎 drop）都会触发：最后一个 `MailClient`
   drop 后任务结束并关闭连接，不会让引擎和数据目录锁多活一个 IDLE 周期。
 - **找 INBOX** 按角色（对账时按名称不分大小写认定），只读这一个文件夹的同步状态。
+- **Gmail** 上 INBOX 是标签：被唤醒（或轮询）时同步的是三个位置，再 EXAMINE INBOX 接着 IDLE，见
+  [位置与标签 / 同步](labels.md#同步)。
 
 ## 文件夹名
 
