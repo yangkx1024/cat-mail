@@ -122,10 +122,27 @@ pub enum GmailLabel {
 }
 
 impl GmailLabel {
+    /// The roles whose mailboxes are system labels.
+    pub const SYSTEM_ROLES: [FolderRole; 4] = [
+        FolderRole::Inbox,
+        FolderRole::Sent,
+        FolderRole::Drafts,
+        FolderRole::Important,
+    ];
+
     pub fn user(remote_name: impl Into<String>, name: impl Into<String>) -> Self {
         Self::User {
             remote_name: remote_name.into(),
             name: name.into(),
+        }
+    }
+
+    /// The label a label's mailbox shows: a system label by its role, a user label by
+    /// its name.
+    pub fn for_mailbox(role: Option<FolderRole>, remote_name: String, name: String) -> Self {
+        match role {
+            Some(role) if Self::SYSTEM_ROLES.contains(&role) => Self::System(role),
+            _ => Self::User { remote_name, name },
         }
     }
 }

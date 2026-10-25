@@ -226,8 +226,10 @@ lettre 的 `send` 不暴露这一点；自己实现还能共用 `TlsConfig`、�
 APPEND 的答复也可能丢失，所以尝试次数在每次尝试**之前**加一：第一次直接 APPEND，第二次起（包括同一
 次尝试里换新连接重来）先 EXAMINE Sent、按 Message-ID `UID SEARCH HEADER`，已经在了就不再 APPEND。
 
-已知问题：Gmail 等会自动把经 SMTP 发出的邮件存进已发送，再 APPEND 会重复，用应用专用密码登录的 Gmail
-账户现在就会遇到；需要按服务器关掉这一步（Gmail 的做法见[位置与标签](labels.md#草稿与已发送)）。
+Gmail 会自动把经它的 SMTP 发出的邮件存进已发送，再 APPEND 会重复，所以 Gmail 账户（同步时认出的模式）
+经同一个登录、同一个域（`imap.gmail.com` / `smtp.gmail.com`）的 SMTP 发出的跳过这一步（`saves_sent_mail`）；
+身份经别的服务器发出的 Gmail 看不到，照常保存。账户第一次同步之前还不知道是 Gmail，照常保存（见
+[位置与标签](labels.md#草稿与已发送)）。
 
 ## 谁来发
 

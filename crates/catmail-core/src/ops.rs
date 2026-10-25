@@ -2,8 +2,8 @@
 //! replayed on the server folder by folder.
 //!
 //! Replay opens a folder with SELECT and runs its ops only if the UIDVALIDITY is still
-//! the one they were recorded under; otherwise they wait for the sync that sees the new
-//! generation and turns them into conflicts. A refusal (NO) fails the ops concerned and
+//! the one they were recorded under; otherwise they become conflicts, as a sync that
+//! sees the new generation would make them. A refusal (NO) fails the ops concerned and
 //! undoes them locally; a lost connection leaves them pending. Every op is safe to run
 //! twice (a UID that is gone is skipped by the server), so an answer lost to a dropped
 //! connection needs no care beyond running it again.
@@ -17,9 +17,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use catmail_proto::imap::{CopyUid, Session};
-use catmail_store::{
-    CopyCheckpoint, LabelCopies, Moved, ReplayFolder, ReplayKind, ReplayOp, Touched,
-};
+use catmail_store::{CopyCheckpoint, Moved, ReplayFolder, ReplayKind, ReplayOp, Touched};
 use catmail_types::{
     AccountId, Event, Flags, FolderId, MessageId, PendingOp, PendingOpId, ReplayReport,
     ReportedError,
@@ -28,7 +26,7 @@ use catmail_types::{
 use crate::connection::with_session;
 use crate::draft_sync::{Uploaded, Uploads};
 use crate::engine::{Activity, Engine, lock, now};
-use crate::{Error, Result, draft_sync, sync};
+use crate::{Error, Result, draft_sync};
 
 pub(crate) async fn set_flags(
     engine: Arc<Engine>,
@@ -45,10 +43,23 @@ pub(crate) async fn set_flags(
 pub(crate) async fn move_messages(
     engine: Arc<Engine>,
     messages: Vec<MessageId>,
+    shown_in: Option<FolderId>,
     to: FolderId,
 ) -> Result<Vec<AccountId>> {
     change(&engine, move |db| {
-        db.ops().move_messages(&messages, to, now())
+        db.ops().move_messages(&messages, shown_in, to, now())
+    })
+    .await
+}
+
+pub(crate) async fn label_messages(
+    engine: Arc<Engine>,
+    messages: Vec<MessageId>,
+    add: Vec<FolderId>,
+    remove: Vec<FolderId>,
+) -> Result<Vec<AccountId>> {
+    change(&engine, move |db| {
+        db.ops().label_messages(&messages, &add, &remove, now())
     })
     .await
 }
@@ -210,8 +221,7 @@ pub(crate) struct Replayed {
 
 /// Uploads the account's changed drafts (those `uploads` takes), then replays all its
 /// queued ops, deleting the copies those drafts replace among them, adding what it did
-/// to `done` (what was done before a failure too). Then drops the copies on other Gmail
-/// labels that the moves took with them. Call with the account's sync permit.
+/// to `done` (what was done before a failure too). Call with the account's sync permit.
 pub(crate) async fn replay_queued(
     engine: &Arc<Engine>,
     session: &mut Session,
@@ -220,31 +230,10 @@ pub(crate) async fn replay_queued(
     done: &mut Replayed,
 ) -> Result<()> {
     draft_sync::upload(engine, session, account, uploads, &mut done.drafts).await?;
-    let (pending, label_copies) = engine
-        .read(move |db| {
-            let ops = db.ops();
-            Ok((ops.pending_folders(account)?, ops.label_copies(account)?))
-        })
+    let pending = engine
+        .read(move |db| db.ops().pending_folders(account))
         .await?;
-    // Before the moves are made: a move without COPYUID deletes the row it starts from.
-    engine.add_label_copies(account, label_copies);
-    replay(engine, session, account, &pending, &mut done.folders).await?;
-    // Those of earlier replays too, which failed after their moves were made. On Gmail a
-    // move to Trash takes the message out of every label, and those folders are only
-    // synced in full every so often: until then the copies would show in search and
-    // fail to open.
-    while let Some(LabelCopies { folder, uids }) = engine.next_label_copies(account) {
-        match sync::drop_vanished(engine, session, account, &folder, &uids).await {
-            Ok(()) => {}
-            // Left to the sync.
-            Err(e) if e.is_refusal() => {
-                tracing::warn!(folder = %folder.name, error = %e, "can't look for moved copies");
-            }
-            Err(e) => return Err(e),
-        }
-        engine.looked_for_label_copies(account, folder.id);
-    }
-    Ok(())
+    replay(engine, session, account, &pending, &mut done.folders).await
 }
 
 /// Replays the ops of `folders` on `session`, one folder after the other, adding what
@@ -260,15 +249,15 @@ async fn replay(
 ) -> Result<()> {
     let mut touched = Touched::new();
     let mut result = Ok(());
-    let mut visited = HashSet::new();
+    let mut seen = HashSet::new();
     let mut next = folders.to_vec();
-    // Settling a copy can send an op on to the copy's folder (a moved message moved back,
-    // or deleted): one more pass for folders that weren't replayed yet.
+    // A move made sends ops on to where the message went: those made while it was in
+    // flight, the label changes waiting for it, and an op whose COPY is settled (a moved
+    // message moved back, or deleted). One more pass for folders with ops not seen there.
     'passes: while !next.is_empty() {
         for folder in next {
-            visited.insert(folder.id);
             let report = reports.entry(folder.id).or_default();
-            match replay_folder(engine, session, &folder, &mut touched, report).await {
+            match replay_folder(engine, session, &folder, &mut seen, &mut touched, report).await {
                 Ok(()) => {}
                 Err(e) if e.is_refusal() => {
                     tracing::warn!(folder = %folder.name, error = %e,
@@ -286,7 +275,7 @@ async fn replay(
         {
             Ok(pending) => pending
                 .into_iter()
-                .filter(|f| !visited.contains(&f.id))
+                .filter(|f| f.ops.iter().any(|&op| !seen.contains(&(f.id, op))))
                 .collect(),
             Err(e) => {
                 result = Err(e);
@@ -312,27 +301,35 @@ pub(crate) fn replayed(engine: &Engine, account: AccountId, touched: &Touched) {
     emit_refused(engine, touched);
 }
 
-/// Runs the folder's pending ops on `session`, recording the folders whose messages
-/// changed in `touched`, and adding to `report` how many were made or refused, those
-/// settled before a failure too: a batch refused before a later one loses the
-/// connection is undone already.
+/// Runs the folder's pending ops on `session`, adding them to `seen` as (folder, op),
+/// recording the folders whose messages changed in `touched`, and adding to `report` how
+/// many were made or refused, those settled before a failure too: a batch refused before
+/// a later one loses the connection is undone already.
 async fn replay_folder(
     engine: &Arc<Engine>,
     session: &mut Session,
     folder: &ReplayFolder,
+    seen: &mut HashSet<(FolderId, PendingOpId)>,
     touched: &mut Touched,
     report: &mut ReplayReport,
 ) -> Result<()> {
     let id = folder.id;
-    let ops = engine.read(move |db| db.ops().pending(id)).await?;
+    let mut ops = engine.read(move |db| db.ops().pending(id)).await?;
+    seen.extend(ops.iter().map(|op| (id, op.id)));
     if ops.is_empty() {
         return Ok(());
     }
     let status = session.select(&folder.remote_name).await?;
-    if !status.same_generation(folder.uidvalidity) {
-        // Not under the generation they name. The sync of this folder starts the new
-        // one, which turns them into conflicts.
-        return Ok(());
+    if ops.iter().any(|op| op.uidvalidity != status.uidvalidity) {
+        // The UIDs they name are gone with their generation. The sync of a location would
+        // find out too, but a label's mailbox (Gmail's Drafts) is never synced.
+        let uidvalidity = status.uidvalidity;
+        touched.merge(
+            engine
+                .write(move |db| db.ops().end_generation(id, Some(uidvalidity)))
+                .await?,
+        );
+        ops.retain(|op| op.uidvalidity == uidvalidity);
     }
     let mut done = Settle {
         engine,
@@ -354,7 +351,9 @@ async fn replay_folder(
             // Rebuilt on the server meanwhile: the rest waits for the sync.
             return Ok(());
         }
-        engine.read(move |db| db.ops().pending(id)).await?
+        let ops = engine.read(move |db| db.ops().pending(id)).await?;
+        seen.extend(ops.iter().map(|op| (id, op.id)));
+        ops
     };
     for batch in batches(&ops, engine.tuning.replay_batch) {
         let uids: Vec<u32> = batch.iter().map(|op| op.uid).collect();
@@ -363,6 +362,18 @@ async fn replay_folder(
                 .uid_store(&uids, *add, *remove)
                 .await
                 .map(|()| Outcome::Done),
+            ReplayKind::Label { name, add, .. } => {
+                let label = std::slice::from_ref(name);
+                let (add, remove) = if *add {
+                    (label, &[][..])
+                } else {
+                    (&[][..], label)
+                };
+                session
+                    .uid_store_labels(&uids, add, remove)
+                    .await
+                    .map(|()| Outcome::Done)
+            }
             ReplayKind::Delete => session.uid_delete(&uids).await.map(|()| Outcome::Done),
             &ReplayKind::Move {
                 to,
@@ -419,7 +430,7 @@ impl Settle<'_> {
             // Refused; the connection is fine.
             Err(e) if !e.is_fatal() => Outcome::Refused(e.to_string()),
             Err(e) => {
-                let (ops, error) = (ops.to_vec(), e.to_string());
+                let (ops, error) = (settled(ops), e.to_string());
                 if let Err(record) = self
                     .engine
                     .write(move |db| db.ops().attempted(&ops, &error))
@@ -437,8 +448,8 @@ impl Settle<'_> {
         if ops.is_empty() {
             return Ok(());
         }
+        let ops = settled(ops);
         let (id, uidvalidity, n) = (self.folder, self.uidvalidity, ops.len() as u32);
-        let ops = ops.to_vec();
         let changed = match outcome {
             Outcome::Done => {
                 self.report.applied += n;
@@ -462,6 +473,11 @@ impl Settle<'_> {
         self.touched.merge(changed);
         Ok(())
     }
+}
+
+/// The ops a batch settles: each with the label changes it supersedes, oldest first.
+fn settled(ops: &[ReplayOp]) -> Vec<ReplayOp> {
+    ops.iter().flat_map(ReplayOp::settled).cloned().collect()
 }
 
 fn moved(copied: CopyUid) -> Moved {
@@ -793,10 +809,12 @@ mod tests {
     fn batches_follow_the_change_and_size() {
         let op = |id: i64, kind: &ReplayKind| ReplayOp {
             id: PendingOpId(id),
+            uidvalidity: 1,
             uid: id as u32,
             kind: kind.clone(),
             copy: None,
             copy_uid: None,
+            superseded: Vec::new(),
         };
         let read = ReplayKind::Flags {
             add: Flags::SEEN,

@@ -10,11 +10,6 @@ use crate::columns::{parse_opt_text, parse_text};
 use crate::drafts::Drafts;
 use crate::ops::{PendingOps, Touched};
 
-/// Accounts with an `\All` mailbox (Gmail), whose labels were once synced as folders,
-/// a copy of a message in each, told apart only by Message-ID. Replay still looks for
-/// such copies; to be removed with it (see `docs/architecture/labels.md`).
-pub(crate) const LABEL_ACCOUNTS: &str = "SELECT account_id FROM folders WHERE role = 'all'";
-
 const COLUMNS: &str = "id, account_id, name, delimiter, role, kind, listed, selectable,
     unread_count, total_count, last_synced_at";
 

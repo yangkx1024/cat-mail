@@ -5,7 +5,7 @@ use catmail_testkit::{FakeMailbox, ServerState};
 
 mod common;
 
-use common::{Env, drain, gmail_trashes, labelled, synced_env};
+use common::{Env, copied, drain, synced_env};
 
 /// INBOX with "one", "two", "three" (UIDs 1..=3), plus Archive and Trash.
 fn state() -> ServerState {
@@ -169,7 +169,7 @@ async fn a_moved_message_keeps_its_body_and_id() {
     let archive = env.folder("Archive").await;
 
     env.client
-        .move_messages(vec![two], archive.id)
+        .move_messages(vec![two], None, archive.id)
         .await
         .unwrap();
     assert_eq!(subjects(&env.local("INBOX").await), ["one", "three"]);
@@ -210,7 +210,7 @@ async fn a_message_expunged_elsewhere_drops_out_of_a_move() {
     );
     let archive = env.folder("Archive").await;
     env.client
-        .move_messages(vec![one, two], archive.id)
+        .move_messages(vec![one, two], None, archive.id)
         .await
         .unwrap();
     env.fake.state().inbox().expunge(2);
@@ -236,7 +236,7 @@ async fn without_uidplus_moved_messages_are_fetched_again() {
     let two = env.id_of("INBOX", "two").await;
     let archive = env.folder("Archive").await;
     env.client
-        .move_messages(vec![two], archive.id)
+        .move_messages(vec![two], None, archive.id)
         .await
         .unwrap();
 
@@ -260,7 +260,7 @@ async fn a_message_moved_offline_downloads_from_where_it_was() {
     let two = env.id_of("INBOX", "two").await;
     let archive = env.folder("Archive").await;
     env.client
-        .move_messages(vec![two], archive.id)
+        .move_messages(vec![two], None, archive.id)
         .await
         .unwrap();
     let message = env.client.download_message(two).await.unwrap();
@@ -268,46 +268,9 @@ async fn a_message_moved_offline_downloads_from_where_it_was() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn moving_a_message_drops_its_other_gmail_labels() {
-    let env = synced_env(labelled(true)).await;
-    let search = async || {
-        let mut found = env.search_folders("labelled").await;
-        found.sort();
-        found
-    };
-    // A copy in each label, but none in All Mail, which only gathers the others.
-    let important = env.folder("Important").await.id;
-    let mut copies = vec![env.folder("INBOX").await.id, important];
-    copies.sort();
-    assert_eq!(search().await, copies);
-
-    let id = env.id_of("INBOX", "labelled").await;
-    env.client.delete_messages(vec![id], false).await.unwrap();
-    let trash = env.folder("Trash").await.id;
-    let mut copies = vec![trash, important];
-    copies.sort();
-    assert_eq!(search().await, copies);
-
-    gmail_trashes(&env.fake);
-    let start = env.fake.state().log.len();
-    assert_eq!(env.replay().await.applied, 1);
-    let commands = env.commands_since(start);
-    for name in ["All Mail", "Important"] {
-        assert!(
-            commands
-                .iter()
-                .any(|c| c.starts_with("EXAMINE") && c.contains(name)),
-            "{commands:?}"
-        );
-        assert!(env.messages(name).await.is_empty(), "{name}");
-    }
-    assert_eq!(search().await, [trash]);
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn moving_a_message_leaves_its_copies_elsewhere_alone() {
-    let env = synced_env(labelled(false)).await;
-    let id = env.id_of("INBOX", "labelled").await;
+    let env = synced_env(copied()).await;
+    let id = env.id_of("INBOX", "copied").await;
     env.client.delete_messages(vec![id], false).await.unwrap();
     let start = env.fake.state().log.len();
     assert_eq!(env.replay().await.applied, 1);
@@ -317,7 +280,7 @@ async fn moving_a_message_leaves_its_copies_elsewhere_alone() {
         "{commands:?}"
     );
     assert_eq!(env.messages("Important").await.len(), 1);
-    let found = env.search_folders("labelled").await;
+    let found = env.search_folders("copied").await;
     assert_eq!(found.len(), 3, "copies are messages of their own");
 }
 
@@ -356,7 +319,7 @@ async fn refused_changes_are_undone() {
         .await
         .unwrap();
     env.client
-        .move_messages(vec![two], archive.id)
+        .move_messages(vec![two], None, archive.id)
         .await
         .unwrap();
     // Changes made locally are no news of a refusal.
@@ -413,7 +376,7 @@ async fn refusals_before_a_lost_connection_are_reported() {
         );
         let archive = env.folder("Archive").await;
         env.client
-            .move_messages(vec![two], archive.id)
+            .move_messages(vec![two], None, archive.id)
             .await
             .unwrap();
         env.replay().await;
@@ -440,7 +403,7 @@ async fn refusals_before_a_lost_connection_are_reported() {
             .await
             .unwrap();
         env.client
-            .move_messages(vec![two], archive.id)
+            .move_messages(vec![two], None, archive.id)
             .await
             .unwrap();
         refuse_then_lose_the_connection(&env, retried).await;
@@ -504,7 +467,7 @@ async fn changes_whose_answer_is_lost_are_made_once() {
     // a new one: INBOX no longer has the message, so there is no COPYUID, and the sync
     // fetches it in Archive.
     env.client
-        .move_messages(vec![two], archive.id)
+        .move_messages(vec![two], None, archive.id)
         .await
         .unwrap();
     env.fake.state().faults.drop_after_change = true;
@@ -531,17 +494,16 @@ async fn a_rebuilt_folder_turns_changes_into_conflicts() {
         .await
         .unwrap();
     env.client
-        .move_messages(vec![two], archive.id)
+        .move_messages(vec![two], None, archive.id)
         .await
         .unwrap();
     env.fake.state().inbox().reset_uidvalidity(99);
     let mut events = env.client.subscribe();
 
-    // Not under the UIDVALIDITY they were made for: left alone.
+    // Not under the UIDVALIDITY they were made for: conflicts, before the sync finds
+    // the new generation too.
     let report = env.client.replay_pending(env.account).await.unwrap();
-    assert_eq!((report.applied, report.pending), (0, 2));
-    let report = env.client.sync_account(env.account).await.unwrap();
-    assert!(report.folders[0].uidvalidity_changed);
+    assert_eq!((report.applied, report.failed, report.pending), (0, 0, 0));
     assert_eq!(
         env.pending()
             .await
@@ -550,6 +512,8 @@ async fn a_rebuilt_folder_turns_changes_into_conflicts() {
             .collect::<Vec<_>>(),
         [OpStatus::Conflict, OpStatus::Conflict]
     );
+    let report = env.client.sync_account(env.account).await.unwrap();
+    assert!(report.folders[0].uidvalidity_changed);
     assert!(
         env.remote("INBOX")
             .iter()
@@ -590,7 +554,7 @@ async fn copy_move_env(message_id: bool) -> (Env, MessageId) {
     let two = env.id_of("INBOX", "two").await;
     let archive = env.folder("Archive").await;
     env.client
-        .move_messages(vec![two], archive.id)
+        .move_messages(vec![two], None, archive.id)
         .await
         .unwrap();
     (env, two)
@@ -650,7 +614,10 @@ async fn a_lost_copy_is_undone_when_the_move_is() {
             env.client.delete_messages(vec![two], true).await.unwrap();
         } else {
             let inbox = env.folder("INBOX").await;
-            env.client.move_messages(vec![two], inbox.id).await.unwrap();
+            env.client
+                .move_messages(vec![two], None, inbox.id)
+                .await
+                .unwrap();
         }
         let report = env.client.replay_pending(env.account).await.unwrap();
         assert_eq!(report.pending, 0, "delete: {delete}");
@@ -694,7 +661,10 @@ async fn a_move_whose_expunge_answer_was_lost_finds_the_copy() {
         match change {
             "back" => {
                 let inbox = env.folder("INBOX").await;
-                env.client.move_messages(vec![two], inbox.id).await.unwrap();
+                env.client
+                    .move_messages(vec![two], None, inbox.id)
+                    .await
+                    .unwrap();
             }
             "delete" => {
                 env.client.delete_messages(vec![two], true).await.unwrap();

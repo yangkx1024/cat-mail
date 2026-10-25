@@ -75,11 +75,14 @@ enum Command {
     /// Move messages to another folder
     #[command(name = "mv")]
     Move(ops::Move),
-    /// Move messages to their account's Archive folder
+    /// Archive messages: move them to their account's Archive folder, or on Gmail take
+    /// them out of INBOX
     Archive(ops::Archive),
     /// Move messages to Trash, or delete them for good
     #[command(name = "rm")]
     Remove(ops::Remove),
+    /// Add Gmail labels to messages, or take them off
+    Label(ops::Label),
     /// Changes to messages not made on the server yet [default: list]
     Ops {
         #[command(subcommand)]
@@ -164,6 +167,7 @@ async fn run() -> Result<()> {
         Command::Move(args) => ops::move_messages(&client, args, cli.json).await,
         Command::Archive(args) => ops::archive(&client, args, cli.json).await,
         Command::Remove(args) => ops::remove(&client, args, cli.json).await,
+        Command::Label(args) => ops::label(&client, args, cli.json).await,
         Command::Ops { command } => {
             let command = command.unwrap_or(ops::OpsCommand::List);
             ops::ops(&client, command, cli.json).await

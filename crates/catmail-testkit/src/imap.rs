@@ -176,7 +176,7 @@ impl FakeMailbox {
     }
 
     /// On Gmail, whether messages are here rather than labelled: All Mail, Trash, Spam.
-    fn is_location(&self) -> bool {
+    pub fn is_location(&self) -> bool {
         ["\\All", "\\Trash", "\\Junk"]
             .iter()
             .any(|a| self.has_attribute(a))
@@ -306,9 +306,6 @@ pub struct Faults {
     /// Like `drop_after_change`, but only for the next EXPUNGE (or UID EXPUNGE): the
     /// changes before it are answered. Fires once.
     pub drop_after_expunge: bool,
-    /// Close the connection when the next EXAMINE or SELECT of the mailbox with this name
-    /// arrives, without answering. Fires once.
-    pub drop_on_open: Option<String>,
     /// When the next UID COPY arrives, first add this message to the mailbox with this
     /// name, as another client might right then. Fires once.
     pub deliver_before_copy: Option<(String, Vec<u8>)>,
@@ -365,7 +362,6 @@ impl Default for Faults {
             drop_after_change: false,
             drop_before_change: false,
             drop_after_expunge: false,
-            drop_on_open: None,
             deliver_before_copy: None,
             forged_copyuid: None,
             idle: true,
@@ -1165,12 +1161,8 @@ async fn handle(
             out += &format!("{tag} OK LIST completed\r\n");
         }
         "EXAMINE" | "SELECT" => {
-            let mut st = lock(state);
+            let st = lock(state);
             let name = args.first().map(Tok::text).unwrap_or_default();
-            if st.faults.drop_on_open.as_deref() == Some(name.as_str()) {
-                st.faults.drop_on_open = None;
-                return Ok(Next::Close);
-            }
             match st.find(&name) {
                 Some(i) if !st.mailboxes[i].has_attribute("\\Noselect") => {
                     let mb = &st.mailboxes[i];

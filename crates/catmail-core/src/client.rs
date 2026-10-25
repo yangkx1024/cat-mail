@@ -720,28 +720,59 @@ impl MailClient {
             .await
     }
 
-    /// Moves the messages to `to`, a folder of their account. They show there at once;
-    /// the server follows as with [`set_flags`](Self::set_flags).
+    /// Moves the messages to `to`, a folder of their account, out of `shown_in`, the
+    /// folder they are looked at in (`None` for search results). What that does is
+    /// [`MovePlan::of`]: on a standard account they move to `to`; on Gmail a move between
+    /// labels takes the label `shown_in` off and adds `to`, and only Trash and Spam
+    /// are places to move to. They show there at once; the server follows as with
+    /// [`set_flags`](Self::set_flags).
+    ///
+    /// [`MovePlan::of`]: catmail_types::MovePlan::of
     pub async fn move_messages(
         &self,
         messages: Vec<MessageId>,
+        shown_in: Option<FolderId>,
         to: FolderId,
     ) -> Result<Vec<AccountId>> {
         self.rt
-            .run(ops::move_messages(self.engine.clone(), messages, to))
+            .run(ops::move_messages(
+                self.engine.clone(),
+                messages,
+                shown_in,
+                to,
+            ))
             .await
     }
 
-    /// Moves the messages to their account's Archive folder ([`special_folder`]), those
-    /// not in an Archive folder already ([`archive_folder`] tells which). Fails, changing
-    /// nothing, if an account whose message would move has none. The server follows as
-    /// with [`set_flags`](Self::set_flags).
+    /// Archives the messages ([`MovePlan::archive`] tells what that does): moves them to
+    /// their account's Archive folder, those not in an Archive folder already, or on
+    /// Gmail takes `\Inbox` off. Fails, changing nothing, if a standard account whose
+    /// message would move has no Archive folder. The server follows as with
+    /// [`set_flags`](Self::set_flags).
     ///
-    /// [`special_folder`]: catmail_types::special_folder
-    /// [`archive_folder`]: catmail_types::archive_folder
+    /// [`MovePlan::archive`]: catmail_types::MovePlan::archive
     pub async fn archive_messages(&self, messages: Vec<MessageId>) -> Result<Vec<AccountId>> {
         self.rt
             .run(ops::archive_messages(self.engine.clone(), messages))
+            .await
+    }
+
+    /// Adds the Gmail labels `add` to the messages and takes `remove` off; both are label
+    /// folders of the messages' account, not Starred (that is `\Flagged`). The server
+    /// follows as with [`set_flags`](Self::set_flags).
+    pub async fn label_messages(
+        &self,
+        messages: Vec<MessageId>,
+        add: Vec<FolderId>,
+        remove: Vec<FolderId>,
+    ) -> Result<Vec<AccountId>> {
+        self.rt
+            .run(ops::label_messages(
+                self.engine.clone(),
+                messages,
+                add,
+                remove,
+            ))
             .await
     }
 

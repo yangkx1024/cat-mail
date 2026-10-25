@@ -1,11 +1,11 @@
-//! `catmail mark`, `mv`, `archive`, `rm` and `ops`: changes to messages, made locally and then on
+//! `catmail mark`, `mv`, `archive`, `rm`, `label` and `ops`: changes to messages, made locally and then on
 //! the server at once, like `catmail send`. What can't be made on the server waits in
 //! the queue for the next `catmail sync` or `catmail ops flush`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
-use catmail_core::{AccountId, Flags, MailClient, MessageId, PendingOpId, ReplayReport};
+use catmail_core::{AccountId, Flags, FolderId, MailClient, MessageId, PendingOpId, ReplayReport};
 use clap::{ArgGroup, Args, Subcommand};
 
 use crate::cmd::folder_names;
@@ -38,6 +38,24 @@ pub(crate) struct Move {
     /// Folder name (e.g. Archive), in the messages' account
     #[arg(long)]
     to: String,
+    /// The folder they are moved out of: on Gmail, a label they lose [default: where
+    /// they are]
+    #[arg(long)]
+    from: Option<String>,
+}
+
+#[derive(Args)]
+#[command(group(ArgGroup::new("labels").required(true).multiple(true)))]
+pub(crate) struct Label {
+    /// Message ids, as shown by `catmail ls`
+    #[arg(required = true)]
+    ids: Vec<i64>,
+    /// Gmail label to add, by folder name (e.g. Work)
+    #[arg(long, group = "labels")]
+    add: Vec<String>,
+    /// Gmail label to take off, by folder name (e.g. INBOX)
+    #[arg(long, group = "labels")]
+    remove: Vec<String>,
 }
 
 #[derive(Args)]
@@ -91,19 +109,54 @@ pub(crate) async fn mark(client: &MailClient, args: Mark, json: bool) -> Result<
 
 pub(crate) async fn move_messages(client: &MailClient, args: Move, json: bool) -> Result<()> {
     let messages = by_account(client, &args.ids).await?;
-    // Resolve every target first, so an unknown name in one account changes nothing.
+    // Resolve every name first, so an unknown one in one account changes nothing.
     let mut moves = Vec::new();
     for (account, ids) in messages {
-        let folder = client
-            .find_folder(account, &args.to)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("no folder `{}` in account {account}", args.to))?;
-        moves.push((account, ids, folder.id));
+        let to = find_folder(client, account, &args.to).await?;
+        let from = match &args.from {
+            Some(name) => Some(find_folder(client, account, name).await?),
+            None => None,
+        };
+        moves.push((account, ids, from, to));
     }
-    for (_, ids, folder) in &moves {
-        client.move_messages(ids.clone(), *folder).await?;
+    for (_, ids, from, to) in &moves {
+        client.move_messages(ids.clone(), *from, *to).await?;
     }
     replay(client, moves.into_iter().map(|(account, ..)| account), json).await
+}
+
+pub(crate) async fn label(client: &MailClient, args: Label, json: bool) -> Result<()> {
+    let messages = by_account(client, &args.ids).await?;
+    let mut changes = Vec::new();
+    for (account, ids) in messages {
+        let (mut add, mut remove) = (Vec::new(), Vec::new());
+        for (names, ids) in [(&args.add, &mut add), (&args.remove, &mut remove)] {
+            for name in names {
+                ids.push(find_folder(client, account, name).await?);
+            }
+        }
+        changes.push((account, ids, add, remove));
+    }
+    for (_, ids, add, remove) in &changes {
+        client
+            .label_messages(ids.clone(), add.clone(), remove.clone())
+            .await?;
+    }
+    replay(
+        client,
+        changes.into_iter().map(|(account, ..)| account),
+        json,
+    )
+    .await
+}
+
+/// The account's folder of that name; fails if there is none.
+async fn find_folder(client: &MailClient, account: AccountId, name: &str) -> Result<FolderId> {
+    Ok(client
+        .find_folder(account, name)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no folder `{name}` in account {account}"))?
+        .id)
 }
 
 pub(crate) async fn archive(client: &MailClient, args: Archive, json: bool) -> Result<()> {
@@ -293,6 +346,7 @@ mod tests {
         let to = |to: &str| Move {
             ids: ids.clone(),
             to: to.into(),
+            from: None,
         };
         let err = move_messages(&client, to("Nowhere"), false)
             .await
@@ -332,6 +386,7 @@ mod tests {
         let to_archive = Move {
             ids: ids[..1].to_vec(),
             to: "Archive".into(),
+            from: None,
         };
         move_messages(&client, to_archive, false).await.unwrap();
 

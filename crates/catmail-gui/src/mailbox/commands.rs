@@ -160,20 +160,21 @@ impl Mailbox {
         self.set_flags(vec![message.id], add, remove, window, cx);
     }
 
-    /// The folder Archive moves the selected message to, if its account has one and the
-    /// message isn't archived already.
-    pub(crate) fn archive_folder(&self, cx: &gpui_kit::App) -> Option<FolderId> {
-        let message = self.selected_message(cx)?;
-        self.account(message.account_id)?
-            .folders
-            .archive_folder(message.folder_id)
+    /// Whether Archive does anything to the selected message: its account has an
+    /// Archive folder it isn't in, or on Gmail it is in All Mail.
+    pub(crate) fn can_archive(&self, cx: &gpui_kit::App) -> bool {
+        self.selected_message(cx)
+            .is_some_and(|message| self.archives(&message))
+    }
+
+    fn archives(&self, message: &catmail_core::MessageSummary) -> bool {
+        self.account(message.account_id)
+            .is_some_and(|a| a.folders.can_archive(message.folder_id))
     }
 
     pub(crate) fn archive(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(message) = self.selected_message(cx)
-            && self
-                .account(message.account_id)
-                .is_some_and(|a| a.folders.archive_folder(message.folder_id).is_some())
+            && self.archives(&message)
         {
             self.remove(
                 message.id,
@@ -193,13 +194,27 @@ impl Mailbox {
         cx: &mut Context<Self>,
     ) {
         if let Some(message) = self.selected_message(cx) {
+            let shown_in = self.shown_in(cx);
             self.remove(
                 message.id,
                 "move the message",
                 window,
                 cx,
-                move |client| async move { client.move_messages(vec![message.id], to).await },
+                move |client| async move {
+                    client
+                        .move_messages(vec![message.id], shown_in, to)
+                        .await
+                },
             );
+        }
+    }
+
+    /// The folder the listed messages are looked at in: on Gmail, a label they leave when
+    /// moved. None for search results.
+    fn shown_in(&self, cx: &gpui_kit::App) -> Option<FolderId> {
+        match self.place {
+            Some(Place::Folder(id)) if !self.is_searching(cx) => Some(id),
+            _ => None,
         }
     }
 
@@ -276,11 +291,16 @@ impl Mailbox {
         let Some(account) = self.account(message.account_id) else {
             return;
         };
+        let shown_in = self.shown_in(cx);
         let folders = account
             .folders
             .paths()
             .into_iter()
-            .filter(|(folder, _)| folder.id != message.folder_id)
+            .filter(|(folder, _)| {
+                account
+                    .folders
+                    .can_move(message.folder_id, shown_in, folder.id)
+            })
             .map(|(folder, path)| (folder.id, path))
             .collect();
         let this = cx.entity().downgrade();
@@ -342,7 +362,7 @@ fn refused_change(op: &PendingOp) -> String {
         }
         _ => {
             let verb = match op.kind {
-                OpKind::Flags { .. } => "change",
+                OpKind::Flags { .. } | OpKind::Label { .. } => "change",
                 OpKind::Move { .. } => "move",
                 OpKind::Delete => "delete",
             };

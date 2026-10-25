@@ -468,10 +468,24 @@ impl<'c> Messages<'c> {
         Ok(changed)
     }
 
-    /// Makes the labels of message `id` these label folders, adding and removing only what
-    /// differs, and notes those. Returns whether that changed any.
+    /// Makes the labels of message `id` the label folders the server reports, with the
+    /// changes still queued for it made on top (as for flags: the server doesn't have them
+    /// yet), adding and removing only what differs, and notes those. Returns whether that
+    /// changed any.
     fn set_labels(&self, id: i64, labels: &[FolderId]) -> Result<bool> {
-        let wanted = to_json(&labels.iter().map(|f| f.0).collect::<Vec<_>>());
+        let mut labels: Vec<i64> = labels.iter().map(|f| f.0).collect();
+        let mut queued = self.conn.prepare_cached(
+            "SELECT target_folder_id, label_add FROM pending_ops
+             WHERE message_id = ?1 AND kind = 'label' AND status = 'pending' ORDER BY id",
+        )?;
+        for change in queued.query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))? {
+            let (label, add): (i64, bool) = change?;
+            labels.retain(|&l| l != label);
+            if add {
+                labels.push(label);
+            }
+        }
+        let wanted = to_json(&labels);
         let mut remove = self.conn.prepare_cached(
             "DELETE FROM message_labels
              WHERE message_id = ?1 AND folder_id NOT IN (SELECT value FROM json_each(?2))
@@ -890,7 +904,7 @@ mod tests {
     use super::*;
     use crate::Store;
     use crate::folders::RemoteFolder;
-    use crate::test_util::{self, TestStore};
+    use crate::test_util::{self, TestStore, gmail};
 
     fn setup() -> (TestStore, AccountId, Folder) {
         let store = test_util::store();
@@ -1540,7 +1554,7 @@ mod tests {
 
         // Moved locally: its location is where it is moving from.
         store
-            .write(|db| db.ops().move_messages(&[ids[1]], f["Kept"], 0))
+            .write(|db| db.ops().move_messages(&[ids[1]], None, f["Kept"], 0))
             .unwrap();
         let moving = location(ids[1]);
         assert!(!delete(&moving));
@@ -1577,63 +1591,6 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-    }
-
-    /// A Gmail account's folders by name: All Mail and Trash are locations (UIDVALIDITY
-    /// 1), the rest labels.
-    fn gmail(store: &Store) -> (AccountId, HashMap<&'static str, FolderId>) {
-        let account = test_util::account(store, "a@gmail.com");
-        let mailboxes = [
-            ("INBOX", Some(FolderRole::Inbox), FolderKind::Label),
-            (
-                "[Gmail]/All Mail",
-                Some(FolderRole::All),
-                FolderKind::Location,
-            ),
-            (
-                "[Gmail]/Trash",
-                Some(FolderRole::Trash),
-                FolderKind::Location,
-            ),
-            (
-                "[Gmail]/Important",
-                Some(FolderRole::Important),
-                FolderKind::Label,
-            ),
-            (
-                "[Gmail]/Starred",
-                Some(FolderRole::Flagged),
-                FolderKind::Label,
-            ),
-            ("Work", None, FolderKind::Label),
-        ];
-        let remote: Vec<_> = mailboxes
-            .iter()
-            .map(|&(name, role, kind)| RemoteFolder {
-                remote_name: name.into(),
-                name: name.into(),
-                delimiter: Some('/'),
-                role,
-                kind,
-                selectable: true,
-            })
-            .collect();
-        let ids = store
-            .write(|db| {
-                db.folders().reconcile(account, &remote)?;
-                let folders = db.folders().list(account)?;
-                let mut ids = HashMap::new();
-                for (name, _, kind) in mailboxes {
-                    let id = folders.iter().find(|f| f.name == name).unwrap().id;
-                    if kind == FolderKind::Location {
-                        db.folders().reset_uidvalidity(id, 1)?;
-                    }
-                    ids.insert(name, id);
-                }
-                Ok(ids)
-            })
-            .unwrap();
-        (account, ids)
     }
 
     fn user(name: &str) -> GmailLabel {
@@ -1866,7 +1823,7 @@ mod tests {
             .unwrap()[0]
             .id;
         store
-            .write(|db| db.ops().move_messages(&[id], trash, 0))
+            .write(|db| db.ops().move_messages(&[id], None, trash, 0))
             .unwrap();
 
         let upsert = |folder, uid| {

@@ -33,9 +33,7 @@ pub use error::{Error, Result};
 pub use folders::{FolderSyncState, Folders, Reconciled, RemoteFolder};
 pub use identities::{DeletedIdentity, Identities, Sending};
 pub use messages::{MessageLocation, Messages, NewBody, NewMessage, Upserted};
-pub use ops::{
-    CopyCheckpoint, LabelCopies, Moved, PendingOps, ReplayFolder, ReplayKind, ReplayOp, Touched,
-};
+pub use ops::{CopyCheckpoint, Moved, PendingOps, ReplayFolder, ReplayKind, ReplayOp, Touched};
 pub use outbox::{NewOutboxEntry, Outbox, OutboxJob};
 pub use private::create_private_dir;
 
@@ -274,10 +272,14 @@ impl Store {
 
 #[cfg(test)]
 pub(crate) mod test_util {
-    use catmail_types::{AccountId, NewAccount, Security, ServerConfig};
+    use std::collections::HashMap;
+
+    use catmail_types::{
+        AccountId, FolderId, FolderKind, FolderRole, NewAccount, Security, ServerConfig,
+    };
     use tempfile::TempDir;
 
-    use crate::Store;
+    use crate::{RemoteFolder, Store};
 
     /// A store in a temporary directory, deleted along with it. On a file, not in
     /// memory: other connections to an in-memory database would open another, empty
@@ -320,6 +322,64 @@ pub(crate) mod test_util {
             .write(|db| db.accounts().insert(&new, &format!("key:{email}")))
             .unwrap()
             .id
+    }
+
+    /// A Gmail account's folders by name: All Mail, Trash and Spam are locations
+    /// (UIDVALIDITY 1), the rest labels.
+    pub(crate) fn gmail(store: &Store) -> (AccountId, HashMap<&'static str, FolderId>) {
+        let account = account(store, "a@gmail.com");
+        let mailboxes = [
+            ("INBOX", Some(FolderRole::Inbox), FolderKind::Label),
+            (
+                "[Gmail]/All Mail",
+                Some(FolderRole::All),
+                FolderKind::Location,
+            ),
+            (
+                "[Gmail]/Trash",
+                Some(FolderRole::Trash),
+                FolderKind::Location,
+            ),
+            ("[Gmail]/Spam", Some(FolderRole::Junk), FolderKind::Location),
+            (
+                "[Gmail]/Important",
+                Some(FolderRole::Important),
+                FolderKind::Label,
+            ),
+            (
+                "[Gmail]/Starred",
+                Some(FolderRole::Flagged),
+                FolderKind::Label,
+            ),
+            ("Work", None, FolderKind::Label),
+        ];
+        let remote: Vec<_> = mailboxes
+            .iter()
+            .map(|&(name, role, kind)| RemoteFolder {
+                remote_name: name.into(),
+                name: name.into(),
+                delimiter: Some('/'),
+                role,
+                kind,
+                selectable: true,
+            })
+            .collect();
+        let ids = store
+            .write(|db| {
+                db.folders().reconcile(account, &remote)?;
+                let folders = db.folders().list(account)?;
+                let mut ids = HashMap::new();
+                for (name, _, kind) in mailboxes {
+                    let id = folders.iter().find(|f| f.name == name).unwrap().id;
+                    if kind == FolderKind::Location {
+                        db.folders().reset_uidvalidity(id, 1)?;
+                    }
+                    ids.insert(name, id);
+                }
+                Ok(ids)
+            })
+            .unwrap();
+        (account, ids)
     }
 }
 

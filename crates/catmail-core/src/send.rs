@@ -12,7 +12,7 @@
 //!   connection, timeout, crash) leaves it `unknown`, and only the user resends it.
 //! - `accepted` → APPEND to the Sent folder (at once, then retried with backoff),
 //!   checking first whether an earlier APPEND arrived after all → done: the entry and
-//!   its draft go.
+//!   its draft go. Gmail saves what its own SMTP server sends to Sent itself: no APPEND.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
@@ -22,8 +22,9 @@ use catmail_proto::imap::Session;
 use catmail_proto::smtp;
 use catmail_store::{NewOutboxEntry, Outbox, OutboxJob, Touched};
 use catmail_types::{
-    AccountId, Address, BlobHash, DraftId, ErrorKind, Event, Flags, FlushReport, FolderRole,
-    IdentityId, OutboxEntry, OutboxId, OutboxStatus, ReportedError,
+    Account, AccountId, AccountMode, Address, BlobHash, DraftId, ErrorKind, Event, Flags,
+    FlushReport, FolderRole, Identity, IdentityId, OutboxEntry, OutboxId, OutboxStatus,
+    ReportedError,
 };
 use futures_util::future::join_all;
 use tokio::sync::Notify;
@@ -497,17 +498,29 @@ async fn save_one(
 }
 
 /// APPENDs the message to the account's Sent folder, unless an earlier attempt that
-/// went unanswered put it there already. Without a Sent folder there is nothing to do.
+/// went unanswered put it there already, or the server put it there itself. Without a
+/// Sent folder there is nothing to do.
 async fn attempt_save(
     engine: &Arc<Engine>,
     job: &OutboxJob,
     mut raw: Option<Vec<u8>>,
 ) -> Result<()> {
-    let account = job.entry.account_id;
-    let known = engine
-        .read(move |db| db.folders().by_role(account, FolderRole::Sent))
-        .await?
-        .map(|(_, remote_name)| remote_name);
+    let (account, identity) = (job.entry.account_id, job.entry.identity);
+    let (known, saved_by_server) = engine
+        .read(move |db| {
+            let saved_by_server =
+                match (db.accounts().get(account)?, db.identities().get(identity)?) {
+                    (Some(account), Some(identity)) => saves_sent_mail(&account, &identity),
+                    _ => false,
+                };
+            let known = db.folders().by_role(account, FolderRole::Sent)?;
+            Ok((known.map(|(_, remote_name)| remote_name), saved_by_server))
+        })
+        .await?;
+    if saved_by_server {
+        tracing::debug!(%account, "the server saves sent mail to Sent itself");
+        return Ok(());
+    }
     // Attempts are counted before they are made, so past the first one (or after a
     // retry on a new connection within this one) an APPEND may have gone through.
     let mut may_be_there = job.entry.attempts > 1;
@@ -547,6 +560,25 @@ async fn attempt_save(
         tracing::info!(%account, "the account has no Sent folder; not saving a copy");
     }
     Ok(())
+}
+
+/// Whether the account's server saves what the identity sends to Sent itself, so that an
+/// APPEND would make a second copy. Gmail does, for mail sent through its own SMTP
+/// server with the account's login (an identity of the same login, on a server in the
+/// IMAP server's domain); what goes out elsewhere it never sees. Before the first sync
+/// the account isn't known to be Gmail, and a copy is saved.
+fn saves_sent_mail(account: &Account, identity: &Identity) -> bool {
+    // `imap.gmail.com` and `smtp.gmail.com`.
+    let domain = |host: &str| {
+        let host = host.to_ascii_lowercase();
+        match host.split_once('.') {
+            Some((_, domain)) if domain.contains('.') => domain.to_owned(),
+            _ => host,
+        }
+    };
+    account.mode == AccountMode::Gmail
+        && identity.username == account.username
+        && domain(&identity.smtp.host) == domain(&account.imap.host)
 }
 
 /// The Sent folder by the server's say, for an account that hasn't been synced.

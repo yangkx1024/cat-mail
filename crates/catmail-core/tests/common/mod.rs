@@ -268,18 +268,15 @@ pub fn folder_report<'a>(report: &'a SyncReport, name: &str) -> &'a FolderSyncRe
     report.folders.iter().find(|f| f.name == name).unwrap()
 }
 
-/// One message in INBOX, Important and All Mail, as Gmail shows its labels, and an empty
-/// Trash; All Mail is marked `\\All` only if `labels`.
+/// One message in INBOX, a copy of it in Important and in All Mail (not marked `\\All`),
+/// and an empty Trash.
 #[allow(dead_code)]
-pub fn labelled(labels: bool) -> ServerState {
+pub fn copied() -> ServerState {
     let mut state = ServerState::new("alice", "pw");
-    state.inbox().append_simple("labelled");
+    state.inbox().append_simple("copied");
     let raw = state.inbox().messages[0].raw.clone();
-    let mut all = FakeMailbox::new("All Mail");
-    if labels {
-        all = all.with_attribute("\\All");
-    }
-    for mut mailbox in [all, FakeMailbox::new("Important")] {
+    for name in ["All Mail", "Important"] {
+        let mut mailbox = FakeMailbox::new(name);
         mailbox.append(&raw, &[]);
         state.mailboxes.push(mailbox);
     }
@@ -287,16 +284,6 @@ pub fn labelled(labels: bool) -> ServerState {
         .mailboxes
         .push(FakeMailbox::new("Trash").with_attribute("\\Trash"));
     state
-}
-
-/// What Gmail does on the server of [`labelled`] when the message is moved to Trash: it
-/// leaves its other labels too.
-#[allow(dead_code)]
-pub fn gmail_trashes(fake: &FakeImap) {
-    let mut state = fake.state();
-    for name in ["All Mail", "Important"] {
-        state.mailbox_mut(name).expunge(1);
-    }
 }
 
 /// A sparse file of `size` bytes in `dir`: only what is read gets written.

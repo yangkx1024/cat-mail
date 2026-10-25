@@ -1,6 +1,6 @@
 //! The sidebar's folder hierarchy, built from the flat list the engine stores.
 
-use catmail_core::{DeleteOutcome, Folder, FolderId, FolderRole, archive_folder, special_folder};
+use catmail_core::{DeleteOutcome, Folder, FolderId, FolderRole, MovePlan, special_folder};
 
 use crate::assets::Hero;
 
@@ -132,9 +132,15 @@ impl AccountFolders {
         DeleteOutcome::of(&self.folders, folder)
     }
 
-    /// Where Archive moves a message in `folder`, if anywhere.
-    pub fn archive_folder(&self, folder: FolderId) -> Option<FolderId> {
-        archive_folder(&self.folders, folder)
+    /// Whether Archive does anything to a message in `folder`.
+    pub fn can_archive(&self, folder: FolderId) -> bool {
+        MovePlan::archive(&self.folders, folder).is_some()
+    }
+
+    /// Whether moving a message in `folder`, looked at in `shown_in`, to `to` does
+    /// anything.
+    pub fn can_move(&self, folder: FolderId, shown_in: Option<FolderId>, to: FolderId) -> bool {
+        MovePlan::of(&self.folders, folder, shown_in, to).is_ok_and(|plan| !plan.is_empty())
     }
 
     /// The node of the selectable folder.
