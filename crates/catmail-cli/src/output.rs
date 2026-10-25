@@ -6,8 +6,8 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use catmail_core::{
-    Account, Draft, Flags, Folder, FolderId, Identity, Message, MessageSummary, OpKind, OpStatus,
-    OutboxEntry, OutboxStatus, PendingOp, ServerConfig, SyncReport, display,
+    Account, Draft, Flags, Folder, FolderId, FolderKind, Identity, Message, MessageSummary, OpKind,
+    OpStatus, OutboxEntry, OutboxStatus, PendingOp, ServerConfig, SyncReport, display,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -189,34 +189,96 @@ pub(crate) fn print_sync_report(report: &SyncReport) {
     }
 }
 
+/// Why a Gmail account's labels are synced as folders, and how to have labels again.
+pub(crate) const ALL_MAIL_HIDDEN: &str = "Gmail's All Mail is hidden from IMAP, so its labels \
+    are synced as folders. Turn on \"Show in IMAP\" for All Mail in Gmail's settings.";
+
+/// An account's folders. Gmail's labels hidden from IMAP in its settings are left out,
+/// as the GUI leaves them out; a KIND column tells labels from folders, on an account
+/// that has them.
 pub(crate) fn print_folders(folders: &[Folder]) {
+    let (header, rows) = folder_table(folders);
+    print_table(&header, rows);
+}
+
+fn folder_table(folders: &[Folder]) -> (Vec<&'static str>, Vec<Vec<String>>) {
+    let kinds = folders.iter().any(|f| f.kind == FolderKind::Label);
     let rows = folders
         .iter()
+        .filter(|f| f.listed)
         .map(|f| {
             let [unread, total] = if f.selectable {
                 [f.unread_count.to_string(), f.total_count.to_string()]
             } else {
                 ["-".into(), "-".into()]
             };
-            vec![
-                f.name.clone(),
-                f.role.map(|r| r.as_str().to_owned()).unwrap_or_default(),
-                unread,
-                total,
-            ]
+            let mut row = vec![f.name.clone()];
+            if kinds {
+                // In words people use; `--json` has the engine's (`location`).
+                let kind = match f.kind {
+                    FolderKind::Label => "label",
+                    FolderKind::Location => "folder",
+                };
+                row.push(kind.into());
+            }
+            row.push(f.role.map(|r| r.as_str().to_owned()).unwrap_or_default());
+            row.extend([unread, total]);
+            row
         })
         .collect();
-    print_table(&["FOLDER", "ROLE", "UNREAD", "TOTAL"], rows);
+    let mut header = vec!["FOLDER"];
+    if kinds {
+        header.push("KIND");
+    }
+    header.extend(["ROLE", "UNREAD", "TOTAL"]);
+    (header, rows)
 }
 
-/// With `folders`, adds a FOLDER column.
+/// The names of the message's user labels ([`Folder::is_user_label`]) but `except`,
+/// sorted; `folders` are its account's.
+pub(crate) fn user_labels(
+    message: &MessageSummary,
+    folders: &HashMap<FolderId, Folder>,
+    except: Option<FolderId>,
+) -> Vec<String> {
+    let mut names: Vec<String> = message
+        .labels
+        .iter()
+        .filter(|&&id| Some(id) != except)
+        .filter_map(|id| folders.get(id))
+        .filter(|f| f.is_user_label())
+        .map(|f| f.name.clone())
+        .collect();
+    names.sort();
+    names
+}
+
+/// `folders` are the messages' accounts'. The messages of one folder, `listed_in`, or
+/// from anywhere (search results), which adds a FOLDER column. A LABELS column, when any
+/// has a user label, leaves out `listed_in`: every message has it.
 pub(crate) fn print_message_table(
     messages: &[MessageSummary],
-    folders: Option<&HashMap<FolderId, String>>,
+    folders: &HashMap<FolderId, Folder>,
+    listed_in: Option<FolderId>,
 ) {
+    let (header, rows) = message_table(messages, folders, listed_in);
+    print_table(&header, rows);
+}
+
+fn message_table(
+    messages: &[MessageSummary],
+    folders: &HashMap<FolderId, Folder>,
+    listed_in: Option<FolderId>,
+) -> (Vec<&'static str>, Vec<Vec<String>>) {
+    let labels: Vec<Vec<String>> = messages
+        .iter()
+        .map(|m| user_labels(m, folders, listed_in))
+        .collect();
+    let with_labels = labels.iter().any(|l| !l.is_empty());
     let rows = messages
         .iter()
-        .map(|m| {
+        .zip(labels)
+        .map(|(m, labels)| {
             let mut marks = String::new();
             marks.push(if m.flags.contains(Flags::SEEN) {
                 ' '
@@ -230,23 +292,32 @@ pub(crate) fn print_message_table(
             });
             marks.push(if m.has_attachments { '@' } else { ' ' });
             let mut row = vec![m.id.to_string(), marks, display::date(m.date)];
-            if let Some(folders) = folders {
-                let name = folders.get(&m.folder_id).cloned().unwrap_or_default();
-                row.push(truncate(&name, 16));
+            if listed_in.is_none() {
+                let name = folders.get(&m.folder_id).map(|f| f.name.as_str());
+                row.push(truncate(name.unwrap_or_default(), 16));
             }
             row.push(truncate(display::sender(&m.from), 24));
+            if with_labels {
+                row.push(truncate(&labels.join(", "), 20));
+            }
             row.push(display::subject(m.subject.as_deref()).to_owned());
             row
         })
         .collect();
-    let header: &[&str] = match folders {
-        Some(_) => &["ID", "", "DATE", "FOLDER", "FROM", "SUBJECT"],
-        None => &["ID", "", "DATE", "FROM", "SUBJECT"],
-    };
-    print_table(header, rows);
+    let mut header = vec!["ID", "", "DATE"];
+    if listed_in.is_none() {
+        header.push("FOLDER");
+    }
+    header.push("FROM");
+    if with_labels {
+        header.push("LABELS");
+    }
+    header.push("SUBJECT");
+    (header, rows)
 }
 
-pub(crate) fn print_message(message: &Message, html: bool) {
+/// `labels` are the names of its user labels.
+pub(crate) fn print_message(message: &Message, labels: &[String], html: bool) {
     let m = &message.summary;
     let header = |name: &str, value: &str| {
         if !value.is_empty() {
@@ -258,6 +329,7 @@ pub(crate) fn print_message(message: &Message, html: bool) {
     header("Cc:", &display::addresses(&message.cc));
     header("Date:", &display::date(m.date));
     header("Subject:", display::subject(m.subject.as_deref()));
+    header("Labels:", &labels.join(", "));
     println!();
     let Some(body) = &message.body else {
         println!("(body not downloaded; run without --offline)");
@@ -294,13 +366,17 @@ pub(crate) fn print_message(message: &Message, html: bool) {
     }
 }
 
-/// `folders` names the folders the changes are in or move to.
-pub(crate) fn print_ops(ops: &[PendingOp], folders: &HashMap<FolderId, String>) {
+/// `folders` are those the changes are in or move to.
+pub(crate) fn print_ops(ops: &[PendingOp], folders: &HashMap<FolderId, Folder>) {
     if ops.is_empty() {
         println!("No changes waiting for the server.");
         return;
     }
-    let name = |id: FolderId| folders.get(&id).cloned().unwrap_or_else(|| id.to_string());
+    let name = |id: FolderId| {
+        folders
+            .get(&id)
+            .map_or_else(|| id.to_string(), |f| f.name.clone())
+    };
     let rows = ops
         .iter()
         .map(|op| {
@@ -451,6 +527,8 @@ pub(crate) fn print_outbox(entries: &[OutboxEntry]) {
 
 #[cfg(test)]
 mod tests {
+    use catmail_core::{AccountId, FolderRole, MessageId};
+
     use super::*;
 
     #[test]
@@ -463,6 +541,111 @@ mod tests {
             printable("你好，世界 ok"),
             Cow::Borrowed("你好，世界 ok")
         ));
+    }
+
+    fn folder(id: i64, name: &str, role: Option<FolderRole>, kind: FolderKind) -> Folder {
+        Folder {
+            id: FolderId(id),
+            account_id: AccountId(1),
+            name: name.into(),
+            delimiter: Some('/'),
+            role,
+            kind,
+            listed: true,
+            selectable: true,
+            unread_count: 0,
+            total_count: 0,
+            last_synced_at: None,
+        }
+    }
+
+    /// INBOX (1) and Important (2) are system labels, Work (3) and Personal (4) the user's,
+    /// Hidden (5) hidden from IMAP; All Mail (6) is where messages are.
+    fn gmail() -> Vec<Folder> {
+        let label = FolderKind::Label;
+        let mut hidden = folder(5, "Hidden", None, label);
+        hidden.listed = false;
+        vec![
+            folder(1, "INBOX", Some(FolderRole::Inbox), label),
+            folder(2, "[Gmail]/Important", Some(FolderRole::Important), label),
+            folder(3, "Work", None, label),
+            folder(4, "Personal", None, label),
+            hidden,
+            folder(
+                6,
+                "[Gmail]/All Mail",
+                Some(FolderRole::All),
+                FolderKind::Location,
+            ),
+        ]
+    }
+
+    fn message(id: i64, labels: &[i64]) -> MessageSummary {
+        MessageSummary {
+            id: MessageId(id),
+            account_id: AccountId(1),
+            folder_id: FolderId(6),
+            subject: Some(format!("m{id}")),
+            from: Vec::new(),
+            date: None,
+            snippet: None,
+            flags: Flags::SEEN,
+            has_attachments: false,
+            labels: labels.iter().map(|&id| FolderId(id)).collect(),
+        }
+    }
+
+    #[test]
+    fn folders_tell_labels_apart_and_leave_hidden_ones_out() {
+        let (header, rows) = folder_table(&gmail());
+        assert_eq!(header, ["FOLDER", "KIND", "ROLE", "UNREAD", "TOTAL"]);
+        let kinds: Vec<_> = rows
+            .iter()
+            .map(|r| (r[0].as_str(), r[1].as_str()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("INBOX", "label"),
+                ("[Gmail]/Important", "label"),
+                ("Work", "label"),
+                ("Personal", "label"),
+                ("[Gmail]/All Mail", "folder"),
+            ]
+        );
+        // Without labels, no column for them.
+        let standard = [folder(
+            1,
+            "INBOX",
+            Some(FolderRole::Inbox),
+            FolderKind::Location,
+        )];
+        assert_eq!(
+            folder_table(&standard).0,
+            ["FOLDER", "ROLE", "UNREAD", "TOTAL"]
+        );
+    }
+
+    #[test]
+    fn messages_show_their_user_labels() {
+        let folders: HashMap<_, _> = gmail().into_iter().map(|f| (f.id, f)).collect();
+        let messages = [message(1, &[1, 2, 3, 4, 5]), message(2, &[3])];
+        // In Work: the other user labels; not INBOX, Important or the hidden one.
+        let (header, rows) = message_table(&messages, &folders, Some(FolderId(3)));
+        assert_eq!(header, ["ID", "", "DATE", "FROM", "LABELS", "SUBJECT"]);
+        assert_eq!(rows[0][4], "Personal");
+        assert_eq!(rows[1][4], "");
+        // Search results: every user label, and the folder.
+        let (header, rows) = message_table(&messages, &folders, None);
+        assert_eq!(
+            header,
+            ["ID", "", "DATE", "FOLDER", "FROM", "LABELS", "SUBJECT"]
+        );
+        assert_eq!(rows[0][3], "[Gmail]/All Mail");
+        assert_eq!(rows[0][5], "Personal, Work");
+        // No user labels, no column.
+        let (header, _) = message_table(&[message(3, &[1])], &folders, Some(FolderId(1)));
+        assert_eq!(header, ["ID", "", "DATE", "FROM", "SUBJECT"]);
     }
 
     #[test]

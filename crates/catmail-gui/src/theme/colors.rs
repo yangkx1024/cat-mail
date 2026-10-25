@@ -16,6 +16,8 @@ pub fn rgb(color: Hsla) -> Rgb {
 pub trait ThemeColors {
     /// A flagged message's flag.
     fn flag(&self) -> Hsla;
+    /// Background and text of a badge that only says what something is: a label, say.
+    fn neutral_badge(&self) -> (Hsla, Hsla);
     /// Background and text of a badge for something that needs a look.
     fn warning_badge(&self) -> (Hsla, Hsla);
     /// Background and text of a badge for something that failed.
@@ -39,6 +41,10 @@ fn tint(theme: &Theme, hue: Hsla) -> Hsla {
 impl ThemeColors for Theme {
     fn flag(&self) -> Hsla {
         self.warning
+    }
+
+    fn neutral_badge(&self) -> (Hsla, Hsla) {
+        (self.muted, self.muted_foreground)
     }
 
     fn warning_badge(&self) -> (Hsla, Hsla) {

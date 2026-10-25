@@ -213,6 +213,8 @@ async fn hiding_all_mail_syncs_the_labels_as_folders() {
     env.client.sync_account(env.account).await.unwrap();
     let account = env.client.get_account(env.account).await.unwrap().unwrap();
     assert_eq!(account.mode, AccountMode::Standard);
+    // Still Gmail's server: only All Mail is hidden.
+    assert!(account.gmail_server && account.all_mail_hidden());
     assert_eq!(env.folder("INBOX").await.kind, FolderKind::Location);
     assert_eq!(env.subjects("INBOX").await, ["one"]);
     assert_eq!(env.subjects(TRASH).await, ["old"]);
@@ -226,6 +228,7 @@ async fn hiding_all_mail_syncs_the_labels_as_folders() {
     env.client.sync_account(env.account).await.unwrap();
     let account = env.client.get_account(env.account).await.unwrap().unwrap();
     assert_eq!(account.mode, AccountMode::Gmail);
+    assert!(!account.all_mail_hidden());
     assert_eq!(env.folder("INBOX").await.kind, FolderKind::Label);
     assert_eq!(env.subjects("INBOX").await, ["one"]);
     assert_eq!(env.subjects(ALL_MAIL).await, ["two", "one"]);

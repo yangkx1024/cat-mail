@@ -5,7 +5,7 @@ use catmail_core::MailClient;
 
 use crate::cmd::resolve_account;
 use crate::json::{self, JsonAccountSync, JsonError};
-use crate::output::{print_sync_report, printable};
+use crate::output::{ALL_MAIL_HIDDEN, print_sync_report, printable};
 
 pub(crate) async fn sync(client: &MailClient, selector: Option<&str>, json: bool) -> Result<()> {
     let accounts = match selector {
@@ -32,7 +32,15 @@ pub(crate) async fn sync(client: &MailClient, selector: Option<&str>, json: bool
                 Err(JsonError::new(e.kind(), e.to_string()))
             }
         };
-        synced.push(JsonAccountSync::new(account, result));
+        // As the sync found the server.
+        let account = client
+            .get_account(account.id)
+            .await?
+            .unwrap_or_else(|| account.clone());
+        if !json && account.all_mail_hidden() {
+            println!("  {ALL_MAIL_HIDDEN}");
+        }
+        synced.push(JsonAccountSync::new(&account, result));
     }
     if json {
         json::print_keyed("accounts", &synced)?;

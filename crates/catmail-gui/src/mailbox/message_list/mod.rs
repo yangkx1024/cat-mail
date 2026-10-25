@@ -3,6 +3,7 @@
 //! under a heading for each day. The list (`ListState`) owns selection, keyboard
 //! navigation and scrolling; the delegate here owns the rows.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use catmail_core::{
@@ -159,6 +160,9 @@ pub struct MessageList {
     /// The message the user moved or deleted: once it is gone while still selected, the
     /// row now at its index is selected, so the next message opens.
     removing: Option<MessageId>,
+    /// The name of each user label shown, of every account: a row shows those of its
+    /// message's labels (see `AccountFolders::user_labels`).
+    labels: HashMap<FolderId, SharedString>,
     _load: Task<()>,
 }
 
@@ -175,6 +179,7 @@ impl MessageList {
             has_more: false,
             generation: 0,
             removing: None,
+            labels: HashMap::new(),
             _load: Task::ready(()),
         }
     }
@@ -185,6 +190,14 @@ impl MessageList {
 
     pub fn source(&self) -> Option<&Source> {
         self.source.as_ref()
+    }
+
+    /// The folder whose messages are listed; not search results.
+    pub fn shown_folder(&self) -> Option<FolderId> {
+        match self.source {
+            Some(Source::Folder(id)) => Some(id),
+            _ => None,
+        }
     }
 
     pub fn selected_row(&self) -> Option<&Row> {
@@ -203,6 +216,30 @@ impl MessageList {
     #[cfg(test)]
     pub fn is_loading(&self) -> bool {
         self.loading
+    }
+
+    /// The user labels' names, as the sidebar has them now. Returns whether they changed,
+    /// and the rows need drawing again.
+    pub fn set_labels(&mut self, labels: HashMap<FolderId, SharedString>) -> bool {
+        let changed = self.labels != labels;
+        self.labels = labels;
+        changed
+    }
+
+    /// The names of the message's user labels but `except`, by name.
+    pub fn label_names(
+        &self,
+        message: &MessageSummary,
+        except: Option<FolderId>,
+    ) -> Vec<SharedString> {
+        let mut names: Vec<_> = message
+            .labels
+            .iter()
+            .filter(|&&id| Some(id) != except)
+            .filter_map(|id| self.labels.get(id).cloned())
+            .collect();
+        names.sort();
+        names
     }
 
     /// Selects the next row once `id`, the selected message, goes away.
@@ -466,7 +503,10 @@ impl ListDelegate for MessageList {
         let row = self.rows.get(ix)?;
         let selected = self.selected == Some(ix);
         let item = match row {
-            Row::Message(message) => message_row(message, cx),
+            // Not the label listed: every row has it.
+            Row::Message(message) => {
+                message_row(message, &self.label_names(message, self.shown_folder()), cx)
+            }
             Row::Draft(draft) => draft_row(draft, cx),
             Row::Outbox(entry) => outbox_row(entry, cx),
         };
@@ -553,6 +593,7 @@ mod tests {
             snippet: None,
             flags: Flags::empty(),
             has_attachments: false,
+            labels: Vec::new(),
         })
     }
 

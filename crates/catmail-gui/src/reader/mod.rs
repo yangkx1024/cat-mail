@@ -49,6 +49,9 @@ pub struct Reader {
     page: Option<ShownPage>,
     /// Every header in full, instead of the one-line summary.
     show_details: bool,
+    /// The names of the open message's user labels. The mailbox keeps them as the list
+    /// has the message now: they change while it is open.
+    labels: Vec<SharedString>,
     _load: Task<()>,
     /// Fetching the open message's remote images; replaced with the message.
     _remote: Task<()>,
@@ -62,6 +65,7 @@ impl Reader {
             state: ReaderState::Empty,
             page: None,
             show_details: false,
+            labels: Vec::new(),
             _load: Task::ready(()),
             _remote: Task::ready(()),
         }
@@ -97,9 +101,22 @@ impl Reader {
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.state = ReaderState::Empty;
         self.page = None;
+        self.labels.clear();
         self._load = Task::ready(());
         self._remote = Task::ready(());
         cx.notify();
+    }
+
+    pub fn set_labels(&mut self, labels: Vec<SharedString>, cx: &mut Context<Self>) {
+        if self.labels != labels {
+            self.labels = labels;
+            cx.notify();
+        }
+    }
+
+    #[cfg(test)]
+    pub fn labels(&self) -> &[SharedString] {
+        &self.labels
     }
 
     /// Shows the message, downloading its body first if needed. Does nothing if it is

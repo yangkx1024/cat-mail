@@ -136,6 +136,14 @@ impl Folder {
     pub fn is_label(&self) -> bool {
         self.kind == FolderKind::Label && self.role != Some(FolderRole::Flagged)
     }
+
+    /// Whether it is a Gmail label of the user's that frontends show, on its messages and
+    /// apart from the folders. The system labels (INBOX, Sent, Drafts, Important) have a
+    /// role: they are where a message is listed, not what it is about. One hidden from
+    /// IMAP in Gmail's settings isn't shown anywhere.
+    pub fn is_user_label(&self) -> bool {
+        self.kind == FolderKind::Label && self.role.is_none() && self.listed
+    }
 }
 
 /// The folder the engine uses for `role` among an account's folders: where Delete moves

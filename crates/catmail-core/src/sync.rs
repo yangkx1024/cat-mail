@@ -164,10 +164,16 @@ pub(crate) async fn run(
             let start = Instant::now();
             let listed = session.list().await?;
             let mode = mode_of(session, &listed);
+            let gmail = session.is_gmail();
             let remote = remote_folders(listed, mode);
             let reconciled = engine
                 .write(move |db| {
                     let mut reconciled = db.folders().reconcile(account_id, &remote)?;
+                    // With the mode, it tells whether All Mail is hidden: the user is told
+                    // how to get the labels back.
+                    if db.accounts().set_gmail_server(account_id, gmail)? {
+                        reconciled.changed = true;
+                    }
                     // What a message row is changed with the mode (one per location, or
                     // one per X-GM-MSGID): every location starts over.
                     if db.accounts().set_mode(account_id, mode)? {

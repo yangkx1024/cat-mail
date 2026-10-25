@@ -104,7 +104,7 @@ BlobStore 自然只存一份。
 
 Gmail 的文件夹是标签，同一封邮件出现在几个邮箱里。决定改为按 `X-GM-MSGID` 一封一行：它有一个位置
 （"所有邮件"、已删除或垃圾邮件里的 UID），其余邮箱是它的标签。普通账户是没有标签的特例，两者是同一套
-模型。存储、同步和操作队列已经这样做，界面还没有，见[位置与标签](architecture/labels.md)。
+模型，见[位置与标签](architecture/labels.md)。
 
 UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UID 的东西（操作队列、草稿的远端
 副本）都同时记下文件夹和它的 UIDVALIDITY，使用前核对。UIDVALIDITY 变化时这个文件夹的旧代际
@@ -163,7 +163,7 @@ UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UI
 | [操作队列](architecture/op-queue.md) | 标记 / 移动 / 删除的本地效果、回放顺序、拒绝时的撤销、无 MOVE 服务器上的 COPY |
 | [正文与附件](architecture/bodies.md) | 按需下载的两条路径、正文提取、HTML 清洗、内嵌图片 |
 | [草稿与发信](architecture/sending.md) | 草稿与回复、草稿同步到服务器、outbox 状态机、SMTP 客户端、重试、保存到 Sent |
-| [位置与标签](architecture/labels.md) | Gmail 按标签建模：一封邮件一行、位置与标签、同步与操作（同步已实现，操作与界面未实现） |
+| [位置与标签](architecture/labels.md) | Gmail 按标签建模：一封邮件一行、位置与标签、同步、操作与界面 |
 | [IMAP / SMTP 连接](architecture/protocol.md) | IMAP 库（改用 imap-proto 的决定）、连接层的严格解析、连接池、认证、TLS |
 | [存储](architecture/storage.md) | SQLite 约定、计数、跨账户约束、全文搜索、BlobStore 与 GC、凭据 |
 | [CLI](architecture/cli.md) | 命令的代码结构、`--json` 的结构与版本、退出码、添加账户前的登录检查、不覆盖文件 |

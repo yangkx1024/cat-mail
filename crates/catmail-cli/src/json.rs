@@ -95,6 +95,12 @@ pub(crate) struct JsonAccount {
     imap: JsonServer,
     /// Its default identity's.
     smtp: Option<JsonServer>,
+    /// `standard` or `gmail`: which folders are labels.
+    mode: &'static str,
+    /// The server is Gmail's, whatever the mode.
+    gmail_server: bool,
+    /// A Gmail server with All Mail hidden from IMAP: its labels are synced as folders.
+    all_mail_hidden: bool,
     created_at: Option<String>,
 }
 
@@ -111,6 +117,9 @@ impl JsonAccount {
                 .iter()
                 .find(|i| i.is_default)
                 .map(|i| (&i.smtp).into()),
+            mode: a.mode.as_str(),
+            gmail_server: a.gmail_server,
+            all_mail_hidden: a.all_mail_hidden(),
             created_at: time(a.created_at),
         }
     }
@@ -198,6 +207,8 @@ impl From<&ReportedError> for JsonError {
 pub(crate) struct JsonAccountSync {
     account: i64,
     email: String,
+    /// As the sync found the server (see [`JsonAccount`]).
+    all_mail_hidden: bool,
     folders: Vec<JsonFolderSync>,
     error: Option<JsonError>,
 }
@@ -211,6 +222,7 @@ impl JsonAccountSync {
         Self {
             account: account.id.0,
             email: account.email.clone(),
+            all_mail_hidden: account.all_mail_hidden(),
             folders,
             error,
         }
@@ -257,6 +269,10 @@ pub(crate) struct JsonFolder {
     name: String,
     delimiter: Option<char>,
     role: Option<&'static str>,
+    /// `location` (where messages are) or `label` (Gmail).
+    kind: &'static str,
+    /// False for a Gmail label hidden from IMAP that messages still carry.
+    listed: bool,
     selectable: bool,
     unread: u32,
     total: u32,
@@ -271,6 +287,8 @@ impl From<&Folder> for JsonFolder {
             name: f.name.clone(),
             delimiter: f.delimiter,
             role: f.role.map(FolderRole::as_str),
+            kind: f.kind.as_str(),
+            listed: f.listed,
             selectable: f.selectable,
             unread: f.unread_count,
             total: f.total_count,
@@ -305,6 +323,8 @@ pub(crate) struct JsonSummary {
     snippet: Option<String>,
     flags: Vec<&'static str>,
     has_attachments: bool,
+    /// On Gmail, the label folders it has, system labels too.
+    labels: Vec<i64>,
 }
 
 impl From<&MessageSummary> for JsonSummary {
@@ -319,6 +339,7 @@ impl From<&MessageSummary> for JsonSummary {
             snippet: m.snippet.clone(),
             flags: flags(m.flags),
             has_attachments: m.has_attachments,
+            labels: m.labels.iter().map(|id| id.0).collect(),
         }
     }
 }
@@ -671,6 +692,42 @@ mod tests {
     // The documents scripts read. A failure here means `--json` output changed: if
     // that was meant, a removed or renamed field needs a new SCHEMA_VERSION.
     #[test]
+    fn folder_snapshot() {
+        let folder = Folder {
+            id: FolderId(5),
+            account_id: AccountId(1),
+            name: "Work".into(),
+            delimiter: Some('/'),
+            role: None,
+            kind: catmail_core::FolderKind::Label,
+            listed: true,
+            selectable: true,
+            unread_count: 2,
+            total_count: 7,
+            last_synced_at: None,
+        };
+        assert_eq!(
+            document(&keyed("folders", list::<JsonFolder, _>([&folder]))),
+            json!({
+                "schema_version": 1,
+                "folders": [{
+                    "id": 5,
+                    "account": 1,
+                    "name": "Work",
+                    "delimiter": "/",
+                    "role": null,
+                    "kind": "label",
+                    "listed": true,
+                    "selectable": true,
+                    "unread": 2,
+                    "total": 7,
+                    "last_synced_at": null,
+                }],
+            })
+        );
+    }
+
+    #[test]
     fn message_snapshot() {
         let summary = MessageSummary {
             id: MessageId(42),
@@ -685,6 +742,7 @@ mod tests {
             snippet: Some("本周".into()),
             flags: Flags::SEEN | Flags::FLAGGED,
             has_attachments: true,
+            labels: vec![FolderId(5)],
         };
         let message = Message {
             summary: summary.clone(),
@@ -727,6 +785,7 @@ mod tests {
                     "snippet": "本周",
                     "flags": ["seen", "flagged"],
                     "has_attachments": true,
+                    "labels": [5],
                 }],
             })
         );
@@ -747,6 +806,7 @@ mod tests {
                     "snippet": "本周",
                     "flags": ["seen", "flagged"],
                     "has_attachments": true,
+                    "labels": [5],
                     "to": [{"name": null, "email": "me@example.com"}],
                     "cc": [],
                     "reply_to": [],

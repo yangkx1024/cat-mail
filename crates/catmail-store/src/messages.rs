@@ -15,9 +15,10 @@ use crate::folders::Folders;
 use crate::fts;
 use crate::ops::MOVING;
 
-/// Of `messages m`.
+/// Of `messages m`. Its labels are one lookup in the primary key of `message_labels`.
 const SUMMARY_COLUMNS: &str = "m.id, m.account_id, m.folder_id, m.subject, m.from_json, m.date,
-    m.snippet, m.flags, m.has_attachments";
+    m.snippet, m.flags, m.has_attachments,
+    (SELECT group_concat(folder_id) FROM message_labels WHERE message_id = m.id) AS labels";
 
 /// The order of lists and search results, as [`MessageCursor`] describes it.
 /// `list_date` is `date` with a missing one sorted last.
@@ -470,8 +471,8 @@ impl<'c> Messages<'c> {
 
     /// Makes the labels of message `id` the label folders the server reports, with the
     /// changes still queued for it made on top (as for flags: the server doesn't have them
-    /// yet), adding and removing only what differs, and notes those. Returns whether that
-    /// changed any.
+    /// yet), adding and removing only what differs, and notes those and the rest of its
+    /// labels. Returns whether that changed any.
     fn set_labels(&self, id: i64, labels: &[FolderId]) -> Result<bool> {
         let mut labels: Vec<i64> = labels.iter().map(|f| f.0).collect();
         let mut queued = self.conn.prepare_cached(
@@ -497,13 +498,16 @@ impl<'c> Messages<'c> {
              FROM messages m, json_each(?2) j WHERE m.id = ?1
              RETURNING folder_id",
         )?;
-        let mut touched = self.touched.borrow_mut();
         let mut changed = false;
         for stmt in [&mut remove, &mut add] {
             for folder in stmt.query_map(params![id, wanted], |r| Ok(FolderId(r.get(0)?)))? {
-                touched.insert(folder?);
+                self.touched.borrow_mut().insert(folder?);
                 changed = true;
             }
+        }
+        // Its other labels list it, with its labels.
+        if changed {
+            self.note_shown(id, false)?;
         }
         Ok(changed)
     }
@@ -892,6 +896,15 @@ fn summary_from_row(row: &Row<'_>) -> rusqlite::Result<MessageSummary> {
         snippet: row.get("snippet")?,
         flags: Flags::from_bits(row.get("flags")?),
         has_attachments: row.get("has_attachments")?,
+        labels: row
+            .get::<_, Option<String>>("labels")?
+            .map(|ids| {
+                ids.split(',')
+                    .filter_map(|id| id.parse().ok())
+                    .map(FolderId)
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 
@@ -1677,6 +1690,18 @@ mod tests {
         assert_eq!(subjects(&store, f["[Gmail]/Important"]), s(&[1]));
         assert_eq!(subjects(&store, f["[Gmail]/Starred"]), s(&[3, 2]));
         assert_eq!(subjects(&store, f["[Gmail]/All Mail"]), s(&[3, 2, 1]));
+        // Each row says which labels it has, wherever it is listed.
+        let listed = store
+            .read(|db| db.messages().list(f["Work"], 10, None))
+            .unwrap();
+        let labels: BTreeSet<_> = listed[1].labels.iter().copied().collect();
+        assert_eq!(
+            labels,
+            BTreeSet::from([f["INBOX"], f["Work"], f["[Gmail]/Important"]])
+        );
+        let one = store.read(|db| db.messages().get(listed[1].id)).unwrap();
+        assert_eq!(one.unwrap().summary.labels.len(), 3);
+        assert_eq!(listed[0].labels, [f["Work"]]);
         // A label X-GM-LABELS names that LIST doesn't is kept, not shown.
         let hidden = store
             .read(|db| db.folders().find_by_name(account, "Hidden"))
@@ -1715,6 +1740,23 @@ mod tests {
         assert_eq!(subjects(&store, f["Work"]), s(&[3, 2]));
         assert_eq!(subjects(&store, hidden.id), s(&[3, 1]));
         assert!(subjects(&store, f["[Gmail]/Important"]).is_empty());
+        // A label added: the labels that list it already show its labels, so they change.
+        let touched = store
+            .write(|db| {
+                let messages = db.messages();
+                let relabelled = [state(
+                    1,
+                    Flags::SEEN,
+                    vec![inbox.clone(), user("Hidden"), user("Work")],
+                )];
+                messages.update_flags(all_mail, &relabelled)?;
+                Ok(messages.touched_labels())
+            })
+            .unwrap();
+        let mut expected = vec![f["INBOX"], f["Work"], hidden.id];
+        expected.sort();
+        assert_eq!(touched, expected);
+        update(&refreshed[..1]);
         // Labels left alone where none are given.
         let flags_only = FlagState {
             labels: None,

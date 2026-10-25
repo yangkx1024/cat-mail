@@ -11,7 +11,7 @@ use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, Context, Focusable as _, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, SharedString, Styled as _, Window, div, rems,
+    ParentElement as _, SharedString, Styled as _, Window, div, prelude::FluentBuilder as _, rems,
 };
 
 use super::Mailbox;
@@ -133,6 +133,7 @@ impl Mailbox {
         let has_html = self.reader.read(cx).has_html();
         let focus = self.focus_handle(cx);
         let can_archive = self.can_archive(cx);
+        let can_edit_labels = self.can_edit_labels(cx);
         let context = Some(actions::MAILBOX);
         layout::toolbar(cx)
             .justify_end()
@@ -161,6 +162,16 @@ impl Mailbox {
                     .tooltip_with_action("Move to", &MoveToFolder, context)
                     .on_click(cx.listener(|this, _, window, cx| this.move_to_folder(window, cx))),
             )
+            .when(can_edit_labels, |this| {
+                this.child(
+                    Button::new("labels")
+                        .ghost()
+                        .small()
+                        .icon(Hero::Tag)
+                        .tooltip_with_action("Labels", &EditLabels, Some(actions::MESSAGE_LIST))
+                        .on_click(cx.listener(|this, _, window, cx| this.edit_labels(window, cx))),
+                )
+            })
             .child(
                 Button::new("more")
                     .ghost()

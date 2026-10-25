@@ -42,6 +42,39 @@ fn screenshots() {
     save(&mut cx, window, "sign-in");
     drop(cx);
 
+    // Gmail: its labels apart from the folders, on the message, and in their dialog.
+    let gmail = TestMail::start_gmail();
+    let (mut cx, window, mailbox) = headless_window(&gmail);
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.update(|cx| subjects(&mailbox, cx) == ["Plan"])
+    });
+    let plan = cx.update(|cx| id_of(&mailbox, "Plan", cx));
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(("message", plan.0 as u64), cx);
+    })
+    .unwrap();
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.update(|cx| shown_in_reader(&mailbox, cx) == Some(plan))
+    });
+    save(&mut cx, window, "gmail");
+    cx.update_window(window, |_, window, cx| {
+        window.dispatch_action(Box::new(EditLabels), cx)
+    })
+    .unwrap();
+    save(&mut cx, window, "gmail-labels");
+    drop(cx);
+    gmail.hide_all_mail_and_sync();
+    let (mut cx, window, mailbox) = headless_window(&gmail);
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.update(|cx| subjects(&mailbox, cx) == ["Plan"])
+    });
+    save(&mut cx, window, "gmail-all-mail-hidden");
+    drop(cx);
+
     let mail = TestMail::start();
     let (mut cx, window, mailbox) = headless_window(&mail);
     wait_until(|| {

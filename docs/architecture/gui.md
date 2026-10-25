@@ -31,7 +31,7 @@ src/
     refresh.rs       哪个引擎事件重读什么、节流（纯逻辑）
     message_list/    中栏列表（mod.rs：来源、加载、选中；rows.rs：三种行的样子）
     folders.rs       文件夹分区（纯逻辑）
-    move_to.rs add_account.rs   "Move to"对话框；登录页
+    folder_picker.rs add_account.rs   "Move to"与"Labels"对话框；登录页
     tests/           驱动窗口的集成测试，按读信、写信、设置分文件，另有截图
   reader/            读信：mod.rs 状态与操作，message.rs 打开的邮件，images.rs 内嵌与远程图片，view.rs 渲染，
                      page.rs Blitz 排版的页面
@@ -56,8 +56,12 @@ src/
 每个账户先列有角色的文件夹，顺序固定（Inbox、Drafts、Outbox、Sent、Archive、All Mail、Flagged、
 Junk、Trash），名字用角色名（`FolderRole::label`）而不是服务器上的名字（`已发送` 显示为 Sent）；
 图标和顺序在 `folders::RoleInfo` 一张表里；不论嵌套在哪（Dovecot 的
-`INBOX.Sent`）都提到这一层，原父级没有其他内容时去掉（`folders::AccountFolders`）。其余文件夹按
-服务器的层级跟在后面。
+`INBOX.Sent`）都提到这一层，原父级没有其他内容时去掉（`folders::AccountFolders`；`\Noselect` 的父级如
+Gmail 的 `[Gmail]` 也一样）。其余文件夹按服务器的层级跟在后面。
+
+- **Gmail 的标签单列一节**"Labels"，在文件夹之后：系统标签有角色，与位置一起排在前面；用户标签按服务器
+  的层级，图标是标签；在 Gmail 设置里不在 IMAP 中显示的（`listed = 0`）不列。"所有邮件"在 IMAP 中隐藏时
+  （`Account::all_mail_hidden()`），账户名下面一行说明并告诉用户怎样恢复（见[位置与标签 / 界面](labels.md#界面)）。
 
 - **Drafts 是本机草稿**，不是服务器的 Drafts 文件夹：那里是本机草稿的副本，按邮件列出会重复、也
   不能编辑。代价是其他客户端写的草稿在 GUI 里看不到（CLI 的 `catmail ls Drafts` 仍能看到）。
@@ -89,6 +93,9 @@ macOS、Windows 用系统字体，不受影响。
   `message_list::Days` 换算。标题在加载、刷新时重算：窗口跨过午夜后，下一次刷新才把"Today"改成
   "Yesterday"。
 - **未读只靠字重**：未读邮件的发件人和主题加粗，不再有左侧的圆点。
+- **Gmail 的用户标签**是主题后面的中性小标签，最多两个、其余计数，不显示正在看的那个标签。名字由
+  `Mailbox` 从侧栏的账户里取（`MessageList::set_labels`），读信区的标签也由它按列表里这封邮件的现状设置
+  （观察列表，`Reader::set_labels`）：标签在邮件打开时也会变。
 
 ## 读与改
 
@@ -102,6 +109,11 @@ macOS、Windows 用系统字体，不受影响。
   正在看的文件夹，Gmail 上从这个标签移走），都基于
   账户的文件夹列表而不是侧栏的顺序：有两个 Trash 时，侧栏先列的不一定是引擎移入的那个，而在任一
   Trash 里删除都是永久的。
+- **标签**（Gmail）：工具栏的标签按钮或 L 键打开"Labels"对话框（与"Move to"同一个 `FolderPicker`，
+  带勾选），点一个立即加上或去掉，对话框留着；普通账户没有这个按钮。勾选由 `Mailbox` 控制：点击只报告点了
+  哪个标签，加还是去按邮件现在的标签定；列表每次变化都按这封邮件现在的标签重设勾选（被拒绝后撤销的、同步
+  拉到的也一样），这封邮件不再是选中的那封（例如在标签里去掉这个标签，列表打开了下一封）就关掉对话框
+  （`sync_labels_dialog`），不会去改另一封。
 - 服务器拒绝的改动：`ChangesRefused` 后 `dismiss_settled` 在一个写事务里取出并忘掉所有失败或冲突的
   改动，逐条以通知说明，不会重复提示。引擎只在改动变成失败或冲突时发这个事件，本地改动不触发查询；
   窗口打开时和漏收事件之后也查一次（之前留下的、窗口没开时被拒绝的）。它先读一下有没有这样的改动，没有

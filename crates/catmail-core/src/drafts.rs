@@ -841,6 +841,7 @@ mod tests {
                 snippet: None,
                 flags: Flags::empty(),
                 has_attachments: false,
+                labels: Vec::new(),
             },
             to,
             cc,

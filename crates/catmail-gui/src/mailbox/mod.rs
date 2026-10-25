@@ -7,9 +7,9 @@
 mod add_account;
 mod commands;
 mod draft;
+mod folder_picker;
 mod folders;
 mod message_list;
-mod move_to;
 mod outbox;
 mod panes;
 mod refresh;
@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use catmail_core::{
     Account, AccountId, AccountOverview, AccountStatus, Event, Flags, FolderId, FolderRole,
-    Identity, MailClient, OutboxEntry, RecvError,
+    Identity, MailClient, MessageId, OutboxEntry, RecvError,
 };
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::list::{ListEvent, ListState};
@@ -31,7 +31,7 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _};
 use gpui_kit::{
     AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Styled as _, Subscription, Task, Window, div,
+    ParentElement as _, Render, Styled as _, Subscription, Task, WeakEntity, Window, div,
 };
 
 use crate::actions::{self, *};
@@ -81,6 +81,13 @@ impl Place {
     }
 }
 
+/// "Labels", open for a message.
+pub(crate) struct LabelsDialog {
+    message: MessageId,
+    /// Gone once the dialog is closed.
+    pub(crate) list: WeakEntity<ListState<folder_picker::FolderPicker>>,
+}
+
 /// One account as the sidebar shows it.
 #[derive(PartialEq)]
 pub struct AccountEntry {
@@ -119,6 +126,8 @@ pub struct Mailbox {
     /// [`REFRESH_INTERVAL`], except in tests, whose clock only moves when told to.
     pub(crate) refresh_interval: Duration,
     throttle: Throttle,
+    /// "Labels", while it is open.
+    pub(crate) labels_dialog: Option<LabelsDialog>,
     /// The sign-in form, shown instead of the mailbox while it is open.
     adding_account: Option<(Entity<AddAccount>, Subscription)>,
     pub(crate) search: Entity<InputState>,
@@ -173,6 +182,12 @@ impl Mailbox {
                     InputEvent::Focus | InputEvent::Blur => {}
                 },
             ),
+            // A refresh may bring the open message with other labels, or another
+            // message selected.
+            cx.observe_in(&messages, window, |this, _, window, cx| {
+                this.show_labels(cx);
+                this.sync_labels_dialog(window, cx);
+            }),
             cx.observe_window_appearance(window, |_, window, cx| {
                 crate::theme::appearance::system_appearance_changed(window, cx);
             }),
@@ -203,6 +218,7 @@ impl Mailbox {
             sync_on_open_after: SYNC_ON_OPEN_AFTER,
             refresh_interval: REFRESH_INTERVAL,
             throttle: Throttle::default(),
+            labels_dialog: None,
             adding_account: None,
             search,
             messages,
@@ -247,6 +263,7 @@ impl Mailbox {
             Row::Message(message) => {
                 self.reader
                     .update(cx, |reader, cx| reader.open(message.id, window, cx));
+                self.show_labels(cx);
                 if Preferences::get(cx).mark_read_on_open && !message.flags.contains(Flags::SEEN) {
                     self.set_flags(vec![message.id], Flags::SEEN, Flags::empty(), window, cx);
                 }
@@ -317,6 +334,17 @@ impl Mailbox {
             })
             .ok();
         });
+    }
+
+    /// Shows the selected message's labels in the reader, as the list has them.
+    fn show_labels(&self, cx: &mut Context<Self>) {
+        let list = self.messages.read(cx).delegate();
+        let labels = list
+            .selected_message()
+            .map(|message| list.label_names(message, None))
+            .unwrap_or_default();
+        self.reader
+            .update(cx, |reader, cx| reader.set_labels(labels, cx));
     }
 
     fn account_mut(&mut self, id: AccountId) -> Option<&mut AccountEntry> {
@@ -425,6 +453,16 @@ impl Mailbox {
         let still_there = self
             .place
             .is_some_and(|place| place.account_in(&accounts).is_some());
+        let labels = accounts
+            .iter()
+            .flat_map(|a| a.folders.user_labels())
+            .map(|(id, name)| (id, name.into()))
+            .collect();
+        self.messages.update(cx, |list, cx| {
+            if list.delegate_mut().set_labels(labels) {
+                cx.notify();
+            }
+        });
         self.accounts = Some(accounts);
         if !still_there {
             let inbox = self
@@ -587,6 +625,7 @@ impl Render for Mailbox {
             .on_action(
                 cx.listener(|this, _: &MoveToFolder, window, cx| this.move_to_folder(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &EditLabels, window, cx| this.edit_labels(window, cx)))
             .on_action(cx.listener(|this, _: &OpenInBrowser, window, cx| {
                 this.reader
                     .update(cx, |reader, cx| reader.open_in_browser(window, cx))

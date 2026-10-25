@@ -7,9 +7,10 @@ use anyhow::{Context, Result, bail};
 use catmail_core::{AttachmentId, MailClient, MessageId, safe_filename};
 use clap::Args;
 
+use crate::cmd::account_folders;
 use crate::files;
 use crate::json::{self, JsonRead};
-use crate::output::{print_message, printable, printable_text};
+use crate::output::{print_message, printable, printable_text, user_labels};
 
 #[derive(Args)]
 pub(crate) struct Read {
@@ -82,7 +83,9 @@ pub(crate) async fn read(client: &MailClient, args: Read, json: bool) -> Result<
             saved: args.save.is_some().then_some(saved),
         });
     }
-    print_message(&message, args.html);
+    let folders = account_folders(client, [message.summary.account_id]).await?;
+    let labels = user_labels(&message.summary, &folders, None);
+    print_message(&message, &labels, args.html);
     for path in saved {
         println!("Saved {}", printable(&path.display().to_string()));
     }

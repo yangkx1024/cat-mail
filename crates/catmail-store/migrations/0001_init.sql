@@ -33,6 +33,9 @@ CREATE TABLE accounts (
     -- standard | gmail: which mailboxes are locations and which labels (see
     -- docs/architecture/labels.md), as found when last connected to.
     mode          TEXT    NOT NULL DEFAULT 'standard',
+    -- 1: the IMAP server is Gmail's (X-GM-EXT-1), as found when last connected to. A Gmail
+    -- server in the standard mode has All Mail hidden from IMAP in its settings.
+    gmail_server  INTEGER NOT NULL DEFAULT 0,
     created_at    INTEGER NOT NULL DEFAULT (unixepoch())
 ) STRICT;
 

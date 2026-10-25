@@ -6,9 +6,9 @@ use anyhow::{Context, Result};
 use catmail_core::{AccountId, MailClient, MessageSummary, SearchQuery};
 use clap::Args;
 
-use crate::cmd::{cursor_after, folder_names, one_account, resolve_account};
+use crate::cmd::{account_folders, cursor_after, one_account, resolve_account};
 use crate::json::{self, JsonFolder, JsonSummary};
-use crate::output::{print_folders, print_message_table, printable};
+use crate::output::{ALL_MAIL_HIDDEN, print_folders, print_message_table, printable};
 
 #[derive(Args)]
 pub(crate) struct Ls {
@@ -55,6 +55,9 @@ pub(crate) async fn ls(client: &MailClient, args: Ls, json: bool) -> Result<()> 
             println!("No folders yet. Run `catmail sync` first.");
         } else {
             print_folders(&folders);
+            if account.all_mail_hidden() {
+                println!("\n{ALL_MAIL_HIDDEN}");
+            }
         }
         return Ok(());
     };
@@ -70,7 +73,8 @@ pub(crate) async fn ls(client: &MailClient, args: Ls, json: bool) -> Result<()> 
         println!("No messages in {}.", printable(&folder.name));
         Ok(())
     } else {
-        print_message_table(&messages, None);
+        let folders = account_folders(client, [account.id]).await?;
+        print_message_table(&messages, &folders, Some(folder.id));
         Ok(())
     }
 }
@@ -99,8 +103,8 @@ pub(crate) async fn search(client: &MailClient, args: Search, json: bool) -> Res
         return Ok(());
     }
     let accounts: BTreeSet<AccountId> = messages.iter().map(|m| m.account_id).collect();
-    let folders = folder_names(client, accounts).await?;
-    print_message_table(&messages, Some(&folders));
+    let folders = account_folders(client, accounts).await?;
+    print_message_table(&messages, &folders, None);
     Ok(())
 }
 

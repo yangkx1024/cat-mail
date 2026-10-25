@@ -98,6 +98,7 @@ heroicons! {
     Stop => "outline" / "stop",
     Sun => "outline" / "sun",
     Swatch => "outline" / "swatch",
+    Tag => "outline" / "tag",
     Trash => "outline" / "trash",
     User => "outline" / "user",
     UserCircle => "outline" / "user-circle",

@@ -1,7 +1,9 @@
 //! The mailbox's commands: on the selected message (the toolbar, the menus and the keys
 //! all call these), writing, syncing and settings.
 
-use catmail_core::{Account, AccountId, Flags, FolderId, MessageId, OpKind, OpStatus, PendingOp};
+use catmail_core::{
+    Account, AccountId, AccountMode, Flags, FolderId, MessageId, OpKind, OpStatus, PendingOp,
+};
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{App, Context, Window};
@@ -212,10 +214,7 @@ impl Mailbox {
     /// The folder the listed messages are looked at in: on Gmail, a label they leave when
     /// moved. None for search results.
     fn shown_in(&self, cx: &gpui_kit::App) -> Option<FolderId> {
-        match self.place {
-            Some(Place::Folder(id)) if !self.is_searching(cx) => Some(id),
-            _ => None,
-        }
+        self.messages.read(cx).delegate().shown_folder()
     }
 
     /// Takes the message out of the list with `call`, selecting the next one once it has
@@ -304,10 +303,100 @@ impl Mailbox {
             .map(|(folder, path)| (folder.id, path))
             .collect();
         let this = cx.entity().downgrade();
-        move_to::open(folders, window, cx, move |folder, window, cx| {
+        folder_picker::open(folders, window, cx, move |folder, window, cx| {
             this.update(cx, |this, cx| this.move_selected(folder, window, cx))
                 .ok();
         });
+    }
+
+    /// Whether the selected message has labels to edit: it is in a Gmail account.
+    pub(crate) fn can_edit_labels(&self, cx: &gpui_kit::App) -> bool {
+        self.selected_message(cx)
+            .is_some_and(|message| self.labels_account(&message).is_some())
+    }
+
+    /// The message's account, if it has labels: on Gmail.
+    fn labels_account(&self, message: &catmail_core::MessageSummary) -> Option<&AccountEntry> {
+        self.account(message.account_id)
+            .filter(|a| a.account.mode == AccountMode::Gmail)
+    }
+
+    /// Opens "Labels" for the selected message, which changes them as they are picked.
+    /// It shows the message's labels as they are, and closes once the message is no
+    /// longer the one selected ([`sync_labels_dialog`](Self::sync_labels_dialog)).
+    pub(crate) fn edit_labels(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(message) = self.selected_message(cx) else {
+            return;
+        };
+        let Some(account) = self.labels_account(&message) else {
+            return;
+        };
+        let labels = account.folders.user_labels();
+        let checked = message.labels.iter().copied().collect();
+        let this = cx.entity().downgrade();
+        let id = message.id;
+        let list =
+            folder_picker::open_labels(labels, checked, window, cx, move |label, window, cx| {
+                this.update(cx, |this, cx| this.toggle_label(id, label, window, cx))
+                    .ok();
+            });
+        self.labels_dialog = Some(LabelsDialog { message: id, list });
+    }
+
+    /// Keeps "Labels" to the message it was opened for: its checks follow the message's
+    /// labels as the list has them (a change refused and undone, or made elsewhere, shows
+    /// there too), and it closes once the message is no longer selected.
+    pub(super) fn sync_labels_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = &self.labels_dialog else {
+            return;
+        };
+        let Some(list) = dialog.list.upgrade() else {
+            self.labels_dialog = None; // Closed.
+            return;
+        };
+        match self.selected_message(cx).filter(|m| m.id == dialog.message) {
+            Some(message) => list.update(cx, |list, cx| {
+                if list
+                    .delegate_mut()
+                    .set_checked(message.labels.into_iter().collect())
+                {
+                    cx.notify();
+                }
+            }),
+            None => {
+                self.labels_dialog = None;
+                window.close_dialog(cx);
+            }
+        }
+    }
+
+    /// Adds `label` to the message, the selected one, or takes it off, as it has it now.
+    fn toggle_label(
+        &mut self,
+        id: MessageId,
+        label: FolderId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(message) = self.selected_message(cx).filter(|m| m.id == id) else {
+            return;
+        };
+        let add = !message.labels.contains(&label);
+        // Off the label it is listed in, it leaves the list: on to the next one.
+        let leaves = !add && self.shown_in(cx) == Some(label);
+        let (add, remove) = if add {
+            (vec![label], Vec::new())
+        } else {
+            (Vec::new(), vec![label])
+        };
+        let call = move |client: catmail_core::MailClient| async move {
+            client.label_messages(vec![id], add, remove).await
+        };
+        if leaves {
+            self.remove(id, "change the labels", window, cx, call);
+        } else {
+            report_failure("change the labels", call(self.client.clone()), window, cx);
+        }
     }
 
     pub(crate) fn compose(
