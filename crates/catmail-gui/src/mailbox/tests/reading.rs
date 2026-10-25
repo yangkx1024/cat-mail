@@ -295,6 +295,35 @@ fn a_removal_still_waiting_doesnt_move_on_from_another_message(cx: &mut TestAppC
 }
 
 #[gpui_kit::test]
+fn an_earlier_removal_settling_leaves_a_later_one_waiting(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    let hello = click_message(cx, window, &mailbox, "你好，世界");
+    // Archived, and the rows read again to see whether it left; meanwhile, before that
+    // read is back, the user deletes it.
+    cx.update_window(window, |_, window, cx| {
+        let list = mailbox.read(cx).messages.clone();
+        list.update(cx, |list, cx| {
+            let archived = list.delegate_mut().expect_removal(hello);
+            message_list::removal_settled(list, archived, true, window, cx);
+            list.delegate_mut().expect_removal(hello);
+        });
+    })
+    .unwrap();
+    // That read still has it, which says nothing of the deletion: still waited for.
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| !mailbox.read(cx).messages.read(cx).delegate().is_loading())
+    });
+    cx.read(|cx| {
+        let list = mailbox.read(cx).messages.read(cx).delegate();
+        assert!(list.waits_for_removal());
+        assert!(find(&mailbox, "你好，世界", cx).is_some());
+    });
+}
+
+#[gpui_kit::test]
 fn shows_what_a_sync_brings_without_losing_the_selection(cx: &mut TestAppContext) {
     let mail = TestMail::start();
     let (window, mailbox) = open(cx, &mail);

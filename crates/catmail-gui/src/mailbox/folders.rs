@@ -1,6 +1,8 @@
 //! The sidebar's folder hierarchy, built from the flat list the engine stores.
 
-use catmail_core::{DeleteOutcome, Folder, FolderId, FolderRole, MovePlan, special_folder};
+use catmail_core::{
+    DeleteOutcome, Folder, FolderId, FolderRole, MessageSummary, MovePlan, special_folder,
+};
 
 use crate::assets::Hero;
 
@@ -161,9 +163,11 @@ impl AccountFolders {
         DeleteOutcome::of(&self.folders, folder)
     }
 
-    /// Whether Archive does anything to a message in `folder`.
-    pub fn can_archive(&self, folder: FolderId) -> bool {
-        MovePlan::archive(&self.folders, folder).is_some()
+    /// Whether Archive does anything to the message: on Gmail, nothing to one that isn't
+    /// in INBOX.
+    pub fn can_archive(&self, message: &MessageSummary) -> bool {
+        MovePlan::archive(&self.folders, message.folder_id)
+            .is_some_and(|plan| plan.changes(message.folder_id, &message.labels))
     }
 
     /// Whether moving a message in `folder`, looked at in `shown_in`, to `to` does

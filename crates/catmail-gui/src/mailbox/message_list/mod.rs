@@ -160,6 +160,15 @@ pub struct MessageList {
     /// The message the user moved or deleted: once it is gone while still selected, the
     /// row now at its index is selected, so the next message opens.
     removing: Option<MessageId>,
+    /// Removals asked for so far: the latest is `removing`'s. An earlier one settling
+    /// says nothing about it (the user may archive, then delete, the same message).
+    removals: u64,
+    /// Loads of the rows shown started so far (not of more pages).
+    reads: u64,
+    /// The change behind removal number `.0` is made: the rows of the read numbered `.1`
+    /// or later show it, and if the message is among them it stays (see
+    /// [`removal_settled`]).
+    settled: Option<(u64, u64)>,
     /// The name of each user label shown, of every account: a row shows those of its
     /// message's labels (see `AccountFolders::user_labels`).
     labels: HashMap<FolderId, SharedString>,
@@ -179,6 +188,9 @@ impl MessageList {
             has_more: false,
             generation: 0,
             removing: None,
+            removals: 0,
+            reads: 0,
+            settled: None,
             labels: HashMap::new(),
             _load: Task::ready(()),
         }
@@ -213,6 +225,12 @@ impl MessageList {
         &self.rows
     }
 
+    /// Whether it waits for a message the user moved to leave, to select the next one.
+    #[cfg(test)]
+    pub fn waits_for_removal(&self) -> bool {
+        self.removing.is_some()
+    }
+
     #[cfg(test)]
     pub fn is_loading(&self) -> bool {
         self.loading
@@ -242,9 +260,13 @@ impl MessageList {
         names
     }
 
-    /// Selects the next row once `id`, the selected message, goes away.
-    pub fn expect_removal(&mut self, id: MessageId) {
+    /// Selects the next row once `id`, the selected message, goes away. Returns the
+    /// removal's number, for [`removal_settled`].
+    pub fn expect_removal(&mut self, id: MessageId) -> u64 {
         self.removing = Some(id);
+        self.removals += 1;
+        self.settled = None;
+        self.removals
     }
 }
 
@@ -262,10 +284,37 @@ pub fn show(
     delegate.has_more = false;
     delegate.stale = false;
     delegate.removing = None;
+    delegate.settled = None;
     delegate.generation += 1;
     list.set_selected_index(None, window, cx);
     list.scroll_to_item(IndexPath::new(0), gpui_kit::ScrollStrategy::Top, window, cx);
     load(list, Load::Replace(PAGE), window, cx);
+}
+
+/// The change behind `removal` ([`MessageList::expect_removal`]), which may take the
+/// message out of the list, was made locally (`made`), or failed. Whether it leaves the
+/// list is the store's to say (on Gmail, a message moved to a label stays in All Mail):
+/// the rows are read again, and if they still have it, it stays selected and is no
+/// longer waited for. If it failed it stays at once. Nothing happens if a later removal
+/// has been asked for since.
+pub fn removal_settled(
+    list: &mut ListState<MessageList>,
+    removal: u64,
+    made: bool,
+    window: &mut Window,
+    cx: &mut Context<ListState<MessageList>>,
+) {
+    let delegate = list.delegate_mut();
+    if delegate.removals != removal || delegate.removing.is_none() {
+        return; // A later one, gone already, or the user moved on.
+    }
+    if !made {
+        delegate.removing = None;
+        return;
+    }
+    // A read in flight may have started before the change: the next one shows it.
+    delegate.settled = Some((removal, delegate.reads + 1));
+    refresh(list, window, cx);
 }
 
 /// Re-reads the rows already shown (after the engine reported a change), keeping the
@@ -341,6 +390,10 @@ fn load(
         Load::After(cursor) => (PAGE, Some(cursor)),
     };
     let append = after.is_some();
+    if !append {
+        delegate.reads += 1;
+    }
+    let read = delegate.reads;
     let client = delegate.client.clone();
     let generation = delegate.generation;
     delegate.loading = true;
@@ -358,6 +411,19 @@ fn load(
             let mut changed = true;
             match result {
                 Ok((rows, more)) => {
+                    if !append
+                        && let Some((removal, from)) = delegate.settled
+                        && read >= from
+                    {
+                        delegate.settled = None;
+                        // `expect_removal` drops a settlement of an earlier removal.
+                        debug_assert_eq!(removal, delegate.removals);
+                        if let Some(id) = delegate.removing
+                            && rows.iter().any(|r| r.id() == RowId::Message(id))
+                        {
+                            delegate.removing = None;
+                        }
+                    }
                     let had_more = std::mem::replace(&mut delegate.has_more, more);
                     if append {
                         // The page starts after the last row shown, whatever came or went

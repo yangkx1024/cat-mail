@@ -132,7 +132,7 @@ impl Mailbox {
         let flagged = message.flags.contains(Flags::FLAGGED);
         let has_html = self.reader.read(cx).has_html();
         let focus = self.focus_handle(cx);
-        let can_archive = self.can_archive(cx);
+        let can_archive = self.can_archive(message);
         let can_edit_labels = self.can_edit_labels(cx);
         let context = Some(actions::MAILBOX);
         layout::toolbar(cx)

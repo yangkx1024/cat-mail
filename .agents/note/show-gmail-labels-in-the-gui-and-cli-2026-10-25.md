@@ -34,6 +34,20 @@ CLI 能改标签（#128 的 `label`、`mv --from`），但同样看不到标签�
   改动）后勾选与邮件不一致，再点会做相反的事。改为点击只报告点了哪个标签，加还是去按邮件现在的标签定；
   `Mailbox` 观察列表，每次变化按这封邮件现在的标签重设勾选，它不再是选中的那封时关掉对话框
   （`sync_labels_dialog`）。考虑过让对话框跟到新选中的邮件，但用户刚为某封邮件打开它，换目标不如关掉明白。
+- **#128 留给 #129 的两处**：GUI 移动、归档、删除之后总是等邮件离开列表再打开下一封，Gmail 上不一定离开（在
+  "所有邮件"里移到标签、在 Work 里归档），一直等着，之后它真离开时会被当成"移走后打开下一封"；归档按钮在不在
+  INBOX 的邮件上也可用，点了什么都不做。
+  - 离开与否最初在 types 里预测（`MovePlan::apply` 加一个按存储规则判断文件夹列不列邮件的 `lists`），GUI 只在
+    会离开时等。/simplify 的评审指出这是把存储的三条列表查询在 Rust 里抄了一份，没有测试把两者绑在一起，以后
+    加一种列表就会悄悄失效。改为不预测：引擎调用返回时本地改动已经提交，`message_list::removal_settled` 让
+    列表再读一次，这一次（按读取的序号，之前在途的可能早于改动）里邮件还在就不再等。存储仍是唯一决定列表
+    内容的地方，搜索、删除、标签对话框都不用特判。codex 评审又指出这里只按邮件 id 认：在 Work 里归档、
+    归档那次的再读还在途时又删除同一封，那次读到它还在，就把删除的等待也取消了，删除后读信区清空而不是
+    打开下一封。改为每次 `expect_removal` 返回一个编号，`removal_settled` 和再读只认最近一次的
+    （`an_earlier_removal_settling_leaves_a_later_one_waiting`，修复前失败）。
+  - 归档按钮按 `MovePlan::changes` 判断归档对这封邮件有没有作用（不分配内存）。store 的 `archive_messages`
+    不用改：去掉邮件没有的 `\Inbox` 本来就不入队；评审建议让 `MovePlan::archive` 带上邮件的标签，那要多一次
+    查询，没做。
 - **"所有邮件"隐藏**：账户上记下服务器是不是 Gmail（`accounts.gmail_server`，对账文件夹时按 `X-GM-EXT-1` 写入），
   "隐藏"由它和模式推出（`Account::all_mail_hidden()`：Gmail 服务器、普通模式）。最初直接存了 `all_mail_hidden`，
   评审指出它只在普通模式下有意义、能表达"Gmail 模式却隐藏"这种不可能的状态；也考虑过给 `AccountMode` 加第三个
@@ -67,6 +81,6 @@ CLI 能改标签（#128 的 `label`、`mv --from`），但同样看不到标签�
   `accounts` 的 `gmail_server`；core `tests/gmail.rs` 隐藏 / 恢复"所有邮件"时的 `gmail_server` 与 `all_mail_hidden()`；GUI 的
   `folders` 单元测试（Gmail 的分节、`[Gmail]` 去掉、隐藏的标签不列）；`tests/labels.rs` 用假 Gmail 服务器驱动
   窗口：侧栏分节与邮件的标签、对话框加 / 去标签并回放到服务器、在标签里去掉它后打开下一封、隐藏"所有邮件"
-  时的说明且没有标签按钮、去掉当前标签后对话框随邮件关掉、被拒绝的改动撤销后勾选也撤销（后两者在修复前
-  失败）；CLI 的 `folders_tell_labels_apart_and_leave_hidden_ones_out`、
+  时的说明且没有标签按钮、不在 INBOX 的邮件不能归档、移动或归档后仍在列表里的不等它离开、去掉当前标签后对话框随邮件关掉、被拒绝的改动撤销后勾选也撤销（这几项在修复前
+  失败）；types 的 `a_plan_changes_a_message_only_if_it_differs`；CLI 的 `folders_tell_labels_apart_and_leave_hidden_ones_out`、
   `messages_show_their_user_labels` 和 JSON 快照（`folder_snapshot`，`message_snapshot` 带上标签）；截图（`gmail`、`gmail-labels`、`gmail-all-mail-hidden`）人工看过。

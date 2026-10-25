@@ -2,7 +2,8 @@
 //! all call these), writing, syncing and settings.
 
 use catmail_core::{
-    Account, AccountId, AccountMode, Flags, FolderId, MessageId, OpKind, OpStatus, PendingOp,
+    Account, AccountId, AccountMode, Flags, FolderId, MessageId, MessageSummary, OpKind, OpStatus,
+    PendingOp,
 };
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
@@ -121,10 +122,7 @@ impl Mailbox {
 
     // Commands on the selected message.
 
-    pub(super) fn selected_message(
-        &self,
-        cx: &gpui_kit::App,
-    ) -> Option<catmail_core::MessageSummary> {
+    pub(super) fn selected_message(&self, cx: &gpui_kit::App) -> Option<MessageSummary> {
         self.messages
             .read(cx)
             .delegate()
@@ -162,53 +160,47 @@ impl Mailbox {
         self.set_flags(vec![message.id], add, remove, window, cx);
     }
 
-    /// Whether Archive does anything to the selected message: its account has an
-    /// Archive folder it isn't in, or on Gmail it is in All Mail.
-    pub(crate) fn can_archive(&self, cx: &gpui_kit::App) -> bool {
-        self.selected_message(cx)
-            .is_some_and(|message| self.archives(&message))
-    }
-
-    fn archives(&self, message: &catmail_core::MessageSummary) -> bool {
+    /// Whether Archive does anything to `message`: its account has an Archive folder it
+    /// isn't in, or on Gmail it is in INBOX and All Mail.
+    pub(crate) fn can_archive(&self, message: &MessageSummary) -> bool {
         self.account(message.account_id)
-            .is_some_and(|a| a.folders.can_archive(message.folder_id))
+            .is_some_and(|a| a.folders.can_archive(message))
     }
 
     pub(crate) fn archive(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(message) = self.selected_message(cx)
-            && self.archives(&message)
-        {
-            self.remove(
-                message.id,
-                "archive the message",
-                window,
-                cx,
-                move |client| async move { client.archive_messages(vec![message.id]).await },
-            );
+        let Some(message) = self.selected_message(cx) else {
+            return;
+        };
+        if !self.can_archive(&message) {
+            return;
         }
+        self.change(
+            message.id,
+            "archive the message",
+            window,
+            cx,
+            move |client| async move { client.archive_messages(vec![message.id]).await },
+        );
     }
 
-    /// Moves the selected message, and selects the next one once it has gone.
+    /// Moves the selected message, and selects the next one once it has gone, if it goes.
     pub(crate) fn move_selected(
         &mut self,
         to: FolderId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(message) = self.selected_message(cx) {
-            let shown_in = self.shown_in(cx);
-            self.remove(
-                message.id,
-                "move the message",
-                window,
-                cx,
-                move |client| async move {
-                    client
-                        .move_messages(vec![message.id], shown_in, to)
-                        .await
-                },
-            );
-        }
+        let Some(message) = self.selected_message(cx) else {
+            return;
+        };
+        let shown_in = self.shown_in(cx);
+        self.change(
+            message.id,
+            "move the message",
+            window,
+            cx,
+            move |client| async move { client.move_messages(vec![message.id], shown_in, to).await },
+        );
     }
 
     /// The folder the listed messages are looked at in: on Gmail, a label they leave when
@@ -217,9 +209,11 @@ impl Mailbox {
         self.messages.read(cx).delegate().shown_folder()
     }
 
-    /// Takes the message out of the list with `call`, selecting the next one once it has
-    /// gone.
-    fn remove<F: Future<Output = catmail_core::Result<Vec<AccountId>>> + 'static>(
+    /// Changes the message with `call`, which may take it out of the list: if it goes,
+    /// the next one is selected. Whether it goes is the store's to say (on Gmail, one moved
+    /// to a label from All Mail stays): once the change is made, the list is read again,
+    /// and a message still in it stays selected (see `message_list::removal_settled`).
+    fn change<F: Future<Output = catmail_core::Result<Vec<AccountId>>> + 'static>(
         &mut self,
         id: MessageId,
         what: &'static str,
@@ -227,9 +221,26 @@ impl Mailbox {
         cx: &mut Context<Self>,
         call: impl FnOnce(catmail_core::MailClient) -> F,
     ) {
-        self.messages
+        let removal = self
+            .messages
             .update(cx, |list, _| list.delegate_mut().expect_removal(id));
-        report_failure(what, call(self.client.clone()), window, cx);
+        let call = call(self.client.clone());
+        cx.spawn_in(window, async move |this, cx| {
+            let result = call.await;
+            this.update_in(cx, |this, window, cx| {
+                if let Err(e) = &result {
+                    window.push_notification(
+                        Notification::error(format!("Couldn't {what}: {e}")),
+                        cx,
+                    );
+                }
+                this.messages.update(cx, |list, cx| {
+                    message_list::removal_settled(list, removal, result.is_ok(), window, cx)
+                });
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// To Trash, or for good from Trash or without one, as the engine will
@@ -274,7 +285,7 @@ impl Mailbox {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.remove(
+        self.change(
             id,
             "delete the message",
             window,
@@ -316,7 +327,7 @@ impl Mailbox {
     }
 
     /// The message's account, if it has labels: on Gmail.
-    fn labels_account(&self, message: &catmail_core::MessageSummary) -> Option<&AccountEntry> {
+    fn labels_account(&self, message: &MessageSummary) -> Option<&AccountEntry> {
         self.account(message.account_id)
             .filter(|a| a.account.mode == AccountMode::Gmail)
     }
@@ -381,22 +392,19 @@ impl Mailbox {
         let Some(message) = self.selected_message(cx).filter(|m| m.id == id) else {
             return;
         };
-        let add = !message.labels.contains(&label);
-        // Off the label it is listed in, it leaves the list: on to the next one.
-        let leaves = !add && self.shown_in(cx) == Some(label);
-        let (add, remove) = if add {
-            (vec![label], Vec::new())
-        } else {
+        let (add, remove) = if message.labels.contains(&label) {
             (Vec::new(), vec![label])
-        };
-        let call = move |client: catmail_core::MailClient| async move {
-            client.label_messages(vec![id], add, remove).await
-        };
-        if leaves {
-            self.remove(id, "change the labels", window, cx, call);
         } else {
-            report_failure("change the labels", call(self.client.clone()), window, cx);
-        }
+            (vec![label], Vec::new())
+        };
+        // Off the label it is listed in, it leaves the list: on to the next one.
+        self.change(
+            id,
+            "change the labels",
+            window,
+            cx,
+            move |client| async move { client.label_messages(vec![id], add, remove).await },
+        );
     }
 
     pub(crate) fn compose(

@@ -210,3 +210,79 @@ fn with_all_mail_hidden_labels_are_folders_and_the_user_is_told(cx: &mut TestApp
     click_message(cx, window, &mailbox, "Plan");
     assert!(!shown(cx, window, "labels"), "no labels to edit");
 }
+
+#[gpui_kit::test]
+fn archive_is_for_what_is_in_the_inbox(cx: &mut TestAppContext) {
+    let mail = TestMail::start_gmail();
+    let (window, mailbox) = open_gmail(cx, &mail);
+    select_folder(cx, window, &mailbox, folder_id(&mail, "[Gmail]/All Mail"));
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| subjects(&mailbox, cx) == ["Plan", "Trip", "Notes"])
+    });
+    click_message(cx, window, &mailbox, "Plan");
+    let can_archive = |cx: &mut TestAppContext| {
+        cx.read(|cx| {
+            let mailbox = mailbox.read(cx);
+            mailbox.can_archive(&mailbox.selected_message(cx).unwrap())
+        })
+    };
+    assert!(can_archive(cx));
+    // Not in INBOX: archiving it would do nothing.
+    click_message(cx, window, &mailbox, "Trip");
+    assert!(!can_archive(cx));
+}
+
+/// What a move leaves where it is stays selected: the list doesn't wait for it to go.
+#[gpui_kit::test]
+fn a_message_still_listed_after_a_move_stays_selected(cx: &mut TestAppContext) {
+    let mail = TestMail::start_gmail();
+    let (window, mailbox) = open_gmail(cx, &mail);
+    let (work, personal) = (folder_id(&mail, "Work"), folder_id(&mail, "Personal"));
+    let inbox = folder_id(&mail, "INBOX");
+    let waits = |cx: &App| {
+        mailbox
+            .read(cx)
+            .messages
+            .read(cx)
+            .delegate()
+            .waits_for_removal()
+    };
+
+    // In Work, archived: out of INBOX, still in Work.
+    select_folder(cx, window, &mailbox, work);
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| subjects(&mailbox, cx) == ["Plan", "Trip"])
+    });
+    let plan = click_message(cx, window, &mailbox, "Plan");
+    cx.update_window(window, |_, window, cx| window.press("e", cx))
+        .unwrap();
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| {
+            find(&mailbox, "Plan", cx).is_some_and(|m| !m.labels.contains(&inbox)) && !waits(cx)
+        })
+    });
+
+    // In All Mail, moved to Personal: a label more, still in All Mail.
+    select_folder(cx, window, &mailbox, folder_id(&mail, "[Gmail]/All Mail"));
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| subjects(&mailbox, cx).len() == 3)
+    });
+    click_message(cx, window, &mailbox, "Plan");
+    cx.update_window(window, |_, window, cx| {
+        mailbox.update(cx, |mailbox, cx| {
+            mailbox.move_selected(personal, window, cx)
+        })
+    })
+    .unwrap();
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| {
+            find(&mailbox, "Plan", cx).is_some_and(|m| m.labels.contains(&personal)) && !waits(cx)
+        })
+    });
+    cx.read(|cx| assert_eq!(shown_in_reader(&mailbox, cx), Some(plan)));
+}
