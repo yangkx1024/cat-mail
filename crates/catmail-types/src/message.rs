@@ -148,7 +148,6 @@ impl GmailLabel {
 }
 
 /// What a message list row needs; bodies and attachments are loaded separately.
-/// Describes the message as it is in `folder_id`; `flags` are that copy's flags.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageSummary {
     pub id: MessageId,
@@ -161,6 +160,9 @@ pub struct MessageSummary {
     pub snippet: Option<String>,
     pub flags: Flags,
     pub has_attachments: bool,
+    /// On Gmail, the label folders it has (unlisted ones too, Starred never: that is
+    /// `\Flagged`), in no particular order. Empty on a standard account.
+    pub labels: Vec<FolderId>,
 }
 
 impl MessageSummary {

@@ -116,8 +116,19 @@ pub struct Account {
     pub imap: ServerConfig,
     /// As found when last connected to; standard until then.
     pub mode: AccountMode,
+    /// The server is Gmail's (X-GM-EXT-1), as found when last connected to; false until
+    /// then. Not the same as the Gmail mode, which also needs All Mail listed.
+    pub gmail_server: bool,
     /// Unix timestamp, seconds.
     pub created_at: i64,
+}
+
+impl Account {
+    /// A Gmail server with All Mail hidden from IMAP in Gmail's settings: the account is
+    /// synced as a standard one, each label a folder, until it is shown again.
+    pub fn all_mail_hidden(&self) -> bool {
+        self.gmail_server && self.mode == AccountMode::Standard
+    }
 }
 
 /// Input for creating an account. `smtp` makes its first identity: its own address,

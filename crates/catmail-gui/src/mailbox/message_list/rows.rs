@@ -61,7 +61,11 @@ fn snippet(text: Option<&str>, cx: &App) -> impl IntoElement + use<> {
         .child(text)
 }
 
-pub(super) fn message_row(message: &MessageSummary, cx: &App) -> ListItem {
+/// The most labels a row shows by name; the rest are counted.
+const ROW_LABELS: usize = 2;
+
+/// `labels` are the names of the message's labels to show.
+pub(super) fn message_row(message: &MessageSummary, labels: &[SharedString], cx: &App) -> ListItem {
     let unread = !message.flags.contains(Flags::SEEN);
     let flagged = message.flags.contains(Flags::FLAGGED);
     let sender = format::sender(&message.from);
@@ -69,7 +73,7 @@ pub(super) fn message_row(message: &MessageSummary, cx: &App) -> ListItem {
     let date = format::time(message.date);
     let muted = cx.theme().muted_foreground;
     let label = format!(
-        "{sender}, {subject}, {date}{}{}{}",
+        "{sender}, {subject}, {date}{}{}{}{}",
         if unread { ", unread" } else { "" },
         if flagged { ", flagged" } else { "" },
         if message.has_attachments {
@@ -77,7 +81,14 @@ pub(super) fn message_row(message: &MessageSummary, cx: &App) -> ListItem {
         } else {
             ""
         },
+        if labels.is_empty() {
+            String::new()
+        } else {
+            format!(", labels {}", labels.join(", "))
+        },
     );
+    let more = labels.len().saturating_sub(ROW_LABELS);
+    let neutral = cx.theme().neutral_badge();
     let middle = h_flex()
         .gap_1p5()
         .child(
@@ -90,6 +101,21 @@ pub(super) fn message_row(message: &MessageSummary, cx: &App) -> ListItem {
                 .when(unread, |this| this.font_weight(FontWeight::BOLD))
                 .child(subject),
         )
+        .children(labels.iter().take(ROW_LABELS).map(|name| {
+            crate::layout::badge(name.clone(), neutral, cx)
+                .min_w_0()
+                .max_w_24()
+                .truncate()
+        }))
+        .when(more > 0, |this| {
+            this.child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(format!("+{more}")),
+            )
+        })
         .when(message.has_attachments, |this| {
             this.child(Icon::new(Hero::PaperClip).xsmall().text_color(muted))
         })
@@ -167,7 +193,7 @@ pub(super) fn outbox_row(entry: &OutboxEntry, cx: &App) -> ListItem {
     let (bg, fg) = match severity {
         Some(Severity::Warning) => theme.warning_badge(),
         Some(Severity::Danger) => theme.danger_badge(),
-        None => (theme.muted, theme.muted_foreground),
+        None => theme.neutral_badge(),
     };
     let badge = h_flex().child(crate::layout::badge(status, (bg, fg), cx));
     ListItem::new(("outbox", entry.id.0 as u64))

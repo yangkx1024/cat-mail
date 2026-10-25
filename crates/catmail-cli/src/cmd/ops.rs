@@ -8,7 +8,7 @@ use anyhow::Result;
 use catmail_core::{AccountId, Flags, FolderId, MailClient, MessageId, PendingOpId, ReplayReport};
 use clap::{ArgGroup, Args, Subcommand};
 
-use crate::cmd::folder_names;
+use crate::cmd::account_folders;
 use crate::exit::{Exit, Outcome};
 use crate::json::{self, JsonPendingOp, JsonReplay};
 use crate::output::print_ops;
@@ -179,7 +179,7 @@ pub(crate) async fn ops(client: &MailClient, cmd: OpsCommand, json: bool) -> Res
                 json::print_list::<JsonPendingOp, _>("ops", &ops)?;
             } else {
                 let accounts: BTreeSet<AccountId> = ops.iter().map(|op| op.account_id).collect();
-                print_ops(&ops, &folder_names(client, accounts).await?);
+                print_ops(&ops, &account_folders(client, accounts).await?);
             }
             Ok(())
         }

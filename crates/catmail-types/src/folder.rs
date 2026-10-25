@@ -136,6 +136,14 @@ impl Folder {
     pub fn is_label(&self) -> bool {
         self.kind == FolderKind::Label && self.role != Some(FolderRole::Flagged)
     }
+
+    /// Whether it is a Gmail label of the user's that frontends show, on its messages and
+    /// apart from the folders. The system labels (INBOX, Sent, Drafts, Important) have a
+    /// role: they are where a message is listed, not what it is about. One hidden from
+    /// IMAP in Gmail's settings isn't shown anywhere.
+    pub fn is_user_label(&self) -> bool {
+        self.kind == FolderKind::Label && self.role.is_none() && self.listed
+    }
 }
 
 /// The folder the engine uses for `role` among an account's folders: where Delete moves
@@ -282,6 +290,14 @@ impl MovePlan {
 
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// Whether it changes a message in location `from` with `labels`: archiving one that
+    /// isn't in INBOX doesn't.
+    pub fn changes(&self, from: FolderId, labels: &[FolderId]) -> bool {
+        self.to.is_some_and(|to| to != from)
+            || self.remove.iter().any(|l| labels.contains(l))
+            || self.add.is_some_and(|l| !labels.contains(&l))
     }
 }
 
@@ -480,6 +496,23 @@ mod tests {
         assert_eq!(MovePlan::archive(&folders, FolderId(6)), None);
         assert_eq!(MovePlan::archive(&folders, FolderId(7)), None);
         assert!(MovePlan::can_archive(&folders));
+    }
+
+    #[test]
+    fn a_plan_changes_a_message_only_if_it_differs() {
+        let folders = gmail();
+        let ids = |ids: &[i64]| ids.iter().copied().map(FolderId).collect::<Vec<_>>();
+        let all_mail = FolderId(5);
+        // Archiving takes INBOX off what has it, and does nothing to the rest.
+        let archive = MovePlan::archive(&folders, all_mail).unwrap();
+        assert!(archive.changes(all_mail, &ids(&[1, 2])));
+        assert!(!archive.changes(all_mail, &ids(&[2])));
+        // A label added that it has, a move to where it is: nothing.
+        let work = MovePlan::of(&folders, all_mail, None, FolderId(2)).unwrap();
+        assert!(!work.changes(all_mail, &ids(&[2])));
+        assert!(work.changes(all_mail, &ids(&[1])));
+        assert!(!moves_to(5).changes(all_mail, &[]));
+        assert!(moves_to(6).changes(all_mail, &[]));
     }
 
     #[test]

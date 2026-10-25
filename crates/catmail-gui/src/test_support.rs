@@ -63,23 +63,48 @@ impl TestMail {
     /// [`start`](Self::start), with only these folders besides INBOX.
     pub fn start_with_folders(folders: &[(&str, &str)]) -> Self {
         let mut mail = Self::with_folders(folders);
+        mail.add_account("alice@example.com");
+        mail
+    }
+
+    /// A Gmail account (`alice@gmail.com`), synced. In All Mail: "Plan" in INBOX and
+    /// Work, "Trip" with Work and Personal, "Notes" with none.
+    pub fn start_gmail() -> Self {
+        let mut state = ServerState::gmail("alice", "pw");
+        state
+            .mailboxes
+            .extend([FakeMailbox::new("Personal"), FakeMailbox::new("Work")]);
+        let all = state.all_mail();
+        for (subject, labels) in [
+            ("Notes", &[][..]),
+            ("Trip", &["Work", "Personal"]),
+            ("Plan", &["\\Inbox", "Work"]),
+        ] {
+            let uid = all.append_simple(subject);
+            all.set_labels(uid, labels);
+        }
+        let mut mail = Self::with_state(state);
+        mail.add_account("alice@gmail.com");
+        mail
+    }
+
+    fn add_account(&mut self, email: &str) {
         let new = NewAccount {
-            email: "alice@example.com".into(),
+            email: email.into(),
             display_name: None,
             username: "alice".into(),
-            imap: mail.server(),
-            smtp: mail.smtp_server(),
+            imap: self.server(),
+            smtp: self.smtp_server(),
         };
-        mail.account = Some(pollster::block_on(async {
-            let account = mail
+        self.account = Some(pollster::block_on(async {
+            let account = self
                 .client
                 .add_account(new, "pw".into(), Verify::Skip)
                 .await
                 .unwrap();
-            mail.client.sync_account(account.id).await.unwrap();
+            self.client.sync_account(account.id).await.unwrap();
             account.id
         }));
-        mail
     }
 
     /// The server (user `alice`, password `pw`) and a client with no accounts.
@@ -88,11 +113,6 @@ impl TestMail {
     }
 
     fn with_folders(folders: &[(&str, &str)]) -> Self {
-        let server_runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
-            .unwrap();
         let mut state = ServerState::new("alice", "pw");
         for (raw, flags) in FIXTURES {
             state.inbox().append(raw, flags);
@@ -102,6 +122,15 @@ impl TestMail {
                 .mailboxes
                 .push(FakeMailbox::new(name).with_attribute(attribute));
         }
+        Self::with_state(state)
+    }
+
+    fn with_state(state: ServerState) -> Self {
+        let server_runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
         let fake = server_runtime.block_on(FakeImap::start(state));
         let smtp = server_runtime.block_on(FakeSmtp::start(SmtpState::new("alice", "pw")));
         let dir = tempfile::tempdir().unwrap();
@@ -158,6 +187,28 @@ impl TestMail {
     pub fn server_flags(&self, mailbox: &str, uid: u32) -> Vec<String> {
         let mut state = self.fake.state();
         state.mailbox_mut(mailbox).message_mut(uid).flags.clone()
+    }
+
+    /// The Gmail labels of the message with `subject` in All Mail, on the server, in wire
+    /// form (`\\Inbox`, `Work`).
+    pub fn server_labels(&self, subject: &str) -> Vec<String> {
+        let mut state = self.fake.state();
+        let all = state.all_mail();
+        let msg = all
+            .messages
+            .iter()
+            .find(|m| String::from_utf8_lossy(&m.raw).contains(&format!("Subject: {subject}\r\n")))
+            .expect("in All Mail");
+        msg.labels.clone()
+    }
+
+    /// Hides All Mail from IMAP, as Gmail's settings can, and syncs.
+    pub fn hide_all_mail_and_sync(&self) {
+        self.fake
+            .state()
+            .mailboxes
+            .retain(|m| m.name != "[Gmail]/All Mail");
+        pollster::block_on(self.client.sync_account(self.account.unwrap())).unwrap();
     }
 
     /// The UIDs in a mailbox on the server.

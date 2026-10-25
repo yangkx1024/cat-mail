@@ -319,11 +319,15 @@ impl<'c> PendingOps<'c> {
                     }
                 }
             }
+            let mut changed = false;
             for &label in remove {
-                self.label_one(&m, m.folder, label, false, now, &mut touched)?;
+                changed |= self.label_one(&m, m.folder, label, false, now, &mut touched)?;
             }
             for &label in add {
-                self.label_one(&m, m.folder, label, true, now, &mut touched)?;
+                changed |= self.label_one(&m, m.folder, label, true, now, &mut touched)?;
+            }
+            if changed {
+                self.touch_shown(m.id, false, &mut touched)?;
             }
         }
         Ok(touched)
@@ -336,17 +340,24 @@ impl<'c> PendingOps<'c> {
             self.move_one(m, to, now, touched)?;
         }
         let folder = plan.to.unwrap_or(m.folder);
+        let mut changed = false;
         for label in plan.remove {
-            self.label_one(m, folder, label, false, now, touched)?;
+            changed |= self.label_one(m, folder, label, false, now, touched)?;
         }
         if let Some(label) = plan.add {
-            self.label_one(m, folder, label, true, now, touched)?;
+            changed |= self.label_one(m, folder, label, true, now, touched)?;
+        }
+        // A move noted them already.
+        if changed && plan.to.is_none() {
+            self.touch_shown(m.id, false, touched)?;
         }
         Ok(())
     }
 
     /// Adds `label` to the message, now in `folder`, or takes it off, and queues that if it
-    /// changed. The op goes where the server has the message; made after a move of it
+    /// changed; returns whether it did. The caller notes the other labels that list the
+    /// message ([`touch_shown`](Self::touch_shown)), once for all its changes. The op goes
+    /// where the server has the message; made after a move of it
     /// (`m` is as it was before), it waits for the move and follows it (see `pending`).
     fn label_one(
         &self,
@@ -356,14 +367,15 @@ impl<'c> PendingOps<'c> {
         add: bool,
         now: i64,
         touched: &mut Touched,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if !self.set_label(m.id, label, add)? {
-            return Ok(());
+            return Ok(false);
         }
         touched
             .folders
             .extend([(m.account, label), (m.account, folder)]);
-        self.queue(m, OpKind::Label { label, add }, now)
+        self.queue(m, OpKind::Label { label, add }, now)?;
+        Ok(true)
     }
 
     /// Adds `label` to message `row` or takes it off. Returns whether that changed it.
@@ -908,6 +920,7 @@ impl<'c> PendingOps<'c> {
                     touched
                         .folders
                         .extend(self.unwind_label(row, label, op.id)?);
+                    self.touch_shown(row, false, &mut touched)?;
                 }
                 ReplayKind::Move { .. } => {
                     touched.merge(self.restore(row, folder, op.uid)?);
@@ -2166,11 +2179,13 @@ mod tests {
                 .move_messages(&[m1], Some(f["INBOX"]), f["Work"], 0)
         });
         let account = g.account;
+        // Important lists it too, with its labels.
         assert_eq!(
             touched,
             Touched::from([
                 (account, f["INBOX"]),
                 (account, f["Work"]),
+                (account, f["Important"]),
                 (account, f["All Mail"])
             ])
         );
@@ -2220,6 +2235,30 @@ mod tests {
                 (1, OpKind::Move { to: f["Trash"] }),
             ]
         );
+    }
+
+    #[test]
+    fn a_label_change_shows_in_every_label_listing_the_message() {
+        let g = gmail();
+        let (m1, f) = (g.message(1), &g.f);
+        // The message is listed in INBOX and Important, with its labels: they change.
+        let touched = g.write(|db| db.ops().label_messages(&[m1], &[f["Work"]], &[], 0));
+        let account = g.account;
+        assert_eq!(
+            touched,
+            Touched::from([
+                (account, f["INBOX"]),
+                (account, f["Work"]),
+                (account, f["Important"]),
+                (account, f["All Mail"])
+            ])
+        );
+        // So does undoing it.
+        let ops = g.replay_ops("All Mail");
+        let touched = g.write(|db| db.ops().failed(f["All Mail"], &ops, "NO"));
+        for label in ["INBOX", "Work", "Important"] {
+            assert!(touched.folders.contains(&(account, f[label])), "{label}");
+        }
     }
 
     #[test]

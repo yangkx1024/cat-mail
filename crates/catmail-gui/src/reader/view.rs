@@ -251,11 +251,25 @@ impl Reader {
                 .into_any_element(),
         };
 
+        let neutral = theme.neutral_badge();
+        let title = v_flex()
+            .gap_2()
+            .child(layout::page_title(open.subject.clone()))
+            .when(!self.labels.is_empty(), |this| {
+                this.child(
+                    h_flex().flex_wrap().gap_1().children(
+                        self.labels
+                            .iter()
+                            .map(|name| layout::badge(name.clone(), neutral, cx)),
+                    ),
+                )
+            });
+
         layout::page(
             ("message", id.0 as u64),
             v_flex()
                 .gap_4()
-                .child(layout::page_title(open.subject.clone()))
+                .child(title)
                 .child(sender)
                 .children(details)
                 .children(attachments)

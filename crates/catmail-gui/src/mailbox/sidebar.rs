@@ -1,23 +1,34 @@
 //! The mailbox's left pane: "New message", each account's places, and at the bottom
 //! Settings, the connection state and Sync.
 
-use catmail_core::{ErrorKind, FolderRole};
+use catmail_core::{AccountId, ErrorKind, FolderRole};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::sidebar::{Sidebar, SidebarItem, SidebarMenu, SidebarMenuItem};
+use gpui_kit::component::sidebar::{
+    Sidebar, SidebarGroup, SidebarItem, SidebarMenu, SidebarMenuItem,
+};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Collapsible, Disableable as _, Icon, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::{
     App, Context, ElementId, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    prelude::FluentBuilder as _,
+    Role, SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window,
+    div, prelude::FluentBuilder as _,
 };
 
-use super::folders::{FolderNode, RoleInfo};
+use super::folders::{self, FolderNode, RoleInfo};
 use super::{AccountEntry, Mailbox, Place};
 use crate::actions::{self, NewMessage, OpenSettings, Sync};
 use crate::assets::Hero;
+
+/// Why a Gmail account's labels are folders, and how to have labels again.
+const ALL_MAIL_HIDDEN: &str = "Labels show as folders because All Mail is hidden from \
+    IMAP. Turn on “Show in IMAP” for it in Gmail’s settings.";
+
+/// The element id of the note under an account's address.
+pub(super) fn account_note(account: AccountId) -> ElementId {
+    ("account-note", account.0 as u64).into()
+}
 
 /// A count at the end of a row; nothing for zero.
 fn count(
@@ -94,10 +105,23 @@ impl Mailbox {
             .w_full()
             .header(header)
             .footer(footer)
-            .children(accounts.iter().map(|entry| AccountGroup {
-                email: entry.account.email.clone().into(),
-                items: self.account_items(entry, cx),
-                collapsed: false,
+            .children(accounts.iter().map(|entry| {
+                AccountGroup {
+                    account: entry.account.id,
+                    email: entry.account.email.clone().into(),
+                    note: entry
+                        .account
+                        .all_mail_hidden()
+                        .then_some(ALL_MAIL_HIDDEN.into()),
+                    items: self.account_items(entry, cx),
+                    labels: entry
+                        .folders
+                        .labels
+                        .iter()
+                        .map(|node| self.folder_item(node, cx))
+                        .collect(),
+                    collapsed: false,
+                }
             }))
     }
 
@@ -129,7 +153,8 @@ impl Mailbox {
         })
     }
 
-    /// Folders with a role first, the drafts and outbox after the inbox, then the rest.
+    /// Folders with a role first, the drafts and outbox after the inbox, then the rest
+    /// of the folders; not the labels, which have a section of their own.
     fn account_items(&self, entry: &AccountEntry, cx: &mut Context<Self>) -> Vec<SidebarMenuItem> {
         let account = entry.account.id;
         let mut items: Vec<SidebarMenuItem> = Vec::new();
@@ -199,9 +224,8 @@ impl Mailbox {
     }
 
     fn folder_item(&self, node: &FolderNode, cx: &mut Context<Self>) -> SidebarMenuItem {
-        let role = node.role();
         let mut item = SidebarMenuItem::new(node.label.clone())
-            .icon(Icon::new(RoleInfo::icon(role)))
+            .icon(Icon::new(folders::icon(node.folder.as_ref())))
             .default_open(true)
             .children(
                 node.children
@@ -225,13 +249,17 @@ impl Mailbox {
     }
 }
 
-/// An account's places under its address. `SidebarGroup` would do, but draws its label
-/// small and faint, as for a section; the address names whose mail this is, so it is a
-/// heading.
+/// An account's places under its address, its labels in a section after them.
+/// `SidebarGroup` would do, but draws its label small and faint, as for a section; the
+/// address names whose mail this is, so it is a heading.
 #[derive(Clone)]
 struct AccountGroup {
+    account: AccountId,
     email: SharedString,
+    /// Something about the account to put right, under its address.
+    note: Option<SharedString>,
     items: Vec<SidebarMenuItem>,
+    labels: Vec<SidebarMenuItem>,
     collapsed: bool,
 }
 
@@ -268,6 +296,18 @@ impl SidebarItem for AccountGroup {
                         .truncate()
                         .child(self.email),
                 )
+                .children(self.note.map(|note| {
+                    div()
+                        .id(account_note(self.account))
+                        .role(Role::Note)
+                        .test_support()
+                        .aria_label(note.clone())
+                        .px_2()
+                        .pb_2()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(note)
+                }))
             })
             // The id SidebarGroup gives its first child, so the items keep theirs.
             .child(
@@ -276,5 +316,13 @@ impl SidebarItem for AccountGroup {
                     .collapsed(self.collapsed)
                     .render(format!("{id}-0"), window, cx),
             )
+            .when(!self.labels.is_empty(), |this| {
+                this.child(
+                    SidebarGroup::new("Labels")
+                        .child(SidebarMenu::new().children(self.labels))
+                        .collapsed(self.collapsed)
+                        .render(format!("{id}-labels"), window, cx),
+                )
+            })
     }
 }

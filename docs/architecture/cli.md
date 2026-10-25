@@ -33,6 +33,19 @@ types 加变体会编译失败）。
   `saved`（实际写入的路径）；`catmail watch --json` 每行一个对象，用 `event` 区分类型。
 - `json.rs` 的快照测试固定了邮件、草稿、outbox 条目、改动和事件的完整结构；它失败说明输出变了。
 
+## Gmail 的标签
+
+与 GUI 同一套规则（见[位置与标签 / 界面](labels.md#界面)），用户标签由 `Folder::is_user_label` 判断：
+
+- `ls` 列文件夹时，账户有标签就多一列 KIND（`folder` / `label`）；在 IMAP 中隐藏的标签（`listed = 0`）不列，
+  但仍能按名字 `ls`、`label`。"所有邮件"在 IMAP 中隐藏时，表格下面和 `sync` 的报告里说明怎样恢复。
+- `ls` / `search` 的邮件表格，有邮件带用户标签时多一列 LABELS（`ls` 不列正在看的那个标签）；`read` 多一行
+  `Labels:`。
+- 改标签：`catmail label <ids> --add Work --remove INBOX`；`mv --from <标签>` 是从哪个标签移走（缺省是邮件的
+  位置）。
+- `--json` 只增加字段：文件夹的 `kind`、`listed`，邮件的 `labels`（标签文件夹的 id，系统标签也在内），账户的
+  `mode`、`gmail_server`、`all_mail_hidden`，`sync` 每个账户的 `all_mail_hidden`。
+
 ## 退出码
 
 | 码 | 含义 |

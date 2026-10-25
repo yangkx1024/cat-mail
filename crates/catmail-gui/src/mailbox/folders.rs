@@ -1,6 +1,8 @@
 //! The sidebar's folder hierarchy, built from the flat list the engine stores.
 
-use catmail_core::{DeleteOutcome, Folder, FolderId, FolderRole, MovePlan, special_folder};
+use catmail_core::{
+    DeleteOutcome, Folder, FolderId, FolderRole, MessageSummary, MovePlan, special_folder,
+};
 
 use crate::assets::Hero;
 
@@ -29,10 +31,16 @@ impl RoleInfo {
         };
         Self { icon, order }
     }
+}
 
-    /// The icon of a folder with `role`, or of an ordinary one.
-    pub fn icon(role: Option<FolderRole>) -> Hero {
-        role.map_or(Hero::Folder, |role| Self::of(role).icon)
+/// The icon of a folder, a label or a hierarchy level the server didn't list (`None`).
+pub fn icon(folder: Option<&Folder>) -> Hero {
+    match folder {
+        Some(folder) if folder.is_user_label() => Hero::Tag,
+        Some(Folder {
+            role: Some(role), ..
+        }) => RoleInfo::of(*role).icon,
+        _ => Hero::Folder,
     }
 }
 
@@ -42,17 +50,27 @@ pub struct AccountFolders {
     /// The account's folders as the engine lists them, which its rules about special
     /// folders apply to.
     folders: Vec<Folder>,
-    /// Folders with a role, in [`RoleInfo::order`], each with its own subfolders.
+    /// Folders with a role, in [`RoleInfo::order`], each with its own subfolders. On
+    /// Gmail the system labels (INBOX, Sent, Important) are among them.
     pub roles: Vec<FolderNode>,
-    /// The rest, as nested on the server.
+    /// The rest of the folders, as nested on the server.
     pub others: Vec<FolderNode>,
+    /// Gmail's user labels, as nested on the server. Those hidden from IMAP in Gmail's
+    /// settings aren't shown, here or anywhere.
+    pub labels: Vec<FolderNode>,
     /// The folders named for their role rather than as on the server: the first of each.
     named_for_role: Vec<FolderId>,
 }
 
 impl AccountFolders {
     pub fn new(folders: Vec<Folder>) -> Self {
-        let mut others = folder_tree(&folders);
+        let (labels, rest): (Vec<_>, Vec<_>) = folders
+            .iter()
+            .filter(|f| f.listed)
+            .cloned()
+            .partition(Folder::is_user_label);
+        let labels = folder_tree(&labels);
+        let mut others = folder_tree(&rest);
         let mut roles = Vec::new();
         take_roles(&mut others, &mut roles);
         roles.sort_by_key(|node| node.role().and_then(|role| RoleInfo::of(role).order));
@@ -82,6 +100,7 @@ impl AccountFolders {
             folders,
             roles: kept,
             others,
+            labels,
             named_for_role,
         }
     }
@@ -97,6 +116,7 @@ impl AccountFolders {
         let mut out = Vec::new();
         walk(&self.roles, &mut out);
         walk(&self.others, &mut out);
+        walk(&self.labels, &mut out);
         out.into_iter()
     }
 
@@ -122,6 +142,17 @@ impl AccountFolders {
             .collect()
     }
 
+    /// The user labels shown, by the name [`paths`](Self::paths) gives them, in sidebar
+    /// order. A message shows these of its labels; the system labels are where it is
+    /// listed, not what it is about.
+    pub fn user_labels(&self) -> Vec<(FolderId, String)> {
+        self.paths()
+            .into_iter()
+            .filter(|(folder, _)| folder.is_user_label())
+            .map(|(folder, path)| (folder.id, path))
+            .collect()
+    }
+
     /// The folder the engine uses for this role, if the account has one.
     pub fn with_role(&self, role: FolderRole) -> Option<&Folder> {
         special_folder(&self.folders, role)
@@ -132,9 +163,11 @@ impl AccountFolders {
         DeleteOutcome::of(&self.folders, folder)
     }
 
-    /// Whether Archive does anything to a message in `folder`.
-    pub fn can_archive(&self, folder: FolderId) -> bool {
-        MovePlan::archive(&self.folders, folder).is_some()
+    /// Whether Archive does anything to the message: on Gmail, nothing to one that isn't
+    /// in INBOX.
+    pub fn can_archive(&self, message: &MessageSummary) -> bool {
+        MovePlan::archive(&self.folders, message.folder_id)
+            .is_some_and(|plan| plan.changes(message.folder_id, &message.labels))
     }
 
     /// Whether moving a message in `folder`, looked at in `shown_in`, to `to` does
@@ -152,7 +185,8 @@ impl AccountFolders {
 
 /// Moves the selectable folders with a role, at any depth, from `nodes` to `roles`,
 /// subfolders first, so a Sent inside INBOX (`INBOX.Sent`) is found too. Parents left
-/// with nothing to show go.
+/// with nothing to show go, whether the server listed them (`\Noselect`, as Gmail's
+/// `[Gmail]`) or not.
 fn take_roles(nodes: &mut Vec<FolderNode>, roles: &mut Vec<FolderNode>) {
     let mut ix = 0;
     while ix < nodes.len() {
@@ -160,7 +194,7 @@ fn take_roles(nodes: &mut Vec<FolderNode>, roles: &mut Vec<FolderNode>) {
         let node = &nodes[ix];
         if node.selectable().is_some() && node.role().is_some() {
             roles.push(nodes.remove(ix));
-        } else if node.folder.is_none() && node.children.is_empty() {
+        } else if node.selectable().is_none() && node.children.is_empty() {
             nodes.remove(ix);
         } else {
             ix += 1;
@@ -364,6 +398,73 @@ mod tests {
         assert!(account.with_role(FolderRole::Archive).is_none());
         // Everything but Drafts, and the "Lists" placeholder.
         assert_eq!(account.nodes().count(), 8);
+    }
+
+    /// A Gmail mailbox: All Mail, Trash and Spam are locations, the rest labels.
+    fn gmail(id: i64, name: &str, role: Option<FolderRole>) -> Folder {
+        let location = matches!(
+            role,
+            Some(FolderRole::All | FolderRole::Trash | FolderRole::Junk)
+        );
+        Folder {
+            delimiter: Some('/'),
+            role,
+            kind: if location {
+                FolderKind::Location
+            } else {
+                FolderKind::Label
+            },
+            ..folder(id, name, Some('/'))
+        }
+    }
+
+    #[test]
+    fn gmail_labels_are_listed_apart_from_the_folders() {
+        let mut gmail_node = gmail(2, "[Gmail]", None);
+        (gmail_node.kind, gmail_node.selectable) = (FolderKind::Location, false);
+        let mut hidden = gmail(10, "Hidden", None);
+        hidden.listed = false;
+        let account = AccountFolders::new(vec![
+            gmail(1, "INBOX", Some(FolderRole::Inbox)),
+            gmail_node,
+            gmail(3, "[Gmail]/All Mail", Some(FolderRole::All)),
+            gmail(4, "[Gmail]/Drafts", Some(FolderRole::Drafts)),
+            gmail(5, "[Gmail]/Important", Some(FolderRole::Important)),
+            gmail(6, "[Gmail]/Starred", Some(FolderRole::Flagged)),
+            gmail(7, "[Gmail]/Trash", Some(FolderRole::Trash)),
+            gmail(8, "Work", None),
+            gmail(9, "Work/Clients", None),
+            hidden,
+        ]);
+        // The system labels and the locations go by their role, as on any account.
+        assert_eq!(
+            shape(&account.roles),
+            [
+                ("Inbox".into(), Some(1), 0),
+                ("All Mail".into(), Some(3), 0),
+                ("Important".into(), Some(5), 0),
+                ("Flagged".into(), Some(6), 0),
+                ("Trash".into(), Some(7), 0),
+            ]
+        );
+        assert!(account.others.is_empty(), "{:?}", shape(&account.others));
+        // The user's labels, as nested; not those hidden from IMAP.
+        assert_eq!(shape(&account.labels), [("Work".into(), Some(8), 1)]);
+        assert_eq!(
+            shape(&account.labels[0].children),
+            [("Clients".into(), Some(9), 0)]
+        );
+        assert!(account.find(FolderId(10)).is_none());
+        assert_eq!(
+            account.user_labels(),
+            [
+                (FolderId(8), "Work".into()),
+                (FolderId(9), "Work / Clients".into())
+            ]
+        );
+        // Labels are where a message can be moved to, after the folders with a role.
+        let paths: Vec<_> = account.paths().into_iter().map(|(f, _)| f.id.0).collect();
+        assert_eq!(paths, [1, 3, 5, 6, 7, 8, 9]);
     }
 
     #[test]

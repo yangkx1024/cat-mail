@@ -7,7 +7,7 @@ use crate::identities::Identities;
 use crate::{Error, Result};
 
 const COLUMNS: &str = "id, email, display_name, username,
-    imap_host, imap_port, imap_security, mode,
+    imap_host, imap_port, imap_security, mode, gmail_server,
     created_at";
 
 pub struct Accounts<'c> {
@@ -129,6 +129,15 @@ impl<'c> Accounts<'c> {
         )? > 0)
     }
 
+    /// Records whether the account's server is Gmail's, as found on connecting. Returns
+    /// whether it changed.
+    pub fn set_gmail_server(&self, id: AccountId, gmail: bool) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE accounts SET gmail_server = ?2 WHERE id = ?1 AND gmail_server <> ?2",
+            (id.0, gmail),
+        )? > 0)
+    }
+
     /// Deletes the account and, via cascades, everything stored for it.
     /// Returns the deleted account's secret key, or `None` if there was no such account.
     pub fn delete(&self, id: AccountId) -> Result<Option<String>> {
@@ -151,6 +160,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Account> {
         username: row.get("username")?,
         imap: server(row, "imap")?,
         mode: parse_text(row, "mode")?,
+        gmail_server: row.get("gmail_server")?,
         created_at: row.get("created_at")?,
     })
 }
@@ -281,6 +291,10 @@ mod tests {
             accounts.get(a.id).unwrap().unwrap().mode,
             AccountMode::Gmail
         );
+        assert!(!a.gmail_server);
+        assert!(accounts.set_gmail_server(a.id, true).unwrap());
+        assert!(!accounts.set_gmail_server(a.id, true).unwrap());
+        assert!(accounts.get(a.id).unwrap().unwrap().gmail_server);
     }
 
     #[test]

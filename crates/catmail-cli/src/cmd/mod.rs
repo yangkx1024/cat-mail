@@ -15,7 +15,7 @@ pub(crate) mod watch;
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
-use catmail_core::{Account, AccountId, FolderId, MailClient, MessageCursor, MessageId};
+use catmail_core::{Account, AccountId, Folder, FolderId, MailClient, MessageCursor, MessageId};
 
 /// The account `selector` names, or the only account there is.
 pub(crate) async fn one_account(client: &MailClient, selector: Option<&str>) -> Result<Account> {
@@ -56,15 +56,15 @@ pub(crate) async fn cursor_after(
     Ok(Some(message.summary.cursor()))
 }
 
-/// Display names of the accounts' folders, for FOLDER columns.
-pub(crate) async fn folder_names(
+/// The accounts' folders, by id: for FOLDER columns, and the names of labels.
+pub(crate) async fn account_folders(
     client: &MailClient,
     accounts: impl IntoIterator<Item = AccountId>,
-) -> Result<HashMap<FolderId, String>> {
+) -> Result<HashMap<FolderId, Folder>> {
     let mut folders = HashMap::new();
     for account in accounts {
         for folder in client.list_folders(account).await? {
-            folders.insert(folder.id, folder.name);
+            folders.insert(folder.id, folder);
         }
     }
     Ok(folders)

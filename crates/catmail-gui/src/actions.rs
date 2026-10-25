@@ -18,6 +18,7 @@ gpui_kit::actions!(
         ToggleRead,
         ToggleFlag,
         MoveToFolder,
+        EditLabels,
         OpenInBrowser,
         Sync,
         FocusSearch,
@@ -63,6 +64,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-f", FocusSearch, mailbox),
         KeyBinding::new("secondary-,", OpenSettings, mailbox),
         KeyBinding::new("e", Archive, list),
+        // Gmail's key for it.
+        KeyBinding::new("l", EditLabels, list),
         KeyBinding::new("delete", Delete, list),
         KeyBinding::new("backspace", Delete, list),
         KeyBinding::new("secondary-a", SelectAll, Some(READER_PAGE)),

@@ -184,6 +184,7 @@ fn wait_for_one_window(cx: &mut TestAppContext) {
     });
 }
 
+mod labels;
 mod reading;
 mod screenshots;
 mod settings;

@@ -17,6 +17,7 @@ use gpui_kit::{
 use crate::assets::Hero;
 use crate::settings::{Appearance, Preferences};
 use crate::theme::appearance::{self, Swatch, Themes};
+use crate::theme::colors::ThemeColors as _;
 
 use super::*;
 
@@ -409,11 +410,7 @@ fn theme_card(
                         .child(name.to_owned()),
                 )
                 .when(imported, |this| {
-                    this.child(crate::layout::badge(
-                        "Imported",
-                        (theme.muted, theme.muted_foreground),
-                        cx,
-                    ))
+                    this.child(crate::layout::badge("Imported", theme.neutral_badge(), cx))
                 })
                 .when(selected, |this| {
                     this.child(Icon::new(Hero::Check).xsmall().text_color(theme.primary))

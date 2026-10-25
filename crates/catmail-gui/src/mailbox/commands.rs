@@ -1,7 +1,10 @@
 //! The mailbox's commands: on the selected message (the toolbar, the menus and the keys
 //! all call these), writing, syncing and settings.
 
-use catmail_core::{Account, AccountId, Flags, FolderId, MessageId, OpKind, OpStatus, PendingOp};
+use catmail_core::{
+    Account, AccountId, AccountMode, Flags, FolderId, MessageId, MessageSummary, OpKind, OpStatus,
+    PendingOp,
+};
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{App, Context, Window};
@@ -119,10 +122,7 @@ impl Mailbox {
 
     // Commands on the selected message.
 
-    pub(super) fn selected_message(
-        &self,
-        cx: &gpui_kit::App,
-    ) -> Option<catmail_core::MessageSummary> {
+    pub(super) fn selected_message(&self, cx: &gpui_kit::App) -> Option<MessageSummary> {
         self.messages
             .read(cx)
             .delegate()
@@ -160,67 +160,60 @@ impl Mailbox {
         self.set_flags(vec![message.id], add, remove, window, cx);
     }
 
-    /// Whether Archive does anything to the selected message: its account has an
-    /// Archive folder it isn't in, or on Gmail it is in All Mail.
-    pub(crate) fn can_archive(&self, cx: &gpui_kit::App) -> bool {
-        self.selected_message(cx)
-            .is_some_and(|message| self.archives(&message))
-    }
-
-    fn archives(&self, message: &catmail_core::MessageSummary) -> bool {
+    /// Whether Archive does anything to `message`: its account has an Archive folder it
+    /// isn't in, or on Gmail it is in INBOX and All Mail.
+    pub(crate) fn can_archive(&self, message: &MessageSummary) -> bool {
         self.account(message.account_id)
-            .is_some_and(|a| a.folders.can_archive(message.folder_id))
+            .is_some_and(|a| a.folders.can_archive(message))
     }
 
     pub(crate) fn archive(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(message) = self.selected_message(cx)
-            && self.archives(&message)
-        {
-            self.remove(
-                message.id,
-                "archive the message",
-                window,
-                cx,
-                move |client| async move { client.archive_messages(vec![message.id]).await },
-            );
+        let Some(message) = self.selected_message(cx) else {
+            return;
+        };
+        if !self.can_archive(&message) {
+            return;
         }
+        self.change(
+            message.id,
+            "archive the message",
+            window,
+            cx,
+            move |client| async move { client.archive_messages(vec![message.id]).await },
+        );
     }
 
-    /// Moves the selected message, and selects the next one once it has gone.
+    /// Moves the selected message, and selects the next one once it has gone, if it goes.
     pub(crate) fn move_selected(
         &mut self,
         to: FolderId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(message) = self.selected_message(cx) {
-            let shown_in = self.shown_in(cx);
-            self.remove(
-                message.id,
-                "move the message",
-                window,
-                cx,
-                move |client| async move {
-                    client
-                        .move_messages(vec![message.id], shown_in, to)
-                        .await
-                },
-            );
-        }
+        let Some(message) = self.selected_message(cx) else {
+            return;
+        };
+        let shown_in = self.shown_in(cx);
+        self.change(
+            message.id,
+            "move the message",
+            window,
+            cx,
+            move |client| async move { client.move_messages(vec![message.id], shown_in, to).await },
+        );
     }
 
     /// The folder the listed messages are looked at in: on Gmail, a label they leave when
     /// moved. None for search results.
     fn shown_in(&self, cx: &gpui_kit::App) -> Option<FolderId> {
-        match self.place {
-            Some(Place::Folder(id)) if !self.is_searching(cx) => Some(id),
-            _ => None,
-        }
+        self.messages.read(cx).delegate().shown_folder()
     }
 
-    /// Takes the message out of the list with `call`, selecting the next one once it has
-    /// gone.
-    fn remove<F: Future<Output = catmail_core::Result<Vec<AccountId>>> + 'static>(
+    /// Changes the message with `call`, which may take it out of the list: if it goes,
+    /// the next one is selected. Whether it goes is the store's to say (on Gmail, one moved
+    /// to a label from All Mail stays): once the change is made, the list is read again,
+    /// and a message still in it stays selected (see `message_list::removal_settled`).
+    fn change<F: Future<Output = catmail_core::Result<Vec<AccountId>>> + 'static>(
         &mut self,
         id: MessageId,
         what: &'static str,
@@ -228,9 +221,26 @@ impl Mailbox {
         cx: &mut Context<Self>,
         call: impl FnOnce(catmail_core::MailClient) -> F,
     ) {
-        self.messages
+        let removal = self
+            .messages
             .update(cx, |list, _| list.delegate_mut().expect_removal(id));
-        report_failure(what, call(self.client.clone()), window, cx);
+        let call = call(self.client.clone());
+        cx.spawn_in(window, async move |this, cx| {
+            let result = call.await;
+            this.update_in(cx, |this, window, cx| {
+                if let Err(e) = &result {
+                    window.push_notification(
+                        Notification::error(format!("Couldn't {what}: {e}")),
+                        cx,
+                    );
+                }
+                this.messages.update(cx, |list, cx| {
+                    message_list::removal_settled(list, removal, result.is_ok(), window, cx)
+                });
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// To Trash, or for good from Trash or without one, as the engine will
@@ -275,7 +285,7 @@ impl Mailbox {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.remove(
+        self.change(
             id,
             "delete the message",
             window,
@@ -304,10 +314,97 @@ impl Mailbox {
             .map(|(folder, path)| (folder.id, path))
             .collect();
         let this = cx.entity().downgrade();
-        move_to::open(folders, window, cx, move |folder, window, cx| {
+        folder_picker::open(folders, window, cx, move |folder, window, cx| {
             this.update(cx, |this, cx| this.move_selected(folder, window, cx))
                 .ok();
         });
+    }
+
+    /// Whether the selected message has labels to edit: it is in a Gmail account.
+    pub(crate) fn can_edit_labels(&self, cx: &gpui_kit::App) -> bool {
+        self.selected_message(cx)
+            .is_some_and(|message| self.labels_account(&message).is_some())
+    }
+
+    /// The message's account, if it has labels: on Gmail.
+    fn labels_account(&self, message: &MessageSummary) -> Option<&AccountEntry> {
+        self.account(message.account_id)
+            .filter(|a| a.account.mode == AccountMode::Gmail)
+    }
+
+    /// Opens "Labels" for the selected message, which changes them as they are picked.
+    /// It shows the message's labels as they are, and closes once the message is no
+    /// longer the one selected ([`sync_labels_dialog`](Self::sync_labels_dialog)).
+    pub(crate) fn edit_labels(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(message) = self.selected_message(cx) else {
+            return;
+        };
+        let Some(account) = self.labels_account(&message) else {
+            return;
+        };
+        let labels = account.folders.user_labels();
+        let checked = message.labels.iter().copied().collect();
+        let this = cx.entity().downgrade();
+        let id = message.id;
+        let list =
+            folder_picker::open_labels(labels, checked, window, cx, move |label, window, cx| {
+                this.update(cx, |this, cx| this.toggle_label(id, label, window, cx))
+                    .ok();
+            });
+        self.labels_dialog = Some(LabelsDialog { message: id, list });
+    }
+
+    /// Keeps "Labels" to the message it was opened for: its checks follow the message's
+    /// labels as the list has them (a change refused and undone, or made elsewhere, shows
+    /// there too), and it closes once the message is no longer selected.
+    pub(super) fn sync_labels_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = &self.labels_dialog else {
+            return;
+        };
+        let Some(list) = dialog.list.upgrade() else {
+            self.labels_dialog = None; // Closed.
+            return;
+        };
+        match self.selected_message(cx).filter(|m| m.id == dialog.message) {
+            Some(message) => list.update(cx, |list, cx| {
+                if list
+                    .delegate_mut()
+                    .set_checked(message.labels.into_iter().collect())
+                {
+                    cx.notify();
+                }
+            }),
+            None => {
+                self.labels_dialog = None;
+                window.close_dialog(cx);
+            }
+        }
+    }
+
+    /// Adds `label` to the message, the selected one, or takes it off, as it has it now.
+    fn toggle_label(
+        &mut self,
+        id: MessageId,
+        label: FolderId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(message) = self.selected_message(cx).filter(|m| m.id == id) else {
+            return;
+        };
+        let (add, remove) = if message.labels.contains(&label) {
+            (Vec::new(), vec![label])
+        } else {
+            (vec![label], Vec::new())
+        };
+        // Off the label it is listed in, it leaves the list: on to the next one.
+        self.change(
+            id,
+            "change the labels",
+            window,
+            cx,
+            move |client| async move { client.label_messages(vec![id], add, remove).await },
+        );
     }
 
     pub(crate) fn compose(
