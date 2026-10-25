@@ -49,7 +49,8 @@ CLI 不开后台同步，在 `mark` / `mv` / `archive` / `rm` 后当场回放。
 
 ## Gmail 的标签
 
-这是过渡做法：改为[按标签建模](labels.md)之后邮件只有一行，没有副本要找，这一节删除。
+这是过渡做法：Gmail 账户已经[按标签建模](labels.md)同步，邮件只有一行，没有副本要找；这个机制随操作
+队列的那一步（[迁移步骤](labels.md#迁移步骤) 5）删除，这一节也删除。下面说的是按标签建模之前的情形。
 
 有 `\All` 邮箱（RFC 6154，Gmail 的"所有邮件"）的账户上，文件夹是标签：同一封邮件同时出现在 INBOX、
 "所有邮件"、"重要"等几个文件夹里，各是一行（邮件仍按文件夹存，见[存储](storage.md)）。移动其中一份，
@@ -58,8 +59,7 @@ CLI 不开后台同步，在 `mark` / `mv` / `archive` / `rm` 后当场回放。
 已经没有"。
 
 所以回放之前（`replay_queued`），对有待回放移动的邮件，按 Message-ID 找出它在其他文件夹里的副本和它们的
-UID（`PendingOps::label_copies`，不含移出和移入的文件夹；`LABEL_ACCOUNTS` 定义哪些账户算标签账户，与搜索
-共用）；回放之后逐个文件夹 EXAMINE、`UID SEARCH UID <这些 UID>`，删掉服务器上已经没有的（`sync::drop_vanished`）。
+UID（`PendingOps::label_copies`，不含移出和移入的文件夹；`LABEL_ACCOUNTS` 定义哪些账户算标签账户）；回放之后逐个文件夹 EXAMINE、`UID SEARCH UID <这些 UID>`，删掉服务器上已经没有的（`sync::drop_vanished`）。
 只问这几封，不同步整个文件夹："所有邮件"可能有十几万封，完整对比要传整个 UID 列表。文件夹打不开或
 UIDVALIDITY 变了就跳过，留给同步。Message-ID 只用来挑要问哪些 UID，删不删由服务器决定，不会因为
 Message-ID 相同就删掉别的邮件。

@@ -44,7 +44,7 @@ async fn watching(state: ServerState, schedule: SyncSchedule) -> Env {
 
 impl Env {
     /// Subjects in the folder, sorted; none if it isn't there (yet).
-    async fn subjects(&self, folder: &str) -> Vec<String> {
+    async fn sorted_subjects(&self, folder: &str) -> Vec<String> {
         let Some(folder) = self.client.find_folder(self.account, folder).await.unwrap() else {
             return Vec::new();
         };
@@ -63,7 +63,10 @@ impl Env {
 
     async fn wait_for_subjects(&self, folder: &str, expected: &[&str]) {
         let what = format!("{folder} to have {expected:?}");
-        eventually(&what, async || self.subjects(folder).await == expected).await;
+        eventually(&what, async || {
+            self.sorted_subjects(folder).await == expected
+        })
+        .await;
     }
 
     /// Waits until the server has received the `n`-th IDLE.
@@ -78,7 +81,7 @@ async fn new_mail_flag_changes_and_expunges_are_pushed() {
     // The account was added after the client opened; it is synced all the same.
     env.wait_for_subjects("Archive", &["old"]).await;
     env.wait_for_idle(1).await;
-    assert_eq!(env.subjects("INBOX").await, ["one", "two"]);
+    assert_eq!(env.sorted_subjects("INBOX").await, ["one", "two"]);
 
     env.fake.state().inbox().append_simple("three");
     env.wait_for_subjects("INBOX", &["one", "three", "two"])
@@ -232,7 +235,7 @@ async fn a_message_moved_out_leaves_its_other_gmail_labels_at_once() {
     env.client.delete_messages(vec![id], false).await.unwrap();
     env.wait_for_subjects("Important", &[]).await;
     env.wait_for_subjects("All Mail", &[]).await;
-    assert_eq!(env.subjects("Trash").await, ["labelled"]);
+    assert_eq!(env.sorted_subjects("Trash").await, ["labelled"]);
     // Without a full sync.
     env.wait_for_idle(2).await;
     assert_eq!(env.fake.state().received("LIST"), 1);
@@ -250,7 +253,7 @@ async fn other_gmail_labels_are_looked_at_after_a_drop_past_the_move() {
     env.client.delete_messages(vec![id], false).await.unwrap();
     env.wait_for_subjects("Important", &[]).await;
     env.wait_for_subjects("All Mail", &[]).await;
-    assert_eq!(env.subjects("Trash").await, ["labelled"]);
+    assert_eq!(env.sorted_subjects("Trash").await, ["labelled"]);
     assert!(env.fake.state().faults.drop_on_open.is_none(), "dropped");
     assert_eq!(env.fake.state().received("LIST"), 1, "without a full sync");
 }

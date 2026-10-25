@@ -86,10 +86,10 @@ fake-server test, with a fault injected if the change is about recovering from o
   is a location: copies in two folders are two messages, never merged by Message-ID (it can
   be missing or repeated). On a Gmail account (`X-GM-EXT-1` with All Mail listed) a row is one `X-GM-MSGID`, located
   in All Mail, Trash or Spam; every other mailbox is a label (`message_labels`), never another
-  row. See [docs/architecture/labels.md](docs/architecture/labels.md). Storage and protocol
-  support it (`message_labels`, `Items::Gmail`), sync doesn't yet: until then Gmail labels
-  are still synced as folders, and search and replay match their copies by Message-ID
-  (`LABEL_ACCOUNTS`); don't extend that, it is to be removed.
+  row. See [docs/architecture/labels.md](docs/architecture/labels.md). Storage, protocol
+  and sync follow it; the operation queue doesn't yet: replay still looks for copies by
+  Message-ID on accounts with All Mail (`LABEL_ACCOUNTS`); don't extend that, it is to be
+  removed.
 - **UIDs are only valid within one UIDVALIDITY.** Anything persisted that refers to a
   remote UID also stores the folder and its UIDVALIDITY, and is checked before use.
 - **Account-owned references** use composite `(id, account_id)` foreign keys; where that is

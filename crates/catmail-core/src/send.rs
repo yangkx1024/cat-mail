@@ -551,10 +551,13 @@ async fn attempt_save(
 
 /// The Sent folder by the server's say, for an account that hasn't been synced.
 async fn find_sent(session: &mut Session) -> Result<Option<String>> {
-    Ok(sync::remote_folders(session.list().await?)
+    let listed = session.list().await?;
+    let roles = sync::roles(&listed, sync::mode_of(session, &listed));
+    Ok(listed
         .into_iter()
-        .find(|f| f.role == Some(FolderRole::Sent) && f.selectable)
-        .map(|f| f.remote_name))
+        .zip(roles)
+        .find(|(m, role)| *role == Some(FolderRole::Sent) && m.selectable)
+        .map(|(m, _)| m.raw_name))
 }
 
 /// The message as it was queued.

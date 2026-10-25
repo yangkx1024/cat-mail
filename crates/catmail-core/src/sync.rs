@@ -7,8 +7,15 @@
 //! is its own transaction, so an interrupted sync keeps what it fetched and the next one
 //! only diffs again. The folder's cursor (UIDNEXT, HIGHESTMODSEQ) is written last, once
 //! the folder matches the server as of the EXAMINE.
+//!
+//! On Gmail only All Mail, Trash and Spam hold messages (the other mailboxes are labels,
+//! see `docs/architecture/labels.md`), and they are synced as one: a message another
+//! client moves between them turns up in its new location under a new UID before it is
+//! missed in the old one, so its row moves (with its body) instead of being deleted, and
+//! only what vanished from one location without turning up in another is deleted, once
+//! all three are synced.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,7 +25,8 @@ use catmail_proto::imap::{
 };
 use catmail_store::{FolderSyncState, NewMessage, RemoteFolder, ReplayFolder};
 use catmail_types::{
-    AccountId, Event, FolderId, FolderKind, FolderRole, FolderSyncReport, ReplayReport, SyncReport,
+    AccountId, AccountMode, Event, Folder, FolderId, FolderKind, FolderRole, FolderSyncReport,
+    ReplayReport, SyncReport,
 };
 
 use crate::connection::with_session;
@@ -61,8 +69,9 @@ pub(crate) async fn initial_sync(engine: Arc<Engine>, account_id: AccountId) -> 
 
 /// Syncs one folder, after making queued local changes (and settled drafts) on the
 /// server, unless it completed a sync less than `max_age` ago. `None` if it didn't sync:
-/// the folder was fresh enough or can't hold messages. Only a sync that went to the
-/// server says anything about it in the account's status.
+/// the folder was fresh enough or can't hold messages. On Gmail that is a sync of the
+/// three locations, whichever folder it is, and a label's report is theirs together.
+/// Only a sync that went to the server says anything about it in the account's status.
 pub(crate) async fn sync_one(
     engine: Arc<Engine>,
     folder: FolderId,
@@ -76,19 +85,27 @@ pub(crate) async fn sync_one(
     let permit = engine.sync_permit(account).await;
     permit
         .run(async {
-            // Checked under the permit: a full sync that held it may just have done this.
-            // Kept in memory only, so after a restart the first open syncs.
-            if engine
-                .folder_synced(account, folder)
-                .is_some_and(|t| t.elapsed() < max_age)
-            {
+            let (current, mode, locations) = engine
+                .read(move |db| {
+                    let folders = db.folders();
+                    let mode = db.accounts().get(account)?.map(|a| a.mode);
+                    Ok((folders.get(folder)?, mode, folders.location_ids(account)?))
+                })
+                .await?;
+            let current = current.ok_or(Error::FolderNotFound(folder))?;
+            if !current.selectable {
                 return Ok(None);
             }
-            let current = engine
-                .read(move |db| db.folders().get(folder))
-                .await?
-                .ok_or(Error::FolderNotFound(folder))?;
-            if !current.selectable {
+            let gmail = mode == Some(AccountMode::Gmail);
+            // Checked under the permit: a full sync that held it may just have done this.
+            // Kept in memory only, so after a restart the first open syncs. On Gmail a
+            // folder is as fresh as the locations its messages are in.
+            let fresh = |id| {
+                engine
+                    .folder_synced(account, id)
+                    .is_some_and(|t| t.elapsed() < max_age)
+            };
+            if (gmail && locations.iter().copied().all(fresh)) || (!gmail && fresh(folder)) {
                 return Ok(None);
             }
             // Safe to run again on a new connection if a reused one turns out dead: what
@@ -100,12 +117,24 @@ pub(crate) async fn sync_one(
                     let mut replayed = ops::Replayed::default();
                     ops::replay_queued(&engine, session, account, Uploads::Settled, &mut replayed)
                         .await?;
+                    if gmail {
+                        let reports = sync_locations(
+                            &engine,
+                            session,
+                            account,
+                            locations.clone(),
+                            &replayed.folders,
+                        )
+                        .await?;
+                        return Ok(report_on(&current, reports));
+                    }
                     let state = engine
                         .read(move |db| db.folders().sync_state(folder))
                         .await?
                         .ok_or(Error::FolderNotFound(folder))?;
                     let replayed = replayed.folders.get(&folder);
-                    sync_reported(&engine, session, account, &state, replayed).await
+                    let mut unit = Unit::new(AccountMode::Standard);
+                    sync_reported(&engine, session, account, &state, replayed, &mut unit).await
                 }
             })
             .await;
@@ -127,15 +156,28 @@ pub(crate) async fn run(
     uploads: Uploads,
 ) -> Result<SyncReport> {
     let permit = engine.sync_permit(account_id).await;
-    let (start, mut replayed, ids) = permit
+    let (start, mut replayed, ids, mode) = permit
         .run(async {
             // Taken holding the permit: a sync completed after this began after it too,
             // and saw the server as it is now or later. One that held the permit before
             // may have seen it as it was before this was asked for.
             let start = Instant::now();
-            let remote = remote_folders(session.list().await?);
+            let listed = session.list().await?;
+            let mode = mode_of(session, &listed);
+            let remote = remote_folders(listed, mode);
             let reconciled = engine
-                .write(move |db| db.folders().reconcile(account_id, &remote))
+                .write(move |db| {
+                    let mut reconciled = db.folders().reconcile(account_id, &remote)?;
+                    // What a message row is changed with the mode (one per location, or
+                    // one per X-GM-MSGID): every location starts over.
+                    if db.accounts().set_mode(account_id, mode)? {
+                        reconciled
+                            .touched
+                            .merge(db.folders().end_generations(account_id)?);
+                        reconciled.changed = true;
+                    }
+                    Ok(reconciled)
+                })
                 .await?;
             if reconciled.changed {
                 engine.emit(Event::FoldersChanged {
@@ -149,14 +191,10 @@ pub(crate) async fn run(
             ops::replay_queued(engine, session, account_id, uploads, &mut replayed).await?;
             // Only which folders, in which order: their state is read when each one's
             // turn comes.
-            let ids: Vec<FolderId> = engine
-                .read(move |db| db.folders().sync_states(account_id))
-                .await?
-                .into_iter()
-                .filter(|f| f.selectable)
-                .map(|f| f.id)
-                .collect();
-            Ok((start, replayed.folders, ids))
+            let ids = engine
+                .read(move |db| db.folders().location_ids(account_id))
+                .await?;
+            Ok((start, replayed.folders, ids, mode))
         })
         .await?;
 
@@ -164,7 +202,8 @@ pub(crate) async fn run(
         account: account_id,
         folders: Vec::new(),
     };
-    for id in ids {
+    let mut unit = Unit::new(mode);
+    for &id in &ids {
         let replayed = replayed.remove(&id);
         let permit = engine.sync_permit(account_id).await;
         let folder_report = permit
@@ -181,34 +220,304 @@ pub(crate) async fn run(
                 {
                     return Ok(Some(replay_report(&current, replayed.as_ref())));
                 }
-                sync_reported(engine, session, account_id, &current, replayed.as_ref())
+                let replayed = replayed.as_ref();
+                sync_reported(engine, session, account_id, &current, replayed, &mut unit)
                     .await
                     .map(Some)
             })
             .await?;
         report.folders.extend(folder_report);
     }
+    if !unit.vanished.is_empty() {
+        let permit = engine.sync_permit(account_id).await;
+        let finished = finish(
+            engine,
+            session,
+            account_id,
+            &mut unit,
+            &ids,
+            &mut report.folders,
+        );
+        permit.run(finished).await?;
+    }
     engine.set_synced(account_id);
     Ok(report)
 }
 
-/// Syncs `folder` and reports how it went, with what replaying its queued changes did.
-/// The server refusing something about the folder (it may have been deleted since LIST)
-/// goes in the report, so other folders can still sync; only a fatal error fails.
+/// Gmail if the server has X-GM-EXT-1 and lists All Mail. All Mail can be hidden from
+/// IMAP in Gmail's settings, and then the labels' mailboxes are all there is to sync.
+pub(crate) fn mode_of(session: &Session, listed: &[ListedMailbox]) -> AccountMode {
+    if session.is_gmail()
+        && listed
+            .iter()
+            .any(|m| m.special_use == Some(FolderRole::All))
+    {
+        AccountMode::Gmail
+    } else {
+        AccountMode::Standard
+    }
+}
+
+/// How locations sync: each on its own, or on Gmail the three as one (see the module
+/// docs), what vanished from one deleted only once all are synced ([`finish`]).
+struct Unit {
+    gmail: bool,
+    /// What vanished from the locations synced so far and isn't deleted yet: (location,
+    /// its UIDVALIDITY, UIDs).
+    vanished: Vec<(FolderId, u32, Vec<u32>)>,
+    /// Every location synced so far stored all it has. If not, one that vanished may be
+    /// where it went, not stored: nothing is deleted, the next sync finds it again.
+    complete: bool,
+}
+
+impl Unit {
+    fn new(mode: AccountMode) -> Self {
+        Self {
+            gmail: mode == AccountMode::Gmail,
+            vanished: Vec::new(),
+            complete: true,
+        }
+    }
+
+    /// What FETCH asks for: on Gmail, X-GM-MSGID, X-GM-THRID and X-GM-LABELS too.
+    fn items(&self) -> Items {
+        if self.gmail {
+            Items::Gmail
+        } else {
+            Items::Standard
+        }
+    }
+
+    /// Notes that `uids` vanished from `folder` under `uidvalidity`, and deletes them at
+    /// once unless the unit spans several locations.
+    async fn vanish(
+        &mut self,
+        engine: &Arc<Engine>,
+        account: AccountId,
+        (folder, uidvalidity, uids): (FolderId, u32, Vec<u32>),
+        report: &mut FolderSyncReport,
+    ) -> Result<()> {
+        self.vanished.push((folder, uidvalidity, uids));
+        if self.gmail {
+            return Ok(());
+        }
+        self.delete_vanished(engine, account, std::slice::from_mut(report))
+            .await
+    }
+
+    /// Deletes the rows of what vanished, still where it vanished from (not moved to
+    /// another location since), adding them to the location's report. Not if the
+    /// location started a new UIDVALIDITY since: the UIDs name other messages. On Gmail,
+    /// nothing if the unit isn't complete. Call with the account's sync permit.
+    async fn delete_vanished(
+        &mut self,
+        engine: &Arc<Engine>,
+        account: AccountId,
+        reports: &mut [FolderSyncReport],
+    ) -> Result<()> {
+        let vanished = std::mem::take(&mut self.vanished);
+        // On its own, a location has nowhere else for them to be.
+        if self.gmail && !self.complete {
+            tracing::debug!(%account, "not all locations synced; deleting nothing");
+            return Ok(());
+        }
+        for (folder, uidvalidity, uids) in vanished {
+            let (removed, labels) = engine
+                .write(move |db| {
+                    let messages = db.messages();
+                    let removed = messages.delete_uids_of(folder, uidvalidity, &uids)?;
+                    Ok((removed as u32, messages.touched_labels()))
+                })
+                .await?;
+            if removed == 0 {
+                continue;
+            }
+            if let Some(report) = reports.iter_mut().find(|r| r.folder == folder) {
+                report.removed += removed;
+            }
+            emit_changed(engine, account, [folder].into_iter().chain(labels));
+        }
+        Ok(())
+    }
+}
+
+/// Looks for new arrivals [`finish`] makes at most before it gives up on settling what
+/// vanished.
+const RECHECKS: usize = 3;
+
+/// Ends a pass of `unit` over the locations `ids`, whose reports `reports` are: on Gmail,
+/// deletes what vanished and didn't turn up in another location. A moved message (one
+/// another client restores from Trash to All Mail, say) shows up above its new
+/// location's UIDNEXT, but maybe only after that location's turn. So the locations are
+/// looked at again for new arrivals, which moves such a row, until a look finds nothing
+/// new anywhere: what vanished and is still where it vanished from is then nowhere, and
+/// is deleted. If the looks don't settle within [`RECHECKS`], nothing is; the next sync
+/// finds it missing again. Call with the account's sync permit.
+async fn finish(
+    engine: &Arc<Engine>,
+    session: &mut Session,
+    account: AccountId,
+    unit: &mut Unit,
+    ids: &[FolderId],
+    reports: &mut [FolderSyncReport],
+) -> Result<()> {
+    for _ in 0..RECHECKS {
+        // Those that turned up elsewhere have moved: nothing to look for.
+        let vanished = std::mem::take(&mut unit.vanished);
+        unit.vanished = engine
+            .read(move |db| {
+                let messages = db.messages();
+                let mut stored = Vec::new();
+                for (folder, uidvalidity, uids) in vanished {
+                    let uids = messages.stored(folder, &uids)?;
+                    if !uids.is_empty() {
+                        stored.push((folder, uidvalidity, uids));
+                    }
+                }
+                Ok(stored)
+            })
+            .await?;
+        if unit.vanished.is_empty() || !unit.complete {
+            break;
+        }
+        let mut arrived = false;
+        for &id in ids {
+            match arrivals(engine, session, account, id, unit, reports).await {
+                Ok(some) => arrived |= some,
+                Err(e) if e.is_refusal() => {
+                    tracing::warn!(folder = %id, error = %e, "folder sync failed");
+                    unit.complete = false;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        if !arrived {
+            return unit.delete_vanished(engine, account, reports).await;
+        }
+    }
+    if !unit.vanished.is_empty() {
+        tracing::debug!(%account, "messages vanished and others keep arriving; left for the next sync");
+        unit.vanished.clear();
+    }
+    Ok(())
+}
+
+/// Fetches what arrived in location `id` since its cursor, adding it to its report in
+/// `reports`. True if anything did, even if it left again. A location without a cursor,
+/// or with a new UIDVALIDITY, can't tell what arrived: the unit is then incomplete.
+async fn arrivals(
+    engine: &Arc<Engine>,
+    session: &mut Session,
+    account: AccountId,
+    id: FolderId,
+    unit: &mut Unit,
+    reports: &mut [FolderSyncReport],
+) -> Result<bool> {
+    let Some(folder) = engine.read(move |db| db.folders().sync_state(id)).await? else {
+        return Ok(false);
+    };
+    let status = session.examine(&folder.remote_name).await?;
+    let Some(uidnext) = folder
+        .uidnext
+        .filter(|_| status.same_generation(folder.uidvalidity))
+    else {
+        unit.complete = false;
+        return Ok(false);
+    };
+    if status.uidnext == Some(uidnext) {
+        return Ok(false);
+    }
+    let stored = engine
+        .read(move |db| db.messages().uids_from(id, uidnext))
+        .await?;
+    let new = sorted_difference(&session.uid_search_from(uidnext).await?, &stored);
+    let mut scratch = FolderSyncReport::new(id, &folder.name);
+    let report = match reports.iter_mut().find(|r| r.folder == id) {
+        Some(report) => report,
+        None => &mut scratch,
+    };
+    let complete = fetch_new(engine, session, account, id, &new, unit.items(), report).await?;
+    unit.complete &= complete;
+    if complete {
+        // Flags stay as of the last look at them.
+        let (uidnext, modseq) = (status.uidnext, folder.highest_modseq);
+        engine
+            .write(move |db| db.folders().set_synced(id, uidnext, modseq, false))
+            .await?;
+    }
+    Ok(true)
+}
+
+/// On Gmail, syncs the three locations, `ids`, as one, reporting on each as
+/// [`sync_reported`] does. Call with the account's sync permit.
+async fn sync_locations(
+    engine: &Arc<Engine>,
+    session: &mut Session,
+    account: AccountId,
+    ids: Vec<FolderId>,
+    replayed: &HashMap<FolderId, ReplayReport>,
+) -> Result<Vec<FolderSyncReport>> {
+    let mut unit = Unit::new(AccountMode::Gmail);
+    let mut reports = Vec::new();
+    for &id in &ids {
+        // Read at its turn: syncing the others may have moved messages in or out.
+        let Some(location) = engine.read(move |db| db.folders().sync_state(id)).await? else {
+            continue;
+        };
+        let replayed = replayed.get(&id);
+        reports
+            .push(sync_reported(engine, session, account, &location, replayed, &mut unit).await?);
+    }
+    finish(engine, session, account, &mut unit, &ids, &mut reports).await?;
+    Ok(reports)
+}
+
+/// What a sync of the locations did, as a report on `folder`: its own if it is one of
+/// them, else (a label) theirs together.
+fn report_on(folder: &Folder, reports: Vec<FolderSyncReport>) -> FolderSyncReport {
+    let mut on = FolderSyncReport::new(folder.id, &folder.name);
+    for r in reports {
+        if r.folder == folder.id {
+            return r;
+        }
+        on.added += r.added;
+        on.updated += r.updated;
+        on.removed += r.removed;
+        on.ops_applied += r.ops_applied;
+        on.ops_failed += r.ops_failed;
+        on.uidvalidity_changed |= r.uidvalidity_changed;
+        on.error = on.error.or(r.error);
+    }
+    on
+}
+
+/// Tells frontends that the messages of these folders changed.
+fn emit_changed(engine: &Engine, account: AccountId, folders: impl IntoIterator<Item = FolderId>) {
+    for folder in folders.into_iter().collect::<BTreeSet<_>>() {
+        engine.emit(Event::MessagesChanged { account, folder });
+    }
+}
+
+/// Syncs `folder` as part of `unit` and reports how it went, with what replaying its
+/// queued changes did. The server refusing something about the folder (it may have been
+/// deleted since LIST) goes in the report, so other folders can still sync; only a fatal
+/// error fails.
 async fn sync_reported(
     engine: &Arc<Engine>,
     session: &mut Session,
     account: AccountId,
     folder: &FolderSyncState,
     replayed: Option<&ReplayReport>,
+    unit: &mut Unit,
 ) -> Result<FolderSyncReport> {
     let mut report = replay_report(folder, replayed);
     let all = ChangedFlags::Unknown;
-    match sync_folder(engine, session, account, folder, &all, &mut report).await {
+    match sync_folder(engine, session, account, folder, &all, &mut report, unit).await {
         Ok(()) => {}
         Err(e) if e.is_refusal() => {
             tracing::warn!(folder = %folder.name, error = %e, "folder sync failed");
             report.error = Some((&e).into());
+            unit.complete = false;
         }
         Err(e) => return Err(e),
     }
@@ -258,7 +567,9 @@ fn replay_report(folder: &FolderSyncState, replayed: Option<&ReplayReport>) -> F
 /// Syncs INBOX alone on `session`, leaving it selected (read-only). Of the flags of
 /// stored messages, only those `changed_flags` names are refreshed, besides what
 /// CONDSTORE says changed; unless that is all of them, the sync doesn't count as
-/// completed. False if the account has no INBOX to sync (or doesn't know of one yet).
+/// completed. On Gmail INBOX is a label: the three locations are synced instead, with
+/// all of their flags (CONDSTORE fetches only what changed, labels too), and INBOX is
+/// only opened. False if the account has no INBOX to sync (or doesn't know of one yet).
 /// Call with the account's sync permit.
 pub(crate) async fn sync_inbox(
     engine: &Arc<Engine>,
@@ -266,19 +577,27 @@ pub(crate) async fn sync_inbox(
     account_id: AccountId,
     changed_flags: &ChangedFlags,
 ) -> Result<bool> {
-    let inbox = engine
+    let (inbox, mode, locations) = engine
         .read(move |db| {
             let folders = db.folders();
-            match folders.by_role(account_id, FolderRole::Inbox)? {
-                Some((id, _)) => folders.sync_state(id),
-                None => Ok(None),
-            }
+            let inbox = match folders.by_role(account_id, FolderRole::Inbox)? {
+                Some((id, _)) => folders.sync_state(id)?,
+                None => None,
+            };
+            let mode = db.accounts().get(account_id)?.map(|a| a.mode);
+            Ok((inbox, mode, folders.location_ids(account_id)?))
         })
         .await?;
     let Some(inbox) = inbox else {
         return Ok(false);
     };
+    if mode == Some(AccountMode::Gmail) {
+        sync_locations(engine, session, account_id, locations, &HashMap::new()).await?;
+        session.examine(&inbox.remote_name).await?;
+        return Ok(true);
+    }
     let mut report = FolderSyncReport::new(inbox.id, &inbox.name);
+    let mut unit = Unit::new(AccountMode::Standard);
     sync_folder(
         engine,
         session,
@@ -286,11 +605,13 @@ pub(crate) async fn sync_inbox(
         &inbox,
         changed_flags,
         &mut report,
+        &mut unit,
     )
     .await?;
     Ok(true)
 }
 
+/// Syncs one location as part of `unit`.
 async fn sync_folder(
     engine: &Arc<Engine>,
     session: &mut Session,
@@ -298,14 +619,13 @@ async fn sync_folder(
     folder: &FolderSyncState,
     changed_flags: &ChangedFlags,
     report: &mut FolderSyncReport,
+    unit: &mut Unit,
 ) -> Result<()> {
     let id = folder.id;
-    let changed = || {
-        engine.emit(Event::MessagesChanged {
-            account,
-            folder: id,
-        })
-    };
+    let (gmail, items) = (unit.gmail, unit.items());
+    // On Gmail labels show messages of the location, and Starred the flagged ones.
+    let changed =
+        |labels: Vec<FolderId>| emit_changed(engine, account, [id].into_iter().chain(labels));
     let status = session.examine(&folder.remote_name).await?;
 
     let (mut uidnext, mut modseq) = (folder.uidnext, folder.highest_modseq);
@@ -313,25 +633,29 @@ async fn sync_folder(
     if !status.same_generation(folder.uidvalidity) {
         // UIDs of the old generation now name different messages (or nothing).
         let uidvalidity = status.uidvalidity;
-        let touched = engine
-            .write(move |db| db.folders().reset_uidvalidity(id, uidvalidity))
+        let (touched, labels) = engine
+            .write(move |db| {
+                let messages = db.messages();
+                if gmail {
+                    messages.note_folder_shown(id)?;
+                }
+                let touched = db.folders().reset_uidvalidity(id, uidvalidity)?;
+                Ok((touched, messages.touched_labels()))
+            })
             .await?;
         // Messages moved out of it locally are gone from where they were moved to.
         ops::announce(engine, &touched);
         report.uidvalidity_changed = folder.uidvalidity.is_some();
         if report.uidvalidity_changed {
-            changed();
+            changed(labels);
         }
         (uidnext, modseq, count, max_uid) = (None, None, 0, 0);
     }
 
     let (new, vanished) = new_and_vanished(engine, session, id, count, uidnext, &status).await?;
-
     if !vanished.is_empty() {
-        report.removed = engine
-            .write(move |db| Ok(db.messages().delete_uids(id, &vanished)? as u32))
-            .await?;
-        changed();
+        let vanished = (id, status.uidvalidity, vanished);
+        unit.vanish(engine, account, vanished, report).await?;
     }
 
     // Flags of messages we already had. With CONDSTORE only what changed since the last
@@ -357,37 +681,27 @@ async fn sync_folder(
                 .map(|w| vec![RangeInclusive::new(w[0], w[w.len() - 1])])
                 .collect(),
         };
-        for uids in windows {
-            let states = session.fetch_flags(&uids, since, Items::Standard).await?;
-            let updated = engine
-                .write(move |db| Ok(db.messages().update_flags(id, &states)? as u32))
+        for ranges in windows {
+            let states = session.fetch_flags(&ranges, since, items).await?;
+            let (updated, labels) = engine
+                .write(move |db| {
+                    let messages = db.messages();
+                    let updated = messages.update_flags(id, &states)? as u32;
+                    Ok((updated, messages.touched_labels()))
+                })
                 .await?;
             if updated > 0 {
                 report.updated += updated;
-                changed();
+                changed(labels);
             }
         }
     }
 
-    // Newest first, so the top of the list fills in before the backlog.
-    let mut complete = true;
-    for batch in new.rchunks(engine.tuning.fetch_batch) {
-        let messages: Vec<NewMessage> = session
-            .fetch_summaries(batch, Items::Standard)
-            .await?
-            .into_iter()
-            .map(new_message)
-            .collect();
-        // Expunged since the SEARCH, or a response we couldn't parse.
-        complete &= messages.len() == batch.len();
-        report.added += engine
-            .write(move |db| Ok(db.messages().upsert(account, id, &messages)? as u32))
-            .await?;
-        changed();
-    }
+    let complete = fetch_new(engine, session, account, id, &new, items, report).await?;
 
     // The cursor promises that everything below it is stored; with a gap, leave the old
     // one so the next sync diffs in full.
+    unit.complete &= complete;
     if complete {
         let (uidnext, modseq) = (status.uidnext, status.highest_modseq);
         engine
@@ -398,6 +712,44 @@ async fn sync_folder(
         }
     }
     Ok(())
+}
+
+/// Fetches the messages at `new` in location `id`, which is selected, adding them to
+/// `report`: newest first, in batches, so the top of the list fills in before the
+/// backlog. False if some weren't stored: expunged since the SEARCH, in a response that
+/// couldn't be parsed, or on Gmail held for a local move.
+async fn fetch_new(
+    engine: &Arc<Engine>,
+    session: &mut Session,
+    account: AccountId,
+    id: FolderId,
+    new: &[u32],
+    items: Items,
+    report: &mut FolderSyncReport,
+) -> Result<bool> {
+    let mut complete = true;
+    for batch in new.rchunks(engine.tuning.fetch_batch) {
+        let fetched: Vec<NewMessage> = session
+            .fetch_summaries(batch, items)
+            .await?
+            .into_iter()
+            .map(new_message)
+            .collect();
+        complete &= fetched.len() == batch.len();
+        let (upserted, mut touched) = engine
+            .write(move |db| {
+                let messages = db.messages();
+                let upserted = messages.upsert(account, id, &fetched)?;
+                Ok((upserted, messages.touched_labels()))
+            })
+            .await?;
+        complete &= upserted.held == 0;
+        report.added += (upserted.added + upserted.moved) as u32;
+        // On Gmail, the labels showing them and the locations they moved from.
+        touched.extend(upserted.moved_from);
+        emit_changed(engine, account, [id].into_iter().chain(touched));
+    }
+    Ok(complete)
 }
 
 /// UIDs on the server but not stored, and stored but gone from the server. The `count`
@@ -447,29 +799,49 @@ fn sorted_difference(a: &[u32], b: &[u32]) -> Vec<u32> {
         .collect()
 }
 
-/// Assigns roles: INBOX by name, then SPECIAL-USE attributes, then well-known names for
-/// roles no folder claimed via SPECIAL-USE.
-pub(crate) fn remote_folders(listed: Vec<ListedMailbox>) -> Vec<RemoteFolder> {
+/// Each mailbox's role: INBOX by name, then SPECIAL-USE attributes, then well-known
+/// names for roles no folder claimed via SPECIAL-USE. Gmail declares every role it has, so
+/// names aren't guessed there: a user label called Trash would otherwise stand in for a
+/// Trash hidden from IMAP.
+pub(crate) fn roles(listed: &[ListedMailbox], mode: AccountMode) -> Vec<Option<FolderRole>> {
     let claimed: HashSet<FolderRole> = listed.iter().filter_map(|m| m.special_use).collect();
     let mut guessed = HashSet::new();
     listed
-        .into_iter()
+        .iter()
         .map(|m| {
-            let role = if m.raw_name.eq_ignore_ascii_case("INBOX") {
+            if m.raw_name.eq_ignore_ascii_case("INBOX") {
                 Some(FolderRole::Inbox)
-            } else if m.special_use.is_some() {
+            } else if m.special_use.is_some() || mode == AccountMode::Gmail {
                 m.special_use
             } else {
-                guess_role(&m)
-                    .filter(|r| m.selectable && !claimed.contains(r) && guessed.insert(*r))
-            };
+                guess_role(m).filter(|r| m.selectable && !claimed.contains(r) && guessed.insert(*r))
+            }
+        })
+        .collect()
+}
+
+/// The listed mailboxes with their [`roles`] and kinds: on Gmail the locations are All
+/// Mail, Trash and Spam, and every other mailbox that can hold messages is a label.
+pub(crate) fn remote_folders(listed: Vec<ListedMailbox>, mode: AccountMode) -> Vec<RemoteFolder> {
+    let roles = roles(&listed, mode);
+    listed
+        .into_iter()
+        .zip(roles)
+        .map(|(m, role)| {
+            let location = matches!(
+                role,
+                Some(FolderRole::All | FolderRole::Trash | FolderRole::Junk)
+            );
             RemoteFolder {
                 remote_name: m.raw_name,
                 name: m.name,
                 delimiter: m.delimiter,
                 role,
-                // Gmail's labels are still synced as folders (see labels.md).
-                kind: FolderKind::Location,
+                kind: if mode == AccountMode::Gmail && m.selectable && !location {
+                    FolderKind::Label
+                } else {
+                    FolderKind::Location
+                },
                 selectable: m.selectable,
             }
         })
@@ -542,15 +914,18 @@ mod tests {
 
     #[test]
     fn assigns_roles() {
-        let roles: Vec<_> = remote_folders(vec![
-            listed("INBOX", None),
-            listed("Sent Items", None),
-            listed("Archive/Sent", None),
-            listed("Mail/Spam", None),
-            listed("草稿箱", None),
-            listed("Trash", None),
-            listed("Bin", Some(FolderRole::Trash)),
-        ])
+        let roles: Vec<_> = remote_folders(
+            vec![
+                listed("INBOX", None),
+                listed("Sent Items", None),
+                listed("Archive/Sent", None),
+                listed("Mail/Spam", None),
+                listed("草稿箱", None),
+                listed("Trash", None),
+                listed("Bin", Some(FolderRole::Trash)),
+            ],
+            AccountMode::Standard,
+        )
         .into_iter()
         .map(|f| (f.remote_name, f.role))
         .collect();

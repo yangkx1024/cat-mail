@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::LazyLock;
 
 use catmail_types::{
@@ -10,7 +11,7 @@ use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 use crate::Result;
 use crate::attachments::{Attachments, NewAttachment};
 use crate::columns::{id_list, json, parse_opt_text, parse_text, to_id_list, to_json};
-use crate::folders::{Folders, LABEL_ACCOUNTS};
+use crate::folders::Folders;
 use crate::fts;
 use crate::ops::MOVING;
 
@@ -54,6 +55,26 @@ impl Page {
     }
 }
 
+/// The folders that show message `id` besides its location, as (account, folder): its
+/// labels, and Starred if it is flagged, or `flagged` (it was, or is about to be). None
+/// on a standard account. A change to the message changes their lists too.
+pub(crate) fn shown(
+    conn: &Connection,
+    id: i64,
+    flagged: bool,
+) -> Result<Vec<(AccountId, FolderId)>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT account_id, folder_id FROM message_labels WHERE message_id = ?1
+         UNION ALL
+         SELECT s.account_id, s.id FROM messages m JOIN starred s ON s.account_id = m.account_id
+         WHERE m.id = ?1 AND (?2 OR m.flags & 2 <> 0)",
+    )?;
+    let rows = stmt.query_map(params![id, flagged], |r| {
+        Ok((AccountId(r.get(0)?), FolderId(r.get(1)?)))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 /// A location's messages, in `messages_folder_date`.
 static LIST_FOLDER: LazyLock<Page> =
     LazyLock::new(|| Page::new("messages m", "m.folder_id = :key", "m.list_date", "m.id"));
@@ -78,14 +99,22 @@ static LIST_STARRED: LazyLock<Page> = LazyLock::new(|| {
     )
 });
 
-/// Which of a message's copies (`m`, in folder `f`) a search shows, best first. One moved
-/// here locally is where the user last put it, and the server doesn't know yet. Then a
-/// folder the message is filed in (Trash too) before one that only gathers messages from
-/// the others (Starred, All Mail).
-const SEARCH_PICK: &str = "m.uid IS NOT NULL,
-    CASE f.role WHEN 'inbox' THEN 0 WHEN 'sent' THEN 1 WHEN 'drafts' THEN 2
-                WHEN 'archive' THEN 3 WHEN 'junk' THEN 5 WHEN 'trash' THEN 6
-                WHEN 'flagged' THEN 7 WHEN 'all' THEN 8 ELSE 4 END";
+/// The messages a search goes through, of `messages m`: on a standard account not those
+/// of a folder that only gathers messages from the others (Dovecot's virtual `\All` and
+/// `\Flagged`), each of which is also a row in its own folder. On Gmail All Mail is a
+/// location, and Starred a label. A label or Starred searched on its own (`:folder`) is
+/// what it lists.
+const SEARCHED: &str = "
+    (:folder IS NULL
+     AND m.folder_id NOT IN (
+         SELECT f.id FROM folders f JOIN accounts a ON a.id = f.account_id
+         WHERE f.role IN ('all', 'flagged') AND a.mode = 'standard'))
+    OR m.folder_id = :folder
+    OR (m.folder_id IN all_mail
+        AND (EXISTS (SELECT 1 FROM message_labels
+                     WHERE message_id = m.id AND folder_id = :folder)
+             OR (m.flags & 2 <> 0
+                 AND m.account_id IN (SELECT account_id FROM starred WHERE id = :folder))))";
 
 /// `:after_date` and `:after_id`; without a cursor, before every row.
 fn cursor_params(cursor: Option<MessageCursor>) -> (i64, i64) {
@@ -116,6 +145,20 @@ pub struct NewMessage {
     /// X-GM-MSGID and X-GM-THRID, on Gmail.
     pub gm_msgid: Option<u64>,
     pub gm_thrid: Option<u64>,
+}
+
+/// What [`Messages::upsert`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Upserted {
+    /// Rows inserted.
+    pub added: usize,
+    /// On Gmail, rows that moved here from another location, and the locations they
+    /// left.
+    pub moved: usize,
+    pub moved_from: Vec<FolderId>,
+    /// On Gmail, messages left out because their row is being moved locally from
+    /// somewhere else: not stored here, though the server has them here.
+    pub held: usize,
 }
 
 /// A downloaded body, stored in one go with its attachments.
@@ -154,11 +197,57 @@ pub struct MessageLocation {
 
 pub struct Messages<'c> {
     conn: &'c Connection,
+    /// The label folders (Starred too) whose lists the changes made through this have
+    /// changed; see [`touched_labels`](Self::touched_labels).
+    touched: RefCell<BTreeSet<FolderId>>,
 }
 
 impl<'c> Messages<'c> {
     pub(crate) fn new(conn: &'c Connection) -> Self {
-        Self { conn }
+        Self {
+            conn,
+            touched: RefCell::default(),
+        }
+    }
+
+    /// On Gmail, the label folders whose lists the changes made through this so far
+    /// changed, besides the locations changed (a label shows messages of All Mail, Starred
+    /// the flagged ones), and forgets them. Covers [`upsert`](Self::upsert),
+    /// [`update_flags`](Self::update_flags) and [`delete_uids`](Self::delete_uids).
+    pub fn touched_labels(&self) -> Vec<FolderId> {
+        self.touched.take().into_iter().collect()
+    }
+
+    /// Notes the folders that show the message besides its location ([`shown`]).
+    fn note_shown(&self, id: i64, flagged: bool) -> Result<()> {
+        let shown = shown(self.conn, id, flagged)?;
+        self.touched
+            .borrow_mut()
+            .extend(shown.into_iter().map(|(_, folder)| folder));
+        Ok(())
+    }
+
+    /// Notes the folders that show the messages at `uids` in `folder` (all of them if
+    /// `None`) besides their location, as [`shown`] does, in one query.
+    fn note_shown_in(&self, folder: FolderId, uids: Option<&[u32]>) -> Result<()> {
+        let mut stmt = self.conn.prepare_cached(
+            "WITH m AS MATERIALIZED (
+                 SELECT id, flags FROM messages
+                 WHERE folder_id = ?1
+                   AND (?2 IS NULL OR uid IN (SELECT value FROM json_each(?2))))
+             SELECT DISTINCT folder_id FROM message_labels
+             WHERE message_id IN (SELECT id FROM m)
+             UNION
+             SELECT s.id FROM folders f JOIN starred s ON s.account_id = f.account_id
+             WHERE f.id = ?1 AND EXISTS (SELECT 1 FROM m WHERE flags & 2 <> 0)",
+        )?;
+        let uids = uids.map(to_json);
+        let shown = stmt.query_map(params![folder.0, uids], |r| Ok(FolderId(r.get(0)?)))?;
+        let mut touched = self.touched.borrow_mut();
+        for folder in shown {
+            touched.insert(folder?);
+        }
+        Ok(())
     }
 
     /// UIDs stored for `folder`, ascending.
@@ -186,13 +275,17 @@ impl<'c> Messages<'c> {
     /// Inserts messages, or refreshes the flags of ones already stored (a repeated batch
     /// after an interrupted sync). Immutable header fields are never rewritten. A
     /// message moved or deleted locally, whose op is still pending, is not brought back.
-    /// Returns how many rows were new.
+    ///
+    /// On Gmail a row is one X-GM-MSGID: a message stored in another location (moved
+    /// there by another client) moves here with its row, keeping its body, attachments
+    /// and index entry. One whose row is being moved locally is left out (`held`): until
+    /// the move is replayed, the row says where the server had it.
     pub fn upsert(
         &self,
         account: AccountId,
         folder: FolderId,
         messages: &[NewMessage],
-    ) -> Result<usize> {
+    ) -> Result<Upserted> {
         let mut insert = self.conn.prepare_cached(
             "INSERT INTO messages (account_id, folder_id, uid, flags, keywords_json, modseq,
                                    gm_msgid, gm_thrid, internal_date, size, message_id_hdr,
@@ -208,15 +301,60 @@ impl<'c> Messages<'c> {
                    AND kind IN ('move', 'delete'))
              ON CONFLICT (folder_id, uid) DO NOTHING",
         )?;
-        let mut inserted = 0;
+        let mut by_gm_msgid = self.conn.prepare_cached(
+            "SELECT id, folder_id, uid FROM messages WHERE account_id = ?1 AND gm_msgid = ?2",
+        )?;
+        let mut moving_from_here = self.conn.prepare_cached(
+            "SELECT 1 FROM pending_ops
+             WHERE folder_id = ?1 AND status = 'pending' AND uid = ?2 AND kind = 'move'",
+        )?;
+        let mut relocate = self
+            .conn
+            .prepare_cached("UPDATE messages SET folder_id = ?2, uid = ?3 WHERE id = ?1")?;
+        let mut done = Upserted::default();
         let mut labels = LabelFolders::new(self.conn, account);
         // Refreshed in one go: `update_flags` reads the folder's pending flag ops each call.
         let mut existing = Vec::new();
         for m in messages {
+            let uid = m.state.uid;
+            let stored: Option<(i64, i64, Option<u32>)> = match m.gm_msgid {
+                Some(gm_msgid) => by_gm_msgid
+                    .query_row(params![account.0, gm_msgid as i64], |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                    })
+                    .optional()?,
+                None => None,
+            };
+            match stored {
+                Some((_, f, Some(u))) if (f, u) == (folder.0, uid) => {
+                    existing.push(m.state.clone());
+                    continue;
+                }
+                Some((_, _, None)) => {
+                    // Moved here locally: this is where the move is from.
+                    if !moving_from_here.exists(params![folder.0, uid])? {
+                        done.held += 1;
+                    }
+                    continue;
+                }
+                Some((id, from, Some(_))) => {
+                    // Its labels show it no more, or again; flags and labels as here are
+                    // refreshed with the others.
+                    self.note_shown(id, false)?;
+                    relocate.execute(params![id, folder.0, uid])?;
+                    done.moved += 1;
+                    if !done.moved_from.contains(&FolderId(from)) {
+                        done.moved_from.push(FolderId(from));
+                    }
+                    existing.push(m.state.clone());
+                    continue;
+                }
+                None => {}
+            }
             let added = insert.execute(named_params! {
                 ":account": account.0,
                 ":folder": folder.0,
-                ":uid": m.state.uid,
+                ":uid": uid,
                 ":flags": m.state.flags.bits(),
                 ":keywords": to_json(&m.state.keywords),
                 ":modseq": m.state.modseq.map(|v| v as i64),
@@ -236,10 +374,15 @@ impl<'c> Messages<'c> {
                 ":has_attachments": m.has_attachments,
             })?;
             if added > 0 {
-                inserted += 1;
-                self.reindex(self.conn.last_insert_rowid())?;
+                done.added += 1;
+                let id = self.conn.last_insert_rowid();
+                self.reindex(id)?;
+                // Its labels are noted as they are set; Starred shows it if flagged.
                 if let Some(names) = &m.state.labels {
-                    self.set_labels(folder, m.state.uid, &labels.ids(names)?)?;
+                    self.set_labels(id, &labels.ids(names)?)?;
+                }
+                if m.state.flags.contains(Flags::FLAGGED) {
+                    self.note_shown(id, false)?;
                 }
             } else {
                 existing.push(m.state.clone());
@@ -248,7 +391,7 @@ impl<'c> Messages<'c> {
         if !existing.is_empty() {
             self.update_flags(folder, &existing)?;
         }
-        Ok(inserted)
+        Ok(done)
     }
 
     /// Applies the server's flags, and labels where given, to stored messages; UIDs not
@@ -271,39 +414,44 @@ impl<'c> Messages<'c> {
             let (uid, add, remove) = row?;
             local.entry(uid).or_default().push((add, remove));
         }
-        let mut update = self.conn.prepare_cached(
-            "UPDATE messages SET flags = :flags, keywords_json = :keywords, modseq = :modseq
-             WHERE folder_id = :folder AND uid = :uid
-               AND (flags, keywords_json) IS NOT (:flags, :keywords)",
+        let mut read = self.conn.prepare_cached(
+            "SELECT id, flags, keywords_json, modseq FROM messages WHERE folder_id = ?1 AND uid = ?2",
         )?;
-        // A new MODSEQ alone is no change worth counting (a message moved here locally
-        // has none until the server reports it).
-        let mut update_modseq = self.conn.prepare_cached(
-            "UPDATE messages SET modseq = :modseq
-             WHERE folder_id = :folder AND uid = :uid AND modseq IS NOT :modseq",
+        let mut update = self.conn.prepare_cached(
+            "UPDATE messages SET flags = ?2, keywords_json = ?3, modseq = ?4 WHERE id = ?1",
         )?;
         let mut labels = None;
         let mut changed = 0;
         for s in states {
+            let stored: Option<(i64, u32, String, Option<i64>)> = read
+                .query_row(params![folder.0, s.uid], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                })
+                .optional()?;
+            let Some((id, old_flags, old_keywords, old_modseq)) = stored else {
+                continue;
+            };
             let flags = local.get(&s.uid).map_or(s.flags, |changes| {
                 changes
                     .iter()
                     .fold(s.flags, |flags, &(add, remove)| flags.apply(add, remove))
             });
-            let modseq = s.modseq.map(|v| v as i64);
-            let updated = update.execute(named_params! {
-                ":folder": folder.0,
-                ":uid": s.uid,
-                ":flags": flags.bits(),
-                ":keywords": to_json(&s.keywords),
-                ":modseq": modseq,
-            })?;
-            if updated == 0 && modseq.is_some() {
-                update_modseq.execute(named_params! {
-                    ":folder": folder.0,
-                    ":uid": s.uid,
-                    ":modseq": modseq,
-                })?;
+            let keywords = to_json(&s.keywords);
+            let differs = (old_flags, &old_keywords) != (flags.bits(), &keywords);
+            // A new MODSEQ alone is no change worth counting (a message moved here locally
+            // has none until the server reports it).
+            let modseq = match s.modseq {
+                Some(m) => Some(m as i64),
+                None if differs => None,
+                None => old_modseq,
+            };
+            if differs {
+                // Starred shows it before or after.
+                let flagged = (Flags::from_bits(old_flags) | flags).contains(Flags::FLAGGED);
+                self.note_shown(id, flagged)?;
+            }
+            if differs || modseq != old_modseq {
+                update.execute(params![id, flags.bits(), keywords, modseq])?;
             }
             let relabelled = match &s.labels {
                 Some(names) => {
@@ -311,40 +459,61 @@ impl<'c> Messages<'c> {
                         Some(labels) => labels,
                         None => labels.insert(LabelFolders::of_folder(self.conn, folder)?),
                     };
-                    self.set_labels(folder, s.uid, &labels.ids(names)?)?
+                    self.set_labels(id, &labels.ids(names)?)?
                 }
                 None => false,
             };
-            changed += (updated > 0 || relabelled) as usize;
+            changed += (differs || relabelled) as usize;
         }
         Ok(changed)
     }
 
-    /// Makes the labels of the message at `uid` these label folders, adding and removing
-    /// only what differs. Returns whether that changed any.
-    fn set_labels(&self, folder: FolderId, uid: u32, labels: &[FolderId]) -> Result<bool> {
+    /// Makes the labels of message `id` these label folders, adding and removing only what
+    /// differs, and notes those. Returns whether that changed any.
+    fn set_labels(&self, id: i64, labels: &[FolderId]) -> Result<bool> {
         let wanted = to_json(&labels.iter().map(|f| f.0).collect::<Vec<_>>());
-        let removed = self
-            .conn
-            .prepare_cached(
-                "DELETE FROM message_labels
-                 WHERE message_id = (SELECT id FROM messages WHERE folder_id = ?1 AND uid = ?2)
-                   AND folder_id NOT IN (SELECT value FROM json_each(?3))",
-            )?
-            .execute(params![folder.0, uid, wanted])?;
-        let added = self
-            .conn
-            .prepare_cached(
-                "INSERT OR IGNORE INTO message_labels (message_id, folder_id, account_id, list_date)
-                 SELECT m.id, j.value, m.account_id, m.list_date
-                 FROM messages m, json_each(?3) j WHERE m.folder_id = ?1 AND m.uid = ?2",
-            )?
-            .execute(params![folder.0, uid, wanted])?;
-        Ok(removed + added > 0)
+        let mut remove = self.conn.prepare_cached(
+            "DELETE FROM message_labels
+             WHERE message_id = ?1 AND folder_id NOT IN (SELECT value FROM json_each(?2))
+             RETURNING folder_id",
+        )?;
+        let mut add = self.conn.prepare_cached(
+            "INSERT OR IGNORE INTO message_labels (message_id, folder_id, account_id, list_date)
+             SELECT m.id, j.value, m.account_id, m.list_date
+             FROM messages m, json_each(?2) j WHERE m.id = ?1
+             RETURNING folder_id",
+        )?;
+        let mut touched = self.touched.borrow_mut();
+        let mut changed = false;
+        for stmt in [&mut remove, &mut add] {
+            for folder in stmt.query_map(params![id, wanted], |r| Ok(FolderId(r.get(0)?)))? {
+                touched.insert(folder?);
+                changed = true;
+            }
+        }
+        Ok(changed)
+    }
+
+    /// Notes the folders that show any message of `folder` besides it, before a change to
+    /// all of them that goes around this, as a new UIDVALIDITY makes; see
+    /// [`touched_labels`](Self::touched_labels).
+    pub fn note_folder_shown(&self, folder: FolderId) -> Result<()> {
+        self.note_shown_in(folder, None)
+    }
+
+    /// Those of `uids` still stored in `folder`, ascending.
+    pub fn stored(&self, folder: FolderId, uids: &[u32]) -> Result<Vec<u32>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT uid FROM messages
+             WHERE folder_id = ?1 AND uid IN (SELECT value FROM json_each(?2)) ORDER BY uid",
+        )?;
+        let rows = stmt.query_map(params![folder.0, to_json(uids)], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Returns how many rows were deleted.
     pub fn delete_uids(&self, folder: FolderId, uids: &[u32]) -> Result<usize> {
+        self.note_shown_in(folder, Some(uids))?;
         let mut delete = self
             .conn
             .prepare_cached("DELETE FROM messages WHERE folder_id = ?1 AND uid = ?2")?;
@@ -353,6 +522,26 @@ impl<'c> Messages<'c> {
             deleted += delete.execute(params![folder.0, uid])?;
         }
         Ok(deleted)
+    }
+
+    /// [`delete_uids`](Self::delete_uids), if `folder` is still at `uidvalidity`: the
+    /// UIDs of another generation name other messages.
+    pub fn delete_uids_of(
+        &self,
+        folder: FolderId,
+        uidvalidity: u32,
+        uids: &[u32],
+    ) -> Result<usize> {
+        let current: Option<u32> = self
+            .conn
+            .prepare_cached("SELECT uidvalidity FROM folders WHERE id = ?1")?
+            .query_row([folder.0], |r| r.get(0))
+            .optional()?
+            .flatten();
+        if current != Some(uidvalidity) {
+            return Ok(0);
+        }
+        self.delete_uids(folder, uids)
     }
 
     /// Deletes the message the server no longer has at `location`, as a sync would, if
@@ -432,32 +621,17 @@ impl<'c> Messages<'c> {
         Ok(page)
     }
 
-    /// Messages matching the query, newest first (see [`MessageCursor`]). Bodies are only searched once
-    /// downloaded; subjects and addresses always.
-    ///
-    /// On an account with an `\All` mailbox (Gmail), folders are labels: one message is
-    /// in several of them at once, so its copies (by Message-ID) are one result, shown
-    /// from the folder [`SEARCH_PICK`] prefers. Elsewhere copies are separate messages.
+    /// Messages matching the query, newest first (see [`MessageCursor`]). Bodies are only
+    /// searched once downloaded; subjects and addresses always.
     pub fn search(&self, query: &SearchQuery) -> Result<Vec<MessageSummary>> {
         let Some(expr) = fts::match_expression(&query.text) else {
             return Ok(Vec::new());
         };
-        // A copy is one result with the others: same Message-ID, or else itself (a TEXT
-        // Message-ID never equals an INTEGER id).
         let sql = format!(
             "SELECT {SUMMARY_COLUMNS} FROM messages m
-             WHERE id IN (
-                 SELECT id FROM (
-                     SELECT m.id, row_number() OVER (
-                         PARTITION BY m.account_id, coalesce(
-                             iif(m.account_id IN ({LABEL_ACCOUNTS}), m.message_id_hdr, NULL),
-                             m.id)
-                         ORDER BY {SEARCH_PICK}, m.id) AS n
-                     FROM messages m JOIN folders f ON f.id = m.folder_id
-                     WHERE m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH :expr)
-                       AND (:account IS NULL OR m.account_id = :account)
-                       AND (:folder IS NULL OR m.folder_id = :folder))
-                 WHERE n = 1)
+             WHERE m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH :expr)
+               AND (:account IS NULL OR m.account_id = :account)
+               AND ({SEARCHED})
                AND {AFTER}
              ORDER BY {NEWEST_FIRST} LIMIT :limit"
         );
@@ -711,7 +885,7 @@ fn summary_from_row(row: &Row<'_>) -> rusqlite::Result<MessageSummary> {
 mod tests {
     use std::collections::HashSet;
 
-    use catmail_types::Folder;
+    use catmail_types::{AccountMode, Folder};
 
     use super::*;
     use crate::Store;
@@ -768,7 +942,8 @@ mod tests {
         assert_eq!(
             store
                 .write(|db| db.messages().upsert(account, folder.id, &batch))
-                .unwrap(),
+                .unwrap()
+                .added,
             3
         );
 
@@ -778,7 +953,8 @@ mod tests {
         assert_eq!(
             store
                 .write(|db| db.messages().upsert(account, folder.id, &again))
-                .unwrap(),
+                .unwrap()
+                .added,
             0
         );
 
@@ -1245,66 +1421,59 @@ mod tests {
     }
 
     #[test]
-    fn search_shows_label_copies_once() {
+    fn search_finds_each_message_once_where_it_is() {
         let store = test_util::store();
-        let gmail = test_util::account(&store, "a@gmail.com");
-        let g = folders(
-            &store,
-            gmail,
-            &[
-                ("INBOX", Some(FolderRole::Inbox)),
-                ("All Mail", Some(FolderRole::All)),
-                ("Important", None),
-                ("Trash", Some(FolderRole::Trash)),
-            ],
-        );
-        let other = test_util::account(&store, "b@example.com");
+        // Dovecot's virtual \All and \Flagged gather the messages of other folders.
+        let standard = test_util::account(&store, "b@example.com");
         let o = folders(
             &store,
-            other,
-            &[("INBOX", Some(FolderRole::Inbox)), ("Kept", None)],
+            standard,
+            &[
+                ("INBOX", Some(FolderRole::Inbox)),
+                ("Kept", None),
+                ("All", Some(FolderRole::All)),
+                ("Flagged", Some(FolderRole::Flagged)),
+            ],
         );
+        let (gmail, g) = gmail(&store);
+        store
+            .write(|db| db.accounts().set_mode(gmail, AccountMode::Gmail))
+            .unwrap();
         let put = |account, folder: FolderId, messages: &[NewMessage]| {
             store
                 .write(|db| db.messages().upsert(account, folder, messages))
                 .unwrap();
         };
-        put(gmail, g["INBOX"], &[copy(10, Some("inbox"))]);
+        for folder in ["INBOX", "Kept", "All", "Flagged"] {
+            put(standard, o[folder], &[copy(10, Some("same"))]);
+        }
+        let work = || vec![user("Work")];
         put(
             gmail,
-            g["All Mail"],
+            g["[Gmail]/All Mail"],
             &[
-                copy(10, Some("inbox")),
-                copy(20, Some("archived")),
-                copy(30, None),
-                copy(40, Some("trashed")),
+                labelled(20, Flags::empty(), work()),
+                labelled(30, Flags::FLAGGED, vec![]),
             ],
         );
         put(
             gmail,
-            g["Important"],
-            &[
-                copy(10, Some("inbox")),
-                copy(20, Some("archived")),
-                copy(30, None),
-            ],
+            g["[Gmail]/Trash"],
+            &[labelled(40, Flags::FLAGGED, work())],
         );
-        put(gmail, g["Trash"], &[copy(40, Some("trashed"))]);
-        put(other, o["INBOX"], &[copy(10, Some("inbox"))]);
-        put(other, o["Kept"], &[copy(10, Some("inbox"))]);
 
         let names: HashMap<FolderId, &str> = g
             .iter()
-            .chain(&o)
-            .map(|(name, &id)| (id, name.as_str()))
+            .map(|(&name, &id)| (id, name))
+            .chain(o.iter().map(|(name, &id)| (id, name.as_str())))
             .collect();
         // Every page of `limit`, as (subject, folder).
-        let run = |account, limit| {
+        let run = |account, folder, limit| {
             let mut found = Vec::new();
             let mut after = None;
             loop {
                 let mut q = SearchQuery::new("alice");
-                (q.account, q.limit, q.after) = (Some(account), limit, after);
+                (q.account, q.folder, q.limit, q.after) = (Some(account), folder, limit, after);
                 let page = store.read(|db| db.messages().search(&q)).unwrap();
                 let Some(last) = page.last() else {
                     return found;
@@ -1317,28 +1486,23 @@ mod tests {
             }
         };
         let s = |uid: u32, folder| (format!("subject {uid}"), folder);
-        // Each once, from where it is filed. Without a Message-ID, copies can't be told
-        // from other messages.
-        let expected = [
-            s(40, "Trash"),
-            s(30, "Important"),
-            s(30, "All Mail"),
-            s(20, "Important"),
-            s(10, "INBOX"),
-        ];
-        assert_eq!(run(gmail, 50), expected);
-        assert_eq!(run(gmail, 1), expected);
-        // Elsewhere, copies in two folders are two messages.
-        assert_eq!(run(other, 50), [s(10, "Kept"), s(10, "INBOX")]);
-
-        // Moved locally, it shows where the user put it.
-        let inbox = store
-            .read(|db| db.messages().list(g["INBOX"], 1, None))
-            .unwrap();
-        store
-            .write(|db| db.ops().move_messages(&[inbox[0].id], g["Trash"], 0))
-            .unwrap();
-        assert_eq!(run(gmail, 50)[4], s(10, "Trash"));
+        // Copies in two folders are two messages, but not those of a folder that only
+        // gathers the others; unless that is where the search looks.
+        let both = [s(10, "Kept"), s(10, "INBOX")];
+        assert_eq!(run(standard, None, 50), both);
+        assert_eq!(run(standard, None, 1), both);
+        assert_eq!(run(standard, Some(o["All"]), 50), [s(10, "All")]);
+        // On Gmail All Mail is where messages are; a label, or Starred, finds what it
+        // lists.
+        let all_mail = "[Gmail]/All Mail";
+        let everything = [s(40, "[Gmail]/Trash"), s(30, all_mail), s(20, all_mail)];
+        assert_eq!(run(gmail, None, 50), everything);
+        assert_eq!(run(gmail, None, 1), everything);
+        assert_eq!(run(gmail, Some(g["Work"]), 50), [s(20, all_mail)]);
+        assert_eq!(
+            run(gmail, Some(g["[Gmail]/Starred"]), 50),
+            [s(30, all_mail)]
+        );
     }
 
     #[test]
@@ -1633,15 +1797,41 @@ mod tests {
         assert_eq!(counted["Hidden"], (1, 0));
         assert_eq!(counted["[Gmail]/Starred"], (1, 0));
 
-        // A message is one X-GM-MSGID.
-        let again = store.write(|db| {
-            db.messages().upsert(
-                account,
-                f["[Gmail]/Trash"],
-                &[labelled(2, Flags::empty(), vec![])],
-            )
-        });
-        assert!(again.is_err());
+        // A message is one X-GM-MSGID: found in another location (another client moved
+        // it), its row moves there, and the labels that showed it no longer do.
+        let trash = f["[Gmail]/Trash"];
+        let id = |folder| {
+            store
+                .read(|db| db.messages().list(folder, 50, None))
+                .unwrap()
+                .into_iter()
+                .find(|m| m.subject.as_deref() == Some("subject 2"))
+                .map(|m| m.id)
+        };
+        let before = id(all_mail);
+        let mut trashed = labelled(2, Flags::SEEN, vec![user("Work")]);
+        trashed.state.uid = 7;
+        let (upserted, touched) = store
+            .write(|db| {
+                let messages = db.messages();
+                let upserted = messages.upsert(account, trash, &[trashed])?;
+                Ok((upserted, messages.touched_labels()))
+            })
+            .unwrap();
+        assert_eq!(
+            upserted,
+            Upserted {
+                moved: 1,
+                moved_from: vec![all_mail],
+                ..Default::default()
+            }
+        );
+        let mut showed = vec![f["Work"], f["[Gmail]/Starred"]];
+        showed.sort();
+        assert_eq!(touched, showed);
+        assert_eq!((id(all_mail), id(trash)), (None, before));
+        assert_eq!(subjects(&store, f["Work"]), Vec::<String>::new());
+        assert_eq!(counts(&store, account)["[Gmail]/Starred"], (0, 0));
 
         // A folder deleted however it is takes its messages out of the labels first.
         store
@@ -1654,6 +1844,52 @@ mod tests {
         let counted = counts(&store, account);
         assert_eq!(counted["Work"], (0, 0));
         assert_eq!(counted["[Gmail]/Starred"], (0, 0));
+    }
+
+    /// A message moved locally to Trash, not yet on the server, is where the move is from
+    /// until replayed: sync finds it there, or (moved by another client) in Trash, and
+    /// leaves its row alone either way.
+    #[test]
+    fn a_row_moving_locally_stays_until_the_move_is_replayed() {
+        let store = test_util::store();
+        let (account, f) = gmail(&store);
+        let (all_mail, trash) = (f["[Gmail]/All Mail"], f["[Gmail]/Trash"]);
+        let message = labelled(1, Flags::empty(), vec![user("Work")]);
+        store
+            .write(|db| {
+                db.messages()
+                    .upsert(account, all_mail, std::slice::from_ref(&message))
+            })
+            .unwrap();
+        let id = store
+            .read(|db| db.messages().list(all_mail, 1, None))
+            .unwrap()[0]
+            .id;
+        store
+            .write(|db| db.ops().move_messages(&[id], trash, 0))
+            .unwrap();
+
+        let upsert = |folder, uid| {
+            let mut m = message.clone();
+            m.state.uid = uid;
+            store
+                .write(|db| db.messages().upsert(account, folder, &[m]))
+                .unwrap()
+        };
+        assert_eq!(upsert(all_mail, 1), Upserted::default());
+        let held = Upserted {
+            held: 1,
+            ..Default::default()
+        };
+        assert_eq!(upsert(trash, 9), held);
+        let row = store
+            .read(|db| db.messages().location(id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (row.folder, row.server_folder, row.uid),
+            (trash, all_mail, 1)
+        );
     }
 
     /// Starred counts what is flagged in All Mail, also when it is listed only once

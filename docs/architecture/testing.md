@@ -28,7 +28,8 @@
   标签邮箱里的命令作用于邮件本身：flags 是邮件的，`\Deleted` 立即去掉这个标签（在草稿里整封删除），
   MOVE 到"所有邮件"是去掉标签，在两个标签之间 MOVE 是换标签；位置之间 MOVE 时 `X-GM-MSGID` 不变，已删除
   去掉 `\Inbox`，垃圾邮件再去掉 `\Important`。FETCH 支持 `X-GM-*`，在标签邮箱里不列它自己的标签；
-  `UID STORE ±X-GM-LABELS`、`UID SEARCH X-GM-MSGID`。
+  `UID STORE ±X-GM-LABELS`、`UID SEARCH X-GM-MSGID`。测试用 `move_message` 扮演另一个客户端在位置之间
+  移动邮件；从 `mailboxes` 里拿掉"所有邮件"就是在 Gmail 设置里把它从 IMAP 隐藏。
 - 测试还可以直接在客户端的数据库里加触发器，让某条写入失败，模拟磁盘满（`tests/common` 的 `sql`）。
 - **SMTP**：明文 / TLS / STARTTLS，AUTH PLAIN / LOGIN，记录投递的信封和正文（已去掉点填充）。故障：
   421 问候、拒绝登录、SIZE 上限、拒绝指定收件人（4xx / 5xx）、MAIL FROM 回 451 或断线、对结束标记回

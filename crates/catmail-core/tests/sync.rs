@@ -7,7 +7,7 @@ use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 
 mod common;
 
-use common::{Env, drain, env, env_added, env_built};
+use common::{Env, drain, env, env_added, env_built, folder_report};
 
 fn state_with(inbox_subjects: &[&str]) -> ServerState {
     let mut state = ServerState::new("alice", "pw");
@@ -21,14 +21,6 @@ impl Env {
     async fn sync(&self) -> SyncReport {
         self.client.sync_account(self.account).await.unwrap()
     }
-
-    async fn subjects(&self, name: &str) -> Vec<String> {
-        self.messages(name).await.into_iter().map(|m| m.0).collect()
-    }
-}
-
-fn folder_report<'a>(report: &'a SyncReport, name: &str) -> &'a catmail_core::FolderSyncReport {
-    report.folders.iter().find(|f| f.name == name).unwrap()
 }
 
 /// The fake's messages share one Date, so they sort by UID, later first.
@@ -838,13 +830,8 @@ async fn sync_folder_goes_in_between_the_folders_of_a_full_sync() {
     assert_eq!(report.added, 1);
 
     let full = full.await.unwrap().unwrap();
-    let examined: Vec<_> = env
-        .commands_since(start)
-        .into_iter()
-        .filter_map(|c| Some(c.strip_prefix("EXAMINE ")?.split(' ').next()?.to_owned()))
-        .collect();
     assert_eq!(
-        examined,
+        env.examined(start),
         ["INBOX", "Later", "Archive"],
         "the opened folder went next, and the full sync left it alone after"
     );

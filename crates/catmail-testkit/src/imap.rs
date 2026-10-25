@@ -578,6 +578,16 @@ impl ServerState {
         target.messages.push(msg);
     }
 
+    /// On Gmail, moves the message at `uid` in location `from` to location `to`, as
+    /// another client would, and returns its UID there.
+    pub fn move_message(&mut self, from: &str, uid: u32, to: &str) -> u32 {
+        self.refresh_labels();
+        let gm_msgid = self.mailbox_mut(from).message_mut(uid).gm_msgid;
+        let to = self.find(to).unwrap_or_else(|| panic!("no mailbox {to}"));
+        self.relocate(gm_msgid, to);
+        self.mailboxes[to].uidnext - 1
+    }
+
     /// On Gmail, adds or removes a label of the message; `\\Starred` is `\\Flagged`.
     fn change_label(&mut self, gm_msgid: u64, label: &str, on: bool) {
         let Some((i, at)) = self.locate(gm_msgid) else {
@@ -607,6 +617,12 @@ impl ServerState {
 
     pub fn inbox(&mut self) -> &mut FakeMailbox {
         self.mailbox_mut("INBOX")
+    }
+
+    /// How many header FETCHes the server received, as `drop_on_fetch` counts them, those
+    /// held at `fetch_gate` included.
+    pub fn header_fetches(&self) -> usize {
+        self.header_fetches
     }
 
     /// How many commands the server received that start with `prefix` (`IDLE`, `LIST`).
