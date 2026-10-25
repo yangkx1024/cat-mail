@@ -71,11 +71,9 @@ const USER_FLAGS: Flags =
 pub(crate) const MOVING: &str = "LEFT JOIN pending_ops o ON m.uid IS NULL AND o.message_id = m.id
      AND o.kind = 'move' AND o.status = 'pending'";
 
-/// Whether op `o` is a label change waiting for an earlier pending move of its message.
-const WAITING: &str = "(o.kind = 'label' AND EXISTS (
-         SELECT 1 FROM pending_ops w
-         WHERE w.folder_id = o.folder_id AND w.uidvalidity = o.uidvalidity AND w.uid = o.uid
-           AND w.kind = 'move' AND w.status = 'pending' AND w.id < o.id))";
+/// Whether op `o` waits for a move of its message (`after_op`) that is still pending.
+const WAITING: &str =
+    "EXISTS (SELECT 1 FROM pending_ops w WHERE w.id = o.after_op AND w.status = 'pending')";
 
 /// An op `o` of account `?1` (any account if NULL) that failed or conflicted.
 const SETTLED: &str = "o.status <> 'pending' AND (?1 IS NULL OR o.account_id = ?1)";
@@ -321,10 +319,10 @@ impl<'c> PendingOps<'c> {
             }
             let mut changed = false;
             for &label in remove {
-                changed |= self.label_one(&m, m.folder, label, false, now, &mut touched)?;
+                changed |= self.label_one(&m, label, false, now, &mut touched)?;
             }
             for &label in add {
-                changed |= self.label_one(&m, m.folder, label, true, now, &mut touched)?;
+                changed |= self.label_one(&m, label, true, now, &mut touched)?;
             }
             if changed {
                 self.touch_shown(m.id, false, &mut touched)?;
@@ -336,16 +334,21 @@ impl<'c> PendingOps<'c> {
     /// Moves the message, then changes its labels, as `plan` says: changed after the move,
     /// they are made after it (see `pending`), and undone with it if it is refused.
     fn carry_out(&self, m: &Local, plan: MovePlan, now: i64, touched: &mut Touched) -> Result<()> {
-        if let Some(to) = plan.to {
-            self.move_one(m, to, now, touched)?;
-        }
-        let folder = plan.to.unwrap_or(m.folder);
+        let moved;
+        let m = match plan.to {
+            Some(to) => {
+                self.move_one(m, to, now, touched)?;
+                moved = self.local(m.id)?;
+                &moved
+            }
+            None => m,
+        };
         let mut changed = false;
         for label in plan.remove {
-            changed |= self.label_one(m, folder, label, false, now, touched)?;
+            changed |= self.label_one(m, label, false, now, touched)?;
         }
         if let Some(label) = plan.add {
-            changed |= self.label_one(m, folder, label, true, now, touched)?;
+            changed |= self.label_one(m, label, true, now, touched)?;
         }
         // A move noted them already.
         if changed && plan.to.is_none() {
@@ -354,15 +357,14 @@ impl<'c> PendingOps<'c> {
         Ok(())
     }
 
-    /// Adds `label` to the message, now in `folder`, or takes it off, and queues that if it
-    /// changed; returns whether it did. The caller notes the other labels that list the
-    /// message ([`touch_shown`](Self::touch_shown)), once for all its changes. The op goes
-    /// where the server has the message; made after a move of it
-    /// (`m` is as it was before), it waits for the move and follows it (see `pending`).
+    /// Adds `label` to the message or takes it off, and queues that if it changed; returns
+    /// whether it did. The caller notes the other labels that list the message
+    /// ([`touch_shown`](Self::touch_shown)), once for all its changes. The op goes where
+    /// the server has the message; while a move of it is pending, it waits for the move
+    /// (`after_op`) and follows it (see `pending`).
     fn label_one(
         &self,
         m: &Local,
-        folder: FolderId,
         label: FolderId,
         add: bool,
         now: i64,
@@ -373,7 +375,7 @@ impl<'c> PendingOps<'c> {
         }
         touched
             .folders
-            .extend([(m.account, label), (m.account, folder)]);
+            .extend([(m.account, label), (m.account, m.folder)]);
         self.queue(m, OpKind::Label { label, add }, now)?;
         Ok(true)
     }
@@ -436,12 +438,17 @@ impl<'c> PendingOps<'c> {
             }
             match m.moving {
                 // Never made it to the target: delete it where the server still has it.
+                // What waited for the move was meant for where it was going, and goes: on
+                // Gmail, `+\Inbox` in Trash would take it out of Trash before the delete.
                 Some(op) => {
                     self.conn
                         .prepare_cached(
                             "UPDATE pending_ops SET kind = 'delete', target_folder_id = NULL
                              WHERE id = ?1",
                         )?
+                        .execute([op.0])?;
+                    self.conn
+                        .prepare_cached("DELETE FROM pending_ops WHERE after_op = ?1")?
                         .execute([op.0])?;
                 }
                 None => self.queue(&m, OpKind::Delete, now)?,
@@ -493,6 +500,7 @@ impl<'c> PendingOps<'c> {
             account,
             (folder, uidvalidity, uid),
             OpKind::Delete,
+            None,
             None,
             now,
         )?;
@@ -552,17 +560,24 @@ impl<'c> PendingOps<'c> {
                 m.id
             ))
         })?;
-        self.insert(m.account, server, kind, Some(m.id), now)
+        // A label change made while the message is moving waits for the move; a flag
+        // change is made before it, where the message still is.
+        let after = match kind {
+            OpKind::Label { .. } => m.moving,
+            _ => None,
+        };
+        self.insert(m.account, server, kind, Some(m.id), after, now)
     }
 
     /// Queues `kind` for the message the server has at `(folder, UIDVALIDITY, UID)`,
-    /// shown locally as `message` if there is such a row.
+    /// shown locally as `message` if there is such a row, after the move `after`.
     fn insert(
         &self,
         account: AccountId,
         (folder, uidvalidity, uid): (FolderId, u32, u32),
         kind: OpKind,
         message: Option<MessageId>,
+        after: Option<PendingOpId>,
         now: i64,
     ) -> Result<()> {
         let none = Flags::empty();
@@ -576,8 +591,8 @@ impl<'c> PendingOps<'c> {
             .prepare_cached(
                 "INSERT INTO pending_ops (account_id, folder_id, uidvalidity, uid, kind, flags_add,
                                           flags_remove, target_folder_id, label_add, message_id,
-                                          created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                                          after_op, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             )?
             .execute(params![
                 account.0,
@@ -590,6 +605,7 @@ impl<'c> PendingOps<'c> {
                 target,
                 label_add,
                 message.map(|m| m.0),
+                after.map(|op| op.0),
                 now
             ])?;
         Ok(())
@@ -739,7 +755,7 @@ impl<'c> PendingOps<'c> {
     /// they go in rounds: every message's first change, then every second one, and so on.
     /// A message has at most one pending move or delete (moving or deleting it again
     /// rewrites that op). A label change made after a pending move of its message isn't
-    /// here: it waits for the move, and follows the message to its new place.
+    /// here: it waits for the move (`after_op`), and follows the message to its new place.
     ///
     /// Of a message's changes to one label, only the last is made: here they all come
     /// before any move of it, so nothing changes the label on the server between them,
@@ -924,7 +940,7 @@ impl<'c> PendingOps<'c> {
                 }
                 ReplayKind::Move { .. } => {
                     touched.merge(self.restore(row, folder, op.uid)?);
-                    self.fail_waiting(folder, op, error, &mut touched)?;
+                    self.fail_waiting(op.id, error, &mut touched)?;
                 }
                 ReplayKind::Delete => {}
             }
@@ -958,27 +974,19 @@ impl<'c> PendingOps<'c> {
         }))
     }
 
-    /// Fails, with the refused move `moved`, the label changes that wait for it (see
-    /// `pending`): they were meant for where it was going.
-    fn fail_waiting(
-        &self,
-        folder: FolderId,
-        moved: &ReplayOp,
-        error: &str,
-        touched: &mut Touched,
-    ) -> Result<()> {
+    /// Fails, with the refused move `moved`, the label changes that wait for it
+    /// (`after_op`): they were meant for where it was going.
+    fn fail_waiting(&self, moved: PendingOpId, error: &str, touched: &mut Touched) -> Result<()> {
         let waiting: Vec<(PendingOpId, FolderId)> = self
             .conn
             .prepare_cached(
                 "SELECT id, target_folder_id FROM pending_ops
-                 WHERE folder_id = ?1 AND uidvalidity = ?2 AND uid = ?3 AND kind = 'label'
-                   AND status = 'pending' AND id > ?4
+                 WHERE after_op = ?1 AND kind = 'label' AND status = 'pending'
                  ORDER BY id",
             )?
-            .query_map(
-                params![folder.0, moved.uidvalidity, moved.uid, moved.id.0],
-                |r| Ok((PendingOpId(r.get(0)?), FolderId(r.get(1)?))),
-            )?
+            .query_map([moved.0], |r| {
+                Ok((PendingOpId(r.get(0)?), FolderId(r.get(1)?)))
+            })?
             .collect::<rusqlite::Result<_>>()?;
         // Oldest first: each undoes what is left after the ones before it.
         for (id, label) in waiting {
@@ -2356,6 +2364,20 @@ mod tests {
             .filter(|op| op.status == OpStatus::Failed)
             .count();
         assert_eq!(failed, 3);
+    }
+
+    #[test]
+    fn label_changes_waiting_for_a_move_go_when_it_turns_into_a_delete() {
+        let g = gmail();
+        let (m2, f) = (g.message(2), &g.f);
+        g.write(|db| {
+            db.ops()
+                .move_messages(&[m2], Some(f["Trash"]), f["INBOX"], 0)?;
+            db.ops().delete_messages(&[m2], true, 0)
+        });
+        // Not `+\Inbox` in Trash first: Gmail would take the message out of Trash.
+        assert_eq!(g.pending("Trash"), [(2, OpKind::Delete)]);
+        assert_eq!(g.store.read(|db| db.ops().list(None)).unwrap().len(), 1);
     }
 
     #[test]

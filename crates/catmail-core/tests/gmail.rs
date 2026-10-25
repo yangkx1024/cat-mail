@@ -708,6 +708,34 @@ async fn sent_mail_is_not_saved_to_sent_again() {
     );
 }
 
+/// Out of Trash into INBOX, then deleted for good before that was made: it is deleted in
+/// Trash, without `\\Inbox` added there first, which on Gmail takes it out of Trash.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restore_out_of_trash_deleted_for_good_in_time_is_deleted_there() {
+    let env = synced_env(gmail()).await;
+    let old = env.id_of(TRASH, "old").await;
+    let (trash, inbox) = (env.folder(TRASH).await.id, env.folder("INBOX").await.id);
+    env.client
+        .move_messages(vec![old], Some(trash), inbox)
+        .await
+        .unwrap();
+    env.client.delete_messages(vec![old], true).await.unwrap();
+    let start = env.fake.state().log.len();
+    let report = env.replay().await;
+    assert_eq!(report.pending, 0);
+    let changes = env.changes_since(start);
+    assert!(
+        changes.iter().all(|c| !c.contains("X-GM-LABELS")),
+        "{changes:?}"
+    );
+    assert!(
+        changes.iter().any(|c| c.starts_with("UID EXPUNGE")),
+        "{changes:?}"
+    );
+    assert!(env.subjects(TRASH).await.is_empty());
+    assert_eq!(env.subjects("INBOX").await, ["one"]);
+}
+
 /// Out of Trash into INBOX, then deleted again before that was made: nothing is moved, and
 /// `\\Inbox` is never added to the message in Trash.
 #[tokio::test(flavor = "multi_thread")]

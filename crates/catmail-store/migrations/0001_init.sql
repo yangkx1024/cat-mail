@@ -464,9 +464,9 @@ CREATE UNIQUE INDEX outbox_draft ON outbox (draft_id);
 --
 -- Within a folder, flag and label changes are replayed before moves and deletes: one
 -- recorded for a message already moved locally (its row is the move's) then reaches the
--- server before the message leaves the folder. A label change waits for an earlier
--- move of its message instead, and follows it to its new place: out of Trash, Gmail
--- takes labels in All Mail.
+-- server before the message leaves the folder. A label change made after a move of its
+-- message waits for that move instead (after_op), and follows it to its new place: out
+-- of Trash, Gmail takes labels in All Mail.
 --
 -- status: pending | failed (refused by the server; the local change was undone where
 -- nothing later depends on it) | conflict (the UIDs it names are gone with their
@@ -484,6 +484,11 @@ CREATE TABLE pending_ops (
     label_add        INTEGER,
     -- Same-account only; checked by the repository (SET NULL rules out a composite FK).
     message_id       INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+    -- The move this op waits for: it is replayed only once that move is made (the move
+    -- is then gone, and this NULL), fails with it if it is refused, and is dropped if it
+    -- turns into a delete. Only ever set to a move of the same message, so of the same
+    -- account (SET NULL rules out a composite FK).
+    after_op         INTEGER REFERENCES pending_ops(id) ON DELETE SET NULL,
     -- A move on a server without MOVE is COPY, then delete, and a COPY repeated after its
     -- answer was lost makes a second copy. So before each COPY the target, its
     -- UIDVALIDITY and UIDNEXT are committed here: a copy it made can only be at or above
@@ -513,6 +518,7 @@ CREATE INDEX pending_ops_queue ON pending_ops (folder_id, status, uid);
 CREATE INDEX pending_ops_message ON pending_ops (message_id);
 CREATE INDEX pending_ops_target ON pending_ops (target_folder_id);
 CREATE INDEX pending_ops_account ON pending_ops (account_id, status);
+CREATE INDEX pending_ops_after ON pending_ops (after_op);
 
 -- Full-text index keyed by messages.id (rowid). Contentless: the text lives in messages
 -- and message_bodies, the index only stores tokens. The Messages repository writes a row
