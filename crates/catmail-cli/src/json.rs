@@ -528,6 +528,10 @@ enum JsonChange {
         to: i64,
     },
     Delete,
+    Label {
+        label: i64,
+        add: bool,
+    },
 }
 
 impl From<&PendingOp> for JsonPendingOp {
@@ -545,6 +549,10 @@ impl From<&PendingOp> for JsonPendingOp {
                 },
                 OpKind::Move { to } => JsonChange::Move { to: to.0 },
                 OpKind::Delete => JsonChange::Delete,
+                OpKind::Label { label, add } => JsonChange::Label {
+                    label: label.0,
+                    add,
+                },
             },
             status: match op.status {
                 OpStatus::Pending => "pending",

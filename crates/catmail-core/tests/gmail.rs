@@ -430,3 +430,304 @@ async fn a_message_moved_while_the_locations_are_looked_at_again_keeps_its_row()
         "gone for good is deleted"
     );
 }
+
+impl Env {
+    /// The location on the server of the message with this subject, and its labels,
+    /// sorted.
+    fn on_server(&self, subject: &str) -> (String, Vec<String>) {
+        let header = format!("Subject: {subject}\r\n");
+        let st = self.fake.state();
+        for mb in st.mailboxes.iter().filter(|mb| mb.is_location()) {
+            for msg in &mb.messages {
+                if msg
+                    .raw
+                    .windows(header.len())
+                    .any(|w| w == header.as_bytes())
+                {
+                    let mut labels = msg.labels.clone();
+                    labels.sort();
+                    return (mb.name.clone(), labels);
+                }
+            }
+        }
+        panic!("no message {subject} on the server");
+    }
+
+    /// Changes made on the server since `start`, besides what reading sends.
+    fn changes_since(&self, start: usize) -> Vec<String> {
+        self.commands_since(start)
+            .into_iter()
+            .filter(|c| {
+                ["UID STORE", "UID MOVE", "UID COPY", "UID EXPUNGE"]
+                    .iter()
+                    .any(|p| c.starts_with(p))
+            })
+            .collect()
+    }
+}
+
+/// [`gmail`] with a second user label, Later.
+fn gmail_later() -> ServerState {
+    let mut state = gmail();
+    state.mailboxes.push(FakeMailbox::new("Later"));
+    state
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn moving_between_labels_changes_labels_where_the_message_is() {
+    let env = synced_env(gmail_later()).await;
+    let one = env.id_of("INBOX", "one").await;
+    let (inbox, later) = (env.folder("INBOX").await.id, env.folder("Later").await.id);
+
+    env.client
+        .move_messages(vec![one], Some(inbox), later)
+        .await
+        .unwrap();
+    assert!(env.subjects("INBOX").await.is_empty());
+    assert_eq!(env.subjects("Later").await, ["one"]);
+    let start = env.fake.state().log.len();
+    assert_eq!(env.replay().await.applied, 2);
+    // In All Mail, where the message is; never `\Deleted` in a label's mailbox.
+    assert_eq!(
+        env.changes_since(start),
+        [
+            "UID STORE 1 -X-GM-LABELS (\\Inbox)",
+            "UID STORE 1 +X-GM-LABELS (Later)"
+        ]
+    );
+    assert!(
+        env.commands_since(start)
+            .iter()
+            .any(|c| c.starts_with("SELECT") && c.contains(ALL_MAIL)),
+    );
+    assert_eq!(
+        env.on_server("one"),
+        (ALL_MAIL.into(), vec!["Later".into(), "Work".into()])
+    );
+
+    // The sync finds it as it is.
+    env.client.sync_account(env.account).await.unwrap();
+    assert_eq!(env.id_of("Later", "one").await, one);
+    assert!(env.subjects("INBOX").await.is_empty());
+    assert_eq!(env.subjects("Work").await, ["one"]);
+
+    // Labels added and taken off directly; Starred is \Flagged.
+    let work = env.folder("Work").await.id;
+    env.client
+        .label_messages(vec![one], vec![inbox], vec![work])
+        .await
+        .unwrap();
+    env.replay().await;
+    assert_eq!(
+        env.on_server("one"),
+        (ALL_MAIL.into(), vec!["Later".into(), "\\Inbox".into()])
+    );
+    let starred = env.folder("[Gmail]/Starred").await.id;
+    let refused = env
+        .client
+        .label_messages(vec![one], vec![starred], vec![])
+        .await;
+    assert!(
+        matches!(refused, Err(catmail_core::Error::InvalidInput(_))),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn archiving_takes_the_message_out_of_inbox() {
+    let env = synced_env(gmail()).await;
+    let one = env.id_of("INBOX", "one").await;
+    env.client.archive_messages(vec![one]).await.unwrap();
+    assert!(env.subjects("INBOX").await.is_empty());
+    assert_eq!(env.subjects(ALL_MAIL).await, ["two", "one"]);
+    let start = env.fake.state().log.len();
+    env.replay().await;
+    assert_eq!(
+        env.changes_since(start),
+        ["UID STORE 1 -X-GM-LABELS (\\Inbox)"]
+    );
+    assert_eq!(env.on_server("one"), (ALL_MAIL.into(), vec!["Work".into()]));
+}
+
+/// To Trash and back to INBOX, the message keeps its row (and body), as it does when
+/// moved on the server.
+#[tokio::test(flavor = "multi_thread")]
+async fn deleted_and_moved_back_to_inbox_it_keeps_its_row() {
+    let env = synced_env(gmail()).await;
+    let one = env.id_of("INBOX", "one").await;
+    env.client.download_message(one).await.unwrap();
+    env.client.delete_messages(vec![one], false).await.unwrap();
+    assert!(env.subjects("INBOX").await.is_empty());
+    let start = env.fake.state().log.len();
+    env.replay().await;
+    // INBOX is taken off as Gmail does, once there (to no effect: the change is known
+    // before the server makes it).
+    let changes = env.changes_since(start);
+    assert_eq!(changes[0], "UID MOVE 1 \"[Gmail]/Trash\"");
+    assert!(
+        changes[1].ends_with("-X-GM-LABELS (\\Inbox)"),
+        "{changes:?}"
+    );
+    assert_eq!(changes.len(), 2);
+    assert_eq!(env.on_server("one"), (TRASH.into(), vec!["Work".into()]));
+
+    // Out of Trash: into All Mail, where INBOX is a label, then the label.
+    let (trash, inbox) = (env.folder(TRASH).await.id, env.folder("INBOX").await.id);
+    env.client
+        .move_messages(vec![one], Some(trash), inbox)
+        .await
+        .unwrap();
+    assert_eq!(env.subjects("INBOX").await, ["one"]);
+    assert_eq!(env.subjects("Work").await, ["one"]);
+    let start = env.fake.state().log.len();
+    let report = env.replay().await;
+    assert_eq!((report.applied, report.pending), (2, 0));
+    let changes = env.changes_since(start);
+    assert!(changes[0].starts_with("UID MOVE "), "{changes:?}");
+    assert!(
+        changes[0].ends_with(&format!("\"{ALL_MAIL}\"")),
+        "{changes:?}"
+    );
+    assert!(
+        changes[1].ends_with("+X-GM-LABELS (\\Inbox)"),
+        "{changes:?}"
+    );
+    assert_eq!(
+        env.on_server("one"),
+        (ALL_MAIL.into(), vec!["Work".into(), "\\Inbox".into()])
+    );
+
+    env.client.sync_account(env.account).await.unwrap();
+    assert_eq!(env.id_of("INBOX", "one").await, one);
+    assert!(env.has_body(one).await);
+    assert_eq!(env.subjects(TRASH).await, ["old"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn refused_label_changes_are_undone() {
+    let env = synced_env(gmail_later()).await;
+    let one = env.id_of("INBOX", "one").await;
+    let (inbox, later) = (env.folder("INBOX").await.id, env.folder("Later").await.id);
+    env.client
+        .move_messages(vec![one], Some(inbox), later)
+        .await
+        .unwrap();
+    env.fake.state().faults.refuse_changes = Some("[CANNOT] Not now".into());
+    let mut events = env.client.subscribe();
+    let report = env.replay().await;
+    assert_eq!((report.applied, report.failed), (0, 2));
+    assert_eq!(env.subjects("INBOX").await, ["one"]);
+    assert!(env.subjects("Later").await.is_empty());
+    assert!(drain(&mut events).contains(&Event::ChangesRefused {
+        account: env.account
+    }));
+    let ops = env.client.list_pending(Some(env.account)).await.unwrap();
+    assert!(
+        ops.iter().all(|op| op.status == OpStatus::Failed),
+        "{ops:?}"
+    );
+}
+
+/// Drafts is a label, which keeps no UIDVALIDITY locally: the copy a newer one replaces
+/// is deleted all the same, under the generation APPENDUID gave.
+#[tokio::test(flavor = "multi_thread")]
+async fn replaced_draft_copies_are_deleted() {
+    let env = synced_env(gmail()).await;
+    let content = |subject: &str| catmail_core::DraftContent {
+        subject: subject.into(),
+        ..Default::default()
+    };
+    let draft = env
+        .client
+        .create_draft(env.account, None, content("draft one"), Vec::new())
+        .await
+        .unwrap()
+        .id;
+    env.replay().await;
+    assert_eq!(env.on_server("draft one").1, ["\\Draft"]);
+
+    env.edit(draft, content("draft two")).await.unwrap();
+    let report = env.replay().await;
+    assert_eq!((report.drafts_uploaded, report.pending), (1, 0));
+    let drafts = env
+        .fake
+        .state()
+        .mailbox_mut("[Gmail]/Drafts")
+        .messages
+        .len();
+    assert_eq!(drafts, 1, "the old copy is gone");
+    assert_eq!(env.on_server("draft two").1, ["\\Draft"]);
+    let ops = env.client.list_pending(Some(env.account)).await.unwrap();
+    assert!(ops.is_empty(), "{ops:?}");
+
+    // Its deletion left pending, then Drafts rebuilt: the copy can't be told, and the op
+    // is a conflict rather than pending for ever.
+    env.edit(draft, content("draft three")).await.unwrap();
+    {
+        // On a new connection, which isn't tried again.
+        let mut state = env.fake.state();
+        state.drop_open_connections();
+        state.faults.drop_before_change = true;
+    }
+    assert!(env.replay().await.error.is_some());
+    env.fake.state().mailbox_mut("[Gmail]/Drafts").uidvalidity += 1;
+    let report = env.replay().await;
+    assert_eq!(report.pending, 0);
+    let ops = env.client.list_pending(Some(env.account)).await.unwrap();
+    assert_eq!(ops.len(), 1);
+    assert_eq!(ops[0].status, OpStatus::Conflict);
+}
+
+/// Gmail saves what goes out through its SMTP server to Sent itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn sent_mail_is_not_saved_to_sent_again() {
+    let env = synced_env(gmail()).await;
+    let content = catmail_core::DraftContent {
+        subject: "hi".into(),
+        to: vec![common::addr("bob@example.com")],
+        ..Default::default()
+    };
+    let draft = env
+        .client
+        .create_draft(env.account, None, content, Vec::new())
+        .await
+        .unwrap();
+    env.client.send_draft(draft.id).await.unwrap();
+    env.flush().await;
+    assert_eq!(env.smtp.state().received.len(), 1);
+    assert_eq!(env.fake.state().received("APPEND"), 0);
+    assert!(
+        env.client
+            .list_outbox(Some(env.account))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Out of Trash into INBOX, then deleted again before that was made: nothing is moved, and
+/// `\\Inbox` is never added to the message in Trash.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restore_out_of_trash_cancelled_in_time_adds_no_inbox_there() {
+    let env = synced_env(gmail()).await;
+    let old = env.id_of(TRASH, "old").await;
+    let (trash, inbox) = (env.folder(TRASH).await.id, env.folder("INBOX").await.id);
+    env.client
+        .move_messages(vec![old], Some(trash), inbox)
+        .await
+        .unwrap();
+    env.client.delete_messages(vec![old], false).await.unwrap();
+    assert_eq!(env.subjects(TRASH).await, ["old"]);
+    let start = env.fake.state().log.len();
+    let report = env.replay().await;
+    assert_eq!(report.pending, 0);
+    let changes = env.changes_since(start);
+    assert!(
+        changes
+            .iter()
+            .all(|c| !c.contains("+X-GM-LABELS") && !c.contains("MOVE")),
+        "{changes:?}"
+    );
+    assert_eq!(env.on_server("old"), (TRASH.into(), vec![]));
+    assert_eq!(env.subjects("INBOX").await, ["one"]);
+}

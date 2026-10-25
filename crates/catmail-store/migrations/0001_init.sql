@@ -442,21 +442,28 @@ CREATE UNIQUE INDEX outbox_draft ON outbox (draft_id);
 --
 -- (folder_id, uidvalidity, uid) is the message on the server. UIDs are only meaningful
 -- within one UIDVALIDITY generation of one mailbox: an op is replayed only after SELECT
--- reports the same `uidvalidity`; a new generation turns the folder's ops into
--- conflicts instead of touching whatever message now has that UID.
+-- reports its `uidvalidity`, and becomes a conflict otherwise, as the folder's ops do
+-- when a sync finds a new generation, instead of touching whatever message now has
+-- that UID. The op's own generation is what counts: the copy of a draft is in Gmail's
+-- Drafts, a label, which keeps no UIDVALIDITY locally.
 --
 -- kind:
 --   flags   set flags_add, clear flags_remove: only bits that changed locally, so a
 --           refused op can be undone exactly, and flags other clients change meanwhile
 --           are left alone (+FLAGS / -FLAGS, never a replace).
+--   label   on Gmail, add (label_add = 1) or take off (0) the label target_folder_id
+--           (+X-GM-LABELS / -X-GM-LABELS): only if that changed locally, undone like
+--           flags. Always in the message's location, never in a label's mailbox.
 --   move    to target_folder_id. message_id is the row now shown there, without a UID
 --           (see messages); moving or deleting that row again rewrites this op.
 --           A move back to its own folder is resolved locally at replay.
 --   delete  \Deleted plus expunge. The row is gone.
 --
--- Within a folder, flag changes are replayed before moves and deletes: a flag change
--- recorded for a message already moved locally (its row is the move's) then reaches
--- the server before the message leaves the folder.
+-- Within a folder, flag and label changes are replayed before moves and deletes: one
+-- recorded for a message already moved locally (its row is the move's) then reaches the
+-- server before the message leaves the folder. A label change waits for an earlier
+-- move of its message instead, and follows it to its new place: out of Trash, Gmail
+-- takes labels in All Mail.
 --
 -- status: pending | failed (refused by the server; the local change was undone where
 -- nothing later depends on it) | conflict (the UIDs it names are gone with their
@@ -471,6 +478,7 @@ CREATE TABLE pending_ops (
     flags_add        INTEGER NOT NULL DEFAULT 0,
     flags_remove     INTEGER NOT NULL DEFAULT 0,
     target_folder_id INTEGER,
+    label_add        INTEGER,
     -- Same-account only; checked by the repository (SET NULL rules out a composite FK).
     message_id       INTEGER REFERENCES messages(id) ON DELETE SET NULL,
     -- A move on a server without MOVE is COPY, then delete, and a COPY repeated after its

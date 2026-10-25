@@ -2,11 +2,10 @@
 
 [← 架构](../architecture.md)
 
-**状态：部分实现。** 存储、协议和同步已经按这个模型（[步骤](#迁移步骤) 4）：Gmail 账户只同步三个位置，
-一封邮件一行。操作队列还没有：标签操作和动作映射没有做，回放仍按 Message-ID 找副本（见
-[操作队列 / Gmail 的标签](op-queue.md#gmail-的标签)），草稿邮箱是标签之后旧副本的删除也还回放不了（见
-[草稿与已发送](#草稿与已发送)）。本文是迁移的目标，按文末的步骤实现，做完一步就把对应文档改成现状。下面
-关于 Gmail 行为的说法都已在真实账户上验证过（见[验证结果](#验证结果)）。
+**状态：部分实现。** 存储、协议、同步和操作队列已经按这个模型（[步骤](#迁移步骤) 4、5）：Gmail 账户只
+同步三个位置，一封邮件一行，移动和归档改的是标签。界面还没有分开显示位置和标签（步骤 6）。本文是迁移的
+目标，按文末的步骤实现，做完一步就把对应文档改成现状。下面关于 Gmail 行为的说法都已在真实账户上验证过
+（见[验证结果](#验证结果)）。
 
 ## 目标
 
@@ -116,7 +115,9 @@
   - 每个位置各自拿锁（完整同步，见[锁](sync.md#锁)），打开文件夹和后台同步的 INBOX 步骤整个单元持有锁。
     已删除和垃圾邮件通常很小，有 CONDSTORE 时没变化就只是一次 EXAMINE。
 - **标签的变化**随 flags 一起拉：只改标签也会让邮件的 MODSEQ 变大，所以有 CONDSTORE 时一条
-  `UID FETCH 1:* (FLAGS X-GM-LABELS) (CHANGEDSINCE <modseq>)` 拿到两者的变化。
+  `UID FETCH 1:* (FLAGS X-GM-LABELS) (CHANGEDSINCE <modseq>)` 拿到两者的变化。与 flags 一样，还没回放的
+  标签改动叠加在服务器报告的标签之上（`Messages::set_labels`），否则归档之后、回放之前的同步会让 INBOX
+  又出现。
 - **删除**：Gmail 没有 QRESYNC，拿不到 VANISHED，删除仍靠现有的做法（条数对不上时 `UID SEARCH` 求差集，
   见[同步](sync.md#流程)）。
 - **只在三个位置里 FETCH `X-GM-LABELS`**：在标签邮箱里 FETCH 时，Gmail 的答复不含这个邮箱自己的标签
@@ -151,45 +152,56 @@
 
 ## 操作队列
 
-操作仍然绑定位置的（文件夹, UIDVALIDITY, UID），在 SELECT 下核对 UIDVALIDITY 后回放。
+操作仍然绑定位置的（文件夹, UIDVALIDITY, UID），在 SELECT 下核对 op 自己记下的 UIDVALIDITY 后回放
+（见[操作队列](op-queue.md)，代码在 `catmail-store/src/ops.rs` 与 `catmail-core/src/ops.rs`）。
 
-- **新增标签操作**：本地立即改 `message_labels`，回放 `UID STORE <uid> +X-GM-LABELS (…)` /
-  `-X-GM-LABELS (…)`。与 flags 一样只记实际改变的标签，被拒绝时按同样的方式逆推撤销。只加减，从不整体
-  替换，被隐藏的标签不受影响。
-- **用户的动作变成哪些操作，由引擎决定**（规则在引擎，见[架构](../architecture.md#规则在引擎措辞在前端)）：
+- **标签操作**（`MailClient::label_messages`，op 的 `kind = 'label'`）：本地立即改 `message_labels`，
+  回放 `UID STORE <uid> +X-GM-LABELS (…)` / `-X-GM-LABELS (…)`，在邮件的位置里。与 flags 一样只记实际
+  改变的标签，被拒绝时按同样的方式逆推撤销（按标签）。只加减，从不整体替换，被隐藏的标签不受影响。
+  "已加星标"不是标签，要求给它会被拒绝，改用 `\Flagged`。
+- **用户的动作变成哪些操作，由引擎决定**（`MovePlan`，在 types 里，前端用同一个函数判断能否归档、
+  可以移到哪里；见[架构](../architecture.md#规则在引擎措辞在前端)）。移动要知道用户在哪个标签里看着这封
+  邮件（`move_messages` 的 `shown_in`，搜索结果为空）：
 
   | 动作 | 普通账户 | Gmail |
   |---|---|---|
-  | 归档（在 INBOX 里） | MOVE 到归档 | 去掉 `\Inbox` |
-  | 移到某个邮箱 | MOVE | 在标签里：加上目标标签、去掉当前标签 |
-  | 删除 | MOVE 到已删除 | MOVE 到已删除（位置变化） |
+  | 归档 | MOVE 到归档 | 在"所有邮件"里的去掉 `\Inbox`，已删除、垃圾邮件里的不动 |
+  | 移到某个标签 | MOVE | 加上目标标签，在标签里看时去掉这个标签（"已加星标"除外：星标是 flag） |
+  | 移到"所有邮件" | MOVE | 在标签里看时去掉这个标签（从 INBOX 移过去就是归档） |
+  | 删除 | MOVE 到已删除 | MOVE 到已删除（位置变化），标签不动 |
   | 在已删除里永久删除 | `\Deleted` + EXPUNGE | 同左，在已删除这个位置里 |
-  | 移出已删除 / 垃圾邮件 | MOVE | MOVE 到"所有邮件"，再加上目标标签 |
+  | 移出已删除 / 垃圾邮件 | MOVE | MOVE 到"所有邮件"，移到标签的再加上目标标签 |
+  | 移到"已加星标" | 无 | 拒绝：改为加星标 |
   | 加 / 去标签 | 无 | 标签操作 |
 
-- **移到已删除**时 Gmail 去掉 `\Inbox`，保留 `\Important` 和用户标签；**移到垃圾邮件**时去掉 `\Inbox` 和
-  `\Important`，只留用户标签。本地照此改 `message_labels`，同步会再核对一遍。
+- **移到已删除 / 垃圾邮件**时 Gmail 去掉 `\Inbox`，保留 `\Important` 和用户标签；**移到垃圾邮件**时去掉
+  `\Inbox` 和 `\Important`，只留用户标签。`MovePlan` 把这些标签列为移动去掉的标签：本地立即去掉，并像
+  别的标签改动一样入队，等移动做成后在新位置回放（服务器上已经去掉了，这条 `-X-GM-LABELS` 不改变什么，
+  多一条命令）。这样服务器做的改动本地事先就知道：移动正在途中时用户又把邮件移回 INBOX，加回 `\Inbox`
+  会照常入队；移动被拒绝时它们一起失败、恢复。
 - **移出已删除 / 垃圾邮件要 MOVE 到"所有邮件"**：MOVE 到 INBOX 也能恢复，但 COPYUID 给的是 INBOX 这个
   标签邮箱里的 UID，不是位置的 UID。MOVE 到"所有邮件"的 COPYUID 就是新位置，同一行改为新的
   （文件夹, UID），与普通账户相同。COPYUID 按位置配对（RFC 4315）在 Gmail 上成立，目标 UID 可能倒序列出。
+  目标标签在 MOVE 之后才加：在一次移动之后做的标签改动等这次移动，随邮件改指新位置，同一次回放里接着做
+  （见[操作队列 / 回放](op-queue.md#回放)）；移动被拒绝时它一起失败。在已删除里给邮件加 `\Inbox` 会怎样
+  没有验证过，不依赖它。
 - **从不在标签邮箱里 `STORE \Deleted`**：Gmail 默认开着自动删除，`+\Deleted` 立即 EXPUNGE，效果是去掉
-  这个标签，邮件仍在"所有邮件"里。去标签一律用 `-X-GM-LABELS`。
-- 删掉现有的按 Message-ID 找副本的机制：`PendingOps::label_copies`、`Engine::add_label_copies`、
-  `sync::drop_vanished`、搜索里的 `SEARCH_PICK`、`LABEL_ACCOUNTS`。邮件只有一行，没有副本要找。
+  这个标签，邮件仍在"所有邮件"里。所有操作都在邮件的位置里回放，去标签一律用 `-X-GM-LABELS`。唯一的例外
+  是删除草稿的旧副本（见下文）。
+- 按 Message-ID 找副本的过渡机制已经删除：邮件只有一行，没有副本要找。
 
 ## 草稿与已发送
 
 - **草稿**：APPEND 到草稿邮箱（Gmail 上是标签），APPENDUID 给的是那个标签邮箱里的 UID 和 UIDVALIDITY；
   这封邮件在"所有邮件"里带 `\Draft` 标签。远端副本仍记（草稿邮箱, UIDVALIDITY, UID）：标签邮箱在服务器上
   照样有 UID，只是本地不同步它。在草稿邮箱里 `\Deleted` + EXPUNGE 会彻底删掉这封草稿（"所有邮件"和
-  已删除里都没有了），所以现有的"按 UID 删除旧副本"照常可用。
-  **还没做：** 回放这条删除时按本地文件夹记下的 UIDVALIDITY 核对，标签不同步、没有这个值，所以 Gmail 上
-  这些删除一直待回放，旧副本留在服务器上。步骤 5 改为按操作自己记下的那一代核对（SELECT 之后，别的代的
-  操作成为 `conflict`）。
+  已删除里都没有了），所以现有的"按 UID 删除旧副本"照常可用。回放这条删除时核对的是操作自己记下的那一代
+  （本地的标签没有 UIDVALIDITY），SELECT 之后别的代的操作成为 `conflict`。
 - **按 Message-ID 找**（APPEND 答复丢失后、保存到已发送之前）：Gmail 的 `SEARCH HEADER` 按词匹配，不是
   RFC 3501 要求的子串匹配，但整个 Message-ID（带尖括号）能搜到，现有的做法可用。
-- **已发送**：Gmail 自动把经 SMTP 发出的邮件存进已发送，再 APPEND 会多一份（[发信](sending.md#保存到-sent)
-  里的已知问题）。Gmail 账户跳过这一步。
+- **已发送**：Gmail 自动把经它的 SMTP 发出的邮件存进已发送，再 APPEND 会多一份。Gmail 账户经同一个登录、
+  同一个域的 SMTP 发出的跳过这一步；身份经别的服务器发出的 Gmail 看不到，照常保存（见
+  [发信 / 保存到 Sent](sending.md#保存到-sent)）。
 
 ## 界面
 
@@ -244,5 +256,5 @@
 4. ~~存储与同步：`folders.kind` / `listed`、`message_labels`、`gm_msgid` / `gm_thrid`、账户的模式；协议层的
    `X-GM-*`；假服务器支持 `X-GM-EXT-1`（#126）；按三个位置同步（#127）。~~ CI 里没有真的 Gmail，与真实
    服务器的行为只能手动验证。
-5. 操作队列：标签操作、动作到操作的映射；删除按 Message-ID 找副本的机制。
+5. ~~操作队列：标签操作、动作到操作的映射；删除按 Message-ID 找副本的机制（#128）。~~
 6. GUI：侧栏分开位置和标签，显示邮件的标签。

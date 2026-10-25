@@ -23,7 +23,9 @@ pub use account::{
 pub use draft::{Draft, DraftAttachment, DraftContent, Forwarding};
 pub use error::{ErrorKind, ReportedError};
 pub use event::Event;
-pub use folder::{DeleteOutcome, Folder, FolderKind, FolderRole, archive_folder, special_folder};
+pub use folder::{
+    DeleteOutcome, Folder, FolderKind, FolderRole, MovePlan, Unmovable, special_folder,
+};
 pub use ids::{
     AccountId, AttachmentId, BlobHash, DraftAttachmentId, DraftId, FolderId, IdentityId, MessageId,
     OutboxId, PendingOpId,

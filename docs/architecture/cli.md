@@ -9,7 +9,7 @@
 src/
   main.rs        clap 的顶层 `Cli` / `Command`，打开 MailClient，分发，按错误决定退出码
   cmd/           每组命令一个文件，各自带 clap 参数类型：account、sync、search（ls / search）、
-                 read（read / attachment）、ops（mark / mv / archive / rm / ops）、
+                 read（read / attachment）、ops（mark / mv / archive / rm / label / ops）、
                  compose（compose / reply / forward / draft）、outbox（send / outbox）、watch、gc；
                  mod.rs 是它们共用的查找（账户、分页游标、文件夹名）
   output.rs      给人看的输出：转义陌生人给的文本、对齐的表格、各命令的表格和信件视图
@@ -46,7 +46,7 @@ types 加变体会编译失败）。
 命令以 `exit::Exit { outcome, message }` 错误表达 3 和 4，其他错误都是 1。一次命令有多种结果时取
 最需要用户处理的：4 > 1 > 3，所以 3 只在"只是还没轮到"时出现，脚本可以放心地稍后重跑。
 
-- `mark` / `mv` / `archive` / `rm` / `ops flush`：连不上服务器（`ReplayReport.error` 的 `transient`，
+- `mark` / `mv` / `archive` / `rm` / `label` / `ops flush`：连不上服务器（`ReplayReport.error` 的 `transient`，
   改动都还在队列里）是 3；登录被拒绝也留着改动，但重跑没用、要先改密码，所以是 1；服务器拒绝了改动或
   草稿是 1，断线之前拒绝的也是。
 - `send` / `outbox retry` / `mark-sent` / `outbox flush`：`queued` / `sending` 是 3，`failed` 是 1，

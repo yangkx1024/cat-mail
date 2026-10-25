@@ -344,6 +344,9 @@ fn change(kind: OpKind, folder: &impl Fn(FolderId) -> String) -> String {
         }
         OpKind::Move { to } => format!("move to {}", folder(to)),
         OpKind::Delete => "delete".into(),
+        OpKind::Label { label, add } => {
+            format!("{}label {}", if add { "+" } else { "-" }, folder(label))
+        }
     }
 }
 

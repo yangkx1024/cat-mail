@@ -130,6 +130,14 @@ pub struct Folder {
     pub last_synced_at: Option<i64>,
 }
 
+impl Folder {
+    /// Whether it is a Gmail label a message can be given. Starred is a label's mailbox
+    /// too, but it shows `\Flagged` rather than a label.
+    pub fn is_label(&self) -> bool {
+        self.kind == FolderKind::Label && self.role != Some(FolderRole::Flagged)
+    }
+}
+
 /// The folder the engine uses for `role` among an account's folders: where Delete moves
 /// to, Archive moves to, sent mail is saved. An account may list several with a role;
 /// it is the selectable one with the lowest id. The store's `Folders::by_role` applies
@@ -171,13 +179,140 @@ impl DeleteOutcome {
     }
 }
 
-/// Where archiving moves a message in `from`, one of the account's `folders`: its Archive
-/// folder ([`special_folder`]), unless the message is in an Archive folder already.
-pub fn archive_folder(folders: &[Folder], from: FolderId) -> Option<FolderId> {
-    if role_of(folders, from) == Some(FolderRole::Archive) {
-        return None;
+/// What moving or archiving a message does (see `docs/architecture/labels.md`). On a
+/// standard account every mailbox is a location, and a move changes it. On Gmail most
+/// mailboxes are labels: a move between them changes labels, and only one into or out
+/// of Trash or Spam changes the location.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MovePlan {
+    /// The location it moves to.
+    pub to: Option<FolderId>,
+    /// The labels it loses, once in `to` if it moves: the one it was looked at in, or
+    /// those Gmail takes off in Trash and Spam (Gmail does that itself; they are taken
+    /// off here so that the change is known before the server makes it).
+    pub remove: Vec<FolderId>,
+    /// The label it gets, once in `to` if it moves.
+    pub add: Option<FolderId>,
+}
+
+/// Why a message can't be moved to a folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unmovable {
+    /// Not one of the account's folders.
+    NotFound,
+    /// A hierarchy node (`\Noselect`).
+    HoldsNoMessages,
+    /// Starred, which is `\Flagged`: star the message instead.
+    Starred,
+}
+
+impl MovePlan {
+    /// For a message in location `from` that is looked at in `shown_in` (a label, on
+    /// Gmail; otherwise, or with `None`, where it is), moved to `to`; all of them among
+    /// the account's `folders`. From a label the move takes that label off, as Gmail
+    /// does. Empty if it is there already.
+    pub fn of(
+        folders: &[Folder],
+        from: FolderId,
+        shown_in: Option<FolderId>,
+        to: FolderId,
+    ) -> Result<Self, Unmovable> {
+        let target = folders
+            .iter()
+            .find(|f| f.id == to)
+            .ok_or(Unmovable::NotFound)?;
+        if !target.selectable {
+            return Err(Unmovable::HoldsNoMessages);
+        }
+        // Starred stays: it is a flag, not a label the message was moved out of.
+        let shown = shown_in
+            .and_then(|id| folders.iter().find(|f| f.id == id))
+            .filter(|f| f.is_label())
+            .map(|f| f.id);
+        Ok(match target.kind {
+            // Into the location it is in: out of the label only (to All Mail from INBOX
+            // is archiving it).
+            FolderKind::Location if to == from => Self {
+                remove: shown.into_iter().collect(),
+                ..Self::default()
+            },
+            FolderKind::Location => Self {
+                to: Some(to),
+                remove: taken_off_in(folders, target),
+                ..Self::default()
+            },
+            FolderKind::Label if !target.is_label() => return Err(Unmovable::Starred),
+            FolderKind::Label if shown_in == Some(to) => Self::default(),
+            FolderKind::Label => {
+                // A label shows the messages of All Mail: one in Trash or Spam goes there.
+                let all = all_mail(folders);
+                Self {
+                    to: all.filter(|&all| all != from),
+                    remove: shown.filter(|_| all == Some(from)).into_iter().collect(),
+                    add: Some(to),
+                }
+            }
+        })
     }
-    special_folder(folders, FolderRole::Archive).map(|f| f.id)
+
+    /// Archiving a message in location `from`, one of the account's `folders`. On a
+    /// standard account it moves to the Archive folder ([`special_folder`]), unless it is
+    /// in an Archive folder already. On Gmail it loses `\Inbox`, if it is in All Mail.
+    /// `None` if there is nothing archiving can do.
+    pub fn archive(folders: &[Folder], from: FolderId) -> Option<Self> {
+        if let Some(inbox) = inbox_label(folders) {
+            return (all_mail(folders)? == from).then(|| Self {
+                remove: vec![inbox],
+                ..Self::default()
+            });
+        }
+        if role_of(folders, from) == Some(FolderRole::Archive) {
+            return None;
+        }
+        Some(Self {
+            to: Some(special_folder(folders, FolderRole::Archive)?.id),
+            ..Self::default()
+        })
+    }
+
+    /// Whether the account archives at all: it has an Archive folder, or is Gmail's.
+    pub fn can_archive(folders: &[Folder]) -> bool {
+        inbox_label(folders).is_some() || special_folder(folders, FolderRole::Archive).is_some()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// The labels Gmail takes off a message moved into `location`: `\Inbox` in Trash, that
+/// and `\Important` in Spam. None on a standard account.
+fn taken_off_in(folders: &[Folder], location: &Folder) -> Vec<FolderId> {
+    let roles: &[FolderRole] = match location.role {
+        Some(FolderRole::Trash) => &[FolderRole::Inbox],
+        Some(FolderRole::Junk) => &[FolderRole::Inbox, FolderRole::Important],
+        _ => &[],
+    };
+    roles
+        .iter()
+        .filter_map(|&role| special_folder(folders, role))
+        .filter(|f| f.is_label())
+        .map(|f| f.id)
+        .collect()
+}
+
+/// Gmail's INBOX, a label.
+fn inbox_label(folders: &[Folder]) -> Option<FolderId> {
+    special_folder(folders, FolderRole::Inbox)
+        .filter(|f| f.kind == FolderKind::Label)
+        .map(|f| f.id)
+}
+
+/// Gmail's All Mail, the location of every message not in Trash or Spam.
+fn all_mail(folders: &[Folder]) -> Option<FolderId> {
+    special_folder(folders, FolderRole::All)
+        .filter(|f| f.kind == FolderKind::Location)
+        .map(|f| f.id)
 }
 
 fn role_of(folders: &[Folder], id: FolderId) -> Option<FolderRole> {
@@ -247,6 +382,13 @@ mod tests {
         assert!(DeleteOutcome::NoTrash.is_permanent());
     }
 
+    fn moves_to(to: i64) -> MovePlan {
+        MovePlan {
+            to: Some(FolderId(to)),
+            ..MovePlan::default()
+        }
+    }
+
     #[test]
     fn archiving_skips_what_is_archived_already() {
         let folders = [
@@ -254,9 +396,104 @@ mod tests {
             folder(4, Some(FolderRole::Archive), true),
             folder(6, Some(FolderRole::Archive), true),
         ];
-        assert_eq!(archive_folder(&folders, FolderId(1)), Some(FolderId(4)));
-        assert_eq!(archive_folder(&folders, FolderId(4)), None);
-        assert_eq!(archive_folder(&folders, FolderId(6)), None);
-        assert_eq!(archive_folder(&folders[..1], FolderId(1)), None);
+        let archive = |from| MovePlan::archive(&folders, FolderId(from));
+        assert_eq!(archive(1), Some(moves_to(4)));
+        assert_eq!(archive(4), None);
+        assert_eq!(archive(6), None);
+        assert_eq!(MovePlan::archive(&folders[..1], FolderId(1)), None);
+    }
+
+    /// INBOX (1), Work (2), Starred (3) and Important (4) are labels; All Mail (5),
+    /// Trash (6) and Spam (7) locations.
+    fn gmail() -> Vec<Folder> {
+        let label = |id, role| Folder {
+            kind: FolderKind::Label,
+            ..folder(id, role, true)
+        };
+        vec![
+            label(1, Some(FolderRole::Inbox)),
+            label(2, None),
+            label(3, Some(FolderRole::Flagged)),
+            label(4, Some(FolderRole::Important)),
+            folder(5, Some(FolderRole::All), true),
+            folder(6, Some(FolderRole::Trash), true),
+            folder(7, Some(FolderRole::Junk), true),
+        ]
+    }
+
+    #[test]
+    fn moves_on_gmail_change_labels_unless_into_or_out_of_trash_or_spam() {
+        let folders = gmail();
+        let plan = |from, shown_in: Option<i64>, to| {
+            MovePlan::of(
+                &folders,
+                FolderId(from),
+                shown_in.map(FolderId),
+                FolderId(to),
+            )
+        };
+        let labels = |add: Option<i64>, remove: Option<i64>| MovePlan {
+            to: None,
+            add: add.map(FolderId),
+            remove: remove.map(FolderId).into_iter().collect(),
+        };
+        let moves = |to: i64, remove: &[i64]| MovePlan {
+            to: Some(FolderId(to)),
+            remove: remove.iter().copied().map(FolderId).collect(),
+            add: None,
+        };
+        // From INBOX to Work; from All Mail or a search, Work is only added.
+        assert_eq!(plan(5, Some(1), 2), Ok(labels(Some(2), Some(1))));
+        assert_eq!(plan(5, Some(5), 2), Ok(labels(Some(2), None)));
+        assert_eq!(plan(5, None, 2), Ok(labels(Some(2), None)));
+        // Starred keeps the star; it is no target.
+        assert_eq!(plan(5, Some(3), 2), Ok(labels(Some(2), None)));
+        assert_eq!(plan(5, Some(1), 3), Err(Unmovable::Starred));
+        // To All Mail from INBOX archives it; to where it is changes nothing.
+        assert_eq!(plan(5, Some(1), 5), Ok(labels(None, Some(1))));
+        assert!(plan(5, Some(2), 2).unwrap().is_empty());
+        assert!(plan(5, None, 5).unwrap().is_empty());
+        // Trash and Spam are locations, which take INBOX (and Important) off; out of
+        // them, into All Mail first.
+        assert_eq!(plan(5, Some(2), 6), Ok(moves(6, &[1])));
+        assert_eq!(plan(6, Some(6), 7), Ok(moves(7, &[1, 4])));
+        assert_eq!(plan(6, Some(6), 5), Ok(moves(5, &[])));
+        assert_eq!(
+            plan(6, Some(6), 1),
+            Ok(MovePlan {
+                to: Some(FolderId(5)),
+                add: Some(FolderId(1)),
+                remove: Vec::new()
+            })
+        );
+        assert_eq!(plan(5, None, 9), Err(Unmovable::NotFound));
+    }
+
+    #[test]
+    fn archiving_on_gmail_takes_inbox_off() {
+        let folders = gmail();
+        let inbox = MovePlan {
+            remove: vec![FolderId(1)],
+            ..MovePlan::default()
+        };
+        assert_eq!(MovePlan::archive(&folders, FolderId(5)), Some(inbox));
+        assert_eq!(MovePlan::archive(&folders, FolderId(6)), None);
+        assert_eq!(MovePlan::archive(&folders, FolderId(7)), None);
+        assert!(MovePlan::can_archive(&folders));
+    }
+
+    #[test]
+    fn moves_on_a_standard_account_change_the_folder() {
+        let folders = [
+            folder(1, Some(FolderRole::Inbox), true),
+            folder(2, None, true),
+            folder(3, None, false),
+        ];
+        let plan =
+            |from, to| MovePlan::of(&folders, FolderId(from), Some(FolderId(1)), FolderId(to));
+        assert_eq!(plan(1, 2), Ok(moves_to(2)));
+        assert!(plan(1, 1).unwrap().is_empty());
+        assert_eq!(plan(1, 3), Err(Unmovable::HoldsNoMessages));
+        assert!(!MovePlan::can_archive(&folders));
     }
 }

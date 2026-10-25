@@ -72,7 +72,7 @@ store / IMAP / SMTP 错误包在不透明的 `StoreError` / `ImapError` / `SmtpE
 推导，否则引擎的规则一变，前端就静默偏离（以后的 IPC 前端还会再抄一遍）：
 
 - 特殊文件夹：`special_folder`（某角色用哪个文件夹：可选中、id 最小）、`DeleteOutcome`（移到 Trash /
-  已在任一 Trash 中永久删除 / 没有 Trash）、`archive_folder`，都作用于账户的文件夹列表。store 的
+  已在任一 Trash 中永久删除 / 没有 Trash）、`MovePlan`（移动、归档改变位置还是标签），都作用于账户的文件夹列表。store 的
   `by_role`、`delete_messages`、`archive_messages` 调用的是同样这几个函数，规则只写一处。
 - outbox：`OutboxStatus::went_out / needs_user / can_retry / can_mark_sent / can_cancel /
   retry_may_duplicate`，store 的状态转换也用它们判断。
@@ -104,7 +104,7 @@ BlobStore 自然只存一份。
 
 Gmail 的文件夹是标签，同一封邮件出现在几个邮箱里。决定改为按 `X-GM-MSGID` 一封一行：它有一个位置
 （"所有邮件"、已删除或垃圾邮件里的 UID），其余邮箱是它的标签。普通账户是没有标签的特例，两者是同一套
-模型。存储和同步已经这样做，操作队列和界面还没有，见[位置与标签](architecture/labels.md)。
+模型。存储、同步和操作队列已经这样做，界面还没有，见[位置与标签](architecture/labels.md)。
 
 UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UID 的东西（操作队列、草稿的远端
 副本）都同时记下文件夹和它的 UIDVALIDITY，使用前核对。UIDVALIDITY 变化时这个文件夹的旧代际

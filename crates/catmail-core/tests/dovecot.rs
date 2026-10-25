@@ -252,7 +252,7 @@ async fn check_changes(client: &MailClient, account: AccountId, maildir: &Path, 
         .await
         .unwrap();
     client
-        .move_messages(vec![third], moved_to.id)
+        .move_messages(vec![third], None, moved_to.id)
         .await
         .unwrap();
     client.delete_messages(vec![large], true).await.unwrap();

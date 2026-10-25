@@ -19,6 +19,11 @@ pub enum OpKind {
     },
     /// Deletes the message for good (`\Deleted` and expunge).
     Delete,
+    /// Adds a Gmail label to the message, or takes it off; only if that changed locally.
+    Label {
+        label: FolderId,
+        add: bool,
+    },
 }
 
 /// Where a queued change is. Applied changes are gone.

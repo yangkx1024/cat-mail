@@ -12,13 +12,13 @@
 use std::collections::{BTreeSet, HashMap, hash_map::Entry};
 
 use catmail_types::{
-    AccountId, DeleteOutcome, Flags, Folder, FolderId, FolderRole, MessageId, OpKind, OpStatus,
-    PendingOp, PendingOpId, archive_folder, special_folder,
+    AccountId, DeleteOutcome, Flags, Folder, FolderId, FolderKind, GmailLabel, MessageId, MovePlan,
+    OpKind, OpStatus, PendingOp, PendingOpId, Unmovable,
 };
 use rusqlite::{Connection, OptionalExtension, Params, Row, params};
 
-use crate::columns::{conversion_error, parse_text};
-use crate::folders::{Folders, LABEL_ACCOUNTS};
+use crate::columns::{conversion_error, parse_opt_text, parse_text};
+use crate::folders::Folders;
 use crate::messages::shown;
 use crate::{Error, Result};
 
@@ -71,6 +71,12 @@ const USER_FLAGS: Flags =
 pub(crate) const MOVING: &str = "LEFT JOIN pending_ops o ON m.uid IS NULL AND o.message_id = m.id
      AND o.kind = 'move' AND o.status = 'pending'";
 
+/// Whether op `o` is a label change waiting for an earlier pending move of its message.
+const WAITING: &str = "(o.kind = 'label' AND EXISTS (
+         SELECT 1 FROM pending_ops w
+         WHERE w.folder_id = o.folder_id AND w.uidvalidity = o.uidvalidity AND w.uid = o.uid
+           AND w.kind = 'move' AND w.status = 'pending' AND w.id < o.id))";
+
 /// An op `o` of account `?1` (any account if NULL) that failed or conflicted.
 const SETTLED: &str = "o.status <> 'pending' AND (?1 IS NULL OR o.account_id = ?1)";
 
@@ -78,12 +84,24 @@ const SETTLED: &str = "o.status <> 'pending' AND (?1 IS NULL OR o.account_id = ?
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayOp {
     pub id: PendingOpId,
+    /// The generation `uid` is of: the op is made only if the server reports it.
+    pub uidvalidity: u32,
     pub uid: u32,
     pub kind: ReplayKind,
     /// For a move on a server without MOVE: where an earlier COPY may have put it.
     pub copy: Option<CopyCheckpoint>,
     /// With `copy`: the copy's UID there, if the COPY was answered with COPYUID.
     pub copy_uid: Option<u32>,
+    /// For a label change: the earlier changes of the same label of the message, oldest
+    /// first, which this one makes moot. They are settled with it.
+    pub superseded: Vec<ReplayOp>,
+}
+
+impl ReplayOp {
+    /// The ops settled when this one is: those it supersedes, oldest first, then itself.
+    pub fn settled(&self) -> impl Iterator<Item = &ReplayOp> {
+        self.superseded.iter().chain(std::iter::once(self))
+    }
 }
 
 /// The target of a COPY as it was right before the COPY was sent.
@@ -97,12 +115,24 @@ pub struct CopyCheckpoint {
     pub uidnext: u32,
 }
 
-/// [`OpKind`], with the target's name on the server for a move.
+/// [`OpKind`], with the target's name on the server for a move, and the label as
+/// X-GM-LABELS names it for a label change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplayKind {
-    Flags { add: Flags, remove: Flags },
-    Move { to: FolderId, remote_name: String },
+    Flags {
+        add: Flags,
+        remove: Flags,
+    },
+    Move {
+        to: FolderId,
+        remote_name: String,
+    },
     Delete,
+    Label {
+        label: FolderId,
+        name: GmailLabel,
+        add: bool,
+    },
 }
 
 #[cfg(test)]
@@ -112,18 +142,9 @@ impl ReplayKind {
             Self::Flags { add, remove } => OpKind::Flags { add, remove },
             Self::Move { to, .. } => OpKind::Move { to },
             Self::Delete => OpKind::Delete,
+            Self::Label { label, add, .. } => OpKind::Label { label, add },
         }
     }
-}
-
-/// The [`ReplayFolder`] in columns `id, name, remote_name, uidvalidity`.
-fn replay_folder(r: &Row<'_>) -> rusqlite::Result<ReplayFolder> {
-    Ok(ReplayFolder {
-        id: FolderId(r.get(0)?),
-        name: r.get(1)?,
-        remote_name: r.get(2)?,
-        uidvalidity: r.get(3)?,
-    })
 }
 
 /// A folder with ops to replay.
@@ -132,16 +153,8 @@ pub struct ReplayFolder {
     pub id: FolderId,
     pub name: String,
     pub remote_name: String,
-    /// The ops are replayed only if the server still reports this one.
-    pub uidvalidity: Option<u32>,
-}
-
-/// Copies in `folder` of messages being moved, which the move may take with them (see
-/// [`PendingOps::label_copies`]).
-#[derive(Debug, Clone)]
-pub struct LabelCopies {
-    pub folder: ReplayFolder,
-    pub uids: Vec<u32>,
+    /// Those [`pending`](PendingOps::pending) gives now.
+    pub ops: Vec<PendingOpId>,
 }
 
 /// What the server said a move did (COPYUID): the target's UIDVALIDITY, and the new
@@ -153,8 +166,8 @@ pub struct Moved {
 }
 
 const COLUMNS: &str = "o.id, o.account_id, o.folder_id, o.message_id, o.kind, o.flags_add,
-    o.flags_remove, o.target_folder_id, o.status, o.attempts, o.last_error, o.created_at,
-    m.subject";
+    o.flags_remove, o.target_folder_id, o.label_add, o.status, o.attempts, o.last_error,
+    o.created_at, m.subject";
 
 /// A message as a local change sees it.
 struct Local {
@@ -217,44 +230,160 @@ impl<'c> PendingOps<'c> {
         Ok(touched)
     }
 
-    /// Moves the messages to `to`, a selectable folder of their account. They show
-    /// there at once, without a UID until the move is made on the server.
-    pub fn move_messages(&self, messages: &[MessageId], to: FolderId, now: i64) -> Result<Touched> {
-        let target = match Folders::new(self.conn).get(to)? {
-            Some(folder) if folder.selectable => folder.account_id,
-            Some(_) => return Err(Error::Invalid(format!("folder {to} can't hold messages"))),
-            None => return Err(Error::Invalid(format!("folder {to} not found"))),
-        };
+    /// Moves the messages, looked at in `shown_in` (see [`MovePlan::of`]), to `to`, a
+    /// folder of their account. On a standard account they show there at once, without
+    /// a UID until the move is made on the server; on Gmail a move between labels
+    /// changes their labels.
+    pub fn move_messages(
+        &self,
+        messages: &[MessageId],
+        shown_in: Option<FolderId>,
+        to: FolderId,
+        now: i64,
+    ) -> Result<Touched> {
         let mut touched = Touched::new();
+        let mut folders = HashMap::new();
         for &id in messages {
             let m = self.local(id)?;
-            if m.account != target {
-                return Err(Error::Invalid(format!(
-                    "message {id} can't move to another account's folder"
-                )));
-            }
-            self.move_one(&m, to, now, &mut touched)?;
+            let folders = self.folders_of(&mut folders, m.account)?;
+            let plan = MovePlan::of(folders, m.folder, shown_in, to).map_err(|e| {
+                Error::Invalid(match e {
+                    Unmovable::NotFound => {
+                        format!("folder {to} not found in message {id}'s account")
+                    }
+                    Unmovable::HoldsNoMessages => format!("folder {to} can't hold messages"),
+                    Unmovable::Starred => "messages are starred, not moved to Starred".into(),
+                })
+            })?;
+            self.carry_out(&m, plan, now, &mut touched)?;
         }
         Ok(touched)
     }
 
-    /// Moves the messages to their account's Archive folder, those not in an Archive
-    /// folder already ([`archive_folder`]). Fails, changing nothing, if an account has
-    /// no Archive folder.
+    /// Archives the messages ([`MovePlan::archive`]): moves them to their account's
+    /// Archive folder, those not in an Archive folder already, or on Gmail takes
+    /// `\Inbox` off. Fails, changing nothing, if a standard account has no Archive
+    /// folder.
     pub fn archive_messages(&self, messages: &[MessageId], now: i64) -> Result<Touched> {
         let mut touched = Touched::new();
         let mut folders = HashMap::new();
         for &id in messages {
             let m = self.local(id)?;
             let folders = self.folders_of(&mut folders, m.account)?;
-            if special_folder(folders, FolderRole::Archive).is_none() {
+            if !MovePlan::can_archive(folders) {
                 return Err(Error::Invalid("the account has no Archive folder".into()));
             }
-            if let Some(to) = archive_folder(folders, m.folder) {
-                self.move_one(&m, to, now, &mut touched)?;
+            if let Some(plan) = MovePlan::archive(folders, m.folder) {
+                self.carry_out(&m, plan, now, &mut touched)?;
             }
         }
         Ok(touched)
+    }
+
+    /// Adds the Gmail labels `add` to the messages and takes `remove` off, queueing what
+    /// actually changed. Starred is no label: it is `\Flagged`.
+    pub fn label_messages(
+        &self,
+        messages: &[MessageId],
+        add: &[FolderId],
+        remove: &[FolderId],
+        now: i64,
+    ) -> Result<Touched> {
+        if add.iter().any(|label| remove.contains(label)) {
+            return Err(Error::Invalid(
+                "a label can't be both added and taken off".into(),
+            ));
+        }
+        let mut touched = Touched::new();
+        let mut folders = HashMap::new();
+        for &id in messages {
+            let m = self.local(id)?;
+            for &label in add.iter().chain(remove) {
+                match self
+                    .folders_of(&mut folders, m.account)?
+                    .iter()
+                    .find(|f| f.id == label)
+                {
+                    Some(f) if f.is_label() => {}
+                    Some(f) if f.kind == FolderKind::Label => {
+                        return Err(Error::Invalid(format!(
+                            "{} is \\Flagged, not a label: star the messages instead",
+                            f.name
+                        )));
+                    }
+                    Some(f) => return Err(Error::Invalid(format!("{} is not a label", f.name))),
+                    None => {
+                        return Err(Error::Invalid(format!(
+                            "folder {label} not found in message {id}'s account"
+                        )));
+                    }
+                }
+            }
+            for &label in remove {
+                self.label_one(&m, m.folder, label, false, now, &mut touched)?;
+            }
+            for &label in add {
+                self.label_one(&m, m.folder, label, true, now, &mut touched)?;
+            }
+        }
+        Ok(touched)
+    }
+
+    /// Moves the message, then changes its labels, as `plan` says: changed after the move,
+    /// they are made after it (see `pending`), and undone with it if it is refused.
+    fn carry_out(&self, m: &Local, plan: MovePlan, now: i64, touched: &mut Touched) -> Result<()> {
+        if let Some(to) = plan.to {
+            self.move_one(m, to, now, touched)?;
+        }
+        let folder = plan.to.unwrap_or(m.folder);
+        for label in plan.remove {
+            self.label_one(m, folder, label, false, now, touched)?;
+        }
+        if let Some(label) = plan.add {
+            self.label_one(m, folder, label, true, now, touched)?;
+        }
+        Ok(())
+    }
+
+    /// Adds `label` to the message, now in `folder`, or takes it off, and queues that if it
+    /// changed. The op goes where the server has the message; made after a move of it
+    /// (`m` is as it was before), it waits for the move and follows it (see `pending`).
+    fn label_one(
+        &self,
+        m: &Local,
+        folder: FolderId,
+        label: FolderId,
+        add: bool,
+        now: i64,
+        touched: &mut Touched,
+    ) -> Result<()> {
+        if !self.set_label(m.id, label, add)? {
+            return Ok(());
+        }
+        touched
+            .folders
+            .extend([(m.account, label), (m.account, folder)]);
+        self.queue(m, OpKind::Label { label, add }, now)
+    }
+
+    /// Adds `label` to message `row` or takes it off. Returns whether that changed it.
+    fn set_label(&self, row: MessageId, label: FolderId, add: bool) -> Result<bool> {
+        let changed = if add {
+            self.conn
+                .prepare_cached(
+                    "INSERT OR IGNORE INTO message_labels (message_id, folder_id, account_id,
+                                                           list_date)
+                     SELECT id, ?2, account_id, list_date FROM messages WHERE id = ?1",
+                )?
+                .execute(params![row.0, label.0])?
+        } else {
+            self.conn
+                .prepare_cached(
+                    "DELETE FROM message_labels WHERE message_id = ?1 AND folder_id = ?2",
+                )?
+                .execute(params![row.0, label.0])?
+        };
+        Ok(changed > 0)
     }
 
     /// Moves the messages to their account's Trash, or deletes them for good if they are
@@ -271,14 +400,19 @@ impl<'c> PendingOps<'c> {
         for &id in messages {
             let m = self.local(id)?;
             touched.folders.insert((m.account, m.folder));
+            let folders = self.folders_of(&mut folders, m.account)?;
             let outcome = if permanently {
                 DeleteOutcome::Permanent
             } else {
-                DeleteOutcome::of(self.folders_of(&mut folders, m.account)?, m.folder)
+                DeleteOutcome::of(folders, m.folder)
             };
             match outcome {
                 DeleteOutcome::ToTrash(trash) => {
-                    self.move_one(&m, trash, now, &mut touched)?;
+                    // On Gmail it loses INBOX there too.
+                    let plan = MovePlan::of(folders, m.folder, None, trash).map_err(|_| {
+                        Error::Invalid("the Trash folder can't hold messages".into())
+                    })?;
+                    self.carry_out(&m, plan, now, &mut touched)?;
                     continue;
                 }
                 DeleteOutcome::NoTrash => {
@@ -324,7 +458,7 @@ impl<'c> PendingOps<'c> {
         let taken: bool = self.conn.query_row(
             "SELECT EXISTS (SELECT 1 FROM pending_ops
                             WHERE folder_id = ?1 AND uidvalidity = ?2 AND uid = ?3
-                              AND kind <> 'flags' AND status = 'pending')",
+                              AND kind IN ('move', 'delete') AND status = 'pending')",
             params![folder.0, uidvalidity, uid],
             |r| r.get(0),
         )?;
@@ -419,16 +553,19 @@ impl<'c> PendingOps<'c> {
         message: Option<MessageId>,
         now: i64,
     ) -> Result<()> {
-        let (name, add, remove, target) = match kind {
-            OpKind::Flags { add, remove } => ("flags", add, remove, None),
-            OpKind::Move { to } => ("move", Flags::empty(), Flags::empty(), Some(to.0)),
-            OpKind::Delete => ("delete", Flags::empty(), Flags::empty(), None),
+        let none = Flags::empty();
+        let (name, add, remove, target, label_add) = match kind {
+            OpKind::Flags { add, remove } => ("flags", add, remove, None, None),
+            OpKind::Move { to } => ("move", none, none, Some(to.0), None),
+            OpKind::Delete => ("delete", none, none, None, None),
+            OpKind::Label { label, add } => ("label", none, none, Some(label.0), Some(add)),
         };
         self.conn
             .prepare_cached(
                 "INSERT INTO pending_ops (account_id, folder_id, uidvalidity, uid, kind, flags_add,
-                                          flags_remove, target_folder_id, message_id, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                          flags_remove, target_folder_id, label_add, message_id,
+                                          created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             )?
             .execute(params![
                 account.0,
@@ -439,6 +576,7 @@ impl<'c> PendingOps<'c> {
                 add.bits(),
                 remove.bits(),
                 target,
+                label_add,
                 message.map(|m| m.0),
                 now
             ])?;
@@ -560,68 +698,61 @@ impl<'c> PendingOps<'c> {
 
     /// Folders of `account` with ops to replay, INBOX first.
     pub fn pending_folders(&self, account: AccountId) -> Result<Vec<ReplayFolder>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT id, name, remote_name, uidvalidity FROM folders
-             WHERE id IN (SELECT folder_id FROM pending_ops
-                          WHERE account_id = ?1 AND status = 'pending')
-             ORDER BY remote_name <> 'INBOX', id",
-        )?;
-        let rows = stmt.query_map([account.0], replay_folder)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
-    /// On a labels account ([`LABEL_ACCOUNTS`]): the other copies of messages with a
-    /// pending move, by folder, UIDs ascending. Moving a message can move those too (to
-    /// Trash, the server takes every label off), so they are looked for once it is made.
-    pub fn label_copies(&self, account: AccountId) -> Result<Vec<LabelCopies>> {
         let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT DISTINCT f.id, f.name, f.remote_name, f.uidvalidity, c.uid
-             FROM pending_ops o
-             JOIN messages m ON m.id = o.message_id AND m.account_id = o.account_id
-             JOIN messages c ON c.account_id = m.account_id
-                            AND c.message_id_hdr = m.message_id_hdr
-             JOIN folders f ON f.id = c.folder_id
-             WHERE o.account_id = ?1 AND o.status = 'pending' AND o.kind = 'move'
-               AND c.uid IS NOT NULL AND c.folder_id NOT IN (o.folder_id, m.folder_id)
-               AND ?1 IN ({LABEL_ACCOUNTS})
-             ORDER BY f.id, c.uid"
+            "SELECT f.id, f.name, f.remote_name, o.id FROM pending_ops o
+             JOIN folders f ON f.id = o.folder_id
+             WHERE o.account_id = ?1 AND o.status = 'pending' AND NOT {WAITING}
+             ORDER BY f.remote_name <> 'INBOX', f.id, o.id"
         ))?;
-        let mut copies: Vec<LabelCopies> = Vec::new();
+        let mut folders: Vec<ReplayFolder> = Vec::new();
         let mut rows = stmt.query([account.0])?;
         while let Some(r) = rows.next()? {
-            let (id, uid) = (FolderId(r.get(0)?), r.get(4)?);
-            match copies.last_mut() {
-                Some(last) if last.folder.id == id => last.uids.push(uid),
-                _ => copies.push(LabelCopies {
-                    folder: replay_folder(r)?,
-                    uids: vec![uid],
+            let (id, op) = (FolderId(r.get(0)?), PendingOpId(r.get(3)?));
+            match folders.last_mut() {
+                Some(last) if last.id == id => last.ops.push(op),
+                _ => folders.push(ReplayFolder {
+                    id,
+                    name: r.get(1)?,
+                    remote_name: r.get(2)?,
+                    ops: vec![op],
                 }),
             }
         }
-        Ok(copies)
+        Ok(folders)
     }
 
     /// The folder's ops in replay order, grouped by what they do so that one command can
-    /// make each group: flag changes, then moves and deletes. Only the order of one
-    /// message's flag changes matters, so they go in rounds: every message's first
-    /// change, then every second one, and so on. A message has at most one pending move
-    /// or delete (moving or deleting it again rewrites that op).
+    /// make each group: flag changes, label changes, then moves and deletes. Only the
+    /// order of one message's flag changes, or changes to one of its labels, matters, so
+    /// they go in rounds: every message's first change, then every second one, and so on.
+    /// A message has at most one pending move or delete (moving or deleting it again
+    /// rewrites that op). A label change made after a pending move of its message isn't
+    /// here: it waits for the move, and follows the message to its new place.
+    ///
+    /// Of a message's changes to one label, only the last is made: here they all come
+    /// before any move of it, so nothing changes the label on the server between them,
+    /// and adding or taking off a label ends the same whatever was done before. The rest
+    /// go along ([`ReplayOp::superseded`]). So a restore out of Trash cancelled before it
+    /// was made never adds `\Inbox` to a message in Trash.
     pub fn pending(&self, folder: FolderId) -> Result<Vec<ReplayOp>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT o.id, o.uid, o.kind, o.flags_add, o.flags_remove, o.target_folder_id,
-                    t.remote_name, o.copy_folder_id, c.remote_name AS copy_remote_name,
-                    o.copy_uidvalidity, o.copy_uidnext, o.copy_uid
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT o.id, o.uidvalidity, o.uid, o.kind, o.flags_add, o.flags_remove,
+                    o.target_folder_id, o.label_add, t.remote_name, t.name, t.role,
+                    o.copy_folder_id, c.remote_name AS copy_remote_name, o.copy_uidvalidity,
+                    o.copy_uidnext, o.copy_uid
              FROM pending_ops o
              LEFT JOIN folders t ON t.id = o.target_folder_id
              LEFT JOIN folders c ON c.id = o.copy_folder_id
-             WHERE o.folder_id = ?1 AND o.status = 'pending'
-             ORDER BY o.kind <> 'flags',
-                      row_number() OVER (PARTITION BY o.kind, o.uid ORDER BY o.id),
-                      o.kind, o.flags_add, o.flags_remove, o.target_folder_id, o.id",
-        )?;
+             WHERE o.folder_id = ?1 AND o.status = 'pending' AND NOT {WAITING}
+             ORDER BY o.kind <> 'flags', o.kind <> 'label',
+                      row_number() OVER (PARTITION BY o.kind, o.uid, o.target_folder_id
+                                         ORDER BY o.id),
+                      o.kind, o.flags_add, o.flags_remove, o.label_add, o.target_folder_id, o.id"
+        ))?;
         let rows = stmt.query_map([folder.0], |r| {
             Ok(ReplayOp {
                 id: PendingOpId(r.get("id")?),
+                uidvalidity: r.get("uidvalidity")?,
                 uid: r.get("uid")?,
                 kind: match kind(r)? {
                     OpKind::Flags { add, remove } => ReplayKind::Flags { add, remove },
@@ -631,6 +762,11 @@ impl<'c> PendingOps<'c> {
                         remote_name: r.get("remote_name")?,
                     },
                     OpKind::Delete => ReplayKind::Delete,
+                    OpKind::Label { label, add } => ReplayKind::Label {
+                        label,
+                        name: gmail_label(r)?,
+                        add,
+                    },
                 },
                 copy: match r.get::<_, Option<i64>>("copy_folder_id")? {
                     Some(folder) => Some(CopyCheckpoint {
@@ -642,9 +778,11 @@ impl<'c> PendingOps<'c> {
                     None => None,
                 },
                 copy_uid: r.get("copy_uid")?,
+                superseded: Vec::new(),
             })
         })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let ops: Vec<ReplayOp> = rows.collect::<rusqlite::Result<_>>()?;
+        Ok(supersede(ops))
     }
 
     /// The server made these flag changes or deletions.
@@ -741,51 +879,101 @@ impl<'c> PendingOps<'c> {
     }
 
     /// The server refused these ops of `folder`. Each is marked failed and its local
-    /// change undone: the message's flags become what the changes still pending make of
-    /// what they were before any of them, a moved message goes back. A deleted message
+    /// change undone: the message's flags (or one of its labels) become what the changes
+    /// still pending make of what they were before any of them, a moved message goes
+    /// back, and the label changes waiting for its move fail with it. A deleted message
     /// can't be restored here; the next sync fetches it again. A move changed meanwhile
     /// stays pending, for its new target. Returns the folders whose messages this changed.
     pub fn failed(&self, folder: FolderId, ops: &[ReplayOp], error: &str) -> Result<Touched> {
         let mut touched = Touched::new();
         for op in ops {
-            // Only flag changes and deletes have no target; a move only if it still goes
+            // Flag changes and deletes have no target; a move only fails if it still goes
             // where it went when it was refused.
-            let target = match &op.kind {
-                ReplayKind::Move { to, .. } => Some(to.0),
+            let target = match op.kind {
+                ReplayKind::Move { to, .. } | ReplayKind::Label { label: to, .. } => Some(to),
                 _ => None,
             };
-            let row: Option<(i64, Option<i64>)> = self
-                .conn
-                .prepare_cached(
-                    "UPDATE pending_ops SET status = 'failed', last_error = ?2
-                     WHERE id = ?1 AND status = 'pending' AND target_folder_id IS ?3
-                     RETURNING account_id, message_id",
-                )?
-                .query_row(params![op.id.0, error, target], |r| {
-                    Ok((r.get(0)?, r.get(1)?))
-                })
-                .optional()?;
-            let Some((account, row)) = row else {
+            let Some(row) = self.fail(op.id, target, error, &mut touched)? else {
                 continue;
             };
-            touched.refused.insert(AccountId(account));
-            match (&op.kind, row) {
-                (ReplayKind::Flags { .. }, Some(row)) => {
+            match op.kind {
+                ReplayKind::Flags { .. } => {
                     // Starred shows it before or after: its flags as they were, then as
                     // unwound.
-                    self.touch_shown(MessageId(row), false, &mut touched)?;
+                    self.touch_shown(row, false, &mut touched)?;
+                    touched.folders.extend(self.unwind_flags(row, op.id)?);
+                    self.touch_shown(row, false, &mut touched)?;
+                }
+                ReplayKind::Label { label, .. } => {
                     touched
                         .folders
-                        .extend(self.unwind_flags(MessageId(row), op.id)?);
-                    self.touch_shown(MessageId(row), false, &mut touched)?;
+                        .extend(self.unwind_label(row, label, op.id)?);
                 }
-                (ReplayKind::Move { .. }, Some(row)) => {
-                    touched.merge(self.restore(MessageId(row), folder, op.uid)?);
+                ReplayKind::Move { .. } => {
+                    touched.merge(self.restore(row, folder, op.uid)?);
+                    self.fail_waiting(folder, op, error, &mut touched)?;
                 }
-                _ => {}
+                ReplayKind::Delete => {}
             }
         }
         Ok(touched)
+    }
+
+    /// Marks op `id` failed, if it is still pending and goes to `target`, recording its
+    /// account in `touched`. Returns its message, if it was marked and has one.
+    fn fail(
+        &self,
+        id: PendingOpId,
+        target: Option<FolderId>,
+        error: &str,
+        touched: &mut Touched,
+    ) -> Result<Option<MessageId>> {
+        let failed: Option<(i64, Option<i64>)> = self
+            .conn
+            .prepare_cached(
+                "UPDATE pending_ops SET status = 'failed', last_error = ?2
+                 WHERE id = ?1 AND status = 'pending' AND target_folder_id IS ?3
+                 RETURNING account_id, message_id",
+            )?
+            .query_row(params![id.0, error, target.map(|f| f.0)], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()?;
+        Ok(failed.and_then(|(account, row)| {
+            touched.refused.insert(AccountId(account));
+            row.map(MessageId)
+        }))
+    }
+
+    /// Fails, with the refused move `moved`, the label changes that wait for it (see
+    /// `pending`): they were meant for where it was going.
+    fn fail_waiting(
+        &self,
+        folder: FolderId,
+        moved: &ReplayOp,
+        error: &str,
+        touched: &mut Touched,
+    ) -> Result<()> {
+        let waiting: Vec<(PendingOpId, FolderId)> = self
+            .conn
+            .prepare_cached(
+                "SELECT id, target_folder_id FROM pending_ops
+                 WHERE folder_id = ?1 AND uidvalidity = ?2 AND uid = ?3 AND kind = 'label'
+                   AND status = 'pending' AND id > ?4
+                 ORDER BY id",
+            )?
+            .query_map(
+                params![folder.0, moved.uidvalidity, moved.uid, moved.id.0],
+                |r| Ok((PendingOpId(r.get(0)?), FolderId(r.get(1)?))),
+            )?
+            .collect::<rusqlite::Result<_>>()?;
+        // Oldest first: each undoes what is left after the ones before it.
+        for (id, label) in waiting {
+            if let Some(row) = self.fail(id, Some(label), error, touched)? {
+                touched.folders.extend(self.unwind_label(row, label, id)?);
+            }
+        }
+        Ok(())
     }
 
     /// Records where a COPY is about to put these messages; see [`CopyCheckpoint`].
@@ -892,6 +1080,54 @@ impl<'c> PendingOps<'c> {
         Ok(Some(folder))
     }
 
+    /// Takes the refused change `failed` to `label` out of the message's labels, as
+    /// [`unwind_flags`](Self::unwind_flags) does for flags: each change of the label
+    /// changed it, so before them all it was the opposite of the first. The pending ones
+    /// are made again on that; one that changes nothing now is dropped. Returns the
+    /// label and the message's folder.
+    fn unwind_label(
+        &self,
+        row: MessageId,
+        label: FolderId,
+        failed: PendingOpId,
+    ) -> Result<Vec<(AccountId, FolderId)>> {
+        let changes: Vec<(i64, bool)> = self
+            .conn
+            .prepare_cached(
+                "SELECT id, label_add FROM pending_ops
+                 WHERE message_id = ?1 AND kind = 'label' AND target_folder_id = ?2
+                   AND (status = 'pending' OR id = ?3)
+                 ORDER BY id",
+            )?
+            .query_map(params![row.0, label.0, failed.0], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let Some(&(_, first)) = changes.first() else {
+            return Ok(Vec::new());
+        };
+        let mut has = !first;
+        let mut drop = self
+            .conn
+            .prepare_cached("DELETE FROM pending_ops WHERE id = ?1")?;
+        for &(id, add) in changes.iter().filter(|(id, _)| *id != failed.0) {
+            if add == has {
+                drop.execute([id])?;
+            }
+            has = add;
+        }
+        self.set_label(row, label, has)?;
+        let folder: Option<(AccountId, FolderId)> = self
+            .conn
+            .prepare_cached("SELECT account_id, folder_id FROM messages WHERE id = ?1")?
+            .query_row([row.0], folder_of)
+            .optional()?;
+        Ok(folder
+            .into_iter()
+            .flat_map(|(account, folder)| [(account, folder), (account, label)])
+            .collect())
+    }
+
     /// The connection was lost while replaying these; they stay pending.
     pub fn attempted(&self, ops: &[ReplayOp], error: &str) -> Result<()> {
         let mut update = self.conn.prepare_cached(
@@ -927,9 +1163,11 @@ impl<'c> PendingOps<'c> {
     }
 
     /// Turns the folder's pending ops of other generations than `keep` into conflicts,
-    /// dropping the rows of their moves: those UIDs are gone. Returns the folders whose
-    /// messages or ops this changed.
-    pub(crate) fn end_generation(&self, folder: FolderId, keep: Option<u32>) -> Result<Touched> {
+    /// dropping the rows of their moves: those UIDs are gone. Sync asks when it finds a
+    /// new generation, replay before making them (a label's mailbox, Gmail's Drafts that
+    /// holds the copies of drafts, is never synced). Returns the folders whose messages or
+    /// ops this changed.
+    pub fn end_generation(&self, folder: FolderId, keep: Option<u32>) -> Result<Touched> {
         self.conflict(
             "folder_id = ?1 AND uidvalidity IS NOT ?2",
             params![folder.0, keep],
@@ -1055,11 +1293,53 @@ fn kind(r: &Row<'_>) -> rusqlite::Result<OpKind> {
             to: FolderId(r.get("target_folder_id")?),
         },
         "delete" => OpKind::Delete,
+        "label" => OpKind::Label {
+            label: FolderId(r.get("target_folder_id")?),
+            add: r.get("label_add")?,
+        },
         other => {
             let error = format!("unknown operation kind `{other}`");
             return Err(conversion_error(r, "kind", error.into()));
         }
     })
+}
+
+/// Folds every message's earlier changes to a label into its last one (see
+/// [`PendingOps::pending`]), keeping the order of what is left.
+fn supersede(ops: Vec<ReplayOp>) -> Vec<ReplayOp> {
+    let key = |op: &ReplayOp| match op.kind {
+        ReplayKind::Label { label, .. } => Some((op.uid, label)),
+        _ => None,
+    };
+    let mut last = HashMap::new();
+    for (i, op) in ops.iter().enumerate() {
+        if let Some(key) = key(op) {
+            last.insert(key, i);
+        }
+    }
+    let mut earlier: HashMap<(u32, FolderId), Vec<ReplayOp>> = HashMap::new();
+    let mut kept = Vec::with_capacity(ops.len());
+    for (i, mut op) in ops.into_iter().enumerate() {
+        match key(&op) {
+            Some(key) if last[&key] != i => earlier.entry(key).or_default().push(op),
+            Some(key) => {
+                op.superseded = earlier.remove(&key).unwrap_or_default();
+                kept.push(op);
+            }
+            None => kept.push(op),
+        }
+    }
+    kept
+}
+
+/// The label of a label op as X-GM-LABELS names it, from its folder's `role`,
+/// `remote_name` and `name`.
+fn gmail_label(r: &Row<'_>) -> rusqlite::Result<GmailLabel> {
+    Ok(GmailLabel::for_mailbox(
+        parse_opt_text(r, "role")?,
+        r.get("remote_name")?,
+        r.get("name")?,
+    ))
 }
 
 fn from_row(r: &Row<'_>) -> rusqlite::Result<PendingOp> {
@@ -1079,7 +1359,9 @@ fn from_row(r: &Row<'_>) -> rusqlite::Result<PendingOp> {
 
 #[cfg(test)]
 mod tests {
-    use catmail_types::{FlagState, Folder};
+    use std::collections::HashMap;
+
+    use catmail_types::{FlagState, Folder, FolderRole};
 
     use super::*;
     use crate::Db;
@@ -1205,56 +1487,11 @@ mod tests {
     }
 
     #[test]
-    fn moves_on_a_labels_account_name_the_other_copies() {
-        let f = setup();
-        let copy = |uid, message_id: &str| NewMessage {
-            state: FlagState {
-                uid,
-                ..Default::default()
-            },
-            message_id: Some(message_id.into()),
-            ..Default::default()
-        };
-        // (folder, uids) of the copies.
-        let copies = |f: &Fixture| -> Vec<(FolderId, Vec<u32>)> {
-            let copies = f.store.read(|db| db.ops().label_copies(f.account)).unwrap();
-            copies.into_iter().map(|c| (c.folder.id, c.uids)).collect()
-        };
-        f.write(|db| {
-            db.messages()
-                .upsert(f.account, f.inbox, &[copy(4, "x"), copy(5, "y")])?;
-            db.messages()
-                .upsert(f.account, f.archive, &[copy(1, "x"), copy(2, "y")])?;
-            db.messages().upsert(f.account, f.trash, &[copy(1, "x")])
-        });
-        let (x, y) = (f.message(f.inbox, 4), f.message(f.inbox, 5));
-        f.write(|db| db.ops().move_messages(&[x], f.trash, 0));
-        f.write(|db| db.ops().set_flags(&[y], Flags::SEEN, Flags::empty(), 0));
-        // Elsewhere, copies are messages of their own.
-        assert!(copies(&f).is_empty());
-
-        f.write(|db| {
-            db.folders().reconcile(
-                f.account,
-                &[
-                    folder("INBOX", Some(FolderRole::Inbox)),
-                    folder("Archive", Some(FolderRole::Archive)),
-                    folder("Trash", Some(FolderRole::Trash)),
-                    folder("All Mail", Some(FolderRole::All)),
-                ],
-            )?;
-            Ok(())
-        });
-        // Not in the folder it is moved from or to; not for a flag change.
-        assert_eq!(copies(&f), [(f.archive, vec![1])]);
-    }
-
-    #[test]
     fn deleting_by_server_location_leaves_what_the_user_moved() {
         let f = setup();
         let (inbox, account) = (f.inbox, f.account);
         let m2 = f.message(inbox, 2);
-        f.write(|db| db.ops().move_messages(&[m2], f.archive, 1));
+        f.write(|db| db.ops().move_messages(&[m2], None, f.archive, 1));
         let delete = |uid| f.write(|db| db.ops().delete_on_server(account, inbox, 7, uid, 2));
 
         assert!(delete(2).is_empty(), "moved by the user meanwhile");
@@ -1439,7 +1676,7 @@ mod tests {
     fn moved_messages_show_in_the_target_until_the_server_moves_them() {
         let f = setup();
         let m2 = f.message(f.inbox, 2);
-        let touched = f.write(|db| db.ops().move_messages(&[m2], f.archive, 0));
+        let touched = f.write(|db| db.ops().move_messages(&[m2], None, f.archive, 0));
         assert_eq!(
             touched,
             Touched::from([(f.account, f.inbox), (f.account, f.archive)])
@@ -1490,7 +1727,7 @@ mod tests {
     fn moves_without_new_uids_leave_it_to_the_next_sync() {
         let f = setup();
         let (m2, m3) = (f.message(f.inbox, 2), f.message(f.inbox, 3));
-        f.write(|db| db.ops().move_messages(&[m2, m3], f.archive, 0));
+        f.write(|db| db.ops().move_messages(&[m2, m3], None, f.archive, 0));
         let ops = f.pending(f.inbox);
         // The server answered without COPYUID, or for another UIDVALIDITY.
         f.write(|db| {
@@ -1507,12 +1744,12 @@ mod tests {
     fn a_message_moved_on_while_in_flight_follows_it() {
         let f = setup();
         let m2 = f.message(f.inbox, 2);
-        f.write(|db| db.ops().move_messages(&[m2], f.archive, 0));
+        f.write(|db| db.ops().move_messages(&[m2], None, f.archive, 0));
         let in_flight = f.pending(f.inbox);
         // While the server moves it to Archive, the user moves it on to Trash, and marks
         // it read.
         f.write(|db| {
-            db.ops().move_messages(&[m2], f.trash, 0)?;
+            db.ops().move_messages(&[m2], None, f.trash, 0)?;
             db.ops().set_flags(&[m2], Flags::SEEN, Flags::empty(), 0)
         });
         f.write(|db| {
@@ -1558,8 +1795,8 @@ mod tests {
         let f = setup();
         let m2 = f.message(f.inbox, 2);
         f.write(|db| {
-            db.ops().move_messages(&[m2], f.archive, 0)?;
-            db.ops().move_messages(&[m2], f.inbox, 0)
+            db.ops().move_messages(&[m2], None, f.archive, 0)?;
+            db.ops().move_messages(&[m2], None, f.inbox, 0)
         });
         assert_eq!(f.row(m2), Some((f.inbox, None, Flags::empty())));
         let ops = f.pending(f.inbox);
@@ -1575,7 +1812,7 @@ mod tests {
     fn refused_moves_go_back() {
         let f = setup();
         let m2 = f.message(f.inbox, 2);
-        f.write(|db| db.ops().move_messages(&[m2], f.archive, 0));
+        f.write(|db| db.ops().move_messages(&[m2], None, f.archive, 0));
         let ops = f.pending(f.inbox);
         f.write(|db| db.ops().failed(f.inbox, &ops, "NO [TRYCREATE]"));
         assert_eq!(f.row(m2), Some((f.inbox, Some(2), Flags::empty())));
@@ -1584,10 +1821,10 @@ mod tests {
 
         // One that was sent elsewhere meanwhile waits for its new target instead.
         let m3 = f.message(f.inbox, 3);
-        f.write(|db| db.ops().move_messages(&[m3], f.archive, 0));
+        f.write(|db| db.ops().move_messages(&[m3], None, f.archive, 0));
         let ops = f.pending(f.inbox);
         f.write(|db| {
-            db.ops().move_messages(&[m3], f.trash, 0)?;
+            db.ops().move_messages(&[m3], None, f.trash, 0)?;
             db.ops().failed(f.inbox, &ops, "NO")
         });
         assert_eq!(f.row(m3), Some((f.trash, None, Flags::empty())));
@@ -1644,9 +1881,9 @@ mod tests {
         );
         // Archive, Trash, Archive, as a user triaging would.
         f.write(|db| {
-            db.ops().move_messages(&[m1], f.archive, 0)?;
+            db.ops().move_messages(&[m1], None, f.archive, 0)?;
             db.ops().delete_messages(&[m2], false, 0)?;
-            db.ops().move_messages(&[m3], f.archive, 0)
+            db.ops().move_messages(&[m3], None, f.archive, 0)
         });
         let order: Vec<(u32, OpKind)> = f
             .pending(f.inbox)
@@ -1726,7 +1963,7 @@ mod tests {
         f.write(|db| {
             db.ops()
                 .set_flags(&[m1], Flags::FLAGGED, Flags::empty(), 0)?;
-            db.ops().move_messages(&[m2], f.archive, 0)
+            db.ops().move_messages(&[m2], None, f.archive, 0)
         });
         let touched = f.write(|db| db.folders().reset_uidvalidity(f.inbox, 8));
         assert_eq!(touched.refused, BTreeSet::from([f.account]));
@@ -1741,7 +1978,7 @@ mod tests {
     fn a_new_generation_keeps_messages_on_their_way_in() {
         let f = setup();
         let m2 = f.message(f.inbox, 2);
-        f.write(|db| db.ops().move_messages(&[m2], f.archive, 0));
+        f.write(|db| db.ops().move_messages(&[m2], None, f.archive, 0));
         // The target is rebuilt: the move names INBOX's UID, which still holds.
         let touched = f.write(|db| db.folders().reset_uidvalidity(f.archive, 8));
         assert!(touched.refused.is_empty());
@@ -1758,8 +1995,8 @@ mod tests {
         let f = setup();
         let (m2, m3) = (f.message(f.inbox, 2), f.message(f.inbox, 3));
         f.write(|db| {
-            db.ops().move_messages(&[m2], f.archive, 0)?;
-            db.ops().move_messages(&[m3], f.trash, 0)
+            db.ops().move_messages(&[m2], None, f.archive, 0)?;
+            db.ops().move_messages(&[m3], None, f.trash, 0)
         });
         // Archive is gone from the server: m2 goes back to INBOX, where the server has it.
         f.write(|db| {
@@ -1793,7 +2030,8 @@ mod tests {
         });
         let m1 = f.message(f.inbox, 1);
         assert!(matches!(
-            f.store.write(|db| db.ops().move_messages(&[m1], theirs, 0)),
+            f.store
+                .write(|db| db.ops().move_messages(&[m1], None, theirs, 0)),
             Err(Error::Invalid(_))
         ));
         f.write(|db| {
@@ -1805,10 +2043,391 @@ mod tests {
         });
         assert!(matches!(
             f.store
-                .write(|db| db.ops().move_messages(&[m1], f.archive, 0)),
+                .write(|db| db.ops().move_messages(&[m1], None, f.archive, 0)),
             Err(Error::Invalid(_))
         ));
         assert_eq!(f.row(m1).unwrap().0, f.inbox);
+    }
+
+    /// The Gmail account of [`test_util::gmail`], its folders named without `[Gmail]/`.
+    /// Message 1 is in All Mail, in INBOX and Important, message 2 in Trash.
+    struct Gmail {
+        store: TestStore,
+        account: AccountId,
+        f: HashMap<&'static str, FolderId>,
+    }
+
+    fn gmail() -> Gmail {
+        let store = test_util::store();
+        let (account, f) = test_util::gmail(&store);
+        let f: HashMap<_, _> = f
+            .into_iter()
+            .map(|(name, id)| (name.trim_start_matches("[Gmail]/"), id))
+            .collect();
+        let message = |uid: u32, labels: Vec<GmailLabel>| NewMessage {
+            state: FlagState {
+                uid,
+                labels: Some(labels),
+                ..Default::default()
+            },
+            subject: Some(format!("m{uid}")),
+            gm_msgid: Some(100 + uid as u64),
+            ..Default::default()
+        };
+        store
+            .write(|db| {
+                let labels = [FolderRole::Inbox, FolderRole::Important].map(GmailLabel::System);
+                db.messages()
+                    .upsert(account, f["All Mail"], &[message(1, labels.into())])?;
+                db.messages()
+                    .upsert(account, f["Trash"], &[message(2, Vec::new())])
+            })
+            .unwrap();
+        Gmail { store, account, f }
+    }
+
+    impl Gmail {
+        fn write<T>(&self, f: impl FnOnce(&Db<'_>) -> Result<T>) -> T {
+            self.store.write(f).unwrap()
+        }
+
+        fn message(&self, n: u32) -> MessageId {
+            self.store
+                .read(|db| {
+                    Ok(db.conn.query_row(
+                        "SELECT id FROM messages WHERE gm_msgid = ?1",
+                        [100 + n],
+                        |r| Ok(MessageId(r.get(0)?)),
+                    )?)
+                })
+                .unwrap()
+        }
+
+        /// The message's location and UID, and its labels by name.
+        fn state(&self, id: MessageId) -> (&'static str, Option<u32>, Vec<&'static str>) {
+            let name = |id: i64| *self.f.iter().find(|(_, f)| f.0 == id).unwrap().0;
+            self.store
+                .read(|db| {
+                    let (folder, uid): (i64, Option<u32>) = db.conn.query_row(
+                        "SELECT folder_id, uid FROM messages WHERE id = ?1",
+                        [id.0],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )?;
+                    let mut labels: Vec<&str> = db
+                        .conn
+                        .prepare("SELECT folder_id FROM message_labels WHERE message_id = ?1")?
+                        .query_map([id.0], |r| r.get(0))?
+                        .map(|f| f.map(name))
+                        .collect::<rusqlite::Result<_>>()?;
+                    labels.sort();
+                    Ok((name(folder), uid, labels))
+                })
+                .unwrap()
+        }
+
+        fn replay_ops(&self, folder: &str) -> Vec<ReplayOp> {
+            self.store
+                .read(|db| db.ops().pending(self.f[folder]))
+                .unwrap()
+        }
+
+        /// The folder's ops to replay: (UID, kind).
+        fn pending(&self, folder: &str) -> Vec<(u32, OpKind)> {
+            self.replay_ops(folder)
+                .into_iter()
+                .map(|op| (op.uid, op.kind.op_kind()))
+                .collect()
+        }
+
+        fn label(&self, name: &str, add: bool) -> OpKind {
+            OpKind::Label {
+                label: self.f[name],
+                add,
+            }
+        }
+
+        /// What `Folders` counts for the label: (total, unread).
+        fn count(&self, name: &str) -> (u32, u32) {
+            let f = self
+                .store
+                .read(|db| db.folders().get(self.f[name]))
+                .unwrap()
+                .unwrap();
+            (f.total_count, f.unread_count)
+        }
+    }
+
+    #[test]
+    fn moves_between_gmail_labels_change_labels() {
+        let g = gmail();
+        let (m1, f) = (g.message(1), &g.f);
+        let touched = g.write(|db| {
+            db.ops()
+                .move_messages(&[m1], Some(f["INBOX"]), f["Work"], 0)
+        });
+        let account = g.account;
+        assert_eq!(
+            touched,
+            Touched::from([
+                (account, f["INBOX"]),
+                (account, f["Work"]),
+                (account, f["All Mail"])
+            ])
+        );
+        // It stays where it is on the server.
+        assert_eq!(
+            g.state(m1),
+            ("All Mail", Some(1), vec!["Important", "Work"])
+        );
+        assert_eq!((g.count("INBOX"), g.count("Work")), ((0, 0), (1, 1)));
+
+        // Archived: out of INBOX, which it isn't in any more.
+        assert!(g.write(|db| db.ops().archive_messages(&[m1], 0)).is_empty());
+        // Starred is \Flagged, and a location is no label.
+        let refused = [
+            g.store
+                .write(|db| db.ops().move_messages(&[m1], None, f["Starred"], 0)),
+            g.store
+                .write(|db| db.ops().label_messages(&[m1], &[f["Starred"]], &[], 0)),
+            g.store
+                .write(|db| db.ops().label_messages(&[m1], &[f["All Mail"]], &[], 0)),
+        ];
+        for refused in refused {
+            assert!(matches!(refused, Err(Error::Invalid(_))), "{refused:?}");
+        }
+
+        g.write(|db| {
+            db.ops().set_flags(&[m1], Flags::SEEN, Flags::empty(), 0)?;
+            db.ops()
+                .label_messages(&[m1], &[f["INBOX"]], &[f["Important"]], 0)?;
+            db.ops().delete_messages(&[m1], false, 0)
+        });
+        // Flags, then labels (each label's in order), then moves; INBOX had two changes.
+        assert_eq!(
+            g.pending("All Mail"),
+            [
+                (
+                    1,
+                    OpKind::Flags {
+                        add: Flags::SEEN,
+                        remove: Flags::empty()
+                    }
+                ),
+                // INBOX taken off, then added again: only the last is made.
+                (1, g.label("Important", false)),
+                (1, g.label("Work", true)),
+                (1, g.label("INBOX", true)),
+                (1, OpKind::Move { to: f["Trash"] }),
+            ]
+        );
+    }
+
+    #[test]
+    fn archiving_on_gmail_takes_inbox_off() {
+        let g = gmail();
+        let (m1, m2) = (g.message(1), g.message(2));
+        g.write(|db| db.ops().archive_messages(&[m1, m2], 0));
+        assert_eq!(g.state(m1), ("All Mail", Some(1), vec!["Important"]));
+        // In Trash: nothing to archive.
+        assert_eq!(g.state(m2), ("Trash", Some(2), vec![]));
+        assert_eq!(g.pending("All Mail"), [(1, g.label("INBOX", false))]);
+        assert!(g.pending("Trash").is_empty());
+        assert_eq!(g.count("INBOX"), (0, 0));
+    }
+
+    #[test]
+    fn refused_label_changes_are_undone_unless_changed_again() {
+        let g = gmail();
+        let (m1, work) = (g.message(1), g.f["Work"]);
+        // Added, taken off, added again: only the last is made, the others along.
+        g.write(|db| {
+            db.ops().label_messages(&[m1], &[work], &[], 0)?;
+            db.ops().label_messages(&[m1], &[], &[work], 0)?;
+            db.ops().label_messages(&[m1], &[work], &[], 0)
+        });
+        let ops = g.replay_ops("All Mail");
+        assert_eq!(g.pending("All Mail"), [(1, g.label("Work", true))]);
+        assert_eq!(ops[0].superseded.len(), 2);
+        // The first refused alone (as a lost connection could leave it).
+        let first = &ops[0].superseded[..1];
+        let touched = g.write(|db| db.ops().failed(g.f["All Mail"], first, "NO"));
+        assert_eq!(touched.refused, BTreeSet::from([g.account]));
+        assert!(touched.folders.contains(&(g.account, work)));
+        // Without it, taking it off changes nothing: only adding it again is left.
+        let ops = g.replay_ops("All Mail");
+        assert_eq!(g.pending("All Mail"), [(1, g.label("Work", true))]);
+        assert!(ops[0].superseded.is_empty());
+        assert_eq!(g.state(m1).2, ["INBOX", "Important", "Work"]);
+        // Refused too: as before them all.
+        g.write(|db| db.ops().failed(g.f["All Mail"], &ops, "NO"));
+        assert_eq!(g.state(m1).2, ["INBOX", "Important"]);
+        assert_eq!(g.count("Work"), (0, 0));
+    }
+
+    #[test]
+    fn a_label_change_waits_for_the_move_out_of_trash() {
+        let g = gmail();
+        let (m2, f) = (g.message(2), &g.f);
+        g.write(|db| {
+            db.ops()
+                .move_messages(&[m2], Some(f["Trash"]), f["INBOX"], 0)
+        });
+        assert_eq!(g.state(m2), ("All Mail", None, vec!["INBOX"]));
+        assert_eq!(g.count("INBOX"), (2, 2));
+        // Gmail takes labels in All Mail: the label waits for the move.
+        assert_eq!(
+            g.pending("Trash"),
+            [(2, OpKind::Move { to: f["All Mail"] })]
+        );
+        let ops = g.replay_ops("Trash");
+        g.write(|db| {
+            db.ops().moved(
+                f["Trash"],
+                1,
+                f["All Mail"],
+                &ops,
+                Some(&moved(1, &[(2, 50)])),
+            )
+        });
+        assert_eq!(g.state(m2), ("All Mail", Some(50), vec!["INBOX"]));
+        assert_eq!(g.pending("All Mail"), [(50, g.label("INBOX", true))]);
+
+        // Refused, the move takes the label changes along: INBOX, which Trash took off,
+        // and Work.
+        let m1 = g.message(1);
+        g.write(|db| {
+            db.ops().delete_messages(&[m1], false, 0)?;
+            db.ops()
+                .move_messages(&[m1], Some(f["Trash"]), f["Work"], 0)
+        });
+        assert_eq!(g.state(m1), ("All Mail", None, vec!["Important", "Work"]));
+        let ops = g.replay_ops("All Mail");
+        let moving: Vec<ReplayOp> = ops.into_iter().filter(|op| op.uid == 1).collect();
+        assert_eq!(moving.len(), 1, "{moving:?}");
+        g.write(|db| db.ops().failed(f["All Mail"], &moving, "NO"));
+        assert_eq!(
+            g.state(m1),
+            ("All Mail", Some(1), vec!["INBOX", "Important"])
+        );
+        let failed = g
+            .store
+            .read(|db| db.ops().list(None))
+            .unwrap()
+            .into_iter()
+            .filter(|op| op.status == OpStatus::Failed)
+            .count();
+        assert_eq!(failed, 3);
+    }
+
+    #[test]
+    fn moved_to_trash_or_spam_loses_the_labels_gmail_takes_off() {
+        let g = gmail();
+        let f = &g.f;
+        let m1 = g.message(1);
+        g.write(|db| db.ops().label_messages(&[m1], &[f["Work"]], &[], 0));
+        // At once, and queued after the move, where Gmail has made them already: then a
+        // move back while this one is under way knows INBOX is to be added again, and a
+        // refusal undoes them with it.
+        let made = g.replay_ops("All Mail");
+        g.write(|db| db.ops().applied(&made));
+        g.write(|db| db.ops().move_messages(&[m1], None, f["Trash"], 0));
+        assert_eq!(g.state(m1).2, ["Important", "Work"]);
+        let ops = g.replay_ops("All Mail");
+        assert!(matches!(
+            ops[..],
+            [ReplayOp {
+                kind: ReplayKind::Move { .. },
+                ..
+            }]
+        ));
+        g.write(|db| {
+            db.ops().moved(
+                f["All Mail"],
+                1,
+                f["Trash"],
+                &ops,
+                Some(&moved(1, &[(1, 11)])),
+            )
+        });
+        assert_eq!(g.pending("Trash"), [(11, g.label("INBOX", false))]);
+
+        // Spam takes Important off too.
+        g.write(|db| db.ops().move_messages(&[m1], None, f["Spam"], 0));
+        assert_eq!(g.state(m1).2, ["Work"]);
+        assert_eq!(g.count("Work"), (0, 0));
+    }
+
+    #[test]
+    fn sync_keeps_unreplayed_label_changes() {
+        let g = gmail();
+        let m1 = g.message(1);
+        g.write(|db| db.ops().archive_messages(&[m1], 0));
+        // The sync's flag refresh still sees \Inbox: the removal isn't replayed yet.
+        let server = FlagState {
+            uid: 1,
+            labels: Some(
+                [FolderRole::Inbox, FolderRole::Important]
+                    .map(GmailLabel::System)
+                    .into(),
+            ),
+            ..Default::default()
+        };
+        g.write(|db| db.messages().update_flags(g.f["All Mail"], &[server]));
+        assert_eq!(g.state(m1).2, ["Important"]);
+    }
+
+    #[test]
+    fn moved_back_while_the_move_to_trash_is_made_it_gets_inbox_again() {
+        let g = gmail();
+        let (m1, f) = (g.message(1), &g.f);
+        g.write(|db| db.ops().delete_messages(&[m1], false, 0));
+        let in_flight = g.replay_ops("All Mail");
+        g.write(|db| {
+            db.ops()
+                .move_messages(&[m1], Some(f["Trash"]), f["INBOX"], 0)
+        });
+        g.write(|db| {
+            db.ops().moved(
+                f["All Mail"],
+                1,
+                f["Trash"],
+                &in_flight,
+                Some(&moved(1, &[(1, 50)])),
+            )
+        });
+        let back = g.replay_ops("Trash");
+        g.write(|db| {
+            db.ops().moved(
+                f["Trash"],
+                1,
+                f["All Mail"],
+                &back,
+                Some(&moved(1, &[(50, 60)])),
+            )
+        });
+        // Gmail took \Inbox off on the way into Trash: it must be added again.
+        assert!(
+            g.pending("All Mail")
+                .contains(&(60, g.label("INBOX", true))),
+            "{:?}",
+            g.pending("All Mail")
+        );
+    }
+
+    #[test]
+    fn a_restore_cancelled_before_it_is_made_adds_no_inbox_in_trash() {
+        let g = gmail();
+        let (m2, f) = (g.message(2), &g.f);
+        g.write(|db| {
+            db.ops()
+                .move_messages(&[m2], Some(f["Trash"]), f["INBOX"], 0)
+        });
+        g.write(|db| db.ops().delete_messages(&[m2], false, 0));
+        let ops = g.replay_ops("Trash");
+        g.write(|db| db.ops().moved(f["Trash"], 1, f["Trash"], &ops, None));
+        // Only the last change to INBOX is made, with the first along.
+        assert_eq!(g.pending("Trash"), [(2, g.label("INBOX", false))]);
+        assert_eq!(g.replay_ops("Trash")[0].settled().count(), 2);
     }
 
     #[test]

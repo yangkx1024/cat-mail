@@ -1276,6 +1276,12 @@ mod tests {
     }
 
     #[test]
+    fn system_labels_are_those_of_the_shared_roles() {
+        let roles = SYSTEM_LABELS.map(|(role, _)| role);
+        assert_eq!(roles, GmailLabel::SYSTEM_ROLES);
+    }
+
+    #[test]
     fn gmail_labels_by_role_or_name() {
         let labels = |line: &[u8]| {
             let Ok((_, imap_proto::Response::Fetch(_, items))) = imap_proto::Response::parse(line)
