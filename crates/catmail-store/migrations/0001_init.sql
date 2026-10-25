@@ -485,9 +485,9 @@ CREATE TABLE pending_ops (
     -- Same-account only; checked by the repository (SET NULL rules out a composite FK).
     message_id       INTEGER REFERENCES messages(id) ON DELETE SET NULL,
     -- The move this op waits for: it is replayed only once that move is made (the move
-    -- is then gone, and this NULL), and fails with it if it is refused. Cleared if the
-    -- move turns into a delete. Only ever set to a move of the same message, so of the
-    -- same account (SET NULL rules out a composite FK).
+    -- is then gone, and this NULL), fails with it if it is refused, and is dropped if it
+    -- turns into a delete. Only ever set to a move of the same message, so of the same
+    -- account (SET NULL rules out a composite FK).
     after_op         INTEGER REFERENCES pending_ops(id) ON DELETE SET NULL,
     -- A move on a server without MOVE is COPY, then delete, and a COPY repeated after its
     -- answer was lost makes a second copy. So before each COPY the target, its

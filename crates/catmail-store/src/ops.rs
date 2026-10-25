@@ -438,7 +438,8 @@ impl<'c> PendingOps<'c> {
             }
             match m.moving {
                 // Never made it to the target: delete it where the server still has it.
-                // What waited for the move waits no more.
+                // What waited for the move was meant for where it was going, and goes: on
+                // Gmail, `+\Inbox` in Trash would take it out of Trash before the delete.
                 Some(op) => {
                     self.conn
                         .prepare_cached(
@@ -447,9 +448,7 @@ impl<'c> PendingOps<'c> {
                         )?
                         .execute([op.0])?;
                     self.conn
-                        .prepare_cached(
-                            "UPDATE pending_ops SET after_op = NULL WHERE after_op = ?1",
-                        )?
+                        .prepare_cached("DELETE FROM pending_ops WHERE after_op = ?1")?
                         .execute([op.0])?;
                 }
                 None => self.queue(&m, OpKind::Delete, now)?,
@@ -2368,7 +2367,7 @@ mod tests {
     }
 
     #[test]
-    fn a_label_change_waits_no_more_once_its_move_turns_into_a_delete() {
+    fn label_changes_waiting_for_a_move_go_when_it_turns_into_a_delete() {
         let g = gmail();
         let (m2, f) = (g.message(2), &g.f);
         g.write(|db| {
@@ -2376,10 +2375,9 @@ mod tests {
                 .move_messages(&[m2], Some(f["Trash"]), f["INBOX"], 0)?;
             db.ops().delete_messages(&[m2], true, 0)
         });
-        assert_eq!(
-            g.pending("Trash"),
-            [(2, g.label("INBOX", true)), (2, OpKind::Delete)]
-        );
+        // Not `+\Inbox` in Trash first: Gmail would take the message out of Trash.
+        assert_eq!(g.pending("Trash"), [(2, OpKind::Delete)]);
+        assert_eq!(g.store.read(|db| db.ops().list(None)).unwrap().len(), 1);
     }
 
     #[test]
