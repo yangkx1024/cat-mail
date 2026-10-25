@@ -75,5 +75,6 @@ Gmail 的每个标签当文件夹，同一封邮件在 INBOX、"所有邮件"、
   "重要"重新显示后有邮件）；store 测试
   `search_finds_each_message_once_where_it_is`、`a_row_moving_locally_stays_until_the_move_is_replayed`，
   `labels_show_and_count_what_is_in_all_mail` 改为断言搬行。分别去掉推迟删除、标签事件、模式变化时的重建，
-  对应的测试都失败。`cargo test --workspace`、clippy、Dovecot 与 submission 真实服务器测试通过。没有用真的
-  Gmail 验证（CI 也没有），需要用测试账户手动验证。
+  对应的测试都失败。`cargo test --workspace`、clippy、Dovecot 与 submission 真实服务器测试通过。CI 里没有
+  真的 Gmail，2026-10-25 用测试账户手动验证：首次同步、移到已删除再移回（同一行、正文保留）、只改标签、
+  后台同步、隐藏再显示"所有邮件"切换模式，结果记在 `labels.md` 的"验证结果"。
