@@ -28,7 +28,8 @@ HTML 和决定哪些图片可以加载的函数。
 ### 每个数据目录一个引擎
 
 `MailClient::open` 对 `<data>/lock` 加独占文件锁并持有到引擎关闭，已被占用时返回
-`Error::AlreadyRunning`。同一个数据目录只有一个引擎在同步、发信、发事件，因此不需要跨进程的
+`Error::AlreadyRunning`。前端也可以先自己加锁（`Config::lock`）再交给引擎（`MailClient::builder_locked`）：
+GUI 这样在打开引擎之前就知道自己是这个数据目录的实例（见[后台运行](architecture/background.md#单实例与唤起)）。同一个数据目录只有一个引擎在同步、发信、发事件，因此不需要跨进程的
 任务领取、租约或变更通知。
 
 代价是 GUI 运行时 CLI 不能打开同一个数据目录。以后让其他前端通过 IPC 连接正在运行的引擎，
@@ -168,6 +169,7 @@ UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UI
 | [存储](architecture/storage.md) | SQLite 约定、计数、跨账户约束、全文搜索、BlobStore 与 GC、凭据 |
 | [CLI](architecture/cli.md) | 命令的代码结构、`--json` 的结构与版本、退出码、添加账户前的登录检查、不覆盖文件 |
 | [GUI](architecture/gui.md) | 视图结构、事件刷新、读信与写信窗口、发件箱、主题与设置、HTML 渲染与图片策略、已知问题 |
+| [后台运行](architecture/background.md) | 关窗后常驻、单实例与唤起；睡眠唤醒、新邮件通知、托盘、开机启动（设计中） |
 | [测试](architecture/testing.md) | 假 IMAP / SMTP 服务器、真实 Dovecot 与 mailpit、GUI 测试 |
 
 ## 数据目录
@@ -181,6 +183,7 @@ CLI 和 GUI 都可用 `--data-dir` 或 `CATMAIL_DATA_DIR` 覆盖。
 | `catmail.db` | SQLite：账户、文件夹、邮件头与正文、草稿、队列 |
 | `blobs/` | 原文、附件等内容寻址文件 |
 | `lock` | 引擎的独占锁 |
+| `gui.sock` | 之后的 GUI 启动唤起正在运行的那个所用的 socket（路径太长时在运行时目录，见[后台运行](architecture/background.md#单实例与唤起)） |
 | `handoff/` | 前端交给其他程序的文件（如给浏览器的邮件页面） |
 | `remote-images/` | 用户要求显示过的远程图片的缓存（见[正文与附件](architecture/bodies.md)） |
 

@@ -119,6 +119,8 @@ pub struct Mailbox {
     /// `None` until the first load finishes.
     pub(crate) accounts: Option<Vec<AccountEntry>>,
     pub(crate) place: Option<Place>,
+    /// Where to start instead of the first inbox, if it is still there.
+    reopen_at: Option<Place>,
     /// Syncs in flight.
     pub(crate) syncing: usize,
     /// [`SYNC_ON_OPEN_AFTER`], except in tests that open folders synced just now.
@@ -214,6 +216,7 @@ impl Mailbox {
             client,
             accounts: None,
             place: None,
+            reopen_at: None,
             syncing: 0,
             sync_on_open_after: SYNC_ON_OPEN_AFTER,
             refresh_interval: REFRESH_INTERVAL,
@@ -238,6 +241,12 @@ impl Mailbox {
         // Left from before, or refused while no window was open.
         mailbox.report_refused_changes(window, cx);
         mailbox
+    }
+
+    /// Starts at `place` rather than the first inbox: where the main window was when it
+    /// was last closed. Before the first load.
+    pub fn reopen_at(&mut self, place: Option<Place>) {
+        self.reopen_at = place;
     }
 
     fn on_list_event(
@@ -453,6 +462,10 @@ impl Mailbox {
         let still_there = self
             .place
             .is_some_and(|place| place.account_in(&accounts).is_some());
+        let reopen_at = self
+            .reopen_at
+            .take()
+            .filter(|place| place.account_in(&accounts).is_some());
         let labels = accounts
             .iter()
             .flat_map(|a| a.folders.user_labels())
@@ -464,7 +477,9 @@ impl Mailbox {
             }
         });
         self.accounts = Some(accounts);
-        if !still_there {
+        if let Some(place) = reopen_at {
+            self.select_place(Some(place), window, cx);
+        } else if !still_there {
             let inbox = self
                 .accounts
                 .as_deref()

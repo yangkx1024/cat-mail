@@ -1,7 +1,7 @@
-//! The window's preferences: appearance, themes, text size, reading. They belong to this
-//! frontend, not to the engine, so they live in `settings.json` in the config directory
-//! instead of the database, next to the imported themes. The settings dialog is in
-//! `dialog/`.
+//! The window's preferences: running in the background, appearance, themes, text size,
+//! reading. They belong to this frontend, not to the engine, so they live in
+//! `settings.json` in the config directory instead of the database, next to the imported
+//! themes. The settings dialog is in `dialog/`.
 
 pub mod dialog;
 
@@ -57,6 +57,9 @@ pub struct Settings {
     pub text_size: f32,
     /// Opening a message marks it read (on the server too, through the operation queue).
     pub mark_read_on_open: bool,
+    /// Closing the last window leaves the app running, syncing and sending, until it is
+    /// quit (see `Resident`).
+    pub keep_running: bool,
 }
 
 impl Default for Settings {
@@ -67,6 +70,7 @@ impl Default for Settings {
             dark_theme: DEFAULT_DARK.into(),
             text_size: DEFAULT_TEXT_SIZE,
             mark_read_on_open: true,
+            keep_running: true,
         }
     }
 }
@@ -272,6 +276,7 @@ mod tests {
         let loaded = Preferences::load(dir.path().to_path_buf()).settings;
         assert_eq!(loaded.appearance, Appearance::Light);
         assert!(loaded.mark_read_on_open);
+        assert!(loaded.keep_running);
     }
 
     #[test]

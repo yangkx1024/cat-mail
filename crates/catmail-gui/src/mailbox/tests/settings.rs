@@ -12,6 +12,8 @@ fn settings_change_the_theme(cx: &mut TestAppContext) {
     wait_for_inbox(cx, &mailbox);
     open_settings(cx, window);
     cx.update_window(window, |_, window, cx| {
+        window.click(crate::settings::dialog::section_item("Appearance"), cx);
+        window.render_frame(cx);
         window.click("appearance-Dark", cx);
     })
     .unwrap();
@@ -283,6 +285,19 @@ fn clears_the_image_cache(cx: &mut TestAppContext) {
         0
     );
     assert_eq!(images.requests(), 1);
+}
+
+#[gpui_kit::test]
+fn settings_open_on_general_where_keeping_running_can_be_turned_off(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    assert!(cx.read(|cx| Preferences::get(cx).keep_running));
+    open_settings(cx, window);
+    cx.update_window(window, |_, window, cx| window.click("keep-running", cx))
+        .unwrap();
+    cx.run_until_parked();
+    assert!(!cx.read(|cx| Preferences::get(cx).keep_running));
 }
 
 #[gpui_kit::test]

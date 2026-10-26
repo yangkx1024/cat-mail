@@ -10,7 +10,7 @@ use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use catmail_core::{Config, DEFAULT_GC_INTERVAL, DraftId, MailClient, SyncSchedule};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
@@ -124,6 +124,18 @@ async fn main() -> ExitCode {
     }
 }
 
+/// The app holding the data directory may have no window to show it is there.
+fn open_failed(e: catmail_core::Error) -> anyhow::Error {
+    let context = match e {
+        catmail_core::Error::AlreadyRunning(_) => {
+            "failed to open the local mail store (the cat-mail app keeps running after its \
+             window is closed; quit it first)"
+        }
+        _ => "failed to open the local mail store",
+    };
+    anyhow::Error::new(e).context(context)
+}
+
 async fn run() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -144,7 +156,7 @@ async fn run() -> Result<()> {
         // While this holds the data directory, `catmail gc` can't run.
         .collect_garbage_every(watching.then_some(DEFAULT_GC_INTERVAL))
         .open()
-        .context("failed to open the local mail store")?;
+        .map_err(open_failed)?;
 
     match cli.command {
         Command::Account(cmd) => account::account(&client, cmd, cli.json).await,
@@ -182,5 +194,20 @@ async fn run() -> Result<()> {
             outbox::outbox(&client, command, cli.json).await
         }
         Command::Gc => gc::gc(&client, cli.json).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_taken_store_names_the_app_that_may_have_no_window() {
+        let e = open_failed(catmail_core::Error::AlreadyRunning("/data".into()));
+        assert!(format!("{e:#}").contains("keeps running after its window is closed"));
+        // Still the engine's error underneath, for `--json` and the exit code.
+        assert!(e.downcast_ref::<catmail_core::Error>().is_some());
+        let e = open_failed(catmail_core::Error::NoDataDir);
+        assert!(!format!("{e:#}").contains("window"));
     }
 }

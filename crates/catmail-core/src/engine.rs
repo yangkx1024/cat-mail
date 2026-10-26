@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::File;
 use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
@@ -17,7 +16,7 @@ use tokio::sync::{Notify, OwnedMutexGuard, broadcast, watch};
 use crate::image_cache::ImageCache;
 use crate::secrets::SecretStore;
 use crate::watch::SyncSchedule;
-use crate::{Config, Error, Result};
+use crate::{Config, DataDirLock, Error, Result};
 
 /// State shared by every `MailClient` clone and every engine task.
 pub(crate) struct Engine {
@@ -25,7 +24,7 @@ pub(crate) struct Engine {
     /// Exclusive lock on the data directory, held for the engine's lifetime: one engine
     /// per data directory, so sync workers, the outbox and events are never split
     /// across processes. Other frontends will reach the running engine over IPC.
-    _data_dir_lock: File,
+    _data_dir_lock: DataDirLock,
     pub store: Store,
     pub blobs: BlobStore,
     pub secrets: Arc<dyn SecretStore>,
@@ -222,7 +221,7 @@ impl Cancellation {
 impl Engine {
     pub fn new(
         config: Config,
-        data_dir_lock: File,
+        data_dir_lock: DataDirLock,
         store: Store,
         blobs: BlobStore,
         secrets: Arc<dyn SecretStore>,

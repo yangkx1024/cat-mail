@@ -1,8 +1,9 @@
-//! The Settings dialog: appearance (light or dark, the themes for each, importing a
-//! terminal color scheme, text size), accounts, and reading (with the cache of remote
-//! images).
+//! The Settings dialog: running in the background, appearance (light or dark, the themes
+//! for each, importing a terminal color scheme, text size), accounts, and reading (with
+//! the cache of remote images).
 
 mod accounts;
+mod general;
 mod identity;
 mod reading;
 mod themes;
@@ -35,13 +36,15 @@ pub(crate) fn section_item(label: &str) -> String {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Section {
+    General,
     Appearance,
     Accounts,
     Reading,
 }
 
 impl Section {
-    const ALL: [(Section, &'static str, Hero); 3] = [
+    const ALL: [(Section, &'static str, Hero); 4] = [
+        (Section::General, "General", Hero::Cog6Tooth),
         (Section::Appearance, "Appearance", Hero::Swatch),
         (Section::Accounts, "Accounts", Hero::UserCircle),
         (Section::Reading, "Reading", Hero::EnvelopeOpen),
@@ -108,7 +111,7 @@ impl SettingsView {
         Self {
             client,
             mailbox,
-            section: Section::Appearance,
+            section: Section::General,
             text_size,
             import: None,
             image_cache: None,
@@ -162,6 +165,7 @@ impl Render for SettingsView {
             .border_color(border)
             .child(sections);
         let content = match self.section {
+            Section::General => self.render_general(cx),
             Section::Appearance => self.render_appearance(cx),
             Section::Accounts => self.render_accounts(cx),
             Section::Reading => self.render_reading(cx),

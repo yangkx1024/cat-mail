@@ -88,7 +88,7 @@ impl Composer {
                 if let Some(problem) = problem {
                     self.show_field_error(problem, window, cx);
                 }
-                self.stop_quitting(cx);
+                self.stop_closing_all(cx);
                 false
             }
             Closing::Now => {
@@ -166,7 +166,7 @@ impl Composer {
                     }
                     Err(e) => {
                         this.finishing = None;
-                        this.stop_quitting(cx);
+                        this.stop_closing_all(cx);
                         this.error = Some(
                             match how {
                                 Finish::Send => format!("Couldn't send: {e}"),
@@ -186,14 +186,18 @@ impl Composer {
     fn unregister(&self, cx: &mut App) {
         let open = cx.default_global::<OpenComposers>();
         open.windows.remove(&self.draft);
-        if open.quitting && open.windows.is_empty() {
-            cx.quit();
+        if open.windows.is_empty()
+            && let Some(closed) = open.closing_all.take()
+        {
+            closed.send(true).ok();
         }
     }
 
-    /// The window stays open to be dealt with, so the app does too.
-    pub(super) fn stop_quitting(&self, cx: &mut App) {
-        cx.default_global::<OpenComposers>().quitting = false;
+    /// The window stays open to be dealt with: closing them all failed.
+    pub(super) fn stop_closing_all(&self, cx: &mut App) {
+        if let Some(closed) = cx.default_global::<OpenComposers>().closing_all.take() {
+            closed.send(false).ok();
+        }
     }
 
     pub(super) fn show_field_error(

@@ -19,7 +19,9 @@ M5 的界面设计稿（三栏、写信窗口、发件箱、设置与主题导�
 
 ```
 src/
-  main.rs            启动：设置、主题、快捷键、主窗口
+  main.rs            启动：交给已在运行的实例或成为它，设置、主题、快捷键；主窗口（`MainWindow`）
+  resident.rs        `Resident`：引擎、主窗口的关闭与重开、常驻时 headless（见[后台运行](background.md)）
+  instance.rs        单实例：数据目录里的 socket，之后的启动经它唤起主窗口
   actions.rs         Action、key context 与快捷键
   assets.rs          资源：Heroicons，及替换 gpui-kit 组件图标
   format.rs html.rs  时刻与日期分组（其余显示格式来自 `catmail_core::display`）；HTML 渲染策略
@@ -154,8 +156,9 @@ macOS、Windows 用系统字体，不受影响。
 - 窗口边框的关闭按钮经 `on_window_should_close` 走同一流程（需要先保存时返回 false，存完自己关）。
 - Ctrl Enter 绑在 `Composer > Input` 上直接是 `Send`：多行输入框自己处理时会先插一个换行，再随信发出。
   附件可选文件或拖进窗口（`ExternalPaths`）。
-- **退出**（Ctrl Q）先让每个写信窗口走关闭流程（存下最后的输入），最后一个关掉后才退出；GPUI 的
-  `quit` 不经过窗口的关闭回调。有窗口关不了（地址要改、保存失败）时留下它，也不退出。
+- **退出**（Ctrl Q）由 `Resident::quit` 决定：先让每个写信窗口走关闭流程（`composer::close_all`，存下
+  最后的输入），全部关掉后才退出；GPUI 的 `quit` 不经过窗口的关闭回调。有窗口关不了（地址要改、保存失败）
+  时 `close_all` 立即答"没关完"，那个窗口留下，退出取消。写信窗口只管"关不关得了"，不知道退出这回事。
 
 ## 发件箱
 
@@ -193,7 +196,8 @@ macOS、Windows 用系统字体，不受影响。
 ## 运行时与事件
 
 `MailClient::builder(cfg).open_async()` 自建 tokio runtime：主窗口先打开、留空，数据目录打开（可能
-要跑一次迁移）后再换成邮箱，打不开时显示原因。视图只在 `cx.spawn` / `spawn_in` 中 await 门面
+要跑一次迁移）后再换成邮箱，打不开时显示原因。客户端由应用级的 `Resident` 持有，不属于主窗口：关掉
+主窗口后应用默认继续运行，再打开时新建邮箱（见[后台运行](background.md)）。视图只在 `cx.spawn` / `spawn_in` 中 await 门面
 方法，从不碰 tokio。事件的 `broadcast::Receiver` 不依赖 reactor，直接在 GPUI 的 executor 上 `recv`；
 `Lagged` 时整体刷新（侧栏、列表，并查一次被拒绝的改动），`Closed` 时退出。
 

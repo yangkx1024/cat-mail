@@ -18,6 +18,7 @@ use catmail_core::{
     AccountId, Draft, DraftAttachment, DraftContent, DraftId, Event, Forwarding, Identity,
     IdentityId, MailClient, MessageId, RecvError, parse_addresses,
 };
+use futures_channel::oneshot;
 use gpui_kit::component::input::{InputEvent, InputState, Position, TextareaState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::select::{SelectEvent, SelectItem, SelectState};
@@ -50,8 +51,8 @@ struct OpenComposers {
     /// Opens on their way, for tests to wait for.
     #[cfg(test)]
     in_flight: usize,
-    /// The app quits once the last of them has closed.
-    quitting: bool,
+    /// Told whether they all closed, while [`close_all`] waits for them.
+    closing_all: Option<oneshot::Sender<bool>>,
 }
 
 impl Global for OpenComposers {}
@@ -71,28 +72,26 @@ fn activate(id: DraftId, cx: &mut App) -> bool {
         .is_ok()
 }
 
-/// Quits once every composer window has saved what it holds and closed; quitting
-/// straight away would lose what was typed since the last save. A window that can't
-/// close (an address to correct, a save that failed) stays open, and so does the app.
-pub fn quit(cx: &mut App) {
-    let open: Vec<_> = cx
-        .default_global::<OpenComposers>()
-        .windows
-        .values()
-        .cloned()
-        .collect();
-    if open.is_empty() {
-        cx.quit();
-        return;
+/// Closes every composer window once it has saved what it holds: closing straight away
+/// would lose what was typed since the last save. True once the last has closed; false as
+/// soon as one can't (an address to correct, a save that failed), which stays open.
+pub fn close_all(cx: &mut App) -> oneshot::Receiver<bool> {
+    let (closed, answer) = oneshot::channel();
+    let open = cx.default_global::<OpenComposers>();
+    let windows: Vec<_> = open.windows.values().cloned().collect();
+    if windows.is_empty() {
+        closed.send(true).ok();
+        return answer;
     }
-    cx.default_global::<OpenComposers>().quitting = true;
-    for (handle, composer) in open {
+    open.closing_all = Some(closed);
+    for (handle, composer) in windows {
         handle
             .update(cx, |_, window, cx| {
                 composer.update(cx, |composer, cx| composer.close(window, cx))
             })
             .ok();
     }
+    answer
 }
 
 /// The open composers.
@@ -687,7 +686,7 @@ impl Composer {
         };
         if failed && how != Finish::Discard {
             self.finishing = None;
-            self.stop_quitting(cx);
+            self.stop_closing_all(cx);
             self.error = Some(
                 match how {
                     Finish::Send => "Not sent: check the attachments first.",
