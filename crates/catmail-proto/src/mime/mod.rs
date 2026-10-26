@@ -9,7 +9,10 @@ mod html;
 mod structure;
 mod tokens;
 
+use std::borrow::Cow;
+
 use catmail_types::Address;
+use encoding_rs::{Encoding, UTF_8};
 use mail_parser::{HeaderValue, MessageParser};
 
 pub use build::{InvalidHeader, Outgoing, OutgoingAttachment, build_message};
@@ -34,7 +37,8 @@ pub const SUMMARY_HEADER_FIELDS: &[&str] = &[
 ];
 
 /// Decoded summary headers. RFC 2047 encoded words and legacy charsets (GBK, Big5,
-/// ISO-2022-JP, …) are already converted to UTF-8.
+/// ISO-2022-JP, …) are already converted to UTF-8, and so are fields in raw 8-bit bytes
+/// for which there was a hint of the charset.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Headers {
     pub subject: Option<String>,
@@ -51,8 +55,13 @@ pub struct Headers {
 }
 
 /// Parses a header block (or a whole message, whose body is ignored). Never fails:
-/// unparsable fields are left empty.
-pub fn parse_headers(raw: &[u8]) -> Headers {
+/// unparsable fields are left empty. A field in raw 8-bit bytes is read in the first of
+/// the charsets `hints` that makes sense of it: those of the message's text parts.
+pub fn parse_headers(raw: &[u8], hints: &[&str]) -> Headers {
+    summary_headers(&transcode_fields(raw, hints))
+}
+
+fn summary_headers(raw: &[u8]) -> Headers {
     let Some(msg) = MessageParser::new().parse_headers(raw) else {
         return Headers::default();
     };
@@ -88,6 +97,72 @@ pub fn parse_headers(raw: &[u8]) -> Headers {
         in_reply_to: id_list(msg.in_reply_to()),
         references: id_list(msg.references()),
     }
+}
+
+/// The header fields of `raw` (a header block) as UTF-8, with each field in raw 8-bit
+/// bytes that aren't UTF-8 read in the first of the charsets `hints` that decodes all of
+/// it. Some mail programs write the sender's local charset (GBK, …) instead of RFC 2047 /
+/// 2231 encoding, and mail-parser reads such bytes as UTF-8, each one a U+FFFD. A field
+/// is converted before it is parsed: a byte of a GBK character can be `\` or `"`.
+/// Borrows `raw` if no field was converted.
+pub(crate) fn transcode_fields<'a>(raw: &'a [u8], hints: &[&str]) -> Cow<'a, [u8]> {
+    if std::str::from_utf8(raw).is_ok() {
+        return Cow::Borrowed(raw);
+    }
+    let encodings = legacy_encodings(hints);
+    if encodings.is_empty() {
+        return Cow::Borrowed(raw);
+    }
+    let Some(message) = MessageParser::new().parse_headers(raw) else {
+        return Cow::Borrowed(raw);
+    };
+    let mut fields = String::new();
+    let mut converted = false;
+    for header in message.headers() {
+        let Some(field) = raw.get(header.offset_field as usize..header.offset_end as usize) else {
+            return Cow::Borrowed(raw);
+        };
+        if let Ok(field) = std::str::from_utf8(field) {
+            fields.push_str(field);
+        } else if let Some(field) = encodings
+            .iter()
+            .find_map(|e| e.decode_without_bom_handling_and_without_replacement(field))
+        {
+            fields.push_str(&field);
+            converted = true;
+        } else {
+            fields.push_str(&String::from_utf8_lossy(field));
+        }
+    }
+    fields.push_str("\r\n");
+    if converted {
+        Cow::Owned(fields.into_bytes())
+    } else {
+        Cow::Borrowed(raw)
+    }
+}
+
+/// The encodings named by the charset `labels` that hint at the charset of fields in raw
+/// 8-bit bytes, in order and once each. Only those that keep ASCII as it is: others
+/// (UTF-16, ISO-2022-JP) would turn the field's name, colon and line end into something
+/// else. Not UTF-8 (those fields aren't), nor ASCII, which says nothing about the
+/// sender's charset (and its labels name windows-1252, which takes any byte).
+fn legacy_encodings(labels: &[&str]) -> Vec<&'static Encoding> {
+    let mut encodings: Vec<&'static Encoding> = Vec::new();
+    for label in labels {
+        let ascii = ["us-ascii", "ascii", "ansi_x3.4-1968"]
+            .iter()
+            .any(|known| label.trim().eq_ignore_ascii_case(known));
+        if let Some(encoding) = Encoding::for_label(label.as_bytes())
+            && encoding.is_ascii_compatible()
+            && encoding != UTF_8
+            && !ascii
+            && !encodings.contains(&encoding)
+        {
+            encodings.push(encoding);
+        }
+    }
+    encodings
 }
 
 fn id_list(value: &HeaderValue<'_>) -> Vec<String> {
@@ -128,7 +203,7 @@ mod tests {
             References: <root@example.com>\r\n <parent@example.com>\r\n\
             Reply-To: list@example.com\r\n\
             \r\n";
-        let h = parse_headers(raw);
+        let h = parse_headers(raw, &[]);
         assert_eq!(h.subject.as_deref(), Some("你好 world"));
         assert_eq!(
             h.from,
@@ -152,6 +227,7 @@ mod tests {
         let h = parse_headers(
             b"Message-ID: <evil\rX-Injected: yes@x>\r\n\
               References: <ok@x> <r1\rX-R: 1@x>\r\n\r\n",
+            &[],
         );
         assert_eq!(h.message_id, None);
         assert_eq!(h.references, ["ok@x"]);
@@ -163,15 +239,71 @@ mod tests {
         let mut raw = b"Subject: =?GBK?B?suLK1A==?=\r\nFrom: ".to_vec();
         raw.extend_from_slice(&[0xb2, 0xe2, 0xca, 0xd4]);
         raw.extend_from_slice(b" <t@example.com>\r\n\r\n");
-        let h = parse_headers(&raw);
+        let h = parse_headers(&raw, &["gbk"]);
         assert_eq!(h.subject.as_deref(), Some("测试"));
+        assert_eq!(h.from[0].name.as_deref(), Some("测试"));
         assert_eq!(h.from[0].email, "t@example.com");
+
+        // Without a hint of the charset, the raw bytes are lost.
+        let h = parse_headers(&raw, &[]);
+        assert_eq!(h.subject.as_deref(), Some("测试"));
+        assert!(h.from[0].name.as_deref().unwrap().contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn reads_each_raw_field_in_the_first_charset_that_fits() {
+        // 张三 in GBK; its last byte is invalid in Shift_JIS. The UTF-8 field is left
+        // alone.
+        let mut raw = b"From: \"\xd5\xc5\xc8\xfd\" <z@example.com>\r\n".to_vec();
+        raw.extend_from_slice("To: 李四 <l@example.com>\r\n\r\n".as_bytes());
+        let h = parse_headers(&raw, &["shift_jis", "gbk"]);
+        assert_eq!(h.from[0].name.as_deref(), Some("张三"));
+        assert_eq!(h.to[0].name.as_deref(), Some("李四"));
+
+        // 乗 in GBK ends in a backslash, which mustn't escape the closing quote.
+        let h = parse_headers(b"Cc: \"\x81\x5c\" <c@example.com>\r\n\r\n", &["gbk"]);
+        assert_eq!(h.cc[0].name.as_deref(), Some("乗"));
+        assert_eq!(h.cc[0].email, "c@example.com");
+    }
+
+    #[test]
+    fn hints_that_would_change_ascii_are_not_used() {
+        let raw = b"Subject: caf\xe9s\r\nTo: a@example.com\r\n\r\n";
+        // UTF-16 would take the whole field (an even number of bytes), name and line end
+        // included, for text.
+        let h = parse_headers(raw, &["utf-16le", "iso-8859-1"]);
+        assert_eq!(h.subject.as_deref(), Some("cafés"));
+        assert_eq!(h.to[0].email, "a@example.com");
+        let h = parse_headers(raw, &["utf-16be", "iso-2022-jp"]);
+        assert!(h.subject.unwrap().contains('\u{FFFD}'));
+        assert_eq!(h.to[0].email, "a@example.com");
+    }
+
+    #[test]
+    fn hints_skip_utf8_ascii_unknown_and_repeats() {
+        let names = |labels: &[&str]| -> Vec<&str> {
+            legacy_encodings(labels).iter().map(|e| e.name()).collect()
+        };
+        assert_eq!(
+            names(&[
+                "UTF-8",
+                "unicode-1-1-utf-8",
+                "gbk",
+                "us-ascii",
+                "ANSI_X3.4-1968"
+            ]),
+            ["GBK"]
+        );
+        assert_eq!(
+            names(&["gb2312", "GBK", "x-unknown", "big5"]),
+            ["GBK", "Big5"]
+        );
     }
 
     #[test]
     fn tolerates_garbage() {
-        assert_eq!(parse_headers(b""), Headers::default());
-        let h = parse_headers(b"Date: yesterday\r\nFrom: nobody\r\n\r\n");
+        assert_eq!(parse_headers(b"", &[]), Headers::default());
+        let h = parse_headers(b"Date: yesterday\r\nFrom: nobody\r\n\r\n", &[]);
         assert_eq!(h.date, None);
     }
 }

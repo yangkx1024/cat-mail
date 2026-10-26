@@ -13,11 +13,15 @@ pub(crate) fn body_structure(raw: &[u8]) -> Vec<u8> {
 }
 
 /// The content of section `spec` (`""` for the whole message, else `1.2`), still
-/// transfer-encoded, as `BODY[spec]` returns it.
+/// transfer-encoded, as `BODY[spec]` returns it; with `1.2.MIME` the part's header.
 pub(crate) fn section(raw: &[u8], spec: &str) -> Option<Vec<u8>> {
     if spec.is_empty() {
         return Some(raw.to_vec());
     }
+    let (spec, header) = match spec.strip_suffix(".MIME") {
+        Some(spec) => (spec, true),
+        None => (spec, false),
+    };
     let message = MessageParser::new().parse(raw)?;
     let mut id = 0u32;
     for (depth, n) in spec.split('.').enumerate() {
@@ -30,8 +34,12 @@ pub(crate) fn section(raw: &[u8], spec: &str) -> Option<Vec<u8>> {
         }
     }
     let part = &message.parts[id as usize];
-    raw.get(part.offset_body as usize..part.offset_end as usize)
-        .map(<[u8]>::to_vec)
+    let (start, end) = if header {
+        (part.offset_header, part.offset_body)
+    } else {
+        (part.offset_body, part.offset_end)
+    };
+    raw.get(start as usize..end as usize).map(<[u8]>::to_vec)
 }
 
 fn node(message: &Message<'_>, id: u32, raw: &[u8]) -> Vec<u8> {
@@ -152,6 +160,12 @@ mod tests {
         assert_eq!(section(RAW, "1").unwrap(), b"Hello");
         assert_eq!(section(RAW, "2").unwrap(), b"JVBERi0xLjQK");
         assert_eq!(section(RAW, "3"), None);
+        assert_eq!(
+            section(RAW, "2.MIME").unwrap(),
+            &b"Content-Type: application/pdf; name=\"r.pdf\"\r\n\
+                Content-Disposition: attachment; filename=\"r.pdf\"\r\n\
+                Content-Transfer-Encoding: base64\r\n\r\n"[..]
+        );
         assert_eq!(section(RAW, "").unwrap(), RAW);
         let single = b"Subject: x\r\n\r\nbody\r\n";
         assert_eq!(section(single, "1").unwrap(), b"body\r\n");

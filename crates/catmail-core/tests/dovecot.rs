@@ -204,16 +204,21 @@ async fn syncs_against_dovecot() {
     );
 
     // Over the whole-message limit: fetched as BODYSTRUCTURE plus text parts, with the
-    // attachment (named in RFC 2231 form) left on the server until opened.
+    // attachments (named in raw GBK bytes and in RFC 2231 form) left on the server until
+    // opened.
     let video = vec![7u8; 3 * 1024 * 1024];
     fs::write(folder_dir.join("new").join("4.d"), large_message(&video)).unwrap();
     client.sync_account(account).await.unwrap();
     let big = client.list_messages(folder.id, 10, None).await.unwrap()[0].clone();
     assert_eq!(big.subject.as_deref(), Some("large"));
+    assert_eq!(big.from[0].name.as_deref(), Some("张三"));
     let message = client.download_message(big.id).await.unwrap();
     let body = message.body.unwrap();
     assert_eq!(body.text.as_deref().map(str::trim), Some("See the clip."));
-    let clip = &body.attachments[0];
+    let report = &body.attachments[0];
+    assert_eq!(report.filename.as_deref(), Some("报告.pdf"));
+    assert!(!report.downloaded);
+    let clip = &body.attachments[1];
     assert_eq!(clip.filename.as_deref(), Some("视频.mp4"));
     assert!(!clip.downloaded);
     assert_eq!(client.attachment_content(clip.id).await.unwrap(), video);
@@ -354,10 +359,13 @@ async fn check_saving_to_sent(
 
 fn large_message(attachment: &[u8]) -> Vec<u8> {
     use base64::Engine;
-    let mut raw = b"From: Test <test@example.com>\r\nSubject: large\r\n\
+    // The sender's name and an attachment's are in raw GBK bytes (张三, 报告).
+    let mut raw = b"From: \xd5\xc5\xc8\xfd <test@example.com>\r\nSubject: large\r\n\
         Date: Sun, 18 Oct 2026 13:00:00 +0000\r\n\
         Content-Type: multipart/mixed; boundary=\"b\"\r\n\r\n\
-        --b\r\nContent-Type: text/plain\r\n\r\nSee the clip.\r\n\
+        --b\r\nContent-Type: text/plain; charset=gbk\r\n\r\nSee the clip.\r\n\
+        --b\r\nContent-Type: application/pdf; name=\"\xb1\xa8\xb8\xe6.pdf\"\r\n\
+        Content-Transfer-Encoding: base64\r\n\r\nJVBERi0xLjQK\r\n\
         --b\r\nContent-Type: video/mp4\r\n\
         Content-Disposition: attachment; filename*=utf-8''%E8%A7%86%E9%A2%91.mp4\r\n\
         Content-Transfer-Encoding: base64\r\n\r\n"

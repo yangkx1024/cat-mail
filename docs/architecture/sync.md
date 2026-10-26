@@ -191,6 +191,8 @@ flags，重复的批次不产生重复行）。HIGHESTMODSEQ 用 EXAMINE 时刻�
 
 只拉 `HEADER.FIELDS (DATE FROM TO CC SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES)`，用
 `mail-parser`（`full_encoding`）解析，RFC 2047 编码字和 GBK、GB2312、Big5 等旧字符集都转成
-UTF-8。没有（或无法解析）Date 头时用 INTERNALDATE 排序。不合法的 msg-id（mail-parser 会保留
+UTF-8。直接用原始 8 位字节写的主题、显示名（不按 RFC 2047 编码）按 BODYSTRUCTURE 里文本部分的
+`charset` 转码（`MimeNode::text_charsets`，规则见[原始字节的邮件头](bodies.md#原始字节的邮件头)），
+没有 BODYSTRUCTURE 或没有线索时保持 mail-parser 的有损结果。没有（或无法解析）Date 头时用 INTERNALDATE 排序。不合法的 msg-id（mail-parser 会保留
 其中的裸 CR，回复时会注入邮件头）在这里就丢掉。`has_attachments` 先由 BODYSTRUCTURE 粗略判断
 （`MimeNode::has_attachments`），下载正文后按完整 MIME 树重算。

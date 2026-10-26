@@ -39,6 +39,12 @@ impl Leaf {
             && self.subtype.eq_ignore_ascii_case(subtype.as_bytes())
     }
 
+    /// The Content-Type parameters, then the Content-Disposition ones.
+    fn all_params(&self) -> impl Iterator<Item = &(Vec<u8>, Vec<u8>)> {
+        let disposition = self.disposition.iter().flat_map(|(_, params)| params);
+        self.params.iter().chain(disposition)
+    }
+
     /// Decoded size, roughly: base64 carries 57 bytes per 78-octet line.
     fn estimated_size(&self) -> u32 {
         if self.encoding.eq_ignore_ascii_case(b"base64") {
@@ -55,8 +61,11 @@ impl MimeNode {
     /// attached message, or a named part that isn't text and isn't marked inline.
     pub fn has_attachments(&self) -> bool {
         self.leaves().values().any(|leaf| {
-            let disposition = leaf.disposition.as_ref();
-            match disposition.map(|(kind, _)| kind.to_ascii_lowercase()) {
+            match leaf
+                .disposition
+                .as_ref()
+                .map(|(kind, _)| kind.to_ascii_lowercase())
+            {
                 Some(kind) if kind == b"attachment" => return true,
                 Some(kind) if kind == b"inline" => return false,
                 _ => {}
@@ -64,13 +73,9 @@ impl MimeNode {
             if leaf.is("message", "rfc822") {
                 return true;
             }
-            let named = leaf
-                .params
-                .iter()
-                .chain(disposition.iter().flat_map(|(_, params)| params))
-                .any(|(name, _)| {
-                    name.eq_ignore_ascii_case(b"name") || name.eq_ignore_ascii_case(b"filename")
-                });
+            let named = leaf.all_params().any(|(name, _)| {
+                name.eq_ignore_ascii_case(b"name") || name.eq_ignore_ascii_case(b"filename")
+            });
             named && !leaf.media_type.eq_ignore_ascii_case(b"text")
         })
     }
@@ -97,12 +102,17 @@ impl MimeNode {
     /// The content of the message, from its structure and the parts in `fetched` (by
     /// section, still transfer-encoded). Parts that weren't fetched have no data; body
     /// text that wasn't fetched (too large) is listed with the attachments, so it can
-    /// still be fetched on its own.
+    /// still be fetched on its own. `headers` are the MIME headers of the
+    /// [`garbled_sections`](Self::garbled_sections), by section.
     ///
     /// Builds a stand-in message with the same structure, the fetched parts in place and
     /// the others empty, and parses that the same way as a whole raw message, so both
     /// ways of downloading choose the same body parts and decode them the same way.
-    pub fn content(&self, fetched: &HashMap<String, Vec<u8>>) -> Content {
+    pub fn content(
+        &self,
+        fetched: &HashMap<String, Vec<u8>>,
+        headers: &HashMap<String, Vec<u8>>,
+    ) -> Content {
         let raw = self.stand_in(fetched);
         let Some(message) = MessageParser::new().parse(&raw) else {
             return Content::default();
@@ -113,7 +123,7 @@ impl MimeNode {
             .filter(|(_, section, _)| !fetched.contains_key(section))
             .map(|(id, _, _)| id)
             .collect();
-        let mut content = extract(&message, &raw, &unfetched);
+        let mut content = extract(&message, &raw, &unfetched, headers);
         for part in &mut content.parts {
             let Some(leaf) = leaves.get(&part.section) else {
                 // The stand-in didn't parse like the structure; whatever this is, it
@@ -132,6 +142,22 @@ impl MimeNode {
         content
     }
 
+    /// Sections of the parts with a parameter, in practice the file name, that lost bytes:
+    /// a server sends one in raw 8-bit bytes if the sender wrote it so, and the bytes that
+    /// aren't UTF-8 arrive as U+FFFD. With their MIME headers, [`content`](Self::content)
+    /// reads it again as a whole message would be.
+    pub fn garbled_sections(&self) -> Vec<String> {
+        self.leaves_in_order()
+            .into_iter()
+            .filter(|(_, leaf)| {
+                leaf.all_params().any(|(_, value)| {
+                    String::from_utf8_lossy(value).contains(char::REPLACEMENT_CHARACTER)
+                })
+            })
+            .map(|(section, _)| section)
+            .collect()
+    }
+
     fn stand_in(&self, fetched: &HashMap<String, Vec<u8>>) -> Vec<u8> {
         let mut raw = Vec::new();
         let boundary = boundary(fetched);
@@ -146,8 +172,26 @@ impl MimeNode {
         raw
     }
 
+    /// The charsets of the text parts, in MIME order: hints for header fields in raw
+    /// 8-bit bytes (see [`parse_headers`](super::parse_headers)), which most likely share
+    /// the text's.
+    pub(crate) fn text_charsets(&self) -> Vec<&str> {
+        let charsets = self
+            .leaves_in_order()
+            .into_iter()
+            .filter(|(_, leaf)| leaf.media_type.eq_ignore_ascii_case(b"text"))
+            .flat_map(|(_, leaf)| &leaf.params)
+            .filter(|(name, _)| name.eq_ignore_ascii_case(b"charset"))
+            .filter_map(|(_, value)| std::str::from_utf8(value).ok());
+        charsets.collect()
+    }
+
     /// Leaves by section; a lone leaf at the top is section `1`.
     fn leaves(&self) -> HashMap<String, &Leaf> {
+        self.leaves_in_order().into_iter().collect()
+    }
+
+    fn leaves_in_order(&self) -> Vec<(String, &Leaf)> {
         fn walk<'a>(node: &'a MimeNode, section: String, out: &mut Vec<(String, &'a Leaf)>) {
             match node {
                 MimeNode::Leaf(leaf) => out.push((section, leaf)),
@@ -163,7 +207,7 @@ impl MimeNode {
             MimeNode::Leaf(leaf) => out.push(("1".to_owned(), leaf)),
             MimeNode::Multipart { .. } => walk(self, String::new(), &mut out),
         }
-        out.into_iter().collect()
+        out
     }
 
     fn write(
@@ -400,7 +444,7 @@ mod tests {
                 b"<p>=E8=AF=B7=E6=9F=A5=E6=94=B6</p><img src=3D\"cid:logo@x\">".to_vec(),
             ),
         ]);
-        let content = tree().content(&fetched);
+        let content = tree().content(&fetched, &HashMap::new());
         assert_eq!(content.text.as_deref(), Some("请查收"));
         assert!(content.html.unwrap().contains("<p>请查收</p>"));
 
@@ -488,7 +532,7 @@ mod tests {
         };
         assert_eq!(alternative.text_sections(1_000), ["1"]);
         let fetched = HashMap::from([("1".to_owned(), b"Hi".to_vec())]);
-        let content = alternative.content(&fetched);
+        let content = alternative.content(&fetched, &HashMap::new());
         assert_eq!(content.text.as_deref(), Some("Hi"));
         assert_eq!(content.html, None);
         assert_eq!(
@@ -507,7 +551,7 @@ mod tests {
             ],
         };
         assert!(mixed.text_sections(1_000).is_empty());
-        let content = mixed.content(&HashMap::new());
+        let content = mixed.content(&HashMap::new(), &HashMap::new());
         assert_eq!((&content.text, &content.snippet), (&None, &None));
         assert_eq!(
             parts(&content),
@@ -544,9 +588,50 @@ mod tests {
             ("2".to_owned(), b"UEsDBA==".to_vec()),
         ]);
         let whole = parse_message(raw);
-        let rebuilt = tree.content(&fetched);
+        let rebuilt = tree.content(&fetched, &HashMap::new());
         assert_eq!(rebuilt, whole);
         assert_eq!(whole.parts[0].filename.as_deref(), Some("a \"b\".zip"));
+    }
+
+    #[test]
+    fn names_that_lost_bytes_are_read_from_their_mime_headers() {
+        // As imap-proto reads the structure from a server sending 报告 in raw GBK bytes.
+        let lost = "\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}.pdf";
+        let mut text = leaf("text", "plain", "7bit", 2);
+        text.params = params(&[("charset", b"gbk")]);
+        let mut pdf = leaf("application", "pdf", "base64", 12);
+        pdf.params = params(&[("name", lost.as_bytes())]);
+        let mut doc = leaf("application", "msword", "base64", 12);
+        doc.disposition = Some((
+            b"attachment".to_vec(),
+            params(&[("filename", lost.as_bytes())]),
+        ));
+        let structure = MimeNode::Multipart {
+            subtype: b"mixed".to_vec(),
+            children: vec![
+                MimeNode::Leaf(text),
+                MimeNode::Leaf(pdf),
+                MimeNode::Leaf(doc),
+            ],
+        };
+        assert_eq!(structure.garbled_sections(), ["2", "3"]);
+        assert!(tree().garbled_sections().is_empty());
+
+        let fetched = HashMap::from([("1".to_owned(), b"hi".to_vec())]);
+        let headers = HashMap::from([(
+            "2".to_owned(),
+            b"Content-Type: application/pdf; name=\"\xb1\xa8\xb8\xe6.pdf\"\r\n\
+                Content-Transfer-Encoding: base64\r\n\r\n"
+                .to_vec(),
+        )]);
+        let content = structure.content(&fetched, &headers);
+        let names: Vec<_> = content
+            .parts
+            .iter()
+            .map(|p| p.filename.as_deref())
+            .collect();
+        // The server sent no header for the second.
+        assert_eq!(names, [Some("报告.pdf"), Some(lost)]);
     }
 
     #[test]
@@ -555,13 +640,13 @@ mod tests {
         evil.params = params(&[("charset", b"utf-8\"\r\n\r\nInjected body")]);
         evil.content_id = Some(b"<x>\r\nContent-Type: text/html".to_vec());
         let fetched = HashMap::from([("1".to_owned(), b"body!".to_vec())]);
-        let content = MimeNode::Leaf(evil).content(&fetched);
+        let content = MimeNode::Leaf(evil).content(&fetched, &HashMap::new());
         assert_eq!(content.text.as_deref(), Some("body!"));
         assert_eq!(content.html, None);
 
         // Garbage where a token belongs makes an unknown type, nothing more.
         let garbage = MimeNode::Leaf(leaf("text\r\nX-Evil: 1", "plain", "7bit", 5));
-        let content = garbage.content(&fetched);
+        let content = garbage.content(&fetched, &HashMap::new());
         assert_eq!(content.text, None);
         assert_eq!(content.parts[0].mime_type, "textx-evil1/plain");
     }
@@ -583,7 +668,7 @@ mod tests {
             ],
         };
         let fetched = HashMap::from([("1".to_owned(), b"hi".to_vec())]);
-        let content = tree.content(&fetched);
+        let content = tree.content(&fetched, &HashMap::new());
         let parts: Vec<_> = content
             .parts
             .iter()

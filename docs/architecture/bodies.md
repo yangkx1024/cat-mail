@@ -35,6 +35,26 @@ base64 正文），交给 mail-parser 按同样方式解析。于是两条路径
 - 替身邮件解析出的部分对不上 BODYSTRUCTURE 的 section 时一律视为未下载。
 - IMAP section 编号按 RFC 3501 §6.4.5 从解析结果计算，附加的邮件（message/rfc822）算一个部分。
 
+## 原始字节的邮件头
+
+有的邮件程序把附件文件名、主题、显示名直接用发件人本地的字符集（如 GBK）写进邮件头，不按 RFC 2047 / 2231
+编码。mail-parser 和 imap-proto（BODYSTRUCTURE）都按 UTF-8 有损读，不是 UTF-8 的字节变成 `U+FFFD`。
+
+- 转码在 `mime::transcode_fields`：一个字段一个字段地看，合法 UTF-8 的字段原样保留（其中的 `U+FFFD` 是发件人
+  自己写的），其余的用线索里第一个能完整解码（encoding_rs 不做替换地解码成功）的字符集转成 UTF-8，再整体重新
+  解析。先转码再解析：GBK 等双字节的第二个字节可能是 `\` 或 `"`。
+- 线索是同一封邮件里文本的 `charset`（其他客户端也这样猜），按 MIME 顺序取所有文本部分（`text/*`）的；整封邮件、替身邮件和 BODYSTRUCTURE（同步时的摘要邮件头，见
+  [同步](sync.md#邮件头)）用同一条规则。附件文件名先试这个部分自己的 `charset`。没有线索就保持原样，不做
+  字符集探测。
+- 只用 encoding_rs 认识、ASCII 兼容的编码（`legacy_encodings`）：UTF-16、ISO-2022-JP 会把字段名、冒号和换行
+  也当成文字解码，解得通却毁了邮件头的结构。UTF-8 不算（这些字段不是）；ASCII 也不算，它说明不了发件人用
+  什么字符集，而且按 WHATWG 它的标签（`us-ascii`、`ascii`、`ansi_x3.4-1968`）指 windows-1252，什么字节都
+  解得通。其他 ASCII 别名 encoding_rs 不认识，自然不用。
+- 附件文件名只在含 `U+FFFD` 时重读。整封下载时原始头就在原文里；按部分下载时，BODYSTRUCTURE 里参数值带
+  `U+FFFD` 的部分（`MimeNode::garbled_sections`）另发一条 `BODY.PEEK[<section>.MIME]`，取回的头交给同一套
+  逻辑。这条 FETCH 解析不了就只是文件名保持原样；只有这种邮件多一次往返，不并进取正文的那条（那条缺项会
+  退回整封下载）。
+
 ## 正文的组成
 
 - `text`：所有正文文本部分；只有 HTML 时由 HTML 转换。

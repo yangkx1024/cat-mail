@@ -6,8 +6,8 @@ use std::time::Duration;
 use catmail_types::{FlagState, Flags, FolderRole, GmailLabel, Security, ServerConfig};
 use imap_proto::rfc4315::UidSetMember;
 use imap_proto::{
-    AttributeValue, Capability, MailboxDatum, NameAttribute, ResponseCode, SectionPath, Status,
-    StatusAttribute,
+    AttributeValue, Capability, MailboxDatum, MessageSection, NameAttribute, ResponseCode,
+    SectionPath, Status, StatusAttribute,
 };
 use secrecy::ExposeSecret;
 
@@ -741,15 +741,44 @@ impl Session {
     }
 
     /// Body parts by section (`1.2`), still transfer-encoded, or `None` if there is no
-    /// message with this UID. A section the server returns no content for is absent.
+    /// message with this UID. A section the server returns no content for is absent. With
+    /// no sections, nothing is sent and nothing is found.
     pub async fn fetch_sections(
         &mut self,
         uid: u32,
         sections: &[String],
     ) -> Result<Option<HashMap<String, Vec<u8>>>> {
+        self.fetch_parts(uid, sections, false).await
+    }
+
+    /// The MIME headers of body parts by section (`BODY.PEEK[1.2.MIME]`), as the sender
+    /// wrote them, or `None` if there is no message with this UID. A section the server
+    /// returns nothing for is absent.
+    pub async fn fetch_mime_headers(
+        &mut self,
+        uid: u32,
+        sections: &[String],
+    ) -> Result<Option<HashMap<String, Vec<u8>>>> {
+        self.fetch_parts(uid, sections, true).await
+    }
+
+    /// `BODY.PEEK[<section>]` for each of `sections`, or with `mime`
+    /// `BODY.PEEK[<section>.MIME]`.
+    async fn fetch_parts(
+        &mut self,
+        uid: u32,
+        sections: &[String],
+        mime: bool,
+    ) -> Result<Option<HashMap<String, Vec<u8>>>> {
+        // A FETCH must ask for something.
+        if sections.is_empty() {
+            return Ok(Some(HashMap::new()));
+        }
+        let suffix = if mime { ".MIME" } else { "" };
+        let kind = mime.then_some(MessageSection::Mime);
         let items = sections
             .iter()
-            .map(|section| Ok(format!("BODY.PEEK[{}]", part(section)?)))
+            .map(|section| Ok(format!("BODY.PEEK[{}{suffix}]", part(section)?)))
             .collect::<Result<Vec<_>>>()?
             .join(" ");
         let Some(fetched) = self.fetch_one(uid, &items).await? else {
@@ -758,10 +787,11 @@ impl Session {
         let mut found = HashMap::new();
         for item in fetched {
             if let AttributeValue::BodySection {
-                section: Some(SectionPath::Part(numbers, None)),
+                section: Some(SectionPath::Part(numbers, got)),
                 data,
                 ..
             } = item
+                && got == kind
             {
                 let section = numbers
                     .iter()
@@ -992,6 +1022,9 @@ fn merge_fetches(response: Response, wanted: impl Fn(u32) -> bool) -> BTreeMap<u
         .into_iter()
         .map(|(uid, items)| {
             let mut m = MergedFetch::default();
+            // Parsed once the structure, whose text charsets they may need, is known.
+            let mut headers = None;
+            let mut structure = None;
             for item in items {
                 match item {
                     AttributeValue::Flags(flags) => m.flags = Some(convert_flags(&flags)),
@@ -999,11 +1032,9 @@ fn merge_fetches(response: Response, wanted: impl Fn(u32) -> bool) -> BTreeMap<u
                     AttributeValue::InternalDate(d) => m.internal_date = internal_date(&d),
                     AttributeValue::Rfc822Size(n) => m.size = Some(n),
                     AttributeValue::BodyStructure(bs) => {
-                        m.has_attachments = Some(super::body::mime_node(&bs).has_attachments())
+                        structure = Some(super::body::mime_node(&bs));
                     }
-                    AttributeValue::BodySection { data, .. } => {
-                        m.headers = Some(Box::new(parse_headers(data.as_deref().unwrap_or(&[]))));
-                    }
+                    AttributeValue::BodySection { data, .. } => headers = Some(data),
                     AttributeValue::GmailMsgId(id) => m.gm_msgid = Some(id),
                     AttributeValue::GmailThrId(id) => m.gm_thrid = Some(id),
                     AttributeValue::GmailLabels(labels) => {
@@ -1011,6 +1042,18 @@ fn merge_fetches(response: Response, wanted: impl Fn(u32) -> bool) -> BTreeMap<u
                     }
                     _ => {}
                 }
+            }
+            m.has_attachments = structure.as_ref().map(MimeNode::has_attachments);
+            if let Some(data) = headers {
+                let raw = data.as_deref().unwrap_or_default();
+                // Only a header that isn't UTF-8 needs them.
+                let hints = match &structure {
+                    Some(structure) if std::str::from_utf8(raw).is_err() => {
+                        structure.text_charsets()
+                    }
+                    _ => Vec::new(),
+                };
+                m.headers = Some(Box::new(parse_headers(raw, &hints)));
             }
             (uid, m)
         })

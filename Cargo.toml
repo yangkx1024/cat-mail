@@ -34,6 +34,9 @@ clap = { version = "4.6", features = ["derive", "env"] }
 # WHATWG data: URL parsing; the one gpui-kit uses for the same job.
 data-url = "0.3.2"
 directories = "6"
+# Reads header fields in raw 8-bit bytes in a legacy charset; the version mail-parser
+# decodes text with.
+encoding_rs = "0.8.42"
 # Rewrites message style sheets token by token; the version Stylo (in Blitz) uses.
 cssparser = "0.38.0"
 # Replies from the render threads to the UI's tasks; the version GPUI uses.

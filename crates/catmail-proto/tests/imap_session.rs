@@ -1,6 +1,7 @@
 // `fetch_flags(&[1..=2], …)` is a UID set of one range, not a range meant to be collected.
 #![allow(clippy::single_range_in_vec_init)]
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use catmail_proto::Credentials;
@@ -635,11 +636,30 @@ async fn fetches_bodies_without_marking_them_seen() {
         "NIL for a section that doesn't exist"
     );
 
-    let content = structure.content(&fetched);
+    let content = structure.content(&fetched, &HashMap::new());
     assert_eq!(content.text.as_deref(), Some("See attached."));
     assert_eq!(content.parts[0].filename.as_deref(), Some("报告.pdf"));
     assert_eq!(content.parts[0].data.as_deref(), Some(&b"%PDF-1.4\n"[..]));
     assert_eq!(session.fetch_structure(99).await.unwrap(), None);
+
+    let headers = session
+        .fetch_mime_headers(2, &["2".into(), "7".into()])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(headers["2"].starts_with(b"Content-Type: application/pdf;"));
+    assert!(headers["2"].ends_with(b"base64\r\n\r\n"));
+    assert!(!headers.contains_key("7"));
+    assert_eq!(
+        session.fetch_mime_headers(99, &["2".into()]).await.unwrap(),
+        None
+    );
+    let sent = fake.state().log.len();
+    assert_eq!(
+        session.fetch_sections(2, &[]).await.unwrap(),
+        Some(HashMap::new())
+    );
+    assert_eq!(fake.state().log.len(), sent, "nothing to ask for");
 
     let log = fake.state().log.clone();
     let fetches: Vec<_> = log.iter().filter(|c| c.line.contains("FETCH")).collect();
@@ -648,6 +668,7 @@ async fn fetches_bodies_without_marking_them_seen() {
         "{fetches:?}"
     );
     assert!(fetches.iter().any(|c| c.line.contains("BODY.PEEK[2]")));
+    assert!(fetches.iter().any(|c| c.line.contains("BODY.PEEK[2.MIME]")));
     assert!(fetches.iter().any(|c| c.line.contains("BODY.PEEK[]")));
 }
 

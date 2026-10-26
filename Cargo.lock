@@ -1151,6 +1151,7 @@ dependencies = [
  "catmail-testkit",
  "catmail-types",
  "cssparser",
+ "encoding_rs",
  "html5ever 0.40.1",
  "imap-proto",
  "jiff",

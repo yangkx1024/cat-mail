@@ -270,6 +270,42 @@ async fn large_messages_leave_attachments_on_the_server_until_opened() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn names_in_raw_bytes_read_the_same_whole_or_in_parts() {
+    // 报告 in raw GBK bytes, as some mail programs write it, beside GBK text.
+    let raw = b"Subject: Report\r\n\
+        Content-Type: multipart/mixed; boundary=\"b\"\r\n\r\n\
+        --b\r\n\
+        Content-Type: text/plain; charset=gbk\r\n\
+        Content-Transfer-Encoding: base64\r\n\r\n\
+        x+uy6crV\r\n\
+        --b\r\n\
+        Content-Type: application/pdf; name=\"\xb1\xa8\xb8\xe6.pdf\"\r\n\
+        Content-Disposition: attachment\r\n\
+        Content-Transfer-Encoding: base64\r\n\r\n\
+        JVBERi0xLjQK\r\n\
+        --b--\r\n";
+    for limit in [u32::MAX, 64] {
+        let env = env_built(state(&[raw]), SmtpState::new("alice", "pw"), |b| {
+            b.tuning(EngineTuning {
+                whole_message_limit: limit,
+                ..EngineTuning::default()
+            })
+        })
+        .await;
+        env.client.sync_account(env.account).await.unwrap();
+        let start = env.log_len();
+
+        let message = env.client.download_message(env.id(0).await).await.unwrap();
+        let commands = env.commands_since(start);
+        let in_parts = commands.iter().any(|c| c.contains("BODY.PEEK[2.MIME]"));
+        assert_eq!(in_parts, limit == 64, "{commands:?}");
+        let b = body(&message);
+        assert_eq!(b.text.as_deref(), Some("请查收"));
+        assert_eq!(b.attachments[0].filename.as_deref(), Some("报告.pdf"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_whole_message_limit_is_tunable() {
     let env = env_built(state(&[NEWSLETTER]), SmtpState::new("alice", "pw"), |b| {
         b.tuning(EngineTuning {
