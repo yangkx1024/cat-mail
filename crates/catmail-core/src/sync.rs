@@ -88,7 +88,7 @@ pub(crate) async fn sync_one(
             let (current, mode, locations) = engine
                 .read(move |db| {
                     let folders = db.folders();
-                    let mode = db.accounts().get(account)?.map(|a| a.mode);
+                    let mode = db.accounts().get(account)?.and_then(|a| a.mode);
                     Ok((folders.get(folder)?, mode, folders.location_ids(account)?))
                 })
                 .await?;
@@ -164,29 +164,30 @@ pub(crate) async fn run(
             let start = Instant::now();
             let listed = session.list().await?;
             let mode = mode_of(session, &listed);
-            let gmail = session.is_gmail();
             let remote = remote_folders(listed, mode);
-            let reconciled = engine
+            let (reconciled, mode_changed) = engine
                 .write(move |db| {
                     let mut reconciled = db.folders().reconcile(account_id, &remote)?;
-                    // With the mode, it tells whether All Mail is hidden: the user is told
-                    // how to get the labels back.
-                    if db.accounts().set_gmail_server(account_id, gmail)? {
-                        reconciled.changed = true;
-                    }
                     // What a message row is changed with the mode (one per location, or
                     // one per X-GM-MSGID): every location starts over.
-                    if db.accounts().set_mode(account_id, mode)? {
+                    let mode_changed = db.accounts().set_mode(account_id, mode)?;
+                    if mode_changed {
                         reconciled
                             .touched
                             .merge(db.folders().end_generations(account_id)?);
                         reconciled.changed = true;
                     }
-                    Ok(reconciled)
+                    Ok((reconciled, mode_changed))
                 })
                 .await?;
             if reconciled.changed {
                 engine.emit(Event::FoldersChanged {
+                    account: account_id,
+                });
+            }
+            // With the mode known, the account tells whether All Mail is hidden.
+            if mode_changed {
+                engine.emit(Event::AccountChanged {
                     account: account_id,
                 });
             }
@@ -560,7 +561,7 @@ pub(crate) async fn sync_inbox(
                 Some((id, _)) => folders.sync_state(id)?,
                 None => None,
             };
-            let mode = db.accounts().get(account_id)?.map(|a| a.mode);
+            let mode = db.accounts().get(account_id)?.and_then(|a| a.mode);
             Ok((inbox, mode, folders.location_ids(account_id)?))
         })
         .await?;

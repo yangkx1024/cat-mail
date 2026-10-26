@@ -37,7 +37,7 @@ impl Refresh {
             | Event::AccountRemoved { .. }
             | Event::FoldersChanged { .. } => sidebar(matches!(shown, Some(Source::Search(_)))),
             // Read with the accounts, for Settings.
-            Event::IdentitiesChanged { .. } => sidebar(false),
+            Event::AccountChanged { .. } => sidebar(false),
             // Unread and total counts may have changed too. A search looks in every
             // folder of every account.
             Event::MessagesChanged { folder, .. } => sidebar(

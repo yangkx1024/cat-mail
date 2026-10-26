@@ -19,8 +19,10 @@ pub enum Event {
     AccountStatusChanged {
         account: AccountId,
     },
-    /// Identities were added to the account or removed.
-    IdentitiesChanged {
+    /// The account changed: identities were added to it, removed or changed, or what is
+    /// known of its server (whether it is Gmail's, its mode), which
+    /// `Identity::server_saves_sent` and `Account::all_mail_hidden` go by.
+    AccountChanged {
         account: AccountId,
     },
     /// Folders were added, removed or renamed.

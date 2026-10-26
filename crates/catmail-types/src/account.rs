@@ -71,11 +71,10 @@ pub struct ServerConfig {
 }
 
 /// How an account's mailboxes map to messages (see `docs/architecture/labels.md`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AccountMode {
     /// Every selectable mailbox is a location.
-    #[default]
     Standard,
     /// Gmail (`X-GM-EXT-1`, with All Mail listed): All Mail, Trash and Spam are the
     /// locations, the other mailboxes labels, and a message is one `X-GM-MSGID`.
@@ -114,10 +113,11 @@ pub struct Account {
     /// but not always the email address.
     pub username: String,
     pub imap: ServerConfig,
-    /// As found when last connected to; standard until then.
-    pub mode: AccountMode,
-    /// The server is Gmail's (X-GM-EXT-1), as found when last connected to; false until
-    /// then. Not the same as the Gmail mode, which also needs All Mail listed.
+    /// As found when its mailboxes were last listed, by a sync; `None` until the first.
+    pub mode: Option<AccountMode>,
+    /// The server is Gmail's (X-GM-EXT-1), as found when last connected to (logging in
+    /// to check the account counts); false until then. Not the same as the Gmail mode,
+    /// which also needs All Mail listed.
     pub gmail_server: bool,
     /// Unix timestamp, seconds.
     pub created_at: i64,
@@ -125,9 +125,10 @@ pub struct Account {
 
 impl Account {
     /// A Gmail server with All Mail hidden from IMAP in Gmail's settings: the account is
-    /// synced as a standard one, each label a folder, until it is shown again.
+    /// synced as a standard one, each label a folder, until it is shown again. Not known
+    /// before the first sync.
     pub fn all_mail_hidden(&self) -> bool {
-        self.gmail_server && self.mode == AccountMode::Standard
+        self.gmail_server && self.mode == Some(AccountMode::Standard)
     }
 }
 
@@ -182,12 +183,6 @@ impl Identity {
     /// on a server in the IMAP server's domain); what goes out elsewhere it never sees.
     /// Other servers are taken not to.
     pub fn server_saves_sent(&self, account: &Account) -> bool {
-        self.server_saves_sent_if(account, account.gmail_server)
-    }
-
-    /// As [`server_saves_sent`](Self::server_saves_sent), with `gmail_server` told rather
-    /// than recorded: the account may not have been synced yet.
-    pub fn server_saves_sent_if(&self, account: &Account, gmail_server: bool) -> bool {
         // `imap.gmail.com` and `smtp.gmail.com`.
         fn domain(host: &str) -> &str {
             match host.split_once('.') {
@@ -196,7 +191,7 @@ impl Identity {
             }
         }
         self.saves_sent.unwrap_or_else(|| {
-            gmail_server
+            account.gmail_server
                 && self.username == account.username
                 && domain(&self.smtp.host).eq_ignore_ascii_case(domain(&account.imap.host))
         })
@@ -278,7 +273,7 @@ mod tests {
             display_name: None,
             username: "alice@gmail.com".into(),
             imap: server("imap.gmail.com"),
-            mode: AccountMode::Standard,
+            mode: None,
             gmail_server,
             created_at: 0,
         }
@@ -318,5 +313,19 @@ mod tests {
         let mut relay = identity("alice@gmail.com", "smtp-relay.example.net");
         relay.saves_sent = Some(true);
         assert!(relay.server_saves_sent(&account(false)));
+    }
+
+    #[test]
+    fn all_mail_is_hidden_only_once_a_sync_found_gmail_without_it() {
+        // Known to be Gmail's at login, not synced yet.
+        let mut gmail = account(true);
+        assert!(!gmail.all_mail_hidden());
+        gmail.mode = Some(AccountMode::Gmail);
+        assert!(!gmail.all_mail_hidden());
+        gmail.mode = Some(AccountMode::Standard);
+        assert!(gmail.all_mail_hidden());
+        let mut other = account(false);
+        other.mode = Some(AccountMode::Standard);
+        assert!(!other.all_mail_hidden());
     }
 }

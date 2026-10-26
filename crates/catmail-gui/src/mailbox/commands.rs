@@ -329,7 +329,7 @@ impl Mailbox {
     /// The message's account, if it has labels: on Gmail.
     fn labels_account(&self, message: &MessageSummary) -> Option<&AccountEntry> {
         self.account(message.account_id)
-            .filter(|a| a.account.mode == AccountMode::Gmail)
+            .filter(|a| a.account.mode == Some(AccountMode::Gmail))
     }
 
     /// Opens "Labels" for the selected message, which changes them as they are picked.

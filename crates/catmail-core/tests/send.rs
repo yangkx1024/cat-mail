@@ -642,7 +642,7 @@ async fn no_copy_is_saved_where_the_server_saves_one() {
         .set_identity_saves_sent(own.id, Some(true))
         .await
         .unwrap();
-    assert!(drain(&mut events).contains(&Event::IdentitiesChanged {
+    assert!(drain(&mut events).contains(&Event::AccountChanged {
         account: env.account
     }));
     env.queue("hi").await;
