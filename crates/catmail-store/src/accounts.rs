@@ -1,7 +1,7 @@
 use catmail_types::{Account, AccountId, AccountMode, NewAccount, NewIdentity};
 use rusqlite::{Connection, OptionalExtension, Row, named_params};
 
-use crate::columns::{parse_text, server, size_limit, size_limit_column};
+use crate::columns::{parse_opt_text, server, size_limit, size_limit_column};
 use crate::error::is_unique_violation;
 use crate::identities::Identities;
 use crate::{Error, Result};
@@ -119,12 +119,12 @@ impl<'c> Accounts<'c> {
         Ok(())
     }
 
-    /// Records the account's mode as found on connecting. Returns whether it changed. Its
+    /// Records the account's mode as a sync found it. Returns whether it changed. Its
     /// folders and messages are not touched: the caller rebuilds them for the new mode
     /// in the same transaction.
     pub fn set_mode(&self, id: AccountId, mode: AccountMode) -> Result<bool> {
         Ok(self.conn.execute(
-            "UPDATE accounts SET mode = ?2 WHERE id = ?1 AND mode <> ?2",
+            "UPDATE accounts SET mode = ?2 WHERE id = ?1 AND mode IS NOT ?2",
             (id.0, mode.as_str()),
         )? > 0)
     }
@@ -159,7 +159,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Account> {
         display_name: row.get("display_name")?,
         username: row.get("username")?,
         imap: server(row, "imap")?,
-        mode: parse_text(row, "mode")?,
+        mode: parse_opt_text(row, "mode")?,
         gmail_server: row.get("gmail_server")?,
         created_at: row.get("created_at")?,
     })
@@ -277,19 +277,20 @@ mod tests {
     }
 
     #[test]
-    fn mode_is_standard_until_found_otherwise() {
+    fn mode_is_unknown_until_found() {
         let store = test_util::store();
         let conn = store.conn();
         let accounts = Accounts::new(&conn);
         let a = accounts
             .insert(&new_account("a@example.com"), &key("a@example.com"))
             .unwrap();
-        assert_eq!(a.mode, AccountMode::Standard);
+        assert_eq!(a.mode, None);
+        assert!(accounts.set_mode(a.id, AccountMode::Standard).unwrap());
         assert!(accounts.set_mode(a.id, AccountMode::Gmail).unwrap());
         assert!(!accounts.set_mode(a.id, AccountMode::Gmail).unwrap());
         assert_eq!(
             accounts.get(a.id).unwrap().unwrap().mode,
-            AccountMode::Gmail
+            Some(AccountMode::Gmail)
         );
         assert!(!a.gmail_server);
         assert!(accounts.set_gmail_server(a.id, true).unwrap());

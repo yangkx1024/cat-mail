@@ -7,7 +7,7 @@ use std::time::Duration;
 use catmail_proto::imap::Session;
 use catmail_proto::{Credentials, smtp};
 use catmail_store::{Db, DraftSnapshot};
-use catmail_types::{Account, AccountId, Address, DraftId, IdentityId, ServerConfig};
+use catmail_types::{Account, AccountId, Address, DraftId, Event, IdentityId, ServerConfig};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::engine::{Engine, blocking};
@@ -17,15 +17,31 @@ use crate::{Error, Result};
 /// Per network read or write, not per command.
 pub(crate) const IO_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Opens a new connection to the account's IMAP server and logs in.
+/// Opens a new connection to the account's IMAP server and logs in. What the server
+/// tells of itself is recorded if it changed: servers change their APPENDLIMIT, and
+/// whether it is Gmail's is known from the first login, not only once synced (identities
+/// guess by it whether the server saves what they send to Sent). Failing to only leaves
+/// what was recorded before, which sending checks anyway.
 pub(crate) async fn connect(engine: &Arc<Engine>, account_id: AccountId) -> Result<Session> {
     let (account, credentials, append_limit) = account_credentials(engine, account_id).await?;
     let session = login(engine, &account.imap, &credentials).await?;
     let announced = announced_append_limit(session.capabilities());
-    remember_limit(engine, append_limit, announced, move |db, limit| {
-        db.accounts().set_append_limit(account_id, limit)
-    })
-    .await;
+    let gmail = session.is_gmail();
+    if (append_limit, account.gmail_server) != (announced, gmail) {
+        let recorded = engine
+            .write(move |db| {
+                db.accounts().set_append_limit(account_id, announced)?;
+                db.accounts().set_gmail_server(account_id, gmail)
+            })
+            .await;
+        match recorded {
+            Ok(true) => engine.emit(Event::AccountChanged {
+                account: account_id,
+            }),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(error = %e, "couldn't record what the server announced"),
+        }
+    }
     Ok(session)
 }
 
@@ -38,21 +54,7 @@ pub(crate) fn announced_append_limit(
     capabilities.append_limit().filter(|&limit| limit > 0)
 }
 
-/// Records the size limit a server just announced (IMAP APPENDLIMIT, SMTP SIZE), if it
-/// isn't the one `recorded`: servers change it. Failing to only leaves the old one, which
-/// sending checks anyway.
-async fn remember_limit(
-    engine: &Arc<Engine>,
-    recorded: Option<u64>,
-    announced: Option<u64>,
-    record: impl FnOnce(&Db<'_>, Option<u64>) -> catmail_store::Result<()> + Send + 'static,
-) {
-    if recorded != announced {
-        record_limit(engine, move |db| record(db, announced)).await;
-    }
-}
-
-/// Writes a size limit with `record`, which only logs failing to: see [`remember_limit`].
+/// Writes a size limit with `record`, which only logs failing to: see [`connect`].
 async fn record_limit(
     engine: &Arc<Engine>,
     record: impl FnOnce(&Db<'_>) -> catmail_store::Result<()> + Send + 'static,
@@ -91,7 +93,7 @@ impl SmtpLogin {
     }
 
     /// Opens a new connection and logs in. The SIZE the server announces is recorded for
-    /// every identity sending over it, as [`remember_limit`] does.
+    /// every identity sending over it, as [`connect`] does the APPENDLIMIT.
     pub async fn connect(&mut self, engine: &Arc<Engine>) -> Result<smtp::Session> {
         let session = smtp_login(engine, &self.server, &self.credentials).await?;
         let announced = session.max_size();

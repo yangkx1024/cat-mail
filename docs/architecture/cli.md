@@ -24,7 +24,8 @@ src/
 加个内部字段都不应该悄悄改变脚本读到的东西，而结构改了 `json.rs` 必须跟着改（枚举是穷尽匹配，
 types 加变体会编译失败）。
 
-- 每次输出是一个对象，带 `"schema_version": 1`。删除字段、改名或改变含义时加一；只增加字段不加。
+- 每次输出是一个对象，带 `"schema_version": 1`。项目尚未发布，发布前调整结构保持版本 1；首次发布后，
+  删除字段、改名或改变含义时加一，只增加字段不加。
   列表放在对象的一个键下（`{"messages": [...]}`），以后可以并列加分页等信息。
 - 时间是 UTC 的 RFC 3339 字符串；标记是单词数组（`"flags": ["seen", "flagged"]`），状态和类别是
   小写单词；ID 是整数，引用别的对象用对象名作键（`"account": 1`、`"folder": 3`）。
@@ -44,7 +45,7 @@ types 加变体会编译失败）。
 - 改标签：`catmail label <ids> --add Work --remove INBOX`；已删除、垃圾邮件里的邮件 `--add INBOX` 是把它
   移到 INBOX。`mv --from <标签>` 是从哪个标签移走（缺省是邮件的位置）。
 - `--json` 只增加字段：文件夹的 `kind`、`listed`，邮件的 `labels`（标签文件夹的 id，系统标签也在内），账户的
-  `mode`、`gmail_server`、`all_mail_hidden`，`sync` 每个账户的 `all_mail_hidden`，身份的 `server_saves_sent`
+  `mode`（第一次同步之前为 `null`）、`gmail_server`、`all_mail_hidden`，`sync` 每个账户的 `all_mail_hidden`，身份的 `server_saves_sent`
   与 `server_saves_sent_auto`（是不是猜的）。
 
 ## 退出码

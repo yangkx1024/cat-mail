@@ -592,7 +592,7 @@ impl Composer {
             loop {
                 match events.recv().await {
                     Err(RecvError::Closed) => break,
-                    Ok(Event::IdentitiesChanged { account: changed }) if changed == account => {}
+                    Ok(Event::AccountChanged { account: changed }) if changed == account => {}
                     Err(RecvError::Lagged(_)) => {}
                     Ok(_) => continue,
                 }

@@ -1,18 +1,19 @@
 //! What `--json` prints. Scripts depend on it, so it is spelled out here rather than
 //! derived from `catmail_core`'s types: renaming a field there must not change it.
-//! Every document is an object with `schema_version`, which goes up when a field
-//! changes meaning or goes away; added fields don't change it. Times are RFC 3339 in
-//! UTC, flags and states are lowercase words.
+//! Every document is an object with `schema_version`, kept at 1 until the first
+//! release. After that, it goes up when a field changes meaning or goes away;
+//! added fields don't change it. Times are RFC 3339 in UTC, flags and states are
+//! lowercase words.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::Result;
 use catmail_core::{
-    Account, Address, Attachment, Draft, DraftAttachment, ErrorKind, Event, Flags, Folder,
-    FolderRole, FolderSyncReport, GcReport, Identity, Message, MessageSummary, OpKind, OpStatus,
-    OutboxEntry, OutboxStatus, PendingOp, ReplayReport, ReportedError, Security, ServerConfig,
-    SyncReport,
+    Account, AccountMode, Address, Attachment, Draft, DraftAttachment, ErrorKind, Event, Flags,
+    Folder, FolderRole, FolderSyncReport, GcReport, Identity, Message, MessageSummary, OpKind,
+    OpStatus, OutboxEntry, OutboxStatus, PendingOp, ReplayReport, ReportedError, Security,
+    ServerConfig, SyncReport,
 };
 use serde::Serialize;
 
@@ -95,9 +96,9 @@ pub(crate) struct JsonAccount {
     imap: JsonServer,
     /// Its default identity's.
     smtp: Option<JsonServer>,
-    /// `standard` or `gmail`: which folders are labels.
-    mode: &'static str,
-    /// The server is Gmail's, whatever the mode.
+    /// `standard` or `gmail`: which folders are labels. `null` until the first sync.
+    mode: Option<&'static str>,
+    /// The server is Gmail's, whatever the mode; false until connected to.
     gmail_server: bool,
     /// A Gmail server with All Mail hidden from IMAP: its labels are synced as folders.
     all_mail_hidden: bool,
@@ -117,7 +118,7 @@ impl JsonAccount {
                 .iter()
                 .find(|i| i.is_default)
                 .map(|i| (&i.smtp).into()),
-            mode: a.mode.as_str(),
+            mode: a.mode.map(AccountMode::as_str),
             gmail_server: a.gmail_server,
             all_mail_hidden: a.all_mail_hidden(),
             created_at: time(a.created_at),
@@ -641,7 +642,7 @@ pub(crate) enum JsonEvent {
     AccountAdded { account: i64 },
     AccountRemoved { account: i64 },
     AccountStatusChanged { account: i64 },
-    IdentitiesChanged { account: i64 },
+    AccountChanged { account: i64 },
     FoldersChanged { account: i64 },
     MessagesChanged { account: i64, folder: i64 },
     DraftsChanged { account: i64 },
@@ -659,7 +660,7 @@ impl From<&Event> for JsonEvent {
             Event::AccountStatusChanged { account } => {
                 Self::AccountStatusChanged { account: account.0 }
             }
-            Event::IdentitiesChanged { account } => Self::IdentitiesChanged { account: account.0 },
+            Event::AccountChanged { account } => Self::AccountChanged { account: account.0 },
             Event::FoldersChanged { account } => Self::FoldersChanged { account: account.0 },
             Event::MessagesChanged { account, folder } => Self::MessagesChanged {
                 account: account.0,
@@ -696,7 +697,8 @@ mod tests {
     }
 
     // The documents scripts read. A failure here means `--json` output changed: if
-    // that was meant, a removed or renamed field needs a new SCHEMA_VERSION.
+    // that was meant, a removed or renamed field needs a new SCHEMA_VERSION after
+    // the first release.
     #[test]
     fn folder_snapshot() {
         let folder = Folder {

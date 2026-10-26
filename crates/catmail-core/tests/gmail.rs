@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use catmail_core::{
     AccountMode, Event, Flags, FolderKind, MessageId, OpStatus, SearchQuery, SyncReport,
-    SyncSchedule,
+    SyncSchedule, Verify,
 };
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 use tokio::sync::Semaphore;
@@ -15,7 +15,7 @@ use tokio::task::JoinHandle;
 
 mod common;
 
-use common::{Env, drain, env, env_built, eventually, folder_report, synced_env};
+use common::{Env, drain, env, env_added, env_built, eventually, folder_report, synced_env};
 
 const ALL_MAIL: &str = "[Gmail]/All Mail";
 const TRASH: &str = "[Gmail]/Trash";
@@ -106,7 +106,7 @@ async fn labels_are_kept_with_the_messages_of_three_locations() {
         "{commands:?}"
     );
     let account = env.client.get_account(env.account).await.unwrap().unwrap();
-    assert_eq!(account.mode, AccountMode::Gmail);
+    assert_eq!(account.mode, Some(AccountMode::Gmail));
     for (name, kind) in [
         ("INBOX", FolderKind::Label),
         ("Work", FolderKind::Label),
@@ -236,7 +236,7 @@ async fn hiding_all_mail_syncs_the_labels_as_folders() {
 
     env.client.sync_account(env.account).await.unwrap();
     let account = env.client.get_account(env.account).await.unwrap().unwrap();
-    assert_eq!(account.mode, AccountMode::Standard);
+    assert_eq!(account.mode, Some(AccountMode::Standard));
     // Still Gmail's server: only All Mail is hidden.
     assert!(account.gmail_server && account.all_mail_hidden());
     assert_eq!(env.folder("INBOX").await.kind, FolderKind::Location);
@@ -251,7 +251,7 @@ async fn hiding_all_mail_syncs_the_labels_as_folders() {
     env.fake.state().mailboxes.insert(hidden.0, hidden.1);
     env.client.sync_account(env.account).await.unwrap();
     let account = env.client.get_account(env.account).await.unwrap().unwrap();
-    assert_eq!(account.mode, AccountMode::Gmail);
+    assert_eq!(account.mode, Some(AccountMode::Gmail));
     assert!(!account.all_mail_hidden());
     assert_eq!(env.folder("INBOX").await.kind, FolderKind::Label);
     assert_eq!(env.subjects("INBOX").await, ["one"]);
@@ -748,15 +748,48 @@ async fn sent_mail_is_not_saved_to_sent_again() {
     assert_eq!(env.fake.state().received("APPEND"), 0);
 }
 
-/// Before the first sync, the account isn't known to be Gmail's, but the server tells.
+/// Added without logging in, the account isn't known to be Gmail's until connected to,
+/// to save the copy: then it is.
 #[tokio::test(flavor = "multi_thread")]
 async fn sent_mail_is_not_saved_again_before_the_first_sync() {
     let env = env(gmail()).await;
     let account = env.client.get_account(env.account).await.unwrap().unwrap();
     assert!(!account.gmail_server);
+    let mut events = env.client.subscribe();
     env.send("hi").await;
     assert_eq!(env.smtp.state().received.len(), 1);
     assert_eq!(env.fake.state().received("APPEND"), 0);
+    let account = env.client.get_account(env.account).await.unwrap().unwrap();
+    assert!(account.gmail_server);
+    assert_eq!(account.mode, None);
+    assert!(drain(&mut events).contains(&Event::AccountChanged {
+        account: env.account
+    }));
+}
+
+/// Logging in to check the account finds the server Gmail's: it is known from the start
+/// that it saves sent mail itself, and All Mail isn't taken to be hidden before a sync
+/// has listed the mailboxes.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_account_added_once_logged_in_is_known_to_be_gmails() {
+    let env = env_added(gmail(), SmtpState::new("alice", "pw"), Verify::Login, |b| b).await;
+    let account = env.client.get_account(env.account).await.unwrap().unwrap();
+    assert!(account.gmail_server);
+    assert_eq!(account.mode, None);
+    assert!(!account.all_mail_hidden());
+    assert!(env.own_identity().await.server_saves_sent(&account));
+
+    env.send("hi").await;
+    assert_eq!(env.fake.state().received("APPEND"), 0);
+
+    // Once synced, the mode is known too.
+    let mut events = env.client.subscribe();
+    env.client.sync_account(env.account).await.unwrap();
+    let account = env.client.get_account(env.account).await.unwrap().unwrap();
+    assert_eq!(account.mode, Some(AccountMode::Gmail));
+    assert!(drain(&mut events).contains(&Event::AccountChanged {
+        account: env.account
+    }));
 }
 
 /// The guess is wrong: the user says the server doesn't save it, and a copy is saved.

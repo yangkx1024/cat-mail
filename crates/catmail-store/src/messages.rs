@@ -109,7 +109,7 @@ const SEARCHED: &str = "
     (:folder IS NULL
      AND m.folder_id NOT IN (
          SELECT f.id FROM folders f JOIN accounts a ON a.id = f.account_id
-         WHERE f.role IN ('all', 'flagged') AND a.mode = 'standard'))
+         WHERE f.role IN ('all', 'flagged') AND a.mode IS NOT 'gmail'))
     OR m.folder_id = :folder
     OR (m.folder_id IN all_mail
         AND (EXISTS (SELECT 1 FROM message_labels

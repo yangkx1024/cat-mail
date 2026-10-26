@@ -335,7 +335,8 @@ impl MailClient {
     /// [`Error::AuthFailed`], [`Error::Unsupported`], or a network error; what the SMTP
     /// server fails with comes wrapped in [`Error::OutgoingServer`]. What the servers said
     /// about message size is kept, so that attachments are limited by it before the
-    /// first send, and the IMAP connection goes on to sync the account. With
+    /// first send, and whether the IMAP server is Gmail's, which identities guess by
+    /// whether it saves sent mail; the IMAP connection goes on to sync the account. With
     /// [`Verify::Skip`] the servers aren't contacted; the first
     /// [`sync_account`](Self::sync_account) does.
     pub async fn add_account(
@@ -356,6 +357,7 @@ impl MailClient {
                     }
                     Verify::Skip => (SizeLimits::default(), None),
                 };
+                let gmail = session.as_ref().is_some_and(Session::is_gmail);
                 let inserted = blocking({
                     let engine = engine.clone();
                     move || {
@@ -363,10 +365,14 @@ impl MailClient {
                             Ok(engine.store.write(|db| {
                                 let account = db.accounts().insert(&new, key)?;
                                 db.accounts().set_append_limit(account.id, limits.append)?;
+                                db.accounts().set_gmail_server(account.id, gmail)?;
                                 if let Some(own) = db.identities().default_of(account.id)? {
                                     db.identities().set_smtp_max_size(own, limits.smtp)?;
                                 }
-                                Ok(account)
+                                Ok(Account {
+                                    gmail_server: gmail,
+                                    ..account
+                                })
                             })?)
                         })
                     }
@@ -455,7 +461,7 @@ impl MailClient {
                     }
                 })
                 .await?;
-                engine.emit(Event::IdentitiesChanged { account });
+                engine.emit(Event::AccountChanged { account });
                 Ok(identity)
             })
             .await
@@ -491,7 +497,7 @@ impl MailClient {
                     .store
                     .write(|db| change(&db.identities()))?
                     .ok_or(Error::IdentityNotFound(id))?;
-                engine.emit(Event::IdentitiesChanged { account });
+                engine.emit(Event::AccountChanged { account });
                 Ok(())
             })
             .await
@@ -513,7 +519,7 @@ impl MailClient {
                 }
                 let account = deleted.account;
                 engine.forget_identity(account, id);
-                engine.emit(Event::IdentitiesChanged { account });
+                engine.emit(Event::AccountChanged { account });
                 if deleted.drafts > 0 {
                     drafts::changed(&engine, account);
                 }

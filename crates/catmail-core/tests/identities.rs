@@ -102,7 +102,7 @@ async fn sends_as_an_identity_through_its_own_server() {
     let resend = service().await;
     let mut events = env.client.subscribe();
     let identity = add_identity(&env, &resend).await;
-    assert!(drain(&mut events).contains(&Event::IdentitiesChanged {
+    assert!(drain(&mut events).contains(&Event::AccountChanged {
         account: env.account
     }));
     let own = env.own_identity().await;
@@ -332,7 +332,7 @@ async fn new_drafts_are_from_the_default_which_can_be_changed() {
     let mut events = env.client.subscribe();
 
     env.client.set_default_identity(identity.id).await.unwrap();
-    assert!(drain(&mut events).contains(&Event::IdentitiesChanged {
+    assert!(drain(&mut events).contains(&Event::AccountChanged {
         account: env.account
     }));
     let identities = env.client.list_identities(env.account).await.unwrap();
