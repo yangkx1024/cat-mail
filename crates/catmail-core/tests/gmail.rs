@@ -606,6 +606,40 @@ async fn deleted_and_moved_back_to_inbox_it_keeps_its_row() {
     assert_eq!(env.subjects(TRASH).await, ["old"]);
 }
 
+/// INBOX added to a message in Trash: Gmail would take `+\\Inbox` there as a move out of
+/// Trash, so it is the move to INBOX, made the same way.
+#[tokio::test(flavor = "multi_thread")]
+async fn inbox_added_in_trash_moves_the_message_out() {
+    let env = synced_env(gmail()).await;
+    let old = env.id_of(TRASH, "old").await;
+    let (inbox, work) = (env.folder("INBOX").await.id, env.folder("Work").await.id);
+    env.client
+        .label_messages(vec![old], vec![inbox, work], Vec::new())
+        .await
+        .unwrap();
+    assert!(env.subjects(TRASH).await.is_empty());
+    assert_eq!(env.subjects("INBOX").await, ["old", "one"]);
+    let start = env.fake.state().log.len();
+    let report = env.replay().await;
+    assert_eq!((report.applied, report.pending), (3, 0));
+    let changes = env.changes_since(start);
+    assert_eq!(changes.len(), 3, "{changes:?}");
+    assert!(
+        changes[0].starts_with("UID MOVE ") && changes[0].ends_with(&format!("\"{ALL_MAIL}\"")),
+        "{changes:?}"
+    );
+    assert!(
+        changes[1..].iter().all(|c| c.contains("+X-GM-LABELS")),
+        "{changes:?}"
+    );
+    assert_eq!(
+        env.on_server("old"),
+        (ALL_MAIL.into(), vec!["Work".into(), "\\Inbox".into()])
+    );
+    env.client.sync_account(env.account).await.unwrap();
+    assert_eq!(env.id_of("INBOX", "old").await, old);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn refused_label_changes_are_undone() {
     let env = synced_env(gmail_later()).await;

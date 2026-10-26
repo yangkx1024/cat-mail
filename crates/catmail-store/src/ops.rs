@@ -279,7 +279,8 @@ impl<'c> PendingOps<'c> {
     }
 
     /// Adds the Gmail labels `add` to the messages and takes `remove` off, queueing what
-    /// actually changed. Starred is no label: it is `\Flagged`.
+    /// actually changed. Starred is no label: it is `\Flagged`. INBOX added to a message in
+    /// Trash or Spam moves it to INBOX ([`MovePlan::labelling`]).
     pub fn label_messages(
         &self,
         messages: &[MessageId],
@@ -295,13 +296,10 @@ impl<'c> PendingOps<'c> {
         let mut touched = Touched::new();
         let mut folders = HashMap::new();
         for &id in messages {
-            let m = self.local(id)?;
+            let mut m = self.local(id)?;
+            let account_folders = self.folders_of(&mut folders, m.account)?;
             for &label in add.iter().chain(remove) {
-                match self
-                    .folders_of(&mut folders, m.account)?
-                    .iter()
-                    .find(|f| f.id == label)
-                {
+                match account_folders.iter().find(|f| f.id == label) {
                     Some(f) if f.is_label() => {}
                     Some(f) if f.kind == FolderKind::Label => {
                         return Err(Error::Invalid(format!(
@@ -316,6 +314,15 @@ impl<'c> PendingOps<'c> {
                         )));
                     }
                 }
+            }
+            // Given `\Inbox` in Trash or Spam, Gmail takes it out to INBOX: move it there,
+            // and change its other labels after the move, as it is then.
+            if let Some(plan) = add
+                .iter()
+                .find_map(|&label| MovePlan::labelling(account_folders, m.folder, label))
+            {
+                self.carry_out(&m, plan, now, &mut touched)?;
+                m = self.local(id)?;
             }
             let mut changed = false;
             for &label in remove {
@@ -2378,6 +2385,37 @@ mod tests {
         // Not `+\Inbox` in Trash first: Gmail would take the message out of Trash.
         assert_eq!(g.pending("Trash"), [(2, OpKind::Delete)]);
         assert_eq!(g.store.read(|db| db.ops().list(None)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn inbox_added_in_trash_moves_the_message_out() {
+        let g = gmail();
+        let (m2, f) = (g.message(2), &g.f);
+        g.write(|db| {
+            db.ops()
+                .label_messages(&[m2], &[f["Work"], f["INBOX"]], &[], 0)
+        });
+        assert_eq!(g.state(m2), ("All Mail", None, vec!["INBOX", "Work"]));
+        // Not `+\Inbox` in Trash, which Gmail would take as a move of its own: both
+        // labels wait for the move.
+        assert_eq!(
+            g.pending("Trash"),
+            [(2, OpKind::Move { to: f["All Mail"] })]
+        );
+        let ops = g.replay_ops("Trash");
+        g.write(|db| {
+            db.ops().moved(
+                f["Trash"],
+                1,
+                f["All Mail"],
+                &ops,
+                Some(&moved(1, &[(2, 50)])),
+            )
+        });
+        assert_eq!(
+            g.pending("All Mail"),
+            [(50, g.label("INBOX", true)), (50, g.label("Work", true))]
+        );
     }
 
     #[test]

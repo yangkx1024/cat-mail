@@ -283,6 +283,18 @@ impl MovePlan {
         })
     }
 
+    /// Adding `label` to a message in location `from`, if that moves it: given `\Inbox` in
+    /// Trash or Spam, Gmail takes it out to INBOX, which is moving it there. Any other
+    /// label is added where the message is.
+    pub fn labelling(folders: &[Folder], from: FolderId, label: FolderId) -> Option<Self> {
+        if inbox_label(folders)? != label {
+            return None;
+        }
+        Self::of(folders, from, None, label)
+            .ok()
+            .filter(|plan| plan.to.is_some())
+    }
+
     /// Whether the account archives at all: it has an Archive folder, or is Gmail's.
     pub fn can_archive(folders: &[Folder]) -> bool {
         inbox_label(folders).is_some() || special_folder(folders, FolderRole::Archive).is_some()
@@ -496,6 +508,30 @@ mod tests {
         assert_eq!(MovePlan::archive(&folders, FolderId(6)), None);
         assert_eq!(MovePlan::archive(&folders, FolderId(7)), None);
         assert!(MovePlan::can_archive(&folders));
+    }
+
+    #[test]
+    fn inbox_added_in_trash_or_spam_moves_the_message_there() {
+        let folders = gmail();
+        let labelling =
+            |from, label| MovePlan::labelling(&folders, FolderId(from), FolderId(label));
+        let restore = MovePlan {
+            to: Some(FolderId(5)),
+            add: Some(FolderId(1)),
+            remove: Vec::new(),
+        };
+        assert_eq!(labelling(6, 1), Some(restore.clone()));
+        assert_eq!(labelling(7, 1), Some(restore));
+        // In All Mail, or any other label, it is only a label.
+        assert_eq!(labelling(5, 1), None);
+        assert_eq!(labelling(6, 2), None);
+        assert_eq!(labelling(7, 4), None);
+        // A standard account has no labels.
+        let standard = [folder(1, Some(FolderRole::Inbox), true)];
+        assert_eq!(
+            MovePlan::labelling(&standard, FolderId(1), FolderId(1)),
+            None
+        );
     }
 
     #[test]

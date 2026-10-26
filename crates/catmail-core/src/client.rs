@@ -758,8 +758,9 @@ impl MailClient {
     }
 
     /// Adds the Gmail labels `add` to the messages and takes `remove` off; both are label
-    /// folders of the messages' account, not Starred (that is `\Flagged`). The server
-    /// follows as with [`set_flags`](Self::set_flags).
+    /// folders of the messages' account, not Starred (that is `\Flagged`). INBOX added to
+    /// a message in Trash or Spam moves it to INBOX, as Gmail does. The server follows as
+    /// with [`set_flags`](Self::set_flags).
     pub async fn label_messages(
         &self,
         messages: Vec<MessageId>,
