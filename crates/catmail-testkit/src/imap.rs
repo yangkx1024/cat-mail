@@ -1981,8 +1981,8 @@ pub(crate) fn literal(data: &[u8]) -> Vec<u8> {
     out
 }
 
-/// `BODY.PEEK[]` → `""`, `BODY.PEEK[1.2]` → `"1.2"`; `None` for other items, including
-/// `BODY.PEEK[HEADER.FIELDS …]`.
+/// `BODY.PEEK[]` → `""`, `BODY.PEEK[1.2]` → `"1.2"`, `BODY.PEEK[1.2.MIME]` →
+/// `"1.2.MIME"`; `None` for other items, including `BODY.PEEK[HEADER.FIELDS …]`.
 fn body_section(item: &str) -> Option<&str> {
     const PREFIX: &str = "BODY.PEEK[";
     let spec = item
@@ -1990,7 +1990,8 @@ fn body_section(item: &str) -> Option<&str> {
         .eq_ignore_ascii_case(PREFIX)
         .then(|| &item[PREFIX.len()..])?
         .strip_suffix(']')?;
-    spec.bytes()
+    let part = spec.strip_suffix(".MIME").unwrap_or(spec);
+    part.bytes()
         .all(|b| b.is_ascii_digit() || b == b'.')
         .then_some(spec)
 }

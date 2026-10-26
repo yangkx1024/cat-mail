@@ -560,6 +560,25 @@ async fn unparsable_answers_never_delete_local_state() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn headers_in_raw_bytes_are_read_in_the_charset_of_the_text() {
+    // 报告 and 张三 in raw GBK bytes, as some mail programs write them, beside GBK text.
+    let mut state = ServerState::new("alice", "pw");
+    state.inbox().append(
+        b"Subject: \xb1\xa8\xb8\xe6\r\n\
+        From: \xd5\xc5\xc8\xfd <zhang@example.com>\r\n\
+        Content-Type: text/plain; charset=gb2312\r\n\r\n\
+        \xc7\xeb\xb2\xe9\xca\xd5\r\n",
+        &[],
+    );
+    let env = env(state).await;
+    env.sync().await;
+    let inbox = env.folder("INBOX").await;
+    let list = env.client.list_messages(inbox.id, 10, None).await.unwrap();
+    assert_eq!(list[0].subject.as_deref(), Some("报告"));
+    assert_eq!(list[0].from[0].name.as_deref(), Some("张三"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn unparsable_bodystructure_does_not_hide_the_message() {
     let mut state = state_with(&["one", "two", "three"]);
     state.inbox().message_mut(2).raw = b"Subject: two\r\nContent-Type: multipart/mixed; \

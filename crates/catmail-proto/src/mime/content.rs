@@ -1,9 +1,11 @@
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use mail_parser::parsers::MessageStream;
-use mail_parser::{Encoding, Message, MessageParser, MimeHeaders, PartType};
+use mail_parser::{Encoding, Message, MessageParser, MessagePart, MimeHeaders, PartType};
 
 use super::html::sanitize_html;
+use super::transcode_fields;
 
 /// Longest snippet, in characters.
 const SNIPPET_CHARS: usize = 200;
@@ -49,7 +51,7 @@ pub struct Part {
 /// make sense of has no content.
 pub fn parse_message(raw: &[u8]) -> Content {
     match MessageParser::new().parse(raw) {
-        Some(message) => extract(&message, raw, &[]),
+        Some(message) => extract(&message, raw, &[], &HashMap::new()),
         None => Content::default(),
     }
 }
@@ -75,7 +77,14 @@ pub fn decode_transfer(encoding: Option<&str>, data: &[u8]) -> Vec<u8> {
 /// text parts and attached messages are cut from `raw` and decoded again, so text keeps
 /// its original bytes and charset (the parser converts it to UTF-8). The parts with ids
 /// in `also_listed` are listed with the attachments even if they belong to the body.
-pub(super) fn extract(message: &Message<'_>, raw: &[u8], also_listed: &[u32]) -> Content {
+/// A part's header as the sender wrote it is in `headers` by section (as
+/// `BODY[<section>.MIME]` returns it), else in `raw`.
+pub(super) fn extract(
+    message: &Message<'_>,
+    raw: &[u8],
+    also_listed: &[u32],
+    headers: &HashMap<String, Vec<u8>>,
+) -> Content {
     let text = joined(
         (0..message.text_body_count()).filter_map(|i| message.body_text(i)),
         "\n",
@@ -96,6 +105,7 @@ pub(super) fn extract(message: &Message<'_>, raw: &[u8], also_listed: &[u32]) ->
 
     let referenced = html.as_deref().map(cid_references).unwrap_or_default();
     let sections = sections(message);
+    let text_charsets = text_charsets(message);
     // Part ids follow MIME order. A set, not `contains` on each part: a message may
     // have thousands of parts.
     let listed: BTreeSet<u32> = message
@@ -108,6 +118,11 @@ pub(super) fn extract(message: &Message<'_>, raw: &[u8], also_listed: &[u32]) ->
         .into_iter()
         .filter_map(|id| {
             let part = &message.parts[id as usize];
+            let section = sections.get(&id)?;
+            let header = headers
+                .get(section)
+                .map(Vec::as_slice)
+                .or_else(|| raw.get(part.offset_header as usize..part.offset_body as usize));
             let data = match &part.body {
                 PartType::Binary(data) | PartType::InlineBinary(data) => Some(data.to_vec()),
                 _ => raw
@@ -126,15 +141,11 @@ pub(super) fn extract(message: &Message<'_>, raw: &[u8], also_listed: &[u32]) ->
                 .map(|id| id.trim().trim_start_matches('<').trim_end_matches('>'))
                 .filter(|id| !id.is_empty());
             Some(Part {
-                section: sections.get(&id)?.clone(),
+                section: section.clone(),
                 transfer_encoding: part
                     .content_transfer_encoding()
                     .map(|e| e.trim().to_ascii_lowercase()),
-                filename: part
-                    .attachment_name()
-                    .map(str::trim)
-                    .filter(|n| !n.is_empty())
-                    .map(String::from),
+                filename: filename(part, header, &text_charsets),
                 mime_type: part
                     .content_type()
                     .map(|ct| match ct.subtype() {
@@ -157,6 +168,57 @@ pub(super) fn extract(message: &Message<'_>, raw: &[u8], also_listed: &[u32]) ->
         html,
         parts,
     }
+}
+
+/// The part's file name. A name in raw 8-bit bytes comes out of the parser with U+FFFD
+/// for each byte that isn't UTF-8; then the part's `header` is read again in the charset
+/// of the part or of the message's text, as other mail clients do (see
+/// [`transcode_fields`]).
+fn filename(
+    part: &MessagePart<'_>,
+    header: Option<&[u8]>,
+    text_charsets: &[&str],
+) -> Option<String> {
+    fn name_of<'a>(part: &'a MessagePart<'_>) -> Option<&'a str> {
+        part.attachment_name()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+    }
+    let name = name_of(part)?;
+    if name.contains(char::REPLACEMENT_CHARACTER)
+        && let Some(header) = header
+    {
+        let own = part.content_type().and_then(|ct| ct.attribute("charset"));
+        let hints: Vec<&str> = own
+            .into_iter()
+            .chain(text_charsets.iter().copied())
+            .collect();
+        if let Cow::Owned(fields) = transcode_fields(header, &hints)
+            && let Some(message) = MessageParser::new().parse_headers(&fields)
+            && let Some(found) = message.parts.first().and_then(name_of)
+        {
+            return Some(found.to_owned());
+        }
+    }
+    Some(name.to_owned())
+}
+
+/// The charsets of the text parts, in MIME order, as [`MimeNode::text_charsets`] reads
+/// them from the structure.
+///
+/// [`MimeNode::text_charsets`]: super::MimeNode::text_charsets
+fn text_charsets<'a>(message: &'a Message<'_>) -> Vec<&'a str> {
+    message
+        .parts
+        .iter()
+        .filter_map(|part| {
+            let content_type = part.content_type()?;
+            content_type
+                .ctype()
+                .eq_ignore_ascii_case("text")
+                .then(|| content_type.attribute("charset"))?
+        })
+        .collect()
 }
 
 fn joined<S: AsRef<str>>(pieces: impl Iterator<Item = S>, separator: &str) -> Option<String> {
@@ -357,6 +419,105 @@ mod tests {
             Some("base64")
         );
         assert_eq!(content.parts[0].size, Some(9));
+    }
+
+    /// A message whose text is in `charset` and whose attachments are named in raw GBK
+    /// bytes, once in each header that can carry the name.
+    fn raw_gbk_names(charset: &str) -> Vec<u8> {
+        let mut raw = format!(
+            "Content-Type: multipart/mixed; boundary=m\r\n\r\n\
+            --m\r\n\
+            Content-Type: text/plain; charset={charset}\r\n\r\n\
+            hi\r\n\
+            --m\r\n"
+        )
+        .into_bytes();
+        // 报告 and 淺记 in GBK; the second byte of 淺 is a backslash.
+        raw.extend_from_slice(
+            b"Content-Type: application/pdf; name=\"\xb1\xa8\xb8\xe6.pdf\"\r\n\
+            Content-Transfer-Encoding: base64\r\n\r\n\
+            JVBERi0xLjQK\r\n\
+            --m\r\n\
+            Content-Type: text/plain; charset=us-ascii\r\n\
+            Content-Disposition: attachment; filename=\"\x9c\\\xbc\xc7.txt\"\r\n\r\n\
+            note\r\n\
+            --m--\r\n",
+        );
+        raw
+    }
+
+    fn filenames(content: &Content) -> Vec<Option<&str>> {
+        content
+            .parts
+            .iter()
+            .map(|p| p.filename.as_deref())
+            .collect()
+    }
+
+    #[test]
+    fn names_in_raw_bytes_are_read_in_the_charset_of_the_text() {
+        let content = parse_message(&raw_gbk_names("gb2312"));
+        assert_eq!(filenames(&content), [Some("报告.pdf"), Some("淺记.txt")]);
+
+        // Without a hint of the charset, the lost bytes stay lost.
+        let content = parse_message(&raw_gbk_names("utf-8"));
+        let names = filenames(&content);
+        assert_eq!(names.len(), 2);
+        assert!(
+            names
+                .iter()
+                .all(|n| n.unwrap().contains(char::REPLACEMENT_CHARACTER)),
+            "{names:?}"
+        );
+    }
+
+    #[test]
+    fn a_part_names_itself_in_its_own_charset_first() {
+        let raw = b"Content-Type: multipart/mixed; boundary=m\r\n\r\n\
+            --m\r\n\
+            Content-Type: text/plain; charset=iso-8859-1\r\n\r\n\
+            hi\r\n\
+            --m\r\n\
+            Content-Type: text/plain; charset=gbk; name=\"\xb1\xa8\xb8\xe6.txt\"\r\n\
+            Content-Disposition: attachment\r\n\r\n\
+            report\r\n\
+            --m--\r\n";
+        assert_eq!(filenames(&parse_message(raw)), [Some("报告.txt")]);
+    }
+
+    #[test]
+    fn a_part_in_ascii_defers_to_the_text() {
+        // ANSI_X3.4-1968 is ASCII, but the label names windows-1252, which would take
+        // the GBK bytes.
+        let raw = b"Content-Type: multipart/mixed; boundary=m\r\n\r\n\
+            --m\r\n\
+            Content-Type: text/plain; charset=gbk\r\n\r\n\
+            hi\r\n\
+            --m\r\n\
+            Content-Type: text/plain; charset=ansi_x3.4-1968\r\n\
+            Content-Disposition: attachment; filename=\"\xb1\xa8\xb8\xe6.txt\"\r\n\r\n\
+            report\r\n\
+            --m--\r\n";
+        assert_eq!(filenames(&parse_message(raw)), [Some("报告.txt")]);
+    }
+
+    #[test]
+    fn a_name_valid_in_utf8_is_left_alone() {
+        // The sender's own U+FFFD, beside bytes that would mean something else in the
+        // text's charset.
+        let raw = "Content-Type: multipart/mixed; boundary=m\r\n\r\n\
+            --m\r\n\
+            Content-Type: text/plain; charset=iso-8859-1\r\n\r\n\
+            hi\r\n\
+            --m\r\n\
+            Content-Type: application/pdf; name=\"\u{FFFD}é.pdf\"\r\n\
+            Content-Transfer-Encoding: base64\r\n\r\n\
+            JVBERi0xLjQK\r\n\
+            --m--\r\n";
+        assert_eq!(
+            filenames(&parse_message(raw.as_bytes())),
+            [Some("\u{FFFD}é.pdf")]
+        );
     }
 
     #[test]

@@ -32,9 +32,8 @@ SMTP 客户端见[草稿与发信](sending.md#smtp-客户端)。
 - 不用 async-imap：它是持有连接的会话层，又会回到在别人的状态机外面打补丁。不自己写响应解析器：IMAP
   响应的语法很大，维护和安全上的负担都不值得。
 - 试用见[位置与标签 / 验证结果](labels.md#验证结果)：真实 Gmail 的全部答复都能解析。
-- **代价**：imap-proto 把 BODYSTRUCTURE 里的字符串按 UTF-8 有损转换。附件文件名用原始 8 位字节（不按
-  RFC 2231 / 2047 编码，如 GBK）时，按部分下载的大邮件里这个文件名变成 `U+FFFD`；整封下载的邮件不受影响，
-  文件名来自原文。
+- imap-proto 把 BODYSTRUCTURE 里的字符串按 UTF-8 有损转换（mail-parser 解析邮件头也一样）。用原始 8 位字节
+  写的附件文件名因此另取各部分的 `BODY.PEEK[<section>.MIME]` 重新读，见[正文与附件](bodies.md#原始字节的邮件头)。
 
 ## 连接层
 

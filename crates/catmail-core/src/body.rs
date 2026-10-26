@@ -181,7 +181,15 @@ async fn forget(engine: &Arc<Engine>, location: MessageLocation) -> Result<()> {
 
 enum Fetched {
     Whole(Vec<u8>),
-    Parts(mime::MimeNode, HashMap<String, Vec<u8>>),
+    Parts(Box<Parts>),
+}
+
+/// A message fetched in parts, by section: its text and the MIME headers of the parts
+/// whose names lost bytes in the structure.
+struct Parts {
+    structure: mime::MimeNode,
+    text: HashMap<String, Vec<u8>>,
+    headers: HashMap<String, Vec<u8>>,
 }
 
 /// Downloads and stores the body unless it is stored already. `whole` fetches even a
@@ -206,7 +214,7 @@ async fn ensure_downloaded(engine: &Arc<Engine>, id: MessageId, whole: bool) -> 
     let stored = blocking(move || {
         let (content, raw) = match fetched {
             Fetched::Whole(raw) => (mime::parse_message(&raw), Some(raw)),
-            Fetched::Parts(structure, parts) => (structure.content(&parts), None),
+            Fetched::Parts(parts) => (parts.structure.content(&parts.text, &parts.headers), None),
         };
         let body = new_body(&engine2, content, raw.as_deref())?;
         if engine2
@@ -242,17 +250,19 @@ async fn fetch(
         match session.fetch_structure(uid).await {
             Ok(Some(structure)) => {
                 let sections = structure.text_sections(limit);
-                let parts = if sections.is_empty() {
-                    HashMap::new()
-                } else {
-                    let Some(parts) = session.fetch_sections(uid, &sections).await? else {
-                        return Ok(None);
-                    };
-                    parts
+                let Some(parts) = session.fetch_sections(uid, &sections).await? else {
+                    return Ok(None);
                 };
                 // A body stored without some of its text would never be fetched again.
                 if sections.iter().all(|s| parts.contains_key(s)) {
-                    return Ok(Some(Fetched::Parts(structure, parts)));
+                    let Some(headers) = mime_headers(session, uid, &structure).await? else {
+                        return Ok(None);
+                    };
+                    return Ok(Some(Fetched::Parts(Box::new(Parts {
+                        structure,
+                        text: parts,
+                        headers,
+                    }))));
                 }
                 tracing::warn!(
                     uid,
@@ -269,6 +279,31 @@ async fn fetch(
         }
     }
     Ok(session.fetch_raw(uid).await?.map(Fetched::Whole))
+}
+
+/// The MIME headers of the parts whose file names lost bytes in the BODYSTRUCTURE (see
+/// [`garbled_sections`](mime::MimeNode::garbled_sections)), so they can be read as in a
+/// whole message. `None` if the message is gone.
+async fn mime_headers(
+    session: &mut Session,
+    uid: u32,
+    structure: &mime::MimeNode,
+) -> Result<Option<HashMap<String, Vec<u8>>>> {
+    match session
+        .fetch_mime_headers(uid, &structure.garbled_sections())
+        .await
+    {
+        Ok(headers) => Ok(headers),
+        // Only the names stay garbled.
+        Err(imap::Error::Incomplete(_)) => {
+            tracing::warn!(
+                uid,
+                "unparsable MIME headers; keeping the names from BODYSTRUCTURE"
+            );
+            Ok(Some(HashMap::new()))
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Opens the message's folder read-only and makes sure its UIDs still mean what they
