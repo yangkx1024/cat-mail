@@ -375,7 +375,7 @@ fn an_attachment_that_fails_stops_the_send(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn quitting_saves_what_the_composers_hold(cx: &mut TestAppContext) {
+fn closing_every_composer_saves_what_it_holds(cx: &mut TestAppContext) {
     let mail = TestMail::start();
     let (_, composer) = reply_window(cx, &mail);
     cx.update_window(composer, |_, window, cx| {
@@ -384,7 +384,7 @@ fn quitting_saves_what_the_composers_hold(cx: &mut TestAppContext) {
     })
     .unwrap();
     // Before the autosave.
-    cx.update(crate::composer::quit);
+    let mut closed = cx.update(crate::composer::close_all);
     wait_until(|| {
         cx.run_until_parked();
         pollster::block_on(mail.client.list_drafts(mail.account()))
@@ -392,6 +392,24 @@ fn quitting_saves_what_the_composers_hold(cx: &mut TestAppContext) {
             .first()
             .is_some_and(|d| d.content.text.starts_with("Not saved yet"))
     });
+    wait_for_one_window(cx);
+    assert_eq!(closed.try_recv(), Ok(Some(true)));
+}
+
+#[gpui_kit::test]
+fn a_composer_that_cant_close_keeps_them_all(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let (_, composer) = reply_window(cx, &mail);
+    cx.update_window(composer, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("composer-to", cx);
+        window.input(", carol@", cx);
+    })
+    .unwrap();
+    let mut closed = cx.update(crate::composer::close_all);
+    cx.run_until_parked();
+    assert_eq!(closed.try_recv(), Ok(Some(false)));
+    assert_eq!(cx.update(|cx| cx.windows().len()), 2);
 }
 
 #[gpui_kit::test]

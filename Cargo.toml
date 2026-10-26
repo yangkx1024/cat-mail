@@ -34,6 +34,8 @@ clap = { version = "4.6", features = ["derive", "env"] }
 # WHATWG data: URL parsing; the one gpui-kit uses for the same job.
 data-url = "0.3.2"
 directories = "6"
+# `canonicalize` without Windows' `\\?\` prefix, which a socket path can't take.
+dunce = "1.0.5"
 # Reads header fields in raw 8-bit bytes in a legacy charset; the version mail-parser
 # decodes text with.
 encoding_rs = "0.8.42"
@@ -97,6 +99,8 @@ tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring
 toml = "1.1.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Unix sockets on Windows (std has them on Unix only); the GUI's single-instance socket.
+uds_windows = "1.2.1"
 unicode-width = "0.2.2"
 # The URL parser ammonia uses; the sanitizer's own checks must agree with it.
 url = "2.5.8"

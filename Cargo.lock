@@ -1127,6 +1127,8 @@ dependencies = [
  "clap",
  "data-url",
  "directories",
+ "dunce",
+ "futures-channel",
  "gpui-kit",
  "image",
  "jiff",
@@ -1140,6 +1142,7 @@ dependencies = [
  "toml 1.1.8+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
+ "uds_windows",
 ]
 
 [[package]]

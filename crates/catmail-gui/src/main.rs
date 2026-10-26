@@ -8,10 +8,12 @@ mod composer;
 mod fonts;
 mod format;
 mod html;
+mod instance;
 mod layout;
 mod login_form;
 mod mailbox;
 mod reader;
+mod resident;
 mod settings;
 #[cfg(test)]
 mod test_support;
@@ -23,13 +25,15 @@ use catmail_core::{Config, DEFAULT_GC_INTERVAL, MailClient, SyncSchedule};
 use clap::Parser;
 use gpui_kit::component::{ActiveTheme as _, StyledExt as _, v_flex};
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Task, Window, WindowOptions, div, px, size,
+    AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, QuitMode,
+    Render, SharedString, Styled as _, Subscription, Window, WindowOptions, div, px, size,
 };
 use settings::{Preferences, Settings};
 use tracing_subscriber::EnvFilter;
 
+use crate::instance::{Claim, Display, Request};
 use crate::mailbox::Mailbox;
+use crate::resident::{Engine, Resident};
 
 #[derive(Parser)]
 #[command(name = "catmail-gui", version, about = "cat-mail in a window")]
@@ -54,42 +58,68 @@ fn main() {
         .config_dir
         .clone()
         .or_else(catmail_core::Config::platform_config_dir);
+    let config = cli.data_dir.map_or_else(Config::platform_default, |dir| {
+        Ok(Config::with_data_dir(dir))
+    });
+    // Before the app starts, so a launch that only hands over shows nothing of its own.
+    // The lock goes to the engine: whoever holds it is the app other launches find.
+    let (builder, requests) = match config {
+        Ok(config) => {
+            let activate = Request::Activate {
+                display: Display::current(),
+            };
+            match instance::claim(&config, &activate) {
+                Ok(Claim::Handed) => return,
+                Ok(Claim::First { lock, requests }) => {
+                    (Ok(MailClient::builder_locked(lock)), requests)
+                }
+                // Opening the engine says why.
+                Ok(Claim::Unavailable) => (Ok(MailClient::builder(config)), None),
+                Err(e) => {
+                    eprintln!("catmail-gui: {e:#}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        // Opening the engine reports it.
+        Err(e) => (Err(e), None),
+    };
     // Without `.runtime(..)` the engine runs its own tokio runtime: GPUI's executor is
     // not tokio, and the client's futures don't need it to be. New mail shows up as the
     // server announces it, through the engine's events.
-    let opening = cli
-        .data_dir
-        .map_or_else(Config::platform_default, |dir| {
-            Ok(Config::with_data_dir(dir))
-        })
-        .map(|config| {
-            MailClient::builder(config)
-                .sync_in_background(Some(SyncSchedule::default()))
-                .send_in_background(true)
-                .collect_garbage_every(Some(DEFAULT_GC_INTERVAL))
-        });
+    let opening = builder.map(|builder| {
+        builder
+            .sync_in_background(Some(SyncSchedule::default()))
+            .send_in_background(true)
+            .collect_garbage_every(Some(DEFAULT_GC_INTERVAL))
+    });
     let opening = async move { opening?.open_async().await };
 
-    gpui_kit::application()
+    let app = gpui_kit::application()
         .with_assets(assets::Assets)
-        .run(move |cx| {
-            // Meanwhile the app and its window are set up.
-            let opening = cx.background_executor().spawn(opening);
-            init_app(
-                match config_dir {
-                    Some(dir) => Preferences::load(dir),
-                    None => Preferences::load_nowhere(),
-                },
-                cx,
-            );
-            let opened = gpui_kit::open_window(window_options(cx), cx, |window, cx| {
-                cx.new(|cx| Startup::new(opening, window, cx))
-            });
-            if let Err(e) = opened {
-                eprintln!("catmail-gui: couldn't open a window: {e:#}");
-                cx.quit();
-            }
-        });
+        // Closing the last window may leave the app running; see `Resident`.
+        .with_quit_mode(QuitMode::Explicit);
+    // macOS: clicking the Dock icon with no window open.
+    app.on_reopen(|cx| {
+        if cx.has_global::<Resident>() {
+            Resident::show(Display::default(), cx);
+        }
+    });
+    app.run(move |cx| {
+        // Meanwhile the app and its window are set up.
+        let opening = cx.background_executor().spawn(opening);
+        init_app(
+            match config_dir {
+                Some(dir) => Preferences::load(dir),
+                None => Preferences::load_nowhere(),
+            },
+            cx,
+        );
+        if let Err(e) = Resident::start(opening, requests, cx) {
+            eprintln!("catmail-gui: couldn't open a window: {e:#}");
+            cx.quit();
+        }
+    });
 }
 
 /// Sets up the app before its first window: components, settings, theme, keys and the
@@ -100,19 +130,12 @@ fn init_app(preferences: Preferences, cx: &mut App) {
     cx.set_global(preferences);
     theme::appearance::init(cx);
     actions::bind_keys(cx);
-    cx.on_action(|_: &actions::Quit, cx| composer::quit(cx));
     // Text size applies to every window, so it is the app's to handle.
     cx.on_action(|_: &actions::TextLarger, cx| step_text_size(1, cx));
     cx.on_action(|_: &actions::TextSmaller, cx| step_text_size(-1, cx));
     cx.on_action(|_: &actions::TextReset, cx| {
         Preferences::update(cx, |s| s.text_size = Settings::default().text_size);
     });
-    cx.on_window_closed(|cx, _| {
-        if cx.windows().is_empty() {
-            cx.quit();
-        }
-    })
-    .detach();
 }
 
 fn step_text_size(step: isize, cx: &mut App) {
@@ -120,7 +143,7 @@ fn step_text_size(step: isize, cx: &mut App) {
     Preferences::update(cx, |s| s.text_size = size);
 }
 
-fn window_options(cx: &App) -> WindowOptions {
+pub(crate) fn window_options(cx: &App) -> WindowOptions {
     layout::window_options(
         "cat-mail",
         size(px(1280.), px(800.)),
@@ -130,56 +153,52 @@ fn window_options(cx: &App) -> WindowOptions {
 }
 
 /// The main window: empty while the engine opens the data directory (which a migration
-/// can make take a while), then the mailbox.
-struct Startup {
-    state: StartupState,
-    _open: Task<()>,
+/// can make take a while), then the mailbox. Closing it drops the mailbox; the engine
+/// stays with the app (see `Resident`).
+pub(crate) struct MainWindow {
+    mailbox: Option<Entity<Mailbox>>,
+    /// Until the mailbox is in it.
+    following_engine: Option<Subscription>,
 }
 
-enum StartupState {
-    Opening,
-    Open(Entity<Mailbox>),
-    /// The data directory couldn't be opened, typically because the CLI or another
-    /// window is using it.
-    Failed(SharedString),
-}
+impl MainWindow {
+    pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let following = cx.observe_global_in::<Resident>(window, Self::follow_engine);
+        let mut this = Self {
+            mailbox: None,
+            following_engine: Some(following),
+        };
+        this.follow_engine(window, cx);
+        this
+    }
 
-impl Startup {
-    fn new(
-        opening: Task<catmail_core::Result<MailClient>>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let open = cx.spawn_in(window, async move |this, cx| {
-            let opened = opening.await;
-            this.update_in(cx, |this, window, cx| {
-                this.state = match opened {
-                    Ok(client) => StartupState::Open(cx.new(|cx| Mailbox::new(client, window, cx))),
-                    Err(e) => {
-                        tracing::error!(error = %e, "failed to open the data directory");
-                        StartupState::Failed(e.to_string().into())
-                    }
-                };
-                cx.notify();
-            })
-            .ok();
-        });
-        Self {
-            state: StartupState::Opening,
-            _open: open,
-        }
+    fn follow_engine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Engine::Open(client) = Resident::engine(cx) else {
+            // Rendered from the engine's state.
+            cx.notify();
+            return;
+        };
+        let client = client.clone();
+        let mailbox = cx.new(|cx| Mailbox::new(client, window, cx));
+        let place = Resident::adopt(&mailbox, cx);
+        mailbox.update(cx, |mailbox, _| mailbox.reopen_at(place));
+        self.mailbox = Some(mailbox);
+        self.following_engine = None;
+        cx.notify();
     }
 }
 
-impl Render for Startup {
+impl Render for MainWindow {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        match &self.state {
-            StartupState::Opening => div()
+        if let Some(mailbox) = &self.mailbox {
+            return mailbox.clone().into_any_element();
+        }
+        match Resident::engine(cx) {
+            Engine::Failed(message) => open_failed(message.clone(), cx),
+            Engine::Opening | Engine::Open(_) => div()
                 .size_full()
                 .bg(cx.theme().background)
                 .into_any_element(),
-            StartupState::Open(mailbox) => mailbox.clone().into_any_element(),
-            StartupState::Failed(message) => open_failed(message.clone(), cx),
         }
     }
 }

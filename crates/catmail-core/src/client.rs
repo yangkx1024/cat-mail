@@ -1,4 +1,4 @@
-use std::fs::{self, File, TryLockError};
+use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -26,7 +26,9 @@ use crate::images::RemoteImageStream;
 use crate::runtime::Runtime;
 use crate::secrets::{KeyringSecrets, SecretStore};
 use crate::watch::{self, SyncSchedule};
-use crate::{Config, Error, Result, body, connection, drafts, gc, images, ops, send, sync};
+use crate::{
+    Config, DataDirLock, Error, Result, body, connection, drafts, gc, images, ops, send, sync,
+};
 
 /// How many events [`MailClient::subscribe`]'s receivers keep unread before the oldest
 /// are dropped and they get `RecvError::Lagged`.
@@ -53,6 +55,8 @@ pub enum Verify {
 
 pub struct MailClientBuilder {
     config: Config,
+    /// Taken before the builder, by [`MailClient::builder_locked`].
+    lock: Option<DataDirLock>,
     runtime: Option<Handle>,
     secrets: Option<Arc<dyn SecretStore>>,
     tls: Option<TlsConfig>,
@@ -168,8 +172,11 @@ impl MailClientBuilder {
     }
 
     /// Blocking.
-    fn open_engine(self) -> Result<Opened> {
-        let data_dir_lock = lock_data_dir(&self.config)?;
+    fn open_engine(mut self) -> Result<Opened> {
+        let data_dir_lock = match self.lock.take() {
+            Some(lock) => lock,
+            None => self.config.lock()?,
+        };
         let handoff_dir = self.config.handoff_dir();
         clear_handoff_dir(&handoff_dir);
         catmail_store::create_private_dir(&handoff_dir)?;
@@ -218,6 +225,7 @@ impl MailClient {
     pub fn builder(config: Config) -> MailClientBuilder {
         MailClientBuilder {
             config,
+            lock: None,
             runtime: None,
             secrets: None,
             tls: None,
@@ -227,6 +235,14 @@ impl MailClient {
             draft_upload_delay: DEFAULT_DRAFT_UPLOAD_DELAY,
             tuning: EngineTuning::default(),
         }
+    }
+
+    /// [`builder`](Self::builder) for a data directory already locked, e.g. by a frontend
+    /// that has to know it is the one for it before the engine is opened.
+    pub fn builder_locked(lock: DataDirLock) -> MailClientBuilder {
+        let mut builder = Self::builder(lock.config().clone());
+        builder.lock = Some(lock);
+        builder
     }
 
     /// Starts the background work asked for on the engine just opened.
@@ -1096,62 +1112,6 @@ impl MailClient {
 /// GUI left open for days would otherwise keep days of them.
 const KEEP_HANDED_OFF: Duration = Duration::from_secs(10 * 60);
 
-fn lock_data_dir(config: &Config) -> Result<File> {
-    create_data_dir(config.data_dir())?;
-    let file = File::options()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(config.lock_path())?;
-    match file.try_lock() {
-        Ok(()) => Ok(file),
-        Err(TryLockError::WouldBlock) => {
-            Err(Error::AlreadyRunning(config.data_dir().to_path_buf()))
-        }
-        Err(TryLockError::Error(e)) => Err(e.into()),
-    }
-}
-
-/// Creates the data directory readable by the user alone: the database holds every
-/// message's headers and text, and the drafts. Parent directories are made as usual. An
-/// existing directory is left as it is (it may be one the user chose, such as their
-/// home; the files the engine makes in it are private anyway), but it must belong to
-/// this user.
-fn create_data_dir(dir: &Path) -> Result<()> {
-    if let Some(parent) = dir.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    // Windows: the new directory inherits the user profile's ACL.
-    catmail_store::create_private_dir(dir)?;
-    check_data_dir_owner(dir)
-}
-
-/// Its owner could swap the files in it, and a symbolic link someone else planted where
-/// the directory was expected (in a shared location) points to one they own. A link to
-/// a directory of the user's own is fine. Windows: the directory's ACL is the user's to
-/// set.
-fn check_data_dir_owner(dir: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let metadata = fs::metadata(dir)?;
-        if metadata.uid() != rustix::process::geteuid().as_raw() {
-            return Err(Error::DataDirNotOwned(dir.to_path_buf()));
-        }
-        let mode = metadata.mode() & 0o777;
-        if mode & 0o077 != 0 {
-            tracing::warn!(
-                dir = %dir.display(),
-                mode = format!("{mode:o}"),
-                "other users can list the data directory; the files in it are private"
-            );
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = dir;
-    Ok(())
-}
-
 /// Files handed to other programs in earlier sessions hold whole messages. The lock just
 /// taken means no frontend is writing them any more. Cleared at start rather than on
 /// close: another program may still be reading them then, and destructors don't always
@@ -1572,6 +1532,20 @@ mod tests {
         assert_eq!(pollster::block_on(client.list_accounts()).unwrap().len(), 1);
     }
 
+    #[test]
+    fn a_lock_taken_first_is_the_engines() {
+        let config = Config::with_data_dir(tempfile::tempdir().unwrap().path().join("data"));
+        let lock = config.lock().unwrap();
+        assert!(matches!(config.lock(), Err(Error::AlreadyRunning(_))));
+        let client = MailClient::builder_locked(lock)
+            .secrets(Arc::new(MemorySecrets::default()))
+            .open()
+            .unwrap();
+        assert!(matches!(config.lock(), Err(Error::AlreadyRunning(_))));
+        drop(client);
+        config.lock().unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn asking_about_an_account_keeps_nothing_for_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -1812,7 +1786,7 @@ mod tests {
         assert_eq!(old.extension().unwrap(), "html");
         assert_ne!(old, recent);
         let written = std::time::SystemTime::now() - KEEP_HANDED_OFF - Duration::from_secs(60);
-        File::options()
+        std::fs::File::options()
             .write(true)
             .open(&old)
             .unwrap()

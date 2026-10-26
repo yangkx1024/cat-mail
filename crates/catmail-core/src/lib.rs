@@ -35,7 +35,7 @@ mod watch;
 pub use catmail_proto::TlsConfig;
 pub use catmail_types::*;
 pub use client::{EVENT_CAPACITY, MailClient, MailClientBuilder, Verify};
-pub use config::Config;
+pub use config::{Config, DataDirLock};
 pub use drafts::{format_addresses, parse_addresses};
 pub use engine::{DEFAULT_DRAFT_UPLOAD_DELAY, EngineTuning};
 pub use error::{Error, HttpError, ImapError, Result, SmtpError, StoreError};
