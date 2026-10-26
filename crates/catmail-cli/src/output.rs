@@ -131,7 +131,9 @@ fn server(s: &ServerConfig) -> String {
     format!("{}:{} ({})", s.host, s.port, s.security)
 }
 
-pub(crate) fn print_identities(identities: &[Identity]) {
+/// The account's identities. SAVES SENT: whether the server saves what goes out to Sent
+/// itself, "(auto)" when guessed.
+pub(crate) fn print_identities(account: &Account, identities: &[Identity]) {
     if identities.is_empty() {
         println!("No identities. Add one with `catmail identity add`.");
         return;
@@ -140,15 +142,25 @@ pub(crate) fn print_identities(identities: &[Identity]) {
         .iter()
         .map(|i| {
             let default = if i.is_default { "*" } else { "" };
+            let saves = if i.server_saves_sent(account) {
+                "yes"
+            } else {
+                "no"
+            };
+            let saves_sent = match i.saves_sent {
+                Some(_) => saves.to_owned(),
+                None => format!("{saves} (auto)"),
+            };
             vec![
                 i.id.to_string(),
                 i.email.clone(),
                 server(&i.smtp),
                 default.into(),
+                saves_sent,
             ]
         })
         .collect();
-    print_table(&["ID", "EMAIL", "SMTP", "DEFAULT"], rows);
+    print_table(&["ID", "EMAIL", "SMTP", "DEFAULT", "SAVES SENT"], rows);
 }
 
 pub(crate) fn print_sync_report(report: &SyncReport) {

@@ -226,10 +226,20 @@ lettre 的 `send` 不暴露这一点；自己实现还能共用 `TlsConfig`、�
 APPEND 的答复也可能丢失，所以尝试次数在每次尝试**之前**加一：第一次直接 APPEND，第二次起（包括同一
 次尝试里换新连接重来）先 EXAMINE Sent、按 Message-ID `UID SEARCH HEADER`，已经在了就不再 APPEND。
 
-Gmail 会自动把经它的 SMTP 发出的邮件存进已发送，再 APPEND 会重复，所以 Gmail 账户（同步时认出的模式）
-经同一个登录、同一个域（`imap.gmail.com` / `smtp.gmail.com`）的 SMTP 发出的跳过这一步（`saves_sent_mail`）；
-身份经别的服务器发出的 Gmail 看不到，照常保存。账户第一次同步之前还不知道是 Gmail，照常保存（见
-[位置与标签](labels.md#草稿与已发送)）。
+有的服务器自己把经它的 SMTP 发出的邮件存进已发送（Gmail 会），再 APPEND 会多一份。所以身份记下"服务器会
+自动存已发送"（`identities.saves_sent`，`Identity::server_saves_sent`），是的跳过这一步：
+
+- **用户说了算**：GUI 的身份设置和 CLI 的 `identity saves-sent <id> yes|no|auto` 可以改它
+  （`set_identity_saves_sent`），改过之后不再猜；`auto` 放回去重新猜。
+- **没说过时猜**：服务器是 Gmail 的（`X-GM-EXT-1`），而身份经同一个登录、同一个域（`imap.gmail.com` /
+  `smtp.gmail.com`）的 SMTP 发信。身份经别的服务器发出的 Gmail 看不到，照常保存；别的服务商一概当作不存。
+  看的是服务器是不是 Gmail，不是账户模式："所有邮件"在 IMAP 中隐藏的 Gmail 账户也自动存已发送。
+- **猜测不存下来**，每次保存时现猜：存一个默认值就得在添加身份、第一次认出 Gmail 时各写一次，还要另记
+  "用户改过"，而结果和现猜一样。账户同步过就按记下的 `accounts.gmail_server`；还没同步过时记下的是 false，
+  就看保存所用 IMAP 会话的能力，第一次同步之前从 Gmail 发出的也不会多存一份。界面显示的是按记下的
+  `gmail_server` 猜的，第一次同步之后才对得上。
+
+见[位置与标签](labels.md#草稿与已发送)。
 
 ## 谁来发
 

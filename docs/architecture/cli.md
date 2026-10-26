@@ -44,7 +44,8 @@ types 加变体会编译失败）。
 - 改标签：`catmail label <ids> --add Work --remove INBOX`；已删除、垃圾邮件里的邮件 `--add INBOX` 是把它
   移到 INBOX。`mv --from <标签>` 是从哪个标签移走（缺省是邮件的位置）。
 - `--json` 只增加字段：文件夹的 `kind`、`listed`，邮件的 `labels`（标签文件夹的 id，系统标签也在内），账户的
-  `mode`、`gmail_server`、`all_mail_hidden`，`sync` 每个账户的 `all_mail_hidden`。
+  `mode`、`gmail_server`、`all_mail_hidden`，`sync` 每个账户的 `all_mail_hidden`，身份的 `server_saves_sent`
+  与 `server_saves_sent_auto`（是不是猜的）。
 
 ## 退出码
 
@@ -78,7 +79,9 @@ keyring 和账户行，拼错的密码不会留下任何东西；SMTP 失败的�
 
 `identity add` 给账户加一个发件身份（另一个地址，经它自己的 SMTP 服务器和登录发信，如 Resend），同样
 用 `add_identity(.., Verify::Login)` 先登录，`--no-verify` 跳过；`identity list`（默认的标 `*`、
-排在最前）、`identity default`、`identity rm`（默认的不能删）。`compose`、`reply`、`forward`、`draft edit`
+排在最前；SAVES SENT 列是服务器会不会自动存已发送，猜的标 `(auto)`）、`identity default`、`identity rm`
+（默认的不能删）、`identity saves-sent <id> yes|no|auto`（`auto` 放回去重新猜，见
+[发信 / 保存到 Sent](sending.md#保存到-sent)）。`compose`、`reply`、`forward`、`draft edit`
 的 `--from` 按 id 或地址（`identity_by_address`，几个身份地址相同时取默认的或较早的）选身份；不给时新信用
 默认身份，`reply` 用原信寄给的那个地址。`reply`、`forward` 先读原信得知账户，把身份连同 `--body` 和
 `forward` 的收件人一起交给 `reply` / `forward`，草稿一次建成，不再事后 `update_draft`。`account list` 的 SMTP 列和 `--json` 的 `smtp` 是默认身份的服务器。

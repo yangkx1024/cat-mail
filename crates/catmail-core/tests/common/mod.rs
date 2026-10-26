@@ -148,6 +148,14 @@ pub async fn eventually(what: &str, mut ready: impl AsyncFnMut() -> bool) {
 }
 
 impl Env {
+    /// The identity made with the account, while it is the default.
+    #[allow(dead_code)]
+    pub async fn own_identity(&self) -> catmail_core::Identity {
+        let identities = self.client.list_identities(self.account).await.unwrap();
+        assert!(identities[0].is_default);
+        identities[0].clone()
+    }
+
     /// Where the fake SMTP server listens.
     #[allow(dead_code)]
     pub fn smtp_config(&self) -> ServerConfig {

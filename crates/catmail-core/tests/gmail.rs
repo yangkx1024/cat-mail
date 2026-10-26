@@ -33,6 +33,30 @@ fn gmail() -> ServerState {
 }
 
 impl Env {
+    /// Sends a message and waits until it is through: sent, and saved to Sent if that
+    /// is for us to do.
+    async fn send(&self, subject: &str) {
+        let content = catmail_core::DraftContent {
+            subject: subject.into(),
+            to: vec![common::addr("bob@example.com")],
+            ..Default::default()
+        };
+        let draft = self
+            .client
+            .create_draft(self.account, None, content, Vec::new())
+            .await
+            .unwrap();
+        self.client.send_draft(draft.id).await.unwrap();
+        self.flush().await;
+        assert!(
+            self.client
+                .list_outbox(Some(self.account))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     /// Whether the message's body is stored, so that it needn't be downloaded again.
     async fn has_body(&self, id: MessageId) -> bool {
         let message = self.client.get_message(id).await.unwrap();
@@ -719,27 +743,37 @@ async fn replaced_draft_copies_are_deleted() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sent_mail_is_not_saved_to_sent_again() {
     let env = synced_env(gmail()).await;
-    let content = catmail_core::DraftContent {
-        subject: "hi".into(),
-        to: vec![common::addr("bob@example.com")],
-        ..Default::default()
-    };
-    let draft = env
-        .client
-        .create_draft(env.account, None, content, Vec::new())
-        .await
-        .unwrap();
-    env.client.send_draft(draft.id).await.unwrap();
-    env.flush().await;
+    env.send("hi").await;
     assert_eq!(env.smtp.state().received.len(), 1);
     assert_eq!(env.fake.state().received("APPEND"), 0);
-    assert!(
-        env.client
-            .list_outbox(Some(env.account))
-            .await
-            .unwrap()
-            .is_empty()
-    );
+}
+
+/// Before the first sync, the account isn't known to be Gmail's, but the server tells.
+#[tokio::test(flavor = "multi_thread")]
+async fn sent_mail_is_not_saved_again_before_the_first_sync() {
+    let env = env(gmail()).await;
+    let account = env.client.get_account(env.account).await.unwrap().unwrap();
+    assert!(!account.gmail_server);
+    env.send("hi").await;
+    assert_eq!(env.smtp.state().received.len(), 1);
+    assert_eq!(env.fake.state().received("APPEND"), 0);
+}
+
+/// The guess is wrong: the user says the server doesn't save it, and a copy is saved.
+#[tokio::test(flavor = "multi_thread")]
+async fn sent_mail_is_saved_once_the_user_says_gmail_does_not() {
+    let env = synced_env(gmail()).await;
+    let own = env.own_identity().await;
+    env.client
+        .set_identity_saves_sent(own.id, Some(false))
+        .await
+        .unwrap();
+    env.send("hi").await;
+    assert_eq!(env.fake.state().received("APPEND"), 1);
+    // Not guessed again by a sync.
+    env.client.sync_account(env.account).await.unwrap();
+    let own = env.own_identity().await;
+    assert_eq!(own.saves_sent, Some(false));
 }
 
 /// Out of Trash into INBOX, then deleted for good before that was made: it is deleted in

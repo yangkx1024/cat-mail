@@ -159,6 +159,10 @@ pub struct Identity {
     pub smtp: ServerConfig,
     /// New messages are from it. Exactly one of an account's identities is.
     pub is_default: bool,
+    /// Whether its SMTP server saves what it sends to the account's Sent itself, as the
+    /// user said; `None` until they do, for a guess (see
+    /// [`server_saves_sent`](Self::server_saves_sent)).
+    pub saves_sent: Option<bool>,
     /// Unix timestamp, seconds.
     pub created_at: i64,
 }
@@ -170,6 +174,32 @@ impl Identity {
             name: self.display_name.clone(),
             email: self.email.clone(),
         }
+    }
+
+    /// Whether its SMTP server saves what it sends to the account's Sent itself, so that
+    /// saving a copy would make a second one. Unless the user said, a guess: Gmail does,
+    /// for mail sent through its own SMTP server with the account's login (the same login,
+    /// on a server in the IMAP server's domain); what goes out elsewhere it never sees.
+    /// Other servers are taken not to.
+    pub fn server_saves_sent(&self, account: &Account) -> bool {
+        self.server_saves_sent_if(account, account.gmail_server)
+    }
+
+    /// As [`server_saves_sent`](Self::server_saves_sent), with `gmail_server` told rather
+    /// than recorded: the account may not have been synced yet.
+    pub fn server_saves_sent_if(&self, account: &Account, gmail_server: bool) -> bool {
+        // `imap.gmail.com` and `smtp.gmail.com`.
+        fn domain(host: &str) -> &str {
+            match host.split_once('.') {
+                Some((_, domain)) if domain.contains('.') => domain,
+                _ => host,
+            }
+        }
+        self.saves_sent.unwrap_or_else(|| {
+            gmail_server
+                && self.username == account.username
+                && domain(&self.smtp.host).eq_ignore_ascii_case(domain(&account.imap.host))
+        })
     }
 }
 
@@ -227,4 +257,66 @@ pub struct ServerProblem {
     /// When the first of these failures happened, in unix seconds.
     pub since: i64,
     pub failures: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn server(host: &str) -> ServerConfig {
+        ServerConfig {
+            host: host.into(),
+            port: 465,
+            security: Security::Tls,
+        }
+    }
+
+    fn account(gmail_server: bool) -> Account {
+        Account {
+            id: AccountId(1),
+            email: "alice@gmail.com".into(),
+            display_name: None,
+            username: "alice@gmail.com".into(),
+            imap: server("imap.gmail.com"),
+            mode: AccountMode::Standard,
+            gmail_server,
+            created_at: 0,
+        }
+    }
+
+    fn identity(username: &str, smtp_host: &str) -> Identity {
+        Identity {
+            id: IdentityId(1),
+            account_id: AccountId(1),
+            email: "alice@gmail.com".into(),
+            display_name: None,
+            username: username.into(),
+            smtp: server(smtp_host),
+            is_default: true,
+            saves_sent: None,
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn gmail_saves_what_goes_through_its_own_smtp_server_with_the_accounts_login() {
+        let gmail = account(true);
+        let own = identity("alice@gmail.com", "SMTP.gmail.com");
+        assert!(own.server_saves_sent(&gmail));
+        // Not known to be Gmail (not connected to yet), or not Gmail.
+        assert!(!own.server_saves_sent(&account(false)));
+        // Gmail never sees what goes out elsewhere.
+        assert!(!identity("resend", "smtp.resend.com").server_saves_sent(&gmail));
+        assert!(!identity("bob@gmail.com", "smtp.gmail.com").server_saves_sent(&gmail));
+    }
+
+    #[test]
+    fn what_the_user_said_wins_over_the_guess() {
+        let mut own = identity("alice@gmail.com", "smtp.gmail.com");
+        own.saves_sent = Some(false);
+        assert!(!own.server_saves_sent(&account(true)));
+        let mut relay = identity("alice@gmail.com", "smtp-relay.example.net");
+        relay.saves_sent = Some(true);
+        assert!(relay.server_saves_sent(&account(false)));
+    }
 }

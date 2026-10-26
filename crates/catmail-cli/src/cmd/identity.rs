@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result};
 use catmail_core::{Account, AccountId, IdentityId, MailClient, NewIdentity, SecretString};
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 
 use crate::cmd::account::{Login, SmtpServer, read_password};
 use crate::cmd::one_account;
@@ -31,6 +31,31 @@ pub(crate) enum IdentityCommand {
         /// Identity id, as shown by `catmail identity list`
         id: i64,
     },
+    /// Say whether an identity's SMTP server saves what it sends to Sent itself (Gmail's
+    /// does), so that no second copy is saved
+    SavesSent {
+        /// Identity id, as shown by `catmail identity list`
+        id: i64,
+        /// `auto` guesses: yes for Gmail's own SMTP server with the account's login
+        saves: SavesSent,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub(crate) enum SavesSent {
+    Yes,
+    No,
+    Auto,
+}
+
+impl SavesSent {
+    fn setting(self) -> Option<bool> {
+        match self {
+            Self::Yes => Some(true),
+            Self::No => Some(false),
+            Self::Auto => None,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -65,9 +90,13 @@ pub(crate) async fn identity(client: &MailClient, cmd: IdentityCommand, json: bo
             let account = one_account(client, account.as_deref()).await?;
             let identities = client.list_identities(account.id).await?;
             if json {
-                json::print_list::<JsonIdentity, _>("identities", &identities)?;
+                let list: Vec<_> = identities
+                    .iter()
+                    .map(|i| JsonIdentity::new(i, &account))
+                    .collect();
+                json::print_keyed("identities", &list)?;
             } else {
-                print_identities(&identities);
+                print_identities(&account, &identities);
             }
         }
         IdentityCommand::Default { id } => {
@@ -80,6 +109,14 @@ pub(crate) async fn identity(client: &MailClient, cmd: IdentityCommand, json: bo
             client.remove_identity(IdentityId(id)).await?;
             if !json {
                 println!("Removed identity {id}.");
+            }
+        }
+        IdentityCommand::SavesSent { id, saves } => {
+            client
+                .set_identity_saves_sent(IdentityId(id), saves.setting())
+                .await?;
+            if !json {
+                println!("Updated identity {id}.");
             }
         }
     }
@@ -105,7 +142,7 @@ async fn add(
         .await;
     let identity = args.login.added("identity", added)?;
     if json {
-        json::print_keyed("identity", &JsonIdentity::from(&identity))?;
+        json::print_keyed("identity", &JsonIdentity::new(&identity, account))?;
     } else {
         println!(
             "Added identity {} ({}) to {}",
@@ -212,5 +249,24 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn saves_sent_is_set_and_put_back_to_a_guess() {
+        let fake = FakeImap::start(ServerState::new("alice", "pw")).await;
+        let smtp = FakeSmtp::start(SmtpState::new("alice", "pw")).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (client, account) = synced_with_smtp(&fake, smtp.port(), dir.path()).await;
+        let own = client.list_identities(account).await.unwrap()[0].id;
+        for (saves, expected) in [
+            (SavesSent::Yes, Some(true)),
+            (SavesSent::No, Some(false)),
+            (SavesSent::Auto, None),
+        ] {
+            let cmd = IdentityCommand::SavesSent { id: own.0, saves };
+            identity(&client, cmd, true).await.unwrap();
+            let identities = client.list_identities(account).await.unwrap();
+            assert_eq!(identities[0].saves_sent, expected);
+        }
     }
 }
