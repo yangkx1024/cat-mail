@@ -66,13 +66,6 @@ fn content(subject: &str) -> DraftContent {
 }
 
 impl Env {
-    /// The identity made with the account, while it is the default.
-    async fn own_identity(&self) -> Identity {
-        let identities = self.client.list_identities(self.account).await.unwrap();
-        assert!(identities[0].is_default);
-        identities[0].clone()
-    }
-
     async fn queue_as(&self, subject: &str, identity: Option<&Identity>) {
         let draft = self
             .client

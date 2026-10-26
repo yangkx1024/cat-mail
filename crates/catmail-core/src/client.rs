@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use catmail_proto::imap::Session;
 use catmail_proto::{Credentials, TlsConfig};
-use catmail_store::{BlobStore, Store};
+use catmail_store::{BlobStore, Identities, Store};
 use catmail_types::{
     Account, AccountId, AccountOverview, AccountStatus, AttachmentId, Draft, DraftAttachment,
     DraftAttachmentId, DraftContent, DraftId, Event, Flags, FlushReport, Folder, FolderId,
@@ -463,12 +463,33 @@ impl MailClient {
 
     /// Makes it the account's default: new drafts are from it.
     pub async fn set_default_identity(&self, id: IdentityId) -> Result<()> {
+        self.update_identity(id, move |identities| identities.set_default(id))
+            .await
+    }
+
+    /// Records whether the identity's SMTP server saves what it sends to the account's
+    /// Sent itself, so that no second copy is saved; `None` to have it guessed again
+    /// (see [`Identity::server_saves_sent`]).
+    pub async fn set_identity_saves_sent(&self, id: IdentityId, saves: Option<bool>) -> Result<()> {
+        self.update_identity(id, move |identities| identities.set_saves_sent(id, saves))
+            .await
+    }
+
+    /// Makes a change to an identity that returns its account, `None` if there is no
+    /// such identity.
+    async fn update_identity(
+        &self,
+        id: IdentityId,
+        change: impl FnOnce(&Identities<'_>) -> catmail_store::Result<Option<AccountId>>
+        + Send
+        + 'static,
+    ) -> Result<()> {
         let engine = self.engine.clone();
         self.rt
             .run_blocking(move || {
                 let account = engine
                     .store
-                    .write(|db| db.identities().set_default(id))?
+                    .write(|db| change(&db.identities()))?
                     .ok_or(Error::IdentityNotFound(id))?;
                 engine.emit(Event::IdentitiesChanged { account });
                 Ok(())

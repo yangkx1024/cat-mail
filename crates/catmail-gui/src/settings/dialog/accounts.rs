@@ -3,6 +3,7 @@
 
 use catmail_core::{AccountId, IdentityId};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, App, Context, ElementId, IntoElement, ParentElement as _, Styled as _, Window, div,
@@ -72,6 +73,24 @@ impl SettingsView {
         crate::mailbox::report_failure(
             "make the address the default",
             async move { client.set_default_identity(id).await },
+            window,
+            cx,
+        );
+    }
+
+    /// Whether its server saves what it sends to Sent itself, as the user says now: the
+    /// guess is not made again.
+    fn set_saves_sent(
+        &mut self,
+        id: IdentityId,
+        saves: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let client = self.client.clone();
+        crate::mailbox::report_failure(
+            "change how sent mail is saved",
+            async move { client.set_identity_saves_sent(id, Some(saves)).await },
             window,
             cx,
         );
@@ -183,6 +202,19 @@ impl SettingsView {
                                         .text_xs()
                                         .text_color(muted)
                                         .child(identity.smtp.host.clone()),
+                                )
+                                .child(
+                                    // Gmail's does: a copy saved too would be a second one.
+                                    Switch::new(ElementId::from(("saves-sent", id.0 as u64)))
+                                        .small()
+                                        .pt_1()
+                                        .checked(identity.server_saves_sent(account))
+                                        .label("Server saves to Sent")
+                                        .on_change(cx.listener(
+                                            move |this, checked: &bool, window, cx| {
+                                                this.set_saves_sent(id, *checked, window, cx)
+                                            },
+                                        )),
                                 ),
                         )
                         .child(actions)

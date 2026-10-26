@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use catmail_core::{
-    Address, DraftContent, Error, ErrorKind, Event, OutboxEntry, OutboxStatus, RecvError, Verify,
+    Address, DraftContent, Error, ErrorKind, Event, IdentityId, OutboxEntry, OutboxStatus,
+    RecvError, Verify,
 };
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 use common::{Env, addr, drain, env, env_with, eventually, files, sparse};
@@ -627,6 +628,39 @@ async fn sent_folder_is_found_without_a_sync_and_optional() {
             .iter()
             .any(|c| c.line.starts_with("APPEND"))
     );
+}
+
+/// The user says the identity's server saves what it sends to Sent itself: no copy is
+/// saved, until they take it back.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_copy_is_saved_where_the_server_saves_one() {
+    let env = env(state()).await;
+    let own = env.own_identity().await;
+    assert_eq!(own.saves_sent, None);
+    let mut events = env.client.subscribe();
+    env.client
+        .set_identity_saves_sent(own.id, Some(true))
+        .await
+        .unwrap();
+    assert!(drain(&mut events).contains(&Event::IdentitiesChanged {
+        account: env.account
+    }));
+    env.queue("hi").await;
+    assert_eq!(env.flush().await, [(OutboxStatus::Done, 1)]);
+    assert_eq!(env.delivered(), 1);
+    assert!(env.sent_folder().is_empty());
+
+    env.client
+        .set_identity_saves_sent(own.id, None)
+        .await
+        .unwrap();
+    env.queue("again").await;
+    assert_eq!(env.flush().await, [(OutboxStatus::Done, 1)]);
+    assert_eq!(env.sent_folder().len(), 1);
+    let gone = env
+        .client
+        .set_identity_saves_sent(IdentityId(99), Some(true));
+    assert!(matches!(gone.await, Err(Error::IdentityNotFound(_))));
 }
 
 #[tokio::test(flavor = "multi_thread")]

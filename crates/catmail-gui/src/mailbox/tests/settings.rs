@@ -220,6 +220,34 @@ fn adds_a_sending_address_and_makes_it_the_default(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn tells_whether_the_server_saves_sent_mail(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let account = mail.account();
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    let own = || pollster::block_on(mail.client.list_identities(account)).unwrap()[0].clone();
+    assert_eq!(own().saves_sent, None);
+
+    // Not Gmail: guessed not to, until switched on; and off again.
+    open_accounts(cx, window);
+    let switch = ("saves-sent", own().id.0 as u64);
+    for saves in [true, false] {
+        wait_until(|| shown(cx, window, switch));
+        cx.update_window(window, |_, window, cx| window.click(switch, cx))
+            .unwrap();
+        // Stored, and read back by the window: the switch shows it.
+        wait_until(|| {
+            cx.run_until_parked();
+            own().saves_sent == Some(saves)
+                && cx.read(|cx| {
+                    let entry = mailbox.read(cx).account(account).unwrap();
+                    entry.identities[0].saves_sent == Some(saves)
+                })
+        });
+    }
+}
+
+#[gpui_kit::test]
 fn clears_the_image_cache(cx: &mut TestAppContext) {
     let mail = TestMail::start();
     let images = mail.serve_images();

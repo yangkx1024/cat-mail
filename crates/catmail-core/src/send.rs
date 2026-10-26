@@ -22,9 +22,8 @@ use catmail_proto::imap::Session;
 use catmail_proto::smtp;
 use catmail_store::{NewOutboxEntry, Outbox, OutboxJob, Touched};
 use catmail_types::{
-    Account, AccountId, AccountMode, Address, BlobHash, DraftId, ErrorKind, Event, Flags,
-    FlushReport, FolderRole, Identity, IdentityId, OutboxEntry, OutboxId, OutboxStatus,
-    ReportedError,
+    AccountId, Address, BlobHash, DraftId, ErrorKind, Event, Flags, FlushReport, FolderRole,
+    IdentityId, OutboxEntry, OutboxId, OutboxStatus, ReportedError,
 };
 use futures_util::future::join_all;
 use tokio::sync::Notify;
@@ -506,18 +505,22 @@ async fn attempt_save(
     mut raw: Option<Vec<u8>>,
 ) -> Result<()> {
     let (account, identity) = (job.entry.account_id, job.entry.identity);
-    let (known, saved_by_server) = engine
+    // Whether the server saves it to Sent itself, and whether it would if it is Gmail's,
+    // which isn't known until the account is synced.
+    let (known, (saves, saves_if_gmail)) = engine
         .read(move |db| {
-            let saved_by_server =
-                match (db.accounts().get(account)?, db.identities().get(identity)?) {
-                    (Some(account), Some(identity)) => saves_sent_mail(&account, &identity),
-                    _ => false,
-                };
+            let sender = db
+                .accounts()
+                .get(account)?
+                .zip(db.identities().get(identity)?);
+            let saves = sender.map_or((false, false), |(a, i)| {
+                (i.server_saves_sent(&a), i.server_saves_sent_if(&a, true))
+            });
             let known = db.folders().by_role(account, FolderRole::Sent)?;
-            Ok((known.map(|(_, remote_name)| remote_name), saved_by_server))
+            Ok((known.map(|(_, remote_name)| remote_name), saves))
         })
         .await?;
-    if saved_by_server {
+    if saves {
         tracing::debug!(%account, "the server saves sent mail to Sent itself");
         return Ok(());
     }
@@ -530,6 +533,10 @@ async fn attempt_save(
         job.entry.message_id.clone(),
     );
     let saved = with_session(engine, account, async move |session| {
+        if saves_if_gmail && session.is_gmail() {
+            tracing::debug!(%account, "Gmail's server saves sent mail to Sent itself");
+            return Ok(true);
+        }
         let check_first = std::mem::replace(&mut may_be_there, true);
         let sent = match &known {
             Some(name) => Some(name.clone()),
@@ -560,25 +567,6 @@ async fn attempt_save(
         tracing::info!(%account, "the account has no Sent folder; not saving a copy");
     }
     Ok(())
-}
-
-/// Whether the account's server saves what the identity sends to Sent itself, so that an
-/// APPEND would make a second copy. Gmail does, for mail sent through its own SMTP
-/// server with the account's login (an identity of the same login, on a server in the
-/// IMAP server's domain); what goes out elsewhere it never sees. Before the first sync
-/// the account isn't known to be Gmail, and a copy is saved.
-fn saves_sent_mail(account: &Account, identity: &Identity) -> bool {
-    // `imap.gmail.com` and `smtp.gmail.com`.
-    let domain = |host: &str| {
-        let host = host.to_ascii_lowercase();
-        match host.split_once('.') {
-            Some((_, domain)) if domain.contains('.') => domain.to_owned(),
-            _ => host,
-        }
-    };
-    account.mode == AccountMode::Gmail
-        && identity.username == account.username
-        && domain(&identity.smtp.host) == domain(&account.imap.host)
 }
 
 /// The Sent folder by the server's say, for an account that hasn't been synced.

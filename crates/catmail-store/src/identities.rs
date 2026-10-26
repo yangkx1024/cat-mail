@@ -29,7 +29,7 @@ pub struct DeletedIdentity {
 }
 
 const COLUMNS: &str = "id, account_id, email, display_name, username,
-    smtp_host, smtp_port, smtp_security, is_default, created_at";
+    smtp_host, smtp_port, smtp_security, is_default, saves_sent, created_at";
 
 pub struct Identities<'c> {
     conn: &'c Connection,
@@ -205,6 +205,19 @@ impl<'c> Identities<'c> {
         Ok(())
     }
 
+    /// Records whether its server saves what it sends to Sent itself, as the user said;
+    /// `None` to guess again. Returns the account, or `None` if there is no such identity.
+    pub fn set_saves_sent(&self, id: IdentityId, saves: Option<bool>) -> Result<Option<AccountId>> {
+        Ok(self
+            .conn
+            .query_row(
+                "UPDATE identities SET saves_sent = ?2 WHERE id = ?1 RETURNING account_id",
+                (id.0, saves),
+                |r| Ok(AccountId(r.get(0)?)),
+            )
+            .optional()?)
+    }
+
     /// Keyring entries of the account's identities that have their own, which go with
     /// it.
     pub fn secret_keys(&self, account: AccountId) -> Result<Vec<String>> {
@@ -283,6 +296,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Identity> {
         username: row.get("username")?,
         smtp: server(row, "smtp")?,
         is_default: row.get("is_default")?,
+        saves_sent: row.get("saves_sent")?,
         created_at: row.get("created_at")?,
     })
 }
@@ -450,6 +464,37 @@ mod tests {
         assert_eq!(
             store
                 .write(|db| db.identities().set_default(IdentityId(99)))
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn saves_sent_is_unset_until_told_and_can_be_unset_again() {
+        let store = test_util::store();
+        let a = test_util::account(&store, "a@example.com");
+        let news = add(&store, a, "news@example.com");
+        assert_eq!(news.saves_sent, None);
+        let saves_sent = |id| {
+            store
+                .read(|db| db.identities().get(id))
+                .unwrap()
+                .unwrap()
+                .saves_sent
+        };
+        for saves in [Some(true), Some(false), None] {
+            assert_eq!(
+                store
+                    .write(|db| db.identities().set_saves_sent(news.id, saves))
+                    .unwrap(),
+                Some(a)
+            );
+            assert_eq!(saves_sent(news.id), saves);
+        }
+        assert_eq!(saves_sent(default_of(&store, a)), None, "only that one");
+        assert_eq!(
+            store
+                .write(|db| db.identities().set_saves_sent(IdentityId(99), Some(true)))
                 .unwrap(),
             None
         );

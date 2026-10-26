@@ -59,6 +59,9 @@ CREATE TABLE identities (
     -- The largest message the SMTP server said it accepts (SIZE, RFC 1870) when last
     -- connected to, which limits a draft's attachments. NULL as for imap_append_limit.
     smtp_max_size INTEGER,
+    -- Whether its server saves what it sends to Sent itself (Gmail's does), as the user
+    -- said. NULL until they do: the engine guesses (Identity::server_saves_sent).
+    saves_sent    INTEGER,
     created_at    INTEGER NOT NULL DEFAULT (unixepoch()),
     -- The same address through the same server and login twice is one.
     UNIQUE (account_id, email, smtp_host, smtp_port, username),

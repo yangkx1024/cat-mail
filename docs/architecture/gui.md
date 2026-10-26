@@ -291,7 +291,8 @@ INBOX，所以打开一个文件夹时同步它（`MailClient::sync_folder`，�
   SMTP，所以 SMTP 填错同样当场报出。邮箱、密码、名字、用户名和服务器字段在 `login_form.rs`（`LoginFields`、
   `ServerFields`），与发件身份的表单共用。
 - **发件身份**在 Settings › Accounts 里，列在各自账户下面（包括随账户建出的那个），默认的标着"Default"，
-  其余可以"Make default"或删除；"Add sending address"在设置上面再叠一个对话框放身份的表单（地址、
+  其余可以"Make default"或删除；每个身份有一个"Server saves to Sent"开关，显示的是现在的判断（用户
+  没说过时是猜的），拨动即存下用户的选择，之后不再猜（见[发信 / 保存到 Sent](sending.md#保存到-sent)）；"Add sending address"在设置上面再叠一个对话框放身份的表单（地址、
   密码、名字、用户名和 SMTP 服务器，字段与登录页共用），`add_identity(.., Verify::Login)`，成功后表单
   自己关掉这个对话框。Enter、Esc、Cancel 都按对话框的约定：任一字段按 Enter 冒泡成对话框的
   `Confirm`，`on_ok` 提交并返回 false；Esc 和 Cancel 是 `Cancel`，只关最上层的这个表单，进行中

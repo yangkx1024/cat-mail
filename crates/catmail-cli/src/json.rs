@@ -135,11 +135,15 @@ pub(crate) struct JsonIdentity {
     username: String,
     smtp: JsonServer,
     is_default: bool,
+    /// Its server saves what it sends to Sent itself: no copy is saved.
+    server_saves_sent: bool,
+    /// `server_saves_sent` is guessed, not what the user said.
+    server_saves_sent_auto: bool,
     created_at: Option<String>,
 }
 
-impl From<&Identity> for JsonIdentity {
-    fn from(i: &Identity) -> Self {
+impl JsonIdentity {
+    pub(crate) fn new(i: &Identity, account: &Account) -> Self {
         Self {
             id: i.id.0,
             account: i.account_id.0,
@@ -148,6 +152,8 @@ impl From<&Identity> for JsonIdentity {
             username: i.username.clone(),
             smtp: (&i.smtp).into(),
             is_default: i.is_default,
+            server_saves_sent: i.server_saves_sent(account),
+            server_saves_sent_auto: i.saves_sent.is_none(),
             created_at: time(i.created_at),
         }
     }
