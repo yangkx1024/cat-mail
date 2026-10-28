@@ -29,6 +29,7 @@ mod ops;
 mod runtime;
 mod secrets;
 mod send;
+mod sleep;
 mod sync;
 mod watch;
 

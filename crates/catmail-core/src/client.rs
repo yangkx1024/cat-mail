@@ -27,7 +27,8 @@ use crate::runtime::Runtime;
 use crate::secrets::{KeyringSecrets, SecretStore};
 use crate::watch::{self, SyncSchedule};
 use crate::{
-    Config, DataDirLock, Error, Result, body, connection, drafts, gc, images, ops, send, sync,
+    Config, DataDirLock, Error, Result, body, connection, drafts, gc, images, ops, send, sleep,
+    sync,
 };
 
 /// How many events [`MailClient::subscribe`]'s receivers keep unread before the oldest
@@ -258,6 +259,12 @@ impl MailClient {
                 client.engine.closing(),
             ));
         }
+        client.rt.spawn(sleep::run(
+            Arc::downgrade(&client.engine),
+            sleep::CHECK_EVERY,
+            sleep::Clocks::now,
+            client.engine.closing(),
+        ));
         if let Some(every) = opened.collect_garbage_every {
             client.rt.spawn(gc::run(
                 Arc::downgrade(&client.engine),
@@ -288,7 +295,8 @@ impl MailClient {
     /// Tells the engine the computer just woke from sleep: it starts over on new
     /// connections and syncs and sends what is due at once, rather than once its timers,
     /// which didn't count the sleep, run out. Not for an account whose server rejected
-    /// the login.
+    /// the login. The engine notices a sleep on its own too, but up to half a minute
+    /// late: a frontend that hears of the wake from the system calls this then.
     pub fn resume(&self) {
         self.engine.resume();
     }
@@ -1296,6 +1304,7 @@ mod tests {
     use catmail_types::{Security, ServerConfig};
 
     use std::sync::Mutex;
+    use std::time::Instant;
 
     use super::*;
     use crate::MemorySecrets;
@@ -1502,8 +1511,9 @@ mod tests {
             .collect_garbage_every(Some(crate::DEFAULT_GC_INTERVAL))
             .open()
             .unwrap();
-        assert_eq!(metrics.num_alive_tasks(), before + 2);
-        // Waiting: the outbox is empty, and the first collection is minutes away.
+        assert_eq!(metrics.num_alive_tasks(), before + 3);
+        // Waiting: the outbox is empty, the first collection is minutes away, and the
+        // clocks are compared every half minute.
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         drop(client);
@@ -1514,7 +1524,59 @@ mod tests {
         };
         tokio::time::timeout(Duration::from_secs(5), ended)
             .await
-            .expect("the outbox worker and GC end once the client is gone");
+            .expect("the outbox worker, GC and sleep detection end once the client is gone");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_engine_resumes_once_the_wall_clock_jumps_ahead() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = open_client(dir.path(), Arc::new(MemorySecrets::default()));
+        // How far the wall clock is set ahead of the real one.
+        let ahead = Arc::new(Mutex::new(Duration::ZERO));
+        let clocks = {
+            let ahead = ahead.clone();
+            move || {
+                let now = sleep::Clocks::now();
+                let wall = now.wall + *ahead.lock().unwrap();
+                sleep::Clocks { wall, ..now }
+            }
+        };
+        let every = Duration::from_millis(10);
+        let engine = &client.engine;
+        tokio::spawn(sleep::run(
+            Arc::downgrade(engine),
+            every,
+            clocks,
+            engine.closing(),
+        ));
+
+        let started = Instant::now();
+        tokio::time::sleep(every * 10).await;
+        assert!(engine.since_woke(started), "no sleep while both clocks run");
+
+        *ahead.lock().unwrap() = Duration::from_secs(60 * 60);
+        let resumed = async {
+            while engine.since_woke(started) {
+                tokio::time::sleep(every).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), resumed)
+            .await
+            .expect("resumed after the wall clock jumped ahead");
+        let woke = Instant::now();
+        tokio::time::sleep(every * 10).await;
+        assert!(engine.since_woke(woke), "resumed once per jump");
+
+        // The frontend resumes first; the jump is noticed after. Locked, so no reading
+        // falls in between.
+        let told = {
+            let mut ahead = ahead.lock().unwrap();
+            engine.resume();
+            *ahead *= 2;
+            Instant::now()
+        };
+        tokio::time::sleep(every * 10).await;
+        assert!(engine.since_woke(told), "not resumed again");
     }
 
     #[test]
