@@ -15,7 +15,9 @@ use tokio::task::JoinHandle;
 
 mod common;
 
-use common::{Env, drain, env, env_added, env_built, eventually, folder_report, synced_env};
+use common::{
+    Env, drain, env, env_added, env_built, eventually, folder_report, new_mail, synced_env,
+};
 
 const ALL_MAIL: &str = "[Gmail]/All Mail";
 const TRASH: &str = "[Gmail]/Trash";
@@ -160,6 +162,30 @@ async fn a_message_moved_to_trash_and_back_keeps_its_row() {
     assert!(env.has_body(one).await);
     assert_eq!(env.subjects("Work").await, ["one"]);
     assert_eq!(env.subjects(TRASH).await, ["old"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn new_mail_is_what_arrives_in_all_mail_with_the_inbox_label() {
+    let env = synced_env(gmail()).await;
+    let mut events = env.client.subscribe();
+    let uid = env.move_on_server(ALL_MAIL, 1, TRASH);
+    env.client.sync_account(env.account).await.unwrap();
+    {
+        let mut st = env.fake.state();
+        let all = st.all_mail();
+        let three = all.append_simple("three");
+        all.set_labels(three, &["\\Inbox"]);
+        let work = all.append_simple("work");
+        all.set_labels(work, &["Work"]);
+    }
+    // Restored from Trash to INBOX: it arrives in All Mail, but isn't new.
+    let back = env.move_on_server(TRASH, uid, ALL_MAIL);
+    env.fake.state().all_mail().set_labels(back, &["\\Inbox"]);
+    env.client.sync_account(env.account).await.unwrap();
+
+    let three = env.id_of("INBOX", "three").await;
+    assert_eq!(new_mail(drain(&mut events)), [vec![three]]);
+    assert_eq!(env.subjects("INBOX").await, ["three", "one"]);
 }
 
 /// A message gone from All Mail isn't deleted before Trash and Spam are synced: the

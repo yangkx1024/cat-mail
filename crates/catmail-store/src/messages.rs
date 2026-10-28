@@ -151,8 +151,8 @@ pub struct NewMessage {
 /// What [`Messages::upsert`] did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Upserted {
-    /// Rows inserted.
-    pub added: usize,
+    /// Rows inserted, in the order given.
+    pub added: Vec<MessageId>,
     /// On Gmail, rows that moved here from another location, and the locations they
     /// left.
     pub moved: usize,
@@ -375,8 +375,8 @@ impl<'c> Messages<'c> {
                 ":has_attachments": m.has_attachments,
             })?;
             if added > 0 {
-                done.added += 1;
                 let id = self.conn.last_insert_rowid();
+                done.added.push(MessageId(id));
                 self.reindex(id)?;
                 // Its labels are noted as they are set; Starred shows it if flagged.
                 if let Some(names) = &m.state.labels {
@@ -393,6 +393,31 @@ impl<'c> Messages<'c> {
             self.update_flags(folder, &existing)?;
         }
         Ok(done)
+    }
+
+    /// Of the rows `ids`, the new mail to tell the user about: at UID `from_uid` or above
+    /// (the folder's UIDNEXT before they arrived), unread and in `inbox`. On Gmail INBOX
+    /// is a label, which shows messages in All Mail.
+    pub fn new_mail(
+        &self,
+        ids: &[MessageId],
+        from_uid: u32,
+        inbox: FolderId,
+    ) -> Result<Vec<MessageId>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT m.id FROM messages m
+             WHERE m.id IN (SELECT value FROM json_each(?1)) AND m.uid >= ?2
+               AND m.flags & ?3 = 0
+               AND (m.folder_id = ?4
+                    OR (m.folder_id IN all_mail
+                        AND EXISTS (SELECT 1 FROM message_labels
+                                    WHERE message_id = m.id AND folder_id = ?4)))
+             ORDER BY m.id",
+        )?;
+        let ids: Vec<i64> = ids.iter().map(|id| id.0).collect();
+        let params = params![to_json(&ids), from_uid, Flags::SEEN.bits(), inbox.0];
+        let rows = stmt.query_map(params, |r| Ok(MessageId(r.get(0)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Applies the server's flags, and labels where given, to stored messages; UIDs not
@@ -970,7 +995,8 @@ mod tests {
             store
                 .write(|db| db.messages().upsert(account, folder.id, &batch))
                 .unwrap()
-                .added,
+                .added
+                .len(),
             3
         );
 
@@ -981,7 +1007,8 @@ mod tests {
             store
                 .write(|db| db.messages().upsert(account, folder.id, &again))
                 .unwrap()
-                .added,
+                .added
+                .len(),
             0
         );
 
@@ -1618,6 +1645,19 @@ mod tests {
         m
     }
 
+    /// Upserts `messages` into `folder`, returning the rows inserted.
+    fn inserted(
+        store: &Store,
+        account: AccountId,
+        folder: FolderId,
+        messages: &[NewMessage],
+    ) -> Vec<MessageId> {
+        store
+            .write(|db| db.messages().upsert(account, folder, messages))
+            .unwrap()
+            .added
+    }
+
     fn subjects(store: &Store, folder: FolderId) -> Vec<String> {
         store
             .read(|db| db.messages().list(folder, 50, None))
@@ -1995,5 +2035,71 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn new_mail_is_unread_arrivals_in_inbox() {
+        let store = test_util::store();
+        let account = test_util::account(&store, "a@example.com");
+        let f = folders(
+            &store,
+            account,
+            &[("INBOX", Some(FolderRole::Inbox)), ("Archive", None)],
+        );
+        let (inbox, archive) = (f["INBOX"], f["Archive"]);
+        let added = inserted(
+            &store,
+            account,
+            inbox,
+            &[
+                message(4, None, Flags::empty()),
+                message(5, None, Flags::empty()),
+                message(6, None, Flags::SEEN),
+                message(7, None, Flags::FLAGGED),
+            ],
+        );
+        let elsewhere = inserted(
+            &store,
+            account,
+            archive,
+            &[message(8, None, Flags::empty())],
+        );
+        let new = store
+            .read(|db| {
+                db.messages()
+                    .new_mail(&[added.clone(), elsewhere].concat(), 5, inbox)
+            })
+            .unwrap();
+        // Not 4, from before UIDNEXT; not the read one, nor the one in Archive.
+        assert_eq!(new, [added[1], added[3]]);
+    }
+
+    #[test]
+    fn new_mail_on_gmail_is_in_all_mail_with_the_inbox_label() {
+        let store = test_util::store();
+        let (account, f) = gmail(&store);
+        let inbox = || GmailLabel::System(FolderRole::Inbox);
+        let all_mail = inserted(
+            &store,
+            account,
+            f["[Gmail]/All Mail"],
+            &[
+                labelled(1, Flags::empty(), vec![inbox(), user("Work")]),
+                labelled(2, Flags::empty(), vec![user("Work")]),
+            ],
+        );
+        let spam = inserted(
+            &store,
+            account,
+            f["[Gmail]/Spam"],
+            &[labelled(3, Flags::empty(), vec![inbox()])],
+        );
+        let new = store
+            .read(|db| {
+                db.messages()
+                    .new_mail(&[all_mail.clone(), spam].concat(), 1, f["INBOX"])
+            })
+            .unwrap();
+        assert_eq!(new, [all_mail[0]]);
     }
 }

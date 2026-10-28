@@ -44,7 +44,8 @@
    只有 MODSEQ 变化不算 flags 更新。
 6. **拉取新邮件。** 从新到旧，每批 200 封（`EngineTuning::fetch_batch`）
    `UID FETCH (UID FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (…)])`，
-   每批一个事务，提交后发 `MessagesChanged`，界面先看到最新的邮件。
+   每批一个事务，提交后发 `MessagesChanged`，界面先看到最新的邮件。同一 UIDVALIDITY 下 UID 不小于游标
+   UIDNEXT、进了 INBOX 的未读邮件另发 `NewMail`（见[后台运行 / 新邮件](background.md#新邮件)）。
 7. **写游标。** 文件夹全部完成后才写（UIDNEXT、HIGHESTMODSEQ，取自 EXAMINE 时刻）。某批拿回的
    邮件比请求的少（SEARCH 之后被删，或响应无法解析）时不写，下次完整求差集。
 
@@ -162,7 +163,8 @@ flags，重复的批次不产生重复行）。HIGHESTMODSEQ 用 EXAMINE 时刻�
   连续发生（例如代理每次都关掉 IDLE 的连接）时，从第二次起按下面的间隔退避，否则会不停地登录、同步；一步开始时复用的连接已断开，也立即换
   新连接重来一次（与连接池同一条规则，`connection::on_session`）。其他失败（连不上等）从 `retry`
   （30 秒）起翻倍等待，最长 `full_sync`，有本地改动入队时立即再试。**登录被拒绝**例外：每隔
-  `full_sync` 才再试一次，本地改动也不提前唤醒它（这时 `Engine::wake` 什么也不做），因为每次重试都是
+  `full_sync` 才再试一次，本地改动、睡眠唤醒也不提前叫醒它：任务被叫醒时查一下账户状态，登录仍被拒绝
+  就接着等（`unless_rejected`），在得知被拒之前就排着的通知也一样，因为每次重试都是
   又一次失败的登录，服务器（AD、Exchange 等）累计几次就会锁定账户；用户要求的同步或回放成功（例如改好
   了密码）清除这个状态时立即唤醒它继续。
 - **账户状态。** 每一步的结果、用户要求的 `sync_account` / `replay_pending`（真的连了服务器时）都记进
@@ -177,6 +179,9 @@ flags，重复的批次不产生重复行）。HIGHESTMODSEQ 用 EXAMINE 时刻�
   按需操作。检查或插入失败时 LOGOUT，连接不留。账户删除时任务结束，IDLE 中也立即结束，删除不必等它。任务只持有引擎的弱引用；等待时
   用账户的取消信号，它在账户删除或引擎不在时（发送端随引擎 drop）都会触发：最后一个 `MailClient`
   drop 后任务结束并关闭连接，不会让引擎和数据目录锁多活一个 IDLE 周期。
+- **睡眠唤醒。** `MailClient::resume` 记下醒来的时刻：睡前建立的连接、睡前开始的同步不再算数，任务丢掉
+  这样的连接（IDLE 中不发 DONE）、做一次完整同步，登录被拒绝的除外。见
+  [后台运行 / 系统睡眠与唤醒](background.md#系统睡眠与唤醒)。
 - **找 INBOX** 按角色（对账时按名称不分大小写认定），只读这一个文件夹的同步状态。
 - **Gmail** 上 INBOX 是标签：被唤醒（或轮询）时同步的是三个位置，再 EXAMINE INBOX 接着 IDLE，见
   [位置与标签 / 同步](labels.md#同步)。

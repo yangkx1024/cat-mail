@@ -254,6 +254,13 @@ pub struct ServerProblem {
     pub failures: u32,
 }
 
+impl ServerProblem {
+    /// Whether the server rejected the login.
+    pub fn login_rejected(&self) -> bool {
+        self.error.kind == crate::ErrorKind::Auth
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

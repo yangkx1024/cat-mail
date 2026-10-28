@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::ops::RangeInclusive;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use catmail_types::{FlagState, Flags, FolderRole, GmailLabel, Security, ServerConfig};
 use imap_proto::rfc4315::UidSetMember;
@@ -35,6 +35,7 @@ pub struct Session {
     writable: bool,
     /// What IDLE reported about flags in `selected`.
     changed_flags: ChangedFlags,
+    opened: Instant,
 }
 
 /// Where a COPY or MOVE put the messages (COPYUID, RFC 4315).
@@ -54,6 +55,7 @@ impl Session {
         tls: &TlsConfig,
         timeout: Duration,
     ) -> Result<Self> {
+        let opened = Instant::now();
         let (stream, server_name) = net::connect(server, tls, timeout).await?;
         let mut conn = Connection::new(stream, timeout);
         let greeting = conn.greeting().await?;
@@ -97,9 +99,15 @@ impl Session {
             selected: None,
             writable: false,
             changed_flags: ChangedFlags::default(),
+            opened,
         };
         session.set_capabilities(caps);
         Ok(session)
+    }
+
+    /// When [`connect`](Self::connect) began.
+    pub fn opened(&self) -> Instant {
+        self.opened
     }
 
     pub fn capabilities(&self) -> &Capabilities {

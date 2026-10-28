@@ -121,7 +121,16 @@ impl Resident {
         });
         cx.on_window_closed(Self::window_closed).detach();
         cx.on_action(|_: &crate::actions::Quit, cx| Self::quit(cx));
+        cx.on_system_wake(Self::woke).detach();
         Self::open_main(cx)
+    }
+
+    /// The engine's connections are likely dead after a sleep, and its timers didn't
+    /// count it: it catches up at once rather than minutes later.
+    fn woke(cx: &mut App) {
+        if let Engine::Open(client) = Self::engine(cx) {
+            client.resume();
+        }
     }
 
     pub fn engine(cx: &App) -> &Engine {

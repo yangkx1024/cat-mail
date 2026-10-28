@@ -8,8 +8,8 @@ use catmail_proto::http::ImageFetcher;
 use catmail_proto::imap::Session;
 use catmail_store::{BlobStore, Db, Store};
 use catmail_types::{
-    AccountId, AccountStatus, DraftId, ErrorKind, Event, FolderId, IdentityId, ReportedError,
-    SendProblem, ServerProblem, SyncReport,
+    AccountId, AccountStatus, DraftId, Event, FolderId, IdentityId, ReportedError, SendProblem,
+    ServerProblem, SyncReport,
 };
 use tokio::sync::{Notify, OwnedMutexGuard, broadcast, watch};
 
@@ -45,6 +45,7 @@ pub(crate) struct Engine {
     /// Never sent to: dropped with the engine, which ends the background tasks holding
     /// it weakly at once (see [`closing`](Self::closing)).
     closing: watch::Sender<()>,
+    woke: Woke,
     accounts: Mutex<HashMap<AccountId, Arc<AccountState>>>,
 }
 
@@ -85,6 +86,29 @@ impl EngineTuning {
     }
 }
 
+/// When the computer last woke from sleep, as [`Engine::resume`] was told.
+#[derive(Default)]
+struct Woke(Mutex<Option<Instant>>);
+
+impl Woke {
+    fn set(&self, at: Instant) {
+        *lock(&self.0) = Some(at);
+    }
+
+    fn since(&self, at: Instant) -> bool {
+        lock(&self.0).is_none_or(|woke| at > woke)
+    }
+
+    /// When work that `began` then finished, to record for [`since`](Self::since) to
+    /// check later, if it counts: not if it began before a wake. The time is taken
+    /// before the check, so a wake that comes after the check is later and leaves the
+    /// record out; taken after it, a wake in between would let the record count.
+    fn finished(&self, began: Instant, now: impl FnOnce() -> Instant) -> Option<Instant> {
+        let finished = now();
+        self.since(began).then_some(finished)
+    }
+}
+
 struct IdleSession {
     session: Session,
     since: Instant,
@@ -118,7 +142,12 @@ struct AccountState {
     /// Wakes the account's background sync, if one runs: local changes are waiting for
     /// the server.
     wake: Arc<Notify>,
-    /// When the last sync of every folder finished.
+    /// Tells the account's background sync, if one runs, to look at once whether its
+    /// connection and the last sync of every folder are from before a sleep (see
+    /// [`Engine::resume`]).
+    resume: Arc<Notify>,
+    /// When the last sync of every folder finished. Neither this nor `folders_synced`
+    /// counts a sync begun before the computer last woke (see [`Engine::since_woke`]).
     synced: Mutex<Option<Instant>>,
     /// When each folder last completed a sync, for a sync of every folder to leave out
     /// those another one completed since it began, and for the sync of an opened folder
@@ -244,6 +273,7 @@ impl Engine {
             draft_upload_delay: DEFAULT_DRAFT_UPLOAD_DELAY,
             tuning: EngineTuning::default(),
             closing: watch::Sender::new(()),
+            woke: Woke::default(),
             accounts: Mutex::default(),
         }
     }
@@ -330,23 +360,54 @@ impl Engine {
     }
 
     /// Wakes the account's background sync, if one runs, to make queued local changes
-    /// on the server. A wake while it is busy is kept for when it next waits. Not while
-    /// the server rejects the login: the changes wait for one that works, since each try
-    /// is another rejected login, which servers count towards locking the account.
+    /// on the server. A wake while it is busy is kept for when it next waits. Ignored
+    /// while the server rejects the login ([`login_rejected`](Self::login_rejected)),
+    /// also one kept from before that was known: the changes wait for a login that works,
+    /// since each try is another rejected login, which servers count towards locking the
+    /// account.
     pub fn wake(&self, account: AccountId) {
-        let state = self.account(account);
-        let rejected = lock(&state.status)
-            .sync
-            .as_ref()
-            .is_some_and(|p| p.error.kind == ErrorKind::Auth);
-        if !rejected {
-            state.wake.notify_one();
-        }
+        self.account(account).wake.notify_one();
+    }
+
+    /// Whether the latest attempt to sync the account found the login rejected.
+    pub fn login_rejected(&self, account: AccountId) -> bool {
+        self.existing(account).is_some_and(|state| {
+            lock(&state.status)
+                .sync
+                .as_ref()
+                .is_some_and(ServerProblem::login_rejected)
+        })
     }
 
     /// What [`wake`](Self::wake) notifies.
     pub fn wake_signal(&self, account: AccountId) -> Arc<Notify> {
         self.account(account).wake.clone()
+    }
+
+    /// What [`resume`](Self::resume) notifies.
+    pub fn resume_signal(&self, account: AccountId) -> Arc<Notify> {
+        self.account(account).resume.clone()
+    }
+
+    /// After the computer slept: connections are likely dead, and the monotonic clock
+    /// the engine times its work by (`Instant`, tokio's timers) didn't count the sleep on
+    /// Linux and macOS. Connections made and syncs begun before now no longer count (see
+    /// [`since_woke`](Self::since_woke)), so every folder is due; background sync and
+    /// the outbox look at once. Ignored like [`wake`](Self::wake) while the server
+    /// rejects the login, which waits as long as ever.
+    pub fn resume(&self) {
+        self.woke.set(Instant::now());
+        for state in lock(&self.accounts).values() {
+            state.resume.notify_one();
+        }
+        self.outbox_kick.notify_one();
+    }
+
+    /// Whether `at` is after the computer last woke from sleep. A connection made before
+    /// is likely dead; a sync begun before may have seen the server before the sleep,
+    /// though it finished after.
+    pub fn since_woke(&self, at: Instant) -> bool {
+        self.woke.since(at)
     }
 
     /// Records that the draft was just changed (or created), so background sync leaves
@@ -402,9 +463,12 @@ impl Engine {
         }
     }
 
-    /// Records that every folder of the account was just synced.
-    pub fn set_synced(&self, account: AccountId) {
-        *lock(&self.account(account).synced) = Some(Instant::now());
+    /// Records that every folder of the account was just synced, by a sync that `began`
+    /// then.
+    pub fn set_synced(&self, account: AccountId, began: Instant) {
+        if let Some(at) = self.woke.finished(began, Instant::now) {
+            *lock(&self.account(account).synced) = Some(at);
+        }
     }
 
     /// Marks the start of background sync's first sync of every folder of the account,
@@ -441,21 +505,27 @@ impl Engine {
     }
 
     /// When every folder of the account was last synced, if ever since the engine
-    /// started.
+    /// started and the computer last woke.
     pub fn synced(&self, account: AccountId) -> Option<Instant> {
-        *lock(&self.existing(account)?.synced)
+        let synced = *lock(&self.existing(account)?.synced);
+        synced.filter(|&at| self.since_woke(at))
     }
 
-    /// Records that `folder` just completed a sync: its messages and all their flags.
-    pub fn set_folder_synced(&self, account: AccountId, folder: FolderId) {
-        lock(&self.account(account).folders_synced).insert(folder, Instant::now());
+    /// Records that `folder` just completed a sync, which `began` then: its messages and
+    /// all their flags.
+    pub fn set_folder_synced(&self, account: AccountId, folder: FolderId, began: Instant) {
+        if let Some(at) = self.woke.finished(began, Instant::now) {
+            lock(&self.account(account).folders_synced).insert(folder, at);
+        }
     }
 
-    /// When `folder` last completed a sync, if ever since the engine started.
+    /// When `folder` last completed a sync, if ever since the engine started and the
+    /// computer last woke.
     pub fn folder_synced(&self, account: AccountId, folder: FolderId) -> Option<Instant> {
-        lock(&self.existing(account)?.folders_synced)
+        let synced = lock(&self.existing(account)?.folders_synced)
             .get(&folder)
-            .copied()
+            .copied();
+        synced.filter(|&at| self.since_woke(at))
     }
 
     /// Records how an attempt to get through to the account's server for `activity`
@@ -586,6 +656,7 @@ impl Engine {
                     removed: watch::Sender::new(false),
                     idle: Mutex::default(),
                     wake: Arc::default(),
+                    resume: Arc::default(),
                     synced: Mutex::default(),
                     folders_synced: Mutex::default(),
                     status: Mutex::default(),
@@ -642,9 +713,7 @@ fn record(slot: &mut Option<ServerProblem>, e: Option<&Error>) -> (bool, bool, u
     match e {
         None => {
             let cleared = slot.take();
-            let rejected = cleared
-                .as_ref()
-                .is_some_and(|p| p.error.kind == ErrorKind::Auth);
+            let rejected = cleared.as_ref().is_some_and(ServerProblem::login_rejected);
             (cleared.is_some(), rejected, 0)
         }
         Some(e) => {
@@ -682,4 +751,37 @@ pub(crate) fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Work begun before the computer slept, finishing as it wakes: whenever the wake
+    /// comes, the record doesn't count.
+    #[test]
+    fn work_begun_before_a_wake_never_counts() {
+        let began = Instant::now();
+        let later = |by| began + Duration::from_secs(by);
+
+        // As the time is taken.
+        let woke = Woke::default();
+        let finished = woke.finished(began, || {
+            woke.set(later(1));
+            later(2)
+        });
+        assert!(finished.is_none_or(|at| !woke.since(at)));
+
+        // Between the check and the record.
+        let woke = Woke::default();
+        let finished = woke.finished(began, || later(1));
+        woke.set(later(2));
+        assert!(finished.is_none_or(|at| !woke.since(at)));
+
+        // Work begun after a wake counts.
+        let woke = Woke::default();
+        woke.set(began);
+        let finished = woke.finished(later(1), || later(2));
+        assert!(finished.is_some_and(|at| woke.since(at)));
+    }
 }

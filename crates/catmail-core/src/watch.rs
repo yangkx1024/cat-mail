@@ -11,6 +11,10 @@
 //! runs on a connection of its own. The first sync of every folder is the exception: a
 //! sync asked for while it runs waits for it rather than logging in to do the same.
 //!
+//! After the computer slept ([`Engine::resume`]) a task drops a connection made before,
+//! which is likely dead, without a word, and syncs every folder unless a sync of them all
+//! began since.
+//!
 //! The tasks hold the engine weakly, so dropping the last client ends them, and with
 //! them their connections.
 
@@ -120,9 +124,14 @@ async fn run(
     let mut first_sync = Some(first_sync);
     // An idle connection if there is one: adding an account leaves the one that checked
     // the password.
-    let Some((wake, mut cancellation, mut session)) = engine.upgrade().map(|e| {
+    let Some((wake, resume, mut cancellation, mut session)) = engine.upgrade().map(|e| {
         let session = e.take_session(account);
-        (e.wake_signal(account), e.cancellation(account), session)
+        (
+            e.wake_signal(account),
+            e.resume_signal(account),
+            e.cancellation(account),
+            session,
+        )
     }) else {
         return;
     };
@@ -160,8 +169,19 @@ async fn run(
             Ok(_) if due.is_zero() => continue,
             Ok(wait) => match (wait, session.as_mut()) {
                 (Wait::Idle, Some(s)) if idle_works => {
-                    let start = Instant::now();
-                    match idle(s, &wake, &mut cancellation, &schedule, due).await {
+                    let (start, opened) = (Instant::now(), s.opened());
+                    let idled = tokio::select! {
+                        idled = idle(s, &wake, &mut cancellation, &schedule, due) => Some(idled),
+                        () = slept_through(&engine, &resume, opened) => None,
+                    };
+                    // Not ended with DONE: after a sleep the answer may never come.
+                    let Some(idled) = idled else {
+                        tracing::debug!(%account, "IDLE connection from before a sleep; starting over");
+                        session = None;
+                        (idle_losses, busy) = (0, 0);
+                        continue;
+                    };
+                    match idled {
                         Ok(Idled::Stopped) => {
                             (idle_losses, busy) = (0, 0);
                             continue;
@@ -229,10 +249,34 @@ async fn run(
                 delay
             }
         };
-        // After a rejected login, queued changes don't wake it (see `Engine::wake`).
         tokio::select! {
-            () = stopped(&wake, &mut cancellation) => {}
+            () = cancellation.cancelled() => {}
+            () = unless_rejected(&engine, account, &wake) => {}
+            () = unless_rejected(&engine, account, &resume) => {}
             () = tokio::time::sleep(pause) => {}
+        }
+    }
+}
+
+/// Returns once `signal` is notified while the server doesn't reject the login, or the
+/// engine is gone: neither queued changes nor waking from sleep bring on another rejected
+/// login (see [`Engine::wake`]), not even when notified before the rejection was known.
+async fn unless_rejected(engine: &Weak<Engine>, account: AccountId, signal: &Notify) {
+    loop {
+        signal.notified().await;
+        if engine.upgrade().is_none_or(|e| !e.login_rejected(account)) {
+            return;
+        }
+    }
+}
+
+/// Returns once the computer woke from sleep since the connection `opened` (see
+/// [`Engine::resume`]), or the engine is gone.
+async fn slept_through(engine: &Weak<Engine>, resume: &Notify, opened: Instant) {
+    loop {
+        resume.notified().await;
+        if engine.upgrade().is_none_or(|e| !e.since_woke(opened)) {
+            return;
         }
     }
 }

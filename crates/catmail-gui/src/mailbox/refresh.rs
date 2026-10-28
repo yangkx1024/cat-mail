@@ -53,7 +53,9 @@ impl Refresh {
             Event::AccountStatusChanged { .. }
             | Event::PendingOpsChanged { .. }
             | Event::ChangesRefused { .. }
-            | Event::MessageSent { .. } => Self::default(),
+            | Event::MessageSent { .. }
+            // Comes with `MessagesChanged`.
+            | Event::NewMail { .. } => Self::default(),
         }
     }
 

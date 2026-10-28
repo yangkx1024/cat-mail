@@ -80,6 +80,14 @@ async fn describe(
                 folder.unread_count
             ))
         }
+        Event::NewMail {
+            account,
+            ref messages,
+        } => {
+            let n = messages.len();
+            let noun = if n == 1 { "message" } else { "messages" };
+            Some(format!("{}: {n} new {noun}", email(account)))
+        }
         Event::FoldersChanged { account } => Some(format!("{}: folders changed", email(account))),
         Event::ChangesRefused { account } => Some(format!(
             "{}: changes refused and undone; see `catmail ops list`",
@@ -98,6 +106,7 @@ async fn describe(
 
 #[cfg(test)]
 mod tests {
+    use catmail_core::MessageId;
     use catmail_testkit::{FakeImap, ServerState};
 
     use super::*;
@@ -130,6 +139,17 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("alice@example.com INBOX: 2 messages, 1 unread")
+        );
+        let new_mail = Event::NewMail {
+            account: account.id,
+            messages: vec![MessageId(1), MessageId(2)],
+        };
+        assert_eq!(
+            describe(&client, &emails, &new_mail)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("alice@example.com: 2 new messages")
         );
         let sent = Event::OutboxChanged {
             account: account.id,

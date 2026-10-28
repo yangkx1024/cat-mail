@@ -269,7 +269,8 @@ pub(crate) async fn with_session<T>(
     result
 }
 
-/// Runs `op` on the connection in `slot`, or on a new one put there. If the one there
+/// Runs `op` on the connection in `slot`, or on a new one put there: also in place of one
+/// made before the computer last slept (see [`Engine::since_woke`]). If the one there
 /// turns out to be dead (disconnected, not merely unusable after a refusal), `op` runs
 /// once more on a fresh one.
 pub(crate) async fn on_session<T>(
@@ -278,6 +279,14 @@ pub(crate) async fn on_session<T>(
     slot: &mut Option<Session>,
     mut op: impl AsyncFnMut(&mut Session) -> Result<T>,
 ) -> Result<T> {
+    // Likely dead after a sleep, and only found so after a timeout.
+    if slot
+        .as_ref()
+        .is_some_and(|s| !engine.since_woke(s.opened()))
+    {
+        tracing::debug!(%account, "connection from before a sleep; reconnecting");
+        *slot = None;
+    }
     if let Some(session) = slot {
         match op(session).await {
             // A fresh connection, not another idle one: those are likely dead too.
