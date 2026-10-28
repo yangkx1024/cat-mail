@@ -165,6 +165,18 @@ async fn new_mail_is_what_arrives_in_inbox_unread() {
     env.sync().await;
     assert!(new_mail(drain(&mut events)).is_empty(), "announced once");
 
+    // Still new until it is read.
+    let still_new = async || -> Vec<_> {
+        let found = env.client.unread_in_inbox(vec![two]).await;
+        found.unwrap().into_iter().map(|m| m.id).collect()
+    };
+    assert_eq!(still_new().await, [two]);
+    env.client
+        .set_flags(vec![two], Flags::SEEN, Flags::empty())
+        .await
+        .unwrap();
+    assert!(still_new().await.is_empty());
+
     // Every message of a new UIDVALIDITY is new to the engine, not to the user.
     {
         let mut st = env.fake.state();

@@ -6,12 +6,13 @@
 use catmail_core::MailClient;
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Entity, Global, GraphicalEnvironment, SharedString,
-    Subscription, Task, WindowId, WindowingRequest,
+    Subscription, Task, WeakEntity, WindowId, WindowingRequest,
 };
 
 use crate::MainWindow;
 use crate::instance::{Display, Requests};
-use crate::mailbox::{Mailbox, Place};
+use crate::mailbox::{Destination, Mailbox};
+use crate::new_mail::Notifier;
 use crate::settings::Preferences;
 
 /// Whether the app drops its display connection while no window is open. macOS apps keep
@@ -75,8 +76,14 @@ pub struct Resident {
     windowing: Windowing,
     /// Quit was asked for, and the composer windows are closing.
     quitting: bool,
-    /// Where the main window was when it closed, to open it there again.
-    place: Option<Place>,
+    /// Where the main window was when it closed, to open it there again; or what a
+    /// notification clicked meanwhile was about.
+    reopen: Option<Destination>,
+    /// The display the windows were last on, to show the main window there again when
+    /// nothing else asks for it (a notification is clicked).
+    display: Display,
+    /// The main window's, once the engine is in it.
+    mailbox: WeakEntity<Mailbox>,
     _mailbox_released: Option<Subscription>,
     _switch: Task<()>,
     _quit: Task<()>,
@@ -113,7 +120,9 @@ impl Resident {
             main: None,
             windowing: Windowing::Windowed,
             quitting: false,
-            place: None,
+            reopen: None,
+            display: Display::current(),
+            mailbox: WeakEntity::new_invalid(),
             _mailbox_released: None,
             _switch: Task::ready(()),
             _quit: Task::ready(()),
@@ -137,15 +146,48 @@ impl Resident {
         &cx.global::<Self>().engine
     }
 
-    /// Where a new mailbox opens: where the last one was. Remembers where this one is
-    /// when it goes.
-    pub fn adopt(mailbox: &Entity<Mailbox>, cx: &mut App) -> Option<Place> {
+    /// Where a new mailbox opens: where the last one was, or what a notification was
+    /// about. Remembers where this one is when it goes.
+    pub fn adopt(mailbox: &Entity<Mailbox>, cx: &mut App) -> Option<Destination> {
         let released = cx.observe_release(mailbox, |mailbox, cx| {
-            cx.global_mut::<Self>().place = mailbox.place;
+            cx.global_mut::<Self>().reopen = mailbox.place.map(Destination::Place);
         });
         let resident = cx.global_mut::<Self>();
+        resident.mailbox = mailbox.downgrade();
         resident._mailbox_released = Some(released);
-        resident.place.take()
+        resident.reopen.take()
+    }
+
+    /// Whether the main window is open and in front.
+    pub fn main_is_active(cx: &mut App) -> bool {
+        let Some(main) = cx.global::<Self>().main else {
+            return false;
+        };
+        main.update(cx, |_, window, _| window.is_window_active())
+            .unwrap_or(false)
+    }
+
+    /// Shows the main window on the display it was last on, taken to `to` (now, or once
+    /// it opens).
+    pub fn show_at(to: Option<Destination>, cx: &mut App) {
+        let resident = cx.global_mut::<Self>();
+        if let Some(to) = to {
+            match (resident.main, resident.mailbox.upgrade()) {
+                (Some(main), Some(mailbox)) => {
+                    main.update(cx, |_, window, cx| {
+                        mailbox.update(cx, |mailbox, cx| mailbox.go_to(to, window, cx))
+                    })
+                    .ok();
+                }
+                _ => resident.reopen = Some(to),
+            }
+        }
+        // Its activation token was used.
+        let display = Display {
+            activation_token: None,
+            ..cx.global::<Self>().display.clone()
+        };
+        Self::show(display, cx);
     }
 
     fn opened(opened: catmail_core::Result<MailClient>, cx: &mut App) {
@@ -156,6 +198,9 @@ impl Resident {
                 Engine::Failed(e.to_string().into())
             }
         };
+        if let Engine::Open(client) = &engine {
+            Notifier::start(client.clone(), cx);
+        }
         let failed = matches!(engine, Engine::Failed(_));
         cx.global_mut::<Self>().engine = engine;
         // The window was closed while it opened: there is nothing to keep running.
@@ -201,10 +246,14 @@ impl Resident {
                 if let Err(e) = &switched {
                     tracing::error!(error = %e, "can't connect to the display");
                 }
-                cx.global_mut::<Self>().windowing = match switched {
+                let resident = cx.global_mut::<Self>();
+                resident.windowing = match switched {
                     Ok(()) => Windowing::Windowed,
                     Err(_) => Windowing::Headless,
                 };
+                if switched.is_ok() {
+                    resident.display = display.clone();
+                }
                 if let Some(display) = after_reconnecting(switched.is_ok(), display, pending) {
                     Self::show(display, cx);
                 }
@@ -320,12 +369,14 @@ fn environment(display: &Display) -> GraphicalEnvironment {
 #[cfg(test)]
 mod tests {
     use catmail_core::AccountId;
-    use gpui_kit::TestAppContext;
     use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{SystemNotificationResponse, TestAppContext};
 
     use super::*;
     use crate::composer::ComposeFrom;
     use crate::instance::Request;
+    use crate::mailbox::Place;
+    use crate::new_mail::GATHER;
     use crate::test_support::{TestMail, wait_until};
 
     /// The main window's mailbox, once the engine is in it and it has loaded.
@@ -334,15 +385,10 @@ mod tests {
         wait_until(|| {
             cx.run_until_parked();
             found = cx.read(|cx| {
-                let window = cx.global::<Resident>().main?;
-                let root = window.downcast::<gpui_kit::base::Root>()?.read(cx).ok()?;
-                let main = root.view().clone().downcast::<MainWindow>().ok()?;
-                let mailbox = main.read(cx).mailbox.clone()?;
-                mailbox
-                    .read(cx)
-                    .accounts
-                    .is_some()
-                    .then_some((window, mailbox))
+                let resident = cx.global::<Resident>();
+                let mailbox = resident.mailbox.upgrade()?;
+                let loaded = mailbox.read(cx).accounts.is_some();
+                loaded.then_some((resident.main?, mailbox))
             });
             found.is_some()
         });
@@ -351,15 +397,9 @@ mod tests {
 
     #[gpui_kit::test]
     fn the_main_window_closes_and_comes_back_where_it_was(cx: &mut TestAppContext) {
-        let mail = TestMail::start();
-        let account: AccountId = mail.account();
-        cx.executor().allow_parking();
         let (requests, received) = futures_channel::mpsc::unbounded();
-        let client = mail.client.clone();
-        cx.update(|cx| {
-            crate::init_app(Preferences::load_nowhere(), cx);
-            Resident::start(Task::ready(Ok(client)), Some(received), cx).unwrap();
-        });
+        let mail = start(Some(received), cx);
+        let account: AccountId = mail.account();
         let (window, mailbox) = main_mailbox(cx);
         let drafts = Place::Drafts(account);
         cx.update_window(window, |_, window, cx| {
@@ -391,15 +431,107 @@ mod tests {
         assert_eq!(cx.read(|cx| mailbox.read(cx).place), Some(drafts));
     }
 
+    /// Lets the engine's announcements of new mail through [`GATHER`] until `done`.
+    fn gather_until(cx: &mut TestAppContext, mut done: impl FnMut(&mut TestAppContext) -> bool) {
+        wait_until(|| {
+            cx.executor().advance_clock(GATHER);
+            cx.run_until_parked();
+            done(cx)
+        });
+    }
+
     #[gpui_kit::test]
-    fn a_composer_that_cant_close_calls_off_quitting(cx: &mut TestAppContext) {
+    fn new_mail_while_no_window_is_open_shows_a_notification_that_opens_it(
+        cx: &mut TestAppContext,
+    ) {
+        let mail = start(None, cx);
+        let (window, mailbox) = main_mailbox(cx);
+        drop(mailbox);
+        cx.update_window(window, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+
+        mail.deliver_and_sync("Lunch?");
+        clicking_the_notification_opens_it(&mail, cx);
+    }
+
+    #[gpui_kit::test]
+    fn a_notification_clicked_with_the_window_behind_opens_the_message_there(
+        cx: &mut TestAppContext,
+    ) {
+        let mail = start(None, cx);
+        main_mailbox(cx);
+        mail.deliver_and_sync("Lunch?");
+        clicking_the_notification_opens_it(&mail, cx);
+    }
+
+    /// The app with its main window and the engine `TestMail::start` has, taking
+    /// `requests` from later launches.
+    fn start(requests: Option<Requests>, cx: &mut TestAppContext) -> TestMail {
         let mail = TestMail::start();
         cx.executor().allow_parking();
         let client = mail.client.clone();
         cx.update(|cx| {
             crate::init_app(Preferences::load_nowhere(), cx);
-            Resident::start(Task::ready(Ok(client.clone())), None, cx).unwrap();
+            Resident::start(Task::ready(Ok(client)), requests, cx).unwrap();
         });
+        mail
+    }
+
+    /// The one notification, for "Lunch?", shows that message in INBOX once clicked.
+    fn clicking_the_notification_opens_it(mail: &TestMail, cx: &mut TestAppContext) {
+        gather_until(cx, |cx| !cx.shown_system_notifications().is_empty());
+        let shown = cx.shown_system_notifications();
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].body.as_ref(), "Lunch?");
+
+        cx.simulate_system_notification_response(SystemNotificationResponse {
+            tag: shown[0].tag.clone(),
+            action_id: None,
+        });
+        let (_, mailbox) = main_mailbox(cx);
+        wait_until(|| {
+            cx.run_until_parked();
+            cx.read(|cx| {
+                let list = mailbox.read(cx).messages.read(cx);
+                let opened = list.delegate().selected_message();
+                opened.and_then(|m| m.subject.clone()).as_deref() == Some("Lunch?")
+            })
+        });
+        let inbox = pollster::block_on(mail.client.find_folder(mail.account(), "INBOX"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cx.read(|cx| mailbox.read(cx).place),
+            Some(Place::Folder(inbox.id))
+        );
+    }
+
+    #[gpui_kit::test]
+    fn new_mail_isnt_notified_while_the_main_window_is_in_front(cx: &mut TestAppContext) {
+        let mail = start(None, cx);
+        let (window, _) = main_mailbox(cx);
+        cx.update_window(window, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        assert!(cx.update(Resident::main_is_active));
+
+        mail.deliver_and_sync("Lunch?");
+        wait_until(|| {
+            cx.run_until_parked();
+            cx.read(Notifier::is_gathering)
+        });
+        // It decides whether to tell as soon as the gathering is over.
+        cx.executor().advance_clock(GATHER);
+        cx.run_until_parked();
+        assert!(!cx.read(Notifier::is_gathering));
+        assert!(cx.shown_system_notifications().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn a_composer_that_cant_close_calls_off_quitting(cx: &mut TestAppContext) {
+        let mail = start(None, cx);
+        let client = mail.client.clone();
         let (main, _) = main_mailbox(cx);
         cx.update_window(main, |_, window, cx| {
             crate::composer::open(client, ComposeFrom::New(mail.account()), window, cx)

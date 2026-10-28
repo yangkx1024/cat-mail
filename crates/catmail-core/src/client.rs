@@ -10,9 +10,9 @@ use catmail_store::{BlobStore, Identities, Store};
 use catmail_types::{
     Account, AccountId, AccountOverview, AccountStatus, AttachmentId, Draft, DraftAttachment,
     DraftAttachmentId, DraftContent, DraftId, Event, Flags, FlushReport, Folder, FolderId,
-    FolderSyncReport, Forwarding, GcReport, Identity, IdentityId, Message, MessageCursor,
-    MessageId, MessageSummary, NewAccount, NewIdentity, OutboxEntry, OutboxId, PendingOp,
-    PendingOpId, ReplayReport, SearchQuery, ServerConfig, SyncReport,
+    FolderRole, FolderSyncReport, Forwarding, GcReport, Identity, IdentityId, Message,
+    MessageCursor, MessageId, MessageSummary, NewAccount, NewIdentity, OutboxEntry, OutboxId,
+    PendingOp, PendingOpId, ReplayReport, SearchQuery, ServerConfig, SyncReport,
 };
 use secrecy::{ExposeSecret, SecretString};
 use tokio::runtime::Handle;
@@ -692,6 +692,30 @@ impl MailClient {
         let engine = self.engine.clone();
         self.rt
             .run(async move { engine.read(move |db| db.messages().get(id)).await })
+            .await
+    }
+
+    /// Of `messages`, which [`Event::NewMail`]s announced, those still unread in their
+    /// account's INBOX, newest first: what to tell the user about. Mail read or moved
+    /// since, on another device or here, is left out.
+    pub async fn unread_in_inbox(&self, messages: Vec<MessageId>) -> Result<Vec<MessageSummary>> {
+        let engine = self.engine.clone();
+        self.rt
+            .run(async move {
+                engine
+                    .read(move |db| {
+                        let mut inboxes = Vec::new();
+                        for account in db.accounts().list()? {
+                            if let Some((inbox, _)) =
+                                db.folders().by_role(account.id, FolderRole::Inbox)?
+                            {
+                                inboxes.push(inbox);
+                            }
+                        }
+                        db.messages().unread_in_inbox(&messages, &inboxes)
+                    })
+                    .await
+            })
             .await
     }
 

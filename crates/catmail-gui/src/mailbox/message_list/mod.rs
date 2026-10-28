@@ -165,6 +165,9 @@ pub struct MessageList {
     removals: u64,
     /// Loads of the rows shown started so far (not of more pages).
     reads: u64,
+    /// The message to select once the rows have it (see [`reveal`]), and the first read
+    /// that must have it: one in flight may have started before it arrived.
+    revealing: Option<(MessageId, u64)>,
     /// The change behind removal number `.0` is made: the rows of the read numbered `.1`
     /// or later show it, and if the message is among them it stays (see
     /// [`removal_settled`]).
@@ -190,6 +193,7 @@ impl MessageList {
             removing: None,
             removals: 0,
             reads: 0,
+            revealing: None,
             settled: None,
             labels: HashMap::new(),
             _load: Task::ready(()),
@@ -260,6 +264,11 @@ impl MessageList {
         names
     }
 
+    /// Drops the message [`reveal`] waits for: the user chose another meanwhile.
+    pub fn forget_reveal(&mut self) {
+        self.revealing = None;
+    }
+
     /// Selects the next row once `id`, the selected message, goes away. Returns the
     /// removal's number, for [`removal_settled`].
     pub fn expect_removal(&mut self, id: MessageId) -> u64 {
@@ -284,11 +293,61 @@ pub fn show(
     delegate.has_more = false;
     delegate.stale = false;
     delegate.removing = None;
+    delegate.revealing = None;
     delegate.settled = None;
     delegate.generation += 1;
     list.set_selected_index(None, window, cx);
     list.scroll_to_item(IndexPath::new(0), gpui_kit::ScrollStrategy::Top, window, cx);
     load(list, Load::Replace(PAGE), window, cx);
+}
+
+/// Selects and opens message `id`, of the source shown: now if it is listed, or else once
+/// the rows read from now on have it (it may have just arrived). Nothing happens if the
+/// next of them doesn't, if another source is shown first, or if the user selects a row
+/// meanwhile ([`MessageList::forget_reveal`]).
+pub fn reveal(
+    list: &mut ListState<MessageList>,
+    id: MessageId,
+    window: &mut Window,
+    cx: &mut Context<ListState<MessageList>>,
+) {
+    let delegate = list.delegate_mut();
+    // The next read starts after now, once one in flight is done.
+    let reads = delegate.reads;
+    delegate.revealing = Some((id, reads + 1));
+    select_revealed(list, reads, window, cx);
+    if list.delegate().revealing.is_some() {
+        refresh(list, window, cx);
+    }
+}
+
+/// Selects the message [`reveal`] asked for if it is among the rows, which read number
+/// `read` brought; gives up if they don't have it and that read should have.
+fn select_revealed(
+    list: &mut ListState<MessageList>,
+    read: u64,
+    window: &mut Window,
+    cx: &mut Context<ListState<MessageList>>,
+) {
+    let delegate = list.delegate_mut();
+    let Some((id, from)) = delegate.revealing else {
+        return;
+    };
+    let ix = delegate
+        .rows
+        .iter()
+        .position(|r| r.id() == RowId::Message(id))
+        .and_then(|ix| delegate.days.path(ix));
+    if ix.is_none() && read < from {
+        return;
+    }
+    delegate.revealing = None;
+    let Some(ix) = ix else {
+        return;
+    };
+    list.set_selected_index(Some(ix), window, cx);
+    list.scroll_to_item(ix, gpui_kit::ScrollStrategy::Center, window, cx);
+    cx.emit(ListEvent::Select(ix));
 }
 
 /// The change behind `removal` ([`MessageList::expect_removal`]), which may take the
@@ -438,6 +497,9 @@ fn load(
                         changed = false;
                     } else {
                         replace_rows(list, rows, window, cx);
+                    }
+                    if !append {
+                        select_revealed(list, read, window, cx);
                     }
                 }
                 Err(e) => window.push_notification(

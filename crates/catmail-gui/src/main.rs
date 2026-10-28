@@ -12,6 +12,7 @@ mod instance;
 mod layout;
 mod login_form;
 mod mailbox;
+mod new_mail;
 mod reader;
 mod resident;
 mod settings;
@@ -126,6 +127,8 @@ fn main() {
 /// app-wide actions.
 fn init_app(preferences: Preferences, cx: &mut App) {
     gpui_kit::init(cx);
+    // Before any window or notification.
+    cx.set_app_identity(new_mail::APP_ID, new_mail::APP_NAME);
     fonts::init(cx);
     cx.set_global(preferences);
     theme::appearance::init(cx);
@@ -180,8 +183,8 @@ impl MainWindow {
         };
         let client = client.clone();
         let mailbox = cx.new(|cx| Mailbox::new(client, window, cx));
-        let place = Resident::adopt(&mailbox, cx);
-        mailbox.update(cx, |mailbox, _| mailbox.reopen_at(place));
+        let reopen = Resident::adopt(&mailbox, cx);
+        mailbox.update(cx, |mailbox, _| mailbox.reopen_at(reopen));
         self.mailbox = Some(mailbox);
         self.following_engine = None;
         cx.notify();
