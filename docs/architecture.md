@@ -169,7 +169,7 @@ UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UI
 | [存储](architecture/storage.md) | SQLite 约定、计数、跨账户约束、全文搜索、BlobStore 与 GC、凭据 |
 | [CLI](architecture/cli.md) | 命令的代码结构、`--json` 的结构与版本、退出码、添加账户前的登录检查、不覆盖文件 |
 | [GUI](architecture/gui.md) | 视图结构、事件刷新、读信与写信窗口、发件箱、主题与设置、HTML 渲染与图片策略、已知问题 |
-| [后台运行](architecture/background.md) | 关窗后常驻、单实例与唤起；睡眠唤醒、新邮件通知、托盘、开机启动（设计中） |
+| [后台运行](architecture/background.md) | 关窗后常驻、单实例与唤起、睡眠唤醒、新邮件事件；通知、托盘、开机启动（设计中） |
 | [测试](architecture/testing.md) | 假 IMAP / SMTP 服务器、真实 Dovecot 与 mailpit、GUI 测试 |
 
 ## 数据目录

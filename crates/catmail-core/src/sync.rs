@@ -247,7 +247,7 @@ pub(crate) async fn run(
         );
         permit.run(finished).await?;
     }
-    engine.set_synced(account_id);
+    engine.set_synced(account_id, start);
     Ok(report)
 }
 
@@ -443,7 +443,12 @@ async fn arrivals(
         Some(report) => report,
         None => &mut scratch,
     };
-    let complete = fetch_new(engine, session, account, id, &new, unit.items(), report).await?;
+    let fetch = Fetch {
+        uids: &new,
+        items: unit.items(),
+        arrived_from: Some(uidnext),
+    };
+    let complete = fetch_new(engine, session, account, id, fetch, report).await?;
     unit.complete &= complete;
     if complete {
         // Flags stay as of the last look at them.
@@ -603,6 +608,7 @@ async fn sync_folder(
     // On Gmail labels show messages of the location, and Starred the flagged ones.
     let changed =
         |labels: Vec<FolderId>| emit_changed(engine, account, [id].into_iter().chain(labels));
+    let began = Instant::now();
     let status = session.examine(&folder.remote_name).await?;
 
     let (mut uidnext, mut modseq) = (folder.uidnext, folder.highest_modseq);
@@ -674,7 +680,14 @@ async fn sync_folder(
         }
     }
 
-    let complete = fetch_new(engine, session, account, id, &new, items, report).await?;
+    // What arrived since the last complete sync is new mail; not after a new UIDVALIDITY
+    // or without a cursor (the first sync, say), when every message would be.
+    let fetch = Fetch {
+        uids: &new,
+        items,
+        arrived_from: uidnext,
+    };
+    let complete = fetch_new(engine, session, account, id, fetch, report).await?;
 
     // The cursor promises that everything below it is stored; with a gap, leave the old
     // one so the next sync diffs in full.
@@ -685,13 +698,22 @@ async fn sync_folder(
             .write(move |db| db.folders().set_synced(id, uidnext, modseq, all_flags))
             .await?;
         if all_flags {
-            engine.set_folder_synced(account, id);
+            engine.set_folder_synced(account, id, began);
         }
     }
     Ok(())
 }
 
-/// Fetches the messages at `new` in location `id`, which is selected, adding them to
+/// Messages for [`fetch_new`] to fetch.
+struct Fetch<'a> {
+    uids: &'a [u32],
+    items: Items,
+    /// The location's UIDNEXT before they arrived, if known: those at or above it that
+    /// are stored are announced as new mail.
+    arrived_from: Option<u32>,
+}
+
+/// Fetches the messages the [`Fetch`] names in location `id`, which is selected, adding them to
 /// `report`: newest first, in batches, so the top of the list fills in before the
 /// backlog. False if some weren't stored: expunged since the SEARCH, in a response that
 /// couldn't be parsed, or on Gmail held for a local move.
@@ -700,12 +722,15 @@ async fn fetch_new(
     session: &mut Session,
     account: AccountId,
     id: FolderId,
-    new: &[u32],
-    items: Items,
+    Fetch {
+        uids,
+        items,
+        arrived_from,
+    }: Fetch<'_>,
     report: &mut FolderSyncReport,
 ) -> Result<bool> {
     let mut complete = true;
-    for batch in new.rchunks(engine.tuning.fetch_batch) {
+    for batch in uids.rchunks(engine.tuning.fetch_batch) {
         let fetched: Vec<NewMessage> = session
             .fetch_summaries(batch, items)
             .await?
@@ -713,18 +738,32 @@ async fn fetch_new(
             .map(new_message)
             .collect();
         complete &= fetched.len() == batch.len();
-        let (upserted, mut touched) = engine
+        let (upserted, mut touched, new_mail) = engine
             .write(move |db| {
                 let messages = db.messages();
                 let upserted = messages.upsert(account, id, &fetched)?;
-                Ok((upserted, messages.touched_labels()))
+                // Only rows inserted: one that moved here (on Gmail) was stored before.
+                let mut new_mail = Vec::new();
+                if let Some(from) = arrived_from
+                    && !upserted.added.is_empty()
+                    && let Some((inbox, _)) = db.folders().by_role(account, FolderRole::Inbox)?
+                {
+                    new_mail = messages.new_mail(&upserted.added, from, inbox)?;
+                }
+                Ok((upserted, messages.touched_labels(), new_mail))
             })
             .await?;
         complete &= upserted.held == 0;
-        report.added += (upserted.added + upserted.moved) as u32;
+        report.added += (upserted.added.len() + upserted.moved) as u32;
         // On Gmail, the labels showing them and the locations they moved from.
         touched.extend(upserted.moved_from);
         emit_changed(engine, account, [id].into_iter().chain(touched));
+        if !new_mail.is_empty() {
+            engine.emit(Event::NewMail {
+                account,
+                messages: new_mail,
+            });
+        }
     }
     Ok(complete)
 }

@@ -55,6 +55,18 @@ pub fn drain(events: &mut tokio::sync::broadcast::Receiver<Event>) -> Vec<Event>
     std::iter::from_fn(|| events.try_recv().ok()).collect()
 }
 
+/// The messages each `NewMail` among `events` announced.
+#[allow(dead_code)]
+pub fn new_mail(events: Vec<Event>) -> Vec<Vec<MessageId>> {
+    events
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::NewMail { messages, .. } => Some(messages),
+            _ => None,
+        })
+        .collect()
+}
+
 /// [`env`], synced once.
 #[allow(dead_code)]
 pub async fn synced_env(state: ServerState) -> Env {

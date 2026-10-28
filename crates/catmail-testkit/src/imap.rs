@@ -417,6 +417,8 @@ pub struct ServerState {
     body_fetches: usize,
     /// Connections numbered up to this one are closed at their next command.
     dropped_through: usize,
+    /// Connections numbered up to this one answer nothing more, and stay open.
+    silenced_through: usize,
 }
 
 impl ServerState {
@@ -434,6 +436,7 @@ impl ServerState {
             header_fetches: 0,
             body_fetches: 0,
             dropped_through: 0,
+            silenced_through: 0,
         }
     }
 
@@ -611,6 +614,13 @@ impl ServerState {
         self.dropped_through = self.connections;
     }
 
+    /// Stops answering on every connection open now, IDLEs included, without closing
+    /// them: as with connections that died while the computer slept, which the client
+    /// only finds out about by timing out.
+    pub fn silence_open_connections(&mut self) {
+        self.silenced_through = self.connections;
+    }
+
     pub fn inbox(&mut self) -> &mut FakeMailbox {
         self.mailbox_mut("INBOX")
     }
@@ -619,6 +629,12 @@ impl ServerState {
     /// held at `fetch_gate` included.
     pub fn header_fetches(&self) -> usize {
         self.header_fetches
+    }
+
+    /// Likewise for body FETCHes, as `drop_on_body_fetch` counts them, those held at
+    /// `body_fetch_gate` included.
+    pub fn body_fetches(&self) -> usize {
+        self.body_fetches
     }
 
     /// How many commands the server received that start with `prefix` (`IDLE`, `LIST`).
@@ -1059,8 +1075,15 @@ async fn handle(
     let line = String::from_utf8_lossy(raw).into_owned();
     let (tag, rest) = line.split_once(' ').unwrap_or((&line, ""));
     let tag = tag.to_owned();
-    if session.id <= lock(state).dropped_through {
+    let (dropped, silenced) = {
+        let st = lock(state);
+        (st.dropped_through, st.silenced_through)
+    };
+    if session.id <= dropped {
         return Ok(Next::Close);
+    }
+    if session.id <= silenced {
+        return silent(io).await;
     }
     {
         let mut st = lock(state);
@@ -1493,6 +1516,9 @@ async fn idle(
         io.get_mut().flush().await?;
     }
     loop {
+        if session.id <= lock(state).silenced_through {
+            return silent(io).await;
+        }
         let (out, next) = {
             let mut st = lock(state);
             st.refresh_labels();
@@ -1536,6 +1562,17 @@ async fn idle(
             }
             () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
         }
+    }
+}
+
+/// Reads and ignores whatever comes until the client closes the connection.
+async fn silent(io: &mut BufReader<Box<dyn Stream>>) -> std::io::Result<Next> {
+    loop {
+        let read = io.fill_buf().await?.len();
+        if read == 0 {
+            return Ok(Next::Close);
+        }
+        io.consume(read);
     }
 }
 

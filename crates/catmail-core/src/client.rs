@@ -285,6 +285,14 @@ impl MailClient {
         self.engine.status(id)
     }
 
+    /// Tells the engine the computer just woke from sleep: it starts over on new
+    /// connections and syncs and sends what is due at once, rather than once its timers,
+    /// which didn't count the sleep, run out. Not for an account whose server rejected
+    /// the login.
+    pub fn resume(&self) {
+        self.engine.resume();
+    }
+
     /// Change notifications. Receivers that fall behind get `RecvError::Lagged` and
     /// should refresh whatever they display.
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {

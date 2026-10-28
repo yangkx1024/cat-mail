@@ -498,6 +498,28 @@ async fn retries_on_a_new_connection_when_every_idle_one_died() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_connection_from_before_a_sleep_is_not_kept() {
+    let env = env(state(&[NEWSLETTER, NEWSLETTER])).await;
+    let (first, second) = (env.id(0).await, env.id(1).await);
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    env.fake.state().faults.body_fetch_gate = Some(gate.clone());
+    let download = tokio::spawn({
+        let client = env.client.clone();
+        async move { client.download_message(first).await }
+    });
+    env.fake.wait_until(|st| st.body_fetches() > 0).await;
+
+    // The computer slept and woke meanwhile; the connection happened to outlive it.
+    env.client.resume();
+    gate.add_permits(1);
+    download.await.unwrap().unwrap();
+    let connections = env.fake.state().connections;
+    env.fake.state().faults.body_fetch_gate = None;
+    env.client.download_message(second).await.unwrap();
+    assert_eq!(env.fake.state().connections, connections + 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn reconnects_when_an_idle_connection_died() {
     let env = env(state(&[NEWSLETTER, NEWSLETTER])).await;
     env.client.download_message(env.id(0).await).await.unwrap();

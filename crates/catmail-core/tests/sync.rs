@@ -7,7 +7,7 @@ use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 
 mod common;
 
-use common::{Env, drain, env, env_added, env_built, folder_report};
+use common::{Env, drain, env, env_added, env_built, folder_report, new_mail};
 
 fn state_with(inbox_subjects: &[&str]) -> ServerState {
     let mut state = ServerState::new("alice", "pw");
@@ -138,6 +138,42 @@ async fn incremental_sync_applies_new_changed_and_vanished() {
     );
     let folder = env.folder("INBOX").await;
     assert_eq!((folder.unread_count, folder.total_count), (2, 3));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn new_mail_is_what_arrives_in_inbox_unread() {
+    let mut state = state_with(&["one"]);
+    state.mailboxes.push(FakeMailbox::new("Archive"));
+    let env = env(state).await;
+    let mut events = env.client.subscribe();
+    env.sync().await;
+    assert!(
+        new_mail(drain(&mut events)).is_empty(),
+        "not the first sync"
+    );
+
+    {
+        let mut st = env.fake.state();
+        st.inbox().append_simple("two");
+        let read = st.inbox().append_simple("read");
+        st.inbox().set_flags(read, &["\\Seen"]);
+        st.mailbox_mut("Archive").append_simple("elsewhere");
+    }
+    env.sync().await;
+    let two = env.id_of("INBOX", "two").await;
+    assert_eq!(new_mail(drain(&mut events)), [vec![two]]);
+    env.sync().await;
+    assert!(new_mail(drain(&mut events)).is_empty(), "announced once");
+
+    // Every message of a new UIDVALIDITY is new to the engine, not to the user.
+    {
+        let mut st = env.fake.state();
+        st.inbox().append_simple("three");
+        st.inbox().reset_uidvalidity(99);
+    }
+    env.sync().await;
+    assert_eq!(env.subjects("INBOX").await.len(), 4);
+    assert!(new_mail(drain(&mut events)).is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -816,7 +852,7 @@ async fn a_skipped_folder_sync_leaves_the_account_status_alone() {
         .await;
     assert_eq!(skipped.unwrap(), None);
     let problem = env.client.account_status(env.account).sync;
-    assert!(problem.is_some_and(|p| p.error.kind == ErrorKind::Auth));
+    assert!(problem.is_some_and(|p| p.login_rejected()));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -935,4 +971,21 @@ async fn a_clock_set_back_doesnt_make_an_opened_folder_look_fresh() {
         .unwrap()
         .expect("synced");
     assert_eq!(report.added, 1, "{report:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn after_resuming_an_opened_folder_is_synced_again() {
+    let mut state = state_with(&["one"]);
+    state.mailboxes.push(FakeMailbox::new("Archive"));
+    let env = env(state).await;
+    env.sync().await;
+    let archive = env.folder("Archive").await.id;
+    let fresh = Duration::from_secs(3600);
+    assert_eq!(env.client.sync_folder(archive, fresh).await.unwrap(), None);
+
+    // The time since it was synced, by the clock that didn't count the sleep, says
+    // nothing of how old it is.
+    env.client.resume();
+    let report = env.client.sync_folder(archive, fresh).await.unwrap();
+    assert!(report.is_some(), "synced");
 }

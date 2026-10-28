@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{AccountId, FolderId, OutboxId};
+use crate::{AccountId, FolderId, MessageId, OutboxId};
 
 /// Change notifications broadcast by the engine. Frontends subscribe and re-query the
 /// affected data instead of receiving full payloads, so a lagging subscriber can always
@@ -34,6 +34,15 @@ pub enum Event {
     MessagesChanged {
         account: AccountId,
         folder: FolderId,
+    },
+    /// Mail arrived in the account's INBOX, unread: messages the server got since the
+    /// last sync, not older ones fetched late. Sent along with `MessagesChanged`, after
+    /// the messages are stored; none for a folder synced for the first time or since
+    /// its UIDVALIDITY changed. They may have been read or moved since: look them up
+    /// before telling the user.
+    NewMail {
+        account: AccountId,
+        messages: Vec<MessageId>,
     },
     /// Drafts were created, changed, queued for sending or deleted.
     DraftsChanged {

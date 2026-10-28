@@ -2,11 +2,13 @@
 //! server: IDLE on INBOX, polling without it, the full sync schedule, queued changes
 //! made at once, reconnecting, and stopping with the account or the client.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use catmail_core::{Config, ErrorKind, Event, Flags, MailClient, SyncReport, SyncSchedule, Verify};
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 use tokio::runtime::Handle;
+use tokio::sync::Semaphore;
 
 mod common;
 
@@ -248,6 +250,105 @@ async fn reconnects_when_the_connection_drops() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn resuming_starts_over_on_a_new_connection() {
+    let env = watching(state(), schedule(HOUR, HOUR)).await;
+    env.wait_for_idle(1).await;
+    // Dead after a sleep: DONE would never be answered.
+    env.fake.state().silence_open_connections();
+    let connections = env.fake.state().connections;
+
+    env.client.resume();
+    env.wait_for_idle(2).await;
+    {
+        let st = env.fake.state();
+        assert_eq!(st.connections, connections + 1);
+        assert_eq!(st.received("LIST"), 2, "every folder synced again");
+    }
+    env.fake.wait_until(|st| st.open_connections == 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_sync_begun_before_the_sleep_is_made_again_after_resuming() {
+    let mut state = state();
+    // Polling: the wait after the sync takes the signal at once.
+    state.faults.idle = false;
+    let gate = Arc::new(Semaphore::new(0));
+    state.faults.fetch_gate = Some(gate.clone());
+    let env = watching(state, schedule(HOUR, HOUR)).await;
+    env.fake.wait_until(|st| st.header_fetches() > 0).await;
+    let connections = env.fake.state().connections;
+
+    // The connection outlived a short sleep, and the sync goes on to complete.
+    env.client.resume();
+    gate.add_permits(Semaphore::MAX_PERMITS);
+    env.fake.wait_until(|st| st.connections > connections).await;
+    // A few polls on the new connection, after whatever its first step synced.
+    let examined = env.fake.state().received("EXAMINE");
+    env.fake
+        .wait_until(|st| st.received("EXAMINE") >= examined + 3)
+        .await;
+    assert_eq!(
+        env.fake.state().received("LIST"),
+        2,
+        "every folder synced again"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connection_made_after_resuming_is_kept() {
+    let env = watching(state(), schedule(HOUR, HOUR)).await;
+    env.wait_for_idle(1).await;
+    let gate = Arc::new(Semaphore::new(0));
+    let (connections, fetches) = {
+        let mut st = env.fake.state();
+        st.faults.fetch_gate = Some(gate.clone());
+        st.inbox().append_simple("three");
+        (st.connections, st.header_fetches())
+    };
+    env.fake
+        .wait_until(|st| st.header_fetches() > fetches)
+        .await;
+
+    // The step under way finds its connection dead after the sleep, and goes on on a
+    // new one.
+    env.client.resume();
+    {
+        let mut st = env.fake.state();
+        st.faults.fetch_gate = None;
+        st.drop_open_connections();
+    }
+    gate.add_permits(Semaphore::MAX_PERMITS);
+    env.wait_for_idle(2).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(env.fake.state().connections, connections + 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wake_while_the_login_is_rejected_waits_too() {
+    let mut state = state();
+    state.faults.reject_login = true;
+    state.faults.slow = Some(("LOGIN".into(), Duration::from_millis(200)));
+    let env = watching(state, schedule(HOUR, HOUR)).await;
+    env.fake.wait_until(|st| st.received("LOGIN") >= 1).await;
+
+    // Before the rejection is known: kept for when background sync next waits.
+    env.client
+        .create_draft(env.account, None, Default::default(), Vec::new())
+        .await
+        .unwrap();
+    env.client.resume();
+    eventually("the failure to be reported", async || {
+        env.client
+            .account_status(env.account)
+            .sync
+            .is_some_and(|p| p.login_rejected())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(env.fake.state().received("LOGIN"), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn backs_off_when_idle_keeps_dropping() {
     let mut state = state();
     state.faults.drop_on_idle = true;
@@ -301,7 +402,7 @@ async fn tries_again_after_a_failure() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_rejected_login_is_reported_and_not_retried_for_each_change() {
+async fn a_rejected_login_is_reported_and_not_retried_for_each_change_or_a_wake() {
     let mut state = state();
     state.faults.reject_login = true;
     let env = watching(state, schedule(HOUR, HOUR)).await;
@@ -311,12 +412,12 @@ async fn a_rejected_login_is_reported_and_not_retried_for_each_change() {
         env.client
             .account_status(env.account)
             .sync
-            .is_some_and(|p| p.error.kind == ErrorKind::Auth)
+            .is_some_and(|p| p.login_rejected())
     })
     .await;
 
-    // Each change wakes background sync, which would log in again: servers lock
-    // accounts that fail too many logins.
+    // Each change wakes background sync, which would log in again, as would waking from
+    // sleep: servers lock accounts that fail too many logins.
     for i in 0..5 {
         env.client
             .create_draft(env.account, None, Default::default(), Vec::new())
@@ -324,6 +425,7 @@ async fn a_rejected_login_is_reported_and_not_retried_for_each_change() {
             .unwrap();
         tokio::time::sleep(Duration::from_millis(20 * i)).await;
     }
+    env.client.resume();
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(env.fake.state().received("LOGIN"), 1);
 

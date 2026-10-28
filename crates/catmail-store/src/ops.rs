@@ -1644,7 +1644,7 @@ mod tests {
         assert_eq!(
             f.write(|db| db.messages().upsert(f.account, f.inbox, &again))
                 .added,
-            0
+            []
         );
         assert_eq!(f.row(m1).unwrap().2, Flags::FLAGGED);
         assert_eq!(f.row(m2).unwrap().2, Flags::SEEN | Flags::FLAGGED);
@@ -1733,7 +1733,7 @@ mod tests {
         assert_eq!(
             f.write(|db| db.messages().upsert(f.account, f.inbox, &[again]))
                 .added,
-            0
+            []
         );
         let states = f
             .store

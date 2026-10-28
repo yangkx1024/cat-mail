@@ -1028,23 +1028,40 @@ async fn background_sending_needs_no_flush() {
     assert_eq!(env.sent_folder().len(), 1);
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_clock_set_back_doesnt_hold_up_a_retry() {
+/// Sending in the background, a message queued and postponed after the server was busy,
+/// and the events from before it was queued.
+async fn postponed_retry() -> (Env, tokio::sync::broadcast::Receiver<Event>, OutboxEntry) {
     let mut smtp = SmtpState::new("alice", "pw");
     smtp.faults.busy = 1;
     let env = env_with(state(), smtp, true).await;
-    let mut events = env.client.subscribe();
+    let events = env.client.subscribe();
     let busy = env.queue("busy").await;
     eventually("the first attempt", async || {
         let entry = &env.outbox().await[0];
         (entry.status, entry.attempts) == (OutboxStatus::Queued, 1)
     })
     .await;
+    (env, events, busy)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clock_set_back_doesnt_hold_up_a_retry() {
+    let (env, mut events, busy) = postponed_retry().await;
     // Postponed before the clock was set back a day: due in what is now the future.
     env.sql("UPDATE outbox SET next_attempt_at = next_attempt_at + 86400");
 
     // Wakes the worker before the retry's half a minute is up.
     env.queue("later").await;
+    wait_for_sent(&mut events, busy.id).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_due_after_a_sleep_is_made_on_resuming() {
+    let (env, mut events, busy) = postponed_retry().await;
+    // The computer slept past the retry; the worker's timer didn't count the sleep.
+    env.sql("UPDATE outbox SET next_attempt_at = 0");
+
+    env.client.resume();
     wait_for_sent(&mut events, busy.id).await;
 }
 

@@ -645,6 +645,7 @@ pub(crate) enum JsonEvent {
     AccountChanged { account: i64 },
     FoldersChanged { account: i64 },
     MessagesChanged { account: i64, folder: i64 },
+    NewMail { account: i64, messages: Vec<i64> },
     DraftsChanged { account: i64 },
     OutboxChanged { account: i64 },
     PendingOpsChanged { account: i64 },
@@ -665,6 +666,13 @@ impl From<&Event> for JsonEvent {
             Event::MessagesChanged { account, folder } => Self::MessagesChanged {
                 account: account.0,
                 folder: folder.0,
+            },
+            Event::NewMail {
+                account,
+                ref messages,
+            } => Self::NewMail {
+                account: account.0,
+                messages: messages.iter().map(|m| m.0).collect(),
             },
             Event::DraftsChanged { account } => Self::DraftsChanged { account: account.0 },
             Event::OutboxChanged { account } => Self::OutboxChanged { account: account.0 },
@@ -951,6 +959,14 @@ mod tests {
         assert_eq!(
             document(&JsonEvent::from(&sent)),
             json!({"schema_version": 1, "event": "message_sent", "account": 1, "outbox": 2})
+        );
+        let new_mail = Event::NewMail {
+            account: AccountId(1),
+            messages: vec![MessageId(3), MessageId(4)],
+        };
+        assert_eq!(
+            document(&JsonEvent::from(&new_mail)),
+            json!({"schema_version": 1, "event": "new_mail", "account": 1, "messages": [3, 4]})
         );
     }
 }
