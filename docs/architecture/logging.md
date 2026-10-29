@@ -62,7 +62,10 @@ INFO catmail_core::logging: running on os="NixOS 26.11 (Zokor)" kernel="7.2.11-z
   以及原有的各种 warn。每次 INBOX 同步不记，太频繁。
 - 连接问题的出现、变化和恢复（`Engine::report`）：只在前端显示的账户状态变化时记一行，不是每次尝试都记。
   "服务器又能连上了"也在这里记。用户报告的往往就是他们看到的这个状态。
-- GUI：主窗口开关、显示连接的切换、trim 前后的 RSS（见[后台运行](background.md#引擎属于应用不属于窗口)）。
+- 按需从服务器取东西（`body::on_server`，正文和附件都走这里）：拿到连接、EXAMINE、FETCH 各用了多久。打开一封
+  没下载的邮件慢时，靠它看出慢在哪一步。
+- GUI：读信区打开一封邮件，下载和准备正文各用了多久；主窗口开关、显示连接的切换、trim 前后的 RSS
+  （见[后台运行](background.md#引擎属于应用不属于窗口)）。
 - panic 连同 backtrace 直接写进文件，不经过 `tracing`，以免 `tracing` 自己 panic 时又回到这里。
 
 不记密码和邮件内容。错误信息会引用服务器的原话，账户相关的问题里可能出现邮箱地址，所以文件和目录与

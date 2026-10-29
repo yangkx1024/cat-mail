@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use catmail_proto::imap::{self, Session};
 use catmail_proto::mime::{self, Content};
@@ -151,10 +152,19 @@ async fn on_server<T>(
     let mut cancellation = engine.cancellation(location.account);
     let account = location.account;
     let owned = engine.clone();
+    let began = Instant::now();
     tokio::select! {
         result = with_session(engine, account, async move |session| {
+            // What the user waits for when a message opens: a connection (a new one
+            // logs in, which is logged too), opening the folder, then the fetch.
+            let connected = began.elapsed();
+            let examined = Instant::now();
             examine(session, &location).await?;
-            if let Some(done) = op(session, &location).await? {
+            let (examine, fetched) = (examined.elapsed(), Instant::now());
+            let done = op(session, &location).await?;
+            tracing::info!(%account, folder = %location.remote_name, uid = location.uid,
+                ?connected, ?examine, fetch = ?fetched.elapsed(), "fetched from the server");
+            if let Some(done) = done {
                 return Ok(done);
             }
             // Not just a part the server left out of its answer.
