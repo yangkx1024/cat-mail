@@ -36,7 +36,7 @@ pass everywhere: put
 platform-specific code behind `cfg`, and don't assume Unix paths or file semantics in
 code or tests. `nix.yml` checks `flake.nix` formatting (`nix fmt`) and the dev shell. `audit.yml` runs
 `cargo deny` against `deny.toml` (advisories, license allowlist, banned TLS/crypto crates,
-crates.io only) on pull requests, `main` and weekly; an advisory that doesn't affect us is
+crates.io and the git repositories listed one by one) on pull requests, `main` and weekly; an advisory that doesn't affect us is
 ignored there with a reason, never by loosening the check.
 
 ## Crates and layering

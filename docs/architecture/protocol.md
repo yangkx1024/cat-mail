@@ -14,8 +14,8 @@ SMTP 客户端见[草稿与发信](sending.md#smtp-客户端)。
 **暂时依赖 imap-proto 的 main。** 0.17.0 不还原带引号字符串里的转义（`"\\Inbox"` 解析出来是
 `\\Inbox`），而解析出来的值看不出原来是带引号的字符串还是 literal，在我们这边没法可靠地补。修复
 （djc/imap-proto#209）在未发版的 0.18.0 里，所以工作区用 `[patch.crates-io]` 固定到 main 的一个 commit。
-`cargo deny` 不接受 git 来源，0.18.0 发版、换成 crates.io 的版本之前 audit 的 sources 检查会失败；项目
-未发布，先接受这一点。
+`cargo deny` 只接受 crates.io 和 `deny.toml` 的 `allow-git` 里列出的 git 仓库，imap-proto 的仓库列在那里；
+0.18.0 发版、换成 crates.io 的版本时一起删掉（#130）。
 
 为什么不用原来的 imap-next / imap-codec：
 
