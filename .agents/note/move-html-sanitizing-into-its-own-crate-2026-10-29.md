@@ -5,7 +5,7 @@
 
 ## 背景
 
-HTML 清洗、样式表重写（`css.rs`）、`color_usage`、图片相关的处理和刚加的深色配色（`dark.rs`、
+HTML 清洗、样式表重写（`css.rs`）、图片相关的处理和刚加的深色配色（`dark.rs`、
 `recolor_html`）都放在 `catmail-proto` 的 `mime/` 下。proto 自己只用到 `sanitize_html`（解析正文时
 清洗）和 `content_id_from_url`，其余都只给 GUI 用，经 core 转出去；`DarkPalette` 这种纯展示类型也就
 出现在协议层的公开 API 里，proto 的职责（IMAP / SMTP / MIME 适配）越来越模糊。

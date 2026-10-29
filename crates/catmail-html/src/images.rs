@@ -10,7 +10,7 @@ use base64::engine::general_purpose::STANDARD;
 use crate::sanitize::{clean, sanitizer};
 
 /// The image URLs in HTML that [`sanitize_html`](crate::sanitize_html) produced, in document order.
-pub fn image_sources(html: &str) -> Vec<String> {
+pub(crate) fn image_sources(html: &str) -> Vec<String> {
     let found = Arc::new(Mutex::new(Vec::new()));
     let sink = found.clone();
     sanitizer(
@@ -78,7 +78,7 @@ pub fn embed_inline_images(html: &str, inline: HashMap<String, InlineImage>) -> 
         })),
         None,
     );
-    clean(&embedding, html, None)
+    clean(&embedding, html)
 }
 
 /// The MIME type as it may appear in a `data:` URL; it comes from the message, so anything

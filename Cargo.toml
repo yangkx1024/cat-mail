@@ -42,6 +42,8 @@ dunce = "1.0.5"
 encoding_rs = "0.8.42"
 # Rewrites message style sheets token by token; the version Stylo (in Blitz) uses.
 cssparser = "0.38.0"
+# Reads CSS colors and converts them to OKLab, for a dark reader; the version Blitz uses.
+color = "0.3.3"
 # Replies from the render threads to the UI's tasks; the version GPUI uses.
 futures-channel = "0.3.34"
 # Runs an outbox pass's SMTP connections side by side within the pass's own task.

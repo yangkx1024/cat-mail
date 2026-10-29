@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use catmail_core::html::{ColorUsage, color_usage, remote_image_urls};
+use catmail_core::html::remote_image_urls;
 use catmail_core::{Attachment, Message, MessageId};
 use gpui_kit::SharedString;
 
@@ -30,8 +30,6 @@ pub(super) struct OpenMessage {
     pub(super) text: Option<SharedString>,
     /// The HTML as sanitized, for the page and the browser.
     pub(super) html: Option<Arc<str>>,
-    /// How the HTML colors itself: whether Blitz may show it dark.
-    pub(super) colors: ColorUsage,
     /// Attachments offered as files, not the inline images.
     pub(super) attachments: Vec<Attachment>,
     pub(super) images: Arc<Images>,
@@ -89,7 +87,6 @@ impl OpenMessage {
             text,
             remote_images: html.as_deref().map(remote_image_urls).unwrap_or_default(),
             loading_remote: false,
-            colors: html.as_deref().map_or(ColorUsage::Unset, color_usage),
             html,
             attachments,
             images: Arc::default(),

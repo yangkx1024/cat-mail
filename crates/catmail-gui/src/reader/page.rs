@@ -11,8 +11,8 @@
 //! goes blank or shows strips of two layouts at once.
 //!
 //! In a dark theme the page is dark too ([`Look`]): a message with dark styles of its own
-//! uses them, one colored for a white page has its colors moved for a dark one
-//! (`recolor_html`), as Gmail shows it.
+//! uses them, the colors of any other are moved for a dark page (`recolor_html`), as Gmail
+//! shows mail written for white.
 //!
 //! The page zooms with the window's text size, as a browser page zooms: everything on it,
 //! since most mail sets its own font sizes in pixels.
@@ -30,7 +30,7 @@ use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::Duration;
 
-use catmail_core::html::{ColorUsage, DarkPalette, recolor_html};
+use catmail_core::html::{DarkPalette, recolor_html};
 use catmail_render::{
     Appearance, Document, Engine, Hit, Recolor, Rect, Resolver, SelectionEnd, Source, Span,
     Stopped, Tile, Unit,
@@ -78,23 +78,20 @@ struct Look {
     background: Hsla,
     foreground: Hsla,
     link: Hsla,
-    /// The message colors itself for a white page: its colors are moved to the theme's.
-    recolor: bool,
 }
 
 impl Look {
     /// The theme's, in a dark theme; `None` for a browser's light page.
-    fn of(colors: ColorUsage, theme: &Theme) -> Option<Self> {
+    fn of(theme: &Theme) -> Option<Self> {
         theme.is_dark().then(|| Self {
             background: theme.background,
             foreground: theme.foreground,
             link: theme.link,
-            recolor: colors == ColorUsage::Light,
         })
     }
 
     /// For the engine: dark, on the pane's background, the theme's colors under the
-    /// message's own, which are moved toward them if set for white.
+    /// message's own, which are moved toward them.
     fn appearance(self) -> Appearance {
         // `a[href]`: Blitz's own sheet colors links with it, and would win over `a`.
         let sheet = format!(
@@ -109,14 +106,12 @@ impl Look {
             background: [canvas.r, canvas.g, canvas.b],
             foreground: [text.r, text.g, text.b],
         };
-        let recolor: Option<Recolor> = self
-            .recolor
-            .then(|| Arc::new(move |html: &str| recolor_html(html, palette)) as Recolor);
+        let recolor: Recolor = Arc::new(move |html: &str| recolor_html(html, palette));
         Appearance {
             dark: true,
             canvas: palette.background,
             sheet: sheet.into(),
-            recolor,
+            recolor: Some(recolor),
         }
     }
 }
@@ -197,7 +192,6 @@ struct Found {
 pub(super) struct PageView {
     engine: Engine,
     source: Source,
-    colors: ColorUsage,
     opened: Option<Opened>,
     /// The layout shown, and its strips: the document's, or the last one's until the
     /// strips on screen are painted for the next.
@@ -230,7 +224,6 @@ impl PageView {
     pub(super) fn new(
         engine: Engine,
         source: Source,
-        colors: ColorUsage,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -268,7 +261,6 @@ impl PageView {
         Self {
             engine,
             source,
-            colors,
             opened: None,
             layout: None,
             layouts: 0,
@@ -366,7 +358,7 @@ impl PageView {
         self.bounds = bounds;
         let scale = window.scale_factor();
         let zoom = f32::from(window.rem_size()) / BROWSER_TEXT_SIZE;
-        let look = Look::of(self.colors, cx.theme());
+        let look = Look::of(cx.theme());
         let current = self.opened.as_ref().is_some_and(|opened| {
             opened.scale == scale && opened.zoom == zoom && opened.look == look
         });
@@ -999,7 +991,7 @@ mod tests {
                 ..Default::default()
             };
             gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| PageView::new(Engine::Blitz, source, ColorUsage::Unset, window, cx))
+                cx.new(|cx| PageView::new(Engine::Blitz, source, window, cx))
             })
             .unwrap()
         })
@@ -1276,7 +1268,6 @@ mod tests {
             background: gpui_kit::rgb(0x202020).into(),
             foreground: gpui_kit::rgb(0xe0e0e0).into(),
             link: gpui_kit::rgb(0x40a0ff).into(),
-            recolor: true,
         };
         // A link the message leaves alone, and a white cell it colors.
         let html = r##"<body style="margin:0">

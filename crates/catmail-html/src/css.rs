@@ -12,12 +12,11 @@
 //! The same rewriting moves a message's colors for a dark page ([`dark`](crate::dark)),
 //! given a palette: colors in the values of properties that take them.
 
-use cssparser::color::{parse_hash_color, parse_named_color};
 use cssparser::{
     Delimiter, ParseError, Parser, ToCss as _, Token, TokenSerializationType, serialize_identifier,
 };
 
-use super::dark::{DarkPalette, Rgba, Role};
+use crate::dark::{self, Color, DarkPalette, Role};
 
 /// The most of a message's style sheets that is kept, in bytes of output: email sheets
 /// are a few kilobytes, a sheet much larger is built to be slow.
@@ -40,18 +39,13 @@ const FETCHING: &[&str] = &[
     "paint",
 ];
 
-/// Properties that color text or its background.
-const COLORS: &[&str] = &["color", "background", "background-color"];
-
-/// A message's style sheets as kept, and what they say about its colors.
+/// A message's style sheets as kept, and whether they adapt to a dark page.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct Stylesheet {
     pub(super) css: String,
     /// It has styles of its own for a dark appearance: `prefers-color-scheme: dark`, or
     /// `color-scheme` naming `dark`.
     pub(super) adapts_to_dark: bool,
-    /// It colors text or backgrounds, outside its dark styles.
-    pub(super) sets_colors: bool,
 }
 
 /// A `<style>` element of a message: its text, and its `media` attribute.
@@ -75,7 +69,6 @@ pub(super) fn sanitize(elements: &[Element], recolor: Option<DarkPalette>) -> St
     Stylesheet {
         css: sheet.out.replace('<', "\\3c "),
         adapts_to_dark: sheet.dark,
-        sets_colors: sheet.colors,
     }
 }
 
@@ -125,14 +118,6 @@ fn is_fetching(token: &Token<'_>) -> bool {
     }
 }
 
-/// Whether a `style` attribute colors text or its background.
-pub(super) fn sets_colors(style: &str) -> bool {
-    let mut parser = Parser::new(style);
-    let mut declarations = Declarations::default();
-    declarations.parse(&mut parser);
-    declarations.colors
-}
-
 /// A `style` attribute with its colors moved for a dark page.
 pub(super) fn recolor_style(style: &str, palette: DarkPalette) -> String {
     let mut declarations = Declarations {
@@ -149,7 +134,6 @@ struct Sheet {
     budget: usize,
     rules: usize,
     dark: bool,
-    colors: bool,
     recolor: Option<DarkPalette>,
 }
 
@@ -160,7 +144,6 @@ impl Sheet {
             budget,
             rules: 0,
             dark: false,
-            colors: false,
             recolor,
         }
     }
@@ -174,7 +157,7 @@ impl Sheet {
     fn element(&mut self, element: &Element) {
         let mut rules = Parser::new(&element.css);
         let Some(media) = element.media.as_deref().filter(|m| !m.trim().is_empty()) else {
-            self.rules(&mut rules, 0, false);
+            self.rules(&mut rules, 0);
             return;
         };
         let mut query = Parser::new(media);
@@ -187,25 +170,25 @@ impl Sheet {
                 return;
             }
         }
-        self.conditional("media", &prelude.text, 0, false, &mut rules);
+        self.conditional("media", &prelude.text, 0, &mut rules);
     }
 
-    /// The rules of a sheet or of a conditional block; `dark` inside dark styles.
-    fn rules(&mut self, parser: &mut Parser<'_>, depth: usize, dark: bool) {
+    /// The rules of a sheet or of a conditional block.
+    fn rules(&mut self, parser: &mut Parser<'_>, depth: usize) {
         while !self.full() {
             let Ok(token) = parser.next().cloned() else {
                 return;
             };
             match token {
-                Token::AtKeyword(name) => self.at_rule(parser, &name, depth, dark),
+                Token::AtKeyword(name) => self.at_rule(parser, &name, depth),
                 // Left from hiding sheets from old browsers.
                 Token::CDO | Token::CDC => {}
-                token => self.style_rule(parser, &token, dark),
+                token => self.style_rule(parser, &token),
             }
         }
     }
 
-    fn style_rule<'i>(&mut self, parser: &mut Parser<'i>, first: &Token<'i>, dark: bool) {
+    fn style_rule<'i>(&mut self, parser: &mut Parser<'i>, first: &Token<'i>) {
         let mut selector = Css::default();
         let mut kept = copy(parser, first, &mut selector, Context::Selector).is_ok();
         loop {
@@ -235,10 +218,9 @@ impl Sheet {
         self.out.push_str(&rule);
         self.rules += 1;
         self.dark |= declarations.dark;
-        self.colors |= declarations.colors && !dark;
     }
 
-    fn at_rule(&mut self, parser: &mut Parser<'_>, name: &str, depth: usize, dark: bool) {
+    fn at_rule(&mut self, parser: &mut Parser<'_>, name: &str, depth: usize) {
         let conditional =
             name.eq_ignore_ascii_case("media") || name.eq_ignore_ascii_case("supports");
         let mut kept = conditional && depth < MAX_DEPTH;
@@ -263,20 +245,13 @@ impl Sheet {
         }
         let name = name.to_ascii_lowercase();
         let _ = parser.parse_nested_block(|block| {
-            self.conditional(&name, &prelude.text, depth, dark, block);
+            self.conditional(&name, &prelude.text, depth, block);
             Ok::<_, ParseError<()>>(())
         });
     }
 
     /// `@name prelude { … }`, `@media` or `@supports`, with the rules in `block`.
-    fn conditional(
-        &mut self,
-        name: &str,
-        prelude: &str,
-        depth: usize,
-        dark: bool,
-        block: &mut Parser<'_>,
-    ) {
+    fn conditional(&mut self, name: &str, prelude: &str, depth: usize, block: &mut Parser<'_>) {
         let query = prelude.to_ascii_lowercase();
         let dark_query =
             name == "media" && query.contains("prefers-color-scheme") && query.contains("dark");
@@ -284,9 +259,8 @@ impl Sheet {
         let budget = self.budget.saturating_sub(self.out.len() + head.len() + 1);
         let mut inner = Sheet::new(budget, self.recolor);
         inner.rules = self.rules;
-        inner.rules(block, depth + 1, dark || dark_query);
+        inner.rules(block, depth + 1);
         self.rules = inner.rules;
-        self.colors |= inner.colors;
         self.dark |= inner.dark || dark_query;
         if !inner.out.is_empty() {
             self.out.push_str(&head);
@@ -301,7 +275,6 @@ impl Sheet {
 struct Declarations {
     out: String,
     dark: bool,
-    colors: bool,
     recolor: Option<DarkPalette>,
 }
 
@@ -313,7 +286,7 @@ impl Declarations {
                 let name = p.expect_ident()?.clone();
                 p.expect_colon()?;
                 let mut value = Css {
-                    recolor: self.recolor.zip(Role::of(&name)),
+                    recolor: self.recolor.and_then(|p| Some((p, Role::of(&name)?))),
                     ..Css::default()
                 };
                 copy_rest(p, &mut value, Context::Value).map_err(|()| ParseError::custom(()))?;
@@ -325,9 +298,6 @@ impl Declarations {
                 self.out.push(':');
                 self.out.push_str(value);
                 self.out.push(';');
-                if COLORS.iter().any(|c| name.eq_ignore_ascii_case(c)) {
-                    self.colors = true;
-                }
                 if name.eq_ignore_ascii_case("color-scheme")
                     && value.to_ascii_lowercase().contains("dark")
                 {
@@ -367,24 +337,8 @@ impl Css {
         token.to_css(&mut self.text).map_err(|_| ())
     }
 
-    /// `#rrggbb`, or `rgba()` if not opaque.
-    fn color(&mut self, color: Rgba) -> Result<(), ()> {
-        let [r, g, b] = color.rgb;
-        if color.alpha >= 1.0 {
-            return self.push(&Token::Hash(format!("{r:02x}{g:02x}{b:02x}").into()));
-        }
-        let number = |value: f32, int_value| Token::Number {
-            has_sign: false,
-            value,
-            int_value,
-        };
-        self.push(&Token::Function("rgba".into()))?;
-        for channel in [r, g, b] {
-            self.push(&number(f32::from(channel), Some(i32::from(channel))))?;
-            self.push(&Token::Comma)?;
-        }
-        self.push(&number(color.alpha, None))?;
-        self.push(&Token::CloseParenthesis)
+    fn color(&mut self, color: Color) -> Result<(), ()> {
+        self.push(&Token::Hash(dark::hex(color).into()))
     }
 }
 
@@ -443,119 +397,22 @@ fn copy_rest(parser: &mut Parser<'_>, out: &mut Css, context: Context) -> Result
     }
 }
 
-/// A color as mail writes it: a hex color, a name, `rgb()` or `hsl()`. Other notations
-/// (`lab()`, `color-mix()`, …) aren't read, and are left as they are.
-fn parse_color(parser: &mut Parser<'_>) -> Result<Rgba, ParseError<()>> {
-    let invalid = || ParseError::custom(());
-    match parser.next_including_whitespace()?.clone() {
-        Token::Hash(hex) | Token::IDHash(hex) => {
-            let (r, g, b, alpha) = parse_hash_color(hex.as_bytes()).map_err(|()| invalid())?;
-            Ok(Rgba {
-                rgb: [r, g, b],
-                alpha,
-            })
-        }
-        Token::Ident(name) => parse_named_color(&name)
-            .map(|(r, g, b)| Rgba::opaque([r, g, b]))
-            .map_err(|()| invalid()),
-        Token::Function(name) if matches!(&*name.to_ascii_lowercase(), "rgb" | "rgba") => {
-            parser.parse_nested_block(rgb)
-        }
-        Token::Function(name) if matches!(&*name.to_ascii_lowercase(), "hsl" | "hsla") => {
-            parser.parse_nested_block(hsl)
-        }
-        _ => Err(invalid()),
-    }
-}
-
-/// The arguments of `rgb()`: three channels, by commas or spaces, and an alpha.
-fn rgb(parser: &mut Parser<'_>) -> Result<Rgba, ParseError<()>> {
-    let r = channel(parser)?;
-    let legacy = parser.try_parse(|p| p.expect_comma()).is_ok();
-    let g = channel(parser)?;
-    if legacy {
-        parser.expect_comma()?;
-    }
-    let b = channel(parser)?;
-    let alpha = alpha(parser, legacy)?;
-    Ok(Rgba {
-        rgb: [r, g, b],
-        alpha,
-    })
-}
-
-/// The arguments of `hsl()`: a hue, saturation and lightness, and an alpha.
-fn hsl(parser: &mut Parser<'_>) -> Result<Rgba, ParseError<()>> {
-    let degrees = match parser.next()?.clone() {
-        Token::Number { value, .. } => value,
-        Token::Dimension { value, unit, .. } => match &*unit.to_ascii_lowercase() {
-            "deg" => value,
-            "rad" => value.to_degrees(),
-            "grad" => value * 0.9,
-            "turn" => value * 360.0,
-            _ => return Err(ParseError::custom(())),
-        },
+/// A color as CSS writes it, read from its source text: a hex color, a name, or a color
+/// function (`rgb()`, `hsl()`, `oklch()`, …) with its arguments.
+fn parse_color(parser: &mut Parser<'_>) -> Result<Color, ParseError<()>> {
+    let start = parser.position();
+    let function = match parser.next_including_whitespace()? {
+        Token::Hash(_) | Token::IDHash(_) | Token::Ident(_) => false,
+        Token::Function(_) => true,
         _ => return Err(ParseError::custom(())),
     };
-    let legacy = parser.try_parse(|p| p.expect_comma()).is_ok();
-    let saturation = fraction(parser)?;
-    if legacy {
-        parser.expect_comma()?;
+    if function {
+        parser.parse_nested_block(|block| {
+            while block.next().is_ok() {}
+            Ok::<_, ParseError<()>>(())
+        })?;
     }
-    let lightness = fraction(parser)?;
-    let alpha = alpha(parser, legacy)?;
-    // CSS Color 4's conversion.
-    let hue = degrees.rem_euclid(360.0);
-    let chroma = saturation * lightness.min(1.0 - lightness);
-    let channel = |n: f32| {
-        let k = (n + hue / 30.0) % 12.0;
-        let value = lightness - chroma * (k - 3.0).min(9.0 - k).clamp(-1.0, 1.0);
-        (value * 255.0).round().clamp(0.0, 255.0) as u8
-    };
-    Ok(Rgba {
-        rgb: [channel(0.0), channel(8.0), channel(4.0)],
-        alpha,
-    })
-}
-
-/// An `rgb()` channel: 0 to 255, or a percentage.
-fn channel(parser: &mut Parser<'_>) -> Result<u8, ParseError<()>> {
-    let value = match *parser.next()? {
-        Token::Number { value, .. } => value,
-        Token::Percentage { unit_value, .. } => unit_value * 255.0,
-        _ => return Err(ParseError::custom(())),
-    };
-    Ok(value.round().clamp(0.0, 255.0) as u8)
-}
-
-/// A percentage, or a number of percent.
-fn fraction(parser: &mut Parser<'_>) -> Result<f32, ParseError<()>> {
-    let value = match *parser.next()? {
-        Token::Percentage { unit_value, .. } => unit_value,
-        Token::Number { value, .. } => value / 100.0,
-        _ => return Err(ParseError::custom(())),
-    };
-    Ok(value.clamp(0.0, 1.0))
-}
-
-/// The alpha that may end a color function (`, a` in the legacy syntax, `/ a` in the
-/// modern one), and the end of its arguments.
-fn alpha(parser: &mut Parser<'_>, legacy: bool) -> Result<f32, ParseError<()>> {
-    let separated = if legacy {
-        parser.try_parse(|p| p.expect_comma())
-    } else {
-        parser.try_parse(|p| p.expect_delim('/'))
-    };
-    let mut alpha = 1.0;
-    if separated.is_ok() {
-        alpha = match *parser.next()? {
-            Token::Number { value, .. } => value,
-            Token::Percentage { unit_value, .. } => unit_value,
-            _ => return Err(ParseError::custom(())),
-        };
-    }
-    parser.expect_exhausted()?;
-    Ok(alpha.clamp(0.0, 1.0))
+    dark::parse(parser.slice_from(start)).ok_or_else(|| ParseError::custom(()))
 }
 
 #[cfg(test)]
@@ -755,17 +612,10 @@ mod tests {
     }
 
     #[test]
-    fn tells_colors_and_dark_styles_apart() {
-        let plain = sheet(".a{padding:4px;font-size:14px}");
-        assert!(!plain.sets_colors && !plain.adapts_to_dark);
-        let light = sheet(".a{color:#333}");
-        assert!(light.sets_colors && !light.adapts_to_dark);
-        let dark_only = sheet("@media (prefers-color-scheme: dark){.a{color:#eee}}");
-        assert!(!dark_only.sets_colors && dark_only.adapts_to_dark);
+    fn finds_dark_styles() {
+        assert!(!sheet(".a{color:#333}").adapts_to_dark);
+        assert!(sheet("@media (prefers-color-scheme: dark){.a{color:#eee}}").adapts_to_dark);
         assert!(sheet(":root{color-scheme:light dark}").adapts_to_dark);
-
-        assert!(sets_colors("padding:0;background-color:#fff"));
-        assert!(!sets_colors("padding:0;font-weight:bold"));
     }
 
     const PALETTE: DarkPalette = DarkPalette {
@@ -794,7 +644,8 @@ mod tests {
             "rgb(255, 255, 255)",
             "rgb(100% 100% 100%)",
             "hsl(0, 0%, 100%)",
-            "hsl(120deg 0 100)",
+            "hsl(120deg 0% 100%)",
+            "oklch(1 0 0)",
         ] {
             assert_eq!(
                 recolored(&format!(".a{{background-color:{white}}}")),
@@ -804,7 +655,7 @@ mod tests {
         }
         assert_eq!(
             recolored(".a{color:rgba(0,0,0,.5)}.b{color:rgb(0 0 0 / 25%)}"),
-            ".a{color:rgba(224,224,224,0.5);}.b{color:rgba(224,224,224,0.25);}"
+            ".a{color:#e0e0e080;}.b{color:#e0e0e040;}"
         );
         // Inside a value, a gradient, a conditional block; what is around stays.
         assert_eq!(
@@ -824,7 +675,6 @@ mod tests {
             ".a{font-family:Tomato,sans-serif;}",
             ".a{color:currentColor;background:transparent;}",
             ".a{color:inherit;}",
-            ".a{color:lab(50% 0 0);}",
             ".a{color:rgb(0,0,0,0,0);}",
             ".a{color:#12345;}",
             ".a{content:\"#000\";}",

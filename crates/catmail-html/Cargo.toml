@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 ammonia.workspace = true
 base64.workspace = true
+color.workspace = true
 cssparser.workspace = true
 html5ever.workspace = true
 url.workspace = true

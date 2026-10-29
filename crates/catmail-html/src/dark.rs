@@ -13,7 +13,10 @@
 //! them leaves less contrast than the message had. Text is inverted over a shorter range,
 //! toward its end: gray text, readable on white, would otherwise come out dim.
 
-use cssparser::color::{parse_hash_color, parse_named_color};
+use color::{AlphaColor, Oklab, Srgb};
+
+/// A color as CSS has it: sRGB with alpha.
+pub(crate) type Color = AlphaColor<Srgb>;
 
 /// How much of the range from the reader's text to its background text is inverted over.
 const TEXT_RANGE: f32 = 0.6;
@@ -29,7 +32,7 @@ pub struct DarkPalette {
 
 /// What a color is used for, which decides how it moves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Role {
+pub(crate) enum Role {
     /// Text and its decorations: only made lighter.
     Text,
     /// Backgrounds and shadows: only made darker.
@@ -41,7 +44,7 @@ pub(super) enum Role {
 impl Role {
     /// The role of the colors in a CSS property's value, or `None` for a property that
     /// takes none: its identifiers aren't colors (`font-family: Tomato`).
-    pub(super) fn of(property: &str) -> Option<Self> {
+    pub(crate) fn of(property: &str) -> Option<Self> {
         let property = property.to_ascii_lowercase();
         let role = match property.as_str() {
             "color"
@@ -55,8 +58,7 @@ impl Role {
             | "caret-color" => Role::Text,
             "background" | "background-color" | "background-image" | "box-shadow"
             | "text-shadow" => Role::Surface,
-            "outline" | "outline-color" | "column-rule" | "column-rule-color" | "fill"
-            | "stroke" => Role::Line,
+            "outline" | "outline-color" | "column-rule" | "column-rule-color" => Role::Line,
             // Custom properties may hold a color for anything.
             p if p.starts_with("border") || p.starts_with("--") => Role::Line,
             _ => return None,
@@ -65,156 +67,96 @@ impl Role {
     }
 }
 
-/// An sRGB color with its alpha.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) struct Rgba {
-    pub(super) rgb: [u8; 3],
-    pub(super) alpha: f32,
-}
-
-impl Rgba {
-    pub(super) fn opaque(rgb: [u8; 3]) -> Self {
-        Self { rgb, alpha: 1.0 }
-    }
-}
-
 impl DarkPalette {
     /// `color` moved for a dark page, as used for `role`.
-    pub(super) fn recolor(&self, color: Rgba, role: Role) -> Rgba {
-        let lab = Lab::from_srgb(color.rgb);
-        let (background, foreground) = (
-            Lab::from_srgb(self.background),
-            Lab::from_srgb(self.foreground),
-        );
+    pub(crate) fn recolor(&self, color: Color, role: Role) -> Color {
+        let [l, a, b, alpha] = color.convert::<Oklab>().components;
+        let [background, foreground] =
+            [self.background, self.foreground].map(|[r, g, b]| oklab(r, g, b));
         // White to the background and black to the text, grays tinted as the two are;
         // a color keeps its own chroma on top.
         let t = match role {
-            Role::Text => lab.l * TEXT_RANGE,
-            Role::Surface | Role::Line => lab.l,
+            Role::Text => l * TEXT_RANGE,
+            Role::Surface | Role::Line => l,
         };
-        let inverted = Lab {
-            l: foreground.l + t * (background.l - foreground.l),
-            a: lab.a + foreground.a + t * (background.a - foreground.a),
-            b: lab.b + foreground.b + t * (background.b - foreground.b),
-        };
+        let [inverted, tint_a, tint_b] =
+            [0, 1, 2].map(|i| foreground[i] + t * (background[i] - foreground[i]));
         let moved = match role {
-            Role::Text => inverted.l > lab.l,
-            Role::Surface => inverted.l < lab.l,
+            Role::Text => inverted > l,
+            Role::Surface => inverted < l,
             Role::Line => true,
         };
         if !moved {
             return color;
         }
-        Rgba {
-            rgb: inverted.to_srgb(),
-            alpha: color.alpha,
-        }
+        in_gamut(inverted.clamp(0.0, 1.0), a + tint_a, b + tint_b, alpha)
     }
 
     /// A legacy color attribute (`bgcolor`, `<font color>`) moved for a dark page, as
     /// `#rrggbb`; `None` for a value that isn't a color.
-    pub(super) fn recolor_attribute(&self, value: &str, role: Role) -> Option<String> {
-        let rgb = legacy_color(value)?;
-        let [r, g, b] = self.recolor(Rgba::opaque(rgb), role).rgb;
-        Some(format!("#{r:02x}{g:02x}{b:02x}"))
+    pub(crate) fn recolor_attribute(&self, value: &str, role: Role) -> Option<String> {
+        Some(format!(
+            "#{}",
+            hex(self.recolor(legacy_color(value)?, role))
+        ))
+    }
+}
+
+/// A color written in CSS (a hex color, a name, `rgb()`, `hsl()`, `oklch()`, …), unless
+/// it is fully transparent: nothing to move.
+pub(crate) fn parse(css: &str) -> Option<Color> {
+    let color = color::parse_color(css).ok()?.to_alpha_color::<Srgb>();
+    (color.components[3] > 0.0).then_some(color)
+}
+
+/// The digits of `#` notation: `rrggbb`, or `rrggbbaa` if not opaque.
+pub(crate) fn hex(color: Color) -> String {
+    let rgba = color.to_rgba8();
+    let (r, g, b, a) = (rgba.r, rgba.g, rgba.b, rgba.a);
+    if a == 255 {
+        format!("{r:02x}{g:02x}{b:02x}")
+    } else {
+        format!("{r:02x}{g:02x}{b:02x}{a:02x}")
     }
 }
 
 /// A legacy color attribute's value: a color name, or hex digits with or without the
 /// `#` that mail often leaves out. The HTML standard's rules accept more (any text,
 /// digits read in odd ways); a value only they could read is left as it is.
-fn legacy_color(value: &str) -> Option<[u8; 3]> {
+fn legacy_color(value: &str) -> Option<Color> {
     let value = value.trim();
-    if let Ok((r, g, b)) = parse_named_color(value) {
-        return Some([r, g, b]);
-    }
-    let hex = value.strip_prefix('#').unwrap_or(value);
-    if !matches!(hex.len(), 3 | 6) {
-        return None;
-    }
-    let (r, g, b, _) = parse_hash_color(hex.as_bytes()).ok()?;
-    Some([r, g, b])
-}
-
-/// A color in OKLab.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Lab {
-    l: f32,
-    a: f32,
-    b: f32,
-}
-
-impl Lab {
-    fn from_srgb(rgb: [u8; 3]) -> Self {
-        let [r, g, b] = rgb.map(|c| to_linear(f32::from(c) / 255.0));
-        let l = (0.412_221_46 * r + 0.536_332_55 * g + 0.051_445_995 * b).cbrt();
-        let m = (0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b).cbrt();
-        let s = (0.088_302_46 * r + 0.281_718_85 * g + 0.629_978_7 * b).cbrt();
-        Self {
-            l: 0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s,
-            a: 1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s,
-            b: 0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s,
-        }
-    }
-
-    fn to_linear_srgb(self) -> [f32; 3] {
-        let l = (self.l + 0.396_337_78 * self.a + 0.215_803_76 * self.b).powi(3);
-        let m = (self.l - 0.105_561_346 * self.a - 0.063_854_17 * self.b).powi(3);
-        let s = (self.l - 0.089_484_18 * self.a - 1.291_485_5 * self.b).powi(3);
-        [
-            4.076_741_7 * l - 3.307_711_6 * m + 0.230_969_94 * s,
-            -1.268_438 * l + 2.609_757_4 * m - 0.341_319_38 * s,
-            -0.004_196_086_3 * l - 0.703_418_6 * m + 1.707_614_7 * s,
-        ]
-    }
-
-    /// In sRGB, with less chroma if it has more than sRGB can show at its lightness: a
-    /// light pastel made dark would otherwise clip to another hue.
-    fn to_srgb(self) -> [u8; 3] {
-        let l = self.l.clamp(0.0, 1.0);
-        let fits = |k: f32| {
-            let lab = Lab {
-                l,
-                a: self.a * k,
-                b: self.b * k,
-            };
-            lab.to_linear_srgb()
-                .iter()
-                .all(|c| (-1e-4..=1.0 + 1e-4).contains(c))
-        };
-        let mut k = 1.0;
-        if !fits(k) {
-            let (mut lo, mut hi) = (0.0, 1.0);
-            for _ in 0..16 {
-                let mid = (lo + hi) / 2.0;
-                if fits(mid) { lo = mid } else { hi = mid }
-            }
-            k = lo;
-        }
-        let lab = Lab {
-            l,
-            a: self.a * k,
-            b: self.b * k,
-        };
-        lab.to_linear_srgb()
-            .map(|c| (from_linear(c.clamp(0.0, 1.0)) * 255.0).round() as u8)
-    }
-}
-
-fn to_linear(c: f32) -> f32 {
-    if c <= 0.040_45 {
-        c / 12.92
+    let bare_hex = matches!(value.len(), 3 | 6) && value.bytes().all(|b| b.is_ascii_hexdigit());
+    if bare_hex {
+        parse(&format!("#{value}"))
     } else {
-        ((c + 0.055) / 1.055).powf(2.4)
+        parse(value)
     }
 }
 
-fn from_linear(c: f32) -> f32 {
-    if c <= 0.003_130_8 {
-        c * 12.92
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
+fn oklab(r: u8, g: u8, b: u8) -> [f32; 3] {
+    let [l, a, b, _] = Color::from_rgba8(r, g, b, 255)
+        .convert::<Oklab>()
+        .components;
+    [l, a, b]
+}
+
+/// The OKLab color in sRGB, with less chroma if it has more than sRGB can show at its
+/// lightness: a light pastel made dark would otherwise clip to another hue.
+fn in_gamut(l: f32, a: f32, b: f32, alpha: f32) -> Color {
+    let scaled = |k: f32| AlphaColor::<Oklab>::new([l, a * k, b * k, alpha]).convert::<Srgb>();
+    let fits = |k: f32| {
+        let [r, g, b, _] = scaled(k).components;
+        [r, g, b].iter().all(|c| (-1e-4..=1.0 + 1e-4).contains(c))
+    };
+    if fits(1.0) {
+        return scaled(1.0);
     }
+    let (mut lo, mut hi) = (0.0, 1.0);
+    for _ in 0..16 {
+        let mid = (lo + hi) / 2.0;
+        if fits(mid) { lo = mid } else { hi = mid }
+    }
+    scaled(lo)
 }
 
 #[cfg(test)]
@@ -226,16 +168,25 @@ mod tests {
         foreground: [0xe0, 0xe2, 0xe8],
     };
 
-    fn moved(rgb: [u8; 3], role: Role) -> [u8; 3] {
-        PALETTE.recolor(Rgba::opaque(rgb), role).rgb
+    fn opaque([r, g, b]: [u8; 3]) -> Color {
+        Color::from_rgba8(r, g, b, 255)
+    }
+
+    fn rgb(color: Color) -> [u8; 3] {
+        let rgba = color.to_rgba8();
+        [rgba.r, rgba.g, rgba.b]
+    }
+
+    fn moved(color: [u8; 3], role: Role) -> [u8; 3] {
+        rgb(PALETTE.recolor(opaque(color), role))
     }
 
     fn close(a: [u8; 3], b: [u8; 3]) -> bool {
         a.iter().zip(b).all(|(&x, y)| x.abs_diff(y) <= 1)
     }
 
-    fn lightness(rgb: [u8; 3]) -> f32 {
-        Lab::from_srgb(rgb).l
+    fn lightness([r, g, b]: [u8; 3]) -> f32 {
+        oklab(r, g, b)[0]
     }
 
     #[test]
@@ -273,9 +224,9 @@ mod tests {
 
     #[test]
     fn a_color_keeps_its_hue_and_alpha() {
-        let hue = |rgb: [u8; 3]| {
-            let lab = Lab::from_srgb(rgb);
-            lab.b.atan2(lab.a).to_degrees()
+        let hue = |[r, g, b]: [u8; 3]| {
+            let [_, a, b] = oklab(r, g, b);
+            b.atan2(a).to_degrees()
         };
         for rgb in [[0xff, 0x66, 0x00], [0xff, 0xeb, 0x3b], [0x1a, 0x73, 0xe8]] {
             for role in [Role::Text, Role::Surface, Role::Line] {
@@ -286,28 +237,20 @@ mod tests {
                 }
             }
         }
-        let shadow = PALETTE.recolor(
-            Rgba {
-                rgb: [0xff; 3],
-                alpha: 0.25,
-            },
-            Role::Surface,
-        );
-        assert_eq!(shadow.alpha, 0.25);
+        let shadow = PALETTE.recolor(opaque([0xff; 3]).with_alpha(0.25), Role::Surface);
+        assert_eq!(shadow.components[3], 0.25);
     }
 
     #[test]
     fn reads_legacy_color_attributes() {
-        assert_eq!(legacy_color(" #FFF "), Some([255; 3]));
-        assert_eq!(legacy_color("ffffff"), Some([255; 3]));
-        assert_eq!(legacy_color("White"), Some([255; 3]));
-        assert_eq!(legacy_color("#12345"), None);
-        assert_eq!(legacy_color("transparent"), None);
+        let read = |value: &str| legacy_color(value).map(rgb);
+        assert_eq!(read(" #FFF "), Some([255; 3]));
+        assert_eq!(read("ffffff"), Some([255; 3]));
+        assert_eq!(read("White"), Some([255; 3]));
+        assert_eq!(read("#12345"), None);
+        assert_eq!(read("transparent"), None);
         let white = PALETTE.recolor_attribute("#ffffff", Role::Surface).unwrap();
-        assert!(
-            close(legacy_color(&white).unwrap(), PALETTE.background),
-            "{white}"
-        );
+        assert!(close(read(&white).unwrap(), PALETTE.background), "{white}");
         assert_eq!(PALETTE.recolor_attribute("none", Role::Surface), None);
     }
 

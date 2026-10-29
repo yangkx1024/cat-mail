@@ -363,10 +363,10 @@ CSS 引擎）+ Taffy + Parley 排版，vello_cpu 绘制。起初保留 GPUI Kit 
   页面画在 `Appearance::canvas` 上（浅色时是白色，邮件按白底写）。
 - **深色。** 深色主题下正文一律显示成深色：`prefers-color-scheme` 回答 dark，画布是窗口背景色，
   再加一张用户代理样式表给 html 的文字、背景和链接配主题色（在邮件自己的样式之下；链接用
-  `a[href]`，否则 Blitz 自带样式表里同一选择器的 `#0000ee` 会赢）。自带深色样式的正文
-  （`color_usage`：`Adaptive`）用它自己的；为白底设了颜色的（`Light`）像 Gmail 那样转换颜色：
+  `a[href]`，否则 Blitz 自带样式表里同一选择器的 `#0000ee` 会赢）。正文自己的颜色像 Gmail 那样转换：
   `Appearance::recolor` 在文档线程上、Blitz 解析之前对 HTML 跑 `recolor_html`（见
-  [正文](bodies.md)），把样式表、`style`、`bgcolor` / `color` 里的颜色按用途搬到主题色上。图片不变。
+  [正文](bodies.md)），把样式表、`style`、`bgcolor` / `color` 里的颜色按用途搬到主题色上；自带深色
+  样式的正文原样保留，用它自己的。图片不变。
   `PageView` 每帧比较主题的这几种颜色，变了就按新外观重新打开文档。
 - **链接。** 悬停时向引擎问指针下有什么（命中测试后沿父节点找 `<a href>`，以及是否在文字上），链接
   显示手形光标、文字显示 I 形光标；点击同样先问，再按 `is_openable_link` 交给系统。拖选结束在链接上

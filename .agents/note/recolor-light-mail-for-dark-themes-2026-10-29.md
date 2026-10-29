@@ -19,9 +19,13 @@
   浅色页眉和黑字；按用途转换保证文字与背景的对比方向不变。在 OKLab 里做，保留色相，品牌色仍可辨认；
   端点取主题的背景色和文字色，纯白背景与读信区融为一体，主题的色调也带进灰色。
 - 文字用更短的反转范围：主题两色之间的范围比黑白窄，等比例反转会让 `#666` 这类灰字对比过低。
+- 除了自带深色样式的，一律转换，而不是另判断"正文有没有设颜色"：那是另一张"哪些是颜色"的清单，
+  和转换实际改写的（边框、渐变、阴影……）对不上，只设了边框或渐变的邮件会漏掉；没有颜色的正文
+  转换后不变，多一遍清洗而已（`/simplify` 时改成这样，删掉了 `ColorUsage` 和 `color_usage`）。
+- 颜色的解析和 OKLab 换算用 `color` crate（Blitz 已经依赖它），不手写矩阵和 `rgb()` / `hsl()` 解析。
 - 改写放在 `catmail-proto`（与清洗共用分词和 ammonia 配置），由 `catmail-render` 的
   `Appearance::recolor` 钩子在文档线程上执行，不占 UI 线程，`PageView` 也不需要新的异步状态。
-- 自带深色样式的邮件（`Adaptive`）不转换，用它自己的。图片不变（透明底的黑色图标可能看不清，
+- 自带深色样式的邮件不转换，用它自己的。图片不变（透明底的黑色图标可能看不清，
   Gmail 也一样）。
 
 ## 方案
@@ -29,12 +33,11 @@
 - `catmail-proto/src/mime/dark.rs`：`DarkPalette`、`Role`（按属性名定用途，不取颜色的属性不改，
   避免 `font-family: Tomato`）、OKLab 转换与降饱和度的色域映射、旧式颜色属性的解析。
 - `css.rs`：`sanitize` 接受可选调色板，`copy_rest` 在取颜色的属性值里（包括渐变等嵌套函数）识别
-  十六进制、颜色名、`rgb()`、`hsl()` 并写回 `#rrggbb` / `rgba()`；`recolor_style` 改写 `style` 属性。
+  颜色（按源码交给 `color::parse_color`）并写回 `#rrggbb` / `#rrggbbaa`；`recolor_style` 改写 `style` 属性。
 - `html.rs`：`recolor_html` 用带调色板的清洗器再清洗一遍，改写 `style`、`bgcolor`、`color` 属性和样式表；
   经 `catmail_core::html` 导出。
 - `catmail-render`：`Appearance::recolor`（`Recolor` 类型），Blitz 打开文档前调用。
-- `catmail-gui/src/reader/page.rs`：深色主题下页面一律为深色，`Look::recolor` 在 `Light` 时为真；
-  链接选择器改为 `a[href]`。
+- `catmail-gui/src/reader/page.rs`：深色主题下页面一律为深色并转换颜色；链接选择器改为 `a[href]`。
 - 文档：`docs/architecture/gui.md`、`bodies.md`。
 - 验证：dark.rs（黑白落到主题色、背景只变暗文字只变亮、色相和透明度保留、旧式属性）、css.rs
   （各种写法、嵌套、条件块、非颜色保持不变、style 属性）、html.rs（属性和样式表、无颜色时不变、

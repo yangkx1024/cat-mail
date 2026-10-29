@@ -1153,6 +1153,7 @@ version = "0.1.0"
 dependencies = [
  "ammonia",
  "base64 0.22.1",
+ "color",
  "cssparser",
  "html5ever 0.40.1",
  "url",

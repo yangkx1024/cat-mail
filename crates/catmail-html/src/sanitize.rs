@@ -1,4 +1,4 @@
-//! The sanitizer: what of a message's HTML is kept, and how it colors itself.
+//! The sanitizer: what of a message's HTML is kept, and its colors for a dark page.
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
@@ -99,75 +99,48 @@ fn is_data_url(value: &str) -> bool {
 /// Image sources (remote URLs, `cid:`, `data:`) are kept: whether remote images load
 /// is the renderer's decision, and it should block them by default.
 pub fn sanitize_html(html: &str) -> String {
-    clean(&SANITIZER, html, None)
+    clean(&SANITIZER, html)
 }
 
 /// HTML that [`sanitize_html`] produced, with its own colors moved for a dark page with
 /// `palette`'s colors, as Gmail and Outlook show mail written for white (`dark.rs`): in
-/// its style sheets, `style` attributes, and `bgcolor` and `color` attributes. For a
-/// message that sets colors ([`ColorUsage::Light`]); one with dark styles of its own uses
-/// them instead.
+/// its style sheets, `style` attributes, and `bgcolor` and `color` attributes. A message
+/// with dark styles of its own is left as it is: those apply.
 pub fn recolor_html(html: &str, palette: DarkPalette) -> String {
-    clean(&sanitizer(None, Some(palette)), html, Some(palette))
+    let sheet = css::sanitize(&style_sheets(html), Some(palette));
+    if sheet.adapts_to_dark {
+        return html.to_owned();
+    }
+    with_sheet(&sheet.css, &sanitizer(None, Some(palette)), html)
 }
 
 /// The sanitizer's output with the message's style sheets in front. ammonia drops every
 /// `<style>` with its content: it doesn't look inside, and writes raw text back as it is.
-pub(crate) fn clean(builder: &Builder<'_>, html: &str, recolor: Option<DarkPalette>) -> String {
-    let sheet = css::sanitize(&scan(html, false).sheets, recolor).css;
+pub(crate) fn clean(builder: &Builder<'_>, html: &str) -> String {
+    let sheet = css::sanitize(&style_sheets(html), None);
+    with_sheet(&sheet.css, builder, html)
+}
+
+fn with_sheet(sheet: &str, builder: &Builder<'_>, html: &str) -> String {
     let mut out = String::new();
     if !sheet.is_empty() {
         out.push_str("<style>");
-        out.push_str(&sheet);
+        out.push_str(sheet);
         out.push_str("</style>");
     }
     out.push_str(&builder.clean(html).to_string());
     out
 }
 
-/// How a message's HTML colors itself, which decides whether it can be shown dark.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ColorUsage {
-    /// It sets no colors: the reader's own may apply.
-    Unset,
-    /// It colors text or backgrounds for a light page.
-    Light,
-    /// It has styles of its own for a dark appearance.
-    Adaptive,
-}
-
-/// How HTML that [`sanitize_html`] produced colors itself.
-pub fn color_usage(html: &str) -> ColorUsage {
-    let scanned = scan(html, true);
-    let sheet = css::sanitize(&scanned.sheets, None);
-    if sheet.adapts_to_dark {
-        ColorUsage::Adaptive
-    } else if sheet.sets_colors || scanned.colors {
-        ColorUsage::Light
-    } else {
-        ColorUsage::Unset
-    }
-}
-
-/// What a tokenizer pass finds in HTML: its style sheets, and whether its attributes set
-/// colors.
-struct Scan {
-    sheets: Vec<css::Element>,
-    colors: bool,
-}
-
-/// Tokenizes HTML for [`Scan`], as the tree builder would switch to raw text (so
-/// `<style>` inside `<script>` or `<textarea>` is no style sheet). Style sheets in SVG or
-/// MathML are skipped: the sanitizer drops that content whole, and so are those of a
-/// `type` other than CSS (templates), which a browser doesn't apply either. Attributes are
-/// looked at for colors only if `colors`: that parses every `style` attribute.
-fn scan(html: &str, colors: bool) -> Scan {
+/// The style sheets of HTML, found by tokenizing it as the tree builder would switch to
+/// raw text (so `<style>` inside `<script>` or `<textarea>` is no style sheet). Those in
+/// SVG or MathML are skipped: the sanitizer drops that content whole, and so are those of
+/// a `type` other than CSS (templates), which a browser doesn't apply either.
+fn style_sheets(html: &str) -> Vec<css::Element> {
     struct Sink {
         sheets: RefCell<Vec<css::Element>>,
         /// The text taken so far.
         len: Cell<usize>,
-        looks_at_colors: bool,
-        colors: Cell<bool>,
         /// `<svg>` and `<math>` elements open.
         foreign: Cell<usize>,
         in_style: Cell<bool>,
@@ -179,14 +152,6 @@ fn scan(html: &str, colors: bool) -> Scan {
         fn process_token(&self, token: Token, _line: u64) -> TokenSinkResult<()> {
             match token {
                 Token::TagToken(tag) if tag.kind == TagKind::StartTag => {
-                    if self.looks_at_colors && !self.colors.get() {
-                        let colored = tag.attrs.iter().any(|attr| match &*attr.name.local {
-                            "bgcolor" | "color" | "text" | "link" => true,
-                            "style" => css::sets_colors(&attr.value),
-                            _ => false,
-                        });
-                        self.colors.set(colored);
-                    }
                     let name = &*tag.name;
                     if matches!(name, "svg" | "math") {
                         if !tag.self_closing {
@@ -234,16 +199,10 @@ fn scan(html: &str, colors: bool) -> Scan {
     let sink = Sink {
         sheets: RefCell::default(),
         len: Cell::new(0),
-        looks_at_colors: colors,
-        colors: Cell::new(false),
         foreign: Cell::new(0),
         in_style: Cell::new(false),
     };
-    let sink = tokens::tokenize(html, sink);
-    Scan {
-        sheets: sink.sheets.into_inner(),
-        colors: sink.colors.get(),
-    }
+    tokens::tokenize(html, sink).sheets.into_inner()
 }
 
 #[cfg(test)]
@@ -309,12 +268,15 @@ mod tests {
             clean.starts_with("<style>.a{color:red;}</style>"),
             "{clean}"
         );
-        assert_eq!(
-            color_usage(&sanitize_html(
-                r#"<style media="(prefers-color-scheme: dark)">.a{color:#eee}</style><p class=a style="color:#333">x</p>"#
-            )),
-            ColorUsage::Adaptive
+        // A sheet's media decide whether it is a message's own dark styles.
+        let adaptive = sanitize_html(
+            r#"<style media="(prefers-color-scheme: dark)">.a{color:#eee}</style><p class=a style="color:#333">x</p>"#,
         );
+        let palette = DarkPalette {
+            background: [0x20; 3],
+            foreground: [0xe0; 3],
+        };
+        assert_eq!(recolor_html(&adaptive, palette), adaptive);
     }
 
     #[test]
@@ -341,9 +303,15 @@ mod tests {
         ] {
             assert!(dark.contains(moved), "{moved}: {dark}");
         }
-        // A message without colors is left as it was.
+        // A message without colors is left as it was, and one with dark styles of its own
+        // keeps its colors for them.
         let plain = sanitize_html("<style>p{margin:0;}</style><p align=\"center\">x</p>");
         assert_eq!(recolor_html(&plain, palette), plain);
+        let adaptive = sanitize_html(
+            "<style>@media (prefers-color-scheme: dark){.a{color:#eee}}</style>\
+             <p class=a style=\"color:#333\">x</p>",
+        );
+        assert_eq!(recolor_html(&adaptive, palette), adaptive);
         // A rewritten style attribute is still only an attribute.
         let dark = recolor_html(
             &sanitize_html(
@@ -367,32 +335,6 @@ mod tests {
                 "{not_a_sheet}"
             );
         }
-    }
-
-    #[test]
-    fn tells_how_a_message_colors_itself() {
-        let usage = |html: &str| color_usage(&sanitize_html(html));
-        assert_eq!(
-            usage("<p>Hello</p><table><tr><td>x</td></tr></table>"),
-            ColorUsage::Unset
-        );
-        assert_eq!(usage("<p style=\"padding:4px\">x</p>"), ColorUsage::Unset);
-        assert_eq!(usage("<p style=\"color:#333\">x</p>"), ColorUsage::Light);
-        assert_eq!(
-            usage("<table bgcolor=\"#ffffff\"><tr><td>x</td></tr></table>"),
-            ColorUsage::Light
-        );
-        assert_eq!(usage("<font color=\"red\">x</font>"), ColorUsage::Light);
-        assert_eq!(
-            usage("<style>.a{background:#fff}</style><p class=a>x</p>"),
-            ColorUsage::Light
-        );
-        assert_eq!(
-            usage(
-                "<style>@media (prefers-color-scheme: dark){.a{color:#eee}}</style><p class=a style=\"color:#333\">x</p>"
-            ),
-            ColorUsage::Adaptive
-        );
     }
 
     #[test]
