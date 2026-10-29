@@ -120,7 +120,7 @@ unsafe_code = "forbid"
 all = { level = "warn", priority = -1 }
 
 # Unreleased imap-proto 0.18.0, for its unescaping of quoted strings (djc/imap-proto#209).
-# Replace with the crates.io release once it is out: until then cargo deny's source check
-# fails (accepted while the project is unreleased).
+# Replace with the crates.io release once it is out, and take the repository out of
+# `allow-git` in deny.toml (#130).
 [patch.crates-io]
 imap-proto = { git = "https://github.com/djc/imap-proto", rev = "0dac3af59a2cfcd649c30034d5f221c4d8edbf34" }

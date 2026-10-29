@@ -81,4 +81,8 @@ deny = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+allow-git = [
+    # The unreleased 0.18.0, pinned to a commit in the root Cargo.toml's
+    # `[patch.crates-io]`; remove with it once 0.18.0 is on crates.io (#130).
+    "https://github.com/djc/imap-proto",
+]
