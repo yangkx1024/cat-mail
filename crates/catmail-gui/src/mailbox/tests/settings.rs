@@ -41,7 +41,8 @@ fn settings_change_the_theme(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn signs_in_from_the_window(cx: &mut TestAppContext) {
-    let mail = TestMail::without_account();
+    // The app's background sync syncs the account once it is added.
+    let mail = TestMail::without_account_syncing_in_background();
     let (window, mailbox) = open(cx, &mail);
     wait_until(|| {
         cx.run_until_parked();
@@ -138,7 +139,7 @@ fn cancel_is_off_once_signing_in_has_started(cx: &mut TestAppContext) {
     // GPUI's tasks run only when parked, so signing in is still under way here.
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
-        // The account may be stored by now; leaving would only skip its first sync.
+        // The account may be stored by now; leaving wouldn't undo that.
         window.click("cancel", cx);
     })
     .unwrap();

@@ -201,10 +201,11 @@ macOS、Windows 用系统字体，不受影响。
 方法，从不碰 tokio。事件的 `broadcast::Receiver` 不依赖 reactor，直接在 GPUI 的 executor 上 `recv`；
 `Lagged` 时整体刷新（侧栏、列表，并查一次被拒绝的改动），`Closed` 时退出。
 
-客户端开启了后台同步（`sync_in_background`）：服务器推送的新邮件同样经 `MessagesChanged` 出现。启动和
-添加账户时仍手动同步一次，把错误显示成通知；后台同步的错误只记日志。添加账户后的这次同步不另开连接：
-它用 `MailClient::initial_sync` 等后台同步的首次完整同步，拿它的报告（见[同步 / 后台同步](sync.md#后台同步与-idle)），
-侧栏的"Syncing…"和文件夹失败的通知照旧；"Sync now"仍是 `sync_account`。后台同步在两次完整同步之间只盯
+客户端开启了后台同步（`sync_in_background`）：服务器推送的新邮件同样经 `MessagesChanged` 出现。GUI
+自己不同步账户：启动、添加账户时后台同步本来就做一次完整同步；Sync 按钮、Ctrl R 和托盘的"Sync now"
+调 `MailClient::sync_now`，由后台同步来做（见[同步 / 后台同步](sync.md#后台同步与-idle)）。进度和失败都
+来自账户状态：有账户 `syncing` 时侧栏底部显示"Syncing…"、Sync 按钮转圈，失败时显示连接问题；
+不再弹同步失败的通知。后台同步在两次完整同步之间只盯
 INBOX，所以打开一个文件夹时同步它（`MailClient::sync_folder`，一分钟内同步过的跳过，见
 [同步 / 打开的文件夹](sync.md#打开的文件夹)）；失败只记日志，连不上服务器已由侧栏底部说明。
 
@@ -286,11 +287,11 @@ INBOX，所以打开一个文件夹时同步它（`MailClient::sync_folder`，�
 ## 登录页
 
 没有账户时自动打开（不能取消），Settings › Accounts 的"Add account"也能打开。调用 `MailClient::add_account(.., Verify::Login)`，
-再同步这个账户；密码或服务器
+之后由后台同步做首次同步（见[同步 / 后台同步](sync.md#后台同步与-idle)）；密码或服务器
 填错不会留下账户行或孤立的密钥环条目。
 
 - 登录进行中"Cancel"不可用：`add_account` 一旦开始就会写入（引擎的阻塞任务不随窗口的任务取消），
-  此时离开只会让新账户错过首次同步。
+  此时离开也撤销不了，账户照样加上、同步。
 - 空的端口和用户名取与 CLI 相同的默认值；表单只检查端口格式，其余由引擎的校验负责。登录也检查
   SMTP，所以 SMTP 填错同样当场报出。邮箱、密码、名字、用户名和服务器字段在 `login_form.rs`（`LoginFields`、
   `ServerFields`），与发件身份的表单共用。

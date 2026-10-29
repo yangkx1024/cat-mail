@@ -625,6 +625,14 @@ impl ServerState {
         self.mailbox_mut("INBOX")
     }
 
+    /// Holds each header FETCH from now on until the gate returned gets a permit
+    /// (`fetch_gate`).
+    pub fn hold_fetches(&mut self) -> Arc<Semaphore> {
+        let gate = Arc::new(Semaphore::new(0));
+        self.faults.fetch_gate = Some(gate.clone());
+        gate
+    }
+
     /// How many header FETCHes the server received, as `drop_on_fetch` counts them, those
     /// held at `fetch_gate` included.
     pub fn header_fetches(&self) -> usize {

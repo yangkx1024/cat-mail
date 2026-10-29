@@ -75,12 +75,10 @@ impl Env {
         &self,
         change: impl FnOnce(&mut ServerState),
     ) -> (Arc<Semaphore>, JoinHandle<catmail_core::Result<SyncReport>>) {
-        let gate = Arc::new(Semaphore::new(0));
-        let fetched = {
+        let (gate, fetched) = {
             let mut st = self.fake.state();
             change(&mut st);
-            st.faults.fetch_gate = Some(gate.clone());
-            st.header_fetches()
+            (st.hold_fetches(), st.header_fetches())
         };
         let sync = tokio::spawn({
             let (client, account) = (self.client.clone(), self.account);

@@ -2,17 +2,16 @@
 //! server: IDLE on INBOX, polling without it, the full sync schedule, queued changes
 //! made at once, reconnecting, and stopping with the account or the client.
 
-use std::sync::Arc;
 use std::time::Duration;
 
-use catmail_core::{Config, ErrorKind, Event, Flags, MailClient, SyncReport, SyncSchedule, Verify};
+use catmail_core::{Config, Flags, MailClient, SyncSchedule, Verify};
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 use tokio::runtime::Handle;
 use tokio::sync::Semaphore;
 
 mod common;
 
-use common::{Env, drain, env_added, env_built, eventually};
+use common::{Env, env_added, env_built, eventually, status_changes};
 
 const HOUR: Duration = Duration::from_secs(3600);
 
@@ -75,6 +74,24 @@ impl Env {
     async fn wait_for_idle(&self, n: usize) {
         self.fake.wait_until(|st| st.received("IDLE") >= n).await;
     }
+
+    fn syncing(&self) -> bool {
+        self.client.account_status(self.account).syncing
+    }
+
+    async fn wait_until_synced(&self) {
+        eventually("the sync to end", async || !self.syncing()).await;
+    }
+
+    async fn wait_until_login_rejected(&self) {
+        eventually("the failure to be reported", async || {
+            self.client
+                .account_status(self.account)
+                .sync
+                .is_some_and(|p| p.login_rejected())
+        })
+        .await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -121,31 +138,113 @@ async fn just_added(state: ServerState) -> Env {
     .await
 }
 
-fn synced_folders(report: &SyncReport) -> Vec<&str> {
-    let mut names: Vec<_> = report.folders.iter().map(|f| f.name.as_str()).collect();
-    names.sort_unstable();
-    names
+#[tokio::test(flavor = "multi_thread")]
+async fn an_account_shows_as_syncing_until_its_first_sync_ends() {
+    let mut state = state();
+    let gate = state.hold_fetches();
+    let env = watching(state, schedule(HOUR, HOUR)).await;
+    env.fake.wait_until(|st| st.header_fetches() > 0).await;
+    assert!(env.syncing());
+
+    gate.add_permits(Semaphore::MAX_PERMITS);
+    env.wait_until_synced().await;
+    assert_eq!(env.sorted_subjects("Archive").await, ["old"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_initial_sync_after_the_first_background_one_syncs_on_its_own() {
-    let env = just_added(state()).await;
+async fn syncing_now_syncs_every_folder_on_background_syncs_connection() {
+    let env = watching(state(), schedule(HOUR, HOUR)).await;
     env.wait_for_idle(1).await;
-    let report = env.client.initial_sync(env.account).await.unwrap();
-    assert_eq!(synced_folders(&report), ["Archive", "INBOX"]);
+    env.wait_until_synced().await;
+    let (gate, fetches) = {
+        let mut st = env.fake.state();
+        st.mailbox_mut("Archive").append_simple("new");
+        (st.hold_fetches(), st.header_fetches())
+    };
+
+    env.client.sync_now().await.unwrap();
+    env.fake
+        .wait_until(|st| st.header_fetches() > fetches)
+        .await;
+    assert!(env.syncing());
+    // Answered by the sync under way.
+    env.client.sync_now().await.unwrap();
+    gate.add_permits(Semaphore::MAX_PERMITS);
+    env.wait_for_subjects("Archive", &["new", "old"]).await;
+    env.wait_until_synced().await;
+    env.wait_for_idle(2).await;
     let st = env.fake.state();
-    assert_eq!((st.connections, st.received("LIST")), (2, 2));
+    assert_eq!((st.connections, st.received("LIST")), (1, 2));
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_initial_sync_waiting_for_a_failed_background_one_syncs_on_its_own() {
+async fn a_full_sync_begun_before_syncing_now_is_made_again() {
+    let env = watching(state(), schedule(HOUR, HOUR)).await;
+    env.wait_for_idle(1).await;
+    env.wait_until_synced().await;
+    let (gate, fetches) = {
+        let mut st = env.fake.state();
+        st.mailbox_mut("Archive").append_simple("new");
+        (st.hold_fetches(), st.header_fetches())
+    };
+    // One the user doesn't wait for, which may have done folders before the call.
+    let earlier = tokio::spawn({
+        let (client, account) = (env.client.clone(), env.account);
+        async move { client.sync_account(account).await }
+    });
+    env.fake
+        .wait_until(|st| st.header_fetches() > fetches)
+        .await;
+
+    env.client.sync_now().await.unwrap();
+    gate.add_permits(Semaphore::MAX_PERMITS);
+    earlier.await.unwrap().unwrap();
+    env.wait_until_synced().await;
+    // The first, the earlier one, and background sync's on the connection it keeps:
+    // unlike after a sleep, nothing starts over.
+    let st = env.fake.state();
+    assert_eq!((st.connections, st.received("LIST")), (2, 3));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn syncing_now_while_the_login_is_rejected_waits_too() {
     let mut state = state();
     state.faults.reject_login = true;
     let env = watching(state, schedule(HOUR, HOUR)).await;
-    let error = env.client.initial_sync(env.account).await.unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Auth);
-    // Background sync's, then its own.
-    assert_eq!(env.fake.state().received("LOGIN"), 2);
+    env.wait_until_login_rejected().await;
+    assert!(!env.syncing());
+
+    env.client.sync_now().await.unwrap();
+    assert!(!env.syncing());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(env.fake.state().received("LOGIN"), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_login_rejected_after_syncing_now_shows_rather_than_syncing() {
+    let env = watching(state(), schedule(HOUR, HOUR)).await;
+    env.wait_for_idle(1).await;
+    env.wait_until_synced().await;
+    // The password changed elsewhere: logging in again after the connection drops fails.
+    let logins = {
+        let mut st = env.fake.state();
+        st.faults.reject_login = true;
+        st.faults.slow = Some(("LOGIN".into(), Duration::from_millis(200)));
+        st.drop_open_connections();
+        st.received("LOGIN")
+    };
+    env.fake
+        .wait_until(|st| st.received("LOGIN") > logins)
+        .await;
+
+    // Asked while that login, begun before, is under way.
+    env.client.sync_now().await.unwrap();
+    assert!(env.syncing());
+    env.wait_until_login_rejected().await;
+    // Nothing answers the request until the login works again.
+    env.wait_until_synced().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(env.fake.state().received("LOGIN"), logins + 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -272,8 +371,7 @@ async fn a_full_sync_begun_before_the_sleep_is_made_again_after_resuming() {
     let mut state = state();
     // Polling: the wait after the sync takes the signal at once.
     state.faults.idle = false;
-    let gate = Arc::new(Semaphore::new(0));
-    state.faults.fetch_gate = Some(gate.clone());
+    let gate = state.hold_fetches();
     let env = watching(state, schedule(HOUR, HOUR)).await;
     env.fake.wait_until(|st| st.header_fetches() > 0).await;
     let connections = env.fake.state().connections;
@@ -298,12 +396,10 @@ async fn a_full_sync_begun_before_the_sleep_is_made_again_after_resuming() {
 async fn a_connection_made_after_resuming_is_kept() {
     let env = watching(state(), schedule(HOUR, HOUR)).await;
     env.wait_for_idle(1).await;
-    let gate = Arc::new(Semaphore::new(0));
-    let (connections, fetches) = {
+    let (gate, connections, fetches) = {
         let mut st = env.fake.state();
-        st.faults.fetch_gate = Some(gate.clone());
         st.inbox().append_simple("three");
-        (st.connections, st.header_fetches())
+        (st.hold_fetches(), st.connections, st.header_fetches())
     };
     env.fake
         .wait_until(|st| st.header_fetches() > fetches)
@@ -337,13 +433,7 @@ async fn a_wake_while_the_login_is_rejected_waits_too() {
         .await
         .unwrap();
     env.client.resume();
-    eventually("the failure to be reported", async || {
-        env.client
-            .account_status(env.account)
-            .sync
-            .is_some_and(|p| p.login_rejected())
-    })
-    .await;
+    env.wait_until_login_rejected().await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(env.fake.state().received("LOGIN"), 1);
 }
@@ -408,13 +498,7 @@ async fn a_rejected_login_is_reported_and_not_retried_for_each_change_or_a_wake(
     let env = watching(state, schedule(HOUR, HOUR)).await;
     let mut events = env.client.subscribe();
     env.fake.wait_until(|st| st.received("LOGIN") >= 1).await;
-    eventually("the failure to be reported", async || {
-        env.client
-            .account_status(env.account)
-            .sync
-            .is_some_and(|p| p.login_rejected())
-    })
-    .await;
+    env.wait_until_login_rejected().await;
 
     // Each change wakes background sync, which would log in again, as would waking from
     // sleep: servers lock accounts that fail too many logins.
@@ -434,14 +518,7 @@ async fn a_rejected_login_is_reported_and_not_retried_for_each_change_or_a_wake(
     env.client.sync_account(env.account).await.unwrap();
     assert_eq!(env.client.account_status(env.account), Default::default());
     env.wait_for_idle(1).await;
-    let changed = drain(&mut events)
-        .into_iter()
-        .filter(|e| {
-            *e == Event::AccountStatusChanged {
-                account: env.account,
-            }
-        })
-        .count();
+    let changed = status_changes(&mut events, env.account);
     assert_eq!(changed, 2, "failing, then through again");
 }
 

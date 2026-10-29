@@ -8,8 +8,8 @@
 //! it to make them on the server at once; a changed draft only once it has been left
 //! alone for the engine's draft upload delay, while it may still be being written. Its work takes the account's sync permit
 //! like any sync, but its waiting doesn't: a sync or replay the user asks for meanwhile
-//! runs on a connection of its own. The first sync of every folder is the exception: a
-//! sync asked for while it runs waits for it rather than logging in to do the same.
+//! runs on a connection of its own. A sync of every account asked for
+//! ([`MailClient::sync_now`](crate::MailClient::sync_now)) is made by these tasks.
 //!
 //! After the computer slept ([`Engine::resume`]) a task drops a connection made before,
 //! which is likely dead, without a word, and syncs every folder unless a sync of them all
@@ -26,7 +26,7 @@ use catmail_types::AccountId;
 use tokio::sync::Notify;
 
 use crate::draft_sync::Uploads;
-use crate::engine::{Activity, Cancellation, Engine, FirstSync, backoff};
+use crate::engine::{Activity, Cancellation, Engine, backoff};
 use crate::{Error, Result, connection, ops, sync};
 
 /// When background sync does what.
@@ -67,15 +67,15 @@ pub(crate) fn spawn(engine: &Arc<Engine>, account: AccountId) {
     }
 }
 
-/// The task that keeps `account` in sync, its first sync of every folder marked as
-/// running already.
+/// The task that keeps `account` in sync, the account shown as syncing already for its
+/// first sync of every folder.
 pub(crate) fn task(
     engine: &Arc<Engine>,
     account: AccountId,
     schedule: SyncSchedule,
 ) -> impl Future<Output = ()> + Send + 'static {
-    let first_sync = engine.start_first_sync(account);
-    run(Arc::downgrade(engine), account, schedule, first_sync)
+    engine.begin_syncing(account);
+    run(Arc::downgrade(engine), account, schedule)
 }
 
 /// An IDLE that loses its connection sooner than this after it began counts towards
@@ -115,13 +115,7 @@ enum Wait {
 }
 
 /// Keeps one account in sync until it is removed or the engine is gone.
-async fn run(
-    engine: Weak<Engine>,
-    account: AccountId,
-    schedule: SyncSchedule,
-    first_sync: FirstSync,
-) {
-    let mut first_sync = Some(first_sync);
+async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
     // An idle connection if there is one: adding an account leaves the one that checked
     // the password.
     let Some((wake, resume, mut cancellation, mut session)) = engine.upgrade().map(|e| {
@@ -150,13 +144,12 @@ async fn run(
         if cancellation.is_cancelled() {
             return;
         }
-        let first = first_sync.take();
+        let began = Instant::now();
         let result = step(&strong, &mut session, account, schedule, &changed_flags).await;
-        drop(first);
         if matches!(result, Ok(Wait::Idle | Wait::Poll)) {
             changed_flags = ChangedFlags::default();
         }
-        let failures = strong.report(account, Activity::Sync, &result);
+        let failures = strong.report(account, Activity::SyncBegun(began), &result);
         // Drafts held back while they are being written are uploaded once they settle:
         // the step runs again by then, at once for one that settled while it ran.
         let full = full_sync_in(&strong, account, &schedule);
@@ -381,8 +374,7 @@ async fn work(
     let full = full_sync_in(engine, account, schedule).is_zero();
     if full {
         // Takes the permit folder by folder, so syncs asked for meanwhile go in between.
-        let report = sync::run(engine, session, account, Uploads::Settled).await?;
-        engine.first_sync_done(account, &report);
+        sync::run(engine, session, account, Uploads::Settled).await?;
     }
     let permit = engine.sync_permit(account).await;
     permit

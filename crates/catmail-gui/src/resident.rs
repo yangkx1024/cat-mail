@@ -202,26 +202,16 @@ impl Resident {
         Self::show_again(activation_token, cx);
     }
 
-    /// Syncs every account: in the main window if it is open, to show it and report
-    /// failures there; otherwise in the background, where a failure shows as the
-    /// account's status once the window is back.
+    /// Syncs every account now, whether the main window is open or not: the engine's
+    /// background sync does it, and progress and failures show as the accounts' status.
     pub fn sync(cx: &mut App) {
-        if Self::in_main(cx, Mailbox::sync) {
-            return;
-        }
         let Engine::Open(client) = Self::engine(cx) else {
             return;
         };
         let client = client.clone();
         cx.background_spawn(async move {
-            let accounts = match client.list_accounts().await {
-                Ok(accounts) => accounts,
-                Err(e) => return tracing::warn!(error = %e, "couldn't sync"),
-            };
-            for account in accounts {
-                if let Err(e) = client.sync_account(account.id).await {
-                    tracing::warn!(account = %account.id, error = %e, "couldn't sync");
-                }
+            if let Err(e) = client.sync_now().await {
+                tracing::warn!(error = %e, "couldn't sync");
             }
         })
         .detach();
@@ -532,7 +522,10 @@ mod tests {
     /// The app with its main window and the engine `TestMail::start` has, taking
     /// `requests` from later launches.
     fn start(requests: Option<Requests>, cx: &mut TestAppContext) -> TestMail {
-        let mail = TestMail::start();
+        start_with(TestMail::start(), requests, cx)
+    }
+
+    fn start_with(mail: TestMail, requests: Option<Requests>, cx: &mut TestAppContext) -> TestMail {
         cx.executor().allow_parking();
         let client = mail.client.clone();
         cx.update(|cx| {
@@ -674,13 +667,37 @@ mod tests {
 
     #[gpui_kit::test]
     fn syncing_from_the_tray_shows_in_the_window(cx: &mut TestAppContext) {
-        let _mail = start(None, cx);
+        let mail = start_with(TestMail::start_syncing_in_background(), None, cx);
         let (_, mailbox) = main_mailbox(cx);
+        // Not INBOX, which background sync watches on its own.
+        mail.deliver("Archive", "Lunch?");
+        let gate = mail.hold_fetches();
         cx.update(|cx| Tray::choose(Command::Sync, None, cx));
-        assert_eq!(cx.read(|cx| mailbox.read(cx).syncing), 1);
         wait_until(|| {
             cx.run_until_parked();
-            cx.read(|cx| mailbox.read(cx).syncing == 0)
+            cx.read(|cx| mailbox.read(cx).syncing())
+        });
+        gate.add_permits(tokio::sync::Semaphore::MAX_PERMITS);
+        wait_until(|| {
+            cx.run_until_parked();
+            cx.read(|cx| !mailbox.read(cx).syncing())
+        });
+        assert!(
+            mail.stored_subjects("Archive")
+                .contains(&"Lunch?".to_owned())
+        );
+    }
+
+    #[gpui_kit::test]
+    fn syncing_from_the_tray_works_with_the_window_closed(cx: &mut TestAppContext) {
+        let mail = start_with(TestMail::start_syncing_in_background(), None, cx);
+        close_main(cx);
+        mail.deliver("Archive", "Lunch?");
+        cx.update(|cx| Tray::choose(Command::Sync, None, cx));
+        wait_until(|| {
+            cx.run_until_parked();
+            mail.stored_subjects("Archive")
+                .contains(&"Lunch?".to_owned())
         });
     }
 

@@ -95,6 +95,11 @@ pub enum Error {
     #[error("could not determine a data directory; pass one explicitly")]
     NoDataDir,
 
+    /// Asked of background sync, which this client doesn't run
+    /// ([`MailClientBuilder::sync_in_background`](crate::MailClientBuilder::sync_in_background)).
+    #[error("accounts aren't kept in sync in the background; sync each one instead")]
+    NoBackgroundSync,
+
     #[error("another cat-mail instance is already using {}", .0.display())]
     AlreadyRunning(std::path::PathBuf),
 
@@ -144,6 +149,7 @@ impl Error {
             Self::Unsupported(_)
             | Self::InvalidInput(_)
             | Self::NoDataDir
+            | Self::NoBackgroundSync
             | Self::DataDirNotOwned(_) => K::Invalid,
             Self::AccountNotFound(_)
             | Self::IdentityNotFound(_)

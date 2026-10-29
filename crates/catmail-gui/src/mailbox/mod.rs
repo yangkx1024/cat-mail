@@ -137,8 +137,6 @@ pub struct Mailbox {
     /// A new message was asked for before the folders loaded, which say from which
     /// account: composed once they have.
     compose_once_loaded: bool,
-    /// Syncs in flight.
-    pub(crate) syncing: usize,
     /// [`SYNC_ON_OPEN_AFTER`], except in tests that open folders synced just now.
     pub(crate) sync_on_open_after: Duration,
     /// [`REFRESH_INTERVAL`], except in tests, whose clock only moves when told to.
@@ -234,7 +232,6 @@ impl Mailbox {
             place: None,
             reopen_at: None,
             compose_once_loaded: false,
-            syncing: 0,
             sync_on_open_after: SYNC_ON_OPEN_AFTER,
             refresh_interval: REFRESH_INTERVAL,
             throttle: Throttle::default(),
@@ -569,9 +566,9 @@ impl Mailbox {
         let subscription = cx.subscribe_in(&form, window, |this, _, event, window, cx| {
             this.adding_account = None;
             match event {
-                // Its folders and messages appear through the engine's events.
-                AddAccountEvent::Added(account) => {
-                    this.sync_accounts(vec![account.clone()], true, window, cx);
+                // Background sync syncs it: its folders and messages appear through the
+                // engine's events, and how that goes in its status.
+                AddAccountEvent::Added => {
                     this.messages.update(cx, |list, cx| list.focus(window, cx));
                 }
                 AddAccountEvent::Cancelled => {}

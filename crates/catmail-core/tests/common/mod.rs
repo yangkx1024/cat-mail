@@ -67,6 +67,18 @@ pub fn new_mail(events: Vec<Event>) -> Vec<Vec<MessageId>> {
         .collect()
 }
 
+/// How many `AccountStatusChanged` for `account` are waiting in `events`.
+#[allow(dead_code)]
+pub fn status_changes(
+    events: &mut tokio::sync::broadcast::Receiver<Event>,
+    account: AccountId,
+) -> usize {
+    drain(events)
+        .into_iter()
+        .filter(|e| *e == Event::AccountStatusChanged { account })
+        .count()
+}
+
 /// [`env`], synced once.
 #[allow(dead_code)]
 pub async fn synced_env(state: ServerState) -> Env {
