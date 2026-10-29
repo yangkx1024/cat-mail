@@ -215,7 +215,7 @@ async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
                             let short = start.elapsed() < SHORT_IDLE;
                             idle_losses = if short { idle_losses + 1 } else { 1 };
                             if idle_losses == 1 {
-                                tracing::debug!(%account, error = %e, "IDLE connection lost");
+                                tracing::info!(%account, error = %e, "IDLE connection lost");
                                 continue;
                             }
                             let delay =

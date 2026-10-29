@@ -12,6 +12,7 @@ mod instance;
 mod layout;
 mod login_form;
 mod mailbox;
+mod memory;
 mod new_mail;
 mod reader;
 mod resident;
@@ -31,7 +32,6 @@ use gpui_kit::{
     Render, SharedString, Styled as _, Subscription, Window, WindowOptions, div, px, size,
 };
 use settings::{Preferences, Settings};
-use tracing_subscriber::EnvFilter;
 
 use crate::instance::{Claim, Display, Request};
 use crate::mailbox::Mailbox;
@@ -44,7 +44,7 @@ pub const APP_ID: &str = "dev.CatMail.CatMail";
 pub const APP_NAME: &str = "cat-mail";
 
 #[derive(Parser)]
-#[command(name = "catmail-gui", version, about = "cat-mail in a window")]
+#[command(name = "catmail-gui", version = catmail_core::VERSION, about = "cat-mail in a window")]
 struct Cli {
     /// Directory for the database and blobs [default: platform data dir]
     #[arg(long, env = "CATMAIL_DATA_DIR")]
@@ -55,12 +55,9 @@ struct Cli {
 }
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
+    // The GPU adapter GPUI chose too: rendering on the CPU makes the app slow and big, and
+    // only info says why it passed the GPU over.
+    catmail_core::logging::init("catmail_gui=info,catmail_render=info,gpui_wgpu=info");
     let cli = Cli::parse();
     let config_dir = cli
         .config_dir
@@ -79,6 +76,7 @@ fn main() {
             match instance::claim(&config, &activate) {
                 Ok(Claim::Handed) => return,
                 Ok(Claim::First { lock, requests }) => {
+                    catmail_core::logging::write_file(&config, "gui");
                     (Ok(MailClient::builder_locked(lock)), requests)
                 }
                 // Opening the engine says why.
@@ -124,7 +122,7 @@ fn main() {
             cx,
         );
         if let Err(e) = Resident::start(opening, requests, cx) {
-            eprintln!("catmail-gui: couldn't open a window: {e:#}");
+            tracing::error!(error = format!("{e:#}"), "couldn't open a window");
             cx.quit();
         }
     });

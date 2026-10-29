@@ -13,6 +13,8 @@
 //! for yet can be given to the open document later ([`Document::set_images`]), without
 //! opening it again.
 
+#![forbid(unsafe_code)]
+
 mod blitz;
 mod pixels;
 mod selection;

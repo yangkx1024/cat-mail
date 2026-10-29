@@ -170,6 +170,7 @@ UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UI
 | [CLI](architecture/cli.md) | 命令的代码结构、`--json` 的结构与版本、退出码、添加账户前的登录检查、不覆盖文件 |
 | [GUI](architecture/gui.md) | 视图结构、事件刷新、读信与写信窗口、发件箱、主题与设置、HTML 渲染与图片策略、已知问题 |
 | [后台运行](architecture/background.md) | 关窗后常驻、单实例与唤起、睡眠唤醒、新邮件事件；通知、托盘、开机启动（设计中） |
+| [日志](architecture/logging.md) | stderr 与数据目录里的日志文件、谁能写、记什么、轮转 |
 | [测试](architecture/testing.md) | 假 IMAP / SMTP 服务器、真实 Dovecot 与 mailpit、GUI 测试 |
 
 ## 数据目录
@@ -186,6 +187,7 @@ CLI 和 GUI 都可用 `--data-dir` 或 `CATMAIL_DATA_DIR` 覆盖。
 | `gui.sock` | 之后的 GUI 启动唤起正在运行的那个所用的 socket（路径太长时在运行时目录，见[后台运行](architecture/background.md#单实例与唤起)） |
 | `handoff/` | 前端交给其他程序的文件（如给浏览器的邮件页面） |
 | `remote-images/` | 用户要求显示过的远程图片的缓存（见[正文与附件](architecture/bodies.md)） |
+| `logs/` | 前端的日志文件和它的锁（见[日志](architecture/logging.md)） |
 
 目录新建时只有本用户可访问（Unix 上 0700）。已存在的目录不改权限：它可能是用户指定的位置（比如
 家目录），宽于 0700 时只打一条 warn；但必须属于当前用户，否则拒绝打开（`Error::DataDirNotOwned`），

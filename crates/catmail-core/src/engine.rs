@@ -551,8 +551,9 @@ impl Engine {
             Ok(_) => None,
         };
         let state = self.account(account);
-        // Whether the status changed, and for a success, whether the login had been rejected.
-        let (changed, rejected, failures) = {
+        // Whether the status changed, and for a success, whether the login had been rejected;
+        // whether the problem did.
+        let (changed, rejected, failures, problem_changed) = {
             let mut status = lock(&state.status);
             match activity {
                 Activity::Sync | Activity::SyncBegun(_) => {
@@ -571,7 +572,7 @@ impl Engine {
                     if done {
                         status.syncing = false;
                     }
-                    (changed || done, rejected, failures)
+                    (changed || done, rejected, failures, changed)
                 }
                 Activity::Send(identity, email) => {
                     let mut slot = status.send.remove(&identity).map(|p| p.problem);
@@ -585,10 +586,25 @@ impl Engine {
                         };
                         status.send.insert(identity, problem);
                     }
-                    recorded
+                    let (changed, rejected, failures) = recorded;
+                    (changed, rejected, failures, changed)
                 }
             }
         };
+        // What frontends show, so what a report from a user is about: logged as it changes,
+        // not at each attempt.
+        if problem_changed {
+            let identity = match activity {
+                Activity::Send(identity, _) => Some(identity),
+                Activity::Sync | Activity::SyncBegun(_) => None,
+            };
+            let identity = identity.map(tracing::field::display);
+            match e {
+                Some(e) => tracing::info!(%account, identity, error = %e, failures,
+                    "can't get through to the server"),
+                None => tracing::info!(%account, identity, "getting through to the server again"),
+            }
+        }
         if changed {
             self.emit(Event::AccountStatusChanged { account });
         }

@@ -65,7 +65,13 @@ GUI 关掉主窗口后继续同步、发信、提醒新邮件，并能从托盘�
 最后一个窗口关闭时怎么做是一个纯函数（`after_last_window`）：正在退出、没开"保持运行"、引擎打开失败
 （没有东西可运行）时退出；否则 Linux、Windows 上切到 headless，macOS 上什么也不做。切换是异步的，
 期间到来的唤起请求等切换结束再处理；切到窗口模式失败（例如请求方没有显示服务器）就留在 headless，
-只记日志。GPUI 只在没有窗口时允许切换，正合这里的用法。`Mailbox::new` 不做启动同步（后台同步
+只记日志。GPUI 只在没有窗口时允许切换，正合这里的用法。切到 headless 之后调一次 glibc 的
+`malloc_trim(0)`（`memory::release_freed`，只在 Linux glibc 上，其他平台什么也不做）：窗口用过的
+布局、读信区的 tile、渲染器的缓冲区都已释放，但 glibc 的堆只能从顶上缩，释放的内存夹在仍在用的块之间，
+留在进程里。实测关掉主窗口后 glibc 持有约 103 MB、其中约 92 MB 是空闲块，trim 之后 RSS 从约 229 MB
+降到约 151 MB。代价是再开窗口时这些页重新缺页，约 2 万次、合计几十毫秒，远小于重建 GPU 设备和管线；
+只在切到 headless 时做一次，不在热路径上反复做。这是工作区里唯一的 `unsafe`：`unsafe_code` 因此是
+`deny` 而不是 `forbid`，由 `memory` 模块单独放行，其他 crate 在根上各自 `forbid`。`Mailbox::new` 不做启动同步（后台同步
 打开时就完整同步一遍），重开窗口不会多出同步；打开时的 `report_refused_changes` 正好报告常驻期间被
 拒绝的改动。
 

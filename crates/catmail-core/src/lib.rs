@@ -4,6 +4,8 @@
 //! executor-agnostic: work runs on a tokio runtime owned by (or handed to) the client,
 //! so the futures can be awaited from GPUI's executor as well as from tokio.
 
+#![forbid(unsafe_code)]
+
 mod body;
 mod client;
 mod config;
@@ -17,6 +19,7 @@ mod filename;
 mod gc;
 mod image_cache;
 mod images;
+pub mod logging;
 /// What renderers of [`MessageBody::html`] need to resolve and block its images.
 pub mod html {
     pub use catmail_proto::http::RemoteImage;
@@ -31,6 +34,8 @@ mod secrets;
 mod send;
 mod sleep;
 mod sync;
+mod system;
+mod version;
 mod watch;
 
 pub use catmail_proto::TlsConfig;
@@ -48,4 +53,5 @@ pub use secrets::{KeyringSecrets, MemorySecrets, SecretStore};
 /// What [`MailClient::subscribe`]'s receiver returns when it falls behind or the engine
 /// is gone.
 pub use tokio::sync::broadcast::error::RecvError;
+pub use version::VERSION;
 pub use watch::SyncSchedule;

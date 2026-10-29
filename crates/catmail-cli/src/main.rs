@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 mod cmd;
 mod exit;
 mod files;
@@ -6,14 +8,12 @@ mod output;
 #[cfg(test)]
 mod test_support;
 
-use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::Result;
 use catmail_core::{Config, DEFAULT_GC_INTERVAL, DraftId, MailClient, SyncSchedule};
 use clap::{Parser, Subcommand};
-use tracing_subscriber::EnvFilter;
 
 use crate::cmd::{account, compose, gc, identity, ops, outbox, read, search, sync, watch};
 use crate::output::printable_text;
@@ -21,7 +21,7 @@ use crate::output::printable_text;
 #[derive(Parser)]
 #[command(
     name = "catmail",
-    version,
+    version = catmail_core::VERSION,
     about = "cat-mail from the terminal",
     after_help = concat!(
         "Exit status:\n",
@@ -137,12 +137,7 @@ fn open_failed(e: catmail_core::Error) -> anyhow::Error {
 }
 
 async fn run() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
-        )
-        .with_writer(io::stderr)
-        .init();
+    catmail_core::logging::init("catmail=info");
 
     let cli = Cli::parse();
     let config = match cli.data_dir {
@@ -150,6 +145,7 @@ async fn run() -> Result<()> {
         None => Config::platform_default()?,
     };
     let watching = matches!(cli.command, Command::Watch);
+    catmail_core::logging::write_file(&config, "cli");
     let client = MailClient::builder(config)
         .runtime(tokio::runtime::Handle::current())
         .sync_in_background(watching.then(SyncSchedule::default))

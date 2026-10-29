@@ -296,8 +296,9 @@ impl Resident {
         if resident.windowing == Windowing::Headless {
             let request = WindowingRequest::Windowed(environment(&display));
             Self::switch(request, cx, move |switched, pending, cx| {
-                if let Err(e) = &switched {
-                    tracing::error!(error = %e, "can't connect to the display");
+                match &switched {
+                    Ok(()) => tracing::info!("connected to the display again"),
+                    Err(e) => tracing::error!(error = %e, "can't connect to the display"),
                 }
                 let resident = cx.global_mut::<Self>();
                 resident.windowing = match switched {
@@ -332,6 +333,7 @@ impl Resident {
         let (window, _) = gpui_kit::open_window(crate::window_options(cx), cx, |window, cx| {
             cx.new(|cx| MainWindow::new(window, cx))
         })?;
+        tracing::info!("main window opened");
         cx.global_mut::<Self>().main = Some(window);
         Ok(())
     }
@@ -343,6 +345,7 @@ impl Resident {
             .main
             .is_some_and(|main| main.window_id() == id)
         {
+            tracing::info!("main window closed");
             cx.global_mut::<Self>().main = None;
         }
         if !cx.windows().is_empty() {
@@ -361,7 +364,13 @@ impl Resident {
             AfterLastWindow::GoHeadless => {
                 Self::switch(WindowingRequest::Headless, cx, |switched, pending, cx| {
                     cx.global_mut::<Self>().windowing = match switched {
-                        Ok(()) => Windowing::Headless,
+                        Ok(()) => {
+                            tracing::info!("no window open; display connection dropped");
+                            // Nothing of the windows is left: what they used is free.
+                            cx.background_spawn(async { crate::memory::release_freed() })
+                                .detach();
+                            Windowing::Headless
+                        }
                         Err(e) => {
                             // Still connected, so still able to show the window.
                             tracing::warn!(error = %e, "can't drop the display connection");

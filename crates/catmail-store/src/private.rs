@@ -50,14 +50,24 @@ pub(crate) fn make_private(path: &Path) -> io::Result<()> {
 /// rather than restricted afterwards: a reader that opens the file in between keeps
 /// reading it.
 pub(crate) fn new_file(path: &Path) -> io::Result<()> {
+    private_file_options()
+        .write(true)
+        .truncate(false)
+        .open(path)
+        .map(drop)
+}
+
+/// Options that create a file for the user alone (see [`new_file`] for why at creation);
+/// the caller says how to open it.
+pub fn private_file_options() -> fs::OpenOptions {
     let mut options = File::options();
-    options.write(true).create(true).truncate(false);
+    options.create(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    options.open(path).map(drop)
+    options
 }
 
 #[cfg(test)]

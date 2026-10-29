@@ -2,6 +2,8 @@
 //!
 //! Everything here is synchronous. `catmail-core` calls into it from blocking tasks.
 
+#![forbid(unsafe_code)]
+
 mod accounts;
 mod attachments;
 mod blob;
@@ -35,7 +37,7 @@ pub use identities::{DeletedIdentity, Identities, Sending};
 pub use messages::{MessageLocation, Messages, NewBody, NewMessage, Upserted};
 pub use ops::{CopyCheckpoint, Moved, PendingOps, ReplayFolder, ReplayKind, ReplayOp, Touched};
 pub use outbox::{NewOutboxEntry, Outbox, OutboxJob};
-pub use private::create_private_dir;
+pub use private::{create_private_dir, private_file_options};
 
 /// Every `*_blob_hash` column (a test checks none is missing).
 const BLOB_REFERENCES: &str = "

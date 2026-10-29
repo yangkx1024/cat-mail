@@ -4,6 +4,8 @@
 //! crates map their own representations into these types, and frontends only ever see
 //! these types (re-exported through `catmail-core`).
 
+#![forbid(unsafe_code)]
+
 mod account;
 mod draft;
 mod error;

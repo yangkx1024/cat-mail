@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use catmail_proto::imap::Session;
 use catmail_proto::{Credentials, smtp};
@@ -24,7 +24,10 @@ pub(crate) const IO_TIMEOUT: Duration = Duration::from_secs(60);
 /// what was recorded before, which sending checks anyway.
 pub(crate) async fn connect(engine: &Arc<Engine>, account_id: AccountId) -> Result<Session> {
     let (account, credentials, append_limit) = account_credentials(engine, account_id).await?;
+    let began = Instant::now();
     let session = login(engine, &account.imap, &credentials).await?;
+    tracing::info!(account = %account_id, host = %account.imap.host, took = ?began.elapsed(),
+        "logged in to IMAP");
     let announced = announced_append_limit(session.capabilities());
     let gmail = session.is_gmail();
     if (append_limit, account.gmail_server) != (announced, gmail) {
@@ -291,7 +294,7 @@ pub(crate) async fn on_session<T>(
         match op(session).await {
             // A fresh connection, not another idle one: those are likely dead too.
             Err(Error::Imap(ImapError(e))) if e.is_disconnected() => {
-                tracing::debug!(%account, error = %e, "reused connection was dead; reconnecting");
+                tracing::info!(%account, error = %e, "reused connection was dead; reconnecting");
             }
             result => return result,
         }

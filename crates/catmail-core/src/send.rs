@@ -384,6 +384,7 @@ async fn send_one(
                     Ok((db.outbox().begin_save(id, now)?, replied))
                 })
                 .await?;
+            tracing::info!(%id, %account, "message sent");
             engine.emit(Event::MessageSent {
                 account,
                 outbox: id,
@@ -479,6 +480,7 @@ async fn save_one(
             if !engine.write(move |db| db.outbox().finish(id)).await? {
                 return Ok(None);
             }
+            tracing::info!(%id, "saved to Sent");
             // The draft is gone, and its copy on the server goes next.
             drafts::changed(engine, job.entry.account_id);
             Ok(Some(OutboxEntry {

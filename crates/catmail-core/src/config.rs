@@ -60,6 +60,11 @@ impl Config {
         self.data_dir.join("remote-images")
     }
 
+    /// The log files a frontend keeps, for finding out later what happened.
+    pub fn log_dir(&self) -> PathBuf {
+        self.data_dir.join("logs")
+    }
+
     /// Locks the data directory for one engine, creating it if needed (see
     /// [`create_data_dir`]). Fails with [`Error::AlreadyRunning`] if another engine, in
     /// this or another process, has it, and with [`Error::DataDirNotOwned`] if it belongs
@@ -67,6 +72,7 @@ impl Config {
     /// ([`MailClient::builder_locked`](crate::MailClient::builder_locked)).
     pub fn lock(&self) -> Result<DataDirLock> {
         create_data_dir(&self.data_dir)?;
+        warn_if_listable(&self.data_dir);
         let file = File::options()
             .create(true)
             .truncate(false)
@@ -101,7 +107,7 @@ impl DataDirLock {
 /// existing directory is left as it is (it may be one the user chose, such as their
 /// home; the files the engine makes in it are private anyway), but it must belong to
 /// this user.
-fn create_data_dir(dir: &Path) -> Result<()> {
+pub(crate) fn create_data_dir(dir: &Path) -> Result<()> {
     if let Some(parent) = dir.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -118,10 +124,24 @@ fn check_data_dir_owner(dir: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        let metadata = fs::metadata(dir)?;
-        if metadata.uid() != rustix::process::geteuid().as_raw() {
+        if fs::metadata(dir)?.uid() != rustix::process::geteuid().as_raw() {
             return Err(Error::DataDirNotOwned(dir.to_path_buf()));
         }
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
+}
+
+/// Says so if other users can list the directory: once, as the engine locks it, though
+/// the log file creates it too.
+fn warn_if_listable(dir: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(metadata) = fs::metadata(dir) else {
+            return;
+        };
         let mode = metadata.mode() & 0o777;
         if mode & 0o077 != 0 {
             tracing::warn!(
@@ -133,7 +153,6 @@ fn check_data_dir_owner(dir: &Path) -> Result<()> {
     }
     #[cfg(not(unix))]
     let _ = dir;
-    Ok(())
 }
 
 fn project_dirs() -> Option<ProjectDirs> {
