@@ -60,6 +60,9 @@ pub struct Settings {
     /// Closing the last window leaves the app running, syncing and sending, until it is
     /// quit (see `Resident`).
     pub keep_running: bool,
+    /// New mail in an INBOX shows a system notification while the main window isn't in
+    /// front (see `new_mail`).
+    pub notify_new_mail: bool,
 }
 
 impl Default for Settings {
@@ -71,6 +74,7 @@ impl Default for Settings {
             text_size: DEFAULT_TEXT_SIZE,
             mark_read_on_open: true,
             keep_running: true,
+            notify_new_mail: true,
         }
     }
 }

@@ -20,6 +20,16 @@ const SUMMARY_COLUMNS: &str = "m.id, m.account_id, m.folder_id, m.subject, m.fro
     m.snippet, m.flags, m.has_attachments,
     (SELECT group_concat(folder_id) FROM message_labels WHERE message_id = m.id) AS labels";
 
+/// Of `messages m`, those among `:ids` that are unread (`:seen` is `\Seen`) in one of
+/// `:inboxes` (JSON arrays both). On Gmail INBOX is a label, which shows messages in All
+/// Mail.
+const UNREAD_IN_INBOX: &str = "m.id IN (SELECT value FROM json_each(:ids)) AND m.flags & :seen = 0
+    AND (m.folder_id IN (SELECT value FROM json_each(:inboxes))
+         OR (m.folder_id IN all_mail
+             AND EXISTS (SELECT 1 FROM message_labels
+                         WHERE message_id = m.id
+                           AND folder_id IN (SELECT value FROM json_each(:inboxes)))))";
+
 /// The order of lists and search results, as [`MessageCursor`] describes it.
 /// `list_date` is `date` with a missing one sorted last.
 const NEWEST_FIRST: &str = "list_date DESC, id DESC";
@@ -75,6 +85,18 @@ pub(crate) fn shown(
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
+
+/// See [`Messages::new_mail`].
+static NEW_MAIL: LazyLock<String> = LazyLock::new(|| {
+    format!("SELECT m.id FROM messages m WHERE {UNREAD_IN_INBOX} AND m.uid >= :from ORDER BY m.id")
+});
+
+/// See [`Messages::unread_in_inbox`].
+static STILL_NEW: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "SELECT {SUMMARY_COLUMNS} FROM messages m WHERE {UNREAD_IN_INBOX} ORDER BY {NEWEST_FIRST}"
+    )
+});
 
 /// A location's messages, in `messages_folder_date`.
 static LIST_FOLDER: LazyLock<Page> =
@@ -396,27 +418,42 @@ impl<'c> Messages<'c> {
     }
 
     /// Of the rows `ids`, the new mail to tell the user about: at UID `from_uid` or above
-    /// (the folder's UIDNEXT before they arrived), unread and in `inbox`. On Gmail INBOX
-    /// is a label, which shows messages in All Mail.
+    /// (the folder's UIDNEXT before they arrived), and [`UNREAD_IN_INBOX`].
     pub fn new_mail(
         &self,
         ids: &[MessageId],
         from_uid: u32,
         inbox: FolderId,
     ) -> Result<Vec<MessageId>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT m.id FROM messages m
-             WHERE m.id IN (SELECT value FROM json_each(?1)) AND m.uid >= ?2
-               AND m.flags & ?3 = 0
-               AND (m.folder_id = ?4
-                    OR (m.folder_id IN all_mail
-                        AND EXISTS (SELECT 1 FROM message_labels
-                                    WHERE message_id = m.id AND folder_id = ?4)))
-             ORDER BY m.id",
+        let mut stmt = self.conn.prepare_cached(&NEW_MAIL)?;
+        let rows = stmt.query_map(
+            named_params! {
+                ":ids": to_json(ids),
+                ":seen": Flags::SEEN.bits(),
+                ":inboxes": to_json(&[inbox]),
+                ":from": from_uid,
+            },
+            |r| Ok(MessageId(r.get(0)?)),
         )?;
-        let ids: Vec<i64> = ids.iter().map(|id| id.0).collect();
-        let params = params![to_json(&ids), from_uid, Flags::SEEN.bits(), inbox.0];
-        let rows = stmt.query_map(params, |r| Ok(MessageId(r.get(0)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Of the rows `ids`, those still [`UNREAD_IN_INBOX`] of `inboxes`, newest first: of
+    /// new mail announced a moment ago, what is still worth telling the user about.
+    pub fn unread_in_inbox(
+        &self,
+        ids: &[MessageId],
+        inboxes: &[FolderId],
+    ) -> Result<Vec<MessageSummary>> {
+        let mut stmt = self.conn.prepare_cached(&STILL_NEW)?;
+        let rows = stmt.query_map(
+            named_params! {
+                ":ids": to_json(ids),
+                ":seen": Flags::SEEN.bits(),
+                ":inboxes": to_json(inboxes),
+            },
+            summary_from_row,
+        )?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -2072,6 +2109,42 @@ mod tests {
             .unwrap();
         // Not 4, from before UIDNEXT; not the read one, nor the one in Archive.
         assert_eq!(new, [added[1], added[3]]);
+    }
+
+    #[test]
+    fn mail_still_new_is_unread_in_inbox_newest_first() {
+        let store = test_util::store();
+        let account = test_util::account(&store, "a@example.com");
+        let f = folders(
+            &store,
+            account,
+            &[("INBOX", Some(FolderRole::Inbox)), ("Archive", None)],
+        );
+        let (inbox, archive) = (f["INBOX"], f["Archive"]);
+        let added = inserted(
+            &store,
+            account,
+            inbox,
+            &[
+                message(4, Some(40), Flags::empty()),
+                message(5, Some(50), Flags::SEEN),
+                message(6, Some(60), Flags::empty()),
+            ],
+        );
+        let elsewhere = inserted(
+            &store,
+            account,
+            archive,
+            &[message(7, Some(70), Flags::empty())],
+        );
+        let still_new = store
+            .read(|db| {
+                db.messages()
+                    .unread_in_inbox(&[added.clone(), elsewhere].concat(), &[inbox])
+            })
+            .unwrap();
+        let ids: Vec<_> = still_new.iter().map(|m| m.id).collect();
+        assert_eq!(ids, [added[2], added[0]]);
     }
 
     #[test]

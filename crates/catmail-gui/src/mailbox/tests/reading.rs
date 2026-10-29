@@ -364,6 +364,94 @@ fn shows_what_a_sync_brings_without_losing_the_selection(cx: &mut TestAppContext
 }
 
 #[gpui_kit::test]
+fn choosing_a_message_gives_up_revealing_one_still_to_come(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| !mailbox.read(cx).messages.read(cx).delegate().is_loading())
+    });
+    let chosen = cx.read(|cx| listed(&mailbox, cx)[0].id);
+    // Stored, and not listed yet: the window hasn't run since.
+    mail.deliver_and_sync("Lunch?");
+    let inbox = pollster::block_on(mail.client.find_folder(mail.account(), "INBOX"))
+        .unwrap()
+        .unwrap();
+    let stored = pollster::block_on(mail.client.list_messages(inbox.id, 100, None)).unwrap();
+    let lunch = stored
+        .iter()
+        .find(|m| m.subject.as_deref() == Some("Lunch?"))
+        .unwrap()
+        .id;
+    assert!(cx.read(|cx| find(&mailbox, "Lunch?", cx).is_none()));
+
+    // A notification for it is clicked, then another message before the list has it.
+    cx.update_window(window, |_, window, cx| {
+        let list = mailbox.read(cx).messages.clone();
+        list.update(cx, |list, cx| message_list::reveal(list, lunch, window, cx));
+        window.render_frame(cx);
+        window.click(("message", chosen.0 as u64), cx);
+    })
+    .unwrap();
+    // The reader shows a message once its body has loaded.
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| {
+            find(&mailbox, "Lunch?", cx).is_some() && shown_in_reader(&mailbox, cx).is_some()
+        })
+    });
+    cx.read(|cx| {
+        let list = mailbox.read(cx).messages.read(cx);
+        assert_eq!(list.delegate().selected_message().unwrap().id, chosen);
+        assert_eq!(shown_in_reader(&mailbox, cx), Some(chosen));
+    });
+}
+
+#[gpui_kit::test]
+fn a_message_revealed_during_a_read_from_before_it_came_opens_after(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| !mailbox.read(cx).messages.read(cx).delegate().is_loading())
+    });
+    // A read starts, and the engine makes it while the window waits to hear back.
+    cx.update_window(window, |_, window, cx| {
+        let list = mailbox.read(cx).messages.clone();
+        list.update(cx, |list, cx| message_list::refresh(list, window, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    std::thread::sleep(Duration::from_millis(100));
+    // Then the mail arrives, and its notification is clicked before that read is in.
+    mail.deliver_and_sync("Lunch?");
+    let inbox = pollster::block_on(mail.client.find_folder(mail.account(), "INBOX"))
+        .unwrap()
+        .unwrap();
+    let stored = pollster::block_on(mail.client.list_messages(inbox.id, 100, None)).unwrap();
+    let lunch = stored
+        .iter()
+        .find(|m| m.subject.as_deref() == Some("Lunch?"))
+        .unwrap()
+        .id;
+    cx.update_window(window, |_, window, cx| {
+        let list = mailbox.read(cx).messages.clone();
+        list.update(cx, |list, cx| message_list::reveal(list, lunch, window, cx));
+    })
+    .unwrap();
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| shown_in_reader(&mailbox, cx) == Some(lunch))
+    });
+    cx.read(|cx| {
+        let list = mailbox.read(cx).messages.read(cx);
+        assert_eq!(list.delegate().selected_message().unwrap().id, lunch);
+    });
+}
+
+#[gpui_kit::test]
 fn opening_a_folder_syncs_it(cx: &mut TestAppContext) {
     let mail = TestMail::start();
     let (window, mailbox) = open(cx, &mail);

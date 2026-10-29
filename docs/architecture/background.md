@@ -2,7 +2,7 @@
 
 [← 架构](../architecture.md)
 
-> 状态：常驻与单实例唤起、睡眠唤醒、引擎的新邮件事件已实现（#106）；通知（#82）、托盘（#107 / #108 /
+> 状态：常驻与单实例唤起、睡眠唤醒、新邮件事件与系统通知已实现（#106、#82）；托盘（#107 / #108 /
 > #109）、开机启动尚未实现，这几个小节是设计。
 
 GUI 关掉主窗口后继续同步、发信、提醒新邮件，并能从托盘、再次启动或通知回到窗口。
@@ -52,7 +52,11 @@ GUI 关掉主窗口后继续同步、发信、提醒新邮件，并能从托盘�
 
 - 打开中、已打开（`MailClient`）或打开失败的引擎；主窗口从它取，写信窗口和设置从主窗口拿到。
 - 主窗口（`MainWindow`：引擎打开前留空，失败时显示原因，之后是 `Mailbox`）和显示模式的切换。
-- 唤起服务送来的请求（下一节）。以后还有不依赖窗口的事件订阅，驱动通知和托盘的未读数。
+- 唤起服务送来的请求（下一节）。
+- 窗口最后在的显示环境（`display`）：点击通知时没有别的请求方，常驻时就切回这里。
+
+不依赖窗口的事件订阅放在各自的全局里，引擎打开时启动：新邮件通知（`Notifier`，见[新邮件](#新邮件)），
+以后还有托盘的未读数。
 
 主窗口关闭时整个 `Mailbox` 被 drop：列表、读信区（Blitz 每个文档一个线程）、图片都随之释放。重新
 打开时新建 `Mailbox`，`Resident` 只记住上次选中的 `Place`（`Mailbox` 释放时记下，新的
@@ -169,10 +173,42 @@ data"。macOS 由系统保证单实例、Dock 点击经 GPUI 的 `on_reopen`；L
 
 `catmail watch` 为它打印一行"N new messages"（`--json` 是 `new_mail` 事件，带邮件 id）。
 
-前端收到后重读这些邮件，仍未读、仍在 INBOX 的才提醒；几封以内逐封通知，多了合成一条"N 封新邮件"。
-主窗口获得焦点时不发通知。点击通知唤起主窗口并打开那封邮件。通知用 GPUI 的
-`show_system_notification`，`set_app_identity` 设置应用标识（Linux 的 desktop 文件 id、Windows 的
-AppUserModelID）。
+### 系统通知
+
+GUI 的 `Notifier`（`catmail-gui/src/new_mail.rs`）是应用级的全局，引擎打开时订阅事件，常驻时也在：
+
+- **先攒 1 秒再说**（`GATHER`）。一次同步按批提交、每批一个 `NewMail`，醒来后各账户又同时同步；
+  不攒的话一阵新邮件会弹出好几条"N 封新邮件"。Linux 上 GPUI 不支持按 tag 替换通知，替换不了已经弹出的。
+- **主窗口在前台时不说**（`Resident::main_is_active`，攒够时判断，这时就不再重读）。写信窗口在前台照发。
+- **说之前重读**：`MailClient::unread_in_inbox` 用一条查询挑出各账户仍未读、仍在 INBOX（Gmail：仍带
+  INBOX 标签）的，新的在前，与 `Messages::new_mail` 用同一个条件（`UNREAD_IN_INBOX`），攒的这一秒里在
+  别处读过、移走的不再提醒。
+- 三封以内逐封通知（标题是发件人，正文是主题），按从旧到新弹出，最新的在最上面；多了合成一条
+  "N new messages"，正文是不重复的发件人。Linux 上正文是标记（通知服务支持 `body-markup` 时），
+  GPUI 原样交给它，所以转义 `&`、`<`、`>`：邮件里的 `<b>`、`<a href>` 照字面显示，不变粗、不成链接。
+  标题按规范是纯文本，不转义。
+- 设置"Notify about new mail"（Settings › General）默认开，关掉时攒够也不重读、不发。
+
+**点击**：通知的 tag 记着它说的是什么（`Target`：`new-mail/账户/邮件`、`new-mail/账户`，多个账户的合成
+通知是 `new-mail`），GPUI 把它随点击送回。它变成一个去处（`Destination::Inbox { account, message }`），
+交给 `Resident::show_at`：主窗口开着就交给它的 `Mailbox::go_to`；没开就记在 `Resident` 里，与关窗时记下的
+位置是同一个（`reopen`），在窗口最后的显示环境上打开主窗口，新的 `Mailbox` 打开时转过去。哪个是 INBOX
+由 `Mailbox` 按它读到的文件夹决定（`AccountFolders::with_role`），与它默认打开的收件箱同一个；文件夹还没
+读完就等读完再转。邮件可能刚到、列表还没读到它：列表记着要选的那封，读到时选中
+（`message_list::reveal`）；正在进行的那次读可能早于它到达，只有点击之后开始的读也没有它（不在第一页或
+已经离开），才放弃、只打开 INBOX。这之前用户自己选了别的邮件，就以用户的为准。
+
+**应用标识**：`set_app_identity("dev.CatMail.CatMail", "cat-mail")`，在第一个窗口之前；标识与数据、
+配置目录的限定名相同。Windows 上它是 AppUserModelID，Linux 上 GPUI 只用名字（通知的 app name），
+不带 desktop 文件 id 的提示；macOS 的通知要有 bundle，打包时（开机启动之后）再看。
+
+已知的限制，都在 GPUI 的 Linux 实现里：
+
+- 点击时通知服务给的激活令牌（`ActivationToken` 信号）没有传出来，Wayland 上由点击打开或激活的窗口
+  可能只被标成"需要注意"，而不是来到前台。
+- 不能收回通知（`dismiss_system_notification` 什么也不做）：已经读过的邮件的通知留在通知中心里，
+  直到它自己过期。点击已经读过或移走的邮件的通知，仍打开 INBOX。
+- 每条通知一个线程，等到它被点击或关闭（过期也算关闭）；通知中心一直留着的通知，线程也一直在。
 
 ## 托盘
 
@@ -211,7 +247,7 @@ GUI 常驻就一直持有数据目录锁，CLI 更常遇到 `AlreadyRunning`。C
    headless；主窗口可以反复关闭、重开（#106）。
 2. ✅ 单实例与唤起：数据目录里的 socket、激活令牌（#106）。
 3. ✅ 引擎：`resume()`、`Event::NewMail`，各有假服务器测试；GUI 在系统唤醒时调用 `resume()`（#106）。
-4. 系统通知（#82）。
+4. ✅ 系统通知（#82）。
 5. 各平台托盘（#107、#108、#109）。
 6. `--background` 与开机启动（新 issue）。
 

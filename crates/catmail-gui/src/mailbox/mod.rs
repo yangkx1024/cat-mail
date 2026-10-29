@@ -63,6 +63,17 @@ pub enum Place {
     Outbox(AccountId),
 }
 
+/// Where to take the mailbox: a place, or an account's INBOX and a message to open there
+/// (what a notification was about), which the mailbox finds among its folders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Destination {
+    Place(Place),
+    Inbox {
+        account: AccountId,
+        message: Option<MessageId>,
+    },
+}
+
 impl Place {
     fn source(self) -> Source {
         match self {
@@ -119,8 +130,9 @@ pub struct Mailbox {
     /// `None` until the first load finishes.
     pub(crate) accounts: Option<Vec<AccountEntry>>,
     pub(crate) place: Option<Place>,
-    /// Where to start instead of the first inbox, if it is still there.
-    reopen_at: Option<Place>,
+    /// Where to start instead of the first inbox, if it is still there, and the message
+    /// to open there.
+    reopen_at: Option<Destination>,
     /// Syncs in flight.
     pub(crate) syncing: usize,
     /// [`SYNC_ON_OPEN_AFTER`], except in tests that open folders synced just now.
@@ -243,10 +255,50 @@ impl Mailbox {
         mailbox
     }
 
-    /// Starts at `place` rather than the first inbox: where the main window was when it
-    /// was last closed. Before the first load.
-    pub fn reopen_at(&mut self, place: Option<Place>) {
-        self.reopen_at = place;
+    /// Starts at `to` rather than the first inbox: where the main window was when it was
+    /// last closed, or what a notification was about. Before the first load.
+    pub fn reopen_at(&mut self, to: Option<Destination>) {
+        self.reopen_at = to;
+    }
+
+    /// Goes to `to` if it is still there, once the folders are loaded.
+    pub fn go_to(&mut self, to: Destination, window: &mut Window, cx: &mut Context<Self>) {
+        if self.accounts.is_none() {
+            self.reopen_at = Some(to);
+        } else if let Some((place, message)) = self.find(to) {
+            self.show_at(place, message, window, cx);
+        }
+    }
+
+    /// The place `to` is, if still there, and the message to open there.
+    fn find(&self, to: Destination) -> Option<(Place, Option<MessageId>)> {
+        let accounts = self.accounts.as_deref()?;
+        match to {
+            Destination::Place(place) => place.account_in(accounts).map(|_| (place, None)),
+            Destination::Inbox { account, message } => {
+                let inbox = self
+                    .account(account)?
+                    .folders
+                    .with_role(FolderRole::Inbox)?;
+                Some((Place::Folder(inbox.id), message))
+            }
+        }
+    }
+
+    /// Selects `place`, and opens `message` there once it is listed.
+    fn show_at(
+        &mut self,
+        place: Place,
+        message: Option<MessageId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_place(Some(place), window, cx);
+        if let Some(message) = message {
+            self.messages.update(cx, |list, cx| {
+                message_list::reveal(list, message, window, cx)
+            });
+        }
     }
 
     fn on_list_event(
@@ -256,6 +308,9 @@ impl Mailbox {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A row selected now, by the user or by the list itself, ends the wait for a
+        // message to reveal: the user's choice wins over a notification clicked before.
+        list.update(cx, |list, _| list.delegate_mut().forget_reveal());
         let (ix, confirmed) = match event {
             ListEvent::Select(ix) => (*ix, false),
             ListEvent::Confirm(ix) => (*ix, true),
@@ -462,10 +517,6 @@ impl Mailbox {
         let still_there = self
             .place
             .is_some_and(|place| place.account_in(&accounts).is_some());
-        let reopen_at = self
-            .reopen_at
-            .take()
-            .filter(|place| place.account_in(&accounts).is_some());
         let labels = accounts
             .iter()
             .flat_map(|a| a.folders.user_labels())
@@ -477,8 +528,8 @@ impl Mailbox {
             }
         });
         self.accounts = Some(accounts);
-        if let Some(place) = reopen_at {
-            self.select_place(Some(place), window, cx);
+        if let Some((place, message)) = self.reopen_at.take().and_then(|to| self.find(to)) {
+            self.show_at(place, message, window, cx);
         } else if !still_there {
             let inbox = self
                 .accounts
