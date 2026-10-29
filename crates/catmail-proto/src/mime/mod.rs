@@ -5,6 +5,7 @@
 mod build;
 mod content;
 mod css;
+mod dark;
 mod html;
 mod structure;
 mod tokens;
@@ -17,9 +18,10 @@ use mail_parser::{HeaderValue, MessageParser};
 
 pub use build::{InvalidHeader, Outgoing, OutgoingAttachment, build_message};
 pub use content::{Content, Part, content_id_from_url, decode_transfer, parse_message};
+pub use dark::DarkPalette;
 pub use html::{
     ColorUsage, InlineImage, MAX_REMOTE_IMAGES, color_usage, embed_inline_images, image_sources,
-    remote_image_url, remote_image_urls, sanitize_html,
+    recolor_html, remote_image_url, remote_image_urls, sanitize_html,
 };
 pub use structure::{Leaf, MimeNode, Params};
 

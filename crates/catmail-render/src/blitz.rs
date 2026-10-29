@@ -55,7 +55,12 @@ pub(crate) fn open(source: &Source, appearance: &Appearance, scale: f32) -> Box<
         font_ctx: Some(fonts),
         ..DocumentConfig::default()
     };
-    let document = HtmlDocument::from_html(&source.html, config).into_inner();
+    let recolored = appearance
+        .recolor
+        .as_ref()
+        .map(|recolor| recolor(&source.html));
+    let html = recolored.as_deref().unwrap_or(&source.html);
+    let document = HtmlDocument::from_html(html, config).into_inner();
     Box::new(BlitzPage {
         document,
         images,

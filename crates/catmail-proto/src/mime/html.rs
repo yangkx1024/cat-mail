@@ -9,6 +9,7 @@ use base64::engine::general_purpose::STANDARD;
 use html5ever::tokenizer::{TagKind, Token, TokenSink, TokenSinkResult};
 
 use super::content_id_from_url;
+use super::dark::{DarkPalette, Role};
 use super::{css, tokens};
 
 /// Presentation attributes that table-based email layouts depend on.
@@ -32,11 +33,12 @@ const LAYOUT_ATTRIBUTES: &[&str] = &[
 /// Rewrites an `img src` value, or keeps it (`None`).
 type ImageHook = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
-static SANITIZER: LazyLock<Builder<'static>> = LazyLock::new(|| sanitizer(None));
+static SANITIZER: LazyLock<Builder<'static>> = LazyLock::new(|| sanitizer(None, None));
 
 /// The one sanitizer configuration; `on_image` lets a renderer see or replace image
-/// sources during the same parse, instead of scanning the HTML text afterwards.
-fn sanitizer(on_image: Option<ImageHook>) -> Builder<'static> {
+/// sources during the same parse, instead of scanning the HTML text afterwards. With a
+/// palette, colors in attributes are moved for a dark page.
+fn sanitizer(on_image: Option<ImageHook>, recolor: Option<DarkPalette>) -> Builder<'static> {
     let mut builder = Builder::default();
     builder
         .add_tags(["font"])
@@ -57,11 +59,26 @@ fn sanitizer(on_image: Option<ImageHook>) -> Builder<'static> {
                 on_image.as_ref().filter(|_| image).and_then(|f| f(value))
             {
                 Some(Cow::Owned(replaced))
+            } else if let Some(recolored) =
+                recolor.and_then(|palette| recolor_attribute(palette, attribute, value))
+            {
+                Some(Cow::Owned(recolored))
             } else {
                 Some(Cow::Borrowed(value))
             }
         });
     builder
+}
+
+/// An attribute's value with its colors moved for a dark page, or `None` for one that
+/// has no colors.
+fn recolor_attribute(palette: DarkPalette, attribute: &str, value: &str) -> Option<String> {
+    match attribute {
+        "style" => Some(css::recolor_style(value, palette)),
+        "bgcolor" => palette.recolor_attribute(value, Role::Surface),
+        "color" => palette.recolor_attribute(value, Role::Text),
+        _ => None,
+    }
 }
 
 /// Whether `value` is a `data:` URL, as judged by the parser ammonia checks schemes with
@@ -80,13 +97,22 @@ fn is_data_url(value: &str) -> bool {
 /// Image sources (remote URLs, `cid:`, `data:`) are kept: whether remote images load
 /// is the renderer's decision, and it should block them by default.
 pub fn sanitize_html(html: &str) -> String {
-    clean(&SANITIZER, html)
+    clean(&SANITIZER, html, None)
+}
+
+/// HTML that [`sanitize_html`] produced, with its own colors moved for a dark page with
+/// `palette`'s colors, as Gmail and Outlook show mail written for white ([`dark`]
+/// (super::dark)): in its style sheets, `style` attributes, and `bgcolor` and `color`
+/// attributes. For a message that sets colors ([`ColorUsage::Light`]); one with dark
+/// styles of its own uses them instead.
+pub fn recolor_html(html: &str, palette: DarkPalette) -> String {
+    clean(&sanitizer(None, Some(palette)), html, Some(palette))
 }
 
 /// The sanitizer's output with the message's style sheets in front. ammonia drops every
 /// `<style>` with its content: it doesn't look inside, and writes raw text back as it is.
-fn clean(builder: &Builder<'_>, html: &str) -> String {
-    let sheet = css::sanitize(&scan(html, false).sheets).css;
+fn clean(builder: &Builder<'_>, html: &str, recolor: Option<DarkPalette>) -> String {
+    let sheet = css::sanitize(&scan(html, false).sheets, recolor).css;
     let mut out = String::new();
     if !sheet.is_empty() {
         out.push_str("<style>");
@@ -111,7 +137,7 @@ pub enum ColorUsage {
 /// How HTML that [`sanitize_html`] produced colors itself.
 pub fn color_usage(html: &str) -> ColorUsage {
     let scanned = scan(html, true);
-    let sheet = css::sanitize(&scanned.sheets);
+    let sheet = css::sanitize(&scanned.sheets, None);
     if sheet.adapts_to_dark {
         ColorUsage::Adaptive
     } else if sheet.sets_colors || scanned.colors {
@@ -222,10 +248,13 @@ fn scan(html: &str, colors: bool) -> Scan {
 pub fn image_sources(html: &str) -> Vec<String> {
     let found = Arc::new(Mutex::new(Vec::new()));
     let sink = found.clone();
-    sanitizer(Some(Box::new(move |src| {
-        sink.lock().unwrap().push(src.to_owned());
-        None
-    })))
+    sanitizer(
+        Some(Box::new(move |src| {
+            sink.lock().unwrap().push(src.to_owned());
+            None
+        })),
+        None,
+    )
     .clean(html);
     Arc::try_unwrap(found).unwrap().into_inner().unwrap()
 }
@@ -273,15 +302,18 @@ pub struct InlineImage {
 /// `cid:` (a browser). The values ammonia's filter returns are not checked again, so the
 /// URL is built here rather than taken from the caller.
 pub fn embed_inline_images(html: &str, inline: HashMap<String, InlineImage>) -> String {
-    let embedding = sanitizer(Some(Box::new(move |src| {
-        let image = content_id_from_url(src).and_then(|id| inline.get(&id))?;
-        Some(format!(
-            "data:{};base64,{}",
-            media_type(&image.mime_type),
-            STANDARD.encode(&image.bytes)
-        ))
-    })));
-    clean(&embedding, html)
+    let embedding = sanitizer(
+        Some(Box::new(move |src| {
+            let image = content_id_from_url(src).and_then(|id| inline.get(&id))?;
+            Some(format!(
+                "data:{};base64,{}",
+                media_type(&image.mime_type),
+                STANDARD.encode(&image.bytes)
+            ))
+        })),
+        None,
+    );
+    clean(&embedding, html, None)
 }
 
 /// The MIME type as it may appear in a `data:` URL; it comes from the message, so anything
@@ -370,6 +402,43 @@ mod tests {
             )),
             ColorUsage::Adaptive
         );
+    }
+
+    #[test]
+    fn moves_colors_for_a_dark_page() {
+        let palette = DarkPalette {
+            background: [0x20; 3],
+            foreground: [0xe0; 3],
+        };
+        let clean = sanitize_html(
+            r##"<style>.a{color:#000}</style><table bgcolor="#ffffff"><tr>
+            <td style="background:white;padding:4px"><font color="black">x</font>
+            <img src="cid:logo@x" width="10"></td></tr></table>"##,
+        );
+        let dark = recolor_html(&clean, palette);
+        assert!(
+            dark.starts_with("<style>.a{color:#e0e0e0;}</style>"),
+            "{dark}"
+        );
+        for moved in [
+            r##"bgcolor="#202020""##,
+            r#"style="background:#202020;padding:4px;""#,
+            r##"color="#e0e0e0""##,
+            r#"src="cid:logo@x" width="10""#,
+        ] {
+            assert!(dark.contains(moved), "{moved}: {dark}");
+        }
+        // A message without colors is left as it was.
+        let plain = sanitize_html("<style>p{margin:0;}</style><p align=\"center\">x</p>");
+        assert_eq!(recolor_html(&plain, palette), plain);
+        // A rewritten style attribute is still only an attribute.
+        let dark = recolor_html(
+            &sanitize_html(
+                r#"<p style="color:#000;content:'&quot;><script>alert(1)</script>'">x</p>"#,
+            ),
+            palette,
+        );
+        assert!(!dark.contains("<script"), "{dark}");
     }
 
     #[test]

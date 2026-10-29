@@ -10,9 +10,9 @@
 //! only once the strips on screen are painted for it, all in one frame, so the page never
 //! goes blank or shows strips of two layouts at once.
 //!
-//! In a dark theme the page is dark too when the message allows it ([`Look`]): it sets
-//! no colors, or has dark styles of its own. A message colored for a white page keeps
-//! its white, as a browser would show it.
+//! In a dark theme the page is dark too ([`Look`]): a message with dark styles of its own
+//! uses them, one colored for a white page has its colors moved for a dark one
+//! (`recolor_html`), as Gmail shows it.
 //!
 //! The page zooms with the window's text size, as a browser page zooms: everything on it,
 //! since most mail sets its own font sizes in pixels.
@@ -30,10 +30,10 @@ use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::Duration;
 
-use catmail_core::html::ColorUsage;
+use catmail_core::html::{ColorUsage, DarkPalette, recolor_html};
 use catmail_render::{
-    Appearance, Document, Engine, Hit, Rect, Resolver, SelectionEnd, Source, Span, Stopped, Tile,
-    Unit,
+    Appearance, Document, Engine, Hit, Recolor, Rect, Resolver, SelectionEnd, Source, Span,
+    Stopped, Tile, Unit,
 };
 use gpui_kit::base::input::{Copy, SelectAll};
 use gpui_kit::base::{
@@ -72,46 +72,53 @@ const BROWSER_TEXT_SIZE: f32 = 16.0;
 /// out. The document is given up then (its thread ends when done), and the page says so.
 const PATIENCE: Duration = Duration::from_secs(10);
 
-/// The theme colors a page takes when its message lets it.
+/// The theme colors a dark page takes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Look {
     background: Hsla,
     foreground: Hsla,
     link: Hsla,
+    /// The message colors itself for a white page: its colors are moved to the theme's.
+    recolor: bool,
 }
 
 impl Look {
-    /// The theme's, if the page is shown dark; `None` for a browser's light page.
+    /// The theme's, in a dark theme; `None` for a browser's light page.
     fn of(colors: ColorUsage, theme: &Theme) -> Option<Self> {
-        shows_dark(colors, theme.is_dark()).then(|| Self {
+        theme.is_dark().then(|| Self {
             background: theme.background,
             foreground: theme.foreground,
             link: theme.link,
+            recolor: colors == ColorUsage::Light,
         })
     }
 
     /// For the engine: dark, on the pane's background, the theme's colors under the
-    /// message's own.
+    /// message's own, which are moved toward them if set for white.
     fn appearance(self) -> Appearance {
+        // `a[href]`: Blitz's own sheet colors links with it, and would win over `a`.
         let sheet = format!(
-            "html {{ color: {}; background: {}; }} a {{ color: {}; }}",
+            "html {{ color: {}; background: {}; }} a[href] {{ color: {}; }}",
             rgb(self.foreground).to_hex(),
             rgb(self.background).to_hex(),
             rgb(self.link).to_hex(),
         );
         let canvas = rgb(self.background);
+        let text = rgb(self.foreground);
+        let palette = DarkPalette {
+            background: [canvas.r, canvas.g, canvas.b],
+            foreground: [text.r, text.g, text.b],
+        };
+        let recolor: Option<Recolor> = self
+            .recolor
+            .then(|| Arc::new(move |html: &str| recolor_html(html, palette)) as Recolor);
         Appearance {
             dark: true,
-            canvas: [canvas.r, canvas.g, canvas.b],
+            canvas: palette.background,
             sheet: sheet.into(),
+            recolor,
         }
     }
-}
-
-/// Whether a message's page is dark in a theme: not when it colors itself for white,
-/// which dark text on a dark page would make unreadable.
-fn shows_dark(colors: ColorUsage, dark_theme: bool) -> bool {
-    dark_theme && colors != ColorUsage::Light
 }
 
 /// A document as the engine has it, and how it was opened.
@@ -1263,18 +1270,41 @@ mod tests {
         assert_eq!(cx.opened_url().as_deref(), Some("https://example.com/"));
     }
 
-    fn bounds(top: f32, height: f32) -> Bounds<Pixels> {
-        Bounds::new(point(px(0.), px(top)), size(px(600.), px(height)))
+    #[test]
+    fn a_dark_page_takes_the_themes_colors() {
+        let look = Look {
+            background: gpui_kit::rgb(0x202020).into(),
+            foreground: gpui_kit::rgb(0xe0e0e0).into(),
+            link: gpui_kit::rgb(0x40a0ff).into(),
+            recolor: true,
+        };
+        // A link the message leaves alone, and a white cell it colors.
+        let html = r##"<body style="margin:0">
+            <a href="https://example.com/" style="display:block;height:20px;
+                background:currentColor"></a>
+            <table width="100%" bgcolor="#ffffff"><tr><td height="20"></td></tr></table>
+            </body>"##;
+        let source = Source {
+            html: html.into(),
+            images: Arc::new(|_| None),
+        };
+        let document = Document::open(Engine::Blitz, source, look.appearance(), 1.0).unwrap();
+        pollster::block_on(document.layout(100.0)).unwrap();
+        let tile = pollster::block_on(document.paint(100.0, 0.0, 40.0)).unwrap();
+        let bgra = |y: u32| {
+            let at = (y * tile.width + 50) as usize * 4;
+            <[u8; 4]>::try_from(&tile.bgra[at..at + 4]).unwrap()
+        };
+        assert_eq!(bgra(10), [0xff, 0xa0, 0x40, 255]);
+        let cell = bgra(30);
+        assert!(
+            cell.iter().take(3).all(|&c| c.abs_diff(0x20) <= 1),
+            "{cell:?}"
+        );
     }
 
-    #[test]
-    fn a_page_is_dark_only_if_its_message_allows_it() {
-        for colors in [ColorUsage::Unset, ColorUsage::Light, ColorUsage::Adaptive] {
-            assert!(!shows_dark(colors, false), "{colors:?}");
-        }
-        assert!(shows_dark(ColorUsage::Unset, true));
-        assert!(shows_dark(ColorUsage::Adaptive, true));
-        assert!(!shows_dark(ColorUsage::Light, true));
+    fn bounds(top: f32, height: f32) -> Bounds<Pixels> {
+        Bounds::new(point(px(0.), px(top)), size(px(600.), px(height)))
     }
 
     #[test]
