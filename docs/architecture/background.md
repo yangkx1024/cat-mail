@@ -233,8 +233,9 @@ GUI 的 `Tray`（`catmail-gui/src/tray/`）是应用级的全局，引擎打开�
   - 打开：`Resident::show_at`，与点击通知相同。
   - 写邮件：主窗口开着就在它里面 `new_message`（与 Ctrl N 相同，用当前账户）；关着就记在 `Resident`
     里，打开主窗口时交给新的 `Mailbox`（`Resident::adopt`，与要去的位置一起），它读完文件夹后再写。
-  - 同步：主窗口开着就走它的同步，进度和失败显示在窗口里；关着就在后台依次同步各账户，失败只记日志，
-    回到窗口时显示为账户的状态。
+  - 同步：`MailClient::sync_now`，不论主窗口开着与否，与 Sync 按钮、Ctrl R 相同。由后台同步来做，
+    进度和失败是账户的状态，回到窗口时照样显示（见
+    [同步 / 后台同步](sync.md#后台同步与-idle)）。
   - Quit：`Resident::quit`，与 Ctrl Q 相同。
 - **Linux** 用 `ksni`（StatusNotifierItem，纯 D-Bus，不依赖 GTK 主循环；`tray-icon` 在 Linux 上要
   GTK），用 `async-io` 运行时，与依赖树里已有的 zbus 同一个，不引入 tokio。KDE、装了 AppIndicator

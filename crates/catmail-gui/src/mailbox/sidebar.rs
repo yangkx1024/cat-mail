@@ -96,7 +96,7 @@ impl Mailbox {
                     .ghost()
                     .small()
                     .icon(Hero::ArrowPath)
-                    .loading(self.syncing > 0)
+                    .loading(self.syncing())
                     .disabled(accounts.is_empty())
                     .tooltip_with_action("Sync now", &Sync, Some(actions::MAILBOX))
                     .on_click(cx.listener(|this, _, window, cx| this.sync(window, cx))),
@@ -129,7 +129,7 @@ impl Mailbox {
     /// first account the engine can't get through to (each of its addresses that can't
     /// send).
     fn connection_note(&self) -> Option<SharedString> {
-        if self.syncing > 0 {
+        if self.syncing() {
             return Some("Syncing…".into());
         }
         self.accounts.as_deref()?.iter().find_map(|entry| {

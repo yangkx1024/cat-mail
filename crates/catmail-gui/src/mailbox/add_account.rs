@@ -2,7 +2,7 @@
 //! servers before anything is stored, so a typo leaves no account (or keyring entry)
 //! behind, as with `catmail account add`.
 
-use catmail_core::{Account, MailClient, NewAccount, Security, Verify};
+use catmail_core::{MailClient, NewAccount, Security, Verify};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, StyledExt as _, v_flex};
 use gpui_kit::{
@@ -13,8 +13,8 @@ use gpui_kit::{
 use crate::login_form::{self, LoginFields, LoginValues, ServerFields, ServerValues, Submit};
 
 pub enum AddAccountEvent {
-    /// The login worked and the account is stored; it has not been synced yet.
-    Added(Account),
+    /// The login worked and the account is stored; background sync syncs it.
+    Added,
     Cancelled,
 }
 
@@ -116,7 +116,7 @@ impl AddAccount {
         self.submit.start(
             |this: &mut Self| &mut this.submit,
             request,
-            |account, _, cx| cx.emit(AddAccountEvent::Added(account)),
+            |_, _, cx| cx.emit(AddAccountEvent::Added),
             window,
             cx,
         );

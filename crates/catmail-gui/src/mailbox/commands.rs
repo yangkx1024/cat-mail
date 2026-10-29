@@ -2,8 +2,7 @@
 //! all call these), writing, syncing and settings.
 
 use catmail_core::{
-    Account, AccountId, AccountMode, Flags, FolderId, MessageId, MessageSummary, OpKind, OpStatus,
-    PendingOp,
+    AccountId, AccountMode, Flags, FolderId, MessageId, MessageSummary, OpKind, OpStatus, PendingOp,
 };
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
@@ -36,67 +35,19 @@ pub(crate) fn report_failure<T: 'static>(
 }
 
 impl Mailbox {
-    /// Syncs every account, unless a sync is already running.
-    pub(crate) fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.syncing > 0 {
-            return;
-        }
-        let accounts: Vec<Account> = self
-            .accounts
-            .iter()
-            .flatten()
-            .map(|a| a.account.clone())
-            .collect();
-        self.sync_accounts(accounts, false, window, cx);
+    /// Syncs every account now. The engine's background sync does it: progress and
+    /// failures show as the accounts' status.
+    pub(super) fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        report_failure("sync", async move { client.sync_now().await }, window, cx);
     }
 
-    /// Syncs the accounts in turn; `initial` for accounts just added, whose first sync
-    /// background sync is already running (see `MailClient::initial_sync`). Progress
-    /// shows as it commits, through the engine's events; only failures are reported here.
-    pub(super) fn sync_accounts(
-        &mut self,
-        accounts: Vec<Account>,
-        initial: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.syncing += 1;
-        cx.notify();
-        let client = self.client.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let mut problems = Vec::new();
-            for account in accounts {
-                let synced = if initial {
-                    client.initial_sync(account.id).await
-                } else {
-                    client.sync_account(account.id).await
-                };
-                match synced {
-                    Ok(report) => {
-                        let failed = report.folders.iter().filter(|f| f.error.is_some()).count();
-                        if failed > 0 {
-                            problems.push(Notification::warning(format!(
-                                "{}: {failed} folder(s) couldn't be synced",
-                                account.email
-                            )));
-                        }
-                    }
-                    Err(e) => problems.push(Notification::error(format!(
-                        "Couldn't sync {}: {e}",
-                        account.email
-                    ))),
-                }
-            }
-            this.update_in(cx, |this, window, cx| {
-                this.syncing -= 1;
-                for problem in problems {
-                    window.push_notification(problem, cx);
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+    /// Whether an account is syncing every folder, as the engine says.
+    pub(crate) fn syncing(&self) -> bool {
+        self.accounts
+            .iter()
+            .flatten()
+            .any(|entry| entry.status.syncing)
     }
 
     /// Changes the server refused are undone locally by the engine; this says so, once

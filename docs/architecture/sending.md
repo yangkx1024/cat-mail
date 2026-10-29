@@ -101,7 +101,8 @@ outbox 里时，上传一份新的，再删除旧的：
   （`Engine::draft_edited`，按草稿），重启后没有记录的草稿直接上传。记录只在后台同步的一步**开始时**
   清掉已到期的（`forget_settled_drafts`，这一步会上传它们）；在一步进行中才到期的留到这一步之后，
   使下一步立即开始，否则它要等到下一次完整同步。用户要求的上传
-  （`replay_pending`、`sync_account`）不等，CLI 的行为不变。
+  （`replay_pending`、`sync_account`）不等，CLI 的行为不变；`sync_now` 由后台同步来做，同样等
+  （见[同步 / 后台同步](sync.md#后台同步与-idle)）。
 - **上传**：完整的 MIME（与发信同一个构建函数，但**保留 Bcc 头**，否则重新打开草稿会丢掉密送），
   flags 为 `\Draft \Seen`，每次一个新的 Message-ID。先 APPEND 新的、再删旧的，服务器上始终有一份。
   旧副本与新副本在同一文件夹、同一代际（APPENDUID 刚报告的 UIDVALIDITY）时，按 UID 经操作队列删除

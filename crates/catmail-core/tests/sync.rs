@@ -7,7 +7,7 @@ use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 
 mod common;
 
-use common::{Env, drain, env, env_added, env_built, folder_report, new_mail};
+use common::{Env, drain, env, env_added, env_built, folder_report, new_mail, status_changes};
 
 fn state_with(inbox_subjects: &[&str]) -> ServerState {
     let mut state = ServerState::new("alice", "pw");
@@ -1019,4 +1019,16 @@ async fn after_resuming_an_opened_folder_is_synced_again() {
     env.client.resume();
     let report = env.client.sync_folder(archive, fresh).await.unwrap();
     assert!(report.is_some(), "synced");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn syncing_now_needs_background_sync() {
+    let env = env(state_with(&["one"])).await;
+    let mut events = env.client.subscribe();
+    let error = env.client.sync_now().await.unwrap_err();
+    assert!(matches!(error, Error::NoBackgroundSync), "{error}");
+    // Nothing shows as syncing, with nobody to end it.
+    assert_eq!(env.client.account_status(env.account), Default::default());
+    assert_eq!(status_changes(&mut events, env.account), 0);
+    assert_eq!(env.fake.state().connections, 0);
 }

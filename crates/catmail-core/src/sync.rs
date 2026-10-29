@@ -39,6 +39,7 @@ use crate::{Error, Result, connection, ops};
 const FLAGS_WINDOW: usize = 5000;
 
 pub(crate) async fn sync_account(engine: Arc<Engine>, account_id: AccountId) -> Result<SyncReport> {
+    let began = Instant::now();
     // `run` takes the permit itself, folder by folder.
     let result = engine
         .cancellation(account_id)
@@ -49,22 +50,8 @@ pub(crate) async fn sync_account(engine: Arc<Engine>, account_id: AccountId) -> 
             Ok(report)
         })
         .await;
-    engine.report(account_id, Activity::Sync, &result);
+    engine.report(account_id, Activity::SyncBegun(began), &result);
     result
-}
-
-/// An account's first sync: background sync's, if it is running it, else one of its own.
-/// The one joined isn't recorded in the account's status again: it already was, and a
-/// newer outcome may have been since.
-pub(crate) async fn initial_sync(engine: Arc<Engine>, account_id: AccountId) -> Result<SyncReport> {
-    let joined = engine
-        .cancellation(account_id)
-        .run(async { Ok(engine.first_sync(account_id).await) })
-        .await?;
-    match joined {
-        Some(report) => Ok(report),
-        None => sync_account(engine, account_id).await,
-    }
 }
 
 /// Syncs one folder, after making queued local changes (and settled drafts) on the

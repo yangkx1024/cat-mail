@@ -10,7 +10,7 @@ use catmail_core::{
     RecvError, Verify,
 };
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
-use common::{Env, addr, drain, env, env_with, eventually, files, sparse};
+use common::{Env, addr, drain, env, env_with, eventually, files, sparse, status_changes};
 use mail_parser::{MessageParser, MimeHeaders};
 use tokio::sync::Semaphore;
 
@@ -518,14 +518,7 @@ async fn wrong_password_holds_the_queue_and_is_reported() {
         "{problem:?}"
     );
     assert_eq!(problem.failures, 2);
-    let changed = drain(&mut events)
-        .into_iter()
-        .filter(|e| {
-            *e == Event::AccountStatusChanged {
-                account: env.account,
-            }
-        })
-        .count();
+    let changed = status_changes(&mut events, env.account);
     assert_eq!(changed, 1, "announced once, not for each failure");
 
     env.smtp.state().faults.reject_login = false;

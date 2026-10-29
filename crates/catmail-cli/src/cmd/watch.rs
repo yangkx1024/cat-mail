@@ -95,9 +95,11 @@ async fn describe(
         )),
         // Sending happens in other commands, so only syncing.
         Event::AccountStatusChanged { account } => {
-            Some(match client.account_status(account).sync {
+            let status = client.account_status(account);
+            Some(match status.sync {
                 Some(problem) => format!("{}: can't sync: {}", email(account), problem.error),
-                None => format!("{}: syncing", email(account)),
+                None if status.syncing => format!("{}: syncing", email(account)),
+                None => format!("{}: synced", email(account)),
             })
         }
         _ => None,

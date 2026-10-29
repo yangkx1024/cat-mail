@@ -212,6 +212,10 @@ pub struct NewIdentity {
 /// only; an engine starts out knowing of no problem.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountStatus {
+    /// Every folder is being synced, and the user may be waiting for it: the first sync
+    /// since the engine started, or one asked for (`MailClient::sync_now`), until the
+    /// attempt ends, however it ends. Background sync's later syncs don't count.
+    pub syncing: bool,
     /// Syncing with the IMAP server failed.
     pub sync: Option<ServerProblem>,
     /// Reaching identities' SMTP servers to send failed, in identity order. The messages

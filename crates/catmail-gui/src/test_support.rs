@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use catmail_core::{
-    AccountId, Config, MailClient, MemorySecrets, NewAccount, Security, ServerConfig, Verify,
+    AccountId, Config, MailClient, MemorySecrets, NewAccount, Security, ServerConfig, SyncSchedule,
+    Verify,
 };
 use catmail_testkit::{
     FakeHttp, FakeImap, FakeMailbox, FakeSmtp, Reply, ServerState, SmtpState, response,
@@ -60,9 +61,19 @@ impl TestMail {
         Self::start_with_folders(FOLDERS)
     }
 
+    /// [`start`](Self::start), the client keeping the account in sync in the background as
+    /// the app does: for tests of what the engine syncs on its own. Returns once its first
+    /// sync of every folder is done.
+    pub fn start_syncing_in_background() -> Self {
+        let mut mail = Self::with_state(fixtures(FOLDERS), Some(SyncSchedule::default()));
+        mail.add_account("alice@example.com");
+        wait_until(|| !mail.client.account_status(mail.account()).syncing);
+        mail
+    }
+
     /// [`start`](Self::start), with only these folders besides INBOX.
     pub fn start_with_folders(folders: &[(&str, &str)]) -> Self {
-        let mut mail = Self::with_folders(folders);
+        let mut mail = Self::with_state(fixtures(folders), None);
         mail.add_account("alice@example.com");
         mail
     }
@@ -83,7 +94,7 @@ impl TestMail {
             let uid = all.append_simple(subject);
             all.set_labels(uid, labels);
         }
-        let mut mail = Self::with_state(state);
+        let mut mail = Self::with_state(state, None);
         mail.add_account("alice@gmail.com");
         mail
     }
@@ -109,23 +120,16 @@ impl TestMail {
 
     /// The server (user `alice`, password `pw`) and a client with no accounts.
     pub fn without_account() -> Self {
-        Self::with_folders(FOLDERS)
+        Self::with_state(fixtures(FOLDERS), None)
     }
 
-    fn with_folders(folders: &[(&str, &str)]) -> Self {
-        let mut state = ServerState::new("alice", "pw");
-        for (raw, flags) in FIXTURES {
-            state.inbox().append(raw, flags);
-        }
-        for (name, attribute) in folders {
-            state
-                .mailboxes
-                .push(FakeMailbox::new(name).with_attribute(attribute));
-        }
-        Self::with_state(state)
+    /// [`without_account`](Self::without_account), the client keeping accounts in sync in
+    /// the background as the app does: for tests of what the engine syncs on its own.
+    pub fn without_account_syncing_in_background() -> Self {
+        Self::with_state(fixtures(FOLDERS), Some(SyncSchedule::default()))
     }
 
-    fn with_state(state: ServerState) -> Self {
+    fn with_state(state: ServerState, sync_in_background: Option<SyncSchedule>) -> Self {
         let server_runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
@@ -134,10 +138,11 @@ impl TestMail {
         let fake = server_runtime.block_on(FakeImap::start(state));
         let smtp = server_runtime.block_on(FakeSmtp::start(SmtpState::new("alice", "pw")));
         let dir = tempfile::tempdir().unwrap();
-        // Sends in the background, as the app does; syncs only when told to, so tests
-        // decide when the server is looked at.
+        // Sends in the background, as the app does; unless asked, syncs only when told to,
+        // so tests decide when the server is looked at.
         let client = MailClient::builder(Config::with_data_dir(dir.path()))
             .secrets(Arc::new(MemorySecrets::default()))
+            .sync_in_background(sync_in_background)
             .send_in_background(true)
             .open()
             .unwrap();
@@ -241,6 +246,25 @@ impl TestMail {
             .append_simple(subject);
     }
 
+    /// Holds the server's answers to header FETCHes, keeping a sync of new messages from
+    /// finishing, until the gate gets permits.
+    pub fn hold_fetches(&self) -> Arc<tokio::sync::Semaphore> {
+        self.fake.state().hold_fetches()
+    }
+
+    /// The subjects of the messages stored in `folder`, newest first.
+    pub fn stored_subjects(&self, folder: &str) -> Vec<String> {
+        pollster::block_on(async {
+            let folder = self.client.find_folder(self.account(), folder).await?;
+            let folder = folder.expect("the folder");
+            self.client.list_messages(folder.id, 100, None).await
+        })
+        .unwrap()
+        .into_iter()
+        .filter_map(|m| m.subject)
+        .collect()
+    }
+
     /// Puts `raw` into the server's INBOX and syncs.
     pub fn deliver_raw_and_sync(&self, raw: &[u8]) {
         self.fake.state().mailbox_mut("INBOX").append(raw, &[]);
@@ -270,6 +294,20 @@ impl TestMail {
         self.deliver("INBOX", subject);
         pollster::block_on(self.client.sync_account(self.account.unwrap())).unwrap();
     }
+}
+
+/// The server (user `alice`, password `pw`) with the fixtures in INBOX, and `folders`.
+fn fixtures(folders: &[(&str, &str)]) -> ServerState {
+    let mut state = ServerState::new("alice", "pw");
+    for (raw, flags) in FIXTURES {
+        state.inbox().append(raw, flags);
+    }
+    for (name, attribute) in folders {
+        state
+            .mailboxes
+            .push(FakeMailbox::new(name).with_attribute(attribute));
+    }
+    state
 }
 
 /// A PNG all of one color.

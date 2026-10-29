@@ -9,7 +9,7 @@ use catmail_proto::imap::Session;
 use catmail_store::{BlobStore, Db, Store};
 use catmail_types::{
     AccountId, AccountStatus, DraftId, Event, FolderId, IdentityId, ReportedError, SendProblem,
-    ServerProblem, SyncReport,
+    ServerProblem,
 };
 use tokio::sync::{Notify, OwnedMutexGuard, broadcast, watch};
 
@@ -45,7 +45,8 @@ pub(crate) struct Engine {
     /// Never sent to: dropped with the engine, which ends the background tasks holding
     /// it weakly at once (see [`closing`](Self::closing)).
     closing: watch::Sender<()>,
-    woke: Woke,
+    /// When the computer last woke from sleep, as [`Engine::resume`] was told.
+    woke: Cutoff,
     accounts: Mutex<HashMap<AccountId, Arc<AccountState>>>,
 }
 
@@ -86,23 +87,24 @@ impl EngineTuning {
     }
 }
 
-/// When the computer last woke from sleep, as [`Engine::resume`] was told.
+/// A moment before which work no longer counts: when the computer last woke from
+/// sleep, or a sync of every folder of an account was last asked for.
 #[derive(Default)]
-struct Woke(Mutex<Option<Instant>>);
+struct Cutoff(Mutex<Option<Instant>>);
 
-impl Woke {
+impl Cutoff {
     fn set(&self, at: Instant) {
         *lock(&self.0) = Some(at);
     }
 
     fn since(&self, at: Instant) -> bool {
-        lock(&self.0).is_none_or(|woke| at > woke)
+        lock(&self.0).is_none_or(|cutoff| at > cutoff)
     }
 
     /// When work that `began` then finished, to record for [`since`](Self::since) to
-    /// check later, if it counts: not if it began before a wake. The time is taken
-    /// before the check, so a wake that comes after the check is later and leaves the
-    /// record out; taken after it, a wake in between would let the record count.
+    /// check later, if it counts: not if it began before the cutoff. The time is taken
+    /// before the check, so a cutoff set after the check is later and leaves the record
+    /// out; taken after it, a cutoff set in between would let the record count.
     fn finished(&self, began: Instant, now: impl FnOnce() -> Instant) -> Option<Instant> {
         let finished = now();
         self.since(began).then_some(finished)
@@ -147,8 +149,11 @@ struct AccountState {
     /// [`Engine::resume`]).
     resume: Arc<Notify>,
     /// When the last sync of every folder finished. Neither this nor `folders_synced`
-    /// counts a sync begun before the computer last woke (see [`Engine::since_woke`]).
+    /// counts a sync begun before the computer last woke (see [`Engine::since_woke`]);
+    /// this doesn't count one begun before `asked` either.
     synced: Mutex<Option<Instant>>,
+    /// When a sync of every folder was last asked for ([`Engine::ask_to_sync`]).
+    asked: Cutoff,
     /// When each folder last completed a sync, for a sync of every folder to leave out
     /// those another one completed since it began, and for the sync of an opened folder
     /// to leave out one synced recently. Not `last_synced_at`: the wall clock can be set
@@ -159,26 +164,12 @@ struct AccountState {
     /// When drafts were last changed, for holding back their upload while they are
     /// being written. Entries older than the delay are dropped as they are found.
     draft_edits: Mutex<HashMap<DraftId, Instant>>,
-    /// Background sync's first sync of every folder while it runs, for syncs asked for
-    /// meanwhile to wait for (see [`Engine::first_sync`]).
-    first_sync: Mutex<Option<watch::Sender<Option<SyncReport>>>>,
-}
-
-/// Background sync's first step, from before its task starts until this is dropped. If
-/// that step didn't sync every folder ([`Engine::first_sync_done`]), the syncs waiting
-/// for it sync on their own.
-pub(crate) struct FirstSync(Arc<AccountState>);
-
-impl Drop for FirstSync {
-    fn drop(&mut self) {
-        // Syncs asked for from now on sync on their own too.
-        lock(&self.0.first_sync).take();
-    }
 }
 
 /// [`AccountStatus`], with the send problems by identity.
 #[derive(Debug, Default)]
 struct Status {
+    syncing: bool,
     sync: Option<ServerProblem>,
     send: BTreeMap<IdentityId, SendProblem>,
 }
@@ -187,6 +178,12 @@ struct Status {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Activity<'a> {
     Sync,
+    /// A sync begun then that syncs every folder whenever that is due: a step of
+    /// background sync, or `sync_account`. Every folder is due once a sync of them all
+    /// was asked for (see [`Engine::begin_syncing`]), so one begun after that answers it:
+    /// ends [`AccountStatus::syncing`] unless asked again since. Any sync that finds the
+    /// login rejected ends it too.
+    SyncBegun(Instant),
     /// As this identity of the account, with the address it sends as.
     Send(IdentityId, &'a str),
 }
@@ -273,7 +270,7 @@ impl Engine {
             draft_upload_delay: DEFAULT_DRAFT_UPLOAD_DELAY,
             tuning: EngineTuning::default(),
             closing: watch::Sender::new(()),
-            woke: Woke::default(),
+            woke: Cutoff::default(),
             accounts: Mutex::default(),
         }
     }
@@ -410,6 +407,42 @@ impl Engine {
         self.woke.since(at)
     }
 
+    /// Asks for every folder of the account to be synced at once (see
+    /// [`MailClient::sync_now`](crate::MailClient::sync_now)), as
+    /// [`begin_syncing`](Self::begin_syncing), and wakes background sync to make it.
+    pub fn ask_to_sync(&self, account: AccountId) {
+        if self.begin_syncing(account) {
+            self.account(account).wake.notify_one();
+        }
+    }
+
+    /// Syncs of every folder of the account begun before now no longer count, so
+    /// background sync's next step makes one, and the account shows as syncing until an
+    /// attempt begun after this ends. Called on its own before background sync's task is
+    /// spawned, for its first step, so that an account just added shows as syncing at
+    /// once. Returns whether it did: not while the account is syncing already, which
+    /// the sync under way or due answers, nor while the server rejects the login, which
+    /// waits as long as ever (see [`wake`](Self::wake)).
+    pub fn begin_syncing(&self, account: AccountId) -> bool {
+        let state = self.account(account);
+        {
+            // Held while asking: an attempt ending meanwhile can't take the account out
+            // of syncing after this put it in.
+            let mut status = lock(&state.status);
+            let rejected = status
+                .sync
+                .as_ref()
+                .is_some_and(ServerProblem::login_rejected);
+            if status.syncing || rejected {
+                return false;
+            }
+            state.asked.set(Instant::now());
+            status.syncing = true;
+        }
+        self.emit(Event::AccountStatusChanged { account });
+        true
+    }
+
     /// Records that the draft was just changed (or created), so background sync leaves
     /// it for [`draft_upload_delay`](Self::draft_upload_delay): a frontend saving as the
     /// user types would otherwise replace the copy on the server with each keystroke.
@@ -466,49 +499,26 @@ impl Engine {
     /// Records that every folder of the account was just synced, by a sync that `began`
     /// then.
     pub fn set_synced(&self, account: AccountId, began: Instant) {
-        if let Some(at) = self.woke.finished(began, Instant::now) {
-            *lock(&self.account(account).synced) = Some(at);
-        }
-    }
-
-    /// Marks the start of background sync's first sync of every folder of the account,
-    /// until it is done or what is returned is dropped. Called before the task is
-    /// spawned, so that a sync asked for right after (once the account is added, say)
-    /// finds it.
-    pub fn start_first_sync(&self, account: AccountId) -> FirstSync {
         let state = self.account(account);
-        *lock(&state.first_sync) = Some(watch::Sender::new(None));
-        FirstSync(state)
-    }
-
-    /// Background sync synced every folder of the account: the syncs waiting for its first
-    /// sync get `report`. Later full syncs find nobody waiting.
-    pub fn first_sync_done(&self, account: AccountId, report: &SyncReport) {
-        let Some(tx) = self
-            .existing(account)
-            .and_then(|s| lock(&s.first_sync).take())
-        else {
-            return;
-        };
-        if tx.receiver_count() > 0 {
-            tx.send_replace(Some(report.clone()));
+        // Taken before the check: see `Cutoff::finished`.
+        let finished = Instant::now();
+        if self.full_sync_counts(&state, began) {
+            *lock(&state.synced) = Some(finished);
         }
-    }
-
-    /// Waits for background sync's first sync of every folder of the account, if it is
-    /// running, and returns its report. `None` if none is running, or it failed.
-    pub async fn first_sync(&self, account: AccountId) -> Option<SyncReport> {
-        let mut rx = lock(&self.existing(account)?.first_sync)
-            .as_ref()?
-            .subscribe();
-        rx.wait_for(Option::is_some).await.ok()?.clone()
     }
 
     /// When every folder of the account was last synced, if ever since the engine
-    /// started and the computer last woke.
+    /// started, the computer last woke and such a sync was last asked for.
     pub fn synced(&self, account: AccountId) -> Option<Instant> {
-        let synced = *lock(&self.existing(account)?.synced);
-        synced.filter(|&at| self.since_woke(at))
+        let state = self.existing(account)?;
+        let synced = *lock(&state.synced);
+        synced.filter(|&at| self.full_sync_counts(&state, at))
+    }
+
+    /// Whether a sync of every folder of the account, begun or finished `at`, counts:
+    /// after the computer last woke, and such a sync was last asked for.
+    fn full_sync_counts(&self, state: &AccountState, at: Instant) -> bool {
+        self.since_woke(at) && state.asked.since(at)
     }
 
     /// Records that `folder` just completed a sync, which `began` then: its messages and
@@ -545,7 +555,24 @@ impl Engine {
         let (changed, rejected, failures) = {
             let mut status = lock(&state.status);
             match activity {
-                Activity::Sync => record(&mut status.sync, e),
+                Activity::Sync | Activity::SyncBegun(_) => {
+                    let (changed, rejected, failures) = record(&mut status.sync, e);
+                    let answered = match activity {
+                        Activity::SyncBegun(began) => state.asked.since(began),
+                        _ => false,
+                    };
+                    // Nor is it answered while the login is rejected, which background
+                    // sync waits out (see `wake`), whenever the rejected attempt began.
+                    let refused = status
+                        .sync
+                        .as_ref()
+                        .is_some_and(ServerProblem::login_rejected);
+                    let done = status.syncing && (answered || refused);
+                    if done {
+                        status.syncing = false;
+                    }
+                    (changed || done, rejected, failures)
+                }
                 Activity::Send(identity, email) => {
                     let mut slot = status.send.remove(&identity).map(|p| p.problem);
                     let recorded = record(&mut slot, e);
@@ -567,7 +594,7 @@ impl Engine {
         }
         // Background sync stopped retrying when the login was rejected (see `wake`):
         // through again, it needn't wait any longer.
-        if let (Activity::Sync, true) = (activity, rejected) {
+        if let (Activity::Sync | Activity::SyncBegun(_), true) = (activity, rejected) {
             state.wake.notify_one();
         }
         failures
@@ -590,6 +617,7 @@ impl Engine {
         };
         let status = lock(&state.status);
         AccountStatus {
+            syncing: status.syncing,
             sync: status.sync.clone(),
             send: status.send.values().cloned().collect(),
         }
@@ -658,10 +686,10 @@ impl Engine {
                     wake: Arc::default(),
                     resume: Arc::default(),
                     synced: Mutex::default(),
+                    asked: Cutoff::default(),
                     folders_synced: Mutex::default(),
                     status: Mutex::default(),
                     draft_edits: Mutex::default(),
-                    first_sync: Mutex::default(),
                 })
             })
             .clone()
@@ -675,14 +703,6 @@ impl Engine {
     #[cfg(test)]
     pub fn tracked_accounts(&self) -> usize {
         lock(&self.accounts).len()
-    }
-
-    /// Calls waiting for background sync's first sync of the account.
-    #[cfg(test)]
-    pub fn first_sync_waiters(&self, account: AccountId) -> usize {
-        self.existing(account)
-            .and_then(|s| lock(&s.first_sync).as_ref().map(|tx| tx.receiver_count()))
-            .unwrap_or(0)
     }
 
     #[cfg(test)]
@@ -765,7 +785,7 @@ mod tests {
         let later = |by| began + Duration::from_secs(by);
 
         // As the time is taken.
-        let woke = Woke::default();
+        let woke = Cutoff::default();
         let finished = woke.finished(began, || {
             woke.set(later(1));
             later(2)
@@ -773,13 +793,13 @@ mod tests {
         assert!(finished.is_none_or(|at| !woke.since(at)));
 
         // Between the check and the record.
-        let woke = Woke::default();
+        let woke = Cutoff::default();
         let finished = woke.finished(began, || later(1));
         woke.set(later(2));
         assert!(finished.is_none_or(|at| !woke.since(at)));
 
         // Work begun after a wake counts.
-        let woke = Woke::default();
+        let woke = Cutoff::default();
         woke.set(began);
         let finished = woke.finished(later(1), || later(2));
         assert!(finished.is_some_and(|at| woke.since(at)));
