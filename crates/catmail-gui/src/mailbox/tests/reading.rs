@@ -394,9 +394,12 @@ fn choosing_a_message_gives_up_revealing_one_still_to_come(cx: &mut TestAppConte
         window.click(("message", chosen.0 as u64), cx);
     })
     .unwrap();
+    // The reader shows a message once its body has loaded.
     wait_until(|| {
         cx.run_until_parked();
-        cx.read(|cx| find(&mailbox, "Lunch?", cx).is_some())
+        cx.read(|cx| {
+            find(&mailbox, "Lunch?", cx).is_some() && shown_in_reader(&mailbox, cx).is_some()
+        })
     });
     cx.read(|cx| {
         let list = mailbox.read(cx).messages.read(cx);
