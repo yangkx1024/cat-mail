@@ -186,6 +186,14 @@ impl Error {
             _ => false,
         }
     }
+
+    /// The IMAP failure this is, if it is one without a variant of its own.
+    pub(crate) fn imap(&self) -> Option<&imap::Error> {
+        match self {
+            Self::Imap(ImapError(e)) => Some(e),
+            _ => None,
+        }
+    }
 }
 
 impl From<&Error> for ReportedError {

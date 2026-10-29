@@ -29,6 +29,7 @@ pub mod html {
     };
 }
 mod ops;
+mod pool;
 mod runtime;
 mod secrets;
 mod send;

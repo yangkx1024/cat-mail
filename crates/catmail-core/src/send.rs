@@ -28,8 +28,9 @@ use catmail_types::{
 use futures_util::future::join_all;
 use tokio::sync::Notify;
 
-use crate::connection::{self, SendAs, SmtpLogin, with_session};
+use crate::connection::{self, SendAs, SmtpLogin};
 use crate::engine::{Activity, Closing, Engine, Permit, blocking, now};
+use crate::pool::with_session;
 use crate::{Error, Result, body, drafts, ops, sync};
 
 /// First retry after this long, doubling up to [`MAX_BACKOFF`].

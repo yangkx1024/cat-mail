@@ -62,6 +62,10 @@ INFO catmail_core::logging: running on os="NixOS 26.11 (Zokor)" kernel="7.2.11-z
   以及原有的各种 warn。每次 INBOX 同步不记，太频繁。
 - 连接问题的出现、变化和恢复（`Engine::report`）：只在前端显示的账户状态变化时记一行，不是每次尝试都记。
   "服务器又能连上了"也在这里记。用户报告的往往就是他们看到的这个状态。
+- 连接池（`pool.rs`）：info 只记解释"为什么又登录了一次"的少见事件，keepalive 发现连接已断开（错误、
+  NOOP 耗时、连接年龄），丢掉睡前建立的连接，删除账户时关掉的连接数。取用、放回、放不下，以及每次
+  keepalive 的 NOOP 往返记在 debug：每条池连接每 4 分钟一次，默认不进文件，排查时用 `CATMAIL_LOG`
+  打开（如 `CATMAIL_LOG=info,catmail_core::pool=debug`）。
 - 按需从服务器取东西（`body::on_server`，正文和附件都走这里）：拿到连接、EXAMINE、FETCH 各用了多久。打开一封
   没下载的邮件慢时，靠它看出慢在哪一步。
 - GUI：读信区打开一封邮件，下载和准备正文各用了多久；主窗口开关、显示连接的切换、trim 前后的 RSS

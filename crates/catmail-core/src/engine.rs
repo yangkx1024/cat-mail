@@ -1,12 +1,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use catmail_proto::TlsConfig;
 use catmail_proto::http::ImageFetcher;
-use catmail_proto::imap::Session;
 use catmail_store::{BlobStore, Db, Store};
 use catmail_types::{
     AccountId, AccountStatus, DraftId, Event, FolderId, IdentityId, ReportedError, SendProblem,
@@ -15,6 +13,7 @@ use catmail_types::{
 use tokio::sync::{Notify, OwnedMutexGuard, broadcast, watch};
 
 use crate::image_cache::ImageCache;
+use crate::pool::Pool;
 use crate::secrets::SecretStore;
 use crate::watch::SyncSchedule;
 use crate::{Config, DataDirLock, Error, Result};
@@ -119,58 +118,8 @@ impl Cutoff {
     }
 }
 
-struct IdleSession {
-    session: Session,
-    /// Tells it from those returned to the pool before or after, for its keepalive.
-    id: u64,
-}
-
 /// [`Engine::draft_upload_delay`] unless the builder sets it.
 pub const DEFAULT_DRAFT_UPLOAD_DELAY: Duration = Duration::from_secs(15);
-
-/// Enough for a message and one of its attachments at once.
-const IDLE_SESSIONS_PER_ACCOUNT: usize = 2;
-
-/// Sends the pooled connection `id` a NOOP once it has waited `every`, and returns it to
-/// the pool (which starts this over) unless that found it dead: then it is closed, so
-/// that the next request connects at once rather than finding out. Ends early if it was
-/// taken meanwhile (returned, it is kept alive anew), or the engine is gone. A connection
-/// from before the computer last slept is closed without a word: it is likely dead, and
-/// `on_session` wouldn't use it anyway.
-async fn keep_alive(
-    engine: Weak<Engine>,
-    account: AccountId,
-    id: u64,
-    every: Duration,
-    mut closing: Closing,
-) {
-    tokio::select! {
-        () = tokio::time::sleep(every) => {}
-        () = closing.closed() => return,
-    }
-    let Some(mut session) = engine.upgrade().and_then(|engine| {
-        let session = engine.take_idle(account, id)?;
-        engine.since_woke(session.opened()).then_some(session)
-    }) else {
-        return;
-    };
-    // Not holding the engine meanwhile, which would keep it from closing.
-    let result = tokio::select! {
-        result = session.noop() => result,
-        () = closing.closed() => return,
-    };
-    match result {
-        // A refusal leaves it as usable as it was, as in `with_session`.
-        Err(e) if e.is_fatal() => {
-            tracing::debug!(%account, error = %e, "idle connection died; closed");
-        }
-        _ => {
-            if let Some(engine) = engine.upgrade() {
-                engine.return_session(account, session);
-            }
-        }
-    }
-}
 
 /// What the engine keeps per account.
 ///
@@ -184,12 +133,8 @@ struct AccountState {
     send: Arc<tokio::sync::Mutex<()>>,
     /// Set when removal starts; cancels running syncs and on-demand fetches.
     removed: watch::Sender<bool>,
-    /// Logged-in connections for on-demand fetches, kept between requests so opening
-    /// messages one after another doesn't log in each time, and kept alive while they
-    /// wait (see [`Engine::return_session`]). Sync uses its own.
-    idle: Mutex<Vec<IdleSession>>,
-    /// Connections returned to `idle` so far, to number them.
-    returned: AtomicU64,
+    /// Logged-in connections for on-demand fetches (see [`pool`](crate::pool)).
+    pool: Arc<Pool>,
     /// Wakes the account's background sync, if one runs: local changes are waiting for
     /// the server.
     wake: Arc<Notify>,
@@ -698,40 +643,9 @@ impl Engine {
         }
     }
 
-    /// A logged-in connection, the one last in use if there are several, so that it
-    /// likely has the folder wanted open still.
-    pub fn take_session(&self, account: AccountId) -> Option<Session> {
-        let state = self.existing(account)?;
-        lock(&state.idle).pop().map(|s| s.session)
-    }
-
-    /// Keeps a connection that is still usable for the next request, unless the account
-    /// is being removed. While it waits, it is kept alive (see [`keep_alive`]).
-    pub fn return_session(self: &Arc<Self>, account: AccountId, session: Session) {
-        let state = self.account(account);
-        let mut idle = lock(&state.idle);
-        // Checked under the pool lock, which removal takes after setting the flag, so a
-        // connection can't slip back in after the pool was emptied.
-        if *state.removed.borrow() || idle.len() >= IDLE_SESSIONS_PER_ACCOUNT {
-            return;
-        }
-        let id = state.returned.fetch_add(1, Ordering::Relaxed);
-        idle.push(IdleSession { session, id });
-        tokio::spawn(keep_alive(
-            Arc::downgrade(self),
-            account,
-            id,
-            self.tuning.keepalive,
-            self.closing(),
-        ));
-    }
-
-    /// The connection `id` from the pool, if it is still there.
-    fn take_idle(&self, account: AccountId, id: u64) -> Option<Session> {
-        let state = self.existing(account)?;
-        let mut idle = lock(&state.idle);
-        let i = idle.iter().position(|s| s.id == id)?;
-        Some(idle.remove(i).session)
+    /// The account's idle connections (see [`pool`](crate::pool)).
+    pub fn pool(&self, account: AccountId) -> Arc<Pool> {
+        self.account(account).pool.clone()
     }
 
     /// Marks `account` removed: running syncs and fetches are cancelled, idle connections
@@ -739,7 +653,7 @@ impl Engine {
     pub async fn start_removal(&self, account: AccountId) -> OwnedMutexGuard<()> {
         let state = self.account(account);
         state.removed.send_replace(true);
-        lock(&state.idle).clear();
+        state.pool.close();
         state.sync.clone().lock_owned().await
     }
 
@@ -759,8 +673,7 @@ impl Engine {
                     sync: Arc::default(),
                     send: Arc::default(),
                     removed: watch::Sender::new(false),
-                    idle: Mutex::default(),
-                    returned: AtomicU64::default(),
+                    pool: Arc::new(Pool::new(account)),
                     wake: Arc::default(),
                     resume: Arc::default(),
                     synced: Mutex::default(),

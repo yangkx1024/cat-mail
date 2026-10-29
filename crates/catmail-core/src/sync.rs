@@ -29,9 +29,9 @@ use catmail_types::{
     ReplayReport, SyncReport,
 };
 
-use crate::connection::with_session;
 use crate::draft_sync::Uploads;
 use crate::engine::{Activity, Engine};
+use crate::pool::with_session;
 use crate::{Error, Result, connection, ops};
 
 /// Stored messages per flags FETCH, and per transaction, on a server that can't say

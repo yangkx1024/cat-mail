@@ -23,9 +23,9 @@ use catmail_types::{
     ReportedError,
 };
 
-use crate::connection::with_session;
 use crate::draft_sync::{Uploaded, Uploads};
 use crate::engine::{Activity, Engine, lock, now};
+use crate::pool::with_session;
 use crate::{Error, Result, draft_sync};
 
 pub(crate) async fn set_flags(

@@ -21,8 +21,8 @@ use catmail_proto::mime::{self, Content};
 use catmail_store::{AttachmentSource, Db, MessageLocation, NewAttachment, NewBody};
 use catmail_types::{AttachmentId, BlobHash, Event, Message, MessageId};
 
-use crate::connection::with_session;
 use crate::engine::{Engine, blocking};
+use crate::pool::with_session;
 use crate::{Error, Result};
 
 const GONE: Error = Error::OutOfSync("the message is no longer on the server");
