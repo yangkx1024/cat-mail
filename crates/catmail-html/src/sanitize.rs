@@ -8,6 +8,7 @@ use std::sync::LazyLock;
 use ammonia::{Builder, UrlRelative};
 use html5ever::tokenizer::{TagKind, Token, TokenSink, TokenSinkResult};
 
+use crate::css::Recolor;
 use crate::dark::{DarkPalette, Role};
 use crate::{css, tokens};
 
@@ -35,12 +36,9 @@ pub(crate) type ImageHook = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 static SANITIZER: LazyLock<Builder<'static>> = LazyLock::new(|| sanitizer(None, None));
 
 /// The one sanitizer configuration; `on_image` lets a renderer see or replace image
-/// sources during the same parse, instead of scanning the HTML text afterwards. With a
-/// palette, colors in attributes are moved for a dark page.
-pub(crate) fn sanitizer(
-    on_image: Option<ImageHook>,
-    recolor: Option<DarkPalette>,
-) -> Builder<'static> {
+/// sources during the same parse, instead of scanning the HTML text afterwards. With
+/// `recolor`, colors in attributes are moved for a dark page.
+pub(crate) fn sanitizer(on_image: Option<ImageHook>, recolor: Option<Recolor>) -> Builder<'static> {
     let mut builder = Builder::default();
     builder
         .add_tags(["font"])
@@ -62,7 +60,7 @@ pub(crate) fn sanitizer(
             {
                 Some(Cow::Owned(replaced))
             } else if let Some(recolored) =
-                recolor.and_then(|palette| recolor_attribute(palette, attribute, value))
+                (recolor.as_ref()).and_then(|r| recolor_attribute(r, attribute, value))
             {
                 Some(Cow::Owned(recolored))
             } else {
@@ -74,11 +72,11 @@ pub(crate) fn sanitizer(
 
 /// An attribute's value with its colors moved for a dark page, or `None` for one that
 /// has no colors.
-fn recolor_attribute(palette: DarkPalette, attribute: &str, value: &str) -> Option<String> {
+fn recolor_attribute(recolor: &Recolor, attribute: &str, value: &str) -> Option<String> {
     match attribute {
-        "style" => Some(css::recolor_style(value, palette)),
-        "bgcolor" => palette.recolor_attribute(value, Role::Surface),
-        "color" => palette.recolor_attribute(value, Role::Text),
+        "style" => Some(css::recolor_style(value, recolor)),
+        "bgcolor" => recolor.palette.recolor_attribute(value, Role::Surface),
+        "color" => recolor.palette.recolor_attribute(value, Role::Text),
         _ => None,
     }
 }
@@ -107,17 +105,19 @@ pub fn sanitize_html(html: &str) -> String {
 /// its style sheets, `style` attributes, and `bgcolor` and `color` attributes. A message
 /// with dark styles of its own is left as it is: those apply.
 pub fn recolor_html(html: &str, palette: DarkPalette) -> String {
-    let sheet = css::sanitize(&style_sheets(html), Some(palette));
+    let styles = styles(html, true);
+    let recolor = Recolor::new(palette, &styles.sheets, &styles.attributes);
+    let sheet = css::sanitize(&styles.sheets, Some(&recolor));
     if sheet.adapts_to_dark {
         return html.to_owned();
     }
-    with_sheet(&sheet.css, &sanitizer(None, Some(palette)), html)
+    with_sheet(&sheet.css, &sanitizer(None, Some(recolor)), html)
 }
 
 /// The sanitizer's output with the message's style sheets in front. ammonia drops every
 /// `<style>` with its content: it doesn't look inside, and writes raw text back as it is.
 pub(crate) fn clean(builder: &Builder<'_>, html: &str) -> String {
-    let sheet = css::sanitize(&style_sheets(html), None);
+    let sheet = css::sanitize(&styles(html, false).sheets, None);
     with_sheet(&sheet.css, builder, html)
 }
 
@@ -132,13 +132,21 @@ fn with_sheet(sheet: &str, builder: &Builder<'_>, html: &str) -> String {
     out
 }
 
-/// The style sheets of HTML, found by tokenizing it as the tree builder would switch to
-/// raw text (so `<style>` inside `<script>` or `<textarea>` is no style sheet). Those in
-/// SVG or MathML are skipped: the sanitizer drops that content whole, and so are those of
-/// a `type` other than CSS (templates), which a browser doesn't apply either.
-fn style_sheets(html: &str) -> Vec<css::Element> {
+/// The styles of HTML: its style sheets, and its `style` attributes if asked for.
+struct Styles {
+    sheets: Vec<css::Element>,
+    attributes: Vec<String>,
+}
+
+/// Finds the [`Styles`] of HTML by tokenizing it as the tree builder would switch to raw
+/// text (so `<style>` inside `<script>` or `<textarea>` is no style sheet). Style sheets
+/// in SVG or MathML are skipped: the sanitizer drops that content whole, and so are those
+/// of a `type` other than CSS (templates), which a browser doesn't apply either.
+fn styles(html: &str, attributes: bool) -> Styles {
     struct Sink {
         sheets: RefCell<Vec<css::Element>>,
+        /// `None` if not asked for.
+        attributes: Option<RefCell<Vec<String>>>,
         /// The text taken so far.
         len: Cell<usize>,
         /// `<svg>` and `<math>` elements open.
@@ -152,6 +160,10 @@ fn style_sheets(html: &str) -> Vec<css::Element> {
         fn process_token(&self, token: Token, _line: u64) -> TokenSinkResult<()> {
             match token {
                 Token::TagToken(tag) if tag.kind == TagKind::StartTag => {
+                    if let Some(attributes) = &self.attributes {
+                        let styles = tag.attrs.iter().filter(|a| &*a.name.local == "style");
+                        (attributes.borrow_mut()).extend(styles.map(|a| a.value.to_string()));
+                    }
                     let name = &*tag.name;
                     if matches!(name, "svg" | "math") {
                         if !tag.self_closing {
@@ -198,11 +210,16 @@ fn style_sheets(html: &str) -> Vec<css::Element> {
 
     let sink = Sink {
         sheets: RefCell::default(),
+        attributes: attributes.then(RefCell::default),
         len: Cell::new(0),
         foreign: Cell::new(0),
         in_style: Cell::new(false),
     };
-    tokens::tokenize(html, sink).sheets.into_inner()
+    let sink = tokens::tokenize(html, sink);
+    Styles {
+        sheets: sink.sheets.into_inner(),
+        attributes: sink.attributes.map(RefCell::into_inner).unwrap_or_default(),
+    }
 }
 
 #[cfg(test)]
@@ -303,6 +320,12 @@ mod tests {
         ] {
             assert!(dark.contains(moved), "{moved}: {dark}");
         }
+        // A custom property set in an attribute is moved as the sheet uses it: for text.
+        let custom = sanitize_html(
+            r#"<style>.a{color:var(--fg)}</style><p class=a style="--fg:#000">x</p>"#,
+        );
+        let dark = recolor_html(&custom, palette);
+        assert!(dark.contains(r##"style="--fg:#e0e0e0;""##), "{dark}");
         // A message without colors is left as it was, and one with dark styles of its own
         // keeps its colors for them.
         let plain = sanitize_html("<style>p{margin:0;}</style><p align=\"center\">x</p>");

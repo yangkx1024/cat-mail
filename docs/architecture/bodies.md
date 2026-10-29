@@ -84,8 +84,10 @@ base64 正文），交给 mail-parser 按同样方式解析。于是两条路径
     用途区别对待：背景（`background*`、`bgcolor`、阴影）只变暗，文字（`color`、`<font color>` 等）只变亮，
     这样文字和它的背景总是拉开对比，本来就深色的页眉和白字保持原样；边框直接反转，与周围的对比不变。
     文字在更短的范围里反转（`TEXT_RANGE`），否则白底上可读的灰字到深色上会发暗。颜色按 CSS 读（十六进制、
-    颜色名和各种颜色函数，`color` crate 解析），只在会取颜色的属性里认（`font-family: Tomato` 不是
-    颜色），读不出的和全透明的原样保留，搬过的写成 `#rrggbb` / `#rrggbbaa`；
+    颜色名和各种颜色函数，按解码转义后的记号交给 `color` crate），只在会取颜色的属性里认
+    （`font-family: Tomato` 不是颜色），读不出的和全透明的原样保留，搬过的写成 `#rrggbb` /
+    `#rrggbbaa`。自定义属性（`--x`）的颜色按使用它的地方（`var(--x)`）决定用途：先把样式表和 `style`
+    属性扫一遍记下用法，只用于一种用途的按那种，多种的反转，没用在颜色上的不动；
   - 保留表格布局属性和行内 `style`，但可能加载资源的 style（`url(`、`image-set(`、`@import`、
     CSS 转义）整个去掉；
   - 链接只允许 http、https、mailto、cid，`data:` 只允许出现在 `img src`；判断时像 URL 解析器

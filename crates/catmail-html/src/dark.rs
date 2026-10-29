@@ -59,8 +59,7 @@ impl Role {
             "background" | "background-color" | "background-image" | "box-shadow"
             | "text-shadow" => Role::Surface,
             "outline" | "outline-color" | "column-rule" | "column-rule-color" => Role::Line,
-            // Custom properties may hold a color for anything.
-            p if p.starts_with("border") || p.starts_with("--") => Role::Line,
+            p if p.starts_with("border") => Role::Line,
             _ => return None,
         };
         Some(role)
@@ -259,7 +258,8 @@ mod tests {
         assert_eq!(Role::of("COLOR"), Some(Role::Text));
         assert_eq!(Role::of("background"), Some(Role::Surface));
         assert_eq!(Role::of("border-bottom-color"), Some(Role::Line));
-        assert_eq!(Role::of("--brand"), Some(Role::Line));
+        // Custom properties take the role of where they are used: see `css::Recolor`.
+        assert_eq!(Role::of("--brand"), None);
         assert_eq!(Role::of("font-family"), None);
     }
 }

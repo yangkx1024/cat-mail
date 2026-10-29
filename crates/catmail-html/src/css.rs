@@ -12,6 +12,8 @@
 //! The same rewriting moves a message's colors for a dark page ([`dark`](crate::dark)),
 //! given a palette: colors in the values of properties that take them.
 
+use std::collections::HashMap;
+
 use cssparser::{
     Delimiter, ParseError, Parser, ToCss as _, Token, TokenSerializationType, serialize_identifier,
 };
@@ -46,6 +48,8 @@ pub(super) struct Stylesheet {
     /// It has styles of its own for a dark appearance: `prefers-color-scheme: dark`, or
     /// `color-scheme` naming `dark`.
     pub(super) adapts_to_dark: bool,
+    /// Custom properties used where colors are moved, and the role of the colors there.
+    uses: Vec<(String, Role)>,
 }
 
 /// A `<style>` element of a message: its text, and its `media` attribute.
@@ -57,8 +61,8 @@ pub(super) struct Element {
 
 /// A message's style sheets, kept as one: each one parsed on its own (a rule left open
 /// ends with its sheet), the rules of one for some media only inside an `@media` block.
-/// With a palette, their colors are moved for a dark page.
-pub(super) fn sanitize(elements: &[Element], recolor: Option<DarkPalette>) -> Stylesheet {
+/// With `recolor`, their colors are moved for a dark page.
+pub(super) fn sanitize(elements: &[Element], recolor: Option<&Recolor>) -> Stylesheet {
     let mut sheet = Sheet::new(MAX_LEN, recolor);
     for element in elements {
         if sheet.full() {
@@ -69,6 +73,53 @@ pub(super) fn sanitize(elements: &[Element], recolor: Option<DarkPalette>) -> St
     Stylesheet {
         css: sheet.out.replace('<', "\\3c "),
         adapts_to_dark: sheet.dark,
+        uses: sheet.uses,
+    }
+}
+
+/// What moving a message's colors for a dark page takes: the palette, and the role of
+/// each custom property's color. That is the role where it is used (`var(--x)`), not
+/// where it is set: white text in a variable must stay light.
+#[derive(Debug, Clone)]
+pub(super) struct Recolor {
+    pub(super) palette: DarkPalette,
+    /// Those used for colors of one role; used for several, inverted (`Role::Line`).
+    /// Others aren't moved.
+    custom: HashMap<String, Role>,
+}
+
+impl Recolor {
+    /// For a message's style sheets and `style` attributes.
+    pub(super) fn new(palette: DarkPalette, sheets: &[Element], styles: &[String]) -> Self {
+        let mut recolor = Self {
+            palette,
+            custom: HashMap::new(),
+        };
+        let all = sheets.iter().map(|sheet| &sheet.css).chain(styles);
+        if !all.into_iter().any(|css| css.contains("--")) {
+            return recolor;
+        }
+        // Written once to find the uses, the custom properties not moved yet.
+        let mut uses = sanitize(sheets, Some(&recolor)).uses;
+        for style in styles {
+            uses.extend(style_declarations(style, &recolor).uses);
+        }
+        for (name, role) in uses {
+            let known = recolor.custom.entry(name).or_insert(role);
+            if *known != role {
+                *known = Role::Line;
+            }
+        }
+        recolor
+    }
+
+    /// The role of the colors in `property`'s value, or `None` if they aren't moved.
+    fn role(&self, property: &str) -> Option<Role> {
+        if property.starts_with("--") {
+            self.custom.get(property).copied()
+        } else {
+            Role::of(property)
+        }
     }
 }
 
@@ -119,32 +170,38 @@ fn is_fetching(token: &Token<'_>) -> bool {
 }
 
 /// A `style` attribute with its colors moved for a dark page.
-pub(super) fn recolor_style(style: &str, palette: DarkPalette) -> String {
+pub(super) fn recolor_style(style: &str, recolor: &Recolor) -> String {
+    style_declarations(style, recolor).out
+}
+
+fn style_declarations<'a>(style: &str, recolor: &'a Recolor) -> Declarations<'a> {
     let mut declarations = Declarations {
-        recolor: Some(palette),
+        recolor: Some(recolor),
         ..Declarations::default()
     };
     declarations.parse(&mut Parser::new(style));
-    declarations.out
+    declarations
 }
 
-struct Sheet {
+struct Sheet<'a> {
     out: String,
     /// Bytes `out` may still take.
     budget: usize,
     rules: usize,
     dark: bool,
-    recolor: Option<DarkPalette>,
+    recolor: Option<&'a Recolor>,
+    uses: Vec<(String, Role)>,
 }
 
-impl Sheet {
-    fn new(budget: usize, recolor: Option<DarkPalette>) -> Self {
+impl<'a> Sheet<'a> {
+    fn new(budget: usize, recolor: Option<&'a Recolor>) -> Self {
         Self {
             out: String::new(),
             budget,
             rules: 0,
             dark: false,
             recolor,
+            uses: Vec::new(),
         }
     }
 
@@ -218,6 +275,7 @@ impl Sheet {
         self.out.push_str(&rule);
         self.rules += 1;
         self.dark |= declarations.dark;
+        self.uses.append(&mut declarations.uses);
     }
 
     fn at_rule(&mut self, parser: &mut Parser<'_>, name: &str, depth: usize) {
@@ -262,6 +320,7 @@ impl Sheet {
         inner.rules(block, depth + 1);
         self.rules = inner.rules;
         self.dark |= inner.dark || dark_query;
+        self.uses.append(&mut inner.uses);
         if !inner.out.is_empty() {
             self.out.push_str(&head);
             self.out.push_str(&inner.out);
@@ -272,21 +331,24 @@ impl Sheet {
 
 /// The declarations of a rule or a `style` attribute.
 #[derive(Default)]
-struct Declarations {
+struct Declarations<'a> {
     out: String,
     dark: bool,
-    recolor: Option<DarkPalette>,
+    recolor: Option<&'a Recolor>,
+    /// Custom properties used where colors are moved, and the role there.
+    uses: Vec<(String, Role)>,
 }
 
-impl Declarations {
+impl Declarations<'_> {
     fn parse(&mut self, parser: &mut Parser<'_>) {
         while !parser.is_exhausted() {
             // A declaration that isn't kept is skipped to the next `;`.
             let _ = parser.parse_until_after(Delimiter::Semicolon, |p| {
                 let name = p.expect_ident()?.clone();
                 p.expect_colon()?;
+                let recolor = self.recolor.and_then(|r| Some((r.palette, r.role(&name)?)));
                 let mut value = Css {
-                    recolor: self.recolor.and_then(|p| Some((p, Role::of(&name)?))),
+                    recolor,
                     ..Css::default()
                 };
                 copy_rest(p, &mut value, Context::Value).map_err(|()| ParseError::custom(()))?;
@@ -298,6 +360,12 @@ impl Declarations {
                 self.out.push(':');
                 self.out.push_str(value);
                 self.out.push(';');
+                if let Some((_, role)) = recolor
+                    && !name.starts_with("--")
+                {
+                    let used = custom_properties_used(value);
+                    self.uses.extend(used.into_iter().map(|name| (name, role)));
+                }
                 if name.eq_ignore_ascii_case("color-scheme")
                     && value.to_ascii_lowercase().contains("dark")
                 {
@@ -397,22 +465,51 @@ fn copy_rest(parser: &mut Parser<'_>, out: &mut Css, context: Context) -> Result
     }
 }
 
-/// A color as CSS writes it, read from its source text: a hex color, a name, or a color
-/// function (`rgb()`, `hsl()`, `oklch()`, …) with its arguments.
-fn parse_color(parser: &mut Parser<'_>) -> Result<Color, ParseError<()>> {
-    let start = parser.position();
-    let function = match parser.next_including_whitespace()? {
-        Token::Hash(_) | Token::IDHash(_) | Token::Ident(_) => false,
-        Token::Function(_) => true,
-        _ => return Err(ParseError::custom(())),
-    };
-    if function {
-        parser.parse_nested_block(|block| {
-            while block.next().is_ok() {}
-            Ok::<_, ParseError<()>>(())
-        })?;
+/// The custom properties a value uses (`var(--x)`), also in another's fallback.
+fn custom_properties_used(value: &str) -> Vec<String> {
+    fn walk(parser: &mut Parser<'_>, used: &mut Vec<String>) {
+        while let Ok(token) = parser.next().cloned() {
+            let var = matches!(&token, Token::Function(f) if f.eq_ignore_ascii_case("var"));
+            let block = matches!(
+                token,
+                Token::Function(_)
+                    | Token::ParenthesisBlock
+                    | Token::SquareBracketBlock
+                    | Token::CurlyBracketBlock
+            );
+            if block {
+                let _ = parser.parse_nested_block(|inner| {
+                    if var
+                        && let Ok(Token::Ident(name)) = inner.next().cloned()
+                        && name.starts_with("--")
+                    {
+                        used.push(name.to_string());
+                    }
+                    walk(inner, used);
+                    Ok::<_, ParseError<()>>(())
+                });
+            }
+        }
     }
-    dark::parse(parser.slice_from(start)).ok_or_else(|| ParseError::custom(()))
+    let mut used = Vec::new();
+    walk(&mut Parser::new(value), &mut used);
+    used
+}
+
+/// A color as CSS writes it: a hex color, a name, or a color function (`rgb()`, `hsl()`,
+/// `oklch()`, …) with its arguments. Read as its tokens are written back, escapes decoded
+/// (`bl\61 ck` is `black`), as a browser reads it.
+fn parse_color(parser: &mut Parser<'_>) -> Result<Color, ParseError<()>> {
+    let token = parser.next_including_whitespace()?.clone();
+    let mut decoded = Css::default();
+    let colorish = matches!(
+        token,
+        Token::Hash(_) | Token::IDHash(_) | Token::Ident(_) | Token::Function(_)
+    );
+    if !colorish || copy(parser, &token, &mut decoded, Context::Value).is_err() {
+        return Err(ParseError::custom(()));
+    }
+    dark::parse(&decoded.text).ok_or_else(|| ParseError::custom(()))
 }
 
 #[cfg(test)]
@@ -624,11 +721,16 @@ mod tests {
     };
 
     fn recolored(source: &str) -> String {
-        let element = Element {
+        let elements = [Element {
             media: None,
             css: source.into(),
-        };
-        sanitize(&[element], Some(PALETTE)).css
+        }];
+        let recolor = Recolor::new(PALETTE, &elements, &[]);
+        sanitize(&elements, Some(&recolor)).css
+    }
+
+    fn recolored_style(style: &str) -> String {
+        recolor_style(style, &Recolor::new(PALETTE, &[], &[style.to_owned()]))
     }
 
     #[test]
@@ -684,9 +786,67 @@ mod tests {
     }
 
     #[test]
+    fn moves_escaped_colors() {
+        assert_eq!(
+            recolored_style(r"color:bl\61 ck;background:\72 gb(255,255,255)"),
+            "color:#e0e0e0;background:#202020;"
+        );
+        assert_eq!(
+            recolored(r".a{background:#\66 ff}"),
+            ".a{background:#202020;}"
+        );
+    }
+
+    #[test]
+    fn moves_custom_properties_as_their_uses_color() {
+        // White text in a variable stays white on its dark background; a black
+        // background in one is made dark, not light.
+        assert_eq!(
+            recolored(".a{--fg:white;color:var(--fg);background:#222}"),
+            ".a{--fg:#ffffff;color:var(--fg);background:#222222;}"
+        );
+        assert_eq!(
+            recolored(".a{--bg:black;background:var(--bg);color:white}"),
+            ".a{--bg:#000000;background:var(--bg);color:#ffffff;}"
+        );
+        // Text and background in variables, set apart from where they are used.
+        let sheet =
+            recolored(":root{--text:#333;--bg:#fff}body{color:var(--text);background:var(--bg)}");
+        assert!(sheet.starts_with(":root{--text:#"), "{sheet}");
+        assert!(sheet.contains("--bg:#202020;"), "{sheet}");
+        assert_eq!(
+            recolored(":root{--text:#333}body{color:var(--text)}"),
+            format!(
+                ":root{{--text:{};}}body{{color:var(--text);}}",
+                recolored_as("#333", "color")
+            ),
+        );
+        // Used for both, inverted; used for no color, left alone.
+        assert_eq!(
+            recolored(".a{--c:#000;color:var(--c);border-color:var(--c)}"),
+            format!(
+                ".a{{--c:{};color:var(--c);border-color:var(--c);}}",
+                recolored_as("#000", "border-color")
+            ),
+        );
+        assert_eq!(
+            recolored(".a{--c:#000;width:var(--w)}"),
+            ".a{--c:#000;width:var(--w);}"
+        );
+    }
+
+    /// `color` as recolored in the value of `property`.
+    fn recolored_as(color: &str, property: &str) -> String {
+        let out = recolored(&format!(".a{{{property}:{color}}}"));
+        out.trim_start_matches(&format!(".a{{{property}:"))
+            .trim_end_matches(";}")
+            .to_owned()
+    }
+
+    #[test]
     fn moves_colors_in_a_style_attribute() {
         assert_eq!(
-            recolor_style("color: #000; background-color :white;width:1px", PALETTE),
+            recolored_style("color: #000; background-color :white;width:1px"),
             "color:#e0e0e0;background-color:#202020;width:1px;"
         );
     }
