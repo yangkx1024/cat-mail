@@ -7,7 +7,7 @@
 
 ```
 src/
-  main.rs        clap 的顶层 `Cli` / `Command`，打开 MailClient，分发，按错误决定退出码
+  main.rs        clap 的顶层 `Cli` / `Command`，开日志文件（见[日志](logging.md)）、打开 MailClient，分发，按错误决定退出码
   cmd/           每组命令一个文件，各自带 clap 参数类型：account、sync、search（ls / search）、
                  read（read / attachment）、ops（mark / mv / archive / rm / label / ops）、
                  compose（compose / reply / forward / draft）、outbox（send / outbox）、watch、gc；

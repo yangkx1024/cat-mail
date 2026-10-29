@@ -200,6 +200,11 @@ impl MailClientBuilder {
             .secrets
             .unwrap_or_else(|| Arc::new(KeyringSecrets::default()));
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
+        tracing::info!(
+            background_sync = self.sync_in_background.is_some(),
+            accounts = watched.len(),
+            "engine opened"
+        );
 
         let mut engine = Engine::new(
             self.config,

@@ -7,6 +7,8 @@
 //!   building outgoing messages
 //! - [`http`]: a message's remote images, fetched when the user asks to see them
 
+#![forbid(unsafe_code)]
+
 mod credentials;
 pub mod http;
 pub mod imap;

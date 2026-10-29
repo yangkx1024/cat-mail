@@ -60,6 +60,8 @@ image = { version = "0.25.10", default-features = false }
 # Parses IMAP responses only; catmail-proto encodes commands and drives the connection.
 imap-proto = "0.18.0"
 keyring = "4.2"
+# glibc's malloc_trim, which hands what the GUI's windows freed back to the system.
+libc = "0.2.191"
 # Builds outgoing messages; the same family as mail-parser. Without `gethostname`:
 # Message-IDs come from the sender's domain, not the machine's name.
 mail-builder = { version = "1.0.0", default-features = false }
@@ -117,7 +119,9 @@ lto = "thin"
 codegen-units = 1
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# Not forbid, which a crate couldn't loosen: catmail-gui's `memory` module calls
+# malloc_trim. Every other crate forbids it at its root.
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

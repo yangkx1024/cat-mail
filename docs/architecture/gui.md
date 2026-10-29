@@ -22,6 +22,7 @@ src/
   main.rs            启动：交给已在运行的实例或成为它，设置、主题、快捷键；主窗口（`MainWindow`）
   resident.rs        `Resident`：引擎、主窗口的关闭与重开、常驻时 headless（见[后台运行](background.md)）
   instance.rs        单实例：数据目录里的 socket，之后的启动经它唤起主窗口
+  memory.rs          常驻时把窗口释放的内存还给系统（glibc 的 `malloc_trim`）
   actions.rs         Action、key context 与快捷键
   assets.rs          资源：Heroicons，及替换 gpui-kit 组件图标
   format.rs html.rs  时刻与日期分组（其余显示格式来自 `catmail_core::display`）；HTML 渲染策略

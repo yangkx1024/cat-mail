@@ -10,6 +10,8 @@
 //! serves remote images, answering or holding each request as the test says. All run on
 //! every CI platform. Real-server tests against Dovecot live in `testenv/`.
 
+#![forbid(unsafe_code)]
+
 mod http;
 mod imap;
 mod mime;

@@ -235,7 +235,25 @@ pub(crate) async fn run(
         permit.run(finished).await?;
     }
     engine.set_synced(account_id, start);
+    log_report(&report, start);
     Ok(report)
+}
+
+/// What a sync of every folder of an account did, in sum.
+fn log_report(report: &SyncReport, began: Instant) {
+    let folders = &report.folders;
+    let sum = |count: fn(&FolderSyncReport) -> u32| folders.iter().map(count).sum::<u32>();
+    tracing::info!(
+        account = %report.account,
+        folders = folders.len(),
+        failed = folders.iter().filter(|f| f.error.is_some()).count(),
+        added = sum(|f| f.added),
+        updated = sum(|f| f.updated),
+        removed = sum(|f| f.removed),
+        rebuilt = folders.iter().filter(|f| f.uidvalidity_changed).count(),
+        took = ?began.elapsed(),
+        "synced every folder"
+    );
 }
 
 /// Gmail if the server has X-GM-EXT-1 and lists All Mail. All Mail can be hidden from

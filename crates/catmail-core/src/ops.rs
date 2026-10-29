@@ -286,6 +286,9 @@ async fn replay(
     // Whatever was committed before a failure too.
     if !folders.is_empty() {
         replayed(engine, account, &touched);
+        let sum = |count: fn(&ReplayReport) -> u32| reports.values().map(count).sum::<u32>();
+        tracing::info!(%account, applied = sum(|r| r.applied), refused = sum(|r| r.failed),
+            error = result.as_ref().err().map(tracing::field::display), "replayed local changes");
     }
     result
 }
