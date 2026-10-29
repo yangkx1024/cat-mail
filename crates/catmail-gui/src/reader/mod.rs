@@ -334,7 +334,7 @@ impl Reader {
             self.page = None;
             return;
         };
-        let (message, colors) = (open.id, open.colors);
+        let message = open.id;
         let images = open.images.clone();
         let resolver: Resolver = Arc::new(move |url| images.bytes(url));
         if let Some(page) = &self.page
@@ -348,7 +348,7 @@ impl Reader {
             html: html.clone(),
             images: resolver,
         };
-        let view = cx.new(|cx| PageView::new(Engine::Blitz, source, colors, window, cx));
+        let view = cx.new(|cx| PageView::new(Engine::Blitz, source, window, cx));
         self.page = Some(ShownPage { message, view });
     }
 

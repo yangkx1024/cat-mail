@@ -1091,6 +1091,7 @@ name = "catmail-core"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "catmail-html",
  "catmail-proto",
  "catmail-store",
  "catmail-testkit",
@@ -1147,16 +1148,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "catmail-proto"
+name = "catmail-html"
 version = "0.1.0"
 dependencies = [
  "ammonia",
  "base64 0.22.1",
+ "color",
+ "cssparser",
+ "html5ever 0.40.1",
+ "url",
+]
+
+[[package]]
+name = "catmail-proto"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "catmail-html",
  "catmail-testkit",
  "catmail-types",
- "cssparser",
  "encoding_rs",
- "html5ever 0.40.1",
  "imap-proto",
  "jiff",
  "mail-builder",

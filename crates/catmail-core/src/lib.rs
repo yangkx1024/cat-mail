@@ -22,11 +22,11 @@ mod images;
 pub mod logging;
 /// What renderers of [`MessageBody::html`] need to resolve and block its images.
 pub mod html {
-    pub use catmail_proto::http::RemoteImage;
-    pub use catmail_proto::mime::{
-        ColorUsage, InlineImage, color_usage, content_id_from_url, embed_inline_images,
-        image_sources, remote_image_url, remote_image_urls,
+    pub use catmail_html::{
+        DarkPalette, InlineImage, content_id_from_url, embed_inline_images, recolor_html,
+        remote_image_url, remote_image_urls,
     };
+    pub use catmail_proto::http::RemoteImage;
 }
 mod ops;
 mod pool;

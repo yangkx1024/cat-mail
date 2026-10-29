@@ -1,13 +1,11 @@
 //! MIME helpers on top of `mail-parser`: summary headers, and the readable content of
 //! a message (text, sanitized HTML, attachments), from the raw message or from its
 //! BODYSTRUCTURE plus selected parts. Outgoing messages are built with `mail-builder`.
+//! HTML bodies are sanitized with `catmail-html`.
 
 mod build;
 mod content;
-mod css;
-mod html;
 mod structure;
-mod tokens;
 
 use std::borrow::Cow;
 
@@ -16,11 +14,7 @@ use encoding_rs::{Encoding, UTF_8};
 use mail_parser::{HeaderValue, MessageParser};
 
 pub use build::{InvalidHeader, Outgoing, OutgoingAttachment, build_message};
-pub use content::{Content, Part, content_id_from_url, decode_transfer, parse_message};
-pub use html::{
-    ColorUsage, InlineImage, MAX_REMOTE_IMAGES, color_usage, embed_inline_images, image_sources,
-    remote_image_url, remote_image_urls, sanitize_html,
-};
+pub use content::{Content, Part, decode_transfer, parse_message};
 pub use structure::{Leaf, MimeNode, Params};
 
 /// The header fields the sync engine fetches for message lists (`HEADER.FIELDS`).

@@ -8,10 +8,15 @@
 //! change, costly for a page built to be costly), nested rules. The output has no `<`
 //! (written `\3c `), so neither `</style>` nor an HTML comment can appear in it, however
 //! the HTML around it is parsed again: the sheet can't change the document's structure.
+//!
+//! The same rewriting moves a message's colors for a dark page ([`dark`](crate::dark)),
+//! given a palette: colors in the values of properties that take them.
 
 use cssparser::{
     Delimiter, ParseError, Parser, ToCss as _, Token, TokenSerializationType, serialize_identifier,
 };
+
+use crate::dark::{self, Color, DarkPalette, Role};
 
 /// The most of a message's style sheets that is kept, in bytes of output: email sheets
 /// are a few kilobytes, a sheet much larger is built to be slow.
@@ -34,18 +39,16 @@ const FETCHING: &[&str] = &[
     "paint",
 ];
 
-/// Properties that color text or its background.
-const COLORS: &[&str] = &["color", "background", "background-color"];
-
-/// A message's style sheets as kept, and what they say about its colors.
+/// A message's style sheets (or a `style` attribute) as kept, and what they say about
+/// showing it on a dark page.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct Stylesheet {
     pub(super) css: String,
     /// It has styles of its own for a dark appearance: `prefers-color-scheme: dark`, or
     /// `color-scheme` naming `dark`.
     pub(super) adapts_to_dark: bool,
-    /// It colors text or backgrounds, outside its dark styles.
-    pub(super) sets_colors: bool,
+    /// When recolored: it sets colors with custom properties (`var()`), which can't be.
+    pub(super) colors_from_variables: bool,
 }
 
 /// A `<style>` element of a message: its text, and its `media` attribute.
@@ -57,8 +60,9 @@ pub(super) struct Element {
 
 /// A message's style sheets, kept as one: each one parsed on its own (a rule left open
 /// ends with its sheet), the rules of one for some media only inside an `@media` block.
-pub(super) fn sanitize(elements: &[Element]) -> Stylesheet {
-    let mut sheet = Sheet::new(MAX_LEN);
+/// With a palette, their colors are moved for a dark page.
+pub(super) fn sanitize(elements: &[Element], recolor: Option<DarkPalette>) -> Stylesheet {
+    let mut sheet = Sheet::new(MAX_LEN, recolor);
     for element in elements {
         if sheet.full() {
             break;
@@ -68,7 +72,7 @@ pub(super) fn sanitize(elements: &[Element]) -> Stylesheet {
     Stylesheet {
         css: sheet.out.replace('<', "\\3c "),
         adapts_to_dark: sheet.dark,
-        sets_colors: sheet.colors,
+        colors_from_variables: sheet.variables,
     }
 }
 
@@ -118,12 +122,18 @@ fn is_fetching(token: &Token<'_>) -> bool {
     }
 }
 
-/// Whether a `style` attribute colors text or its background.
-pub(super) fn sets_colors(style: &str) -> bool {
-    let mut parser = Parser::new(style);
-    let mut declarations = Declarations::default();
-    declarations.parse(&mut parser);
-    declarations.colors
+/// A `style` attribute with its colors moved for a dark page, as its declarations.
+pub(super) fn recolor_style(style: &str, palette: DarkPalette) -> Stylesheet {
+    let mut declarations = Declarations {
+        recolor: Some(palette),
+        ..Declarations::default()
+    };
+    declarations.parse(&mut Parser::new(style));
+    Stylesheet {
+        css: declarations.out,
+        adapts_to_dark: declarations.dark,
+        colors_from_variables: declarations.variables,
+    }
 }
 
 struct Sheet {
@@ -132,17 +142,19 @@ struct Sheet {
     budget: usize,
     rules: usize,
     dark: bool,
-    colors: bool,
+    variables: bool,
+    recolor: Option<DarkPalette>,
 }
 
 impl Sheet {
-    fn new(budget: usize) -> Self {
+    fn new(budget: usize, recolor: Option<DarkPalette>) -> Self {
         Self {
             out: String::new(),
             budget,
             rules: 0,
             dark: false,
-            colors: false,
+            variables: false,
+            recolor,
         }
     }
 
@@ -155,7 +167,7 @@ impl Sheet {
     fn element(&mut self, element: &Element) {
         let mut rules = Parser::new(&element.css);
         let Some(media) = element.media.as_deref().filter(|m| !m.trim().is_empty()) else {
-            self.rules(&mut rules, 0, false);
+            self.rules(&mut rules, 0);
             return;
         };
         let mut query = Parser::new(media);
@@ -168,25 +180,25 @@ impl Sheet {
                 return;
             }
         }
-        self.conditional("media", &prelude.text, 0, false, &mut rules);
+        self.conditional("media", &prelude.text, 0, &mut rules);
     }
 
-    /// The rules of a sheet or of a conditional block; `dark` inside dark styles.
-    fn rules(&mut self, parser: &mut Parser<'_>, depth: usize, dark: bool) {
+    /// The rules of a sheet or of a conditional block.
+    fn rules(&mut self, parser: &mut Parser<'_>, depth: usize) {
         while !self.full() {
             let Ok(token) = parser.next().cloned() else {
                 return;
             };
             match token {
-                Token::AtKeyword(name) => self.at_rule(parser, &name, depth, dark),
+                Token::AtKeyword(name) => self.at_rule(parser, &name, depth),
                 // Left from hiding sheets from old browsers.
                 Token::CDO | Token::CDC => {}
-                token => self.style_rule(parser, &token, dark),
+                token => self.style_rule(parser, &token),
             }
         }
     }
 
-    fn style_rule<'i>(&mut self, parser: &mut Parser<'i>, first: &Token<'i>, dark: bool) {
+    fn style_rule<'i>(&mut self, parser: &mut Parser<'i>, first: &Token<'i>) {
         let mut selector = Css::default();
         let mut kept = copy(parser, first, &mut selector, Context::Selector).is_ok();
         loop {
@@ -201,7 +213,10 @@ impl Sheet {
                 }
             }
         }
-        let mut declarations = Declarations::default();
+        let mut declarations = Declarations {
+            recolor: self.recolor,
+            ..Declarations::default()
+        };
         let _ = parser.parse_nested_block(|block| {
             declarations.parse(block);
             Ok::<_, ParseError<()>>(())
@@ -213,10 +228,10 @@ impl Sheet {
         self.out.push_str(&rule);
         self.rules += 1;
         self.dark |= declarations.dark;
-        self.colors |= declarations.colors && !dark;
+        self.variables |= declarations.variables;
     }
 
-    fn at_rule(&mut self, parser: &mut Parser<'_>, name: &str, depth: usize, dark: bool) {
+    fn at_rule(&mut self, parser: &mut Parser<'_>, name: &str, depth: usize) {
         let conditional =
             name.eq_ignore_ascii_case("media") || name.eq_ignore_ascii_case("supports");
         let mut kept = conditional && depth < MAX_DEPTH;
@@ -241,30 +256,24 @@ impl Sheet {
         }
         let name = name.to_ascii_lowercase();
         let _ = parser.parse_nested_block(|block| {
-            self.conditional(&name, &prelude.text, depth, dark, block);
+            self.conditional(&name, &prelude.text, depth, block);
             Ok::<_, ParseError<()>>(())
         });
     }
 
     /// `@name prelude { … }`, `@media` or `@supports`, with the rules in `block`.
-    fn conditional(
-        &mut self,
-        name: &str,
-        prelude: &str,
-        depth: usize,
-        dark: bool,
-        block: &mut Parser<'_>,
-    ) {
+    fn conditional(&mut self, name: &str, prelude: &str, depth: usize, block: &mut Parser<'_>) {
         let query = prelude.to_ascii_lowercase();
         let dark_query =
             name == "media" && query.contains("prefers-color-scheme") && query.contains("dark");
         let head = format!("@{name} {}{{", prelude.trim());
-        let mut inner = Sheet::new(self.budget.saturating_sub(self.out.len() + head.len() + 1));
+        let budget = self.budget.saturating_sub(self.out.len() + head.len() + 1);
+        let mut inner = Sheet::new(budget, self.recolor);
         inner.rules = self.rules;
-        inner.rules(block, depth + 1, dark || dark_query);
+        inner.rules(block, depth + 1);
         self.rules = inner.rules;
-        self.colors |= inner.colors;
         self.dark |= inner.dark || dark_query;
+        self.variables |= inner.variables;
         if !inner.out.is_empty() {
             self.out.push_str(&head);
             self.out.push_str(&inner.out);
@@ -278,7 +287,9 @@ impl Sheet {
 struct Declarations {
     out: String,
     dark: bool,
-    colors: bool,
+    /// A value whose colors are moved uses a custom property.
+    variables: bool,
+    recolor: Option<DarkPalette>,
 }
 
 impl Declarations {
@@ -288,11 +299,12 @@ impl Declarations {
             let _ = parser.parse_until_after(Delimiter::Semicolon, |p| {
                 let name = p.expect_ident()?.clone();
                 p.expect_colon()?;
-                let mut value = Css::default();
-                while let Ok(token) = p.next_including_whitespace().cloned() {
-                    copy(p, &token, &mut value, Context::Value)
-                        .map_err(|()| ParseError::custom(()))?;
-                }
+                let mut value = Css {
+                    recolor: self.recolor.and_then(|p| Some((p, Role::of(&name)?))),
+                    ..Css::default()
+                };
+                copy_rest(p, &mut value, Context::Value).map_err(|()| ParseError::custom(()))?;
+                self.variables |= value.variables;
                 let value = value.text.trim();
                 if value.is_empty() {
                     return Err(ParseError::custom(()));
@@ -301,9 +313,6 @@ impl Declarations {
                 self.out.push(':');
                 self.out.push_str(value);
                 self.out.push(';');
-                if COLORS.iter().any(|c| name.eq_ignore_ascii_case(c)) {
-                    self.colors = true;
-                }
                 if name.eq_ignore_ascii_case("color-scheme")
                     && value.to_ascii_lowercase().contains("dark")
                 {
@@ -329,6 +338,10 @@ enum Context {
 struct Css {
     text: String,
     last: TokenSerializationType,
+    /// Moves the colors written, as used in the value of the property being written.
+    recolor: Option<(DarkPalette, Role)>,
+    /// It recolors, and wrote a `var()`.
+    variables: bool,
 }
 
 impl Css {
@@ -339,6 +352,10 @@ impl Css {
         }
         self.last = kind;
         token.to_css(&mut self.text).map_err(|_| ())
+    }
+
+    fn color(&mut self, color: Color) -> Result<(), ()> {
+        self.push(&Token::Hash(dark::hex(color).into()))
     }
 }
 
@@ -358,6 +375,7 @@ fn copy<'i>(
             if context == Context::Selector && name.eq_ignore_ascii_case("has") {
                 return Err(());
             }
+            out.variables |= out.recolor.is_some() && name.eq_ignore_ascii_case("var");
             Token::CloseParenthesis
         }
         Token::ParenthesisBlock => Token::CloseParenthesis,
@@ -374,13 +392,43 @@ fn copy<'i>(
     out.push(token)?;
     parser
         .parse_nested_block(|block| {
-            while let Ok(token) = block.next_including_whitespace().cloned() {
-                copy(block, &token, out, context).map_err(|()| ParseError::custom(()))?;
-            }
-            Ok::<_, ParseError<()>>(())
+            copy_rest(block, out, context).map_err(|()| ParseError::custom(()))
         })
-        .map_err(|_| ())?;
+        .map_err(|_: ParseError<()>| ())?;
     out.push(&close)
+}
+
+/// Writes the rest of `parser` to `out` as [`copy`] does, the colors moved if `out`
+/// recolors.
+fn copy_rest(parser: &mut Parser<'_>, out: &mut Css, context: Context) -> Result<(), ()> {
+    loop {
+        if let Some((palette, role)) = out.recolor
+            && let Ok(color) = parser.try_parse(parse_color)
+        {
+            out.color(palette.recolor(color, role))?;
+            continue;
+        }
+        let Ok(token) = parser.next_including_whitespace().cloned() else {
+            return Ok(());
+        };
+        copy(parser, &token, out, context)?;
+    }
+}
+
+/// A color as CSS writes it: a hex color, a name, or a color function (`rgb()`, `hsl()`,
+/// `oklch()`, …) with its arguments. Read as its tokens are written back, escapes decoded
+/// (`bl\61 ck` is `black`), as a browser reads it.
+fn parse_color(parser: &mut Parser<'_>) -> Result<Color, ParseError<()>> {
+    let token = parser.next_including_whitespace()?.clone();
+    let mut decoded = Css::default();
+    let colorish = matches!(
+        token,
+        Token::Hash(_) | Token::IDHash(_) | Token::Ident(_) | Token::Function(_)
+    );
+    if !colorish || copy(parser, &token, &mut decoded, Context::Value).is_err() {
+        return Err(ParseError::custom(()));
+    }
+    dark::parse(&decoded.text).ok_or_else(|| ParseError::custom(()))
 }
 
 #[cfg(test)]
@@ -388,10 +436,13 @@ mod tests {
     use super::*;
 
     fn sheet(source: &str) -> Stylesheet {
-        sanitize(&[Element {
-            media: None,
-            css: source.into(),
-        }])
+        sanitize(
+            &[Element {
+                media: None,
+                css: source.into(),
+            }],
+            None,
+        )
     }
 
     fn css(source: &str) -> String {
@@ -502,11 +553,14 @@ mod tests {
             media: Some(media.into()),
             css: css.into(),
         };
-        let sheets = sanitize(&[
-            element("print", "p{display:none}"),
-            element(" ", ".a{color:red}"),
-            element("(prefers-color-scheme: dark)", ".b{color:#eee}"),
-        ]);
+        let sheets = sanitize(
+            &[
+                element("print", "p{display:none}"),
+                element(" ", ".a{color:red}"),
+                element("(prefers-color-scheme: dark)", ".b{color:#eee}"),
+            ],
+            None,
+        );
         assert_eq!(
             sheets.css,
             "@media print{p{display:none;}}.a{color:red;}\
@@ -514,18 +568,21 @@ mod tests {
         );
         assert!(sheets.adapts_to_dark);
         // A rule left open ends with its sheet: it doesn't take in the next one.
-        let sheets = sanitize(&[
-            element("print", "p{display:none"),
-            Element {
-                media: None,
-                css: ".a{color:red}".into(),
-            },
-        ]);
+        let sheets = sanitize(
+            &[
+                element("print", "p{display:none"),
+                Element {
+                    media: None,
+                    css: ".a{color:red}".into(),
+                },
+            ],
+            None,
+        );
         assert_eq!(sheets.css, "@media print{p{display:none;}}.a{color:red;}");
         // Not a media query list: the sheet applies nowhere.
         for media in ["print;", "print{}.x", "@import x", "url(x)"] {
             assert_eq!(
-                sanitize(&[element(media, "p{display:none}")]).css,
+                sanitize(&[element(media, "p{display:none}")], None).css,
                 "",
                 "{media}"
             );
@@ -571,16 +628,124 @@ mod tests {
     }
 
     #[test]
-    fn tells_colors_and_dark_styles_apart() {
-        let plain = sheet(".a{padding:4px;font-size:14px}");
-        assert!(!plain.sets_colors && !plain.adapts_to_dark);
-        let light = sheet(".a{color:#333}");
-        assert!(light.sets_colors && !light.adapts_to_dark);
-        let dark_only = sheet("@media (prefers-color-scheme: dark){.a{color:#eee}}");
-        assert!(!dark_only.sets_colors && dark_only.adapts_to_dark);
+    fn finds_dark_styles() {
+        assert!(!sheet(".a{color:#333}").adapts_to_dark);
+        assert!(sheet("@media (prefers-color-scheme: dark){.a{color:#eee}}").adapts_to_dark);
         assert!(sheet(":root{color-scheme:light dark}").adapts_to_dark);
+    }
 
-        assert!(sets_colors("padding:0;background-color:#fff"));
-        assert!(!sets_colors("padding:0;font-weight:bold"));
+    const PALETTE: DarkPalette = DarkPalette {
+        background: [0x20; 3],
+        foreground: [0xe0; 3],
+    };
+
+    fn recolored_sheet(source: &str) -> Stylesheet {
+        let element = Element {
+            media: None,
+            css: source.into(),
+        };
+        sanitize(&[element], Some(PALETTE))
+    }
+
+    fn recolored(source: &str) -> String {
+        recolored_sheet(source).css
+    }
+
+    fn recolored_style(style: &str) -> String {
+        recolor_style(style, PALETTE).css
+    }
+
+    #[test]
+    fn moves_colors_for_a_dark_page() {
+        // White goes to the page and black text to the reader's text, in any notation.
+        assert_eq!(
+            recolored(".a{background:#fff;color:black;padding:4px}"),
+            ".a{background:#202020;color:#e0e0e0;padding:4px;}"
+        );
+        for white in [
+            "WHITE",
+            "#ffffff",
+            "rgb(255, 255, 255)",
+            "rgb(100% 100% 100%)",
+            "hsl(0, 0%, 100%)",
+            "hsl(120deg 0% 100%)",
+            "oklch(1 0 0)",
+        ] {
+            assert_eq!(
+                recolored(&format!(".a{{background-color:{white}}}")),
+                ".a{background-color:#202020;}",
+                "{white}"
+            );
+        }
+        assert_eq!(
+            recolored(".a{color:rgba(0,0,0,.5)}.b{color:rgb(0 0 0 / 25%)}"),
+            ".a{color:#e0e0e080;}.b{color:#e0e0e040;}"
+        );
+        // Inside a value, a gradient, a conditional block; what is around stays.
+        assert_eq!(
+            recolored(
+                "@media (max-width:600px){.a{border:1px solid #000!important;\
+                 background-image:linear-gradient(#fff,#000)}}"
+            ),
+            "@media (max-width:600px){.a{border:1px solid #e0e0e0!important;\
+             background-image:linear-gradient(#202020,#000000);}}"
+        );
+    }
+
+    #[test]
+    fn leaves_what_is_no_color_alone() {
+        for kept in [
+            "#fff{margin:0;}",
+            ".a{font-family:Tomato,sans-serif;}",
+            ".a{color:currentColor;background:transparent;}",
+            ".a{color:inherit;}",
+            ".a{color:rgb(0,0,0,0,0);}",
+            ".a{color:#12345;}",
+            ".a{content:\"#000\";}",
+        ] {
+            assert_eq!(recolored(kept), kept);
+        }
+    }
+
+    #[test]
+    fn moves_escaped_colors() {
+        assert_eq!(
+            recolored_style(r"color:bl\61 ck;background:\72 gb(255,255,255)"),
+            "color:#e0e0e0;background:#202020;"
+        );
+        assert_eq!(
+            recolored(r".a{background:#\66 ff}"),
+            ".a{background:#202020;}"
+        );
+    }
+
+    #[test]
+    fn finds_colors_set_with_custom_properties() {
+        for uses in [
+            ".a{--fg:white;color:var(--fg);background:#222}",
+            ".a{border:1px solid var(--c, #000)}",
+            "@media (max-width:600px){.a{background:VAR(--bg)}}",
+        ] {
+            assert!(recolored_sheet(uses).colors_from_variables, "{uses}");
+        }
+        // Not for a color, or not used: nothing to tell.
+        for plain in [".a{width:var(--w);--c:#fff}", ".a{color:#000}"] {
+            assert!(!recolored_sheet(plain).colors_from_variables, "{plain}");
+        }
+        assert!(
+            !sheet(".a{color:var(--fg)}").colors_from_variables,
+            "not recolored"
+        );
+        assert!(recolor_style("color:var(--fg)", PALETTE).colors_from_variables);
+        // A custom property's own value isn't moved: where it is used decides.
+        assert_eq!(recolored(".a{--c:#000}"), ".a{--c:#000;}");
+    }
+
+    #[test]
+    fn moves_colors_in_a_style_attribute() {
+        assert_eq!(
+            recolored_style("color: #000; background-color :white;width:1px"),
+            "color:#e0e0e0;background-color:#202020;width:1px;"
+        );
     }
 }

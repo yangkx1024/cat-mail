@@ -47,6 +47,21 @@ pub(crate) trait Page {
     fn select(&mut self, span: Span) -> Selection;
 }
 
+/// The page as it opens once its appearance moved its colors ([`Appearance::recolor`]):
+/// in the default appearance, as written, if they can't be.
+fn recolored(mut source: Source, appearance: Appearance) -> (Source, Appearance) {
+    let Some(recolor) = &appearance.recolor else {
+        return (source, appearance);
+    };
+    match recolor(&source.html) {
+        Some(html) => {
+            source.html = html.into();
+            (source, appearance)
+        }
+        None => (source, Appearance::default()),
+    }
+}
+
 /// Opens an engine's page, on the thread that keeps it.
 pub(crate) type Opener = fn(&Source, &Appearance, f32) -> Box<dyn Page>;
 
@@ -87,6 +102,7 @@ impl Document {
         thread::Builder::new()
             .name(format!("render-{}", engine.name()))
             .spawn(move || {
+                let (source, appearance) = recolored(source, appearance);
                 let page = opener(&source, &appearance, scale);
                 serve(page, appearance.canvas, &receiver);
             })?;

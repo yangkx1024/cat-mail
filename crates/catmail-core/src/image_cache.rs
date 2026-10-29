@@ -13,8 +13,8 @@ use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use catmail_html::remote_image_url;
 use catmail_proto::http::RemoteImage;
-use catmail_proto::mime::remote_image_url;
 use sha2::{Digest, Sha256};
 
 /// Past this, the images used longest ago go.

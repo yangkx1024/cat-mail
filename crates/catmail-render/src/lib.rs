@@ -71,8 +71,12 @@ impl fmt::Debug for Source {
     }
 }
 
-/// How the page looks where the message's own styles say nothing.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Rewrites a page's HTML before it is parsed, or declines to: `None`.
+pub type Recolor = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
+/// How the page looks where the message's own styles say nothing, and what becomes of
+/// the colors they set.
+#[derive(Clone)]
 pub struct Appearance {
     /// What `prefers-color-scheme` answers.
     pub dark: bool,
@@ -80,6 +84,10 @@ pub struct Appearance {
     pub canvas: [u8; 3],
     /// A user-agent style sheet, under the message's styles: the reader's colors.
     pub sheet: Arc<str>,
+    /// Moves the page's own colors for this appearance, run on the document's thread:
+    /// a pass over the whole HTML that the UI thread shouldn't wait for. If it can't, the
+    /// page is shown in the default appearance, as written for a light page.
+    pub recolor: Option<Recolor>,
 }
 
 impl Default for Appearance {
@@ -89,7 +97,19 @@ impl Default for Appearance {
             dark: false,
             canvas: [255; 3],
             sheet: "".into(),
+            recolor: None,
         }
+    }
+}
+
+impl fmt::Debug for Appearance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Appearance")
+            .field("dark", &self.dark)
+            .field("canvas", &self.canvas)
+            .field("sheet", &self.sheet)
+            .field("recolor", &self.recolor.is_some())
+            .finish()
     }
 }
 
@@ -507,6 +527,7 @@ mod tests {
             dark: true,
             canvas: [0x10, 0x20, 0x30],
             sheet: "a { color: #ff0000 }".into(),
+            recolor: None,
         };
         let paint = |html: &str, appearance: Appearance| {
             let document = open(source(html), appearance, 1.0);
@@ -521,12 +542,28 @@ mod tests {
             @media (prefers-color-scheme: dark){body{background:#123456}}</style>
             <body style="margin:0;height:40px">x</body>"#;
         assert_eq!(
-            pixel(&paint(adaptive, dark), 290, 30),
+            pixel(&paint(adaptive, dark.clone()), 290, 30),
             [0x56, 0x34, 0x12, 255]
         );
         assert_eq!(
             pixel(&paint(adaptive, Appearance::default()), 290, 30),
             WHITE
         );
+        // The page's own colors are moved as the appearance says.
+        let recolored = Appearance {
+            recolor: Some(Arc::new(|html: &str| {
+                Some(html.replace("#ffffff", "#00ff00"))
+            })),
+            ..dark.clone()
+        };
+        let light = r#"<body style="margin:0;height:40px;background:#ffffff">x</body>"#;
+        assert_eq!(pixel(&paint(light, recolored), 290, 30), GREEN);
+        // One it can't move shows light, as written: its light styles, on white.
+        let declined = Appearance {
+            recolor: Some(Arc::new(|_: &str| None)),
+            ..dark
+        };
+        assert_eq!(pixel(&paint(adaptive, declined.clone()), 290, 30), WHITE);
+        assert_eq!(pixel(&paint("<p>x</p>", declined), 290, 30), WHITE);
     }
 }

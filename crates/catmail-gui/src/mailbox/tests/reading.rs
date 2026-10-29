@@ -65,17 +65,34 @@ fn shows_html_as_a_page_and_text_without_one(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn shows_html_dark_when_the_message_allows_it(cx: &mut TestAppContext) {
+fn shows_html_dark_in_a_dark_theme(cx: &mut TestAppContext) {
     let mail = TestMail::start();
     mail.deliver_raw_and_sync(
         b"From: a@example.com\r\nTo: catmail@example.com\r\nSubject: Plain HTML\r\n\
           Date: Mon, 19 Oct 2026 10:00:00 +0800\r\nMIME-Version: 1.0\r\n\
           Content-Type: text/html; charset=utf-8\r\n\r\n<p>No colors of its own</p>\r\n",
     );
+    mail.deliver_raw_and_sync(
+        b"From: a@example.com\r\nTo: catmail@example.com\r\nSubject: White HTML\r\n\
+          Date: Mon, 19 Oct 2026 11:00:00 +0800\r\nMIME-Version: 1.0\r\n\
+          Content-Type: text/html; charset=utf-8\r\n\r\n\
+          <body style=\"margin:0\"><table width=\"100%\" bgcolor=\"#ffffff\"><tr>\
+          <td style=\"color:#333333;height:40px\">Colored for white</td></tr></table></body>\r\n",
+    );
+    mail.deliver_raw_and_sync(
+        b"From: a@example.com\r\nTo: catmail@example.com\r\nSubject: Variable HTML\r\n\
+          Date: Mon, 19 Oct 2026 12:00:00 +0800\r\nMIME-Version: 1.0\r\n\
+          Content-Type: text/html; charset=utf-8\r\n\r\n\
+          <style>p{--fg:#333333;color:var(--fg)}</style><p>Colored with a variable</p>\r\n",
+    );
     let (window, mailbox) = open(cx, &mail);
     wait_until(|| {
         cx.run_until_parked();
-        cx.read(|cx| find(&mailbox, "Plain HTML", cx).is_some())
+        cx.read(|cx| {
+            ["Plain HTML", "White HTML", "Variable HTML"]
+                .iter()
+                .all(|subject| find(&mailbox, subject, cx).is_some())
+        })
     });
     let pixel = |cx: &mut TestAppContext| {
         frame(cx, window);
@@ -89,6 +106,16 @@ fn shows_html_dark_when_the_message_allows_it(cx: &mut TestAppContext) {
     let dark = [background.b, background.g, background.r, 255];
     assert_ne!(dark, [255; 4]);
     wait_until(|| pixel(cx) == Some(dark));
+
+    // One colored for a white page has its white moved to the theme's background (to
+    // within rounding: it goes through another color space).
+    click_message(cx, window, &mailbox, "White HTML");
+    let near = |pixel: [u8; 4]| pixel.iter().zip(dark).all(|(&a, b)| a.abs_diff(b) <= 1);
+    wait_until(|| pixel(cx).is_some_and(near));
+
+    // One colored with custom properties can't be moved: it shows light, as written.
+    click_message(cx, window, &mailbox, "Variable HTML");
+    wait_until(|| pixel(cx) == Some([255; 4]));
 
     // The page follows the theme when it changes.
     set_appearance(cx, crate::settings::Appearance::Light);
