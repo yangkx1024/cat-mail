@@ -137,7 +137,8 @@ impl MailClientBuilder {
         self
     }
 
-    /// Batch sizes and the whole-message limit [default: `EngineTuning::default()`].
+    /// Batch sizes, the whole-message limit and the keepalive of idle connections
+    /// [default: `EngineTuning::default()`].
     /// Batch sizes below 1 count as 1.
     pub fn tuning(mut self, tuning: EngineTuning) -> Self {
         self.tuning = tuning.checked();

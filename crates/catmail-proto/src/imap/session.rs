@@ -30,7 +30,8 @@ pub struct Session {
     caps: Capabilities,
     /// From a PREAUTH greeting, or after `login`.
     authenticated: bool,
-    selected: Option<MailboxStatus>,
+    /// The opened mailbox: its raw name, and what opening it found.
+    selected: Option<(String, MailboxStatus)>,
     /// Whether `selected` was opened with SELECT rather than EXAMINE.
     writable: bool,
     /// What IDLE reported about flags in `selected`.
@@ -258,10 +259,30 @@ impl Session {
             exists: exists.ok_or_else(|| missing("EXISTS"))?,
             highest_modseq: highest_modseq.filter(|_| self.condstore() && !no_modseq),
         };
-        self.selected = Some(status);
+        self.selected = Some((raw_name.to_owned(), status));
         self.writable = writable;
         self.conn.mailbox_opened(status.exists);
         Ok(status)
+    }
+
+    /// The UIDVALIDITY [`examine`](Self::examine) found when it opened `raw_name`, if
+    /// that is the mailbox open now, read-only. It holds for as long as the mailbox stays
+    /// open (RFC 3501 §2.3.1.1: a server that rebuilds it ends the session, as Dovecot
+    /// does), so reading it needs no EXAMINE again. What else opening it found may be out
+    /// of date, so it isn't offered.
+    pub fn examined(&self, raw_name: &str) -> Option<u32> {
+        match &self.selected {
+            Some((name, status)) if !self.writable && name == raw_name => Some(status.uidvalidity),
+            _ => None,
+        }
+    }
+
+    /// Asks the server for nothing but news of the opened mailbox, which keeps a quiet
+    /// connection from being closed, and tells whether it still works.
+    pub async fn noop(&mut self) -> Result<()> {
+        // Only the tagged answer matters.
+        self.conn.execute_lossy(Command::new("NOOP")).await?;
+        Ok(())
     }
 
     /// Whether [`idle`](Self::idle) is available (IDLE, RFC 2177).
@@ -858,11 +879,15 @@ impl Session {
     }
 
     fn modseq_enabled(&self) -> bool {
-        self.selected.is_some_and(|s| s.highest_modseq.is_some())
+        self.selected
+            .as_ref()
+            .is_some_and(|(_, s)| s.highest_modseq.is_some())
     }
 
     fn selected_status(&self) -> Result<MailboxStatus> {
         self.selected
+            .as_ref()
+            .map(|(_, status)| *status)
             .ok_or_else(|| Error::Protocol("no mailbox selected".into()))
     }
 

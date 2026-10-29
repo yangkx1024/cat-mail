@@ -1093,6 +1093,11 @@ async fn handle(
     if session.id <= silenced {
         return silent(io).await;
     }
+    if rebuilt(&lock(state), session) {
+        io.get_mut().write_all(REBUILT.as_bytes()).await?;
+        io.get_mut().flush().await?;
+        return Ok(Next::Close);
+    }
     {
         let mut st = lock(state);
         st.log.push(LoggedCommand {
@@ -1498,6 +1503,23 @@ fn insert_before_last_line(out: &mut Vec<u8>, lines: &[u8]) {
     out.splice(at..at, lines.iter().copied());
 }
 
+/// What a connection whose selected mailbox was rebuilt (see [`rebuilt`]) is told before
+/// it is closed.
+const REBUILT: &str = "* BYE UIDVALIDITY changed\r\n";
+
+/// Whether the connection's selected mailbox was rebuilt since it was opened: its UIDs
+/// mean other messages now, so the connection is ended, as Dovecot does, whether it
+/// idles or sends a command.
+fn rebuilt(st: &ServerState, session: &Session) -> bool {
+    match (
+        session.selected.and_then(|i| st.mailboxes.get(i)),
+        &session.view,
+    ) {
+        (Some(mb), Some(view)) => mb.uidvalidity != view.uidvalidity,
+        _ => false,
+    }
+}
+
 /// IDLE until DONE: reports changes to the selected mailbox as they happen. A new
 /// UIDVALIDITY ends the connection with BYE, as Dovecot does; so does
 /// [`ServerState::drop_open_connections`] (without the BYE).
@@ -1533,15 +1555,16 @@ async fn idle(
             if session.id <= st.dropped_through {
                 return Ok(Next::Close);
             }
-            match (
-                session.selected.and_then(|i| st.mailboxes.get(i)),
-                &mut session.view,
-            ) {
-                (Some(mb), Some(view)) if mb.uidvalidity != view.uidvalidity => {
-                    ("* BYE UIDVALIDITY changed\r\n".to_owned(), Next::Close)
+            if rebuilt(&st, session) {
+                (REBUILT.to_owned(), Next::Close)
+            } else {
+                match (
+                    session.selected.and_then(|i| st.mailboxes.get(i)),
+                    &mut session.view,
+                ) {
+                    (Some(mb), Some(view)) => (view.catch_up(View::of(mb)), Next::Continue),
+                    _ => (String::new(), Next::Continue),
                 }
-                (Some(mb), Some(view)) => (view.catch_up(View::of(mb)), Next::Continue),
-                _ => (String::new(), Next::Continue),
             }
         };
         if !out.is_empty() {

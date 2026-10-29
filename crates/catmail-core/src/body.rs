@@ -4,9 +4,9 @@
 //! [`EngineTuning`](crate::EngineTuning)) is fetched whole (`BODY.PEEK[]`), kept as a
 //! raw blob, and its attachments stored at once. A larger one is fetched as its
 //! BODYSTRUCTURE plus the text parts; each attachment is fetched by section when it is
-//! first opened. Either way the mailbox is opened with EXAMINE and bodies are fetched
-//! with `.PEEK`, so nothing changes on the server, and the stored UIDVALIDITY is checked
-//! before any UID is used.
+//! first opened. Either way the mailbox is opened with EXAMINE (unless the connection has
+//! it open so already) and bodies are fetched with `.PEEK`, so nothing changes on the
+//! server, and the stored UIDVALIDITY is checked before any UID is used.
 //!
 //! Results are written only if the message row still exists. Message ids are never
 //! reused and a UIDVALIDITY change deletes the rows of the old generation, so an
@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use catmail_proto::imap::{self, Session};
 use catmail_proto::mime::{self, Content};
@@ -133,7 +133,7 @@ pub(crate) async fn raw_message(engine: Arc<Engine>, id: MessageId) -> Result<Ve
 }
 
 /// Runs `op` against the message's folder on the server: on one of the account's
-/// connections, after EXAMINE has confirmed the UIDVALIDITY, and cancelled if the
+/// connections, once the folder is open with the UIDVALIDITY confirmed, and cancelled if the
 /// account is removed meanwhile. Every on-demand fetch goes through here.
 ///
 /// `op` returns `None` if the server sent nothing of what it asked for: the message is
@@ -156,11 +156,11 @@ async fn on_server<T>(
     tokio::select! {
         result = with_session(engine, account, async move |session| {
             // What the user waits for when a message opens: a connection (a new one
-            // logs in, which is logged too), opening the folder, then the fetch.
+            // logs in, which is logged too), opening the folder unless it is open, then
+            // the fetch.
             let connected = began.elapsed();
-            let examined = Instant::now();
-            examine(session, &location).await?;
-            let (examine, fetched) = (examined.elapsed(), Instant::now());
+            let examine = examine(session, &location).await?;
+            let fetched = Instant::now();
             let done = op(session, &location).await?;
             tracing::info!(%account, folder = %location.remote_name, uid = location.uid,
                 ?connected, ?examine, fetch = ?fetched.elapsed(), "fetched from the server");
@@ -317,15 +317,24 @@ async fn mime_headers(
 }
 
 /// Opens the message's folder read-only and makes sure its UIDs still mean what they
-/// meant when the message was stored.
-async fn examine(session: &mut Session, location: &MessageLocation) -> Result<()> {
+/// meant when the message was stored. A connection that has it open read-only already,
+/// with that UIDVALIDITY, is used as it is (see [`Session::examined`]): on Gmail nearly
+/// every message is in All Mail. Returns how long opening it took, if it was opened.
+async fn examine(session: &mut Session, location: &MessageLocation) -> Result<Option<Duration>> {
+    if session
+        .examined(&location.remote_name)
+        .is_some_and(|open| location.uidvalidity == Some(open))
+    {
+        return Ok(None);
+    }
+    let began = Instant::now();
     let status = session.examine(&location.remote_name).await?;
     if !status.same_generation(location.uidvalidity) {
         return Err(Error::OutOfSync(
             "the folder was rebuilt on the server (UIDVALIDITY changed)",
         ));
     }
-    Ok(())
+    Ok(Some(began.elapsed()))
 }
 
 /// Stores the raw message and every part that came with it in the blob store.

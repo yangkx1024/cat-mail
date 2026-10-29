@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use catmail_core::{EngineTuning, Error, Event, Message, MessageId, SearchQuery};
+use catmail_core::{EngineTuning, Error, Event, Flags, Message, MessageId, SearchQuery};
 use catmail_testkit::{FakeHttp, Reply, ServerState, SmtpState, response};
 
 mod common;
@@ -529,6 +529,75 @@ async fn reconnects_when_an_idle_connection_died() {
     env.fake.state().faults.drop_on_body_fetch = Some(2);
     env.client.download_message(env.id(1).await).await.unwrap();
     assert_eq!(env.fake.state().connections, connections + 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_folder_open_read_only_is_not_examined_again() {
+    let env = env(state(&[NEWSLETTER, NEWSLETTER, NEWSLETTER])).await;
+    env.client.download_message(env.id(0).await).await.unwrap();
+
+    let start = env.log_len();
+    env.client.download_message(env.id(1).await).await.unwrap();
+    let commands = env.commands_since(start);
+    assert_eq!(env.examined(start), Vec::<String>::new());
+    assert!(
+        commands.iter().any(|c| c.contains("BODY.PEEK[]")),
+        "{commands:?}"
+    );
+
+    // Opened with SELECT to make a change: reading examines it again.
+    env.client
+        .set_flags(vec![env.id(0).await], Flags::FLAGGED, Flags::empty())
+        .await
+        .unwrap();
+    env.replay().await;
+    assert_eq!(env.fake.state().received("SELECT"), 1);
+    let start = env.log_len();
+    env.client.download_message(env.id(2).await).await.unwrap();
+    assert_eq!(env.examined(start), ["INBOX"]);
+}
+
+/// Two messages, the first downloaded, which leaves a connection idle that is kept alive
+/// every 50 ms; and how many connections the server accepted so far.
+async fn kept_alive() -> (Env, usize) {
+    let env = env_built(
+        state(&[NEWSLETTER, NEWSLETTER]),
+        SmtpState::new("alice", "pw"),
+        |b| {
+            b.tuning(EngineTuning {
+                keepalive: Duration::from_millis(50),
+                ..EngineTuning::default()
+            })
+        },
+    )
+    .await;
+    env.client.sync_account(env.account).await.unwrap();
+    env.client.download_message(env.id(0).await).await.unwrap();
+    let connections = env.fake.state().connections;
+    (env, connections)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_connections_are_kept_alive() {
+    let (env, connections) = kept_alive().await;
+    // Each keepalive takes the connection from the pool by its id, so a third NOOP means
+    // it was put back twice: kept, with no new login. Not shown by a download, which can
+    // find the pool empty while a NOOP is out (the folder staying open across a NOOP is
+    // `imap_session`'s to show).
+    env.fake.wait_until(|st| st.received("NOOP") >= 3).await;
+    assert_eq!(env.fake.state().connections, connections);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_idle_connection_found_dead_is_replaced() {
+    let (env, connections) = kept_alive().await;
+    // The server hangs up on the next command, which only the keepalive sends.
+    env.fake.state().drop_open_connections();
+    env.fake.wait_until(|st| st.open_connections == 0).await;
+    let start = env.log_len();
+    env.client.download_message(env.id(1).await).await.unwrap();
+    assert_eq!(env.fake.state().connections, connections + 1);
+    assert_eq!(env.examined(start), ["INBOX"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
