@@ -8,7 +8,6 @@ use std::sync::LazyLock;
 use ammonia::{Builder, UrlRelative};
 use html5ever::tokenizer::{TagKind, Token, TokenSink, TokenSinkResult};
 
-use crate::css::Recolor;
 use crate::dark::{DarkPalette, Role};
 use crate::{css, tokens};
 
@@ -36,9 +35,12 @@ pub(crate) type ImageHook = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 static SANITIZER: LazyLock<Builder<'static>> = LazyLock::new(|| sanitizer(None, None));
 
 /// The one sanitizer configuration; `on_image` lets a renderer see or replace image
-/// sources during the same parse, instead of scanning the HTML text afterwards. With
-/// `recolor`, colors in attributes are moved for a dark page.
-pub(crate) fn sanitizer(on_image: Option<ImageHook>, recolor: Option<Recolor>) -> Builder<'static> {
+/// sources during the same parse, instead of scanning the HTML text afterwards. With a
+/// palette, colors in attributes are moved for a dark page.
+pub(crate) fn sanitizer(
+    on_image: Option<ImageHook>,
+    recolor: Option<DarkPalette>,
+) -> Builder<'static> {
     let mut builder = Builder::default();
     builder
         .add_tags(["font"])
@@ -60,7 +62,7 @@ pub(crate) fn sanitizer(on_image: Option<ImageHook>, recolor: Option<Recolor>) -
             {
                 Some(Cow::Owned(replaced))
             } else if let Some(recolored) =
-                (recolor.as_ref()).and_then(|r| recolor_attribute(r, attribute, value))
+                recolor.and_then(|palette| recolor_attribute(palette, attribute, value))
             {
                 Some(Cow::Owned(recolored))
             } else {
@@ -72,11 +74,11 @@ pub(crate) fn sanitizer(on_image: Option<ImageHook>, recolor: Option<Recolor>) -
 
 /// An attribute's value with its colors moved for a dark page, or `None` for one that
 /// has no colors.
-fn recolor_attribute(recolor: &Recolor, attribute: &str, value: &str) -> Option<String> {
+fn recolor_attribute(palette: DarkPalette, attribute: &str, value: &str) -> Option<String> {
     match attribute {
-        "style" => Some(css::recolor_style(value, recolor)),
-        "bgcolor" => recolor.palette.recolor_attribute(value, Role::Surface),
-        "color" => recolor.palette.recolor_attribute(value, Role::Text),
+        "style" => Some(css::recolor_style(value, palette).css),
+        "bgcolor" => palette.recolor_attribute(value, Role::Surface),
+        "color" => palette.recolor_attribute(value, Role::Text),
         _ => None,
     }
 }
@@ -104,14 +106,31 @@ pub fn sanitize_html(html: &str) -> String {
 /// `palette`'s colors, as Gmail and Outlook show mail written for white (`dark.rs`): in
 /// its style sheets, `style` attributes, and `bgcolor` and `color` attributes. A message
 /// with dark styles of its own is left as it is: those apply.
-pub fn recolor_html(html: &str, palette: DarkPalette) -> String {
+///
+/// `None` for a message that sets colors with custom properties (`var()`): what a
+/// variable holds where it is used is up to the cascade, which only the engine knows, so
+/// no move where it is set keeps every pair it ends up in readable. Such a message is to
+/// be shown as written, on a light page. Mail clients rarely support them, so mail rarely
+/// uses them.
+pub fn recolor_html(html: &str, palette: DarkPalette) -> Option<String> {
     let styles = styles(html, true);
-    let recolor = Recolor::new(palette, &styles.sheets, &styles.attributes);
-    let sheet = css::sanitize(&styles.sheets, Some(&recolor));
+    let sheet = css::sanitize(&styles.sheets, Some(palette));
     if sheet.adapts_to_dark {
-        return html.to_owned();
+        return Some(html.to_owned());
     }
-    with_sheet(&sheet.css, &sanitizer(None, Some(recolor)), html)
+    let attributes = styles.attributes.iter();
+    if sheet.colors_from_variables
+        || attributes
+            .map(|style| css::recolor_style(style, palette))
+            .any(|s| s.colors_from_variables)
+    {
+        return None;
+    }
+    Some(with_sheet(
+        &sheet.css,
+        &sanitizer(None, Some(palette)),
+        html,
+    ))
 }
 
 /// The sanitizer's output with the message's style sheets in front. ammonia drops every
@@ -293,7 +312,7 @@ mod tests {
             background: [0x20; 3],
             foreground: [0xe0; 3],
         };
-        assert_eq!(recolor_html(&adaptive, palette), adaptive);
+        assert_eq!(recolor_html(&adaptive, palette), Some(adaptive));
     }
 
     #[test]
@@ -307,7 +326,7 @@ mod tests {
             <td style="background:white;padding:4px"><font color="black">x</font>
             <img src="cid:logo@x" width="10"></td></tr></table>"##,
         );
-        let dark = recolor_html(&clean, palette);
+        let dark = recolor_html(&clean, palette).unwrap();
         assert!(
             dark.starts_with("<style>.a{color:#e0e0e0;}</style>"),
             "{dark}"
@@ -320,28 +339,34 @@ mod tests {
         ] {
             assert!(dark.contains(moved), "{moved}: {dark}");
         }
-        // A custom property set in an attribute is moved as the sheet uses it: for text.
-        let custom = sanitize_html(
+        // Colors set with custom properties, in a sheet or an attribute, can't be moved.
+        for custom in [
+            r#"<style>.a{--fg:#000}</style><p class=a style="color:var(--fg)">x</p>"#,
             r#"<style>.a{color:var(--fg)}</style><p class=a style="--fg:#000">x</p>"#,
-        );
-        let dark = recolor_html(&custom, palette);
-        assert!(dark.contains(r##"style="--fg:#e0e0e0;""##), "{dark}");
+        ] {
+            assert_eq!(
+                recolor_html(&sanitize_html(custom), palette),
+                None,
+                "{custom}"
+            );
+        }
         // A message without colors is left as it was, and one with dark styles of its own
         // keeps its colors for them.
         let plain = sanitize_html("<style>p{margin:0;}</style><p align=\"center\">x</p>");
-        assert_eq!(recolor_html(&plain, palette), plain);
+        assert_eq!(recolor_html(&plain, palette).as_ref(), Some(&plain));
         let adaptive = sanitize_html(
             "<style>@media (prefers-color-scheme: dark){.a{color:#eee}}</style>\
              <p class=a style=\"color:#333\">x</p>",
         );
-        assert_eq!(recolor_html(&adaptive, palette), adaptive);
+        assert_eq!(recolor_html(&adaptive, palette).as_ref(), Some(&adaptive));
         // A rewritten style attribute is still only an attribute.
         let dark = recolor_html(
             &sanitize_html(
                 r#"<p style="color:#000;content:'&quot;><script>alert(1)</script>'">x</p>"#,
             ),
             palette,
-        );
+        )
+        .unwrap();
         assert!(!dark.contains("<script"), "{dark}");
     }
 

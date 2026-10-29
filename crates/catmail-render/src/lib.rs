@@ -71,8 +71,8 @@ impl fmt::Debug for Source {
     }
 }
 
-/// Rewrites a page's HTML before it is parsed.
-pub type Recolor = Arc<dyn Fn(&str) -> String + Send + Sync>;
+/// Rewrites a page's HTML before it is parsed, or declines to: `None`.
+pub type Recolor = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// How the page looks where the message's own styles say nothing, and what becomes of
 /// the colors they set.
@@ -85,7 +85,8 @@ pub struct Appearance {
     /// A user-agent style sheet, under the message's styles: the reader's colors.
     pub sheet: Arc<str>,
     /// Moves the page's own colors for this appearance, run on the document's thread:
-    /// a pass over the whole HTML that the UI thread shouldn't wait for.
+    /// a pass over the whole HTML that the UI thread shouldn't wait for. If it can't, the
+    /// page is shown in the default appearance, as written for a light page.
     pub recolor: Option<Recolor>,
 }
 
@@ -550,10 +551,19 @@ mod tests {
         );
         // The page's own colors are moved as the appearance says.
         let recolored = Appearance {
-            recolor: Some(Arc::new(|html: &str| html.replace("#ffffff", "#00ff00"))),
-            ..dark
+            recolor: Some(Arc::new(|html: &str| {
+                Some(html.replace("#ffffff", "#00ff00"))
+            })),
+            ..dark.clone()
         };
         let light = r#"<body style="margin:0;height:40px;background:#ffffff">x</body>"#;
         assert_eq!(pixel(&paint(light, recolored), 290, 30), GREEN);
+        // One it can't move shows light, as written: its light styles, on white.
+        let declined = Appearance {
+            recolor: Some(Arc::new(|_: &str| None)),
+            ..dark
+        };
+        assert_eq!(pixel(&paint(adaptive, declined.clone()), 290, 30), WHITE);
+        assert_eq!(pixel(&paint("<p>x</p>", declined), 290, 30), WHITE);
     }
 }

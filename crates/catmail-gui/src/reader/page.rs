@@ -12,7 +12,8 @@
 //!
 //! In a dark theme the page is dark too ([`Look`]): a message with dark styles of its own
 //! uses them, the colors of any other are moved for a dark page (`recolor_html`), as Gmail
-//! shows mail written for white.
+//! shows mail written for white. One whose colors can't be moved (set with custom
+//! properties) shows light, as written.
 //!
 //! The page zooms with the window's text size, as a browser page zooms: everything on it,
 //! since most mail sets its own font sizes in pixels.

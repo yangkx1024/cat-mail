@@ -79,11 +79,19 @@ fn shows_html_dark_in_a_dark_theme(cx: &mut TestAppContext) {
           <body style=\"margin:0\"><table width=\"100%\" bgcolor=\"#ffffff\"><tr>\
           <td style=\"color:#333333;height:40px\">Colored for white</td></tr></table></body>\r\n",
     );
+    mail.deliver_raw_and_sync(
+        b"From: a@example.com\r\nTo: catmail@example.com\r\nSubject: Variable HTML\r\n\
+          Date: Mon, 19 Oct 2026 12:00:00 +0800\r\nMIME-Version: 1.0\r\n\
+          Content-Type: text/html; charset=utf-8\r\n\r\n\
+          <style>p{--fg:#333333;color:var(--fg)}</style><p>Colored with a variable</p>\r\n",
+    );
     let (window, mailbox) = open(cx, &mail);
     wait_until(|| {
         cx.run_until_parked();
         cx.read(|cx| {
-            find(&mailbox, "Plain HTML", cx).is_some() && find(&mailbox, "White HTML", cx).is_some()
+            ["Plain HTML", "White HTML", "Variable HTML"]
+                .iter()
+                .all(|subject| find(&mailbox, subject, cx).is_some())
         })
     });
     let pixel = |cx: &mut TestAppContext| {
@@ -104,6 +112,10 @@ fn shows_html_dark_in_a_dark_theme(cx: &mut TestAppContext) {
     click_message(cx, window, &mailbox, "White HTML");
     let near = |pixel: [u8; 4]| pixel.iter().zip(dark).all(|(&a, b)| a.abs_diff(b) <= 1);
     wait_until(|| pixel(cx).is_some_and(near));
+
+    // One colored with custom properties can't be moved: it shows light, as written.
+    click_message(cx, window, &mailbox, "Variable HTML");
+    wait_until(|| pixel(cx) == Some([255; 4]));
 
     // The page follows the theme when it changes.
     set_appearance(cx, crate::settings::Appearance::Light);

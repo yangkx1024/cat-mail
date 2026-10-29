@@ -258,7 +258,7 @@ mod tests {
         assert_eq!(Role::of("COLOR"), Some(Role::Text));
         assert_eq!(Role::of("background"), Some(Role::Surface));
         assert_eq!(Role::of("border-bottom-color"), Some(Role::Line));
-        // Custom properties take the role of where they are used: see `css::Recolor`.
+        // A custom property's color is moved where it is used, if at all.
         assert_eq!(Role::of("--brand"), None);
         assert_eq!(Role::of("font-family"), None);
     }
