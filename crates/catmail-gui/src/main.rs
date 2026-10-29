@@ -19,6 +19,7 @@ mod settings;
 #[cfg(test)]
 mod test_support;
 mod theme;
+mod tray;
 
 use std::path::PathBuf;
 
@@ -35,6 +36,12 @@ use tracing_subscriber::EnvFilter;
 use crate::instance::{Claim, Display, Request};
 use crate::mailbox::Mailbox;
 use crate::resident::{Engine, Resident};
+
+/// What the system knows the app by: on Windows its AppUserModelID; elsewhere only the
+/// name shows (notifications, the tray). The qualifier of the data and config
+/// directories (`Config`).
+pub const APP_ID: &str = "dev.CatMail.CatMail";
+pub const APP_NAME: &str = "cat-mail";
 
 #[derive(Parser)]
 #[command(name = "catmail-gui", version, about = "cat-mail in a window")]
@@ -128,7 +135,7 @@ fn main() {
 fn init_app(preferences: Preferences, cx: &mut App) {
     gpui_kit::init(cx);
     // Before any window or notification.
-    cx.set_app_identity(new_mail::APP_ID, new_mail::APP_NAME);
+    cx.set_app_identity(APP_ID, APP_NAME);
     fonts::init(cx);
     cx.set_global(preferences);
     theme::appearance::init(cx);
@@ -183,8 +190,7 @@ impl MainWindow {
         };
         let client = client.clone();
         let mailbox = cx.new(|cx| Mailbox::new(client, window, cx));
-        let reopen = Resident::adopt(&mailbox, cx);
-        mailbox.update(cx, |mailbox, _| mailbox.reopen_at(reopen));
+        Resident::adopt(&mailbox, window, cx);
         self.mailbox = Some(mailbox);
         self.following_engine = None;
         cx.notify();

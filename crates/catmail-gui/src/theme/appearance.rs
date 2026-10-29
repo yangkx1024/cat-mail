@@ -135,6 +135,13 @@ pub fn init(cx: &mut App) {
     apply(cx);
 }
 
+/// The desktop's light or dark appearance, whatever the app's own theme is set to.
+pub fn system(cx: &App) -> WindowAppearance {
+    cx.global::<Themes>()
+        .system
+        .unwrap_or_else(|| cx.window_appearance())
+}
+
 /// Follows the desktop's light or dark appearance as the window sees it, for "System".
 pub fn system_appearance_changed(window: &Window, cx: &mut App) {
     cx.global_mut::<Themes>().system = Some(window.appearance());
@@ -186,10 +193,7 @@ fn apply(cx: &mut App) {
     let mode = match settings.appearance {
         Appearance::Light => ThemeMode::Light,
         Appearance::Dark => ThemeMode::Dark,
-        Appearance::System => themes
-            .system
-            .unwrap_or_else(|| cx.window_appearance())
-            .into(),
+        Appearance::System => system(cx).into(),
     };
     Theme::update(cx, |theme| {
         theme.light_theme = light;

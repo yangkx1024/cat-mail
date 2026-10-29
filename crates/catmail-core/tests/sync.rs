@@ -189,6 +189,25 @@ async fn new_mail_is_what_arrives_in_inbox_unread() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_unread_in_inboxes_are_counted() {
+    let mut state = state_with(&["one", "two"]);
+    let mut archive = FakeMailbox::new("Archive");
+    archive.append_simple("elsewhere");
+    state.mailboxes.push(archive);
+    let env = env(state).await;
+    assert_eq!(env.client.count_unread_in_inboxes().await.unwrap(), 0);
+    env.sync().await;
+    assert_eq!(env.client.count_unread_in_inboxes().await.unwrap(), 2);
+
+    let one = env.id_of("INBOX", "one").await;
+    env.client
+        .set_flags(vec![one], Flags::SEEN, Flags::empty())
+        .await
+        .unwrap();
+    assert_eq!(env.client.count_unread_in_inboxes().await.unwrap(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn new_mail_alone_does_not_list_every_uid() {
     let env = env(state_with(&["one", "two", "three"])).await;
     env.sync().await;

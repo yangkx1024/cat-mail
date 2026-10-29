@@ -52,6 +52,9 @@ hex = "0.4"
 # The version ammonia uses, so the sanitizer and the layout pass share one parser.
 html5ever = "0.40.1"
 jiff = "0.2.38"
+# The Linux tray icon (StatusNotifierItem over D-Bus, no GTK). On async-io, the runtime
+# of the zbus already in the tree (notifications, the keyring), not tokio.
+ksni = { version = "0.3.7", default-features = false, features = ["async-io"] }
 # Wraps rendered pages into GPUI images; the version GPUI uses.
 image = { version = "0.25.10", default-features = false }
 # Parses IMAP responses only; catmail-proto encodes commands and drives the connection.

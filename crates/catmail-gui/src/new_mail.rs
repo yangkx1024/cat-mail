@@ -13,11 +13,6 @@ use crate::mailbox::Destination;
 use crate::resident::Resident;
 use crate::settings::Preferences;
 
-/// What the system knows the app by: on Windows its AppUserModelID; elsewhere only the
-/// name shows. The qualifier of the data and config directories (`Config`).
-pub const APP_ID: &str = "dev.CatMail.CatMail";
-pub const APP_NAME: &str = "cat-mail";
-
 /// How long announcements are gathered before telling: a sync stores new mail in
 /// batches, and after a wake every account syncs at once, each announcing its own.
 pub const GATHER: Duration = Duration::from_secs(1);
@@ -172,7 +167,7 @@ impl Notifier {
         });
         cx.on_system_notification_response(|response, cx| {
             if let Some(target) = Target::from_tag(&response.tag) {
-                Resident::show_at(target.destination(), cx);
+                Resident::show_at(target.destination(), None, cx);
             }
         });
     }

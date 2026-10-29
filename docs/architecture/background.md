@@ -2,8 +2,8 @@
 
 [← 架构](../architecture.md)
 
-> 状态：常驻与单实例唤起、睡眠唤醒、新邮件事件与系统通知已实现（#106、#82）；托盘（#107 / #108 /
-> #109）、开机启动尚未实现，这几个小节是设计。
+> 状态：常驻与单实例唤起、睡眠唤醒、新邮件事件与系统通知、Linux 托盘已实现（#106、#82、#107）；
+> Windows、macOS 托盘（#108 / #109）、开机启动尚未实现，这几个小节是设计。
 
 GUI 关掉主窗口后继续同步、发信、提醒新邮件，并能从托盘、再次启动或通知回到窗口。
 
@@ -55,8 +55,8 @@ GUI 关掉主窗口后继续同步、发信、提醒新邮件，并能从托盘�
 - 唤起服务送来的请求（下一节）。
 - 窗口最后在的显示环境（`display`）：点击通知时没有别的请求方，常驻时就切回这里。
 
-不依赖窗口的事件订阅放在各自的全局里，引擎打开时启动：新邮件通知（`Notifier`，见[新邮件](#新邮件)），
-以后还有托盘的未读数。
+不依赖窗口的事件订阅放在各自的全局里，引擎打开时启动：新邮件通知（`Notifier`，见[新邮件](#新邮件)）、
+托盘（`Tray`，见[托盘](#托盘)）。
 
 主窗口关闭时整个 `Mailbox` 被 drop：列表、读信区（Blitz 每个文档一个线程）、图片都随之释放。重新
 打开时新建 `Mailbox`，`Resident` 只记住上次选中的 `Place`（`Mailbox` 释放时记下，新的
@@ -212,16 +212,41 @@ GUI 的 `Notifier`（`catmail-gui/src/new_mail.rs`）是应用级的全局，引
 
 ## 托盘
 
-各平台在 #107 / #108 / #109 实现，属于 `Resident`，有窗口时也在：
+GUI 的 `Tray`（`catmail-gui/src/tray/`）是应用级的全局，引擎打开时启动，有窗口时、常驻时都在。
+与平台无关的部分在 `tray/mod.rs`，各平台只把图标、提示和菜单交给系统（`tray/linux.rs`；Windows、macOS
+在 #108 / #109）：
 
-- Linux 用 `ksni`（StatusNotifierItem，纯 D-Bus，不依赖 GTK 主循环；`tray-icon` 在 Linux 上要 GTK）。
-  没有 StatusNotifierWatcher 时不显示，靠再次启动唤起。
-- Windows、macOS 用 `tray-icon`，在 GPUI 的主线程消息循环上。
-- 菜单：打开 cat-mail、写邮件、同步、Quit；图标带 INBOX 的未读数（`MailClient::overview`）。
+- **未读数**：`MailClient::count_unread_in_inboxes` 把各账户 INBOX（Gmail：INBOX 标签）的 `unread_count`
+  加起来，一次读。侧栏要重读的事件（`Refresh::after(..).sidebar`：消息、文件夹、账户的变化，漏掉事件）
+  都重数，同一时刻只有一次在读，其间又有变化就读完再读一次（`Coalesce`，与侧栏相同）；数没变就不重画。
+  托盘注册上了才开始数：没有托盘的桌面和还没有托盘实现的平台不读。
+- **图标**：应用图标（`assets/app-icon/` 的亮色或暗色版本，按桌面的外观，与"System"主题读的是同一个，
+  `appearance::system`）右上角叠一个红色角标写着
+  未读数，超过 99 写"99+"，没有未读就不画。拼成一个 SVG，用 GPUI 的 `SvgRenderer` 在后台线程画成
+  22、32、64 像素，由托盘挑合适的；不提交位图，也不另加 SVG 库。提示文字是"N unread messages"。
+  桌面外观变化时重画；外观只能从窗口得知，常驻期间的变化要等下次开窗口。画也一次一个（`Coalesce`）：
+  后台的两次绘制可能先后颠倒，旧的数字盖掉新的之后数字不再变，就一直错着；画的途中又有变化，画完按
+  当时的数字和外观再画一次。
+- **点击图标**打开主窗口；**菜单**（`MENU`，各平台按它建自己的菜单）："Open cat-mail"、"New message"、
+  "Sync now"、"Quit"。都转成 `Command`，经 channel 回到 GPUI 线程（`Tray::choose`），由 `Resident` 处理；
+  主窗口开着就在它的 `Mailbox` 上做（`Resident::in_main`），否则记下等它打开：
+  - 打开：`Resident::show_at`，与点击通知相同。
+  - 写邮件：主窗口开着就在它里面 `new_message`（与 Ctrl N 相同，用当前账户）；关着就记在 `Resident`
+    里，打开主窗口时交给新的 `Mailbox`（`Resident::adopt`，与要去的位置一起），它读完文件夹后再写。
+  - 同步：主窗口开着就走它的同步，进度和失败显示在窗口里；关着就在后台依次同步各账户，失败只记日志，
+    回到窗口时显示为账户的状态。
+  - Quit：`Resident::quit`，与 Ctrl Q 相同。
+- **Linux** 用 `ksni`（StatusNotifierItem，纯 D-Bus，不依赖 GTK 主循环；`tray-icon` 在 Linux 上要
+  GTK），用 `async-io` 运行时，与依赖树里已有的 zbus 同一个，不引入 tokio。KDE、装了 AppIndicator
+  扩展的 GNOME、waybar 等都显示它；没有 StatusNotifierWatcher（GNOME 没装扩展）就不显示，记一条日志，
+  靠再次启动唤起。托盘给的 XDG 激活令牌（`ksni::current_xdg_activation_token`，KDE 可能晚到一点，等 1 ms
+  再取一次）随命令传给 `Resident`，Wayland 上切回窗口模式、新开的主窗口能获得焦点；已经开着的窗口
+  仍只能请求激活（GPUI 不能把令牌交给已有窗口）。测试里不注册（`cfg(test)`）。
+- Windows、macOS 用 `tray-icon`，在 GPUI 的主线程消息循环上（#108、#109）。
 
 ## 退出
 
-退出由 `Resident` 一处决定（`Resident::quit`，绑在 Quit action 上；托盘的 Quit 派发同一个 action）：
+退出由 `Resident` 一处决定（`Resident::quit`，绑在 Quit action 上，托盘的 Quit 也调用它）：
 
 - 置 `quitting`，让每个写信窗口走关闭流程、存下最后的输入（`composer::close_all`）。它答"全部关掉了"
   就 `cx.quit()`；有一个关不了（地址要改、保存或附件失败）就答"没关完"，取消退出，那个窗口留下。
@@ -248,7 +273,7 @@ GUI 常驻就一直持有数据目录锁，CLI 更常遇到 `AlreadyRunning`。C
 2. ✅ 单实例与唤起：数据目录里的 socket、激活令牌（#106）。
 3. ✅ 引擎：`resume()`、`Event::NewMail`，各有假服务器测试；GUI 在系统唤醒时调用 `resume()`（#106）。
 4. ✅ 系统通知（#82）。
-5. 各平台托盘（#107、#108、#109）。
+5. 各平台托盘：✅ Linux（#107）；Windows（#108）、macOS（#109）。
 6. `--background` 与开机启动（新 issue）。
 
 实现前用一个小原型在 Wayland 上确认过：关掉窗口后切到 headless，定时器照常运行，D-Bus 通知照常发出，

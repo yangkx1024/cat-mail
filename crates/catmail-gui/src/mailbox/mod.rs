@@ -41,7 +41,8 @@ use crate::settings::Preferences;
 use add_account::{AddAccount, AddAccountEvent};
 use folders::AccountFolders;
 use message_list::{MessageList, Row, Source};
-use refresh::{Coalesce, DraftCounts, Refresh, Throttle};
+pub(crate) use refresh::{Coalesce, Refresh};
+use refresh::{DraftCounts, Throttle};
 
 /// How long typing in the search field pauses before it searches.
 const SEARCH_DELAY: Duration = Duration::from_millis(200);
@@ -133,6 +134,9 @@ pub struct Mailbox {
     /// Where to start instead of the first inbox, if it is still there, and the message
     /// to open there.
     reopen_at: Option<Destination>,
+    /// A new message was asked for before the folders loaded, which say from which
+    /// account: composed once they have.
+    compose_once_loaded: bool,
     /// Syncs in flight.
     pub(crate) syncing: usize,
     /// [`SYNC_ON_OPEN_AFTER`], except in tests that open folders synced just now.
@@ -229,6 +233,7 @@ impl Mailbox {
             accounts: None,
             place: None,
             reopen_at: None,
+            compose_once_loaded: false,
             syncing: 0,
             sync_on_open_after: SYNC_ON_OPEN_AFTER,
             refresh_interval: REFRESH_INTERVAL,
@@ -255,13 +260,9 @@ impl Mailbox {
         mailbox
     }
 
-    /// Starts at `to` rather than the first inbox: where the main window was when it was
-    /// last closed, or what a notification was about. Before the first load.
-    pub fn reopen_at(&mut self, to: Option<Destination>) {
-        self.reopen_at = to;
-    }
-
-    /// Goes to `to` if it is still there, once the folders are loaded.
+    /// Goes to `to` if it is still there, once the folders are loaded: from a new
+    /// mailbox, where the main window was when it was last closed, or what a
+    /// notification was about.
     pub fn go_to(&mut self, to: Destination, window: &mut Window, cx: &mut Context<Self>) {
         if self.accounts.is_none() {
             self.reopen_at = Some(to);
@@ -549,6 +550,9 @@ impl Mailbox {
             self.add_account(false, window, cx);
         } else if first_load {
             self.messages.update(cx, |list, cx| list.focus(window, cx));
+        }
+        if std::mem::take(&mut self.compose_once_loaded) {
+            self.new_message(window, cx);
         }
         cx.notify();
     }
