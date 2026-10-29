@@ -85,4 +85,7 @@ allow-git = [
     # The unreleased 0.18.0, pinned to a commit in the root Cargo.toml's
     # `[patch.crates-io]`; remove with it once 0.18.0 is on crates.io (#130).
     "https://github.com/djc/imap-proto",
+    # Blitz 0.3.0-beta.4 with anonymous cells in table rows, pinned in the root
+    # Cargo.toml's `[patch.crates-io]`; remove with it once a release has them.
+    "https://github.com/yangkx1024/blitz",
 ]

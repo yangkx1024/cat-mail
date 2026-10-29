@@ -320,6 +320,12 @@ CSS 引擎）+ Taffy + Parley 排版，vello_cpu 绘制。起初保留 GPUI Kit 
 布局表格的 `unwrap_layout_tables`），页面能选择文字之后删掉了。不开 blitz-dom 的 `svg` feature：usvg 会按本地路径读嵌套图片（见上文
 "图片"）。选型经过见[下文](#选型记录)。
 
+Blitz 用的是 fork（`yangkx1024/blitz`，基于 0.3.0-beta.4，根 `Cargo.toml` 的 `[patch.crates-io]` 按提交固定），
+只多一处改动：表格行里非表格内部的子元素（邮件模板常把单元格改成 `td { display: block }`，内联或在样式表里）
+按匿名单元格排版。上游把它们当成标题忽略，整块内容不显示。连续几个这样的子元素各占一列，不像浏览器那样
+共用一个单元格叠起来。上游的修复（DioxusLabs/blitz#781、#783）发布后回到 crates.io，同时从 `deny.toml` 的
+`allow-git` 删掉 fork。
+
 - **`catmail-render`** 不依赖 GPUI 和邮件类型。每个打开的文档（`Document`）一个线程：Blitz 的文档
   不是 `Send`（持有不带 `Send` 约束的 provider），只能在打开它的线程上活。请求按顺序回答：某宽度下
   的高度、一条像素（分块）、某点下的链接；调用方不再等的请求（任务被替换）直接跳过，所以拖动窗口
