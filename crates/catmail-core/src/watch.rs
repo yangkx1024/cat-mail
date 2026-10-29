@@ -27,7 +27,7 @@ use tokio::sync::Notify;
 
 use crate::draft_sync::Uploads;
 use crate::engine::{Activity, Cancellation, Engine, backoff};
-use crate::{Error, Result, connection, ops, sync};
+use crate::{Error, Result, ops, pool, sync};
 
 /// When background sync does what.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,7 +119,7 @@ async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
     // An idle connection if there is one: adding an account leaves the one that checked
     // the password.
     let Some((wake, resume, mut cancellation, mut session)) = engine.upgrade().map(|e| {
-        let session = e.take_session(account);
+        let session = e.pool(account).take();
         (
             e.wake_signal(account),
             e.resume_signal(account),
@@ -344,7 +344,7 @@ fn full_sync_in(engine: &Engine, account: AccountId, schedule: &SyncSchedule) ->
 /// Syncs every folder if that is due, else makes queued local changes on the server
 /// (changed drafts included); then syncs INBOX, refreshing the flags `changed_flags`
 /// names. On the connection there, or a new one (see
-/// [`on_session`](connection::on_session)).
+/// [`on_session`](pool::on_session)).
 async fn step(
     engine: &Arc<Engine>,
     session: &mut Option<Session>,
@@ -354,7 +354,7 @@ async fn step(
 ) -> Result<Wait> {
     // Connected before taking the permit: waiting for an unreachable server shouldn't
     // hold up syncs the user asks for.
-    connection::on_session(engine, account, session, {
+    pool::on_session(engine, account, session, {
         let (engine, changed_flags) = (engine.clone(), changed_flags.clone());
         async move |s| work(&engine, s, account, &schedule, &changed_flags).await
     })

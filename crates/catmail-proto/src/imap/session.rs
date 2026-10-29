@@ -30,13 +30,20 @@ pub struct Session {
     caps: Capabilities,
     /// From a PREAUTH greeting, or after `login`.
     authenticated: bool,
-    /// The opened mailbox: its raw name, and what opening it found.
-    selected: Option<(String, MailboxStatus)>,
-    /// Whether `selected` was opened with SELECT rather than EXAMINE.
-    writable: bool,
+    selected: Option<Opened>,
     /// What IDLE reported about flags in `selected`.
     changed_flags: ChangedFlags,
     opened: Instant,
+}
+
+/// The mailbox a session has open.
+struct Opened {
+    /// As the server spells it.
+    name: String,
+    /// What opening it found.
+    status: MailboxStatus,
+    /// Opened with SELECT rather than EXAMINE.
+    writable: bool,
 }
 
 /// Where a COPY or MOVE put the messages (COPYUID, RFC 4315).
@@ -98,7 +105,6 @@ impl Session {
             caps: Capabilities::default(),
             authenticated,
             selected: None,
-            writable: false,
             changed_flags: ChangedFlags::default(),
             opened,
         };
@@ -259,8 +265,11 @@ impl Session {
             exists: exists.ok_or_else(|| missing("EXISTS"))?,
             highest_modseq: highest_modseq.filter(|_| self.condstore() && !no_modseq),
         };
-        self.selected = Some((raw_name.to_owned(), status));
-        self.writable = writable;
+        self.selected = Some(Opened {
+            name: raw_name.to_owned(),
+            status,
+            writable,
+        });
         self.conn.mailbox_opened(status.exists);
         Ok(status)
     }
@@ -271,10 +280,10 @@ impl Session {
     /// does), so reading it needs no EXAMINE again. What else opening it found may be out
     /// of date, so it isn't offered.
     pub fn examined(&self, raw_name: &str) -> Option<u32> {
-        match &self.selected {
-            Some((name, status)) if !self.writable && name == raw_name => Some(status.uidvalidity),
-            _ => None,
-        }
+        self.selected
+            .as_ref()
+            .filter(|o| !o.writable && o.name == raw_name)
+            .map(|o| o.status.uidvalidity)
     }
 
     /// Asks the server for nothing but news of the opened mailbox, which keeps a quiet
@@ -500,7 +509,7 @@ impl Session {
     /// the status and COPYUID, so an unparsable response (an unsolicited FETCH, say)
     /// doesn't fail it: that would make a change that happened look refused.
     async fn change(&mut self, command: Command) -> Result<Response> {
-        if !self.writable {
+        if !self.selected.as_ref().is_some_and(|o| o.writable) {
             return Err(Error::Protocol(format!(
                 "{} needs a mailbox opened with SELECT",
                 command.name
@@ -870,7 +879,6 @@ impl Session {
     /// has none selected either.
     fn deselect(&mut self) {
         self.selected = None;
-        self.writable = false;
         self.changed_flags = ChangedFlags::default();
     }
 
@@ -881,13 +889,13 @@ impl Session {
     fn modseq_enabled(&self) -> bool {
         self.selected
             .as_ref()
-            .is_some_and(|(_, s)| s.highest_modseq.is_some())
+            .is_some_and(|o| o.status.highest_modseq.is_some())
     }
 
     fn selected_status(&self) -> Result<MailboxStatus> {
         self.selected
             .as_ref()
-            .map(|(_, status)| *status)
+            .map(|o| o.status)
             .ok_or_else(|| Error::Protocol("no mailbox selected".into()))
     }
 

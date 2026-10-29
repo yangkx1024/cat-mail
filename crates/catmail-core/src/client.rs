@@ -287,6 +287,12 @@ impl MailClient {
         client
     }
 
+    /// For tests of the engine's parts that need one.
+    #[cfg(test)]
+    pub(crate) fn engine(&self) -> &Arc<Engine> {
+        &self.engine
+    }
+
     pub fn config(&self) -> &Config {
         &self.engine.config
     }
@@ -430,7 +436,7 @@ impl MailClient {
                 });
                 // For background sync to start on, or the next request.
                 if let Some(session) = session {
-                    engine.return_session(account.id, session);
+                    engine.pool(account.id).put(&engine, session);
                 }
                 watch::spawn(&engine, account.id);
                 Ok(account)
