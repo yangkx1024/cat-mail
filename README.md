@@ -254,6 +254,7 @@ CI（GitHub Actions）：
 | `catmail-types` | 领域类型，纯数据 |
 | `catmail-store` | SQLite、迁移、repository、BlobStore |
 | `catmail-proto` | IMAP / SMTP / MIME 适配 |
+| `catmail-html` | 邮件 HTML 的清洗，以及读信区在它上面做的处理（图片、深色配色） |
 | `catmail-core` | 引擎与 `MailClient` 门面，前端唯一依赖 |
 | `catmail-cli` | `catmail` 命令行 |
 | `catmail-gui` | `catmail-gui` 图形界面（gpui-kit） |

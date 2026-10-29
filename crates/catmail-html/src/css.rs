@@ -9,7 +9,7 @@
 //! (written `\3c `), so neither `</style>` nor an HTML comment can appear in it, however
 //! the HTML around it is parsed again: the sheet can't change the document's structure.
 //!
-//! The same rewriting moves a message's colors for a dark page ([`dark`](super::dark)),
+//! The same rewriting moves a message's colors for a dark page ([`dark`](crate::dark)),
 //! given a palette: colors in the values of properties that take them.
 
 use cssparser::color::{parse_hash_color, parse_named_color};

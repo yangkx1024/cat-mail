@@ -41,13 +41,14 @@ ignored there with a reason, never by loosening the check.
 
 ## Crates and layering
 
-`types ← store, proto ← core ← cli / gui`, and `render ← gui`
+`types ← store, proto ← core ← cli / gui`, `html ← proto, core`, and `render ← gui`
 
 | Crate | Role |
 |---|---|
 | `catmail-types` | Domain types. Pure data: no IO, no async |
 | `catmail-store` | SQLite schema, migrations, repositories, content-addressed `BlobStore`. Synchronous |
 | `catmail-proto` | IMAP (our own command encoding and connection driver; `imap-proto` parses responses), SMTP, MIME adapters; remote images over HTTP |
+| `catmail-html` | Sanitizing message HTML and its style sheets, and the passes readers make over the result (images, dark recoloring). Pure functions, no IO |
 | `catmail-core` | Engine, services, runtime bridge, secrets, the `MailClient` facade |
 | `catmail-cli` | The `catmail` binary |
 | `catmail-gui` | The `catmail-gui` desktop binary, on GPUI Kit |

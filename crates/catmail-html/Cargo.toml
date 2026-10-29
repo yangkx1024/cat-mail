@@ -1,0 +1,17 @@
+[package]
+name = "catmail-html"
+description = "Sanitizing a message's HTML and its style sheets for cat-mail, and the passes readers make over it"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ammonia.workspace = true
+base64.workspace = true
+cssparser.workspace = true
+html5ever.workspace = true
+url.workspace = true
+
+[lints]
+workspace = true

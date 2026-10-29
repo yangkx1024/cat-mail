@@ -1,16 +1,15 @@
+//! The sanitizer: what of a message's HTML is kept, and how it colors itself.
+
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::collections::HashSet;
+use std::sync::LazyLock;
 
 use ammonia::{Builder, UrlRelative};
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
 use html5ever::tokenizer::{TagKind, Token, TokenSink, TokenSinkResult};
 
-use super::content_id_from_url;
-use super::dark::{DarkPalette, Role};
-use super::{css, tokens};
+use crate::dark::{DarkPalette, Role};
+use crate::{css, tokens};
 
 /// Presentation attributes that table-based email layouts depend on.
 const LAYOUT_ATTRIBUTES: &[&str] = &[
@@ -31,14 +30,17 @@ const LAYOUT_ATTRIBUTES: &[&str] = &[
 ];
 
 /// Rewrites an `img src` value, or keeps it (`None`).
-type ImageHook = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+pub(crate) type ImageHook = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 static SANITIZER: LazyLock<Builder<'static>> = LazyLock::new(|| sanitizer(None, None));
 
 /// The one sanitizer configuration; `on_image` lets a renderer see or replace image
 /// sources during the same parse, instead of scanning the HTML text afterwards. With a
 /// palette, colors in attributes are moved for a dark page.
-fn sanitizer(on_image: Option<ImageHook>, recolor: Option<DarkPalette>) -> Builder<'static> {
+pub(crate) fn sanitizer(
+    on_image: Option<ImageHook>,
+    recolor: Option<DarkPalette>,
+) -> Builder<'static> {
     let mut builder = Builder::default();
     builder
         .add_tags(["font"])
@@ -92,7 +94,7 @@ fn is_data_url(value: &str) -> bool {
 /// handlers, links only to web, mail and `cid:` targets. Inline `style` attributes and
 /// table layout attributes stay, since most email is laid out with them, unless the
 /// style could load something (`url(…)`).
-/// Style sheets are rewritten rule by rule ([`css`]) and put back as one `<style>` at the
+/// Style sheets are rewritten rule by rule (`css.rs`) and put back as one `<style>` at the
 /// start: what could fetch is dropped, and the sheet can't end its element.
 /// Image sources (remote URLs, `cid:`, `data:`) are kept: whether remote images load
 /// is the renderer's decision, and it should block them by default.
@@ -101,17 +103,17 @@ pub fn sanitize_html(html: &str) -> String {
 }
 
 /// HTML that [`sanitize_html`] produced, with its own colors moved for a dark page with
-/// `palette`'s colors, as Gmail and Outlook show mail written for white ([`dark`]
-/// (super::dark)): in its style sheets, `style` attributes, and `bgcolor` and `color`
-/// attributes. For a message that sets colors ([`ColorUsage::Light`]); one with dark
-/// styles of its own uses them instead.
+/// `palette`'s colors, as Gmail and Outlook show mail written for white (`dark.rs`): in
+/// its style sheets, `style` attributes, and `bgcolor` and `color` attributes. For a
+/// message that sets colors ([`ColorUsage::Light`]); one with dark styles of its own uses
+/// them instead.
 pub fn recolor_html(html: &str, palette: DarkPalette) -> String {
     clean(&sanitizer(None, Some(palette)), html, Some(palette))
 }
 
 /// The sanitizer's output with the message's style sheets in front. ammonia drops every
 /// `<style>` with its content: it doesn't look inside, and writes raw text back as it is.
-fn clean(builder: &Builder<'_>, html: &str, recolor: Option<DarkPalette>) -> String {
+pub(crate) fn clean(builder: &Builder<'_>, html: &str, recolor: Option<DarkPalette>) -> String {
     let sheet = css::sanitize(&scan(html, false).sheets, recolor).css;
     let mut out = String::new();
     if !sheet.is_empty() {
@@ -241,95 +243,6 @@ fn scan(html: &str, colors: bool) -> Scan {
     Scan {
         sheets: sink.sheets.into_inner(),
         colors: sink.colors.get(),
-    }
-}
-
-/// The image URLs in HTML that [`sanitize_html`] produced, in document order.
-pub fn image_sources(html: &str) -> Vec<String> {
-    let found = Arc::new(Mutex::new(Vec::new()));
-    let sink = found.clone();
-    sanitizer(
-        Some(Box::new(move |src| {
-            sink.lock().unwrap().push(src.to_owned());
-            None
-        })),
-        None,
-    )
-    .clean(html);
-    Arc::try_unwrap(found).unwrap().into_inner().unwrap()
-}
-
-/// More remote images than any message needs to show; the rest of a longer list is left
-/// out.
-pub const MAX_REMOTE_IMAGES: usize = 200;
-
-/// The remote images in HTML that [`sanitize_html`] produced, as [`remote_image_url`]
-/// writes them, each once, in document order, at most [`MAX_REMOTE_IMAGES`]: what a
-/// reader fetches when the user asks for them. Other URLs that aren't the message's own
-/// (`file:`, relative) never load.
-pub fn remote_image_urls(html: &str) -> Vec<String> {
-    let mut urls = Vec::new();
-    for url in image_sources(html) {
-        if let Some(url) = remote_image_url(&url)
-            && !urls.contains(&url)
-        {
-            urls.push(url);
-            if urls.len() == MAX_REMOTE_IMAGES {
-                break;
-            }
-        }
-    }
-    urls
-}
-
-/// The URL of a remote (`http`, `https`) image, normalized as a URL parser writes it, or
-/// `None` for anything else. Renderers ask for an image by its URL as they found it
-/// (Blitz parses it first, others don't), so remote images are fetched, cached and
-/// looked up by this one spelling.
-pub fn remote_image_url(url: &str) -> Option<String> {
-    let url = url::Url::parse(url.trim()).ok()?;
-    matches!(url.scheme(), "http" | "https").then(|| url.into())
-}
-
-/// An inline part's content, to embed in place of its `cid:` URL.
-pub struct InlineImage {
-    pub mime_type: String,
-    pub bytes: Vec<u8>,
-}
-
-/// HTML that [`sanitize_html`] produced, with each `cid:` image whose Content-ID is in
-/// `inline` replaced by a `data:` URL of the part, for a renderer that can't resolve
-/// `cid:` (a browser). The values ammonia's filter returns are not checked again, so the
-/// URL is built here rather than taken from the caller.
-pub fn embed_inline_images(html: &str, inline: HashMap<String, InlineImage>) -> String {
-    let embedding = sanitizer(
-        Some(Box::new(move |src| {
-            let image = content_id_from_url(src).and_then(|id| inline.get(&id))?;
-            Some(format!(
-                "data:{};base64,{}",
-                media_type(&image.mime_type),
-                STANDARD.encode(&image.bytes)
-            ))
-        })),
-        None,
-    );
-    clean(&embedding, html, None)
-}
-
-/// The MIME type as it may appear in a `data:` URL; it comes from the message, so anything
-/// unusual is replaced.
-fn media_type(mime_type: &str) -> &str {
-    let valid = mime_type.split_once('/').is_some_and(|(t, s)| {
-        !t.is_empty()
-            && !s.is_empty()
-            && mime_type
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"/.+-".contains(&b))
-    });
-    if valid {
-        mime_type
-    } else {
-        "application/octet-stream"
     }
 }
 
@@ -483,21 +396,6 @@ mod tests {
     }
 
     #[test]
-    fn the_browser_page_keeps_the_style_sheet() {
-        let html = sanitize_html("<style>.a{color:red}</style><img src=\"cid:logo@x\">");
-        let inline = HashMap::from([(
-            "logo@x".to_owned(),
-            InlineImage {
-                mime_type: "image/png".into(),
-                bytes: b"hi".to_vec(),
-            },
-        )]);
-        let page = embed_inline_images(&html, inline);
-        assert!(page.starts_with("<style>.a{color:red;}</style>"), "{page}");
-        assert!(page.contains("data:image/png;base64,aGk="), "{page}");
-    }
-
-    #[test]
     fn strips_active_content_and_keeps_layout() {
         let dirty = r##"<html><head><style>p{}</style><script>alert(1)</script></head>
             <body onload="x()"><table width="600" bgcolor="#fff"><tr>
@@ -562,75 +460,5 @@ mod tests {
             );
         }
         assert!(sanitize_html("<p style=\"color:red\">x</p>").contains("style=\"color:red\""));
-    }
-
-    #[test]
-    fn finds_and_embeds_images_by_parsing() {
-        let clean = sanitize_html(
-            r#"<p>src="cid:in-text"</p><img src="cid:logo" alt="a"><img data-src="https://x/a.gif">
-            <img src="https://tracker.example/p.gif"><a href="cid:logo">link</a>"#,
-        );
-        assert_eq!(
-            image_sources(&clean),
-            ["cid:logo", "https://tracker.example/p.gif"]
-        );
-
-        let inline = HashMap::from([
-            (
-                "logo".to_owned(),
-                InlineImage {
-                    mime_type: "image/png".into(),
-                    bytes: b"hi".to_vec(),
-                },
-            ),
-            (
-                "odd".to_owned(),
-                InlineImage {
-                    mime_type: "image/gif\"><script>".into(),
-                    bytes: b"gif".to_vec(),
-                },
-            ),
-        ]);
-        let clean = format!("{clean}<img src=\"cid:odd\"><img src=\"cid:missing\">");
-        let embedded = embed_inline_images(&clean, inline);
-        assert!(embedded.contains(r#"<img src="data:image/png;base64,aGk=" alt="a">"#));
-        assert!(embedded.contains(r#"<img src="data:application/octet-stream;base64,Z2lm">"#));
-        assert!(embedded.contains(r#"<img src="cid:missing">"#));
-        assert!(
-            embedded.contains(r#"src="cid:in-text""#),
-            "text is not an attribute"
-        );
-        assert!(
-            embedded.contains(r#"href="cid:logo""#),
-            "only images are replaced"
-        );
-        assert!(embedded.contains("https://tracker.example/p.gif"));
-        assert!(!embedded.contains("<script>"));
-    }
-
-    #[test]
-    fn finds_remote_images() {
-        assert_eq!(
-            remote_image_urls(
-                r#"<p>hi</p><img src="https://Tracker.example/p.gif?a=1&amp;b=2" alt="">
-                <img src="cid:logo"><img src="data:image/png;base64,aGk"><a href="https://x">x</a>
-                <img src="http://x.example/a b.png"><img src="file:///etc/passwd"><img src="a.png">
-                <img src="https://tracker.example/p.gif?a=1&b=2">"#
-            ),
-            [
-                "https://tracker.example/p.gif?a=1&b=2",
-                "http://x.example/a%20b.png"
-            ]
-        );
-        assert!(remote_image_urls(r#"<img src="cid:logo"><img src="//x/a.png">"#).is_empty());
-        let many: String = (0..MAX_REMOTE_IMAGES + 5)
-            .map(|i| format!(r#"<img src="https://x.example/{i}.png">"#))
-            .collect();
-        assert_eq!(remote_image_urls(&many).len(), MAX_REMOTE_IMAGES);
-        assert_eq!(remote_image_url("cid:logo"), None);
-        assert_eq!(
-            remote_image_url("HTTPS://x.example/a b.png").as_deref(),
-            Some("https://x.example/a%20b.png")
-        );
     }
 }

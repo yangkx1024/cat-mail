@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
+use catmail_html::MAX_REMOTE_IMAGES;
 use catmail_proto::http::{ImageFetcher, RemoteImage};
-use catmail_proto::mime::MAX_REMOTE_IMAGES;
 use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinSet;
 

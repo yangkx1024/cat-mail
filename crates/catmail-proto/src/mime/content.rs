@@ -1,10 +1,10 @@
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use catmail_html::{content_id_from_url, sanitize_html};
 use mail_parser::parsers::MessageStream;
 use mail_parser::{Encoding, Message, MessageParser, MessagePart, MimeHeaders, PartType};
 
-use super::html::sanitize_html;
 use super::transcode_fields;
 
 /// Longest snippet, in characters.
@@ -240,41 +240,6 @@ fn cid_references(html: &str) -> HashSet<String> {
             content_id_from_url(&html[start..start + 4 + end])
         })
         .collect()
-}
-
-/// The Content-ID a `cid:` URL refers to (RFC 2392: the scheme in any case, the rest
-/// percent-encoded), or `None` for any other URL. Renderers resolve inline images with
-/// this, so they agree with what [`Part::inline`] counts as referenced.
-pub fn content_id_from_url(url: &str) -> Option<String> {
-    let scheme = url.get(..4)?;
-    if !scheme.eq_ignore_ascii_case("cid:") {
-        return None;
-    }
-    let id = percent_decode(&url[4..]);
-    (!id.is_empty()).then_some(id)
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let hex = bytes
-            .get(i + 1..i + 3)
-            .and_then(|h| std::str::from_utf8(h).ok())
-            .and_then(|h| u8::from_str_radix(h, 16).ok());
-        match (bytes[i], hex) {
-            (b'%', Some(b)) => {
-                out.push(b);
-                i += 3;
-            }
-            (b, _) => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// IMAP section numbers of the parts of `message` (RFC 3501 §6.4.5): the children of a
@@ -632,17 +597,6 @@ mod tests {
                 ("a@b".to_owned(), true), // RFC 2392: case-insensitive scheme, %-encoded
             ]
         );
-    }
-
-    #[test]
-    fn content_id_from_url_accepts_only_cid_urls() {
-        assert_eq!(content_id_from_url("CID:a%40b").as_deref(), Some("a@b"));
-        assert_eq!(content_id_from_url("cid:logo").as_deref(), Some("logo"));
-        assert_eq!(content_id_from_url("cid:"), None);
-        assert_eq!(content_id_from_url("https://x/cid:logo"), None);
-        assert_eq!(content_id_from_url("ci"), None);
-        // Multi-byte input shorter than the scheme must not panic on a char boundary.
-        assert_eq!(content_id_from_url("图片"), None);
     }
 
     #[test]

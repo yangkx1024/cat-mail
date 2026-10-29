@@ -59,11 +59,13 @@ base64 正文），交给 mail-parser 按同样方式解析。于是两条路径
 ## 正文的组成
 
 - `text`：所有正文文本部分；只有 HTML 时由 HTML 转换。
-- `html`：只在有真正的 HTML 部分时存在，经 `ammonia` 清洗：
+- `html`：只在有真正的 HTML 部分时存在。proto 解析正文时用 `catmail-html` 的 `sanitize_html` 清洗
+  （经 `ammonia`）。这个 crate 只管 HTML：清洗，以及读信区在清洗结果上做的几遍处理；纯函数，不碰
+  协议，前端经 `catmail_core::html` 使用。清洗规则：
   - 去掉脚本、表单、iframe、事件属性和 `javascript:` 链接；
   - 样式表不交给 ammonia（它不看 `<style>` 里面，写回时原样输出原始文本）：分词时按树构建器的规则
     （`script`、`textarea` 等之后切到原始文本，SVG / MathML 里的忽略）取出 `<style>` 的内容，经
-    `mime/css.rs` 用 cssparser 的记号逐条重写，合成一个 `<style>` 放在输出开头。每张表单独解析（没写完
+    `css.rs` 用 cssparser 的记号逐条重写，合成一个 `<style>` 放在输出开头。每张表单独解析（没写完
     的规则随它的表结束，不吞掉下一张）；带 `media` 属性的表包进 `@media <属性值>{…}`，属性值按
     `@media` 的条件重写，不是媒体查询列表就整张不用（浏览器也当它 `not all`）；`type` 不是空或
     `text/css` 的（模板等）浏览器不应用，这里也跳过。记号写回时按 cssparser 的
@@ -75,9 +77,9 @@ base64 正文），交给 mail-parser 按同样方式解析。于是两条路径
     2000 条规则。输出里没有 `<`（写成 `\3c `），所以样式表不可能结束自己的元素或改变文档结构，变异
     XSS 不依赖 ammonia 对边角情况的处理。重写是幂等的，读信区对清洗后的 HTML 再清洗不会改变它；规则
     只作用于之后下载的正文，已入库的正文保持旧规则清洗的结果。
-  - `color_usage` 用同一套分词（`mime/tokens.rs`）判断正文怎样用颜色（不设、为白底设了颜色、自带深色样式），读信区据此
+  - `color_usage` 用同一套分词（`tokens.rs`）判断正文怎样用颜色（不设、为白底设了颜色、自带深色样式），读信区据此
     决定深色时是否转换颜色（见 [GUI](gui.md#html-引擎)）；
-  - `recolor_html` 把清洗后的 HTML 再清洗一遍，同时把颜色搬到深色页面上（`mime/dark.rs`）：在 OKLab
+  - `recolor_html` 把清洗后的 HTML 再清洗一遍，同时把颜色搬到深色页面上（`dark.rs`）：在 OKLab
     里反转亮度，白色到读信区背景色、黑色到文字色，色相和饱和度保留（超出 sRGB 时降饱和度）。颜色按
     用途区别对待：背景（`background*`、`bgcolor`、阴影）只变暗，文字（`color`、`<font color>` 等）只变亮，
     这样文字和它的背景总是拉开对比，本来就深色的页眉和白字保持原样；边框直接反转，与周围的对比不变。
@@ -89,7 +91,7 @@ base64 正文），交给 mail-parser 按同样方式解析。于是两条路径
   - 链接只允许 http、https、mailto、cid，`data:` 只允许出现在 `img src`；判断时像 URL 解析器
     一样忽略其中的制表符、换行和开头的控制字符。
   - 图片地址（远程、`cid:`）原样保留，是否加载由渲染端决定，默认应拦截远程图片。
-- **哪些是远程图片**由 proto 决定（`mime::remote_image_urls`，经 `catmail_core::html` 导出）：清洗用的
+- **哪些是远程图片**由 `catmail-html` 决定（`remote_image_urls`，经 `catmail_core::html` 导出）：清洗用的
   同一个 ammonia 配置列出 `img src`（`image_sources`），只留 `http` / `https`，按 `url` 解析后的写法
   （`remote_image_url`）去重，最多 200 张。下载、缓存和读信区都用这一种写法，调用方传别的写法，缓存
   也会先规范化。
