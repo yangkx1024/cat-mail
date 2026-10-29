@@ -3,8 +3,9 @@
 [← 架构](../architecture.md)
 
 正文按需下载（`MailClient::download_message`），不在同步时预取。所有按需操作经过同一个入口
-（`catmail-core/src/body.rs` 的 `on_server`）：从连接池取连接、EXAMINE 比对 UIDVALIDITY、在账户
-的取消信号上 select。
+（`catmail-core/src/body.rs` 的 `on_server`）：从连接池取连接、EXAMINE 比对 UIDVALIDITY（连接已经
+只读打开着同一个文件夹、UIDVALIDITY 一致时省掉，见[连接池](protocol.md#连接池)）、在账户的取消信号上
+select。
 
 ## 两条下载路径
 

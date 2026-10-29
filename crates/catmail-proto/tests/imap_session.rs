@@ -579,7 +579,24 @@ async fn examine_requires_a_complete_answer() {
         assert!(!err.is_fatal(), "only this folder fails");
         // And nothing that depends on the selected mailbox runs on a stale one.
         assert!(session.uid_search_all().await.is_err());
+        assert_eq!(session.examined("INBOX"), None);
     }
+}
+
+#[tokio::test]
+async fn examined_names_only_the_mailbox_open_read_only() {
+    let fake = FakeImap::start(sample_state()).await;
+    let mut session = login(&fake).await;
+    assert_eq!(session.examined("INBOX"), None);
+
+    let status = session.examine("INBOX").await.unwrap();
+    assert_eq!(session.examined("INBOX"), Some(status.uidvalidity));
+    assert_eq!(session.examined("Archive"), None);
+    session.noop().await.unwrap();
+    assert_eq!(session.examined("INBOX"), Some(status.uidvalidity));
+
+    session.select("INBOX").await.unwrap();
+    assert_eq!(session.examined("INBOX"), None);
 }
 
 #[tokio::test]

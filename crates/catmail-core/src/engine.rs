@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use catmail_proto::TlsConfig;
@@ -50,8 +51,8 @@ pub(crate) struct Engine {
     accounts: Mutex<HashMap<AccountId, Arc<AccountState>>>,
 }
 
-/// Sizes the engine works in, which tests and users on metered connections may want
-/// other than the defaults. Set with
+/// Sizes and intervals the engine works in, which tests and users on metered connections
+/// may want other than the defaults. Set with
 /// [`MailClientBuilder::tuning`](crate::MailClientBuilder::tuning).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EngineTuning {
@@ -64,6 +65,10 @@ pub struct EngineTuning {
     /// attachments are left on the server until opened, and text parts above it are not
     /// fetched at all [2 MiB].
     pub whole_message_limit: u32,
+    /// A connection kept for on-demand fetches is sent a NOOP after this long unused, so
+    /// that servers and NAT boxes don't close it as idle, and one that died is closed
+    /// before it is needed [4 minutes].
+    pub keepalive: Duration,
 }
 
 impl Default for EngineTuning {
@@ -72,6 +77,9 @@ impl Default for EngineTuning {
             fetch_batch: 200,
             replay_batch: 500,
             whole_message_limit: 2 * 1024 * 1024,
+            // Under five minutes: quiet connections lasted that long when the pool still
+            // dropped them at that age. Servers wait far longer (Gmail some 30 minutes).
+            keepalive: Duration::from_secs(4 * 60),
         }
     }
 }
@@ -113,18 +121,56 @@ impl Cutoff {
 
 struct IdleSession {
     session: Session,
-    since: Instant,
+    /// Tells it from those returned to the pool before or after, for its keepalive.
+    id: u64,
 }
 
 /// [`Engine::draft_upload_delay`] unless the builder sets it.
 pub const DEFAULT_DRAFT_UPLOAD_DELAY: Duration = Duration::from_secs(15);
 
-/// Idle connections older than this are dropped rather than reused: servers and NAT
-/// boxes close quiet connections, and a dead one costs a timeout to discover.
-const IDLE_SESSION_TTL: Duration = Duration::from_secs(5 * 60);
-
 /// Enough for a message and one of its attachments at once.
 const IDLE_SESSIONS_PER_ACCOUNT: usize = 2;
+
+/// Sends the pooled connection `id` a NOOP once it has waited `every`, and returns it to
+/// the pool (which starts this over) unless that found it dead: then it is closed, so
+/// that the next request connects at once rather than finding out. Ends early if it was
+/// taken meanwhile (returned, it is kept alive anew), or the engine is gone. A connection
+/// from before the computer last slept is closed without a word: it is likely dead, and
+/// `on_session` wouldn't use it anyway.
+async fn keep_alive(
+    engine: Weak<Engine>,
+    account: AccountId,
+    id: u64,
+    every: Duration,
+    mut closing: Closing,
+) {
+    tokio::select! {
+        () = tokio::time::sleep(every) => {}
+        () = closing.closed() => return,
+    }
+    let Some(mut session) = engine.upgrade().and_then(|engine| {
+        let session = engine.take_idle(account, id)?;
+        engine.since_woke(session.opened()).then_some(session)
+    }) else {
+        return;
+    };
+    // Not holding the engine meanwhile, which would keep it from closing.
+    let result = tokio::select! {
+        result = session.noop() => result,
+        () = closing.closed() => return,
+    };
+    match result {
+        // A refusal leaves it as usable as it was, as in `with_session`.
+        Err(e) if e.is_fatal() => {
+            tracing::debug!(%account, error = %e, "idle connection died; closed");
+        }
+        _ => {
+            if let Some(engine) = engine.upgrade() {
+                engine.return_session(account, session);
+            }
+        }
+    }
+}
 
 /// What the engine keeps per account.
 ///
@@ -139,8 +185,11 @@ struct AccountState {
     /// Set when removal starts; cancels running syncs and on-demand fetches.
     removed: watch::Sender<bool>,
     /// Logged-in connections for on-demand fetches, kept between requests so opening
-    /// messages one after another doesn't log in each time. Sync uses its own.
+    /// messages one after another doesn't log in each time, and kept alive while they
+    /// wait (see [`Engine::return_session`]). Sync uses its own.
     idle: Mutex<Vec<IdleSession>>,
+    /// Connections returned to `idle` so far, to number them.
+    returned: AtomicU64,
     /// Wakes the account's background sync, if one runs: local changes are waiting for
     /// the server.
     wake: Arc<Notify>,
@@ -649,17 +698,16 @@ impl Engine {
         }
     }
 
-    /// A logged-in connection that was recently in use, if there is one.
+    /// A logged-in connection, the one last in use if there are several, so that it
+    /// likely has the folder wanted open still.
     pub fn take_session(&self, account: AccountId) -> Option<Session> {
         let state = self.existing(account)?;
-        let mut idle = lock(&state.idle);
-        idle.retain(|s| s.since.elapsed() < IDLE_SESSION_TTL);
-        idle.pop().map(|s| s.session)
+        lock(&state.idle).pop().map(|s| s.session)
     }
 
     /// Keeps a connection that is still usable for the next request, unless the account
-    /// is being removed.
-    pub fn return_session(&self, account: AccountId, session: Session) {
+    /// is being removed. While it waits, it is kept alive (see [`keep_alive`]).
+    pub fn return_session(self: &Arc<Self>, account: AccountId, session: Session) {
         let state = self.account(account);
         let mut idle = lock(&state.idle);
         // Checked under the pool lock, which removal takes after setting the flag, so a
@@ -667,10 +715,23 @@ impl Engine {
         if *state.removed.borrow() || idle.len() >= IDLE_SESSIONS_PER_ACCOUNT {
             return;
         }
-        idle.push(IdleSession {
-            session,
-            since: Instant::now(),
-        });
+        let id = state.returned.fetch_add(1, Ordering::Relaxed);
+        idle.push(IdleSession { session, id });
+        tokio::spawn(keep_alive(
+            Arc::downgrade(self),
+            account,
+            id,
+            self.tuning.keepalive,
+            self.closing(),
+        ));
+    }
+
+    /// The connection `id` from the pool, if it is still there.
+    fn take_idle(&self, account: AccountId, id: u64) -> Option<Session> {
+        let state = self.existing(account)?;
+        let mut idle = lock(&state.idle);
+        let i = idle.iter().position(|s| s.id == id)?;
+        Some(idle.remove(i).session)
     }
 
     /// Marks `account` removed: running syncs and fetches are cancelled, idle connections
@@ -699,6 +760,7 @@ impl Engine {
                     send: Arc::default(),
                     removed: watch::Sender::new(false),
                     idle: Mutex::default(),
+                    returned: AtomicU64::default(),
                     wake: Arc::default(),
                     resume: Arc::default(),
                     synced: Mutex::default(),
