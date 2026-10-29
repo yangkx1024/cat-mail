@@ -13,6 +13,7 @@ mod view;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Context as _;
 use catmail_core::html::{InlineImage, RemoteImage};
@@ -136,12 +137,17 @@ impl Reader {
         let client = self.client.clone();
         // Replacing the task cancels the load of the message shown before.
         self._load = cx.spawn_in(window, async move |this, cx| {
+            let began = Instant::now();
             let (state, inline) = match client.download_message(id).await {
                 Ok(message) => {
+                    let downloaded = began.elapsed();
                     let inline = inline_images(&message);
+                    let prepared = Instant::now();
                     let open = cx
                         .background_spawn(async move { OpenMessage::new(message) })
                         .await;
+                    tracing::info!(message = %id, ?downloaded, prepare = ?prepared.elapsed(),
+                        "message opened");
                     (ReaderState::Open(Box::new(open)), inline)
                 }
                 Err(e) => {
