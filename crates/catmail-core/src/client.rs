@@ -6,13 +6,13 @@ use std::time::Duration;
 
 use catmail_proto::imap::Session;
 use catmail_proto::{Credentials, TlsConfig};
-use catmail_store::{BlobStore, Identities, Store};
+use catmail_store::{BlobStore, Db, Identities, Store};
 use catmail_types::{
     Account, AccountId, AccountOverview, AccountStatus, AttachmentId, Draft, DraftAttachment,
     DraftAttachmentId, DraftContent, DraftId, Event, Flags, FlushReport, Folder, FolderId,
     FolderRole, FolderSyncReport, Forwarding, GcReport, Identity, IdentityId, Message,
     MessageCursor, MessageId, MessageSummary, NewAccount, NewIdentity, OutboxEntry, OutboxId,
-    PendingOp, PendingOpId, ReplayReport, SearchQuery, ServerConfig, SyncReport,
+    PendingOp, PendingOpId, ReplayReport, SearchQuery, ServerConfig, SyncReport, special_folder,
 };
 use secrecy::{ExposeSecret, SecretString};
 use tokio::runtime::Handle;
@@ -704,16 +704,22 @@ impl MailClient {
             .run(async move {
                 engine
                     .read(move |db| {
-                        let mut inboxes = Vec::new();
-                        for account in db.accounts().list()? {
-                            if let Some((inbox, _)) =
-                                db.folders().by_role(account.id, FolderRole::Inbox)?
-                            {
-                                inboxes.push(inbox);
-                            }
-                        }
+                        let inboxes: Vec<_> = inboxes(db)?.iter().map(|f| f.id).collect();
                         db.messages().unread_in_inbox(&messages, &inboxes)
                     })
+                    .await
+            })
+            .await
+    }
+
+    /// How many messages are unread in the accounts' INBOXes together (on Gmail, labelled
+    /// INBOX): what the tray shows.
+    pub async fn count_unread_in_inboxes(&self) -> Result<u32> {
+        let engine = self.engine.clone();
+        self.rt
+            .run(async move {
+                engine
+                    .read(|db| Ok(inboxes(db)?.iter().map(|f| f.unread_count).sum()))
                     .await
             })
             .await
@@ -1186,6 +1192,16 @@ fn remove_old_files(dir: &Path, age: Duration) {
                 "couldn't remove handed-off file");
         }
     }
+}
+
+/// Each account's INBOX (on Gmail, the INBOX label), where it has one.
+fn inboxes(db: &Db<'_>) -> catmail_store::Result<Vec<Folder>> {
+    let mut inboxes = Vec::new();
+    for account in db.accounts().list()? {
+        let folders = db.folders().list(account.id)?;
+        inboxes.extend(special_folder(&folders, FolderRole::Inbox).cloned());
+    }
+    Ok(inboxes)
 }
 
 fn check_password(password: &SecretString) -> Result<()> {

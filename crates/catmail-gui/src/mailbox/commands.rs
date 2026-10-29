@@ -417,6 +417,10 @@ impl Mailbox {
     }
 
     pub(crate) fn new_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.accounts.is_none() {
+            self.compose_once_loaded = true;
+            return;
+        }
         let account = self
             .current_account()
             .or_else(|| self.accounts.as_deref()?.first())
