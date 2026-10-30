@@ -386,6 +386,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_column_grows_past_its_width_to_fit_its_content() {
+        // GitHub's notification mail heads a column `<th style="width: 24px">Status</th>`:
+        // a browser widens the column to the word rather than overlap the next column.
+        let html = r#"<body style="margin:0;background:#0000ff">
+            <style>td { padding: 0 } div { width: 50px; height: 10px }</style>
+            <table width="100%" cellspacing="0"><tr>
+            <td style="width:24px"><div style="background:#ff0000"></div></td>
+            <td style="width:100%"><div style="background:#ffffff"></div></td>
+            </tr></table></body>"#;
+        let document = open(source(html), Appearance::default(), 1.0);
+        let tile = block_on(document.paint(WIDTH, 0.0, 10.0)).unwrap();
+        assert_eq!(pixel(&tile, 40, 5), RED);
+        assert_eq!(pixel(&tile, 75, 5), WHITE);
+    }
+
     /// Two paragraphs a line each, 30 px apart: 0..30 and 60..90, and a table below.
     const PARAGRAPHS: &str = r#"<body style="margin:0;font-size:20px;line-height:30px">
         <p style="margin:0 0 30px">alpha beta</p><p style="margin:0">gamma delta<br>epsilon</p>

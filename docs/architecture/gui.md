@@ -321,7 +321,7 @@ CSS 引擎）+ Taffy + Parley 排版，vello_cpu 绘制。起初保留 GPUI Kit 
 "图片"）。选型经过见[下文](#选型记录)。
 
 Blitz 用的是 fork（`yangkx1024/blitz`，基于 0.3.0-beta.4，根 `Cargo.toml` 的 `[patch.crates-io]` 按提交固定），
-多两处改动：
+多三处改动：
 
 - 表格行里非表格内部的子元素（邮件模板常把单元格改成 `td { display: block }`，内联或在样式表里）按匿名
   单元格排版。上游把它们当成标题忽略，整块内容不显示。连续几个这样的子元素各占一列，不像浏览器那样共用
@@ -330,8 +330,11 @@ Blitz 用的是 fork（`yangkx1024/blitz`，基于 0.3.0-beta.4，根 `Cargo.tom
   `parse_legacy_color`）。上游只认 `#` 开头的六位或三位，三位还读错（`#fff` 成了近黑的 `#0f0f0f`），
   颜色名和省略 `#` 的写法被忽略，`font color` 完全不映射。浅色主题和自带深色样式的邮件都靠它，
   深色转换写回的六位颜色不受影响。
+- 自动表格布局里，单元格或 `<col>` 的长度 `width` 是列的最小宽度：列仍撑到单元格内容的 min-content
+  宽度，但不再按 max-content 继续变宽，和浏览器一致。上游把它当成固定宽度的网格轨道，内容比它宽就压到
+  下一列上（GitHub 通知邮件的 `<th style="width: 24px">Status</th>`）。上游还没有相关 issue 或 PR。
 
-两处都进了上游发布后回到 crates.io，同时从 `deny.toml` 的 `allow-git` 删掉 fork。
+三处都进了上游发布后回到 crates.io，同时从 `deny.toml` 的 `allow-git` 删掉 fork。
 
 - **`catmail-render`** 不依赖 GPUI 和邮件类型。每个打开的文档（`Document`）一个线程：Blitz 的文档
   不是 `Send`（持有不带 `Send` 约束的 provider），只能在打开它的线程上活。请求按顺序回答：某宽度下

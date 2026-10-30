@@ -134,15 +134,16 @@ all = { level = "warn", priority = -1 }
 # `allow-git` in deny.toml (#130).
 [patch.crates-io]
 imap-proto = { git = "https://github.com/djc/imap-proto", rev = "0dac3af59a2cfcd649c30034d5f221c4d8edbf34" }
-# Blitz 0.3.0-beta.4 with two changes: a table row's block children (`td { display: block }`
-# in email) are laid out as anonymous cells instead of dropped, and `bgcolor`,
-# `font color` and `body text` are read as legacy colors (`#fff` was near black, names
-# ignored; #161). Every crate of its workspace that we use comes from the fork, so that
-# each is in the graph once. Back to crates.io once a release has both (cells:
-# DioxusLabs/blitz#781, #783).
-blitz-dom = { git = "https://github.com/yangkx1024/blitz", rev = "ce6f35956a874127c3ec291caee565bad6470bff" }
-blitz-html = { git = "https://github.com/yangkx1024/blitz", rev = "ce6f35956a874127c3ec291caee565bad6470bff" }
-blitz-paint = { git = "https://github.com/yangkx1024/blitz", rev = "ce6f35956a874127c3ec291caee565bad6470bff" }
-blitz-traits = { git = "https://github.com/yangkx1024/blitz", rev = "ce6f35956a874127c3ec291caee565bad6470bff" }
-stylo_taffy = { git = "https://github.com/yangkx1024/blitz", rev = "ce6f35956a874127c3ec291caee565bad6470bff" }
-debug_timer = { git = "https://github.com/yangkx1024/blitz", rev = "ce6f35956a874127c3ec291caee565bad6470bff" }
+# Blitz 0.3.0-beta.4 with three changes: a table row's block children (`td { display: block }`
+# in email) are laid out as anonymous cells instead of dropped, `bgcolor`, `font color`
+# and `body text` are read as legacy colors (`#fff` was near black, names ignored; #161),
+# and a cell's length `width` is a minimum in the auto table layout (content wider than it
+# overflowed into the next column). Every crate of its workspace that we use comes from the
+# fork, so that each is in the graph once. Back to crates.io once a release has all three
+# (cells: DioxusLabs/blitz#781, #783).
+blitz-dom = { git = "https://github.com/yangkx1024/blitz", rev = "7333936c0f99537bea4db203d67ea437baae1e5c" }
+blitz-html = { git = "https://github.com/yangkx1024/blitz", rev = "7333936c0f99537bea4db203d67ea437baae1e5c" }
+blitz-paint = { git = "https://github.com/yangkx1024/blitz", rev = "7333936c0f99537bea4db203d67ea437baae1e5c" }
+blitz-traits = { git = "https://github.com/yangkx1024/blitz", rev = "7333936c0f99537bea4db203d67ea437baae1e5c" }
+stylo_taffy = { git = "https://github.com/yangkx1024/blitz", rev = "7333936c0f99537bea4db203d67ea437baae1e5c" }
+debug_timer = { git = "https://github.com/yangkx1024/blitz", rev = "7333936c0f99537bea4db203d67ea437baae1e5c" }
