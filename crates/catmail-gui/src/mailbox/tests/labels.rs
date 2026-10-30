@@ -77,7 +77,8 @@ fn labels_are_listed_apart_and_shown_on_their_messages(cx: &mut TestAppContext) 
     // The inbox is where it is listed: Work is what it is about.
     click_message(cx, window, &mailbox, "Plan");
     cx.read(|cx| assert_eq!(reader_labels(&mailbox, cx), ["Work"]));
-    assert!(shown(cx, window, "labels"));
+    // "Labels" is in the toolbar's More menu.
+    cx.read(|cx| assert!(mailbox.read(cx).can_edit_labels(cx)));
 
     // In Work, every row has Work: the rows leave it out, the reader doesn't.
     select_folder(cx, window, &mailbox, mail.folder_id("Work"));
@@ -201,7 +202,7 @@ fn with_all_mail_hidden_labels_are_folders_and_the_user_is_told(cx: &mut TestApp
         super::sidebar::account_note(mail.account())
     ));
     click_message(cx, window, &mailbox, "Plan");
-    assert!(!shown(cx, window, "labels"), "no labels to edit");
+    cx.read(|cx| assert!(!mailbox.read(cx).can_edit_labels(cx), "no labels to edit"));
 }
 
 #[gpui_kit::test]

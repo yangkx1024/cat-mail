@@ -30,18 +30,21 @@ impl Mailbox {
         .into_iter()
         .map(|(name, value)| layout::labelled(name, value, cx).text_sm())
         .collect::<Vec<_>>();
-        v_flex().size_full().child(layout::toolbar(cx)).child(
-            layout::page(
-                "outbox-entry",
-                v_flex()
-                    .gap_4()
-                    .child(layout::page_title(format::subject(Some(&entry.subject))))
-                    .child(v_flex().gap_1().children(facts))
-                    .child(self.render_outbox_state(entry, cx)),
+        v_flex()
+            .size_full()
+            .child(layout::toolbar(cx).child(self.back_button(cx)))
+            .child(
+                layout::page(
+                    "outbox-entry",
+                    v_flex()
+                        .gap_4()
+                        .child(layout::page_title(format::subject(Some(&entry.subject))))
+                        .child(v_flex().gap_1().children(facts))
+                        .child(self.render_outbox_state(entry, cx)),
+                )
+                .flex_1()
+                .min_h_0(),
             )
-            .flex_1()
-            .min_h_0(),
-        )
     }
 
     /// What happened to the entry, and the choices it leaves.

@@ -1,8 +1,10 @@
 //! Embedded icons. The app draws [Heroicons](https://heroicons.com) (MIT, vendored under
-//! `assets/heroicons/`, only the ones used), and serves them in place of GPUI Kit's own
-//! Lucide icons wherever its components draw one we have a counterpart for (check marks,
-//! chevrons, close buttons, …), so the window uses one icon family. Component icons
-//! without a counterpart (the spinner, panel toggles) still come from GPUI Kit.
+//! `assets/heroicons/`, only the ones used; `folder-arrow-right` is ours, Heroicons'
+//! `folder-arrow-down` with its arrow turned, as Heroicons has none), and serves them in
+//! place of GPUI Kit's own Lucide icons wherever its components draw one we have a
+//! counterpart for (check marks, chevrons, close buttons, …), so the window uses one icon
+//! family. Component icons without a counterpart (the spinner, panel toggles) still come
+//! from GPUI Kit.
 
 use std::borrow::Cow;
 
@@ -10,28 +12,49 @@ use gpui_kit::assets::IconNamed;
 use gpui_kit::{AssetSource, SharedString};
 
 macro_rules! heroicons {
-    ($($name:ident => $style:literal / $file:literal,)*) => {
-        /// The Heroicons this app embeds. `Icon::new(Hero::Inbox)` draws one.
+    ($($name:ident => $style:literal / $file:literal $(+ $solid:ident)?,)*) => {
+        /// The Heroicons this app embeds. `Icon::new(Hero::Inbox)` draws one. An icon
+        /// listed `+ NameSolid` also has its filled counterpart, `Hero::NameSolid`.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub enum Hero {
-            $($name,)*
+            $($name, $($solid,)?)*
         }
 
         impl Hero {
-            const ALL: &[Hero] = &[$(Hero::$name,)*];
+            const ALL: &[Hero] = &[$(Hero::$name, $(Hero::$solid,)?)*];
 
             fn asset_path(self) -> &'static str {
                 match self {
-                    $(Hero::$name => concat!("icons/hero/", $style, "/", $file, ".svg"),)*
+                    $(
+                        Hero::$name => concat!("icons/hero/", $style, "/", $file, ".svg"),
+                        $(Hero::$solid => concat!("icons/hero/solid/", $file, ".svg"),)?
+                    )*
+                }
+            }
+
+            fn bytes(self) -> &'static [u8] {
+                match self {
+                    $(
+                        Hero::$name => include_bytes!(
+                            concat!("../assets/heroicons/", $style, "/", $file, ".svg")
+                        ),
+                        $(Hero::$solid => include_bytes!(
+                            concat!("../assets/heroicons/solid/", $file, ".svg")
+                        ),)?
+                    )*
                 }
             }
 
             fn svg(path: &str) -> Option<&'static [u8]> {
-                match path {
-                    $(concat!("icons/hero/", $style, "/", $file, ".svg") => Some(include_bytes!(
-                        concat!("../assets/heroicons/", $style, "/", $file, ".svg")
-                    )),)*
-                    _ => None,
+                Self::ALL.iter().find(|icon| icon.asset_path() == path).map(|icon| icon.bytes())
+            }
+
+            /// The filled counterpart, for a selected sidebar row; the icon itself when it
+            /// has none.
+            pub fn solid(self) -> Self {
+                match self {
+                    $($(Hero::$name => Hero::$solid,)?)*
+                    other => other,
                 }
             }
         }
@@ -39,13 +62,14 @@ macro_rules! heroicons {
 }
 
 heroicons! {
-    ArchiveBox => "outline" / "archive-box",
+    ArchiveBox => "outline" / "archive-box" + ArchiveBoxSolid,
+    ArrowLeft => "outline" / "arrow-left",
     ArrowDown => "outline" / "arrow-down",
     ArrowDownTray => "outline" / "arrow-down-tray",
     ArrowPath => "outline" / "arrow-path",
     ArrowTopRightOnSquare => "outline" / "arrow-top-right-on-square",
     ArrowUp => "outline" / "arrow-up",
-    ArrowUpTray => "outline" / "arrow-up-tray",
+    ArrowUpTray => "outline" / "arrow-up-tray" + ArrowUpTraySolid,
     ArrowUturnLeft => "outline" / "arrow-uturn-left",
     ArrowUturnRight => "outline" / "arrow-uturn-right",
     ArrowsPointingIn => "outline" / "arrows-pointing-in",
@@ -62,23 +86,22 @@ heroicons! {
     ChevronUp => "outline" / "chevron-up",
     ChevronUpDown => "outline" / "chevron-up-down",
     Clock => "outline" / "clock",
-    Cog6Tooth => "outline" / "cog-6-tooth",
+    Cog6Tooth => "outline" / "cog-6-tooth" + Cog6ToothSolid,
     ComputerDesktop => "outline" / "computer-desktop",
     Document => "outline" / "document",
     DocumentDuplicate => "outline" / "document-duplicate",
-    DocumentText => "outline" / "document-text",
+    DocumentText => "outline" / "document-text" + DocumentTextSolid,
     EllipsisHorizontal => "outline" / "ellipsis-horizontal",
-    Envelope => "outline" / "envelope",
-    EnvelopeOpen => "outline" / "envelope-open",
+    Envelope => "outline" / "envelope" + EnvelopeSolid,
+    EnvelopeOpen => "outline" / "envelope-open" + EnvelopeOpenSolid,
     ExclamationTriangle => "outline" / "exclamation-triangle",
     Eye => "outline" / "eye",
     EyeSlash => "outline" / "eye-slash",
-    Flag => "outline" / "flag",
-    FlagSolid => "solid" / "flag",
-    Folder => "outline" / "folder",
-    FolderArrowDown => "outline" / "folder-arrow-down",
-    Inbox => "outline" / "inbox",
-    InboxStack => "outline" / "inbox-stack",
+    Flag => "outline" / "flag" + FlagSolid,
+    Folder => "outline" / "folder" + FolderSolid,
+    FolderArrowRight => "outline" / "folder-arrow-right",
+    Inbox => "outline" / "inbox" + InboxSolid,
+    InboxStack => "outline" / "inbox-stack" + InboxStackSolid,
     InformationCircle => "outline" / "information-circle",
     Key => "outline" / "key",
     MagnifyingGlass => "outline" / "magnifying-glass",
@@ -86,23 +109,22 @@ heroicons! {
     Minus => "outline" / "minus",
     Moon => "outline" / "moon",
     NoSymbol => "outline" / "no-symbol",
-    PaperAirplane => "outline" / "paper-airplane",
+    PaperAirplane => "outline" / "paper-airplane" + PaperAirplaneSolid,
     PaperClip => "outline" / "paper-clip",
     PencilSquare => "outline" / "pencil-square",
     Photo => "outline" / "photo",
     Plus => "outline" / "plus",
-    ShieldExclamation => "outline" / "shield-exclamation",
+    ShieldExclamation => "outline" / "shield-exclamation" + ShieldExclamationSolid,
     SignalSlash => "outline" / "signal-slash",
     Square2Stack => "outline" / "square-2-stack",
-    Star => "outline" / "star",
-    StarSolid => "solid" / "star",
+    Star => "outline" / "star" + StarSolid,
     Stop => "outline" / "stop",
     Sun => "outline" / "sun",
-    Swatch => "outline" / "swatch",
-    Tag => "outline" / "tag",
-    Trash => "outline" / "trash",
+    Swatch => "outline" / "swatch" + SwatchSolid,
+    Tag => "outline" / "tag" + TagSolid,
+    Trash => "outline" / "trash" + TrashSolid,
     User => "outline" / "user",
-    UserCircle => "outline" / "user-circle",
+    UserCircle => "outline" / "user-circle" + UserCircleSolid,
     XCircle => "outline" / "x-circle",
     XMark => "outline" / "x-mark",
 }

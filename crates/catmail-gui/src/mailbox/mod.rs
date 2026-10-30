@@ -19,6 +19,7 @@ mod tests;
 
 pub(crate) use commands::report_failure;
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use catmail_core::{
@@ -156,6 +157,9 @@ pub struct Mailbox {
     /// [`REFRESH_INTERVAL`], except in tests, whose clock only moves when told to.
     pub(crate) refresh_interval: Duration,
     throttle: Throttle,
+    /// Whether each account the user folded or unfolded in the sidebar is open; see
+    /// [`Mailbox::account_open`] for the others.
+    account_folds: HashMap<AccountId, bool>,
     /// "Labels", while it is open.
     pub(crate) labels_dialog: Option<LabelsDialog>,
     /// The sign-in form, shown instead of the mailbox while it is open.
@@ -249,6 +253,7 @@ impl Mailbox {
             sync_on_open_after: SYNC_ON_OPEN_AFTER,
             refresh_interval: REFRESH_INTERVAL,
             throttle: Throttle::default(),
+            account_folds: HashMap::new(),
             labels_dialog: None,
             adding_account: None,
             search,
@@ -327,8 +332,7 @@ impl Mailbox {
             ListEvent::Select(ix) => (*ix, false),
             ListEvent::Confirm(ix) => (*ix, true),
             ListEvent::Cancel => {
-                self.reader.update(cx, |reader, cx| reader.clear(cx));
-                cx.notify();
+                self.close_detail(window, cx);
                 return;
             }
         };
@@ -635,6 +639,11 @@ impl Mailbox {
             return;
         }
         self.place = place;
+        // Wherever it was taken (a notification, the last session), the selected row shows.
+        let accounts = self.accounts.as_deref().unwrap_or_default();
+        if let Some(entry) = place.and_then(|place| place.account_in(accounts)) {
+            self.account_folds.insert(entry.account.id, true);
+        }
         // Leaving a search for a folder: the folder's messages, not the results.
         self.search
             .update(cx, |search, cx| search.set_value("", window, cx));

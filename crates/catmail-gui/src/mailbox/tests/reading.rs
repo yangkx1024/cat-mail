@@ -706,3 +706,52 @@ fn all_inboxes_lists_an_inbox_found_after_its_messages(cx: &mut TestAppContext) 
         cx.read(|cx| subjects(&mailbox, cx).len() == 18)
     });
 }
+
+/// An account's places fold under its address, and unfold wherever the mailbox is taken
+/// into them, so the selected row shows.
+#[gpui_kit::test]
+fn an_account_unfolds_where_the_mailbox_goes(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let account = mail.account();
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    let open = |cx: &mut TestAppContext| cx.read(|cx| mailbox.read(cx).account_open(account));
+    // The only account starts unfolded.
+    assert!(open(cx));
+
+    let heading = super::sidebar::account_heading(account);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(heading.clone(), cx);
+    })
+    .unwrap();
+    assert!(!open(cx), "the address folds it");
+
+    cx.update_window(window, |_, window, cx| {
+        mailbox.update(cx, |mailbox, cx| {
+            mailbox.select_place(Some(Place::Drafts(account)), window, cx)
+        })
+    })
+    .unwrap();
+    assert!(open(cx));
+}
+
+/// The right pane shows only for a selected row; Back closes it, the list across the
+/// window again.
+#[gpui_kit::test]
+fn back_closes_the_message(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    assert!(!shown(cx, window, "back"), "nothing open, no pane");
+
+    click_message(cx, window, &mailbox, "你好，世界");
+    assert!(shown(cx, window, "back"));
+    click(cx, window, "back");
+    cx.read(|cx| {
+        let list = mailbox.read(cx).messages.read(cx);
+        assert!(list.delegate().selected_row().is_none());
+        assert_eq!(shown_in_reader(&mailbox, cx), None);
+    });
+    assert!(!shown(cx, window, "back"));
+}

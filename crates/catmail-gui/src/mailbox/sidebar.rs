@@ -1,8 +1,11 @@
-//! The mailbox's left pane: "New message", All Inboxes, each account's places, and at
+//! The mailbox's left pane: "Compose", All Inboxes, each account's places, and at
 //! the bottom Settings, the connection state and Sync.
+
+use std::rc::Rc;
 
 use catmail_core::{AccountId, ErrorKind, FolderRole};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::collapsible;
 use gpui_kit::component::sidebar::{
     Sidebar, SidebarGroup, SidebarItem, SidebarMenu, SidebarMenuItem,
 };
@@ -11,19 +14,25 @@ use gpui_kit::component::{
     ActiveTheme as _, Collapsible, Disableable as _, Icon, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::{
-    App, Context, ElementId, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    Role, SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window,
-    div, prelude::FluentBuilder as _,
+    App, ClickEvent, Context, ElementId, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
+    TestSupportExt as _, Window, div, prelude::FluentBuilder as _,
 };
 
 use super::folders::{self, FolderNode, RoleInfo};
 use super::{AccountEntry, Mailbox, Place};
 use crate::actions::{self, NewMessage, OpenSettings, Sync};
 use crate::assets::Hero;
+use crate::layout;
 
 /// Why a Gmail account's labels are folders, and how to have labels again.
 const ALL_MAIL_HIDDEN: &str = "Labels show as folders because All Mail is hidden from \
     IMAP. Turn on “Show in IMAP” for it in Gmail’s settings.";
+
+/// The element id of an account's address, which folds and unfolds its places.
+pub(super) fn account_heading(account: AccountId) -> ElementId {
+    ("account-heading", account.0 as u64).into()
+}
 
 /// The element id of the note under an account's address.
 pub(super) fn account_note(account: AccountId) -> ElementId {
@@ -57,12 +66,15 @@ impl Mailbox {
         let accounts = self.accounts.as_deref().unwrap_or_default();
         let note = self.connection_note();
         let header = Button::new("new-message")
-            .outline()
+            .primary()
+            .rounded_full()
             .w_full()
             .icon(Hero::PencilSquare)
-            .label("New message")
-            .tooltip_with_action("New message", &NewMessage, Some(actions::MAILBOX))
+            .label("Compose")
+            .tooltip_with_action("Compose", &NewMessage, Some(actions::MAILBOX))
             .disabled(accounts.is_empty())
+            // 20px down to All Inboxes, with the 12px the sidebar puts above its first group.
+            .mb_2()
             .on_click(cx.listener(|this, _, window, cx| this.new_message(window, cx)));
         let footer = h_flex()
             .w_full()
@@ -116,7 +128,6 @@ impl Mailbox {
             }
             Group {
                 heading: None,
-                note: None,
                 items: vec![item],
                 labels: Vec::new(),
                 collapsed: false,
@@ -127,13 +138,25 @@ impl Mailbox {
             .header(header)
             .footer(footer)
             .children(inboxes)
-            .children(accounts.iter().map(|entry| {
+            .children(accounts.iter().enumerate().map(|(ix, entry)| {
+                let account = entry.account.id;
+                let open = self.account_open(account);
                 Group {
-                    heading: Some(entry.account.email.clone().into()),
-                    note: entry
-                        .account
-                        .all_mail_hidden()
-                        .then(|| (account_note(entry.account.id), ALL_MAIL_HIDDEN.into())),
+                    heading: Some(Heading {
+                        title: (ix == 0).then(|| "Accounts".into()),
+                        id: account_heading(account),
+                        places: ("account-places", account.0 as u64).into(),
+                        email: entry.account.email.clone().into(),
+                        note: entry
+                            .account
+                            .all_mail_hidden()
+                            .then(|| (account_note(account), ALL_MAIL_HIDDEN.into())),
+                        open,
+                        toggle: Rc::new(
+                            cx.listener(move |this, _, _, cx| this.toggle_account(account, cx)),
+                        ),
+                    }),
+                    // Folded too: they shrink away rather than vanish.
                     items: self.account_items(entry, cx),
                     labels: entry
                         .folders
@@ -144,6 +167,25 @@ impl Mailbox {
                     collapsed: false,
                 }
             }))
+    }
+
+    /// Whether the sidebar shows the account's places: as the user left it, else only
+    /// for the only account.
+    pub(super) fn account_open(&self, account: AccountId) -> bool {
+        self.account_folds
+            .get(&account)
+            .copied()
+            .unwrap_or_else(|| {
+                self.accounts
+                    .as_ref()
+                    .is_some_and(|accounts| accounts.len() == 1)
+            })
+    }
+
+    fn toggle_account(&mut self, account: AccountId, cx: &mut Context<Self>) {
+        let open = self.account_open(account);
+        self.account_folds.insert(account, !open);
+        cx.notify();
     }
 
     /// One line on what is wrong with the connection, if anything: syncing, or the
@@ -229,12 +271,9 @@ impl Mailbox {
         attention: bool,
         cx: &mut Context<Self>,
     ) -> SidebarMenuItem {
-        let mut item = SidebarMenuItem::new(label)
-            .icon(Icon::new(icon))
-            .active(self.place == Some(place))
-            .on_click(
-                cx.listener(move |this, _, window, cx| this.select_place(Some(place), window, cx)),
-            );
+        let mut item = layout::sidebar_row(label, icon, self.place == Some(place), cx).on_click(
+            cx.listener(move |this, _, window, cx| this.select_place(Some(place), window, cx)),
+        );
         if attention {
             item = item.accessibility_label(format!("{label}, {n}, needs attention"));
         }
@@ -245,20 +284,25 @@ impl Mailbox {
     }
 
     fn folder_item(&self, node: &FolderNode, cx: &mut Context<Self>) -> SidebarMenuItem {
-        let mut item = SidebarMenuItem::new(node.label.clone())
-            .icon(Icon::new(folders::icon(node.folder.as_ref())))
-            .default_open(true)
-            .children(
-                node.children
-                    .iter()
-                    .map(|child| self.folder_item(child, cx)),
-            );
-        if let Some(folder) = node.selectable() {
-            let place = Place::Folder(folder.id);
+        let place = node.selectable().map(|folder| Place::Folder(folder.id));
+        let mut item = layout::sidebar_row(
+            node.label.clone(),
+            folders::icon(node.folder.as_ref()),
+            place.is_some() && self.place == place,
+            cx,
+        )
+        .default_open(true)
+        .children(
+            node.children
+                .iter()
+                .map(|child| self.folder_item(child, cx)),
+        );
+        if let Some(place) = place {
             let unread = node.unread() as usize;
-            item = item.active(self.place == Some(place)).on_click(
-                cx.listener(move |this, _, window, cx| this.select_place(Some(place), window, cx)),
-            );
+            item =
+                item.on_click(cx.listener(move |this, _, window, cx| {
+                    this.select_place(Some(place), window, cx)
+                }));
             if unread > 0 {
                 item = item.accessibility_label(format!("{}, {unread} unread", node.label));
             }
@@ -275,12 +319,28 @@ impl Mailbox {
 /// faint, as for a section; the address names whose mail this is, so it is a heading.
 #[derive(Clone)]
 struct Group {
-    heading: Option<SharedString>,
-    /// Something about the account to put right, under its address, and its element id.
-    note: Option<(ElementId, SharedString)>,
+    heading: Option<Heading>,
     items: Vec<SidebarMenuItem>,
     labels: Vec<SidebarMenuItem>,
     collapsed: bool,
+}
+
+type Toggle = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+
+/// An account's address, which folds and unfolds its places.
+#[derive(Clone)]
+struct Heading {
+    /// The title of the section it starts: "Accounts", over the first account.
+    title: Option<SharedString>,
+    id: ElementId,
+    /// The id the places' folding animates under.
+    places: ElementId,
+    email: SharedString,
+    /// Something about the account to put right, and its element id. It shows while the
+    /// account is folded too.
+    note: Option<(ElementId, SharedString)>,
+    open: bool,
+    toggle: Toggle,
 }
 
 impl Collapsible for Group {
@@ -302,21 +362,50 @@ impl SidebarItem for Group {
         cx: &mut App,
     ) -> impl IntoElement {
         let id = id.into();
+        // Folding needs the address to click, which the icon-only sidebar doesn't show.
+        let open = self.collapsed || self.heading.as_ref().is_none_or(|h| h.open);
+        let places = self.heading.as_ref().map(|h| h.places.clone());
         v_flex()
-            .when(!self.collapsed, |this| {
-                this.children(self.heading.map(|heading| {
+            .when_some(self.heading.filter(|_| !self.collapsed), |this, heading| {
+                let toggle = heading.toggle;
+                this.children(heading.title.map(|title| {
+                    // As SidebarGroup draws its label.
                     div()
                         .px_2()
                         .h_8()
                         .flex()
                         .items_center()
+                        .text_xs()
+                        .text_color(cx.theme().sidebar_foreground.opacity(0.7))
+                        .child(title)
+                }))
+                .child(
+                    h_flex()
+                        .id(heading.id)
+                        .test_support()
+                        .role(Role::Button)
+                        .aria_expanded(heading.open)
+                        .px_2()
+                        .h_8()
+                        .gap_2()
+                        .rounded(cx.theme().radius)
                         .text_sm()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(cx.theme().sidebar_foreground)
-                        .truncate()
-                        .child(heading)
-                }))
-                .children(self.note.map(|(id, note)| {
+                        .hover(|this| this.bg(cx.theme().sidebar_accent.opacity(0.8)))
+                        .child(div().flex_1().min_w_0().truncate().child(heading.email))
+                        .child(
+                            Icon::new(if heading.open {
+                                Hero::ChevronDown
+                            } else {
+                                Hero::ChevronRight
+                            })
+                            .xsmall()
+                            .text_color(cx.theme().muted_foreground),
+                        )
+                        .on_click(move |event, window, cx| toggle(event, window, cx)),
+                )
+                .children(heading.note.map(|(id, note)| {
                     div()
                         .id(id)
                         .role(Role::Note)
@@ -329,20 +418,29 @@ impl SidebarItem for Group {
                         .child(note)
                 }))
             })
-            // The id SidebarGroup gives its first child, so the items keep theirs.
             .child(
-                SidebarMenu::new()
-                    .children(self.items)
-                    .collapsed(self.collapsed)
-                    .render(format!("{id}-0"), window, cx),
+                collapsible::Collapsible::new()
+                    .open(open)
+                    .when_some(places, |this, places| this.motion_id(places))
+                    .content(
+                        v_flex()
+                            // The id SidebarGroup gives its first child, so the items keep
+                            // theirs.
+                            .child(
+                                SidebarMenu::new()
+                                    .children(self.items)
+                                    .collapsed(self.collapsed)
+                                    .render(format!("{id}-0"), window, cx),
+                            )
+                            .when(!self.labels.is_empty(), |this| {
+                                this.child(
+                                    SidebarGroup::new("Labels")
+                                        .child(SidebarMenu::new().children(self.labels))
+                                        .collapsed(self.collapsed)
+                                        .render(format!("{id}-labels"), window, cx),
+                                )
+                            }),
+                    ),
             )
-            .when(!self.labels.is_empty(), |this| {
-                this.child(
-                    SidebarGroup::new("Labels")
-                        .child(SidebarMenu::new().children(self.labels))
-                        .collapsed(self.collapsed)
-                        .render(format!("{id}-labels"), window, cx),
-                )
-            })
     }
 }
