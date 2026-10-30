@@ -339,6 +339,19 @@ mod tests {
         select(document, span).text
     }
 
+    #[test]
+    fn a_cell_made_a_block_is_laid_out_as_a_cell() {
+        // Templates restyle a cell as a block, inline (Constant Contact) or from their
+        // style sheet (Mailchimp); a browser wraps it in an anonymous cell.
+        let html = r#"<body style="margin:0;font-size:20px;line-height:30px">
+            <style>td.container { display: block; max-width: 200px; margin: 0 auto }</style>
+            <table width="100%"><tr><td style="display:block">inline</td></tr></table>
+            <table width="100%"><tr><td class="container">sheet</td></tr></table>
+            </body>"#;
+        let document = open(source(html), Appearance::default(), 1.0);
+        assert_eq!(text(&document, Span::Between(Start, End)), "inline\nsheet");
+    }
+
     /// Two paragraphs a line each, 30 px apart: 0..30 and 60..90, and a table below.
     const PARAGRAPHS: &str = r#"<body style="margin:0;font-size:20px;line-height:30px">
         <p style="margin:0 0 30px">alpha beta</p><p style="margin:0">gamma delta<br>epsilon</p>
