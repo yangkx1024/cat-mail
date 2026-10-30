@@ -134,13 +134,15 @@ all = { level = "warn", priority = -1 }
 # `allow-git` in deny.toml (#130).
 [patch.crates-io]
 imap-proto = { git = "https://github.com/djc/imap-proto", rev = "0dac3af59a2cfcd649c30034d5f221c4d8edbf34" }
-# Blitz 0.3.0-beta.4 with one change: a table row's block children (`td { display: block }`
-# in email) are laid out as anonymous cells instead of dropped. Every crate of its
-# workspace that we use comes from the fork, so that each is in the graph once. Back to
-# crates.io once a release lays them out (DioxusLabs/blitz#781, #783).
-blitz-dom = { git = "https://github.com/yangkx1024/blitz", rev = "b8bf98a6155859508e1dc255e7aa330864049334" }
-blitz-html = { git = "https://github.com/yangkx1024/blitz", rev = "b8bf98a6155859508e1dc255e7aa330864049334" }
-blitz-paint = { git = "https://github.com/yangkx1024/blitz", rev = "b8bf98a6155859508e1dc255e7aa330864049334" }
-blitz-traits = { git = "https://github.com/yangkx1024/blitz", rev = "b8bf98a6155859508e1dc255e7aa330864049334" }
-stylo_taffy = { git = "https://github.com/yangkx1024/blitz", rev = "b8bf98a6155859508e1dc255e7aa330864049334" }
-debug_timer = { git = "https://github.com/yangkx1024/blitz", rev = "b8bf98a6155859508e1dc255e7aa330864049334" }
+# Blitz 0.3.0-beta.4 with two changes: a table row's block children (`td { display: block }`
+# in email) are laid out as anonymous cells instead of dropped, and `bgcolor`,
+# `font color` and `body text` are read as legacy colors (`#fff` was near black, names
+# ignored; #161). Every crate of its workspace that we use comes from the fork, so that
+# each is in the graph once. Back to crates.io once a release has both (cells:
+# DioxusLabs/blitz#781, #783).
+blitz-dom = { git = "https://github.com/yangkx1024/blitz", rev = "ce6f35956a874127c3ec291caee565bad6470bff" }
+blitz-html = { git = "https://github.com/yangkx1024/blitz", rev = "ce6f35956a874127c3ec291caee565bad6470bff" }
+blitz-paint = { git = "https://github.com/yangkx1024/blitz", rev = "ce6f35956a874127c3ec291caee565bad6470bff" }
+blitz-traits = { git = "https://github.com/yangkx1024/blitz", rev = "ce6f35956a874127c3ec291caee565bad6470bff" }
+stylo_taffy = { git = "https://github.com/yangkx1024/blitz", rev = "ce6f35956a874127c3ec291caee565bad6470bff" }
+debug_timer = { git = "https://github.com/yangkx1024/blitz", rev = "ce6f35956a874127c3ec291caee565bad6470bff" }

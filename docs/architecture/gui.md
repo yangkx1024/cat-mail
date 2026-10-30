@@ -321,10 +321,17 @@ CSS 引擎）+ Taffy + Parley 排版，vello_cpu 绘制。起初保留 GPUI Kit 
 "图片"）。选型经过见[下文](#选型记录)。
 
 Blitz 用的是 fork（`yangkx1024/blitz`，基于 0.3.0-beta.4，根 `Cargo.toml` 的 `[patch.crates-io]` 按提交固定），
-只多一处改动：表格行里非表格内部的子元素（邮件模板常把单元格改成 `td { display: block }`，内联或在样式表里）
-按匿名单元格排版。上游把它们当成标题忽略，整块内容不显示。连续几个这样的子元素各占一列，不像浏览器那样
-共用一个单元格叠起来。上游的修复（DioxusLabs/blitz#781、#783）发布后回到 crates.io，同时从 `deny.toml` 的
-`allow-git` 删掉 fork。
+多两处改动：
+
+- 表格行里非表格内部的子元素（邮件模板常把单元格改成 `td { display: block }`，内联或在样式表里）按匿名
+  单元格排版。上游把它们当成标题忽略，整块内容不显示。连续几个这样的子元素各占一列，不像浏览器那样共用
+  一个单元格叠起来。上游的修复：DioxusLabs/blitz#781、#783。
+- `bgcolor`、`<font color>`、`<body text>` 按 HTML 标准的旧式颜色规则解析（用 Stylo 的
+  `parse_legacy_color`）。上游只认 `#` 开头的六位或三位，三位还读错（`#fff` 成了近黑的 `#0f0f0f`），
+  颜色名和省略 `#` 的写法被忽略，`font color` 完全不映射。浅色主题和自带深色样式的邮件都靠它，
+  深色转换写回的六位颜色不受影响。
+
+两处都进了上游发布后回到 crates.io，同时从 `deny.toml` 的 `allow-git` 删掉 fork。
 
 - **`catmail-render`** 不依赖 GPUI 和邮件类型。每个打开的文档（`Document`）一个线程：Blitz 的文档
   不是 `Send`（持有不带 `Send` 约束的 provider），只能在打开它的线程上活。请求按顺序回答：某宽度下

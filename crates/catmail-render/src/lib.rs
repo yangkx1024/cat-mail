@@ -352,6 +352,38 @@ mod tests {
         assert_eq!(text(&document, Span::Between(Start, End)), "inline\nsheet");
     }
 
+    #[test]
+    fn legacy_color_attributes_are_read_as_a_browser_reads_them() {
+        // Mail writes `bgcolor` and `<font color>` in every form the HTML standard reads:
+        // short hex, names, without the `#`, with spaces around.
+        let values = ["#ff0000", "#fff", "#f00", "red", "ff0000", " #ff0000"];
+        let expected = [RED, WHITE, RED, RED, RED, RED];
+        let rows: String = values
+            .iter()
+            .map(|v| {
+                format!(
+                    r#"<table width="100%" height="10" bgcolor="{v}"><tr><td></td></tr></table>"#
+                )
+            })
+            .collect();
+        // Text color shown as a background, so the test doesn't read glyphs.
+        let fonts: String = values
+            .iter()
+            .map(|v| format!(r#"<font color="{v}"><div style="height:10px;background:currentcolor"></div></font>"#))
+            .collect();
+        let html = format!(
+            r#"<body style="margin:0;background:#0000ff">
+            <style>table {{ border-spacing: 0 }} td {{ padding: 0 }}</style>{rows}{fonts}</body>"#
+        );
+        let document = open(source(&html), Appearance::default(), 1.0);
+        let tile = block_on(document.paint(WIDTH, 0.0, 120.0)).unwrap();
+        for (i, (value, color)) in values.iter().zip(expected).enumerate() {
+            let y = i as u32 * 10 + 5;
+            assert_eq!(pixel(&tile, 150, y), color, "bgcolor={value:?}");
+            assert_eq!(pixel(&tile, 150, y + 60), color, "color={value:?}");
+        }
+    }
+
     /// Two paragraphs a line each, 30 px apart: 0..30 and 60..90, and a table below.
     const PARAGRAPHS: &str = r#"<body style="margin:0;font-size:20px;line-height:30px">
         <p style="margin:0 0 30px">alpha beta</p><p style="margin:0">gamma delta<br>epsilon</p>
