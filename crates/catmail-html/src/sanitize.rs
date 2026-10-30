@@ -54,9 +54,11 @@ pub(crate) fn sanitizer(
             if url_attribute && is_data_url(value) && !image {
                 // Inline images may be data: URLs; a data: link could carry a whole page.
                 None
-            } else if attribute == "style" && css::fetches(value) {
-                // Remote images must stay blockable, also as CSS backgrounds.
-                None
+            } else if attribute == "style" {
+                // Written again from its tokens, as style sheets are: remote images must
+                // stay blockable, also as CSS backgrounds.
+                let style = css::sanitize_style(value, recolor).css;
+                (!style.is_empty()).then_some(Cow::Owned(style))
             } else if let Some(replaced) =
                 on_image.as_ref().filter(|_| image).and_then(|f| f(value))
             {
@@ -73,10 +75,9 @@ pub(crate) fn sanitizer(
 }
 
 /// An attribute's value with its colors moved for a dark page, or `None` for one that
-/// has no colors.
+/// has no colors. `style` is recolored where the sanitizer rewrites it.
 fn recolor_attribute(palette: DarkPalette, attribute: &str, value: &str) -> Option<String> {
     match attribute {
-        "style" => Some(css::recolor_style(value, palette).css),
         "bgcolor" => palette.recolor_attribute(value, Role::Surface),
         "color" => palette.recolor_attribute(value, Role::Text),
         _ => None,
@@ -92,10 +93,10 @@ fn is_data_url(value: &str) -> bool {
 
 /// Makes HTML from a message safe to render: no scripts, forms, frames or event
 /// handlers, links only to web, mail and `cid:` targets. Inline `style` attributes and
-/// table layout attributes stay, since most email is laid out with them, unless the
-/// style could load something (`url(…)`).
+/// table layout attributes stay, since most email is laid out with them.
 /// Style sheets are rewritten rule by rule (`css.rs`) and put back as one `<style>` at the
-/// start: what could fetch is dropped, and the sheet can't end its element.
+/// start: what could fetch is dropped, and the sheet can't end its element. `style`
+/// attributes are rewritten as a rule's declarations.
 /// Image sources (remote URLs, `cid:`, `data:`) are kept: whether remote images load
 /// is the renderer's decision, and it should block them by default.
 pub fn sanitize_html(html: &str) -> String {
@@ -121,7 +122,7 @@ pub fn recolor_html(html: &str, palette: DarkPalette) -> Option<String> {
     let attributes = styles.attributes.iter();
     if sheet.colors_from_variables
         || attributes
-            .map(|style| css::recolor_style(style, palette))
+            .map(|style| css::sanitize_style(style, Some(palette)))
             .any(|s| s.colors_from_variables)
     {
         return None;
@@ -245,6 +246,11 @@ fn styles(html: &str, attributes: bool) -> Styles {
 mod tests {
     use super::*;
 
+    const PALETTE: DarkPalette = DarkPalette {
+        background: [0x20; 3],
+        foreground: [0xe0; 3],
+    };
+
     #[test]
     fn keeps_style_sheets_rewritten_in_front() {
         let dirty = r#"<html><head><style>.a{color:red;background:url(https://t.example/p.gif)}</style>
@@ -308,25 +314,17 @@ mod tests {
         let adaptive = sanitize_html(
             r#"<style media="(prefers-color-scheme: dark)">.a{color:#eee}</style><p class=a style="color:#333">x</p>"#,
         );
-        let palette = DarkPalette {
-            background: [0x20; 3],
-            foreground: [0xe0; 3],
-        };
-        assert_eq!(recolor_html(&adaptive, palette), Some(adaptive));
+        assert_eq!(recolor_html(&adaptive, PALETTE), Some(adaptive));
     }
 
     #[test]
     fn moves_colors_for_a_dark_page() {
-        let palette = DarkPalette {
-            background: [0x20; 3],
-            foreground: [0xe0; 3],
-        };
         let clean = sanitize_html(
             r##"<style>.a{color:#000}</style><table bgcolor="#ffffff"><tr>
             <td style="background:white;padding:4px"><font color="black">x</font>
             <img src="cid:logo@x" width="10"></td></tr></table>"##,
         );
-        let dark = recolor_html(&clean, palette).unwrap();
+        let dark = recolor_html(&clean, PALETTE).unwrap();
         assert!(
             dark.starts_with("<style>.a{color:#e0e0e0;}</style>"),
             "{dark}"
@@ -345,7 +343,7 @@ mod tests {
             r#"<style>.a{color:var(--fg)}</style><p class=a style="--fg:#000">x</p>"#,
         ] {
             assert_eq!(
-                recolor_html(&sanitize_html(custom), palette),
+                recolor_html(&sanitize_html(custom), PALETTE),
                 None,
                 "{custom}"
             );
@@ -353,21 +351,12 @@ mod tests {
         // A message without colors is left as it was, and one with dark styles of its own
         // keeps its colors for them.
         let plain = sanitize_html("<style>p{margin:0;}</style><p align=\"center\">x</p>");
-        assert_eq!(recolor_html(&plain, palette).as_ref(), Some(&plain));
+        assert_eq!(recolor_html(&plain, PALETTE).as_ref(), Some(&plain));
         let adaptive = sanitize_html(
             "<style>@media (prefers-color-scheme: dark){.a{color:#eee}}</style>\
              <p class=a style=\"color:#333\">x</p>",
         );
-        assert_eq!(recolor_html(&adaptive, palette).as_ref(), Some(&adaptive));
-        // A rewritten style attribute is still only an attribute.
-        let dark = recolor_html(
-            &sanitize_html(
-                r#"<p style="color:#000;content:'&quot;><script>alert(1)</script>'">x</p>"#,
-            ),
-            palette,
-        )
-        .unwrap();
-        assert!(!dark.contains("<script"), "{dark}");
+        assert_eq!(recolor_html(&adaptive, PALETTE).as_ref(), Some(&adaptive));
     }
 
     #[test]
@@ -412,7 +401,7 @@ mod tests {
         }
         for kept in [
             r##"<table width="600" bgcolor="#fff">"##,
-            r#"style="padding:4px""#,
+            r#"style="padding:4px;""#,
             r#"<font color="red">你好</font>"#,
             r#"src="https://tracker.example/p.gif""#,
             r#"src="cid:logo@x""#,
@@ -439,7 +428,7 @@ mod tests {
         }
         for style in [
             "background:url(https://t.example/p.gif)",
-            "background: URL ( 'https://t.example' )",
+            "background:URL( 'https://t.example' )",
             "background-image:image-set(\"https://t.example\" 1x)",
             "background:u\\72l(https://t.example)",
         ] {
@@ -449,6 +438,43 @@ mod tests {
                 "{style} → {clean}"
             );
         }
-        assert!(sanitize_html("<p style=\"color:red\">x</p>").contains("style=\"color:red\""));
+    }
+
+    #[test]
+    fn rewrites_style_attributes_as_declarations() {
+        let style = |style: &str| {
+            let clean = sanitize_html(&format!("<p style=\"{style}\">x</p>"));
+            assert_eq!(sanitize_html(&clean), clean, "{style}");
+            clean
+        };
+        // What mail uses stays: `!important`, vendor prefixes, Outlook's own properties.
+        assert_eq!(
+            style(
+                " padding : 4px 8px ; color:red !important;-webkit-text-size-adjust:100%;mso-line-height-rule:exactly "
+            ),
+            "<p style=\"padding:4px 8px;color:red !important;-webkit-text-size-adjust:100%;mso-line-height-rule:exactly;\">x</p>"
+        );
+        // A declaration that fetches, runs script or doesn't parse goes alone.
+        assert_eq!(
+            style("color:red;background:url(https://t.example/p.gif);margin:0"),
+            "<p style=\"color:red;margin:0;\">x</p>"
+        );
+        assert_eq!(
+            style("width:expression(alert(1));}color:blue;height:1px"),
+            "<p style=\"height:1px;\">x</p>"
+        );
+        // `url (…)` is no function: nothing loads.
+        assert_eq!(
+            style("background:url (p.gif)"),
+            "<p style=\"background:url (p.gif);\">x</p>"
+        );
+        // The rewritten value is still only an attribute, also for a dark page.
+        let dirty = r#"<p style="color:#000;font-family:'&quot;><script>alert(1)</script>'">x</p>"#;
+        let clean = sanitize_html(dirty);
+        for html in [recolor_html(&clean, PALETTE).unwrap(), clean] {
+            assert!(html.starts_with("<p style=\"color:#"), "{html}");
+            assert!(html.ends_with("\">x</p>"), "{html}");
+            assert_eq!(html.matches('"').count(), 2, "{html}");
+        }
     }
 }

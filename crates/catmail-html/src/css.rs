@@ -1,15 +1,18 @@
-//! Style sheets from a message, rewritten so that they can't fetch anything or end the
-//! `<style>` element they are put back in.
+//! Style sheets and `style` attributes from a message, rewritten so that they can't fetch
+//! anything or end the `<style>` element they are put back in.
 //!
 //! Rules are written again from cssparser's tokens, never copied as text, so escapes are
 //! already decoded when they are judged (`\75rl(` is `url(`). What isn't understood is
 //! dropped: at-rules other than `@media` and `@supports`, declarations whose value
-//! fetches (`url()`, `image-set()`, …), selectors with `:has()` (matched again on every
-//! change, costly for a page built to be costly), nested rules. The output has no `<`
-//! (written `\3c `), so neither `</style>` nor an HTML comment can appear in it, however
-//! the HTML around it is parsed again: the sheet can't change the document's structure.
+//! fetches (`url()`, `image-set()`, …) or is script (`expression()`), selectors with
+//! `:has()` (matched again on every change, costly for a page built to be costly),
+//! nested rules. The output has no `<` (written `\3c `), so neither `</style>` nor an
+//! HTML comment can appear in it, however the HTML around it is parsed again: the sheet
+//! can't change the document's structure.
+//! A `style` attribute is rewritten as a rule's declarations; ammonia escapes it as an
+//! attribute value.
 //!
-//! The same rewriting moves a message's colors for a dark page ([`dark`](crate::dark)),
+//! The same rewriting moves a message's colors for a dark page ([`dark`]),
 //! given a palette: colors in the values of properties that take them.
 
 use cssparser::{
@@ -25,8 +28,9 @@ const MAX_RULES: usize = 2_000;
 /// How deep `@media` and `@supports` may nest.
 const MAX_DEPTH: usize = 3;
 
-/// Functions that fetch something, or show other content of the page as an image.
-const FETCHING: &[&str] = &[
+/// Functions refused anywhere: those that fetch something or show other content of the
+/// page as an image, and IE's `expression()`, script that no engine runs any more.
+const REFUSED: &[&str] = &[
     "url",
     "src",
     "image",
@@ -37,16 +41,24 @@ const FETCHING: &[&str] = &[
     "element",
     "-moz-element",
     "paint",
+    "expression",
 ];
 
-/// A message's style sheets (or a `style` attribute) as kept, and what they say about
-/// showing it on a dark page.
+/// A message's style sheets as kept, and what they say about showing it on a dark page.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct Stylesheet {
     pub(super) css: String,
     /// It has styles of its own for a dark appearance: `prefers-color-scheme: dark`, or
     /// `color-scheme` naming `dark`.
     pub(super) adapts_to_dark: bool,
+    /// When recolored: it sets colors with custom properties (`var()`), which can't be.
+    pub(super) colors_from_variables: bool,
+}
+
+/// A `style` attribute as kept.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct Style {
+    pub(super) css: String,
     /// When recolored: it sets colors with custom properties (`var()`), which can't be.
     pub(super) colors_from_variables: bool,
 }
@@ -76,62 +88,24 @@ pub(super) fn sanitize(elements: &[Element], recolor: Option<DarkPalette>) -> St
     }
 }
 
-/// Whether CSS (a `style` attribute) would fetch something, anywhere in it: not only in
-/// the declarations that parse, since what a browser's error recovery keeps is not
-/// judged here. ammonia writes the attribute back as it is.
-///
-/// Also a fetching name before a parenthesis, `url (…)`: no function by the grammar, but
-/// nothing to keep a style for either.
-pub(super) fn fetches(css: &str) -> bool {
-    fn any(parser: &mut Parser<'_>) -> bool {
-        let mut after_fetching_name = false;
-        while let Ok(token) = parser.next().cloned() {
-            let spaced_call = after_fetching_name && token == Token::ParenthesisBlock;
-            if is_fetching(&token) || spaced_call {
-                return true;
-            }
-            after_fetching_name = matches!(&token, Token::Ident(name)
-                if FETCHING.iter().any(|f| name.eq_ignore_ascii_case(f)));
-            let block = matches!(
-                token,
-                Token::Function(_)
-                    | Token::ParenthesisBlock
-                    | Token::SquareBracketBlock
-                    | Token::CurlyBracketBlock
-            );
-            if block
-                && parser
-                    .parse_nested_block(|inner| Ok::<_, ParseError<()>>(any(inner)))
-                    .unwrap_or(true)
-            {
-                return true;
-            }
-        }
-        false
-    }
-    any(&mut Parser::new(css))
-}
-
-/// A token that fetches: a URL, a function that loads an image or shows other content,
-/// or an at-rule (`@import` has no place in a declaration).
-fn is_fetching(token: &Token<'_>) -> bool {
+/// A token that is never written back: a URL, a [refused](REFUSED) function, or an at-rule
+/// (`@import` has no place in a declaration).
+fn is_refused(token: &Token<'_>) -> bool {
     match token {
-        Token::Function(name) => FETCHING.iter().any(|f| name.eq_ignore_ascii_case(f)),
+        Token::Function(name) => REFUSED.iter().any(|f| name.eq_ignore_ascii_case(f)),
         Token::UnquotedUrl(_) | Token::BadUrl(_) | Token::AtKeyword(_) => true,
         _ => false,
     }
 }
 
-/// A `style` attribute with its colors moved for a dark page, as its declarations.
-pub(super) fn recolor_style(style: &str, palette: DarkPalette) -> Stylesheet {
-    let mut declarations = Declarations {
-        recolor: Some(palette),
-        ..Declarations::default()
-    };
+/// A `style` attribute written again from its declarations, as those of a rule: what
+/// fetches is dropped, the rest kept. With a palette, its colors are moved for a dark
+/// page.
+pub(super) fn sanitize_style(style: &str, recolor: Option<DarkPalette>) -> Style {
+    let mut declarations = Declarations::new(recolor);
     declarations.parse(&mut Parser::new(style));
-    Stylesheet {
+    Style {
         css: declarations.out,
-        adapts_to_dark: declarations.dark,
         colors_from_variables: declarations.variables,
     }
 }
@@ -213,10 +187,7 @@ impl Sheet {
                 }
             }
         }
-        let mut declarations = Declarations {
-            recolor: self.recolor,
-            ..Declarations::default()
-        };
+        let mut declarations = Declarations::new(self.recolor);
         let _ = parser.parse_nested_block(|block| {
             declarations.parse(block);
             Ok::<_, ParseError<()>>(())
@@ -283,7 +254,6 @@ impl Sheet {
 }
 
 /// The declarations of a rule or a `style` attribute.
-#[derive(Default)]
 struct Declarations {
     out: String,
     dark: bool,
@@ -293,6 +263,15 @@ struct Declarations {
 }
 
 impl Declarations {
+    fn new(recolor: Option<DarkPalette>) -> Self {
+        Self {
+            out: String::new(),
+            dark: false,
+            variables: false,
+            recolor,
+        }
+    }
+
     fn parse(&mut self, parser: &mut Parser<'_>) {
         while !parser.is_exhausted() {
             // A declaration that isn't kept is skipped to the next `;`.
@@ -305,9 +284,15 @@ impl Declarations {
                 };
                 copy_rest(p, &mut value, Context::Value).map_err(|()| ParseError::custom(()))?;
                 self.variables |= value.variables;
-                let value = value.text.trim();
+                let mut value = value.text.trim();
                 if value.is_empty() {
-                    return Err(ParseError::custom(()));
+                    // A custom property may be empty, and that differs from unset: a
+                    // `var()` of it takes no fallback. Written ` ` for engines that
+                    // still want a token.
+                    if !name.starts_with("--") {
+                        return Err(ParseError::custom(()));
+                    }
+                    value = " ";
                 }
                 let _ = serialize_identifier(&name, &mut self.out);
                 self.out.push(':');
@@ -367,7 +352,7 @@ fn copy<'i>(
     out: &mut Css,
     context: Context,
 ) -> Result<(), ()> {
-    if is_fetching(token) {
+    if is_refused(token) {
         return Err(());
     }
     let close = match token {
@@ -605,29 +590,6 @@ mod tests {
     }
 
     #[test]
-    fn finds_what_fetches_in_a_style_attribute() {
-        for fetching in [
-            "background:url(https://t.example/p.gif)",
-            r"background:\75rl(https://t.example/p.gif)",
-            "background:URL('p.gif')",
-            "background-image:image-set('p.png' 1x)",
-            "x:(cross-fade(a, b))",
-            "padding:0;}{background:url(p.gif)",
-            "@import 'x'",
-        ] {
-            assert!(fetches(fetching), "{fetching}");
-        }
-        for inert in [
-            "padding:4px;color:#333",
-            "font-family:'url(x)'",
-            "content:'@import'",
-            "",
-        ] {
-            assert!(!fetches(inert), "{inert}");
-        }
-    }
-
-    #[test]
     fn finds_dark_styles() {
         assert!(!sheet(".a{color:#333}").adapts_to_dark);
         assert!(sheet("@media (prefers-color-scheme: dark){.a{color:#eee}}").adapts_to_dark);
@@ -652,7 +614,7 @@ mod tests {
     }
 
     fn recolored_style(style: &str) -> String {
-        recolor_style(style, PALETTE).css
+        sanitize_style(style, Some(PALETTE)).css
     }
 
     #[test]
@@ -736,9 +698,23 @@ mod tests {
             !sheet(".a{color:var(--fg)}").colors_from_variables,
             "not recolored"
         );
-        assert!(recolor_style("color:var(--fg)", PALETTE).colors_from_variables);
+        assert!(sanitize_style("color:var(--fg)", Some(PALETTE)).colors_from_variables);
         // A custom property's own value isn't moved: where it is used decides.
         assert_eq!(recolored(".a{--c:#000}"), ".a{--c:#000;}");
+    }
+
+    #[test]
+    fn keeps_empty_custom_properties() {
+        // Empty, `--gap` keeps `var()` from its fallback; dropped, it would apply it.
+        let kept = ".a{--gap: ;padding:var(--gap,1000px);}";
+        for source in [".a{--gap:;padding:var(--gap,1000px)}", kept] {
+            assert_eq!(css(source), kept, "{source}");
+        }
+        assert_eq!(
+            sanitize_style("--gap:;color:red", None).css,
+            "--gap: ;color:red;"
+        );
+        assert_eq!(css(".a{color:;margin:0}"), ".a{margin:0;}");
     }
 
     #[test]
