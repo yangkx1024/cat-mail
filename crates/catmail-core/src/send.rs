@@ -36,6 +36,9 @@ use crate::{Error, Result, body, drafts, ops, sync};
 /// First retry after this long, doubling up to [`MAX_BACKOFF`].
 const FIRST_BACKOFF: i64 = 30;
 const MAX_BACKOFF: i64 = 30 * 60;
+/// After the computer woke, the first retry of a server that can't be reached is this
+/// much later (see [`Failures::retry_in`](crate::engine::Failures::retry_in)).
+const RETRY_AFTER_WAKE: i64 = 2;
 
 /// Freezes the draft into an outbox entry: the message is built and stored now, with
 /// its Message-ID and Date, and the draft is locked until the entry is done or
@@ -268,11 +271,19 @@ fn connected(
     connected: Result<smtp::Session>,
     report: &mut FlushReport,
 ) -> Result<Smtp> {
-    // A login shared since its last failure has failed as often as the most failed of
-    // its identities.
-    let failures = identities
+    // A login shared since its last failure waits as long as the most failed of its
+    // identities.
+    let secs = |s: i64| Duration::from_secs(s as u64);
+    let retry_in = identities
         .iter()
         .map(|i| engine.report(account, Activity::Send(i.id, &i.email), &connected))
+        .map(|f| {
+            f.retry_in(
+                secs(RETRY_AFTER_WAKE),
+                secs(FIRST_BACKOFF),
+                secs(MAX_BACKOFF),
+            )
+        })
         .max()
         .unwrap_or_default();
     match connected {
@@ -287,7 +298,7 @@ fn connected(
             }
             Ok(Smtp::Down(Down {
                 error: error.message,
-                next: now() + backoff(failures),
+                next: now() + retry_in.as_secs() as i64,
             }))
         }
     }

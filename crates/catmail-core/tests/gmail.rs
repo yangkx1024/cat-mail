@@ -292,6 +292,7 @@ async fn background_sync_idles_on_inbox_and_syncs_the_locations() {
         poll: Duration::from_millis(50),
         idle: HOUR,
         retry: Duration::from_millis(50),
+        ..Default::default()
     };
     let env = env_built(gmail(), SmtpState::new("alice", "pw"), |b| {
         b.sync_in_background(Some(schedule))

@@ -711,6 +711,7 @@ fn background(delay: Duration) -> impl FnOnce(MailClientBuilder) -> MailClientBu
         poll: Duration::from_millis(50),
         idle: Duration::from_secs(3600),
         retry: Duration::from_millis(50),
+        ..Default::default()
     };
     move |b| {
         b.sync_in_background(Some(schedule))

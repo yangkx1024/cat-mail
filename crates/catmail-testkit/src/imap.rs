@@ -324,6 +324,8 @@ pub struct Faults {
     pub garble_idle: bool,
     /// Answer each command that starts with this text (`EXAMINE`) only after this long.
     pub slow: Option<(String, std::time::Duration)>,
+    /// Close this many new connections before the greeting, as if the network were down.
+    pub refuse_connections: usize,
 }
 
 impl Default for Faults {
@@ -370,6 +372,7 @@ impl Default for Faults {
             end_idle_early: false,
             garble_idle: false,
             slow: None,
+            refuse_connections: 0,
         }
     }
 }
@@ -862,7 +865,15 @@ async fn serve(
         condstore_enabled: false,
         view: None,
     };
-    if lock(&state).faults.preauth {
+    let preauth = {
+        let mut st = lock(&state);
+        if st.faults.refuse_connections > 0 {
+            st.faults.refuse_connections -= 1;
+            return Ok(());
+        }
+        st.faults.preauth
+    };
+    if preauth {
         session.authenticated = true;
         io.get_mut()
             .write_all(b"* PREAUTH fake IMAP ready\r\n")
