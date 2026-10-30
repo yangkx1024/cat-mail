@@ -10,8 +10,8 @@ mod themes;
 
 use catmail_core::MailClient;
 use gpui_kit::component::select::{SelectEvent, SelectState};
-use gpui_kit::component::sidebar::{SidebarItem as _, SidebarMenu, SidebarMenuItem};
-use gpui_kit::component::{ActiveTheme as _, Icon, IndexPath, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::sidebar::{SidebarItem as _, SidebarMenu};
+use gpui_kit::component::{ActiveTheme as _, IndexPath, WindowExt as _, h_flex, v_flex};
 use gpui_kit::{
     App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
@@ -19,6 +19,7 @@ use gpui_kit::{
 };
 
 use crate::assets::Hero;
+use crate::layout;
 use crate::mailbox::Mailbox;
 use crate::settings::{Appearance, Preferences, TEXT_SIZES};
 use crate::theme::appearance::ImportCandidate;
@@ -144,17 +145,16 @@ impl Render for SettingsView {
         // As GPUI Kit's own settings page draws its pages.
         let sections = SidebarMenu::new()
             .children(Section::ALL.iter().map(|&(section, label, icon)| {
-                SidebarMenuItem::new(label)
-                    .icon(Icon::new(icon))
-                    .active(self.section == section)
-                    .on_click(cx.listener(move |this, _, window, cx| {
+                layout::sidebar_row(label, icon, self.section == section, cx).on_click(cx.listener(
+                    move |this, _, window, cx| {
                         this.section = section;
                         if section == Section::Reading {
                             // It grows as messages show their remote images.
                             this.measure_image_cache(window, cx);
                         }
                         cx.notify();
-                    }))
+                    },
+                ))
             }))
             .render(SECTIONS, window, cx);
         let nav = div()

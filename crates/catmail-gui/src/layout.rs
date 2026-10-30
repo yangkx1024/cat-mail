@@ -4,16 +4,39 @@ use std::rc::Rc;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::{Cancel, Confirm, DialogFooter};
+use gpui_kit::component::sidebar::SidebarMenuItem;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, WindowExt as _, h_flex};
 use gpui_kit::{
     App, Bounds, Div, ElementId, FontWeight, Hsla, InteractiveElement as _, IntoElement,
     ParentElement as _, Pixels, SharedString, Size, Stateful, StatefulInteractiveElement as _,
-    Styled as _, TitlebarOptions, Window, WindowBounds, WindowOptions, div, rems,
+    StyleRefinement, Styled as _, TitlebarOptions, Window, WindowBounds, WindowOptions, div,
 };
 
 use crate::actions::DIALOG_BUTTON;
 use crate::assets::Hero;
 use crate::format;
+
+/// A row of a sidebar menu, the mailbox's or the settings'. Selected, its label and its
+/// icon, filled, take the primary color, and the label keeps its weight: GPUI Kit sets a
+/// selected row in medium, which widens it.
+pub fn sidebar_row(
+    label: impl Into<SharedString>,
+    icon: Hero,
+    selected: bool,
+    cx: &App,
+) -> SidebarMenuItem {
+    let item = SidebarMenuItem::new(label).active(selected);
+    if !selected {
+        return item.icon(Icon::new(icon));
+    }
+    let primary = cx.theme().primary;
+    item.icon(Icon::new(icon.solid()).text_color(primary))
+        .label_style(
+            StyleRefinement::default()
+                .font_weight(FontWeight::NORMAL)
+                .text_color(primary),
+        )
+}
 
 /// A window centered on the screen. Its geometry is in device-independent pixels, not
 /// the rem scale.
@@ -56,13 +79,13 @@ pub fn empty(text: impl Into<SharedString>, cx: &App) -> Div {
 }
 
 /// A page of the right pane, `content` starting with its [`page_title`]: it scrolls as a
-/// whole, so a long header doesn't squeeze the text, and keeps a readable line length.
-/// The caller sizes it.
+/// whole, so a long header doesn't squeeze the text, and spans the pane, whose width the
+/// user sets. The caller sizes it.
 pub fn page(id: impl Into<ElementId>, content: Div) -> Stateful<Div> {
     div()
         .id(id)
         .overflow_y_scroll()
-        .child(content.max_w(rems(48.)).px_6().pt_5().pb_8())
+        .child(content.px_6().pt_5().pb_8())
 }
 
 pub fn page_title(title: impl Into<SharedString>) -> Div {

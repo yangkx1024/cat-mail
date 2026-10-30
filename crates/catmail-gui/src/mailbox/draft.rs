@@ -34,6 +34,7 @@ impl Mailbox {
             .size_full()
             .child(
                 layout::toolbar(cx)
+                    .child(self.back_button(cx))
                     .child(
                         Button::new("edit-draft")
                             .primary()
