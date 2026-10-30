@@ -141,9 +141,9 @@ imap-proto = { git = "https://github.com/djc/imap-proto", rev = "0dac3af59a2cfcd
 # overflowed into the next column). Every crate of its workspace that we use comes from the
 # fork, so that each is in the graph once. Back to crates.io once a release has all three
 # (cells: DioxusLabs/blitz#781, #783).
-blitz-dom = { git = "https://github.com/yangkx1024/blitz", rev = "7333936c0f99537bea4db203d67ea437baae1e5c" }
-blitz-html = { git = "https://github.com/yangkx1024/blitz", rev = "7333936c0f99537bea4db203d67ea437baae1e5c" }
-blitz-paint = { git = "https://github.com/yangkx1024/blitz", rev = "7333936c0f99537bea4db203d67ea437baae1e5c" }
-blitz-traits = { git = "https://github.com/yangkx1024/blitz", rev = "7333936c0f99537bea4db203d67ea437baae1e5c" }
-stylo_taffy = { git = "https://github.com/yangkx1024/blitz", rev = "7333936c0f99537bea4db203d67ea437baae1e5c" }
-debug_timer = { git = "https://github.com/yangkx1024/blitz", rev = "7333936c0f99537bea4db203d67ea437baae1e5c" }
+blitz-dom = { git = "https://github.com/yangkx1024/blitz", rev = "046129ead6a6595e0174970220d46e61b3eee21c" }
+blitz-html = { git = "https://github.com/yangkx1024/blitz", rev = "046129ead6a6595e0174970220d46e61b3eee21c" }
+blitz-paint = { git = "https://github.com/yangkx1024/blitz", rev = "046129ead6a6595e0174970220d46e61b3eee21c" }
+blitz-traits = { git = "https://github.com/yangkx1024/blitz", rev = "046129ead6a6595e0174970220d46e61b3eee21c" }
+stylo_taffy = { git = "https://github.com/yangkx1024/blitz", rev = "046129ead6a6595e0174970220d46e61b3eee21c" }
+debug_timer = { git = "https://github.com/yangkx1024/blitz", rev = "046129ead6a6595e0174970220d46e61b3eee21c" }
