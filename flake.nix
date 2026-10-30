@@ -31,6 +31,14 @@
             libGL
             libX11
           ];
+          # Link with mold: GNU ld turns a one-line change to catmail-gui into a 25 s
+          # rebuild, mostly relinking debug info; mold makes it about 3 s. Only in the
+          # shells, so CI and builds outside them keep the default linker. Every shell
+          # sets it, or switching between them rebuilds everything.
+          linkWithMold = {
+            "CARGO_TARGET_${pkgs.stdenv.hostPlatform.rust.cargoEnvVarTarget}_RUSTFLAGS" =
+              "-C link-arg=-fuse-ld=mold";
+          };
 
           default = pkgs.mkShell {
             packages =
@@ -42,6 +50,7 @@
                 rustfmt
                 rust-analyzer
                 cargo-deny
+                mold
                 pkg-config
                 sqlite-interactive
               ]
@@ -49,6 +58,7 @@
 
             RUST_SRC_PATH = pkgs.rustPlatform.rustLibSrc;
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (guiLibs ++ guiRuntimeLibs);
+            env = linkWithMold;
           };
         in
         {
@@ -63,6 +73,7 @@
               pkgs.openssl
             ];
             inherit (default) RUST_SRC_PATH LD_LIBRARY_PATH;
+            env = linkWithMold;
           };
         }
       );
