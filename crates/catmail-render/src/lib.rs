@@ -20,6 +20,7 @@ mod pixels;
 mod selection;
 mod worker;
 
+use std::borrow::Cow;
 use std::fmt;
 use std::sync::Arc;
 
@@ -71,8 +72,9 @@ impl fmt::Debug for Source {
     }
 }
 
-/// Rewrites a page's HTML before it is parsed, or declines to: `None`.
-pub type Recolor = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+/// Rewrites a page's HTML before it is parsed (borrowed if it stays as it is), or declines
+/// to: `None`.
+pub type Recolor = Arc<dyn Fn(&str) -> Option<Cow<'_, str>> + Send + Sync>;
 
 /// How the page looks where the message's own styles say nothing, and what becomes of
 /// the colors they set.
@@ -597,7 +599,7 @@ mod tests {
         // The page's own colors are moved as the appearance says.
         let recolored = Appearance {
             recolor: Some(Arc::new(|html: &str| {
-                Some(html.replace("#ffffff", "#00ff00"))
+                Some(html.replace("#ffffff", "#00ff00").into())
             })),
             ..dark.clone()
         };
