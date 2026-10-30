@@ -67,8 +67,8 @@ INFO catmail_core::logging: running on os="NixOS 26.11 (Zokor)" kernel="7.2.11-z
   keepalive 的 NOOP 往返记在 debug：每条池连接每 4 分钟一次，默认不进文件，排查时用 `CATMAIL_LOG`
   打开（如 `CATMAIL_LOG=info,catmail_core::pool=debug`）。
 - 按需从服务器取东西（`body::on_server`，正文和附件都走这里）：拿到连接、EXAMINE、FETCH 各用了多久。打开一封
-  没下载的邮件慢时，靠它看出慢在哪一步。
-- GUI：读信区打开一封邮件，下载和准备正文各用了多久；主窗口开关、显示连接的切换、trim 前后的 RSS
+  没下载的邮件慢时，靠它看出慢在哪一步。复用的文件夹 FETCH 落空、重新打开它时另记一行。
+- GUI：读信区打开一封邮件，下载和准备正文各用了多久，打不开时的错误（warn，用户看到的那句话）；主窗口开关、显示连接的切换、trim 前后的 RSS
   （见[后台运行](background.md#引擎属于应用不属于窗口)）。
 - panic 连同 backtrace 直接写进文件，不经过 `tracing`，以免 `tracing` 自己 panic 时又回到这里。
 

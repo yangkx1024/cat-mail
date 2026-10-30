@@ -264,7 +264,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_keepalive_leaves_a_connection_where_it_was() {
         let mut state = ServerState::new("alice", "pw");
-        state.mailboxes.push(FakeMailbox::new("Archive"));
+        state.inbox().append_simple("In");
+        let mut archive = FakeMailbox::new("Archive");
+        archive.append_simple("Archived");
+        state.mailboxes.push(archive);
         let fake = FakeImap::start(state).await;
         let dir = tempfile::tempdir().unwrap();
         let client = MailClient::builder(Config::with_data_dir(dir.path()))
@@ -295,8 +298,8 @@ mod tests {
         pool.put(engine, examining("INBOX").await);
         // Used before the other, and returned after it by its keepalive.
         pool.keep(engine, examining("Archive").await, before);
-        assert!(pool.take().unwrap().examined("INBOX").is_some());
-        assert!(pool.take().unwrap().examined("Archive").is_some());
+        assert!(pool.take().unwrap().examined("INBOX", 1).is_some());
+        assert!(pool.take().unwrap().examined("Archive", 1).is_some());
         assert!(pool.take().is_none());
     }
 }

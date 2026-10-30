@@ -151,6 +151,7 @@ impl Reader {
                     (ReaderState::Open(Box::new(open)), inline)
                 }
                 Err(e) => {
+                    tracing::warn!(message = %id, error = %e, "couldn't open the message");
                     let error = e.to_string().into();
                     (ReaderState::Failed { id, error }, Vec::new())
                 }

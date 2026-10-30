@@ -579,7 +579,7 @@ async fn examine_requires_a_complete_answer() {
         assert!(!err.is_fatal(), "only this folder fails");
         // And nothing that depends on the selected mailbox runs on a stale one.
         assert!(session.uid_search_all().await.is_err());
-        assert_eq!(session.examined("INBOX"), None);
+        assert_eq!(session.examined("INBOX", 1), None);
     }
 }
 
@@ -587,16 +587,35 @@ async fn examine_requires_a_complete_answer() {
 async fn examined_names_only_the_mailbox_open_read_only() {
     let fake = FakeImap::start(sample_state()).await;
     let mut session = login(&fake).await;
-    assert_eq!(session.examined("INBOX"), None);
+    assert_eq!(session.examined("INBOX", 1), None);
 
     let status = session.examine("INBOX").await.unwrap();
-    assert_eq!(session.examined("INBOX"), Some(status.uidvalidity));
-    assert_eq!(session.examined("Archive"), None);
+    assert_eq!(session.examined("INBOX", 1), Some(status.uidvalidity));
+    assert_eq!(session.examined("Archive", 1), None);
     session.noop().await.unwrap();
-    assert_eq!(session.examined("INBOX"), Some(status.uidvalidity));
+    assert_eq!(session.examined("INBOX", 1), Some(status.uidvalidity));
 
     session.select("INBOX").await.unwrap();
-    assert_eq!(session.examined("INBOX"), None);
+    assert_eq!(session.examined("INBOX", 1), None);
+}
+
+#[tokio::test]
+async fn examined_leaves_out_messages_that_arrived_since() {
+    let fake = FakeImap::start(sample_state()).await;
+    let mut session = login(&fake).await;
+    let status = session.examine("INBOX").await.unwrap();
+    let uid = fake.state().inbox().append_simple("New");
+    assert_eq!(status.uidnext, Some(uid));
+
+    // Fetched there, it isn't found: the session wasn't told of it yet.
+    assert_eq!(session.examined("INBOX", uid - 1), Some(status.uidvalidity));
+    assert_eq!(session.examined("INBOX", uid), None);
+    assert_eq!(session.fetch_raw(uid).await.unwrap(), None);
+
+    // Opened again, it is in.
+    let status = session.examine("INBOX").await.unwrap();
+    assert_eq!(session.examined("INBOX", uid), Some(status.uidvalidity));
+    assert!(session.fetch_raw(uid).await.unwrap().is_some());
 }
 
 #[tokio::test]

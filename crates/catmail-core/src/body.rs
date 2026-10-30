@@ -136,10 +136,13 @@ pub(crate) async fn raw_message(engine: Arc<Engine>, id: MessageId) -> Result<Ve
 /// connections, once the folder is open with the UIDVALIDITY confirmed, and cancelled if the
 /// account is removed meanwhile. Every on-demand fetch goes through here.
 ///
-/// `op` returns `None` if the server sent nothing of what it asked for: the message is
-/// gone. If the server confirms it has no such UID, the local copy is deleted, as the
+/// `op` returns `None` if the server sent nothing of what it asked for. A folder that was
+/// open already is opened again and `op` tried once more: this connection's view of it
+/// may be older than the message, whatever [`examine`] made of it. If a UID SEARCH
+/// then finds no such UID, the message is gone and the local copy is deleted, as the
 /// next sync of the folder would: until then it would stay in the list (and in search,
-/// from another Gmail label), failing to open.
+/// from another Gmail label), failing to open. Otherwise the server left it out: a
+/// protocol error, which drops the connection and its view of the folder.
 ///
 /// The caller looked up `location` before calling, and the cancellation is obtained
 /// after that: a removal that started earlier left the account marked removed, which
@@ -159,19 +162,32 @@ async fn on_server<T>(
             // logs in, which is logged too), opening the folder unless it is open, then
             // the fetch.
             let connected = began.elapsed();
-            let examine = examine(session, &location).await?;
-            let fetched = Instant::now();
-            let done = op(session, &location).await?;
+            let mut opened = examine(session, &location).await?;
+            let mut fetched = Instant::now();
+            let mut done = op(session, &location).await?;
+            if done.is_none() && opened.is_none() {
+                tracing::info!(%account, folder = %location.remote_name, uid = location.uid,
+                    "nothing from the folder as it was open; opening it again");
+                opened = Some(reopen(session, &location).await?);
+                fetched = Instant::now();
+                done = op(session, &location).await?;
+            }
             tracing::info!(%account, folder = %location.remote_name, uid = location.uid,
-                ?connected, ?examine, fetch = ?fetched.elapsed(), "fetched from the server");
+                ?connected, examine = ?opened, fetch = ?fetched.elapsed(),
+                "fetched from the server");
             if let Some(done) = done {
                 return Ok(done);
             }
-            // Not just a part the server left out of its answer.
+            // Gone, or only left out of the answer?
             if session.uid_search_uids(&[location.uid]).await?.is_empty() {
                 forget(&owned, location.clone()).await?;
+                return Err(GONE);
             }
-            Err(GONE)
+            Err(imap::Error::Protocol(format!(
+                "the server has the message (UID {}) but left it out of its answer",
+                location.uid
+            ))
+            .into())
         }) => result,
         () = cancellation.cancelled() => Err(Error::Cancelled),
     }
@@ -318,15 +334,22 @@ async fn mime_headers(
 
 /// Opens the message's folder read-only and makes sure its UIDs still mean what they
 /// meant when the message was stored. A connection that has it open read-only already,
-/// with that UIDVALIDITY, is used as it is (see [`Session::examined`]): on Gmail nearly
-/// every message is in All Mail. Returns how long opening it took, if it was opened.
+/// with that UIDVALIDITY and since before the message arrived, is used as it is (see
+/// [`Session::examined`]): on Gmail nearly every message is in All Mail. Returns how
+/// long opening it took, if it was opened.
 async fn examine(session: &mut Session, location: &MessageLocation) -> Result<Option<Duration>> {
     if session
-        .examined(&location.remote_name)
+        .examined(&location.remote_name, location.uid)
         .is_some_and(|open| location.uidvalidity == Some(open))
     {
         return Ok(None);
     }
+    Ok(Some(reopen(session, location).await?))
+}
+
+/// Opens the message's folder read-only, open or not, and checks its UIDVALIDITY as
+/// [`examine`] does. Returns how long that took.
+async fn reopen(session: &mut Session, location: &MessageLocation) -> Result<Duration> {
     let began = Instant::now();
     let status = session.examine(&location.remote_name).await?;
     if !status.same_generation(location.uidvalidity) {
@@ -334,7 +357,7 @@ async fn examine(session: &mut Session, location: &MessageLocation) -> Result<Op
             "the folder was rebuilt on the server (UIDVALIDITY changed)",
         ));
     }
-    Ok(Some(began.elapsed()))
+    Ok(began.elapsed())
 }
 
 /// Stores the raw message and every part that came with it in the blob store.
