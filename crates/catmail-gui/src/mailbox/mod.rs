@@ -67,8 +67,8 @@ pub enum Place {
 }
 
 /// Where to take the mailbox: a place, or an account's INBOX and a message to open there
-/// (what a notification was about), which the mailbox finds among its folders; where it
-/// is, if that shows the INBOX (All Inboxes).
+/// (what a notification was about), which the mailbox finds among its folders. Not All
+/// Inboxes, even if shown: the message may be too far down to be loaded there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Destination {
     Place(Place),
@@ -291,13 +291,8 @@ impl Mailbox {
                 let inbox = self
                     .account(account)?
                     .folders
-                    .with_role(FolderRole::Inbox)?
-                    .id;
-                let place = self
-                    .place
-                    .filter(|_| self.shown_folders().any(|f| f.id == inbox))
-                    .unwrap_or(Place::Folder(inbox));
-                Some((place, message))
+                    .with_role(FolderRole::Inbox)?;
+                Some((Place::Folder(inbox.id), message))
             }
         }
     }
@@ -559,6 +554,7 @@ impl Mailbox {
         }
         let first_load = self.accounts.is_none();
         let still_there = self.place.is_some_and(|place| place.is_in(&accounts));
+        let shown: Vec<_> = self.shown_folders().map(|f| f.id).collect();
         let labels = accounts
             .iter()
             .flat_map(|a| a.folders.user_labels())
@@ -586,6 +582,11 @@ impl Mailbox {
                     })
                 });
             self.select_place(start, window, cx);
+        } else if !self.shown_folders().map(|f| f.id).eq(shown) && !self.is_searching(cx) {
+            // The list shows a folder more (All Inboxes, an account's first INBOX): its
+            // messages' events may have come first, taken for a folder not shown.
+            self.messages
+                .update(cx, |list, cx| message_list::refresh(list, window, cx));
         }
         let no_accounts = self.accounts.as_ref().is_some_and(Vec::is_empty);
         if no_accounts && self.adding_account.is_none() {

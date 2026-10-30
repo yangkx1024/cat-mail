@@ -651,3 +651,58 @@ fn all_inboxes_is_there_with_more_than_one_account(cx: &mut TestAppContext) {
     wait_for_inbox(cx, &mailbox);
     frame(cx, window);
 }
+
+/// An account's first sync finds its INBOX, then fetches its messages. If their event
+/// comes before the window has read the INBOX among the folders, it is taken for a folder
+/// All Inboxes doesn't show; reading the folders shows it, and the list follows.
+#[gpui_kit::test]
+fn all_inboxes_lists_an_inbox_found_after_its_messages(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    mail.add_another_account("bob@example.com");
+    let (_, mailbox) = open(cx, &mail);
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| subjects(&mailbox, cx).len() == 12)
+    });
+
+    // Carol's sync finds her INBOX, and waits to fetch its messages.
+    let gate = mail.hold_fetches();
+    let client = mail.client.clone();
+    let carol = catmail_core::NewAccount {
+        email: "carol@example.com".into(),
+        display_name: None,
+        username: "alice".into(),
+        imap: mail.server(),
+        smtp: mail.smtp_server(),
+    };
+    let sync = std::thread::spawn(move || {
+        pollster::block_on(async {
+            let account = client
+                .add_account(carol, "pw".into(), Verify::Skip)
+                .await
+                .unwrap();
+            client.sync_account(account.id).await.unwrap();
+        })
+    });
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let mailbox = mailbox.read(cx);
+            mailbox.inboxes().count() == 3 && !mailbox.reading_folders.is_running()
+        })
+    });
+    // As if the window hadn't read Carol's folders yet.
+    cx.update(|cx| {
+        mailbox.update(cx, |mailbox, _| {
+            mailbox.accounts.as_mut().unwrap().pop();
+        })
+    });
+    cx.read(|cx| assert_eq!(subjects(&mailbox, cx).len(), 12));
+
+    gate.add_permits(usize::MAX >> 4);
+    sync.join().unwrap();
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| subjects(&mailbox, cx).len() == 18)
+    });
+}

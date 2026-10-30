@@ -529,7 +529,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn a_notification_clicked_with_all_inboxes_shown_opens_the_message_there(
+    fn a_notification_clicked_with_all_inboxes_shown_opens_the_message_in_its_inbox(
         cx: &mut TestAppContext,
     ) {
         let mail = TestMail::start();
@@ -541,7 +541,8 @@ mod tests {
             cx.read(|cx| mailbox.read(cx).place == Some(Place::Inboxes))
         });
         mail.deliver_and_sync("Lunch?");
-        clicking_the_notification_opens_it(Place::Inboxes, cx);
+        // Not in All Inboxes, where other accounts' newer mail may keep it off the page.
+        clicking_the_notification_opens_it(Place::Folder(mail.folder_id("INBOX")), cx);
     }
 
     /// The app with its main window and the engine `TestMail::start` has, taking

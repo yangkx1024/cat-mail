@@ -61,8 +61,8 @@ INBOX 标签）合成一个列表，`MailClient::list_inboxes` 按与单个文�
 `list_merged` 取每个文件夹游标之后的一页再归并，前 n 封必在各自的前 n 封里）。计数是各收件箱未读之和。
 打开窗口时默认选中它，原来的位置不在了时也回到这里（只剩一个账户时回到它的 Inbox）；选中时同步每个收件箱，与打开单个文件夹相同。
 在这里移动 Gmail 的邮件，看作是在它账户的 INBOX 里看的（`shown_in`），所以移到别的标签会去掉 INBOX，
-与在账户的 Inbox 里移动一样。点击新邮件通知时，窗口正显示 All Inboxes 就在这里打开那封信，否则去它账户的
-Inbox。
+与在账户的 Inbox 里移动一样。点击新邮件通知总是去它账户的 Inbox，即使窗口正显示 All Inboxes：日期较旧的新邮件
+在合并的列表里可能被别的账户更新的邮件挤出已加载的那一页，而 `reveal` 只重读已加载的行数。
 
 每个账户先列有角色的文件夹，顺序固定（Inbox、Drafts、Outbox、Sent、Archive、All Mail、Flagged、
 Junk、Trash），名字用角色名（`FolderRole::label`）而不是服务器上的名字（`已发送` 显示为 Sent）；
@@ -231,7 +231,9 @@ INBOX，所以打开一个文件夹时同步它（`MailClient::sync_folder`，�
   一次计数失败时改为重读侧栏，否则草稿数会停在旧值直到下一次 `DraftsChanged`。
 - **列表**：`MessagesChanged` 且列表显示这个文件夹（All Inboxes 是其中一个收件箱，`Mailbox::shown_folders`），
   或显示搜索结果（搜索跨所有账户和文件夹，任何文件夹变了都可能影响结果）；账户增删、`FoldersChanged` 也重读
-  搜索结果（里面可能有已经不在的账户或文件夹的邮件）和 All Inboxes（收件箱可能随之多一个或少一个）；`DraftsChanged` / `OutboxChanged` 且显示该账户的草稿 / 发件箱。重读已
+  搜索结果（里面可能有已经不在的账户或文件夹的邮件）和 All Inboxes（收件箱可能随之多一个或少一个）；
+  侧栏读完后列表显示的文件夹变了也重读：账户第一次同步时先有 INBOX、后有邮件，邮件的事件可能早于侧栏
+  读到这个 INBOX，当时被当成不在显示的文件夹；`DraftsChanged` / `OutboxChanged` 且显示该账户的草稿 / 发件箱。重读已
   显示的行，按行的身份保持选中（`message_list::reselect`）。选中的邮件刷新后不见了（被删除、
   UIDVALIDITY 改变）时，列表发出 `ListEvent::Cancel`（与按 Escape 相同），读信区随之清空；用户自己
   移走的除外（见"读与改"）。
