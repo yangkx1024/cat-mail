@@ -248,6 +248,9 @@ pub struct Faults {
     pub body_fetch_gate: Option<Arc<Semaphore>>,
     /// Answer `BODY.PEEK[<section>]` with NIL, as if the part had no content.
     pub nil_sections: bool,
+    /// Answer this many UID FETCHes that ask for a body with nothing but OK, as a server
+    /// does about a UID the connection's view of the mailbox doesn't have.
+    pub empty_body_fetches: usize,
     /// Send every FETCH response twice.
     pub duplicate_fetch: bool,
     /// Report each RFC822.SIZE one byte larger than the message, as some servers count
@@ -340,6 +343,7 @@ impl Default for Faults {
             hang_on_body_fetch: false,
             body_fetch_gate: None,
             nil_sections: false,
+            empty_body_fetches: 0,
             duplicate_fetch: false,
             inexact_sizes: false,
             reverse_fetch: false,
@@ -809,6 +813,12 @@ impl View {
                 .map(|m| (m.uid, m.flags.clone()))
                 .collect(),
         }
+    }
+
+    /// The newest message the connection was told of: UIDs only grow, as messages
+    /// arrive.
+    fn last_uid(&self) -> u32 {
+        self.messages.last().map_or(0, |(uid, _)| *uid)
     }
 
     /// The untagged responses that bring this view up to `now`, which it then becomes:
@@ -1318,14 +1328,12 @@ async fn handle(
                     let gm_msgid = (st.gmail && first == "X-GM-MSGID")
                         .then(|| key(1).and_then(|id| id.parse::<u64>().ok()))
                         .flatten();
+                    let in_set = set.as_deref().map(|set| uid_set(set, mb));
                     let uids: Vec<String> = mb
                         .messages
                         .iter()
                         .filter(|m| gm_msgid.is_none_or(|id| m.gm_msgid == id))
-                        .filter(|m| {
-                            set.as_ref()
-                                .is_none_or(|set| uid_set_contains(set, m.uid, mb))
-                        })
+                        .filter(|m| in_set.as_ref().is_none_or(|in_set| in_set(m.uid)))
                         .filter(|m| {
                             header.as_ref().is_none_or(|(field, value)| {
                                 let found = filter_headers(&m.raw, &[field.to_ascii_lowercase()]);
@@ -1448,13 +1456,25 @@ async fn handle(
                     gate.acquire().await.expect("gate open").forget();
                 }
             }
+            let empty = {
+                let faults = &mut lock(state).faults;
+                let empty = faults.empty_body_fetches > 0
+                    && items.iter().any(|i| body_section(i).is_some());
+                faults.empty_body_fetches -= usize::from(empty);
+                empty
+            };
             let st = lock(state);
             match session.selected.and_then(|i| st.mailboxes.get(i)) {
+                Some(_) if empty => out += &format!("{tag} OK FETCH completed\r\n"),
                 // Header literals may not be UTF-8, so FETCH output is bytes.
                 Some(mb) => {
                     let gmail = st.gmail;
+                    // Only what the connection has been told of: one that arrived since
+                    // is reported (EXISTS) with this answer, but not fetched (Gmail).
+                    let known = session.view.as_ref().map_or(0, View::last_uid);
                     fetched = Some(fetch(
                         mb,
+                        known,
                         args,
                         session.condstore_enabled,
                         gmail,
@@ -1491,7 +1511,7 @@ fn new_messages(session: &mut Session, st: &ServerState) -> String {
     let new: Vec<_> = mb
         .messages
         .iter()
-        .filter(|m| m.uid > view.messages.last().map_or(0, |(u, _)| *u))
+        .filter(|m| m.uid > view.last_uid())
         .map(|m| (m.uid, m.flags.clone()))
         .collect();
     if new.is_empty() || mb.uidvalidity != view.uidvalidity {
@@ -1623,10 +1643,11 @@ fn change(st: &mut ServerState, selected: usize, command: &str, args: &[Tok], ta
     let set = args.first().map(Tok::text).unwrap_or_default();
     let uids: Vec<u32> = {
         let mb = &st.mailboxes[selected];
+        let in_set = uid_set(&set, mb);
         mb.messages
             .iter()
             .map(|m| m.uid)
-            .filter(|&uid| uid_set_contains(&set, uid, mb))
+            .filter(|&uid| in_set(uid))
             .collect()
     };
     let mut out = String::new();
@@ -1753,10 +1774,11 @@ fn gmail_change(
         .collect();
     let chosen: Vec<(u32, u64)> = {
         let mb = &st.mailboxes[selected];
+        let in_set = uid_set(&set, mb);
         before
             .iter()
             .copied()
-            .filter(|&(uid, _)| uid_set_contains(&set, uid, mb))
+            .filter(|&(uid, _)| in_set(uid))
             .collect()
     };
     let in_label = st.mailboxes[selected].label();
@@ -1924,8 +1946,11 @@ fn gmail_labels(mb: &FakeMailbox, msg: &FakeMessage) -> String {
     labels.join(" ")
 }
 
+/// Answers a UID FETCH about the messages up to UID `known`, the last one the
+/// connection was told of.
 fn fetch(
     mb: &FakeMailbox,
+    known: u32,
     args: &[Tok],
     condstore: bool,
     gmail: bool,
@@ -1943,14 +1968,17 @@ fn fetch(
         }
         _ => None,
     };
-    let in_set = |uid| uid_set_contains(&set, uid, mb);
+    let in_set = uid_set(&set, mb);
     let upper: Vec<String> = items.iter().map(|i| i.to_ascii_uppercase()).collect();
     let wants = |name: &str| upper.iter().any(|i| i == name);
     let header_item = header_item(&items);
 
     let mut responses = Vec::new();
     for (i, msg) in mb.messages.iter().enumerate() {
-        if !in_set(msg.uid) || changed_since.is_some_and(|since| msg.modseq <= since) {
+        if msg.uid > known
+            || !in_set(msg.uid)
+            || changed_since.is_some_and(|since| msg.modseq <= since)
+        {
             continue;
         }
         let mut parts: Vec<Vec<u8>> = vec![format!("UID {}", msg.uid).into_bytes()];
@@ -2119,15 +2147,17 @@ fn replace_line(pattern: &mut Option<String>, out: Vec<u8>, with: &[u8]) -> Vec<
     result
 }
 
-/// Whether `uid` is in an IMAP UID set like `1:3,7,9:*`, with `*` meaning the highest
-/// UID in the mailbox (so `5:*` matches it even when it is below 5).
-fn uid_set_contains(set: &str, uid: u32, mb: &FakeMailbox) -> bool {
-    // Called for every message: finding the highest UID each time would make a FETCH
-    // on a large mailbox quadratic.
+/// Whether a UID is in an IMAP UID set like `1:3,7,9:*`, with `*` meaning the highest
+/// UID in the mailbox (so `5:*` matches it even when it is below 5). Made once per
+/// command and asked about every message: it finds the highest UID once, where finding
+/// it each time would make a FETCH on a large mailbox quadratic.
+fn uid_set<'a>(set: &'a str, mb: &'a FakeMailbox) -> impl Fn(u32) -> bool + 'a {
     let max_uid = std::cell::OnceCell::new();
-    set_contains(set, uid, || {
-        *max_uid.get_or_init(|| mb.messages.iter().map(|m| m.uid).max().unwrap_or(0))
-    })
+    move |uid| {
+        set_contains(set, uid, || {
+            *max_uid.get_or_init(|| mb.messages.iter().map(|m| m.uid).max().unwrap_or(0))
+        })
+    }
 }
 
 /// Whether the sequence set or UID set `set` has `n`; `star` is what `*` stands for.

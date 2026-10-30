@@ -4,7 +4,7 @@
 
 正文按需下载（`MailClient::download_message`），不在同步时预取。所有按需操作经过同一个入口
 （`catmail-core/src/body.rs` 的 `on_server`）：从连接池取连接、EXAMINE 比对 UIDVALIDITY（连接已经
-只读打开着同一个文件夹、UIDVALIDITY 一致时省掉，见[连接池](protocol.md#连接池)）、在账户的取消信号上
+只读打开着同一个文件夹、UIDVALIDITY 一致、邮件在打开之前就已到达时省掉，见[连接池](protocol.md#连接池)）、在账户的取消信号上
 select。
 
 ## 两条下载路径
@@ -129,11 +129,17 @@ base64 正文），交给 mail-parser 按同样方式解析。于是两条路径
 ## 正确性
 
 - 用 UID 之前先 EXAMINE 并比对 UIDVALIDITY；不一致或服务器已没有这封邮件时返回
-  `Error::OutOfSync`，交给下一次同步处理。没有这封邮件时先用 `UID SEARCH UID <uid>` 确认（答复里只是
-  缺了某个部分不算），确认了就像同步那样删掉本地这一行（`Messages::delete_gone`，行仍在服务器上那个文件夹、
+  `Error::OutOfSync`，交给下一次同步处理。FETCH 什么也没回时先用 `UID SEARCH UID <uid>` 确认，确认了
+  没有就像同步那样删掉本地这一行（`Messages::delete_gone`，行仍在服务器上那个文件夹、
   UIDVALIDITY 和 UID 才删：本地移动过来、还没移动的行不删；查位置之后移动才做成的也不删，它已经在
   目标文件夹里，UID 和 UIDVALIDITY 可能碰巧相同）并发 `MessagesChanged`：否则它要留在列表和
   搜索结果里，直到下次同步那个文件夹，每次打开都失败。
+- FETCH 什么也没回、而文件夹是复用的（没有 EXAMINE）时，先重新 EXAMINE、再取一次，然后才去 SEARCH：
+  这条连接看到的文件夹可能比邮件旧（像 Gmail 那样对还没报告给这条连接的新邮件什么也不回）。复用前的
+  UIDNEXT 判断已经排除了已知的原因，这一步是兜底：万一判断不全，代价是一次 EXAMINE，而不是报错，更不会
+  在过时的视图上 SEARCH 落空、把服务器上还在的邮件删掉。只重开一次。
+- 服务器还有这封邮件、却没回所要的内容（整封或某个部分为 NIL）时，不说"已不在服务器上"，而是返回协议
+  错误：这条连接连同它看到的文件夹一起丢掉，再试会用新连接。
 - 写入时只检查邮件行是否还在：message id 不复用，UIDVALIDITY 变化会删除旧代际的行，所以行还在
   就说明它仍是下载开始时的那个（文件夹, UID）。
 - 正文、附件行、摘要、`has_attachments` 和全文索引在同一个事务里写入（`Messages::store_body`）；

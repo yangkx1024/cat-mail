@@ -275,14 +275,17 @@ impl Session {
     }
 
     /// The UIDVALIDITY [`examine`](Self::examine) found when it opened `raw_name`, if
-    /// that is the mailbox open now, read-only. It holds for as long as the mailbox stays
-    /// open (RFC 3501 §2.3.1.1: a server that rebuilds it ends the session, as Dovecot
-    /// does), so reading it needs no EXAMINE again. What else opening it found may be out
-    /// of date, so it isn't offered.
-    pub fn examined(&self, raw_name: &str) -> Option<u32> {
+    /// that is the mailbox open now, read-only, and `uid` is below the UIDNEXT it found
+    /// (none is without one): a message that arrived since can't be fetched here until
+    /// the server reports it, Gmail answering with nothing. It holds for as long as the
+    /// mailbox stays open (RFC 3501 §2.3.1.1: a server that rebuilds it ends the
+    /// session, as Dovecot does), so reading it needs no EXAMINE again. What else opening
+    /// it found may be out of date, so it isn't offered.
+    pub fn examined(&self, raw_name: &str, uid: u32) -> Option<u32> {
         self.selected
             .as_ref()
             .filter(|o| !o.writable && o.name == raw_name)
+            .filter(|o| o.status.uidnext.is_some_and(|next| uid < next))
             .map(|o| o.status.uidvalidity)
     }
 

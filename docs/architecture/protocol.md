@@ -124,6 +124,11 @@ VANISHED、FETCH）、`stop` 完成或过了 `max`，然后发 DONE、等 tagged
   （约 0.5 s）。依据是 RFC 3501 §2.3.1.1：一个文件夹打开期间 UIDVALIDITY 不会变，服务器重建了选中的
   文件夹就断开连接（Dovecot 回 BYE），复用的连接因此换成新连接、重新 EXAMINE 并报 `OutOfSync`。
   用 SELECT 打开的不算：读取只在 EXAMINE 打开的文件夹上做，即使 `BODY.PEEK` 本身也不会改动什么。
+  打开之后才到的邮件也不算：服务器报告它（EXISTS）之前，这条连接看到的文件夹里没有它，Gmail 对它的
+  `UID FETCH` 什么也不回（2026-10-30 打开刚收到的邮件时遇到）。所以只有 UID 小于打开时 UIDNEXT 的邮件
+  才复用，否则重新 EXAMINE，UIDNEXT 随之更新；服务器没给 UIDNEXT 就每次都 EXAMINE。新邮件因此多一次
+  EXAMINE（约 0.4 s），之后同一批新邮件照常复用。复用的文件夹 FETCH 落空时还会重新 EXAMINE 再取一次
+  （见[正文与附件 / 正确性](bodies.md#正确性)）。
   同步、草稿上传等仍然每次 EXAMINE：它们要的是最新的 EXISTS、UIDNEXT 和 HIGHESTMODSEQ。
 - 删除账户时关闭连接池（`Pool::close`）：在池子的锁内清空、并记下"已关闭"，之后放回的连接一律
   丢掉。放回也在这把锁内检查，所以不会有连接在账户删除后留在池里。

@@ -12,12 +12,13 @@
 - **IMAP**：进程内、可修改邮箱内容，明文 / TLS / STARTTLS。BODYSTRUCTURE 和各 section 由每封邮件的原文
   推导（mail-parser），测试邮件就是普通的 `.eml`。SELECT 可写，支持 `UID STORE` / `COPY` / `MOVE`
   （带 COPYUID）/ `EXPUNGE`。像真实服务器一样报告别的连接造成的变化：每条连接记住所选文件夹的样子，
-  任何命令的答复里顺带报告新邮件（`* n EXISTS`），IDLE 时（每 10 ms 看一次）报告 EXPUNGE、EXISTS 和
+  任何命令的答复里顺带报告新邮件（`* n EXISTS`），`UID FETCH` 只回这条连接已经被告知的邮件（和 Gmail
+  一样，刚到、还没报告的 UID 什么也不回），IDLE 时（每 10 ms 看一次）报告 EXPUNGE、EXISTS 和
   flags 变化（`FETCH`）；所选文件夹的 UIDVALIDITY 改变后，IDLE 中或收到下一条命令时回 BYE 并断开，
   和 Dovecot 一样。记录当前打开的连接数。可注入的故障：
   - 连接：拉邮件头时断线（第 n 次）或挂起，拉正文时断线、挂起或按闸门放行，关闭当前所有连接
     （IDLE 中的也立即断开），每次 IDLE 一开始就断开、立即用 OK 结束或发一行无法解析的数据，拒绝登录；
-  - 响应：重复或倒序的 FETCH、不带 UID 的主动 FETCH、section 回 NIL、比原文多一字节的 RFC822.SIZE、
+  - 响应：重复或倒序的 FETCH、不带 UID 的主动 FETCH、section 回 NIL、要正文的 UID FETCH 只回 OK（前 n 次）、比原文多一字节的 RFC822.SIZE、
     STARTTLS 之后的明文注入；
   - 能力与状态：没有 CONDSTORE，关掉 MOVE、UIDPLUS 和 IDLE，UIDVALIDITY 改变；
   - 写操作：拒绝 APPEND（回 NO，或不要 literal 直接回 NO）、APPEND 存下后不答复就断开，拒绝修改、

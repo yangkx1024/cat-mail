@@ -557,6 +557,73 @@ async fn a_folder_open_read_only_is_not_examined_again() {
     assert_eq!(env.examined(start), ["INBOX"]);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_newer_than_the_open_folder_examines_it_again() {
+    let env = env(state(&[NEWSLETTER])).await;
+    env.client.download_message(env.id(0).await).await.unwrap();
+
+    // Arrives after the kept connection opened INBOX, which the server hasn't told it
+    // of: a UID FETCH there finds nothing. Sync has a connection of its own.
+    env.fake.state().inbox().append(NEWSLETTER, &[]);
+    env.client.sync_account(env.account).await.unwrap();
+    let start = env.log_len();
+    let message = env.client.download_message(env.id(1).await).await.unwrap();
+    assert!(message.body.is_some());
+    assert_eq!(env.examined(start), ["INBOX"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nothing_from_a_folder_open_from_before_opens_it_again() {
+    let env = env(state(&[NEWSLETTER, NEWSLETTER, NEWSLETTER])).await;
+    env.client.download_message(env.id(0).await).await.unwrap();
+    let bodies = |start| {
+        env.commands_since(start)
+            .iter()
+            .filter(|c| c.contains("BODY.PEEK[]"))
+            .count()
+    };
+
+    // The folder as it was open lacks the message, for a reason of the server's: what
+    // it sends once the folder is opened again counts.
+    env.fake.state().faults.empty_body_fetches = 1;
+    let start = env.log_len();
+    let message = env.client.download_message(env.id(1).await).await.unwrap();
+    assert!(message.body.is_some());
+    assert_eq!(env.examined(start), ["INBOX"]);
+    assert_eq!(bodies(start), 2);
+    assert!(
+        !env.commands_since(start)
+            .iter()
+            .any(|c| c.contains("SEARCH"))
+    );
+
+    // Opened again only once: nothing then means the server left it out.
+    env.fake.state().faults.empty_body_fetches = 2;
+    let id = env.id(2).await;
+    let start = env.log_len();
+    let err = env.client.download_message(id).await.unwrap_err();
+    assert!(matches!(err, Error::Imap(_)), "{err:?}");
+    assert_eq!(bodies(start), 2);
+    assert!(env.client.get_message(id).await.unwrap().is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_part_the_server_leaves_out_is_not_called_gone() {
+    let env = env(state(&[&large_message()])).await;
+    let id = env.id(0).await;
+    let message = env.client.download_message(id).await.unwrap();
+    let video = body(&message).attachments[0].id;
+
+    // The server still has the message: an error, and nothing deleted.
+    env.fake.state().faults.nil_sections = true;
+    let err = env.client.attachment_content(video).await.unwrap_err();
+    assert!(matches!(err, Error::Imap(_)), "{err:?}");
+    assert!(env.client.get_message(id).await.unwrap().is_some());
+
+    env.fake.state().faults.nil_sections = false;
+    env.client.attachment_content(video).await.unwrap();
+}
+
 /// Two messages, the first downloaded, which leaves a connection idle that is kept alive
 /// every 50 ms; and how many connections the server accepted so far.
 async fn kept_alive() -> (Env, usize) {
