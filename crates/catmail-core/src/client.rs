@@ -710,6 +710,23 @@ impl MailClient {
             .await
     }
 
+    /// The messages of every account's INBOX as one list, paged like
+    /// [`list_messages`](Self::list_messages).
+    pub async fn list_inboxes(
+        &self,
+        limit: u32,
+        after: Option<MessageCursor>,
+    ) -> Result<Vec<MessageSummary>> {
+        let engine = self.engine.clone();
+        self.rt
+            .run(async move {
+                engine
+                    .read(move |db| db.messages().list_merged(&inbox_ids(db)?, limit, after))
+                    .await
+            })
+            .await
+    }
+
     /// The message as stored locally; `body` is `None` until downloaded.
     pub async fn get_message(&self, id: MessageId) -> Result<Option<Message>> {
         let engine = self.engine.clone();
@@ -726,10 +743,7 @@ impl MailClient {
         self.rt
             .run(async move {
                 engine
-                    .read(move |db| {
-                        let inboxes: Vec<_> = inboxes(db)?.iter().map(|f| f.id).collect();
-                        db.messages().unread_in_inbox(&messages, &inboxes)
-                    })
+                    .read(move |db| db.messages().unread_in_inbox(&messages, &inbox_ids(db)?))
                     .await
             })
             .await
@@ -1225,6 +1239,11 @@ fn inboxes(db: &Db<'_>) -> catmail_store::Result<Vec<Folder>> {
         inboxes.extend(special_folder(&folders, FolderRole::Inbox).cloned());
     }
     Ok(inboxes)
+}
+
+/// The ids of [`inboxes`].
+fn inbox_ids(db: &Db<'_>) -> catmail_store::Result<Vec<FolderId>> {
+    Ok(inboxes(db)?.iter().map(|f| f.id).collect())
 }
 
 fn check_password(password: &SecretString) -> Result<()> {

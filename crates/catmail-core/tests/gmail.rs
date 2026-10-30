@@ -601,6 +601,51 @@ async fn archiving_takes_the_message_out_of_inbox() {
     assert_eq!(env.on_server("one"), (ALL_MAIL.into(), vec!["Work".into()]));
 }
 
+/// Gmail's INBOX label and a standard account's INBOX folder, as one list.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_accounts_inbox_is_listed_together() {
+    let env = synced_env(gmail()).await;
+    let mut state = ServerState::new("bob", "pw");
+    state.inbox().append_simple("three");
+    state.inbox().append_simple("four");
+    let mut archive = FakeMailbox::new("Archive");
+    archive.append_simple("elsewhere");
+    state.mailboxes.push(archive);
+    let other = catmail_testkit::FakeImap::start(state).await;
+    let bob = env
+        .client
+        .add_account(
+            catmail_core::NewAccount {
+                email: "bob@example.com".into(),
+                display_name: None,
+                username: "bob".into(),
+                imap: common::local_server(other.port()),
+                smtp: common::local_server(env.smtp.port()),
+            },
+            "pw".into(),
+            Verify::Skip,
+        )
+        .await
+        .unwrap()
+        .id;
+    env.client.sync_account(bob).await.unwrap();
+
+    let subjects = |page: &[catmail_core::MessageSummary]| -> Vec<_> {
+        page.iter().filter_map(|m| m.subject.clone()).collect()
+    };
+    // Newest first; "three" and "one" have the same date, and "three" was stored later.
+    let all = env.client.list_inboxes(10, None).await.unwrap();
+    assert_eq!(subjects(&all), ["four", "three", "one"]);
+    let next = env.client.list_inboxes(1, Some(all[0].cursor())).await;
+    assert_eq!(subjects(&next.unwrap()), ["three"]);
+
+    // Archived on Gmail, it leaves.
+    let one = env.id_of("INBOX", "one").await;
+    env.client.archive_messages(vec![one]).await.unwrap();
+    let all = env.client.list_inboxes(10, None).await.unwrap();
+    assert_eq!(subjects(&all), ["four", "three"]);
+}
+
 /// To Trash and back to INBOX, the message keeps its row (and body), as it does when
 /// moved on the server.
 #[tokio::test(flavor = "multi_thread")]

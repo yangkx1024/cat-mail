@@ -15,7 +15,7 @@ use gpui_kit::{
 };
 
 use super::Mailbox;
-use super::folders::FolderNode;
+use super::folders;
 use super::message_list::{Row, Source};
 use crate::actions::{self, *};
 use crate::assets::Hero;
@@ -51,14 +51,10 @@ impl Mailbox {
             _ => self.place_label().unwrap_or_default().into(),
         };
         let note = match &source {
-            Some(Source::Folder(id)) => self
-                .accounts
-                .iter()
-                .flatten()
-                .find_map(|a| a.folders.find(*id))
-                .map(FolderNode::unread)
-                .filter(|&n| n > 0)
-                .map(|n| format!("{n} unread")),
+            Some(Source::Inboxes | Source::Folder(_)) => {
+                let unread = folders::unread(self.shown_folders());
+                (unread > 0).then(|| format!("{unread} unread"))
+            }
             Some(Source::Outbox(account)) => self
                 .account(*account)
                 .filter(|a| !a.status.send.is_empty() || a.status.sync.is_some())

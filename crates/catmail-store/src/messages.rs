@@ -701,6 +701,26 @@ impl<'c> Messages<'c> {
         Ok(page)
     }
 
+    /// The messages of all of `folders` as one list, as [`list`](Self::list) pages each:
+    /// the first `limit` of them all are among the first `limit` of each.
+    pub fn list_merged(
+        &self,
+        folders: &[FolderId],
+        limit: u32,
+        after: Option<MessageCursor>,
+    ) -> Result<Vec<MessageSummary>> {
+        let mut merged = Vec::new();
+        for &folder in folders {
+            merged.extend(self.list(folder, limit, after)?);
+        }
+        // `NEWEST_FIRST`, as the cursors bind it.
+        merged.sort_unstable_by_key(|m| std::cmp::Reverse(cursor_params(Some(m.cursor()))));
+        // Sorted by id within a date: a message two of the folders list is listed once.
+        merged.dedup_by_key(|m| m.id);
+        merged.truncate(limit as usize);
+        Ok(merged)
+    }
+
     /// Messages matching the query, newest first (see [`MessageCursor`]). Bodies are only
     /// searched once downloaded; subjects and addresses always.
     pub fn search(&self, query: &SearchQuery) -> Result<Vec<MessageSummary>> {
@@ -984,6 +1004,12 @@ mod tests {
     fn setup() -> (TestStore, AccountId, Folder) {
         let store = test_util::store();
         let account = test_util::account(&store, "a@example.com");
+        let folder = inbox(&store, account);
+        (store, account, folder)
+    }
+
+    /// Gives the account an INBOX, its only folder.
+    fn inbox(store: &Store, account: AccountId) -> Folder {
         let inbox = RemoteFolder {
             remote_name: "INBOX".into(),
             name: "INBOX".into(),
@@ -995,11 +1021,10 @@ mod tests {
         store
             .write(|db| db.folders().reconcile(account, &[inbox]))
             .unwrap();
-        let folder = store
+        store
             .read(|db| db.folders().list(account))
             .unwrap()
-            .remove(0);
-        (store, account, folder)
+            .remove(0)
     }
 
     fn message(uid: u32, date: Option<i64>, flags: Flags) -> NewMessage {
@@ -1142,6 +1167,58 @@ mod tests {
             .unwrap();
         assert_eq!(ids(list(2, Some(all[1].cursor()))), [1, 6]);
         assert_eq!(ids(list(10, None)), [7, 4, 1, 6, 5, 2]);
+    }
+
+    #[test]
+    fn folders_listed_together_page_as_one_list() {
+        let (store, account, folder) = setup();
+        let other = test_util::account(&store, "b@example.com");
+        let other_folder = inbox(&store, other).id;
+        // Ids 1 to 3 in the first folder, 4 to 6 in the other.
+        let batch = |dates: [Option<i64>; 3]| -> Vec<NewMessage> {
+            (1..)
+                .zip(dates)
+                .map(|(uid, date)| NewMessage {
+                    internal_date: None,
+                    ..message(uid, date, Flags::empty())
+                })
+                .collect()
+        };
+        store
+            .write(|db| {
+                db.messages().upsert(
+                    account,
+                    folder.id,
+                    &batch([Some(3_000), None, Some(1_000)]),
+                )?;
+                db.messages().upsert(
+                    other,
+                    other_folder,
+                    &batch([Some(2_000), Some(3_000), None]),
+                )
+            })
+            .unwrap();
+        let folders = [folder.id, other_folder];
+        let list = |limit, after| {
+            store
+                .read(|db| db.messages().list_merged(&folders, limit, after))
+                .unwrap()
+        };
+        let ids = |rows: &[MessageSummary]| rows.iter().map(|m| m.id.0).collect::<Vec<_>>();
+
+        let all = list(10, None);
+        let order = [5, 1, 4, 3, 6, 2];
+        assert_eq!(ids(&all), order);
+        for (ix, m) in all.iter().enumerate() {
+            let page = list(2, Some(m.cursor()));
+            let expected: Vec<_> = order[ix + 1..].iter().take(2).copied().collect();
+            assert_eq!(ids(&page), expected, "after {}", m.id.0);
+        }
+        // A folder given twice lists its messages once.
+        let twice = store
+            .read(|db| db.messages().list_merged(&[folder.id, folder.id], 10, None))
+            .unwrap();
+        assert_eq!(ids(&twice), [1, 3, 2]);
     }
 
     /// Paging through a large group of equal dates, each page seeks to its cursor: the
@@ -1434,18 +1511,7 @@ mod tests {
     fn search_filters_by_account_and_folder() {
         let (store, account, folder) = setup();
         let other = test_util::account(&store, "b@example.com");
-        let inbox = RemoteFolder {
-            remote_name: "INBOX".into(),
-            name: "INBOX".into(),
-            delimiter: None,
-            role: None,
-            kind: FolderKind::Location,
-            selectable: true,
-        };
-        store
-            .write(|db| db.folders().reconcile(other, &[inbox]))
-            .unwrap();
-        let other_folder = store.read(|db| db.folders().list(other)).unwrap()[0].id;
+        let other_folder = inbox(&store, other).id;
         store
             .write(|db| {
                 db.messages()

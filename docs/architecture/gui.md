@@ -45,16 +45,24 @@ src/
 ```
 
 - `Mailbox`：根视图。状态是账户列表（每个账户的文件夹、草稿数、发件箱、连接状态）和侧栏选中的位置
-  `Place`（文件夹、本机草稿、发件箱）；登录页打开时整个替换三栏。对邮件的命令（回复、归档、删除、
+  `Place`（All Inboxes、文件夹、本机草稿、发件箱）；登录页打开时整个替换三栏。对邮件的命令（回复、归档、删除、
   移动、标记……）都是它的方法（`commands.rs`），工具栏按钮、菜单和快捷键调用同一个方法或 Action。
   Reply、Reply all、Forward 在读信区正文上方那一行（与 Show remote images、Open in browser 同行），按钮
   经 `Mailbox` 的焦点句柄派发它的 Action（`FocusHandle::dispatch_action`），焦点不在邮箱里时也能到达。
-- `MessageList`：gpui-kit `List` 的 delegate，一个列表显示四种来源（`Source`）：文件夹（分页）、
+- `MessageList`：gpui-kit `List` 的 delegate，一个列表显示五种来源（`Source`）：All Inboxes 与文件夹（分页）、
   搜索结果、本机草稿、发件箱。行按身份（`RowId`）保持选中。搜索框停顿 200 ms 才搜索，不是每个键都
   读一遍。
 - 纯逻辑（文件夹分区、日期格式、HTML 策略、设置文件、主题推导与导入）不依赖窗口，单测覆盖。
 
 ## 侧栏
+
+有多个账户时，"New message"下面第一项是 **All Inboxes**（只有一个账户时它就是那个账户的 Inbox，不列）：每个账户的 INBOX（与引擎同样按 `special_folder` 挑选；Gmail 上是
+INBOX 标签）合成一个列表，`MailClient::list_inboxes` 按与单个文件夹相同的顺序和游标分页（store 的
+`list_merged` 取每个文件夹游标之后的一页再归并，前 n 封必在各自的前 n 封里）。计数是各收件箱未读之和。
+打开窗口时默认选中它，原来的位置不在了时也回到这里（只剩一个账户时回到它的 Inbox）；选中时同步每个收件箱，与打开单个文件夹相同。
+在这里移动 Gmail 的邮件，看作是在它账户的 INBOX 里看的（`shown_in`），所以移到别的标签会去掉 INBOX，
+与在账户的 Inbox 里移动一样。点击新邮件通知总是去它账户的 Inbox，即使窗口正显示 All Inboxes：日期较旧的新邮件
+在合并的列表里可能被别的账户更新的邮件挤出已加载的那一页，而 `reveal` 只重读已加载的行数。
 
 每个账户先列有角色的文件夹，顺序固定（Inbox、Drafts、Outbox、Sent、Archive、All Mail、Flagged、
 Junk、Trash），名字用角色名（`FolderRole::label`）而不是服务器上的名字（`已发送` 显示为 Sent）；
@@ -221,9 +229,11 @@ INBOX，所以打开一个文件夹时同步它（`MailClient::sync_folder`，�
   早的计数或侧栏读取，不改这个账户的草稿数，由那次事件引起的计数来改。接收端 lag 时先给每个计数加一、
   再重读侧栏：丢掉的事件里可能有 `DraftsChanged`，在途的旧计数作废，侧栏读到的草稿数照常写入。最近
   一次计数失败时改为重读侧栏，否则草稿数会停在旧值直到下一次 `DraftsChanged`。
-- **列表**：`MessagesChanged` 且列表显示这个文件夹，或显示搜索结果（搜索跨所有账户和文件夹，任何
-  文件夹变了都可能影响结果；账户增删、`FoldersChanged` 也重读搜索结果，里面可能有已经不在的账户或
-  文件夹的邮件）；`DraftsChanged` / `OutboxChanged` 且显示该账户的草稿 / 发件箱。重读已
+- **列表**：`MessagesChanged` 且列表显示这个文件夹（All Inboxes 是其中一个收件箱，`Mailbox::shown_folders`），
+  或显示搜索结果（搜索跨所有账户和文件夹，任何文件夹变了都可能影响结果）；账户增删、`FoldersChanged` 也重读
+  搜索结果（里面可能有已经不在的账户或文件夹的邮件）和 All Inboxes（收件箱可能随之多一个或少一个）；
+  侧栏读完后列表显示的文件夹变了也重读：账户第一次同步时先有 INBOX、后有邮件，邮件的事件可能早于侧栏
+  读到这个 INBOX，当时被当成不在显示的文件夹；`DraftsChanged` / `OutboxChanged` 且显示该账户的草稿 / 发件箱。重读已
   显示的行，按行的身份保持选中（`message_list::reselect`）。选中的邮件刷新后不见了（被删除、
   UIDVALIDITY 改变）时，列表发出 `ListEvent::Cancel`（与按 Escape 相同），读信区随之清空；用户自己
   移走的除外（见"读与改"）。

@@ -144,7 +144,7 @@ impl Mailbox {
         let Some(message) = self.selected_message(cx) else {
             return;
         };
-        let shown_in = self.shown_in(cx);
+        let shown_in = self.shown_in(&message, cx);
         self.change(
             message.id,
             "move the message",
@@ -154,10 +154,15 @@ impl Mailbox {
         );
     }
 
-    /// The folder the listed messages are looked at in: on Gmail, a label they leave when
-    /// moved. None for search results.
-    fn shown_in(&self, cx: &gpui_kit::App) -> Option<FolderId> {
-        self.messages.read(cx).delegate().shown_folder()
+    /// The folder the listed message is looked at in: on Gmail, a label it leaves when
+    /// moved. In All Inboxes, its account's INBOX; none for search results.
+    fn shown_in(&self, message: &MessageSummary, cx: &gpui_kit::App) -> Option<FolderId> {
+        if self.is_searching(cx) {
+            return None;
+        }
+        self.shown_folders()
+            .find(|f| f.account_id == message.account_id)
+            .map(|f| f.id)
     }
 
     /// Changes the message with `call`, which may take it out of the list: if it goes,
@@ -252,7 +257,7 @@ impl Mailbox {
         let Some(account) = self.account(message.account_id) else {
             return;
         };
-        let shown_in = self.shown_in(cx);
+        let shown_in = self.shown_in(&message, cx);
         let folders = account
             .folders
             .paths()

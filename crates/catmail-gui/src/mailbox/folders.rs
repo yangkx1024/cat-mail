@@ -223,11 +223,17 @@ impl FolderNode {
 
     /// The unread count worth showing ([`FolderRole::counts_unread`]).
     pub fn unread(&self) -> u32 {
-        match self.role() {
-            Some(role) if !role.counts_unread() => 0,
-            _ => self.selectable().map_or(0, |f| f.unread_count),
-        }
+        unread(self.selectable())
     }
+}
+
+/// The unread count of `folders` worth showing ([`FolderRole::counts_unread`]).
+pub fn unread<'a>(folders: impl IntoIterator<Item = &'a Folder>) -> u32 {
+    folders
+        .into_iter()
+        .filter(|f| f.role.is_none_or(FolderRole::counts_unread))
+        .map(|f| f.unread_count)
+        .sum()
 }
 
 /// Nests the folders by their hierarchy delimiter, keeping the engine's order (INBOX

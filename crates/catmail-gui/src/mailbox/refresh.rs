@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use catmail_core::{AccountId, Event};
+use catmail_core::{AccountId, Event, FolderId};
 
 use super::message_list::Source;
 
@@ -21,9 +21,10 @@ impl Refresh {
         list: true,
     };
 
-    /// For `event`, while the list shows `shown`; `None` when events were missed, which
-    /// could have changed anything.
-    pub fn after(event: Option<&Event>, shown: Option<&Source>) -> Self {
+    /// For `event`, while the list shows `shown`, the messages of `folders` (unless it
+    /// shows search results); `None` when events were missed, which could have changed
+    /// anything.
+    pub fn after(event: Option<&Event>, shown: Option<&Source>, folders: &[FolderId]) -> Self {
         let Some(event) = event else {
             return Self::ALL;
         };
@@ -31,18 +32,20 @@ impl Refresh {
             sidebar: true,
             list,
         };
+        // Search results come from every folder of every account.
+        let search = matches!(shown, Some(Source::Search(_)));
         match *event {
-            // Search results may come from the account or folder that went away.
+            // Search results may come from the account or folder that went away; All
+            // Inboxes may have an INBOX more or less.
             Event::AccountAdded { .. }
             | Event::AccountRemoved { .. }
-            | Event::FoldersChanged { .. } => sidebar(matches!(shown, Some(Source::Search(_)))),
+            | Event::FoldersChanged { .. } => {
+                sidebar(search || shown == Some(&Source::Inboxes))
+            }
             // Read with the accounts, for Settings.
             Event::AccountChanged { .. } => sidebar(false),
-            // Unread and total counts may have changed too. A search looks in every
-            // folder of every account.
-            Event::MessagesChanged { folder, .. } => sidebar(
-                matches!(shown, Some(Source::Search(_))) || shown == Some(&Source::Folder(folder)),
-            ),
+            // Unread and total counts may have changed too.
+            Event::MessagesChanged { folder, .. } => sidebar(search || folders.contains(&folder)),
             // Only the count, which is read on its own (`Mailbox::count_drafts`): every pause
             // in typing saves a draft.
             Event::DraftsChanged { account } => Self {
@@ -198,7 +201,7 @@ mod tests {
     #[test]
     fn events_read_again_what_they_change() {
         let (account, other) = (AccountId(1), AccountId(2));
-        let (folder, elsewhere) = (FolderId(1), FolderId(2));
+        let (folder, elsewhere, inbox) = (FolderId(1), FolderId(2), FolderId(3));
         let messages = Event::MessagesChanged { account, folder };
         let search = Source::Search("lunch".into());
         #[rustfmt::skip]
@@ -217,6 +220,12 @@ mod tests {
             (Some(messages.clone()), None, SIDEBAR),
             // Results come from every account.
             (Some(Event::MessagesChanged { account: other, folder: elsewhere }), Some(search.clone()), Refresh::ALL),
+            // All Inboxes, from each INBOX; which they are may change with the accounts.
+            (Some(Event::MessagesChanged { account: other, folder: inbox }), Some(Source::Inboxes), Refresh::ALL),
+            (Some(Event::MessagesChanged { account: other, folder: elsewhere }), Some(Source::Inboxes), SIDEBAR),
+            (Some(Event::AccountAdded { account: other }), Some(Source::Inboxes), Refresh::ALL),
+            (Some(Event::FoldersChanged { account }), Some(Source::Inboxes), Refresh::ALL),
+            (Some(Event::DraftsChanged { account }), Some(Source::Inboxes), NOTHING),
             // The draft count is read on its own.
             (Some(Event::DraftsChanged { account }), Some(Source::Drafts(account)), LIST),
             (Some(Event::DraftsChanged { account }), Some(Source::Drafts(other)), NOTHING),
@@ -228,8 +237,13 @@ mod tests {
             (Some(Event::ChangesRefused { account }), Some(search), NOTHING),
         ];
         for (event, shown, expected) in cases {
+            let folders = match shown {
+                Some(Source::Folder(id)) => vec![id],
+                Some(Source::Inboxes) => vec![folder, inbox],
+                _ => Vec::new(),
+            };
             assert_eq!(
-                Refresh::after(event.as_ref(), shown.as_ref()),
+                Refresh::after(event.as_ref(), shown.as_ref(), &folders),
                 expected,
                 "{event:?} {shown:?}"
             );

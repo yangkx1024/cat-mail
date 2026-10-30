@@ -515,7 +515,7 @@ mod tests {
         cx.run_until_parked();
 
         mail.deliver_and_sync("Lunch?");
-        clicking_the_notification_opens_it(&mail, cx);
+        clicking_the_notification_opens_it(Place::Folder(mail.folder_id("INBOX")), cx);
     }
 
     #[gpui_kit::test]
@@ -525,7 +525,24 @@ mod tests {
         let mail = start(None, cx);
         main_mailbox(cx);
         mail.deliver_and_sync("Lunch?");
-        clicking_the_notification_opens_it(&mail, cx);
+        clicking_the_notification_opens_it(Place::Folder(mail.folder_id("INBOX")), cx);
+    }
+
+    #[gpui_kit::test]
+    fn a_notification_clicked_with_all_inboxes_shown_opens_the_message_in_its_inbox(
+        cx: &mut TestAppContext,
+    ) {
+        let mail = TestMail::start();
+        mail.add_another_account("bob@example.com");
+        let mail = start_with(mail, None, cx);
+        let (_, mailbox) = main_mailbox(cx);
+        wait_until(|| {
+            cx.run_until_parked();
+            cx.read(|cx| mailbox.read(cx).place == Some(Place::Inboxes))
+        });
+        mail.deliver_and_sync("Lunch?");
+        // Not in All Inboxes, where other accounts' newer mail may keep it off the page.
+        clicking_the_notification_opens_it(Place::Folder(mail.folder_id("INBOX")), cx);
     }
 
     /// The app with its main window and the engine `TestMail::start` has, taking
@@ -544,8 +561,8 @@ mod tests {
         mail
     }
 
-    /// The one notification, for "Lunch?", shows that message in INBOX once clicked.
-    fn clicking_the_notification_opens_it(mail: &TestMail, cx: &mut TestAppContext) {
+    /// The one notification, for "Lunch?", shows that message in `place` once clicked.
+    fn clicking_the_notification_opens_it(place: Place, cx: &mut TestAppContext) {
         gather_until(cx, |cx| !cx.shown_system_notifications().is_empty());
         let shown = cx.shown_system_notifications();
         assert_eq!(shown.len(), 1);
@@ -564,13 +581,7 @@ mod tests {
                 opened.and_then(|m| m.subject.clone()).as_deref() == Some("Lunch?")
             })
         });
-        let inbox = pollster::block_on(mail.client.find_folder(mail.account(), "INBOX"))
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            cx.read(|cx| mailbox.read(cx).place),
-            Some(Place::Folder(inbox.id))
-        );
+        assert_eq!(cx.read(|cx| mailbox.read(cx).place), Some(place));
     }
 
     #[gpui_kit::test]

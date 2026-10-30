@@ -1,5 +1,5 @@
-//! The mailbox's left pane: "New message", each account's places, and at the bottom
-//! Settings, the connection state and Sync.
+//! The mailbox's left pane: "New message", All Inboxes, each account's places, and at
+//! the bottom Settings, the connection state and Sync.
 
 use catmail_core::{AccountId, ErrorKind, FolderRole};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -101,18 +101,39 @@ impl Mailbox {
                     .tooltip_with_action("Sync now", &Sync, Some(actions::MAILBOX))
                     .on_click(cx.listener(|this, _, window, cx| this.sync(window, cx))),
             );
+        let inboxes = Place::Inboxes.is_in(accounts).then(|| {
+            let unread = folders::unread(self.inboxes()) as usize;
+            let mut item = self.place_item(
+                Place::Inboxes,
+                "All Inboxes",
+                Hero::InboxStack,
+                unread,
+                false,
+                cx,
+            );
+            if unread > 0 {
+                item = item.accessibility_label(format!("All Inboxes, {unread} unread"));
+            }
+            Group {
+                heading: None,
+                note: None,
+                items: vec![item],
+                labels: Vec::new(),
+                collapsed: false,
+            }
+        });
         Sidebar::new("folders")
             .w_full()
             .header(header)
             .footer(footer)
+            .children(inboxes)
             .children(accounts.iter().map(|entry| {
-                AccountGroup {
-                    account: entry.account.id,
-                    email: entry.account.email.clone().into(),
+                Group {
+                    heading: Some(entry.account.email.clone().into()),
                     note: entry
                         .account
                         .all_mail_hidden()
-                        .then_some(ALL_MAIL_HIDDEN.into()),
+                        .then(|| (account_note(entry.account.id), ALL_MAIL_HIDDEN.into())),
                     items: self.account_items(entry, cx),
                     labels: entry
                         .folders
@@ -249,21 +270,20 @@ impl Mailbox {
     }
 }
 
-/// An account's places under its address, its labels in a section after them.
-/// `SidebarGroup` would do, but draws its label small and faint, as for a section; the
-/// address names whose mail this is, so it is a heading.
+/// An account's places under its address, its labels in a section after them; All
+/// Inboxes, without a heading. `SidebarGroup` would do, but draws its label small and
+/// faint, as for a section; the address names whose mail this is, so it is a heading.
 #[derive(Clone)]
-struct AccountGroup {
-    account: AccountId,
-    email: SharedString,
-    /// Something about the account to put right, under its address.
-    note: Option<SharedString>,
+struct Group {
+    heading: Option<SharedString>,
+    /// Something about the account to put right, under its address, and its element id.
+    note: Option<(ElementId, SharedString)>,
     items: Vec<SidebarMenuItem>,
     labels: Vec<SidebarMenuItem>,
     collapsed: bool,
 }
 
-impl Collapsible for AccountGroup {
+impl Collapsible for Group {
     fn is_collapsed(&self) -> bool {
         self.collapsed
     }
@@ -274,7 +294,7 @@ impl Collapsible for AccountGroup {
     }
 }
 
-impl SidebarItem for AccountGroup {
+impl SidebarItem for Group {
     fn render(
         self,
         id: impl Into<ElementId>,
@@ -284,7 +304,7 @@ impl SidebarItem for AccountGroup {
         let id = id.into();
         v_flex()
             .when(!self.collapsed, |this| {
-                this.child(
+                this.children(self.heading.map(|heading| {
                     div()
                         .px_2()
                         .h_8()
@@ -294,11 +314,11 @@ impl SidebarItem for AccountGroup {
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(cx.theme().sidebar_foreground)
                         .truncate()
-                        .child(self.email),
-                )
-                .children(self.note.map(|note| {
+                        .child(heading)
+                }))
+                .children(self.note.map(|(id, note)| {
                     div()
-                        .id(account_note(self.account))
+                        .id(id)
                         .role(Role::Note)
                         .test_support()
                         .aria_label(note.clone())

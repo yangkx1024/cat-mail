@@ -153,8 +153,8 @@ catmail-gui                     # 打开窗口；同样支持 --data-dir / CATMA
 才保存并开始同步，密码错误不会留下任何账户或密钥环条目（之后在 Settings › Accounts 添加或移除
 账户）。
 
-主窗口三栏：左侧是"New message"和各账户的位置（Inbox、Drafts、Outbox、Sent、Archive、Junk、
-Trash，然后是其他文件夹），中间是列表和搜索框，右侧是选中的邮件、草稿或待发邮件。窗口打开期间在
+主窗口三栏：左侧是"New message"、所有账户收件箱合在一起的 All Inboxes（有多个账户时才有，打开时
+默认选中它），以及各账户的位置（Inbox、Drafts、Outbox、Sent、Archive、Junk、Trash，然后是其他文件夹），中间是列表和搜索框，右侧是选中的邮件、草稿或待发邮件。窗口打开期间在
 后台保持同步和发信，新邮件由服务器推送，与 `catmail watch` 相同，也同样定期回收不再引用的文件；
 打开一个文件夹时立即同步它。主窗口不在前台（或已关闭、应用仍在运行）时，收件箱里的未读新邮件弹出系统
 通知，点击打开那封信（Settings › General 可关闭）。Linux 上托盘图标标着各收件箱的未读数，点击回到
