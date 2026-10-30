@@ -112,7 +112,8 @@ fn is_data_url(value: &str) -> bool {
 /// Image sources (remote URLs, `cid:`, `data:`) are kept: whether remote images load
 /// is the renderer's decision, and it should block them by default.
 pub fn sanitize_html(html: &str) -> String {
-    clean(&SANITIZER, html)
+    let sheet = css::sanitize(&style_sheets(html), None);
+    with_sheet(&sheet.css, &SANITIZER, html)
 }
 
 /// HTML that [`sanitize_html`] produced, with its own colors moved for a dark page with
@@ -126,7 +127,7 @@ pub fn sanitize_html(html: &str) -> String {
 /// be shown as written, on a light page. Mail clients rarely support them, so mail rarely
 /// uses them.
 pub fn recolor_html(html: &str, palette: DarkPalette) -> Option<Cow<'_, str>> {
-    let sheet = css::sanitize(&style_sheets(html), Some(palette));
+    let sheet = css::sanitize(sanitized_sheet(html).as_slice(), Some(palette));
     if sheet.adapts_to_dark {
         return Some(Cow::Borrowed(html));
     }
@@ -144,13 +145,15 @@ pub fn recolor_html(html: &str, palette: DarkPalette) -> Option<Cow<'_, str>> {
     (!colors_from_variables.load(Ordering::Relaxed)).then_some(Cow::Owned(html))
 }
 
-/// The sanitizer's output with the message's style sheets in front. ammonia drops every
-/// `<style>` with its content: it doesn't look inside, and writes raw text back as it is.
+/// HTML that [`sanitize_html`] produced, cleaned again through `builder` (the sanitizer
+/// with a filter of its own).
 pub(crate) fn clean(builder: &Builder<'_>, html: &str) -> String {
-    let sheet = css::sanitize(&style_sheets(html), None);
+    let sheet = css::sanitize(sanitized_sheet(html).as_slice(), None);
     with_sheet(&sheet.css, builder, html)
 }
 
+/// The sanitizer's output with the style sheet in front. ammonia drops every `<style>`
+/// with its content: it doesn't look inside, and writes raw text back as it is.
 fn with_sheet(sheet: &str, builder: &Builder<'_>, html: &str) -> String {
     let mut out = Vec::new();
     if !sheet.is_empty() {
@@ -165,6 +168,19 @@ fn with_sheet(sheet: &str, builder: &Builder<'_>, html: &str) -> String {
         .write_to(&mut out)
         .expect("writing to a Vec doesn't fail");
     String::from_utf8(out).expect("html5ever writes UTF-8")
+}
+
+/// The style sheet of HTML that [`sanitize_html`] produced, without tokenizing it again: the
+/// one `<style>` it writes in front, with no attributes. Its text has no `<` (`css.rs`), so
+/// the first `</style>` ends it; ammonia drops every other `<style>`. Bodies stored before
+/// sheets were kept have none, and their HTML doesn't start with one either. Other HTML
+/// loses its style sheets, which the sanitizer drops anyway.
+fn sanitized_sheet(html: &str) -> Option<css::Element> {
+    let (css, _) = html.strip_prefix("<style>")?.split_once("</style>")?;
+    Some(css::Element {
+        media: None,
+        css: css.to_owned(),
+    })
 }
 
 /// Finds the style sheets of HTML by tokenizing it as the tree builder would switch to raw
@@ -281,10 +297,12 @@ mod tests {
             for gone in ["onerror", "<script", "alert(1)<"] {
                 assert!(!clean.contains(gone), "{gone} survived {dirty}: {clean}");
             }
-            if let Some(sheet) = clean.strip_prefix("<style>") {
-                let (css, _) = sheet.split_once("</style>").unwrap();
-                assert!(!css.contains('<'), "{dirty}: {clean}");
-            }
+            let sheet = sanitized_sheet(&clean);
+            assert_eq!(sheet.as_slice(), style_sheets(&clean), "{dirty}: {clean}");
+            assert!(
+                sheet.is_none_or(|s| !s.css.contains('<')),
+                "{dirty}: {clean}"
+            );
         }
     }
 
@@ -359,6 +377,26 @@ mod tests {
         // Not copied: the reader keeps what it has.
         let kept = recolor_html(&adaptive, PALETTE);
         assert!(matches!(kept, Some(Cow::Borrowed(h)) if h == adaptive));
+    }
+
+    #[test]
+    fn the_sanitized_sheet_is_the_one_tokenizing_finds() {
+        // The reader's passes take the sheet from the front rather than tokenizing the
+        // message again, which is right only for what `sanitize_html` writes (see also
+        // `a_style_sheet_cannot_end_its_element`).
+        for dirty in [
+            "<p>no sheet</p>",
+            "<style></style><p>empty</p>",
+            "<style>.a{color:red}</style><style media=\"print\">p{display:none}</style>",
+            "<p>late</p><style>.a{color:red}</style>",
+            "<style>.a{\r\ncolor:red}\r.b{color:blue}</style>",
+            "<style>.a::after{content:\"\0\u{0}x\"}</style>",
+            "<svg><style>.a{color:red}</style></svg><textarea><style>.b{}</style></textarea>",
+        ] {
+            let clean = sanitize_html(dirty);
+            let sheet = sanitized_sheet(&clean);
+            assert_eq!(sheet.as_slice(), style_sheets(&clean), "{dirty}: {clean}");
+        }
     }
 
     #[test]
