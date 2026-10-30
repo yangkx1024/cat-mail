@@ -392,6 +392,44 @@ async fn postponed_entries_back_off_with_the_one_attempted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_unreachable_server_is_tried_again_soon_after_a_wake() {
+    let mut smtp = SmtpState::new("alice", "pw");
+    smtp.faults.unavailable = 2;
+    let env = env_with(state(), smtp, false).await;
+    env.queue("one").await;
+    // The network not back yet: seconds, not half a minute.
+    env.client.resume();
+    let wait = async || {
+        let entry = &env.outbox().await[0];
+        entry.next_attempt_at.unwrap() - entry.created_at
+    };
+    env.flush().await;
+    assert!(wait().await <= 3);
+    env.flush().await;
+    assert!(wait().await <= 5);
+    assert_eq!(env.flush().await, [(OutboxStatus::Done, 1)]);
+
+    // Through since: failing again waits as long as ever.
+    env.smtp.state().faults.unavailable = 1;
+    env.queue("two").await;
+    env.flush().await;
+    assert!(wait().await >= 25);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_login_rejected_after_a_wake_is_not_tried_again_soon() {
+    let mut smtp = SmtpState::new("alice", "pw");
+    smtp.faults.reject_login = true;
+    let env = env_with(state(), smtp, false).await;
+    env.queue("one").await;
+    // Servers lock accounts that fail too many logins.
+    env.client.resume();
+    env.flush().await;
+    let entry = &env.outbox().await[0];
+    assert!(entry.next_attempt_at.unwrap() - entry.created_at >= 25);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn odd_reply_to_the_end_is_not_taken_as_a_refusal() {
     let mut smtp = SmtpState::new("alice", "pw");
     smtp.faults.end_of_data_replies = vec![354];

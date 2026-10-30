@@ -13,7 +13,8 @@
 //!
 //! After the computer slept ([`Engine::resume`]) a task drops a connection made before,
 //! which is likely dead, without a word, and syncs every folder unless a sync of them all
-//! began since.
+//! began since. Failing then, it tries again sooner than after other failures, as the
+//! network may not be back yet ([`SyncSchedule::retry_after_wake`]).
 //!
 //! The tasks hold the engine weakly, so dropping the last client ends them, and with
 //! them their connections.
@@ -46,6 +47,10 @@ pub struct SyncSchedule {
     /// except after the server rejected the login: that waits `full_sync`, whatever is
     /// queued, or until a sync asked for gets through.
     pub retry: Duration,
+    /// After the computer woke, how long to wait after the first failure, doubling while
+    /// that is sooner than `retry`; failures then back off from `retry` as usual
+    /// [2 seconds]. The network is often back only a few seconds after the computer.
+    pub retry_after_wake: Duration,
 }
 
 impl Default for SyncSchedule {
@@ -55,6 +60,7 @@ impl Default for SyncSchedule {
             poll: Duration::from_secs(2 * 60),
             idle: Duration::from_secs(10 * 60),
             retry: Duration::from_secs(30),
+            retry_after_wake: Duration::from_secs(2),
         }
     }
 }
@@ -235,7 +241,11 @@ async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
                     // Each try is another rejected login, which servers count towards
                     // locking the account.
                     Error::AuthFailed(_) => schedule.full_sync,
-                    _ => backoff(schedule.retry, failures, schedule.full_sync),
+                    _ => failures.retry_in(
+                        schedule.retry_after_wake,
+                        schedule.retry,
+                        schedule.full_sync,
+                    ),
                 };
                 tracing::warn!(%account, error = %e, ?delay,
                     "background sync failed; trying again later");

@@ -22,6 +22,7 @@ fn schedule(full_sync: Duration, idle: Duration) -> SyncSchedule {
         poll: Duration::from_millis(50),
         idle,
         retry: Duration::from_millis(50),
+        ..Default::default()
     }
 }
 
@@ -436,6 +437,41 @@ async fn a_wake_while_the_login_is_rejected_waits_too() {
     env.wait_until_login_rejected().await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(env.fake.state().received("LOGIN"), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failing_to_connect_after_a_wake_tries_again_soon_until_through() {
+    let schedule = SyncSchedule {
+        retry: HOUR,
+        retry_after_wake: Duration::from_millis(20),
+        ..schedule(HOUR, HOUR)
+    };
+    let env = watching(state(), schedule).await;
+    env.wait_for_idle(1).await;
+    // Dead after the sleep, and the network not back yet.
+    {
+        let mut st = env.fake.state();
+        st.silence_open_connections();
+        st.faults.refuse_connections = 3;
+    }
+    let connections = env.fake.state().connections;
+
+    env.client.resume();
+    env.wait_for_idle(2).await;
+    assert_eq!(env.fake.state().connections, connections + 4);
+
+    // Through since: failing again waits as long as ever.
+    {
+        let mut st = env.fake.state();
+        st.drop_open_connections();
+        st.faults.refuse_connections = 1;
+    }
+    env.fake
+        .wait_until(|st| st.connections == connections + 5)
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let st = env.fake.state();
+    assert_eq!((st.received("IDLE"), st.connections), (2, connections + 5));
 }
 
 #[tokio::test(flavor = "multi_thread")]

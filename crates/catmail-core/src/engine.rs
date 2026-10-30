@@ -7,8 +7,8 @@ use catmail_proto::TlsConfig;
 use catmail_proto::http::ImageFetcher;
 use catmail_store::{BlobStore, Db, Store};
 use catmail_types::{
-    AccountId, AccountStatus, DraftId, Event, FolderId, IdentityId, ReportedError, SendProblem,
-    ServerProblem,
+    AccountId, AccountStatus, DraftId, ErrorKind, Event, FolderId, IdentityId, ReportedError,
+    SendProblem, ServerProblem,
 };
 use tokio::sync::{Notify, OwnedMutexGuard, broadcast, watch};
 
@@ -160,12 +160,99 @@ struct AccountState {
     draft_edits: Mutex<HashMap<DraftId, Instant>>,
 }
 
-/// [`AccountStatus`], with the send problems by identity.
-#[derive(Debug, Default)]
+/// [`AccountStatus`], with the send problems by identity, and the failures since the
+/// computer last woke of each server.
+#[derive(Debug)]
 struct Status {
     syncing: bool,
     sync: Option<ServerProblem>,
     send: BTreeMap<IdentityId, SendProblem>,
+    sync_after_wake: AfterWake,
+    send_after_wake: BTreeMap<IdentityId, AfterWake>,
+    /// When the account's state was made, as if its servers were tried then.
+    made: Instant,
+}
+
+impl Status {
+    fn new() -> Self {
+        let made = Instant::now();
+        Self {
+            syncing: false,
+            sync: None,
+            send: BTreeMap::new(),
+            sync_after_wake: AfterWake::new(made),
+            send_after_wake: BTreeMap::new(),
+            made,
+        }
+    }
+}
+
+/// Failures in a row of one server since the computer last woke (see
+/// [`Failures::after_wake`]).
+#[derive(Debug)]
+struct AfterWake {
+    /// When a wake was last looked for.
+    checked: Instant,
+    failures: Option<u32>,
+}
+
+impl AfterWake {
+    fn new(checked: Instant) -> Self {
+        Self {
+            checked,
+            failures: None,
+        }
+    }
+
+    /// Takes in how an attempt ended, whether it `reached` the server or not;
+    /// `woke_after(at)` is whether the computer woke after `at`. Returns the failures
+    /// since the wake.
+    fn saw(&mut self, reached: bool, woke_after: impl FnOnce(Instant) -> bool) -> Option<u32> {
+        // Taken before looking: a wake in between is seen again next time, not never.
+        let now = Instant::now();
+        if woke_after(self.checked) {
+            self.failures = Some(0);
+        }
+        self.checked = now;
+        self.failures = if reached {
+            None
+        } else {
+            self.failures.map(|n| n + 1)
+        };
+        self.failures
+    }
+}
+
+/// Failures in a row to get through to a server, as [`Engine::report`] counts them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Failures {
+    /// This one included; 0 for a success.
+    pub in_a_row: u32,
+    /// Those since the computer last woke, if none got through to the server since (a
+    /// rejected login did): they are tried again sooner, as the network is often back
+    /// only a few seconds after the computer. Those before the wake say nothing about
+    /// the network after.
+    pub after_wake: Option<u32>,
+}
+
+impl Failures {
+    /// How long to wait before trying again: from `first`, doubling up to `max`. After
+    /// the computer woke, from `soon` first, doubling while that is sooner than `first`
+    /// (and `max`), then from `first` as usual.
+    pub fn retry_in(self, soon: Duration, first: Duration, max: Duration) -> Duration {
+        let Some(failures) = self.after_wake else {
+            return backoff(first, self.in_a_row, max);
+        };
+        let cap = first.min(max);
+        let quick = |n| backoff(soon, n, cap);
+        // Bounded for a zero `soon`, which never reaches `cap`.
+        let quick_tries = (1..=u32::BITS).take_while(|&n| quick(n) < cap).count() as u32;
+        if failures <= quick_tries {
+            quick(failures)
+        } else {
+            backoff(first, failures - quick_tries, max)
+        }
+    }
 }
 
 /// What an attempt that [`Engine::report`] records was doing.
@@ -534,12 +621,17 @@ impl Engine {
 
     /// Records how an attempt to get through to the account's server for `activity`
     /// ended, and announces what that changes in [`status`](Self::status). Returns the
-    /// failures in a row, this one included (0 for a success). The account being removed
-    /// says nothing about the server, and isn't recorded.
-    pub fn report<T>(&self, account: AccountId, activity: Activity, outcome: &Result<T>) -> u32 {
+    /// failures in a row. The account being removed says nothing about the server, and
+    /// isn't recorded.
+    pub fn report<T>(
+        &self,
+        account: AccountId,
+        activity: Activity,
+        outcome: &Result<T>,
+    ) -> Failures {
         let e = match outcome {
             Err(Error::Cancelled | Error::AccountNotFound(_) | Error::IdentityNotFound(_)) => {
-                return 0;
+                return Failures::default();
             }
             Err(e) => Some(e),
             Ok(_) => None,
@@ -549,7 +641,20 @@ impl Engine {
         // whether the problem did.
         let (changed, rejected, failures, problem_changed) = {
             let mut status = lock(&state.status);
-            match activity {
+            let status = &mut *status;
+            let after_wake = match activity {
+                Activity::Sync | Activity::SyncBegun(_) => &mut status.sync_after_wake,
+                Activity::Send(identity, _) => status
+                    .send_after_wake
+                    .entry(identity)
+                    .or_insert_with(|| AfterWake::new(status.made)),
+            };
+            // A rejected login got through to the server: the network is back, and
+            // trying again soon would only bring on more rejections, which servers count
+            // towards locking the account.
+            let reached = e.is_none_or(|e| e.kind() == ErrorKind::Auth);
+            let after_wake = after_wake.saw(reached, |at| !self.since_woke(at));
+            let (changed, rejected, in_a_row, problem_changed) = match activity {
                 Activity::Sync | Activity::SyncBegun(_) => {
                     let (changed, rejected, failures) = record(&mut status.sync, e);
                     let answered = match activity {
@@ -583,7 +688,12 @@ impl Engine {
                     let (changed, rejected, failures) = recorded;
                     (changed, rejected, failures, changed)
                 }
-            }
+            };
+            let failures = Failures {
+                in_a_row,
+                after_wake,
+            };
+            (changed, rejected, failures, problem_changed)
         };
         // What frontends show, so what a report from a user is about: logged as it changes,
         // not at each attempt.
@@ -594,8 +704,8 @@ impl Engine {
             };
             let identity = identity.map(tracing::field::display);
             match e {
-                Some(e) => tracing::info!(%account, identity, error = %e, failures,
-                    "can't get through to the server"),
+                Some(e) => tracing::info!(%account, identity, error = %e,
+                    failures = failures.in_a_row, "can't get through to the server"),
                 None => tracing::info!(%account, identity, "getting through to the server again"),
             }
         }
@@ -615,7 +725,10 @@ impl Engine {
         let Some(state) = self.existing(account) else {
             return;
         };
-        if lock(&state.status).send.remove(&identity).is_some() {
+        let mut status = lock(&state.status);
+        status.send_after_wake.remove(&identity);
+        if status.send.remove(&identity).is_some() {
+            drop(status);
             self.emit(Event::AccountStatusChanged { account });
         }
     }
@@ -679,7 +792,7 @@ impl Engine {
                     synced: Mutex::default(),
                     asked: Cutoff::default(),
                     folders_synced: Mutex::default(),
-                    status: Mutex::default(),
+                    status: Mutex::new(Status::new()),
                     draft_edits: Mutex::default(),
                 })
             })
@@ -767,6 +880,39 @@ pub(crate) fn now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failures_after_a_wake_are_tried_again_soon_then_as_usual() {
+        let secs = Duration::from_secs;
+        let retry_in = |after_wake| {
+            let failures = Failures {
+                in_a_row: 9,
+                after_wake,
+            };
+            failures.retry_in(secs(2), secs(30), secs(900))
+        };
+        let mut after_wake = AfterWake::new(Instant::now());
+        // Failing since before the computer slept.
+        assert_eq!(after_wake.saw(false, |_| false), None);
+        assert_eq!(retry_in(None), secs(900));
+
+        let mut woke = true;
+        let delays: Vec<_> = (0..7)
+            .map(|_| retry_in(after_wake.saw(false, |_| std::mem::take(&mut woke))))
+            .collect();
+        assert_eq!(delays, [2, 4, 8, 16, 30, 60, 120].map(secs));
+
+        // Through again: failures later back off as usual.
+        assert_eq!(after_wake.saw(true, |_| false), None);
+        assert_eq!(after_wake.saw(false, |_| false), None);
+
+        // Never longer than `max`, even when it is shorter than `first`.
+        let failures = Failures {
+            in_a_row: 1,
+            after_wake: Some(1),
+        };
+        assert_eq!(failures.retry_in(secs(2), secs(30), secs(1)), secs(1));
+    }
 
     /// Work begun before the computer slept, finishing as it wakes: whenever the wake
     /// comes, the record doesn't count.

@@ -310,6 +310,7 @@ impl MailClient {
     /// the login. The engine notices a sleep on its own too, but up to half a minute
     /// late: a frontend that hears of the wake from the system calls this then.
     pub fn resume(&self) {
+        tracing::info!("the frontend says the computer woke; starting over on new connections");
         self.engine.resume();
     }
 
