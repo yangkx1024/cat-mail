@@ -151,7 +151,7 @@ impl Tray {
                     Err(RecvError::Closed) => break,
                 };
                 // The unread counts are the sidebar's.
-                if Refresh::after(event.as_ref(), None).sidebar {
+                if Refresh::after(event.as_ref(), None, &[]).sidebar {
                     cx.update(Self::count);
                 }
             }

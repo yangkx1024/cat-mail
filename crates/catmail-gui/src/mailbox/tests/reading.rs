@@ -246,10 +246,7 @@ fn deleting_from_trash_asks_first_whichever_trash_it_is(cx: &mut TestAppContext)
     let mail = TestMail::start_with_folders(&[("Trash", "\\Trash"), ("Old/Bin", "\\Trash")]);
     mail.deliver("Trash", "Binned");
     pollster::block_on(mail.client.sync_account(mail.account())).unwrap();
-    let trash = pollster::block_on(mail.client.find_folder(mail.account(), "Trash"))
-        .unwrap()
-        .unwrap()
-        .id;
+    let trash = mail.folder_id("Trash");
     let (window, mailbox) = open(cx, &mail);
     wait_for_inbox(cx, &mailbox);
     cx.update_window(window, |_, window, cx| {
@@ -360,17 +357,7 @@ fn shows_what_a_sync_brings_without_losing_the_selection(cx: &mut TestAppContext
     // The body downloads on the engine's threads; a sync finishing first must not be
     // taken for the reader losing it.
     let hello = click_message(cx, window, &mailbox, "你好，世界");
-    let unread = |cx: &App| {
-        let mailbox = mailbox.read(cx);
-        let Some(Place::Folder(folder)) = mailbox.place else {
-            panic!("not a folder")
-        };
-        mailbox.accounts.as_deref().unwrap()[0]
-            .folders
-            .find(folder)
-            .unwrap()
-            .unread()
-    };
+    let unread = |cx: &App| super::folders::unread(mailbox.read(cx).shown_folders());
     let unread_before = cx.read(unread);
 
     // Synced by the client, not by the window: only events tell it.
@@ -402,10 +389,8 @@ fn choosing_a_message_gives_up_revealing_one_still_to_come(cx: &mut TestAppConte
     let chosen = cx.read(|cx| listed(&mailbox, cx)[0].id);
     // Stored, and not listed yet: the window hasn't run since.
     mail.deliver_and_sync("Lunch?");
-    let inbox = pollster::block_on(mail.client.find_folder(mail.account(), "INBOX"))
-        .unwrap()
-        .unwrap();
-    let stored = pollster::block_on(mail.client.list_messages(inbox.id, 100, None)).unwrap();
+    let inbox = mail.folder_id("INBOX");
+    let stored = pollster::block_on(mail.client.list_messages(inbox, 100, None)).unwrap();
     let lunch = stored
         .iter()
         .find(|m| m.subject.as_deref() == Some("Lunch?"))
@@ -454,10 +439,8 @@ fn a_message_revealed_during_a_read_from_before_it_came_opens_after(cx: &mut Tes
     std::thread::sleep(Duration::from_millis(100));
     // Then the mail arrives, and its notification is clicked before that read is in.
     mail.deliver_and_sync("Lunch?");
-    let inbox = pollster::block_on(mail.client.find_folder(mail.account(), "INBOX"))
-        .unwrap()
-        .unwrap();
-    let stored = pollster::block_on(mail.client.list_messages(inbox.id, 100, None)).unwrap();
+    let inbox = mail.folder_id("INBOX");
+    let stored = pollster::block_on(mail.client.list_messages(inbox, 100, None)).unwrap();
     let lunch = stored
         .iter()
         .find(|m| m.subject.as_deref() == Some("Lunch?"))
@@ -485,10 +468,7 @@ fn opening_a_folder_syncs_it(cx: &mut TestAppContext) {
     wait_for_inbox(cx, &mailbox);
     // Synced as the test began: every open counts as late enough.
     cx.update(|cx| mailbox.update(cx, |m, _| m.sync_on_open_after = Duration::ZERO));
-    let archive = pollster::block_on(mail.client.find_folder(mail.account(), "Archive"))
-        .unwrap()
-        .unwrap()
-        .id;
+    let archive = mail.folder_id("Archive");
     // Filed by another client; only INBOX is watched between full syncs.
     mail.deliver("Archive", "Filed elsewhere");
 
@@ -544,13 +524,9 @@ fn a_change_the_server_refuses_is_undone_and_reported(cx: &mut TestAppContext) {
 fn a_change_refused_before_the_window_opened_is_reported(cx: &mut TestAppContext) {
     let mail = TestMail::start();
     let client = &mail.client;
+    let inbox = mail.folder_id("INBOX");
     pollster::block_on(async {
-        let inbox = client
-            .find_folder(mail.account(), "INBOX")
-            .await
-            .unwrap()
-            .unwrap();
-        let messages = client.list_messages(inbox.id, 1, None).await.unwrap();
+        let messages = client.list_messages(inbox, 1, None).await.unwrap();
         let ids = messages.iter().map(|m| m.id).collect();
         client
             .set_flags(ids, Flags::FLAGGED, Flags::empty())
@@ -640,4 +616,38 @@ fn reading_again_what_hasnt_changed_redraws_nothing(cx: &mut TestAppContext) {
         })
     });
     assert_eq!(redraws.get(), 0);
+}
+
+/// With more than one account, All Inboxes lists every INBOX and is where the window
+/// starts; with one, it would be that account's INBOX again, and isn't there.
+#[gpui_kit::test]
+fn all_inboxes_is_there_with_more_than_one_account(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let bob = mail.add_another_account("bob@example.com");
+    let (window, mailbox) = open(cx, &mail);
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| subjects(&mailbox, cx).len() == 12)
+    });
+    cx.read(|cx| {
+        assert_eq!(mailbox.read(cx).place, Some(Place::Inboxes));
+        assert_eq!(
+            mailbox.read(cx).place_label().as_deref(),
+            Some("All Inboxes")
+        );
+        let accounts: std::collections::HashSet<_> =
+            listed(&mailbox, cx).iter().map(|m| m.account_id).collect();
+        assert_eq!(accounts.len(), 2);
+    });
+    frame(cx, window);
+
+    // Down to one account: its inbox.
+    pollster::block_on(mail.client.remove_account(bob)).unwrap();
+    let inbox = mail.folder_id("INBOX");
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| mailbox.read(cx).place == Some(Place::Folder(inbox)))
+    });
+    wait_for_inbox(cx, &mailbox);
+    frame(cx, window);
 }

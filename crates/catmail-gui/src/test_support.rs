@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use catmail_core::{
-    AccountId, Config, MailClient, MemorySecrets, NewAccount, Security, ServerConfig, SyncSchedule,
-    Verify,
+    AccountId, Config, FolderId, MailClient, MemorySecrets, NewAccount, Security, ServerConfig,
+    SyncSchedule, Verify,
 };
 use catmail_testkit::{
     FakeHttp, FakeImap, FakeMailbox, FakeSmtp, Reply, ServerState, SmtpState, response,
@@ -100,6 +100,12 @@ impl TestMail {
     }
 
     fn add_account(&mut self, email: &str) {
+        self.account = Some(self.add_another_account(email));
+    }
+
+    /// Adds an account `email` for the same server and user, and syncs it: the same
+    /// messages, a second time. [`account`](Self::account) stays the first.
+    pub fn add_another_account(&self, email: &str) -> AccountId {
         let new = NewAccount {
             email: email.into(),
             display_name: None,
@@ -107,7 +113,7 @@ impl TestMail {
             imap: self.server(),
             smtp: self.smtp_server(),
         };
-        self.account = Some(pollster::block_on(async {
+        pollster::block_on(async {
             let account = self
                 .client
                 .add_account(new, "pw".into(), Verify::Skip)
@@ -115,7 +121,7 @@ impl TestMail {
                 .unwrap();
             self.client.sync_account(account.id).await.unwrap();
             account.id
-        }));
+        })
     }
 
     /// The server (user `alice`, password `pw`) and a client with no accounts.
@@ -176,6 +182,14 @@ impl TestMail {
 
     pub fn account(&self) -> AccountId {
         self.account.unwrap()
+    }
+
+    /// The account's folder `name`.
+    pub fn folder_id(&self, name: &str) -> FolderId {
+        pollster::block_on(self.client.find_folder(self.account(), name))
+            .unwrap()
+            .unwrap()
+            .id
     }
 
     /// The messages the SMTP server took, as sent.

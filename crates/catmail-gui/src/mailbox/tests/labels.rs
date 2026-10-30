@@ -14,13 +14,6 @@ fn open_gmail(cx: &mut TestAppContext, mail: &TestMail) -> (AnyWindowHandle, Ent
     (window, mailbox)
 }
 
-fn folder_id(mail: &TestMail, name: &str) -> FolderId {
-    pollster::block_on(mail.client.find_folder(mail.account(), name))
-        .unwrap()
-        .unwrap()
-        .id
-}
-
 fn select_folder(
     cx: &mut TestAppContext,
     window: AnyWindowHandle,
@@ -87,7 +80,7 @@ fn labels_are_listed_apart_and_shown_on_their_messages(cx: &mut TestAppContext) 
     assert!(shown(cx, window, "labels"));
 
     // In Work, every row has Work: the rows leave it out, the reader doesn't.
-    select_folder(cx, window, &mailbox, folder_id(&mail, "Work"));
+    select_folder(cx, window, &mailbox, mail.folder_id("Work"));
     wait_until(|| {
         cx.run_until_parked();
         cx.read(|cx| subjects(&mailbox, cx) == ["Plan", "Trip"])
@@ -97,7 +90,7 @@ fn labels_are_listed_apart_and_shown_on_their_messages(cx: &mut TestAppContext) 
         assert_eq!(reader_labels(&mailbox, cx), ["Personal", "Work"]);
         let list = mailbox.read(cx).messages.read(cx).delegate();
         let trip = find(&mailbox, "Trip", cx).unwrap();
-        let work = Some(folder_id(&mail, "Work"));
+        let work = Some(mail.folder_id("Work"));
         assert_eq!(list.label_names(&trip, work), ["Personal"]);
     });
 }
@@ -106,7 +99,7 @@ fn labels_are_listed_apart_and_shown_on_their_messages(cx: &mut TestAppContext) 
 fn labels_are_changed_from_the_labels_dialog(cx: &mut TestAppContext) {
     let mail = TestMail::start_gmail();
     let (window, mailbox) = open_gmail(cx, &mail);
-    let (personal, work) = (folder_id(&mail, "Personal"), folder_id(&mail, "Work"));
+    let (personal, work) = (mail.folder_id("Personal"), mail.folder_id("Work"));
     click_message(cx, window, &mailbox, "Plan");
 
     // Each pick is made at once, and shows on the message as it is.
@@ -133,7 +126,7 @@ fn labels_are_changed_from_the_labels_dialog(cx: &mut TestAppContext) {
 fn taking_off_the_label_listed_opens_the_next_message(cx: &mut TestAppContext) {
     let mail = TestMail::start_gmail();
     let (window, mailbox) = open_gmail(cx, &mail);
-    let work = folder_id(&mail, "Work");
+    let work = mail.folder_id("Work");
     select_folder(cx, window, &mailbox, work);
     wait_until(|| {
         cx.run_until_parked();
@@ -158,7 +151,7 @@ fn taking_off_the_label_listed_opens_the_next_message(cx: &mut TestAppContext) {
 fn a_refused_label_change_is_unchecked_again(cx: &mut TestAppContext) {
     let mail = TestMail::start_gmail();
     let (window, mailbox) = open_gmail(cx, &mail);
-    let (personal, work) = (folder_id(&mail, "Personal"), folder_id(&mail, "Work"));
+    let (personal, work) = (mail.folder_id("Personal"), mail.folder_id("Work"));
     click_message(cx, window, &mailbox, "Plan");
     mail.refuse_changes("no such label");
 
@@ -215,7 +208,7 @@ fn with_all_mail_hidden_labels_are_folders_and_the_user_is_told(cx: &mut TestApp
 fn archive_is_for_what_is_in_the_inbox(cx: &mut TestAppContext) {
     let mail = TestMail::start_gmail();
     let (window, mailbox) = open_gmail(cx, &mail);
-    select_folder(cx, window, &mailbox, folder_id(&mail, "[Gmail]/All Mail"));
+    select_folder(cx, window, &mailbox, mail.folder_id("[Gmail]/All Mail"));
     wait_until(|| {
         cx.run_until_parked();
         cx.read(|cx| subjects(&mailbox, cx) == ["Plan", "Trip", "Notes"])
@@ -238,8 +231,8 @@ fn archive_is_for_what_is_in_the_inbox(cx: &mut TestAppContext) {
 fn a_message_still_listed_after_a_move_stays_selected(cx: &mut TestAppContext) {
     let mail = TestMail::start_gmail();
     let (window, mailbox) = open_gmail(cx, &mail);
-    let (work, personal) = (folder_id(&mail, "Work"), folder_id(&mail, "Personal"));
-    let inbox = folder_id(&mail, "INBOX");
+    let (work, personal) = (mail.folder_id("Work"), mail.folder_id("Personal"));
+    let inbox = mail.folder_id("INBOX");
     let waits = |cx: &App| {
         mailbox
             .read(cx)
@@ -266,7 +259,7 @@ fn a_message_still_listed_after_a_move_stays_selected(cx: &mut TestAppContext) {
     });
 
     // In All Mail, moved to Personal: a label more, still in All Mail.
-    select_folder(cx, window, &mailbox, folder_id(&mail, "[Gmail]/All Mail"));
+    select_folder(cx, window, &mailbox, mail.folder_id("[Gmail]/All Mail"));
     wait_until(|| {
         cx.run_until_parked();
         cx.read(|cx| subjects(&mailbox, cx).len() == 3)
@@ -285,4 +278,39 @@ fn a_message_still_listed_after_a_move_stays_selected(cx: &mut TestAppContext) {
         })
     });
     cx.read(|cx| assert_eq!(shown_in_reader(&mailbox, cx), Some(plan)));
+}
+
+/// All Inboxes shows Gmail's INBOX label: a message moved from there leaves it, as from
+/// the account's INBOX.
+#[gpui_kit::test]
+fn a_message_moved_from_all_inboxes_leaves_its_inbox(cx: &mut TestAppContext) {
+    let mail = TestMail::start_gmail();
+    // The same mailbox: "Plan" is in both accounts' INBOX.
+    mail.add_another_account("bob@gmail.com");
+    let (window, mailbox) = open(cx, &mail);
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| subjects(&mailbox, cx) == ["Plan", "Plan"])
+    });
+    cx.read(|cx| assert_eq!(mailbox.read(cx).place, Some(Place::Inboxes)));
+    let plan = click_message(cx, window, &mailbox, "Plan");
+    let account = cx.read(|cx| find(&mailbox, "Plan", cx).unwrap().account_id);
+    let personal = pollster::block_on(mail.client.find_folder(account, "Personal"))
+        .unwrap()
+        .unwrap()
+        .id;
+    cx.update_window(window, |_, window, cx| {
+        mailbox.update(cx, |mailbox, cx| {
+            mailbox.move_selected(personal, window, cx)
+        })
+    })
+    .unwrap();
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| listed(&mailbox, cx).iter().all(|m| m.id != plan))
+    });
+    cx.read(|cx| assert_eq!(subjects(&mailbox, cx), ["Plan"]));
+
+    pollster::block_on(mail.client.replay_pending(account)).unwrap();
+    assert_eq!(mail.server_labels("Plan"), ["Work", "Personal"]);
 }

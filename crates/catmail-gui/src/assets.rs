@@ -78,6 +78,7 @@ heroicons! {
     Folder => "outline" / "folder",
     FolderArrowDown => "outline" / "folder-arrow-down",
     Inbox => "outline" / "inbox",
+    InboxStack => "outline" / "inbox-stack",
     InformationCircle => "outline" / "information-circle",
     Key => "outline" / "key",
     MagnifyingGlass => "outline" / "magnifying-glass",

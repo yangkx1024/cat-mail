@@ -1,5 +1,5 @@
-//! The middle pane: a folder's messages (loaded a page at a time as the list scrolls),
-//! search results, the drafts kept here, or what is waiting in the outbox, newest first
+//! The middle pane: a folder's messages, or every account's INBOX together (loaded a
+//! page at a time as the list scrolls), search results, the drafts kept here, or what is waiting in the outbox, newest first
 //! under a heading for each day. The list (`ListState`) owns selection, keyboard
 //! navigation and scrolling; the delegate here owns the rows.
 
@@ -32,6 +32,8 @@ const PAGE: u32 = 200;
 /// What the list shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
+    /// Every account's INBOX.
+    Inboxes,
     Folder(FolderId),
     Search(String),
     Drafts(AccountId),
@@ -406,19 +408,19 @@ async fn fetch(
     limit: u32,
     after: Option<MessageCursor>,
 ) -> catmail_core::Result<(Vec<Row>, bool)> {
+    // A full page may have more after it.
+    let page = |messages: Vec<MessageSummary>| {
+        let more = messages.len() == limit as usize;
+        (messages.into_iter().map(Row::Message).collect(), more)
+    };
     Ok(match source {
-        Source::Folder(folder) => {
-            let page = client.list_messages(*folder, limit, after).await?;
-            let more = page.len() == limit as usize;
-            (page.into_iter().map(Row::Message).collect(), more)
-        }
+        Source::Inboxes => page(client.list_inboxes(limit, after).await?),
+        Source::Folder(folder) => page(client.list_messages(*folder, limit, after).await?),
         Source::Search(text) => {
             let mut query = SearchQuery::new(text.clone());
             query.limit = limit;
             query.after = after;
-            let found = client.search(query).await?;
-            let more = found.len() == limit as usize;
-            (found.into_iter().map(Row::Message).collect(), more)
+            page(client.search(query).await?)
         }
         Source::Drafts(account) => {
             let drafts = client.list_drafts(*account).await?;
@@ -655,7 +657,7 @@ impl ListDelegate for MessageList {
     ) -> impl IntoElement {
         let text = match &self.source {
             None => "No folder selected",
-            Some(Source::Folder(_)) => "No messages",
+            Some(Source::Inboxes | Source::Folder(_)) => "No messages",
             Some(Source::Search(_)) => "Nothing found",
             Some(Source::Drafts(_)) => "No drafts",
             Some(Source::Outbox(_)) => "Nothing waiting to be sent",
@@ -688,7 +690,7 @@ impl ListDelegate for MessageList {
         // `load` needs the list, which is being updated right now.
         cx.defer_in(window, |list, window, cx| {
             let delegate = list.delegate();
-            // Only folders and search results have more pages, and their rows are messages.
+            // Only messages have more pages: of folders, the inboxes and search results.
             let last = delegate.rows.last().and_then(Row::message);
             if let Some(last) = last.filter(|_| !delegate.loading) {
                 load(list, Load::After(last.cursor()), window, cx);
