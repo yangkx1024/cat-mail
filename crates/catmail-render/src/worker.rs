@@ -10,6 +10,7 @@
 //! busy until done, but no other document waits for it; the caller decides how long to
 //! wait, and drops the [`Document`] to let the thread end.
 
+use std::borrow::Cow;
 use std::future::Future;
 use std::sync::mpsc;
 use std::thread;
@@ -54,12 +55,11 @@ fn recolored(mut source: Source, appearance: Appearance) -> (Source, Appearance)
         return (source, appearance);
     };
     match recolor(&source.html) {
-        Some(html) => {
-            source.html = html.into();
-            (source, appearance)
-        }
-        None => (source, Appearance::default()),
+        Some(Cow::Owned(html)) => source.html = html.into(),
+        Some(Cow::Borrowed(_)) => {}
+        None => return (source, Appearance::default()),
     }
+    (source, appearance)
 }
 
 /// Opens an engine's page, on the thread that keeps it.
@@ -304,5 +304,27 @@ mod tests {
         assert!(pollster::block_on(document.hit(300.0, 0.0, 0.0)).is_err());
         assert!(pollster::block_on(document.layout(300.0)).is_err());
         assert!(pollster::block_on(open("0").layout(300.0)).is_ok());
+    }
+
+    #[test]
+    fn a_page_kept_as_it_is_is_not_copied() {
+        let source = || Source {
+            html: "<p>x</p>".into(),
+            images: Arc::new(|_| None),
+        };
+        let appearance = |recolor: crate::Recolor| Appearance {
+            dark: true,
+            recolor: Some(recolor),
+            ..Appearance::default()
+        };
+        let kept = source();
+        let html = kept.html.clone();
+        let (kept, look) = recolored(kept, appearance(Arc::new(|html| Some(html.into()))));
+        assert!(Arc::ptr_eq(&kept.html, &html) && look.dark);
+        let moved = appearance(Arc::new(|html| Some(html.replace('x', "y").into())));
+        let (moved, look) = recolored(source(), moved);
+        assert_eq!((&*moved.html, look.dark), ("<p>y</p>", true));
+        let (declined, look) = recolored(source(), appearance(Arc::new(|_| None)));
+        assert_eq!((&*declined.html, look.dark), ("<p>x</p>", false));
     }
 }

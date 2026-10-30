@@ -3,7 +3,8 @@
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use ammonia::{Builder, UrlRelative};
 use html5ever::tokenizer::{TagKind, Token, TokenSink, TokenSinkResult};
@@ -34,13 +35,19 @@ pub(crate) type ImageHook = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 static SANITIZER: LazyLock<Builder<'static>> = LazyLock::new(|| sanitizer(None, None));
 
+/// Colors moved for a dark page as the sanitizer goes.
+pub(crate) struct Recolor {
+    palette: DarkPalette,
+    /// Set when a `style` attribute sets colors with custom properties (`var()`), which
+    /// can't be moved.
+    colors_from_variables: Arc<AtomicBool>,
+}
+
 /// The one sanitizer configuration; `on_image` lets a renderer see or replace image
-/// sources during the same parse, instead of scanning the HTML text afterwards. With a
-/// palette, colors in attributes are moved for a dark page.
-pub(crate) fn sanitizer(
-    on_image: Option<ImageHook>,
-    recolor: Option<DarkPalette>,
-) -> Builder<'static> {
+/// sources during the same parse, instead of scanning the HTML text afterwards. With
+/// `recolor`, colors in attributes are moved for a dark page.
+pub(crate) fn sanitizer(on_image: Option<ImageHook>, recolor: Option<Recolor>) -> Builder<'static> {
+    let palette = recolor.as_ref().map(|r| r.palette);
     let mut builder = Builder::default();
     builder
         .add_tags(["font"])
@@ -57,14 +64,19 @@ pub(crate) fn sanitizer(
             } else if attribute == "style" {
                 // Written again from its tokens, as style sheets are: remote images must
                 // stay blockable, also as CSS backgrounds.
-                let style = css::sanitize_style(value, recolor).css;
-                (!style.is_empty()).then_some(Cow::Owned(style))
+                let style = css::sanitize_style(value, palette);
+                if style.colors_from_variables
+                    && let Some(recolor) = &recolor
+                {
+                    recolor.colors_from_variables.store(true, Ordering::Relaxed);
+                }
+                (!style.css.is_empty()).then_some(Cow::Owned(style.css))
             } else if let Some(replaced) =
                 on_image.as_ref().filter(|_| image).and_then(|f| f(value))
             {
                 Some(Cow::Owned(replaced))
             } else if let Some(recolored) =
-                recolor.and_then(|palette| recolor_attribute(palette, attribute, value))
+                palette.and_then(|palette| recolor_attribute(palette, attribute, value))
             {
                 Some(Cow::Owned(recolored))
             } else {
@@ -106,67 +118,62 @@ pub fn sanitize_html(html: &str) -> String {
 /// HTML that [`sanitize_html`] produced, with its own colors moved for a dark page with
 /// `palette`'s colors, as Gmail and Outlook show mail written for white (`dark.rs`): in
 /// its style sheets, `style` attributes, and `bgcolor` and `color` attributes. A message
-/// with dark styles of its own is left as it is: those apply.
+/// with dark styles of its own is left as it is (borrowed, not copied): those apply.
 ///
 /// `None` for a message that sets colors with custom properties (`var()`): what a
 /// variable holds where it is used is up to the cascade, which only the engine knows, so
 /// no move where it is set keeps every pair it ends up in readable. Such a message is to
 /// be shown as written, on a light page. Mail clients rarely support them, so mail rarely
 /// uses them.
-pub fn recolor_html(html: &str, palette: DarkPalette) -> Option<String> {
-    let styles = styles(html, true);
-    let sheet = css::sanitize(&styles.sheets, Some(palette));
+pub fn recolor_html(html: &str, palette: DarkPalette) -> Option<Cow<'_, str>> {
+    let sheet = css::sanitize(&style_sheets(html), Some(palette));
     if sheet.adapts_to_dark {
-        return Some(html.to_owned());
+        return Some(Cow::Borrowed(html));
     }
-    let attributes = styles.attributes.iter();
-    if sheet.colors_from_variables
-        || attributes
-            .map(|style| css::sanitize_style(style, Some(palette)))
-            .any(|s| s.colors_from_variables)
-    {
+    if sheet.colors_from_variables {
         return None;
     }
-    Some(with_sheet(
-        &sheet.css,
-        &sanitizer(None, Some(palette)),
-        html,
-    ))
+    // Known only once the attributes are rewritten; the rare message that uses them is
+    // then rewritten for nothing.
+    let colors_from_variables = Arc::new(AtomicBool::new(false));
+    let recolor = Recolor {
+        palette,
+        colors_from_variables: colors_from_variables.clone(),
+    };
+    let html = with_sheet(&sheet.css, &sanitizer(None, Some(recolor)), html);
+    (!colors_from_variables.load(Ordering::Relaxed)).then_some(Cow::Owned(html))
 }
 
 /// The sanitizer's output with the message's style sheets in front. ammonia drops every
 /// `<style>` with its content: it doesn't look inside, and writes raw text back as it is.
 pub(crate) fn clean(builder: &Builder<'_>, html: &str) -> String {
-    let sheet = css::sanitize(&styles(html, false).sheets, None);
+    let sheet = css::sanitize(&style_sheets(html), None);
     with_sheet(&sheet.css, builder, html)
 }
 
 fn with_sheet(sheet: &str, builder: &Builder<'_>, html: &str) -> String {
-    let mut out = String::new();
+    let mut out = Vec::new();
     if !sheet.is_empty() {
-        out.push_str("<style>");
-        out.push_str(sheet);
-        out.push_str("</style>");
+        out.extend_from_slice(b"<style>");
+        out.extend_from_slice(sheet.as_bytes());
+        out.extend_from_slice(b"</style>");
     }
-    out.push_str(&builder.clean(html).to_string());
-    out
+    // Serialized after the sheet: the document's `Display` would build a string of its own
+    // that is then copied here.
+    builder
+        .clean(html)
+        .write_to(&mut out)
+        .expect("writing to a Vec doesn't fail");
+    String::from_utf8(out).expect("html5ever writes UTF-8")
 }
 
-/// The styles of HTML: its style sheets, and its `style` attributes if asked for.
-struct Styles {
-    sheets: Vec<css::Element>,
-    attributes: Vec<String>,
-}
-
-/// Finds the [`Styles`] of HTML by tokenizing it as the tree builder would switch to raw
+/// Finds the style sheets of HTML by tokenizing it as the tree builder would switch to raw
 /// text (so `<style>` inside `<script>` or `<textarea>` is no style sheet). Style sheets
 /// in SVG or MathML are skipped: the sanitizer drops that content whole, and so are those
 /// of a `type` other than CSS (templates), which a browser doesn't apply either.
-fn styles(html: &str, attributes: bool) -> Styles {
+fn style_sheets(html: &str) -> Vec<css::Element> {
     struct Sink {
         sheets: RefCell<Vec<css::Element>>,
-        /// `None` if not asked for.
-        attributes: Option<RefCell<Vec<String>>>,
         /// The text taken so far.
         len: Cell<usize>,
         /// `<svg>` and `<math>` elements open.
@@ -180,10 +187,6 @@ fn styles(html: &str, attributes: bool) -> Styles {
         fn process_token(&self, token: Token, _line: u64) -> TokenSinkResult<()> {
             match token {
                 Token::TagToken(tag) if tag.kind == TagKind::StartTag => {
-                    if let Some(attributes) = &self.attributes {
-                        let styles = tag.attrs.iter().filter(|a| &*a.name.local == "style");
-                        (attributes.borrow_mut()).extend(styles.map(|a| a.value.to_string()));
-                    }
                     let name = &*tag.name;
                     if matches!(name, "svg" | "math") {
                         if !tag.self_closing {
@@ -230,16 +233,11 @@ fn styles(html: &str, attributes: bool) -> Styles {
 
     let sink = Sink {
         sheets: RefCell::default(),
-        attributes: attributes.then(RefCell::default),
         len: Cell::new(0),
         foreign: Cell::new(0),
         in_style: Cell::new(false),
     };
-    let sink = tokens::tokenize(html, sink);
-    Styles {
-        sheets: sink.sheets.into_inner(),
-        attributes: sink.attributes.map(RefCell::into_inner).unwrap_or_default(),
-    }
+    tokens::tokenize(html, sink).sheets.into_inner()
 }
 
 #[cfg(test)]
@@ -314,7 +312,8 @@ mod tests {
         let adaptive = sanitize_html(
             r#"<style media="(prefers-color-scheme: dark)">.a{color:#eee}</style><p class=a style="color:#333">x</p>"#,
         );
-        assert_eq!(recolor_html(&adaptive, PALETTE), Some(adaptive));
+        let kept = recolor_html(&adaptive, PALETTE);
+        assert!(matches!(kept, Some(Cow::Borrowed(h)) if h == adaptive));
     }
 
     #[test]
@@ -341,6 +340,7 @@ mod tests {
         for custom in [
             r#"<style>.a{--fg:#000}</style><p class=a style="color:var(--fg)">x</p>"#,
             r#"<style>.a{color:var(--fg)}</style><p class=a style="--fg:#000">x</p>"#,
+            r#"<p style="background:var(--bg, #fff)">x</p><p style="margin:0">y</p>"#,
         ] {
             assert_eq!(
                 recolor_html(&sanitize_html(custom), PALETTE),
@@ -351,12 +351,14 @@ mod tests {
         // A message without colors is left as it was, and one with dark styles of its own
         // keeps its colors for them.
         let plain = sanitize_html("<style>p{margin:0;}</style><p align=\"center\">x</p>");
-        assert_eq!(recolor_html(&plain, PALETTE).as_ref(), Some(&plain));
+        assert_eq!(recolor_html(&plain, PALETTE).as_deref(), Some(&*plain));
         let adaptive = sanitize_html(
             "<style>@media (prefers-color-scheme: dark){.a{color:#eee}}</style>\
              <p class=a style=\"color:#333\">x</p>",
         );
-        assert_eq!(recolor_html(&adaptive, PALETTE).as_ref(), Some(&adaptive));
+        // Not copied: the reader keeps what it has.
+        let kept = recolor_html(&adaptive, PALETTE);
+        assert!(matches!(kept, Some(Cow::Borrowed(h)) if h == adaptive));
     }
 
     #[test]
@@ -471,7 +473,7 @@ mod tests {
         // The rewritten value is still only an attribute, also for a dark page.
         let dirty = r#"<p style="color:#000;font-family:'&quot;><script>alert(1)</script>'">x</p>"#;
         let clean = sanitize_html(dirty);
-        for html in [recolor_html(&clean, PALETTE).unwrap(), clean] {
+        for html in [recolor_html(&clean, PALETTE).unwrap().into_owned(), clean] {
             assert!(html.starts_with("<p style=\"color:#"), "{html}");
             assert!(html.ends_with("\">x</p>"), "{html}");
             assert_eq!(html.matches('"').count(), 2, "{html}");

@@ -379,7 +379,7 @@ Blitz 用的是 fork（`yangkx1024/blitz`，基于 0.3.0-beta.4，根 `Cargo.tom
   `a[href]`，否则 Blitz 自带样式表里同一选择器的 `#0000ee` 会赢）。正文自己的颜色像 Gmail 那样转换：
   `Appearance::recolor` 在文档线程上、Blitz 解析之前对 HTML 跑 `recolor_html`（见
   [正文](bodies.md)），把样式表、`style`、`bgcolor` / `color` 里的颜色按用途搬到主题色上；自带深色
-  样式的正文原样保留，用它自己的。颜色用了 CSS 变量的正文转换不了，钩子返回 `None`，文档线程改用
+  样式的正文原样保留，用它自己的（钩子返回借用的原文，文档线程沿用手上的 HTML，不复制）。颜色用了 CSS 变量的正文转换不了，钩子返回 `None`，文档线程改用
   默认外观（白色画布、不加读信区的样式表、`prefers-color-scheme` 回答 light），按原样显示成浅色。
   图片不变。
   `PageView` 每帧比较主题的这几种颜色，变了就按新外观重新打开文档。
