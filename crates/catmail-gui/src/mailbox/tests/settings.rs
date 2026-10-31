@@ -478,3 +478,45 @@ fn dialogs_open_in_the_middle_of_the_window(cx: &mut TestAppContext) {
     })
     .unwrap();
 }
+
+#[gpui_kit::test]
+fn dialogs_settle_in_place_and_take_their_time_to_leave(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    cx.update(|cx| cx.set_reduce_motion(false));
+    let top = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window
+                .try_find("surface")
+                .map(|surface| surface.bounds().top())
+        })
+        .unwrap()
+    };
+    let step = |ms, cx: &mut TestAppContext| {
+        cx.executor().advance_clock(Duration::from_millis(ms));
+        top(cx)
+    };
+
+    cx.update_window(window, |_, window, cx| {
+        crate::layout::confirm_danger("Delete?", "For good.", "Delete", window, cx, |_, _| {});
+    })
+    .unwrap();
+    let opening = top(cx).unwrap();
+    let settled = step(500, cx).unwrap();
+    // A few pixels above its place, not from the window's top.
+    assert!(
+        opening < settled && settled - opening <= px(8.),
+        "opened at {opening:?}, settled at {settled:?}"
+    );
+
+    cx.update_window(window, |_, window, cx| window.close_dialog(cx))
+        .unwrap();
+    let leaving = step(90, cx).unwrap();
+    assert!(
+        leaving < settled && settled - leaving <= px(8.),
+        "halfway out at {leaving:?}, from {settled:?}"
+    );
+    assert_eq!(step(500, cx), None);
+}

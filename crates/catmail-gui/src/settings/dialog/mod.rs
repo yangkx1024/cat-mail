@@ -11,7 +11,7 @@ mod themes;
 use catmail_core::MailClient;
 use gpui_kit::component::select::{SelectEvent, SelectState};
 use gpui_kit::component::sidebar::{SidebarItem as _, SidebarMenu};
-use gpui_kit::component::{ActiveTheme as _, IndexPath, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, IndexPath, h_flex, v_flex};
 use gpui_kit::{
     App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
@@ -75,7 +75,7 @@ pub struct SettingsView {
 pub fn open(client: MailClient, mailbox: WeakEntity<Mailbox>, window: &mut Window, cx: &mut App) {
     let view = cx.new(|cx| SettingsView::new(client, mailbox, window, cx));
     let width = rems(50.).to_pixels(window.rem_size());
-    window.open_dialog(cx, move |dialog, _, _| {
+    layout::open_dialog(window, cx, move |dialog, _, _| {
         dialog
             .title("Settings")
             .w(width)
