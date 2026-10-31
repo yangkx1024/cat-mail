@@ -1,4 +1,4 @@
-//! The themes that come with cat-mail, kept as terminal palettes and derived like
+//! The themes that come with catmail, kept as terminal palettes and derived like
 //! imported ones, so built-in and imported themes follow the same rules.
 
 use gpui_kit::component::ThemeConfig;
@@ -6,8 +6,8 @@ use gpui_kit::component::ThemeConfig;
 use super::derive::theme_config;
 use super::palette::{Rgb, TerminalPalette};
 
-pub const DEFAULT_LIGHT: &str = "cat-mail Light";
-pub const DEFAULT_DARK: &str = "cat-mail Dark";
+pub const DEFAULT_LIGHT: &str = "catmail Light";
+pub const DEFAULT_DARK: &str = "catmail Dark";
 
 /// (name, background, foreground, ANSI 0–15).
 type Scheme = (&'static str, u32, u32, [u32; 16]);

@@ -1,4 +1,4 @@
-# Throwaway Dovecot for cat-mail's real-server tests; run.sh fills in the @...@ values.
+# Throwaway Dovecot for catmail's real-server tests; run.sh fills in the @...@ values.
 # Runs as the invoking user, on loopback only: IMAP in plaintext, and the submission
 # service (SMTP) with STARTTLS and implicit TLS, relaying to a mailpit sink.
 dovecot_config_version = 2.4.5

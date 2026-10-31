@@ -1,6 +1,6 @@
 [package]
 name = "catmail-core"
-description = "cat-mail engine: services, sync, and the MailClient facade used by all frontends"
+description = "catmail engine: services, sync, and the MailClient facade used by all frontends"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

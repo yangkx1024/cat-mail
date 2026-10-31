@@ -75,7 +75,7 @@ impl ImportedTheme {
 /// Why a file couldn't be imported, worded for the person who picked it.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ImportError {
-    #[error("This isn't a color scheme cat-mail can read.")]
+    #[error("This isn't a color scheme catmail can read.")]
     Unrecognized,
     #[error("No background and foreground colors were found in it.")]
     NoColors,

@@ -240,7 +240,7 @@ impl SettingsView {
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
                         .child(
-                            "cat-mail reads color schemes from Alacritty (.toml), kitty (.conf), \
+                            "catmail reads color schemes from Alacritty (.toml), kitty (.conf), \
                              Ghostty, WezTerm (.toml), Windows Terminal (.json), iTerm2 \
                              (.itermcolors), foot (.ini), Xresources, base16 / base24 (.yaml) \
                              and GPUI Kit themes (.json).",

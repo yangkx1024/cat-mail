@@ -22,7 +22,7 @@ use crate::output::printable_text;
 #[command(
     name = "catmail",
     version = catmail_core::VERSION,
-    about = "cat-mail from the terminal",
+    about = "catmail from the terminal",
     after_help = concat!(
         "Exit status:\n",
         "  0  done\n",
@@ -128,7 +128,7 @@ async fn main() -> ExitCode {
 fn open_failed(e: catmail_core::Error) -> anyhow::Error {
     let context = match e {
         catmail_core::Error::AlreadyRunning(_) => {
-            "failed to open the local mail store (the cat-mail app keeps running after its \
+            "failed to open the local mail store (the catmail app keeps running after its \
              window is closed; quit it first)"
         }
         _ => "failed to open the local mail store",

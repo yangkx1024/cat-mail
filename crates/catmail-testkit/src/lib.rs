@@ -1,4 +1,4 @@
-//! Protocol test environment for cat-mail.
+//! Protocol test environment for catmail.
 //!
 //! [`FakeImap`] is a small in-process IMAP server with mutable mailboxes and fault
 //! injection (dropped connections, duplicate or reordered responses, missing CONDSTORE,

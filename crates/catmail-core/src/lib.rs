@@ -1,4 +1,4 @@
-//! The cat-mail engine and the [`MailClient`] facade.
+//! The catmail engine and the [`MailClient`] facade.
 //!
 //! Frontends (CLI, GUI) depend on this crate only. Every public async method is
 //! executor-agnostic: work runs on a tokio runtime owned by (or handed to) the client,

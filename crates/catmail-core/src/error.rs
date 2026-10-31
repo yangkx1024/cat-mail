@@ -100,7 +100,7 @@ pub enum Error {
     #[error("accounts aren't kept in sync in the background; sync each one instead")]
     NoBackgroundSync,
 
-    #[error("another cat-mail instance is already using {}", .0.display())]
+    #[error("another catmail instance is already using {}", .0.display())]
     AlreadyRunning(std::path::PathBuf),
 
     /// Whoever owns the data directory could read or replace what is stored in it.

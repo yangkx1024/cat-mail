@@ -40,11 +40,11 @@ use crate::resident::{Engine, Resident};
 /// What the system knows the app by: on Windows its AppUserModelID; elsewhere only the
 /// name shows (notifications, the tray). The qualifier of the data and config
 /// directories (`Config`).
-pub const APP_ID: &str = "dev.CatMail.CatMail";
-pub const APP_NAME: &str = "cat-mail";
+pub const APP_ID: &str = "net.yangkx.catmail";
+pub const APP_NAME: &str = "catmail";
 
 #[derive(Parser)]
-#[command(name = "catmail-gui", version = catmail_core::VERSION, about = "cat-mail in a window")]
+#[command(name = "catmail-gui", version = catmail_core::VERSION, about = "catmail in a window")]
 struct Cli {
     /// Directory for the database and blobs [default: platform data dir]
     #[arg(long, env = "CATMAIL_DATA_DIR")]
@@ -153,7 +153,7 @@ fn step_text_size(step: isize, cx: &mut App) {
 
 pub(crate) fn window_options(cx: &App) -> WindowOptions {
     layout::window_options(
-        "cat-mail",
+        "catmail",
         size(px(1280.), px(800.)),
         size(px(720.), px(480.)),
         cx,

@@ -686,8 +686,8 @@ impl Mailbox {
 
     fn title(&self) -> String {
         match self.place_label() {
-            Some(label) => format!("{label} — cat-mail"),
-            None => "cat-mail".into(),
+            Some(label) => format!("{label} — catmail"),
+            None => "catmail".into(),
         }
     }
 

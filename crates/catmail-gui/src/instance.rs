@@ -205,9 +205,9 @@ fn hand(socket: &Path, request: &Request) -> anyhow::Result<bool> {
         )?;
         Ok(serde_json::from_str(&read_line(&stream)?)?)
     };
-    let reply = ask().context("the running cat-mail didn't answer")?;
+    let reply = ask().context("the running catmail didn't answer")?;
     match reply.error {
-        Some(error) => bail!("the running cat-mail refused: {error}"),
+        Some(error) => bail!("the running catmail refused: {error}"),
         None => Ok(true),
     }
 }

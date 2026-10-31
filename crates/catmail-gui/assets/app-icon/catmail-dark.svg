@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
-  <title id="title">Cat Mail</title>
+  <title id="title">catmail</title>
   <desc id="desc">An orange cat paw stamped on a cream envelope, with a dark rounded background.</desc>
   <defs>
     <linearGradient id="tile" x1="64" y1="24" x2="448" y2="512" gradientUnits="userSpaceOnUse">

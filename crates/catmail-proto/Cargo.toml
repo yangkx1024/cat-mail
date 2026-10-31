@@ -1,6 +1,6 @@
 [package]
 name = "catmail-proto"
-description = "Remote mail protocol adapters (IMAP, SMTP) for cat-mail"
+description = "Remote mail protocol adapters (IMAP, SMTP) for catmail"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "catmail-cli"
-description = "Command-line frontend for cat-mail"
+description = "Command-line frontend for catmail"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

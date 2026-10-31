@@ -1,4 +1,4 @@
-//! Domain types shared by every cat-mail layer.
+//! Domain types shared by every catmail layer.
 //!
 //! This crate is pure data: no IO, no async, no storage details. Storage and protocol
 //! crates map their own representations into these types, and frontends only ever see

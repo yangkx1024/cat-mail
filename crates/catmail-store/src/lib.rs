@@ -1,4 +1,4 @@
-//! Local persistence for cat-mail: the SQLite database and the on-disk blob store.
+//! Local persistence for catmail: the SQLite database and the on-disk blob store.
 //!
 //! Everything here is synchronous. `catmail-core` calls into it from blocking tasks.
 
