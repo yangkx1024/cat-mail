@@ -4,68 +4,122 @@ use catmail_core::{Draft, Flags, MessageSummary, OutboxEntry, OutboxStatus};
 use gpui_kit::component::Icon;
 use gpui_kit::component::list::ListItem;
 use gpui_kit::component::{h_flex, v_flex};
-use gpui_kit::{App, FontWeight, IntoElement, SharedString, div};
+use gpui_kit::{App, Div, FontWeight, SharedString, div, rems};
 
 use crate::assets::Hero;
 use crate::format;
 
 use super::*;
 
-/// Every row has the same three lines: the list requires one row height. The time is
-/// all a row says of when: its day is the heading above it.
-fn three_lines(
-    top: (SharedString, SharedString, bool),
-    middle: impl IntoElement,
-    bottom: impl IntoElement,
-    cx: &App,
-) -> impl IntoElement {
-    let (title, trailing, strong) = top;
-    v_flex()
-        .w_full()
-        .min_w_0()
-        .gap_0p5()
-        .child(
-            h_flex()
-                .gap_2()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_sm()
-                        .when(strong, |this| this.font_weight(FontWeight::BOLD))
-                        .child(title),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(trailing),
-                ),
-        )
-        .child(middle)
-        .child(bottom)
+/// How the rows of messages and drafts are laid out: on one line while the list has the
+/// window to itself, the subject under the sender while the reading pane is open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Shape {
+    Line,
+    Stacked,
 }
 
-fn snippet(text: Option<&str>, cx: &App) -> impl IntoElement + use<> {
-    // More words than a row has room for; a draft's text may be a whole forwarded message.
-    let text = text
-        .map(|s| s.split_whitespace().take(40).collect::<Vec<_>>().join(" "))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "\u{a0}".into());
+/// What a message or draft row shows: who it is from or to, its subject, its time (all a
+/// row says of when: its day is the heading above it) and the marks after the subject.
+/// `strong` sets the first two in bold.
+struct Summary {
+    who: SharedString,
+    subject: SharedString,
+    time: SharedString,
+    strong: bool,
+    marks: Div,
+}
+
+/// A stacked subject's line height: it always takes two lines, as every row of a list
+/// keeps one height.
+const SUBJECT_LINE: f32 = 1.25;
+
+impl Summary {
+    /// `item` laid out as `shape`, its padding too: a row on one line has the width to
+    /// spare.
+    fn row(self, item: ListItem, shape: Shape, cx: &App) -> ListItem {
+        let Self {
+            who,
+            subject,
+            time,
+            strong,
+            marks,
+        } = self;
+        match shape {
+            // The senders as a column, so the subjects line up.
+            Shape::Line => item.px_5().py_3().child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_3()
+                    .child(text(who, strong).w_48().flex_none().truncate())
+                    .child(text(subject, strong).flex_1().truncate())
+                    .child(marks)
+                    .child(time_of_day(time, cx)),
+            ),
+            Shape::Stacked => item.px_2().child(
+                v_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(top_line(who, time, strong, cx))
+                    .child(
+                        h_flex()
+                            .items_start()
+                            .gap_1p5()
+                            .child(
+                                // Set apart from the sender above it by color: weight tells
+                                // unread.
+                                text(subject, strong)
+                                    .flex_1()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .line_height(rems(SUBJECT_LINE))
+                                    .h(rems(2. * SUBJECT_LINE))
+                                    .line_clamp(2)
+                                    .text_ellipsis(),
+                            )
+                            // Beside the subject's first line.
+                            .child(h_flex().flex_none().h(rems(SUBJECT_LINE)).child(marks)),
+                    ),
+            ),
+        }
+    }
+}
+
+fn text(text: SharedString, strong: bool) -> Div {
     div()
-        .truncate()
+        .min_w_0()
+        .text_sm()
+        .when(strong, |this| this.font_weight(FontWeight::BOLD))
+        .child(text)
+}
+
+fn time_of_day(time: SharedString, cx: &App) -> Div {
+    div()
+        .flex_none()
         .text_xs()
         .text_color(cx.theme().muted_foreground)
-        .child(text)
+        .child(time)
+}
+
+/// The title of a row over the rest, its time at the end.
+fn top_line(title: SharedString, time: SharedString, strong: bool, cx: &App) -> Div {
+    h_flex()
+        .gap_2()
+        .child(text(title, strong).flex_1().truncate())
+        .child(time_of_day(time, cx))
 }
 
 /// The most labels a row shows by name; the rest are counted.
 const ROW_LABELS: usize = 2;
 
 /// `labels` are the names of the message's labels to show.
-pub(super) fn message_row(message: &MessageSummary, labels: &[SharedString], cx: &App) -> ListItem {
+pub(super) fn message_row(
+    message: &MessageSummary,
+    labels: &[SharedString],
+    shape: Shape,
+    cx: &App,
+) -> ListItem {
     let unread = !message.flags.contains(Flags::SEEN);
     let flagged = message.flags.contains(Flags::FLAGGED);
     let sender = format::sender(&message.from);
@@ -89,18 +143,8 @@ pub(super) fn message_row(message: &MessageSummary, labels: &[SharedString], cx:
     );
     let more = labels.len().saturating_sub(ROW_LABELS);
     let neutral = cx.theme().neutral_badge();
-    let middle = h_flex()
+    let marks = h_flex()
         .gap_1p5()
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .text_sm()
-                // Unread is told by weight alone: sender and subject in bold.
-                .when(unread, |this| this.font_weight(FontWeight::BOLD))
-                .child(subject),
-        )
         .children(labels.iter().take(ROW_LABELS).map(|name| {
             crate::layout::badge(name.clone(), neutral, cx)
                 .min_w_0()
@@ -126,17 +170,19 @@ pub(super) fn message_row(message: &MessageSummary, labels: &[SharedString], cx:
                     .text_color(cx.theme().flag()),
             )
         });
-    ListItem::new(("message", message.id.0 as u64))
-        .accessibility_label(label)
-        .child(three_lines(
-            (sender.into(), date.into(), unread),
-            middle,
-            snippet(message.snippet.as_deref(), cx),
-            cx,
-        ))
+    let summary = Summary {
+        who: sender.into(),
+        subject: subject.into(),
+        time: date.into(),
+        // Unread is told by weight alone: sender and subject in bold.
+        strong: unread,
+        marks,
+    };
+    let item = ListItem::new(("message", message.id.0 as u64)).accessibility_label(label);
+    summary.row(item, shape, cx)
 }
 
-pub(super) fn draft_row(draft: &Draft, cx: &App) -> ListItem {
+pub(super) fn draft_row(draft: &Draft, shape: Shape, cx: &App) -> ListItem {
     let to = format::names(draft.content.recipients());
     let to = if to.is_empty() {
         "No recipients".to_owned()
@@ -145,19 +191,21 @@ pub(super) fn draft_row(draft: &Draft, cx: &App) -> ListItem {
     };
     let subject = format::subject(Some(&draft.content.subject)).to_owned();
     let date = format::time(Some(draft.updated_at));
-    let muted = cx.theme().muted_foreground;
-    let middle = h_flex()
-        .gap_1p5()
-        .child(div().flex_1().min_w_0().truncate().text_sm().child(subject))
-        .when(!draft.attachments.is_empty(), |this| {
-            this.child(Icon::new(Hero::PaperClip).xsmall().text_color(muted))
-        });
-    ListItem::new(("draft", draft.id.0 as u64)).child(three_lines(
-        (to.into(), date.into(), false),
-        middle,
-        snippet(Some(&draft.content.text), cx),
-        cx,
-    ))
+    let marks = h_flex().when(!draft.attachments.is_empty(), |this| {
+        this.child(
+            Icon::new(Hero::PaperClip)
+                .xsmall()
+                .text_color(cx.theme().muted_foreground),
+        )
+    });
+    let summary = Summary {
+        who: to.into(),
+        subject: subject.into(),
+        time: date.into(),
+        strong: false,
+        marks,
+    };
+    summary.row(ListItem::new(("draft", draft.id.0 as u64)), shape, cx)
 }
 
 /// How an outbox entry's state reads, and how loud it is if it needs the user.
@@ -196,16 +244,29 @@ pub(super) fn outbox_row(entry: &OutboxEntry, cx: &App) -> ListItem {
         None => theme.neutral_badge(),
     };
     let badge = h_flex().child(crate::layout::badge(status, (bg, fg), cx));
+    let accessibility_label = format!("{subject}, {to}, {status}");
+    // Three lines in every row: the list requires one row height.
     ListItem::new(("outbox", entry.id.0 as u64))
-        .accessibility_label(format!("{subject}, {to}, {status}"))
-        .child(three_lines(
-            (subject.into(), date.into(), severity.is_some()),
-            div()
-                .truncate()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(to),
-            badge,
-            cx,
-        ))
+        .accessibility_label(accessibility_label)
+        .px_2()
+        .child(
+            v_flex()
+                .w_full()
+                .min_w_0()
+                .gap_0p5()
+                .child(top_line(
+                    subject.into(),
+                    date.into(),
+                    severity.is_some(),
+                    cx,
+                ))
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(to),
+                )
+                .child(badge),
+        )
 }

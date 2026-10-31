@@ -89,10 +89,32 @@ impl Mailbox {
                     .gap_2()
                     .p_3()
                     .child(
-                        Input::new(&self.search)
-                            .id("search")
-                            .prefix(Icon::new(Hero::MagnifyingGlass).small())
-                            .cleanable(true),
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new("sync")
+                                    .ghost()
+                                    .rounded_full()
+                                    .icon(Hero::ArrowPath)
+                                    .accessibility_label("Sync now")
+                                    .loading(self.syncing())
+                                    .disabled(
+                                        self.accounts.as_deref().unwrap_or_default().is_empty(),
+                                    )
+                                    .tooltip_with_action("Sync now", &Sync, Some(actions::MAILBOX))
+                                    .on_click(
+                                        cx.listener(|this, _, window, cx| this.sync(window, cx)),
+                                    ),
+                            )
+                            .child(
+                                Input::new(&self.search)
+                                    .id("search")
+                                    .flex_1()
+                                    // As round as "Compose" across from it.
+                                    .rounded_full()
+                                    .prefix(Icon::new(Hero::MagnifyingGlass).small())
+                                    .cleanable(true),
+                            ),
                     )
                     .child(
                         h_flex()
@@ -117,9 +139,12 @@ impl Mailbox {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .px_1p5()
                     .key_context(actions::MESSAGE_LIST)
-                    .child(List::new(&self.messages)),
+                    .child(
+                        // The sidebar's margins, inside the scrolling: rows as far in, room
+                        // below the last, and the scrollbar in the margin, off the rows.
+                        List::new(&self.messages).scroll_bounce(true).px_3().pb_3(),
+                    ),
             )
     }
 

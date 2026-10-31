@@ -21,7 +21,7 @@ use gpui_kit::{
 
 use super::folders::{self, FolderNode, RoleInfo};
 use super::{AccountEntry, Mailbox, Place};
-use crate::actions::{self, NewMessage, OpenSettings, Sync};
+use crate::actions::{self, NewMessage, OpenSettings};
 use crate::assets::Hero;
 use crate::layout;
 
@@ -82,9 +82,10 @@ impl Mailbox {
             .child(
                 Button::new("settings")
                     .ghost()
-                    .small()
+                    // As the Sync button by the search field.
+                    .rounded_full()
                     .icon(Hero::Cog6Tooth)
-                    .label("Settings")
+                    .accessibility_label("Settings")
                     .tooltip_with_action("Settings", &OpenSettings, Some(actions::MAILBOX))
                     .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
             )
@@ -102,16 +103,6 @@ impl Mailbox {
                         this.tooltip(move |window, cx| Tooltip::new(note.clone()).build(window, cx))
                     })
                     .children(note),
-            )
-            .child(
-                Button::new("sync")
-                    .ghost()
-                    .small()
-                    .icon(Hero::ArrowPath)
-                    .loading(self.syncing())
-                    .disabled(accounts.is_empty())
-                    .tooltip_with_action("Sync now", &Sync, Some(actions::MAILBOX))
-                    .on_click(cx.listener(|this, _, window, cx| this.sync(window, cx))),
             );
         let inboxes = Place::Inboxes.is_in(accounts).then(|| {
             let unread = folders::unread(self.inboxes()) as usize;
@@ -188,13 +179,10 @@ impl Mailbox {
         cx.notify();
     }
 
-    /// One line on what is wrong with the connection, if anything: syncing, or the
-    /// first account the engine can't get through to (each of its addresses that can't
-    /// send).
+    /// One line on what is wrong with the connection, if anything: the first account the
+    /// engine can't get through to (each of its addresses that can't send). A sync going
+    /// on is told by the Sync button alone.
     fn connection_note(&self) -> Option<SharedString> {
-        if self.syncing() {
-            return Some("Syncing…".into());
-        }
         self.accounts.as_deref()?.iter().find_map(|entry| {
             let email = &entry.account.email;
             let status = &entry.status;
@@ -365,9 +353,14 @@ impl SidebarItem for Group {
         // Folding needs the address to click, which the icon-only sidebar doesn't show.
         let open = self.collapsed || self.heading.as_ref().is_none_or(|h| h.open);
         let places = self.heading.as_ref().map(|h| h.places.clone());
+        let heading = self.heading.filter(|_| !self.collapsed);
+        let headed = heading.is_some();
         v_flex()
-            .when_some(self.heading.filter(|_| !self.collapsed), |this, heading| {
+            .when_some(heading, |this, heading| {
                 let toggle = heading.toggle;
+                // Apart from the account above, as the places are from each other; the
+                // first has the section's title over it.
+                let first = heading.title.is_some();
                 this.children(heading.title.map(|title| {
                     // As SidebarGroup draws its label.
                     div()
@@ -412,11 +405,11 @@ impl SidebarItem for Group {
                         .test_support()
                         .aria_label(note.clone())
                         .px_2()
-                        .pb_2()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
                         .child(note)
                 }))
+                .when(!first, |this| this.pt_2())
             })
             .child(
                 collapsible::Collapsible::new()
@@ -424,6 +417,11 @@ impl SidebarItem for Group {
                     .when_some(places, |this, places| this.motion_id(places))
                     .content(
                         v_flex()
+                            // The reveal lays the places out on their own: without it they
+                            // would be as narrow as their text.
+                            .w_full()
+                            // Apart from the address, as the places are from each other.
+                            .when(headed, |this| this.pt_2())
                             // The id SidebarGroup gives its first child, so the items keep
                             // theirs.
                             .child(
