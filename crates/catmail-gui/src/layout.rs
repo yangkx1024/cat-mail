@@ -187,6 +187,7 @@ pub fn confirm_danger(
             });
         alert
             .title(title.clone())
+            .centered()
             .description(description.clone())
             .footer(DialogFooter::new().child(cancel).child(confirm))
             .on_ok(move |_, window, cx| {

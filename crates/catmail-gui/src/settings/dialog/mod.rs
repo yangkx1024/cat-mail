@@ -76,7 +76,11 @@ pub fn open(client: MailClient, mailbox: WeakEntity<Mailbox>, window: &mut Windo
     let view = cx.new(|cx| SettingsView::new(client, mailbox, window, cx));
     let width = rems(50.).to_pixels(window.rem_size());
     window.open_dialog(cx, move |dialog, _, _| {
-        dialog.title("Settings").w(width).child(view.clone())
+        dialog
+            .title("Settings")
+            .w(width)
+            .centered()
+            .child(view.clone())
     });
 }
 

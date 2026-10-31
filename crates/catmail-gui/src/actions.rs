@@ -3,7 +3,7 @@
 //! it.
 
 use gpui_kit::base::input::SelectAll;
-use gpui_kit::{App, KeyBinding, NoAction};
+use gpui_kit::{Action, App, KeyBinding, KeyBindingContextPredicate, NoAction};
 
 gpui_kit::actions!(
     catmail,
@@ -45,37 +45,45 @@ pub fn bind_keys(cx: &mut App) {
     let mailbox = Some(MAILBOX);
     let list = Some(MESSAGE_LIST);
     let composer = Some(COMPOSER);
-    cx.bind_keys([
-        KeyBinding::new("secondary-q", Quit, None),
-        KeyBinding::new("secondary-=", TextLarger, None),
-        KeyBinding::new("secondary-+", TextLarger, None),
-        KeyBinding::new("secondary--", TextSmaller, None),
-        KeyBinding::new("secondary-0", TextReset, None),
-        KeyBinding::new("secondary-n", NewMessage, mailbox),
-        KeyBinding::new("secondary-r", Reply, mailbox),
-        KeyBinding::new("secondary-shift-r", ReplyAll, mailbox),
-        KeyBinding::new("secondary-shift-f", Forward, mailbox),
-        KeyBinding::new("secondary-shift-u", ToggleRead, mailbox),
-        KeyBinding::new("secondary-shift-l", ToggleFlag, mailbox),
-        KeyBinding::new("secondary-shift-m", MoveToFolder, mailbox),
-        KeyBinding::new("secondary-shift-n", Sync, mailbox),
-        KeyBinding::new("f5", Sync, mailbox),
-        KeyBinding::new("secondary-f", FocusSearch, mailbox),
-        KeyBinding::new("secondary-,", OpenSettings, mailbox),
-        KeyBinding::new("e", Archive, list),
+    let bindings = [
+        key("secondary-q", Quit, None, cx),
+        key("secondary-=", TextLarger, None, cx),
+        key("secondary-+", TextLarger, None, cx),
+        key("secondary--", TextSmaller, None, cx),
+        key("secondary-0", TextReset, None, cx),
+        key("secondary-n", NewMessage, mailbox, cx),
+        key("secondary-r", Reply, mailbox, cx),
+        key("secondary-shift-r", ReplyAll, mailbox, cx),
+        key("secondary-shift-f", Forward, mailbox, cx),
+        key("secondary-shift-u", ToggleRead, mailbox, cx),
+        key("secondary-shift-l", ToggleFlag, mailbox, cx),
+        key("secondary-shift-m", MoveToFolder, mailbox, cx),
+        key("secondary-shift-n", Sync, mailbox, cx),
+        key("f5", Sync, mailbox, cx),
+        key("secondary-f", FocusSearch, mailbox, cx),
+        key("secondary-,", OpenSettings, mailbox, cx),
+        key("e", Archive, list, cx),
         // Gmail's key for it.
-        KeyBinding::new("l", EditLabels, list),
-        KeyBinding::new("delete", Delete, list),
-        KeyBinding::new("backspace", Delete, list),
-        KeyBinding::new("secondary-a", SelectAll, Some(READER_PAGE)),
-        KeyBinding::new("secondary-enter", Send, composer),
+        key("l", EditLabels, list, cx),
+        key("delete", Delete, list, cx),
+        key("backspace", Delete, list, cx),
+        key("secondary-a", SelectAll, Some(READER_PAGE), cx),
+        key("secondary-enter", Send, composer, cx),
         // Before the fields see it: the text would take it as a new line, then send.
-        KeyBinding::new("secondary-enter", Send, Some("Composer > Input")),
-        KeyBinding::new("escape", CloseComposer, composer),
-        KeyBinding::new("secondary-w", CloseComposer, composer),
-        KeyBinding::new("secondary-shift-a", Attach, composer),
+        key("secondary-enter", Send, Some("Composer > Input"), cx),
+        key("escape", CloseComposer, composer, cx),
+        key("secondary-w", CloseComposer, composer, cx),
+        key("secondary-shift-a", Attach, composer, cx),
         // A dialog binds Enter to its Confirm, which would take it from a focused button
         // (Cancel, say): unbound here, the button sees it as a click.
-        KeyBinding::new("enter", NoAction, Some(DIALOG_BUTTON)),
-    ]);
+        key("enter", NoAction, Some(DIALOG_BUTTON), cx),
+    ];
+    cx.bind_keys(bindings);
+}
+
+/// A binding for this OS: only `load` reads `secondary-`, as Cmd on macOS and Ctrl
+/// elsewhere.
+fn key(keys: &str, action: impl Action, context: Option<&str>, cx: &App) -> KeyBinding {
+    let context = context.map(|c| KeyBindingContextPredicate::parse(c).unwrap().into());
+    KeyBinding::load(keys, Box::new(action), context, false, None, cx).unwrap()
 }
