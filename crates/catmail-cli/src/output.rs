@@ -337,8 +337,8 @@ pub(crate) fn print_message(message: &Message, labels: &[String], html: bool) {
         }
     };
     header("From:", &display::addresses(&m.from));
-    header("To:", &display::addresses(&message.to));
-    header("Cc:", &display::addresses(&message.cc));
+    header("To:", &display::addresses(&m.to));
+    header("Cc:", &display::addresses(&m.cc));
     header("Date:", &display::date(m.date));
     header("Subject:", display::subject(m.subject.as_deref()));
     header("Labels:", &labels.join(", "));
@@ -599,6 +599,8 @@ mod tests {
             folder_id: FolderId(6),
             subject: Some(format!("m{id}")),
             from: Vec::new(),
+            to: Vec::new(),
+            cc: Vec::new(),
             date: None,
             snippet: None,
             flags: Flags::SEEN,

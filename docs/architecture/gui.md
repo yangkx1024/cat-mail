@@ -47,8 +47,10 @@ src/
 - `Mailbox`：根视图。状态是账户列表（每个账户的文件夹、草稿数、发件箱、连接状态）和侧栏选中的位置
   `Place`（All Inboxes、文件夹、本机草稿、发件箱）；登录页打开时整个替换三栏。对邮件的命令（回复、归档、删除、
   移动、标记……）都是它的方法（`commands.rs`），工具栏按钮、菜单和快捷键调用同一个方法或 Action。
-  Reply、Reply all、Forward 在读信区正文上方那一行（与 Show remote images、Open in browser 同行），按钮
-  经 `Mailbox` 的焦点句柄派发它的 Action（`FocusHandle::dispatch_action`），焦点不在邮箱里时也能到达。
+  邮件的命令都在右栏顶部的工具栏，只显示图标，不收进菜单，按用途分组、组间加分隔线：返回；位置（Archive、
+  Delete、Move to、Labels，Labels 只在 Gmail 上）；标记（已读 / 未读、Flag）；内容（Show remote images，有被拦的
+  远程图片时，和 Open in browser，没有 HTML 时不可用）；回复（Reply、Reply all、Forward）。Reply all
+  只在它比 Reply 多写给人时显示（`MailClient::can_reply_all`，只读头部，打开邮件时与正文一起查好）。
 - `MessageList`：gpui-kit `List` 的 delegate，一个列表显示五种来源（`Source`）：All Inboxes 与文件夹（分页）、
   搜索结果、本机草稿、发件箱。行按身份（`RowId`）保持选中。搜索框停顿 200 ms 才搜索，不是每个键都
   读一遍。
@@ -123,6 +125,15 @@ macOS、Windows 用系统字体，不受影响。
   一栏、主题、标记、时间；读信区打开后改成两行：发件人和时间在上，主题在下，最多折两行，用 `muted_foreground` 和发件人区分（字重仍只表示未读）。`List` 只量一行
   的高度给所有行用，所以两行时主题总是占两行高。切换时每一行的高度都变，`MessageList` 把刚打开（或刚关上）
   的那封滚到中间，免得它从指针下跑开。Outbox 的行不变。
+- **悬停操作**：一行排开时（这时没有选中的邮件，也就没有工具栏），指针所在的邮件行紧跟主题显示 Mark as
+  read / unread、Delete 两个图标按钮（指针不用挪到行尾），标记和时间左边显示收件人地址（To，没有 To 时显示
+  Cc；`MessageSummary` 带着），不打开邮件就能
+  处理。悬停的行记在 `MessageList::hovered`（行的 `on_hover`），不用 `group_hover` 隐藏元素：gpui-fast
+  在 prepaint 和 paint 之间悬停状态会变，改变布局的悬停样式会画到没 prepaint 的元素上而 panic。按钮
+  停止点击冒泡（否则行的点击会打开邮件），把 `RowCommand` 作为列表的事件发给 `Mailbox`，由它对这一行的
+  邮件执行，与工具栏共用同一套命令（永久删除同样先确认）。
+- **头像**：邮件行和读信区头部用同一个头像（`layout::avatar`：发件人名字的首字，底色按地址挑），两种行形同样
+  大小、与文字行同高（打开邮件时行形变了头像不变），一行排开时在发件人前，两行时在左边；草稿和发件箱的行不显示。
 - **未读只靠字重**：未读邮件的发件人和主题加粗，不再有左侧的圆点。
 - **Gmail 的用户标签**是主题后面的中性小标签，最多两个、其余计数，不显示正在看的那个标签。名字由
   `Mailbox` 从侧栏的账户里取（`MessageList::set_labels`），读信区的标签也由它按列表里这封邮件的现状设置
@@ -289,7 +300,7 @@ INBOX，所以打开一个文件夹时同步它（`MailClient::sync_folder`，�
     `Images::bytes`）。`data:` 图片每次问都重新解码，不缓存：文档只在打开时问一次。内嵌图片在正文显示
     后再逐个取；没有 HTML 的邮件不取。
 - **远程图片。** 打开邮件时在后台线程用 `catmail_core::html::remote_image_urls` 列出正文引用的远程
-  图片（见[正文与附件](bodies.md)），`OpenMessage::remote_images` 记着其中还没显示的，不为空就在格式栏
+  图片（见[正文与附件](bodies.md)），`OpenMessage::remote_images` 记着其中还没显示的，不为空就在工具栏
   显示"Show remote images"按钮。打开邮件时与内嵌图片并行地查缓存（`cached_remote_images`），缓存里有的
   直接显示，不必点击，也不发请求；都在缓存里就不显示按钮。点击后把其余 URL 交给 `MailClient::fetch_remote_images`（限制见
   [正文与附件](bodies.md)），按钮转圈；图片按下载完成的顺序逐批显示：每到一张，连同此刻已到的

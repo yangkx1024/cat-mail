@@ -41,7 +41,7 @@ use crate::reader::Reader;
 use crate::settings::Preferences;
 use add_account::{AddAccount, AddAccountEvent};
 use folders::AccountFolders;
-use message_list::{MessageList, Row, Source};
+use message_list::{MessageList, Row, RowCommand, Source};
 pub(crate) use refresh::{Coalesce, Refresh};
 use refresh::{DraftCounts, Throttle};
 
@@ -190,10 +190,20 @@ impl Mailbox {
     pub fn new(client: MailClient, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let messages = cx.new(|cx| ListState::new(MessageList::new(client.clone()), window, cx));
         let focus_handle = cx.focus_handle();
-        let reader = cx.new(|_| Reader::new(client.clone(), focus_handle.clone()));
+        let reader = cx.new(|_| Reader::new(client.clone()));
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
         let subscriptions = vec![
             cx.subscribe_in(&messages, window, Self::on_list_event),
+            cx.subscribe_in(
+                &messages,
+                window,
+                |this, _, command: &RowCommand, window, cx| match command {
+                    RowCommand::Delete(message) => this.delete_message(message, window, cx),
+                    RowCommand::ToggleRead(message) => {
+                        this.toggle_message(message, Flags::SEEN, window, cx)
+                    }
+                },
+            ),
             cx.subscribe_in(
                 &search,
                 window,
@@ -749,10 +759,6 @@ impl Render for Mailbox {
                 cx.listener(|this, _: &MoveToFolder, window, cx| this.move_to_folder(window, cx)),
             )
             .on_action(cx.listener(|this, _: &EditLabels, window, cx| this.edit_labels(window, cx)))
-            .on_action(cx.listener(|this, _: &OpenInBrowser, window, cx| {
-                this.reader
-                    .update(cx, |reader, cx| reader.open_in_browser(window, cx))
-            }))
             .on_action(cx.listener(|this, _: &Sync, window, cx| this.sync(window, cx)))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
                 this.search

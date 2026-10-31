@@ -9,7 +9,7 @@ use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     AnyWindowHandle, App, Bounds, ElementId, HeadlessAppContext, TestAppContext, Window,
-    WindowBounds, WindowOptions, px, size,
+    WindowBounds, WindowOptions, point, px, size,
 };
 
 use super::*;
@@ -96,7 +96,7 @@ fn wait_for_inbox(cx: &mut TestAppContext, mailbox: &Entity<Mailbox>) {
 }
 
 /// Draws a frame, so `id` is where the click lands, then clicks it.
-fn click(cx: &mut TestAppContext, window: AnyWindowHandle, id: &'static str) {
+fn click(cx: &mut TestAppContext, window: AnyWindowHandle, id: impl Into<ElementId>) {
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
         window.click(id, cx);
@@ -115,6 +115,12 @@ fn set_appearance(cx: &mut TestAppContext, appearance: crate::settings::Appearan
     cx.update(|cx| Preferences::update(cx, |s| s.appearance = appearance));
 }
 
+/// Clicks a message's row on its sender: on one line, its middle can be under the
+/// commands the row shows while hovered.
+fn click_row(window: &mut Window, id: MessageId, cx: &mut App) {
+    window.click_at(("message", id.0 as u64), point(px(30.), px(10.)), cx);
+}
+
 fn click_message(
     cx: &mut TestAppContext,
     window: AnyWindowHandle,
@@ -124,7 +130,7 @@ fn click_message(
     let id = cx.read(|cx| id_of(mailbox, subject, cx));
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
-        window.click(("message", id.0 as u64), cx);
+        click_row(window, id, cx);
     })
     .unwrap();
     wait_until(|| {

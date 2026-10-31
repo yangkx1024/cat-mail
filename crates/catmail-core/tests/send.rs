@@ -741,6 +741,26 @@ async fn replies_are_threaded_and_quoted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn reply_all_is_offered_only_when_it_adds_someone() {
+    let mut state = state();
+    for (subject, to) in [
+        ("alone", "alice@example.com"),
+        ("together", "alice@example.com, li@example.com"),
+    ] {
+        let raw =
+            format!("From: zhang@example.com\r\nTo: {to}\r\nSubject: {subject}\r\n\r\nHello\r\n");
+        state.inbox().append(raw.as_bytes(), &[]);
+    }
+    let env = env(state).await;
+    env.client.sync_account(env.account).await.unwrap();
+    let alone = env.id_of("INBOX", "alone").await;
+    let together = env.id_of("INBOX", "together").await;
+
+    assert!(!env.client.can_reply_all(alone).await.unwrap());
+    assert!(env.client.can_reply_all(together).await.unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn attachments_are_copied_when_added() {
     let env = env(state()).await;
     let dir = tempfile::tempdir().unwrap();

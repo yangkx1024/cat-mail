@@ -171,7 +171,7 @@ async fn downloads_a_small_message_whole() {
     );
     assert!(message.summary.has_attachments);
     assert_eq!(message.summary.snippet.as_deref(), Some("请查收附件。"));
-    assert_eq!(message.to[0].email, "alice@example.com");
+    assert_eq!(message.summary.to[0].email, "alice@example.com");
 
     // Everything is local now.
     let start = env.log_len();

@@ -228,6 +228,8 @@ mod tests {
                 name: Some(from.into()),
                 email: format!("{}@example.com", from.to_lowercase()),
             }],
+            to: Vec::new(),
+            cc: Vec::new(),
             date: Some(id),
             snippet: None,
             flags: Flags::empty(),

@@ -19,7 +19,6 @@ gpui_kit::actions!(
         ToggleFlag,
         MoveToFolder,
         EditLabels,
-        OpenInBrowser,
         Sync,
         FocusSearch,
         OpenSettings,
