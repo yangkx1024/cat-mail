@@ -1,6 +1,6 @@
-# cat-mail — Agent Guide
+# catmail — Agent Guide
 
-cat-mail is a cross-platform email client in Rust (Linux first, then Windows and macOS).
+catmail is a cross-platform email client in Rust (Linux first, then Windows and macOS).
 A UI-independent engine exposes a single `MailClient` facade; the `catmail` CLI and the
 GPUI/gpui-kit GUI are peer frontends on top of it.
 

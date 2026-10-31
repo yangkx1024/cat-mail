@@ -5,7 +5,7 @@ use directories::ProjectDirs;
 
 use crate::{Error, Result};
 
-/// Where cat-mail keeps its local state.
+/// Where catmail keeps its local state.
 #[derive(Debug, Clone)]
 pub struct Config {
     data_dir: PathBuf,
@@ -13,16 +13,16 @@ pub struct Config {
 
 impl Config {
     /// Platform default: `$XDG_DATA_HOME/catmail` on Linux,
-    /// `~/Library/Application Support/dev.CatMail.CatMail` on macOS,
-    /// `%APPDATA%\CatMail\CatMail\data` on Windows.
+    /// `~/Library/Application Support/net.yangkx.catmail` on macOS,
+    /// `%APPDATA%\yangkx\catmail\data` on Windows.
     pub fn platform_default() -> Result<Self> {
         let dirs = project_dirs().ok_or(Error::NoDataDir)?;
         Ok(Self::with_data_dir(dirs.data_dir()))
     }
 
     /// Where frontends keep their settings: `$XDG_CONFIG_HOME/catmail` on Linux,
-    /// `~/Library/Application Support/dev.CatMail.CatMail` on macOS,
-    /// `%APPDATA%\CatMail\CatMail\config` on Windows.
+    /// `~/Library/Application Support/net.yangkx.catmail` on macOS,
+    /// `%APPDATA%\yangkx\catmail\config` on Windows.
     pub fn platform_config_dir() -> Option<PathBuf> {
         project_dirs().map(|dirs| dirs.config_dir().to_path_buf())
     }
@@ -156,5 +156,5 @@ fn warn_if_listable(dir: &Path) {
 }
 
 fn project_dirs() -> Option<ProjectDirs> {
-    ProjectDirs::from("dev", "CatMail", "CatMail")
+    ProjectDirs::from("net", "yangkx", "catmail")
 }

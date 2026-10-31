@@ -1,6 +1,6 @@
 [package]
 name = "catmail-html"
-description = "Sanitizing a message's HTML and its style sheets for cat-mail, and the passes readers make over it"
+description = "Sanitizing a message's HTML and its style sheets for catmail, and the passes readers make over it"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

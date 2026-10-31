@@ -108,7 +108,7 @@ mtime。宽限期要远大于任何写事务的时长；`put` 遇到已存在的
 ## 凭据
 
 `SecretStore` trait，默认 `KeyringSecrets`（`keyring` 4：Linux Secret Service / macOS Keychain /
-Windows Credential Manager），service 为 `cat-mail`，键为 `account:{email}:{随机 uuid}`，存在
+Windows Credential Manager），service 为 `catmail`，键为 `account:{email}:{随机 uuid}`，存在
 `accounts.secret_key` 列。随机键保证不同数据目录的凭据互不覆盖。之后添加的发件身份（`identities`，见
 [发信](sending.md#发件身份)）各有自己的密码，键为 `identity:{email}:{随机 uuid}`，规则相同；随账户建出的
 那个身份没有自己的条目（`secret_key` 为空），用账户的密码。

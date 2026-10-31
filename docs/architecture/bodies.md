@@ -110,7 +110,7 @@ base64 正文），交给 mail-parser 按同样方式解析。于是两条路径
   在引擎运行时上用 `catmail-proto` 的 `http::ImageFetcher`（reqwest，TLS 与邮件服务器共用同一个
   rustls + ring 配置）：
   - 只取 `http` / `https`，重定向最多 5 次且只能到这两种 scheme；只发 GET，不存 cookie，不发 `Referer`
-    （重定向时也不发），User-Agent 是 `cat-mail/<版本>`。
+    （重定向时也不发），User-Agent 是 `catmail/<版本>`。
   - 每张 30 秒、10 MiB 为限（先看 `Content-Length`，再边读边数）；一次最多 200 张，同时 6 个。
   - 类型先按开头字节认常见栅格格式（服务器常标成 `application/octet-stream` 或标错），认不出再用
     `Content-Type` 的 `image/*`，都不是就算失败。SVG 也算失败：读信区不显示 SVG（解码器会读本地

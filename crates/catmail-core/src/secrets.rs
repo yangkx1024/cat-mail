@@ -33,7 +33,7 @@ impl KeyringSecrets {
 
 impl Default for KeyringSecrets {
     fn default() -> Self {
-        Self::new("cat-mail")
+        Self::new("catmail")
     }
 }
 

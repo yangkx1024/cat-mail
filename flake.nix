@@ -1,5 +1,5 @@
 {
-  description = "cat-mail - a cross-platform email client";
+  description = "catmail - a cross-platform email client";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 

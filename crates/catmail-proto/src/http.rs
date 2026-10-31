@@ -80,7 +80,7 @@ impl ImageFetcher {
     fn with_timeout(tls: &TlsConfig, timeout: Duration) -> Result<Self, Error> {
         let client = Client::builder()
             .use_preconfigured_tls(tls.client_config())
-            .user_agent(concat!("cat-mail/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("catmail/", env!("CARGO_PKG_VERSION")))
             .referer(false)
             .redirect(Policy::limited(MAX_REDIRECTS))
             .timeout(timeout)

@@ -1,6 +1,6 @@
 [package]
 name = "catmail-store"
-description = "SQLite persistence and content-addressed blob storage for cat-mail"
+description = "SQLite persistence and content-addressed blob storage for catmail"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

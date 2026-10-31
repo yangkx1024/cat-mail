@@ -80,7 +80,7 @@ pub enum Command {
     allow(dead_code, reason = "no tray to show it in yet (#108, #109)")
 )]
 const MENU: [Option<(&str, Command)>; 5] = [
-    Some(("Open cat-mail", Command::Open)),
+    Some(("Open catmail", Command::Open)),
     Some(("New message", Command::Compose)),
     Some(("Sync now", Command::Sync)),
     None,

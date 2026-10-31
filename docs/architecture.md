@@ -1,4 +1,4 @@
-# cat-mail 架构
+# catmail 架构
 
 跨平台（Linux → Windows / macOS）邮件客户端。核心是一个与 UI 无关的邮件引擎，对外只暴露
 `MailClient` 门面；CLI 与 GUI 是平级的两个前端。
@@ -177,7 +177,7 @@ UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UI
 ## 数据目录
 
 `Config::platform_default()`（`directories`）：Linux `~/.local/share/catmail`，macOS
-`~/Library/Application Support/dev.CatMail.CatMail`，Windows `%APPDATA%\CatMail\CatMail\data`。
+`~/Library/Application Support/net.yangkx.catmail`，Windows `%APPDATA%\yangkx\catmail\data`。
 CLI 和 GUI 都可用 `--data-dir` 或 `CATMAIL_DATA_DIR` 覆盖。
 
 | 路径 | 内容 |

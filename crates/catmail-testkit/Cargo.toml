@@ -1,6 +1,6 @@
 [package]
 name = "catmail-testkit"
-description = "Protocol test environment for cat-mail: scriptable IMAP and SMTP servers with fault injection"
+description = "Protocol test environment for catmail: scriptable IMAP and SMTP servers with fault injection"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

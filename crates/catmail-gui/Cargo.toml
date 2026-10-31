@@ -1,6 +1,6 @@
 [package]
 name = "catmail-gui"
-description = "Desktop frontend for cat-mail, built on GPUI Kit"
+description = "Desktop frontend for catmail, built on GPUI Kit"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

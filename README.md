@@ -1,4 +1,4 @@
-# cat-mail
+# catmail
 
 用 Rust 编写的跨平台邮件客户端。核心是一个与 UI 无关的邮件引擎（账户、收件箱、草稿、发件、
 附件），对外只暴露 `MailClient` 门面；在它之上有两个平级的前端：
@@ -176,7 +176,7 @@ catmail-gui                     # 打开窗口；同样支持 --data-dir / CATMA
 - **发件箱**：还没发完的邮件出现在 Outbox。被服务器拒绝的可以改回草稿或重试；发出后没收到确认的
   不会自动重发，由你选择"Mark as sent""Send again"或"Back to drafts"。
 - **主题**：Settings › Appearance 选择跟随系统、浅色或深色，并分别为浅色和深色选主题。内置
-  cat-mail、Catppuccin、Gruvbox、Solarized、Nord、Tokyo Night、Dracula；"Import theme"可以导入
+  catmail、Catppuccin、Gruvbox、Solarized、Nord、Tokyo Night、Dracula；"Import theme"可以导入
   Alacritty、kitty、Ghostty、WezTerm、Windows Terminal、iTerm2、foot、Xresources、base16 / base24
   的配色文件或 GPUI Kit 主题 JSON，按终端调色板推导出整套界面颜色，存进主题目录（可手工修改）。
   文字大小在同一页，或用 Ctrl + / Ctrl − / Ctrl 0。
@@ -185,7 +185,7 @@ catmail-gui                     # 打开窗口；同样支持 --data-dir / CATMA
   F5 同步、Ctrl , 设置；写信窗口里 Ctrl Enter 发送、Esc 关闭（macOS 上 Ctrl 换成 Cmd）。
 
 设置和导入的主题保存在配置目录：Linux `~/.config/catmail`、macOS
-`~/Library/Application Support/dev.CatMail.CatMail`、Windows `%APPDATA%\CatMail\CatMail\config`，
+`~/Library/Application Support/net.yangkx.catmail`、Windows `%APPDATA%\yangkx\catmail\config`，
 可用 `--config-dir` 或环境变量 `CATMAIL_CONFIG_DIR` 覆盖。窗口运行时 CLI 不能打开同一个数据目录
 （反之亦然），见上文"IPC 待定"。
 
@@ -193,7 +193,7 @@ catmail-gui                     # 打开窗口；同样支持 --data-dir / CATMA
 `starttls` 为 587、`plain` 为 25。
 
 数据目录默认为 Linux `~/.local/share/catmail`、macOS
-`~/Library/Application Support/dev.CatMail.CatMail`、Windows `%APPDATA%\CatMail\CatMail\data`，
+`~/Library/Application Support/net.yangkx.catmail`、Windows `%APPDATA%\yangkx\catmail\data`，
 可用 `--data-dir` 或环境变量 `CATMAIL_DATA_DIR` 覆盖。
 
 Linux 上需要一个 Secret Service 提供者（如 gnome-keyring、KeePassXC）来保存密码；图形界面

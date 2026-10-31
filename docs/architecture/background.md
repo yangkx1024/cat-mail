@@ -77,7 +77,7 @@ GUI 关掉主窗口后继续同步、发信、提醒新邮件，并能从托盘�
 
 ## 单实例与唤起
 
-常驻之后，从启动器再点一次 cat-mail 应当唤起已有实例的窗口，而不是显示 "Couldn't open the mail
+常驻之后，从启动器再点一次 catmail 应当唤起已有实例的窗口，而不是显示 "Couldn't open the mail
 data"。macOS 由系统保证单实例、Dock 点击经 GPUI 的 `on_reopen`；Linux、Windows 上 GPUI 不提供
 （Linux 的 `on_reopen` 从不触发），自己做：
 
@@ -223,7 +223,7 @@ GUI 的 `Notifier`（`catmail-gui/src/new_mail.rs`）是应用级的全局，引
 （`message_list::reveal`）；正在进行的那次读可能早于它到达，只有点击之后开始的读也没有它（不在第一页或
 已经离开），才放弃、只打开 INBOX。这之前用户自己选了别的邮件，就以用户的为准。
 
-**应用标识**：`set_app_identity("dev.CatMail.CatMail", "cat-mail")`，在第一个窗口之前；标识与数据、
+**应用标识**：`set_app_identity("net.yangkx.catmail", "catmail")`，在第一个窗口之前；标识与数据、
 配置目录的限定名相同。Windows 上它是 AppUserModelID，Linux 上 GPUI 只用名字（通知的 app name），
 不带 desktop 文件 id 的提示；macOS 的通知要有 bundle，打包时（开机启动之后）再看。
 
@@ -252,7 +252,7 @@ GUI 的 `Tray`（`catmail-gui/src/tray/`）是应用级的全局，引擎打开�
   桌面外观变化时重画；外观只能从窗口得知，常驻期间的变化要等下次开窗口。画也一次一个（`Coalesce`）：
   后台的两次绘制可能先后颠倒，旧的数字盖掉新的之后数字不再变，就一直错着；画的途中又有变化，画完按
   当时的数字和外观再画一次。
-- **点击图标**打开主窗口；**菜单**（`MENU`，各平台按它建自己的菜单）："Open cat-mail"、"New message"、
+- **点击图标**打开主窗口；**菜单**（`MENU`，各平台按它建自己的菜单）："Open catmail"、"New message"、
   "Sync now"、"Quit"。都转成 `Command`，经 channel 回到 GPUI 线程（`Tray::choose`），由 `Resident` 处理；
   主窗口开着就在它的 `Mailbox` 上做（`Resident::in_main`），否则记下等它打开：
   - 打开：`Resident::show_at`，与点击通知相同。
@@ -289,7 +289,7 @@ autostart 文件（Flatpak 用 Background portal）、Windows 的 `HKCU\…\Run`
 
 ## 与 CLI 的关系
 
-GUI 常驻就一直持有数据目录锁，CLI 更常遇到 `AlreadyRunning`。CLI 打不开数据目录时说明"cat-mail 应用
+GUI 常驻就一直持有数据目录锁，CLI 更常遇到 `AlreadyRunning`。CLI 打不开数据目录时说明"catmail 应用
 关掉窗口后仍在运行，先退出它"。让 CLI 经唤起服务所在的端点使用正在运行的引擎，另开 issue。
 
 ## 实施顺序

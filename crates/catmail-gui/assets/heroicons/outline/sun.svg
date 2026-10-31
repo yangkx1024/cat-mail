@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true" data-slot="icon">
-  <!-- cat-mail: scaled by 1.15 about the center, stroke kept at 1.5 (1.3 × 1.15). The
+  <!-- catmail: scaled by 1.15 about the center, stroke kept at 1.5 (1.3 × 1.15). The
        upstream sun is a small circle with thin rays, and next to computer-desktop and
        moon at button size it reads a size smaller. -->
   <g transform="translate(12 12) scale(1.15) translate(-12 -12)" stroke-width="1.3">

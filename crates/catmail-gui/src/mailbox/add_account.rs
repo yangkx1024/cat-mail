@@ -156,7 +156,7 @@ impl Render for AddAccount {
                                 div()
                                     .text_sm()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("cat-mail signs in to check these settings before saving them."),
+                                    .child("catmail signs in to check these settings before saving them."),
                             ),
                     )
                     .child(self.login.render())
