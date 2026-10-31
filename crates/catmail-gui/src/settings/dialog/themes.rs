@@ -145,31 +145,19 @@ impl SettingsView {
             .child(
                 h_flex()
                     .gap_4()
-                    .child(div().flex_1().child(section_title(
-                        "Appearance",
-                        "System follows the desktop's light or dark setting.",
-                        cx,
-                    )))
+                    .child(div().flex_1().child(section_title("Appearance")))
                     .child(appearance),
             )
             .child(
                 v_flex()
                     .gap_3()
-                    .child(section_title(
-                        "Light theme",
-                        "Used when the appearance is light.",
-                        cx,
-                    ))
+                    .child(section_title("Light theme"))
                     .child(light),
             )
             .child(
                 v_flex()
                     .gap_3()
-                    .child(section_title(
-                        "Dark theme",
-                        "Used when the appearance is dark.",
-                        cx,
-                    ))
+                    .child(section_title("Dark theme"))
                     .child(dark),
             )
             .child(
@@ -216,7 +204,7 @@ impl SettingsView {
                     .pt_4()
                     .border_t_1()
                     .border_color(cx.theme().border)
-                    .child(div().flex_1().child(section_title(
+                    .child(div().flex_1().child(section_title_with_help(
                         "Text size",
                         "Scales the whole window. Ctrl + and Ctrl − change it anywhere.",
                         cx,

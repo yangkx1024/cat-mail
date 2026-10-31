@@ -13,11 +13,7 @@ impl SettingsView {
         let (keep_running, notify_new_mail) = (settings.keep_running, settings.notify_new_mail);
         v_flex()
             .gap_4()
-            .child(section_title(
-                "General",
-                "How cat-mail runs on this computer.",
-                cx,
-            ))
+            .child(section_title("General"))
             .child(
                 Switch::new("keep-running")
                     .checked(keep_running)

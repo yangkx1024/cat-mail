@@ -147,11 +147,7 @@ impl SettingsView {
             .unwrap_or_default();
         v_flex()
             .gap_4()
-            .child(section_title(
-                "Accounts",
-                "Removing an account deletes only what is kept on this computer.",
-                cx,
-            ))
+            .child(section_title("Accounts"))
             .child(v_flex().children(accounts.iter().map(|entry| {
                 let account = &entry.account;
                 let account_id = account.id;
@@ -247,6 +243,10 @@ impl SettingsView {
                                 .ghost()
                                 .small()
                                 .label("Remove")
+                                .tooltip(
+                                    "Removing an account deletes only what is kept on this \
+                                     computer.",
+                                )
                                 .on_click(cx.listener(
                                     move |this, _, window, cx| {
                                         this.confirm_remove_account(account_id, window, cx)
