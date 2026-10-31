@@ -21,7 +21,7 @@ use catmail_core::{Attachment, MailClient, MessageId, safe_filename};
 use catmail_render::{Engine, Resolver, Source};
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
-use gpui_kit::{AppContext as _, Context, Entity, FocusHandle, SharedString, Task, Window};
+use gpui_kit::{AppContext as _, Context, Entity, SharedString, Task, Window};
 
 use crate::html;
 
@@ -44,8 +44,6 @@ enum ReaderState {
 
 pub struct Reader {
     client: MailClient,
-    /// The mailbox's: replying and forwarding are its actions, dispatched from here.
-    mailbox: FocusHandle,
     state: ReaderState,
     page: Option<ShownPage>,
     /// Every header in full, instead of the one-line summary.
@@ -59,10 +57,9 @@ pub struct Reader {
 }
 
 impl Reader {
-    pub fn new(client: MailClient, mailbox: FocusHandle) -> Self {
+    pub fn new(client: MailClient) -> Self {
         Self {
             client,
-            mailbox,
             state: ReaderState::Empty,
             page: None,
             show_details: false,
@@ -97,6 +94,20 @@ impl Reader {
     /// Whether the open message has HTML, which "Open in browser" needs.
     pub fn has_html(&self) -> bool {
         matches!(&self.state, ReaderState::Open(open) if open.html.is_some())
+    }
+
+    /// Whether replying to all the open message writes to more than replying does.
+    pub fn can_reply_all(&self) -> bool {
+        matches!(&self.state, ReaderState::Open(open) if open.can_reply_all)
+    }
+
+    /// The open message's remote images still blocked, if it has any: whether they are
+    /// being fetched.
+    pub fn blocked_remote_images(&self) -> Option<bool> {
+        match &self.state {
+            ReaderState::Open(open) if !open.remote_images.is_empty() => Some(open.loading_remote),
+            _ => None,
+        }
     }
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
@@ -141,10 +152,15 @@ impl Reader {
             let (state, inline) = match client.download_message(id).await {
                 Ok(message) => {
                     let downloaded = began.elapsed();
+                    // Offered when unsure: it only adds recipients the user can remove.
+                    let can_reply_all = client.can_reply_all(id).await.unwrap_or_else(|e| {
+                        tracing::warn!(message = %id, error = %e, "couldn't tell who replying to all writes to");
+                        true
+                    });
                     let inline = inline_images(&message);
                     let prepared = Instant::now();
                     let open = cx
-                        .background_spawn(async move { OpenMessage::new(message) })
+                        .background_spawn(async move { OpenMessage::new(message, can_reply_all) })
                         .await;
                     tracing::info!(message = %id, ?downloaded, prepare = ?prepared.elapsed(),
                         "message opened");
@@ -229,7 +245,7 @@ impl Reader {
     /// Fetches the open message's remote images and shows each as it comes, because the
     /// user asked. If none could be had, says why and leaves them blocked, to try again.
     /// Moving to another message drops the task, and with it the fetches still going.
-    fn show_remote_images(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn show_remote_images(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let ReaderState::Open(open) = &mut self.state else {
             return;
         };

@@ -24,11 +24,17 @@ fn reads_a_message_through_the_window(cx: &mut TestAppContext) {
     pollster::block_on(mail.client.replay_pending(mail.account())).unwrap();
     assert!(mail.server_flags("INBOX", 5).contains(&"\\Seen".to_owned()));
 
-    cx.update_window(window, |_, window, cx| {
-        window.render_frame(cx);
-        assert!(window.try_find("open-in-browser").is_some());
-    })
-    .unwrap();
+    // Replying to all is offered when it writes to more than the sender: this message
+    // went to another address too.
+    let has_reply_all = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.try_find("reply-all").is_some()
+        })
+        .unwrap()
+    };
+    assert!(has_reply_all(cx));
+    assert!(!shown(cx, window, "labels"), "not a Gmail account");
 
     // The list keeps keyboard focus: the next message opens with the arrow key.
     let next = cx.read(|cx| {
@@ -43,6 +49,10 @@ fn reads_a_message_through_the_window(cx: &mut TestAppContext) {
         cx.run_until_parked();
         cx.read(|cx| shown_in_reader(&mailbox, cx) == Some(next))
     });
+
+    // The account's own message to one address: replying already writes to it.
+    click_message(cx, window, &mailbox, "Plain ASCII message");
+    assert!(!has_reply_all(cx));
 }
 
 #[gpui_kit::test]
@@ -186,6 +196,47 @@ fn shows_remote_images_as_they_come_when_asked(cx: &mut TestAppContext) {
     wait_until(|| pixels(cx) == (red, red));
     assert!(!has_button(cx));
     assert_eq!(images.requests(), 2);
+}
+
+#[gpui_kit::test]
+fn a_row_on_one_line_offers_commands_while_hovered(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    let hello = cx.read(|cx| id_of(&mailbox, "你好，世界", cx));
+    let toggle = ("row-toggle-read", hello.0 as u64);
+    let hover = |cx: &mut TestAppContext, id: MessageId| {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.hover(("message", id.0 as u64), cx);
+        })
+        .unwrap();
+    };
+    assert!(!shown(cx, window, toggle), "only while hovered");
+
+    // Marked read without being opened.
+    hover(cx, hello);
+    assert!(shown(cx, window, toggle));
+    click(cx, window, toggle);
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| {
+            find(&mailbox, "你好，世界", cx).is_some_and(|m| m.flags.contains(Flags::SEEN))
+        })
+    });
+    assert_eq!(cx.read(|cx| shown_in_reader(&mailbox, cx)), None);
+
+    // To Trash.
+    let report = cx.read(|cx| id_of(&mailbox, "Quarterly report", cx));
+    hover(cx, report);
+    click(cx, window, ("row-delete", report.0 as u64));
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| find(&mailbox, "Quarterly report", cx).is_none())
+    });
+    assert_eq!(cx.read(|cx| shown_in_reader(&mailbox, cx)), None);
+    pollster::block_on(mail.client.replay_pending(mail.account())).unwrap();
+    assert_eq!(mail.server_uids("Trash").len(), 1);
 }
 
 #[gpui_kit::test]
@@ -403,7 +454,7 @@ fn choosing_a_message_gives_up_revealing_one_still_to_come(cx: &mut TestAppConte
         let list = mailbox.read(cx).messages.clone();
         list.update(cx, |list, cx| message_list::reveal(list, lunch, window, cx));
         window.render_frame(cx);
-        window.click(("message", chosen.0 as u64), cx);
+        click_row(window, chosen, cx);
     })
     .unwrap();
     // The reader shows a message once its body has loaded.

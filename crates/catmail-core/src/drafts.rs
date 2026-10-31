@@ -285,34 +285,7 @@ pub(crate) async fn reply(
 ) -> Result<Draft> {
     let message = with_body(engine, id).await?;
     let account_id = message.summary.account_id;
-    // The addresses `reply_content` tells the account's from others by.
-    let addresses: Vec<String> = message
-        .summary
-        .from
-        .iter()
-        .chain(&message.to)
-        .chain(&message.cc)
-        .map(|a| a.email.clone())
-        .collect();
-    let own = engine
-        .read(move |db| {
-            let Some(account) = db.accounts().get(account_id)? else {
-                return Ok(None);
-            };
-            let mut own = Vec::new();
-            for email in addresses {
-                // The account's address is its own even if no identity sends as it any
-                // more.
-                if let Some(identity) = db.identities().by_email(account_id, &email)? {
-                    own.push((Some(identity), email));
-                } else if email.eq_ignore_ascii_case(&account.email) {
-                    own.push((None, email));
-                }
-            }
-            Ok(Some(own))
-        })
-        .await?
-        .ok_or_else(|| Error::AccountNotFound(account_id.to_string()))?;
+    let own = own_addresses(engine, &message).await?;
     let (mut content, written_as) = reply_content(&message, &own, all);
     write_above(&text, &mut content);
     let mut references = message.references.clone();
@@ -333,6 +306,50 @@ pub(crate) async fn reply(
         files,
     )
     .await
+}
+
+/// Whether replying to all would write to anyone a reply doesn't: false when the
+/// message's only other party is the one a reply goes to. Reads only its headers.
+pub(crate) async fn can_reply_all(engine: &Arc<Engine>, id: MessageId) -> Result<bool> {
+    let message = engine
+        .read(move |db| db.messages().headers(id))
+        .await?
+        .ok_or(Error::MessageNotFound(id))?;
+    let own = own_addresses(engine, &message).await?;
+    Ok(!reply_recipients(&message, &own, true).cc.is_empty())
+}
+
+/// Those of the addresses `message` came from or went to that are the account's, which
+/// a reply tells from the others.
+async fn own_addresses(engine: &Arc<Engine>, message: &Message) -> Result<Vec<Own>> {
+    let account_id = message.summary.account_id;
+    let addresses: Vec<String> = message
+        .summary
+        .from
+        .iter()
+        .chain(&message.summary.to)
+        .chain(&message.summary.cc)
+        .map(|a| a.email.clone())
+        .collect();
+    engine
+        .read(move |db| {
+            let Some(account) = db.accounts().get(account_id)? else {
+                return Ok(None);
+            };
+            let mut own = Vec::new();
+            for email in addresses {
+                // The account's address is its own even if no identity sends as it any
+                // more.
+                if let Some(identity) = db.identities().by_email(account_id, &email)? {
+                    own.push((Some(identity), email));
+                } else if email.eq_ignore_ascii_case(&account.email) {
+                    own.push((None, email));
+                }
+            }
+            Ok(Some(own))
+        })
+        .await?
+        .ok_or_else(|| Error::AccountNotFound(account_id.to_string()))
 }
 
 /// A new draft forwarding `message`, with its attachments, as `forwarding` says.
@@ -645,6 +662,25 @@ type Own = (Option<IdentityId>, String);
 /// it is sent as: that of the address the message came from or went to (`None`, the
 /// default, for none).
 fn reply_content(message: &Message, own: &[Own], all: bool) -> (DraftContent, Option<IdentityId>) {
+    let ReplyRecipients { to, cc, written_as } = reply_recipients(message, own, all);
+    let content = DraftContent {
+        subject: reply_subject(message.summary.subject.as_deref().unwrap_or_default()),
+        to,
+        cc,
+        bcc: Vec::new(),
+        text: quote(message),
+    };
+    (content, written_as)
+}
+
+struct ReplyRecipients {
+    to: Vec<Address>,
+    /// Empty unless replying to all.
+    cc: Vec<Address>,
+    written_as: Option<IdentityId>,
+}
+
+fn reply_recipients(message: &Message, own: &[Own], all: bool) -> ReplyRecipients {
     let mine = |a: &Address| {
         own.iter()
             .find(|(_, email)| a.email.eq_ignore_ascii_case(email))
@@ -657,10 +693,15 @@ fn reply_content(message: &Message, own: &[Own], all: bool) -> (DraftContent, Op
     let written_as = if from_me {
         sender.iter().find_map(mine)
     } else {
-        message.to.iter().chain(&message.cc).find_map(mine)
+        message
+            .summary
+            .to
+            .iter()
+            .chain(&message.summary.cc)
+            .find_map(mine)
     };
     let to = if from_me {
-        message.to.clone()
+        message.summary.to.clone()
     } else if !message.reply_to.is_empty() {
         message.reply_to.clone()
     } else {
@@ -671,24 +712,21 @@ fn reply_content(message: &Message, own: &[Own], all: bool) -> (DraftContent, Op
     let to: Vec<Address> = to.into_iter().filter(|a| unique(a)).collect();
     let cc = if all {
         // Those it went to, but for one's own message they are already in `to`.
-        let to_others: &[Address] = if from_me { &[] } else { &message.to };
+        let to_others: &[Address] = if from_me { &[] } else { &message.summary.to };
         to_others
             .iter()
-            .chain(&message.cc)
+            .chain(&message.summary.cc)
             .filter(|a| !is_me(a) && unique(a))
             .cloned()
             .collect()
     } else {
         Vec::new()
     };
-    let content = DraftContent {
-        subject: reply_subject(message.summary.subject.as_deref().unwrap_or_default()),
+    ReplyRecipients {
         to,
         cc,
-        bcc: Vec::new(),
-        text: quote(message),
-    };
-    (content, written_as.flatten())
+        written_as: written_as.flatten(),
+    }
 }
 
 fn reply_subject(subject: &str) -> String {
@@ -761,8 +799,8 @@ fn forward_content(message: &Message) -> DraftContent {
         ("From", display::addresses(&message.summary.from)),
         ("Date", date),
         ("Subject", subject.trim().to_owned()),
-        ("To", display::addresses(&message.to)),
-        ("Cc", display::addresses(&message.cc)),
+        ("To", display::addresses(&message.summary.to)),
+        ("Cc", display::addresses(&message.summary.cc)),
     ] {
         if !value.is_empty() {
             text.push_str(&format!("{name}: {value}\n"));
@@ -837,14 +875,14 @@ mod tests {
                 folder_id: FolderId(1),
                 subject: Some("季度报告".into()),
                 from: vec![from],
+                to,
+                cc,
                 date: None,
                 snippet: None,
                 flags: Flags::empty(),
                 has_attachments: false,
                 labels: Vec::new(),
             },
-            to,
-            cc,
             reply_to: Vec::new(),
             message_id: Some("m1@example.com".into()),
             references: Vec::new(),

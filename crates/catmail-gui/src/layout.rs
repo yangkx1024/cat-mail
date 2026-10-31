@@ -15,6 +15,7 @@ use gpui_kit::{
 use crate::actions::DIALOG_BUTTON;
 use crate::assets::Hero;
 use crate::format;
+use crate::theme::colors::ThemeColors as _;
 
 /// A row of a sidebar menu, the mailbox's or the settings'. Selected, its label and its
 /// icon, filled, take the primary color, and the label keeps its weight: GPUI Kit sets a
@@ -108,6 +109,23 @@ pub fn labelled(name: impl IntoElement, value: impl IntoElement, cx: &App) -> Di
                 .child(name),
         )
         .child(div().flex_1().min_w_0().child(value))
+}
+
+/// A sender's avatar: the first letter of `name`, on the color `email` picks, so a
+/// sender keeps theirs wherever it shows. The caller sizes it.
+pub fn avatar(name: &str, email: &str, cx: &App) -> Div {
+    let (bg, fg) = cx.theme().avatar(email);
+    let initial = name.chars().take(1).collect::<String>().to_uppercase();
+    div()
+        .flex_none()
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(bg)
+        .text_color(fg)
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(initial)
 }
 
 /// A short status beside a name, on the background and in the text color given.

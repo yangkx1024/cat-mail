@@ -77,8 +77,8 @@ fn labels_are_listed_apart_and_shown_on_their_messages(cx: &mut TestAppContext) 
     // The inbox is where it is listed: Work is what it is about.
     click_message(cx, window, &mailbox, "Plan");
     cx.read(|cx| assert_eq!(reader_labels(&mailbox, cx), ["Work"]));
-    // "Labels" is in the toolbar's More menu.
-    cx.read(|cx| assert!(mailbox.read(cx).can_edit_labels(cx)));
+    // "Labels" is in the toolbar, on Gmail only.
+    assert!(shown(cx, window, "labels"));
 
     // In Work, every row has Work: the rows leave it out, the reader doesn't.
     select_folder(cx, window, &mailbox, mail.folder_id("Work"));

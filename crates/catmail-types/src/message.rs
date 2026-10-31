@@ -155,6 +155,8 @@ pub struct MessageSummary {
     pub folder_id: FolderId,
     pub subject: Option<String>,
     pub from: Vec<Address>,
+    pub to: Vec<Address>,
+    pub cc: Vec<Address>,
     /// Unix timestamp, seconds.
     pub date: Option<i64>,
     pub snippet: Option<String>,
@@ -190,8 +192,6 @@ pub struct MessageCursor {
 pub struct Message {
     #[serde(flatten)]
     pub summary: MessageSummary,
-    pub to: Vec<Address>,
-    pub cc: Vec<Address>,
     /// Where replies should go instead of the sender, e.g. a mailing list.
     pub reply_to: Vec<Address>,
     /// The Message-ID header, without angle brackets.

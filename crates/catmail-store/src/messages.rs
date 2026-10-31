@@ -16,7 +16,8 @@ use crate::fts;
 use crate::ops::MOVING;
 
 /// Of `messages m`. Its labels are one lookup in the primary key of `message_labels`.
-const SUMMARY_COLUMNS: &str = "m.id, m.account_id, m.folder_id, m.subject, m.from_json, m.date,
+const SUMMARY_COLUMNS: &str = "m.id, m.account_id, m.folder_id, m.subject, m.from_json, m.to_json,
+    m.cc_json, m.date,
     m.snippet, m.flags, m.has_attachments,
     (SELECT group_concat(folder_id) FROM message_labels WHERE message_id = m.id) AS labels";
 
@@ -789,11 +790,23 @@ impl<'c> Messages<'c> {
 
     /// The message with its full headers, and its body and attachments if downloaded.
     pub fn get(&self, id: MessageId) -> Result<Option<Message>> {
+        self.load(id, true)
+    }
+
+    /// The message with its full headers, without reading its body (`None` either way).
+    pub fn headers(&self, id: MessageId) -> Result<Option<Message>> {
+        self.load(id, false)
+    }
+
+    fn load(&self, id: MessageId, with_body: bool) -> Result<Option<Message>> {
+        let body = if with_body {
+            "b.message_id IS NOT NULL AS has_body, b.text_plain, b.text_html
+             FROM messages m LEFT JOIN message_bodies b ON b.message_id = m.id"
+        } else {
+            "FALSE AS has_body FROM messages m"
+        };
         let sql = format!(
-            "SELECT {SUMMARY_COLUMNS}, to_json, cc_json, reply_to_json, message_id_hdr,
-                    references_hdr, size,
-                    b.message_id IS NOT NULL AS has_body, b.text_plain, b.text_html
-             FROM messages m LEFT JOIN message_bodies b ON b.message_id = m.id
+            "SELECT {SUMMARY_COLUMNS}, reply_to_json, message_id_hdr, references_hdr, size, {body}
              WHERE m.id = ?1"
         );
         let found = self
@@ -811,8 +824,6 @@ impl<'c> Messages<'c> {
                     .transpose()?;
                 Ok(Message {
                     summary: summary_from_row(row)?,
-                    to: json(row, "to_json")?,
-                    cc: json(row, "cc_json")?,
                     reply_to: json(row, "reply_to_json")?,
                     message_id: row.get("message_id_hdr")?,
                     references: id_list(row, "references_hdr")?,
@@ -974,6 +985,8 @@ fn summary_from_row(row: &Row<'_>) -> rusqlite::Result<MessageSummary> {
         folder_id: FolderId(row.get("folder_id")?),
         subject: row.get("subject")?,
         from: json(row, "from_json")?,
+        to: json(row, "to_json")?,
+        cc: json(row, "cc_json")?,
         date: row.get("date")?,
         snippet: row.get("snippet")?,
         flags: Flags::from_bits(row.get("flags")?),
@@ -1439,7 +1452,16 @@ mod tests {
         );
 
         let message = store.read(|db| db.messages().get(id)).unwrap().unwrap();
-        assert_eq!(message.cc[0].email, "wang@example.com");
+        let headers = store.read(|db| db.messages().headers(id)).unwrap().unwrap();
+        assert_eq!(
+            headers,
+            Message {
+                body: None,
+                ..message.clone()
+            },
+            "the same, but for the body"
+        );
+        assert_eq!(message.summary.cc[0].email, "wang@example.com");
         assert!(message.summary.has_attachments, "the PDF is not inline");
         assert_eq!(
             message.summary.snippet.as_deref(),

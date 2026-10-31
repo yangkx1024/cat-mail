@@ -52,7 +52,7 @@ fn screenshots() {
     let plan = cx.update(|cx| id_of(&mailbox, "Plan", cx));
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
-        window.click(("message", plan.0 as u64), cx);
+        click_row(window, plan, cx);
     })
     .unwrap();
     wait_until(|| {
@@ -82,6 +82,15 @@ fn screenshots() {
         cx.update(|cx| subjects(&mailbox, cx).len() == 6)
     });
 
+    // The list on one line, a row hovered.
+    let id = cx.update(|cx| id_of(&mailbox, "月度报表", cx));
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.hover(("message", id.0 as u64), cx);
+    })
+    .unwrap();
+    save(&mut cx, window, "list-row-hovered");
+
     let shots = [
         ("text", "你好，世界"),
         ("html-inline-image", "月度报表"),
@@ -91,7 +100,7 @@ fn screenshots() {
         let id = cx.update(|cx| id_of(&mailbox, subject, cx));
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
-            window.click(("message", id.0 as u64), cx);
+            click_row(window, id, cx);
         })
         .unwrap();
         wait_until(|| {

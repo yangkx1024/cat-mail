@@ -37,16 +37,18 @@ pub(super) struct OpenMessage {
     /// the cached ones show at once, the others when the user asks.
     pub(super) remote_images: Vec<String>,
     pub(super) loading_remote: bool,
+    /// Whether replying to all writes to more than replying does.
+    pub(super) can_reply_all: bool,
 }
 
 impl OpenMessage {
     /// Parses the whole HTML; not for the UI thread.
-    pub(super) fn new(message: Message) -> Self {
+    pub(super) fn new(message: Message, can_reply_all: bool) -> Self {
         let summary = &message.summary;
         let headers = [
             ("From", format::addresses(&summary.from)),
-            ("To", format::addresses(&message.to)),
-            ("Cc", format::addresses(&message.cc)),
+            ("To", format::addresses(&summary.to)),
+            ("Cc", format::addresses(&summary.cc)),
             ("Reply-To", format::addresses(&message.reply_to)),
             ("Date", format::date(summary.date)),
         ]
@@ -59,7 +61,7 @@ impl OpenMessage {
         let sender_email = from
             .filter(|a| a.name.is_some())
             .map(|a| SharedString::from(a.email.clone()));
-        let recipients = [("To", &message.to), ("Cc", &message.cc)]
+        let recipients = [("To", &summary.to), ("Cc", &summary.cc)]
             .into_iter()
             .filter(|(_, list)| !list.is_empty())
             .map(|(name, list)| format!("{name} {}", format::names(list)))
@@ -87,6 +89,7 @@ impl OpenMessage {
             text,
             remote_images: html.as_deref().map(remote_image_urls).unwrap_or_default(),
             loading_remote: false,
+            can_reply_all,
             html,
             attachments,
             images: Arc::default(),

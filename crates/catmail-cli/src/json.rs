@@ -401,8 +401,8 @@ impl From<&Message> for JsonMessage {
     fn from(m: &Message) -> Self {
         Self {
             summary: (&m.summary).into(),
-            to: addresses(&m.to),
-            cc: addresses(&m.cc),
+            to: addresses(&m.summary.to),
+            cc: addresses(&m.summary.cc),
             reply_to: addresses(&m.reply_to),
             message_id: m.message_id.clone(),
             references: m.references.clone(),
@@ -754,6 +754,11 @@ mod tests {
                 name: Some("张三".into()),
                 email: "zhang@example.com".into(),
             }],
+            to: vec![Address {
+                name: None,
+                email: "me@example.com".into(),
+            }],
+            cc: Vec::new(),
             date: Some(1_790_000_000),
             snippet: Some("本周".into()),
             flags: Flags::SEEN | Flags::FLAGGED,
@@ -762,11 +767,6 @@ mod tests {
         };
         let message = Message {
             summary: summary.clone(),
-            to: vec![Address {
-                name: None,
-                email: "me@example.com".into(),
-            }],
-            cc: Vec::new(),
             reply_to: Vec::new(),
             message_id: Some("<a@example.com>".into()),
             references: Vec::new(),

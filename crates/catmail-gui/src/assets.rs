@@ -1,10 +1,11 @@
 //! Embedded icons. The app draws [Heroicons](https://heroicons.com) (MIT, vendored under
 //! `assets/heroicons/`, only the ones used; `folder-arrow-right` is ours, Heroicons'
-//! `folder-arrow-down` with its arrow turned, as Heroicons has none), and serves them in
-//! place of GPUI Kit's own Lucide icons wherever its components draw one we have a
-//! counterpart for (check marks, chevrons, close buttons, …), so the window uses one icon
-//! family. Component icons without a counterpart (the spinner, panel toggles) still come
-//! from GPUI Kit.
+//! `folder-arrow-down` with its arrow turned, and so is `arrow-uturn-left-double`,
+//! `arrow-uturn-left` with a second head for replying to all, as Heroicons has neither),
+//! and serves them in place of GPUI Kit's own Lucide icons wherever its components draw
+//! one we have a counterpart for (check marks, chevrons, close buttons, …), so the window
+//! uses one icon family. Component icons without a counterpart (the spinner, panel
+//! toggles) still come from GPUI Kit.
 
 use std::borrow::Cow;
 
@@ -71,6 +72,7 @@ heroicons! {
     ArrowUp => "outline" / "arrow-up",
     ArrowUpTray => "outline" / "arrow-up-tray" + ArrowUpTraySolid,
     ArrowUturnLeft => "outline" / "arrow-uturn-left",
+    ArrowUturnLeftDouble => "outline" / "arrow-uturn-left-double",
     ArrowUturnRight => "outline" / "arrow-uturn-right",
     ArrowsPointingIn => "outline" / "arrows-pointing-in",
     ArrowsPointingOut => "outline" / "arrows-pointing-out",

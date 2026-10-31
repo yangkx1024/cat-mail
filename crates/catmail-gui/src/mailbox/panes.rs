@@ -6,13 +6,12 @@ use catmail_core::{Flags, MessageSummary};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::list::List;
-use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::resizable::{h_resizable, resizable_panel};
+use gpui_kit::component::separator::Separator;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, Context, Focusable as _, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, SharedString, Styled as _, Window, div,
-    prelude::FluentBuilder as _, rems,
+    AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
+    Pixels, SharedString, Styled as _, Window, div, prelude::FluentBuilder as _, rems,
 };
 
 use super::Mailbox;
@@ -183,20 +182,25 @@ impl Mailbox {
         message: &MessageSummary,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let seen = message.flags.contains(Flags::SEEN);
         let flagged = message.flags.contains(Flags::FLAGGED);
-        let has_html = self.reader.read(cx).has_html();
-        let focus = self.focus_handle(cx);
+        let reader = self.reader.read(cx);
+        let has_html = reader.has_html();
+        let can_reply_all = reader.can_reply_all();
+        let blocked_images = reader.blocked_remote_images();
         let can_archive = self.can_archive(message);
         let can_edit_labels = self.can_edit_labels(cx);
         let context = Some(actions::MAILBOX);
-        let (read_icon, read_label) = if seen {
-            (Hero::Envelope, "Mark as unread")
+        let (read_icon, read_label) = super::commands::read_toggle(message.flags);
+        let (flag_icon, flag_label) = if flagged {
+            (Hero::FlagSolid, "Remove flag")
         } else {
-            (Hero::EnvelopeOpen, "Mark as read")
+            (Hero::Flag, "Flag")
         };
+        let separator = || Separator::vertical().h_5().mx_1();
+        // In groups: where the message is, its marks, its content, and answering it.
         layout::toolbar(cx)
             .child(self.back_button(cx))
+            .child(separator())
             .child(
                 Button::new("archive")
                     .ghost()
@@ -215,6 +219,25 @@ impl Mailbox {
                     .on_click(cx.listener(|this, _, window, cx| this.delete(window, cx))),
             )
             .child(
+                Button::new("move")
+                    .ghost()
+                    .small()
+                    .icon(Hero::FolderArrowRight)
+                    .tooltip_with_action("Move to", &MoveToFolder, context)
+                    .on_click(cx.listener(|this, _, window, cx| this.move_to_folder(window, cx))),
+            )
+            .when(can_edit_labels, |this| {
+                this.child(
+                    Button::new("labels")
+                        .ghost()
+                        .small()
+                        .icon(Hero::Tag)
+                        .tooltip_with_action("Labels", &EditLabels, Some(actions::MESSAGE_LIST))
+                        .on_click(cx.listener(|this, _, window, cx| this.edit_labels(window, cx))),
+                )
+            })
+            .child(separator())
+            .child(
                 Button::new("toggle-read")
                     .ghost()
                     .small()
@@ -225,37 +248,68 @@ impl Mailbox {
                     ),
             )
             .child(
-                Button::new("move")
+                Button::new("toggle-flag")
                     .ghost()
                     .small()
-                    .icon(Hero::FolderArrowRight)
-                    .tooltip_with_action("Move to", &MoveToFolder, context)
-                    .on_click(cx.listener(|this, _, window, cx| this.move_to_folder(window, cx))),
+                    .icon(flag_icon)
+                    .tooltip_with_action(flag_label, &ToggleFlag, context)
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.toggle(Flags::FLAGGED, window, cx)),
+                    ),
             )
+            .child(separator())
+            .when_some(blocked_images, |this, loading| {
+                this.child(
+                    Button::new("show-remote-images")
+                        .ghost()
+                        .small()
+                        .icon(Hero::Photo)
+                        .tooltip("Show remote images")
+                        .loading(loading)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.reader
+                                .update(cx, |reader, cx| reader.show_remote_images(window, cx))
+                        })),
+                )
+            })
             .child(
-                Button::new("more")
+                Button::new("open-in-browser")
                     .ghost()
                     .small()
-                    .icon(Hero::EllipsisHorizontal)
-                    .tooltip("More")
-                    .dropdown_menu_with_anchor(gpui_kit::Anchor::TopLeft, move |menu, _, _| {
-                        menu.action_context(focus.clone())
-                            .menu_with_icon(
-                                if flagged { "Remove flag" } else { "Flag" },
-                                Hero::Flag,
-                                Box::new(ToggleFlag),
-                            )
-                            .when(can_edit_labels, |menu| {
-                                menu.menu_with_icon("Labels", Hero::Tag, Box::new(EditLabels))
-                            })
-                            .separator()
-                            .menu_with_icon_and_disabled(
-                                "Open in browser",
-                                Hero::ArrowTopRightOnSquare,
-                                Box::new(OpenInBrowser),
-                                !has_html,
-                            )
-                    }),
+                    .icon(Hero::ArrowTopRightOnSquare)
+                    .disabled(!has_html)
+                    .tooltip("Open in browser")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.reader
+                            .update(cx, |reader, cx| reader.open_in_browser(window, cx))
+                    })),
+            )
+            .child(separator())
+            .child(
+                Button::new("reply")
+                    .ghost()
+                    .small()
+                    .icon(Hero::ArrowUturnLeft)
+                    .tooltip_with_action("Reply", &Reply, context)
+                    .on_click(cx.listener(|this, _, window, cx| this.reply(false, window, cx))),
+            )
+            .when(can_reply_all, |this| {
+                this.child(
+                    Button::new("reply-all")
+                        .ghost()
+                        .small()
+                        .icon(Hero::ArrowUturnLeftDouble)
+                        .tooltip_with_action("Reply all", &ReplyAll, context)
+                        .on_click(cx.listener(|this, _, window, cx| this.reply(true, window, cx))),
+                )
+            })
+            .child(
+                Button::new("forward")
+                    .ghost()
+                    .small()
+                    .icon(Hero::ArrowUturnRight)
+                    .tooltip_with_action("Forward", &Forward, context)
+                    .on_click(cx.listener(|this, _, window, cx| this.forward(window, cx))),
             )
     }
 }

@@ -1,5 +1,5 @@
 //! The mailbox's commands: on the selected message (the toolbar, the menus and the keys
-//! all call these), writing, syncing and settings.
+//! all call these) or a row's, writing, syncing and settings.
 
 use catmail_core::{
     AccountId, AccountMode, Flags, FolderId, MessageId, MessageSummary, OpKind, OpStatus, PendingOp,
@@ -8,11 +8,21 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{App, Context, Window};
 
+use crate::assets::Hero;
 use crate::composer::{self, ComposeFrom};
 use crate::layout;
 
 use super::*;
 use crate::settings::dialog as settings_dialog;
+
+/// The icon and name of the command that marks a message read or unread, by its flags.
+pub(super) fn read_toggle(flags: Flags) -> (Hero, &'static str) {
+    if flags.contains(Flags::SEEN) {
+        (Hero::Envelope, "Mark as unread")
+    } else {
+        (Hero::EnvelopeOpen, "Mark as read")
+    }
+}
 
 /// Runs an engine call, and tells the user if it fails: "Couldn't {what}: …".
 pub(crate) fn report_failure<T: 'static>(
@@ -100,9 +110,19 @@ impl Mailbox {
 
     /// Sets the flag on the selected message, or clears it if it is set.
     pub(crate) fn toggle(&mut self, flag: Flags, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(message) = self.selected_message(cx) else {
-            return;
-        };
+        if let Some(message) = self.selected_message(cx) {
+            self.toggle_message(&message, flag, window, cx);
+        }
+    }
+
+    /// Sets the flag on `message`, or clears it if it is set.
+    pub(super) fn toggle_message(
+        &mut self,
+        message: &MessageSummary,
+        flag: Flags,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let (add, remove) = if message.flags.contains(flag) {
             (Flags::empty(), flag)
         } else {
@@ -165,8 +185,8 @@ impl Mailbox {
             .map(|f| f.id)
     }
 
-    /// Changes the message with `call`, which may take it out of the list: if it goes,
-    /// the next one is selected. Whether it goes is the store's to say (on Gmail, one moved
+    /// Changes the message with `call`, which may take it out of the list: if it goes
+    /// while selected, the next one is selected. Whether it goes is the store's to say (on Gmail, one moved
     /// to a label from All Mail stays): once the change is made, the list is read again,
     /// and a message still in it stays selected (see `message_list::removal_settled`).
     fn change<F: Future<Output = catmail_core::Result<Vec<AccountId>>> + 'static>(
@@ -177,9 +197,12 @@ impl Mailbox {
         cx: &mut Context<Self>,
         call: impl FnOnce(catmail_core::MailClient) -> F,
     ) {
-        let removal = self
-            .messages
-            .update(cx, |list, _| list.delegate_mut().expect_removal(id));
+        // Only the selected message's removal is waited for: another's (a row's own
+        // command) must not take the place of one pending for it.
+        let removal = self.messages.update(cx, |list, _| {
+            let list = list.delegate_mut();
+            (list.selected_message().map(|m| m.id) == Some(id)).then(|| list.expect_removal(id))
+        });
         let call = call(self.client.clone());
         cx.spawn_in(window, async move |this, cx| {
             let result = call.await;
@@ -190,22 +213,33 @@ impl Mailbox {
                         cx,
                     );
                 }
-                this.messages.update(cx, |list, cx| {
-                    message_list::removal_settled(list, removal, result.is_ok(), window, cx)
-                });
+                if let Some(removal) = removal {
+                    this.messages.update(cx, |list, cx| {
+                        message_list::removal_settled(list, removal, result.is_ok(), window, cx)
+                    });
+                }
             })
             .ok();
         })
         .detach();
     }
 
+    /// Deletes the selected message, as [`delete_message`](Self::delete_message).
+    pub(crate) fn delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(message) = self.selected_message(cx) {
+            self.delete_message(&message, window, cx);
+        }
+    }
+
     /// To Trash, or for good from Trash or without one, as the engine will
     /// ([`DeleteOutcome`](catmail_core::DeleteOutcome)). A message deleted for good
     /// can't be brought back, so that asks first.
-    pub(crate) fn delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(message) = self.selected_message(cx) else {
-            return;
-        };
+    pub(super) fn delete_message(
+        &mut self,
+        message: &MessageSummary,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(account) = self.account(message.account_id) else {
             return;
         };
@@ -214,10 +248,13 @@ impl Mailbox {
             .delete_outcome(message.folder_id)
             .is_permanent()
         {
-            self.delete_selected(message.id, false, window, cx);
+            self.delete_now(message.id, false, window, cx);
             return;
         }
-        let subject = crate::format::subject(message.subject.as_deref());
+        let (id, subject) = (
+            message.id,
+            crate::format::subject(message.subject.as_deref()),
+        );
         let this = cx.entity().downgrade();
         layout::confirm_danger(
             format!("Delete “{subject}” for good?"),
@@ -226,15 +263,13 @@ impl Mailbox {
             window,
             cx,
             move |window, cx| {
-                this.update(cx, |this, cx| {
-                    this.delete_selected(message.id, true, window, cx)
-                })
-                .ok();
+                this.update(cx, |this, cx| this.delete_now(id, true, window, cx))
+                    .ok();
             },
         );
     }
 
-    fn delete_selected(
+    fn delete_now(
         &mut self,
         id: MessageId,
         permanently: bool,

@@ -1008,6 +1008,16 @@ impl MailClient {
             .await
     }
 
+    /// Whether [`reply`](Self::reply) with `all` would write to anyone more than without:
+    /// false when the message's sender (or Reply-To) is its only other party. Reads the
+    /// message's headers only, without downloading its body.
+    pub async fn can_reply_all(&self, message: MessageId) -> Result<bool> {
+        let engine = self.engine.clone();
+        self.rt
+            .run(async move { drafts::can_reply_all(&engine, message).await })
+            .await
+    }
+
     /// A new draft forwarding the message to the recipients `forwarding` names (none with
     /// [`Forwarding::default`]): `Fwd:` and its subject, its headers and text below an
     /// empty start or `forwarding.text`, and copies of its attachments (not the images

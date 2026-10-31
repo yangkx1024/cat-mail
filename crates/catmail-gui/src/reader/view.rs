@@ -1,4 +1,4 @@
-//! How the pane looks: the message's header, attachments, toolbar and body.
+//! How the pane looks: the message's header, attachments and body.
 
 use gpui_kit::base::SelectableText;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -6,11 +6,10 @@ use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
-    Action, AnyElement, App, ClickEvent, Context, FontWeight, IntoElement, ParentElement as _,
-    Render, Styled as _, Window, div, prelude::FluentBuilder as _,
+    AnyElement, Context, FontWeight, IntoElement, ParentElement as _, Render, Styled as _, Window,
+    div, prelude::FluentBuilder as _,
 };
 
-use crate::actions::{self, Forward, Reply, ReplyAll};
 use crate::assets::Hero;
 use crate::format;
 use crate::layout;
@@ -52,44 +51,15 @@ impl Render for Reader {
 }
 
 impl Reader {
-    /// Runs one of the mailbox's actions from a button here, wherever the focus is.
-    fn dispatch(
-        &self,
-        action: &dyn Action,
-    ) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
-        let (mailbox, action) = (self.mailbox.clone(), action.boxed_clone());
-        move |_, window, cx| mailbox.dispatch_action(action.as_ref(), window, cx)
-    }
-
     fn render_message(&self, open: &OpenMessage, cx: &mut Context<Self>) -> impl IntoElement {
-        let has_html = open.html.is_some();
         let id = open.id;
         let theme = cx.theme();
         let muted = theme.muted_foreground;
-        let (avatar_bg, avatar_fg) = theme.avatar(&open.sender_key);
-        let initial: String = open
-            .sender
-            .chars()
-            .take(1)
-            .collect::<String>()
-            .to_uppercase();
 
         let sender = h_flex()
             .items_start()
             .gap_3()
-            .child(
-                div()
-                    .flex_none()
-                    .size_9()
-                    .rounded_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(avatar_bg)
-                    .text_color(avatar_fg)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(initial),
-            )
+            .child(layout::avatar(&open.sender, &open.sender_key, cx).size_9())
             .child(
                 v_flex()
                     .flex_1()
@@ -178,66 +148,6 @@ impl Reader {
                 }))
         });
 
-        let context = Some(actions::MAILBOX);
-        let toolbar = h_flex()
-            .gap_2()
-            .pt_3()
-            .border_t_1()
-            .border_color(theme.border)
-            .child(
-                Button::new("reply")
-                    .ghost()
-                    .xsmall()
-                    .icon(Hero::ArrowUturnLeft)
-                    .label("Reply")
-                    .tooltip_with_action("Reply", &Reply, context)
-                    .on_click(self.dispatch(&Reply)),
-            )
-            .child(
-                Button::new("reply-all")
-                    .ghost()
-                    .xsmall()
-                    .label("Reply all")
-                    .tooltip_with_action("Reply all", &ReplyAll, context)
-                    .on_click(self.dispatch(&ReplyAll)),
-            )
-            .child(
-                Button::new("forward")
-                    .ghost()
-                    .xsmall()
-                    .icon(Hero::ArrowUturnRight)
-                    .label("Forward")
-                    .tooltip_with_action("Forward", &Forward, context)
-                    .on_click(self.dispatch(&Forward)),
-            )
-            .when(!open.remote_images.is_empty(), |this| {
-                this.child(
-                    Button::new("show-remote-images")
-                        .ghost()
-                        .xsmall()
-                        .icon(Hero::Photo)
-                        .label("Show remote images")
-                        .tooltip("Loading them tells the sender you read the message.")
-                        .loading(open.loading_remote)
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.show_remote_images(window, cx)),
-                        ),
-                )
-            })
-            .child(div().flex_1())
-            .when(has_html, |this| {
-                this.child(
-                    Button::new("open-in-browser")
-                        .ghost()
-                        .xsmall()
-                        .icon(Hero::ArrowTopRightOnSquare)
-                        .label("Open in browser")
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.open_in_browser(window, cx)),
-                        ),
-                )
-            });
-
         // `show_page` keeps it the open message's.
         let body: AnyElement = match (&self.page, &open.text) {
             (Some(page), _) => page.view.clone().into_any_element(),
@@ -273,7 +183,6 @@ impl Reader {
                 .child(sender)
                 .children(details)
                 .children(attachments)
-                .child(toolbar)
                 .child(body),
         )
         .size_full()

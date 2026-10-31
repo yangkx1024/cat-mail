@@ -2,7 +2,8 @@
 
 use catmail_core::{Draft, Flags, MessageSummary, OutboxEntry, OutboxStatus};
 use gpui_kit::component::Icon;
-use gpui_kit::component::list::ListItem;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::list::{ListItem, ListState};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{App, Div, FontWeight, SharedString, div, rems};
 
@@ -19,16 +20,30 @@ pub(super) enum Shape {
     Stacked,
 }
 
-/// What a message or draft row shows: who it is from or to, its subject, its time (all a
-/// row says of when: its day is the heading above it) and the marks after the subject.
-/// `strong` sets the first two in bold.
+/// What a message or draft row shows: the sender's avatar (a message's), who it is from
+/// or to, its subject, its time (all a row says of when: its day is the heading above it)
+/// and the marks after the subject.
+/// `strong` sets the first two in bold. `hovered` shows on one line while the pointer is
+/// on the row.
 struct Summary {
+    avatar: Option<Div>,
     who: SharedString,
     subject: SharedString,
     time: SharedString,
     strong: bool,
     marks: Div,
+    hovered: Option<Hovered>,
 }
+
+/// What a row on one line adds while hovered: commands after the subject, within reach
+/// of the pointer, and more about the message before the marks.
+struct Hovered {
+    commands: Div,
+    aside: Div,
+}
+
+/// How far a stacked row's avatar sits below the top of the sender's line, in rems.
+const AVATAR_DROP: f32 = 0.3125;
 
 /// A stacked subject's line height: it always takes two lines, as every row of a list
 /// keeps one height.
@@ -39,51 +54,86 @@ impl Summary {
     /// spare.
     fn row(self, item: ListItem, shape: Shape, cx: &App) -> ListItem {
         let Self {
+            avatar,
             who,
             subject,
             time,
             strong,
             marks,
+            hovered,
         } = self;
+        let (commands, aside) = hovered.map(|h| (h.commands, h.aside)).unzip();
         match shape {
             // The senders as a column, so the subjects line up.
-            Shape::Line => item.px_5().py_3().child(
+            // The avatar no taller than the text's line and its padding.
+            Shape::Line => item.px_5().py_2p5().child(
                 h_flex()
                     .w_full()
                     .min_w_0()
                     .gap_3()
+                    .children(avatar.map(|avatar| avatar.size_6().text_xs()))
                     .child(text(who, strong).w_48().flex_none().truncate())
-                    .child(text(subject, strong).flex_1().truncate())
-                    .child(marks)
-                    .child(time_of_day(time, cx)),
-            ),
-            Shape::Stacked => item.px_2().child(
-                v_flex()
-                    .w_full()
-                    .min_w_0()
-                    .gap_0p5()
-                    .child(top_line(who, time, strong, cx))
+                    // Only as wide as it is: the commands shown while hovered follow it.
+                    .child(text(subject, strong).truncate())
+                    .children(commands)
                     .child(
                         h_flex()
-                            .items_start()
-                            .gap_1p5()
-                            .child(
-                                // Set apart from the sender above it by color: weight tells
-                                // unread.
-                                text(subject, strong)
-                                    .flex_1()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .line_height(rems(SUBJECT_LINE))
-                                    .h(rems(2. * SUBJECT_LINE))
-                                    .line_clamp(2)
-                                    .text_ellipsis(),
-                            )
-                            // Beside the subject's first line.
-                            .child(h_flex().flex_none().h(rems(SUBJECT_LINE)).child(marks)),
+                            .flex_none()
+                            .ml_auto()
+                            .gap_3()
+                            .children(aside)
+                            .child(marks)
+                            .child(time_of_day(time, cx)),
                     ),
+            ),
+            Shape::Stacked => item.px_2().child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .items_start()
+                    .gap_2()
+                    // As on one line: opening a message changes the row's shape, not this.
+                    // Its top at the text's: the sender's glyphs start below their line's
+                    // top, by half its leading and the font's own space above them.
+                    .children(avatar.map(|avatar| avatar.size_6().text_xs().mt(rems(AVATAR_DROP))))
+                    .child(self::stacked(who, subject, time, strong, marks, cx)),
             ),
         }
     }
+}
+
+/// A stacked row's text: the sender and time above the subject.
+fn stacked(
+    who: SharedString,
+    subject: SharedString,
+    time: SharedString,
+    strong: bool,
+    marks: Div,
+    cx: &App,
+) -> Div {
+    v_flex()
+        .flex_1()
+        .min_w_0()
+        .gap_0p5()
+        .child(top_line(who, time, strong, cx))
+        .child(
+            h_flex()
+                .items_start()
+                .gap_1p5()
+                .child(
+                    // Set apart from the sender above it by color: weight tells
+                    // unread.
+                    text(subject, strong)
+                        .flex_1()
+                        .text_color(cx.theme().muted_foreground)
+                        .line_height(rems(SUBJECT_LINE))
+                        .h(rems(2. * SUBJECT_LINE))
+                        .line_clamp(2)
+                        .text_ellipsis(),
+                )
+                // Beside the subject's first line.
+                .child(h_flex().flex_none().h(rems(SUBJECT_LINE)).child(marks)),
+        )
 }
 
 fn text(text: SharedString, strong: bool) -> Div {
@@ -113,12 +163,14 @@ fn top_line(title: SharedString, time: SharedString, strong: bool, cx: &App) -> 
 /// The most labels a row shows by name; the rest are counted.
 const ROW_LABELS: usize = 2;
 
-/// `labels` are the names of the message's labels to show.
+/// `labels` are the names of the message's labels to show; `hovered` says whether the
+/// pointer is on the row.
 pub(super) fn message_row(
     message: &MessageSummary,
     labels: &[SharedString],
     shape: Shape,
-    cx: &App,
+    hovered: bool,
+    cx: &mut Context<ListState<MessageList>>,
 ) -> ListItem {
     let unread = !message.flags.contains(Flags::SEEN);
     let flagged = message.flags.contains(Flags::FLAGGED);
@@ -170,16 +222,76 @@ pub(super) fn message_row(
                     .text_color(cx.theme().flag()),
             )
         });
+    let email = message.from.first().map_or("", |a| a.email.as_str());
     let summary = Summary {
+        avatar: Some(crate::layout::avatar(sender, email, cx)),
         who: sender.into(),
         subject: subject.into(),
         time: date.into(),
         // Unread is told by weight alone: sender and subject in bold.
         strong: unread,
         marks,
+        hovered: (hovered && shape == Shape::Line).then(|| hovered_row(message, cx)),
     };
     let item = ListItem::new(("message", message.id.0 as u64)).accessibility_label(label);
     summary.row(item, shape, cx)
+}
+
+/// The commands most used on a message without opening it, as [`RowCommand`]s (the list
+/// on one line shows no message), and whom it went to: To, or Cc when it has no To.
+fn hovered_row(message: &MessageSummary, cx: &mut Context<ListState<MessageList>>) -> Hovered {
+    let (read_icon, read_label) = crate::mailbox::commands::read_toggle(message.flags);
+    let commands = h_flex()
+        .flex_none()
+        .gap_1()
+        .child(
+            Button::new(("row-toggle-read", message.id.0 as u64))
+                .ghost()
+                .xsmall()
+                .icon(read_icon)
+                .tooltip(read_label)
+                .on_click(emit(RowCommand::ToggleRead(message.clone()), cx)),
+        )
+        .child(
+            Button::new(("row-delete", message.id.0 as u64))
+                .ghost()
+                .xsmall()
+                .icon(Hero::Trash)
+                .tooltip("Delete")
+                .on_click(emit(RowCommand::Delete(message.clone()), cx)),
+        );
+    let aside = div()
+        .max_w_64()
+        .truncate()
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .child(recipients(message));
+    Hovered { commands, aside }
+}
+
+/// The addresses of whom `message` went to: To, or Cc when it has no To.
+fn recipients(message: &MessageSummary) -> String {
+    let to = if message.to.is_empty() {
+        &message.cc
+    } else {
+        &message.to
+    };
+    to.iter()
+        .map(|a| a.email.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A button's click handler sending `command`, not the row's click as well, which would
+/// open the message.
+fn emit(
+    command: RowCommand,
+    cx: &mut Context<ListState<MessageList>>,
+) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
+    cx.listener(move |_, _, _, cx| {
+        cx.stop_propagation();
+        cx.emit(command.clone());
+    })
 }
 
 pub(super) fn draft_row(draft: &Draft, shape: Shape, cx: &App) -> ListItem {
@@ -199,11 +311,13 @@ pub(super) fn draft_row(draft: &Draft, shape: Shape, cx: &App) -> ListItem {
         )
     });
     let summary = Summary {
+        avatar: None,
         who: to.into(),
         subject: subject.into(),
         time: date.into(),
         strong: false,
         marks,
+        hovered: None,
     };
     summary.row(ListItem::new(("draft", draft.id.0 as u64)), shape, cx)
 }
@@ -269,4 +383,36 @@ pub(super) fn outbox_row(entry: &OutboxEntry, cx: &App) -> ListItem {
                 )
                 .child(badge),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use catmail_core::{AccountId, Address, FolderId, MessageId};
+
+    use super::*;
+
+    #[test]
+    fn recipients_are_to_or_else_cc() {
+        let address = |email: &str| Address {
+            name: Some("Name".into()),
+            email: email.into(),
+        };
+        let mut message = MessageSummary {
+            id: MessageId(1),
+            account_id: AccountId(1),
+            folder_id: FolderId(1),
+            subject: None,
+            from: Vec::new(),
+            to: vec![address("a@example.com"), address("b@example.com")],
+            cc: vec![address("c@example.com")],
+            date: None,
+            snippet: None,
+            flags: Flags::empty(),
+            has_attachments: false,
+            labels: Vec::new(),
+        };
+        assert_eq!(recipients(&message), "a@example.com, b@example.com");
+        message.to.clear();
+        assert_eq!(recipients(&message), "c@example.com");
+    }
 }

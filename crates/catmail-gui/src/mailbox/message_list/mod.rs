@@ -14,8 +14,9 @@ use gpui_kit::component::list::{ListDelegate, ListEvent, ListItem, ListState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, IndexPath, Sizable as _, WindowExt as _};
 use gpui_kit::{
-    App, Context, FontWeight, IntoElement, ParentElement as _, SharedString, Styled as _, Task,
-    Window, div, prelude::FluentBuilder as _,
+    App, ClickEvent, Context, EventEmitter, FontWeight, IntoElement, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Task, Window, div,
+    prelude::FluentBuilder as _,
 };
 use jiff::civil::Date;
 
@@ -28,6 +29,16 @@ pub use rows::outbox_status;
 use rows::{Shape, draft_row, message_row, outbox_row};
 
 const PAGE: u32 = 200;
+
+/// A command on a row's message from the row itself, not the selection: the mailbox
+/// runs it.
+#[derive(Debug, Clone)]
+pub enum RowCommand {
+    Delete(MessageSummary),
+    ToggleRead(MessageSummary),
+}
+
+impl EventEmitter<RowCommand> for ListState<MessageList> {}
 
 /// What the list shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,6 +188,8 @@ pub struct MessageList {
     /// The name of each user label shown, of every account: a row shows those of its
     /// message's labels (see `AccountFolders::user_labels`).
     labels: HashMap<FolderId, SharedString>,
+    /// The message row the pointer is on.
+    hovered: Option<MessageId>,
     _load: Task<()>,
 }
 
@@ -198,6 +211,7 @@ impl MessageList {
             revealing: None,
             settled: None,
             labels: HashMap::new(),
+            hovered: None,
             _load: Task::ready(()),
         }
     }
@@ -644,12 +658,28 @@ impl ListDelegate for MessageList {
         let shape = self.shape();
         let item = match row {
             // Not the label listed: every row has it.
-            Row::Message(message) => message_row(
-                message,
-                &self.label_names(message, self.shown_folder()),
-                shape,
-                cx,
-            ),
+            Row::Message(message) => {
+                let id = message.id;
+                message_row(
+                    message,
+                    &self.label_names(message, self.shown_folder()),
+                    shape,
+                    self.hovered == Some(id),
+                    cx,
+                )
+                .on_hover(cx.listener(move |list, &hovered: &bool, _, cx| {
+                    let delegate = list.delegate_mut();
+                    let before = delegate.hovered;
+                    if hovered {
+                        delegate.hovered = Some(id);
+                    } else if before == Some(id) {
+                        delegate.hovered = None;
+                    }
+                    if delegate.hovered != before {
+                        cx.notify();
+                    }
+                }))
+            }
             Row::Draft(draft) => draft_row(draft, shape, cx),
             Row::Outbox(entry) => outbox_row(entry, cx),
         };
@@ -744,6 +774,8 @@ mod tests {
             folder_id: FolderId(1),
             subject: None,
             from: Vec::new(),
+            to: Vec::new(),
+            cc: Vec::new(),
             date,
             snippet: None,
             flags: Flags::empty(),
