@@ -150,7 +150,7 @@ pub fn open(client: MailClient, from: ComposeFrom, window: &mut Window, cx: &mut
                     .await?
                     .ok_or(catmail_core::Error::DraftNotFound(id))?,
             };
-            let identities = client.list_identities(draft.account_id).await?;
+            let identities = client.draft_senders(draft.id).await?;
             Ok::<_, catmail_core::Error>((draft, identities))
         }
         .await;
@@ -217,7 +217,7 @@ pub(crate) fn errors(cx: &App) -> Vec<Option<String>> {
 /// What a composer window is opened with.
 struct Opening {
     client: MailClient,
-    /// The account's identities, to choose From among.
+    /// The identities the draft can be sent as, to choose From among.
     identities: Vec<Identity>,
     draft: Draft,
     /// Made for this window, see [`Composer::created_here`].
@@ -250,7 +250,7 @@ fn window_title(subject: &str) -> String {
     }
 }
 
-/// A choice of From: one of the account's identities.
+/// A choice of From: one of the identities the draft can be sent as.
 #[derive(Debug, Clone, PartialEq)]
 struct Sender {
     identity: IdentityId,
@@ -269,8 +269,8 @@ impl SelectItem for Sender {
     }
 }
 
-/// The account's identities, as the engine lists them (the default first). An address
-/// there twice (through two servers) is told apart by its server.
+/// The identities, as the engine lists them (by account, each one's default first). An
+/// address there twice (through two servers) is told apart by its server.
 fn senders(identities: &[Identity]) -> Vec<Sender> {
     identities
         .iter()
@@ -294,8 +294,8 @@ fn senders(identities: &[Identity]) -> Vec<Sender> {
         .collect()
 }
 
-/// The From line: who the draft is from, or a choice when the account has more than one
-/// identity.
+/// The From line: who the draft is from, or a choice when it can be sent as more than
+/// one identity.
 enum FromField {
     /// With its identity, kept as it is.
     One(IdentityId, SharedString),
@@ -370,7 +370,7 @@ pub struct Composer {
     focus_handle: FocusHandle,
     _debounce: Task<()>,
     _save: Task<()>,
-    /// Follows the engine's changes to the account's identities.
+    /// Follows the engine's changes to the identities.
     _identities: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -411,7 +411,7 @@ impl Composer {
             .collect();
         subscriptions.push(cx.subscribe_in(&body, window, Self::on_input_event));
         let from = Self::from_field(&identities, draft.identity, window, cx);
-        let identities = Self::follow_identities(&client, draft.account_id, window, cx);
+        let identities = Self::follow_identities(&client, draft.id, window, cx);
         // The window is named after the subject.
         subscriptions.push(
             cx.subscribe_in(&subject, window, |_, subject, event, window, cx| {
@@ -527,7 +527,7 @@ impl Composer {
         (Written { from, content }, problem)
     }
 
-    /// The From line for the account's `identities`, with `selected` chosen.
+    /// The From line for `identities`, with `selected` chosen.
     fn from_field(
         identities: &[Identity],
         selected: IdentityId,
@@ -578,11 +578,12 @@ impl Composer {
         }
     }
 
-    /// Reads the account's identities again whenever the engine says they changed (or
-    /// events were missed), for [`set_identities`](Self::set_identities).
+    /// Reads the identities the draft can be sent as again whenever the engine says an
+    /// account's changed, or came or went (or events were missed), for
+    /// [`set_identities`](Self::set_identities).
     fn follow_identities(
         client: &MailClient,
-        account: AccountId,
+        draft: DraftId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<()> {
@@ -591,15 +592,22 @@ impl Composer {
             loop {
                 match events.recv().await {
                     Err(RecvError::Closed) => break,
-                    Ok(Event::AccountChanged { account: changed }) if changed == account => {}
-                    Err(RecvError::Lagged(_)) => {}
+                    Ok(
+                        Event::AccountChanged { .. }
+                        | Event::AccountAdded { .. }
+                        | Event::AccountRemoved { .. },
+                    )
+                    | Err(RecvError::Lagged(_)) => {}
                     Ok(_) => continue,
                 }
-                let Ok(identities) = client.list_identities(account).await else {
+                let (Ok(identities), Ok(Some(stored))) = (
+                    client.draft_senders(draft).await,
+                    client.get_draft(draft).await,
+                ) else {
                     continue;
                 };
                 let updated = this.update_in(cx, |this, window, cx| {
-                    this.set_identities(&identities, window, cx)
+                    this.set_identities(&identities, stored.identity, window, cx)
                 });
                 if updated.is_err() {
                     break; // The window is gone.
@@ -608,19 +616,22 @@ impl Composer {
         })
     }
 
-    /// The account's identities changed: one was added, made the default or removed. One
-    /// removed is replaced by the default, as the engine did in the stored draft; what was
+    /// The identities changed: one was added, made its account's default or removed, or
+    /// an account came or went. One removed is replaced by the identity the engine keeps
+    /// in the stored draft, `stored` (its account's default, if it was that one); what was
     /// typed stays.
     fn set_identities(
         &mut self,
         identities: &[Identity],
+        stored: IdentityId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let current = self.sender_identity(cx);
-        let selected = match identities.first() {
-            Some(default) if !identities.iter().any(|i| i.id == current) => default.id,
-            _ => current,
+        let selected = if identities.iter().any(|i| i.id == current) {
+            current
+        } else {
+            stored
         };
         self.from = Self::from_field(identities, selected, window, cx);
         cx.notify();

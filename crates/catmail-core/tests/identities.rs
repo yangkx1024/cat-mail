@@ -260,7 +260,7 @@ async fn removing_an_identity_hands_its_drafts_to_the_default() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn drafts_are_written_only_as_the_accounts_identities() {
+async fn drafts_are_made_only_as_the_accounts_identities() {
     let env = env(state()).await;
     let resend = service().await;
     let other = env

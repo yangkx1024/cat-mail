@@ -145,6 +145,35 @@ pub async fn env_added(
     }
 }
 
+impl Env {
+    /// Another account, `email`, on a fake server of its own holding `state` (logging in
+    /// as its user), sending through this one's SMTP server; synced. Returns the server,
+    /// which must be kept running.
+    #[allow(dead_code)]
+    pub async fn add_fake_account(&self, state: ServerState, email: &str) -> (FakeImap, AccountId) {
+        let (username, password) = (state.username.clone(), state.password.clone());
+        let fake = FakeImap::start(state).await;
+        let account = self
+            .client
+            .add_account(
+                NewAccount {
+                    email: email.into(),
+                    display_name: None,
+                    username,
+                    imap: local_server(fake.port()),
+                    smtp: local_server(self.smtp.port()),
+                },
+                password.into(),
+                Verify::Skip,
+            )
+            .await
+            .unwrap()
+            .id;
+        self.client.sync_account(account).await.unwrap();
+        (fake, account)
+    }
+}
+
 /// A fake server on this machine, without TLS.
 pub fn local_server(port: u16) -> ServerConfig {
     ServerConfig {

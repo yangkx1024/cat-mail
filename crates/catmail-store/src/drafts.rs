@@ -22,6 +22,14 @@ const STALE: &str = "SELECT d.id FROM drafts d
        AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.draft_id = d.id)
        AND NOT EXISTS (SELECT 1 FROM draft_uploads u WHERE u.draft_id = d.id)";
 
+/// Whether the draft `d` is a reply, which is sent from its account only. Its original
+/// may be gone, but not the Message-ID it answers, unless it had none.
+pub(crate) const REPLY: &str = "d.reply_to_message_id IS NOT NULL OR d.in_reply_to IS NOT NULL";
+
+/// Forgets a draft's copy on the server: its columns are set and cleared together.
+const NO_COPY: &str = "remote_folder_id = NULL, remote_uidvalidity = NULL, remote_uid = NULL,
+    remote_message_id = NULL, remote_revision = NULL";
+
 /// The SIZE of the SMTP server that sends a draft and the APPENDLIMIT of its account's
 /// IMAP server, as last announced.
 type SizeLimits = (Option<u64>, Option<u64>);
@@ -49,8 +57,6 @@ pub struct NewDraftAttachment {
 pub struct DraftUpload {
     pub id: i64,
     pub account: AccountId,
-    /// `None` if the draft was deleted or sent since: a copy made is deleted.
-    pub draft: Option<DraftId>,
     pub folder: FolderId,
     pub remote_name: String,
     /// Of the uploaded message, without brackets.
@@ -197,25 +203,25 @@ impl<'c> Drafts<'c> {
         }))
     }
 
-    /// Replaces what the user wrote, and the identity it is sent as. Returns false if
-    /// there is no such draft. The identity must be one of the account's; one removed
-    /// since leaves the draft from the identity it has.
+    /// Replaces what the user wrote, and the identity it is sent as. Returns the account
+    /// the draft was in, `None` if there is no such draft. An identity of another account
+    /// moves the draft there ([`move_to`](Self::move_to)), unless it is a reply; one
+    /// removed since leaves the draft from the identity it has.
     pub fn update(
         &self,
         id: DraftId,
         identity: IdentityId,
         content: &DraftContent,
         now: i64,
-    ) -> Result<bool> {
+    ) -> Result<Option<AccountId>> {
         let Some(account) = self.editable(id)? else {
-            return Ok(false);
+            return Ok(None);
         };
         let identity = match Identities::new(self.conn).account_of(identity)? {
             Some(owner) if owner == account => Some(identity),
-            Some(_) => {
-                return Err(Error::Invalid(format!(
-                    "identity {identity} belongs to another account"
-                )));
+            Some(owner) => {
+                self.move_to(id, owner, identity)?;
+                Some(identity)
             }
             // Removed since it was read: the draft is from the default now, which
             // `Identities::delete` made it. Ids aren't reused.
@@ -239,7 +245,38 @@ impl<'c> Drafts<'c> {
                 ":text": content.text,
                 ":now": now,
             })?;
-        Ok(true)
+        Ok(Some(account))
+    }
+
+    /// Moves the draft to `account`, sent as its `identity`. What the old account's
+    /// Drafts folder has of it is deleted as if the draft were gone: its copy, and what
+    /// an upload of it still to settle made. The new account's gets a copy as of a draft
+    /// that never had one. A reply stays in the account of the message it answers.
+    fn move_to(&self, id: DraftId, account: AccountId, identity: IdentityId) -> Result<()> {
+        let reply: bool = self.conn.query_row(
+            &format!("SELECT {REPLY} FROM drafts d WHERE d.id = ?1"),
+            [id.0],
+            |r| r.get(0),
+        )?;
+        if reply {
+            return Err(Error::Invalid(format!(
+                "draft {id} is a reply: it is sent from the account of the message it answers"
+            )));
+        }
+        self.orphan_copy(id)?;
+        self.conn.execute(
+            "UPDATE draft_uploads SET draft_id = NULL WHERE draft_id = ?1",
+            [id.0],
+        )?;
+        self.conn.execute(
+            &format!(
+                "UPDATE drafts SET account_id = ?2, identity_id = ?3, {NO_COPY},
+                                   upload_error = NULL
+                 WHERE id = ?1"
+            ),
+            params![id.0, account.0, identity.0],
+        )?;
+        Ok(())
     }
 
     /// Deletes the draft; its copy on the server is deleted by the next upload pass.
@@ -315,7 +352,8 @@ impl<'c> Drafts<'c> {
 
     /// Records an upload of `revision` of the draft to `folder` (of its account, named
     /// `remote_name` on the server) before the APPEND is sent. `None` if the draft is
-    /// gone, being sent or changed since.
+    /// gone, being sent or changed since, or moved to another account: the revision
+    /// read may be of after the move, by a pass of the account it left.
     pub fn begin_upload(
         &self,
         draft: DraftId,
@@ -330,6 +368,7 @@ impl<'c> Drafts<'c> {
                                             revision)
                  SELECT d.account_id, d.id, ?3, ?4, d.revision FROM drafts d
                  WHERE d.id = ?1 AND d.revision = ?2
+                   AND d.account_id = (SELECT account_id FROM folders WHERE id = ?3)
                    AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.draft_id = d.id)
                  RETURNING id, account_id",
             )?
@@ -337,7 +376,6 @@ impl<'c> Drafts<'c> {
                 Ok(DraftUpload {
                     id: r.get(0)?,
                     account: AccountId(r.get(1)?),
-                    draft: Some(draft),
                     folder,
                     remote_name: remote_name.to_owned(),
                     message_id: message_id.to_owned(),
@@ -361,15 +399,14 @@ impl<'c> Drafts<'c> {
         uids: &[u32],
         now: i64,
     ) -> Result<Touched> {
-        self.conn
-            .execute("DELETE FROM draft_uploads WHERE id = ?1", [upload.id])?;
+        let draft = self.end_upload(upload)?;
         let mut delete: Vec<(FolderId, u32, u32)> = uids
             .iter()
             .map(|&uid| (upload.folder, uidvalidity, uid))
             .collect();
         delete.sort_unstable();
         // The draft's copy now and its revision, if the draft is still there.
-        let current = match upload.draft {
+        let current = match draft {
             Some(draft) => self
                 .conn
                 .query_row(
@@ -436,10 +473,10 @@ impl<'c> Drafts<'c> {
             )?;
         }
         self.conn.execute(
-            "UPDATE drafts
-             SET remote_folder_id = NULL, remote_uidvalidity = NULL, remote_uid = NULL,
-                 remote_message_id = NULL, remote_revision = NULL
-             WHERE remote_folder_id = ?1 AND remote_uidvalidity IS NOT ?2",
+            &format!(
+                "UPDATE drafts SET {NO_COPY}
+                 WHERE remote_folder_id = ?1 AND remote_uidvalidity IS NOT ?2"
+            ),
             params![folder.0, keep],
         )?;
         Ok(())
@@ -447,12 +484,24 @@ impl<'c> Drafts<'c> {
 
     /// The server refused the upload, which so stored nothing.
     pub fn upload_refused(&self, upload: &DraftUpload, error: &str) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM draft_uploads WHERE id = ?1", [upload.id])?;
-        match upload.draft {
+        match self.end_upload(upload)? {
             Some(draft) => self.upload_failed(draft, error),
             None => Ok(()),
         }
+    }
+
+    /// Forgets the upload, returning the draft it is of: `None` if that was deleted, sent
+    /// or moved to another account since the upload began, and what it made is deleted.
+    fn end_upload(&self, upload: &DraftUpload) -> Result<Option<DraftId>> {
+        let draft: Option<Option<i64>> = self
+            .conn
+            .query_row(
+                "DELETE FROM draft_uploads WHERE id = ?1 RETURNING draft_id",
+                [upload.id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(draft.flatten().map(DraftId))
     }
 
     /// Records why the draft couldn't be uploaded; the next upload that succeeds clears
@@ -631,7 +680,7 @@ impl<'c> Drafts<'c> {
     }
 }
 
-const UPLOADS: &str = "SELECT u.id, u.account_id, u.draft_id, u.folder_id, f.remote_name,
+const UPLOADS: &str = "SELECT u.id, u.account_id, u.folder_id, f.remote_name,
         u.message_id_hdr, u.revision
      FROM draft_uploads u JOIN folders f ON f.id = u.folder_id";
 
@@ -639,11 +688,10 @@ fn upload_from_row(r: &Row<'_>) -> rusqlite::Result<DraftUpload> {
     Ok(DraftUpload {
         id: r.get(0)?,
         account: AccountId(r.get(1)?),
-        draft: r.get::<_, Option<i64>>(2)?.map(DraftId),
-        folder: FolderId(r.get(3)?),
-        remote_name: r.get(4)?,
-        message_id: r.get(5)?,
-        revision: r.get(6)?,
+        folder: FolderId(r.get(2)?),
+        remote_name: r.get(3)?,
+        message_id: r.get(4)?,
+        revision: r.get(5)?,
     })
 }
 
@@ -704,7 +752,7 @@ mod tests {
     /// Changes what the draft says, keeping who it is from.
     fn edit(db: &Db<'_>, id: DraftId, content: &DraftContent, now: i64) -> Result<bool> {
         let identity = db.drafts().get(id)?.map_or(IdentityId(0), |d| d.identity);
-        db.drafts().update(id, identity, content, now)
+        Ok(db.drafts().update(id, identity, content, now)?.is_some())
     }
 
     fn hash(c: char) -> BlobHash {
@@ -993,6 +1041,23 @@ mod tests {
             .collect()
     }
 
+    /// The account's uploads still to settle, oldest first: the draft each is of, if it
+    /// still is, and its Message-ID.
+    fn unsettled(store: &Store, account: AccountId) -> Vec<(Option<DraftId>, String)> {
+        store
+            .read(|db| {
+                let mut stmt = db.conn.prepare(
+                    "SELECT draft_id, message_id_hdr FROM draft_uploads
+                     WHERE account_id = ?1 ORDER BY id",
+                )?;
+                let rows = stmt.query_map([account.0], |r| {
+                    Ok((r.get::<_, Option<i64>>(0)?.map(DraftId), r.get(1)?))
+                })?;
+                Ok(rows.collect::<rusqlite::Result<_>>()?)
+            })
+            .unwrap()
+    }
+
     fn get(store: &Store, draft: DraftId) -> Draft {
         store.read(|db| db.drafts().get(draft)).unwrap().unwrap()
     }
@@ -1015,7 +1080,7 @@ mod tests {
         assert!(!get(&store, draft).on_server);
 
         let first = begin(&store, draft, folder, "one@x");
-        assert_eq!(first.draft, Some(draft));
+        assert_eq!(unsettled(&store, account), [(Some(draft), "one@x".into())]);
         assert_eq!(
             stale(&store, account),
             (vec![], true),
@@ -1054,14 +1119,95 @@ mod tests {
         // Deleted, the draft leaves its copy to be found by its Message-ID: no sync may
         // have seen the folder's current UIDVALIDITY.
         assert!(store.write(|db| db.drafts().delete(draft)).unwrap());
-        let orphans: Vec<(Option<DraftId>, String)> = store
-            .read(|db| db.drafts().uploads(account))
-            .unwrap()
-            .into_iter()
-            .map(|u| (u.draft, u.message_id))
-            .collect();
-        assert_eq!(orphans, [(None, "two@x".into())]);
+        assert_eq!(unsettled(&store, account), [(None, "two@x".into())]);
         assert_eq!(deletions(&store, folder), [5]);
+    }
+
+    #[test]
+    fn a_draft_moved_to_another_account_leaves_nothing_behind() {
+        let (store, a, folder, draft) = with_drafts_folder();
+        settle(&store, &begin(&store, draft, folder, "one@x"), 7, &[5]);
+        store
+            .write(|db| edit(db, draft, &content("two"), 2))
+            .unwrap();
+        // Its next upload is under way.
+        let under_way = begin(&store, draft, folder, "two@x");
+        let b = test_util::account(&store, "b@example.com");
+        let theirs = store
+            .read(|db| db.identities().default_of(b))
+            .unwrap()
+            .unwrap();
+
+        let moved = store.write(|db| db.drafts().update(draft, theirs, &content("three"), 3));
+        assert_eq!(moved.unwrap(), Some(a), "the account it was in");
+        let draft_now = get(&store, draft);
+        assert_eq!((draft_now.account_id, draft_now.identity), (b, theirs));
+        assert_eq!(draft_now.content.subject, "three");
+        assert!(!draft_now.on_server);
+        let list = |account| store.read(|db| db.drafts().list(account)).unwrap();
+        assert!(list(a).is_empty());
+        assert_eq!(list(b).len(), 1);
+        // Its copy in the old account's Drafts is looked for by its Message-ID, and
+        // deleted; and so is what the upload under way makes, though it was of the draft.
+        assert_eq!(
+            unsettled(&store, a),
+            [(None, "two@x".into()), (None, "one@x".into())]
+        );
+        settle(&store, &under_way, 7, &[6]);
+        assert_eq!(deletions(&store, folder), [6]);
+        assert!(!get(&store, draft).on_server);
+        // The new account uploads it, once it has a Drafts folder.
+        assert_eq!(stale(&store, b), (vec![draft], false));
+    }
+
+    #[test]
+    fn a_draft_moved_during_its_old_accounts_upload_pass_is_skipped() {
+        let (store, a, folder, draft) = with_drafts_folder();
+        assert_eq!(stale(&store, a), (vec![draft], true));
+        // Moved after the pass listed it, before it read the draft.
+        let b = test_util::account(&store, "b@example.com");
+        store
+            .write(|db| {
+                let theirs = db.identities().default_of(b)?.unwrap();
+                db.drafts().update(draft, theirs, &content("two"), 2)
+            })
+            .unwrap();
+        let revision = store
+            .read(|db| db.drafts().snapshot(draft))
+            .unwrap()
+            .unwrap()
+            .revision;
+        let upload = store.write(|db| {
+            db.drafts()
+                .begin_upload(draft, revision, (folder, "Drafts"), "two@x")
+        });
+        assert_eq!(upload.unwrap(), None, "not the account's any more");
+        assert_eq!(stale(&store, b), (vec![draft], false));
+    }
+
+    #[test]
+    fn a_reply_stays_in_its_account() {
+        let store = test_util::store();
+        let a = test_util::account(&store, "a@example.com");
+        let b = test_util::account(&store, "b@example.com");
+        let reply = DraftReply {
+            message: MessageId(42),
+            in_reply_to: Some("parent@x".into()),
+            references: vec!["parent@x".into()],
+        };
+        let (id, theirs) = store
+            .write(|db| {
+                let id = db
+                    .drafts()
+                    .insert(a, None, &content("Re: x"), Some(&reply), 1)?;
+                Ok((id, db.identities().default_of(b)?.unwrap()))
+            })
+            .unwrap();
+        let moved = store.write(|db| db.drafts().update(id, theirs, &content("Re: x"), 2));
+        assert!(matches!(moved, Err(Error::Invalid(_))), "{moved:?}");
+        assert_eq!(get(&store, id).account_id, a);
+        let senders = store.read(|db| db.identities().of_draft(id)).unwrap();
+        assert!(senders.iter().all(|i| i.account_id == a), "{senders:?}");
     }
 
     #[test]
@@ -1076,15 +1222,9 @@ mod tests {
         settle(&store, &begin(&store, draft, folder, "two@x"), 9, &[1]);
         assert!(get(&store, draft).on_server);
         assert!(deletions(&store, folder).is_empty());
-        let orphan = store.read(|db| db.drafts().uploads(account)).unwrap();
-        assert_eq!(
-            orphan
-                .iter()
-                .map(|u| (u.draft, u.message_id.as_str()))
-                .collect::<Vec<_>>(),
-            [(None, "one@x")]
-        );
+        assert_eq!(unsettled(&store, account), [(None, "one@x".into())]);
         // Found in the new generation, and deleted there.
+        let orphan = store.read(|db| db.drafts().uploads(account)).unwrap();
         settle(&store, &orphan[0], 9, &[2]);
         let ops = store.read(|db| db.ops().list(Some(account))).unwrap();
         assert_eq!(ops.len(), 1, "nothing under the old generation: {ops:?}");
@@ -1096,8 +1236,8 @@ mod tests {
         let (store, account, folder, draft) = with_drafts_folder();
         begin(&store, draft, folder, "one@x");
         store.write(|db| db.drafts().delete(draft)).unwrap();
+        assert_eq!(unsettled(&store, account), [(None, "one@x".into())]);
         let orphan = &store.read(|db| db.drafts().uploads(account)).unwrap()[0];
-        assert_eq!(orphan.draft, None);
         assert_eq!(stale(&store, account), (vec![], true));
         settle(&store, orphan, 7, &[9, 8]);
         assert_eq!(deletions(&store, folder), [8, 9]);
@@ -1168,14 +1308,9 @@ mod tests {
             .write(|db| db.folders().reset_uidvalidity(folder, 9))
             .unwrap();
         assert!(!get(&store, draft).on_server);
+        assert_eq!(unsettled(&store, account), [(Some(draft), "one@x".into())]);
         let again = store.read(|db| db.drafts().uploads(account)).unwrap();
-        assert_eq!(
-            again
-                .iter()
-                .map(|u| (u.draft, u.message_id.as_str(), u.revision))
-                .collect::<Vec<_>>(),
-            [(Some(draft), "one@x", 0)]
-        );
+        assert_eq!(again[0].revision, 0);
         assert_eq!(stale(&store, account), (vec![], true));
         settle(&store, &again[0], 9, &[1]);
         assert!(get(&store, draft).on_server, "found, not uploaded again");
@@ -1197,8 +1332,8 @@ mod tests {
                 .unwrap()
         );
         assert!(store.read(|db| db.drafts().get(draft)).unwrap().is_none());
+        assert_eq!(unsettled(&store, account), [(None, "one@x".into())]);
         let orphan = &store.read(|db| db.drafts().uploads(account)).unwrap()[0];
-        assert_eq!(orphan.draft, None);
         settle(&store, orphan, 7, &[5]);
         assert_eq!(deletions(&store, folder), [5]);
     }

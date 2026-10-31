@@ -36,15 +36,20 @@ pub(crate) async fn update(
 ) -> Result<Draft> {
     validate(&content)?;
     let content = without_nul(content);
-    let draft = engine
+    let (draft, was_in) = engine
         .write(move |db| {
-            if !db.drafts().update(id, from, &content, now())? {
+            let Some(was_in) = db.drafts().update(id, from, &content, now())? else {
                 return Ok(None);
-            }
-            db.drafts().get(id)
+            };
+            Ok(db.drafts().get(id)?.map(|draft| (draft, was_in)))
         })
         .await?
         .ok_or(Error::DraftNotFound(id))?;
+    if was_in != draft.account_id {
+        // Moved: gone from there, its copy deleted by the next upload pass.
+        engine.draft_gone(was_in, id);
+        changed(engine, was_in);
+    }
     edited(engine, draft.account_id, id);
     Ok(draft)
 }

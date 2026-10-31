@@ -1039,10 +1039,12 @@ impl MailClient {
             .await
     }
 
-    /// Replaces what the draft says, and the identity of its account it is sent as. An
-    /// identity removed meanwhile leaves it from the one it has: the default, which
-    /// removing the identity made it. Fails with [`Error::Conflict`] while it is in the
-    /// outbox.
+    /// Replaces what the draft says, and the identity it is sent as: one of
+    /// [`draft_senders`](Self::draft_senders). One of another account moves the draft
+    /// there, with its copy in the Drafts folder. An identity removed meanwhile leaves it
+    /// from the one it has: the default, which removing the identity made it. Fails with
+    /// [`Error::Conflict`] while it is in the outbox, [`Error::InvalidInput`] for another
+    /// account's identity if the draft is a reply.
     pub async fn update_draft(
         &self,
         id: DraftId,
@@ -1053,6 +1055,22 @@ impl MailClient {
         self.rt
             .run(async move { drafts::update(&engine, id, from, content).await })
             .await
+    }
+
+    /// The identities the draft can be sent as: every account's, by account and each
+    /// one's default first. A reply goes from the account of the message it answers, as
+    /// one of its identities.
+    pub async fn draft_senders(&self, id: DraftId) -> Result<Vec<Identity>> {
+        let engine = self.engine.clone();
+        let senders = self
+            .rt
+            .run_blocking(move || Ok(engine.store.read(|db| db.identities().of_draft(id))?))
+            .await?;
+        // Every account has its default identity.
+        if senders.is_empty() {
+            return Err(Error::DraftNotFound(id));
+        }
+        Ok(senders)
     }
 
     pub async fn get_draft(&self, id: DraftId) -> Result<Option<Draft>> {

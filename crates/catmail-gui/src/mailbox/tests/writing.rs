@@ -64,22 +64,7 @@ fn a_message_goes_from_the_address_chosen(cx: &mut TestAppContext) {
     let composer = composer_window(cx, window);
 
     // The second choice: the account's own address comes first.
-    click(cx, composer, "composer-from");
-    frame(cx, composer);
-    cx.update_window(composer, |_, window, cx| {
-        window.press("down", cx);
-        window.render_frame(cx);
-        window.press("enter", cx);
-    })
-    .unwrap();
-    // Sending saves it first, with the choice.
-    cx.update_window(composer, |_, window, cx| {
-        window.render_frame(cx);
-        window.click("composer-to", cx);
-        window.input("bob@example.com", cx);
-        window.press("secondary-enter", cx);
-    })
-    .unwrap();
+    send_from_second_choice(cx, composer, "bob@example.com");
     wait_for_one_window(cx);
     wait_until(|| mail.sent().len() == 1);
     assert!(
@@ -88,6 +73,58 @@ fn a_message_goes_from_the_address_chosen(cx: &mut TestAppContext) {
         "{}",
         mail.sent()[0]
     );
+}
+
+#[gpui_kit::test]
+fn a_new_message_goes_from_any_account(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let bob = mail.add_another_account("bob@example.org");
+    let (window, mailbox) = open(cx, &mail);
+    // The same messages, in both inboxes.
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| subjects(&mailbox, cx).len() == 12)
+    });
+    click(cx, window, "new-message");
+    let composer = composer_window(cx, window);
+
+    // The second choice: Bob's account comes after this one.
+    send_from_second_choice(cx, composer, "carol@example.com");
+    wait_for_one_window(cx);
+    wait_until(|| mail.sent().len() == 1);
+    assert!(
+        mail.sent()[0].contains("From: bob@example.org")
+            || mail.sent()[0].contains("From: <bob@example.org>"),
+        "{}",
+        mail.sent()[0]
+    );
+    for account in [mail.account(), bob] {
+        assert!(
+            pollster::block_on(mail.client.list_drafts(account))
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+/// Chooses the second address in the composer's From, and sends the message to `to`;
+/// sending saves it first, with the choice.
+fn send_from_second_choice(cx: &mut TestAppContext, composer: AnyWindowHandle, to: &str) {
+    click(cx, composer, "composer-from");
+    frame(cx, composer);
+    cx.update_window(composer, |_, window, cx| {
+        window.press("down", cx);
+        window.render_frame(cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.update_window(composer, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("composer-to", cx);
+        window.input(to, cx);
+        window.press("secondary-enter", cx);
+    })
+    .unwrap();
 }
 
 #[gpui_kit::test]

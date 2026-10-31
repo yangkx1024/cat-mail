@@ -58,7 +58,8 @@ pub(crate) struct Fields {
 #[derive(Args)]
 pub(crate) struct SendAs {
     /// Send as one of the account's identities, by address or id [default: its default
-    /// identity]
+    /// identity]. `draft edit` takes another account's too, moving the draft there,
+    /// unless it is a reply
     #[arg(long, value_name = "IDENTITY")]
     from: Option<String>,
 }
@@ -70,6 +71,16 @@ impl SendAs {
             return Ok(None);
         };
         Ok(Some(identity::resolve_from(client, account, from).await?))
+    }
+
+    /// The identity named among those the draft can be sent as, if one was.
+    async fn resolve_for(&self, client: &MailClient, draft: &Draft) -> Result<Option<IdentityId>> {
+        let Some(from) = &self.from else {
+            return Ok(None);
+        };
+        Ok(Some(
+            identity::resolve_draft_from(client, draft, from).await?,
+        ))
     }
 }
 
@@ -278,7 +289,8 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
         }
         DraftCommand::Edit { id, fields } => {
             let draft = get_draft(client, id).await?;
-            let identity = fields.from.resolve(client, draft.account_id).await?;
+            let was_in = draft.account_id;
+            let identity = fields.from.resolve_for(client, &draft).await?;
             let from = identity.unwrap_or(draft.identity);
             let content = fields.apply(draft.content)?;
             let draft = client.update_draft(draft.id, from, content).await?;
@@ -286,6 +298,10 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
                 print_draft_json(&draft)?;
             } else {
                 println!("Saved draft {}.", draft.id);
+            }
+            if was_in != draft.account_id {
+                // Moved: its copy there goes.
+                save_to_server(client, was_in).await;
             }
             Some(draft.account_id)
         }
@@ -559,6 +575,71 @@ mod tests {
             drafts[1].content.text.starts_with("thanks\n\n"),
             "{drafts:?}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn draft_edit_from_another_accounts_address_moves_the_draft() {
+        let mut state = ServerState::new("alice", "pw");
+        state.inbox().append_simple("hello");
+        let fake = FakeImap::start(state).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (client, alice) = synced(&fake, dir.path()).await;
+        let server = ServerConfig {
+            host: "127.0.0.1".into(),
+            port: fake.port(),
+            security: Security::Plain,
+        };
+        let bob = client
+            .add_account(
+                NewAccount {
+                    email: "bob@example.org".into(),
+                    display_name: None,
+                    username: "alice".into(),
+                    imap: server.clone(),
+                    smtp: server,
+                },
+                "pw".into(),
+                Verify::Skip,
+            )
+            .await
+            .unwrap()
+            .id;
+        let edit = |id: DraftId, from: &str| DraftCommand::Edit {
+            id: id.0,
+            fields: Fields {
+                from: SendAs {
+                    from: Some(from.into()),
+                },
+                recipients: Recipients {
+                    to: None,
+                    cc: None,
+                    bcc: None,
+                },
+                subject: None,
+                body: None,
+                body_file: None,
+            },
+        };
+        let new = client
+            .create_draft(alice, None, DraftContent::default(), Vec::new())
+            .await
+            .unwrap();
+        draft(&client, edit(new.id, "Bob@example.org"), false)
+            .await
+            .unwrap();
+        let moved = client.get_draft(new.id).await.unwrap().unwrap();
+        assert_eq!(moved.account_id, bob);
+
+        let answer = client
+            .reply(MessageId(1), false, None, String::new(), Vec::new())
+            .await
+            .unwrap();
+        let err = draft(&client, edit(answer.id, "bob@example.org"), false)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("identity list"), "{err:#}");
+        let kept = client.get_draft(answer.id).await.unwrap().unwrap();
+        assert_eq!(kept.account_id, alice);
     }
 
     #[tokio::test(flavor = "multi_thread")]

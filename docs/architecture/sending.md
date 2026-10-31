@@ -69,9 +69,21 @@
   `DraftContent` 里：只有新建（`create_draft(account, from: Option<IdentityId>, ..)`）可以不指定，存成
   账户当时的默认身份；`update_draft(id, from: IdentityId, ..)` 必须给出，自己拼一个 `DraftContent` 的
   调用方不会无意中把发件人换回默认。`reply`、`forward` 也可以指定身份（`from: Option<IdentityId>`），
-  和正文、转发的收件人一样在建草稿时就定下，不再事后 `update_draft`；不指定时回复按原信选，转发用默认身份。存下时由 repository
-  检查身份属于草稿的账户（复合外键 `(identity_id, account_id)` 兜底）；改身份和改别的内容一样算一次修改。From 头、MAIL FROM 和
+  和正文、转发的收件人一样在建草稿时就定下，不再事后 `update_draft`；不指定时回复按原信选，转发用默认身份。建草稿时由 repository
+  检查身份属于这个账户（复合外键 `(identity_id, account_id)` 兜底）；改身份和改别的内容一样算一次修改。From 头、MAIL FROM 和
   Message-ID 的域名都来自所选身份；Drafts 里的副本也是。
+- **换到另一个账户**：`update_draft` 给的是别的账户的身份时，草稿在同一个事务里搬过去
+  （`Drafts::move_to`）：改 `account_id` 和 `identity_id`，旧账户 Drafts 里的副本转成一条没有草稿的上传
+  （按 Message-ID 找到后删除，和删除草稿一样），还没结算的上传也解除关联（`draft_id` 置空，结算时删掉它做出的
+  副本：结算看的是 `draft_uploads` 行此时的 `draft_id`，不是读出时的），清掉 `remote_*` 和
+  `upload_error`，由新账户的同步上传到它的 Drafts。旧账户正在进行的一轮上传可能在列出草稿之后、读草稿
+  之前遇到搬走，读到的是搬走后的版本：`begin_upload` 只在草稿仍属于目标文件夹的账户时记下上传，否则跳过，
+  不会违反 `(folder_id, account_id)` 外键让这一轮失败。两个账户都发 `DraftsChanged`。附件上限不重新检查，
+  超出新服务器的 `SIZE` 时由发送报错。**回复不能换账户**（`InvalidInput`）：它回答的那封信在原账户里，
+  发出后要在那里加 `\Answered`，而 `reply_to_message_id` 只引用本账户的邮件；判断依据是
+  `reply_to_message_id` 或 `in_reply_to` 不为空（原信被删后 In-Reply-To 还在）。转发和新邮件可以换。
+  `MailClient::draft_senders` 列出一封草稿可选的身份：回复只有本账户的，其余是所有账户的，按账户排列，
+  每个账户的默认身份在前。CLI 的 `--from` 仍只在草稿的账户里按地址找身份。
 - **按地址找身份**只有一处：`Identities::by_email`（`MailClient::identity_by_address`），不分大小写；
   几个身份地址相同（经不同服务器）时默认的优先，其次最早添加的。回复和 CLI 的 `--from` 都用它。
 - **回复**用原信寄给的那个地址：在原信的 To、Cc 里按顺序找第一个是账户身份的地址；回复自己发出的信

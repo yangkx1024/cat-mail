@@ -611,24 +611,7 @@ async fn every_accounts_inbox_is_listed_together() {
     let mut archive = FakeMailbox::new("Archive");
     archive.append_simple("elsewhere");
     state.mailboxes.push(archive);
-    let other = catmail_testkit::FakeImap::start(state).await;
-    let bob = env
-        .client
-        .add_account(
-            catmail_core::NewAccount {
-                email: "bob@example.com".into(),
-                display_name: None,
-                username: "bob".into(),
-                imap: common::local_server(other.port()),
-                smtp: common::local_server(env.smtp.port()),
-            },
-            "pw".into(),
-            Verify::Skip,
-        )
-        .await
-        .unwrap()
-        .id;
-    env.client.sync_account(bob).await.unwrap();
+    let (_other, _) = env.add_fake_account(state, "bob@example.com").await;
 
     let subjects = |page: &[catmail_core::MessageSummary]| -> Vec<_> {
         page.iter().filter_map(|m| m.subject.clone()).collect()

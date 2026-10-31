@@ -54,19 +54,7 @@ impl Env {
 
     /// (subject, flags) of the messages in the server's Drafts folder.
     fn server_drafts(&self) -> Vec<(String, Vec<String>)> {
-        let mut state = self.fake.state();
-        state
-            .mailbox_mut("Drafts")
-            .messages
-            .iter()
-            .map(|m| {
-                let parsed = MessageParser::new().parse(&m.raw).unwrap();
-                (
-                    parsed.subject().unwrap_or_default().to_owned(),
-                    m.flags.clone(),
-                )
-            })
-            .collect()
+        drafts_on(&self.fake)
     }
 
     fn appends(&self) -> usize {
@@ -76,6 +64,23 @@ impl Env {
     async fn on_server(&self, id: DraftId) -> bool {
         self.client.get_draft(id).await.unwrap().unwrap().on_server
     }
+}
+
+/// (subject, flags) of the messages in `fake`'s Drafts folder.
+fn drafts_on(fake: &catmail_testkit::FakeImap) -> Vec<(String, Vec<String>)> {
+    let mut state = fake.state();
+    state
+        .mailbox_mut("Drafts")
+        .messages
+        .iter()
+        .map(|m| {
+            let parsed = MessageParser::new().parse(&m.raw).unwrap();
+            (
+                parsed.subject().unwrap_or_default().to_owned(),
+                m.flags.clone(),
+            )
+        })
+        .collect()
 }
 
 fn subjects(drafts: &[(String, Vec<String>)]) -> Vec<&str> {
@@ -157,6 +162,57 @@ async fn deleting_or_sending_a_draft_deletes_its_copy() {
     assert_eq!(env.smtp.state().received.len(), 1);
     let sent_folder = env.fake.state().mailbox_mut("Sent").messages.len();
     assert_eq!(sent_folder, 1);
+}
+
+/// Sent as another account's identity, a new message moves to that account, its copy
+/// with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_draft_sent_from_another_account_moves_there() {
+    let env = synced_env(state()).await;
+    let mut bobs = ServerState::new("bob", "pw");
+    bobs.inbox().append_simple("hi");
+    bobs.mailboxes
+        .push(FakeMailbox::new("Drafts").with_attribute("\\Drafts"));
+    let (other, bob) = env.add_fake_account(bobs, "bob@example.org").await;
+    let id = env.draft("one").await;
+    env.replay().await;
+    assert_eq!(subjects(&env.server_drafts()), ["one"]);
+
+    let senders = env.client.draft_senders(id).await.unwrap();
+    let accounts: Vec<_> = senders.iter().map(|i| i.account_id).collect();
+    assert_eq!(accounts, [env.account, bob]);
+    let mut events = env.client.subscribe();
+    let moved = env
+        .client
+        .update_draft(id, senders[1].id, content("two"))
+        .await
+        .unwrap();
+    assert_eq!((moved.account_id, moved.identity), (bob, senders[1].id));
+    let changed: Vec<_> = common::drain(&mut events)
+        .into_iter()
+        .filter(|e| matches!(e, catmail_core::Event::DraftsChanged { .. }))
+        .collect();
+    assert!(
+        changed.contains(&catmail_core::Event::DraftsChanged {
+            account: env.account
+        }) && changed.contains(&catmail_core::Event::DraftsChanged { account: bob }),
+        "{changed:?}"
+    );
+    assert!(
+        env.client
+            .list_drafts(env.account)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    env.replay().await;
+    assert!(
+        env.server_drafts().is_empty(),
+        "gone from the first account"
+    );
+    env.client.replay_pending(bob).await.unwrap();
+    assert_eq!(subjects(&drafts_on(&other)), ["two"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
