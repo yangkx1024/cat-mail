@@ -41,17 +41,18 @@ use gpui_kit::base::{
     TextSelection, TextSelectionCoverage, TextSelectionEndpoint, TextSelectionEvent,
     TextSelectionHandle, TextSelectionRegistration, TextSelectionSnapshot,
 };
-use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Theme, h_flex};
 use gpui_kit::{
-    App, Bounds, ClickEvent, ClipboardItem, Context, EntityId, FocusHandle, FutureExt as _,
-    HitboxBehavior, Hsla, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, ObjectFit, ParentElement as _, Pixels, Point, Render, RenderImage,
-    SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription,
-    Task, TestSupportExt as _, Timeout, Window, canvas, div, fill, img, point,
-    prelude::FluentBuilder as _, px, size,
+    Anchor, App, Bounds, ClickEvent, ClipboardItem, Context, EntityId, FocusHandle, FutureExt as _,
+    HitboxBehavior, HoverListenerMode, Hsla, InteractiveElement as _, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, ObjectFit, ParentElement as _, Pixels, Point, Render,
+    RenderImage, SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _,
+    Subscription, Task, TestSupportExt as _, Timeout, Window, anchored, canvas, deferred, div,
+    fill, img, point, prelude::FluentBuilder as _, px, size,
 };
+use url::{Position, Url};
 
 use crate::theme::colors::rgb;
 use crate::{actions, html};
@@ -151,6 +152,14 @@ struct Layout {
     number: u64,
 }
 
+/// A point on a layout of the page, in the window's pixels from the page's top left: what
+/// is there changes when the page moves under the pointer, or is laid out again.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Probe {
+    at: Point<Pixels>,
+    layout: Option<Layout>,
+}
+
 /// What an engine answered, or why it didn't.
 type Answer<T> = Result<Result<T, Stopped>, Timeout>;
 
@@ -209,6 +218,11 @@ pub(super) struct PageView {
     painting: HashMap<u32, Task<()>>,
     /// What is under the pointer.
     hovered: Hit,
+    /// Where `hovered` was asked for, and where the question being answered is.
+    hovered_at: Option<Probe>,
+    asked: Option<Probe>,
+    /// Whether the pointer is on the page.
+    pointer_over: bool,
     error: Option<SharedString>,
     /// The page's part in the window's text selection.
     selection: TextSelectionHandle,
@@ -271,6 +285,9 @@ impl PageView {
             next: None,
             painting: HashMap::new(),
             hovered: Hit::default(),
+            hovered_at: None,
+            asked: None,
+            pointer_over: false,
             error: None,
             selection,
             focus,
@@ -357,6 +374,11 @@ impl PageView {
     /// From the frame's geometry: opens, lays out and paints what changed.
     fn measure(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         self.bounds = bounds;
+        if self.pointer_over {
+            // Scrolled or pushed under a pointer that stayed, or laid out again: what is
+            // under it may have changed. Asked again only then.
+            self.hover(window.mouse_position(), window, cx);
+        }
         let scale = window.scale_factor();
         let zoom = f32::from(window.rem_size()) / BROWSER_TEXT_SIZE;
         let look = Look::of(cx.theme());
@@ -610,23 +632,52 @@ impl PageView {
         Some(document.hit(opened.width?, x / opened.zoom, y / opened.zoom))
     }
 
+    fn probe(&self, position: Point<Pixels>) -> Probe {
+        Probe {
+            at: position - self.bounds.origin,
+            layout: self.layout,
+        }
+    }
+
+    /// Asks what is at `position`, unless that is the question already asked.
     fn hover(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let probe = self.probe(position);
+        if self.asked == Some(probe) {
+            return;
+        }
         let Some(hit) = self.hit(position) else {
             return;
         };
+        self.asked = Some(probe);
         // Replacing the task drops the question for where the pointer was before.
         self._hover = cx.spawn_in(window, async move |this, cx| {
             let Ok(hit) = hit.await else {
                 return;
             };
-            this.update(cx, |this, cx| {
-                if this.hovered != hit {
-                    this.hovered = hit;
-                    cx.notify();
-                }
-            })
-            .ok();
+            this.update(cx, |this, cx| this.set_hovered(hit, Some(probe), cx))
+                .ok();
         });
+    }
+
+    fn set_hovered(&mut self, hit: Hit, at: Option<Probe>, cx: &mut Context<Self>) {
+        self.hovered_at = at;
+        if self.hovered != hit {
+            self.hovered = hit;
+            cx.notify();
+        }
+    }
+
+    /// Forgets what was under the pointer, which isn't there any more.
+    fn unhover(&mut self, cx: &mut Context<Self>) {
+        self._hover = Task::ready(());
+        self.asked = None;
+        self.set_hovered(Hit::default(), None, cx);
+    }
+
+    /// The link at `position`, or none, if the page knows yet: what is under the pointer
+    /// is asked for as it moves, and answered a moment later.
+    fn known_link_at(&self, position: Point<Pixels>) -> Option<Option<String>> {
+        (self.hovered_at == Some(self.probe(position))).then(|| self.hovered.link.clone())
     }
 
     fn click(&mut self, event: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -792,6 +843,96 @@ fn paint_highlight(
     }
 }
 
+/// The address of the link under the pointer, in the window's bottom right corner as a
+/// browser shows it: out of the way of the text, on one line a third of the window wide.
+/// What doesn't fit goes from the middle of the path, and from the start of the host if
+/// that is too long by itself: the end of the host is what says where the link goes.
+fn link_address(link: &str, window: &Window, cx: &App) -> impl IntoElement + use<> {
+    let theme = cx.theme();
+    let corner = window.viewport_size();
+    let width = (corner.width / 3.).max(px(320.)).min(corner.width);
+    let (host, path) = split_link(link);
+    deferred(
+        anchored()
+            .anchor(Anchor::BottomRight)
+            .position(point(corner.width, corner.height))
+            .child(
+                h_flex()
+                    .id("link-address")
+                    .test_support()
+                    .max_w(width)
+                    .px_2()
+                    .py_0p5()
+                    .rounded_tl(theme.radius)
+                    .border_t_1()
+                    .border_l_1()
+                    .border_color(theme.border)
+                    .bg(theme.popover)
+                    .text_color(theme.popover_foreground)
+                    .text_xs()
+                    .whitespace_nowrap()
+                    .child(
+                        div()
+                            .flex_none()
+                            .max_w(width * 0.6)
+                            .overflow_hidden()
+                            .text_ellipsis_start()
+                            // Cut short, against the path still.
+                            .text_right()
+                            .child(host),
+                    )
+                    .when(!path.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis_middle()
+                                .child(path),
+                        )
+                    }),
+            ),
+    )
+    .with_priority(1)
+}
+
+/// A link as a browser reads it, its scheme and host (with any user name, which can pass
+/// for a host) apart from the rest. Read as the browser will, by the URL standard: a
+/// browser takes `https://evil.example\@bank.example/` to `evil.example`. A link with no
+/// host keeps its address (`mailto:`) before any query; one that isn't a URL is all rest.
+fn split_link(link: &str) -> (String, String) {
+    let Ok(url) = Url::parse(link) else {
+        return (String::new(), link.to_owned());
+    };
+    let end = if url.has_host() {
+        Position::BeforePath
+    } else {
+        Position::AfterPath
+    };
+    (url[..end].to_owned(), url[end..].to_owned())
+}
+
+/// The page's context menu: Copy link over a link, then what copies the selection,
+/// `text`, and selects all.
+fn page_menu(menu: PopupMenu, link: Option<String>, text: Option<String>) -> PopupMenu {
+    // The action only shows the keys that copy.
+    let copy = PopupMenuItem::new("Copy")
+        .action(Box::new(Copy))
+        .disabled(text.is_none())
+        .on_click(move |_, _, cx| {
+            if let Some(text) = &text {
+                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+            }
+        });
+    menu.when_some(link, |menu, link| {
+        menu.item(PopupMenuItem::new("Copy link").on_click(move |_, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(link.clone()))
+        }))
+        .separator()
+    })
+    .item(copy)
+    .menu("Select all", Box::new(SelectAll))
+}
+
 /// A strip as GPUI draws it. The engine already wrote the BGRA it wants.
 fn render_image(tile: Tile) -> Option<Arc<RenderImage>> {
     let buffer = image::RgbaImage::from_raw(tile.width, tile.height, tile.bgra)?;
@@ -799,7 +940,7 @@ fn render_image(tile: Tile) -> Option<Arc<RenderImage>> {
 }
 
 impl Render for PageView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let shown = self.layout.filter(|_| self.error.is_none());
         let view = cx.entity();
         // Only a page shown takes part in the selection.
@@ -908,6 +1049,22 @@ impl Render for PageView {
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 this.hover(event.position, window, cx)
             }))
+            // Keys scroll the page too, and leave the pointer on it.
+            .hover_listener_mode(HoverListenerMode::InputModalityIndependent)
+            .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
+                this.pointer_over = *hovered;
+                if *hovered {
+                    this.hover(window.mouse_position(), window, cx);
+                } else {
+                    this.unhover(cx);
+                }
+            }))
+            .children(
+                self.hovered
+                    .link
+                    .as_deref()
+                    .map(|link| link_address(link, window, cx)),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event, window, cx| this.press(event, window, cx)),
@@ -915,23 +1072,42 @@ impl Render for PageView {
             .on_click(cx.listener(|this, event, window, cx| this.click(event, window, cx)))
             .context_menu({
                 let focus = self.focus.clone();
+                let page = cx.weak_entity();
                 move |menu, window, cx| {
                     // What the keys would copy, as the menu opens: pressing the menu clears
                     // the window's selection before the item runs.
                     let text = TextSelection::selected_text(window, cx).trim().to_owned();
                     let text = (!text.is_empty()).then_some(text);
-                    // The action only shows the keys that copy.
-                    let copy = PopupMenuItem::new("Copy")
-                        .action(Box::new(Copy))
-                        .disabled(text.is_none())
-                        .on_click(move |_, _, cx| {
-                            if let Some(text) = &text {
-                                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-                            }
-                        });
-                    menu.action_context(focus.clone())
-                        .item(copy)
-                        .menu("Select all", Box::new(SelectAll))
+                    let menu = menu.action_context(focus.clone());
+                    // The link under the press, the menu opening there. If the page doesn't
+                    // know yet, the menu opens without, and takes it once asked.
+                    let position = window.mouse_position();
+                    let Some(page) = page.upgrade() else {
+                        return page_menu(menu, None, text);
+                    };
+                    let page = page.read(cx);
+                    if let Some(link) = page.known_link_at(position) {
+                        return page_menu(menu, link, text);
+                    }
+                    if let Some(hit) = page.hit(position) {
+                        let text = text.clone();
+                        cx.spawn_in(window, async move |menu, cx| {
+                            let Ok(Hit {
+                                link: Some(link), ..
+                            }) = hit.await
+                            else {
+                                return;
+                            };
+                            menu.update_in(cx, |menu, window, cx| {
+                                menu.rebuild(window, cx, |menu, _, _| {
+                                    page_menu(menu, Some(link), text)
+                                })
+                            })
+                            .ok();
+                        })
+                        .detach();
+                    }
+                    page_menu(menu, None, text)
                 }
             })
             .into_any_element()
@@ -942,7 +1118,8 @@ impl Render for PageView {
 mod tests {
     use gpui_kit::test::{ClickOptions, TestEventExt as _, TestWindowExt as _};
     use gpui_kit::{
-        AnyWindowHandle, AppContext as _, Entity, TestAppContext, WindowBounds, WindowOptions,
+        AnyWindowHandle, AppContext as _, Entity, InputEvent as _, ScrollDelta, ScrollEvent,
+        TestAppContext, WindowBounds, WindowOptions,
     };
 
     use super::*;
@@ -979,6 +1156,28 @@ mod tests {
 
     /// A window 800 px tall showing the page of `source` whole.
     fn open(cx: &mut TestAppContext, source: Source) -> (AnyWindowHandle, Entity<PageView>) {
+        open_in(cx, source, |page, _| page)
+    }
+
+    /// The page in a pane of its own, which scrolls as the reader's does.
+    struct Scrolling(Entity<PageView>);
+
+    impl Render for Scrolling {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("scrolling")
+                .size_full()
+                .overflow_y_scroll()
+                .child(self.0.clone())
+        }
+    }
+
+    /// A window 800 px tall showing the page of `source` in the view `wrap` makes.
+    fn open_in<V: Render>(
+        cx: &mut TestAppContext,
+        source: Source,
+        wrap: impl FnOnce(Entity<PageView>, &mut App) -> Entity<V>,
+    ) -> (AnyWindowHandle, Entity<PageView>) {
         cx.executor().allow_parking();
         cx.update(|cx| {
             crate::init_app(Preferences::load_nowhere(), cx);
@@ -991,10 +1190,14 @@ mod tests {
                 show: false,
                 ..Default::default()
             };
-            gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| PageView::new(Engine::Blitz, source, window, cx))
+            let mut page = None;
+            let (window, _) = gpui_kit::open_window(options, cx, |window, cx| {
+                let view = cx.new(|cx| PageView::new(Engine::Blitz, source, window, cx));
+                page = Some(view.clone());
+                wrap(view, cx)
             })
-            .unwrap()
+            .unwrap();
+            (window, page.unwrap())
         })
     }
 
@@ -1175,8 +1378,8 @@ mod tests {
     }
 
     /// Opens the page's context menu and clicks its `item`th item.
-    fn menu(cx: &mut TestAppContext, window: AnyWindowHandle, item: usize) {
-        click(cx, window, point(px(40.), px(15.)), MouseButton::Right, 1);
+    fn menu(cx: &mut TestAppContext, window: AnyWindowHandle, at: Point<Pixels>, item: usize) {
+        click(cx, window, at, MouseButton::Right, 1);
         frame(cx, window, true);
         cx.update_window(window, |_, window, cx| {
             window.within("popup-menu").click(item, cx)
@@ -1219,7 +1422,7 @@ mod tests {
 
         // The context menu's Copy copies it too; the press on the menu clears it.
         cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
-        menu(cx, window, 0);
+        menu(cx, window, point(px(40.), px(15.)), 0);
         assert_eq!(cx.read_from_clipboard().and_then(|item| item.text()), all);
         assert_eq!(selected(cx), None);
 
@@ -1238,7 +1441,7 @@ mod tests {
 
         // Select all, from the context menu with nothing selected (Copy is there, off),
         // or with the keys. A press anywhere clears it, the first after the menu too.
-        menu(cx, window, 1);
+        menu(cx, window, point(px(40.), px(15.)), 1);
         wait_until(|| selected(cx) == all);
         let outside = point(px(5.), px(400.));
         cx.update_window(window, |_, window, cx| {
@@ -1261,6 +1464,177 @@ mod tests {
             cx.opened_url().is_some()
         });
         assert_eq!(cx.opened_url().as_deref(), Some("https://example.com/"));
+    }
+
+    #[gpui_kit::test]
+    fn a_link_under_the_pointer_shows_its_address_and_copies(cx: &mut TestAppContext) {
+        let html = r#"<body style="margin:0;font-size:20px;line-height:30px">
+            <p style="margin:0 0 30px">alpha beta</p>
+            <p style="margin:0"><a href="https://example.com/a/long/path">gamma delta</a></p>"#;
+        let (window, view) = open(cx, page(html));
+        painted(cx, window, &view, 1);
+        let point_at = |cx: &mut TestAppContext, at| {
+            cx.update_window(window, |_, window, cx| window.pointer_move(at, None, cx))
+                .unwrap();
+        };
+        let shown = |cx: &mut TestAppContext| {
+            frame(cx, window, true);
+            cx.update_window(window, |_, window, _| {
+                window
+                    .try_find("link-address")
+                    .map(|address| address.bounds())
+            })
+            .unwrap()
+        };
+
+        point_at(cx, point(px(5.), px(75.)));
+        wait_until(|| shown(cx).is_some());
+        let corner = cx
+            .update_window(window, |_, window, _| window.viewport_size())
+            .unwrap();
+        // In the corner, but for the rounding of a text line's height.
+        let bounds = shown(cx).unwrap();
+        let off = (
+            corner.width - bounds.right(),
+            corner.height - bounds.bottom(),
+        );
+        assert!(off.0.abs() <= px(1.) && off.1.abs() <= px(1.), "{off:?}");
+        assert_eq!(
+            cx.read(|cx| view.read(cx).hovered.link.clone()).as_deref(),
+            Some("https://example.com/a/long/path")
+        );
+
+        // Off the link, it goes; and off the page.
+        point_at(cx, point(px(5.), px(15.)));
+        wait_until(|| shown(cx).is_none());
+        point_at(cx, point(px(5.), px(75.)));
+        wait_until(|| shown(cx).is_some());
+        point_at(cx, point(px(5.), px(700.)));
+        wait_until(|| shown(cx).is_none());
+
+        // The context menu over it copies it.
+        point_at(cx, point(px(5.), px(75.)));
+        wait_until(|| shown(cx).is_some());
+        menu(cx, window, point(px(5.), px(75.)), 0);
+        assert_eq!(
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some("https://example.com/a/long/path")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn the_menu_copies_the_link_under_the_press(cx: &mut TestAppContext) {
+        let html = r#"<body style="margin:0;font-size:20px;line-height:30px">
+            <p style="margin:0 0 30px"><a href="https://a.example/">alpha</a></p>
+            <p style="margin:0"><a href="https://b.example/">beta</a></p>"#;
+        let (window, view) = open(cx, page(html));
+        painted(cx, window, &view, 1);
+        cx.update_window(window, |_, window, cx| {
+            window.pointer_move(point(px(5.), px(15.)), None, cx)
+        })
+        .unwrap();
+        wait_until(|| {
+            frame(cx, window, true);
+            cx.read(|cx| view.read(cx).hovered.link.as_deref() == Some("https://a.example/"))
+        });
+
+        // Onto the second and pressed at once: the menu opens before the page knows
+        // what is there, takes the second's Copy link once it does, and never the first's.
+        menu(cx, window, point(px(5.), px(75.)), 0);
+        assert_eq!(
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some("https://b.example/")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_link_an_image_pushes_from_under_the_pointer_goes(cx: &mut TestAppContext) {
+        // The image, once it comes, pushes the link down 100 px, in a box that keeps the
+        // page's size: the page doesn't move.
+        let html = r#"<body style="margin:0;font-size:20px;line-height:30px">
+            <div style="height:300px"><img src="cid:image" style="display:block">
+            <p style="margin:0"><a href="https://example.com/">gamma</a></p></div>"#;
+        let (window, view) = open(cx, page(html));
+        painted(cx, window, &view, 1);
+        let link = |cx: &mut TestAppContext| {
+            frame(cx, window, true);
+            cx.read(|cx| view.read(cx).hovered.link.clone())
+        };
+        cx.update_window(window, |_, window, cx| {
+            window.pointer_move(point(px(5.), px(15.)), None, cx)
+        })
+        .unwrap();
+        wait_until(|| link(cx).is_some());
+
+        let image: catmail_render::Bytes = crate::test_support::solid_png(40, 100, RED).into();
+        let images: Resolver = Arc::new(move |url| (url == "cid:image").then(|| image.clone()));
+        cx.update(|cx| view.update(cx, |view, cx| view.set_images(images, cx)));
+        wait_until(|| link(cx).is_none());
+    }
+
+    #[gpui_kit::test]
+    fn a_link_scrolled_under_the_pointer_shows_its_address(cx: &mut TestAppContext) {
+        // Taller than the window, to scroll.
+        let html = r#"<body style="margin:0;font-size:20px;line-height:30px">
+            <p style="margin:0 0 30px">alpha beta</p>
+            <p style="margin:0"><a href="https://example.com/">gamma delta</a></p>
+            <div style="height:2000px"></div>"#;
+        let (window, view) = open_in(cx, page(html), |page, cx| cx.new(|_| Scrolling(page)));
+        painted(cx, window, &view, 1);
+        let link = |cx: &mut TestAppContext| {
+            frame(cx, window, true);
+            cx.read(|cx| view.read(cx).hovered.link.clone())
+        };
+        let at = point(px(5.), px(15.));
+        cx.update_window(window, |_, window, cx| window.pointer_move(at, None, cx))
+            .unwrap();
+        assert_eq!(link(cx), None);
+
+        // The pointer stays; the page moves the link under it.
+        cx.update_window(window, |_, window, cx| {
+            let delta = ScrollDelta::Pixels(point(px(0.), px(-60.)));
+            let event = ScrollEvent {
+                position: at,
+                delta,
+                ..Default::default()
+            };
+            window.dispatch_event(event.to_platform_input(), cx);
+        })
+        .unwrap();
+        wait_until(|| link(cx).as_deref() == Some("https://example.com/"));
+    }
+
+    #[test]
+    fn a_link_splits_after_its_host() {
+        let split = split_link;
+        let pair = |host: &str, rest: &str| (host.to_owned(), rest.to_owned());
+        assert_eq!(
+            split("https://example.com/a?b#c"),
+            pair("https://example.com", "/a?b#c")
+        );
+        assert_eq!(
+            split("https://example.com?b"),
+            pair("https://example.com", "/?b")
+        );
+        // A user name is part of what can pass for the host.
+        assert_eq!(
+            split("https://bank.com@evil.example/login"),
+            pair("https://bank.com@evil.example", "/login")
+        );
+        // A backslash ends the host, as the browser reads it.
+        assert_eq!(
+            split("https://evil.example\\@accounts.bank.example/login"),
+            pair("https://evil.example", "/@accounts.bank.example/login")
+        );
+        assert_eq!(
+            split("mailto:a@example.com?subject=hi"),
+            pair("mailto:a@example.com", "?subject=hi")
+        );
+        assert_eq!(split("/relative/path"), pair("", "/relative/path"));
     }
 
     #[test]
