@@ -77,7 +77,7 @@ Gmail 的 `[Gmail]` 也一样）。其余文件夹按服务器的层级跟在后
 - **Drafts 是本机草稿**，不是服务器的 Drafts 文件夹：那里是本机草稿的副本，按邮件列出会重复、也
   不能编辑。代价是其他客户端写的草稿在 GUI 里看不到（CLI 的 `catmail ls Drafts` 仍能看到）。
 - **Outbox 只在有待发邮件时出现**，有被拒绝或未确认的条目时带警告图标。
-- Sent、Junk、Trash 不显示未读数。底部一行说明连接问题（同步中、登录被拒、连不上、发不出去；发不出去时列出每个发不出的地址），截断时悬停显示全文。
+- Sent、Junk、Trash 不显示未读数。底部一行说明连接问题（登录被拒、连不上、发不出去；同步进度只由搜索框旁的 Sync 按钮转圈表示；发不出去时列出每个发不出的地址），截断时悬停显示全文。
 
 ## 字体（Linux）
 
@@ -88,10 +88,26 @@ GPUI 的 Linux 后端（cosmic-text）只在一个字族的多个独立字面里
 - **自带静态的 Noto Sans**（Regular、Medium、SemiBold、Bold，SIL OFL，`assets/fonts/noto-sans/`，
   约 1.7 MB，只在 Linux 编入），并写进每个应用的主题配置的 `font_family`：应用主题会设置它指定的字体，
   只改全局主题会在切换主题时被覆盖。
-- **CJK 回退字体**：启动时从常见字族（Noto Sans CJK、思源黑体、MiSans、HarmonyOS Sans 等）里挑出已安装
-  且常规和粗体是不同字面的（即非可变字体），作为 `FontFallbacks` 由一个 `RootPlugin` 设在每个窗口的根上，
-  对话框、通知也在其中；回退字体按主字体的字重匹配。都不满足时 CJK 仍由 GPUI 自己挑。不自带 CJK 字体：
-  每个字重十几 MB。
+- **CJK 回退字体**：排第一的是随应用安装的 Noto Sans SC（见下一条）；其后是从常见字族（Noto Sans CJK、
+  思源黑体、MiSans、HarmonyOS Sans 等）里挑出的已安装、且常规和粗体是不同字面的（即非可变字体）。它们作为
+  `FontFallbacks` 由一个 `RootPlugin` 设在每个窗口的根上，对话框、通知也在其中。都没有时 CJK 仍由 GPUI
+  自己挑。
+- **随应用安装的 CJK 字体**：Noto Sans SC 的 Regular 和 Bold（noto-cjk `Sans2.004` 的
+  `SubsetOTF/SC`，SIL OFL，共约 16 MB）不编进程序也不放进仓库，由安装包放在数据目录的
+  `catmail/fonts/NotoSansSC-{Regular,Bold}.otf`；启动时依次在 `$XDG_DATA_HOME`（默认
+  `~/.local/share`）和 `$XDG_DATA_DIRS` 里找，第一个两份都有的目录为准。Flatpak、AppImage 和 nix 的包装
+  都会设置 `XDG_DATA_DIRS`；dev shell 用 `fetchurl` 取这两个文件，加到 `XDG_DATA_DIRS` 前面。回退只认相等
+  的字重（下一条），而 Noto Sans SC 没有 500、600：界面字体（自带的 Noto Sans 各字面）有几个字重，就把
+  字重最接近的那份字体各载入一次（Regular 作 400、500，Bold 作 600、700），只改内存里那份的 OS/2
+  `usWeightClass`（fontdb 和 cosmic-text 只看它）；字重从字体里读，界面字体换了字重也跟着变。四份共约
+  33 MB 内存。找不到时一切照旧。字体放在仓库外，是为了不让仓库和每次构建都多出 16 MB。
+- **回退只认相等的字重**：cosmic-text 用主字体所选字面的字重（自带的 Noto Sans 是 400、500、600、700）
+  去回退字族里找字面，只接受 `usWeightClass` 与之**相等**的，或 `wght` 轴覆盖它的可变字体；对不上就跳过
+  这个字族，接着找 cosmic-text 自己按文种排的回退（多半是可变的 Noto Sans CJK，又按默认实例画成 Thin），
+  最后才取字重最接近、又有这个字的任何字体。所以一个回退字族只有在界面用到的每个字重都有字面时才可靠。
+  静态的 Noto Sans CJK 有 400、500、700，缺 600；MiSans 的字重标得不标准（Regular 330、Semibold 520、
+  Bold 630、Heavy 700），通过了上面的挑选，却只在 700 生效，400、600 的中文仍落到可变字体上，偏细。
+  挑选条件没有收紧成"各字重齐全"：那样常见字族都不合格，连现在碰巧能用的粗体也会丢掉。
 
 macOS、Windows 用系统字体，不受影响。
 
@@ -103,6 +119,10 @@ macOS、Windows 用系统字体，不受影响。
   错位。`List` 按 `IndexPath { section, row }` 计数，`rows` 和选中项仍按从上到下的序号，两者由
   `message_list::Days` 换算。标题在加载、刷新时重算：窗口跨过午夜后，下一次刷新才把"Today"改成
   "Yesterday"。
+- **两种行形**：行里不显示正文。读信区关着时列表独占窗口宽度，邮件和草稿一行排开：发件人（草稿是收件人）
+  一栏、主题、标记、时间；读信区打开后改成两行：发件人和时间在上，主题在下，最多折两行，用 `muted_foreground` 和发件人区分（字重仍只表示未读）。`List` 只量一行
+  的高度给所有行用，所以两行时主题总是占两行高。切换时每一行的高度都变，`MessageList` 把刚打开（或刚关上）
+  的那封滚到中间，免得它从指针下跑开。Outbox 的行不变。
 - **未读只靠字重**：未读邮件的发件人和主题加粗，不再有左侧的圆点。
 - **Gmail 的用户标签**是主题后面的中性小标签，最多两个、其余计数，不显示正在看的那个标签。名字由
   `Mailbox` 从侧栏的账户里取（`MessageList::set_labels`），读信区的标签也由它按列表里这封邮件的现状设置
@@ -213,7 +233,7 @@ macOS、Windows 用系统字体，不受影响。
 客户端开启了后台同步（`sync_in_background`）：服务器推送的新邮件同样经 `MessagesChanged` 出现。GUI
 自己不同步账户：启动、添加账户时后台同步本来就做一次完整同步；Sync 按钮、Ctrl R 和托盘的"Sync now"
 调 `MailClient::sync_now`，由后台同步来做（见[同步 / 后台同步](sync.md#后台同步与-idle)）。进度和失败都
-来自账户状态：有账户 `syncing` 时侧栏底部显示"Syncing…"、Sync 按钮转圈，失败时显示连接问题；
+来自账户状态：有账户 `syncing` 时搜索框旁的 Sync 按钮转圈，失败时侧栏底部显示连接问题；
 不再弹同步失败的通知。后台同步在两次完整同步之间只盯
 INBOX，所以打开一个文件夹时同步它（`MailClient::sync_folder`，一分钟内同步过的跳过，见
 [同步 / 打开的文件夹](sync.md#打开的文件夹)）；失败只记日志，连不上服务器已由侧栏底部说明。
@@ -485,7 +505,12 @@ Lucide 图标（勾、箭头、关闭、搜索……）在资源加载时按路�
   与 `gpui-pre-wgpu` 0.3.9 的相同）栅格化字形时不设 `wght` 轴坐标，可变字体一律按默认实例渲染。系统
   只有 Noto Sans CJK 可变字体时，中文偏细、加粗无效；只给静态字体时字重正常。上游跟踪 zed-industries/zed#60155（#64123、#64783 同一处）。界面
   文字用自带的静态 Noto Sans 绕开，CJK 只在装有静态字面的字族里挑回退字体（见[字体](#字体linux)）；只有
-  可变 CJK 字体的系统，中文仍然没有粗体，用户可改装静态版（如 nixpkgs 的 `noto-fonts-cjk-sans-static`）。
+  可变 CJK 字体的系统，中文仍然没有粗体，用户可改装静态版（如 nixpkgs 的 `noto-fonts-cjk-sans-static`），
+  并去掉可变版：可变字体对任何字重都算匹配，只要还装着就会被选中。装了随应用的 Noto Sans SC 时不受影响。
+- **回退字体的字重须相等（上游）。** 同一处的另一半：GPUI 把主字体的字重原样交给 cosmic-text 去匹配
+  回退字族，cosmic-text 0.19（`font/fallback/mod.rs`）只接受字重相等的字面，见[字体](#字体linux)。
+  #60155 报的就是它（回退只在字重 400 时生效）。修法是按回退字族里最接近的字重去匹配，要改 GPUI；
+  Zed 的编辑器不受影响，只因常用的编辑器字体（如 Maple Mono NF CN）自带 CJK，用不到回退。
   升级 gpui-kit 时检查这几个 issue：修好后可以去掉自带字体和 `fonts.rs` 的回退挑选。
 - **依赖锁定。** `gpui-fast-*` 精确 pin 了 `cocoa = 0.26.0` 和 `unicode-properties = 0.1.3`，锁文件里
   这两个必须保持这些版本；升级 gpui-kit 时对照它自带的 `Cargo.lock`。

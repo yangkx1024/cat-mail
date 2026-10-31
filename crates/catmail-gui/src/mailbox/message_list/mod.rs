@@ -25,7 +25,7 @@ use crate::theme::colors::ThemeColors as _;
 mod rows;
 
 pub use rows::outbox_status;
-use rows::{draft_row, message_row, outbox_row};
+use rows::{Shape, draft_row, message_row, outbox_row};
 
 const PAGE: u32 = 200;
 
@@ -264,6 +264,15 @@ impl MessageList {
             .collect();
         names.sort();
         names
+    }
+
+    /// The reading pane, open while a row is selected, leaves the rows less room.
+    fn shape(&self) -> Shape {
+        if self.selected_row().is_some() {
+            Shape::Stacked
+        } else {
+            Shape::Line
+        }
     }
 
     /// Drops the message [`reveal`] waits for: the user chose another meanwhile.
@@ -632,20 +641,23 @@ impl ListDelegate for MessageList {
         let ix = self.days.flat(ix)?;
         let row = self.rows.get(ix)?;
         let selected = self.selected == Some(ix);
+        let shape = self.shape();
         let item = match row {
             // Not the label listed: every row has it.
-            Row::Message(message) => {
-                message_row(message, &self.label_names(message, self.shown_folder()), cx)
-            }
-            Row::Draft(draft) => draft_row(draft, cx),
+            Row::Message(message) => message_row(
+                message,
+                &self.label_names(message, self.shown_folder()),
+                shape,
+                cx,
+            ),
+            Row::Draft(draft) => draft_row(draft, shape, cx),
             Row::Outbox(entry) => outbox_row(entry, cx),
         };
         // The virtual list has no gap between rows; the margin keeps a selected row's
-        // background apart from a hovered neighbour's.
+        // background apart from a hovered neighbour's. The padding is the row's own.
         Some(
             item.selected(selected)
                 .rounded(cx.theme().radius_lg)
-                .px_2()
                 .my_0p5(),
         )
     }
@@ -673,10 +685,23 @@ impl ListDelegate for MessageList {
     fn set_selected_index(
         &mut self,
         ix: Option<IndexPath>,
-        _: &mut Window,
-        _: &mut Context<ListState<Self>>,
+        window: &mut Window,
+        cx: &mut Context<ListState<Self>>,
     ) {
+        let (shape, before) = (self.shape(), self.selected);
         self.selected = ix.and_then(|ix| self.days.flat(ix));
+        if self.shape() == shape {
+            return;
+        }
+        // Every row changes height: the one opened, or the one just closed, would move
+        // away from under the pointer. (Not when the rows went with it: another source.)
+        let row = self.selected.or(before.filter(|&ix| ix < self.rows.len()));
+        if let Some(path) = row.and_then(|ix| self.days.path(ix)) {
+            // The list is being updated right now.
+            cx.defer_in(window, move |list, window, cx| {
+                list.scroll_to_item(path, gpui_kit::ScrollStrategy::Center, window, cx)
+            });
+        }
     }
 
     fn has_more(&self, _: &App) -> bool {
