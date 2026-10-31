@@ -15,6 +15,7 @@ use gpui_kit::{
 };
 
 use crate::assets::Hero;
+use crate::layout;
 
 pub struct FolderPicker {
     folders: Vec<(FolderId, String)>,
@@ -205,7 +206,7 @@ fn show(
         }
     });
     let width = rems(26.).to_pixels(window.rem_size());
-    window.open_dialog(cx, move |dialog, _, _| {
+    layout::open_dialog(window, cx, move |dialog, _, _| {
         // The subscription lives as long as the dialog's builder.
         let _ = &subscription;
         dialog.title(title).w(width).centered().child(

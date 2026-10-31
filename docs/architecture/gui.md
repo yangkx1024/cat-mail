@@ -539,3 +539,9 @@ Lucide 图标（勾、箭头、关闭、搜索……）在资源加载时按路�
   升级 gpui-kit 时检查这几个 issue：修好后可以去掉自带字体和 `fonts.rs` 的回退挑选。
 - **依赖锁定。** `gpui-fast-*` 精确 pin 了 `cocoa = 0.26.0` 和 `unicode-properties = 0.1.3`，锁文件里
   这两个必须保持这些版本；升级 gpui-kit 时对照它自带的 `Cargo.lock`。
+- **弹窗与菜单的动画（上游）。** 对话框一律经 `layout::open_dialog`（确认框 `layout::confirm_danger`）
+  打开，用 `DialogEntrance::FadeSlide`：从略高于终点处淡入落定，关闭时原路淡出。gpui-kit 默认的
+  `SlideDown` 从窗口顶部拉下来，关闭时倒放同一条先快后慢的曲线，几帧内就走完整段距离，看起来像没有动画。
+  GPUI 没有元素级变换（`TransformationMatrix` 只作用于 SVG 和图片），做不了缩放，gpui-kit 也把曲线
+  截在 0–1，所以没有回弹。右键菜单没有动画，Select 下拉只有入场（上滑 8px 加渐变），都没有给应用的
+  接口；要统一须改 gpui-kit。升级 gpui-kit 时看它是否加了这些。

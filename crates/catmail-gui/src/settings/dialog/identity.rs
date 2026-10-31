@@ -13,6 +13,7 @@ use gpui_kit::{
 };
 
 use crate::actions::DIALOG_BUTTON;
+use crate::layout;
 use crate::login_form::{LoginFields, LoginValues, ServerFields, ServerValues, Submit};
 
 /// What the form holds, as typed.
@@ -49,7 +50,7 @@ pub(super) fn open(
     let title = SharedString::from(format!("New address for {email}"));
     let width = rems(32.).to_pixels(window.rem_size());
     let dialog_form = form.clone();
-    window.open_dialog(cx, move |dialog, _, cx| {
+    layout::open_dialog(window, cx, move |dialog, _, cx| {
         let form = &dialog_form;
         let submit = &form.read(cx).submit;
         // The buttons act through the dialog's own Cancel and Confirm, as Escape and Enter

@@ -3,7 +3,7 @@
 use std::rc::Rc;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::dialog::{Cancel, Confirm, DialogFooter};
+use gpui_kit::component::dialog::{Cancel, Confirm, Dialog, DialogEntrance, DialogFooter};
 use gpui_kit::component::sidebar::SidebarMenuItem;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, WindowExt as _, h_flex};
 use gpui_kit::{
@@ -162,6 +162,22 @@ pub fn attachment_chip(filename: impl Into<SharedString>, size: u64, cx: &App) -
         .child(div().text_xs().text_color(muted).child(format::size(size)))
 }
 
+/// How every dialog comes and goes: settling from just above its place as it fades in,
+/// and back out the same way. GPUI Kit's default slides down from the window's top, and
+/// leaving retraces that whole distance in a few frames, so a dialog seems to vanish.
+const DIALOG_ENTRANCE: DialogEntrance = DialogEntrance::FadeSlide;
+
+/// Opens a dialog built by `build`, with the motion every dialog shares.
+pub fn open_dialog(
+    window: &mut Window,
+    cx: &mut App,
+    build: impl Fn(Dialog, &mut Window, &mut App) -> Dialog + 'static,
+) {
+    window.open_dialog(cx, move |dialog, window, cx| {
+        build(dialog.entrance(DIALOG_ENTRANCE), window, cx)
+    });
+}
+
 /// The element ids of the buttons that confirm and cancel [`confirm_danger`].
 pub const CONFIRM: &str = "confirm-ok";
 pub const CANCEL: &str = "confirm-cancel";
@@ -194,6 +210,7 @@ pub fn confirm_danger(
                 window.dispatch_action(Box::new(Confirm { secondary: false }), cx)
             });
         alert
+            .entrance(DIALOG_ENTRANCE)
             .title(title.clone())
             .centered()
             .description(description.clone())
