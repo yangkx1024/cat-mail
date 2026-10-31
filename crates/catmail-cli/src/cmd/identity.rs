@@ -2,7 +2,7 @@
 //! of its own, and `--from`, which picks one for a message.
 
 use anyhow::{Context, Result};
-use catmail_core::{Account, AccountId, IdentityId, MailClient, NewIdentity, SecretString};
+use catmail_core::{Account, AccountId, Draft, IdentityId, MailClient, NewIdentity, SecretString};
 use clap::{Args, Subcommand, ValueEnum};
 
 use crate::cmd::account::{Login, SmtpServer, read_password};
@@ -171,6 +171,44 @@ pub(crate) async fn resolve_from(
     };
     found.with_context(|| {
         format!("account {account} has no identity `{from}`; see `catmail identity list`")
+    })
+}
+
+/// The identity `--from` names for the draft, among those it can be sent as (see
+/// [`MailClient::draft_senders`]): by id, or by address as [`resolve_from`] finds it,
+/// in the draft's own account first, then in the others in turn.
+pub(crate) async fn resolve_draft_from(
+    client: &MailClient,
+    draft: &Draft,
+    from: &str,
+) -> Result<IdentityId> {
+    let from = from.trim();
+    let senders = client.draft_senders(draft.id).await?;
+    let found = match from.parse::<i64>() {
+        Ok(id) => senders.iter().find(|i| i.id.0 == id).map(|i| i.id),
+        Err(_) => {
+            let mut accounts = vec![draft.account_id];
+            for sender in &senders {
+                if !accounts.contains(&sender.account_id) {
+                    accounts.push(sender.account_id);
+                }
+            }
+            let mut found = None;
+            for account in accounts {
+                found = client.identity_by_address(account, from).await?;
+                if found.is_some() {
+                    break;
+                }
+            }
+            found
+        }
+    };
+    found.with_context(|| {
+        format!(
+            "draft {} can't be sent as `{from}` (a reply goes from its own account only); \
+             see `catmail identity list`",
+            draft.id
+        )
     })
 }
 

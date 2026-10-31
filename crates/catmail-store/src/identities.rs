@@ -1,8 +1,8 @@
-use catmail_types::{AccountId, Identity, IdentityId, NewIdentity};
+use catmail_types::{AccountId, DraftId, Identity, IdentityId, NewIdentity};
 use rusqlite::{Connection, OptionalExtension, Row, named_params};
 
 use crate::columns::{server, size_limit, size_limit_column};
-use crate::drafts::Drafts;
+use crate::drafts::{Drafts, REPLY};
 use crate::error::is_unique_violation;
 use crate::{Error, Result};
 
@@ -124,6 +124,21 @@ impl<'c> Identities<'c> {
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt.query_map([account.0], from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The identities the draft may be sent as: every account's, or for a reply its own
+    /// account's only (see [`Drafts::update`]). By account, each one's default first;
+    /// none if there is no such draft.
+    pub fn of_draft(&self, draft: DraftId) -> Result<Vec<Identity>> {
+        let sql = format!(
+            "SELECT {COLUMNS} FROM identities i
+             WHERE EXISTS (SELECT 1 FROM drafts d
+                           WHERE d.id = ?1 AND (d.account_id = i.account_id OR NOT ({REPLY})))
+             ORDER BY i.account_id, i.is_default DESC, i.id"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map([draft.0], from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -303,7 +318,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Identity> {
 
 #[cfg(test)]
 mod tests {
-    use catmail_types::{BlobHash, DraftContent, DraftId, Security, ServerConfig};
+    use catmail_types::{BlobHash, DraftContent, Security, ServerConfig};
 
     use super::*;
     use crate::outbox::NewOutboxEntry;
@@ -412,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn drafts_are_written_as_the_default_unless_told_and_only_as_their_accounts() {
+    fn drafts_are_written_as_the_default_unless_told() {
         let store = test_util::store();
         let a = test_util::account(&store, "a@example.com");
         let b = test_util::account(&store, "b@example.com");
@@ -420,17 +435,48 @@ mod tests {
         let id = draft(&store, a, None);
         assert_eq!(identity_of(&store, id), default_of(&store, a));
 
+        // Made in an account, as one of its identities.
         let content = DraftContent::default();
         let insert = store.write(|db| db.drafts().insert(a, Some(theirs.id), &content, None, 1));
         assert!(matches!(insert, Err(Error::Invalid(_))), "{insert:?}");
-        let update = store.write(|db| db.drafts().update(id, theirs.id, &content, 2));
-        assert!(matches!(update, Err(Error::Invalid(_))), "{update:?}");
 
         let mine = add(&store, a, "news@example.com");
         store
             .write(|db| db.drafts().update(id, mine.id, &content, 3))
             .unwrap();
         assert_eq!(identity_of(&store, id), mine.id);
+    }
+
+    #[test]
+    fn a_draft_may_be_sent_as_any_accounts_identity() {
+        let store = test_util::store();
+        let a = test_util::account(&store, "a@example.com");
+        let b = test_util::account(&store, "b@example.com");
+        let theirs = add(&store, b, "news@example.com");
+        let mine = add(&store, a, "news@example.com");
+        let id = draft(&store, b, None);
+        let senders: Vec<IdentityId> = store
+            .read(|db| db.identities().of_draft(id))
+            .unwrap()
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(
+            senders,
+            [
+                default_of(&store, a),
+                mine.id,
+                default_of(&store, b),
+                theirs.id
+            ],
+            "by account, the default first"
+        );
+        assert!(
+            store
+                .read(|db| db.identities().of_draft(DraftId(99)))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
