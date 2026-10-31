@@ -2,7 +2,7 @@
 
 use super::*;
 
-use gpui_kit::{ExternalPaths, FileDropEvent, PlatformInput, point};
+use gpui_kit::{ExternalPaths, FileDropEvent, PlatformInput, point, size};
 
 #[gpui_kit::test]
 fn replies_from_a_composer_window(cx: &mut TestAppContext) {
@@ -308,6 +308,63 @@ fn an_untouched_reply_still_sends(cx: &mut TestAppContext) {
     .unwrap();
     wait_for_one_window(cx);
     wait_until(|| mail.sent().len() == 1);
+}
+
+#[gpui_kit::test]
+fn the_commands_stay_in_a_small_window_full_of_attachments(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let dir = tempfile::tempdir().unwrap();
+    let files: Vec<PathBuf> = (0..30)
+        .map(|n| {
+            let file = dir.path().join(format!("attachment-{n}.txt"));
+            std::fs::write(&file, "notes").unwrap();
+            file
+        })
+        .collect();
+    let (_, composer) = reply_window(cx, &mail);
+    // The composer's smallest size, with every header row showing.
+    cx.simulate_window_resize(composer, size(px(480.), px(360.)));
+    click(cx, composer, "show-cc-bcc");
+    cx.update_window(composer, |_, window, cx| {
+        let position = point(px(240.), px(200.));
+        window.dispatch_event(
+            PlatformInput::FileDrop(FileDropEvent::Entered {
+                position,
+                paths: ExternalPaths(files.into()),
+            }),
+            cx,
+        );
+        window.dispatch_event(
+            PlatformInput::FileDrop(FileDropEvent::Submit { position }),
+            cx,
+        );
+    })
+    .unwrap();
+    let mut last = None;
+    wait_until(|| {
+        cx.run_until_parked();
+        let drafts = pollster::block_on(mail.client.list_drafts(mail.account())).unwrap();
+        last = drafts
+            .first()
+            .filter(|draft| draft.attachments.len() == 30)
+            .and_then(|draft| draft.attachments.last())
+            .map(|attachment| attachment.id);
+        last.is_some()
+    });
+    let last = last.unwrap();
+    assert!(shown(cx, composer, ("remove-attachment", last.0 as u64)));
+
+    cx.update_window(composer, |_, window, _| {
+        let height = window.viewport_size().height;
+        for id in ["send", "attach", "discard"] {
+            let bottom = window.find(id).bounds().bottom();
+            assert!(
+                bottom <= height,
+                "{id} ends at {bottom:?}, below {height:?}"
+            );
+        }
+    })
+    .unwrap();
 }
 
 #[gpui_kit::test]
