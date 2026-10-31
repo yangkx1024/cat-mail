@@ -1,4 +1,4 @@
-//! How the pane looks: the message's header, attachments and body.
+//! How the pane looks: the message's header, body and attachments.
 
 use gpui_kit::base::SelectableText;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -117,10 +117,14 @@ impl Reader {
                 )
         });
 
+        // Under the text, where reading it ends.
         let attachments = (!open.attachments.is_empty()).then(|| {
             h_flex()
                 .flex_wrap()
                 .gap_2()
+                .pt_4()
+                .border_t_1()
+                .border_color(theme.border)
                 .children(open.attachments.iter().map(|attachment| {
                     let name = attachment
                         .filename
@@ -182,8 +186,8 @@ impl Reader {
                 .child(title)
                 .child(sender)
                 .children(details)
-                .children(attachments)
-                .child(body),
+                .child(body)
+                .children(attachments),
         )
         .size_full()
     }

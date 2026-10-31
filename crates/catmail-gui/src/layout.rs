@@ -60,12 +60,20 @@ pub fn window_options(
 
 /// The bar of commands at the top of a pane or window; the same height whatever it holds.
 pub fn toolbar(cx: &App) -> Div {
+    command_bar(cx).border_b_1()
+}
+
+/// A [`toolbar`] at the bottom of a window instead.
+pub fn bottom_bar(cx: &App) -> Div {
+    command_bar(cx).border_t_1()
+}
+
+fn command_bar(cx: &App) -> Div {
     h_flex()
         .flex_none()
         .h_12()
         .px_3()
         .gap_1()
-        .border_b_1()
         .border_color(cx.theme().border)
 }
 

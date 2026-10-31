@@ -1,4 +1,4 @@
-//! How the composer looks: toolbar, header fields, attachments and the text.
+//! How the composer looks: header fields, the text, attachments and the bar of commands.
 
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -7,7 +7,8 @@ use gpui_kit::component::select::Select;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
     App, Context, Entity, ExternalPaths, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, Styled as _, Window, div, prelude::FluentBuilder as _, rems,
+    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _, rems,
 };
 
 use crate::actions::{self, Attach, CloseComposer, Send};
@@ -84,12 +85,13 @@ impl Render for Composer {
             (SaveState::Failed(e), _) => Some(format!("Not saved: {e}").into()),
             _ => None,
         };
-        let toolbar = layout::toolbar(cx)
+        let footer = layout::bottom_bar(cx)
             .gap_2()
             .child(
                 Button::new("send")
                     .primary()
-                    .small()
+                    .rounded_full()
+                    .px_5()
                     .icon(Hero::PaperAirplane)
                     .label("Send")
                     .loading(sending)
@@ -100,9 +102,7 @@ impl Render for Composer {
             .child(
                 Button::new("attach")
                     .ghost()
-                    .small()
                     .icon(Hero::PaperClip)
-                    .label("Attach")
                     .disabled(ending)
                     .tooltip_with_action("Attach files", &Attach, Some(actions::COMPOSER))
                     .on_click(cx.listener(|this, _, window, cx| this.attach(window, cx))),
@@ -117,7 +117,6 @@ impl Render for Composer {
             .child(
                 Button::new("discard")
                     .ghost()
-                    .small()
                     .icon(Hero::Trash)
                     .disabled(ending)
                     .tooltip("Discard draft")
@@ -137,11 +136,21 @@ impl Render for Composer {
                 .into_any_element()
         });
         let from = match &self.from {
-            FromField::Choice { senders, .. } => Select::new(senders)
-                .id("composer-from")
-                .appearance(false)
-                .small()
-                .disabled(ending)
+            // As wide as the address chosen: a Select fills its parent, and this one
+            // takes only its content's width in the row. Its menu, which would follow
+            // that width, gets room for the longer choices.
+            FromField::Choice { senders, .. } => h_flex()
+                .child(
+                    div().min_w_0().child(
+                        Select::new(senders)
+                            .id("composer-from")
+                            .appearance(false)
+                            .small()
+                            .px_0()
+                            .menu_width(rems(24.))
+                            .disabled(ending),
+                    ),
+                )
                 .into_any_element(),
             FromField::One(_, title) => div()
                 .text_sm()
@@ -170,22 +179,19 @@ impl Render for Composer {
                 )
                 .border_b_1()
                 .border_color(theme.border),
-            )
-            .when(!self.attachments.is_empty(), |this| {
-                this.child(
-                    h_flex()
-                        .flex_wrap()
-                        .gap_2()
-                        .py_2p5()
-                        .border_b_1()
-                        .border_color(theme.border)
-                        .children(self.attachments.iter().map(|attachment| {
-                            let id = attachment.id;
-                            layout::attachment_chip(
-                                attachment.filename.clone(),
-                                attachment.size,
-                                cx,
-                            )
+            );
+        // Many of them scroll, in no more than a few rows: the bar under them stays in
+        // the window, however small.
+        let attachments = (!self.attachments.is_empty()).then(|| {
+            div()
+                .id("composer-attachments")
+                .min_h_0()
+                .max_h(rems(8.))
+                .overflow_y_scroll()
+                .child(h_flex().flex_wrap().gap_2().px_5().py_2p5().children(
+                    self.attachments.iter().map(|attachment| {
+                        let id = attachment.id;
+                        layout::attachment_chip(attachment.filename.clone(), attachment.size, cx)
                             .pr_1()
                             .child(
                                 Button::new(("remove-attachment", id.0 as u64))
@@ -198,9 +204,9 @@ impl Render for Composer {
                                         this.remove_attachment(id, window, cx)
                                     })),
                             )
-                        })),
-                )
-            });
+                    }),
+                ))
+        });
 
         v_flex()
             .id("composer")
@@ -215,7 +221,6 @@ impl Render for Composer {
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
-            .child(toolbar)
             .children(self.error.clone().map(|error| {
                 div()
                     .px_5()
@@ -231,5 +236,7 @@ impl Render for Composer {
                         .h_full(),
                 ),
             )
+            .children(attachments)
+            .child(footer)
     }
 }
