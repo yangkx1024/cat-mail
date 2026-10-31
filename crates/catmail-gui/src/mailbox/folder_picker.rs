@@ -208,7 +208,7 @@ fn show(
     window.open_dialog(cx, move |dialog, _, _| {
         // The subscription lives as long as the dialog's builder.
         let _ = &subscription;
-        dialog.title(title).w(width).child(
+        dialog.title(title).w(width).centered().child(
             div()
                 .h(rems(20.))
                 .child(List::new(&list).search_placeholder(placeholder)),

@@ -50,7 +50,7 @@ futures-channel = "0.3.34"
 futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
 # Pins the matching GPUI crates; never depend on GPUI directly (two copies would link).
 # `gpui-fast` swaps the backend from gpui-pre to GPUI Fast behind the same imports.
-gpui-kit = { version = "0.8.0", features = ["gpui-fast"] }
+gpui-kit = { version = "0.8.1", features = ["gpui-fast"] }
 hex = "0.4"
 # The version ammonia uses, so the sanitizer and the layout pass share one parser.
 html5ever = "0.40.1"

@@ -68,11 +68,7 @@ impl SettingsView {
         };
         v_flex()
             .gap_4()
-            .child(section_title(
-                "Reading",
-                "How messages behave as you read them.",
-                cx,
-            ))
+            .child(section_title("Reading"))
             .child(
                 Switch::new("mark-read-on-open")
                     .checked(mark_read)

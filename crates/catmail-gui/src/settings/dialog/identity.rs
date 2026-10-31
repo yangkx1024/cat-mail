@@ -72,6 +72,7 @@ pub(super) fn open(
         dialog
             .title(title.clone())
             .w(width)
+            .centered()
             // The form closes the dialog once the address is added.
             .on_ok(move |_, window, cx| {
                 add.update(cx, |form, cx| form.add(window, cx));

@@ -76,7 +76,11 @@ pub fn open(client: MailClient, mailbox: WeakEntity<Mailbox>, window: &mut Windo
     let view = cx.new(|cx| SettingsView::new(client, mailbox, window, cx));
     let width = rems(50.).to_pixels(window.rem_size());
     window.open_dialog(cx, move |dialog, _, _| {
-        dialog.title("Settings").w(width).child(view.clone())
+        dialog
+            .title("Settings")
+            .w(width)
+            .centered()
+            .child(view.clone())
     });
 }
 
@@ -184,14 +188,19 @@ impl Render for SettingsView {
     }
 }
 
-fn section_title(title: &'static str, help: &'static str, cx: &App) -> impl IntoElement + use<> {
-    v_flex()
-        .gap_0p5()
-        .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
-        .child(
-            div()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(help),
-        )
+fn section_title(title: &'static str) -> impl IntoElement + use<> {
+    div().font_weight(FontWeight::SEMIBOLD).child(title)
+}
+
+fn section_title_with_help(
+    title: &'static str,
+    help: &'static str,
+    cx: &App,
+) -> impl IntoElement + use<> {
+    v_flex().gap_0p5().child(section_title(title)).child(
+        div()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(help),
+    )
 }

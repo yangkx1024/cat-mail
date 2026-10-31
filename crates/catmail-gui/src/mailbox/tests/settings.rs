@@ -444,3 +444,37 @@ fn the_sending_address_form_works_from_the_keyboard(cx: &mut TestAppContext) {
         1
     );
 }
+
+/// Asserts the dialog on top sits in the vertical middle of the window.
+fn assert_centered(window: &mut Window) {
+    let viewport = window.viewport_size();
+    let dialog = window.find("surface").bounds();
+    let (above, below) = (dialog.top(), viewport.height - dialog.bottom());
+    assert!(
+        (above - below).abs() <= px(1.),
+        "{above:?} above, {below:?} below"
+    );
+}
+
+#[gpui_kit::test]
+fn dialogs_open_in_the_middle_of_the_window(cx: &mut TestAppContext) {
+    let mail = TestMail::start_with_folders(&[("Archive", "\\Archive")]);
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    open_settings(cx, window);
+    cx.update_window(window, |_, window, cx| {
+        assert_centered(window);
+        window.close_all_dialogs(cx);
+    })
+    .unwrap();
+    // A confirmation: with no Trash, deleting is for good.
+    click_message(cx, window, &mailbox, "你好，世界");
+    cx.update_window(window, |_, window, cx| window.press("delete", cx))
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert_centered(window);
+    })
+    .unwrap();
+}
