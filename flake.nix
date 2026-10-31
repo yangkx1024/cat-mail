@@ -39,6 +39,29 @@
             "CARGO_TARGET_${pkgs.stdenv.hostPlatform.rust.cargoEnvVarTarget}_RUSTFLAGS" =
               "-C link-arg=-fuse-ld=mold";
           };
+          # The CJK font catmail-gui looks for in `catmail/fonts` of a data directory
+          # (`fonts.rs`), as a package will install it. The shells put it on
+          # XDG_DATA_DIRS, so the app run from them has it.
+          cjkFonts = pkgs.linkFarm "catmail-cjk-fonts" (
+            map
+              (face: {
+                name = "share/catmail/fonts/NotoSansSC-${face.weight}.otf";
+                path = pkgs.fetchurl {
+                  url = "https://github.com/notofonts/noto-cjk/raw/Sans2.004/Sans/SubsetOTF/SC/NotoSansSC-${face.weight}.otf";
+                  inherit (face) hash;
+                };
+              })
+              [
+                {
+                  weight = "Regular";
+                  hash = "sha256-+qbJ32UhFt3nidNRNZ89fl0ihaKyofBKLXJE33BtXqk=";
+                }
+                {
+                  weight = "Bold";
+                  hash = "sha256-xstak6uqntyO50Y7frt/QtYY1A5u0velNxyXsLZHZ8A=";
+                }
+              ]
+          );
 
           default = pkgs.mkShell {
             packages =
@@ -59,6 +82,10 @@
             RUST_SRC_PATH = pkgs.rustPlatform.rustLibSrc;
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (guiLibs ++ guiRuntimeLibs);
             env = linkWithMold;
+            # Unset means the default directories, which must stay.
+            shellHook = ''
+              export XDG_DATA_DIRS=${cjkFonts}/share:''${XDG_DATA_DIRS:-/usr/local/share:/usr/share}
+            '';
           };
         in
         {
