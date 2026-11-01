@@ -233,6 +233,30 @@ impl<'c> Identities<'c> {
             .optional()?)
     }
 
+    /// Changes the name it sends as; `None` for the address alone. Drafts written as it
+    /// are uploaded again, for their copies on the server to be from the new name.
+    /// Returns its account and how many drafts there were, or `None` if there is no such
+    /// identity.
+    pub fn set_display_name(
+        &self,
+        id: IdentityId,
+        name: Option<&str>,
+    ) -> Result<Option<(AccountId, usize)>> {
+        let Some(identity) = self.get(id)? else {
+            return Ok(None);
+        };
+        let account = identity.account_id;
+        if identity.display_name.as_deref() == name {
+            return Ok(Some((account, 0)));
+        }
+        self.conn.execute(
+            "UPDATE identities SET display_name = ?2 WHERE id = ?1",
+            (id.0, name),
+        )?;
+        let drafts = Drafts::new(self.conn).reupload_identity(id)?;
+        Ok(Some((account, drafts)))
+    }
+
     /// Keyring entries of the account's identities that have their own, which go with
     /// it.
     pub fn secret_keys(&self, account: AccountId) -> Result<Vec<String>> {
@@ -544,6 +568,45 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn renaming_one_uploads_its_drafts_again() {
+        let store = test_util::store();
+        let a = test_util::account(&store, "a@example.com");
+        let own = default_of(&store, a);
+        let news = add(&store, a, "news@example.com");
+        let mine = draft(&store, a, Some(news.id));
+        let other = draft(&store, a, None);
+        let snapshot = |id| store.read(|db| db.drafts().snapshot(id)).unwrap().unwrap();
+        let revision = |id| snapshot(id).revision;
+        let (before, other_before) = (revision(mine), revision(other));
+        let rename = |id, name| {
+            store
+                .write(|db| db.identities().set_display_name(id, name))
+                .unwrap()
+        };
+        let name = |id| {
+            store
+                .read(|db| db.identities().get(id))
+                .unwrap()
+                .unwrap()
+                .display_name
+        };
+
+        assert_eq!(rename(news.id, Some("Weekly")), Some((a, 1)));
+        assert_eq!(name(news.id).as_deref(), Some("Weekly"));
+        assert_eq!(name(own), None, "only that one");
+        assert_eq!(revision(mine), before + 1);
+        assert_eq!(revision(other), other_before, "written as another");
+        assert_eq!(snapshot(mine).draft.updated_at, 1, "not edited by the user");
+        // The same name again changes nothing.
+        assert_eq!(rename(news.id, Some("Weekly")), Some((a, 0)));
+        assert_eq!(revision(mine), before + 1);
+
+        assert_eq!(rename(news.id, None), Some((a, 1)));
+        assert_eq!(name(news.id), None);
+        assert_eq!(rename(IdentityId(99), Some("x")), None);
     }
 
     #[test]

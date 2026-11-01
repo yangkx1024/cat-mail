@@ -652,6 +652,15 @@ impl<'c> Drafts<'c> {
         )?)
     }
 
+    /// Drafts written as `identity` are uploaded again, unchanged otherwise: when it was
+    /// last changed stays when the user did. Returns how many there were.
+    pub(crate) fn reupload_identity(&self, identity: IdentityId) -> Result<usize> {
+        Ok(self.conn.execute(
+            "UPDATE drafts SET revision = revision + 1 WHERE identity_id = ?1",
+            [identity.0],
+        )?)
+    }
+
     fn touch(&self, id: DraftId, now: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE drafts SET revision = revision + 1, updated_at = ?2 WHERE id = ?1",

@@ -615,6 +615,14 @@ fn parse_entry(entry: &str) -> Option<Address> {
     })
 }
 
+/// An identity's name as stored: `None` when there is nothing to it, without a NUL (see
+/// [`without_nul`]).
+pub(crate) fn clean_name(name: Option<&str>) -> Option<String> {
+    let name = name?.replace('\0', "");
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
 /// A NUL means nothing in text, and no message stored on the server can contain one
 /// (IMAP literals can't carry it), so drafts never keep one: quoted from a message that
 /// has one (`=00`), it would fail every upload of the draft.

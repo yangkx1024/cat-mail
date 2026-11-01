@@ -223,6 +223,46 @@ fn adds_a_sending_address_and_makes_it_the_default(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn renames_a_sending_address(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let account = mail.account();
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    let own = || pollster::block_on(mail.client.list_identities(account)).unwrap()[0].clone();
+    assert_eq!(own().display_name, None);
+
+    // The one made with the account, the default, too. Enter saves it, and the field
+    // starts selected: what is typed replaces the name there was.
+    open_accounts(cx, window);
+    let rename = ("rename-identity", own().id.0 as u64);
+    for (name, submit) in [
+        ("Alice", None),
+        ("Alice Liddell", Some("identity-rename-save")),
+    ] {
+        wait_until(|| shown(cx, window, rename));
+        cx.update_window(window, |_, window, cx| {
+            window.click(rename, cx);
+            window.render_frame(cx);
+            window.input(name, cx);
+            match submit {
+                Some(button) => window.click(button, cx),
+                None => window.press("enter", cx),
+            }
+        })
+        .unwrap();
+        wait_until(|| {
+            cx.run_until_parked();
+            own().display_name.as_deref() == Some(name)
+                && cx.read(|cx| {
+                    let entry = mailbox.read(cx).account(account).unwrap();
+                    entry.identities[0].display_name.as_deref() == Some(name)
+                })
+                && !shown(cx, window, "identity-rename")
+        });
+    }
+}
+
+#[gpui_kit::test]
 fn tells_whether_the_server_saves_sent_mail(cx: &mut TestAppContext) {
     let mail = TestMail::start();
     let account = mail.account();

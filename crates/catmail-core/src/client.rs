@@ -386,10 +386,11 @@ impl MailClient {
     /// [`sync_account`](Self::sync_account) does.
     pub async fn add_account(
         &self,
-        new: NewAccount,
+        mut new: NewAccount,
         password: SecretString,
         verify: Verify,
     ) -> Result<Account> {
+        new.display_name = drafts::clean_name(new.display_name.as_deref());
         validate_new_account(&new)?;
         check_password(&password)?;
         let engine = self.engine.clone();
@@ -479,10 +480,11 @@ impl MailClient {
     pub async fn add_identity(
         &self,
         account: AccountId,
-        new: NewIdentity,
+        mut new: NewIdentity,
         password: SecretString,
         verify: Verify,
     ) -> Result<Identity> {
+        new.display_name = drafts::clean_name(new.display_name.as_deref());
         validate_new_identity(&new)?;
         check_password(&password)?;
         let engine = self.engine.clone();
@@ -514,35 +516,55 @@ impl MailClient {
 
     /// Makes it the account's default: new drafts are from it.
     pub async fn set_default_identity(&self, id: IdentityId) -> Result<()> {
-        self.update_identity(id, move |identities| identities.set_default(id))
-            .await
+        self.update_identity(id, move |identities| {
+            Ok(identities.set_default(id)?.map(|account| (account, 0)))
+        })
+        .await
     }
 
     /// Records whether the identity's SMTP server saves what it sends to the account's
     /// Sent itself, so that no second copy is saved; `None` to have it guessed again
     /// (see [`Identity::server_saves_sent`]).
     pub async fn set_identity_saves_sent(&self, id: IdentityId, saves: Option<bool>) -> Result<()> {
-        self.update_identity(id, move |identities| identities.set_saves_sent(id, saves))
-            .await
+        self.update_identity(id, move |identities| {
+            Ok(identities
+                .set_saves_sent(id, saves)?
+                .map(|account| (account, 0)))
+        })
+        .await
     }
 
-    /// Makes a change to an identity that returns its account, `None` if there is no
-    /// such identity.
+    /// Changes the name the identity sends as, the From header's; empty (or `None`) for
+    /// the address alone. Its drafts are uploaded again, for their copies in Drafts to be
+    /// from the new name; what is in the outbox already goes as it was written.
+    pub async fn set_identity_name(&self, id: IdentityId, name: Option<&str>) -> Result<()> {
+        let name = drafts::clean_name(name);
+        self.update_identity(id, move |identities| {
+            identities.set_display_name(id, name.as_deref())
+        })
+        .await
+    }
+
+    /// Makes a change to an identity that returns its account and how many drafts it
+    /// changed, `None` if there is no such identity.
     async fn update_identity(
         &self,
         id: IdentityId,
-        change: impl FnOnce(&Identities<'_>) -> catmail_store::Result<Option<AccountId>>
+        change: impl FnOnce(&Identities<'_>) -> catmail_store::Result<Option<(AccountId, usize)>>
         + Send
         + 'static,
     ) -> Result<()> {
         let engine = self.engine.clone();
         self.rt
             .run_blocking(move || {
-                let account = engine
+                let (account, drafts) = engine
                     .store
                     .write(|db| change(&db.identities()))?
                     .ok_or(Error::IdentityNotFound(id))?;
                 engine.emit(Event::AccountChanged { account });
+                if drafts > 0 {
+                    drafts::changed(&engine, account);
+                }
                 Ok(())
             })
             .await

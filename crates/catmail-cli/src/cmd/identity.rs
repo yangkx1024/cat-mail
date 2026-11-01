@@ -26,6 +26,14 @@ pub(crate) enum IdentityCommand {
         /// Identity id, as shown by `catmail identity list`
         id: i64,
     },
+    /// Change the name an identity sends as, in the From header; its drafts are uploaded
+    /// again with it
+    Name {
+        /// Identity id, as shown by `catmail identity list`
+        id: i64,
+        /// Left out or empty: the address alone
+        name: Option<String>,
+    },
     /// Remove an identity other than the default; its drafts are sent as the default
     Rm {
         /// Identity id, as shown by `catmail identity list`
@@ -103,6 +111,14 @@ pub(crate) async fn identity(client: &MailClient, cmd: IdentityCommand, json: bo
             client.set_default_identity(IdentityId(id)).await?;
             if !json {
                 println!("Identity {id} is the default now.");
+            }
+        }
+        IdentityCommand::Name { id, name } => {
+            client
+                .set_identity_name(IdentityId(id), name.as_deref())
+                .await?;
+            if !json {
+                println!("Updated identity {id}.");
             }
         }
         IdentityCommand::Rm { id } => {
@@ -305,6 +321,24 @@ mod tests {
             identity(&client, cmd, true).await.unwrap();
             let identities = client.list_identities(account).await.unwrap();
             assert_eq!(identities[0].saves_sent, expected);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn name_is_set_and_taken_off() {
+        let fake = FakeImap::start(ServerState::new("alice", "pw")).await;
+        let smtp = FakeSmtp::start(SmtpState::new("alice", "pw")).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (client, account) = synced_with_smtp(&fake, smtp.port(), dir.path()).await;
+        let own = client.list_identities(account).await.unwrap()[0].id;
+        for name in [Some("Alice"), None] {
+            let cmd = IdentityCommand::Name {
+                id: own.0,
+                name: name.map(Into::into),
+            };
+            identity(&client, cmd, true).await.unwrap();
+            let identities = client.list_identities(account).await.unwrap();
+            assert_eq!(identities[0].display_name.as_deref(), name);
         }
     }
 }

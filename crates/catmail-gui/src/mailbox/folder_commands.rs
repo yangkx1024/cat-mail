@@ -4,18 +4,12 @@
 //! why if it couldn't.
 
 use catmail_core::{AccountId, AccountMode, Folder, FolderId, MailClient};
-use gpui_kit::component::WindowExt as _;
-use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
-use gpui_kit::component::v_flex;
-use gpui_kit::{
-    App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Window,
-};
+use gpui_kit::{App, Context, SharedString, Window};
 
 use super::{AccountEntry, Mailbox, Place, report_failure};
 use crate::layout;
-use crate::submission::{self, DialogForm, Submit};
+use crate::submission::{NameDialog, NameIds};
 
 /// The element id of the name field.
 pub const NAME: &str = "folder-name";
@@ -41,7 +35,7 @@ impl Naming {
     }
 }
 
-/// Opens the dialog titled `title`, its field holding `name`, selected.
+/// Opens the dialog titled `title`, its field holding `name`.
 fn open(
     client: MailClient,
     naming: Naming,
@@ -50,80 +44,32 @@ fn open(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let form = cx.new(|cx| FolderForm::new(client, naming, name, window, cx));
-    let (ok, _) = naming.verbs();
-    let ids = ("folder-cancel", "folder-ok");
-    submission::open_dialog(form.clone(), title.into(), 24., ids, ok, window, cx);
-    // Only once the dialog is open: it gives focus back to what had it when it closes.
-    form.update(cx, |form, cx| {
-        form.name.update(cx, |name, cx| {
-            name.focus(window, cx);
-            name.select_all(window, cx);
-        })
-    });
-}
-
-struct FolderForm {
-    client: MailClient,
-    naming: Naming,
-    name: Entity<InputState>,
-    submit: Submit,
-}
-
-impl FolderForm {
-    fn new(
-        client: MailClient,
-        naming: Naming,
-        name: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        Self {
-            client,
-            naming,
-            name: cx.new(|cx| InputState::new(window, cx).default_value(name.to_owned())),
-            submit: Submit::new(naming.verbs().1),
-        }
-    }
-}
-
-impl DialogForm for FolderForm {
-    fn submit(&self) -> &Submit {
-        &self.submit
-    }
-
-    fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (client, naming) = (self.client.clone(), self.naming);
-        let name = self.name.read(cx).value().to_string();
-        let request = Ok(async move {
+    let (ok, what) = naming.verbs();
+    let dialog = NameDialog {
+        ids: NameIds {
+            field: NAME,
+            cancel: "folder-cancel",
+            ok: "folder-ok",
+            error: "folder-error",
+        },
+        title: title.into(),
+        name: name.to_owned(),
+        placeholder: None,
+        ok,
+        what,
+    };
+    let request = move |name: String| {
+        let client = client.clone();
+        async move {
             match naming {
                 Naming::New { account, parent } => {
                     client.create_folder(account, parent, &name).await
                 }
                 Naming::Rename(folder) => client.rename_folder(folder, &name).await,
             }
-        });
-        // The sidebar shows it once the mailbox reads its folders again, for the
-        // engine's event. Nothing can open over this dialog meanwhile, so it is the one
-        // closed.
-        self.submit.start(
-            |this: &mut Self| &mut this.submit,
-            request,
-            |_, window, cx| window.close_dialog(cx),
-            window,
-            cx,
-        );
-    }
-}
-
-impl Render for FolderForm {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
-            .id("folder-form")
-            .gap_3()
-            .child(Input::new(&self.name).id(NAME))
-            .children(self.submit.error("folder-error", cx))
-    }
+        }
+    };
+    dialog.open(request, window, cx);
 }
 
 /// A command a folder's context menu runs on the mailbox.

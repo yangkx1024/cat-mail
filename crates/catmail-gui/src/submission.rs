@@ -1,16 +1,19 @@
 //! A form's submission, shared by every form (the sign-in page, the dialogs that add a
-//! sending address or name a folder), and the dialog a form opens in.
+//! sending address or name a folder), the dialog a form opens in, and the one-field
+//! dialog that asks for a name.
 
 use std::future::Future;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::{Cancel, Confirm, DialogFooter};
-use gpui_kit::component::input::{InputEvent, InputState};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, h_flex};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render, Role,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
-    TestSupportExt as _, Window, div, rems,
+    App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Task, TestSupportExt as _, Window, div, rems,
 };
 
 use crate::actions::DIALOG_BUTTON;
@@ -124,12 +127,17 @@ impl Submit {
 
     /// The form's Cancel button: off while a submission runs.
     pub fn cancel_button(&self, cancel: Button) -> Button {
-        cancel.disabled(self.busy)
+        cancel.rounded_full().disabled(self.busy)
     }
 
-    /// The button that submits the form.
+    /// The button that submits the form. Running, it spins, as Sync does: `loading` alone
+    /// only dims a button without an icon.
     pub fn submit_button(&self, submit: Button) -> Button {
-        submit.primary().loading(self.busy)
+        submit
+            .primary()
+            .rounded_full()
+            .loading(self.busy)
+            .when(self.busy, |submit| submit.icon(Spinner::new()))
     }
 
     /// The buttons under the form: Cancel, if it has one, and the one that submits it.
@@ -197,4 +205,115 @@ pub fn open_dialog<F: DialogForm>(
             .child(div().py_1().child(form.clone()))
             .footer(DialogFooter::new().child(cancel_button).child(ok_button))
     });
+}
+
+/// The element ids of a [`NameDialog`].
+#[derive(Debug, Clone, Copy)]
+pub struct NameIds {
+    pub field: &'static str,
+    pub cancel: &'static str,
+    pub ok: &'static str,
+    pub error: &'static str,
+}
+
+/// A dialog that asks for a name: a folder's, or the one an address sends as. Its one
+/// field holds `name`, selected, so that what is typed replaces it.
+pub struct NameDialog {
+    pub ids: NameIds,
+    pub title: SharedString,
+    pub name: String,
+    /// Shown while the field is empty.
+    pub placeholder: Option<&'static str>,
+    /// The button that submits the name.
+    pub ok: &'static str,
+    /// What submitting does, for the error: "rename it".
+    pub what: &'static str,
+}
+
+impl NameDialog {
+    /// Opens it over the window. Each submission hands the name, as typed, to `request`;
+    /// the dialog stays open until one succeeds, and says why one didn't.
+    pub fn open<F, Fut, R>(self, request: F, window: &mut Window, cx: &mut App)
+    where
+        F: Fn(String) -> Fut + 'static,
+        Fut: Future<Output = catmail_core::Result<R>> + 'static,
+        R: 'static,
+    {
+        let Self {
+            ids,
+            title,
+            name,
+            placeholder,
+            ok,
+            what,
+        } = self;
+        let form = cx.new(|cx| NameForm {
+            name: cx.new(|cx| {
+                let input = InputState::new(window, cx).default_value(name);
+                match placeholder {
+                    Some(placeholder) => input.placeholder(placeholder),
+                    None => input,
+                }
+            }),
+            ids,
+            request,
+            submit: Submit::new(what),
+        });
+        open_dialog(
+            form.clone(),
+            title,
+            24.,
+            (ids.cancel, ids.ok),
+            ok,
+            window,
+            cx,
+        );
+        // Only once the dialog is open: it gives focus back to what had it when it closes.
+        form.update(cx, |form, cx| {
+            form.name.update(cx, |name, cx| {
+                name.focus(window, cx);
+                name.select_all(window, cx);
+            })
+        });
+    }
+}
+
+struct NameForm<F> {
+    name: Entity<InputState>,
+    ids: NameIds,
+    request: F,
+    submit: Submit,
+}
+
+impl<F, Fut, R> DialogForm for NameForm<F>
+where
+    F: Fn(String) -> Fut + 'static,
+    Fut: Future<Output = catmail_core::Result<R>> + 'static,
+    R: 'static,
+{
+    fn submit(&self) -> &Submit {
+        &self.submit
+    }
+
+    fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.name.read(cx).value().to_string();
+        // The view shows the change once it reads it again, for the engine's event.
+        // Nothing can open over this dialog meanwhile, so it is the one closed.
+        self.submit.start(
+            |this: &mut Self| &mut this.submit,
+            Ok((self.request)(name)),
+            |_, window, cx| window.close_dialog(cx),
+            window,
+            cx,
+        );
+    }
+}
+
+impl<F: 'static> Render for NameForm<F> {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .gap_3()
+            .child(Input::new(&self.name).id(self.ids.field))
+            .children(self.submit.error(self.ids.error, cx))
+    }
 }

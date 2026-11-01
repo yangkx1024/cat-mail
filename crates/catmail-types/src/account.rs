@@ -108,7 +108,6 @@ impl FromStr for AccountMode {
 pub struct Account {
     pub id: AccountId,
     pub email: String,
-    pub display_name: Option<String>,
     /// Login name for IMAP (and for SMTP, with the identity it was added with); usually
     /// but not always the email address.
     pub username: String,
@@ -137,6 +136,7 @@ impl Account {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewAccount {
     pub email: String,
+    /// Its first identity's; the account has none of its own.
     pub display_name: Option<String>,
     pub username: String,
     pub imap: ServerConfig,
@@ -281,7 +281,6 @@ mod tests {
         Account {
             id: AccountId(1),
             email: "alice@gmail.com".into(),
-            display_name: None,
             username: "alice@gmail.com".into(),
             imap: server("imap.gmail.com"),
             mode: None,

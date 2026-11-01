@@ -200,7 +200,10 @@ fn screenshots() {
     let account = mail.account();
     cx.update_window(window, |_, window, cx| {
         window.click(crate::settings::dialog::section_item("Accounts"), cx);
-        window.render_frame(cx);
+    })
+    .unwrap();
+    save(&mut cx, window, "settings-accounts");
+    cx.update_window(window, |_, window, cx| {
         window.click(("add-identity", account.0 as u64), cx);
     })
     .unwrap();
