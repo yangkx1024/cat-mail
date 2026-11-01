@@ -8,7 +8,7 @@
 
 数据存储在本地 SQLite，离线可用；密码保存在系统密钥环中，不进数据库。
 
-> 项目处于早期开发阶段（M5 已完成，下一步是 M6 的 Windows / macOS 打包），接口和数据库结构仍会变化。
+> 项目处于早期开发阶段（M5 已完成，M6 打包中：Linux AppImage 已完成，接下来是 Windows / macOS），接口和数据库结构仍会变化。
 
 架构设计见 [docs/architecture.md](docs/architecture.md)。
 
@@ -29,7 +29,7 @@
 | M3 | 草稿；SMTP 发信与 outbox 状态机；保存到 Sent；`catmail compose` / `reply` / `send` / `outbox` | ✅ 完成 |
 | M4 | 离线操作队列（标记 / 移动 / 删除）；IDLE 推送与后台同步；草稿同步到服务器 | ✅ 完成 |
 | M5 | 图形界面：三栏布局、读信、写信（回复、转发、附件）、标记 / 归档 / 移动 / 删除、发件箱、设置与主题（导入终端配色）；`catmail forward` | ✅ 完成 |
-| M6 | Windows / macOS 打包 | |
+| M6 | 打包：Linux AppImage（自动更新）与 CLI tar.gz；Windows / macOS | 进行中 |
 
 几个安排上的考虑：
 
@@ -203,6 +203,11 @@ catmail-gui                     # 打开窗口；同样支持 --data-dir / CATMA
 
 Linux 上需要一个 Secret Service 提供者（如 gnome-keyring、KeePassXC）来保存密码；图形界面
 需要 Wayland 或 X11，以及 Vulkan 驱动（没有时 wgpu 退回 OpenGL）。
+
+Linux 版从 GitHub Releases 下载：图形界面是 `catmail-<版本>-<架构>.AppImage`（x86_64、aarch64，
+glibc 2.35 及以上，即 Ubuntu 22.04 之后的发行版），`chmod +x` 后直接运行，可用 AppImageUpdate 或
+Gear Lever 增量更新；CLI 在同一个 release 的 `catmail-<版本>-<架构>-linux.tar.gz` 里。打包方式见
+[docs/architecture/packaging.md](docs/architecture/packaging.md)。
 
 ## 开发
 

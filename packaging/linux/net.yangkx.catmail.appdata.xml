@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>net.yangkx.catmail</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <name>catmail</name>
+  <summary>Read and send mail over IMAP and SMTP</summary>
+  <description>
+    <p>
+      A mail client for IMAP and SMTP accounts. Mail is kept in a local database and can
+      be read, searched and written offline; changes reach the server once it is back.
+      Passwords stay in the system keyring.
+    </p>
+  </description>
+  <developer id="net.yangkx">
+    <name>Kexuan Yang</name>
+  </developer>
+  <url type="homepage">https://github.com/yangkx1024/cat-mail</url>
+  <url type="bugtracker">https://github.com/yangkx1024/cat-mail/issues</url>
+  <launchable type="desktop-id">net.yangkx.catmail.desktop</launchable>
+  <provides>
+    <binary>catmail-gui</binary>
+  </provides>
+  <categories>
+    <category>Network</category>
+    <category>Email</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+</component>

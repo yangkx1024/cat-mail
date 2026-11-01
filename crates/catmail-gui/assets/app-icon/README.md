@@ -8,4 +8,4 @@
 - `catmail-dark.svg`：固定暗色，所有颜色直接写入 SVG 属性。
 
 浏览器可使用自动版；桌面图标加载器通常不响应 CSS 媒体查询，应根据主题选择固定版本。
-这里提供设计资源，系统桌面图标与窗口图标的接入留待打包时完成。
+AppImage 用 `catmail-light.svg` 作桌面图标（见 `docs/architecture/packaging.md`）。

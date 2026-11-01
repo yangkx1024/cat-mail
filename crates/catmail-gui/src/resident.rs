@@ -321,9 +321,10 @@ impl Resident {
     }
 
     fn open_main(cx: &mut App) -> anyhow::Result<()> {
-        let (window, _) = gpui_kit::open_window(crate::window_options(cx), cx, |window, cx| {
-            cx.new(|cx| MainWindow::new(window, cx))
-        })?;
+        let (window, _) =
+            crate::layout::open_window(crate::window_options(cx), cx, |window, cx| {
+                cx.new(|cx| MainWindow::new(window, cx))
+            })?;
         tracing::info!("main window opened");
         cx.global_mut::<Self>().main = Some(window);
         Ok(())

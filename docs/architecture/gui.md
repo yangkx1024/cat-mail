@@ -26,7 +26,7 @@ src/
   actions.rs         Action、key context 与快捷键
   assets.rs          资源：Heroicons，及替换 gpui-kit 组件图标
   format.rs html.rs  时刻与日期分组（其余显示格式来自 `catmail_core::display`）；HTML 渲染策略
-  layout.rs          共用的工具栏、右栏页面、名称与值的行、附件块、危险操作的确认框
+  layout.rs          共用的窗口（带 app id）、工具栏、右栏页面、名称与值的行、附件块、危险操作的确认框
   mailbox/           主窗口
     mod.rs           状态（账户、Place）、引擎事件、读侧栏、搜索、渲染与 Action 分派
     commands.rs      对邮件的命令（标记、归档、删除、移动，对一封或勾选的多封）、写信、同步、被拒改动的通知
