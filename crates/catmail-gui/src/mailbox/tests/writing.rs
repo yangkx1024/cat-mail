@@ -340,19 +340,16 @@ fn the_commands_stay_in_a_small_window_full_of_attachments(cx: &mut TestAppConte
         );
     })
     .unwrap();
-    let mut last = None;
+    // The draft is stored before the composer hears back, so wait for the composer.
     wait_until(|| {
         cx.run_until_parked();
         let drafts = pollster::block_on(mail.client.list_drafts(mail.account())).unwrap();
-        last = drafts
+        drafts
             .first()
             .filter(|draft| draft.attachments.len() == 30)
             .and_then(|draft| draft.attachments.last())
-            .map(|attachment| attachment.id);
-        last.is_some()
+            .is_some_and(|last| shown(cx, composer, ("remove-attachment", last.id.0 as u64)))
     });
-    let last = last.unwrap();
-    assert!(shown(cx, composer, ("remove-attachment", last.0 as u64)));
 
     cx.update_window(composer, |_, window, _| {
         let height = window.viewport_size().height;
