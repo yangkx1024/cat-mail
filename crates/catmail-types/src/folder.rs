@@ -206,7 +206,8 @@ pub fn special_folder(folders: &[Folder], role: FolderRole) -> Option<&Folder> {
         .min_by_key(|f| f.id)
 }
 
-/// What deleting a message does, unless permanent deletion is asked for.
+/// What deleting a message does, unless permanent deletion is asked for
+/// ([`DeleteMode`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeleteOutcome {
     /// It moves to the account's Trash, and can be brought back from there.
@@ -234,6 +235,20 @@ impl DeleteOutcome {
     pub fn is_permanent(self) -> bool {
         !matches!(self, Self::ToTrash(_))
     }
+}
+
+/// What deleting messages does with each. The engine decides per message, so one
+/// deletion is one change even when the messages are of several accounts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteMode {
+    /// To Trash, or for good from Trash. Refused for an account without Trash: nothing
+    /// is deleted for good there unless asked.
+    ToTrash,
+    /// As its [`DeleteOutcome`] says, for good without a Trash too: whoever asks has
+    /// told the user which go for good.
+    ByOutcome,
+    /// For good, all of them.
+    Permanent,
 }
 
 /// What moving or archiving a message does (see `docs/architecture/labels.md`). On a

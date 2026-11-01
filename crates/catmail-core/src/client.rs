@@ -8,9 +8,9 @@ use catmail_proto::imap::Session;
 use catmail_proto::{Credentials, TlsConfig};
 use catmail_store::{BlobStore, Db, Identities, Store};
 use catmail_types::{
-    Account, AccountId, AccountOverview, AccountStatus, AttachmentId, Draft, DraftAttachment,
-    DraftAttachmentId, DraftContent, DraftId, Event, Flags, FlushReport, Folder, FolderId,
-    FolderRole, FolderSyncReport, Forwarding, GcReport, Identity, IdentityId, Message,
+    Account, AccountId, AccountOverview, AccountStatus, AttachmentId, DeleteMode, Draft,
+    DraftAttachment, DraftAttachmentId, DraftContent, DraftId, Event, Flags, FlushReport, Folder,
+    FolderId, FolderRole, FolderSyncReport, Forwarding, GcReport, Identity, IdentityId, Message,
     MessageCursor, MessageId, MessageSummary, NewAccount, NewIdentity, OutboxEntry, OutboxId,
     PendingOp, PendingOpId, ReplayReport, SearchQuery, ServerConfig, SyncReport, special_folder,
 };
@@ -971,23 +971,19 @@ impl MailClient {
             .await
     }
 
-    /// Moves the messages to their account's Trash, or deletes them for good if they
-    /// are in Trash already or `permanently` is set. An account without a Trash folder
-    /// only allows the latter. [`DeleteOutcome`] tells beforehand which it is, to ask the
-    /// user first. The server follows as with [`set_flags`](Self::set_flags).
+    /// Moves each message to its account's Trash, or deletes it for good, as `mode`
+    /// says: one change, whatever accounts the messages are of. [`DeleteOutcome`] tells
+    /// beforehand which go for good, to ask the user first. The server follows as with
+    /// [`set_flags`](Self::set_flags).
     ///
     /// [`DeleteOutcome`]: catmail_types::DeleteOutcome
     pub async fn delete_messages(
         &self,
         messages: Vec<MessageId>,
-        permanently: bool,
+        mode: DeleteMode,
     ) -> Result<Vec<AccountId>> {
         self.rt
-            .run(ops::delete_messages(
-                self.engine.clone(),
-                messages,
-                permanently,
-            ))
+            .run(ops::delete_messages(self.engine.clone(), messages, mode))
             .await
     }
 

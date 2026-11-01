@@ -223,10 +223,13 @@ impl TestMail {
 
     /// Hides All Mail from IMAP, as Gmail's settings can, and syncs.
     pub fn hide_all_mail_and_sync(&self) {
-        self.fake
-            .state()
-            .mailboxes
-            .retain(|m| m.name != "[Gmail]/All Mail");
+        self.remove_mailbox_and_sync("[Gmail]/All Mail");
+    }
+
+    /// Takes a mailbox off the server, by wire name, and syncs: the engine knows before
+    /// the window hears of it.
+    pub fn remove_mailbox_and_sync(&self, mailbox: &str) {
+        self.fake.state().mailboxes.retain(|m| m.name != mailbox);
         pollster::block_on(self.client.sync_account(self.account.unwrap())).unwrap();
     }
 

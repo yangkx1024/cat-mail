@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use catmail_core::{
-    AccountId, Address, DraftContent, Flags, FolderRole, MailClient, MessageSummary, OutboxStatus,
-    SearchQuery, Security, ServerConfig, SyncReport,
+    AccountId, Address, DeleteMode, DraftContent, Flags, FolderRole, MailClient, MessageSummary,
+    OutboxStatus, SearchQuery, Security, ServerConfig, SyncReport,
 };
 use catmail_testkit::{FakeSmtp, SmtpState};
 use testenv::{add_account, open_client, run_tag, sent_copies};
@@ -260,7 +260,10 @@ async fn check_changes(client: &MailClient, account: AccountId, maildir: &Path, 
         .move_messages(vec![third], None, moved_to.id)
         .await
         .unwrap();
-    client.delete_messages(vec![large], true).await.unwrap();
+    client
+        .delete_messages(vec![large], DeleteMode::Permanent)
+        .await
+        .unwrap();
     let report = client.replay_pending(account).await.unwrap();
     assert_eq!((report.applied, report.failed, report.pending), (4, 0, 0));
 

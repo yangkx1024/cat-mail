@@ -18,7 +18,9 @@
   找它，所以没下载的正文照样能下载（`Messages::location`）。同步只比较有 UID 的行。
 - **删除**：不在 Trash 里的移到账户的 Trash；已在 Trash 里或指定永久删除时 `\Deleted` +
   `UID EXPUNGE`（没有 UIDPLUS 只能用普通 EXPUNGE，会一并清除别人标了 `\Deleted` 的邮件——这正是
-  那个标记的含义）。没有 Trash 的账户只能显式永久删除，不会悄悄变成永久删除。
+  那个标记的含义）。去向由引擎逐封定（`DeleteMode`），一批删除是一次写事务，跨账户也一样。没有 Trash
+  的账户只能永久删除：`ToTrash` 拒绝整批，不会悄悄变成永久删除；`ByOutcome` 永久删除它们，调用方已经
+  向用户确认过（GUI）；`Permanent` 全部永久删除。
 - **标签**（Gmail）：本地立即改 `message_labels`（Gmail 移进已删除、垃圾邮件时自己去掉的标签也是，
   见[位置与标签](labels.md#操作队列)），每封邮件、每个标签一条 op（`label`，
   `target_folder_id` 是标签，`label_add` 是加还是去），只记实际改变的，回放用 `UID STORE

@@ -1,6 +1,8 @@
 //! Local changes (flags, moves, deletions) and their replay against the fake IMAP server.
 
-use catmail_core::{DraftContent, Error, ErrorKind, Event, Flags, MessageId, OpKind, OpStatus};
+use catmail_core::{
+    DeleteMode, DraftContent, Error, ErrorKind, Event, Flags, MessageId, OpKind, OpStatus,
+};
 use catmail_testkit::{FakeMailbox, ServerState};
 
 mod common;
@@ -271,7 +273,10 @@ async fn a_message_moved_offline_downloads_from_where_it_was() {
 async fn moving_a_message_leaves_its_copies_elsewhere_alone() {
     let env = synced_env(copied()).await;
     let id = env.id_of("INBOX", "copied").await;
-    env.client.delete_messages(vec![id], false).await.unwrap();
+    env.client
+        .delete_messages(vec![id], DeleteMode::ToTrash)
+        .await
+        .unwrap();
     let start = env.fake.state().log.len();
     assert_eq!(env.replay().await.applied, 1);
     let commands = env.commands_since(start);
@@ -288,15 +293,24 @@ async fn moving_a_message_leaves_its_copies_elsewhere_alone() {
 async fn deleting_goes_through_trash() {
     let env = synced_env(state()).await;
     let one = env.id_of("INBOX", "one").await;
-    env.client.delete_messages(vec![one], false).await.unwrap();
+    env.client
+        .delete_messages(vec![one], DeleteMode::ToTrash)
+        .await
+        .unwrap();
     assert_eq!(subjects(&env.local("Trash").await), ["one"]);
     env.client.sync_account(env.account).await.unwrap();
     assert_eq!(names(&env.remote("Trash")), ["one"]);
 
     let one = env.id_of("Trash", "one").await;
-    env.client.delete_messages(vec![one], false).await.unwrap();
+    env.client
+        .delete_messages(vec![one], DeleteMode::ToTrash)
+        .await
+        .unwrap();
     let three = env.id_of("INBOX", "three").await;
-    env.client.delete_messages(vec![three], true).await.unwrap();
+    env.client
+        .delete_messages(vec![three], DeleteMode::Permanent)
+        .await
+        .unwrap();
     assert!(env.local("Trash").await.is_empty());
     env.client.sync_account(env.account).await.unwrap();
     assert!(env.remote("Trash").is_empty());
@@ -611,7 +625,10 @@ async fn a_lost_copy_is_undone_when_the_move_is() {
         assert_eq!(names(&env.remote("Archive")), ["two"]);
 
         if delete {
-            env.client.delete_messages(vec![two], true).await.unwrap();
+            env.client
+                .delete_messages(vec![two], DeleteMode::Permanent)
+                .await
+                .unwrap();
         } else {
             let inbox = env.folder("INBOX").await;
             env.client
@@ -667,7 +684,10 @@ async fn a_move_whose_expunge_answer_was_lost_finds_the_copy() {
                     .unwrap();
             }
             "delete" => {
-                env.client.delete_messages(vec![two], true).await.unwrap();
+                env.client
+                    .delete_messages(vec![two], DeleteMode::Permanent)
+                    .await
+                    .unwrap();
             }
             _ => {}
         }
@@ -703,7 +723,10 @@ async fn a_lost_expunge_answer_without_copyuid_is_reported() {
             .error
             .is_some()
     );
-    env.client.delete_messages(vec![two], true).await.unwrap();
+    env.client
+        .delete_messages(vec![two], DeleteMode::Permanent)
+        .await
+        .unwrap();
 
     let report = env.client.replay_pending(env.account).await.unwrap();
     assert_eq!((report.applied, report.failed, report.pending), (0, 1, 0));
@@ -741,7 +764,10 @@ async fn a_namesake_arriving_with_the_copy_is_left_alone() {
             .error
             .is_some()
     );
-    env.client.delete_messages(vec![two], true).await.unwrap();
+    env.client
+        .delete_messages(vec![two], DeleteMode::Permanent)
+        .await
+        .unwrap();
 
     let report = env.client.replay_pending(env.account).await.unwrap();
     assert_eq!((report.failed, report.pending), (0, 0));

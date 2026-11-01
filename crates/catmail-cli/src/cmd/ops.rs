@@ -5,7 +5,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
-use catmail_core::{AccountId, Flags, MailClient, MessageId, PendingOpId, ReplayReport};
+use catmail_core::{
+    AccountId, DeleteMode, Flags, MailClient, MessageId, PendingOpId, ReplayReport,
+};
 use clap::{ArgGroup, Args, Subcommand};
 
 use crate::cmd::{account_folders, find_folder};
@@ -156,9 +158,12 @@ pub(crate) async fn archive(client: &MailClient, args: Archive, json: bool) -> R
 }
 
 pub(crate) async fn remove(client: &MailClient, args: Remove, json: bool) -> Result<()> {
-    let accounts = client
-        .delete_messages(message_ids(&args.ids), args.permanent)
-        .await?;
+    let mode = if args.permanent {
+        DeleteMode::Permanent
+    } else {
+        DeleteMode::ToTrash
+    };
+    let accounts = client.delete_messages(message_ids(&args.ids), mode).await?;
     replay(client, accounts, json).await
 }
 

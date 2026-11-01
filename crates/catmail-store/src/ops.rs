@@ -12,8 +12,8 @@
 use std::collections::{BTreeSet, HashMap, hash_map::Entry};
 
 use catmail_types::{
-    AccountId, DeleteOutcome, Flags, Folder, FolderId, FolderKind, GmailLabel, MessageId, MovePlan,
-    OpKind, OpStatus, PendingOp, PendingOpId, Unmovable,
+    AccountId, DeleteMode, DeleteOutcome, Flags, Folder, FolderId, FolderKind, GmailLabel,
+    MessageId, MovePlan, OpKind, OpStatus, PendingOp, PendingOpId, Unmovable,
 };
 use rusqlite::{Connection, OptionalExtension, Params, Row, params};
 
@@ -417,13 +417,13 @@ impl<'c> PendingOps<'c> {
         Ok(changed > 0)
     }
 
-    /// Moves the messages to their account's Trash, or deletes them for good if they are
-    /// in Trash already or `permanently` is set ([`DeleteOutcome`]). Without a Trash
-    /// folder, only permanent deletion is possible.
+    /// Moves each message to its account's Trash, or deletes it for good, as `mode` and
+    /// its [`DeleteOutcome`] say. Refused, all of it, if `mode` leaves a message nowhere
+    /// to go but for good.
     pub fn delete_messages(
         &self,
         messages: &[MessageId],
-        permanently: bool,
+        mode: DeleteMode,
         now: i64,
     ) -> Result<Touched> {
         let mut touched = Touched::new();
@@ -431,27 +431,24 @@ impl<'c> PendingOps<'c> {
         for &id in messages {
             let m = self.local(id)?;
             touched.folders.insert((m.account, m.folder));
-            let folders = self.folders_of(&mut folders, m.account)?;
-            let outcome = if permanently {
-                DeleteOutcome::Permanent
-            } else {
-                DeleteOutcome::of(folders, m.folder)
-            };
-            match outcome {
-                DeleteOutcome::ToTrash(trash) => {
-                    // On Gmail it loses INBOX there too.
-                    let plan = MovePlan::of(folders, m.folder, None, trash).map_err(|_| {
-                        Error::Invalid("the Trash folder can't hold messages".into())
-                    })?;
-                    self.carry_out(&m, plan, now, &mut touched)?;
-                    continue;
+            if mode != DeleteMode::Permanent {
+                let folders = self.folders_of(&mut folders, m.account)?;
+                match DeleteOutcome::of(folders, m.folder) {
+                    DeleteOutcome::ToTrash(trash) => {
+                        // On Gmail it loses INBOX there too.
+                        let plan = MovePlan::of(folders, m.folder, None, trash).map_err(|_| {
+                            Error::Invalid("the Trash folder can't hold messages".into())
+                        })?;
+                        self.carry_out(&m, plan, now, &mut touched)?;
+                        continue;
+                    }
+                    DeleteOutcome::NoTrash if mode == DeleteMode::ToTrash => {
+                        return Err(Error::Invalid(
+                            "the account has no Trash folder; delete permanently instead".into(),
+                        ));
+                    }
+                    DeleteOutcome::NoTrash | DeleteOutcome::Permanent => {}
                 }
-                DeleteOutcome::NoTrash => {
-                    return Err(Error::Invalid(
-                        "the account has no Trash folder; delete permanently instead".into(),
-                    ));
-                }
-                DeleteOutcome::Permanent => {}
             }
             match m.moving {
                 // Never made it to the target: delete it where the server still has it.
@@ -511,7 +508,7 @@ impl<'c> PendingOps<'c> {
             )
             .optional()?;
         if let Some(row) = row {
-            return self.delete_messages(&[MessageId(row)], true, now);
+            return self.delete_messages(&[MessageId(row)], DeleteMode::Permanent, now);
         }
         self.insert(
             account,
@@ -1922,7 +1919,7 @@ mod tests {
         // Archive, Trash, Archive, as a user triaging would.
         f.write(|db| {
             db.ops().move_messages(&[m1], None, f.archive, 0)?;
-            db.ops().delete_messages(&[m2], false, 0)?;
+            db.ops().delete_messages(&[m2], DeleteMode::ToTrash, 0)?;
             db.ops().move_messages(&[m3], None, f.archive, 0)
         });
         let order: Vec<(u32, OpKind)> = f
@@ -1945,12 +1942,12 @@ mod tests {
             f.message(f.inbox, 2),
             f.message(f.inbox, 3),
         );
-        f.write(|db| db.ops().delete_messages(&[m2], false, 0));
+        f.write(|db| db.ops().delete_messages(&[m2], DeleteMode::ToTrash, 0));
         assert_eq!(f.row(m2), Some((f.trash, None, Flags::empty())));
         // In Trash (even before it got there on the server): for good.
-        f.write(|db| db.ops().delete_messages(&[m2], false, 0));
+        f.write(|db| db.ops().delete_messages(&[m2], DeleteMode::ToTrash, 0));
         assert_eq!(f.row(m2), None);
-        f.write(|db| db.ops().delete_messages(&[m3], true, 0));
+        f.write(|db| db.ops().delete_messages(&[m3], DeleteMode::Permanent, 0));
         assert_eq!(f.row(m3), None);
         let kinds: Vec<(u32, OpKind)> = f
             .pending(f.inbox)
@@ -1960,17 +1957,62 @@ mod tests {
         assert_eq!(kinds, [(2, OpKind::Delete), (3, OpKind::Delete)]);
         assert_eq!(f.counts(f.trash), (0, 0));
 
-        // Without a Trash folder, only permanently.
+        // Without a Trash folder, only when that was asked.
         f.write(|db| {
             db.conn.execute("UPDATE folders SET role = NULL", [])?;
             Ok(())
         });
         assert!(matches!(
             f.store
-                .write(|db| db.ops().delete_messages(&[m1], false, 0)),
+                .write(|db| db.ops().delete_messages(&[m1], DeleteMode::ToTrash, 0)),
             Err(Error::Invalid(_))
         ));
         assert!(f.row(m1).is_some());
+    }
+
+    #[test]
+    fn deleting_decides_for_each_message() {
+        let f = setup();
+        let m2 = f.message(f.inbox, 2);
+        // Another account, with no Trash folder.
+        let other = test_util::account(&f.store, "b@example.com");
+        let other_inbox = f.write(|db| {
+            db.folders()
+                .reconcile(other, &[folder("INBOX", Some(FolderRole::Inbox))])?;
+            let inbox = db.folders().list(other)?[0].id;
+            db.folders().reset_uidvalidity(inbox, 7)?;
+            let message = NewMessage {
+                state: FlagState {
+                    uid: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            db.messages().upsert(other, inbox, &[message])?;
+            Ok(inbox)
+        });
+        let lone = f.message(other_inbox, 1);
+        // One change: to Trash, and for good where there is none. Refused as a whole
+        // unless for good is asked.
+        assert!(matches!(
+            f.store.write(|db| db
+                .ops()
+                .delete_messages(&[m2, lone], DeleteMode::ToTrash, 0)),
+            Err(Error::Invalid(_))
+        ));
+        assert_eq!(f.row(m2), Some((f.inbox, Some(2), Flags::empty())));
+        f.write(|db| {
+            db.ops()
+                .delete_messages(&[m2, lone], DeleteMode::ByOutcome, 0)
+        });
+        assert_eq!(f.row(m2), Some((f.trash, None, Flags::empty())));
+        assert_eq!(f.row(lone), None);
+        let kinds: Vec<(u32, OpKind)> = f
+            .pending(other_inbox)
+            .iter()
+            .map(|op| (op.uid, op.kind.op_kind()))
+            .collect();
+        assert_eq!(kinds, [(1, OpKind::Delete)]);
     }
 
     #[test]
@@ -2243,7 +2285,7 @@ mod tests {
             db.ops().set_flags(&[m1], Flags::SEEN, Flags::empty(), 0)?;
             db.ops()
                 .label_messages(&[m1], &[f["INBOX"]], &[f["Important"]], 0)?;
-            db.ops().delete_messages(&[m1], false, 0)
+            db.ops().delete_messages(&[m1], DeleteMode::ToTrash, 0)
         });
         // Flags, then labels (each label's in order), then moves; INBOX had two changes.
         assert_eq!(
@@ -2356,7 +2398,7 @@ mod tests {
         // and Work.
         let m1 = g.message(1);
         g.write(|db| {
-            db.ops().delete_messages(&[m1], false, 0)?;
+            db.ops().delete_messages(&[m1], DeleteMode::ToTrash, 0)?;
             db.ops()
                 .move_messages(&[m1], Some(f["Trash"]), f["Work"], 0)
         });
@@ -2386,7 +2428,7 @@ mod tests {
         g.write(|db| {
             db.ops()
                 .move_messages(&[m2], Some(f["Trash"]), f["INBOX"], 0)?;
-            db.ops().delete_messages(&[m2], true, 0)
+            db.ops().delete_messages(&[m2], DeleteMode::Permanent, 0)
         });
         // Not `+\Inbox` in Trash first: Gmail would take the message out of Trash.
         assert_eq!(g.pending("Trash"), [(2, OpKind::Delete)]);
@@ -2485,7 +2527,7 @@ mod tests {
     fn moved_back_while_the_move_to_trash_is_made_it_gets_inbox_again() {
         let g = gmail();
         let (m1, f) = (g.message(1), &g.f);
-        g.write(|db| db.ops().delete_messages(&[m1], false, 0));
+        g.write(|db| db.ops().delete_messages(&[m1], DeleteMode::ToTrash, 0));
         let in_flight = g.replay_ops("All Mail");
         g.write(|db| {
             db.ops()
@@ -2527,7 +2569,7 @@ mod tests {
             db.ops()
                 .move_messages(&[m2], Some(f["Trash"]), f["INBOX"], 0)
         });
-        g.write(|db| db.ops().delete_messages(&[m2], false, 0));
+        g.write(|db| db.ops().delete_messages(&[m2], DeleteMode::ToTrash, 0));
         let ops = g.replay_ops("Trash");
         g.write(|db| db.ops().moved(f["Trash"], 1, f["Trash"], &ops, None));
         // Only the last change to INBOX is made, with the first along.
