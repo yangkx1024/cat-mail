@@ -1,27 +1,25 @@
-//! The mailbox's commands: on the selected message (the toolbar, the menus and the keys
-//! all call these) or a row's, writing, syncing and settings.
+//! The mailbox's commands: on the selected message (its toolbar), the messages checked
+//! (the list's toolbar), what the keys act on (those checked, or else the selected one)
+//! or a row's; writing, syncing and settings.
 
 use catmail_core::{
-    AccountId, Flags, FolderId, MessageId, MessageSummary, OpKind, OpStatus, PendingOp,
+    AccountId, DeleteOutcome, Flags, FolderId, MessageId, MessageSummary, OpKind, OpStatus,
+    PendingOp,
 };
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{App, Context, Window};
 
-use crate::assets::Hero;
 use crate::composer::{self, ComposeFrom};
 use crate::layout;
 
+use super::message_commands::{self, Applies, MessageCommand};
 use super::*;
 use crate::settings::dialog as settings_dialog;
 
-/// The icon and name of the command that marks a message read or unread, by its flags.
-pub(super) fn read_toggle(flags: Flags) -> (Hero, &'static str) {
-    if flags.contains(Flags::SEEN) {
-        (Hero::Envelope, "Mark as unread")
-    } else {
-        (Hero::EnvelopeOpen, "Mark as read")
-    }
+/// What a command does, for its failure: "Couldn't {what}".
+fn what(messages: usize, one: &'static str, many: &'static str) -> &'static str {
+    if messages == 1 { one } else { many }
 }
 
 /// Runs an engine call, and tells the user if it fails: "Couldn't {what}: …".
@@ -81,7 +79,7 @@ impl Mailbox {
         });
     }
 
-    // Commands on the selected message.
+    // Commands on messages: the selected one, those checked, or what the keys act on.
 
     pub(super) fn selected_message(&self, cx: &gpui_kit::App) -> Option<MessageSummary> {
         self.messages
@@ -89,6 +87,59 @@ impl Mailbox {
             .delegate()
             .selected_message()
             .cloned()
+    }
+
+    /// The selected message, as the messages a command acts on.
+    pub(super) fn selected(&self, cx: &gpui_kit::App) -> Vec<MessageSummary> {
+        self.selected_message(cx).into_iter().collect()
+    }
+
+    /// The messages checked in the list, top to bottom.
+    pub(super) fn checked(&self, cx: &gpui_kit::App) -> Vec<MessageSummary> {
+        self.messages
+            .read(cx)
+            .delegate()
+            .checked_messages()
+            .cloned()
+            .collect()
+    }
+
+    /// What a key acts on: the messages checked, or else the selected one.
+    pub(super) fn keyed(&self, cx: &gpui_kit::App) -> Vec<MessageSummary> {
+        let checked = self.checked(cx);
+        if checked.is_empty() {
+            self.selected(cx)
+        } else {
+            checked
+        }
+    }
+
+    /// What the commands do to the messages, for their buttons.
+    pub(super) fn applies<'a, I>(&'a self, messages: I) -> Applies
+    where
+        I: IntoIterator<Item = &'a MessageSummary>,
+        I::IntoIter: Clone,
+    {
+        Applies::of(messages, |account| {
+            self.account(account).map(|entry| &entry.folders)
+        })
+    }
+
+    /// Runs `command` on the messages: from a key, a toolbar or a row.
+    pub(super) fn run(
+        &mut self,
+        command: MessageCommand,
+        messages: Vec<MessageSummary>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            MessageCommand::Archive => self.archive(&messages, window, cx),
+            MessageCommand::Delete => self.delete(&messages, window, cx),
+            MessageCommand::Move => self.move_to_folder(messages, window, cx),
+            MessageCommand::ToggleRead => self.toggle(&messages, Flags::SEEN, window, cx),
+            MessageCommand::ToggleFlag => self.toggle(&messages, Flags::FLAGGED, window, cx),
+        }
     }
 
     pub(super) fn set_flags(
@@ -108,27 +159,24 @@ impl Mailbox {
         );
     }
 
-    /// Sets the flag on the selected message, or clears it if it is set.
-    pub(crate) fn toggle(&mut self, flag: Flags, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(message) = self.selected_message(cx) {
-            self.toggle_message(&message, flag, window, cx);
-        }
-    }
-
-    /// Sets the flag on `message`, or clears it if it is set.
-    pub(super) fn toggle_message(
+    /// Clears the flag on the messages if they all have it, or else sets it on them all.
+    fn toggle(
         &mut self,
-        message: &MessageSummary,
+        messages: &[MessageSummary],
         flag: Flags,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (add, remove) = if message.flags.contains(flag) {
+        if messages.is_empty() {
+            return;
+        }
+        let (add, remove) = if message_commands::common_flags(messages).contains(flag) {
             (Flags::empty(), flag)
         } else {
             (flag, Flags::empty())
         };
-        self.set_flags(vec![message.id], add, remove, window, cx);
+        let ids = messages.iter().map(|m| m.id).collect();
+        self.set_flags(ids, add, remove, window, cx);
     }
 
     /// Whether Archive does anything to `message`: its account has an Archive folder it
@@ -138,40 +186,71 @@ impl Mailbox {
             .is_some_and(|a| a.folders.can_archive(message))
     }
 
-    pub(crate) fn archive(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(message) = self.selected_message(cx) else {
-            return;
-        };
-        if !self.can_archive(&message) {
+    /// Archives those of the messages Archive does anything to.
+    fn archive(
+        &mut self,
+        messages: &[MessageSummary],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ids: Vec<_> = messages
+            .iter()
+            .filter(|m| self.can_archive(m))
+            .map(|m| m.id)
+            .collect();
+        if ids.is_empty() {
             return;
         }
-        self.change(
-            message.id,
-            "archive the message",
-            window,
-            cx,
-            move |client| async move { client.archive_messages(vec![message.id]).await },
-        );
+        let what = what(ids.len(), "archive the message", "archive the messages");
+        self.uncheck(&ids, cx);
+        self.change(ids.clone(), what, window, cx, move |client| async move {
+            client.archive_messages(ids).await
+        });
     }
 
-    /// Moves the selected message, and selects the next one once it has gone, if it goes.
-    pub(crate) fn move_selected(
+    /// Moves those of the messages, all of one account, that moving to `to` changes. If
+    /// the selected one goes, the next one is selected.
+    pub(super) fn move_to(
         &mut self,
+        messages: &[MessageSummary],
         to: FolderId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(message) = self.selected_message(cx) else {
+        let Some((account, shown_in)) = self.move_source(messages, cx) else {
             return;
         };
-        let shown_in = self.shown_in(&message, cx);
-        self.change(
-            message.id,
-            "move the message",
-            window,
-            cx,
-            move |client| async move { client.move_messages(vec![message.id], shown_in, to).await },
-        );
+        let ids: Vec<_> = messages
+            .iter()
+            .filter(|m| account.folders.can_move(m.folder_id, shown_in, to))
+            .map(|m| m.id)
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let what = what(ids.len(), "move the message", "move the messages");
+        self.uncheck(&ids, cx);
+        self.change(ids.clone(), what, window, cx, move |client| async move {
+            client.move_messages(ids, shown_in, to).await
+        });
+    }
+
+    /// The account of the messages, which "Move to" lists the folders of, and the folder
+    /// they are looked at in; none if there are none or they are of different accounts.
+    fn move_source(
+        &self,
+        messages: &[MessageSummary],
+        cx: &gpui_kit::App,
+    ) -> Option<(&AccountEntry, Option<FolderId>)> {
+        let account = self.account(message_commands::one_account(messages)?)?;
+        Some((account, self.shown_in(&messages[0], cx)))
+    }
+
+    /// Unchecks the messages moved or deleted: those still listed (on Gmail, one moved
+    /// to a label from All Mail) have been dealt with.
+    fn uncheck(&self, ids: &[MessageId], cx: &mut Context<Self>) {
+        self.messages
+            .update(cx, |list, cx| message_list::uncheck(list, ids, cx));
     }
 
     /// The folder the listed message is looked at in: on Gmail, a label it leaves when
@@ -185,13 +264,13 @@ impl Mailbox {
             .map(|f| f.id)
     }
 
-    /// Changes the message with `call`, which may take it out of the list: if it goes
-    /// while selected, the next one is selected. Whether it goes is the store's to say (on Gmail, one moved
+    /// Changes the messages with `call`, which may take them out of the list: if the
+    /// selected one goes, the next one is selected. Whether it goes is the store's to say (on Gmail, one moved
     /// to a label from All Mail stays): once the change is made, the list is read again,
     /// and a message still in it stays selected (see `message_list::removal_settled`).
     fn change<F: Future<Output = catmail_core::Result<Vec<AccountId>>> + 'static>(
         &mut self,
-        id: MessageId,
+        ids: Vec<MessageId>,
         what: &'static str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -201,7 +280,10 @@ impl Mailbox {
         // command) must not take the place of one pending for it.
         let removal = self.messages.update(cx, |list, _| {
             let list = list.delegate_mut();
-            (list.selected_message().map(|m| m.id) == Some(id)).then(|| list.expect_removal(id))
+            let selected = list.selected_message().map(|m| m.id);
+            selected
+                .filter(|id| ids.contains(id))
+                .map(|id| list.expect_removal(id))
         });
         let call = call(self.client.clone());
         cx.spawn_in(window, async move |this, cx| {
@@ -224,89 +306,110 @@ impl Mailbox {
         .detach();
     }
 
-    /// Deletes the selected message, as [`delete_message`](Self::delete_message).
-    pub(crate) fn delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(message) = self.selected_message(cx) {
-            self.delete_message(&message, window, cx);
+    /// Each to Trash, or for good from Trash or without one, as the engine will
+    /// ([`DeleteOutcome`]). A message deleted for good can't be brought back, so that
+    /// asks first, once for them all.
+    fn delete(&mut self, messages: &[MessageSummary], window: &mut Window, cx: &mut Context<Self>) {
+        // The engine decides between Trash and for good itself, but refuses a message of
+        // an account without Trash unless told to delete it for good.
+        let (mut by_outcome, mut no_trash, mut for_good) = (Vec::new(), Vec::new(), Vec::new());
+        for message in messages {
+            let Some(account) = self.account(message.account_id) else {
+                continue;
+            };
+            let outcome = account.folders.delete_outcome(message.folder_id);
+            if outcome == DeleteOutcome::NoTrash {
+                no_trash.push(message.id);
+            } else {
+                by_outcome.push(message.id);
+            }
+            if outcome.is_permanent() {
+                for_good.push(message);
+            }
         }
-    }
-
-    /// To Trash, or for good from Trash or without one, as the engine will
-    /// ([`DeleteOutcome`](catmail_core::DeleteOutcome)). A message deleted for good
-    /// can't be brought back, so that asks first.
-    pub(super) fn delete_message(
-        &mut self,
-        message: &MessageSummary,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(account) = self.account(message.account_id) else {
-            return;
+        let (title, description) = match for_good[..] {
+            [] => return self.delete_now(by_outcome, no_trash, window, cx),
+            [message] => (
+                format!(
+                    "Delete “{}” for good?",
+                    crate::format::subject(message.subject.as_deref())
+                ),
+                "It is removed from the server and can't be brought back.",
+            ),
+            _ => (
+                format!("Delete {} messages for good?", for_good.len()),
+                "They are removed from the server and can't be brought back.",
+            ),
         };
-        if !account
-            .folders
-            .delete_outcome(message.folder_id)
-            .is_permanent()
-        {
-            self.delete_now(message.id, false, window, cx);
-            return;
-        }
-        let (id, subject) = (
-            message.id,
-            crate::format::subject(message.subject.as_deref()),
-        );
         let this = cx.entity().downgrade();
         layout::confirm_danger(
-            format!("Delete “{subject}” for good?"),
-            "It is removed from the server and can't be brought back.",
+            title,
+            description,
             "Delete",
             window,
             cx,
             move |window, cx| {
-                this.update(cx, |this, cx| this.delete_now(id, true, window, cx))
-                    .ok();
+                let (by_outcome, no_trash) = (by_outcome.clone(), no_trash.clone());
+                this.update(cx, |this, cx| {
+                    this.delete_now(by_outcome, no_trash, window, cx)
+                })
+                .ok();
             },
         );
     }
 
+    /// Deletes `by_outcome` as [`DeleteOutcome`] says, and `no_trash`, of accounts
+    /// without Trash, for good. One call unless there are both: not one change then, as
+    /// the engine takes "for good" for the whole call (issue #190).
     fn delete_now(
         &mut self,
-        id: MessageId,
-        permanently: bool,
+        by_outcome: Vec<MessageId>,
+        no_trash: Vec<MessageId>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.change(
-            id,
-            "delete the message",
-            window,
-            cx,
-            move |client| async move { client.delete_messages(vec![id], permanently).await },
-        );
+        let ids: Vec<_> = by_outcome.iter().chain(&no_trash).copied().collect();
+        if ids.is_empty() {
+            return;
+        }
+        let what = what(ids.len(), "delete the message", "delete the messages");
+        self.uncheck(&ids, cx);
+        self.change(ids, what, window, cx, move |client| async move {
+            let mut accounts = Vec::new();
+            for (ids, permanently) in [(by_outcome, false), (no_trash, true)] {
+                if !ids.is_empty() {
+                    accounts.extend(client.delete_messages(ids, permanently).await?);
+                }
+            }
+            Ok(accounts)
+        });
     }
 
-    pub(crate) fn move_to_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(message) = self.selected_message(cx) else {
+    /// Asks where to move the messages, all of one account: to the folders moving any of
+    /// them to changes.
+    fn move_to_folder(
+        &mut self,
+        messages: Vec<MessageSummary>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((account, shown_in)) = self.move_source(&messages, cx) else {
             return;
         };
-        let Some(account) = self.account(message.account_id) else {
-            return;
-        };
-        let shown_in = self.shown_in(&message, cx);
         let folders = account
             .folders
             .paths()
             .into_iter()
             .filter(|(folder, _)| {
-                account
-                    .folders
-                    .can_move(message.folder_id, shown_in, folder.id)
+                messages
+                    .iter()
+                    .any(|m| account.folders.can_move(m.folder_id, shown_in, folder.id))
             })
             .map(|(folder, path)| (folder.id, path))
             .collect();
         let this = cx.entity().downgrade();
         folder_picker::open(folders, window, cx, move |folder, window, cx| {
-            this.update(cx, |this, cx| this.move_selected(folder, window, cx))
+            this.update(cx, |this, cx| this.move_to(&messages, folder, window, cx))
                 .ok();
         });
     }
@@ -389,7 +492,7 @@ impl Mailbox {
         };
         // Off the label it is listed in, it leaves the list: on to the next one.
         self.change(
-            id,
+            vec![id],
             "change the labels",
             window,
             cx,

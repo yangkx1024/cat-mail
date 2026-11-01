@@ -1,25 +1,27 @@
 //! The middle pane: a folder's messages, or every account's INBOX together (loaded a
 //! page at a time as the list scrolls), search results, the drafts kept here, or what is waiting in the outbox, newest first
 //! under a heading for each day. The list (`ListState`) owns selection, keyboard
-//! navigation and scrolling; the delegate here owns the rows.
+//! navigation and scrolling; the delegate here owns the rows, and the messages checked
+//! for a command on them all.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use catmail_core::{
-    AccountId, Draft, DraftId, FolderId, MailClient, MessageCursor, MessageId, MessageSummary,
-    OutboxEntry, OutboxId, SearchQuery,
+    AccountId, Draft, DraftId, Flags, FolderId, MailClient, MessageCursor, MessageId,
+    MessageSummary, OutboxEntry, OutboxId, SearchQuery,
 };
 use gpui_kit::component::list::{ListDelegate, ListEvent, ListItem, ListState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, IndexPath, Sizable as _, WindowExt as _};
 use gpui_kit::{
-    App, ClickEvent, Context, EventEmitter, FontWeight, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Task, Window, div,
-    prelude::FluentBuilder as _,
+    App, Context, EventEmitter, FontWeight, IntoElement, ParentElement as _, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Task, Window, div, prelude::FluentBuilder as _,
 };
 use jiff::civil::Date;
 
+use super::folders::AccountFolders;
+use super::message_commands::{Applies, MessageCommand};
 use crate::format::Calendar;
 use crate::theme::colors::ThemeColors as _;
 
@@ -33,12 +35,52 @@ const PAGE: u32 = 200;
 /// A command on a row's message from the row itself, not the selection: the mailbox
 /// runs it.
 #[derive(Debug, Clone)]
-pub enum RowCommand {
-    Delete(MessageSummary),
-    ToggleRead(MessageSummary),
+pub struct RowCommand {
+    pub message: MessageSummary,
+    pub command: MessageCommand,
 }
 
 impl EventEmitter<RowCommand> for ListState<MessageList> {}
+
+/// Which of the messages listed to check, from the menu beside the list's checkbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Check {
+    All,
+    Read,
+    Unread,
+    Flagged,
+    Unflagged,
+}
+
+impl Check {
+    pub const MENU: [Check; 5] = [
+        Check::All,
+        Check::Read,
+        Check::Unread,
+        Check::Flagged,
+        Check::Unflagged,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Check::All => "All",
+            Check::Read => "Read",
+            Check::Unread => "Unread",
+            Check::Flagged => "Flagged",
+            Check::Unflagged => "Unflagged",
+        }
+    }
+
+    fn takes(self, flags: Flags) -> bool {
+        match self {
+            Check::All => true,
+            Check::Read => flags.contains(Flags::SEEN),
+            Check::Unread => !flags.contains(Flags::SEEN),
+            Check::Flagged => flags.contains(Flags::FLAGGED),
+            Check::Unflagged => !flags.contains(Flags::FLAGGED),
+        }
+    }
+}
 
 /// What the list shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +91,16 @@ pub enum Source {
     Search(String),
     Drafts(AccountId),
     Outbox(AccountId),
+}
+
+impl Source {
+    /// Whether it lists messages, which can be checked; not drafts or the outbox.
+    pub fn lists_messages(&self) -> bool {
+        matches!(
+            self,
+            Source::Inboxes | Source::Folder(_) | Source::Search(_)
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -185,11 +237,16 @@ pub struct MessageList {
     /// or later show it, and if the message is among them it stays (see
     /// [`removal_settled`]).
     settled: Option<(u64, u64)>,
-    /// The name of each user label shown, of every account: a row shows those of its
-    /// message's labels (see `AccountFolders::user_labels`).
+    /// The name of each user label shown, of every account, from `folders`: a row shows
+    /// those of its message's labels (see `AccountFolders::user_labels`).
     labels: HashMap<FolderId, SharedString>,
+    /// Each account's folders, which say what the commands on a row's message do.
+    folders: HashMap<AccountId, AccountFolders>,
     /// The message row the pointer is on.
     hovered: Option<MessageId>,
+    /// The messages checked, for a command on them all: apart from the selected row, the
+    /// one the reader shows. Always among the rows.
+    checked: HashSet<MessageId>,
     _load: Task<()>,
 }
 
@@ -211,7 +268,9 @@ impl MessageList {
             revealing: None,
             settled: None,
             labels: HashMap::new(),
+            folders: HashMap::new(),
             hovered: None,
+            checked: HashSet::new(),
             _load: Task::ready(()),
         }
     }
@@ -240,6 +299,28 @@ impl MessageList {
         self.selected_row()?.message()
     }
 
+    /// The messages checked, top to bottom.
+    pub fn checked_messages(&self) -> impl Iterator<Item = &MessageSummary> + Clone {
+        self.messages().filter(|m| self.checked.contains(&m.id))
+    }
+
+    pub fn has_checked(&self) -> bool {
+        !self.checked.is_empty()
+    }
+
+    /// Whether every message listed is checked, and there is one.
+    pub fn all_checked(&self) -> bool {
+        !self.checked.is_empty() && self.messages().count() == self.checked.len()
+    }
+
+    pub fn has_messages(&self) -> bool {
+        self.messages().next().is_some()
+    }
+
+    fn messages(&self) -> impl Iterator<Item = &MessageSummary> + Clone {
+        self.rows.iter().filter_map(Row::message)
+    }
+
     #[cfg(test)]
     pub fn rows(&self) -> &[Row] {
         &self.rows
@@ -256,12 +337,19 @@ impl MessageList {
         self.loading
     }
 
-    /// The user labels' names, as the sidebar has them now. Returns whether they changed,
+    /// The accounts' folders, as the sidebar has them now. Returns whether they changed,
     /// and the rows need drawing again.
-    pub fn set_labels(&mut self, labels: HashMap<FolderId, SharedString>) -> bool {
-        let changed = self.labels != labels;
-        self.labels = labels;
-        changed
+    pub fn set_folders(&mut self, folders: HashMap<AccountId, AccountFolders>) -> bool {
+        if self.folders == folders {
+            return false;
+        }
+        self.labels = folders
+            .values()
+            .flat_map(AccountFolders::user_labels)
+            .map(|(id, name)| (id, name.into()))
+            .collect();
+        self.folders = folders;
+        true
     }
 
     /// The names of the message's user labels but `except`, by name.
@@ -321,9 +409,68 @@ pub fn show(
     delegate.revealing = None;
     delegate.settled = None;
     delegate.generation += 1;
+    uncheck_all(list, cx);
     list.set_selected_index(None, window, cx);
     list.scroll_to_item(IndexPath::new(0), gpui_kit::ScrollStrategy::Top, window, cx);
     load(list, Load::Replace(PAGE), window, cx);
+}
+
+/// Checks message `id`, or unchecks it if it is checked.
+pub fn toggle_checked(
+    list: &mut ListState<MessageList>,
+    id: MessageId,
+    cx: &mut Context<ListState<MessageList>>,
+) {
+    let checked = &mut list.delegate_mut().checked;
+    if !checked.remove(&id) {
+        checked.insert(id);
+    }
+    cx.notify();
+}
+
+/// Checks the messages listed that `which` takes, and only those: of a folder, those of
+/// the pages loaded.
+pub fn check(
+    list: &mut ListState<MessageList>,
+    which: Check,
+    cx: &mut Context<ListState<MessageList>>,
+) {
+    let checked = list
+        .delegate()
+        .messages()
+        .filter(|m| which.takes(m.flags))
+        .map(|m| m.id)
+        .collect();
+    set_checked(list, checked, cx);
+}
+
+pub fn uncheck_all(list: &mut ListState<MessageList>, cx: &mut Context<ListState<MessageList>>) {
+    set_checked(list, HashSet::new(), cx);
+}
+
+pub fn uncheck(
+    list: &mut ListState<MessageList>,
+    ids: &[MessageId],
+    cx: &mut Context<ListState<MessageList>>,
+) {
+    let checked = &mut list.delegate_mut().checked;
+    let before = checked.len();
+    checked.retain(|id| !ids.contains(id));
+    if checked.len() != before {
+        cx.notify();
+    }
+}
+
+fn set_checked(
+    list: &mut ListState<MessageList>,
+    checked: HashSet<MessageId>,
+    cx: &mut Context<ListState<MessageList>>,
+) {
+    let delegate = list.delegate_mut();
+    if delegate.checked != checked {
+        delegate.checked = checked;
+        cx.notify();
+    }
 }
 
 /// Selects and opens message `id`, of the source shown: now if it is listed, or else once
@@ -552,9 +699,16 @@ fn replace_rows(
 ) {
     let delegate = list.delegate_mut();
     let selected = delegate.selected.zip(delegate.selected_row().map(Row::id));
-    let next = reselect(selected, delegate.removing.take(), &rows);
+    let next = reselect(selected, delegate.removing.take(), &delegate.rows, &rows);
     delegate.days = Days::new(&rows);
     delegate.rows = rows;
+    // Those gone are no longer checked: moved, deleted, or expunged on the server.
+    let delegate = list.delegate();
+    if !delegate.checked.is_empty() {
+        let listed: HashSet<_> = delegate.messages().map(|m| m.id).collect();
+        let checked = delegate.checked.intersection(&listed).copied().collect();
+        set_checked(list, checked, cx);
+    }
     if let Reselect::Keep { ix, removing } = next {
         let ix = ix.and_then(|ix| list.delegate().days.path(ix));
         list.set_selected_index(ix, window, cx);
@@ -584,17 +738,20 @@ enum Reselect {
         ix: Option<usize>,
         removing: Option<MessageId>,
     },
-    /// The user moved or deleted the selected message: on to the row now at its index.
+    /// The user moved or deleted the selected message: on to the next row still there,
+    /// at this index among the new rows.
     Next(usize),
     /// The selected row is gone (expunged, sent, or a new UIDVALIDITY).
     Gone,
 }
 
-/// `selected` is the selected row's index and identity in the rows replaced, `removing`
-/// the message the user moved or deleted (see [`MessageList::expect_removal`]).
+/// `selected` is the selected row's index and identity in `before`, the rows replaced,
+/// `removing` the message the user moved or deleted (see
+/// [`MessageList::expect_removal`]).
 fn reselect(
     selected: Option<(usize, RowId)>,
     removing: Option<MessageId>,
+    before: &[Row],
     rows: &[Row],
 ) -> Reselect {
     let Some((at, id)) = selected else {
@@ -605,12 +762,22 @@ fn reselect(
     };
     // Only while the message is still the one selected: the user may have moved on.
     let removing = removing.filter(|m| id == RowId::Message(*m));
-    match rows.iter().position(|r| r.id() == id) {
+    let position = |id: RowId| rows.iter().position(|r| r.id() == id);
+    match position(id) {
         Some(ix) => Reselect::Keep {
             ix: Some(ix),
             removing,
         },
-        None if removing.is_some() && !rows.is_empty() => Reselect::Next(at.min(rows.len() - 1)),
+        // The next row that is still there, or else the one before: rows around it may
+        // have gone with it (several moved at once), or come (new mail).
+        None if removing.is_some() => {
+            let after = before.get(at + 1..).unwrap_or_default().iter();
+            let before = before.get(..at).unwrap_or_default().iter().rev();
+            after
+                .chain(before)
+                .find_map(|r| position(r.id()))
+                .map_or(Reselect::Gone, Reselect::Next)
+        }
         None => Reselect::Gone,
     }
 }
@@ -664,7 +831,10 @@ impl ListDelegate for MessageList {
                     message,
                     &self.label_names(message, self.shown_folder()),
                     shape,
-                    self.hovered == Some(id),
+                    self.checked.contains(&id),
+                    // The commands show on one line, while hovered.
+                    (self.hovered == Some(id) && shape == Shape::Line)
+                        .then(|| Applies::of([message], |account| self.folders.get(&account))),
                     cx,
                 )
                 .on_hover(cx.listener(move |list, &hovered: &bool, _, cx| {
@@ -793,26 +963,31 @@ mod tests {
         #[rustfmt::skip]
         let cases = [
             // Nothing selected: nothing is, and a removal isn't waited for.
-            (None, removing, &[1, 2][..], Keep { ix: None, removing: None }),
+            (None, removing, &[1, 2][..], &[1, 2][..], Keep { ix: None, removing: None }),
             // Still there, wherever it is now.
-            (Some((1, m(2))), None, &[0, 1, 2], Keep { ix: Some(2), removing: None }),
+            (Some((1, m(2))), None, &[1, 2], &[0, 1, 2], Keep { ix: Some(2), removing: None }),
             // Moved but still listed: keep waiting.
-            (Some((1, m(2))), removing, &[1, 2, 3], Keep { ix: Some(1), removing }),
+            (Some((1, m(2))), removing, &[1, 2, 3], &[1, 2, 3], Keep { ix: Some(1), removing }),
             // Waiting for another message than the selected one: the user moved on.
-            (Some((0, m(1))), removing, &[1, 3], Keep { ix: Some(0), removing: None }),
-            // Moved away: the row now at its place, or the last one.
-            (Some((1, m(2))), removing, &[1, 3, 4], Next(1)),
-            (Some((2, m(2))), removing, &[1, 3], Next(1)),
-            // Moved away and nothing left, or gone by itself.
-            (Some((0, m(2))), removing, &[], Gone),
-            (Some((1, m(2))), None, &[1, 3], Gone),
-            (Some((0, RowId::Draft(DraftId(2)))), removing, &[1], Gone),
+            (Some((0, m(1))), removing, &[1, 2, 3], &[1, 3], Keep { ix: Some(0), removing: None }),
+            // Moved away: the next row still there, or the one before.
+            (Some((1, m(2))), removing, &[1, 2, 3, 4], &[1, 3, 4], Next(1)),
+            (Some((1, m(2))), removing, &[1, 2], &[1], Next(0)),
+            // With those above it: not the row now at its index.
+            (Some((1, m(2))), removing, &[1, 2, 3, 4, 5], &[3, 4, 5], Next(0)),
+            // With those below it, and new mail above.
+            (Some((0, m(2))), removing, &[2, 3, 4], &[9, 4], Next(1)),
+            // Moved away and nothing left of the rows around it, or gone by itself.
+            (Some((0, m(2))), removing, &[2], &[], Gone),
+            (Some((0, m(2))), removing, &[2, 3], &[9], Gone),
+            (Some((1, m(2))), None, &[1, 2, 3], &[1, 3], Gone),
+            (Some((0, RowId::Draft(DraftId(2)))), removing, &[1], &[1], Gone),
         ];
-        for (selected, removing, ids, expected) in cases {
+        for (selected, removing, before, ids, expected) in cases {
             assert_eq!(
-                reselect(selected, removing, &rows(ids)),
+                reselect(selected, removing, &rows(before), &rows(ids)),
                 expected,
-                "{selected:?} {removing:?} {ids:?}"
+                "{selected:?} {removing:?} {before:?} {ids:?}"
             );
         }
     }

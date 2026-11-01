@@ -125,6 +125,13 @@ pub fn labelled(name: impl IntoElement, value: impl IntoElement, cx: &App) -> Di
 pub fn avatar(name: &str, email: &str, cx: &App) -> Div {
     let (bg, fg) = cx.theme().avatar(email);
     let initial = name.chars().take(1).collect::<String>().to_uppercase();
+    circle(bg, fg)
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(initial)
+}
+
+/// An [`avatar`]'s shape, for what stands in its place: its content centered.
+pub fn circle(bg: Hsla, fg: Hsla) -> Div {
     div()
         .flex_none()
         .rounded_full()
@@ -133,8 +140,6 @@ pub fn avatar(name: &str, email: &str, cx: &App) -> Div {
         .justify_center()
         .bg(bg)
         .text_color(fg)
-        .font_weight(FontWeight::SEMIBOLD)
-        .child(initial)
 }
 
 /// A short status beside a name, on the background and in the text color given.

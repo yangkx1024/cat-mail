@@ -2,13 +2,17 @@
 
 use catmail_core::{Draft, Flags, MessageSummary, OutboxEntry, OutboxStatus};
 use gpui_kit::component::Icon;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::list::{ListItem, ListState};
+use gpui_kit::component::separator::Separator;
 use gpui_kit::component::{h_flex, v_flex};
-use gpui_kit::{App, Div, FontWeight, SharedString, div, rems};
+use gpui_kit::{
+    AnyElement, App, Div, ElementId, FontWeight, InteractiveElement as _, Role, SharedString,
+    TestSupportExt as _, Toggled, div, rems,
+};
 
 use crate::assets::Hero;
 use crate::format;
+use crate::mailbox::message_commands::{self, Applies, Buttons};
 
 use super::*;
 
@@ -20,13 +24,13 @@ pub(super) enum Shape {
     Stacked,
 }
 
-/// What a message or draft row shows: the sender's avatar (a message's), who it is from
-/// or to, its subject, its time (all a row says of when: its day is the heading above it)
+/// What a message or draft row shows: the sender's avatar (a message's, which checks it
+/// when clicked), who it is from or to, its subject, its time (all a row says of when: its day is the heading above it)
 /// and the marks after the subject.
 /// `strong` sets the first two in bold. `hovered` shows on one line while the pointer is
 /// on the row.
 struct Summary {
-    avatar: Option<Div>,
+    avatar: Option<AnyElement>,
     who: SharedString,
     subject: SharedString,
     time: SharedString,
@@ -65,13 +69,12 @@ impl Summary {
         let (commands, aside) = hovered.map(|h| (h.commands, h.aside)).unzip();
         match shape {
             // The senders as a column, so the subjects line up.
-            // The avatar no taller than the text's line and its padding.
             Shape::Line => item.px_5().py_2p5().child(
                 h_flex()
                     .w_full()
                     .min_w_0()
                     .gap_3()
-                    .children(avatar.map(|avatar| avatar.size_6().text_xs()))
+                    .children(avatar)
                     .child(text(who, strong).w_48().flex_none().truncate())
                     // Only as wide as it is: the commands shown while hovered follow it.
                     .child(text(subject, strong).truncate())
@@ -95,7 +98,9 @@ impl Summary {
                     // As on one line: opening a message changes the row's shape, not this.
                     // Its top at the text's: the sender's glyphs start below their line's
                     // top, by half its leading and the font's own space above them.
-                    .children(avatar.map(|avatar| avatar.size_6().text_xs().mt(rems(AVATAR_DROP))))
+                    .children(
+                        avatar.map(|avatar| div().flex_none().mt(rems(AVATAR_DROP)).child(avatar)),
+                    )
                     .child(self::stacked(who, subject, time, strong, marks, cx)),
             ),
         }
@@ -163,13 +168,15 @@ fn top_line(title: SharedString, time: SharedString, strong: bool, cx: &App) -> 
 /// The most labels a row shows by name; the rest are counted.
 const ROW_LABELS: usize = 2;
 
-/// `labels` are the names of the message's labels to show; `hovered` says whether the
-/// pointer is on the row.
+/// `labels` are the names of the message's labels to show; `checked` says whether the
+/// message is checked; `hovered`, while the row on one line is, what the commands it
+/// shows then do to the message.
 pub(super) fn message_row(
     message: &MessageSummary,
     labels: &[SharedString],
     shape: Shape,
-    hovered: bool,
+    checked: bool,
+    hovered: Option<Applies>,
     cx: &mut Context<ListState<MessageList>>,
 ) -> ListItem {
     let unread = !message.flags.contains(Flags::SEEN);
@@ -223,49 +230,94 @@ pub(super) fn message_row(
             )
         });
     let email = message.from.first().map_or("", |a| a.email.as_str());
+    let avatar = if checked {
+        checked_avatar(cx)
+    } else {
+        crate::layout::avatar(sender, email, cx)
+    };
     let summary = Summary {
-        avatar: Some(crate::layout::avatar(sender, email, cx)),
+        avatar: Some(check_on_click(avatar, message.id, checked, cx)),
         who: sender.into(),
         subject: subject.into(),
         time: date.into(),
         // Unread is told by weight alone: sender and subject in bold.
         strong: unread,
         marks,
-        hovered: (hovered && shape == Shape::Line).then(|| hovered_row(message, cx)),
+        hovered: hovered.map(|applies| hovered_row(message, applies, cx)),
     };
     let item = ListItem::new(("message", message.id.0 as u64)).accessibility_label(label);
     summary.row(item, shape, cx)
 }
 
-/// The commands most used on a message without opening it, as [`RowCommand`]s (the list
+/// In place of the sender's avatar while the message is checked.
+fn checked_avatar(cx: &App) -> Div {
+    let theme = cx.theme();
+    crate::layout::circle(theme.primary, theme.primary_foreground)
+        .child(Icon::new(Hero::Check).small())
+}
+
+/// The avatar as the message's checkbox: a click checks or unchecks it, not opening it
+/// as well.
+fn check_on_click(
+    avatar: Div,
+    id: MessageId,
+    checked: bool,
+    cx: &mut Context<ListState<MessageList>>,
+) -> AnyElement {
+    // No taller than the text's line and its padding, in either shape.
+    avatar
+        .size_6()
+        .text_xs()
+        .id(("avatar", id.0 as u64))
+        .role(Role::CheckBox)
+        .aria_label("Select")
+        .aria_toggled(if checked {
+            Toggled::True
+        } else {
+            Toggled::False
+        })
+        .on_click(cx.listener(move |list, _, _, cx| {
+            cx.stop_propagation();
+            super::toggle_checked(list, id, cx);
+        }))
+        .test_support()
+        .into_any_element()
+}
+
+/// The commands on a message, as over the message open, without opening it (the list
 /// on one line shows no message), and whom it went to: To, or Cc when it has no To.
-fn hovered_row(message: &MessageSummary, cx: &mut Context<ListState<MessageList>>) -> Hovered {
-    let (read_icon, read_label) = crate::mailbox::commands::read_toggle(message.flags);
-    let commands = h_flex()
-        .flex_none()
-        .gap_1()
-        .child(
-            Button::new(("row-toggle-read", message.id.0 as u64))
-                .ghost()
-                .xsmall()
-                .icon(read_icon)
-                .tooltip(read_label)
-                .on_click(emit(RowCommand::ToggleRead(message.clone()), cx)),
-        )
-        .child(
-            Button::new(("row-delete", message.id.0 as u64))
-                .ghost()
-                .xsmall()
-                .icon(Hero::Trash)
-                .tooltip("Delete")
-                .on_click(emit(RowCommand::Delete(message.clone()), cx)),
-        );
+fn hovered_row(
+    message: &MessageSummary,
+    applies: Applies,
+    cx: &mut Context<ListState<MessageList>>,
+) -> Hovered {
     let aside = div()
         .max_w_64()
         .truncate()
         .text_xs()
         .text_color(cx.theme().muted_foreground)
         .child(recipients(message));
+    let id = message.id.0 as u64;
+    let message = message.clone();
+    let Buttons { place, marks } = message_commands::buttons(
+        applies,
+        |name| ElementId::NamedInteger(format!("row-{name}").into(), id),
+        false,
+        // Not the row's click as well, which would open the message.
+        cx.listener(move |_, &command: &MessageCommand, _, cx| {
+            cx.stop_propagation();
+            cx.emit(RowCommand {
+                message: message.clone(),
+                command,
+            });
+        }),
+    );
+    let commands = h_flex()
+        .flex_none()
+        .gap_1()
+        .children(place.into_iter().map(|b| b.xsmall()))
+        .child(Separator::vertical().h_4().mx_0p5())
+        .children(marks.into_iter().map(|b| b.xsmall()));
     Hovered { commands, aside }
 }
 
@@ -280,18 +332,6 @@ fn recipients(message: &MessageSummary) -> String {
         .map(|a| a.email.as_str())
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-/// A button's click handler sending `command`, not the row's click as well, which would
-/// open the message.
-fn emit(
-    command: RowCommand,
-    cx: &mut Context<ListState<MessageList>>,
-) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
-    cx.listener(move |_, _, _, cx| {
-        cx.stop_propagation();
-        cx.emit(command.clone());
-    })
 }
 
 pub(super) fn draft_row(draft: &Draft, shape: Shape, cx: &App) -> ListItem {

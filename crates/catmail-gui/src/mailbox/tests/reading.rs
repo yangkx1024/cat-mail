@@ -235,8 +235,28 @@ fn a_row_on_one_line_offers_commands_while_hovered(cx: &mut TestAppContext) {
         cx.read(|cx| find(&mailbox, "Quarterly report", cx).is_none())
     });
     assert_eq!(cx.read(|cx| shown_in_reader(&mailbox, cx)), None);
+
+    // Flagged, then archived: the same commands as over a message open.
+    let plain = cx.read(|cx| id_of(&mailbox, "Plain ASCII message", cx));
+    hover(cx, plain);
+    click(cx, window, ("row-toggle-flag", plain.0 as u64));
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| {
+            find(&mailbox, "Plain ASCII message", cx)
+                .is_some_and(|m| m.flags.contains(Flags::FLAGGED))
+        })
+    });
+    hover(cx, plain);
+    click(cx, window, ("row-archive", plain.0 as u64));
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| find(&mailbox, "Plain ASCII message", cx).is_none())
+    });
+    assert_eq!(cx.read(|cx| shown_in_reader(&mailbox, cx)), None);
     pollster::block_on(mail.client.replay_pending(mail.account())).unwrap();
     assert_eq!(mail.server_uids("Trash").len(), 1);
+    assert_eq!(mail.server_uids("Archive").len(), 1);
 }
 
 #[gpui_kit::test]

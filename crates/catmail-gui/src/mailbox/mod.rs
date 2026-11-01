@@ -10,6 +10,7 @@ mod draft;
 mod folder_commands;
 mod folder_picker;
 mod folders;
+mod message_commands;
 mod message_list;
 mod outbox;
 mod panes;
@@ -42,6 +43,7 @@ use crate::reader::Reader;
 use crate::settings::Preferences;
 use add_account::{AddAccount, AddAccountEvent};
 use folders::AccountFolders;
+use message_commands::MessageCommand;
 use message_list::{MessageList, Row, RowCommand, Source};
 pub(crate) use refresh::{Coalesce, Refresh};
 use refresh::{DraftCounts, Throttle};
@@ -198,11 +200,8 @@ impl Mailbox {
             cx.subscribe_in(
                 &messages,
                 window,
-                |this, _, command: &RowCommand, window, cx| match command {
-                    RowCommand::Delete(message) => this.delete_message(message, window, cx),
-                    RowCommand::ToggleRead(message) => {
-                        this.toggle_message(message, Flags::SEEN, window, cx)
-                    }
+                |this, _, row: &RowCommand, window, cx| {
+                    this.run(row.command, vec![row.message.clone()], window, cx)
                 },
             ),
             cx.subscribe_in(
@@ -570,13 +569,12 @@ impl Mailbox {
         let first_load = self.accounts.is_none();
         let still_there = self.place.is_some_and(|place| place.is_in(&accounts));
         let shown: Vec<_> = self.shown_folders().map(|f| f.id).collect();
-        let labels = accounts
+        let folders = accounts
             .iter()
-            .flat_map(|a| a.folders.user_labels())
-            .map(|(id, name)| (id, name.into()))
+            .map(|a| (a.account.id, a.folders.clone()))
             .collect();
         self.messages.update(cx, |list, cx| {
-            if list.delegate_mut().set_labels(labels) {
+            if list.delegate_mut().set_folders(folders) {
                 cx.notify();
             }
         });
@@ -746,20 +744,31 @@ impl Render for Mailbox {
             .on_action(cx.listener(|this, _: &Reply, window, cx| this.reply(false, window, cx)))
             .on_action(cx.listener(|this, _: &ReplyAll, window, cx| this.reply(true, window, cx)))
             .on_action(cx.listener(|this, _: &Forward, window, cx| this.forward(window, cx)))
-            .on_action(cx.listener(|this, _: &Archive, window, cx| this.archive(window, cx)))
-            .on_action(cx.listener(|this, _: &Delete, window, cx| this.delete(window, cx)))
-            .on_action(
-                cx.listener(|this, _: &ToggleRead, window, cx| {
-                    this.toggle(Flags::SEEN, window, cx)
-                }),
-            )
-            .on_action(cx.listener(|this, _: &ToggleFlag, window, cx| {
-                this.toggle(Flags::FLAGGED, window, cx)
+            // On the messages checked, or else the selected one.
+            .on_action(cx.listener(|this, _: &Archive, window, cx| {
+                this.run(MessageCommand::Archive, this.keyed(cx), window, cx)
             }))
-            .on_action(
-                cx.listener(|this, _: &MoveToFolder, window, cx| this.move_to_folder(window, cx)),
-            )
+            .on_action(cx.listener(|this, _: &Delete, window, cx| {
+                this.run(MessageCommand::Delete, this.keyed(cx), window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ToggleRead, window, cx| {
+                this.run(MessageCommand::ToggleRead, this.keyed(cx), window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ToggleFlag, window, cx| {
+                this.run(MessageCommand::ToggleFlag, this.keyed(cx), window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &MoveToFolder, window, cx| {
+                this.run(MessageCommand::Move, this.keyed(cx), window, cx)
+            }))
             .on_action(cx.listener(|this, _: &EditLabels, window, cx| this.edit_labels(window, cx)))
+            // The keys' way to check a message: the avatar is the pointer's.
+            .on_action(cx.listener(|this, _: &ToggleChecked, _, cx| {
+                if let Some(message) = this.selected_message(cx) {
+                    this.messages.update(cx, |list, cx| {
+                        message_list::toggle_checked(list, message.id, cx)
+                    });
+                }
+            }))
             .on_action(cx.listener(|this, _: &RenameFolder, window, cx| {
                 this.rename_selected_folder(window, cx)
             }))
