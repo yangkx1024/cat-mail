@@ -249,7 +249,7 @@ fn a_message_still_listed_after_a_move_stays_selected(cx: &mut TestAppContext) {
     click_message(cx, window, &mailbox, "Plan");
     cx.update_window(window, |_, window, cx| {
         mailbox.update(cx, |mailbox, cx| {
-            mailbox.move_selected(personal, window, cx)
+            mailbox.move_to(&mailbox.selected(cx), personal, window, cx)
         })
     })
     .unwrap();
@@ -283,7 +283,7 @@ fn a_message_moved_from_all_inboxes_leaves_its_inbox(cx: &mut TestAppContext) {
         .id;
     cx.update_window(window, |_, window, cx| {
         mailbox.update(cx, |mailbox, cx| {
-            mailbox.move_selected(personal, window, cx)
+            mailbox.move_to(&mailbox.selected(cx), personal, window, cx)
         })
     })
     .unwrap();

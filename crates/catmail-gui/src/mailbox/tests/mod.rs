@@ -137,9 +137,9 @@ fn set_appearance(cx: &mut TestAppContext, appearance: crate::settings::Appearan
 }
 
 /// Clicks a message's row on its sender: on one line, its middle can be under the
-/// commands the row shows while hovered.
+/// commands the row shows while hovered, and its avatar checks it instead.
 fn click_row(window: &mut Window, id: MessageId, cx: &mut App) {
-    window.click_at(("message", id.0 as u64), point(px(30.), px(10.)), cx);
+    window.click_at(("message", id.0 as u64), point(px(80.), px(10.)), cx);
 }
 
 fn click_message(
@@ -211,6 +211,7 @@ fn wait_for_one_window(cx: &mut TestAppContext) {
     });
 }
 
+mod checking;
 mod labels;
 mod managing_folders;
 mod reading;

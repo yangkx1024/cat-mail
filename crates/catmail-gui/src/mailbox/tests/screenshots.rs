@@ -121,6 +121,22 @@ fn screenshots() {
     .unwrap();
     save(&mut cx, window, "list-row-hovered");
 
+    // Two messages checked, the commands on them by the heading; the checkbox's menu.
+    for subject in ["你好，世界", "Quarterly report"] {
+        let id = cx.update(|cx| id_of(&mailbox, subject, cx));
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("avatar", id.0 as u64), cx);
+        })
+        .unwrap();
+    }
+    save(&mut cx, window, "list-checked");
+    cx.update_window(window, |_, window, cx| window.click("check-menu", cx))
+        .unwrap();
+    save(&mut cx, window, "list-check-menu");
+    cx.update_window(window, |_, window, cx| window.press("escape", cx))
+        .unwrap();
+
     let shots = [
         ("text", "你好，世界"),
         ("html-inline-image", "月度报表"),
@@ -139,6 +155,8 @@ fn screenshots() {
         });
         save(&mut cx, window, name);
     }
+    // Still checked, with a message open.
+    save(&mut cx, window, "list-checked-reading");
 
     // Text selected on the newsletter's page, still open.
     cx.update_window(window, |_, window, cx| {

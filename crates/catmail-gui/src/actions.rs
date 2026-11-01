@@ -19,6 +19,7 @@ gpui_kit::actions!(
         ToggleFlag,
         MoveToFolder,
         EditLabels,
+        ToggleChecked,
         RenameFolder,
         Sync,
         FocusSearch,
@@ -66,8 +67,9 @@ pub fn bind_keys(cx: &mut App) {
         // As file managers rename what is selected; here the sidebar's folder.
         key("f2", RenameFolder, mailbox, cx),
         key("e", Archive, list, cx),
-        // Gmail's key for it.
+        // Gmail's keys for them.
         key("l", EditLabels, list, cx),
+        key("x", ToggleChecked, list, cx),
         key("delete", Delete, list, cx),
         key("backspace", Delete, list, cx),
         key("secondary-a", SelectAll, Some(READER_PAGE), cx),

@@ -1,11 +1,13 @@
-//! The mailbox's layout, and its right pane for what the list has selected: a message
-//! with the toolbar of commands on it, a draft (`draft.rs`) or an outbox entry
-//! (`outbox.rs`).
+//! The mailbox's layout: the list under its heading, which has the commands on the
+//! messages checked, and the right pane for what the list has selected: a message with
+//! the toolbar of commands on it, a draft (`draft.rs`) or an outbox entry (`outbox.rs`).
 
-use catmail_core::{Flags, MessageSummary};
+use catmail_core::MessageSummary;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::list::List;
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::separator::Separator;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
@@ -16,7 +18,8 @@ use gpui_kit::{
 
 use super::Mailbox;
 use super::folders;
-use super::message_list::{Row, Source};
+use super::message_commands::{self, Applies, Buttons};
+use super::message_list::{self, Check, Row, Source};
 use crate::actions::{self, *};
 use crate::assets::Hero;
 use crate::layout;
@@ -77,6 +80,13 @@ impl Mailbox {
                 .map(|_| "Sending resumes when the connection is back.".to_owned()),
             _ => None,
         };
+        let list = self.messages.read(cx).delegate();
+        // What the commands on the messages checked do, while there are some.
+        let checked = list
+            .has_checked()
+            .then(|| self.applies(list.checked_messages()));
+        let (all_checked, has_messages) = (list.all_checked(), list.has_messages());
+        let lists_messages = source.as_ref().is_some_and(Source::lists_messages);
         v_flex()
             .size_full()
             .when(reading, |this| {
@@ -119,19 +129,37 @@ impl Mailbox {
                         h_flex()
                             .px_1()
                             .gap_2()
-                            .items_baseline()
+                            .when(lists_messages, |this| {
+                                this.child(self.render_check_all(all_checked, has_messages, cx))
+                            })
                             .child(
-                                div()
-                                    .text_lg()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(title),
+                                h_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap_2()
+                                    .items_baseline()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_lg()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(title),
+                                    )
+                                    // The commands on the messages checked take its room.
+                                    .when(checked.is_none(), |this| {
+                                        this.children(note.map(|note| {
+                                            div()
+                                                .flex_none()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(note)
+                                        }))
+                                    }),
                             )
-                            .children(note.map(|note| {
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(note)
-                            })),
+                            .when_some(checked, |this, applies| {
+                                this.child(self.render_checked_toolbar(applies, cx))
+                            }),
                     ),
             )
             .child(
@@ -145,6 +173,70 @@ impl Mailbox {
                         List::new(&self.messages).scroll_bounce(true).px_3().pb_3(),
                     ),
             )
+    }
+
+    /// Checks every message listed, or none; its menu checks those read, flagged and so on.
+    fn render_check_all(
+        &self,
+        all_checked: bool,
+        has_messages: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let this = cx.entity().downgrade();
+        h_flex()
+            .flex_none()
+            .gap_0p5()
+            .child(
+                Checkbox::new("check-all")
+                    .checked(all_checked)
+                    .disabled(!has_messages)
+                    .accessibility_label("Select all")
+                    .on_click(cx.listener(|this, &check: &bool, _, cx| {
+                        this.messages.update(cx, |list, cx| {
+                            if check {
+                                message_list::check(list, Check::All, cx);
+                            } else {
+                                message_list::uncheck_all(list, cx);
+                            }
+                        })
+                    })),
+            )
+            .child(
+                Button::new("check-menu")
+                    .ghost()
+                    .xsmall()
+                    .icon(Hero::ChevronDown)
+                    .disabled(!has_messages)
+                    .tooltip("Select")
+                    .dropdown_menu(move |menu, _, _| {
+                        Check::MENU.into_iter().fold(menu, |menu, which| {
+                            menu.item(PopupMenuItem::new(which.label()).on_click(
+                                layout::after_menu(this.clone(), move |this, _, cx| {
+                                    this.messages
+                                        .update(cx, |list, cx| message_list::check(list, which, cx))
+                                }),
+                            ))
+                        })
+                    }),
+            )
+    }
+
+    /// The commands on the messages checked, as the message toolbar has them.
+    fn render_checked_toolbar(&self, applies: Applies, cx: &mut Context<Self>) -> impl IntoElement {
+        let Buttons { place, marks } = message_commands::buttons(
+            applies,
+            |name| format!("checked-{name}").into(),
+            true,
+            cx.listener(|this, &command, window, cx| {
+                this.run(command, this.checked(cx), window, cx)
+            }),
+        );
+        h_flex()
+            .flex_none()
+            .gap_1()
+            .children(place.into_iter().map(|b| b.small()))
+            .child(separator())
+            .children(marks.into_iter().map(|b| b.small()))
     }
 
     fn render_detail(&self, row: Row, cx: &mut Context<Self>) -> AnyElement {
@@ -182,50 +274,25 @@ impl Mailbox {
         message: &MessageSummary,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let flagged = message.flags.contains(Flags::FLAGGED);
         let reader = self.reader.read(cx);
         let has_html = reader.has_html();
         let can_reply_all = reader.can_reply_all();
         let blocked_images = reader.blocked_remote_images();
-        let can_archive = self.can_archive(message);
         let can_edit_labels = self.can_edit_labels(cx);
         let context = Some(actions::MAILBOX);
-        let (read_icon, read_label) = super::commands::read_toggle(message.flags);
-        let (flag_icon, flag_label) = if flagged {
-            (Hero::FlagSolid, "Remove flag")
-        } else {
-            (Hero::Flag, "Flag")
-        };
-        let separator = || Separator::vertical().h_5().mx_1();
+        let Buttons { place, marks } = message_commands::buttons(
+            self.applies([message]),
+            |name| name.into(),
+            true,
+            cx.listener(|this, &command, window, cx| {
+                this.run(command, this.selected(cx), window, cx)
+            }),
+        );
         // In groups: where the message is, its marks, its content, and answering it.
         layout::toolbar(cx)
             .child(self.back_button(cx))
             .child(separator())
-            .child(
-                Button::new("archive")
-                    .ghost()
-                    .small()
-                    .icon(Hero::ArchiveBox)
-                    .disabled(!can_archive)
-                    .tooltip_with_action("Archive", &Archive, Some(actions::MESSAGE_LIST))
-                    .on_click(cx.listener(|this, _, window, cx| this.archive(window, cx))),
-            )
-            .child(
-                Button::new("delete")
-                    .ghost()
-                    .small()
-                    .icon(Hero::Trash)
-                    .tooltip_with_action("Delete", &Delete, Some(actions::MESSAGE_LIST))
-                    .on_click(cx.listener(|this, _, window, cx| this.delete(window, cx))),
-            )
-            .child(
-                Button::new("move")
-                    .ghost()
-                    .small()
-                    .icon(Hero::FolderArrowRight)
-                    .tooltip_with_action("Move to", &MoveToFolder, context)
-                    .on_click(cx.listener(|this, _, window, cx| this.move_to_folder(window, cx))),
-            )
+            .children(place.into_iter().map(|b| b.small()))
             .when(can_edit_labels, |this| {
                 this.child(
                     Button::new("labels")
@@ -237,26 +304,7 @@ impl Mailbox {
                 )
             })
             .child(separator())
-            .child(
-                Button::new("toggle-read")
-                    .ghost()
-                    .small()
-                    .icon(read_icon)
-                    .tooltip_with_action(read_label, &ToggleRead, context)
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.toggle(Flags::SEEN, window, cx)),
-                    ),
-            )
-            .child(
-                Button::new("toggle-flag")
-                    .ghost()
-                    .small()
-                    .icon(flag_icon)
-                    .tooltip_with_action(flag_label, &ToggleFlag, context)
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.toggle(Flags::FLAGGED, window, cx)),
-                    ),
-            )
+            .children(marks.into_iter().map(|b| b.small()))
             .child(separator())
             .when_some(blocked_images, |this, loading| {
                 this.child(
@@ -312,4 +360,9 @@ impl Mailbox {
                     .on_click(cx.listener(|this, _, window, cx| this.forward(window, cx))),
             )
     }
+}
+
+/// Between groups of a toolbar's buttons.
+fn separator() -> Separator {
+    Separator::vertical().h_5().mx_1()
 }
