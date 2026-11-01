@@ -82,6 +82,19 @@ impl Error {
         )
     }
 
+    /// Whether the server said the account went over its download limit, on logging in,
+    /// with a BYE or refusing a command (see [`says_over_limit`]). Then nothing else on the
+    /// account works for a while either, and trying again only adds to it.
+    pub fn is_over_limit(&self) -> bool {
+        match self {
+            Self::Command { text, .. }
+            | Self::Bye(text)
+            | Self::Rejected(text)
+            | Self::AuthFailed(text) => says_over_limit(text),
+            _ => false,
+        }
+    }
+
     /// Whether the connection was gone, rather than the command refused: the error an
     /// idle connection that the server or a NAT box closed meanwhile shows. Trying again
     /// on a new connection may work.
@@ -93,6 +106,18 @@ impl Error {
     }
 }
 
+/// What servers answer once an account went over its download limit, in lower case:
+/// Gmail's `[ALERT] Account exceeded command or bandwidth limits` (on logging in or on a
+/// command), NetEase's `Fetch volume limit exceed` (on FETCH) and its "flow over limit".
+const OVER_LIMIT: &[&str] = &["bandwidth limit", "volume limit", "flow over limit"];
+
+/// Whether a server's text says the account went over its download limit. Servers have
+/// no response code for it, only words.
+pub fn says_over_limit(text: &str) -> bool {
+    let text = text.to_lowercase();
+    OVER_LIMIT.iter().any(|t| text.contains(t))
+}
+
 impl From<crate::net::NetError> for Error {
     fn from(e: crate::net::NetError) -> Self {
         use crate::net::NetError;
@@ -101,5 +126,29 @@ impl From<crate::net::NetError> for Error {
             NetError::Timeout => Self::Timeout,
             NetError::InvalidServerName(name) => Self::InvalidServerName(name),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn servers_saying_the_account_went_over_its_limit_are_told_apart() {
+        let refused = |text: &str| Error::Command {
+            command: "UID FETCH",
+            text: text.into(),
+        };
+        assert!(refused("Fetch volume limit exceed").is_over_limit());
+        assert!(
+            Error::AuthFailed("[ALERT] Account exceeded command or bandwidth limits".into())
+                .is_over_limit()
+        );
+        assert!(Error::Bye("Account exceeded bandwidth limits".into()).is_over_limit());
+        assert!(!refused("[SERVERBUG] Message can't be read").is_over_limit());
+        assert!(
+            !Error::AuthFailed("[AUTHENTICATIONFAILED] Invalid credentials".into()).is_over_limit()
+        );
+        assert!(!Error::Protocol("bandwidth limits".into()).is_over_limit());
     }
 }

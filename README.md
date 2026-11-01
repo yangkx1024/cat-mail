@@ -13,7 +13,8 @@
 
 - 原生 Rust，界面由 GPU 绘制（[GPUI](https://www.gpui.rs/) + [gpui-kit](https://github.com/longbridge/gpui-kit)），
   邮件 HTML 由纯 Rust 的 [Blitz](https://github.com/DioxusLabs/blitz) 排版，不带浏览器内核，没有 Electron / WebView
-- 数据全在本地一个 SQLite 里，离线可读、可搜索、可操作；正文和附件按需下载
+- 数据全在本地一个 SQLite 里，离线可读、可搜索、可操作；正文在后台按每日限额预取（没打开过的邮件也能按正文
+  搜到），大附件打开时才下载
 - 窗口关闭后在后台保持同步，同时释放界面占用的内存
 
 **安全**

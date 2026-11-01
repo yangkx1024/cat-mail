@@ -25,7 +25,7 @@ mod tray;
 
 use std::path::PathBuf;
 
-use catmail_core::{Config, DEFAULT_GC_INTERVAL, MailClient, SyncSchedule};
+use catmail_core::{BodyPrefetch, Config, DEFAULT_GC_INTERVAL, MailClient, SyncSchedule};
 use clap::Parser;
 use gpui_kit::component::{ActiveTheme as _, StyledExt as _, v_flex};
 use gpui_kit::{
@@ -97,6 +97,7 @@ fn main() {
     let opening = builder.map(|builder| {
         builder
             .sync_in_background(Some(SyncSchedule::default()))
+            .prefetch_bodies(Some(BodyPrefetch::default()))
             .send_in_background(true)
             .collect_garbage_every(Some(DEFAULT_GC_INTERVAL))
     });

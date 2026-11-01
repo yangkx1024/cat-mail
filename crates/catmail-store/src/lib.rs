@@ -16,6 +16,7 @@ mod identities;
 mod messages;
 mod ops;
 mod outbox;
+mod prefetch;
 mod private;
 
 use std::collections::HashSet;
@@ -37,6 +38,7 @@ pub use identities::{DeletedIdentity, Identities, Sending};
 pub use messages::{MessageLocation, Messages, NewBody, NewMessage, Upserted};
 pub use ops::{CopyCheckpoint, Moved, PendingOps, ReplayFolder, ReplayKind, ReplayOp, Touched};
 pub use outbox::{NewOutboxEntry, Outbox, OutboxJob};
+pub use prefetch::{Prefetch, Usage};
 pub use private::{create_private_dir, private_file_options};
 
 /// Every `*_blob_hash` column (a test checks none is missing).
@@ -181,6 +183,10 @@ impl<'c> Db<'c> {
         PendingOps::new(self.conn)
     }
 
+    pub fn prefetch(&self) -> Prefetch<'c> {
+        Prefetch::new(self.conn)
+    }
+
     /// Every blob some row refers to, for [`BlobStore::collect_garbage`]. A new
     /// `*_blob_hash` column must be added here, or GC deletes what it points to.
     pub fn blob_references(&self) -> Result<HashSet<BlobHash>> {
@@ -277,7 +283,7 @@ pub(crate) mod test_util {
     use std::collections::HashMap;
 
     use catmail_types::{
-        AccountId, FolderId, FolderKind, FolderRole, NewAccount, Security, ServerConfig,
+        AccountId, FolderId, FolderKind, FolderRole, MessageId, NewAccount, Security, ServerConfig,
     };
     use tempfile::TempDir;
 
@@ -305,6 +311,19 @@ pub(crate) mod test_util {
             store: Store::open(&dir.path().join("catmail.db")).unwrap(),
             _dir: dir,
         }
+    }
+
+    /// The message in `folder` with `uid`.
+    pub(crate) fn message_id(store: &Store, folder: FolderId, uid: u32) -> MessageId {
+        store
+            .read(|db| {
+                Ok(db.conn.query_row(
+                    "SELECT id FROM messages WHERE folder_id = ?1 AND uid IS ?2",
+                    rusqlite::params![folder.0, uid],
+                    |r| Ok(MessageId(r.get(0)?)),
+                )?)
+            })
+            .unwrap()
     }
 
     pub(crate) fn account(store: &Store, email: &str) -> AccountId {

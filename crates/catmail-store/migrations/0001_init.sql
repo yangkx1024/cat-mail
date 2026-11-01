@@ -166,6 +166,11 @@ CREATE UNIQUE INDEX messages_gm_msgid ON messages (account_id, gm_msgid)
 -- Gmail's Starred, which is \Flagged rather than a label row; read like
 -- messages_folder_date.
 CREATE INDEX messages_flagged ON messages (account_id, list_date) WHERE flags & 2 <> 0;
+-- What the background prefetch of bodies fetches next, newest first (Prefetch::next):
+-- without it each look reads every row of the account and sorts them. Shrinks as bodies
+-- arrive.
+CREATE INDEX messages_prefetch ON messages (account_id, list_date)
+    WHERE body_state = 'headers' AND uid IS NOT NULL;
 
 -- Folder counts follow every change to `messages`, whoever makes it (sync, local flag
 -- changes, cascading deletes), so no writer can forget them. Unread = no \Seen (bit 0).
@@ -289,6 +294,27 @@ CREATE TABLE message_bodies (
     text_plain    TEXT,
     text_html     TEXT, -- already sanitized
     raw_blob_hash TEXT  -- the whole raw message; only kept for messages fetched whole
+) STRICT;
+
+-- Background prefetch of bodies (catmail_core::prefetch). A message whose body failed to
+-- fetch, so that the prefetch goes on with the others and tries this one again only
+-- after retry_at (unix seconds), later with each failure. Dropped with the message, and
+-- once its body is stored however it was fetched.
+CREATE TABLE prefetch_failures (
+    message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    failures   INTEGER NOT NULL,
+    retry_at   INTEGER NOT NULL
+) STRICT;
+
+-- What the prefetch fetched of an account on one day (UTC, in days since the epoch), so
+-- that its daily budget holds across restarts. Only the latest day is kept. paused_until
+-- (unix seconds): the server said the account went over its download limit, so nothing is
+-- fetched until then, also after a restart.
+CREATE TABLE prefetch_usage (
+    account_id   INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+    day          INTEGER NOT NULL,
+    bytes        INTEGER NOT NULL,
+    paused_until INTEGER
 ) STRICT;
 
 -- Attachments and inline parts of a downloaded message. Small messages are fetched whole

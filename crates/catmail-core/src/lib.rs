@@ -31,6 +31,7 @@ pub mod html {
 }
 mod ops;
 mod pool;
+mod prefetch;
 mod runtime;
 mod secrets;
 mod send;
@@ -50,6 +51,7 @@ pub use error::{Error, HttpError, ImapError, Result, SmtpError, StoreError};
 pub use filename::safe_filename;
 pub use gc::DEFAULT_GC_INTERVAL;
 pub use images::RemoteImageStream;
+pub use prefetch::BodyPrefetch;
 pub use secrecy::{ExposeSecret, SecretString};
 pub use secrets::{KeyringSecrets, MemorySecrets, SecretStore};
 /// What [`MailClient::subscribe`]'s receiver returns when it falls behind or the engine

@@ -13,7 +13,7 @@
 | Frontends | `catmail-cli`、`catmail-gui` | 命令行（clap）；图形界面（gpui-kit） |
 | Rendering | `catmail-render` | 读信区的 HTML 引擎（Blitz）：在自己的线程上排版、分块绘制成像素；不依赖 UI 库和邮件类型 |
 | Facade | `catmail-core` | `MailClient`：async 方法 + 事件订阅，前端唯一依赖 |
-| Services / Engine | `catmail-core` | 同步、后台同步（IDLE）、操作队列回放、按需下载、Outbox；每账户状态；运行时桥接；凭据 |
+| Services / Engine | `catmail-core` | 同步、后台同步（IDLE）、操作队列回放、按需下载与后台预取正文、Outbox；每账户状态；运行时桥接；凭据 |
 | Storage | `catmail-store` | SQLite schema 与迁移、事务化 Repository、FTS5、内容寻址 `BlobStore`；全部同步 API |
 | Protocol | `catmail-proto` | IMAP（自己的命令编码与连接驱动，imap-proto 解析响应）、SMTP（自己实现）、MIME 解析（mail-parser）与构建（mail-builder）、远程图片的 HTTP 下载（reqwest） |
 | HTML | `catmail-html` | 邮件 HTML 的清洗（ammonia，样式表逐记号重写），以及读信区在清洗结果上做的几遍：图片、内嵌图片、深色时的颜色转换；纯函数，无 IO |
@@ -163,7 +163,7 @@ UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UI
 |---|---|
 | [同步](architecture/sync.md) | 文件夹对账、UIDVALIDITY、增量拉取、游标与断点续传、容错、邮件头 |
 | [操作队列](architecture/op-queue.md) | 标记 / 移动 / 删除的本地效果、回放顺序、拒绝时的撤销、无 MOVE 服务器上的 COPY |
-| [正文与附件](architecture/bodies.md) | 按需下载的两条路径、正文提取、HTML 清洗、内嵌图片 |
+| [正文与附件](architecture/bodies.md) | 按需下载的两条路径、后台预取与每日预算、正文提取、HTML 清洗、内嵌图片 |
 | [草稿与发信](architecture/sending.md) | 草稿与回复、草稿同步到服务器、outbox 状态机、SMTP 客户端、重试、保存到 Sent |
 | [文件夹与标签的管理](architecture/folders.md) | 新建、重命名、删除文件夹和 Gmail 标签：当场在服务器上做而不进队列、能改哪些、答复丢失后的重来 |
 | [位置与标签](architecture/labels.md) | Gmail 按标签建模：一封邮件一行、位置与标签、同步、操作与界面 |
