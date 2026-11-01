@@ -1,7 +1,7 @@
 //! The system's notifications for new mail, which the engine announces
-//! (`Event::NewMail`), while the main window isn't in front; clicking one shows the
-//! window on the message. Lives with the app, not a window: it tells about mail that
-//! arrives while none is open. See docs/architecture/background.md.
+//! (`Event::NewMail`); clicking one shows the main window on the message. Lives with
+//! the app, not a window: it tells about mail that arrives while none is open. See
+//! docs/architecture/background.md.
 
 use std::time::Duration;
 
@@ -181,8 +181,7 @@ impl Notifier {
         cx.spawn(async move |cx| {
             cx.background_executor().timer(GATHER).await;
             let told = cx.update(|cx| {
-                // Looking at the window, the user sees it arrive.
-                let tell = Preferences::get(cx).notify_new_mail && !Resident::main_is_active(cx);
+                let tell = Preferences::get(cx).notify_new_mail;
                 let this = cx.global_mut::<Self>();
                 this.gathering = false;
                 let arrived = std::mem::take(&mut this.arrived);
@@ -203,12 +202,6 @@ impl Notifier {
             });
         })
         .detach();
-    }
-
-    /// Whether announcements are being gathered.
-    #[cfg(test)]
-    pub fn is_gathering(cx: &App) -> bool {
-        cx.global::<Self>().gathering
     }
 }
 
