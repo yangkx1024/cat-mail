@@ -1333,3 +1333,40 @@ async fn gmail_label_mailboxes_act_on_the_message() {
     );
     assert!(session.uid_search_all().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn creates_renames_and_deletes_mailboxes() {
+    let fake = FakeImap::start(ServerState::new("alice", "pw")).await;
+    let mut session = login(&fake).await;
+
+    session.create("Projects").await.unwrap();
+    session.create("Projects/2026").await.unwrap();
+    assert!(matches!(
+        session.create("Projects").await,
+        Err(Error::Command { .. })
+    ));
+    assert_eq!(
+        fake.state().mailbox_names(),
+        ["INBOX", "Projects", "Projects/2026"]
+    );
+
+    // Open, as a session usually has a mailbox: renaming it needs it closed first.
+    session.select("Projects/2026").await.unwrap();
+    session.rename("Projects", "Work").await.unwrap();
+    assert_eq!(fake.state().mailbox_names(), ["INBOX", "Work", "Work/2026"]);
+    assert_eq!(
+        fake.state().subscriptions.iter().collect::<Vec<_>>(),
+        ["Projects/2026", "Work"],
+        "the subscription follows the renamed mailbox; the server keeps the rest"
+    );
+
+    session.delete("Work/2026").await.unwrap();
+    session.delete("Work").await.unwrap();
+    assert!(matches!(
+        session.delete("Work").await,
+        Err(Error::Command { .. })
+    ));
+    assert_eq!(fake.state().mailbox_names(), ["INBOX"]);
+    // The session still works: it left the mailbox before deleting it.
+    session.examine("INBOX").await.unwrap();
+}

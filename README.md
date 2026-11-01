@@ -51,8 +51,8 @@
 
 ## 使用
 
-目前可以管理账户、同步文件夹和邮件头、列出和阅读邮件、搜索，写信、回复、转发和发信，以及标记、
-移动和删除邮件：
+目前可以管理账户、同步文件夹和邮件头、列出和阅读邮件、搜索，写信、回复、转发和发信，标记、
+移动和删除邮件，以及新建、重命名和删除文件夹：
 
 ```sh
 # 添加账户（交互输入密码；脚本里用 --password-stdin）。先登录检查，失败不留下账户；--no-verify 跳过
@@ -96,6 +96,11 @@ catmail mv 42 --to Archive
 catmail archive 42                # 移到账户的归档文件夹；已在其中则不动
 catmail rm 42                     # 移到"已删除"；已在其中或加 --permanent 则永久删除
 catmail ops                       # 还没同步到服务器的改动，以及被拒绝的；ops flush / dismiss
+
+# 文件夹（Gmail 上是标签）：当场在服务器上新建、重命名、删除
+catmail folder add 2026 --parent Archive
+catmail folder rename Archive/2026 二〇二六
+catmail folder rm Archive/二〇二六        # 连同子文件夹和里面的邮件，不能撤销
 ```
 
 `catmail watch` 在前台持续同步所有账户：收件箱的新邮件、删除和标记变化由服务器推送（IDLE，不支持时

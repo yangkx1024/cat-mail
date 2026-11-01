@@ -4,17 +4,14 @@
 
 use catmail_core::{AccountId, MailClient, NewIdentity, Security, Verify};
 use gpui_kit::component::WindowExt as _;
-use gpui_kit::component::button::Button;
-use gpui_kit::component::dialog::{Cancel, Confirm, DialogFooter};
 use gpui_kit::component::v_flex;
 use gpui_kit::{
     App, AppContext as _, Context, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, Styled as _, Window, rems,
+    Render, SharedString, Styled as _, Window,
 };
 
-use crate::actions::DIALOG_BUTTON;
-use crate::layout;
-use crate::login_form::{LoginFields, LoginValues, ServerFields, ServerValues, Submit};
+use crate::login_form::{LoginFields, LoginValues, ServerFields, ServerValues};
+use crate::submission::{self, DialogForm, Submit};
 
 /// What the form holds, as typed.
 #[derive(Debug, Clone)]
@@ -48,41 +45,8 @@ pub(super) fn open(
 ) {
     let form = cx.new(|cx| AddIdentity::new(client, account, display_name, window, cx));
     let title = SharedString::from(format!("New address for {email}"));
-    let width = rems(32.).to_pixels(window.rem_size());
-    let dialog_form = form.clone();
-    layout::open_dialog(window, cx, move |dialog, _, cx| {
-        let form = &dialog_form;
-        let submit = &form.read(cx).submit;
-        // The buttons act through the dialog's own Cancel and Confirm, as Escape and Enter
-        // do. On the buttons themselves, not a wrapper: focused, they take Enter and Space.
-        let cancel_button = submit.cancel_button(
-            Button::new("identity-cancel")
-                .label("Cancel")
-                .key_context(DIALOG_BUTTON)
-                .on_click(|_, window, cx| window.dispatch_action(Box::new(Cancel), cx)),
-        );
-        let add_button = submit.submit_button(
-            Button::new("identity-add")
-                .label("Add")
-                .key_context(DIALOG_BUTTON)
-                .on_click(|_, window, cx| {
-                    window.dispatch_action(Box::new(Confirm { secondary: false }), cx)
-                }),
-        );
-        let (add, cancel) = (form.clone(), form.clone());
-        dialog
-            .title(title.clone())
-            .w(width)
-            .centered()
-            // The form closes the dialog once the address is added.
-            .on_ok(move |_, window, cx| {
-                add.update(cx, |form, cx| form.add(window, cx));
-                false
-            })
-            .on_cancel(move |_, _, cx| !cancel.read(cx).submit.busy())
-            .child(form.clone())
-            .footer(DialogFooter::new().child(cancel_button).child(add_button))
-    });
+    let ids = ("identity-cancel", "identity-add");
+    submission::open_dialog(form.clone(), title, 32., ids, "Add", window, cx);
     // Only once the dialog is open: it gives focus back to what had it before (Settings)
     // when it closes.
     form.update(cx, |form, cx| form.login.focus(window, cx));
@@ -118,7 +82,7 @@ impl AddIdentity {
             account,
             login,
             smtp,
-            submit: Submit::default(),
+            submit: Submit::new("sign in"),
         }
     }
 
@@ -128,8 +92,14 @@ impl AddIdentity {
             smtp: self.smtp.values(cx),
         }
     }
+}
 
-    fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+impl DialogForm for AddIdentity {
+    fn submit(&self) -> &Submit {
+        &self.submit
+    }
+
+    fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let values = self.values(cx);
         let (client, account) = (self.client.clone(), self.account);
         let request = values.new_identity().map(|new| async move {

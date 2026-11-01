@@ -124,6 +124,8 @@ pub struct Folder {
     pub listed: bool,
     /// False for hierarchy-only nodes (`\Noselect`) that cannot hold messages.
     pub selectable: bool,
+    /// False if the server says no folder can be made in it (`\Noinferiors`).
+    pub inferiors: bool,
     pub unread_count: u32,
     pub total_count: u32,
     /// Unix timestamp, seconds, of the last completed sync.
@@ -144,6 +146,53 @@ impl Folder {
     pub fn is_user_label(&self) -> bool {
         self.kind == FolderKind::Label && self.role.is_none() && self.listed
     }
+
+    /// The last level of its name: `2026` of `Archive/2026`.
+    pub fn leaf_name(&self) -> &str {
+        self.delimiter
+            .and_then(|d| self.name.rsplit_once(d))
+            .map_or(&self.name, |(_, leaf)| leaf)
+    }
+
+    /// Whether `other` is under this folder, at any depth.
+    pub fn is_above(&self, other: &Folder) -> bool {
+        self.delimiter.is_some_and(|d| {
+            other
+                .name
+                .strip_prefix(self.name.as_str())
+                .is_some_and(|rest| rest.starts_with(d))
+        })
+    }
+}
+
+/// Whether the user may rename or delete the folder: not one with a role, which the
+/// engine and the server treat as special (INBOX, Sent, Trash, Gmail's All Mail), nor
+/// one holding such a folder (Gmail's `[Gmail]`), nor a label hidden from IMAP.
+pub fn can_change_folder(folders: &[Folder], folder: FolderId) -> bool {
+    let Some(folder) = folders.iter().find(|f| f.id == folder) else {
+        return false;
+    };
+    folder.listed && !holds(folders, folder, |f| f.role.is_some())
+}
+
+/// Whether the user may make a folder in `parent`: the server allows one there (it has
+/// levels, and doesn't mark it `\Noinferiors`), and it is neither a special folder nor a
+/// level holding special folders (Gmail's `[Gmail]`). Archive is the exception: folders
+/// in it (`Archive/2026`) are archives too. On Gmail, that leaves the user's labels.
+pub fn can_create_in(folders: &[Folder], parent: FolderId) -> bool {
+    let special = |f: &Folder| f.role.is_some_and(|role| role != FolderRole::Archive);
+    let Some(parent) = folders.iter().find(|f| f.id == parent) else {
+        return false;
+    };
+    parent.listed
+        && parent.inferiors
+        && parent.delimiter.is_some()
+        && !holds(folders, parent, special)
+}
+
+/// Whether the folder is `special`, or a level holding a folder that is.
+fn holds(folders: &[Folder], folder: &Folder, special: impl Fn(&Folder) -> bool) -> bool {
+    special(folder) || folders.iter().any(|f| special(f) && folder.is_above(f))
 }
 
 /// The folder the engine uses for `role` among an account's folders: where Delete moves
@@ -361,10 +410,71 @@ mod tests {
             kind: FolderKind::Location,
             listed: true,
             selectable,
+            inferiors: true,
             unread_count: 0,
             total_count: 0,
             last_synced_at: None,
         }
+    }
+
+    fn named(id: i64, name: &str, role: Option<FolderRole>) -> Folder {
+        Folder {
+            name: name.into(),
+            ..folder(id, role, true)
+        }
+    }
+
+    #[test]
+    fn folders_with_a_role_or_holding_one_stay_as_they_are() {
+        let folders = [
+            named(1, "INBOX", Some(FolderRole::Inbox)),
+            named(2, "INBOX/Receipts", None),
+            named(3, "[Gmail]", None),
+            named(4, "[Gmail]/Trash", Some(FolderRole::Trash)),
+            named(5, "[Gmail]2", None),
+            Folder {
+                listed: false,
+                ..named(6, "Hidden", None)
+            },
+        ];
+        let changeable: Vec<i64> = folders
+            .iter()
+            .filter(|f| can_change_folder(&folders, f.id))
+            .map(|f| f.id.0)
+            .collect();
+        assert_eq!(changeable, [2, 5]);
+        let open: Vec<i64> = folders
+            .iter()
+            .filter(|f| can_create_in(&folders, f.id))
+            .map(|f| f.id.0)
+            .collect();
+        assert_eq!(open, [2, 5]);
+        assert!(!can_change_folder(&folders, FolderId(9)));
+        assert_eq!(folders[1].leaf_name(), "Receipts");
+        assert!(folders[0].is_above(&folders[1]));
+        assert!(!folders[2].is_above(&folders[4]));
+    }
+
+    #[test]
+    fn folders_go_in_archive_but_not_where_the_server_allows_none() {
+        let folders = [
+            named(1, "Archive", Some(FolderRole::Archive)),
+            named(2, "Sent", Some(FolderRole::Sent)),
+            Folder {
+                inferiors: false,
+                ..named(3, "Leaf", None)
+            },
+            Folder {
+                delimiter: None,
+                ..named(4, "Flat", None)
+            },
+        ];
+        let open: Vec<i64> = folders
+            .iter()
+            .filter(|f| can_create_in(&folders, f.id))
+            .map(|f| f.id.0)
+            .collect();
+        assert_eq!(open, [1]);
     }
 
     #[test]

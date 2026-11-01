@@ -230,6 +230,11 @@ impl TestMail {
         pollster::block_on(self.client.sync_account(self.account.unwrap())).unwrap();
     }
 
+    /// The server's mailboxes, by wire name.
+    pub fn server_mailboxes(&self) -> Vec<String> {
+        self.fake.state().mailbox_names()
+    }
+
     /// The UIDs in a mailbox on the server.
     pub fn server_uids(&self, mailbox: &str) -> Vec<u32> {
         let mut state = self.fake.state();

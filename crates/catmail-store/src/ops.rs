@@ -25,8 +25,12 @@ use crate::{Error, Result};
 /// What a change did, for change events.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Touched {
-    /// Folders whose messages it changed.
+    /// Folders it changed messages in: where they are, where they went, and the labels
+    /// it added to them or took off.
     pub folders: BTreeSet<(AccountId, FolderId)>,
+    /// The other folders that list those messages (their labels, Starred): their lists
+    /// change with them, though nothing was done in them.
+    pub shown: BTreeSet<(AccountId, FolderId)>,
     /// Accounts some of whose queued changes it made fail or turned into conflicts.
     pub refused: BTreeSet<AccountId>,
 }
@@ -37,13 +41,19 @@ impl Touched {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.folders.is_empty() && self.refused.is_empty()
+        self.folders.is_empty() && self.shown.is_empty() && self.refused.is_empty()
     }
 
     /// Adds what `other` did.
     pub fn merge(&mut self, other: Touched) {
         self.folders.extend(other.folders);
+        self.shown.extend(other.shown);
         self.refused.extend(other.refused);
+    }
+
+    /// Every folder whose list of messages it changed, once.
+    pub fn lists(&self) -> impl Iterator<Item = (AccountId, FolderId)> + '_ {
+        self.folders.union(&self.shown).copied()
     }
 }
 
@@ -51,7 +61,7 @@ impl FromIterator<(AccountId, FolderId)> for Touched {
     fn from_iter<I: IntoIterator<Item = (AccountId, FolderId)>>(folders: I) -> Self {
         Self {
             folders: folders.into_iter().collect(),
-            refused: BTreeSet::new(),
+            ..Self::default()
         }
     }
 }
@@ -621,7 +631,7 @@ impl<'c> PendingOps<'c> {
     /// Records in `touched` the folders that show the message besides its location
     /// ([`shown`]), before a change to it.
     fn touch_shown(&self, id: MessageId, flagged: bool, touched: &mut Touched) -> Result<()> {
-        touched.folders.extend(shown(self.conn, id.0, flagged)?);
+        touched.shown.extend(shown(self.conn, id.0, flagged)?);
         Ok(())
     }
 
@@ -1187,6 +1197,7 @@ impl<'c> PendingOps<'c> {
             touched.merge(self.restore(MessageId(row), FolderId(source), uid)?);
         }
         touched.folders.retain(|&(_, f)| f != folder);
+        touched.shown.retain(|&(_, f)| f != folder);
         Ok(touched)
     }
 
@@ -1413,6 +1424,7 @@ mod tests {
             role,
             kind: catmail_types::FolderKind::Location,
             selectable: true,
+            inferiors: true,
         }
     }
 
@@ -2115,6 +2127,14 @@ mod tests {
     }
 
     impl Gmail {
+        /// The folders named, as `Touched` holds them.
+        fn set(&self, names: &[&str]) -> BTreeSet<(AccountId, FolderId)> {
+            names
+                .iter()
+                .map(|name| (self.account, self.f[*name]))
+                .collect()
+        }
+
         fn write<T>(&self, f: impl FnOnce(&Db<'_>) -> Result<T>) -> T {
             self.store.write(f).unwrap()
         }
@@ -2193,17 +2213,10 @@ mod tests {
             db.ops()
                 .move_messages(&[m1], Some(f["INBOX"]), f["Work"], 0)
         });
-        let account = g.account;
+        assert_eq!(touched.folders, g.set(&["INBOX", "Work", "All Mail"]));
         // Important lists it too, with its labels.
-        assert_eq!(
-            touched,
-            Touched::from([
-                (account, f["INBOX"]),
-                (account, f["Work"]),
-                (account, f["Important"]),
-                (account, f["All Mail"])
-            ])
-        );
+        let all = g.set(&["INBOX", "Work", "Important", "All Mail"]);
+        assert_eq!(touched.lists().collect::<BTreeSet<_>>(), all);
         // It stays where it is on the server.
         assert_eq!(
             g.state(m1),
@@ -2258,22 +2271,15 @@ mod tests {
         let (m1, f) = (g.message(1), &g.f);
         // The message is listed in INBOX and Important, with its labels: they change.
         let touched = g.write(|db| db.ops().label_messages(&[m1], &[f["Work"]], &[], 0));
-        let account = g.account;
-        assert_eq!(
-            touched,
-            Touched::from([
-                (account, f["INBOX"]),
-                (account, f["Work"]),
-                (account, f["Important"]),
-                (account, f["All Mail"])
-            ])
-        );
+        // Only the label added is changed: the others list the message.
+        assert_eq!(touched.folders, g.set(&["Work", "All Mail"]));
+        let all = g.set(&["INBOX", "Work", "Important", "All Mail"]);
+        assert_eq!(touched.lists().collect::<BTreeSet<_>>(), all);
         // So does undoing it.
         let ops = g.replay_ops("All Mail");
         let touched = g.write(|db| db.ops().failed(f["All Mail"], &ops, "NO"));
-        for label in ["INBOX", "Work", "Important"] {
-            assert!(touched.folders.contains(&(account, f[label])), "{label}");
-        }
+        let lists: BTreeSet<_> = touched.lists().collect();
+        assert!(g.set(&["INBOX", "Work", "Important"]).is_subset(&lists));
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! The sidebar's folder hierarchy, built from the flat list the engine stores.
 
 use catmail_core::{
-    DeleteOutcome, Folder, FolderId, FolderRole, MessageSummary, MovePlan, special_folder,
+    DeleteOutcome, Folder, FolderId, FolderRole, MessageSummary, MovePlan, can_change_folder,
+    can_create_in, special_folder,
 };
 
 use crate::assets::Hero;
@@ -176,6 +177,27 @@ impl AccountFolders {
         MovePlan::of(&self.folders, folder, shown_in, to).is_ok_and(|plan| !plan.is_empty())
     }
 
+    /// Any of the account's folders, a level that holds no messages too.
+    pub fn get(&self, id: FolderId) -> Option<&Folder> {
+        self.folders.iter().find(|f| f.id == id)
+    }
+
+    /// Whether the user may rename or delete the folder ([`can_change_folder`]).
+    pub fn can_change(&self, id: FolderId) -> bool {
+        can_change_folder(&self.folders, id)
+    }
+
+    /// Whether the user may make a folder in the folder ([`can_create_in`]).
+    pub fn can_create_in(&self, id: FolderId) -> bool {
+        can_create_in(&self.folders, id)
+    }
+
+    /// Whether other folders are under the folder.
+    pub fn has_subfolders(&self, id: FolderId) -> bool {
+        self.get(id)
+            .is_some_and(|folder| self.folders.iter().any(|f| folder.is_above(f)))
+    }
+
     /// The node of the selectable folder.
     pub fn find(&self, id: FolderId) -> Option<&FolderNode> {
         self.nodes()
@@ -293,6 +315,7 @@ mod tests {
             kind: FolderKind::Location,
             listed: true,
             selectable: true,
+            inferiors: true,
             unread_count: 0,
             total_count: 0,
             last_synced_at: None,
@@ -309,6 +332,7 @@ mod tests {
             kind: FolderKind::Location,
             listed: true,
             selectable: true,
+            inferiors: true,
             unread_count: 0,
             total_count: 0,
             last_synced_at: None,

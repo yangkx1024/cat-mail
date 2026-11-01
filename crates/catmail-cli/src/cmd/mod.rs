@@ -3,6 +3,7 @@
 
 pub(crate) mod account;
 pub(crate) mod compose;
+pub(crate) mod folder;
 pub(crate) mod gc;
 pub(crate) mod identity;
 pub(crate) mod ops;
@@ -39,6 +40,19 @@ pub(crate) async fn resolve_account(client: &MailClient, selector: &str) -> Resu
         Err(_) => client.find_account_by_email(selector).await?,
     };
     found.with_context(|| format!("no account matches `{selector}`"))
+}
+
+/// The account's folder of that name (see [`MailClient::find_folder`]); fails if there is
+/// none.
+pub(crate) async fn find_folder(
+    client: &MailClient,
+    account: AccountId,
+    name: &str,
+) -> Result<Folder> {
+    client
+        .find_folder(account, name)
+        .await?
+        .with_context(|| format!("no folder `{name}` in account {account}"))
 }
 
 /// Where the page after message `id` starts.

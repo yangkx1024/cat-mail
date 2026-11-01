@@ -6,6 +6,7 @@ use std::rc::Rc;
 use catmail_core::{AccountId, ErrorKind, FolderRole};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::collapsible;
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu};
 use gpui_kit::component::sidebar::{
     Sidebar, SidebarGroup, SidebarItem, SidebarMenu, SidebarMenuItem,
 };
@@ -146,6 +147,7 @@ impl Mailbox {
                         toggle: Rc::new(
                             cx.listener(move |this, _, _, cx| this.toggle_account(account, cx)),
                         ),
+                        menu: Rc::new(self.folder_menu(account, None, cx)),
                     }),
                     // Folded too: they shrink away rather than vanish.
                     items: self.account_items(entry, cx),
@@ -153,7 +155,7 @@ impl Mailbox {
                         .folders
                         .labels
                         .iter()
-                        .map(|node| self.folder_item(node, cx))
+                        .map(|node| self.folder_item(entry.account.id, node, cx))
                         .collect(),
                     collapsed: false,
                 }
@@ -217,7 +219,7 @@ impl Mailbox {
             .first()
             .filter(|n| n.role() == Some(FolderRole::Inbox))
         {
-            items.push(self.folder_item(inbox, cx));
+            items.push(self.folder_item(entry.account.id, inbox, cx));
             roles.next();
         }
         items.push(self.place_item(
@@ -239,13 +241,13 @@ impl Mailbox {
                 cx,
             ));
         }
-        items.extend(roles.map(|node| self.folder_item(node, cx)));
+        items.extend(roles.map(|node| self.folder_item(entry.account.id, node, cx)));
         items.extend(
             entry
                 .folders
                 .others
                 .iter()
-                .map(|node| self.folder_item(node, cx)),
+                .map(|node| self.folder_item(entry.account.id, node, cx)),
         );
         items
     }
@@ -271,7 +273,12 @@ impl Mailbox {
         }
     }
 
-    fn folder_item(&self, node: &FolderNode, cx: &mut Context<Self>) -> SidebarMenuItem {
+    fn folder_item(
+        &self,
+        account: AccountId,
+        node: &FolderNode,
+        cx: &mut Context<Self>,
+    ) -> SidebarMenuItem {
         let place = node.selectable().map(|folder| Place::Folder(folder.id));
         let mut item = layout::sidebar_row(
             node.label.clone(),
@@ -283,8 +290,12 @@ impl Mailbox {
         .children(
             node.children
                 .iter()
-                .map(|child| self.folder_item(child, cx)),
+                .map(|child| self.folder_item(account, child, cx)),
         );
+        // A level the server doesn't list has nothing to make in or change.
+        if let Some(folder) = &node.folder {
+            item = item.context_menu(self.folder_menu(account, Some(folder.id), cx));
+        }
         if let Some(place) = place {
             let unread = node.unread() as usize;
             item =
@@ -315,6 +326,8 @@ struct Group {
 
 type Toggle = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
+type Menu = Rc<dyn Fn(PopupMenu, &mut Window, &mut App) -> PopupMenu>;
+
 /// An account's address, which folds and unfolds its places.
 #[derive(Clone)]
 struct Heading {
@@ -329,6 +342,8 @@ struct Heading {
     note: Option<(ElementId, SharedString)>,
     open: bool,
     toggle: Toggle,
+    /// Its context menu: a new folder at the top.
+    menu: Menu,
 }
 
 impl Collapsible for Group {
@@ -357,7 +372,7 @@ impl SidebarItem for Group {
         let headed = heading.is_some();
         v_flex()
             .when_some(heading, |this, heading| {
-                let toggle = heading.toggle;
+                let (toggle, menu) = (heading.toggle, heading.menu);
                 // Apart from the account above, as the places are from each other; the
                 // first has the section's title over it.
                 let first = heading.title.is_some();
@@ -396,7 +411,8 @@ impl SidebarItem for Group {
                             .xsmall()
                             .text_color(cx.theme().muted_foreground),
                         )
-                        .on_click(move |event, window, cx| toggle(event, window, cx)),
+                        .on_click(move |event, window, cx| toggle(event, window, cx))
+                        .context_menu(move |popup, window, cx| menu(popup, window, cx)),
                 )
                 .children(heading.note.map(|(id, note)| {
                     div()

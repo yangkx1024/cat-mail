@@ -7,6 +7,7 @@
 mod add_account;
 mod commands;
 mod draft;
+mod folder_commands;
 mod folder_picker;
 mod folders;
 mod message_list;
@@ -759,6 +760,9 @@ impl Render for Mailbox {
                 cx.listener(|this, _: &MoveToFolder, window, cx| this.move_to_folder(window, cx)),
             )
             .on_action(cx.listener(|this, _: &EditLabels, window, cx| this.edit_labels(window, cx)))
+            .on_action(cx.listener(|this, _: &RenameFolder, window, cx| {
+                this.rename_selected_folder(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &Sync, window, cx| this.sync(window, cx)))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
                 this.search

@@ -66,6 +66,8 @@ pub struct ListedMailbox {
     pub delimiter: Option<char>,
     /// False for `\Noselect` / `\NonExistent` hierarchy nodes.
     pub selectable: bool,
+    /// False for `\Noinferiors`: no mailbox can be made under it.
+    pub inferiors: bool,
     /// From a SPECIAL-USE attribute (RFC 6154), if the server sent one.
     pub special_use: Option<FolderRole>,
 }

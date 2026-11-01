@@ -584,3 +584,65 @@ async fn drafts_are_kept_in_dovecots_drafts_folder() {
     assert_eq!((report.applied, report.pending), (1, 0));
     assert_eq!(copies(), []);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn folders_are_created_renamed_and_deleted_on_dovecot() {
+    let Some(env) = testenv::testenv() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let client = open_client(dir.path(), None);
+    let account = add_account(
+        &client,
+        "folders",
+        "folders",
+        None,
+        None,
+        env.imap.clone(),
+        env.imap.clone(),
+    )
+    .await;
+    client.sync_account(account).await.unwrap();
+    let maildir = user_maildir(&env.maildir, "folders");
+
+    let run = run_tag();
+    let parent = client.create_folder(account, None, &run).await.unwrap();
+    let child = client
+        .create_folder(account, Some(parent.id), "子")
+        .await
+        .unwrap();
+    assert_eq!(child.name, format!("{run}/子"));
+    fs::write(
+        maildir.join(format!(".{run}/new/1.a")),
+        message(&format!("{run} kept")),
+    )
+    .unwrap();
+    let report = client.sync_account(account).await.unwrap();
+    assert_eq!(added(&report, &run), (1, 0, 0));
+    let kept = client.list_messages(parent.id, 10, None).await.unwrap()[0].id;
+
+    let renamed = format!("{run}-renamed");
+    let folder = client.rename_folder(parent.id, &renamed).await.unwrap();
+    assert_eq!(folder.name, renamed);
+    let report = client.sync_account(account).await.unwrap();
+    // Dovecot keeps the UIDVALIDITY: the message is the one stored, not fetched again.
+    assert_eq!(added(&report, &renamed), (0, 0, 0));
+    assert_eq!(
+        client.list_messages(parent.id, 10, None).await.unwrap()[0].id,
+        kept
+    );
+    let names: Vec<String> = client
+        .list_folders(account)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|f| f.name)
+        .filter(|name| name.starts_with(&run))
+        .collect();
+    assert_eq!(names, [renamed.clone(), format!("{renamed}/子")]);
+
+    client.delete_folder(parent.id).await.unwrap();
+    let report = client.sync_account(account).await.unwrap();
+    assert!(!report.folders.iter().any(|f| f.name.starts_with(&run)));
+    assert!(!maildir.join(format!(".{renamed}")).exists());
+}

@@ -14,20 +14,6 @@ fn open_gmail(cx: &mut TestAppContext, mail: &TestMail) -> (AnyWindowHandle, Ent
     (window, mailbox)
 }
 
-fn select_folder(
-    cx: &mut TestAppContext,
-    window: AnyWindowHandle,
-    mailbox: &Entity<Mailbox>,
-    folder: FolderId,
-) {
-    cx.update_window(window, |_, window, cx| {
-        mailbox.update(cx, |mailbox, cx| {
-            mailbox.select_place(Some(Place::Folder(folder)), window, cx)
-        })
-    })
-    .unwrap();
-}
-
 /// The names of the labels the reader shows.
 fn reader_labels(mailbox: &Entity<Mailbox>, cx: &App) -> Vec<String> {
     let reader = mailbox.read(cx).reader.read(cx);
@@ -38,11 +24,6 @@ fn reader_labels(mailbox: &Entity<Mailbox>, cx: &App) -> Vec<String> {
 fn checked(mailbox: &Entity<Mailbox>, label: FolderId, cx: &App) -> Option<bool> {
     let list = mailbox.read(cx).labels_dialog.as_ref()?.list.upgrade()?;
     Some(list.read(cx).delegate().checked()?.contains(&label))
-}
-
-fn dialog_open(cx: &mut TestAppContext, window: AnyWindowHandle) -> bool {
-    cx.update_window(window, |_, window, cx| window.has_active_dialog(cx))
-        .unwrap()
 }
 
 /// Presses L in the list and picks `label` in the dialog it opens.

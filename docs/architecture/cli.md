@@ -9,7 +9,7 @@
 src/
   main.rs        clap 的顶层 `Cli` / `Command`，开日志文件（见[日志](logging.md)）、打开 MailClient，分发，按错误决定退出码
   cmd/           每组命令一个文件，各自带 clap 参数类型：account、sync、search（ls / search）、
-                 read（read / attachment）、ops（mark / mv / archive / rm / label / ops）、
+                 read（read / attachment）、ops（mark / mv / archive / rm / label / ops）、folder（新建、重命名、删除文件夹）、
                  compose（compose / reply / forward / draft）、outbox（send / outbox）、watch、gc；
                  mod.rs 是它们共用的查找（账户、分页游标、文件夹名）
   output.rs      给人看的输出：转义陌生人给的文本、对齐的表格、各命令的表格和信件视图
@@ -47,6 +47,12 @@ types 加变体会编译失败）。
 - `--json` 只增加字段：文件夹的 `kind`、`listed`，邮件的 `labels`（标签文件夹的 id，系统标签也在内），账户的
   `mode`（第一次同步之前为 `null`）、`gmail_server`、`all_mail_hidden`，`sync` 每个账户的 `all_mail_hidden`，身份的 `server_saves_sent`
   与 `server_saves_sent_auto`（是不是猜的）。
+
+## 文件夹
+
+`catmail folder add <名字> [--parent <文件夹>]`、`folder rename <文件夹> <新名字>`、`folder rm <文件夹>`：当场在服务器上
+做（不进队列），连不上就失败、退出码 1。文件夹按名字找（与 `ls` 相同）；Gmail 上是标签。`--json` 输出
+`{"folder": …}`，结构同 `ls` 的文件夹，`rm` 的是删除前的样子。规则见[文件夹与标签的管理](folders.md)。
 
 ## 退出码
 

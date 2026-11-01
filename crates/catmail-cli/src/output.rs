@@ -565,6 +565,7 @@ mod tests {
             kind,
             listed: true,
             selectable: true,
+            inferiors: true,
             unread_count: 0,
             total_count: 0,
             last_synced_at: None,

@@ -98,6 +98,7 @@ CREATE TABLE folders (
     kind           TEXT    NOT NULL DEFAULT 'location',
     listed         INTEGER NOT NULL DEFAULT 1,
     selectable     INTEGER NOT NULL DEFAULT 1, -- 0 for \Noselect hierarchy nodes
+    inferiors      INTEGER NOT NULL DEFAULT 1, -- 0 for \Noinferiors: none can be made in it
     uidvalidity    INTEGER,
     uidnext        INTEGER,
     highest_modseq INTEGER,

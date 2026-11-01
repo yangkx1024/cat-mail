@@ -189,6 +189,10 @@ impl Session {
                 raw_name,
                 delimiter: list.delimiter.and_then(|d| d.chars().next()),
                 selectable,
+                inferiors: !list
+                    .name_attributes
+                    .iter()
+                    .any(|a| matches!(a, NameAttribute::NoInferiors)),
                 special_use,
             });
         }
@@ -867,6 +871,71 @@ impl Session {
         let fetch = uid_fetch(&uid.to_string(), &format!("UID {items}"));
         let response = self.conn.execute(fetch).await?;
         Ok(group_fetches(response, |u| u == uid).remove(&uid))
+    }
+
+    /// Creates the mailbox `raw_name` (in its wire form, see [`utf7`]) and subscribes to
+    /// it, for clients that show only subscribed mailboxes. The server makes the levels
+    /// above it it doesn't have.
+    pub async fn create(&mut self, raw_name: &str) -> Result<()> {
+        self.conn
+            .execute(Command::new("CREATE").astring(raw_name.as_bytes())?)
+            .await?;
+        self.subscribe(raw_name, true).await
+    }
+
+    /// Renames the mailbox `from` to `to`, and the mailboxes under it with it (RFC 3501
+    /// §6.3.5); the subscription goes along.
+    pub async fn rename(&mut self, from: &str, to: &str) -> Result<()> {
+        self.leave(from).await?;
+        let command = Command::new("RENAME")
+            .astring(from.as_bytes())?
+            .astring(to.as_bytes())?;
+        self.conn.execute(command).await?;
+        self.subscribe(from, false).await?;
+        self.subscribe(to, true).await
+    }
+
+    /// Deletes the mailbox `raw_name` and the messages in it, and unsubscribes from it.
+    /// One with mailboxes under it is left as a level that holds none (`\Noselect`), or
+    /// refused if it is one already (RFC 3501 §6.3.4).
+    pub async fn delete(&mut self, raw_name: &str) -> Result<()> {
+        self.leave(raw_name).await?;
+        self.conn
+            .execute(Command::new("DELETE").astring(raw_name.as_bytes())?)
+            .await?;
+        self.subscribe(raw_name, false).await
+    }
+
+    /// SUBSCRIBE or UNSUBSCRIBE: a courtesy to other clients, so a server refusing it
+    /// doesn't fail what it follows.
+    async fn subscribe(&mut self, raw_name: &str, on: bool) -> Result<()> {
+        let command = if on { "SUBSCRIBE" } else { "UNSUBSCRIBE" };
+        match self
+            .conn
+            .execute(Command::new(command).astring(raw_name.as_bytes())?)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(Error::Command { text, .. }) => {
+                tracing::debug!(%text, "{command} refused");
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Leaves the selected mailbox for INBOX if it is `raw_name` or may be under it, before
+    /// that is renamed or deleted: not every server lets a session do that to the mailbox
+    /// it has open, nor tells what became of it. EXAMINE, as CLOSE would expunge.
+    async fn leave(&mut self, raw_name: &str) -> Result<()> {
+        if self
+            .selected
+            .as_ref()
+            .is_some_and(|o| o.name.starts_with(raw_name))
+        {
+            self.has_inbox().await?;
+        }
+        Ok(())
     }
 
     /// Ends the session politely. Errors are not interesting at this point.

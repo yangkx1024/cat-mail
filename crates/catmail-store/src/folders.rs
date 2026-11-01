@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use catmail_types::{
     AccountId, Folder, FolderId, FolderKind, FolderRole, GmailLabel, special_folder,
@@ -11,7 +11,7 @@ use crate::drafts::Drafts;
 use crate::ops::{PendingOps, Touched};
 
 const COLUMNS: &str = "id, account_id, name, delimiter, role, kind, listed, selectable,
-    unread_count, total_count, last_synced_at";
+    inferiors, unread_count, total_count, last_synced_at";
 
 /// A mailbox as listed by the server.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +22,8 @@ pub struct RemoteFolder {
     pub role: Option<FolderRole>,
     pub kind: FolderKind,
     pub selectable: bool,
+    /// False for `\Noinferiors`.
+    pub inferiors: bool,
 }
 
 /// What [`Folders::reconcile`] changed.
@@ -134,12 +136,7 @@ impl<'c> Folders<'c> {
         let Some(id) = special_folder(&self.list(account)?, role).map(|f| f.id) else {
             return Ok(None);
         };
-        Ok(self
-            .conn
-            .prepare_cached("SELECT remote_name FROM folders WHERE id = ?1")?
-            .query_row([id.0], |r| r.get(0))
-            .optional()?
-            .map(|remote_name| (id, remote_name)))
+        Ok(self.remote_name(id)?.map(|remote_name| (id, remote_name)))
     }
 
     /// The account's locations, which sync goes through (labels have no sync state), in
@@ -225,14 +222,16 @@ impl<'c> Folders<'c> {
         });
         let mut upsert = self.conn.prepare(
             "INSERT INTO folders (account_id, remote_name, name, delimiter, role, kind,
-                                  selectable)
-             VALUES (:account, :remote_name, :name, :delimiter, :role, :kind, :selectable)
+                                  selectable, inferiors)
+             VALUES (:account, :remote_name, :name, :delimiter, :role, :kind, :selectable,
+                     :inferiors)
              ON CONFLICT (account_id, remote_name) DO UPDATE SET
                  name = excluded.name, delimiter = excluded.delimiter, role = excluded.role,
-                 kind = excluded.kind, listed = 1, selectable = excluded.selectable
-             WHERE (name, delimiter, role, kind, listed, selectable)
+                 kind = excluded.kind, listed = 1, selectable = excluded.selectable,
+                 inferiors = excluded.inferiors
+             WHERE (name, delimiter, role, kind, listed, selectable, inferiors)
                    IS NOT (excluded.name, excluded.delimiter, excluded.role, excluded.kind, 1,
-                           excluded.selectable)",
+                           excluded.selectable, excluded.inferiors)",
         )?;
         for folder in remote {
             changed |= upsert.execute(named_params! {
@@ -243,6 +242,7 @@ impl<'c> Folders<'c> {
                 ":role": folder.role.map(FolderRole::as_str),
                 ":kind": folder.kind.as_str(),
                 ":selectable": folder.selectable,
+                ":inferiors": folder.inferiors,
             })? > 0;
         }
 
@@ -258,10 +258,7 @@ impl<'c> Folders<'c> {
                 )? > 0;
                 continue;
             }
-            touched.merge(PendingOps::new(self.conn).forget_folder(FolderId(id))?);
-            Drafts::new(self.conn).end_generation(FolderId(id), None)?;
-            self.conn
-                .execute("DELETE FROM folders WHERE id = ?1", [id])?;
+            touched.merge(self.remove(FolderId(id))?);
             changed = true;
         }
 
@@ -299,6 +296,78 @@ impl<'c> Folders<'c> {
             self.recount(account)?;
         }
         Ok(Reconciled { changed, touched })
+    }
+
+    /// Deletes the folder with its messages, as when the server no longer has it. A
+    /// label comes off its messages, whose lists show it. Messages moved out of it
+    /// locally go with it; those moved into it go back. Returns the other folders whose
+    /// messages this changed, and the accounts whose queued changes it did.
+    pub fn remove(&self, folder: FolderId) -> Result<Touched> {
+        let folders = |sql| -> Result<BTreeSet<(AccountId, FolderId)>> {
+            Ok(self
+                .conn
+                .prepare_cached(sql)?
+                .query_map([folder.0], |r| {
+                    Ok((AccountId(r.get(0)?), FolderId(r.get(1)?)))
+                })?
+                .collect::<rusqlite::Result<_>>()?)
+        };
+        let mut touched = Touched {
+            // Where its messages are, and the lists that only show them (see `Touched`).
+            folders: folders(
+                "SELECT m.account_id, m.folder_id FROM message_labels l
+                 JOIN messages m ON m.id = l.message_id
+                 WHERE l.folder_id = ?1",
+            )?,
+            shown: folders(
+                "SELECT o.account_id, o.folder_id FROM message_labels l
+                 JOIN message_labels o ON o.message_id = l.message_id
+                 WHERE l.folder_id = ?1 AND o.folder_id <> ?1
+                 UNION
+                 SELECT s.account_id, s.id FROM message_labels l
+                 JOIN messages m ON m.id = l.message_id
+                 JOIN starred s ON s.account_id = m.account_id
+                 WHERE l.folder_id = ?1 AND m.flags & 2 <> 0",
+            )?,
+            ..Touched::default()
+        };
+        touched.merge(PendingOps::new(self.conn).forget_folder(folder)?);
+        Drafts::new(self.conn).end_generation(folder, None)?;
+        self.conn
+            .execute("DELETE FROM folders WHERE id = ?1", [folder.0])?;
+        Ok(touched)
+    }
+
+    /// Gives the folder its new names, after the server renamed it, and the folders
+    /// under it theirs: a sync that lists them then finds the folders it has, with their
+    /// messages and queued changes, rather than new ones.
+    pub fn rename(&self, folder: FolderId, remote_name: &str, name: &str) -> Result<()> {
+        self.conn.execute(
+            "WITH old AS (SELECT account_id, remote_name, name, ifnull(delimiter, '') AS d
+                          FROM folders WHERE id = :id)
+             UPDATE folders SET
+                 remote_name = :remote_name
+                     || substr(folders.remote_name, length(old.remote_name) + 1),
+                 name = CASE WHEN substr(folders.name, 1, length(old.name)) = old.name
+                             THEN :name || substr(folders.name, length(old.name) + 1)
+                             ELSE folders.name END
+             FROM old
+             WHERE folders.account_id = old.account_id
+               AND (folders.id = :id
+                    OR (old.d <> '' AND substr(folders.remote_name, 1, length(old.remote_name) + 1)
+                                        = old.remote_name || old.d))",
+            named_params! { ":id": folder.0, ":remote_name": remote_name, ":name": name },
+        )?;
+        Ok(())
+    }
+
+    /// The folder's name on the server, as commands spell it.
+    pub fn remote_name(&self, folder: FolderId) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .prepare_cached("SELECT remote_name FROM folders WHERE id = ?1")?
+            .query_row([folder.0], |r| r.get(0))
+            .optional()?)
     }
 
     /// Counts the account's folders anew, as the count triggers would have: needed when
@@ -448,6 +517,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Folder> {
         kind: parse_text(row, "kind")?,
         listed: row.get("listed")?,
         selectable: row.get("selectable")?,
+        inferiors: row.get("inferiors")?,
         unread_count: row.get("unread_count")?,
         total_count: row.get("total_count")?,
         last_synced_at: row.get("last_synced_at")?,
@@ -468,6 +538,7 @@ mod tests {
             role,
             kind: FolderKind::Location,
             selectable: true,
+            inferiors: true,
         }
     }
 
@@ -922,5 +993,109 @@ mod tests {
                 ("Hidden/Deep".into(), false),
             ]
         );
+    }
+
+    #[test]
+    fn renaming_keeps_the_folders_under_it_and_their_messages() {
+        let store = test_util::store();
+        let account = test_util::account(&store, "a@example.com");
+        let listed = [
+            remote("INBOX", "INBOX", Some(FolderRole::Inbox)),
+            remote("Projects", "Projects", None),
+            remote("Projects/&ZeVnLIqe-", "Projects/日本語", None),
+            remote("Projects2", "Projects2", None),
+        ];
+        store
+            .write(|db| db.folders().reconcile(account, &listed))
+            .unwrap();
+        let id = |name: &str| {
+            store
+                .read(|db| db.folders().find_by_name(account, name))
+                .unwrap()
+                .unwrap()
+                .id
+        };
+        let (projects, child) = (id("Projects"), id("Projects/日本語"));
+        store
+            .write(|db| {
+                db.folders().reset_uidvalidity(child, 3)?;
+                db.messages().upsert(account, child, &[message(1)])?;
+                db.folders().rename(projects, "&TgCI-", "一行")
+            })
+            .unwrap();
+        let names: Vec<_> = store
+            .read(|db| db.folders().list(account))
+            .unwrap()
+            .into_iter()
+            .map(|f| f.name)
+            .collect();
+        assert_eq!(names, ["INBOX", "Projects2", "一行", "一行/日本語"]);
+        assert_eq!(id("&TgCI-/&ZeVnLIqe-"), child);
+        // What the server lists now is what is stored: nothing changes, nothing goes.
+        let renamed = [
+            remote("INBOX", "INBOX", Some(FolderRole::Inbox)),
+            remote("&TgCI-", "一行", None),
+            remote("&TgCI-/&ZeVnLIqe-", "一行/日本語", None),
+            remote("Projects2", "Projects2", None),
+        ];
+        assert!(
+            !store
+                .write(|db| db.folders().reconcile(account, &renamed))
+                .unwrap()
+                .changed
+        );
+        assert_eq!(store.read(|db| db.messages().count(child)).unwrap(), 1);
+    }
+
+    #[test]
+    fn removing_a_label_touches_the_lists_of_its_messages() {
+        let store = test_util::store();
+        let account = test_util::account(&store, "a@gmail.com");
+        let label = |name: &str, role| RemoteFolder {
+            kind: FolderKind::Label,
+            ..remote(name, name, role)
+        };
+        let listed = [
+            remote("[Gmail]/All Mail", "All Mail", Some(FolderRole::All)),
+            label("INBOX", Some(FolderRole::Inbox)),
+            label("Work", None),
+            label("Other", None),
+        ];
+        store
+            .write(|db| db.folders().reconcile(account, &listed))
+            .unwrap();
+        let id = |name: &str| {
+            store
+                .read(|db| db.folders().find_by_name(account, name))
+                .unwrap()
+                .unwrap()
+                .id
+        };
+        let (all, inbox, work, other) = (id("All Mail"), id("INBOX"), id("Work"), id("Other"));
+        let mut labelled = message(1);
+        labelled.state.labels = Some(vec![
+            GmailLabel::System(FolderRole::Inbox),
+            GmailLabel::user("Work", "Work"),
+        ]);
+        let mut unlabelled = message(2);
+        unlabelled.state.labels = Some(vec![GmailLabel::user("Other", "Other")]);
+        store
+            .write(|db| {
+                db.folders().reset_uidvalidity(all, 7)?;
+                db.messages().upsert(account, all, &[labelled, unlabelled])
+            })
+            .unwrap();
+
+        let touched = store.write(|db| db.folders().remove(work)).unwrap();
+        assert_eq!(touched.folders, [(account, all)].into());
+        assert_eq!(touched.shown, [(account, inbox)].into());
+        store
+            .read(|db| {
+                assert_eq!(db.folders().get(work)?, None);
+                assert_eq!(db.messages().count(all)?, 2);
+                assert_eq!(db.folders().get(other)?.unwrap().total_count, 1);
+                Ok(())
+            })
+            .unwrap();
     }
 }

@@ -5,10 +5,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
-use catmail_core::{AccountId, Flags, FolderId, MailClient, MessageId, PendingOpId, ReplayReport};
+use catmail_core::{AccountId, Flags, MailClient, MessageId, PendingOpId, ReplayReport};
 use clap::{ArgGroup, Args, Subcommand};
 
-use crate::cmd::account_folders;
+use crate::cmd::{account_folders, find_folder};
 use crate::exit::{Exit, Outcome};
 use crate::json::{self, JsonPendingOp, JsonReplay};
 use crate::output::print_ops;
@@ -112,9 +112,9 @@ pub(crate) async fn move_messages(client: &MailClient, args: Move, json: bool) -
     // Resolve every name first, so an unknown one in one account changes nothing.
     let mut moves = Vec::new();
     for (account, ids) in messages {
-        let to = find_folder(client, account, &args.to).await?;
+        let to = find_folder(client, account, &args.to).await?.id;
         let from = match &args.from {
-            Some(name) => Some(find_folder(client, account, name).await?),
+            Some(name) => Some(find_folder(client, account, name).await?.id),
             None => None,
         };
         moves.push((account, ids, from, to));
@@ -132,7 +132,7 @@ pub(crate) async fn label(client: &MailClient, args: Label, json: bool) -> Resul
         let (mut add, mut remove) = (Vec::new(), Vec::new());
         for (names, ids) in [(&args.add, &mut add), (&args.remove, &mut remove)] {
             for name in names {
-                ids.push(find_folder(client, account, name).await?);
+                ids.push(find_folder(client, account, name).await?.id);
             }
         }
         changes.push((account, ids, add, remove));
@@ -148,15 +148,6 @@ pub(crate) async fn label(client: &MailClient, args: Label, json: bool) -> Resul
         json,
     )
     .await
-}
-
-/// The account's folder of that name; fails if there is none.
-async fn find_folder(client: &MailClient, account: AccountId, name: &str) -> Result<FolderId> {
-    Ok(client
-        .find_folder(account, name)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("no folder `{name}` in account {account}"))?
-        .id)
 }
 
 pub(crate) async fn archive(client: &MailClient, args: Archive, json: bool) -> Result<()> {
