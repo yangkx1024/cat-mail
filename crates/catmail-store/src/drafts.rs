@@ -999,6 +999,7 @@ mod tests {
                     role: Some(FolderRole::Drafts),
                     kind: catmail_types::FolderKind::Location,
                     selectable: true,
+                    inferiors: true,
                 };
                 db.folders().reconcile(account, &[remote])?;
                 let folder = db.folders().list(account)?[0].id;

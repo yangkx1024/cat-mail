@@ -17,6 +17,7 @@ mod new_mail;
 mod reader;
 mod resident;
 mod settings;
+mod submission;
 #[cfg(test)]
 mod test_support;
 mod theme;

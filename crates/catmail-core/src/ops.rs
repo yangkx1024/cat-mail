@@ -86,25 +86,38 @@ pub(crate) async fn delete_messages(
 }
 
 /// Makes a local change, all of it or nothing, and announces it. Returns the accounts
-/// it touched.
+/// it touched. Refused if it changes messages in a folder being deleted, or adds or
+/// takes off that label: the deletion would take the change along (a message moved out
+/// of it, say), or the label would come back. One that only shows the messages (a label
+/// they carry) is no matter. Checked in the transaction, after which a deletion's own
+/// check sees the change (see `folders::delete`).
 async fn change(
     engine: &Arc<Engine>,
     f: impl FnOnce(&catmail_store::Db<'_>) -> catmail_store::Result<Touched> + Send + 'static,
 ) -> Result<Vec<AccountId>> {
-    let touched = engine.write(f).await?;
+    let deleting = engine.being_deleted();
+    let touched = engine
+        .write(move |db| {
+            let touched = f(db)?;
+            let deleting = lock(&deleting);
+            if touched.folders.iter().any(|(_, f)| deleting.contains(f)) {
+                return Err(catmail_store::Error::Conflict(
+                    "the folder is being deleted".into(),
+                ));
+            }
+            Ok(touched)
+        })
+        .await?;
     Ok(announce(engine, &touched))
 }
 
 /// Emits the events for `touched`, and wakes the accounts' background sync to make any
 /// ops queued on the server. Returns its accounts.
 pub(crate) fn announce(engine: &Engine, touched: &Touched) -> Vec<AccountId> {
-    for &(account, folder) in &touched.folders {
-        engine.emit(Event::MessagesChanged { account, folder });
-    }
+    emit_lists(engine, touched);
     let accounts: BTreeSet<AccountId> = touched
-        .folders
-        .iter()
-        .map(|(a, _)| *a)
+        .lists()
+        .map(|(a, _)| a)
         .chain(touched.refused.iter().copied())
         .collect();
     for &account in &accounts {
@@ -115,6 +128,13 @@ pub(crate) fn announce(engine: &Engine, touched: &Touched) -> Vec<AccountId> {
     }
     emit_refused(engine, touched);
     accounts.into_iter().collect()
+}
+
+/// Tells that the messages of the folders `touched` lists changed.
+fn emit_lists(engine: &Engine, touched: &Touched) {
+    for (account, folder) in touched.lists() {
+        engine.emit(Event::MessagesChanged { account, folder });
+    }
 }
 
 /// Tells about the changes `touched` refused, after the events that show them undone.
@@ -297,9 +317,7 @@ async fn replay(
 /// of the folders in `touched`. Unlike [`announce`] it wakes nobody: the replay is what
 /// a wake would ask for.
 pub(crate) fn replayed(engine: &Engine, account: AccountId, touched: &Touched) {
-    for &(account, folder) in &touched.folders {
-        engine.emit(Event::MessagesChanged { account, folder });
-    }
+    emit_lists(engine, touched);
     engine.emit(Event::PendingOpsChanged { account });
     emit_refused(engine, touched);
 }

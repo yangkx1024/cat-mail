@@ -104,6 +104,27 @@ fn click(cx: &mut TestAppContext, window: AnyWindowHandle, id: impl Into<Element
     .unwrap();
 }
 
+fn select_folder(
+    cx: &mut TestAppContext,
+    window: AnyWindowHandle,
+    mailbox: &Entity<Mailbox>,
+    folder: catmail_core::FolderId,
+) {
+    cx.update_window(window, |_, window, cx| {
+        mailbox.update(cx, |mailbox, cx| {
+            mailbox.select_place(Some(Place::Folder(folder)), window, cx)
+        })
+    })
+    .unwrap();
+}
+
+/// Whether a dialog is open, once what is pending has run.
+fn dialog_open(cx: &mut TestAppContext, window: AnyWindowHandle) -> bool {
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| window.has_active_dialog(cx))
+        .unwrap()
+}
+
 /// Draws a frame and lets the tasks it started run.
 fn frame(cx: &mut TestAppContext, window: AnyWindowHandle) {
     cx.update_window(window, |_, window, cx| window.render_frame(cx))
@@ -191,6 +212,7 @@ fn wait_for_one_window(cx: &mut TestAppContext) {
 }
 
 mod labels;
+mod managing_folders;
 mod reading;
 mod screenshots;
 mod settings;

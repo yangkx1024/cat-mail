@@ -364,6 +364,7 @@ pub(crate) mod test_util {
                 role,
                 kind,
                 selectable: true,
+                inferiors: true,
             })
             .collect();
         let ids = store

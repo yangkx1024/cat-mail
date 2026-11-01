@@ -10,7 +10,8 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, rems,
 };
 
-use crate::login_form::{self, LoginFields, LoginValues, ServerFields, ServerValues, Submit};
+use crate::login_form::{LoginFields, LoginValues, ServerFields, ServerValues};
+use crate::submission::{self, Submit};
 
 pub enum AddAccountEvent {
     /// The login worked and the account is stored; background sync syncs it.
@@ -84,7 +85,7 @@ impl AddAccount {
             .into_iter()
             .chain(imap.inputs())
             .chain(smtp.inputs());
-        let subscriptions = login_form::submit_on_enter(fields, Self::sign_in, window, cx);
+        let subscriptions = submission::submit_on_enter(fields, Self::sign_in, window, cx);
 
         Self {
             client,
@@ -92,7 +93,7 @@ impl AddAccount {
             imap,
             smtp,
             cancellable,
-            submit: Submit::default(),
+            submit: Submit::new("sign in"),
             _subscriptions: subscriptions,
         }
     }

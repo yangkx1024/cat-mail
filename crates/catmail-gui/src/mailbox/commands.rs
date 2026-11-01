@@ -2,7 +2,7 @@
 //! all call these) or a row's, writing, syncing and settings.
 
 use catmail_core::{
-    AccountId, AccountMode, Flags, FolderId, MessageId, MessageSummary, OpKind, OpStatus, PendingOp,
+    AccountId, Flags, FolderId, MessageId, MessageSummary, OpKind, OpStatus, PendingOp,
 };
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
@@ -319,8 +319,7 @@ impl Mailbox {
 
     /// The message's account, if it has labels: on Gmail.
     fn labels_account(&self, message: &MessageSummary) -> Option<&AccountEntry> {
-        self.account(message.account_id)
-            .filter(|a| a.account.mode == Some(AccountMode::Gmail))
+        self.account(message.account_id).filter(|a| a.has_labels())
     }
 
     /// Opens "Labels" for the selected message, which changes them as they are picked.

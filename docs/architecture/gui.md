@@ -34,6 +34,7 @@ src/
     refresh.rs       哪个引擎事件重读什么、节流（纯逻辑）
     message_list/    中栏列表（mod.rs：来源、加载、选中；rows.rs：三种行的样子）
     folders.rs       文件夹分区（纯逻辑）
+    folder_commands.rs   侧栏文件夹的右键菜单：新建、重命名、删除，及命名的对话框（见[文件夹与标签的管理](folders.md#界面)）
     folder_picker.rs add_account.rs   "Move to"与"Labels"对话框；登录页
     tests/           驱动窗口的集成测试，按读信、写信、设置分文件，另有截图
   reader/            读信：mod.rs 状态与操作，message.rs 打开的邮件，images.rs 内嵌与远程图片，view.rs 渲染，
@@ -79,6 +80,8 @@ Gmail 的 `[Gmail]` 也一样）。其余文件夹按服务器的层级跟在后
 - **Drafts 是本机草稿**，不是服务器的 Drafts 文件夹：那里是本机草稿的副本，按邮件列出会重复、也
   不能编辑。代价是其他客户端写的草稿在 GUI 里看不到（CLI 的 `catmail ls Drafts` 仍能看到）。
 - **Outbox 只在有待发邮件时出现**，有被拒绝或未确认的条目时带警告图标。
+- **新建、重命名、删除文件夹和标签**在右键菜单里：新建总是建在右键点的地方（账户地址上建在最上层，文件夹和标签上
+  建在它里面，不允许就没有），可以改的另有 Rename、Delete，F2 重命名选中的文件夹（见[文件夹与标签的管理](folders.md#界面)）。
 - Sent、Junk、Trash 不显示未读数。底部一行说明连接问题（登录被拒、连不上、发不出去；同步进度只由搜索框旁的 Sync 按钮转圈表示；发不出去时列出每个发不出的地址），截断时悬停显示全文。
 
 ## 字体（Linux）
@@ -350,10 +353,11 @@ INBOX，所以打开一个文件夹时同步它（`MailClient::sync_folder`，�
   `DialogButton` 键上下文，在那里把 Enter 绑成 `NoAction`，交还给按钮。确认框（`layout::confirm_danger`）
 同理不用 `AlertDialog` 默认生成的按钮，自己给 footer，Cancel 和确认按钮带同样的上下文。表单要等对话框打开之后才把焦点
   放进 Email 字段：对话框记下打开时的焦点，关闭时还给它，先聚焦就会还给一个随表单消失的字段，
-  再按 Esc 也关不掉设置。登录页不是对话框，任一字段按 Enter 提交靠 `login_form::submit_on_enter`。
-- 两个表单的提交流程也共用 `login_form::Submit`：进行中不重复提交、字段校验失败或登录失败显示在按钮
-  上方，以及 Cancel（进行中不可用）和主按钮（loading）的样式；登录页把两个按钮排成一行，身份表单放进
-  `DialogFooter`。表单只提供字段和要调用的 `MailClient` 方法。
+  再按 Esc 也关不掉设置。登录页不是对话框，任一字段按 Enter 提交靠 `submission::submit_on_enter`。
+- 表单的提交流程共用 `submission::Submit`（`submission.rs`，对话框里的表单另用 `open_dialog`）：进行中不重复提交、字段校验失败或请求失败显示在按钮
+  上方，以及 Cancel（进行中不可用）和主按钮（loading）的样式；登录页把两个按钮排成一行，对话框里的表单（发件身份、
+  文件夹的名字）放进 `DialogFooter`。`open_dialog` 给表单上下各留 4px：对话框的正文按内容高度裁剪，输入框的焦点
+  光圈画在边框外 3px，表单以输入框开头或结尾时光圈会被裁掉。表单只提供字段和要调用的 `MailClient` 方法。
 
 ## HTML 引擎
 

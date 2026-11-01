@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use catmail_proto::imap::{
     ChangedFlags, FetchedMessage, Items, ListedMailbox, MailboxStatus, Session,
 };
-use catmail_store::{FolderSyncState, NewMessage, RemoteFolder};
+use catmail_store::{Db, FolderSyncState, NewMessage, Reconciled, RemoteFolder};
 use catmail_types::{
     AccountId, AccountMode, Event, Folder, FolderId, FolderKind, FolderRole, FolderSyncReport,
     ReplayReport, SyncReport,
@@ -32,7 +32,7 @@ use catmail_types::{
 use crate::draft_sync::Uploads;
 use crate::engine::{Activity, Engine};
 use crate::pool::with_session;
-use crate::{Error, Result, connection, ops};
+use crate::{Error, Result, connection, folders, ops};
 
 /// Stored messages per flags FETCH, and per transaction, on a server that can't say
 /// which changed: the whole answer is held in memory.
@@ -64,11 +64,7 @@ pub(crate) async fn sync_one(
     folder: FolderId,
     max_age: Duration,
 ) -> Result<Option<FolderSyncReport>> {
-    let account = engine
-        .read(move |db| db.folders().get(folder))
-        .await?
-        .ok_or(Error::FolderNotFound(folder))?
-        .account_id;
+    let account = folders::account_of(&engine, folder).await?;
     let permit = engine.sync_permit(account).await;
     permit
         .run(async {
@@ -149,36 +145,8 @@ pub(crate) async fn run(
             // and saw the server as it is now or later. One that held the permit before
             // may have seen it as it was before this was asked for.
             let start = Instant::now();
-            let listed = session.list().await?;
-            let mode = mode_of(session, &listed);
-            let remote = remote_folders(listed, mode);
-            let (reconciled, mode_changed) = engine
-                .write(move |db| {
-                    let mut reconciled = db.folders().reconcile(account_id, &remote)?;
-                    // What a message row is changed with the mode (one per location, or
-                    // one per X-GM-MSGID): every location starts over.
-                    let mode_changed = db.accounts().set_mode(account_id, mode)?;
-                    if mode_changed {
-                        reconciled
-                            .touched
-                            .merge(db.folders().end_generations(account_id)?);
-                        reconciled.changed = true;
-                    }
-                    Ok((reconciled, mode_changed))
-                })
-                .await?;
-            if reconciled.changed {
-                engine.emit(Event::FoldersChanged {
-                    account: account_id,
-                });
-            }
-            // With the mode known, the account tells whether All Mail is hidden.
-            if mode_changed {
-                engine.emit(Event::AccountChanged {
-                    account: account_id,
-                });
-            }
-            ops::announce(engine, &reconciled.touched);
+            let mode =
+                store_folders(engine, session, account_id, |_| Ok(Reconciled::default())).await?;
 
             // Local changes first, so the sync sees the server with them made.
             let mut replayed = ops::Replayed::default();
@@ -254,6 +222,53 @@ fn log_report(report: &SyncReport, began: Instant) {
         took = ?began.elapsed(),
         "synced every folder"
     );
+}
+
+/// Lists the account's mailboxes and makes its folders match them (see
+/// [`Folders::reconcile`](catmail_store::Folders::reconcile)), and the account's mode,
+/// then tells about it. `first` runs before, in the same transaction: what the account's
+/// own change to its mailboxes (a rename, say) means for its folders. Returns the mode.
+/// Call with the account's sync permit.
+pub(crate) async fn store_folders(
+    engine: &Arc<Engine>,
+    session: &mut Session,
+    account_id: AccountId,
+    first: impl FnOnce(&Db<'_>) -> catmail_store::Result<Reconciled> + Send + 'static,
+) -> Result<AccountMode> {
+    let listed = session.list().await?;
+    let mode = mode_of(session, &listed);
+    let remote = remote_folders(listed, mode);
+    let (reconciled, mode_changed) = engine
+        .write(move |db| {
+            let done = first(db)?;
+            let mut reconciled = db.folders().reconcile(account_id, &remote)?;
+            reconciled.changed |= done.changed;
+            reconciled.touched.merge(done.touched);
+            // What a message row is changed with the mode (one per location, or one per
+            // X-GM-MSGID): every location starts over.
+            let mode_changed = db.accounts().set_mode(account_id, mode)?;
+            if mode_changed {
+                reconciled
+                    .touched
+                    .merge(db.folders().end_generations(account_id)?);
+                reconciled.changed = true;
+            }
+            Ok((reconciled, mode_changed))
+        })
+        .await?;
+    if reconciled.changed {
+        engine.emit(Event::FoldersChanged {
+            account: account_id,
+        });
+    }
+    // With the mode known, the account tells whether All Mail is hidden.
+    if mode_changed {
+        engine.emit(Event::AccountChanged {
+            account: account_id,
+        });
+    }
+    ops::announce(engine, &reconciled.touched);
+    Ok(mode)
 }
 
 /// Gmail if the server has X-GM-EXT-1 and lists All Mail. All Mail can be hidden from
@@ -864,6 +879,7 @@ pub(crate) fn remote_folders(listed: Vec<ListedMailbox>, mode: AccountMode) -> V
                     FolderKind::Location
                 },
                 selectable: m.selectable,
+                inferiors: m.inferiors,
             }
         })
         .collect()
@@ -919,6 +935,7 @@ mod tests {
             name: name.into(),
             delimiter: Some('/'),
             selectable: true,
+            inferiors: true,
             special_use,
         }
     }

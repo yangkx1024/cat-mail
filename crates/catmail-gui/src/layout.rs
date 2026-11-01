@@ -7,9 +7,10 @@ use gpui_kit::component::dialog::{Cancel, Confirm, Dialog, DialogEntrance, Dialo
 use gpui_kit::component::sidebar::SidebarMenuItem;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, WindowExt as _, h_flex};
 use gpui_kit::{
-    App, Bounds, Div, ElementId, FontWeight, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, SharedString, Size, Stateful, StatefulInteractiveElement as _,
-    StyleRefinement, Styled as _, TitlebarOptions, Window, WindowBounds, WindowOptions, div,
+    App, Bounds, ClickEvent, Context, Div, ElementId, FontWeight, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, SharedString, Size, Stateful,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, TitlebarOptions, WeakEntity,
+    Window, WindowBounds, WindowOptions, div,
 };
 
 use crate::actions::DIALOG_BUTTON;
@@ -176,6 +177,24 @@ pub fn open_dialog(
     window.open_dialog(cx, move |dialog, window, cx| {
         build(dialog.entrance(DIALOG_ENTRANCE), window, cx)
     });
+}
+
+/// What a context menu's item runs: `f` on `view`, once the menu has closed. A dialog
+/// opened from the item gives the focus back, when it closes, to what had it when it
+/// opened; run at once, that is the menu, gone by then, and the window's keys would do
+/// nothing. GPUI Kit hands the focus back before an item that dispatches an action, not
+/// before one with a click handler.
+pub fn after_menu<V: 'static>(
+    view: WeakEntity<V>,
+    f: impl Fn(&mut V, &mut Window, &mut Context<V>) + 'static,
+) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
+    let f = Rc::new(f);
+    move |_, window, cx| {
+        let (view, f) = (view.clone(), f.clone());
+        window.defer(cx, move |window, cx| {
+            view.update(cx, |view, cx| f(view, window, cx)).ok();
+        });
+    }
 }
 
 /// The element ids of the buttons that confirm and cancel [`confirm_danger`].

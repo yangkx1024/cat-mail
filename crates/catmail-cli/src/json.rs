@@ -718,6 +718,7 @@ mod tests {
             kind: catmail_core::FolderKind::Label,
             listed: true,
             selectable: true,
+            inferiors: true,
             unread_count: 2,
             total_count: 7,
             last_synced_at: None,

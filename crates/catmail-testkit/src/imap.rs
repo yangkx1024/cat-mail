@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -49,6 +50,9 @@ pub struct FakeMailbox {
     pub name: String,
     /// LIST attributes, e.g. `\Sent` or `\Noselect`.
     pub attributes: Vec<String>,
+    /// The hierarchy delimiter LIST gives it: `/`, unless a test makes a namespace of
+    /// its own.
+    pub delimiter: char,
     pub uidvalidity: u32,
     pub uidnext: u32,
     pub highest_modseq: u64,
@@ -60,6 +64,7 @@ impl FakeMailbox {
         Self {
             name: name.into(),
             attributes: Vec::new(),
+            delimiter: '/',
             uidvalidity: 1,
             uidnext: 1,
             highest_modseq: 1,
@@ -329,6 +334,9 @@ pub struct Faults {
     pub slow: Option<(String, std::time::Duration)>,
     /// Close this many new connections before the greeting, as if the network were down.
     pub refuse_connections: usize,
+    /// Make the next CREATE, RENAME or DELETE, then close the connection without
+    /// answering. Fires once.
+    pub drop_after_mailbox_change: bool,
 }
 
 impl Default for Faults {
@@ -377,6 +385,7 @@ impl Default for Faults {
             garble_idle: false,
             slow: None,
             refuse_connections: 0,
+            drop_after_mailbox_change: false,
         }
     }
 }
@@ -411,6 +420,8 @@ pub struct ServerState {
     pub username: String,
     pub password: String,
     pub mailboxes: Vec<FakeMailbox>,
+    /// Mailboxes subscribed to, by wire name.
+    pub subscriptions: BTreeSet<String>,
     /// Behave as Gmail (X-GM-EXT-1; see [`ServerState::gmail`]).
     pub gmail: bool,
     next_gm_msgid: u64,
@@ -434,6 +445,7 @@ impl ServerState {
             username: username.into(),
             password: password.into(),
             mailboxes: vec![FakeMailbox::new("INBOX")],
+            subscriptions: BTreeSet::new(),
             gmail: false,
             next_gm_msgid: 1_850_000_000_000_000_001,
             faults: Faults::default(),
@@ -660,6 +672,122 @@ impl ServerState {
             .count()
     }
 
+    /// The mailboxes, by wire name.
+    pub fn mailbox_names(&self) -> Vec<String> {
+        self.mailboxes.iter().map(|m| m.name.clone()).collect()
+    }
+
+    /// CREATE: an empty mailbox, under a UIDVALIDITY no other has had (a mailbox deleted
+    /// and made again is another mailbox), with the delimiter of the one it is in. On
+    /// Gmail, a label.
+    fn create(&mut self, name: &str) -> Result<(), &'static str> {
+        if self.find(name).is_some() {
+            return Err("[ALREADYEXISTS] Mailbox already exists");
+        }
+        let mut mailbox = FakeMailbox::new(name);
+        if let Some(parent) = self
+            .mailboxes
+            .iter()
+            .filter(|m| under(name, &m.name, m.delimiter))
+            .max_by_key(|m| m.name.len())
+        {
+            mailbox.delimiter = parent.delimiter;
+        }
+        mailbox.uidvalidity = self
+            .mailboxes
+            .iter()
+            .map(|m| m.uidvalidity)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        self.mailboxes.push(mailbox);
+        Ok(())
+    }
+
+    /// Whether the mailbox can't be renamed or deleted: INBOX, or one of Gmail's
+    /// locations.
+    fn fixed(&self, i: usize) -> bool {
+        let mb = &self.mailboxes[i];
+        mb.name == "INBOX" || mb.is_location() && self.gmail
+    }
+
+    /// RENAME: the mailbox and those under it, keeping their UIDVALIDITY, as Dovecot
+    /// does. On Gmail the label is renamed on its messages too.
+    fn rename(&mut self, from: &str, to: &str) -> Result<(), &'static str> {
+        let Some(i) = self.find(from) else {
+            return Err("[NONEXISTENT] Mailbox doesn't exist");
+        };
+        if self.fixed(i) {
+            return Err("[CANNOT] Can't rename this mailbox");
+        }
+        if self.find(to).is_some() {
+            return Err("[ALREADYEXISTS] Target mailbox already exists");
+        }
+        let d = self.mailboxes[i].delimiter;
+        let renamed = |name: &str| {
+            (name == from || under(name, from, d)).then(|| format!("{to}{}", &name[from.len()..]))
+        };
+        for mb in &mut self.mailboxes {
+            if let Some(name) = renamed(&mb.name) {
+                mb.name = name;
+            }
+        }
+        if self.gmail {
+            for mb in self.mailboxes.iter_mut().filter(|mb| mb.is_location()) {
+                for uid in mb.messages.iter().map(|m| m.uid).collect::<Vec<_>>() {
+                    mb.change(uid, |msg| {
+                        let mut changed = false;
+                        for label in &mut msg.labels {
+                            if let Some(name) = renamed(label) {
+                                *label = name;
+                                changed = true;
+                            }
+                        }
+                        changed
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// DELETE: a mailbox with others under it is emptied and kept as a level
+    /// (`\Noselect`), refused if it is one already (RFC 3501 §6.3.4). On Gmail the label
+    /// comes off its messages.
+    fn delete(&mut self, name: &str) -> Result<(), &'static str> {
+        let Some(i) = self.find(name) else {
+            return Err("[NONEXISTENT] Mailbox doesn't exist");
+        };
+        if self.fixed(i) {
+            return Err("[CANNOT] Can't delete this mailbox");
+        }
+        let mb = &self.mailboxes[i];
+        let inferiors = self
+            .mailboxes
+            .iter()
+            .any(|m| under(&m.name, &mb.name, mb.delimiter));
+        if inferiors && mb.has_attribute("\\Noselect") {
+            return Err("[CANNOT] Mailbox has children");
+        }
+        if self.gmail
+            && let Some(label) = mb.label()
+        {
+            for location in self.mailboxes.iter_mut().filter(|mb| mb.is_location()) {
+                for uid in location.messages.iter().map(|m| m.uid).collect::<Vec<_>>() {
+                    location.change_label(uid, &label, false);
+                }
+            }
+        }
+        if inferiors {
+            let mb = &mut self.mailboxes[i];
+            mb.messages.clear();
+            mb.attributes.push("\\Noselect".into());
+        } else {
+            self.mailboxes.remove(i);
+        }
+        Ok(())
+    }
+
     fn find(&self, name: &str) -> Option<usize> {
         self.mailboxes.iter().position(|m| {
             m.name == name || (name.eq_ignore_ascii_case("INBOX") && m.name == "INBOX")
@@ -785,12 +913,24 @@ struct Session {
     tls: bool,
     mode: TlsMode,
     authenticated: bool,
-    selected: Option<usize>,
+    /// The selected mailbox, by name: renaming or deleting another moves it in
+    /// `ServerState::mailboxes`.
+    selected: Option<String>,
     /// Opened with SELECT rather than EXAMINE.
     writable: bool,
     condstore_enabled: bool,
     /// The selected mailbox as this connection was last told about it.
     view: Option<View>,
+}
+
+impl Session {
+    fn selected_index(&self, st: &ServerState) -> Option<usize> {
+        st.find(self.selected.as_deref()?)
+    }
+
+    fn mailbox<'a>(&self, st: &'a ServerState) -> Option<&'a FakeMailbox> {
+        self.selected_index(st).map(|i| &st.mailboxes[i])
+    }
 }
 
 /// What a connection knows about its selected mailbox. Changes others make since are
@@ -1213,7 +1353,11 @@ async fn handle(
             let st = lock(state);
             for mb in &st.mailboxes {
                 let attrs = mb.attributes.join(" ");
-                out += &format!("* LIST ({attrs}) \"/\" {}\r\n", quote(&mb.name));
+                out += &format!(
+                    "* LIST ({attrs}) \"{}\" {}\r\n",
+                    mb.delimiter,
+                    quote(&mb.name)
+                );
             }
             out += &format!("{tag} OK LIST completed\r\n");
         }
@@ -1223,7 +1367,7 @@ async fn handle(
             match st.find(&name) {
                 Some(i) if !st.mailboxes[i].has_attribute("\\Noselect") => {
                     let mb = &st.mailboxes[i];
-                    session.selected = Some(i);
+                    session.selected = Some(mb.name.clone());
                     session.view = Some(View::of(mb));
                     session.writable = command == "SELECT";
                     session.condstore_enabled = st.faults.condstore
@@ -1299,6 +1443,32 @@ async fn handle(
                 (_, None) => out += &format!("{tag} BAD Missing message\r\n"),
             }
         }
+        "CREATE" | "RENAME" | "DELETE" => {
+            let st = &mut *lock(state);
+            let name = |i: usize| args.get(i).map(Tok::text).unwrap_or_default();
+            let done = match command.as_str() {
+                "CREATE" => st.create(&name(0)),
+                "RENAME" => st.rename(&name(0), &name(1)),
+                _ => st.delete(&name(0)),
+            };
+            match done {
+                Ok(()) if std::mem::take(&mut st.faults.drop_after_mailbox_change) => {
+                    return Ok(Next::Close);
+                }
+                Ok(()) => out += &format!("{tag} OK {command} completed\r\n"),
+                Err(text) => out += &format!("{tag} NO {text}\r\n"),
+            }
+        }
+        "SUBSCRIBE" | "UNSUBSCRIBE" => {
+            let st = &mut *lock(state);
+            let name = args.first().map(Tok::text).unwrap_or_default();
+            if command == "SUBSCRIBE" {
+                st.subscriptions.insert(name);
+            } else {
+                st.subscriptions.remove(&name);
+            }
+            out += &format!("{tag} OK {command} completed\r\n");
+        }
         "STATUS" => {
             let st = lock(state);
             let name = args.first().map(Tok::text).unwrap_or_default();
@@ -1317,7 +1487,7 @@ async fn handle(
         }
         "UID SEARCH" => {
             let st = lock(state);
-            match session.selected.and_then(|i| st.mailboxes.get(i)) {
+            match session.mailbox(&st) {
                 Some(mb) => {
                     // `ALL`, `UID <set>`, `HEADER <field> <substring>`, or on Gmail
                     // `X-GM-MSGID <id>`.
@@ -1359,7 +1529,7 @@ async fn handle(
                 st.mailbox_mut(&mailbox).append(&raw, &[]);
             }
             let refusal = st.faults.refuse_changes.clone();
-            match session.selected {
+            match session.selected_index(st) {
                 None => out += &format!("{tag} BAD No mailbox selected\r\n"),
                 Some(_) if !session.writable => {
                     out += &format!("{tag} NO [READ-ONLY] Mailbox is read-only\r\n");
@@ -1464,7 +1634,7 @@ async fn handle(
                 empty
             };
             let st = lock(state);
-            match session.selected.and_then(|i| st.mailboxes.get(i)) {
+            match session.mailbox(&st) {
                 Some(_) if empty => out += &format!("{tag} OK FETCH completed\r\n"),
                 // Header literals may not be UTF-8, so FETCH output is bytes.
                 Some(mb) => {
@@ -1498,14 +1668,18 @@ async fn handle(
     Ok(next)
 }
 
+/// Whether the mailbox `name` is inside `parent`, at any depth, `delimiter` separating
+/// the levels.
+fn under(name: &str, parent: &str, delimiter: char) -> bool {
+    name.strip_prefix(parent)
+        .is_some_and(|rest| rest.starts_with(delimiter))
+}
+
 /// `* n EXISTS` if messages arrived in the selected mailbox since the connection was last
 /// told, as servers report new mail with the answer to any command. (Other changes wait
 /// for IDLE: a server can't announce expunges during FETCH, STORE or SEARCH.)
 fn new_messages(session: &mut Session, st: &ServerState) -> String {
-    let (Some(i), Some(view)) = (session.selected, &mut session.view) else {
-        return String::new();
-    };
-    let Some(mb) = st.mailboxes.get(i) else {
+    let (Some(mb), Some(view)) = (session.mailbox(st), &mut session.view) else {
         return String::new();
     };
     let new: Vec<_> = mb
@@ -1540,13 +1714,12 @@ const REBUILT: &str = "* BYE UIDVALIDITY changed\r\n";
 
 /// Whether the connection's selected mailbox was rebuilt since it was opened: its UIDs
 /// mean other messages now, so the connection is ended, as Dovecot does, whether it
-/// idles or sends a command.
+/// idles or sends a command. So is one whose mailbox was renamed or deleted.
 fn rebuilt(st: &ServerState, session: &Session) -> bool {
-    match (
-        session.selected.and_then(|i| st.mailboxes.get(i)),
-        &session.view,
-    ) {
-        (Some(mb), Some(view)) => mb.uidvalidity != view.uidvalidity,
+    match (&session.selected, &session.view) {
+        (Some(_), Some(view)) => session
+            .mailbox(st)
+            .is_none_or(|mb| mb.uidvalidity != view.uidvalidity),
         _ => false,
     }
 }
@@ -1589,10 +1762,7 @@ async fn idle(
             if rebuilt(&st, session) {
                 (REBUILT.to_owned(), Next::Close)
             } else {
-                match (
-                    session.selected.and_then(|i| st.mailboxes.get(i)),
-                    &mut session.view,
-                ) {
+                match (session.mailbox(&st), &mut session.view) {
                     (Some(mb), Some(view)) => (view.catch_up(View::of(mb)), Next::Continue),
                     _ => (String::new(), Next::Continue),
                 }

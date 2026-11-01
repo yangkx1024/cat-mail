@@ -15,7 +15,7 @@ use anyhow::Result;
 use catmail_core::{Config, DEFAULT_GC_INTERVAL, DraftId, MailClient, SyncSchedule};
 use clap::{Parser, Subcommand};
 
-use crate::cmd::{account, compose, gc, identity, ops, outbox, read, search, sync, watch};
+use crate::cmd::{account, compose, folder, gc, identity, ops, outbox, read, search, sync, watch};
 use crate::output::printable_text;
 
 #[derive(Parser)]
@@ -64,6 +64,9 @@ enum Command {
     Watch,
     /// List folders, or the messages in a folder
     Ls(search::Ls),
+    /// Create, rename or delete folders (on Gmail, labels), on the server at once
+    #[command(subcommand)]
+    Folder(folder::FolderCommand),
     /// Show a message, downloading its body first (it stays unread on the server)
     Read(read::Read),
     /// Save an attachment, downloading it first if needed
@@ -168,6 +171,7 @@ async fn run() -> Result<()> {
             watch::watch(&client, cli.json, interrupted).await
         }
         Command::Ls(args) => search::ls(&client, args, cli.json).await,
+        Command::Folder(cmd) => folder::folder(&client, cmd, cli.json).await,
         Command::Read(args) => read::read(&client, args, cli.json).await,
         Command::Attachment(args) => read::save_attachment(&client, args).await,
         Command::Search(args) => search::search(&client, args, cli.json).await,

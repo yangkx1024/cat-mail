@@ -165,6 +165,7 @@ UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UI
 | [操作队列](architecture/op-queue.md) | 标记 / 移动 / 删除的本地效果、回放顺序、拒绝时的撤销、无 MOVE 服务器上的 COPY |
 | [正文与附件](architecture/bodies.md) | 按需下载的两条路径、正文提取、HTML 清洗、内嵌图片 |
 | [草稿与发信](architecture/sending.md) | 草稿与回复、草稿同步到服务器、outbox 状态机、SMTP 客户端、重试、保存到 Sent |
+| [文件夹与标签的管理](architecture/folders.md) | 新建、重命名、删除文件夹和 Gmail 标签：当场在服务器上做而不进队列、能改哪些、答复丢失后的重来 |
 | [位置与标签](architecture/labels.md) | Gmail 按标签建模：一封邮件一行、位置与标签、同步、操作与界面 |
 | [IMAP / SMTP 连接](architecture/protocol.md) | IMAP 库（改用 imap-proto 的决定）、连接层的严格解析、连接池、认证、TLS |
 | [存储](architecture/storage.md) | SQLite 约定、计数、跨账户约束、全文搜索、BlobStore 与 GC、凭据 |

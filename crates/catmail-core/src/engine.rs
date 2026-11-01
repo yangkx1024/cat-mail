@@ -48,6 +48,25 @@ pub(crate) struct Engine {
     /// When the computer last woke from sleep, as [`Engine::resume`] was told.
     woke: Cutoff,
     accounts: Mutex<HashMap<AccountId, Arc<AccountState>>>,
+    /// Folders being deleted on the server (`folders::delete`): local changes to their
+    /// messages are refused meanwhile, as the deletion would take those along. Shared
+    /// with the write transactions that check it.
+    deleting: Arc<Mutex<HashSet<FolderId>>>,
+}
+
+/// Folders marked as being deleted, by [`Engine::deleting`]; unmarked when dropped.
+pub(crate) struct Deleting {
+    set: Arc<Mutex<HashSet<FolderId>>>,
+    folders: Vec<FolderId>,
+}
+
+impl Drop for Deleting {
+    fn drop(&mut self) {
+        let mut set = lock(&self.set);
+        for folder in &self.folders {
+            set.remove(folder);
+        }
+    }
 }
 
 /// Sizes and intervals the engine works in, which tests and users on metered connections
@@ -353,7 +372,22 @@ impl Engine {
             closing: watch::Sender::new(()),
             woke: Cutoff::default(),
             accounts: Mutex::default(),
+            deleting: Arc::default(),
         }
+    }
+
+    /// Marks `folders` as being deleted until the guard returned is dropped.
+    pub fn deleting(&self, folders: Vec<FolderId>) -> Deleting {
+        lock(&self.deleting).extend(folders.iter().copied());
+        Deleting {
+            set: self.deleting.clone(),
+            folders,
+        }
+    }
+
+    /// The folders being deleted, to check from inside a write transaction.
+    pub fn being_deleted(&self) -> Arc<Mutex<HashSet<FolderId>>> {
+        self.deleting.clone()
     }
 
     /// For background tasks that hold the engine weakly and wait long between rounds: on

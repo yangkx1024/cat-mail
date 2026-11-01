@@ -1030,6 +1030,7 @@ mod tests {
             role: None,
             kind: FolderKind::Location,
             selectable: true,
+            inferiors: true,
         };
         store
             .write(|db| db.folders().reconcile(account, &[inbox]))
@@ -1576,6 +1577,7 @@ mod tests {
                 role,
                 kind: FolderKind::Location,
                 selectable: true,
+                inferiors: true,
             })
             .collect();
         store
@@ -2073,6 +2075,7 @@ mod tests {
                 role: f.role,
                 kind: f.kind,
                 selectable: f.selectable,
+                inferiors: true,
             })
             .collect();
         let hidden: Vec<_> = all

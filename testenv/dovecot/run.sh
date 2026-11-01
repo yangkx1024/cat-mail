@@ -62,11 +62,12 @@ cp "$fixtures/01-plain.eml"        "$maildir/.Archive.2026/cur/1792100000.archiv
 
 # `catmail` has the fixtures (tests/dovecot.rs); `sender` sends through submission
 # (tests/submission.rs), so the two never change the same mailbox; `push` gets mail
-# delivered while a client idles on its INBOX, and `drafts` has drafts uploaded
-# (tests/dovecot.rs).
+# delivered while a client idles on its INBOX, `drafts` has drafts uploaded, and
+# `folders` has folders created, renamed and deleted (tests/dovecot.rs).
 mkfolder "$work/mail/push/Maildir"
 mkfolder "$work/mail/drafts/Maildir"
-for user in catmail sender push drafts; do
+mkfolder "$work/mail/folders/Maildir"
+for user in catmail sender push drafts folders; do
     echo "$user:{PLAIN}$user:$(id -u):$(id -g)::$work/mail/$user::"
 done > "$work/users"
 sed -e "s|@WORK@|$work|g" -e "s|@RUN@|$run|g" -e "s|@PORT@|$port|g" \

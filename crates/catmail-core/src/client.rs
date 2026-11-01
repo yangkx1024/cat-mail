@@ -27,8 +27,8 @@ use crate::runtime::Runtime;
 use crate::secrets::{KeyringSecrets, SecretStore};
 use crate::watch::{self, SyncSchedule};
 use crate::{
-    Config, DataDirLock, Error, Result, body, connection, drafts, gc, images, ops, send, sleep,
-    sync,
+    Config, DataDirLock, Error, Result, body, connection, drafts, folders, gc, images, ops, send,
+    sleep, sync,
 };
 
 /// How many events [`MailClient::subscribe`]'s receivers keep unread before the oldest
@@ -689,6 +689,52 @@ impl MailClient {
                     .read(move |db| db.folders().find_by_name(account, &name))
                     .await
             })
+            .await
+    }
+
+    /// Creates a folder named `name` (on Gmail, a label) in `parent`, or with `None` at
+    /// the top of the account's folders, and returns it. Made on the server at once, so
+    /// it fails without a connection; the account's folders change as after a sync, with
+    /// [`Event::FoldersChanged`](crate::Event::FoldersChanged). `name` is one level: it
+    /// can't hold the server's delimiter (see [`Folder::delimiter`]).
+    pub async fn create_folder(
+        &self,
+        account: AccountId,
+        parent: Option<FolderId>,
+        name: &str,
+    ) -> Result<Folder> {
+        self.rt
+            .run(folders::create(
+                self.engine.clone(),
+                account,
+                parent,
+                name.to_owned(),
+            ))
+            .await
+    }
+
+    /// Renames the folder to `name`, staying where it is, and returns it; the folders
+    /// under it go along. Its messages and queued changes stay. Only for a folder
+    /// [`can_change_folder`](crate::can_change_folder) allows; made on the server at
+    /// once, as [`create_folder`](Self::create_folder) is.
+    pub async fn rename_folder(&self, folder: FolderId, name: &str) -> Result<Folder> {
+        self.rt
+            .run(folders::rename(
+                self.engine.clone(),
+                folder,
+                name.to_owned(),
+            ))
+            .await
+    }
+
+    /// Deletes the folder and the folders under it, with their messages, on the server
+    /// too: it can't be undone. On Gmail a label comes off its messages, which stay.
+    /// Queued changes are made first, so messages moved out of it aren't lost with it;
+    /// if some can't be, nothing is deleted. Only for a folder
+    /// [`can_change_folder`](crate::can_change_folder) allows.
+    pub async fn delete_folder(&self, folder: FolderId) -> Result<()> {
+        self.rt
+            .run(folders::delete(self.engine.clone(), folder))
             .await
     }
 

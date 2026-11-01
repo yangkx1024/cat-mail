@@ -60,6 +60,36 @@ fn screenshots() {
         cx.update(|cx| shown_in_reader(&mailbox, cx) == Some(plan))
     });
     save(&mut cx, window, "gmail");
+    // Labels made, renamed and deleted: the address's menu, and the dialogs.
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.right_click(super::sidebar::account_heading(gmail.account()), cx);
+    })
+    .unwrap();
+    save(&mut cx, window, "gmail-account-menu");
+    cx.update_window(window, |_, window, cx| {
+        window.within("popup-menu").click(0usize, cx)
+    })
+    .unwrap();
+    save(&mut cx, window, "gmail-new-label");
+    let work = gmail.folder_id("Work");
+    for (name, command) in [
+        (
+            "gmail-rename-label",
+            Mailbox::rename_folder as fn(&mut Mailbox, _, &mut Window, &mut Context<Mailbox>),
+        ),
+        ("gmail-delete-label", Mailbox::delete_folder),
+    ] {
+        cx.update_window(window, |_, window, cx| window.close_all_dialogs(cx))
+            .unwrap();
+        cx.update_window(window, |_, window, cx| {
+            mailbox.update(cx, |mailbox, cx| command(mailbox, work, window, cx))
+        })
+        .unwrap();
+        save(&mut cx, window, name);
+    }
+    cx.update_window(window, |_, window, cx| window.close_all_dialogs(cx))
+        .unwrap();
     cx.update_window(window, |_, window, cx| {
         window.dispatch_action(Box::new(EditLabels), cx)
     })

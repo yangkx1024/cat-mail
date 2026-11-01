@@ -16,6 +16,7 @@ mod drafts;
 mod engine;
 mod error;
 mod filename;
+mod folders;
 mod gc;
 mod image_cache;
 mod images;
