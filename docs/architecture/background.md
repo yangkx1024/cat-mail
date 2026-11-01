@@ -204,7 +204,7 @@ GUI 的 `Notifier`（`catmail-gui/src/new_mail.rs`）是应用级的全局，引
 
 - **先攒 1 秒再说**（`GATHER`）。一次同步按批提交、每批一个 `NewMail`，醒来后各账户又同时同步；
   不攒的话一阵新邮件会弹出好几条"N 封新邮件"。Linux 上 GPUI 不支持按 tag 替换通知，替换不了已经弹出的。
-- **主窗口在前台时不说**（`Resident::main_is_active`，攒够时判断，这时就不再重读）。写信窗口在前台照发。
+- **主窗口在前台时也说**：不看窗口在不在前台、开没开着。起初主窗口在前台时不发，后来改掉了。
 - **说之前重读**：`MailClient::unread_in_inbox` 用一条查询挑出各账户仍未读、仍在 INBOX（Gmail：仍带
   INBOX 标签）的，新的在前，与 `Messages::new_mail` 用同一个条件（`UNREAD_IN_INBOX`），攒的这一秒里在
   别处读过、移走的不再提醒。

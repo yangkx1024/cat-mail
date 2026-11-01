@@ -173,15 +173,6 @@ impl Resident {
         });
     }
 
-    /// Whether the main window is open and in front.
-    pub fn main_is_active(cx: &mut App) -> bool {
-        let Some(main) = cx.global::<Self>().main else {
-            return false;
-        };
-        main.update(cx, |_, window, _| window.is_window_active())
-            .unwrap_or(false)
-    }
-
     /// Shows the main window on the display it was last on, taken to `to` (now, or once
     /// it opens). `activation_token` is what the notification or tray clicked gave, if
     /// anything, to take focus on Wayland.
@@ -585,24 +576,19 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn new_mail_isnt_notified_while_the_main_window_is_in_front(cx: &mut TestAppContext) {
+    fn new_mail_is_notified_while_the_main_window_is_in_front(cx: &mut TestAppContext) {
         let mail = start(None, cx);
         let (window, _) = main_mailbox(cx);
         cx.update_window(window, |_, window, _| window.activate_window())
             .unwrap();
         cx.run_until_parked();
-        assert!(cx.update(Resident::main_is_active));
+        assert!(
+            cx.update_window(window, |_, window, _| window.is_window_active())
+                .unwrap()
+        );
 
         mail.deliver_and_sync("Lunch?");
-        wait_until(|| {
-            cx.run_until_parked();
-            cx.read(Notifier::is_gathering)
-        });
-        // It decides whether to tell as soon as the gathering is over.
-        cx.executor().advance_clock(GATHER);
-        cx.run_until_parked();
-        assert!(!cx.read(Notifier::is_gathering));
-        assert!(cx.shown_system_notifications().is_empty());
+        clicking_the_notification_opens_it(Place::Folder(mail.folder_id("INBOX")), cx);
     }
 
     #[gpui_kit::test]
