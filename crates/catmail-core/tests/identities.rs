@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use catmail_core::{
-    Address, DraftContent, Error, ErrorKind, Event, Forwarding, Identity, NewIdentity,
+    Address, DraftContent, Error, ErrorKind, Event, Forwarding, Identity, IdentityId, NewIdentity,
     OutboxStatus, Verify,
 };
 use catmail_testkit::{FakeMailbox, FakeSmtp, ServerState, SmtpState};
@@ -157,6 +157,70 @@ async fn the_copy_in_drafts_is_from_the_identity() {
     let m = MessageParser::new().parse(&drafts[0].raw).unwrap();
     let from = m.from().unwrap().first().unwrap();
     assert_eq!(from.address(), Some("news@example.org"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn renaming_an_identity_replaces_its_copies_in_drafts() {
+    let env = env(state()).await;
+    env.client.sync_account(env.account).await.unwrap();
+    let own = env.own_identity().await;
+    assert_eq!(own.display_name, None);
+    env.client
+        .create_draft(env.account, None, content("draft"), Vec::new())
+        .await
+        .unwrap();
+    env.queue_as("queued", None).await;
+    env.client.replay_pending(env.account).await.unwrap();
+    let from_in_drafts = || {
+        let mut state = env.fake.state();
+        let drafts = &state.mailbox_mut("Drafts").messages;
+        assert_eq!(drafts.len(), 1);
+        let m = MessageParser::new().parse(&drafts[0].raw).unwrap();
+        let from = m.from().unwrap().first().unwrap();
+        from.name().map(str::to_owned)
+    };
+    assert_eq!(from_in_drafts(), None);
+
+    let mut events = env.client.subscribe();
+    env.client
+        .set_identity_name(own.id, Some(" Alice\0 Liddell "))
+        .await
+        .unwrap();
+    let seen = drain(&mut events);
+    for event in [
+        Event::AccountChanged {
+            account: env.account,
+        },
+        Event::DraftsChanged {
+            account: env.account,
+        },
+    ] {
+        assert!(seen.contains(&event), "{seen:?}");
+    }
+    let own = env.own_identity().await;
+    assert_eq!(own.display_name.as_deref(), Some("Alice Liddell"));
+    env.client.replay_pending(env.account).await.unwrap();
+    assert_eq!(from_in_drafts().as_deref(), Some("Alice Liddell"));
+
+    // Queued before, it goes as it was written.
+    assert_eq!(env.flush().await, [(OutboxStatus::Done, 1)]);
+    let sent = env.smtp.state().received.clone();
+    let m = MessageParser::new().parse(&sent[0].data).unwrap();
+    assert_eq!(m.from().unwrap().first().unwrap().name(), None);
+
+    env.client
+        .set_identity_name(own.id, Some("  "))
+        .await
+        .unwrap();
+    assert_eq!(env.own_identity().await.display_name, None);
+    let missing = env
+        .client
+        .set_identity_name(IdentityId(99), Some("x"))
+        .await;
+    assert!(
+        matches!(missing, Err(Error::IdentityNotFound(_))),
+        "{missing:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

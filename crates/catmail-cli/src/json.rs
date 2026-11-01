@@ -91,6 +91,7 @@ fn flags(flags: Flags) -> Vec<&'static str> {
 pub(crate) struct JsonAccount {
     id: i64,
     email: String,
+    /// Its default identity's.
     display_name: Option<String>,
     username: String,
     imap: JsonServer,
@@ -108,16 +109,14 @@ pub(crate) struct JsonAccount {
 impl JsonAccount {
     /// `identities` are the account's.
     pub(crate) fn new(a: &Account, identities: &[Identity]) -> Self {
+        let default = identities.iter().find(|i| i.is_default);
         Self {
             id: a.id.0,
             email: a.email.clone(),
-            display_name: a.display_name.clone(),
+            display_name: default.and_then(|i| i.display_name.clone()),
             username: a.username.clone(),
             imap: (&a.imap).into(),
-            smtp: identities
-                .iter()
-                .find(|i| i.is_default)
-                .map(|i| (&i.smtp).into()),
+            smtp: default.map(|i| (&i.smtp).into()),
             mode: a.mode.map(AccountMode::as_str),
             gmail_server: a.gmail_server,
             all_mail_hidden: a.all_mail_hidden(),

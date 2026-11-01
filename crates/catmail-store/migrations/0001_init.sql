@@ -18,7 +18,6 @@
 CREATE TABLE accounts (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     email         TEXT    NOT NULL UNIQUE COLLATE NOCASE,
-    display_name  TEXT,
     username      TEXT    NOT NULL,
     imap_host     TEXT    NOT NULL,
     imap_port     INTEGER NOT NULL,

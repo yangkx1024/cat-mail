@@ -5,6 +5,7 @@ use catmail_core::{AccountId, IdentityId};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Context, ElementId, IntoElement, ParentElement as _, Styled as _, Window, div,
 };
@@ -12,6 +13,7 @@ use gpui_kit::{
 use crate::assets::Hero;
 use crate::layout;
 use crate::mailbox::AccountEntry;
+use crate::submission::{NameDialog, NameIds};
 
 use super::*;
 
@@ -61,11 +63,50 @@ impl SettingsView {
         let Some(entry) = self.account(id, cx) else {
             return;
         };
-        let (email, name) = (
-            entry.account.email.clone(),
-            entry.account.display_name.clone(),
-        );
+        // As the account's default goes by: most often the user's own name.
+        let name = entry
+            .identities
+            .iter()
+            .find(|i| i.is_default)
+            .and_then(|i| i.display_name.clone());
+        let email = entry.account.email.clone();
         identity::open(self.client.clone(), id, &email, name, window, cx);
+    }
+
+    fn rename_identity(
+        &mut self,
+        account: AccountId,
+        id: IdentityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entry) = self.account(account, cx) else {
+            return;
+        };
+        let Some(identity) = entry.identities.iter().find(|i| i.id == id) else {
+            return;
+        };
+        let dialog = NameDialog {
+            ids: NameIds {
+                // Not `identity-name`: the form that adds one has that.
+                field: "identity-rename",
+                cancel: "identity-rename-cancel",
+                ok: "identity-rename-save",
+                error: "identity-rename-error",
+            },
+            title: format!("Name for {}", identity.email).into(),
+            // Empty, the address goes alone.
+            name: identity.display_name.clone().unwrap_or_default(),
+            placeholder: Some("Optional"),
+            ok: "Save",
+            what: "change the name",
+        };
+        let client = self.client.clone();
+        let request = move |name: String| {
+            let client = client.clone();
+            async move { client.set_identity_name(id, Some(&name)).await }
+        };
+        dialog.open(request, window, cx);
     }
 
     fn make_default(&mut self, id: IdentityId, window: &mut Window, cx: &mut Context<Self>) {
@@ -153,46 +194,66 @@ impl SettingsView {
                 let account_id = account.id;
                 let identity_rows = entry.identities.iter().map(|identity| {
                     let id = identity.id;
-                    let actions = if identity.is_default {
-                        div()
-                            .text_xs()
-                            .text_color(muted)
-                            .child("Default")
-                            .into_any_element()
-                    } else {
-                        h_flex()
-                            .gap_1()
-                            .child(
+                    let actions = h_flex()
+                        .gap_1()
+                        .child(
+                            Button::new(ElementId::from(("rename-identity", id.0 as u64)))
+                                .ghost()
+                                .small()
+                                .icon(Hero::PencilSquare)
+                                .accessibility_label("Rename")
+                                .tooltip("Rename")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.rename_identity(account_id, id, window, cx)
+                                })),
+                        )
+                        .child({
+                            // Filled for the default, which stays so until another is made it.
+                            let star =
                                 Button::new(ElementId::from(("default-identity", id.0 as u64)))
                                     .ghost()
                                     .small()
-                                    .label("Make default")
+                                    .toggled(identity.is_default);
+                            if identity.is_default {
+                                star.icon(Hero::StarSolid)
+                                    .accessibility_label("Default")
+                                    .tooltip("Default")
+                            } else {
+                                star.icon(Hero::Star)
+                                    .accessibility_label("Make default")
+                                    .tooltip("Make default")
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.make_default(id, window, cx)
-                                    })),
-                            )
-                            .child(
+                                    }))
+                            }
+                        })
+                        .when(!identity.is_default, |actions| {
+                            actions.child(
                                 Button::new(ElementId::from(("remove-identity", id.0 as u64)))
                                     .ghost()
                                     .small()
-                                    .label("Remove")
+                                    .icon(Hero::Trash)
+                                    .accessibility_label("Remove address")
+                                    .tooltip("Remove address")
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.confirm_remove_identity(account_id, id, window, cx)
                                     })),
                             )
-                            .into_any_element()
-                    };
+                        });
                     h_flex()
                         .gap_3()
                         .py_1p5()
+                        // Icon and buttons by the first line, the address.
+                        .items_start()
                         // Under the account's email, past its icon.
                         .pl_8()
-                        .child(Icon::new(Hero::PaperAirplane).text_color(muted))
+                        .child(Icon::new(Hero::PaperAirplane).text_color(muted).mt_1())
                         .child(
                             v_flex()
                                 .flex_1()
                                 .min_w_0()
-                                .child(div().text_sm().child(identity.email.clone()))
+                                // As the From line has it: with its name.
+                                .child(div().text_sm().child(identity.address().to_string()))
                                 .child(
                                     div()
                                         .text_xs()
@@ -222,7 +283,10 @@ impl SettingsView {
                     .child(
                         h_flex()
                             .gap_3()
-                            .child(Icon::new(Hero::UserCircle).text_color(muted))
+                            // Icon and button by the first line, the address.
+                            .items_start()
+                            // Level with its letters, a little below the middle of the line.
+                            .child(Icon::new(Hero::UserCircle).text_color(muted).mt_1())
                             .child(
                                 v_flex()
                                     .flex_1()
@@ -242,11 +306,10 @@ impl SettingsView {
                                 )))
                                 .ghost()
                                 .small()
-                                .label("Remove")
-                                .tooltip(
-                                    "Removing an account deletes only what is kept on this \
-                                     computer.",
-                                )
+                                .icon(Hero::Trash)
+                                // The confirmation says what goes, and that the server keeps it all.
+                                .accessibility_label("Remove account")
+                                .tooltip("Remove account")
                                 .on_click(cx.listener(
                                     move |this, _, window, cx| {
                                         this.confirm_remove_account(account_id, window, cx)
@@ -273,6 +336,7 @@ impl SettingsView {
                     Button::new("settings-add-account")
                         .outline()
                         .small()
+                        .rounded_full()
                         .icon(Hero::Plus)
                         .label("Add account")
                         .on_click(cx.listener(|this, _, window, cx| this.add_account(window, cx))),

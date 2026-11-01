@@ -6,7 +6,7 @@ use crate::error::is_unique_violation;
 use crate::identities::Identities;
 use crate::{Error, Result};
 
-const COLUMNS: &str = "id, email, display_name, username,
+const COLUMNS: &str = "id, email, username,
     imap_host, imap_port, imap_security, mode, gmail_server,
     created_at";
 
@@ -25,9 +25,9 @@ impl<'c> Accounts<'c> {
     pub fn insert(&self, new: &NewAccount, secret_key: &str) -> Result<Account> {
         let conn = self.conn;
         let sql = format!(
-            "INSERT INTO accounts (email, display_name, username,
+            "INSERT INTO accounts (email, username,
                                    imap_host, imap_port, imap_security, secret_key)
-             VALUES (:email, :display_name, :username,
+             VALUES (:email, :username,
                      :imap_host, :imap_port, :imap_security, :secret_key)
              RETURNING {COLUMNS}"
         );
@@ -36,7 +36,6 @@ impl<'c> Accounts<'c> {
                 &sql,
                 named_params! {
                     ":email": new.email,
-                    ":display_name": new.display_name,
                     ":username": new.username,
                     ":imap_host": new.imap.host,
                     ":imap_port": new.imap.port,
@@ -156,7 +155,6 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Account> {
     Ok(Account {
         id: AccountId(row.get("id")?),
         email: row.get("email")?,
-        display_name: row.get("display_name")?,
         username: row.get("username")?,
         imap: server(row, "imap")?,
         mode: parse_opt_text(row, "mode")?,
