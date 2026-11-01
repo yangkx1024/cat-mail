@@ -1,0 +1,8 @@
+#!/bin/sh
+# Entry point of the AppImage. The runtime sets APPDIR to where it mounted the image.
+set -e
+here="${APPDIR:-$(dirname "$(readlink -f "$0")")}"
+# The CJK fonts are looked up in $XDG_DATA_DIRS/catmail/fonts (fonts.rs). Unset means
+# the default directories, which must stay.
+export XDG_DATA_DIRS="$here/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+exec "$here/usr/bin/catmail-gui" "$@"

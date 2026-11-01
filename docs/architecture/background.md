@@ -225,7 +225,7 @@ GUI 的 `Notifier`（`catmail-gui/src/new_mail.rs`）是应用级的全局，引
 
 **应用标识**：`set_app_identity("net.yangkx.catmail", "catmail")`，在第一个窗口之前；标识与数据、
 配置目录的限定名相同。Windows 上它是 AppUserModelID，Linux 上 GPUI 只用名字（通知的 app name），
-不带 desktop 文件 id 的提示；macOS 的通知要有 bundle，打包时（开机启动之后）再看。
+不带 desktop 文件 id 的提示（窗口的 app id 另设，见[打包](packaging.md#字体图标桌面文件)）；macOS 的通知要有 bundle，打包时（开机启动之后）再看。
 
 已知的限制，都在 GPUI 的 Linux 实现里：
 
@@ -285,7 +285,8 @@ GUI 的 `Tray`（`catmail-gui/src/tray/`）是应用级的全局，引擎打开�
 
 `catmail-gui --background`：以 headless 启动，不开窗口，进入常驻。"开机时启动"的设置写 XDG
 autostart 文件（Flatpak 用 Background portal）、Windows 的 `HKCU\…\Run`、macOS 的
-`SMAppService.mainApp`。
+`SMAppService.mainApp`。AppImage 里运行时，autostart 的 `Exec` 写 `$APPIMAGE`（文件本身），不能写
+当前可执行文件的路径：它在每次运行都不同的挂载点下（见[打包](packaging.md#与开机启动的关系)）。
 
 ## 与 CLI 的关系
 

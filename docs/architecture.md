@@ -174,6 +174,7 @@ UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UI
 | [后台运行](architecture/background.md) | 关窗后常驻、单实例与唤起、睡眠唤醒、新邮件事件；通知、托盘、开机启动（设计中） |
 | [日志](architecture/logging.md) | stderr 与数据目录里的日志文件、谁能写、记什么、轮转 |
 | [测试](architecture/testing.md) | 假 IMAP / SMTP 服务器、真实 Dovecot 与 mailpit、GUI 测试 |
+| [打包](architecture/packaging.md) | Linux AppImage：在旧 glibc 上构建、哪些库自带、字体与桌面文件、自动更新、发布 |
 
 ## 数据目录
 

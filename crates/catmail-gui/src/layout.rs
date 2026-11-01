@@ -7,10 +7,10 @@ use gpui_kit::component::dialog::{Cancel, Confirm, Dialog, DialogEntrance, Dialo
 use gpui_kit::component::sidebar::SidebarMenuItem;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, WindowExt as _, h_flex};
 use gpui_kit::{
-    App, Bounds, ClickEvent, Context, Div, ElementId, FontWeight, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, SharedString, Size, Stateful,
-    StatefulInteractiveElement as _, StyleRefinement, Styled as _, TitlebarOptions, WeakEntity,
-    Window, WindowBounds, WindowOptions, div,
+    AnyWindowHandle, App, Bounds, ClickEvent, Context, Div, ElementId, Entity, FontWeight, Hsla,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString, Size,
+    Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled as _, TitlebarOptions,
+    WeakEntity, Window, WindowBounds, WindowOptions, div,
 };
 
 use crate::actions::DIALOG_BUTTON;
@@ -55,8 +55,25 @@ pub fn window_options(
         }),
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size, cx))),
         window_min_size: Some(min_size),
+        // Wayland reads it when it creates the window.
+        app_id: Some(crate::APP_ID.into()),
         ..Default::default()
     }
+}
+
+/// Opens a window of the app. Its app id (Wayland) or `WM_CLASS` (X11) is the name of
+/// the desktop file, which is how a dock or a task switcher finds the window's icon and
+/// name.
+pub fn open_window<V: Render>(
+    options: WindowOptions,
+    cx: &mut App,
+    build: impl FnOnce(&mut Window, &mut App) -> Entity<V>,
+) -> anyhow::Result<(AnyWindowHandle, Entity<V>)> {
+    gpui_kit::open_window(options, cx, |window, cx| {
+        // X11 doesn't read `WindowOptions::app_id`.
+        window.set_app_id(crate::APP_ID);
+        build(window, cx)
+    })
 }
 
 /// The bar of commands at the top of a pane or window; the same height whatever it holds.

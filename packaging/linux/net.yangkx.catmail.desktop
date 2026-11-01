@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=catmail
+GenericName=Mail Client
+Exec=catmail-gui
+Icon=net.yangkx.catmail
+Terminal=false
+Categories=Network;Email;
+Keywords=mail;email;imap;smtp;
+StartupNotify=true
+StartupWMClass=net.yangkx.catmail
+SingleMainWindow=true

@@ -117,9 +117,13 @@ uuid = { version = "1.28", features = ["v4"] }
 # Thin LTO with one codegen unit takes 18-20% off both binaries. Not opt-level "z" (as
 # Zed does for its own crates): our code is a small part of the binaries, and "z" saved
 # under 1% on catmail-gui even with every dependency included.
+#
+# Stripped of symbols too: catmail-gui goes from 86 to 69 MB. A panic's backtrace
+# then shows addresses only; the message and location are still logged.
 [profile.release]
 lto = "thin"
 codegen-units = 1
+strip = true
 
 [workspace.lints.rust]
 # Not forbid, which a crate couldn't loosen: catmail-gui's `memory` module calls

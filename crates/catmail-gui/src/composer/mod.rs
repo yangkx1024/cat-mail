@@ -234,7 +234,7 @@ fn open_window(opening: Opening, cx: &mut App) -> anyhow::Result<()> {
         size(px(480.), px(360.)),
         cx,
     );
-    let (handle, composer) = gpui_kit::open_window(options, cx, |window, cx| {
+    let (handle, composer) = crate::layout::open_window(options, cx, |window, cx| {
         cx.new(|cx| Composer::new(opening, window, cx))
     })?;
     cx.default_global::<OpenComposers>()
