@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use catmail_proto::imap::{CopyUid, Session};
 use catmail_store::{CopyCheckpoint, Moved, ReplayFolder, ReplayKind, ReplayOp, Touched};
 use catmail_types::{
-    AccountId, Event, Flags, FolderId, MessageId, PendingOp, PendingOpId, ReplayReport,
+    AccountId, DeleteMode, Event, Flags, FolderId, MessageId, PendingOp, PendingOpId, ReplayReport,
     ReportedError,
 };
 
@@ -77,10 +77,10 @@ pub(crate) async fn archive_messages(
 pub(crate) async fn delete_messages(
     engine: Arc<Engine>,
     messages: Vec<MessageId>,
-    permanently: bool,
+    mode: DeleteMode,
 ) -> Result<Vec<AccountId>> {
     change(&engine, move |db| {
-        db.ops().delete_messages(&messages, permanently, now())
+        db.ops().delete_messages(&messages, mode, now())
     })
     .await
 }

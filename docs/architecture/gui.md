@@ -152,7 +152,10 @@ macOS、Windows 用系统字体，不受影响。
   右边换成对它们的工具栏，与读信区工具栏同样的图标和分组：Archive、Delete、Move to；已读 / 未读、Flag。
   标记按全体算：都已读才是 Mark as unread，都有旗标才是 Remove flag，否则对全部设上。Archive 只对能归档的
   那些（都不能时不可用）；Move to 要求都属于一个账户（All Inboxes 和搜索里可能不是），列出能移动其中任一封的
-  文件夹，只移动会变的那些；Delete 中要永久删除的（在 Trash 里或账户没有 Trash）一起确认一次，其余进 Trash；去向由引擎按 `DeleteOutcome` 定，一次调用，只有没有 Trash 的账户的邮件要另调一次（`permanently`，两次之间不原子，见 #190）。
+  文件夹，只移动会变的那些；Delete 中要永久删除的（在 Trash 里或账户没有 Trash）一起确认一次，其余进 Trash；
+  去向由引擎按 `DeleteOutcome` 逐封定，一次调用、一次写事务。只有这批里有 GUI 已知没有 Trash 的账户的邮件（因而
+  已经确认过）才用 `DeleteMode::ByOutcome`，否则用 `ToTrash`：账户的 Trash 在 GUI 刷新文件夹前没了时，没确认的
+  删除被引擎拒绝，不会变成永久删除。
   移走、删除、归档后这些邮件不再勾选（Gmail 上留在列表里的也是），标记后仍勾选。勾选的邮件不在新读到的行里
   （被移走、服务器上删了）就不再勾选；换来源时全部清空。
 - **快捷键作用于勾选的邮件**：有勾选时 E、Delete、Move to、已读 / 未读、Flag 的快捷键对勾选的邮件，没有时对

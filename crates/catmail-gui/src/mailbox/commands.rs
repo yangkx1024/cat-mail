@@ -3,8 +3,8 @@
 //! or a row's; writing, syncing and settings.
 
 use catmail_core::{
-    AccountId, DeleteOutcome, Flags, FolderId, MessageId, MessageSummary, OpKind, OpStatus,
-    PendingOp,
+    AccountId, DeleteMode, DeleteOutcome, Flags, FolderId, MessageId, MessageSummary, OpKind,
+    OpStatus, PendingOp,
 };
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
@@ -307,28 +307,28 @@ impl Mailbox {
     }
 
     /// Each to Trash, or for good from Trash or without one, as the engine will
-    /// ([`DeleteOutcome`]). A message deleted for good can't be brought back, so that
-    /// asks first, once for them all.
+    /// ([`DeleteOutcome`]): one change. A message deleted for good can't be brought back,
+    /// so that asks first, once for them all.
     fn delete(&mut self, messages: &[MessageSummary], window: &mut Window, cx: &mut Context<Self>) {
-        // The engine decides between Trash and for good itself, but refuses a message of
-        // an account without Trash unless told to delete it for good.
-        let (mut by_outcome, mut no_trash, mut for_good) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut ids, mut for_good) = (Vec::new(), Vec::new());
+        // For good without Trash only where the user is asked about it: if an account's
+        // Trash went away since its folders were listed here, the engine refuses.
+        let mut mode = DeleteMode::ToTrash;
         for message in messages {
             let Some(account) = self.account(message.account_id) else {
                 continue;
             };
+            ids.push(message.id);
             let outcome = account.folders.delete_outcome(message.folder_id);
             if outcome == DeleteOutcome::NoTrash {
-                no_trash.push(message.id);
-            } else {
-                by_outcome.push(message.id);
+                mode = DeleteMode::ByOutcome;
             }
             if outcome.is_permanent() {
                 for_good.push(message);
             }
         }
         let (title, description) = match for_good[..] {
-            [] => return self.delete_now(by_outcome, no_trash, window, cx),
+            [] => return self.delete_now(ids, mode, window, cx),
             [message] => (
                 format!(
                     "Delete “{}” for good?",
@@ -349,39 +349,27 @@ impl Mailbox {
             window,
             cx,
             move |window, cx| {
-                let (by_outcome, no_trash) = (by_outcome.clone(), no_trash.clone());
-                this.update(cx, |this, cx| {
-                    this.delete_now(by_outcome, no_trash, window, cx)
-                })
-                .ok();
+                let ids = ids.clone();
+                this.update(cx, |this, cx| this.delete_now(ids, mode, window, cx))
+                    .ok();
             },
         );
     }
 
-    /// Deletes `by_outcome` as [`DeleteOutcome`] says, and `no_trash`, of accounts
-    /// without Trash, for good. One call unless there are both: not one change then, as
-    /// the engine takes "for good" for the whole call (issue #190).
     fn delete_now(
         &mut self,
-        by_outcome: Vec<MessageId>,
-        no_trash: Vec<MessageId>,
+        ids: Vec<MessageId>,
+        mode: DeleteMode,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let ids: Vec<_> = by_outcome.iter().chain(&no_trash).copied().collect();
         if ids.is_empty() {
             return;
         }
         let what = what(ids.len(), "delete the message", "delete the messages");
         self.uncheck(&ids, cx);
-        self.change(ids, what, window, cx, move |client| async move {
-            let mut accounts = Vec::new();
-            for (ids, permanently) in [(by_outcome, false), (no_trash, true)] {
-                if !ids.is_empty() {
-                    accounts.extend(client.delete_messages(ids, permanently).await?);
-                }
-            }
-            Ok(accounts)
+        self.change(ids.clone(), what, window, cx, move |client| async move {
+            client.delete_messages(ids, mode).await
         });
     }
 

@@ -1,6 +1,7 @@
 //! Checking messages in the list, and the commands on all of them.
 
 use super::*;
+use catmail_core::DeleteMode;
 
 /// The messages checked, top to bottom.
 fn checked(mailbox: &Entity<Mailbox>, cx: &App) -> Vec<MessageId> {
@@ -188,7 +189,11 @@ fn a_message_checked_is_unchecked_once_it_is_gone(cx: &mut TestAppContext) {
     click_avatar(cx, window, report);
 
     // Deleted elsewhere than the list.
-    pollster::block_on(mail.client.delete_messages(vec![report], false)).unwrap();
+    pollster::block_on(
+        mail.client
+            .delete_messages(vec![report], DeleteMode::ToTrash),
+    )
+    .unwrap();
     wait_until(|| {
         cx.run_until_parked();
         cx.read(|cx| find(&mailbox, "Quarterly report", cx).is_none())

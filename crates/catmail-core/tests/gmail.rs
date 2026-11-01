@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use catmail_core::{
-    AccountMode, Event, Flags, FolderKind, MessageId, OpStatus, SearchQuery, SyncReport,
-    SyncSchedule, Verify,
+    AccountMode, DeleteMode, Event, Flags, FolderKind, MessageId, OpStatus, SearchQuery,
+    SyncReport, SyncSchedule, Verify,
 };
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 use tokio::sync::Semaphore;
@@ -411,7 +411,10 @@ async fn local_changes_tell_the_labels_showing_the_message() {
         .await
         .unwrap();
     all_told();
-    env.client.delete_messages(vec![one], false).await.unwrap();
+    env.client
+        .delete_messages(vec![one], DeleteMode::ToTrash)
+        .await
+        .unwrap();
     all_told();
     assert!(env.subjects("INBOX").await.is_empty());
 }
@@ -636,7 +639,10 @@ async fn deleted_and_moved_back_to_inbox_it_keeps_its_row() {
     let env = synced_env(gmail()).await;
     let one = env.id_of("INBOX", "one").await;
     env.client.download_message(one).await.unwrap();
-    env.client.delete_messages(vec![one], false).await.unwrap();
+    env.client
+        .delete_messages(vec![one], DeleteMode::ToTrash)
+        .await
+        .unwrap();
     assert!(env.subjects("INBOX").await.is_empty());
     let start = env.fake.state().log.len();
     env.replay().await;
@@ -873,7 +879,10 @@ async fn a_restore_out_of_trash_deleted_for_good_in_time_is_deleted_there() {
         .move_messages(vec![old], Some(trash), inbox)
         .await
         .unwrap();
-    env.client.delete_messages(vec![old], true).await.unwrap();
+    env.client
+        .delete_messages(vec![old], DeleteMode::Permanent)
+        .await
+        .unwrap();
     let start = env.fake.state().log.len();
     let report = env.replay().await;
     assert_eq!(report.pending, 0);
@@ -901,7 +910,10 @@ async fn a_restore_out_of_trash_cancelled_in_time_adds_no_inbox_there() {
         .move_messages(vec![old], Some(trash), inbox)
         .await
         .unwrap();
-    env.client.delete_messages(vec![old], false).await.unwrap();
+    env.client
+        .delete_messages(vec![old], DeleteMode::ToTrash)
+        .await
+        .unwrap();
     assert_eq!(env.subjects(TRASH).await, ["old"]);
     let start = env.fake.state().log.len();
     let report = env.replay().await;

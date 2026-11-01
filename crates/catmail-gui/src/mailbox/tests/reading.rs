@@ -311,6 +311,32 @@ fn deletes_for_good_without_a_trash_folder(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn deleting_is_never_for_good_unasked_when_trash_went_away(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    click_message(cx, window, &mailbox, "你好，世界");
+    // Gone before the window has heard: it still thinks the message goes to Trash, and
+    // doesn't ask.
+    mail.remove_mailbox_and_sync("Trash");
+    cx.update_window(window, |_, window, cx| window.press("delete", cx))
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find(crate::layout::CONFIRM).is_none());
+    })
+    .unwrap();
+    // So the engine refuses rather than delete it for good.
+    pollster::block_on(mail.client.replay_pending(mail.account())).unwrap();
+    assert!(mail.server_uids("INBOX").contains(&2));
+    assert!(
+        mail.stored_subjects("INBOX")
+            .contains(&"你好，世界".to_string())
+    );
+}
+
+#[gpui_kit::test]
 fn deleting_from_trash_asks_first_whichever_trash_it_is(cx: &mut TestAppContext) {
     // Two Trash folders: the engine moves to the first stored, "Trash", while the
     // sidebar lists "Old/Bin" first. Deleting from either is for good.
