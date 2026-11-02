@@ -262,9 +262,6 @@ pub struct Faults {
     /// Refuse every body FETCH with `NO <text>`, e.g. NetEase's `Fetch volume limit
     /// exceed` once an account went over its download limit.
     pub body_fetch_refusal: Option<String>,
-    /// Hold each LOGOUT until it gets a permit, e.g. to keep a sync from reporting that
-    /// it finished.
-    pub logout_gate: Option<Arc<Semaphore>>,
     /// Send every FETCH response twice.
     pub duplicate_fetch: bool,
     /// Report each RFC822.SIZE one byte larger than the message, as some servers count
@@ -356,6 +353,11 @@ pub struct Faults {
     pub bye_on_idle: Option<String>,
     /// Answer each command that starts with this text (`EXAMINE`) only after this long.
     pub slow: Option<(String, std::time::Duration)>,
+    /// Hold each command that starts with this text (`DELETE`) until it gets a permit,
+    /// e.g. to make changes while the server is at it, or to keep a sync from reporting
+    /// that it finished (`LOGOUT`). Logged before it waits; one already waiting keeps
+    /// waiting when the gate is taken away.
+    pub gate: Option<(String, Arc<Semaphore>)>,
     /// Close this many new connections before the greeting, as if the network were down.
     pub refuse_connections: usize,
     /// Make the next CREATE, RENAME or DELETE, then close the connection without
@@ -381,7 +383,6 @@ impl Default for Faults {
             empty_body_fetches: 0,
             refuse_body_fetch: Vec::new(),
             body_fetch_refusal: None,
-            logout_gate: None,
             duplicate_fetch: false,
             inexact_sizes: false,
             reverse_fetch: false,
@@ -420,6 +421,7 @@ impl Default for Faults {
             idle_refusal: None,
             bye_on_idle: None,
             slow: None,
+            gate: None,
             refuse_connections: 0,
             drop_after_mailbox_change: false,
             bare_status: false,
@@ -693,6 +695,13 @@ impl ServerState {
     pub fn hold_body_fetches(&mut self) -> Arc<Semaphore> {
         let gate = Arc::new(Semaphore::new(0));
         self.faults.body_fetch_gate = Some(gate.clone());
+        gate
+    }
+
+    /// Likewise for each command that starts with `prefix` (`gate`).
+    pub fn hold(&mut self, prefix: &str) -> Arc<Semaphore> {
+        let gate = Arc::new(Semaphore::new(0));
+        self.faults.gate = Some((prefix.into(), gate.clone()));
         gate
     }
 
@@ -1309,21 +1318,32 @@ async fn handle(
         io.get_mut().flush().await?;
         return Ok(Next::Close);
     }
-    {
+    let (slow, gate) = {
         let mut st = lock(state);
         st.log.push(LoggedCommand {
             tls: session.tls,
             line: rest.to_owned(),
         });
         st.refresh_labels();
-    }
-    let slow = lock(state)
-        .faults
-        .slow
-        .clone()
-        .filter(|(prefix, _)| rest.starts_with(prefix.as_str()));
-    if let Some((_, delay)) = slow {
+        let applies = |prefix: &String| rest.starts_with(prefix.as_str());
+        (
+            st.faults
+                .slow
+                .as_ref()
+                .filter(|(p, _)| applies(p))
+                .map(|(_, d)| *d),
+            st.faults
+                .gate
+                .as_ref()
+                .filter(|(p, _)| applies(p))
+                .map(|(_, g)| g.clone()),
+        )
+    };
+    if let Some(delay) = slow {
         tokio::time::sleep(delay).await;
+    }
+    if let Some(gate) = gate {
+        gate.acquire().await.expect("gate open").forget();
     }
     let toks = tokenize(rest);
     let word = |i: usize| {
@@ -1349,10 +1369,6 @@ async fn handle(
         }
         "NOOP" => out += &format!("{tag} OK NOOP completed\r\n"),
         "LOGOUT" => {
-            let gate = lock(state).faults.logout_gate.clone();
-            if let Some(gate) = gate {
-                gate.acquire().await.expect("gate open").forget();
-            }
             out += &format!("* BYE logging out\r\n{tag} OK LOGOUT completed\r\n");
             next = Next::Close;
         }

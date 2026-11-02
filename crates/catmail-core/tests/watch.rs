@@ -232,12 +232,11 @@ async fn a_login_rejected_after_syncing_now_shows_rather_than_syncing() {
     env.wait_for_idle(1).await;
     env.wait_until_synced().await;
     // The password changed elsewhere: logging in again after the connection drops fails.
-    let logins = {
+    let (gate, logins) = {
         let mut st = env.fake.state();
         st.faults.reject_login = true;
-        st.faults.slow = Some(("LOGIN".into(), Duration::from_millis(200)));
         st.drop_open_connections();
-        st.received("LOGIN")
+        (st.hold("LOGIN"), st.received("LOGIN"))
     };
     env.fake
         .wait_until(|st| st.received("LOGIN") > logins)
@@ -246,6 +245,7 @@ async fn a_login_rejected_after_syncing_now_shows_rather_than_syncing() {
     // Asked while that login, begun before, is under way.
     env.client.sync_now().await.unwrap();
     assert!(env.syncing());
+    gate.add_permits(Semaphore::MAX_PERMITS);
     env.wait_until_login_rejected().await;
     // Nothing answers the request until the login works again.
     env.wait_until_synced().await;
@@ -429,7 +429,7 @@ async fn a_connection_made_after_resuming_is_kept() {
 async fn a_wake_while_the_login_is_rejected_waits_too() {
     let mut state = state();
     state.faults.reject_login = true;
-    state.faults.slow = Some(("LOGIN".into(), Duration::from_millis(200)));
+    let gate = state.hold("LOGIN");
     let env = watching(state, schedule(HOUR, HOUR)).await;
     env.fake.wait_until(|st| st.received("LOGIN") >= 1).await;
 
@@ -439,6 +439,7 @@ async fn a_wake_while_the_login_is_rejected_waits_too() {
         .await
         .unwrap();
     env.client.resume();
+    gate.add_permits(Semaphore::MAX_PERMITS);
     env.wait_until_login_rejected().await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(env.fake.state().received("LOGIN"), 1);

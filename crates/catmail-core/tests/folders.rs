@@ -1,10 +1,12 @@
 //! Creating, renaming and deleting folders (Gmail's labels) against the fake server:
 //! made on the server at once, then stored as a sync would.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use catmail_core::{Error, Event, Flags, FolderKind, MailClient};
 use catmail_testkit::{FakeMailbox, ServerState};
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
 mod common;
@@ -41,24 +43,35 @@ impl Env {
         names
     }
 
-    /// Starts `f` with the server slow to answer `command`, and waits until the server
-    /// has it: what follows happens while the server is at it.
-    async fn while_slow<F>(
-        &self,
-        command: &str,
-        f: impl FnOnce(MailClient) -> F,
-    ) -> JoinHandle<F::Output>
+    /// Starts `f` with the server holding its answer to `command`, and waits until the
+    /// server has it: what follows happens while the server is at it, until
+    /// [`Held::finish`].
+    async fn while_held<F>(&self, command: &str, f: impl FnOnce(MailClient) -> F) -> Held<F::Output>
     where
         F: Future + Send + 'static,
         F::Output: Send,
     {
-        self.fake.state().faults.slow = Some((command.into(), Duration::from_millis(300)));
+        let gate = self.fake.state().hold(command);
         let task = tokio::spawn(f(self.client.clone()));
         eventually(&format!("{command} sent"), async || {
             self.fake.state().received(command) > 0
         })
         .await;
-        task
+        Held { task, gate }
+    }
+}
+
+/// A call the server is holding the answer to a command of, from [`Env::while_held`].
+struct Held<T> {
+    task: JoinHandle<T>,
+    gate: Arc<Semaphore>,
+}
+
+impl<T> Held<T> {
+    /// Lets the server answer, and waits for the call to finish.
+    async fn finish(self) -> T {
+        self.gate.add_permits(Semaphore::MAX_PERMITS);
+        self.task.await.unwrap()
     }
 }
 
@@ -343,7 +356,7 @@ async fn messages_of_a_folder_being_deleted_stay_put() {
     let (inbox, projects) = (env.folder("INBOX").await, env.folder("Projects").await);
 
     let deleting = env
-        .while_slow("DELETE", move |client| async move {
+        .while_held("DELETE", move |client| async move {
             client.delete_folder(projects.id).await
         })
         .await;
@@ -354,7 +367,7 @@ async fn messages_of_a_folder_being_deleted_stay_put() {
         .await
         .unwrap_err();
     assert!(matches!(err, Error::Conflict(_)), "{err:?}");
-    deleting.await.unwrap().unwrap();
+    deleting.finish().await.unwrap();
     assert_eq!(env.subjects("INBOX").await, ["hello"]);
     let pending = env.client.list_pending(Some(env.account)).await.unwrap();
     assert!(pending.is_empty(), "{pending:?}");
@@ -378,7 +391,7 @@ async fn messages_carrying_a_label_being_deleted_still_change() {
     let inbox = env.folder("INBOX").await;
 
     let deleting = env
-        .while_slow("DELETE", move |client| async move {
+        .while_held("DELETE", move |client| async move {
             client.delete_folder(travel.id).await
         })
         .await;
@@ -394,7 +407,7 @@ async fn messages_carrying_a_label_being_deleted_still_change() {
         .await
         .unwrap_err();
     assert!(matches!(err, Error::Conflict(_)), "{err:?}");
-    deleting.await.unwrap().unwrap();
+    deleting.finish().await.unwrap();
     env.replay().await;
     let messages = env.fake.state().all_mail().messages.clone();
     assert!(messages[0].flags.iter().any(|f| f == "\\Flagged"));
@@ -408,16 +421,22 @@ async fn a_folder_made_while_its_parent_is_renamed_goes_into_the_renamed_one() {
     let projects = env.folder("Projects").await;
 
     let renaming = env
-        .while_slow("RENAME", move |client| async move {
+        .while_held("RENAME", move |client| async move {
             client.rename_folder(projects.id, "Work").await
         })
         .await;
-    let made = env
-        .client
-        .create_folder(env.account, Some(projects.id), "2026")
-        .await
-        .unwrap();
-    renaming.await.unwrap().unwrap();
+    let making = tokio::spawn({
+        let (client, account) = (env.client.clone(), env.account);
+        async move {
+            client
+                .create_folder(account, Some(projects.id), "2026")
+                .await
+        }
+    });
+    // It waits for the rename; given the time to start waiting, it is made after.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    renaming.finish().await.unwrap();
+    let made = making.await.unwrap().unwrap();
     assert_eq!(made.name, "Work/2026");
     assert_eq!(env.mailboxes(), ["INBOX", "Work", "Work/2026"]);
 }
