@@ -99,6 +99,11 @@ COPY 重做会多出一份，所以 COPY 像发信的结束标记一样处理（
 - 每次 COPY **之前**，用 `write_durable` 记下检查点：目标文件夹、它的 UIDVALIDITY 和 UIDNEXT
   （`pending_ops.copy_*`，用 STATUS 取，不必离开选中的文件夹）。这次 COPY 造出的副本 UID 只可能
   不小于这个 UIDNEXT。
+- STATUS 不给这两个值时（网易 Coremail 回 `* STATUS "INBOX" ()`），就在 COPY 之前打开目标现取
+  （`ops::copy_boundary`）：UIDVALIDITY 取 EXAMINE 的；EXAMINE 也不给 UIDNEXT（网易就不给）时，用
+  `UID SEARCH UID *` 取最大 UID + 1，再重新 SELECT 原文件夹（期间被重建就停下，交给同步）。不能用上次
+  同步记下的值：那之后别的客户端复制进目标的同一封邮件（原文逐字节相同）会落在检查点之后，COPY 前断线
+  时会被当成副本认领，原邮件被删、两封变一封。
 - COPY 的答复带 COPYUID 时，删除原邮件**之前**再用 `write_durable` 记下每个副本的 UID（`copy_uid`，
   UIDVALIDITY 与检查点相同才记）。
 - 有检查点的 op 在这个文件夹里**先于一切**核对，不论之后被改成了什么（移到别处、移回原处、永久

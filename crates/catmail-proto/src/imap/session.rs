@@ -15,7 +15,7 @@ use super::command::{Command, Literals};
 use super::connection::{Code, Connection, Data, Response};
 use super::{
     Capabilities, ChangedFlags, Error, FetchedMessage, Items, ListedMailbox, MailboxStatus, Result,
-    utf7,
+    UidStatus, utf7,
 };
 use crate::Credentials;
 use crate::mime::{Headers, MimeNode, SUMMARY_HEADER_FIELDS, parse_headers};
@@ -468,29 +468,27 @@ impl Session {
     }
 
     /// UIDVALIDITY and UIDNEXT of `raw_name`, without opening it (STATUS); not for the
-    /// selected mailbox.
-    pub async fn status(&mut self, raw_name: &str) -> Result<(u32, u32)> {
+    /// selected mailbox. Items the server leaves out are `None`, for the caller to make
+    /// do without.
+    pub async fn status(&mut self, raw_name: &str) -> Result<UidStatus> {
         let command = Command::new("STATUS")
             .astring(raw_name.as_bytes())?
             .raw("(UIDVALIDITY UIDNEXT)");
         let response = self.conn.execute(command).await?;
-        let (mut uidvalidity, mut uidnext) = (None, None);
+        let mut found = UidStatus::default();
         for data in &response.data {
             let Data::MailboxData(MailboxDatum::Status { status, .. }) = data else {
                 continue;
             };
             for item in status {
                 match item {
-                    StatusAttribute::UidValidity(v) => uidvalidity = Some(*v),
-                    StatusAttribute::UidNext(n) => uidnext = Some(*n),
+                    StatusAttribute::UidValidity(v) => found.uidvalidity = Some(*v),
+                    StatusAttribute::UidNext(n) => found.uidnext = Some(*n),
                     _ => {}
                 }
             }
         }
-        uidvalidity.zip(uidnext).ok_or_else(|| Error::Command {
-            command: "STATUS",
-            text: format!("the server sent no UIDVALIDITY or UIDNEXT for `{raw_name}`"),
-        })
+        Ok(found)
     }
 
     /// Moves messages of the selected mailbox to `to` (MOVE, RFC 6851; see
@@ -610,6 +608,15 @@ impl Session {
         let mut uids = self.uid_search(search).await?;
         uids.retain(|&uid| uid >= first);
         Ok(uids)
+    }
+
+    /// The highest UID in the selected mailbox, `None` if it is empty: where its UIDNEXT
+    /// is at least, for a server that doesn't say.
+    pub async fn last_uid(&mut self) -> Result<Option<u32>> {
+        let uids = self
+            .uid_search(Command::new("UID SEARCH").raw("UID *"))
+            .await?;
+        Ok(uids.into_iter().max())
     }
 
     /// Those of `uids` the selected mailbox has, ascending.

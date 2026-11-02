@@ -409,7 +409,10 @@ async fn replay_folder(
                         .await
                         .map(|copied| Outcome::Moved(to, copied.map(moved)))
                 } else {
-                    copy_move(&mut done, session, batch, to, remote_name).await?;
+                    if !copy_move(&mut done, session, folder, batch, to, remote_name).await? {
+                        // Rebuilt on the server meanwhile: the rest waits for the sync.
+                        return Ok(());
+                    }
                     continue;
                 }
             }
@@ -511,22 +514,33 @@ fn moved(copied: CopyUid) -> Moved {
 /// A move on a server without MOVE: COPY, then delete the original. A COPY repeated after
 /// its answer was lost would make a second copy, so the target's UIDNEXT is committed
 /// before each COPY (see [`CopyCheckpoint`]); [`settle_copies`] looks for the copy from
-/// it before anything else is done with the op.
+/// it before anything else is done with the op. Returns false if `folder` was rebuilt on
+/// the server meanwhile.
 async fn copy_move(
     done: &mut Settle<'_>,
     session: &mut Session,
+    folder: &ReplayFolder,
     ops: &[ReplayOp],
     to: FolderId,
     target: &str,
-) -> Result<()> {
-    let checkpoint = match session.status(target).await {
-        Ok((uidvalidity, uidnext)) => CopyCheckpoint {
-            folder: to,
-            remote_name: Some(target.to_owned()),
-            uidvalidity,
-            uidnext,
+) -> Result<bool> {
+    let status = match session.status(target).await {
+        Ok(status) => status,
+        Err(e) => return done.outcome(ops, Err(e)).await.map(|()| true),
+    };
+    let (uidvalidity, uidnext) = match (status.uidvalidity, status.uidnext) {
+        (Some(uidvalidity), Some(uidnext)) => (uidvalidity, uidnext),
+        _ => match copy_boundary(session, target, folder, done.uidvalidity).await {
+            Ok(Some(boundary)) => boundary,
+            Ok(None) => return Ok(false),
+            Err(e) => return done.outcome(ops, Err(e)).await.map(|()| true),
         },
-        Err(e) => return done.outcome(ops, Err(e)).await,
+    };
+    let checkpoint = CopyCheckpoint {
+        folder: to,
+        remote_name: Some(target.to_owned()),
+        uidvalidity,
+        uidnext,
     };
     let (checkpointed, copy_uidvalidity) = (ops.to_vec(), checkpoint.uidvalidity);
     done.engine
@@ -536,7 +550,7 @@ async fn copy_move(
     // A refused COPY copied nothing (RFC 3501), so failing the ops leaves no copy behind.
     let copied = match session.uid_copy(&uids, target).await {
         Ok(copied) => copied,
-        Err(e) => return done.outcome(ops, Err(e)).await,
+        Err(e) => return done.outcome(ops, Err(e)).await.map(|()| true),
     };
     // Which message is the copy, for when the answer to the delete is lost: the original
     // is gone then, and nothing else tells the copy apart.
@@ -562,7 +576,44 @@ async fn copy_move(
         // The copy is there; the next try finds it from the checkpoint.
         Err(e) => Err(e),
     };
-    done.outcome(ops, outcome).await
+    done.outcome(ops, outcome).await.map(|()| true)
+}
+
+/// The UIDVALIDITY and UIDNEXT of `target` when STATUS leaves them out (NetEase): from
+/// opening it, past its highest UID if it doesn't say its UIDNEXT either. A copy is looked
+/// for from there, so it is taken right before the COPY: from an older point, such as the
+/// last sync, a message that arrived since (the same message, copied there by another
+/// client) would be taken for the copy. Leaves `folder` selected again; `None` if it was
+/// rebuilt on the server meanwhile.
+async fn copy_boundary(
+    session: &mut Session,
+    target: &str,
+    folder: &ReplayFolder,
+    uidvalidity: u32,
+) -> catmail_proto::imap::Result<Option<(u32, u32)>> {
+    let found = async {
+        let opened = session.examine(target).await?;
+        let uidnext = match opened.uidnext {
+            Some(uidnext) => uidnext,
+            None => session
+                .last_uid()
+                .await?
+                .map_or(1, |uid| uid.saturating_add(1)),
+        };
+        Ok::<_, catmail_proto::imap::Error>((opened.uidvalidity, uidnext))
+    }
+    .await;
+    if let Err(e) = &found
+        && e.is_fatal()
+    {
+        return found.map(Some);
+    }
+    // Refused or not, the ops that follow need `folder` selected.
+    let reopened = session.select(&folder.remote_name).await?;
+    if !reopened.same_generation(Some(uidvalidity)) {
+        return Ok(None);
+    }
+    found.map(Some)
 }
 
 /// Finds out what earlier COPYs (see [`copy_move`]) did for these ops, whatever they
