@@ -21,6 +21,10 @@ use crate::Credentials;
 use crate::mime::{Headers, MimeNode, SUMMARY_HEADER_FIELDS, parse_headers};
 use crate::{TlsConfig, net};
 
+/// How [`Session::login`] introduces us (ID, RFC 2971).
+const CLIENT_NAME: &str = "catmail";
+const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// An IMAP connection, from greeting to logout. Reading never changes the server:
 /// mailboxes are opened with EXAMINE, and bodies fetched with `BODY.PEEK`, which leaves
 /// `\Seen` alone. Changes take a mailbox opened with [`select`](Self::select) (flags,
@@ -132,11 +136,16 @@ impl Session {
         self.caps = caps;
     }
 
-    /// Authenticates, unless the server already did so with a PREAUTH greeting.
+    /// Authenticates, unless the server already did so with a PREAUTH greeting, then
+    /// tells the server who we are.
     pub async fn login(&mut self, credentials: &Credentials) -> Result<()> {
-        if self.authenticated {
-            return Ok(());
+        if !self.authenticated {
+            self.authenticate(credentials).await?;
         }
+        self.identify().await
+    }
+
+    async fn authenticate(&mut self, credentials: &Credentials) -> Result<()> {
         let response = if self.caps.has("AUTH=PLAIN") {
             self.conn
                 .authenticate("PLAIN", credentials.sasl_plain())
@@ -161,6 +170,26 @@ impl Session {
         self.set_capabilities(caps);
         self.authenticated = true;
         Ok(())
+    }
+
+    /// Sends ID (RFC 2971) if the server takes it: NetEase (163, 126, yeah.net) refuses
+    /// to open any mailbox for a client that hasn't (`NO Unsafe Login`). Only the name
+    /// and version, nothing about the system. The answer doesn't matter, so neither does
+    /// a NO, BAD or reply we can't parse.
+    async fn identify(&mut self) -> Result<()> {
+        if !self.caps.has("ID") {
+            return Ok(());
+        }
+        let fields = ["name", CLIENT_NAME, "version", CLIENT_VERSION];
+        let command = Command::new("ID").list(fields, |c, field| c.string(field.as_bytes()))?;
+        match self.conn.execute_lossy(command).await {
+            Ok(_) => Ok(()),
+            Err(Error::Command { text, .. }) => {
+                tracing::debug!(%text, "server refused ID");
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Every mailbox. A listing without INBOX is `Incomplete` if the user has one after

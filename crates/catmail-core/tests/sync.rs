@@ -99,6 +99,28 @@ async fn initial_sync_fetches_folders_and_headers() {
     }));
 }
 
+/// NetEase (163, 126, yeah.net) opens no mailbox for a client that hasn't sent ID.
+#[tokio::test(flavor = "multi_thread")]
+async fn syncs_servers_that_want_the_client_to_introduce_itself() {
+    let mut state = state_with(&["one", "two"]);
+    state.faults.require_id = true;
+    let env = env(state).await;
+
+    let report = env.sync().await;
+    assert!(folder_report(&report, "INBOX").error.is_none());
+    assert_eq!(env.subjects("INBOX").await, newest_first(&["one", "two"]));
+    // A change goes out under SELECT, on whichever connection carries it.
+    let one = env.id_of("INBOX", "one").await;
+    env.client
+        .set_flags(vec![one], Flags::SEEN, Flags::empty())
+        .await
+        .unwrap();
+    assert_eq!(env.replay().await.applied, 1);
+    let mut state = env.fake.state();
+    assert_eq!(state.inbox().messages[0].flags, ["\\Seen"]);
+    assert_eq!(state.received("ID "), state.connections);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn incremental_sync_applies_new_changed_and_vanished() {
     let env = env(state_with(&["one", "two", "three"])).await;
