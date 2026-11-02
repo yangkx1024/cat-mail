@@ -70,6 +70,13 @@
     `id_of` 和公共的 `Env::query`，store 测试的 id 查询移进 `test_util`。
   - 没采纳：`OutOfSync` 带原因枚举（改公开错误类型）、`synced` 换成 watch channel、预算用完后只睡不听事件
     （系统睡眠时定时器会晚到）、`next` 直接返回位置（省下的只是微秒）。
+- **codex review 修复**（2 条，均先写出不修就失败的测试）：
+  - 登录被拒之后，成功的那次同步先发"同步完成"信号，LOGOUT（后台同步还要同步 INBOX）之后才在 `report` 里清掉
+    "登录被拒"。预取被信号叫醒时还看到被拒，回去只等下一次同步信号，听不到随后的 `AccountStatusChanged`，要卡到
+    下一次完整同步或一小时后。现在等同步时也听账户的消息。测试 `a_login_working_again_is_noticed_after_the_sync_that_shows_it`
+    用新故障 `logout_gate` 把 LOGOUT 卡住，稳定复现这个先后。
+  - "连续三封被拒就暂停"的计数原来是每批的局部变量，批大小为 1、2 时永远到不了 3，跨批的连续被拒也会清零。计数移到
+    任务里，暂停时清零。`message_after_message_refused_pauses_the_prefetch` 改用每批 1 封。
 
 验证：`cargo fmt`、`clippy -D warnings`、全部测试通过。新增 store 测试 4 个（候选顺序与排除、失败退避与正文写入后
 清除、按日累计用量及账户已删除时不写、暂停跨日保留）、core 单元测试 1 个（认出超限回复）、core 集成测试 11 个

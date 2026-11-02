@@ -262,6 +262,9 @@ pub struct Faults {
     /// Refuse every body FETCH with `NO <text>`, e.g. NetEase's `Fetch volume limit
     /// exceed` once an account went over its download limit.
     pub body_fetch_refusal: Option<String>,
+    /// Hold each LOGOUT until it gets a permit, e.g. to keep a sync from reporting that
+    /// it finished.
+    pub logout_gate: Option<Arc<Semaphore>>,
     /// Send every FETCH response twice.
     pub duplicate_fetch: bool,
     /// Report each RFC822.SIZE one byte larger than the message, as some servers count
@@ -360,6 +363,7 @@ impl Default for Faults {
             empty_body_fetches: 0,
             refuse_body_fetch: Vec::new(),
             body_fetch_refusal: None,
+            logout_gate: None,
             duplicate_fetch: false,
             inexact_sizes: false,
             reverse_fetch: false,
@@ -1314,6 +1318,10 @@ async fn handle(
         }
         "NOOP" => out += &format!("{tag} OK NOOP completed\r\n"),
         "LOGOUT" => {
+            let gate = lock(state).faults.logout_gate.clone();
+            if let Some(gate) = gate {
+                gate.acquire().await.expect("gate open").forget();
+            }
             out += &format!("* BYE logging out\r\n{tag} OK LOGOUT completed\r\n");
             next = Next::Close;
         }

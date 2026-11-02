@@ -106,7 +106,7 @@ pub(crate) fn task(
 /// What to do after a look.
 enum Next {
     Now,
-    /// Look again once a sync of every folder finished.
+    /// Look again once a sync of every folder finished, or on news of the account.
     Synced,
     /// Look again on news of the account, or after this long.
     News(Duration),
@@ -146,6 +146,8 @@ async fn run(engine: Weak<Engine>, account: AccountId, settings: BodyPrefetch) {
     // Not until a sync of every folder finished after this: the login was rejected then.
     let mut rejected_at = None;
     let mut failures = 0;
+    // Messages the server refused in a row, across batches.
+    let mut refused = 0;
     // Bodies were fetched since nothing was left last: the next time nothing is, it says so.
     let mut busy = false;
     tracing::info!(%account, whole_limit = settings.whole_limit,
@@ -177,6 +179,7 @@ async fn run(engine: Weak<Engine>, account: AccountId, settings: BodyPrefetch) {
                 &settings,
                 &mut session,
                 &mut skip,
+                &mut refused,
                 &mut cancellation,
             )
             .await;
@@ -220,7 +223,9 @@ async fn run(engine: Weak<Engine>, account: AccountId, settings: BodyPrefetch) {
         drop(strong);
         let (wait, news, waiting_for_sync) = match next {
             Next::Now => continue,
-            Next::Synced => (IDLE, false, true),
+            // News too: a sync that finishes after a rejected login signals before it
+            // reports the login working again, which `may_start` waits for.
+            Next::Synced => (IDLE, true, true),
             Next::News(wait) => (wait, true, false),
             Next::Sleep(wait) => (wait, false, false),
         };
@@ -289,14 +294,16 @@ enum One {
 }
 
 /// Fetches the next batch of bodies on `session` (connecting if it is empty) and stores
-/// them, leaving out the folders in `skip` and adding those found rebuilt. Stores what
-/// it fetched also if it then fails.
+/// them, leaving out the folders in `skip` and adding those found rebuilt, and counting
+/// the messages the server refused in a row in `refused`. Stores what it fetched also if
+/// it then fails.
 async fn batch(
     engine: &Arc<Engine>,
     account: AccountId,
     settings: &BodyPrefetch,
     session: &mut Option<Session>,
     skip: &mut HashSet<FolderId>,
+    refused: &mut u32,
     cancellation: &mut Cancellation,
 ) -> Result<Batch> {
     let (now, day) = (now(), today());
@@ -342,7 +349,6 @@ async fn batch(
     };
     let began = Instant::now();
     let mut fetched = Fetched::default();
-    let mut refused = 0;
     let mut result = Ok(Batch::More);
     for (id, _) in next {
         if used + fetched.bytes >= budget {
@@ -357,7 +363,7 @@ async fn batch(
             }) => {
                 fetched.bodies.push((id, folder, body));
                 fetched.bytes += bytes;
-                refused = 0;
+                *refused = 0;
             }
             Ok(One::Skipped) => {
                 tracing::debug!(%account, message_id = %id, "downloaded meanwhile, or gone");
@@ -368,12 +374,13 @@ async fn batch(
                 skip.insert(folder);
             }
             Ok(One::Refused(e)) => {
-                tracing::warn!(%account, message_id = %id, error = %e, refused_in_a_row = refused + 1,
+                tracing::warn!(%account, message_id = %id, error = %e, refused_in_a_row = *refused + 1,
                     "can't prefetch the body; trying it again later");
                 fetched.failed.push(id);
-                refused += 1;
-                if refused >= REFUSED_IN_A_ROW {
-                    tracing::warn!(%account, refused, wait = ?IDLE,
+                *refused += 1;
+                if *refused >= REFUSED_IN_A_ROW {
+                    *refused = 0;
+                    tracing::warn!(%account, refused = REFUSED_IN_A_ROW, wait = ?IDLE,
                         "the server refuses message after message; prefetch paused");
                     result = Ok(Batch::Paused(IDLE));
                     break;

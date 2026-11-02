@@ -253,7 +253,15 @@ async fn a_message_the_server_refuses_does_not_hold_up_the_rest() {
 #[tokio::test(flavor = "multi_thread")]
 async fn message_after_message_refused_pauses_the_prefetch() {
     let inbox: Vec<_> = (1..=4).map(|n| mail("pelican", n)).collect();
-    let env = env(state(&inbox), prefetching()).await;
+    // The streak runs across batches.
+    let env = env(
+        state(&inbox),
+        BodyPrefetch {
+            batch: 1,
+            ..prefetching()
+        },
+    )
+    .await;
     env.fake.state().faults.refuse_body_fetch = vec![2, 3, 4];
     env.client.sync_account(env.account).await.unwrap();
     eventually("three refused", async || env.failures() == 3).await;
@@ -377,4 +385,33 @@ async fn going_over_the_servers_limit_stops_it_for_a_day() {
     env.client.sync_account(env.account).await.unwrap();
     a_while().await;
     assert_eq!(env.fake.state().body_fetches(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_login_working_again_is_noticed_after_the_sync_that_shows_it() {
+    let inbox: Vec<_> = (1..=2).map(|n| mail("pelican", n)).collect();
+    let env = env(state(&inbox), prefetching()).await;
+    env.fake.state().faults.reject_login = true;
+    env.client.sync_account(env.account).await.unwrap_err();
+
+    // The sync that gets through signals it finished before it reports the login
+    // working (after LOGOUT): the prefetch looks, finds it still rejected, and must hear
+    // of the report.
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    {
+        let mut state = env.fake.state();
+        state.faults.reject_login = false;
+        state.faults.logout_gate = Some(gate.clone());
+    }
+    let syncing = tokio::spawn({
+        let (client, account) = (env.client.clone(), env.account);
+        async move { client.sync_account(account).await.unwrap() }
+    });
+    env.fake.wait_until(|st| st.received("LOGOUT") >= 1).await;
+    a_while().await;
+    assert_eq!(env.fake.state().body_fetches(), 0);
+
+    gate.add_permits(100);
+    syncing.await.unwrap();
+    eventually("both bodies", async || env.found("pelican").await == 2).await;
 }
