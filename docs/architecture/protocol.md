@@ -139,6 +139,12 @@ VANISHED、FETCH）、`stop` 完成或过了 `max`，然后发 DONE、等 tagged
 密码登录，不做 OAuth2（原因见 README 的"范围"）。IMAP 有 `AUTH=PLAIN` 就用 `AUTHENTICATE PLAIN`，
 否则 `LOGIN`（`LOGINDISABLED` 时报错）；SMTP 优先 `AUTH PLAIN`，其次 `AUTH LOGIN`。
 
+IMAP 登录之后（PREAUTH 也一样）、打开任何邮箱之前，服务器的 CAPABILITY 里有 `ID` 就发一次
+`ID ("name" "catmail" "version" "<版本>")`（RFC 2971）：网易邮箱（163、126、yeah.net，Coremail）对没发过
+`ID` 的连接一律拒绝 EXAMINE / SELECT，回 `NO Unsafe Login`，登录本身却成功。只报名字和版本，不带操作系统等
+信息。服务器怎么回都不影响登录：NO、BAD 或解析不了的回答都照常继续，没有 `ID` 能力就不发。放在
+`Session::login` 里，所以每条连接都会发，不用每个调用方记着。
+
 密码一路是 `secrecy::SecretString`（core 重新导出）：从 CLI / GUI 读入、`MailClient::add_account`、
 `SecretStore`、`Credentials` 到 SASL 响应和 SMTP 的 AUTH 行（`Zeroizing`），`Debug` 输出不含它，释放时
 清零。写给 socket 的副本发出后也清零；GUI 输入框里的文本不归我们管，这只是尽力而为：目标是不让密码散落在

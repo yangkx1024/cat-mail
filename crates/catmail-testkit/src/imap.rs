@@ -284,6 +284,13 @@ pub struct Faults {
     pub login_refusal: Option<String>,
     /// Greet with PREAUTH: the connection starts out authenticated.
     pub preauth: bool,
+    /// Advertise ID (RFC 2971) and answer it.
+    pub id: bool,
+    /// Refuse every ID with `NO <text>`.
+    pub id_refusal: Option<String>,
+    /// Refuse to open a mailbox on a connection that hasn't sent ID yet, as NetEase
+    /// does: `NO EXAMINE Unsafe Login. Please contact kefu@188.com for help`.
+    pub require_id: bool,
     /// Replace the first untagged response line containing this text with one no
     /// parser accepts, e.g. `"* SEARCH"` or `"* LIST"`. Fires once.
     pub garble: Option<String>,
@@ -380,6 +387,9 @@ impl Default for Faults {
             reject_login: false,
             login_refusal: None,
             preauth: false,
+            id: true,
+            id_refusal: None,
+            require_id: false,
             garble: None,
             omit: None,
             split_fetch: false,
@@ -949,6 +959,8 @@ struct Session {
     /// Opened with SELECT rather than EXAMINE.
     writable: bool,
     condstore_enabled: bool,
+    /// Sent ID.
+    identified: bool,
     /// The selected mailbox as this connection was last told about it.
     view: Option<View>,
 }
@@ -1043,6 +1055,7 @@ async fn serve(
         selected: None,
         writable: false,
         condstore_enabled: false,
+        identified: false,
         view: None,
     };
     let preauth = {
@@ -1257,6 +1270,9 @@ fn capabilities(state: &ServerState, session: &Session) -> String {
     if state.faults.idle {
         caps.push("IDLE");
     }
+    if state.faults.id {
+        caps.push("ID");
+    }
     if state.gmail {
         caps.push("X-GM-EXT-1");
     }
@@ -1343,6 +1359,16 @@ async fn handle(
             }
             next = Next::StartTls;
         }
+        // Allowed in any state (RFC 2971 §3.1).
+        "ID" if lock(state).faults.id => {
+            let st = lock(state);
+            if let Some(text) = &st.faults.id_refusal {
+                out += &format!("{tag} NO {text}\r\n");
+            } else {
+                session.identified = true;
+                out += &format!("* ID (\"name\" \"catmail-testkit\")\r\n{tag} OK ID completed\r\n");
+            }
+        }
         "LOGIN" | "AUTHENTICATE" if session.authenticated => {
             out += &format!("{tag} BAD Already authenticated\r\n");
         }
@@ -1402,6 +1428,12 @@ async fn handle(
                 );
             }
             out += &format!("{tag} OK LIST completed\r\n");
+        }
+        // Nothing can be open yet.
+        "EXAMINE" | "SELECT" if lock(state).faults.require_id && !session.identified => {
+            out += &format!(
+                "{tag} NO {command} Unsafe Login. Please contact kefu@188.com for help\r\n"
+            );
         }
         "EXAMINE" | "SELECT" => {
             let st = lock(state);

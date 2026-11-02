@@ -650,6 +650,51 @@ async fn preauth_skips_login() {
 }
 
 #[tokio::test]
+async fn introduces_itself_to_servers_that_ask() {
+    for preauth in [false, true] {
+        let mut state = sample_state();
+        state.faults.require_id = true;
+        state.faults.preauth = preauth;
+        let fake = FakeImap::start(state).await;
+        let mut session = login(&fake).await;
+        let status = session.examine("INBOX").await.unwrap();
+        assert_eq!(status.uidvalidity, 42);
+        let version = env!("CARGO_PKG_VERSION");
+        let state = fake.state();
+        let ids: Vec<_> = state
+            .log
+            .iter()
+            .filter(|c| c.line.starts_with("ID"))
+            .collect();
+        assert_eq!(ids.len(), 1, "preauth: {preauth}");
+        assert_eq!(
+            ids[0].line,
+            format!(r#"ID ("name" "catmail" "version" "{version}")"#)
+        );
+    }
+
+    // Not to a server that doesn't take it.
+    let mut state = sample_state();
+    state.faults.id = false;
+    let fake = FakeImap::start(state).await;
+    login(&fake).await;
+    assert_eq!(fake.state().received("ID"), 0);
+}
+
+#[tokio::test]
+async fn a_refused_or_unreadable_id_answer_is_ignored() {
+    for (refusal, garble) in [(Some("Not now"), None), (None, Some("* ID"))] {
+        let mut state = sample_state();
+        state.faults.id_refusal = refusal.map(String::from);
+        state.faults.garble = garble.map(String::from);
+        let fake = FakeImap::start(state).await;
+        let mut session = login(&fake).await;
+        assert_eq!(fake.state().received("ID"), 1);
+        assert_eq!(session.list().await.unwrap().len(), 3);
+    }
+}
+
+#[tokio::test]
 async fn fetches_bodies_without_marking_them_seen() {
     let fake = FakeImap::start(sample_state()).await;
     let mut session = login(&fake).await;
