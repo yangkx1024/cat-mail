@@ -1,17 +1,12 @@
 //! Creating, renaming and deleting folders (Gmail's labels) against the fake server:
 //! made on the server at once, then stored as a sync would.
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use catmail_core::{Error, Event, Flags, FolderKind, MailClient};
+use catmail_core::{Error, Event, Flags, FolderKind};
 use catmail_testkit::{FakeMailbox, ServerState};
-use tokio::sync::Semaphore;
-use tokio::task::JoinHandle;
 
 mod common;
 
-use common::{Env, drain, eventually, synced_env};
+use common::{Env, drain, synced_env};
 
 /// INBOX with "hello", and Projects with "plan".
 fn state() -> ServerState {
@@ -41,37 +36,6 @@ impl Env {
             .collect();
         names.sort();
         names
-    }
-
-    /// Starts `f` with the server holding its answer to `command`, and waits until the
-    /// server has it: what follows happens while the server is at it, until
-    /// [`Held::finish`].
-    async fn while_held<F>(&self, command: &str, f: impl FnOnce(MailClient) -> F) -> Held<F::Output>
-    where
-        F: Future + Send + 'static,
-        F::Output: Send,
-    {
-        let gate = self.fake.state().hold(command);
-        let task = tokio::spawn(f(self.client.clone()));
-        eventually(&format!("{command} sent"), async || {
-            self.fake.state().received(command) > 0
-        })
-        .await;
-        Held { task, gate }
-    }
-}
-
-/// A call the server is holding the answer to a command of, from [`Env::while_held`].
-struct Held<T> {
-    task: JoinHandle<T>,
-    gate: Arc<Semaphore>,
-}
-
-impl<T> Held<T> {
-    /// Lets the server answer, and waits for the call to finish.
-    async fn finish(self) -> T {
-        self.gate.add_permits(Semaphore::MAX_PERMITS);
-        self.task.await.unwrap()
     }
 }
 
@@ -425,16 +389,14 @@ async fn a_folder_made_while_its_parent_is_renamed_goes_into_the_renamed_one() {
             client.rename_folder(projects.id, "Work").await
         })
         .await;
-    let making = tokio::spawn({
-        let (client, account) = (env.client.clone(), env.account);
-        async move {
+    let account = env.account;
+    let making = env
+        .queued_for_sync(move |client| async move {
             client
                 .create_folder(account, Some(projects.id), "2026")
                 .await
-        }
-    });
-    // It waits for the rename; given the time to start waiting, it is made after.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+        })
+        .await;
     renaming.finish().await.unwrap();
     let made = making.await.unwrap().unwrap();
     assert_eq!(made.name, "Work/2026");

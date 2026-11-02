@@ -13,6 +13,7 @@ use catmail_core::{
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 use common::{Env, addr, env, env_built, eventually, synced_env};
 use mail_parser::{MessageParser, MimeHeaders};
+use tokio::sync::Semaphore;
 
 fn content(subject: &str) -> DraftContent {
     DraftContent {
@@ -817,8 +818,17 @@ async fn a_draft_that_settles_during_a_sync_is_uploaded_after_it() {
 
     // The sync the draft wakes leaves it alone, and outlasts its delay: nothing else
     // would wake background sync before the next full sync, an hour away.
-    env.fake.state().faults.slow = Some(("EXAMINE".into(), Duration::from_millis(1500)));
+    let (gate, examined) = {
+        let mut st = env.fake.state();
+        (st.hold("EXAMINE"), st.received("EXAMINE"))
+    };
     let id = env.draft("one").await;
+    let settled = tokio::time::Instant::now() + Duration::from_secs(1);
+    env.fake
+        .wait_until(|st| st.received("EXAMINE") > examined)
+        .await;
+    tokio::time::sleep_until(settled).await;
+    gate.add_permits(Semaphore::MAX_PERMITS);
     eventually("the draft on the server", async || env.on_server(id).await).await;
     assert_eq!(subjects(&env.server_drafts()), ["one"]);
 }

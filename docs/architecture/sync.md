@@ -93,6 +93,8 @@ flags，重复的批次不产生重复行）。HIGHESTMODSEQ 用 EXAMINE 时刻�
 - 两次完整同步（手动的与后台的）同样按文件夹交替，各自跳过对方在自己开始之后做完的，合起来大致只同步
   每个文件夹一遍。`sync_account` 在拿锁之前连接服务器，账户被删除时立即返回 `Error::Cancelled`。
 - 只同步一个文件夹（打开文件夹、后台同步的 INBOX）和只回放操作的，整次持有锁：它们本来就短。
+- 锁记着有几个调用在等它。测试用 `test-support` feature 下的 `MailClient::sync_waiting` 读这个数：
+  先让假服务器挡住持锁的同步（`ServerState::hold`），等到有调用排上了锁再放行，不用靠固定的等待。
 
 ## 打开的文件夹
 

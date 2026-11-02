@@ -351,8 +351,6 @@ pub struct Faults {
     pub idle_refusal: Option<String>,
     /// Accept every IDLE, then close the connection with `* BYE <text>`.
     pub bye_on_idle: Option<String>,
-    /// Answer each command that starts with this text (`EXAMINE`) only after this long.
-    pub slow: Option<(String, std::time::Duration)>,
     /// Hold each command that starts with this text (`DELETE`) until it gets a permit,
     /// e.g. to make changes while the server is at it, or to keep a sync from reporting
     /// that it finished (`LOGOUT`). Logged before it waits; one already waiting keeps
@@ -420,7 +418,6 @@ impl Default for Faults {
             garble_idle: false,
             idle_refusal: None,
             bye_on_idle: None,
-            slow: None,
             gate: None,
             refuse_connections: 0,
             drop_after_mailbox_change: false,
@@ -1318,30 +1315,19 @@ async fn handle(
         io.get_mut().flush().await?;
         return Ok(Next::Close);
     }
-    let (slow, gate) = {
+    let gate = {
         let mut st = lock(state);
         st.log.push(LoggedCommand {
             tls: session.tls,
             line: rest.to_owned(),
         });
         st.refresh_labels();
-        let applies = |prefix: &String| rest.starts_with(prefix.as_str());
-        (
-            st.faults
-                .slow
-                .as_ref()
-                .filter(|(p, _)| applies(p))
-                .map(|(_, d)| *d),
-            st.faults
-                .gate
-                .as_ref()
-                .filter(|(p, _)| applies(p))
-                .map(|(_, g)| g.clone()),
-        )
+        st.faults
+            .gate
+            .as_ref()
+            .filter(|(prefix, _)| rest.starts_with(prefix.as_str()))
+            .map(|(_, gate)| gate.clone())
     };
-    if let Some(delay) = slow {
-        tokio::time::sleep(delay).await;
-    }
     if let Some(gate) = gate {
         gate.acquire().await.expect("gate open").forget();
     }

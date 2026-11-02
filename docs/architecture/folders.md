@@ -117,6 +117,6 @@ Gmail 上新建的都是标签（对账时按账户模式定 `kind`），引擎�
 - `crates/catmail-core/tests/folders.rs`：新建、重命名（邮件不重拉、待回放的操作跟着走）、删除（先回放移走的
   邮件；移出被拒绝时不删；删除期间移出被拒绝；删除期间给带着这个标签的邮件加星照常、去掉这个标签被拒绝；别的客户端新建的子文件夹一起删）、父文件夹改名途中新建子文件夹、
   按父文件夹的分隔符检查名字、拒绝的情况、INBOX 前缀的服务器、答复丢失后重来、Gmail 标签。假服务器的邮箱可以
-  有自己的分隔符（`FakeMailbox::delimiter`），`slow` 故障让 RENAME / DELETE 慢下来以测并发。
+  有自己的分隔符（`FakeMailbox::delimiter`），闸门（`ServerState::hold`）把 RENAME / DELETE 挡住，在它们进行中做别的操作，做完再放行。
 - `tests/dovecot.rs` 的 `folders_are_created_renamed_and_deleted_on_dovecot` 对真实 Dovecot（用户 `folders`）
   验证同样的流程，以及重命名后 UIDVALIDITY 不变。
