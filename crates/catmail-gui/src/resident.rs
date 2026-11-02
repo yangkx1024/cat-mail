@@ -3,10 +3,14 @@
 //! running, disconnected from the display server, until another launch asks for the
 //! window again. See docs/architecture/background.md.
 
+use std::fmt;
+use std::time::Duration;
+
 use catmail_core::MailClient;
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Context, Entity, Global, GraphicalEnvironment,
-    SharedString, Subscription, Task, WeakEntity, Window, WindowId, WindowingRequest,
+    AnyWindowHandle, App, AppContext as _, Context, Entity, FutureExt as _, Global,
+    GraphicalEnvironment, SHUTDOWN_TIMEOUT, SharedString, Subscription, Task, WeakEntity, Window,
+    WindowId, WindowingRequest,
 };
 
 use crate::MainWindow;
@@ -25,7 +29,49 @@ pub enum Engine {
     Open(MailClient),
     /// The data directory couldn't be opened, typically because the CLI is using it.
     Failed(SharedString),
+    /// The app is quitting and has let go of it, so it can close.
+    Closed,
 }
+
+/// Why the app quits. Said in the log, where an app that was killed or crashed just stops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuitReason {
+    /// The Quit action (Ctrl Q).
+    Shortcut,
+    Tray,
+    /// SIGINT, SIGTERM or SIGHUP; on Windows, a console event.
+    Signal,
+    LastWindowClosed,
+    /// The data directory couldn't be opened, and no window is left to say so.
+    EngineFailed,
+    /// The main window couldn't be opened at launch.
+    NoWindow,
+    /// Not by the app: the platform's own Quit (macOS's app menu or Dock).
+    Platform,
+}
+
+impl fmt::Display for QuitReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Shortcut => "shortcut",
+            Self::Tray => "tray",
+            Self::Signal => "signal",
+            Self::LastWindowClosed => "last_window_closed",
+            Self::EngineFailed => "engine_failed",
+            Self::NoWindow => "no_window",
+            Self::Platform => "platform",
+        })
+    }
+}
+
+/// Quits now, for `reason`, which [`Resident::shut_down`] logs.
+pub fn exit(reason: QuitReason, cx: &mut App) {
+    cx.global_mut::<Resident>().quitting = Some(reason);
+    cx.quit();
+}
+
+/// How long quitting waits for the engine to close, within the time GPUI gives it.
+const ENGINE_CLOSING: Duration = SHUTDOWN_TIMEOUT.saturating_sub(Duration::from_millis(50));
 
 #[derive(Debug, PartialEq)]
 enum Windowing {
@@ -54,7 +100,7 @@ fn after_last_window(
     match engine {
         _ if quitting || !keep_running => AfterLastWindow::Quit,
         // Nothing would run.
-        Engine::Failed(_) => AfterLastWindow::Quit,
+        Engine::Failed(_) | Engine::Closed => AfterLastWindow::Quit,
         Engine::Opening | Engine::Open(_) if goes_headless => AfterLastWindow::GoHeadless,
         Engine::Opening | Engine::Open(_) => AfterLastWindow::Stay,
     }
@@ -75,8 +121,9 @@ pub struct Resident {
     engine: Engine,
     main: Option<AnyWindowHandle>,
     windowing: Windowing,
-    /// Quit was asked for, and the composer windows are closing.
-    quitting: bool,
+    /// Quit was asked for, and why: the composer windows are closing, or the app is
+    /// quitting already.
+    quitting: Option<QuitReason>,
     /// Where the main window was when it closed, to open it there again; or what a
     /// notification clicked meanwhile was about.
     reopen: Option<Destination>,
@@ -123,7 +170,7 @@ impl Resident {
             engine: Engine::Opening,
             main: None,
             windowing: Windowing::Windowed,
-            quitting: false,
+            quitting: None,
             reopen: None,
             compose: false,
             display: Display::current(),
@@ -134,9 +181,70 @@ impl Resident {
             _tasks: tasks,
         });
         cx.on_window_closed(Self::window_closed).detach();
-        cx.on_action(|_: &crate::actions::Quit, cx| Self::quit(cx));
+        cx.on_action(|_: &crate::actions::Quit, cx| Self::quit(QuitReason::Shortcut, cx));
+        cx.on_app_quit(Self::shut_down).detach();
         cx.on_system_wake(Self::woke).detach();
         Self::open_main(cx)
+    }
+
+    /// Quits on SIGINT, SIGTERM or SIGHUP (on Windows, the console's events) as the tray's
+    /// Quit does, so what the composers hold is saved: ending the session sends SIGTERM. A
+    /// second one quits at once, without waiting for a composer that can't close. Only
+    /// once per process.
+    pub fn quit_on_signals(cx: &mut App) {
+        let (signalled, mut signals) = futures_channel::mpsc::unbounded();
+        let handled = ctrlc::set_handler(move || {
+            let _ = signalled.unbounded_send(());
+        });
+        if let Err(e) = handled {
+            tracing::warn!(error = %e, "can't handle signals; they end the app at once");
+            return;
+        }
+        cx.spawn(async move |cx| {
+            if signals.recv().await.is_ok() {
+                cx.update(|cx| Self::quit(QuitReason::Signal, cx));
+            }
+            if signals.recv().await.is_ok() {
+                cx.update(|cx| exit(QuitReason::Signal, cx));
+            }
+        })
+        .detach();
+    }
+
+    /// However the app quits: says why, where the log of an app that was killed or
+    /// crashed just stops. GPUI quits without dropping the app's state, so this lets go
+    /// of the engine, which closes once GPUI has closed the windows that hold the rest.
+    /// Waits for it within the time GPUI gives, so the log says whether it did.
+    fn shut_down(cx: &mut App) -> impl Future<Output = ()> + use<> {
+        let resident = cx.global_mut::<Self>();
+        let reason = resident.quitting.unwrap_or(QuitReason::Platform);
+        tracing::info!(%reason, "quitting");
+        let engine = std::mem::replace(&mut resident.engine, Engine::Closed);
+        // They hold the engine too.
+        if cx.has_global::<Tray>() {
+            cx.remove_global::<Tray>();
+        }
+        if cx.has_global::<Notifier>() {
+            cx.remove_global::<Notifier>();
+        }
+        let closed = match engine {
+            Engine::Open(client) => Some(client.closed()),
+            Engine::Opening | Engine::Failed(_) | Engine::Closed => None,
+        };
+        let executor = cx.background_executor().clone();
+        async move {
+            let Some(closed) = closed else {
+                return;
+            };
+            if closed
+                .with_timeout(ENGINE_CLOSING, &executor)
+                .await
+                .is_err()
+            {
+                // Something still holds a handle: ended with the process, mid-work maybe.
+                tracing::warn!("the engine is still open; quitting anyway");
+            }
+        }
     }
 
     /// The engine's connections are likely dead after a sleep, and its timers didn't
@@ -249,15 +357,15 @@ impl Resident {
         cx.global_mut::<Self>().engine = engine;
         // The window was closed while it opened: there is nothing to keep running.
         if failed && cx.windows().is_empty() {
-            cx.quit();
+            exit(QuitReason::EngineFailed, cx);
         }
     }
 
     /// Quits once every composer window has saved what it holds and closed. One that
     /// can't close (see [`composer::close_all`](crate::composer::close_all)) stays open,
     /// and so does the app.
-    pub fn quit(cx: &mut App) {
-        if cx.global::<Self>().quitting {
+    pub fn quit(reason: QuitReason, cx: &mut App) {
+        if cx.global::<Self>().quitting.is_some() {
             return;
         }
         let closed = crate::composer::close_all(cx);
@@ -266,14 +374,15 @@ impl Resident {
             let closed = closed.await.unwrap_or(false);
             cx.update(|cx| {
                 if closed {
-                    cx.quit();
+                    exit(reason, cx);
                 } else {
-                    cx.global_mut::<Self>().quitting = false;
+                    tracing::info!(%reason, "quit called off: a composer stayed open");
+                    cx.global_mut::<Self>().quitting = None;
                 }
             });
         });
         let resident = cx.global_mut::<Self>();
-        resident.quitting = true;
+        resident.quitting = Some(reason);
         resident._quit = quit;
     }
 
@@ -345,13 +454,14 @@ impl Resident {
         }
         let keep_running = Preferences::get(cx).keep_running;
         let resident = cx.global::<Self>();
+        let quitting = resident.quitting;
         match after_last_window(
             keep_running,
             &resident.engine,
-            resident.quitting,
+            quitting.is_some(),
             GOES_HEADLESS,
         ) {
-            AfterLastWindow::Quit => cx.quit(),
+            AfterLastWindow::Quit => exit(quitting.unwrap_or(QuitReason::LastWindowClosed), cx),
             AfterLastWindow::Stay => {}
             AfterLastWindow::GoHeadless => {
                 Self::switch(WindowingRequest::Headless, cx, |switched, pending, cx| {
@@ -616,10 +726,33 @@ mod tests {
 
         // From the tray, as from the key.
         cx.update(|cx| Tray::choose(Command::Quit, None, cx));
-        assert!(cx.read(|cx| cx.global::<Resident>().quitting));
+        assert_eq!(
+            cx.read(|cx| cx.global::<Resident>().quitting),
+            Some(QuitReason::Tray)
+        );
         cx.run_until_parked();
-        assert!(!cx.read(|cx| cx.global::<Resident>().quitting));
+        assert_eq!(cx.read(|cx| cx.global::<Resident>().quitting), None);
         assert_eq!(cx.read(|cx| cx.windows().len()), 2);
+    }
+
+    #[gpui_kit::test]
+    fn quitting_lets_go_of_the_engine_so_it_closes(cx: &mut TestAppContext) {
+        let mail = start(None, cx);
+        main_mailbox(cx);
+        let mut closed = Box::pin(mail.client.closed());
+        drop(mail.client);
+
+        cx.update(|cx| Resident::quit(QuitReason::Shortcut, cx));
+        cx.run_until_parked();
+        // What the platform does once asked to quit.
+        cx.quit();
+        // Work started before, such as syncing the folder the window opened on, still
+        // holds it until it is done.
+        let mut noop = std::task::Context::from_waker(std::task::Waker::noop());
+        wait_until(|| {
+            cx.run_until_parked();
+            closed.as_mut().poll(&mut noop).is_ready()
+        });
     }
 
     /// Closes the main window, as the user does.

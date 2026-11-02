@@ -36,7 +36,7 @@ use settings::{Preferences, Settings};
 
 use crate::instance::{Claim, Display, Request};
 use crate::mailbox::Mailbox;
-use crate::resident::{Engine, Resident};
+use crate::resident::{Engine, QuitReason, Resident};
 
 /// What the system knows the app by: on Windows its AppUserModelID; elsewhere only the
 /// name shows (notifications, the tray). The qualifier of the data and config
@@ -125,8 +125,10 @@ fn main() {
         );
         if let Err(e) = Resident::start(opening, requests, cx) {
             tracing::error!(error = format!("{e:#}"), "couldn't open a window");
-            cx.quit();
+            resident::exit(QuitReason::NoWindow, cx);
+            return;
         }
+        Resident::quit_on_signals(cx);
     });
 }
 
@@ -204,7 +206,7 @@ impl Render for MainWindow {
         }
         match Resident::engine(cx) {
             Engine::Failed(message) => open_failed(message.clone(), cx),
-            Engine::Opening | Engine::Open(_) => div()
+            Engine::Opening | Engine::Open(_) | Engine::Closed => div()
                 .size_full()
                 .bg(cx.theme().background)
                 .into_any_element(),

@@ -273,7 +273,7 @@ GUI 的 `Tray`（`catmail-gui/src/tray/`）是应用级的全局，引擎打开�
 
 ## 退出
 
-退出由 `Resident` 一处决定（`Resident::quit`，绑在 Quit action 上，托盘的 Quit 也调用它）：
+退出由 `Resident` 一处决定（`Resident::quit`，绑在 Quit action 上，托盘的 Quit 和信号也调用它）：
 
 - 置 `quitting`，让每个写信窗口走关闭流程、存下最后的输入（`composer::close_all`）。它答"全部关掉了"
   就 `cx.quit()`；有一个关不了（地址要改、保存或附件失败）就答"没关完"，取消退出，那个窗口留下。
@@ -281,6 +281,19 @@ GUI 的 `Tray`（`catmail-gui/src/tray/`）是应用级的全局，引擎打开�
 - 写信窗口只回答"关不关得了"，不知道退出：起初退出状态放在写信窗口模块里，由最后一个关掉的写信窗口
   调 `cx.quit()`，`Resident` 还要去读它的标志，退出的决定分在两处，以后加入口（托盘）或退出前的确认
   都得改两边。
+- 退出时在 `on_app_quit`（`Resident::shut_down`）记一行 `quitting reason=…`，不管是谁让应用退出的。
+  我们自己的退出路径都经 `resident::exit`，先把原因记在 `quitting` 里（`QuitReason`：`shortcut`、
+  `tray`、`signal`、`last_window_closed`、`engine_failed`、`no_window`）；没记原因的是平台自己的退出
+  （macOS 应用菜单、Dock），记 `platform`。退出被取消时记 `quit called off`。以前日志只是停住，分不清
+  正常退出和进程被杀、崩溃。
+- SIGINT、SIGTERM、SIGHUP（Windows 上是控制台的 Ctrl+C、关闭等事件）走同一个 `Resident::quit`，写信
+  窗口先存好再退出：会话注销时系统发的是 SIGTERM，这样没保存的草稿也能留下。第二个信号不再等写信窗口，
+  直接退出。用 `ctrlc` 在它自己的线程上等信号，经 channel 回到 GPUI 线程；GPUI 不是 tokio，用不了
+  `tokio::signal`。Windows 上关闭控制台、注销、关机时，处理函数一返回系统就结束进程，来不及存。
+- GPUI 退出时不丢掉全局状态，只清掉窗口。`Resident::shut_down` 还把引擎从
+  `Resident` 里拿走，并移除也持有它的 `Tray`、`Notifier`；窗口里的句柄随窗口关闭而去。最后一个句柄
+  没了引擎就关闭，记 `engine closed`。在 GPUI 给退出回调的时间内（`SHUTDOWN_TIMEOUT`）等
+  `MailClient::closed()`，等不到（刚发出的同步之类的请求还拿着句柄）就记一行 warn 后照样退出。
 
 ## 开机启动
 
