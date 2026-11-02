@@ -92,6 +92,14 @@ impl MailboxStatus {
     }
 }
 
+/// UIDVALIDITY and UIDNEXT of a mailbox, as STATUS reported them. Either may be missing:
+/// NetEase (Coremail) answers STATUS with an empty list.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UidStatus {
+    pub uidvalidity: Option<u32>,
+    pub uidnext: Option<u32>,
+}
+
 /// What a FETCH of messages asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Items {

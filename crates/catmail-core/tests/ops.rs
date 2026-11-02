@@ -582,6 +582,10 @@ async fn a_rebuilt_folder_turns_changes_into_conflicts() {
 /// Without MOVE, with "two" moved locally to Archive. The message "two" has no
 /// Message-ID unless `message_id`.
 async fn copy_move_env(message_id: bool) -> (Env, MessageId) {
+    move_two_to_archive(copy_move_state(message_id)).await
+}
+
+fn copy_move_state(message_id: bool) -> ServerState {
     let mut state = ServerState::new("alice", "pw");
     state.faults.move_command = false;
     for subject in ["one", "two"] {
@@ -594,6 +598,10 @@ async fn copy_move_env(message_id: bool) -> (Env, MessageId) {
         state.inbox().append(raw.as_bytes(), &[]);
     }
     state.mailboxes.push(FakeMailbox::new("Archive"));
+    state
+}
+
+async fn move_two_to_archive(state: ServerState) -> (Env, MessageId) {
     let env = synced_env(state).await;
     let two = env.id_of("INBOX", "two").await;
     let archive = env.folder("Archive").await;
@@ -869,6 +877,92 @@ async fn an_unknowable_copy_leaves_the_original() {
     // Not tried again on its own.
     env.client.sync_account(env.account).await.unwrap();
     assert_eq!(names(&env.remote("INBOX")), ["one", "two"]);
+}
+
+/// As [`copy_move_env`], on a server that answers STATUS with nothing and leaves UIDNEXT
+/// out of EXAMINE, as NetEase does; Archive holds `archived` messages already.
+async fn bare_status_env(archived: usize) -> (Env, MessageId) {
+    let mut state = copy_move_state(true);
+    state.faults.bare_status = true;
+    for i in 0..archived {
+        state
+            .mailbox_mut("Archive")
+            .append_simple(&format!("old {i}"));
+    }
+    move_two_to_archive(state).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn moves_where_status_says_nothing() {
+    // The checkpoint comes from the last sync of Archive; a COPY whose answer was lost
+    // is found from it.
+    for archived in [0, 2] {
+        for lose_answer in [false, true] {
+            let case = format!("archived: {archived}, lose answer: {lose_answer}");
+            let (env, two) = bare_status_env(archived).await;
+            if lose_answer {
+                env.fake.state().faults.drop_after_change = true;
+                let report = env.client.replay_pending(env.account).await.unwrap();
+                assert!(report.error.is_some(), "{case}");
+                assert_eq!(names(&env.remote("INBOX")), ["one", "two"], "{case}");
+            }
+
+            let report = env.client.replay_pending(env.account).await.unwrap();
+            assert_eq!(
+                (report.applied, report.failed, report.pending),
+                (1, 0, 0),
+                "{case}"
+            );
+            let remote = env.remote("Archive");
+            let archive = names(&remote);
+            assert_eq!(archive.len(), archived + 1, "copied once: {case}");
+            assert_eq!(archive.last(), Some(&"two"), "{case}");
+            assert_eq!(names(&env.remote("INBOX")), ["one"], "{case}");
+            assert_eq!(env.id_of("Archive", "two").await, two, "{case}");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_identical_message_arriving_after_the_sync_is_not_taken_for_the_copy() {
+    // Another client copies "two" to Archive after its last sync here; then the move's
+    // connection drops before the COPY. That message is not the move's copy: both stay.
+    let (env, _) = bare_status_env(0).await;
+    {
+        let mut state = env.fake.state();
+        let raw = state.inbox().messages[1].raw.clone();
+        state.mailbox_mut("Archive").append(&raw, &[]);
+        state.faults.drop_before_change = true;
+    }
+    let report = env.client.replay_pending(env.account).await.unwrap();
+    assert!(report.error.is_some());
+
+    let report = env.client.replay_pending(env.account).await.unwrap();
+    assert_eq!((report.applied, report.pending), (1, 0));
+    assert_eq!(names(&env.remote("Archive")), ["two", "two"]);
+    assert_eq!(names(&env.remote("INBOX")), ["one"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn moves_into_a_new_folder_where_status_says_nothing() {
+    // Never synced: where a copy would go comes from the server, not the last sync.
+    let (env, _) = bare_status_env(0).await;
+    env.client.replay_pending(env.account).await.unwrap();
+    let one = env.id_of("INBOX", "one").await;
+    let new = env
+        .client
+        .create_folder(env.account, None, "Receipts")
+        .await
+        .unwrap();
+    env.client
+        .move_messages(vec![one], None, new.id)
+        .await
+        .unwrap();
+
+    let report = env.client.replay_pending(env.account).await.unwrap();
+    assert_eq!((report.applied, report.failed, report.pending), (1, 0, 0));
+    assert_eq!(names(&env.remote("Receipts")), ["one"]);
+    assert!(env.remote("INBOX").is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]

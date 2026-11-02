@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use catmail_proto::Credentials;
 use catmail_proto::TlsConfig;
-use catmail_proto::imap::{ChangedFlags, CopyUid, Error, Items, Session};
+use catmail_proto::imap::{ChangedFlags, CopyUid, Error, Items, Session, UidStatus};
 use catmail_testkit::{FakeImap, FakeMailbox, ServerState, TestCert};
 use catmail_types::{Flags, FolderRole, GmailLabel, Security, ServerConfig};
 
@@ -895,7 +895,21 @@ async fn changes_flags_moves_and_deletes() {
         ]
     );
 
-    assert_eq!(session.status("Archive").await.unwrap(), (9, 2));
+    assert_eq!(
+        session.status("Archive").await.unwrap(),
+        UidStatus {
+            uidvalidity: Some(9),
+            uidnext: Some(2)
+        }
+    );
+    // NetEase answers with an empty list; that is for the caller to make do with.
+    fake.state().faults.bare_status = true;
+    assert_eq!(
+        session.status("Archive").await.unwrap(),
+        UidStatus::default()
+    );
+    fake.state().faults.bare_status = false;
+    assert_eq!(session.last_uid().await.unwrap(), Some(3));
     let copied = session.uid_move(&[2, 3], "Archive").await.unwrap();
     assert_eq!(
         copied,

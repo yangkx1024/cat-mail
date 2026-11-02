@@ -12,4 +12,6 @@ pub mod utf7;
 
 pub use error::{Error, Result};
 pub use session::{CopyUid, Session};
-pub use types::{Capabilities, ChangedFlags, FetchedMessage, Items, ListedMailbox, MailboxStatus};
+pub use types::{
+    Capabilities, ChangedFlags, FetchedMessage, Items, ListedMailbox, MailboxStatus, UidStatus,
+};
