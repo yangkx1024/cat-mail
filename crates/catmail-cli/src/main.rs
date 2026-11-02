@@ -168,6 +168,7 @@ async fn run() -> Result<()> {
                     tracing::warn!(error = %e, "can't wait for Ctrl-C");
                     std::future::pending::<()>().await;
                 }
+                tracing::info!("interrupted; stopping");
             };
             watch::watch(&client, cli.json, interrupted).await
         }

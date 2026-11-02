@@ -1114,6 +1114,7 @@ dependencies = [
  "catmail-render",
  "catmail-testkit",
  "clap",
+ "ctrlc",
  "data-url",
  "directories",
  "dunce",

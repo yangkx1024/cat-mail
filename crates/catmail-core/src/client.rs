@@ -355,6 +355,13 @@ impl MailClient {
         self.engine.events.subscribe()
     }
 
+    /// Resolves once the engine has closed: every handle on it dropped, and the background
+    /// work with it. Holds no handle itself, so a frontend can drop its own and then wait.
+    pub fn closed(&self) -> impl Future<Output = ()> + Send + use<> {
+        let mut closing = self.engine.closing();
+        async move { closing.closed().await }
+    }
+
     pub async fn list_accounts(&self) -> Result<Vec<Account>> {
         let engine = self.engine.clone();
         self.rt
@@ -1511,6 +1518,7 @@ fn validate_server(proto: &str, server: &ServerConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use catmail_types::{Security, ServerConfig};
+    use futures_util::FutureExt as _;
 
     use std::sync::Mutex;
     use std::time::Instant;
@@ -1603,6 +1611,37 @@ mod tests {
         fn delete(&self, _: &str) -> Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn closed_resolves_once_the_last_handle_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let open = || {
+            // Its own runtime, as the GUI's; background tasks hold the engine weakly.
+            MailClient::builder(Config::with_data_dir(dir.path()))
+                .secrets(Arc::new(MemorySecrets::default()))
+                .sync_in_background(Some(SyncSchedule::default()))
+                .collect_garbage_every(Some(Duration::from_secs(3600)))
+                .open()
+        };
+        let client = open().unwrap();
+        let other = client.clone();
+        let mut closed = std::pin::pin!(client.closed());
+        drop(client);
+        let open_meanwhile = (&mut closed).now_or_never().is_none();
+        assert!(open_meanwhile, "another handle keeps it open");
+        drop(other);
+        let waiter = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        waiter.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), closed)
+                .await
+                .expect("the engine closes with its last handle");
+        });
+        // Closed means the data directory is free again.
+        open().unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]

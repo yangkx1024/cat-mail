@@ -9,7 +9,7 @@ use catmail_core::{MailClient, RecvError};
 use gpui_kit::{App, AppContext as _, Global, RenderImage, SvgRenderer, Task, WindowAppearance};
 
 use crate::mailbox::{Coalesce, Refresh};
-use crate::resident::Resident;
+use crate::resident::{QuitReason, Resident};
 use crate::theme::appearance::{self, Themes};
 
 /// Where the desktop may have a tray to register with.
@@ -169,7 +169,7 @@ impl Tray {
             Command::Open => Resident::show_at(None, activation_token, cx),
             Command::Compose => Resident::compose(activation_token, cx),
             Command::Sync => Resident::sync(cx),
-            Command::Quit => Resident::quit(cx),
+            Command::Quit => Resident::quit(QuitReason::Tray, cx),
         }
     }
 

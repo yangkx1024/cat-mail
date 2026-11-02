@@ -32,6 +32,9 @@ blitz-html = "=0.3.0-beta.4"
 blitz-paint = { version = "=0.3.0-beta.4", default-features = false }
 blitz-traits = "=0.3.0-beta.4"
 clap = { version = "4.6", features = ["derive", "env"] }
+# The GUI quits as the tray's Quit does on SIGINT, SIGTERM and SIGHUP (Windows: console
+# events), on its own thread, without tokio.
+ctrlc = { version = "3.5.2", features = ["termination"] }
 # WHATWG data: URL parsing; the one gpui-kit uses for the same job.
 data-url = "0.3.2"
 directories = "6"

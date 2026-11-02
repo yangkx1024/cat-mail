@@ -350,6 +350,14 @@ impl Drop for Uncount<'_> {
     }
 }
 
+impl Drop for Engine {
+    fn drop(&mut self) {
+        // The last line of a clean exit: without it, the log ending means the process was
+        // killed or crashed.
+        tracing::info!("engine closed");
+    }
+}
+
 /// Tells a task holding the engine weakly that the engine is gone.
 pub(crate) struct Closing(watch::Receiver<()>);
 

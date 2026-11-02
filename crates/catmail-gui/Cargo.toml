@@ -15,6 +15,7 @@ catmail-core.workspace = true
 catmail-render.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+ctrlc.workspace = true
 data-url.workspace = true
 directories.workspace = true
 dunce.workspace = true
