@@ -36,6 +36,13 @@ pub enum Error {
     #[error("login rejected by the server ({0}); check the username and password")]
     AuthFailed(String),
 
+    /// The server said the account went over its download (or command) limit, with
+    /// these words; on logging in too. It lifts on its own.
+    #[error(
+        "the account went over the server's download limit ({0}); this lifts on its own, within a day at most"
+    )]
+    OverLimit(String),
+
     /// The server lacks something the account's settings require, e.g. STARTTLS.
     #[error("the server does not support {0}; check the security setting and port")]
     Unsupported(&'static str),
@@ -146,6 +153,7 @@ impl Error {
             Self::Http(HttpError(e)) => e.kind(),
             Self::OutgoingServer(e) | Self::Attach { error: e, .. } => e.kind(),
             Self::AuthFailed(_) => K::Auth,
+            Self::OverLimit(_) => K::OverLimit,
             Self::Unsupported(_)
             | Self::InvalidInput(_)
             | Self::NoDataDir
@@ -167,12 +175,13 @@ impl Error {
     }
 
     /// Whether trying the same again later may work, with nothing changed meanwhile: the
-    /// network failed, or the server refused for now (an SMTP 4xx reply).
+    /// network failed, or the server refused for now (an SMTP 4xx reply, an account over
+    /// its download limit).
     pub fn is_transient(&self) -> bool {
         match self {
             Self::Smtp(SmtpError(e)) => !e.is_permanent(),
             Self::OutgoingServer(e) => e.is_transient(),
-            _ => self.kind() == ErrorKind::Network,
+            _ => matches!(self.kind(), ErrorKind::Network | ErrorKind::OverLimit),
         }
     }
 
@@ -187,13 +196,12 @@ impl Error {
         }
     }
 
-    /// Whether the server said the account went over its download limit (see
-    /// [`imap::Error::is_over_limit`]); a rejected login is lifted to
-    /// [`AuthFailed`](Self::AuthFailed) with the server's text.
-    pub(crate) fn is_over_limit(&self) -> bool {
+    /// Whether the IMAP connection this happened on can no longer be used: it broke, or
+    /// the server said the account went over its limit.
+    pub(crate) fn breaks_connection(&self) -> bool {
         match self {
-            Self::Imap(ImapError(e)) => e.is_over_limit(),
-            Self::AuthFailed(text) => imap::says_over_limit(text),
+            Self::OverLimit(_) => true,
+            Self::Imap(ImapError(e)) => e.is_fatal(),
             _ => false,
         }
     }
@@ -219,9 +227,14 @@ impl From<&Error> for ReportedError {
 
 impl From<imap::Error> for Error {
     /// Lifts the failures a user can act on, so frontends needn't interpret protocol
-    /// errors.
+    /// errors. An account over its download limit is that first, whatever it came with:
+    /// a refused login, a BYE or a refused command. Then it isn't a refusal either: the
+    /// next command would fare no better.
     fn from(e: imap::Error) -> Self {
         use imap::Error as E;
+        if let Some(text) = e.over_limit() {
+            return Self::OverLimit(text.to_owned());
+        }
         match e {
             E::AuthFailed(text) => Self::AuthFailed(text),
             E::Unsupported(what) => Self::Unsupported(what),
@@ -298,15 +311,34 @@ mod tests {
     }
 
     #[test]
+    fn an_account_over_its_limit_is_neither_a_rejected_login_nor_a_refusal() {
+        let gmail = "[ALERT] Account exceeded command or bandwidth limits. (Failure)";
+        let over = [
+            imap::Error::AuthFailed(gmail.into()),
+            imap::Error::Bye(gmail.into()),
+            imap::Error::Command {
+                command: "UID FETCH",
+                text: "Fetch volume limit exceed".into(),
+            },
+        ];
+        for e in over.map(Error::from) {
+            assert!(matches!(e, Error::OverLimit(_)), "{e:?}");
+            assert_eq!(e.kind(), ErrorKind::OverLimit);
+            assert!(
+                e.breaks_connection() && e.is_transient() && !e.is_refusal(),
+                "{e:?}"
+            );
+            assert!(e.imap().is_none(), "not retried on a new connection");
+        }
+        let gmail = Error::from(imap::Error::AuthFailed(gmail.into()));
+        assert!(gmail.to_string().contains("bandwidth limits"), "{gmail}");
+    }
+
+    #[test]
     fn user_facing_failures_are_lifted() {
         let rejected = Error::from(imap::Error::AuthFailed("NO".into()));
         assert!(matches!(rejected, Error::AuthFailed(_)));
         assert_eq!(rejected.kind(), ErrorKind::Auth);
-        assert!(!rejected.is_over_limit());
-        let over = Error::from(imap::Error::AuthFailed(
-            "[ALERT] Account exceeded command or bandwidth limits".into(),
-        ));
-        assert!(over.is_over_limit(), "the server's text survives the lift");
 
         let dup = Error::from(catmail_store::Error::AlreadyExists("account a".into()));
         assert!(matches!(dup, Error::AlreadyExists(_)));

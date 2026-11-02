@@ -7,7 +7,7 @@ use catmail_testkit::{FakeMailbox, ServerState};
 
 mod common;
 
-use common::{Env, copied, drain, synced_env};
+use common::{Env, GMAIL_OVER_LIMIT, copied, drain, synced_env};
 
 /// INBOX with "one", "two", "three" (UIDs 1..=3), plus Archive and Trash.
 fn state() -> ServerState {
@@ -367,6 +367,36 @@ async fn refused_changes_are_undone() {
     }
     assert!(env.pending().await.is_empty());
     assert_eq!(refusals(&drain(&mut events)), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn changes_refused_over_the_servers_limit_wait_for_it_to_lift() {
+    let env = synced_env(state()).await;
+    let one = env.id_of("INBOX", "one").await;
+    env.client
+        .set_flags(vec![one], Flags::FLAGGED, Flags::empty())
+        .await
+        .unwrap();
+    env.fake.state().faults.refuse_changes = Some(GMAIL_OVER_LIMIT.into());
+
+    let report = env.client.replay_pending(env.account).await.unwrap();
+    let err = report.error.unwrap();
+    assert!(err.kind == ErrorKind::OverLimit && err.transient, "{err:?}");
+    assert_eq!(
+        (report.failed, report.pending),
+        (0, 1),
+        "not refused for good"
+    );
+    assert!(
+        env.local("INBOX")
+            .await
+            .contains(&("one".into(), Flags::FLAGGED))
+    );
+
+    env.fake.state().faults.refuse_changes = None;
+    let report = env.client.replay_pending(env.account).await.unwrap();
+    assert_eq!((report.applied, report.pending), (1, 0));
+    assert_eq!(env.remote("INBOX")[0].1, ["\\Flagged"]);
 }
 
 /// How many times `events` say changes were refused.

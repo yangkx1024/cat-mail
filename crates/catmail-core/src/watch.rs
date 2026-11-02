@@ -45,12 +45,18 @@ pub struct SyncSchedule {
     /// How long to wait after a failure before trying again, doubling with each failure
     /// in a row, up to `full_sync` [30 seconds]. Queued local changes try again at once,
     /// except after the server rejected the login: that waits `full_sync`, whatever is
-    /// queued, or until a sync asked for gets through.
+    /// queued, or until a sync asked for gets through. An account over its download limit
+    /// waits `over_limit`.
     pub retry: Duration,
     /// After the computer woke, how long to wait after the first failure, doubling while
     /// that is sooner than `retry`; failures then back off from `retry` as usual
     /// [2 seconds]. The network is often back only a few seconds after the computer.
     pub retry_after_wake: Duration,
+    /// How long to wait after the server said the account went over its download limit
+    /// [1 hour]: Gmail usually lifts it after an hour, and both it and NetEase within a
+    /// day; each try in between may count towards it. Queued local changes wait too,
+    /// but a sync asked for or waking from sleep tries again at once.
+    pub over_limit: Duration,
 }
 
 impl Default for SyncSchedule {
@@ -61,6 +67,7 @@ impl Default for SyncSchedule {
             idle: Duration::from_secs(10 * 60),
             retry: Duration::from_secs(30),
             retry_after_wake: Duration::from_secs(2),
+            over_limit: Duration::from_secs(60 * 60),
         }
     }
 }
@@ -170,7 +177,7 @@ async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
                 (Wait::Idle, Some(s)) if idle_works => {
                     let (start, opened) = (Instant::now(), s.opened());
                     let idled = tokio::select! {
-                        idled = idle(s, &wake, &mut cancellation, &schedule, due) => Some(idled),
+                        idled = idle(s, &engine, account, &wake, &mut cancellation, &schedule, due) => Some(idled),
                         () = slept_through(&engine, &resume, opened) => None,
                     };
                     // Not ended with DONE: after a sleep the answer may never come.
@@ -205,6 +212,18 @@ async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
                                 "server ends IDLE at once; checking INBOX at intervals");
                             idle_works = false;
                             continue;
+                        }
+                        // Neither a refused IDLE nor a lost connection: nothing works on
+                        // the account until it lifts, as for a step that fails so.
+                        Err(e) if e.is_over_limit() => {
+                            session = None;
+                            tracing::warn!(%account, error = %e, delay = ?schedule.over_limit,
+                                "background sync failed; trying again later");
+                            if let Some(engine) = engine.upgrade() {
+                                let failed = Err::<(), _>(Error::from(e));
+                                engine.report(account, Activity::Sync, &failed);
+                            }
+                            schedule.over_limit
                         }
                         Err(catmail_proto::imap::Error::Command { text, .. }) => {
                             tracing::info!(%account, %text,
@@ -241,6 +260,7 @@ async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
                     // Each try is another rejected login, which servers count towards
                     // locking the account.
                     Error::AuthFailed(_) => schedule.full_sync,
+                    Error::OverLimit(_) => schedule.over_limit,
                     _ => failures.retry_in(
                         schedule.retry_after_wake,
                         schedule.retry,
@@ -254,20 +274,21 @@ async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
         };
         tokio::select! {
             () = cancellation.cancelled() => {}
-            () = unless_rejected(&engine, account, &wake) => {}
-            () = unless_rejected(&engine, account, &resume) => {}
+            () = unless(&engine, &wake, |e| e.ignores_wakes(account, false)) => {}
+            () = unless(&engine, &resume, |e| e.login_rejected(account)) => {}
             () = tokio::time::sleep(pause) => {}
         }
     }
 }
 
-/// Returns once `signal` is notified while the server doesn't reject the login, or the
-/// engine is gone: neither queued changes nor waking from sleep bring on another rejected
-/// login (see [`Engine::wake`]), not even when notified before the rejection was known.
-async fn unless_rejected(engine: &Weak<Engine>, account: AccountId, signal: &Notify) {
+/// Returns once `signal` is notified while `ignored` doesn't hold, or the engine is gone:
+/// neither queued changes nor waking from sleep bring on another rejected login, nor do
+/// queued changes add to an account over its limit (see [`Engine::wake`]), not even when
+/// notified before that was known.
+async fn unless(engine: &Weak<Engine>, signal: &Notify, ignored: impl Fn(&Engine) -> bool) {
     loop {
         signal.notified().await;
-        if engine.upgrade().is_none_or(|e| !e.login_rejected(account)) {
+        if engine.upgrade().is_none_or(|e| !ignored(&e)) {
             return;
         }
     }
@@ -284,12 +305,15 @@ async fn slept_through(engine: &Weak<Engine>, resume: &Notify, opened: Instant) 
     }
 }
 
-/// IDLEs until the server reports a change, local changes are queued, the account is
-/// removed or the engine is gone, or the next step is due (in `due`: every folder to be
-/// synced, or a draft to be uploaded). An IDLE that ends quietly is started over: its
-/// round trip showed the connection alive.
+/// IDLEs until the server reports a change, local changes are queued (unless background
+/// sync ignores them for now, see [`Engine::ignores_wakes`]), the account is removed or
+/// the engine is gone, or the next step is due (in `due`: every folder to be synced, or a
+/// draft to be uploaded). An IDLE that ends quietly is started over: its round trip
+/// showed the connection alive.
 async fn idle(
     session: &mut Session,
+    engine: &Weak<Engine>,
+    account: AccountId,
     wake: &Notify,
     cancellation: &mut Cancellation,
     schedule: &SyncSchedule,
@@ -301,7 +325,7 @@ async fn idle(
         let left = due.saturating_sub(start.elapsed());
         let mut stop = false;
         let stopping = async {
-            stopped(wake, cancellation).await;
+            stopped(engine, account, wake, cancellation).await;
             stop = true;
         };
         let (began, max) = (Instant::now(), schedule.idle.min(left));
@@ -323,10 +347,16 @@ async fn idle(
     }
 }
 
-/// Resolves once local changes are queued, the account is removed or the engine is gone.
-async fn stopped(wake: &Notify, cancellation: &mut Cancellation) {
+/// Resolves once local changes are queued that background sync doesn't ignore, the
+/// account is removed or the engine is gone.
+async fn stopped(
+    engine: &Weak<Engine>,
+    account: AccountId,
+    wake: &Notify,
+    cancellation: &mut Cancellation,
+) {
     tokio::select! {
-        () = wake.notified() => {}
+        () = unless(engine, wake, |e| e.ignores_wakes(account, true)) => {}
         () = cancellation.cancelled() => {}
     }
 }

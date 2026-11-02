@@ -10,7 +10,7 @@ use catmail_testkit::{FakeHttp, Reply, ServerState, SmtpState, response};
 
 mod common;
 
-use common::{Env, drain, env_built, eventually, files, synced_env as env};
+use common::{Env, NETEASE_OVER_LIMIT, drain, env_built, eventually, files, synced_env as env};
 
 impl Env {
     /// Message ids in INBOX, by UID: the fixtures' dates say nothing about it.
@@ -687,6 +687,32 @@ async fn a_failed_download_stores_nothing_and_can_be_retried() {
 
     let message = env.client.download_message(id).await.unwrap();
     assert_eq!(body(&message).attachments.len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_download_over_the_servers_limit_says_so_and_drops_the_connection() {
+    let env = env(state(&[NEWSLETTER, NEWSLETTER])).await;
+    env.client.download_message(env.id(0).await).await.unwrap();
+    let connections = env.fake.state().connections;
+    env.fake.state().faults.body_fetch_refusal = Some(NETEASE_OVER_LIMIT.into());
+
+    let err = env
+        .client
+        .download_message(env.id(1).await)
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind(), catmail_core::ErrorKind::OverLimit, "{err:?}");
+    assert!(err.is_transient(), "{err:?}");
+    let text = err.to_string();
+    assert!(
+        text.contains("download limit") && text.contains(NETEASE_OVER_LIMIT),
+        "{text}"
+    );
+
+    // Not kept for the next download, which would only add to the count.
+    env.fake.state().faults.body_fetch_refusal = None;
+    env.client.download_message(env.id(1).await).await.unwrap();
+    assert_eq!(env.fake.state().connections, connections + 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

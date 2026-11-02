@@ -17,9 +17,9 @@ use catmail_proto::imap::{self, Session};
 use catmail_types::AccountId;
 use tokio::task::AbortHandle;
 
+use crate::Result;
 use crate::connection::connect;
 use crate::engine::{Closing, Engine, lock};
-use crate::{Error, Result};
 
 /// Enough for a message and one of its attachments at once.
 const PER_ACCOUNT: usize = 2;
@@ -212,11 +212,7 @@ pub(crate) async fn with_session<T>(
     let mut slot = pool.take();
     let result = on_session(engine, account, &mut slot, op).await;
     if let Some(session) = slot
-        && result
-            .as_ref()
-            .err()
-            .and_then(Error::imap)
-            .is_none_or(survives)
+        && result.as_ref().err().is_none_or(|e| !e.breaks_connection())
     {
         pool.put(engine, session);
     }

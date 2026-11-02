@@ -191,6 +191,7 @@ impl JsonError {
         let kind = match kind {
             ErrorKind::Network => "network",
             ErrorKind::Auth => "auth",
+            ErrorKind::OverLimit => "over_limit",
             ErrorKind::Refused => "refused",
             ErrorKind::OutOfSync => "out_of_sync",
             ErrorKind::NotFound => "not_found",

@@ -178,8 +178,8 @@ async fn upload_one(
         Ok(appended) => appended,
         // A refused APPEND stores nothing, nor does one that couldn't be sent: also one
         // refused before its message went out (Dovecot does that when it can't store
-        // anything).
-        Err(e @ (ImapError::Command { .. } | ImapError::InvalidInput(_))) => {
+        // anything). Not one saying the account went over its limit, which lifts.
+        Err(e @ (ImapError::Command { .. } | ImapError::InvalidInput(_))) if !e.is_over_limit() => {
             return failed(engine, draft, Some(upload), e.to_string()).await;
         }
         // Answered OK, but not all of the answer could be read: stored, at a UID to be

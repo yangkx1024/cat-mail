@@ -7,7 +7,10 @@ use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 
 mod common;
 
-use common::{Env, drain, env, env_added, env_built, folder_report, new_mail, status_changes};
+use common::{
+    Env, GMAIL_OVER_LIMIT, drain, env, env_added, env_built, folder_report, new_mail,
+    status_changes,
+};
 
 fn state_with(inbox_subjects: &[&str]) -> ServerState {
     let mut state = ServerState::new("alice", "pw");
@@ -884,6 +887,27 @@ async fn a_skipped_folder_sync_leaves_the_account_status_alone() {
     assert_eq!(skipped.unwrap(), None);
     let problem = env.client.account_status(env.account).sync;
     assert!(problem.is_some_and(|p| p.login_rejected()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_login_over_the_servers_limit_is_not_a_rejected_login() {
+    let env = env(state_with(&["one"])).await;
+    env.sync().await;
+    env.fake.state().faults.login_refusal = Some(GMAIL_OVER_LIMIT.into());
+
+    let err = env.client.sync_account(env.account).await.unwrap_err();
+    assert!(matches!(err, Error::OverLimit(_)), "{err:?}");
+    assert_eq!(err.kind(), ErrorKind::OverLimit);
+    let problem = env.client.account_status(env.account).sync.unwrap();
+    assert!(
+        problem.over_limit() && !problem.login_rejected(),
+        "{problem:?}"
+    );
+    assert!(problem.error.transient, "{problem:?}");
+
+    env.fake.state().faults.login_refusal = None;
+    env.client.sync_account(env.account).await.unwrap();
+    assert_eq!(env.client.account_status(env.account), Default::default());
 }
 
 #[tokio::test(flavor = "multi_thread")]

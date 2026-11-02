@@ -251,7 +251,9 @@ pub struct AccountOverview {
 pub struct ServerProblem {
     /// The latest error. If its kind is [`ErrorKind::Auth`](crate::ErrorKind::Auth),
     /// the server rejected the login: retrying is slowed down, since servers lock
-    /// accounts after repeated failed logins, and the password needs fixing.
+    /// accounts after repeated failed logins, and the password needs fixing. If it is
+    /// [`ErrorKind::OverLimit`](crate::ErrorKind::OverLimit), the server stopped serving
+    /// the account for a while: retrying is slowed down too, and nothing needs fixing.
     pub error: ReportedError,
     /// When the first of these failures happened, in unix seconds.
     pub since: i64,
@@ -262,6 +264,17 @@ impl ServerProblem {
     /// Whether the server rejected the login.
     pub fn login_rejected(&self) -> bool {
         self.error.kind == crate::ErrorKind::Auth
+    }
+
+    /// Whether the server said the account went over its download limit.
+    pub fn over_limit(&self) -> bool {
+        self.error.kind == crate::ErrorKind::OverLimit
+    }
+
+    /// Whether trying again soon would only make it worse, so background sync waits it
+    /// out: the login was rejected, or the account went over its limit.
+    pub fn waited_out(&self) -> bool {
+        self.login_rejected() || self.over_limit()
     }
 }
 

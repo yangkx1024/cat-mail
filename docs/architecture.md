@@ -55,17 +55,23 @@ GPUI 有自己的 executor，不是 tokio；IMAP / SMTP 栈却依赖 tokio react
 ### 错误
 
 `catmail_core::Error` 是前端看到的唯一错误类型。用户能处理的失败有自己的变体（`AuthFailed`、
-`Unsupported`、`AlreadyExists`、`OutOfSync`、各种 `*NotFound` 等），从下层错误里提升上来；其余的
+`OverLimit`、`Unsupported`、`AlreadyExists`、`OutOfSync`、各种 `*NotFound` 等），从下层错误里提升上来；其余的
 store / IMAP / SMTP 错误包在不透明的 `StoreError` / `ImapError` / `SmtpError` 里，下层的错误枚举
 不属于公开 API。
 
-- 前端按 `Error::kind()`（`ErrorKind`：`Network`、`Auth`、`Refused`、`OutOfSync`、`NotFound`、
+- 前端按 `Error::kind()`（`ErrorKind`：`Network`、`Auth`、`OverLimit`、`Refused`、`OutOfSync`、`NotFound`、
   `Invalid`、`Conflict`、`Internal`）决定图标和动作，不去解析 `Display` 文本。`is_transient()`：
-  什么都不改、稍后重试可能成功（网络、SMTP 4xx）；`is_refusal()`：命令失败但连接仍可用，同一连接上
+  什么都不改、稍后重试可能成功（网络、SMTP 4xx、超出下载限额）；`is_refusal()`：命令失败但连接仍可用，同一连接上
   其余的工作照常继续（引擎内部"记日志、跳过这个文件夹"的判断）。
 - 后台工作的错误以 `ReportedError { kind, message, transient }` 交给前端：`ServerProblem.error`
   （账户状态）、`FolderSyncReport.error` 和 `ReplayReport.error`。登录被拒绝就是 `kind == Auth`，
   没有单独的布尔位；`transient` 是 `is_transient()` 的结果，因为单看种类分不出 SMTP 的 421 和 554。
+- **超出服务器的下载限额**（`OverLimit`）：服务器没有响应码，只能按文字认（proto 的
+  `imap::Error::over_limit`：Gmail 的 `Account exceeded command or bandwidth limits`，网易的
+  `Fetch volume limit exceed` / "flow over limit"）。IMAP 错误提升为 core 错误时最先认它，不论它出现在登录
+  （否则是 `AuthFailed`，会让用户去改密码）、BYE 还是某条命令的 NO 上（否则是 `Refused`）；它也不算
+  `is_refusal()`，proto 的 `is_fatal()` 也算它：同一连接上的下一条命令不会更好，同步就此停下，不再逐个文件夹
+  去碰，操作回放也不把它记成服务器拒绝（那是永久失败，会撤销用户的改动），留在队列里等限额解除。
 - `ErrorKind` 故意不加 `#[non_exhaustive]`：以后加种类时，前端的 `match` 会编译失败，提醒每处都处理。
 
 ### 规则在引擎，措辞在前端

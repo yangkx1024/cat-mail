@@ -54,6 +54,7 @@ pub enum Error {
 impl Error {
     pub fn kind(&self) -> ErrorKind {
         match self {
+            _ if self.is_over_limit() => ErrorKind::OverLimit,
             // A garbled conversation too: a new connection may do better.
             Self::Io(_)
             | Self::Timeout
@@ -71,27 +72,35 @@ impl Error {
 
     /// Whether the connection can no longer be used. Everything except a refused or
     /// incompletely parsed command (and invalid input detected before sending) means it
-    /// must be dropped.
+    /// must be dropped; so does a refusal saying the account went over its limit
+    /// ([`is_over_limit`](Self::is_over_limit)): the next command would fare no better.
     pub fn is_fatal(&self) -> bool {
-        !matches!(
-            self,
-            Self::Command { .. }
-                | Self::Incomplete(_)
-                | Self::InvalidServerName(_)
-                | Self::InvalidInput(_)
-        )
+        self.is_over_limit()
+            || !matches!(
+                self,
+                Self::Command { .. }
+                    | Self::Incomplete(_)
+                    | Self::InvalidServerName(_)
+                    | Self::InvalidInput(_)
+            )
     }
 
     /// Whether the server said the account went over its download limit, on logging in,
-    /// with a BYE or refusing a command (see [`says_over_limit`]). Then nothing else on the
-    /// account works for a while either, and trying again only adds to it.
+    /// with a BYE or refusing a command (by its words, see `OVER_LIMIT`). Then nothing
+    /// else on the account works for a while either, and trying again only adds to it.
     pub fn is_over_limit(&self) -> bool {
+        self.over_limit().is_some()
+    }
+
+    /// What the server said, if it said the account went over its download limit (see
+    /// [`is_over_limit`](Self::is_over_limit)).
+    pub fn over_limit(&self) -> Option<&str> {
         match self {
             Self::Command { text, .. }
             | Self::Bye(text)
             | Self::Rejected(text)
-            | Self::AuthFailed(text) => says_over_limit(text),
-            _ => false,
+            | Self::AuthFailed(text) => says_over_limit(text).then_some(text.as_str()),
+            _ => None,
         }
     }
 
@@ -113,7 +122,7 @@ const OVER_LIMIT: &[&str] = &["bandwidth limit", "volume limit", "flow over limi
 
 /// Whether a server's text says the account went over its download limit. Servers have
 /// no response code for it, only words.
-pub fn says_over_limit(text: &str) -> bool {
+fn says_over_limit(text: &str) -> bool {
     let text = text.to_lowercase();
     OVER_LIMIT.iter().any(|t| text.contains(t))
 }
@@ -140,6 +149,9 @@ mod tests {
             text: text.into(),
         };
         assert!(refused("Fetch volume limit exceed").is_over_limit());
+        let over = refused("Fetch volume limit exceed");
+        assert!(over.kind() == ErrorKind::OverLimit && over.is_fatal());
+        assert!(!refused("[SERVERBUG] Message can't be read").is_fatal());
         assert!(
             Error::AuthFailed("[ALERT] Account exceeded command or bandwidth limits".into())
                 .is_over_limit()
