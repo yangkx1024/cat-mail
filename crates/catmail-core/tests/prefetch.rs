@@ -424,12 +424,11 @@ async fn a_login_working_again_is_noticed_after_the_sync_that_shows_it() {
     // The sync that gets through signals it finished before it reports the login
     // working (after LOGOUT): the prefetch looks, finds it still rejected, and must hear
     // of the report.
-    let gate = Arc::new(tokio::sync::Semaphore::new(0));
-    {
+    let gate = {
         let mut state = env.fake.state();
         state.faults.reject_login = false;
-        state.faults.logout_gate = Some(gate.clone());
-    }
+        state.hold("LOGOUT")
+    };
     let syncing = tokio::spawn({
         let (client, account) = (env.client.clone(), env.account);
         async move { client.sync_account(account).await.unwrap() }
