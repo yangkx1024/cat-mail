@@ -256,6 +256,15 @@ pub struct Faults {
     /// Answer this many UID FETCHes that ask for a body with nothing but OK, as a server
     /// does about a UID the connection's view of the mailbox doesn't have.
     pub empty_body_fetches: usize,
+    /// UIDs whose body FETCHes are refused with NO, every time, as a server does with a
+    /// message it can't read.
+    pub refuse_body_fetch: Vec<u32>,
+    /// Refuse every body FETCH with `NO <text>`, e.g. NetEase's `Fetch volume limit
+    /// exceed` once an account went over its download limit.
+    pub body_fetch_refusal: Option<String>,
+    /// Hold each LOGOUT until it gets a permit, e.g. to keep a sync from reporting that
+    /// it finished.
+    pub logout_gate: Option<Arc<Semaphore>>,
     /// Send every FETCH response twice.
     pub duplicate_fetch: bool,
     /// Report each RFC822.SIZE one byte larger than the message, as some servers count
@@ -352,6 +361,9 @@ impl Default for Faults {
             body_fetch_gate: None,
             nil_sections: false,
             empty_body_fetches: 0,
+            refuse_body_fetch: Vec::new(),
+            body_fetch_refusal: None,
+            logout_gate: None,
             duplicate_fetch: false,
             inexact_sizes: false,
             reverse_fetch: false,
@@ -649,6 +661,13 @@ impl ServerState {
     pub fn hold_fetches(&mut self) -> Arc<Semaphore> {
         let gate = Arc::new(Semaphore::new(0));
         self.faults.fetch_gate = Some(gate.clone());
+        gate
+    }
+
+    /// Likewise for body FETCHes (`body_fetch_gate`).
+    pub fn hold_body_fetches(&mut self) -> Arc<Semaphore> {
+        let gate = Arc::new(Semaphore::new(0));
+        self.faults.body_fetch_gate = Some(gate.clone());
         gate
     }
 
@@ -1299,6 +1318,10 @@ async fn handle(
         }
         "NOOP" => out += &format!("{tag} OK NOOP completed\r\n"),
         "LOGOUT" => {
+            let gate = lock(state).faults.logout_gate.clone();
+            if let Some(gate) = gate {
+                gate.acquire().await.expect("gate open").forget();
+            }
             out += &format!("* BYE logging out\r\n{tag} OK LOGOUT completed\r\n");
             next = Next::Close;
         }
@@ -1625,6 +1648,27 @@ async fn handle(
                 if let Some(gate) = gate {
                     gate.acquire().await.expect("gate open").forget();
                 }
+            }
+            let refusal = if items.iter().any(|i| body_section(i).is_some()) {
+                let set = args.first().map(Tok::text).unwrap_or_default();
+                let faults = &lock(state).faults;
+                if faults
+                    .refuse_body_fetch
+                    .iter()
+                    .any(|&uid| set_contains(&set, uid, || u32::MAX))
+                {
+                    Some("[SERVERBUG] Message can't be read".to_string())
+                } else {
+                    faults.body_fetch_refusal.clone()
+                }
+            } else {
+                None
+            };
+            if let Some(text) = refusal {
+                out += &format!("{tag} NO {text}\r\n");
+                io.get_mut().write_all(out.as_bytes()).await?;
+                io.get_mut().flush().await?;
+                return Ok(next);
             }
             let empty = {
                 let faults = &mut lock(state).faults;

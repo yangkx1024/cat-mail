@@ -1478,15 +1478,7 @@ mod tests {
         }
 
         fn message(&self, folder: FolderId, uid: u32) -> MessageId {
-            self.store
-                .read(|db| {
-                    Ok(db.conn.query_row(
-                        "SELECT id FROM messages WHERE folder_id = ?1 AND uid IS ?2",
-                        params![folder.0, uid],
-                        |r| Ok(MessageId(r.get(0)?)),
-                    )?)
-                })
-                .unwrap()
+            test_util::message_id(&self.store, folder, uid)
         }
 
         /// (folder, uid, flags) of the row, if it exists.

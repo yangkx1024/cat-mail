@@ -649,3 +649,82 @@ async fn folders_are_created_renamed_and_deleted_on_dovecot() {
     assert!(!report.folders.iter().any(|f| f.name.starts_with(&run)));
     assert!(!maildir.join(format!(".{renamed}")).exists());
 }
+
+/// Bodies fetched in the background once the account is synced: a small message whole, of
+/// a large one only the text, and neither marked read. In the `prefetch` user's mailbox.
+#[tokio::test(flavor = "multi_thread")]
+async fn bodies_are_prefetched_from_dovecot() {
+    let Some(env) = testenv::testenv() else {
+        return;
+    };
+    let maildir = user_maildir(&env.maildir, "prefetch");
+    let word = run_tag();
+    let small = format!(
+        "From: Test <test@example.com>\r\nSubject: small {word}\r\n\
+         Date: Sun, 18 Oct 2026 12:00:00 +0000\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\r\n请查收{word}的季度报告\r\n"
+    );
+    fs::write(maildir.join("new").join(format!("{word}-small")), small).unwrap();
+    let large = large_message(&[0; 64 * 1024]);
+    fs::write(maildir.join("new").join(format!("{word}-large")), large).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let client = MailClient::builder(catmail_core::Config::with_data_dir(dir.path()))
+        .runtime(tokio::runtime::Handle::current())
+        .secrets(std::sync::Arc::new(catmail_core::MemorySecrets::default()))
+        .prefetch_bodies(Some(catmail_core::BodyPrefetch {
+            whole_limit: 16 * 1024,
+            ..Default::default()
+        }))
+        .open()
+        .unwrap();
+    let account = add_account(
+        &client,
+        "prefetch",
+        "prefetch",
+        None,
+        None,
+        env.imap.clone(),
+        env.imap,
+    )
+    .await;
+    client.sync_account(account).await.unwrap();
+    let inbox = client.find_folder(account, "INBOX").await.unwrap().unwrap();
+
+    let downloaded = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let messages = client.list_messages(inbox.id, 1000, None).await.unwrap();
+            let mut bodies = Vec::new();
+            for m in &messages {
+                let subject = m.subject.as_deref().unwrap_or_default();
+                if subject == format!("small {word}") || subject == "large" {
+                    bodies.push(client.get_message(m.id).await.unwrap().unwrap());
+                }
+            }
+            if bodies.len() >= 2 && bodies.iter().all(|m| m.body.is_some()) {
+                break bodies;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the bodies were never prefetched");
+
+    let found = client.search(SearchQuery::new("季度报告")).await.unwrap();
+    assert!(
+        found
+            .iter()
+            .any(|m| m.subject.as_deref() == Some(&format!("small {word}")))
+    );
+    for message in &downloaded {
+        assert!(!message.summary.flags.contains(Flags::SEEN), "still unread");
+        if message.summary.subject.as_deref() == Some("large") {
+            let body = message.body.as_ref().unwrap();
+            assert_eq!(body.text.as_deref().map(str::trim), Some("See the clip."));
+            assert!(
+                body.attachments.iter().any(|a| !a.downloaded),
+                "left on the server"
+            );
+        }
+    }
+}

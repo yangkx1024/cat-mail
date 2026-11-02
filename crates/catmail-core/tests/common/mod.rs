@@ -238,6 +238,15 @@ impl Env {
             .unwrap();
     }
 
+    /// The one value `sql` selects, read behind the client's back.
+    #[allow(dead_code)]
+    pub fn query<T: rusqlite::types::FromSql>(&self, sql: &str) -> T {
+        rusqlite::Connection::open(self.client.config().db_path())
+            .unwrap()
+            .query_row(sql, [], |r| r.get(0))
+            .unwrap()
+    }
+
     #[allow(dead_code)]
     pub async fn list(&self, name: &str) -> Vec<MessageSummary> {
         let folder = self.folder(name).await;

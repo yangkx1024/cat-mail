@@ -14,6 +14,7 @@ use tokio::sync::{Notify, OwnedMutexGuard, broadcast, watch};
 
 use crate::image_cache::ImageCache;
 use crate::pool::Pool;
+use crate::prefetch::BodyPrefetch;
 use crate::secrets::SecretStore;
 use crate::watch::SyncSchedule;
 use crate::{Config, DataDirLock, Error, Result};
@@ -38,6 +39,8 @@ pub(crate) struct Engine {
     pub outbox_kick: Arc<Notify>,
     /// Set if every account is kept in sync in the background (see `watch`).
     pub sync_in_background: Option<SyncSchedule>,
+    /// Set if bodies are fetched in the background (see `prefetch`).
+    pub prefetch: Option<BodyPrefetch>,
     /// How long background sync leaves a draft alone after it changed before uploading
     /// it (see [`held_drafts`](Self::held_drafts)).
     pub draft_upload_delay: Duration,
@@ -161,6 +164,9 @@ struct AccountState {
     /// connection and the last sync of every folder are from before a sleep (see
     /// [`Engine::resume`]).
     resume: Arc<Notify>,
+    /// Notified each time a sync of every folder finishes (see
+    /// [`Engine::synced_signal`]).
+    synced_signal: Arc<Notify>,
     /// When the last sync of every folder finished. Neither this nor `folders_synced`
     /// counts a sync begun before the computer last woke (see [`Engine::since_woke`]);
     /// this doesn't count one begun before `asked` either.
@@ -367,6 +373,7 @@ impl Engine {
             image_cache,
             outbox_kick: Arc::default(),
             sync_in_background: None,
+            prefetch: None,
             draft_upload_delay: DEFAULT_DRAFT_UPLOAD_DELAY,
             tuning: EngineTuning::default(),
             closing: watch::Sender::new(()),
@@ -620,6 +627,14 @@ impl Engine {
         if self.full_sync_counts(&state, began) {
             *lock(&state.synced) = Some(finished);
         }
+        state.synced_signal.notify_waiters();
+    }
+
+    /// Notified to those waiting each time a sync of every folder of the account
+    /// finishes, whether or not it counts (see [`synced`](Self::synced)): nothing else
+    /// tells of one that changed nothing.
+    pub fn synced_signal(&self, account: AccountId) -> Arc<Notify> {
+        self.account(account).synced_signal.clone()
     }
 
     /// When every folder of the account was last synced, if ever since the engine
@@ -823,6 +838,7 @@ impl Engine {
                     pool: Arc::new(Pool::new(account)),
                     wake: Arc::default(),
                     resume: Arc::default(),
+                    synced_signal: Arc::default(),
                     synced: Mutex::default(),
                     asked: Cutoff::default(),
                     folders_synced: Mutex::default(),

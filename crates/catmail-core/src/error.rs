@@ -187,6 +187,17 @@ impl Error {
         }
     }
 
+    /// Whether the server said the account went over its download limit (see
+    /// [`imap::Error::is_over_limit`]); a rejected login is lifted to
+    /// [`AuthFailed`](Self::AuthFailed) with the server's text.
+    pub(crate) fn is_over_limit(&self) -> bool {
+        match self {
+            Self::Imap(ImapError(e)) => e.is_over_limit(),
+            Self::AuthFailed(text) => imap::says_over_limit(text),
+            _ => false,
+        }
+    }
+
     /// The IMAP failure this is, if it is one without a variant of its own.
     pub(crate) fn imap(&self) -> Option<&imap::Error> {
         match self {
@@ -291,6 +302,11 @@ mod tests {
         let rejected = Error::from(imap::Error::AuthFailed("NO".into()));
         assert!(matches!(rejected, Error::AuthFailed(_)));
         assert_eq!(rejected.kind(), ErrorKind::Auth);
+        assert!(!rejected.is_over_limit());
+        let over = Error::from(imap::Error::AuthFailed(
+            "[ALERT] Account exceeded command or bandwidth limits".into(),
+        ));
+        assert!(over.is_over_limit(), "the server's text survives the lift");
 
         let dup = Error::from(catmail_store::Error::AlreadyExists("account a".into()));
         assert!(matches!(dup, Error::AlreadyExists(_)));

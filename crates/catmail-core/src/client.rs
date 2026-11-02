@@ -27,9 +27,17 @@ use crate::runtime::Runtime;
 use crate::secrets::{KeyringSecrets, SecretStore};
 use crate::watch::{self, SyncSchedule};
 use crate::{
-    Config, DataDirLock, Error, Result, body, connection, drafts, folders, gc, images, ops, send,
-    sleep, sync,
+    BodyPrefetch, Config, DataDirLock, Error, Result, body, connection, drafts, folders, gc,
+    images, ops, prefetch, send, sleep, sync,
 };
+
+/// Starts the background work the engine does per account (sync, prefetch of bodies), if
+/// it does any: for an account added, or kept after a removal failed. Call from inside the
+/// engine runtime.
+fn spawn_background(engine: &Arc<Engine>, account: AccountId) {
+    watch::spawn(engine, account);
+    prefetch::spawn(engine, account);
+}
 
 /// How many events [`MailClient::subscribe`]'s receivers keep unread before the oldest
 /// are dropped and they get `RecvError::Lagged`.
@@ -63,6 +71,7 @@ pub struct MailClientBuilder {
     tls: Option<TlsConfig>,
     send_in_background: bool,
     sync_in_background: Option<SyncSchedule>,
+    prefetch_bodies: Option<BodyPrefetch>,
     collect_garbage_every: Option<Duration>,
     draft_upload_delay: Duration,
     tuning: EngineTuning,
@@ -72,7 +81,7 @@ pub struct MailClientBuilder {
 /// sync is the engine's to know: it starts for accounts added later too.
 struct Opened {
     engine: Engine,
-    /// The accounts to keep in sync in the background.
+    /// The accounts to keep in sync, and fetch bodies of, in the background.
     watched: Vec<Account>,
     send_in_background: bool,
     collect_garbage_every: Option<Duration>,
@@ -115,6 +124,16 @@ impl MailClientBuilder {
     /// [`SyncSchedule`] says how often, `SyncSchedule::default()` for the usual.
     pub fn sync_in_background(mut self, schedule: Option<SyncSchedule>) -> Self {
         self.sync_in_background = schedule;
+        self
+    }
+
+    /// Fetch bodies in the background for as long as the client exists, so that search
+    /// finds messages never opened by their text too [default: off]: the newest first,
+    /// each account on a connection of its own, starting once its folders were synced,
+    /// within a daily budget. For long-running frontends. The [`BodyPrefetch`] says how,
+    /// `BodyPrefetch::default()` for the usual.
+    pub fn prefetch_bodies(mut self, prefetch: Option<BodyPrefetch>) -> Self {
+        self.prefetch_bodies = prefetch;
         self
     }
 
@@ -192,9 +211,10 @@ impl MailClientBuilder {
             );
         }
         // Read now: no account can be added before the client exists.
-        let watched = match self.sync_in_background {
-            Some(_) => store.read(|db| db.accounts().list())?,
-            None => Vec::new(),
+        let watched = if self.sync_in_background.is_some() || self.prefetch_bodies.is_some() {
+            store.read(|db| db.accounts().list())?
+        } else {
+            Vec::new()
         };
         let blobs = BlobStore::open(self.config.blob_dir())?;
         let secrets = self
@@ -203,6 +223,7 @@ impl MailClientBuilder {
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         tracing::info!(
             background_sync = self.sync_in_background.is_some(),
+            prefetch_bodies = self.prefetch_bodies.is_some(),
             accounts = watched.len(),
             "engine opened"
         );
@@ -217,6 +238,7 @@ impl MailClientBuilder {
             self.tls,
         );
         engine.sync_in_background = self.sync_in_background;
+        engine.prefetch = self.prefetch_bodies;
         engine.draft_upload_delay = self.draft_upload_delay;
         engine.tuning = self.tuning;
         Ok(Opened {
@@ -238,6 +260,7 @@ impl MailClient {
             tls: None,
             send_in_background: false,
             sync_in_background: None,
+            prefetch_bodies: None,
             collect_garbage_every: None,
             draft_upload_delay: DEFAULT_DRAFT_UPLOAD_DELAY,
             tuning: EngineTuning::default(),
@@ -278,9 +301,14 @@ impl MailClient {
                 client.engine.closing(),
             ));
         }
-        if let Some(schedule) = client.engine.sync_in_background {
-            for account in opened.watched {
+        // As `spawn_background`, from outside the runtime.
+        for account in opened.watched {
+            if let Some(schedule) = client.engine.sync_in_background {
                 let task = watch::task(&client.engine, account.id, schedule);
+                client.rt.spawn(task);
+            }
+            if let Some(settings) = client.engine.prefetch {
+                let task = prefetch::task(&client.engine, account.id, settings);
                 client.rt.spawn(task);
             }
         }
@@ -440,7 +468,7 @@ impl MailClient {
                 if let Some(session) = session {
                     engine.pool(account.id).put(&engine, session);
                 }
-                watch::spawn(&engine, account.id);
+                spawn_background(&engine, account.id);
                 Ok(account)
             })
             .await
@@ -626,7 +654,7 @@ impl MailClient {
                     engine.cancel_removal(id);
                     // Its background sync stopped for the removal; the account stays.
                     if !matches!(e, Error::AccountNotFound(_)) {
-                        watch::spawn(&engine, id);
+                        spawn_background(&engine, id);
                     }
                 }
                 result

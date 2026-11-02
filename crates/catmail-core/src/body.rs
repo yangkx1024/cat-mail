@@ -8,6 +8,9 @@
 //! it open so already) and bodies are fetched with `.PEEK`, so nothing changes on the
 //! server, and the stored UIDVALIDITY is checked before any UID is used.
 //!
+//! The background prefetch (`prefetch`) fetches bodies the same way ([`fetch_body`]), on a
+//! connection of its own.
+//!
 //! Results are written only if the message row still exists. Message ids are never
 //! reused and a UIDVALIDITY change deletes the rows of the old generation, so an
 //! existing row is still the same (folder, UID) as when the download started.
@@ -26,6 +29,38 @@ use crate::pool::with_session;
 use crate::{Error, Result};
 
 const GONE: Error = Error::OutOfSync("the message is no longer on the server");
+const REBUILT: &str = "the folder was rebuilt on the server (UIDVALIDITY changed)";
+
+/// Whether `e` says the message's folder has a new UIDVALIDITY on the server: none of its
+/// messages can be fetched until a sync of it starts over.
+pub(crate) fn folder_rebuilt(e: &Error) -> bool {
+    matches!(e, Error::OutOfSync(text) if *text == REBUILT)
+}
+
+/// How large a message may be (RFC822.SIZE) to be fetched whole, and a text part of a
+/// larger one to be fetched at all (a larger part is listed among the attachments).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Limits {
+    pub whole: u32,
+    pub text: u32,
+}
+
+impl Limits {
+    /// As for a message the user opens.
+    fn opened(engine: &Engine) -> Self {
+        let limit = engine.tuning.whole_message_limit;
+        Self {
+            whole: limit,
+            text: limit,
+        }
+    }
+
+    /// Whole, however large: for the raw message.
+    const RAW: Self = Self {
+        whole: u32::MAX,
+        text: u32::MAX,
+    };
+}
 
 pub(crate) async fn download_message(engine: Arc<Engine>, id: MessageId) -> Result<Message> {
     ensure_downloaded(&engine, id, false).await?;
@@ -132,17 +167,9 @@ pub(crate) async fn raw_message(engine: Arc<Engine>, id: MessageId) -> Result<Ve
     Ok(raw)
 }
 
-/// Runs `op` against the message's folder on the server: on one of the account's
-/// connections, once the folder is open with the UIDVALIDITY confirmed, and cancelled if the
-/// account is removed meanwhile. Every on-demand fetch goes through here.
-///
-/// `op` returns `None` if the server sent nothing of what it asked for. A folder that was
-/// open already is opened again and `op` tried once more: this connection's view of it
-/// may be older than the message, whatever [`examine`] made of it. If a UID SEARCH
-/// then finds no such UID, the message is gone and the local copy is deleted, as the
-/// next sync of the folder would: until then it would stay in the list (and in search,
-/// from another Gmail label), failing to open. Otherwise the server left it out: a
-/// protocol error, which drops the connection and its view of the folder.
+/// Runs `op` against the message's folder on the server (see [`in_folder`]), on one of
+/// the account's pooled connections, cancelled if the account is removed meanwhile. Every
+/// on-demand fetch goes through here.
 ///
 /// The caller looked up `location` before calling, and the cancellation is obtained
 /// after that: a removal that started earlier left the account marked removed, which
@@ -162,35 +189,66 @@ async fn on_server<T>(
             // logs in, which is logged too), opening the folder unless it is open, then
             // the fetch.
             let connected = began.elapsed();
-            let mut opened = examine(session, &location).await?;
-            let mut fetched = Instant::now();
-            let mut done = op(session, &location).await?;
-            if done.is_none() && opened.is_none() {
-                tracing::info!(%account, folder = %location.remote_name, uid = location.uid,
-                    "nothing from the folder as it was open; opening it again");
-                opened = Some(reopen(session, &location).await?);
-                fetched = Instant::now();
-                done = op(session, &location).await?;
-            }
+            let (done, took) = in_folder(&owned, session, &location, &op).await?;
             tracing::info!(%account, folder = %location.remote_name, uid = location.uid,
-                ?connected, examine = ?opened, fetch = ?fetched.elapsed(),
+                ?connected, examine = ?took.examine, fetch = ?took.fetch,
                 "fetched from the server");
-            if let Some(done) = done {
-                return Ok(done);
-            }
-            // Gone, or only left out of the answer?
-            if session.uid_search_uids(&[location.uid]).await?.is_empty() {
-                forget(&owned, location.clone()).await?;
-                return Err(GONE);
-            }
-            Err(imap::Error::Protocol(format!(
-                "the server has the message (UID {}) but left it out of its answer",
-                location.uid
-            ))
-            .into())
+            Ok(done)
         }) => result,
         () = cancellation.cancelled() => Err(Error::Cancelled),
     }
+}
+
+/// How long [`in_folder`] took to open the folder, if it did, and to fetch.
+pub(crate) struct Took {
+    pub examine: Option<Duration>,
+    pub fetch: Duration,
+}
+
+/// Runs `op` on `session` once the message's folder is open with the UIDVALIDITY
+/// confirmed (see [`examine`]).
+///
+/// `op` returns `None` if the server sent nothing of what it asked for. A folder that was
+/// open already is opened again and `op` tried once more: this connection's view of it
+/// may be older than the message, whatever [`examine`] made of it. If a UID SEARCH
+/// then finds no such UID, the message is gone and the local copy is deleted, as the
+/// next sync of the folder would: until then it would stay in the list (and in search,
+/// from another Gmail label), failing to open. Otherwise the server left it out: a
+/// protocol error, which drops the connection and its view of the folder.
+async fn in_folder<T>(
+    engine: &Arc<Engine>,
+    session: &mut Session,
+    location: &MessageLocation,
+    op: &impl AsyncFn(&mut Session, &MessageLocation) -> Result<Option<T>>,
+) -> Result<(T, Took)> {
+    let account = location.account;
+    let mut opened = examine(session, location).await?;
+    let mut fetched = Instant::now();
+    let mut done = op(session, location).await?;
+    if done.is_none() && opened.is_none() {
+        tracing::info!(%account, folder = %location.remote_name, uid = location.uid,
+            "nothing from the folder as it was open; opening it again");
+        opened = Some(reopen(session, location).await?);
+        fetched = Instant::now();
+        done = op(session, location).await?;
+    }
+    if let Some(done) = done {
+        let took = Took {
+            examine: opened,
+            fetch: fetched.elapsed(),
+        };
+        return Ok((done, took));
+    }
+    // Gone, or only left out of the answer?
+    if session.uid_search_uids(&[location.uid]).await?.is_empty() {
+        forget(engine, location.clone()).await?;
+        return Err(GONE);
+    }
+    Err(imap::Error::Protocol(format!(
+        "the server has the message (UID {}) but left it out of its answer",
+        location.uid
+    ))
+    .into())
 }
 
 /// Deletes the local copy of a message the server no longer has at `location`.
@@ -205,14 +263,30 @@ async fn forget(engine: &Arc<Engine>, location: MessageLocation) -> Result<()> {
     Ok(())
 }
 
-enum Fetched {
+/// A body as fetched, to be parsed with [`parse`].
+pub(crate) enum Fetched {
     Whole(Vec<u8>),
     Parts(Box<Parts>),
 }
 
+impl Fetched {
+    /// The bytes that came from the server, about.
+    pub fn len(&self) -> u64 {
+        match self {
+            Self::Whole(raw) => raw.len() as u64,
+            Self::Parts(parts) => parts
+                .text
+                .values()
+                .chain(parts.headers.values())
+                .map(|data| data.len() as u64)
+                .sum(),
+        }
+    }
+}
+
 /// A message fetched in parts, by section: its text and the MIME headers of the parts
 /// whose names lost bytes in the structure.
-struct Parts {
+pub(crate) struct Parts {
     structure: mime::MimeNode,
     text: HashMap<String, Vec<u8>>,
     headers: HashMap<String, Vec<u8>>,
@@ -226,23 +300,19 @@ async fn ensure_downloaded(engine: &Arc<Engine>, id: MessageId, whole: bool) -> 
         return Ok(());
     }
     let (account, folder) = (location.account, location.folder);
-    let limit = if whole {
-        u32::MAX
+    let limits = if whole {
+        Limits::RAW
     } else {
-        engine.tuning.whole_message_limit
+        Limits::opened(engine)
     };
     let fetched = on_server(engine, location, async move |session, location| {
-        fetch(session, location, limit).await
+        fetch(session, location, limits).await
     })
     .await?;
 
     let engine2 = engine.clone();
     let stored = blocking(move || {
-        let (content, raw) = match fetched {
-            Fetched::Whole(raw) => (mime::parse_message(&raw), Some(raw)),
-            Fetched::Parts(parts) => (parts.structure.content(&parts.text, &parts.headers), None),
-        };
-        let body = new_body(&engine2, content, raw.as_deref())?;
+        let body = parse(&engine2, fetched)?;
         if engine2
             .store
             .write(|db| db.messages().store_body(id, &body))?
@@ -264,18 +334,42 @@ async fn ensure_downloaded(engine: &Arc<Engine>, id: MessageId, whole: bool) -> 
     Ok(())
 }
 
-/// Runs after [`examine`] (see [`on_server`]). Fetches a message larger than `limit` in
-/// parts. `None` if the message is gone.
+/// Fetches the message's body on `session` (see [`in_folder`]), for the background
+/// prefetch, which has a connection of its own.
+pub(crate) async fn fetch_body(
+    engine: &Arc<Engine>,
+    session: &mut Session,
+    location: &MessageLocation,
+    limits: Limits,
+) -> Result<(Fetched, Took)> {
+    let op = async move |session: &mut Session, location: &MessageLocation| {
+        fetch(session, location, limits).await
+    };
+    in_folder(engine, session, location, &op).await
+}
+
+/// Parses a fetched body into what is stored, putting the raw message and the parts
+/// that came with it in the blob store. Blocking.
+pub(crate) fn parse(engine: &Engine, fetched: Fetched) -> Result<NewBody> {
+    let (content, raw) = match fetched {
+        Fetched::Whole(raw) => (mime::parse_message(&raw), Some(raw)),
+        Fetched::Parts(parts) => (parts.structure.content(&parts.text, &parts.headers), None),
+    };
+    new_body(engine, content, raw.as_deref())
+}
+
+/// Runs after [`examine`] (see [`in_folder`]). Fetches a message larger than
+/// `limits.whole` in parts. `None` if the message is gone.
 async fn fetch(
     session: &mut Session,
     location: &MessageLocation,
-    limit: u32,
+    limits: Limits,
 ) -> Result<Option<Fetched>> {
     let uid = location.uid;
-    if location.size.is_some_and(|size| size > limit) {
+    if location.size.is_some_and(|size| size > limits.whole) {
         match session.fetch_structure(uid).await {
             Ok(Some(structure)) => {
-                let sections = structure.text_sections(limit);
+                let sections = structure.text_sections(limits.text);
                 let Some(parts) = session.fetch_sections(uid, &sections).await? else {
                     return Ok(None);
                 };
@@ -353,9 +447,7 @@ async fn reopen(session: &mut Session, location: &MessageLocation) -> Result<Dur
     let began = Instant::now();
     let status = session.examine(&location.remote_name).await?;
     if !status.same_generation(location.uidvalidity) {
-        return Err(Error::OutOfSync(
-            "the folder was rebuilt on the server (UIDVALIDITY changed)",
-        ));
+        return Err(Error::OutOfSync(REBUILT));
     }
     Ok(began.elapsed())
 }

@@ -865,6 +865,10 @@ impl<'c> Messages<'c> {
             ],
         )?;
         Attachments::new(self.conn).insert(id, &body.attachments)?;
+        self.conn.execute(
+            "DELETE FROM prefetch_failures WHERE message_id = ?1",
+            [id.0],
+        )?;
 
         self.reindex(id.0)?;
         Ok(true)

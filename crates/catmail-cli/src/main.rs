@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::Result;
-use catmail_core::{Config, DEFAULT_GC_INTERVAL, DraftId, MailClient, SyncSchedule};
+use catmail_core::{BodyPrefetch, Config, DEFAULT_GC_INTERVAL, DraftId, MailClient, SyncSchedule};
 use clap::{Parser, Subcommand};
 
 use crate::cmd::{account, compose, folder, gc, identity, ops, outbox, read, search, sync, watch};
@@ -152,6 +152,7 @@ async fn run() -> Result<()> {
     let client = MailClient::builder(config)
         .runtime(tokio::runtime::Handle::current())
         .sync_in_background(watching.then(SyncSchedule::default))
+        .prefetch_bodies(watching.then(BodyPrefetch::default))
         // While this holds the data directory, `catmail gc` can't run.
         .collect_garbage_every(watching.then_some(DEFAULT_GC_INTERVAL))
         .open()
