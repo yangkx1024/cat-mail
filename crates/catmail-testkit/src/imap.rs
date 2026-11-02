@@ -278,6 +278,10 @@ pub struct Faults {
     pub inject_after_starttls: bool,
     /// Reject every login.
     pub reject_login: bool,
+    /// Refuse every login with `NO <text>`, the right password too, e.g. Gmail's
+    /// `[ALERT] Account exceeded command or bandwidth limits` once an account went over
+    /// its download limit.
+    pub login_refusal: Option<String>,
     /// Greet with PREAUTH: the connection starts out authenticated.
     pub preauth: bool,
     /// Replace the first untagged response line containing this text with one no
@@ -339,6 +343,10 @@ pub struct Faults {
     pub end_idle_early: bool,
     /// Accept every IDLE, then send a line no parser accepts.
     pub garble_idle: bool,
+    /// Refuse every IDLE with `NO <text>`, e.g. Gmail's over-limit alert.
+    pub idle_refusal: Option<String>,
+    /// Accept every IDLE, then close the connection with `* BYE <text>`.
+    pub bye_on_idle: Option<String>,
     /// Answer each command that starts with this text (`EXAMINE`) only after this long.
     pub slow: Option<(String, std::time::Duration)>,
     /// Close this many new connections before the greeting, as if the network were down.
@@ -370,6 +378,7 @@ impl Default for Faults {
             unsolicited: false,
             inject_after_starttls: false,
             reject_login: false,
+            login_refusal: None,
             preauth: false,
             garble: None,
             omit: None,
@@ -395,6 +404,8 @@ impl Default for Faults {
             drop_on_idle: false,
             end_idle_early: false,
             garble_idle: false,
+            idle_refusal: None,
+            bye_on_idle: None,
             slow: None,
             refuse_connections: 0,
             drop_after_mailbox_change: false,
@@ -1339,6 +1350,8 @@ async fn handle(
             let st = lock(state);
             if session.mode == TlsMode::StartTls && !session.tls {
                 out += &format!("{tag} NO [PRIVACYREQUIRED] LOGIN disabled before STARTTLS\r\n");
+            } else if let Some(text) = &st.faults.login_refusal {
+                out += &format!("{tag} NO {text}\r\n");
             } else if !st.faults.reject_login
                 && args.first().map(Tok::text).as_deref() == Some(st.username.as_str())
                 && args.get(1).map(Tok::text).as_deref() == Some(st.password.as_str())
@@ -1363,7 +1376,9 @@ async fn handle(
                 && parts.len() == 3
                 && parts[1] == st.username.as_bytes()
                 && parts[2] == st.password.as_bytes();
-            if ok {
+            if let Some(text) = &st.faults.login_refusal {
+                out += &format!("{tag} NO {text}\r\n");
+            } else if ok {
                 session.authenticated = true;
                 out += &format!("{tag} OK Logged in\r\n");
             } else {
@@ -1371,6 +1386,10 @@ async fn handle(
             }
         }
         _ if !session.authenticated => out += &format!("{tag} NO Not authenticated\r\n"),
+        "IDLE" if lock(state).faults.idle_refusal.is_some() => {
+            let text = lock(state).faults.idle_refusal.clone().unwrap_or_default();
+            out += &format!("{tag} NO {text}\r\n");
+        }
         "IDLE" if lock(state).faults.idle => return idle(io, session, state, &tag).await,
         "LIST" => {
             let st = lock(state);
@@ -1781,6 +1800,13 @@ async fn idle(
     io.get_mut().flush().await?;
     let faults = lock(state).faults.clone();
     if faults.drop_on_idle {
+        return Ok(Next::Close);
+    }
+    if let Some(text) = &faults.bye_on_idle {
+        io.get_mut()
+            .write_all(format!("* BYE {text}\r\n").as_bytes())
+            .await?;
+        io.get_mut().flush().await?;
         return Ok(Next::Close);
     }
     if faults.end_idle_early {

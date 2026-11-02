@@ -254,9 +254,9 @@ pub(crate) struct Failures {
     /// This one included; 0 for a success.
     pub in_a_row: u32,
     /// Those since the computer last woke, if none got through to the server since (a
-    /// rejected login did): they are tried again sooner, as the network is often back
-    /// only a few seconds after the computer. Those before the wake say nothing about
-    /// the network after.
+    /// rejected login did, as did an over-limit reply): they are tried again sooner, as
+    /// the network is often back only a few seconds after the computer. Those before the
+    /// wake say nothing about the network after.
     pub after_wake: Option<u32>,
 }
 
@@ -483,19 +483,43 @@ impl Engine {
     /// while the server rejects the login ([`login_rejected`](Self::login_rejected)),
     /// also one kept from before that was known: the changes wait for a login that works,
     /// since each try is another rejected login, which servers count towards locking the
-    /// account.
+    /// account. Ignored as well while the server says the account is over its download
+    /// limit ([`ServerProblem::over_limit`]), unless a sync was asked for: the changes
+    /// wait for it to lift rather than add to it (see [`ignores_wakes`](Self::ignores_wakes)).
     pub fn wake(&self, account: AccountId) {
         self.account(account).wake.notify_one();
     }
 
     /// Whether the latest attempt to sync the account found the login rejected.
     pub fn login_rejected(&self, account: AccountId) -> bool {
+        self.sync_problem(account, ServerProblem::login_rejected)
+    }
+
+    /// Whether the latest attempt to sync the account found a failure background sync
+    /// waits out ([`ServerProblem::waited_out`]).
+    pub fn waits_out(&self, account: AccountId) -> bool {
+        self.sync_problem(account, ServerProblem::waited_out)
+    }
+
+    /// Whether background sync ignores [`wake`](Self::wake) for now: the server says the
+    /// account is over its limit and no sync of every folder was asked for since
+    /// ([`begin_syncing`](Self::begin_syncing)), which the user waits for; or it rejects
+    /// the login, unless background sync is `logged_in` already (idling on a connection
+    /// from before), which a rejected login doesn't hold up. Also when another sync found
+    /// that out, not background sync itself.
+    pub fn ignores_wakes(&self, account: AccountId, logged_in: bool) -> bool {
         self.existing(account).is_some_and(|state| {
-            lock(&state.status)
-                .sync
-                .as_ref()
-                .is_some_and(ServerProblem::login_rejected)
+            let status = lock(&state.status);
+            status.sync.as_ref().is_some_and(|problem| {
+                (problem.login_rejected() && !logged_in)
+                    || (problem.over_limit() && !status.syncing)
+            })
         })
+    }
+
+    fn sync_problem(&self, account: AccountId, is: impl FnOnce(&ServerProblem) -> bool) -> bool {
+        self.existing(account)
+            .is_some_and(|state| lock(&state.status).sync.as_ref().is_some_and(is))
     }
 
     /// What [`wake`](Self::wake) notifies.
@@ -513,7 +537,8 @@ impl Engine {
     /// Linux and macOS. Connections made and syncs begun before now no longer count (see
     /// [`since_woke`](Self::since_woke)), so every folder is due; background sync and
     /// the outbox look at once. Ignored like [`wake`](Self::wake) while the server
-    /// rejects the login, which waits as long as ever.
+    /// rejects the login, which waits as long as ever; not while the account is over its
+    /// limit, whose wait the timers didn't count the sleep towards either.
     pub fn resume(&self) {
         self.woke.set(Instant::now());
         for state in lock(&self.accounts).values() {
@@ -686,9 +711,9 @@ impl Engine {
             Ok(_) => None,
         };
         let state = self.account(account);
-        // Whether the status changed, and for a success, whether the login had been rejected;
-        // whether the problem did.
-        let (changed, rejected, failures, problem_changed) = {
+        // Whether the status changed, and for a success, whether background sync waited it
+        // out (see `record`); whether the problem did.
+        let (changed, waited, failures, problem_changed) = {
             let mut status = lock(&state.status);
             let status = &mut *status;
             let after_wake = match activity {
@@ -700,12 +725,14 @@ impl Engine {
             };
             // A rejected login got through to the server: the network is back, and
             // trying again soon would only bring on more rejections, which servers count
-            // towards locking the account.
-            let reached = e.is_none_or(|e| e.kind() == ErrorKind::Auth);
+            // towards locking the account. So did an over-limit reply, which retrying
+            // soon would only add to.
+            let reached =
+                e.is_none_or(|e| matches!(e.kind(), ErrorKind::Auth | ErrorKind::OverLimit));
             let after_wake = after_wake.saw(reached, |at| !self.since_woke(at));
-            let (changed, rejected, in_a_row, problem_changed) = match activity {
+            let (changed, waited, in_a_row, problem_changed) = match activity {
                 Activity::Sync | Activity::SyncBegun(_) => {
-                    let (changed, rejected, failures) = record(&mut status.sync, e);
+                    let (changed, waited, failures) = record(&mut status.sync, e);
                     let answered = match activity {
                         Activity::SyncBegun(began) => state.asked.since(began),
                         _ => false,
@@ -720,7 +747,7 @@ impl Engine {
                     if done {
                         status.syncing = false;
                     }
-                    (changed || done, rejected, failures, changed)
+                    (changed || done, waited, failures, changed)
                 }
                 Activity::Send(identity, email) => {
                     let mut slot = status.send.remove(&identity).map(|p| p.problem);
@@ -734,15 +761,15 @@ impl Engine {
                         };
                         status.send.insert(identity, problem);
                     }
-                    let (changed, rejected, failures) = recorded;
-                    (changed, rejected, failures, changed)
+                    let (changed, waited, failures) = recorded;
+                    (changed, waited, failures, changed)
                 }
             };
             let failures = Failures {
                 in_a_row,
                 after_wake,
             };
-            (changed, rejected, failures, problem_changed)
+            (changed, waited, failures, problem_changed)
         };
         // What frontends show, so what a report from a user is about: logged as it changes,
         // not at each attempt.
@@ -761,9 +788,9 @@ impl Engine {
         if changed {
             self.emit(Event::AccountStatusChanged { account });
         }
-        // Background sync stopped retrying when the login was rejected (see `wake`):
-        // through again, it needn't wait any longer.
-        if let (Activity::Sync | Activity::SyncBegun(_), true) = (activity, rejected) {
+        // Background sync slowed down retrying when the login was rejected or the account
+        // went over its limit (see `wake`): through again, it needn't wait any longer.
+        if let (Activity::Sync | Activity::SyncBegun(_), true) = (activity, waited) {
             state.wake.notify_one();
         }
         failures
@@ -881,14 +908,14 @@ pub(crate) async fn blocking<T: Send + 'static>(
 }
 
 /// Records an attempt's outcome (`None`: success) in what is known of a server. Returns
-/// whether that changed, whether a success follows a rejected login, and the failures in
-/// a row.
+/// whether that changed, whether a success follows a failure background sync waits out
+/// (a rejected login, an account over its limit), and the failures in a row.
 fn record(slot: &mut Option<ServerProblem>, e: Option<&Error>) -> (bool, bool, u32) {
     match e {
         None => {
             let cleared = slot.take();
-            let rejected = cleared.as_ref().is_some_and(ServerProblem::login_rejected);
-            (cleared.is_some(), rejected, 0)
+            let waited = cleared.as_ref().is_some_and(ServerProblem::waited_out);
+            (cleared.is_some(), waited, 0)
         }
         Some(e) => {
             let error = ReportedError::from(e);

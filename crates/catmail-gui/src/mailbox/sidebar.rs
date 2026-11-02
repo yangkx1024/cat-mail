@@ -193,6 +193,9 @@ impl Mailbox {
                     match problem.error.kind {
                         ErrorKind::Auth => format!("Can't sign in to {email}"),
                         ErrorKind::Network => format!("Can't reach {email}"),
+                        ErrorKind::OverLimit => {
+                            format!("{email} is over the server's download limit for now")
+                        }
                         _ => format!("Can't sync {email}"),
                     }
                     .into(),

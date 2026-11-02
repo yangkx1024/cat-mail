@@ -10,7 +10,7 @@ use tokio::runtime::Handle;
 
 mod common;
 
-use common::{Env, drain, env_built, eventually};
+use common::{Env, GMAIL_OVER_LIMIT, NETEASE_OVER_LIMIT, drain, env_built, eventually};
 
 /// A message whose body says `word`, the `n`-th of the day: later ones are newer.
 fn mail(word: &str, n: u32) -> Vec<u8> {
@@ -365,7 +365,7 @@ async fn gmail_has_a_budget_of_its_own() {
 async fn going_over_the_servers_limit_stops_it_for_a_day() {
     let inbox: Vec<_> = (1..=3).map(|n| mail("pelican", n)).collect();
     let mut env = env(state(&inbox), prefetching()).await;
-    env.fake.state().faults.body_fetch_refusal = Some("Fetch volume limit exceed".into());
+    env.fake.state().faults.body_fetch_refusal = Some(NETEASE_OVER_LIMIT.into());
     env.client.sync_account(env.account).await.unwrap();
     eventually("the pause", async || env.paused_until().is_some()).await;
     a_while().await;
@@ -385,6 +385,33 @@ async fn going_over_the_servers_limit_stops_it_for_a_day() {
     env.client.sync_account(env.account).await.unwrap();
     a_while().await;
     assert_eq!(env.fake.state().body_fetches(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn waits_while_sync_finds_the_account_over_its_limit() {
+    let inbox: Vec<_> = (1..=3).map(|n| mail("pelican", n)).collect();
+    let prefetch = BodyPrefetch {
+        batch: 1,
+        ..prefetching()
+    };
+    let env = env(state(&inbox), prefetch).await;
+    let gate = env.fake.state().hold_body_fetches();
+    env.client.sync_account(env.account).await.unwrap();
+    env.fake.wait_until(|st| st.body_fetches() == 1).await;
+    env.fake.state().faults.login_refusal = Some(GMAIL_OVER_LIMIT.into());
+    env.client.sync_account(env.account).await.unwrap_err();
+
+    // The body being fetched comes in; the next waits rather than add to the limit.
+    gate.add_permits(100);
+    eventually("the first body", async || env.found("pelican").await == 1).await;
+    a_while().await;
+    assert_eq!(env.fake.state().body_fetches(), 1);
+    assert_eq!(env.paused_until(), None, "not paused for a day");
+
+    // A sync that gets through again is news.
+    env.fake.state().faults.login_refusal = None;
+    env.client.sync_account(env.account).await.unwrap();
+    eventually("every body", async || env.found("pelican").await == 3).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -67,8 +67,8 @@ types 加变体会编译失败）。
 命令以 `exit::Exit { outcome, message }` 错误表达 3 和 4，其他错误都是 1。一次命令有多种结果时取
 最需要用户处理的：4 > 1 > 3，所以 3 只在"只是还没轮到"时出现，脚本可以放心地稍后重跑。
 
-- `mark` / `mv` / `archive` / `rm` / `label` / `ops flush`：连不上服务器（`ReplayReport.error` 的 `transient`，
-  改动都还在队列里）是 3；登录被拒绝也留着改动，但重跑没用、要先改密码，所以是 1；服务器拒绝了改动或
+- `mark` / `mv` / `archive` / `rm` / `label` / `ops flush`：连不上服务器或超出下载限额（`ReplayReport.error` 的
+  `transient`，改动都还在队列里）是 3；登录被拒绝也留着改动，但重跑没用、要先改密码，所以是 1；服务器拒绝了改动或
   草稿是 1，断线之前拒绝的也是。
 - `send` / `outbox retry` / `mark-sent` / `outbox flush`：`queued` / `sending` 是 3，`failed` 是 1，
   `unknown` 是 4；`accepted`（已发出、只是没存进 Sent）算成功。连 SMTP 服务器失败时邮件都推迟、仍是

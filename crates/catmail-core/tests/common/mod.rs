@@ -11,6 +11,16 @@ use catmail_core::{
 use catmail_testkit::{FakeImap, FakeMailbox, FakeSmtp, ServerState, SmtpState};
 use tokio::runtime::Handle;
 
+/// Gmail's answer to logging in (or a command) once the account went over its download
+/// limit.
+#[allow(dead_code)]
+pub const GMAIL_OVER_LIMIT: &str =
+    "[ALERT] Account exceeded command or bandwidth limits. (Failure)";
+
+/// NetEase's answer to a FETCH once the account went over its daily download limit.
+#[allow(dead_code)]
+pub const NETEASE_OVER_LIMIT: &str = "Fetch volume limit exceed";
+
 /// Fake servers and a client with one account on them (alice@example.com, logging in
 /// as alice / pw), not yet synced.
 pub struct Env {

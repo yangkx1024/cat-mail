@@ -10,6 +10,10 @@ pub enum ErrorKind {
     Network,
     /// The server rejected the login: the password needs fixing.
     Auth,
+    /// The server said the account went over its download (or command) limit. Nothing
+    /// works on the account until that lifts on its own, within a day at most; trying
+    /// again meanwhile may only add to it.
+    OverLimit,
     /// The server refused the request, or its answer couldn't be read. The text says
     /// why. Not necessarily for good: an SMTP server may refuse for now (see
     /// `catmail_core::Error::is_transient`).

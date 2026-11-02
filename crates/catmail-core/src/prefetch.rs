@@ -243,9 +243,10 @@ async fn run(engine: Weak<Engine>, account: AccountId, settings: BodyPrefetch) {
 
 /// Whether every folder of the account was synced since the computer last woke (see
 /// [`Engine::synced`]), after `rejected_at` if the login was rejected then, and the
-/// server doesn't reject it now.
+/// server neither rejects it now nor told sync the account is over its limit (prefetching
+/// would only add to it; a sync getting through again is news).
 fn may_start(engine: &Engine, account: AccountId, rejected_at: Option<Instant>) -> bool {
-    !engine.login_rejected(account)
+    !engine.waits_out(account)
         && engine
             .synced(account)
             .is_some_and(|at| rejected_at.is_none_or(|rejected| at > rejected))
@@ -454,13 +455,10 @@ async fn one(
             })
         }
         Err(e) => {
-            // Whatever an over-limit came with (the login, opening the folder, the fetch),
-            // the connection is no use until it is lifted.
-            let over_limit = e.is_over_limit();
-            if over_limit || e.imap().is_some_and(imap::Error::is_fatal) {
+            if e.breaks_connection() {
                 *session = None;
             }
-            if over_limit {
+            if let Error::OverLimit(_) = e {
                 return Ok(One::OverLimit(e));
             }
             if body::folder_rebuilt(&e) {

@@ -4,14 +4,14 @@
 
 use std::time::Duration;
 
-use catmail_core::{Config, Flags, MailClient, SyncSchedule, Verify};
+use catmail_core::{Config, Flags, MailClient, ServerProblem, SyncSchedule, Verify};
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 use tokio::runtime::Handle;
 use tokio::sync::Semaphore;
 
 mod common;
 
-use common::{Env, env_added, env_built, eventually, status_changes};
+use common::{Env, GMAIL_OVER_LIMIT, env_added, env_built, eventually, status_changes};
 
 const HOUR: Duration = Duration::from_secs(3600);
 
@@ -85,11 +85,16 @@ impl Env {
     }
 
     async fn wait_until_login_rejected(&self) {
+        self.wait_for_problem(ServerProblem::login_rejected).await;
+    }
+
+    /// Waits until the account's sync problem is one `is` holds for.
+    async fn wait_for_problem(&self, is: impl Fn(&ServerProblem) -> bool) {
         eventually("the failure to be reported", async || {
             self.client
                 .account_status(self.account)
                 .sync
-                .is_some_and(|p| p.login_rejected())
+                .is_some_and(|p| is(&p))
         })
         .await;
     }
@@ -525,6 +530,120 @@ async fn tries_again_after_a_failure() {
 
     env.fake.state().faults.reject_login = false;
     env.wait_for_subjects("INBOX", &["one", "two"]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_account_over_its_limit_waits_for_it_to_lift_whatever_is_queued() {
+    let mut state = state();
+    state.faults.login_refusal = Some(GMAIL_OVER_LIMIT.into());
+    // Failures are otherwise tried again after 50 ms.
+    let schedule = SyncSchedule {
+        over_limit: HOUR,
+        ..schedule(HOUR, HOUR)
+    };
+    let env = watching(state, schedule).await;
+    env.wait_for_problem(ServerProblem::over_limit).await;
+    let problem = env.client.account_status(env.account).sync.unwrap();
+    assert!(!problem.login_rejected(), "{problem:?}");
+    assert!(!env.syncing());
+
+    // Queued changes wait for the limit to lift rather than add to it.
+    for _ in 0..3 {
+        env.client
+            .create_draft(env.account, None, Default::default(), Vec::new())
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(env.fake.state().received("LOGIN"), 1);
+
+    // A sync the user asks for tries once more, and shows how that went.
+    env.client.sync_now().await.unwrap();
+    env.fake.wait_until(|st| st.received("LOGIN") >= 2).await;
+    env.wait_until_synced().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(env.fake.state().received("LOGIN"), 2);
+
+    // Lifted: the next sync asked for goes on as before.
+    env.fake.state().faults.login_refusal = None;
+    env.client.sync_now().await.unwrap();
+    env.wait_for_idle(1).await;
+    assert_eq!(env.client.account_status(env.account).sync, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_idle_ended_over_the_limit_waits_and_idles_again_once_lifted() {
+    // Refused with NO, then ended with BYE.
+    for refused in [true, false] {
+        let schedule = SyncSchedule {
+            over_limit: HOUR,
+            ..schedule(HOUR, HOUR)
+        };
+        let env = watching(state(), schedule).await;
+        env.wait_for_idle(1).await;
+        {
+            let mut st = env.fake.state();
+            let text = Some(GMAIL_OVER_LIMIT.to_owned());
+            if refused {
+                st.faults.idle_refusal = text;
+            } else {
+                st.faults.bye_on_idle = text;
+            }
+            // Ends the IDLE under way; the next one meets the limit.
+            st.inbox().append_simple("three");
+        }
+        env.wait_for_problem(ServerProblem::over_limit).await;
+        let seen = |st: &catmail_testkit::ServerState| (st.connections, st.received("IDLE"));
+        let before = seen(&env.fake.state());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(seen(&env.fake.state()), before, "refused: {refused}");
+
+        // Lifted: IDLE wasn't given up for checking INBOX at intervals.
+        {
+            let mut st = env.fake.state();
+            (st.faults.idle_refusal, st.faults.bye_on_idle) = (None, None);
+        }
+        env.client.sync_now().await.unwrap();
+        env.wait_for_idle(before.1 + 1).await;
+        assert_eq!(env.client.account_status(env.account).sync, None);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_change_while_idling_waits_once_another_sync_found_the_account_over_its_limit() {
+    let env = watching(state(), schedule(HOUR, HOUR)).await;
+    env.wait_for_idle(1).await;
+    // A sync on a connection of its own meets the limit; the idling one is logged in.
+    env.fake.state().faults.login_refusal = Some(GMAIL_OVER_LIMIT.into());
+    env.client.sync_account(env.account).await.unwrap_err();
+
+    let one = env.id_of("INBOX", "one").await;
+    env.client
+        .set_flags(vec![one], Flags::FLAGGED, Flags::empty())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let st = env.fake.state();
+    assert_eq!((st.received("STORE"), st.received("IDLE")), (0, 1));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_account_over_its_limit_is_tried_again_after_a_while() {
+    let mut state = state();
+    state.faults.login_refusal = Some(GMAIL_OVER_LIMIT.into());
+    let schedule = SyncSchedule {
+        over_limit: Duration::from_millis(200),
+        ..schedule(HOUR, HOUR)
+    };
+    let env = watching(state, schedule).await;
+    env.fake.wait_until(|st| st.received("LOGIN") >= 2).await;
+
+    env.fake.state().faults.login_refusal = None;
+    env.wait_for_subjects("INBOX", &["one", "two"]).await;
+    eventually("the problem to clear", async || {
+        env.client.account_status(env.account).sync.is_none()
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
