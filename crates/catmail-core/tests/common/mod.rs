@@ -10,6 +10,8 @@ use catmail_core::{
 };
 use catmail_testkit::{FakeImap, FakeMailbox, FakeSmtp, ServerState, SmtpState};
 use tokio::runtime::Handle;
+use tokio::sync::Semaphore;
+use tokio::task::JoinHandle;
 
 /// Gmail's answer to logging in (or a command) once the account went over its download
 /// limit.
@@ -43,6 +45,61 @@ impl Env {
     pub async fn edit(&self, id: DraftId, content: DraftContent) -> catmail_core::Result<Draft> {
         let draft = self.client.get_draft(id).await?.expect("the draft");
         self.client.update_draft(id, draft.identity, content).await
+    }
+
+    /// Starts `f` with the server holding its answer to `command`, and waits until the
+    /// server has it: what follows happens while the server is at it, until
+    /// [`Held::finish`].
+    #[allow(dead_code)]
+    pub async fn while_held<F>(
+        &self,
+        command: &str,
+        f: impl FnOnce(MailClient) -> F,
+    ) -> Held<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send,
+    {
+        let (gate, before) = {
+            let mut st = self.fake.state();
+            (st.hold(command), st.received(command))
+        };
+        let task = tokio::spawn(f(self.client.clone()));
+        self.fake
+            .wait_until(|st| st.received(command) > before)
+            .await;
+        Held { task, gate }
+    }
+
+    /// Starts `f`, and waits until it waits for another sync of the account to finish:
+    /// one held by [`while_held`](Self::while_held), say.
+    #[allow(dead_code)]
+    pub async fn queued_for_sync<F>(&self, f: impl FnOnce(MailClient) -> F) -> JoinHandle<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send,
+    {
+        let waiting = || self.client.sync_waiting(self.account);
+        let before = waiting();
+        let task = tokio::spawn(f(self.client.clone()));
+        eventually("a call queued for the sync", async || waiting() > before).await;
+        task
+    }
+}
+
+/// A call the server is holding the answer to a command of, from [`Env::while_held`].
+#[allow(dead_code)]
+pub struct Held<T> {
+    task: JoinHandle<T>,
+    gate: Arc<Semaphore>,
+}
+
+#[allow(dead_code)]
+impl<T> Held<T> {
+    /// Lets the server answer, and waits for the call to finish.
+    pub async fn finish(self) -> T {
+        self.gate.add_permits(Semaphore::MAX_PERMITS);
+        self.task.await.unwrap()
     }
 }
 

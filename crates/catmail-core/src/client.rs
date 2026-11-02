@@ -342,6 +342,13 @@ impl MailClient {
         self.engine.resume();
     }
 
+    /// How many calls wait for another sync of `account` to finish, for tests that hold
+    /// a sync at the server and need a call queued behind it.
+    #[cfg(feature = "test-support")]
+    pub fn sync_waiting(&self, account: AccountId) -> usize {
+        self.engine.sync_waiting(account)
+    }
+
     /// Change notifications. Receivers that fall behind get `RecvError::Lagged` and
     /// should refresh whatever they display.
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {

@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::future::Future;
+use std::future::{Future, poll_fn};
+use std::pin::pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -11,6 +13,7 @@ use catmail_types::{
     SendProblem, ServerProblem,
 };
 use tokio::sync::{Notify, OwnedMutexGuard, broadcast, watch};
+use tokio::task::unconstrained;
 
 use crate::image_cache::ImageCache;
 use crate::pool::Pool;
@@ -150,9 +153,9 @@ pub const DEFAULT_DRAFT_UPLOAD_DELAY: Duration = Duration::from_secs(15);
 struct AccountState {
     /// Serializes syncs. A sync of every folder holds it for one folder at a time (see
     /// `sync::run`); the lock is fair, so whatever waits for it meanwhile goes next.
-    sync: Arc<tokio::sync::Mutex<()>>,
+    sync: AccountLock,
     /// Serializes work on the outbox, so an entry is never sent or saved twice at once.
-    send: Arc<tokio::sync::Mutex<()>>,
+    send: AccountLock,
     /// Set when removal starts; cancels running syncs and on-demand fetches.
     removed: watch::Sender<bool>,
     /// Logged-in connections for on-demand fetches (see [`pool`](crate::pool)).
@@ -304,6 +307,46 @@ impl Permit {
     /// Runs `work` holding the permit, as [`Cancellation::run`].
     pub async fn run<T>(self, work: impl Future<Output = Result<T>>) -> Result<T> {
         self.cancellation.run(work).await
+    }
+}
+
+/// A fair lock on work on an account, which counts the callers waiting for it: tests
+/// hold work at the fake server and wait until a call is queued behind it. Only the
+/// sync lock's count is read ([`Engine::sync_waiting`]); the send lock counts too, so
+/// that both are taken the same way.
+#[derive(Default)]
+struct AccountLock {
+    mutex: Arc<tokio::sync::Mutex<()>>,
+    waiting: AtomicUsize,
+}
+
+impl AccountLock {
+    async fn lock(&self) -> OwnedMutexGuard<()> {
+        // Unconstrained: out of its task's budget, the first poll would be Pending without
+        // queueing the call. Only this one acquisition is exempt.
+        let mut locking = pin!(unconstrained(self.mutex.clone().lock_owned()));
+        // Uncounted however the wait ends, given up on too.
+        let mut counted = None;
+        poll_fn(|cx| {
+            let poll = locking.as_mut().poll(cx);
+            // Counted only once the first poll has put the call in the lock's queue: a
+            // test that sees the count may let the holder go, and the lock must then
+            // pass to this call, not back to the holder.
+            if poll.is_pending() && counted.is_none() {
+                self.waiting.fetch_add(1, Ordering::Release);
+                counted = Some(Uncount(&self.waiting));
+            }
+            poll
+        })
+        .await
+    }
+}
+
+struct Uncount<'a>(&'a AtomicUsize);
+
+impl Drop for Uncount<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -465,13 +508,20 @@ impl Engine {
         self.permit(account, |state| &state.send).await
     }
 
+    /// How many calls wait for [`sync_permit`](Self::sync_permit) on `account`.
+    #[cfg(feature = "test-support")]
+    pub fn sync_waiting(&self, account: AccountId) -> usize {
+        self.existing(account)
+            .map_or(0, |state| state.sync.waiting.load(Ordering::Acquire))
+    }
+
     async fn permit(
         &self,
         account: AccountId,
-        lock: impl FnOnce(&AccountState) -> &Arc<tokio::sync::Mutex<()>>,
+        lock: impl FnOnce(&AccountState) -> &AccountLock,
     ) -> Permit {
         let cancellation = self.cancellation(account);
-        let guard = lock(&self.account(account)).clone().lock_owned().await;
+        let guard = lock(&self.account(account)).lock().await;
         Permit {
             _guard: guard,
             cancellation,
@@ -843,7 +893,7 @@ impl Engine {
         let state = self.account(account);
         state.removed.send_replace(true);
         state.pool.close();
-        state.sync.clone().lock_owned().await
+        state.sync.lock().await
     }
 
     /// After [`start_removal`](Self::start_removal) found no such account: forget the
@@ -859,8 +909,8 @@ impl Engine {
             .entry(account)
             .or_insert_with(|| {
                 Arc::new(AccountState {
-                    sync: Arc::default(),
-                    send: Arc::default(),
+                    sync: AccountLock::default(),
+                    send: AccountLock::default(),
                     removed: watch::Sender::new(false),
                     pool: Arc::new(Pool::new(account)),
                     wake: Arc::default(),
@@ -956,7 +1006,79 @@ pub(crate) fn now() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use std::task::Poll;
+
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_lock_counts_a_call_once_it_is_queued_until_it_stops_waiting() {
+        let lock = Arc::new(AccountLock::default());
+        let waiting = || lock.waiting.load(Ordering::Acquire);
+        let holder = lock.lock().await;
+        assert_eq!(waiting(), 0, "taken at once: never waited");
+
+        let queued = tokio::spawn({
+            let lock = lock.clone();
+            async move { lock.lock().await }
+        });
+        while waiting() == 0 {
+            tokio::task::yield_now().await;
+        }
+        // Counted only once queued: let go of, the lock goes to it, never to a newcomer.
+        drop(holder);
+        assert!(lock.mutex.try_lock().is_err());
+        drop(queued.await.unwrap());
+        assert_eq!(waiting(), 0);
+
+        // Given up on while waiting, it is uncounted too.
+        let holder = lock.lock().await;
+        let given_up = tokio::spawn({
+            let lock = lock.clone();
+            async move { lock.lock().await }
+        });
+        while waiting() == 0 {
+            tokio::task::yield_now().await;
+        }
+        given_up.abort();
+        assert!(given_up.await.unwrap_err().is_cancelled());
+        assert_eq!(waiting(), 0);
+        drop(holder);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_call_out_of_budget_is_counted_once_it_is_queued() {
+        let lock = Arc::new(AccountLock::default());
+        let waiting = || lock.waiting.load(Ordering::Acquire);
+        let holder = lock.lock().await;
+
+        let queued = tokio::spawn({
+            let lock = lock.clone();
+            async move {
+                // Out of its budget, a task's polls of tokio's resources are Pending, the
+                // lock's before it queues the call.
+                poll_fn(|cx| {
+                    while tokio::task::coop::has_budget_remaining() {
+                        let coop = std::task::ready!(tokio::task::coop::poll_proceed(cx));
+                        coop.made_progress();
+                    }
+                    Poll::Ready(())
+                })
+                .await;
+                lock.lock().await
+            }
+        });
+        // One thread: the call runs only while this waits.
+        while waiting() == 0 {
+            tokio::task::yield_now().await;
+        }
+        drop(holder);
+        assert!(
+            lock.mutex.try_lock().is_err(),
+            "counted before it was queued"
+        );
+        drop(queued.await.unwrap());
+        assert_eq!(waiting(), 0);
+    }
 
     #[test]
     fn failures_after_a_wake_are_tried_again_soon_then_as_usual() {

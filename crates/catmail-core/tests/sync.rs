@@ -939,29 +939,24 @@ async fn sync_folder_goes_in_between_the_folders_of_a_full_sync() {
     state.mailboxes.push(FakeMailbox::new("Later"));
     let env = env(state).await;
     env.sync().await;
-    let later = env.folder("Later").await.id;
-    {
-        let mut st = env.fake.state();
-        st.mailbox_mut("Later").append_simple("new");
-        // Holds the full sync in its first folder until the folder sync is waiting.
-        st.faults.slow = Some(("EXAMINE INBOX".into(), Duration::from_millis(500)));
-    }
+    let (later, account) = (env.folder("Later").await.id, env.account);
+    env.fake.state().mailbox_mut("Later").append_simple("new");
     let start = env.fake.state().log.len();
 
-    let (client, account) = (env.client.clone(), env.account);
-    let full = tokio::spawn(async move { client.sync_account(account).await });
-    env.fake
-        .wait_until(|st| st.received("EXAMINE INBOX") >= 2)
+    // Held in its first folder until the folder sync is waiting.
+    let full = env
+        .while_held("EXAMINE INBOX", move |client| async move {
+            client.sync_account(account).await
+        })
         .await;
-    let report = env
-        .client
-        .sync_folder(later, Duration::ZERO)
-        .await
-        .unwrap()
-        .unwrap();
+    let folder_sync = env
+        .queued_for_sync(
+            move |client| async move { client.sync_folder(later, Duration::ZERO).await },
+        )
+        .await;
+    let full = full.finish().await.unwrap();
+    let report = folder_sync.await.unwrap().unwrap().unwrap();
     assert_eq!(report.added, 1);
-
-    let full = full.await.unwrap().unwrap();
     assert_eq!(
         env.examined(start),
         ["INBOX", "Later", "Archive"],
@@ -981,31 +976,27 @@ async fn a_full_sync_doesnt_skip_a_folder_whose_sync_began_before_it() {
     state.mailbox_mut("Archive").append_simple("old");
     let env = env(state).await;
     env.sync().await;
-    let archive = env.folder("Archive").await.id;
-    let fetches = {
-        let mut st = env.fake.state();
-        st.faults.slow = Some(("UID FETCH".into(), Duration::from_millis(500)));
-        st.received("UID FETCH")
-    };
+    let (archive, account) = (env.folder("Archive").await.id, env.account);
 
-    let folder_sync = tokio::spawn({
-        let client = env.client.clone();
-        async move { client.sync_folder(archive, Duration::ZERO).await }
-    });
     // Past its EXAMINE: what arrives now is news to it.
-    env.fake
-        .wait_until(|st| st.received("UID FETCH") > fetches)
+    let folder_sync = env
+        .while_held("UID FETCH", move |client| async move {
+            client.sync_folder(archive, Duration::ZERO).await
+        })
         .await;
     {
         let mut st = env.fake.state();
         // The FETCH already held stays held; the full sync's needn't be.
-        st.faults.slow = None;
+        st.faults.gate = None;
         st.mailbox_mut("Archive").append_simple("new");
     }
 
     // Asked for while the folder sync runs, so it has to see the new message.
-    let full = env.sync().await;
-    folder_sync.await.unwrap().unwrap();
+    let full = env
+        .queued_for_sync(move |client| async move { client.sync_account(account).await })
+        .await;
+    folder_sync.finish().await.unwrap();
+    let full = full.await.unwrap().unwrap();
     assert_eq!(folder_report(&full, "Archive").added, 1, "{full:?}");
     assert_eq!(env.subjects("Archive").await, ["new", "old"]);
 }

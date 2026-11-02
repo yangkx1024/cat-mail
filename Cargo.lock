@@ -1078,6 +1078,7 @@ name = "catmail-core"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "catmail-core",
  "catmail-html",
  "catmail-proto",
  "catmail-store",
