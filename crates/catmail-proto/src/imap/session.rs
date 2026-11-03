@@ -355,11 +355,27 @@ impl Session {
     /// session, as Dovecot does), so reading it needs no EXAMINE again. What else opening
     /// it found may be out of date, so it isn't offered.
     pub fn examined(&self, raw_name: &str, uid: u32) -> Option<u32> {
-        self.selected
-            .as_ref()
-            .filter(|o| !o.writable && o.name == raw_name)
+        self.read_only()
+            .filter(|o| o.name == raw_name)
             .filter(|o| o.status.uidnext.is_some_and(|next| uid < next))
             .map(|o| o.status.uidvalidity)
+    }
+
+    /// The mailbox open now read-only, by raw name, and the UIDVALIDITY
+    /// [`examine`](Self::examine) found when it opened it: what holds of it for as long as
+    /// it stays open (see [`examined`](Self::examined)). Messages that arrived since are
+    /// in it once the server has reported them (EXISTS), which it may do in answer to any
+    /// command. Not one the server last said is empty: commands on it aren't sent (there
+    /// is nothing to ask about), so nothing would ever report mail that arrived since.
+    pub fn examined_mailbox(&self) -> Option<(&str, u32)> {
+        self.read_only()
+            .filter(|_| self.conn.exists() > 0)
+            .map(|o| (o.name.as_str(), o.status.uidvalidity))
+    }
+
+    /// The mailbox open now, if read-only.
+    fn read_only(&self) -> Option<&Opened> {
+        self.selected.as_ref().filter(|o| !o.writable)
     }
 
     /// Asks the server for nothing but news of the opened mailbox, which keeps a quiet
