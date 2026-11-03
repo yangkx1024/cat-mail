@@ -18,6 +18,7 @@ use tokio::task::unconstrained;
 use crate::image_cache::ImageCache;
 use crate::pool::Pool;
 use crate::prefetch::BodyPrefetch;
+use crate::search::SearchSlot;
 use crate::secrets::SecretStore;
 use crate::watch::SyncSchedule;
 use crate::{Config, DataDirLock, Error, Result};
@@ -166,6 +167,8 @@ struct AccountState {
     removed: watch::Sender<bool>,
     /// Logged-in connections for on-demand fetches (see [`pool`](crate::pool)).
     pool: Arc<Pool>,
+    /// The connection searches on the server use (see [`search`](crate::search)).
+    search: Arc<SearchSlot>,
     /// Wakes the account's background sync, if one runs: local changes are waiting for
     /// the server.
     wake: Arc<Notify>,
@@ -901,12 +904,19 @@ impl Engine {
         self.account(account).pool.clone()
     }
 
+    /// The connection searches of the account on the server use.
+    pub fn search_slot(&self, account: AccountId) -> Arc<SearchSlot> {
+        self.account(account).search.clone()
+    }
+
     /// Marks `account` removed: running syncs and fetches are cancelled, idle connections
     /// closed. Waits until a running sync has stopped.
     pub async fn start_removal(&self, account: AccountId) -> OwnedMutexGuard<()> {
         let state = self.account(account);
         state.removed.send_replace(true);
         state.pool.close();
+        // One a search holds goes with it, cancelled.
+        state.search.close_idle();
         state.sync.lock().await
     }
 
@@ -927,6 +937,7 @@ impl Engine {
                     send: AccountLock::default(),
                     removed: watch::Sender::new(false),
                     pool: Arc::new(Pool::new(account)),
+                    search: Arc::default(),
                     wake: Arc::default(),
                     resume: Arc::default(),
                     synced_signal: Arc::default(),

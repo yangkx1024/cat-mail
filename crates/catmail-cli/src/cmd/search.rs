@@ -43,6 +43,9 @@ pub(crate) struct Search {
     /// Only the matches after this message id, the last one of the previous page
     #[arg(long)]
     after: Option<i64>,
+    /// Also ask the servers, for the text of messages whose bodies aren't downloaded
+    #[arg(long)]
+    server: bool,
 }
 
 pub(crate) async fn ls(client: &MailClient, args: Ls, json: bool) -> Result<()> {
@@ -93,6 +96,9 @@ pub(crate) async fn search(client: &MailClient, args: Search, json: bool) -> Res
         query.folder = Some(folder.id);
     } else if let Some(selector) = &args.account {
         query.account = Some(resolve_account(client, selector).await?.id);
+    }
+    if args.server {
+        query.found_on_server = client.search_server(query.clone()).await?;
     }
     let messages = client.search(query).await?;
     if json {

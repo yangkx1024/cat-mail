@@ -3,7 +3,9 @@ use std::future::Future;
 use std::ops::RangeInclusive;
 use std::time::{Duration, Instant};
 
-use catmail_types::{FlagState, Flags, FolderRole, GmailLabel, Security, ServerConfig};
+use catmail_types::{
+    FlagState, Flags, FolderRole, GmailLabel, SearchField, SearchTerm, Security, ServerConfig,
+};
 use imap_proto::rfc4315::UidSetMember;
 use imap_proto::{
     AttributeValue, Capability, MailboxDatum, MessageSection, NameAttribute, ResponseCode,
@@ -590,6 +592,20 @@ impl Session {
     pub async fn uid_search_gm_msgid(&mut self, msgid: u64) -> Result<Vec<u32>> {
         self.require_gmail()?;
         let search = Command::new("UID SEARCH").raw(&format!("X-GM-MSGID {msgid}"));
+        self.uid_search(search).await
+    }
+
+    /// UIDs of messages in the selected mailbox that match every one of `terms`,
+    /// ascending, as the server matches them: a substring of the whole message (TEXT) or
+    /// of the field, on most servers; on Gmail, by its own search (X-GM-RAW), as its web
+    /// interface does; without terms, nothing matches. Non-ASCII text goes with
+    /// `CHARSET UTF-8`, which not every server takes: one that doesn't refuses the
+    /// command (`BADCHARSET`, or a plain NO).
+    pub async fn uid_search_text(&mut self, terms: &[SearchTerm]) -> Result<Vec<u32>> {
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let search = search_text_command(terms, self.is_gmail())?;
         self.uid_search(search).await
     }
 
@@ -1375,9 +1391,75 @@ fn sequence_set(ranges: &[RangeInclusive<u32>]) -> Option<String> {
     (!set.is_empty()).then(|| set.join(","))
 }
 
+/// `UID SEARCH` for [`Session::uid_search_text`]: one key per term, which IMAP ANDs; on
+/// Gmail, one X-GM-RAW query, in which the terms are ANDed too. A term's text never holds
+/// a `"` (it opens and closes phrases), so quoting it is safe in Gmail's syntax.
+fn search_text_command(terms: &[SearchTerm], gmail: bool) -> Result<Command> {
+    let mut search = Command::new("UID SEARCH");
+    if terms.iter().any(|t| !t.text.is_ascii()) {
+        search = search.raw("CHARSET UTF-8");
+    }
+    if gmail {
+        let query: Vec<String> = terms
+            .iter()
+            .map(|t| match t.field {
+                SearchField::Anywhere => format!("\"{}\"", t.text),
+                SearchField::From => format!("from:\"{}\"", t.text),
+                SearchField::To => format!("{{to:\"{0}\" cc:\"{0}\"}}", t.text),
+                SearchField::Subject => format!("subject:\"{}\"", t.text),
+            })
+            .collect();
+        return search.raw("X-GM-RAW").string(query.join(" ").as_bytes());
+    }
+    for term in terms {
+        let text = term.text.as_bytes();
+        search = match term.field {
+            SearchField::Anywhere => search.raw("TEXT").string(text)?,
+            SearchField::From => search.raw("FROM").string(text)?,
+            SearchField::To => search.raw("OR TO").string(text)?.raw("CC").string(text)?,
+            SearchField::Subject => search.raw("SUBJECT").string(text)?,
+        };
+    }
+    Ok(search)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn search_wire(input: &str, gmail: bool) -> String {
+        let command = search_text_command(&SearchTerm::parse(input), gmail).unwrap();
+        let chunks = command.encode("C1", Literals::NonSynchronizing);
+        String::from_utf8_lossy(&chunks.concat().concat()).into_owned()
+    }
+
+    #[test]
+    fn searches_text_with_a_key_per_term() {
+        assert_eq!(
+            search_wire(r#"report from:alice to:bob subject:"q 3""#, false),
+            "C1 UID SEARCH TEXT \"report\" FROM \"alice\" OR TO \"bob\" CC \"bob\" \
+             SUBJECT \"q 3\"\r\n"
+        );
+        // Non-ASCII text needs a charset, and a literal to carry it.
+        assert_eq!(
+            search_wire("季度", false),
+            "C1 UID SEARCH CHARSET UTF-8 TEXT {6+}\r\n季度\r\n"
+        );
+    }
+
+    #[test]
+    fn searches_gmail_in_its_own_syntax() {
+        assert_eq!(
+            search_wire(r#"report from:alice to:bob subject:"q 3""#, true),
+            r#"C1 UID SEARCH X-GM-RAW "\"report\" from:\"alice\" {to:\"bob\" cc:\"bob\"} subject:\"q 3\"""#
+                .to_owned()
+                + "\r\n"
+        );
+        assert_eq!(
+            search_wire("季度", true),
+            "C1 UID SEARCH CHARSET UTF-8 X-GM-RAW {8+}\r\n\"季度\"\r\n"
+        );
+    }
 
     #[test]
     fn compresses_uid_sets() {

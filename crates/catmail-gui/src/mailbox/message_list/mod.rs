@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::time::Duration;
 
 use catmail_core::{
     AccountId, Draft, DraftId, Flags, FolderId, MailClient, MessageCursor, MessageId,
@@ -31,6 +32,13 @@ pub use rows::outbox_status;
 use rows::{Shape, draft_row, message_row, outbox_row};
 
 const PAGE: u32 = 200;
+
+/// How long search results show before the servers are asked about the text too. A
+/// search the user moves on from still has the server finish the command at hand (a scan
+/// of a whole folder's text, on servers without an index), which the next one waits for:
+/// this keeps the pauses in typing from asking, at the cost of server results showing a
+/// little later than they could.
+const SERVER_SEARCH_DELAY: Duration = Duration::from_secs(1);
 
 /// A command on a row's message from the row itself, not the selection: the mailbox
 /// runs it.
@@ -247,7 +255,12 @@ pub struct MessageList {
     /// The messages checked, for a command on them all: apart from the selected row, the
     /// one the reader shows. Always among the rows.
     checked: HashSet<MessageId>,
+    /// Search results the servers found that local search can't, by their text: read with
+    /// every page of the results (see `MailClient::search_server`).
+    found_on_server: Rc<[MessageId]>,
     _load: Task<()>,
+    /// Asks the servers about the search shown.
+    _server: Task<()>,
 }
 
 impl MessageList {
@@ -271,7 +284,9 @@ impl MessageList {
             folders: HashMap::new(),
             hovered: None,
             checked: HashSet::new(),
+            found_on_server: Rc::new([]),
             _load: Task::ready(()),
+            _server: Task::ready(()),
         }
     }
 
@@ -409,10 +424,50 @@ pub fn show(
     delegate.revealing = None;
     delegate.settled = None;
     delegate.generation += 1;
+    delegate.found_on_server = Rc::new([]);
+    delegate._server = match &delegate.source {
+        Some(Source::Search(text)) => search_server(delegate, text.clone(), window, cx),
+        _ => Task::ready(()),
+    };
     uncheck_all(list, cx);
     list.set_selected_index(None, window, cx);
     list.scroll_to_item(IndexPath::new(0), gpui_kit::ScrollStrategy::Top, window, cx);
     load(list, Load::Replace(PAGE), window, cx);
+}
+
+/// Asks the servers about `text` once the local results showed for
+/// [`SERVER_SEARCH_DELAY`], and reads the results again with what they found, if
+/// anything. Failures leave the local results alone; they are only logged.
+fn search_server(
+    delegate: &MessageList,
+    text: String,
+    window: &mut Window,
+    cx: &mut Context<ListState<MessageList>>,
+) -> Task<()> {
+    let (client, generation) = (delegate.client.clone(), delegate.generation);
+    cx.spawn_in(window, async move |list, cx| {
+        cx.background_executor().timer(SERVER_SEARCH_DELAY).await;
+        // The engine logs what each server said; this is what kept it from asking.
+        let found = match client.search_server(SearchQuery::new(text)).await {
+            Ok(found) => found,
+            Err(e) => {
+                tracing::warn!(error = %e, "couldn't search the servers");
+                return;
+            }
+        };
+        if found.is_empty() {
+            return;
+        }
+        list.update_in(cx, |list, window, cx| {
+            let delegate = list.delegate_mut();
+            if delegate.generation != generation {
+                return;
+            }
+            delegate.found_on_server = found.into();
+            refresh(list, window, cx);
+        })
+        .ok();
+    })
 }
 
 /// Checks message `id`, or unchecks it if it is checked.
@@ -575,6 +630,7 @@ enum Load {
 async fn fetch(
     client: &MailClient,
     source: &Source,
+    found_on_server: &[MessageId],
     limit: u32,
     after: Option<MessageCursor>,
 ) -> catmail_core::Result<(Vec<Row>, bool)> {
@@ -590,6 +646,7 @@ async fn fetch(
             let mut query = SearchQuery::new(text.clone());
             query.limit = limit;
             query.after = after;
+            query.found_on_server = found_on_server.to_vec();
             page(client.search(query).await?)
         }
         Source::Drafts(account) => {
@@ -626,12 +683,13 @@ fn load(
     }
     let read = delegate.reads;
     let client = delegate.client.clone();
+    let found_on_server = delegate.found_on_server.clone();
     let generation = delegate.generation;
     delegate.loading = true;
     // Replacing the task drops (cancels) a load still in flight, which only `show` does:
     // the other callers wait for `loading`.
     delegate._load = cx.spawn_in(window, async move |list, cx| {
-        let result = fetch(&client, &source, limit, after).await;
+        let result = fetch(&client, &source, &found_on_server, limit, after).await;
         list.update_in(cx, |list, window, cx| {
             if list.delegate().generation != generation {
                 return;

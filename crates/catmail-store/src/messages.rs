@@ -129,10 +129,7 @@ static LIST_STARRED: LazyLock<Page> = LazyLock::new(|| {
 /// location, and Starred a label. A label or Starred searched on its own (`:folder`) is
 /// what it lists.
 const SEARCHED: &str = "
-    (:folder IS NULL
-     AND m.folder_id NOT IN (
-         SELECT f.id FROM folders f JOIN accounts a ON a.id = f.account_id
-         WHERE f.role IN ('all', 'flagged') AND a.mode IS NOT 'gmail'))
+    (:folder IS NULL AND m.folder_id NOT IN gathering)
     OR m.folder_id = :folder
     OR (m.folder_id IN all_mail
         AND (EXISTS (SELECT 1 FROM message_labels
@@ -742,14 +739,16 @@ impl<'c> Messages<'c> {
     }
 
     /// Messages matching the query, newest first (see [`MessageCursor`]). Bodies are only
-    /// searched once downloaded; subjects and addresses always.
+    /// searched once downloaded; subjects and addresses always. The query's
+    /// `found_on_server` match as well, in its account and folder.
     pub fn search(&self, query: &SearchQuery) -> Result<Vec<MessageSummary>> {
         let Some(expr) = fts::match_expression(&query.text) else {
             return Ok(Vec::new());
         };
         let sql = format!(
             "SELECT {SUMMARY_COLUMNS} FROM messages m
-             WHERE m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH :expr)
+             WHERE (m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH :expr)
+                    OR m.id IN (SELECT value FROM json_each(:found)))
                AND (:account IS NULL OR m.account_id = :account)
                AND ({SEARCHED})
                AND {AFTER}
@@ -760,6 +759,7 @@ impl<'c> Messages<'c> {
         let rows = stmt.query_map(
             named_params! {
                 ":expr": expr,
+                ":found": to_json(&query.found_on_server),
                 ":account": query.account.map(|a| a.0),
                 ":folder": query.folder.map(|f| f.0),
                 ":after_date": after_date,
@@ -767,6 +767,36 @@ impl<'c> Messages<'c> {
                 ":limit": query.limit,
             },
             summary_from_row,
+        )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Of the messages at `uids` in `folder` while its UIDVALIDITY is `uidvalidity`, those
+    /// whose bodies aren't downloaded, at most `limit`, the highest UIDs: what a search on
+    /// the server adds to the local one. A message moved locally isn't at its old UID any
+    /// more, nor yet at a new one.
+    pub fn without_body(
+        &self,
+        folder: FolderId,
+        uidvalidity: u32,
+        uids: &[u32],
+        limit: usize,
+    ) -> Result<Vec<MessageId>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT m.id FROM messages m JOIN folders f ON f.id = m.folder_id
+             WHERE m.folder_id = :folder AND f.uidvalidity = :uidvalidity
+               AND m.body_state = 'headers'
+               AND m.uid IN (SELECT value FROM json_each(:uids))
+             ORDER BY m.uid DESC LIMIT :limit",
+        )?;
+        let rows = stmt.query_map(
+            named_params! {
+                ":folder": folder.0,
+                ":uidvalidity": uidvalidity,
+                ":uids": to_json(uids),
+                ":limit": limit as i64,
+            },
+            |r| Ok(MessageId(r.get(0)?)),
         )?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -1970,6 +2000,141 @@ mod tests {
             run(gmail, Some(g["[Gmail]/Starred"]), 50),
             [s(30, all_mail)]
         );
+    }
+
+    #[test]
+    fn what_the_server_found_is_searched_where_search_looks() {
+        let store = test_util::store();
+        let standard = test_util::account(&store, "b@example.com");
+        let o = folders(
+            &store,
+            standard,
+            &[
+                ("INBOX", Some(FolderRole::Inbox)),
+                ("Kept", None),
+                ("All", Some(FolderRole::All)),
+                ("Flagged", Some(FolderRole::Flagged)),
+            ],
+        );
+        let (gmail, g) = gmail(&store);
+        store
+            .write(|db| {
+                db.accounts().set_mode(gmail, AccountMode::Gmail)?;
+                let messages = db.messages();
+                messages.upsert(standard, o["INBOX"], &[copy(10, None), copy(11, None)])?;
+                messages.upsert(standard, o["Kept"], &[copy(12, None)])?;
+                messages.upsert(standard, o["All"], &[copy(13, None)])?;
+                messages.upsert(
+                    gmail,
+                    g["[Gmail]/All Mail"],
+                    &[labelled(20, Flags::empty(), vec![user("Work")])],
+                )?;
+                messages.upsert(
+                    gmail,
+                    g["[Gmail]/Trash"],
+                    &[labelled(21, Flags::empty(), vec![])],
+                )?;
+                messages.upsert(
+                    gmail,
+                    g["[Gmail]/Spam"],
+                    &[labelled(22, Flags::empty(), vec![])],
+                )
+            })
+            .unwrap();
+        let id = |folder, uid| test_util::message_id(&store, folder, uid);
+        let (ten, eleven, twelve) = (id(o["INBOX"], 10), id(o["INBOX"], 11), id(o["Kept"], 12));
+        let twenty = id(g["[Gmail]/All Mail"], 20);
+
+        // UIDs the server found, as rows: not those with a body, nor of another
+        // UIDVALIDITY, nor UIDs not stored.
+        store
+            .write(|db| db.messages().store_body(eleven, &body()))
+            .unwrap();
+        let without_body = |folder, uidvalidity, uids: &[u32], limit| {
+            store
+                .read(|db| db.messages().without_body(folder, uidvalidity, uids, limit))
+                .unwrap()
+        };
+        assert_eq!(without_body(o["INBOX"], 1, &[10, 11, 99], 9), [ten]);
+        assert!(without_body(o["INBOX"], 2, &[10], 9).is_empty());
+        assert!(without_body(o["Kept"], 1, &[10], 9).is_empty());
+        // The limit counts only what is left: a newer message with its body takes none.
+        assert_eq!(without_body(o["INBOX"], 1, &[10, 11], 1), [ten]);
+
+        // They match whatever the text, within the account and folder.
+        let run = |account, folder, found: Vec<MessageId>| {
+            let mut q = SearchQuery::new("pelican");
+            (q.account, q.folder, q.found_on_server) = (account, folder, found);
+            let found = store.read(|db| db.messages().search(&q)).unwrap();
+            found.into_iter().map(|m| m.id).collect::<Vec<_>>()
+        };
+        let all = vec![ten, twelve, twenty];
+        assert!(run(None, None, Vec::new()).is_empty());
+        assert_eq!(run(None, None, all.clone()), [twenty, twelve, ten]);
+        assert_eq!(run(Some(standard), None, all.clone()), [twelve, ten]);
+        assert_eq!(run(None, Some(o["Kept"]), all.clone()), [twelve]);
+        assert_eq!(run(None, Some(g["Work"]), all.clone()), [twenty]);
+        assert!(run(None, Some(o["All"]), all).is_empty());
+
+        // The server is asked about the folders search covers, by account.
+        let searched = |account, folder| {
+            let found = store
+                .read(|db| db.folders().searched_on_server(account, folder))
+                .unwrap();
+            found
+                .into_iter()
+                .map(|(account, states)| {
+                    let names = states.into_iter().map(|s| s.remote_name).collect();
+                    (account, names)
+                })
+                .collect::<Vec<(AccountId, Vec<String>)>>()
+        };
+        let names = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let locations = names(&["[Gmail]/All Mail", "[Gmail]/Trash", "[Gmail]/Spam"]);
+        assert_eq!(
+            searched(None, None),
+            [
+                (standard, names(&["INBOX", "Kept"])),
+                (gmail, locations.clone())
+            ]
+        );
+        assert_eq!(searched(Some(gmail), None), [(gmail, locations)]);
+        assert_eq!(
+            searched(None, Some(o["All"])),
+            [(standard, names(&["All"]))]
+        );
+        assert_eq!(
+            searched(Some(standard), Some(o["Kept"])),
+            [(standard, names(&["Kept"]))]
+        );
+        assert!(searched(Some(gmail), Some(o["Kept"])).is_empty());
+        let trash = names(&["[Gmail]/Trash"]);
+        assert_eq!(searched(None, Some(g["[Gmail]/Trash"])), [(gmail, trash)]);
+        let all_mail = names(&["[Gmail]/All Mail"]);
+        assert_eq!(searched(None, Some(g["Work"])), [(gmail, all_mail.clone())]);
+        assert_eq!(
+            searched(None, Some(g["[Gmail]/Starred"])),
+            [(gmail, all_mail)]
+        );
+        // Not where every body is here: local search finds whatever the server would.
+        store
+            .write(|db| db.messages().store_body(ten, &body()).map(drop))
+            .unwrap();
+        assert_eq!(
+            searched(Some(standard), None),
+            [(standard, names(&["Kept"]))]
+        );
+        // Nor before the folder was synced: there is nothing to map UIDs to.
+        store
+            .write(|db| {
+                db.conn.execute(
+                    "UPDATE folders SET uidvalidity = NULL WHERE id = ?1",
+                    [o["Kept"].0],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(searched(Some(standard), None).is_empty());
     }
 
     #[test]

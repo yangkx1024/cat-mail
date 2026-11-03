@@ -202,6 +202,41 @@ fn a_message_checked_is_unchecked_once_it_is_gone(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn search_results_gain_what_the_server_finds_in_bodies_not_downloaded(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    mail.deliver_raw_to_and_sync(
+        "Archive",
+        b"From: Bob <bob@example.com>\r\nSubject: Kept for later\r\n\r\nThe pelican numbers.\r\n",
+    );
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    let search_for = |text: &str, cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, cx| {
+            mailbox.update(cx, |mailbox, cx| {
+                mailbox.search_for(text.into(), window, cx)
+            })
+        })
+        .unwrap();
+        cx.run_until_parked();
+    };
+    // Not while the text is still changing: only once its results showed a while.
+    search_for("peli", cx);
+    cx.executor().advance_clock(Duration::from_millis(500));
+    search_for("pelican", cx);
+    assert!(mail.text_searches().is_empty());
+    cx.executor().advance_clock(Duration::from_secs(1));
+    wait_until(|| {
+        cx.run_until_parked();
+        cx.read(|cx| find(&mailbox, "Kept for later", cx).is_some())
+    });
+    let searches = mail.text_searches();
+    assert!(
+        !searches.is_empty() && searches.iter().all(|s| s.contains("pelican")),
+        "{searches:?}"
+    );
+}
+
+#[gpui_kit::test]
 fn deleting_from_search_results_trashes_some_and_deletes_the_binned_for_good(
     cx: &mut TestAppContext,
 ) {

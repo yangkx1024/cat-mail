@@ -30,7 +30,7 @@ use crate::secrets::{KeyringSecrets, SecretStore};
 use crate::watch::{self, SyncSchedule};
 use crate::{
     BodyPrefetch, Config, DataDirLock, Error, Result, body, connection, drafts, folders, gc,
-    images, ops, prefetch, rebuild, send, sleep, sync,
+    images, ops, prefetch, rebuild, search, send, sleep, sync,
 };
 
 /// Starts the background work the engine does per account (sync, prefetch of bodies), if
@@ -1146,12 +1146,34 @@ impl MailClient {
     }
 
     /// Searches subjects, senders and recipients of all synced messages, and the text
-    /// of downloaded bodies. Newest first.
+    /// of downloaded bodies. Newest first. Messages [`search_server`](Self::search_server)
+    /// found, given in the query's `found_on_server`, are among the results too.
     pub async fn search(&self, query: SearchQuery) -> Result<Vec<MessageSummary>> {
         let engine = self.engine()?;
         self.shared
             .rt
             .run(async move { engine.read(move |db| db.messages().search(&query)).await })
+            .await
+    }
+
+    /// Asks the servers about the query's text, in its account (every account with
+    /// `None`) and folder, and returns the messages they found whose bodies aren't
+    /// downloaded, by id: those [`search`](Self::search) can't find by their text. Put
+    /// them in the query's `found_on_server`, for every page and every read again of the
+    /// results.
+    ///
+    /// Every folder search covers is searched, one after another: this can take a while.
+    /// A server that can't be reached, or won't search the text, adds nothing; no error
+    /// says so. Messages a server has that aren't synced yet are left out. Dropping the
+    /// future stops the search after the command at hand, leaving the connection to the
+    /// next one.
+    pub async fn search_server(&self, query: SearchQuery) -> Result<Vec<MessageId>> {
+        let engine = self.engine()?;
+        let abandoned = search::Abandoned::default();
+        let _abandon = abandoned.on_drop();
+        self.shared
+            .rt
+            .run(search::on_servers(engine, query, abandoned))
             .await
     }
 

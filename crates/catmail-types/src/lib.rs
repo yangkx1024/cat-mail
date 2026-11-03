@@ -39,5 +39,5 @@ pub use message::{
 };
 pub use ops::{OpKind, OpStatus, PendingOp, ReplayReport};
 pub use outbox::{FlushReport, OutboxEntry, OutboxStatus};
-pub use search::SearchQuery;
+pub use search::{SearchField, SearchQuery, SearchTerm};
 pub use sync::{FolderSyncReport, GcReport, SyncReport};
