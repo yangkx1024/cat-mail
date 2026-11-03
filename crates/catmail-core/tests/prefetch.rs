@@ -125,12 +125,18 @@ async fn bodies_are_fetched_once_every_folder_is_synced() {
 
     gate.add_permits(100);
     syncing.await.unwrap();
-    eventually("both bodies in INBOX", async || {
-        env.downloaded("INBOX", 1).await && env.downloaded("INBOX", 2).await
+    // Trash's too, last.
+    eventually("every body", async || {
+        env.downloaded("INBOX", 1).await
+            && env.downloaded("INBOX", 2).await
+            && env.downloaded("Trash", 23).await
     })
     .await;
     assert_eq!(env.found("pelican").await, 1);
     assert_eq!(env.found("walrus").await, 1);
+    assert_eq!(env.found("trashed").await, 1);
+    // Done, the prefetch closes its connection.
+    env.fake.wait_until(|st| st.open_connections == 0).await;
 
     // The small one whole, so it opens offline with everything; of the large one only
     // the text, its attachment left on the server until opened.
@@ -150,8 +156,12 @@ async fn bodies_are_fetched_once_every_folder_is_synced() {
     assert_eq!(attachments.len(), 1);
     assert!(!attachments[0].downloaded);
 
-    a_while().await;
-    assert!(!env.downloaded("Trash", 23).await, "Trash is left out");
+    // Nothing left for a search to ask the server about.
+    let start = env.fake.state().log.len();
+    let found = env.client.search_server(SearchQuery::new("trashed")).await;
+    assert_eq!(found.unwrap(), Vec::<MessageId>::new());
+    assert_eq!(env.commands_since(start), Vec::<String>::new());
+
     let mut state = env.fake.state();
     assert!(state.log.iter().all(|c| !c.line.contains("BODY[")));
     assert!(state.log.iter().all(|c| !c.line.starts_with("SELECT")));
@@ -213,6 +223,10 @@ async fn the_newest_come_first_within_the_daily_budget() {
     .await;
     env.client.sync_account(env.account).await.unwrap();
     eventually("the newest body", async || env.downloaded("INBOX", 3).await).await;
+    assert!(
+        !env.downloaded("Trash", 23).await,
+        "Trash's last, though newer"
+    );
 
     // Spent: new mail doesn't change that.
     env.fake.state().inbox().append(&mail("heron", 4), &[]);
@@ -223,20 +237,49 @@ async fn the_newest_come_first_within_the_daily_budget() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn trash_waits_for_the_rest_also_within_a_batch() {
+    // Archive, listed after Trash, has the larger folder id: a batch fetched a folder at
+    // a time would start with Trash.
+    let mut state = state(&[]);
+    let mut archive = FakeMailbox::new("Archive");
+    archive.append(&mail("pelican", 1), &[]);
+    state.mailboxes.push(archive);
+    let env = env(
+        state,
+        BodyPrefetch {
+            daily_budget: 1,
+            gmail_daily_budget: 1,
+            ..prefetching()
+        },
+    )
+    .await;
+    env.client.sync_account(env.account).await.unwrap();
+    assert!(env.folder("Trash").await.id < env.folder("Archive").await.id);
+    eventually("Archive's body", async || {
+        env.downloaded("Archive", 1).await
+    })
+    .await;
+    a_while().await;
+    assert!(!env.downloaded("Trash", 23).await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_message_the_server_refuses_does_not_hold_up_the_rest() {
     let inbox: Vec<_> = (1..=3).map(|n| mail("pelican", n)).collect();
     let env = env(state(&inbox), prefetching()).await;
     env.fake.state().faults.refuse_body_fetch = vec![2];
     env.client.sync_account(env.account).await.unwrap();
     eventually("the others", async || {
-        env.downloaded("INBOX", 3).await && env.downloaded("INBOX", 1).await
+        env.downloaded("INBOX", 3).await
+            && env.downloaded("INBOX", 1).await
+            && env.downloaded("Trash", 23).await
     })
     .await;
     assert_eq!(env.failures(), 1);
 
     // Not tried again for a while.
     a_while().await;
-    assert_eq!(env.fake.state().body_fetches(), 3);
+    assert_eq!(env.fake.state().body_fetches(), 4);
 
     // Opened, it is forgotten.
     env.fake.state().faults.refuse_body_fetch.clear();
