@@ -338,11 +338,9 @@ fn colors(palette: &TerminalPalette) -> Map<String, Value> {
 /// A theme file for the themes folder: pretty JSON of a GPUI Kit `ThemeSet`, without
 /// the unset (null) fields, so it reads well when edited by hand.
 pub fn theme_set_json(configs: &[ThemeConfig]) -> String {
-    let set = ThemeSet {
-        name: configs.first().map(|c| c.name.clone()).unwrap_or_default(),
-        themes: configs.to_vec(),
-        ..Default::default()
-    };
+    let mut set = ThemeSet::default();
+    set.name = configs.first().map(|c| c.name.clone()).unwrap_or_default();
+    set.themes = configs.to_vec();
     let mut value = serde_json::to_value(&set).expect("a theme set serializes");
     strip_nulls(&mut value);
     serde_json::to_string_pretty(&value).expect("JSON serializes")

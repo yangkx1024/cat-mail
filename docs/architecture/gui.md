@@ -523,7 +523,7 @@ Blitz 用的是 fork（`yangkx1024/blitz`，基于 0.3.0-beta.4，根 `Cargo.tom
   - **菜单之后的第一次按下**：菜单项的点击会 `stop_propagation`，选区层收不到这次松开，它的
     "按下已处理" 标记（`mouse_down_prepared`）要到下一次松开才复位，期间的那次按下不清空选区。窗口
     选区照样被新的拖动替换，但参与者的本地选区（全选、双击）会留下。所以页面在窗口上注册一个 capture
-    阶段的左键按下监听，按在任何地方时若页面有本地选区就调 `TextSelection::clear`。这是 gpui-kit 0.8.0 的问题，升级时可以再看。
+    阶段的左键按下监听，按在任何地方时若页面有本地选区就调 `TextSelection::clear`。这是 gpui-kit 的问题（0.9.0 仍在），升级时可以再看。
   - 段落之间用换行连接；表格单元格也各占一行（浏览器用制表符）。
 - **还不支持**：页内查找、单封邮件切回原色的开关（暂不需要：Gmail 也没有）。
 
@@ -558,8 +558,8 @@ Lucide 图标（勾、箭头、关闭、搜索……）在资源加载时按路�
 
 ## 已知问题与升级须知
 
-- **可变字体的字重（上游）。** Linux 上 GPUI（`gpui-fast-wgpu` 0.1.10 的 `cosmic_text_system.rs`，
-  与 `gpui-pre-wgpu` 0.3.9 的相同）栅格化字形时不设 `wght` 轴坐标，可变字体一律按默认实例渲染。系统
+- **可变字体的字重（上游）。** Linux 上 GPUI（`gpui-fast-wgpu` 0.1.13 的 `cosmic_text_system.rs`，
+  与 `gpui-pre-wgpu` 0.3.11 的相同）栅格化字形时不设 `wght` 轴坐标，可变字体一律按默认实例渲染。系统
   只有 Noto Sans CJK 可变字体时，中文偏细、加粗无效；只给静态字体时字重正常。上游跟踪 zed-industries/zed#60155（#64123、#64783 同一处）。界面
   文字用自带的静态 Noto Sans 绕开，CJK 只在装有静态字面的字族里挑回退字体（见[字体](#字体linux)）；只有
   可变 CJK 字体的系统，中文仍然没有粗体，用户可改装静态版（如 nixpkgs 的 `noto-fonts-cjk-sans-static`），
@@ -569,8 +569,8 @@ Lucide 图标（勾、箭头、关闭、搜索……）在资源加载时按路�
   #60155 报的就是它（回退只在字重 400 时生效）。修法是按回退字族里最接近的字重去匹配，要改 GPUI；
   Zed 的编辑器不受影响，只因常用的编辑器字体（如 Maple Mono NF CN）自带 CJK，用不到回退。
   升级 gpui-kit 时检查这几个 issue：修好后可以去掉自带字体和 `fonts.rs` 的回退挑选。
-- **依赖锁定。** `gpui-fast-*` 精确 pin 了 `cocoa = 0.26.0` 和 `unicode-properties = 0.1.3`，锁文件里
-  这两个必须保持这些版本；升级 gpui-kit 时对照它自带的 `Cargo.lock`。
+- **依赖锁定。** `gpui-fast-web` 精确 pin 了 `unicode-properties = 0.1.3`，锁文件里它必须保持这个
+  版本；升级 gpui-kit 时对照它自带的 `Cargo.lock`。
 - **弹窗与菜单的动画（上游）。** 对话框一律经 `layout::open_dialog`（确认框 `layout::confirm_danger`）
   打开，用 `DialogEntrance::FadeSlide`：从略高于终点处淡入落定，关闭时原路淡出。gpui-kit 默认的
   `SlideDown` 从窗口顶部拉下来，关闭时倒放同一条先快后慢的曲线，几帧内就走完整段距离，看起来像没有动画。
