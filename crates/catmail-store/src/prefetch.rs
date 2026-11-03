@@ -21,12 +21,13 @@ pub struct Usage {
     pub paused_until: Option<i64>,
 }
 
-/// Of [`Prefetch::next`]. Reads `messages_prefetch` newest first, which needs no sort.
+/// Of [`Prefetch::next`], in Trash and Junk or (`:discarded` 0) outside them. Reads
+/// `messages_prefetch` newest first, which needs no sort.
 const NEXT: &str = "SELECT m.id, m.folder_id FROM messages m JOIN folders f ON f.id = m.folder_id
     WHERE m.account_id = :account AND m.body_state = 'headers'
       AND m.uid IS NOT NULL
       AND f.kind = 'location' AND f.selectable
-      AND f.role IS NOT 'trash' AND f.role IS NOT 'junk'
+      AND (f.role IS 'trash' OR f.role IS 'junk') = :discarded
       AND f.id NOT IN (SELECT value FROM json_each(:skip))
       AND NOT EXISTS (SELECT 1 FROM prefetch_failures p
                       WHERE p.message_id = m.id AND p.retry_at > :now)
@@ -44,9 +45,13 @@ impl<'c> Prefetch<'c> {
 
     /// Up to `limit` messages of the account whose body to fetch next, newest first, with
     /// their folders: those not downloaded, where the server has them (a message moved
-    /// locally has no UID until the move is made), not in Trash or Junk, nor in the
-    /// folders in `skip`, and not waiting to be tried again after a failure (as of `now`,
-    /// unix seconds).
+    /// locally has no UID until the move is made), not in the folders in `skip`, and not
+    /// waiting to be tried again after a failure (as of `now`, unix seconds).
+    ///
+    /// Those in Trash and Junk only once there are no others: they are the least looked
+    /// for, but a search asks the server about every folder with bodies missing, and once
+    /// these are here it needn't. Never both in one call, as a batch is fetched a folder
+    /// at a time, which could put them first.
     pub fn next(
         &self,
         account: AccountId,
@@ -54,18 +59,25 @@ impl<'c> Prefetch<'c> {
         now: i64,
         limit: usize,
     ) -> Result<Vec<(MessageId, FolderId)>> {
-        let skip: Vec<i64> = skip.iter().map(|f| f.0).collect();
+        let skip = to_json(&skip.iter().map(|f| f.0).collect::<Vec<_>>());
         let mut stmt = self.conn.prepare_cached(NEXT)?;
-        let rows = stmt.query_map(
-            named_params! {
-                ":account": account.0,
-                ":skip": to_json(&skip),
-                ":now": now,
-                ":limit": limit as i64,
-            },
-            |r| Ok((MessageId(r.get(0)?), FolderId(r.get(1)?))),
-        )?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        for discarded in [false, true] {
+            let rows = stmt.query_map(
+                named_params! {
+                    ":account": account.0,
+                    ":discarded": discarded,
+                    ":skip": skip,
+                    ":now": now,
+                    ":limit": limit as i64,
+                },
+                |r| Ok((MessageId(r.get(0)?), FolderId(r.get(1)?))),
+            )?;
+            let next = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+            if !next.is_empty() {
+                return Ok(next);
+            }
+        }
+        Ok(Vec::new())
     }
 
     /// Records that the message's body failed to fetch at `now`, so that [`next`]
@@ -152,9 +164,9 @@ mod tests {
     use crate::messages::{NewBody, NewMessage};
     use crate::test_util::{self, TestStore};
 
-    /// An account with INBOX, Archive and Trash, each with two messages (UIDs 1 and 2,
-    /// dated by folder and UID); and the folders' ids.
-    fn setup() -> (TestStore, AccountId, [FolderId; 3]) {
+    /// An account with INBOX, Archive, Trash and Junk, each with two messages (UIDs 1 and
+    /// 2, dated by folder and UID); and the folders' ids.
+    fn setup() -> (TestStore, AccountId, [FolderId; 4]) {
         let store = test_util::store();
         let account = test_util::account(&store, "a@example.com");
         let folder = |name: &str, role| RemoteFolder {
@@ -170,13 +182,14 @@ mod tests {
             folder("INBOX", Some(FolderRole::Inbox)),
             folder("Archive", None),
             folder("Trash", Some(FolderRole::Trash)),
+            folder("Junk", Some(FolderRole::Junk)),
         ];
         let folders = store
             .write(|db| {
                 db.folders().reconcile(account, &remote)?;
                 let listed = db.folders().list(account)?;
                 let mut ids = Vec::new();
-                for (i, name) in ["INBOX", "Archive", "Trash"].iter().enumerate() {
+                for (i, name) in ["INBOX", "Archive", "Trash", "Junk"].iter().enumerate() {
                     let id = listed.iter().find(|f| f.name == *name).unwrap().id;
                     db.folders().reset_uidvalidity(id, 1)?;
                     let messages: Vec<_> = (1..=2)
@@ -200,22 +213,37 @@ mod tests {
 
     use test_util::message_id as id;
 
-    fn next(store: &TestStore, account: AccountId, skip: &[FolderId], now: i64) -> Vec<MessageId> {
-        let next = store.read(|db| db.prefetch().next(account, skip, now, 10));
+    fn next(
+        store: &TestStore,
+        account: AccountId,
+        skip: &[FolderId],
+        now: i64,
+        limit: usize,
+    ) -> Vec<MessageId> {
+        let next = store.read(|db| db.prefetch().next(account, skip, now, limit));
         next.unwrap().into_iter().map(|(id, _)| id).collect()
     }
 
     #[test]
-    fn next_is_newest_first_and_leaves_out_trash_downloaded_and_skipped() {
-        let (store, account, [inbox, archive, _trash]) = setup();
-        let all = next(&store, account, &[], 0);
+    fn next_is_newest_first_with_trash_once_the_rest_is_done_and_leaves_out_downloaded() {
+        let (store, account, [inbox, archive, trash, junk]) = setup();
+        // Not Trash's and Junk's, though the newest and there is room for them.
         assert_eq!(
-            all,
+            next(&store, account, &[], 0, 10),
             [
                 id(&store, archive, 2),
                 id(&store, archive, 1),
                 id(&store, inbox, 2),
                 id(&store, inbox, 1),
+            ]
+        );
+        // Once the others are done (or left out).
+        assert_eq!(
+            next(&store, account, &[inbox, archive], 0, 3),
+            [
+                id(&store, junk, 2),
+                id(&store, junk, 1),
+                id(&store, trash, 2)
             ]
         );
 
@@ -227,49 +255,55 @@ mod tests {
                     .map(drop)
             })
             .unwrap();
-        assert_eq!(next(&store, account, &[inbox], 0), [id(&store, archive, 1)]);
+        assert_eq!(
+            next(&store, account, &[inbox, trash, junk], 0, 10),
+            [id(&store, archive, 1)]
+        );
     }
 
     #[test]
     fn next_reads_its_index_rather_than_every_message() {
         let (store, account, _) = setup();
-        let plan: Vec<String> = store
-            .read(|db| {
-                let mut stmt = db.conn.prepare(&format!("EXPLAIN QUERY PLAN {NEXT}"))?;
-                let rows = stmt.query_map(
-                    named_params! {
-                        ":account": account.0, ":skip": "[]", ":now": 0, ":limit": 10,
-                    },
-                    |r| r.get::<_, String>(3),
-                )?;
-                Ok(rows.collect::<rusqlite::Result<_>>()?)
-            })
-            .unwrap();
-        assert!(
-            plan.iter().any(|step| step.contains("messages_prefetch")),
-            "{plan:?}"
-        );
-        assert!(
-            !plan.iter().any(|step| step.contains("TEMP B-TREE")),
-            "{plan:?}"
-        );
+        for discarded in [false, true] {
+            let plan: Vec<String> = store
+                .read(|db| {
+                    let mut stmt = db.conn.prepare(&format!("EXPLAIN QUERY PLAN {NEXT}"))?;
+                    let rows = stmt.query_map(
+                        named_params! {
+                            ":account": account.0, ":discarded": discarded, ":skip": "[]",
+                            ":now": 0, ":limit": 10,
+                        },
+                        |r| r.get::<_, String>(3),
+                    )?;
+                    Ok(rows.collect::<rusqlite::Result<_>>()?)
+                })
+                .unwrap();
+            assert!(
+                plan.iter().any(|step| step.contains("messages_prefetch")),
+                "{plan:?}"
+            );
+            assert!(
+                !plan.iter().any(|step| step.contains("TEMP B-TREE")),
+                "{plan:?}"
+            );
+        }
     }
 
     #[test]
     fn a_failed_message_waits_longer_each_time_until_its_body_is_stored() {
-        let (store, account, [inbox, _, _]) = setup();
+        let (store, account, [inbox, ..]) = setup();
         let failing = id(&store, inbox, 2);
         let hour = 60 * 60;
 
         store.write(|db| db.prefetch().failed(failing, 0)).unwrap();
-        assert!(!next(&store, account, &[], hour - 1).contains(&failing));
-        assert!(next(&store, account, &[], hour).contains(&failing));
+        assert!(!next(&store, account, &[], hour - 1, 10).contains(&failing));
+        assert!(next(&store, account, &[], hour, 10).contains(&failing));
 
         store
             .write(|db| db.prefetch().failed(failing, hour))
             .unwrap();
-        assert!(!next(&store, account, &[], 5 * hour - 1).contains(&failing));
-        assert!(next(&store, account, &[], 5 * hour).contains(&failing));
+        assert!(!next(&store, account, &[], 5 * hour - 1, 10).contains(&failing));
+        assert!(next(&store, account, &[], 5 * hour, 10).contains(&failing));
 
         // Opened meanwhile: forgotten.
         store

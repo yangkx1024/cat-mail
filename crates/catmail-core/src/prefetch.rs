@@ -5,7 +5,8 @@
 //! pooled ones stay free for opening messages, which never wait for it. It starts once
 //! every folder of the account was synced (and after the computer slept, once they were
 //! again), fetches the newest bodies first, and waits for news of the account when none
-//! is left. Messages in Trash and Junk are left out.
+//! is left. Messages in Trash and Junk come after all the others: least looked for, but
+//! a search asks the server about any folder with bodies missing.
 //!
 //! A small message is fetched whole, as when it is opened; a larger one only its text,
 //! its attachments left on the server until opened (see [`body`]). What is fetched counts
