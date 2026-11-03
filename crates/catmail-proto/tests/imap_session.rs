@@ -600,6 +600,29 @@ async fn examined_names_only_the_mailbox_open_read_only() {
 }
 
 #[tokio::test]
+async fn examined_mailbox_is_the_one_open_read_only() {
+    let fake = FakeImap::start(sample_state()).await;
+    let mut session = login(&fake).await;
+    assert_eq!(session.examined_mailbox(), None);
+
+    let status = session.examine("INBOX").await.unwrap();
+    assert_eq!(
+        session.examined_mailbox(),
+        Some(("INBOX", status.uidvalidity))
+    );
+    // Not one that failed to open: the server has none open then.
+    assert!(session.examine("Missing").await.is_err());
+    assert_eq!(session.examined_mailbox(), None);
+    // Nor an empty one: nothing asked of it would bring news of mail arriving.
+    fake.state().mailboxes.push(FakeMailbox::new("Empty"));
+    session.examine("Empty").await.unwrap();
+    assert_eq!(session.examined_mailbox(), None);
+
+    session.select("INBOX").await.unwrap();
+    assert_eq!(session.examined_mailbox(), None);
+}
+
+#[tokio::test]
 async fn examined_leaves_out_messages_that_arrived_since() {
     let fake = FakeImap::start(sample_state()).await;
     let mut session = login(&fake).await;

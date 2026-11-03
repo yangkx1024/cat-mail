@@ -252,6 +252,96 @@ async fn searches_share_a_connection_of_their_own() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_folder_open_already_is_searched_first_without_opening_it() {
+    let env = env(mailboxes()).await;
+    let pelican = SearchQuery::new("pelican");
+    env.search_both(pelican.clone()).await;
+
+    // Archive was searched last.
+    let start = env.log_len();
+    assert_eq!(env.search_both(pelican.clone()).await, ["Quarterly", "Old"]);
+    assert_eq!(env.examined(start), ["INBOX"]);
+    let mut archive = pelican.clone();
+    archive.folder = Some(env.folder("Archive").await.id);
+    env.search_both(archive.clone()).await;
+    let start = env.log_len();
+    assert_eq!(env.search_both(archive.clone()).await, ["Old"]);
+    assert_eq!(env.examined(start), Vec::<String>::new());
+
+    // Rebuilt while open: the server ends the connection, and the next one finds it.
+    env.fake.state().mailbox_mut("Archive").reset_uidvalidity(9);
+    let (start, connections) = (env.log_len(), env.connections());
+    assert_eq!(env.search_both(archive).await, Vec::<String>::new());
+    assert_eq!(env.examined(start), ["Archive"]);
+    assert_eq!(env.connections(), connections + 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_folder_open_empty_is_opened_again() {
+    let env = env(mailboxes()).await;
+    let mut query = SearchQuery::new("pelican");
+    query.folder = Some(env.folder("Archive").await.id);
+    // Gone from the server, not yet from here.
+    env.fake.state().mailbox_mut("Archive").expunge(1);
+    assert_eq!(env.search_both(query.clone()).await, Vec::<String>::new());
+
+    env.fake
+        .state()
+        .mailbox_mut("Archive")
+        .append(&mail("New", 5, "Another pelican."), &[]);
+    env.client.sync_account(env.account).await.unwrap();
+    let start = env.log_len();
+    assert_eq!(env.search_both(query).await, ["New"]);
+    assert_eq!(env.examined(start), ["Archive"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_folder_open_that_sync_found_rebuilt_is_opened_again() {
+    let env = env(mailboxes()).await;
+    let mut query = SearchQuery::new("pelican");
+    query.folder = Some(env.folder("Archive").await.id);
+    env.search_both(query.clone()).await;
+
+    env.fake.state().mailbox_mut("Archive").reset_uidvalidity(9);
+    env.client.sync_account(env.account).await.unwrap();
+    assert_eq!(env.search_both(query).await, ["Old"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connecting_ahead_saves_the_search_its_login() {
+    let env = env(mailboxes()).await;
+    let logins = || env.fake.state().received("LOGIN");
+    let before = logins();
+    env.client.connect_for_search(None).await.unwrap();
+    assert_eq!(logins(), before + 1);
+    // Connected already.
+    env.client.connect_for_search(None).await.unwrap();
+    assert_eq!(logins(), before + 1);
+
+    let start = env.log_len();
+    assert_eq!(
+        env.search_both(SearchQuery::new("pelican")).await,
+        ["Quarterly", "Old"]
+    );
+    assert_eq!(logins(), before + 1);
+    assert_eq!(env.examined(start), ["INBOX", "Archive"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connecting_ahead_to_a_server_refusing_the_login_keeps_searches_from_trying() {
+    let env = env(mailboxes()).await;
+    env.fake.state().faults.reject_login = true;
+    let logins = || env.fake.state().received("LOGIN");
+    env.client.connect_for_search(None).await.unwrap();
+    let tried = logins();
+    // Each try would count against the account.
+    env.client.connect_for_search(None).await.unwrap();
+    let found = env.client.search_server(SearchQuery::new("pelican")).await;
+    assert_eq!(found.unwrap(), []);
+    assert_eq!(logins(), tried);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_search_given_up_on_stops_and_leaves_its_connection_to_the_next() {
     // Given up on while INBOX's text is searched it goes no further; while INBOX opens,
     // it doesn't search its text either, which may scan the whole folder.

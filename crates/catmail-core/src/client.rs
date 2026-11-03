@@ -1176,6 +1176,20 @@ impl MailClient {
             .await
     }
 
+    /// Logs in to the servers [`search_server`](Self::search_server) would ask about the
+    /// account's messages (every account's with `None`), for a search about to start not
+    /// to wait for the login: as a search box is focused. Returns
+    /// once connected; does nothing for an account with a search connection open, or
+    /// that a search wouldn't ask. A server that can't be reached isn't an error; it is
+    /// only logged. Unused, the connection closes after a while.
+    pub async fn connect_for_search(&self, account: Option<AccountId>) -> Result<()> {
+        let engine = self.engine()?;
+        self.shared
+            .rt
+            .run(search::connect_ahead(engine, account))
+            .await
+    }
+
     /// A new draft, sent as the account's identity `from` (its default with `None`).
     /// Addresses are checked as they will be needed for sending.
     ///

@@ -70,13 +70,13 @@ INFO catmail_core::logging: running on os="NixOS 26.11 (Zokor)" kernel="7.2.11-z
   没下载的邮件慢时，靠它看出慢在哪一步。复用的文件夹 FETCH 落空、重新打开它时另记一行。
 - 问服务器的搜索（`search.rs`，见[问服务器](storage.md#问服务器)）：每次搜索每个账户 info 一行
   `searched the server`：搜了几个文件夹（共几个）、服务器命中几封（`matched`，正文在不在都算）、补到几封
-  （`found`）、用的语法（`TextSearch`：`Keys` 即 `TEXT`、`GmRaw`、`QqMail`，不能按文字搜的为 `Unsupported`）、有没有带 `CHARSET UTF-8`、词数、EXAMINE 和 SEARCH 各花的
-  总时间、是否被放弃、出错时的错误。不记搜索词本身。`matched` 为 0 而本地明明有这段正文，说明服务器不支持这种
+  （`found`）、用的语法（`TextSearch`：`Keys` 即 `TEXT`、`GmRaw`、`QqMail`，不能按文字搜的为 `Unsupported`）、有没有带 `CHARSET UTF-8`、词数、EXAMINE 了几个
+  文件夹（`opened`，连接上已打开着的不再 EXAMINE）、EXAMINE 和 SEARCH 各花的总时间、是否被放弃、出错时的错误。不记搜索词本身。`matched` 为 0 而本地明明有这段正文，说明服务器不支持这种
   搜索（比如中文不按子串）；`matched` 大而 `found` 为 0，是命中的正文都已在本地。服务器拒绝搜索时（如
   `BADCHARSET`）另记一行带服务器原话；服务器不能按文字搜（Coremail，或无视文字、全部命中）时记一行
   `the server can't search text`，之后不再问。每个文件夹的命中数和两段耗时、跳过的文件夹（UIDVALIDITY 变了、打不开）、
-  因登录被拒或超限不问的账户记在 debug：`CATMAIL_LOG=info,catmail_core::search=debug`。GUI 发起搜索失败时
-  warn 一行。
+  因登录被拒或超限不问的账户记在 debug：`CATMAIL_LOG=info,catmail_core::search=debug`；提前连接
+  失败记 info 一行（连上的是通常的 `logged in to IMAP`）。GUI 发起搜索或提前连接失败时 warn 一行。
 - 退出：GUI 每条退出路径记一行 `quitting reason=…`（见[后台运行](background.md#退出)），
   `MailClient::shut_down` 记 `shutting down the engine`，引擎关闭时 core 记 `engine closed`；`catmail watch` 被 Ctrl+C 中断时记 `interrupted; stopping`。日志停在别处，
   就是进程被杀或崩溃了。

@@ -223,7 +223,8 @@ impl Mailbox {
                     InputEvent::PressEnter { .. } => {
                         this.messages.update(cx, |list, cx| list.focus(window, cx));
                     }
-                    InputEvent::Focus | InputEvent::Blur => {}
+                    InputEvent::Focus => this.connect_for_search(cx),
+                    InputEvent::Blur => {}
                 },
             ),
             // A refresh may bring the open message with other labels, or another
@@ -665,6 +666,18 @@ impl Mailbox {
             self.sync_on_open(folder.id, cx);
         }
         cx.notify();
+    }
+
+    /// Logs in to the servers ahead of a search, which asks them a moment after the local
+    /// results show. Failures only go to the log: the search adds nothing then either.
+    fn connect_for_search(&self, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        cx.background_spawn(async move {
+            if let Err(e) = client.connect_for_search(None).await {
+                tracing::warn!(error = %e, "couldn't connect ahead of a search");
+            }
+        })
+        .detach();
     }
 
     /// What it brings shows through the engine's events. A server that can't be reached

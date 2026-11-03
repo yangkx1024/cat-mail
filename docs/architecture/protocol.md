@@ -129,6 +129,12 @@ VANISHED、FETCH）、`stop` 完成或过了 `max`，然后发 DONE、等 tagged
   才复用，否则重新 EXAMINE，UIDNEXT 随之更新；服务器没给 UIDNEXT 就每次都 EXAMINE。新邮件因此多一次
   EXAMINE（约 0.4 s），之后同一批新邮件照常复用。复用的文件夹 FETCH 落空时还会重新 EXAMINE 再取一次
   （见[正文与附件 / 正确性](bodies.md#正确性)）。
+  问服务器的搜索也复用（`Session::examined_mailbox`，不看 UIDNEXT：搜的是整个文件夹，不是某个 UID），
+  但有两种情况照样 EXAMINE：服务器上次说它是空的（空文件夹上 `Session` 不发 SEARCH，不发命令就永远收不到
+  新邮件的 EXISTS）；本地记的 UIDVALIDITY 已经和打开时不同（同步先发现了重建：只有发一条命令，服务器才能
+  按规矩断开，或者让 EXAMINE 报出新的 UIDVALIDITY；否则每次都判为重建、一条命令不发，这个文件夹一直搜不到）。
+  服务器还没报告的新邮件这次搜不到，下一次搜得到（服务器在任何命令的回复里都可能报告 EXISTS）；
+  漏掉的只会是这段时间里别的连接已经同步进本地的，接受。
   同步、草稿上传等仍然每次 EXAMINE：它们要的是最新的 EXISTS、UIDNEXT 和 HIGHESTMODSEQ。
 - 删除账户时关闭连接池（`Pool::close`）：在池子的锁内清空、并记下"已关闭"，之后放回的连接一律
   丢掉。放回也在这把锁内检查，所以不会有连接在账户删除后留在池里。

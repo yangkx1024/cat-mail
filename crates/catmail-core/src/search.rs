@@ -3,7 +3,9 @@
 //!
 //! Every location the local search covers is searched in turn, EXAMINE then UID SEARCH,
 //! on a connection of the account's own: the pooled ones stay free for opening messages.
-//! Accounts are searched at once. What a server finds is mapped back to the rows stored
+//! The one the connection has open already goes first, without EXAMINE. Accounts are
+//! searched at once. A frontend may have the connection made ahead of a search
+//! ([`connect_ahead`]), which then doesn't wait for the login. What a server finds is mapped back to the rows stored
 //! for its folder in the same UIDVALIDITY, and only those without a body are kept: local
 //! search finds the others itself. Messages the server has that sync hasn't brought yet
 //! are left to sync.
@@ -61,6 +63,31 @@ struct Held {
     /// on a search's own first connection, and for one ignoring the text, which is only
     /// ever kept here.
     unsearchable: bool,
+}
+
+impl Held {
+    /// Whether the account's server may be asked now; the log says why not. Forgets a
+    /// refusal that a sync got past since.
+    fn may_ask(&mut self, engine: &Engine, account: AccountId) -> bool {
+        if self.unsearchable {
+            tracing::debug!(%account, "not asking the server: it can't search text");
+            return false;
+        }
+        let synced_since = |at| engine.synced(account).is_some_and(|synced| synced > at);
+        if engine.waits_out(account) || self.refused.is_some_and(|at| !synced_since(at)) {
+            tracing::debug!(%account, "not asking the server: it rejects the login, or the account is over its limit");
+            return false;
+        }
+        self.refused = None;
+        true
+    }
+
+    /// Remembers a rejected login, or the account over its limit, if `e` is that.
+    fn note_refusal(&mut self, e: &Error) {
+        if matches!(e, Error::AuthFailed(_) | Error::OverLimit(_)) {
+            self.refused = Some(Instant::now());
+        }
+    }
 }
 
 impl SearchSlot {
@@ -121,6 +148,52 @@ pub(crate) async fn on_servers(
     Ok(found)
 }
 
+/// Logs in to the servers [`on_servers`] would ask about `account`'s messages (every
+/// account's with `None`) ahead of a search, so that it doesn't wait for the login: the
+/// connection is the searches' own, closed after [`IDLE`] unless one used it. An account
+/// whose connection is open, or in use (a search under way has one, or is making one),
+/// is left alone. Failures are only logged; a rejected login keeps searches from trying
+/// again, as their own would.
+pub(crate) async fn connect_ahead(engine: Arc<Engine>, account: Option<AccountId>) -> Result<()> {
+    let accounts = engine
+        .read(move |db| db.folders().searched_on_server(account, None))
+        .await?;
+    join_all(
+        accounts
+            .into_iter()
+            .map(|(account, _)| connect_account_ahead(&engine, account)),
+    )
+    .await;
+    Ok(())
+}
+
+async fn connect_account_ahead(engine: &Arc<Engine>, account: AccountId) {
+    let slot = engine.search_slot(account);
+    let Ok(mut held) = slot.0.try_lock() else {
+        return;
+    };
+    if !held.may_ask(engine, account) {
+        return;
+    }
+    // Held meanwhile: a search starting now waits for this connection, not one of its own.
+    // One open already is left as it is.
+    let mut cancellation = engine.cancellation(account);
+    let result = tokio::select! {
+        result = pool::on_session(engine, account, &mut held.session, async |_| Ok(())) => result,
+        () = cancellation.cancelled() => return,
+    };
+    if let Err(e) = result {
+        tracing::info!(%account, error = %e, kind = ?e.kind(),
+            "couldn't connect ahead of a search");
+        held.note_refusal(&e);
+        return;
+    }
+    held.uses += 1;
+    let uses = held.uses;
+    drop(held);
+    close_when_idle(engine, account, uses);
+}
+
 /// What one account's server found in `folders`; nothing if it couldn't be asked, and
 /// what it found until then if it failed on the way. Failures are only logged.
 async fn in_account(
@@ -134,19 +207,9 @@ async fn in_account(
     let slot = engine.search_slot(account);
     // An abandoned search finishes its command first.
     let mut held = slot.0.lock().await;
-    if abandoned.is_set() {
+    if abandoned.is_set() || !held.may_ask(engine, account) {
         return Vec::new();
     }
-    if held.unsearchable {
-        tracing::debug!(%account, "not searching the server: it can't search text");
-        return Vec::new();
-    }
-    let synced_since = |at| engine.synced(account).is_some_and(|synced| synced > at);
-    if engine.waits_out(account) || held.refused.is_some_and(|at| !synced_since(at)) {
-        tracing::debug!(%account, "not searching the server: it rejects the login, or the account is over its limit");
-        return Vec::new();
-    }
-    held.refused = None;
     held.uses += 1;
     let uses = held.uses;
     let began = Instant::now();
@@ -167,9 +230,7 @@ async fn in_account(
         if matches!(e, Error::Cancelled) || e.breaks_connection() {
             held.session = None;
         }
-        if matches!(e, Error::AuthFailed(_) | Error::OverLimit(_)) {
-            held.refused = Some(Instant::now());
-        }
+        held.note_refusal(e);
     }
     if progress.unsearchable {
         held.unsearchable = true;
@@ -179,7 +240,8 @@ async fn in_account(
     // (found), and where the time went: opening folders or the server searching them.
     tracing::info!(%account, searched = progress.searched, of = folders.len(),
         matched = progress.matched, found = progress.found.len(), syntax, charset,
-        terms = terms.len(), examine = ?progress.examine, search = ?progress.search,
+        terms = terms.len(), opened = progress.opened, examine = ?progress.examine,
+        search = ?progress.search,
         abandoned = abandoned.is_set(), error = error.as_ref().map(tracing::field::display),
         kind = error.as_ref().map(|e| tracing::field::debug(e.kind())),
         took = ?began.elapsed(), "searched the server");
@@ -195,7 +257,9 @@ struct Progress {
     /// Folders searched, and the messages the server matched in them, with a body or not.
     searched: usize,
     matched: usize,
-    /// Time spent opening the folders searched, and the server searching them.
+    /// Folders of those that had to be opened (the others were open already), the time
+    /// spent opening them, and the server searching all of them.
+    opened: usize,
     examine: Duration,
     search: Duration,
     /// The server turned out unable to search text.
@@ -213,6 +277,11 @@ async fn in_folders(
     abandoned: &Abandoned,
     progress: &mut Progress,
 ) -> Result<()> {
+    // The one the connection has open first, which needs no EXAMINE: the last searched,
+    // so each search of several folders opens one fewer.
+    let open = session.as_ref().and_then(|s| s.examined_mailbox());
+    let mut folders: Vec<&FolderSyncState> = folders.iter().collect();
+    folders.sort_by_key(|f| open.is_none_or(|(name, _)| f.remote_name != name));
     for state in folders {
         if abandoned.is_set() {
             return Ok(());
@@ -224,19 +293,30 @@ async fn in_folders(
         let began = Instant::now();
         let searched = pool::on_session(engine, account, session, async move |s| {
             let began = Instant::now();
-            let status = match s.examine(&remote).await {
-                Ok(status) => status,
-                Err(e) if !e.is_fatal() => return Ok(Searched::Unopened(e.into())),
-                Err(e) => return Err(e.into()),
+            // Its UIDVALIDITY holds while it is open; what else EXAMINE would bring
+            // (EXISTS) the connection keeps up to date. Not if sync found the folder
+            // rebuilt since: only a command lets the server end the connection, as it
+            // should then, or EXAMINE tell of the new generation.
+            let examined = s
+                .examined_mailbox()
+                .filter(|&(name, uidvalidity)| name == remote && synced == Some(uidvalidity))
+                .map(|(_, uidvalidity)| uidvalidity);
+            let (uidvalidity, examine) = match examined {
+                Some(uidvalidity) => (uidvalidity, None),
+                None => match s.examine(&remote).await {
+                    Ok(status) => (status.uidvalidity, Some(began.elapsed())),
+                    Err(e) if !e.is_fatal() => return Ok(Searched::Unopened(e.into())),
+                    Err(e) => return Err(e.into()),
+                },
             };
-            if !status.same_generation(synced) {
+            if synced != Some(uidvalidity) {
                 return Ok(Searched::Rebuilt);
             }
             // Searching the text may scan the whole folder.
             if abandoned.is_set() {
                 return Ok(Searched::Abandoned);
             }
-            let (examine, began) = (began.elapsed(), Instant::now());
+            let began = Instant::now();
             let refused = |e: catmail_proto::imap::Error| -> Result<Searched> {
                 match e.is_fatal() {
                     false => Ok(Searched::Refused(e.into())),
@@ -282,7 +362,10 @@ async fn in_folders(
                     ?search, took = ?began.elapsed(), "searched a folder on the server");
                 progress.searched += 1;
                 progress.matched += matched;
-                progress.examine += examine;
+                if let Some(examine) = examine {
+                    progress.opened += 1;
+                    progress.examine += examine;
+                }
                 progress.search += search;
                 progress.found.extend(ids);
             }
@@ -312,11 +395,11 @@ async fn in_folders(
 
 /// What came of searching a folder.
 enum Searched {
-    /// The UIDs matching, ascending, and how long opening the folder and searching it
-    /// took.
+    /// The UIDs matching, ascending, and how long opening the folder (`None` if it was
+    /// open already) and searching it took.
     Found {
         uids: Vec<u32>,
-        examine: Duration,
+        examine: Option<Duration>,
         search: Duration,
     },
     /// Abandoned once the folder was open, or before making sure of what was found.
