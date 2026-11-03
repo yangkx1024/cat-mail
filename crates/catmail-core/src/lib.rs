@@ -32,6 +32,7 @@ pub mod html {
 mod ops;
 mod pool;
 mod prefetch;
+mod rebuild;
 mod runtime;
 mod secrets;
 mod send;

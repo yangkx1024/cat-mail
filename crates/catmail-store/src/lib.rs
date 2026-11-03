@@ -35,7 +35,7 @@ pub use drafts::{DraftReply, DraftSnapshot, DraftUpload, Drafts, NewDraftAttachm
 pub use error::{Error, Result};
 pub use folders::{FolderSyncState, Folders, Reconciled, RemoteFolder};
 pub use identities::{DeletedIdentity, Identities, Sending};
-pub use messages::{MessageLocation, Messages, NewBody, NewMessage, Upserted};
+pub use messages::{MessageLocation, Messages, NewBody, NewMessage, StaleBody, Upserted};
 pub use ops::{CopyCheckpoint, Moved, PendingOps, ReplayFolder, ReplayKind, ReplayOp, Touched};
 pub use outbox::{NewOutboxEntry, Outbox, OutboxJob};
 pub use prefetch::{Prefetch, Usage};

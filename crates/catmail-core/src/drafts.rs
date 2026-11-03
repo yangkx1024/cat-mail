@@ -221,36 +221,38 @@ pub(crate) async fn attach_file(
     draft: DraftId,
     path: PathBuf,
 ) -> Result<DraftAttachment> {
-    let engine2 = engine.clone();
-    let attachment = blocking(move || {
-        let (used, limits) = engine2
-            .store
-            .read(|db| {
-                // Before copying the file: a draft being sent can't change.
-                if db.drafts().editable(draft)?.is_none() {
-                    return Ok(None);
+    let attachment = blocking({
+        let engine = engine.clone();
+        move || {
+            let (used, limits) = engine
+                .store
+                .read(|db| {
+                    // Before copying the file: a draft being sent can't change.
+                    if db.drafts().editable(draft)?.is_none() {
+                        return Ok(None);
+                    }
+                    let Some((smtp, append)) = db.drafts().size_limits(draft)? else {
+                        return Ok(None);
+                    };
+                    let used = db.drafts().attachments_size(draft)?;
+                    Ok(Some((used, SizeLimits { smtp, append })))
+                })?
+                .ok_or(Error::DraftNotFound(draft))?;
+            let limit = attachments_limit(limits);
+            let new = copy_file(&engine.blobs, &path, used, limit)?;
+            // An attachment refused here, like one whose draft is gone, leaves an unreferenced
+            // blob for GC.
+            engine.store.write(|db| {
+                // Again, for the draft: another file may have been attached meanwhile.
+                if db.drafts().attachments_size(draft)? + new.size > limit {
+                    return Ok(Err(attachments_too_large(limit)));
                 }
-                let Some((smtp, append)) = db.drafts().size_limits(draft)? else {
-                    return Ok(None);
+                let Some(attachment) = db.drafts().add_attachment(draft, &new, now())? else {
+                    return Ok(Ok(None));
                 };
-                let used = db.drafts().attachments_size(draft)?;
-                Ok(Some((used, SizeLimits { smtp, append })))
+                Ok(Ok(db.drafts().account_of(draft)?.map(|a| (a, attachment))))
             })?
-            .ok_or(Error::DraftNotFound(draft))?;
-        let limit = attachments_limit(limits);
-        let new = copy_file(&engine2.blobs, &path, used, limit)?;
-        // An attachment refused here, like one whose draft is gone, leaves an unreferenced
-        // blob for GC.
-        engine2.store.write(|db| {
-            // Again, for the draft: another file may have been attached meanwhile.
-            if db.drafts().attachments_size(draft)? + new.size > limit {
-                return Ok(Err(attachments_too_large(limit)));
-            }
-            let Some(attachment) = db.drafts().add_attachment(draft, &new, now())? else {
-                return Ok(Ok(None));
-            };
-            Ok(Ok(db.drafts().account_of(draft)?.map(|a| (a, attachment))))
-        })?
+        }
     })
     .await?;
     let (account, attachment) = attachment.ok_or(Error::DraftNotFound(draft))?;
@@ -438,28 +440,30 @@ async fn insert(
     files: Vec<PathBuf>,
 ) -> Result<Draft> {
     let content = without_nul(content);
-    let engine2 = engine.clone();
-    let draft = blocking(move || {
-        let mut from = from;
-        if !files.is_empty() {
-            let used = attachments.iter().map(|a| a.size).sum();
-            let (identity, copied) = copy_files(&engine2, account, from, used, &files)?;
-            from = Some(identity);
-            attachments.extend(copied);
+    let draft = blocking({
+        let engine = engine.clone();
+        move || {
+            let mut from = from;
+            if !files.is_empty() {
+                let used = attachments.iter().map(|a| a.size).sum();
+                let (identity, copied) = copy_files(&engine, account, from, used, &files)?;
+                from = Some(identity);
+                attachments.extend(copied);
+            }
+            Ok(engine.store.write(|db| {
+                if db.accounts().get(account)?.is_none() {
+                    return Ok(None);
+                }
+                let now = now();
+                let id = db
+                    .drafts()
+                    .insert(account, from, &content, reply.as_ref(), now)?;
+                for attachment in &attachments {
+                    db.drafts().add_attachment(id, attachment, now)?;
+                }
+                db.drafts().get(id)
+            })?)
         }
-        Ok(engine2.store.write(|db| {
-            if db.accounts().get(account)?.is_none() {
-                return Ok(None);
-            }
-            let now = now();
-            let id = db
-                .drafts()
-                .insert(account, from, &content, reply.as_ref(), now)?;
-            for attachment in &attachments {
-                db.drafts().add_attachment(id, attachment, now)?;
-            }
-            db.drafts().get(id)
-        })?)
     })
     .await?
     .ok_or_else(|| Error::AccountNotFound(account.to_string()))?;

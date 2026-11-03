@@ -290,11 +290,17 @@ END;
 -- The downloaded body of a message; exists iff messages.body_state = 'full'. Written in
 -- one transaction with the message's attachments rows, its snippet and its FTS entry.
 CREATE TABLE message_bodies (
-    message_id    INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
-    text_plain    TEXT,
-    text_html     TEXT, -- already sanitized
-    raw_blob_hash TEXT  -- the whole raw message; only kept for messages fetched whole
+    message_id      INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    text_plain      TEXT,
+    text_html       TEXT, -- already sanitized
+    raw_blob_hash   TEXT, -- the whole raw message; only kept for messages fetched whole
+    -- The catmail_proto::mime::CONTENT_VERSION that parsed and sanitized the body: one
+    -- below the current is rebuilt (catmail_core::rebuild).
+    content_version INTEGER NOT NULL DEFAULT 0
 ) STRICT;
+-- The bodies to rebuild: without it, finding none reads every body (its last column is
+-- behind the text, often on overflow pages).
+CREATE INDEX message_bodies_version ON message_bodies (content_version);
 
 -- Background prefetch of bodies (catmail_core::prefetch). A message whose body failed to
 -- fetch, so that the prefetch goes on with the others and tries this one again only

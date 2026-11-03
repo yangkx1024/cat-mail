@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::LazyLock;
 
 use catmail_types::{
@@ -195,6 +195,20 @@ pub struct NewBody {
     pub raw: Option<BlobHash>,
     pub snippet: Option<String>,
     pub attachments: Vec<NewAttachment>,
+    /// The `catmail_proto::mime::CONTENT_VERSION` that made it.
+    pub version: u32,
+}
+
+/// A stored body made by an older content version, with what it can be made again from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleBody {
+    pub id: MessageId,
+    pub account: AccountId,
+    pub folder: FolderId,
+    pub version: u32,
+    /// The whole raw message, if it was kept.
+    pub raw: Option<BlobHash>,
+    pub html: Option<String>,
 }
 
 /// Where a message lives on the server, and what of it is stored locally.
@@ -216,6 +230,8 @@ pub struct MessageLocation {
     pub size: Option<u32>,
     /// Whether the body is stored.
     pub downloaded: bool,
+    /// The content version of the stored body.
+    pub body_version: Option<u32>,
     pub raw: Option<BlobHash>,
 }
 
@@ -237,7 +253,10 @@ impl<'c> Messages<'c> {
     /// On Gmail, the label folders whose lists the changes made through this so far
     /// changed, besides the locations changed (a label shows messages of All Mail, Starred
     /// the flagged ones), and forgets them. Covers [`upsert`](Self::upsert),
-    /// [`update_flags`](Self::update_flags) and [`delete_uids`](Self::delete_uids).
+    /// [`update_flags`](Self::update_flags), [`delete_uids`](Self::delete_uids) and the
+    /// bodies stored ([`store_body`](Self::store_body), [`rebuild_body`](Self::rebuild_body),
+    /// [`refresh_html`](Self::refresh_html)): snippets and attachment markers show there
+    /// too.
     pub fn touched_labels(&self) -> Vec<FolderId> {
         self.touched.take().into_iter().collect()
     }
@@ -762,7 +781,7 @@ impl<'c> Messages<'c> {
                     "SELECT m.account_id, m.folder_id, f.id, f.remote_name,
                             iif(o.id IS NULL, f.uidvalidity, o.uidvalidity),
                             coalesce(m.uid, o.uid), m.size, m.body_state = 'full',
-                            b.raw_blob_hash
+                            b.content_version, b.raw_blob_hash
                      FROM messages m
                      {MOVING}
                      JOIN folders f ON f.id = coalesce(o.folder_id, m.folder_id)
@@ -781,6 +800,7 @@ impl<'c> Messages<'c> {
                         uid: r.get(5)?,
                         size: r.get(6)?,
                         downloaded: r.get(7)?,
+                        body_version: r.get(8)?,
                         raw: parse_opt_text(r, "raw_blob_hash")?,
                     })
                 },
@@ -845,32 +865,141 @@ impl<'c> Messages<'c> {
     /// and indexes the body text. Returns false, changing nothing, if the message is
     /// gone or its body is already stored.
     pub fn store_body(&self, id: MessageId, body: &NewBody) -> Result<bool> {
-        let has_attachments = body.attachments.iter().any(|a| !a.inline);
         let updated = self.conn.execute(
-            "UPDATE messages SET body_state = 'full', snippet = ?2, has_attachments = ?3
-             WHERE id = ?1 AND body_state <> 'full'",
-            params![id.0, body.snippet, has_attachments],
+            "UPDATE messages SET body_state = 'full' WHERE id = ?1 AND body_state <> 'full'",
+            [id.0],
         )?;
         if updated == 0 {
             return Ok(false);
         }
         self.conn.execute(
-            "INSERT INTO message_bodies (message_id, text_plain, text_html, raw_blob_hash)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO message_bodies (message_id, text_plain, text_html, raw_blob_hash,
+                                         content_version)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 id.0,
                 body.text,
                 body.html,
-                body.raw.as_ref().map(BlobHash::as_str)
+                body.raw.as_ref().map(BlobHash::as_str),
+                body.version,
             ],
         )?;
-        Attachments::new(self.conn).insert(id, &body.attachments)?;
+        self.store_parts(id, body, true)?;
         self.conn.execute(
             "DELETE FROM prefetch_failures WHERE message_id = ?1",
             [id.0],
         )?;
+        self.note_shown(id.0, false)?;
+        Ok(true)
+    }
 
-        self.reindex(id.0)?;
+    /// What goes with a body stored: snippet, attachment flag, attachments and, if
+    /// `reindex`, the index entry.
+    fn store_parts(&self, id: MessageId, body: &NewBody, reindex: bool) -> Result<()> {
+        let has_attachments = body.attachments.iter().any(|a| !a.inline);
+        self.conn.execute(
+            "UPDATE messages SET snippet = ?2, has_attachments = ?3 WHERE id = ?1",
+            params![id.0, body.snippet, has_attachments],
+        )?;
+        Attachments::new(self.conn).store(id, &body.attachments)?;
+        if reindex {
+            self.reindex(id.0)?;
+        }
+        Ok(())
+    }
+
+    /// The bodies made by a content version below `current`, newest message first.
+    pub fn stale_bodies(&self, current: u32) -> Result<Vec<MessageId>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT message_id FROM message_bodies WHERE content_version < ?1
+             ORDER BY message_id DESC",
+        )?;
+        let rows = stmt.query_map([current], |r| Ok(MessageId(r.get(0)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The message's body if a content version below `current` made it.
+    pub fn stale_body(&self, id: MessageId, current: u32) -> Result<Option<StaleBody>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT m.account_id, m.folder_id, b.content_version, b.raw_blob_hash,
+                        b.text_html
+                 FROM message_bodies b JOIN messages m ON m.id = b.message_id
+                 WHERE b.message_id = ?1 AND b.content_version < ?2",
+                params![id.0, current],
+                |r| {
+                    Ok(StaleBody {
+                        id,
+                        account: AccountId(r.get(0)?),
+                        folder: FolderId(r.get(1)?),
+                        version: r.get(2)?,
+                        raw: parse_opt_text(r, "raw_blob_hash")?,
+                        html: r.get(4)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Replaces a body made by content version `from` with `body`, made again from the
+    /// same raw message, with its attachments, snippet and index entry. Attachments keep
+    /// their ids by section (a reader may be showing them), and a downloaded part keeps
+    /// its content where `body` has none. Returns false, changing nothing, if the
+    /// message is gone or its body was rebuilt meanwhile.
+    pub fn rebuild_body(&self, id: MessageId, from: u32, body: &NewBody) -> Result<bool> {
+        let old_text: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT text_plain FROM message_bodies
+                 WHERE message_id = ?1 AND content_version = ?2",
+                params![id.0, from],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(old_text) = old_text else {
+            return Ok(false);
+        };
+        self.conn.execute(
+            "UPDATE message_bodies SET text_plain = ?2, text_html = ?3, content_version = ?4
+             WHERE message_id = ?1",
+            params![id.0, body.text, body.html, body.version],
+        )?;
+        // Mostly the sanitizing changed, which leaves the text as it was.
+        self.store_parts(id, body, old_text != body.text)?;
+        self.note_shown(id.0, false)?;
+        Ok(true)
+    }
+
+    /// Replaces the HTML of a body made by content version `from` and kept without its
+    /// raw message, cleaned again by content version `to`: the attachments that `cid:`
+    /// URLs in it refer to (by Content-ID, in `referenced`) are the inline ones. The
+    /// text, and so the snippet and index entry, stay. Returns false, changing nothing,
+    /// if the message is gone or its body was rebuilt meanwhile.
+    pub fn refresh_html(
+        &self,
+        id: MessageId,
+        from: u32,
+        to: u32,
+        html: Option<&str>,
+        referenced: &HashSet<String>,
+    ) -> Result<bool> {
+        let updated = self.conn.execute(
+            "UPDATE message_bodies SET text_html = ?3, content_version = ?4
+             WHERE message_id = ?1 AND content_version = ?2",
+            params![id.0, from, html, to],
+        )?;
+        if updated == 0 {
+            return Ok(false);
+        }
+        Attachments::new(self.conn).mark_inline(id, referenced)?;
+        self.conn.execute(
+            "UPDATE messages SET has_attachments =
+                 EXISTS (SELECT 1 FROM attachments WHERE message_id = ?1 AND NOT is_inline)
+             WHERE id = ?1",
+            [id.0],
+        )?;
+        self.note_shown(id.0, false)?;
         Ok(true)
     }
 
@@ -1381,7 +1510,160 @@ mod tests {
                     ..Default::default()
                 },
             ],
+            version: 1,
         }
+    }
+
+    #[test]
+    fn rebuilds_bodies_in_place() {
+        let (store, account, folder) = setup();
+        store
+            .write(|db| {
+                db.messages()
+                    .upsert(account, folder.id, &[message(1, None, Flags::empty())])
+            })
+            .unwrap();
+        let id = store
+            .read(|db| db.messages().list(folder.id, 1, None))
+            .unwrap()[0]
+            .id;
+        store
+            .write(|db| db.messages().store_body(id, &body()))
+            .unwrap();
+        let image = store.read(|db| Attachments::new(db.conn).list(id)).unwrap()[1].id;
+        store
+            .write(|db| db.attachments().set_blob(image, &hash('c'), 4))
+            .unwrap();
+
+        assert!(
+            store
+                .read(|db| db.messages().stale_bodies(1))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store.read(|db| db.messages().stale_bodies(2)).unwrap(),
+            [id]
+        );
+        let stale = store
+            .read(|db| db.messages().stale_body(id, 2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (stale.account, stale.folder, stale.version, stale.raw),
+            (account, folder.id, 1, Some(hash('a')))
+        );
+        assert_eq!(stale.html.as_deref(), Some("<p>请查收</p>"));
+
+        let rebuilt = NewBody {
+            text: Some("The pelican report".into()),
+            html: Some("<p>pelican</p>".into()),
+            raw: Some(hash('a')),
+            snippet: Some("The pelican report".into()),
+            attachments: vec![
+                // Not referred to any more, and fetched since.
+                NewAttachment {
+                    section: "3".into(),
+                    mime_type: "image/png".into(),
+                    content_id: Some("logo@x".into()),
+                    size: Some(99),
+                    ..Default::default()
+                },
+                NewAttachment {
+                    section: "4".into(),
+                    mime_type: "image/gif".into(),
+                    content_id: Some("new@x".into()),
+                    inline: true,
+                    blob: Some(hash('d')),
+                    ..Default::default()
+                },
+            ],
+            version: 2,
+        };
+        assert!(
+            !store
+                .write(|db| db.messages().rebuild_body(id, 0, &rebuilt))
+                .unwrap(),
+            "made by another version"
+        );
+        assert!(
+            store
+                .write(|db| db.messages().rebuild_body(id, 1, &rebuilt))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .write(|db| db.messages().rebuild_body(id, 1, &rebuilt))
+                .unwrap(),
+            "rebuilt once"
+        );
+        let message = store.read(|db| db.messages().get(id)).unwrap().unwrap();
+        let stored = message.body.unwrap();
+        assert_eq!(stored.html.as_deref(), Some("<p>pelican</p>"));
+        assert_eq!(
+            message.summary.snippet.as_deref(),
+            Some("The pelican report")
+        );
+        let parts: Vec<_> = stored
+            .attachments
+            .iter()
+            .map(|a| (a.mime_type.as_str(), a.size, a.inline, a.downloaded))
+            .collect();
+        assert_eq!(
+            parts,
+            [
+                ("image/png", Some(4), false, true),
+                ("image/gif", None, true, true)
+            ],
+            "the PDF went, the image kept what was fetched of it"
+        );
+        assert_eq!(stored.attachments[0].id, image, "same id");
+        assert!(
+            message.summary.has_attachments,
+            "the image isn't inline now"
+        );
+        assert_eq!(search(&store, "pelican"), [Some("subject 1".into())]);
+        assert!(
+            search(&store, "季度报告").is_empty(),
+            "the old text is gone"
+        );
+        assert_eq!(
+            store
+                .read(|db| db.messages().location(id))
+                .unwrap()
+                .unwrap()
+                .body_version,
+            Some(2)
+        );
+
+        let referenced = HashSet::from(["logo@x".to_owned()]);
+        assert!(
+            store
+                .write(|db| {
+                    db.messages().refresh_html(
+                        id,
+                        2,
+                        3,
+                        Some("<img src=\"cid:logo@x\">"),
+                        &referenced,
+                    )
+                })
+                .unwrap()
+        );
+        let message = store.read(|db| db.messages().get(id)).unwrap().unwrap();
+        let stored = message.body.unwrap();
+        assert_eq!(stored.html.as_deref(), Some("<img src=\"cid:logo@x\">"));
+        assert_eq!(stored.text.as_deref(), Some("The pelican report"), "kept");
+        let inline: Vec<_> = stored.attachments.iter().map(|a| a.inline).collect();
+        assert_eq!(inline, [true, false]);
+        assert!(message.summary.has_attachments);
+        assert_eq!(search(&store, "pelican"), [Some("subject 1".into())]);
+        assert!(
+            store
+                .read(|db| db.messages().stale_bodies(3))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     fn search(store: &Store, text: &str) -> Vec<Option<String>> {
@@ -1938,6 +2220,33 @@ mod tests {
         let counted = counts(&store, account);
         assert_eq!(counted["Work"], (2, 0));
         assert_eq!(counted["[Gmail]/Starred"], (2, 0));
+
+        // Its body stored or rebuilt: its snippet and attachment marker show there too.
+        let three = store
+            .read(|db| {
+                Ok(MessageId(db.conn.query_row(
+                    "SELECT id FROM messages WHERE gm_msgid = 103",
+                    [],
+                    |r| r.get(0),
+                )?))
+            })
+            .unwrap();
+        let mut showing = vec![f["Work"], hidden.id, f["[Gmail]/Starred"]];
+        showing.sort();
+        let touched = store
+            .write(|db| {
+                let messages = db.messages();
+                messages.store_body(three, &body())?;
+                let stored = messages.touched_labels();
+                let rebuilt = NewBody {
+                    version: 2,
+                    ..body()
+                };
+                messages.rebuild_body(three, 1, &rebuilt)?;
+                Ok([stored, messages.touched_labels()])
+            })
+            .unwrap();
+        assert_eq!(touched, [showing.clone(), showing]);
 
         // Moved to Trash and back, as sync will move a row by its X-GM-MSGID.
         let to = |folder: FolderId| {
