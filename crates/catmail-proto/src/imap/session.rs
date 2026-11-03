@@ -40,6 +40,39 @@ pub struct Session {
     /// What IDLE reported about flags in `selected`.
     changed_flags: ChangedFlags,
     opened: Instant,
+    /// How the greeting says to search text, unless the server turns out to be Gmail.
+    greeted: TextSearch,
+    /// The server was seen to find nothing for text no message has: it reads the text.
+    heeds_text: bool,
+}
+
+/// How [`Session::uid_search_text`] asks a server for text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextSearch {
+    /// A key per term: `TEXT`, `FROM`, `TO` or `CC`, `SUBJECT`; non-ASCII text in literals.
+    Keys,
+    /// Gmail's own search (X-GM-RAW), as its web interface does.
+    GmRaw,
+    /// QQ Mail ignores `TEXT` (it matches every message) and takes a literal's `{n}` for
+    /// the text: `BODY`, `SUBJECT`, `FROM`, `TO`, `CC` ORed instead, non-ASCII text quoted.
+    QqMail,
+    /// Coremail matches no text at all but a Message-ID (an empty result, no error).
+    Unsupported,
+}
+
+impl TextSearch {
+    /// QQ Mail greets with `QQMail XMIMAP4Server ready` (its business mail with `QQMail
+    /// IMAP4Server`), Coremail (NetEase's 163, 126, yeah.net and others) with `Coremail
+    /// System IMap Server Ready`.
+    fn of_greeting(greeting: &str) -> Self {
+        if greeting.starts_with("QQMail ") {
+            Self::QqMail
+        } else if greeting.starts_with("Coremail ") {
+            Self::Unsupported
+        } else {
+            Self::Keys
+        }
+    }
 }
 
 /// The mailbox a session has open.
@@ -73,6 +106,9 @@ impl Session {
         let (stream, server_name) = net::connect(server, tls, timeout).await?;
         let mut conn = Connection::new(stream, timeout);
         let greeting = conn.greeting().await?;
+        // Before STARTTLS it may have been tampered with: that changes only how text is
+        // searched.
+        let greeted = TextSearch::of_greeting(&greeting.text);
         let mut caps = match greeting.code {
             Some(Code::Known(ResponseCode::Capabilities(caps))) => capabilities(&caps),
             _ => Capabilities::default(),
@@ -113,6 +149,8 @@ impl Session {
             selected: None,
             changed_flags: ChangedFlags::default(),
             opened,
+            greeted,
+            heeds_text: false,
         };
         session.set_capabilities(caps);
         Ok(session)
@@ -595,18 +633,57 @@ impl Session {
         self.uid_search(search).await
     }
 
-    /// UIDs of messages in the selected mailbox that match every one of `terms`,
-    /// ascending, as the server matches them: a substring of the whole message (TEXT) or
-    /// of the field, on most servers; on Gmail, by its own search (X-GM-RAW), as its web
-    /// interface does; without terms, nothing matches. Non-ASCII text goes with
-    /// `CHARSET UTF-8`, which not every server takes: one that doesn't refuses the
-    /// command (`BADCHARSET`, or a plain NO).
-    pub async fn uid_search_text(&mut self, terms: &[SearchTerm]) -> Result<Vec<u32>> {
-        if terms.is_empty() {
-            return Ok(Vec::new());
+    /// How [`uid_search_text`](Self::uid_search_text) asks this server.
+    pub fn text_search(&self) -> TextSearch {
+        match self.is_gmail() {
+            true => TextSearch::GmRaw,
+            false => self.greeted,
         }
-        let search = search_text_command(terms, self.is_gmail())?;
-        self.uid_search(search).await
+    }
+
+    /// UIDs of messages in the selected mailbox that match every one of `terms`,
+    /// ascending, as the server matches them (see [`TextSearch`]): a substring of the
+    /// whole message or of the field, on most servers; without terms, nothing matches.
+    /// Non-ASCII text goes with `CHARSET UTF-8`, which not every server takes: one that
+    /// doesn't refuses the command (`BADCHARSET`, or a plain NO). `None` if the server is
+    /// known not to search text. Every message matching may also mean it ignored the
+    /// text: what it found is its answer once [`heeds_text`](Self::heeds_text) says so.
+    pub async fn uid_search_text(&mut self, terms: &[SearchTerm]) -> Result<Option<Vec<u32>>> {
+        let syntax = self.text_search();
+        if syntax == TextSearch::Unsupported {
+            return Ok(None);
+        }
+        if terms.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        let charset = terms.iter().any(|t| !t.text.is_ascii());
+        let search = search_text_command(terms, syntax, charset)?;
+        self.uid_search(search).await.map(Some)
+    }
+
+    /// Whether `uids`, what [`uid_search_text`](Self::uid_search_text) found for
+    /// `terms`, are the server's answer to them. Every message matching may be true, or a
+    /// server ignoring the text, as QQ Mail ignores TEXT: then it is asked the same way
+    /// for text no message has, which one heeding the text finds nowhere. (Not with the
+    /// terms negated: QQ Mail ignores NOT too.) Asked once per connection; otherwise no
+    /// command is sent.
+    pub async fn heeds_text(&mut self, terms: &[SearchTerm], uids: &[u32]) -> Result<bool> {
+        let everything = !uids.is_empty() && uids.len() >= self.selected_exists()? as usize;
+        if !everything || self.heeds_text {
+            return Ok(true);
+        }
+        let nowhere = uuid::Uuid::new_v4().simple().to_string();
+        let control: Vec<SearchTerm> = terms
+            .iter()
+            .map(|t| SearchTerm {
+                field: t.field,
+                text: nowhere.clone(),
+            })
+            .collect();
+        let charset = terms.iter().any(|t| !t.text.is_ascii());
+        let control = search_text_command(&control, self.text_search(), charset)?;
+        self.heeds_text = self.uid_search(control).await?.is_empty();
+        Ok(self.heeds_text)
     }
 
     /// Every UID in the selected mailbox, ascending.
@@ -1391,15 +1468,16 @@ fn sequence_set(ranges: &[RangeInclusive<u32>]) -> Option<String> {
     (!set.is_empty()).then(|| set.join(","))
 }
 
-/// `UID SEARCH` for [`Session::uid_search_text`]: one key per term, which IMAP ANDs; on
-/// Gmail, one X-GM-RAW query, in which the terms are ANDed too. A term's text never holds
-/// a `"` (it opens and closes phrases), so quoting it is safe in Gmail's syntax.
-fn search_text_command(terms: &[SearchTerm], gmail: bool) -> Result<Command> {
+/// `UID SEARCH` for [`Session::uid_search_text`], with `CHARSET UTF-8` if `charset`:
+/// one key per term, which IMAP ANDs; on Gmail, one X-GM-RAW query, in which the terms
+/// are ANDed too. A term's text never holds a `"` (it opens and closes phrases), so
+/// quoting it is safe in Gmail's syntax.
+fn search_text_command(terms: &[SearchTerm], syntax: TextSearch, charset: bool) -> Result<Command> {
     let mut search = Command::new("UID SEARCH");
-    if terms.iter().any(|t| !t.text.is_ascii()) {
+    if charset {
         search = search.raw("CHARSET UTF-8");
     }
-    if gmail {
+    if syntax == TextSearch::GmRaw {
         let query: Vec<String> = terms
             .iter()
             .map(|t| match t.field {
@@ -1411,13 +1489,25 @@ fn search_text_command(terms: &[SearchTerm], gmail: bool) -> Result<Command> {
             .collect();
         return search.raw("X-GM-RAW").string(query.join(" ").as_bytes());
     }
+    let qq = syntax == TextSearch::QqMail;
+    let key = |search: Command, name: &str, text: &[u8]| match qq {
+        true => search.raw(name).quoted_8bit(text),
+        false => search.raw(name).string(text),
+    };
     for term in terms {
-        let text = term.text.as_bytes();
+        let t = term.text.as_bytes();
         search = match term.field {
-            SearchField::Anywhere => search.raw("TEXT").string(text)?,
-            SearchField::From => search.raw("FROM").string(text)?,
-            SearchField::To => search.raw("OR TO").string(text)?.raw("CC").string(text)?,
-            SearchField::Subject => search.raw("SUBJECT").string(text)?,
+            // The fields local search covers.
+            SearchField::Anywhere if qq => {
+                let search = key(search.raw("OR"), "BODY", t)?;
+                let search = key(search.raw("OR"), "SUBJECT", t)?;
+                let search = key(search.raw("OR"), "FROM", t)?;
+                key(key(search.raw("OR"), "TO", t)?, "CC", t)?
+            }
+            SearchField::Anywhere => key(search, "TEXT", t)?,
+            SearchField::From => key(search, "FROM", t)?,
+            SearchField::To => key(key(search.raw("OR"), "TO", t)?, "CC", t)?,
+            SearchField::Subject => key(search, "SUBJECT", t)?,
         };
     }
     Ok(search)
@@ -1427,38 +1517,61 @@ fn search_text_command(terms: &[SearchTerm], gmail: bool) -> Result<Command> {
 mod tests {
     use super::*;
 
-    fn search_wire(input: &str, gmail: bool) -> String {
-        let command = search_text_command(&SearchTerm::parse(input), gmail).unwrap();
+    fn search_wire(input: &str, syntax: TextSearch) -> String {
+        let charset = !input.is_ascii();
+        let command = search_text_command(&SearchTerm::parse(input), syntax, charset).unwrap();
         let chunks = command.encode("C1", Literals::NonSynchronizing);
         String::from_utf8_lossy(&chunks.concat().concat()).into_owned()
     }
 
     #[test]
     fn searches_text_with_a_key_per_term() {
+        let query = r#"report from:alice to:bob subject:"q 3""#;
         assert_eq!(
-            search_wire(r#"report from:alice to:bob subject:"q 3""#, false),
+            search_wire(query, TextSearch::Keys),
             "C1 UID SEARCH TEXT \"report\" FROM \"alice\" OR TO \"bob\" CC \"bob\" \
              SUBJECT \"q 3\"\r\n"
         );
         // Non-ASCII text needs a charset, and a literal to carry it.
         assert_eq!(
-            search_wire("季度", false),
+            search_wire("季度", TextSearch::Keys),
             "C1 UID SEARCH CHARSET UTF-8 TEXT {6+}\r\n季度\r\n"
+        );
+    }
+
+    #[test]
+    fn searches_qq_mail_without_text_or_literals() {
+        assert_eq!(
+            search_wire("季度 from:alice", TextSearch::QqMail),
+            "C1 UID SEARCH CHARSET UTF-8 OR BODY \"季度\" OR SUBJECT \"季度\" OR FROM \"季度\" \
+             OR TO \"季度\" CC \"季度\" FROM \"alice\"\r\n"
         );
     }
 
     #[test]
     fn searches_gmail_in_its_own_syntax() {
         assert_eq!(
-            search_wire(r#"report from:alice to:bob subject:"q 3""#, true),
+            search_wire(r#"report from:alice to:bob subject:"q 3""#, TextSearch::GmRaw),
             r#"C1 UID SEARCH X-GM-RAW "\"report\" from:\"alice\" {to:\"bob\" cc:\"bob\"} subject:\"q 3\"""#
                 .to_owned()
                 + "\r\n"
         );
         assert_eq!(
-            search_wire("季度", true),
+            search_wire("季度", TextSearch::GmRaw),
             "C1 UID SEARCH CHARSET UTF-8 X-GM-RAW {8+}\r\n\"季度\"\r\n"
         );
+    }
+
+    #[test]
+    fn knows_servers_by_their_greeting() {
+        let of = TextSearch::of_greeting;
+        assert_eq!(of("QQMail XMIMAP4Server ready"), TextSearch::QqMail);
+        assert_eq!(of("QQMail IMAP4Server ready"), TextSearch::QqMail);
+        assert_eq!(
+            of("Coremail System IMap Server Ready(163com[10774b26])"),
+            TextSearch::Unsupported
+        );
+        assert_eq!(of("Dovecot ready."), TextSearch::Keys);
     }
 
     #[test]

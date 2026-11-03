@@ -92,21 +92,38 @@ impl Command {
     }
 
     /// Appends a string: quoted if it can be, else a literal.
-    pub fn string(mut self, value: &[u8]) -> Result<Self> {
+    pub fn string(self, value: &[u8]) -> Result<Self> {
         if value.iter().all(|&b| is_text_char(b)) {
-            self.separate();
-            let out = self.text();
-            out.push(b'"');
-            for &b in value {
-                if b == b'"' || b == b'\\' {
-                    out.push(b'\\');
-                }
-                out.push(b);
-            }
-            out.push(b'"');
-            return Ok(self);
+            return Ok(self.quoted(value));
         }
         self.literal(value)
+    }
+
+    /// Appends a quoted string that may hold 8-bit bytes, which RFC 3501 only allows in a
+    /// literal: for a server that can't take literals where they are needed (QQ Mail's
+    /// SEARCH). A CR, LF or NUL can't be sent this way.
+    pub fn quoted_8bit(self, value: &[u8]) -> Result<Self> {
+        if value.iter().any(|&b| matches!(b, 0 | b'\r' | b'\n')) {
+            return Err(Error::InvalidInput(format!(
+                "{} can't quote a CR, LF or NUL",
+                self.name
+            )));
+        }
+        Ok(self.quoted(value))
+    }
+
+    fn quoted(mut self, value: &[u8]) -> Self {
+        self.separate();
+        let out = self.text();
+        out.push(b'"');
+        for &b in value {
+            if b == b'"' || b == b'\\' {
+                out.push(b'\\');
+            }
+            out.push(b);
+        }
+        out.push(b'"');
+        self
     }
 
     /// Appends a literal. A NUL can't be sent in one (that takes BINARY's `~{n}`).
@@ -178,6 +195,22 @@ mod tests {
             .iter()
             .map(|s| String::from_utf8_lossy(&s.concat()).into_owned())
             .collect()
+    }
+
+    #[test]
+    fn eight_bit_text_can_be_quoted_but_not_a_line_break() {
+        let command = Command::new("UID SEARCH")
+            .raw("BODY")
+            .quoted_8bit("季\"度".as_bytes())
+            .unwrap();
+        assert_eq!(
+            wire(command, Literals::Synchronizing),
+            ["C1 UID SEARCH BODY \"季\\\"度\"\r\n"]
+        );
+        for bad in [&b"a\rb"[..], b"a\nb", b"a\0b"] {
+            let command = Command::new("UID SEARCH").raw("BODY").quoted_8bit(bad);
+            assert!(matches!(command, Err(Error::InvalidInput(_))));
+        }
     }
 
     #[test]

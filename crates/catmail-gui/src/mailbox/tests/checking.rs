@@ -229,9 +229,12 @@ fn search_results_gain_what_the_server_finds_in_bodies_not_downloaded(cx: &mut T
         cx.run_until_parked();
         cx.read(|cx| find(&mailbox, "Kept for later", cx).is_some())
     });
+    // Only the text it settled on. (Archive, all of it matching, is also searched for
+    // text no message has: see `Session::uid_search_text`.)
     let searches = mail.text_searches();
     assert!(
-        !searches.is_empty() && searches.iter().all(|s| s.contains("pelican")),
+        searches.iter().any(|s| s.contains("\"pelican\""))
+            && !searches.iter().any(|s| s.contains("\"peli\"")),
         "{searches:?}"
     );
 }
