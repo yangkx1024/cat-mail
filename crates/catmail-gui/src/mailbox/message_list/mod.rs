@@ -437,7 +437,7 @@ pub fn show(
 
 /// Asks the servers about `text` once the local results showed for
 /// [`SERVER_SEARCH_DELAY`], and reads the results again with what they found, if
-/// anything. Failures leave the local results alone.
+/// anything. Failures leave the local results alone; they are only logged.
 fn search_server(
     delegate: &MessageList,
     text: String,
@@ -447,8 +447,13 @@ fn search_server(
     let (client, generation) = (delegate.client.clone(), delegate.generation);
     cx.spawn_in(window, async move |list, cx| {
         cx.background_executor().timer(SERVER_SEARCH_DELAY).await;
-        let Ok(found) = client.search_server(SearchQuery::new(text)).await else {
-            return;
+        // The engine logs what each server said; this is what kept it from asking.
+        let found = match client.search_server(SearchQuery::new(text)).await {
+            Ok(found) => found,
+            Err(e) => {
+                tracing::warn!(error = %e, "couldn't search the servers");
+                return;
+            }
         };
         if found.is_empty() {
             return;

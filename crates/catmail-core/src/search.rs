@@ -138,33 +138,54 @@ async fn in_account(
     held.uses += 1;
     let uses = held.uses;
     let began = Instant::now();
-    let mut found = Vec::new();
+    let mut progress = Progress::default();
     let result = tokio::select! {
-        result = in_folders(engine, account, &mut held.session, &folders, terms, abandoned, &mut found) => result,
+        result = in_folders(engine, account, &mut held.session, &folders, terms, abandoned, &mut progress) => result,
         () = cancellation.cancelled() => Err(Error::Cancelled),
     };
-    match result {
-        Ok(()) => tracing::info!(%account, folders = folders.len(), found = found.len(),
-            abandoned = abandoned.is_set(), took = ?began.elapsed(), "searched the server"),
-        Err(e) => {
-            // Left in the middle of a command, or broken.
-            if matches!(e, Error::Cancelled) || e.breaks_connection() {
-                held.session = None;
-            }
-            if matches!(e, Error::AuthFailed(_) | Error::OverLimit(_)) {
-                held.refused = Some(Instant::now());
-            }
-            tracing::info!(%account, error = %e, kind = ?e.kind(), found = found.len(),
-                took = ?began.elapsed(), "search on the server failed");
+    // Which syntax the server got, known once connected; never the text searched.
+    let syntax = held.session.as_ref().map(|s| match s.is_gmail() {
+        true => "X-GM-RAW",
+        false => "TEXT",
+    });
+    let charset = terms.iter().any(|t| !t.text.is_ascii());
+    let error = result.err();
+    if let Some(e) = &error {
+        // Left in the middle of a command, or broken.
+        if matches!(e, Error::Cancelled) || e.breaks_connection() {
+            held.session = None;
+        }
+        if matches!(e, Error::AuthFailed(_) | Error::OverLimit(_)) {
+            held.refused = Some(Instant::now());
         }
     }
+    // What tells "the server found nothing" (matched) from "it found only what is here"
+    // (found), and where the time went: opening folders or the server searching them.
+    tracing::info!(%account, searched = progress.searched, of = folders.len(),
+        matched = progress.matched, found = progress.found.len(), syntax, charset,
+        terms = terms.len(), examine = ?progress.examine, search = ?progress.search,
+        abandoned = abandoned.is_set(), error = error.as_ref().map(tracing::field::display),
+        kind = error.as_ref().map(|e| tracing::field::debug(e.kind())),
+        took = ?began.elapsed(), "searched the server");
     drop(held);
     close_when_idle(engine, account, uses);
-    found
+    progress.found
+}
+
+/// What the search of an account came to so far: kept when it fails on the way.
+#[derive(Default)]
+struct Progress {
+    found: Vec<MessageId>,
+    /// Folders searched, and the messages the server matched in them, with a body or not.
+    searched: usize,
+    matched: usize,
+    /// Time spent opening the folders searched, and the server searching them.
+    examine: Duration,
+    search: Duration,
 }
 
 /// Searches `folders` one by one on the connection in `session` (connecting if it is
-/// empty), adding what each finds to `found`, until the search is abandoned.
+/// empty), adding what each finds to `progress`, until the search is abandoned.
 async fn in_folders(
     engine: &Arc<Engine>,
     account: AccountId,
@@ -172,7 +193,7 @@ async fn in_folders(
     folders: &[FolderSyncState],
     terms: &[SearchTerm],
     abandoned: &Abandoned,
-    found: &mut Vec<MessageId>,
+    progress: &mut Progress,
 ) -> Result<()> {
     for state in folders {
         if abandoned.is_set() {
@@ -184,6 +205,7 @@ async fn in_folders(
         let abandoned = abandoned.clone();
         let began = Instant::now();
         let searched = pool::on_session(engine, account, session, async move |s| {
+            let began = Instant::now();
             let status = match s.examine(&remote).await {
                 Ok(status) => status,
                 Err(e) if !e.is_fatal() => return Ok(Searched::Unopened(e.into())),
@@ -196,8 +218,13 @@ async fn in_folders(
             if abandoned.is_set() {
                 return Ok(Searched::Abandoned);
             }
+            let (examine, began) = (began.elapsed(), Instant::now());
             match s.uid_search_text(&terms).await {
-                Ok(uids) => Ok(Searched::Found(uids)),
+                Ok(uids) => Ok(Searched::Found {
+                    uids,
+                    examine,
+                    search: began.elapsed(),
+                }),
                 Err(e) if !e.is_fatal() => Ok(Searched::Refused(e.into())),
                 Err(e) => Err(e.into()),
             }
@@ -205,7 +232,11 @@ async fn in_folders(
         .await?;
         let folder = &state.name;
         match searched {
-            Searched::Found(uids) => {
+            Searched::Found {
+                uids,
+                examine,
+                search,
+            } => {
                 let matched = uids.len();
                 let (id, uidvalidity) = (state.id, synced.unwrap_or_default());
                 let ids = engine
@@ -214,9 +245,13 @@ async fn in_folders(
                         messages.without_body(id, uidvalidity, &uids, MAX_PER_FOLDER)
                     })
                     .await?;
-                tracing::debug!(%account, folder, matched, without_body = ids.len(),
-                    took = ?began.elapsed(), "searched a folder on the server");
-                found.extend(ids);
+                tracing::debug!(%account, folder, matched, without_body = ids.len(), ?examine,
+                    ?search, took = ?began.elapsed(), "searched a folder on the server");
+                progress.searched += 1;
+                progress.matched += matched;
+                progress.examine += examine;
+                progress.search += search;
+                progress.found.extend(ids);
             }
             Searched::Abandoned => return Ok(()),
             // Its messages are about to be synced again.
@@ -239,8 +274,13 @@ async fn in_folders(
 
 /// What came of searching a folder.
 enum Searched {
-    /// The UIDs matching, ascending.
-    Found(Vec<u32>),
+    /// The UIDs matching, ascending, and how long opening the folder and searching it
+    /// took.
+    Found {
+        uids: Vec<u32>,
+        examine: Duration,
+        search: Duration,
+    },
     /// Abandoned once the folder was open.
     Abandoned,
     /// Its UIDVALIDITY on the server isn't the one synced.
