@@ -368,6 +368,15 @@ pub struct Faults {
     /// Refuse every SEARCH with a CHARSET, with `NO [BADCHARSET (US-ASCII)]`, as servers
     /// that only search ASCII may.
     pub refuse_search_charset: bool,
+    /// Match every message in a UID SEARCH with text in it (`TEXT`, `BODY`, a header,
+    /// X-GM-RAW), as a server ignoring the text does.
+    pub search_ignores_text: bool,
+    /// Behave as QQ Mail does: greet with `QQMail XMIMAP4Server ready`, match every
+    /// message in a UID SEARCH with `TEXT` in it, and take a literal in one for the text
+    /// `{n}`.
+    pub qq_mail: bool,
+    /// Greet as Coremail (NetEase) does: `Coremail System IMap Server Ready`.
+    pub coremail: bool,
 }
 
 impl Default for Faults {
@@ -428,6 +437,9 @@ impl Default for Faults {
             bare_status: false,
             no_uidnext: false,
             refuse_search_charset: false,
+            search_ignores_text: false,
+            qq_mail: false,
+            coremail: false,
         }
     }
 }
@@ -1088,11 +1100,21 @@ async fn serve(
             .write_all(b"* PREAUTH fake IMAP ready\r\n")
             .await?;
     } else {
-        io.get_mut().write_all(b"* OK fake IMAP ready\r\n").await?;
+        let greeting = match &lock(&state).faults {
+            f if f.qq_mail => "QQMail XMIMAP4Server ready",
+            f if f.coremail => "Coremail System IMap Server Ready(fake)",
+            _ => "fake IMAP ready",
+        };
+        io.get_mut()
+            .write_all(format!("* OK {greeting}\r\n").as_bytes())
+            .await?;
     }
     loop {
-        let refuse = lock(&state).faults.reject_append_literal;
-        let Some((line, literals)) = read_command(&mut io, refuse).await? else {
+        let (refuse, qq_mail) = {
+            let faults = &lock(&state).faults;
+            (faults.reject_append_literal, faults.qq_mail)
+        };
+        let Some((line, literals)) = read_command(&mut io, refuse, qq_mail).await? else {
             return Ok(());
         };
         match handle(&mut io, &mut session, &state, &line, literals).await? {
@@ -1112,10 +1134,12 @@ async fn serve(
 
 /// Reads one command line, inlining `{n}` / `{n+}` literals, which are also returned as
 /// they came (APPEND needs the exact bytes). `None` at EOF. With `refuse_append`, an
-/// APPEND is answered with NO instead of being asked for its message, and skipped.
+/// APPEND is answered with NO instead of being asked for its message, and skipped. With
+/// `qq_mail`, a literal in a UID SEARCH is inlined as its `{n}`.
 async fn read_command(
     io: &mut BufReader<Box<dyn Stream>>,
     refuse_append: bool,
+    qq_mail: bool,
 ) -> std::io::Result<Option<(Vec<u8>, Vec<Vec<u8>>)>> {
     let mut line = Vec::new();
     let mut literals = Vec::new();
@@ -1149,9 +1173,14 @@ async fn read_command(
                 }
                 let mut data = vec![0; len];
                 io.read_exact(&mut data).await?;
+                let searching = text.split(' ').skip(1).take(2).eq(["UID", "SEARCH"]);
+                let inlined = match qq_mail && searching {
+                    true => format!("{{{len}}}").into_bytes(),
+                    false => data.clone(),
+                };
                 // Inline as a quoted string so the tokenizer sees one token.
                 line.push(b'"');
-                for &b in &data {
+                for &b in &inlined {
                     if b == b'"' || b == b'\\' {
                         line.push(b'\\');
                     }
@@ -1602,10 +1631,24 @@ async fn handle(
                     Some(mb) => {
                         // What `*` stands for in a UID set, found once.
                         let max_uid = mb.messages.iter().map(|m| m.uid).max().unwrap_or(0);
+                        let f = &st.faults;
+                        let ignored = keys.iter().any(|k| {
+                            f.search_ignores_text
+                                && k.has(|k| {
+                                    matches!(
+                                        k,
+                                        SearchKey::Header(..)
+                                            | SearchKey::Text(_)
+                                            | SearchKey::Body(_)
+                                            | SearchKey::GmRaw(_)
+                                    )
+                                })
+                                || f.qq_mail && k.has(|k| matches!(k, SearchKey::Text(_)))
+                        });
                         let uids: Vec<String> = mb
                             .messages
                             .iter()
-                            .filter(|m| keys.iter().all(|key| key.matches(m, max_uid)))
+                            .filter(|m| ignored || keys.iter().all(|key| key.matches(m, max_uid)))
                             .map(|m| m.uid.to_string())
                             .collect();
                         out += &format!("* SEARCH {}\r\n", uids.join(" "))
@@ -2445,14 +2488,17 @@ fn replace_line(pattern: &mut Option<String>, out: Vec<u8>, with: &[u8]) -> Vec<
 /// A UID SEARCH key the fake understands: `ALL`, `UID <set>`, `HEADER <field> <text>`,
 /// `TEXT` / `BODY <text>`, `FROM` / `TO` / `CC` / `SUBJECT <text>`, `OR <key> <key>`,
 /// and on Gmail `X-GM-MSGID <id>` and `X-GM-RAW <query>` (see [`gm_raw_matches`]). Text
-/// matches as a substring, whatever its case, as Dovecot without full-text search
-/// matches it; MIME encodings aren't decoded.
+/// matches as a substring, whatever its case, as Dovecot without full-text search matches
+/// it; MIME encodings aren't decoded.
 enum SearchKey {
     All,
     Uid(String),
     /// A header field, lowercase, and the text.
     Header(String, String),
+    /// Anywhere in the message.
     Text(String),
+    /// After the header.
+    Body(String),
     GmMsgid(u64),
     GmRaw(String),
     Or(Box<SearchKey>, Box<SearchKey>),
@@ -2470,7 +2516,8 @@ fn search_key(args: &[Tok], i: &mut usize, gmail: bool) -> Option<SearchKey> {
         "ALL" => SearchKey::All,
         "UID" => SearchKey::Uid(next()?),
         "HEADER" => SearchKey::Header(next()?.to_ascii_lowercase(), next()?),
-        "TEXT" | "BODY" => SearchKey::Text(next()?),
+        "TEXT" => SearchKey::Text(next()?),
+        "BODY" => SearchKey::Body(next()?),
         "FROM" | "TO" | "CC" | "SUBJECT" => SearchKey::Header(name.to_ascii_lowercase(), next()?),
         "X-GM-MSGID" if gmail => SearchKey::GmMsgid(next()?.parse().ok()?),
         "X-GM-RAW" if gmail => SearchKey::GmRaw(next()?),
@@ -2490,10 +2537,22 @@ impl SearchKey {
             SearchKey::Uid(set) => set_contains(set, m.uid, || max_uid),
             SearchKey::Header(field, text) => header_has(&m.raw, field, text),
             SearchKey::Text(text) => contains(&String::from_utf8_lossy(&m.raw), text),
+            SearchKey::Body(text) => {
+                contains(&String::from_utf8_lossy(&m.raw[header_end(&m.raw)..]), text)
+            }
             SearchKey::GmMsgid(id) => m.gm_msgid == *id,
             SearchKey::GmRaw(query) => gm_raw_matches(query, &m.raw),
             SearchKey::Or(a, b) => a.matches(m, max_uid) || b.matches(m, max_uid),
         }
+    }
+
+    /// Whether this key or one in it is `what`.
+    fn has(&self, what: impl Fn(&SearchKey) -> bool + Copy) -> bool {
+        what(self)
+            || match self {
+                SearchKey::Or(a, b) => a.has(what) || b.has(what),
+                _ => false,
+            }
     }
 }
 
@@ -2598,11 +2657,15 @@ fn set_contains(set: &str, n: u32, star: impl Fn() -> u32) -> bool {
 
 /// The header lines (with continuations) whose names are in `fields`, plus the blank
 /// line that ends a header block.
-fn filter_headers(raw: &[u8], fields: &[String]) -> Vec<u8> {
-    let end = raw
-        .windows(4)
+/// Where the header of `raw` ends, its last CRLF included; all of it without a blank line.
+fn header_end(raw: &[u8]) -> usize {
+    raw.windows(4)
         .position(|w| w == b"\r\n\r\n")
-        .map_or(raw.len(), |p| p + 2);
+        .map_or(raw.len(), |p| p + 2)
+}
+
+fn filter_headers(raw: &[u8], fields: &[String]) -> Vec<u8> {
+    let end = header_end(raw);
     let mut out = Vec::new();
     let mut keep = false;
     for line in raw[..end].split_inclusive(|&b| b == b'\n') {

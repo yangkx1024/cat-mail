@@ -14,9 +14,11 @@
 //! [`IDLE`].
 //!
 //! A server that can't search the text (one refusing `CHARSET UTF-8`, as some do) or
-//! can't be reached adds nothing: the local results are all there are. Nor are accounts
-//! asked whose login was rejected, or that went over their limit, until a sync gets
-//! through: each try would count against them.
+//! can't be reached adds nothing: the local results are all there are. One that can't
+//! search text at all ([`Session::uid_search_text`] or [`Session::heeds_text`] says) isn't
+//! asked again. Nor are
+//! accounts asked whose login was rejected, or that went over their limit, until a sync
+//! gets through: each try would count against them.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
@@ -53,6 +55,9 @@ struct Held {
     /// until a sync of every folder gets through after that, as each try counts against
     /// the account.
     refused: Option<Instant>,
+    /// The server can't search text: asking it again would only cost a login and the
+    /// round trips.
+    unsearchable: bool,
 }
 
 impl SearchSlot {
@@ -129,6 +134,10 @@ async fn in_account(
     if abandoned.is_set() {
         return Vec::new();
     }
+    if held.unsearchable {
+        tracing::debug!(%account, "not searching the server: it can't search text");
+        return Vec::new();
+    }
     let synced_since = |at| engine.synced(account).is_some_and(|synced| synced > at);
     if engine.waits_out(account) || held.refused.is_some_and(|at| !synced_since(at)) {
         tracing::debug!(%account, "not searching the server: it rejects the login, or the account is over its limit");
@@ -144,10 +153,10 @@ async fn in_account(
         () = cancellation.cancelled() => Err(Error::Cancelled),
     };
     // Which syntax the server got, known once connected; never the text searched.
-    let syntax = held.session.as_ref().map(|s| match s.is_gmail() {
-        true => "X-GM-RAW",
-        false => "TEXT",
-    });
+    let syntax = held
+        .session
+        .as_ref()
+        .map(|s| tracing::field::debug(s.text_search()));
     let charset = terms.iter().any(|t| !t.text.is_ascii());
     let error = result.err();
     if let Some(e) = &error {
@@ -158,6 +167,10 @@ async fn in_account(
         if matches!(e, Error::AuthFailed(_) | Error::OverLimit(_)) {
             held.refused = Some(Instant::now());
         }
+    }
+    if progress.unsearchable {
+        held.unsearchable = true;
+        held.session = None;
     }
     // What tells "the server found nothing" (matched) from "it found only what is here"
     // (found), and where the time went: opening folders or the server searching them.
@@ -182,6 +195,8 @@ struct Progress {
     /// Time spent opening the folders searched, and the server searching them.
     examine: Duration,
     search: Duration,
+    /// The server turned out unable to search text.
+    unsearchable: bool,
 }
 
 /// Searches `folders` one by one on the connection in `session` (connecting if it is
@@ -219,14 +234,29 @@ async fn in_folders(
                 return Ok(Searched::Abandoned);
             }
             let (examine, began) = (began.elapsed(), Instant::now());
-            match s.uid_search_text(&terms).await {
-                Ok(uids) => Ok(Searched::Found {
+            let refused = |e: catmail_proto::imap::Error| -> Result<Searched> {
+                match e.is_fatal() {
+                    false => Ok(Searched::Refused(e.into())),
+                    true => Err(e.into()),
+                }
+            };
+            let uids = match s.uid_search_text(&terms).await {
+                Ok(Some(uids)) => uids,
+                Ok(None) => return Ok(Searched::Unsearchable),
+                Err(e) => return refused(e),
+            };
+            // Making sure of them may take another search of the text.
+            if abandoned.is_set() {
+                return Ok(Searched::Abandoned);
+            }
+            match s.heeds_text(&terms, &uids).await {
+                Ok(true) => Ok(Searched::Found {
                     uids,
                     examine,
                     search: began.elapsed(),
                 }),
-                Err(e) if !e.is_fatal() => Ok(Searched::Refused(e.into())),
-                Err(e) => Err(e.into()),
+                Ok(false) => Ok(Searched::Unsearchable),
+                Err(e) => refused(e),
             }
         })
         .await?;
@@ -267,6 +297,11 @@ async fn in_folders(
                     "the server refused to search; no more of its folders searched");
                 return Ok(());
             }
+            Searched::Unsearchable => {
+                tracing::info!(%account, folder, "the server can't search text; not asked again");
+                progress.unsearchable = true;
+                return Ok(());
+            }
         }
     }
     Ok(())
@@ -281,7 +316,7 @@ enum Searched {
         examine: Duration,
         search: Duration,
     },
-    /// Abandoned once the folder was open.
+    /// Abandoned once the folder was open, or before making sure of what was found.
     Abandoned,
     /// Its UIDVALIDITY on the server isn't the one synced.
     Rebuilt,
@@ -289,6 +324,8 @@ enum Searched {
     Unopened(Error),
     /// The server wouldn't search it.
     Refused(Error),
+    /// The server can't search text, in any folder.
+    Unsearchable,
 }
 
 /// Closes the account's search connection after [`IDLE`], unless another search used it

@@ -616,6 +616,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_greeting_s_text_leaves_its_code_out() {
+        let (ours, mut theirs) = tokio::io::duplex(64 * 1024);
+        let greeting = "* OK [CAPABILITY IMAP4 IMAP4rev1 ID AUTH=PLAIN NAMESPACE] \
+                        QQMail XMIMAP4Server ready\r\n";
+        theirs.write_all(greeting.as_bytes()).await.unwrap();
+        let mut conn = Connection::new(Box::new(ours), Duration::from_secs(10));
+        let greeting = conn.greeting().await.unwrap();
+        assert_eq!(greeting.text, "QQMail XMIMAP4Server ready");
+        assert!(matches!(
+            greeting.code,
+            Some(Code::Known(ResponseCode::Capabilities(_)))
+        ));
+    }
+
+    #[tokio::test]
     async fn an_unknown_code_is_kept_by_name() {
         let (ours, theirs) = tokio::io::duplex(64 * 1024);
         let server = tokio::spawn(async move {

@@ -131,6 +131,71 @@ async fn a_server_refusing_the_charset_adds_nothing() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn qq_mail_is_searched_without_text_or_literals() {
+    let env = env(mailboxes()).await;
+    env.fake.state().faults.qq_mail = true;
+    let start = env.log_len();
+    assert_eq!(
+        env.search_both(SearchQuery::new("pelican")).await,
+        ["Quarterly", "Old"]
+    );
+    assert_eq!(
+        env.search_both(SearchQuery::new("季度报告")).await,
+        ["Report CN"]
+    );
+    let searches = env.searches(start);
+    assert!(!searches.iter().any(|s| s.contains("TEXT")), "{searches:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_that_cant_search_text_isnt_asked() {
+    let env = env(mailboxes()).await;
+    env.fake.state().faults.coremail = true;
+    let (start, connections) = (env.log_len(), env.connections());
+    for _ in 0..2 {
+        let found = env.client.search_server(SearchQuery::new("pelican")).await;
+        assert_eq!(found.unwrap(), []);
+    }
+    // Connected once to find out, and asked about no folder after the first.
+    assert_eq!(env.examined(start), ["INBOX"]);
+    assert_eq!(env.searches(start), Vec::<String>::new());
+    assert_eq!(env.connections(), connections + 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_ignoring_the_text_adds_nothing() {
+    let env = env(mailboxes()).await;
+    env.fake.state().faults.search_ignores_text = true;
+    let start = env.log_len();
+    let found = env.client.search_server(SearchQuery::new("pelican")).await;
+    assert_eq!(found.unwrap(), []);
+    // Told by text no message has, in the first folder, and not asked again.
+    assert_eq!(env.searches(start).len(), 2);
+    let found = env.client.search_server(SearchQuery::new("pelican")).await;
+    assert_eq!(found.unwrap(), []);
+    assert_eq!(env.searches(start).len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_message_matching_is_checked_against_text_no_message_has() {
+    let env = env(mailboxes()).await;
+    let mut query = SearchQuery::new("pelican");
+    query.folder = Some(env.folder("Archive").await.id);
+    let start = env.log_len();
+    assert_eq!(env.search_both(query.clone()).await, ["Old"]);
+    let searches = env.searches(start);
+    assert_eq!(searches.len(), 2, "{searches:?}");
+    assert!(
+        searches[1].starts_with("UID SEARCH TEXT ") && !searches[1].contains("pelican"),
+        "{searches:?}"
+    );
+    // Once per connection.
+    let start = env.log_len();
+    assert_eq!(env.search_both(query).await, ["Old"]);
+    assert_eq!(env.searches(start).len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_server_out_of_reach_adds_nothing() {
     let env = env(mailboxes()).await;
     env.fake.state().faults.refuse_connections = usize::MAX;
@@ -190,6 +255,40 @@ async fn a_search_given_up_on_stops_and_leaves_its_connection_to_the_next() {
         // The next one went on the same connection.
         assert_eq!(env.connections(), connections + 1, "held at {held}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_search_given_up_on_doesnt_make_sure_of_everything_matching() {
+    let env = env(mailboxes()).await;
+    let (gate, before) = {
+        let mut st = env.fake.state();
+        (st.hold("UID SEARCH"), st.received("UID SEARCH"))
+    };
+    let start = env.log_len();
+    // Archive's one message matches.
+    let mut query = SearchQuery::new("pelican");
+    query.folder = Some(env.folder("Archive").await.id);
+    let first = tokio::spawn({
+        let client = env.client.clone();
+        async move { client.search_server(query).await }
+    });
+    env.fake
+        .wait_until(|st| st.received("UID SEARCH") > before)
+        .await;
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+
+    let next = tokio::spawn({
+        let client = env.client.clone();
+        async move { client.search_server(SearchQuery::new("lunch")).await }
+    });
+    gate.add_permits(Semaphore::MAX_PERMITS);
+    let lunch = env.id_of("INBOX", "Lunch").await;
+    assert_eq!(next.await.unwrap().unwrap(), [lunch]);
+    // No search for text no message has in between.
+    let searches = env.searches(start);
+    assert_eq!(searches.len(), 3, "{searches:?}");
+    assert!(searches[0].contains("pelican"), "{searches:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
