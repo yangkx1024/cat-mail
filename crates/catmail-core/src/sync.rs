@@ -710,7 +710,7 @@ async fn sync_folder(
     let complete = fetch_new(engine, session, account, id, fetch, report).await?;
 
     // The cursor promises that everything below it is stored; with a gap, leave the old
-    // one so the next sync diffs in full.
+    // one so the next sync diffs in full. `set_synced` derives one without UIDNEXT.
     unit.complete &= complete;
     if complete {
         let (uidnext, modseq) = (status.uidnext, status.highest_modseq);
@@ -728,7 +728,7 @@ async fn sync_folder(
 struct Fetch<'a> {
     uids: &'a [u32],
     items: Items,
-    /// The location's UIDNEXT before they arrived, if known: those at or above it that
+    /// The location's cursor before they arrived, if known: those at or above it that
     /// are stored are announced as new mail.
     arrived_from: Option<u32>,
 }
@@ -799,7 +799,9 @@ async fn new_and_vanished(
     uidnext: Option<u32>,
     status: &MailboxStatus,
 ) -> Result<(Vec<u32>, Vec<u32>)> {
-    // Nothing arrived since the cursor, and the count shows nothing was expunged.
+    // Nothing arrived since the cursor, and the count shows nothing was expunged. Not
+    // where EXAMINE leaves out UIDNEXT: the count alone can't tell an expunge and an
+    // arrival from nothing.
     if uidnext.is_some() && uidnext == status.uidnext && count == status.exists {
         return Ok((Vec::new(), Vec::new()));
     }

@@ -232,35 +232,55 @@ async fn the_unread_in_inboxes_are_counted() {
     assert_eq!(env.client.count_unread_in_inboxes().await.unwrap(), 1);
 }
 
+/// Also where EXAMINE leaves out UIDNEXT, as NetEase does: the cursor is then one past
+/// the highest stored UID.
 #[tokio::test(flavor = "multi_thread")]
 async fn new_mail_alone_does_not_list_every_uid() {
-    let env = env(state_with(&["one", "two", "three"])).await;
-    env.sync().await;
+    for no_uidnext in [false, true] {
+        let mut state = state_with(&["one", "two", "three"]);
+        state.faults.no_uidnext = no_uidnext;
+        let env = env(state).await;
+        let mut events = env.client.subscribe();
+        env.sync().await;
+        assert!(new_mail(drain(&mut events)).is_empty());
 
-    env.fake.state().inbox().append_simple("four");
-    let start = env.fake.state().log.len();
-    let report = env.sync().await;
-    assert_eq!(folder_report(&report, "INBOX").added, 1);
-    let searches: Vec<_> = env
-        .commands_since(start)
-        .into_iter()
-        .filter(|c| c.starts_with("UID SEARCH"))
-        .collect();
-    assert_eq!(searches, ["UID SEARCH UID 4:*"]);
+        env.fake.state().inbox().append_simple("four");
+        let start = env.fake.state().log.len();
+        let report = env.sync().await;
+        assert_eq!(folder_report(&report, "INBOX").added, 1);
+        assert_eq!(env.searches(start), ["UID SEARCH UID 4:*"], "{no_uidnext}");
+        let four = env.id_of("INBOX", "four").await;
+        assert_eq!(new_mail(drain(&mut events)), [vec![four]], "{no_uidnext}");
 
-    // An expunge as well: the counts no longer add up, so the full list is needed.
-    {
-        let mut st = env.fake.state();
-        st.inbox().expunge(2);
-        st.inbox().append_simple("five");
+        // An expunge as well: the counts no longer add up, so the full list is needed.
+        {
+            let mut st = env.fake.state();
+            st.inbox().expunge(2);
+            st.inbox().append_simple("five");
+        }
+        let report = env.sync().await;
+        let inbox = folder_report(&report, "INBOX");
+        assert_eq!((inbox.added, inbox.removed), (1, 1), "{no_uidnext}");
+        let five = env.id_of("INBOX", "five").await;
+        assert_eq!(new_mail(drain(&mut events)), [vec![five]], "{no_uidnext}");
+
+        // With the highest expunged, the cursor without UIDNEXT falls behind the
+        // server's; what arrives next is above both.
+        env.fake.state().inbox().expunge(5);
+        env.sync().await;
+        env.fake.state().inbox().append_simple("six");
+        let start = env.fake.state().log.len();
+        env.sync().await;
+        let six = env.id_of("INBOX", "six").await;
+        assert_eq!(new_mail(drain(&mut events)), [vec![six]], "{no_uidnext}");
+        let cursor = if no_uidnext { 5 } else { 6 };
+        assert_eq!(env.searches(start), [format!("UID SEARCH UID {cursor}:*")]);
+        assert_eq!(
+            env.subjects("INBOX").await,
+            ["six", "four", "three", "one"],
+            "{no_uidnext}"
+        );
     }
-    let report = env.sync().await;
-    let inbox = folder_report(&report, "INBOX");
-    assert_eq!((inbox.added, inbox.removed), (1, 1));
-    assert_eq!(
-        env.subjects("INBOX").await,
-        ["five", "four", "three", "one"]
-    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
