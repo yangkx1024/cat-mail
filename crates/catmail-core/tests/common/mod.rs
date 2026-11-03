@@ -389,6 +389,15 @@ impl Env {
             .collect()
     }
 
+    /// UID SEARCH commands the server received from the `start`-th on.
+    #[allow(dead_code)]
+    pub fn searches(&self, start: usize) -> Vec<String> {
+        self.commands_since(start)
+            .into_iter()
+            .filter(|c| c.starts_with("UID SEARCH"))
+            .collect()
+    }
+
     /// Commands the server received from the `start`-th on, without tags.
     #[allow(dead_code)]
     pub fn commands_since(&self, start: usize) -> Vec<String> {

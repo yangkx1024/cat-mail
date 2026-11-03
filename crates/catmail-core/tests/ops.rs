@@ -884,6 +884,7 @@ async fn an_unknowable_copy_leaves_the_original() {
 async fn bare_status_env(archived: usize) -> (Env, MessageId) {
     let mut state = copy_move_state(true);
     state.faults.bare_status = true;
+    state.faults.no_uidnext = true;
     for i in 0..archived {
         state
             .mailbox_mut("Archive")
@@ -894,8 +895,8 @@ async fn bare_status_env(archived: usize) -> (Env, MessageId) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn moves_where_status_says_nothing() {
-    // The checkpoint comes from the last sync of Archive; a COPY whose answer was lost
-    // is found from it.
+    // The checkpoint comes from opening Archive before the COPY; a COPY whose answer was
+    // lost is found from it.
     for archived in [0, 2] {
         for lose_answer in [false, true] {
             let case = format!("archived: {archived}, lose answer: {lose_answer}");

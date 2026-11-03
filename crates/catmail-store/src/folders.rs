@@ -53,14 +53,24 @@ pub struct FolderSyncState {
     pub max_uid: u32,
 }
 
+/// The highest UID stored in the folder of the `folders` row at hand, 0 if none. Shared by
+/// the sync state and the cursor `set_synced` derives, so the two can't drift apart.
+macro_rules! max_stored_uid {
+    () => {
+        "(SELECT ifnull(max(uid), 0) FROM messages WHERE folder_id = folders.id)"
+    };
+}
+
 /// Messages moved here locally and not yet on the server have no UID; sync leaves them
 /// out of its counts.
-const SYNC_STATE: &str = "
-    SELECT id, remote_name, name, selectable, uidvalidity, uidnext, highest_modseq,
-           total_count - (SELECT count(*) FROM messages
-                          WHERE folder_id = folders.id AND uid IS NULL),
-           (SELECT ifnull(max(uid), 0) FROM messages WHERE folder_id = folders.id)
-    FROM folders";
+const SYNC_STATE: &str = concat!(
+    "SELECT id, remote_name, name, selectable, uidvalidity, uidnext, highest_modseq,
+            total_count - (SELECT count(*) FROM messages
+                           WHERE folder_id = folders.id AND uid IS NULL),
+            ",
+    max_stored_uid!(),
+    " FROM folders"
+);
 
 /// The order sync goes through an account's locations: INBOX first, where new mail is,
 /// then All Mail, then by id.
@@ -484,20 +494,29 @@ impl<'c> Folders<'c> {
     /// Records the cursor of a sync that stored every message. It counts as a completed
     /// sync (`last_synced_at`) only with `flags_refreshed`: a sync that left the flags of
     /// stored messages alone may be behind on them.
+    ///
+    /// Without the server's UIDNEXT (NetEase leaves it out of EXAMINE) the cursor is one
+    /// past the highest stored UID, which keeps its promise; see the sync document. Not
+    /// past the last UID there is, which is no `u32`: nothing arrives above it anyway.
     pub fn set_synced(
         &self,
         folder: FolderId,
-        uidnext: Option<u32>,
+        server_uidnext: Option<u32>,
         highest_modseq: Option<u64>,
         flags_refreshed: bool,
     ) -> Result<()> {
         self.conn.execute(
-            "UPDATE folders SET uidnext = ?2, highest_modseq = ?3,
-                last_synced_at = CASE WHEN ?4 THEN unixepoch() ELSE last_synced_at END
-             WHERE id = ?1",
+            concat!(
+                "UPDATE folders SET uidnext = ifnull(?2, min(",
+                max_stored_uid!(),
+                " + 1, 4294967295)),
+                    highest_modseq = ?3,
+                    last_synced_at = CASE WHEN ?4 THEN unixepoch() ELSE last_synced_at END
+                 WHERE id = ?1"
+            ),
             params![
                 folder.0,
-                uidnext,
+                server_uidnext,
                 highest_modseq.map(|m| m as i64),
                 flags_refreshed
             ],
@@ -540,6 +559,16 @@ mod tests {
             selectable: true,
             inferiors: true,
         }
+    }
+
+    /// An account with the one folder `name`.
+    fn one_folder(store: &crate::Store, name: &str) -> (AccountId, FolderId) {
+        let account = test_util::account(store, "a@example.com");
+        store
+            .write(|db| db.folders().reconcile(account, &[remote(name, name, None)]))
+            .unwrap();
+        let folder = store.read(|db| db.folders().list(account)).unwrap()[0].id;
+        (account, folder)
     }
 
     fn message(uid: u32) -> NewMessage {
@@ -614,14 +643,7 @@ mod tests {
         // RFC 3501 DELETE of a mailbox with children empties it and leaves its name as
         // \Noselect, which sync never opens again.
         let store = test_util::store();
-        let account = test_util::account(&store, "a@example.com");
-        store
-            .write(|db| {
-                db.folders()
-                    .reconcile(account, &[remote("Parent", "Parent", None)])
-            })
-            .unwrap();
-        let folder = store.read(|db| db.folders().list(account)).unwrap()[0].id;
+        let (account, folder) = one_folder(&store, "Parent");
         store
             .write(|db| {
                 db.folders().reset_uidvalidity(folder, 7)?;
@@ -696,14 +718,7 @@ mod tests {
     #[test]
     fn a_sync_that_left_the_flags_alone_is_not_completed() {
         let store = test_util::store();
-        let account = test_util::account(&store, "a@example.com");
-        store
-            .write(|db| {
-                db.folders()
-                    .reconcile(account, &[remote("INBOX", "INBOX", None)])
-            })
-            .unwrap();
-        let folder = store.read(|db| db.folders().list(account)).unwrap()[0].id;
+        let (_, folder) = one_folder(&store, "INBOX");
         let state = || store.read(|db| db.folders().get(folder)).unwrap().unwrap();
 
         store
@@ -730,16 +745,49 @@ mod tests {
     }
 
     #[test]
-    fn uidvalidity_reset_drops_the_old_generation() {
+    fn without_the_servers_uidnext_the_cursor_is_past_the_highest_stored_uid() {
         let store = test_util::store();
-        let account = test_util::account(&store, "a@example.com");
+        let (account, folder) = one_folder(&store, "INBOX");
+        let cursor = || {
+            store
+                .read(|db| db.folders().sync_state(folder))
+                .unwrap()
+                .unwrap()
+                .uidnext
+        };
+
+        store
+            .write(|db| db.folders().set_synced(folder, None, None, true))
+            .unwrap();
+        assert_eq!(cursor(), Some(1), "empty");
         store
             .write(|db| {
-                db.folders()
-                    .reconcile(account, &[remote("INBOX", "INBOX", None)])
+                db.messages()
+                    .upsert(account, folder, &[message(2), message(5)])?;
+                db.folders().set_synced(folder, None, None, true)
             })
             .unwrap();
-        let folder = store.read(|db| db.folders().list(account)).unwrap()[0].id;
+        assert_eq!(cursor(), Some(6));
+        store
+            .write(|db| db.folders().set_synced(folder, Some(9), None, true))
+            .unwrap();
+        assert_eq!(cursor(), Some(9), "the server's when it says");
+
+        // The last UID there is: nothing can arrive above it, and one past it is no UID.
+        store
+            .write(|db| {
+                db.messages()
+                    .upsert(account, folder, &[message(u32::MAX)])?;
+                db.folders().set_synced(folder, None, None, true)
+            })
+            .unwrap();
+        assert_eq!(cursor(), Some(u32::MAX));
+    }
+
+    #[test]
+    fn uidvalidity_reset_drops_the_old_generation() {
+        let store = test_util::store();
+        let (account, folder) = one_folder(&store, "INBOX");
         store
             .write(|db| {
                 db.folders().reset_uidvalidity(folder, 7)?;
@@ -804,14 +852,7 @@ mod tests {
     #[test]
     fn deleting_a_folder_forgets_remote_draft_copies() {
         let store = test_util::store();
-        let account = test_util::account(&store, "a@example.com");
-        store
-            .write(|db| {
-                db.folders()
-                    .reconcile(account, &[remote("Drafts", "Drafts", None)])
-            })
-            .unwrap();
-        let folder = store.read(|db| db.folders().list(account)).unwrap()[0].id;
+        let (account, folder) = one_folder(&store, "Drafts");
         let insert_draft = format!(
             "INSERT INTO drafts (account_id, identity_id, remote_folder_id, remote_uidvalidity,
                                  remote_uid, remote_message_id, remote_revision)

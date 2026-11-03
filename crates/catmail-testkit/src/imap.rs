@@ -361,9 +361,10 @@ pub struct Faults {
     /// Make the next CREATE, RENAME or DELETE, then close the connection without
     /// answering. Fires once.
     pub drop_after_mailbox_change: bool,
-    /// Answer STATUS with an empty list, and leave UIDNEXT out of EXAMINE and SELECT, as
-    /// NetEase does: `* STATUS "INBOX" ()`.
+    /// Answer STATUS with an empty list, as NetEase does: `* STATUS "INBOX" ()`.
     pub bare_status: bool,
+    /// Leave UIDNEXT out of EXAMINE and SELECT, as NetEase does.
+    pub no_uidnext: bool,
 }
 
 impl Default for Faults {
@@ -422,6 +423,7 @@ impl Default for Faults {
             refuse_connections: 0,
             drop_after_mailbox_change: false,
             bare_status: false,
+            no_uidnext: false,
         }
     }
 }
@@ -1457,7 +1459,7 @@ async fn handle(
                     out += "* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)\r\n";
                     out += &format!("* {} EXISTS\r\n* 0 RECENT\r\n", mb.messages.len());
                     out += &format!("* OK [UIDVALIDITY {}] UIDs valid\r\n", mb.uidvalidity);
-                    if !st.faults.bare_status {
+                    if !st.faults.no_uidnext {
                         out += &format!("* OK [UIDNEXT {}] Predicted next UID\r\n", mb.uidnext);
                     }
                     if st.faults.condstore {

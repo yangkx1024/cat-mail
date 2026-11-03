@@ -30,7 +30,8 @@
    `conflict`，清掉按旧 UID 指向它的草稿远端副本（改为按 Message-ID 重新找，见
    [草稿同步](sending.md#同步到服务器)）。
 4. **新邮件与已删除邮件。**
-   - 游标里的 UIDNEXT 与服务器相同、本地条数等于 EXISTS：没有变化，不发 SEARCH。
+   - 游标里的 UIDNEXT 与服务器相同、本地条数等于 EXISTS：没有变化，不发 SEARCH。EXAMINE 不给
+     UIDNEXT 时不走这一步：只看条数分不清"删一封又到一封"和没有变化。
    - 否则 `UID SEARCH UID <游标>:*` 只取游标之后的 UID；"本地条数 + 新邮件数 = EXISTS" 说明
      没有删除，不必传输大文件夹的完整 UID 列表。
    - 仍对不上（有删除，或没有游标）时才 `UID SEARCH ALL`，与本地 UID 列表求差集。
@@ -47,7 +48,8 @@
    每批一个事务，提交后发 `MessagesChanged`，界面先看到最新的邮件。同一 UIDVALIDITY 下 UID 不小于游标
    UIDNEXT、进了 INBOX 的未读邮件另发 `NewMail`（见[后台运行 / 新邮件](background.md#新邮件)）。
 7. **写游标。** 文件夹全部完成后才写（UIDNEXT、HIGHESTMODSEQ，取自 EXAMINE 时刻）。某批拿回的
-   邮件比请求的少（SEARCH 之后被删，或响应无法解析）时不写，下次完整求差集。
+   邮件比请求的少（SEARCH 之后被删，或响应无法解析）时不写，下次完整求差集。EXAMINE 不给 UIDNEXT
+   （网易）时游标记为本地最大 UID + 1，见下节。
 
 ## 游标与断点续传
 
@@ -55,6 +57,15 @@
 邮件行本身就是进度。中断后下一次同步重新求差集，只拉缺的那些（`upsert` 遇到已有 UID 只刷新
 flags，重复的批次不产生重复行）。HIGHESTMODSEQ 用 EXAMINE 时刻的值，之后的变化 modseq 更大，
 下次 `CHANGEDSINCE` 一定能拿到。
+
+网易邮箱（Coremail）的 EXAMINE 不给 UIDNEXT。这时游标记为本地最大 UID + 1（`Folders::set_synced`，
+与其余写入在同一个事务里取值）：同步完成说明这之下的邮件都已存下，UID 只增不减，之后到的邮件一定
+在它之上，游标的约定照样成立。不能用 `UID SEARCH UID *` 取服务器的最大 UID：同步之后才到、还没存下
+的邮件会落到游标之下。这个游标可能比服务器的 UIDNEXT 小（最高的几封已被删除，或正在本地移走、
+`upsert` 跳过了），只是 `UID SEARCH UID <游标>:*` 多看几个 UID；本地移走后操作被丢弃、又被拉回来的
+那一封会被当成新邮件通知一次。本地最大 UID 已是 4294967295（UID 的上限）时游标就记这个值：再加一
+超出 `u32`，读不回来会让之后的每次同步都失败，而它之上本来也不会再有邮件。复制检查点不能用这个游标，
+见[操作队列](op-queue.md)。
 
 ## 容错
 
