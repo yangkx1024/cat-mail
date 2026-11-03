@@ -19,7 +19,8 @@
   `SUBJECT`、`OR` 和 `CHARSET`，文字按不分大小写的子串匹配原文（`BODY` 只匹配头之后的部分；像没有全文搜索
   插件的 Dovecot，但不解码 MIME）。记录当前打开的连接数。可注入的故障：
   - 连接：拉邮件头时断线（第 n 次）或挂起，拉正文时断线、挂起或按闸门放行，关闭当前所有连接
-    （IDLE 中的也立即断开），每次 IDLE 一开始就断开、立即用 OK 结束或发一行无法解析的数据，拒绝登录；
+    （IDLE 中的也立即断开），每次 IDLE 一开始就断开、立即用 OK 结束或发一行无法解析的数据，拒绝登录，
+    连接一段时间没有命令就断开（`idle_timeout`，像网易那样，IDLE 中不算）；
   - 响应：重复或倒序的 FETCH、不带 UID 的主动 FETCH、section 回 NIL、要正文的 UID FETCH 只回 OK（前 n 次）、比原文多一字节的 RFC822.SIZE、
     STARTTLS 之后的明文注入；
   - 能力与状态：没有 CONDSTORE，关掉 MOVE、UIDPLUS 和 IDLE，UIDVALIDITY 改变，带 CHARSET 的 SEARCH 回

@@ -140,7 +140,7 @@ impl Pool {
 
 /// Whether a connection is worth using: not one made before the computer last slept
 /// (see [`Engine::since_woke`]), which is likely dead and only found so after a timeout.
-fn usable(engine: &Engine, session: &Session) -> bool {
+pub(crate) fn usable(engine: &Engine, session: &Session) -> bool {
     engine.since_woke(session.opened())
 }
 
@@ -175,25 +175,45 @@ async fn keep_alive(
         return;
     };
     // Not holding the engine meanwhile, which would keep it from closing.
-    let began = Instant::now();
-    let result = tokio::select! {
-        result = session.noop() => result,
-        () = closing.closed() => return,
-    };
-    let (took, age) = (began.elapsed(), session.opened().elapsed());
-    match result {
-        Ok(()) => tracing::debug!(%account, ?took, ?age, "kept an idle connection alive"),
-        Err(e) if survives(&e) => {
-            tracing::debug!(%account, error = %e, ?took, "keepalive NOOP refused");
-        }
-        Err(e) => {
-            tracing::info!(%account, error = %e, ?took, ?age, "idle connection died; closed");
-            return;
-        }
+    if ping(account, &mut session, "pooled", closing.closed()).await != Some(true) {
+        return;
     }
     if let Some(engine) = engine.upgrade() {
         engine.pool(account).keep(&engine, session, used);
     }
+}
+
+/// Sends a quiet connection a NOOP, so that servers and NAT boxes don't close it as idle,
+/// and tells whether it is still worth keeping: not if it died. `None` if `stop` resolved
+/// first, which leaves the answer half read. `whose` tells the connections apart in the
+/// log.
+pub(crate) async fn ping(
+    account: AccountId,
+    session: &mut Session,
+    whose: &'static str,
+    stop: impl Future<Output = ()>,
+) -> Option<bool> {
+    let began = Instant::now();
+    let result = tokio::select! {
+        result = session.noop() => result,
+        () = stop => return None,
+    };
+    let (took, age) = (began.elapsed(), session.opened().elapsed());
+    Some(match result {
+        Ok(()) => {
+            tracing::debug!(%account, whose, ?took, ?age, "kept an idle connection alive");
+            true
+        }
+        Err(e) if survives(&e) => {
+            tracing::debug!(%account, whose, error = %e, ?took, "keepalive NOOP refused");
+            true
+        }
+        Err(e) => {
+            tracing::info!(%account, whose, error = %e, ?took, ?age,
+                "idle connection died; closed");
+            false
+        }
+    })
 }
 
 /// Runs `op` on one of the account's idle connections, or a new one, and keeps the

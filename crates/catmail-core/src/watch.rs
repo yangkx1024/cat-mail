@@ -39,6 +39,10 @@ pub struct SyncSchedule {
     /// How often INBOX is checked on a server that can't announce changes (no IDLE)
     /// [2 minutes].
     pub poll: Duration,
+    /// While waiting other than in IDLE (between checks, or before trying again), the
+    /// connection is sent a NOOP this often, so that it is still open for the next step
+    /// [45 seconds: NetEase closes one quiet for a minute].
+    pub keepalive: Duration,
     /// How long one IDLE lasts before it is started over, so that a connection that died
     /// without a word (a NAT box forgetting it, say) is noticed [10 minutes].
     pub idle: Duration,
@@ -64,6 +68,7 @@ impl Default for SyncSchedule {
         Self {
             full_sync: Duration::from_secs(15 * 60),
             poll: Duration::from_secs(2 * 60),
+            keepalive: Duration::from_secs(45),
             idle: Duration::from_secs(10 * 60),
             retry: Duration::from_secs(30),
             retry_after_wake: Duration::from_secs(2),
@@ -272,12 +277,51 @@ async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
                 delay
             }
         };
-        tokio::select! {
-            () = cancellation.cancelled() => {}
-            () = unless(&engine, &wake, |e| e.ignores_wakes(account, false)) => {}
-            () = unless(&engine, &resume, |e| e.login_rejected(account)) => {}
-            () = tokio::time::sleep(pause) => {}
+        let until = tokio::time::Instant::now() + pause;
+        loop {
+            let next = tokio::time::Instant::now() + schedule.keepalive;
+            let noop = session.is_some() && next < until;
+            tokio::select! {
+                () = cancellation.cancelled() => break,
+                () = unless(&engine, &wake, |e| e.ignores_wakes(account, false)) => break,
+                () = unless(&engine, &resume, |e| e.login_rejected(account)) => break,
+                () = tokio::time::sleep_until(if noop { next } else { until }) => {}
+            }
+            if !noop {
+                break;
+            }
+            keep_alive(&engine, account, &mut session, &mut cancellation).await;
         }
+    }
+}
+
+/// Sends the connection background sync waits on a NOOP, so that the server doesn't
+/// close it as idle before the next step: NetEase does after a minute, and offers no
+/// IDLE, so that each check of INBOX would log in again. Closes one that died, or one
+/// from before a sleep (see [`pool::usable`]). Queued changes and waking from sleep don't
+/// cut the NOOP short, which would leave its answer half read: their signals keep a
+/// permit, so the wait after it ends at once.
+async fn keep_alive(
+    engine: &Weak<Engine>,
+    account: AccountId,
+    slot: &mut Option<Session>,
+    cancellation: &mut Cancellation,
+) {
+    let Some(session) = slot.as_mut() else {
+        return;
+    };
+    // The task ends at its next look if the engine is gone.
+    let Some(usable) = engine.upgrade().map(|e| pool::usable(&e, session)) else {
+        return;
+    };
+    if !usable {
+        tracing::debug!(%account, "waiting connection from before a sleep; closed");
+        *slot = None;
+        return;
+    }
+    let stop = cancellation.cancelled();
+    if pool::ping(account, session, "background sync", stop).await != Some(true) {
+        *slot = None;
     }
 }
 

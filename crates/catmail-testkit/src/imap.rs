@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
@@ -377,6 +378,9 @@ pub struct Faults {
     pub qq_mail: bool,
     /// Greet as Coremail (NetEase) does: `Coremail System IMap Server Ready`.
     pub coremail: bool,
+    /// Close a connection that sent no command for this long, without a word, as NetEase
+    /// does after about a minute. Not while it idles.
+    pub idle_timeout: Option<Duration>,
 }
 
 impl Default for Faults {
@@ -440,6 +444,7 @@ impl Default for Faults {
             search_ignores_text: false,
             qq_mail: false,
             coremail: false,
+            idle_timeout: None,
         }
     }
 }
@@ -1110,11 +1115,21 @@ async fn serve(
             .await?;
     }
     loop {
-        let (refuse, qq_mail) = {
+        let (refuse, qq_mail, idle_timeout) = {
             let faults = &lock(&state).faults;
-            (faults.reject_append_literal, faults.qq_mail)
+            (
+                faults.reject_append_literal,
+                faults.qq_mail,
+                faults.idle_timeout,
+            )
         };
-        let Some((line, literals)) = read_command(&mut io, refuse, qq_mail).await? else {
+        let command = read_command(&mut io, refuse, qq_mail);
+        // Timed out: closed as at EOF.
+        let command = match idle_timeout {
+            Some(t) => tokio::time::timeout(t, command).await.unwrap_or(Ok(None)),
+            None => command.await,
+        };
+        let Some((line, literals)) = command? else {
             return Ok(());
         };
         match handle(&mut io, &mut session, &state, &line, literals).await? {

@@ -65,7 +65,8 @@ INFO catmail_core::logging: running on os="NixOS 26.11 (Zokor)" kernel="7.2.11-z
 - 连接池（`pool.rs`）：info 只记解释"为什么又登录了一次"的少见事件，keepalive 发现连接已断开（错误、
   NOOP 耗时、连接年龄），丢掉睡前建立的连接，删除账户时关掉的连接数。取用、放回、放不下，以及每次
   keepalive 的 NOOP 往返记在 debug：每条池连接每 4 分钟一次，默认不进文件，排查时用 `CATMAIL_LOG`
-  打开（如 `CATMAIL_LOG=info,catmail_core::pool=debug`）。
+  打开（如 `CATMAIL_LOG=info,catmail_core::pool=debug`）。后台同步在两次检查之间的 NOOP 走同一个
+  `pool::ping`，记法相同，`whose` 字段区分是池里的连接（`pooled`）还是后台同步的（`background sync`）。
 - 按需从服务器取东西（`body::on_server`，正文和附件都走这里）：拿到连接、EXAMINE、FETCH 各用了多久。打开一封
   没下载的邮件慢时，靠它看出慢在哪一步。复用的文件夹 FETCH 落空、重新打开它时另记一行。
 - 问服务器的搜索（`search.rs`，见[问服务器](storage.md#问服务器)）：每次搜索每个账户 info 一行

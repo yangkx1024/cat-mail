@@ -511,6 +511,51 @@ async fn polls_inbox_without_idle() {
     assert_eq!(env.fake.state().connections, 1);
 }
 
+/// Without IDLE the connection waits quietly between checks of INBOX, longer than some
+/// servers keep one (NetEase, a minute): NOOPs keep it open, rather than each check
+/// logging in again.
+#[tokio::test(flavor = "multi_thread")]
+async fn keeps_the_connection_open_between_polls() {
+    let mut state = state();
+    state.faults.idle = false;
+    state.faults.idle_timeout = Some(Duration::from_secs(1));
+    let schedule = SyncSchedule {
+        poll: Duration::from_secs(2),
+        keepalive: Duration::from_millis(100),
+        ..schedule(HOUR, HOUR)
+    };
+    let env = watching(state, schedule).await;
+    env.wait_for_subjects("INBOX", &["one", "two"]).await;
+
+    env.fake.state().inbox().append_simple("three");
+    env.wait_for_subjects("INBOX", &["one", "three", "two"])
+        .await;
+    let st = env.fake.state();
+    assert!(st.received("NOOP") > 0);
+    assert_eq!(st.connections, 1);
+}
+
+/// A connection found dead by a NOOP while waiting is closed, and the next check of
+/// INBOX makes a new one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connection_that_died_while_waiting_is_replaced() {
+    let mut state = state();
+    state.faults.idle = false;
+    let schedule = SyncSchedule {
+        poll: Duration::from_millis(500),
+        keepalive: Duration::from_millis(50),
+        ..schedule(HOUR, HOUR)
+    };
+    let env = watching(state, schedule).await;
+    env.wait_for_subjects("INBOX", &["one", "two"]).await;
+
+    env.fake.state().drop_open_connections();
+    env.fake.state().inbox().append_simple("three");
+    env.wait_for_subjects("INBOX", &["one", "three", "two"])
+        .await;
+    assert_eq!(env.fake.state().connections, 2);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn syncs_every_folder_on_schedule() {
     let env = watching(state(), schedule(Duration::from_millis(300), HOUR)).await;

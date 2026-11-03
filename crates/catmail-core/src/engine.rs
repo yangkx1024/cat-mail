@@ -108,7 +108,9 @@ impl Default for EngineTuning {
             replay_batch: 500,
             whole_message_limit: 2 * 1024 * 1024,
             // Under five minutes: quiet connections lasted that long when the pool still
-            // dropped them at that age. Servers wait far longer (Gmail some 30 minutes).
+            // dropped them at that age. Most servers wait far longer (Gmail some 30
+            // minutes); NetEase closes one quiet for a minute, which the pool leaves be
+            // (#227).
             keepalive: Duration::from_secs(4 * 60),
             rebuild_delay: Duration::from_secs(2 * 60),
         }
