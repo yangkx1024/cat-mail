@@ -15,6 +15,8 @@
 //! Because the pairs of a run sit at consecutive positions, the phrase matches exactly
 //! the original substring. Everything else is left to unicode61.
 
+use catmail_types::{SearchField, SearchTerm};
+
 /// Rewrites `text` for indexing: CJK runs segmented, everything else unchanged.
 pub(crate) fn segment(text: &str) -> String {
     if !text.chars().any(|c| is_cjk(c) || is_wide(c)) {
@@ -38,70 +40,31 @@ pub(crate) fn segment(text: &str) -> String {
 /// Returns `None` if nothing in it is searchable. Every term is quoted, so input can
 /// never be interpreted as FTS5 syntax.
 pub(crate) fn match_expression(input: &str) -> Option<String> {
-    let terms: Vec<String> = parse_terms(input)
+    // Not empty: every term holds a letter or a digit, which some phrase keeps.
+    let terms: Vec<String> = SearchTerm::parse(input)
         .into_iter()
-        .filter_map(|(column, text)| {
-            let phrases = phrases(&text);
-            if phrases.is_empty() {
-                return None;
-            }
+        .map(|term| {
+            let phrases = phrases(&term.text);
             let expr = phrases.join(" AND ");
-            Some(match column {
+            match column(term.field) {
                 Some(column) => format!("{column} : ({expr})"),
                 None if phrases.len() > 1 => format!("({expr})"),
                 None => expr,
-            })
+            }
         })
         .collect();
     (!terms.is_empty()).then(|| terms.join(" AND "))
 }
 
-/// Splits input into (column filter, text) terms: whitespace-separated words or
-/// `"quoted phrases"`, each optionally prefixed with `from:`, `to:` or `subject:`.
-fn parse_terms(input: &str) -> Vec<(Option<&'static str>, String)> {
-    let mut terms = Vec::new();
-    let mut chars = input.chars().peekable();
-    loop {
-        // Control characters (a pasted NUL ends an FTS5 string) separate terms too.
-        while chars
-            .next_if(|c| c.is_whitespace() || c.is_control())
-            .is_some()
-        {}
-        if chars.peek().is_none() {
-            return terms;
-        }
-        let mut word = String::new();
-        let mut quoted = false;
-        while let Some(&c) = chars.peek() {
-            if c == '"' {
-                quoted = !quoted;
-            } else if (c.is_whitespace() || c.is_control()) && !quoted {
-                break;
-            } else if c.is_control() {
-                word.push(' '); // inside a phrase
-            } else {
-                word.push(c);
-            }
-            chars.next();
-        }
-        let filter = COLUMN_FILTERS.iter().find_map(|(prefix, column)| {
-            let head = word.get(..prefix.len())?;
-            head.eq_ignore_ascii_case(prefix)
-                .then(|| (*column, word[prefix.len()..].to_owned()))
-        });
-        terms.push(match filter {
-            Some((column, text)) => (Some(column), text),
-            None => (None, word),
-        });
+/// The index column a field is, if not all of them.
+fn column(field: SearchField) -> Option<&'static str> {
+    match field {
+        SearchField::Anywhere => None,
+        SearchField::From => Some("from_text"),
+        SearchField::To => Some("to_text"),
+        SearchField::Subject => Some("subject"),
     }
 }
-
-/// Query prefixes and the index columns they restrict a term to.
-const COLUMN_FILTERS: [(&str, &str); 3] = [
-    ("from:", "from_text"),
-    ("to:", "to_text"),
-    ("subject:", "subject"),
-];
 
 /// The quoted FTS5 strings a term must all match: one per stretch of CJK and of other
 /// text. Mixed stretches are matched separately rather than as one phrase, since a CJK

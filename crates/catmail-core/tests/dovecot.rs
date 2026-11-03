@@ -728,3 +728,63 @@ async fn bodies_are_prefetched_from_dovecot() {
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bodies_not_downloaded_are_searched_on_dovecot() {
+    let Some(env) = testenv::testenv() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let client = open_client(dir.path(), None);
+    let account = add_account(
+        &client,
+        "catmail",
+        "catmail",
+        None,
+        None,
+        env.imap.clone(),
+        env.imap,
+    )
+    .await;
+    // A folder of our own, only read.
+    let run = run_tag();
+    let folder_dir = maildir_folder(&env.maildir, &run);
+    let utf8 = format!(
+        "From: Test <test@example.com>\r\nSubject: utf-8 {run}\r\n\
+         Date: Sun, 18 Oct 2026 12:00:00 +0000\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\r\n请查收{run}的季度报告\r\n"
+    );
+    // 请查收季度报告 in GBK, as base64: Dovecot decodes it before searching.
+    let gbk = format!(
+        "From: Test <test@example.com>\r\nSubject: gbk {run}\r\n\
+         Date: Sun, 18 Oct 2026 11:00:00 +0000\r\n\
+         Content-Type: text/plain; charset=gbk\r\n\
+         Content-Transfer-Encoding: base64\r\n\r\nx+uy6crVvL62yLGouOY=\r\n"
+    );
+    fs::write(folder_dir.join("new").join("1.utf8"), utf8).unwrap();
+    fs::write(folder_dir.join("new").join("2.gbk"), gbk).unwrap();
+    client.sync_account(account).await.unwrap();
+    let folder = client.find_folder(account, &run).await.unwrap().unwrap();
+
+    let search = async |text: &str, folder| {
+        let mut query = SearchQuery::new(text);
+        (query.account, query.folder) = (Some(account), folder);
+        assert!(client.search(query.clone()).await.unwrap().is_empty());
+        query.found_on_server = client.search_server(query.clone()).await.unwrap();
+        let found = client.search(query).await.unwrap();
+        found
+            .into_iter()
+            .map(|m| m.subject.unwrap_or_default())
+            .collect::<Vec<_>>()
+    };
+    // A substring of Chinese text, without full-text search on the server.
+    assert_eq!(
+        search("季度报告", Some(folder.id)).await,
+        [format!("utf-8 {run}"), format!("gbk {run}")]
+    );
+    // Every folder, the one named in UTF-7 too.
+    assert_eq!(
+        search(&format!("查收{run}"), None).await,
+        [format!("utf-8 {run}")]
+    );
+}

@@ -34,6 +34,7 @@ mod pool;
 mod prefetch;
 mod rebuild;
 mod runtime;
+mod search;
 mod secrets;
 mod send;
 mod sleep;

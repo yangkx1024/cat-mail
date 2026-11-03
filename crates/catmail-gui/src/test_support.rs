@@ -279,6 +279,16 @@ impl TestMail {
         self.fake.state().header_fetches()
     }
 
+    /// The text searches the server received (`UID SEARCH … TEXT …`), without tags.
+    pub fn text_searches(&self) -> Vec<String> {
+        let state = self.fake.state();
+        let searches = state.log.iter().map(|c| &c.line);
+        searches
+            .filter(|line| line.starts_with("UID SEARCH") && line.contains(" TEXT "))
+            .cloned()
+            .collect()
+    }
+
     /// The subjects of the messages stored in `folder`, newest first.
     pub fn stored_subjects(&self, folder: &str) -> Vec<String> {
         pollster::block_on(async {
@@ -294,7 +304,12 @@ impl TestMail {
 
     /// Puts `raw` into the server's INBOX and syncs.
     pub fn deliver_raw_and_sync(&self, raw: &[u8]) {
-        self.fake.state().mailbox_mut("INBOX").append(raw, &[]);
+        self.deliver_raw_to_and_sync("INBOX", raw);
+    }
+
+    /// Puts `raw` into the server's `mailbox` and syncs.
+    pub fn deliver_raw_to_and_sync(&self, mailbox: &str, raw: &[u8]) {
+        self.fake.state().mailbox_mut(mailbox).append(raw, &[]);
         pollster::block_on(self.client.sync_account(self.account.unwrap())).unwrap();
     }
 

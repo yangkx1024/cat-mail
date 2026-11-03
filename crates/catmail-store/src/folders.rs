@@ -170,6 +170,60 @@ impl<'c> Folders<'c> {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The locations a search on the server goes through, by account, each account's in
+    /// [`LOCATION_ORDER`]: those a search within `account` (every account with `None`) and
+    /// `folder` covers (see `Messages::search`), leaving out those without a message
+    /// whose body isn't downloaded, where the server can't find anything local search
+    /// doesn't, and those never synced. Within `folder`, that location, in its account;
+    /// within a Gmail label, All Mail, where its messages are.
+    pub fn searched_on_server(
+        &self,
+        account: Option<AccountId>,
+        folder: Option<FolderId>,
+    ) -> Result<Vec<(AccountId, Vec<FolderSyncState>)>> {
+        let mut accounts = self.conn.prepare_cached(
+            "SELECT id FROM accounts
+             WHERE (:account IS NULL OR id = :account)
+               AND (:folder IS NULL OR id = (SELECT account_id FROM folders WHERE id = :folder))
+             ORDER BY id",
+        )?;
+        let (account, folder) = (account.map(|a| a.0), folder.map(|f| f.0));
+        let accounts = accounts
+            .query_map(
+                named_params! {":account": account, ":folder": folder},
+                |r| Ok(AccountId(r.get(0)?)),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut locations = self.conn.prepare_cached(&format!(
+            "{SYNC_STATE}
+             WHERE account_id = :account AND kind = 'location' AND selectable
+               AND uidvalidity IS NOT NULL
+               AND CASE
+                   WHEN :folder IS NULL THEN id NOT IN gathering
+                   WHEN (SELECT kind FROM folders WHERE id = :folder) = 'location' THEN
+                       id = :folder
+                   ELSE role IS 'all'
+                   END
+               AND EXISTS (SELECT 1 FROM messages
+                           WHERE folder_id = folders.id AND body_state = 'headers'
+                             AND uid IS NOT NULL)
+             {LOCATION_ORDER}"
+        ))?;
+        let mut searched = Vec::new();
+        for account in accounts {
+            let states = locations
+                .query_map(
+                    named_params! {":account": account.0, ":folder": folder},
+                    sync_state,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if !states.is_empty() {
+                searched.push((account, states));
+            }
+        }
+        Ok(searched)
+    }
+
     pub fn sync_state(&self, id: FolderId) -> Result<Option<FolderSyncState>> {
         Ok(self
             .conn

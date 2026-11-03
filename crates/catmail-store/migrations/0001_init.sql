@@ -231,6 +231,14 @@ CREATE VIEW starred AS
     SELECT id, account_id FROM folders WHERE kind = 'label' AND role = 'flagged';
 CREATE INDEX folders_starred ON folders (account_id) WHERE kind = 'label' AND role = 'flagged';
 
+-- Folders that only gather other folders' messages: a standard account's \All and
+-- \Flagged, which Dovecot can have virtual ones of; every message in them has a row
+-- elsewhere too. Search leaves them out unless asked to look there, locally and on the
+-- server (catmail_store::messages, Folders::searched_on_server).
+CREATE VIEW gathering AS
+    SELECT f.id FROM folders f JOIN accounts a ON a.id = f.account_id
+    WHERE f.role IN ('all', 'flagged') AND a.mode IS NOT 'gmail';
+
 -- Label counts, like the folder counts above: a message counts in each of its labels,
 -- and in Starred if \Flagged, while it is in All Mail. Each change is O(labels).
 CREATE TRIGGER labels_count_insert AFTER INSERT ON message_labels BEGIN

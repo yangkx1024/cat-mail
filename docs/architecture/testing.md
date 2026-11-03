@@ -15,12 +15,15 @@
   任何命令的答复里顺带报告新邮件（`* n EXISTS`），`UID FETCH` 只回这条连接已经被告知的邮件（和 Gmail
   一样，刚到、还没报告的 UID 什么也不回），IDLE 时（每 10 ms 看一次）报告 EXPUNGE、EXISTS 和
   flags 变化（`FETCH`）；所选文件夹的 UIDVALIDITY 改变后，IDLE 中或收到下一条命令时回 BYE 并断开，
-  和 Dovecot 一样。记录当前打开的连接数。可注入的故障：
+  和 Dovecot 一样。`UID SEARCH` 认 `ALL`、`UID`、`HEADER`、`TEXT` / `BODY`、`FROM` / `TO` / `CC` /
+  `SUBJECT`、`OR` 和 `CHARSET`，文字按不分大小写的子串匹配原文（像没有全文搜索插件的 Dovecot，但不解码
+  MIME）。记录当前打开的连接数。可注入的故障：
   - 连接：拉邮件头时断线（第 n 次）或挂起，拉正文时断线、挂起或按闸门放行，关闭当前所有连接
     （IDLE 中的也立即断开），每次 IDLE 一开始就断开、立即用 OK 结束或发一行无法解析的数据，拒绝登录；
   - 响应：重复或倒序的 FETCH、不带 UID 的主动 FETCH、section 回 NIL、要正文的 UID FETCH 只回 OK（前 n 次）、比原文多一字节的 RFC822.SIZE、
     STARTTLS 之后的明文注入；
-  - 能力与状态：没有 CONDSTORE，关掉 MOVE、UIDPLUS 和 IDLE，UIDVALIDITY 改变；
+  - 能力与状态：没有 CONDSTORE，关掉 MOVE、UIDPLUS 和 IDLE，UIDVALIDITY 改变，带 CHARSET 的 SEARCH 回
+    `NO [BADCHARSET]`；
   - 写操作：拒绝 APPEND（回 NO，或不要 literal 直接回 NO）、APPEND 存下后不答复就断开，拒绝修改、
     修改后不答复就断开（或只在 EXPUNGE 后断开），COPY 之前先往目标投递一封。
 - **Gmail**（`ServerState::gmail`）：`X-GM-EXT-1`，按[验证结果](labels.md#验证结果)模拟。邮件在"所有邮件"、
@@ -30,7 +33,8 @@
   标签邮箱里的命令作用于邮件本身：flags 是邮件的，`\Deleted` 立即去掉这个标签（在草稿里整封删除），
   MOVE 到"所有邮件"是去掉标签，在两个标签之间 MOVE 是换标签；位置之间 MOVE 时 `X-GM-MSGID` 不变，已删除
   去掉 `\Inbox`，垃圾邮件再去掉 `\Important`。FETCH 支持 `X-GM-*`，在标签邮箱里不列它自己的标签；
-  `UID STORE ±X-GM-LABELS`、`UID SEARCH X-GM-MSGID`。测试用 `move_message` 扮演另一个客户端在位置之间
+  `UID STORE ±X-GM-LABELS`、`UID SEARCH X-GM-MSGID` 和 `X-GM-RAW`（只认我们写出的那部分语法：词、短语、
+  字段前缀和 `{}` 里的 OR）。测试用 `move_message` 扮演另一个客户端在位置之间
   移动邮件；从 `mailboxes` 里拿掉"所有邮件"就是在 Gmail 设置里把它从 IMAP 隐藏。
 - 测试还可以直接在客户端的数据库里加触发器，让某条写入失败，模拟磁盘满（`tests/common` 的 `sql`）。
 - **SMTP**：明文 / TLS / STARTTLS，AUTH PLAIN / LOGIN，记录投递的信封和正文（已去掉点填充）。故障：
@@ -53,7 +57,8 @@
   inotify 发现，通常不到一秒）。草稿同步用单独的 `drafts` 用户（不影响对预置邮件的同步断言）：上传、
   修改后替换、删除，看 Drafts 的 maildir 里只有一份且带 `DS` 标记。后台预取正文用单独的 `prefetch` 用户：
   投递一封小邮件和一封大邮件，同步后等它们的正文出现，小的能按中文正文搜到，大的只取了正文、附件留在
-  服务器上，两封都仍是未读。
+  服务器上，两封都仍是未读。问服务器的搜索在预置用户的一个新文件夹里投递 UTF-8 和 GBK（base64）正文的
+  中文邮件，确认没有全文搜索插件的 Dovecot 能按子串搜到两封，并搜过包括 UTF-7 名字在内的全部文件夹。
 - **SMTP**（`tests/submission.rs`）：Dovecot 的 submission 服务（STARTTLS 与隐式 TLS 各一个端口，
   `run.sh` 用 openssl 生成 127.0.0.1 的自签名证书，测试只信任它；`submission_max_mail_size` 为 1 MiB）
   转发给 mailpit，测试从 mailpit 的 HTTP API 读回：信封收件人（密送只在信封里）、原文与 Sent 里的副本
