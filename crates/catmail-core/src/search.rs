@@ -55,8 +55,11 @@ struct Held {
     /// until a sync of every folder gets through after that, as each try counts against
     /// the account.
     refused: Option<Instant>,
-    /// The server can't search text: asking it again would only cost a login and the
-    /// round trips.
+    /// The server turned out unable to search text, or to ignore it: asking it again
+    /// would only cost the round trips. One recorded on connecting as unable to isn't
+    /// connected to at all (see `Folders::searched_on_server`): this is for one found out
+    /// on a search's own first connection, and for one ignoring the text, which is only
+    /// ever kept here.
     unsearchable: bool,
 }
 

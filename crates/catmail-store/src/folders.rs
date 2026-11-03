@@ -175,7 +175,8 @@ impl<'c> Folders<'c> {
     /// `folder` covers (see `Messages::search`), leaving out those without a message
     /// whose body isn't downloaded, where the server can't find anything local search
     /// doesn't, and those never synced. Within `folder`, that location, in its account;
-    /// within a Gmail label, All Mail, where its messages are.
+    /// within a Gmail label, All Mail, where its messages are. Accounts whose server
+    /// can't search text have none.
     pub fn searched_on_server(
         &self,
         account: Option<AccountId>,
@@ -183,7 +184,8 @@ impl<'c> Folders<'c> {
     ) -> Result<Vec<(AccountId, Vec<FolderSyncState>)>> {
         let mut accounts = self.conn.prepare_cached(
             "SELECT id FROM accounts
-             WHERE (:account IS NULL OR id = :account)
+             WHERE searches_text
+               AND (:account IS NULL OR id = :account)
                AND (:folder IS NULL OR id = (SELECT account_id FROM folders WHERE id = :folder))
              ORDER BY id",
         )?;

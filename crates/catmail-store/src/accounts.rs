@@ -128,6 +128,29 @@ impl<'c> Accounts<'c> {
         )? > 0)
     }
 
+    /// Whether the account's IMAP server searches text, as recorded: until connected to,
+    /// and for no such account, taken to.
+    pub fn searches_text(&self, id: AccountId) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT searches_text FROM accounts WHERE id = ?1",
+                [id.0],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(true))
+    }
+
+    /// Records whether the account's IMAP server searches text, as found on connecting.
+    pub fn set_searches_text(&self, id: AccountId, searches: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE accounts SET searches_text = ?2 WHERE id = ?1",
+            (id.0, searches),
+        )?;
+        Ok(())
+    }
+
     /// Records whether the account's server is Gmail's, as found on connecting. Returns
     /// whether it changed.
     pub fn set_gmail_server(&self, id: AccountId, gmail: bool) -> Result<bool> {
@@ -257,6 +280,19 @@ mod tests {
             "the account's password"
         );
         assert!(Identities::new(&conn).secret_keys(a.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn searching_text_is_recorded() {
+        let store = test_util::store();
+        let conn = store.conn();
+        let accounts = Accounts::new(&conn);
+        let a = accounts
+            .insert(&new_account("a@example.com"), &key("a@example.com"))
+            .unwrap();
+        assert!(accounts.searches_text(a.id).unwrap());
+        accounts.set_searches_text(a.id, false).unwrap();
+        assert!(!accounts.searches_text(a.id).unwrap());
     }
 
     #[test]

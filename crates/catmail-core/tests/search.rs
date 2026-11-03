@@ -1,13 +1,13 @@
 //! Searching the servers for the text of messages whose bodies aren't downloaded, against
 //! the fake IMAP server.
 
-use catmail_core::{MessageId, SearchQuery};
-use catmail_testkit::{FakeMailbox, ServerState};
+use catmail_core::{MessageId, SearchQuery, Verify};
+use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 use tokio::sync::Semaphore;
 
 mod common;
 
-use common::{Env, synced_env as env};
+use common::{Env, env_added, synced_env as env};
 
 /// A plain message, dated by `minute`.
 fn mail(subject: &str, minute: u32, body: &str) -> Vec<u8> {
@@ -150,6 +150,7 @@ async fn qq_mail_is_searched_without_text_or_literals() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_server_that_cant_search_text_isnt_asked() {
     let env = env(mailboxes()).await;
+    // Greeting as one that searches when synced: the search finds out.
     env.fake.state().faults.coremail = true;
     let (start, connections) = (env.log_len(), env.connections());
     for _ in 0..2 {
@@ -160,6 +161,34 @@ async fn a_server_that_cant_search_text_isnt_asked() {
     assert_eq!(env.examined(start), ["INBOX"]);
     assert_eq!(env.searches(start), Vec::<String>::new());
     assert_eq!(env.connections(), connections + 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_greeting_that_it_cant_search_text_isnt_logged_in_to() {
+    let mut state = mailboxes();
+    state.faults.coremail = true;
+    let mut env = env_added(state, SmtpState::new("alice", "pw"), Verify::Login, |b| b).await;
+    // Adding the account logged in to it.
+    assert!(!env.query::<bool>("SELECT searches_text FROM accounts"));
+    env.client.sync_account(env.account).await.unwrap();
+    for reopened in [false, true] {
+        if reopened {
+            env.reopen(|b| b).await;
+        }
+        let (start, connections) = (env.log_len(), env.connections());
+        let found = env.client.search_server(SearchQuery::new("pelican")).await;
+        assert_eq!(found.unwrap(), [], "reopened: {reopened}");
+        assert_eq!(env.commands_since(start), Vec::<String>::new());
+        assert_eq!(env.connections(), connections);
+    }
+
+    // Recorded anew on connecting: a sync finds the server greeting otherwise.
+    env.fake.state().faults.coremail = false;
+    env.client.sync_account(env.account).await.unwrap();
+    assert_eq!(
+        env.search_both(SearchQuery::new("pelican")).await,
+        ["Quarterly", "Old"]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
