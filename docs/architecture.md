@@ -45,6 +45,10 @@ GPUI 有自己的 executor，不是 tokio；IMAP / SMTP 栈却依赖 tokio react
 
 - `Runtime` 与 `Engine` 分放在两个 `Arc` 里，后台任务只持有 `Engine`，不会在 runtime 自己的
   线程上 drop 最后一个 runtime 引用。
+- `MailClient` 的各个克隆共享一份引擎，全部 drop 时关闭；`MailClient::shut_down` 不等它们 drop
+  就关：各克隆之后的调用都得到 `Error::Closed`，自建 runtime 随即 `shutdown_background()`，进行中的
+  调用同样得到 `Error::Closed`。给不会 drop 自己状态的前端（GPUI 退出时）用。它从槽里取出的引擎交给
+  一个单独的线程 drop：没有别人持有时关闭就发生在那里，关数据库可能做 WAL checkpoint，不该占着 UI 线程。
 - 自建 runtime drop 时 `shutdown_background()`，不等待任务：状态都已落 SQLite。借用的 runtime 不会
   被关掉，所以只持 `Weak<Engine>` 的后台任务（发信、GC）还 select 引擎的关闭信号（`Engine::closing`，
   随引擎 drop），客户端一没就结束，不等下一次定时器；每账户的后台同步靠账户的取消信号，同样随引擎 drop。

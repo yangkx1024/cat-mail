@@ -29,7 +29,7 @@ pub enum Engine {
     Open(MailClient),
     /// The data directory couldn't be opened, typically because the CLI is using it.
     Failed(SharedString),
-    /// The app is quitting and has let go of it, so it can close.
+    /// The app is quitting and has shut it down.
     Closed,
 }
 
@@ -166,8 +166,17 @@ impl Resident {
                 }
             }));
         }
-        cx.set_global(Self {
-            engine: Engine::Opening,
+        cx.set_global(Self::new(Engine::Opening, tasks));
+        cx.on_window_closed(Self::window_closed).detach();
+        cx.on_action(|_: &crate::actions::Quit, cx| Self::quit(QuitReason::Shortcut, cx));
+        cx.on_app_quit(Self::shut_down).detach();
+        cx.on_system_wake(Self::woke).detach();
+        Self::open_main(cx)
+    }
+
+    fn new(engine: Engine, tasks: Vec<Task<()>>) -> Self {
+        Self {
+            engine,
             main: None,
             windowing: Windowing::Windowed,
             quitting: None,
@@ -179,12 +188,14 @@ impl Resident {
             _switch: Task::ready(()),
             _quit: Task::ready(()),
             _tasks: tasks,
-        });
-        cx.on_window_closed(Self::window_closed).detach();
-        cx.on_action(|_: &crate::actions::Quit, cx| Self::quit(QuitReason::Shortcut, cx));
-        cx.on_app_quit(Self::shut_down).detach();
-        cx.on_system_wake(Self::woke).detach();
-        Self::open_main(cx)
+        }
+    }
+
+    /// Only the engine, open, without the window or what starts with it: for tests of
+    /// those that take it from here.
+    #[cfg(test)]
+    pub fn hold(client: MailClient, cx: &mut App) {
+        cx.set_global(Self::new(Engine::Open(client), Vec::new()));
     }
 
     /// Quits on SIGINT, SIGTERM or SIGHUP (on Windows, the console's events) as the tray's
@@ -212,23 +223,19 @@ impl Resident {
     }
 
     /// However the app quits: says why, where the log of an app that was killed or
-    /// crashed just stops. GPUI quits without dropping the app's state, so this lets go
-    /// of the engine, which closes once GPUI has closed the windows that hold the rest.
-    /// Waits for it within the time GPUI gives, so the log says whether it did.
+    /// crashed just stops. GPUI quits without dropping the app's state, so this shuts the
+    /// engine down, whoever still holds it. Waits for it to close within the time GPUI
+    /// gives, so the log says whether it did.
     fn shut_down(cx: &mut App) -> impl Future<Output = ()> + use<> {
         let resident = cx.global_mut::<Self>();
         let reason = resident.quitting.unwrap_or(QuitReason::Platform);
         tracing::info!(%reason, "quitting");
         let engine = std::mem::replace(&mut resident.engine, Engine::Closed);
-        // They hold the engine too.
-        if cx.has_global::<Tray>() {
-            cx.remove_global::<Tray>();
-        }
-        if cx.has_global::<Notifier>() {
-            cx.remove_global::<Notifier>();
-        }
         let closed = match engine {
-            Engine::Open(client) => Some(client.closed()),
+            Engine::Open(client) => {
+                client.shut_down();
+                Some(client.closed())
+            }
             Engine::Opening | Engine::Failed(_) | Engine::Closed => None,
         };
         let executor = cx.background_executor().clone();
@@ -241,7 +248,7 @@ impl Resident {
                 .await
                 .is_err()
             {
-                // Something still holds a handle: ended with the process, mid-work maybe.
+                // Blocking work under way, such as a write to the database, still holds it.
                 tracing::warn!("the engine is still open; quitting anyway");
             }
         }
@@ -257,6 +264,15 @@ impl Resident {
 
     pub fn engine(cx: &App) -> &Engine {
         &cx.global::<Self>().engine
+    }
+
+    /// The engine, while it is open. What lives with the app takes it from here each time
+    /// rather than keeping a handle of its own: there is one engine state, `Resident`'s.
+    pub fn client(cx: &App) -> Option<MailClient> {
+        match Self::engine(cx) {
+            Engine::Open(client) => Some(client.clone()),
+            Engine::Opening | Engine::Failed(_) | Engine::Closed => None,
+        }
     }
 
     /// Opens a new mailbox where the last one was, or where a notification or the tray
@@ -304,10 +320,9 @@ impl Resident {
     /// Syncs every account now, whether the main window is open or not: the engine's
     /// background sync does it, and progress and failures show as the accounts' status.
     pub fn sync(cx: &mut App) {
-        let Engine::Open(client) = Self::engine(cx) else {
+        let Some(client) = Self::client(cx) else {
             return;
         };
-        let client = client.clone();
         cx.background_spawn(async move {
             if let Err(e) = client.sync_now().await {
                 tracing::warn!(error = %e, "couldn't sync");
@@ -349,12 +364,14 @@ impl Resident {
                 Engine::Failed(e.to_string().into())
             }
         };
-        if let Engine::Open(client) = &engine {
-            Notifier::start(client.clone(), cx);
-            Tray::start(client.clone(), cx);
-        }
+        let open = matches!(engine, Engine::Open(_));
         let failed = matches!(engine, Engine::Failed(_));
         cx.global_mut::<Self>().engine = engine;
+        // Both take the engine from here.
+        if open {
+            Notifier::start(cx);
+            Tray::start(cx);
+        }
         // The window was closed while it opened: there is nothing to keep running.
         if failed && cx.windows().is_empty() {
             exit(QuitReason::EngineFailed, cx);
@@ -736,23 +753,33 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn quitting_lets_go_of_the_engine_so_it_closes(cx: &mut TestAppContext) {
+    fn quitting_closes_the_engine_whoever_holds_it(cx: &mut TestAppContext) {
         let mail = start(None, cx);
         main_mailbox(cx);
+        // A sync under way, held at the server, and a handle kept here.
+        mail.deliver("INBOX", "Lunch?");
+        let _gate = mail.hold_fetches();
+        let fetches = mail.header_fetches();
+        let (client, account) = (mail.client.clone(), mail.account());
+        // On a thread of its own: blocking on it here would stop the test's executor.
+        let syncing = std::thread::spawn(move || pollster::block_on(client.sync_account(account)));
+        wait_until(|| mail.header_fetches() > fetches);
         let mut closed = Box::pin(mail.client.closed());
-        drop(mail.client);
 
         cx.update(|cx| Resident::quit(QuitReason::Shortcut, cx));
         cx.run_until_parked();
         // What the platform does once asked to quit.
         cx.quit();
-        // Work started before, such as syncing the folder the window opened on, still
-        // holds it until it is done.
         let mut noop = std::task::Context::from_waker(std::task::Waker::noop());
         wait_until(|| {
             cx.run_until_parked();
             closed.as_mut().poll(&mut noop).is_ready()
         });
+        let synced = syncing.join().unwrap();
+        assert!(
+            matches!(synced, Err(catmail_core::Error::Closed)),
+            "{synced:?}"
+        );
     }
 
     /// Closes the main window, as the user does.

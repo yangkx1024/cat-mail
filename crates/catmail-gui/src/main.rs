@@ -185,12 +185,11 @@ impl MainWindow {
     }
 
     fn follow_engine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Engine::Open(client) = Resident::engine(cx) else {
+        let Some(client) = Resident::client(cx) else {
             // Rendered from the engine's state.
             cx.notify();
             return;
         };
-        let client = client.clone();
         let mailbox = cx.new(|cx| Mailbox::new(client, window, cx));
         Resident::adopt(&mailbox, window, cx);
         self.mailbox = Some(mailbox);

@@ -24,7 +24,6 @@ use crate::{Config, DataDirLock, Error, Result};
 
 /// State shared by every `MailClient` clone and every engine task.
 pub(crate) struct Engine {
-    pub config: Config,
     /// Exclusive lock on the data directory, held for the engine's lifetime: one engine
     /// per data directory, so sync workers, the outbox and events are never split
     /// across processes. Other frontends will reach the running engine over IPC.
@@ -359,6 +358,7 @@ impl Drop for Engine {
 }
 
 /// Tells a task holding the engine weakly that the engine is gone.
+#[derive(Clone)]
 pub(crate) struct Closing(watch::Receiver<()>);
 
 impl Closing {
@@ -403,7 +403,7 @@ impl Cancellation {
 
 impl Engine {
     pub fn new(
-        config: Config,
+        config: &Config,
         data_dir_lock: DataDirLock,
         store: Store,
         blobs: BlobStore,
@@ -413,7 +413,6 @@ impl Engine {
     ) -> Self {
         let image_cache = Arc::new(ImageCache::new(config.image_cache_dir()));
         Self {
-            config,
             _data_dir_lock: data_dir_lock,
             store,
             blobs,

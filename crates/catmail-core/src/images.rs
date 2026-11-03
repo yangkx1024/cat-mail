@@ -7,8 +7,8 @@ use catmail_proto::http::{ImageFetcher, RemoteImage};
 use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinSet;
 
-use crate::engine::blocking;
-use crate::image_cache::{ImageCache, MAX_CACHE_BYTES};
+use crate::engine::{Engine, blocking};
+use crate::image_cache::MAX_CACHE_BYTES;
 use crate::runtime::Runtime;
 use crate::{Error, Result};
 
@@ -35,10 +35,12 @@ impl RemoteImageStream {
     }
 }
 
+/// Holds `engine` until done, and each write to the cache, which is in its data directory,
+/// until that is done.
 pub(crate) fn fetch(
     rt: &Runtime,
     fetcher: ImageFetcher,
-    cache: Arc<ImageCache>,
+    engine: Arc<Engine>,
     urls: Vec<String>,
 ) -> RemoteImageStream {
     let (sender, fetched) = mpsc::channel(CONCURRENT_FETCHES);
@@ -46,8 +48,8 @@ pub(crate) fn fetch(
         let mut urls: Vec<String> = urls.into_iter().take(MAX_REMOTE_IMAGES).collect();
         // Cached ones first: they come at once, and nothing is fetched for them.
         let cached = {
-            let (cache, urls) = (cache.clone(), urls.clone());
-            blocking(move || Ok(cache.get_many(&urls)))
+            let (engine, urls) = (engine.clone(), urls.clone());
+            blocking(move || Ok(engine.image_cache.get_many(&urls)))
                 .await
                 .unwrap_or_default()
         };
@@ -61,11 +63,11 @@ pub(crate) fn fetch(
         let permits = Arc::new(Semaphore::new(CONCURRENT_FETCHES));
         let mut fetches = JoinSet::new();
         for url in urls {
-            let (fetcher, permits, cache) = (fetcher.clone(), permits.clone(), cache.clone());
+            let (fetcher, permits, engine) = (fetcher.clone(), permits.clone(), engine.clone());
             fetches.spawn(async move {
                 let _permit = permits.acquire_owned().await;
                 let image = match fetcher.fetch(&url).await {
-                    Ok(image) => keep(cache, url.clone(), image).await,
+                    Ok(image) => keep(engine, url.clone(), image).await,
                     Err(e) => Err(Error::from(e)),
                 };
                 (url, image)
@@ -97,7 +99,7 @@ pub(crate) fn fetch(
         if !stored {
             return;
         }
-        match blocking(move || Ok(cache.trim(MAX_CACHE_BYTES)?)).await {
+        match blocking(move || Ok(engine.image_cache.trim(MAX_CACHE_BYTES)?)).await {
             Ok(0) => {}
             Ok(freed) => tracing::debug!(freed, "trimmed the image cache"),
             Err(e) => tracing::warn!(error = %e, "couldn't trim the image cache"),
@@ -108,9 +110,9 @@ pub(crate) fn fetch(
 
 /// Caches `image` for `url`, and hands it back. Not being able to keep it is no reason not
 /// to show it.
-async fn keep(cache: Arc<ImageCache>, url: String, image: RemoteImage) -> Result<RemoteImage> {
+async fn keep(engine: Arc<Engine>, url: String, image: RemoteImage) -> Result<RemoteImage> {
     blocking(move || {
-        if let Err(e) = cache.put(&url, &image) {
+        if let Err(e) = engine.image_cache.put(&url, &image) {
             tracing::warn!(error = %e, "couldn't cache a remote image");
         }
         Ok(image)

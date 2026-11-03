@@ -271,7 +271,7 @@ mod tests {
             .secrets(Arc::new(MemorySecrets::default()))
             .open()
             .unwrap();
-        let engine = client.engine();
+        let engine = &client.engine().unwrap();
         let examining = async |name: &str| {
             let server = ServerConfig {
                 host: "127.0.0.1".into(),
