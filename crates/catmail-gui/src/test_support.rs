@@ -353,14 +353,17 @@ pub fn solid_png(width: u32, height: u32, rgb: [u8; 3]) -> Vec<u8> {
 
 /// Calls `step` until it returns true; `step` should let GPUI run its queued work first.
 /// The engine works on its own threads, which GPUI's test scheduler doesn't see, so this
-/// also waits in real time between calls.
+/// also waits in real time between calls. A timeout is reported where this was called,
+/// so a CI log tells which wait it was.
+#[track_caller]
 pub fn wait_until(mut step: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    const TIMEOUT: Duration = Duration::from_secs(10);
+    let deadline = Instant::now() + TIMEOUT;
     loop {
         if step() {
             return;
         }
-        assert!(Instant::now() < deadline, "timed out");
+        assert!(Instant::now() < deadline, "timed out after {TIMEOUT:?}");
         std::thread::sleep(Duration::from_millis(10));
     }
 }
