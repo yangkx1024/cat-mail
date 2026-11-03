@@ -19,7 +19,7 @@ use tokio::runtime::Handle;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use crate::drafts::SizeLimits;
+use crate::connection::Announced;
 use crate::engine::{
     Closing, DEFAULT_DRAFT_UPLOAD_DELAY, Engine, EngineTuning, blocking, lock, now,
 };
@@ -478,9 +478,9 @@ impl MailClient {
     /// server fails with comes wrapped in [`Error::OutgoingServer`]. What the servers said
     /// about message size is kept, so that attachments are limited by it before the
     /// first send, and whether the IMAP server is Gmail's, which identities guess by
-    /// whether it saves sent mail; the IMAP connection goes on to sync the account. With
-    /// [`Verify::Skip`] the servers aren't contacted; the first
-    /// [`sync_account`](Self::sync_account) does.
+    /// whether it saves sent mail, and whether it searches text; the IMAP connection goes
+    /// on to sync the account. With [`Verify::Skip`] the servers aren't contacted; the
+    /// first [`sync_account`](Self::sync_account) does.
     pub async fn add_account(
         &self,
         mut new: NewAccount,
@@ -494,27 +494,26 @@ impl MailClient {
         self.shared
             .rt
             .run(async move {
-                let (limits, session) = match verify {
+                let (smtp_max_size, session) = match verify {
                     Verify::Login => {
-                        let (limits, session) = check_account(&engine, &new, &password).await?;
-                        (limits, Some(session))
+                        let (smtp, session) = check_account(&engine, &new, &password).await?;
+                        (smtp, Some(session))
                     }
-                    Verify::Skip => (SizeLimits::default(), None),
+                    Verify::Skip => (None, None),
                 };
-                let gmail = session.as_ref().is_some_and(Session::is_gmail);
+                let announced = session.as_ref().map(Announced::of).unwrap_or_default();
                 let inserted = blocking({
                     let engine = engine.clone();
                     move || {
                         insert_with_secret(&engine, "account", &new.email, &password, |key| {
                             Ok(engine.store.write(|db| {
                                 let account = db.accounts().insert(&new, key)?;
-                                db.accounts().set_append_limit(account.id, limits.append)?;
-                                db.accounts().set_gmail_server(account.id, gmail)?;
+                                announced.record(db, account.id)?;
                                 if let Some(own) = db.identities().default_of(account.id)? {
-                                    db.identities().set_smtp_max_size(own, limits.smtp)?;
+                                    db.identities().set_smtp_max_size(own, smtp_max_size)?;
                                 }
                                 Ok(Account {
-                                    gmail_server: gmail,
+                                    gmail_server: announced.gmail,
                                     ..account
                                 })
                             })?)
@@ -1521,12 +1520,12 @@ fn check_password(password: &SecretString) -> Result<()> {
 }
 
 /// Logs in to the account's IMAP and SMTP servers, both at once, and out of the SMTP
-/// server again; returns what they said about message size, and the IMAP connection.
+/// server again; returns the SIZE the SMTP server announced, and the IMAP connection.
 async fn check_account(
     engine: &Engine,
     new: &NewAccount,
     password: &SecretString,
-) -> Result<(SizeLimits, Session)> {
+) -> Result<(Option<u64>, Session)> {
     let credentials = Credentials {
         username: new.username.clone(),
         password: password.clone(),
@@ -1540,10 +1539,7 @@ async fn check_account(
         smtp = &mut smtp => (imap.await?, smtp),
     };
     match smtp {
-        Ok(smtp) => {
-            let append = connection::announced_append_limit(session.capabilities());
-            Ok((SizeLimits { append, smtp }, session))
-        }
+        Ok(smtp) => Ok((smtp, session)),
         Err(e) => {
             session.logout().await;
             Err(e)

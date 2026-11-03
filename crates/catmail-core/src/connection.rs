@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use catmail_proto::imap::Session;
+use catmail_proto::imap::{Session, TextSearch};
 use catmail_proto::{Credentials, smtp};
 use catmail_store::{Db, DraftSnapshot};
 use catmail_types::{Account, AccountId, Address, DraftId, Event, IdentityId, ServerConfig};
@@ -19,24 +19,22 @@ pub(crate) const IO_TIMEOUT: Duration = Duration::from_secs(60);
 /// Opens a new connection to the account's IMAP server and logs in. What the server
 /// tells of itself is recorded if it changed: servers change their APPENDLIMIT, and
 /// whether it is Gmail's is known from the first login, not only once synced (identities
-/// guess by it whether the server saves what they send to Sent). Failing to only leaves
-/// what was recorded before, which sending checks anyway.
+/// guess by it whether the server saves what they send to Sent), and whether it searches
+/// text, so that searches on the server needn't log in to find out. Failing to only
+/// leaves what was recorded before, which sending checks anyway, and a search finds out
+/// again.
 pub(crate) async fn connect(engine: &Arc<Engine>, account_id: AccountId) -> Result<Session> {
-    let (account, credentials, append_limit) = account_credentials(engine, account_id).await?;
+    let (account, credentials, recorded) = account_credentials(engine, account_id).await?;
     let began = Instant::now();
     let session = login(engine, &account.imap, &credentials).await?;
     tracing::info!(account = %account_id, host = %account.imap.host, took = ?began.elapsed(),
         "logged in to IMAP");
-    let announced = announced_append_limit(session.capabilities());
-    let gmail = session.is_gmail();
-    if (append_limit, account.gmail_server) != (announced, gmail) {
-        let recorded = engine
-            .write(move |db| {
-                db.accounts().set_append_limit(account_id, announced)?;
-                db.accounts().set_gmail_server(account_id, gmail)
-            })
-            .await;
-        match recorded {
+    let announced = Announced::of(&session);
+    if recorded != announced {
+        match engine
+            .write(move |db| announced.record(db, account_id))
+            .await
+        {
             Ok(true) => engine.emit(Event::AccountChanged {
                 account: account_id,
             }),
@@ -47,13 +45,46 @@ pub(crate) async fn connect(engine: &Arc<Engine>, account_id: AccountId) -> Resu
     Ok(session)
 }
 
-/// The largest message the IMAP server takes in APPEND, as recorded. `APPENDLIMIT=0` is no
-/// APPEND at all (RFC 7889): no size, nor anything for attachments to fit, since no copy
-/// of any size is kept.
-pub(crate) fn announced_append_limit(
-    capabilities: &catmail_proto::imap::Capabilities,
-) -> Option<u64> {
-    capabilities.append_limit().filter(|&limit| limit > 0)
+/// What the IMAP server tells of itself, as recorded on connecting (see [`connect`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Announced {
+    /// The largest message it takes in APPEND. `APPENDLIMIT=0` is no APPEND at all
+    /// (RFC 7889): no size, nor anything for attachments to fit, since no copy of any
+    /// size is kept.
+    pub append_limit: Option<u64>,
+    /// It is Gmail's (X-GM-EXT-1): [`Account::gmail_server`].
+    pub gmail: bool,
+    /// Its greeting doesn't say it can't search text (see `Session::text_search`).
+    pub searches_text: bool,
+}
+
+/// As for a server not connected to yet.
+impl Default for Announced {
+    fn default() -> Self {
+        Self {
+            append_limit: None,
+            gmail: false,
+            searches_text: true,
+        }
+    }
+}
+
+impl Announced {
+    pub fn of(session: &Session) -> Self {
+        Self {
+            append_limit: session.capabilities().append_limit().filter(|&l| l > 0),
+            gmail: session.is_gmail(),
+            searches_text: session.text_search() != TextSearch::Unsupported,
+        }
+    }
+
+    /// Returns whether the [`Account`] changed: whether it is Gmail's.
+    pub fn record(self, db: &Db<'_>, account: AccountId) -> catmail_store::Result<bool> {
+        let accounts = db.accounts();
+        accounts.set_append_limit(account, self.append_limit)?;
+        accounts.set_searches_text(account, self.searches_text)?;
+        accounts.set_gmail_server(account, self.gmail)
+    }
 }
 
 /// Writes a size limit with `record`, which only logs failing to: see [`connect`].
@@ -204,15 +235,25 @@ pub(crate) async fn smtp_login(
 async fn account_credentials(
     engine: &Arc<Engine>,
     account_id: AccountId,
-) -> Result<(Account, Credentials, Option<u64>)> {
-    let ((account, secret_key), append_limit) = engine
+) -> Result<(Account, Credentials, Announced)> {
+    let ((account, secret_key), recorded) = engine
         .read(move |db| {
             let accounts = db.accounts();
             let found = accounts
                 .get(account_id)?
                 .zip(accounts.secret_key(account_id)?);
-            let append_limit = accounts.append_limit(account_id)?;
-            Ok(found.map(|found| (found, append_limit)))
+            let (append_limit, searches_text) = (
+                accounts.append_limit(account_id)?,
+                accounts.searches_text(account_id)?,
+            );
+            Ok(found.map(|(account, key)| {
+                let recorded = Announced {
+                    append_limit,
+                    gmail: account.gmail_server,
+                    searches_text,
+                };
+                ((account, key), recorded)
+            }))
         })
         .await?
         .ok_or_else(|| Error::AccountNotFound(account_id.to_string()))?;
@@ -221,7 +262,7 @@ async fn account_credentials(
         username: account.username.clone(),
         password,
     };
-    Ok((account, credentials, append_limit))
+    Ok((account, credentials, recorded))
 }
 
 /// The password in the keyring entry `secret_key`, for the account or identity with
