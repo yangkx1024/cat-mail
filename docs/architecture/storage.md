@@ -104,7 +104,9 @@ rowid 即 `id`，不必再列一次）：先取游标那个日期里 `id` 更小
 - **查询翻译**（`Session::uid_search_text`）：查询解析在 `catmail-types`（`SearchTerm::parse`），本地和服务器
   共用。普通 IMAP 每个词一个键（隐含 AND）：`TEXT`，`from:` → `FROM`，`to:` → `OR TO … CC …`，`subject:` →
   `SUBJECT`；服务器按子串匹配。Gmail 用 `X-GM-RAW`，写成它自己的语法（`"词"`、`from:"…"`、`{to:"…" cc:"…"}`、
-  `subject:"…"`），与网页版的搜索一致。有非 ASCII 字符时加 `CHARSET UTF-8`，文字用字面量发送。
+  `subject:"…"`），与网页版的搜索一致：按词匹配，中文先分词，词中间的片段（"长桥证券"里的"桥证"）和英文
+  前缀都搜不到（#222 验证），本地 FTS 的双字切分能搜到；正文没下载的邮件 Gmail 补到的会少一些，可以接受。
+  有非 ASCII 字符时加 `CHARSET UTF-8`，文字用字面量发送。
 - **按问候语认出的服务器**（`TextSearch`，2026-11 在真实服务器上验证，见 #222）：
   - QQ 邮箱（含企业邮，问候语以 `QQMail ` 开头）无视 `TEXT`（`TEXT x`、`NOT TEXT x` 都返回整个文件夹），
     也不读 SEARCH 里的字面量，把 `{n}` 本身当成要搜的文字。所以不带字段的词写成 `OR BODY … OR SUBJECT … OR
