@@ -26,6 +26,7 @@ use catmail_types::{AttachmentId, BlobHash, Event, Message, MessageId};
 
 use crate::engine::{Engine, blocking};
 use crate::pool::with_session;
+use crate::rebuild;
 use crate::{Error, Result};
 
 const GONE: Error = Error::OutOfSync("the message is no longer on the server");
@@ -297,6 +298,12 @@ pub(crate) struct Parts {
 async fn ensure_downloaded(engine: &Arc<Engine>, id: MessageId, whole: bool) -> Result<()> {
     let location = locate(engine, id).await?;
     if location.downloaded {
+        if location
+            .body_version
+            .is_some_and(|v| v < mime::CONTENT_VERSION)
+        {
+            rebuild::on_open(engine, id).await;
+        }
         return Ok(());
     }
     let (account, folder) = (location.account, location.folder);
@@ -310,26 +317,33 @@ async fn ensure_downloaded(engine: &Arc<Engine>, id: MessageId, whole: bool) -> 
     })
     .await?;
 
-    let engine2 = engine.clone();
-    let stored = blocking(move || {
-        let body = parse(&engine2, fetched)?;
-        if engine2
-            .store
-            .write(|db| db.messages().store_body(id, &body))?
-        {
-            return Ok(true);
-        }
-        // Not stored: a concurrent download stored it first, or the message is gone.
-        let location = engine2.store.read(|db| db.messages().location(id))?;
-        match location {
-            Some(location) if location.downloaded => Ok(false),
-            _ => Err(Error::MessageNotFound(id)),
+    let stored = blocking({
+        let engine = engine.clone();
+        move || {
+            let body = parse(&engine, fetched)?;
+            let labels = engine.store.write(|db| {
+                let messages = db.messages();
+                Ok(messages
+                    .store_body(id, &body)?
+                    .then(|| messages.touched_labels()))
+            })?;
+            if labels.is_some() {
+                return Ok(labels);
+            }
+            // Not stored: a concurrent download stored it first, or the message is gone.
+            let location = engine.store.read(|db| db.messages().location(id))?;
+            match location {
+                Some(location) if location.downloaded => Ok(None),
+                _ => Err(Error::MessageNotFound(id)),
+            }
         }
     })
     .await?;
-    if stored {
-        // Snippet and attachment marker changed.
-        engine.emit(Event::MessagesChanged { account, folder });
+    if let Some(labels) = stored {
+        // Snippet and attachment marker changed, where it is and on Gmail where it shows.
+        for folder in labels.into_iter().chain([folder]) {
+            engine.emit(Event::MessagesChanged { account, folder });
+        }
     }
     Ok(())
 }
@@ -453,7 +467,7 @@ async fn reopen(session: &mut Session, location: &MessageLocation) -> Result<Dur
 }
 
 /// Stores the raw message and every part that came with it in the blob store.
-fn new_body(engine: &Engine, content: Content, raw: Option<&[u8]>) -> Result<NewBody> {
+pub(crate) fn new_body(engine: &Engine, content: Content, raw: Option<&[u8]>) -> Result<NewBody> {
     let raw = raw.map(|raw| engine.blobs.put_bytes(raw)).transpose()?;
     let attachments = content
         .parts
@@ -482,6 +496,7 @@ fn new_body(engine: &Engine, content: Content, raw: Option<&[u8]>) -> Result<New
         raw,
         snippet: content.snippet,
         attachments,
+        version: mime::CONTENT_VERSION,
     })
 }
 
@@ -518,13 +533,21 @@ async fn attachment_source(engine: &Arc<Engine>, id: AttachmentId) -> Result<Att
 /// `None` if the blob has gone missing from disk, so the caller fetches it again.
 pub(crate) async fn read_blob(engine: &Arc<Engine>, hash: BlobHash) -> Result<Option<Vec<u8>>> {
     let engine = engine.clone();
-    blocking(move || match engine.blobs.read(&hash) {
-        Ok(data) => Ok(Some(data)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+    blocking(move || {
+        let data = stored(&engine, &hash)?;
+        if data.is_none() {
             tracing::warn!(%hash, "referenced blob is missing; fetching again");
-            Ok(None)
         }
-        Err(e) => Err(e.into()),
+        Ok(data)
     })
     .await
+}
+
+/// Blocking. The blob's content, `None` if it has gone missing from disk.
+pub(crate) fn stored(engine: &Engine, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
+    match engine.blobs.read(hash) {
+        Ok(data) => Ok(Some(data)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }

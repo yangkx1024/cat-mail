@@ -66,12 +66,13 @@ pub(crate) async fn queue_draft(engine: &Arc<Engine>, id: DraftId) -> Result<Out
     let message_id = drafts::new_message_id(&sender.email);
     let (revision, subject) = (snapshot.revision, content.subject.clone());
     let envelope_from = sender.email.clone();
-    let engine2 = engine.clone();
-    let message_id2 = message_id.clone();
-    let raw = blocking(move || {
-        // Bcc only in the envelope.
-        let raw = drafts::build(&engine2, &sender, &snapshot, &message_id2, false)?;
-        Ok(engine2.blobs.put_bytes(&raw)?)
+    let raw = blocking({
+        let (engine, message_id) = (engine.clone(), message_id.clone());
+        move || {
+            // Bcc only in the envelope.
+            let raw = drafts::build(&engine, &sender, &snapshot, &message_id, false)?;
+            Ok(engine.blobs.put_bytes(&raw)?)
+        }
     })
     .await?;
     let entry = NewOutboxEntry {

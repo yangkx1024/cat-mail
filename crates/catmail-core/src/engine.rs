@@ -92,6 +92,12 @@ pub struct EngineTuning {
     /// that servers and NAT boxes don't close it as idle, and one that died is closed
     /// before it is needed [4 minutes].
     pub keepalive: Duration,
+    /// How long after the client opens the bodies stored by an older version of the
+    /// parsing and sanitizing are made again, so that search finds them by their text as
+    /// parsed now [2 minutes: after the first sync has started, which it then holds up
+    /// for only a moment at a time]. A client closed before then leaves them for the
+    /// next one; opening a message rebuilds its body anyway.
+    pub rebuild_delay: Duration,
 }
 
 impl Default for EngineTuning {
@@ -103,6 +109,7 @@ impl Default for EngineTuning {
             // Under five minutes: quiet connections lasted that long when the pool still
             // dropped them at that age. Servers wait far longer (Gmail some 30 minutes).
             keepalive: Duration::from_secs(4 * 60),
+            rebuild_delay: Duration::from_secs(2 * 60),
         }
     }
 }

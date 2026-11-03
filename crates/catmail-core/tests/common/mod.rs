@@ -213,6 +213,23 @@ pub async fn env_added(
 }
 
 impl Env {
+    /// Closes the client and opens it again on the same data directory, built by
+    /// `build` as in [`env_built`].
+    #[allow(dead_code)]
+    pub async fn reopen(&mut self, build: impl FnOnce(MailClientBuilder) -> MailClientBuilder) {
+        let config = self.client.config().clone();
+        let closed = self.client.closed();
+        self.client.shut_down();
+        closed.await;
+        self.client = build(
+            MailClient::builder(config)
+                .runtime(Handle::current())
+                .secrets(self.secrets.clone()),
+        )
+        .open()
+        .unwrap();
+    }
+
     /// Another account, `email`, on a fake server of its own holding `state` (logging in
     /// as its user), sending through this one's SMTP server; synced. Returns the server,
     /// which must be kept running.

@@ -419,6 +419,42 @@ async fn local_changes_tell_the_labels_showing_the_message() {
     assert!(env.subjects("INBOX").await.is_empty());
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn storing_a_body_tells_the_labels_showing_the_message() {
+    let env = synced_env(gmail()).await;
+    let one = env.id_of("INBOX", "one").await;
+    env.client
+        .set_flags(vec![one], Flags::FLAGGED, Flags::empty())
+        .await
+        .unwrap();
+    let mut showing = Vec::new();
+    for name in [ALL_MAIL, "INBOX", "Work", "[Gmail]/Starred"] {
+        let folder = env.folder(name).await.id;
+        showing.push((name, folder));
+    }
+    let mut events = env.client.subscribe();
+    let mut all_told = |what| {
+        let seen = drain(&mut events);
+        for (name, folder) in &showing {
+            let changed = Event::MessagesChanged {
+                account: env.account,
+                folder: *folder,
+            };
+            assert!(seen.contains(&changed), "{what}, {name}: {seen:?}");
+        }
+    };
+
+    env.client.download_message(one).await.unwrap();
+    all_told("downloaded");
+    // As an older content version left it.
+    env.sql(&format!(
+        "UPDATE message_bodies SET content_version = 0 WHERE message_id = {}",
+        one.0
+    ));
+    env.client.download_message(one).await.unwrap();
+    all_told("rebuilt");
+}
+
 /// Important hidden from IMAP when the messages were fetched: X-GM-LABELS named it, but
 /// there was no mailbox to tie it to. Shown again, it lists them.
 #[tokio::test(flavor = "multi_thread")]

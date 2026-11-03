@@ -1,8 +1,10 @@
+use std::collections::HashSet;
+
 use catmail_types::{Attachment, AttachmentId, BlobHash, MessageId};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::Result;
-use crate::columns::parse_opt_text;
+use crate::columns::{parse_opt_text, to_json};
 use crate::messages::{MessageLocation, Messages};
 
 const COLUMNS: &str = "id, message_id, filename, mime_type, size, content_id, is_inline, blob_hash";
@@ -89,14 +91,26 @@ impl<'c> Attachments<'c> {
         )? > 0)
     }
 
-    pub(crate) fn insert(&self, message: MessageId, attachments: &[NewAttachment]) -> Result<()> {
-        let mut insert = self.conn.prepare_cached(
+    /// Makes the message's attachments `attachments`, matched to the stored ones (if
+    /// any: a body stored again) by section: those matched keep their ids, and their
+    /// content where the new one has none; the others are added or removed.
+    pub(crate) fn store(&self, message: MessageId, attachments: &[NewAttachment]) -> Result<()> {
+        let mut upsert = self.conn.prepare_cached(
             "INSERT INTO attachments (message_id, part_section, transfer_encoding, filename,
                                       mime_type, size, content_id, is_inline, blob_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT (message_id, part_section) DO UPDATE SET
+                 transfer_encoding = excluded.transfer_encoding,
+                 filename = excluded.filename,
+                 mime_type = excluded.mime_type,
+                 size = iif(excluded.blob_hash IS NULL AND blob_hash IS NOT NULL,
+                            size, excluded.size),
+                 content_id = excluded.content_id,
+                 is_inline = excluded.is_inline,
+                 blob_hash = coalesce(excluded.blob_hash, blob_hash)",
         )?;
         for a in attachments {
-            insert.execute(params![
+            upsert.execute(params![
                 message.0,
                 a.section,
                 a.transfer_encoding,
@@ -108,6 +122,30 @@ impl<'c> Attachments<'c> {
                 a.blob.as_ref().map(BlobHash::as_str),
             ])?;
         }
+        let sections: Vec<&str> = attachments.iter().map(|a| a.section.as_str()).collect();
+        self.conn
+            .prepare_cached(
+                "DELETE FROM attachments
+                 WHERE message_id = ?1 AND part_section NOT IN (SELECT value FROM json_each(?2))",
+            )?
+            .execute(params![message.0, to_json(&sections)])?;
+        Ok(())
+    }
+
+    /// Marks the message's attachments inline if their Content-ID is in `referenced`,
+    /// and the others not.
+    pub(crate) fn mark_inline(
+        &self,
+        message: MessageId,
+        referenced: &HashSet<String>,
+    ) -> Result<()> {
+        self.conn
+            .prepare_cached(
+                "UPDATE attachments
+                 SET is_inline = coalesce(content_id IN (SELECT value FROM json_each(?2)), 0)
+                 WHERE message_id = ?1",
+            )?
+            .execute(params![message.0, to_json(referenced)])?;
         Ok(())
     }
 }

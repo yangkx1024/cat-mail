@@ -98,8 +98,15 @@ impl BlobStore {
         }
     }
 
+    /// [`put`](Self::put) of content in memory. Content already stored (an attachment
+    /// parsed again, say) is only hashed, not written out to be thrown away.
     pub fn put_bytes(&self, bytes: &[u8]) -> io::Result<BlobHash> {
-        self.put(bytes)
+        let hash = BlobHash::parse(&hex::encode(Sha256::digest(bytes)))
+            .expect("hex-encoded SHA-256 is a valid BlobHash");
+        match self.refresh(&hash)? {
+            Some(_) => Ok(hash),
+            None => self.put(bytes),
+        }
     }
 
     /// What `put` of a blob's content does when it is already stored, without the

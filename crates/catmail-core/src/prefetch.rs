@@ -489,13 +489,16 @@ async fn store(
     }
     let changed = engine
         .write(move |db| {
+            let messages = db.messages();
             let mut changed = BTreeSet::new();
             for (id, folder, body) in &fetched.bodies {
                 // Not if it was opened meanwhile, or is gone.
-                if db.messages().store_body(*id, body)? {
+                if messages.store_body(*id, body)? {
                     changed.insert(*folder);
                 }
             }
+            // On Gmail, the labels (and Starred) showing them.
+            changed.extend(messages.touched_labels());
             for &id in &fetched.failed {
                 db.prefetch().failed(id, now)?;
             }

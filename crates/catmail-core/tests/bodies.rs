@@ -269,6 +269,118 @@ async fn large_messages_leave_attachments_on_the_server_until_opened() {
     }));
 }
 
+impl Env {
+    /// Makes the stored body of `id` look as an older content version would have left
+    /// it: `html` and other text, not indexed, with no inline parts.
+    fn make_stale(&self, id: MessageId, html: &str) {
+        let id = id.0;
+        self.sql(&format!(
+            "UPDATE message_bodies SET content_version = 0, text_html = '{html}',
+                                       text_plain = 'stale'
+             WHERE message_id = {id};
+             DELETE FROM messages_fts WHERE rowid = {id};
+             UPDATE attachments SET is_inline = 0 WHERE message_id = {id};
+             UPDATE messages SET snippet = 'stale', has_attachments = 0 WHERE id = {id};"
+        ));
+    }
+
+    fn stale_bodies(&self) -> i64 {
+        self.query("SELECT count(*) FROM message_bodies WHERE content_version = 0")
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn opening_a_body_an_older_version_made_rebuilds_it_from_the_raw_message() {
+    let env = env(state(&[NEWSLETTER])).await;
+    let id = env.id(0).await;
+    let fresh = env.client.download_message(id).await.unwrap();
+    env.make_stale(id, "<p>old</p><script>alert(1)</script>");
+    assert!(env.search("请查收").await.is_empty());
+    let mut events = env.client.subscribe();
+    let start = env.log_len();
+
+    let rebuilt = env.client.download_message(id).await.unwrap();
+    assert_eq!(
+        rebuilt, fresh,
+        "as parsed now, the attachments keeping their ids"
+    );
+    assert!(env.commands_since(start).is_empty(), "from the raw message");
+    let folder = fresh.summary.folder_id;
+    assert_eq!(
+        drain(&mut events),
+        [Event::MessagesChanged {
+            account: env.account,
+            folder
+        }]
+    );
+    assert_eq!(env.search("请查收").await, ["第三季度报告"]);
+    assert_eq!(env.stale_bodies(), 0);
+
+    env.client.download_message(id).await.unwrap();
+    assert!(drain(&mut events).is_empty(), "rebuilt once");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_body_without_its_raw_message_is_sanitized_again() {
+    let raw = large_message();
+    let env = env(state(&[&raw])).await;
+    let id = env.id(0).await;
+    let fresh = env.client.download_message(id).await.unwrap();
+    let video = body(&fresh).attachments[0].id;
+    env.sql(&format!(
+        "UPDATE attachments SET content_id = 'clip@x' WHERE id = {}",
+        video.0
+    ));
+    env.make_stale(
+        id,
+        "<p>kept</p><script>alert(1)</script><img src=\"cid:clip@x\">",
+    );
+    let start = env.log_len();
+
+    let rebuilt = env.client.download_message(id).await.unwrap();
+    assert!(
+        env.commands_since(start).is_empty(),
+        "nothing fetched again"
+    );
+    let b = body(&rebuilt);
+    let html = b.html.as_deref().unwrap();
+    assert!(html.contains("<p>kept</p>"), "{html}");
+    assert!(!html.contains("script"), "{html}");
+    assert_eq!(b.text.as_deref(), Some("stale"), "the text stays");
+    assert_eq!(b.attachments[0].id, video);
+    assert!(b.attachments[0].inline, "the HTML refers to it now");
+    assert!(!b.attachments[0].downloaded);
+    assert!(!rebuilt.summary.has_attachments);
+    assert_eq!(env.stale_bodies(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_bodies_are_rebuilt_in_the_background_when_asked_to() {
+    let raw = large_message();
+    let mut env = env(state(&[NEWSLETTER, &raw])).await;
+    for n in 0..2 {
+        let id = env.id(n).await;
+        env.client.download_message(id).await.unwrap();
+        env.make_stale(id, "<p>old</p><script>alert(1)</script>");
+    }
+    assert!(env.search("请查收").await.is_empty());
+
+    env.reopen(|b| {
+        b.tuning(EngineTuning {
+            rebuild_delay: Duration::ZERO,
+            ..EngineTuning::default()
+        })
+    })
+    .await;
+    eventually("the bodies to be rebuilt", async || env.stale_bodies() == 0).await;
+    let start = env.log_len();
+    assert_eq!(env.search("请查收").await, ["第三季度报告"]);
+    let html: String =
+        env.query("SELECT group_concat(text_html, '|') FROM message_bodies ORDER BY message_id");
+    assert!(!html.contains("script"), "{html}");
+    assert_eq!(env.commands_since(start), Vec::<String>::new());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn names_in_raw_bytes_read_the_same_whole_or_in_parts() {
     // 报告 in raw GBK bytes, as some mail programs write it, beside GBK text.

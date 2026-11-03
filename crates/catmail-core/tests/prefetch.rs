@@ -2,11 +2,8 @@
 
 use std::time::Duration;
 
-use std::sync::Arc;
-
-use catmail_core::{BodyPrefetch, Config, Event, MailClient, MessageId, SearchQuery};
+use catmail_core::{BodyPrefetch, Event, MessageId, SearchQuery};
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
-use tokio::runtime::Handle;
 
 mod common;
 
@@ -374,14 +371,8 @@ async fn going_over_the_servers_limit_stops_it_for_a_day() {
 
     // Nor after a restart, though the server would hand them out again.
     env.fake.state().faults.body_fetch_refusal = None;
-    drop(env.client);
+    env.reopen(|b| b.prefetch_bodies(Some(prefetching()))).await;
     env.fake.wait_until(|st| st.open_connections == 0).await;
-    env.client = MailClient::builder(Config::with_data_dir(env.dir.path()))
-        .runtime(Handle::current())
-        .secrets(Arc::clone(&env.secrets) as _)
-        .prefetch_bodies(Some(prefetching()))
-        .open()
-        .unwrap();
     env.client.sync_account(env.account).await.unwrap();
     a_while().await;
     assert_eq!(env.fake.state().body_fetches(), 1);

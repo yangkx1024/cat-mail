@@ -30,7 +30,7 @@ use crate::secrets::{KeyringSecrets, SecretStore};
 use crate::watch::{self, SyncSchedule};
 use crate::{
     BodyPrefetch, Config, DataDirLock, Error, Result, body, connection, drafts, folders, gc,
-    images, ops, prefetch, send, sleep, sync,
+    images, ops, prefetch, rebuild, send, sleep, sync,
 };
 
 /// Starts the background work the engine does per account (sync, prefetch of bodies), if
@@ -309,6 +309,11 @@ impl MailClient {
         if let Some(every) = opened.collect_garbage_every {
             rt.spawn(gc::run(Arc::downgrade(&engine), every, engine.closing()));
         }
+        rt.spawn(rebuild::run(
+            Arc::downgrade(&engine),
+            engine.tuning.rebuild_delay,
+            engine.closing(),
+        ));
         // As `spawn_background`, from outside the runtime.
         for account in opened.watched {
             if let Some(schedule) = engine.sync_in_background {
@@ -901,7 +906,8 @@ impl MailClient {
             .await
     }
 
-    /// The message as stored locally; `body` is `None` until downloaded.
+    /// The message as stored locally; `body` is `None` until downloaded, and as an older
+    /// version parsed it until [`download_message`](Self::download_message) makes it again.
     pub async fn get_message(&self, id: MessageId) -> Result<Option<Message>> {
         let engine = self.engine()?;
         self.shared
@@ -1866,9 +1872,9 @@ mod tests {
             .collect_garbage_every(Some(crate::DEFAULT_GC_INTERVAL))
             .open()
             .unwrap();
-        assert_eq!(metrics.num_alive_tasks(), before + 3);
-        // Waiting: the outbox is empty, the first collection is minutes away, and the
-        // clocks are compared every half minute.
+        assert_eq!(metrics.num_alive_tasks(), before + 4);
+        // Waiting: the outbox is empty, the first collection and the rebuild of stale
+        // bodies are minutes away, and the clocks are compared every half minute.
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         drop(client);

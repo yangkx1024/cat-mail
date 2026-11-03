@@ -10,6 +10,16 @@ use super::transcode_fields;
 /// Longest snippet, in characters.
 const SNIPPET_CHARS: usize = 200;
 
+/// The version of what [`parse_message`] and [`MimeNode::content`] make of a message
+/// (the parsing, and the sanitizing in `catmail-html`). Stored with each body: one made
+/// by an older version is made again, from the raw message where it was kept. Raise it
+/// when a change should reach bodies already stored, such as any that sanitizes more
+/// strictly; `fingerprint_follows_content_version` fails whenever the output changes,
+/// so that the change is a decision.
+///
+/// [`MimeNode::content`]: super::MimeNode::content
+pub const CONTENT_VERSION: u32 = 1;
+
 /// What a reader shows of a message.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Content {
@@ -101,9 +111,11 @@ pub(super) fn extract(
             )
         })
         .flatten()
-        .map(|html| sanitize_html(&html));
-
-    let referenced = html.as_deref().map(cid_references).unwrap_or_default();
+        .map(|html| sanitized_html(&html));
+    let (html, referenced) = match html {
+        Some((html, referenced)) => (Some(html), referenced),
+        None => (None, HashSet::new()),
+    };
     let sections = sections(message);
     let text_charsets = text_charsets(message);
     // Part ids follow MIME order. A set, not `contains` on each part: a message may
@@ -225,6 +237,16 @@ fn joined<S: AsRef<str>>(pieces: impl Iterator<Item = S>, separator: &str) -> Op
     let pieces: Vec<S> = pieces.filter(|p| !p.as_ref().trim().is_empty()).collect();
     let pieces: Vec<&str> = pieces.iter().map(AsRef::as_ref).collect();
     (!pieces.is_empty()).then(|| pieces.join(separator))
+}
+
+/// The body's HTML as stored: sanitized, with the Content-IDs that its `cid:` URLs refer
+/// to, which make those parts inline. Also what HTML stored by an older
+/// [`CONTENT_VERSION`] is made into when there is no raw message to parse again
+/// (sanitizing is idempotent).
+pub fn sanitized_html(html: &str) -> (String, HashSet<String>) {
+    let html = sanitize_html(html);
+    let referenced = cid_references(&html);
+    (html, referenced)
 }
 
 /// The Content-IDs that `cid:` URLs in the HTML refer to.
@@ -618,5 +640,82 @@ mod tests {
         let s = snippet(&long).unwrap();
         assert_eq!(s.chars().count(), SNIPPET_CHARS);
         assert_eq!(snippet("  \n> only quoted\n"), None);
+    }
+
+    /// What a sender may write in HTML, for the sanitizer.
+    const HTML_ONLY: &[u8] = b"From: news@example.com\r\n\
+        Subject: Offers\r\n\
+        MIME-Version: 1.0\r\n\
+        Content-Type: multipart/related; boundary=\"rel\"\r\n\
+        \r\n\
+        --rel\r\n\
+        Content-Type: text/html; charset=utf-8\r\n\
+        \r\n\
+        <html><head><style>body{color:#333;background:url(https://t.example/a.png)}\
+        @media (max-width:600px){td{display:block}}@import url(x.css);\
+        .a:has(b){color:red}p{color:var(--c)}</style>\
+        <style media=\"print\">p{color:black}</style></head>\
+        <body bgcolor=\"#ffffff\" onload=\"x()\"><table width=\"600\"><tr>\
+        <td style=\"color:red;background-image:url(x);mso-line-height-rule:exactly\">\
+        <font color=\"blue\">Hi</font> <a href=\"javascript:alert(1)\">x</a> \
+        <a href=\"java\tscript:alert(1)\">y</a> <a href=\"https://example.com/?a=1\">z</a>\
+        <img src=\"cid:logo@x\"><img src=\"data:image/png;base64,iVBORw0KGgo=\">\
+        <img src=\"https://example.com/p.gif\"><script>alert(1)</script>\
+        <form><input name=\"q\"></form><iframe src=\"https://example.com\"></iframe>\
+        <svg><style>p{}</style></svg></td></tr></table></body></html>\r\n\
+        --rel\r\n\
+        Content-Type: image/png\r\n\
+        Content-ID: <logo@x>\r\n\
+        Content-Transfer-Encoding: base64\r\n\
+        \r\n\
+        iVBORw0KGgo=\r\n\
+        --rel--\r\n";
+
+    const PLAIN: &[u8] = b"From: a@example.com\r\n\
+        Subject: Plain\r\n\
+        Content-Type: text/plain; charset=iso-8859-1\r\n\
+        Content-Transfer-Encoding: quoted-printable\r\n\
+        \r\n\
+        Gr=FC=DFe aus Z=FCrich,\r\n\
+        bis bald.\r\n";
+
+    /// FNV-1a: stable across Rust versions, unlike `DefaultHasher`. `None` hashes apart
+    /// from any value.
+    fn fnv(hash: &mut u64, bytes: Option<&[u8]>) {
+        for &b in bytes.unwrap_or(b"\0none").iter().chain(&[0xff]) {
+            *hash ^= u64::from(b);
+            *hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+
+    /// Pins what parsing and sanitizing make of a corpus, so that a change to either is
+    /// a decision on [`CONTENT_VERSION`].
+    #[test]
+    fn fingerprint_follows_content_version() {
+        let mut hash = 0xcbf2_9ce4_8422_2325;
+        for raw in [MIXED, &raw_gbk_names("gbk"), HTML_ONLY, PLAIN] {
+            let content = parse_message(raw);
+            let h = &mut hash;
+            fnv(h, content.text.as_deref().map(str::as_bytes));
+            fnv(h, content.html.as_deref().map(str::as_bytes));
+            fnv(h, content.snippet.as_deref().map(str::as_bytes));
+            for part in &content.parts {
+                fnv(h, Some(part.section.as_bytes()));
+                fnv(h, part.transfer_encoding.as_deref().map(str::as_bytes));
+                fnv(h, part.filename.as_deref().map(str::as_bytes));
+                fnv(h, Some(part.mime_type.as_bytes()));
+                fnv(h, part.content_id.as_deref().map(str::as_bytes));
+                fnv(h, Some(&[u8::from(part.inline)]));
+                fnv(h, part.size.map(u32::to_le_bytes).as_ref().map(|b| &b[..]));
+                fnv(h, part.data.as_deref());
+            }
+        }
+        // What parsing or sanitizing makes of messages changed. If bodies already stored
+        // should change too (always for stricter sanitizing), raise CONTENT_VERSION;
+        // either way, record the new fingerprint here.
+        assert_eq!(
+            (CONTENT_VERSION, format!("{hash:016x}")),
+            (1, "e8e4810e0d9cd7b3".to_owned()),
+        );
     }
 }

@@ -14,7 +14,7 @@ use encoding_rs::{Encoding, UTF_8};
 use mail_parser::{HeaderValue, MessageParser};
 
 pub use build::{InvalidHeader, Outgoing, OutgoingAttachment, build_message};
-pub use content::{Content, Part, decode_transfer, parse_message};
+pub use content::{CONTENT_VERSION, Content, Part, decode_transfer, parse_message, sanitized_html};
 pub use structure::{Leaf, MimeNode, Params};
 
 /// The header fields the sync engine fetches for message lists (`HEADER.FIELDS`).
