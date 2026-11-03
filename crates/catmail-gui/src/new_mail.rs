@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use catmail_core::{AccountId, Event, MailClient, MessageId, MessageSummary, RecvError};
+use catmail_core::{AccountId, Event, MessageId, MessageSummary, RecvError};
 use gpui_kit::{App, Global, SharedString, SystemNotification, Task};
 
 use crate::format;
@@ -129,7 +129,6 @@ fn plain(text: &str) -> SharedString {
 }
 
 pub struct Notifier {
-    client: MailClient,
     /// Announced and not yet told about.
     arrived: Vec<MessageId>,
     /// Waiting out [`GATHER`] since something arrived, to tell then. The task isn't
@@ -141,8 +140,12 @@ pub struct Notifier {
 impl Global for Notifier {}
 
 impl Notifier {
-    /// Tells about the new mail `client` announces from now on.
-    pub fn start(client: MailClient, cx: &mut App) {
+    /// Tells about the new mail [`Resident`]'s engine announces from now on, until it
+    /// closes.
+    pub fn start(cx: &mut App) {
+        let Some(client) = Resident::client(cx) else {
+            return;
+        };
         let mut events = client.subscribe();
         let events = cx.spawn(async move |cx| {
             loop {
@@ -160,7 +163,6 @@ impl Notifier {
             }
         });
         cx.set_global(Self {
-            client,
             arrived: Vec::new(),
             gathering: false,
             _events: events,
@@ -185,7 +187,11 @@ impl Notifier {
                 let this = cx.global_mut::<Self>();
                 this.gathering = false;
                 let arrived = std::mem::take(&mut this.arrived);
-                tell.then(|| (this.client.clone(), arrived))
+                if !tell {
+                    return None;
+                }
+                // None once the app is quitting.
+                Some((Resident::client(cx)?, arrived))
             });
             let Some((client, arrived)) = told else {
                 return;

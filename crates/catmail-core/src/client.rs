@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use catmail_proto::imap::Session;
@@ -20,7 +20,9 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::drafts::SizeLimits;
-use crate::engine::{DEFAULT_DRAFT_UPLOAD_DELAY, Engine, EngineTuning, blocking, now};
+use crate::engine::{
+    Closing, DEFAULT_DRAFT_UPLOAD_DELAY, Engine, EngineTuning, blocking, lock, now,
+};
 use crate::html::RemoteImage;
 use crate::images::RemoteImageStream;
 use crate::runtime::Runtime;
@@ -43,13 +45,24 @@ fn spawn_background(engine: &Arc<Engine>, account: AccountId) {
 /// are dropped and they get `RecvError::Lagged`.
 pub const EVENT_CAPACITY: usize = 256;
 
-/// The only entry point frontends use. Cheap to clone; all clones share one engine.
+/// The only entry point frontends use. Cheap to clone; all clones share one engine, which
+/// closes once they are all dropped, or [`shut_down`](MailClient::shut_down).
 #[derive(Clone)]
 pub struct MailClient {
-    // Kept apart from `Engine` so tasks running on the runtime never hold the last
-    // reference to the runtime itself.
-    rt: Arc<Runtime>,
-    engine: Arc<Engine>,
+    shared: Arc<Shared>,
+}
+
+/// What the clones of a client share. Tasks running on the runtime hold only the engine,
+/// never this, so none of them holds the last reference to the runtime itself.
+struct Shared {
+    /// First, so it is shut down before the engine is let go of.
+    rt: Runtime,
+    /// Taken by [`MailClient::shut_down`]. Work running on the engine holds its own
+    /// reference meanwhile.
+    engine: Mutex<Option<Arc<Engine>>>,
+    config: Config,
+    /// The engine's, kept here to wait on once it was let go of.
+    closing: Closing,
 }
 
 /// Whether [`MailClient::add_account`] and [`MailClient::add_identity`] log in to the
@@ -83,6 +96,7 @@ struct Opened {
     engine: Engine,
     /// The accounts to keep in sync, and fetch bodies of, in the background.
     watched: Vec<Account>,
+    config: Config,
     send_in_background: bool,
     collect_garbage_every: Option<Duration>,
 }
@@ -229,7 +243,7 @@ impl MailClientBuilder {
         );
 
         let mut engine = Engine::new(
-            self.config,
+            &self.config,
             data_dir_lock,
             store,
             blobs,
@@ -244,6 +258,7 @@ impl MailClientBuilder {
         Ok(Opened {
             engine,
             watched,
+            config: self.config,
             send_in_background: self.send_in_background,
             collect_garbage_every: self.collect_garbage_every,
         })
@@ -277,59 +292,58 @@ impl MailClient {
 
     /// Starts the background work asked for on the engine just opened.
     fn start(rt: Runtime, opened: Opened) -> Self {
-        let client = MailClient {
-            rt: Arc::new(rt),
-            engine: Arc::new(opened.engine),
-        };
+        let engine = Arc::new(opened.engine);
         if opened.send_in_background {
-            client.rt.spawn(send::worker(
-                Arc::downgrade(&client.engine),
-                client.engine.outbox_kick.clone(),
-                client.engine.closing(),
+            rt.spawn(send::worker(
+                Arc::downgrade(&engine),
+                engine.outbox_kick.clone(),
+                engine.closing(),
             ));
         }
-        client.rt.spawn(sleep::run(
-            Arc::downgrade(&client.engine),
+        rt.spawn(sleep::run(
+            Arc::downgrade(&engine),
             sleep::CHECK_EVERY,
             sleep::Clocks::now,
-            client.engine.closing(),
+            engine.closing(),
         ));
         if let Some(every) = opened.collect_garbage_every {
-            client.rt.spawn(gc::run(
-                Arc::downgrade(&client.engine),
-                every,
-                client.engine.closing(),
-            ));
+            rt.spawn(gc::run(Arc::downgrade(&engine), every, engine.closing()));
         }
         // As `spawn_background`, from outside the runtime.
         for account in opened.watched {
-            if let Some(schedule) = client.engine.sync_in_background {
-                let task = watch::task(&client.engine, account.id, schedule);
-                client.rt.spawn(task);
+            if let Some(schedule) = engine.sync_in_background {
+                let task = watch::task(&engine, account.id, schedule);
+                rt.spawn(task);
             }
-            if let Some(settings) = client.engine.prefetch {
-                let task = prefetch::task(&client.engine, account.id, settings);
-                client.rt.spawn(task);
+            if let Some(settings) = engine.prefetch {
+                let task = prefetch::task(&engine, account.id, settings);
+                rt.spawn(task);
             }
         }
-        client
+        MailClient {
+            shared: Arc::new(Shared {
+                rt,
+                closing: engine.closing(),
+                config: opened.config,
+                engine: Mutex::new(Some(engine)),
+            }),
+        }
     }
 
-    /// For tests of the engine's parts that need one.
-    #[cfg(test)]
-    pub(crate) fn engine(&self) -> &Arc<Engine> {
-        &self.engine
+    /// The engine, unless it was [shut down](Self::shut_down).
+    pub(crate) fn engine(&self) -> Result<Arc<Engine>> {
+        lock(&self.shared.engine).clone().ok_or(Error::Closed)
     }
 
     pub fn config(&self) -> &Config {
-        &self.engine.config
+        &self.shared.config
     }
 
     /// Whether the engine gets through to the account's servers, as its latest attempts
     /// found (in the background, or asked for). Changes are announced with
     /// [`Event::AccountStatusChanged`].
     pub fn account_status(&self, id: AccountId) -> AccountStatus {
-        self.engine.status(id)
+        self.engine().map(|e| e.status(id)).unwrap_or_default()
     }
 
     /// Tells the engine the computer just woke from sleep: it starts over on new
@@ -339,32 +353,65 @@ impl MailClient {
     /// late: a frontend that hears of the wake from the system calls this then.
     pub fn resume(&self) {
         tracing::info!("the frontend says the computer woke; starting over on new connections");
-        self.engine.resume();
+        if let Ok(engine) = self.engine() {
+            engine.resume();
+        }
     }
 
     /// How many calls wait for another sync of `account` to finish, for tests that hold
     /// a sync at the server and need a call queued behind it.
     #[cfg(feature = "test-support")]
     pub fn sync_waiting(&self, account: AccountId) -> usize {
-        self.engine.sync_waiting(account)
+        self.engine().map_or(0, |e| e.sync_waiting(account))
     }
 
     /// Change notifications. Receivers that fall behind get `RecvError::Lagged` and
-    /// should refresh whatever they display.
+    /// should refresh whatever they display. They get `RecvError::Closed` once the engine
+    /// has closed.
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
-        self.engine.events.subscribe()
+        match self.engine() {
+            Ok(engine) => engine.events.subscribe(),
+            // Closed already: one whose sender is gone.
+            Err(_) => broadcast::channel(1).1,
+        }
     }
 
-    /// Resolves once the engine has closed: every handle on it dropped, and the background
-    /// work with it. Holds no handle itself, so a frontend can drop its own and then wait.
+    /// Resolves once the engine has closed: every handle on it dropped, or
+    /// [`shut_down`](Self::shut_down), and the work under way with it. Holds no handle
+    /// itself, so a frontend can let go of its own and then wait.
     pub fn closed(&self) -> impl Future<Output = ()> + Send + use<> {
-        let mut closing = self.engine.closing();
+        let mut closing = self.shared.closing.clone();
         async move { closing.closed().await }
     }
 
+    /// Closes the engine for every clone of this client, as dropping them all would, for a
+    /// frontend that quits without dropping what it holds (GPUI). On a runtime of the
+    /// client's own the work under way stops at once, and its calls fail with
+    /// [`Error::Closed`]; on a borrowed runtime it is left to finish, as when the last
+    /// handle goes. Calls from now on fail with [`Error::Closed`]. Doesn't wait: see
+    /// [`closed`](Self::closed).
+    pub fn shut_down(&self) {
+        let Some(engine) = lock(&self.shared.engine).take() else {
+            return;
+        };
+        tracing::info!("shutting down the engine");
+        // If nothing else holds it, it closes on dropping it, and closing the database may
+        // checkpoint it: not on the caller's thread, the UI's. Not on the runtime either,
+        // which drops what hasn't started yet as it shuts down, here.
+        let closing = std::thread::Builder::new()
+            .name("catmail-close".into())
+            .spawn(move || drop(engine));
+        if let Err(e) = closing {
+            // The engine went with the closure, here.
+            tracing::warn!(error = %e, "couldn't close the engine on a thread of its own");
+        }
+        self.shared.rt.shut_down();
+    }
+
     pub async fn list_accounts(&self) -> Result<Vec<Account>> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run_blocking(move || Ok(engine.store.read(|db| db.accounts().list())?))
             .await
     }
@@ -373,8 +420,9 @@ impl MailClient {
     /// shows, consistent with itself. Their status is
     /// [`account_status`](Self::account_status), which isn't stored.
     pub async fn overview(&self) -> Result<Vec<AccountOverview>> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run_blocking(move || {
                 Ok(engine.store.read(|db| {
                     let mut outbox = db.outbox().list(None)?;
@@ -398,16 +446,18 @@ impl MailClient {
     }
 
     pub async fn get_account(&self, id: AccountId) -> Result<Option<Account>> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run_blocking(move || Ok(engine.store.read(|db| db.accounts().get(id))?))
             .await
     }
 
     pub async fn find_account_by_email(&self, email: &str) -> Result<Option<Account>> {
-        let engine = self.engine.clone();
+        let engine = self.engine()?;
         let email = email.to_owned();
-        self.rt
+        self.shared
+            .rt
             .run_blocking(move || {
                 Ok(engine
                     .store
@@ -435,8 +485,9 @@ impl MailClient {
         new.display_name = drafts::clean_name(new.display_name.as_deref());
         validate_new_account(&new)?;
         check_password(&password)?;
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run(async move {
                 let (limits, session) = match verify {
                     Verify::Login => {
@@ -490,8 +541,9 @@ impl MailClient {
 
     /// The account's identities: the default first, then the others oldest first.
     pub async fn list_identities(&self, account: AccountId) -> Result<Vec<Identity>> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run_blocking(move || Ok(engine.store.read(|db| db.identities().list(account))?))
             .await
     }
@@ -504,9 +556,10 @@ impl MailClient {
         account: AccountId,
         email: &str,
     ) -> Result<Option<IdentityId>> {
-        let engine = self.engine.clone();
+        let engine = self.engine()?;
         let email = email.to_owned();
-        self.rt
+        self.shared
+            .rt
             .run_blocking(move || {
                 Ok(engine
                     .store
@@ -529,8 +582,9 @@ impl MailClient {
         new.display_name = drafts::clean_name(new.display_name.as_deref());
         validate_new_identity(&new)?;
         check_password(&password)?;
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run(async move {
                 let smtp_max_size = match verify {
                     Verify::Login => check_identity(&engine, &new, &password).await?,
@@ -596,8 +650,9 @@ impl MailClient {
         + Send
         + 'static,
     ) -> Result<()> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run_blocking(move || {
                 let (account, drafts) = engine
                     .store
@@ -616,8 +671,9 @@ impl MailClient {
     /// the account's default. Refused with [`Error::Conflict`] for the default, and while
     /// the outbox has messages to send as it.
     pub async fn remove_identity(&self, id: IdentityId) -> Result<()> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run_blocking(move || {
                 let deleted = engine
                     .store
@@ -640,8 +696,9 @@ impl MailClient {
     /// Removes the account, all local data cached for it, and its stored password.
     /// A sync of the account that is running is cancelled first.
     pub async fn remove_account(&self, id: AccountId) -> Result<()> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run(async move {
                 let _stopped = engine.start_removal(id).await;
                 let result = blocking({
@@ -684,8 +741,9 @@ impl MailClient {
     /// in its [`FolderSyncReport`](crate::FolderSyncReport); losing the connection fails
     /// the whole call.
     pub async fn sync_account(&self, id: AccountId) -> Result<SyncReport> {
-        self.rt
-            .run(sync::sync_account(self.engine.clone(), id))
+        self.shared
+            .rt
+            .run(sync::sync_account(self.engine()?, id))
             .await
     }
 
@@ -698,11 +756,12 @@ impl MailClient {
     /// [`Error::NoBackgroundSync`] without background sync: there
     /// [`sync_account`](Self::sync_account) syncs one.
     pub async fn sync_now(&self) -> Result<()> {
-        if self.engine.sync_in_background.is_none() {
+        let engine = self.engine()?;
+        if engine.sync_in_background.is_none() {
             return Err(Error::NoBackgroundSync);
         }
-        let engine = self.engine.clone();
-        self.rt
+        self.shared
+            .rt
             .run(async move {
                 for account in engine.read(|db| db.accounts().list()).await? {
                     engine.ask_to_sync(account.id);
@@ -723,31 +782,35 @@ impl MailClient {
         folder: FolderId,
         max_age: Duration,
     ) -> Result<Option<FolderSyncReport>> {
-        self.rt
-            .run(sync::sync_one(self.engine.clone(), folder, max_age))
+        self.shared
+            .rt
+            .run(sync::sync_one(self.engine()?, folder, max_age))
             .await
     }
 
     /// The account's folders, INBOX first.
     pub async fn list_folders(&self, account: AccountId) -> Result<Vec<Folder>> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run(async move { engine.read(move |db| db.folders().list(account)).await })
             .await
     }
 
     pub async fn get_folder(&self, id: FolderId) -> Result<Option<Folder>> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run(async move { engine.read(move |db| db.folders().get(id)).await })
             .await
     }
 
     /// By display name (`已发送`), server name (`&XfJT0ZAB-`), or `inbox` in any case.
     pub async fn find_folder(&self, account: AccountId, name: &str) -> Result<Option<Folder>> {
-        let engine = self.engine.clone();
+        let engine = self.engine()?;
         let name = name.to_owned();
-        self.rt
+        self.shared
+            .rt
             .run(async move {
                 engine
                     .read(move |db| db.folders().find_by_name(account, &name))
@@ -767,9 +830,10 @@ impl MailClient {
         parent: Option<FolderId>,
         name: &str,
     ) -> Result<Folder> {
-        self.rt
+        self.shared
+            .rt
             .run(folders::create(
-                self.engine.clone(),
+                self.engine()?,
                 account,
                 parent,
                 name.to_owned(),
@@ -782,12 +846,9 @@ impl MailClient {
     /// [`can_change_folder`](crate::can_change_folder) allows; made on the server at
     /// once, as [`create_folder`](Self::create_folder) is.
     pub async fn rename_folder(&self, folder: FolderId, name: &str) -> Result<Folder> {
-        self.rt
-            .run(folders::rename(
-                self.engine.clone(),
-                folder,
-                name.to_owned(),
-            ))
+        self.shared
+            .rt
+            .run(folders::rename(self.engine()?, folder, name.to_owned()))
             .await
     }
 
@@ -797,8 +858,9 @@ impl MailClient {
     /// if some can't be, nothing is deleted. Only for a folder
     /// [`can_change_folder`](crate::can_change_folder) allows.
     pub async fn delete_folder(&self, folder: FolderId) -> Result<()> {
-        self.rt
-            .run(folders::delete(self.engine.clone(), folder))
+        self.shared
+            .rt
+            .run(folders::delete(self.engine()?, folder))
             .await
     }
 
@@ -810,8 +872,9 @@ impl MailClient {
         limit: u32,
         after: Option<MessageCursor>,
     ) -> Result<Vec<MessageSummary>> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run(async move {
                 engine
                     .read(move |db| db.messages().list(folder, limit, after))
@@ -827,8 +890,9 @@ impl MailClient {
         limit: u32,
         after: Option<MessageCursor>,
     ) -> Result<Vec<MessageSummary>> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run(async move {
                 engine
                     .read(move |db| db.messages().list_merged(&inbox_ids(db)?, limit, after))
@@ -839,8 +903,9 @@ impl MailClient {
 
     /// The message as stored locally; `body` is `None` until downloaded.
     pub async fn get_message(&self, id: MessageId) -> Result<Option<Message>> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run(async move { engine.read(move |db| db.messages().get(id)).await })
             .await
     }
@@ -849,8 +914,9 @@ impl MailClient {
     /// account's INBOX, newest first: what to tell the user about. Mail read or moved
     /// since, on another device or here, is left out.
     pub async fn unread_in_inbox(&self, messages: Vec<MessageId>) -> Result<Vec<MessageSummary>> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run(async move {
                 engine
                     .read(move |db| db.messages().unread_in_inbox(&messages, &inbox_ids(db)?))
@@ -862,8 +928,9 @@ impl MailClient {
     /// How many messages are unread in the accounts' INBOXes together (on Gmail, labelled
     /// INBOX): what the tray shows.
     pub async fn count_unread_in_inboxes(&self) -> Result<u32> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run(async move {
                 engine
                     .read(|db| Ok(inboxes(db)?.iter().map(|f| f.unread_count).sum()))
@@ -876,16 +943,18 @@ impl MailClient {
     /// message unread on the server). Fails with [`Error::OutOfSync`] if the server no
     /// longer has the message as it was synced.
     pub async fn download_message(&self, id: MessageId) -> Result<Message> {
-        self.rt
-            .run(body::download_message(self.engine.clone(), id))
+        self.shared
+            .rt
+            .run(body::download_message(self.engine()?, id))
             .await
     }
 
     /// The decoded content of an attachment or inline part, downloading it first if
     /// needed.
     pub async fn attachment_content(&self, id: AttachmentId) -> Result<Vec<u8>> {
-        self.rt
-            .run(body::attachment_content(self.engine.clone(), id))
+        self.shared
+            .rt
+            .run(body::attachment_content(self.engine()?, id))
             .await
     }
 
@@ -898,10 +967,15 @@ impl MailClient {
     /// finishes; dropping it stops the rest. Fails only if the HTTP client can't be set
     /// up.
     pub async fn fetch_remote_images(&self, urls: Vec<String>) -> Result<RemoteImageStream> {
-        let engine = self.engine.clone();
-        let fetcher = self.rt.run(async move { engine.image_fetcher() }).await?;
-        let cache = self.engine.image_cache.clone();
-        Ok(images::fetch(&self.rt, fetcher, cache, urls))
+        let engine = self.engine()?;
+        let fetcher = {
+            let engine = engine.clone();
+            self.shared
+                .rt
+                .run(async move { engine.image_fetcher() })
+                .await?
+        };
+        Ok(images::fetch(&self.shared.rt, fetcher, engine, urls))
     }
 
     /// The remote images among `urls` that were shown before and are still cached, with
@@ -911,31 +985,39 @@ impl MailClient {
         &self,
         urls: Vec<String>,
     ) -> Result<Vec<(String, RemoteImage)>> {
-        let cache = self.engine.image_cache.clone();
-        self.rt
-            .run_blocking(move || Ok(cache.get_many(&urls)))
+        let engine = self.engine()?;
+        self.shared
+            .rt
+            .run_blocking(move || Ok(engine.image_cache.get_many(&urls)))
             .await
     }
 
     /// The bytes the cache of remote images takes on disk. It keeps at most 256 MiB,
     /// dropping the images used longest ago.
     pub async fn image_cache_size(&self) -> Result<u64> {
-        let cache = self.engine.image_cache.clone();
-        self.rt.run_blocking(move || Ok(cache.size()?)).await
+        let engine = self.engine()?;
+        self.shared
+            .rt
+            .run_blocking(move || Ok(engine.image_cache.size()?))
+            .await
     }
 
     /// Deletes every cached remote image; returns the bytes freed. Messages show their
     /// remote images again only when asked.
     pub async fn clear_image_cache(&self) -> Result<u64> {
-        let cache = self.engine.image_cache.clone();
-        self.rt.run_blocking(move || Ok(cache.clear()?)).await
+        let engine = self.engine()?;
+        self.shared
+            .rt
+            .run_blocking(move || Ok(engine.image_cache.clear()?))
+            .await
     }
 
     /// The message exactly as the server stores it (the `.eml`), downloading it first if
     /// needed.
     pub async fn raw_message(&self, id: MessageId) -> Result<Vec<u8>> {
-        self.rt
-            .run(body::raw_message(self.engine.clone(), id))
+        self.shared
+            .rt
+            .run(body::raw_message(self.engine()?, id))
             .await
     }
 
@@ -951,8 +1033,9 @@ impl MailClient {
         add: Flags,
         remove: Flags,
     ) -> Result<Vec<AccountId>> {
-        self.rt
-            .run(ops::set_flags(self.engine.clone(), messages, add, remove))
+        self.shared
+            .rt
+            .run(ops::set_flags(self.engine()?, messages, add, remove))
             .await
     }
 
@@ -970,13 +1053,9 @@ impl MailClient {
         shown_in: Option<FolderId>,
         to: FolderId,
     ) -> Result<Vec<AccountId>> {
-        self.rt
-            .run(ops::move_messages(
-                self.engine.clone(),
-                messages,
-                shown_in,
-                to,
-            ))
+        self.shared
+            .rt
+            .run(ops::move_messages(self.engine()?, messages, shown_in, to))
             .await
     }
 
@@ -988,8 +1067,9 @@ impl MailClient {
     ///
     /// [`MovePlan::archive`]: catmail_types::MovePlan::archive
     pub async fn archive_messages(&self, messages: Vec<MessageId>) -> Result<Vec<AccountId>> {
-        self.rt
-            .run(ops::archive_messages(self.engine.clone(), messages))
+        self.shared
+            .rt
+            .run(ops::archive_messages(self.engine()?, messages))
             .await
     }
 
@@ -1003,13 +1083,9 @@ impl MailClient {
         add: Vec<FolderId>,
         remove: Vec<FolderId>,
     ) -> Result<Vec<AccountId>> {
-        self.rt
-            .run(ops::label_messages(
-                self.engine.clone(),
-                messages,
-                add,
-                remove,
-            ))
+        self.shared
+            .rt
+            .run(ops::label_messages(self.engine()?, messages, add, remove))
             .await
     }
 
@@ -1024,8 +1100,9 @@ impl MailClient {
         messages: Vec<MessageId>,
         mode: DeleteMode,
     ) -> Result<Vec<AccountId>> {
-        self.rt
-            .run(ops::delete_messages(self.engine.clone(), messages, mode))
+        self.shared
+            .rt
+            .run(ops::delete_messages(self.engine()?, messages, mode))
             .await
     }
 
@@ -1036,35 +1113,38 @@ impl MailClient {
     /// counts what was done before (refusals, already undone, among it). Fails if the
     /// account is removed, or its queue can't be read to begin with.
     pub async fn replay_pending(&self, account: AccountId) -> Result<ReplayReport> {
-        self.rt
-            .run(ops::replay_account(self.engine.clone(), account))
+        self.shared
+            .rt
+            .run(ops::replay_account(self.engine()?, account))
             .await
     }
 
     /// Changes not yet made on the server, and those it refused or that no longer
     /// apply, oldest first; all accounts' with `None`.
     pub async fn list_pending(&self, account: Option<AccountId>) -> Result<Vec<PendingOp>> {
-        self.rt.run(ops::list(self.engine.clone(), account)).await
+        self.shared.rt.run(ops::list(self.engine()?, account)).await
     }
 
     /// Forgets every failed or conflicting change of the account (of every account with
     /// `None`), and returns them: what to tell the user about, once.
     pub async fn dismiss_settled(&self, account: Option<AccountId>) -> Result<Vec<PendingOp>> {
-        self.rt
-            .run(ops::dismiss_settled(self.engine.clone(), account))
+        self.shared
+            .rt
+            .run(ops::dismiss_settled(self.engine()?, account))
             .await
     }
 
     /// Forgets a failed or conflicting change. Pending ones can't be dismissed.
     pub async fn dismiss_pending(&self, id: PendingOpId) -> Result<()> {
-        self.rt.run(ops::dismiss(self.engine.clone(), id)).await
+        self.shared.rt.run(ops::dismiss(self.engine()?, id)).await
     }
 
     /// Searches subjects, senders and recipients of all synced messages, and the text
     /// of downloaded bodies. Newest first.
     pub async fn search(&self, query: SearchQuery) -> Result<Vec<MessageSummary>> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run(async move { engine.read(move |db| db.messages().search(&query)).await })
             .await
     }
@@ -1086,8 +1166,9 @@ impl MailClient {
         content: DraftContent,
         files: Vec<PathBuf>,
     ) -> Result<Draft> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run(async move { drafts::create(&engine, account, from, content, files).await })
             .await
     }
@@ -1108,8 +1189,9 @@ impl MailClient {
         text: String,
         files: Vec<PathBuf>,
     ) -> Result<Draft> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run(async move { drafts::reply(&engine, message, all, from, text, files).await })
             .await
     }
@@ -1118,8 +1200,9 @@ impl MailClient {
     /// false when the message's sender (or Reply-To) is its only other party. Reads the
     /// message's headers only, without downloading its body.
     pub async fn can_reply_all(&self, message: MessageId) -> Result<bool> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run(async move { drafts::can_reply_all(&engine, message).await })
             .await
     }
@@ -1139,8 +1222,9 @@ impl MailClient {
         forwarding: Forwarding,
         files: Vec<PathBuf>,
     ) -> Result<Draft> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run(async move { drafts::forward(&engine, message, from, forwarding, files).await })
             .await
     }
@@ -1157,8 +1241,9 @@ impl MailClient {
         from: IdentityId,
         content: DraftContent,
     ) -> Result<Draft> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run(async move { drafts::update(&engine, id, from, content).await })
             .await
     }
@@ -1167,8 +1252,9 @@ impl MailClient {
     /// one's default first. A reply goes from the account of the message it answers, as
     /// one of its identities.
     pub async fn draft_senders(&self, id: DraftId) -> Result<Vec<Identity>> {
-        let engine = self.engine.clone();
+        let engine = self.engine()?;
         let senders = self
+            .shared
             .rt
             .run_blocking(move || Ok(engine.store.read(|db| db.identities().of_draft(id))?))
             .await?;
@@ -1180,8 +1266,9 @@ impl MailClient {
     }
 
     pub async fn get_draft(&self, id: DraftId) -> Result<Option<Draft>> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run(async move { engine.read(move |db| db.drafts().get(id)).await })
             .await
     }
@@ -1189,16 +1276,18 @@ impl MailClient {
     /// The account's drafts, most recently changed first. Drafts being sent are not
     /// among them; see [`list_outbox`](Self::list_outbox).
     pub async fn list_drafts(&self, account: AccountId) -> Result<Vec<Draft>> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run(async move { engine.read(move |db| db.drafts().list(account)).await })
             .await
     }
 
     /// How many drafts [`list_drafts`](Self::list_drafts) returns.
     pub async fn count_drafts(&self, account: AccountId) -> Result<usize> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run(async move { engine.read(move |db| db.drafts().count(account)).await })
             .await
     }
@@ -1206,8 +1295,9 @@ impl MailClient {
     /// Deletes the draft, and its copy on the server the way changes to messages are
     /// made.
     pub async fn delete_draft(&self, id: DraftId) -> Result<()> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run(async move { drafts::delete(&engine, id).await })
             .await
     }
@@ -1219,17 +1309,19 @@ impl MailClient {
         draft: DraftId,
         path: impl Into<PathBuf>,
     ) -> Result<DraftAttachment> {
-        let engine = self.engine.clone();
+        let engine = self.engine()?;
         let path = path.into();
-        self.rt
+        self.shared
+            .rt
             .run(async move { drafts::attach_file(&engine, draft, path).await })
             .await
     }
 
     /// Returns the draft as it is now.
     pub async fn remove_draft_attachment(&self, id: DraftAttachmentId) -> Result<Draft> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run(async move { drafts::remove_attachment(&engine, id).await })
             .await
     }
@@ -1240,8 +1332,9 @@ impl MailClient {
     /// [`MailClientBuilder::send_in_background`], else on
     /// [`flush_outbox`](Self::flush_outbox).
     pub async fn send_draft(&self, id: DraftId) -> Result<OutboxEntry> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run(async move { send::queue_draft(&engine, id).await })
             .await
     }
@@ -1249,8 +1342,9 @@ impl MailClient {
     /// Every entry still in the outbox (sent ones are gone), oldest first; all
     /// accounts' with `None`.
     pub async fn list_outbox(&self, account: Option<AccountId>) -> Result<Vec<OutboxEntry>> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run(async move { engine.read(move |db| db.outbox().list(account)).await })
             .await
     }
@@ -1260,16 +1354,18 @@ impl MailClient {
     /// the entries worked on, as they ended up, and why the SMTP server couldn't be used
     /// if it couldn't; failures are recorded there, not returned.
     pub async fn flush_outbox(&self, account: AccountId) -> Result<FlushReport> {
-        self.rt
-            .run(send::flush(self.engine.clone(), account, false))
+        self.shared
+            .rt
+            .run(send::flush(self.engine()?, account, false))
             .await
     }
 
     /// Tries a failed or unknown send again (an unknown one may then arrive twice), or
     /// saving an accepted one to Sent. Due at once.
     pub async fn retry_outbox(&self, id: OutboxId) -> Result<OutboxEntry> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run(async move { send::retry(&engine, id).await })
             .await
     }
@@ -1277,8 +1373,9 @@ impl MailClient {
     /// For a send with an unknown outcome that the user found was delivered: it is only
     /// saved to Sent from now on.
     pub async fn mark_outbox_sent(&self, id: OutboxId) -> Result<OutboxEntry> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run(async move { send::mark_sent(&engine, id).await })
             .await
     }
@@ -1289,8 +1386,9 @@ impl MailClient {
     /// it left the entry; one still waiting its turn goes at once. Returns the entry as
     /// it was.
     pub async fn cancel_outbox(&self, id: OutboxId) -> Result<OutboxEntry> {
-        let engine = self.engine.clone();
-        self.rt
+        let engine = self.engine()?;
+        self.shared
+            .rt
             .run(async move { send::cancel(&engine, id).await })
             .await
     }
@@ -1298,8 +1396,11 @@ impl MailClient {
     /// Deletes stored bodies and attachments nothing refers to any more (after messages
     /// or accounts were removed). Safe to run at any time.
     pub async fn collect_garbage(&self) -> Result<GcReport> {
-        let engine = self.engine.clone();
-        self.rt.run_blocking(move || gc::collect(&engine)).await
+        let engine = self.engine()?;
+        self.shared
+            .rt
+            .run_blocking(move || gc::collect(&engine))
+            .await
     }
 
     /// Writes `contents` to a new file in [`Config::handoff_dir`], readable by this user
@@ -1307,10 +1408,14 @@ impl MailClient {
     /// left there: the other program reads it after this returns. It goes when the engine
     /// next opens, or when a later hand-off finds it older than ten minutes.
     pub async fn hand_off(&self, extension: &str, contents: Vec<u8>) -> Result<PathBuf> {
+        let engine = self.engine()?;
         let dir = self.config().handoff_dir();
         let suffix = format!(".{extension}");
-        self.rt
+        self.shared
+            .rt
             .run_blocking(move || {
+                // Held until written: the engine holds the data directory's lock.
+                let _engine = engine;
                 remove_old_files(&dir, KEEP_HANDED_OFF);
                 let mut file = tempfile::Builder::new()
                     .prefix("catmail-")
@@ -1528,7 +1633,8 @@ mod tests {
 
     fn secret_key(client: &MailClient, id: AccountId) -> String {
         client
-            .engine
+            .engine()
+            .unwrap()
             .store
             .read(|db| db.accounts().secret_key(id))
             .unwrap()
@@ -1704,7 +1810,8 @@ mod tests {
             .unwrap();
         let key = |id| {
             client
-                .engine
+                .engine()
+                .unwrap()
                 .store
                 .read(|db| db.identities().sending(account.id, id))
                 .unwrap()
@@ -1790,9 +1897,9 @@ mod tests {
             }
         };
         let every = Duration::from_millis(10);
-        let engine = &client.engine;
+        let engine = client.engine().unwrap();
         tokio::spawn(sleep::run(
-            Arc::downgrade(engine),
+            Arc::downgrade(&engine),
             every,
             clocks,
             engine.closing(),
@@ -1872,7 +1979,7 @@ mod tests {
             client.account_status(AccountId(42)),
             AccountStatus::default()
         );
-        assert_eq!(client.engine.tracked_accounts(), 0);
+        assert_eq!(client.engine().unwrap().tracked_accounts(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1888,7 +1995,7 @@ mod tests {
             .create_draft(account, None, DraftContent::default(), Vec::new())
             .await
             .unwrap();
-        assert_eq!(client.engine.tracked_draft_edits(account), 0);
+        assert_eq!(client.engine().unwrap().tracked_draft_edits(account), 0);
     }
 
     #[test]
@@ -2008,7 +2115,7 @@ mod tests {
         release.send(()).unwrap();
         assert_eq!(add.await.unwrap().unwrap().id, id);
         assert!(
-            !client.engine.cancellation(id).is_cancelled(),
+            !client.engine().unwrap().cancellation(id).is_cancelled(),
             "the failed removal must not leave the new account marked removed"
         );
 
@@ -2138,7 +2245,8 @@ mod tests {
         // The process dies sending both: the first before the end of the message, the
         // second after.
         client
-            .engine
+            .engine()
+            .unwrap()
             .store
             .write(|db| {
                 db.outbox().begin_send(entries[0], 1)?;
@@ -2173,7 +2281,8 @@ mod tests {
         let entry = queue_one(&client, account).await;
         // An attempt that couldn't record how it ended, e.g. a failed write.
         client
-            .engine
+            .engine()
+            .unwrap()
             .store
             .write(|db| db.outbox().begin_send(entry.id, 1))
             .unwrap();

@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use catmail_core::{MailClient, RecvError};
+use catmail_core::RecvError;
 use gpui_kit::{App, AppContext as _, Global, RenderImage, SvgRenderer, Task, WindowAppearance};
 
 use crate::mailbox::{Coalesce, Refresh};
@@ -98,7 +98,6 @@ const SIZES: [u32; 3] = [22, 32, 64];
 type Pixmaps = Vec<(u32, Vec<u8>)>;
 
 pub struct Tray {
-    client: MailClient,
     /// Unread messages in the INBOXes, once counted.
     unread: Option<u32>,
     counting: Coalesce,
@@ -112,9 +111,9 @@ pub struct Tray {
 impl Global for Tray {}
 
 impl Tray {
-    /// Shows the tray icon for `client`'s mail, where the desktop has a tray. Counts
-    /// nothing where it hasn't.
-    pub fn start(client: MailClient, cx: &mut App) {
+    /// Shows the tray icon for the mail of [`Resident`]'s engine, where the desktop has a
+    /// tray. Counts nothing where it hasn't.
+    pub fn start(cx: &mut App) {
         let (choose, mut chosen) = futures_channel::mpsc::unbounded();
         let chosen = cx.spawn(async move |cx| {
             while let Ok((command, activation_token)) = chosen.recv().await {
@@ -122,7 +121,6 @@ impl Tray {
             }
         });
         cx.set_global(Self {
-            client,
             unread: None,
             counting: Coalesce::default(),
             drawing: Coalesce::default(),
@@ -142,7 +140,11 @@ impl Tray {
     /// The tray has the item: counts from now on, and draws the icon in the desktop's
     /// appearance.
     fn shown(item: Item, cx: &mut App) {
-        let mut events = cx.global::<Self>().client.subscribe();
+        // The app is quitting.
+        let Some(client) = Resident::client(cx) else {
+            return;
+        };
+        let mut events = client.subscribe();
         let events = cx.spawn(async move |cx| {
             loop {
                 let event = match events.recv().await {
@@ -175,11 +177,12 @@ impl Tray {
 
     /// Counts the unread messages again, and shows the count if it changed.
     fn count(cx: &mut App) {
-        let this = cx.global_mut::<Self>();
-        if !this.counting.start() {
+        let Some(client) = Resident::client(cx) else {
+            return;
+        };
+        if !cx.global_mut::<Self>().counting.start() {
             return;
         }
-        let client = this.client.clone();
         cx.spawn(async move |cx| {
             let counted = client.count_unread_in_inboxes().await;
             cx.update(|cx| {
@@ -322,7 +325,8 @@ mod tests {
         let client = mail.client.clone();
         cx.update(|cx| {
             crate::init_app(Preferences::load_nowhere(), cx);
-            Tray::start(client, cx);
+            Resident::hold(client, cx);
+            Tray::start(cx);
         });
         wait_until(|| {
             cx.run_until_parked();

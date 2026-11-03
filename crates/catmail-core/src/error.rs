@@ -114,6 +114,10 @@ pub enum Error {
     #[error("{} belongs to another user; choose a data directory of your own", .0.display())]
     DataDirNotOwned(std::path::PathBuf),
 
+    /// The client was shut down ([`MailClient::shut_down`](crate::MailClient::shut_down)).
+    #[error("the engine was shut down")]
+    Closed,
+
     #[error("background task failed: {0}")]
     Task(String),
 
@@ -168,7 +172,9 @@ impl Error {
             | Self::DraftAttachmentNotFound(_)
             | Self::OutboxNotFound(_)
             | Self::Cancelled => K::NotFound,
-            Self::AlreadyExists(_) | Self::Conflict(_) | Self::AlreadyRunning(_) => K::Conflict,
+            Self::AlreadyExists(_) | Self::Conflict(_) | Self::AlreadyRunning(_) | Self::Closed => {
+                K::Conflict
+            }
             Self::OutOfSync(_) => K::OutOfSync,
             Self::Tls(_) | Self::Secrets(_) | Self::Task(_) | Self::Io(_) => K::Internal,
         }

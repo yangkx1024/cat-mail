@@ -274,6 +274,11 @@ impl TestMail {
         self.fake.state().hold_fetches()
     }
 
+    /// How many header FETCHes the server received, those it holds included.
+    pub fn header_fetches(&self) -> usize {
+        self.fake.state().header_fetches()
+    }
+
     /// The subjects of the messages stored in `folder`, newest first.
     pub fn stored_subjects(&self, folder: &str) -> Vec<String> {
         pollster::block_on(async {

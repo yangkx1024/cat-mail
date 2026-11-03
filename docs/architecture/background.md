@@ -56,7 +56,10 @@ GUI 关掉主窗口后继续同步、发信、提醒新邮件，并能从托盘�
 - 窗口最后在的显示环境（`display`）：点击通知时没有别的请求方，常驻时就切回这里。
 
 不依赖窗口的事件订阅放在各自的全局里，引擎打开时启动：新邮件通知（`Notifier`，见[新邮件](#新邮件)）、
-托盘（`Tray`，见[托盘](#托盘)）。
+托盘（`Tray`，见[托盘](#托盘)）。它们不存 `MailClient`：启动时订阅一次事件，之后每次用到都从
+`Resident::client` 取（引擎没打开或已在退出时是 `None`），引擎的状态只有 `Resident` 一份，退出后也就
+不再发出注定得到 `Error::Closed` 的调用。引擎关闭时事件流结束，它们的事件循环随之停下。退出时关闭
+引擎不靠谁放手（见[退出](#退出)），存着 `MailClient` 也拖不住它。
 
 主窗口关闭时整个 `Mailbox` 被 drop：列表、读信区（Blitz 每个文档一个线程）、图片都随之释放。重新
 打开时新建 `Mailbox`，`Resident` 只记住上次选中的 `Place`（`Mailbox` 释放时记下，新的
@@ -290,10 +293,11 @@ GUI 的 `Tray`（`catmail-gui/src/tray/`）是应用级的全局，引擎打开�
   窗口先存好再退出：会话注销时系统发的是 SIGTERM，这样没保存的草稿也能留下。第二个信号不再等写信窗口，
   直接退出。用 `ctrlc` 在它自己的线程上等信号，经 channel 回到 GPUI 线程；GPUI 不是 tokio，用不了
   `tokio::signal`。Windows 上关闭控制台、注销、关机时，处理函数一返回系统就结束进程，来不及存。
-- GPUI 退出时不丢掉全局状态，只清掉窗口。`Resident::shut_down` 还把引擎从
-  `Resident` 里拿走，并移除也持有它的 `Tray`、`Notifier`；窗口里的句柄随窗口关闭而去。最后一个句柄
-  没了引擎就关闭，记 `engine closed`。在 GPUI 给退出回调的时间内（`SHUTDOWN_TIMEOUT`）等
-  `MailClient::closed()`，等不到（刚发出的同步之类的请求还拿着句柄）就记一行 warn 后照样退出。
+- GPUI 退出时不丢掉全局状态，只清掉窗口，所以不能指望最后一个 `MailClient` 句柄被 drop。
+  `Resident::shut_down` 把引擎换成 `Engine::Closed`，并调 `MailClient::shut_down`：不管谁还拿着句柄
+  （窗口里的、某个全局、正在等结果的请求），引擎都关闭，记 `engine closed`；GUI 的 runtime 是自建的，
+  进行中的工作随之停下，它们的调用得到 `Error::Closed`。在 GPUI 给退出回调的时间内（`SHUTDOWN_TIMEOUT`）等
+  `MailClient::closed()`，等不到（已开始的 blocking 工作，如一次数据库写入，还没做完）就记一行 warn 后照样退出。
 
 ## 开机启动
 
