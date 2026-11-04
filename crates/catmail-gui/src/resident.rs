@@ -1,7 +1,8 @@
 //! What outlives the windows: the engine, and the main window coming and going. With
 //! "Keep running after the window is closed" on, closing the last window leaves the app
-//! running, disconnected from the display server, until another launch asks for the
-//! window again. See docs/architecture/background.md.
+//! running, disconnected from the display server (on macOS, without its Dock icon), until
+//! the tray or another launch asks for the window again. See
+//! docs/architecture/background.md.
 
 use std::fmt;
 use std::time::Duration;
@@ -19,10 +20,6 @@ use crate::mailbox::{Destination, Mailbox};
 use crate::new_mail::Notifier;
 use crate::settings::Preferences;
 use crate::tray::Tray;
-
-/// Whether the app drops its display connection while no window is open. macOS apps keep
-/// their Dock icon instead, and get the window back through it (`on_reopen`).
-const GOES_HEADLESS: bool = !cfg!(target_os = "macos");
 
 pub enum Engine {
     Opening,
@@ -86,23 +83,17 @@ enum Windowing {
 #[derive(Debug, PartialEq, Eq)]
 enum AfterLastWindow {
     Quit,
-    /// Keep running, connected to the display.
-    Stay,
+    /// Keep running without the display: on macOS, as an accessory, without a Dock icon
+    /// or menu bar; the status item stays.
     GoHeadless,
 }
 
-fn after_last_window(
-    keep_running: bool,
-    engine: &Engine,
-    quitting: bool,
-    goes_headless: bool,
-) -> AfterLastWindow {
+fn after_last_window(keep_running: bool, engine: &Engine, quitting: bool) -> AfterLastWindow {
     match engine {
         _ if quitting || !keep_running => AfterLastWindow::Quit,
         // Nothing would run.
         Engine::Failed(_) | Engine::Closed => AfterLastWindow::Quit,
-        Engine::Opening | Engine::Open(_) if goes_headless => AfterLastWindow::GoHeadless,
-        Engine::Opening | Engine::Open(_) => AfterLastWindow::Stay,
+        Engine::Opening | Engine::Open(_) => AfterLastWindow::GoHeadless,
     }
 }
 
@@ -431,7 +422,12 @@ impl Resident {
             });
             return;
         }
-        match resident.main {
+        // A status item's menu leaves the app in the background, and an app that was an
+        // accessory a moment ago isn't active: its window would open behind the others.
+        let main = resident.main;
+        #[cfg(target_os = "macos")]
+        cx.activate(true);
+        match main {
             // Wayland compositors may only mark it as wanting attention: GPUI can't pass
             // the asking launch's activation token to a window already open.
             Some(main) => {
@@ -472,14 +468,8 @@ impl Resident {
         let keep_running = Preferences::get(cx).keep_running;
         let resident = cx.global::<Self>();
         let quitting = resident.quitting;
-        match after_last_window(
-            keep_running,
-            &resident.engine,
-            quitting.is_some(),
-            GOES_HEADLESS,
-        ) {
+        match after_last_window(keep_running, &resident.engine, quitting.is_some()) {
             AfterLastWindow::Quit => exit(quitting.unwrap_or(QuitReason::LastWindowClosed), cx),
-            AfterLastWindow::Stay => {}
             AfterLastWindow::GoHeadless => {
                 Self::switch(WindowingRequest::Headless, cx, |switched, pending, cx| {
                     cx.global_mut::<Self>().windowing = match switched {
@@ -890,15 +880,11 @@ mod tests {
     fn closing_the_last_window_keeps_the_engine_running_if_asked() {
         let open = Engine::Opening;
         assert_eq!(
-            after_last_window(true, &open, false, true),
+            after_last_window(true, &open, false),
             AfterLastWindow::GoHeadless
         );
         assert_eq!(
-            after_last_window(true, &open, false, false),
-            AfterLastWindow::Stay
-        );
-        assert_eq!(
-            after_last_window(false, &open, false, true),
+            after_last_window(false, &open, false),
             AfterLastWindow::Quit
         );
     }
@@ -906,16 +892,12 @@ mod tests {
     #[test]
     fn quitting_or_a_failed_engine_ends_the_app_with_its_last_window() {
         assert_eq!(
-            after_last_window(true, &Engine::Opening, true, true),
+            after_last_window(true, &Engine::Opening, true),
             AfterLastWindow::Quit
         );
         let failed = Engine::Failed("in use".into());
         assert_eq!(
-            after_last_window(true, &failed, false, true),
-            AfterLastWindow::Quit
-        );
-        assert_eq!(
-            after_last_window(true, &failed, false, false),
+            after_last_window(true, &failed, false),
             AfterLastWindow::Quit
         );
     }

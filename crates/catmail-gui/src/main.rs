@@ -107,7 +107,8 @@ fn main() {
         .with_assets(assets::Assets)
         // Closing the last window may leave the app running; see `Resident`.
         .with_quit_mode(QuitMode::Explicit);
-    // macOS: clicking the Dock icon with no window open.
+    // macOS: clicking the Dock icon with no window open, or opening the app again from
+    // the Finder or Launchpad while it runs without one (and without a Dock icon).
     app.on_reopen(|cx| {
         if cx.has_global::<Resident>() {
             Resident::show(Display::default(), cx);

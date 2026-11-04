@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <mask id="fold-gap" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <path fill="white" d="M0 0h512v512H0z" />
+      <ellipse cx="256" cy="276" rx="116" ry="114" fill="black" />
+    </mask>
+  </defs>
+  <rect x="44" y="108" width="424" height="304" rx="52" fill="none" stroke-width="44" stroke="#000" />
+  <path d="M70 134l166 126q20 15 40 0l166-126" fill="none" stroke-width="36" stroke-linecap="round" stroke-linejoin="round" mask="url(#fold-gap)" stroke="#000" />
+  <g transform="translate(256 278) scale(1.22) rotate(13) translate(-258 -277)" fill="#000">
+    <ellipse cx="200" cy="260" rx="18" ry="25" transform="rotate(-26 200 260)" />
+    <ellipse cx="237" cy="231" rx="19" ry="27" transform="rotate(-9 237 231)" />
+    <ellipse cx="279" cy="231" rx="19" ry="27" transform="rotate(9 279 231)" />
+    <ellipse cx="316" cy="260" rx="18" ry="25" transform="rotate(26 316 260)" />
+    <path d="M258 267c-17 0-24 15-35 27-10 11-23 19-23 34 0 13 10 22 24 22 13 0 21-7 34-7s21 7 34 7c14 0 24-9 24-22 0-15-13-23-23-34-11-12-18-27-35-27Z" />
+  </g>
+</svg>

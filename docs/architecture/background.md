@@ -2,8 +2,8 @@
 
 [← 架构](../architecture.md)
 
-> 状态：常驻与单实例唤起、睡眠唤醒、新邮件事件与系统通知、Linux 托盘已实现（#106、#82、#107）；
-> Windows、macOS 托盘（#108 / #109）、开机启动尚未实现，这几个小节是设计。
+> 状态：常驻与单实例唤起、睡眠唤醒、新邮件事件与系统通知、Linux 托盘、macOS 状态栏已实现（#106、#82、
+> #107、#108）；Windows 托盘（#109）、开机启动尚未实现，这几个小节是设计。
 
 GUI 关掉主窗口后继续同步、发信、提醒新邮件，并能从托盘、再次启动或通知回到窗口。
 
@@ -26,7 +26,7 @@ GUI 关掉主窗口后继续同步、发信、提醒新邮件，并能从托盘�
 ```
 有窗口 ──最后一个窗口关闭，且开着"关闭窗口后保持运行"──▶ 常驻
   ▲                                                    │
-  └──── 托盘 / 再次启动 / 点击通知 / Dock ───────────────┘
+  └──── 托盘 / 再次启动 / 点击通知 ──────────────────────┘
 有窗口、常驻 ──Quit（Ctrl Q、托盘菜单、macOS 应用菜单）──▶ 退出
 ```
 
@@ -42,9 +42,13 @@ GUI 关掉主窗口后继续同步、发信、提醒新邮件，并能从托盘�
   |---|---|
   | Linux | 断开 Wayland / X11 连接；托盘和通知经 D-Bus |
   | Windows | 释放 GPU；消息循环照常，托盘图标需要它 |
-  | macOS | 不切换，保持 Regular（Dock 图标），合 Mail.app 的习惯；只留状态栏图标的模式在 #108 决定 |
+  | macOS | 切到 Accessory：没有 Dock 图标、菜单栏，不在 Cmd-Tab 里，只留状态栏图标 |
 
   被另一个进程唤起时，`env` 带上那个进程的 `XDG_ACTIVATION_TOKEN`，否则 Wayland 不让新窗口获得焦点。
+- macOS 上考虑过保留 Dock 图标（Mail.app 的习惯，点 Dock 回到窗口），没有采用：有了状态栏图标，常驻
+  就与 Linux、Windows 是同一个状态，"关闭窗口后保持运行"在三个平台上意思相同；从启动台、Finder 再打开
+  仍经 `on_reopen` 回到窗口，状态栏图标被系统或别的工具藏起来也找得回来。回到窗口时先 `cx.activate`：
+  状态栏菜单不会让应用变成前台，刚从 Accessory 切回来的应用也不是，新窗口会开在别的应用后面。
 
 ## 引擎属于应用，不属于窗口
 
@@ -66,22 +70,23 @@ GUI 关掉主窗口后继续同步、发信、提醒新邮件，并能从托盘�
 `Mailbox::reopen_at`），那里已经不在就回到第一个收件箱。
 
 最后一个窗口关闭时怎么做是一个纯函数（`after_last_window`）：正在退出、没开"保持运行"、引擎打开失败
-（没有东西可运行）时退出；否则 Linux、Windows 上切到 headless，macOS 上什么也不做。切换是异步的，
+（没有东西可运行）时退出；否则切到 headless（macOS 上是 Accessory）。切换是异步的，
 期间到来的唤起请求等切换结束再处理；切到窗口模式失败（例如请求方没有显示服务器）就留在 headless，
 只记日志。GPUI 只在没有窗口时允许切换，正合这里的用法。切到 headless 之后调一次 glibc 的
 `malloc_trim(0)`（`memory::release_freed`，只在 Linux glibc 上，其他平台什么也不做）：窗口用过的
 布局、读信区的 tile、渲染器的缓冲区都已释放，但 glibc 的堆只能从顶上缩，释放的内存夹在仍在用的块之间，
 留在进程里。实测关掉主窗口后 glibc 持有约 103 MB、其中约 92 MB 是空闲块，trim 之后 RSS 从约 229 MB
 降到约 151 MB。代价是再开窗口时这些页重新缺页，约 2 万次、合计几十毫秒，远小于重建 GPU 设备和管线；
-只在切到 headless 时做一次，不在热路径上反复做。这是工作区里唯一的 `unsafe`：`unsafe_code` 因此是
-`deny` 而不是 `forbid`，由 `memory` 模块单独放行，其他 crate 在根上各自 `forbid`。`Mailbox::new` 不做启动同步（后台同步
+只在切到 headless 时做一次，不在热路径上反复做。`unsafe_code` 因此是 `deny` 而不是
+`forbid`，由 `memory` 模块单独放行（还有 macOS 的状态栏，见[托盘](#托盘)），其他 crate 在根上各自 `forbid`。`Mailbox::new` 不做启动同步（后台同步
 打开时就完整同步一遍），重开窗口不会多出同步；打开时的 `report_refused_changes` 正好报告常驻期间被
 拒绝的改动。
 
 ## 单实例与唤起
 
 常驻之后，从启动器再点一次 catmail 应当唤起已有实例的窗口，而不是显示 "Couldn't open the mail
-data"。macOS 由系统保证单实例、Dock 点击经 GPUI 的 `on_reopen`；Linux、Windows 上 GPUI 不提供
+data"。macOS 由系统保证单实例，点 Dock 图标、常驻时从启动台或 Finder 再打开都经 GPUI 的 `on_reopen`；
+Linux、Windows 上 GPUI 不提供
 （Linux 的 `on_reopen` 从不触发），自己做：
 
 - **端点是数据目录里的 Unix socket `gui.sock`**（`catmail-gui/src/instance.rs`），由持有数据目录锁的
@@ -242,21 +247,22 @@ GUI 的 `Notifier`（`catmail-gui/src/new_mail.rs`）是应用级的全局，引
 ## 托盘
 
 GUI 的 `Tray`（`catmail-gui/src/tray/`）是应用级的全局，引擎打开时启动，有窗口时、常驻时都在。
-与平台无关的部分在 `tray/mod.rs`，各平台只把图标、提示和菜单交给系统（`tray/linux.rs`；Windows、macOS
-在 #108 / #109）：
+与平台无关的部分在 `tray/mod.rs`：数未读、按平台定图标的样子（`icon`：一个 SVG 和要画的尺寸）、在后台画；
+各平台只把画好的图标、未读数和菜单交给系统（`tray/linux.rs`、`tray/macos.rs`；Windows 在 #109）：
 
 - **未读数**：`MailClient::count_unread_in_inboxes` 把各账户 INBOX（Gmail：INBOX 标签）的 `unread_count`
   加起来，一次读。侧栏要重读的事件（`Refresh::after(..).sidebar`：消息、文件夹、账户的变化，漏掉事件）
   都重数，同一时刻只有一次在读，其间又有变化就读完再读一次（`Coalesce`，与侧栏相同）；数没变就不重画。
   托盘注册上了才开始数：没有托盘的桌面和还没有托盘实现的平台不读。
-- **图标**：应用图标（`assets/app-icon/` 的亮色或暗色版本，按桌面的外观，与"System"主题读的是同一个，
+- **图标**（Linux）：应用图标（`assets/app-icon/` 的亮色或暗色版本，按桌面的外观，与"System"主题读的是同一个，
   `appearance::system`）右上角叠一个红色角标写着
   未读数，超过 99 写"99+"，没有未读就不画。拼成一个 SVG，用 GPUI 的 `SvgRenderer` 在后台线程画成
   22、32、64 像素，由托盘挑合适的；不提交位图，也不另加 SVG 库。提示文字是"N unread messages"。
   桌面外观变化时重画；外观只能从窗口得知，常驻期间的变化要等下次开窗口。画也一次一个（`Coalesce`）：
   后台的两次绘制可能先后颠倒，旧的数字盖掉新的之后数字不再变，就一直错着；画的途中又有变化，画完按
-  当时的数字和外观再画一次。
-- **点击图标**打开主窗口；**菜单**（`MENU`，各平台按它建自己的菜单）："Open catmail"、"New message"、
+  当时的数字和外观再画一次。`Tray` 记着上次画的 SVG，同样的不再画，只更新数字（`Item::show` 收到
+  `None`）：外观变了而图标没变（macOS 的模板图从不变）时不白画。
+- **点击图标**打开主窗口（macOS 上打开菜单）；**菜单**（`MENU`，各平台按它建自己的菜单）："Open catmail"、"New message"、
   "Sync now"、"Quit"。都转成 `Command`，经 channel 回到 GPUI 线程（`Tray::choose`），由 `Resident` 处理；
   主窗口开着就在它的 `Mailbox` 上做（`Resident::in_main`），否则记下等它打开：
   - 打开：`Resident::show_at`，与点击通知相同。
@@ -272,7 +278,17 @@ GUI 的 `Tray`（`catmail-gui/src/tray/`）是应用级的全局，引擎打开�
   靠再次启动唤起。托盘给的 XDG 激活令牌（`ksni::current_xdg_activation_token`，KDE 可能晚到一点，等 1 ms
   再取一次）随命令传给 `Resident`，Wayland 上切回窗口模式、新开的主窗口能获得焦点；已经开着的窗口
   仍只能请求激活（GPUI 不能把令牌交给已有窗口）。测试里不注册（`cfg(test)`）。
-- Windows、macOS 用 `tray-icon`，在 GPUI 的主线程消息循环上（#108、#109）。
+- **macOS** 直接用 AppKit（`objc2-app-kit`，GPUI 的 macOS 平台已经用它，不增加依赖）：`NSStatusItem`
+  的按钮放图标，菜单是 `NSMenu`，菜单项的 target 是一个只转发命令的小类（`define_class!`，tag 是在 `MENU`
+  里的位置），`Item` 留着它（菜单项不 retain target）。都在 GPUI 的前台任务里，也就是主线程上。
+  - 图标是单色的模板图（`assets/app-icon/catmail-menu-bar.svg`：信封和猫爪），系统按菜单栏的亮暗、
+    强调色着色，不用跟外观重画；画成 18、36 像素（18 pt 的 1x、2x），只用 alpha。未读数是按钮的标题，
+    写在图标右边，与 Linux 角标同样的文字（超过 99 写"99+"），没有未读就不写；提示文字相同。
+  - 同一个数也作 Dock 图标的角标（`NSDockTile::badgeLabel`，Mail.app 的做法）。常驻时没有 Dock 图标，
+    仍照样设，回到窗口时 Dock 图标带着它。
+  - 没有用 `tray-icon`：它在 macOS 上也是这些 AppKit 调用，外加 `muda` 的菜单和它自己的事件循环约定；
+    直接写只有一百多行，图标、标题、角标都由我们决定。Windows（#109）再看是否用它。
+  - `define_class!`、位图的缓冲区要 `unsafe`，由 `tray` 模块对 `macos.rs` 单独放行。
 
 ## 退出
 
@@ -318,7 +334,7 @@ GUI 常驻就一直持有数据目录锁，CLI 更常遇到 `AlreadyRunning`。C
 2. ✅ 单实例与唤起：数据目录里的 socket、激活令牌（#106）。
 3. ✅ 引擎：`resume()`、`Event::NewMail`，各有假服务器测试；GUI 在系统唤醒时调用 `resume()`（#106）。
 4. ✅ 系统通知（#82）。
-5. 各平台托盘：✅ Linux（#107）；Windows（#108）、macOS（#109）。
+5. 各平台托盘：✅ Linux（#107）；✅ macOS（#108）；Windows（#109）。
 6. `--background` 与开机启动（新 issue）。
 
 实现前用一个小原型在 Wayland 上确认过：关掉窗口后切到 headless，定时器照常运行，D-Bus 通知照常发出，
