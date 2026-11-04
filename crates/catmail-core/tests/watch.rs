@@ -525,14 +525,15 @@ async fn keeps_the_connection_open_between_polls() {
         ..schedule(HOUR, HOUR)
     };
     let env = watching(state, schedule).await;
-    env.wait_for_subjects("INBOX", &["one", "two"]).await;
+    // Waiting, past the first step: until then it could still sync INBOX once more and
+    // find new mail without any wait.
+    env.fake.wait_until(|st| st.received("NOOP") > 0).await;
 
+    // Next checked after a wait longer than the server keeps a quiet connection.
     env.fake.state().inbox().append_simple("three");
     env.wait_for_subjects("INBOX", &["one", "three", "two"])
         .await;
-    let st = env.fake.state();
-    assert!(st.received("NOOP") > 0);
-    assert_eq!(st.connections, 1);
+    assert_eq!(env.fake.state().connections, 1);
 }
 
 /// A connection found dead by a NOOP while waiting is closed, and the next check of
@@ -547,7 +548,7 @@ async fn a_connection_that_died_while_waiting_is_replaced() {
         ..schedule(HOUR, HOUR)
     };
     let env = watching(state, schedule).await;
-    env.wait_for_subjects("INBOX", &["one", "two"]).await;
+    env.fake.wait_until(|st| st.received("NOOP") > 0).await;
 
     env.fake.state().drop_open_connections();
     env.fake.state().inbox().append_simple("three");
