@@ -28,6 +28,7 @@ use tokio::sync::Notify;
 
 use crate::draft_sync::Uploads;
 use crate::engine::{Activity, Cancellation, Engine, backoff};
+use crate::pool::Pinged;
 use crate::{Error, Result, ops, pool, sync};
 
 /// When background sync does what.
@@ -222,13 +223,7 @@ async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
                         // the account until it lifts, as for a step that fails so.
                         Err(e) if e.is_over_limit() => {
                             session = None;
-                            tracing::warn!(%account, error = %e, delay = ?schedule.over_limit,
-                                "background sync failed; trying again later");
-                            if let Some(engine) = engine.upgrade() {
-                                let failed = Err::<(), _>(Error::from(e));
-                                engine.report(account, Activity::Sync, &failed);
-                            }
-                            schedule.over_limit
+                            went_over_limit(&engine, account, e, &schedule)
                         }
                         Err(catmail_proto::imap::Error::Command { text, .. }) => {
                             tracing::info!(%account, %text,
@@ -277,7 +272,7 @@ async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
                 delay
             }
         };
-        let until = tokio::time::Instant::now() + pause;
+        let mut until = tokio::time::Instant::now() + pause;
         loop {
             let next = tokio::time::Instant::now() + schedule.keepalive;
             let noop = session.is_some() && next < until;
@@ -290,38 +285,64 @@ async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
             if !noop {
                 break;
             }
-            keep_alive(&engine, account, &mut session, &mut cancellation).await;
+            if let Some(e) = keep_alive(&engine, account, &mut session, &mut cancellation).await {
+                let delay = went_over_limit(&engine, account, e, &schedule);
+                until = tokio::time::Instant::now() + delay;
+            }
         }
     }
+}
+
+/// Reports that the server said the account went over its download limit outside a
+/// step (in IDLE, or answering a keepalive NOOP), as for a step that fails so; returns
+/// how long to wait for it to lift.
+fn went_over_limit(
+    engine: &Weak<Engine>,
+    account: AccountId,
+    e: catmail_proto::imap::Error,
+    schedule: &SyncSchedule,
+) -> Duration {
+    tracing::warn!(%account, error = %e, delay = ?schedule.over_limit,
+        "background sync failed; trying again later");
+    if let Some(engine) = engine.upgrade() {
+        let failed = Err::<(), _>(Error::from(e));
+        engine.report(account, Activity::Sync, &failed);
+    }
+    schedule.over_limit
 }
 
 /// Sends the connection background sync waits on a NOOP, so that the server doesn't
 /// close it as idle before the next step: NetEase does after a minute, and offers no
 /// IDLE, so that each check of INBOX would log in again. Closes one that died, or one
-/// from before a sleep (see [`pool::usable`]). Queued changes and waking from sleep don't
-/// cut the NOOP short, which would leave its answer half read: their signals keep a
-/// permit, so the wait after it ends at once.
+/// from before a sleep (see [`pool::usable`]); returns the error if the server said the
+/// account went over its download limit. Queued changes and waking from sleep don't cut
+/// the NOOP short, which would leave its answer half read: their signals keep a permit,
+/// so the wait after it ends at once.
 async fn keep_alive(
     engine: &Weak<Engine>,
     account: AccountId,
     slot: &mut Option<Session>,
     cancellation: &mut Cancellation,
-) {
-    let Some(session) = slot.as_mut() else {
-        return;
-    };
+) -> Option<catmail_proto::imap::Error> {
+    let session = slot.as_mut()?;
     // The task ends at its next look if the engine is gone.
-    let Some(usable) = engine.upgrade().map(|e| pool::usable(&e, session)) else {
-        return;
-    };
+    let usable = engine.upgrade().map(|e| pool::usable(&e, session))?;
     if !usable {
         tracing::debug!(%account, "waiting connection from before a sleep; closed");
         *slot = None;
-        return;
+        return None;
     }
     let stop = cancellation.cancelled();
-    if pool::ping(account, session, "background sync", stop).await != Some(true) {
-        *slot = None;
+    match pool::ping(account, session, "background sync", stop).await {
+        Some(Pinged::Alive) => None,
+        Some(Pinged::OverLimit(e)) => {
+            *slot = None;
+            Some(e)
+        }
+        Some(Pinged::Died) | None => {
+            *slot = None;
+            None
+        }
     }
 }
 

@@ -352,6 +352,10 @@ pub struct Faults {
     pub idle_refusal: Option<String>,
     /// Accept every IDLE, then close the connection with `* BYE <text>`.
     pub bye_on_idle: Option<String>,
+    /// Refuse every NOOP with `NO <text>`, e.g. Gmail's over-limit alert.
+    pub noop_refusal: Option<String>,
+    /// Answer every NOOP by closing the connection with `* BYE <text>`.
+    pub bye_on_noop: Option<String>,
     /// Hold each command that starts with this text (`DELETE`) until it gets a permit,
     /// e.g. to make changes while the server is at it, or to keep a sync from reporting
     /// that it finished (`LOGOUT`). Logged before it waits; one already waiting keeps
@@ -435,6 +439,8 @@ impl Default for Faults {
             garble_idle: false,
             idle_refusal: None,
             bye_on_idle: None,
+            noop_refusal: None,
+            bye_on_noop: None,
             gate: None,
             refuse_connections: 0,
             drop_after_mailbox_change: false,
@@ -1403,7 +1409,17 @@ async fn handle(
             let caps = capabilities(&lock(state), session);
             out += &format!("* CAPABILITY {caps}\r\n{tag} OK CAPABILITY completed\r\n");
         }
-        "NOOP" => out += &format!("{tag} OK NOOP completed\r\n"),
+        "NOOP" => {
+            let faults = &lock(state).faults;
+            match (&faults.noop_refusal, &faults.bye_on_noop) {
+                (Some(text), _) => out += &format!("{tag} NO {text}\r\n"),
+                (None, Some(text)) => {
+                    out += &format!("* BYE {text}\r\n");
+                    next = Next::Close;
+                }
+                (None, None) => out += &format!("{tag} OK NOOP completed\r\n"),
+            }
+        }
         "LOGOUT" => {
             out += &format!("* BYE logging out\r\n{tag} OK LOGOUT completed\r\n");
             next = Next::Close;

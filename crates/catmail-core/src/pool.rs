@@ -175,7 +175,10 @@ async fn keep_alive(
         return;
     };
     // Not holding the engine meanwhile, which would keep it from closing.
-    if ping(account, &mut session, "pooled", closing.closed()).await != Some(true) {
+    if !matches!(
+        ping(account, &mut session, "pooled", closing.closed()).await,
+        Some(Pinged::Alive)
+    ) {
         return;
     }
     if let Some(engine) = engine.upgrade() {
@@ -183,16 +186,27 @@ async fn keep_alive(
     }
 }
 
+/// How a [`ping`] went.
+pub(crate) enum Pinged {
+    /// Answered, or refused: as usable as it was.
+    Alive,
+    /// The connection died: closed.
+    Died,
+    /// The server said the account went over its download limit, refusing the NOOP or
+    /// hanging up: nothing works on the account until it lifts, so the connection is
+    /// closed either way.
+    OverLimit(imap::Error),
+}
+
 /// Sends a quiet connection a NOOP, so that servers and NAT boxes don't close it as idle,
-/// and tells whether it is still worth keeping: not if it died. `None` if `stop` resolved
-/// first, which leaves the answer half read. `whose` tells the connections apart in the
-/// log.
+/// and tells whether it is still worth keeping. `None` if `stop` resolved first, which
+/// leaves the answer half read. `whose` tells the connections apart in the log.
 pub(crate) async fn ping(
     account: AccountId,
     session: &mut Session,
     whose: &'static str,
     stop: impl Future<Output = ()>,
-) -> Option<bool> {
+) -> Option<Pinged> {
     let began = Instant::now();
     let result = tokio::select! {
         result = session.noop() => result,
@@ -202,16 +216,20 @@ pub(crate) async fn ping(
     Some(match result {
         Ok(()) => {
             tracing::debug!(%account, whose, ?took, ?age, "kept an idle connection alive");
-            true
+            Pinged::Alive
+        }
+        Err(e) if e.is_over_limit() => {
+            tracing::info!(%account, whose, error = %e, "idle connection over the limit; closed");
+            Pinged::OverLimit(e)
         }
         Err(e) if survives(&e) => {
             tracing::debug!(%account, whose, error = %e, ?took, "keepalive NOOP refused");
-            true
+            Pinged::Alive
         }
         Err(e) => {
             tracing::info!(%account, whose, error = %e, ?took, ?age,
                 "idle connection died; closed");
-            false
+            Pinged::Died
         }
     })
 }

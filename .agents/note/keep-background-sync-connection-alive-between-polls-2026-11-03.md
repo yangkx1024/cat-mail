@@ -34,8 +34,14 @@ issue 起初怀疑的连接池 keepalive（4 分钟）也撑不过这两个计�
   否则发 NOOP。NOOP 本身（计时、致命错误才关掉、被拒绝照常保留、日志）从池的 keepalive 里抽成
   `pool::ping`，两边共用，日志用 `whose` 字段区分。`engine.rs`、`protocol.md` 里"服务器踢掉闲置连接要久得多"
   补上网易这个例外。
-- `catmail-testkit`：`Faults::idle_timeout`，连接一段时间没有命令就不声不响地断开。
+- 超出下载限额（review 发现）：`pool::ping` 返回 `Pinged`（`Alive` / `Died` / `OverLimit`），NOOP 被以超限
+  拒绝或以超限的 BYE 断开都算 `OverLimit`、关掉连接。后台同步遇到它和 IDLE 中一样记进账户状态、等
+  `over_limit`（两处共用 `watch::went_over_limit`），否则下一次检查又要登录，可能让限额更久不解除。
+- `catmail-testkit`：`Faults::idle_timeout`，连接一段时间没有命令就不声不响地断开；`noop_refusal`、
+  `bye_on_noop`。
 - 测试（`tests/watch.rs`）：`keeps_the_connection_open_between_polls`（服务器 1 秒断开空闲连接、2 秒
   检查一次，新邮件仍在同一条连接上同步到；去掉 NOOP 时失败），
-  `a_connection_that_died_while_waiting_is_replaced`。
+  `a_connection_that_died_while_waiting_is_replaced`，`a_keepalive_over_the_limit_waits_for_it_to_lift`
+  （NO 和 BYE 两种，之后不再有任何命令；不处理超限时失败）。两条保活测试都等服务器收到第一个 NOOP 再加
+  邮件：第一步在完整同步之后还会再同步一次 INBOX，CI 慢时加的邮件会在那里被拿到，根本没进入等待。
 - 文档：`sync.md` 后台同步、`testing.md` 故障列表、`logging.md`。
