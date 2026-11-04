@@ -1377,12 +1377,25 @@ mod tests {
         .unwrap();
     }
 
-    /// Opens the page's context menu and clicks its `item`th item.
-    fn menu(cx: &mut TestAppContext, window: AnyWindowHandle, at: Point<Pixels>, item: usize) {
+    /// Opens the page's context menu and clicks its item `label`, once it has it: when
+    /// the page doesn't know yet what is under the press, Copy link comes after the menu
+    /// opens, from the render thread, which settling GPUI's executor doesn't wait for.
+    fn menu(cx: &mut TestAppContext, window: AnyWindowHandle, at: Point<Pixels>, label: &str) {
         click(cx, window, at, MouseButton::Right, 1);
-        frame(cx, window, true);
+        let mut item = None;
+        wait_until(|| {
+            frame(cx, window, true);
+            item = cx
+                .update_window(window, |_, window, _| {
+                    let menu = window.within("popup-menu");
+                    let item = menu.try_find_by_label(label)?;
+                    item.path().last().cloned()
+                })
+                .unwrap();
+            item.is_some()
+        });
         cx.update_window(window, |_, window, cx| {
-            window.within("popup-menu").click(item, cx)
+            window.within("popup-menu").click(item.unwrap(), cx)
         })
         .unwrap();
         cx.run_until_parked();
@@ -1422,7 +1435,7 @@ mod tests {
 
         // The context menu's Copy copies it too; the press on the menu clears it.
         cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
-        menu(cx, window, point(px(40.), px(15.)), 0);
+        menu(cx, window, point(px(40.), px(15.)), "Copy");
         assert_eq!(cx.read_from_clipboard().and_then(|item| item.text()), all);
         assert_eq!(selected(cx), None);
 
@@ -1441,7 +1454,7 @@ mod tests {
 
         // Select all, from the context menu with nothing selected (Copy is there, off),
         // or with the keys. A press anywhere clears it, the first after the menu too.
-        menu(cx, window, point(px(40.), px(15.)), 1);
+        menu(cx, window, point(px(40.), px(15.)), "Select all");
         wait_until(|| selected(cx) == all);
         let outside = point(px(5.), px(400.));
         cx.update_window(window, |_, window, cx| {
@@ -1515,7 +1528,7 @@ mod tests {
         // The context menu over it copies it.
         point_at(cx, point(px(5.), px(75.)));
         wait_until(|| shown(cx).is_some());
-        menu(cx, window, point(px(5.), px(75.)), 0);
+        menu(cx, window, point(px(5.), px(75.)), "Copy link");
         assert_eq!(
             cx.read_from_clipboard()
                 .and_then(|item| item.text())
@@ -1542,7 +1555,7 @@ mod tests {
 
         // Onto the second and pressed at once: the menu opens before the page knows
         // what is there, takes the second's Copy link once it does, and never the first's.
-        menu(cx, window, point(px(5.), px(75.)), 0);
+        menu(cx, window, point(px(5.), px(75.)), "Copy link");
         assert_eq!(
             cx.read_from_clipboard()
                 .and_then(|item| item.text())
