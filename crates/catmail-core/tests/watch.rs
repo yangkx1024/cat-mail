@@ -511,6 +511,86 @@ async fn polls_inbox_without_idle() {
     assert_eq!(env.fake.state().connections, 1);
 }
 
+/// Without IDLE the connection waits quietly between checks of INBOX, longer than some
+/// servers keep one (NetEase, a minute): NOOPs keep it open, rather than each check
+/// logging in again.
+#[tokio::test(flavor = "multi_thread")]
+async fn keeps_the_connection_open_between_polls() {
+    let mut state = state();
+    state.faults.idle = false;
+    state.faults.idle_timeout = Some(Duration::from_secs(1));
+    let schedule = SyncSchedule {
+        poll: Duration::from_secs(2),
+        keepalive: Duration::from_millis(100),
+        ..schedule(HOUR, HOUR)
+    };
+    let env = watching(state, schedule).await;
+    // Waiting, past the first step: until then it could still sync INBOX once more and
+    // find new mail without any wait.
+    env.fake.wait_until(|st| st.received("NOOP") > 0).await;
+
+    // Next checked after a wait longer than the server keeps a quiet connection.
+    env.fake.state().inbox().append_simple("three");
+    env.wait_for_subjects("INBOX", &["one", "three", "two"])
+        .await;
+    assert_eq!(env.fake.state().connections, 1);
+}
+
+/// A connection found dead by a NOOP while waiting is closed, and the next check of
+/// INBOX makes a new one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connection_that_died_while_waiting_is_replaced() {
+    let mut state = state();
+    state.faults.idle = false;
+    let schedule = SyncSchedule {
+        poll: Duration::from_millis(500),
+        keepalive: Duration::from_millis(50),
+        ..schedule(HOUR, HOUR)
+    };
+    let env = watching(state, schedule).await;
+    env.fake.wait_until(|st| st.received("NOOP") > 0).await;
+
+    env.fake.state().drop_open_connections();
+    env.fake.state().inbox().append_simple("three");
+    env.wait_for_subjects("INBOX", &["one", "three", "two"])
+        .await;
+    assert_eq!(env.fake.state().connections, 2);
+}
+
+/// A keepalive NOOP the server answers by saying the account went over its download
+/// limit, refusing it or hanging up, is waited out as anywhere else, rather than logging
+/// in again for the next check.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_keepalive_over_the_limit_waits_for_it_to_lift() {
+    for refused in [true, false] {
+        let mut state = state();
+        state.faults.idle = false;
+        let schedule = SyncSchedule {
+            poll: Duration::from_millis(200),
+            keepalive: Duration::from_millis(50),
+            over_limit: HOUR,
+            ..schedule(HOUR, HOUR)
+        };
+        let env = watching(state, schedule).await;
+        env.fake.wait_until(|st| st.received("NOOP") > 0).await;
+        {
+            let mut st = env.fake.state();
+            let text = Some(GMAIL_OVER_LIMIT.to_owned());
+            if refused {
+                st.faults.noop_refusal = text;
+            } else {
+                st.faults.bye_on_noop = text;
+            }
+        }
+        env.wait_for_problem(ServerProblem::over_limit).await;
+        let seen = |st: &ServerState| (st.connections, st.received("NOOP"), st.log.len());
+        let before = seen(&env.fake.state());
+        // Several checks' worth.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(seen(&env.fake.state()), before, "refused: {refused}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn syncs_every_folder_on_schedule() {
     let env = watching(state(), schedule(Duration::from_millis(300), HOUR)).await;

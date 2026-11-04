@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
@@ -351,6 +352,10 @@ pub struct Faults {
     pub idle_refusal: Option<String>,
     /// Accept every IDLE, then close the connection with `* BYE <text>`.
     pub bye_on_idle: Option<String>,
+    /// Refuse every NOOP with `NO <text>`, e.g. Gmail's over-limit alert.
+    pub noop_refusal: Option<String>,
+    /// Answer every NOOP by closing the connection with `* BYE <text>`.
+    pub bye_on_noop: Option<String>,
     /// Hold each command that starts with this text (`DELETE`) until it gets a permit,
     /// e.g. to make changes while the server is at it, or to keep a sync from reporting
     /// that it finished (`LOGOUT`). Logged before it waits; one already waiting keeps
@@ -377,6 +382,9 @@ pub struct Faults {
     pub qq_mail: bool,
     /// Greet as Coremail (NetEase) does: `Coremail System IMap Server Ready`.
     pub coremail: bool,
+    /// Close a connection that sent no command for this long, without a word, as NetEase
+    /// does after about a minute. Not while it idles.
+    pub idle_timeout: Option<Duration>,
 }
 
 impl Default for Faults {
@@ -431,6 +439,8 @@ impl Default for Faults {
             garble_idle: false,
             idle_refusal: None,
             bye_on_idle: None,
+            noop_refusal: None,
+            bye_on_noop: None,
             gate: None,
             refuse_connections: 0,
             drop_after_mailbox_change: false,
@@ -440,6 +450,7 @@ impl Default for Faults {
             search_ignores_text: false,
             qq_mail: false,
             coremail: false,
+            idle_timeout: None,
         }
     }
 }
@@ -1110,11 +1121,21 @@ async fn serve(
             .await?;
     }
     loop {
-        let (refuse, qq_mail) = {
+        let (refuse, qq_mail, idle_timeout) = {
             let faults = &lock(&state).faults;
-            (faults.reject_append_literal, faults.qq_mail)
+            (
+                faults.reject_append_literal,
+                faults.qq_mail,
+                faults.idle_timeout,
+            )
         };
-        let Some((line, literals)) = read_command(&mut io, refuse, qq_mail).await? else {
+        let command = read_command(&mut io, refuse, qq_mail);
+        // Timed out: closed as at EOF.
+        let command = match idle_timeout {
+            Some(t) => tokio::time::timeout(t, command).await.unwrap_or(Ok(None)),
+            None => command.await,
+        };
+        let Some((line, literals)) = command? else {
             return Ok(());
         };
         match handle(&mut io, &mut session, &state, &line, literals).await? {
@@ -1388,7 +1409,17 @@ async fn handle(
             let caps = capabilities(&lock(state), session);
             out += &format!("* CAPABILITY {caps}\r\n{tag} OK CAPABILITY completed\r\n");
         }
-        "NOOP" => out += &format!("{tag} OK NOOP completed\r\n"),
+        "NOOP" => {
+            let faults = &lock(state).faults;
+            match (&faults.noop_refusal, &faults.bye_on_noop) {
+                (Some(text), _) => out += &format!("{tag} NO {text}\r\n"),
+                (None, Some(text)) => {
+                    out += &format!("* BYE {text}\r\n");
+                    next = Next::Close;
+                }
+                (None, None) => out += &format!("{tag} OK NOOP completed\r\n"),
+            }
+        }
         "LOGOUT" => {
             out += &format!("* BYE logging out\r\n{tag} OK LOGOUT completed\r\n");
             next = Next::Close;
