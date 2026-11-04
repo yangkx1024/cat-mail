@@ -95,6 +95,7 @@ notarize() {
     xcrun notarytool log "$id" "${credentials[@]}" >&2 || true
     die "notarizing $(basename "$1") ended $status"
   fi
+  echo "notarized $(basename "$1")"
 }
 
 resvg=$tools/bin/resvg
@@ -187,8 +188,8 @@ if [[ -n $notary_key ]]; then
   xcrun stapler staple -q "$dmg"
   xcrun stapler validate -q "$dmg"
   # What Gatekeeper decides for a downloaded disk image and the app in it.
-  spctl --assess --type open --context context:primary-signature "$dmg"
-  spctl --assess --type execute "$app"
+  spctl --assess --verbose --type open --context context:primary-signature "$dmg"
+  spctl --assess --verbose --type execute "$app"
 fi
 
 tarball=$out/catmail-$version-$arch-macos.tar.gz
