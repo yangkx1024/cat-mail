@@ -95,6 +95,10 @@ appimagetool `1.9.1` 和 type2 runtime `20251108` 都固定到具体 release，�
 - 推到 main 依赖 main 没有禁止 Actions 推送的保护规则；以后开启分支保护时要允许 `github-actions[bot]`。
 - 改动 `packaging/` 或这个 workflow 的 PR 也构建（用当前版本，不打标签），只作为 artifact 上传，用来在
   合并前检查打包。
+- 手动运行时勾上 `build_only`（`gh workflow run release.yml --ref <分支> -f build_only=true`）只构建：
+  任何分支都行，用当前版本，不改版本、不打标签、不发布，包作为 artifact 上传。和 PR 走同一条路径；
+  同时填了 `version` 会报错。它有自己的 concurrency 组，不会排在发布后面，也不会顶掉排队中的发布。
+  在 NixOS 上本地打不了正式包（见上），要一个能分发的包就用它。
 
 本地打包也要在 glibc 不高于 2.35 的系统上（或这样的容器里）运行脚本，需要 curl、patchelf、binutils
 和上面那些库的开发包。

@@ -2,8 +2,9 @@ name: Release
 
 # Run by hand on main, it releases: it sets the workspace version (the patch after the
 # current one, or the version given), commits that to main with the tag `v<version>`,
-# builds the Linux packages from the tag and publishes them as a GitHub release. Pull
-# requests that change the packaging build them too, uploaded as workflow artifacts only.
+# builds the Linux packages from the tag and publishes them as a GitHub release. Run with
+# `build_only` (on any branch), and pull requests that change the packaging, build them
+# at the current version, uploaded as workflow artifacts only.
 #
 # One run does it all: a tag pushed with GITHUB_TOKEN starts no other workflow.
 on:
@@ -13,6 +14,10 @@ on:
         description: "Version to release, such as 0.2.0 (empty: the next patch)"
         required: false
         default: ""
+      build_only:
+        description: "Only build the packages: no version change, tag or release"
+        type: boolean
+        default: false
   pull_request:
     paths:
       - "packaging/**"
@@ -21,8 +26,9 @@ on:
 permissions:
   contents: read
 
+# A build-only run in its own group: it must not queue behind, or replace, a release.
 concurrency:
-  group: release-${{ github.ref }}
+  group: ${{ inputs.build_only && 'build' || 'release' }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -49,11 +55,14 @@ jobs:
         id: version
         env:
           REQUESTED: ${{ inputs.version }}
+          BUILD_ONLY: ${{ inputs.build_only }}
         run: |
           die() { echo "error: $*" >&2; exit 1; }
           pkgid=$(cargo pkgid -p catmail-gui)
           current=${pkgid##*[#@]}
-          if [[ $GITHUB_EVENT_NAME != workflow_dispatch ]]; then
+          [[ $BUILD_ONLY != true || -z $REQUESTED ]] ||
+            die "a build-only run builds the current version $current, not $REQUESTED"
+          if [[ $GITHUB_EVENT_NAME != workflow_dispatch || $BUILD_ONLY == true ]]; then
             echo "version=$current" >> "$GITHUB_OUTPUT"
             exit 0
           fi
