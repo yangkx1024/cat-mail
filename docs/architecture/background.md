@@ -229,7 +229,7 @@ GUI 的 `Notifier`（`catmail-gui/src/new_mail.rs`）是应用级的全局，引
 
 **应用标识**：`set_app_identity("net.yangkx.catmail", "catmail")`，在第一个窗口之前；标识与数据、
 配置目录的限定名相同。Windows 上它是 AppUserModelID，Linux 上 GPUI 只用名字（通知的 app name），
-不带 desktop 文件 id 的提示（窗口的 app id 另设，见[打包](packaging.md#字体图标桌面文件)）；macOS 的通知要有 bundle，打包时（开机启动之后）再看。
+不带 desktop 文件 id 的提示（窗口的 app id 另设，见[打包](packaging.md#字体图标桌面文件)）；macOS 的通知要有 bundle（bundle id 即 `APP_ID`，见[打包](packaging.md#macos磁盘映像)），`cargo run` 起的 GUI 没有通知。
 
 已知的限制，都在 GPUI 的 Linux 实现里：
 
