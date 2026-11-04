@@ -73,6 +73,35 @@ libc = "0.2.191"
 mail-builder = { version = "1.0.0", default-features = false }
 mail-parser = { version = "0.11.9", features = ["full_encoding"] }
 mime_guess = "2.0.5"
+# The macOS status item (menu bar icon, its menu, the Dock badge): AppKit straight, no
+# tray crate. The versions GPUI's macOS platform uses.
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSApplication",
+    "NSBitmapImageRep",
+    "NSButton",
+    "NSCell",
+    "NSControl",
+    "NSDockTile",
+    "NSGraphics",
+    "NSImage",
+    "NSImageRep",
+    "NSMenu",
+    "NSMenuItem",
+    "NSResponder",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSView",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSGeometry",
+    "NSObject",
+    "NSString",
+] }
 # Blitz lays text out with it; the reader's text selection reads those layouts. The
 # version Blitz uses.
 parley = { version = "0.12.0", default-features = false, features = ["std"] }
@@ -130,7 +159,8 @@ strip = true
 
 [workspace.lints.rust]
 # Not forbid, which a crate couldn't loosen: catmail-gui's `memory` module calls
-# malloc_trim. Every other crate forbids it at its root.
+# malloc_trim, and its macOS status item calls AppKit. Every other crate forbids it at
+# its root.
 unsafe_code = "deny"
 
 [workspace.lints.clippy]

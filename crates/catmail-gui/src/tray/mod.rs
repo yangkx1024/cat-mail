@@ -2,7 +2,12 @@
 //! unread messages in the INBOXes, a click to bring the main window back, and a menu to
 //! write a message, sync or quit. Lives with the app, like the engine it shows. See
 //! docs/architecture/background.md.
+#![cfg_attr(
+    not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")),
+    allow(dead_code, reason = "no tray here yet (#109)")
+)]
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use catmail_core::RecvError;
@@ -17,8 +22,16 @@ use crate::theme::appearance::{self, Themes};
 #[path = "linux.rs"]
 mod platform;
 
-/// No tray here yet (#108, #109): there is never an item, so nothing is counted.
-#[cfg(all(not(any(target_os = "linux", target_os = "freebsd")), not(test)))]
+#[cfg(all(target_os = "macos", not(test)))]
+#[path = "macos.rs"]
+#[allow(unsafe_code, reason = "AppKit's status item, menu and images")]
+mod platform;
+
+/// No tray here yet (#109): there is never an item, so nothing is counted.
+#[cfg(all(
+    not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")),
+    not(test)
+))]
 mod platform {
     use futures_channel::mpsc::UnboundedSender;
 
@@ -32,11 +45,12 @@ mod platform {
             None
         }
 
-        pub async fn show(&self, _: Pixmaps, _: String) {}
+        pub async fn show(&self, _: Option<Pixmaps>, _: u32) {}
     }
 }
 
-/// An item that keeps the tool tips it was shown with, in order.
+/// An item that keeps what it was shown, in order: the tool tip, and whether it was
+/// given an icon.
 #[cfg(test)]
 mod platform {
     use std::sync::{Arc, Mutex};
@@ -46,27 +60,48 @@ mod platform {
     use super::{Chosen, Pixmaps};
 
     #[derive(Clone, Default)]
-    pub struct Item(pub Arc<Mutex<Vec<String>>>);
+    pub struct Item(pub Arc<Mutex<Vec<(String, bool)>>>);
 
     impl Item {
         pub async fn spawn(_: UnboundedSender<Chosen>) -> Option<Self> {
             Some(Self::default())
         }
 
-        pub async fn show(&self, _: Pixmaps, tool_tip: String) {
-            self.0.lock().unwrap().push(tool_tip);
+        pub async fn show(&self, icon: Option<Pixmaps>, unread: u32) {
+            let shown = (super::tool_tip(unread), icon.is_some());
+            self.0.lock().unwrap().push(shown);
         }
     }
 }
 
 use platform::Item;
 
-/// What the tray asks the app for. Clicking the icon is `Open`.
+/// The count drawn on the app's icon.
+#[cfg(not(all(target_os = "macos", not(test))))]
+mod badged;
+
+/// What the icon looks like, as an SVG, and the sizes it is drawn at (square).
+#[cfg(not(all(target_os = "macos", not(test))))]
+fn icon(dark: bool, unread: u32) -> (Cow<'static, str>, &'static [u32]) {
+    (badged::svg(dark, unread), &badged::SIZES)
+}
+
+/// A template image, which macOS tints to suit the menu bar; the count is text beside it.
+#[cfg(all(target_os = "macos", not(test)))]
+fn icon(_dark: bool, _unread: u32) -> (Cow<'static, str>, &'static [u32]) {
+    (Cow::Borrowed(MENU_BAR_TEMPLATE), &MENU_BAR_SIZES)
+}
+
+#[cfg(any(target_os = "macos", test))]
+const MENU_BAR_TEMPLATE: &str = include_str!("../../assets/app-icon/catmail-menu-bar.svg");
+
+/// 18 points high, as the menu bar's icons are, for 1x and 2x displays.
+#[cfg(any(target_os = "macos", test))]
+const MENU_BAR_SIZES: [u32; 2] = [18, 36];
+
+/// What the tray asks the app for. Clicking the icon is `Open` where that doesn't open
+/// the menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    not(any(target_os = "linux", target_os = "freebsd")),
-    allow(dead_code, reason = "no tray to choose them in yet (#108, #109)")
-)]
 pub enum Command {
     Open,
     Compose,
@@ -75,10 +110,6 @@ pub enum Command {
 }
 
 /// The menu, top to bottom; `None` is a separator.
-#[cfg_attr(
-    not(any(target_os = "linux", target_os = "freebsd")),
-    allow(dead_code, reason = "no tray to show it in yet (#108, #109)")
-)]
 const MENU: [Option<(&str, Command)>; 5] = [
     Some(("Open catmail", Command::Open)),
     Some(("New message", Command::Compose)),
@@ -91,10 +122,7 @@ const MENU: [Option<(&str, Command)>; 5] = [
 /// one.
 type Chosen = (Command, Option<String>);
 
-/// The sizes the icon is drawn at; the host picks what fits its panel.
-const SIZES: [u32; 3] = [22, 32, 64];
-
-/// The icon at each of [`SIZES`], in straight-alpha BGRA.
+/// The icon at each of its sizes, square, in straight-alpha BGRA.
 type Pixmaps = Vec<(u32, Vec<u8>)>;
 
 pub struct Tray {
@@ -103,6 +131,9 @@ pub struct Tray {
     counting: Coalesce,
     /// One drawing at a time, so an icon drawn for an older count can't land last.
     drawing: Coalesce,
+    /// The SVG the item's icon was last drawn from: one that looks the same isn't drawn
+    /// again (macOS's never changes).
+    drawn: Option<Cow<'static, str>>,
     item: Option<Item>,
     _events: Task<()>,
     _chosen: Task<()>,
@@ -124,6 +155,7 @@ impl Tray {
             unread: None,
             counting: Coalesce::default(),
             drawing: Coalesce::default(),
+            drawn: None,
             item: None,
             _events: Task::ready(()),
             _chosen: chosen,
@@ -204,8 +236,8 @@ impl Tray {
         .detach();
     }
 
-    /// Draws the icon for the count, in the desktop's appearance, off the UI thread, and
-    /// hands it to the tray.
+    /// Shows the count, with the icon for it in the desktop's appearance, drawn off the UI
+    /// thread if it changed.
     fn draw(cx: &mut App) {
         let this = cx.global_mut::<Self>();
         let (Some(item), Some(unread)) = (this.item.clone(), this.unread) else {
@@ -218,10 +250,25 @@ impl Tray {
             appearance::system(cx),
             WindowAppearance::Dark | WindowAppearance::VibrantDark
         );
-        let renderer = cx.svg_renderer();
-        let drawn = cx.background_spawn(async move { pixmaps(&renderer, dark, unread) });
+        let (svg, sizes) = icon(dark, unread);
+        let unchanged = cx.global::<Self>().drawn.as_ref() == Some(&svg);
+        let drawing = (!unchanged).then(|| {
+            let renderer = cx.svg_renderer();
+            cx.background_spawn(async move {
+                let pixmaps = pixmaps(&renderer, &svg, sizes);
+                (svg, pixmaps)
+            })
+        });
         cx.spawn(async move |cx| {
-            item.show(drawn.await, tool_tip(unread)).await;
+            let pixmaps = match drawing {
+                Some(drawing) => {
+                    let (svg, pixmaps) = drawing.await;
+                    cx.update(|cx| cx.global_mut::<Self>().drawn = Some(svg));
+                    Some(pixmaps)
+                }
+                None => None,
+            };
+            item.show(pixmaps, unread).await;
             // What changed meanwhile is drawn now, from what it is now.
             if cx.update(|cx| cx.global_mut::<Self>().drawing.finish()) {
                 cx.update(Self::draw);
@@ -236,9 +283,9 @@ impl Tray {
         cx.global::<Self>().unread
     }
 
-    /// The tool tips the icon was shown with, in order.
+    /// What the item was shown, in order: the tool tip, and whether with a new icon.
     #[cfg(test)]
-    fn tool_tips(cx: &App) -> Vec<String> {
+    fn showings(cx: &App) -> Vec<(String, bool)> {
         let item = cx.global::<Self>().item.as_ref();
         item.map(|item| item.0.lock().unwrap().clone())
             .unwrap_or_default()
@@ -262,40 +309,16 @@ fn badge(unread: u32) -> Option<String> {
     }
 }
 
-const LIGHT: &str = include_str!("../../assets/app-icon/catmail-light.svg");
-const DARK: &str = include_str!("../../assets/app-icon/catmail-dark.svg");
-
-/// The app's icon with the badge on top, as one SVG; the icon keeps its own canvas
-/// (512 × 512) as a nested `<svg>`.
-fn icon_svg(dark: bool, unread: u32) -> String {
-    let icon = if dark { DARK } else { LIGHT };
-    let Some(text) = badge(unread) else {
-        return icon.to_owned();
-    };
-    // Big enough to read at a panel's 22 pixels; wider for each digit past the first.
-    let (height, size) = (260, 210);
-    let width = height + (text.chars().count() as u32 - 1) * 110;
-    let (x, radius) = (512 - width, height / 2);
-    format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
-{icon}
-<rect x="{x}" y="0" width="{width}" height="{height}" rx="{radius}" fill="#d93025"/>
-<text x="{cx}" y="{radius}" font-family="sans-serif" font-weight="bold" font-size="{size}" fill="#ffffff" text-anchor="middle" dominant-baseline="central">{text}</text>
-</svg>"##,
-        cx = x + width / 2,
-    )
-}
-
-/// The icon at each of [`SIZES`].
-fn pixmaps(renderer: &SvgRenderer, dark: bool, unread: u32) -> Pixmaps {
-    let svg = match renderer.parse_svg(icon_svg(dark, unread).as_bytes()) {
+/// `svg` at each of `sizes`.
+fn pixmaps(renderer: &SvgRenderer, svg: &str, sizes: &[u32]) -> Pixmaps {
+    let svg = match renderer.parse_svg(svg.as_bytes()) {
         Ok(svg) => svg,
         Err(e) => {
             tracing::error!(error = %e, "couldn't draw the tray icon");
             return Vec::new();
         }
     };
-    SIZES
+    sizes
         .iter()
         .filter_map(|&size| {
             let side = gpui_kit::DevicePixels(size as i32);
@@ -318,8 +341,8 @@ mod tests {
     use crate::settings::Preferences;
     use crate::test_support::{TestMail, wait_until};
 
-    #[gpui_kit::test(iterations = 20)]
-    fn the_icon_shows_the_latest_count_however_its_drawings_finish(cx: &mut TestAppContext) {
+    /// A tray showing its first count, with its engine.
+    fn start(cx: &mut TestAppContext) -> TestMail {
         let mail = TestMail::start();
         cx.executor().allow_parking();
         let client = mail.client.clone();
@@ -330,8 +353,14 @@ mod tests {
         });
         wait_until(|| {
             cx.run_until_parked();
-            !cx.read(Tray::tool_tips).is_empty()
+            !cx.read(Tray::showings).is_empty()
         });
+        mail
+    }
+
+    #[gpui_kit::test(iterations = 20)]
+    fn the_icon_shows_the_latest_count_however_its_drawings_finish(cx: &mut TestAppContext) {
+        let _mail = start(cx);
 
         // Two counts in a row, the second while the first is being drawn.
         cx.update(|cx| {
@@ -341,8 +370,22 @@ mod tests {
             }
         });
         cx.run_until_parked();
-        let shown = cx.read(Tray::tool_tips);
-        assert_eq!(shown.last().map(String::as_str), Some("8 unread messages"));
+        let shown = cx.read(Tray::showings);
+        let last = shown.last().map(|(tool_tip, _)| tool_tip.as_str());
+        assert_eq!(last, Some("8 unread messages"));
+    }
+
+    #[gpui_kit::test]
+    fn an_icon_that_looks_the_same_isnt_drawn_again(cx: &mut TestAppContext) {
+        let _mail = start(cx);
+
+        // The appearance changed, say, but not the count.
+        cx.update(Tray::draw);
+        cx.run_until_parked();
+        let shown = cx.read(Tray::showings);
+        assert_eq!(shown.len(), 2);
+        assert!(shown[0].1, "the first time, the icon is drawn");
+        assert!(!shown[1].1, "drawn again: {shown:?}");
     }
 
     #[test]
@@ -369,14 +412,31 @@ mod tests {
     fn the_icon_is_drawn_at_every_size_with_its_badge() {
         let renderer = SvgRenderer::new(Arc::new(crate::assets::Assets));
         for dark in [false, true] {
-            let plain = pixmaps(&renderer, dark, 0);
-            let badged = pixmaps(&renderer, dark, 12);
+            let plain = pixmaps(&renderer, &badged::svg(dark, 0), &badged::SIZES);
+            let badged = pixmaps(&renderer, &badged::svg(dark, 12), &badged::SIZES);
             let sizes: Vec<_> = badged.iter().map(|(size, _)| *size).collect();
-            assert_eq!(sizes, SIZES);
+            assert_eq!(sizes, badged::SIZES);
             for ((size, plain), (_, badged)) in plain.iter().zip(&badged) {
                 assert_eq!(plain.len(), (size * size * 4) as usize);
                 assert_ne!(plain, badged, "{size}");
             }
+        }
+    }
+
+    /// macOS tints whatever isn't transparent.
+    #[test]
+    fn the_menu_bar_template_is_drawn() {
+        let renderer = SvgRenderer::new(Arc::new(crate::assets::Assets));
+        let drawn = pixmaps(&renderer, MENU_BAR_TEMPLATE, &MENU_BAR_SIZES);
+        assert_eq!(drawn.len(), MENU_BAR_SIZES.len());
+        for (size, bgra) in drawn {
+            let (pixels, _) = bgra.as_chunks::<4>();
+            let opaque = pixels.iter().filter(|[.., a]| *a > 128).count();
+            let all = (size * size) as usize;
+            assert!(
+                all / 5 < opaque && opaque < all / 2,
+                "{size}: {opaque} of {all}"
+            );
         }
     }
 }

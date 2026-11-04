@@ -90,11 +90,15 @@ impl Item {
         }
     }
 
-    pub async fn show(&self, pixmaps: Pixmaps, tool_tip: String) {
-        let icon = pixmaps.into_iter().map(argb).collect();
+    /// Shows the count, and `icon` unless it is `None`: the one there looks the same.
+    pub async fn show(&self, icon: Option<Pixmaps>, unread: u32) {
+        let icon = icon.map(|pixmaps| pixmaps.into_iter().map(argb).collect());
+        let tool_tip = super::tool_tip(unread);
         self.0
             .update(move |item| {
-                item.icon = icon;
+                if let Some(icon) = icon {
+                    item.icon = icon;
+                }
                 item.tool_tip = tool_tip;
             })
             .await;
