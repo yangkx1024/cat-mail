@@ -2,7 +2,9 @@ name: Release
 
 # Run by hand on main, it releases: it sets the workspace version (the patch after the
 # current one, or the version given), commits that to main with the tag `v<version>`,
-# builds the Linux packages from the tag and publishes them as a GitHub release. Run with
+# builds the Linux and macOS packages from the tag and publishes them as a GitHub release.
+# The macOS ones are signed with the Developer ID and notarized, with the secrets of the
+# `release` environment; pull requests can't have those and sign ad hoc. Run with
 # `build_only` (on any branch), and pull requests that change the packaging, build them
 # at the current version, uploaded as workflow artifacts only.
 #
@@ -156,17 +158,103 @@ jobs:
           path: target/dist/
           if-no-files-found: error
 
+  macos:
+    name: macOS (aarch64)
+    needs: version
+    runs-on: macos-15
+    # Two rounds with the notary, which now and then takes a while.
+    timeout-minutes: 90
+    # The signing identity and the notary's key, for manual runs only.
+    environment: ${{ github.event_name == 'workflow_dispatch' && 'release' || '' }}
+    env:
+      SIGNED: ${{ github.event_name == 'workflow_dispatch' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.version.outputs.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # A keychain of its own, holding the identity and the intermediate it chains to.
+      - name: Signing identity
+        if: env.SIGNED == 'true'
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          die() { echo "error: $*" >&2; exit 1; }
+          keychain=$RUNNER_TEMP/signing.keychain-db
+          password=$(uuidgen)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          printf %s "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/identity.p12"
+          security import "$RUNNER_TEMP/identity.p12" -k "$keychain" -f pkcs12 \
+            -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/identity.p12"
+          ca=$RUNNER_TEMP/DeveloperIDG2CA.cer
+          curl -fsSL --retry 3 -o "$ca" https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          echo "f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a  $ca" |
+            shasum -a 256 -c --quiet - || die "DeveloperIDG2CA.cer doesn't match its hash"
+          security import "$ca" -k "$keychain"
+          # Lets codesign use the key without asking.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" \
+            "$keychain" > /dev/null
+          existing=$(security list-keychains -d user | tr -d '"')
+          # shellcheck disable=SC2086 # one keychain per word
+          security list-keychains -d user -s "$keychain" $existing
+          identity=$(security find-identity -v -p codesigning "$keychain" |
+            awk -v team="($APPLE_TEAM_ID)\"" \
+              '/"Developer ID Application: / && index($0, team) { print $2; exit }')
+          if [[ -z $identity ]]; then
+            security find-identity -v -p codesigning "$keychain"
+            die "no valid Developer ID Application identity of the team $APPLE_TEAM_ID"
+          fi
+          {
+            echo "CATMAIL_SIGN_IDENTITY=$identity"
+            echo "CATMAIL_TEAM_ID=$APPLE_TEAM_ID"
+          } >> "$GITHUB_ENV"
+
+      - name: Notary key
+        if: env.SIGNED == 'true'
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          key=$RUNNER_TEMP/notary-key.p8
+          printf '%s\n' "$APPLE_API_KEY" > "$key"
+          {
+            echo "CATMAIL_NOTARY_KEY=$key"
+            echo "CATMAIL_NOTARY_KEY_ID=$APPLE_API_KEY_ID"
+            echo "CATMAIL_NOTARY_ISSUER=$APPLE_API_ISSUER_ID"
+          } >> "$GITHUB_ENV"
+
+      - name: Disk image and CLI tarball
+        run: packaging/macos/build-dmg.sh
+
+      - name: Collect the packages
+        run: |
+          mkdir -p target/dist
+          cp target/macos/*.dmg target/macos/*.tar.gz target/dist/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-aarch64
+          path: target/dist/
+          if-no-files-found: error
+
   publish:
     name: Publish
     if: needs.version.outputs.ref != ''
-    needs: [version, linux]
+    needs: [version, linux, macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v8
         with:
-          pattern: linux-*
           merge-multiple: true
           path: dist
 

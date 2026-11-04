@@ -5,7 +5,7 @@
 
 用 Rust 编写的跨平台邮件客户端，同时提供图形界面（`catmail-gui`）和命令行（`catmail`）。
 
-> 早期开发中：目前发布 Linux 版，Windows / macOS 在路上；接口和数据库结构仍会变化。
+> 早期开发中：目前发布 Linux 和 macOS 版，Windows 在路上；接口和数据库结构仍会变化。
 
 ## 特点
 
@@ -41,13 +41,21 @@
 
 ### 安装
 
-从 [GitHub Releases](https://github.com/yangkx1024/cat-mail/releases/latest) 下载（x86_64、aarch64，
-glibc 2.35 及以上，即 Ubuntu 22.04 之后的发行版）：
+从 [GitHub Releases](https://github.com/yangkx1024/cat-mail/releases/latest) 下载。
+
+Linux（x86_64、aarch64，glibc 2.35 及以上，即 Ubuntu 22.04 之后的发行版）：
 
 - 图形界面：`catmail-<版本>-<架构>.AppImage`，`chmod +x` 后直接运行，可用 AppImageUpdate 或 Gear Lever 增量更新
 - 命令行：`catmail-<版本>-<架构>-linux.tar.gz`
 
 需要一个 Secret Service 提供者（如 gnome-keyring、KeePassXC）保存密码；图形界面需要 Wayland 或 X11。
+
+macOS（Apple 芯片，macOS 12 及以上，已签名并公证）：
+
+- 图形界面：`catmail-<版本>-aarch64.dmg`，把 catmail 拖进"应用程序"
+- 命令行：`catmail-<版本>-aarch64-macos.tar.gz`
+
+密码保存在钥匙串里。
 
 ### 图形界面
 
@@ -158,7 +166,7 @@ cargo test -p catmail-core --test dovecot --test submission
 | M3 | 草稿、SMTP 发信与 outbox、保存到已发送 | ✅ |
 | M4 | 离线操作队列、IDLE 推送与后台同步、草稿同步到服务器 | ✅ |
 | M5 | 图形界面 | ✅ |
-| M6 | 打包：Linux AppImage 与 CLI ✅；Windows / macOS | 进行中 |
+| M6 | 打包：Linux AppImage、macOS 磁盘映像与 CLI ✅；Windows | 进行中 |
 
 之后：前端通过 IPC 连接正在运行的引擎（让图形界面和命令行能同时使用）。
 
