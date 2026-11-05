@@ -185,10 +185,8 @@ async fn open_message(id: MessageId, dark: bool) {
     let recolored = html
         .filter(|_| dark)
         .and_then(|html| recolor_html(html, palette()));
-    let (page_html, page_dark) = match &recolored {
-        Some(html) => (Some(html.as_ref()), true),
-        None => (html, false),
-    };
+    let page_dark = page_is_dark(dark, html.is_some(), recolored.is_some());
+    let page_html = recolored.as_deref().or(html);
     let page = page::body_page(
         page_html,
         body.and_then(|b| b.text.as_deref()),
@@ -352,6 +350,13 @@ fn palette() -> DarkPalette {
         background: rgb(theme().background),
         foreground: rgb(theme().foreground),
     }
+}
+
+/// Whether a message's page takes the dark theme's colors: when the reader is dark and
+/// the message's HTML could be moved toward them, or it is plain text, which has no
+/// colors of its own. HTML that couldn't be moved stays light.
+fn page_is_dark(dark: bool, html: bool, recolored: bool) -> bool {
+    dark && (recolored || !html)
 }
 
 fn colors(dark: bool) -> Colors {
@@ -817,4 +822,20 @@ fn attachments() -> impl IntoElement {
                 ))
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_text_takes_the_dark_theme() {
+        assert!(page_is_dark(true, false, false), "plain text");
+        assert!(page_is_dark(true, true, true), "recolored HTML");
+        assert!(
+            !page_is_dark(true, true, false),
+            "HTML that couldn't be recolored"
+        );
+        assert!(!page_is_dark(false, false, false), "light");
+    }
 }
