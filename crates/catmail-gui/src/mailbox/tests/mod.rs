@@ -212,6 +212,8 @@ fn wait_for_one_window(cx: &mut TestAppContext) {
 }
 
 mod checking;
+#[cfg(target_os = "macos")]
+mod frame;
 mod labels;
 mod managing_folders;
 mod reading;

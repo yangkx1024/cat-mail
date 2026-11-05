@@ -1,5 +1,6 @@
 //! How the composer looks: header fields, the text, attachments and the bar of commands.
 
+use gpui_kit::component::TitleBar;
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState, Textarea};
@@ -10,12 +11,34 @@ use gpui_kit::{
     Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
     prelude::FluentBuilder as _, rems,
 };
+use gpui_kit::{FontWeight, Pixels, px};
 
 use crate::actions::{self, Attach, CloseComposer, Send};
 use crate::assets::Hero;
 use crate::layout;
 
 use super::*;
+
+/// The window's title bar on macOS, in the theme's colors (`layout::Frame::TitleBar`):
+/// the title in the middle of the window, as the system's would be. Elsewhere the
+/// system draws it.
+fn title_bar(title: String, cx: &App) -> TitleBar {
+    // GPUI Kit's bar leaves this much on the left for the window's buttons; as much on
+    // the right puts the title in the middle.
+    const BUTTONS_WIDTH: Pixels = px(80.);
+    TitleBar::new().child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .mr(BUTTONS_WIDTH)
+            .text_center()
+            .truncate()
+            .text_sm()
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(cx.theme().foreground)
+            .child(title),
+    )
+}
 
 /// A line of the header: the field's name in a column, then the field.
 fn field_row(label: &'static str, field: impl IntoElement, cx: &App) -> gpui_kit::Div {
@@ -208,6 +231,8 @@ impl Render for Composer {
                 ))
         });
 
+        let title_bar = cfg!(target_os = "macos")
+            .then(|| title_bar(window_title(&self.subject.read(cx).value()), cx));
         v_flex()
             .id("composer")
             .key_context(actions::COMPOSER)
@@ -221,6 +246,7 @@ impl Render for Composer {
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
+            .children(title_bar)
             .children(self.error.clone().map(|error| {
                 div()
                     .px_5()

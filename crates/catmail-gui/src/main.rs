@@ -29,8 +29,9 @@ use catmail_core::{BodyPrefetch, Config, DEFAULT_GC_INTERVAL, MailClient, SyncSc
 use clap::Parser;
 use gpui_kit::component::{ActiveTheme as _, StyledExt as _, v_flex};
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, QuitMode,
-    Render, SharedString, Styled as _, Subscription, Window, WindowOptions, div, px, size,
+    AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Pixels,
+    Point, QuitMode, Render, SharedString, Styled as _, Subscription, Window, WindowOptions, div,
+    px, size,
 };
 use settings::{Preferences, Settings};
 
@@ -161,6 +162,7 @@ pub(crate) fn window_options(cx: &App) -> WindowOptions {
         "catmail",
         size(px(1280.), px(800.)),
         size(px(720.), px(480.)),
+        layout::Frame::Unified,
         cx,
     )
 }
@@ -172,6 +174,8 @@ pub(crate) struct MainWindow {
     mailbox: Option<Entity<Mailbox>>,
     /// Until the mailbox is in it.
     following_engine: Option<Subscription>,
+    /// Where the window's buttons were put, for the text size (`layout::Frame::Unified`).
+    window_buttons: Option<Point<Pixels>>,
 }
 
 impl MainWindow {
@@ -180,6 +184,7 @@ impl MainWindow {
         let mut this = Self {
             mailbox: None,
             following_engine: Some(following),
+            window_buttons: None,
         };
         this.follow_engine(window, cx);
         this
@@ -200,17 +205,19 @@ impl MainWindow {
 }
 
 impl Render for MainWindow {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        layout::place_window_buttons(&mut self.window_buttons, window);
         if let Some(mailbox) = &self.mailbox {
             return mailbox.clone().into_any_element();
         }
-        match Resident::engine(cx) {
+        let page = match Resident::engine(cx) {
             Engine::Failed(message) => open_failed(message.clone(), cx),
             Engine::Opening | Engine::Open(_) | Engine::Closed => div()
                 .size_full()
                 .bg(cx.theme().background)
                 .into_any_element(),
-        }
+        };
+        layout::movable(page, window).into_any_element()
     }
 }
 

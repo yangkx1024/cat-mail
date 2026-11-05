@@ -48,7 +48,7 @@ impl Mailbox {
                     // Its own width, not a share of the reader's while that is hidden.
                     .flex_none()
                     .size_range(rems(12.).to_pixels(rem)..rems(24.).to_pixels(rem))
-                    .child(self.render_sidebar(cx)),
+                    .child(self.render_sidebar(layout::has_window_buttons(window), cx)),
             )
             .child(
                 resizable_panel()
@@ -95,10 +95,12 @@ impl Mailbox {
             .child(
                 v_flex()
                     .flex_none()
-                    .gap_2()
-                    .p_3()
+                    .px_3()
+                    .pb_3()
                     .child(
+                        // As tall as the toolbar across from it, and lined up with it.
                         h_flex()
+                            .h(layout::bar_height())
                             .gap_1()
                             .child(
                                 Button::new("sync")

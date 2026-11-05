@@ -2,15 +2,17 @@
 
 use std::rc::Rc;
 
+use gpui_kit::component::TitleBar;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::{Cancel, Confirm, Dialog, DialogEntrance, DialogFooter};
 use gpui_kit::component::sidebar::SidebarMenuItem;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, WindowExt as _, h_flex};
 use gpui_kit::{
     AnyWindowHandle, App, Bounds, ClickEvent, Context, Div, ElementId, Entity, FontWeight, Hsla,
-    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString, Size,
-    Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled as _, TitlebarOptions,
-    WeakEntity, Window, WindowBounds, WindowOptions, div,
+    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Pixels, Point, Rems,
+    Render, RenderOnce, SharedString, Size, Stateful, StatefulInteractiveElement as _,
+    StyleRefinement, Styled as _, TitlebarOptions, WeakEntity, Window, WindowBounds, WindowOptions,
+    div, point, prelude::FluentBuilder as _, px, rems,
 };
 
 use crate::actions::DIALOG_BUTTON;
@@ -40,24 +42,163 @@ pub fn sidebar_row(
         )
 }
 
+/// What a window has at its top on macOS; elsewhere it has the system's title bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Frame {
+    /// No title bar: the content goes up to the top, the window's buttons over the
+    /// sidebar's corner, and the row they sit in, the bars at the top of the panes, is
+    /// where the window is moved from ([`movable`]). The window places its buttons with
+    /// [`place_window_buttons`].
+    Unified,
+    /// GPUI Kit's `TitleBar`, in the theme's colors: the system's would match the
+    /// theme's light or dark at best (`App::set_window_appearance`), not its colors.
+    /// The window renders it at its top.
+    TitleBar,
+}
+
 /// A window centered on the screen. Its geometry is in device-independent pixels, not
-/// the rem scale.
+/// the rem scale. Its title shows in the Window menu, Mission Control and to screen
+/// readers, also where the window draws its own title bar.
 pub fn window_options(
     title: impl Into<SharedString>,
     size: Size<Pixels>,
     min_size: Size<Pixels>,
+    frame: Frame,
     cx: &App,
 ) -> WindowOptions {
     WindowOptions {
-        titlebar: Some(TitlebarOptions {
-            title: Some(title.into()),
-            ..Default::default()
-        }),
+        titlebar: Some(titlebar(title.into(), frame, cx)),
+        // The window moves itself (`movable`, `TitleBar`): AppKit would also take a
+        // double click there, and hold every click back to see whether it is one.
+        app_owns_titlebar_drag: cfg!(target_os = "macos"),
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size, cx))),
         window_min_size: Some(min_size),
         // Wayland reads it when it creates the window.
         app_id: Some(crate::APP_ID.into()),
         ..Default::default()
+    }
+}
+
+fn titlebar(title: SharedString, frame: Frame, cx: &App) -> TitlebarOptions {
+    let title = Some(title);
+    if !cfg!(target_os = "macos") {
+        return TitlebarOptions {
+            title,
+            ..Default::default()
+        };
+    }
+    match frame {
+        Frame::Unified => TitlebarOptions {
+            title,
+            appears_transparent: true,
+            // The window's rem; `place_window_buttons` moves them when it changes.
+            traffic_light_position: Some(window_buttons_at(cx.theme().font_size)),
+        },
+        Frame::TitleBar => TitlebarOptions {
+            title,
+            ..TitleBar::title_bar_options()
+        },
+    }
+}
+
+/// How tall the bars at the top of a window are, [`toolbar`] and the list's search row:
+/// the row the window's buttons sit in, in a [`Frame::Unified`] window.
+pub fn bar_height() -> Rems {
+    rems(3.)
+}
+
+/// Whether a [`Frame::Unified`] window's buttons are over its top-left corner, which
+/// then leaves them room: on macOS, unless the window is full screen, which hides them.
+pub fn has_window_buttons(window: &Window) -> bool {
+    cfg!(target_os = "macos") && !window.is_fullscreen()
+}
+
+/// Where the window's buttons go in a [`Frame::Unified`] window, at the text size
+/// `rem`: in the middle of the top bars' row, as far from the left edge as from the
+/// top, so they follow the bars as the text size changes them.
+fn window_buttons_at(rem: Pixels) -> Point<Pixels> {
+    // AppKit's buttons (their frames, a little taller than the circles).
+    const BUTTON_HEIGHT: Pixels = px(16.);
+    let inset = ((bar_height().to_pixels(rem) - BUTTON_HEIGHT) / 2.).floor();
+    point(inset, inset)
+}
+
+/// Keeps a [`Frame::Unified`] window's buttons in the middle of its top row, which
+/// grows with the text size; `placed` is where they went last, so AppKit is asked only
+/// when that changes. Called as the window renders.
+pub fn place_window_buttons(placed: &mut Option<Point<Pixels>>, window: &mut Window) {
+    #[cfg(target_os = "macos")]
+    {
+        let at = window_buttons_at(window.rem_size());
+        if *placed != Some(at) {
+            window.set_traffic_light_position(at);
+            *placed = Some(at);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (placed, window);
+}
+
+/// `content` in a [`Frame::Unified`] window, which has no title bar: behind it, across
+/// the top, the row the window is moved from. Whatever is in front there and takes the
+/// press (a button, a field, a checkbox: they prevent the default) keeps it; the rest
+/// of the row moves the window. It goes inside any focusable element the content is in:
+/// that takes the press for its focus, after what is in it.
+pub fn movable(content: impl IntoElement, window: &Window) -> Div {
+    div()
+        .relative()
+        .size_full()
+        // First, so behind: what is in front gets the press first.
+        .when(has_window_buttons(window), |this| this.child(MoveRow))
+        .child(content)
+}
+
+/// Pressing it and moving moves the window, and a double click does what the system's
+/// setting says a double click on a title bar does. See [`movable`].
+#[derive(IntoElement)]
+struct MoveRow;
+
+impl RenderOnce for MoveRow {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        // Pressed, until it moves: then the window moves, as GPUI Kit's `TitleBar` does.
+        // Nothing renders from it, so changing it doesn't notify.
+        let pressed = window.use_state(cx, |_, _| false);
+        let set = |pressed: &Entity<bool>, value: bool, cx: &mut App| {
+            pressed.update(cx, |pressed, _| *pressed = value)
+        };
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .h(bar_height())
+            .on_mouse_down(MouseButton::Left, {
+                let pressed = pressed.clone();
+                move |event, window, cx| {
+                    // What is in front ran first, and took the press.
+                    if window.default_prevented() {
+                        return;
+                    }
+                    if event.click_count == 2 {
+                        window.titlebar_double_click();
+                    }
+                    set(&pressed, event.click_count == 1, cx);
+                }
+            })
+            .on_mouse_up(MouseButton::Left, {
+                let pressed = pressed.clone();
+                move |_, _, cx| set(&pressed, false, cx)
+            })
+            // A press let go off the row is over by the next move here, without the button:
+            // the row hears only what happens over it.
+            .on_mouse_move(move |event, window, cx| {
+                if *pressed.read(cx) {
+                    set(&pressed, false, cx);
+                    if event.pressed_button == Some(MouseButton::Left) {
+                        window.start_window_move();
+                    }
+                }
+            })
     }
 }
 
@@ -76,7 +217,8 @@ pub fn open_window<V: Render>(
     })
 }
 
-/// The bar of commands at the top of a pane or window; the same height whatever it holds.
+/// The bar of commands at the top of a pane or window; the same height whatever it
+/// holds, [`bar_height`]: in a [`Frame::Unified`] window, the row the window moves from.
 pub fn toolbar(cx: &App) -> Div {
     command_bar(cx).border_b_1()
 }
@@ -89,7 +231,7 @@ pub fn bottom_bar(cx: &App) -> Div {
 fn command_bar(cx: &App) -> Div {
     h_flex()
         .flex_none()
-        .h_12()
+        .h(bar_height())
         .px_3()
         .gap_1()
         .border_color(cx.theme().border)

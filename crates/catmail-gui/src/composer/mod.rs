@@ -232,6 +232,7 @@ fn open_window(opening: Opening, cx: &mut App) -> anyhow::Result<()> {
         window_title(&opening.draft.content.subject),
         size(px(760.), px(680.)),
         size(px(480.), px(360.)),
+        crate::layout::Frame::TitleBar,
         cx,
     );
     let (handle, composer) = crate::layout::open_window(options, cx, |window, cx| {
@@ -412,7 +413,8 @@ impl Composer {
         subscriptions.push(cx.subscribe_in(&body, window, Self::on_input_event));
         let from = Self::from_field(&identities, draft.identity, window, cx);
         let identities = Self::follow_identities(&client, draft.id, window, cx);
-        // The window is named after the subject.
+        // The window is named after the subject (its title bar redraws with the change,
+        // `on_input_event`).
         subscriptions.push(
             cx.subscribe_in(&subject, window, |_, subject, event, window, cx| {
                 if matches!(event, InputEvent::Change) {

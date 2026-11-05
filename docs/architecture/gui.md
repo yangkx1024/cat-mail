@@ -26,7 +26,7 @@ src/
   actions.rs         Action、key context 与快捷键
   assets.rs          资源：Heroicons，及替换 gpui-kit 组件图标
   format.rs html.rs  时刻与日期分组（其余显示格式来自 `catmail_core::display`）；HTML 渲染策略
-  layout.rs          共用的窗口（带 app id）、工具栏、右栏页面、名称与值的行、附件块、危险操作的确认框
+  layout.rs          共用的窗口（带 app id、macOS 的窗口外框）、工具栏与窗口的拖动区、右栏页面、名称与值的行、附件块、危险操作的确认框
   mailbox/           主窗口
     mod.rs           状态（账户、Place）、引擎事件、读侧栏、搜索、渲染与 Action 分派
     commands.rs      对邮件的命令（标记、归档、删除、移动，对一封或勾选的多封）、写信、同步、被拒改动的通知
@@ -58,6 +58,30 @@ src/
   读一遍。本地结果先显示，1 秒后再问服务器，它找到正文没下载的邮件时再读一遍（见
   [问服务器](storage.md#问服务器)）。
 - 纯逻辑（文件夹分区、日期格式、HTML 策略、设置文件、主题推导与导入）不依赖窗口，单测覆盖。
+
+## 窗口外框（macOS）
+
+macOS 上窗口没有系统标题栏：系统标题栏只写着窗口名，占一行又不提供什么。Linux、Windows 仍用系统的标题栏。
+窗口用哪种外框由 `layout::window_options` 的 `Frame` 决定：
+
+- **主窗口是一体式**（`Frame::Unified`，像 Mail.app）：内容一直到窗口顶部，红绿灯叠在侧栏左上角。顶部一行
+  （`layout::bar_height`，3 rem）就是红绿灯所在的行：右栏的工具栏（`layout::toolbar`）和中栏的同步、搜索一行
+  都是这个高度、互相对齐，侧栏顶部空出这一行，Compose 在它下面。全屏时红绿灯隐藏，这一行也不留
+  （`layout::has_window_buttons`）。红绿灯离左边和上边一样远，在这一行垂直居中；行高随文字大小变，
+  `MainWindow` 渲染时按窗口的 rem 重新摆（`layout::place_window_buttons`，位置没变不调 AppKit）。
+- **拖动由应用自己做**（`app_owns_titlebar_drag`，否则 AppKit 也处理标题栏的双击，还会为分辨双击而推迟每次单击）：
+  `layout::movable` 在内容后面横放一条与顶部一行同高的拖动区，按下再移动就 `start_window_move`，双击按系统
+  "双击标题栏"的设置缩放或最小化（`titlebar_double_click`）。它只收得到发生在它上面的移动和松开，所以
+  拖动前看移动事件里左键是否还按着：在外面松开的那次按下，之后不会让不按键经过的指针拖动窗口。按在按钮、输入框、复选框上不算：它们在按下时
+  `prevent_default`，而拖动区在它们后面，最后才收到。只放两处：`Mailbox` 的根里（三栏和登录页），`MainWindow`
+  里引擎没打开时的空白页和失败页。必须放在可获得焦点的元素（`Mailbox` 的根）**里面**：它为拿焦点也
+  `prevent_default`，放在外面的拖动区就永远收不到。
+- **写信窗口保留标题栏**，但用 gpui-kit 的 `TitleBar`（`Frame::TitleBar`），按主题的颜色画，标题（信的 Subject）居中。
+  系统标题栏最多能借 `App::set_window_appearance` 跟上主题的浅色 / 深色，配不上导入主题的颜色。设置是
+  主窗口里的对话框，没有自己的窗口。
+- 窗口标题仍然设置（窗口菜单、Mission Control、辅助功能读它），只是不显示。
+- 拖动的测试只在 macOS 上编译（`mailbox/tests/frame.rs`）：测试平台的 `start_window_move` 是
+  `unimplemented!()`，测试以它 panic 判断窗口会被拖动。PR 的 CI 只在 Linux 上跑测试，改这里要在 Mac 上跑一遍。
 
 ## 侧栏
 

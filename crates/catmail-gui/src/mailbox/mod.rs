@@ -39,6 +39,7 @@ use gpui_kit::{
 
 use crate::actions::{self, *};
 use crate::composer::{self, ComposeFrom};
+use crate::layout;
 use crate::reader::Reader;
 use crate::settings::Preferences;
 use add_account::{AddAccount, AddAccountEvent};
@@ -796,6 +797,7 @@ impl Render for Mailbox {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(content)
+            // In the root, which takes the press for its focus after the row.
+            .child(layout::movable(content, window))
     }
 }
