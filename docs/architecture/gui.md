@@ -26,13 +26,11 @@ src/
   assets.rs          资源：Heroicons，及替换 gpui-kit 组件图标
   layout.rs          共用的窗口（带 app id、macOS 的窗口外框）、工具栏与窗口的拖动区、右栏页面、名称与值的行、附件块、危险操作的确认框
   mailbox/           主窗口
-    mod.rs           状态（账户、Place）、引擎事件、读侧栏、搜索、渲染与 Action 分派
+    mod.rs           状态（账户、选中的位置）、引擎事件、读侧栏、搜索、渲染与 Action 分派
     commands.rs      对邮件的命令（标记、归档、删除、移动，对一封或勾选的多封）、写信、同步、被拒改动的通知
     message_commands.rs   这些命令的图标按钮，读信区、列表标题、悬停的行共用
     sidebar.rs panes.rs draft.rs outbox.rs   侧栏；三栏与邮件工具栏；草稿、发件箱的右栏
-    refresh.rs       哪个引擎事件重读什么、节流（纯逻辑）
     message_list/    中栏列表（mod.rs：来源、加载、选中；rows.rs：三种行的样子）
-    folders.rs       文件夹分区（纯逻辑）
     folder_commands.rs   侧栏文件夹的右键菜单：新建、重命名、删除，及命名的对话框（见[文件夹与标签的管理](folders.md#界面)）
     folder_picker.rs add_account.rs   "Move to"与"Labels"对话框；登录页
     tests/           驱动窗口的集成测试，按读信、写信、设置分文件，另有截图
@@ -56,8 +54,10 @@ src/
   读一遍。本地结果先显示，1 秒后再问服务器，它找到正文没下载的邮件时再读一遍（见
   [问服务器](storage.md#问服务器)）。
 - 纯逻辑（文件夹分区、日期格式、HTML 策略、设置文件、主题推导与导入）不依赖窗口，单测覆盖。其中单实例
-  （`instance`）、日期格式（`format`）、HTML 策略（`html`）和设置文件（`settings`）在 `catmail-frontend`，
-  GUI 在 crate 根下按原路径引用（`crate::format` 等），别的前端也能用。
+  （`instance`）、日期格式（`format`）、HTML 策略（`html`）、设置文件（`settings`）、文件夹分区和侧栏图标的
+  角色（`folders`）、侧栏的模型（`mailbox`：`Place`、`Source`、`AccountEntry`、连接说明、文件夹右键菜单的
+  项和文案）和哪个引擎事件重读什么（`refresh`）在 `catmail-frontend`，别的前端也能用。GUI 按原路径引用
+  （`crate::format`、`mailbox` 模块里的 `folders`、`refresh` 等），`assets.rs` 把 `FolderIcon` 对应到 Heroicons。
 
 ## 窗口外框（macOS）
 

@@ -1,12 +1,12 @@
-//! Which engine events make the window read what again, and how often.
+//! Which engine events make the mailbox read what again, and how often.
 
 use std::collections::HashMap;
 
 use catmail_core::{AccountId, Event, FolderId};
 
-use super::message_list::Source;
+use crate::mailbox::Source;
 
-/// What the window reads again after an engine event.
+/// What the mailbox reads again after an engine event.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Refresh {
     /// The accounts, their folders and counts, drafts and outbox.
@@ -108,7 +108,7 @@ impl Throttle {
 }
 
 /// One read at a time. Asking while one runs asks for one more after it, so the last
-/// read always starts after the last change; only replacing the GPUI task wouldn't do,
+/// read always starts after the last change; only replacing the UI's task wouldn't do,
 /// as the engine finishes a read it was handed anyway.
 #[derive(Debug, Default)]
 pub struct Coalesce {
@@ -133,7 +133,7 @@ impl Coalesce {
         std::mem::take(&mut self.again)
     }
 
-    #[cfg(test)]
+    /// Whether a read is running.
     pub fn is_running(&self) -> bool {
         self.running
     }

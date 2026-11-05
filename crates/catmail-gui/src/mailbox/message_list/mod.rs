@@ -21,6 +21,8 @@ use gpui_kit::{
 };
 use jiff::civil::Date;
 
+pub use catmail_frontend::mailbox::Source;
+
 use super::folders::AccountFolders;
 use super::message_commands::{Applies, MessageCommand};
 use crate::format::Calendar;
@@ -87,27 +89,6 @@ impl Check {
             Check::Flagged => flags.contains(Flags::FLAGGED),
             Check::Unflagged => !flags.contains(Flags::FLAGGED),
         }
-    }
-}
-
-/// What the list shows.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Source {
-    /// Every account's INBOX.
-    Inboxes,
-    Folder(FolderId),
-    Search(String),
-    Drafts(AccountId),
-    Outbox(AccountId),
-}
-
-impl Source {
-    /// Whether it lists messages, which can be checked; not drafts or the outbox.
-    pub fn lists_messages(&self) -> bool {
-        matches!(
-            self,
-            Source::Inboxes | Source::Folder(_) | Source::Search(_)
-        )
     }
 }
 

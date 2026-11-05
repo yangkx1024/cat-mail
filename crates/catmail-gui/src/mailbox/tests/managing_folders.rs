@@ -2,9 +2,10 @@
 //! sidebar following the engine's events.
 
 use catmail_core::{Folder, FolderId};
+use catmail_frontend::mailbox::FolderMenuEntry as MenuEntry;
 
 use super::*;
-use crate::mailbox::folder_commands::{self, MenuEntry};
+use crate::mailbox::folder_commands;
 
 /// The account's folders the sidebar shows.
 fn sidebar_folders<'a>(mailbox: &Entity<Mailbox>, cx: &'a App) -> Vec<&'a Folder> {
