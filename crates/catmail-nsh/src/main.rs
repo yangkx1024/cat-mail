@@ -50,7 +50,7 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
     use catmail_frontend::instance::{self, Claim, Display, Request};
     use catmail_frontend::settings::SettingsFile;
 
-    catmail_core::logging::init("catmail_nsh=info");
+    catmail_core::logging::init("catmail_nsh=info,catmail_frontend=info");
     let config = match std::env::var_os("CATMAIL_DATA_DIR") {
         Some(dir) => Config::with_data_dir(dir),
         None => Config::platform_default()?,

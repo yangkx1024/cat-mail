@@ -166,7 +166,22 @@ Accounts 的确认文案在 `accounts`，与 gpui 版共用；nsh 版把 gpui-ki
       Inbox，列表读到那封后选中它（`Reveal`）。GNOME Shell 上点击无效：GLib 在那里改用 GNOME 自己的接口，它经
       D-Bus 名字唤起应用，而 nsh 版不占这个名字（`NON_UNIQUE`，单实例靠 socket）
 - [x] 系统唤醒：nsh 不听 logind，靠引擎自己发现睡眠（`sleep.rs`，最多晚 30 秒）
-- [ ] 常驻时回收内存：关掉最后一个窗口 2 秒后 `malloc_trim` 已接上；还没量 WebKit 子进程常驻时的占用
+- [x] 常驻时回收内存：关掉最后一个窗口 2 秒后 `malloc_trim`。实测（release，两个真实账户，2026-11-05），
+      单位 MB，RSS / PSS：
+
+      | | 主进程 | WebKit 渲染进程 | WebKit 网络进程 | 合计 PSS |
+      |---|---|---|---|---|
+      | 刚启动、还没开邮件 | 226 / 193 | — | — | 193 |
+      | 开着窗口读信 | 280 / 192 | 195 / 107 | 69 / 32 | 约 335 |
+      | 关窗后、trim 后 | 265 / 197 | 退出了 | 69 / 41 | 约 238 |
+
+      trim 只还回约 14 MB（主进程 anon 从 104 降到 90）。gpui 版能还回约 76 MB，常驻约 151 MB RSS。
+      常驻时主进程里约 107 MB 是文件映射（程序本身和 GTK、WebKitGTK 的库），能和别的进程共用，也能被换出。
+      渲染进程随窗口退出，网络进程留着：bwrap 沙箱和 `xdg-dbus-proxy` 合计约 3 MB
+- [ ] 每打开一封邮件都新起一个 WebKit 渲染进程（每次约 100 MB PSS，还要再起一次 bwrap 沙箱），旧的随即退出。
+      读信区换一封邮件时应复用同一个 web view，只换页面，打开也会更快
+- [ ] 常驻时网络进程还留着（41 MB PSS），可它从来不联网（CSP 只放行 `data:`）。看 nsh 能否在没有 web view 时
+      放掉它
 - [x] 快捷键对齐 `actions.rs`。这次补上的有：Sync（Ctrl+Shift+N、F5）、Ctrl+F 聚焦搜索框、写信窗口的 Escape 关闭
       和 Ctrl+Shift+A 加附件
 
