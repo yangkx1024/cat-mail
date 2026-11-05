@@ -69,11 +69,11 @@ GUI 关掉主窗口后继续同步、发信、提醒新邮件，并能从托盘�
 打开时新建 `Mailbox`，`Resident` 只记住上次选中的 `Place`（`Mailbox` 释放时记下，新的
 `Mailbox::reopen_at`），那里已经不在就回到第一个收件箱。
 
-最后一个窗口关闭时怎么做是一个纯函数（`after_last_window`）：正在退出、没开"保持运行"、引擎打开失败
+最后一个窗口关闭时怎么做是一个纯函数（`catmail_frontend::resident::after_last_window`，退出原因 `QuitReason` 也在那里）：正在退出、没开"保持运行"、引擎打开失败
 （没有东西可运行）时退出；否则切到 headless（macOS 上是 Accessory）。切换是异步的，
 期间到来的唤起请求等切换结束再处理；切到窗口模式失败（例如请求方没有显示服务器）就留在 headless，
 只记日志。GPUI 只在没有窗口时允许切换，正合这里的用法。切到 headless 之后调一次 glibc 的
-`malloc_trim(0)`（`memory::release_freed`，只在 Linux glibc 上，其他平台什么也不做）：窗口用过的
+`malloc_trim(0)`（`catmail_frontend::memory::release_freed`，只在 Linux glibc 上，其他平台什么也不做）：窗口用过的
 布局、读信区的 tile、渲染器的缓冲区都已释放，但 glibc 的堆只能从顶上缩，释放的内存夹在仍在用的块之间，
 留在进程里。实测关掉主窗口后 glibc 持有约 103 MB、其中约 92 MB 是空闲块，trim 之后 RSS 从约 229 MB
 降到约 151 MB。代价是再开窗口时这些页重新缺页，约 2 万次、合计几十毫秒，远小于重建 GPU 设备和管线；
@@ -209,7 +209,9 @@ Linux、Windows 上 GPUI 不提供
 
 ### 系统通知
 
-GUI 的 `Notifier`（`catmail-gui/src/new_mail.rs`）是应用级的全局，引擎打开时订阅事件，常驻时也在：
+GUI 的 `Notifier`（`catmail-gui/src/new_mail.rs`）是应用级的全局，引擎打开时订阅事件，常驻时也在。攒、措辞、
+每条通知的 tag 和点击后的去处不依赖 GPUI，在 `catmail_frontend::new_mail`（`Arrivals`、`notifications`、`Target`），
+nsh 版也用它：
 
 - **先攒 1 秒再说**（`GATHER`）。一次同步按批提交、每批一个 `NewMail`，醒来后各账户又同时同步；
   不攒的话一阵新邮件会弹出好几条"N 封新邮件"。Linux 上 GPUI 不支持按 tag 替换通知，替换不了已经弹出的。
@@ -248,7 +250,9 @@ GUI 的 `Notifier`（`catmail-gui/src/new_mail.rs`）是应用级的全局，引
 
 GUI 的 `Tray`（`catmail-gui/src/tray/`）是应用级的全局，引擎打开时启动，有窗口时、常驻时都在。
 与平台无关的部分在 `tray/mod.rs`：数未读、按平台定图标的样子（`icon`：一个 SVG 和要画的尺寸）、在后台画；
-各平台只把画好的图标、未读数和菜单交给系统（`tray/linux.rs`、`tray/macos.rs`；Windows 在 #109）：
+各平台只把画好的图标、未读数和菜单交给系统（Linux 的在 frontend，见下；`tray/macos.rs`；Windows 在 #109）。
+不依赖 GPUI 的部分在 `catmail_frontend::tray`：菜单（`MENU`、`Command`）、提示文字、角标的文字和带角标的 SVG
+（`badged`）、Linux 的 StatusNotifierItem（`tray::linux`，ksni 本来就不依赖界面库），nsh 版也用它们：
 
 - **未读数**：`MailClient::count_unread_in_inboxes` 把各账户 INBOX（Gmail：INBOX 标签）的 `unread_count`
   加起来，一次读。侧栏要重读的事件（`Refresh::after(..).sidebar`：消息、文件夹、账户的变化，漏掉事件）

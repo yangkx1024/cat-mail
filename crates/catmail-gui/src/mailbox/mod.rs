@@ -42,24 +42,12 @@ use crate::settings::Preferences;
 use add_account::{AddAccount, AddAccountEvent};
 use catmail_frontend::folders;
 use catmail_frontend::list::SEARCH_DELAY;
-pub use catmail_frontend::mailbox::{AccountEntry, Place};
+pub use catmail_frontend::mailbox::{AccountEntry, Destination, Place};
 use catmail_frontend::mailbox::{REFRESH_INTERVAL, SYNC_ON_OPEN_AFTER};
 pub(crate) use catmail_frontend::refresh::{Coalesce, Refresh};
 use catmail_frontend::refresh::{DraftCounts, Throttle};
 use message_commands::MessageCommand;
 use message_list::{MessageList, Row, RowCommand, Source};
-
-/// Where to take the mailbox: a place, or an account's INBOX and a message to open there
-/// (what a notification was about), which the mailbox finds among its folders. Not All
-/// Inboxes, even if shown: the message may be too far down to be loaded there.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Destination {
-    Place(Place),
-    Inbox {
-        account: AccountId,
-        message: Option<MessageId>,
-    },
-}
 
 /// "Labels", open for a message.
 pub(crate) struct LabelsDialog {
@@ -224,17 +212,7 @@ impl Mailbox {
 
     /// The place `to` is, if still there, and the message to open there.
     fn find(&self, to: Destination) -> Option<(Place, Option<MessageId>)> {
-        let accounts = self.accounts.as_deref()?;
-        match to {
-            Destination::Place(place) => place.is_in(accounts).then_some((place, None)),
-            Destination::Inbox { account, message } => {
-                let inbox = self
-                    .account(account)?
-                    .folders
-                    .with_role(FolderRole::Inbox)?;
-                Some((Place::Folder(inbox.id), message))
-            }
-        }
+        to.find(self.accounts.as_deref()?)
     }
 
     /// Selects `place`, and opens `message` there once it is listed.

@@ -1,15 +1,17 @@
 //! The tray on Linux: a StatusNotifierItem over D-Bus (`ksni`), which KDE, the GNOME
 //! AppIndicator extension, waybar and others show. Pure D-Bus, so it stays while the app
-//! has no display connection.
+//! has no display connection, and is no toolkit's: the frontend draws the icon and does
+//! what is chosen.
 
 use futures_channel::mpsc::UnboundedSender;
 use ksni::menu::{MenuItem, StandardItem};
 use ksni::{Category, Handle, Icon, ToolTip, TrayMethods as _};
 
-use super::{Chosen, Command, MENU, Pixmaps};
-use crate::APP_NAME;
+use super::{Chosen, Command, MENU, Pixmap};
 
 struct StatusItem {
+    /// The app's name, which the host shows and tells items apart by.
+    name: &'static str,
     icon: Vec<Icon>,
     tool_tip: String,
     chosen: UnboundedSender<Chosen>,
@@ -28,11 +30,11 @@ impl StatusItem {
 
 impl ksni::Tray for StatusItem {
     fn id(&self) -> String {
-        APP_NAME.into()
+        self.name.into()
     }
 
     fn title(&self) -> String {
-        APP_NAME.into()
+        self.name.into()
     }
 
     fn category(&self) -> Category {
@@ -74,9 +76,11 @@ pub struct Item(Handle<StatusItem>);
 
 impl Item {
     /// Registers the item with the desktop's tray, if it has one: GNOME without the
-    /// AppIndicator extension doesn't, and the window comes back from the launcher.
-    pub async fn spawn(chosen: UnboundedSender<Chosen>) -> Option<Self> {
+    /// AppIndicator extension doesn't, and the window comes back from the launcher. What
+    /// is chosen in it is sent to `chosen`.
+    pub async fn spawn(name: &'static str, chosen: UnboundedSender<Chosen>) -> Option<Self> {
         let item = StatusItem {
+            name,
             icon: Vec::new(),
             tool_tip: String::new(),
             chosen,
@@ -91,7 +95,7 @@ impl Item {
     }
 
     /// Shows the count, and `icon` unless it is `None`: the one there looks the same.
-    pub async fn show(&self, icon: Option<Pixmaps>, unread: u32) {
+    pub async fn show(&self, icon: Option<Vec<Pixmap>>, unread: u32) {
         let icon = icon.map(|pixmaps| pixmaps.into_iter().map(argb).collect());
         let tool_tip = super::tool_tip(unread);
         self.0
@@ -105,17 +109,10 @@ impl Item {
     }
 }
 
-/// From straight-alpha BGRA to the ARGB, in network byte order, that the specification
-/// asks for.
-fn argb((size, bgra): (u32, Vec<u8>)) -> Icon {
-    let (pixels, _) = bgra.as_chunks::<4>();
-    let data = pixels
-        .iter()
-        .flat_map(|&[b, g, r, a]| [a, r, g, b])
-        .collect();
+fn argb(pixmap: Pixmap) -> Icon {
     Icon {
-        width: size as i32,
-        height: size as i32,
-        data,
+        width: pixmap.size as i32,
+        height: pixmap.size as i32,
+        data: pixmap.argb,
     }
 }

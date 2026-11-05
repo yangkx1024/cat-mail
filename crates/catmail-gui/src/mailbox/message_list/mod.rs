@@ -10,8 +10,10 @@ use std::rc::Rc;
 use catmail_core::{
     AccountId, FolderId, MailClient, MessageCursor, MessageId, MessageSummary, SearchQuery,
 };
-use catmail_frontend::list::{self, Days, PAGE, Removal, Reselect, SERVER_SEARCH_DELAY, fetch};
-pub use catmail_frontend::list::{Check, Row, RowId};
+use catmail_frontend::list::{
+    self, Days, PAGE, Removal, Reselect, Reveal, SERVER_SEARCH_DELAY, fetch,
+};
+pub use catmail_frontend::list::{Check, Row};
 pub use catmail_frontend::mailbox::Source;
 use gpui_kit::component::list::{ListDelegate, ListEvent, ListItem, ListState};
 use gpui_kit::component::notification::Notification;
@@ -71,9 +73,8 @@ pub struct MessageList {
     removal: Removal,
     /// Loads of the rows shown started so far (not of more pages).
     reads: u64,
-    /// The message to select once the rows have it (see [`reveal`]), and the first read
-    /// that must have it: one in flight may have started before it arrived.
-    revealing: Option<(MessageId, u64)>,
+    /// The message to select once the rows have it (see [`reveal`]).
+    reveal: Reveal,
     /// The name of each user label shown, of every account, from `folders`: a row shows
     /// those of its message's labels (see `AccountFolders::user_labels`).
     labels: HashMap<FolderId, SharedString>,
@@ -106,7 +107,7 @@ impl MessageList {
             generation: 0,
             removal: Removal::default(),
             reads: 0,
-            revealing: None,
+            reveal: Reveal::default(),
             labels: HashMap::new(),
             folders: HashMap::new(),
             hovered: None,
@@ -214,7 +215,7 @@ impl MessageList {
 
     /// Drops the message [`reveal`] waits for: the user chose another meanwhile.
     pub fn forget_reveal(&mut self) {
-        self.revealing = None;
+        self.reveal.forget();
     }
 
     /// Selects the next row once `id`, the selected message, goes away. Returns the
@@ -238,7 +239,7 @@ pub fn show(
     delegate.has_more = false;
     delegate.stale = false;
     delegate.removal.clear();
-    delegate.revealing = None;
+    delegate.reveal.forget();
     delegate.generation += 1;
     delegate.found_on_server = Rc::new([]);
     delegate._server = match &delegate.source {
@@ -357,9 +358,9 @@ pub fn reveal(
     let delegate = list.delegate_mut();
     // The next read starts after now, once one in flight is done.
     let reads = delegate.reads;
-    delegate.revealing = Some((id, reads + 1));
+    delegate.reveal.ask(id, reads + 1);
     select_revealed(list, reads, window, cx);
-    if list.delegate().revealing.is_some() {
+    if list.delegate().reveal.is_waiting() {
         refresh(list, window, cx);
     }
 }
@@ -373,19 +374,11 @@ fn select_revealed(
     cx: &mut Context<ListState<MessageList>>,
 ) {
     let delegate = list.delegate_mut();
-    let Some((id, from)) = delegate.revealing else {
-        return;
-    };
-    let ix = delegate
-        .rows
-        .iter()
-        .position(|r| r.id() == RowId::Message(id))
-        .and_then(|ix| path(&delegate.days, ix));
-    if ix.is_none() && read < from {
-        return;
-    }
-    delegate.revealing = None;
-    let Some(ix) = ix else {
+    let Some(ix) = delegate
+        .reveal
+        .read(read, &delegate.rows)
+        .and_then(|ix| path(&delegate.days, ix))
+    else {
         return;
     };
     list.set_selected_index(Some(ix), window, cx);

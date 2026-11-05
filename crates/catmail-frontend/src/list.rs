@@ -330,6 +330,42 @@ impl Removal {
     }
 }
 
+/// A message to select once the rows have it: what a notification clicked was about,
+/// which may have just arrived and not be listed yet. It is waited for until the first
+/// read started after asking has come and still doesn't have it; another source shown,
+/// or a row the user selects meanwhile, ends the wait ([`Reveal::forget`]). Reads are
+/// numbered as for [`Removal`].
+#[derive(Debug, Default)]
+pub struct Reveal(Option<(MessageId, u64)>);
+
+impl Reveal {
+    /// Waits for `id`, which the read numbered `next_read` (and any later) should have.
+    pub fn ask(&mut self, id: MessageId, next_read: u64) {
+        self.0 = Some((id, next_read));
+    }
+
+    pub fn forget(&mut self) {
+        self.0 = None;
+    }
+
+    /// The rows of read number `read` came (or are those shown, of the latest read so
+    /// far): where the message waited for is among them, if it is, to select. The wait
+    /// ends then, or when it should have been there.
+    pub fn read(&mut self, read: u64, rows: &[Row]) -> Option<usize> {
+        let (id, from) = self.0?;
+        let at = rows.iter().position(|r| r.id() == RowId::Message(id));
+        if at.is_some() || read >= from {
+            self.0 = None;
+        }
+        at
+    }
+
+    /// Whether a message is waited for.
+    pub fn is_waiting(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
 /// Which of the messages listed to check, from the menu beside the list's checkbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Check {
@@ -559,6 +595,29 @@ mod tests {
                 "{selected:?} {removing:?} {before:?} {ids:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_message_to_reveal_is_waited_for_until_a_read_that_should_have_it() {
+        let rows = |ids: &[i64]| -> Vec<Row> { ids.iter().map(|&id| message(id, None)).collect() };
+        let mut reveal = Reveal::default();
+        // Listed already.
+        reveal.ask(MessageId(2), 4);
+        assert_eq!(reveal.read(3, &rows(&[1, 2])), Some(1));
+        assert!(!reveal.is_waiting());
+
+        // Not yet: a read from before asking doesn't end the wait, the next does.
+        reveal.ask(MessageId(5), 4);
+        assert_eq!(reveal.read(3, &rows(&[1, 2])), None);
+        assert!(reveal.is_waiting());
+        assert_eq!(reveal.read(4, &rows(&[1, 2])), None);
+        assert!(!reveal.is_waiting());
+
+        reveal.ask(MessageId(5), 4);
+        assert_eq!(reveal.read(4, &rows(&[5, 1, 2])), Some(0));
+        reveal.ask(MessageId(5), 4);
+        reveal.forget();
+        assert_eq!(reveal.read(4, &rows(&[5])), None);
     }
 
     #[test]

@@ -11,7 +11,7 @@
 | 层 | crate | 内容 |
 |---|---|---|
 | Frontends | `catmail-cli`、`catmail-gui` | 命令行（clap）；图形界面（gpui-kit） |
-| Frontend 共用 | `catmail-frontend` | 桌面前端共用、与 UI 库无关的部分：设置文件、主题、单实例、侧栏的文件夹与模型、引擎事件的重读规则、列表的行、对邮件的命令、写信窗口的模型、发件箱的选择、登录表单、显示格式、读信区的头部与 HTML 策略 |
+| Frontend 共用 | `catmail-frontend` | 桌面前端共用、与 UI 库无关的部分：设置文件、主题、单实例、侧栏的文件夹与模型、引擎事件的重读规则、列表的行、对邮件的命令、写信窗口的模型、发件箱的选择、登录表单、显示格式、读信区的头部与 HTML 策略、托盘（菜单、角标、Linux 的 StatusNotifierItem）、新邮件通知的措辞、关掉最后一个窗口之后怎么办 |
 | Rendering | `catmail-render` | 读信区的 HTML 引擎（Blitz）：在自己的线程上排版、分块绘制成像素；不依赖 UI 库和邮件类型 |
 | Facade | `catmail-core` | `MailClient`：async 方法 + 事件订阅，前端唯一依赖 |
 | Services / Engine | `catmail-core` | 同步、后台同步（IDLE）、操作队列回放、按需下载与后台预取正文、Outbox；每账户状态；运行时桥接；凭据 |

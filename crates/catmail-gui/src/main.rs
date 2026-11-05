@@ -9,7 +9,6 @@ mod fonts;
 mod layout;
 mod login_form;
 mod mailbox;
-mod memory;
 mod new_mail;
 mod reader;
 mod resident;

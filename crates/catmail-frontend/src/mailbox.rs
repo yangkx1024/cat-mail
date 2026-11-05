@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use catmail_core::{
     Account, AccountId, AccountMode, AccountOverview, AccountStatus, ErrorKind, Folder, FolderId,
-    FolderRole, Identity, OutboxEntry,
+    FolderRole, Identity, MessageId, OutboxEntry,
 };
 
 use crate::folders::AccountFolders;
@@ -103,6 +103,36 @@ impl Place {
             Place::Drafts(_) => FolderRole::Drafts.label().into(),
             Place::Outbox(_) => "Outbox".into(),
         })
+    }
+}
+
+/// Where to take the mailbox: a place, or an account's INBOX and a message to open there
+/// (what a notification was about), which the mailbox finds among its folders. Not All
+/// Inboxes, even if shown: the message may be too far down to be loaded there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Destination {
+    Place(Place),
+    Inbox {
+        account: AccountId,
+        message: Option<MessageId>,
+    },
+}
+
+impl Destination {
+    /// The place it is among these accounts, if still there, and the message to open
+    /// there.
+    pub fn find(self, accounts: &[AccountEntry]) -> Option<(Place, Option<MessageId>)> {
+        match self {
+            Destination::Place(place) => place.is_in(accounts).then_some((place, None)),
+            Destination::Inbox { account, message } => {
+                let inbox = accounts
+                    .iter()
+                    .find(|entry| entry.account.id == account)?
+                    .folders
+                    .with_role(FolderRole::Inbox)?;
+                Some((Place::Folder(inbox.id), message))
+            }
+        }
     }
 }
 
