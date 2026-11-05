@@ -60,7 +60,8 @@ src/
   按标记勾选、行上的文字；移走后等它离开的 `Removal`）、对邮件的命令（`commands`：`Applies`、命令的名字、
   归档 / 移动作用于哪些邮件、"Move to"列出的文件夹、永久删除的确认文案、被拒改动的说明）、读信区的头部
   （`reader`：`Header`、附件的名字、保存对话框的起始目录）和写信窗口的模型（`composer`：从什么开始、From 的
-  选项、字段解析、何时保存 / 发送 / 关窗的 `Lifecycle`、按草稿登记窗口的 `OpenComposers`）在 `catmail-frontend`，别的前端也能用。GUI 按原路径引用
+  选项、字段解析、何时保存 / 发送 / 关窗的 `Lifecycle`、按草稿登记窗口的 `OpenComposers`）和发件箱的右栏
+  （`outbox`：条目的状态、可选的操作）在 `catmail-frontend`，别的前端也能用。GUI 按原路径引用
   （`crate::format`、`mailbox` 模块里的 `folders`、`refresh` 等），`assets.rs` 把 `FolderIcon` 对应到 Heroicons。
 
 ## 窗口外框（macOS）
@@ -262,7 +263,7 @@ macOS、Windows 用系统字体，不受影响。
 ## 发件箱
 
 客户端开启 `send_in_background`。条目的状态决定右栏给出的选择（哪些可用由 `OutboxStatus::can_*`
-判断，按钮的措辞和先后在 `outbox.rs`）：排队中可以"Send now"
+判断，右栏说的状态、按钮的措辞和先后、要先确认的选择在 `catmail_frontend::outbox`，`mailbox/outbox.rs` 只画出来）：排队中可以"Send now"
 （`flush_outbox`）或"Back to drafts"（`cancel_outbox`）；被拒绝的可以改回草稿或重试；已发出但
 没存进 Sent 的可以重试保存或放弃；**发出后未确认（unknown）的从不自动重发**，由用户选"Mark as sent"、
 "Send again"（确认可能重复）或"Back to drafts"。

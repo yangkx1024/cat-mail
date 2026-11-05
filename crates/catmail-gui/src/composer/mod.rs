@@ -13,11 +13,11 @@ mod view;
 use std::path::PathBuf;
 
 use catmail_core::{DraftAttachment, DraftId, Event, Identity, IdentityId, MailClient, RecvError};
-pub use catmail_frontend::composer::{ComposeFrom, new_message_account};
 use catmail_frontend::composer::{
     AfterAttachment, Field, FieldError, Fields, Lifecycle, Opening, SAVE_DELAY, Written,
     window_title,
 };
+pub use catmail_frontend::composer::{ComposeFrom, new_message_account};
 use futures_channel::oneshot;
 use gpui_kit::component::input::{InputEvent, InputState, Position, TextareaState};
 use gpui_kit::component::notification::Notification;
