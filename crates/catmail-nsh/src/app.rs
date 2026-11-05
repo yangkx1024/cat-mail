@@ -17,7 +17,7 @@ use nsh_core::prelude::*;
 use crate::list::{self, Rows, Selected};
 use crate::sidebar::{self, SelectedPlace};
 use crate::toast::{Level, notify};
-use crate::{commands, composer, draft, reader, toast};
+use crate::{commands, composer, draft, outbox, reader, toast};
 
 pub fn client() -> MailClient {
     crate::engine::client()
@@ -149,8 +149,8 @@ fn mailbox() -> impl IntoElement {
         .child(dynamic(move || match global::<Selected>().with(|s| s.0) {
             Some(RowId::Message(_)) => reader::reader().into_element(),
             Some(RowId::Draft(_)) => draft::pane().into_element(),
-            // The outbox's pane comes with P6.
-            Some(RowId::Outbox(_)) | None => view().into_element(),
+            Some(RowId::Outbox(_)) => outbox::pane().into_element(),
+            None => view().into_element(),
         }))
         .child(commands::picker())
 }

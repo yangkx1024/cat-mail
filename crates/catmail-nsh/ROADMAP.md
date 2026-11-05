@@ -117,8 +117,12 @@ GTK 线程之间用 `shell::on_gtk` 与一个关窗请求的通道来回。
 
 ## P6 发件箱（gui.md「发件箱」）
 
-- [ ] 右栏按条目状态给出操作：Send now、Back to drafts、重试、Mark as sent、Send again（`OutboxStatus::can_*`）
-- [ ] 后台发送（`send_in_background`）；`unknown` 的条目从不自动重发
+右栏的模型在 `catmail-frontend`（`outbox`：`State` 说条目怎样了，`choices` 和 `Choice` 给出可选的操作、措辞、
+要先确认的和对应的引擎调用），与 gpui 版共用；nsh 版只有界面（`outbox.rs`）。
+
+- [x] 右栏按条目状态给出操作：Send now、Back to drafts、重试、Mark as sent、Send again（`OutboxStatus::can_*`），
+      可能重复的 Send again 先用 `alert_dialog` 确认
+- [x] 后台发送（`send_in_background`，P1 起就开着）；`unknown` 的条目从不自动重发（引擎的规则）
 
 ## P7 设置与主题（gui.md「主题与设置」）
 

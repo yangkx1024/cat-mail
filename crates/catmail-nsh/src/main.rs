@@ -20,6 +20,8 @@ mod engine;
 mod icons;
 #[cfg(target_os = "linux")]
 mod list;
+#[cfg(target_os = "linux")]
+mod outbox;
 mod page;
 #[cfg(target_os = "linux")]
 mod reader;

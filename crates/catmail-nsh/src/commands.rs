@@ -433,6 +433,43 @@ pub fn primary_button(
         )
 }
 
+/// A button that says what it does: outlined when it is the likeliest choice, plain
+/// otherwise.
+pub fn text_button(label: &'static str, outlined: bool, press: impl Fn() + 'static) -> View {
+    let hovered = signal(false);
+    view()
+        .flex_row()
+        .items_center()
+        .h(px(32.0))
+        .px(px(14.0))
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(move || {
+            if outlined {
+                theme().border
+            } else {
+                AdaptiveColor::TRANSPARENT
+            }
+        })
+        .bg(move || {
+            if hovered.get() {
+                theme().accent
+            } else {
+                AdaptiveColor::TRANSPARENT
+            }
+        })
+        .label(SharedString::from(label))
+        .on_mouse_enter(move |_: &MouseEvent| hovered.set(true))
+        .on_mouse_leave(move |_: &MouseEvent| hovered.set(false))
+        .on_press(press)
+        .child(
+            text(label)
+                .text_sm()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(move || theme().foreground),
+        )
+}
+
 /// A tooltip that says `text`.
 pub fn tooltip(text_: impl Fn() -> String + 'static) -> AnyElement {
     view()

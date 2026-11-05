@@ -8,7 +8,9 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use catmail_core::{Draft, Flags, FolderId, MessageCursor, MessageId, MessageSummary, SearchQuery};
+use catmail_core::{
+    Draft, Flags, FolderId, MessageCursor, MessageId, MessageSummary, OutboxEntry, SearchQuery,
+};
 use catmail_frontend::commands::MessageCommand;
 use catmail_frontend::composer::ComposeFrom;
 use catmail_frontend::format;
@@ -381,6 +383,19 @@ pub fn selected_draft() -> Option<Rc<Draft>> {
     global::<Rows>().with(|r| {
         r.rows.iter().find_map(|row| match row {
             Row::Draft(draft) if draft.id == id => Some(draft.clone()),
+            _ => None,
+        })
+    })
+}
+
+/// The selected outbox entry, as the list has it now. Tracked.
+pub fn selected_outbox() -> Option<OutboxEntry> {
+    let Some(RowId::Outbox(id)) = global::<Selected>().with(|s| s.0) else {
+        return None;
+    };
+    global::<Rows>().with(|r| {
+        r.rows.iter().find_map(|row| match row {
+            Row::Outbox(entry) if entry.id == id => Some(entry.clone()),
             _ => None,
         })
     })

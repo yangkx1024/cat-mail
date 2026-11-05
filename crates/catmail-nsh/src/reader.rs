@@ -94,7 +94,7 @@ fn page_state() -> Rc<RefCell<Page>> {
 }
 
 /// Opens the message selected; anything else empties the pane (drafts and the outbox
-/// have panes of their own, P5 and P6). Run in an effect: the task belongs to its run,
+/// have panes of their own). Run in an effect: the task belongs to its run,
 /// so opening another message cancels what is still loading for the last one.
 pub fn follow_selection() {
     // Read here so the page is made again when the appearance changes.
