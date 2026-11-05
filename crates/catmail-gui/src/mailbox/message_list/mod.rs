@@ -10,7 +10,7 @@ use std::rc::Rc;
 use catmail_core::{
     AccountId, FolderId, MailClient, MessageCursor, MessageId, MessageSummary, SearchQuery,
 };
-use catmail_frontend::list::{self, Days, PAGE, Reselect, SERVER_SEARCH_DELAY, fetch, reselect};
+use catmail_frontend::list::{self, Days, PAGE, Removal, Reselect, SERVER_SEARCH_DELAY, fetch};
 pub use catmail_frontend::list::{Check, Row, RowId};
 pub use catmail_frontend::mailbox::Source;
 use gpui_kit::component::list::{ListDelegate, ListEvent, ListItem, ListState};
@@ -67,20 +67,13 @@ pub struct MessageList {
     /// Bumped when the source changes, so rows fetched for the previous one are dropped.
     generation: u64,
     /// The message the user moved or deleted: once it is gone while still selected, the
-    /// row now at its index is selected, so the next message opens.
-    removing: Option<MessageId>,
-    /// Removals asked for so far: the latest is `removing`'s. An earlier one settling
-    /// says nothing about it (the user may archive, then delete, the same message).
-    removals: u64,
+    /// next row still there is selected, so the next message opens.
+    removal: Removal,
     /// Loads of the rows shown started so far (not of more pages).
     reads: u64,
     /// The message to select once the rows have it (see [`reveal`]), and the first read
     /// that must have it: one in flight may have started before it arrived.
     revealing: Option<(MessageId, u64)>,
-    /// The change behind removal number `.0` is made: the rows of the read numbered `.1`
-    /// or later show it, and if the message is among them it stays (see
-    /// [`removal_settled`]).
-    settled: Option<(u64, u64)>,
     /// The name of each user label shown, of every account, from `folders`: a row shows
     /// those of its message's labels (see `AccountFolders::user_labels`).
     labels: HashMap<FolderId, SharedString>,
@@ -111,11 +104,9 @@ impl MessageList {
             stale: false,
             has_more: false,
             generation: 0,
-            removing: None,
-            removals: 0,
+            removal: Removal::default(),
             reads: 0,
             revealing: None,
-            settled: None,
             labels: HashMap::new(),
             folders: HashMap::new(),
             hovered: None,
@@ -180,7 +171,7 @@ impl MessageList {
     /// Whether it waits for a message the user moved to leave, to select the next one.
     #[cfg(test)]
     pub fn waits_for_removal(&self) -> bool {
-        self.removing.is_some()
+        self.removal.is_waiting()
     }
 
     #[cfg(test)]
@@ -229,10 +220,7 @@ impl MessageList {
     /// Selects the next row once `id`, the selected message, goes away. Returns the
     /// removal's number, for [`removal_settled`].
     pub fn expect_removal(&mut self, id: MessageId) -> u64 {
-        self.removing = Some(id);
-        self.removals += 1;
-        self.settled = None;
-        self.removals
+        self.removal.expect(id)
     }
 }
 
@@ -249,9 +237,8 @@ pub fn show(
     delegate.days = Days::default();
     delegate.has_more = false;
     delegate.stale = false;
-    delegate.removing = None;
+    delegate.removal.clear();
     delegate.revealing = None;
-    delegate.settled = None;
     delegate.generation += 1;
     delegate.found_on_server = Rc::new([]);
     delegate._server = match &delegate.source {
@@ -420,16 +407,11 @@ pub fn removal_settled(
     cx: &mut Context<ListState<MessageList>>,
 ) {
     let delegate = list.delegate_mut();
-    if delegate.removals != removal || delegate.removing.is_none() {
-        return; // A later one, gone already, or the user moved on.
-    }
-    if !made {
-        delegate.removing = None;
-        return;
-    }
     // A read in flight may have started before the change: the next one shows it.
-    delegate.settled = Some((removal, delegate.reads + 1));
-    refresh(list, window, cx);
+    let next_read = delegate.reads + 1;
+    if delegate.removal.settled(removal, made, next_read) {
+        refresh(list, window, cx);
+    }
 }
 
 /// Re-reads the rows already shown (after the engine reported a change), keeping the
@@ -494,18 +476,8 @@ fn load(
             let mut changed = true;
             match result {
                 Ok((rows, more)) => {
-                    if !append
-                        && let Some((removal, from)) = delegate.settled
-                        && read >= from
-                    {
-                        delegate.settled = None;
-                        // `expect_removal` drops a settlement of an earlier removal.
-                        debug_assert_eq!(removal, delegate.removals);
-                        if let Some(id) = delegate.removing
-                            && rows.iter().any(|r| r.id() == RowId::Message(id))
-                        {
-                            delegate.removing = None;
-                        }
+                    if !append {
+                        delegate.removal.read(read, &rows);
                     }
                     let had_more = std::mem::replace(&mut delegate.has_more, more);
                     if append {
@@ -551,7 +523,7 @@ fn replace_rows(
 ) {
     let delegate = list.delegate_mut();
     let selected = delegate.selected.zip(delegate.selected_row().map(Row::id));
-    let next = reselect(selected, delegate.removing.take(), &delegate.rows, &rows);
+    let next = delegate.removal.reselect(selected, &delegate.rows, &rows);
     delegate.days = Days::new(&rows);
     delegate.rows = rows;
     // Those gone are no longer checked: moved, deleted, or expunged on the server.
@@ -561,10 +533,9 @@ fn replace_rows(
         let checked = delegate.checked.intersection(&listed).copied().collect();
         set_checked(list, checked, cx);
     }
-    if let Reselect::Keep { ix, removing } = next {
+    if let Reselect::Keep { ix, .. } = next {
         let ix = ix.and_then(|ix| path(&list.delegate().days, ix));
         list.set_selected_index(ix, window, cx);
-        list.delegate_mut().removing = removing;
         return;
     }
     let next = match next {

@@ -57,7 +57,9 @@ src/
   （`instance`）、日期格式（`format`）、HTML 策略（`html`）、设置文件（`settings`）、文件夹分区和侧栏图标的
   角色（`folders`）、侧栏的模型（`mailbox`：`Place`、`Source`、`AccountEntry`、连接说明、文件夹右键菜单的
   项和文案）、哪个引擎事件重读什么（`refresh`）和列表的行（`list`：来源怎么分页读、按天分组、重读后选中去哪、
-  按标记勾选、行上的文字）在 `catmail-frontend`，别的前端也能用。GUI 按原路径引用
+  按标记勾选、行上的文字；移走后等它离开的 `Removal`）、对邮件的命令（`commands`：`Applies`、命令的名字、
+  归档 / 移动作用于哪些邮件、"Move to"列出的文件夹、永久删除的确认文案、被拒改动的说明）和读信区的头部
+  （`reader`：`Header`、附件的名字、保存对话框的起始目录）在 `catmail-frontend`，别的前端也能用。GUI 按原路径引用
   （`crate::format`、`mailbox` 模块里的 `folders`、`refresh` 等），`assets.rs` 把 `FolderIcon` 对应到 Heroicons。
 
 ## 窗口外框（macOS）

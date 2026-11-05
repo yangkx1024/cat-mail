@@ -238,6 +238,98 @@ pub fn reselect(
     }
 }
 
+/// The wait for a message the user moved or deleted to leave the list, so the next one
+/// opens (see `docs/architecture/gui.md`, "读与改").
+///
+/// Whether it leaves is the store's to say, not the frontend's to predict (on Gmail, one
+/// moved to a label from All Mail stays): once the change is made, the rows are read
+/// again, and if that read (or a later one) still has the message, it stays selected and
+/// is no longer waited for. Reads in flight before may predate the change. Each removal
+/// has its number, and only the latest's settling counts: archiving and then deleting
+/// one message, the archive's read still finding it doesn't end the wait for the delete.
+/// The list numbers its reads of the rows shown (not of more pages) from 1.
+#[derive(Debug, Default)]
+pub struct Removal {
+    removing: Option<MessageId>,
+    /// Removals asked for so far: the latest is `removing`'s.
+    count: u64,
+    /// The change behind removal number `.0` is made: the rows of read number `.1` or
+    /// later show it.
+    settled: Option<(u64, u64)>,
+}
+
+impl Removal {
+    /// The rows go on to the next once `id`, the selected message, goes. Returns the
+    /// removal's number, for [`settled`](Self::settled).
+    pub fn expect(&mut self, id: MessageId) -> u64 {
+        self.removing = Some(id);
+        self.count += 1;
+        self.settled = None;
+        self.count
+    }
+
+    /// The change behind `removal` was made locally (`made`), or failed: a failure stays
+    /// at once. Returns whether to read the rows again, the read numbered `next_read`
+    /// being the first that shows the change. Nothing changes if a later removal has been
+    /// asked for since, or the wait is over.
+    pub fn settled(&mut self, removal: u64, made: bool, next_read: u64) -> bool {
+        if self.count != removal || self.removing.is_none() {
+            return false;
+        }
+        if !made {
+            self.removing = None;
+            return false;
+        }
+        self.settled = Some((removal, next_read));
+        true
+    }
+
+    /// The rows of read number `read` came: if they show the change and still have the
+    /// message, it stays.
+    pub fn read(&mut self, read: u64, rows: &[Row]) {
+        let Some((removal, from)) = self.settled else {
+            return;
+        };
+        if read < from {
+            return;
+        }
+        self.settled = None;
+        // `expect` drops a settlement of an earlier removal.
+        debug_assert_eq!(removal, self.count);
+        if let Some(id) = self.removing
+            && rows.iter().any(|r| r.id() == RowId::Message(id))
+        {
+            self.removing = None;
+        }
+    }
+
+    /// Where the selection goes as the rows are replaced ([`reselect`]), still waiting
+    /// while the message is listed.
+    pub fn reselect(
+        &mut self,
+        selected: Option<(usize, RowId)>,
+        before: &[Row],
+        rows: &[Row],
+    ) -> Reselect {
+        let next = reselect(selected, self.removing.take(), before, rows);
+        if let Reselect::Keep { removing, .. } = next {
+            self.removing = removing;
+        }
+        next
+    }
+
+    /// Nothing is waited for: another source is shown.
+    pub fn clear(&mut self) {
+        self.removing = None;
+        self.settled = None;
+    }
+
+    /// Whether a message is waited for to leave.
+    pub fn is_waiting(&self) -> bool {
+        self.removing.is_some()
+    }
+}
+
 /// Which of the messages listed to check, from the menu beside the list's checkbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Check {
@@ -467,6 +559,52 @@ mod tests {
                 "{selected:?} {removing:?} {before:?} {ids:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_removal_waits_until_a_read_after_the_change() {
+        let rows = |ids: &[i64]| -> Vec<Row> { ids.iter().map(|&id| message(id, None)).collect() };
+        let selected = Some((1, RowId::Message(MessageId(2))));
+        let mut removal = Removal::default();
+        let first = removal.expect(MessageId(2));
+        // A read in flight, started before the change was made: it says nothing.
+        assert!(removal.settled(first, true, 2));
+        removal.read(1, &rows(&[1, 2, 3]));
+        assert!(removal.is_waiting());
+        // Made, and the message still listed (Gmail, to a label from All Mail): it stays.
+        removal.read(2, &rows(&[1, 2, 3]));
+        assert!(!removal.is_waiting());
+        let rows_now = rows(&[1, 3]);
+        assert_eq!(
+            removal.reselect(selected, &rows(&[1, 2, 3]), &rows_now),
+            Reselect::Gone
+        );
+
+        // Archived, then deleted: the archive settling doesn't end the wait for the delete.
+        let archive = removal.expect(MessageId(2));
+        let delete = removal.expect(MessageId(2));
+        assert!(!removal.settled(archive, true, 3));
+        removal.read(3, &rows(&[1, 2, 3]));
+        assert!(removal.is_waiting());
+        assert_eq!(
+            removal.reselect(selected, &rows(&[1, 2, 3]), &rows(&[1, 2, 3])),
+            Reselect::Keep {
+                ix: Some(1),
+                removing: Some(MessageId(2))
+            }
+        );
+        assert!(removal.is_waiting(), "still listed: still waited for");
+        assert_eq!(
+            removal.reselect(selected, &rows(&[1, 2, 3]), &rows(&[1, 3])),
+            Reselect::Next(1)
+        );
+        // Settling once it has gone does nothing.
+        assert!(!removal.settled(delete, true, 4));
+
+        // A change that failed stays at once.
+        let failed = removal.expect(MessageId(2));
+        assert!(!removal.settled(failed, false, 5));
+        assert!(!removal.is_waiting());
     }
 
     #[test]

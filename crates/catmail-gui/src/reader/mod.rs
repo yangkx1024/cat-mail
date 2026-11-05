@@ -11,13 +11,13 @@ mod page;
 mod view;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Context as _;
 use catmail_core::html::{InlineImage, RemoteImage};
 use catmail_core::{Attachment, MailClient, MessageId, safe_filename};
+use catmail_frontend::reader;
 use catmail_render::{Engine, Resolver, Source};
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
@@ -378,7 +378,7 @@ impl Reader {
         cx: &mut Context<Self>,
     ) {
         let name = safe_filename(attachment.filename.as_deref(), "attachment");
-        let path = cx.prompt_for_new_path(&download_dir(), Some(&name));
+        let path = cx.prompt_for_new_path(&reader::download_dir(), Some(&name));
         let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             let saved = async {
@@ -452,14 +452,4 @@ impl Reader {
         })
         .detach();
     }
-}
-
-fn download_dir() -> PathBuf {
-    directories::UserDirs::new()
-        .and_then(|dirs| {
-            dirs.download_dir()
-                .map(|d| d.to_path_buf())
-                .or_else(|| Some(dirs.home_dir().to_path_buf()))
-        })
-        .unwrap_or_else(std::env::temp_dir)
 }

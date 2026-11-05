@@ -4,9 +4,8 @@ use std::sync::Arc;
 
 use catmail_core::html::remote_image_urls;
 use catmail_core::{Attachment, Message, MessageId};
+use catmail_frontend::reader::{self, Header};
 use gpui_kit::SharedString;
-
-use crate::format;
 
 use super::*;
 
@@ -44,48 +43,30 @@ pub(super) struct OpenMessage {
 impl OpenMessage {
     /// Parses the whole HTML; not for the UI thread.
     pub(super) fn new(message: Message, can_reply_all: bool) -> Self {
-        let summary = &message.summary;
-        let headers = [
-            ("From", format::addresses(&summary.from)),
-            ("To", format::addresses(&summary.to)),
-            ("Cc", format::addresses(&summary.cc)),
-            ("Reply-To", format::addresses(&message.reply_to)),
-            ("Date", format::date(summary.date)),
-        ]
-        .into_iter()
-        .filter(|(_, value)| !value.is_empty())
-        .map(|(name, value)| (name, value.into()))
-        .collect();
-        let from = summary.from.first();
-        let sender = format::sender(&summary.from);
-        let sender_email = from
-            .filter(|a| a.name.is_some())
-            .map(|a| SharedString::from(a.email.clone()));
-        let recipients = [("To", &summary.to), ("Cc", &summary.cc)]
-            .into_iter()
-            .filter(|(_, list)| !list.is_empty())
-            .map(|(name, list)| format!("{name} {}", format::names(list)))
-            .collect::<Vec<_>>()
-            .join(" · ");
-        let (text, html, attachments) = match message.body {
+        let header = Header::of(&message);
+        let attachments = reader::attachments(&message);
+        let (text, html) = match message.body {
             Some(body) => (
                 body.text
                     .filter(|_| body.html.is_none())
                     .map(SharedString::from),
                 body.html.map(Arc::from),
-                body.attachments.into_iter().filter(|a| !a.inline).collect(),
             ),
-            None => (None, None, Vec::new()),
+            None => (None, None),
         };
         Self {
-            id: summary.id,
-            subject: format::subject(summary.subject.as_deref()).into(),
-            sender_key: from.map(|a| a.email.clone()).unwrap_or_default().into(),
-            sender: sender.into(),
-            sender_email,
-            recipients: recipients.into(),
-            date: format::date(summary.date).into(),
-            headers,
+            id: message.summary.id,
+            subject: header.subject.into(),
+            sender_key: header.sender_key.into(),
+            sender: header.sender.into(),
+            sender_email: header.sender_email.map(SharedString::from),
+            recipients: header.recipients.into(),
+            date: header.date.into(),
+            headers: header
+                .details
+                .into_iter()
+                .map(|(name, value)| (name, value.into()))
+                .collect(),
             text,
             remote_images: html.as_deref().map(remote_image_urls).unwrap_or_default(),
             loading_remote: false,

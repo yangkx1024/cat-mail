@@ -70,15 +70,21 @@ pub fn embed_inline_images(html: &str, inline: HashMap<String, InlineImage>) -> 
     let embedding = sanitizer(
         Some(Box::new(move |src| {
             let image = content_id_from_url(src).and_then(|id| inline.get(&id))?;
-            Some(format!(
-                "data:{};base64,{}",
-                media_type(&image.mime_type),
-                STANDARD.encode(&image.bytes)
-            ))
+            Some(data_url(&image.mime_type, &image.bytes))
         })),
         None,
     );
     clean(&embedding, html)
+}
+
+/// A `data:` URL of an image, for a page that may load nothing else: its type comes from
+/// the message (or a server), so an unusual one is replaced.
+pub fn data_url(mime_type: &str, bytes: &[u8]) -> String {
+    format!(
+        "data:{};base64,{}",
+        media_type(mime_type),
+        STANDARD.encode(bytes)
+    )
 }
 
 /// The MIME type as it may appear in a `data:` URL; it comes from the message, so anything

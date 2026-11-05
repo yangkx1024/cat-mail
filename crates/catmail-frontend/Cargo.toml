@@ -1,6 +1,6 @@
 [package]
 name = "catmail-frontend"
-description = "What catmail's desktop frontends share: settings, single instance, display formats, the reader's HTML policy"
+description = "What catmail's desktop frontends share: settings, single instance, the sidebar's and list's models, the commands on messages, display formats, the reader's header and HTML policy"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
