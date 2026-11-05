@@ -71,7 +71,8 @@ macOS 上窗口没有系统标题栏：系统标题栏只写着窗口名，占�
   `MainWindow` 渲染时按窗口的 rem 重新摆（`layout::place_window_buttons`，位置没变不调 AppKit）。
 - **拖动由应用自己做**（`app_owns_titlebar_drag`，否则 AppKit 也处理标题栏的双击，还会为分辨双击而推迟每次单击）：
   `layout::movable` 在内容后面横放一条与顶部一行同高的拖动区，按下再移动就 `start_window_move`，双击按系统
-  "双击标题栏"的设置缩放或最小化（`titlebar_double_click`）。按在按钮、输入框、复选框上不算：它们在按下时
+  "双击标题栏"的设置缩放或最小化（`titlebar_double_click`）。它只收得到发生在它上面的移动和松开，所以
+  拖动前看移动事件里左键是否还按着：在外面松开的那次按下，之后不会让不按键经过的指针拖动窗口。按在按钮、输入框、复选框上不算：它们在按下时
   `prevent_default`，而拖动区在它们后面，最后才收到。只放两处：`Mailbox` 的根里（三栏和登录页），`MainWindow`
   里引擎没打开时的空白页和失败页。必须放在可获得焦点的元素（`Mailbox` 的根）**里面**：它为拿焦点也
   `prevent_default`，放在外面的拖动区就永远收不到。

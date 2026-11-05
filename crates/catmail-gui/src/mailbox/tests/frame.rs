@@ -60,3 +60,22 @@ fn dragging_from_above_the_sidebar_moves_the_window(cx: &mut TestAppContext) {
     let compose = center_of(cx, window, "new-message");
     drag_from(cx, window, point(compose.x, px(10.)));
 }
+
+/// A press that leaves the row at once and is let go elsewhere is over: the pointer
+/// coming back over the row, with no button down, doesn't move the window.
+#[gpui_kit::test]
+fn a_press_let_go_off_the_row_is_over(cx: &mut TestAppContext) {
+    let mail = TestMail::start();
+    let (window, mailbox) = open(cx, &mail);
+    wait_for_inbox(cx, &mailbox);
+    click_message(cx, window, &mailbox, "你好，世界");
+
+    // From the toolbar's empty end, down the window: the first move is already below
+    // the row, and the button is let go there.
+    let back = center_of(cx, window, "back");
+    cx.update_window(window, |_, window, cx| {
+        window.drag(point(px(1270.), back.y), point(px(1270.), px(790.)), cx);
+        window.hover("search", cx);
+    })
+    .unwrap();
+}

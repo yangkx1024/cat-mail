@@ -189,10 +189,14 @@ impl RenderOnce for MoveRow {
                 let pressed = pressed.clone();
                 move |_, _, cx| set(&pressed, false, cx)
             })
-            .on_mouse_move(move |_, window, cx| {
+            // A press let go off the row is over by the next move here, without the button:
+            // the row hears only what happens over it.
+            .on_mouse_move(move |event, window, cx| {
                 if *pressed.read(cx) {
                     set(&pressed, false, cx);
-                    window.start_window_move();
+                    if event.pressed_button == Some(MouseButton::Left) {
+                        window.start_window_move();
+                    }
                 }
             })
     }

@@ -21,6 +21,9 @@
   （`toolbar`、中栏顶部、侧栏、登录页、空白页），简化审查指出新页面容易漏。它要放进 `Mailbox` 的根里：
   根 `track_focus`，按下时为拿焦点也 `prevent_default`，放在外面就收不到（测试先发现）。按下状态不
   `notify`：没有东西按它渲染，`Entity::write` 会让整个窗口重绘。
+- 拖动前看移动事件里左键是否还按着（`pressed_button`），不只看按下时记的一笔：这一行只收得到发生在它
+  上面的移动和松开，按下后第一次移动就到了外面、在外面松开时，那一笔没人清，之后指针不按键经过这一行
+  也会拖动窗口（Codex 审查指出）。
 - 顶部一行就是工具栏的高度（3 rem）：中栏的同步、搜索一行改成同样高，与右栏工具栏、红绿灯对齐（原来
   是 `p_3` 加按钮高度，比工具栏低 4px）。这一行随文字大小变，红绿灯在 `MainWindow` 渲染时按 rem 重摆，
   打开窗口时按当前设置的文字大小放，不先出现在默认位置。
@@ -36,5 +39,6 @@
 - 文档：`docs/architecture/gui.md` 新增"窗口外框（macOS）"。
 - 验证：新增 `mailbox/tests/frame.rs`（只在 macOS 编译）：从工具栏按钮、搜索框拖动不移动窗口（去掉
   `default_prevented` 判断时失败）；从工具栏空白处、侧栏顶部拖动会移动窗口（测试平台的
-  `start_window_move` 是 `unimplemented!()`，以它的 panic 判断）。macOS 上 clippy、fmt、GUI 测试通过
+  `start_window_move` 是 `unimplemented!()`，以它的 panic 判断）；按下后立刻拖出这一行、在外面松开，
+  再把指针移回来不拖动窗口（`a_press_let_go_off_the_row_is_over`，没有 `pressed_button` 的判断时失败）。macOS 上 clippy、fmt、GUI 测试通过
   （`instance` 的 6 个测试因沙箱不能建 unix socket 失败，改动前同样失败）。真机上的布局还要人看。
