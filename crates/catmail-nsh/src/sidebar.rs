@@ -11,7 +11,7 @@ use std::rc::Rc;
 use catmail_core::{AccountId, FolderId, FolderRole};
 use catmail_frontend::folders::{self, FolderIcon, FolderNode, RoleInfo};
 use catmail_frontend::mailbox::{
-    self, ALL_MAIL_HIDDEN, AccountEntry, FolderMenuEntry, Place, SYNC_ON_OPEN_AFTER,
+    self, ALL_MAIL_HIDDEN, AccountEntry, Destination, FolderMenuEntry, Place, SYNC_ON_OPEN_AFTER,
 };
 use catmail_frontend::refresh::{Coalesce, DraftCounts};
 use nsh_base::{alert_dialog, theme};
@@ -32,6 +32,15 @@ pub struct Accounts(pub Option<Vec<AccountEntry>>);
 /// Where the sidebar's selection is.
 #[derive(Clone, Default)]
 pub struct SelectedPlace(pub Option<Place>);
+
+/// What waits for the first read of the folders, asked of the mailbox from outside it
+/// (`shell::Ask`) before then: where to go instead of where it starts, and a message to
+/// write.
+#[derive(Clone, Copy, Default)]
+struct Waiting {
+    to: Option<Destination>,
+    compose: bool,
+}
 
 /// Whether each account the user folded or unfolded is open; see [`account_open`] for
 /// the others.
@@ -110,7 +119,17 @@ fn set_accounts(accounts: Vec<AccountEntry>) {
     let place = global::<SelectedPlace>().with_untracked(|p| p.0);
     let still_there = place.is_some_and(|place| place.is_in(&accounts));
     let folders_before = shown_folders();
-    let start = (!still_there).then(|| Place::start(&accounts));
+    // The first read: where it was asked to go, if that is there.
+    let waiting = if shown.with_untracked(|a| a.0.is_none()) {
+        global::<Waiting>().get_untracked()
+    } else {
+        Waiting::default()
+    };
+    let going = waiting.to.and_then(|to| to.find(&accounts));
+    let start = match going {
+        Some((place, _)) => Some(Some(place)),
+        None => (!still_there).then(|| Place::start(&accounts)),
+    };
     shown.set(Accounts(Some(accounts)));
     crate::list::set_labels();
     match start {
@@ -120,6 +139,53 @@ fn set_accounts(accounts: Vec<AccountEntry>) {
         None if shown_folders() != folders_before => crate::list::refresh(),
         None => {}
     }
+    if let Some((_, Some(message))) = going {
+        crate::list::reveal(message);
+    }
+    if waiting.compose {
+        composer::new_message();
+    }
+}
+
+/// Goes to `to` if it is there, once the folders are read: where the main window was
+/// when it closed, or what a notification was about, which opens its message once the
+/// list has it.
+pub fn go_to(to: Destination) {
+    if global::<Accounts>().with_untracked(|a| a.0.is_none()) {
+        global::<Waiting>().update(|w| w.to = Some(to));
+        return;
+    }
+    let Some((place, message)) = crate::commands::with_accounts(|a| to.find(a)) else {
+        return;
+    };
+    select(Some(place));
+    if let Some(message) = message {
+        crate::list::reveal(message);
+    }
+}
+
+/// A new message, from the account shown, once the folders are read.
+pub fn compose() {
+    if global::<Accounts>().with_untracked(|a| a.0.is_none()) {
+        global::<Waiting>().update(|w| w.compose = true);
+    } else {
+        composer::new_message();
+    }
+}
+
+/// Syncs every account now. The engine's background sync does it: progress and failures
+/// show as the accounts' status.
+pub fn sync() {
+    in_mailbox(async {
+        if let Err(e) = client().sync_now().await {
+            report("Couldn't sync", e);
+        }
+    });
+}
+
+/// Whether an account is syncing every folder, as the engine says.
+pub fn syncing() -> bool {
+    global::<Accounts>().with(|a| a.0.iter().flatten().any(|entry| entry.status.syncing))
 }
 
 /// Every pause in typing saves a draft: only the account's draft count can have changed,

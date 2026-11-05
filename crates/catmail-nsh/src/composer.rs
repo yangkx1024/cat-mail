@@ -555,7 +555,10 @@ fn Composer() -> impl IntoElement {
     // The window is named after the subject.
     let title = computed(move || window_title(&global::<Typed>().with(|t| t.subject.clone())));
     effect(move || set_title(title.get()));
+    // As the GUI binds them; Ctrl+W is the window's, which asks the view to close.
     on_key("mod+enter", |_| send());
+    on_key("escape", |_| close_requested());
+    on_key("mod+shift+a", |_| attach());
 
     view()
         .flex_1()

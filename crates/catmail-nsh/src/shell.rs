@@ -1,12 +1,13 @@
-//! The GTK application around the nsh views: its windows, what later launches ask for,
-//! and the engine's opening and shutting down. nsh's `run_app` runs one view in one window
-//! and ends with it; the app has its own `gtk::Application` instead, so that windows can
-//! come and go while the engine stays (composer windows, running without a window).
+//! The GTK application around the nsh views: its windows, what later launches, the tray
+//! and notifications ask for, running on with no window, quitting, and the engine's
+//! opening and shutting down. nsh's `run_app` runs one view in one window and ends with
+//! it; the app has its own `gtk::Application` instead, so that windows can come and go
+//! while the engine stays (composer windows, running without a window).
 //!
 //! All of this runs on GTK's thread. Each window's view runs on a thread of its own (nsh's
 //! engine thread), and reaches what is here with [`on_gtk`].
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, PoisonError};
@@ -14,8 +15,11 @@ use std::sync::{Arc, LazyLock, Mutex, OnceLock, PoisonError};
 use catmail_core::{DraftId, MailClientBuilder};
 use catmail_frontend::composer::{ComposeFrom, OpenComposers, Opening, window_title};
 use catmail_frontend::instance::{Request, Requests};
+use catmail_frontend::mailbox::{Destination, Place};
+use catmail_frontend::resident::{AfterLastWindow, QuitReason, after_last_window};
 use catmail_frontend::settings::{self, Settings, SettingsFile};
 use catmail_frontend::theme::{DEFAULT_DARK, DEFAULT_LIGHT, Themes};
+use catmail_frontend::tray::Command;
 use futures_channel::{mpsc, oneshot};
 use futures_util::StreamExt as _;
 use nsh_platform_linux::gtk4::{self as gtk, glib, prelude::*};
@@ -26,7 +30,8 @@ use crate::engine;
 /// The application id: Wayland's app id, X11's WM_CLASS, the `.desktop` file's name.
 pub const APP_ID: &str = "net.yangkx.catmail.nsh";
 
-const TITLE: &str = "catmail";
+/// The app's name: the main window's title, the tray item's.
+pub const APP_NAME: &str = "catmail";
 
 // --- Settings and themes ------------------------------------------------------------
 //
@@ -130,6 +135,104 @@ fn restyle_views() {
     });
 }
 
+// --- The main window's mailbox, asked from outside it --------------------------------
+
+/// What the tray or a notification asks of the main window's mailbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ask {
+    /// Go there, once the folders are read.
+    GoTo(Destination),
+    /// A new message, from the account shown.
+    Compose,
+}
+
+struct Asks {
+    /// The main window's mailbox, while it follows them.
+    mailbox: Option<mpsc::UnboundedSender<Ask>>,
+    /// Asked while there was none: the next takes them.
+    waiting: Vec<Ask>,
+    /// Where the last one was, for the next to open there.
+    left_at: Option<Place>,
+}
+
+static ASKS: Mutex<Asks> = Mutex::new(Asks {
+    mailbox: None,
+    waiting: Vec::new(),
+    left_at: None,
+});
+
+fn ask(ask: Ask) {
+    let mut asks = lock(&ASKS);
+    let sent = asks
+        .mailbox
+        .as_ref()
+        .is_some_and(|mailbox| mailbox.unbounded_send(ask).is_ok());
+    if !sent {
+        asks.mailbox = None;
+        asks.waiting.push(ask);
+    }
+}
+
+/// For the main window's mailbox, as it opens: what was asked of it while there was none,
+/// starting with where the last one was (unless a notification asked for elsewhere), and
+/// what is asked from now on.
+pub fn follow_asks() -> (Vec<Ask>, mpsc::UnboundedReceiver<Ask>) {
+    let (mailbox, asks_) = mpsc::unbounded();
+    let mut asks = lock(&ASKS);
+    asks.mailbox = Some(mailbox);
+    let mut waiting = std::mem::take(&mut asks.waiting);
+    if !waiting.iter().any(|ask| matches!(ask, Ask::GoTo(_)))
+        && let Some(place) = asks.left_at
+    {
+        waiting.insert(0, Ask::GoTo(Destination::Place(place)));
+    }
+    (waiting, asks_)
+}
+
+/// The main window's mailbox shows `place`: the next opens there.
+pub fn left_at(place: Option<Place>) {
+    lock(&ASKS).left_at = place;
+}
+
+/// Shows the main window (opened if there is none), taken to `to`. `activation_token` is
+/// what the tray clicked gave, if anything, to take the focus on Wayland.
+pub fn show_at(to: Option<Destination>, activation_token: Option<&str>) {
+    if let Some(to) = to {
+        ask(Ask::GoTo(to));
+    }
+    if let Some(app) = application() {
+        show(&app, activation_token);
+    }
+}
+
+/// Does what was chosen in the tray.
+pub fn chose(command: Command, activation_token: Option<String>) {
+    let token = activation_token.as_deref();
+    match command {
+        Command::Open => show_at(None, token),
+        Command::Compose => {
+            ask(Ask::Compose);
+            show_at(None, token);
+        }
+        // The engine's background sync does it, window or not: progress and failures show
+        // as the accounts' status.
+        Command::Sync => {
+            if let Some(client) = engine::open() {
+                glib::spawn_future_local(async move {
+                    if let Err(e) = client.sync_now().await {
+                        tracing::warn!(error = %e, "couldn't sync");
+                    }
+                });
+            }
+        }
+        Command::Quit => quit(QuitReason::Tray),
+    }
+}
+
+pub fn application() -> Option<gtk::Application> {
+    gtk::gio::Application::default().and_downcast()
+}
+
 /// A composer's window, and how to ask its view to close it.
 type ComposerWindow = (gtk::ApplicationWindow, mpsc::UnboundedSender<()>);
 
@@ -137,6 +240,11 @@ thread_local! {
     /// The main window, while it is open.
     static MAIN: RefCell<glib::WeakRef<gtk::ApplicationWindow>> = RefCell::default();
     static COMPOSERS: RefCell<OpenComposers<ComposerWindow>> = RefCell::default();
+    /// Held while the app runs with no window: GTK's app ends with its last window
+    /// otherwise.
+    static RESIDENT: RefCell<Option<gtk::gio::ApplicationHoldGuard>> = RefCell::default();
+    /// Quit was asked for, and why: the composers are closing, or the app is quitting.
+    static QUITTING: Cell<Option<QuitReason>> = const { Cell::new(None) };
 }
 
 /// Runs `f` on GTK's thread, from a view's: at once, whether the answer is awaited or
@@ -174,7 +282,20 @@ pub fn run(
             return;
         };
         // On GTK's loop: the client does the work on the engine's own runtime.
-        glib::spawn_future_local(async move { engine::opened_with(builder.open_async().await) });
+        let weak = app.downgrade();
+        glib::spawn_future_local(async move {
+            engine::opened_with(builder.open_async().await);
+            let Some(app) = weak.upgrade() else {
+                return;
+            };
+            if engine::open().is_some() {
+                crate::new_mail::start(&app);
+                crate::tray::start();
+            } else if app.windows().is_empty() {
+                // The window was closed while it opened: there is nothing to run on.
+                exit(QuitReason::EngineFailed);
+            }
+        });
         if let Some(requests) = requests {
             glib::spawn_future_local(answer(requests, app.downgrade()));
         }
@@ -182,8 +303,11 @@ pub fn run(
         quit_on_signals(app);
     });
     app.connect_activate(|app| show(app, None));
+    app.connect_window_removed(|app, _| window_removed(app));
     // GTK must not parse the app's own arguments.
     let code = app.run_with_args::<&str>(&[]);
+    let reason = QUITTING.get().unwrap_or(QuitReason::Platform);
+    tracing::info!(%reason, "quitting");
     if let Some(client) = engine::take() {
         client.shut_down();
         // The loop is over: nothing else runs on this thread meanwhile.
@@ -221,16 +345,24 @@ fn show(app: &gtk::Application, activation_token: Option<&str>) {
         window.set_startup_id(token);
     }
     window.present();
+    // The window holds the app now.
+    RESIDENT.take();
 }
 
 fn main_window(app: &gtk::Application) -> gtk::ApplicationWindow {
     let window = gtk::ApplicationWindow::builder()
         .application(app)
-        .title(TITLE)
+        .title(APP_NAME)
         .default_width(1280)
         .default_height(800)
         .build();
-    show_view(&window, TITLE, Root::of::<crate::app::App>());
+    show_view(&window, APP_NAME, Root::of::<crate::app::App>());
+    tracing::info!("main window opened");
+    // Its mailbox goes with it: what is asked from now on waits for the next.
+    window.connect_destroy(|_| {
+        tracing::info!("main window closed");
+        lock(&ASKS).mailbox = None;
+    });
     window
 }
 
@@ -366,41 +498,93 @@ pub fn appearance(settings: &Settings) -> Appearance {
     }
 }
 
-/// Ctrl+Q closes every window, which ends the app (the engine shuts down after the loop).
-/// The composers close first, each saving what it holds; one that can't stays, and the
-/// app with it.
-fn install_quit(app: &gtk::Application) {
-    let quit = gtk::gio::SimpleAction::new("quit", None);
-    let weak = app.downgrade();
-    quit.connect_activate(move |_, _| {
-        let weak = weak.clone();
-        let closed = close_all();
-        glib::spawn_future_local(async move {
-            if closed.await != Ok(true) {
-                return;
-            }
-            if let Some(app) = weak.upgrade() {
-                for window in app.windows() {
-                    window.close();
+// --- Running without a window, and quitting -----------------------------------------
+
+/// The last window is gone: the app quits, or with "Keep running after the window is
+/// closed" on, runs on until the tray, a notification or another launch shows the window
+/// again. ⚠️ GTK stays connected to the display meanwhile (the GUI lets go of it).
+fn window_removed(app: &gtk::Application) {
+    if !app.windows().is_empty() {
+        return;
+    }
+    let quitting = QUITTING.get();
+    match after_last_window(
+        settings().keep_running,
+        engine::usable(),
+        quitting.is_some(),
+    ) {
+        // The app ends with its last window.
+        AfterLastWindow::Quit => {
+            QUITTING.set(Some(quitting.unwrap_or(QuitReason::LastWindowClosed)))
+        }
+        AfterLastWindow::KeepRunning => {
+            RESIDENT.set(Some(app.hold()));
+            tracing::info!("no window open; running on");
+            // Once the views' threads have let go of what they held.
+            glib::timeout_add_seconds_local_once(2, || {
+                if RESIDENT.with_borrow(Option::is_some) {
+                    std::thread::spawn(catmail_frontend::memory::release_freed);
                 }
-            }
-        });
+            });
+        }
+    }
+}
+
+/// Quits once every composer has saved what it holds and closed. One that can't close
+/// (an address to correct, a save that failed) stays open, and so does the app.
+pub fn quit(reason: QuitReason) {
+    if QUITTING.get().is_some() {
+        return;
+    }
+    QUITTING.set(Some(reason));
+    let closed = close_all();
+    glib::spawn_future_local(async move {
+        if closed.await == Ok(true) {
+            exit(reason);
+        } else {
+            tracing::info!(%reason, "quit called off: a composer stayed open");
+            QUITTING.set(None);
+        }
     });
-    app.add_action(&quit);
+}
+
+/// Quits now, for `reason`: every window closes, and the app ends with the last (at once
+/// if it has none). The engine shuts down after the loop.
+fn exit(reason: QuitReason) {
+    QUITTING.set(Some(reason));
+    RESIDENT.take();
+    if let Some(app) = application() {
+        for window in app.windows() {
+            window.close();
+        }
+    }
+}
+
+/// Ctrl+Q quits as the tray's Quit does.
+fn install_quit(app: &gtk::Application) {
+    let quit_ = gtk::gio::SimpleAction::new("quit", None);
+    quit_.connect_activate(|_, _| quit(QuitReason::Shortcut));
+    app.add_action(&quit_);
     app.set_accels_for_action("app.quit", &["<Control>q"]);
 }
 
-/// SIGINT and SIGTERM quit as Ctrl+Q does, so the engine shuts down rather than being cut
-/// off (as the GUI does, `ctrlc` there).
+/// SIGHUP, SIGINT and SIGTERM quit as Ctrl+Q does, so that the composers save first (a
+/// session ending sends SIGTERM) and the engine shuts down rather than being cut off (as
+/// the GUI does, `ctrlc` there). A second signal doesn't wait for the composers.
 fn quit_on_signals(app: &gtk::Application) {
+    const SIGHUP: i32 = 1;
     const SIGINT: i32 = 2;
     const SIGTERM: i32 = 15;
-    for signal in [SIGINT, SIGTERM] {
+    for signal in [SIGHUP, SIGINT, SIGTERM] {
         let weak = app.downgrade();
         glib_unix::unix_signal_add_local(signal, move || {
-            tracing::info!(signal, "quitting on a signal");
-            if let Some(app) = weak.upgrade() {
-                app.activate_action("quit", None);
+            if QUITTING.get().is_none() {
+                tracing::info!(signal, "quitting on a signal");
+                quit(QuitReason::Signal);
+            } else if let Some(app) = weak.upgrade() {
+                tracing::info!(signal, "quitting at once, on another signal");
+                QUITTING.set(Some(QuitReason::Signal));
+                app.quit();
             }
             glib::ControlFlow::Continue
         });

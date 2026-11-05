@@ -25,6 +25,8 @@ mod list;
 #[cfg(target_os = "linux")]
 mod login;
 #[cfg(target_os = "linux")]
+mod new_mail;
+#[cfg(target_os = "linux")]
 mod outbox;
 mod page;
 #[cfg(target_os = "linux")]
@@ -39,6 +41,8 @@ mod sidebar;
 mod theme;
 #[cfg(target_os = "linux")]
 mod toast;
+#[cfg(target_os = "linux")]
+mod tray;
 
 #[cfg(target_os = "linux")]
 fn main() -> anyhow::Result<std::process::ExitCode> {

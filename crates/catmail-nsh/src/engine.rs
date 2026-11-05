@@ -67,6 +67,19 @@ pub fn client() -> MailClient {
     }
 }
 
+/// The engine if it is open: not while it opens, nor once the app is quitting.
+pub fn open() -> Option<MailClient> {
+    match &*state() {
+        State::Open(client) => Some(client.clone()),
+        _ => None,
+    }
+}
+
+/// Whether there is an engine to run without a window: open, or still opening.
+pub fn usable() -> bool {
+    matches!(&*state(), State::Opening(_) | State::Open(_))
+}
+
 /// The engine, to shut it down as the app quits.
 pub fn take() -> Option<MailClient> {
     match std::mem::replace(&mut *state(), State::Closed) {

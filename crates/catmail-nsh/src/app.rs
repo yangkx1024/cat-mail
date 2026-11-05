@@ -10,15 +10,17 @@ use catmail_core::{Event, MailClient, RecvError};
 use catmail_frontend::list::RowId;
 use catmail_frontend::mailbox::{Place, REFRESH_INTERVAL};
 use catmail_frontend::refresh::{Refresh, Throttle};
+use futures_util::StreamExt as _;
 use nsh_base::theme;
 use nsh_core::element::Owner;
 use nsh_core::prelude::*;
 
 use crate::list::{self, Rows, Selected};
 use crate::login::{self, SignIn};
+use crate::shell::Ask;
 use crate::sidebar::{self, Accounts, SelectedPlace};
 use crate::toast::{Level, notify};
-use crate::{commands, composer, draft, form, outbox, reader, settings, toast};
+use crate::{commands, composer, draft, form, outbox, reader, settings, shell, toast};
 
 pub fn client() -> MailClient {
     crate::engine::client()
@@ -135,6 +137,16 @@ fn mailbox() -> impl IntoElement {
         });
     });
     effect(reader::follow_selection);
+    // The next main window opens where this one was.
+    effect(|| shell::left_at(global::<SelectedPlace>().with(|s| s.0)));
+    // The tray's and the notifications': before this mailbox opened, and from now on.
+    let (asked, mut asks) = shell::follow_asks();
+    asked.into_iter().for_each(on_ask);
+    spawn(async move {
+        while let Some(ask) = asks.next().await {
+            on_ask(ask);
+        }
+    });
     // No account: the sign-in page, which can't be left (as the GUI's `set_accounts`).
     effect(|| {
         let none = global::<Accounts>().with(|a| a.0.as_ref().is_some_and(Vec::is_empty));
@@ -144,6 +156,9 @@ fn mailbox() -> impl IntoElement {
     });
     composer::bind_keys();
     settings::bind_keys(true);
+    on_key("mod+shift+n", |_| sidebar::sync());
+    on_key("F5", |_| sidebar::sync());
+    on_key("mod+f", |_| list::focus_search());
     // Open at once, for looking at it without a mouse (screenshots of the spike).
     if std::env::var_os("CATMAIL_NSH_SETTINGS").is_some() {
         settings::open();
@@ -159,6 +174,13 @@ fn mailbox() -> impl IntoElement {
         .child(settings::dialog())
         .child(login::identity_dialog())
         .child(form::name_dialog())
+}
+
+fn on_ask(ask: Ask) {
+    match ask {
+        Ask::GoTo(to) => sidebar::go_to(to),
+        Ask::Compose => sidebar::compose(),
+    }
 }
 
 fn panes() -> impl IntoElement {

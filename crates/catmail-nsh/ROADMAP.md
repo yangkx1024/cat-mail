@@ -48,7 +48,7 @@
 - [x] 账户可以折叠：只有一个账户时默认展开，多个时默认折叠，选中某处时展开它的账户
 - [ ] 子文件夹折叠（gpui 版每个有子文件夹的行可以收起）；折叠的动画
 - [x] 底部的 Settings 按钮（随 P7）
-- [ ] Sync 按钮
+- [x] Sync 按钮（随 P9）：在搜索框左边，同步时转圈（nsh 的循环动画）
 
 ## P3 邮件列表（gui.md「邮件列表」）
 
@@ -139,7 +139,7 @@ Accounts 的确认文案在 `accounts`，与 gpui 版共用；nsh 版把 gpui-ki
       `set_theme_overrides` 给每个视图；旗标、头像、徽章、发件箱的警告不再写死颜色。导入各种终端配色格式；主题目录
       与 gpui 版是同一个
 - [x] 跟随系统外观（nsh 自带，经 XDG portal）
-- [ ] General（关窗后常驻、新邮件通知）随 P9
+- [x] General（关窗后常驻、新邮件通知），随 P9
 
 ## P8 登录页（gui.md「登录页」）
 
@@ -151,11 +151,24 @@ Accounts 的确认文案在 `accounts`，与 gpui 版共用；nsh 版把 gpui-ki
 
 ## P9 常驻与系统集成（docs/architecture/background.md）
 
-- [ ] 托盘：ksni，显示未读数、Sync now；把 `tray/linux.rs` 里的 gpui-kit 类型剥掉后复用
-- [ ] 关窗后常驻、重开窗口；Ctrl+Q 退出；`shut_down`
-- [ ] 新邮件通知（`new_mail.rs`）；点击打开对应账户的 Inbox
-- [ ] 常驻时回收内存（`malloc_trim`），并量一下 WebKit 子进程常驻时的占用
-- [ ] 快捷键全集（对齐 `actions.rs`，用 nsh `keymap`）
+托盘的菜单、提示文字、带角标的图标 SVG 和 Linux 的 StatusNotifierItem（`tray`）、新邮件通知的攒批、措辞和 tag
+（`new_mail`）、点击后的去处（`mailbox::Destination`）、关窗后的去留（`resident`）、`malloc_trim`（`memory`）、
+列表等待某封邮件出现（`list::Reveal`）都在 `catmail-frontend`，与 gpui 版共用。nsh 版只做计数、绘制和收发
+（`tray.rs`、`new_mail.rs`），常驻与退出在 `shell.rs`。
+
+- [x] 托盘：ksni（frontend 的 `tray::linux`），显示未读数，菜单是 Open catmail、New message、Sync now、Quit。
+      图标用 resvg 在另一个线程上画（nsh-core 已经带了 resvg，这里另外打开 `text`，用来画角标数字）。亮暗跟随
+      portal 的 `color-scheme`，即桌面的外观而不是应用的；常驻时也跟随（gpui 版要等下次开窗口）
+- [x] 关窗后常驻：最后一个窗口关掉时 `app.hold()`，重开窗口时放掉。重开时回到上次的位置（`shell::left_at`）。
+      Quit（Ctrl+Q、托盘、SIGHUP / SIGINT / SIGTERM）先关写信窗口，第二个信号直接退出；日志记
+      `quitting reason=…`。⚠️ GTK 常驻时仍连着显示服务器（gpui 版会断开）
+- [x] 新邮件通知：⚠️ nsh 没有通知，改用 GLib 的 `GNotification`。点击走应用的 `open-mail` action，打开对应账户的
+      Inbox，列表读到那封后选中它（`Reveal`）。GNOME Shell 上点击无效：GLib 在那里改用 GNOME 自己的接口，它经
+      D-Bus 名字唤起应用，而 nsh 版不占这个名字（`NON_UNIQUE`，单实例靠 socket）
+- [x] 系统唤醒：nsh 不听 logind，靠引擎自己发现睡眠（`sleep.rs`，最多晚 30 秒）
+- [ ] 常驻时回收内存：关掉最后一个窗口 2 秒后 `malloc_trim` 已接上；还没量 WebKit 子进程常驻时的占用
+- [x] 快捷键对齐 `actions.rs`。这次补上的有：Sync（Ctrl+Shift+N、F5）、Ctrl+F 聚焦搜索框、写信窗口的 Escape 关闭
+      和 Ctrl+Shift+A 加附件
 
 ## P10 平台与工程
 

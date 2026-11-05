@@ -93,13 +93,15 @@ pub fn close() {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Section {
+    General,
     Appearance,
     Accounts,
     Reading,
 }
 
 impl Section {
-    const ALL: [(Section, &'static str, Icon); 3] = [
+    const ALL: [(Section, &'static str, Icon); 4] = [
+        (Section::General, "General", Icon::Cog6Tooth),
         (Section::Appearance, "Appearance", Icon::Swatch),
         (Section::Accounts, "Accounts", Icon::UserCircle),
         (Section::Reading, "Reading", Icon::EnvelopeOpen),
@@ -129,12 +131,13 @@ pub fn dialog() -> impl IntoElement {
 }
 
 fn settings_dialog() -> impl IntoElement {
-    // `CATMAIL_NSH_SETTINGS=accounts` (or `reading`) shows that section first, for looking
-    // at it without a mouse (screenshots of the spike).
+    // `CATMAIL_NSH_SETTINGS=appearance` (or `accounts`, `reading`) shows that section
+    // first, for looking at it without a mouse (screenshots of the spike).
     let first = match std::env::var("CATMAIL_NSH_SETTINGS").as_deref() {
+        Ok("appearance") => Section::Appearance,
         Ok("accounts") => Section::Accounts,
         Ok("reading") => Section::Reading,
-        _ => Section::Appearance,
+        _ => Section::General,
     };
     let section = signal(first);
     let nav = view()
@@ -172,6 +175,7 @@ fn settings_dialog() -> impl IntoElement {
                 .into_element()
         }));
     let content = dynamic(move || match section.get() {
+        Section::General => general().into_element(),
         Section::Appearance => appearance().into_element(),
         Section::Accounts => accounts_section().into_element(),
         Section::Reading => reading().into_element(),
@@ -280,6 +284,25 @@ fn labelled_button(
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || theme().foreground),
         )
+}
+
+// --- General ------------------------------------------------------------------------
+
+/// Whether the app keeps running once its windows are closed, and tells about new mail.
+fn general() -> impl IntoElement {
+    view()
+        .gap(px(16.0))
+        .child(section_title("General"))
+        .child(toggle(
+            "Keep running after the window is closed",
+            move || prefs(|s| s.keep_running),
+            |on| shell::update_settings(|s| s.keep_running = on),
+        ))
+        .child(toggle(
+            "Notify about new mail",
+            move || prefs(|s| s.notify_new_mail),
+            |on| shell::update_settings(|s| s.notify_new_mail = on),
+        ))
 }
 
 // --- Appearance ---------------------------------------------------------------------

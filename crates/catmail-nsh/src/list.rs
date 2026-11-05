@@ -15,7 +15,7 @@ use catmail_frontend::commands::MessageCommand;
 use catmail_frontend::composer::ComposeFrom;
 use catmail_frontend::format;
 use catmail_frontend::list::{
-    self, Check, Days, PAGE, ROW_LABELS, Removal, Reselect, Row, RowId, SEARCH_DELAY,
+    self, Check, Days, PAGE, ROW_LABELS, Removal, Reselect, Reveal, Row, RowId, SEARCH_DELAY,
     SERVER_SEARCH_DELAY, Severity,
 };
 use catmail_frontend::mailbox::{self, Source};
@@ -28,7 +28,7 @@ use nsh_core::prelude::*;
 use crate::app::{client, in_mailbox, report};
 use crate::commands::{self, Size};
 use crate::icons::{Icon, icon};
-use crate::sidebar::{Accounts, SelectedPlace};
+use crate::sidebar::{self, Accounts, SelectedPlace};
 
 /// What the list shows: the rows, grouped by day, and what a row of them shows besides.
 #[derive(Clone, Default)]
@@ -123,6 +123,8 @@ struct Loads {
     /// The message the user moved or deleted: once it is gone while still selected, the
     /// next row still there opens.
     removal: Removal,
+    /// The message a notification was about, to open once the rows have it.
+    reveal: Reveal,
 }
 
 #[derive(Clone, Default)]
@@ -135,6 +137,17 @@ fn loads() -> Rc<RefCell<Loads>> {
 /// The list's handle, for scrolling it.
 #[derive(Clone, Default)]
 struct ListRef(Option<ElementRef>);
+
+/// The search field's, for Ctrl+F.
+#[derive(Clone, Default)]
+struct SearchRef(Option<ElementRef>);
+
+/// Puts the keys in the search field.
+pub fn focus_search() {
+    if let Some(search) = global::<SearchRef>().with_untracked(|r| r.0) {
+        search.focus();
+    }
+}
 
 /// Whether the reading pane is open: a row is selected.
 pub fn reading() -> bool {
@@ -152,6 +165,7 @@ pub fn show(source: Option<Source>) {
         loads.stale = false;
         loads.found_on_server = Rc::new([]);
         loads.removal.clear();
+        loads.reveal.forget();
         loads.generation
     };
     if let Some(Source::Search(text)) = &source {
@@ -250,6 +264,7 @@ fn load(what: Load) {
             Ok((rows, more)) => {
                 loads().borrow_mut().removal.read(read, &rows);
                 replace(rows, more);
+                select_revealed(read);
             }
             Err(e) => {
                 global::<Rows>().update(|r| r.loading = false);
@@ -340,10 +355,43 @@ fn load_more() {
     }
 }
 
+/// Selects and opens message `id` of the source shown: now if it is listed, or else once
+/// the rows read from now on have it (it may have just arrived). Nothing happens if the
+/// next of them doesn't, if another source is shown first, or if the user opens a row
+/// meanwhile.
+pub fn reveal(id: MessageId) {
+    let reads = {
+        let loads = loads();
+        let mut loads = loads.borrow_mut();
+        // The next read starts after now, once one in flight is done.
+        let reads = loads.reads;
+        loads.reveal.ask(id, reads + 1);
+        reads
+    };
+    select_revealed(reads);
+    if loads().borrow().reveal.is_waiting() {
+        refresh();
+    }
+}
+
+/// Opens the message [`reveal`] asked for if it is among the rows, which read number
+/// `read` brought; gives up if they don't have it and that read should have.
+fn select_revealed(read: u64) {
+    let row = global::<Rows>().with_untracked(|r| {
+        let at = loads().borrow_mut().reveal.read(read, &r.rows)?;
+        Some(r.rows[at].id())
+    });
+    if let Some(row) = row {
+        open(row);
+    }
+}
+
 /// The user opened `row` (or the list moved on to it from one the user moved): opening a
 /// message marks it read, unless the settings say not to. Read again after a refresh, it
 /// stays as it is.
 pub fn open(row: RowId) {
+    // The user's choice wins over a notification clicked before.
+    loads().borrow_mut().reveal.forget();
     global::<Selected>().set(Selected(Some(row)));
     let RowId::Message(id) = row else {
         return;
@@ -639,6 +687,50 @@ pub fn list_column() -> impl IntoElement {
     )
 }
 
+/// Syncs every account now; it turns while one is syncing.
+fn sync_button() -> impl IntoElement {
+    // Only when it starts or stops: the accounts are read again many times meanwhile, and
+    // starting the turn again each time would jerk it back.
+    let syncing = computed(sidebar::syncing);
+    let angle = animated_value(0.0);
+    let turning =
+        Animation::timing(&angle, 360.0, Timing::new(TURN_MS, Easing::Linear)).looped(None);
+    effect(move || {
+        if syncing.get() {
+            let _ = turning.start();
+        } else {
+            spawn(finish_turn(angle));
+        }
+    });
+    let has_accounts =
+        move || global::<Accounts>().with(|a| a.0.as_ref().is_some_and(|a| !a.is_empty()));
+    commands::icon_button(
+        || Icon::ArrowPath,
+        || "Sync now".to_owned(),
+        move || has_accounts() && !syncing.get(),
+        Size::Bar,
+        sidebar::sync,
+    )
+    .bind_rotate(&angle)
+}
+
+/// How long a turn of the sync button takes, in milliseconds.
+const TURN_MS: f32 = 1000.0;
+
+/// Stops the sync button's turning once it is upright again, rather than snapping back.
+async fn finish_turn(angle: AnimatedValue) {
+    angle.stop();
+    let at = angle.value().await;
+    if at <= 0.0 {
+        return;
+    }
+    let left = TURN_MS * (360.0 - at) / 360.0;
+    // Not if a sync started meanwhile, which turns it again.
+    if angle.timing(360.0, left, Easing::Linear).await {
+        angle.set(0.0);
+    }
+}
+
 fn header() -> impl IntoElement {
     let title = computed(move || {
         let source = global::<Rows>().with(|r| r.source.clone());
@@ -653,6 +745,8 @@ fn header() -> impl IntoElement {
     });
     let lists_messages =
         move || global::<Rows>().with(|r| r.source.as_ref().is_some_and(Source::lists_messages));
+    let search = element_ref();
+    global::<SearchRef>().set(SearchRef(Some(search)));
     view()
         .px(px(12.0))
         .pt(px(12.0))
@@ -662,25 +756,9 @@ fn header() -> impl IntoElement {
             view()
                 .flex_row()
                 .items_center()
-                .gap(px(8.0))
-                .h(px(36.0))
-                .px(px(12.0))
-                .rounded(px(18.0))
-                .border_1()
-                .border_color(move || theme().input)
-                .child(
-                    icon(|| Icon::MagnifyingGlass, 16.0)
-                        .text_color(move || theme().muted_foreground),
-                )
-                .child(
-                    input()
-                        .value(move || global::<SearchText>().with(|t| t.0.clone()))
-                        .placeholder("Search".to_owned())
-                        .on_change(move |text: &str| typed(text.to_owned()))
-                        .flex_1()
-                        .text_sm()
-                        .text_color(move || theme().foreground),
-                ),
+                .gap(px(4.0))
+                .child(sync_button())
+                .child(search_field(search)),
         )
         .child(
             view()
@@ -713,6 +791,31 @@ fn header() -> impl IntoElement {
                             .into_element()
                     }
                 })),
+        )
+}
+
+/// The search field, round as "Compose" across from it.
+fn search_field(search: ElementRef) -> impl IntoElement {
+    view()
+        .flex_1()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .h(px(36.0))
+        .px(px(12.0))
+        .rounded(px(18.0))
+        .border_1()
+        .border_color(move || theme().input)
+        .child(icon(|| Icon::MagnifyingGlass, 16.0).text_color(move || theme().muted_foreground))
+        .child(
+            input()
+                .value(move || global::<SearchText>().with(|t| t.0.clone()))
+                .placeholder("Search".to_owned())
+                .on_change(move |text: &str| typed(text.to_owned()))
+                .element_ref(&search)
+                .flex_1()
+                .text_sm()
+                .text_color(move || theme().foreground),
         )
 }
 

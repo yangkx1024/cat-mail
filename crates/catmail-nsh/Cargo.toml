@@ -34,6 +34,8 @@ nsh-core = "0.4.0"
 nsh-base = { version = "0.4.0", default-features = false }
 # SIGINT and SIGTERM on GTK's loop; the glib that gtk4 uses.
 glib-unix = "0.22"
+# The tray icon's pixels: nsh-core's resvg, with text for the badge's digits.
+resvg = { version = "0.46", default-features = false, features = ["text", "system-fonts"] }
 # WebKitGTK 6.0 web views, for message bodies.
 nsh-platform-linux = { version = "0.4.0", default-features = false, features = ["webview"] }
 
