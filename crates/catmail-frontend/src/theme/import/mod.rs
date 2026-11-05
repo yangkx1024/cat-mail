@@ -11,11 +11,11 @@ mod structured;
 use std::collections::HashMap;
 use std::path::Path;
 
-use gpui_kit::component::{ThemeConfig, ThemeSet};
 use serde_json::Value;
 
 use super::derive;
 use super::palette::{Rgb, TerminalPalette};
+use super::{ThemeConfig, ThemeSet};
 use lines::{base16, foot, ghostty, is_base16_key, kitty, xresource_name, xresources};
 use structured::{iterm2, json, strip_json_comments, toml_scheme};
 
@@ -68,7 +68,7 @@ impl ImportedTheme {
     }
 
     pub fn is_dark(&self) -> bool {
-        self.config.mode.is_dark()
+        self.config.is_dark()
     }
 }
 

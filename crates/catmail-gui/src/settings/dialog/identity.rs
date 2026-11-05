@@ -2,7 +2,8 @@
 //! (a sending service, say), in a dialog over Settings. The login is tried before
 //! anything is stored, as for an account.
 
-use catmail_core::{AccountId, MailClient, NewIdentity, Security, Verify};
+use catmail_core::{AccountId, MailClient, Security, Verify};
+use catmail_frontend::login::IdentityValues;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::v_flex;
 use gpui_kit::{
@@ -10,41 +11,22 @@ use gpui_kit::{
     Render, SharedString, Styled as _, Window,
 };
 
-use crate::login_form::{LoginFields, LoginValues, ServerFields, ServerValues};
+use crate::login_form::{LoginFields, ServerFields};
 use crate::submission::{self, DialogForm, Submit};
 
-/// What the form holds, as typed.
-#[derive(Debug, Clone)]
-struct Values {
-    login: LoginValues,
-    smtp: ServerValues,
-}
-
-impl Values {
-    fn new_identity(&self) -> Result<NewIdentity, &'static str> {
-        let (email, display_name, username) = self.login.who();
-        Ok(NewIdentity {
-            email,
-            display_name,
-            username,
-            smtp: self.smtp.config(Security::default_smtp_port)?,
-        })
-    }
-}
-
-/// Opens the form for another address of `account`, whose own address is `email`, over
-/// the Settings dialog. Being a dialog of its own, Enter (its Confirm) adds the address,
+/// Opens the form for another address of `account`, titled `title`, over the Settings
+/// dialog. Being a dialog of its own, Enter (its Confirm) adds the address,
 /// and Escape or Cancel close only the form.
 pub(super) fn open(
     client: MailClient,
     account: AccountId,
-    email: &str,
+    title: String,
     display_name: Option<String>,
     window: &mut Window,
     cx: &mut App,
 ) {
     let form = cx.new(|cx| AddIdentity::new(client, account, display_name, window, cx));
-    let title = SharedString::from(format!("New address for {email}"));
+    let title = SharedString::from(title);
     let ids = ("identity-cancel", "identity-add");
     submission::open_dialog(form.clone(), title, 32., ids, "Add", window, cx);
     // Only once the dialog is open: it gives focus back to what had it before (Settings)
@@ -86,8 +68,8 @@ impl AddIdentity {
         }
     }
 
-    fn values(&self, cx: &App) -> Values {
-        Values {
+    fn values(&self, cx: &App) -> IdentityValues {
+        IdentityValues {
             login: self.login.values(cx),
             smtp: self.smtp.values(cx),
         }
@@ -127,32 +109,5 @@ impl Render for AddIdentity {
             .child(self.login.render())
             .child(self.smtp.render(|this: &mut Self| &mut this.smtp, cx))
             .children(self.submit.error("identity-error", cx))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn empty_fields_take_the_defaults() {
-        let values = Values {
-            login: LoginValues {
-                email: " news@example.org ".into(),
-                password: "key".into(),
-                name: String::new(),
-                username: String::new(),
-            },
-            smtp: ServerValues {
-                host: "smtp.resend.com".into(),
-                port: String::new(),
-                security: Security::Tls,
-            },
-        };
-        let new = values.new_identity().unwrap();
-        assert_eq!(new.email, "news@example.org");
-        assert_eq!(new.username, "news@example.org");
-        assert_eq!(new.display_name, None);
-        assert_eq!((new.smtp.port, new.smtp.security), (465, Security::Tls));
     }
 }

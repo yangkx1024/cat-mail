@@ -16,6 +16,8 @@ use gpui_kit::{
 
 use crate::assets::Hero;
 use crate::settings::{Appearance, Preferences};
+use catmail_frontend::theme::{self as offered, IMPORT_HELP, IMPORTABLE_FORMATS};
+
 use crate::theme::appearance::{self, Swatch, Themes};
 use crate::theme::colors::ThemeColors as _;
 
@@ -39,14 +41,14 @@ impl SettingsView {
             let read = cx
                 .background_spawn({
                     let path = path.clone();
-                    async move { appearance::read_import(&path) }
+                    async move { offered::read_import(&path) }
                 })
                 .await;
             this.update(cx, |this, cx| {
                 this.import = Some(match read {
                     Ok(candidate) => Import::Ready(candidate),
                     Err(error) => Import::Failed {
-                        file_name: appearance::file_name(&path),
+                        file_name: offered::file_name(&path),
                         error,
                     },
                 });
@@ -62,7 +64,7 @@ impl SettingsView {
             return;
         };
         // One theme imported is put to use for its appearance at once.
-        let single = (candidate.themes.len() == 1).then(|| candidate.themes[0].is_dark());
+        let single = candidate.single();
         match appearance::install(candidate.themes, cx) {
             Ok(names) => {
                 if let (Some(dark), [name]) = (single, names.as_slice()) {
@@ -191,11 +193,7 @@ impl SettingsView {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(
-                                "Color schemes from Alacritty, kitty, Ghostty, WezTerm, Windows \
-                                 Terminal, iTerm2, foot, Xresources and base16, or a GPUI Kit \
-                                 theme file.",
-                            ),
+                            .child(IMPORT_HELP),
                     ),
             )
             .child(
@@ -233,26 +231,18 @@ impl SettingsView {
                 .gap_4()
                 .child(
                     Alert::error("import-error", error.clone())
-                        .title(format!("Couldn’t import “{file_name}”")),
+                        .title(offered::import_title(file_name)),
                 )
                 .child(
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child(
-                            "catmail reads color schemes from Alacritty (.toml), kitty (.conf), \
-                             Ghostty, WezTerm (.toml), Windows Terminal (.json), iTerm2 \
-                             (.itermcolors), foot (.ini), Xresources, base16 / base24 (.yaml) \
-                             and GPUI Kit themes (.json).",
-                        ),
+                        .child(IMPORTABLE_FORMATS),
                 )
                 .child(h_flex().justify_end().child(cancel.label("OK")))
                 .into_any_element(),
             Import::Ready(candidate) => {
-                let title = match candidate.themes.as_slice() {
-                    [theme] => format!("Import “{}”?", theme.name()),
-                    themes => format!("Import {} themes?", themes.len()),
-                };
+                let title = candidate.title();
                 let muted = cx.theme().muted_foreground;
                 v_flex()
                     .gap_4()
@@ -265,15 +255,7 @@ impl SettingsView {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(title),
                             )
-                            .child(div().text_xs().text_color(muted).child(format!(
-                                "{} · {}",
-                                candidate.file_name,
-                                candidate
-                                    .themes
-                                    .first()
-                                    .map(|t| t.format.label())
-                                    .unwrap_or_default()
-                            ))),
+                            .child(div().text_xs().text_color(muted).child(candidate.about())),
                     )
                     .children(candidate.themes.iter().map(|theme| {
                         v_flex()

@@ -93,7 +93,7 @@ impl Choice {
             (
                 Confirm {
                     title: "Send it again?".into(),
-                    description: "If the first one did arrive, the recipients get it twice.",
+                    description: "If the first one did arrive, the recipients get it twice.".into(),
                 },
                 "Send again",
             )

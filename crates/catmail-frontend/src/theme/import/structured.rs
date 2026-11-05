@@ -158,6 +158,17 @@ pub(super) fn json(contents: &str) -> Result<Vec<ImportedTheme>> {
         if set.themes.is_empty() {
             return Err(ImportError::Empty);
         }
+        // As GPUI Kit reads them: a color is a string, if it is set.
+        let colors = set.themes.iter().flat_map(|theme| &theme.colors);
+        if let Some((key, _)) = colors
+            .into_iter()
+            .find(|(_, v)| !(v.is_string() || v.is_null()))
+        {
+            return Err(ImportError::Syntax {
+                format: "GPUI Kit theme JSON",
+                detail: format!("“{key}” isn't a color"),
+            });
+        }
         return Ok(set
             .themes
             .into_iter()

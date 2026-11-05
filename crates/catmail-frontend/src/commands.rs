@@ -210,7 +210,7 @@ pub struct Deletion {
 #[derive(Debug, PartialEq)]
 pub struct Confirm {
     pub title: String,
-    pub description: &'static str,
+    pub description: String,
 }
 
 /// How deleting the messages goes; `folders` gives an account's folders. Messages of an
@@ -243,11 +243,11 @@ pub fn deletion<'a>(
                 "Delete “{}” for good?",
                 format::subject(message.subject.as_deref())
             ),
-            description: "It is removed from the server and can't be brought back.",
+            description: "It is removed from the server and can't be brought back.".into(),
         }),
         _ => Some(Confirm {
             title: format!("Delete {} messages for good?", for_good.len()),
-            description: "They are removed from the server and can't be brought back.",
+            description: "They are removed from the server and can't be brought back.".into(),
         }),
     };
     Deletion { ids, mode, confirm }

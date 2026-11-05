@@ -2,6 +2,7 @@
 //! other addresses each sends as.
 
 use catmail_core::{AccountId, IdentityId};
+use catmail_frontend::accounts;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex};
@@ -39,11 +40,11 @@ impl SettingsView {
         let Some(entry) = self.account(id, cx) else {
             return;
         };
+        let confirm = accounts::remove_account(entry);
         let client = self.client.clone();
         layout::confirm_danger(
-            format!("Remove “{}”?", entry.account.email),
-            "Its mail, drafts and outbox are deleted from this computer, and its password from \
-             the keyring. Nothing changes on the server.",
+            confirm.title,
+            confirm.description,
             "Remove",
             window,
             cx,
@@ -63,14 +64,11 @@ impl SettingsView {
         let Some(entry) = self.account(id, cx) else {
             return;
         };
-        // As the account's default goes by: most often the user's own name.
-        let name = entry
-            .identities
-            .iter()
-            .find(|i| i.is_default)
-            .and_then(|i| i.display_name.clone());
-        let email = entry.account.email.clone();
-        identity::open(self.client.clone(), id, &email, name, window, cx);
+        let (title, name) = (
+            accounts::new_identity_title(entry),
+            accounts::new_identity_name(entry),
+        );
+        identity::open(self.client.clone(), id, title, name, window, cx);
     }
 
     fn rename_identity(
@@ -83,7 +81,7 @@ impl SettingsView {
         let Some(entry) = self.account(account, cx) else {
             return;
         };
-        let Some(identity) = entry.identities.iter().find(|i| i.id == id) else {
+        let Some(identity) = accounts::identity(entry, id) else {
             return;
         };
         let dialog = NameDialog {
@@ -94,7 +92,7 @@ impl SettingsView {
                 ok: "identity-rename-save",
                 error: "identity-rename-error",
             },
-            title: format!("Name for {}", identity.email).into(),
+            title: accounts::rename_title(identity).into(),
             // Empty, the address goes alone.
             name: identity.display_name.clone().unwrap_or_default(),
             placeholder: Some("Optional"),
@@ -147,21 +145,13 @@ impl SettingsView {
         let Some(entry) = self.account(account, cx) else {
             return;
         };
-        let Some(identity) = entry.identities.iter().find(|i| i.id == id) else {
+        let Some(confirm) = accounts::remove_identity(entry, id) else {
             return;
         };
-        // The default is listed first.
-        let default = entry
-            .identities
-            .first()
-            .map_or(&entry.account.email, |i| &i.email);
         let client = self.client.clone();
         layout::confirm_danger(
-            format!("Remove “{}”?", identity.email),
-            format!(
-                "Drafts from it will be sent from {default} instead, and its password is \
-                 deleted from the keyring."
-            ),
+            confirm.title,
+            confirm.description,
             "Remove",
             window,
             cx,

@@ -54,8 +54,8 @@ fn kitty() {
     assert_eq!(hex(p.ansi[15]), "#dcd7ba");
     assert_eq!(p.cursor.map(hex).as_deref(), Some("#c8c093"));
     assert_eq!(p.selection_background.map(hex).as_deref(), Some("#2d4f67"));
-    assert_eq!(theme.config.name.as_ref(), "Kanagawa");
-    assert!(theme.config.mode.is_dark());
+    assert_eq!(theme.config.name, "Kanagawa");
+    assert!(theme.config.is_dark());
 }
 
 #[test]
@@ -310,17 +310,14 @@ fn base24_flat() {
 
 #[test]
 fn gpui_kit_theme_set() {
-    let configs: Vec<_> = crate::theme::builtin::builtin_themes()
-        .into_iter()
-        .take(2)
-        .collect();
+    let configs: Vec<_> = crate::theme::builtin_themes().into_iter().take(2).collect();
     let json = derive::theme_set_json(&configs);
     let themes = import("mine.json", &json).unwrap();
     assert_eq!(themes.len(), 2);
     assert!(themes.iter().all(|t| t.format == ThemeFormat::GpuiKit));
     assert!(themes.iter().all(|t| t.palette.is_none()));
-    assert_eq!(themes[0].name(), configs[0].name.as_ref());
-    assert_eq!(themes[1].is_dark(), configs[1].mode.is_dark());
+    assert_eq!(themes[0].name(), configs[0].name);
+    assert_eq!(themes[1].is_dark(), configs[1].is_dark());
 }
 
 #[test]

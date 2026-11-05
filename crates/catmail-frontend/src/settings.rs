@@ -90,6 +90,17 @@ impl Settings {
     }
 }
 
+/// Under "Remote images" in Settings › Reading: what the cache is, and what it takes once
+/// measured.
+pub fn image_cache_help(size: Option<u64>) -> String {
+    let help = "Remote images you chose to show are kept on this computer and show again \
+                without being loaded.";
+    match size {
+        Some(size) => format!("{help} They take {}.", crate::format::size(size)),
+        None => help.to_owned(),
+    }
+}
+
 /// `settings.json` in a config directory, and the writes to it.
 ///
 /// Writes run on any thread (the frontend's background executor), so one that started

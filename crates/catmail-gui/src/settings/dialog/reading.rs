@@ -1,5 +1,6 @@
 //! The Reading section: marking messages read, and the cache of remote images.
 
+use catmail_frontend::settings::image_cache_help;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::switch::Switch;
@@ -7,8 +8,6 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::{AnyElement, Context, IntoElement, ParentElement as _, Styled as _, Window, div};
-
-use crate::format;
 
 use super::*;
 
@@ -60,12 +59,7 @@ impl SettingsView {
     pub(super) fn render_reading(&self, cx: &mut Context<Self>) -> AnyElement {
         let mark_read = Preferences::get(cx).mark_read_on_open;
         let theme = cx.theme();
-        let help = "Remote images you chose to show are kept on this computer and show \
-                    again without being loaded.";
-        let help = match self.image_cache {
-            Some(size) => format!("{help} They take {}.", format::size(size)),
-            None => help.to_owned(),
-        };
+        let help = image_cache_help(self.image_cache);
         v_flex()
             .gap_4()
             .child(section_title("Reading"))

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use catmail_frontend::settings::SettingsFile;
-pub use catmail_frontend::settings::{Appearance, Settings, TEXT_SIZES, write_atomically};
+pub use catmail_frontend::settings::{Appearance, Settings, TEXT_SIZES};
 use gpui_kit::{App, AppContext as _, Global};
 
 /// The settings in effect, as a GPUI global, and where they are kept.

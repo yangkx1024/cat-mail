@@ -5,7 +5,7 @@
 use gpui_kit::component::{Colorize as _, Theme};
 use gpui_kit::{Hsla, Rgba};
 
-use super::palette::Rgb;
+use super::Rgb;
 
 /// A theme color as 8-bit sRGB, without its alpha: for what takes colors outside GPUI.
 pub fn rgb(color: Hsla) -> Rgb {

@@ -38,8 +38,7 @@ src/
                      page.rs Blitz 排版的页面
   composer/          写信窗口：mod.rs 打开与编辑，lifecycle.rs 保存 / 发送 / 关闭，view.rs 渲染
   settings/          mod.rs 偏好（`Preferences` 全局，文件读写在 catmail-frontend）；dialog/ 设置对话框（外观与主题、账户、读信分文件）
-  theme/             palette / derive / builtin / import/（纯逻辑：调色板、推导、内置、导入）；
-                     appearance.rs 可选主题与应用；colors.rs 应用自己的颜色
+  theme/             appearance.rs 把 catmail-frontend 的主题转成 gpui-kit 的并应用；colors.rs 应用自己的颜色
 ```
 
 - `Mailbox`：根视图。状态是账户列表（每个账户的文件夹、草稿数、发件箱、连接状态）和侧栏选中的位置
@@ -61,7 +60,9 @@ src/
   归档 / 移动作用于哪些邮件、"Move to"列出的文件夹、永久删除的确认文案、被拒改动的说明）、读信区的头部
   （`reader`：`Header`、附件的名字、保存对话框的起始目录）和写信窗口的模型（`composer`：从什么开始、From 的
   选项、字段解析、何时保存 / 发送 / 关窗的 `Lifecycle`、按草稿登记窗口的 `OpenComposers`）和发件箱的右栏
-  （`outbox`：条目的状态、可选的操作）在 `catmail-frontend`，别的前端也能用。GUI 按原路径引用
+  （`outbox`：条目的状态、可选的操作）、主题（`theme`：调色板、推导、内置、导入、主题目录）、登录表单
+  （`login`：字段怎么读成 `NewAccount` / `NewIdentity`、提交的状态 `Submission`）和 Settings › Accounts 的确认
+  文案（`accounts`）在 `catmail-frontend`，别的前端也能用。GUI 按原路径引用
   （`crate::format`、`mailbox` 模块里的 `folders`、`refresh` 等），`assets.rs` 把 `FolderIcon` 对应到 Heroicons。
 
 ## 窗口外框（macOS）
@@ -276,14 +277,17 @@ macOS、Windows 用系统字体，不受影响。
 - **远程图片缓存**属于引擎的数据目录，不是偏好：Settings › Reading 显示它占多少（每次切到这一节时重新
   量，缓存随阅读增长），"Clear image cache"清空；缓存为空时按钮不可用，清空中转圈。已经显示在读信
   区的图片留在内存里，换一封再回来才重新拦截。
-- **主题都从终端调色板推导**（`theme/`）：背景、前景和 16 个 ANSI 色按设计稿的映射表推导出 gpui-kit
+- **主题都从终端调色板推导**（`catmail_frontend::theme`）：背景、前景和 16 个 ANSI 色按设计稿的映射表推导出 gpui-kit
   `ThemeConfig` 的全部颜色键；内置主题也写成调色板，与导入的走同一套规则。导入按内容识别 Alacritty、
   kitty、Ghostty、WezTerm、Windows Terminal、iTerm2、foot、Xresources、base16 / base24 和 gpui-kit
   主题 JSON，推导结果写成 gpui-kit 主题 JSON 放进主题目录（可手工修改，启动时读取）。新主题的文件
   不与别的主题共用（名字不同、文件名相同时加序号）；重新导入的主题写回原来的文件，同一文件里的其他主题
   保留。
+- 主题在 `catmail-frontend` 里是 `ThemeConfig`（名字、明暗、按 gpui-kit 键名的颜色，其余字段原样保留），不依赖
+  gpui-kit；GUI 经 serde 转成 gpui-kit 的 `ThemeConfig`，gpui-kit 读不了的（手改坏的主题文件）记一条警告后不提供。
+  nsh 版把同样的颜色映射到 shadcn 的 token。
 - **不用 gpui-kit 的 `ThemeRegistry`**：它不能替换同名主题（重新导入要覆盖旧的），也会自己监视目录、
-  改全局主题。可选主题由 `appearance::Themes` 全局保存，应用时把选中的配置放进 `Theme::light_theme` /
+  改全局主题。可选主题由 `appearance::Themes` 全局保存（包着 `catmail_frontend::theme::Themes`），应用时把选中的配置放进 `Theme::light_theme` /
   `dark_theme` 再 `Theme::change`。
 - **设置改了就生效**：`appearance::init` 观察 `Preferences` 全局，任何地方 `Preferences::update` 之后
   主题和文字大小随之应用，调用方不必各自记得。
@@ -396,7 +400,7 @@ INBOX，所以打开一个文件夹时同步它（`MailClient::sync_folder`，�
   此时离开也撤销不了，账户照样加上、同步。
 - 空的端口和用户名取与 CLI 相同的默认值；表单只检查端口格式，其余由引擎的校验负责。登录也检查
   SMTP，所以 SMTP 填错同样当场报出。邮箱、密码、名字、用户名和服务器字段在 `login_form.rs`（`LoginFields`、
-  `ServerFields`），与发件身份的表单共用。
+  `ServerFields`），与发件身份的表单共用；字段怎么读、端口的默认值在 `catmail_frontend::login`。
 - **发件身份**在 Settings › Accounts 里，列在各自账户下面（包括随账户建出的那个），和写信窗口的 From 一样显示成
   "名字 <地址>"。操作都是图标按钮，和图标一起对齐第一行：星标实心的是默认身份，空心的点了设为默认；
   默认之外的可以删除；每个都可以改名（编辑图标）：对话框里只有名字

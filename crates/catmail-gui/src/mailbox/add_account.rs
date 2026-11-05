@@ -2,7 +2,8 @@
 //! servers before anything is stored, so a typo leaves no account (or keyring entry)
 //! behind, as with `catmail account add`.
 
-use catmail_core::{MailClient, NewAccount, Security, Verify};
+use catmail_core::{MailClient, Security, Verify};
+use catmail_frontend::login::AccountValues;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, StyledExt as _, v_flex};
 use gpui_kit::{
@@ -10,35 +11,13 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, rems,
 };
 
-use crate::login_form::{LoginFields, LoginValues, ServerFields, ServerValues};
+use crate::login_form::{LoginFields, ServerFields};
 use crate::submission::{self, Submit};
 
 pub enum AddAccountEvent {
     /// The login worked and the account is stored; background sync syncs it.
     Added,
     Cancelled,
-}
-
-/// What the form holds, as typed.
-#[derive(Debug, Clone)]
-struct Values {
-    login: LoginValues,
-    imap: ServerValues,
-    smtp: ServerValues,
-}
-
-impl Values {
-    /// The account to add.
-    fn new_account(&self) -> Result<NewAccount, &'static str> {
-        let (email, display_name, username) = self.login.who();
-        Ok(NewAccount {
-            email,
-            display_name,
-            username,
-            imap: self.imap.config(Security::default_imap_port)?,
-            smtp: self.smtp.config(Security::default_smtp_port)?,
-        })
-    }
 }
 
 pub struct AddAccount {
@@ -98,8 +77,8 @@ impl AddAccount {
         }
     }
 
-    fn values(&self, cx: &App) -> Values {
-        Values {
+    fn values(&self, cx: &App) -> AccountValues {
+        AccountValues {
             login: self.login.values(cx),
             imap: self.imap.values(cx),
             smtp: self.smtp.values(cx),
@@ -166,100 +145,5 @@ impl Render for AddAccount {
                     .children(self.submit.error("sign-in-error", cx))
                     .child(actions),
             )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn server(host: &str, security: Security) -> ServerValues {
-        ServerValues {
-            host: host.into(),
-            port: String::new(),
-            security,
-        }
-    }
-
-    fn login() -> LoginValues {
-        LoginValues {
-            email: " me@example.com ".into(),
-            password: "pw".into(),
-            name: String::new(),
-            username: String::new(),
-        }
-    }
-
-    fn filled() -> Values {
-        Values {
-            login: login(),
-            imap: server("imap.example.com", Security::Tls),
-            smtp: server("smtp.example.com", Security::StartTls),
-        }
-    }
-
-    #[test]
-    fn debug_output_leaves_out_the_password() {
-        let values = Values {
-            login: LoginValues {
-                password: "hunter2".into(),
-                ..login()
-            },
-            ..filled()
-        };
-        let shown = format!("{values:?}");
-        assert!(shown.contains("me@example.com"), "{shown}");
-        assert!(!shown.contains("hunter2"), "{shown}");
-    }
-
-    #[test]
-    fn empty_fields_take_the_cli_defaults() {
-        let new = filled().new_account().unwrap();
-        assert_eq!(new.email, "me@example.com");
-        assert_eq!(new.username, "me@example.com");
-        assert_eq!(new.display_name, None);
-        assert_eq!((new.imap.port, new.imap.security), (993, Security::Tls));
-        assert_eq!(
-            (new.smtp.port, new.smtp.security),
-            (587, Security::StartTls)
-        );
-    }
-
-    #[test]
-    fn typed_values_win() {
-        let new = Values {
-            login: LoginValues {
-                name: " 张三 ".into(),
-                username: "zhang".into(),
-                ..login()
-            },
-            imap: ServerValues {
-                port: "10143".into(),
-                ..server("127.0.0.1", Security::Plain)
-            },
-            ..filled()
-        }
-        .new_account()
-        .unwrap();
-        assert_eq!(new.display_name.as_deref(), Some("张三"));
-        assert_eq!(new.username, "zhang");
-        assert_eq!((new.imap.port, new.imap.security), (10143, Security::Plain));
-    }
-
-    #[test]
-    fn rejects_ports_that_are_not_ports() {
-        for port in ["0", "65536", "x"] {
-            let values = Values {
-                imap: ServerValues {
-                    port: port.into(),
-                    ..server("imap.example.com", Security::Tls)
-                },
-                ..filled()
-            };
-            assert_eq!(
-                values.new_account().unwrap_err(),
-                "A port is a number from 1 to 65535."
-            );
-        }
     }
 }
