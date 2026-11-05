@@ -22,25 +22,33 @@
 - [x] 自建 `gtk::Application`，每个窗口放一个 `AppView`，替换 `run_app`（`shell.rs`）。引擎由应用持有（`engine.rs`），
       主循环结束后 `shut_down` 并等它关好；Ctrl+Q、Ctrl+W、SIGINT / SIGTERM 都走这个退出流程
 - [x] 新建 `catmail-frontend`，抽出 `instance`、`settings`（数据和文件读写）、`format`、`html`。
-      其余的到用到时再抽：`folders`、`refresh` 在 P2、P3，`theme/` 的推导和导入在 P7
+      其余的到用到时再抽：`folders`、`mailbox`、`refresh` 在 P2，`theme/` 的推导和导入在 P7
 - [x] 引擎异步打开（`open_async`）：先显示窗口，打不开时显示原因（文案与 gpui 版相同）
 - [x] 单实例（`catmail_frontend::instance`）：再次启动时唤起已有窗口，与 gpui 版互通（谁先启动谁是那个应用）；
       Wayland 下用启动方的 activation token 获得焦点
 - [x] 日志写进数据目录（`logging::write_file`）
 - [x] 读同一份 `settings.json`，应用外观和文字大小（`AppView::set_font_scale`）；写入随 P7 的设置对话框一起做
-- [ ] 图标：Heroicons SVG，作为 nsh 的资源（随 P2 侧栏一起做）
+- [x] 图标：gpui 版的 Heroicons SVG，`include_str!` 后用 nsh 的 `svg` 画，`currentColor` 跟随文字色（`icons.rs`，随 P2 做）
 
 ## P2 侧栏（gui.md「侧栏」）
 
-- [ ] All Inboxes（多账户时显示，默认选中；`list_inboxes`）
-- [ ] 有角色的文件夹排前面，顺序固定，显示角色名，带图标；从嵌套里提到账户这一层（`folders::AccountFolders`）
-- [ ] Gmail 的"Labels"单列一节；"所有邮件"被隐藏时显示提示
-- [ ] Drafts 是本机草稿；Outbox 只在有待发时出现，有问题时带警告图标
-- [ ] Sent、Junk、Trash 不显示未读数
-- [ ] 底部一行说明连接问题（`account_status`），截断时悬停显示全文
-- [ ] 侧栏一次读完（`overview`）；`DraftsChanged` 只重数该账户的草稿（`count_drafts`、`DraftCounts`）
-- [ ] 右键菜单：新建、重命名、删除文件夹和标签；F2 重命名（docs/architecture/folders.md「界面」）
-- [ ] 打开文件夹时同步它（`sync_folder`）
+模型都在 `catmail-frontend`（`folders`、`mailbox`、`refresh`），与 gpui 版共用；nsh 版只有界面（`sidebar.rs`）。
+
+- [x] All Inboxes（多账户时显示，默认选中；`list_inboxes`）
+- [x] 有角色的文件夹排前面，顺序固定，显示角色名，带图标；从嵌套里提到账户这一层（`folders::AccountFolders`）
+- [x] Gmail 的"Labels"单列一节；"所有邮件"被隐藏时显示提示
+- [x] Drafts 是本机草稿；Outbox 只在有待发时出现，有问题时带警告图标（⚠️ nsh 主题没有 warning 色，先用
+      destructive）。两者的列表随 P3 的来源一起做，现在是空的
+- [x] Sent、Junk、Trash 不显示未读数
+- [x] 底部一行说明连接问题（`account_status`），截断时悬停显示全文
+- [x] 侧栏一次读完（`overview`）；`DraftsChanged` 只重数该账户的草稿（`count_drafts`、`DraftCounts`）。
+      引擎事件按 `Refresh::after` 决定重读什么，200 ms 节流（`Throttle`），读侧栏一次一个（`Coalesce`）
+- [x] 右键菜单：新建、重命名、删除文件夹和标签；F2 重命名（docs/architecture/folders.md「界面」）。
+      菜单是原生的 `popup_menu`，删除确认是原生的 `alert_dialog`，命名用 `dialog()` 加输入框
+- [x] 打开文件夹时同步它（`sync_folder`）
+- [x] 账户可以折叠：只有一个账户时默认展开，多个时默认折叠，选中某处时展开它的账户
+- [ ] 子文件夹折叠（gpui 版每个有子文件夹的行可以收起）；折叠的动画
+- [ ] 底部的 Settings 和 Sync 按钮（随 P7 设置、P4 同步）
 
 ## P3 邮件列表（gui.md「邮件列表」）
 

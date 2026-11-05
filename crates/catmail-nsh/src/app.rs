@@ -3,45 +3,33 @@
 //! State is nsh globals (one signal per type, per surface). The client's futures are
 //! awaited in nsh tasks on the UI thread; the engine does the work on its own runtime.
 
-use std::{collections::HashMap, time::Duration};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 
 use catmail_core::{
-    FolderId, FolderRole, MailClient, MessageId, MessageSummary, RecvError,
+    Event, MailClient, MessageId, MessageSummary, RecvError,
     html::{DarkPalette, InlineImage, recolor_html},
 };
+use catmail_frontend::html::is_openable_link;
+use catmail_frontend::mailbox::{Place, REFRESH_INTERVAL};
+use catmail_frontend::refresh::{Refresh, Throttle};
 use nsh_base::theme;
+use nsh_core::element::Owner;
 use nsh_core::prelude::*;
 
-use catmail_frontend::html::is_openable_link;
-
 use crate::page::{self, Colors, FromPage};
+use crate::sidebar::{self, SelectedPlace};
 
-fn client() -> MailClient {
+pub fn client() -> MailClient {
     crate::engine::client()
 }
 
 /// Messages fetched at a time.
 const PAGE: u32 = 200;
 
-#[derive(Clone, PartialEq)]
-enum SidebarRow {
-    Account(String),
-    Folder {
-        id: FolderId,
-        label: String,
-        depth: usize,
-        unread: u32,
-    },
-}
-
 #[derive(Clone, Default)]
-struct Sidebar(Vec<SidebarRow>);
-
-#[derive(Clone, Default)]
-struct SelectedFolder(Option<FolderId>);
-
-#[derive(Clone, Default)]
-struct SelectedMessage(Option<MessageId>);
+pub struct SelectedMessage(pub Option<MessageId>);
 
 #[derive(Clone, Default)]
 struct Messages {
@@ -65,12 +53,35 @@ struct BodyHeight(f32);
 
 /// The last error, shown at the bottom of the sidebar.
 #[derive(Clone, Default)]
-struct Status(Option<String>);
+pub struct Status(pub Option<String>);
 
-fn report(what: &str, error: catmail_core::Error) {
+/// `what` failed ("Couldn't load folders"), and why.
+pub fn report(what: &str, error: catmail_core::Error) {
     tracing::warn!(error = format!("{error:#}"), "{what}");
     global::<Status>().set(Status(Some(format!("{what}: {error}"))));
 }
+
+/// The mailbox's owner, which the work it starts from anywhere in it belongs to: a
+/// row's press, say, starts what outlives the row.
+#[derive(Clone, Default)]
+struct MailboxOwner(Option<Owner>);
+
+/// Runs `future` for as long as the mailbox is shown.
+pub fn in_mailbox(future: impl Future<Output = ()> + 'static) {
+    let owner = global::<MailboxOwner>().with_untracked(|o| o.0);
+    match owner {
+        Some(owner) => {
+            owner.run(|| spawn(future));
+        }
+        None => {
+            spawn(future);
+        }
+    }
+}
+
+/// What the engine's events ask to read again, held back between reads. Not reactive.
+#[derive(Clone, Default)]
+struct Throttled(Rc<RefCell<Throttle>>);
 
 /// Whether the engine is open yet.
 #[derive(Clone, PartialEq)]
@@ -123,14 +134,14 @@ fn failed(reason: String) -> impl IntoElement {
 }
 
 fn mailbox() -> impl IntoElement {
-    spawn(load_sidebar());
+    global::<MailboxOwner>().set(MailboxOwner(Some(Owner::current())));
+    sidebar::load();
     spawn(watch_events());
-    // The tasks belong to the effects' runs: picking another folder or message cancels
+    // The tasks belong to the effects' runs: picking another place or message cancels
     // what is still loading for the last one.
     effect(move || {
-        if let Some(folder) = global::<SelectedFolder>().with(|s| s.0) {
-            spawn(load_messages(folder));
-        }
+        let place = global::<SelectedPlace>().with(|s| s.0);
+        spawn(load_messages(place));
     });
     effect(move || {
         // Read here so the page is made again when the appearance changes.
@@ -145,66 +156,36 @@ fn mailbox() -> impl IntoElement {
     view()
         .flex_1()
         .flex_row()
-        .child(sidebar())
+        .child(sidebar::sidebar())
         .child(message_list())
         .child(reader())
 }
 
 // --- Loading ------------------------------------------------------------------------
 
-async fn load_sidebar() {
-    let accounts = match client().list_accounts().await {
-        Ok(accounts) => accounts,
-        Err(e) => return report("couldn't list accounts", e),
-    };
-    let mut rows = Vec::new();
-    let mut inbox = None;
-    for account in accounts {
-        rows.push(SidebarRow::Account(account.email.clone()));
-        let folders = match client().list_folders(account.id).await {
-            Ok(folders) => folders,
-            Err(e) => {
-                report("couldn't list folders", e);
-                continue;
-            }
-        };
-        for folder in folders.into_iter().filter(|f| f.selectable) {
-            if inbox.is_none() && folder.role == Some(FolderRole::Inbox) {
-                inbox = Some(folder.id);
-            }
-            let (depth, label) = match folder.delimiter {
-                Some(d) => (
-                    folder.name.matches(d).count(),
-                    folder
-                        .name
-                        .rsplit(d)
-                        .next()
-                        .unwrap_or(&folder.name)
-                        .to_owned(),
-                ),
-                None => (0, folder.name.clone()),
-            };
-            rows.push(SidebarRow::Folder {
-                id: folder.id,
-                label,
-                depth,
-                unread: folder.unread_count,
-            });
-        }
-    }
-    global::<Sidebar>().set(Sidebar(rows));
-    let selected = global::<SelectedFolder>();
-    if selected.with_untracked(|s| s.0.is_none()) {
-        selected.set(SelectedFolder(inbox));
+/// A page of what `place` lists, after `after`. The drafts and the outbox are lists of
+/// their own (P3).
+async fn list_page(
+    place: Place,
+    limit: u32,
+    after: Option<catmail_core::MessageCursor>,
+) -> catmail_core::Result<Vec<MessageSummary>> {
+    match place {
+        Place::Inboxes => client().list_inboxes(limit, after).await,
+        Place::Folder(folder) => client().list_messages(folder, limit, after).await,
+        Place::Drafts(_) | Place::Outbox(_) => Ok(Vec::new()),
     }
 }
 
-async fn load_messages(folder: FolderId) {
+async fn load_messages(place: Option<Place>) {
     global::<Messages>().set(Messages {
-        loading: true,
+        loading: place.is_some(),
         ..Messages::default()
     });
-    match client().list_messages(folder, PAGE, None).await {
+    let Some(place) = place else {
+        return;
+    };
+    match list_page(place, PAGE, None).await {
         Ok(list) => {
             // For looking at the reader without a mouse (screenshots of the spike): the
             // message at that index opens.
@@ -224,7 +205,7 @@ async fn load_messages(folder: FolderId) {
         }
         Err(e) => {
             global::<Messages>().update(|m| m.loading = false);
-            report("couldn't list messages", e);
+            report("Couldn't list messages", e);
         }
     }
 }
@@ -232,7 +213,7 @@ async fn load_messages(folder: FolderId) {
 /// The next page of the open folder.
 async fn load_more() {
     let messages = global::<Messages>();
-    let Some(folder) = global::<SelectedFolder>().with_untracked(|s| s.0) else {
+    let Some(place) = global::<SelectedPlace>().with_untracked(|s| s.0) else {
         return;
     };
     let Some(after) = messages.with_untracked(|m| {
@@ -243,7 +224,7 @@ async fn load_more() {
         return;
     };
     messages.update(|m| m.loading = true);
-    match client().list_messages(folder, PAGE, Some(after)).await {
+    match list_page(place, PAGE, Some(after)).await {
         Ok(page) => messages.update(|m| {
             m.more = page.len() == PAGE as usize;
             m.list.extend(page);
@@ -251,48 +232,91 @@ async fn load_more() {
         }),
         Err(e) => {
             messages.update(|m| m.loading = false);
-            report("couldn't list messages", e);
+            report("Couldn't list messages", e);
         }
     }
 }
 
-/// Mail changed: the counts and the open folder's first page again. Events come in
-/// bursts during a sync, so a quarter second of them is one refresh.
+/// Follows the engine's events, as the GUI does (`Refresh::after`): what they change is
+/// read again, a burst of them (a sync sends one per batch of messages) a read per
+/// interval.
 async fn watch_events() {
     let mut events = client().subscribe();
     loop {
-        match events.recv().await {
-            Ok(_) | Err(RecvError::Lagged(_)) => {}
+        let event = match events.recv().await {
+            Ok(event) => Some(event),
+            Err(RecvError::Lagged(_)) => None,
             Err(RecvError::Closed) => return,
-        }
-        timer(Duration::from_millis(250)).await;
-        // Drops what came meanwhile: the refresh covers it.
-        events = events.resubscribe();
-        load_sidebar().await;
-        if let Some(folder) = global::<SelectedFolder>().with_untracked(|s| s.0) {
-            refresh_messages(folder).await;
-        }
+        };
+        on_event(event.as_ref());
     }
 }
 
-/// The open folder's messages again, as many as are shown, keeping the place.
-async fn refresh_messages(folder: FolderId) {
-    let shown = global::<Messages>().with_untracked(|m| m.list.len()) as u32;
-    if let Ok(list) = client().list_messages(folder, shown.max(PAGE), None).await
-        && global::<SelectedFolder>().with_untracked(|s| s.0) == Some(folder)
-    {
-        global::<Messages>().update(|m| {
-            m.more = list.len() as u32 == shown.max(PAGE);
-            m.list = list;
-        });
+fn on_event(event: Option<&Event>) {
+    if event.is_none() {
+        // Before reading the sidebar again, so the read isn't taken for an old one.
+        sidebar::missed_events();
     }
+    let shown = global::<SelectedPlace>().with_untracked(|p| p.0.map(Place::source));
+    let refresh = Refresh::after(event, shown.as_ref(), &sidebar::shown_folders());
+    let refresh = throttle().borrow_mut().ask(refresh);
+    read_again(refresh);
+    match event {
+        Some(&Event::AccountStatusChanged { account }) => sidebar::status_changed(account),
+        Some(&Event::DraftsChanged { account }) => sidebar::count_drafts(account),
+        _ => {}
+    }
+}
+
+fn throttle() -> Rc<RefCell<Throttle>> {
+    global::<Throttled>().with_untracked(|t| t.0.clone())
+}
+
+/// Reads the sidebar or the list again, as [`Throttle::ask`] or [`Throttle::elapsed`]
+/// said, and waits out an interval after that.
+fn read_again(refresh: Refresh) {
+    if refresh.is_empty() {
+        return;
+    }
+    if refresh.sidebar {
+        sidebar::load();
+    }
+    if refresh.list {
+        refresh_list();
+    }
+    in_mailbox(async {
+        timer(REFRESH_INTERVAL).await;
+        let held = throttle().borrow_mut().elapsed();
+        read_again(held);
+    });
+}
+
+/// The list's first rows again, as many as are shown, keeping the place.
+pub fn refresh_list() {
+    let Some(place) = global::<SelectedPlace>().with_untracked(|p| p.0) else {
+        return;
+    };
+    in_mailbox(async move {
+        let shown = global::<Messages>().with_untracked(|m| m.list.len()) as u32;
+        let limit = shown.max(PAGE);
+        match list_page(place, limit, None).await {
+            Ok(list) if global::<SelectedPlace>().with_untracked(|p| p.0) == Some(place) => {
+                global::<Messages>().update(|m| {
+                    m.more = list.len() as u32 == limit;
+                    m.list = list;
+                });
+            }
+            Ok(_) => {}
+            Err(e) => report("Couldn't list messages", e),
+        }
+    });
 }
 
 async fn open_message(id: MessageId, dark: bool) {
     global::<BodyHeight>().set(BodyHeight(0.0));
     let message = match client().download_message(id).await {
         Ok(message) => message,
-        Err(e) => return report("couldn't open the message", e),
+        Err(e) => return report("Couldn't open the message", e),
     };
     let summary = &message.summary;
     let body = message.body.as_ref();
@@ -315,7 +339,7 @@ async fn open_message(id: MessageId, dark: bool) {
                         },
                     );
                 }
-                Err(e) => report("couldn't load an inline image", e),
+                Err(e) => report("Couldn't load an inline image", e),
             }
         }
     }
@@ -381,82 +405,6 @@ fn format_date(seconds: i64) -> String {
 }
 
 // --- Panes --------------------------------------------------------------------------
-
-fn sidebar() -> impl IntoElement {
-    view()
-        .w(px(240.0))
-        .border_r_1()
-        .border_color(move || theme().border)
-        .bg(move || theme().sidebar)
-        .child(
-            virtual_list(move || global::<Sidebar>().with(|s| s.0.len()), sidebar_row)
-                .estimated_item_size(px(30.0))
-                .flex_1(),
-        )
-        .child(
-            text(move || global::<Status>().with(|s| s.0.clone().unwrap_or_default()))
-                .text_xs()
-                .px(px(12.0))
-                .py(px(6.0))
-                .text_color(move || theme().destructive),
-        )
-}
-
-fn sidebar_row(at: Position) -> impl IntoElement {
-    let row = computed(move || global::<Sidebar>().with(|s| s.0.get(at.index()).cloned()));
-    let folder = move || match row.get() {
-        Some(SidebarRow::Folder { id, .. }) => Some(id),
-        _ => None,
-    };
-    let is_account = move || matches!(row.get(), Some(SidebarRow::Account(_)));
-    let selected =
-        move || folder().is_some() && folder() == global::<SelectedFolder>().with(|s| s.0);
-    view()
-        .h(px(30.0))
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .pr(px(12.0))
-        .pl(move || {
-            px(match row.get() {
-                Some(SidebarRow::Folder { depth, .. }) => 20.0 + depth as f32 * 14.0,
-                _ => 12.0,
-            })
-        })
-        .style_when(selected, |s| s.bg(move || theme().sidebar_accent))
-        .on_press(move || {
-            if let Some(id) = folder() {
-                global::<SelectedMessage>().set(SelectedMessage(None));
-                global::<SelectedFolder>().set(SelectedFolder(Some(id)));
-            }
-        })
-        .child(
-            text(move || match row.get() {
-                Some(SidebarRow::Account(email)) => email,
-                Some(SidebarRow::Folder { label, .. }) => label,
-                None => String::new(),
-            })
-            .number_of_lines(1)
-            .flex_1()
-            .text_sm()
-            .style_when(is_account, |s| s.font_weight(FontWeight::SEMIBOLD))
-            .text_color(move || {
-                if is_account() {
-                    theme().muted_foreground
-                } else {
-                    theme().sidebar_foreground
-                }
-            }),
-        )
-        .child(
-            text(move || match row.get() {
-                Some(SidebarRow::Folder { unread, .. }) if unread > 0 => unread.to_string(),
-                _ => String::new(),
-            })
-            .text_xs()
-            .text_color(move || theme().muted_foreground),
-        )
-}
 
 fn message_list() -> impl IntoElement {
     view()
