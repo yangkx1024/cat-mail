@@ -9,6 +9,8 @@
 #[cfg(target_os = "linux")]
 mod app;
 #[cfg(target_os = "linux")]
+mod commands;
+#[cfg(target_os = "linux")]
 mod engine;
 #[cfg(target_os = "linux")]
 mod icons;
@@ -16,9 +18,13 @@ mod icons;
 mod list;
 mod page;
 #[cfg(target_os = "linux")]
+mod reader;
+#[cfg(target_os = "linux")]
 mod shell;
 #[cfg(target_os = "linux")]
 mod sidebar;
+#[cfg(target_os = "linux")]
+mod toast;
 
 #[cfg(target_os = "linux")]
 fn main() -> anyhow::Result<std::process::ExitCode> {

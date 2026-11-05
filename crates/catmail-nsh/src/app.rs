@@ -4,15 +4,9 @@
 //! awaited in nsh tasks on the UI thread; the engine does the work on its own runtime.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
-use catmail_core::{
-    Event, MailClient, MessageId, RecvError,
-    html::{DarkPalette, InlineImage, recolor_html},
-};
-use catmail_frontend::html::is_openable_link;
-use catmail_frontend::list::RowId;
+use catmail_core::{Event, MailClient, RecvError};
 use catmail_frontend::mailbox::{Place, REFRESH_INTERVAL};
 use catmail_frontend::refresh::{Refresh, Throttle};
 use nsh_base::theme;
@@ -20,33 +14,18 @@ use nsh_core::element::Owner;
 use nsh_core::prelude::*;
 
 use crate::list::{self, Rows, Selected};
-use crate::page::{self, Colors, FromPage};
 use crate::sidebar::{self, SelectedPlace};
+use crate::toast::{Level, notify};
+use crate::{commands, reader, toast};
 
 pub fn client() -> MailClient {
     crate::engine::client()
 }
 
-#[derive(Clone, Default)]
-struct Reading {
-    subject: String,
-    from: String,
-    date: String,
-    page: String,
-}
-
-/// The body's height in points, as the page reports it.
-#[derive(Clone, Default)]
-struct BodyHeight(f32);
-
-/// The last error, shown at the bottom of the sidebar.
-#[derive(Clone, Default)]
-pub struct Status(pub Option<String>);
-
-/// `what` failed ("Couldn't load folders"), and why.
+/// `what` failed ("Couldn't load folders"), and why: a notification, as the GUI's.
 pub fn report(what: &str, error: catmail_core::Error) {
     tracing::warn!(error = format!("{error:#}"), "{what}");
-    global::<Status>().set(Status(Some(format!("{what}: {error}"))));
+    notify(Level::Error, format!("{what}: {error}"));
 }
 
 /// The mailbox's owner, which the work it starts from anywhere in it belongs to: a
@@ -98,6 +77,7 @@ pub fn App() -> impl IntoElement {
             Opening::Open => mailbox().into_element(),
             Opening::Failed(reason) => failed(reason).into_element(),
         }))
+        .child(toast::toasts())
 }
 
 fn failed(reason: String) -> impl IntoElement {
@@ -124,6 +104,8 @@ fn failed(reason: String) -> impl IntoElement {
 fn mailbox() -> impl IntoElement {
     global::<MailboxOwner>().set(MailboxOwner(Some(Owner::current())));
     sidebar::load();
+    // Those refused while no window was open.
+    commands::report_refused_changes();
     spawn(watch_events());
     effect(move || {
         let place = global::<SelectedPlace>().with(|s| s.0);
@@ -133,19 +115,7 @@ fn mailbox() -> impl IntoElement {
             list::show(place.map(Place::source));
         });
     });
-    // The task belongs to the effect's run: opening another message cancels what is
-    // still loading for the last one.
-    effect(move || {
-        // Read here so the page is made again when the appearance changes.
-        let dark = dark();
-        match global::<Selected>().with(|s| s.0) {
-            Some(RowId::Message(id)) => {
-                spawn(open_message(id, dark));
-            }
-            // Drafts and the outbox have panes of their own (P5, P6).
-            _ => global::<Reading>().set(Reading::default()),
-        }
-    });
+    effect(reader::follow_selection);
     // As the GUI's: Escape closes what is open.
     on_key("escape", |_| global::<Selected>().set(Selected(None)));
     view()
@@ -168,7 +138,8 @@ fn mailbox() -> impl IntoElement {
                 .border_color(move || theme().border)
                 .child(list::list_column()),
         )
-        .child(when(list::reading, reader))
+        .child(when(list::reading, reader::reader))
+        .child(commands::picker())
 }
 
 /// Follows the engine's events, as the GUI does (`Refresh::after`): what they change is
@@ -198,6 +169,8 @@ fn on_event(event: Option<&Event>) {
     match event {
         Some(&Event::AccountStatusChanged { account }) => sidebar::status_changed(account),
         Some(&Event::DraftsChanged { account }) => sidebar::count_drafts(account),
+        // Missed events may have been some.
+        Some(Event::ChangesRefused { .. }) | None => commands::report_refused_changes(),
         _ => {}
     }
 }
@@ -223,152 +196,4 @@ fn read_again(refresh: Refresh) {
         let held = throttle().borrow_mut().elapsed();
         read_again(held);
     });
-}
-
-async fn open_message(id: MessageId, dark: bool) {
-    global::<BodyHeight>().set(BodyHeight(0.0));
-    let message = match client().download_message(id).await {
-        Ok(message) => message,
-        Err(e) => return report("Couldn't open the message", e),
-    };
-    let summary = &message.summary;
-    let body = message.body.as_ref();
-    let mut inline = HashMap::new();
-    if let Some(body) = body.filter(|b| b.html.is_some()) {
-        for part in &body.attachments {
-            let Some(content_id) = &part.content_id else {
-                continue;
-            };
-            if !part.mime_type.starts_with("image/") {
-                continue;
-            }
-            match client().attachment_content(part.id).await {
-                Ok(bytes) => {
-                    inline.insert(
-                        content_id.clone(),
-                        InlineImage {
-                            mime_type: part.mime_type.clone(),
-                            bytes,
-                        },
-                    );
-                }
-                Err(e) => report("Couldn't load an inline image", e),
-            }
-        }
-    }
-    // For checking what the page may load: this file's HTML in place of the message's.
-    let probe = std::env::var_os("CATMAIL_NSH_HTML").and_then(|f| std::fs::read_to_string(f).ok());
-    let html = probe.as_deref().or(body.and_then(|b| b.html.as_deref()));
-    // A dark page moves the message's colors toward the theme's, as the GUI does; one
-    // whose colors come from CSS variables can't be moved and stays light.
-    let recolored = html
-        .filter(|_| dark)
-        .and_then(|html| recolor_html(html, palette()));
-    let (html, dark) = match &recolored {
-        Some(html) => (Some(html.as_ref()), true),
-        None => (html, false),
-    };
-    let page = page::body_page(
-        html,
-        body.and_then(|b| b.text.as_deref()),
-        inline,
-        &colors(dark),
-    );
-    global::<Reading>().set(Reading {
-        subject: summary.subject.clone().unwrap_or_default(),
-        from: summary
-            .from
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", "),
-        date: summary.date.map(format_date).unwrap_or_default(),
-        page,
-    });
-}
-
-fn palette() -> DarkPalette {
-    let rgb = |c: AdaptiveColor| {
-        let c = c.dark.to_rgb();
-        [c.r, c.g, c.b].map(|v| (v * 255.0).round() as u8)
-    };
-    DarkPalette {
-        background: rgb(theme().background),
-        foreground: rgb(theme().foreground),
-    }
-}
-
-fn colors(dark: bool) -> Colors {
-    let pick = |c: AdaptiveColor| if dark { c.dark } else { c.light }.to_hex();
-    Colors {
-        foreground: pick(theme().foreground),
-        background: pick(theme().background),
-        link: pick(theme().primary),
-    }
-}
-
-fn format_date(seconds: i64) -> String {
-    jiff::Timestamp::from_second(seconds)
-        .map(|t| {
-            t.to_zoned(jiff::tz::TimeZone::system())
-                .strftime("%Y-%m-%d %H:%M")
-                .to_string()
-        })
-        .unwrap_or_default()
-}
-
-// --- Panes --------------------------------------------------------------------------
-
-fn reader() -> impl IntoElement {
-    let reading = global::<Reading>();
-    scroll().flex_1().child(
-        view()
-            .child(
-                view()
-                    .px(px(16.0))
-                    .pt(px(16.0))
-                    .gap(px(4.0))
-                    .child(
-                        text(move || reading.with(|r| r.subject.clone()))
-                            .text_lg()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .selectable(true)
-                            .text_color(move || theme().foreground),
-                    )
-                    .child(
-                        view()
-                            .flex_row()
-                            .gap(px(8.0))
-                            .child(
-                                text(move || reading.with(|r| r.from.clone()))
-                                    .flex_1()
-                                    .text_sm()
-                                    .selectable(true)
-                                    .text_color(move || theme().foreground),
-                            )
-                            .child(
-                                text(move || reading.with(|r| r.date.clone()))
-                                    .text_xs()
-                                    .text_color(move || theme().muted_foreground),
-                            ),
-                    ),
-            )
-            .child(
-                // One web view for every message: a new page loads into it.
-                web_view_html(move || reading.with(|r| r.page.clone()), None)
-                    .java_script_enabled(false)
-                    .scrollable(false)
-                    .injected_java_script(page::BRIDGE.to_owned())
-                    .on_message(move |message: &str| match FromPage::parse(message) {
-                        Some(FromPage::Height(height)) => {
-                            global::<BodyHeight>().set(BodyHeight(height));
-                        }
-                        Some(FromPage::Open(url)) if is_openable_link(url) => {
-                            spawn(open_url(url.to_owned()));
-                        }
-                        _ => {}
-                    })
-                    .h(move || px(global::<BodyHeight>().with(|h| h.0).max(40.0))),
-            ),
-    )
 }

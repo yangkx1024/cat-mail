@@ -85,9 +85,11 @@
             RUST_SRC_PATH = pkgs.rustPlatform.rustLibSrc;
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (guiLibs ++ guiRuntimeLibs);
             env = linkWithMold;
-            # Unset means the default directories, which must stay.
+            # Unset means the default directories, which must stay. GTK's GSettings
+            # schemas (catmail-nsh's file dialogs abort without them) are where
+            # wrapGAppsHook would point a packaged app.
             shellHook = ''
-              export XDG_DATA_DIRS=${cjkFonts}/share:''${XDG_DATA_DIRS:-/usr/local/share:/usr/share}
+              export XDG_DATA_DIRS=${cjkFonts}/share:${pkgs.gtk4}/share/gsettings-schemas/${pkgs.gtk4.name}:${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}:''${XDG_DATA_DIRS:-/usr/local/share:/usr/share}
             '';
           };
         in

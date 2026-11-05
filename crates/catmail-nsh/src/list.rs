@@ -9,10 +9,11 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use catmail_core::{Flags, FolderId, MessageCursor, MessageId, MessageSummary, SearchQuery};
+use catmail_frontend::commands::MessageCommand;
 use catmail_frontend::format;
 use catmail_frontend::list::{
-    self, Check, Days, PAGE, ROW_LABELS, Reselect, Row, RowId, SEARCH_DELAY, SERVER_SEARCH_DELAY,
-    Severity,
+    self, Check, Days, PAGE, ROW_LABELS, Removal, Reselect, Row, RowId, SEARCH_DELAY,
+    SERVER_SEARCH_DELAY, Severity,
 };
 use catmail_frontend::mailbox::{self, Source};
 use nsh_base::theme;
@@ -23,6 +24,7 @@ use nsh_core::geometry::Percentage;
 use nsh_core::prelude::*;
 
 use crate::app::{client, in_mailbox, report};
+use crate::commands::{self, Size};
 use crate::icons::{Icon, icon};
 use crate::sidebar::{Accounts, SelectedPlace};
 
@@ -114,6 +116,11 @@ struct Loads {
     typed: u64,
     /// `CATMAIL_NSH_OPEN` opened its row already.
     opened_from_env: bool,
+    /// Reads of the rows shown started so far (not of more pages).
+    reads: u64,
+    /// The message the user moved or deleted: once it is gone while still selected, the
+    /// next row still there opens.
+    removal: Removal,
 }
 
 #[derive(Clone, Default)]
@@ -142,6 +149,7 @@ pub fn show(source: Option<Source>) {
         loads.generation += 1;
         loads.stale = false;
         loads.found_on_server = Rc::new([]);
+        loads.removal.clear();
         loads.generation
     };
     if let Some(Source::Search(text)) = &source {
@@ -212,10 +220,13 @@ fn load(what: Load) {
         Load::Replace(n) => (n, None),
         Load::After(cursor) => (PAGE, Some(cursor)),
     };
-    let (generation, found_on_server) = {
+    let (generation, found_on_server, read) = {
         let loads = loads();
-        let loads = loads.borrow();
-        (loads.generation, loads.found_on_server.clone())
+        let mut loads = loads.borrow_mut();
+        if after.is_none() {
+            loads.reads += 1;
+        }
+        (loads.generation, loads.found_on_server.clone(), loads.reads)
     };
     global::<Rows>().update(|r| r.loading = true);
     in_mailbox(async move {
@@ -234,7 +245,10 @@ fn load(what: Load) {
                 shown.has_more = more;
                 shown.loading = false;
             }),
-            Ok((rows, more)) => replace(rows, more),
+            Ok((rows, more)) => {
+                loads().borrow_mut().removal.read(read, &rows);
+                replace(rows, more);
+            }
             Err(e) => {
                 global::<Rows>().update(|r| r.loading = false);
                 report("Couldn't load the list", e);
@@ -259,8 +273,15 @@ fn replace(rows: Vec<Row>, more: bool) {
     let selected = global::<Selected>().with_untracked(|s| s.0);
     let next = shown.with_untracked(|r| {
         let at = selected.and_then(|id| r.rows.iter().position(|row| row.id() == id));
-        list::reselect(at.zip(selected), None, &r.rows, &rows)
+        loads()
+            .borrow_mut()
+            .removal
+            .reselect(at.zip(selected), &r.rows, &rows)
     });
+    let next_row = match next {
+        Reselect::Next(ix) => rows.get(ix).map(Row::id),
+        _ => None,
+    };
     // Those gone are no longer checked: moved, deleted, or expunged on the server.
     let listed: HashSet<_> = rows.iter().filter_map(Row::message).map(|m| m.id).collect();
     let checked = global::<Checked>();
@@ -275,10 +296,12 @@ fn replace(rows: Vec<Row>, more: bool) {
         r.has_more = more;
         r.loading = false;
     });
-    match next {
-        Reselect::Keep { .. } => {}
-        // Nothing is waited for to go: the row went on its own.
-        Reselect::Next(_) | Reselect::Gone => global::<Selected>().set(Selected(None)),
+    match (next, next_row) {
+        (Reselect::Keep { .. }, _) => {}
+        // The user moved or deleted it: on to the next, as if the user opened that.
+        (Reselect::Next(_), Some(row)) => open(row),
+        // Gone on its own: expunged, sent, a new UIDVALIDITY.
+        _ => global::<Selected>().set(Selected(None)),
     }
     open_from_env();
 }
@@ -312,6 +335,107 @@ fn load_more() {
     });
     if let Some(after) = after {
         load(Load::After(after));
+    }
+}
+
+/// The user opened `row` (or the list moved on to it from one the user moved): opening a
+/// message marks it read, unless the settings say not to. Read again after a refresh, it
+/// stays as it is.
+pub fn open(row: RowId) {
+    global::<Selected>().set(Selected(Some(row)));
+    let RowId::Message(id) = row else {
+        return;
+    };
+    if crate::shell::settings().mark_read_on_open
+        && message(id).is_some_and(|m| !m.flags.contains(Flags::SEEN))
+    {
+        commands::set_flags(vec![id], Flags::SEEN, Flags::empty());
+    }
+}
+
+/// The message listed with `id`. Tracked.
+pub fn message(id: MessageId) -> Option<MessageSummary> {
+    global::<Rows>().with(|r| {
+        r.rows
+            .iter()
+            .filter_map(Row::message)
+            .find(|m| m.id == id)
+            .cloned()
+    })
+}
+
+/// The selected row's identity. Tracked.
+pub fn selected_id() -> Option<MessageId> {
+    match global::<Selected>().with(|s| s.0) {
+        Some(RowId::Message(id)) => Some(id),
+        _ => None,
+    }
+}
+
+/// The selected message, as the list has it now. Tracked.
+pub fn selected_message() -> Option<MessageSummary> {
+    message(selected_id()?)
+}
+
+/// The messages checked, top to bottom. Tracked.
+pub fn checked_messages() -> Vec<MessageSummary> {
+    let checked = global::<Checked>().with(|c| c.0.clone());
+    if checked.is_empty() {
+        return Vec::new();
+    }
+    global::<Rows>().with(|r| {
+        r.rows
+            .iter()
+            .filter_map(Row::message)
+            .filter(|m| checked.contains(&m.id))
+            .cloned()
+            .collect()
+    })
+}
+
+/// What a key acts on: the messages checked, or else the selected one.
+fn keyed() -> Vec<MessageSummary> {
+    let checked = untracked(checked_messages);
+    if checked.is_empty() {
+        untracked(selected_message).into_iter().collect()
+    } else {
+        checked
+    }
+}
+
+/// Unchecks the messages moved or deleted: those still listed (on Gmail, one moved to a
+/// label from All Mail) have been dealt with.
+pub fn uncheck(ids: &[MessageId]) {
+    let checked = global::<Checked>();
+    if checked.with_untracked(|c| ids.iter().any(|id| c.0.contains(id))) {
+        checked.update(|c| c.0.retain(|id| !ids.contains(id)));
+    }
+}
+
+/// Whether the list shows search results.
+pub fn is_searching() -> bool {
+    global::<Rows>().with_untracked(|r| matches!(r.source, Some(Source::Search(_))))
+}
+
+/// Selects the next row once `id`, the selected message, goes away. Returns the
+/// removal's number, for [`removal_settled`].
+pub fn expect_removal(id: MessageId) -> u64 {
+    loads().borrow_mut().removal.expect(id)
+}
+
+/// The change behind `removal`, which may take the message out of the list, was made
+/// locally (`made`), or failed: the rows are read again, and say whether it left
+/// ([`Removal::settled`]).
+pub fn removal_settled(removal: u64, made: bool) {
+    let again = {
+        let loads = loads();
+        let mut loads = loads.borrow_mut();
+        // A read in flight may have started before the change: the next one shows it.
+        let next_read = loads.reads + 1;
+        loads.removal.settled(removal, made, next_read)
+    };
+    if again {
+        refresh();
     }
 }
 
@@ -387,6 +511,24 @@ fn check(which: Check) {
     global::<Checked>().set(Checked(checked));
 }
 
+/// The keys of the commands on messages, as the GUI binds them: on those checked, or else
+/// the selected one.
+fn bind_command_keys() {
+    let keys = [
+        ("e", MessageCommand::Archive),
+        ("delete", MessageCommand::Delete),
+        ("backspace", MessageCommand::Delete),
+        ("mod+shift+m", MessageCommand::Move),
+        ("mod+shift+u", MessageCommand::ToggleRead),
+        ("mod+shift+l", MessageCommand::ToggleFlag),
+    ];
+    for (key, command) in keys {
+        on_key(key, move |_| commands::run(command, keyed()));
+    }
+    // Gmail's key for them.
+    on_key("l", |_| commands::edit_labels());
+}
+
 /// X, as Gmail's: checks the selected message, or unchecks it.
 fn toggle_selected() {
     if let Some(RowId::Message(id)) = global::<Selected>().with_untracked(|s| s.0) {
@@ -401,6 +543,7 @@ pub fn list_column() -> impl IntoElement {
     let list = element_ref();
     global::<ListRef>().set(ListRef(Some(list)));
     on_key("x", move |_| toggle_selected());
+    bind_command_keys();
     // Opening a row or closing it changes every row's height: the one opened, or just
     // closed, would move away from under the pointer.
     let last_selected = stored(None::<RowId>);
@@ -518,12 +661,27 @@ fn header() -> impl IntoElement {
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(move || theme().foreground),
                 )
-                .child(
-                    text(move || title.with(|t| t.1.clone().unwrap_or_default()))
-                        .text_xs()
-                        .text_color(move || theme().muted_foreground),
-                ),
+                .child(dynamic(move || {
+                    // The commands on the messages checked take the note's room.
+                    if has_checked() {
+                        view()
+                            .flex_1()
+                            .flex_row()
+                            .justify_end()
+                            .child(commands::buttons(checked_messages, Size::Bar))
+                            .into_element()
+                    } else {
+                        text(move || title.with(|t| t.1.clone().unwrap_or_default()))
+                            .text_xs()
+                            .text_color(move || theme().muted_foreground)
+                            .into_element()
+                    }
+                })),
         )
+}
+
+fn has_checked() -> bool {
+    global::<Checked>().with(|c| !c.0.is_empty())
 }
 
 /// Checks every message listed, or none; its menu checks those read, flagged and so on.
@@ -641,7 +799,7 @@ fn row_box(row: impl Fn() -> Option<Row> + Copy + 'static) -> View {
         .style_when(selected, |s| s.bg(move || theme().accent))
         .on_press(move || {
             if let Some(id) = id() {
-                global::<Selected>().set(Selected(Some(id)));
+                open(id);
             }
         })
 }
@@ -763,11 +921,22 @@ fn message_row(item: Memo<Option<Item>>) -> impl IntoElement {
                             .text_color(move || theme().foreground),
                     )
                     .child(
+                        // Only as wide as it is: the commands shown while hovered
+                        // follow it.
                         subject()
-                            .flex_1()
+                            .flex_shrink(1.0)
+                            .min_w(px(0.0))
                             .font_weight(weight())
                             .text_color(move || theme().foreground),
                     )
+                    // The commands, within reach of the pointer: the message isn't open.
+                    .child(when(hovered, move || {
+                        commands::buttons(
+                            move || message.with(|m| m.iter().cloned().collect()),
+                            Size::Row,
+                        )
+                    }))
+                    .child(view().flex_1())
                     // Whom it went to, while hovered.
                     .child(when(hovered, move || {
                         text(field(list::recipients))
@@ -791,6 +960,11 @@ fn label_names(message: &MessageSummary) -> Vec<String> {
         _ => None,
     });
     global::<LabelNames>().with(|l| list::label_names(&l.0, message, listed))
+}
+
+/// The names of all the message's user labels, as the reading pane shows them.
+pub fn user_label_names(message: &MessageSummary) -> Vec<String> {
+    global::<LabelNames>().with(|l| list::label_names(&l.0, message, None))
 }
 
 /// What follows the subject: the labels, the paper clip, the flag.
@@ -843,6 +1017,14 @@ const FLAG: Hsla = hsla(38.0 / 360.0, 0.92, 0.50, 1.0);
 /// The avatars' six hues ([`list::avatar_hue`]): red, green, yellow, blue, magenta, cyan.
 const HUES: [f32; 6] = [0.0, 140.0, 45.0, 215.0, 300.0, 185.0];
 
+/// An avatar's background, by the sender's address: a tint of their hue, as dark
+/// backgrounds need more of it to show as much.
+pub fn avatar_color(seed: &str) -> AdaptiveColor {
+    let hue = HUES[list::avatar_hue(seed)] / 360.0;
+    let share = if dark() { 0.30 } else { 0.22 };
+    hsla(hue, 0.65, 0.5, share).into()
+}
+
 /// The sender's initial on their hue, or a check while the message is checked; pressing
 /// it checks or unchecks the message, not opening it as well.
 fn avatar(message: Memo<Option<MessageSummary>>) -> View {
@@ -851,14 +1033,13 @@ fn avatar(message: Memo<Option<MessageSummary>>) -> View {
         let id = id();
         id.is_some_and(|id| global::<Checked>().with(|c| c.0.contains(&id)))
     };
-    let hue = move || {
-        let seed = message.with(|m| {
+    let seed = move || {
+        message.with(|m| {
             m.as_ref()
                 .and_then(|m| m.from.first())
                 .map(|a| a.email.clone())
                 .unwrap_or_default()
-        });
-        HUES[list::avatar_hue(&seed)] / 360.0
+        })
     };
     view()
         .w(px(24.0))
@@ -871,9 +1052,7 @@ fn avatar(message: Memo<Option<MessageSummary>>) -> View {
             if checked() {
                 theme().primary
             } else {
-                // A tint: dark backgrounds need more of the hue to show as much.
-                let share = if dark() { 0.30 } else { 0.22 };
-                hsla(hue(), 0.65, 0.5, share).into()
+                avatar_color(&seed())
             }
         })
         .label("Select")

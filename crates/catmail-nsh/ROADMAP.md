@@ -61,9 +61,9 @@
       两行时主题按实际行数占高，不必像 gpui 版那样总占两行
 - [x] 头像（姓名首字，底色按地址挑）；未读只用字重表示；Gmail 用户标签小标签（最多两个）
 - [x] 悬停的行显示 To 或 Cc
-- [ ] 悬停的行显示操作按钮（随 P4 的命令）
+- [x] 悬停的行显示操作按钮（一行排开时，跟在主题后面）
 - [x] 勾选多封：点头像或按 X 勾选；标题的勾选框和按标记勾选的菜单（原生 `popup_menu`）
-- [ ] 有勾选时标题换成批量工具栏（随 P4 的命令）
+- [x] 有勾选时标题旁的说明换成批量工具栏
 - [x] 搜索：200 ms 防抖；先显示本地结果，1 s 后再问服务器（`search_server`）；选侧栏时清空搜索
 - [x] 刷新规则对齐 `refresh::Refresh::after`：200 ms 节流、合并请求、结果没变不替换、按行的身份保持选中；
       选中的邮件消失时清空读信区；消失的邮件不再勾选
@@ -72,21 +72,30 @@
 
 ## P4 读信与操作（gui.md「读与改」「读信」）
 
-- [ ] 工具栏：Archive、Delete、Move to、Labels（Gmail）；已读 / 未读、Flag；Show remote images、Open in browser；
-      Reply、Reply all（`can_reply_all`）、Forward
-- [ ] 读信区工具栏、勾选工具栏、悬停的行用同一套按钮（`message_commands`、`Applies`、`MovePlan`）
-- [ ] 打开即已读（设置里可关；只在用户选中时标记）
-- [ ] 归档、删除、移动后打开下一封（`expect_removal`、`removal_settled`）
-- [ ] 永久删除先确认（`DeleteOutcome`）
-- [ ] "Move to"、"Labels"对话框（`FolderPicker`）
-- [ ] 服务器拒绝的改动用通知说明（`ChangesRefused`、`dismiss_settled`）
-- [ ] 远程图片：先显示缓存里的（`cached_remote_images`）；点击后用 `fetch_remote_images` 逐批显示。
-      ⚠️ 不重新加载页面，而是由注入脚本经 `post_message` 把 `data:` URL 填进对应的 `<img>`，否则会丢掉滚动位置。
-      CSP 照样只放行 `data:`
-- [ ] 附件列表；点击后弹系统保存对话框（`pick_save_path`、`safe_filename`）
-- [ ] 头部：头像；收件人一行只列名字；"Details"展开完整头部
-- [ ] 在浏览器打开（`hand_off`）
-- [ ] 正文的选中、复制、查找（WebKit 自带，接上快捷键）
+命令的模型在 `catmail-frontend`（`commands`：`Applies`、命令的名字、归档 / 移动作用于哪些邮件、"Move to"列出的
+文件夹、永久删除的确认文案、被拒改动的说明；`list::Removal`：移走后等它离开；`reader::Header`：头部），与 gpui 版
+共用；nsh 版只有界面（`commands.rs`、`reader.rs`、`toast.rs`）。
+
+- [x] 工具栏：返回；Archive、Delete、Move to、Labels（Gmail）；已读 / 未读、Flag；Show remote images、Open in browser
+- [ ] Reply、Reply all（`can_reply_all`）、Forward（随 P5 写信窗口）
+- [x] 读信区工具栏、勾选工具栏、悬停的行用同一套按钮（`commands::group`）；快捷键 E、Delete / Backspace、L、
+      Ctrl+Shift+M / U / L，作用于勾选的邮件，没有勾选时是选中的那封
+- [x] 打开即已读（读 `settings.json` 的 `mark_read_on_open`）；只在用户选中、或移走后打开下一封时标记
+- [x] 归档、删除、移动、去掉标签后打开下一封（`Removal`：`expect`、`settled`）
+- [x] 永久删除先确认（`DeleteOutcome`），原生 `alert_dialog`
+- [x] "Move to"、"Labels"对话框：输入即过滤，上下键和 Enter 或点击选；Labels 的勾选跟着列表里这封邮件的标签，
+      选中的不再是它时关掉
+- [x] 服务器拒绝的改动用通知说明（`ChangesRefused`、漏收事件、窗口打开时；`dismiss_settled`，一次一查）。
+      ⚠️ nsh-base 只有无样式的 toast 原件，通知的样式和计时在 `toast.rs`；出错不再写在侧栏底部，也改成通知
+- [x] 远程图片：先显示缓存里的（`cached_remote_images`）；点击后用 `fetch_remote_images` 逐批显示，换邮件即取消。
+      ⚠️ 不重新加载页面：注入脚本收到 `post_message` 后把 `data:` URL（`catmail_core::html::data_url`）填进对应的
+      `<img>` 和 `background`；页面因外观变化重新加载时（脚本报 `r`）再发一遍。CSP 照样只放行 `data:`
+- [x] 附件列表；点击后弹系统保存对话框（`pick_save_path`、`safe_filename`），写文件在另一个线程
+- [x] 头部：头像；收件人一行只列名字；"Details"展开完整头部；Gmail 用户标签
+- [x] 在浏览器打开（`hand_off`，`open_path`）
+- [ ] 正文的查找：WebKit 没有自带的查找栏，nsh 也没给 `WebKitFindController`，要自己用注入脚本做。
+      选中、复制、全选是 WebKit 自带的
+- [ ] 打开时先显示文字、内嵌图片后到（现在等内嵌图片取完才建页面：后到就要重新加载页面）
 
 ## P5 写信窗口（gui.md「写信窗口」，依赖 P1 多窗口）
 

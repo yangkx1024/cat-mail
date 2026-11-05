@@ -20,6 +20,16 @@ pub const APP_ID: &str = "net.yangkx.catmail.nsh";
 
 const TITLE: &str = "catmail";
 
+thread_local! {
+    /// The settings read at launch; the windows are on this thread.
+    static SETTINGS: RefCell<Settings> = RefCell::new(Settings::default());
+}
+
+/// The settings read at launch. Writing them comes with the settings dialog (P7).
+pub fn settings() -> Settings {
+    SETTINGS.with_borrow(Clone::clone)
+}
+
 /// Runs the app until it quits, then shuts the engine down.
 pub fn run(
     builder: MailClientBuilder,
@@ -33,6 +43,7 @@ pub fn run(
         .application_id(APP_ID)
         .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
         .build();
+    SETTINGS.set(settings.clone());
     let settings = Rc::new(settings);
     let starting = RefCell::new(Some((builder, requests)));
     let shown = settings.clone();
@@ -107,6 +118,7 @@ fn main_window(app: &gtk::Application, settings: &Settings) -> gtk::ApplicationW
     window.set_child(Some(&view.widget()));
     view.load(App::Rust(Root::of::<crate::app::App>()));
     close_on_ctrl_w(&window);
+    blur_on_press_outside(&window);
     // The window keeps the view and its nsh engine; closing it stops them.
     let kept = RefCell::new(Some(view));
     window.connect_destroy(move |_| {
@@ -174,4 +186,34 @@ fn close_on_ctrl_w(window: &gtk::ApplicationWindow) {
         Some(gtk::NamedAction::new("window.close")),
     ));
     window.add_controller(close);
+}
+
+/// A press outside the text field that has the focus takes the focus off it, as in a
+/// browser: typing in the search field, then clicking a row, gives the keys back to the
+/// window (E, X, L act on messages only while no field takes them). nsh's backend only
+/// sends a press to the innermost view that handles it, so no view of the app sees them
+/// all; the window does, before its widgets (capture), and leaves the press to them.
+fn blur_on_press_outside(window: &gtk::ApplicationWindow) {
+    let press = gtk::GestureClick::new();
+    press.set_button(0);
+    press.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let weak = window.downgrade();
+    press.connect_pressed(move |_, _, x, y| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let Some(focus) = GtkWindowExt::focus(&window) else {
+            return;
+        };
+        if !(focus.is::<gtk::Text>() || focus.is::<gtk::TextView>()) {
+            return;
+        }
+        let on_it = window
+            .pick(x, y, gtk::PickFlags::DEFAULT)
+            .is_some_and(|picked| picked == focus || picked.is_ancestor(&focus));
+        if !on_it {
+            GtkWindowExt::set_focus(&window, None::<&gtk::Widget>);
+        }
+    });
+    window.add_controller(press);
 }

@@ -491,13 +491,6 @@ pub fn sidebar() -> impl IntoElement {
                         .into_element(),
                 ),
         )
-        .child(
-            text(move || global::<crate::app::Status>().with(|s| s.0.clone().unwrap_or_default()))
-                .text_xs()
-                .px(px(12.0))
-                .pb(px(6.0))
-                .text_color(move || theme().destructive),
-        )
         .child(when(
             move || global::<NameDialog>().with(|n| n.0.is_some()),
             name_dialog,

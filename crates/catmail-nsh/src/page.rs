@@ -4,7 +4,9 @@
 //! checks top-level navigations, not a page's subresources. So the page shuts the
 //! network out itself: a Content-Security-Policy that allows nothing but `data:`
 //! images and inline styles, with every image the reader shows embedded as a `data:`
-//! URL first (inline parts here; remote ones the user asked for once that is tried).
+//! URL first: the inline parts in the page as it is made, remote ones (cached, or that the
+//! user asked for) sent to the page as they come, which puts them in place of the
+//! blocked URLs, so the page doesn't load again and lose its place.
 //! The page's own scripts are off (`java_script_enabled(false)`); the bridge below is
 //! an injected user script, which WebKit still runs.
 
@@ -24,9 +26,12 @@ const BASE_STYLE: &str = "html, body { margin: 0; } \
                           body { padding: 16px; overflow-x: auto; overflow-wrap: break-word; \
                           font-family: sans-serif; }";
 
-/// What the page tells the reader, through `window.nsh.postMessage`: its height
-/// (`h:<px>`), so the web view can be as tall as the page, and the links clicked
-/// (`o:<url>`), which open in the system's browser instead of in the view.
+/// What the page tells the reader, through `window.nsh.postMessage`: that it loaded
+/// (`r`), its height (`h:<px>`), so the web view can be as tall as the page, and the
+/// links clicked (`o:<url>`), which open in the system's browser instead of in the view.
+/// What the reader tells the page ([`image_message`]): the `data:` URL of a remote image
+/// shown, for the elements that refer to it (as `img.src` normalizes it, which is
+/// `remote_image_url`'s spelling too).
 pub const BRIDGE: &str = r#"(function () {
   var last = -1;
   function report() {
@@ -46,17 +51,43 @@ pub const BRIDGE: &str = r#"(function () {
       window.nsh.postMessage("o:" + a.href);
     }
   }, true);
+  function absolute(url) {
+    try { return new URL(url, document.baseURI).href; } catch (e) { return null; }
+  }
+  window.addEventListener("message", function (e) {
+    var d = String(e.data);
+    if (d.slice(0, 2) !== "i:") return;
+    var end = d.indexOf("\n");
+    var url = d.slice(2, end), data = d.slice(end + 1);
+    if (data.slice(0, 5) !== "data:") return;
+    document.querySelectorAll("img[src]").forEach(function (img) {
+      if (absolute(img.getAttribute("src")) === url) img.src = data;
+    });
+    document.querySelectorAll("[background]").forEach(function (el) {
+      if (absolute(el.getAttribute("background")) === url) el.setAttribute("background", data);
+    });
+  });
+  window.nsh.postMessage("r");
 })();"#;
+
+/// The message that puts a remote image's `data:` URL in place of `url` in the page.
+pub fn image_message(url: &str, data_url: &str) -> String {
+    format!("i:{url}\n{data_url}")
+}
 
 /// What a message from [`BRIDGE`] says.
 #[derive(Debug, PartialEq)]
 pub enum FromPage<'a> {
+    Ready,
     Height(f32),
     Open(&'a str),
 }
 
 impl<'a> FromPage<'a> {
     pub fn parse(message: &'a str) -> Option<Self> {
+        if message == "r" {
+            return Some(FromPage::Ready);
+        }
         if let Some(height) = message.strip_prefix("h:") {
             return height.parse().ok().map(FromPage::Height);
         }
@@ -164,6 +195,7 @@ mod tests {
             FromPage::parse("o:https://example.com/"),
             Some(FromPage::Open("https://example.com/"))
         );
+        assert_eq!(FromPage::parse("r"), Some(FromPage::Ready));
         assert_eq!(FromPage::parse("h:tall"), None);
         assert_eq!(FromPage::parse("x"), None);
     }
