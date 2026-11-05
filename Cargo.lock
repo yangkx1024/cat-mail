@@ -1133,18 +1133,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "catmail-frontend"
+version = "0.1.0"
+dependencies = [
+ "catmail-core",
+ "data-url",
+ "directories",
+ "dunce",
+ "futures-channel",
+ "jiff",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+ "uds_windows",
+]
+
+[[package]]
 name = "catmail-gui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "catmail-core",
+ "catmail-frontend",
  "catmail-render",
  "catmail-testkit",
  "clap",
  "ctrlc",
- "data-url",
  "directories",
- "dunce",
  "futures-channel",
  "gpui-kit",
  "image",
@@ -1156,14 +1173,12 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "pollster 1.0.1",
  "quick-xml",
- "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "toml 1.1.8+spec-1.1.0",
  "tracing",
- "uds_windows",
  "url",
 ]
 

@@ -6,9 +6,6 @@ mod actions;
 mod assets;
 mod composer;
 mod fonts;
-mod format;
-mod html;
-mod instance;
 mod layout;
 mod login_form;
 mod mailbox;
@@ -25,7 +22,9 @@ mod tray;
 
 use std::path::PathBuf;
 
+// Shared with the other frontends; kept at these paths, where the rest of the GUI finds them.
 use catmail_core::{BodyPrefetch, Config, DEFAULT_GC_INTERVAL, MailClient, SyncSchedule};
+use catmail_frontend::{format, html, instance};
 use clap::Parser;
 use gpui_kit::component::{ActiveTheme as _, StyledExt as _, v_flex};
 use gpui_kit::{
@@ -84,7 +83,8 @@ fn main() {
                 // Opening the engine says why.
                 Ok(Claim::Unavailable) => (Ok(MailClient::builder(config)), None),
                 Err(e) => {
-                    eprintln!("catmail-gui: {e:#}");
+                    // Through anyhow, for the cause after the error.
+                    eprintln!("catmail-gui: {:#}", anyhow::Error::from(e));
                     std::process::exit(1);
                 }
             }

@@ -12,19 +12,17 @@ path = "src/main.rs"
 
 [dependencies]
 catmail-core.workspace = true
+catmail-frontend.workspace = true
 catmail-render.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 ctrlc.workspace = true
-data-url.workspace = true
 directories.workspace = true
-dunce.workspace = true
 futures-channel.workspace = true
 gpui-kit.workspace = true
 image.workspace = true
 jiff.workspace = true
 quick-xml.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
@@ -42,9 +40,6 @@ libc.workspace = true
 objc2.workspace = true
 objc2-app-kit.workspace = true
 objc2-foundation.workspace = true
-
-[target.'cfg(windows)'.dependencies]
-uds_windows.workspace = true
 
 [dev-dependencies]
 catmail-testkit.workspace = true

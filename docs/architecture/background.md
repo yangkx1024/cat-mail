@@ -89,7 +89,7 @@ data"。macOS 由系统保证单实例，点 Dock 图标、常驻时从启动台
 Linux、Windows 上 GPUI 不提供
 （Linux 的 `on_reopen` 从不触发），自己做：
 
-- **端点是数据目录里的 Unix socket `gui.sock`**（`catmail-gui/src/instance.rs`），由持有数据目录锁的
+- **端点是数据目录里的 Unix socket `gui.sock`**（`catmail-frontend/src/instance.rs`），由持有数据目录锁的
   进程监听：目录只有本用户可访问，socket 本身也设成 0600。Windows 10 起也有 AF_UNIX，std 不支持，用 `uds_windows`（zbus 已经
   带进依赖树），三个平台一套代码；没有选 named pipe，那要自己设 DACL。
 - **路径太长时放进运行时目录。** socket 地址最多约 100 字节（`sun_path`：Linux、Windows 108，macOS 104），

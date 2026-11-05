@@ -6,8 +6,7 @@ use gpui_kit::component::ThemeConfig;
 use super::derive::theme_config;
 use super::palette::{Rgb, TerminalPalette};
 
-pub const DEFAULT_LIGHT: &str = "catmail Light";
-pub const DEFAULT_DARK: &str = "catmail Dark";
+pub use catmail_frontend::theme::{DEFAULT_DARK, DEFAULT_LIGHT};
 
 /// (name, background, foreground, ANSI 0–15).
 type Scheme = (&'static str, u32, u32, [u32; 16]);

@@ -21,11 +21,9 @@ M5 的界面设计稿（三栏、写信窗口、发件箱、设置与主题导�
 src/
   main.rs            启动：交给已在运行的实例或成为它，设置、主题、快捷键；主窗口（`MainWindow`）
   resident.rs        `Resident`：引擎、主窗口的关闭与重开、常驻时 headless（见[后台运行](background.md)）
-  instance.rs        单实例：数据目录里的 socket，之后的启动经它唤起主窗口
   memory.rs          常驻时把窗口释放的内存还给系统（glibc 的 `malloc_trim`）
   actions.rs         Action、key context 与快捷键
   assets.rs          资源：Heroicons，及替换 gpui-kit 组件图标
-  format.rs html.rs  时刻与日期分组（其余显示格式来自 `catmail_core::display`）；HTML 渲染策略
   layout.rs          共用的窗口（带 app id、macOS 的窗口外框）、工具栏与窗口的拖动区、右栏页面、名称与值的行、附件块、危险操作的确认框
   mailbox/           主窗口
     mod.rs           状态（账户、Place）、引擎事件、读侧栏、搜索、渲染与 Action 分派
@@ -41,7 +39,7 @@ src/
   reader/            读信：mod.rs 状态与操作，message.rs 打开的邮件，images.rs 内嵌与远程图片，view.rs 渲染，
                      page.rs Blitz 排版的页面
   composer/          写信窗口：mod.rs 打开与编辑，lifecycle.rs 保存 / 发送 / 关闭，view.rs 渲染
-  settings/          mod.rs 偏好（settings.json）；dialog/ 设置对话框（外观与主题、账户、读信分文件）
+  settings/          mod.rs 偏好（`Preferences` 全局，文件读写在 catmail-frontend）；dialog/ 设置对话框（外观与主题、账户、读信分文件）
   theme/             palette / derive / builtin / import/（纯逻辑：调色板、推导、内置、导入）；
                      appearance.rs 可选主题与应用；colors.rs 应用自己的颜色
 ```
@@ -57,7 +55,9 @@ src/
   搜索结果、本机草稿、发件箱。行按身份（`RowId`）保持选中。搜索框停顿 200 ms 才搜索，不是每个键都
   读一遍。本地结果先显示，1 秒后再问服务器，它找到正文没下载的邮件时再读一遍（见
   [问服务器](storage.md#问服务器)）。
-- 纯逻辑（文件夹分区、日期格式、HTML 策略、设置文件、主题推导与导入）不依赖窗口，单测覆盖。
+- 纯逻辑（文件夹分区、日期格式、HTML 策略、设置文件、主题推导与导入）不依赖窗口，单测覆盖。其中单实例
+  （`instance`）、日期格式（`format`）、HTML 策略（`html`）和设置文件（`settings`）在 `catmail-frontend`，
+  GUI 在 crate 根下按原路径引用（`crate::format` 等），别的前端也能用。
 
 ## 窗口外框（macOS）
 

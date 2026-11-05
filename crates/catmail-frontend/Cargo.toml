@@ -1,0 +1,26 @@
+[package]
+name = "catmail-frontend"
+description = "What catmail's desktop frontends share: settings, single instance, display formats, the reader's HTML policy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+catmail-core.workspace = true
+data-url.workspace = true
+directories.workspace = true
+dunce.workspace = true
+futures-channel.workspace = true
+jiff.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+uds_windows.workspace = true
+
+[lints]
+workspace = true

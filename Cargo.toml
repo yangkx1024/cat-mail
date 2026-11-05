@@ -14,6 +14,7 @@ catmail-store = { path = "crates/catmail-store" }
 catmail-proto = { path = "crates/catmail-proto" }
 catmail-html = { path = "crates/catmail-html" }
 catmail-core = { path = "crates/catmail-core" }
+catmail-frontend = { path = "crates/catmail-frontend" }
 catmail-testkit = { path = "crates/catmail-testkit" }
 catmail-render = { path = "crates/catmail-render" }
 
