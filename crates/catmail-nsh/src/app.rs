@@ -183,7 +183,26 @@ fn on_ask(ask: Ask) {
     }
 }
 
+/// Which pane the row selected opens.
+#[derive(Clone, Copy, PartialEq)]
+enum Pane {
+    Reader,
+    Draft,
+    Outbox,
+}
+
 fn panes() -> impl IntoElement {
+    // By the kind of row alone: going from one message to the next doesn't make the panes
+    // again.
+    let pane = computed(|| {
+        global::<Selected>().with(|s| {
+            s.0.map(|row| match row {
+                RowId::Message(_) => Pane::Reader,
+                RowId::Draft(_) => Pane::Draft,
+                RowId::Outbox(_) => Pane::Outbox,
+            })
+        })
+    });
     view()
         .flex_1()
         .flex_row()
@@ -204,10 +223,26 @@ fn panes() -> impl IntoElement {
                 .border_color(move || theme().border)
                 .child(list::list_column()),
         )
-        .child(dynamic(move || match global::<Selected>().with(|s| s.0) {
-            Some(RowId::Message(_)) => reader::reader().into_element(),
-            Some(RowId::Draft(_)) => draft::pane().into_element(),
-            Some(RowId::Outbox(_)) => outbox::pane().into_element(),
+        // Always there, and out of sight while no message is selected: its web view keeps
+        // its web process (100 MB, and a moment to start), so the first message opened
+        // shows as quickly as the next. Laid out where the panes would be, rather than not
+        // at all: nsh shows a native view only with a size, and WebKit loads a page only
+        // into one shown.
+        .child(reader::reader().style_when(
+            move || pane.get() != Some(Pane::Reader),
+            |s| {
+                s.absolute()
+                    .top(px(0.0))
+                    .bottom(px(0.0))
+                    .right(px(0.0))
+                    .w(px(640.0))
+                    .invisible()
+            },
+        ))
+        .child(dynamic(move || match pane.get() {
+            Some(Pane::Reader) => view().into_element(),
+            Some(Pane::Draft) => draft::pane().into_element(),
+            Some(Pane::Outbox) => outbox::pane().into_element(),
             None => view().into_element(),
         }))
         .child(commands::picker())

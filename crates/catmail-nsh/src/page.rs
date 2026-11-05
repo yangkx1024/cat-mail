@@ -26,19 +26,25 @@ const BASE_STYLE: &str = "html, body { margin: 0; } \
                           body { padding: 16px; overflow-x: auto; overflow-wrap: break-word; \
                           font-family: sans-serif; }";
 
-/// What the page tells the reader, through `window.nsh.postMessage`: that it loaded
-/// (`r`), its height (`h:<px>`), so the web view can be as tall as the page, and the
-/// links clicked (`o:<url>`), which open in the system's browser instead of in the view.
+/// What the page tells the reader, through `window.nsh.postMessage`, with the page's
+/// number ([`body_page`]: one web view shows page after page, and what an earlier one
+/// says may come late): that it loaded (`r:<n>`), its height (`h:<n>:<px>`), so the web
+/// view can be as tall as the page, that it has painted at the web view's height
+/// (`p:<n>:<px>`, two frames after it loaded and after each resize: WebKit has shown it
+/// at that size), and the links clicked (`o:<url>`), which open in the system's browser
+/// instead of in the view.
 /// What the reader tells the page ([`image_message`]): the `data:` URL of a remote image
 /// shown, for the elements that refer to it (as `img.src` normalizes it, which is
 /// `remote_image_url`'s spelling too).
 pub const BRIDGE: &str = r#"(function () {
+  var number = document.querySelector('meta[name="catmail-page"]');
+  var page = number ? number.content : "0";
   var last = -1;
   function report() {
     var height = Math.ceil(document.body ? document.body.scrollHeight : 0);
     if (height !== last) {
       last = height;
-      window.nsh.postMessage("h:" + height);
+      window.nsh.postMessage("h:" + page + ":" + height);
     }
   }
   if (document.body) new ResizeObserver(report).observe(document.body);
@@ -67,7 +73,16 @@ pub const BRIDGE: &str = r#"(function () {
       if (absolute(el.getAttribute("background")) === url) el.setAttribute("background", data);
     });
   });
-  window.nsh.postMessage("r");
+  window.nsh.postMessage("r:" + page);
+  function painted() {
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        window.nsh.postMessage("p:" + page + ":" + window.innerHeight);
+      });
+    });
+  }
+  window.addEventListener("resize", painted);
+  painted();
 })();"#;
 
 /// The message that puts a remote image's `data:` URL in place of `url` in the page.
@@ -75,29 +90,40 @@ pub fn image_message(url: &str, data_url: &str) -> String {
     format!("i:{url}\n{data_url}")
 }
 
-/// What a message from [`BRIDGE`] says.
+/// What a message from [`BRIDGE`] says, and of which page (its number).
 #[derive(Debug, PartialEq)]
 pub enum FromPage<'a> {
-    Ready,
-    Height(f32),
+    Ready(u64),
+    Height(u64, f32),
+    /// At the web view's height then, in points.
+    Painted(u64, f32),
     Open(&'a str),
 }
 
 impl<'a> FromPage<'a> {
     pub fn parse(message: &'a str) -> Option<Self> {
-        if message == "r" {
-            return Some(FromPage::Ready);
+        if let Some(url) = message.strip_prefix("o:") {
+            return Some(FromPage::Open(url));
         }
-        if let Some(height) = message.strip_prefix("h:") {
-            return height.parse().ok().map(FromPage::Height);
+        let (kind, rest) = message.split_once(':')?;
+        let (page, height) = match rest.split_once(':') {
+            Some((page, height)) => (page.parse().ok()?, Some(height.parse().ok()?)),
+            None => (rest.parse().ok()?, None),
+        };
+        match (kind, height) {
+            ("r", None) => Some(FromPage::Ready(page)),
+            ("h", Some(height)) => Some(FromPage::Height(page, height)),
+            ("p", Some(height)) => Some(FromPage::Painted(page, height)),
+            _ => None,
         }
-        message.strip_prefix("o:").map(FromPage::Open)
     }
 }
 
 /// The page of a body: its sanitized HTML (`MessageBody::html`) with `inline` (by
-/// Content-ID) embedded, or the plain text when there is no HTML part.
+/// Content-ID) embedded, or the plain text when there is no HTML part. `number` is in
+/// what the page says ([`FromPage`]).
 pub fn body_page(
+    number: u64,
     html: Option<&str>,
     text: Option<&str>,
     inline: HashMap<String, InlineImage>,
@@ -114,10 +140,17 @@ pub fn body_page(
         "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">\
          <meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\">\
          <meta name=\"referrer\" content=\"no-referrer\">\
+         <meta name=\"catmail-page\" content=\"{number}\">\
          <style>{BASE_STYLE} html {{ color: {}; background: {}; }} a[href] {{ color: {}; }}</style>\
          </head>\n<body>\n{content}\n</body></html>\n",
         colors.foreground, colors.background, colors.link,
     )
+}
+
+/// A page with nothing in it, in `colors`: what the web view shows while no message is,
+/// so that its web process is running when one opens.
+pub fn blank_page(number: u64, colors: &Colors) -> String {
+    body_page(number, None, None, HashMap::new(), colors)
 }
 
 /// The reader's colors under the message's own, as CSS colors.
@@ -149,6 +182,7 @@ mod tests {
     #[test]
     fn the_policy_comes_before_the_message() {
         let page = body_page(
+            1,
             Some("<p>hi <img src=\"https://tracker.example/p.gif\"></p>"),
             None,
             HashMap::new(),
@@ -171,6 +205,7 @@ mod tests {
             },
         )]);
         let page = body_page(
+            1,
             Some("<img src=\"cid:logo@example\">"),
             None,
             inline,
@@ -184,19 +219,33 @@ mod tests {
 
     #[test]
     fn plain_text_is_escaped() {
-        let page = body_page(None, Some("<b>&"), HashMap::new(), &colors());
+        let page = body_page(1, None, Some("<b>&"), HashMap::new(), &colors());
         assert!(page.contains("&lt;b&gt;&amp;"));
     }
 
     #[test]
     fn reads_what_the_page_says() {
-        assert_eq!(FromPage::parse("h:640"), Some(FromPage::Height(640.0)));
+        assert_eq!(FromPage::parse("h:3:640"), Some(FromPage::Height(3, 640.0)));
         assert_eq!(
             FromPage::parse("o:https://example.com/"),
             Some(FromPage::Open("https://example.com/"))
         );
-        assert_eq!(FromPage::parse("r"), Some(FromPage::Ready));
-        assert_eq!(FromPage::parse("h:tall"), None);
-        assert_eq!(FromPage::parse("x"), None);
+        assert_eq!(FromPage::parse("r:3"), Some(FromPage::Ready(3)));
+        assert_eq!(
+            FromPage::parse("p:3:480"),
+            Some(FromPage::Painted(3, 480.0))
+        );
+        for unknown in ["h:3:tall", "h:640", "r", "r:3:1", "p:3", "x:3", "x"] {
+            assert_eq!(FromPage::parse(unknown), None, "{unknown}");
+        }
+    }
+
+    #[test]
+    fn the_page_says_its_number() {
+        let page = blank_page(7, &colors());
+        assert!(
+            page.contains("<meta name=\"catmail-page\" content=\"7\">"),
+            "{page}"
+        );
     }
 }

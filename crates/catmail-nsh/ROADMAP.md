@@ -178,8 +178,10 @@ Accounts 的确认文案在 `accounts`，与 gpui 版共用；nsh 版把 gpui-ki
       trim 只还回约 14 MB（主进程 anon 从 104 降到 90）。gpui 版能还回约 76 MB，常驻约 151 MB RSS。
       常驻时主进程里约 107 MB 是文件映射（程序本身和 GTK、WebKitGTK 的库），能和别的进程共用，也能被换出。
       渲染进程随窗口退出，网络进程留着：bwrap 沙箱和 `xdg-dbus-proxy` 合计约 3 MB
-- [ ] 每打开一封邮件都新起一个 WebKit 渲染进程（每次约 100 MB PSS，还要再起一次 bwrap 沙箱），旧的随即退出。
-      读信区换一封邮件时应复用同一个 web view，只换页面，打开也会更快
+- [x] 每打开一封邮件都新起一个 WebKit 渲染进程（每次约 100 MB PSS，还要再起一次 bwrap 沙箱），旧的随即退出。
+      现在读信区和它的 web view 随主窗口一直存在：没选中邮件时，读信区不显示，web view 里放一个空白页。渲染进程
+      在开窗时就先起好，之后一直是同一个；它的 PSS 在浏览过程中从约 100 MB 涨到约 140 MB。开窗后点开第一封邮件，
+      内容在选中后约 2 帧（约 33 ms）就出现，原来要约 13 帧（约 217 ms）
 - [ ] 常驻时网络进程还留着（41 MB PSS），可它从来不联网（CSP 只放行 `data:`）。看 nsh 能否在没有 web view 时
       放掉它
 - [x] 快捷键对齐 `actions.rs`。这次补上的有：Sync（Ctrl+Shift+N、F5）、Ctrl+F 聚焦搜索框、写信窗口的 Escape 关闭
