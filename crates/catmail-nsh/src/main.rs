@@ -12,6 +12,8 @@ mod app;
 mod engine;
 #[cfg(target_os = "linux")]
 mod icons;
+#[cfg(target_os = "linux")]
+mod list;
 mod page;
 #[cfg(target_os = "linux")]
 mod shell;

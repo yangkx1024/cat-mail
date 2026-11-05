@@ -1,4 +1,4 @@
-//! The window: folders, the folder's messages, and the message open in a web view.
+//! The window: the sidebar, the list, and the message open in a web view.
 //!
 //! State is nsh globals (one signal per type, per surface). The client's futures are
 //! awaited in nsh tasks on the UI thread; the engine does the work on its own runtime.
@@ -8,35 +8,23 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use catmail_core::{
-    Event, MailClient, MessageId, MessageSummary, RecvError,
+    Event, MailClient, MessageId, RecvError,
     html::{DarkPalette, InlineImage, recolor_html},
 };
 use catmail_frontend::html::is_openable_link;
+use catmail_frontend::list::RowId;
 use catmail_frontend::mailbox::{Place, REFRESH_INTERVAL};
 use catmail_frontend::refresh::{Refresh, Throttle};
 use nsh_base::theme;
 use nsh_core::element::Owner;
 use nsh_core::prelude::*;
 
+use crate::list::{self, Rows, Selected};
 use crate::page::{self, Colors, FromPage};
 use crate::sidebar::{self, SelectedPlace};
 
 pub fn client() -> MailClient {
     crate::engine::client()
-}
-
-/// Messages fetched at a time.
-const PAGE: u32 = 200;
-
-#[derive(Clone, Default)]
-pub struct SelectedMessage(pub Option<MessageId>);
-
-#[derive(Clone, Default)]
-struct Messages {
-    list: Vec<MessageSummary>,
-    /// The last page was full: there may be more.
-    more: bool,
-    loading: bool,
 }
 
 #[derive(Clone, Default)]
@@ -137,104 +125,50 @@ fn mailbox() -> impl IntoElement {
     global::<MailboxOwner>().set(MailboxOwner(Some(Owner::current())));
     sidebar::load();
     spawn(watch_events());
-    // The tasks belong to the effects' runs: picking another place or message cancels
-    // what is still loading for the last one.
     effect(move || {
         let place = global::<SelectedPlace>().with(|s| s.0);
-        spawn(load_messages(place));
+        // Leaving a search for a place: the place's rows, not the results.
+        untracked(|| {
+            list::clear_search();
+            list::show(place.map(Place::source));
+        });
     });
+    // The task belongs to the effect's run: opening another message cancels what is
+    // still loading for the last one.
     effect(move || {
         // Read here so the page is made again when the appearance changes.
         let dark = dark();
-        match global::<SelectedMessage>().with(|s| s.0) {
-            Some(id) => {
+        match global::<Selected>().with(|s| s.0) {
+            Some(RowId::Message(id)) => {
                 spawn(open_message(id, dark));
             }
-            None => global::<Reading>().set(Reading::default()),
+            // Drafts and the outbox have panes of their own (P5, P6).
+            _ => global::<Reading>().set(Reading::default()),
         }
     });
+    // As the GUI's: Escape closes what is open.
+    on_key("escape", |_| global::<Selected>().set(Selected(None)));
     view()
         .flex_1()
         .flex_row()
         .child(sidebar::sidebar())
-        .child(message_list())
-        .child(reader())
-}
-
-// --- Loading ------------------------------------------------------------------------
-
-/// A page of what `place` lists, after `after`. The drafts and the outbox are lists of
-/// their own (P3).
-async fn list_page(
-    place: Place,
-    limit: u32,
-    after: Option<catmail_core::MessageCursor>,
-) -> catmail_core::Result<Vec<MessageSummary>> {
-    match place {
-        Place::Inboxes => client().list_inboxes(limit, after).await,
-        Place::Folder(folder) => client().list_messages(folder, limit, after).await,
-        Place::Drafts(_) | Place::Outbox(_) => Ok(Vec::new()),
-    }
-}
-
-async fn load_messages(place: Option<Place>) {
-    global::<Messages>().set(Messages {
-        loading: place.is_some(),
-        ..Messages::default()
-    });
-    let Some(place) = place else {
-        return;
-    };
-    match list_page(place, PAGE, None).await {
-        Ok(list) => {
-            // For looking at the reader without a mouse (screenshots of the spike): the
-            // message at that index opens.
-            let open = std::env::var("CATMAIL_NSH_OPEN")
-                .ok()
-                .and_then(|i| i.parse::<usize>().ok())
-                .and_then(|i| list.get(i))
-                .map(|m| m.id);
-            global::<Messages>().set(Messages {
-                more: list.len() == PAGE as usize,
-                list,
-                loading: false,
-            });
-            if open.is_some() && global::<SelectedMessage>().with_untracked(|s| s.0.is_none()) {
-                global::<SelectedMessage>().set(SelectedMessage(open));
-            }
-        }
-        Err(e) => {
-            global::<Messages>().update(|m| m.loading = false);
-            report("Couldn't list messages", e);
-        }
-    }
-}
-
-/// The next page of the open folder.
-async fn load_more() {
-    let messages = global::<Messages>();
-    let Some(place) = global::<SelectedPlace>().with_untracked(|s| s.0) else {
-        return;
-    };
-    let Some(after) = messages.with_untracked(|m| {
-        (m.more && !m.loading)
-            .then(|| m.list.last().map(MessageSummary::cursor))
-            .flatten()
-    }) else {
-        return;
-    };
-    messages.update(|m| m.loading = true);
-    match list_page(place, PAGE, Some(after)).await {
-        Ok(page) => messages.update(|m| {
-            m.more = page.len() == PAGE as usize;
-            m.list.extend(page);
-            m.loading = false;
-        }),
-        Err(e) => {
-            messages.update(|m| m.loading = false);
-            report("Couldn't list messages", e);
-        }
-    }
+        .child(
+            // The window's width to itself until a row opens; then as wide as it was.
+            view()
+                .flex_row()
+                .w(move || {
+                    if list::reading() {
+                        px(420.0).into()
+                    } else {
+                        Length::Auto
+                    }
+                })
+                .flex_grow(move || if list::reading() { 0.0_f32 } else { 1.0 })
+                .border_r_1()
+                .border_color(move || theme().border)
+                .child(list::list_column()),
+        )
+        .child(when(list::reading, reader))
 }
 
 /// Follows the engine's events, as the GUI does (`Refresh::after`): what they change is
@@ -257,7 +191,7 @@ fn on_event(event: Option<&Event>) {
         // Before reading the sidebar again, so the read isn't taken for an old one.
         sidebar::missed_events();
     }
-    let shown = global::<SelectedPlace>().with_untracked(|p| p.0.map(Place::source));
+    let shown = global::<Rows>().with_untracked(|r| r.source.clone());
     let refresh = Refresh::after(event, shown.as_ref(), &sidebar::shown_folders());
     let refresh = throttle().borrow_mut().ask(refresh);
     read_again(refresh);
@@ -282,33 +216,12 @@ fn read_again(refresh: Refresh) {
         sidebar::load();
     }
     if refresh.list {
-        refresh_list();
+        list::refresh();
     }
     in_mailbox(async {
         timer(REFRESH_INTERVAL).await;
         let held = throttle().borrow_mut().elapsed();
         read_again(held);
-    });
-}
-
-/// The list's first rows again, as many as are shown, keeping the place.
-pub fn refresh_list() {
-    let Some(place) = global::<SelectedPlace>().with_untracked(|p| p.0) else {
-        return;
-    };
-    in_mailbox(async move {
-        let shown = global::<Messages>().with_untracked(|m| m.list.len()) as u32;
-        let limit = shown.max(PAGE);
-        match list_page(place, limit, None).await {
-            Ok(list) if global::<SelectedPlace>().with_untracked(|p| p.0) == Some(place) => {
-                global::<Messages>().update(|m| {
-                    m.more = list.len() as u32 == limit;
-                    m.list = list;
-                });
-            }
-            Ok(_) => {}
-            Err(e) => report("Couldn't list messages", e),
-        }
     });
 }
 
@@ -405,91 +318,6 @@ fn format_date(seconds: i64) -> String {
 }
 
 // --- Panes --------------------------------------------------------------------------
-
-fn message_list() -> impl IntoElement {
-    view()
-        .w(px(380.0))
-        .border_r_1()
-        .border_color(move || theme().border)
-        .child(
-            virtual_list(
-                move || global::<Messages>().with(|m| m.list.len()),
-                message_row,
-            )
-            .keys(move || {
-                global::<Messages>()
-                    .with(|m| m.list.iter().map(|m| m.id.to_string()).collect::<Vec<_>>())
-            })
-            .on_load_more(move || {
-                spawn(load_more());
-            })
-            .estimated_item_size(px(76.0))
-            .flex_1(),
-        )
-}
-
-fn message_row(at: Position) -> impl IntoElement {
-    let message = computed(move || global::<Messages>().with(|m| m.list.get(at.index()).cloned()));
-    let field = move |f: fn(&MessageSummary) -> String| {
-        move || message.with(|m| m.as_ref().map(f).unwrap_or_default())
-    };
-    let id = move || message.with(|m| m.as_ref().map(|m| m.id));
-    let unread = move || {
-        message.with(|m| {
-            m.as_ref()
-                .is_some_and(|m| !m.flags.contains(catmail_core::Flags::SEEN))
-        })
-    };
-    let selected = move || id().is_some() && id() == global::<SelectedMessage>().with(|s| s.0);
-    view()
-        .px(px(14.0))
-        .py(px(10.0))
-        .gap(px(2.0))
-        .border_b_1()
-        .border_color(move || theme().border)
-        .style_when(selected, |s| s.bg(move || theme().accent))
-        .on_press(move || {
-            if let Some(id) = id() {
-                global::<SelectedMessage>().set(SelectedMessage(Some(id)));
-            }
-        })
-        .child(
-            view()
-                .flex_row()
-                .gap(px(8.0))
-                .child(
-                    text(field(|m| {
-                        m.from
-                            .first()
-                            .map(|a| a.name.clone().unwrap_or_else(|| a.email.clone()))
-                            .unwrap_or_default()
-                    }))
-                    .number_of_lines(1)
-                    .flex_1()
-                    .text_sm()
-                    .style_when(unread, |s| s.font_weight(FontWeight::SEMIBOLD))
-                    .text_color(move || theme().foreground),
-                )
-                .child(
-                    text(field(|m| m.date.map(format_date).unwrap_or_default()))
-                        .text_xs()
-                        .text_color(move || theme().muted_foreground),
-                ),
-        )
-        .child(
-            text(field(|m| m.subject.clone().unwrap_or_default()))
-                .number_of_lines(1)
-                .text_sm()
-                .style_when(unread, |s| s.font_weight(FontWeight::SEMIBOLD))
-                .text_color(move || theme().foreground),
-        )
-        .child(
-            text(field(|m| m.snippet.clone().unwrap_or_default()))
-                .number_of_lines(1)
-                .text_xs()
-                .text_color(move || theme().muted_foreground),
-        )
-}
 
 fn reader() -> impl IntoElement {
     let reading = global::<Reading>();

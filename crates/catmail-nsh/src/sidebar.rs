@@ -20,7 +20,7 @@ use nsh_core::element::input;
 use nsh_core::prelude::*;
 use nsh_core::{ContextMenuEvent, ModalAnimation};
 
-use crate::app::{SelectedMessage, client, in_mailbox, report};
+use crate::app::{client, in_mailbox, report};
 use crate::icons::{Icon, icon};
 
 /// The accounts as the sidebar shows them; `None` until the first read.
@@ -114,11 +114,12 @@ fn set_accounts(accounts: Vec<AccountEntry>) {
     let folders_before = shown_folders();
     let start = (!still_there).then(|| Place::start(&accounts));
     shown.set(Accounts(Some(accounts)));
+    crate::list::set_labels();
     match start {
         Some(start) => select(start),
         // The list shows a folder more (All Inboxes, an account's first INBOX): its
         // messages' events may have come first, taken for a folder not shown.
-        None if shown_folders() != folders_before => crate::app::refresh_list(),
+        None if shown_folders() != folders_before => crate::list::refresh(),
         None => {}
     }
 }
@@ -190,7 +191,6 @@ pub fn select(place: Option<Place>) {
             f.0.insert(account, true);
         });
     }
-    global::<SelectedMessage>().set(SelectedMessage(None));
     selected.set(SelectedPlace(place));
     for folder in shown_folders() {
         in_mailbox(async move {

@@ -1,5 +1,5 @@
-//! The icons, the GUI's Heroicons (`catmail-gui/assets/heroicons`, MIT): outline ones,
-//! drawn with `currentColor`, so they take the text color of where they are.
+//! The icons, the GUI's Heroicons (`catmail-gui/assets/heroicons`, MIT), drawn with
+//! `currentColor`, so they take the text color of where they are.
 
 use catmail_frontend::folders::FolderIcon;
 use nsh_core::element::ImageSrc;
@@ -7,8 +7,13 @@ use nsh_core::prelude::*;
 
 macro_rules! hero {
     ($file:literal) => {
+        hero!("outline", $file)
+    };
+    ($style:literal, $file:literal) => {
         include_str!(concat!(
-            "../../catmail-gui/assets/heroicons/outline/",
+            "../../catmail-gui/assets/heroicons/",
+            $style,
+            "/",
             $file,
             ".svg"
         ))
@@ -19,9 +24,14 @@ macro_rules! hero {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Icon {
     Folder(FolderIcon),
+    Check,
     ChevronDown,
     ChevronRight,
     ExclamationTriangle,
+    /// Filled, as a mark on a flagged message.
+    FlagSolid,
+    MagnifyingGlass,
+    PaperClip,
 }
 
 impl From<FolderIcon> for Icon {
@@ -48,9 +58,13 @@ impl Icon {
                 FolderIcon::Inboxes => hero!("inbox-stack"),
                 FolderIcon::Outbox => hero!("arrow-up-tray"),
             },
+            Icon::Check => hero!("check"),
             Icon::ChevronDown => hero!("chevron-down"),
             Icon::ChevronRight => hero!("chevron-right"),
             Icon::ExclamationTriangle => hero!("exclamation-triangle"),
+            Icon::FlagSolid => hero!("solid", "flag"),
+            Icon::MagnifyingGlass => hero!("magnifying-glass"),
+            Icon::PaperClip => hero!("paper-clip"),
         }
     }
 
