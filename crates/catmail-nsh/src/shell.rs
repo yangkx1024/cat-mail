@@ -2,13 +2,19 @@
 //! and the engine's opening and shutting down. nsh's `run_app` runs one view in one window
 //! and ends with it; the app has its own `gtk::Application` instead, so that windows can
 //! come and go while the engine stays (composer windows, running without a window).
+//!
+//! All of this runs on GTK's thread. Each window's view runs on a thread of its own (nsh's
+//! engine thread), and reaches what is here with [`on_gtk`].
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex, PoisonError};
 
-use catmail_core::MailClientBuilder;
+use catmail_core::{DraftId, MailClientBuilder};
+use catmail_frontend::composer::{ComposeFrom, OpenComposers, Opening, window_title};
 use catmail_frontend::instance::{Request, Requests};
 use catmail_frontend::settings::{self, Settings};
+use futures_channel::{mpsc, oneshot};
 use futures_util::StreamExt as _;
 use nsh_platform_linux::gtk4::{self as gtk, glib, prelude::*};
 use nsh_platform_linux::{App, AppOptions, AppView, Appearance, Root};
@@ -20,14 +26,37 @@ pub const APP_ID: &str = "net.yangkx.catmail.nsh";
 
 const TITLE: &str = "catmail";
 
-thread_local! {
-    /// The settings read at launch; the windows are on this thread.
-    static SETTINGS: RefCell<Settings> = RefCell::new(Settings::default());
-}
+/// The settings read at launch: every window's view reads them, each on its own thread.
+static SETTINGS: Mutex<Option<Settings>> = Mutex::new(None);
 
 /// The settings read at launch. Writing them comes with the settings dialog (P7).
 pub fn settings() -> Settings {
-    SETTINGS.with_borrow(Clone::clone)
+    SETTINGS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+        .unwrap_or_default()
+}
+
+/// A composer's window, and how to ask its view to close it.
+type ComposerWindow = (gtk::ApplicationWindow, mpsc::UnboundedSender<()>);
+
+thread_local! {
+    /// The main window, while it is open.
+    static MAIN: RefCell<glib::WeakRef<gtk::ApplicationWindow>> = RefCell::default();
+    static COMPOSERS: RefCell<OpenComposers<ComposerWindow>> = RefCell::default();
+}
+
+/// Runs `f` on GTK's thread, from a view's: at once, whether the answer is awaited or
+/// not. `None` once the app has stopped.
+pub fn on_gtk<R: Send + 'static>(
+    f: impl FnOnce() -> R + Send + 'static,
+) -> impl Future<Output = Option<R>> {
+    let (sent, answer) = oneshot::channel();
+    glib::MainContext::default().invoke(move || {
+        let _ = sent.send(f());
+    });
+    async move { answer.await.ok() }
 }
 
 /// Runs the app until it quits, then shuts the engine down.
@@ -43,7 +72,7 @@ pub fn run(
         .application_id(APP_ID)
         .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
         .build();
-    SETTINGS.set(settings.clone());
+    *SETTINGS.lock().unwrap_or_else(PoisonError::into_inner) = Some(settings.clone());
     let settings = Rc::new(settings);
     let starting = RefCell::new(Some((builder, requests)));
     let shown = settings.clone();
@@ -91,9 +120,13 @@ async fn answer(
 /// The main window in front, opened if there is none. `activation_token` is the asking
 /// launch's, which lets the window take the focus on Wayland.
 fn show(app: &gtk::Application, settings: &Settings, activation_token: Option<&str>) {
-    let window = match app.windows().into_iter().next() {
+    let window = match MAIN.with_borrow(|main| main.upgrade()) {
         Some(window) => window,
-        None => main_window(app, settings).upcast(),
+        None => {
+            let window = main_window(app, settings);
+            MAIN.with_borrow_mut(|main| main.set(Some(&window)));
+            window
+        }
     };
     if let Some(token) = activation_token {
         window.set_startup_id(token);
@@ -108,17 +141,23 @@ fn main_window(app: &gtk::Application, settings: &Settings) -> gtk::ApplicationW
         .default_width(1280)
         .default_height(800)
         .build();
+    show_view(&window, TITLE, Root::of::<crate::app::App>(), settings);
+    window
+}
+
+/// Puts a view running `root` in `window`, which keeps it while it is open.
+fn show_view(window: &gtk::ApplicationWindow, title: &str, root: Root, settings: &Settings) {
     let view = AppView::new(AppOptions {
-        title: TITLE.to_owned(),
+        title: title.to_owned(),
         app_id: APP_ID.to_owned(),
         appearance: appearance(settings),
         ..Default::default()
     });
     view.set_font_scale(Some(settings.text_size / settings::DEFAULT_TEXT_SIZE));
     window.set_child(Some(&view.widget()));
-    view.load(App::Rust(Root::of::<crate::app::App>()));
-    close_on_ctrl_w(&window);
-    blur_on_press_outside(&window);
+    view.load(App::Rust(root));
+    close_on_ctrl_w(window);
+    blur_on_press_outside(window);
     // The window keeps the view and its nsh engine; closing it stops them.
     let kept = RefCell::new(Some(view));
     window.connect_destroy(move |_| {
@@ -126,7 +165,98 @@ fn main_window(app: &gtk::Application, settings: &Settings) -> gtk::ApplicationW
             view.stop();
         }
     });
-    window
+}
+
+// --- Composer windows ---------------------------------------------------------------
+
+/// Brings the draft's window forward, if it has one.
+fn activate(draft: DraftId) -> bool {
+    let window = COMPOSERS.with_borrow(|open| open.window(draft));
+    window.inspect(|(window, _)| window.present()).is_some()
+}
+
+/// Whether to read `from`'s draft for a window: not when it has one (brought forward
+/// instead) or is on its way.
+pub fn begin_opening(from: ComposeFrom) -> bool {
+    match from {
+        ComposeFrom::Draft(id) => {
+            !activate(id) && COMPOSERS.with_borrow_mut(|open| open.begin_opening(id))
+        }
+        _ => true,
+    }
+}
+
+/// `from`'s draft was made or read (or couldn't be, `None`): opens a window on it, or
+/// brings forward the one it has (a reply or forward made it, and it was opened from the
+/// drafts before its window came up).
+pub fn opened(from: ComposeFrom, opening: Option<Opening>) {
+    if let ComposeFrom::Draft(id) = from {
+        COMPOSERS.with_borrow_mut(|open| open.end_opening(id));
+    }
+    let Some(opening) = opening else {
+        return;
+    };
+    let id = opening.draft.id;
+    if activate(id) {
+        return;
+    }
+    let Some(app) = gtk::gio::Application::default().and_downcast::<gtk::Application>() else {
+        return;
+    };
+    let title = window_title(&opening.draft.content.subject);
+    let window = gtk::ApplicationWindow::builder()
+        .application(&app)
+        .title(title.as_str())
+        .default_width(760)
+        .default_height(680)
+        .build();
+    window.set_size_request(480, 360);
+    let (asks, close_requests) = mpsc::unbounded();
+    let start = Arc::new(crate::composer::Start {
+        opening,
+        close_requests: Mutex::new(Some(close_requests)),
+    });
+    show_view(&window, &title, crate::composer::root(start), &settings());
+    // The view decides: it saves first, and closes the window itself (`composer_closed`).
+    // One that is gone can't, and the window just goes.
+    let ask = asks.clone();
+    window.connect_close_request(move |_| {
+        if ask.unbounded_send(()).is_ok() {
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    window.connect_destroy(move |_| COMPOSERS.with_borrow_mut(|open| open.remove(id)));
+    COMPOSERS.with_borrow_mut(|open| open.insert(id, (window.clone(), asks)));
+    window.present();
+}
+
+/// The draft's composer is done: its window goes.
+pub fn composer_closed(draft: DraftId) {
+    let window = COMPOSERS.with_borrow_mut(|open| {
+        let window = open.window(draft);
+        open.remove(draft);
+        window
+    });
+    if let Some((window, _)) = window {
+        window.destroy();
+    }
+}
+
+/// A composer stays open, to be dealt with: closing them all failed.
+pub fn stop_closing_all() {
+    COMPOSERS.with_borrow_mut(|open| open.stop_closing_all());
+}
+
+/// Asks every composer to close, once it has saved what it holds: true once the last
+/// has, false as soon as one can't (an address to correct, a save that failed).
+fn close_all() -> oneshot::Receiver<bool> {
+    let (windows, answer) = COMPOSERS.with_borrow_mut(|open| open.close_all());
+    for (_, asks) in windows {
+        let _ = asks.unbounded_send(());
+    }
+    answer
 }
 
 /// The settings' appearance; `CATMAIL_NSH_APPEARANCE` (`dark`, `light`) overrides it, for
@@ -145,15 +275,24 @@ fn appearance(settings: &Settings) -> Appearance {
 }
 
 /// Ctrl+Q closes every window, which ends the app (the engine shuts down after the loop).
+/// The composers close first, each saving what it holds; one that can't stays, and the
+/// app with it.
 fn install_quit(app: &gtk::Application) {
     let quit = gtk::gio::SimpleAction::new("quit", None);
     let weak = app.downgrade();
     quit.connect_activate(move |_, _| {
-        if let Some(app) = weak.upgrade() {
-            for window in app.windows() {
-                window.close();
+        let weak = weak.clone();
+        let closed = close_all();
+        glib::spawn_future_local(async move {
+            if closed.await != Ok(true) {
+                return;
             }
-        }
+            if let Some(app) = weak.upgrade() {
+                for window in app.windows() {
+                    window.close();
+                }
+            }
+        });
     });
     app.add_action(&quit);
     app.set_accels_for_action("app.quit", &["<Control>q"]);

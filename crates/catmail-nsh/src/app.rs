@@ -7,6 +7,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use catmail_core::{Event, MailClient, RecvError};
+use catmail_frontend::list::RowId;
 use catmail_frontend::mailbox::{Place, REFRESH_INTERVAL};
 use catmail_frontend::refresh::{Refresh, Throttle};
 use nsh_base::theme;
@@ -16,7 +17,7 @@ use nsh_core::prelude::*;
 use crate::list::{self, Rows, Selected};
 use crate::sidebar::{self, SelectedPlace};
 use crate::toast::{Level, notify};
-use crate::{commands, reader, toast};
+use crate::{commands, composer, draft, reader, toast};
 
 pub fn client() -> MailClient {
     crate::engine::client()
@@ -33,7 +34,13 @@ pub fn report(what: &str, error: catmail_core::Error) {
 #[derive(Clone, Default)]
 struct MailboxOwner(Option<Owner>);
 
-/// Runs `future` for as long as the mailbox is shown.
+/// The work started anywhere in the view from now on belongs to `owner`: the
+/// mailbox's, or a composer window's (whose notifications time out with a task too).
+pub fn own_tasks(owner: Owner) {
+    global::<MailboxOwner>().set(MailboxOwner(Some(owner)));
+}
+
+/// Runs `future` for as long as the mailbox (or the composer, in its window) is shown.
 pub fn in_mailbox(future: impl Future<Output = ()> + 'static) {
     let owner = global::<MailboxOwner>().with_untracked(|o| o.0);
     match owner {
@@ -102,7 +109,7 @@ fn failed(reason: String) -> impl IntoElement {
 }
 
 fn mailbox() -> impl IntoElement {
-    global::<MailboxOwner>().set(MailboxOwner(Some(Owner::current())));
+    own_tasks(Owner::current());
     sidebar::load();
     // Those refused while no window was open.
     commands::report_refused_changes();
@@ -116,6 +123,7 @@ fn mailbox() -> impl IntoElement {
         });
     });
     effect(reader::follow_selection);
+    composer::bind_keys();
     // As the GUI's: Escape closes what is open.
     on_key("escape", |_| global::<Selected>().set(Selected(None)));
     view()
@@ -138,7 +146,12 @@ fn mailbox() -> impl IntoElement {
                 .border_color(move || theme().border)
                 .child(list::list_column()),
         )
-        .child(when(list::reading, reader::reader))
+        .child(dynamic(move || match global::<Selected>().with(|s| s.0) {
+            Some(RowId::Message(_)) => reader::reader().into_element(),
+            Some(RowId::Draft(_)) => draft::pane().into_element(),
+            // The outbox's pane comes with P6.
+            Some(RowId::Outbox(_)) | None => view().into_element(),
+        }))
         .child(commands::picker())
 }
 

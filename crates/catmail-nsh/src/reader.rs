@@ -25,6 +25,7 @@ use nsh_core::prelude::*;
 
 use crate::app::{client, in_mailbox};
 use crate::commands::{self, Size, icon_button, separator};
+use crate::composer;
 use crate::icons::{Icon, icon};
 use crate::list::{self, Selected};
 use crate::page::{self, Colors, FromPage};
@@ -55,6 +56,8 @@ struct Reading {
     /// at once, the others when the user asks.
     remote: Vec<String>,
     loading_remote: bool,
+    /// Replying to all writes to more than replying does.
+    can_reply_all: bool,
 }
 
 /// The body's height in points, as the page reports it.
@@ -134,6 +137,11 @@ async fn open_message(id: MessageId, dark: bool) {
             return;
         }
     };
+    // Offered when unsure: it only adds recipients the user can remove.
+    let can_reply_all = client().can_reply_all(id).await.unwrap_or_else(|e| {
+        tracing::warn!(message = %id, error = %e, "couldn't tell who replying to all writes to");
+        true
+    });
     let body = message.body.as_ref();
     let mut inline = HashMap::new();
     if let Some(body) = body.filter(|b| b.html.is_some()) {
@@ -198,6 +206,7 @@ async fn open_message(id: MessageId, dark: bool) {
         page,
         remote: remote.clone(),
         loading_remote: false,
+        can_reply_all,
     });
     // Those cached need no request: they show without asking.
     if remote.is_empty() {
@@ -477,8 +486,8 @@ fn failed(error: String) -> impl IntoElement {
         )
 }
 
-/// The commands on the message open, in groups: where it is, its marks, its content.
-/// Answering it comes with the composer (P5).
+/// The commands on the message open, in groups: where it is, its marks, its content,
+/// answering it.
 fn toolbar() -> impl IntoElement {
     let selected = move || list::selected_message().into_iter().collect::<Vec<_>>();
     let can_edit_labels =
@@ -537,6 +546,33 @@ fn toolbar() -> impl IntoElement {
             has_html,
             Size::Bar,
             open_in_browser,
+        ))
+        .child(separator(Size::Bar))
+        .child(icon_button(
+            || Icon::ArrowUturnLeft,
+            || "Reply".to_owned(),
+            || true,
+            Size::Bar,
+            || composer::reply(false),
+        ))
+        .child(when(
+            move || global::<Reading>().with(|r| r.can_reply_all),
+            || {
+                icon_button(
+                    || Icon::ArrowUturnLeftDouble,
+                    || "Reply all".to_owned(),
+                    || true,
+                    Size::Bar,
+                    || composer::reply(true),
+                )
+            },
+        ))
+        .child(icon_button(
+            || Icon::ArrowUturnRight,
+            || "Forward".to_owned(),
+            || true,
+            Size::Bar,
+            composer::forward,
         ))
 }
 

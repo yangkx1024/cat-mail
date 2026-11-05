@@ -8,8 +8,9 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use catmail_core::{Flags, FolderId, MessageCursor, MessageId, MessageSummary, SearchQuery};
+use catmail_core::{Draft, Flags, FolderId, MessageCursor, MessageId, MessageSummary, SearchQuery};
 use catmail_frontend::commands::MessageCommand;
+use catmail_frontend::composer::ComposeFrom;
 use catmail_frontend::format;
 use catmail_frontend::list::{
     self, Check, Days, PAGE, ROW_LABELS, Removal, Reselect, Row, RowId, SEARCH_DELAY,
@@ -372,6 +373,26 @@ pub fn selected_id() -> Option<MessageId> {
     }
 }
 
+/// The selected draft, as the list has it now. Tracked.
+pub fn selected_draft() -> Option<Rc<Draft>> {
+    let Some(RowId::Draft(id)) = global::<Selected>().with(|s| s.0) else {
+        return None;
+    };
+    global::<Rows>().with(|r| {
+        r.rows.iter().find_map(|row| match row {
+            Row::Draft(draft) if draft.id == id => Some(draft.clone()),
+            _ => None,
+        })
+    })
+}
+
+/// A draft opens in its window: on Enter, or a second click on its row, as the GUI's.
+fn edit_selected_draft() {
+    if let Some(RowId::Draft(id)) = global::<Selected>().with_untracked(|s| s.0) {
+        crate::composer::open(ComposeFrom::Draft(id));
+    }
+}
+
 /// The selected message, as the list has it now. Tracked.
 pub fn selected_message() -> Option<MessageSummary> {
     message(selected_id()?)
@@ -543,6 +564,7 @@ pub fn list_column() -> impl IntoElement {
     let list = element_ref();
     global::<ListRef>().set(ListRef(Some(list)));
     on_key("x", move |_| toggle_selected());
+    on_key("enter", move |_| edit_selected_draft());
     bind_command_keys();
     // Opening a row or closing it changes every row's height: the one opened, or just
     // closed, would move away from under the pointer.
@@ -797,9 +819,12 @@ fn row_box(row: impl Fn() -> Option<Row> + Copy + 'static) -> View {
         .rounded(px(8.0))
         .my(px(1.0))
         .style_when(selected, |s| s.bg(move || theme().accent))
-        .on_press(move || {
+        .on_press(move |press: &PressEvent| {
             if let Some(id) = id() {
                 open(id);
+                if press.clicks == 2 {
+                    edit_selected_draft();
+                }
             }
         })
 }

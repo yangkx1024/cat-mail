@@ -27,6 +27,9 @@ pub enum Icon {
     ArchiveBox,
     ArrowLeft,
     ArrowTopRightOnSquare,
+    ArrowUturnLeft,
+    ArrowUturnLeftDouble,
+    ArrowUturnRight,
     Check,
     ChevronDown,
     ChevronRight,
@@ -40,11 +43,14 @@ pub enum Icon {
     FolderArrowRight,
     InformationCircle,
     MagnifyingGlass,
+    PaperAirplane,
     PaperClip,
+    PencilSquare,
     Photo,
     Tag,
     Trash,
     XCircle,
+    XMark,
 }
 
 impl From<FolderIcon> for Icon {
@@ -74,6 +80,9 @@ impl Icon {
             Icon::ArchiveBox => hero!("archive-box"),
             Icon::ArrowLeft => hero!("arrow-left"),
             Icon::ArrowTopRightOnSquare => hero!("arrow-top-right-on-square"),
+            Icon::ArrowUturnLeft => hero!("arrow-uturn-left"),
+            Icon::ArrowUturnLeftDouble => hero!("arrow-uturn-left-double"),
+            Icon::ArrowUturnRight => hero!("arrow-uturn-right"),
             Icon::Check => hero!("check"),
             Icon::ChevronDown => hero!("chevron-down"),
             Icon::ChevronRight => hero!("chevron-right"),
@@ -86,11 +95,14 @@ impl Icon {
             Icon::FolderArrowRight => hero!("folder-arrow-right"),
             Icon::InformationCircle => hero!("information-circle"),
             Icon::MagnifyingGlass => hero!("magnifying-glass"),
+            Icon::PaperAirplane => hero!("paper-airplane"),
             Icon::PaperClip => hero!("paper-clip"),
+            Icon::PencilSquare => hero!("pencil-square"),
             Icon::Photo => hero!("photo"),
             Icon::Tag => hero!("tag"),
             Icon::Trash => hero!("trash"),
             Icon::XCircle => hero!("x-circle"),
+            Icon::XMark => hero!("x-mark"),
         }
     }
 

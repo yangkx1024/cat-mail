@@ -11,6 +11,10 @@ mod app;
 #[cfg(target_os = "linux")]
 mod commands;
 #[cfg(target_os = "linux")]
+mod composer;
+#[cfg(target_os = "linux")]
+mod draft;
+#[cfg(target_os = "linux")]
 mod engine;
 #[cfg(target_os = "linux")]
 mod icons;

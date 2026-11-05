@@ -77,7 +77,7 @@
 共用；nsh 版只有界面（`commands.rs`、`reader.rs`、`toast.rs`）。
 
 - [x] 工具栏：返回；Archive、Delete、Move to、Labels（Gmail）；已读 / 未读、Flag；Show remote images、Open in browser
-- [ ] Reply、Reply all（`can_reply_all`）、Forward（随 P5 写信窗口）
+- [x] Reply、Reply all（`can_reply_all`）、Forward（Ctrl+R、Ctrl+Shift+R、Ctrl+Shift+F）
 - [x] 读信区工具栏、勾选工具栏、悬停的行用同一套按钮（`commands::group`）；快捷键 E、Delete / Backspace、L、
       Ctrl+Shift+M / U / L，作用于勾选的邮件，没有勾选时是选中的那封
 - [x] 打开即已读（读 `settings.json` 的 `mark_read_on_open`）；只在用户选中、或移走后打开下一封时标记
@@ -99,14 +99,21 @@
 
 ## P5 写信窗口（gui.md「写信窗口」，依赖 P1 多窗口）
 
-- [ ] 每封草稿一个窗口；同一草稿只开一个（`OpenComposers`）
-- [ ] 一开始就是草稿（`create_draft`、`reply`、`forward`）；没改就关窗时删掉
-- [ ] 停顿 800 ms 自动保存；同一草稿的引擎调用不重叠；发送、关闭、丢弃前做最后一次保存（`Finish`）
-- [ ] 地址栏：解析和显示规则（`parse_addresses`、`format_addresses`），关窗前检查
-- [ ] From 下拉（`draft_senders`）；身份变化时重读身份和草稿
-- [ ] 附件：选文件或拖进窗口（nsh file-drop）
-- [ ] Ctrl+Enter 发送；关窗按钮走同样的流程。⚠️ 要确认 nsh 和 `AppView` 能不能拦截窗口关闭
-- [ ] 退出（Ctrl+Q）前先关所有写信窗口（`close_all`）
+写信的模型在 `catmail-frontend`（`composer`：`ComposeFrom::start`、From 的选项、字段解析、`Lifecycle` 决定何时
+保存 / 发送 / 关窗、`OpenComposers` 登记窗口和退出前全部关闭），与 gpui 版共用；nsh 版只有界面和窗口
+（`composer.rs`、`draft.rs`，`shell.rs` 里的 GTK 窗口）。每个 nsh 视图跑在自己的引擎线程上，写信窗口的视图和
+GTK 线程之间用 `shell::on_gtk` 与一个关窗请求的通道来回。
+
+- [x] 每封草稿一个窗口；同一草稿只开一个（`OpenComposers`）
+- [x] 一开始就是草稿（`create_draft`、`reply`、`forward`）；没改就关窗时删掉
+- [x] 停顿 800 ms 自动保存；同一草稿的引擎调用不重叠；发送、关闭、丢弃前做最后一次保存（`Finish`）
+- [x] 地址栏：解析和显示规则（`parse_addresses`、`format_addresses`），关窗前检查
+- [x] From 下拉（`draft_senders`，原生 `popup_menu`）；身份变化时重读身份和草稿
+- [x] 附件：选文件或拖进窗口（nsh file-drop）
+- [x] Ctrl+Enter 发送；关窗按钮、Ctrl+W 走同样的流程：GTK 的 `close-request` 总是拦下，交给视图决定，视图存好后
+      自己销毁窗口
+- [x] 退出（Ctrl+Q、SIGINT / SIGTERM）前先关所有写信窗口（`close_all`），有一个关不了就不退出
+- [x] 草稿的右栏：Edit、Delete draft；双击或 Enter 打开草稿的写信窗口；侧栏顶上的 Compose（Ctrl+N）
 
 ## P6 发件箱（gui.md「发件箱」）
 

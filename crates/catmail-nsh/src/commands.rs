@@ -4,11 +4,13 @@
 //! and "Labels". What they apply to and what they say are `catmail_frontend::commands`'.
 
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use catmail_core::{AccountId, Flags, FolderId, MessageId, MessageSummary};
 use catmail_frontend::commands::{self, Applies, Deletion, MessageCommand, what};
 use catmail_frontend::folders::AccountFolders;
 use catmail_frontend::mailbox::AccountEntry;
+
 use nsh_base::{alert_dialog, theme};
 use nsh_core::ModalAnimation;
 use nsh_core::element::input;
@@ -391,6 +393,44 @@ pub fn icon_button(
         })
         .tooltip(tooltip(name))
         .child(icon(which, size.icon_size()).text_color(move || theme().foreground))
+}
+
+/// The button of the main thing to do where it is (Compose, Send, Edit): filled, round,
+/// with an icon and a label.
+pub fn primary_button(
+    which: Icon,
+    label: impl Fn() -> String + 'static,
+    hint: impl Fn() -> String + 'static,
+    enabled: impl Fn() -> bool + Copy + 'static,
+    press: impl Fn() + 'static,
+) -> View {
+    let label = Rc::new(label);
+    let name = label.clone();
+    view()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .gap(px(8.0))
+        .h(px(34.0))
+        .px(px(18.0))
+        .rounded(px(17.0))
+        .bg(move || theme().primary)
+        .opacity(move || if enabled() { 1.0_f32 } else { 0.5 })
+        .label(move || SharedString::from(name()))
+        .on_press(move || {
+            if untracked(enabled) {
+                press();
+            }
+        })
+        .tooltip(tooltip(hint))
+        .child(icon(move || which, 16.0).text_color(move || theme().primary_foreground))
+        .child(
+            text(move || label())
+                .text_sm()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(move || theme().primary_foreground),
+        )
 }
 
 /// A tooltip that says `text`.

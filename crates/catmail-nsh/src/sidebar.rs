@@ -21,6 +21,8 @@ use nsh_core::prelude::*;
 use nsh_core::{ContextMenuEvent, ModalAnimation};
 
 use crate::app::{client, in_mailbox, report};
+use crate::commands::primary_button;
+use crate::composer;
 use crate::icons::{Icon, icon};
 
 /// The accounts as the sidebar shows them; `None` until the first read.
@@ -453,11 +455,20 @@ pub fn sidebar() -> impl IntoElement {
         global::<Accounts>().with(|a| mailbox::connection_note(a.0.as_deref().unwrap_or_default()))
     });
     on_key("F2", move |_| rename_selected());
+    let has_accounts =
+        move || global::<Accounts>().with(|a| a.0.as_ref().is_some_and(|a| !a.is_empty()));
     view()
         .w(px(240.0))
         .border_r_1()
         .border_color(move || theme().border)
         .bg(move || theme().sidebar)
+        .child(view().px(px(12.0)).pt(px(12.0)).child(primary_button(
+            Icon::PencilSquare,
+            || "Compose".to_owned(),
+            || "Compose (Ctrl+N)".to_owned(),
+            has_accounts,
+            composer::new_message,
+        )))
         .child(
             scroll()
                 .flex_1()
