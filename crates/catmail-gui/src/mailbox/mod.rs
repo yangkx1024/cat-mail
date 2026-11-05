@@ -394,11 +394,6 @@ impl Mailbox {
             .into_iter()
     }
 
-    /// The account the selected place belongs to.
-    pub(crate) fn current_account(&self) -> Option<&AccountEntry> {
-        self.place?.account_in(self.accounts.as_deref()?)
-    }
-
     /// Reads the accounts, their folders, drafts and outbox again (see [`Coalesce`]).
     fn load_folders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.reading_folders.start() {

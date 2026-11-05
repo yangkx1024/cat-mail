@@ -58,8 +58,9 @@ src/
   角色（`folders`）、侧栏的模型（`mailbox`：`Place`、`Source`、`AccountEntry`、连接说明、文件夹右键菜单的
   项和文案）、哪个引擎事件重读什么（`refresh`）和列表的行（`list`：来源怎么分页读、按天分组、重读后选中去哪、
   按标记勾选、行上的文字；移走后等它离开的 `Removal`）、对邮件的命令（`commands`：`Applies`、命令的名字、
-  归档 / 移动作用于哪些邮件、"Move to"列出的文件夹、永久删除的确认文案、被拒改动的说明）和读信区的头部
-  （`reader`：`Header`、附件的名字、保存对话框的起始目录）在 `catmail-frontend`，别的前端也能用。GUI 按原路径引用
+  归档 / 移动作用于哪些邮件、"Move to"列出的文件夹、永久删除的确认文案、被拒改动的说明）、读信区的头部
+  （`reader`：`Header`、附件的名字、保存对话框的起始目录）和写信窗口的模型（`composer`：从什么开始、From 的
+  选项、字段解析、何时保存 / 发送 / 关窗的 `Lifecycle`、按草稿登记窗口的 `OpenComposers`）在 `catmail-frontend`，别的前端也能用。GUI 按原路径引用
   （`crate::format`、`mailbox` 模块里的 `folders`、`refresh` 等），`assets.rs` 把 `FolderIcon` 对应到 Heroicons。
 
 ## 窗口外框（macOS）
@@ -249,6 +250,8 @@ macOS、Windows 用系统字体，不受影响。
   `AccountChanged`、`AccountAdded`、`AccountRemoved`（或漏了事件）就重读身份和存下的草稿：选着的身份还在就
   留着，被删了就换成引擎存下的草稿的身份（删的是它时已改成默认身份），GUI 不自己再推一遍，已输入的内容不动。在那之前的保存也不会失败：存草稿时传来的身份已被删除，引擎就保留草稿
   现在的身份（删除时已改成默认身份；身份 id 不重用）。
+- 保存、发送、关闭的先后由 `catmail_frontend::composer::Lifecycle` 决定（`Composer` 把用户的操作告诉它，按它的
+  回答调用引擎），窗口的登记和 `close_all` 的应答是 `OpenComposers`；`composer/` 只有界面和 GPUI 的任务。
 - 窗口边框的关闭按钮经 `on_window_should_close` 走同一流程（需要先保存时返回 false，存完自己关）。
 - Ctrl Enter 绑在 `Composer > Input` 上直接是 `Send`：多行输入框自己处理时会先插一个换行，再随信发出。
   附件可选文件或拖进窗口（`ExternalPaths`）。

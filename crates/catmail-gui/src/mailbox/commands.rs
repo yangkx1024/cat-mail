@@ -448,11 +448,8 @@ impl Mailbox {
             self.compose_once_loaded = true;
             return;
         }
-        let account = self
-            .current_account()
-            .or_else(|| self.accounts.as_deref()?.first())
-            .map(|a| a.account.id);
-        if let Some(account) = account {
+        let accounts = self.accounts.as_deref().unwrap_or_default();
+        if let Some(account) = composer::new_message_account(self.place, accounts) {
             self.compose(ComposeFrom::New(account), window, cx);
         }
     }

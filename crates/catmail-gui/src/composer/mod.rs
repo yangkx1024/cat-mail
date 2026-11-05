@@ -10,13 +10,13 @@
 mod lifecycle;
 mod view;
 
-use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::Duration;
 
-use catmail_core::{
-    AccountId, Draft, DraftAttachment, DraftContent, DraftId, Event, Forwarding, Identity,
-    IdentityId, MailClient, MessageId, RecvError, parse_addresses,
+use catmail_core::{DraftAttachment, DraftId, Event, Identity, IdentityId, MailClient, RecvError};
+pub use catmail_frontend::composer::{ComposeFrom, new_message_account};
+use catmail_frontend::composer::{
+    AfterAttachment, Field, FieldError, Fields, Lifecycle, Opening, SAVE_DELAY, Written,
+    window_title,
 };
 use futures_channel::oneshot;
 use gpui_kit::component::input::{InputEvent, InputState, Position, TextareaState};
@@ -28,43 +28,27 @@ use gpui_kit::{
     PathPromptOptions, SharedString, Subscription, Task, WeakEntity, Window, px, size,
 };
 
-/// How long typing has to pause before the draft is saved.
-const SAVE_DELAY: Duration = Duration::from_millis(800);
+/// A composer's window, and the composer in it.
+type ComposerWindow = (AnyWindowHandle, WeakEntity<Composer>);
 
-/// What a composer window starts from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ComposeFrom {
-    New(AccountId),
-    Reply { message: MessageId, all: bool },
-    Forward(MessageId),
-    Draft(DraftId),
-}
-
-/// The composer windows open, by draft: opening a draft again brings its window forward
-/// instead of a second editor of the same draft.
+/// The composer windows open, by draft.
 #[derive(Default)]
 struct OpenComposers {
-    windows: HashMap<DraftId, (AnyWindowHandle, WeakEntity<Composer>)>,
-    /// Drafts being read for a window: opening one again meanwhile does nothing, the
-    /// window is on its way.
-    opening: HashSet<DraftId>,
+    open: catmail_frontend::composer::OpenComposers<ComposerWindow>,
     /// Opens on their way, for tests to wait for.
     #[cfg(test)]
     in_flight: usize,
-    /// Told whether they all closed, while [`close_all`] waits for them.
-    closing_all: Option<oneshot::Sender<bool>>,
 }
 
 impl Global for OpenComposers {}
 
+fn open_composers(cx: &mut App) -> &mut catmail_frontend::composer::OpenComposers<ComposerWindow> {
+    &mut cx.default_global::<OpenComposers>().open
+}
+
 /// Brings the draft's window forward, if it has one.
 fn activate(id: DraftId, cx: &mut App) -> bool {
-    let Some((handle, _)) = cx
-        .default_global::<OpenComposers>()
-        .windows
-        .get(&id)
-        .cloned()
-    else {
+    let Some((handle, _)) = open_composers(cx).window(id) else {
         return false;
     };
     handle
@@ -76,14 +60,7 @@ fn activate(id: DraftId, cx: &mut App) -> bool {
 /// would lose what was typed since the last save. True once the last has closed; false as
 /// soon as one can't (an address to correct, a save that failed), which stays open.
 pub fn close_all(cx: &mut App) -> oneshot::Receiver<bool> {
-    let (closed, answer) = oneshot::channel();
-    let open = cx.default_global::<OpenComposers>();
-    let windows: Vec<_> = open.windows.values().cloned().collect();
-    if windows.is_empty() {
-        closed.send(true).ok();
-        return answer;
-    }
-    open.closing_all = Some(closed);
+    let (windows, answer) = open_composers(cx).close_all();
     for (handle, composer) in windows {
         handle
             .update(cx, |_, window, cx| {
@@ -99,7 +76,7 @@ pub fn close_all(cx: &mut App) -> oneshot::Receiver<bool> {
 fn composers(cx: &App) -> impl Iterator<Item = &Composer> {
     cx.try_global::<OpenComposers>()
         .into_iter()
-        .flat_map(|open| open.windows.values())
+        .flat_map(|open| open.open.windows())
         .filter_map(|(_, composer)| composer.upgrade())
         .map(|composer| composer.read(cx))
 }
@@ -116,7 +93,7 @@ pub(crate) fn texts(cx: &App) -> Vec<String> {
 /// reported in `window`, the one asking.
 pub fn open(client: MailClient, from: ComposeFrom, window: &mut Window, cx: &mut App) {
     if let ComposeFrom::Draft(id) = from
-        && (activate(id, cx) || !cx.default_global::<OpenComposers>().opening.insert(id))
+        && (activate(id, cx) || !open_composers(cx).begin_opening(id))
     {
         return;
     }
@@ -128,35 +105,10 @@ pub fn open(client: MailClient, from: ComposeFrom, window: &mut Window, cx: &mut
     // On the app, not the asking window: closing that must not leave the draft marked
     // as being opened.
     cx.spawn(async move |cx| {
-        let opened = async {
-            let draft = match from {
-                ComposeFrom::New(account) => {
-                    client
-                        .create_draft(account, None, DraftContent::default(), Vec::new())
-                        .await?
-                }
-                ComposeFrom::Reply { message, all } => {
-                    client
-                        .reply(message, all, None, String::new(), Vec::new())
-                        .await?
-                }
-                ComposeFrom::Forward(message) => {
-                    client
-                        .forward(message, None, Forwarding::default(), Vec::new())
-                        .await?
-                }
-                ComposeFrom::Draft(id) => client
-                    .get_draft(id)
-                    .await?
-                    .ok_or(catmail_core::Error::DraftNotFound(id))?,
-            };
-            let identities = client.draft_senders(draft.id).await?;
-            Ok::<_, catmail_core::Error>((draft, identities))
-        }
-        .await;
+        let opened = from.start(&client).await;
         cx.update(|cx| {
             if let ComposeFrom::Draft(id) = from {
-                cx.default_global::<OpenComposers>().opening.remove(&id);
+                open_composers(cx).end_opening(id);
             }
             #[cfg(test)]
             {
@@ -165,26 +117,10 @@ pub fn open(client: MailClient, from: ComposeFrom, window: &mut Window, cx: &mut
             let failure = match opened {
                 // A window for it opened meanwhile: a reply or forward made it, and it
                 // was opened from the drafts before its window came up.
-                Ok((draft, ..)) if activate(draft.id, cx) => None,
-                Ok((draft, identities)) => {
-                    let created_here = !matches!(from, ComposeFrom::Draft(_));
-                    // Where the writing starts: the text once there is someone to send to.
-                    let focus_body = match from {
-                        ComposeFrom::Reply { .. } => true,
-                        ComposeFrom::Draft(_) => !draft.content.to.is_empty(),
-                        _ => false,
-                    };
-                    let opening = Opening {
-                        client,
-                        identities,
-                        draft,
-                        created_here,
-                        focus_body,
-                    };
-                    open_window(opening, cx)
-                        .err()
-                        .map(|e| format!("Couldn't open a window: {e:#}"))
-                }
+                Ok(opening) if activate(opening.draft.id, cx) => None,
+                Ok(opening) => open_window(client, opening, cx)
+                    .err()
+                    .map(|e| format!("Couldn't open a window: {e:#}")),
                 Err(e) => Some(format!("Couldn't start the message: {e}")),
             };
             if let Some(failure) = failure {
@@ -214,19 +150,7 @@ pub(crate) fn errors(cx: &App) -> Vec<Option<String>> {
         .collect()
 }
 
-/// What a composer window is opened with.
-struct Opening {
-    client: MailClient,
-    /// The identities the draft can be sent as, to choose From among.
-    identities: Vec<Identity>,
-    draft: Draft,
-    /// Made for this window, see [`Composer::created_here`].
-    created_here: bool,
-    /// The text has the focus, not To.
-    focus_body: bool,
-}
-
-fn open_window(opening: Opening, cx: &mut App) -> anyhow::Result<()> {
+fn open_window(client: MailClient, opening: Opening, cx: &mut App) -> anyhow::Result<()> {
     let id = opening.draft.id;
     let options = crate::layout::window_options(
         window_title(&opening.draft.content.subject),
@@ -236,19 +160,10 @@ fn open_window(opening: Opening, cx: &mut App) -> anyhow::Result<()> {
         cx,
     );
     let (handle, composer) = crate::layout::open_window(options, cx, |window, cx| {
-        cx.new(|cx| Composer::new(opening, window, cx))
+        cx.new(|cx| Composer::new(client, opening, window, cx))
     })?;
-    cx.default_global::<OpenComposers>()
-        .windows
-        .insert(id, (handle, composer.downgrade()));
+    open_composers(cx).insert(id, (handle, composer.downgrade()));
     Ok(())
-}
-
-fn window_title(subject: &str) -> String {
-    match subject.trim() {
-        "" => "New message".into(),
-        subject => subject.into(),
-    }
 }
 
 /// A choice of From: one of the identities the draft can be sent as.
@@ -270,27 +185,12 @@ impl SelectItem for Sender {
     }
 }
 
-/// The identities, as the engine lists them (by account, each one's default first). An
-/// address there twice (through two servers) is told apart by its server.
 fn senders(identities: &[Identity]) -> Vec<Sender> {
-    identities
-        .iter()
-        .map(|identity| {
-            let address = identity.address();
-            let twice = identities
-                .iter()
-                .filter(|other| other.email.eq_ignore_ascii_case(&identity.email))
-                .count()
-                > 1;
-            let title = if twice {
-                format!("{address} · {}", identity.smtp.host)
-            } else {
-                address.to_string()
-            };
-            Sender {
-                identity: identity.id,
-                title: title.into(),
-            }
+    catmail_frontend::composer::senders(identities)
+        .into_iter()
+        .map(|s| Sender {
+            identity: s.identity,
+            title: s.title.into(),
         })
         .collect()
 }
@@ -306,57 +206,12 @@ enum FromField {
     },
 }
 
-/// What a save hands to the engine: who the draft is from, and what it says.
-#[derive(Debug, Clone, PartialEq)]
-struct Written {
-    from: IdentityId,
-    content: DraftContent,
-}
-
-/// An address field, which an error is shown under.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Field {
-    To,
-    Cc,
-    Bcc,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Finish {
-    Send,
-    Close,
-    Discard,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum SaveState {
-    Unchanged,
-    Saved,
-    Failed(SharedString),
-}
-
 pub struct Composer {
     client: MailClient,
     from: FromField,
     draft: DraftId,
-    /// Made for this window (not opened from the drafts): deleted again if nothing was
-    /// changed before it closes.
-    created_here: bool,
-    /// Changed since the window opened.
-    edited: bool,
-    /// Changed since the last save started.
-    dirty: bool,
-    /// A save, or the send or close that ends the window, is with the engine.
-    saving: bool,
-    /// Attachments being added or removed. The window ends after them: sending first
-    /// would leave one out, and it couldn't be added to a draft being sent.
-    attaching: usize,
-    save_state: SaveState,
-    /// What the window is ending with; it waits for the save in flight.
-    finishing: Option<Finish>,
-    /// What was last handed to the engine. An address field that doesn't parse keeps
-    /// this value until it does.
-    saved: Written,
+    /// When it saves, sends and closes.
+    life: Lifecycle,
     to: Entity<InputState>,
     cc: Entity<InputState>,
     bcc: Entity<InputState>,
@@ -366,7 +221,7 @@ pub struct Composer {
     attachments: Vec<DraftAttachment>,
     /// A field that doesn't hold addresses, shown under it once sending (or closing)
     /// needs it to.
-    field_error: Option<(Field, SharedString)>,
+    field_error: Option<FieldError>,
     error: Option<SharedString>,
     focus_handle: FocusHandle,
     _debounce: Task<()>,
@@ -383,15 +238,20 @@ impl Focusable for Composer {
 }
 
 impl Composer {
-    fn new(opening: Opening, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        client: MailClient,
+        opening: Opening,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let life = Lifecycle::new(&opening);
         let Opening {
-            client,
             identities,
             draft,
-            created_here,
             focus_body,
+            ..
         } = opening;
-        let content = draft.content.clone();
+        let content = draft.content;
         let address_input = |list: &[catmail_core::Address], window: &mut Window, cx: &mut App| {
             let value = catmail_core::format_addresses(list);
             cx.new(|cx| InputState::new(window, cx).default_value(value))
@@ -443,18 +303,8 @@ impl Composer {
             client,
             from,
             draft: draft.id,
-            created_here,
-            edited: false,
-            dirty: false,
-            saving: false,
-            attaching: 0,
-            save_state: SaveState::Unchanged,
-            finishing: None,
+            life,
             show_cc_bcc: !content.cc.is_empty() || !content.bcc.is_empty(),
-            saved: Written {
-                from: draft.identity,
-                content,
-            },
             to,
             cc,
             bcc,
@@ -485,11 +335,9 @@ impl Composer {
 
     fn changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // The fields are read-only by then (see `header_input`).
-        if self.finishing.is_some() {
+        if !self.life.changed() {
             return;
         }
-        self.edited = true;
-        self.dirty = true;
         self.field_error = None;
         // Replacing the task cancels the previous timer.
         self._debounce = cx.spawn_in(window, async move |this, cx| {
@@ -502,31 +350,23 @@ impl Composer {
 
     /// The draft as typed. An address field that doesn't parse keeps its last saved
     /// value, and is reported.
-    fn written(&self, cx: &App) -> (Written, Option<(Field, SharedString)>) {
-        let mut problem = None;
-        let mut field =
-            |field: Field, input: &Entity<InputState>, saved: &[catmail_core::Address]| {
-                match parse_addresses(&input.read(cx).value()) {
-                    Ok(list) => list,
-                    Err(e) => {
-                        problem.get_or_insert((field, error_text(&e)));
-                        saved.to_vec()
-                    }
-                }
-            };
-        let saved = &self.saved.content;
-        let to = field(Field::To, &self.to, &saved.to);
-        let cc = field(Field::Cc, &self.cc, &saved.cc);
-        let bcc = field(Field::Bcc, &self.bcc, &saved.bcc);
-        let content = DraftContent {
-            subject: self.subject.read(cx).value().to_string(),
-            to,
-            cc,
-            bcc,
-            text: self.body.read(cx).value().to_string(),
+    fn written(&self, cx: &App) -> (Written, Option<FieldError>) {
+        let value = |input: &Entity<InputState>| input.read(cx).value();
+        let (to, cc, bcc, subject) = (
+            value(&self.to),
+            value(&self.cc),
+            value(&self.bcc),
+            value(&self.subject),
+        );
+        let text = self.body.read(cx).value();
+        let fields = Fields {
+            to: &to,
+            cc: &cc,
+            bcc: &bcc,
+            subject: &subject,
+            text: &text,
         };
-        let from = self.sender_identity(cx);
-        (Written { from, content }, problem)
+        self.life.written(fields, self.sender_identity(cx))
     }
 
     /// The From line for `identities`, with `selected` chosen.
@@ -556,7 +396,7 @@ impl Composer {
             window,
             |this, _, event: &SelectEvent<Vec<Sender>>, window, cx| {
                 if let SelectEvent::Confirm(Some(identity)) = event
-                    && this.saved.from != *identity
+                    && this.life.saved().from != *identity
                 {
                     this.changed(window, cx);
                 }
@@ -576,7 +416,7 @@ impl Composer {
                 .read(cx)
                 .selected_value()
                 .copied()
-                .unwrap_or(self.saved.from),
+                .unwrap_or(self.life.saved().from),
         }
     }
 
@@ -656,13 +496,11 @@ impl Composer {
     }
 
     fn attach_paths(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-        if self.finishing.is_some() {
+        if !self.life.begin_attachment() {
             return;
         }
         let client = self.client.clone();
         let id = self.draft;
-        self.edited = true;
-        self.attaching += 1;
         cx.spawn_in(window, async move |this, cx| {
             let mut failed = false;
             for path in paths {
@@ -689,38 +527,18 @@ impl Composer {
         .detach();
     }
 
-    /// An attachment change is done; a window waiting to end can go on. If it failed, a
-    /// send or close waiting for it stops instead: the message isn't what the user
-    /// meant to send, and the window stays to show why.
+    /// An attachment change is done; a window waiting to end can go on, or stops if it
+    /// failed.
     fn attached(&mut self, failed: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.attaching -= 1;
-        let Some(how) = self.finishing else {
-            return;
-        };
-        if failed && how != Finish::Discard {
-            self.finishing = None;
-            self.stop_closing_all(cx);
-            self.error = Some(
-                match how {
-                    Finish::Send => "Not sent: check the attachments first.",
-                    _ => "Left open: check the attachments first.",
-                }
-                .into(),
-            );
-            cx.notify();
-        } else if !self.busy() {
-            self.run_finish(window, cx);
+        match self.life.attachment_ended(failed) {
+            AfterAttachment::Finish => self.run_finish(window, cx),
+            AfterAttachment::Stop(why) => {
+                self.stop_closing_all(cx);
+                self.error = Some(why.into());
+                cx.notify();
+            }
+            AfterAttachment::Nothing => {}
         }
-    }
-
-    /// Something for this draft is with the engine.
-    fn busy(&self) -> bool {
-        self.saving || self.attaching > 0
-    }
-
-    /// Made for this window and never changed: closing it leaves nothing behind.
-    fn untouched(&self) -> bool {
-        self.created_here && !self.edited
     }
 
     fn remove_attachment(
@@ -729,12 +547,10 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.finishing.is_some() {
+        if !self.life.begin_attachment() {
             return;
         }
         let client = self.client.clone();
-        self.edited = true;
-        self.attaching += 1;
         cx.spawn_in(window, async move |this, cx| {
             let result = client.remove_draft_attachment(attachment).await;
             this.update_in(cx, |this, window, cx| {
@@ -753,18 +569,4 @@ impl Composer {
         })
         .detach();
     }
-}
-
-/// The engine's message, as a sentence for the window.
-fn error_text(e: &catmail_core::Error) -> SharedString {
-    let text = e.to_string();
-    let mut chars = text.chars();
-    let mut sentence: String = match chars.next() {
-        Some(first) => first.to_uppercase().chain(chars).collect(),
-        None => return SharedString::default(),
-    };
-    if !sentence.ends_with('.') {
-        sentence.push('.');
-    }
-    sentence.into()
 }

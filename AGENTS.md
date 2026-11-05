@@ -52,7 +52,7 @@ ignored there with a reason, never by loosening the check.
 | `catmail-core` | Engine, services, runtime bridge, secrets, the `MailClient` facade |
 | `catmail-cli` | The `catmail` binary |
 | `catmail-gui` | The `catmail-gui` desktop binary, on GPUI Kit |
-| `catmail-frontend` | What desktop frontends share and no UI toolkit needs: the settings file, single instance, the sidebar's folders and model, which engine events read what again, the list's rows, the commands on messages, display formats, the reader's header and HTML policy |
+| `catmail-frontend` | What desktop frontends share and no UI toolkit needs: the settings file, single instance, the sidebar's folders and model, which engine events read what again, the list's rows, the commands on messages, the composer's model, display formats, the reader's header and HTML policy |
 | `catmail-render` | The reader's HTML engine (Blitz): lays out and paints a message body on its own thread. No UI toolkit, no mail types |
 | `catmail-testkit` | Fake IMAP and SMTP servers with fault injection; dev-dependency only |
 
