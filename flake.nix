@@ -22,6 +22,9 @@
             freetype
             libxkbcommon
             libxcb
+            # catmail-nsh (the nsh spike): its GTK 4 backend and the web views of bodies.
+            gtk4
+            webkitgtk_6_0
           ];
           # What GPUI loads at runtime with dlopen: the Wayland client and the Vulkan
           # loader (with the GL fallback wgpu tries when there is no Vulkan driver).

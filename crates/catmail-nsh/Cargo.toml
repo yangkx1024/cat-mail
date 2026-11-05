@@ -1,0 +1,42 @@
+[package]
+name = "catmail-nsh"
+description = "Spike: a catmail frontend on Native Shell (nsh), GTK 4 on Linux, bodies in a web view"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Not a member of the root workspace: built together, Blitz (catmail-render) turns on
+# taffy's `calc` feature, and nsh-core 0.4.0 doesn't compile with it. Build from this
+# directory, not with `--manifest-path` from the root: Cargo reads `.cargo/config.toml`
+# (which shares the root's target directory) from where it runs, and would otherwise
+# build everything again in a `target/` here.
+[workspace]
+
+[[bin]]
+name = "catmail-nsh"
+path = "src/main.rs"
+
+[dependencies]
+catmail-core = { path = "../catmail-core" }
+anyhow = "1"
+jiff = "0.2.38"
+tracing = "0.1"
+
+# Only the Linux backend is tried; elsewhere the binary says so and exits.
+[target.'cfg(target_os = "linux")'.dependencies]
+nsh-core = "0.4.0"
+nsh-base = { version = "0.4.0", default-features = false }
+# WebKitGTK 6.0 web views, for message bodies.
+nsh-platform-linux = { version = "0.4.0", default-features = false, features = ["webview"] }
+
+# The root workspace's patch, which catmail-core needs (unreleased imap-proto 0.18.0).
+[patch.crates-io]
+imap-proto = { git = "https://github.com/djc/imap-proto", rev = "0dac3af59a2cfcd649c30034d5f221c4d8edbf34" }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

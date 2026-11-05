@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# A workspace of its own: built with the rest, Blitz turns on taffy's `calc`, which
+# nsh-core 0.4.0 doesn't handle (a match without the `Calc` arm).
+exclude = ["crates/catmail-nsh"]
 
 [workspace.package]
 version = "0.1.0"
