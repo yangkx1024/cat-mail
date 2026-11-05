@@ -492,6 +492,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "catmail-frontend"
+version = "0.1.0"
+dependencies = [
+ "catmail-core",
+ "data-url",
+ "directories",
+ "dunce",
+ "futures-channel",
+ "jiff",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+ "uds_windows",
+]
+
+[[package]]
 name = "catmail-html"
 version = "0.1.0"
 dependencies = [
@@ -509,6 +527,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "catmail-core",
+ "catmail-frontend",
+ "futures-channel",
+ "futures-util",
+ "glib-unix",
  "jiff",
  "nsh-base",
  "nsh-core",
@@ -945,6 +967,12 @@ checksum = "cd1511a7b6a56299bd043a9c167a6d2bfb37bf84a6dfceaba651168adfb43c87"
 dependencies = [
  "dtoa",
 ]
+
+[[package]]
+name = "dunce"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "encoding_rs"
@@ -1435,6 +1463,28 @@ version = "0.22.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "99b38907e67e40dec9b60f858bcada952598719cb512a13eb13d6cdcd16f8295"
 dependencies = [
+ "libc",
+ "system-deps 9.0.1",
+]
+
+[[package]]
+name = "glib-unix"
+version = "0.22.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc698e05c8483a899312f76b30b8d6d59e44f9e6ddf93a7487a6de34019b543d"
+dependencies = [
+ "futures-core",
+ "glib",
+ "glib-unix-sys",
+]
+
+[[package]]
+name = "glib-unix-sys"
+version = "0.22.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8644d8d71c4f25b27f775dc9bb4dcd69ff81de8614b23f16c2d7944c915e96ab"
+dependencies = [
+ "glib-sys",
  "libc",
  "system-deps 9.0.1",
 ]

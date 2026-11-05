@@ -20,7 +20,10 @@ path = "src/main.rs"
 
 [dependencies]
 catmail-core = { path = "../catmail-core" }
+catmail-frontend = { path = "../catmail-frontend" }
 anyhow = "1"
+futures-channel = "0.3"
+futures-util = { version = "0.3", default-features = false }
 jiff = "0.2.38"
 tracing = "0.1"
 
@@ -28,6 +31,8 @@ tracing = "0.1"
 [target.'cfg(target_os = "linux")'.dependencies]
 nsh-core = "0.4.0"
 nsh-base = { version = "0.4.0", default-features = false }
+# SIGINT and SIGTERM on GTK's loop; the glib that gtk4 uses.
+glib-unix = "0.22"
 # WebKitGTK 6.0 web views, for message bodies.
 nsh-platform-linux = { version = "0.4.0", default-features = false, features = ["webview"] }
 

@@ -3,7 +3,7 @@
 //! State is nsh globals (one signal per type, per surface). The client's futures are
 //! awaited in nsh tasks on the UI thread; the engine does the work on its own runtime.
 
-use std::{collections::HashMap, sync::OnceLock, time::Duration};
+use std::{collections::HashMap, time::Duration};
 
 use catmail_core::{
     FolderId, FolderRole, MailClient, MessageId, MessageSummary, RecvError,
@@ -12,20 +12,12 @@ use catmail_core::{
 use nsh_base::theme;
 use nsh_core::prelude::*;
 
+use catmail_frontend::html::is_openable_link;
+
 use crate::page::{self, Colors, FromPage};
 
-static CLIENT: OnceLock<MailClient> = OnceLock::new();
-
-pub fn set_client(client: MailClient) {
-    if CLIENT.set(client).is_err() {
-        panic!("the client is set once");
-    }
-}
-
-fn client() -> &'static MailClient {
-    CLIENT
-        .get()
-        .expect("main sets the client before the app starts")
+fn client() -> MailClient {
+    crate::engine::client()
 }
 
 /// Messages fetched at a time.
@@ -80,8 +72,57 @@ fn report(what: &str, error: catmail_core::Error) {
     global::<Status>().set(Status(Some(format!("{what}: {error}"))));
 }
 
+/// Whether the engine is open yet.
+#[derive(Clone, PartialEq)]
+enum Opening {
+    Waiting,
+    Open,
+    Failed(String),
+}
+
+/// The window: empty while the engine opens (usually a moment), then the mailbox, or why
+/// there is none.
 #[component]
 pub fn App() -> impl IntoElement {
+    let opening = signal(Opening::Waiting);
+    spawn(async move {
+        opening.set(match crate::engine::opened().await {
+            Ok(_) => Opening::Open,
+            Err(e) => Opening::Failed(e),
+        });
+    });
+    view()
+        .flex_1()
+        .bg(move || theme().background)
+        .child(dynamic(move || match opening.get() {
+            Opening::Waiting => view().into_element(),
+            Opening::Open => mailbox().into_element(),
+            Opening::Failed(reason) => failed(reason).into_element(),
+        }))
+}
+
+fn failed(reason: String) -> impl IntoElement {
+    view()
+        .flex_1()
+        .items_center()
+        .justify_center()
+        .gap(px(8.0))
+        .p(px(24.0))
+        .child(
+            // The GUI's words (`open_failed`).
+            text("Couldn't open the mail data")
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(move || theme().foreground),
+        )
+        .child(
+            text(reason)
+                .text_sm()
+                .selectable(true)
+                .text_color(move || theme().muted_foreground),
+        )
+}
+
+fn mailbox() -> impl IntoElement {
     spawn(load_sidebar());
     spawn(watch_events());
     // The tasks belong to the effects' runs: picking another folder or message cancels
@@ -104,7 +145,6 @@ pub fn App() -> impl IntoElement {
     view()
         .flex_1()
         .flex_row()
-        .bg(move || theme().background)
         .child(sidebar())
         .child(message_list())
         .child(reader())
@@ -555,14 +595,4 @@ fn reader() -> impl IntoElement {
                     .h(move || px(global::<BodyHeight>().with(|h| h.0).max(40.0))),
             ),
     )
-}
-
-/// Web pages and new mail; the sanitizer also lets `cid:` links through, which lead
-/// nowhere outside the message.
-fn is_openable_link(url: &str) -> bool {
-    url.split_once(':').is_some_and(|(scheme, _)| {
-        ["http", "https", "mailto"]
-            .iter()
-            .any(|s| scheme.eq_ignore_ascii_case(s))
-    })
 }

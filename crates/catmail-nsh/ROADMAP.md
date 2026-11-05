@@ -6,8 +6,8 @@
 **做法**
 
 - **一项一提交**：对齐一项就提交一次，附上与 gpui 版的截图对比。
-- **纯逻辑共用，不复制**：gpui 版里不依赖窗口的纯逻辑先抽到两个前端都能用的地方，再从 nsh 版调用。包括文件夹分区、
-  事件刷新的节流、日期格式、HTML 策略、设置文件、主题推导与导入。见 P1。
+- **纯逻辑共用，不复制**：gpui 版里不依赖窗口的纯逻辑先抽进 `catmail-frontend`，再从 nsh 版调用。包括文件夹分区、
+  事件刷新的节流、日期格式、HTML 策略、设置文件、主题推导与导入。
 - **注明替换方案**：nsh 没有对应能力、需要换做法的地方标 ⚠️。
 
 ## P0 只读三栏（已完成）
@@ -19,15 +19,16 @@
 
 ## P1 应用骨架
 
-- [ ] 自建 `gtk::Application`，每个窗口放一个 `AppView`，替换 `run_app`。⚠️ `run_app` 只有一个窗口，关窗即退出；
-      写信窗口（P5）和关窗常驻（P9）都依赖这一项
-- [ ] 抽出前端共用的纯逻辑（`folders`、`refresh`、`format`、`html`、`settings`、`theme/` 的调色板、推导和导入），
-      两个前端各自调用。放哪里要先定：新建 crate，还是放进 `catmail-core`
-- [ ] 引擎异步打开（`open_async`）：先显示窗口，打不开时显示原因
-- [ ] 单实例（`instance.rs` 的 socket）：再次启动时唤起已有窗口
-- [ ] 日志写进数据目录（`logging::write_file`）
-- [ ] 读写同一份 `settings.json`
-- [ ] 图标：Heroicons SVG，作为 nsh 的资源
+- [x] 自建 `gtk::Application`，每个窗口放一个 `AppView`，替换 `run_app`（`shell.rs`）。引擎由应用持有（`engine.rs`），
+      主循环结束后 `shut_down` 并等它关好；Ctrl+Q、Ctrl+W、SIGINT / SIGTERM 都走这个退出流程
+- [x] 新建 `catmail-frontend`，抽出 `instance`、`settings`（数据和文件读写）、`format`、`html`。
+      其余的到用到时再抽：`folders`、`refresh` 在 P2、P3，`theme/` 的推导和导入在 P7
+- [x] 引擎异步打开（`open_async`）：先显示窗口，打不开时显示原因（文案与 gpui 版相同）
+- [x] 单实例（`catmail_frontend::instance`）：再次启动时唤起已有窗口，与 gpui 版互通（谁先启动谁是那个应用）；
+      Wayland 下用启动方的 activation token 获得焦点
+- [x] 日志写进数据目录（`logging::write_file`）
+- [x] 读同一份 `settings.json`，应用外观和文字大小（`AppView::set_font_scale`）；写入随 P7 的设置对话框一起做
+- [ ] 图标：Heroicons SVG，作为 nsh 的资源（随 P2 侧栏一起做）
 
 ## P2 侧栏（gui.md「侧栏」）
 
