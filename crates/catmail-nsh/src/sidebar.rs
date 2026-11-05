@@ -14,16 +14,16 @@ use catmail_frontend::mailbox::{
     self, ALL_MAIL_HIDDEN, AccountEntry, FolderMenuEntry, Place, SYNC_ON_OPEN_AFTER,
 };
 use catmail_frontend::refresh::{Coalesce, DraftCounts};
-use nsh_base::{alert_dialog, button, dialog, theme};
+use nsh_base::{alert_dialog, theme};
+use nsh_core::ContextMenuEvent;
 use nsh_core::element::desktop::{MenuItem, popup_menu};
-use nsh_core::element::input;
 use nsh_core::prelude::*;
-use nsh_core::{ContextMenuEvent, ModalAnimation};
 
 use crate::app::{client, in_mailbox, report};
-use crate::commands::primary_button;
-use crate::composer;
+use crate::commands::{Size, icon_button, primary_button, tooltip};
+use crate::form::{NameRequest, ask_name, asking_name};
 use crate::icons::{Icon, icon};
+use crate::{composer, settings};
 
 /// The accounts as the sidebar shows them; `None` until the first read.
 #[derive(Clone, Default)]
@@ -37,10 +37,6 @@ pub struct SelectedPlace(pub Option<Place>);
 /// the others.
 #[derive(Clone, Default)]
 struct Folds(HashMap<AccountId, bool>);
-
-/// The name dialog, while it is open.
-#[derive(Clone, Default)]
-struct NameDialog(Option<NameRequest>);
 
 /// The reads of the sidebar: one at a time, and which draft count is the latest. Not
 /// reactive: nothing shows it.
@@ -479,33 +475,30 @@ pub fn sidebar() -> impl IntoElement {
                 ))),
         )
         .child(
-            text(move || note.get().unwrap_or_default())
-                .number_of_lines(1)
-                .text_xs()
-                .px(px(12.0))
-                .py(px(6.0))
-                .text_color(move || theme().muted_foreground)
-                // All of it, when the line is cut short: every address that can't send,
-                // say.
-                .tooltip(
-                    view()
-                        .max_w(px(320.0))
-                        .px(px(8.0))
-                        .py(px(4.0))
-                        .rounded(px(6.0))
-                        .bg(move || theme().popover)
-                        .child(
-                            text(move || note.get().unwrap_or_default())
-                                .text_xs()
-                                .text_color(move || theme().popover_foreground),
-                        )
-                        .into_element(),
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .px(px(6.0))
+                .py(px(4.0))
+                .child(icon_button(
+                    || Icon::Cog6Tooth,
+                    || "Settings (Ctrl+,)".to_owned(),
+                    || true,
+                    Size::Bar,
+                    settings::open,
+                ))
+                .child(
+                    text(move || note.get().unwrap_or_default())
+                        .number_of_lines(1)
+                        .flex_1()
+                        .text_xs()
+                        .text_color(move || theme().muted_foreground)
+                        // All of it, when the line is cut short: every address that can't
+                        // send, say.
+                        .tooltip(tooltip(move || note.get().unwrap_or_default())),
                 ),
         )
-        .child(when(
-            move || global::<NameDialog>().with(|n| n.0.is_some()),
-            name_dialog,
-        ))
 }
 
 fn row(row: ReadSignal<Row>, _ix: ReadSignal<usize>) -> AnyElement {
@@ -611,7 +604,7 @@ fn place_row(row: ReadSignal<Row>) -> impl IntoElement {
         )
         .child(when(
             move || row.with(|r| r.attention),
-            || icon(|| Icon::ExclamationTriangle, 12.0).text_color(move || theme().destructive),
+            || icon(|| Icon::ExclamationTriangle, 12.0).text_color(crate::theme::warning),
         ))
         .child(
             text(move || match row.with(|r| r.count) {
@@ -674,10 +667,21 @@ fn new_folder(account: AccountId, parent: Option<FolderId>) {
         Some(entry.new_folder_title(parent))
     });
     if let Some(title) = title {
-        open_name_dialog(NameRequest {
-            naming: Naming::New { account, parent },
+        ask_name(NameRequest {
             title,
             name: String::new(),
+            placeholder: None,
+            ok: "Create",
+            what: "create it",
+            may_be_empty: false,
+            request: Rc::new(move |name| {
+                Box::pin(async move {
+                    client()
+                        .create_folder(account, parent, &name)
+                        .await
+                        .map(drop)
+                })
+            }),
         });
     }
 }
@@ -687,17 +691,23 @@ fn rename_folder(id: FolderId) {
         Some(entry.changeable_folder(id)?.leaf_name().to_owned())
     });
     if let Some(name) = name {
-        open_name_dialog(NameRequest {
-            naming: Naming::Rename(id),
+        ask_name(NameRequest {
             title: format!("Rename “{name}”"),
             name,
+            placeholder: None,
+            ok: "Rename",
+            what: "rename it",
+            may_be_empty: false,
+            request: Rc::new(move |name| {
+                Box::pin(async move { client().rename_folder(id, &name).await.map(drop) })
+            }),
         });
     }
 }
 
 /// F2: renames the folder the sidebar has selected, if the user may.
 fn rename_selected() {
-    if global::<NameDialog>().with_untracked(|n| n.0.is_some()) {
+    if asking_name() {
         return;
     }
     if let Some(Place::Folder(id)) = global::<SelectedPlace>().with_untracked(|p| p.0) {
@@ -728,166 +738,4 @@ fn delete_folder(id: FolderId) {
             report(&format!("Couldn't {}", deletion.what), e);
         }
     });
-}
-
-// --- The name dialog ----------------------------------------------------------------
-
-/// What a name is for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Naming {
-    /// A new folder in `parent`, or at the top of the account's.
-    New {
-        account: AccountId,
-        parent: Option<FolderId>,
-    },
-    Rename(FolderId),
-}
-
-impl Naming {
-    /// The button that submits the name, and what it does, for the error.
-    fn verbs(self) -> (&'static str, &'static str) {
-        match self {
-            Naming::New { .. } => ("Create", "create it"),
-            Naming::Rename(_) => ("Rename", "rename it"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct NameRequest {
-    naming: Naming,
-    title: String,
-    /// What the field starts with, selected.
-    name: String,
-}
-
-fn open_name_dialog(request: NameRequest) {
-    global::<NameDialog>().set(NameDialog(Some(request)));
-}
-
-fn close_name_dialog() {
-    global::<NameDialog>().set(NameDialog(None));
-}
-
-/// Asks for a name; stays open until the engine has made the change on the server,
-/// which it does at once, and says why if it couldn't.
-fn name_dialog() -> impl IntoElement {
-    let Some(request) = global::<NameDialog>().with_untracked(|n| n.0.clone()) else {
-        return view().into_element();
-    };
-    let naming = request.naming;
-    let (ok, what) = naming.verbs();
-    let value = signal(request.name.clone());
-    let error = signal(None::<String>);
-    let busy = signal(false);
-    let submit = move || {
-        let name = value.get_untracked();
-        if busy.get_untracked() || name.trim().is_empty() {
-            return;
-        }
-        busy.set(true);
-        error.set(None);
-        spawn(async move {
-            let done = match naming {
-                Naming::New { account, parent } => client()
-                    .create_folder(account, parent, &name)
-                    .await
-                    .map(drop),
-                Naming::Rename(folder) => client().rename_folder(folder, &name).await.map(drop),
-            };
-            busy.set(false);
-            match done {
-                Ok(()) => close_name_dialog(),
-                Err(e) => error.set(Some(format!("Couldn't {what}: {e}"))),
-            }
-        });
-    };
-    let length = request.name.chars().count() as u32;
-    dialog()
-        .animation(ModalAnimation::Fade)
-        .on_cancel(close_name_dialog)
-        .child(
-            view()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .bg(hsla(0.0, 0.0, 0.0, 0.4))
-                .child(
-                    view()
-                        .w(px(400.0))
-                        .p(px(24.0))
-                        .gap(px(12.0))
-                        .rounded(px(12.0))
-                        .border_1()
-                        .border_color(move || theme().border)
-                        .bg(move || theme().popover)
-                        .child(
-                            text(request.title.clone())
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(move || theme().popover_foreground),
-                        )
-                        .child(
-                            input()
-                                .default_value(request.name.clone())
-                                .selected_range((0, length))
-                                .auto_focus(true)
-                                .on_change(move |name: &str| value.set(name.to_owned()))
-                                .on_submit(move |_: &str| submit())
-                                .h(px(36.0))
-                                .px(px(10.0))
-                                .rounded(px(8.0))
-                                .border_1()
-                                .border_color(move || theme().input)
-                                .text_sm()
-                                .text_color(move || theme().popover_foreground),
-                        )
-                        .child(when(
-                            move || error.with(Option::is_some),
-                            move || {
-                                text(move || error.get().unwrap_or_default())
-                                    .text_sm()
-                                    .selectable(true)
-                                    .text_color(move || theme().destructive)
-                            },
-                        ))
-                        .child(
-                            view()
-                                .flex_row()
-                                .justify_end()
-                                .gap(px(8.0))
-                                .child(dialog_button("Cancel", false, busy, close_name_dialog))
-                                .child(dialog_button(ok, true, busy, submit)),
-                        ),
-                ),
-        )
-        .into_element()
-}
-
-fn dialog_button(
-    label: &'static str,
-    primary: bool,
-    busy: Signal<bool>,
-    press: impl Fn() + 'static,
-) -> impl IntoElement {
-    button()
-        .disabled(move || busy.get())
-        .on_press(press)
-        .h(px(32.0))
-        .px(px(14.0))
-        .rounded(px(16.0))
-        .justify_center()
-        .bg(move || {
-            if primary {
-                theme().primary
-            } else {
-                theme().secondary
-            }
-        })
-        .child(text(label).text_sm().text_color(move || {
-            if primary {
-                theme().primary_foreground
-            } else {
-                theme().secondary_foreground
-            }
-        }))
 }

@@ -15,9 +15,10 @@ use nsh_core::element::Owner;
 use nsh_core::prelude::*;
 
 use crate::list::{self, Rows, Selected};
-use crate::sidebar::{self, SelectedPlace};
+use crate::login::{self, SignIn};
+use crate::sidebar::{self, Accounts, SelectedPlace};
 use crate::toast::{Level, notify};
-use crate::{commands, composer, draft, outbox, reader, toast};
+use crate::{commands, composer, draft, form, outbox, reader, settings, toast};
 
 pub fn client() -> MailClient {
     crate::engine::client()
@@ -53,6 +54,16 @@ pub fn in_mailbox(future: impl Future<Output = ()> + 'static) {
     }
 }
 
+/// Runs `f` on a thread of its own (reading a file, say), for its result; `None` if the
+/// thread panicked.
+pub async fn off_thread<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    let (done, result) = futures_channel::oneshot::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(f());
+    });
+    result.await.ok()
+}
+
 /// What the engine's events ask to read again, held back between reads. Not reactive.
 #[derive(Clone, Default)]
 struct Throttled(Rc<RefCell<Throttle>>);
@@ -69,6 +80,7 @@ enum Opening {
 /// there is none.
 #[component]
 pub fn App() -> impl IntoElement {
+    settings::follow();
     let opening = signal(Opening::Waiting);
     spawn(async move {
         opening.set(match crate::engine::opened().await {
@@ -123,9 +135,33 @@ fn mailbox() -> impl IntoElement {
         });
     });
     effect(reader::follow_selection);
+    // No account: the sign-in page, which can't be left (as the GUI's `set_accounts`).
+    effect(|| {
+        let none = global::<Accounts>().with(|a| a.0.as_ref().is_some_and(Vec::is_empty));
+        if none && untracked(|| global::<SignIn>().get().0.is_none()) {
+            login::add_account(false);
+        }
+    });
     composer::bind_keys();
+    settings::bind_keys(true);
+    // Open at once, for looking at it without a mouse (screenshots of the spike).
+    if std::env::var_os("CATMAIL_NSH_SETTINGS").is_some() {
+        settings::open();
+    }
     // As the GUI's: Escape closes what is open.
     on_key("escape", |_| global::<Selected>().set(Selected(None)));
+    view()
+        .flex_1()
+        .child(dynamic(move || match global::<SignIn>().get().0 {
+            Some(cancellable) => login::sign_in_page(cancellable).into_element(),
+            None => panes().into_element(),
+        }))
+        .child(settings::dialog())
+        .child(login::identity_dialog())
+        .child(form::name_dialog())
+}
+
+fn panes() -> impl IntoElement {
     view()
         .flex_1()
         .flex_row()

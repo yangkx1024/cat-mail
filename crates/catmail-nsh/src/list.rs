@@ -20,7 +20,6 @@ use catmail_frontend::list::{
 };
 use catmail_frontend::mailbox::{self, Source};
 use nsh_base::theme;
-use nsh_core::Hsla;
 use nsh_core::element::desktop::{MenuItem, popup_menu};
 use nsh_core::element::{ElementRef, input};
 use nsh_core::geometry::Percentage;
@@ -1047,22 +1046,13 @@ fn marks(message: Memo<Option<MessageSummary>>) -> View {
             icon(|| Icon::PaperClip, 12.0).text_color(move || theme().muted_foreground)
         }))
         .child(when(has(|m| m.flags.contains(Flags::FLAGGED)), || {
-            icon(|| Icon::FlagSolid, 12.0).text_color(FLAG)
+            icon(|| Icon::FlagSolid, 12.0).text_color(crate::theme::flag)
         }))
 }
 
-/// The flag's amber, as the GUI's theme has it.
-const FLAG: Hsla = hsla(38.0 / 360.0, 0.92, 0.50, 1.0);
-
-/// The avatars' six hues ([`list::avatar_hue`]): red, green, yellow, blue, magenta, cyan.
-const HUES: [f32; 6] = [0.0, 140.0, 45.0, 215.0, 300.0, 185.0];
-
-/// An avatar's background, by the sender's address: a tint of their hue, as dark
-/// backgrounds need more of it to show as much.
+/// An avatar's background, by the sender's address (`theme::avatar`).
 pub fn avatar_color(seed: &str) -> AdaptiveColor {
-    let hue = HUES[list::avatar_hue(seed)] / 360.0;
-    let share = if dark() { 0.30 } else { 0.22 };
-    hsla(hue, 0.65, 0.5, share).into()
+    crate::theme::avatar(seed)
 }
 
 /// The sender's initial on their hue, or a check while the message is checked; pressing
@@ -1248,8 +1238,8 @@ fn outbox_row(item: Memo<Option<Item>>) -> impl IntoElement {
                     .rounded(px(4.0))
                     .text_xs()
                     .bg(move || match severity() {
-                        Some(Severity::Warning) => hsla(38.0 / 360.0, 0.92, 0.5, 0.2).into(),
-                        Some(Severity::Danger) => hsla(0.0, 0.8, 0.5, 0.2).into(),
+                        Some(Severity::Warning) => crate::theme::warning_badge(),
+                        Some(Severity::Danger) => crate::theme::danger_badge(),
                         None => theme().muted,
                     })
                     .text_color(move || theme().foreground),

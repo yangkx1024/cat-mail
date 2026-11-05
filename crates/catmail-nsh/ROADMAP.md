@@ -37,8 +37,7 @@
 - [x] All Inboxes（多账户时显示，默认选中；`list_inboxes`）
 - [x] 有角色的文件夹排前面，顺序固定，显示角色名，带图标；从嵌套里提到账户这一层（`folders::AccountFolders`）
 - [x] Gmail 的"Labels"单列一节；"所有邮件"被隐藏时显示提示
-- [x] Drafts 是本机草稿；Outbox 只在有待发时出现，有问题时带警告图标（⚠️ nsh 主题没有 warning 色，先用
-      destructive）。两者的列表随 P3 的来源一起做，现在是空的
+- [x] Drafts 是本机草稿；Outbox 只在有待发时出现，有问题时带警告图标（警告色是应用自己的 token，随 P7）。两者的列表随 P3 的来源一起做，现在是空的
 - [x] Sent、Junk、Trash 不显示未读数
 - [x] 底部一行说明连接问题（`account_status`），截断时悬停显示全文
 - [x] 侧栏一次读完（`overview`）；`DraftsChanged` 只重数该账户的草稿（`count_drafts`、`DraftCounts`）。
@@ -48,7 +47,8 @@
 - [x] 打开文件夹时同步它（`sync_folder`）
 - [x] 账户可以折叠：只有一个账户时默认展开，多个时默认折叠，选中某处时展开它的账户
 - [ ] 子文件夹折叠（gpui 版每个有子文件夹的行可以收起）；折叠的动画
-- [ ] 底部的 Settings 和 Sync 按钮（随 P7 设置、P4 同步）
+- [x] 底部的 Settings 按钮（随 P7）
+- [ ] Sync 按钮
 
 ## P3 邮件列表（gui.md「邮件列表」）
 
@@ -126,16 +126,28 @@ GTK 线程之间用 `shell::on_gtk` 与一个关窗请求的通道来回。
 
 ## P7 设置与主题（gui.md「主题与设置」）
 
-- [ ] 设置对话框：外观、浅色和深色各自的主题、文字大小（`AppView::set_font_scale`）、打开即已读
-- [ ] Reading：远程图片缓存的大小和"Clear image cache"
-- [ ] Accounts：账户列表、Add account；发件身份的默认、改名、删除、"Server saves to Sent"、Add sending address
-- [ ] 主题：终端调色板推导出 nsh 的 shadcn token（`set_theme_overrides`）；导入各种终端配色格式；主题目录
-- [ ] 跟随系统外观（nsh 自带，经 XDG portal）
+主题的推导、导入和主题目录在 `catmail-frontend`（`theme`：主题是 gpui-kit 主题 JSON 的格式，但不依赖 gpui-kit），
+Accounts 的确认文案在 `accounts`，与 gpui 版共用；nsh 版把 gpui-kit 的颜色键映射成 shadcn 的 token（`theme.rs`），
+设置和主题是进程级的（`shell.rs`），对话框在 `settings.rs`。
+
+- [x] 设置对话框：外观、浅色和深色各自的主题、文字大小（`AppView::set_font_scale`）、打开即已读；Ctrl+,，
+      Ctrl + / Ctrl − / Ctrl 0 改文字大小。改了就写回 `settings.json`，所有窗口（包括写信窗口）随之更新：
+      主题和文字大小在 GTK 线程上设给每个 `AppView`，外观由各视图自己 `set_color_scheme`
+- [x] Reading：远程图片缓存的大小和"Clear image cache"
+- [x] Accounts：账户列表、Add account；发件身份的默认、改名、删除、"Server saves to Sent"、Add sending address
+- [x] 主题：gpui-kit 的颜色键映射到 shadcn 的 token，再加上应用自己的（`warning`、`link`、六个色相等），经
+      `set_theme_overrides` 给每个视图；旗标、头像、徽章、发件箱的警告不再写死颜色。导入各种终端配色格式；主题目录
+      与 gpui 版是同一个
+- [x] 跟随系统外观（nsh 自带，经 XDG portal）
+- [ ] General（关窗后常驻、新邮件通知）随 P9
 
 ## P8 登录页（gui.md「登录页」）
 
-- [ ] 没有账户时自动打开；`add_account(.., Verify::Login)`；进行中不能取消
-- [ ] 表单字段与发件身份的表单共用（`LoginFields`、`ServerFields`、`submission::Submit`）
+字段怎么读、端口的默认值和提交的状态在 `catmail-frontend`（`login`：`AccountValues`、`IdentityValues`、
+`Submission`），与 gpui 版共用；nsh 版的字段和页面在 `login.rs`，对话框外框与命名对话框在 `form.rs`。
+
+- [x] 没有账户时自动打开；`add_account(.., Verify::Login)`；进行中不能取消
+- [x] 表单字段与发件身份的表单共用；任一字段按 Enter 提交
 
 ## P9 常驻与系统集成（docs/architecture/background.md）
 

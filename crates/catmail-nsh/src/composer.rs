@@ -514,6 +514,8 @@ fn Composer() -> impl IntoElement {
     } = start.opening.clone();
     let content = &draft.content;
     crate::app::own_tasks(Owner::current());
+    crate::settings::follow();
+    crate::settings::bind_keys(false);
     global::<Shared>().set(Shared(Some(Rc::new(RefCell::new(Composing {
         draft: draft.id,
         life: Lifecycle::new(&start.opening),

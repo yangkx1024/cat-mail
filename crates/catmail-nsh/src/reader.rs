@@ -359,7 +359,7 @@ fn colors(dark: bool) -> Colors {
     Colors {
         foreground: pick(theme().foreground),
         background: pick(theme().background),
-        link: pick(theme().primary),
+        link: pick(crate::theme::link()),
     }
 }
 

@@ -99,8 +99,15 @@ fn page(entry: OutboxEntry) -> impl IntoElement {
 fn state(entry: &OutboxEntry) -> impl IntoElement {
     let muted = move || theme().muted_foreground;
     let state = match State::of(entry) {
-        State::Unknown { title, text } => alert(Icon::ExclamationTriangle, title, text.to_owned()),
-        State::Rejected { title, reason } => alert(Icon::XCircle, title, reason),
+        State::Unknown { title, text } => alert(
+            Icon::ExclamationTriangle,
+            crate::theme::warning,
+            title,
+            text.to_owned(),
+        ),
+        State::Rejected { title, reason } => {
+            alert(Icon::XCircle, || theme().destructive, title, reason)
+        }
         State::Sending => {
             return text("Sending…").text_sm().text_color(muted).into_element();
         }
@@ -136,9 +143,14 @@ fn state(entry: &OutboxEntry) -> impl IntoElement {
         .into_element()
 }
 
-/// A note that needs the user: an icon, a title, and what it is about. nsh's theme has no
-/// warning color: both kinds take the destructive one, as the sidebar's mark does.
-fn alert(which: Icon, title: &'static str, about: String) -> AnyElement {
+/// A note that needs the user: an icon, a title, and what it is about, in `tone` (the
+/// warning color, or the destructive one).
+fn alert(
+    which: Icon,
+    tone: fn() -> AdaptiveColor,
+    title: &'static str,
+    about: String,
+) -> AnyElement {
     view()
         .flex_row()
         .items_start()
@@ -147,12 +159,8 @@ fn alert(which: Icon, title: &'static str, about: String) -> AnyElement {
         .py(px(10.0))
         .rounded(px(8.0))
         .border_1()
-        .border_color(move || theme().destructive)
-        .child(
-            icon(move || which, 18.0)
-                .flex_shrink_0()
-                .text_color(move || theme().destructive),
-        )
+        .border_color(tone)
+        .child(icon(move || which, 18.0).flex_shrink_0().text_color(tone))
         .child(
             view()
                 .flex_1()
@@ -161,7 +169,7 @@ fn alert(which: Icon, title: &'static str, about: String) -> AnyElement {
                     text(title)
                         .text_sm()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(move || theme().destructive),
+                        .text_color(tone),
                 )
                 .child(
                     text(about)

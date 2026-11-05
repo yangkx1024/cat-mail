@@ -17,18 +17,26 @@ mod draft;
 #[cfg(target_os = "linux")]
 mod engine;
 #[cfg(target_os = "linux")]
+mod form;
+#[cfg(target_os = "linux")]
 mod icons;
 #[cfg(target_os = "linux")]
 mod list;
+#[cfg(target_os = "linux")]
+mod login;
 #[cfg(target_os = "linux")]
 mod outbox;
 mod page;
 #[cfg(target_os = "linux")]
 mod reader;
 #[cfg(target_os = "linux")]
+mod settings;
+#[cfg(target_os = "linux")]
 mod shell;
 #[cfg(target_os = "linux")]
 mod sidebar;
+#[cfg(target_os = "linux")]
+mod theme;
 #[cfg(target_os = "linux")]
 mod toast;
 
@@ -36,7 +44,7 @@ mod toast;
 fn main() -> anyhow::Result<std::process::ExitCode> {
     use catmail_core::{BodyPrefetch, Config, DEFAULT_GC_INTERVAL, MailClient, SyncSchedule};
     use catmail_frontend::instance::{self, Claim, Display, Request};
-    use catmail_frontend::settings::{Settings, SettingsFile};
+    use catmail_frontend::settings::SettingsFile;
 
     catmail_core::logging::init("catmail_nsh=info");
     let config = match std::env::var_os("CATMAIL_DATA_DIR") {
@@ -66,8 +74,7 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
         .prefetch_bodies(Some(BodyPrefetch::default()))
         .send_in_background(true)
         .collect_garbage_every(Some(DEFAULT_GC_INTERVAL));
-    let settings = config_dir.map_or_else(Settings::default, |dir| SettingsFile::new(dir).load());
-    let code = shell::run(builder, requests, settings);
+    let code = shell::run(builder, requests, config_dir.map(SettingsFile::new));
     Ok(std::process::ExitCode::from(code.get()))
 }
 

@@ -25,6 +25,7 @@ anyhow = "1"
 futures-channel = "0.3"
 futures-util = { version = "0.3", default-features = false }
 jiff = "0.2.38"
+serde_json = "1"
 tracing = "0.1"
 
 # Only the Linux backend is tried; elsewhere the binary says so and exits.

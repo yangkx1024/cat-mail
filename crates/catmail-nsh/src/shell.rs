@@ -7,13 +7,15 @@
 //! engine thread), and reaches what is here with [`on_gtk`].
 
 use std::cell::RefCell;
-use std::rc::Rc;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::path::PathBuf;
+use std::rc::{Rc, Weak};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, PoisonError};
 
 use catmail_core::{DraftId, MailClientBuilder};
 use catmail_frontend::composer::{ComposeFrom, OpenComposers, Opening, window_title};
 use catmail_frontend::instance::{Request, Requests};
-use catmail_frontend::settings::{self, Settings};
+use catmail_frontend::settings::{self, Settings, SettingsFile};
+use catmail_frontend::theme::{DEFAULT_DARK, DEFAULT_LIGHT, Themes};
 use futures_channel::{mpsc, oneshot};
 use futures_util::StreamExt as _;
 use nsh_platform_linux::gtk4::{self as gtk, glib, prelude::*};
@@ -26,16 +28,106 @@ pub const APP_ID: &str = "net.yangkx.catmail.nsh";
 
 const TITLE: &str = "catmail";
 
-/// The settings read at launch: every window's view reads them, each on its own thread.
+// --- Settings and themes ------------------------------------------------------------
+//
+// Process-wide: every window's view reads them, each on its own thread, and the settings
+// dialog changes them from the main window's.
+
+/// The settings in effect.
 static SETTINGS: Mutex<Option<Settings>> = Mutex::new(None);
 
-/// The settings read at launch. Writing them comes with the settings dialog (P7).
+/// Where the settings are written, and the themes folder next to them; `None` without a
+/// config directory, and they stay in memory.
+static FILE: OnceLock<Option<Arc<SettingsFile>>> = OnceLock::new();
+
+/// The themes on offer.
+static THEMES: LazyLock<Mutex<Themes>> = LazyLock::new(Mutex::default);
+
+/// The views following the settings ([`follow_settings`]).
+static FOLLOWERS: Mutex<Vec<mpsc::UnboundedSender<Settings>>> = Mutex::new(Vec::new());
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The settings in effect.
 pub fn settings() -> Settings {
-    SETTINGS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clone()
-        .unwrap_or_default()
+    lock(&SETTINGS).clone().unwrap_or_default()
+}
+
+/// Changes the settings, from any view: they are written out in the background and take
+/// effect in every window.
+pub fn update_settings(change: impl FnOnce(&mut Settings)) {
+    let settings = {
+        let mut current = lock(&SETTINGS);
+        let settings = current.get_or_insert_with(Settings::default);
+        let before = settings.clone();
+        change(settings);
+        if *settings == before {
+            return;
+        }
+        settings.clone()
+    };
+    if let Some(file) = FILE.get().cloned().flatten() {
+        file.queue(settings.clone());
+        // Writes take the newest settings queued, whichever thread finishes first.
+        std::thread::spawn(move || file.write_pending());
+    }
+    lock(&FOLLOWERS).retain(|follower| follower.unbounded_send(settings.clone()).is_ok());
+    glib::MainContext::default().invoke(restyle_views);
+}
+
+/// The settings each time they change, for a view to follow (its appearance, the dialog
+/// that shows them).
+pub fn follow_settings() -> mpsc::UnboundedReceiver<Settings> {
+    let (follower, changes) = mpsc::unbounded();
+    lock(&FOLLOWERS).push(follower);
+    changes
+}
+
+/// The themes folder, if there is one.
+pub fn themes_dir() -> Option<PathBuf> {
+    FILE.get()?.as_ref().map(|file| file.themes_dir())
+}
+
+/// The themes on offer, to read or to import into. A change to them takes effect in every
+/// window with [`themes_changed`].
+pub fn with_themes<R>(f: impl FnOnce(&mut Themes) -> R) -> R {
+    f(&mut lock(&THEMES))
+}
+
+/// The themes changed: the settings' ones may be new.
+pub fn themes_changed() {
+    glib::MainContext::default().invoke(restyle_views);
+}
+
+/// The settings' light and dark themes as nsh's theme overrides.
+fn theme_overrides(settings: &Settings) -> Option<String> {
+    let themes = lock(&THEMES);
+    let light = themes.pick(&settings.light_theme, DEFAULT_LIGHT)?;
+    let dark = themes.pick(&settings.dark_theme, DEFAULT_DARK)?;
+    Some(crate::theme::css_vars(&light.config, &dark.config))
+}
+
+thread_local! {
+    /// Every window's view, for the settings to reach (GTK's thread).
+    static VIEWS: RefCell<Vec<Weak<AppView>>> = RefCell::default();
+}
+
+/// Gives `view` the settings' theme and text size. Its appearance is the view's to set
+/// (`set_color_scheme`), on its own thread.
+fn restyle(view: &AppView, settings: &Settings) {
+    view.set_font_scale(Some(settings.text_size / settings::DEFAULT_TEXT_SIZE));
+    if let Err(e) = view.set_theme_overrides(theme_overrides(settings).as_deref()) {
+        tracing::warn!(error = %e, "couldn't apply the theme");
+    }
+}
+
+fn restyle_views() {
+    let settings = settings();
+    VIEWS.with_borrow_mut(|views| {
+        views.retain(|view| view.upgrade().inspect(|v| restyle(v, &settings)).is_some());
+    });
 }
 
 /// A composer's window, and how to ask its view to close it.
@@ -63,7 +155,7 @@ pub fn on_gtk<R: Send + 'static>(
 pub fn run(
     builder: MailClientBuilder,
     requests: Option<Requests>,
-    settings: Settings,
+    file: Option<SettingsFile>,
 ) -> glib::ExitCode {
     glib::set_prgname(Some(APP_ID));
     // Not unique through D-Bus: one app per data directory is the instance socket's job,
@@ -72,10 +164,11 @@ pub fn run(
         .application_id(APP_ID)
         .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
         .build();
-    *SETTINGS.lock().unwrap_or_else(PoisonError::into_inner) = Some(settings.clone());
-    let settings = Rc::new(settings);
+    let file = FILE.get_or_init(|| file.map(Arc::new));
+    *lock(&SETTINGS) = Some(file.as_ref().map(|file| file.load()).unwrap_or_default());
+    let themes_dir = file.as_ref().map(|file| file.themes_dir());
+    *lock(&THEMES) = Themes::load(themes_dir.as_deref());
     let starting = RefCell::new(Some((builder, requests)));
-    let shown = settings.clone();
     app.connect_startup(move |app| {
         let Some((builder, requests)) = starting.borrow_mut().take() else {
             return;
@@ -83,12 +176,12 @@ pub fn run(
         // On GTK's loop: the client does the work on the engine's own runtime.
         glib::spawn_future_local(async move { engine::opened_with(builder.open_async().await) });
         if let Some(requests) = requests {
-            glib::spawn_future_local(answer(requests, app.downgrade(), shown.clone()));
+            glib::spawn_future_local(answer(requests, app.downgrade()));
         }
         install_quit(app);
         quit_on_signals(app);
     });
-    app.connect_activate(move |app| show(app, &settings, None));
+    app.connect_activate(|app| show(app, None));
     // GTK must not parse the app's own arguments.
     let code = app.run_with_args::<&str>(&[]);
     if let Some(client) = engine::take() {
@@ -100,18 +193,14 @@ pub fn run(
 }
 
 /// What later launches ask for, for as long as the app runs.
-async fn answer(
-    mut requests: Requests,
-    app: glib::WeakRef<gtk::Application>,
-    settings: Rc<Settings>,
-) {
+async fn answer(mut requests: Requests, app: glib::WeakRef<gtk::Application>) {
     while let Some(request) = requests.next().await {
         let Some(app) = app.upgrade() else {
             return;
         };
         match request {
             Request::Activate { display } => {
-                show(&app, &settings, display.activation_token.as_deref());
+                show(&app, display.activation_token.as_deref());
             }
         }
     }
@@ -119,11 +208,11 @@ async fn answer(
 
 /// The main window in front, opened if there is none. `activation_token` is the asking
 /// launch's, which lets the window take the focus on Wayland.
-fn show(app: &gtk::Application, settings: &Settings, activation_token: Option<&str>) {
+fn show(app: &gtk::Application, activation_token: Option<&str>) {
     let window = match MAIN.with_borrow(|main| main.upgrade()) {
         Some(window) => window,
         None => {
-            let window = main_window(app, settings);
+            let window = main_window(app);
             MAIN.with_borrow_mut(|main| main.set(Some(&window)));
             window
         }
@@ -134,26 +223,29 @@ fn show(app: &gtk::Application, settings: &Settings, activation_token: Option<&s
     window.present();
 }
 
-fn main_window(app: &gtk::Application, settings: &Settings) -> gtk::ApplicationWindow {
+fn main_window(app: &gtk::Application) -> gtk::ApplicationWindow {
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .title(TITLE)
         .default_width(1280)
         .default_height(800)
         .build();
-    show_view(&window, TITLE, Root::of::<crate::app::App>(), settings);
+    show_view(&window, TITLE, Root::of::<crate::app::App>());
     window
 }
 
 /// Puts a view running `root` in `window`, which keeps it while it is open.
-fn show_view(window: &gtk::ApplicationWindow, title: &str, root: Root, settings: &Settings) {
+fn show_view(window: &gtk::ApplicationWindow, title: &str, root: Root) {
+    let settings = settings();
     let view = AppView::new(AppOptions {
         title: title.to_owned(),
         app_id: APP_ID.to_owned(),
-        appearance: appearance(settings),
+        appearance: appearance(&settings),
         ..Default::default()
     });
-    view.set_font_scale(Some(settings.text_size / settings::DEFAULT_TEXT_SIZE));
+    // Before it loads: the app starts with them.
+    restyle(&view, &settings);
+    VIEWS.with_borrow_mut(|views| views.push(Rc::downgrade(&view)));
     window.set_child(Some(&view.widget()));
     view.load(App::Rust(root));
     close_on_ctrl_w(window);
@@ -216,7 +308,7 @@ pub fn opened(from: ComposeFrom, opening: Option<Opening>) {
         opening,
         close_requests: Mutex::new(Some(close_requests)),
     });
-    show_view(&window, &title, crate::composer::root(start), &settings());
+    show_view(&window, &title, crate::composer::root(start));
     // The view decides: it saves first, and closes the window itself (`composer_closed`).
     // One that is gone can't, and the window just goes.
     let ask = asks.clone();
@@ -261,7 +353,7 @@ fn close_all() -> oneshot::Receiver<bool> {
 
 /// The settings' appearance; `CATMAIL_NSH_APPEARANCE` (`dark`, `light`) overrides it, for
 /// screenshots of the spike that leave the settings alone.
-fn appearance(settings: &Settings) -> Appearance {
+pub fn appearance(settings: &Settings) -> Appearance {
     match std::env::var("CATMAIL_NSH_APPEARANCE").as_deref() {
         Ok("dark") => return Appearance::Dark,
         Ok("light") => return Appearance::Light,
