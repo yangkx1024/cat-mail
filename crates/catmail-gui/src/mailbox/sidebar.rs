@@ -17,7 +17,7 @@ use gpui_kit::component::{
 use gpui_kit::{
     App, ClickEvent, Context, ElementId, FontWeight, InteractiveElement as _, IntoElement,
     ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
-    TestSupportExt as _, Window, div, prelude::FluentBuilder as _,
+    TestSupportExt as _, Window, div, prelude::FluentBuilder as _, rems,
 };
 
 use super::folders::{self, FolderNode, RoleInfo};
@@ -63,10 +63,16 @@ fn count(
 }
 
 impl Mailbox {
-    pub(crate) fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// `under_window_buttons`: the window's buttons are over its top, and it starts below
+    /// their row (`layout::has_window_buttons`).
+    pub(crate) fn render_sidebar(
+        &self,
+        under_window_buttons: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let accounts = self.accounts.as_deref().unwrap_or_default();
         let note = self.connection_note();
-        let header = Button::new("new-message")
+        let compose = Button::new("new-message")
             .primary()
             .rounded_full()
             .w_full()
@@ -77,6 +83,14 @@ impl Mailbox {
             // 20px down to All Inboxes, with the 12px the sidebar puts above its first group.
             .mb_2()
             .on_click(cx.listener(|this, _, window, cx| this.new_message(window, cx)));
+        // Just below the buttons' row: `Sidebar` puts 12px (`pt_3`) above its header
+        // already, and takes no padding of ours.
+        let header = v_flex()
+            .w_full()
+            .when(under_window_buttons, |this| {
+                this.pt(layout::bar_height() - rems(0.75))
+            })
+            .child(compose);
         let footer = h_flex()
             .w_full()
             .gap_1()
