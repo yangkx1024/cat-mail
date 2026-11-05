@@ -78,6 +78,23 @@ impl Place {
             })
     }
 
+    /// The folders whose messages it lists: one, or for All Inboxes each account's INBOX;
+    /// none for the drafts and the outbox.
+    pub fn folders(self, accounts: &[AccountEntry]) -> Vec<&Folder> {
+        match self {
+            Place::Inboxes => accounts
+                .iter()
+                .filter_map(|a| a.folders.with_role(FolderRole::Inbox))
+                .collect(),
+            Place::Folder(id) => accounts
+                .iter()
+                .find_map(|a| a.folders.find(id)?.selectable())
+                .into_iter()
+                .collect(),
+            Place::Drafts(_) | Place::Outbox(_) => Vec::new(),
+        }
+    }
+
     /// Its name, as the sidebar shows it.
     pub fn label(self, accounts: &[AccountEntry]) -> Option<String> {
         Some(match self {
@@ -107,6 +124,40 @@ impl Source {
             self,
             Source::Inboxes | Source::Folder(_) | Source::Search(_)
         )
+    }
+}
+
+/// The list's title: the place's name, or what is searched for.
+pub fn list_title(
+    source: Option<&Source>,
+    place: Option<Place>,
+    accounts: &[AccountEntry],
+) -> String {
+    match source {
+        Some(Source::Search(text)) => format!("Results for “{text}”"),
+        _ => place
+            .and_then(|place| place.label(accounts))
+            .unwrap_or_default(),
+    }
+}
+
+/// What the list's title adds: how many are unread, or why the outbox waits.
+pub fn list_note(
+    source: Option<&Source>,
+    place: Option<Place>,
+    accounts: &[AccountEntry],
+) -> Option<String> {
+    match source? {
+        Source::Inboxes | Source::Folder(_) => {
+            let unread = crate::folders::unread(place?.folders(accounts));
+            (unread > 0).then(|| format!("{unread} unread"))
+        }
+        Source::Outbox(account) => accounts
+            .iter()
+            .find(|a| a.account.id == *account)
+            .filter(|a| !a.status.send.is_empty() || a.status.sync.is_some())
+            .map(|_| "Sending resumes when the connection is back.".to_owned()),
+        _ => None,
     }
 }
 

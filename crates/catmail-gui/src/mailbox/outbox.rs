@@ -7,10 +7,10 @@ use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::{AnyElement, Context, IntoElement, ParentElement as _, Styled as _, Window, div};
 
-use super::message_list::outbox_status;
 use super::{Mailbox, report_failure};
 use crate::format;
 use crate::layout;
+use catmail_frontend::list::outbox_status;
 
 impl Mailbox {
     pub(super) fn render_outbox_entry(

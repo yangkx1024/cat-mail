@@ -283,7 +283,7 @@ pub fn labelled(name: impl IntoElement, value: impl IntoElement, cx: &App) -> Di
 /// sender keeps theirs wherever it shows. The caller sizes it.
 pub fn avatar(name: &str, email: &str, cx: &App) -> Div {
     let (bg, fg) = cx.theme().avatar(email);
-    let initial = name.chars().take(1).collect::<String>().to_uppercase();
+    let initial = catmail_frontend::list::initial(name);
     circle(bg, fg)
         .font_weight(FontWeight::SEMIBOLD)
         .child(initial)

@@ -1,6 +1,9 @@
 //! How a row of the list looks: a message, a draft or an outbox entry.
 
-use catmail_core::{Draft, Flags, MessageSummary, OutboxEntry, OutboxStatus};
+use catmail_core::{Draft, Flags, MessageSummary, OutboxEntry};
+use catmail_frontend::list::{
+    ROW_LABELS, Severity, draft_recipients, message_label, outbox_status, recipients,
+};
 use gpui_kit::component::Icon;
 use gpui_kit::component::list::{ListItem, ListState};
 use gpui_kit::component::separator::Separator;
@@ -165,9 +168,6 @@ fn top_line(title: SharedString, time: SharedString, strong: bool, cx: &App) -> 
         .child(time_of_day(time, cx))
 }
 
-/// The most labels a row shows by name; the rest are counted.
-const ROW_LABELS: usize = 2;
-
 /// `labels` are the names of the message's labels to show; `checked` says whether the
 /// message is checked; `hovered`, while the row on one line is, what the commands it
 /// shows then do to the message.
@@ -185,21 +185,7 @@ pub(super) fn message_row(
     let subject = format::subject(message.subject.as_deref()).to_owned();
     let date = format::time(message.date);
     let muted = cx.theme().muted_foreground;
-    let label = format!(
-        "{sender}, {subject}, {date}{}{}{}{}",
-        if unread { ", unread" } else { "" },
-        if flagged { ", flagged" } else { "" },
-        if message.has_attachments {
-            ", has attachments"
-        } else {
-            ""
-        },
-        if labels.is_empty() {
-            String::new()
-        } else {
-            format!(", labels {}", labels.join(", "))
-        },
-    );
+    let label = message_label(message, labels);
     let more = labels.len().saturating_sub(ROW_LABELS);
     let neutral = cx.theme().neutral_badge();
     let marks = h_flex()
@@ -321,26 +307,8 @@ fn hovered_row(
     Hovered { commands, aside }
 }
 
-/// The addresses of whom `message` went to: To, or Cc when it has no To.
-fn recipients(message: &MessageSummary) -> String {
-    let to = if message.to.is_empty() {
-        &message.cc
-    } else {
-        &message.to
-    };
-    to.iter()
-        .map(|a| a.email.as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 pub(super) fn draft_row(draft: &Draft, shape: Shape, cx: &App) -> ListItem {
-    let to = format::names(draft.content.recipients());
-    let to = if to.is_empty() {
-        "No recipients".to_owned()
-    } else {
-        format!("To {to}")
-    };
+    let to = draft_recipients(draft);
     let subject = format::subject(Some(&draft.content.subject)).to_owned();
     let date = format::time(Some(draft.updated_at));
     let marks = h_flex().when(!draft.attachments.is_empty(), |this| {
@@ -360,30 +328,6 @@ pub(super) fn draft_row(draft: &Draft, shape: Shape, cx: &App) -> ListItem {
         hovered: None,
     };
     summary.row(ListItem::new(("draft", draft.id.0 as u64)), shape, cx)
-}
-
-/// How an outbox entry's state reads, and how loud it is if it needs the user.
-pub fn outbox_status(entry: &OutboxEntry) -> (&'static str, Option<Severity>) {
-    let text = match entry.status {
-        OutboxStatus::Queued if entry.attempts > 0 => "Waiting to retry",
-        OutboxStatus::Queued => "Waiting to send",
-        OutboxStatus::Sending => "Sending…",
-        OutboxStatus::Accepted => "Sent · saving to Sent",
-        OutboxStatus::Unknown => "Not confirmed",
-        OutboxStatus::Failed => "Rejected",
-        OutboxStatus::Done => "Sent",
-    };
-    let severity = entry.status.needs_user().then_some(match entry.status {
-        OutboxStatus::Failed => Severity::Danger,
-        _ => Severity::Warning,
-    });
-    (text, severity)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Severity {
-    Warning,
-    Danger,
 }
 
 pub(super) fn outbox_row(entry: &OutboxEntry, cx: &App) -> ListItem {
@@ -423,36 +367,4 @@ pub(super) fn outbox_row(entry: &OutboxEntry, cx: &App) -> ListItem {
                 )
                 .child(badge),
         )
-}
-
-#[cfg(test)]
-mod tests {
-    use catmail_core::{AccountId, Address, FolderId, MessageId};
-
-    use super::*;
-
-    #[test]
-    fn recipients_are_to_or_else_cc() {
-        let address = |email: &str| Address {
-            name: Some("Name".into()),
-            email: email.into(),
-        };
-        let mut message = MessageSummary {
-            id: MessageId(1),
-            account_id: AccountId(1),
-            folder_id: FolderId(1),
-            subject: None,
-            from: Vec::new(),
-            to: vec![address("a@example.com"), address("b@example.com")],
-            cc: vec![address("c@example.com")],
-            date: None,
-            snippet: None,
-            flags: Flags::empty(),
-            has_attachments: false,
-            labels: Vec::new(),
-        };
-        assert_eq!(recipients(&message), "a@example.com, b@example.com");
-        message.to.clear();
-        assert_eq!(recipients(&message), "c@example.com");
-    }
 }

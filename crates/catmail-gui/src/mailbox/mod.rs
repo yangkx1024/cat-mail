@@ -41,15 +41,13 @@ use crate::reader::Reader;
 use crate::settings::Preferences;
 use add_account::{AddAccount, AddAccountEvent};
 use catmail_frontend::folders;
+use catmail_frontend::list::SEARCH_DELAY;
 pub use catmail_frontend::mailbox::{AccountEntry, Place};
 use catmail_frontend::mailbox::{REFRESH_INTERVAL, SYNC_ON_OPEN_AFTER};
 pub(crate) use catmail_frontend::refresh::{Coalesce, Refresh};
 use catmail_frontend::refresh::{DraftCounts, Throttle};
 use message_commands::MessageCommand;
 use message_list::{MessageList, Row, RowCommand, Source};
-
-/// How long typing in the search field pauses before it searches.
-const SEARCH_DELAY: Duration = Duration::from_millis(200);
 
 /// Where to take the mailbox: a place, or an account's INBOX and a message to open there
 /// (what a notification was about), which the mailbox finds among its folders. Not All
@@ -388,18 +386,12 @@ impl Mailbox {
 
     /// The folders whose messages the selected place lists: one, or for All Inboxes each
     /// account's INBOX; none for the drafts and the outbox.
-    pub(crate) fn shown_folders(&self) -> Box<dyn Iterator<Item = &Folder> + '_> {
-        match self.place {
-            Some(Place::Inboxes) => Box::new(self.inboxes()),
-            Some(Place::Folder(id)) => Box::new(
-                self.accounts
-                    .iter()
-                    .flatten()
-                    .find_map(|a| a.folders.find(id)?.selectable())
-                    .into_iter(),
-            ),
-            _ => Box::new(std::iter::empty()),
-        }
+    pub(crate) fn shown_folders(&self) -> impl Iterator<Item = &Folder> + '_ {
+        let accounts = self.accounts.as_deref().unwrap_or_default();
+        self.place
+            .map(|place| place.folders(accounts))
+            .unwrap_or_default()
+            .into_iter()
     }
 
     /// The account the selected place belongs to.

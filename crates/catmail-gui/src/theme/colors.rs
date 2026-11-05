@@ -64,14 +64,7 @@ impl ThemeColors for Theme {
             self.colors.magenta,
             self.colors.cyan,
         ];
-        // FNV-1a: stable across runs and platforms, unlike the std hasher.
-        let hash = seed
-            .to_lowercase()
-            .bytes()
-            .fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
-                (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
-            });
-        let hue = hues[(hash % hues.len() as u64) as usize];
+        let hue = hues[catmail_frontend::list::avatar_hue(seed)];
         (tint(self, hue), self.foreground)
     }
 }

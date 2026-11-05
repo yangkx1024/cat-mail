@@ -56,7 +56,8 @@ src/
 - 纯逻辑（文件夹分区、日期格式、HTML 策略、设置文件、主题推导与导入）不依赖窗口，单测覆盖。其中单实例
   （`instance`）、日期格式（`format`）、HTML 策略（`html`）、设置文件（`settings`）、文件夹分区和侧栏图标的
   角色（`folders`）、侧栏的模型（`mailbox`：`Place`、`Source`、`AccountEntry`、连接说明、文件夹右键菜单的
-  项和文案）和哪个引擎事件重读什么（`refresh`）在 `catmail-frontend`，别的前端也能用。GUI 按原路径引用
+  项和文案）、哪个引擎事件重读什么（`refresh`）和列表的行（`list`：来源怎么分页读、按天分组、重读后选中去哪、
+  按标记勾选、行上的文字）在 `catmail-frontend`，别的前端也能用。GUI 按原路径引用
   （`crate::format`、`mailbox` 模块里的 `folders`、`refresh` 等），`assets.rs` 把 `FolderIcon` 对应到 Heroicons。
 
 ## 窗口外框（macOS）
