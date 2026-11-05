@@ -57,7 +57,9 @@ struct Cli {
 fn main() {
     // The GPU adapter GPUI chose too: rendering on the CPU makes the app slow and big, and
     // only info says why it passed the GPU over.
-    catmail_core::logging::init("catmail_gui=info,catmail_render=info,gpui_wgpu=info");
+    catmail_core::logging::init(
+        "catmail_gui=info,catmail_frontend=info,catmail_render=info,gpui_wgpu=info",
+    );
     let cli = Cli::parse();
     let config_dir = cli
         .config_dir
