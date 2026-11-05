@@ -65,8 +65,9 @@ impl ListDelegate for FolderPicker {
         _: &mut Window,
         _: &mut Context<ListState<Self>>,
     ) -> Task<()> {
+        let matches = commands::picker_filter(query);
         self.shown = (0..self.folders.len())
-            .filter(|&ix| commands::picker_matches(&self.folders[ix].1, query))
+            .filter(|&ix| matches(&self.folders[ix].1))
             .collect();
         Task::ready(())
     }

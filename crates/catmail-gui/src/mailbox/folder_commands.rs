@@ -8,7 +8,7 @@ use catmail_frontend::mailbox::FolderMenuEntry;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::{App, Context, SharedString, Window};
 
-use super::{AccountEntry, Mailbox, Place, report_failure};
+use super::{Mailbox, Place, report_failure};
 use crate::layout;
 use crate::submission::{NameDialog, NameIds};
 
@@ -124,13 +124,12 @@ impl Mailbox {
         }
     }
 
-    /// The folder (a level that holds no messages too) and its account, if the user may
-    /// change it.
-    fn changeable_folder(&self, id: FolderId) -> Option<(&AccountEntry, &catmail_core::Folder)> {
+    /// The folder (a level that holds no messages too), if the user may change it.
+    fn changeable_folder(&self, id: FolderId) -> Option<&catmail_core::Folder> {
         self.accounts
             .iter()
             .flatten()
-            .find_map(|entry| Some((entry, entry.changeable_folder(id)?)))
+            .find_map(|entry| entry.changeable_folder(id))
     }
 
     /// Asks for the name of a new folder of `account`, in `parent` or at the top.
@@ -156,7 +155,7 @@ impl Mailbox {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((_, folder)) = self.changeable_folder(id) else {
+        let Some(folder) = self.changeable_folder(id) else {
             return;
         };
         let name = folder.leaf_name();

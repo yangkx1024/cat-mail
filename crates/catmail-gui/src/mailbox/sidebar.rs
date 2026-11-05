@@ -69,7 +69,7 @@ impl Mailbox {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let accounts = self.accounts.as_deref().unwrap_or_default();
-        let note = self.connection_note();
+        let note = mailbox::connection_note(accounts).map(SharedString::from);
         let compose = Button::new("new-message")
             .primary()
             .rounded_full()
@@ -118,7 +118,7 @@ impl Mailbox {
                     .children(note),
             );
         let inboxes = Place::Inboxes.is_in(accounts).then(|| {
-            let unread = folders::unread(self.inboxes()) as usize;
+            let unread = folders::unread(Place::Inboxes.folders(accounts)) as usize;
             let mut item = self.place_item(
                 Place::Inboxes,
                 "All Inboxes",
@@ -191,12 +191,6 @@ impl Mailbox {
         let open = self.account_open(account);
         self.account_folds.insert(account, !open);
         cx.notify();
-    }
-
-    /// One line on what is wrong with the connection, if anything
-    /// ([`mailbox::connection_note`]).
-    fn connection_note(&self) -> Option<SharedString> {
-        mailbox::connection_note(self.accounts.as_deref()?).map(Into::into)
     }
 
     /// Folders with a role first, the drafts and outbox after the inbox, then the rest

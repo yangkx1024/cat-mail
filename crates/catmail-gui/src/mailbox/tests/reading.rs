@@ -785,7 +785,11 @@ fn all_inboxes_lists_an_inbox_found_after_its_messages(cx: &mut TestAppContext) 
         cx.run_until_parked();
         cx.read(|cx| {
             let mailbox = mailbox.read(cx);
-            mailbox.inboxes().count() == 3 && !mailbox.reading_folders.is_running()
+            Place::Inboxes
+                .folders(mailbox.accounts.as_deref().unwrap_or_default())
+                .len()
+                == 3
+                && !mailbox.reading_folders.is_running()
         })
     });
     // As if the window hadn't read Carol's folders yet.

@@ -180,9 +180,10 @@ pub fn label_change(message: &MessageSummary, label: FolderId) -> (Vec<FolderId>
     }
 }
 
-/// Whether a folder picker's entry named `name` shows for what is typed.
-pub fn picker_matches(name: &str, query: &str) -> bool {
-    name.to_lowercase().contains(&query.trim().to_lowercase())
+/// Which of a folder picker's entries, by name, show for what is typed.
+pub fn picker_filter(query: &str) -> impl Fn(&str) -> bool + use<> {
+    let query = query.trim().to_lowercase();
+    move |name| name.to_lowercase().contains(&query)
 }
 
 /// What a folder picker says when it lists nothing: "Labels" (`labels`) or "Move to",
@@ -294,8 +295,8 @@ mod tests {
 
     #[test]
     fn the_picker_filters_by_name() {
-        assert!(picker_matches("Clients / Invoices", " invo "));
-        assert!(picker_matches("Inbox", ""));
-        assert!(!picker_matches("Inbox", "sent"));
+        assert!(picker_filter(" invo ")("Clients / Invoices"));
+        assert!(picker_filter("")("Inbox"));
+        assert!(!picker_filter("sent")("Inbox"));
     }
 }

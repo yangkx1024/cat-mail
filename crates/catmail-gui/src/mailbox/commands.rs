@@ -4,6 +4,7 @@
 
 use catmail_core::{AccountId, DeleteMode, Flags, FolderId, MessageId, MessageSummary};
 use catmail_frontend::commands::{self, Deletion, MessageCommand, what};
+use catmail_frontend::folders::AccountFolders;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{App, Context, Window};
@@ -114,9 +115,7 @@ impl Mailbox {
         I: IntoIterator<Item = &'a MessageSummary>,
         I::IntoIter: Clone,
     {
-        Applies::of(messages, |account| {
-            self.account(account).map(|entry| &entry.folders)
-        })
+        Applies::of(messages, |account| self.account_folders(account))
     }
 
     /// Runs `command` on the messages: from a key, a toolbar or a row.
@@ -169,12 +168,9 @@ impl Mailbox {
         self.set_flags(ids, add, remove, window, cx);
     }
 
-    /// Whether Archive does anything to `message`: its account has an Archive folder it
-    /// isn't in, or on Gmail it is in INBOX and All Mail.
-    #[cfg(test)]
-    pub(crate) fn can_archive(&self, message: &MessageSummary) -> bool {
-        self.account(message.account_id)
-            .is_some_and(|a| a.folders.can_archive(message))
+    /// An account's folders, which the commands go by.
+    pub(crate) fn account_folders(&self, account: AccountId) -> Option<&AccountFolders> {
+        self.account(account).map(|entry| &entry.folders)
     }
 
     /// Archives those of the messages Archive does anything to.
@@ -184,9 +180,7 @@ impl Mailbox {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let ids = commands::archivable(messages, |account| {
-            self.account(account).map(|a| &a.folders)
-        });
+        let ids = commands::archivable(messages, |account| self.account_folders(account));
         if ids.is_empty() {
             return;
         }
@@ -295,9 +289,8 @@ impl Mailbox {
     /// ([`DeleteOutcome`]): one change. A message deleted for good can't be brought back,
     /// so that asks first, once for them all.
     fn delete(&mut self, messages: &[MessageSummary], window: &mut Window, cx: &mut Context<Self>) {
-        let Deletion { ids, mode, confirm } = commands::deletion(messages, |account| {
-            self.account(account).map(|a| &a.folders)
-        });
+        let Deletion { ids, mode, confirm } =
+            commands::deletion(messages, |account| self.account_folders(account));
         let Some(confirm) = confirm else {
             return self.delete_now(ids, mode, window, cx);
         };

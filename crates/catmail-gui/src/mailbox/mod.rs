@@ -22,9 +22,7 @@ pub(crate) use commands::report_failure;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use catmail_core::{
-    AccountId, Event, Flags, Folder, FolderId, FolderRole, MailClient, MessageId, RecvError,
-};
+use catmail_core::{AccountId, Event, Flags, Folder, FolderId, MailClient, MessageId, RecvError};
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::list::{ListEvent, ListState};
 use gpui_kit::component::notification::Notification;
@@ -352,14 +350,6 @@ impl Mailbox {
 
     pub(crate) fn account(&self, id: AccountId) -> Option<&AccountEntry> {
         self.accounts.as_ref()?.iter().find(|a| a.account.id == id)
-    }
-
-    /// Each account's INBOX, as All Inboxes lists them.
-    pub(crate) fn inboxes(&self) -> impl Iterator<Item = &Folder> {
-        self.accounts
-            .iter()
-            .flatten()
-            .filter_map(|a| a.folders.with_role(FolderRole::Inbox))
     }
 
     /// The folders whose messages the selected place lists: one, or for All Inboxes each

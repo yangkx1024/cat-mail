@@ -10,6 +10,7 @@
 //! before the next starts, and sending or closing waits for it, so an older save can't
 //! land after the content that was sent.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
@@ -19,6 +20,7 @@ use catmail_core::{
 };
 use futures_channel::oneshot;
 
+use crate::commands::Confirm;
 use crate::mailbox::{AccountEntry, Place};
 
 /// How long typing has to pause before the draft is saved.
@@ -185,6 +187,14 @@ pub struct Fields<'a> {
     pub text: &'a str,
 }
 
+/// What asking before discarding a draft says.
+pub fn discard_confirm() -> Confirm {
+    Confirm {
+        title: "Discard this draft?".into(),
+        description: "It is deleted here and from the server's Drafts folder.".into(),
+    }
+}
+
 /// Why a draft written so can't be sent, if it can't.
 pub fn unsendable(written: &Written, problem: Option<FieldError>) -> Option<FieldError> {
     problem.or_else(|| {
@@ -320,11 +330,17 @@ impl Lifecycle {
         true
     }
 
+    /// Whether a save may start: not while the last one is still with the engine, if
+    /// nothing changed, or once the window is ending and saves what is left itself. The
+    /// fields need reading only if so.
+    pub fn save_due(&self) -> bool {
+        !self.saving && self.dirty && self.finishing.is_none()
+    }
+
     /// Starts saving `written`, the fields now: what to hand to `update_draft`, if
-    /// anything (the last save is still with the engine, nothing changed, or the window
-    /// is ending and saves what is left itself).
+    /// anything ([`Self::save_due`], and they changed since the last save).
     pub fn begin_save(&mut self, written: Written) -> Option<Written> {
-        if self.saving || !self.dirty || self.finishing.is_some() {
+        if !self.save_due() {
             return None;
         }
         self.dirty = false;
@@ -453,12 +469,12 @@ impl Lifecycle {
     }
 
     /// What the window says of the saving, if anything.
-    pub fn status(&self) -> Option<String> {
+    pub fn status(&self) -> Option<Cow<'static, str>> {
         let ending = self.finishing.is_some();
         match (&self.save_state, self.saving && !ending) {
             (_, true) => Some("Saving…".into()),
             (SaveState::Saved, _) if !self.dirty => Some("Draft saved".into()),
-            (SaveState::Failed(e), _) => Some(format!("Not saved: {e}")),
+            (SaveState::Failed(e), _) => Some(format!("Not saved: {e}").into()),
             _ => None,
         }
     }

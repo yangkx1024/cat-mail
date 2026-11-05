@@ -1,6 +1,6 @@
 use std::io;
 
-use catmail_types::ErrorKind;
+use catmail_types::{ErrorKind, Security};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -15,7 +15,8 @@ pub enum Error {
     /// The settings say TLS, and the server answered in plaintext.
     #[error(
         "the server on port {port} doesn't start with TLS; choose STARTTLS for it, or port \
-         465 for TLS"
+         {tls} for TLS",
+        tls = Security::Tls.default_smtp_port()
     )]
     NotTls { port: u16 },
 

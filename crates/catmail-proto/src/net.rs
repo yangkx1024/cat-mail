@@ -53,14 +53,17 @@ pub(crate) async fn connect(
     let name = ServerName::try_from(server.host.clone())
         .map_err(|_| NetError::InvalidServerName(server.host.clone()))?;
     let stream: Box<dyn Stream> = match server.security {
-        Security::Tls => Box::new(start_tls(tcp, &name, tls, timeout).await.map_err(
-            |e| match e {
-                NetError::Io(e) if answered_in_plaintext(&e) => {
-                    NetError::NotTls { port: server.port }
-                }
-                e => e,
-            },
-        )?),
+        Security::Tls => {
+            let stream = start_tls(tcp, &name, tls, timeout)
+                .await
+                .map_err(|e| match e {
+                    NetError::Io(e) if answered_in_plaintext(&e) => {
+                        NetError::NotTls { port: server.port }
+                    }
+                    e => e,
+                })?;
+            Box::new(stream)
+        }
         Security::StartTls | Security::Plain => Box::new(tcp),
     };
     Ok((stream, name))

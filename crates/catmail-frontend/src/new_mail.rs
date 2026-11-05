@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use catmail_core::{AccountId, MessageId, MessageSummary};
 
+use crate::commands::one_account;
 use crate::format;
 use crate::mailbox::Destination;
 
@@ -102,12 +103,7 @@ pub fn notifications(arrived: &[MessageSummary]) -> Vec<Notice> {
             })
             .collect();
     }
-    let account = arrived[0].account_id;
-    let target = if arrived.iter().all(|m| m.account_id == account) {
-        Target::Inbox(account)
-    } else {
-        Target::Window
-    };
+    let target = one_account(arrived).map_or(Target::Window, Target::Inbox);
     let mut senders: Vec<&str> = Vec::new();
     for sender in arrived.iter().map(|m| format::sender(&m.from)) {
         if !sender.is_empty() && !senders.contains(&sender) {

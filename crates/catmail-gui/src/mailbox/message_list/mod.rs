@@ -561,7 +561,7 @@ impl ListDelegate for MessageList {
         _: &mut Window,
         cx: &mut Context<ListState<Self>>,
     ) -> Option<impl IntoElement> {
-        let label = SharedString::from(self.days.get(section)?.label.clone());
+        let label = SharedString::from(&self.days.get(section)?.label);
         // Lined up with the rows' text (their padding).
         Some(
             div()

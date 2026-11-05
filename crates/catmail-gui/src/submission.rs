@@ -91,7 +91,7 @@ impl Submit {
     /// Why the last submission failed, under the form.
     pub fn error(&self, id: &'static str, cx: &App) -> Option<impl IntoElement + use<>> {
         self.state.error().map(|error| {
-            let error = SharedString::from(error.to_owned());
+            let error = SharedString::from(error);
             div()
                 .id(id)
                 .role(Role::Alert)

@@ -123,11 +123,6 @@ impl SettingsFile {
         }
     }
 
-    /// The config directory.
-    pub fn dir(&self) -> &Path {
-        &self.dir
-    }
-
     /// Where imported themes are kept.
     pub fn themes_dir(&self) -> PathBuf {
         self.dir.join("themes")

@@ -2,7 +2,7 @@
 //! imported ones are kept in.
 //!
 //! Every theme starts as a [`TerminalPalette`] (background, foreground, 16 ANSI colors)
-//! and becomes a [`ThemeConfig`] through [`theme_config`], so a scheme from Alacritty,
+//! and becomes a [`ThemeConfig`] through the same mapping, so a scheme from Alacritty,
 //! kitty, Ghostty and the like looks as deliberate as a built-in one. A theme is written
 //! as GPUI Kit's theme JSON (the themes folder holds those files, and GPUI Kit's own theme
 //! files are taken as they are), whichever frontend reads it: the GUI gives it to GPUI Kit,
@@ -18,8 +18,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 pub use builtin::builtin_themes;
-pub use derive::{theme_config, theme_set_json};
-pub use import::{ImportError, ImportedTheme, ThemeFormat, import};
+pub use derive::theme_set_json;
+use import::{ImportError, import};
+pub use import::{ImportedTheme, ThemeFormat};
 pub use palette::{Rgb, TerminalPalette};
 pub use themes::{
     IMPORT_HELP, IMPORTABLE_FORMATS, ImportCandidate, ThemeEntry, Themes, file_name, import_title,

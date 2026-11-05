@@ -14,9 +14,9 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSObject, NSSize, NSString, ns_string};
 
-use catmail_frontend::tray::{Chosen, MENU};
+use catmail_frontend::tray::MENU;
 
-use super::{MENU_BAR_SIZES, Pixmaps};
+use super::{Chosen, MENU_BAR_SIZES, Pixmaps};
 
 /// The image's size in points: the menu bar's icons are 18 points high, and the first
 /// size is for 1x displays.

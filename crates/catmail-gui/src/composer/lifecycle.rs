@@ -1,7 +1,10 @@
 //! Saving, sending, closing and discarding, one engine call at a time: an older save
 //! never lands after what was sent.
 
-use catmail_frontend::composer::{AfterSave, Closing, Finish, error_text, unsendable};
+use catmail_frontend::commands::Confirm;
+use catmail_frontend::composer::{
+    AfterSave, Closing, Finish, discard_confirm, error_text, unsendable,
+};
 use gpui_kit::{App, Context, Task, Window};
 
 use super::*;
@@ -9,6 +12,9 @@ use crate::layout;
 
 impl Composer {
     pub(super) fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.life.save_due() {
+            return;
+        }
         let (written, _) = self.written(cx);
         let Some(written) = self.life.begin_save(written) else {
             return;
@@ -72,9 +78,10 @@ impl Composer {
 
     pub(super) fn discard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let this = cx.entity().downgrade();
+        let Confirm { title, description } = discard_confirm();
         layout::confirm_danger(
-            "Discard this draft?",
-            "It is deleted here and from the server's Drafts folder.",
+            title,
+            description,
             "Discard",
             window,
             cx,

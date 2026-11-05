@@ -131,7 +131,7 @@ impl Render for Composer {
                 div()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(status)
+                    .child(SharedString::from(status))
             }))
             .child(
                 Button::new("discard")
