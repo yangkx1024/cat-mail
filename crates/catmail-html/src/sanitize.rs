@@ -415,6 +415,17 @@ mod tests {
     }
 
     #[test]
+    fn drops_background_images_of_table_cells() {
+        // Only `<img>` gets its images: the reader's page fills in nothing else.
+        let clean = sanitize_html(
+            r##"<table background="https://x.example/a.png"><tr>
+            <td background="cid:bg@x" bgcolor="#fff">hi</td></tr></table>"##,
+        );
+        assert!(!clean.contains("background"), "{clean}");
+        assert!(clean.contains(r##"bgcolor="#fff""##), "{clean}");
+    }
+
+    #[test]
     fn strips_active_content_and_keeps_layout() {
         let dirty = r##"<html><head><style>p{}</style><script>alert(1)</script></head>
             <body onload="x()"><table width="600" bgcolor="#fff"><tr>

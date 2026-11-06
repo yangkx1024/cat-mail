@@ -24,34 +24,47 @@ const CSP: &str = "default-src 'none'; img-src data:; style-src 'unsafe-inline';
 /// Ours, under the message's own styles: the page has no margins of its own (the
 /// reader pads it) and doesn't scroll (the reader's scroll view does), but a message
 /// wider than the pane scrolls sideways inside it.
-const BASE_STYLE: &str = "html, body { margin: 0; } \
+/// The page itself never scrolls: on macOS nsh's `scrollable(false)` only sends the
+/// wheel to the reader, and WebKit shows a scroller of its own for a page a fraction of
+/// a pixel taller than the view, or one a sideways scroller makes taller. With the
+/// root's overflow hidden, the body's no longer goes to the viewport: the body is what
+/// scrolls sideways.
+const BASE_STYLE: &str = "html { overflow: hidden !important; } \
+                          html, body { margin: 0; } \
                           body { padding: 16px; overflow-x: auto; overflow-wrap: break-word; \
                           font-family: sans-serif; }";
 
 /// What the page tells the reader, through `window.nsh.postMessage`, with the page's
 /// number ([`body_page`]: one web view shows page after page, and what an earlier one
 /// says may come late): that it loaded (`r:<n>`), its height (`h:<n>:<px>`), so the web
-/// view can be as tall as the page, that it has painted at the web view's height
+/// view can be as tall as the page (the root's box, which holds the body's margins and
+/// its sideways scroller, rounded up: the root's overflow is hidden, so what the view
+/// is short of is cut off; not `scrollHeight`, which is rounded, nor the root's, which
+/// is never less than the view's height and so wouldn't shrink for a shorter message), that it has painted at the web view's height
 /// (`p:<n>:<px>`, two frames after it loaded and after each resize: WebKit has shown it
 /// at that size), the links clicked (`o:<url>`), which open in the system's browser
 /// instead of in the view, and once, before `r`, each `cid:` URL of its images
 /// (`c:<n>:<url>`, as [`BRIDGE`]'s image message spells it), so the inline parts can go in
 /// as they load.
 /// What the reader tells the page ([`image_message`]): the `data:` URL of an image shown,
-/// remote or inline, for the elements that refer to it (as `img.src` normalizes it, which
-/// is `remote_image_url`'s spelling too).
+/// remote or inline, for the `<img>` elements that refer to it (as `img.src` normalizes
+/// it, which is `remote_image_url`'s spelling too). Only those: the sanitizer keeps no
+/// `background` attribute, and no `url()` in styles.
 pub const BRIDGE: &str = r#"(function () {
   var number = document.querySelector('meta[name="catmail-page"]');
   var page = number ? number.content : "0";
   var last = -1;
+  var root = document.documentElement;
   function report() {
-    var height = Math.ceil(document.body ? document.body.scrollHeight : 0);
+    var style = getComputedStyle(root);
+    var height = Math.ceil(root.getBoundingClientRect().height +
+      parseFloat(style.marginTop) + parseFloat(style.marginBottom));
     if (height !== last) {
       last = height;
       window.nsh.postMessage("h:" + page + ":" + height);
     }
   }
-  if (document.body) new ResizeObserver(report).observe(document.body);
+  new ResizeObserver(report).observe(root, { box: "border-box" });
   window.addEventListener("load", report);
   report();
   document.addEventListener("click", function (e) {
@@ -72,9 +85,6 @@ pub const BRIDGE: &str = r#"(function () {
     if (data.slice(0, 5) !== "data:") return;
     document.querySelectorAll("img[src]").forEach(function (img) {
       if (absolute(img.getAttribute("src")) === url) img.src = data;
-    });
-    document.querySelectorAll("[background]").forEach(function (el) {
-      if (absolute(el.getAttribute("background")) === url) el.setAttribute("background", data);
     });
   });
   var cids = {};
@@ -223,6 +233,17 @@ mod tests {
             page.contains("src=\"data:image/png;base64,AQID\""),
             "{page}"
         );
+    }
+
+    #[test]
+    fn the_page_itself_never_scrolls() {
+        // WebKit on macOS would show a scroller of its own next to the reader's.
+        let page = blank_page(1, &colors());
+        assert!(
+            page.contains("html { overflow: hidden !important; }"),
+            "{page}"
+        );
+        assert!(!BRIDGE.contains("scrollHeight"));
     }
 
     #[test]
