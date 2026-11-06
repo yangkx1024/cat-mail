@@ -1,6 +1,8 @@
 //! What the mailbox window shows, apart from how: the places the sidebar selects, what
 //! the message list lists, and each account as the sidebar shows it.
 
+pub mod sidebar;
+
 use std::time::Duration;
 
 use catmail_core::{

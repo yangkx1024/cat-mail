@@ -135,7 +135,11 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 
 ## 侧栏
 
-模型在 `catmail-frontend`（`folders`、`mailbox`），`mailbox/sidebar.rs` 只有界面。
+模型在 `catmail-frontend`：文件夹的层级在 `folders`，地方（`Place`：名字、图标、列出哪些文件夹）在 `mailbox`，
+侧栏的分组和排序、折叠（`sidebar_groups`、`Folds`）和读回账户之后做什么（`SidebarModel`：一次一个读取、保留更新的
+草稿数、窗口打开前托盘或通知要求去的位置和写信、原来的位置不在了时回到开始处、列表显示的文件夹变了时重读列表）
+在 `mailbox::sidebar`，都有表驱动测试。`mailbox/sidebar.rs` 只把模型的结果放进 nsh 的 signal 再画出来。分组的
+子树用 `Rc` 共享，账户每变一次只建一次，传给各层时不再整棵复制。
 
 有多个账户时第一项是 **All Inboxes**（只有一个账户时不列，它就是那个账户的 Inbox）：每个账户的 INBOX（与引擎
 同样按 `special_folder` 挑；Gmail 上是 INBOX 标签）合成一个列表，`MailClient::list_inboxes` 按与单个文件夹相同

@@ -1,9 +1,8 @@
 //! Accounts, folders and messages for the models' tests.
 
 use catmail_core::{
-    Account, AccountId, AccountMode, AccountOverview, AccountStatus, Flags, Folder, FolderId,
-    FolderKind, FolderRole, MessageId, MessageSummary, OutboxEntry, OutboxId, OutboxStatus,
-    Security, ServerConfig,
+    Account, AccountId, AccountMode, AccountOverview, AccountStatus, Folder, FolderId, FolderKind,
+    FolderRole, OutboxEntry, OutboxId, OutboxStatus, Security, ServerConfig,
 };
 
 use crate::mailbox::AccountEntry;
@@ -109,23 +108,6 @@ pub fn standard(id: i64) -> AccountEntry {
             folder(4, "Trash"),
         ],
     )
-}
-
-pub fn message(id: i64, account: i64, folder: i64) -> MessageSummary {
-    MessageSummary {
-        id: MessageId(id),
-        account_id: AccountId(account),
-        folder_id: FolderId(folder),
-        subject: Some(format!("Message {id}")),
-        from: Vec::new(),
-        to: Vec::new(),
-        cc: Vec::new(),
-        date: None,
-        snippet: None,
-        flags: Flags::empty(),
-        has_attachments: false,
-        labels: Vec::new(),
-    }
 }
 
 pub fn outbox_entry(id: i64, account: i64, status: OutboxStatus) -> OutboxEntry {

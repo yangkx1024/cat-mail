@@ -1,19 +1,18 @@
 //! The mailbox's left pane: All Inboxes, each account's places under its address (folders
 //! with a role first, the drafts and outbox after the inbox, then the other folders,
 //! Gmail's labels in a section of their own), and at the bottom what is wrong with the
-//! connection. Its model is `catmail_frontend`'s; the commands in a folder's menu are
+//! connection. Its model (the groups, the folds, what a read of the accounts changes) is
+//! `catmail_frontend::mailbox::sidebar`'s; the commands in a folder's menu are
 //! `folder_commands.rs`'.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use catmail_core::{AccountId, FolderId, FolderRole};
-use catmail_frontend::folders::{self, FolderIcon, FolderNode};
-use catmail_frontend::mailbox::{
-    self, ALL_MAIL_HIDDEN, AccountEntry, Destination, Place, SYNC_ON_OPEN_AFTER,
+use catmail_core::{AccountId, FolderId};
+use catmail_frontend::mailbox::sidebar::{
+    Folds, Group, Heading, Item, Loaded, SidebarModel, sidebar_groups,
 };
-use catmail_frontend::refresh::{Coalesce, DraftCounts};
+use catmail_frontend::mailbox::{self, AccountEntry, Destination, Place, SYNC_ON_OPEN_AFTER};
 use nsh_base::theme;
 use nsh_core::ContextMenuEvent;
 use nsh_core::prelude::*;
@@ -44,44 +43,18 @@ pub fn with_account<T>(id: AccountId, f: impl FnOnce(&AccountEntry) -> T) -> Opt
     with_accounts(|a| a.iter().find(|e| e.account.id == id).map(f))
 }
 
-/// What waits for the first read of the folders, asked of the mailbox from outside it
-/// (`shell::Ask`) before then: where to go instead of where it starts, and a message to
-/// write.
-#[derive(Clone, Copy, Default)]
-struct Waiting {
-    to: Option<Destination>,
-    compose: bool,
-}
-
-/// Whether each account the user folded or unfolded is open; see [`account_open`] for
-/// the others.
+/// The reads of the sidebar. Not reactive: nothing shows it.
 #[derive(Clone, Default)]
-struct Folds(HashMap<AccountId, bool>);
+struct Reads(Rc<RefCell<SidebarModel>>);
 
-/// The folders the user folded, by row key: their subfolders don't show. Every one is
-/// open until then.
-#[derive(Clone, Default)]
-struct FolderFolds(HashSet<String>);
-
-/// The reads of the sidebar: one at a time, and which draft count is the latest. Not
-/// reactive: nothing shows it.
-#[derive(Clone, Default)]
-struct Reads(Rc<RefCell<ReadState>>);
-
-#[derive(Default)]
-struct ReadState {
-    reading: Coalesce,
-    draft_counts: DraftCounts,
-}
-
-fn reads() -> Rc<RefCell<ReadState>> {
+fn reads() -> Rc<RefCell<SidebarModel>> {
     global::<Reads>().with_untracked(|r| r.0.clone())
 }
 
 /// Events were missed, a `DraftsChanged` among them maybe. Call it before reading the
-/// sidebar again ([`DraftCounts::missed`]).
+/// sidebar again (`SidebarModel::missed_events`).
 pub fn missed_events() {
-    reads().borrow_mut().draft_counts.missed();
+    reads().borrow_mut().missed_events();
 }
 
 // --- Reading ------------------------------------------------------------------------
@@ -90,31 +63,25 @@ pub fn missed_events() {
 /// asked for meanwhile follows it).
 pub fn load() {
     let reads = reads();
-    if !reads.borrow_mut().reading.start() {
+    let Some(read) = reads.borrow_mut().start_read() else {
         return;
-    }
-    let counts = reads.borrow().draft_counts.clone();
+    };
     in_view(async move {
         let loaded = client().overview().await;
-        let again = reads.borrow_mut().reading.finish();
+        let again = reads.borrow_mut().finish_read();
         match loaded {
             Ok(overviews) => {
-                let _shown = global::<Accounts>();
-                let accounts = overviews
-                    .into_iter()
-                    .map(|overview| {
-                        let id = overview.account.id;
-                        // Not stored: taken now, it is never older than its event.
-                        let mut entry = AccountEntry::new(overview, client().account_status(id));
-                        if !reads.borrow().draft_counts.read_is_latest(&counts, id)
-                            && let Some(drafts) = with_account(id, |e| e.drafts)
-                        {
-                            entry.drafts = drafts;
-                        }
-                        entry
-                    })
-                    .collect();
-                set_accounts(accounts);
+                let place = global::<SelectedPlace>().with_untracked(|p| p.0);
+                let loaded = global::<Accounts>().with_untracked(|shown| {
+                    let status = |id| client().account_status(id);
+                    let shown = shown.0.as_deref();
+                    reads
+                        .borrow_mut()
+                        .loaded(read, overviews, status, shown, place)
+                });
+                if let Some(loaded) = loaded {
+                    show(loaded);
+                }
             }
             Err(e) => report("Couldn't load folders", e),
         }
@@ -124,39 +91,18 @@ pub fn load() {
     });
 }
 
-fn set_accounts(accounts: Vec<AccountEntry>) {
-    let shown = global::<Accounts>();
-    if shown.with_untracked(|a| a.0.as_ref() == Some(&accounts)) {
-        // A sync's events often bring nothing the sidebar shows.
-        return;
-    }
-    let place = global::<SelectedPlace>().with_untracked(|p| p.0);
-    let still_there = place.is_some_and(|place| place.is_in(&accounts));
-    let folders_before = shown_folders();
-    // The first read: where it was asked to go, if that is there.
-    let waiting = if shown.with_untracked(|a| a.0.is_none()) {
-        global::<Waiting>().get_untracked()
-    } else {
-        Waiting::default()
-    };
-    let going = waiting.to.and_then(|to| to.find(&accounts));
-    let start = match going {
-        Some((place, _)) => Some(Some(place)),
-        None => (!still_there).then(|| Place::start(&accounts)),
-    };
-    shown.set(Accounts(Some(accounts)));
+fn show(loaded: Loaded) {
+    global::<Accounts>().set(Accounts(Some(loaded.accounts)));
     crate::mailbox::list::set_labels();
-    match start {
-        Some(start) => select(start),
-        // The list shows a folder more (All Inboxes, an account's first INBOX): its
-        // messages' events may have come first, taken for a folder not shown.
-        None if shown_folders() != folders_before => crate::mailbox::list::refresh(),
+    match loaded.select {
+        Some(place) => select(place),
+        None if loaded.refresh_list => crate::mailbox::list::refresh(),
         None => {}
     }
-    if let Some((_, Some(message))) = going {
+    if let Some(message) = loaded.reveal {
         crate::mailbox::list::reveal(message);
     }
-    if waiting.compose {
+    if loaded.compose {
         composer::new_message();
     }
 }
@@ -165,11 +111,7 @@ fn set_accounts(accounts: Vec<AccountEntry>) {
 /// when it closed, or what a notification was about, which opens its message once the
 /// list has it.
 pub fn go_to(to: Destination) {
-    if global::<Accounts>().with_untracked(|a| a.0.is_none()) {
-        global::<Waiting>().update(|w| w.to = Some(to));
-        return;
-    }
-    let Some((place, message)) = crate::mailbox::sidebar::with_accounts(|a| to.find(a)) else {
+    let Some((place, message)) = with_accounts(|a| reads().borrow_mut().go_to(to, a)) else {
         return;
     };
     select(Some(place));
@@ -180,9 +122,7 @@ pub fn go_to(to: Destination) {
 
 /// A new message, from the account shown, once the folders are read.
 pub fn compose() {
-    if global::<Accounts>().with_untracked(|a| a.0.is_none()) {
-        global::<Waiting>().update(|w| w.compose = true);
-    } else {
+    if reads().borrow_mut().compose() {
         composer::new_message();
     }
 }
@@ -205,10 +145,10 @@ pub fn syncing() -> bool {
 /// Every pause in typing saves a draft: only the account's draft count can have changed,
 /// so only that is read again.
 pub fn count_drafts(account: AccountId) {
-    let change = reads().borrow_mut().draft_counts.changed(account);
+    let change = reads().borrow_mut().drafts_changed(account);
     in_view(async move {
         let counted = client().count_drafts(account).await;
-        if !reads().borrow().draft_counts.is_latest(account, change) {
+        if !reads().borrow().is_latest_count(account, change) {
             return; // A later count is on its way.
         }
         match counted {
@@ -268,9 +208,7 @@ pub fn select(place: Option<Place>) {
     let account = global::<Accounts>()
         .with_untracked(|a| Some(place?.account_in(a.0.as_deref()?)?.account.id));
     if let Some(account) = account {
-        global::<Folds>().update(|f| {
-            f.0.insert(account, true);
-        });
+        global::<Folds>().update(|f| f.unfold(account));
     }
     selected.set(SelectedPlace(place));
     for folder in shown_folders() {
@@ -296,254 +234,31 @@ pub fn shown_folders() -> Vec<FolderId> {
     with_accounts(|accounts| place.folders(accounts).iter().map(|f| f.id).collect())
 }
 
-/// Whether the sidebar shows the account's places: as the user left it, else only for
-/// the only account. `CATMAIL_GUI_UNFOLD` set opens every account, for looking at the
-/// places without a mouse (screenshots).
-fn account_open(folds: &Folds, accounts: &[AccountEntry], account: AccountId) -> bool {
-    folds
-        .0
-        .get(&account)
-        .copied()
-        .unwrap_or_else(|| accounts.len() == 1 || std::env::var_os("CATMAIL_GUI_UNFOLD").is_some())
-}
-
 fn toggle_folder(key: &str) {
-    global::<FolderFolds>().update(|f| {
-        if !f.0.remove(key) {
-            f.0.insert(key.to_owned());
-        }
-    });
+    global::<Folds>().update(|f| f.toggle_folder(key));
 }
 
 fn toggle(account: AccountId) {
-    let open = global::<Accounts>().with_untracked(|a| {
-        let accounts = a.0.as_deref().unwrap_or_default();
-        global::<Folds>().with_untracked(|f| account_open(f, accounts, account))
+    let folds = global::<Folds>();
+    let toggled = with_accounts(|accounts| {
+        let mut toggled = folds.get_untracked();
+        toggled.toggle_account(accounts, account);
+        toggled
     });
-    global::<Folds>().update(|f| {
-        f.0.insert(account, !open);
-    });
-}
-
-// --- Groups -------------------------------------------------------------------------
-
-/// A group of the sidebar: All Inboxes alone, or an account's address over
-/// its places, its labels in a section after them.
-#[derive(Debug, Clone, PartialEq)]
-struct Group {
-    key: String,
-    heading: Option<Heading>,
-    /// Its places; none while the account is folded.
-    items: Vec<Item>,
-    /// The account's Gmail labels; none while it is folded.
-    labels: Vec<Item>,
-}
-
-/// An account's address, which folds and unfolds its places.
-#[derive(Debug, Clone, PartialEq)]
-struct Heading {
-    account: AccountId,
-    email: String,
-    /// The first account's: the section's title is over it.
-    first: bool,
-    /// Something about the account to put right. It shows while the account is folded
-    /// too: it is about the account, not one of its places.
-    note: Option<&'static str>,
-    open: bool,
-}
-
-/// An item of a sidebar menu: a place, or a level of folders that holds no messages.
-#[derive(Debug, Clone, PartialEq)]
-struct Item {
-    key: String,
-    label: String,
-    icon: FolderIcon,
-    /// What it selects; none for a level that holds no messages.
-    place: Option<Place>,
-    /// The account its context menu is about (All Inboxes: none).
-    account: Option<AccountId>,
-    /// The folder its context menu is about.
-    folder: Option<FolderId>,
-    /// Unread messages, drafts, or what waits in the outbox; nothing for zero.
-    count: usize,
-    /// The outbox has something the user has to look at.
-    attention: bool,
-    /// Whether its subfolders show; none for a folder without subfolders.
-    open: Option<bool>,
-    /// The subfolders that show: none while it is folded.
-    children: Vec<Item>,
-}
-
-impl Item {
-    fn new(key: String, label: impl Into<String>, icon: FolderIcon) -> Self {
-        Self {
-            key,
-            label: label.into(),
-            icon,
-            place: None,
-            account: None,
-            folder: None,
-            count: 0,
-            attention: false,
-            open: None,
-            children: Vec::new(),
-        }
-    }
-
-    fn place(
-        place: Place,
-        label: impl Into<String>,
-        icon: FolderIcon,
-        count: usize,
-        attention: bool,
-    ) -> Self {
-        let key = match place {
-            Place::Inboxes => "inboxes".to_owned(),
-            Place::Folder(id) => format!("folder-{id}"),
-            Place::Drafts(account) => format!("drafts-{account}"),
-            Place::Outbox(account) => format!("outbox-{account}"),
-        };
-        Self {
-            place: Some(place),
-            count,
-            attention,
-            ..Self::new(key, label, icon)
-        }
-    }
-
-    /// A place that isn't a folder of the tree, named as the list's title names it.
-    fn of(place: Place, accounts: &[AccountEntry], count: usize, attention: bool) -> Self {
-        let label = place.label(accounts).unwrap_or_default();
-        Self::place(place, label, place.icon(accounts), count, attention)
-    }
-}
-
-fn groups(accounts: &[AccountEntry], folds: &Folds, folded: &FolderFolds) -> Vec<Group> {
-    let mut groups = Vec::new();
-    if Place::Inboxes.is_in(accounts) {
-        let inboxes = accounts
-            .iter()
-            .filter_map(|a| a.folders.with_role(FolderRole::Inbox));
-        groups.push(Group {
-            key: "inboxes".to_owned(),
-            heading: None,
-            items: vec![Item::of(
-                Place::Inboxes,
-                accounts,
-                folders::unread(inboxes) as usize,
-                false,
-            )],
-            labels: Vec::new(),
-        });
-    }
-    for (ix, entry) in accounts.iter().enumerate() {
-        let account = entry.account.id;
-        let open = account_open(folds, accounts, account);
-        let path = format!("{account}");
-        groups.push(Group {
-            key: format!("account-{account}"),
-            heading: Some(Heading {
-                account,
-                email: entry.account.email.clone(),
-                first: ix == 0,
-                note: entry.account.all_mail_hidden().then_some(ALL_MAIL_HIDDEN),
-                open,
-            }),
-            items: if open {
-                places(accounts, entry, folded)
-            } else {
-                Vec::new()
-            },
-            labels: if open {
-                (entry.folders.labels.iter())
-                    .map(|node| folder_item(account, node, &path, folded))
-                    .collect()
-            } else {
-                Vec::new()
-            },
-        });
-    }
-    groups
-}
-
-/// Folders with a role first, the drafts and outbox after the inbox, then the rest of
-/// the folders; not the labels, which have a section of their own.
-fn places(accounts: &[AccountEntry], entry: &AccountEntry, folded: &FolderFolds) -> Vec<Item> {
-    let account = entry.account.id;
-    let path = format!("{account}");
-    let mut items = Vec::new();
-    let mut roles = entry.folders.roles.iter();
-    // The inbox, if the account has one (it always has), leads.
-    if let Some(inbox) = entry
-        .folders
-        .roles
-        .first()
-        .filter(|n| n.role() == Some(FolderRole::Inbox))
-    {
-        items.push(folder_item(account, inbox, &path, folded));
-        roles.next();
-    }
-    items.push(Item {
-        account: Some(account),
-        ..Item::of(Place::Drafts(account), accounts, entry.drafts, false)
-    });
-    if !entry.outbox.is_empty() {
-        items.push(Item {
-            account: Some(account),
-            ..Item::of(
-                Place::Outbox(account),
-                accounts,
-                entry.outbox.len(),
-                entry.outbox_needs_user(),
-            )
-        });
-    }
-    items.extend(
-        roles
-            .chain(&entry.folders.others)
-            .map(|node| folder_item(account, node, &path, folded)),
-    );
-    items
-}
-
-/// The node and the folders in it, unless it is `folded`. `path` names the levels above,
-/// for the key of a level the server didn't list.
-fn folder_item(account: AccountId, node: &FolderNode, path: &str, folded: &FolderFolds) -> Item {
-    let path = format!("{path}/{}", node.label);
-    let icon = folders::icon(node.folder.as_ref());
-    let mut item = match node.selectable() {
-        Some(folder) => Item::place(
-            Place::Folder(folder.id),
-            &node.label,
-            icon,
-            node.unread() as usize,
-            false,
-        ),
-        None => Item::new(format!("level-{path}"), &node.label, icon),
-    };
-    item.account = Some(account);
-    item.folder = node.folder.as_ref().map(|f| f.id);
-    if !node.children.is_empty() {
-        let open = !folded.0.contains(&item.key);
-        item.open = Some(open);
-        if open {
-            item.children = (node.children.iter())
-                .map(|child| folder_item(account, child, &path, folded))
-                .collect();
-        }
-    }
-    item
+    folds.set(toggled);
 }
 
 // --- The pane -----------------------------------------------------------------------
 
 pub fn sidebar() -> impl IntoElement {
+    // `CATMAIL_GUI_UNFOLD` set opens every account, for looking at the places without a
+    // mouse (screenshots).
+    if std::env::var_os("CATMAIL_GUI_UNFOLD").is_some() {
+        global::<Folds>().update(|f| f.unfold_all = true);
+    }
     let groups = computed(move || {
         global::<Folds>().with(|folds| {
-            global::<FolderFolds>().with(|folded| {
-                global::<Accounts>()
-                    .with(|a| groups(a.0.as_deref().unwrap_or_default(), folds, folded))
-            })
+            global::<Accounts>().with(|a| sidebar_groups(a.0.as_deref().unwrap_or_default(), folds))
         })
     });
     let note = computed(move || {
@@ -623,7 +338,11 @@ fn group(group: ReadSignal<Group>, _ix: ReadSignal<usize>) -> AnyElement {
         .child(when(
             move || group.with(|g| !g.items.is_empty()),
             move || {
-                menu(move || group.with(|g| g.items.clone())).pt(px(if headed { 8.0 } else { 0.0 }))
+                menu(move || group.with(|g| g.items.to_vec())).pt(px(if headed {
+                    8.0
+                } else {
+                    0.0
+                }))
             },
         ))
         .child(when(
@@ -631,7 +350,7 @@ fn group(group: ReadSignal<Group>, _ix: ReadSignal<usize>) -> AnyElement {
             move || {
                 view()
                     .child(title("Labels"))
-                    .child(menu(move || group.with(|g| g.labels.clone())))
+                    .child(menu(move || group.with(|g| g.labels.to_vec())))
             },
         ))
         .into_element()
@@ -735,7 +454,7 @@ fn menu_entry(item: ReadSignal<Item>, _ix: ReadSignal<usize>) -> AnyElement {
                     .py(px(2.0))
                     .gap(px(4.0))
                     .child(each(
-                        move || item.with(|i| i.children.clone()),
+                        move || item.with(|i| i.children.to_vec()),
                         |item| item.key.clone(),
                         menu_entry,
                     ))
@@ -867,50 +586,5 @@ fn row_color(selected: impl Fn() -> bool + 'static) -> impl Fn() -> AdaptiveColo
         } else {
             theme().sidebar_foreground
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn node(label: &str, children: Vec<FolderNode>) -> FolderNode {
-        FolderNode {
-            label: label.to_owned(),
-            folder: None,
-            children,
-        }
-    }
-
-    /// Each item's label and whether it is open, depth first.
-    fn labels(folded: &FolderFolds) -> Vec<(String, Option<bool>)> {
-        fn walk(item: &Item, out: &mut Vec<(String, Option<bool>)>) {
-            out.push((item.label.clone(), item.open));
-            for child in &item.children {
-                walk(child, out);
-            }
-        }
-        let tree = node("Clients", vec![node("Acme", vec![node("2026", vec![])])]);
-        let mut out = Vec::new();
-        walk(&folder_item(AccountId(1), &tree, "1", folded), &mut out);
-        out
-    }
-
-    #[test]
-    fn a_folded_folder_hides_its_subfolders() {
-        let open = labels(&FolderFolds::default());
-        assert_eq!(
-            open,
-            [
-                ("Clients".into(), Some(true)),
-                ("Acme".into(), Some(true)),
-                ("2026".into(), None),
-            ]
-        );
-        let folded = FolderFolds(HashSet::from(["level-1/Clients/Acme".to_owned()]));
-        assert_eq!(
-            labels(&folded),
-            [("Clients".into(), Some(true)), ("Acme".into(), Some(false))]
-        );
     }
 }
