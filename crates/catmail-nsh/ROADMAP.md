@@ -192,8 +192,9 @@ Accounts 的确认文案在 `accounts`，与 gpui 版共用；nsh 版把 gpui-ki
       ⚠️ 不用 `invisible`：一阵没画的 web view 再画时，WebKit 画好之前会先闪一帧黑。渲染进程
       在开窗时就先起好，之后一直是同一个；它的 PSS 在浏览过程中从约 100 MB 涨到约 140 MB。开窗后点开第一封邮件，
       内容在选中后约 2 帧（约 33 ms）就出现，原来要约 13 帧（约 217 ms）
-- [ ] 常驻时网络进程还留着（41 MB PSS），可它从来不联网（CSP 只放行 `data:`）。看 nsh 能否在没有 web view 时
-      放掉它
+- [ ] 常驻时网络进程还留着（41 MB PSS），可它从来不联网（CSP 只放行 `data:`）。原因在 nsh：它按 app id 把
+      `NetworkSession` 一直存在表里，最后一个 web view 没了也不放。改成弱引用之后，WebKit 会结束网络进程（实验已验证），
+      PR 是 longbridge/nsh#1051。合并后升级 nsh 的 rev，再用真实账户确认关窗后网络进程退出，并测一下重新开窗要多花多少时间
 - [x] 快捷键对齐 `actions.rs`。这次补上的有：Sync（Ctrl+Shift+N、F5）、Ctrl+F 聚焦搜索框、写信窗口的 Escape 关闭
       和 Ctrl+Shift+A 加附件
 
