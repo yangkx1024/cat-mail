@@ -41,8 +41,8 @@ jobs:
 
   # The core must stay platform-neutral, so lint and test on every target OS from the
   # start, even though only Linux is shipped for now. Pull requests run the tests on Linux
-  # only: macOS and Windows still compile them (clippy covers all targets) but run them
-  # once merged, on main, where macOS minutes cost 10x and Windows ones 2x.
+  # and macOS, where the desktop app runs: Windows still compiles them (clippy covers all
+  # targets) but runs them once merged, on main, where its minutes cost 2x.
   #
   # On Linux the tests also run against real servers: Dovecot for IMAP and SMTP
   # submission, relaying to mailpit (the fake servers cover faults on every OS). Only the
@@ -113,5 +113,5 @@ jobs:
           echo "CATMAIL_TESTENV_REQUIRED=1" >> "$GITHUB_ENV" # fail instead of skipping
 
       - name: Test
-        if: runner.os == 'Linux' || github.event_name != 'pull_request'
+        if: runner.os != 'Windows' || github.event_name != 'pull_request'
         run: cargo test --workspace --locked
