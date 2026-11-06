@@ -54,8 +54,19 @@ pub fn remote_image_urls(html: &str) -> Vec<String> {
 /// the HTML or parsed, so remote images are fetched, cached and looked up by this one
 /// spelling.
 pub fn remote_image_url(url: &str) -> Option<String> {
-    let url = url::Url::parse(url.trim()).ok()?;
+    let url = image_url(url)?;
     matches!(url.scheme(), "http" | "https").then(|| url.into())
+}
+
+/// An image's URL as a URL parser writes it, which is how a page's `img.src` spells it.
+fn image_url(src: &str) -> Option<url::Url> {
+    url::Url::parse(src.trim()).ok()
+}
+
+/// The Content-ID an image's `src` refers to: what makes a part inline
+/// ([`cid_image_ids`]) is what is embedded in its place.
+fn cid_image_id(src: &str) -> Option<String> {
+    content_id_from_url(src.trim())
 }
 
 /// The Content-IDs that the images in HTML that [`sanitize_html`](crate::sanitize_html)
@@ -63,9 +74,7 @@ pub fn remote_image_url(url: &str) -> Option<String> {
 /// `cid:` link, or the text `cid:…`, shows nothing, so the part it names stays an
 /// attachment.
 pub fn cid_image_ids(html: &str) -> HashSet<String> {
-    image_sources(html, |src| content_id_from_url(src.trim()))
-        .into_iter()
-        .collect()
+    image_sources(html, cid_image_id).into_iter().collect()
 }
 
 /// An inline part, to embed in place of its `cid:` URL: its content as a `data:` URL,
@@ -91,19 +100,54 @@ impl InlineImage {
     }
 }
 
+/// HTML with its inline images embedded ([`embed_inline_images`]).
+pub struct Embedded {
+    pub html: String,
+    /// The `cid:` images left as they were, their parts not given: each URL once, in
+    /// document order. A reader that shows the page before its inline parts have loaded
+    /// puts each in place of its URL.
+    pub inline_urls: Vec<InlineUrl>,
+}
+
+/// A `cid:` image of a page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineUrl {
+    /// The part it shows.
+    pub content_id: String,
+    /// As a page's `img.src` spells it: normalized as a URL parser writes it, as
+    /// [`remote_image_url`] is.
+    pub url: String,
+}
+
 /// HTML that [`sanitize_html`](crate::sanitize_html) produced, with each `cid:` image whose Content-ID is in
 /// `inline` replaced by a `data:` URL of the part, for a renderer that can't resolve
 /// `cid:` (a browser). The values ammonia's filter returns are not checked again, so the
 /// URL is built here ([`InlineImage::new`]) rather than taken from the caller.
-pub fn embed_inline_images(html: &str, inline: HashMap<String, InlineImage>) -> String {
+pub fn embed_inline_images(html: &str, inline: HashMap<String, InlineImage>) -> Embedded {
+    let left = Arc::new(Mutex::new((Vec::new(), HashSet::new())));
+    let sink = left.clone();
     let embedding = sanitizer(
         Some(Box::new(move |src| {
-            let image = content_id_from_url(src).and_then(|id| inline.get(&id))?;
-            Some(image.data_url().to_owned())
+            let content_id = cid_image_id(src)?;
+            if let Some(image) = inline.get(&content_id) {
+                return Some(image.data_url().to_owned());
+            }
+            if let Some(url) = image_url(src) {
+                let (urls, seen) = &mut *sink.lock().unwrap();
+                if seen.insert(url.to_string()) {
+                    urls.push(InlineUrl {
+                        content_id,
+                        url: url.into(),
+                    });
+                }
+            }
+            None
         })),
         None,
     );
-    clean(&embedding, html)
+    let html = clean(&embedding, html);
+    let inline_urls = std::mem::take(&mut left.lock().unwrap().0);
+    Embedded { html, inline_urls }
 }
 
 /// A `data:` URL of an image, for a page that may load nothing else: its type comes from
@@ -155,9 +199,8 @@ fn media_type(mime_type: &str) -> &str {
 }
 
 /// The Content-ID a `cid:` URL refers to (RFC 2392: the scheme in any case, the rest
-/// percent-encoded), or `None` for any other URL. Renderers resolve inline images with
-/// this, so they agree with what the parser counts as an inline part.
-pub fn content_id_from_url(url: &str) -> Option<String> {
+/// percent-encoded), or `None` for any other URL.
+fn content_id_from_url(url: &str) -> Option<String> {
     let scheme = url.get(..4)?;
     if !scheme.eq_ignore_ascii_case("cid:") {
         return None;
@@ -209,7 +252,7 @@ mod tests {
     fn the_browser_page_keeps_the_style_sheet() {
         let html = sanitize_html("<style>.a{color:red}</style><img src=\"cid:logo@x\">");
         let inline = HashMap::from([("logo@x".to_owned(), InlineImage::new("image/png", b"hi"))]);
-        let page = embed_inline_images(&html, inline);
+        let page = embed_inline_images(&html, inline).html;
         assert!(page.starts_with("<style>.a{color:red;}</style>"), "{page}");
         assert!(page.contains("data:image/png;base64,aGk="), "{page}");
     }
@@ -233,7 +276,7 @@ mod tests {
             ),
         ]);
         let clean = format!("{clean}<img src=\"cid:odd\"><img src=\"cid:missing\">");
-        let embedded = embed_inline_images(&clean, inline);
+        let embedded = embed_inline_images(&clean, inline).html;
         assert!(embedded.contains(r#"<img src="data:image/png;base64,aGk=" alt="a">"#));
         assert!(embedded.contains(r#"<img src="data:application/octet-stream;base64,Z2lm">"#));
         assert!(embedded.contains(r#"<img src="cid:missing">"#));
@@ -258,6 +301,36 @@ mod tests {
         assert_eq!(
             cid_image_ids(&clean),
             HashSet::from(["logo@x".to_owned(), "a@b".to_owned()])
+        );
+    }
+
+    #[test]
+    fn leaves_inline_images_not_given_as_a_page_spells_them() {
+        // The right-hand sides are what WebKit's `new URL(src).href` writes (WHATWG URL):
+        // the page puts an image in place of the URL that equals this.
+        let clean = sanitize_html(
+            r#"<img src="cid:logo@x"><img src=" CID:a%40b "><img src="Cid:图片@x">
+            <img src="cid:a b"><img src="cid:a%2fb"><img src="cid:a?b#c">
+            <img src="cid:logo@x"><img src="cid:"><img src="https://x/cid:remote">
+            <a href="cid:report@x">report</a><img src=" cid:given@x ">"#,
+        );
+        let inline = HashMap::from([("given@x".to_owned(), InlineImage::new("image/png", b"hi"))]);
+        let embedded = embed_inline_images(&clean, inline);
+        assert!(embedded.html.contains("data:image/png;base64,aGk="));
+        assert_eq!(
+            embedded.inline_urls,
+            [
+                ("logo@x", "cid:logo@x"),
+                ("a@b", "cid:a%40b"),
+                ("图片@x", "cid:%E5%9B%BE%E7%89%87@x"),
+                ("a b", "cid:a b"),
+                ("a/b", "cid:a%2fb"),
+                ("a?b#c", "cid:a?b#c"),
+            ]
+            .map(|(id, url)| InlineUrl {
+                content_id: id.to_owned(),
+                url: url.to_owned(),
+            })
         );
     }
 

@@ -245,7 +245,7 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 
 ### 正文在 web view 里
 
-有 HTML 部分就显示清洗后的 HTML，否则把纯文本转义后放进 `<pre>`（`catmail_frontend::html::body_page`），都在同一个 web view 里。
+有 HTML 部分就显示清洗后的 HTML，否则把纯文本转义后放进 `<pre>`（`catmail_frontend::html::PageImages::page`），都在同一个 web view 里。
 
 - **断网**：WebKit 有自己的网络，nsh 只检查顶层导航，不管页面的子资源，所以由页面自己断网：`<head>` 最前面
   一条 CSP `default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; form-action 'none';
@@ -254,8 +254,8 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
   `<link>`、iframe、`meta refresh`……）指向本机 HTTP 服务器验证过：开着 CSP 时零请求。
 - **脚本**：页面自己的 JS 关掉（`java_script_enabled(false)`）。注入的脚本（`html::BRIDGE`）WebKit 照样运行，
   经 `window.nsh.postMessage` 回报：载入了（`r`）、页面高度（`h`）、按 web view 的高度画好了（`p`）、点击的链接
-  （`o`）、页面里的 `cid:` 图片（`c`）。读信区经 `post_message` 发回图片（`i:<url>\n<data URL>`），脚本把它填进
-  对应的 `<img>`。只有 `<img>` 有图：清洗不保留 `background` 属性和样式里的 `url()`（见
+  （`o`）。读信区经 `post_message` 发回图片（`i:<url>\n<data URL>`），脚本把它填进 `src` 规范化后等于 `url` 的
+  `<img>`。只有 `<img>` 有图：清洗不保留 `background` 属性和样式里的 `url()`（见
   [正文](bodies.md)），表格布局邮件的 `<td background="…">` 背景图不显示。
 - **页面带编号**（`<meta name="catmail-page">`），消息都附上它，读信区只认最后建的那个：空白页、上一封邮件的
   页面晚到的消息不会被当成新页面的。
@@ -278,8 +278,12 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 ### 图片
 
 - **内嵌图片**：取的是 `MessageBody::inline_parts`，内嵌的规则见[正文与附件](bodies.md)，读信区不另加条件。
-  打开时先显示文字。已经取到的内嵌部分在建页时嵌进页面；其余的，脚本报出页面引用的 `cid:`，取到一个就
-  `post_message` 填进去，不重新载入页面。没有 HTML 的邮件不取。
+  打开时先显示文字。已经取到的内嵌部分在建页时嵌进页面；其余的，建页时就从 HTML 算出它们在页面里的 `cid:`
+  URL（`embed_inline_images` 嵌入时顺便记下没嵌的，按 URL 解析器的写法规范化，和脚本里 `new URL(src).href`
+  一致，同远程图片），取到一个就 `post_message` 填进去，不重新载入页面。没有 HTML 的邮件不取。
+- **发给页面的图片**由 `catmail_frontend::html::PageImages` 管：这封邮件取到的内嵌部分、显示了的远程图片、
+  页面还缺哪些、页面载入了没有（`r`）。它建页面，每次有图片来就返回要发的消息，页面没载入完就留到 `r` 时
+  一起发；读信区只管把消息发给 web view。换外观重建页面时，取到的内嵌部分直接嵌进去，远程图片在 `r` 时重发。
 - **远程图片**：打开时在后台列出正文引用的远程图片（`remote_image_urls`），缓存里有的（`cached_remote_images`）
   直接显示，其余的在用户点"Show remote images"后交给 `MailClient::fetch_remote_images`（限制见
   [正文与附件](bodies.md)），按下载完成的顺序逐批填进页面（`html::data_url`），按钮转圈；一张也没拿到时提示
@@ -377,9 +381,10 @@ From 是条目实际发出用的身份（`OutboxEntry::identity`），叫法和�
 
 ## 测试
 
-纯逻辑在 `catmail-frontend`，表驱动测试，不用编译 GTK 和 WebKit（见[测试](testing.md#gui)）。这个 crate 只测几处
-不经窗口的：页面（CSP 在正文之前、`cid:` 图片嵌入、纯文本转义、消息协议的解析、页面编号）、页面高度的判断、
-主题映射、图标、托盘的绘制。还没有驱动窗口的测试（ROADMAP 里的 nsh-testing）。
+纯逻辑在 `catmail-frontend`，表驱动测试，不用编译 GTK 和 WebKit（见[测试](testing.md#gui)），读信区的正文页面
+也在那里测（`html`：CSP 在正文之前、`cid:` 图片嵌入、纯文本转义、消息协议的解析、页面编号、载入后补发哪些图片）。
+这个 crate 只测几处不经窗口的：页面高度够不够、页面算深色还是浅色、主题映射、图标、托盘的绘制。还没有驱动窗口
+的测试（ROADMAP 里的 nsh-testing）。
 
 ## 已知问题与上游
 
