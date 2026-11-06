@@ -17,8 +17,8 @@ use crate::mailbox::panes::back_button;
 use crate::{chrome, composer};
 
 use super::{
-    BodyHeight, MIN_BODY_HEIGHT, Reading, Retry, ShowDetails, State, is_shown, open_in_browser,
-    page_painted, page_ready, page_state, save_attachment, show_remote_images,
+    BodyHeight, MIN_BODY_HEIGHT, Reading, Retry, ShowDetails, State, image_taken, is_shown,
+    open_in_browser, page_painted, page_ready, page_state, save_attachment, show_remote_images,
 };
 
 /// The pane: its toolbar over the message. It stays while no message is selected
@@ -396,6 +396,7 @@ fn web_view(view_ref: ElementRef) -> impl IntoElement {
         .element_ref(&view_ref)
         .on_message(move |message: &str| match FromPage::parse(message) {
             Some(FromPage::Ready(number)) if is_shown(number) => page_ready(),
+            Some(FromPage::Taken(number)) if is_shown(number) => image_taken(),
             Some(FromPage::Painted(number, height)) if is_shown(number) => page_painted(height),
             Some(FromPage::Height(number, height)) if is_shown(number) => {
                 global::<BodyHeight>().set(BodyHeight(height));

@@ -291,16 +291,14 @@ async fn open_message(id: MessageId, dark: bool) {
 fn add_inline_image(content_id: String, image: InlineImage) {
     let page = page_state();
     let mut page = page.borrow_mut();
-    let messages = page.images.add_inline(content_id, image);
-    post(page.view, messages);
+    let message = page.images.add_inline(content_id, image);
+    post(page.view, message);
 }
 
-/// Sends the page shown what `PageImages` says it needs.
-fn post(view: Option<ElementRef>, messages: Vec<String>) {
-    if let Some(view) = view {
-        for message in messages {
-            view.post_message(message);
-        }
+/// Sends the page shown the image `PageImages` says is due.
+fn post(view: Option<ElementRef>, message: Option<String>) {
+    if let (Some(view), Some(message)) = (view, message) {
+        view.post_message(message);
     }
 }
 
@@ -382,8 +380,8 @@ fn add_remote_images(id: MessageId, fetched: Vec<(String, RemoteImage)>) -> bool
     });
     let page = page_state();
     let mut page = page.borrow_mut();
-    let messages = page.images.add_remote(fetched);
-    post(page.view, messages);
+    let message = page.images.add_remote(fetched);
+    post(page.view, message);
     true
 }
 
@@ -391,8 +389,16 @@ fn add_remote_images(id: MessageId, fetched: Vec<(String, RemoteImage)>) -> bool
 fn page_ready() {
     let page = page_state();
     let mut page = page.borrow_mut();
-    let messages = page.images.ready();
-    post(page.view, messages);
+    let message = page.images.ready();
+    post(page.view, message);
+}
+
+/// The page has taken the image sent last: the next goes.
+fn image_taken() {
+    let page = page_state();
+    let mut page = page.borrow_mut();
+    let message = page.images.taken();
+    post(page.view, message);
 }
 
 /// The page has painted with the web view `height` points tall: a hidden one shows

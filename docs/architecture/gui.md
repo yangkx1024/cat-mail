@@ -254,8 +254,9 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
   `<link>`、iframe、`meta refresh`……）指向本机 HTTP 服务器验证过：开着 CSP 时零请求。
 - **脚本**：页面自己的 JS 关掉（`java_script_enabled(false)`）。注入的脚本（`html::BRIDGE`）WebKit 照样运行，
   经 `window.nsh.postMessage` 回报：载入了（`r`）、页面高度（`h`）、按 web view 的高度画好了（`p`）、点击的链接
-  （`o`）。读信区经 `post_message` 发回图片（`i:<url>\n<data URL>`），脚本把它填进 `src` 规范化后等于 `url` 的
-  `<img>`。只有 `<img>` 有图：清洗不保留 `background` 属性和样式里的 `url()`（见
+  （`o`）、收下了刚发来的图片（`d`）。读信区经 `post_message` 发回图片（`i:<url>\n<data URL>`），脚本把它填进
+  `src` 规范化后等于 `url` 的 `<img>`（第一次收到图片时按 URL 建一张表，之后只查表：已填上的 `src` 是几百 KB 的
+  `data:` URL，每张都重新解析一遍是 O(n²)）。只有 `<img>` 有图：清洗不保留 `background` 属性和样式里的 `url()`（见
   [正文](bodies.md)），表格布局邮件的 `<td background="…">` 背景图不显示。
 - **页面带编号**（`<meta name="catmail-page">`），消息都附上它，读信区只认最后建的那个：空白页、上一封邮件的
   页面晚到的消息不会被当成新页面的。
@@ -282,8 +283,12 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
   URL（`embed_inline_images` 嵌入时顺便记下没嵌的，按 URL 解析器的写法规范化，和脚本里 `new URL(src).href`
   一致，同远程图片），取到一个就 `post_message` 填进去，不重新载入页面。没有 HTML 的邮件不取。
 - **发给页面的图片**由 `catmail_frontend::html::PageImages` 管：这封邮件取到的内嵌部分、显示了的远程图片、
-  页面还缺哪些、页面载入了没有（`r`）。它建页面，每次有图片来就返回要发的消息，页面没载入完就留到 `r` 时
-  一起发；读信区只管把消息发给 web view。换外观重建页面时，取到的内嵌部分直接嵌进去，远程图片在 `r` 时重发。
+  页面还缺哪些、页面载入了没有（`r`）。它建页面，有图片来就排进队列，页面载入后**一次只发一张**，页面回了 `d`
+  再发下一张；读信区只管把消息发给 web view。换外观重建页面时，取到的内嵌部分直接嵌进去，远程图片在 `r` 后重发。
+  ⚠️ nsh 没有自定义 URL scheme，图片只能以 `data:` URL 写进一段脚本（`evaluateJavaScript`），newsletter 的图片
+  一张就上 MB：GUI 主线程要转义整段字符串，网页进程按顺序执行这些脚本。一次全发出去时界面会卡，换邮件时新页面
+  也要排在这些脚本后面；一次一张，换邮件时剩下的就不发了（`forget_message`）。总的载入时间还是跟图片大小成正比，
+  要让 WebKit 自己读图片得等 nsh 支持 URL scheme handler（longbridge/nsh#1136）。远程图片存原始字节，发送时才编成 `data:` URL。
 - **远程图片**：打开时在后台列出正文引用的远程图片（`remote_image_urls`），缓存里有的（`cached_remote_images`）
   直接显示，其余的在用户点"Show remote images"后交给 `MailClient::fetch_remote_images`（限制见
   [正文与附件](bodies.md)），按下载完成的顺序逐批填进页面（`html::data_url`），按钮转圈；一张也没拿到时提示
@@ -398,3 +403,6 @@ From 是条目实际发出用的身份（`OutboxEntry::identity`），叫法和�
 - **cargo deny 还不过**：nsh 带进来的许可证（webpki-roots 的 CDLA-Permissive-2.0，target-lexicon、winx 的
   LLVM-exception）和 nsh-updater 用的 zip 8 的 advisory（要 zip 9，longbridge/nsh#1050），见 ROADMAP。
 - macOS 的 `title_bar()` 高度（longbridge/nsh#1068）、输入框失焦（longbridge/nsh#248），见上文[外壳](#外壳)。
+- **图片多的邮件载入慢**：nsh 的 web view 没有自定义 URL scheme，图片只能以 `data:` URL 写进脚本发给页面，见上文
+  [图片](#图片)。现在一次发一张，换邮件不卡，但总时间跟图片大小成正比。已提 longbridge/nsh#1136；支持后改成由
+  WebKit 经 scheme handler 自己读图片，要改的地方见 ROADMAP。
