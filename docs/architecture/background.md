@@ -232,15 +232,17 @@ INBOX。这之前用户自己选了别的邮件，就以用户的为准。点击
 
 ## 托盘
 
-GUI 的 `tray/` 在引擎打开时启动，有窗口时、常驻时都在。`tray/mod.rs` 数未读、按平台定图标的样子、在后台画；
+GUI 的 `tray/` 在引擎打开时启动，有窗口时、常驻时都在。`tray/mod.rs` 数未读、在后台把图标画成像素；
 `linux.rs`、`macos.rs` 把画好的图标和未读数交给 frontend 里各平台的托盘项。不依赖 UI 库的部分在
-`catmail_frontend::tray`：菜单（`MENU`、`Command`）、提示文字、角标的文字和带角标的 SVG（`badged`）、Linux 的
-StatusNotifierItem（`tray::linux`，ksni 本来就不依赖 UI 库）、macOS 的状态栏项（`tray::macos`，AppKit 本身）。
+`catmail_frontend::tray`：菜单（`MENU`、`Command`）、提示文字、角标的文字和带角标的 SVG（`badged`）、按平台给出
+图标的样子和尺寸（`icon`，图标的 SVG 在 `crates/catmail-frontend/assets/app-icon/`）、什么时候数、什么时候画、
+画哪个（`TrayModel`）、Linux 的 StatusNotifierItem（`tray::linux`，ksni 本来就不依赖 UI 库）、macOS 的状态栏项
+（`tray::macos`，AppKit 本身）。
 
 - **未读数**：`MailClient::count_unread_in_inboxes` 把各账户 INBOX（Gmail：INBOX 标签）的 `unread_count` 加起来，
   一次读。侧栏要重读的事件（`Refresh::after(..).sidebar`：消息、文件夹、账户的变化，漏掉事件）都重数；数没变
   就不重画。托盘注册上了才开始数：没有托盘的桌面不读。
-- **图标**（Linux）：应用图标（`assets/app-icon/` 的亮色或暗色版本）右上角叠一个红色角标写着未读数，超过 99 写
+- **图标**（Linux）：应用图标（`app-icon/` 的亮色或暗色版本）右上角叠一个红色角标写着未读数，超过 99 写
   "99+"，没有未读就不画。拼成一个 SVG，用 resvg（nsh-core 已经带着，另开 `text` 画数字）在另一个线程上画成
   22、32、64 像素，由托盘挑合适的。提示文字是"N unread messages"。亮暗跟随 portal 的 `color-scheme`，即桌面的
   外观而不是应用的，常驻时也跟随。
@@ -262,7 +264,7 @@ StatusNotifierItem（`tray::linux`，ksni 本来就不依赖 UI 库）、macOS �
 - **macOS** 直接用 AppKit（`objc2-app-kit`）：`NSStatusItem` 的按钮放图标，菜单是 `NSMenu`，菜单项的 target 是一个
   只转发命令的小类（`define_class!`，tag 是在 `MENU` 里的位置），`Item` 留着它（菜单项不 retain target）。都在主
   线程上。图标由前端画好交过来（`Template`：预乘 alpha 的 RGBA，AppKit 位图的格式）。
-  - 图标是单色的模板图（`assets/app-icon/catmail-menu-bar.svg`：信封和猫爪），系统按菜单栏的亮暗、强调色着色，
+  - 图标是单色的模板图（`app-icon/catmail-menu-bar.svg`：信封和猫爪），系统按菜单栏的亮暗、强调色着色，
     不用跟外观重画，只画一次（18、36 像素，18 pt 的 1x、2x）。未读数是按钮的标题，写在图标右边，与 Linux 角标
     同样的文字；提示文字相同。
   - 同一个数也作 Dock 图标的角标（`NSDockTile::badgeLabel`，Mail.app 的做法）。

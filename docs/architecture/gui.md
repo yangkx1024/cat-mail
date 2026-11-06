@@ -59,7 +59,8 @@ src/
   theme.rs         主题映射到 nsh（shadcn）的 token
   toast.rs         窗口里的通知；report 记日志并提示出错
   icons.rs         Heroicons
-  tray/            托盘：mod.rs 计数与绘制，linux.rs、macos.rs 交给 frontend 的 StatusNotifierItem、状态栏项
+  tray/            托盘：mod.rs 计数、把图标画成像素（何时数、何时画由 frontend 的 TrayModel 定），linux.rs、
+                   macos.rs 交给 frontend 的 StatusNotifierItem、状态栏项
   new_mail.rs      新邮件的系统通知（Linux）
 ```
 
@@ -345,7 +346,7 @@ From 是条目实际发出用的身份（`OutboxEntry::identity`），叫法和�
 
 [Heroicons](https://heroicons.com)（MIT），只把用到的 SVG 放在 `crates/catmail-gui/assets/heroicons/`（附许可证），
 `include_str!` 编进程序，用 nsh 的 `svg` 画，`currentColor` 跟随所在处的文字色（`icons.rs`）。选中的行换成填充的
-那一版。应用图标在 `assets/app-icon/`。
+那一版。应用图标在 `crates/catmail-frontend/assets/app-icon/`：托盘用它们，打包时由它生成 `.icns`。
 
 ## 调试用的环境变量
 
