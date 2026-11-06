@@ -1,10 +1,9 @@
 //! The tray icon on Linux: the StatusNotifierItem, the app's icon with the count on it in
 //! the desktop's appearance, which the settings portal says.
 
-use std::borrow::Cow;
 use std::cell::RefCell;
 
-use catmail_frontend::tray::{Chosen, Pixmap, badged, linux};
+use catmail_frontend::tray::{Chosen, Pixmap, linux};
 use futures_channel::mpsc::UnboundedSender;
 use nsh_platform_linux::gtk4::{gio, glib, prelude::*};
 use resvg::tiny_skia;
@@ -12,9 +11,6 @@ use resvg::tiny_skia;
 use resvg::usvg;
 
 use crate::shell;
-
-const LIGHT: &str = include_str!("../../assets/app-icon/catmail-light.svg");
-const DARK: &str = include_str!("../../assets/app-icon/catmail-dark.svg");
 
 #[derive(Clone)]
 pub struct Item(linux::Item);
@@ -40,12 +36,6 @@ pub fn icon_from(drawn: tiny_skia::Pixmap) -> Pixmap {
         })
         .collect();
     Pixmap::from_rgba(drawn.width(), &rgba)
-}
-
-/// What the icon looks like, as an SVG, and the sizes it is drawn at (square).
-pub fn icon(dark: bool, unread: u32) -> (Cow<'static, str>, &'static [u32]) {
-    let icon = if dark { DARK } else { LIGHT };
-    (badged::svg(icon, unread), &badged::SIZES)
 }
 
 thread_local! {
@@ -109,6 +99,8 @@ fn color_scheme(value: &glib::Variant) {
 
 #[cfg(test)]
 mod tests {
+    use catmail_frontend::tray::{DARK_ICON, LIGHT_ICON, badged};
+
     use super::*;
 
     /// The digits need the system's fonts, which usvg finds only with its `text` and
@@ -119,7 +111,7 @@ mod tests {
             let pixmaps = super::super::pixmaps(svg, &badged::SIZES).into_iter();
             pixmaps.map(icon_from).collect()
         };
-        for icon in [LIGHT, DARK] {
+        for icon in [LIGHT_ICON, DARK_ICON] {
             let plain = drawn(&badged::svg(icon, 0));
             let badged = drawn(&badged::svg(icon, 7));
             let sizes: Vec<_> = badged.iter().map(|p| p.size).collect();

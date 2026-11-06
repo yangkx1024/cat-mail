@@ -11,6 +11,7 @@ mod builtin;
 mod derive;
 mod import;
 mod palette;
+mod swatch;
 mod themes;
 
 use serde::{Deserialize, Serialize};
@@ -20,6 +21,7 @@ pub use builtin::builtin_themes;
 use import::{ImportError, import};
 pub use import::{ImportedTheme, ThemeFormat};
 pub use palette::{Rgb, TerminalPalette};
+pub use swatch::{Rgba, Swatch};
 pub use themes::{
     IMPORT_HELP, IMPORTABLE_FORMATS, ImportCandidate, ThemeEntry, Themes, file_name, import_title,
     read_import,

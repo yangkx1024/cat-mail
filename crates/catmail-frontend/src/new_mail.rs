@@ -155,27 +155,20 @@ impl Arrivals {
 
 #[cfg(test)]
 mod tests {
-    use catmail_core::{Address, Flags, FolderId};
+    use catmail_core::Address;
 
     use super::*;
+    use crate::fixtures;
 
     fn message(account: i64, id: i64, from: &str, subject: &str) -> MessageSummary {
         MessageSummary {
-            id: MessageId(id),
-            account_id: AccountId(account),
-            folder_id: FolderId(1),
             subject: Some(subject.into()),
             from: vec![Address {
                 name: Some(from.into()),
                 email: format!("{}@example.com", from.to_lowercase()),
             }],
-            to: Vec::new(),
-            cc: Vec::new(),
             date: Some(id),
-            snippet: None,
-            flags: Flags::empty(),
-            has_attachments: false,
-            labels: Vec::new(),
+            ..fixtures::message(id, account, 1)
         }
     }
 

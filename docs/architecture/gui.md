@@ -43,7 +43,7 @@ src/
     panes.rs       三栏和拖宽度的把手，右栏按选中的是邮件、草稿还是发件箱条目；右栏共用的返回按钮、字段行
     sidebar.rs     侧栏：All Inboxes、账户与文件夹、标签、连接说明
     folder_commands.rs  文件夹的右键菜单：新建、改名、删除
-    list/          中栏：mod.rs 来源、分页、按天分组、勾选、搜索；rows.rs 日期标题和三种行
+    list/          中栏：mod.rs 发起读取并交给 frontend 的 ListModel、勾选、搜索；rows.rs 日期标题和三种行
     commands.rs    对邮件的命令：图标按钮组、快捷键、被拒改动的通知
     picker.rs      "Move to"与"Labels"对话框
     draft.rs outbox.rs  草稿、发件箱条目的右栏
@@ -59,7 +59,8 @@ src/
   theme.rs         主题映射到 nsh（shadcn）的 token
   toast.rs         窗口里的通知；report 记日志并提示出错
   icons.rs         Heroicons
-  tray/            托盘：mod.rs 计数与绘制，linux.rs、macos.rs 交给 frontend 的 StatusNotifierItem、状态栏项
+  tray/            托盘：mod.rs 计数、把图标画成像素（何时数、何时画由 frontend 的 TrayModel 定），linux.rs、
+                   macos.rs 交给 frontend 的 StatusNotifierItem、状态栏项
   new_mail.rs      新邮件的系统通知（Linux）
 ```
 
@@ -127,14 +128,18 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
   `Lagged` 时整体刷新（侧栏、列表，并查一次被拒绝的改动）。
 - **节流**（`Throttle`）：一次读取之后 200 ms 内的事件攒着，间隔结束时合在一起读一次。单个改动（标记已读）
   马上显示，一次同步的几十个事件每 200 ms 最多读一轮。节流之下，读侧栏和列表各自还合并请求（`Coalesce`）：
-  同一时间最多一次读取，期间再有事件只记"过期"，完成后补读一次；已交给引擎的读取不会因为换了任务而不做。
+  同一时间最多一次读取，期间再有事件只记下，完成后补读一次；已交给引擎的读取不会因为换了任务而不做。
 - 读回来的和正显示的一样时不替换：同步每批邮件发一个事件，多数轮次什么都没变。
 - **分页**：文件夹和搜索结果每页 200 条，滚到底再取下一页，按游标取排在最后一行之后的（见
   [存储](storage.md#列表顺序与分页)）：顶上新来或删掉的行不会让下一页重复或漏行。
 
 ## 侧栏
 
-模型在 `catmail-frontend`（`folders`、`mailbox`），`mailbox/sidebar.rs` 只有界面。
+模型在 `catmail-frontend`：文件夹的层级在 `folders`，地方（`Place`：名字、图标、列出哪些文件夹）在 `mailbox`，
+侧栏的分组和排序、折叠（`sidebar_groups`、`Folds`）和读回账户之后做什么（`SidebarModel`：一次一个读取、保留更新的
+草稿数、窗口打开前托盘或通知要求去的位置和写信、原来的位置不在了时回到开始处、列表显示的文件夹变了时重读列表）
+在 `mailbox::sidebar`，都有表驱动测试。`mailbox/sidebar.rs` 只把模型的结果放进 nsh 的 signal 再画出来。分组的
+子树用 `Rc` 共享，账户每变一次只建一次，传给各层时不再整棵复制。
 
 有多个账户时第一项是 **All Inboxes**（只有一个账户时不列，它就是那个账户的 Inbox）：每个账户的 INBOX（与引擎
 同样按 `special_folder` 挑；Gmail 上是 INBOX 标签）合成一个列表，`MailClient::list_inboxes` 按与单个文件夹相同
@@ -160,8 +165,14 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 
 ## 邮件列表
 
-行的模型在 `catmail_frontend::list`（来源怎么分页读、按天分组、重读后选中去哪、按标记勾选、行上的文字），
-`mailbox/list/` 只有界面。
+行的模型在 `catmail_frontend::list`（来源怎么分页读、按天分组、重读后选中去哪、按标记勾选、行上的文字）。
+列表显示什么是 `Listing`：行、按天的分组和排成的条目，条目只记日期标题和行的下标，翻页时只追加，不再把每行
+复制一份。怎么读是 `ListModel`：换来源时作废旧来源的读取、一次一个读取（`Coalesce`）、搜索框停顿后换成什么（`typed`、
+`paused`：期间又有按键就不搜，没输入就回到选中的地方，和正显示的一样就不动）、什么时候问服务器（`server_search`，
+用户已经离开这次搜索就不问）、搜索时带上服务器找到的、
+读完后按 `Removal`、`Reveal`、`Reselect` 定下选中哪一行、哪些勾选不在了、要不要再读一次（`loaded`），都有表驱动
+测试。`mailbox/list/` 发起读取、把结果交给模型，再把 `Listing`、选中、勾选和"正在读"放进 nsh 的 signal；
+"正在读"单独一个 signal，同步时每次刷新不再让读行的地方重算。
 
 - **按天分组**：列表（都是新的在前）按本地日期分组，标题是 Today、Yesterday、今年的"Monday, October 12"、
   更早的"October 12, 2025"，没有日期的归到 No date；行里只显示时间。只合并相邻的同一天，顺序不是按日期时
@@ -186,8 +197,14 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 
 ## 读与改
 
-命令的模型在 `catmail_frontend::commands`（`Applies`、命令的名字、作用于哪些邮件、"Move to"列出的文件夹、永久
-删除的确认文案、被拒改动的说明），`mailbox/commands.rs` 只有界面。
+命令的模型在 `catmail_frontend::commands`（`Applies`、命令的名字、"Move to"列出的文件夹、永久删除的确认文案、
+被拒改动的说明），都直接拿账户列表（`&[AccountEntry]`）。每个改动是一个 `Change`：改哪些邮件、向引擎要做什么
+（`Op`，`Change::run` 调对应的 `MailClient` 方法）、失败时怎么说（`Change::failure`，"Couldn't {what}"，和删除
+文件夹、发件箱的选项一样）、会不会让邮件离开列表（`may_remove`，改标记以外都会）、做完要不要去掉勾选
+（`unchecks`，归档、移动、删除）。快捷键作用于哪些邮件是 `Listing::keyed`，只等选中的那封离开是
+`ListModel::expect_removal`，一封邮件"在哪看"（Gmail 上移动会去掉的标签、行上不用再写的标签）是
+`Source::shown_in`，移动和行上的标签名都用它（行上的按账户先算好一份，`shown_in_each`）。`mailbox/commands.rs`
+只有一个 `run_change`：按 `Change` 去掉勾选、等选中的那封离开、运行、出错时通知；其余是画按钮。
 
 - **三处同一套按钮**：读信区工具栏、勾选工具栏、悬停的行都由 `commands::group` 生成，只显示图标，按用途分组：
   位置（Archive、Delete、Move to）；标记（已读 / 未读、Flag）；读信区另有内容（Show remote images、Open in
@@ -345,7 +362,7 @@ From 是条目实际发出用的身份（`OutboxEntry::identity`），叫法和�
 
 [Heroicons](https://heroicons.com)（MIT），只把用到的 SVG 放在 `crates/catmail-gui/assets/heroicons/`（附许可证），
 `include_str!` 编进程序，用 nsh 的 `svg` 画，`currentColor` 跟随所在处的文字色（`icons.rs`）。选中的行换成填充的
-那一版。应用图标在 `assets/app-icon/`。
+那一版。应用图标在 `crates/catmail-frontend/assets/app-icon/`：托盘用它们，打包时由它生成 `.icns`。
 
 ## 调试用的环境变量
 

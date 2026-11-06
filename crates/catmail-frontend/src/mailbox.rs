@@ -1,6 +1,9 @@
 //! What the mailbox window shows, apart from how: the places the sidebar selects, what
 //! the message list lists, and each account as the sidebar shows it.
 
+pub mod sidebar;
+
+use std::collections::HashMap;
 use std::time::Duration;
 
 use catmail_core::{
@@ -9,7 +12,7 @@ use catmail_core::{
 };
 
 use crate::commands::Confirm;
-use crate::folders::AccountFolders;
+use crate::folders::{self, AccountFolders, FolderIcon};
 
 /// Opening a folder synced longer ago than this syncs it. Background sync keeps only
 /// INBOX current between full syncs; the server can't tell us about the others.
@@ -105,6 +108,19 @@ impl Place {
             Place::Outbox(_) => "Outbox".into(),
         })
     }
+
+    /// Its icon, as the sidebar shows it.
+    pub fn icon(self, accounts: &[AccountEntry]) -> FolderIcon {
+        match self {
+            Place::Inboxes => FolderIcon::Inboxes,
+            Place::Folder(id) => {
+                let node = self.account_in(accounts).and_then(|a| a.folders.find(id));
+                folders::icon(node.and_then(|n| n.folder.as_ref()))
+            }
+            Place::Drafts(_) => FolderIcon::Role(FolderRole::Drafts),
+            Place::Outbox(_) => FolderIcon::Outbox,
+        }
+    }
 }
 
 /// Where to take the mailbox: a place, or an account's INBOX and a message to open there
@@ -126,9 +142,7 @@ impl Destination {
         match self {
             Destination::Place(place) => place.is_in(accounts).then_some((place, None)),
             Destination::Inbox { account, message } => {
-                let inbox = accounts
-                    .iter()
-                    .find(|entry| entry.account.id == account)?
+                let inbox = AccountEntry::find(accounts, account)?
                     .folders
                     .with_role(FolderRole::Inbox)?;
                 Some((Place::Folder(inbox.id), message))
@@ -155,6 +169,24 @@ impl Source {
             self,
             Source::Inboxes | Source::Folder(_) | Source::Search(_)
         )
+    }
+
+    /// The folder a message of `entry`'s listed here is looked at in: on Gmail, the label
+    /// it leaves when moved to another, and one its row needn't name. In All Inboxes its
+    /// account's INBOX; none for search results, which come from anywhere.
+    pub fn shown_in(&self, entry: &AccountEntry) -> Option<FolderId> {
+        match self {
+            Source::Inboxes => entry.folders.with_role(FolderRole::Inbox).map(|f| f.id),
+            Source::Folder(id) => entry.folders.get(*id).map(|f| f.id),
+            Source::Search(_) | Source::Drafts(_) | Source::Outbox(_) => None,
+        }
+    }
+
+    /// [`shown_in`](Self::shown_in) for each account that has such a folder: worked out
+    /// once for the rows, which look theirs up.
+    pub fn shown_in_each(&self, accounts: &[AccountEntry]) -> HashMap<AccountId, FolderId> {
+        let shown_in = |entry: &AccountEntry| Some((entry.account.id, self.shown_in(entry)?));
+        accounts.iter().filter_map(shown_in).collect()
     }
 }
 
@@ -183,9 +215,7 @@ pub fn list_note(
             let unread = crate::folders::unread(place?.folders(accounts));
             (unread > 0).then(|| format!("{unread} unread"))
         }
-        Source::Outbox(account) => accounts
-            .iter()
-            .find(|a| a.account.id == *account)
+        Source::Outbox(account) => AccountEntry::find(accounts, *account)
             .filter(|a| !a.status.send.is_empty() || a.status.sync.is_some())
             .map(|_| "Sending resumes when the connection is back.".to_owned()),
         _ => None,
@@ -215,6 +245,11 @@ impl AccountEntry {
             outbox: overview.outbox,
             status,
         }
+    }
+
+    /// Account `id`, among `accounts`.
+    pub fn find(accounts: &[AccountEntry], id: AccountId) -> Option<&AccountEntry> {
+        accounts.iter().find(|e| e.account.id == id)
     }
 
     /// Whether something in the outbox waits for the user.
@@ -342,4 +377,44 @@ pub fn connection_note(accounts: &[AccountEntry]) -> Option<String> {
             format!("Can't send from {}", from.join(", "))
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use catmail_core::FolderRole;
+
+    use super::*;
+    use crate::fixtures::{account, folder, gmail, gmail_folder, standard};
+
+    #[test]
+    fn a_place_is_named_and_drawn_as_the_sidebar_shows_it() {
+        let accounts = [
+            standard(1),
+            gmail(
+                2,
+                vec![gmail_folder(21, 2, "INBOX"), gmail_folder(22, 2, "Work")],
+            ),
+            account(3, vec![folder(31, 3, "Projects/2026")]),
+        ];
+        let (inbox, sent) = (FolderId(11), FolderId(12));
+        #[rustfmt::skip]
+        let cases = [
+            (Place::Inboxes, "All Inboxes", FolderIcon::Inboxes),
+            (Place::Folder(inbox), "Inbox", FolderIcon::Role(FolderRole::Inbox)),
+            (Place::Folder(sent), "Sent", FolderIcon::Role(FolderRole::Sent)),
+            (Place::Folder(FolderId(22)), "Work", FolderIcon::Label),
+            (Place::Folder(FolderId(31)), "2026", FolderIcon::Folder),
+            (Place::Drafts(AccountId(1)), "Drafts", FolderIcon::Role(FolderRole::Drafts)),
+            (Place::Outbox(AccountId(1)), "Outbox", FolderIcon::Outbox),
+        ];
+        for (place, label, icon) in cases {
+            assert_eq!(place.label(&accounts).as_deref(), Some(label), "{place:?}");
+            assert_eq!(place.icon(&accounts), icon, "{place:?}");
+        }
+        assert_eq!(Place::Folder(FolderId(99)).label(&accounts), None);
+        assert_eq!(
+            Place::Folder(FolderId(99)).icon(&accounts),
+            FolderIcon::Folder
+        );
+    }
 }

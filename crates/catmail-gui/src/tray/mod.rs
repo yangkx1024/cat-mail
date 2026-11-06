@@ -1,9 +1,10 @@
 //! The tray icon: on Linux the app's icon with the number of unread messages in the
 //! INBOXes, a click to bring the main window back; on macOS a template in the menu bar with
 //! the number beside it, and on the Dock icon. Either has a menu to write a message, sync
-//! or quit, and is there with or without a window. The items, their menu and what they say
-//! are `catmail_frontend::tray`'s; here the count is counted, drawn (resvg, off the main
-//! thread) and followed, on the main thread. See docs/architecture/background.md.
+//! or quit, and is there with or without a window. The items, their menu, what they say,
+//! the icons and when to count and draw are `catmail_frontend::tray`'s; here the count is
+//! counted and the icon drawn (resvg, off the main thread), on the main thread. See
+//! docs/architecture/background.md.
 
 #[cfg(target_os = "linux")]
 #[path = "linux.rs"]
@@ -12,13 +13,12 @@ mod platform;
 #[path = "macos.rs"]
 mod platform;
 
-use std::borrow::Cow;
 use std::cell::RefCell;
 use std::sync::{Arc, LazyLock};
 
 use catmail_core::RecvError;
-use catmail_frontend::refresh::{Coalesce, Refresh};
-use catmail_frontend::tray::Chosen;
+use catmail_frontend::refresh::Refresh;
+use catmail_frontend::tray::{Chosen, TrayModel};
 use futures_channel::mpsc;
 use futures_util::StreamExt as _;
 use resvg::{tiny_skia, usvg};
@@ -30,17 +30,7 @@ use crate::{engine, shell};
 #[derive(Default)]
 struct Tray {
     item: Option<Item>,
-    /// Unread messages in the INBOXes, once counted.
-    unread: Option<u32>,
-    /// The desktop's appearance, which the icon is drawn in where it isn't a template:
-    /// the panel's, not the app's.
-    dark: bool,
-    counting: Coalesce,
-    /// One drawing at a time, so an icon drawn for an older count can't land last.
-    drawing: Coalesce,
-    /// The SVG the item's icon was last drawn from: one that looks the same isn't drawn
-    /// again (macOS's never changes).
-    drawn: Option<Cow<'static, str>>,
+    model: TrayModel,
 }
 
 thread_local! {
@@ -90,7 +80,7 @@ pub fn start() {
     expect(dead_code, reason = "a template follows by itself")
 )]
 fn appearance_changed(dark: bool) {
-    if TRAY.with_borrow_mut(|tray| std::mem::replace(&mut tray.dark, dark) != dark) {
+    if TRAY.with_borrow_mut(|tray| tray.model.appearance(dark)) {
         draw();
     }
 }
@@ -100,22 +90,15 @@ fn count() {
     let Some(client) = engine::open() else {
         return;
     };
-    if !TRAY.with_borrow_mut(|tray| tray.counting.start()) {
+    if !TRAY.with_borrow_mut(|tray| tray.model.count()) {
         return;
     }
     shell::spawn(async move {
         let counted = client.count_unread_in_inboxes().await;
-        let (changed, again) = TRAY.with_borrow_mut(|tray| {
-            let again = tray.counting.finish();
-            let changed = match counted {
-                Ok(unread) => tray.unread.replace(unread) != Some(unread),
-                Err(e) => {
-                    tracing::warn!(error = %e, "couldn't count the unread mail");
-                    false
-                }
-            };
-            (changed, again)
-        });
+        let counted = counted
+            .inspect_err(|e| tracing::warn!(error = %e, "couldn't count the unread mail"))
+            .ok();
+        let (changed, again) = TRAY.with_borrow_mut(|tray| tray.model.counted(counted));
         if changed {
             draw();
         }
@@ -125,40 +108,26 @@ fn count() {
     });
 }
 
-/// Shows the count, with the icon for it in the desktop's appearance, drawn off the main
-/// thread if it changed.
+/// Shows the count, with the icon for it drawn off the main thread if it changed.
 fn draw() {
-    let drawing = TRAY.with_borrow_mut(|tray| {
-        let (Some(item), Some(unread)) = (tray.item.clone(), tray.unread) else {
-            return None;
-        };
-        if !tray.drawing.start() {
-            return None;
-        }
-        let (svg, sizes) = platform::icon(tray.dark, unread);
-        let unchanged = tray.drawn.as_ref() == Some(&svg);
-        Some((item, unread, (!unchanged).then_some((svg, sizes))))
-    });
-    let Some((item, unread, svg)) = drawing else {
+    let drawing = TRAY.with_borrow_mut(|tray| Some((tray.item.clone()?, tray.model.draw()?)));
+    let Some((item, drawing)) = drawing else {
         return;
     };
     shell::spawn(async move {
-        let pixmaps = match svg {
+        let pixmaps = match drawing.icon.clone() {
             Some((svg, sizes)) => {
-                let drawn = svg.clone();
-                let pixmaps = crate::tasks::off_thread(move || {
-                    let pixmaps = pixmaps(&drawn, sizes).into_iter();
+                crate::tasks::off_thread(move || {
+                    let pixmaps = pixmaps(&svg, sizes).into_iter();
                     pixmaps.map(platform::icon_from).collect::<Vec<_>>()
                 })
-                .await;
-                TRAY.with_borrow_mut(|tray| tray.drawn = Some(svg));
-                pixmaps
+                .await
             }
             None => None,
         };
-        item.show(pixmaps, unread).await;
+        item.show(pixmaps, drawing.unread).await;
         // What changed meanwhile is drawn now, from what it is now.
-        if TRAY.with_borrow_mut(|tray| tray.drawing.finish()) {
+        if TRAY.with_borrow_mut(|tray| tray.model.shown(drawing)) {
             draw();
         }
     });

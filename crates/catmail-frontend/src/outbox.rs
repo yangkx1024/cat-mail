@@ -164,21 +164,13 @@ mod tests {
     use catmail_core::{IdentityId, Security, ServerConfig};
 
     use super::*;
+    use crate::fixtures;
 
+    /// Account 2's, sent as identity 3.
     fn entry(status: OutboxStatus) -> OutboxEntry {
         OutboxEntry {
-            id: OutboxId(1),
-            account_id: AccountId(2),
             identity: IdentityId(3),
-            draft_id: None,
-            subject: String::new(),
-            recipients: Vec::new(),
-            message_id: String::new(),
-            status,
-            attempts: 0,
-            next_attempt_at: None,
-            last_error: None,
-            created_at: 0,
+            ..fixtures::outbox_entry(1, 2, status)
         }
     }
 

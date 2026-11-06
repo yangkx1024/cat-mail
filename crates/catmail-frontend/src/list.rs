@@ -1,6 +1,9 @@
 //! The middle pane's rows apart from how they look: what a source lists and how it is
 //! read a page at a time, the rows grouped by day, where the selection goes when they
-//! are read again, which messages a check menu takes, and what a row says.
+//! are read again, which messages a check menu takes, and what a row says. The list's
+//! reads and the lines it shows are [`ListModel`]'s and [`Listing`]'s.
+
+mod model;
 
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -15,6 +18,10 @@ use jiff::civil::Date;
 
 use crate::format::{self, Calendar};
 use crate::mailbox::Source;
+
+pub use model::{
+    Fetch, Line, LineKey, ListModel, Listing, Loaded, Rows, Select, ServerSearch, Typed,
+};
 
 /// Rows read at a time.
 pub const PAGE: u32 = 200;
@@ -78,7 +85,7 @@ impl Row {
 /// Reads `limit` rows of `source`, after `after`; and whether there may be more.
 /// `found_on_server` are the search results the servers found that local search can't
 /// (see `MailClient::search_server`).
-pub async fn fetch(
+pub(crate) async fn fetch(
     client: &MailClient,
     source: &Source,
     found_on_server: &[MessageId],
@@ -115,20 +122,20 @@ pub async fn fetch(
 
 /// A run of rows from the same day, shown under its heading.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Day {
-    pub day: Option<Date>,
-    pub label: String,
+pub(crate) struct Day {
+    day: Option<Date>,
+    label: String,
     /// Its first row, counted top to bottom.
-    pub start: usize,
-    pub len: usize,
+    start: usize,
+    len: usize,
 }
 
 /// The rows grouped by day: the list's sections.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct Days(Vec<Day>);
+pub(crate) struct Days(Vec<Day>);
 
 impl Days {
-    pub fn new(rows: &[Row]) -> Self {
+    fn new(rows: &[Row]) -> Self {
         let mut days = Self::default();
         days.extend(rows, 0);
         days
@@ -137,7 +144,7 @@ impl Days {
     /// Groups `rows[from..]`, the rows after those already grouped. The rows are newest
     /// first, so a day is one run; if they weren't, a day would just get a heading more
     /// than once.
-    pub fn extend(&mut self, rows: &[Row], from: usize) {
+    fn extend(&mut self, rows: &[Row], from: usize) {
         let calendar = Calendar::now();
         for (ix, row) in rows.iter().enumerate().skip(from) {
             let day = calendar.day(row.date());
@@ -153,22 +160,18 @@ impl Days {
         }
     }
 
-    pub fn len(&self) -> usize {
-        self.0.len()
+    fn get(&self, ix: usize) -> Option<&Day> {
+        self.0.get(ix)
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &Day> {
+    fn iter(&self) -> impl Iterator<Item = &Day> {
         self.0.iter()
     }
 }
 
 /// Where the selection goes when the rows are replaced.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Reselect {
+enum Reselect {
     /// The selected row, at its index among the new rows; nothing if nothing was
     /// selected. `removing` is still waited for: the row is still there (a page read
     /// before the change committed, or the change failed).
@@ -186,7 +189,7 @@ pub enum Reselect {
 /// `selected` is the selected row's index and identity in `before`, the rows replaced,
 /// `removing` the message the user moved or deleted (the selection moves on to the next
 /// row once it is gone).
-pub fn reselect(
+fn reselect(
     selected: Option<(usize, RowId)>,
     removing: Option<MessageId>,
     before: &[Row],
@@ -231,7 +234,7 @@ pub fn reselect(
 /// one message, the archive's read still finding it doesn't end the wait for the delete.
 /// The list numbers its reads of the rows shown (not of more pages) from 1.
 #[derive(Debug, Default)]
-pub struct Removal {
+pub(crate) struct Removal {
     removing: Option<MessageId>,
     /// Removals asked for so far: the latest is `removing`'s.
     count: u64,
@@ -285,19 +288,18 @@ impl Removal {
         }
     }
 
-    /// Where the selection goes as the rows are replaced ([`reselect`]), still waiting
-    /// while the message is listed.
-    pub fn reselect(
-        &mut self,
-        selected: Option<(usize, RowId)>,
-        before: &[Row],
-        rows: &[Row],
-    ) -> Reselect {
-        let next = reselect(selected, self.removing.take(), before, rows);
-        if let Reselect::Keep { removing, .. } = next {
-            self.removing = removing;
+    /// Where the selection goes as `before` are replaced by `rows`, `selected` selected
+    /// ([`reselect`]), still waiting while the message is listed.
+    pub fn reselect(&mut self, selected: Option<RowId>, before: &[Row], rows: &[Row]) -> Select {
+        let at = selected.and_then(|id| before.iter().position(|r| r.id() == id));
+        match reselect(at.zip(selected), self.removing.take(), before, rows) {
+            Reselect::Keep { removing, .. } => {
+                self.removing = removing;
+                Select::Keep
+            }
+            Reselect::Next(ix) => Select::Open(rows[ix].id()),
+            Reselect::Gone => Select::Clear,
         }
-        next
     }
 
     /// Nothing is waited for: another source is shown.
@@ -307,7 +309,8 @@ impl Removal {
     }
 
     /// Whether a message is waited for to leave.
-    pub fn is_waiting(&self) -> bool {
+    #[cfg(test)]
+    fn is_waiting(&self) -> bool {
         self.removing.is_some()
     }
 }
@@ -318,7 +321,7 @@ impl Removal {
 /// or a row the user selects meanwhile, ends the wait ([`Reveal::forget`]). Reads are
 /// numbered as for [`Removal`].
 #[derive(Debug, Default)]
-pub struct Reveal(Option<(MessageId, u64)>);
+pub(crate) struct Reveal(Option<(MessageId, u64)>);
 
 impl Reveal {
     /// Waits for `id`, which the read numbered `next_read` (and any later) should have.
@@ -502,36 +505,20 @@ pub fn initial(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use catmail_core::{AccountId, Address};
+    use catmail_core::Address;
 
     use super::*;
+    use crate::fixtures;
 
     fn summary(id: i64, date: Option<i64>) -> MessageSummary {
         MessageSummary {
-            id: MessageId(id),
-            account_id: AccountId(1),
-            folder_id: FolderId(1),
-            subject: None,
-            from: Vec::new(),
-            to: Vec::new(),
-            cc: Vec::new(),
             date,
-            snippet: None,
-            flags: Flags::empty(),
-            has_attachments: false,
-            labels: Vec::new(),
+            ..fixtures::message(id, 1, 1)
         }
     }
 
-    /// Midday UTC: the same calendar day in nearly every time zone the test runs in.
-    fn message(id: i64, date: Option<&str>) -> Row {
-        let date = date.map(|d| {
-            format!("{d}T12:00:00Z")
-                .parse::<jiff::Timestamp>()
-                .unwrap()
-                .as_second()
-        });
-        Row::Message(summary(id, date))
+    fn message(id: i64, day: Option<&str>) -> Row {
+        Row::Message(summary(id, day.map(fixtures::midday)))
     }
 
     #[test]
@@ -598,7 +585,7 @@ mod tests {
     #[test]
     fn a_removal_waits_until_a_read_after_the_change() {
         let rows = |ids: &[i64]| -> Vec<Row> { ids.iter().map(|&id| message(id, None)).collect() };
-        let selected = Some((1, RowId::Message(MessageId(2))));
+        let selected = Some(RowId::Message(MessageId(2)));
         let mut removal = Removal::default();
         let first = removal.expect(MessageId(2));
         // A read in flight, started before the change was made: it says nothing.
@@ -611,7 +598,7 @@ mod tests {
         let rows_now = rows(&[1, 3]);
         assert_eq!(
             removal.reselect(selected, &rows(&[1, 2, 3]), &rows_now),
-            Reselect::Gone
+            Select::Clear
         );
 
         // Archived, then deleted: the archive settling doesn't end the wait for the delete.
@@ -622,15 +609,12 @@ mod tests {
         assert!(removal.is_waiting());
         assert_eq!(
             removal.reselect(selected, &rows(&[1, 2, 3]), &rows(&[1, 2, 3])),
-            Reselect::Keep {
-                ix: Some(1),
-                removing: Some(MessageId(2))
-            }
+            Select::Keep
         );
         assert!(removal.is_waiting(), "still listed: still waited for");
         assert_eq!(
             removal.reselect(selected, &rows(&[1, 2, 3]), &rows(&[1, 3])),
-            Reselect::Next(1)
+            Select::Open(RowId::Message(MessageId(3)))
         );
         // Settling once it has gone does nothing.
         assert!(!removal.settled(delete, true, 4));
@@ -663,7 +647,7 @@ mod tests {
                 ("No date".to_owned(), 3, 2),
             ]
         );
-        assert!(Days::new(&[]).is_empty());
+        assert!(Days::new(&[]).get(0).is_none());
     }
 
     #[test]

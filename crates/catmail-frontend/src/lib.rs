@@ -14,6 +14,8 @@
 pub mod accounts;
 pub mod commands;
 pub mod composer;
+#[cfg(test)]
+mod fixtures;
 pub mod folders;
 pub mod format;
 pub mod html;

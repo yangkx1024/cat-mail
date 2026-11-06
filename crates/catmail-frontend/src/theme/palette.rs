@@ -13,7 +13,6 @@ pub struct Rgb {
 
 impl Rgb {
     pub const BLACK: Rgb = Rgb::new(0, 0, 0);
-    #[cfg(test)]
     pub const WHITE: Rgb = Rgb::new(0xff, 0xff, 0xff);
 
     pub const fn new(r: u8, g: u8, b: u8) -> Self {
@@ -30,11 +29,16 @@ impl Rgb {
     /// hex digits per channel. A trailing alpha (`#rrggbbaa`) is ignored: terminals
     /// draw the scheme opaque.
     pub fn parse(s: &str) -> Option<Self> {
+        Self::parse_with_alpha(s).map(|(rgb, _)| rgb)
+    }
+
+    /// As [`parse`](Self::parse), with the trailing alpha if there is one.
+    pub(super) fn parse_with_alpha(s: &str) -> Option<(Self, Option<u8>)> {
         let s = s.trim();
         if let Some(x11) = s.strip_prefix("rgb:") {
             let mut channels = x11.split('/').map(x11_channel);
             let rgb = Self::new(channels.next()??, channels.next()??, channels.next()??);
-            return channels.next().is_none().then_some(rgb);
+            return channels.next().is_none().then_some((rgb, None));
         }
         let hex = s
             .strip_prefix('#')
@@ -48,9 +52,10 @@ impl Rgb {
         match hex.len() {
             3 => {
                 let nibble = |i: usize| u8::from_str_radix(&hex[i..=i], 16).ok().map(|n| n * 17);
-                Some(Self::new(nibble(0)?, nibble(1)?, nibble(2)?))
+                Some((Self::new(nibble(0)?, nibble(1)?, nibble(2)?), None))
             }
-            6 | 8 => Some(Self::new(byte(0)?, byte(2)?, byte(4)?)),
+            6 => Some((Self::new(byte(0)?, byte(2)?, byte(4)?), None)),
+            8 => Some((Self::new(byte(0)?, byte(2)?, byte(4)?), Some(byte(6)?))),
             _ => None,
         }
     }

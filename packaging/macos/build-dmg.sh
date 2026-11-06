@@ -131,7 +131,7 @@ mkdir -p "$iconset"
 source_viewbox='width="512" height="512" viewBox="0 0 512 512"'
 grid_viewbox='width="1024" height="1024" viewBox="-42.2524 -42.2524 596.5049 596.5049"'
 icon_svg=$out/catmail-icon.svg
-sed "1s/$source_viewbox/$grid_viewbox/" "$repo/crates/catmail-gui/assets/app-icon/catmail-light.svg" \
+sed "1s/$source_viewbox/$grid_viewbox/" "$repo/crates/catmail-frontend/assets/app-icon/catmail-light.svg" \
   > "$icon_svg"
 grep -qF "$grid_viewbox" "$icon_svg" || die "catmail-light.svg no longer starts with $source_viewbox"
 for size in 16 32 128 256 512; do

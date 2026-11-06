@@ -1,8 +1,9 @@
 //! The middle pane: what the selected place lists, or search results, newest first under a
 //! heading for each day; a row on one line while nothing is open, the subject under the
 //! sender while the reading pane is; the messages checked for a command on them all. What a
-//! source lists, the days, where the selection goes and what a row says are
-//! `catmail_frontend::list`'s.
+//! source lists, the days and lines, the reads and where the selection goes after them, and
+//! what a row says are `catmail_frontend::list`'s (`Listing`, `ListModel`); here they are
+//! read, kept in nsh's signals and drawn.
 
 mod rows;
 
@@ -10,14 +11,12 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use catmail_core::{
-    Draft, Flags, FolderId, MessageCursor, MessageId, MessageSummary, OutboxEntry, SearchQuery,
-};
+use catmail_core::{AccountId, Draft, Flags, FolderId, MessageId, MessageSummary, OutboxEntry};
 use catmail_frontend::commands::MessageCommand;
 use catmail_frontend::composer::ComposeFrom;
 use catmail_frontend::list::{
-    self, Check, Days, PAGE, Removal, Reselect, Reveal, Row, RowId, SEARCH_DELAY,
-    SERVER_SEARCH_DELAY,
+    self, Check, Fetch, ListModel, Listing, Loaded, Row, RowId, Rows, SEARCH_DELAY,
+    SERVER_SEARCH_DELAY, Select, ServerSearch,
 };
 use catmail_frontend::mailbox::{self, Source};
 use nsh_base::theme;
@@ -38,57 +37,6 @@ use crate::toast::report;
 use rows::item;
 pub use rows::{avatar_color, user_label_names};
 
-/// What the list shows: the rows, grouped by day, and what a row of them shows besides.
-#[derive(Clone, Default)]
-pub struct Rows {
-    pub source: Option<Source>,
-    pub rows: Vec<Row>,
-    days: Days,
-    /// The headings and the rows, as the list lays them out.
-    items: Rc<[Item]>,
-    has_more: bool,
-    /// A page is being read.
-    loading: bool,
-}
-
-/// A line of the list: a day's heading or one of its rows.
-#[derive(Debug, Clone, PartialEq)]
-enum Item {
-    Day(String),
-    Row(Row),
-}
-
-impl Item {
-    /// Its identity, across reads.
-    fn key(&self, ix: usize) -> ItemKey {
-        match self {
-            // A day can head two runs, when the rows aren't by date.
-            Item::Day(_) => ItemKey::Day(ix),
-            Item::Row(row) => ItemKey::Row(row.id()),
-        }
-    }
-}
-
-#[derive(Hash)]
-enum ItemKey {
-    Day(usize),
-    Row(RowId),
-}
-
-fn items(rows: &[Row], days: &Days) -> Rc<[Item]> {
-    let mut items = Vec::with_capacity(rows.len() + days.len());
-    for day in days.iter() {
-        items.push(Item::Day(day.label.clone()));
-        items.extend(
-            rows[day.start..day.start + day.len]
-                .iter()
-                .cloned()
-                .map(Item::Row),
-        );
-    }
-    items.into()
-}
-
 /// The row the reading pane shows. Its index changes as rows come and go; it doesn't.
 #[derive(Clone, Default)]
 pub struct Selected(pub Option<RowId>);
@@ -97,6 +45,10 @@ pub struct Selected(pub Option<RowId>);
 /// the reader shows. Always among the rows.
 #[derive(Clone, Default)]
 pub struct Checked(pub HashSet<MessageId>);
+
+/// A page is being read. Apart from the [`Listing`]: the rows don't change with it.
+#[derive(Clone, Copy, Default, PartialEq)]
+struct Loading(bool);
 
 /// What the search field holds.
 #[derive(Clone, Default)]
@@ -107,35 +59,26 @@ struct SearchText(String);
 #[derive(Clone, Default)]
 struct LabelNames(HashMap<FolderId, String>);
 
-/// The reads of the list: which source they are for, and what waits on them. Not
-/// reactive.
+/// The reads of the list, and the row `CATMAIL_GUI_OPEN` opens. Not reactive.
 #[derive(Default)]
-struct Loads {
-    /// Bumped when the source changes, so rows read for the one before are dropped.
-    generation: u64,
-    /// The engine reported a change while a page was being read: refresh after it.
-    stale: bool,
-    /// Search results the servers found that local search can't, by their text: read
-    /// with every page of the results.
-    found_on_server: Rc<[MessageId]>,
-    /// Bumped by every key typed in the search field: a pause searches.
-    typed: u64,
+struct ListState {
+    model: ListModel,
     /// `CATMAIL_GUI_OPEN` opened its row already.
     opened_from_env: bool,
-    /// Reads of the rows shown started so far (not of more pages).
-    reads: u64,
-    /// The message the user moved or deleted: once it is gone while still selected, the
-    /// next row still there opens.
-    removal: Removal,
-    /// The message a notification was about, to open once the rows have it.
-    reveal: Reveal,
 }
 
 #[derive(Clone, Default)]
-struct LoadState(Rc<RefCell<Loads>>);
+struct State(Rc<RefCell<ListState>>);
 
-fn loads() -> Rc<RefCell<Loads>> {
-    global::<LoadState>().with_untracked(|l| l.0.clone())
+/// `f` with the list's state.
+fn state<T>(f: impl FnOnce(&mut ListState) -> T) -> T {
+    let state = global::<State>().with_untracked(|s| s.0.clone());
+    f(&mut state.borrow_mut())
+}
+
+/// `f` with the reads, and the listing they are of. Untracked.
+fn reads<T>(f: impl FnOnce(&mut ListModel, &Listing) -> T) -> T {
+    global::<Listing>().with_untracked(|listing| state(|s| f(&mut s.model, listing)))
 }
 
 /// The list's handle, for scrolling it.
@@ -162,200 +105,122 @@ pub fn reading() -> bool {
 
 /// Shows `source` from the top, or nothing.
 pub fn show(source: Option<Source>) {
-    let generation = {
-        let loads = loads();
-        let mut loads = loads.borrow_mut();
-        loads.generation += 1;
-        loads.stale = false;
-        loads.found_on_server = Rc::new([]);
-        loads.removal.clear();
-        loads.reveal.forget();
-        loads.generation
-    };
-    if let Some(Source::Search(text)) = &source {
-        search_server(text.clone(), generation);
+    let (listing, fetch) = state(|s| s.model.show(source));
+    if let Some(search) = state(|s| s.model.server_search(&listing)) {
+        search_server(search);
     }
-    global::<Rows>().set(Rows {
-        source,
-        ..Rows::default()
-    });
+    global::<Listing>().set(listing);
+    set_shown_in();
     global::<Selected>().set(Selected(None));
     global::<Checked>().set(Checked::default());
     if let Some(list) = global::<ListRef>().with_untracked(|r| r.0) {
         list.scroll_to_index(0, Percentage(0.0), px(0.0), false);
     }
-    load(Load::Replace(PAGE));
+    read(fetch);
 }
 
-/// Asks the servers about `text` once the local results showed for
-/// [`SERVER_SEARCH_DELAY`], and reads the results again with what they found, if
-/// anything. Failures leave the local results alone; they are only logged.
-fn search_server(text: String, generation: u64) {
+/// Asks the servers once the local results showed for [`SERVER_SEARCH_DELAY`], and reads
+/// the results again with what they found, if anything. Failures leave the local results
+/// alone; they are only logged.
+fn search_server(search: ServerSearch) {
     in_view(async move {
         timer(SERVER_SEARCH_DELAY).await;
-        if loads().borrow().generation != generation {
+        if !state(|s| s.model.is_shown(&search)) {
             return;
         }
         // The engine logs what each server said; this is what kept it from asking.
-        let found = match client().search_server(SearchQuery::new(text)).await {
+        let found = match search.run(&client()).await {
             Ok(found) => found,
             Err(e) => {
                 tracing::warn!(error = %e, "couldn't search the servers");
                 return;
             }
         };
-        let loads = loads();
-        if found.is_empty() || loads.borrow().generation != generation {
-            return;
-        }
-        loads.borrow_mut().found_on_server = found.into();
-        refresh();
+        read(reads(|model, listing| {
+            model.found_on_server(&search, found, listing)
+        }));
     });
 }
 
 /// Reads the rows shown again (after the engine reported a change), keeping the selected
-/// row selected. During a sync changes arrive faster than a page loads, so they are
-/// coalesced: at most one read runs, and one more follows if needed.
+/// row selected; one more read follows one running (`ListModel::refresh`).
 pub fn refresh() {
-    if global::<Rows>().with_untracked(|r| r.loading) {
-        loads().borrow_mut().stale = true;
-        return;
-    }
-    let shown = global::<Rows>().with_untracked(|r| r.rows.len()) as u32;
-    load(Load::Replace(shown.max(PAGE)));
+    let fetch = reads(|model, listing| model.refresh(listing));
+    read(fetch);
 }
 
-enum Load {
-    /// The first `n` rows, replacing what is shown.
-    Replace(u32),
-    /// The next page, after the last row shown.
-    After(MessageCursor),
+fn load_more() {
+    let fetch = reads(|model, listing| model.more(listing));
+    read(fetch);
 }
 
-fn load(what: Load) {
-    let Some(source) = global::<Rows>().with_untracked(|r| r.source.clone()) else {
+/// Runs `fetch`, if a read is to start, and shows what it brings.
+fn read(fetch: Option<Fetch>) {
+    show_loading();
+    let Some(fetch) = fetch else {
         return;
     };
-    let (limit, after) = match what {
-        Load::Replace(n) => (n, None),
-        Load::After(cursor) => (PAGE, Some(cursor)),
-    };
-    let (generation, found_on_server, read) = {
-        let loads = loads();
-        let mut loads = loads.borrow_mut();
-        if after.is_none() {
-            loads.reads += 1;
-        }
-        (loads.generation, loads.found_on_server.clone(), loads.reads)
-    };
-    global::<Rows>().update(|r| r.loading = true);
     in_view(async move {
-        let result = list::fetch(&client(), &source, &found_on_server, limit, after).await;
-        if loads().borrow().generation != generation {
-            return; // Another source is shown.
+        let (rows, error) = match fetch.run(&client()).await {
+            Ok(rows) => (Some(rows), None),
+            Err(e) => (None, Some(e)),
+        };
+        let selected = global::<Selected>().with_untracked(|s| s.0);
+        let loaded = global::<Checked>().with_untracked(|checked| {
+            reads(|model, listing| model.loaded(&fetch, rows, listing, selected, &checked.0))
+        });
+        // Another source is shown.
+        let Some(loaded) = loaded else {
+            return;
+        };
+        show_loading();
+        if let Some(e) = error {
+            report("Couldn't load the list", e);
         }
-        match result {
-            Ok((rows, more)) if after.is_some() => global::<Rows>().update(|shown| {
-                // The page starts after the last row shown, whatever came or went above
-                // it since; the refresh such a change brings updates those.
-                let from = shown.rows.len();
-                shown.rows.extend(rows);
-                shown.days.extend(&shown.rows, from);
-                shown.items = items(&shown.rows, &shown.days);
-                shown.has_more = more;
-                shown.loading = false;
-            }),
-            Ok((rows, more)) => {
-                loads().borrow_mut().removal.read(read, &rows);
-                replace(rows, more);
-                select_revealed(read);
-            }
-            Err(e) => {
-                global::<Rows>().update(|r| r.loading = false);
-                report("Couldn't load the list", e);
-            }
-        }
-        if std::mem::take(&mut loads().borrow_mut().stale) {
-            refresh();
-        }
+        show_loaded(loaded);
     });
 }
 
-/// Puts the new rows in, keeping the selected row selected by its identity.
-fn replace(rows: Vec<Row>, more: bool) {
-    let shown = global::<Rows>();
-    let unchanged =
-        shown.with_untracked(|r| !rows.is_empty() && r.rows == rows && r.has_more == more);
-    if unchanged {
-        // A sync's events often bring nothing this list shows.
-        shown.update(|r| r.loading = false);
-        return;
+fn show_loading() {
+    let reading = Loading(state(|s| s.model.is_reading()));
+    if global::<Loading>().get_untracked() != reading {
+        global::<Loading>().set(reading);
     }
-    let selected = global::<Selected>().with_untracked(|s| s.0);
-    let next = shown.with_untracked(|r| {
-        let at = selected.and_then(|id| r.rows.iter().position(|row| row.id() == id));
-        loads()
-            .borrow_mut()
-            .removal
-            .reselect(at.zip(selected), &r.rows, &rows)
-    });
-    let next_row = match next {
-        Reselect::Next(ix) => rows.get(ix).map(Row::id),
-        _ => None,
-    };
-    // Those gone are no longer checked: moved, deleted, or expunged on the server.
-    let listed: HashSet<_> = rows.iter().filter_map(Row::message).map(|m| m.id).collect();
-    let checked = global::<Checked>();
-    if checked.with_untracked(|c| !c.0.is_subset(&listed)) {
-        checked.update(|c| c.0.retain(|id| listed.contains(id)));
+}
+
+fn show_loaded(loaded: Loaded) {
+    if let Some(checked) = loaded.checked {
+        global::<Checked>().set(Checked(checked));
     }
-    let days = Days::new(&rows);
-    shown.update(|r| {
-        r.items = items(&rows, &days);
-        r.rows = rows;
-        r.days = days;
-        r.has_more = more;
-        r.loading = false;
-    });
-    match (next, next_row) {
-        (Reselect::Keep { .. }, _) => {}
-        // The user moved or deleted it: on to the next, as if the user opened that.
-        (Reselect::Next(_), Some(row)) => open(row),
-        // Gone on its own: expunged, sent, a new UIDVALIDITY.
-        _ => global::<Selected>().set(Selected(None)),
+    let replaced = matches!(loaded.rows, Some(Rows::Replace(..)));
+    if let Some(rows) = loaded.rows {
+        global::<Listing>().update(|listing| rows.apply(listing));
     }
-    open_from_env();
+    match loaded.select {
+        Select::Keep => {}
+        Select::Open(row) => open(row),
+        Select::Clear => global::<Selected>().set(Selected(None)),
+    }
+    if replaced {
+        open_from_env();
+    }
+    if loaded.again {
+        refresh();
+    }
 }
 
 /// For looking at the reading pane without a mouse (screenshots): the row
 /// at index `CATMAIL_GUI_OPEN` of the first rows read opens.
 fn open_from_env() {
-    if std::mem::replace(&mut loads().borrow_mut().opened_from_env, true) {
+    if state(|s| std::mem::replace(&mut s.opened_from_env, true)) {
         return;
     }
     let row = std::env::var("CATMAIL_GUI_OPEN")
         .ok()
         .and_then(|ix| ix.parse::<usize>().ok())
-        .and_then(|ix| global::<Rows>().with_untracked(|r| r.rows.get(ix).map(Row::id)));
+        .and_then(|ix| global::<Listing>().with_untracked(|l| l.rows().get(ix).map(Row::id)));
     if row.is_some() {
         global::<Selected>().set(Selected(row));
-    }
-}
-
-fn load_more() {
-    let after = global::<Rows>().with_untracked(|r| {
-        // Only messages have more pages: of folders, the inboxes and search results.
-        (r.has_more && !r.loading)
-            .then(|| {
-                r.rows
-                    .last()
-                    .and_then(Row::message)
-                    .map(MessageSummary::cursor)
-            })
-            .flatten()
-    });
-    if let Some(after) = after {
-        load(Load::After(after));
     }
 }
 
@@ -364,29 +229,12 @@ fn load_more() {
 /// next of them doesn't, if another source is shown first, or if the user opens a row
 /// meanwhile.
 pub fn reveal(id: MessageId) {
-    let reads = {
-        let loads = loads();
-        let mut loads = loads.borrow_mut();
-        // The next read starts after now, once one in flight is done.
-        let reads = loads.reads;
-        loads.reveal.ask(id, reads + 1);
-        reads
-    };
-    select_revealed(reads);
-    if loads().borrow().reveal.is_waiting() {
-        refresh();
-    }
-}
-
-/// Opens the message [`reveal`] asked for if it is among the rows, which read number
-/// `read` brought; gives up if they don't have it and that read should have.
-fn select_revealed(read: u64) {
-    let row = global::<Rows>().with_untracked(|r| {
-        let at = loads().borrow_mut().reveal.read(read, &r.rows)?;
-        Some(r.rows[at].id())
-    });
+    let (row, again) = reads(|model, listing| model.reveal(id, listing));
     if let Some(row) = row {
         open(row);
+    }
+    if again {
+        refresh();
     }
 }
 
@@ -395,7 +243,7 @@ fn select_revealed(read: u64) {
 /// stays as it is.
 pub fn open(row: RowId) {
     // The user's choice wins over a notification clicked before.
-    loads().borrow_mut().reveal.forget();
+    state(|s| s.model.opened());
     global::<Selected>().set(Selected(Some(row)));
     let RowId::Message(id) = row else {
         return;
@@ -403,19 +251,13 @@ pub fn open(row: RowId) {
     if crate::shell::settings().mark_read_on_open
         && message(id).is_some_and(|m| !m.flags.contains(Flags::SEEN))
     {
-        commands::set_flags(vec![id], Flags::SEEN, Flags::empty());
+        commands::run_change(catmail_frontend::commands::mark_read(id));
     }
 }
 
 /// The message listed with `id`. Tracked.
 pub fn message(id: MessageId) -> Option<MessageSummary> {
-    global::<Rows>().with(|r| {
-        r.rows
-            .iter()
-            .filter_map(Row::message)
-            .find(|m| m.id == id)
-            .cloned()
-    })
+    global::<Listing>().with(|l| l.message(id).cloned())
 }
 
 /// The selected row's identity. Tracked.
@@ -445,7 +287,7 @@ pub fn selected_outbox() -> Option<OutboxEntry> {
 /// The row selected, as `pick` takes it. Tracked.
 fn selected_row<T>(pick: impl FnOnce(&Row) -> Option<T>) -> Option<T> {
     let id = global::<Selected>().with(|s| s.0)?;
-    global::<Rows>().with(|r| r.rows.iter().find(|row| row.id() == id).and_then(pick))
+    global::<Listing>().with(|l| l.row(id).and_then(pick))
 }
 
 /// A draft opens in its window: on Enter, or a second click on its row.
@@ -462,28 +304,14 @@ pub fn selected_message() -> Option<MessageSummary> {
 
 /// The messages checked, top to bottom. Tracked.
 pub fn checked_messages() -> Vec<MessageSummary> {
-    let checked = global::<Checked>().with(|c| c.0.clone());
-    if checked.is_empty() {
-        return Vec::new();
-    }
-    global::<Rows>().with(|r| {
-        r.rows
-            .iter()
-            .filter_map(Row::message)
-            .filter(|m| checked.contains(&m.id))
-            .cloned()
-            .collect()
-    })
+    global::<Checked>().with(|c| global::<Listing>().with(|l| l.checked(&c.0)))
 }
 
 /// What a key acts on: the messages checked, or else the selected one.
 fn keyed() -> Vec<MessageSummary> {
-    let checked = untracked(checked_messages);
-    if checked.is_empty() {
-        untracked(selected_message).into_iter().collect()
-    } else {
-        checked
-    }
+    let selected = global::<Selected>().with_untracked(|s| s.0);
+    global::<Checked>()
+        .with_untracked(|c| global::<Listing>().with_untracked(|l| l.keyed(&c.0, selected)))
 }
 
 /// Unchecks the messages moved or deleted: those still listed (on Gmail, one moved to a
@@ -495,70 +323,70 @@ pub fn uncheck(ids: &[MessageId]) {
     }
 }
 
-/// Whether the list shows search results.
-pub fn is_searching() -> bool {
-    global::<Rows>().with_untracked(|r| matches!(r.source, Some(Source::Search(_))))
+/// What the list shows. Untracked.
+pub fn source() -> Option<Source> {
+    global::<Listing>().with_untracked(|l| l.source().cloned())
 }
 
-/// Selects the next row once `id`, the selected message, goes away. Returns the
-/// removal's number, for [`removal_settled`].
-pub fn expect_removal(id: MessageId) -> u64 {
-    loads().borrow_mut().removal.expect(id)
+/// `ids` are about to be moved or deleted: if the selected message is among them, the
+/// next row is selected once it goes away. Returns the removal's number, for
+/// [`removal_settled`].
+pub fn expect_removal(ids: &[MessageId]) -> Option<u64> {
+    let selected = global::<Selected>().with_untracked(|s| s.0);
+    state(|s| s.model.expect_removal(selected, ids))
 }
 
 /// The change behind `removal`, which may take the message out of the list, was made
-/// locally (`made`), or failed: the rows are read again, and say whether it left
-/// ([`Removal::settled`]).
+/// locally (`made`), or failed: the rows are read again, and say whether it left.
 pub fn removal_settled(removal: u64, made: bool) {
-    let again = {
-        let loads = loads();
-        let mut loads = loads.borrow_mut();
-        // A read in flight may have started before the change: the next one shows it.
-        let next_read = loads.reads + 1;
-        loads.removal.settled(removal, made, next_read)
-    };
-    if again {
+    if state(|s| s.model.removal_settled(removal, made)) {
         refresh();
     }
 }
 
 /// The accounts' user labels, by the name a row shows them by.
+/// Also where each account's messages are looked at ([`ShownIn`]).
 pub fn set_labels() {
-    let names: HashMap<_, _> = global::<Accounts>().with_untracked(|a| {
-        a.0.iter()
-            .flatten()
-            .flat_map(|entry| entry.folders.user_labels())
-            .collect()
+    let names: HashMap<_, _> = sidebar::with_accounts(|accounts| {
+        let labels = accounts
+            .iter()
+            .flat_map(|entry| entry.folders.user_labels());
+        labels.collect()
     });
     if global::<LabelNames>().with_untracked(|l| l.0 != names) {
         global::<LabelNames>().set(LabelNames(names));
+    }
+    set_shown_in();
+}
+
+/// Where the rows' messages are looked at, by account (`Source::shown_in_each`): the
+/// label a row needn't name. Worked out once for the source and the accounts, not by
+/// each row.
+#[derive(Clone, Default, PartialEq)]
+struct ShownIn(HashMap<AccountId, FolderId>);
+
+fn set_shown_in() {
+    let source = source();
+    let shown_in = match source {
+        Some(source) => sidebar::with_accounts(|a| source.shown_in_each(a)),
+        None => HashMap::new(),
+    };
+    if global::<ShownIn>().with_untracked(|s| s.0 != shown_in) {
+        global::<ShownIn>().set(ShownIn(shown_in));
     }
 }
 
 // --- Searching ----------------------------------------------------------------------
 
 /// The search field changed: a pause in typing searches, or with nothing typed shows
-/// the place selected again.
+/// the place selected again (`ListModel::paused`).
 fn typed(text: String) {
     global::<SearchText>().set(SearchText(text.clone()));
-    let typed = {
-        let loads = loads();
-        let mut loads = loads.borrow_mut();
-        loads.typed += 1;
-        loads.typed
-    };
+    let typed = state(|s| s.model.typed());
     in_view(async move {
         timer(SEARCH_DELAY).await;
-        if loads().borrow().typed != typed {
-            return;
-        }
-        let text = text.trim();
-        let source = if text.is_empty() {
-            global::<SelectedPlace>().with_untracked(|p| p.0.map(|p| p.source()))
-        } else {
-            Some(Source::Search(text.to_owned()))
-        };
-        if global::<Rows>().with_untracked(|r| r.source != source) {
+        let place = global::<SelectedPlace>().with_untracked(|p| p.0);
+        if let Some(source) = reads(|model, listing| model.paused(typed, &text, place, listing)) {
             show(source);
         }
     });
@@ -566,7 +394,7 @@ fn typed(text: String) {
 
 /// Leaving a search for a place: the place's rows, not the results.
 pub fn clear_search() {
-    loads().borrow_mut().typed += 1;
+    state(|s| s.model.typed());
     global::<SearchText>().set(SearchText::default());
 }
 
@@ -583,10 +411,8 @@ fn toggle_checked(id: MessageId) {
 /// Checks the messages listed that `which` takes, and only those: of a folder, those of
 /// the pages read.
 fn check(which: Check) {
-    let checked = global::<Rows>().with_untracked(|r| {
-        r.rows
-            .iter()
-            .filter_map(Row::message)
+    let checked = global::<Listing>().with_untracked(|l| {
+        l.messages()
             .filter(|m| which.takes(m.flags))
             .map(|m| m.id)
             .collect()
@@ -637,28 +463,17 @@ pub fn list_column() -> impl IntoElement {
         if selected.is_some() == before.is_some() {
             return;
         }
-        let row = selected.or(before);
-        let ix = global::<Rows>().with_untracked(|r| {
-            r.items
-                .iter()
-                .position(|item| matches!(item, Item::Row(row_) if Some(row_.id()) == row))
-        });
+        let ix = selected
+            .or(before)
+            .and_then(|row| global::<Listing>().with_untracked(|l| l.line_of(row)));
         if let Some(ix) = ix {
             list.scroll_to_index(ix as u32, Percentage(0.5), px(0.0), false);
         }
     });
     view().flex_1().min_w(px(0.0)).child(header()).child(
-        virtual_list(move || global::<Rows>().with(|r| r.items.len()), item)
+        virtual_list(move || global::<Listing>().with(Listing::len), item)
             .content_padding_x(px(12.0))
-            .keys(move || {
-                global::<Rows>().with(|r| {
-                    r.items
-                        .iter()
-                        .enumerate()
-                        .map(|(ix, item)| item.key(ix))
-                        .collect::<Vec<_>>()
-                })
-            })
+            .keys(move || global::<Listing>().with(Listing::keys))
             .on_load_more(load_more)
             .empty(
                 view()
@@ -668,12 +483,11 @@ pub fn list_column() -> impl IntoElement {
                     .p(px(24.0))
                     .child(
                         text(move || {
-                            let (source, loading) =
-                                global::<Rows>().with(|r| (r.source.clone(), r.loading));
                             // Nothing while the first page is on its way.
-                            if loading {
+                            if global::<Loading>().get().0 {
                                 String::new()
                             } else {
+                                let source = global::<Listing>().with(|l| l.source().cloned());
                                 list::empty_text(source.as_ref()).to_owned()
                             }
                         })
@@ -702,12 +516,10 @@ fn sync_button() -> impl IntoElement {
             spawn(finish_turn(angle));
         }
     });
-    let has_accounts =
-        move || global::<Accounts>().with(|a| a.0.as_ref().is_some_and(|a| !a.is_empty()));
     crate::buttons::icon_button(
         || Icon::ArrowPath,
         || "Sync now".to_owned(),
-        move || has_accounts() && !syncing.get(),
+        move || sidebar::has_accounts() && !syncing.get(),
         Size::Bar,
         sidebar::sync,
     )
@@ -733,10 +545,10 @@ async fn finish_turn(angle: AnimatedValue) {
 
 fn header() -> impl IntoElement {
     let title = computed(move || {
-        let source = global::<Rows>().with(|r| r.source.clone());
+        let source = global::<Listing>().with(|l| l.source().cloned());
         let place = global::<SelectedPlace>().with(|p| p.0);
         global::<Accounts>().with(|a| {
-            let accounts = a.0.as_deref().unwrap_or_default();
+            let accounts = a.list();
             (
                 mailbox::list_title(source.as_ref(), place, accounts),
                 mailbox::list_note(source.as_ref(), place, accounts),
@@ -744,7 +556,7 @@ fn header() -> impl IntoElement {
         })
     });
     let lists_messages =
-        move || global::<Rows>().with(|r| r.source.as_ref().is_some_and(Source::lists_messages));
+        move || global::<Listing>().with(|l| l.source().is_some_and(Source::lists_messages));
     let search = element_ref();
     global::<SearchRef>().set(SearchRef(Some(search)));
     view()
@@ -827,7 +639,7 @@ fn has_checked() -> bool {
 /// Checks every message listed, or none; its menu checks those read, flagged and so on.
 fn check_all() -> impl IntoElement {
     let counts = computed(move || {
-        let listed = global::<Rows>().with(|r| r.rows.iter().filter_map(Row::message).count());
+        let listed = global::<Listing>().with(|l| l.messages().count());
         let checked = global::<Checked>().with(|c| c.0.len());
         (listed, checked)
     });

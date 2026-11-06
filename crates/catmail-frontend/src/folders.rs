@@ -5,19 +5,11 @@ use catmail_core::{
     can_create_in, special_folder,
 };
 
-/// What a sidebar row draws, which each frontend maps to its own icon set: a folder's
-/// role, a label, any other folder, and the places that aren't folders.
+/// What a sidebar row draws, which the frontend maps to its icon set: a folder's role, a
+/// label, any other folder, and the places that aren't folders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FolderIcon {
-    Inbox,
-    Sent,
-    Archive,
-    All,
-    Important,
-    Flagged,
-    Junk,
-    Trash,
-    Drafts,
+    Role(FolderRole),
     Label,
     Folder,
     /// All Inboxes.
@@ -25,31 +17,22 @@ pub enum FolderIcon {
     Outbox,
 }
 
-/// What the sidebar adds to a role ([`FolderRole::label`] names it): its icon, and its
-/// place among the folders with a role, which come first under an account in this order
-/// whatever their names and nesting. Drafts has none: the sidebar's Drafts lists the
-/// drafts kept here, of which the server's Drafts folder holds copies.
-#[derive(Debug, Clone, Copy)]
-pub struct RoleInfo {
-    pub icon: FolderIcon,
-    pub order: Option<u8>,
-}
-
-impl RoleInfo {
-    pub fn of(role: FolderRole) -> Self {
-        let (icon, order) = match role {
-            FolderRole::Inbox => (FolderIcon::Inbox, Some(0)),
-            FolderRole::Sent => (FolderIcon::Sent, Some(1)),
-            FolderRole::Archive => (FolderIcon::Archive, Some(2)),
-            FolderRole::All => (FolderIcon::All, Some(3)),
-            FolderRole::Important => (FolderIcon::Important, Some(4)),
-            FolderRole::Flagged => (FolderIcon::Flagged, Some(5)),
-            FolderRole::Junk => (FolderIcon::Junk, Some(6)),
-            FolderRole::Trash => (FolderIcon::Trash, Some(7)),
-            FolderRole::Drafts => (FolderIcon::Drafts, None),
-        };
-        Self { icon, order }
-    }
+/// A role's place among the folders with a role, which come first under an account in
+/// this order whatever their names and nesting ([`FolderRole::label`] names them). Drafts
+/// has none: the sidebar's Drafts lists the drafts kept here, of which the server's Drafts
+/// folder holds copies.
+fn role_order(role: FolderRole) -> Option<u8> {
+    Some(match role {
+        FolderRole::Inbox => 0,
+        FolderRole::Sent => 1,
+        FolderRole::Archive => 2,
+        FolderRole::All => 3,
+        FolderRole::Important => 4,
+        FolderRole::Flagged => 5,
+        FolderRole::Junk => 6,
+        FolderRole::Trash => 7,
+        FolderRole::Drafts => return None,
+    })
 }
 
 /// The icon of a folder, a label or a hierarchy level the server didn't list (`None`).
@@ -58,7 +41,7 @@ pub fn icon(folder: Option<&Folder>) -> FolderIcon {
         Some(folder) if folder.is_user_label() => FolderIcon::Label,
         Some(Folder {
             role: Some(role), ..
-        }) => RoleInfo::of(*role).icon,
+        }) => FolderIcon::Role(*role),
         _ => FolderIcon::Folder,
     }
 }
@@ -69,7 +52,7 @@ pub struct AccountFolders {
     /// The account's folders as the engine lists them, which its rules about special
     /// folders apply to.
     folders: Vec<Folder>,
-    /// Folders with a role, in [`RoleInfo::order`], each with its own subfolders. On
+    /// Folders with a role, in [`role_order`], each with its own subfolders. On
     /// Gmail the system labels (INBOX, Sent, Important) are among them.
     pub roles: Vec<FolderNode>,
     /// The rest of the folders, as nested on the server.
@@ -92,7 +75,7 @@ impl AccountFolders {
         let mut others = folder_tree(&rest);
         let mut roles = Vec::new();
         take_roles(&mut others, &mut roles);
-        roles.sort_by_key(|node| node.role().and_then(|role| RoleInfo::of(role).order));
+        roles.sort_by_key(|node| node.role().and_then(role_order));
         // The Drafts folder itself is replaced by the drafts kept here; its subfolders
         // (rare) are ordinary folders.
         let mut kept = Vec::new();
@@ -319,41 +302,25 @@ fn folder_tree(folders: &[Folder]) -> Vec<FolderNode> {
 
 #[cfg(test)]
 mod tests {
-    use catmail_core::{AccountId, FolderId, FolderKind};
+    use catmail_core::{FolderId, FolderKind};
 
     use super::*;
+    use crate::fixtures;
 
+    /// Of account 1; only INBOX has a role.
     fn folder(id: i64, name: &str, delimiter: Option<char>) -> Folder {
         Folder {
-            id: FolderId(id),
-            account_id: AccountId(1),
-            name: name.into(),
             delimiter,
             role: (name == "INBOX").then_some(FolderRole::Inbox),
-            kind: FolderKind::Location,
-            listed: true,
-            selectable: true,
-            inferiors: true,
-            unread_count: 0,
-            total_count: 0,
-            last_synced_at: None,
+            ..fixtures::folder(id, 1, name)
         }
     }
 
     fn with_role(id: i64, name: &str, role: FolderRole) -> Folder {
         Folder {
-            id: FolderId(id),
-            account_id: AccountId(1),
-            name: name.into(),
             delimiter: Some('.'),
             role: Some(role),
-            kind: FolderKind::Location,
-            listed: true,
-            selectable: true,
-            inferiors: true,
-            unread_count: 0,
-            total_count: 0,
-            last_synced_at: None,
+            ..fixtures::folder(id, 1, name)
         }
     }
 
@@ -450,20 +417,10 @@ mod tests {
 
     /// A Gmail mailbox: All Mail, Trash and Spam are locations, the rest labels.
     fn gmail(id: i64, name: &str, role: Option<FolderRole>) -> Folder {
-        let location = matches!(
+        fixtures::on_gmail(Folder {
             role,
-            Some(FolderRole::All | FolderRole::Trash | FolderRole::Junk)
-        );
-        Folder {
-            delimiter: Some('/'),
-            role,
-            kind: if location {
-                FolderKind::Location
-            } else {
-                FolderKind::Label
-            },
             ..folder(id, name, Some('/'))
-        }
+        })
     }
 
     #[test]

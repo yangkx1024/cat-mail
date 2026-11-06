@@ -6,8 +6,8 @@ use std::rc::Rc;
 use catmail_frontend::folders::FolderIcon;
 use catmail_frontend::settings::{Appearance, TEXT_SIZES};
 use catmail_frontend::theme::{
-    IMPORT_HELP, IMPORTABLE_FORMATS, ImportCandidate, TerminalPalette, ThemeConfig, ThemeEntry,
-    file_name, import_title, read_import,
+    IMPORT_HELP, IMPORTABLE_FORMATS, ImportCandidate, Rgb, Rgba, Swatch, TerminalPalette,
+    ThemeEntry, file_name, import_title, read_import,
 };
 use nsh_base::theme;
 use nsh_core::Color;
@@ -233,29 +233,15 @@ impl PartialEq for Candidate {
 
 /// A color of the theme, for the card that pictures it: these are the theme's own
 /// colors, not the window's.
-fn swatch(config: &ThemeConfig, key: &str) -> Option<Hsla> {
-    config.color(key).and_then(Color::parse).map(Hsla::from)
+fn color(color: Rgba) -> Hsla {
+    let Rgb { r, g, b } = color.rgb;
+    Color::rgba(r, g, b, color.alpha).into()
 }
 
 /// A theme drawn small, in its own colors, with its name.
 fn theme_card(entry: ThemeEntry, dark: bool) -> AnyElement {
-    let config = &entry.config;
-    let background = swatch(config, "background").unwrap_or(hsla(0.0, 0.0, 1.0, 1.0));
-    let foreground = swatch(config, "foreground").unwrap_or(hsla(0.0, 0.0, 0.0, 1.0));
-    let primary = swatch(config, "primary.background").unwrap_or(foreground);
-    let color = |key: &str, fallback: Hsla| swatch(config, key).unwrap_or(fallback);
-    let sidebar = color("sidebar.background", background);
-    let border = color("border", foreground.opacity(0.15));
-    let muted = color("muted.foreground", foreground.opacity(0.6));
-    let selection = color("list.active.background", primary.opacity(0.15));
-    let hues = [
-        "danger.background",
-        "success.background",
-        "warning.background",
-    ]
-    .map(|key| color(key, primary))
-    .into_iter()
-    .chain([primary, color("info.background", primary)]);
+    let swatch = Swatch::of(&entry.config);
+    let hues = swatch.hues.map(color).into_iter();
     let name = entry.name().to_owned();
     let chosen = name.clone();
     let selected = move || {
@@ -278,13 +264,13 @@ fn theme_card(entry: ThemeEntry, dark: bool) -> AnyElement {
     let miniature = view()
         .flex_row()
         .h(px(64.0))
-        .bg(background)
+        .bg(color(swatch.background))
         .child(
             view()
                 .w(px(32.0))
-                .bg(sidebar)
+                .bg(color(swatch.sidebar))
                 .border_r_1()
-                .border_color(border),
+                .border_color(color(swatch.border)),
         )
         .child(
             view()
@@ -296,17 +282,23 @@ fn theme_card(entry: ThemeEntry, dark: bool) -> AnyElement {
                         .flex_row()
                         .items_center()
                         .gap(px(6.0))
-                        .child(view().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(primary))
-                        .child(line(55.0, foreground)),
+                        .child(
+                            view()
+                                .w(px(6.0))
+                                .h(px(6.0))
+                                .rounded(px(3.0))
+                                .bg(color(swatch.primary)),
+                        )
+                        .child(line(55.0, color(swatch.foreground))),
                 )
-                .child(view().pl(px(12.0)).child(line(40.0, muted)))
+                .child(view().pl(px(12.0)).child(line(40.0, color(swatch.muted))))
                 .child(
                     view()
                         .ml(px(12.0))
                         .h(px(12.0))
                         .w(relative(0.6))
                         .rounded(px(3.0))
-                        .bg(selection),
+                        .bg(color(swatch.selection)),
                 ),
         );
     let picked = name.clone();

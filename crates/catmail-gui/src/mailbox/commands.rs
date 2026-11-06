@@ -1,12 +1,11 @@
 //! The commands on messages: the same icon buttons over the message open, by the list's
 //! heading for the messages checked and on a row while hovered; what they do, which ones
 //! ask first, and "Move to" and "Labels" (their dialog is `picker.rs`). What they apply
-//! to and what they say are `catmail_frontend::commands`'.
+//! to, what they change and what they say are `catmail_frontend::commands`'; here they
+//! are run.
 
-use catmail_core::{AccountId, Flags, FolderId, MessageId, MessageSummary};
-use catmail_frontend::commands::{self, Applies, Deletion, MessageCommand, what};
-use catmail_frontend::folders::AccountFolders;
-use catmail_frontend::mailbox::AccountEntry;
+use catmail_core::{Flags, FolderId, MessageId, MessageSummary};
+use catmail_frontend::commands::{self, Applies, Change, Deletion, MessageCommand};
 
 use nsh_core::prelude::*;
 
@@ -16,29 +15,14 @@ use crate::form::confirmed;
 use crate::icons::Icon;
 use crate::mailbox::list;
 use crate::mailbox::picker::{Picker, Picking, open_picker};
-use crate::mailbox::sidebar::{self, Accounts, with_account, with_accounts};
+use crate::mailbox::sidebar::{Accounts, with_account, with_accounts};
 use crate::tasks::in_view;
 use crate::toast::{Level, notify, report};
-
-/// An account's folders, among `accounts`.
-pub fn folders_in<'a>(
-    accounts: &'a [AccountEntry],
-) -> impl Fn(AccountId) -> Option<&'a AccountFolders> + 'a {
-    move |id| {
-        accounts
-            .iter()
-            .find(|e| e.account.id == id)
-            .map(|e| &e.folders)
-    }
-}
 
 /// What the commands do to the messages, for their buttons. Tracked: the buttons follow
 /// the accounts' folders.
 pub fn applies(messages: &[MessageSummary]) -> Applies {
-    global::<Accounts>().with(|a| {
-        let accounts = a.0.as_deref().unwrap_or_default();
-        Applies::of(messages, folders_in(accounts))
-    })
+    global::<Accounts>().with(|a| Applies::of(messages, a.list()))
 }
 
 /// Runs `command` on the messages: from a key, a toolbar or a row.
@@ -47,95 +31,34 @@ pub fn run(command: MessageCommand, messages: Vec<MessageSummary>) {
         return;
     }
     match command {
-        MessageCommand::Archive => archive(&messages),
+        MessageCommand::Archive => {
+            run_change(with_accounts(|a| commands::archivable(&messages, a)));
+        }
         MessageCommand::Delete => delete(&messages),
         MessageCommand::Move => move_to_folder(messages),
-        MessageCommand::ToggleRead => toggle(&messages, Flags::SEEN),
-        MessageCommand::ToggleFlag => toggle(&messages, Flags::FLAGGED),
+        MessageCommand::ToggleRead => run_change(commands::toggled(&messages, Flags::SEEN)),
+        MessageCommand::ToggleFlag => run_change(commands::toggled(&messages, Flags::FLAGGED)),
     }
 }
 
-pub fn set_flags(ids: Vec<MessageId>, add: Flags, remove: Flags) {
+/// Makes `change`. If it may take the messages out of the list and the selected one goes,
+/// the next one is selected (`ListModel::expect_removal`); those dealt with are no longer
+/// checked.
+pub fn run_change(change: Change) {
+    if change.is_empty() {
+        return;
+    }
+    if change.unchecks() {
+        list::uncheck(&change.ids);
+    }
+    let removal = change
+        .may_remove()
+        .then(|| list::expect_removal(&change.ids))
+        .flatten();
     in_view(async move {
-        if let Err(e) = client().set_flags(ids, add, remove).await {
-            report("Couldn't change the message", e);
-        }
-    });
-}
-
-fn toggle(messages: &[MessageSummary], flag: Flags) {
-    let (add, remove) = commands::toggled(messages, flag);
-    set_flags(messages.iter().map(|m| m.id).collect(), add, remove);
-}
-
-fn archive(messages: &[MessageSummary]) {
-    let ids = with_accounts(|accounts| commands::archivable(messages, folders_in(accounts)));
-    if ids.is_empty() {
-        return;
-    }
-    let what = what(ids.len(), "archive the message", "archive the messages");
-    list::uncheck(&ids);
-    let call = {
-        let ids = ids.clone();
-        async move { client().archive_messages(ids).await }
-    };
-    change(ids, what, call);
-}
-
-/// The folder the listed message is looked at in: on Gmail, a label it leaves when moved.
-/// In All Inboxes, its account's INBOX; none for search results.
-fn shown_in(message: &MessageSummary) -> Option<FolderId> {
-    if list::is_searching() {
-        return None;
-    }
-    let shown = sidebar::shown_folders();
-    with_accounts(|accounts| {
-        let folders = folders_in(accounts)(message.account_id)?;
-        shown.into_iter().find(|&id| folders.get(id).is_some())
-    })
-}
-
-/// Moves those of the messages, all of one account, that moving to `to` changes.
-pub fn move_to(messages: &[MessageSummary], to: FolderId) {
-    let Some(first) = messages.first() else {
-        return;
-    };
-    let shown_in = shown_in(first);
-    let ids = with_accounts(|accounts| {
-        let account = commands::one_account(messages)?;
-        let folders = folders_in(accounts)(account)?;
-        Some(commands::movable(folders, messages, shown_in, to))
-    })
-    .unwrap_or_default();
-    if ids.is_empty() {
-        return;
-    }
-    let what = what(ids.len(), "move the message", "move the messages");
-    list::uncheck(&ids);
-    let call = {
-        let ids = ids.clone();
-        async move { client().move_messages(ids, shown_in, to).await }
-    };
-    change(ids, what, call);
-}
-
-/// Changes the messages with `call`, which may take them out of the list: if the
-/// selected one goes, the next one is selected (`list::expect_removal`).
-fn change(
-    ids: Vec<MessageId>,
-    what: &'static str,
-    call: impl Future<Output = catmail_core::Result<Vec<AccountId>>> + 'static,
-) {
-    // Only the selected message's removal is waited for: another's (a row's own command)
-    // must not take the place of one pending for it.
-    let removal = list::selected_message()
-        .map(|m| m.id)
-        .filter(|id| ids.contains(id))
-        .map(list::expect_removal);
-    in_view(async move {
-        let result = call.await;
+        let result = change.run(&client()).await;
         if let Err(e) = &result {
-            report(&format!("Couldn't {what}"), e);
+            report(&change.failure(), e);
         }
         if let Some(removal) = removal {
             list::removal_settled(removal, result.is_ok());
@@ -143,30 +66,26 @@ fn change(
     });
 }
 
+/// Moves those of the messages, all of one account, that moving to `to` changes.
+pub fn move_to(messages: &[MessageSummary], to: FolderId) {
+    let source = list::source();
+    run_change(with_accounts(|a| {
+        commands::movable(messages, a, source.as_ref(), to)
+    }));
+}
+
 /// Each to Trash, or for good from Trash or without one, as the engine will: one change.
 /// A message deleted for good can't be brought back, so that asks first.
 fn delete(messages: &[MessageSummary]) {
-    let Deletion { ids, mode, confirm } =
-        with_accounts(|accounts| commands::deletion(messages, folders_in(accounts)));
-    if ids.is_empty() {
-        return;
-    }
-    let delete_now = move || {
-        let what = what(ids.len(), "delete the message", "delete the messages");
-        list::uncheck(&ids);
-        let call = {
-            let ids = ids.clone();
-            async move { client().delete_messages(ids, mode).await }
-        };
-        change(ids, what, call);
-    };
+    let Deletion { change, confirm } = with_accounts(|a| commands::deletion(messages, a));
+    // Something goes for good: there is something to delete.
     let Some(confirm) = confirm else {
-        return delete_now();
+        return run_change(change);
     };
     let answer = confirmed(confirm);
     in_view(async move {
         if answer.await {
-            delete_now();
+            run_change(change);
         }
     });
 }
@@ -174,15 +93,8 @@ fn delete(messages: &[MessageSummary]) {
 /// Asks where to move the messages, all of one account: to the folders moving any of
 /// them to changes.
 fn move_to_folder(messages: Vec<MessageSummary>) {
-    let Some(first) = messages.first() else {
-        return;
-    };
-    let shown_in = shown_in(first);
-    let folders = with_accounts(|accounts| {
-        let account = commands::one_account(&messages)?;
-        let folders = folders_in(accounts)(account)?;
-        Some(commands::move_targets(folders, &messages, shown_in))
-    });
+    let source = list::source();
+    let folders = with_accounts(|a| commands::move_targets(&messages, a, source.as_ref()));
     let Some(folders) = folders else {
         return;
     };
@@ -227,9 +139,7 @@ pub fn toggle_label(id: MessageId, label: FolderId) {
     let Some(message) = list::selected_message().filter(|m| m.id == id) else {
         return;
     };
-    let (add, remove) = commands::label_change(&message, label);
-    let call = async move { client().label_messages(vec![id], add, remove).await };
-    change(vec![id], "change the labels", call);
+    run_change(commands::label_change(&message, label));
 }
 
 /// The server refused changes, which the engine undid: says so, once per change, and

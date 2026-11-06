@@ -3,8 +3,7 @@
 
 use catmail_core::{Flags, MessageSummary};
 use catmail_frontend::format;
-use catmail_frontend::list::{self, ROW_LABELS, Row, RowId, Severity};
-use catmail_frontend::mailbox::Source;
+use catmail_frontend::list::{self, Line, Listing, ROW_LABELS, Row, RowId, Severity};
 use nsh_base::theme;
 use nsh_core::prelude::*;
 
@@ -13,7 +12,7 @@ use crate::icons::{Icon, icon};
 use crate::mailbox::commands;
 
 use super::{
-    Checked, Item, LabelNames, Rows, Selected, edit_selected_draft, open, reading, toggle_checked,
+    Checked, LabelNames, Selected, ShownIn, edit_selected_draft, open, reading, toggle_checked,
 };
 
 /// The row the pointer is on. One for the list rather than one per row: a cell that
@@ -24,13 +23,13 @@ struct Hovered(Option<RowId>);
 /// What a cell shows: a day's heading or a row. A cell shows other items as the list
 /// scrolls, so which it is follows its position.
 pub fn item(at: Position) -> impl IntoElement {
-    let item = computed(move || global::<Rows>().with(|r| r.items.get(at.index()).cloned()));
+    let item = computed(move || global::<Listing>().with(|l| l.line(at.index())));
     let kind = computed(move || {
         item.with(|item| match item {
-            Some(Item::Day(_)) | None => 0,
-            Some(Item::Row(Row::Message(_))) => 1,
-            Some(Item::Row(Row::Draft(_))) => 2,
-            Some(Item::Row(Row::Outbox(_))) => 3,
+            Some(Line::Day(_)) | None => 0,
+            Some(Line::Row(Row::Message(_))) => 1,
+            Some(Line::Row(Row::Draft(_))) => 2,
+            Some(Line::Row(Row::Outbox(_))) => 3,
         })
     });
     dynamic(move || match kind.get() {
@@ -38,7 +37,7 @@ pub fn item(at: Position) -> impl IntoElement {
         2 => draft_row(item).into_element(),
         3 => outbox_row(item).into_element(),
         _ => text(move || match item.get() {
-            Some(Item::Day(label)) => label,
+            Some(Line::Day(label)) => label,
             _ => String::new(),
         })
         .text_xs()
@@ -53,11 +52,11 @@ pub fn item(at: Position) -> impl IntoElement {
 
 /// A row's box: selected or under the pointer, it has the list's colors behind it; pressed,
 /// it opens.
-fn row_box(item: Memo<Option<Item>>) -> View {
+fn row_box(item: Memo<Option<Line>>) -> View {
     // Its id only, not the row: the pointer crossing rows doesn't copy their messages.
     let id = computed(move || {
         item.with(|item| match item {
-            Some(Item::Row(row)) => Some(row.id()),
+            Some(Line::Row(row)) => Some(row.id()),
             _ => None,
         })
     });
@@ -100,11 +99,11 @@ fn row_box(item: Memo<Option<Item>>) -> View {
         })
 }
 
-fn message_row(item: Memo<Option<Item>>) -> impl IntoElement {
+fn message_row(item: Memo<Option<Line>>) -> impl IntoElement {
     // Only a change between reading and not makes the row again, not each selection.
     let reading = computed(reading);
     let message = computed(move || match item.get() {
-        Some(Item::Row(Row::Message(m))) => Some(m),
+        Some(Line::Row(Row::Message(m))) => Some(m),
         _ => None,
     });
     let id = move || message.with(|m| m.as_ref().map(|m| m.id));
@@ -244,14 +243,11 @@ fn message_row(item: Memo<Option<Item>>) -> impl IntoElement {
         }))
 }
 
-/// The names of the message's user labels a row shows: not the one listed, which every
-/// row has.
+/// The names of the message's user labels a row shows: not the one it is looked at in
+/// ([`ShownIn`]), which every row has.
 fn label_names(message: &MessageSummary) -> Vec<String> {
-    let listed = global::<Rows>().with(|r| match r.source {
-        Some(Source::Folder(id)) => Some(id),
-        _ => None,
-    });
-    global::<LabelNames>().with(|l| list::label_names(&l.0, message, listed))
+    let shown_in = global::<ShownIn>().with(|s| s.0.get(&message.account_id).copied());
+    global::<LabelNames>().with(|l| list::label_names(&l.0, message, shown_in))
 }
 
 /// The names of all the message's user labels, as the reading pane shows them.
@@ -365,11 +361,11 @@ fn avatar(message: Memo<Option<MessageSummary>>) -> View {
         }))
 }
 
-fn draft_row(item: Memo<Option<Item>>) -> impl IntoElement {
+fn draft_row(item: Memo<Option<Line>>) -> impl IntoElement {
     // Only a change between reading and not makes the row again, not each selection.
     let reading = computed(reading);
     let draft = computed(move || match item.get() {
-        Some(Item::Row(Row::Draft(d))) => Some(d),
+        Some(Line::Row(Row::Draft(d))) => Some(d),
         _ => None,
     });
     let field = move |f: fn(&catmail_core::Draft) -> String| {
@@ -446,9 +442,9 @@ fn draft_row(item: Memo<Option<Item>>) -> impl IntoElement {
     }))
 }
 
-fn outbox_row(item: Memo<Option<Item>>) -> impl IntoElement {
+fn outbox_row(item: Memo<Option<Line>>) -> impl IntoElement {
     let entry = computed(move || match item.get() {
-        Some(Item::Row(Row::Outbox(e))) => Some(e),
+        Some(Line::Row(Row::Outbox(e))) => Some(e),
         _ => None,
     });
     let field = move |f: fn(&catmail_core::OutboxEntry) -> String| {

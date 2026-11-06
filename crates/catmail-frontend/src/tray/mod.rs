@@ -1,7 +1,8 @@
-//! The tray icon's model: its menu, what its tool tip and badge say, the app's icon with
-//! the count drawn on it (as an SVG, for the frontend to draw), and the item itself: on
-//! Linux the StatusNotifierItem ([`linux`]), which is D-Bus and no toolkit's, on macOS the
-//! status item ([`macos`]), which is AppKit's. See docs/architecture/background.md.
+//! The tray icon's model: its menu, what its tool tip and badge say, when the unread mail
+//! is counted and the icon drawn ([`TrayModel`]), the app's icon with the count drawn on
+//! it (as an SVG, for the frontend to draw), and the item itself: on Linux the
+//! StatusNotifierItem ([`linux`]), which is D-Bus and no toolkit's, on macOS the status
+//! item ([`macos`]), which is AppKit's. See docs/architecture/background.md.
 
 pub mod badged;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -9,6 +10,31 @@ pub mod linux;
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code, reason = "AppKit's status item, menu and images")]
 pub mod macos;
+mod model;
+
+use std::borrow::Cow;
+
+pub use model::{Drawing, TrayModel};
+
+/// The app's icon, light and dark (`assets/app-icon/`, 512 × 512): Linux's tray icon, in
+/// the desktop's appearance.
+pub const LIGHT_ICON: &str = include_str!("../../assets/app-icon/catmail-light.svg");
+pub const DARK_ICON: &str = include_str!("../../assets/app-icon/catmail-dark.svg");
+
+/// The menu bar's icon on macOS: a template, which the system tints to suit the menu bar.
+pub const MENU_BAR_ICON: &str = include_str!("../../assets/app-icon/catmail-menu-bar.svg");
+
+/// What the icon looks like, as an SVG, and the sizes it is drawn at (square): on macOS
+/// the template, whatever the count and the appearance (the count is beside it); elsewhere
+/// the app's icon in the desktop's appearance, with the count on it.
+pub fn icon(dark: bool, unread: u32) -> (Cow<'static, str>, &'static [u32]) {
+    if cfg!(target_os = "macos") {
+        (Cow::Borrowed(MENU_BAR_ICON), &MENU_BAR_SIZES)
+    } else {
+        let icon = if dark { DARK_ICON } else { LIGHT_ICON };
+        (badged::svg(icon, unread), &badged::SIZES)
+    }
+}
 
 /// What the tray asks the app for. Clicking the icon is `Open` where that doesn't open
 /// the menu.
@@ -104,6 +130,19 @@ mod tests {
         assert_eq!(badge(7).as_deref(), Some("7"));
         assert_eq!(badge(99).as_deref(), Some("99"));
         assert_eq!(badge(100).as_deref(), Some("99+"));
+    }
+
+    #[test]
+    fn the_icon_is_the_apps_with_the_count_or_the_menu_bars_template() {
+        let (light, sizes) = icon(false, 7);
+        if cfg!(target_os = "macos") {
+            assert_eq!(light, MENU_BAR_ICON);
+            assert_eq!(sizes, MENU_BAR_SIZES);
+        } else {
+            assert!(light.contains(LIGHT_ICON) && light.contains(">7</text>"));
+            assert!(icon(true, 0).0 == DARK_ICON);
+            assert_eq!(sizes, badged::SIZES);
+        }
     }
 
     #[test]
