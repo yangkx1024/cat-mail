@@ -28,7 +28,8 @@ use crate::login::{self, SignIn};
 use crate::shell::Ask;
 use crate::tasks::{in_view, own_tasks};
 use crate::{chrome, composer, form, reader, settings, shell, toast};
-use list::{Rows, Selected};
+use catmail_frontend::list::Listing;
+use list::Selected;
 use sidebar::{Accounts, SelectedPlace};
 
 /// What the engine's events ask to read again, held back between reads. Not reactive.
@@ -168,7 +169,7 @@ fn on_event(event: Option<&Event>) {
         // Before reading the sidebar again, so the read isn't taken for an old one.
         sidebar::missed_events();
     }
-    let shown = global::<Rows>().with_untracked(|r| r.source.clone());
+    let shown = global::<Listing>().with_untracked(|l| l.source().cloned());
     let refresh = Refresh::after(event, shown.as_ref(), &sidebar::shown_folders());
     let refresh = throttle().borrow_mut().ask(refresh);
     read_again(refresh);

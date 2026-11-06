@@ -1,6 +1,9 @@
 //! The middle pane's rows apart from how they look: what a source lists and how it is
 //! read a page at a time, the rows grouped by day, where the selection goes when they
-//! are read again, which messages a check menu takes, and what a row says.
+//! are read again, which messages a check menu takes, and what a row says. The list's
+//! reads and the lines it shows are [`ListModel`]'s and [`Listing`]'s.
+
+mod model;
 
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -15,6 +18,8 @@ use jiff::civil::Date;
 
 use crate::format::{self, Calendar};
 use crate::mailbox::Source;
+
+pub use model::{Fetch, Line, LineKey, ListModel, Listing, Loaded, Rows, Select};
 
 /// Rows read at a time.
 pub const PAGE: u32 = 200;

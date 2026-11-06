@@ -127,6 +127,11 @@ impl Coalesce {
         true
     }
 
+    /// Whether a read is running.
+    pub fn is_running(&self) -> bool {
+        self.running
+    }
+
     /// The read is done: whether to start another.
     pub fn finish(&mut self) -> bool {
         self.running = false;
