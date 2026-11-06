@@ -46,7 +46,12 @@ pub fn unread(folder: Folder, unread: u32) -> Folder {
 
 /// On Gmail, every mailbox but All Mail, Trash and Spam is a label.
 pub fn gmail_folder(id: i64, account: i64, name: &str) -> Folder {
-    let folder = folder(id, account, name);
+    on_gmail(folder(id, account, name))
+}
+
+/// `folder` as Gmail lists it: a location if its role is All Mail, Trash or Spam, else a
+/// label.
+pub fn on_gmail(folder: Folder) -> Folder {
     let location = matches!(
         folder.role,
         Some(FolderRole::All | FolderRole::Trash | FolderRole::Junk)

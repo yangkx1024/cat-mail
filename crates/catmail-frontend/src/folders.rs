@@ -302,41 +302,25 @@ fn folder_tree(folders: &[Folder]) -> Vec<FolderNode> {
 
 #[cfg(test)]
 mod tests {
-    use catmail_core::{AccountId, FolderId, FolderKind};
+    use catmail_core::{FolderId, FolderKind};
 
     use super::*;
+    use crate::fixtures;
 
+    /// Of account 1; only INBOX has a role.
     fn folder(id: i64, name: &str, delimiter: Option<char>) -> Folder {
         Folder {
-            id: FolderId(id),
-            account_id: AccountId(1),
-            name: name.into(),
             delimiter,
             role: (name == "INBOX").then_some(FolderRole::Inbox),
-            kind: FolderKind::Location,
-            listed: true,
-            selectable: true,
-            inferiors: true,
-            unread_count: 0,
-            total_count: 0,
-            last_synced_at: None,
+            ..fixtures::folder(id, 1, name)
         }
     }
 
     fn with_role(id: i64, name: &str, role: FolderRole) -> Folder {
         Folder {
-            id: FolderId(id),
-            account_id: AccountId(1),
-            name: name.into(),
             delimiter: Some('.'),
             role: Some(role),
-            kind: FolderKind::Location,
-            listed: true,
-            selectable: true,
-            inferiors: true,
-            unread_count: 0,
-            total_count: 0,
-            last_synced_at: None,
+            ..fixtures::folder(id, 1, name)
         }
     }
 
@@ -433,20 +417,10 @@ mod tests {
 
     /// A Gmail mailbox: All Mail, Trash and Spam are locations, the rest labels.
     fn gmail(id: i64, name: &str, role: Option<FolderRole>) -> Folder {
-        let location = matches!(
+        fixtures::on_gmail(Folder {
             role,
-            Some(FolderRole::All | FolderRole::Trash | FolderRole::Junk)
-        );
-        Folder {
-            delimiter: Some('/'),
-            role,
-            kind: if location {
-                FolderKind::Location
-            } else {
-                FolderKind::Label
-            },
             ..folder(id, name, Some('/'))
-        }
+        })
     }
 
     #[test]
