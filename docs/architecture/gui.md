@@ -296,7 +296,9 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 ## 发件箱
 
 条目的状态决定右栏给出的选择：可用的由 `OutboxStatus::can_*` 判断，措辞、先后、要先确认的在
-`catmail_frontend::outbox`，`mailbox/outbox.rs` 只画出来。排队中可以 Send now（`flush_outbox`）或 Back to drafts
+`catmail_frontend::outbox`，`mailbox/outbox.rs` 只画出来。右栏的 To / From / Queued 也由它给出（`outbox::facts`）：
+From 是条目实际发出用的身份（`OutboxEntry::identity`），叫法和写新邮件时的 From 选项一样（在所有账户的身份里区分）；发件箱里还有条目用着的身份删不掉，
+所以总找得到。排队中可以 Send now（`flush_outbox`）或 Back to drafts
 （`cancel_outbox`）；被拒绝的可以改回草稿或重试；已发出但没存进 Sent 的可以重试保存或放弃；**发出后未确认
 （unknown）的从不自动重发**，由用户选 Mark as sent、Send again（先确认可能重复）或 Back to drafts。
 

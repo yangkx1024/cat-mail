@@ -3,7 +3,7 @@
 
 use catmail_core::{OutboxEntry, OutboxStatus};
 use catmail_frontend::format;
-use catmail_frontend::outbox::{Choice, State, choices};
+use catmail_frontend::outbox::{Choice, State, choices, facts};
 use nsh_base::theme;
 use nsh_core::prelude::*;
 
@@ -14,7 +14,7 @@ use crate::form::confirmed;
 use crate::icons::{Icon, icon};
 use crate::mailbox::list::{self};
 use crate::mailbox::panes::{back_button, fact};
-use crate::mailbox::sidebar::with_account;
+use crate::mailbox::sidebar::with_accounts;
 use crate::tasks::in_view;
 use crate::toast::report;
 
@@ -32,15 +32,16 @@ pub fn pane() -> impl IntoElement {
 }
 
 fn page(entry: OutboxEntry) -> impl IntoElement {
-    let from = with_account(entry.account_id, |a| a.account.email.clone()).unwrap_or_default();
-    let facts = [
-        ("To", entry.recipients.join(", ")),
-        ("From", from),
-        ("Queued", format::date(Some(entry.created_at))),
-    ]
-    .into_iter()
-    .map(|(name, value)| fact(name, value).into_element())
-    .collect::<Vec<_>>();
+    let identities: Vec<_> = with_accounts(|accounts| {
+        accounts
+            .iter()
+            .flat_map(|a| a.identities.iter().cloned())
+            .collect()
+    });
+    let lines = facts(&entry, &identities)
+        .into_iter()
+        .map(|(name, value)| fact(name, value).into_element())
+        .collect::<Vec<_>>();
     scroll().flex_1().child(
         view()
             .px(px(24.0))
@@ -54,7 +55,7 @@ fn page(entry: OutboxEntry) -> impl IntoElement {
                     .selectable(true)
                     .text_color(move || theme().foreground),
             )
-            .child(view().gap(px(4.0)).children(facts))
+            .child(view().gap(px(4.0)).children(lines))
             .child(state(&entry)),
     )
 }
