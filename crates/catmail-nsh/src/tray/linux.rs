@@ -8,6 +8,8 @@ use catmail_frontend::tray::{Chosen, Pixmap, badged, linux};
 use futures_channel::mpsc::UnboundedSender;
 use nsh_platform_linux::gtk4::{gio, glib, prelude::*};
 use resvg::tiny_skia;
+#[cfg(test)]
+use resvg::usvg;
 
 use crate::shell;
 
@@ -134,7 +136,8 @@ mod tests {
                 .flat_map(|y| (side / 2..side).map(move |x| y * side + x))
                 .filter(|&i| matches!(pixels[i], [255, r, g, b] if r > 240 && g > 240 && b > 240))
                 .count();
-            assert!(white > 20, "{white} white pixels");
+            let sans_serif = super::super::FONTS.family_name(&usvg::fontdb::Family::SansSerif);
+            assert!(white > 20, "{white} white pixels, in {sans_serif}");
         }
     }
 }

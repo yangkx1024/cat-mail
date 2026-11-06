@@ -23,6 +23,7 @@ use catmail_frontend::tray::Chosen;
 use futures_channel::mpsc;
 use futures_util::StreamExt as _;
 use resvg::{tiny_skia, usvg};
+use usvg::fontdb::{Database, Family, Query};
 
 use self::platform::Item;
 use crate::{engine, shell};
@@ -166,11 +167,57 @@ fn draw() {
 
 /// The system's fonts, for the badge's digits: loaded once, on the first drawing's
 /// thread that has text to draw.
-static FONTS: LazyLock<Arc<usvg::fontdb::Database>> = LazyLock::new(|| {
-    let mut fonts = usvg::fontdb::Database::new();
+static FONTS: LazyLock<Arc<Database>> = LazyLock::new(|| {
+    let mut fonts = Database::new();
     fonts.load_system_fonts();
+    installed_sans_serif(&mut fonts);
     Arc::new(fonts)
 });
+
+/// Sans-serif fonts one of which most systems have, tried in order when the one
+/// `sans-serif` names isn't installed.
+const SANS_SERIF: &[&str] = &[
+    "DejaVu Sans",
+    "Noto Sans",
+    "Liberation Sans",
+    "Cantarell",
+    "Ubuntu",
+    "Arial",
+    "Helvetica",
+];
+
+/// Makes `sans-serif`, which the badge's digits are in, a font that is installed.
+/// fontdb takes it from fontconfig's aliases, the first font each prefers, installed or
+/// not, the last alias winning: on Ubuntu one that isn't there, and the digits weren't
+/// drawn. Then the first of [`SANS_SERIF`] there is, else any font at all.
+fn installed_sans_serif(fonts: &mut Database) {
+    let installed = |fonts: &Database, family: Family| {
+        let families = [family];
+        let query = Query {
+            families: &families,
+            ..Query::default()
+        };
+        fonts.query(&query).is_some()
+    };
+    if installed(fonts, Family::SansSerif) {
+        return;
+    }
+    let name = SANS_SERIF
+        .iter()
+        .find(|&&name| installed(fonts, Family::Name(name)))
+        .map(|&name| name.to_owned())
+        .or_else(|| {
+            let face = fonts.faces().next()?;
+            face.families.first().map(|(name, _)| name.clone())
+        });
+    if let Some(name) = name {
+        tracing::info!(
+            font = name,
+            "sans-serif isn't installed: the tray's badge uses another"
+        );
+        fonts.set_sans_serif_family(name);
+    }
+}
 
 /// `svg` at each of `sizes`, square: RGBA, premultiplied.
 fn pixmaps(svg: &str, sizes: &[u32]) -> Vec<tiny_skia::Pixmap> {
@@ -199,4 +246,24 @@ fn pixmaps(svg: &str, sizes: &[u32]) -> Vec<tiny_skia::Pixmap> {
             Some(pixmap)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Whatever fontconfig's aliases name: Ubuntu's named one that isn't installed.
+    #[test]
+    fn sans_serif_is_a_font_that_is_installed() {
+        let mut fonts = Database::new();
+        fonts.load_system_fonts();
+        fonts.set_sans_serif_family("No Such Font");
+        installed_sans_serif(&mut fonts);
+        let query = Query {
+            families: &[Family::SansSerif],
+            ..Query::default()
+        };
+        let name = fonts.family_name(&Family::SansSerif).to_owned();
+        assert!(fonts.query(&query).is_some(), "sans-serif is {name}");
+    }
 }
