@@ -183,9 +183,10 @@ base64 正文），交给 mail-parser 按同样方式解析。于是两条路径
   - 只取 `http` / `https`，重定向最多 5 次且只能到这两种 scheme；只发 GET，不存 cookie，不发 `Referer`
     （重定向时也不发），User-Agent 是 `catmail/<版本>`。
   - 每张 30 秒、10 MiB 为限（先看 `Content-Length`，再边读边数）；一次最多 200 张，同时 6 个。
-  - 类型先按开头字节认常见栅格格式（服务器常标成 `application/octet-stream` 或标错），认不出再用
-    `Content-Type` 的 `image/*`，都不是就算失败。SVG 也算失败，不必缓存：它能带脚本和外部引用，邮件里的
-    远程图片用栅格格式就够（起初是因为 GPUI 版的 SVG 解码器会按路径读本地文件）。
+  - 类型先按开头字节认常见栅格格式（`catmail_html::sniff_image`，内嵌图片也用它；服务器常标成
+    `application/octet-stream` 或标错），认不出再用 `Content-Type` 的 `image/*`，都不是就算失败。SVG 也算
+    失败，不必缓存：它能带脚本和外部引用，邮件里的远程图片用栅格格式就够（起初是因为 GPUI 版的 SVG 解码器会
+    按路径读本地文件）。
   - 返回一个流（`RemoteImageStream`）：每个 URL 下载完（或失败）就给出它的结果，按完成顺序，一张
     失败不影响其他；`next_ready` 不等待地取已完成的，前端可以把同时到的几张合成一批。流是 tokio 的
     channel，任何执行器都能等。丢掉流，引擎里还在下载的立即中止（`JoinSet` 随任务丢弃）。
@@ -200,9 +201,12 @@ base64 正文），交给 mail-parser 按同样方式解析。于是两条路径
     任何信号。缓存按 URL，不按邮件：另一封信引用同一个 URL 也直接显示。不看 `Cache-Control`：
     邮件里的图片基本不变，按 `no-store` 再去取反而又给发件人一次信号。
   - 总大小上限 256 MiB，有新图片存入的那次下载结束后按最后使用时间（读取时更新 mtime）从最旧的删起。`image_cache_size`、`clear_image_cache` 给设置界面用。
-- **内嵌**（`inline`）指 HTML 用 `cid:` 引用了它：按 RFC 2392 取出完整的引用值、百分号解码后精确
-  比较（`cid:logo-long` 不会让 `logo` 也算内嵌）。没被引用的图片都算附件，`has_attachments` 只统计
-  非内嵌的部分。
+- **内嵌**（`inline`）指正文把它当图片显示（proto 的 `mime::is_inline`）：HTML 里有 `<img src="cid:…">` 引用它
+  （`catmail_html::cid_image_ids`，按 RFC 2392 取出完整的引用值、百分号解码后精确比较，`cid:logo-long` 不会让
+  `logo` 也算内嵌），而且它能当图片显示（`image/*`，或发信端常标的 `application/octet-stream`，显示时按开头字节
+  认类型）。其余部分都算附件，不管放在哪、别处怎么引用它：`cid:` 链接指向的、正文文字里恰好写着 `cid:…` 的、
+  `<img>` 引用了却不是图片的（比如视频），都列在附件里，这样每个部分都拿得到。读信区和附件列表都只看这一个值
+  （`MessageBody::inline_parts` / `files`），`has_attachments` 只统计非内嵌的部分。
 
 ## 按版本重建
 
@@ -219,8 +223,8 @@ base64 正文），交给 mail-parser 按同样方式解析。于是两条路径
   不重写索引；附件内容已在 BlobStore 里的只算 hash，不再写一遍（`BlobStore::put_bytes`）。原文的 blob 在磁盘上
   找不到时按没有原文处理。
 - **没有原文的**（按部分下载的大邮件）：清洗是幂等的，把存下的 HTML 再清洗一遍，收紧的规则就生效；内嵌按新
-  HTML 的 `cid:` 重新判定。两步与解析时是同一个函数（proto 的 `mime::sanitized_html`），指纹测试也覆盖它
-  （`Messages::refresh_html`）。文本是从未清洗的 HTML 转出来的，保持不变，索引也不变。
+  HTML 的图片引用和部分的类型重新判定。清洗、取图片引用和判定内嵌，用的都是解析时的那几个函数（proto 的
+  `mime::sanitized_html`、`mime::is_inline`；`Messages::refresh_html`）。文本是从未清洗的 HTML 转出来的，保持不变，索引也不变。
   放开的规则（以前去掉、现在允许的）对它们不生效：重新下载要占预取的每日预算、要连服务器，而且都是最大的
   邮件，所以接受。
 - **打开时。** `download_message` 看到正文旧了，先重建再返回，用户看到的总是当前规则的结果；重建失败只记

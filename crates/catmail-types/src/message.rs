@@ -216,6 +216,18 @@ pub struct MessageBody {
     pub attachments: Vec<Attachment>,
 }
 
+impl MessageBody {
+    /// The parts the HTML shows as images.
+    pub fn inline_parts(&self) -> impl Iterator<Item = &Attachment> {
+        self.attachments.iter().filter(|a| a.inline)
+    }
+
+    /// The parts offered as files: every one the body doesn't show.
+    pub fn files(&self) -> impl Iterator<Item = &Attachment> {
+        self.attachments.iter().filter(|a| !a.inline)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {
     pub id: AttachmentId,
@@ -227,7 +239,8 @@ pub struct Attachment {
     pub size: Option<u32>,
     /// Without angle brackets; what `cid:` URLs in the HTML refer to.
     pub content_id: Option<String>,
-    /// Shown within the body rather than offered as a file.
+    /// Shown within the body as an image rather than offered as a file (decided by
+    /// `catmail_proto::mime::is_inline`).
     pub inline: bool,
     /// Whether the content is stored locally. Large messages are downloaded without
     /// their attachments, which are fetched when first opened.

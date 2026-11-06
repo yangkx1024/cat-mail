@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use catmail_types::{Attachment, AttachmentId, BlobHash, MessageId};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
@@ -132,20 +130,18 @@ impl<'c> Attachments<'c> {
         Ok(())
     }
 
-    /// Marks the message's attachments inline if their Content-ID is in `referenced`,
-    /// and the others not.
+    /// Marks the message's attachments inline or not, as `inline` decides.
     pub(crate) fn mark_inline(
         &self,
         message: MessageId,
-        referenced: &HashSet<String>,
+        inline: impl Fn(&Attachment) -> bool,
     ) -> Result<()> {
-        self.conn
-            .prepare_cached(
-                "UPDATE attachments
-                 SET is_inline = coalesce(content_id IN (SELECT value FROM json_each(?2)), 0)
-                 WHERE message_id = ?1",
-            )?
-            .execute(params![message.0, to_json(referenced)])?;
+        let mut update = self
+            .conn
+            .prepare_cached("UPDATE attachments SET is_inline = ?2 WHERE id = ?1")?;
+        for attachment in self.list(message)? {
+            update.execute(params![attachment.id.0, inline(&attachment)])?;
+        }
         Ok(())
     }
 }

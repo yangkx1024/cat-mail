@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use catmail_html::{content_id_from_url, sanitize_html};
+use catmail_html::{cid_image_ids, sanitize_html};
 use mail_parser::parsers::MessageStream;
 use mail_parser::{Encoding, Message, MessageParser, MessagePart, MimeHeaders, PartType};
 
@@ -18,7 +18,7 @@ const SNIPPET_CHARS: usize = 200;
 /// so that the change is a decision.
 ///
 /// [`MimeNode::content`]: super::MimeNode::content
-pub const CONTENT_VERSION: u32 = 1;
+pub const CONTENT_VERSION: u32 = 2;
 
 /// What a reader shows of a message.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -48,8 +48,7 @@ pub struct Part {
     pub mime_type: String,
     /// Without angle brackets.
     pub content_id: Option<String>,
-    /// Shown within the body rather than offered as a file: the HTML refers to it by
-    /// `cid:`. (An image that nothing refers to is an attachment, wherever it sits.)
+    /// Shown within the body rather than offered as a file ([`is_inline`]).
     pub inline: bool,
     /// Decoded size; estimated from the encoded size when `data` is `None`.
     pub size: Option<u32>,
@@ -111,11 +110,7 @@ pub(super) fn extract(
             )
         })
         .flatten()
-        .map(|html| sanitized_html(&html));
-    let (html, referenced) = match html {
-        Some((html, referenced)) => (Some(html), referenced),
-        None => (None, HashSet::new()),
-    };
+        .map(|html| sanitize_html(&html));
     let sections = sections(message);
     let text_charsets = text_charsets(message);
     // Part ids follow MIME order. A set, not `contains` on each part: a message may
@@ -126,7 +121,7 @@ pub(super) fn extract(
         .chain(also_listed)
         .copied()
         .collect();
-    let parts = listed
+    let mut parts: Vec<Part> = listed
         .into_iter()
         .filter_map(|id| {
             let part = &message.parts[id as usize];
@@ -152,27 +147,41 @@ pub(super) fn extract(
                 .content_id()
                 .map(|id| id.trim().trim_start_matches('<').trim_end_matches('>'))
                 .filter(|id| !id.is_empty());
+            let mime_type = part
+                .content_type()
+                .map(|ct| match ct.subtype() {
+                    Some(sub) => format!("{}/{sub}", ct.ctype()),
+                    None => ct.ctype().to_owned(),
+                })
+                .unwrap_or_else(|| "text/plain".into())
+                .to_ascii_lowercase();
             Some(Part {
                 section: section.clone(),
                 transfer_encoding: part
                     .content_transfer_encoding()
                     .map(|e| e.trim().to_ascii_lowercase()),
                 filename: filename(part, header, &text_charsets),
-                mime_type: part
-                    .content_type()
-                    .map(|ct| match ct.subtype() {
-                        Some(sub) => format!("{}/{sub}", ct.ctype()),
-                        None => ct.ctype().to_owned(),
-                    })
-                    .unwrap_or_else(|| "text/plain".into())
-                    .to_ascii_lowercase(),
-                inline: content_id.is_some_and(|id| referenced.contains(id)),
+                // Below.
+                inline: false,
+                mime_type,
                 content_id: content_id.map(String::from),
                 size: data.as_ref().map(|d| d.len() as u32),
                 data,
             })
         })
         .collect();
+    // Most messages have no part that could be inline: their HTML isn't parsed again for
+    // the images.
+    if let Some(html) = &html
+        && parts
+            .iter()
+            .any(|p| p.content_id.is_some() && may_be_image(&p.mime_type))
+    {
+        let images = cid_image_ids(html);
+        for part in &mut parts {
+            part.inline = is_inline(part.content_id.as_deref(), &part.mime_type, &images);
+        }
+    }
 
     Content {
         snippet: text.as_deref().and_then(snippet),
@@ -239,29 +248,28 @@ fn joined<S: AsRef<str>>(pieces: impl Iterator<Item = S>, separator: &str) -> Op
     (!pieces.is_empty()).then(|| pieces.join(separator))
 }
 
-/// The body's HTML as stored: sanitized, with the Content-IDs that its `cid:` URLs refer
-/// to, which make those parts inline. Also what HTML stored by an older
-/// [`CONTENT_VERSION`] is made into when there is no raw message to parse again
-/// (sanitizing is idempotent).
+/// HTML stored by an older [`CONTENT_VERSION`] without its raw message, made again as
+/// parsing makes it (sanitizing is idempotent), with the Content-IDs that its images
+/// refer to by `cid:` ([`is_inline`]).
 pub fn sanitized_html(html: &str) -> (String, HashSet<String>) {
     let html = sanitize_html(html);
-    let referenced = cid_references(&html);
-    (html, referenced)
+    let images = cid_image_ids(&html);
+    (html, images)
 }
 
-/// The Content-IDs that `cid:` URLs in the HTML refer to.
-fn cid_references(html: &str) -> HashSet<String> {
-    let lower = html.to_ascii_lowercase();
-    lower
-        .match_indices("cid:")
-        .filter_map(|(start, _)| {
-            let rest = &html[start + 4..];
-            let end = rest
-                .find(|c: char| c.is_whitespace() || "\"'()<>".contains(c))
-                .unwrap_or(rest.len());
-            content_id_from_url(&html[start..start + 4 + end])
-        })
-        .collect()
+/// Whether a part is shown within the body rather than offered as a file: an image in
+/// the HTML refers to it by its Content-ID (in `images`, from
+/// [`cid_image_ids`](catmail_html::cid_image_ids)), and it can be shown as one. Every other part is an attachment, wherever it sits and whatever
+/// else refers to it (a `cid:` link, the text `cid:…`), so that none is out of reach.
+pub fn is_inline(content_id: Option<&str>, mime_type: &str, images: &HashSet<String>) -> bool {
+    content_id.is_some_and(|id| images.contains(id)) && may_be_image(mime_type)
+}
+
+/// Whether a part of `mime_type` can be shown as an image: an image type, or the generic
+/// `application/octet-stream` some senders label images with (a reader then takes the
+/// type from its bytes, `catmail_html::sniff_image`).
+fn may_be_image(mime_type: &str) -> bool {
+    mime_type.starts_with("image/") || mime_type == "application/octet-stream"
 }
 
 /// IMAP section numbers of the parts of `message` (RFC 3501 §6.4.5): the children of a
@@ -622,6 +630,48 @@ mod tests {
     }
 
     #[test]
+    fn inline_means_shown_as_an_image() {
+        let raw = b"Content-Type: multipart/related; boundary=r\r\n\r\n\
+            --r\r\n\
+            Content-Type: text/html\r\n\r\n\
+            <a href=\"cid:report@x\">report</a> see cid:note@x\r\n\
+            <img src=\"cid:photo@x\"><img src=\"cid:clip@x\">\r\n\
+            --r\r\n\
+            Content-Type: application/pdf; name=report.pdf\r\n\
+            Content-ID: <report@x>\r\n\r\n\
+            %PDF\r\n\
+            --r\r\n\
+            Content-Type: text/plain; name=note.txt\r\n\
+            Content-ID: <note@x>\r\n\r\n\
+            note\r\n\
+            --r\r\n\
+            Content-Type: application/octet-stream; name=photo.png\r\n\
+            Content-ID: <photo@x>\r\n\r\n\
+            png\r\n\
+            --r\r\n\
+            Content-Type: video/mp4; name=clip.mp4\r\n\
+            Content-ID: <clip@x>\r\n\r\n\
+            mp4\r\n\
+            --r--\r\n";
+        let inline: Vec<_> = parse_message(raw)
+            .parts
+            .iter()
+            .map(|p| (p.content_id.clone().unwrap(), p.inline))
+            .collect();
+        assert_eq!(
+            inline,
+            [
+                ("report@x".to_owned(), false), // a link: listed, so it can be opened
+                ("note@x".to_owned(), false),   // text, not a URL
+                ("photo@x".to_owned(), true),   // an image labelled as bytes
+                ("clip@x".to_owned(), false),   // can't be shown as an image
+            ]
+        );
+        assert!(may_be_image("image/svg+xml"));
+        assert!(!may_be_image("application/pdf"));
+    }
+
+    #[test]
     fn snippet_stops_at_the_limit_between_words() {
         let text = format!("{} b c d", "a".repeat(SNIPPET_CHARS));
         assert_eq!(snippet(&text).unwrap(), "a".repeat(SNIPPET_CHARS));
@@ -715,7 +765,7 @@ mod tests {
         // either way, record the new fingerprint here.
         assert_eq!(
             (CONTENT_VERSION, format!("{hash:016x}")),
-            (1, "e8e4810e0d9cd7b3".to_owned()),
+            (2, "e8e4810e0d9cd7b3".to_owned()),
         );
     }
 }

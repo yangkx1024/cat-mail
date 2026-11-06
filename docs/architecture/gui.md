@@ -255,8 +255,9 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 
 ### 图片
 
-- **内嵌图片**：打开时先显示文字。已经取到的内嵌部分在建页时嵌进页面；其余的，脚本报出页面引用的 `cid:`，取到
-  一个就 `post_message` 填进去，不重新载入页面。没有 HTML 的邮件不取。
+- **内嵌图片**：取的是 `MessageBody::inline_parts`，内嵌的规则见[正文与附件](bodies.md)，读信区不另加条件。
+  打开时先显示文字。已经取到的内嵌部分在建页时嵌进页面；其余的，脚本报出页面引用的 `cid:`，取到一个就
+  `post_message` 填进去，不重新载入页面。没有 HTML 的邮件不取。
 - **远程图片**：打开时在后台列出正文引用的远程图片（`remote_image_urls`），缓存里有的（`cached_remote_images`）
   直接显示，其余的在用户点"Show remote images"后交给 `MailClient::fetch_remote_images`（限制见
   [正文与附件](bodies.md)），按下载完成的顺序逐批填进页面（`html::data_url`），按钮转圈；一张也没拿到时提示

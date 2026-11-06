@@ -375,10 +375,7 @@ pub(crate) async fn forward(
     }
     let message = with_body(engine, id).await?;
     let mut attachments = Vec::new();
-    for original in message.body.iter().flat_map(|b| &b.attachments) {
-        if original.inline {
-            continue;
-        }
+    for original in message.body.iter().flat_map(|b| b.files()) {
         // The blob the message already has, its GC grace period restarted to cover the
         // gap until the transaction below refers to it.
         let (blob, size) = body::attachment_blob(engine.clone(), original.id).await?;

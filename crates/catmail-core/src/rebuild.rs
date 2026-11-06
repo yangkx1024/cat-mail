@@ -35,7 +35,7 @@ struct Rebuilt {
 enum Made {
     /// From the raw message.
     Whole(NewBody),
-    /// The stored HTML sanitized again, and the Content-IDs it refers to.
+    /// The stored HTML sanitized again, and the Content-IDs its images refer to.
     Html(Option<String>, HashSet<String>),
 }
 
@@ -45,8 +45,10 @@ impl Rebuilt {
         let (id, from) = (self.stale.id, self.stale.version);
         match &self.made {
             Made::Whole(body) => messages.rebuild_body(id, from, body),
-            Made::Html(html, referenced) => {
-                messages.refresh_html(id, from, CONTENT_VERSION, html.as_deref(), referenced)
+            Made::Html(html, images) => {
+                messages.refresh_html(id, from, CONTENT_VERSION, html.as_deref(), |a| {
+                    mime::is_inline(a.content_id.as_deref(), &a.mime_type, images)
+                })
             }
         }
     }
@@ -74,7 +76,7 @@ fn make(engine: &Engine, id: MessageId) -> Result<Option<Rebuilt>> {
         // Not put in the blob store again: the row keeps referring to it.
         Some(raw) => Made::Whole(new_body(engine, mime::parse_message(&raw), None)?),
         None => match stale.html.as_deref().map(mime::sanitized_html) {
-            Some((html, referenced)) => Made::Html(Some(html), referenced),
+            Some((html, images)) => Made::Html(Some(html), images),
             None => Made::Html(None, HashSet::new()),
         },
     };

@@ -7,6 +7,7 @@
 
 use std::time::Duration;
 
+use catmail_html::sniff_image;
 use catmail_types::ErrorKind;
 use reqwest::header::CONTENT_TYPE;
 use reqwest::redirect::Policy;
@@ -133,33 +134,12 @@ impl ImageFetcher {
             }
             bytes.extend_from_slice(&chunk);
         }
-        // Servers label images loosely (`application/octet-stream`, or the wrong format);
-        // what decodes them goes by the type.
-        let mime_type = sniff(&bytes)
+        let mime_type = sniff_image(&bytes)
             .map(str::to_owned)
             .or(declared)
             .ok_or(Error::NotAnImage)?;
         Ok(RemoteImage { mime_type, bytes })
     }
-}
-
-/// The type of a well-known raster image, from its first bytes.
-fn sniff(bytes: &[u8]) -> Option<&'static str> {
-    const SIGNATURES: [(&[u8], &str); 6] = [
-        (b"\x89PNG\r\n\x1a\n", "image/png"),
-        (b"\xff\xd8\xff", "image/jpeg"),
-        (b"GIF87a", "image/gif"),
-        (b"GIF89a", "image/gif"),
-        (b"BM", "image/bmp"),
-        (b"\0\0\x01\0", "image/x-icon"),
-    ];
-    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        return Some("image/webp");
-    }
-    SIGNATURES
-        .iter()
-        .find(|(magic, _)| bytes.starts_with(magic))
-        .map(|&(_, mime_type)| mime_type)
 }
 
 #[cfg(test)]
@@ -266,15 +246,5 @@ mod tests {
             matches!(&slow, Err(Error::Request(e)) if e.is_timeout()),
             "{slow:?}"
         );
-    }
-
-    #[test]
-    fn sniffs_raster_formats() {
-        assert_eq!(sniff(PNG), Some("image/png"));
-        assert_eq!(sniff(b"\xff\xd8\xff\xe0"), Some("image/jpeg"));
-        assert_eq!(sniff(b"GIF89a\x01"), Some("image/gif"));
-        assert_eq!(sniff(b"RIFF\0\0\0\0WEBPVP8 "), Some("image/webp"));
-        assert_eq!(sniff(b"<svg xmlns="), None);
-        assert_eq!(sniff(b""), None);
     }
 }

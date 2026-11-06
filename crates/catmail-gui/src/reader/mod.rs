@@ -287,14 +287,11 @@ async fn open_message(id: MessageId, dark: bool) {
     let Some(body) = body.filter(|b| b.html.is_some()) else {
         return;
     };
-    for part in &body.attachments {
+    for part in body.inline_parts() {
         let Some(content_id) = &part.content_id else {
             continue;
         };
-        if !part.inline
-            || !part.mime_type.starts_with("image/")
-            || page_state().borrow().inline.contains_key(content_id)
-        {
+        if page_state().borrow().inline.contains_key(content_id) {
             continue;
         }
         match client().attachment_content(part.id).await {

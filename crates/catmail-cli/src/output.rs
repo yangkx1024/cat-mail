@@ -356,7 +356,7 @@ pub(crate) fn print_message(message: &Message, labels: &[String], html: bool) {
         Some(text) => println!("{}", printable_text(text.trim_end())),
         None => println!("(no text)"),
     }
-    let attachments: Vec<_> = body.attachments.iter().filter(|a| !a.inline).collect();
+    let attachments: Vec<_> = body.files().collect();
     if !attachments.is_empty() {
         println!();
         let rows = attachments

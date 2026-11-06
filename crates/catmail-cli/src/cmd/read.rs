@@ -63,12 +63,7 @@ pub(crate) async fn read(client: &MailClient, args: Read, json: bool) -> Result<
     if let Some(dir) = &args.save {
         std::fs::create_dir_all(dir)?;
         // The ones listed; inline images are part of the HTML.
-        for a in message
-            .body
-            .iter()
-            .flat_map(|b| &b.attachments)
-            .filter(|a| !a.inline)
-        {
+        for a in message.body.iter().flat_map(|b| b.files()) {
             let data = client.attachment_content(a.id).await?;
             let name = safe_filename(a.filename.as_deref(), &format!("attachment-{}", a.id));
             let path = files::write_new(dir, &name, &data)
