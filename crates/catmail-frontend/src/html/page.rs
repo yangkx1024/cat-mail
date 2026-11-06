@@ -47,8 +47,9 @@ const BASE_STYLE: &str = "html { overflow: hidden !important; } \
 /// (`c:<n>:<url>`, as [`BRIDGE`]'s image message spells it), so the inline parts can go in
 /// as they load.
 /// What the reader tells the page ([`image_message`]): the `data:` URL of an image shown,
-/// remote or inline, for the elements that refer to it (as `img.src` normalizes it, which
-/// is `remote_image_url`'s spelling too).
+/// remote or inline, for the `<img>` elements that refer to it (as `img.src` normalizes
+/// it, which is `remote_image_url`'s spelling too). Only those: the sanitizer keeps no
+/// `background` attribute, and no `url()` in styles.
 pub const BRIDGE: &str = r#"(function () {
   var number = document.querySelector('meta[name="catmail-page"]');
   var page = number ? number.content : "0";
@@ -84,9 +85,6 @@ pub const BRIDGE: &str = r#"(function () {
     if (data.slice(0, 5) !== "data:") return;
     document.querySelectorAll("img[src]").forEach(function (img) {
       if (absolute(img.getAttribute("src")) === url) img.src = data;
-    });
-    document.querySelectorAll("[background]").forEach(function (el) {
-      if (absolute(el.getAttribute("background")) === url) el.setAttribute("background", data);
     });
   });
   var cids = {};

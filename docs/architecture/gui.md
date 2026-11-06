@@ -255,7 +255,8 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 - **脚本**：页面自己的 JS 关掉（`java_script_enabled(false)`）。注入的脚本（`html::BRIDGE`）WebKit 照样运行，
   经 `window.nsh.postMessage` 回报：载入了（`r`）、页面高度（`h`）、按 web view 的高度画好了（`p`）、点击的链接
   （`o`）、页面里的 `cid:` 图片（`c`）。读信区经 `post_message` 发回图片（`i:<url>\n<data URL>`），脚本把它填进
-  对应的 `<img>` 和 `background`。
+  对应的 `<img>`。只有 `<img>` 有图：清洗不保留 `background` 属性和样式里的 `url()`（见
+  [正文](bodies.md)），表格布局邮件的 `<td background="…">` 背景图不显示。
 - **页面带编号**（`<meta name="catmail-page">`），消息都附上它，读信区只认最后建的那个：空白页、上一封邮件的
   页面晚到的消息不会被当成新页面的。
 - **高度**：web view 不滚动，高度跟着页面报的走；标题、头部和正文由外层一起滚。页面自己的 overflow 隐藏
