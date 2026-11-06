@@ -1,328 +1,232 @@
-//! The tray icon, there with or without a window: the app's icon with the number of
-//! unread messages in the INBOXes, a click to bring the main window back, and a menu to
-//! write a message, sync or quit. Lives with the app, like the engine it shows. What it
-//! shows, and on Linux the item itself, are `catmail_frontend::tray`'s. See
-//! docs/architecture/background.md.
-#![cfg_attr(
-    not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")),
-    allow(dead_code, reason = "no tray here yet (#109)")
-)]
+//! The tray icon: on Linux the app's icon with the number of unread messages in the
+//! INBOXes, a click to bring the main window back; on macOS a template in the menu bar with
+//! the number beside it, and on the Dock icon. Either has a menu to write a message, sync
+//! or quit, and is there with or without a window. The items, their menu and what they say
+//! are `catmail_frontend::tray`'s; here the count is counted, drawn (resvg, off the main
+//! thread) and followed, on the main thread. See docs/architecture/background.md.
+
+#[cfg(target_os = "linux")]
+#[path = "linux.rs"]
+mod platform;
+#[cfg(target_os = "macos")]
+#[path = "macos.rs"]
+mod platform;
 
 use std::borrow::Cow;
-use std::sync::Arc;
+use std::cell::RefCell;
+use std::sync::{Arc, LazyLock};
 
 use catmail_core::RecvError;
+use catmail_frontend::refresh::{Coalesce, Refresh};
 use catmail_frontend::tray::Chosen;
-pub use catmail_frontend::tray::Command;
-use gpui_kit::{App, AppContext as _, Global, RenderImage, SvgRenderer, Task, WindowAppearance};
+use futures_channel::mpsc;
+use futures_util::StreamExt as _;
+use resvg::{tiny_skia, usvg};
+use usvg::fontdb::{Database, Family, Query};
 
-use crate::mailbox::{Coalesce, Refresh};
-use crate::resident::{QuitReason, Resident};
-use crate::theme::appearance::{self, Themes};
+use self::platform::Item;
+use crate::{engine, shell};
 
-/// Where the desktop may have a tray to register with: the StatusNotifierItem.
-#[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(test)))]
-mod platform {
-    use catmail_frontend::tray::{Pixmap, linux};
-    use futures_channel::mpsc::UnboundedSender;
-
-    use super::{Chosen, Pixmaps};
-
-    #[derive(Clone)]
-    pub struct Item(linux::Item);
-
-    impl Item {
-        pub async fn spawn(chosen: UnboundedSender<Chosen>) -> Option<Self> {
-            linux::Item::spawn(crate::APP_NAME, chosen).await.map(Self)
-        }
-
-        pub async fn show(&self, icon: Option<Pixmaps>, unread: u32) {
-            let icon = icon.map(|pixmaps| {
-                let pixmaps = pixmaps.into_iter();
-                pixmaps
-                    .map(|(size, bgra)| Pixmap::from_bgra(size, &bgra))
-                    .collect()
-            });
-            self.0.show(icon, unread).await;
-        }
-    }
-}
-
-/// The menu bar's status item.
-#[cfg(all(target_os = "macos", not(test)))]
-mod platform {
-    use catmail_frontend::tray::{Template, macos};
-    use futures_channel::mpsc::UnboundedSender;
-
-    use super::{Chosen, Pixmaps};
-
-    #[derive(Clone)]
-    pub struct Item(macos::Item);
-
-    impl Item {
-        pub async fn spawn(chosen: UnboundedSender<Chosen>) -> Option<Self> {
-            macos::Item::spawn(chosen).map(Self)
-        }
-
-        pub async fn show(&self, icon: Option<Pixmaps>, unread: u32) {
-            let icon = icon.map(|pixmaps| {
-                let to_template = |(size, bgra): (u32, Vec<u8>)| Template::from_bgra(size, &bgra);
-                pixmaps.into_iter().map(to_template).collect::<Vec<_>>()
-            });
-            self.0.show(icon.as_deref(), unread);
-        }
-    }
-}
-
-/// No tray here yet (#109): there is never an item, so nothing is counted.
-#[cfg(all(
-    not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")),
-    not(test)
-))]
-mod platform {
-    use futures_channel::mpsc::UnboundedSender;
-
-    use super::{Chosen, Pixmaps};
-
-    #[derive(Clone)]
-    pub struct Item;
-
-    impl Item {
-        pub async fn spawn(_: UnboundedSender<Chosen>) -> Option<Self> {
-            None
-        }
-
-        pub async fn show(&self, _: Option<Pixmaps>, _: u32) {}
-    }
-}
-
-/// An item that keeps what it was shown, in order: the tool tip, and whether it was
-/// given an icon.
-#[cfg(test)]
-mod platform {
-    use std::sync::{Arc, Mutex};
-
-    use futures_channel::mpsc::UnboundedSender;
-
-    use super::{Chosen, Pixmaps};
-
-    #[derive(Clone, Default)]
-    pub struct Item(pub Arc<Mutex<Vec<(String, bool)>>>);
-
-    impl Item {
-        pub async fn spawn(_: UnboundedSender<Chosen>) -> Option<Self> {
-            Some(Self::default())
-        }
-
-        pub async fn show(&self, icon: Option<Pixmaps>, unread: u32) {
-            let shown = (catmail_frontend::tray::tool_tip(unread), icon.is_some());
-            self.0.lock().unwrap().push(shown);
-        }
-    }
-}
-
-use platform::Item;
-
-/// The app's icon, which the count is drawn on.
-#[cfg(not(all(target_os = "macos", not(test))))]
-const LIGHT: &str = include_str!("../../assets/app-icon/catmail-light.svg");
-#[cfg(not(all(target_os = "macos", not(test))))]
-const DARK: &str = include_str!("../../assets/app-icon/catmail-dark.svg");
-
-/// What the icon looks like, as an SVG, and the sizes it is drawn at (square).
-#[cfg(not(all(target_os = "macos", not(test))))]
-fn icon(dark: bool, unread: u32) -> (Cow<'static, str>, &'static [u32]) {
-    use catmail_frontend::tray::badged;
-    let icon = if dark { DARK } else { LIGHT };
-    (badged::svg(icon, unread), &badged::SIZES)
-}
-
-/// A template image, which macOS tints to suit the menu bar; the count is text beside it.
-#[cfg(all(target_os = "macos", not(test)))]
-fn icon(_dark: bool, _unread: u32) -> (Cow<'static, str>, &'static [u32]) {
-    (Cow::Borrowed(MENU_BAR_TEMPLATE), &MENU_BAR_SIZES)
-}
-
-#[cfg(any(target_os = "macos", test))]
-const MENU_BAR_TEMPLATE: &str = include_str!("../../assets/app-icon/catmail-menu-bar.svg");
-
-#[cfg(any(target_os = "macos", test))]
-use catmail_frontend::tray::MENU_BAR_SIZES;
-
-/// The icon at each of its sizes, square, in straight-alpha BGRA.
-type Pixmaps = Vec<(u32, Vec<u8>)>;
-
-pub struct Tray {
+#[derive(Default)]
+struct Tray {
+    item: Option<Item>,
     /// Unread messages in the INBOXes, once counted.
     unread: Option<u32>,
+    /// The desktop's appearance, which the icon is drawn in where it isn't a template:
+    /// the panel's, not the app's.
+    dark: bool,
     counting: Coalesce,
     /// One drawing at a time, so an icon drawn for an older count can't land last.
     drawing: Coalesce,
     /// The SVG the item's icon was last drawn from: one that looks the same isn't drawn
     /// again (macOS's never changes).
     drawn: Option<Cow<'static, str>>,
-    item: Option<Item>,
-    _events: Task<()>,
-    _chosen: Task<()>,
 }
 
-impl Global for Tray {}
+thread_local! {
+    /// The main thread's.
+    static TRAY: RefCell<Tray> = RefCell::default();
+}
 
-impl Tray {
-    /// Shows the tray icon for the mail of [`Resident`]'s engine, where the desktop has a
-    /// tray. Counts nothing where it hasn't.
-    pub fn start(cx: &mut App) {
-        let (choose, mut chosen) = futures_channel::mpsc::unbounded();
-        let chosen = cx.spawn(async move |cx| {
-            while let Ok((command, activation_token)) = chosen.recv().await {
-                cx.update(|cx| Self::choose(command, activation_token, cx));
-            }
-        });
-        cx.set_global(Self {
-            unread: None,
-            counting: Coalesce::default(),
-            drawing: Coalesce::default(),
-            drawn: None,
-            item: None,
-            _events: Task::ready(()),
-            _chosen: chosen,
-        });
-        cx.spawn(async move |cx| {
-            let Some(item) = Item::spawn(choose).await else {
-                return;
-            };
-            cx.update(|cx| Self::shown(item, cx));
-        })
-        .detach();
-    }
-
-    /// The tray has the item: counts from now on, and draws the icon in the desktop's
-    /// appearance.
-    fn shown(item: Item, cx: &mut App) {
+/// Shows the tray icon for the open engine's mail, where the desktop has a tray. Counts
+/// nothing where it hasn't. On the main thread, once the engine is open.
+pub fn start() {
+    let (choose, mut chosen) = mpsc::unbounded::<Chosen>();
+    shell::spawn(async move {
+        while let Some((command, activation_token)) = chosen.next().await {
+            shell::chose(command, activation_token);
+        }
+    });
+    shell::spawn(async move {
+        let Some(item) = Item::spawn(choose).await else {
+            return;
+        };
         // The app is quitting.
-        let Some(client) = Resident::client(cx) else {
+        let Some(client) = engine::open() else {
             return;
         };
+        TRAY.with_borrow_mut(|tray| tray.item = Some(item));
+        platform::follow_appearance();
+        count();
         let mut events = client.subscribe();
-        let events = cx.spawn(async move |cx| {
-            loop {
-                let event = match events.recv().await {
-                    Ok(event) => Some(event),
-                    Err(RecvError::Lagged(_)) => None,
-                    Err(RecvError::Closed) => break,
-                };
-                // The unread counts are the sidebar's.
-                if Refresh::after(event.as_ref(), None, &[]).sidebar {
-                    cx.update(Self::count);
-                }
-            }
-        });
-        let this = cx.global_mut::<Self>();
-        this.item = Some(item);
-        this._events = events;
-        cx.observe_global::<Themes>(Self::draw).detach();
-        Self::count(cx);
-    }
-
-    /// Does what `command`, chosen in the tray, asks for.
-    pub fn choose(command: Command, activation_token: Option<String>, cx: &mut App) {
-        match command {
-            Command::Open => Resident::show_at(None, activation_token, cx),
-            Command::Compose => Resident::compose(activation_token, cx),
-            Command::Sync => Resident::sync(cx),
-            Command::Quit => Resident::quit(QuitReason::Tray, cx),
-        }
-    }
-
-    /// Counts the unread messages again, and shows the count if it changed.
-    fn count(cx: &mut App) {
-        let Some(client) = Resident::client(cx) else {
-            return;
-        };
-        if !cx.global_mut::<Self>().counting.start() {
-            return;
-        }
-        cx.spawn(async move |cx| {
-            let counted = client.count_unread_in_inboxes().await;
-            cx.update(|cx| {
-                let this = cx.global_mut::<Self>();
-                let again = this.counting.finish();
-                match counted {
-                    Ok(unread) if this.unread != Some(unread) => {
-                        this.unread = Some(unread);
-                        Self::draw(cx);
-                    }
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(error = %e, "couldn't count the unread mail"),
-                }
-                if again {
-                    Self::count(cx);
-                }
-            });
-        })
-        .detach();
-    }
-
-    /// Shows the count, with the icon for it in the desktop's appearance, drawn off the UI
-    /// thread if it changed.
-    fn draw(cx: &mut App) {
-        let this = cx.global_mut::<Self>();
-        let (Some(item), Some(unread)) = (this.item.clone(), this.unread) else {
-            return;
-        };
-        if !this.drawing.start() {
-            return;
-        }
-        let dark = matches!(
-            appearance::system(cx),
-            WindowAppearance::Dark | WindowAppearance::VibrantDark
-        );
-        let (svg, sizes) = icon(dark, unread);
-        let unchanged = cx.global::<Self>().drawn.as_ref() == Some(&svg);
-        let drawing = (!unchanged).then(|| {
-            let renderer = cx.svg_renderer();
-            cx.background_spawn(async move {
-                let pixmaps = pixmaps(&renderer, &svg, sizes);
-                (svg, pixmaps)
-            })
-        });
-        cx.spawn(async move |cx| {
-            let pixmaps = match drawing {
-                Some(drawing) => {
-                    let (svg, pixmaps) = drawing.await;
-                    cx.update(|cx| cx.global_mut::<Self>().drawn = Some(svg));
-                    Some(pixmaps)
-                }
-                None => None,
+        drop(client);
+        loop {
+            let event = match events.recv().await {
+                Ok(event) => Some(event),
+                Err(RecvError::Lagged(_)) => None,
+                Err(RecvError::Closed) => break,
             };
-            item.show(pixmaps, unread).await;
-            // What changed meanwhile is drawn now, from what it is now.
-            if cx.update(|cx| cx.global_mut::<Self>().drawing.finish()) {
-                cx.update(Self::draw);
+            // The unread counts are the sidebar's.
+            if Refresh::after(event.as_ref(), None, &[]).sidebar {
+                count();
             }
-        })
-        .detach();
-    }
+        }
+    });
+}
 
-    /// The unread messages counted last.
-    #[cfg(test)]
-    pub fn unread(cx: &App) -> Option<u32> {
-        cx.global::<Self>().unread
-    }
-
-    /// What the item was shown, in order: the tool tip, and whether with a new icon.
-    #[cfg(test)]
-    fn showings(cx: &App) -> Vec<(String, bool)> {
-        let item = cx.global::<Self>().item.as_ref();
-        item.map(|item| item.0.lock().unwrap().clone())
-            .unwrap_or_default()
+/// The desktop's appearance is `dark` now: the icon is drawn again in it if it changed.
+#[cfg_attr(
+    target_os = "macos",
+    expect(dead_code, reason = "a template follows by itself")
+)]
+fn appearance_changed(dark: bool) {
+    if TRAY.with_borrow_mut(|tray| std::mem::replace(&mut tray.dark, dark) != dark) {
+        draw();
     }
 }
 
-/// `svg` at each of `sizes`.
-fn pixmaps(renderer: &SvgRenderer, svg: &str, sizes: &[u32]) -> Pixmaps {
-    let svg = match renderer.parse_svg(svg.as_bytes()) {
-        Ok(svg) => svg,
+/// Counts the unread messages again, and shows the count if it changed.
+fn count() {
+    let Some(client) = engine::open() else {
+        return;
+    };
+    if !TRAY.with_borrow_mut(|tray| tray.counting.start()) {
+        return;
+    }
+    shell::spawn(async move {
+        let counted = client.count_unread_in_inboxes().await;
+        let (changed, again) = TRAY.with_borrow_mut(|tray| {
+            let again = tray.counting.finish();
+            let changed = match counted {
+                Ok(unread) => tray.unread.replace(unread) != Some(unread),
+                Err(e) => {
+                    tracing::warn!(error = %e, "couldn't count the unread mail");
+                    false
+                }
+            };
+            (changed, again)
+        });
+        if changed {
+            draw();
+        }
+        if again {
+            count();
+        }
+    });
+}
+
+/// Shows the count, with the icon for it in the desktop's appearance, drawn off the main
+/// thread if it changed.
+fn draw() {
+    let drawing = TRAY.with_borrow_mut(|tray| {
+        let (Some(item), Some(unread)) = (tray.item.clone(), tray.unread) else {
+            return None;
+        };
+        if !tray.drawing.start() {
+            return None;
+        }
+        let (svg, sizes) = platform::icon(tray.dark, unread);
+        let unchanged = tray.drawn.as_ref() == Some(&svg);
+        Some((item, unread, (!unchanged).then_some((svg, sizes))))
+    });
+    let Some((item, unread, svg)) = drawing else {
+        return;
+    };
+    shell::spawn(async move {
+        let pixmaps = match svg {
+            Some((svg, sizes)) => {
+                let drawn = svg.clone();
+                let pixmaps = crate::app::off_thread(move || {
+                    let pixmaps = pixmaps(&drawn, sizes).into_iter();
+                    pixmaps.map(platform::icon_from).collect::<Vec<_>>()
+                })
+                .await;
+                TRAY.with_borrow_mut(|tray| tray.drawn = Some(svg));
+                pixmaps
+            }
+            None => None,
+        };
+        item.show(pixmaps, unread).await;
+        // What changed meanwhile is drawn now, from what it is now.
+        if TRAY.with_borrow_mut(|tray| tray.drawing.finish()) {
+            draw();
+        }
+    });
+}
+
+/// The system's fonts, for the badge's digits: loaded once, on the first drawing's
+/// thread that has text to draw.
+static FONTS: LazyLock<Arc<Database>> = LazyLock::new(|| {
+    let mut fonts = Database::new();
+    fonts.load_system_fonts();
+    installed_sans_serif(&mut fonts);
+    Arc::new(fonts)
+});
+
+/// Sans-serif fonts one of which most systems have, tried in order when the one
+/// `sans-serif` names isn't installed.
+const SANS_SERIF: &[&str] = &[
+    "DejaVu Sans",
+    "Noto Sans",
+    "Liberation Sans",
+    "Cantarell",
+    "Ubuntu",
+    "Arial",
+    "Helvetica",
+];
+
+/// Makes `sans-serif`, which the badge's digits are in, a font that is installed.
+/// fontdb takes it from fontconfig's aliases, the first font each prefers, installed or
+/// not, the last alias winning: on Ubuntu one that isn't there, and the digits weren't
+/// drawn. Then the first of [`SANS_SERIF`] there is, else any font at all.
+fn installed_sans_serif(fonts: &mut Database) {
+    let installed = |fonts: &Database, family: Family| {
+        let families = [family];
+        let query = Query {
+            families: &families,
+            ..Query::default()
+        };
+        fonts.query(&query).is_some()
+    };
+    if installed(fonts, Family::SansSerif) {
+        return;
+    }
+    let name = SANS_SERIF
+        .iter()
+        .find(|&&name| installed(fonts, Family::Name(name)))
+        .map(|&name| name.to_owned())
+        .or_else(|| {
+            let face = fonts.faces().next()?;
+            face.families.first().map(|(name, _)| name.clone())
+        });
+    if let Some(name) = name {
+        tracing::info!(
+            font = name,
+            "sans-serif isn't installed: the tray's badge uses another"
+        );
+        fonts.set_sans_serif_family(name);
+    }
+}
+
+/// `svg` at each of `sizes`, square: RGBA, premultiplied.
+fn pixmaps(svg: &str, sizes: &[u32]) -> Vec<tiny_skia::Pixmap> {
+    let mut options = usvg::Options::default();
+    // macOS's template has none: the count is the item's title there.
+    if svg.contains("<text") {
+        options.fontdb = FONTS.clone();
+    }
+    let tree = match usvg::Tree::from_str(svg, &options) {
+        Ok(tree) => tree,
         Err(e) => {
             tracing::error!(error = %e, "couldn't draw the tray icon");
             return Vec::new();
@@ -331,103 +235,34 @@ fn pixmaps(renderer: &SvgRenderer, svg: &str, sizes: &[u32]) -> Pixmaps {
     sizes
         .iter()
         .filter_map(|&size| {
-            let side = gpui_kit::DevicePixels(size as i32);
-            let image: Arc<RenderImage> = renderer
-                .render_parsed(
-                    &svg,
-                    gpui_kit::SvgSize::ExactSize(gpui_kit::size(side, side)),
-                )
-                .ok()?;
-            Some((size, image.as_bytes(0)?.to_vec()))
+            let mut pixmap = tiny_skia::Pixmap::new(size, size)?;
+            let scale = size as f32 / tree.size().width();
+            resvg::render(
+                &tree,
+                tiny_skia::Transform::from_scale(scale, scale),
+                &mut pixmap.as_mut(),
+            );
+            Some(pixmap)
         })
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use gpui_kit::TestAppContext;
-
     use super::*;
-    use crate::settings::Preferences;
-    use crate::test_support::{TestMail, wait_until};
 
-    /// A tray showing its first count, with its engine.
-    fn start(cx: &mut TestAppContext) -> TestMail {
-        let mail = TestMail::start();
-        cx.executor().allow_parking();
-        let client = mail.client.clone();
-        cx.update(|cx| {
-            crate::init_app(Preferences::load_nowhere(), cx);
-            Resident::hold(client, cx);
-            Tray::start(cx);
-        });
-        wait_until(|| {
-            cx.run_until_parked();
-            !cx.read(Tray::showings).is_empty()
-        });
-        mail
-    }
-
-    #[gpui_kit::test(iterations = 20)]
-    fn the_icon_shows_the_latest_count_however_its_drawings_finish(cx: &mut TestAppContext) {
-        let _mail = start(cx);
-
-        // Two counts in a row, the second while the first is being drawn.
-        cx.update(|cx| {
-            for unread in [7, 8] {
-                cx.global_mut::<Tray>().unread = Some(unread);
-                Tray::draw(cx);
-            }
-        });
-        cx.run_until_parked();
-        let shown = cx.read(Tray::showings);
-        let last = shown.last().map(|(tool_tip, _)| tool_tip.as_str());
-        assert_eq!(last, Some("8 unread messages"));
-    }
-
-    #[gpui_kit::test]
-    fn an_icon_that_looks_the_same_isnt_drawn_again(cx: &mut TestAppContext) {
-        let _mail = start(cx);
-
-        // The appearance changed, say, but not the count.
-        cx.update(Tray::draw);
-        cx.run_until_parked();
-        let shown = cx.read(Tray::showings);
-        assert_eq!(shown.len(), 2);
-        assert!(shown[0].1, "the first time, the icon is drawn");
-        assert!(!shown[1].1, "drawn again: {shown:?}");
-    }
-
+    /// Whatever fontconfig's aliases name: Ubuntu's named one that isn't installed.
     #[test]
-    fn the_icon_is_drawn_at_every_size_with_its_badge() {
-        let renderer = SvgRenderer::new(Arc::new(crate::assets::Assets));
-        for dark in [false, true] {
-            let (plain, sizes) = icon(dark, 0);
-            let plain = pixmaps(&renderer, &plain, sizes);
-            let badged = pixmaps(&renderer, &icon(dark, 12).0, sizes);
-            let drawn: Vec<_> = badged.iter().map(|(size, _)| *size).collect();
-            assert_eq!(drawn, sizes);
-            for ((size, plain), (_, badged)) in plain.iter().zip(&badged) {
-                assert_eq!(plain.len(), (size * size * 4) as usize);
-                assert_ne!(plain, badged, "{size}");
-            }
-        }
-    }
-
-    /// macOS tints whatever isn't transparent.
-    #[test]
-    fn the_menu_bar_template_is_drawn() {
-        let renderer = SvgRenderer::new(Arc::new(crate::assets::Assets));
-        let drawn = pixmaps(&renderer, MENU_BAR_TEMPLATE, &MENU_BAR_SIZES);
-        assert_eq!(drawn.len(), MENU_BAR_SIZES.len());
-        for (size, bgra) in drawn {
-            let (pixels, _) = bgra.as_chunks::<4>();
-            let opaque = pixels.iter().filter(|[.., a]| *a > 128).count();
-            let all = (size * size) as usize;
-            assert!(
-                all / 5 < opaque && opaque < all / 2,
-                "{size}: {opaque} of {all}"
-            );
-        }
+    fn sans_serif_is_a_font_that_is_installed() {
+        let mut fonts = Database::new();
+        fonts.load_system_fonts();
+        fonts.set_sans_serif_family("No Such Font");
+        installed_sans_serif(&mut fonts);
+        let query = Query {
+            families: &[Family::SansSerif],
+            ..Query::default()
+        };
+        let name = fonts.family_name(&Family::SansSerif).to_owned();
+        assert!(fonts.query(&query).is_some(), "sans-serif is {name}");
     }
 }

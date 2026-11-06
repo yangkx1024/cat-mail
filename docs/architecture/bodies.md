@@ -152,7 +152,7 @@ base64 正文），交给 mail-parser 按同样方式解析。于是两条路径
     把整封信分词一遍（大的营销邮件省下深色显示约四分之一的时间）；输出里没有 `<`，其它 `<style>` 都被
     ammonia 去掉，所以两种取法结果一样，有测试钉住。不是这种输入时只会丢样式表，不影响安全。
   - `recolor_html` 把清洗后的 HTML 再清洗一遍，同时把颜色搬到深色页面上（`dark.rs`，读信区在深色
-    主题下使用，见 [GUI](gui.md#html-引擎)）。样式表有自己的深色样式（`prefers-color-scheme: dark`，
+    主题下使用，见 [GUI](gui.md#深色)）。样式表有自己的深色样式（`prefers-color-scheme: dark`，
     或 `color-scheme` 含 `dark`）的正文原样返回。转换在 OKLab
     里反转亮度（换算用 `color` crate），白色到读信区背景色、黑色到文字色，色相和饱和度保留（超出 sRGB 时降饱和度）。颜色按
     用途区别对待：背景（`background*`、`bgcolor`、阴影）只变暗，文字（`color`、`<font color>` 等）只变亮，
@@ -184,8 +184,8 @@ base64 正文），交给 mail-parser 按同样方式解析。于是两条路径
     （重定向时也不发），User-Agent 是 `catmail/<版本>`。
   - 每张 30 秒、10 MiB 为限（先看 `Content-Length`，再边读边数）；一次最多 200 张，同时 6 个。
   - 类型先按开头字节认常见栅格格式（服务器常标成 `application/octet-stream` 或标错），认不出再用
-    `Content-Type` 的 `image/*`，都不是就算失败。SVG 也算失败：读信区不显示 SVG（解码器会读本地
-    文件），不必缓存。
+    `Content-Type` 的 `image/*`，都不是就算失败。SVG 也算失败，不必缓存：它能带脚本和外部引用，邮件里的
+    远程图片用栅格格式就够（起初是因为 GPUI 版的 SVG 解码器会按路径读本地文件）。
   - 返回一个流（`RemoteImageStream`）：每个 URL 下载完（或失败）就给出它的结果，按完成顺序，一张
     失败不影响其他；`next_ready` 不等待地取已完成的，前端可以把同时到的几张合成一批。流是 tokio 的
     channel，任何执行器都能等。丢掉流，引擎里还在下载的立即中止（`JoinSet` 随任务丢弃）。

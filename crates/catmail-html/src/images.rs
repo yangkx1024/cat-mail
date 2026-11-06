@@ -48,9 +48,9 @@ pub fn remote_image_urls(html: &str) -> Vec<String> {
 }
 
 /// The URL of a remote (`http`, `https`) image, normalized as a URL parser writes it, or
-/// `None` for anything else. Renderers ask for an image by its URL as they found it
-/// (Blitz parses it first, others don't), so remote images are fetched, cached and
-/// looked up by this one spelling.
+/// `None` for anything else. A reader may ask for an image by its URL as it found it in
+/// the HTML or parsed, so remote images are fetched, cached and looked up by this one
+/// spelling.
 pub fn remote_image_url(url: &str) -> Option<String> {
     let url = url::Url::parse(url.trim()).ok()?;
     matches!(url.scheme(), "http" | "https").then(|| url.into())

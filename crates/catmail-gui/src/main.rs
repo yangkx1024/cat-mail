@@ -1,242 +1,95 @@
-//! `catmail-gui`, the desktop frontend: a three-pane mailbox (accounts and folders,
-//! messages, the message), composer windows, and settings with themes that can come
-//! from a terminal's color scheme.
+//! `catmail-gui`: catmail's desktop app, on Native Shell (nsh): its GTK 4 backend on
+//! Linux, its AppKit one on macOS, message bodies in web views. `CATMAIL_DATA_DIR` opens
+//! another data directory, `CATMAIL_CONFIG_DIR` reads other settings; a second launch
+//! brings the running one's window up.
 
-mod actions;
-mod assets;
+#![cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+
+#[cfg(target_os = "linux")]
+use nsh_platform_linux as nsh_platform;
+#[cfg(target_os = "macos")]
+use nsh_platform_macos as nsh_platform;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod app;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod chrome;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod commands;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod composer;
-mod fonts;
-mod layout;
-mod login_form;
-mod mailbox;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod draft;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod engine;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod form;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod icons;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod list;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod login;
+#[cfg(target_os = "linux")]
 mod new_mail;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod outbox;
+mod page;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod reader;
-mod resident;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod settings;
-mod submission;
-#[cfg(test)]
-mod test_support;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod shell;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod sidebar;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod theme;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod toast;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod tray;
 
-use std::path::PathBuf;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn main() -> anyhow::Result<std::process::ExitCode> {
+    use catmail_core::{BodyPrefetch, Config, DEFAULT_GC_INTERVAL, MailClient, SyncSchedule};
+    use catmail_frontend::instance::{self, Claim, Display, Request};
+    use catmail_frontend::settings::SettingsFile;
 
-// Shared with the other frontends; kept at these paths, where the rest of the GUI finds them.
-use catmail_core::{BodyPrefetch, Config, DEFAULT_GC_INTERVAL, MailClient, SyncSchedule};
-use catmail_frontend::{format, html, instance};
-use clap::Parser;
-use gpui_kit::component::{ActiveTheme as _, StyledExt as _, v_flex};
-use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Pixels,
-    Point, QuitMode, Render, SharedString, Styled as _, Subscription, Window, WindowOptions, div,
-    px, size,
-};
-use settings::{Preferences, Settings};
-
-use crate::instance::{Claim, Display, Request};
-use crate::mailbox::Mailbox;
-use crate::resident::{Engine, QuitReason, Resident};
-
-/// What the system knows the app by: on Windows its AppUserModelID; elsewhere only the
-/// name shows (notifications, the tray). The qualifier of the data and config
-/// directories (`Config`).
-pub const APP_ID: &str = "net.yangkx.catmail";
-pub const APP_NAME: &str = "catmail";
-
-#[derive(Parser)]
-#[command(name = "catmail-gui", version = catmail_core::VERSION, about = "catmail in a window")]
-struct Cli {
-    /// Directory for the database and blobs [default: platform data dir]
-    #[arg(long, env = "CATMAIL_DATA_DIR")]
-    data_dir: Option<PathBuf>,
-    /// Directory for settings and imported themes [default: platform config dir]
-    #[arg(long, env = "CATMAIL_CONFIG_DIR")]
-    config_dir: Option<PathBuf>,
-}
-
-fn main() {
-    // The GPU adapter GPUI chose too: rendering on the CPU makes the app slow and big, and
-    // only info says why it passed the GPU over.
-    catmail_core::logging::init(
-        "catmail_gui=info,catmail_frontend=info,catmail_render=info,gpui_wgpu=info",
-    );
-    let cli = Cli::parse();
-    let config_dir = cli
-        .config_dir
-        .clone()
-        .or_else(catmail_core::Config::platform_config_dir);
-    let config = cli.data_dir.map_or_else(Config::platform_default, |dir| {
-        Ok(Config::with_data_dir(dir))
-    });
-    // Before the app starts, so a launch that only hands over shows nothing of its own.
-    // The lock goes to the engine: whoever holds it is the app other launches find.
-    let (builder, requests) = match config {
-        Ok(config) => {
-            let activate = Request::Activate {
-                display: Display::current(),
-            };
-            match instance::claim(&config, &activate) {
-                Ok(Claim::Handed) => return,
-                Ok(Claim::First { lock, requests }) => {
-                    catmail_core::logging::write_file(&config, "gui");
-                    (Ok(MailClient::builder_locked(lock)), requests)
-                }
-                // Opening the engine says why.
-                Ok(Claim::Unavailable) => (Ok(MailClient::builder(config)), None),
-                Err(e) => {
-                    // Through anyhow, for the cause after the error.
-                    eprintln!("catmail-gui: {:#}", anyhow::Error::from(e));
-                    std::process::exit(1);
-                }
-            }
-        }
-        // Opening the engine reports it.
-        Err(e) => (Err(e), None),
+    catmail_core::logging::init("catmail_gui=info,catmail_frontend=info");
+    let config = match std::env::var_os("CATMAIL_DATA_DIR") {
+        Some(dir) => Config::with_data_dir(dir),
+        None => Config::platform_default()?,
     };
-    // Without `.runtime(..)` the engine runs its own tokio runtime: GPUI's executor is
-    // not tokio, and the client's futures don't need it to be. New mail shows up as the
-    // server announces it, through the engine's events.
-    let opening = builder.map(|builder| {
-        builder
-            .sync_in_background(Some(SyncSchedule::default()))
-            .prefetch_bodies(Some(BodyPrefetch::default()))
-            .send_in_background(true)
-            .collect_garbage_every(Some(DEFAULT_GC_INTERVAL))
-    });
-    let opening = async move { opening?.open_async().await };
-
-    let app = gpui_kit::application()
-        .with_assets(assets::Assets)
-        // Closing the last window may leave the app running; see `Resident`.
-        .with_quit_mode(QuitMode::Explicit);
-    // macOS: clicking the Dock icon with no window open, or opening the app again from
-    // the Finder or Launchpad while it runs without one (and without a Dock icon).
-    app.on_reopen(|cx| {
-        if cx.has_global::<Resident>() {
-            Resident::show(Display::default(), cx);
+    let config_dir = std::env::var_os("CATMAIL_CONFIG_DIR")
+        .map(Into::into)
+        .or_else(Config::platform_config_dir);
+    // Before any window: a launch that only hands over shows nothing of its own.
+    let activate = Request::Activate {
+        display: Display::current(),
+    };
+    let (builder, requests) = match instance::claim(&config, &activate)? {
+        Claim::Handed => return Ok(std::process::ExitCode::SUCCESS),
+        Claim::First { lock, requests } => {
+            catmail_core::logging::write_file(&config, "gui");
+            (MailClient::builder_locked(lock), requests)
         }
-    });
-    app.run(move |cx| {
-        // Meanwhile the app and its window are set up.
-        let opening = cx.background_executor().spawn(opening);
-        init_app(
-            match config_dir {
-                Some(dir) => Preferences::load(dir),
-                None => Preferences::load_nowhere(),
-            },
-            cx,
-        );
-        if let Err(e) = Resident::start(opening, requests, cx) {
-            tracing::error!(error = format!("{e:#}"), "couldn't open a window");
-            resident::exit(QuitReason::NoWindow, cx);
-            return;
-        }
-        Resident::quit_on_signals(cx);
-    });
+        // Opening the engine says why.
+        Claim::Unavailable => (MailClient::builder(config), None),
+    };
+    // The engine syncs, prefetches, sends and collects garbage on its
+    // own, and its futures don't need tokio, which the toolkit's loop isn't.
+    let builder = builder
+        .sync_in_background(Some(SyncSchedule::default()))
+        .prefetch_bodies(Some(BodyPrefetch::default()))
+        .send_in_background(true)
+        .collect_garbage_every(Some(DEFAULT_GC_INTERVAL));
+    let code = shell::run(builder, requests, config_dir.map(SettingsFile::new));
+    Ok(std::process::ExitCode::from(code))
 }
 
-/// Sets up the app before its first window: components, settings, theme, keys and the
-/// app-wide actions.
-fn init_app(preferences: Preferences, cx: &mut App) {
-    gpui_kit::init(cx);
-    // Before any window or notification.
-    cx.set_app_identity(APP_ID, APP_NAME);
-    fonts::init(cx);
-    cx.set_global(preferences);
-    theme::appearance::init(cx);
-    actions::bind_keys(cx);
-    // Text size applies to every window, so it is the app's to handle.
-    cx.on_action(|_: &actions::TextLarger, cx| step_text_size(1, cx));
-    cx.on_action(|_: &actions::TextSmaller, cx| step_text_size(-1, cx));
-    cx.on_action(|_: &actions::TextReset, cx| {
-        Preferences::update(cx, |s| s.text_size = Settings::default().text_size);
-    });
-}
-
-fn step_text_size(step: isize, cx: &mut App) {
-    let size = Preferences::get(cx).stepped_text_size(step);
-    Preferences::update(cx, |s| s.text_size = size);
-}
-
-pub(crate) fn window_options(cx: &App) -> WindowOptions {
-    layout::window_options(
-        "catmail",
-        size(px(1280.), px(800.)),
-        size(px(720.), px(480.)),
-        layout::Frame::Unified,
-        cx,
-    )
-}
-
-/// The main window: empty while the engine opens the data directory (which a migration
-/// can make take a while), then the mailbox. Closing it drops the mailbox; the engine
-/// stays with the app (see `Resident`).
-pub(crate) struct MainWindow {
-    mailbox: Option<Entity<Mailbox>>,
-    /// Until the mailbox is in it.
-    following_engine: Option<Subscription>,
-    /// Where the window's buttons were put, for the text size (`layout::Frame::Unified`).
-    window_buttons: Option<Point<Pixels>>,
-}
-
-impl MainWindow {
-    pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let following = cx.observe_global_in::<Resident>(window, Self::follow_engine);
-        let mut this = Self {
-            mailbox: None,
-            following_engine: Some(following),
-            window_buttons: None,
-        };
-        this.follow_engine(window, cx);
-        this
-    }
-
-    fn follow_engine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(client) = Resident::client(cx) else {
-            // Rendered from the engine's state.
-            cx.notify();
-            return;
-        };
-        let mailbox = cx.new(|cx| Mailbox::new(client, window, cx));
-        Resident::adopt(&mailbox, window, cx);
-        self.mailbox = Some(mailbox);
-        self.following_engine = None;
-        cx.notify();
-    }
-}
-
-impl Render for MainWindow {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        layout::place_window_buttons(&mut self.window_buttons, window);
-        if let Some(mailbox) = &self.mailbox {
-            return mailbox.clone().into_any_element();
-        }
-        let page = match Resident::engine(cx) {
-            Engine::Failed(message) => open_failed(message.clone(), cx),
-            Engine::Opening | Engine::Open(_) | Engine::Closed => div()
-                .size_full()
-                .bg(cx.theme().background)
-                .into_any_element(),
-        };
-        layout::movable(page, window).into_any_element()
-    }
-}
-
-fn open_failed(message: SharedString, cx: &App) -> AnyElement {
-    v_flex()
-        .size_full()
-        .items_center()
-        .justify_center()
-        .gap_2()
-        .p_4()
-        .bg(cx.theme().background)
-        .text_color(cx.theme().foreground)
-        .child(div().font_semibold().child("Couldn't open the mail data"))
-        .child(
-            div()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child(message),
-        )
-        .into_any_element()
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn main() {
+    eprintln!("catmail-gui: runs on Linux and macOS only, as nsh does");
+    std::process::exit(1);
 }

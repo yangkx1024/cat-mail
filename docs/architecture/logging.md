@@ -4,9 +4,8 @@
 
 - stderr：按 `RUST_LOG`，默认只有 warn，和以前一样。
 - 数据目录下的 `logs/catmail.log`：按 `CATMAIL_LOG`，默认 warn 加上引擎各 crate（core、proto、store）
-  的 info，再加上前端自己的那部分：GUI 是 `catmail_gui`、`catmail_frontend`、`catmail_render` 和 `gpui_wgpu`，
-  CLI 是 `catmail`。`catmail_frontend` 里有常驻时回收内存（trim 前后的 RSS）和没有托盘这两条。GUI 把 `gpui_wgpu` 记进来，是因为选到 llvmpipe（CPU 渲染）时应用又慢又大，而 GPUI 只在
-  info 级别说明为什么跳过了显卡。
+  的 info，再加上前端自己的那部分：GUI 是 `catmail_gui` 和 `catmail_frontend`，CLI 是 `catmail`。
+  `catmail_frontend` 里有常驻时回收内存（trim 前后的 RSS）和没有托盘这两条。
 
 全局 subscriber 由前端显式调 `init` 来装，core 自己从不装：测试在一个进程里开很多引擎。
 
@@ -43,13 +42,13 @@ INFO catmail_core::logging: running on os="NixOS 26.11 (Zokor)" kernel="7.2.11-z
   - 没有 `.git` 的构建（源码包、Nix 打包）由打包方设置 `CATMAIL_COMMIT`。
   - build script 只在 HEAD 或分支变化时重新运行，不监听 index；调用 git 时带 `--no-optional-locks`，以免 git
     刷新 index、反过来让 build script 再跑一遍。所以只改了文件时，`-dirty` 可能滞后。
-  - `catmail --version` 和 `catmail-gui --version` 显示同一个 `catmail_core::VERSION`（`0.1.0 (commit)`）。
+  - `catmail --version` 显示 `catmail_core::VERSION`（`0.1.0 (commit)`），文件头里的是同一个。
 - 运行环境（`system.rs`）尽量读文件，启动时不起别的进程：Linux 读 `/etc/os-release` 和
   `/proc/sys/kernel/osrelease`，macOS 读 `SystemVersion.plist`；只有 Windows 起一次 `cmd /c ver`（带
   `CREATE_NO_WINDOW`，GUI 不会闪出控制台）。没有用 `os_info`：它在 Linux 上要起 `lsb_release`、`uname`、
   `getconf` 三个进程，还会带进 `nix`、`objc2`、windows-sys 这些依赖。
 - 会话（`XDG_SESSION_TYPE` 加 `XDG_CURRENT_DESKTOP`）和 locale 决定了窗口、托盘、通知和字体最容易出问题的
-  地方。文件里的时间是 UTC，`utc_offset` 用来对上用户说的本地时间。GPU 由 GPUI 自己在随后几行里记下。
+  地方。文件里的时间是 UTC，`utc_offset` 用来对上用户说的本地时间。
 - 不记主机名、用户名。家目录在写文件时统一换成 `~`（`LogFile::write`），所有日志行和 panic 都一样，
   不用每个打日志的地方自己记着处理。
 
@@ -78,10 +77,10 @@ INFO catmail_core::logging: running on os="NixOS 26.11 (Zokor)" kernel="7.2.11-z
   `the server can't search text`，之后不再问。每个文件夹的命中数和两段耗时、跳过的文件夹（UIDVALIDITY 变了、打不开）、
   因登录被拒或超限不问的账户记在 debug：`CATMAIL_LOG=info,catmail_core::search=debug`；提前连接
   失败记 info 一行（连上的是通常的 `logged in to IMAP`）。GUI 发起搜索或提前连接失败时 warn 一行。
-- 退出：GUI 每条退出路径记一行 `quitting reason=…`（见[后台运行](background.md#退出)），
+- 退出：GUI 退出时记一行 `quitting reason=…`，退出被取消时记 `quit called off`（见[后台运行](background.md#退出)），
   `MailClient::shut_down` 记 `shutting down the engine`，引擎关闭时 core 记 `engine closed`；`catmail watch` 被 Ctrl+C 中断时记 `interrupted; stopping`。日志停在别处，
   就是进程被杀或崩溃了。
-- GUI：读信区打开一封邮件，下载和准备正文各用了多久，打不开时的错误（warn，用户看到的那句话）；主窗口开关、显示连接的切换、trim 前后的 RSS
+- GUI：打不开邮件、附件、图片缓存时的错误（warn）；主窗口开关、进入常驻、trim 前后的 RSS
   （见[后台运行](background.md#引擎属于应用不属于窗口)）。
 - panic 连同 backtrace 直接写进文件，不经过 `tracing`，以免 `tracing` 自己 panic 时又回到这里。
 

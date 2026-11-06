@@ -151,7 +151,7 @@ flags，重复的批次不产生重复行）。HIGHESTMODSEQ 用 EXAMINE 时刻�
 - **锁。** 每一步持有账户的同步锁（完整同步按文件夹拿，见[锁](#锁)），与手动同步、`replay_pending` 串行；等待（IDLE、轮询和重试的间隔）
   时不持有，所以另开连接的同步（`sync_folder`、`sync_account`、`replay_pending`）不必等 IDLE 结束。
   连接在拿锁之前建好：服务器连不上时不挡住它们。
-- **现在同步**（`MailClient::sync_now`，GUI 的 Sync 按钮、Ctrl R、托盘的"Sync now"）由后台任务来做，
+- **现在同步**（`MailClient::sync_now`，GUI 的 Sync 按钮、Ctrl Shift N 或 F5、托盘的"Sync now"）由后台任务来做，
   不另开连接：每个账户记下要求的时刻（`Engine::ask_to_sync`），开始于它之前的完整同步不再算数（与醒来的
   时刻同一套比较，`Cutoff`），再像本地改动一样唤醒任务，它的下一步就是一次完整同步。正在进行的那次
   完整同步可能在要求之前就做完了某些文件夹，所以做完后再来一遍。与 `resume` 不同，它不改醒来的时刻，
@@ -169,9 +169,8 @@ flags，重复的批次不产生重复行）。HIGHESTMODSEQ 用 EXAMINE 时刻�
   - 前端不再自己逐个账户同步（#152）。代价：文件夹级的失败（服务器拒绝某个文件夹）不再弹通知，与后台
     同步一样只在报告里、记日志；同步也只上传停止编辑够久的草稿（`draft_upload_delay`）。
   - 没有后台同步时 `sync_now` 返回 `Error::NoBackgroundSync`，什么也不置位（没有任务来撤下）。起初它
-    在调用里逐个 `sync_account`，但走那条分支的只有关掉后台同步的 GUI 测试：一个方法两套行为（同步完
-    才返回、另开连接、上传全部草稿），测试也测不到真实的路径。现在按 Sync 的 GUI 测试用开着后台同步的
-    客户端（`TestMail::start_syncing_in_background`）。CLI 的 `catmail sync` 仍直接调 `sync_account`：
+    在调用里逐个 `sync_account`，但走那条分支的只有（GPUI 版的）关掉后台同步的 GUI 测试：一个方法两套
+    行为（同步完才返回、另开连接、上传全部草稿），测试也测不到真实的路径。CLI 的 `catmail sync` 仍直接调 `sync_account`：
     一次性的命令没有后台同步可以催。
   - 报告时带上这次尝试开始的时刻（`Activity::SyncBegun`：后台同步的每一步、`sync_account`），开始于
     要求之后的就撤下 `syncing`。后台同步只同步 INBOX 的步骤也这样报告：要求之后全部文件夹都到期，

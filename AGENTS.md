@@ -1,8 +1,9 @@
 # catmail — Agent Guide
 
-catmail is a cross-platform email client in Rust (Linux first, then Windows and macOS).
+catmail is a cross-platform email client in Rust (Linux and macOS; Windows later).
 A UI-independent engine exposes a single `MailClient` facade; the `catmail` CLI and the
-GPUI/gpui-kit GUI are peer frontends on top of it.
+`catmail-gui` desktop app (Native Shell: GTK 4 on Linux, AppKit on macOS) are peer
+frontends on top of it.
 
 - Scope, roadmap and status: [README.md](README.md)
 - Architecture and the reasoning behind it: [docs/architecture.md](docs/architecture.md)
@@ -31,17 +32,18 @@ CI (`.github/workflows/ci.yml`) runs clippy on Linux, macOS and Windows; pull re
 run the tests on Linux only, and `main` runs them on all three. A platform-specific
 failure can therefore first show up after merging: when a change touches paths, files
 or anything behind `cfg`, run the macOS / Windows tests before merging with
-`gh workflow run ci.yml --ref <branch>`. Only Linux is shipped for now, but code must build and
-pass everywhere: put
-platform-specific code behind `cfg`, and don't assume Unix paths or file semantics in
-code or tests. `nix.yml` checks `flake.nix` formatting (`nix fmt`) and the dev shell. `audit.yml` runs
+`gh workflow run ci.yml --ref <branch>`. The desktop app runs on Linux and macOS only
+(it isn't brought up on nsh's Windows backend yet; on Windows `catmail-gui` builds, says
+so and exits), but all code must build and pass everywhere: put platform-specific code
+behind `cfg`, and don't assume Unix paths or file semantics in code or tests. `nix.yml`
+checks `flake.nix` formatting (`nix fmt`) and the dev shell. `audit.yml` runs
 `cargo deny` against `deny.toml` (advisories, license allowlist, banned TLS/crypto crates,
 crates.io and the git repositories listed one by one) on pull requests, `main` and weekly; an advisory that doesn't affect us is
 ignored there with a reason, never by loosening the check.
 
 ## Crates and layering
 
-`types ← store, proto ← core ← cli / gui`, `html ← proto, core`, `core ← frontend ← gui`, and `render ← gui`
+`types ← store, proto ← core ← cli / gui`, `html ← proto, core`, and `core ← frontend ← gui`
 
 | Crate | Role |
 |---|---|
@@ -51,20 +53,16 @@ ignored there with a reason, never by loosening the check.
 | `catmail-html` | Sanitizing message HTML and its style sheets, and the passes readers make over the result (images, dark recoloring). Pure functions, no IO |
 | `catmail-core` | Engine, services, runtime bridge, secrets, the `MailClient` facade |
 | `catmail-cli` | The `catmail` binary |
-| `catmail-gui` | The `catmail-gui` desktop binary, on GPUI Kit |
-| `catmail-frontend` | What desktop frontends share and no UI toolkit needs: the settings file, the themes, single instance, the sidebar's folders and model, which engine events read what again, the list's rows, the commands on messages, the composer's model, the outbox's choices, the login forms, display formats, the reader's header and HTML policy, the tray icon (its menu, badge, the Linux StatusNotifierItem), what new-mail notifications say, what happens once the last window closes |
-| `catmail-render` | The reader's HTML engine (Blitz): lays out and paints a message body on its own thread. No UI toolkit, no mail types |
+| `catmail-gui` | The `catmail-gui` desktop binary, on Native Shell (nsh): GTK 4 and WebKitGTK on Linux, AppKit and WKWebView on macOS; message bodies in a web view |
+| `catmail-frontend` | The desktop logic no UI toolkit needs: the settings file, the themes, single instance, the sidebar's folders and model, which engine events read what again, the list's rows, the commands on messages, the composer's model, the outbox's choices, the login forms, display formats, the reader's header and HTML policy, the tray icon (its menu, badge, the Linux StatusNotifierItem, the macOS status item), what new-mail notifications say, what happens once the last window closes |
 | `catmail-testkit` | Fake IMAP and SMTP servers with fault injection; dev-dependency only |
 
 Frontends depend on `catmail-core` only; it re-exports the types they need. Desktop logic that
-no UI toolkit needs goes in `catmail-frontend`, not in `catmail-gui`. The GUI also
-depends on `catmail-render`, which knows nothing of mail: the reader gives it sanitized HTML
-and the one function that decides which images load.
-
-`catmail-gui` depends on `gpui-kit` alone, never on `gpui` directly. Before changing it,
-read the vendored GPUI Kit skills in `crates/catmail-gui/.claude/skills/` (`gpui-kit` holds
-the Coding Guides, `gpui-kit-design-guides` the Design Guides; see their `README.md` for
-the upstream commit).
+no UI toolkit needs goes in `catmail-frontend`, not in `catmail-gui`: its tests build and
+run without GTK, WebKit or nsh, and the crate boundary keeps toolkit types out of the
+models. `catmail-gui` holds the views and the shell around them (windows, the toolkit's
+main loop, quitting); see [docs/architecture/gui.md](docs/architecture/gui.md) and its
+roadmap, `crates/catmail-gui/ROADMAP.md`, which marks the nsh workarounds with ⚠️.
 
 Protocol behaviour is tested against `catmail-testkit`'s fake servers (every OS) and a real
 Dovecot (`testenv/dovecot/run.sh`, run by the Linux CI test job; IMAP, and SMTP submission relaying to a
@@ -75,7 +73,8 @@ fake-server test, with a fault injected if the change is about recovering from o
 
 - **Runtime bridge.** Public `MailClient` methods must stay executor-agnostic: run work on
   the engine runtime (`Runtime::run` / `run_blocking`) and await the handle. Never call
-  `tokio::spawn` or block on tokio from frontend code; GPUI is not tokio.
+  `tokio::spawn` or block on tokio from frontend code; the GUI's main loop (GTK's,
+  AppKit's) and nsh's view threads are not tokio.
 - **Database access** goes through `Store::read` / `Store::write`. Everything that must be
   atomic (a local change plus its `pending_ops` row, synced messages plus the folder
   cursor) happens inside one `write` closure. Never call back into the `Store` from inside

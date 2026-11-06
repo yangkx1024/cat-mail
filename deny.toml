@@ -20,14 +20,14 @@ all-features = true
 # unsound only covers direct dependencies by default; unmaintained already covers all.
 unsound = "all"
 ignore = [
-    # Unmaintained, no known vulnerability, and only reachable through gpui-kit's own
-    # dependencies (fonts, SVG, accessibility, D-Bus); they go when gpui-kit drops them.
-    { id = "RUSTSEC-2024-0384", reason = "instant, via gpui-kit" },
-    { id = "RUSTSEC-2024-0436", reason = "paste, via gpui-kit, metal and exr" },
-    { id = "RUSTSEC-2026-0192", reason = "ttf-parser, via gpui-kit's font stack" },
-    { id = "RUSTSEC-2026-0206", reason = "rustybuzz, via gpui-kit's SVG renderer" },
+    # Unmaintained, no known vulnerability, and only reachable through resvg's text
+    # (usvg's fonts and shaping: nsh-core's SVGs, the tray's badge); they go when it
+    # drops them.
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser, via resvg's text" },
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz, via resvg's text" },
     # zbus_names, zvariant and zvariant_derive were merged into zbus 6; we get zbus 5
-    # through gpui-kit and keyring's Secret Service store, until both move to zbus 6.
+    # through ksni (the Linux tray) and keyring's Secret Service store, until both move
+    # to zbus 6.
     { id = "RUSTSEC-2026-0370", reason = "zvariant, via zbus" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names, via zbus" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive, via zbus" },
@@ -58,7 +58,7 @@ confidence-threshold = 0.8
 ignore = true
 
 [bans]
-# GPUI alone pulls in many duplicate versions we can't unify, so duplicates are allowed;
+# Our dependencies pull in duplicate versions we can't unify, so duplicates are allowed;
 # what must not come in twice is a TLS or crypto stack (see the rustls entry in Cargo.toml).
 multiple-versions = "allow"
 wildcards = "allow"
@@ -85,10 +85,7 @@ allow-git = [
     # The unreleased 0.18.0, pinned to a commit in the root Cargo.toml's
     # `[patch.crates-io]`; remove with it once 0.18.0 is on crates.io (#130).
     "https://github.com/djc/imap-proto",
-    # Blitz 0.3.0-beta.4 with anonymous cells in table rows, pinned in the root
-    # Cargo.toml's `[patch.crates-io]`; remove with it once a release has them.
-    "https://github.com/yangkx1024/blitz",
-    # Native Shell's unreleased main, for the catmail-nsh spike, pinned in the root
-    # Cargo.toml; remove with it once a release handles taffy's `calc` (nsh#966).
+    # Native Shell's unreleased main, catmail-gui's toolkit, pinned in the root
+    # Cargo.toml; remove with it once a release has what catmail-gui uses.
     "https://github.com/longbridge/nsh",
 ]

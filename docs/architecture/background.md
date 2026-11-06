@@ -2,8 +2,8 @@
 
 [← 架构](../architecture.md)
 
-> 状态：常驻与单实例唤起、睡眠唤醒、新邮件事件与系统通知、Linux 托盘、macOS 状态栏已实现（#106、#82、
-> #107、#108）；Windows 托盘（#109）、开机启动尚未实现，这几个小节是设计。
+> 状态：常驻与单实例唤起、引擎自己发现睡眠、新邮件事件、Linux 的系统通知与托盘、macOS 的状态栏已实现。macOS 的
+> 新邮件通知、开机启动尚未实现；Windows 还没有 GUI（见 [GUI](gui.md)）。没实现的小节是设计。
 
 GUI 关掉主窗口后继续同步、发信、提醒新邮件，并能从托盘、再次启动或通知回到窗口。
 
@@ -15,79 +15,73 @@ GUI 关掉主窗口后继续同步、发信、提醒新邮件，并能从托盘�
 
 - `MailClient` 的六十多个 async 方法、事件流、文件交接都要过 IPC，两个进程的版本要配对。
 - 守护进程省不掉 UI 循环：macOS 的状态栏图标要 NSApplication 主线程，它实际上还是一个 UI 进程。
-- 常驻 GUI 的开销已经接近守护进程：GPUI Fast 能在运行时切到 headless（见下），Linux 上的托盘
-  （StatusNotifierItem）和通知都走 D-Bus，不需要显示服务器的连接。
+- 常驻 GUI 的开销接近守护进程：窗口、它的视图线程和 WebKit 渲染进程都随窗口退出，Linux 上的托盘
+  （StatusNotifierItem）和通知都走 D-Bus。⚠️ GTK 常驻时仍连着显示服务器（GPUI 版能断开），实测见下。
 
 守护进程真正的好处是 CLI 能与 GUI 同时使用，这留给"引擎 IPC"（见[与 CLI 的关系](#与-cli-的关系)）。
-常驻的部分集中在一个模块里，以后要拆成独立进程时整体搬出去。
+常驻的部分集中在外壳（`catmail-gui/src/shell/`）和 `catmail_frontend::resident`，以后要拆成独立进程时整体搬出去。
 
 ## 两个状态
 
 ```
 有窗口 ──最后一个窗口关闭，且开着"关闭窗口后保持运行"──▶ 常驻
   ▲                                                    │
-  └──── 托盘 / 再次启动 / 点击通知 ──────────────────────┘
+  └──── 托盘 / 再次启动 / 点击通知 / Dock ───────────────┘
 有窗口、常驻 ──Quit（Ctrl Q、托盘菜单、macOS 应用菜单）──▶ 退出
 ```
 
-- 应用用 `QuitMode::Explicit`，何时退出由我们决定，不再在 `on_window_closed` 里 `cx.quit()`。
-- 设置"关闭窗口后保持运行"（`settings.json`）默认开。关闭时与以前相同：最后一个窗口关掉就退出。
-  默认开，是因为没有托盘的桌面（GNOME 未装 AppIndicator 扩展）也能从启动器再点一次回到窗口
-  （见[单实例与唤起](#单实例与唤起)），不会"找不回来"。
-- 写信、设置窗口也算窗口：关掉主窗口时还有写信窗口开着，就等它们都关掉才进入常驻。
-- 进入常驻时 `cx.request_windowing(WindowingRequest::Headless)`，回到窗口前
-  `request_windowing(Windowed(env))`：
-
-  | 平台 | 常驻时 |
-  |---|---|
-  | Linux | 断开 Wayland / X11 连接；托盘和通知经 D-Bus |
-  | Windows | 释放 GPU；消息循环照常，托盘图标需要它 |
-  | macOS | 切到 Accessory：没有 Dock 图标、菜单栏，不在 Cmd-Tab 里，只留状态栏图标 |
-
-  被另一个进程唤起时，`env` 带上那个进程的 `XDG_ACTIVATION_TOKEN`，否则 Wayland 不让新窗口获得焦点。
-- macOS 上考虑过保留 Dock 图标（Mail.app 的习惯，点 Dock 回到窗口），没有采用：有了状态栏图标，常驻
-  就与 Linux、Windows 是同一个状态，"关闭窗口后保持运行"在三个平台上意思相同；从启动台、Finder 再打开
-  仍经 `on_reopen` 回到窗口，状态栏图标被系统或别的工具藏起来也找得回来。回到窗口时先 `cx.activate`：
-  状态栏菜单不会让应用变成前台，刚从 Accessory 切回来的应用也不是，新窗口会开在别的应用后面。
+- 何时退出由外壳决定，不是工具包：GTK 的应用整个运行期间 `hold()` 着，否则它随最后一个窗口结束；AppKit 的
+  `applicationShouldTerminateAfterLastWindowClosed` 答否。外壳在窗口没了时（`window_removed`）决定，要退出时
+  `toolkit::end`。
+- 设置"关闭窗口后保持运行"（`settings.json`）默认开。关闭时最后一个窗口关掉就退出。默认开，是因为没有托盘的
+  桌面（GNOME 未装 AppIndicator 扩展）也能从启动器再点一次回到窗口（见[单实例与唤起](#单实例与唤起)），不会
+  "找不回来"。
+- 写信窗口也算窗口：关掉主窗口时还有写信窗口开着，就等它们都关掉才进入常驻。
+- macOS 上常驻时 Dock 图标还在（`Regular` 的激活策略），点它回到窗口。GPUI 版常驻时切到 Accessory，只留状态栏
+  图标；现在没有切换。
 
 ## 引擎属于应用，不属于窗口
 
-应用级的全局 `Resident`（`catmail-gui/src/resident.rs`）持有：
+引擎由应用持有（`catmail-gui/src/engine.rs`）：打开中、已打开（`MailClient`）、打开失败或已关闭。窗口来来去去，
+引擎一直运行到应用退出；视图用 `engine::opened` 等它打开。外壳（`shell/`）另外记着主窗口、写信窗口、托盘和通知
+对主窗口的请求（`Ask`），以及主窗口上次的位置。
 
-- 打开中、已打开（`MailClient`）或打开失败的引擎；主窗口从它取，写信窗口和设置从主窗口拿到。
-- 主窗口（`MainWindow`：引擎打开前留空，失败时显示原因，之后是 `Mailbox`）和显示模式的切换。
-- 唤起服务送来的请求（下一节）。
-- 窗口最后在的显示环境（`display`）：点击通知时没有别的请求方，常驻时就切回这里。
+不依赖窗口的事件订阅在引擎打开时启动：新邮件通知（`new_mail.rs`，见[新邮件](#新邮件)）、托盘（`tray/`，见
+[托盘](#托盘)）。它们不存 `MailClient`：启动时订阅一次事件，之后每次用到都从 `engine::open` 取（引擎没打开或已在
+退出时是 `None`），退出后也就不再发出注定得到 `Error::Closed` 的调用。引擎关闭时事件流结束，它们的循环随之停下。
 
-不依赖窗口的事件订阅放在各自的全局里，引擎打开时启动：新邮件通知（`Notifier`，见[新邮件](#新邮件)）、
-托盘（`Tray`，见[托盘](#托盘)）。它们不存 `MailClient`：启动时订阅一次事件，之后每次用到都从
-`Resident::client` 取（引擎没打开或已在退出时是 `None`），引擎的状态只有 `Resident` 一份，退出后也就
-不再发出注定得到 `Error::Closed` 的调用。引擎关闭时事件流结束，它们的事件循环随之停下。退出时关闭
-引擎不靠谁放手（见[退出](#退出)），存着 `MailClient` 也拖不住它。
+主窗口关闭时它的视图和视图线程随之结束：列表、读信区、图片都释放，WebKit 的渲染进程也退出。重新打开时新建
+邮箱，外壳只记住上次选中的 `Place`（`shell::left_at`），那里已经不在就回到第一个收件箱。期间托盘、通知的请求
+（去某处、写信）记着，新的邮箱打开时接过去（`follow_asks`）。
 
-主窗口关闭时整个 `Mailbox` 被 drop：列表、读信区（Blitz 每个文档一个线程）、图片都随之释放。重新
-打开时新建 `Mailbox`，`Resident` 只记住上次选中的 `Place`（`Mailbox` 释放时记下，新的
-`Mailbox::reopen_at`），那里已经不在就回到第一个收件箱。
+最后一个窗口关闭时怎么做是一个纯函数（`catmail_frontend::resident::after_last_window`，退出原因 `QuitReason` 也在
+那里）：正在退出、没开"保持运行"、引擎打开失败（没有东西可运行）时退出；否则常驻。常驻 2 秒后（视图线程放掉
+它们持有的东西之后）在另一个线程上调一次 glibc 的 `malloc_trim(0)`（`catmail_frontend::memory::release_freed`，只在
+Linux glibc 上，其他平台什么也不做）：glibc 的堆只能从顶上缩，释放的内存夹在仍在用的块之间，留在进程里。
+`unsafe_code` 因此在 frontend 里是 `deny` 而不是 `forbid`，由 `memory` 模块单独放行（还有 macOS 的状态栏，见
+[托盘](#托盘)）。
 
-最后一个窗口关闭时怎么做是一个纯函数（`catmail_frontend::resident::after_last_window`，退出原因 `QuitReason` 也在那里）：正在退出、没开"保持运行"、引擎打开失败
-（没有东西可运行）时退出；否则切到 headless（macOS 上是 Accessory）。切换是异步的，
-期间到来的唤起请求等切换结束再处理；切到窗口模式失败（例如请求方没有显示服务器）就留在 headless，
-只记日志。GPUI 只在没有窗口时允许切换，正合这里的用法。切到 headless 之后调一次 glibc 的
-`malloc_trim(0)`（`catmail_frontend::memory::release_freed`，只在 Linux glibc 上，其他平台什么也不做）：窗口用过的
-布局、读信区的 tile、渲染器的缓冲区都已释放，但 glibc 的堆只能从顶上缩，释放的内存夹在仍在用的块之间，
-留在进程里。实测关掉主窗口后 glibc 持有约 103 MB、其中约 92 MB 是空闲块，trim 之后 RSS 从约 229 MB
-降到约 151 MB。代价是再开窗口时这些页重新缺页，约 2 万次、合计几十毫秒，远小于重建 GPU 设备和管线；
-只在切到 headless 时做一次，不在热路径上反复做。`unsafe_code` 因此是 `deny` 而不是
-`forbid`，由 `memory` 模块单独放行（还有 macOS 的状态栏，见[托盘](#托盘)），其他 crate 在根上各自 `forbid`。`Mailbox::new` 不做启动同步（后台同步
-打开时就完整同步一遍），重开窗口不会多出同步；打开时的 `report_refused_changes` 正好报告常驻期间被
-拒绝的改动。
+实测（release，两个真实账户，Linux），单位 MB，RSS / PSS：
+
+| | 主进程 | WebKit 渲染进程 | WebKit 网络进程 | 合计 PSS |
+|---|---|---|---|---|
+| 刚启动、还没开邮件 | 226 / 193 | — | — | 193 |
+| 开着窗口读信 | 280 / 192 | 195 / 107 | 69 / 32 | 约 335 |
+| 关窗后、trim 后 | 265 / 197 | 退出了 | 69 / 41 | 约 238 |
+
+trim 只还回约 14 MB。常驻时主进程里约 107 MB 是文件映射（程序本身和 GTK、WebKitGTK 的库），能和别的进程共用，
+也能被换出。WebKit 的网络进程从不联网（CSP 只放行 `data:`），却因 nsh 一直持有 `NetworkSession` 留着
+（longbridge/nsh#1051，见 `crates/catmail-gui/ROADMAP.md`）。
+
+打开邮箱时不做启动同步（后台同步打开时就完整同步一遍），重开窗口不会多出同步；打开时查一次被拒绝的改动，
+正好报告常驻期间被拒绝的。
 
 ## 单实例与唤起
 
 常驻之后，从启动器再点一次 catmail 应当唤起已有实例的窗口，而不是显示 "Couldn't open the mail
-data"。macOS 由系统保证单实例，点 Dock 图标、常驻时从启动台或 Finder 再打开都经 GPUI 的 `on_reopen`；
-Linux、Windows 上 GPUI 不提供
-（Linux 的 `on_reopen` 从不触发），自己做：
+data"。macOS 上 LaunchServices 把同一个 bundle 的再次打开交给已在运行的那个，点 Dock 图标经
+`applicationShouldHandleReopen` 唤回主窗口；但 `cargo run`、命令行直接启动的不经过它，Linux 上 GTK 应用也是
+`NON_UNIQUE`（不经 D-Bus 判断唯一），所以自己做，三个平台一样：
 
 - **端点是数据目录里的 Unix socket `gui.sock`**（`catmail-frontend/src/instance.rs`），由持有数据目录锁的
   进程监听：目录只有本用户可访问，socket 本身也设成 0600。Windows 10 起也有 AF_UNIX，std 不支持，用 `uds_windows`（zbus 已经
@@ -99,7 +93,7 @@ Linux、Windows 上 GPUI 不提供
   而升级后的新版本要找得到还在运行的旧版本。放哪里也按规范路径（`dunce::canonicalize`，Windows 上不带
   socket 路径用不了的 `\\?\` 前缀）的长度决定：否则一个启动用很长的真实路径（socket 进运行时目录）、
   另一个用指向它的短链接（找 `链接/gui.sock`），两者争同一把锁却找不到对方。
-- **谁是实例由引擎的锁决定**，在 GPUI 启动之前，不会闪出窗口：
+- **谁是实例由引擎的锁决定**，在工具包的应用启动之前，不会闪出窗口：
   1. 对数据目录加引擎的锁（`Config::lock`）。拿到了，这个启动就是实例：删掉残留的 socket、绑定、开线程
      监听，再把锁交给引擎（`MailClient::builder_locked`），引擎打开时不再加锁。锁在 `main` 里同步地拿，
      迁移仍在后台：其间再启动的那个已经连得上 socket。
@@ -113,17 +107,15 @@ Linux、Windows 上 GPUI 不提供
   `Activate { display }`，`display` 是请求方的 `WAYLAND_DISPLAY`、`DISPLAY`、`XDG_RUNTIME_DIR` 和
   `XDG_ACTIVATION_TOKEN`（只在 Linux 上有）。以后加 `Compose { mailto }`（注册为默认邮件程序时用）、
   打开某封邮件，也可以长成"其他前端经 IPC 连接正在运行的引擎"。
-- 收到 `Activate`：常驻时用请求方的显示环境切回窗口模式，再打开主窗口，激活令牌在新窗口打开时用掉；
-  已有主窗口就激活它。切换期间又来的请求记在 `Windowing::Switching` 里：切换成功，新窗口就是答复；
-  失败（请求方的显示环境不可用）时改用这个请求的显示环境再试，它已经得到"好"的答复，不能丢掉。后一种情况 GPUI 不能用外来的令牌，它自己申请的令牌多半被 compositor 拒绝，
-  窗口可能只被标成"需要注意"。
-- 监听在一个专门的线程上（阻塞的 accept），请求经 channel 交给 GPUI 的前台任务。
+- 收到 `Activate`：打开主窗口（没有时）并放到前面，用请求方的激活令牌，Wayland 上它才能获得焦点。常驻时 GTK
+  仍连着原来的显示服务器，不按请求方的显示环境重连。
+- 监听在一个专门的线程上（阻塞的 accept），请求经 channel 交给主循环上的任务。
 
 ## 系统睡眠与唤醒
 
-`Engine::resume` 有两个来源：`MailClient::resume()`，`Resident` 在 GPUI 的 `on_system_wake` 里调用
-（Linux 上 GPUI 听 logind 的 `PrepareForSleep`，常驻时也在）；引擎自己发现睡眠（见下）。常驻之后这是最
-容易出问题的一处：
+`Engine::resume` 有两个来源：前端知道系统醒了时调 `MailClient::resume()`；引擎自己发现睡眠（见下）。现在的 GUI
+只靠后者：nsh 不听 logind 或 `NSWorkspaceDidWakeNotification`（GPUI 版在 GPUI 的 `on_system_wake` 里调用）。常驻
+之后这是最容易出问题的一处：
 
 - Linux、macOS 上 `Instant` 和 tokio 的定时器不计睡眠时间，醒来后下一次完整同步最多还要再等 15 分钟；
   发件箱等重试的定时器同样晚到。
@@ -179,14 +171,15 @@ Linux、Windows 上 GPUI 不提供
 墙上时钟多走了 60 秒以上就算睡过，调用同一个 `Engine::resume`。
 
 - 记下的醒来时刻是发现的那一刻，最多晚 30 秒（tokio 的定时器也不计睡眠，醒来后接着走完剩下的间隔），
-  这中间开始的事重做一次：偏保守，不会出错。GUI 仍在 `on_system_wake` 里调用，醒来那一刻就响应。
+  这中间开始的事重做一次：偏保守，不会出错。前端若能在醒来那一刻调 `resume`，就不必等这 30 秒。
   上次检查之后已经有人调用过 `resume`，任务就不再调用：再调用一次会把醒来时刻往后挪，丢掉这之间新开的
   连接、作废这之间的同步，再来一遍。
 - 墙上时钟本身会跳：校时、用户往前调时间都会误报，代价是换一次连接、完整同步一次。60 秒的阈值远大于
   漂移和通常的校时；更短的睡眠发现不了，连接多半撑得过，定时器也只晚这么多。墙上时钟往回调不算。
 - 不用计入睡眠的时钟（`CLOCK_BOOTTIME`、`mach_continuous_time`）：有了 `resume` 的比较，过时的同步时间
   和连接都已处理，与时钟计不计睡眠无关；tokio 的定时器和卡在死连接上的 IDLE 也要靠外部信号打断。
-- Windows 上 `Instant` 可能计入睡眠，那样两边走得一样，发现不了；只在 GUI 收到系统唤醒时 `resume`。
+- Windows 上 `Instant` 可能计入睡眠，那样两边走得一样，发现不了；以后的 Windows GUI 要在收到系统唤醒时
+  `resume`。
 - 不论前端开没开后台同步、发信都起这个任务：连接池里的连接同样会睡过期，`resume` 的作用在引擎，不在
   某个后台任务。代价只是每 30 秒一次定时器。
 
@@ -209,125 +202,102 @@ Linux、Windows 上 GPUI 不提供
 
 ### 系统通知
 
-GUI 的 `Notifier`（`catmail-gui/src/new_mail.rs`）是应用级的全局，引擎打开时订阅事件，常驻时也在。攒、措辞、
-每条通知的 tag 和点击后的去处不依赖 GPUI，在 `catmail_frontend::new_mail`（`Arrivals`、`notifications`、`Target`），
-nsh 版也用它：
+GUI 的 `new_mail.rs` 在引擎打开时订阅事件，有窗口时、常驻时都在。攒、措辞、每条通知的 tag 和点击后的去处不依赖
+UI 库，在 `catmail_frontend::new_mail`（`Arrivals`、`notifications`、`Target`）：
 
-- **先攒 1 秒再说**（`GATHER`）。一次同步按批提交、每批一个 `NewMail`，醒来后各账户又同时同步；
-  不攒的话一阵新邮件会弹出好几条"N 封新邮件"。Linux 上 GPUI 不支持按 tag 替换通知，替换不了已经弹出的。
-- **主窗口在前台时也说**：不看窗口在不在前台、开没开着。起初主窗口在前台时不发，后来改掉了。
-- **说之前重读**：`MailClient::unread_in_inbox` 用一条查询挑出各账户仍未读、仍在 INBOX（Gmail：仍带
-  INBOX 标签）的，新的在前，与 `Messages::new_mail` 用同一个条件（`UNREAD_IN_INBOX`），攒的这一秒里在
-  别处读过、移走的不再提醒。
-- 三封以内逐封通知（标题是发件人，正文是主题），按从旧到新弹出，最新的在最上面；多了合成一条
-  "N new messages"，正文是不重复的发件人。Linux 上正文是标记（通知服务支持 `body-markup` 时），
-  GPUI 原样交给它，所以转义 `&`、`<`、`>`：邮件里的 `<b>`、`<a href>` 照字面显示，不变粗、不成链接。
+- **先攒 1 秒再说**（`GATHER`）。一次同步按批提交、每批一个 `NewMail`，醒来后各账户又同时同步；不攒的话一阵
+  新邮件会弹出好几条。同一个 tag 的通知替换前一条（`send_notification` 的 id）。
+- **主窗口在前台时也说**：不看窗口在不在前台、开没开着。
+- **说之前重读**：`MailClient::unread_in_inbox` 用一条查询挑出各账户仍未读、仍在 INBOX（Gmail：仍带 INBOX 标签）
+  的，与 `Messages::new_mail` 用同一个条件（`UNREAD_IN_INBOX`），攒的这一秒里在别处读过、移走的不再提醒。
+- 三封以内逐封通知（标题是发件人，正文是主题），多了合成一条"N new messages"，正文是不重复的发件人。Linux 上
+  正文是标记（通知服务支持 `body-markup` 时），所以转义 `&`、`<`、`>`：邮件里的 `<b>`、`<a href>` 照字面显示。
   标题按规范是纯文本，不转义。
 - 设置"Notify about new mail"（Settings › General）默认开，关掉时攒够也不重读、不发。
 
-**点击**：通知的 tag 记着它说的是什么（`Target`：`new-mail/账户/邮件`、`new-mail/账户`，多个账户的合成
-通知是 `new-mail`），GPUI 把它随点击送回。它变成一个去处（`Destination::Inbox { account, message }`），
-交给 `Resident::show_at`：主窗口开着就交给它的 `Mailbox::go_to`；没开就记在 `Resident` 里，与关窗时记下的
-位置是同一个（`reopen`），在窗口最后的显示环境上打开主窗口，新的 `Mailbox` 打开时转过去。哪个是 INBOX
-由 `Mailbox` 按它读到的文件夹决定（`AccountFolders::with_role`），与它默认打开的收件箱同一个；文件夹还没
-读完就等读完再转。邮件可能刚到、列表还没读到它：列表记着要选的那封，读到时选中
-（`message_list::reveal`）；正在进行的那次读可能早于它到达，只有点击之后开始的读也没有它（不在第一页或
-已经离开），才放弃、只打开 INBOX。这之前用户自己选了别的邮件，就以用户的为准。
+**Linux**：⚠️ nsh 没有通知，用 GLib 的 `GNotification`，经 `gtk::Application` 发出（`category` 是
+`email.arrived`）。没有沙箱时 GLib 走 `org.freedesktop.Notifications`，点击回来是应用的 `open-mail` action，带着
+通知的 tag（`Target`：`new-mail/账户/邮件`、`new-mail/账户`，多个账户的合成通知是 `new-mail`）。它变成一个去处
+（`Destination::Inbox { account, message }`），交给 `shell::show_at`：主窗口开着就转过去；没开就记下，打开主窗口，
+新的邮箱读完文件夹后转过去。哪个是 INBOX 由邮箱按它读到的文件夹决定，与它默认打开的收件箱同一个。邮件可能刚到、
+列表还没读到它：列表记着要选的那封，读到时选中（`list::Reveal`）；只有点击之后开始的读也没有它，才放弃、只打开
+INBOX。这之前用户自己选了别的邮件，就以用户的为准。点击总是去账户的 Inbox，即使窗口正显示 All Inboxes：合并的
+列表里旧一些的新邮件可能不在已加载的那一页。
 
-**应用标识**：`set_app_identity("net.yangkx.catmail", "catmail")`，在第一个窗口之前；标识与数据、
-配置目录的限定名相同。Windows 上它是 AppUserModelID，Linux 上 GPUI 只用名字（通知的 app name），
-不带 desktop 文件 id 的提示（窗口的 app id 另设，见[打包](packaging.md#字体图标桌面文件)）；macOS 的通知要有 bundle（bundle id 即 `APP_ID`，见[打包](packaging.md#macos磁盘映像)），`cargo run` 起的 GUI 没有通知。
+已知的限制：GNOME Shell 上点击无效。GLib 在那里改用 GNOME 自己的接口，它经 D-Bus 名字唤起应用，而应用不占这个
+名字（`NON_UNIQUE`，单实例靠 socket）。
 
-已知的限制，都在 GPUI 的 Linux 实现里：
-
-- 点击时通知服务给的激活令牌（`ActivationToken` 信号）没有传出来，Wayland 上由点击打开或激活的窗口
-  可能只被标成"需要注意"，而不是来到前台。
-- 不能收回通知（`dismiss_system_notification` 什么也不做）：已经读过的邮件的通知留在通知中心里，
-  直到它自己过期。点击已经读过或移走的邮件的通知，仍打开 INBOX。
-- 每条通知一个线程，等到它被点击或关闭（过期也算关闭）；通知中心一直留着的通知，线程也一直在。
+**macOS**：还没有。系统通知（`UNUserNotificationCenter`）只能在 bundle 里用，在 bundle 外会让进程崩溃；磁盘映像里
+是 bundle 了，接上之前 macOS 上没有新邮件通知。
 
 ## 托盘
 
-GUI 的 `Tray`（`catmail-gui/src/tray/`）是应用级的全局，引擎打开时启动，有窗口时、常驻时都在。
-与平台无关的部分在 `tray/mod.rs`：数未读、按平台定图标的样子（`icon`：一个 SVG 和要画的尺寸）、在后台画；
-各平台只把画好的图标、未读数和菜单交给系统（Linux、macOS 的都在 frontend，见下；Windows 在 #109）。
-不依赖 GPUI 的部分在 `catmail_frontend::tray`：菜单（`MENU`、`Command`）、提示文字、角标的文字和带角标的 SVG
-（`badged`）、Linux 的 StatusNotifierItem（`tray::linux`，ksni 本来就不依赖界面库）、macOS 的状态栏项
-（`tray::macos`，AppKit 本身，也不属于哪个界面库），nsh 版也用它们：
+GUI 的 `tray/` 在引擎打开时启动，有窗口时、常驻时都在。`tray/mod.rs` 数未读、按平台定图标的样子、在后台画；
+`linux.rs`、`macos.rs` 把画好的图标和未读数交给 frontend 里各平台的托盘项。不依赖 UI 库的部分在
+`catmail_frontend::tray`：菜单（`MENU`、`Command`）、提示文字、角标的文字和带角标的 SVG（`badged`）、Linux 的
+StatusNotifierItem（`tray::linux`，ksni 本来就不依赖 UI 库）、macOS 的状态栏项（`tray::macos`，AppKit 本身）。
 
-- **未读数**：`MailClient::count_unread_in_inboxes` 把各账户 INBOX（Gmail：INBOX 标签）的 `unread_count`
-  加起来，一次读。侧栏要重读的事件（`Refresh::after(..).sidebar`：消息、文件夹、账户的变化，漏掉事件）
-  都重数，同一时刻只有一次在读，其间又有变化就读完再读一次（`Coalesce`，与侧栏相同）；数没变就不重画。
-  托盘注册上了才开始数：没有托盘的桌面和还没有托盘实现的平台不读。
-- **图标**（Linux）：应用图标（`assets/app-icon/` 的亮色或暗色版本，按桌面的外观，与"System"主题读的是同一个，
-  `appearance::system`）右上角叠一个红色角标写着
-  未读数，超过 99 写"99+"，没有未读就不画。拼成一个 SVG，用 GPUI 的 `SvgRenderer` 在后台线程画成
-  22、32、64 像素，由托盘挑合适的；不提交位图，也不另加 SVG 库。提示文字是"N unread messages"。
-  桌面外观变化时重画；外观只能从窗口得知，常驻期间的变化要等下次开窗口。画也一次一个（`Coalesce`）：
-  后台的两次绘制可能先后颠倒，旧的数字盖掉新的之后数字不再变，就一直错着；画的途中又有变化，画完按
-  当时的数字和外观再画一次。`Tray` 记着上次画的 SVG，同样的不再画，只更新数字（`Item::show` 收到
-  `None`）：外观变了而图标没变（macOS 的模板图从不变）时不白画。
-- **点击图标**打开主窗口（macOS 上打开菜单）；**菜单**（`MENU`，各平台按它建自己的菜单）："Open catmail"、"New message"、
-  "Sync now"、"Quit"。都转成 `Command`，经 channel 回到 GPUI 线程（`Tray::choose`），由 `Resident` 处理；
-  主窗口开着就在它的 `Mailbox` 上做（`Resident::in_main`），否则记下等它打开：
-  - 打开：`Resident::show_at`，与点击通知相同。
-  - 写邮件：主窗口开着就在它里面 `new_message`（与 Ctrl N 相同，用当前账户）；关着就记在 `Resident`
-    里，打开主窗口时交给新的 `Mailbox`（`Resident::adopt`，与要去的位置一起），它读完文件夹后再写。
-  - 同步：`MailClient::sync_now`，不论主窗口开着与否，与 Sync 按钮、Ctrl R 相同。由后台同步来做，
-    进度和失败是账户的状态，回到窗口时照样显示（见
-    [同步 / 后台同步](sync.md#后台同步与-idle)）。
-  - Quit：`Resident::quit`，与 Ctrl Q 相同。
-- **Linux** 用 `ksni`（StatusNotifierItem，纯 D-Bus，不依赖 GTK 主循环；`tray-icon` 在 Linux 上要
-  GTK），用 `async-io` 运行时，与依赖树里已有的 zbus 同一个，不引入 tokio。KDE、装了 AppIndicator
-  扩展的 GNOME、waybar 等都显示它；没有 StatusNotifierWatcher（GNOME 没装扩展）就不显示，记一条日志，
-  靠再次启动唤起。托盘给的 XDG 激活令牌（`ksni::current_xdg_activation_token`，KDE 可能晚到一点，等 1 ms
-  再取一次）随命令传给 `Resident`，Wayland 上切回窗口模式、新开的主窗口能获得焦点；已经开着的窗口
-  仍只能请求激活（GPUI 不能把令牌交给已有窗口）。测试里不注册（`cfg(test)`）。
-- **macOS** 直接用 AppKit（`objc2-app-kit`，GPUI 的 macOS 平台已经用它，不增加依赖）：`NSStatusItem`
-  的按钮放图标，菜单是 `NSMenu`，菜单项的 target 是一个只转发命令的小类（`define_class!`，tag 是在 `MENU`
-  里的位置），`Item` 留着它（菜单项不 retain target）。都要在主线程上：GPUI 的前台任务、nsh 版外壳的主线程
-  任务都是。图标由前端画好交过来（`Template`：预乘 alpha 的 RGBA，AppKit 位图的格式；GPUI 画出的直通 alpha
-  BGRA 用 `Template::from_bgra` 转）。
-  - 图标是单色的模板图（`assets/app-icon/catmail-menu-bar.svg`：信封和猫爪），系统按菜单栏的亮暗、
-    强调色着色，不用跟外观重画；画成 18、36 像素（18 pt 的 1x、2x），只用 alpha。未读数是按钮的标题，
-    写在图标右边，与 Linux 角标同样的文字（超过 99 写"99+"），没有未读就不写；提示文字相同。
-  - 同一个数也作 Dock 图标的角标（`NSDockTile::badgeLabel`，Mail.app 的做法）。常驻时没有 Dock 图标，
-    仍照样设，回到窗口时 Dock 图标带着它。
-  - 没有用 `tray-icon`：它在 macOS 上也是这些 AppKit 调用，外加 `muda` 的菜单和它自己的事件循环约定；
-    直接写只有一百多行，图标、标题、角标都由我们决定。Windows（#109）再看是否用它。
+- **未读数**：`MailClient::count_unread_in_inboxes` 把各账户 INBOX（Gmail：INBOX 标签）的 `unread_count` 加起来，
+  一次读。侧栏要重读的事件（`Refresh::after(..).sidebar`：消息、文件夹、账户的变化，漏掉事件）都重数；数没变
+  就不重画。托盘注册上了才开始数：没有托盘的桌面不读。
+- **图标**（Linux）：应用图标（`assets/app-icon/` 的亮色或暗色版本）右上角叠一个红色角标写着未读数，超过 99 写
+  "99+"，没有未读就不画。拼成一个 SVG，用 resvg（nsh-core 已经带着，另开 `text` 画数字）在另一个线程上画成
+  22、32、64 像素，由托盘挑合适的。提示文字是"N unread messages"。亮暗跟随 portal 的 `color-scheme`，即桌面的
+  外观而不是应用的，常驻时也跟随。
+  - 画也一次一个：后台的两次绘制可能先后颠倒，旧的数字盖掉新的之后就一直错着；画的途中又有变化，画完按当时的
+    数字和外观再画一次。记着上次画的 SVG，同样的不再画，只更新数字。
+  - 数字用 `sans-serif`：fontdb 从 fontconfig 的别名里取，可能是没装的字体（Ubuntu 上就是），这时依次换成常见的
+    无衬线字体，再没有就用任意一个装了的。
+- **点击图标**打开主窗口（macOS 上打开菜单）；**菜单**："Open catmail"、"New message"、"Sync now"、"Quit"。都转成
+  `Command`，经 channel 回到主线程（`shell::chose`）：
+  - 打开：`shell::show_at`，与点击通知相同。
+  - 写邮件：主窗口开着就在它里面写（与 Ctrl N 相同，用当前账户）；关着就记下，打开主窗口，新的邮箱读完文件夹
+    后再写。
+  - 同步：`MailClient::sync_now`，不论主窗口开着与否，与 Sync 按钮相同（见[同步 / 后台同步](sync.md#后台同步与-idle)）。
+  - Quit：`shell::quit`，与 Ctrl Q 相同。
+- **Linux** 用 `ksni`（StatusNotifierItem，纯 D-Bus，不依赖 GTK 主循环），用 `async-io` 运行时，与依赖树里已有的
+  zbus 同一个，不引入 tokio。KDE、装了 AppIndicator 扩展的 GNOME、waybar 等都显示它；没有 StatusNotifierWatcher
+  （GNOME 没装扩展）就不显示，记一条日志，靠再次启动唤起。托盘给的 XDG 激活令牌（`ksni::current_xdg_activation_token`，
+  KDE 可能晚到一点，等 1 ms 再取一次）随命令传给外壳，主窗口用它获得焦点。测试里不注册（`cfg(test)`）。
+- **macOS** 直接用 AppKit（`objc2-app-kit`）：`NSStatusItem` 的按钮放图标，菜单是 `NSMenu`，菜单项的 target 是一个
+  只转发命令的小类（`define_class!`，tag 是在 `MENU` 里的位置），`Item` 留着它（菜单项不 retain target）。都在主
+  线程上。图标由前端画好交过来（`Template`：预乘 alpha 的 RGBA，AppKit 位图的格式）。
+  - 图标是单色的模板图（`assets/app-icon/catmail-menu-bar.svg`：信封和猫爪），系统按菜单栏的亮暗、强调色着色，
+    不用跟外观重画，只画一次（18、36 像素，18 pt 的 1x、2x）。未读数是按钮的标题，写在图标右边，与 Linux 角标
+    同样的文字；提示文字相同。
+  - 同一个数也作 Dock 图标的角标（`NSDockTile::badgeLabel`，Mail.app 的做法）。
+  - 没有用 `tray-icon`：它在 macOS 上也是这些 AppKit 调用，外加 `muda` 的菜单和它自己的事件循环约定；直接写只有
+    一百多行，图标、标题、角标都由我们决定。
   - `define_class!`、位图的缓冲区要 `unsafe`，由 `catmail_frontend::tray` 对 `macos` 模块单独放行。
 
 ## 退出
 
-退出由 `Resident` 一处决定（`Resident::quit`，绑在 Quit action 上，托盘的 Quit 和信号也调用它）：
+退出由外壳一处决定（`shell::quit`；Ctrl Q、托盘的 Quit、macOS 应用菜单和 Dock 的 Quit、信号都调用它）：
 
-- 置 `quitting`，让每个写信窗口走关闭流程、存下最后的输入（`composer::close_all`）。它答"全部关掉了"
-  就 `cx.quit()`；有一个关不了（地址要改、保存或附件失败）就答"没关完"，取消退出，那个窗口留下。
-- 退出途中最后一个窗口关掉时，`after_last_window` 看到 `quitting`，不会先切到 headless。
-- 写信窗口只回答"关不关得了"，不知道退出：起初退出状态放在写信窗口模块里，由最后一个关掉的写信窗口
-  调 `cx.quit()`，`Resident` 还要去读它的标志，退出的决定分在两处，以后加入口（托盘）或退出前的确认
-  都得改两边。
-- 退出时在 `on_app_quit`（`Resident::shut_down`）记一行 `quitting reason=…`，不管是谁让应用退出的。
-  我们自己的退出路径都经 `resident::exit`，先把原因记在 `quitting` 里（`QuitReason`：`shortcut`、
-  `tray`、`signal`、`last_window_closed`、`engine_failed`、`no_window`）；没记原因的是平台自己的退出
-  （macOS 应用菜单、Dock），记 `platform`。退出被取消时记 `quit called off`。以前日志只是停住，分不清
-  正常退出和进程被杀、崩溃。
-- SIGINT、SIGTERM、SIGHUP（Windows 上是控制台的 Ctrl+C、关闭等事件）走同一个 `Resident::quit`，写信
-  窗口先存好再退出：会话注销时系统发的是 SIGTERM，这样没保存的草稿也能留下。第二个信号不再等写信窗口，
-  直接退出。用 `ctrlc` 在它自己的线程上等信号，经 channel 回到 GPUI 线程；GPUI 不是 tokio，用不了
-  `tokio::signal`。Windows 上关闭控制台、注销、关机时，处理函数一返回系统就结束进程，来不及存。
-- GPUI 退出时不丢掉全局状态，只清掉窗口，所以不能指望最后一个 `MailClient` 句柄被 drop。
-  `Resident::shut_down` 把引擎换成 `Engine::Closed`，并调 `MailClient::shut_down`：不管谁还拿着句柄
-  （窗口里的、某个全局、正在等结果的请求），引擎都关闭，记 `engine closed`；GUI 的 runtime 是自建的，
-  进行中的工作随之停下，它们的调用得到 `Error::Closed`。在 GPUI 给退出回调的时间内（`SHUTDOWN_TIMEOUT`）等
-  `MailClient::closed()`，等不到（已开始的 blocking 工作，如一次数据库写入，还没做完）就记一行 warn 后照样退出。
+- 记下退出原因，让每个写信窗口走关闭流程、存下最后的输入（`OpenComposers::close_all`）。全部关掉了就关掉所有窗口，
+  应用随最后一个窗口结束（没有窗口时立即结束）；有一个关不了（地址要改、保存或附件失败）就取消退出，那个窗口
+  留下，记 `quit called off`。
+- 退出途中最后一个窗口关掉时，`after_last_window` 看到正在退出，不会进入常驻。
+- 写信窗口只回答"关不关得了"，不知道退出：起初退出状态放在写信窗口模块里，由最后一个关掉的写信窗口让应用退出，
+  退出的决定分在两处，以后加入口（托盘）或退出前的确认都得改两边。
+- 主循环结束后记一行 `quitting reason=…`（`QuitReason`：`shortcut`、`tray`、`signal`、`last_window_closed`、
+  `engine_failed`、`no_window`；没记原因的是平台自己的退出，记 `platform`），以前日志只是停住，分不清正常退出和
+  进程被杀、崩溃。macOS 上 `applicationShouldTerminate` 先答取消，走同样的流程，存完再停主循环。⚠️ 注销时这样
+  会被系统当成应用拒绝退出（ROADMAP）。
+- SIGHUP、SIGINT、SIGTERM 走同一个 `shell::quit`，写信窗口先存好再退出：会话注销时系统发的是 SIGTERM，这样没保存
+  的草稿也能留下。第二个信号不再等写信窗口，直接销毁窗口、结束主循环。Linux 上用 GLib 的 unix 信号源，直接在
+  主循环上；macOS 上用 `ctrlc` 在它自己的线程上等，再回到主线程。主循环不是 tokio，用不了 `tokio::signal`。
+- 不能指望最后一个 `MailClient` 句柄被 drop（视图、全局、等结果的任务都可能拿着）。主循环结束后外壳从
+  `engine.rs` 取出引擎并调 `MailClient::shut_down`：不管谁还拿着句柄，引擎都关闭，记 `engine closed`；runtime 是
+  自建的，进行中的工作随之停下，它们的调用得到 `Error::Closed`。然后在主线程上等 `MailClient::closed()`，这时主
+  线程上已经没有别的事。
 
 ## 开机启动
 
-`catmail-gui --background`：以 headless 启动，不开窗口，进入常驻。"开机时启动"的设置写 XDG
-autostart 文件（Flatpak 用 Background portal）、Windows 的 `HKCU\…\Run`、macOS 的
-`SMAppService.mainApp`。AppImage 里运行时，autostart 的 `Exec` 写 `$APPIMAGE`（文件本身），不能写
-当前可执行文件的路径：它在每次运行都不同的挂载点下（见[打包](packaging.md#与开机启动的关系)）。
+`catmail-gui --background`：不开窗口，直接常驻。"开机时启动"的设置写 XDG autostart 文件（Flatpak 用 Background
+portal）、Windows 的 `HKCU\…\Run`、macOS 的 `SMAppService.mainApp`。autostart 的 `Exec` 要写包本身的路径：
+AppImage 之类每次运行挂载到不同目录的包，当前可执行文件的路径下次就不在了（见
+[打包](packaging.md#图形界面暂缓)）。
 
 ## 与 CLI 的关系
 
@@ -336,14 +306,11 @@ GUI 常驻就一直持有数据目录锁，CLI 更常遇到 `AlreadyRunning`。C
 
 ## 实施顺序
 
-1. ✅ `Resident` 持有引擎；`QuitMode::Explicit`；"关闭窗口后保持运行"（Settings › General）；常驻时
-   headless；主窗口可以反复关闭、重开（#106）。
+1. ✅ 引擎属于应用；"关闭窗口后保持运行"（Settings › General）；主窗口可以反复关闭、重开（#106）。
 2. ✅ 单实例与唤起：数据目录里的 socket、激活令牌（#106）。
-3. ✅ 引擎：`resume()`、`Event::NewMail`，各有假服务器测试；GUI 在系统唤醒时调用 `resume()`（#106）。
-4. ✅ 系统通知（#82）。
-5. 各平台托盘：✅ Linux（#107）；✅ macOS（#108）；Windows（#109）。
+3. ✅ 引擎：`resume()`、自己发现睡眠、`Event::NewMail`，各有假服务器测试（#106）。
+4. 系统通知：✅ Linux（#82）；macOS。
+5. 各平台托盘：✅ Linux（#107）；✅ macOS（#108）；Windows（#109，随 Windows 的 GUI）。
 6. `--background` 与开机启动（新 issue）。
 
-实现前用一个小原型在 Wayland 上确认过：关掉窗口后切到 headless，定时器照常运行，D-Bus 通知照常发出，
-再切回窗口模式能打开新窗口。只有一个空窗口的原型，常驻内存从 119 MB 降到 110 MB；真正的应用里
-窗口占的更多（列表、读信区），实际数字待测。
+这几步最初在 GPUI 版上做完，换到 nsh 时外壳重写，frontend 里的部分没动。

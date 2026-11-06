@@ -1,6 +1,6 @@
 # catmail 架构
 
-跨平台（Linux → Windows / macOS）邮件客户端。核心是一个与 UI 无关的邮件引擎，对外只暴露
+跨平台邮件客户端（Linux、macOS；Windows 目前只有 CLI）。核心是一个与 UI 无关的邮件引擎，对外只暴露
 `MailClient` 门面；CLI 与 GUI 是平级的两个前端。
 
 本文只讲整体结构和贯穿各子系统的设计决定，实现细节见[子系统文档](#子系统)。项目范围、里程碑
@@ -10,9 +10,8 @@
 
 | 层 | crate | 内容 |
 |---|---|---|
-| Frontends | `catmail-cli`、`catmail-gui` | 命令行（clap）；图形界面（gpui-kit） |
-| Frontend 共用 | `catmail-frontend` | 桌面前端共用、与 UI 库无关的部分：设置文件、主题、单实例、侧栏的文件夹与模型、引擎事件的重读规则、列表的行、对邮件的命令、写信窗口的模型、发件箱的选择、登录表单、显示格式、读信区的头部与 HTML 策略、托盘（菜单、角标、Linux 的 StatusNotifierItem）、新邮件通知的措辞、关掉最后一个窗口之后怎么办 |
-| Rendering | `catmail-render` | 读信区的 HTML 引擎（Blitz）：在自己的线程上排版、分块绘制成像素；不依赖 UI 库和邮件类型 |
+| Frontends | `catmail-cli`、`catmail-gui` | 命令行（clap）；图形界面（Native Shell：Linux 上 GTK 4 与 WebKitGTK，macOS 上 AppKit 与 WKWebView） |
+| Desktop 逻辑 | `catmail-frontend` | 桌面前端里与 UI 库无关的部分：设置文件、主题、单实例、侧栏的文件夹与模型、引擎事件的重读规则、列表的行、对邮件的命令、写信窗口的模型、发件箱的选择、登录表单、显示格式、读信区的头部与 HTML 策略、托盘（菜单、角标、Linux 的 StatusNotifierItem、macOS 的状态栏项）、新邮件通知的措辞、关掉最后一个窗口之后怎么办 |
 | Facade | `catmail-core` | `MailClient`：async 方法 + 事件订阅，前端唯一依赖 |
 | Services / Engine | `catmail-core` | 同步、后台同步（IDLE）、操作队列回放、按需下载与后台预取正文、Outbox；每账户状态；运行时桥接；凭据 |
 | Storage | `catmail-store` | SQLite schema 与迁移、事务化 Repository、FTS5、内容寻址 `BlobStore`；全部同步 API |
@@ -22,9 +21,10 @@
 
 依赖方向 `types ← store, proto ← core ← cli / gui`，`html ← proto, core`，`core ← frontend ← gui`：store 与 proto 并列、互不依赖；前端不直接
 依赖 store / proto，需要的类型由 `catmail-core` 重新导出。`catmail-testkit`（假 IMAP / SMTP
-服务器）只作为 dev-dependency。`catmail-render` 只被 GUI 依赖，它不认识邮件：读信区交给它清洗后的
-HTML 和决定哪些图片可以加载的函数。桌面前端里不依赖 UI 库的逻辑放进 `catmail-frontend`，换一个 UI 库
-（如 `nsh-spike` 分支上的 `catmail-nsh`）也能直接用。
+服务器）只作为 dev-dependency。桌面前端里不依赖 UI 库的逻辑放进 `catmail-frontend`，`catmail-gui` 只有
+视图和外壳（窗口、主循环、退出）：模型的测试不用编译 GTK、WebKit 和 nsh，增量构建快；crate 的边界也让
+UI 库的类型进不了模型；以后换 UI 库或加一个前端，模型照样能用（GUI 就从 GPUI 换到 Native Shell 过一次，
+见 [GUI](architecture/gui.md#选型)）。
 
 ## 关键设计
 
@@ -40,7 +40,8 @@ GUI 这样在打开引擎之前就知道自己是这个数据目录的实例（�
 
 ### 运行时桥接
 
-GPUI 有自己的 executor，不是 tokio；IMAP / SMTP 栈却依赖 tokio reactor。`MailClient` 持有
+GUI 的主循环（GTK 的 GLib 循环、AppKit 的）和 nsh 每个窗口的视图线程都不是 tokio；IMAP / SMTP 栈却依赖
+tokio reactor。`MailClient` 持有
 （GUI：`MailClient::builder(cfg).open_async()` 自建）或借用（CLI：`.runtime(Handle::current())`）
 一个 tokio runtime，每个公开方法把工作 `spawn` / `spawn_blocking` 到该 runtime 上再 await
 `JoinHandle`，返回的 future 因此可以被任意 executor poll（`catmail-core/src/runtime.rs`）。
@@ -49,7 +50,8 @@ GPUI 有自己的 executor，不是 tokio；IMAP / SMTP 栈却依赖 tokio react
   线程上 drop 最后一个 runtime 引用。
 - `MailClient` 的各个克隆共享一份引擎，全部 drop 时关闭；`MailClient::shut_down` 不等它们 drop
   就关：各克隆之后的调用都得到 `Error::Closed`，自建 runtime 随即 `shutdown_background()`，进行中的
-  调用同样得到 `Error::Closed`。给不会 drop 自己状态的前端（GPUI 退出时）用。它从槽里取出的引擎交给
+  调用同样得到 `Error::Closed`。给不能指望每个句柄都被 drop 的前端用（GUI 退出时，句柄可能还在视图、
+全局状态和等结果的任务里）。它从槽里取出的引擎交给
   一个单独的线程 drop：没有别人持有时关闭就发生在那里，关数据库可能做 WAL checkpoint，不该占着 UI 线程。
 - 自建 runtime drop 时 `shutdown_background()`，不等待任务：状态都已落 SQLite。借用的 runtime 不会
   被关掉，所以只持 `Weak<Engine>` 的后台任务（发信、GC）还 select 引擎的关闭信号（`Engine::closing`，
@@ -166,7 +168,8 @@ UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UI
 - **邮件内容不可信**：HTML 入库前经 ammonia 清洗，样式表由 cssparser 逐条重写（不能取资源、
   不能结束 `<style>`）；远程图片默认不加载，GUI 读信不发出任何网络
   请求，除非用户对这封信点了"Show remote images"，下载也由引擎做（`MailClient::fetch_remote_images`：
-  不带 cookie 和 referrer，只 GET）；`catmail-render` 的引擎没有网络栈，一切资源只经读信区给的函数；服务器给的值（BODYSTRUCTURE、msg-id）写进邮件头之前都要校验。
+  不带 cookie 和 referrer，只 GET）；正文所在的 WebView 有自己的网络，所以页面关掉脚本，并由 CSP 只放行
+  嵌成 `data:` 的图片和内联样式，要显示的图片都由读信区嵌进去（见 [GUI / 读信](architecture/gui.md#读信)）；服务器给的值（BODYSTRUCTURE、msg-id）写进邮件头之前都要校验。
 - **本地数据**：数据目录只有本用户可访问，交给其他程序的文件也放在里面。
 
 ## 子系统
@@ -182,17 +185,17 @@ UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UI
 | [IMAP / SMTP 连接](architecture/protocol.md) | IMAP 库（改用 imap-proto 的决定）、连接层的严格解析、连接池、认证、TLS |
 | [存储](architecture/storage.md) | SQLite 约定、计数、跨账户约束、全文搜索、BlobStore 与 GC、凭据 |
 | [CLI](architecture/cli.md) | 命令的代码结构、`--json` 的结构与版本、退出码、添加账户前的登录检查、不覆盖文件 |
-| [GUI](architecture/gui.md) | 视图结构、事件刷新、读信与写信窗口、发件箱、主题与设置、HTML 渲染与图片策略、已知问题 |
+| [GUI](architecture/gui.md) | 选型、外壳与线程、视图结构、事件刷新、正文在 WebView 里（断网、图片、深色）、写信窗口、发件箱、主题与设置、已知问题 |
 | [后台运行](architecture/background.md) | 关窗后常驻、单实例与唤起、睡眠唤醒、新邮件事件；通知、托盘、开机启动（设计中） |
 | [日志](architecture/logging.md) | stderr 与数据目录里的日志文件、谁能写、记什么、轮转 |
-| [测试](architecture/testing.md) | 假 IMAP / SMTP 服务器、真实 Dovecot 与 mailpit、GUI 测试 |
-| [打包](architecture/packaging.md) | Linux AppImage：在旧 glibc 上构建、哪些库自带、字体与桌面文件、自动更新；macOS 磁盘映像：bundle、签名与公证；发布 |
+| [测试](architecture/testing.md) | 假 IMAP / SMTP 服务器、真实 Dovecot 与 mailpit、GUI 的测试 |
+| [打包](architecture/packaging.md) | Linux：CLI 的 tarball，图形界面的包为什么暂缓；macOS 磁盘映像：bundle、签名与公证；发布 |
 
 ## 数据目录
 
 `Config::platform_default()`（`directories`）：Linux `~/.local/share/catmail`，macOS
 `~/Library/Application Support/net.yangkx.catmail`，Windows `%APPDATA%\yangkx\catmail\data`。
-CLI 和 GUI 都可用 `--data-dir` 或 `CATMAIL_DATA_DIR` 覆盖。
+CLI 和 GUI 都可用 `CATMAIL_DATA_DIR` 覆盖，CLI 另有 `--data-dir`。
 
 | 路径 | 内容 |
 |---|---|

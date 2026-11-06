@@ -5,8 +5,7 @@
 //! and becomes a [`ThemeConfig`] through the same mapping, so a scheme from Alacritty,
 //! kitty, Ghostty and the like looks as deliberate as a built-in one. A theme is written
 //! as GPUI Kit's theme JSON (the themes folder holds those files, and GPUI Kit's own theme
-//! files are taken as they are), whichever frontend reads it: the GUI gives it to GPUI Kit,
-//! the nsh spike maps its colors onto shadcn's tokens.
+//! files are taken as they are); the GUI maps its colors onto nsh's (shadcn's) tokens.
 
 mod builtin;
 mod derive;

@@ -2,7 +2,8 @@ name: Release
 
 # Run by hand on main, it releases: it sets the workspace version (the patch after the
 # current one, or the version given), commits that to main with the tag `v<version>`,
-# builds the Linux and macOS packages from the tag and publishes them as a GitHub release.
+# builds the macOS app and the CLI for Linux and macOS from the tag and publishes them as
+# a GitHub release. Linux has no package of the app yet: WebKitGTK has to be bundled first.
 # The macOS ones are signed with the Developer ID and notarized, with the secrets of the
 # `release` environment; pull requests can't have those and sign ad hoc. Run with
 # `build_only` (on any branch), and pull requests that change the packaging, build them
@@ -102,7 +103,7 @@ jobs:
           echo "ref=v$version" >> "$GITHUB_OUTPUT"
 
   linux:
-    name: Linux (${{ matrix.arch }})
+    name: Linux CLI (${{ matrix.arch }})
     strategy:
       fail-fast: false
       matrix:
@@ -111,8 +112,7 @@ jobs:
             os: ubuntu-22.04
           - arch: aarch64
             os: ubuntu-22.04-arm
-    # The oldest glibc a package runs on is the one it was built against: Ubuntu 22.04's
-    # 2.35, which build-appimage.sh checks.
+    # The oldest glibc the CLI runs on is the one it was built against: Ubuntu 22.04's 2.35.
     needs: version
     runs-on: ${{ matrix.os }}
     env:
@@ -125,17 +125,6 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install build tools and GUI libraries
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
-            patchelf zsync
-
-      - name: AppImage
-        run: packaging/linux/build-appimage.sh
-
-      # The CLI isn't in the AppImage (one entry point, the GUI): a tarball of the binary.
       - name: CLI tarball
         run: |
           cargo build --release --locked -p catmail-cli
@@ -149,8 +138,7 @@ jobs:
       - name: Collect the packages
         run: |
           mkdir -p target/dist
-          cp target/appimage/*.AppImage target/appimage/*.AppImage.zsync target/cli/*.tar.gz \
-            target/dist/
+          cp target/cli/*.tar.gz target/dist/
 
       - uses: actions/upload-artifact@v7
         with:
@@ -258,8 +246,6 @@ jobs:
           merge-multiple: true
           path: dist
 
-      # Not a prerelease: AppImageUpdate looks for the .zsync in the latest release, which
-      # leaves prereleases out.
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}

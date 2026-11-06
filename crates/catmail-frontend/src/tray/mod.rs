@@ -1,8 +1,7 @@
-//! The tray icon's model, which every desktop frontend shows the same way: its menu, what
-//! its tool tip and badge say, the app's icon with the count drawn on it (as an SVG, for
-//! the frontend to draw), and the item itself: on Linux the StatusNotifierItem
-//! ([`linux`]), which is D-Bus and no toolkit's, on macOS the status item ([`macos`]),
-//! which is AppKit's. See docs/architecture/background.md.
+//! The tray icon's model: its menu, what its tool tip and badge say, the app's icon with
+//! the count drawn on it (as an SVG, for the frontend to draw), and the item itself: on
+//! Linux the StatusNotifierItem ([`linux`]), which is D-Bus and no toolkit's, on macOS the
+//! status item ([`macos`]), which is AppKit's. See docs/architecture/background.md.
 
 pub mod badged;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -43,16 +42,6 @@ pub struct Pixmap {
 }
 
 impl Pixmap {
-    /// From straight-alpha BGRA.
-    pub fn from_bgra(size: u32, bgra: &[u8]) -> Self {
-        let (pixels, _) = bgra.as_chunks::<4>();
-        let argb = pixels
-            .iter()
-            .flat_map(|&[b, g, r, a]| [a, r, g, b])
-            .collect();
-        Self { size, argb }
-    }
-
     /// From straight-alpha RGBA.
     pub fn from_rgba(size: u32, rgba: &[u8]) -> Self {
         let (pixels, _) = rgba.as_chunks::<4>();
@@ -74,19 +63,6 @@ pub const MENU_BAR_SIZES: [u32; 2] = [18, 36];
 pub struct Template {
     pub size: u32,
     pub rgba: Vec<u8>,
-}
-
-impl Template {
-    /// From straight-alpha BGRA.
-    pub fn from_bgra(size: u32, bgra: &[u8]) -> Self {
-        let (pixels, _) = bgra.as_chunks::<4>();
-        let times_alpha = |c: u8, a: u8| (u16::from(c) * u16::from(a) / 255) as u8;
-        let rgba = pixels
-            .iter()
-            .flat_map(|&[b, g, r, a]| [times_alpha(r, a), times_alpha(g, a), times_alpha(b, a), a])
-            .collect();
-        Self { size, rgba }
-    }
 }
 
 pub fn tool_tip(unread: u32) -> String {
@@ -132,14 +108,6 @@ mod tests {
 
     #[test]
     fn pixels_come_out_as_argb() {
-        let argb = [0x80, 1, 2, 3];
-        assert_eq!(Pixmap::from_bgra(1, &[3, 2, 1, 0x80]).argb, argb);
-        assert_eq!(Pixmap::from_rgba(1, &[1, 2, 3, 0x80]).argb, argb);
-    }
-
-    #[test]
-    fn templates_are_premultiplied_rgba() {
-        let template = Template::from_bgra(1, &[255, 128, 0, 0x80]);
-        assert_eq!(template.rgba, [0, 64, 128, 0x80]);
+        assert_eq!(Pixmap::from_rgba(1, &[1, 2, 3, 0x80]).argb, [0x80, 1, 2, 3]);
     }
 }
