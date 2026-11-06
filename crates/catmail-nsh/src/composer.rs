@@ -6,6 +6,7 @@
 //! (`shell::open_composer`), and closing it asks the view, which saves first and then
 //! closes it (`shell::composer_closed`). State is nsh globals, the view's own.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -17,8 +18,8 @@ use catmail_core::{
 };
 use catmail_frontend::composer::{
     AfterAttachment, AfterSave, Closing, ComposeFrom, Field, FieldError, Fields, Finish, Lifecycle,
-    Opening, SAVE_DELAY, Sender, Written, error_text, new_message_account, senders, unsendable,
-    window_title,
+    Opening, SAVE_DELAY, Sender, Written, discard_confirm, error_text, new_message_account,
+    senders, unsendable, window_title,
 };
 use catmail_frontend::format;
 use futures_channel::mpsc;
@@ -164,7 +165,7 @@ struct From {
 #[derive(Clone, Default, PartialEq)]
 struct Shown {
     ending: Option<Finish>,
-    status: Option<String>,
+    status: Option<Cow<'static, str>>,
     /// Why the send or close the window was ending with didn't happen.
     error: Option<String>,
     /// A field that doesn't hold addresses, shown under it once sending (or closing)
@@ -226,6 +227,9 @@ fn changed() {
 }
 
 fn save() {
+    if !with_life(|l| l.save_due()) {
+        return;
+    }
     let (written, _) = written();
     let Some(written) = with_life(|l| l.begin_save(written)) else {
         return;
@@ -270,9 +274,10 @@ fn close_requested() {
 }
 
 fn discard() {
+    let confirm = discard_confirm();
     let answer = alert_dialog()
-        .title("Discard this draft?")
-        .description("It is deleted here and from the server's Drafts folder.")
+        .title(confirm.title)
+        .description(confirm.description)
         .cancel("cancel", "Cancel")
         .destructive("discard", "Discard")
         .show();
@@ -883,7 +888,7 @@ fn footer() -> impl IntoElement {
         ))
         .child(view().flex_1())
         .child(
-            text(move || status().unwrap_or_default())
+            text(move || status().unwrap_or_default().into_owned())
                 .text_xs()
                 .text_color(move || theme().muted_foreground),
         )

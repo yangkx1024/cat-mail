@@ -553,9 +553,10 @@ fn picker_dialog(picker: Picker) -> impl IntoElement {
     let query = signal(String::new());
     let shown = computed(move || {
         query.with(|q| {
+            let matches = commands::picker_filter(q);
             folders
                 .iter()
-                .filter(|(_, name)| commands::picker_matches(name, q))
+                .filter(|(_, name)| matches(name))
                 .cloned()
                 .collect::<Vec<_>>()
         })
