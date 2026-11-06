@@ -13,7 +13,6 @@ pub struct Rgb {
 
 impl Rgb {
     pub const BLACK: Rgb = Rgb::new(0, 0, 0);
-    #[cfg(test)]
     pub const WHITE: Rgb = Rgb::new(0xff, 0xff, 0xff);
 
     pub const fn new(r: u8, g: u8, b: u8) -> Self {

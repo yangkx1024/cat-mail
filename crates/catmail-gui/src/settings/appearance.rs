@@ -6,8 +6,8 @@ use std::rc::Rc;
 use catmail_frontend::folders::FolderIcon;
 use catmail_frontend::settings::{Appearance, TEXT_SIZES};
 use catmail_frontend::theme::{
-    IMPORT_HELP, IMPORTABLE_FORMATS, ImportCandidate, TerminalPalette, ThemeConfig, ThemeEntry,
-    file_name, import_title, read_import,
+    IMPORT_HELP, IMPORTABLE_FORMATS, ImportCandidate, Rgb, Rgba, Swatch, TerminalPalette,
+    ThemeEntry, file_name, import_title, read_import,
 };
 use nsh_base::theme;
 use nsh_core::Color;
@@ -233,29 +233,33 @@ impl PartialEq for Candidate {
 
 /// A color of the theme, for the card that pictures it: these are the theme's own
 /// colors, not the window's.
-fn swatch(config: &ThemeConfig, key: &str) -> Option<Hsla> {
-    config.color(key).and_then(Color::parse).map(Hsla::from)
+fn color(color: Rgba) -> Hsla {
+    let Rgb { r, g, b } = color.rgb;
+    Color::rgba(r, g, b, color.alpha).into()
 }
 
 /// A theme drawn small, in its own colors, with its name.
 fn theme_card(entry: ThemeEntry, dark: bool) -> AnyElement {
-    let config = &entry.config;
-    let background = swatch(config, "background").unwrap_or(hsla(0.0, 0.0, 1.0, 1.0));
-    let foreground = swatch(config, "foreground").unwrap_or(hsla(0.0, 0.0, 0.0, 1.0));
-    let primary = swatch(config, "primary.background").unwrap_or(foreground);
-    let color = |key: &str, fallback: Hsla| swatch(config, key).unwrap_or(fallback);
-    let sidebar = color("sidebar.background", background);
-    let border = color("border", foreground.opacity(0.15));
-    let muted = color("muted.foreground", foreground.opacity(0.6));
-    let selection = color("list.active.background", primary.opacity(0.15));
-    let hues = [
-        "danger.background",
-        "success.background",
-        "warning.background",
+    let swatch = Swatch::of(&entry.config);
+    let [
+        background,
+        foreground,
+        primary,
+        sidebar,
+        border,
+        muted,
+        selection,
+    ] = [
+        swatch.background,
+        swatch.foreground,
+        swatch.primary,
+        swatch.sidebar,
+        swatch.border,
+        swatch.muted,
+        swatch.selection,
     ]
-    .map(|key| color(key, primary))
-    .into_iter()
-    .chain([primary, color("info.background", primary)]);
+    .map(color);
+    let hues = swatch.hues.map(color).into_iter();
     let name = entry.name().to_owned();
     let chosen = name.clone();
     let selected = move || {

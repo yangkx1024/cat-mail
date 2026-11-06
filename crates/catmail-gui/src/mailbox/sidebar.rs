@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use catmail_core::{AccountId, FolderId, FolderRole};
-use catmail_frontend::folders::{self, FolderIcon, FolderNode, RoleInfo};
+use catmail_frontend::folders::{self, FolderIcon, FolderNode};
 use catmail_frontend::mailbox::{
     self, ALL_MAIL_HIDDEN, AccountEntry, Destination, Place, SYNC_ON_OPEN_AFTER,
 };
@@ -410,6 +410,12 @@ impl Item {
             ..Self::new(key, label, icon)
         }
     }
+
+    /// A place that isn't a folder of the tree, named as the list's title names it.
+    fn of(place: Place, accounts: &[AccountEntry], count: usize, attention: bool) -> Self {
+        let label = place.label(accounts).unwrap_or_default();
+        Self::place(place, label, place.icon(accounts), count, attention)
+    }
 }
 
 fn groups(accounts: &[AccountEntry], folds: &Folds, folded: &FolderFolds) -> Vec<Group> {
@@ -421,10 +427,9 @@ fn groups(accounts: &[AccountEntry], folds: &Folds, folded: &FolderFolds) -> Vec
         groups.push(Group {
             key: "inboxes".to_owned(),
             heading: None,
-            items: vec![Item::place(
+            items: vec![Item::of(
                 Place::Inboxes,
-                "All Inboxes",
-                FolderIcon::Inboxes,
+                accounts,
                 folders::unread(inboxes) as usize,
                 false,
             )],
@@ -445,7 +450,7 @@ fn groups(accounts: &[AccountEntry], folds: &Folds, folded: &FolderFolds) -> Vec
                 open,
             }),
             items: if open {
-                places(entry, folded)
+                places(accounts, entry, folded)
             } else {
                 Vec::new()
             },
@@ -463,7 +468,7 @@ fn groups(accounts: &[AccountEntry], folds: &Folds, folded: &FolderFolds) -> Vec
 
 /// Folders with a role first, the drafts and outbox after the inbox, then the rest of
 /// the folders; not the labels, which have a section of their own.
-fn places(entry: &AccountEntry, folded: &FolderFolds) -> Vec<Item> {
+fn places(accounts: &[AccountEntry], entry: &AccountEntry, folded: &FolderFolds) -> Vec<Item> {
     let account = entry.account.id;
     let path = format!("{account}");
     let mut items = Vec::new();
@@ -480,21 +485,14 @@ fn places(entry: &AccountEntry, folded: &FolderFolds) -> Vec<Item> {
     }
     items.push(Item {
         account: Some(account),
-        ..Item::place(
-            Place::Drafts(account),
-            FolderRole::Drafts.label(),
-            RoleInfo::of(FolderRole::Drafts).icon,
-            entry.drafts,
-            false,
-        )
+        ..Item::of(Place::Drafts(account), accounts, entry.drafts, false)
     });
     if !entry.outbox.is_empty() {
         items.push(Item {
             account: Some(account),
-            ..Item::place(
+            ..Item::of(
                 Place::Outbox(account),
-                "Outbox",
-                FolderIcon::Outbox,
+                accounts,
                 entry.outbox.len(),
                 entry.outbox_needs_user(),
             )

@@ -9,7 +9,7 @@ use catmail_core::{
 };
 
 use crate::commands::Confirm;
-use crate::folders::AccountFolders;
+use crate::folders::{self, AccountFolders, FolderIcon};
 
 /// Opening a folder synced longer ago than this syncs it. Background sync keeps only
 /// INBOX current between full syncs; the server can't tell us about the others.
@@ -104,6 +104,19 @@ impl Place {
             Place::Drafts(_) => FolderRole::Drafts.label().into(),
             Place::Outbox(_) => "Outbox".into(),
         })
+    }
+
+    /// Its icon, as the sidebar shows it.
+    pub fn icon(self, accounts: &[AccountEntry]) -> FolderIcon {
+        match self {
+            Place::Inboxes => FolderIcon::Inboxes,
+            Place::Folder(id) => {
+                let node = self.account_in(accounts).and_then(|a| a.folders.find(id));
+                folders::icon(node.and_then(|n| n.folder.as_ref()))
+            }
+            Place::Drafts(_) => FolderIcon::Role(FolderRole::Drafts),
+            Place::Outbox(_) => FolderIcon::Outbox,
+        }
     }
 }
 
@@ -342,4 +355,44 @@ pub fn connection_note(accounts: &[AccountEntry]) -> Option<String> {
             format!("Can't send from {}", from.join(", "))
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use catmail_core::FolderRole;
+
+    use super::*;
+    use crate::fixtures::{account, folder, gmail, gmail_folder, standard};
+
+    #[test]
+    fn a_place_is_named_and_drawn_as_the_sidebar_shows_it() {
+        let accounts = [
+            standard(1),
+            gmail(
+                2,
+                vec![gmail_folder(21, 2, "INBOX"), gmail_folder(22, 2, "Work")],
+            ),
+            account(3, vec![folder(31, 3, "Projects/2026")]),
+        ];
+        let (inbox, sent) = (FolderId(11), FolderId(12));
+        #[rustfmt::skip]
+        let cases = [
+            (Place::Inboxes, "All Inboxes", FolderIcon::Inboxes),
+            (Place::Folder(inbox), "Inbox", FolderIcon::Role(FolderRole::Inbox)),
+            (Place::Folder(sent), "Sent", FolderIcon::Role(FolderRole::Sent)),
+            (Place::Folder(FolderId(22)), "Work", FolderIcon::Label),
+            (Place::Folder(FolderId(31)), "2026", FolderIcon::Folder),
+            (Place::Drafts(AccountId(1)), "Drafts", FolderIcon::Role(FolderRole::Drafts)),
+            (Place::Outbox(AccountId(1)), "Outbox", FolderIcon::Outbox),
+        ];
+        for (place, label, icon) in cases {
+            assert_eq!(place.label(&accounts).as_deref(), Some(label), "{place:?}");
+            assert_eq!(place.icon(&accounts), icon, "{place:?}");
+        }
+        assert_eq!(Place::Folder(FolderId(99)).label(&accounts), None);
+        assert_eq!(
+            Place::Folder(FolderId(99)).icon(&accounts),
+            FolderIcon::Folder
+        );
+    }
 }

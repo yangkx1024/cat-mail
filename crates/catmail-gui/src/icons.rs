@@ -1,6 +1,7 @@
 //! The icons, Heroicons (`assets/heroicons`, MIT), drawn with
 //! `currentColor`, so they take the text color of where they are.
 
+use catmail_core::FolderRole;
 use catmail_frontend::folders::FolderIcon;
 use nsh_core::element::ImageSrc;
 use nsh_core::prelude::*;
@@ -69,15 +70,17 @@ pub enum Icon {
 macro_rules! folder_icon {
     ($icon:expr, $style:literal) => {
         match $icon {
-            FolderIcon::Inbox => hero!($style, "inbox"),
-            FolderIcon::Sent => hero!($style, "paper-airplane"),
-            FolderIcon::Archive => hero!($style, "archive-box"),
-            FolderIcon::All => hero!($style, "envelope"),
-            FolderIcon::Important => hero!($style, "star"),
-            FolderIcon::Flagged => hero!($style, "flag"),
-            FolderIcon::Junk => hero!($style, "shield-exclamation"),
-            FolderIcon::Trash => hero!($style, "trash"),
-            FolderIcon::Drafts => hero!($style, "document-text"),
+            FolderIcon::Role(role) => match role {
+                FolderRole::Inbox => hero!($style, "inbox"),
+                FolderRole::Sent => hero!($style, "paper-airplane"),
+                FolderRole::Archive => hero!($style, "archive-box"),
+                FolderRole::All => hero!($style, "envelope"),
+                FolderRole::Important => hero!($style, "star"),
+                FolderRole::Flagged => hero!($style, "flag"),
+                FolderRole::Junk => hero!($style, "shield-exclamation"),
+                FolderRole::Trash => hero!($style, "trash"),
+                FolderRole::Drafts => hero!($style, "document-text"),
+            },
             FolderIcon::Label => hero!($style, "tag"),
             FolderIcon::Folder => hero!($style, "folder"),
             FolderIcon::Inboxes => hero!($style, "inbox-stack"),
@@ -172,18 +175,24 @@ mod tests {
 
     #[test]
     fn a_selected_row_has_its_icon_filled() {
-        use FolderIcon::*;
-        let folders = [
-            Inbox, Sent, Archive, All, Important, Flagged, Junk, Trash, Drafts, Label, Folder,
-            Inboxes, Outbox,
+        use FolderRole::*;
+        let roles = [
+            Inbox, Sent, Archive, All, Important, Flagged, Junk, Trash, Drafts,
         ];
+        let others = [
+            FolderIcon::Label,
+            FolderIcon::Folder,
+            FolderIcon::Inboxes,
+            FolderIcon::Outbox,
+        ];
+        let folders = roles.map(FolderIcon::Role).into_iter().chain(others);
         let settings = [
             Icon::Cog6Tooth,
             Icon::Swatch,
             Icon::UserCircle,
             Icon::EnvelopeOpen,
         ];
-        for icon in folders.map(Icon::from).into_iter().chain(settings) {
+        for icon in folders.map(Icon::from).chain(settings) {
             assert_ne!(icon.solid().markup(), icon.markup(), "{icon:?}");
         }
         assert_eq!(Icon::XMark.solid(), Icon::XMark);
