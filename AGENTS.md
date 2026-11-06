@@ -64,6 +64,11 @@ models. `catmail-gui` holds the views and the shell around them (windows, the to
 main loop, quitting); see [docs/architecture/gui.md](docs/architecture/gui.md) and its
 roadmap, `crates/catmail-gui/ROADMAP.md`, which marks the nsh workarounds with ⚠️.
 
+Before changing `catmail-gui`, read the vendored nsh skills in
+`crates/catmail-gui/.claude/skills/` (`nsh-design-guides` holds the Design Guides, `nsh`
+the Coding Guides; see their `README.md` for the upstream commit and what doesn't apply
+to an app with its own shell).
+
 Protocol behaviour is tested against `catmail-testkit`'s fake servers (every OS) and a real
 Dovecot (`testenv/dovecot/run.sh`, run by the Linux CI test job; IMAP, and SMTP submission relaying to a
 mailpit sink). New sync or protocol behaviour gets a
