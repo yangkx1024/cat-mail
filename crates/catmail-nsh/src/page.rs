@@ -4,9 +4,10 @@
 //! checks top-level navigations, not a page's subresources. So the page shuts the
 //! network out itself: a Content-Security-Policy that allows nothing but `data:`
 //! images and inline styles, with every image the reader shows embedded as a `data:`
-//! URL first: the inline parts in the page as it is made, remote ones (cached, or that the
-//! user asked for) sent to the page as they come, which puts them in place of the
-//! blocked URLs, so the page doesn't load again and lose its place.
+//! URL first: the inline parts loaded when the page is made in it, and the rest of them
+//! and remote ones (cached, or that the user asked for) sent to the page as they come,
+//! which puts them in place of the blocked URLs, so the page doesn't load again and lose
+//! its place.
 //! The page's own scripts are off (`java_script_enabled(false)`); the bridge below is
 //! an injected user script, which WebKit still runs.
 
@@ -31,11 +32,13 @@ const BASE_STYLE: &str = "html, body { margin: 0; } \
 /// says may come late): that it loaded (`r:<n>`), its height (`h:<n>:<px>`), so the web
 /// view can be as tall as the page, that it has painted at the web view's height
 /// (`p:<n>:<px>`, two frames after it loaded and after each resize: WebKit has shown it
-/// at that size), and the links clicked (`o:<url>`), which open in the system's browser
-/// instead of in the view.
-/// What the reader tells the page ([`image_message`]): the `data:` URL of a remote image
-/// shown, for the elements that refer to it (as `img.src` normalizes it, which is
-/// `remote_image_url`'s spelling too).
+/// at that size), the links clicked (`o:<url>`), which open in the system's browser
+/// instead of in the view, and once, before `r`, each `cid:` URL of its images
+/// (`c:<n>:<url>`, as [`BRIDGE`]'s image message spells it), so the inline parts can go in
+/// as they load.
+/// What the reader tells the page ([`image_message`]): the `data:` URL of an image shown,
+/// remote or inline, for the elements that refer to it (as `img.src` normalizes it, which
+/// is `remote_image_url`'s spelling too).
 pub const BRIDGE: &str = r#"(function () {
   var number = document.querySelector('meta[name="catmail-page"]');
   var page = number ? number.content : "0";
@@ -73,6 +76,14 @@ pub const BRIDGE: &str = r#"(function () {
       if (absolute(el.getAttribute("background")) === url) el.setAttribute("background", data);
     });
   });
+  var cids = {};
+  document.querySelectorAll("img[src]").forEach(function (img) {
+    var url = absolute(img.getAttribute("src"));
+    if (url && url.slice(0, 4).toLowerCase() === "cid:" && !cids[url]) {
+      cids[url] = true;
+      window.nsh.postMessage("c:" + page + ":" + url);
+    }
+  });
   window.nsh.postMessage("r:" + page);
   function painted() {
     requestAnimationFrame(function () {
@@ -97,6 +108,8 @@ pub enum FromPage<'a> {
     Height(u64, f32),
     /// At the web view's height then, in points.
     Painted(u64, f32),
+    /// A `cid:` URL its images refer to.
+    Inline(u64, &'a str),
     Open(&'a str),
 }
 
@@ -104,6 +117,10 @@ impl<'a> FromPage<'a> {
     pub fn parse(message: &'a str) -> Option<Self> {
         if let Some(url) = message.strip_prefix("o:") {
             return Some(FromPage::Open(url));
+        }
+        if let Some(rest) = message.strip_prefix("c:") {
+            let (page, url) = rest.split_once(':')?;
+            return Some(FromPage::Inline(page.parse().ok()?, url));
         }
         let (kind, rest) = message.split_once(':')?;
         let (page, height) = match rest.split_once(':') {
@@ -235,7 +252,21 @@ mod tests {
             FromPage::parse("p:3:480"),
             Some(FromPage::Painted(3, 480.0))
         );
-        for unknown in ["h:3:tall", "h:640", "r", "r:3:1", "p:3", "x:3", "x"] {
+        assert_eq!(
+            FromPage::parse("c:3:cid:logo@example"),
+            Some(FromPage::Inline(3, "cid:logo@example"))
+        );
+        for unknown in [
+            "h:3:tall",
+            "h:640",
+            "r",
+            "r:3:1",
+            "p:3",
+            "x:3",
+            "x",
+            "c:3",
+            "c:x:cid:a",
+        ] {
             assert_eq!(FromPage::parse(unknown), None, "{unknown}");
         }
     }

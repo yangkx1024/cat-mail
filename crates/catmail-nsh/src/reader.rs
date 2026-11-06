@@ -14,7 +14,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use catmail_core::html::{
-    DarkPalette, InlineImage, RemoteImage, data_url, recolor_html, remote_image_urls,
+    DarkPalette, InlineImage, RemoteImage, content_id_from_url, data_url, recolor_html,
+    remote_image_urls,
 };
 use catmail_core::{Attachment, MessageId, safe_filename};
 use catmail_frontend::commands::MessageCommand;
@@ -52,8 +53,6 @@ struct Reading {
     attachments: Vec<Attachment>,
     /// The HTML as sanitized, for "Open in browser".
     html: Option<Rc<str>>,
-    /// The inline parts loaded, by Content-ID: in the page, and in the browser's.
-    inline: Rc<HashMap<String, InlineImage>>,
     page: String,
     /// Hidden while a message loads, past [`STAYS_SHOWN`] (or with nothing before it to
     /// show).
@@ -105,6 +104,11 @@ struct Page {
     /// The remote images shown, as `data:` URLs by URL: sent again when the page loads
     /// again (the appearance changed).
     remote: Vec<(String, String)>,
+    /// The open message's inline parts loaded so far, by Content-ID: in its page as made
+    /// again, sent to the one shown as they come, and in the browser's.
+    inline: HashMap<String, InlineImage>,
+    /// The `cid:` URLs the page shown refers to (`FromPage::Inline`), by Content-ID.
+    cids: Vec<(String, String)>,
     /// The page loaded: images can be sent to it.
     ready: bool,
     /// Fetching the open message's remote images; dropped with the message.
@@ -145,6 +149,7 @@ pub fn follow_selection() {
         let page = page_state();
         let mut page = page.borrow_mut();
         page.remote.clear();
+        page.inline.clear();
         if let Some(fetch) = page.fetch.take() {
             fetch.cancel();
         }
@@ -202,28 +207,6 @@ async fn open_message(id: MessageId, dark: bool) {
         true
     });
     let body = message.body.as_ref();
-    let mut inline = HashMap::new();
-    if let Some(body) = body.filter(|b| b.html.is_some()) {
-        for part in &body.attachments {
-            let Some(content_id) = &part.content_id else {
-                continue;
-            };
-            if !part.inline || !part.mime_type.starts_with("image/") {
-                continue;
-            }
-            match client().attachment_content(part.id).await {
-                Ok(bytes) => {
-                    let image = InlineImage {
-                        mime_type: part.mime_type.clone(),
-                        bytes,
-                    };
-                    inline.insert(content_id.clone(), image);
-                }
-                Err(e) => tracing::warn!(attachment = %part.id, error = %e,
-                    "failed to load inline image"),
-            }
-        }
-    }
     // For checking what the page may load: this file's HTML in place of the message's.
     let probe = std::env::var_os("CATMAIL_NSH_HTML").and_then(|f| std::fs::read_to_string(f).ok());
     let html = probe.as_deref().or(body.and_then(|b| b.html.as_deref()));
@@ -246,17 +229,21 @@ async fn open_message(id: MessageId, dark: bool) {
         .and_then(|html| recolor_html(html, palette()));
     let page_dark = page_is_dark(dark, html.is_some(), recolored.is_some());
     let page_html = recolored.as_deref().or(html);
+    // The inline parts already loaded (the page is made again, in a new appearance) are in
+    // it; the others go in as they load, after the text shows.
+    let loaded = copy_inline(&page_state().borrow().inline);
     let page = page::body_page(
         next_page(),
         page_html,
         body.and_then(|b| b.text.as_deref()),
-        copy_inline(&inline),
+        loaded,
         &colors(page_dark),
     );
     {
         let page = page_state();
         let mut page = page.borrow_mut();
         page.ready = false;
+        page.cids.clear();
         // Another message (not this one again, in a new appearance): from its top.
         if page.shown.replace(id) != Some(id)
             && let Some(scroll) = page.scroll
@@ -279,7 +266,6 @@ async fn open_message(id: MessageId, dark: bool) {
         header: Header::of(&message),
         attachments: reader::attachments(&message),
         html: html.map(Rc::from),
-        inline: Rc::new(inline),
         page,
         hidden,
         page_dark,
@@ -288,16 +274,75 @@ async fn open_message(id: MessageId, dark: bool) {
         can_reply_all,
     });
     // Those cached need no request: they show without asking.
-    if remote.is_empty() {
-        return;
-    }
-    match client().cached_remote_images(remote).await {
-        Ok(cached) if !cached.is_empty() => {
-            add_remote_images(id, cached);
+    if !remote.is_empty() {
+        match client().cached_remote_images(remote).await {
+            Ok(cached) if !cached.is_empty() => {
+                add_remote_images(id, cached);
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "couldn't read the image cache"),
         }
-        Ok(_) => {}
-        Err(e) => tracing::warn!(error = %e, "couldn't read the image cache"),
     }
+    // Only HTML shows inline parts. One at a time, as the GUI loads them; this task goes
+    // with the message.
+    let Some(body) = body.filter(|b| b.html.is_some()) else {
+        return;
+    };
+    for part in &body.attachments {
+        let Some(content_id) = &part.content_id else {
+            continue;
+        };
+        if !part.inline
+            || !part.mime_type.starts_with("image/")
+            || page_state().borrow().inline.contains_key(content_id)
+        {
+            continue;
+        }
+        match client().attachment_content(part.id).await {
+            Ok(bytes) => {
+                let image = InlineImage {
+                    mime_type: part.mime_type.clone(),
+                    bytes,
+                };
+                add_inline_image(content_id.clone(), image);
+            }
+            Err(e) => tracing::warn!(attachment = %part.id, error = %e,
+                "failed to load inline image"),
+        }
+    }
+}
+
+/// Puts an inline part of the open message in its page.
+fn add_inline_image(content_id: String, image: InlineImage) {
+    let page = page_state();
+    let mut page = page.borrow_mut();
+    if page.ready
+        && let Some(view) = page.view
+    {
+        let mut urls = page
+            .cids
+            .iter()
+            .filter(|(id, _)| *id == content_id)
+            .peekable();
+        if urls.peek().is_some() {
+            let data = data_url(&image.mime_type, &image.bytes);
+            for (_, url) in urls {
+                view.post_message(page::image_message(url, &data));
+            }
+        }
+    }
+    page.inline.insert(content_id, image);
+}
+
+/// The page shown refers to `url`: a `cid:` URL, which gets its inline part once that
+/// has loaded.
+fn page_refers_to(url: &str) {
+    let Some(content_id) = content_id_from_url(url) else {
+        return;
+    };
+    let page = page_state();
+    let mut page = page.borrow_mut();
+    page.cids.push((content_id, url.to_owned()));
 }
 
 /// Fetches the open message's remote images and shows each as it comes, because the user
@@ -396,14 +441,22 @@ fn add_remote_images(id: MessageId, fetched: Vec<(String, RemoteImage)>) -> bool
     true
 }
 
-/// The page loaded: it gets the remote images shown so far.
+/// The page loaded: it gets the remote images shown so far, and the inline parts loaded
+/// that it isn't made with (those that loaded while it did).
 fn page_ready() {
     let page = page_state();
     let mut page = page.borrow_mut();
     page.ready = true;
-    if let Some(view) = page.view {
-        for (url, data) in &page.remote {
-            view.post_message(page::image_message(url, data));
+    let Some(view) = page.view else {
+        return;
+    };
+    for (url, data) in &page.remote {
+        view.post_message(page::image_message(url, data));
+    }
+    for (content_id, url) in &page.cids {
+        if let Some(image) = page.inline.get(content_id) {
+            let data = data_url(&image.mime_type, &image.bytes);
+            view.post_message(page::image_message(url, &data));
         }
     }
 }
@@ -525,14 +578,15 @@ async fn write_off_thread(path: std::path::PathBuf, bytes: Vec<u8>) -> std::io::
 /// Writes the message as a standalone page and hands it to the system browser. The
 /// inline parts go in as loaded; remote images stay blocked there.
 fn open_in_browser() {
-    let Some((title, html, inline)) = global::<Reading>().with_untracked(|r| {
+    let Some((title, html)) = global::<Reading>().with_untracked(|r| {
         let html = r.html.clone()?;
-        Some((r.header.subject.clone(), html, r.inline.clone()))
+        Some((r.header.subject.clone(), html))
     }) else {
         return;
     };
+    let inline = copy_inline(&page_state().borrow().inline);
     in_mailbox(async move {
-        let page = browser_page(&title, &html, copy_inline(&inline));
+        let page = browser_page(&title, &html, inline);
         match client().hand_off("html", page.into_bytes()).await {
             Ok(path) => {
                 if let Err(e) = open_path(path).await {
@@ -924,6 +978,7 @@ fn web_view(view_ref: ElementRef) -> impl IntoElement {
         .injected_java_script(page::BRIDGE.to_owned())
         .element_ref(&view_ref)
         .on_message(move |message: &str| match FromPage::parse(message) {
+            Some(FromPage::Inline(number, url)) if is_shown(number) => page_refers_to(url),
             Some(FromPage::Ready(number)) if is_shown(number) => page_ready(),
             Some(FromPage::Painted(number, height)) if is_shown(number) => page_painted(height),
             Some(FromPage::Height(number, height)) if is_shown(number) => {
