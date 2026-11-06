@@ -18,7 +18,7 @@ use crate::{chrome, composer};
 
 use super::{
     BodyHeight, MIN_BODY_HEIGHT, Reading, Retry, ShowDetails, State, is_shown, open_in_browser,
-    page_painted, page_ready, page_refers_to, page_state, save_attachment, show_remote_images,
+    page_painted, page_ready, page_state, save_attachment, show_remote_images,
 };
 
 /// The pane: its toolbar over the message. It stays while no message is selected
@@ -395,7 +395,6 @@ fn web_view(view_ref: ElementRef) -> impl IntoElement {
         .injected_java_script(html::BRIDGE.to_owned())
         .element_ref(&view_ref)
         .on_message(move |message: &str| match FromPage::parse(message) {
-            Some(FromPage::Inline(number, url)) if is_shown(number) => page_refers_to(url),
             Some(FromPage::Ready(number)) if is_shown(number) => page_ready(),
             Some(FromPage::Painted(number, height)) if is_shown(number) => page_painted(height),
             Some(FromPage::Height(number, height)) if is_shown(number) => {

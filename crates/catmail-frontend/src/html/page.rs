@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use catmail_core::html::{InlineImage, embed_inline_images};
+use catmail_core::html::{InlineImage, InlineUrl, embed_inline_images};
 
 use super::escape;
 
@@ -43,9 +43,7 @@ const BASE_STYLE: &str = "html { overflow: hidden !important; } \
 /// is never less than the view's height and so wouldn't shrink for a shorter message), that it has painted at the web view's height
 /// (`p:<n>:<px>`, two frames after it loaded and after each resize: WebKit has shown it
 /// at that size), the links clicked (`o:<url>`), which open in the system's browser
-/// instead of in the view, and once, before `r`, each `cid:` URL of its images
-/// (`c:<n>:<url>`, as [`BRIDGE`]'s image message spells it), so the inline parts can go in
-/// as they load.
+/// instead of in the view.
 /// What the reader tells the page ([`image_message`]): the `data:` URL of an image shown,
 /// remote or inline, for the `<img>` elements that refer to it (as `img.src` normalizes
 /// it, which is `remote_image_url`'s spelling too). Only those: the sanitizer keeps no
@@ -87,14 +85,6 @@ pub const BRIDGE: &str = r#"(function () {
       if (absolute(img.getAttribute("src")) === url) img.src = data;
     });
   });
-  var cids = {};
-  document.querySelectorAll("img[src]").forEach(function (img) {
-    var url = absolute(img.getAttribute("src"));
-    if (url && url.slice(0, 4).toLowerCase() === "cid:" && !cids[url]) {
-      cids[url] = true;
-      window.nsh.postMessage("c:" + page + ":" + url);
-    }
-  });
   window.nsh.postMessage("r:" + page);
   function painted() {
     requestAnimationFrame(function () {
@@ -108,7 +98,7 @@ pub const BRIDGE: &str = r#"(function () {
 })();"#;
 
 /// The message that puts a remote image's `data:` URL in place of `url` in the page.
-pub fn image_message(url: &str, data_url: &str) -> String {
+pub(super) fn image_message(url: &str, data_url: &str) -> String {
     format!("i:{url}\n{data_url}")
 }
 
@@ -119,8 +109,6 @@ pub enum FromPage<'a> {
     Height(u64, f32),
     /// At the web view's height then, in points.
     Painted(u64, f32),
-    /// A `cid:` URL its images refer to.
-    Inline(u64, &'a str),
     Open(&'a str),
 }
 
@@ -128,10 +116,6 @@ impl<'a> FromPage<'a> {
     pub fn parse(message: &'a str) -> Option<Self> {
         if let Some(url) = message.strip_prefix("o:") {
             return Some(FromPage::Open(url));
-        }
-        if let Some(rest) = message.strip_prefix("c:") {
-            let (page, url) = rest.split_once(':')?;
-            return Some(FromPage::Inline(page.parse().ok()?, url));
         }
         let (kind, rest) = message.split_once(':')?;
         let (page, height) = match rest.split_once(':') {
@@ -147,24 +131,38 @@ impl<'a> FromPage<'a> {
     }
 }
 
+/// A page made by [`body_page`].
+pub(super) struct BodyPage {
+    pub html: String,
+    /// The `cid:` images whose parts it isn't made with: what [`image_message`] puts each
+    /// part in place of once it has loaded.
+    pub inline_urls: Vec<InlineUrl>,
+}
+
 /// The page of a body: its sanitized HTML (`MessageBody::html`) with `inline` (by
 /// Content-ID) embedded, or the plain text when there is no HTML part. `number` is in
 /// what the page says ([`FromPage`]).
-pub fn body_page(
+pub(super) fn body_page(
     number: u64,
     html: Option<&str>,
     text: Option<&str>,
     inline: HashMap<String, InlineImage>,
     colors: &Colors,
-) -> String {
-    let content = match html {
-        Some(html) => embed_inline_images(html, inline),
-        None => format!(
-            "<pre style=\"white-space: pre-wrap; font-family: inherit; margin: 0\">{}</pre>",
-            escape(text.unwrap_or_default())
+) -> BodyPage {
+    let (content, inline_urls) = match html {
+        Some(html) => {
+            let embedded = embed_inline_images(html, inline);
+            (embedded.html, embedded.inline_urls)
+        }
+        None => (
+            format!(
+                "<pre style=\"white-space: pre-wrap; font-family: inherit; margin: 0\">{}</pre>",
+                escape(text.unwrap_or_default())
+            ),
+            Vec::new(),
         ),
     };
-    format!(
+    let html = format!(
         "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">\
          <meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\">\
          <meta name=\"referrer\" content=\"no-referrer\">\
@@ -172,13 +170,14 @@ pub fn body_page(
          <style>{BASE_STYLE} html {{ color: {}; background: {}; }} a[href] {{ color: {}; }}</style>\
          </head>\n<body>\n{content}\n</body></html>\n",
         colors.foreground, colors.background, colors.link,
-    )
+    );
+    BodyPage { html, inline_urls }
 }
 
 /// A page with nothing in it, in `colors`: what the web view shows while no message is,
 /// so that its web process is running when one opens.
 pub fn blank_page(number: u64, colors: &Colors) -> String {
-    body_page(number, None, None, HashMap::new(), colors)
+    body_page(number, None, None, HashMap::new(), colors).html
 }
 
 /// The reader's colors under the message's own, as CSS colors.
@@ -208,7 +207,8 @@ mod tests {
             None,
             HashMap::new(),
             &colors(),
-        );
+        )
+        .html;
         let policy = page.find("Content-Security-Policy").unwrap();
         let body = page.find("<body>").unwrap();
         assert!(policy < body);
@@ -217,21 +217,29 @@ mod tests {
     }
 
     #[test]
-    fn inline_images_are_embedded() {
+    fn inline_images_are_embedded_or_sent_as_they_load() {
         let inline = HashMap::from([(
             "logo@example".to_owned(),
             InlineImage::new("image/png", &[1, 2, 3]),
         )]);
         let page = body_page(
             1,
-            Some("<img src=\"cid:logo@example\">"),
+            Some("<img src=\"cid:logo@example\"><img src=\"CID:chart%40example\">"),
             None,
             inline,
             &colors(),
         );
         assert!(
-            page.contains("src=\"data:image/png;base64,AQID\""),
-            "{page}"
+            page.html.contains("src=\"data:image/png;base64,AQID\""),
+            "{}",
+            page.html
+        );
+        assert_eq!(
+            page.inline_urls,
+            [InlineUrl {
+                content_id: "chart@example".to_owned(),
+                url: "cid:chart%40example".to_owned(),
+            }]
         );
     }
 
@@ -249,7 +257,8 @@ mod tests {
     #[test]
     fn plain_text_is_escaped() {
         let page = body_page(1, None, Some("<b>&"), HashMap::new(), &colors());
-        assert!(page.contains("&lt;b&gt;&amp;"));
+        assert!(page.html.contains("&lt;b&gt;&amp;"));
+        assert!(page.inline_urls.is_empty());
     }
 
     #[test]
@@ -264,21 +273,7 @@ mod tests {
             FromPage::parse("p:3:480"),
             Some(FromPage::Painted(3, 480.0))
         );
-        assert_eq!(
-            FromPage::parse("c:3:cid:logo@example"),
-            Some(FromPage::Inline(3, "cid:logo@example"))
-        );
-        for unknown in [
-            "h:3:tall",
-            "h:640",
-            "r",
-            "r:3:1",
-            "p:3",
-            "x:3",
-            "x",
-            "c:3",
-            "c:x:cid:a",
-        ] {
+        for unknown in ["h:3:tall", "h:640", "r", "r:3:1", "p:3", "x:3", "x"] {
             assert_eq!(FromPage::parse(unknown), None, "{unknown}");
         }
     }

@@ -6,11 +6,13 @@
 //! message was read (and from where), so only images carried by the message itself are
 //! shown (inline parts, `cid:`, and `data:` URLs) until the user asks for the remote
 //! ones of a message (`catmail_core::html::remote_image_urls`). The page the reader shows
-//! a body as is [`page`]'s.
+//! a body as is [`page`]'s, and the images sent to it after it is [`PageImages`]'.
 
+mod images;
 mod page;
 
-pub use page::{BRIDGE, Colors, FromPage, blank_page, body_page, image_message};
+pub use images::PageImages;
+pub use page::{BRIDGE, Colors, FromPage, blank_page};
 
 use std::collections::HashMap;
 
@@ -40,7 +42,7 @@ pub fn browser_page(title: &str, html: &str, inline: HashMap<String, InlineImage
          <meta name=\"referrer\" content=\"no-referrer\">\
          <title>{}</title></head>\n<body>\n{}\n</body></html>\n",
         escape(title),
-        embed_inline_images(html, inline),
+        embed_inline_images(html, inline).html,
     )
 }
 
