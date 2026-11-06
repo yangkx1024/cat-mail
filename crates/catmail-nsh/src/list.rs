@@ -90,9 +90,10 @@ pub struct Selected(pub Option<RowId>);
 #[derive(Clone, Default)]
 pub struct Checked(pub HashSet<MessageId>);
 
-/// The message row the pointer is on.
-#[derive(Clone, Default)]
-struct Hovered(Option<MessageId>);
+/// The row the pointer is on. One for the list rather than one per row: a cell that
+/// scrolls to another row doesn't take the pointer with it.
+#[derive(Clone, Default, PartialEq)]
+struct Hovered(Option<RowId>);
 
 /// What the search field holds.
 #[derive(Clone, Default)]
@@ -649,6 +650,8 @@ pub fn list_column() -> impl IntoElement {
     });
     view().flex_1().min_w(px(0.0)).child(header()).child(
         virtual_list(move || global::<Rows>().with(|r| r.items.len()), item)
+            // In from the list's sides, as the GUI's list (`px_3`).
+            .content_padding_x(px(12.0))
             .keys(move || {
                 global::<Rows>().with(|r| {
                     r.items
@@ -682,7 +685,6 @@ pub fn list_column() -> impl IntoElement {
             )
             .estimated_item_size(px(48.0))
             .element_ref(&list)
-            .px(px(12.0))
             .flex_1(),
     )
 }
@@ -925,17 +927,38 @@ fn row_of(item: Memo<Option<Item>>) -> impl Fn() -> Option<Row> + Copy {
     }
 }
 
-/// A row's box: selected, it has the accent behind it; pressed, it opens.
+/// A row's box: selected or under the pointer, it has the list's colors behind it, as
+/// the GUI's; pressed, it opens.
 fn row_box(row: impl Fn() -> Option<Row> + Copy + 'static) -> View {
     let id = move || row().map(|r| r.id());
     let selected = move || {
         let id = id();
         id.is_some() && global::<Selected>().with(|s| s.0) == id
     };
+    let hovered = move || {
+        let id = id();
+        id.is_some() && global::<Hovered>().with(|h| h.0) == id
+    };
+    // Apart from the next row, so a selected row's background and a hovered neighbour's
+    // don't touch (GPUI Kit's list has no gap of its own).
     view()
         .rounded(px(8.0))
-        .my(px(1.0))
-        .style_when(selected, |s| s.bg(move || theme().accent))
+        .my(px(2.0))
+        .bg(move || {
+            if selected() {
+                crate::theme::list_active()
+            } else if hovered() {
+                crate::theme::list_hover()
+            } else {
+                AdaptiveColor::TRANSPARENT
+            }
+        })
+        .on_mouse_enter(move |_: &MouseEvent| global::<Hovered>().set(Hovered(id())))
+        .on_mouse_leave(move |_: &MouseEvent| {
+            if global::<Hovered>().with_untracked(|h| h.0) == id() {
+                global::<Hovered>().set(Hovered(None));
+            }
+        })
         .on_press(move |press: &PressEvent| {
             if let Some(id) = id() {
                 open(id);
@@ -966,7 +989,7 @@ fn message_row(item: Memo<Option<Item>>) -> impl IntoElement {
     };
     let hovered = move || {
         let id = id();
-        id.is_some() && global::<Hovered>().with(|h| h.0) == id
+        id.is_some() && global::<Hovered>().with(|h| h.0) == id.map(RowId::Message)
     };
     let who = move || {
         text(field(|m| format::sender(&m.from).to_owned()))
@@ -993,12 +1016,6 @@ fn message_row(item: Memo<Option<Item>>) -> impl IntoElement {
                     .map(|m| list::message_label(m, &label_names(m)))
                     .unwrap_or_default()
             }))
-        })
-        .on_mouse_enter(move |_: &MouseEvent| global::<Hovered>().set(Hovered(id())))
-        .on_mouse_leave(move |_: &MouseEvent| {
-            if global::<Hovered>().with_untracked(|h| h.0) == id() {
-                global::<Hovered>().set(Hovered(None));
-            }
         })
         .child(dynamic(move || {
             if reading() {

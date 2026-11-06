@@ -49,6 +49,8 @@ const TOKENS: &[(&str, &str)] = &[
     ("sidebar-ring", "ring"),
     // The app's own. `selection` is also what nsh's components highlight with.
     ("selection", "selection.background"),
+    ("list-active", "list.active.background"),
+    ("list-hover", "list.hover.background"),
     ("warning", "warning.background"),
     ("success", "success.background"),
     ("info", "info.background"),
@@ -112,6 +114,16 @@ pub fn warning_badge() -> AdaptiveColor {
 /// A badge for something that failed.
 pub fn danger_badge() -> AdaptiveColor {
     tint(theme().destructive)
+}
+
+/// A list's selected row, as GPUI Kit's lists draw it.
+pub fn list_active() -> AdaptiveColor {
+    token("list-active", || theme().accent)
+}
+
+/// A list's row under the pointer.
+pub fn list_hover() -> AdaptiveColor {
+    token("list-hover", || theme().accent)
 }
 
 /// Links in a message.
