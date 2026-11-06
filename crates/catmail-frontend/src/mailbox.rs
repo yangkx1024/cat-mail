@@ -171,6 +171,18 @@ impl Source {
             Source::Inboxes | Source::Folder(_) | Source::Search(_)
         )
     }
+
+    /// The folder a message of `account` listed here is looked at in: on Gmail, the label
+    /// it leaves when moved to another, and one its row needn't name. In All Inboxes its
+    /// account's INBOX; none for search results, which come from anywhere.
+    pub fn shown_in(&self, account: AccountId, accounts: &[AccountEntry]) -> Option<FolderId> {
+        let entry = accounts.iter().find(|e| e.account.id == account)?;
+        match self {
+            Source::Inboxes => entry.folders.with_role(FolderRole::Inbox).map(|f| f.id),
+            Source::Folder(id) => entry.folders.find(*id).map(|_| *id),
+            Source::Search(_) | Source::Drafts(_) | Source::Outbox(_) => None,
+        }
+    }
 }
 
 /// The list's title: the place's name, or what is searched for.

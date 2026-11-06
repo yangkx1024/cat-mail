@@ -4,13 +4,13 @@
 use catmail_core::{Flags, MessageSummary};
 use catmail_frontend::format;
 use catmail_frontend::list::{self, Line, Listing, ROW_LABELS, Row, RowId, Severity};
-use catmail_frontend::mailbox::Source;
 use nsh_base::theme;
 use nsh_core::prelude::*;
 
 use crate::buttons::Size;
 use crate::icons::{Icon, icon};
 use crate::mailbox::commands;
+use crate::mailbox::sidebar::Accounts;
 
 use super::{Checked, LabelNames, Selected, edit_selected_draft, open, reading, toggle_checked};
 
@@ -242,14 +242,17 @@ fn message_row(item: Memo<Option<Line>>) -> impl IntoElement {
         }))
 }
 
-/// The names of the message's user labels a row shows: not the one listed, which every
-/// row has.
+/// The names of the message's user labels a row shows: not the one it is looked at in
+/// (`Source::shown_in`), which every row has.
 fn label_names(message: &MessageSummary) -> Vec<String> {
-    let listed = global::<Listing>().with(|l| match l.source() {
-        Some(&Source::Folder(id)) => Some(id),
-        _ => None,
+    let shown_in = global::<Listing>().with(|l| {
+        let source = l.source()?;
+        global::<Accounts>().with(|a| {
+            let accounts = a.0.as_deref().unwrap_or_default();
+            source.shown_in(message.account_id, accounts)
+        })
     });
-    global::<LabelNames>().with(|l| list::label_names(&l.0, message, listed))
+    global::<LabelNames>().with(|l| list::label_names(&l.0, message, shown_in))
 }
 
 /// The names of all the message's user labels, as the reading pane shows them.

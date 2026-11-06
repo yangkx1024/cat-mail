@@ -195,8 +195,11 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 
 ## 读与改
 
-命令的模型在 `catmail_frontend::commands`（`Applies`、命令的名字、作用于哪些邮件、"Move to"列出的文件夹、永久
-删除的确认文案、被拒改动的说明），`mailbox/commands.rs` 只有界面。
+命令的模型在 `catmail_frontend::commands`（`Applies`、命令的名字、改动哪些邮件和失败时怎么说（`Change::what`，
+"Couldn't {what}"，和删除文件夹、发件箱的选项一样）、"Move to"列出的文件夹、永久删除的确认文案、被拒改动的说明），
+都直接拿账户列表（`&[AccountEntry]`）。快捷键作用于哪些邮件是 `Listing::keyed`，只等选中的那封离开是
+`ListModel::expect_removal`，一封邮件"在哪看"（Gmail 上移动会去掉的标签、行上不用再写的标签）是
+`Source::shown_in`，移动和行上的标签名都用它。`mailbox/commands.rs` 只调用 `MailClient`、显示通知和画按钮。
 
 - **三处同一套按钮**：读信区工具栏、勾选工具栏、悬停的行都由 `commands::group` 生成，只显示图标，按用途分组：
   位置（Archive、Delete、Move to）；标记（已读 / 未读、Flag）；读信区另有内容（Show remote images、Open in

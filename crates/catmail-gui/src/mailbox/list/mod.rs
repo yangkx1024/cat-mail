@@ -264,7 +264,7 @@ pub fn open(row: RowId) {
     if crate::shell::settings().mark_read_on_open
         && message(id).is_some_and(|m| !m.flags.contains(Flags::SEEN))
     {
-        commands::set_flags(vec![id], Flags::SEEN, Flags::empty());
+        commands::set_flags(catmail_frontend::commands::mark_read(id));
     }
 }
 
@@ -317,26 +317,14 @@ pub fn selected_message() -> Option<MessageSummary> {
 
 /// The messages checked, top to bottom. Tracked.
 pub fn checked_messages() -> Vec<MessageSummary> {
-    let checked = global::<Checked>().with(|c| c.0.clone());
-    if checked.is_empty() {
-        return Vec::new();
-    }
-    global::<Listing>().with(|l| {
-        l.messages()
-            .filter(|m| checked.contains(&m.id))
-            .cloned()
-            .collect()
-    })
+    global::<Checked>().with(|c| global::<Listing>().with(|l| l.checked(&c.0)))
 }
 
 /// What a key acts on: the messages checked, or else the selected one.
 fn keyed() -> Vec<MessageSummary> {
-    let checked = untracked(checked_messages);
-    if checked.is_empty() {
-        untracked(selected_message).into_iter().collect()
-    } else {
-        checked
-    }
+    let selected = global::<Selected>().with_untracked(|s| s.0);
+    global::<Checked>()
+        .with_untracked(|c| global::<Listing>().with_untracked(|l| l.keyed(&c.0, selected)))
 }
 
 /// Unchecks the messages moved or deleted: those still listed (on Gmail, one moved to a
@@ -348,15 +336,17 @@ pub fn uncheck(ids: &[MessageId]) {
     }
 }
 
-/// Whether the list shows search results.
-pub fn is_searching() -> bool {
-    global::<Listing>().with_untracked(|l| matches!(l.source(), Some(Source::Search(_))))
+/// What the list shows. Untracked.
+pub fn source() -> Option<Source> {
+    global::<Listing>().with_untracked(|l| l.source().cloned())
 }
 
-/// Selects the next row once `id`, the selected message, goes away. Returns the
-/// removal's number, for [`removal_settled`].
-pub fn expect_removal(id: MessageId) -> u64 {
-    reads().borrow_mut().expect_removal(id)
+/// `ids` are about to be moved or deleted: if the selected message is among them, the
+/// next row is selected once it goes away. Returns the removal's number, for
+/// [`removal_settled`].
+pub fn expect_removal(ids: &[MessageId]) -> Option<u64> {
+    let selected = global::<Selected>().with_untracked(|s| s.0);
+    reads().borrow_mut().expect_removal(selected, ids)
 }
 
 /// The change behind `removal`, which may take the message out of the list, was made

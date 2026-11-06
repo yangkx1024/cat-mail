@@ -75,6 +75,32 @@ impl Listing {
         self.messages().find(|m| m.id == id)
     }
 
+    /// The messages checked, top to bottom.
+    pub fn checked(&self, checked: &HashSet<MessageId>) -> Vec<MessageSummary> {
+        if checked.is_empty() {
+            return Vec::new();
+        }
+        let checked = self.messages().filter(|m| checked.contains(&m.id));
+        checked.cloned().collect()
+    }
+
+    /// What a command from a key acts on: the messages checked, or else the one selected.
+    pub fn keyed(
+        &self,
+        checked: &HashSet<MessageId>,
+        selected: Option<RowId>,
+    ) -> Vec<MessageSummary> {
+        let messages = self.checked(checked);
+        if !messages.is_empty() {
+            return messages;
+        }
+        let selected = match selected {
+            Some(RowId::Message(id)) => self.message(id),
+            _ => None,
+        };
+        selected.into_iter().cloned().collect()
+    }
+
     /// How many lines the list has.
     pub fn len(&self) -> usize {
         self.lines.len()
@@ -378,10 +404,15 @@ impl ListModel {
         (open, self.reveal.is_waiting())
     }
 
-    /// Selects the next row once `id`, the selected message, goes away. Returns the
-    /// removal's number, for [`removal_settled`](Self::removal_settled).
-    pub fn expect_removal(&mut self, id: MessageId) -> u64 {
-        self.removal.expect(id)
+    /// `ids` are about to be moved or deleted: if `selected` is among them, the next row
+    /// is selected once it goes away. Only the selected message's removal is waited for:
+    /// another's (a row's own command) must not take the place of one pending for it.
+    /// Returns the removal's number, for [`removal_settled`](Self::removal_settled).
+    pub fn expect_removal(&mut self, selected: Option<RowId>, ids: &[MessageId]) -> Option<u64> {
+        let Some(RowId::Message(id)) = selected else {
+            return None;
+        };
+        ids.contains(&id).then(|| self.removal.expect(id))
     }
 
     /// The change behind `removal`, which may take the message out of the list, was made
@@ -543,7 +574,10 @@ mod tests {
         list.load(&first, &[1, 2, 3]);
         list.open(m(2));
         list.checked = HashSet::from([MessageId(2), MessageId(3)]);
-        let removal = list.model.expect_removal(MessageId(2));
+        let removal = list
+            .model
+            .expect_removal(list.selected, &[MessageId(2)])
+            .unwrap();
         // A read started before the change still has it: it stays selected. The read
         // the change asks for follows it.
         let before = list.model.refresh(&list.listing).unwrap();
@@ -611,7 +645,10 @@ mod tests {
         let (mut list, first) = List::new();
         list.load(&first, &[1, 2, 3]);
         list.open(m(2));
-        let removal = list.model.expect_removal(MessageId(2));
+        let removal = list
+            .model
+            .expect_removal(list.selected, &[MessageId(2)])
+            .unwrap();
         assert!(list.model.removal_settled(removal, true));
         list.model.reveal(MessageId(9), &list.listing);
         let next = list.model.refresh(&list.listing).unwrap();
@@ -621,6 +658,41 @@ mod tests {
         );
         let next = list.model.refresh(&list.listing).unwrap();
         assert_eq!(list.load(&next, &[9, 1, 3]).unwrap().select, Select::Keep);
+    }
+
+    #[test]
+    fn a_key_acts_on_the_messages_checked_or_else_the_one_selected() {
+        let (mut list, first) = List::new();
+        list.load(&first, &[1, 2, 3]);
+        let keyed = |list: &List| -> Vec<i64> {
+            let keyed = list.listing.keyed(&list.checked, list.selected);
+            keyed.iter().map(|m| m.id.0).collect()
+        };
+        assert!(keyed(&list).is_empty());
+        list.open(m(2));
+        assert_eq!(keyed(&list), [2]);
+        // Top to bottom, whatever order they were checked in.
+        list.checked = HashSet::from([MessageId(3), MessageId(1)]);
+        assert_eq!(keyed(&list), [1, 3]);
+        // A draft selected isn't a message.
+        list.checked.clear();
+        list.selected = Some(RowId::Draft(catmail_core::DraftId(2)));
+        assert!(keyed(&list).is_empty());
+    }
+
+    #[test]
+    fn only_the_selected_messages_removal_is_waited_for() {
+        let (mut list, first) = List::new();
+        list.load(&first, &[1, 2, 3]);
+        assert_eq!(list.model.expect_removal(None, &[MessageId(1)]), None);
+        list.open(m(2));
+        // A row's own command, on another message.
+        assert_eq!(
+            list.model.expect_removal(list.selected, &[MessageId(1)]),
+            None
+        );
+        let ids = [MessageId(1), MessageId(2)];
+        assert!(list.model.expect_removal(list.selected, &ids).is_some());
     }
 
     #[test]
