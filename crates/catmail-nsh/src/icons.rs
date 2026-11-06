@@ -24,6 +24,8 @@ macro_rules! hero {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Icon {
     Folder(FolderIcon),
+    /// Filled, as a selected row's ([`Icon::solid`]).
+    FolderSolid(FolderIcon),
     ArchiveBox,
     ArrowDownTray,
     ArrowLeft,
@@ -36,10 +38,12 @@ pub enum Icon {
     ChevronDown,
     ChevronRight,
     Cog6Tooth,
+    Cog6ToothSolid,
     ComputerDesktop,
     Document,
     Envelope,
     EnvelopeOpen,
+    EnvelopeOpenSolid,
     ExclamationTriangle,
     Flag,
     /// Filled, as a mark on a flagged message.
@@ -58,11 +62,34 @@ pub enum Icon {
     StarSolid,
     Sun,
     Swatch,
+    SwatchSolid,
     Tag,
     Trash,
     UserCircle,
+    UserCircleSolid,
     XCircle,
     XMark,
+}
+
+/// A folder's icon in `style`: one table for the outlined and the filled.
+macro_rules! folder_icon {
+    ($icon:expr, $style:literal) => {
+        match $icon {
+            FolderIcon::Inbox => hero!($style, "inbox"),
+            FolderIcon::Sent => hero!($style, "paper-airplane"),
+            FolderIcon::Archive => hero!($style, "archive-box"),
+            FolderIcon::All => hero!($style, "envelope"),
+            FolderIcon::Important => hero!($style, "star"),
+            FolderIcon::Flagged => hero!($style, "flag"),
+            FolderIcon::Junk => hero!($style, "shield-exclamation"),
+            FolderIcon::Trash => hero!($style, "trash"),
+            FolderIcon::Drafts => hero!($style, "document-text"),
+            FolderIcon::Label => hero!($style, "tag"),
+            FolderIcon::Folder => hero!($style, "folder"),
+            FolderIcon::Inboxes => hero!($style, "inbox-stack"),
+            FolderIcon::Outbox => hero!($style, "arrow-up-tray"),
+        }
+    };
 }
 
 impl From<FolderIcon> for Icon {
@@ -72,23 +99,25 @@ impl From<FolderIcon> for Icon {
 }
 
 impl Icon {
+    /// The filled icon, for a selected row as the GUI's `layout::sidebar_row` draws it;
+    /// one with no filled form stays as it is.
+    pub fn solid(self) -> Self {
+        match self {
+            Icon::Folder(icon) => Icon::FolderSolid(icon),
+            Icon::Cog6Tooth => Icon::Cog6ToothSolid,
+            Icon::EnvelopeOpen => Icon::EnvelopeOpenSolid,
+            Icon::Flag => Icon::FlagSolid,
+            Icon::Star => Icon::StarSolid,
+            Icon::Swatch => Icon::SwatchSolid,
+            Icon::UserCircle => Icon::UserCircleSolid,
+            other => other,
+        }
+    }
+
     fn markup(self) -> &'static str {
         match self {
-            Icon::Folder(icon) => match icon {
-                FolderIcon::Inbox => hero!("inbox"),
-                FolderIcon::Sent => hero!("paper-airplane"),
-                FolderIcon::Archive => hero!("archive-box"),
-                FolderIcon::All => hero!("envelope"),
-                FolderIcon::Important => hero!("star"),
-                FolderIcon::Flagged => hero!("flag"),
-                FolderIcon::Junk => hero!("shield-exclamation"),
-                FolderIcon::Trash => hero!("trash"),
-                FolderIcon::Drafts => hero!("document-text"),
-                FolderIcon::Label => hero!("tag"),
-                FolderIcon::Folder => hero!("folder"),
-                FolderIcon::Inboxes => hero!("inbox-stack"),
-                FolderIcon::Outbox => hero!("arrow-up-tray"),
-            },
+            Icon::Folder(icon) => folder_icon!(icon, "outline"),
+            Icon::FolderSolid(icon) => folder_icon!(icon, "solid"),
             Icon::ArchiveBox => hero!("archive-box"),
             Icon::ArrowDownTray => hero!("arrow-down-tray"),
             Icon::ArrowLeft => hero!("arrow-left"),
@@ -101,10 +130,12 @@ impl Icon {
             Icon::ChevronDown => hero!("chevron-down"),
             Icon::ChevronRight => hero!("chevron-right"),
             Icon::Cog6Tooth => hero!("cog-6-tooth"),
+            Icon::Cog6ToothSolid => hero!("solid", "cog-6-tooth"),
             Icon::ComputerDesktop => hero!("computer-desktop"),
             Icon::Document => hero!("document"),
             Icon::Envelope => hero!("envelope"),
             Icon::EnvelopeOpen => hero!("envelope-open"),
+            Icon::EnvelopeOpenSolid => hero!("solid", "envelope-open"),
             Icon::ExclamationTriangle => hero!("exclamation-triangle"),
             Icon::Flag => hero!("flag"),
             Icon::FlagSolid => hero!("solid", "flag"),
@@ -121,9 +152,11 @@ impl Icon {
             Icon::StarSolid => hero!("solid", "star"),
             Icon::Sun => hero!("sun"),
             Icon::Swatch => hero!("swatch"),
+            Icon::SwatchSolid => hero!("solid", "swatch"),
             Icon::Tag => hero!("tag"),
             Icon::Trash => hero!("trash"),
             Icon::UserCircle => hero!("user-circle"),
+            Icon::UserCircleSolid => hero!("solid", "user-circle"),
             Icon::XCircle => hero!("x-circle"),
             Icon::XMark => hero!("x-mark"),
         }
@@ -137,4 +170,28 @@ impl Icon {
 /// The icon `icon` gives, `size` points square.
 pub fn icon(icon: impl Fn() -> Icon + 'static, size: f32) -> Svg {
     svg(move || icon().src()).w(px(size)).h(px(size))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_selected_row_has_its_icon_filled() {
+        use FolderIcon::*;
+        let folders = [
+            Inbox, Sent, Archive, All, Important, Flagged, Junk, Trash, Drafts, Label, Folder,
+            Inboxes, Outbox,
+        ];
+        let settings = [
+            Icon::Cog6Tooth,
+            Icon::Swatch,
+            Icon::UserCircle,
+            Icon::EnvelopeOpen,
+        ];
+        for icon in folders.map(Icon::from).into_iter().chain(settings) {
+            assert_ne!(icon.solid().markup(), icon.markup(), "{icon:?}");
+        }
+        assert_eq!(Icon::XMark.solid(), Icon::XMark);
+    }
 }

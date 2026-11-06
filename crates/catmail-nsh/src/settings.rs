@@ -33,7 +33,7 @@ use crate::form::{self, NameRequest, ask_name, modal};
 use crate::icons::{Icon, icon};
 use crate::login;
 use crate::shell;
-use crate::sidebar::Accounts;
+use crate::sidebar::{self, Accounts};
 use crate::toast::{Level, notify};
 
 // --- The settings in a view ---------------------------------------------------------
@@ -140,38 +140,19 @@ fn settings_dialog() -> impl IntoElement {
         _ => Section::General,
     };
     let section = signal(first);
+    // As the GUI's: GPUI Kit's sidebar menu, 10 rem wide.
     let nav = view()
-        .w(px(168.0))
+        .w(px(160.0))
         .flex_shrink_0()
-        .gap(px(2.0))
+        .gap(px(8.0))
         .pr(px(12.0))
         .border_r_1()
         .border_color(move || theme().border)
         .children(Section::ALL.map(|(which, label, glyph)| {
             let selected = move || section.get() == which;
-            view()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .h(px(32.0))
-                .px(px(8.0))
-                .rounded(px(6.0))
-                .bg(move || {
-                    if selected() {
-                        theme().accent
-                    } else {
-                        AdaptiveColor::TRANSPARENT
-                    }
-                })
+            sidebar::menu_item(move || glyph, label, selected)
                 .label(label)
                 .on_press(move || section.set(which))
-                .child(icon(move || glyph, 16.0).text_color(move || theme().foreground))
-                .child(
-                    text(label)
-                        .text_sm()
-                        .style_when(selected, |s| s.font_weight(FontWeight::MEDIUM))
-                        .text_color(move || theme().foreground),
-                )
                 .into_element()
         }));
     let content = dynamic(move || match section.get() {
@@ -245,7 +226,6 @@ fn labelled_button(
     enabled: impl Fn() -> bool + Copy + 'static,
     press: impl Fn() + 'static,
 ) -> impl IntoElement {
-    let hovered = signal(false);
     view()
         .flex_row()
         .items_center()
@@ -261,17 +241,17 @@ fn labelled_button(
                 AdaptiveColor::TRANSPARENT
             }
         })
-        .bg(move || {
-            if hovered.get() && enabled() {
-                theme().accent
-            } else {
-                AdaptiveColor::TRANSPARENT
-            }
+        .hover(move |s| {
+            s.bg(move || {
+                if enabled() {
+                    theme().accent
+                } else {
+                    AdaptiveColor::TRANSPARENT
+                }
+            })
         })
         .opacity(move || if enabled() { 1.0_f32 } else { 0.5 })
         .label(label)
-        .on_mouse_enter(move |_: &MouseEvent| hovered.set(true))
-        .on_mouse_leave(move |_: &MouseEvent| hovered.set(false))
         .on_press(move || {
             if untracked(enabled) {
                 press();
@@ -530,7 +510,6 @@ fn theme_card(entry: ThemeEntry, dark: bool) -> AnyElement {
             }
         })
     };
-    let hovered = signal(false);
     let line = move |width: f32, color: Hsla| {
         view()
             .h(px(6.0))
@@ -581,7 +560,7 @@ fn theme_card(entry: ThemeEntry, dark: bool) -> AnyElement {
         .rounded(px(10.0))
         .border(move || if selected_() { px(2.0) } else { px(1.0) })
         .border_color(move || {
-            if selected__() || hovered.get() {
+            if selected__() {
                 theme().ring
             } else {
                 theme().border
@@ -590,8 +569,7 @@ fn theme_card(entry: ThemeEntry, dark: bool) -> AnyElement {
         .overflow_hidden()
         .role(AccessibilityRole::Button)
         .label(name.clone())
-        .on_mouse_enter(move |_: &MouseEvent| hovered.set(true))
-        .on_mouse_leave(move |_: &MouseEvent| hovered.set(false))
+        .hover(|s| s.border_color(move || theme().ring))
         .on_press(move || choose_theme(picked.clone(), dark))
         .child(miniature)
         .child(

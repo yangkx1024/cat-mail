@@ -1011,7 +1011,6 @@ fn attachments() -> impl IntoElement {
                     |a| a.id,
                     |attachment, _| {
                         let image = move || attachment.with(|a| a.mime_type.starts_with("image/"));
-                        let hovered = signal(false);
                         let names = move || attachment.with(reader::attachment_label);
                         view()
                             .flex_row()
@@ -1022,15 +1021,7 @@ fn attachments() -> impl IntoElement {
                             .rounded(px(8.0))
                             .border_1()
                             .border_color(move || theme().border)
-                            .bg(move || {
-                                if hovered.get() {
-                                    theme().accent
-                                } else {
-                                    AdaptiveColor::TRANSPARENT
-                                }
-                            })
-                            .on_mouse_enter(move |_: &MouseEvent| hovered.set(true))
-                            .on_mouse_leave(move |_: &MouseEvent| hovered.set(false))
+                            .hover(|s| s.bg(move || theme().accent))
                             .on_press(move || save_attachment(attachment.get_untracked()))
                             .tooltip(commands::tooltip(move || format!("Save “{}”", names().0)))
                             .child(

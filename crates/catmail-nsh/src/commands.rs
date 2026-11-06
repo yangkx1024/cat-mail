@@ -367,7 +367,6 @@ pub fn icon_button(
     size: Size,
     press: impl Fn() + 'static,
 ) -> View {
-    let hovered = signal(false);
     view()
         .w(px(size.box_size()))
         .h(px(size.box_size()))
@@ -376,16 +375,16 @@ pub fn icon_button(
         .items_center()
         .justify_center()
         .opacity(move || if enabled() { 1.0_f32 } else { 0.4 })
-        .bg(move || {
-            if hovered.get() && enabled() {
-                theme().accent
-            } else {
-                AdaptiveColor::TRANSPARENT
-            }
+        .hover(move |s| {
+            s.bg(move || {
+                if enabled() {
+                    theme().accent
+                } else {
+                    AdaptiveColor::TRANSPARENT
+                }
+            })
         })
         .label(move || SharedString::from(name()))
-        .on_mouse_enter(move |_: &MouseEvent| hovered.set(true))
-        .on_mouse_leave(move |_: &MouseEvent| hovered.set(false))
         .on_press(move || {
             if untracked(enabled) {
                 press();
@@ -436,7 +435,6 @@ pub fn primary_button(
 /// A button that says what it does: outlined when it is the likeliest choice, plain
 /// otherwise.
 pub fn text_button(label: &'static str, outlined: bool, press: impl Fn() + 'static) -> View {
-    let hovered = signal(false);
     view()
         .flex_row()
         .items_center()
@@ -451,16 +449,8 @@ pub fn text_button(label: &'static str, outlined: bool, press: impl Fn() + 'stat
                 AdaptiveColor::TRANSPARENT
             }
         })
-        .bg(move || {
-            if hovered.get() {
-                theme().accent
-            } else {
-                AdaptiveColor::TRANSPARENT
-            }
-        })
+        .hover(|s| s.bg(move || theme().accent))
         .label(SharedString::from(label))
-        .on_mouse_enter(move |_: &MouseEvent| hovered.set(true))
-        .on_mouse_leave(move |_: &MouseEvent| hovered.set(false))
         .on_press(press)
         .child(
             text(label)
@@ -597,7 +587,6 @@ fn picker_dialog(picker: Picker) -> impl IntoElement {
     let row = move |entry: ReadSignal<(FolderId, String)>, ix: ReadSignal<usize>| {
         let pick = pick.clone();
         let is_checked = move || checked.with(|c| c.contains(&entry.get().0));
-        let row_hovered = signal(false);
         view()
             .flex_row()
             .items_center()
@@ -606,12 +595,13 @@ fn picker_dialog(picker: Picker) -> impl IntoElement {
             .px(px(8.0))
             .rounded(px(6.0))
             .bg(move || {
-                if highlighted.get() == ix.get() || row_hovered.get() {
+                if highlighted.get() == ix.get() {
                     theme().accent
                 } else {
                     AdaptiveColor::TRANSPARENT
                 }
             })
+            .hover(|s| s.bg(move || theme().accent))
             .label(move || {
                 let name = entry.get().1;
                 SharedString::from(match labels {
@@ -620,8 +610,6 @@ fn picker_dialog(picker: Picker) -> impl IntoElement {
                     None => name,
                 })
             })
-            .on_mouse_enter(move |_: &MouseEvent| row_hovered.set(true))
-            .on_mouse_leave(move |_: &MouseEvent| row_hovered.set(false))
             .on_press(move || pick(entry.get_untracked().0))
             .child(
                 icon(

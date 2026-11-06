@@ -5,7 +5,7 @@
 //! `catmail_frontend`'s, which the GUI uses too.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use catmail_core::{AccountId, FolderId, FolderRole};
@@ -46,6 +46,11 @@ struct Waiting {
 /// the others.
 #[derive(Clone, Default)]
 struct Folds(HashMap<AccountId, bool>);
+
+/// The folders the user folded, by row key: their subfolders don't show. Every one is
+/// open until then, as in the GUI.
+#[derive(Clone, Default)]
+struct FolderFolds(HashSet<String>);
 
 /// The reads of the sidebar: one at a time, and which draft count is the latest. Not
 /// reactive: nothing shows it.
@@ -303,6 +308,14 @@ fn account_open(folds: &Folds, accounts: &[AccountEntry], account: AccountId) ->
         .unwrap_or_else(|| accounts.len() == 1 || std::env::var_os("CATMAIL_NSH_UNFOLD").is_some())
 }
 
+fn toggle_folder(key: &str) {
+    global::<FolderFolds>().update(|f| {
+        if !f.0.remove(key) {
+            f.0.insert(key.to_owned());
+        }
+    });
+}
+
 fn toggle(account: AccountId) {
     let open = global::<Accounts>().with_untracked(|a| {
         let accounts = a.0.as_deref().unwrap_or_default();
@@ -313,54 +326,68 @@ fn toggle(account: AccountId) {
     });
 }
 
-// --- Rows ---------------------------------------------------------------------------
+// --- Groups -------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    /// A section's title: "Accounts", "Labels".
-    Title,
-    /// An account's address, which folds and unfolds its places.
-    Account,
-    /// Something about the account to put right.
-    Note,
-    Place,
+/// A group of the sidebar, as the GUI's: All Inboxes alone, or an account's address over
+/// its places, its labels in a section after them.
+#[derive(Debug, Clone, PartialEq)]
+struct Group {
+    key: String,
+    heading: Option<Heading>,
+    /// Its places; none while the account is folded.
+    items: Vec<Item>,
+    /// The account's Gmail labels; none while it is folded.
+    labels: Vec<Item>,
 }
 
-/// One line of the sidebar, flattened: nesting is its depth.
+/// An account's address, which folds and unfolds its places.
 #[derive(Debug, Clone, PartialEq)]
-struct Row {
+struct Heading {
+    account: AccountId,
+    email: String,
+    /// The first account's: the section's title is over it.
+    first: bool,
+    /// Something about the account to put right. It shows while the account is folded
+    /// too: it is about the account, not one of its places.
+    note: Option<&'static str>,
+    open: bool,
+}
+
+/// An item of a sidebar menu: a place, or a level of folders that holds no messages.
+#[derive(Debug, Clone, PartialEq)]
+struct Item {
     key: String,
-    kind: Kind,
     label: String,
     icon: FolderIcon,
-    depth: usize,
     /// What it selects; none for a level that holds no messages.
     place: Option<Place>,
+    /// The account its context menu is about (All Inboxes: none).
     account: Option<AccountId>,
-    /// The folder its context menu is about (an account's heading: none).
+    /// The folder its context menu is about.
     folder: Option<FolderId>,
     /// Unread messages, drafts, or what waits in the outbox; nothing for zero.
     count: usize,
     /// The outbox has something the user has to look at.
     attention: bool,
-    /// An account's places show.
-    open: bool,
+    /// Whether its subfolders show; none for a folder without subfolders.
+    open: Option<bool>,
+    /// The subfolders that show: none while it is folded.
+    children: Vec<Item>,
 }
 
-impl Row {
-    fn new(key: String, kind: Kind, label: impl Into<String>) -> Self {
+impl Item {
+    fn new(key: String, label: impl Into<String>, icon: FolderIcon) -> Self {
         Self {
             key,
-            kind,
             label: label.into(),
-            icon: FolderIcon::Folder,
-            depth: 0,
+            icon,
             place: None,
             account: None,
             folder: None,
             count: 0,
             attention: false,
-            open: false,
+            open: None,
+            children: Vec::new(),
         }
     }
 
@@ -378,63 +405,69 @@ impl Row {
             Place::Outbox(account) => format!("outbox-{account}"),
         };
         Self {
-            icon,
             place: Some(place),
             count,
             attention,
-            ..Self::new(key, Kind::Place, label)
+            ..Self::new(key, label, icon)
         }
     }
 }
 
-fn rows(accounts: &[AccountEntry], folds: &Folds) -> Vec<Row> {
-    let mut rows = Vec::new();
+fn groups(accounts: &[AccountEntry], folds: &Folds, folded: &FolderFolds) -> Vec<Group> {
+    let mut groups = Vec::new();
     if Place::Inboxes.is_in(accounts) {
         let inboxes = accounts
             .iter()
             .filter_map(|a| a.folders.with_role(FolderRole::Inbox));
-        rows.push(Row::place(
-            Place::Inboxes,
-            "All Inboxes",
-            FolderIcon::Inboxes,
-            folders::unread(inboxes) as usize,
-            false,
-        ));
+        groups.push(Group {
+            key: "inboxes".to_owned(),
+            heading: None,
+            items: vec![Item::place(
+                Place::Inboxes,
+                "All Inboxes",
+                FolderIcon::Inboxes,
+                folders::unread(inboxes) as usize,
+                false,
+            )],
+            labels: Vec::new(),
+        });
     }
     for (ix, entry) in accounts.iter().enumerate() {
-        let id = entry.account.id;
-        if ix == 0 {
-            rows.push(Row::new("title-accounts".into(), Kind::Title, "Accounts"));
-        }
-        let open = account_open(folds, accounts, id);
-        rows.push(Row {
-            account: Some(id),
-            open,
-            ..Row::new(format!("account-{id}"), Kind::Account, &entry.account.email)
+        let account = entry.account.id;
+        let open = account_open(folds, accounts, account);
+        let path = format!("{account}");
+        groups.push(Group {
+            key: format!("account-{account}"),
+            heading: Some(Heading {
+                account,
+                email: entry.account.email.clone(),
+                first: ix == 0,
+                note: entry.account.all_mail_hidden().then_some(ALL_MAIL_HIDDEN),
+                open,
+            }),
+            items: if open {
+                places(entry, folded)
+            } else {
+                Vec::new()
+            },
+            labels: if open {
+                (entry.folders.labels.iter())
+                    .map(|node| folder_item(account, node, &path, folded))
+                    .collect()
+            } else {
+                Vec::new()
+            },
         });
-        // Folded too: it is about the account, not one of its places.
-        if entry.account.all_mail_hidden() {
-            rows.push(Row::new(format!("note-{id}"), Kind::Note, ALL_MAIL_HIDDEN));
-        }
-        if !open {
-            continue;
-        }
-        account_rows(entry, &mut rows);
-        if !entry.folders.labels.is_empty() {
-            rows.push(Row::new(format!("labels-{id}"), Kind::Title, "Labels"));
-            for node in &entry.folders.labels {
-                folder_rows(id, node, 0, &format!("{id}"), &mut rows);
-            }
-        }
     }
-    rows
+    groups
 }
 
 /// Folders with a role first, the drafts and outbox after the inbox, then the rest of
 /// the folders; not the labels, which have a section of their own.
-fn account_rows(entry: &AccountEntry, rows: &mut Vec<Row>) {
+fn places(entry: &AccountEntry, folded: &FolderFolds) -> Vec<Item> {
     let account = entry.account.id;
     let path = format!("{account}");
+    let mut items = Vec::new();
     let mut roles = entry.folders.roles.iter();
     // The inbox, if the account has one (it always has), leads.
     if let Some(inbox) = entry
@@ -443,12 +476,12 @@ fn account_rows(entry: &AccountEntry, rows: &mut Vec<Row>) {
         .first()
         .filter(|n| n.role() == Some(FolderRole::Inbox))
     {
-        folder_rows(account, inbox, 0, &path, rows);
+        items.push(folder_item(account, inbox, &path, folded));
         roles.next();
     }
-    rows.push(Row {
+    items.push(Item {
         account: Some(account),
-        ..Row::place(
+        ..Item::place(
             Place::Drafts(account),
             FolderRole::Drafts.label(),
             RoleInfo::of(FolderRole::Drafts).icon,
@@ -457,9 +490,9 @@ fn account_rows(entry: &AccountEntry, rows: &mut Vec<Row>) {
         )
     });
     if !entry.outbox.is_empty() {
-        rows.push(Row {
+        items.push(Item {
             account: Some(account),
-            ..Row::place(
+            ..Item::place(
                 Place::Outbox(account),
                 "Outbox",
                 FolderIcon::Outbox,
@@ -468,50 +501,53 @@ fn account_rows(entry: &AccountEntry, rows: &mut Vec<Row>) {
             )
         });
     }
-    for node in roles.chain(&entry.folders.others) {
-        folder_rows(account, node, 0, &path, rows);
-    }
+    items.extend(
+        roles
+            .chain(&entry.folders.others)
+            .map(|node| folder_item(account, node, &path, folded)),
+    );
+    items
 }
 
-/// The node and the folders in it. `path` names the levels above, for the key of a
-/// level the server didn't list.
-fn folder_rows(
-    account: AccountId,
-    node: &FolderNode,
-    depth: usize,
-    path: &str,
-    rows: &mut Vec<Row>,
-) {
+/// The node and the folders in it, unless it is `folded`. `path` names the levels above,
+/// for the key of a level the server didn't list.
+fn folder_item(account: AccountId, node: &FolderNode, path: &str, folded: &FolderFolds) -> Item {
     let path = format!("{path}/{}", node.label);
     let icon = folders::icon(node.folder.as_ref());
-    let mut row = match node.selectable() {
-        Some(folder) => Row::place(
+    let mut item = match node.selectable() {
+        Some(folder) => Item::place(
             Place::Folder(folder.id),
             &node.label,
             icon,
             node.unread() as usize,
             false,
         ),
-        None => Row {
-            icon,
-            ..Row::new(format!("level-{path}"), Kind::Place, &node.label)
-        },
+        None => Item::new(format!("level-{path}"), &node.label, icon),
     };
-    row.depth = depth;
-    row.account = Some(account);
-    row.folder = node.folder.as_ref().map(|f| f.id);
-    rows.push(row);
-    for child in &node.children {
-        folder_rows(account, child, depth + 1, &path, rows);
+    item.account = Some(account);
+    item.folder = node.folder.as_ref().map(|f| f.id);
+    if !node.children.is_empty() {
+        let open = !folded.0.contains(&item.key);
+        item.open = Some(open);
+        if open {
+            item.children = (node.children.iter())
+                .map(|child| folder_item(account, child, &path, folded))
+                .collect();
+        }
     }
+    item
 }
 
 // --- The pane -----------------------------------------------------------------------
 
 pub fn sidebar() -> impl IntoElement {
-    let rows = computed(move || {
-        let folds = global::<Folds>().get();
-        global::<Accounts>().with(|a| rows(a.0.as_deref().unwrap_or_default(), &folds))
+    let groups = computed(move || {
+        global::<Folds>().with(|folds| {
+            global::<FolderFolds>().with(|folded| {
+                global::<Accounts>()
+                    .with(|a| groups(a.0.as_deref().unwrap_or_default(), folds, folded))
+            })
+        })
     });
     let note = computed(move || {
         global::<Accounts>().with(|a| mailbox::connection_note(a.0.as_deref().unwrap_or_default()))
@@ -519,25 +555,31 @@ pub fn sidebar() -> impl IntoElement {
     on_key("F2", move |_| rename_selected());
     let has_accounts =
         move || global::<Accounts>().with(|a| a.0.as_ref().is_some_and(|a| !a.is_empty()));
+    // As wide as the pane it is in, which the user drags.
     view()
-        .w(px(240.0))
-        .border_r_1()
-        .border_color(move || theme().border)
+        .flex_1()
         .bg(move || theme().sidebar)
-        .child(view().px(px(12.0)).pt(px(12.0)).child(primary_button(
-            Icon::PencilSquare,
-            || "Compose".to_owned(),
-            || "Compose (Ctrl+N)".to_owned(),
-            has_accounts,
-            composer::new_message,
-        )))
+        // 20 down to the first place, with the 12 above it, as the GUI's.
+        .child(
+            view()
+                .px(px(12.0))
+                .pt(px(12.0))
+                .pb(px(8.0))
+                .child(primary_button(
+                    Icon::PencilSquare,
+                    || "Compose".to_owned(),
+                    || "Compose (Ctrl+N)".to_owned(),
+                    has_accounts,
+                    composer::new_message,
+                )),
+        )
         .child(
             scroll()
                 .flex_1()
-                .child(view().px(px(8.0)).py(px(12.0)).child(each(
-                    move || rows.get(),
-                    |row| row.key.clone(),
-                    row,
+                .child(view().px(px(12.0)).py(px(12.0)).child(each(
+                    move || groups.get(),
+                    |group| group.key.clone(),
+                    group,
                 ))),
         )
         .child(
@@ -567,119 +609,261 @@ pub fn sidebar() -> impl IntoElement {
         )
 }
 
-fn row(row: ReadSignal<Row>, _ix: ReadSignal<usize>) -> AnyElement {
-    match row.with_untracked(|r| r.kind) {
-        Kind::Title => text(move || row.with(|r| r.label.clone()))
-            .text_xs()
-            .px(px(8.0))
-            .pt(px(12.0))
-            .pb(px(4.0))
-            .text_color(move || theme().muted_foreground)
-            .into_element(),
-        Kind::Note => text(move || row.with(|r| r.label.clone()))
-            .text_xs()
-            .px(px(8.0))
-            .pb(px(4.0))
-            .text_color(move || theme().muted_foreground)
-            .into_element(),
-        Kind::Account => account_row(row).into_element(),
-        Kind::Place => place_row(row).into_element(),
-    }
+/// A group, as the GUI's: an account's address 8 below the places above (the first has
+/// the section's title over it instead), its places 8 below it.
+fn group(group: ReadSignal<Group>, _ix: ReadSignal<usize>) -> AnyElement {
+    let headed = group.with_untracked(|g| g.heading.is_some());
+    view()
+        .child(when(move || headed, move || heading(group)))
+        .child(when(
+            move || group.with(|g| !g.items.is_empty()),
+            move || {
+                menu(move || group.with(|g| g.items.clone())).pt(px(if headed { 8.0 } else { 0.0 }))
+            },
+        ))
+        .child(when(
+            move || group.with(|g| !g.labels.is_empty()),
+            move || {
+                view()
+                    .child(title("Labels"))
+                    .child(menu(move || group.with(|g| g.labels.clone())))
+            },
+        ))
+        .into_element()
 }
 
-fn account_row(row: ReadSignal<Row>) -> impl IntoElement {
-    let account = move || row.with(|r| r.account);
+/// A section's title, as GPUI Kit's `SidebarGroup` draws its label.
+fn title(label: &'static str) -> View {
+    view().h(px(32.0)).px(px(8.0)).justify_center().child(
+        text(label)
+            .text_xs()
+            .text_color(move || theme().sidebar_foreground.opacity(0.7)),
+    )
+}
+
+/// GPUI Kit's sidebar menu: its items 8 apart.
+fn menu(items: impl Fn() -> Vec<Item> + 'static) -> View {
     view()
-        .h(px(32.0))
-        .mt(px(4.0))
-        .flex_row()
-        .items_center()
         .gap(px(8.0))
-        .px(px(8.0))
-        .rounded(px(6.0))
-        .on_press(move || {
-            if let Some(account) = account() {
-                toggle(account);
-            }
-        })
-        .on_context_menu(move |_: &ContextMenuEvent| {
-            if let Some(account) = account() {
-                folder_menu(account, None);
-            }
-        })
+        .child(each(items, |item| item.key.clone(), menu_entry))
+}
+
+fn heading(group: ReadSignal<Group>) -> View {
+    let heading =
+        move |f: fn(&Heading) -> bool| move || group.with(|g| g.heading.as_ref().is_some_and(f));
+    let account = move || group.with(|g| g.heading.as_ref().map(|h| h.account));
+    let note = move || group.with(|g| g.heading.as_ref().and_then(|h| h.note));
+    let open = heading(|h| h.open);
+    let first = heading(|h| h.first);
+    view()
+        .pt(move || px(if first() { 0.0 } else { 8.0 }))
+        .child(when(first, || title("Accounts")))
         .child(
-            text(move || row.with(|r| r.label.clone()))
-                .number_of_lines(1)
-                .flex_1()
-                .text_sm()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(move || theme().sidebar_foreground),
+            view()
+                .h(px(32.0))
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .px(px(8.0))
+                .rounded(px(6.0))
+                .hover(|s| s.bg(row_background(|| false, true)))
+                .on_press(move || {
+                    if let Some(account) = account() {
+                        toggle(account);
+                    }
+                })
+                .on_context_menu(move |_: &ContextMenuEvent| {
+                    if let Some(account) = account() {
+                        folder_menu(account, None);
+                    }
+                })
+                .child(
+                    text(move || {
+                        group
+                            .with(|g| g.heading.as_ref().map(|h| h.email.clone()))
+                            .unwrap_or_default()
+                    })
+                    .number_of_lines(1)
+                    .flex_1()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(move || theme().sidebar_foreground),
+                )
+                .child(
+                    icon(
+                        move || {
+                            if open() {
+                                Icon::ChevronDown
+                            } else {
+                                Icon::ChevronRight
+                            }
+                        },
+                        12.0,
+                    )
+                    .text_color(move || theme().muted_foreground),
+                ),
         )
-        .child(
-            icon(
+        .child(when(
+            move || note().is_some(),
+            move || {
+                text(move || note().unwrap_or_default())
+                    .text_xs()
+                    .px(px(8.0))
+                    .text_color(move || theme().muted_foreground)
+            },
+        ))
+}
+
+/// An item and, while it is open, its subfolders: in GPUI Kit's submenu, 4 apart in a
+/// list with a line down its left.
+fn menu_entry(item: ReadSignal<Item>, _ix: ReadSignal<usize>) -> AnyElement {
+    view()
+        .child(place_row(item))
+        .child(when(
+            move || item.with(|i| !i.children.is_empty()),
+            move || {
+                view()
+                    .ml(px(14.0))
+                    .border_l_1()
+                    .border_color(move || theme().sidebar_border)
+                    .pl(px(10.0))
+                    .py(px(2.0))
+                    .gap(px(4.0))
+                    .child(each(
+                        move || item.with(|i| i.children.clone()),
+                        |item| item.key.clone(),
+                        menu_entry,
+                    ))
+            },
+        ))
+        .into_element()
+}
+
+fn place_row(item: ReadSignal<Item>) -> View {
+    let place = move || item.with(|i| i.place);
+    let selected = move || {
+        let place = place();
+        place.is_some() && global::<SelectedPlace>().with(|p| p.0) == place
+    };
+    let open = move || item.with(|i| i.open == Some(true));
+    menu_item(
+        move || item.with(|i| i.icon).into(),
+        move || item.with(|i| i.label.clone()),
+        selected,
+    )
+    .on_press(move || {
+        if let Some(place) = place() {
+            select(Some(place));
+        }
+    })
+    .on_context_menu(move |_: &ContextMenuEvent| {
+        let (account, folder) = item.with(|i| (i.account, i.folder));
+        // Drafts, the outbox and All Inboxes aren't folders to make in or change.
+        if let (Some(account), Some(folder)) = (account, folder) {
+            folder_menu(account, Some(folder));
+        }
+    })
+    .child(when(
+        move || item.with(|i| i.attention),
+        || icon(|| Icon::ExclamationTriangle, 12.0).text_color(crate::theme::warning),
+    ))
+    .child(
+        text(move || match item.with(|i| i.count) {
+            0 => String::new(),
+            n => n.to_string(),
+        })
+        .text_xs()
+        .text_color(move || theme().muted_foreground),
+    )
+    // Its own press: the row's selects the folder, this only folds it (nsh gives a press
+    // to the innermost view alone).
+    .child(when(
+        move || item.with(|i| i.open.is_some()),
+        move || {
+            icon_button(
                 move || {
-                    if row.with(|r| r.open) {
+                    if open() {
                         Icon::ChevronDown
                     } else {
                         Icon::ChevronRight
                     }
                 },
-                12.0,
+                move || {
+                    let label = item.with(|i| i.label.clone());
+                    if open() {
+                        format!("Collapse {label}")
+                    } else {
+                        format!("Expand {label}")
+                    }
+                },
+                || true,
+                Size::Row,
+                move || toggle_folder(&item.with_untracked(|i| i.key.clone())),
             )
-            .text_color(move || theme().muted_foreground),
-        )
+            .mr(px(-4.0))
+        },
+    ))
 }
 
-fn place_row(row: ReadSignal<Row>) -> impl IntoElement {
-    let place = move || row.with(|r| r.place);
-    let selected = move || {
-        let place = place();
-        place.is_some() && global::<SelectedPlace>().with(|p| p.0) == place
-    };
+/// An item of a sidebar menu, the mailbox's or the settings': GPUI Kit's, filled as the
+/// GUI's `layout::sidebar_row`. Selected, the icon fills and the icon and label take the
+/// primary color; the label keeps its weight.
+pub fn menu_item(
+    which: impl Fn() -> Icon + 'static,
+    label: impl IntoReactive<SharedString>,
+    selected: impl Fn() -> bool + Copy + 'static,
+) -> View {
     view()
-        .h(px(30.0))
+        .h(px(28.0))
         .flex_row()
         .items_center()
         .gap(px(8.0))
-        .pr(px(8.0))
-        .pl(move || px(8.0 + row.with(|r| r.depth) as f32 * 14.0))
+        .px(px(8.0))
         .rounded(px(6.0))
-        .style_when(selected, |s| s.bg(move || theme().sidebar_accent))
-        .on_press(move || {
-            if let Some(place) = place() {
-                select(Some(place));
-            }
-        })
-        .on_context_menu(move |_: &ContextMenuEvent| {
-            let (account, folder) = row.with(|r| (r.account, r.folder));
-            // Drafts, the outbox and All Inboxes aren't folders to make in or change.
-            if let (Some(account), Some(folder)) = (account, folder) {
-                folder_menu(account, Some(folder));
-            }
-        })
+        .bg(row_background(selected, false))
+        .hover(move |s| s.bg(row_background(selected, true)))
+        // As large as the label's text, as GPUI Kit draws it.
         .child(
-            icon(move || row.with(|r| r.icon).into(), 16.0)
-                .text_color(move || theme().sidebar_foreground),
+            icon(
+                move || if selected() { which().solid() } else { which() },
+                14.0,
+            )
+            .text_color(row_color(selected)),
         )
         .child(
-            text(move || row.with(|r| r.label.clone()))
+            text(label)
                 .number_of_lines(1)
                 .flex_1()
                 .text_sm()
-                .text_color(move || theme().sidebar_foreground),
+                .text_color(row_color(selected)),
         )
-        .child(when(
-            move || row.with(|r| r.attention),
-            || icon(|| Icon::ExclamationTriangle, 12.0).text_color(crate::theme::warning),
-        ))
-        .child(
-            text(move || match row.with(|r| r.count) {
-                0 => String::new(),
-                n => n.to_string(),
-            })
-            .text_xs()
-            .text_color(move || theme().muted_foreground),
-        )
+}
+
+/// A sidebar row's background, as GPUI Kit's sidebar draws it: the accent when selected,
+/// lighter under the pointer.
+fn row_background(
+    selected: impl Fn() -> bool + 'static,
+    hovered: bool,
+) -> impl Fn() -> AdaptiveColor + 'static {
+    move || {
+        if selected() {
+            theme().sidebar_accent
+        } else if hovered {
+            theme().sidebar_accent.opacity(0.8)
+        } else {
+            AdaptiveColor::TRANSPARENT
+        }
+    }
+}
+
+fn row_color(selected: impl Fn() -> bool + 'static) -> impl Fn() -> AdaptiveColor + 'static {
+    move || {
+        if selected() {
+            theme().primary
+        } else {
+            theme().sidebar_foreground
+        }
+    }
 }
 
 // --- Folder commands ----------------------------------------------------------------
@@ -804,4 +988,49 @@ fn delete_folder(id: FolderId) {
             report(&format!("Couldn't {}", deletion.what), e);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(label: &str, children: Vec<FolderNode>) -> FolderNode {
+        FolderNode {
+            label: label.to_owned(),
+            folder: None,
+            children,
+        }
+    }
+
+    /// Each item's label and whether it is open, depth first.
+    fn labels(folded: &FolderFolds) -> Vec<(String, Option<bool>)> {
+        fn walk(item: &Item, out: &mut Vec<(String, Option<bool>)>) {
+            out.push((item.label.clone(), item.open));
+            for child in &item.children {
+                walk(child, out);
+            }
+        }
+        let tree = node("Clients", vec![node("Acme", vec![node("2026", vec![])])]);
+        let mut out = Vec::new();
+        walk(&folder_item(AccountId(1), &tree, "1", folded), &mut out);
+        out
+    }
+
+    #[test]
+    fn a_folded_folder_hides_its_subfolders() {
+        let open = labels(&FolderFolds::default());
+        assert_eq!(
+            open,
+            [
+                ("Clients".into(), Some(true)),
+                ("Acme".into(), Some(true)),
+                ("2026".into(), None),
+            ]
+        );
+        let folded = FolderFolds(HashSet::from(["level-1/Clients/Acme".to_owned()]));
+        assert_eq!(
+            labels(&folded),
+            [("Clients".into(), Some(true)), ("Acme".into(), Some(false))]
+        );
+    }
 }
