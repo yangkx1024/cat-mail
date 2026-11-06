@@ -29,9 +29,9 @@ Before reporting work as done, `cargo fmt`, `clippy -D warnings` and the full te
 must pass. Say so explicitly if any of them could not be run.
 
 CI (`.github/workflows/ci.yml`) runs clippy on Linux, macOS and Windows; pull requests
-run the tests on Linux only, and `main` runs them on all three. A platform-specific
-failure can therefore first show up after merging: when a change touches paths, files
-or anything behind `cfg`, run the macOS / Windows tests before merging with
+run the tests on Linux and macOS, and `main` runs them on all three. A Windows failure
+can therefore first show up after merging: when a change touches paths, files or
+anything behind `cfg`, run the Windows tests before merging with
 `gh workflow run ci.yml --ref <branch>`. The desktop app runs on Linux and macOS only
 (it isn't brought up on nsh's Windows backend yet; on Windows `catmail-gui` builds, says
 so and exits), but all code must build and pass everywhere: put platform-specific code
