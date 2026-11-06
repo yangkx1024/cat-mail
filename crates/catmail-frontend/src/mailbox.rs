@@ -8,6 +8,7 @@ use catmail_core::{
     FolderRole, Identity, MessageId, OutboxEntry,
 };
 
+use crate::commands::Confirm;
 use crate::folders::AccountFolders;
 
 /// Opening a folder synced longer ago than this syncs it. Background sync keeps only
@@ -286,8 +287,11 @@ impl AccountEntry {
             (false, true) => "Its subfolders and all their messages are deleted from the server.",
         };
         Some(FolderDeletion {
-            title: format!("Delete “{}”?", folder.leaf_name()),
-            consequence,
+            confirm: Confirm {
+                title: format!("Delete “{}”?", folder.leaf_name()),
+                description: consequence.into(),
+                action: "Delete",
+            },
             what: if label {
                 "delete the label"
             } else {
@@ -309,9 +313,8 @@ pub enum FolderMenuEntry {
 /// The confirmation of deleting a folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderDeletion {
-    pub title: String,
-    /// What goes with it.
-    pub consequence: &'static str,
+    /// The question, and what goes with the folder.
+    pub confirm: Confirm,
     /// What failed, for the error: "Couldn't delete the folder".
     pub what: &'static str,
 }

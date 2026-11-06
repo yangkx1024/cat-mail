@@ -10,4 +10,5 @@
   alpha，按菜单栏着色。
 
 浏览器可使用自动版；桌面图标加载器通常不响应 CSS 媒体查询，应根据主题选择固定版本。
-AppImage 用 `catmail-light.svg` 作桌面图标（见 `docs/architecture/packaging.md`）。
+macOS 的 `.icns` 由 `catmail-light.svg` 生成；托盘图标按桌面的外观选亮色或暗色版（见
+`docs/architecture/packaging.md`、`docs/architecture/background.md`）。

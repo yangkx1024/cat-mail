@@ -1,10 +1,11 @@
 [package]
 name = "catmail-gui"
-description = "Desktop frontend for catmail, built on GPUI Kit"
+description = "The catmail desktop app, on Native Shell (nsh): GTK 4 on Linux and AppKit on macOS, bodies in a web view"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish = false
 
 [[bin]]
 name = "catmail-gui"
@@ -13,29 +14,44 @@ path = "src/main.rs"
 [dependencies]
 catmail-core.workspace = true
 catmail-frontend.workspace = true
-catmail-render.workspace = true
 anyhow.workspace = true
-clap.workspace = true
-ctrlc.workspace = true
-directories.workspace = true
 futures-channel.workspace = true
-gpui-kit.workspace = true
-image.workspace = true
+futures-util.workspace = true
+jiff.workspace = true
+pollster.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 url.workspace = true
 
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2.workspace = true
-objc2-app-kit.workspace = true
-objc2-foundation.workspace = true
+# nsh has backends for Linux and macOS; elsewhere the binary says so and exits.
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+nsh-core.workspace = true
+nsh-base.workspace = true
+resvg.workspace = true
 
-[dev-dependencies]
-catmail-testkit.workspace = true
-gpui-kit = { workspace = true, features = ["test-support"] }
-pollster.workspace = true
-tempfile.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+[target.'cfg(target_os = "linux")'.dependencies]
+glib-unix.workspace = true
+nsh-platform-linux.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nsh-platform-macos.workspace = true
+async-task.workspace = true
+block2.workspace = true
+ctrlc.workspace = true
+dispatch2.workspace = true
+objc2.workspace = true
+objc2-app-kit = { workspace = true, features = [
+    "block2",
+    "NSAppearance",
+    "NSEvent",
+    "NSGraphics",
+    "NSRunningApplication",
+    "NSScrollView",
+    "NSText",
+    "NSTextField",
+    "NSWindow",
+] }
+objc2-foundation = { workspace = true, features = ["NSNotification"] }
 
 [lints]
 workspace = true

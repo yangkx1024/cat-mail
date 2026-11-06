@@ -86,14 +86,13 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # What catmail-gui (GPUI) links against on Linux. Its tests run on GPUI's test
-      # platform, so no display or GPU is needed.
+      # What catmail-gui links against on Linux: nsh's GTK 4 backend and WebKitGTK. Its
+      # tests open no window, so no display is needed.
       - name: Install GUI libraries
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev
+          sudo apt-get install -y --no-install-recommends libgtk-4-dev libwebkitgtk-6.0-dev
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings

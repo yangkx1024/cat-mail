@@ -390,7 +390,7 @@ impl MailClient {
     }
 
     /// Closes the engine for every clone of this client, as dropping them all would, for a
-    /// frontend that quits without dropping what it holds (GPUI). On a runtime of the
+    /// frontend that quits without dropping what it holds. On a runtime of the
     /// client's own the work under way stops at once, and its calls fail with
     /// [`Error::Closed`]; on a borrowed runtime it is left to finish, as when the last
     /// handle goes. Calls from now on fail with [`Error::Closed`]. Doesn't wait: see

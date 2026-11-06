@@ -328,7 +328,7 @@ async fn a_body_without_its_raw_message_is_sanitized_again() {
     let fresh = env.client.download_message(id).await.unwrap();
     let video = body(&fresh).attachments[0].id;
     env.sql(&format!(
-        "UPDATE attachments SET content_id = 'clip@x' WHERE id = {}",
+        "UPDATE attachments SET content_id = 'clip@x', mime_type = 'image/png' WHERE id = {}",
         video.0
     ));
     env.make_stale(

@@ -16,45 +16,30 @@ catmail-html = { path = "crates/catmail-html" }
 catmail-core = { path = "crates/catmail-core" }
 catmail-frontend = { path = "crates/catmail-frontend" }
 catmail-testkit = { path = "crates/catmail-testkit" }
-catmail-render = { path = "crates/catmail-render" }
 
 ammonia = "4.2.4"
 anyhow = "1"
-# Blitz paints through anyrender; vello_cpu rasterizes on the CPU, off the UI thread.
-anyrender = "0.14.0"
-anyrender_vello_cpu = "0.18.0"
 base64 = "0.22.1"
-# What Blitz takes image content as; the reader hands over its images without copying.
-bytes = "1.12.1"
-# Blitz is still in beta and its crates require each other at exact versions. Without
-# blitz-dom's default `svg` feature: usvg resolves nested images from the local disk.
-blitz-dom = { version = "=0.3.0-beta.4", default-features = false, features = ["floats", "system-fonts"] }
-blitz-html = "=0.3.0-beta.4"
-blitz-paint = { version = "=0.3.0-beta.4", default-features = false }
-blitz-traits = "=0.3.0-beta.4"
 clap = { version = "4.6", features = ["derive", "env"] }
-# The GUI quits as the tray's Quit does on SIGINT, SIGTERM and SIGHUP (Windows: console
-# events), on its own thread, without tokio.
+# The GUI quits as the tray's Quit does on SIGINT, SIGTERM and SIGHUP on macOS, on its own
+# thread, without tokio (GTK's loop takes them on Linux).
 ctrlc = { version = "3.5.2", features = ["termination"] }
-# WHATWG data: URL parsing; the one gpui-kit uses for the same job.
-data-url = "0.3.2"
 directories = "6"
 # `canonicalize` without Windows' `\\?\` prefix, which a socket path can't take.
 dunce = "1.0.5"
 # Reads header fields in raw 8-bit bytes in a legacy charset; the version mail-parser
 # decodes text with.
 encoding_rs = "0.8.42"
-# Rewrites message style sheets token by token; the version Stylo (in Blitz) uses.
+# Rewrites message style sheets token by token.
 cssparser = "0.38.0"
-# Reads CSS colors and converts them to OKLab, for a dark reader; the version Blitz uses.
+# Reads CSS colors and converts them to OKLab, for a dark reader.
 color = "0.3.3"
-# Replies from the render threads to the UI's tasks; the version GPUI uses.
+# Replies from other threads to the UI's tasks.
 futures-channel = "0.3.34"
 # Runs an outbox pass's SMTP connections side by side within the pass's own task.
 futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
-# Pins the matching GPUI crates; never depend on GPUI directly (two copies would link).
-# `gpui-fast` swaps the backend from gpui-pre to GPUI Fast behind the same imports.
-gpui-kit = { version = "0.9.0", features = ["gpui-fast"] }
+# SIGINT and SIGTERM on GTK's loop in catmail-gui; the glib that gtk4 uses.
+glib-unix = "0.22"
 hex = "0.4"
 # The version ammonia uses, so the sanitizer and the layout pass share one parser.
 html5ever = "0.40.1"
@@ -62,8 +47,6 @@ jiff = "0.2.38"
 # The Linux tray icon (StatusNotifierItem over D-Bus, no GTK). On async-io, the runtime
 # of the zbus already in the tree (notifications, the keyring), not tokio.
 ksni = { version = "0.3.7", default-features = false, features = ["async-io"] }
-# Wraps rendered pages into GPUI images; the version GPUI uses.
-image = { version = "0.25.10", default-features = false }
 # Parses IMAP responses only; catmail-proto encodes commands and drives the connection.
 imap-proto = "0.18.0"
 keyring = "4.2"
@@ -74,8 +57,21 @@ libc = "0.2.191"
 mail-builder = { version = "1.0.0", default-features = false }
 mail-parser = { version = "0.11.9", features = ["full_encoding"] }
 mime_guess = "2.0.5"
+# Native Shell, catmail-gui's toolkit: GTK 4 on Linux and AppKit on macOS, bodies in web
+# views (WebKitGTK, WKWebView). Unreleased main, first for its handling of taffy's `calc`
+# (longbridge/nsh#966). Back to crates.io (and the repository out of `allow-git` in
+# deny.toml) once a release has what catmail-gui uses.
+nsh-core = { git = "https://github.com/longbridge/nsh", rev = "f8cfd1a650640bd4b2668201d364e08e3b0ab570" }
+nsh-base = { git = "https://github.com/longbridge/nsh", rev = "f8cfd1a650640bd4b2668201d364e08e3b0ab570", default-features = false }
+nsh-platform-linux = { git = "https://github.com/longbridge/nsh", rev = "f8cfd1a650640bd4b2668201d364e08e3b0ab570", default-features = false, features = ["webview"] }
+nsh-platform-macos = { git = "https://github.com/longbridge/nsh", rev = "f8cfd1a650640bd4b2668201d364e08e3b0ab570", default-features = false }
+# catmail-gui's AppKit shell: the main thread's futures on the main dispatch queue
+# (async-task), and the event monitor's block (the versions nsh's macOS platform uses).
+async-task = "4.7.1"
+block2 = "0.6.2"
+dispatch2 = "0.3.1"
 # The macOS status item (menu bar icon, its menu, the Dock badge): AppKit straight, no
-# tray crate. The versions GPUI's macOS platform uses.
+# tray crate. The versions nsh's macOS platform uses.
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "std",
@@ -103,15 +99,14 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSObject",
     "NSString",
 ] }
-# Blitz lays text out with it; the reader's text selection reads those layouts. The
-# version Blitz uses.
-parley = { version = "0.12.0", default-features = false, features = ["std"] }
 pollster = "1"
 # Remote images, when the user asks to see them. Without default features: rustls on our
 # ring configuration (`use_preconfigured_tls`), no native-tls, no HTTP/2, no system proxy
 # lookup.
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls-no-provider"] }
-# Reads iTerm2 color schemes (XML property lists); the version GPUI's platform crates use.
+# catmail-gui's tray icon pixels: nsh-core's resvg, with text for the badge's digits.
+resvg = { version = "0.46", default-features = false, features = ["text", "system-fonts"] }
+# Reads iTerm2 color schemes (XML property lists).
 quick-xml = "0.41.0"
 rcgen = "0.14"
 rpassword = "7"
@@ -125,9 +120,6 @@ rustix = { version = "1.1.5", features = ["process"] }
 # Keeps passwords out of Debug output and zeroes them when dropped.
 secrecy = "0.10.3"
 serde = { version = "1", features = ["derive"] }
-# Stylo, Blitz's CSS engine, for the computed styles the reader's text selection reads
-# (what is hidden). The version Blitz uses, under the name Blitz gives it.
-style = { package = "stylo", version = "0.22.0", default-features = false }
 serde_json = "1"
 sha2 = "0.11"
 # TCP keepalive, which tokio's TcpStream doesn't expose.
@@ -140,19 +132,15 @@ tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring
 toml = "1.1.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-# Unix sockets on Windows (std has them on Unix only); the GUI's single-instance socket.
+# Unix sockets on Windows (std has them on Unix only), for the single-instance socket.
 uds_windows = "1.2.1"
 unicode-width = "0.2.2"
 # The URL parser ammonia uses; the sanitizer's own checks must agree with it.
 url = "2.5.8"
 uuid = { version = "1.28", features = ["v4"] }
 
-# Thin LTO with one codegen unit takes 18-20% off both binaries. Not opt-level "z" (as
-# Zed does for its own crates): our code is a small part of the binaries, and "z" saved
-# under 1% on catmail-gui even with every dependency included.
-#
-# Stripped of symbols too: catmail-gui goes from 86 to 69 MB. A panic's backtrace
-# then shows addresses only; the message and location are still logged.
+# Thin LTO with one codegen unit, and stripped of symbols: a smaller binary. A panic's
+# backtrace then shows addresses only; the message and location are still logged.
 [profile.release]
 lto = "thin"
 codegen-units = 1
@@ -160,8 +148,8 @@ strip = true
 
 [workspace.lints.rust]
 # Not forbid, which a crate couldn't loosen: catmail-frontend's `memory` module calls
-# malloc_trim, and catmail-gui's macOS status item calls AppKit. Every other crate
-# forbids it at its root.
+# malloc_trim, its macOS status item and catmail-gui's AppKit shell call AppKit. Every
+# other crate forbids it at its root.
 unsafe_code = "deny"
 
 [workspace.lints.clippy]
@@ -172,16 +160,3 @@ all = { level = "warn", priority = -1 }
 # `allow-git` in deny.toml (#130).
 [patch.crates-io]
 imap-proto = { git = "https://github.com/djc/imap-proto", rev = "0dac3af59a2cfcd649c30034d5f221c4d8edbf34" }
-# Blitz 0.3.0-beta.4 with three changes: a table row's block children (`td { display: block }`
-# in email) are laid out as anonymous cells instead of dropped, `bgcolor`, `font color`
-# and `body text` are read as legacy colors (`#fff` was near black, names ignored; #161),
-# and a cell's length `width` is a minimum in the auto table layout (content wider than it
-# overflowed into the next column). Every crate of its workspace that we use comes from the
-# fork, so that each is in the graph once. Back to crates.io once a release has all three
-# (cells: DioxusLabs/blitz#781, #783).
-blitz-dom = { git = "https://github.com/yangkx1024/blitz", rev = "046129ead6a6595e0174970220d46e61b3eee21c" }
-blitz-html = { git = "https://github.com/yangkx1024/blitz", rev = "046129ead6a6595e0174970220d46e61b3eee21c" }
-blitz-paint = { git = "https://github.com/yangkx1024/blitz", rev = "046129ead6a6595e0174970220d46e61b3eee21c" }
-blitz-traits = { git = "https://github.com/yangkx1024/blitz", rev = "046129ead6a6595e0174970220d46e61b3eee21c" }
-stylo_taffy = { git = "https://github.com/yangkx1024/blitz", rev = "046129ead6a6595e0174970220d46e61b3eee21c" }
-debug_timer = { git = "https://github.com/yangkx1024/blitz", rev = "046129ead6a6595e0174970220d46e61b3eee21c" }

@@ -1,126 +1,163 @@
 //! The right pane for a draft: what it says, and editing or deleting it.
 
-use catmail_core::Draft;
-use gpui_kit::base::SelectableText;
-use gpui_kit::component::alert::Alert;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
-use gpui_kit::{
-    Context, IntoElement, ParentElement as _, SharedString, Styled as _, Window, div,
-    prelude::FluentBuilder as _,
-};
+use std::rc::Rc;
 
-use super::{Mailbox, report_failure};
-use crate::assets::Hero;
-use crate::composer::ComposeFrom;
-use crate::format;
-use crate::layout;
+use catmail_core::{Draft, DraftId};
+use catmail_frontend::composer::ComposeFrom;
+use catmail_frontend::composer::draft_deletion;
+use catmail_frontend::format;
+use nsh_base::theme;
+use nsh_core::prelude::*;
 
-impl Mailbox {
-    pub(super) fn render_draft(&self, draft: &Draft, cx: &mut Context<Self>) -> impl IntoElement {
-        let id = draft.id;
-        let subject = format::subject(Some(&draft.content.subject)).to_owned();
-        let lines: Vec<_> = [
-            ("To", &draft.content.to),
-            ("Cc", &draft.content.cc),
-            ("Bcc", &draft.content.bcc),
-        ]
-        .into_iter()
-        .filter(|(_, list)| !list.is_empty())
-        .map(|(name, list)| layout::labelled(name, format::addresses(list), cx).text_sm())
-        .collect();
-        let subject_for_delete = subject.clone();
-        v_flex()
-            .size_full()
-            .child(
-                layout::toolbar(cx)
-                    .child(self.back_button(cx))
-                    .child(
-                        Button::new("edit-draft")
-                            .primary()
-                            .small()
-                            .icon(Hero::PencilSquare)
-                            .label("Edit")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.compose(ComposeFrom::Draft(id), window, cx)
-                            })),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        Button::new("delete-draft")
-                            .ghost()
-                            .small()
-                            .icon(Hero::Trash)
-                            .tooltip("Delete draft")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.confirm_delete_draft(
-                                    id,
-                                    subject_for_delete.clone(),
-                                    window,
-                                    cx,
-                                )
-                            })),
-                    ),
-            )
-            .child(
-                layout::page(
-                    "draft",
-                    v_flex()
-                        .gap_3()
-                        .when_some(draft.upload_error.clone(), |this, error| {
-                            this.child(
-                                Alert::warning("upload-error", error)
-                                    .title("The server didn't save a copy of this draft"),
-                            )
-                        })
-                        .child(layout::page_title(subject))
-                        .children(lines)
-                        .when(!draft.attachments.is_empty(), |this| {
-                            this.child(h_flex().flex_wrap().gap_2().children(
-                                draft.attachments.iter().map(|a| {
-                                    layout::attachment_chip(a.filename.clone(), a.size, cx)
-                                }),
-                            ))
-                        })
-                        .child(
-                            div()
-                                .pt_3()
-                                .border_t_1()
-                                .border_color(cx.theme().border)
-                                .child(SelectableText::new(
-                                    ("draft-text", id.0 as u64),
-                                    SharedString::from(draft.content.text.clone()),
-                                )),
-                        ),
-                )
-                .flex_1()
-                .min_h_0(),
-            )
-    }
+use crate::buttons::{Size, icon_button, primary_button, separator};
+use crate::engine::client;
+use crate::form::confirmed;
+use crate::icons::{Icon, icon};
+use crate::mailbox::list::{self};
+use crate::mailbox::panes::{back_button, fact};
+use crate::tasks::in_view;
+use crate::toast::report;
+use crate::{chrome, composer};
 
-    fn confirm_delete_draft(
-        &mut self,
-        id: catmail_core::DraftId,
-        subject: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let client = self.client.clone();
-        layout::confirm_danger(
-            format!("Delete the draft “{subject}”?"),
-            "Its copy in the server's Drafts folder is deleted too.",
-            "Delete",
-            window,
-            cx,
-            move |window, cx| {
-                let client = client.clone();
-                report_failure(
-                    "delete the draft",
-                    async move { client.delete_draft(id).await },
-                    window,
-                    cx,
-                );
+/// The pane, while a draft is selected.
+pub fn pane() -> impl IntoElement {
+    let draft = computed(list::selected_draft);
+    view()
+        .flex_1()
+        .min_w(px(0.0))
+        .child(toolbar(draft))
+        .child(dynamic(move || match draft.get() {
+            Some(draft) => page(draft).into_element(),
+            None => view().flex_1().into_element(),
+        }))
+}
+
+fn toolbar(draft: Memo<Option<Rc<Draft>>>) -> impl IntoElement {
+    let id = move || draft.with(|d| d.as_ref().map(|d| d.id));
+    chrome::toolbar()
+        .gap(px(2.0))
+        .child(back_button())
+        .child(separator(Size::Bar))
+        .child(primary_button(
+            Icon::PencilSquare,
+            || "Edit".to_owned(),
+            || "Edit".to_owned(),
+            move || id().is_some(),
+            move || {
+                if let Some(id) = untracked(id) {
+                    composer::open(ComposeFrom::Draft(id));
+                }
             },
-        );
-    }
+        ))
+        .child(view().flex_1())
+        .child(icon_button(
+            || Icon::Trash,
+            || "Delete draft".to_owned(),
+            move || id().is_some(),
+            Size::Bar,
+            move || {
+                if let Some(draft) = draft.get_untracked() {
+                    confirm_delete(draft.id, Some(&draft.content.subject));
+                }
+            },
+        ))
+}
+
+fn confirm_delete(id: DraftId, subject: Option<&str>) {
+    let answer = confirmed(draft_deletion(subject));
+    in_view(async move {
+        if answer.await
+            && let Err(e) = client().delete_draft(id).await
+        {
+            report("Couldn't delete the draft", e);
+        }
+    });
+}
+
+/// What the draft says: the server's complaint if it couldn't keep a copy, its subject,
+/// recipients, attachments and text.
+fn page(draft: Rc<Draft>) -> impl IntoElement {
+    let muted = move || theme().muted_foreground;
+    let lines = [
+        ("To", &draft.content.to),
+        ("Cc", &draft.content.cc),
+        ("Bcc", &draft.content.bcc),
+    ]
+    .into_iter()
+    .filter(|(_, list)| !list.is_empty())
+    .map(|(name, list)| fact(name, format::addresses(list)).into_element())
+    .collect::<Vec<_>>();
+    let upload_error = draft.upload_error.clone().map(|error| {
+        view()
+            .gap(px(4.0))
+            .px(px(12.0))
+            .py(px(10.0))
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(move || theme().destructive)
+            .child(
+                text("The server didn't save a copy of this draft")
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(move || theme().destructive),
+            )
+            .child(
+                text(error)
+                    .text_sm()
+                    .selectable(true)
+                    .text_color(move || theme().foreground),
+            )
+            .into_element()
+    });
+    let attachments = (!draft.attachments.is_empty()).then(|| {
+        view()
+            .flex_row()
+            .flex_wrap()
+            .gap(px(8.0))
+            .children(draft.attachments.iter().map(|a| {
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .h(px(30.0))
+                    .px(px(10.0))
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(move || theme().border)
+                    .child(icon(|| Icon::Document, 16.0).text_color(muted))
+                    .child(
+                        text(format!("{} · {}", a.filename, format::size(a.size)))
+                            .text_sm()
+                            .text_color(move || theme().foreground),
+                    )
+                    .into_element()
+            }))
+            .into_element()
+    });
+    scroll().flex_1().child(
+        view()
+            .px(px(24.0))
+            .pt(px(20.0))
+            .pb(px(32.0))
+            .gap(px(12.0))
+            .children(upload_error)
+            .child(
+                text(format::subject(Some(&draft.content.subject)).to_owned())
+                    .text_xl()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .selectable(true)
+                    .text_color(move || theme().foreground),
+            )
+            .children(lines)
+            .children(attachments)
+            .child(
+                text(draft.content.text.clone())
+                    .pt(px(12.0))
+                    .border_t_1()
+                    .border_color(move || theme().border)
+                    .text_sm()
+                    .selectable(true)
+                    .text_color(move || theme().foreground),
+            ),
+    )
 }

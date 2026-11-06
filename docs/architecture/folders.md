@@ -97,15 +97,13 @@ Gmail 上新建的都是标签（对账时按账户模式定 `kind`），引擎�
 
 ## 界面
 
-- **GUI**：侧栏的右键菜单（`mailbox/folder_commands.rs`），打开时才按当时的文件夹列表决定有哪些项
+- **GUI**：侧栏的右键菜单（`sidebar.rs`，原生的 `popup_menu`），打开时才按当时的文件夹列表决定有哪些项
   （`AccountEntry::folder_menu_entries`）。New folder（Gmail 上 New label）总是建在右键点的地方：账户地址上建在
   最上层，文件夹上建在它里面，`can_create_in` 不允许就没有这一项；可以改的（`can_change_folder`）再有 Rename、
   Delete。不另设"新建子文件夹"：同一个菜单里两种新建，哪个建在哪里有歧义。一项都没有的（INBOX、已发送，以及
   服务器没列出的层级）不弹菜单。F2 重命名
-  侧栏选中的文件夹。命名的对话框（`submission::NameDialog`，与发件身份改名共用）在引擎做完之前一直开着，失败时在
-  输入框下说明原因；删除先用 `confirm_danger` 确认，说明邮件的去向。菜单项的命令推迟到菜单关闭之后再执行
-  （`layout::after_menu`）：否则对话框记下的"之前的焦点"是菜单，关闭后焦点落空，窗口的快捷键都不响应。GPUI Kit
-  只对派发 Action 的菜单项先还焦点，带点击回调的不还；以后别的菜单打开对话框也要用它。
+  侧栏选中的文件夹。命名的对话框（`form.rs` 里只要一个名字的对话框，与发件身份改名共用）在引擎做完之前一直开着，
+  失败时说明原因；删除先用原生的 `alert_dialog` 确认，说明邮件的去向。
 - **CLI**：`catmail folder add <名字> [--parent <文件夹>]`、`folder rename <文件夹> <新名字>`、
   `folder rm <文件夹>`，`--json` 输出 `{"folder": …}`（删除的是删除前的样子）。见 [CLI](cli.md)。
 

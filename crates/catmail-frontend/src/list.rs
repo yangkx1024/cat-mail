@@ -123,8 +123,7 @@ pub struct Day {
     pub len: usize,
 }
 
-/// The rows grouped by day: the list's sections. Rows are counted top to bottom
-/// (`flat`), a section's within it (`(section, row)`).
+/// The rows grouped by day: the list's sections.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Days(Vec<Day>);
 
@@ -162,25 +161,8 @@ impl Days {
         self.0.is_empty()
     }
 
-    pub fn get(&self, section: usize) -> Option<&Day> {
-        self.0.get(section)
-    }
-
     pub fn iter(&self) -> impl Iterator<Item = &Day> {
         self.0.iter()
-    }
-
-    /// The row at `row` of `section`, counted top to bottom.
-    pub fn flat(&self, section: usize, row: usize) -> Option<usize> {
-        let day = self.0.get(section)?;
-        (row < day.len).then_some(day.start + row)
-    }
-
-    /// The section and row within it of row `flat`.
-    pub fn path(&self, flat: usize) -> Option<(usize, usize)> {
-        let section = self.0.partition_point(|d| d.start <= flat).checked_sub(1)?;
-        let row = flat - self.0[section].start;
-        (row < self.0[section].len).then_some((section, row))
     }
 }
 
@@ -510,14 +492,7 @@ pub fn empty_text(source: Option<&Source>) -> &'static str {
 /// Which of six hues a sender's avatar takes, picked by the address so a sender keeps
 /// theirs.
 pub fn avatar_hue(seed: &str) -> usize {
-    // FNV-1a: stable across runs and platforms, unlike the std hasher.
-    let hash = seed
-        .to_lowercase()
-        .bytes()
-        .fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
-            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
-        });
-    (hash % 6) as usize
+    (crate::fnv1a(seed.to_lowercase().bytes()) % 6) as usize
 }
 
 /// The letter an avatar shows: the first of the name, upper case.
@@ -667,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn rows_are_grouped_by_day_and_indexed_both_ways() {
+    fn rows_are_grouped_by_day() {
         let rows = vec![
             message(1, Some("2020-03-02")),
             message(2, Some("2020-03-02")),
@@ -688,15 +663,7 @@ mod tests {
                 ("No date".to_owned(), 3, 2),
             ]
         );
-        for flat in 0..5 {
-            let (section, row) = days.path(flat).unwrap();
-            assert_eq!(days.flat(section, row), Some(flat), "{section} {row}");
-        }
-        assert_eq!(days.path(3), Some((2, 0)));
-        assert_eq!(days.path(5), None);
-        assert_eq!(days.flat(1, 1), None);
-        assert_eq!(days.flat(3, 0), None);
-        assert!(Days::new(&[]).path(0).is_none());
+        assert!(Days::new(&[]).is_empty());
     }
 
     #[test]

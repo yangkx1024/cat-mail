@@ -1,215 +1,125 @@
-//! The commands on the sidebar's folders (on Gmail, labels): New, Rename and Delete,
-//! from their context menus. The dialog that names a folder, new or renamed, stays open
-//! until the engine has made the change on the server, which it does at once, and says
-//! why if it couldn't.
+//! The commands on a folder, from its menu in the sidebar: a new folder in it, renaming
+//! and deleting it.
 
-use catmail_core::{AccountId, FolderId, MailClient};
-use catmail_frontend::mailbox::FolderMenuEntry;
-use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
-use gpui_kit::{App, Context, SharedString, Window};
+use std::rc::Rc;
 
-use super::{Mailbox, Place, report_failure};
-use crate::layout;
-use crate::submission::{NameDialog, NameIds};
+use catmail_core::{AccountId, FolderId};
+use catmail_frontend::mailbox::{AccountEntry, FolderMenuEntry, Place};
+use nsh_core::element::desktop::{MenuItem, popup_menu};
+use nsh_core::prelude::*;
 
-/// The element id of the name field.
-pub const NAME: &str = "folder-name";
+use crate::engine::client;
+use crate::form::{NameRequest, ask_name, asking_name, confirmed};
+use crate::mailbox::sidebar::{Accounts, SelectedPlace, with_account};
+use crate::tasks::in_view;
+use crate::toast::report;
 
-/// What the name is for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Naming {
-    /// A new folder in `parent`, or at the top of the account's.
-    New {
-        account: AccountId,
-        parent: Option<FolderId>,
-    },
-    Rename(FolderId),
-}
-
-impl Naming {
-    /// The button that submits the name, and what it does, for the error.
-    fn verbs(self) -> (&'static str, &'static str) {
-        match self {
-            Naming::New { .. } => ("Create", "create it"),
-            Naming::Rename(_) => ("Rename", "rename it"),
-        }
-    }
-}
-
-/// Opens the dialog titled `title`, its field holding `name`.
-fn open(
-    client: MailClient,
-    naming: Naming,
-    title: impl Into<SharedString>,
-    name: &str,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let (ok, what) = naming.verbs();
-    let dialog = NameDialog {
-        ids: NameIds {
-            field: NAME,
-            cancel: "folder-cancel",
-            ok: "folder-ok",
-            error: "folder-error",
-        },
-        title: title.into(),
-        name: name.to_owned(),
-        placeholder: None,
-        ok,
-        what,
-    };
-    let request = move |name: String| {
-        let client = client.clone();
-        async move {
-            match naming {
-                Naming::New { account, parent } => {
-                    client.create_folder(account, parent, &name).await
-                }
-                Naming::Rename(folder) => client.rename_folder(folder, &name).await,
+/// The context menu of a folder (`None`: of the account's heading), with
+/// [`AccountEntry::folder_menu_entries`]. One left with nothing doesn't open.
+pub fn folder_menu(account: AccountId, folder: Option<FolderId>) {
+    let items = with_account(account, |entry| {
+        let mut items = Vec::new();
+        for menu_entry in entry.folder_menu_entries(folder) {
+            // Left out where it would come first.
+            if matches!(menu_entry, FolderMenuEntry::Rename(_)) && !items.is_empty() {
+                items.push(MenuItem::separator());
             }
+            items.push(
+                MenuItem::new(entry.folder_menu_label(menu_entry))
+                    .on_select(move || run(account, menu_entry)),
+            );
         }
-    };
-    dialog.open(request, window, cx);
+        items
+    });
+    if let Some(items) = items.filter(|items| !items.is_empty()) {
+        // Nothing waits on it closing.
+        drop(popup_menu(items));
+    }
 }
 
-/// A command a folder's context menu runs on the mailbox.
-type FolderCommand = Box<dyn Fn(&mut Mailbox, &mut Window, &mut Context<Mailbox>)>;
-
-impl Mailbox {
-    /// The context menu of a folder in the sidebar (`None`: of the account's heading),
-    /// with [`AccountEntry::folder_menu_entries`]. Worked out as it
-    /// opens; a menu left with nothing doesn't open.
-    pub(super) fn folder_menu(
-        &self,
-        account: AccountId,
-        folder: Option<FolderId>,
-        cx: &mut Context<Self>,
-    ) -> impl Fn(PopupMenu, &mut Window, &mut App) -> PopupMenu + 'static {
-        let mailbox = cx.weak_entity();
-        move |menu, _, cx| {
-            let Some(this) = mailbox.upgrade() else {
-                return menu;
-            };
-            let Some(entry) = this.read(cx).account(account) else {
-                return menu;
-            };
-            entry
-                .folder_menu_entries(folder)
-                .into_iter()
-                .fold(menu, |menu, menu_entry| {
-                    let label = entry.folder_menu_label(menu_entry);
-                    let (menu, command): (_, FolderCommand) = match menu_entry {
-                        FolderMenuEntry::New(parent) => (
-                            menu,
-                            Box::new(move |this, window, cx| {
-                                this.new_folder(account, parent, window, cx)
-                            }),
-                        ),
-                        FolderMenuEntry::Rename(id) => (
-                            // Left out where it would come first.
-                            menu.separator(),
-                            Box::new(move |this, window, cx| this.rename_folder(id, window, cx)),
-                        ),
-                        FolderMenuEntry::Delete(id) => (
-                            menu,
-                            Box::new(move |this, window, cx| this.delete_folder(id, window, cx)),
-                        ),
-                    };
-                    menu.item(
-                        PopupMenuItem::new(label)
-                            .on_click(layout::after_menu(mailbox.clone(), command)),
-                    )
-                })
-        }
+fn run(account: AccountId, entry: FolderMenuEntry) {
+    match entry {
+        FolderMenuEntry::New(parent) => new_folder(account, parent),
+        FolderMenuEntry::Rename(id) => rename_folder(id),
+        FolderMenuEntry::Delete(id) => delete_folder(id),
     }
+}
 
-    /// The folder (a level that holds no messages too), if the user may change it.
-    fn changeable_folder(&self, id: FolderId) -> Option<&catmail_core::Folder> {
-        self.accounts
-            .iter()
-            .flatten()
-            .find_map(|entry| entry.changeable_folder(id))
-    }
+/// The account the folder (a level that holds no messages too) is in.
+fn with_entry<R>(folder: FolderId, f: impl FnOnce(&AccountEntry) -> Option<R>) -> Option<R> {
+    global::<Accounts>().with_untracked(|a| {
+        let entry =
+            a.0.as_ref()?
+                .iter()
+                .find(|e| e.folders.get(folder).is_some())?;
+        f(entry)
+    })
+}
 
-    /// Asks for the name of a new folder of `account`, in `parent` or at the top.
-    pub(super) fn new_folder(
-        &mut self,
-        account: AccountId,
-        parent: Option<FolderId>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(entry) = self.account(account) else {
-            return;
-        };
-        let title = entry.new_folder_title(parent);
-        let naming = Naming::New { account, parent };
-        open(self.client.clone(), naming, title, "", window, cx);
-    }
-
-    /// Asks for the folder's new name.
-    pub(super) fn rename_folder(
-        &mut self,
-        id: FolderId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(folder) = self.changeable_folder(id) else {
-            return;
-        };
-        let name = folder.leaf_name();
-        let title = format!("Rename “{name}”");
-        open(
-            self.client.clone(),
-            Naming::Rename(id),
+fn new_folder(account: AccountId, parent: Option<FolderId>) {
+    let title = with_account(account, |entry| entry.new_folder_title(parent));
+    if let Some(title) = title {
+        ask_name(NameRequest {
             title,
+            name: String::new(),
+            placeholder: None,
+            ok: "Create",
+            what: "create it",
+            may_be_empty: false,
+            request: Rc::new(move |name| {
+                Box::pin(async move {
+                    client()
+                        .create_folder(account, parent, &name)
+                        .await
+                        .map(drop)
+                })
+            }),
+        });
+    }
+}
+
+fn rename_folder(id: FolderId) {
+    let name = with_entry(id, |entry| {
+        Some(entry.changeable_folder(id)?.leaf_name().to_owned())
+    });
+    if let Some(name) = name {
+        ask_name(NameRequest {
+            title: format!("Rename “{name}”"),
             name,
-            window,
-            cx,
-        );
+            placeholder: None,
+            ok: "Rename",
+            what: "rename it",
+            may_be_empty: false,
+            request: Rc::new(move |name| {
+                Box::pin(async move { client().rename_folder(id, &name).await.map(drop) })
+            }),
+        });
     }
+}
 
-    /// Renames the folder the sidebar has selected, if the user may.
-    pub(super) fn rename_selected_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(Place::Folder(id)) = self.place {
-            self.rename_folder(id, window, cx);
-        }
+/// F2: renames the folder the sidebar has selected, if the user may.
+pub fn rename_selected() {
+    if asking_name() {
+        return;
     }
+    if let Some(Place::Folder(id)) = global::<SelectedPlace>().with_untracked(|p| p.0) {
+        rename_folder(id);
+    }
+}
 
-    /// Deletes the folder, the folders in it and their messages once the user confirms:
-    /// it can't be undone. A Gmail label only comes off its messages.
-    pub(super) fn delete_folder(
-        &mut self,
-        id: FolderId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(deletion) = self
-            .accounts
-            .iter()
-            .flatten()
-            .find_map(|entry| entry.folder_deletion(id))
-        else {
+/// Deletes the folder, the folders in it and their messages once the user confirms: it
+/// can't be undone. A Gmail label only comes off its messages.
+fn delete_folder(id: FolderId) {
+    let Some(deletion) = with_entry(id, |entry| entry.folder_deletion(id)) else {
+        return;
+    };
+    let answer = confirmed(deletion.confirm);
+    in_view(async move {
+        if !answer.await {
             return;
-        };
-        let client = self.client.clone();
-        let what = deletion.what;
-        layout::confirm_danger(
-            deletion.title,
-            deletion.consequence,
-            "Delete",
-            window,
-            cx,
-            move |window, cx| {
-                let client = client.clone();
-                report_failure(
-                    what,
-                    async move { client.delete_folder(id).await },
-                    window,
-                    cx,
-                );
-            },
-        );
-    }
+        }
+        if let Err(e) = client().delete_folder(id).await {
+            report(&format!("Couldn't {}", deletion.what), e);
+        }
+    });
 }

@@ -61,13 +61,7 @@ pub fn attachments(message: &Message) -> Vec<Attachment> {
     message
         .body
         .as_ref()
-        .map(|body| {
-            body.attachments
-                .iter()
-                .filter(|a| !a.inline)
-                .cloned()
-                .collect()
-        })
+        .map(|body| body.files().cloned().collect())
         .unwrap_or_default()
 }
 

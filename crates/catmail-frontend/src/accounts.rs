@@ -13,6 +13,7 @@ pub fn remove_account(entry: &AccountEntry) -> Confirm {
         description: "Its mail, drafts and outbox are deleted from this computer, and its \
                       password from the keyring. Nothing changes on the server."
             .into(),
+        action: "Remove",
     }
 }
 
@@ -30,6 +31,7 @@ pub fn remove_identity(entry: &AccountEntry, id: IdentityId) -> Option<Confirm> 
             "Drafts from it will be sent from {default} instead, and its password is deleted \
              from the keyring."
         ),
+        action: "Remove",
     })
 }
 

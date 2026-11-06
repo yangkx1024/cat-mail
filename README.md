@@ -5,14 +5,15 @@
 
 用 Rust 编写的跨平台邮件客户端，同时提供图形界面（`catmail-gui`）和命令行（`catmail`）。
 
-> 早期开发中：目前发布 Linux 和 macOS 版，Windows 在路上；接口和数据库结构仍会变化。
+> 早期开发中：图形界面目前只发布 macOS 版，Linux 上要从源码构建，Windows 上只有命令行；接口和数据库结构
+> 仍会变化。
 
 ## 特点
 
 **轻量**
 
-- 原生 Rust，界面由 GPU 绘制（[GPUI](https://www.gpui.rs/) + [gpui-kit](https://github.com/longbridge/gpui-kit)），
-  邮件 HTML 由纯 Rust 的 [Blitz](https://github.com/DioxusLabs/blitz) 排版，不带浏览器内核，没有 Electron / WebView
+- 原生 Rust，界面是系统自己的控件（[Native Shell](https://github.com/longbridge/nsh)：Linux 上 GTK 4，macOS 上
+  AppKit），邮件正文在系统的 WebView（WebKitGTK、WKWebView）里显示；没有 Electron，不自带浏览器内核
 - 数据全在本地一个 SQLite 里，离线可读、可搜索、可操作；正文在后台按每日限额预取（没打开过的邮件也能按正文
   搜到，更早的搜索时问服务器），大附件打开时才下载
 - 窗口关闭后在后台保持同步，同时释放界面占用的内存
@@ -20,7 +21,7 @@
 **安全**
 
 - 密码只存系统密钥环，不进数据库
-- 邮件 HTML 先清洗再显示；远程图片默认拦截，要你点一下才加载
+- 邮件 HTML 先清洗再显示；正文页面不运行脚本，也不联网，远程图片默认拦截，要你点一下才由引擎下载
 - 阅读不改变服务器上的任何东西（`EXAMINE`、`BODY.PEEK`）；打开即已读可以关闭
 - 发出后没收到服务器确认的邮件不会自动重发，由你决定
 - TLS 只用 rustls，禁止 OpenSSL 等第二套加密实现；全工作区禁用 `unsafe`；依赖每周做安全审计
@@ -28,7 +29,7 @@
 **简洁高效**
 
 - 三栏布局，多账户合并收件箱，写信用独立窗口；常用操作都有快捷键
-- IMAP IDLE 推送新邮件，系统通知、托盘未读数
+- IMAP IDLE 推送新邮件，托盘（macOS 是菜单栏）显示未读数，Linux 上有系统通知
 - 标记、移动、删除先改本地，再经队列同步到服务器，离线也能用
 - 中日韩文字全文搜索；支持 Gmail 标签、一个账户多个发件身份
 - 主题可直接导入终端配色（Alacritty、kitty、Ghostty、WezTerm、iTerm2 等）
@@ -43,12 +44,13 @@
 
 从 [GitHub Releases](https://github.com/yangkx1024/cat-mail/releases/latest) 下载。
 
-Linux（x86_64、aarch64，glibc 2.35 及以上，即 Ubuntu 22.04 之后的发行版）：
+Linux（x86_64、aarch64）：
 
-- 图形界面：`catmail-<版本>-<架构>.AppImage`，`chmod +x` 后直接运行，可用 AppImageUpdate 或 Gear Lever 增量更新
-- 命令行：`catmail-<版本>-<架构>-linux.tar.gz`
+- 命令行：`catmail-<版本>-<架构>-linux.tar.gz`（glibc 2.35 及以上，即 Ubuntu 22.04 之后的发行版）
+- 图形界面暂时没有安装包（WebKitGTK 的打包还没做），要[从源码构建](#构建)；运行时需要 GTK 4.14 及以上、
+  WebKitGTK 6.0，以及 Wayland 或 X11
 
-需要一个 Secret Service 提供者（如 gnome-keyring、KeePassXC）保存密码；图形界面需要 Wayland 或 X11。
+需要一个 Secret Service 提供者（如 gnome-keyring、KeePassXC）保存密码。
 
 macOS（Apple 芯片，macOS 12 及以上，已签名并公证）：
 
@@ -56,6 +58,8 @@ macOS（Apple 芯片，macOS 12 及以上，已签名并公证）：
 - 命令行：`catmail-<版本>-aarch64-macos.tar.gz`
 
 密码保存在钥匙串里。
+
+Windows：暂无安装包，目前只有命令行，可以从源码构建。
 
 ### 图形界面
 
@@ -125,8 +129,8 @@ cargo fmt --all
 cargo deny check
 ```
 
-不用 Nix 时，装好 `rust-toolchain.toml` 指定的 stable 工具链，Linux 上再装 fontconfig、freetype、
-libxkbcommon、libxcb 的开发包（包名见 `.github/workflows/ci.yml`）。
+不用 Nix 时，装好 `rust-toolchain.toml` 指定的 stable 工具链，Linux 上再装 GTK 4 和 WebKitGTK 6.0 的开发包
+（包名见 `.github/workflows/ci.yml`）。
 
 对真实的 Dovecot 和 mailpit 测试（Linux，不能以 root 运行）：
 
@@ -149,11 +153,11 @@ cargo test -p catmail-core --test dovecot --test submission
 | `catmail-html` | 邮件 HTML 的清洗与读信区的处理（图片、深色配色），纯函数 |
 | `catmail-core` | 引擎与 `MailClient` 门面，前端唯一依赖 |
 | `catmail-cli` | `catmail` 命令行 |
-| `catmail-gui` | `catmail-gui` 图形界面 |
-| `catmail-render` | 读信区的 HTML 引擎（Blitz） |
+| `catmail-frontend` | 桌面前端里与 UI 库无关的逻辑：设置、主题、侧栏与列表的模型、命令、写信与发件箱的模型、托盘等 |
+| `catmail-gui` | `catmail-gui` 图形界面（Native Shell：GTK 4 / AppKit，正文在 WebView 里） |
 | `catmail-testkit` | 可注入故障的假 IMAP / SMTP 服务器，只用于测试 |
 
-依赖方向：`types ← store, proto ← core ← cli / gui`。设计细节见
+依赖方向：`types ← store, proto ← core ← cli / gui`，`core ← frontend ← gui`。设计细节见
 [docs/architecture.md](docs/architecture.md) 及 [docs/architecture/](docs/architecture/)。
 
 ## 路线图
@@ -165,8 +169,8 @@ cargo test -p catmail-core --test dovecot --test submission
 | M2 | 正文与附件按需下载、全文搜索、blob GC | ✅ |
 | M3 | 草稿、SMTP 发信与 outbox、保存到已发送 | ✅ |
 | M4 | 离线操作队列、IDLE 推送与后台同步、草稿同步到服务器 | ✅ |
-| M5 | 图形界面 | ✅ |
-| M6 | 打包：Linux AppImage、macOS 磁盘映像与 CLI ✅；Windows | 进行中 |
+| M5 | 图形界面（起初基于 GPUI，后改用 Native Shell） | ✅ |
+| M6 | 打包：macOS 磁盘映像与 CLI ✅；Linux 图形界面的安装包；Windows（图形界面接上 Native Shell 的 Windows 后端） | 进行中 |
 
 之后：前端通过 IPC 连接正在运行的引擎（让图形界面和命令行能同时使用）。
 

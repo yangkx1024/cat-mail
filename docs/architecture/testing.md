@@ -72,27 +72,15 @@
 
 ## GUI
 
-UI 集成测试（`#[gpui_kit::test]`，GPUI 的测试平台，无需显示器或 GPU，三个平台都跑）用假 IMAP 服务器
-（INBOX 加载 `testenv/fixtures/` 和 `crates/catmail-gui/fixtures/` 的邮件，另有 Archive、Drafts、Sent、
-Trash）和假 SMTP 服务器，驱动真实的窗口：点击、键盘、切换 HTML，打开即已读并经队列到服务器、归档后
-打开下一封、在写信窗口回复并发出、未改动的草稿关闭即删除、地址写错时不关窗、在设置里换主题，以及
-"另一处同步后窗口靠事件更新且保持选中"。客户端与应用一样在后台发信，但不在后台同步，由测试决定何时
-看服务器。引擎在自己的线程上运行，GPUI 的测试调度器看不到，所以
-测试在 `run_until_parked` 之间按真实时间等待（`test_support::wait_until`）。
-测试打开"减少动态效果"（`set_reduce_motion(true)`）：对话框会滑入，命中测试跟着移动，在慢的 CI 机器上
-点对话框里的按钮会落在上一帧的位置；测试调度器下 gpui-kit 不读系统设置，只能由测试自己设。
-测试的时钟只在 `advance_clock` 时走，所以主窗口的事件节流间隔（`refresh_interval`）在测试里设为零。
-断言"什么都没发生"时等一个正面的信号（窗口显示了原因、第二次打开同步返回），不固定 sleep。
-测试要点 gpui-kit 自己生成的元素 id（SidebarMenu 的第几项）时，只经 `settings::dialog::section_item`
-取得，升级 gpui-kit 改了命名只需改这一处；确认框的按钮是我们自己的，id 是 `layout::CONFIRM` /
-`layout::CANCEL`。
+窗口里的决策逻辑都在 `catmail-frontend`，抽成纯函数做表驱动测试，不经过窗口，也不用编译 GTK、WebKit 和 nsh：
+列表刷新后选中去哪、移走后等它离开（`list`）、哪个事件重读什么及节流（`refresh`）、写信窗口何时保存 / 发送 /
+关闭（`composer::Lifecycle`）、对邮件的命令作用于哪些邮件（`commands`）、发件箱的选择（`outbox`）、主题的推导与
+导入（`theme`）、设置文件、单实例、托盘的角标等。`catmail-gui` 自己只测不经窗口的几处：正文页面（CSP 在正文
+之前、`cid:` 图片嵌入、纯文本转义、和注入脚本之间的消息协议）、主题到 nsh token 的映射、图标、托盘的绘制。
 
-窗口里的决策逻辑抽成纯函数做表驱动测试，不必经过窗口：列表刷新后选中去哪（`message_list::reselect`）、
-哪个事件重读什么及节流（`mailbox::refresh`）、写信窗口关闭时等待 / 提示 / 关闭 / 先保存（`composer::lifecycle`
-的 `closing`、`steps`）。
-
-`mailbox::tests::screenshots`（`mailbox/tests/screenshots.rs`，`#[ignore]`）用 WGPU 离屏渲染把几封邮件、每个内置主题、设置和写信窗口
-截成 PNG，供人检查排版。
+还没有驱动真实窗口的测试。GPUI 版有过（GPUI 的测试平台，假 IMAP / SMTP 服务器驱动窗口：读信、写信、设置、
+文件夹），随它删掉了；要用 nsh-testing 无头驱动窗口重新做（见 `crates/catmail-gui/ROADMAP.md`）。在那之前，
+界面的改动靠手动检查，`CATMAIL_GUI_*` 环境变量（见 [GUI](gui.md#调试用的环境变量)）方便截图。
 
 ## 覆盖不到的
 

@@ -1,472 +1,312 @@
-//! The mailbox's commands: on the selected message (its toolbar), the messages checked
-//! (the list's toolbar), what the keys act on (those checked, or else the selected one)
-//! or a row's; writing, syncing and settings.
+//! The commands on messages: the same icon buttons over the message open, by the list's
+//! heading for the messages checked and on a row while hovered; what they do, which ones
+//! ask first, and "Move to" and "Labels" (their dialog is `picker.rs`). What they apply
+//! to and what they say are `catmail_frontend::commands`'.
 
-use catmail_core::{AccountId, DeleteMode, Flags, FolderId, MessageId, MessageSummary};
-use catmail_frontend::commands::{self, Deletion, MessageCommand, what};
+use catmail_core::{AccountId, Flags, FolderId, MessageId, MessageSummary};
+use catmail_frontend::commands::{self, Applies, Deletion, MessageCommand, what};
 use catmail_frontend::folders::AccountFolders;
-use gpui_kit::component::WindowExt as _;
-use gpui_kit::component::notification::Notification;
-use gpui_kit::{App, Context, Window};
+use catmail_frontend::mailbox::AccountEntry;
 
-use crate::composer::{self, ComposeFrom};
-use crate::layout;
+use nsh_core::prelude::*;
 
-use super::message_commands::Applies;
-use super::*;
-use crate::settings::dialog as settings_dialog;
+use crate::buttons::{Size, icon_button, separator};
+use crate::engine::client;
+use crate::form::confirmed;
+use crate::icons::Icon;
+use crate::mailbox::list;
+use crate::mailbox::picker::{Picker, Picking, open_picker};
+use crate::mailbox::sidebar::{self, Accounts, with_account, with_accounts};
+use crate::tasks::in_view;
+use crate::toast::{Level, notify, report};
 
-/// Runs an engine call, and tells the user if it fails: "Couldn't {what}: …".
-pub(crate) fn report_failure<T: 'static>(
-    what: &'static str,
-    call: impl Future<Output = catmail_core::Result<T>> + 'static,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    window
-        .spawn(cx, async move |cx| {
-            if let Err(e) = call.await {
-                cx.update(|window, cx| {
-                    window
-                        .push_notification(Notification::error(format!("Couldn't {what}: {e}")), cx)
-                })
-                .ok();
-            }
-        })
-        .detach();
+/// An account's folders, among `accounts`.
+pub fn folders_in<'a>(
+    accounts: &'a [AccountEntry],
+) -> impl Fn(AccountId) -> Option<&'a AccountFolders> + 'a {
+    move |id| {
+        accounts
+            .iter()
+            .find(|e| e.account.id == id)
+            .map(|e| &e.folders)
+    }
 }
 
-impl Mailbox {
-    /// Syncs every account now. The engine's background sync does it: progress and
-    /// failures show as the accounts' status.
-    pub(super) fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let client = self.client.clone();
-        report_failure("sync", async move { client.sync_now().await }, window, cx);
-    }
+/// What the commands do to the messages, for their buttons. Tracked: the buttons follow
+/// the accounts' folders.
+pub fn applies(messages: &[MessageSummary]) -> Applies {
+    global::<Accounts>().with(|a| {
+        let accounts = a.0.as_deref().unwrap_or_default();
+        Applies::of(messages, folders_in(accounts))
+    })
+}
 
-    /// Whether an account is syncing every folder, as the engine says.
-    pub(crate) fn syncing(&self) -> bool {
-        self.accounts
-            .iter()
-            .flatten()
-            .any(|entry| entry.status.syncing)
+/// Runs `command` on the messages: from a key, a toolbar or a row.
+pub fn run(command: MessageCommand, messages: Vec<MessageSummary>) {
+    if messages.is_empty() {
+        return;
     }
+    match command {
+        MessageCommand::Archive => archive(&messages),
+        MessageCommand::Delete => delete(&messages),
+        MessageCommand::Move => move_to_folder(messages),
+        MessageCommand::ToggleRead => toggle(&messages, Flags::SEEN),
+        MessageCommand::ToggleFlag => toggle(&messages, Flags::FLAGGED),
+    }
+}
 
-    /// Changes the server refused are undone locally by the engine; this says so, once
-    /// per change, and forgets them. Coalesced like reading.
-    pub(super) fn report_refused_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.checking_refused.start() {
-            return;
+pub fn set_flags(ids: Vec<MessageId>, add: Flags, remove: Flags) {
+    in_view(async move {
+        if let Err(e) = client().set_flags(ids, add, remove).await {
+            report("Couldn't change the message", e);
         }
-        let client = self.client.clone();
-        self._refused = cx.spawn_in(window, async move |this, cx| {
-            let refused = client.dismiss_settled(None).await.unwrap_or_default();
-            this.update_in(cx, |this, window, cx| {
-                for op in &refused {
-                    window
-                        .push_notification(Notification::warning(commands::refused_change(op)), cx);
-                }
-                if this.checking_refused.finish() {
-                    this.report_refused_changes(window, cx);
-                }
-            })
-            .ok();
-        });
+    });
+}
+
+fn toggle(messages: &[MessageSummary], flag: Flags) {
+    let (add, remove) = commands::toggled(messages, flag);
+    set_flags(messages.iter().map(|m| m.id).collect(), add, remove);
+}
+
+fn archive(messages: &[MessageSummary]) {
+    let ids = with_accounts(|accounts| commands::archivable(messages, folders_in(accounts)));
+    if ids.is_empty() {
+        return;
     }
+    let what = what(ids.len(), "archive the message", "archive the messages");
+    list::uncheck(&ids);
+    let call = {
+        let ids = ids.clone();
+        async move { client().archive_messages(ids).await }
+    };
+    change(ids, what, call);
+}
 
-    // Commands on messages: the selected one, those checked, or what the keys act on.
-
-    pub(super) fn selected_message(&self, cx: &gpui_kit::App) -> Option<MessageSummary> {
-        self.messages
-            .read(cx)
-            .delegate()
-            .selected_message()
-            .cloned()
+/// The folder the listed message is looked at in: on Gmail, a label it leaves when moved.
+/// In All Inboxes, its account's INBOX; none for search results.
+fn shown_in(message: &MessageSummary) -> Option<FolderId> {
+    if list::is_searching() {
+        return None;
     }
+    let shown = sidebar::shown_folders();
+    with_accounts(|accounts| {
+        let folders = folders_in(accounts)(message.account_id)?;
+        shown.into_iter().find(|&id| folders.get(id).is_some())
+    })
+}
 
-    /// The selected message, as the messages a command acts on.
-    pub(super) fn selected(&self, cx: &gpui_kit::App) -> Vec<MessageSummary> {
-        self.selected_message(cx).into_iter().collect()
+/// Moves those of the messages, all of one account, that moving to `to` changes.
+pub fn move_to(messages: &[MessageSummary], to: FolderId) {
+    let Some(first) = messages.first() else {
+        return;
+    };
+    let shown_in = shown_in(first);
+    let ids = with_accounts(|accounts| {
+        let account = commands::one_account(messages)?;
+        let folders = folders_in(accounts)(account)?;
+        Some(commands::movable(folders, messages, shown_in, to))
+    })
+    .unwrap_or_default();
+    if ids.is_empty() {
+        return;
     }
+    let what = what(ids.len(), "move the message", "move the messages");
+    list::uncheck(&ids);
+    let call = {
+        let ids = ids.clone();
+        async move { client().move_messages(ids, shown_in, to).await }
+    };
+    change(ids, what, call);
+}
 
-    /// The messages checked in the list, top to bottom.
-    pub(super) fn checked(&self, cx: &gpui_kit::App) -> Vec<MessageSummary> {
-        self.messages
-            .read(cx)
-            .delegate()
-            .checked_messages()
-            .cloned()
-            .collect()
-    }
-
-    /// What a key acts on: the messages checked, or else the selected one.
-    pub(super) fn keyed(&self, cx: &gpui_kit::App) -> Vec<MessageSummary> {
-        let checked = self.checked(cx);
-        if checked.is_empty() {
-            self.selected(cx)
-        } else {
-            checked
+/// Changes the messages with `call`, which may take them out of the list: if the
+/// selected one goes, the next one is selected (`list::expect_removal`).
+fn change(
+    ids: Vec<MessageId>,
+    what: &'static str,
+    call: impl Future<Output = catmail_core::Result<Vec<AccountId>>> + 'static,
+) {
+    // Only the selected message's removal is waited for: another's (a row's own command)
+    // must not take the place of one pending for it.
+    let removal = list::selected_message()
+        .map(|m| m.id)
+        .filter(|id| ids.contains(id))
+        .map(list::expect_removal);
+    in_view(async move {
+        let result = call.await;
+        if let Err(e) = &result {
+            report(&format!("Couldn't {what}"), e);
         }
-    }
-
-    /// What the commands do to the messages, for their buttons.
-    pub(super) fn applies<'a, I>(&'a self, messages: I) -> Applies
-    where
-        I: IntoIterator<Item = &'a MessageSummary>,
-        I::IntoIter: Clone,
-    {
-        Applies::of(messages, |account| self.account_folders(account))
-    }
-
-    /// Runs `command` on the messages: from a key, a toolbar or a row.
-    pub(super) fn run(
-        &mut self,
-        command: MessageCommand,
-        messages: Vec<MessageSummary>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match command {
-            MessageCommand::Archive => self.archive(&messages, window, cx),
-            MessageCommand::Delete => self.delete(&messages, window, cx),
-            MessageCommand::Move => self.move_to_folder(messages, window, cx),
-            MessageCommand::ToggleRead => self.toggle(&messages, Flags::SEEN, window, cx),
-            MessageCommand::ToggleFlag => self.toggle(&messages, Flags::FLAGGED, window, cx),
+        if let Some(removal) = removal {
+            list::removal_settled(removal, result.is_ok());
         }
-    }
+    });
+}
 
-    pub(super) fn set_flags(
-        &mut self,
-        ids: Vec<MessageId>,
-        add: Flags,
-        remove: Flags,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let client = self.client.clone();
-        report_failure(
-            "change the message",
-            async move { client.set_flags(ids, add, remove).await },
-            window,
-            cx,
-        );
+/// Each to Trash, or for good from Trash or without one, as the engine will: one change.
+/// A message deleted for good can't be brought back, so that asks first.
+fn delete(messages: &[MessageSummary]) {
+    let Deletion { ids, mode, confirm } =
+        with_accounts(|accounts| commands::deletion(messages, folders_in(accounts)));
+    if ids.is_empty() {
+        return;
     }
-
-    /// Clears the flag on the messages if they all have it, or else sets it on them all.
-    fn toggle(
-        &mut self,
-        messages: &[MessageSummary],
-        flag: Flags,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if messages.is_empty() {
-            return;
-        }
-        let (add, remove) = commands::toggled(messages, flag);
-        let ids = messages.iter().map(|m| m.id).collect();
-        self.set_flags(ids, add, remove, window, cx);
-    }
-
-    /// An account's folders, which the commands go by.
-    pub(crate) fn account_folders(&self, account: AccountId) -> Option<&AccountFolders> {
-        self.account(account).map(|entry| &entry.folders)
-    }
-
-    /// Archives those of the messages Archive does anything to.
-    fn archive(
-        &mut self,
-        messages: &[MessageSummary],
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let ids = commands::archivable(messages, |account| self.account_folders(account));
-        if ids.is_empty() {
-            return;
-        }
-        let what = what(ids.len(), "archive the message", "archive the messages");
-        self.uncheck(&ids, cx);
-        self.change(ids.clone(), what, window, cx, move |client| async move {
-            client.archive_messages(ids).await
-        });
-    }
-
-    /// Moves those of the messages, all of one account, that moving to `to` changes. If
-    /// the selected one goes, the next one is selected.
-    pub(super) fn move_to(
-        &mut self,
-        messages: &[MessageSummary],
-        to: FolderId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some((account, shown_in)) = self.move_source(messages, cx) else {
-            return;
-        };
-        let ids = commands::movable(&account.folders, messages, shown_in, to);
-        if ids.is_empty() {
-            return;
-        }
-        let what = what(ids.len(), "move the message", "move the messages");
-        self.uncheck(&ids, cx);
-        self.change(ids.clone(), what, window, cx, move |client| async move {
-            client.move_messages(ids, shown_in, to).await
-        });
-    }
-
-    /// The account of the messages, which "Move to" lists the folders of, and the folder
-    /// they are looked at in; none if there are none or they are of different accounts.
-    fn move_source(
-        &self,
-        messages: &[MessageSummary],
-        cx: &gpui_kit::App,
-    ) -> Option<(&AccountEntry, Option<FolderId>)> {
-        let account = self.account(commands::one_account(messages)?)?;
-        Some((account, self.shown_in(&messages[0], cx)))
-    }
-
-    /// Unchecks the messages moved or deleted: those still listed (on Gmail, one moved
-    /// to a label from All Mail) have been dealt with.
-    fn uncheck(&self, ids: &[MessageId], cx: &mut Context<Self>) {
-        self.messages
-            .update(cx, |list, cx| message_list::uncheck(list, ids, cx));
-    }
-
-    /// The folder the listed message is looked at in: on Gmail, a label it leaves when
-    /// moved. In All Inboxes, its account's INBOX; none for search results.
-    fn shown_in(&self, message: &MessageSummary, cx: &gpui_kit::App) -> Option<FolderId> {
-        if self.is_searching(cx) {
-            return None;
-        }
-        self.shown_folders()
-            .find(|f| f.account_id == message.account_id)
-            .map(|f| f.id)
-    }
-
-    /// Changes the messages with `call`, which may take them out of the list: if the
-    /// selected one goes, the next one is selected. Whether it goes is the store's to say (on Gmail, one moved
-    /// to a label from All Mail stays): once the change is made, the list is read again,
-    /// and a message still in it stays selected (see `message_list::removal_settled`).
-    fn change<F: Future<Output = catmail_core::Result<Vec<AccountId>>> + 'static>(
-        &mut self,
-        ids: Vec<MessageId>,
-        what: &'static str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        call: impl FnOnce(catmail_core::MailClient) -> F,
-    ) {
-        // Only the selected message's removal is waited for: another's (a row's own
-        // command) must not take the place of one pending for it.
-        let removal = self.messages.update(cx, |list, _| {
-            let list = list.delegate_mut();
-            let selected = list.selected_message().map(|m| m.id);
-            selected
-                .filter(|id| ids.contains(id))
-                .map(|id| list.expect_removal(id))
-        });
-        let call = call(self.client.clone());
-        cx.spawn_in(window, async move |this, cx| {
-            let result = call.await;
-            this.update_in(cx, |this, window, cx| {
-                if let Err(e) = &result {
-                    window.push_notification(
-                        Notification::error(format!("Couldn't {what}: {e}")),
-                        cx,
-                    );
-                }
-                if let Some(removal) = removal {
-                    this.messages.update(cx, |list, cx| {
-                        message_list::removal_settled(list, removal, result.is_ok(), window, cx)
-                    });
-                }
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Each to Trash, or for good from Trash or without one, as the engine will
-    /// ([`DeleteOutcome`]): one change. A message deleted for good can't be brought back,
-    /// so that asks first, once for them all.
-    fn delete(&mut self, messages: &[MessageSummary], window: &mut Window, cx: &mut Context<Self>) {
-        let Deletion { ids, mode, confirm } =
-            commands::deletion(messages, |account| self.account_folders(account));
-        let Some(confirm) = confirm else {
-            return self.delete_now(ids, mode, window, cx);
-        };
-        let this = cx.entity().downgrade();
-        layout::confirm_danger(
-            confirm.title,
-            confirm.description,
-            "Delete",
-            window,
-            cx,
-            move |window, cx| {
-                let ids = ids.clone();
-                this.update(cx, |this, cx| this.delete_now(ids, mode, window, cx))
-                    .ok();
-            },
-        );
-    }
-
-    fn delete_now(
-        &mut self,
-        ids: Vec<MessageId>,
-        mode: DeleteMode,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if ids.is_empty() {
-            return;
-        }
+    let delete_now = move || {
         let what = what(ids.len(), "delete the message", "delete the messages");
-        self.uncheck(&ids, cx);
-        self.change(ids.clone(), what, window, cx, move |client| async move {
-            client.delete_messages(ids, mode).await
-        });
-    }
-
-    /// Asks where to move the messages, all of one account: to the folders moving any of
-    /// them to changes.
-    fn move_to_folder(
-        &mut self,
-        messages: Vec<MessageSummary>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some((account, shown_in)) = self.move_source(&messages, cx) else {
-            return;
+        list::uncheck(&ids);
+        let call = {
+            let ids = ids.clone();
+            async move { client().delete_messages(ids, mode).await }
         };
-        let folders = commands::move_targets(&account.folders, &messages, shown_in);
-        let this = cx.entity().downgrade();
-        folder_picker::open(folders, window, cx, move |folder, window, cx| {
-            this.update(cx, |this, cx| this.move_to(&messages, folder, window, cx))
-                .ok();
-        });
-    }
-
-    /// Whether the selected message has labels to edit: it is in a Gmail account.
-    pub(crate) fn can_edit_labels(&self, cx: &gpui_kit::App) -> bool {
-        self.selected_message(cx)
-            .is_some_and(|message| self.labels_account(&message).is_some())
-    }
-
-    /// The message's account, if it has labels: on Gmail.
-    fn labels_account(&self, message: &MessageSummary) -> Option<&AccountEntry> {
-        self.account(message.account_id).filter(|a| a.has_labels())
-    }
-
-    /// Opens "Labels" for the selected message, which changes them as they are picked.
-    /// It shows the message's labels as they are, and closes once the message is no
-    /// longer the one selected ([`sync_labels_dialog`](Self::sync_labels_dialog)).
-    pub(crate) fn edit_labels(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(message) = self.selected_message(cx) else {
-            return;
-        };
-        let Some(account) = self.labels_account(&message) else {
-            return;
-        };
-        let labels = account.folders.user_labels();
-        let checked = message.labels.iter().copied().collect();
-        let this = cx.entity().downgrade();
-        let id = message.id;
-        let list =
-            folder_picker::open_labels(labels, checked, window, cx, move |label, window, cx| {
-                this.update(cx, |this, cx| this.toggle_label(id, label, window, cx))
-                    .ok();
-            });
-        self.labels_dialog = Some(LabelsDialog { message: id, list });
-    }
-
-    /// Keeps "Labels" to the message it was opened for: its checks follow the message's
-    /// labels as the list has them (a change refused and undone, or made elsewhere, shows
-    /// there too), and it closes once the message is no longer selected.
-    pub(super) fn sync_labels_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(dialog) = &self.labels_dialog else {
-            return;
-        };
-        let Some(list) = dialog.list.upgrade() else {
-            self.labels_dialog = None; // Closed.
-            return;
-        };
-        match self.selected_message(cx).filter(|m| m.id == dialog.message) {
-            Some(message) => list.update(cx, |list, cx| {
-                if list
-                    .delegate_mut()
-                    .set_checked(message.labels.into_iter().collect())
-                {
-                    cx.notify();
-                }
-            }),
-            None => {
-                self.labels_dialog = None;
-                window.close_dialog(cx);
-            }
+        change(ids, what, call);
+    };
+    let Some(confirm) = confirm else {
+        return delete_now();
+    };
+    let answer = confirmed(confirm);
+    in_view(async move {
+        if answer.await {
+            delete_now();
         }
-    }
+    });
+}
 
-    /// Adds `label` to the message, the selected one, or takes it off, as it has it now.
-    fn toggle_label(
-        &mut self,
-        id: MessageId,
-        label: FolderId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(message) = self.selected_message(cx).filter(|m| m.id == id) else {
-            return;
-        };
-        let (add, remove) = commands::label_change(&message, label);
-        // Off the label it is listed in, it leaves the list: on to the next one.
-        self.change(
-            vec![id],
-            "change the labels",
-            window,
-            cx,
-            move |client| async move { client.label_messages(vec![id], add, remove).await },
-        );
-    }
+/// Asks where to move the messages, all of one account: to the folders moving any of
+/// them to changes.
+fn move_to_folder(messages: Vec<MessageSummary>) {
+    let Some(first) = messages.first() else {
+        return;
+    };
+    let shown_in = shown_in(first);
+    let folders = with_accounts(|accounts| {
+        let account = commands::one_account(&messages)?;
+        let folders = folders_in(accounts)(account)?;
+        Some(commands::move_targets(folders, &messages, shown_in))
+    });
+    let Some(folders) = folders else {
+        return;
+    };
+    open_picker(Picker {
+        kind: Picking::Move(messages),
+        folders,
+    });
+}
 
-    pub(crate) fn compose(
-        &mut self,
-        from: ComposeFrom,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        composer::open(self.client.clone(), from, window, cx);
-    }
+/// The message's account, if it has labels to edit: on Gmail.
+pub fn can_edit_labels(message: &MessageSummary) -> bool {
+    global::<Accounts>().with(|a| {
+        a.0.iter()
+            .flatten()
+            .any(|e| e.account.id == message.account_id && e.has_labels())
+    })
+}
 
-    pub(crate) fn new_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.accounts.is_none() {
-            self.compose_once_loaded = true;
-            return;
+/// Opens "Labels" for the selected message, which changes them as they are picked. Its
+/// checks are the message's labels as the list has them, and it closes once the message
+/// is no longer the one selected.
+pub fn edit_labels() {
+    let Some(message) = list::selected_message() else {
+        return;
+    };
+    let labels = with_account(message.account_id, |e| {
+        e.has_labels().then(|| e.folders.user_labels())
+    })
+    .flatten();
+    let Some(labels) = labels else {
+        return;
+    };
+    open_picker(Picker {
+        kind: Picking::Labels(message.id),
+        folders: labels,
+    });
+}
+
+/// Adds `label` to the message, the selected one, or takes it off, as it has it now.
+/// Off the label it is listed in, it leaves the list: on to the next one.
+pub fn toggle_label(id: MessageId, label: FolderId) {
+    let Some(message) = list::selected_message().filter(|m| m.id == id) else {
+        return;
+    };
+    let (add, remove) = commands::label_change(&message, label);
+    let call = async move { client().label_messages(vec![id], add, remove).await };
+    change(vec![id], "change the labels", call);
+}
+
+/// The server refused changes, which the engine undid: says so, once per change, and
+/// forgets them. One check at a time, and one more if asked meanwhile.
+pub fn report_refused_changes() {
+    if !global::<RefusedCheck>().with_untracked(|c| c.0.borrow_mut().start()) {
+        return;
+    }
+    in_view(async {
+        let refused = client().dismiss_settled(None).await.unwrap_or_default();
+        for op in &refused {
+            notify(Level::Warning, commands::refused_change(op));
         }
-        let accounts = self.accounts.as_deref().unwrap_or_default();
-        if let Some(account) = composer::new_message_account(self.place, accounts) {
-            self.compose(ComposeFrom::New(account), window, cx);
+        if global::<RefusedCheck>().with_untracked(|c| c.0.borrow_mut().finish()) {
+            report_refused_changes();
         }
-    }
+    });
+}
 
-    pub(crate) fn reply(&mut self, all: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(message) = self.selected_message(cx) {
-            self.compose(
-                ComposeFrom::Reply {
-                    message: message.id,
-                    all,
-                },
-                window,
-                cx,
-            );
-        }
-    }
+#[derive(Clone, Default)]
+struct RefusedCheck(std::rc::Rc<std::cell::RefCell<catmail_frontend::refresh::Coalesce>>);
 
-    pub(crate) fn forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(message) = self.selected_message(cx) {
-            self.compose(ComposeFrom::Forward(message.id), window, cx);
-        }
-    }
+// --- Buttons ------------------------------------------------------------------------
 
-    pub(crate) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        settings_dialog::open(self.client.clone(), cx.entity().downgrade(), window, cx);
+/// A command's icon, for messages that all have `flags`: a toggle shows what it does.
+fn command_icon(command: MessageCommand, flags: Flags) -> Icon {
+    match command {
+        MessageCommand::Archive => Icon::ArchiveBox,
+        MessageCommand::Delete => Icon::Trash,
+        MessageCommand::Move => Icon::FolderArrowRight,
+        MessageCommand::ToggleRead if flags.contains(Flags::SEEN) => Icon::Envelope,
+        MessageCommand::ToggleRead => Icon::EnvelopeOpen,
+        MessageCommand::ToggleFlag if flags.contains(Flags::FLAGGED) => Icon::FlagSolid,
+        MessageCommand::ToggleFlag => Icon::Flag,
     }
+}
+
+/// The commands' buttons, in their two groups: where the messages are, and their marks.
+/// `messages` gives those they act on; the buttons follow what the commands do to them.
+pub fn buttons(
+    messages: impl Fn() -> Vec<MessageSummary> + Copy + 'static,
+    size: Size,
+) -> impl IntoElement {
+    let applies = computed(move || applies(&messages()));
+    view()
+        .flex_row()
+        .items_center()
+        .flex_shrink_0()
+        .gap(px(2.0))
+        .child(group(&MessageCommand::PLACE, messages, applies, size))
+        .child(separator(size))
+        .child(group(&MessageCommand::MARKS, messages, applies, size))
+}
+
+/// The buttons of one group of `commands`, as [`buttons`] has them: a toolbar puts
+/// buttons of its own between the groups. `applies` is what the commands do to `messages`
+/// ([`applies`]), one for a toolbar's groups.
+pub fn group(
+    commands: &[MessageCommand],
+    messages: impl Fn() -> Vec<MessageSummary> + Copy + 'static,
+    applies: Memo<Applies>,
+    size: Size,
+) -> View {
+    let button = move |&command: &MessageCommand| {
+        let flags = move || applies.with(|a| a.flags());
+        icon_button(
+            move || command_icon(command, flags()),
+            move || command.label(flags()).to_owned(),
+            move || applies.with(|a| a.enables(command)),
+            size,
+            move || run(command, untracked(messages)),
+        )
+    };
+    view()
+        .flex_row()
+        .items_center()
+        .flex_shrink_0()
+        .gap(px(2.0))
+        .children(commands.iter().map(button).collect::<Vec<_>>())
 }

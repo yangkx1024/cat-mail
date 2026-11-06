@@ -1,10 +1,10 @@
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::LazyLock;
 
 use catmail_types::{
-    AccountId, Address, BlobHash, FlagState, Flags, FolderId, FolderKind, FolderRole, GmailLabel,
-    Message, MessageBody, MessageCursor, MessageId, MessageSummary, SearchQuery,
+    AccountId, Address, Attachment, BlobHash, FlagState, Flags, FolderId, FolderKind, FolderRole,
+    GmailLabel, Message, MessageBody, MessageCursor, MessageId, MessageSummary, SearchQuery,
 };
 use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
@@ -1002,17 +1002,17 @@ impl<'c> Messages<'c> {
     }
 
     /// Replaces the HTML of a body made by content version `from` and kept without its
-    /// raw message, cleaned again by content version `to`: the attachments that `cid:`
-    /// URLs in it refer to (by Content-ID, in `referenced`) are the inline ones. The
-    /// text, and so the snippet and index entry, stay. Returns false, changing nothing,
-    /// if the message is gone or its body was rebuilt meanwhile.
+    /// raw message, cleaned again by content version `to`, with the attachments that
+    /// `inline` picks shown within it. The text, and so the snippet and index entry,
+    /// stay. Returns false, changing nothing, if the message is gone or its body was
+    /// rebuilt meanwhile.
     pub fn refresh_html(
         &self,
         id: MessageId,
         from: u32,
         to: u32,
         html: Option<&str>,
-        referenced: &HashSet<String>,
+        inline: impl Fn(&Attachment) -> bool,
     ) -> Result<bool> {
         let updated = self.conn.execute(
             "UPDATE message_bodies SET text_html = ?3, content_version = ?4
@@ -1022,7 +1022,7 @@ impl<'c> Messages<'c> {
         if updated == 0 {
             return Ok(false);
         }
-        Attachments::new(self.conn).mark_inline(id, referenced)?;
+        Attachments::new(self.conn).mark_inline(id, inline)?;
         self.conn.execute(
             "UPDATE messages SET has_attachments =
                  EXISTS (SELECT 1 FROM attachments WHERE message_id = ?1 AND NOT is_inline)
@@ -1666,17 +1666,13 @@ mod tests {
             Some(2)
         );
 
-        let referenced = HashSet::from(["logo@x".to_owned()]);
         assert!(
             store
                 .write(|db| {
-                    db.messages().refresh_html(
-                        id,
-                        2,
-                        3,
-                        Some("<img src=\"cid:logo@x\">"),
-                        &referenced,
-                    )
+                    db.messages()
+                        .refresh_html(id, 2, 3, Some("<img src=\"cid:logo@x\">"), |a| {
+                            a.content_id.as_deref() == Some("logo@x")
+                        })
                 })
                 .unwrap()
         );

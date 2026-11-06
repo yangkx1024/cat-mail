@@ -42,7 +42,8 @@ pub const TEXT_SIZES: [(f32, &str); 5] = [
     (18., "Larger"),
 ];
 
-const DEFAULT_TEXT_SIZE: f32 = 16.;
+/// The text size of `Default`, in pixels.
+pub const DEFAULT_TEXT_SIZE: f32 = 16.;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -178,7 +179,7 @@ impl SettingsFile {
 
 /// Writes through a temporary file next to `path`, so a crash mid-write leaves the old
 /// file. Creates the folder if needed.
-pub fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;

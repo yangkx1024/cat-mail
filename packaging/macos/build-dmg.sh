@@ -9,8 +9,8 @@
 # SHA-1 in the keychain) of the team CATMAIL_TEAM_ID, and has Apple notarize the result
 # when CATMAIL_NOTARY_KEY (an App Store Connect API key file), CATMAIL_NOTARY_KEY_ID and
 # CATMAIL_NOTARY_ISSUER are set too. Without an identity it signs ad hoc: a package that
-# runs on this Mac only, enough to check the packaging. Needs Xcode (the Metal shader
-# compiler, codesign, notarytool).
+# runs on this Mac only, enough to check the packaging. Needs Xcode (codesign,
+# notarytool).
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
@@ -22,8 +22,8 @@ out=$target_dir/macos
 tools=$out/tools
 arch=aarch64
 
-# GPUI's Metal shaders are compiled for macOS 12 (gpui-fast-apple's build.rs): the oldest
-# the app can run on, and the one the binaries are linked for.
+# The oldest macOS the app says it runs on (Info.plist), and the one the binaries are
+# linked for. Not tried on anything older than the build machine.
 min_macos=12.0
 export MACOSX_DEPLOYMENT_TARGET=$min_macos
 # Renders the icon. From crates.io, pinned.
@@ -122,8 +122,6 @@ sed -e "s/@VERSION@/$version/g" -e "s/@MIN_MACOS@/$min_macos/g" "$here/Info.plis
 plutil -lint -s "$app/Contents/Info.plist"
 cp "$gui" "$app/Contents/MacOS/catmail-gui"
 cp "$repo/LICENSE-MIT" "$repo/LICENSE-APACHE" "$app/Contents/Resources/licenses/"
-cp "$repo/crates/catmail-gui/assets/fonts/noto-sans/OFL.txt" \
-  "$app/Contents/Resources/licenses/NotoSans-OFL.txt"
 
 # The fixed light icon, on Apple's icon grid: the tile (16 to 496 of 512 in the source)
 # takes 824 of 1024 pixels, centred, leaving the margin the system's icons have.

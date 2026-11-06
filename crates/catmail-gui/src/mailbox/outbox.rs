@@ -1,136 +1,169 @@
-//! The right pane for an outbox entry: what happened to it, and the choices it leaves.
+//! The right pane for an outbox entry: what happened to it, and the choices it leaves
+//! (`catmail_frontend::outbox`).
 
 use catmail_core::{OutboxEntry, OutboxStatus};
-use gpui_kit::component::alert::Alert;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
-use gpui_kit::{AnyElement, Context, IntoElement, ParentElement as _, Styled as _, Window, div};
+use catmail_frontend::format;
+use catmail_frontend::outbox::{Choice, State, choices, facts};
+use nsh_base::theme;
+use nsh_core::prelude::*;
 
-use super::{Mailbox, report_failure};
-use crate::format;
-use crate::layout;
-use catmail_frontend::outbox::{Choice, State, choices};
+use crate::buttons::text_button;
+use crate::chrome;
+use crate::engine::client;
+use crate::form::confirmed;
+use crate::icons::{Icon, icon};
+use crate::mailbox::list::{self};
+use crate::mailbox::panes::{back_button, fact};
+use crate::mailbox::sidebar::with_accounts;
+use crate::tasks::in_view;
+use crate::toast::report;
 
-impl Mailbox {
-    pub(super) fn render_outbox_entry(
-        &self,
-        entry: &OutboxEntry,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let from = self
-            .account(entry.account_id)
-            .map(|a| a.account.email.clone())
-            .unwrap_or_default();
-        let facts = [
-            ("To", entry.recipients.join(", ")),
-            ("From", from),
-            ("Queued", format::date(Some(entry.created_at))),
-        ]
+/// The pane, while an outbox entry is selected.
+pub fn pane() -> impl IntoElement {
+    let entry = computed(list::selected_outbox);
+    view()
+        .flex_1()
+        .min_w(px(0.0))
+        .child(chrome::toolbar().child(back_button()))
+        .child(dynamic(move || match entry.get() {
+            Some(entry) => page(entry).into_element(),
+            None => view().flex_1().into_element(),
+        }))
+}
+
+fn page(entry: OutboxEntry) -> impl IntoElement {
+    let identities: Vec<_> = with_accounts(|accounts| {
+        accounts
+            .iter()
+            .flat_map(|a| a.identities.iter().cloned())
+            .collect()
+    });
+    let lines = facts(&entry, &identities)
         .into_iter()
-        .map(|(name, value)| layout::labelled(name, value, cx).text_sm())
+        .map(|(name, value)| fact(name, value).into_element())
         .collect::<Vec<_>>();
-        v_flex()
-            .size_full()
-            .child(layout::toolbar(cx).child(self.back_button(cx)))
+    scroll().flex_1().child(
+        view()
+            .px(px(24.0))
+            .pt(px(20.0))
+            .pb(px(32.0))
+            .gap(px(16.0))
             .child(
-                layout::page(
-                    "outbox-entry",
-                    v_flex()
-                        .gap_4()
-                        .child(layout::page_title(format::subject(Some(&entry.subject))))
-                        .child(v_flex().gap_1().children(facts))
-                        .child(self.render_outbox_state(entry, cx)),
-                )
-                .flex_1()
-                .min_h_0(),
+                text(format::subject(Some(&entry.subject)).to_owned())
+                    .text_xl()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .selectable(true)
+                    .text_color(move || theme().foreground),
             )
-    }
+            .child(view().gap(px(4.0)).children(lines))
+            .child(state(&entry)),
+    )
+}
 
-    /// What happened to the entry, and the choices it leaves.
-    fn render_outbox_state(&self, entry: &OutboxEntry, cx: &mut Context<Self>) -> AnyElement {
+/// What happened to the entry, and the choices it leaves.
+fn state(entry: &OutboxEntry) -> impl IntoElement {
+    let muted = move || theme().muted_foreground;
+    let state = match State::of(entry) {
+        State::Unknown { title, text } => alert(
+            Icon::ExclamationTriangle,
+            crate::theme::warning,
+            title,
+            text.to_owned(),
+        ),
+        State::Rejected { title, reason } => {
+            alert(Icon::XCircle, || theme().destructive, title, reason)
+        }
+        State::Sending => {
+            return text("Sending…").text_sm().text_color(muted).into_element();
+        }
         // Why it is where it is, under the state's own words.
-        let note = |reason: Option<String>| {
-            reason.map(|reason| {
-                div()
+        State::Note { text: says, reason } => view()
+            .gap(px(12.0))
+            .child(text(says).text_sm().text_color(move || theme().foreground))
+            .children(reason.map(|reason| {
+                text(reason)
                     .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(reason)
-            })
-        };
-        let state = match State::of(entry) {
-            State::Unknown { title, text } => Alert::warning("unknown", text)
-                .title(title)
-                .into_any_element(),
-            State::Rejected { title, reason } => Alert::error("failed", reason)
-                .title(title)
-                .into_any_element(),
-            State::Sending => {
-                return h_flex()
-                    .gap_2()
-                    .text_sm()
-                    .child(Spinner::new().small())
-                    .child("Sending…")
-                    .into_any_element();
-            }
-            State::Note { text, reason } => v_flex()
-                .gap_3()
-                .child(div().text_sm().child(text))
-                .children(note(reason))
-                .into_any_element(),
-        };
-        let buttons = choices(entry).into_iter().enumerate().map(|(ix, choice)| {
-            let status = entry.status;
-            let button = Button::new(choice.id()).label(choice.label(entry.status));
-            let button = if ix == 0 {
-                button.outline()
-            } else {
-                button.ghost()
-            };
-            button.on_click(cx.listener(move |this, _, window, cx| {
-                this.outbox_choice(choice, status, window, cx)
+                    .selectable(true)
+                    .text_color(muted)
+                    .into_element()
             }))
-        });
-        v_flex()
-            .gap_3()
-            .child(state)
-            .child(h_flex().gap_2().flex_wrap().children(buttons))
-            .into_any_element()
-    }
+            .into_element(),
+    };
+    let status = entry.status;
+    let buttons = choices(entry)
+        .into_iter()
+        .enumerate()
+        .map(|(ix, choice)| {
+            // The likeliest choice stands out.
+            text_button(choice.label(status), ix == 0, move || {
+                choose(choice, status)
+            })
+            .into_element()
+        })
+        .collect::<Vec<_>>();
+    view()
+        .gap(px(12.0))
+        .child(state)
+        .child(view().flex_row().flex_wrap().gap(px(8.0)).children(buttons))
+        .into_element()
+}
 
-    /// Does what the user chose; sending again what may have arrived asks first.
-    fn outbox_choice(
-        &mut self,
-        choice: Choice,
-        status: OutboxStatus,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some((confirm, go_on)) = choice.confirm(status) else {
-            self.run_outbox_choice(choice, window, cx);
-            return;
-        };
-        let this = cx.entity().downgrade();
-        layout::confirm_danger(
-            confirm.title,
-            confirm.description,
-            go_on,
-            window,
-            cx,
-            move |window, cx| {
-                this.update(cx, |this, cx| this.run_outbox_choice(choice, window, cx))
-                    .ok();
-            },
-        );
-    }
+/// A note that needs the user: an icon, a title, and what it is about, in `tone` (the
+/// warning color, or the destructive one).
+fn alert(
+    which: Icon,
+    tone: fn() -> AdaptiveColor,
+    title: &'static str,
+    about: String,
+) -> AnyElement {
+    view()
+        .flex_row()
+        .items_start()
+        .gap(px(10.0))
+        .px(px(12.0))
+        .py(px(10.0))
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(tone)
+        .child(icon(move || which, 18.0).flex_shrink_0().text_color(tone))
+        .child(
+            view()
+                .flex_1()
+                .gap(px(4.0))
+                .child(
+                    text(title)
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(tone),
+                )
+                .child(
+                    text(about)
+                        .text_sm()
+                        .selectable(true)
+                        .text_color(move || theme().foreground),
+                ),
+        )
+        .into_element()
+}
 
-    fn run_outbox_choice(&mut self, choice: Choice, window: &mut Window, cx: &mut Context<Self>) {
-        let client = self.client.clone();
-        report_failure(
-            choice.what(),
-            async move { choice.run(&client).await },
-            window,
-            cx,
-        );
-    }
+/// Does what the user chose; sending again what may have arrived asks first.
+fn choose(choice: Choice, status: OutboxStatus) {
+    let Some(confirm) = choice.confirm(status) else {
+        run(choice);
+        return;
+    };
+    let answer = confirmed(confirm);
+    in_view(async move {
+        if answer.await {
+            run(choice);
+        }
+    });
+}
+
+fn run(choice: Choice) {
+    in_view(async move {
+        if let Err(e) = choice.run(&client()).await {
+            report(&format!("Couldn't {}", choice.what()), e);
+        }
+    });
 }

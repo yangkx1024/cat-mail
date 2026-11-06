@@ -1,10 +1,30 @@
-//! The right pane of an outbox entry, without its widgets: what it says happened to the
-//! entry, and the choices it leaves (which the engine allows: `OutboxStatus::can_*`).
+//! The right pane of an outbox entry, without its widgets: what it is, what it says
+//! happened to it, and the choices it leaves (which the engine allows:
+//! `OutboxStatus::can_*`).
 
-use catmail_core::{AccountId, MailClient, OutboxEntry, OutboxId, OutboxStatus};
+use catmail_core::{AccountId, Identity, MailClient, OutboxEntry, OutboxId, OutboxStatus};
 
 use crate::commands::Confirm;
+use crate::composer::senders;
+use crate::format;
 use crate::list::outbox_status;
+
+/// The lines over the entry's state, as (name, value). From is the identity it goes out
+/// as, named among `identities` (every account's) as a new message's From names it. It
+/// is among them once they are read: an identity can't be removed while the outbox has
+/// messages to send through it.
+pub fn facts(entry: &OutboxEntry, identities: &[Identity]) -> [(&'static str, String); 3] {
+    let from = senders(identities)
+        .into_iter()
+        .find(|s| s.identity == entry.identity)
+        .map(|s| s.title)
+        .unwrap_or_default();
+    [
+        ("To", entry.recipients.join(", ")),
+        ("From", from),
+        ("Queued", format::date(Some(entry.created_at))),
+    ]
+}
 
 /// What happened to the entry, as the pane says it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,15 +108,11 @@ impl Choice {
 
     /// What to ask first, and the button that goes on, if anything: sending again what
     /// may have arrived.
-    pub fn confirm(self, status: OutboxStatus) -> Option<(Confirm, &'static str)> {
-        (matches!(self, Self::Retry(_)) && status.retry_may_duplicate()).then(|| {
-            (
-                Confirm {
-                    title: "Send it again?".into(),
-                    description: "If the first one did arrive, the recipients get it twice.".into(),
-                },
-                "Send again",
-            )
+    pub fn confirm(self, status: OutboxStatus) -> Option<Confirm> {
+        (matches!(self, Self::Retry(_)) && status.retry_may_duplicate()).then(|| Confirm {
+            title: "Send it again?".into(),
+            description: "If the first one did arrive, the recipients get it twice.".into(),
+            action: "Send again",
         })
     }
 
@@ -145,13 +161,15 @@ pub fn choices(entry: &OutboxEntry) -> Vec<Choice> {
 
 #[cfg(test)]
 mod tests {
+    use catmail_core::{IdentityId, Security, ServerConfig};
+
     use super::*;
 
     fn entry(status: OutboxStatus) -> OutboxEntry {
         OutboxEntry {
             id: OutboxId(1),
             account_id: AccountId(2),
-            identity: catmail_core::IdentityId(3),
+            identity: IdentityId(3),
             draft_id: None,
             subject: String::new(),
             recipients: Vec::new(),
@@ -162,6 +180,41 @@ mod tests {
             last_error: None,
             created_at: 0,
         }
+    }
+
+    fn identity(id: i64, name: Option<&str>, email: &str, host: &str) -> Identity {
+        Identity {
+            id: IdentityId(id),
+            account_id: AccountId(2),
+            email: email.into(),
+            display_name: name.map(Into::into),
+            username: email.into(),
+            smtp: ServerConfig {
+                host: host.into(),
+                port: 465,
+                security: Security::Tls,
+            },
+            is_default: id == 1,
+            saves_sent: None,
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn from_is_the_identity_it_goes_out_as() {
+        let from =
+            |identities: &[Identity]| facts(&entry(OutboxStatus::Queued), identities)[1].1.clone();
+        let default = identity(1, None, "me@example.com", "smtp.example.com");
+        let other = identity(3, Some("Me"), "me@work.example", "smtp.work.example");
+        assert_eq!(from(&[default.clone(), other]), "Me <me@work.example>");
+        // The same address through another server is told apart by it, as in the composer.
+        let relay = identity(3, None, "me@example.com", "relay.example.net");
+        assert_eq!(
+            from(&[default, relay]),
+            "me@example.com · relay.example.net"
+        );
+        // Not read yet.
+        assert_eq!(from(&[]), "");
     }
 
     #[test]

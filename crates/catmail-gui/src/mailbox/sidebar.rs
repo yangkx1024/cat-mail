@@ -1,448 +1,918 @@
-//! The mailbox's left pane: "Compose", All Inboxes, each account's places, and at
-//! the bottom Settings, the connection state and Sync.
+//! The mailbox's left pane: All Inboxes, each account's places under its address (folders
+//! with a role first, the drafts and outbox after the inbox, then the other folders,
+//! Gmail's labels in a section of their own), and at the bottom what is wrong with the
+//! connection. Its model is `catmail_frontend`'s; the commands in a folder's menu are
+//! `folder_commands.rs`'.
 
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use catmail_core::{AccountId, FolderRole};
-use catmail_frontend::folders::FolderIcon;
-use catmail_frontend::mailbox::{self, ALL_MAIL_HIDDEN};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::collapsible;
-use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu};
-use gpui_kit::component::sidebar::{
-    Sidebar, SidebarGroup, SidebarItem, SidebarMenu, SidebarMenuItem,
+use catmail_core::{AccountId, FolderId, FolderRole};
+use catmail_frontend::folders::{self, FolderIcon, FolderNode, RoleInfo};
+use catmail_frontend::mailbox::{
+    self, ALL_MAIL_HIDDEN, AccountEntry, Destination, Place, SYNC_ON_OPEN_AFTER,
 };
-use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{
-    ActiveTheme as _, Collapsible, Disableable as _, Icon, Sizable as _, h_flex, v_flex,
-};
-use gpui_kit::{
-    App, ClickEvent, Context, ElementId, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
-    TestSupportExt as _, Window, div, prelude::FluentBuilder as _, rems,
-};
+use catmail_frontend::refresh::{Coalesce, DraftCounts};
+use nsh_base::theme;
+use nsh_core::ContextMenuEvent;
+use nsh_core::prelude::*;
 
-use super::folders::{self, FolderNode, RoleInfo};
-use super::{AccountEntry, Mailbox, Place};
-use crate::actions::{self, NewMessage, OpenSettings};
-use crate::assets::Hero;
-use crate::layout;
+use crate::buttons::{Size, icon_button, primary_button, tooltip};
+use crate::engine::client;
+use crate::icons::{Icon, icon};
+use crate::mailbox::folder_commands::{folder_menu, rename_selected};
+use crate::tasks::in_view;
+use crate::toast::report;
+use crate::{chrome, composer, settings};
 
-/// The element id of an account's address, which folds and unfolds its places.
-pub(super) fn account_heading(account: AccountId) -> ElementId {
-    ("account-heading", account.0 as u64).into()
+/// The accounts as the sidebar shows them; `None` until the first read.
+#[derive(Clone, Default)]
+pub struct Accounts(pub Option<Vec<AccountEntry>>);
+
+/// Where the sidebar's selection is.
+#[derive(Clone, Default)]
+pub struct SelectedPlace(pub Option<Place>);
+
+/// `f` with the accounts as the sidebar has them.
+pub fn with_accounts<T>(f: impl FnOnce(&[AccountEntry]) -> T) -> T {
+    global::<Accounts>().with_untracked(|a| f(a.0.as_deref().unwrap_or_default()))
 }
 
-/// The element id of the note under an account's address.
-pub(super) fn account_note(account: AccountId) -> ElementId {
-    ("account-note", account.0 as u64).into()
+/// `f` with account `id` as the sidebar has it; `None` while it has no such account.
+pub fn with_account<T>(id: AccountId, f: impl FnOnce(&AccountEntry) -> T) -> Option<T> {
+    with_accounts(|a| a.iter().find(|e| e.account.id == id).map(f))
 }
 
-/// A count at the end of a row; nothing for zero.
-fn count(
-    n: usize,
-    attention: bool,
-) -> Option<impl Fn(&mut gpui_kit::Window, &mut App) -> gpui_kit::AnyElement + 'static> {
-    (n > 0).then_some(move |_: &mut gpui_kit::Window, cx: &mut App| {
-        h_flex()
-            .gap_1()
-            .text_xs()
-            .text_color(cx.theme().muted_foreground)
-            .when(attention, |this| {
-                this.child(
-                    Icon::new(Hero::ExclamationTriangle)
-                        .xsmall()
-                        .text_color(cx.theme().warning),
-                )
-            })
-            .child(n.to_string())
-            .into_any_element()
-    })
+/// What waits for the first read of the folders, asked of the mailbox from outside it
+/// (`shell::Ask`) before then: where to go instead of where it starts, and a message to
+/// write.
+#[derive(Clone, Copy, Default)]
+struct Waiting {
+    to: Option<Destination>,
+    compose: bool,
 }
 
-impl Mailbox {
-    /// `under_window_buttons`: the window's buttons are over its top, and it starts below
-    /// their row (`layout::has_window_buttons`).
-    pub(crate) fn render_sidebar(
-        &self,
-        under_window_buttons: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let accounts = self.accounts.as_deref().unwrap_or_default();
-        let note = mailbox::connection_note(accounts).map(SharedString::from);
-        let compose = Button::new("new-message")
-            .primary()
-            .rounded_full()
-            .w_full()
-            .icon(Hero::PencilSquare)
-            .label("Compose")
-            .tooltip_with_action("Compose", &NewMessage, Some(actions::MAILBOX))
-            .disabled(accounts.is_empty())
-            // 20px down to All Inboxes, with the 12px the sidebar puts above its first group.
-            .mb_2()
-            .on_click(cx.listener(|this, _, window, cx| this.new_message(window, cx)));
-        // Just below the buttons' row: `Sidebar` puts 12px (`pt_3`) above its header
-        // already, and takes no padding of ours.
-        let header = v_flex()
-            .w_full()
-            .when(under_window_buttons, |this| {
-                this.pt(layout::bar_height() - rems(0.75))
-            })
-            .child(compose);
-        let footer = h_flex()
-            .w_full()
-            .gap_1()
-            .child(
-                Button::new("settings")
-                    .ghost()
-                    // As the Sync button by the search field.
-                    .rounded_full()
-                    .icon(Hero::Cog6Tooth)
-                    .accessibility_label("Settings")
-                    .tooltip_with_action("Settings", &OpenSettings, Some(actions::MAILBOX))
-                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
-            )
-            .child(
-                div()
-                    .id("connection-note")
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    // All of it, when the line is cut short: every address that can't
-                    // send, say.
-                    .when_some(note.clone(), |this, note| {
-                        this.tooltip(move |window, cx| Tooltip::new(note.clone()).build(window, cx))
+/// Whether each account the user folded or unfolded is open; see [`account_open`] for
+/// the others.
+#[derive(Clone, Default)]
+struct Folds(HashMap<AccountId, bool>);
+
+/// The folders the user folded, by row key: their subfolders don't show. Every one is
+/// open until then.
+#[derive(Clone, Default)]
+struct FolderFolds(HashSet<String>);
+
+/// The reads of the sidebar: one at a time, and which draft count is the latest. Not
+/// reactive: nothing shows it.
+#[derive(Clone, Default)]
+struct Reads(Rc<RefCell<ReadState>>);
+
+#[derive(Default)]
+struct ReadState {
+    reading: Coalesce,
+    draft_counts: DraftCounts,
+}
+
+fn reads() -> Rc<RefCell<ReadState>> {
+    global::<Reads>().with_untracked(|r| r.0.clone())
+}
+
+/// Events were missed, a `DraftsChanged` among them maybe. Call it before reading the
+/// sidebar again ([`DraftCounts::missed`]).
+pub fn missed_events() {
+    reads().borrow_mut().draft_counts.missed();
+}
+
+// --- Reading ------------------------------------------------------------------------
+
+/// Reads the accounts, their folders, drafts and outbox again (one read at a time; one
+/// asked for meanwhile follows it).
+pub fn load() {
+    let reads = reads();
+    if !reads.borrow_mut().reading.start() {
+        return;
+    }
+    let counts = reads.borrow().draft_counts.clone();
+    in_view(async move {
+        let loaded = client().overview().await;
+        let again = reads.borrow_mut().reading.finish();
+        match loaded {
+            Ok(overviews) => {
+                let _shown = global::<Accounts>();
+                let accounts = overviews
+                    .into_iter()
+                    .map(|overview| {
+                        let id = overview.account.id;
+                        // Not stored: taken now, it is never older than its event.
+                        let mut entry = AccountEntry::new(overview, client().account_status(id));
+                        if !reads.borrow().draft_counts.read_is_latest(&counts, id)
+                            && let Some(drafts) = with_account(id, |e| e.drafts)
+                        {
+                            entry.drafts = drafts;
+                        }
+                        entry
                     })
-                    .children(note),
-            );
-        let inboxes = Place::Inboxes.is_in(accounts).then(|| {
-            let unread = folders::unread(Place::Inboxes.folders(accounts)) as usize;
-            let mut item = self.place_item(
+                    .collect();
+                set_accounts(accounts);
+            }
+            Err(e) => report("Couldn't load folders", e),
+        }
+        if again {
+            load();
+        }
+    });
+}
+
+fn set_accounts(accounts: Vec<AccountEntry>) {
+    let shown = global::<Accounts>();
+    if shown.with_untracked(|a| a.0.as_ref() == Some(&accounts)) {
+        // A sync's events often bring nothing the sidebar shows.
+        return;
+    }
+    let place = global::<SelectedPlace>().with_untracked(|p| p.0);
+    let still_there = place.is_some_and(|place| place.is_in(&accounts));
+    let folders_before = shown_folders();
+    // The first read: where it was asked to go, if that is there.
+    let waiting = if shown.with_untracked(|a| a.0.is_none()) {
+        global::<Waiting>().get_untracked()
+    } else {
+        Waiting::default()
+    };
+    let going = waiting.to.and_then(|to| to.find(&accounts));
+    let start = match going {
+        Some((place, _)) => Some(Some(place)),
+        None => (!still_there).then(|| Place::start(&accounts)),
+    };
+    shown.set(Accounts(Some(accounts)));
+    crate::mailbox::list::set_labels();
+    match start {
+        Some(start) => select(start),
+        // The list shows a folder more (All Inboxes, an account's first INBOX): its
+        // messages' events may have come first, taken for a folder not shown.
+        None if shown_folders() != folders_before => crate::mailbox::list::refresh(),
+        None => {}
+    }
+    if let Some((_, Some(message))) = going {
+        crate::mailbox::list::reveal(message);
+    }
+    if waiting.compose {
+        composer::new_message();
+    }
+}
+
+/// Goes to `to` if it is there, once the folders are read: where the main window was
+/// when it closed, or what a notification was about, which opens its message once the
+/// list has it.
+pub fn go_to(to: Destination) {
+    if global::<Accounts>().with_untracked(|a| a.0.is_none()) {
+        global::<Waiting>().update(|w| w.to = Some(to));
+        return;
+    }
+    let Some((place, message)) = crate::mailbox::sidebar::with_accounts(|a| to.find(a)) else {
+        return;
+    };
+    select(Some(place));
+    if let Some(message) = message {
+        crate::mailbox::list::reveal(message);
+    }
+}
+
+/// A new message, from the account shown, once the folders are read.
+pub fn compose() {
+    if global::<Accounts>().with_untracked(|a| a.0.is_none()) {
+        global::<Waiting>().update(|w| w.compose = true);
+    } else {
+        composer::new_message();
+    }
+}
+
+/// Syncs every account now. The engine's background sync does it: progress and failures
+/// show as the accounts' status.
+pub fn sync() {
+    in_view(async {
+        if let Err(e) = client().sync_now().await {
+            report("Couldn't sync", e);
+        }
+    });
+}
+
+/// Whether an account is syncing every folder, as the engine says.
+pub fn syncing() -> bool {
+    global::<Accounts>().with(|a| a.0.iter().flatten().any(|entry| entry.status.syncing))
+}
+
+/// Every pause in typing saves a draft: only the account's draft count can have changed,
+/// so only that is read again.
+pub fn count_drafts(account: AccountId) {
+    let change = reads().borrow_mut().draft_counts.changed(account);
+    in_view(async move {
+        let counted = client().count_drafts(account).await;
+        if !reads().borrow().draft_counts.is_latest(account, change) {
+            return; // A later count is on its way.
+        }
+        match counted {
+            Ok(drafts) => update_account(account, |entry| entry.drafts = drafts),
+            // No later count would put it right: the sidebar's read counts the drafts
+            // too, and says so if it fails as well.
+            Err(e) => {
+                tracing::warn!(%account, error = %e, "couldn't count the drafts");
+                load();
+            }
+        }
+    });
+}
+
+/// The account's connection changed.
+pub fn status_changed(account: AccountId) {
+    let status = client().account_status(account);
+    update_account(account, |entry| entry.status = status);
+}
+
+fn update_account(account: AccountId, change: impl FnOnce(&mut AccountEntry)) {
+    let accounts = global::<Accounts>();
+    let shown = |a: &Accounts| {
+        a.0.iter()
+            .flatten()
+            .find(|e| e.account.id == account)
+            .cloned()
+    };
+    let Some(mut entry) = accounts.with_untracked(shown) else {
+        return;
+    };
+    change(&mut entry);
+    let unchanged = accounts.with_untracked(|a| {
+        a.0.iter()
+            .flatten()
+            .any(|e| e.account.id == account && *e == entry)
+    });
+    if unchanged {
+        return;
+    }
+    accounts.update(|a| {
+        if let Some(shown) = a.0.iter_mut().flatten().find(|e| e.account.id == account) {
+            *shown = entry;
+        }
+    });
+}
+
+// --- Selecting ----------------------------------------------------------------------
+
+/// Selects `place`, unfolding its account, and syncs the folders it shows that weren't
+/// synced lately: background sync keeps only INBOX current.
+pub fn select(place: Option<Place>) {
+    let selected = global::<SelectedPlace>();
+    if selected.with_untracked(|p| p.0) == place && place.is_some() {
+        return;
+    }
+    let account = global::<Accounts>()
+        .with_untracked(|a| Some(place?.account_in(a.0.as_deref()?)?.account.id));
+    if let Some(account) = account {
+        global::<Folds>().update(|f| {
+            f.0.insert(account, true);
+        });
+    }
+    selected.set(SelectedPlace(place));
+    for folder in shown_folders() {
+        in_view(async move {
+            let error = match client().sync_folder(folder, SYNC_ON_OPEN_AFTER).await {
+                Ok(report) => report.and_then(|r| r.error).map(|e| e.message),
+                Err(e) => Some(e.to_string()),
+            };
+            if let Some(error) = error {
+                tracing::warn!(%folder, %error, "couldn't sync the opened folder");
+            }
+        });
+    }
+}
+
+/// The folders whose messages the selected place lists: one, or for All Inboxes each
+/// account's INBOX; none for the drafts and the outbox. Untracked.
+pub fn shown_folders() -> Vec<FolderId> {
+    let place = global::<SelectedPlace>().with_untracked(|p| p.0);
+    let Some(place) = place else {
+        return Vec::new();
+    };
+    with_accounts(|accounts| place.folders(accounts).iter().map(|f| f.id).collect())
+}
+
+/// Whether the sidebar shows the account's places: as the user left it, else only for
+/// the only account. `CATMAIL_GUI_UNFOLD` set opens every account, for looking at the
+/// places without a mouse (screenshots).
+fn account_open(folds: &Folds, accounts: &[AccountEntry], account: AccountId) -> bool {
+    folds
+        .0
+        .get(&account)
+        .copied()
+        .unwrap_or_else(|| accounts.len() == 1 || std::env::var_os("CATMAIL_GUI_UNFOLD").is_some())
+}
+
+fn toggle_folder(key: &str) {
+    global::<FolderFolds>().update(|f| {
+        if !f.0.remove(key) {
+            f.0.insert(key.to_owned());
+        }
+    });
+}
+
+fn toggle(account: AccountId) {
+    let open = global::<Accounts>().with_untracked(|a| {
+        let accounts = a.0.as_deref().unwrap_or_default();
+        global::<Folds>().with_untracked(|f| account_open(f, accounts, account))
+    });
+    global::<Folds>().update(|f| {
+        f.0.insert(account, !open);
+    });
+}
+
+// --- Groups -------------------------------------------------------------------------
+
+/// A group of the sidebar: All Inboxes alone, or an account's address over
+/// its places, its labels in a section after them.
+#[derive(Debug, Clone, PartialEq)]
+struct Group {
+    key: String,
+    heading: Option<Heading>,
+    /// Its places; none while the account is folded.
+    items: Vec<Item>,
+    /// The account's Gmail labels; none while it is folded.
+    labels: Vec<Item>,
+}
+
+/// An account's address, which folds and unfolds its places.
+#[derive(Debug, Clone, PartialEq)]
+struct Heading {
+    account: AccountId,
+    email: String,
+    /// The first account's: the section's title is over it.
+    first: bool,
+    /// Something about the account to put right. It shows while the account is folded
+    /// too: it is about the account, not one of its places.
+    note: Option<&'static str>,
+    open: bool,
+}
+
+/// An item of a sidebar menu: a place, or a level of folders that holds no messages.
+#[derive(Debug, Clone, PartialEq)]
+struct Item {
+    key: String,
+    label: String,
+    icon: FolderIcon,
+    /// What it selects; none for a level that holds no messages.
+    place: Option<Place>,
+    /// The account its context menu is about (All Inboxes: none).
+    account: Option<AccountId>,
+    /// The folder its context menu is about.
+    folder: Option<FolderId>,
+    /// Unread messages, drafts, or what waits in the outbox; nothing for zero.
+    count: usize,
+    /// The outbox has something the user has to look at.
+    attention: bool,
+    /// Whether its subfolders show; none for a folder without subfolders.
+    open: Option<bool>,
+    /// The subfolders that show: none while it is folded.
+    children: Vec<Item>,
+}
+
+impl Item {
+    fn new(key: String, label: impl Into<String>, icon: FolderIcon) -> Self {
+        Self {
+            key,
+            label: label.into(),
+            icon,
+            place: None,
+            account: None,
+            folder: None,
+            count: 0,
+            attention: false,
+            open: None,
+            children: Vec::new(),
+        }
+    }
+
+    fn place(
+        place: Place,
+        label: impl Into<String>,
+        icon: FolderIcon,
+        count: usize,
+        attention: bool,
+    ) -> Self {
+        let key = match place {
+            Place::Inboxes => "inboxes".to_owned(),
+            Place::Folder(id) => format!("folder-{id}"),
+            Place::Drafts(account) => format!("drafts-{account}"),
+            Place::Outbox(account) => format!("outbox-{account}"),
+        };
+        Self {
+            place: Some(place),
+            count,
+            attention,
+            ..Self::new(key, label, icon)
+        }
+    }
+}
+
+fn groups(accounts: &[AccountEntry], folds: &Folds, folded: &FolderFolds) -> Vec<Group> {
+    let mut groups = Vec::new();
+    if Place::Inboxes.is_in(accounts) {
+        let inboxes = accounts
+            .iter()
+            .filter_map(|a| a.folders.with_role(FolderRole::Inbox));
+        groups.push(Group {
+            key: "inboxes".to_owned(),
+            heading: None,
+            items: vec![Item::place(
                 Place::Inboxes,
                 "All Inboxes",
                 FolderIcon::Inboxes,
-                unread,
+                folders::unread(inboxes) as usize,
                 false,
-                cx,
-            );
-            if unread > 0 {
-                item = item.accessibility_label(format!("All Inboxes, {unread} unread"));
-            }
-            Group {
-                heading: None,
-                items: vec![item],
-                labels: Vec::new(),
-                collapsed: false,
-            }
+            )],
+            labels: Vec::new(),
         });
-        Sidebar::new("folders")
-            .w_full()
-            .header(header)
-            .footer(footer)
-            .children(inboxes)
-            .children(accounts.iter().enumerate().map(|(ix, entry)| {
-                let account = entry.account.id;
-                let open = self.account_open(account);
-                Group {
-                    heading: Some(Heading {
-                        title: (ix == 0).then(|| "Accounts".into()),
-                        id: account_heading(account),
-                        places: ("account-places", account.0 as u64).into(),
-                        email: entry.account.email.clone().into(),
-                        note: entry
-                            .account
-                            .all_mail_hidden()
-                            .then(|| (account_note(account), ALL_MAIL_HIDDEN.into())),
-                        open,
-                        toggle: Rc::new(
-                            cx.listener(move |this, _, _, cx| this.toggle_account(account, cx)),
-                        ),
-                        menu: Rc::new(self.folder_menu(account, None, cx)),
-                    }),
-                    // Folded too: they shrink away rather than vanish.
-                    items: self.account_items(entry, cx),
-                    labels: entry
-                        .folders
-                        .labels
-                        .iter()
-                        .map(|node| self.folder_item(entry.account.id, node, cx))
-                        .collect(),
-                    collapsed: false,
-                }
-            }))
     }
-
-    /// Whether the sidebar shows the account's places: as the user left it, else only
-    /// for the only account.
-    pub(super) fn account_open(&self, account: AccountId) -> bool {
-        self.account_folds
-            .get(&account)
-            .copied()
-            .unwrap_or_else(|| {
-                self.accounts
-                    .as_ref()
-                    .is_some_and(|accounts| accounts.len() == 1)
-            })
-    }
-
-    fn toggle_account(&mut self, account: AccountId, cx: &mut Context<Self>) {
-        let open = self.account_open(account);
-        self.account_folds.insert(account, !open);
-        cx.notify();
-    }
-
-    /// Folders with a role first, the drafts and outbox after the inbox, then the rest
-    /// of the folders; not the labels, which have a section of their own.
-    fn account_items(&self, entry: &AccountEntry, cx: &mut Context<Self>) -> Vec<SidebarMenuItem> {
+    for (ix, entry) in accounts.iter().enumerate() {
         let account = entry.account.id;
-        let mut items: Vec<SidebarMenuItem> = Vec::new();
-        let mut roles = entry.folders.roles.iter();
-        // The inbox, if the account has one (it always has), leads.
-        if let Some(inbox) = entry
-            .folders
-            .roles
-            .first()
-            .filter(|n| n.role() == Some(FolderRole::Inbox))
-        {
-            items.push(self.folder_item(entry.account.id, inbox, cx));
-            roles.next();
-        }
-        items.push(self.place_item(
+        let open = account_open(folds, accounts, account);
+        let path = format!("{account}");
+        groups.push(Group {
+            key: format!("account-{account}"),
+            heading: Some(Heading {
+                account,
+                email: entry.account.email.clone(),
+                first: ix == 0,
+                note: entry.account.all_mail_hidden().then_some(ALL_MAIL_HIDDEN),
+                open,
+            }),
+            items: if open {
+                places(entry, folded)
+            } else {
+                Vec::new()
+            },
+            labels: if open {
+                (entry.folders.labels.iter())
+                    .map(|node| folder_item(account, node, &path, folded))
+                    .collect()
+            } else {
+                Vec::new()
+            },
+        });
+    }
+    groups
+}
+
+/// Folders with a role first, the drafts and outbox after the inbox, then the rest of
+/// the folders; not the labels, which have a section of their own.
+fn places(entry: &AccountEntry, folded: &FolderFolds) -> Vec<Item> {
+    let account = entry.account.id;
+    let path = format!("{account}");
+    let mut items = Vec::new();
+    let mut roles = entry.folders.roles.iter();
+    // The inbox, if the account has one (it always has), leads.
+    if let Some(inbox) = entry
+        .folders
+        .roles
+        .first()
+        .filter(|n| n.role() == Some(FolderRole::Inbox))
+    {
+        items.push(folder_item(account, inbox, &path, folded));
+        roles.next();
+    }
+    items.push(Item {
+        account: Some(account),
+        ..Item::place(
             Place::Drafts(account),
             FolderRole::Drafts.label(),
             RoleInfo::of(FolderRole::Drafts).icon,
             entry.drafts,
             false,
-            cx,
-        ));
-        if !entry.outbox.is_empty() {
-            let attention = entry.outbox_needs_user();
-            items.push(self.place_item(
+        )
+    });
+    if !entry.outbox.is_empty() {
+        items.push(Item {
+            account: Some(account),
+            ..Item::place(
                 Place::Outbox(account),
                 "Outbox",
                 FolderIcon::Outbox,
                 entry.outbox.len(),
-                attention,
-                cx,
-            ));
-        }
-        items.extend(roles.map(|node| self.folder_item(entry.account.id, node, cx)));
-        items.extend(
-            entry
-                .folders
-                .others
-                .iter()
-                .map(|node| self.folder_item(entry.account.id, node, cx)),
-        );
-        items
-    }
-
-    fn place_item(
-        &self,
-        place: Place,
-        label: &'static str,
-        icon: FolderIcon,
-        n: usize,
-        attention: bool,
-        cx: &mut Context<Self>,
-    ) -> SidebarMenuItem {
-        let mut item = layout::sidebar_row(label, icon.into(), self.place == Some(place), cx)
-            .on_click(
-                cx.listener(move |this, _, window, cx| this.select_place(Some(place), window, cx)),
-            );
-        if attention {
-            item = item.accessibility_label(format!("{label}, {n}, needs attention"));
-        }
-        match count(n, attention) {
-            Some(suffix) => item.suffix(suffix),
-            None => item,
-        }
-    }
-
-    fn folder_item(
-        &self,
-        account: AccountId,
-        node: &FolderNode,
-        cx: &mut Context<Self>,
-    ) -> SidebarMenuItem {
-        let place = node.selectable().map(|folder| Place::Folder(folder.id));
-        let mut item = layout::sidebar_row(
-            node.label.clone(),
-            folders::icon(node.folder.as_ref()).into(),
-            place.is_some() && self.place == place,
-            cx,
-        )
-        .default_open(true)
-        .children(
-            node.children
-                .iter()
-                .map(|child| self.folder_item(account, child, cx)),
-        );
-        // A level the server doesn't list has nothing to make in or change.
-        if let Some(folder) = &node.folder {
-            item = item.context_menu(self.folder_menu(account, Some(folder.id), cx));
-        }
-        if let Some(place) = place {
-            let unread = node.unread() as usize;
-            item =
-                item.on_click(cx.listener(move |this, _, window, cx| {
-                    this.select_place(Some(place), window, cx)
-                }));
-            if unread > 0 {
-                item = item.accessibility_label(format!("{}, {unread} unread", node.label));
-            }
-            if let Some(suffix) = count(unread, false) {
-                item = item.suffix(suffix);
-            }
-        }
-        item
-    }
-}
-
-/// An account's places under its address, its labels in a section after them; All
-/// Inboxes, without a heading. `SidebarGroup` would do, but draws its label small and
-/// faint, as for a section; the address names whose mail this is, so it is a heading.
-#[derive(Clone)]
-struct Group {
-    heading: Option<Heading>,
-    items: Vec<SidebarMenuItem>,
-    labels: Vec<SidebarMenuItem>,
-    collapsed: bool,
-}
-
-type Toggle = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
-
-type Menu = Rc<dyn Fn(PopupMenu, &mut Window, &mut App) -> PopupMenu>;
-
-/// An account's address, which folds and unfolds its places.
-#[derive(Clone)]
-struct Heading {
-    /// The title of the section it starts: "Accounts", over the first account.
-    title: Option<SharedString>,
-    id: ElementId,
-    /// The id the places' folding animates under.
-    places: ElementId,
-    email: SharedString,
-    /// Something about the account to put right, and its element id. It shows while the
-    /// account is folded too.
-    note: Option<(ElementId, SharedString)>,
-    open: bool,
-    toggle: Toggle,
-    /// Its context menu: a new folder at the top.
-    menu: Menu,
-}
-
-impl Collapsible for Group {
-    fn is_collapsed(&self) -> bool {
-        self.collapsed
-    }
-
-    fn collapsed(mut self, collapsed: bool) -> Self {
-        self.collapsed = collapsed;
-        self
-    }
-}
-
-impl SidebarItem for Group {
-    fn render(
-        self,
-        id: impl Into<ElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> impl IntoElement {
-        let id = id.into();
-        // Folding needs the address to click, which the icon-only sidebar doesn't show.
-        let open = self.collapsed || self.heading.as_ref().is_none_or(|h| h.open);
-        let places = self.heading.as_ref().map(|h| h.places.clone());
-        let heading = self.heading.filter(|_| !self.collapsed);
-        let headed = heading.is_some();
-        v_flex()
-            .when_some(heading, |this, heading| {
-                let (toggle, menu) = (heading.toggle, heading.menu);
-                // Apart from the account above, as the places are from each other; the
-                // first has the section's title over it.
-                let first = heading.title.is_some();
-                this.children(heading.title.map(|title| {
-                    // As SidebarGroup draws its label.
-                    div()
-                        .px_2()
-                        .h_8()
-                        .flex()
-                        .items_center()
-                        .text_xs()
-                        .text_color(cx.theme().sidebar_foreground.opacity(0.7))
-                        .child(title)
-                }))
-                .child(
-                    h_flex()
-                        .id(heading.id)
-                        .test_support()
-                        .role(Role::Button)
-                        .aria_expanded(heading.open)
-                        .px_2()
-                        .h_8()
-                        .gap_2()
-                        .rounded(cx.theme().radius)
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(cx.theme().sidebar_foreground)
-                        .hover(|this| this.bg(cx.theme().sidebar_accent.opacity(0.8)))
-                        .child(div().flex_1().min_w_0().truncate().child(heading.email))
-                        .child(
-                            Icon::new(if heading.open {
-                                Hero::ChevronDown
-                            } else {
-                                Hero::ChevronRight
-                            })
-                            .xsmall()
-                            .text_color(cx.theme().muted_foreground),
-                        )
-                        .on_click(move |event, window, cx| toggle(event, window, cx))
-                        .context_menu(move |popup, window, cx| menu(popup, window, cx)),
-                )
-                .children(heading.note.map(|(id, note)| {
-                    div()
-                        .id(id)
-                        .role(Role::Note)
-                        .test_support()
-                        .aria_label(note.clone())
-                        .px_2()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(note)
-                }))
-                .when(!first, |this| this.pt_2())
-            })
-            .child(
-                collapsible::Collapsible::new()
-                    .open(open)
-                    .when_some(places, |this, places| this.motion_id(places))
-                    .content(
-                        v_flex()
-                            // The reveal lays the places out on their own: without it they
-                            // would be as narrow as their text.
-                            .w_full()
-                            // Apart from the address, as the places are from each other.
-                            .when(headed, |this| this.pt_2())
-                            // The id SidebarGroup gives its first child, so the items keep
-                            // theirs.
-                            .child(
-                                SidebarMenu::new()
-                                    .children(self.items)
-                                    .collapsed(self.collapsed)
-                                    .render(format!("{id}-0"), window, cx),
-                            )
-                            .when(!self.labels.is_empty(), |this| {
-                                this.child(
-                                    SidebarGroup::new("Labels")
-                                        .child(SidebarMenu::new().children(self.labels))
-                                        .collapsed(self.collapsed)
-                                        .render(format!("{id}-labels"), window, cx),
-                                )
-                            }),
-                    ),
+                entry.outbox_needs_user(),
             )
+        });
+    }
+    items.extend(
+        roles
+            .chain(&entry.folders.others)
+            .map(|node| folder_item(account, node, &path, folded)),
+    );
+    items
+}
+
+/// The node and the folders in it, unless it is `folded`. `path` names the levels above,
+/// for the key of a level the server didn't list.
+fn folder_item(account: AccountId, node: &FolderNode, path: &str, folded: &FolderFolds) -> Item {
+    let path = format!("{path}/{}", node.label);
+    let icon = folders::icon(node.folder.as_ref());
+    let mut item = match node.selectable() {
+        Some(folder) => Item::place(
+            Place::Folder(folder.id),
+            &node.label,
+            icon,
+            node.unread() as usize,
+            false,
+        ),
+        None => Item::new(format!("level-{path}"), &node.label, icon),
+    };
+    item.account = Some(account);
+    item.folder = node.folder.as_ref().map(|f| f.id);
+    if !node.children.is_empty() {
+        let open = !folded.0.contains(&item.key);
+        item.open = Some(open);
+        if open {
+            item.children = (node.children.iter())
+                .map(|child| folder_item(account, child, &path, folded))
+                .collect();
+        }
+    }
+    item
+}
+
+// --- The pane -----------------------------------------------------------------------
+
+pub fn sidebar() -> impl IntoElement {
+    let groups = computed(move || {
+        global::<Folds>().with(|folds| {
+            global::<FolderFolds>().with(|folded| {
+                global::<Accounts>()
+                    .with(|a| groups(a.0.as_deref().unwrap_or_default(), folds, folded))
+            })
+        })
+    });
+    let note = computed(move || {
+        global::<Accounts>().with(|a| mailbox::connection_note(a.0.as_deref().unwrap_or_default()))
+    });
+    on_key("F2", move |_| rename_selected());
+    let has_accounts =
+        move || global::<Accounts>().with(|a| a.0.as_ref().is_some_and(|a| !a.is_empty()));
+    // As wide as the pane it is in, which the user drags.
+    view()
+        .flex_1()
+        .bg(move || theme().sidebar)
+        // Under the window's buttons, "Compose" just below their row.
+        .child(when(chrome::has_window_buttons, chrome::move_row))
+        // 20 down to the first place, with the 12 above it.
+        .child(
+            view()
+                .px(px(12.0))
+                .pt(move || {
+                    px(if chrome::has_window_buttons() {
+                        0.0
+                    } else {
+                        12.0
+                    })
+                })
+                .pb(px(8.0))
+                .child(primary_button(
+                    Icon::PencilSquare,
+                    || "Compose".to_owned(),
+                    || format!("Compose ({})", key_label("mod+n")),
+                    has_accounts,
+                    composer::new_message,
+                )),
+        )
+        .child(
+            scroll()
+                .flex_1()
+                .child(view().px(px(12.0)).py(px(12.0)).child(each(
+                    move || groups.get(),
+                    |group| group.key.clone(),
+                    group,
+                ))),
+        )
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .px(px(6.0))
+                .py(px(4.0))
+                .child(icon_button(
+                    || Icon::Cog6Tooth,
+                    || format!("Settings ({})", key_label("mod+,")),
+                    || true,
+                    Size::Bar,
+                    settings::open,
+                ))
+                .child(
+                    text(move || note.get().unwrap_or_default())
+                        .number_of_lines(1)
+                        .flex_1()
+                        .text_xs()
+                        .text_color(move || theme().muted_foreground)
+                        // All of it, when the line is cut short: every address that can't
+                        // send, say.
+                        .tooltip(tooltip(move || note.get().unwrap_or_default())),
+                ),
+        )
+}
+
+/// A group: an account's address 8 below the places above (the first has
+/// the section's title over it instead), its places 8 below it.
+fn group(group: ReadSignal<Group>, _ix: ReadSignal<usize>) -> AnyElement {
+    let headed = group.with_untracked(|g| g.heading.is_some());
+    view()
+        .child(when(move || headed, move || heading(group)))
+        .child(when(
+            move || group.with(|g| !g.items.is_empty()),
+            move || {
+                menu(move || group.with(|g| g.items.clone())).pt(px(if headed { 8.0 } else { 0.0 }))
+            },
+        ))
+        .child(when(
+            move || group.with(|g| !g.labels.is_empty()),
+            move || {
+                view()
+                    .child(title("Labels"))
+                    .child(menu(move || group.with(|g| g.labels.clone())))
+            },
+        ))
+        .into_element()
+}
+
+/// A section's title, as GPUI Kit's `SidebarGroup` draws its label.
+fn title(label: &'static str) -> View {
+    view().h(px(32.0)).px(px(8.0)).justify_center().child(
+        text(label)
+            .text_xs()
+            .text_color(move || theme().sidebar_foreground.opacity(0.7)),
+    )
+}
+
+/// GPUI Kit's sidebar menu: its items 8 apart.
+fn menu(items: impl Fn() -> Vec<Item> + 'static) -> View {
+    view()
+        .gap(px(8.0))
+        .child(each(items, |item| item.key.clone(), menu_entry))
+}
+
+fn heading(group: ReadSignal<Group>) -> View {
+    let heading =
+        move |f: fn(&Heading) -> bool| move || group.with(|g| g.heading.as_ref().is_some_and(f));
+    let account = move || group.with(|g| g.heading.as_ref().map(|h| h.account));
+    let note = move || group.with(|g| g.heading.as_ref().and_then(|h| h.note));
+    let open = heading(|h| h.open);
+    let first = heading(|h| h.first);
+    view()
+        .pt(move || px(if first() { 0.0 } else { 8.0 }))
+        .child(when(first, || title("Accounts")))
+        .child(
+            view()
+                .h(px(32.0))
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .px(px(8.0))
+                .rounded(px(6.0))
+                .hover(|s| s.bg(row_background(|| false, true)))
+                .on_press(move || {
+                    if let Some(account) = account() {
+                        toggle(account);
+                    }
+                })
+                .on_context_menu(move |_: &ContextMenuEvent| {
+                    if let Some(account) = account() {
+                        folder_menu(account, None);
+                    }
+                })
+                .child(
+                    text(move || {
+                        group
+                            .with(|g| g.heading.as_ref().map(|h| h.email.clone()))
+                            .unwrap_or_default()
+                    })
+                    .number_of_lines(1)
+                    .flex_1()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(move || theme().sidebar_foreground),
+                )
+                .child(
+                    icon(
+                        move || {
+                            if open() {
+                                Icon::ChevronDown
+                            } else {
+                                Icon::ChevronRight
+                            }
+                        },
+                        12.0,
+                    )
+                    .text_color(move || theme().muted_foreground),
+                ),
+        )
+        .child(when(
+            move || note().is_some(),
+            move || {
+                text(move || note().unwrap_or_default())
+                    .text_xs()
+                    .px(px(8.0))
+                    .text_color(move || theme().muted_foreground)
+            },
+        ))
+}
+
+/// An item and, while it is open, its subfolders: in GPUI Kit's submenu, 4 apart in a
+/// list with a line down its left.
+fn menu_entry(item: ReadSignal<Item>, _ix: ReadSignal<usize>) -> AnyElement {
+    view()
+        .child(place_row(item))
+        .child(when(
+            move || item.with(|i| !i.children.is_empty()),
+            move || {
+                view()
+                    .ml(px(14.0))
+                    .border_l_1()
+                    .border_color(move || theme().sidebar_border)
+                    .pl(px(10.0))
+                    .py(px(2.0))
+                    .gap(px(4.0))
+                    .child(each(
+                        move || item.with(|i| i.children.clone()),
+                        |item| item.key.clone(),
+                        menu_entry,
+                    ))
+            },
+        ))
+        .into_element()
+}
+
+fn place_row(item: ReadSignal<Item>) -> View {
+    let place = move || item.with(|i| i.place);
+    let selected = move || {
+        let place = place();
+        place.is_some() && global::<SelectedPlace>().with(|p| p.0) == place
+    };
+    let open = move || item.with(|i| i.open == Some(true));
+    menu_item(
+        move || item.with(|i| i.icon).into(),
+        move || item.with(|i| i.label.clone()),
+        selected,
+    )
+    .on_press(move || {
+        if let Some(place) = place() {
+            select(Some(place));
+        }
+    })
+    .on_context_menu(move |_: &ContextMenuEvent| {
+        let (account, folder) = item.with(|i| (i.account, i.folder));
+        // Drafts, the outbox and All Inboxes aren't folders to make in or change.
+        if let (Some(account), Some(folder)) = (account, folder) {
+            folder_menu(account, Some(folder));
+        }
+    })
+    .child(when(
+        move || item.with(|i| i.attention),
+        || icon(|| Icon::ExclamationTriangle, 12.0).text_color(crate::theme::warning),
+    ))
+    .child(
+        text(move || match item.with(|i| i.count) {
+            0 => String::new(),
+            n => n.to_string(),
+        })
+        .text_xs()
+        .text_color(move || theme().muted_foreground),
+    )
+    // Its own press: the row's selects the folder, this only folds it (nsh gives a press
+    // to the innermost view alone).
+    .child(when(
+        move || item.with(|i| i.open.is_some()),
+        move || {
+            icon_button(
+                move || {
+                    if open() {
+                        Icon::ChevronDown
+                    } else {
+                        Icon::ChevronRight
+                    }
+                },
+                move || {
+                    let label = item.with(|i| i.label.clone());
+                    if open() {
+                        format!("Collapse {label}")
+                    } else {
+                        format!("Expand {label}")
+                    }
+                },
+                || true,
+                Size::Row,
+                move || toggle_folder(&item.with_untracked(|i| i.key.clone())),
+            )
+            .mr(px(-4.0))
+        },
+    ))
+}
+
+/// An item of a sidebar menu, the mailbox's or the settings': GPUI Kit's. Selected, the icon fills and the icon and label take the
+/// primary color; the label keeps its weight.
+pub fn menu_item(
+    which: impl Fn() -> Icon + 'static,
+    label: impl IntoReactive<SharedString>,
+    selected: impl Fn() -> bool + Copy + 'static,
+) -> View {
+    view()
+        .h(px(28.0))
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .px(px(8.0))
+        .rounded(px(6.0))
+        .bg(row_background(selected, false))
+        .hover(move |s| s.bg(row_background(selected, true)))
+        // As large as the label's text, as GPUI Kit draws it.
+        .child(
+            icon(
+                move || if selected() { which().solid() } else { which() },
+                14.0,
+            )
+            .text_color(row_color(selected)),
+        )
+        .child(
+            text(label)
+                .number_of_lines(1)
+                .flex_1()
+                .text_sm()
+                .text_color(row_color(selected)),
+        )
+}
+
+/// A sidebar row's background, as GPUI Kit's sidebar draws it: the accent when selected,
+/// lighter under the pointer.
+fn row_background(
+    selected: impl Fn() -> bool + 'static,
+    hovered: bool,
+) -> impl Fn() -> AdaptiveColor + 'static {
+    move || {
+        if selected() {
+            theme().sidebar_accent
+        } else if hovered {
+            theme().sidebar_accent.opacity(0.8)
+        } else {
+            AdaptiveColor::TRANSPARENT
+        }
+    }
+}
+
+fn row_color(selected: impl Fn() -> bool + 'static) -> impl Fn() -> AdaptiveColor + 'static {
+    move || {
+        if selected() {
+            theme().primary
+        } else {
+            theme().sidebar_foreground
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(label: &str, children: Vec<FolderNode>) -> FolderNode {
+        FolderNode {
+            label: label.to_owned(),
+            folder: None,
+            children,
+        }
+    }
+
+    /// Each item's label and whether it is open, depth first.
+    fn labels(folded: &FolderFolds) -> Vec<(String, Option<bool>)> {
+        fn walk(item: &Item, out: &mut Vec<(String, Option<bool>)>) {
+            out.push((item.label.clone(), item.open));
+            for child in &item.children {
+                walk(child, out);
+            }
+        }
+        let tree = node("Clients", vec![node("Acme", vec![node("2026", vec![])])]);
+        let mut out = Vec::new();
+        walk(&folder_item(AccountId(1), &tree, "1", folded), &mut out);
+        out
+    }
+
+    #[test]
+    fn a_folded_folder_hides_its_subfolders() {
+        let open = labels(&FolderFolds::default());
+        assert_eq!(
+            open,
+            [
+                ("Clients".into(), Some(true)),
+                ("Acme".into(), Some(true)),
+                ("2026".into(), None),
+            ]
+        );
+        let folded = FolderFolds(HashSet::from(["level-1/Clients/Acme".to_owned()]));
+        assert_eq!(
+            labels(&folded),
+            [("Clients".into(), Some(true)), ("Acme".into(), Some(false))]
+        );
     }
 }

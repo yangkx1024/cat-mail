@@ -20,17 +20,25 @@ all-features = true
 # unsound only covers direct dependencies by default; unmaintained already covers all.
 unsound = "all"
 ignore = [
-    # Unmaintained, no known vulnerability, and only reachable through gpui-kit's own
-    # dependencies (fonts, SVG, accessibility, D-Bus); they go when gpui-kit drops them.
-    { id = "RUSTSEC-2024-0384", reason = "instant, via gpui-kit" },
-    { id = "RUSTSEC-2024-0436", reason = "paste, via gpui-kit, metal and exr" },
-    { id = "RUSTSEC-2026-0192", reason = "ttf-parser, via gpui-kit's font stack" },
-    { id = "RUSTSEC-2026-0206", reason = "rustybuzz, via gpui-kit's SVG renderer" },
+    # Unmaintained, no known vulnerability, and only reachable through resvg's text
+    # (usvg's fonts and shaping: nsh-core's SVGs, the tray's badge); they go when it
+    # drops them.
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser, via resvg's text" },
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz, via resvg's text" },
     # zbus_names, zvariant and zvariant_derive were merged into zbus 6; we get zbus 5
-    # through gpui-kit and keyring's Secret Service store, until both move to zbus 6.
+    # through ksni (the Linux tray) and keyring's Secret Service store, until both move
+    # to zbus 6.
     { id = "RUSTSEC-2026-0370", reason = "zvariant, via zbus" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names, via zbus" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive, via zbus" },
+    # Temporarily, until nsh is back on a release: zip 8 comes only through nsh-updater,
+    # which nsh-core always depends on, and is fixed in 9. The flaws are in
+    # `ZipArchive::extract`, which only nsh's updater calls, to install a downloaded
+    # update; catmail-gui doesn't use the updater. Upstream: longbridge/nsh#1050.
+    { id = "RUSTSEC-2026-0367", reason = "zip extract, via nsh-updater; not used" },
+    { id = "RUSTSEC-2026-0368", reason = "zip extract, via nsh-updater; not used" },
+    { id = "RUSTSEC-2026-0369", reason = "zip extract, via nsh-updater; not used" },
+    { id = "RUSTSEC-2026-0429", reason = "zip extract, via nsh-updater; not used" },
 ]
 
 [licenses]
@@ -52,13 +60,27 @@ allow = [
     "Zlib",
 ]
 confidence-threshold = 0.8
+# Temporarily allowed for the crates Native Shell (catmail-gui's toolkit, pinned to an
+# unreleased commit in the root Cargo.toml) brings in, and for them only: no license is
+# added to the list above. Both are permissive, but neither is reviewed for the whole
+# graph yet. Revisit when nsh is back on a release (the `allow-git` entry below goes then
+# too).
+exceptions = [
+    # Apache-2.0 with an exception that only loosens it. Build-time only: the GTK and
+    # WebKitGTK -sys crates' build scripts (system-deps → cfg-expr).
+    { crate = "target-lexicon", allow = ["Apache-2.0 WITH LLVM-exception"] },
+    # The same license; Windows only, through nsh-core's cap-std.
+    { crate = "winx", allow = ["Apache-2.0 WITH LLVM-exception"] },
+    # Mozilla's root certificates as data: nsh-core's own, and its tokio-tungstenite's.
+    { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
+]
 
 [licenses.private]
 # The workspace crates are not published to a registry; their license is the workspace's.
 ignore = true
 
 [bans]
-# GPUI alone pulls in many duplicate versions we can't unify, so duplicates are allowed;
+# Our dependencies pull in duplicate versions we can't unify, so duplicates are allowed;
 # what must not come in twice is a TLS or crypto stack (see the rustls entry in Cargo.toml).
 multiple-versions = "allow"
 wildcards = "allow"
@@ -85,7 +107,7 @@ allow-git = [
     # The unreleased 0.18.0, pinned to a commit in the root Cargo.toml's
     # `[patch.crates-io]`; remove with it once 0.18.0 is on crates.io (#130).
     "https://github.com/djc/imap-proto",
-    # Blitz 0.3.0-beta.4 with anonymous cells in table rows, pinned in the root
-    # Cargo.toml's `[patch.crates-io]`; remove with it once a release has them.
-    "https://github.com/yangkx1024/blitz",
+    # Native Shell's unreleased main, catmail-gui's toolkit, pinned in the root
+    # Cargo.toml; remove with it once a release has what catmail-gui uses.
+    "https://github.com/longbridge/nsh",
 ]

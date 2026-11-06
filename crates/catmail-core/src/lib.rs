@@ -2,7 +2,7 @@
 //!
 //! Frontends (CLI, GUI) depend on this crate only. Every public async method is
 //! executor-agnostic: work runs on a tokio runtime owned by (or handed to) the client,
-//! so the futures can be awaited from GPUI's executor as well as from tokio.
+//! so the futures can be awaited from a UI toolkit's main loop as well as from tokio.
 
 #![forbid(unsafe_code)]
 

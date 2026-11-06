@@ -1,93 +1,93 @@
-//! The system's notifications for new mail, which the engine announces
-//! (`Event::NewMail`); clicking one shows the main window on the message. Lives with
-//! the app, not a window: it tells about mail that arrives while none is open. What they
-//! say and where a click goes are `catmail_frontend::new_mail`'s. See
-//! docs/architecture/background.md.
+//! The system's notifications for new mail: what the engine announces (`Event::NewMail`) is
+//! gathered for a moment, read again, and told about; clicking a notification shows the
+//! main window on the message. There with or without a window. What they say and where a
+//! click goes are `catmail_frontend::new_mail`'s.
+//!
+//! ⚠️ nsh has no notifications; these are GLib's (`GNotification`), sent through the
+//! application. Without a sandbox GLib speaks `org.freedesktop.Notifications`, and a
+//! click comes back as the app's `open-mail` action, with the host's activation token
+//! for the window. On GNOME, GLib uses GNOME Shell's own interface instead, which
+//! activates the app through its D-Bus name: the app doesn't own one (it isn't unique
+//! through D-Bus, see `shell::run`), so a click there does nothing.
+
+use std::cell::RefCell;
 
 use catmail_core::{Event, MessageId, RecvError};
 use catmail_frontend::new_mail::{Arrivals, GATHER, Target, notifications};
-use gpui_kit::{App, Global, SystemNotification, Task};
+use nsh_platform_linux::gtk4::{gio, glib, prelude::*};
 
-use crate::resident::Resident;
-use crate::settings::Preferences;
+use crate::{engine, shell};
 
-pub struct Notifier {
-    /// Announced and not yet told about. The task waiting out [`GATHER`] isn't kept: it
-    /// would be dropped, and so cancelled, as it takes what arrived.
-    arrivals: Arrivals,
-    _events: Task<()>,
+/// The action a notification's click runs, with its tag.
+const OPEN: &str = "open-mail";
+
+thread_local! {
+    /// Announced and not yet told about (GTK's thread).
+    static ARRIVALS: RefCell<Arrivals> = RefCell::default();
 }
 
-impl Global for Notifier {}
-
-impl Notifier {
-    /// Tells about the new mail [`Resident`]'s engine announces from now on, until it
-    /// closes.
-    pub fn start(cx: &mut App) {
-        let Some(client) = Resident::client(cx) else {
-            return;
-        };
-        let mut events = client.subscribe();
-        let events = cx.spawn(async move |cx| {
-            loop {
-                match events.recv().await {
-                    Ok(Event::NewMail { messages, .. }) => {
-                        cx.update(|cx| Self::arrived(messages, cx));
-                    }
-                    Ok(_) => {}
-                    // Missed announcements can't be had again; the mail is in the list.
-                    Err(RecvError::Lagged(missed)) => {
-                        tracing::warn!(missed, "missed events, maybe of new mail");
-                    }
-                    Err(RecvError::Closed) => break,
+/// Tells about the new mail the open engine announces from now on, until it closes. On
+/// GTK's thread.
+pub fn start() {
+    let (Some(client), Some(app)) = (engine::open(), shell::application()) else {
+        return;
+    };
+    let open = gio::SimpleAction::new(OPEN, Some(glib::VariantTy::STRING));
+    open.connect_activate(|_, tag| {
+        let target = tag.and_then(|tag| tag.str()).and_then(Target::from_tag);
+        if let Some(target) = target {
+            shell::show_at(target.destination(), None);
+        }
+    });
+    app.add_action(&open);
+    let mut events = client.subscribe();
+    glib::spawn_future_local(async move {
+        loop {
+            match events.recv().await {
+                Ok(Event::NewMail { messages, .. }) => arrived(messages),
+                Ok(_) => {}
+                // Missed announcements can't be had again; the mail is in the list.
+                Err(RecvError::Lagged(missed)) => {
+                    tracing::warn!(missed, "missed events, maybe of new mail");
                 }
+                Err(RecvError::Closed) => break,
             }
-        });
-        cx.set_global(Self {
-            arrivals: Arrivals::default(),
-            _events: events,
-        });
-        cx.on_system_notification_response(|response, cx| {
-            if let Some(target) = Target::from_tag(&response.tag) {
-                Resident::show_at(target.destination(), None, cx);
-            }
-        });
-    }
+        }
+    });
+}
 
-    fn arrived(messages: Vec<MessageId>, cx: &mut App) {
-        if !cx.global_mut::<Self>().arrivals.arrived(messages) {
+fn arrived(messages: Vec<MessageId>) {
+    if !ARRIVALS.with_borrow_mut(|arrivals| arrivals.arrived(messages)) {
+        return;
+    }
+    glib::spawn_future_local(async {
+        glib::timeout_future(GATHER).await;
+        let arrived = ARRIVALS.with_borrow_mut(Arrivals::take);
+        if !shell::settings().notify_new_mail {
             return;
         }
-        cx.spawn(async move |cx| {
-            cx.background_executor().timer(GATHER).await;
-            let told = cx.update(|cx| {
-                let tell = Preferences::get(cx).notify_new_mail;
-                let arrived = cx.global_mut::<Self>().arrivals.take();
-                if !tell {
-                    return None;
-                }
-                // None once the app is quitting.
-                Some((Resident::client(cx)?, arrived))
-            });
-            let Some((client, arrived)) = told else {
-                return;
-            };
-            // Read or moved meanwhile, here or elsewhere: not new any more.
-            let still_new = match client.unread_in_inbox(arrived).await {
-                Ok(still_new) => still_new,
-                Err(e) => return tracing::warn!(error = %e, "couldn't read new mail"),
-            };
-            cx.update(|cx| {
-                for notice in notifications(&still_new) {
-                    cx.show_system_notification(SystemNotification {
-                        tag: notice.tag.into(),
-                        title: notice.title.into(),
-                        body: notice.body.into(),
-                        actions: Vec::new(),
-                    });
-                }
-            });
-        })
-        .detach();
-    }
+        // None once the app is quitting.
+        let Some(client) = engine::open() else {
+            return;
+        };
+        // Read or moved meanwhile, here or elsewhere: not new any more.
+        let still_new = match client.unread_in_inbox(arrived).await {
+            Ok(still_new) => still_new,
+            Err(e) => return tracing::warn!(error = %e, "couldn't read new mail"),
+        };
+        let Some(app) = shell::application() else {
+            return;
+        };
+        for notice in notifications(&still_new) {
+            let notification = gio::Notification::new(&notice.title);
+            notification.set_body(Some(&notice.body));
+            notification.set_category(Some("email.arrived"));
+            notification.set_default_action_and_target_value(
+                &format!("app.{OPEN}"),
+                Some(&notice.tag.to_variant()),
+            );
+            // By its tag: one for several messages replaces the one before.
+            app.send_notification(Some(&notice.tag), &notification);
+        }
+    });
 }

@@ -1,572 +1,495 @@
-//! Writing a message, each in its own window. A new message, a reply or a forward is a
-//! draft from the start: the engine creates it, and the window saves every change to it
-//! (a moment after typing stops), so closing the window or the app loses nothing. A
-//! draft nobody touched is deleted again when its window closes.
+//! Writing a message, each in its own window: From, To, Cc, Bcc, Subject, the text, the
+//! attachments and the bar of commands. When it saves, sends and closes is
+//! `catmail_frontend::composer`'s ([`Lifecycle`]); here is what the window does with it,
+//! `view.rs` how it looks.
 //!
-//! Engine calls for one draft never overlap: the save in flight finishes before the
-//! next starts, and sending or closing waits for it, so an older save can't land after
-//! the content that was sent.
+//! A composer's view runs on its window's own nsh thread; the window is the shell's
+//! (`shell::opened`), and closing it asks the view, which saves first and then
+//! closes it (`shell::composer_closed`). State is nsh globals, the view's own.
 
-mod lifecycle;
 mod view;
 
+use std::borrow::Cow;
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
-use catmail_core::{DraftAttachment, DraftId, Event, Identity, IdentityId, MailClient, RecvError};
+use catmail_core::{
+    DraftAttachment, DraftAttachmentId, DraftId, Event, Identity, IdentityId, RecvError,
+};
 use catmail_frontend::composer::{
-    AfterAttachment, Field, FieldError, Fields, Lifecycle, Opening, SAVE_DELAY, Written,
-    window_title,
+    AfterAttachment, AfterSave, Closing, ComposeFrom, Field, FieldError, Fields, Finish, Lifecycle,
+    Opening, SAVE_DELAY, Sender, Written, discard_confirm, error_text, new_message_account,
+    senders, unsendable,
 };
-pub use catmail_frontend::composer::{ComposeFrom, new_message_account};
-use futures_channel::oneshot;
-use gpui_kit::component::input::{InputEvent, InputState, Position, TextareaState};
-use gpui_kit::component::notification::Notification;
-use gpui_kit::component::select::{SelectEvent, SelectItem, SelectState};
-use gpui_kit::component::{IndexPath, WindowExt as _};
-use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Context, Entity, FocusHandle, Focusable, Global,
-    PathPromptOptions, SharedString, Subscription, Task, WeakEntity, Window, px, size,
-};
+use futures_channel::mpsc;
+use nsh_core::element::desktop::{MenuItem, popup_menu};
+use nsh_core::element::{ElementRef, FileDropEvent, Owner, Spawned, pick_paths};
+use nsh_core::file_dialog::OpenDialog;
+use nsh_core::prelude::*;
 
-/// A composer's window, and the composer in it.
-type ComposerWindow = (AnyWindowHandle, WeakEntity<Composer>);
+use crate::engine::client;
+use crate::form::confirmed;
+use crate::mailbox::list;
+use crate::mailbox::sidebar::{SelectedPlace, with_accounts};
+use crate::nsh_platform::Root;
+use crate::shell::{self, on_main};
+use crate::tasks::in_view;
+use crate::toast::report;
 
-/// The composer windows open, by draft.
-#[derive(Default)]
-struct OpenComposers {
-    open: catmail_frontend::composer::OpenComposers<ComposerWindow>,
-    /// Opens on their way, for tests to wait for.
-    #[cfg(test)]
-    in_flight: usize,
+use view::Composer;
+
+/// Opens a composer window for `from`, from the mailbox. The draft is made (or read)
+/// first; failures are reported in the mailbox.
+pub fn open(from: ComposeFrom) {
+    in_view(async move {
+        if on_main(move || shell::begin_opening(from)).await != Some(true) {
+            return;
+        }
+        let opened = from.start(&client()).await;
+        if let Err(e) = &opened {
+            report("Couldn't start the message", e);
+        }
+        let _ = on_main(move || shell::opened(from, opened.ok())).await;
+    });
 }
 
-impl Global for OpenComposers {}
-
-fn open_composers(cx: &mut App) -> &mut catmail_frontend::composer::OpenComposers<ComposerWindow> {
-    &mut cx.default_global::<OpenComposers>().open
-}
-
-/// Brings the draft's window forward, if it has one.
-fn activate(id: DraftId, cx: &mut App) -> bool {
-    let Some((handle, _)) = open_composers(cx).window(id) else {
-        return false;
-    };
-    handle
-        .update(cx, |_, window, _| window.activate_window())
-        .is_ok()
-}
-
-/// Closes every composer window once it has saved what it holds: closing straight away
-/// would lose what was typed since the last save. True once the last has closed; false as
-/// soon as one can't (an address to correct, a save that failed), which stays open.
-pub fn close_all(cx: &mut App) -> oneshot::Receiver<bool> {
-    let (windows, answer) = open_composers(cx).close_all();
-    for (handle, composer) in windows {
-        handle
-            .update(cx, |_, window, cx| {
-                composer.update(cx, |composer, cx| composer.close(window, cx))
-            })
-            .ok();
+/// A new message, from the account of the place shown (or else the first).
+pub fn new_message() {
+    let place = global::<SelectedPlace>().with_untracked(|p| p.0);
+    let account = with_accounts(|accounts| new_message_account(place, accounts));
+    if let Some(account) = account {
+        open(ComposeFrom::New(account));
     }
-    answer
 }
 
-/// The open composers.
-#[cfg(test)]
-fn composers(cx: &App) -> impl Iterator<Item = &Composer> {
-    cx.try_global::<OpenComposers>()
-        .into_iter()
-        .flat_map(|open| open.open.windows())
-        .filter_map(|(_, composer)| composer.upgrade())
-        .map(|composer| composer.read(cx))
-}
-
-/// The text of each open composer.
-#[cfg(test)]
-pub(crate) fn texts(cx: &App) -> Vec<String> {
-    composers(cx)
-        .map(|composer| composer.body.read(cx).value().to_string())
-        .collect()
-}
-
-/// Opens a composer window for `from`. The draft is made (or read) first; failures are
-/// reported in `window`, the one asking.
-pub fn open(client: MailClient, from: ComposeFrom, window: &mut Window, cx: &mut App) {
-    if let ComposeFrom::Draft(id) = from
-        && (activate(id, cx) || !open_composers(cx).begin_opening(id))
-    {
-        return;
+/// A reply to the message open, to its sender or to everyone it went to.
+pub fn reply(all: bool) {
+    if let Some(message) = untracked(list::selected_id) {
+        open(ComposeFrom::Reply { message, all });
     }
-    #[cfg(test)]
-    {
-        cx.default_global::<OpenComposers>().in_flight += 1;
+}
+
+pub fn forward() {
+    if let Some(message) = untracked(list::selected_id) {
+        open(ComposeFrom::Forward(message));
     }
-    let asking = window.window_handle();
-    // On the app, not the asking window: closing that must not leave the draft marked
-    // as being opened.
-    cx.spawn(async move |cx| {
-        let opened = from.start(&client).await;
-        cx.update(|cx| {
-            if let ComposeFrom::Draft(id) = from {
-                open_composers(cx).end_opening(id);
-            }
-            #[cfg(test)]
-            {
-                cx.default_global::<OpenComposers>().in_flight -= 1;
-            }
-            let failure = match opened {
-                // A window for it opened meanwhile: a reply or forward made it, and it
-                // was opened from the drafts before its window came up.
-                Ok(opening) if activate(opening.draft.id, cx) => None,
-                Ok(opening) => open_window(client, opening, cx)
-                    .err()
-                    .map(|e| format!("Couldn't open a window: {e:#}")),
-                Err(e) => Some(format!("Couldn't start the message: {e}")),
-            };
-            if let Some(failure) = failure {
-                asking
-                    .update(cx, |_, window, cx| {
-                        window.push_notification(Notification::error(failure), cx)
-                    })
-                    .ok();
-            }
-        });
+}
+
+/// The keys that start a message.
+pub fn bind_keys() {
+    on_key("mod+n", |_| new_message());
+    on_key("mod+r", |_| reply(false));
+    on_key("mod+shift+r", |_| reply(true));
+    on_key("mod+shift+f", |_| forward());
+}
+
+// --- The view's state ---------------------------------------------------------------
+
+/// What a composer's view is made with ([`root`]).
+pub struct Start {
+    pub opening: Opening,
+    /// The window's asks to close: its close button, Ctrl+W, quitting.
+    pub close_requests: Mutex<Option<mpsc::UnboundedReceiver<()>>>,
+}
+
+thread_local! {
+    /// The start of the view on this thread: nsh's props are values JS has, so it comes
+    /// this way. Each view has a thread of its own.
+    static START: RefCell<Option<Arc<Start>>> = const { RefCell::new(None) };
+}
+
+/// The root of a composer window's view.
+pub fn root(start: Arc<Start>) -> Root {
+    Root::new::<Composer>(move || {
+        START.set(Some(start.clone()));
+        Default::default()
     })
-    .detach();
 }
 
-/// Whether every [`open`] has finished.
-#[cfg(test)]
-pub(crate) fn opened(cx: &App) -> bool {
-    cx.try_global::<OpenComposers>()
-        .is_none_or(|open| open.in_flight == 0)
-}
-
-/// The error each open composer shows, if any.
-#[cfg(test)]
-pub(crate) fn errors(cx: &App) -> Vec<Option<String>> {
-    composers(cx)
-        .map(|composer| composer.error.as_ref().map(ToString::to_string))
-        .collect()
-}
-
-fn open_window(client: MailClient, opening: Opening, cx: &mut App) -> anyhow::Result<()> {
-    let id = opening.draft.id;
-    let options = crate::layout::window_options(
-        window_title(&opening.draft.content.subject),
-        size(px(760.), px(680.)),
-        size(px(480.), px(360.)),
-        crate::layout::Frame::TitleBar,
-        cx,
-    );
-    let (handle, composer) = crate::layout::open_window(options, cx, |window, cx| {
-        cx.new(|cx| Composer::new(client, opening, window, cx))
-    })?;
-    open_composers(cx).insert(id, (handle, composer.downgrade()));
-    Ok(())
-}
-
-/// A choice of From: one of the identities the draft can be sent as.
-#[derive(Debug, Clone, PartialEq)]
-struct Sender {
-    identity: IdentityId,
-    title: SharedString,
-}
-
-impl SelectItem for Sender {
-    type Value = IdentityId;
-
-    fn value(&self) -> &Self::Value {
-        &self.identity
-    }
-
-    fn title(&self) -> SharedString {
-        self.title.clone()
-    }
-}
-
-fn senders(identities: &[Identity]) -> Vec<Sender> {
-    catmail_frontend::composer::senders(identities)
-        .into_iter()
-        .map(|s| Sender {
-            identity: s.identity,
-            title: s.title.into(),
-        })
-        .collect()
-}
-
-/// The From line: who the draft is from, or a choice when it can be sent as more than
-/// one identity.
-enum FromField {
-    /// With its identity, kept as it is.
-    One(IdentityId, SharedString),
-    Choice {
-        senders: Entity<SelectState<Vec<Sender>>>,
-        _changes: Subscription,
-    },
-}
-
-pub struct Composer {
-    client: MailClient,
-    from: FromField,
+/// The draft and when it saves. Not reactive.
+struct Composing {
     draft: DraftId,
-    /// When it saves, sends and closes.
     life: Lifecycle,
-    to: Entity<InputState>,
-    cc: Entity<InputState>,
-    bcc: Entity<InputState>,
-    subject: Entity<InputState>,
-    body: Entity<TextareaState>,
-    show_cc_bcc: bool,
-    attachments: Vec<DraftAttachment>,
+    /// The save after typing pauses.
+    debounce: Option<Spawned<()>>,
+    /// The view's, which the work it starts belongs to.
+    owner: Owner,
+    /// The address fields, to put the focus in one to fix.
+    inputs: [Option<ElementRef>; 3],
+}
+
+#[derive(Clone, Default)]
+struct Shared(Option<Rc<RefCell<Composing>>>);
+
+fn composing() -> Rc<RefCell<Composing>> {
+    global::<Shared>()
+        .with_untracked(|s| s.0.clone())
+        .expect("the view sets it first")
+}
+
+fn with_life<T>(f: impl FnOnce(&mut Lifecycle) -> T) -> T {
+    f(&mut composing().borrow_mut().life)
+}
+
+fn draft() -> DraftId {
+    composing().borrow().draft
+}
+
+/// Runs `future` for as long as the window is open.
+fn in_window(future: impl Future<Output = ()> + 'static) -> Spawned<()> {
+    let owner = composing().borrow().owner;
+    owner.run(|| spawn(future))
+}
+
+/// The fields as typed: what a save takes. The inputs keep their own text.
+#[derive(Clone, Default)]
+struct Typed {
+    to: String,
+    cc: String,
+    bcc: String,
+    subject: String,
+    text: String,
+}
+
+/// Who the draft can be from, and who it is.
+#[derive(Clone, Default)]
+struct From {
+    senders: Vec<Sender>,
+    chosen: Option<IdentityId>,
+}
+
+/// How the window is doing.
+#[derive(Clone, Default, PartialEq)]
+struct Shown {
+    ending: Option<Finish>,
+    status: Option<Cow<'static, str>>,
+    /// Why the send or close the window was ending with didn't happen.
+    error: Option<String>,
     /// A field that doesn't hold addresses, shown under it once sending (or closing)
     /// needs it to.
     field_error: Option<FieldError>,
-    error: Option<SharedString>,
-    focus_handle: FocusHandle,
-    _debounce: Task<()>,
-    _save: Task<()>,
-    /// Follows the engine's changes to the identities.
-    _identities: Task<()>,
-    _subscriptions: Vec<Subscription>,
+    cc_bcc: bool,
 }
 
-impl Focusable for Composer {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus_handle.clone()
+#[derive(Clone, Default)]
+struct Attachments(Vec<DraftAttachment>);
+
+fn ending() -> bool {
+    global::<Shown>().with(|s| s.ending.is_some())
+}
+
+/// Shows what the lifecycle says of the saving and the ending.
+fn sync() {
+    let (ending, status) = with_life(|l| (l.ending(), l.status()));
+    global::<Shown>().update(|s| {
+        s.ending = ending;
+        s.status = status;
+    });
+}
+
+// --- Saving, sending, closing -------------------------------------------------------
+
+/// The draft as typed. An address field that doesn't parse keeps its last saved value,
+/// and is reported.
+fn written() -> (Written, Option<FieldError>) {
+    let typed = global::<Typed>().with_untracked(Clone::clone);
+    let chosen = global::<From>().with_untracked(|f| f.chosen);
+    let composing = composing();
+    let composing = composing.borrow();
+    let from = chosen.unwrap_or(composing.life.saved().from);
+    let fields = Fields {
+        to: &typed.to,
+        cc: &typed.cc,
+        bcc: &typed.bcc,
+        subject: &typed.subject,
+        text: &typed.text,
+    };
+    composing.life.written(fields, from)
+}
+
+/// A field changed: the draft is saved once typing pauses.
+fn changed() {
+    if !with_life(Lifecycle::changed) {
+        return;
+    }
+    global::<Shown>().update(|s| s.field_error = None);
+    let save_later = in_window(async {
+        timer(SAVE_DELAY).await;
+        save();
+    });
+    if let Some(earlier) = composing().borrow_mut().debounce.replace(save_later) {
+        earlier.cancel();
+    }
+    sync();
+}
+
+fn save() {
+    if !with_life(|l| l.save_due()) {
+        return;
+    }
+    let (written, _) = written();
+    let Some(written) = with_life(|l| l.begin_save(written)) else {
+        return;
+    };
+    sync();
+    let draft = draft();
+    in_window(async move {
+        let Written { from, content } = written.clone();
+        let result = client().update_draft(draft, from, content).await;
+        let result = result.map(drop).map_err(|e| error_text(&e));
+        match with_life(|l| l.save_ended(written, result)) {
+            AfterSave::Finish => run_finish(),
+            AfterSave::SaveLater => changed(),
+            AfterSave::Nothing => {}
+        }
+        sync();
+    });
+}
+
+fn send() {
+    let (written, problem) = written();
+    match unsendable(&written, problem) {
+        Some(problem) => show_field_error(problem),
+        None => finish(Finish::Send),
     }
 }
 
-impl Composer {
-    fn new(
-        client: MailClient,
-        opening: Opening,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let life = Lifecycle::new(&opening);
-        let Opening {
-            identities,
-            draft,
-            focus_body,
-            ..
-        } = opening;
-        let content = draft.content;
-        let address_input = |list: &[catmail_core::Address], window: &mut Window, cx: &mut App| {
-            let value = catmail_core::format_addresses(list);
-            cx.new(|cx| InputState::new(window, cx).default_value(value))
-        };
-        let to = address_input(&content.to, window, cx);
-        let cc = address_input(&content.cc, window, cx);
-        let bcc = address_input(&content.bcc, window, cx);
-        let subject = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Subject")
-                .default_value(content.subject.clone())
-        });
-        let body = cx.new(|cx| TextareaState::new(window, cx).default_value(content.text.clone()));
-
-        let mut subscriptions: Vec<Subscription> = [&to, &cc, &bcc, &subject]
-            .into_iter()
-            .map(|input| cx.subscribe_in(input, window, Self::on_input_event))
-            .collect();
-        subscriptions.push(cx.subscribe_in(&body, window, Self::on_input_event));
-        let from = Self::from_field(&identities, draft.identity, window, cx);
-        let identities = Self::follow_identities(&client, draft.id, window, cx);
-        // The window is named after the subject (its title bar redraws with the change,
-        // `on_input_event`).
-        subscriptions.push(
-            cx.subscribe_in(&subject, window, |_, subject, event, window, cx| {
-                if matches!(event, InputEvent::Change) {
-                    window.set_window_title(&window_title(&subject.read(cx).value()));
-                }
-            }),
-        );
-        // Closing the window by its frame saves too; it waits for the save to land.
-        let this = cx.entity().downgrade();
-        window.on_window_should_close(cx, move |window, cx| {
-            this.update(cx, |this, cx| this.should_close(window, cx))
-                .unwrap_or(true)
-        });
-
-        if focus_body {
-            body.update(cx, |body, cx| {
-                body.focus(window, cx);
-                // Above the quote.
-                body.set_cursor_position(Position::new(0, 0), window, cx);
-            });
-        } else {
-            to.update(cx, |to, cx| to.focus(window, cx));
+/// The window asks to close: now if everything is saved, after saving what isn't.
+fn close_requested() {
+    let (written, problem) = written();
+    match with_life(|l| l.close(&written, problem.is_some())) {
+        Closing::Wait => {}
+        Closing::Fix => {
+            if let Some(problem) = problem {
+                show_field_error(problem);
+            }
+            stop_closing_all();
         }
-
-        Self {
-            client,
-            from,
-            draft: draft.id,
-            life,
-            show_cc_bcc: !content.cc.is_empty() || !content.bcc.is_empty(),
-            to,
-            cc,
-            bcc,
-            subject,
-            body,
-            attachments: draft.attachments,
-            field_error: None,
-            error: None,
-            focus_handle: cx.focus_handle(),
-            _debounce: Task::ready(()),
-            _save: Task::ready(()),
-            _identities: identities,
-            _subscriptions: subscriptions,
-        }
+        Closing::Now => close_window(),
+        Closing::Finish => finish(Finish::Close),
     }
+}
 
-    fn on_input_event<E>(
-        &mut self,
-        _: &Entity<E>,
-        event: &InputEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if matches!(event, InputEvent::Change) {
-            self.changed(window, cx);
+fn discard() {
+    let answer = confirmed(discard_confirm());
+    in_window(async move {
+        if answer.await {
+            finish(Finish::Discard);
         }
-    }
+    });
+}
 
-    fn changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // The fields are read-only by then (see `header_input`).
-        if !self.life.changed() {
-            return;
+fn finish(how: Finish) {
+    if with_life(|l| l.ending().is_some()) {
+        return;
+    }
+    global::<Shown>().update(|s| s.error = None);
+    if let Some(save_later) = composing().borrow_mut().debounce.take() {
+        save_later.cancel();
+    }
+    if with_life(|l| l.finish(how)) {
+        run_finish();
+    }
+    sync();
+}
+
+/// Saves what is left, then sends, deletes or just closes; the window goes when that
+/// worked.
+fn run_finish() {
+    let (written, _) = written();
+    let Some(steps) = with_life(|l| l.begin_finish(&written)) else {
+        return;
+    };
+    sync();
+    let draft = draft();
+    in_window(async move {
+        let result = steps.run(&client(), draft, written).await;
+        match with_life(|l| l.finish_ended(result.map_err(|e| e.to_string()))) {
+            Ok(()) => close_window(),
+            Err(e) => {
+                stop_closing_all();
+                global::<Shown>().update(|s| s.error = Some(e));
+            }
         }
-        self.field_error = None;
-        // Replacing the task cancels the previous timer.
-        self._debounce = cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor().timer(SAVE_DELAY).await;
-            this.update_in(cx, |this, window, cx| this.save(window, cx))
-                .ok();
-        });
-        cx.notify();
-    }
+        sync();
+    });
+}
 
-    /// The draft as typed. An address field that doesn't parse keeps its last saved
-    /// value, and is reported.
-    fn written(&self, cx: &App) -> (Written, Option<FieldError>) {
-        let value = |input: &Entity<InputState>| input.read(cx).value();
-        let (to, cc, bcc, subject) = (
-            value(&self.to),
-            value(&self.cc),
-            value(&self.bcc),
-            value(&self.subject),
-        );
-        let text = self.body.read(cx).value();
-        let fields = Fields {
-            to: &to,
-            cc: &cc,
-            bcc: &bcc,
-            subject: &subject,
-            text: &text,
-        };
-        self.life.written(fields, self.sender_identity(cx))
-    }
+fn close_window() {
+    let draft = draft();
+    drop(on_main(move || shell::composer_closed(draft)));
+}
 
-    /// The From line for `identities`, with `selected` chosen.
-    fn from_field(
-        identities: &[Identity],
-        selected: IdentityId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> FromField {
-        let senders = senders(identities);
-        if senders.len() <= 1 {
-            // Every account has its default.
-            let title = senders
-                .into_iter()
-                .next()
-                .map(|s| s.title)
-                .unwrap_or_default();
-            return FromField::One(selected, title);
+/// The window stays open to be dealt with: quitting, which waits for every composer to
+/// close, doesn't.
+fn stop_closing_all() {
+    drop(on_main(shell::stop_closing_all));
+}
+
+fn show_field_error((field, message): FieldError) {
+    global::<Shown>().update(|s| {
+        if matches!(field, Field::Cc | Field::Bcc) {
+            s.cc_bcc = true;
         }
-        let position = senders
-            .iter()
-            .position(|s| s.identity == selected)
-            .map(IndexPath::new);
-        let choice = cx.new(|cx| SelectState::new(senders, position, window, cx));
-        let changes = cx.subscribe_in(
-            &choice,
-            window,
-            |this, _, event: &SelectEvent<Vec<Sender>>, window, cx| {
-                if let SelectEvent::Confirm(Some(identity)) = event
-                    && this.life.saved().from != *identity
-                {
-                    this.changed(window, cx);
-                }
-            },
-        );
-        FromField::Choice {
-            senders: choice,
-            _changes: changes,
-        }
-    }
+        s.field_error = Some((field, message));
+    });
+    focus(field);
+}
 
-    /// Nothing chosen keeps the one saved.
-    fn sender_identity(&self, cx: &App) -> IdentityId {
-        match &self.from {
-            FromField::One(identity, _) => *identity,
-            FromField::Choice { senders, .. } => senders
-                .read(cx)
-                .selected_value()
-                .copied()
-                .unwrap_or(self.life.saved().from),
+/// Puts the focus in `field`, once it shows (Cc and Bcc may have just appeared).
+fn focus(field: Field) {
+    in_window(async move {
+        timer(std::time::Duration::ZERO).await;
+        let input = composing().borrow().inputs[field_index(field)];
+        if let Some(input) = input {
+            input.focus();
         }
-    }
+    });
+}
 
-    /// Reads the identities the draft can be sent as again whenever the engine says an
-    /// account's changed, or came or went (or events were missed), for
-    /// [`set_identities`](Self::set_identities).
-    fn follow_identities(
-        client: &MailClient,
-        draft: DraftId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Task<()> {
-        let (client, mut events) = (client.clone(), client.subscribe());
-        cx.spawn_in(window, async move |this, cx| {
-            loop {
-                match events.recv().await {
-                    Err(RecvError::Closed) => break,
-                    Ok(
-                        Event::AccountChanged { .. }
-                        | Event::AccountAdded { .. }
-                        | Event::AccountRemoved { .. },
-                    )
-                    | Err(RecvError::Lagged(_)) => {}
-                    Ok(_) => continue,
-                }
-                let (Ok(identities), Ok(Some(stored))) = (
-                    client.draft_senders(draft).await,
-                    client.get_draft(draft).await,
-                ) else {
-                    continue;
-                };
-                let updated = this.update_in(cx, |this, window, cx| {
-                    this.set_identities(&identities, stored.identity, window, cx)
-                });
-                if updated.is_err() {
-                    break; // The window is gone.
+fn field_index(field: Field) -> usize {
+    match field {
+        Field::To => 0,
+        Field::Cc => 1,
+        Field::Bcc => 2,
+    }
+}
+
+// --- Attachments --------------------------------------------------------------------
+
+fn attach() {
+    let picked = pick_paths(OpenDialog::files().multiple(true).button_label("Attach"));
+    in_window(async move {
+        match picked.await {
+            Ok(Some(paths)) => attach_paths(paths),
+            Ok(None) => {}
+            Err(e) => report("Couldn't choose files", e),
+        }
+    });
+}
+
+/// Dropped on the window: its `file:` URLs, as paths.
+fn dropped(event: &FileDropEvent) {
+    let paths = event
+        .uris
+        .iter()
+        .filter_map(|uri| url::Url::parse(uri).ok()?.to_file_path().ok())
+        .collect::<Vec<_>>();
+    if !paths.is_empty() {
+        attach_paths(paths);
+    }
+}
+
+fn attach_paths(paths: Vec<PathBuf>) {
+    if !with_life(Lifecycle::begin_attachment) {
+        return;
+    }
+    let draft = draft();
+    in_window(async move {
+        let client = client();
+        let mut failed = false;
+        for path in paths {
+            match client.attach_file(draft, path.clone()).await {
+                Ok(attachment) => global::<Attachments>().update(|a| a.0.push(attachment)),
+                Err(e) => {
+                    failed = true;
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    report(&format!("Couldn't attach {name}"), e);
                 }
             }
-        })
-    }
+        }
+        attached(failed);
+    });
+}
 
-    /// The identities changed: one was added, made its account's default or removed, or
-    /// an account came or went. One removed is replaced by the identity the engine keeps
-    /// in the stored draft, `stored` (its account's default, if it was that one); what was
-    /// typed stays.
-    fn set_identities(
-        &mut self,
-        identities: &[Identity],
-        stored: IdentityId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let current = self.sender_identity(cx);
-        let selected = if identities.iter().any(|i| i.id == current) {
+fn remove_attachment(attachment: DraftAttachmentId) {
+    if !with_life(Lifecycle::begin_attachment) {
+        return;
+    }
+    in_window(async move {
+        let result = client().remove_draft_attachment(attachment).await;
+        let failed = result.is_err();
+        match result {
+            Ok(draft) => global::<Attachments>().set(Attachments(draft.attachments)),
+            Err(e) => report("Couldn't remove the attachment", e),
+        }
+        attached(failed);
+    });
+}
+
+/// An attachment change is done; a window waiting to end goes on, or stays if it failed.
+fn attached(failed: bool) {
+    match with_life(|l| l.attachment_ended(failed)) {
+        AfterAttachment::Finish => run_finish(),
+        AfterAttachment::Stop(why) => {
+            stop_closing_all();
+            global::<Shown>().update(|s| s.error = Some(why));
+        }
+        AfterAttachment::Nothing => {}
+    }
+    sync();
+}
+
+// --- From ---------------------------------------------------------------------------
+
+/// Reads the identities the draft can be sent as again whenever the engine says an
+/// account's changed, or came or went (or events were missed).
+async fn follow_identities(draft: DraftId) {
+    let client = client();
+    let mut events = client.subscribe();
+    loop {
+        match events.recv().await {
+            Err(RecvError::Closed) => break,
+            Ok(
+                Event::AccountChanged { .. }
+                | Event::AccountAdded { .. }
+                | Event::AccountRemoved { .. },
+            )
+            | Err(RecvError::Lagged(_)) => {}
+            Ok(_) => continue,
+        }
+        let (Ok(identities), Ok(Some(stored))) = (
+            client.draft_senders(draft).await,
+            client.get_draft(draft).await,
+        ) else {
+            continue;
+        };
+        set_identities(&identities, stored.identity);
+    }
+}
+
+/// The identities changed. One removed is replaced by the identity the engine keeps in
+/// the stored draft, `stored`; what was typed stays.
+fn set_identities(identities: &[Identity], stored: IdentityId) {
+    let saved = with_life(|l| l.saved().from);
+    global::<From>().update(|f| {
+        let current = f.chosen.unwrap_or(saved);
+        f.chosen = Some(if identities.iter().any(|i| i.id == current) {
             current
         } else {
             stored
-        };
-        self.from = Self::from_field(identities, selected, window, cx);
-        cx.notify();
-    }
-
-    fn attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let paths = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: true,
-            prompt: Some("Attach".into()),
         });
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = paths.await {
-                this.update_in(cx, |this, window, cx| this.attach_paths(paths, window, cx))
-                    .ok();
-            }
-        })
-        .detach();
-    }
+        f.senders = senders(identities);
+    });
+}
 
-    fn attach_paths(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.life.begin_attachment() {
-            return;
-        }
-        let client = self.client.clone();
-        let id = self.draft;
-        cx.spawn_in(window, async move |this, cx| {
-            let mut failed = false;
-            for path in paths {
-                let attached = client.attach_file(id, path.clone()).await;
-                failed |= attached.is_err();
-                this.update_in(cx, |this, window, cx| {
-                    match attached {
-                        Ok(attachment) => this.attachments.push(attachment),
-                        Err(e) => window.push_notification(
-                            Notification::error(format!(
-                                "Couldn't attach {}: {e}",
-                                path.file_name().unwrap_or_default().to_string_lossy()
-                            )),
-                            cx,
-                        ),
+fn choose_sender() {
+    let (senders, chosen) = global::<From>().with_untracked(|f| (f.senders.clone(), f.chosen));
+    let items = senders
+        .into_iter()
+        .map(|sender| {
+            let identity = sender.identity;
+            MenuItem::new(sender.title)
+                .checked(Some(identity) == chosen)
+                .on_select(move || {
+                    global::<From>().update(|f| f.chosen = Some(identity));
+                    if with_life(|l| l.saved().from != identity) {
+                        changed();
                     }
-                    cx.notify();
                 })
-                .ok();
-            }
-            this.update_in(cx, |this, window, cx| this.attached(failed, window, cx))
-                .ok();
         })
-        .detach();
-    }
-
-    /// An attachment change is done; a window waiting to end can go on, or stops if it
-    /// failed.
-    fn attached(&mut self, failed: bool, window: &mut Window, cx: &mut Context<Self>) {
-        match self.life.attachment_ended(failed) {
-            AfterAttachment::Finish => self.run_finish(window, cx),
-            AfterAttachment::Stop(why) => {
-                self.stop_closing_all(cx);
-                self.error = Some(why.into());
-                cx.notify();
-            }
-            AfterAttachment::Nothing => {}
-        }
-    }
-
-    fn remove_attachment(
-        &mut self,
-        attachment: catmail_core::DraftAttachmentId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.life.begin_attachment() {
-            return;
-        }
-        let client = self.client.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let result = client.remove_draft_attachment(attachment).await;
-            this.update_in(cx, |this, window, cx| {
-                let failed = result.is_err();
-                match result {
-                    Ok(draft) => this.attachments = draft.attachments,
-                    Err(e) => window.push_notification(
-                        Notification::error(format!("Couldn't remove the attachment: {e}")),
-                        cx,
-                    ),
-                }
-                this.attached(failed, window, cx);
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
+        .collect();
+    drop(popup_menu(items));
 }

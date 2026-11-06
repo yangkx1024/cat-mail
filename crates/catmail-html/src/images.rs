@@ -1,7 +1,7 @@
 //! The images a message's HTML refers to: which are remote, and inline parts embedded
 //! for a renderer that can't resolve `cid:`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
@@ -9,19 +9,23 @@ use base64::engine::general_purpose::STANDARD;
 
 use crate::sanitize::{clean, sanitizer};
 
-/// The image URLs in HTML that [`sanitize_html`](crate::sanitize_html) produced, in document order.
-pub(crate) fn image_sources(html: &str) -> Vec<String> {
+/// What `f` makes of each image URL in HTML that [`sanitize_html`](crate::sanitize_html)
+/// produced, in document order, leaving out the `None`s; the URLs themselves (a `data:`
+/// one can be large) aren't copied.
+pub(crate) fn image_sources<T: Send + 'static>(html: &str, f: fn(&str) -> Option<T>) -> Vec<T> {
     let found = Arc::new(Mutex::new(Vec::new()));
     let sink = found.clone();
     sanitizer(
         Some(Box::new(move |src| {
-            sink.lock().unwrap().push(src.to_owned());
+            if let Some(found) = f(src) {
+                sink.lock().unwrap().push(found);
+            }
             None
         })),
         None,
     )
     .clean(html);
-    Arc::try_unwrap(found).unwrap().into_inner().unwrap()
+    std::mem::take(&mut *found.lock().unwrap())
 }
 
 /// More remote images than any message needs to show; the rest of a longer list is left
@@ -34,10 +38,8 @@ pub const MAX_REMOTE_IMAGES: usize = 200;
 /// (`file:`, relative) never load.
 pub fn remote_image_urls(html: &str) -> Vec<String> {
     let mut urls = Vec::new();
-    for url in image_sources(html) {
-        if let Some(url) = remote_image_url(&url)
-            && !urls.contains(&url)
-        {
+    for url in image_sources(html, remote_image_url) {
+        if !urls.contains(&url) {
             urls.push(url);
             if urls.len() == MAX_REMOTE_IMAGES {
                 break;
@@ -48,29 +50,56 @@ pub fn remote_image_urls(html: &str) -> Vec<String> {
 }
 
 /// The URL of a remote (`http`, `https`) image, normalized as a URL parser writes it, or
-/// `None` for anything else. Renderers ask for an image by its URL as they found it
-/// (Blitz parses it first, others don't), so remote images are fetched, cached and
-/// looked up by this one spelling.
+/// `None` for anything else. A reader may ask for an image by its URL as it found it in
+/// the HTML or parsed, so remote images are fetched, cached and looked up by this one
+/// spelling.
 pub fn remote_image_url(url: &str) -> Option<String> {
     let url = url::Url::parse(url.trim()).ok()?;
     matches!(url.scheme(), "http" | "https").then(|| url.into())
 }
 
-/// An inline part's content, to embed in place of its `cid:` URL.
+/// The Content-IDs that the images in HTML that [`sanitize_html`](crate::sanitize_html)
+/// produced refer to by `cid:` URL: what a reader shows within the body. Only images: a
+/// `cid:` link, or the text `cid:…`, shows nothing, so the part it names stays an
+/// attachment.
+pub fn cid_image_ids(html: &str) -> HashSet<String> {
+    image_sources(html, |src| content_id_from_url(src.trim()))
+        .into_iter()
+        .collect()
+}
+
+/// An inline part, to embed in place of its `cid:` URL: its content as a `data:` URL,
+/// encoded once, here (the page made again, the browser's page and a page shown that is
+/// sent it all take the same one). Cloning it is cheap.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlineImage {
-    pub mime_type: String,
-    pub bytes: Vec<u8>,
+    data_url: Arc<str>,
+}
+
+impl InlineImage {
+    /// Of the type its bytes start with, if they are a well-known format
+    /// ([`sniff_image`]), else of `mime_type`.
+    pub fn new(mime_type: &str, bytes: &[u8]) -> Self {
+        let mime_type = sniff_image(bytes).unwrap_or(mime_type);
+        Self {
+            data_url: data_url(mime_type, bytes).into(),
+        }
+    }
+
+    pub fn data_url(&self) -> &str {
+        &self.data_url
+    }
 }
 
 /// HTML that [`sanitize_html`](crate::sanitize_html) produced, with each `cid:` image whose Content-ID is in
 /// `inline` replaced by a `data:` URL of the part, for a renderer that can't resolve
 /// `cid:` (a browser). The values ammonia's filter returns are not checked again, so the
-/// URL is built here rather than taken from the caller.
+/// URL is built here ([`InlineImage::new`]) rather than taken from the caller.
 pub fn embed_inline_images(html: &str, inline: HashMap<String, InlineImage>) -> String {
     let embedding = sanitizer(
         Some(Box::new(move |src| {
             let image = content_id_from_url(src).and_then(|id| inline.get(&id))?;
-            Some(data_url(&image.mime_type, &image.bytes))
+            Some(image.data_url().to_owned())
         })),
         None,
     );
@@ -85,6 +114,27 @@ pub fn data_url(mime_type: &str, bytes: &[u8]) -> String {
         media_type(mime_type),
         STANDARD.encode(bytes)
     )
+}
+
+/// The type of a well-known raster image, from its first bytes. Senders and servers
+/// label images loosely (`application/octet-stream`, or the wrong format); what decodes
+/// them goes by the type.
+pub fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
+    const SIGNATURES: [(&[u8], &str); 6] = [
+        (b"\x89PNG\r\n\x1a\n", "image/png"),
+        (b"\xff\xd8\xff", "image/jpeg"),
+        (b"GIF87a", "image/gif"),
+        (b"GIF89a", "image/gif"),
+        (b"BM", "image/bmp"),
+        (b"\0\0\x01\0", "image/x-icon"),
+    ];
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    SIGNATURES
+        .iter()
+        .find(|(magic, _)| bytes.starts_with(magic))
+        .map(|&(_, mime_type)| mime_type)
 }
 
 /// The MIME type as it may appear in a `data:` URL; it comes from the message, so anything
@@ -158,13 +208,7 @@ mod tests {
     #[test]
     fn the_browser_page_keeps_the_style_sheet() {
         let html = sanitize_html("<style>.a{color:red}</style><img src=\"cid:logo@x\">");
-        let inline = HashMap::from([(
-            "logo@x".to_owned(),
-            InlineImage {
-                mime_type: "image/png".into(),
-                bytes: b"hi".to_vec(),
-            },
-        )]);
+        let inline = HashMap::from([("logo@x".to_owned(), InlineImage::new("image/png", b"hi"))]);
         let page = embed_inline_images(&html, inline);
         assert!(page.starts_with("<style>.a{color:red;}</style>"), "{page}");
         assert!(page.contains("data:image/png;base64,aGk="), "{page}");
@@ -177,24 +221,15 @@ mod tests {
             <img src="https://tracker.example/p.gif"><a href="cid:logo">link</a>"#,
         );
         assert_eq!(
-            image_sources(&clean),
+            image_sources(&clean, |src| Some(src.to_owned())),
             ["cid:logo", "https://tracker.example/p.gif"]
         );
 
         let inline = HashMap::from([
-            (
-                "logo".to_owned(),
-                InlineImage {
-                    mime_type: "image/png".into(),
-                    bytes: b"hi".to_vec(),
-                },
-            ),
+            ("logo".to_owned(), InlineImage::new("image/png", b"hi")),
             (
                 "odd".to_owned(),
-                InlineImage {
-                    mime_type: "image/gif\"><script>".into(),
-                    bytes: b"gif".to_vec(),
-                },
+                InlineImage::new("image/gif\"><script>", b"gif"),
             ),
         ]);
         let clean = format!("{clean}<img src=\"cid:odd\"><img src=\"cid:missing\">");
@@ -212,6 +247,38 @@ mod tests {
         );
         assert!(embedded.contains("https://tracker.example/p.gif"));
         assert!(!embedded.contains("<script>"));
+    }
+
+    #[test]
+    fn only_images_make_parts_inline() {
+        let clean = sanitize_html(
+            r#"<img src=" cid:logo@x "><img src="CID:a%40b"><a href="cid:report@x">report</a>
+            <p>see cid:note@x</p><img src="https://x/cid:remote">"#,
+        );
+        assert_eq!(
+            cid_image_ids(&clean),
+            HashSet::from(["logo@x".to_owned(), "a@b".to_owned()])
+        );
+    }
+
+    #[test]
+    fn sniffs_raster_formats() {
+        assert_eq!(sniff_image(b"\x89PNG\r\n\x1a\n"), Some("image/png"));
+        assert_eq!(sniff_image(b"\xff\xd8\xff\xe0"), Some("image/jpeg"));
+        assert_eq!(sniff_image(b"GIF89a\x01"), Some("image/gif"));
+        assert_eq!(sniff_image(b"RIFF\0\0\0\0WEBPVP8 "), Some("image/webp"));
+        assert_eq!(sniff_image(b"<svg xmlns="), None);
+        assert_eq!(sniff_image(b""), None);
+    }
+
+    #[test]
+    fn an_inline_image_is_of_the_type_its_bytes_are() {
+        let png = InlineImage::new("application/octet-stream", b"\x89PNG\r\n\x1a\n...");
+        assert!(png.data_url().starts_with("data:image/png;base64,"));
+        let mislabelled = InlineImage::new("image/jpeg", b"GIF89a");
+        assert!(mislabelled.data_url().starts_with("data:image/gif;"));
+        let svg = InlineImage::new("image/svg+xml", b"<svg/>");
+        assert!(svg.data_url().starts_with("data:image/svg+xml;"));
     }
 
     #[test]

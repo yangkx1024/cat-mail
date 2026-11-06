@@ -176,7 +176,7 @@ fn socket_path(dir: &Path, runtime: Option<&Path>) -> io::Result<PathBuf> {
     })?;
     let name = format!(
         "catmail-{:016x}.sock",
-        fnv1a(dir.as_os_str().as_encoded_bytes())
+        crate::fnv1a(dir.as_os_str().as_encoded_bytes().iter().copied())
     );
     Ok(runtime.join(name))
 }
@@ -191,13 +191,6 @@ fn runtime_dir() -> Option<PathBuf> {
     } else {
         Some(std::env::temp_dir())
     }
-}
-
-/// FNV-1a: stable across Rust versions, unlike `DefaultHasher`.
-fn fnv1a(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &b| {
-        (hash ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
-    })
 }
 
 /// Sends `request` to the app listening on `socket`; false if none does.
@@ -365,7 +358,7 @@ mod tests {
             dunce::canonicalize(dir.path()).unwrap().join(SOCKET)
         );
         // The name of a long one is the same in every build.
-        assert_eq!(fnv1a(b"/data"), 0x2e61_291c_e2d9_239e);
+        assert_eq!(crate::fnv1a(*b"/data"), 0x2e61_291c_e2d9_239e);
     }
 
     /// Windows needs a privilege for links.
