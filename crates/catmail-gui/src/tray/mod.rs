@@ -48,10 +48,31 @@ mod platform {
     }
 }
 
+/// The menu bar's status item.
 #[cfg(all(target_os = "macos", not(test)))]
-#[path = "macos.rs"]
-#[allow(unsafe_code, reason = "AppKit's status item, menu and images")]
-mod platform;
+mod platform {
+    use catmail_frontend::tray::{Template, macos};
+    use futures_channel::mpsc::UnboundedSender;
+
+    use super::{Chosen, Pixmaps};
+
+    #[derive(Clone)]
+    pub struct Item(macos::Item);
+
+    impl Item {
+        pub async fn spawn(chosen: UnboundedSender<Chosen>) -> Option<Self> {
+            macos::Item::spawn(chosen).map(Self)
+        }
+
+        pub async fn show(&self, icon: Option<Pixmaps>, unread: u32) {
+            let icon = icon.map(|pixmaps| {
+                let to_template = |(size, bgra): (u32, Vec<u8>)| Template::from_bgra(size, &bgra);
+                pixmaps.into_iter().map(to_template).collect::<Vec<_>>()
+            });
+            self.0.show(icon.as_deref(), unread);
+        }
+    }
+}
 
 /// No tray here yet (#109): there is never an item, so nothing is counted.
 #[cfg(all(
@@ -125,9 +146,8 @@ fn icon(_dark: bool, _unread: u32) -> (Cow<'static, str>, &'static [u32]) {
 #[cfg(any(target_os = "macos", test))]
 const MENU_BAR_TEMPLATE: &str = include_str!("../../assets/app-icon/catmail-menu-bar.svg");
 
-/// 18 points high, as the menu bar's icons are, for 1x and 2x displays.
 #[cfg(any(target_os = "macos", test))]
-const MENU_BAR_SIZES: [u32; 2] = [18, 36];
+use catmail_frontend::tray::MENU_BAR_SIZES;
 
 /// The icon at each of its sizes, square, in straight-alpha BGRA.
 type Pixmaps = Vec<(u32, Vec<u8>)>;

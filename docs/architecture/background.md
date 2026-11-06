@@ -250,9 +250,10 @@ nsh 版也用它：
 
 GUI 的 `Tray`（`catmail-gui/src/tray/`）是应用级的全局，引擎打开时启动，有窗口时、常驻时都在。
 与平台无关的部分在 `tray/mod.rs`：数未读、按平台定图标的样子（`icon`：一个 SVG 和要画的尺寸）、在后台画；
-各平台只把画好的图标、未读数和菜单交给系统（Linux 的在 frontend，见下；`tray/macos.rs`；Windows 在 #109）。
+各平台只把画好的图标、未读数和菜单交给系统（Linux、macOS 的都在 frontend，见下；Windows 在 #109）。
 不依赖 GPUI 的部分在 `catmail_frontend::tray`：菜单（`MENU`、`Command`）、提示文字、角标的文字和带角标的 SVG
-（`badged`）、Linux 的 StatusNotifierItem（`tray::linux`，ksni 本来就不依赖界面库），nsh 版也用它们：
+（`badged`）、Linux 的 StatusNotifierItem（`tray::linux`，ksni 本来就不依赖界面库）、macOS 的状态栏项
+（`tray::macos`，AppKit 本身，也不属于哪个界面库），nsh 版也用它们：
 
 - **未读数**：`MailClient::count_unread_in_inboxes` 把各账户 INBOX（Gmail：INBOX 标签）的 `unread_count`
   加起来，一次读。侧栏要重读的事件（`Refresh::after(..).sidebar`：消息、文件夹、账户的变化，漏掉事件）
@@ -284,7 +285,9 @@ GUI 的 `Tray`（`catmail-gui/src/tray/`）是应用级的全局，引擎打开�
   仍只能请求激活（GPUI 不能把令牌交给已有窗口）。测试里不注册（`cfg(test)`）。
 - **macOS** 直接用 AppKit（`objc2-app-kit`，GPUI 的 macOS 平台已经用它，不增加依赖）：`NSStatusItem`
   的按钮放图标，菜单是 `NSMenu`，菜单项的 target 是一个只转发命令的小类（`define_class!`，tag 是在 `MENU`
-  里的位置），`Item` 留着它（菜单项不 retain target）。都在 GPUI 的前台任务里，也就是主线程上。
+  里的位置），`Item` 留着它（菜单项不 retain target）。都要在主线程上：GPUI 的前台任务、nsh 版外壳的主线程
+  任务都是。图标由前端画好交过来（`Template`：预乘 alpha 的 RGBA，AppKit 位图的格式；GPUI 画出的直通 alpha
+  BGRA 用 `Template::from_bgra` 转）。
   - 图标是单色的模板图（`assets/app-icon/catmail-menu-bar.svg`：信封和猫爪），系统按菜单栏的亮暗、
     强调色着色，不用跟外观重画；画成 18、36 像素（18 pt 的 1x、2x），只用 alpha。未读数是按钮的标题，
     写在图标右边，与 Linux 角标同样的文字（超过 99 写"99+"），没有未读就不写；提示文字相同。
@@ -292,7 +295,7 @@ GUI 的 `Tray`（`catmail-gui/src/tray/`）是应用级的全局，引擎打开�
     仍照样设，回到窗口时 Dock 图标带着它。
   - 没有用 `tray-icon`：它在 macOS 上也是这些 AppKit 调用，外加 `muda` 的菜单和它自己的事件循环约定；
     直接写只有一百多行，图标、标题、角标都由我们决定。Windows（#109）再看是否用它。
-  - `define_class!`、位图的缓冲区要 `unsafe`，由 `tray` 模块对 `macos.rs` 单独放行。
+  - `define_class!`、位图的缓冲区要 `unsafe`，由 `catmail_frontend::tray` 对 `macos` 模块单独放行。
 
 ## 退出
 

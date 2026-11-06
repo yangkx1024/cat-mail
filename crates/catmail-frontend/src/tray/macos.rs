@@ -1,6 +1,7 @@
 //! The status item on macOS: a template image in the menu bar, which the system tints
 //! to suit the menu bar, with the unread count beside it and on the Dock icon. Clicking
-//! it opens the menu, as status items do on macOS.
+//! it opens the menu, as status items do on macOS. AppKit's, and no UI toolkit's: the
+//! frontend draws the image ([`Template`]) and runs it on the main thread.
 
 use futures_channel::mpsc::UnboundedSender;
 use objc2::rc::Retained;
@@ -14,9 +15,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSObject, NSSize, NSString, ns_string};
 
-use catmail_frontend::tray::MENU;
-
-use super::{Chosen, MENU_BAR_SIZES, Pixmaps};
+use super::{Chosen, MENU, MENU_BAR_SIZES, Template};
 
 /// The image's size in points: the menu bar's icons are 18 points high, and the first
 /// size is for 1x displays.
@@ -58,9 +57,9 @@ pub struct Item {
 }
 
 impl Item {
-    /// Puts the item in the menu bar, which macOS always has. On the main thread, where
-    /// GPUI runs the app's tasks.
-    pub async fn spawn(chosen: UnboundedSender<Chosen>) -> Option<Self> {
+    /// Puts the item in the menu bar, which macOS always has: what is chosen in its menu
+    /// goes to `chosen`. On the main thread; `None` elsewhere.
+    pub fn spawn(chosen: UnboundedSender<Chosen>) -> Option<Self> {
         let Some(mtm) = MainThreadMarker::new() else {
             tracing::error!("no status item: not on the main thread");
             return None;
@@ -101,20 +100,19 @@ impl Item {
         })
     }
 
-    /// Shows the count, and `icon` unless it is `None`: the one there looks the same.
-    pub async fn show(&self, icon: Option<Pixmaps>, unread: u32) {
+    /// Shows the count, and `icon` (the template at each of its sizes) unless it is
+    /// `None`: the one there looks the same. On the main thread.
+    pub fn show(&self, icon: Option<&[Template]>, unread: u32) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
-        let badge = catmail_frontend::tray::badge(unread);
+        let badge = super::badge(unread);
         if let Some(button) = self.status.button(mtm) {
-            if let Some(image) = icon.as_ref().and_then(template) {
+            if let Some(image) = icon.and_then(image) {
                 button.setImage(Some(&image));
             }
             button.setTitle(&NSString::from_str(badge.as_deref().unwrap_or_default()));
-            button.setToolTip(Some(&NSString::from_str(
-                &catmail_frontend::tray::tool_tip(unread),
-            )));
+            button.setToolTip(Some(&NSString::from_str(&super::tool_tip(unread))));
         }
         // Kept while the app has no Dock icon, for when it has one again.
         let badge = badge.map(|badge| NSString::from_str(&badge));
@@ -126,14 +124,13 @@ impl Item {
 
 /// A template image of [`POINTS`] from the icon at each of its sizes; only its alpha
 /// counts. `None` if none was drawn, which keeps the image there was.
-fn template(pixmaps: &Pixmaps) -> Option<Retained<NSImage>> {
+fn image(templates: &[Template]) -> Option<Retained<NSImage>> {
     let points = NSSize::new(POINTS.into(), POINTS.into());
     let image = NSImage::initWithSize(NSImage::alloc(), points);
     let mut drawn = false;
-    for (side, bgra) in pixmaps {
-        let rgba = premultiplied_rgba(bgra);
-        let side = *side as isize;
-        if rgba.len() != (side * side * 4) as usize {
+    for template in templates {
+        let side = template.size as isize;
+        if template.rgba.len() != (side * side * 4) as usize {
             continue;
         }
         // SAFETY: no planes, so the representation allocates its own buffer, described
@@ -162,22 +159,12 @@ fn template(pixmaps: &Pixmaps) -> Option<Retained<NSImage>> {
             continue;
         }
         // SAFETY: the buffer holds `side * side * 4` bytes, as asked for above, and so
-        // does `rgba`.
-        unsafe { std::ptr::copy_nonoverlapping(rgba.as_ptr(), data, rgba.len()) };
+        // does the template's.
+        unsafe { std::ptr::copy_nonoverlapping(template.rgba.as_ptr(), data, template.rgba.len()) };
         rep.setSize(points);
         image.addRepresentation(&rep);
         drawn = true;
     }
     image.setTemplate(true);
     drawn.then_some(image)
-}
-
-/// From GPUI's straight-alpha BGRA to the premultiplied RGBA the representation holds.
-fn premultiplied_rgba(bgra: &[u8]) -> Vec<u8> {
-    let (pixels, _) = bgra.as_chunks::<4>();
-    let times_alpha = |c: u8, a: u8| (u16::from(c) * u16::from(a) / 255) as u8;
-    pixels
-        .iter()
-        .flat_map(|&[b, g, r, a]| [times_alpha(r, a), times_alpha(g, a), times_alpha(b, a), a])
-        .collect()
 }
