@@ -65,10 +65,15 @@
 - [x] 服务器拒绝的改动用通知说明。⚠️ nsh-base 只有无样式的 toast 原件，通知的样式和计时在 `toast.rs`；出错也
       改成通知，不再写在侧栏底部
 - [x] 远程图片：先显示缓存里的；点击后逐批显示，换邮件即取消。⚠️ 不重新载入页面：注入脚本收到 `post_message`
-      后把 `data:` URL 填进对应的 `<img>` 和 `background`；页面因外观变化重新载入时（脚本报 `r`）再发一遍。CSP 照样
-      只放行 `data:`
+      后把 `data:` URL 填进对应的 `<img>`；页面因外观变化重新载入时（脚本报 `r`）再发一遍。CSP 照样只放行 `data:`
 - [x] 打开时先显示文字、内嵌图片后到。⚠️ 同样不重新载入页面：建页时算出页面里 `cid:` 图片的 URL，取到的内嵌
       图片用 `post_message` 填进去；已经取到的在页面重建时直接嵌进页面
+- [ ] 图片由 WebKit 自己读。⚠️ 现在只能把 `data:` URL 写进脚本发给页面，大图（一张 1–4 MB）每个字节要在主线程
+      上编码、转义，再被 JSC 解析；只好一次发一张（`d:`），换邮件才不卡，但载入还是慢。等 nsh 支持 URL scheme
+      handler（longbridge/nsh#1136）后：升级 nsh 的 rev，页面里的图片写成自定义 scheme 的 URL（内嵌部分按
+      Content-ID，远程图片按 URL），由 handler 从引擎读（内嵌部分、图片缓存）；CSP 的 `img-src` 放行这个 scheme；
+      删掉 `i:` / `d:` 消息、`PageImages` 的队列和 `data:` 编码，建页时也不再嵌入内嵌部分；"Show remote images"
+      之后改成让页面重新请求被拦下的图片。两个平台都要验证
 - [x] 附件（系统保存对话框，写文件在另一个线程）、头部（"Details"）、在浏览器打开（`hand_off`）
 - [ ] 正文的查找：WebKit 没有自带的查找栏，nsh 也没给 `WebKitFindController`，要自己用注入脚本做。选中、复制、
       全选是 WebKit 自带的

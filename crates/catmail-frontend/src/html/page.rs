@@ -43,7 +43,8 @@ const BASE_STYLE: &str = "html { overflow: hidden !important; } \
 /// is never less than the view's height and so wouldn't shrink for a shorter message), that it has painted at the web view's height
 /// (`p:<n>:<px>`, two frames after it loaded and after each resize: WebKit has shown it
 /// at that size), the links clicked (`o:<url>`), which open in the system's browser
-/// instead of in the view.
+/// instead of in the view, and that it has taken the image it was sent last (`d:<n>`),
+/// so the next can come ([`PageImages`](super::PageImages)).
 /// What the reader tells the page ([`image_message`]): the `data:` URL of an image shown,
 /// remote or inline, for the `<img>` elements that refer to it (as `img.src` normalizes
 /// it, which is `remote_image_url`'s spelling too). Only those: the sanitizer keeps no
@@ -75,15 +76,34 @@ pub const BRIDGE: &str = r#"(function () {
   function absolute(url) {
     try { return new URL(url, document.baseURI).href; } catch (e) { return null; }
   }
+  // The images by the URL they refer to, found once: parsing each image's URL for each
+  // message, once dozens are data: URLs, keeps the page busy for seconds, and the next
+  // page waits behind it.
+  var images = null;
+  function imagesOf(url) {
+    if (!images) {
+      images = new Map();
+      document.querySelectorAll("img[src]").forEach(function (img) {
+        var src = img.getAttribute("src");
+        if (src.trim().slice(0, 5).toLowerCase() === "data:") return;
+        src = absolute(src);
+        if (!src) return;
+        if (images.has(src)) images.get(src).push(img); else images.set(src, [img]);
+      });
+    }
+    return images.get(url) || [];
+  }
   window.addEventListener("message", function (e) {
     var d = String(e.data);
     if (d.slice(0, 2) !== "i:") return;
-    var end = d.indexOf("\n");
-    var url = d.slice(2, end), data = d.slice(end + 1);
-    if (data.slice(0, 5) !== "data:") return;
-    document.querySelectorAll("img[src]").forEach(function (img) {
-      if (absolute(img.getAttribute("src")) === url) img.src = data;
-    });
+    try {
+      var end = d.indexOf("\n");
+      var url = d.slice(2, end), data = d.slice(end + 1);
+      if (data.slice(0, 5) === "data:") imagesOf(url).forEach(function (img) { img.src = data; });
+    } finally {
+      // Whatever became of it: no other image comes until this is said.
+      window.nsh.postMessage("d:" + page);
+    }
   });
   window.nsh.postMessage("r:" + page);
   function painted() {
@@ -97,7 +117,7 @@ pub const BRIDGE: &str = r#"(function () {
   painted();
 })();"#;
 
-/// The message that puts a remote image's `data:` URL in place of `url` in the page.
+/// The message that puts an image's `data:` URL in place of `url` in the page.
 pub(super) fn image_message(url: &str, data_url: &str) -> String {
     format!("i:{url}\n{data_url}")
 }
@@ -109,6 +129,8 @@ pub enum FromPage<'a> {
     Height(u64, f32),
     /// At the web view's height then, in points.
     Painted(u64, f32),
+    /// It has taken the image sent last.
+    Taken(u64),
     Open(&'a str),
 }
 
@@ -124,6 +146,7 @@ impl<'a> FromPage<'a> {
         };
         match (kind, height) {
             ("r", None) => Some(FromPage::Ready(page)),
+            ("d", None) => Some(FromPage::Taken(page)),
             ("h", Some(height)) => Some(FromPage::Height(page, height)),
             ("p", Some(height)) => Some(FromPage::Painted(page, height)),
             _ => None,
@@ -255,6 +278,25 @@ mod tests {
     }
 
     #[test]
+    fn the_page_finds_its_images_once() {
+        // Not on each image sent: by then those shown are data: URLs, megabytes to parse
+        // again for every image that follows.
+        let handler = &BRIDGE[BRIDGE.find("addEventListener(\"message\"").unwrap()..];
+        let handler = &handler[..handler.find("});").unwrap()];
+        assert!(!handler.contains("querySelectorAll"), "{handler}");
+        assert!(handler.contains("imagesOf(url)"), "{handler}");
+    }
+
+    #[test]
+    fn the_page_says_it_has_taken_each_image() {
+        // Or no other image comes.
+        let handler = &BRIDGE[BRIDGE.find("addEventListener(\"message\"").unwrap()..];
+        let handler = &handler[..handler.find("\n  });").unwrap()];
+        let taken = handler.find("postMessage(\"d:\" + page)").expect(handler);
+        assert!(handler[..taken].contains("finally"), "{handler}");
+    }
+
+    #[test]
     fn plain_text_is_escaped() {
         let page = body_page(1, None, Some("<b>&"), HashMap::new(), &colors());
         assert!(page.html.contains("&lt;b&gt;&amp;"));
@@ -273,7 +315,10 @@ mod tests {
             FromPage::parse("p:3:480"),
             Some(FromPage::Painted(3, 480.0))
         );
-        for unknown in ["h:3:tall", "h:640", "r", "r:3:1", "p:3", "x:3", "x"] {
+        assert_eq!(FromPage::parse("d:3"), Some(FromPage::Taken(3)));
+        for unknown in [
+            "h:3:tall", "h:640", "r", "r:3:1", "p:3", "d:3:1", "x:3", "x",
+        ] {
             assert_eq!(FromPage::parse(unknown), None, "{unknown}");
         }
     }
