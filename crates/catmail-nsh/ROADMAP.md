@@ -22,7 +22,7 @@
 
 ## P1 应用骨架
 
-- [x] 自建 `gtk::Application`，每个窗口放一个 `AppView`，替换 `run_app`（`shell.rs`）。引擎由应用持有（`engine.rs`），
+- [x] 自建 `gtk::Application`，每个窗口放一个 `AppView`，替换 `run_app`（`shell/`；macOS 上是 `NSApplication`，见 P10）。引擎由应用持有（`engine.rs`），
       主循环结束后 `shut_down` 并等它关好；Ctrl+Q、Ctrl+W、SIGINT / SIGTERM 都走这个退出流程
 - [x] 新建 `catmail-frontend`，抽出 `instance`、`settings`（数据和文件读写）、`format`、`html`。
       其余的到用到时再抽：`folders`、`mailbox`、`refresh` 在 P2，`theme/` 的推导和导入在 P7
@@ -110,7 +110,7 @@
 
 写信的模型在 `catmail-frontend`（`composer`：`ComposeFrom::start`、From 的选项、字段解析、`Lifecycle` 决定何时
 保存 / 发送 / 关窗、`OpenComposers` 登记窗口和退出前全部关闭），与 gpui 版共用；nsh 版只有界面和窗口
-（`composer.rs`、`draft.rs`，`shell.rs` 里的 GTK 窗口）。每个 nsh 视图跑在自己的引擎线程上，写信窗口的视图和
+（`composer.rs`、`draft.rs`，`shell/` 里的窗口）。每个 nsh 视图跑在自己的引擎线程上，写信窗口的视图和
 GTK 线程之间用 `shell::on_gtk` 与一个关窗请求的通道来回。
 
 - [x] 每封草稿一个窗口；同一草稿只开一个（`OpenComposers`）
@@ -137,7 +137,7 @@ GTK 线程之间用 `shell::on_gtk` 与一个关窗请求的通道来回。
 
 主题的推导、导入和主题目录在 `catmail-frontend`（`theme`：主题是 gpui-kit 主题 JSON 的格式，但不依赖 gpui-kit），
 Accounts 的确认文案在 `accounts`，与 gpui 版共用；nsh 版把 gpui-kit 的颜色键映射成 shadcn 的 token（`theme.rs`），
-设置和主题是进程级的（`shell.rs`），对话框在 `settings.rs`。
+设置和主题是进程级的（`shell/`），对话框在 `settings.rs`。
 
 - [x] 设置对话框：外观、浅色和深色各自的主题、文字大小（`AppView::set_font_scale`）、打开即已读；Ctrl+,，
       Ctrl + / Ctrl − / Ctrl 0 改文字大小。改了就写回 `settings.json`，所有窗口（包括写信窗口）随之更新：
@@ -163,7 +163,7 @@ Accounts 的确认文案在 `accounts`，与 gpui 版共用；nsh 版把 gpui-ki
 托盘的菜单、提示文字、带角标的图标 SVG 和 Linux 的 StatusNotifierItem（`tray`）、新邮件通知的攒批、措辞和 tag
 （`new_mail`）、点击后的去处（`mailbox::Destination`）、关窗后的去留（`resident`）、`malloc_trim`（`memory`）、
 列表等待某封邮件出现（`list::Reveal`）都在 `catmail-frontend`，与 gpui 版共用。nsh 版只做计数、绘制和收发
-（`tray.rs`、`new_mail.rs`），常驻与退出在 `shell.rs`。
+（`tray.rs`、`new_mail.rs`），常驻与退出在 `shell/`。
 
 - [x] 托盘：ksni（frontend 的 `tray::linux`），显示未读数，菜单是 Open catmail、New message、Sync now、Quit。
       图标用 resvg 在另一个线程上画（nsh-core 已经带了 resvg，这里另外打开 `text`，用来画角标数字）。亮暗跟随
@@ -211,4 +211,12 @@ Accounts 的确认文案在 `accounts`，与 gpui 版共用；nsh 版把 gpui-ki
       报到上游 longbridge/nsh#1048，修复 PR longbridge/nsh#1049
 - [ ] 打包：`.desktop`；运行时依赖 GTK 4.14+ 和 WebKitGTK 6.0
 - [ ] 与 gpui 版对比：内存（含 WebKit 子进程）、滚动帧率、冷启动时间
-- [ ] macOS（WKWebView）、Windows（WebView2）后端
+- [x] macOS 后端（AppKit，正文在 WKWebView）：`shell/` 分成共用的部分和两个工具包（`gtk.rs`、`appkit.rs`），窗口、
+      退出流程、常驻、设置和主题两边共用。⚠️ AppKit 没有 GLib 那样的主循环 future 执行器，用 `async-task` 在主
+      dispatch queue 上跑；输入框失焦也自己用事件 monitor 做（同 Linux）。菜单栏、停主循环、外观映射抄了 nsh `run_app` 的私有实现，
+      失焦两个后端各一份，宜由 nsh 提供（#248）。菜单栏有应用菜单（⌘Q 走退出流程）、
+      Edit、Window（⌘W 走窗口的关闭询问），点 Dock 图标唤回主窗口；信号用 `ctrlc`。快捷键提示用 nsh 的 `key_label`
+- [ ] macOS：状态栏图标（gpui 版的 `tray/macos.rs`，宜先抽进 frontend）、新邮件通知（系统通知要打包成 .app）、
+      .app 打包（现在菜单栏显示可执行文件名，Dock 没有图标）、注销时不取消（现在 `applicationShouldTerminate`
+      先取消，等写信窗口存完再退出）
+- [ ] Windows（WebView2）后端

@@ -1,6 +1,6 @@
 [package]
 name = "catmail-nsh"
-description = "Spike: a catmail frontend on Native Shell (nsh), GTK 4 on Linux, bodies in a web view"
+description = "Spike: a catmail frontend on Native Shell (nsh), GTK 4 on Linux and AppKit on macOS, bodies in a web view"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,16 +18,40 @@ anyhow.workspace = true
 futures-channel.workspace = true
 futures-util.workspace = true
 jiff.workspace = true
+pollster.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+url.workspace = true
 
-# Only the Linux backend is tried; elsewhere the binary says so and exits.
-[target.'cfg(target_os = "linux")'.dependencies]
+# Linux's and macOS's backends are tried; elsewhere the binary says so and exits.
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 nsh-core.workspace = true
 nsh-base.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
 glib-unix.workspace = true
 resvg.workspace = true
 nsh-platform-linux.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nsh-platform-macos.workspace = true
+async-task.workspace = true
+block2.workspace = true
+ctrlc.workspace = true
+dispatch2.workspace = true
+objc2.workspace = true
+objc2-app-kit = { workspace = true, features = [
+    "block2",
+    "NSAppearance",
+    "NSEvent",
+    "NSGraphics",
+    "NSRunningApplication",
+    "NSScrollView",
+    "NSText",
+    "NSTextField",
+    "NSWindow",
+] }
+objc2-foundation = { workspace = true, features = ["NSNotification"] }
 
 [lints]
 workspace = true

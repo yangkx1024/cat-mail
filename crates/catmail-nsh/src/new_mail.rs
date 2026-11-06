@@ -15,7 +15,7 @@ use std::cell::RefCell;
 
 use catmail_core::{Event, MessageId, RecvError};
 use catmail_frontend::new_mail::{Arrivals, GATHER, Target, notifications};
-use nsh_platform_linux::gtk4::{self as gtk, gio, glib, prelude::*};
+use nsh_platform_linux::gtk4::{gio, glib, prelude::*};
 
 use crate::{engine, shell};
 
@@ -29,8 +29,8 @@ thread_local! {
 
 /// Tells about the new mail the open engine announces from now on, until it closes. On
 /// GTK's thread.
-pub fn start(app: &gtk::Application) {
-    let Some(client) = engine::open() else {
+pub fn start() {
+    let (Some(client), Some(app)) = (engine::open(), shell::application()) else {
         return;
     };
     let open = gio::SimpleAction::new(OPEN, Some(glib::VariantTy::STRING));

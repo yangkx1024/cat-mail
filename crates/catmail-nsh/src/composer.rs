@@ -2,8 +2,8 @@
 //! Bcc, Subject, the text, the attachments and the bar of commands. When it saves, sends
 //! and closes is `catmail_frontend::composer`'s ([`Lifecycle`]); this is the view.
 //!
-//! A composer's view runs on its window's own nsh thread; the window is GTK's
-//! (`shell::open_composer`), and closing it asks the view, which saves first and then
+//! A composer's view runs on its window's own nsh thread; the window is the shell's
+//! (`shell::opened`), and closing it asks the view, which saves first and then
 //! closes it (`shell::composer_closed`). State is nsh globals, the view's own.
 
 use std::borrow::Cow;
@@ -29,15 +29,14 @@ use nsh_core::element::desktop::{MenuItem, popup_menu, set_title};
 use nsh_core::element::{ElementRef, FileDropEvent, Owner, Spawned, input, pick_paths};
 use nsh_core::file_dialog::OpenDialog;
 use nsh_core::prelude::*;
-use nsh_platform_linux::Root;
-use nsh_platform_linux::gtk4::gio::{self, prelude::FileExt as _};
 
 use crate::app::{client, in_mailbox};
 use crate::commands::with_accounts;
 use crate::commands::{Size, icon_button, primary_button};
 use crate::icons::{Icon, icon};
 use crate::list;
-use crate::shell::{self, on_gtk};
+use crate::nsh_platform::Root;
+use crate::shell::{self, on_main};
 use crate::sidebar::SelectedPlace;
 use crate::toast::{self, Level, notify};
 
@@ -45,14 +44,14 @@ use crate::toast::{self, Level, notify};
 /// first; failures are reported in the mailbox.
 pub fn open(from: ComposeFrom) {
     in_mailbox(async move {
-        if on_gtk(move || shell::begin_opening(from)).await != Some(true) {
+        if on_main(move || shell::begin_opening(from)).await != Some(true) {
             return;
         }
         let opened = from.start(&client()).await;
         if let Err(e) = &opened {
             notify(Level::Error, format!("Couldn't start the message: {e}"));
         }
-        let _ = on_gtk(move || shell::opened(from, opened.ok())).await;
+        let _ = on_main(move || shell::opened(from, opened.ok())).await;
     });
 }
 
@@ -329,13 +328,13 @@ fn run_finish() {
 
 fn close_window() {
     let draft = draft();
-    drop(on_gtk(move || shell::composer_closed(draft)));
+    drop(on_main(move || shell::composer_closed(draft)));
 }
 
 /// The window stays open to be dealt with: quitting, which waits for every composer to
 /// close, doesn't.
 fn stop_closing_all() {
-    drop(on_gtk(shell::stop_closing_all));
+    drop(on_main(shell::stop_closing_all));
 }
 
 fn show_field_error((field, message): FieldError) {
@@ -385,7 +384,7 @@ fn dropped(event: &FileDropEvent) {
     let paths = event
         .uris
         .iter()
-        .filter_map(|uri| gio::File::for_uri(uri).path())
+        .filter_map(|uri| url::Url::parse(uri).ok()?.to_file_path().ok())
         .collect::<Vec<_>>();
     if !paths.is_empty() {
         attach_paths(paths);
@@ -875,7 +874,7 @@ fn footer() -> impl IntoElement {
         .child(primary_button(
             Icon::PaperAirplane,
             move || if sending() { "Sending" } else { "Send" }.to_owned(),
-            || "Send (Ctrl+Enter)".to_owned(),
+            || format!("Send ({})", key_label("mod+enter")),
             move || !ending(),
             send,
         ))

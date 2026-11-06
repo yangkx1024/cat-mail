@@ -83,6 +83,13 @@ mime_guess = "2.0.5"
 nsh-core = { git = "https://github.com/longbridge/nsh", rev = "f8cfd1a650640bd4b2668201d364e08e3b0ab570" }
 nsh-base = { git = "https://github.com/longbridge/nsh", rev = "f8cfd1a650640bd4b2668201d364e08e3b0ab570", default-features = false }
 nsh-platform-linux = { git = "https://github.com/longbridge/nsh", rev = "f8cfd1a650640bd4b2668201d364e08e3b0ab570", default-features = false, features = ["webview"] }
+nsh-platform-macos = { git = "https://github.com/longbridge/nsh", rev = "f8cfd1a650640bd4b2668201d364e08e3b0ab570", default-features = false }
+# catmail-nsh's AppKit shell: the main thread's futures on the main dispatch queue
+# (async-task, the version GPUI uses), and the event monitor's block (the versions nsh's
+# macOS platform uses).
+async-task = "4.7.1"
+block2 = "0.6.2"
+dispatch2 = "0.3.1"
 # The macOS status item (menu bar icon, its menu, the Dock badge): AppKit straight, no
 # tray crate. The versions GPUI's macOS platform uses.
 objc2 = "0.6.5"

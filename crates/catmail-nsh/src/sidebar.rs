@@ -568,7 +568,7 @@ pub fn sidebar() -> impl IntoElement {
                 .child(primary_button(
                     Icon::PencilSquare,
                     || "Compose".to_owned(),
-                    || "Compose (Ctrl+N)".to_owned(),
+                    || format!("Compose ({})", key_label("mod+n")),
                     has_accounts,
                     composer::new_message,
                 )),
@@ -591,7 +591,7 @@ pub fn sidebar() -> impl IntoElement {
                 .py(px(4.0))
                 .child(icon_button(
                     || Icon::Cog6Tooth,
-                    || "Settings (Ctrl+,)".to_owned(),
+                    || format!("Settings ({})", key_label("mod+,")),
                     || true,
                     Size::Bar,
                     settings::open,

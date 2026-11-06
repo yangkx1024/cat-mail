@@ -1,51 +1,55 @@
 //! `catmail-nsh`: a spike of a catmail frontend on Native Shell (nsh), to see how its
-//! GTK 4 backend does on Linux, brought up to `catmail-gui` feature by feature
-//! (`ROADMAP.md`). It is the app for the data directory the GUI uses (`CATMAIL_DATA_DIR`
+//! GTK 4 backend does on Linux and its AppKit one on macOS, brought up to `catmail-gui`
+//! feature by feature (`ROADMAP.md`). It is the app for the data directory the GUI uses (`CATMAIL_DATA_DIR`
 //! for another one), with the GUI's settings (`CATMAIL_CONFIG_DIR`): a launch of either
 //! while the other runs brings the running one's window up.
 
-#![forbid(unsafe_code)]
-#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#![cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 
 #[cfg(target_os = "linux")]
+use nsh_platform_linux as nsh_platform;
+#[cfg(target_os = "macos")]
+use nsh_platform_macos as nsh_platform;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod app;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod commands;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod composer;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod draft;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod engine;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod form;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod icons;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod list;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod login;
 #[cfg(target_os = "linux")]
 mod new_mail;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod outbox;
 mod page;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod reader;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod settings;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod shell;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod sidebar;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod theme;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod toast;
 #[cfg(target_os = "linux")]
 mod tray;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn main() -> anyhow::Result<std::process::ExitCode> {
     use catmail_core::{BodyPrefetch, Config, DEFAULT_GC_INTERVAL, MailClient, SyncSchedule};
     use catmail_frontend::instance::{self, Claim, Display, Request};
@@ -73,18 +77,18 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
         Claim::Unavailable => (MailClient::builder(config), None),
     };
     // What the GUI runs: the engine syncs, prefetches, sends and collects garbage on its
-    // own, and its futures don't need tokio, which GTK's loop isn't.
+    // own, and its futures don't need tokio, which the toolkit's loop isn't.
     let builder = builder
         .sync_in_background(Some(SyncSchedule::default()))
         .prefetch_bodies(Some(BodyPrefetch::default()))
         .send_in_background(true)
         .collect_garbage_every(Some(DEFAULT_GC_INTERVAL));
     let code = shell::run(builder, requests, config_dir.map(SettingsFile::new));
-    Ok(std::process::ExitCode::from(code.get()))
+    Ok(std::process::ExitCode::from(code))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn main() {
-    eprintln!("catmail-nsh: the nsh spike runs on Linux only");
+    eprintln!("catmail-nsh: the nsh spike runs on Linux and macOS only");
     std::process::exit(1);
 }

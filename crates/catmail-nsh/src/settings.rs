@@ -418,10 +418,11 @@ fn themes_pane(
                         .flex_1()
                         .gap(px(2.0))
                         .child(section_title("Text size"))
-                        .child(help(
-                            "Scales the whole window. Ctrl + and Ctrl − change it anywhere."
-                                .to_owned(),
-                        )),
+                        .child(help(format!(
+                            "Scales the whole window. {} and {} change it anywhere.",
+                            key_label("mod+plus"),
+                            key_label("mod+minus")
+                        ))),
                 )
                 .child(
                     view()
