@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use catmail_core::{MailClient, MessageCursor, MessageId, MessageSummary};
 
-use super::{Days, PAGE, Removal, Reselect, Reveal, Row, RowId, fetch};
+use super::{Days, PAGE, Removal, Reveal, Row, RowId, fetch};
 use crate::mailbox::Source;
 use crate::refresh::Coalesce;
 
@@ -113,7 +113,7 @@ impl Listing {
     /// The line at `ix`.
     pub fn line(&self, ix: usize) -> Option<Line> {
         Some(match *self.lines.get(ix)? {
-            LineAt::Day(day) => Line::Day(self.days.0[day].label.clone()),
+            LineAt::Day(day) => Line::Day(self.days.get(day)?.label.clone()),
             LineAt::Row(row) => Line::Row(self.rows[row].clone()),
         })
     }
@@ -202,7 +202,7 @@ pub struct Loaded {
 }
 
 /// Rows a read brought, for the listing.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Rows {
     /// The rows shown, read again: in place of them.
     Replace(Vec<Row>, bool),
@@ -234,7 +234,6 @@ pub enum Select {
 /// keeps where its views read it, and hands in.
 #[derive(Debug, Default)]
 pub struct ListModel {
-    source: Option<Source>,
     /// Counted when the source changes, so rows read for the one before are dropped.
     generation: u64,
     /// One read at a time; the engine reporting a change meanwhile reads again after it.
@@ -260,9 +259,9 @@ impl ListModel {
         self.found_on_server = Rc::new([]);
         self.removal.clear();
         self.reveal.forget();
-        self.source = source.clone();
-        let fetch = self.start(PAGE, None);
-        (Listing::new(source), fetch)
+        let listing = Listing::new(source);
+        let fetch = self.start(&listing, PAGE, None);
+        (listing, fetch)
     }
 
     /// The source shown, counted: whether one is still shown, for work started for it.
@@ -281,7 +280,7 @@ impl ListModel {
     /// meanwhile ([`Loaded::again`]).
     pub fn refresh(&mut self, listing: &Listing) -> Option<Fetch> {
         let shown = u32::try_from(listing.rows.len()).unwrap_or(u32::MAX);
-        self.start(shown.max(PAGE), None)
+        self.start(listing, shown.max(PAGE), None)
     }
 
     /// The next page, when the list is scrolled to its end: only of messages (folders,
@@ -292,7 +291,7 @@ impl ListModel {
             return None;
         }
         let after = listing.rows.last()?.message()?.cursor();
-        self.start(PAGE, Some(after))
+        self.start(listing, PAGE, Some(after))
     }
 
     /// The servers found `found` for the search shown in `generation`: whether to read
@@ -305,8 +304,13 @@ impl ListModel {
         true
     }
 
-    fn start(&mut self, limit: u32, after: Option<MessageCursor>) -> Option<Fetch> {
-        let source = self.source.clone()?;
+    fn start(
+        &mut self,
+        listing: &Listing,
+        limit: u32,
+        after: Option<MessageCursor>,
+    ) -> Option<Fetch> {
+        let source = listing.source.clone()?;
         if !self.reading.start() {
             return None;
         }
@@ -356,15 +360,7 @@ impl ListModel {
         // A sync's events often bring nothing this list shows.
         let unchanged = !rows.is_empty() && listing.rows == rows && listing.has_more == more;
         if !unchanged {
-            let at = selected.and_then(|id| listing.rows.iter().position(|r| r.id() == id));
-            loaded.select = match self
-                .removal
-                .reselect(at.zip(selected), &listing.rows, &rows)
-            {
-                Reselect::Keep { .. } => Select::Keep,
-                Reselect::Next(ix) => Select::Open(rows[ix].id()),
-                Reselect::Gone => Select::Clear,
-            };
+            loaded.select = self.removal.reselect(selected, &listing.rows, &rows);
             let listed: HashSet<_> = rows.iter().filter_map(Row::message).map(|m| m.id).collect();
             if !checked.is_subset(&listed) {
                 loaded.checked = Some(checked.intersection(&listed).copied().collect());
@@ -429,7 +425,7 @@ mod tests {
     use catmail_core::FolderId;
 
     use super::*;
-    use crate::fixtures::message;
+    use crate::fixtures::{message, midday};
 
     fn rows(ids: &[i64]) -> Vec<Row> {
         ids.iter()
@@ -475,11 +471,7 @@ mod tests {
                 self.selected,
                 &self.checked,
             )?;
-            if let Some(rows) = &loaded.rows {
-                let rows = match rows {
-                    Rows::Replace(rows, more) => Rows::Replace(rows.clone(), *more),
-                    Rows::Append(rows, more) => Rows::Append(rows.clone(), *more),
-                };
+            if let Some(rows) = loaded.rows.clone() {
                 rows.apply(&mut self.listing);
             }
             match loaded.select {
@@ -528,8 +520,9 @@ mod tests {
         list.load(&next.unwrap(), &[3]);
         assert_eq!(list.ids(), [m(3)]);
         // Nothing shown: nothing read.
-        assert!(list.model.show(None).1.is_none());
-        assert!(list.model.refresh(&list.listing).is_none());
+        let (nothing, fetch) = list.model.show(None);
+        assert!(fetch.is_none());
+        assert!(list.model.refresh(&nothing).is_none());
     }
 
     #[test]
@@ -698,13 +691,13 @@ mod tests {
     #[test]
     fn the_servers_results_are_read_with_the_search_they_were_for() {
         let mut model = ListModel::default();
-        let (_, fetch) = model.show(Some(Source::Search("lunch".into())));
+        let (listing, fetch) = model.show(Some(Source::Search("lunch".into())));
         let fetch = fetch.unwrap();
         let generation = model.generation();
         assert!(!model.found_on_server(generation, Vec::new()));
         assert!(model.found_on_server(generation, vec![MessageId(4)]));
-        model.loaded(&fetch, None, &Listing::default(), None, &HashSet::new());
-        let again = model.refresh(&Listing::default()).unwrap();
+        model.loaded(&fetch, None, &listing, None, &HashSet::new());
+        let again = model.refresh(&listing).unwrap();
         assert_eq!(&*again.found_on_server, [MessageId(4)]);
         model.show(Some(FOLDER));
         assert!(!model.found_on_server(generation, vec![MessageId(4)]));
@@ -714,12 +707,7 @@ mod tests {
     fn a_page_more_adds_lines_to_the_last_day_and_after_it() {
         let dated = |id, day: &str| {
             let mut message = message(id, 1, 1);
-            message.date = Some(
-                format!("{day}T12:00:00Z")
-                    .parse::<jiff::Timestamp>()
-                    .unwrap()
-                    .as_second(),
-            );
+            message.date = Some(midday(day));
             Row::Message(message)
         };
         let mut listing = Listing::new(Some(FOLDER));

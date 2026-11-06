@@ -241,24 +241,6 @@ fn color(color: Rgba) -> Hsla {
 /// A theme drawn small, in its own colors, with its name.
 fn theme_card(entry: ThemeEntry, dark: bool) -> AnyElement {
     let swatch = Swatch::of(&entry.config);
-    let [
-        background,
-        foreground,
-        primary,
-        sidebar,
-        border,
-        muted,
-        selection,
-    ] = [
-        swatch.background,
-        swatch.foreground,
-        swatch.primary,
-        swatch.sidebar,
-        swatch.border,
-        swatch.muted,
-        swatch.selection,
-    ]
-    .map(color);
     let hues = swatch.hues.map(color).into_iter();
     let name = entry.name().to_owned();
     let chosen = name.clone();
@@ -282,13 +264,13 @@ fn theme_card(entry: ThemeEntry, dark: bool) -> AnyElement {
     let miniature = view()
         .flex_row()
         .h(px(64.0))
-        .bg(background)
+        .bg(color(swatch.background))
         .child(
             view()
                 .w(px(32.0))
-                .bg(sidebar)
+                .bg(color(swatch.sidebar))
                 .border_r_1()
-                .border_color(border),
+                .border_color(color(swatch.border)),
         )
         .child(
             view()
@@ -300,17 +282,23 @@ fn theme_card(entry: ThemeEntry, dark: bool) -> AnyElement {
                         .flex_row()
                         .items_center()
                         .gap(px(6.0))
-                        .child(view().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(primary))
-                        .child(line(55.0, foreground)),
+                        .child(
+                            view()
+                                .w(px(6.0))
+                                .h(px(6.0))
+                                .rounded(px(3.0))
+                                .bg(color(swatch.primary)),
+                        )
+                        .child(line(55.0, color(swatch.foreground))),
                 )
-                .child(view().pl(px(12.0)).child(line(40.0, muted)))
+                .child(view().pl(px(12.0)).child(line(40.0, color(swatch.muted))))
                 .child(
                     view()
                         .ml(px(12.0))
                         .h(px(12.0))
                         .w(relative(0.6))
                         .rounded(px(3.0))
-                        .bg(selection),
+                        .bg(color(swatch.selection)),
                 ),
         );
     let picked = name.clone();

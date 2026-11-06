@@ -133,6 +133,19 @@ mod tests {
     }
 
     #[test]
+    fn the_icon_is_the_apps_with_the_count_or_the_menu_bars_template() {
+        let (light, sizes) = icon(false, 7);
+        if cfg!(target_os = "macos") {
+            assert_eq!(light, MENU_BAR_ICON);
+            assert_eq!(sizes, MENU_BAR_SIZES);
+        } else {
+            assert!(light.contains(LIGHT_ICON) && light.contains(">7</text>"));
+            assert!(icon(true, 0).0 == DARK_ICON);
+            assert_eq!(sizes, badged::SIZES);
+        }
+    }
+
+    #[test]
     fn pixels_come_out_as_argb() {
         assert_eq!(Pixmap::from_rgba(1, &[1, 2, 3, 0x80]).argb, [0x80, 1, 2, 3]);
     }

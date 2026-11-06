@@ -7,11 +7,13 @@
 
 mod rows;
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use catmail_core::{Draft, Flags, FolderId, MessageId, MessageSummary, OutboxEntry, SearchQuery};
+use catmail_core::{
+    AccountId, Draft, Flags, FolderId, MessageId, MessageSummary, OutboxEntry, SearchQuery,
+};
 use catmail_frontend::commands::MessageCommand;
 use catmail_frontend::composer::ComposeFrom;
 use catmail_frontend::list::{
@@ -59,36 +61,37 @@ struct SearchText(String);
 #[derive(Clone, Default)]
 struct LabelNames(HashMap<FolderId, String>);
 
-/// The reads of the list. Not reactive.
-#[derive(Clone, Default)]
-struct Reads(Rc<RefCell<ListModel>>);
-
-fn reads() -> Rc<RefCell<ListModel>> {
-    global::<Reads>().with_untracked(|r| r.0.clone())
-}
-
-/// What the view adds to the reads. Not reactive.
+/// The reads of the list, and what the view adds to them. Not reactive.
 #[derive(Default)]
-struct Typing {
+struct ListState {
+    model: ListModel,
     /// Counts the keys typed in the search field: a pause searches if no other key
     /// followed.
-    typed: Cell<u64>,
+    typed: u64,
     /// `CATMAIL_GUI_OPEN` opened its row already.
-    opened_from_env: Cell<bool>,
+    opened_from_env: bool,
 }
 
 #[derive(Clone, Default)]
-struct TypingState(Rc<Typing>);
+struct State(Rc<RefCell<ListState>>);
 
-fn typing() -> Rc<Typing> {
-    global::<TypingState>().with_untracked(|t| t.0.clone())
+/// `f` with the list's state.
+fn state<T>(f: impl FnOnce(&mut ListState) -> T) -> T {
+    let state = global::<State>().with_untracked(|s| s.0.clone());
+    f(&mut state.borrow_mut())
+}
+
+/// `f` with the reads, and the listing they are of. Untracked.
+fn reads<T>(f: impl FnOnce(&mut ListModel, &Listing) -> T) -> T {
+    global::<Listing>().with_untracked(|listing| state(|s| f(&mut s.model, listing)))
 }
 
 /// Counts a key typed in the search field, or the field cleared.
 fn count_typed() -> u64 {
-    let typing = typing();
-    typing.typed.set(typing.typed.get() + 1);
-    typing.typed.get()
+    state(|s| {
+        s.typed += 1;
+        s.typed
+    })
 }
 
 /// The list's handle, for scrolling it.
@@ -115,11 +118,12 @@ pub fn reading() -> bool {
 
 /// Shows `source` from the top, or nothing.
 pub fn show(source: Option<Source>) {
-    let (listing, fetch) = reads().borrow_mut().show(source.clone());
+    let (listing, fetch) = state(|s| s.model.show(source.clone()));
     if let Some(Source::Search(text)) = source {
-        search_server(text, reads().borrow().generation());
+        search_server(text, state(|s| s.model.generation()));
     }
     global::<Listing>().set(listing);
+    set_shown_in();
     global::<Selected>().set(Selected(None));
     global::<Checked>().set(Checked::default());
     if let Some(list) = global::<ListRef>().with_untracked(|r| r.0) {
@@ -134,7 +138,7 @@ pub fn show(source: Option<Source>) {
 fn search_server(text: String, generation: u64) {
     in_view(async move {
         timer(SERVER_SEARCH_DELAY).await;
-        if reads().borrow().generation() != generation {
+        if state(|s| s.model.generation()) != generation {
             return;
         }
         // The engine logs what each server said; this is what kept it from asking.
@@ -145,7 +149,7 @@ fn search_server(text: String, generation: u64) {
                 return;
             }
         };
-        if reads().borrow_mut().found_on_server(generation, found) {
+        if state(|s| s.model.found_on_server(generation, found)) {
             refresh();
         }
     });
@@ -154,12 +158,12 @@ fn search_server(text: String, generation: u64) {
 /// Reads the rows shown again (after the engine reported a change), keeping the selected
 /// row selected; one more read follows one running (`ListModel::refresh`).
 pub fn refresh() {
-    let fetch = global::<Listing>().with_untracked(|l| reads().borrow_mut().refresh(l));
+    let fetch = reads(|model, listing| model.refresh(listing));
     read(fetch);
 }
 
 fn load_more() {
-    let fetch = global::<Listing>().with_untracked(|l| reads().borrow_mut().more(l));
+    let fetch = reads(|model, listing| model.more(listing));
     read(fetch);
 }
 
@@ -176,11 +180,7 @@ fn read(fetch: Option<Fetch>) {
         };
         let selected = global::<Selected>().with_untracked(|s| s.0);
         let loaded = global::<Checked>().with_untracked(|checked| {
-            global::<Listing>().with_untracked(|listing| {
-                let reads = reads();
-                let mut reads = reads.borrow_mut();
-                reads.loaded(&fetch, rows, listing, selected, &checked.0)
-            })
+            reads(|model, listing| model.loaded(&fetch, rows, listing, selected, &checked.0))
         });
         // Another source is shown.
         let Some(loaded) = loaded else {
@@ -195,7 +195,7 @@ fn read(fetch: Option<Fetch>) {
 }
 
 fn show_loading() {
-    let reading = Loading(reads().borrow().is_reading());
+    let reading = Loading(state(|s| s.model.is_reading()));
     if global::<Loading>().get_untracked() != reading {
         global::<Loading>().set(reading);
     }
@@ -225,7 +225,7 @@ fn show_loaded(loaded: Loaded) {
 /// For looking at the reading pane without a mouse (screenshots): the row
 /// at index `CATMAIL_GUI_OPEN` of the first rows read opens.
 fn open_from_env() {
-    if typing().opened_from_env.replace(true) {
+    if state(|s| std::mem::replace(&mut s.opened_from_env, true)) {
         return;
     }
     let row = std::env::var("CATMAIL_GUI_OPEN")
@@ -242,7 +242,7 @@ fn open_from_env() {
 /// next of them doesn't, if another source is shown first, or if the user opens a row
 /// meanwhile.
 pub fn reveal(id: MessageId) {
-    let (row, again) = global::<Listing>().with_untracked(|l| reads().borrow_mut().reveal(id, l));
+    let (row, again) = reads(|model, listing| model.reveal(id, listing));
     if let Some(row) = row {
         open(row);
     }
@@ -256,7 +256,7 @@ pub fn reveal(id: MessageId) {
 /// stays as it is.
 pub fn open(row: RowId) {
     // The user's choice wins over a notification clicked before.
-    reads().borrow_mut().opened();
+    state(|s| s.model.opened());
     global::<Selected>().set(Selected(Some(row)));
     let RowId::Message(id) = row else {
         return;
@@ -264,7 +264,7 @@ pub fn open(row: RowId) {
     if crate::shell::settings().mark_read_on_open
         && message(id).is_some_and(|m| !m.flags.contains(Flags::SEEN))
     {
-        commands::set_flags(catmail_frontend::commands::mark_read(id));
+        commands::run_change(catmail_frontend::commands::mark_read(id));
     }
 }
 
@@ -346,27 +346,46 @@ pub fn source() -> Option<Source> {
 /// [`removal_settled`].
 pub fn expect_removal(ids: &[MessageId]) -> Option<u64> {
     let selected = global::<Selected>().with_untracked(|s| s.0);
-    reads().borrow_mut().expect_removal(selected, ids)
+    state(|s| s.model.expect_removal(selected, ids))
 }
 
 /// The change behind `removal`, which may take the message out of the list, was made
 /// locally (`made`), or failed: the rows are read again, and say whether it left.
 pub fn removal_settled(removal: u64, made: bool) {
-    if reads().borrow_mut().removal_settled(removal, made) {
+    if state(|s| s.model.removal_settled(removal, made)) {
         refresh();
     }
 }
 
 /// The accounts' user labels, by the name a row shows them by.
+/// Also where each account's messages are looked at ([`ShownIn`]).
 pub fn set_labels() {
-    let names: HashMap<_, _> = global::<Accounts>().with_untracked(|a| {
-        a.0.iter()
-            .flatten()
-            .flat_map(|entry| entry.folders.user_labels())
-            .collect()
+    let names: HashMap<_, _> = sidebar::with_accounts(|accounts| {
+        let labels = accounts
+            .iter()
+            .flat_map(|entry| entry.folders.user_labels());
+        labels.collect()
     });
     if global::<LabelNames>().with_untracked(|l| l.0 != names) {
         global::<LabelNames>().set(LabelNames(names));
+    }
+    set_shown_in();
+}
+
+/// Where the rows' messages are looked at, by account (`Source::shown_in_each`): the
+/// label a row needn't name. Worked out once for the source and the accounts, not by
+/// each row.
+#[derive(Clone, Default, PartialEq)]
+struct ShownIn(HashMap<AccountId, FolderId>);
+
+fn set_shown_in() {
+    let source = source();
+    let shown_in = match source {
+        Some(source) => sidebar::with_accounts(|a| source.shown_in_each(a)),
+        None => HashMap::new(),
+    };
+    if global::<ShownIn>().with_untracked(|s| s.0 != shown_in) {
+        global::<ShownIn>().set(ShownIn(shown_in));
     }
 }
 
@@ -379,7 +398,7 @@ fn typed(text: String) {
     let typed = count_typed();
     in_view(async move {
         timer(SEARCH_DELAY).await;
-        if typing().typed.get() != typed {
+        if state(|s| s.typed) != typed {
             return;
         }
         let text = text.trim();
@@ -518,12 +537,10 @@ fn sync_button() -> impl IntoElement {
             spawn(finish_turn(angle));
         }
     });
-    let has_accounts =
-        move || global::<Accounts>().with(|a| a.0.as_ref().is_some_and(|a| !a.is_empty()));
     crate::buttons::icon_button(
         || Icon::ArrowPath,
         || "Sync now".to_owned(),
-        move || has_accounts() && !syncing.get(),
+        move || sidebar::has_accounts() && !syncing.get(),
         Size::Bar,
         sidebar::sync,
     )
@@ -552,7 +569,7 @@ fn header() -> impl IntoElement {
         let source = global::<Listing>().with(|l| l.source().cloned());
         let place = global::<SelectedPlace>().with(|p| p.0);
         global::<Accounts>().with(|a| {
-            let accounts = a.0.as_deref().unwrap_or_default();
+            let accounts = a.list();
             (
                 mailbox::list_title(source.as_ref(), place, accounts),
                 mailbox::list_note(source.as_ref(), place, accounts),

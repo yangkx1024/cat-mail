@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use catmail_core::{AccountId, FolderId};
 use catmail_frontend::mailbox::sidebar::{
-    Folds, Group, Heading, Item, Loaded, SidebarModel, sidebar_groups,
+    Folds, Group, Heading, Item, Loaded, Selection, SidebarModel, sidebar_groups,
 };
 use catmail_frontend::mailbox::{self, AccountEntry, Destination, Place, SYNC_ON_OPEN_AFTER};
 use nsh_base::theme;
@@ -29,18 +29,30 @@ use crate::{chrome, composer, settings};
 #[derive(Clone, Default)]
 pub struct Accounts(pub Option<Vec<AccountEntry>>);
 
+impl Accounts {
+    /// The accounts shown: none before the first read.
+    pub fn list(&self) -> &[AccountEntry] {
+        self.0.as_deref().unwrap_or_default()
+    }
+}
+
+/// Whether there is an account to write from or sync. Tracked.
+pub fn has_accounts() -> bool {
+    global::<Accounts>().with(|a| !a.list().is_empty())
+}
+
 /// Where the sidebar's selection is.
 #[derive(Clone, Default)]
 pub struct SelectedPlace(pub Option<Place>);
 
 /// `f` with the accounts as the sidebar has them.
 pub fn with_accounts<T>(f: impl FnOnce(&[AccountEntry]) -> T) -> T {
-    global::<Accounts>().with_untracked(|a| f(a.0.as_deref().unwrap_or_default()))
+    global::<Accounts>().with_untracked(|a| f(a.list()))
 }
 
 /// `f` with account `id` as the sidebar has it; `None` while it has no such account.
 pub fn with_account<T>(id: AccountId, f: impl FnOnce(&AccountEntry) -> T) -> Option<T> {
-    with_accounts(|a| a.iter().find(|e| e.account.id == id).map(f))
+    with_accounts(|a| AccountEntry::find(a, id).map(f))
 }
 
 /// The reads of the sidebar. Not reactive: nothing shows it.
@@ -94,10 +106,10 @@ pub fn load() {
 fn show(loaded: Loaded) {
     global::<Accounts>().set(Accounts(Some(loaded.accounts)));
     crate::mailbox::list::set_labels();
-    match loaded.select {
-        Some(place) => select(place),
-        None if loaded.refresh_list => crate::mailbox::list::refresh(),
-        None => {}
+    match loaded.selection {
+        Selection::Keep => {}
+        Selection::KeepAndRefresh => crate::mailbox::list::refresh(),
+        Selection::Go(place) => select(place),
     }
     if let Some(message) = loaded.reveal {
         crate::mailbox::list::reveal(message);
@@ -208,7 +220,7 @@ pub fn select(place: Option<Place>) {
     let account = global::<Accounts>()
         .with_untracked(|a| Some(place?.account_in(a.0.as_deref()?)?.account.id));
     if let Some(account) = account {
-        global::<Folds>().update(|f| f.unfold(account));
+        global::<Folds>().update(|f| f.set_account_open(account, true));
     }
     selected.set(SelectedPlace(place));
     for folder in shown_folders() {
@@ -238,16 +250,6 @@ fn toggle_folder(key: &str) {
     global::<Folds>().update(|f| f.toggle_folder(key));
 }
 
-fn toggle(account: AccountId) {
-    let folds = global::<Folds>();
-    let toggled = with_accounts(|accounts| {
-        let mut toggled = folds.get_untracked();
-        toggled.toggle_account(accounts, account);
-        toggled
-    });
-    folds.set(toggled);
-}
-
 // --- The pane -----------------------------------------------------------------------
 
 pub fn sidebar() -> impl IntoElement {
@@ -257,16 +259,11 @@ pub fn sidebar() -> impl IntoElement {
         global::<Folds>().update(|f| f.unfold_all = true);
     }
     let groups = computed(move || {
-        global::<Folds>().with(|folds| {
-            global::<Accounts>().with(|a| sidebar_groups(a.0.as_deref().unwrap_or_default(), folds))
-        })
+        global::<Folds>()
+            .with(|folds| global::<Accounts>().with(|a| sidebar_groups(a.list(), folds)))
     });
-    let note = computed(move || {
-        global::<Accounts>().with(|a| mailbox::connection_note(a.0.as_deref().unwrap_or_default()))
-    });
+    let note = computed(move || global::<Accounts>().with(|a| mailbox::connection_note(a.list())));
     on_key("F2", move |_| rename_selected());
-    let has_accounts =
-        move || global::<Accounts>().with(|a| a.0.as_ref().is_some_and(|a| !a.is_empty()));
     // As wide as the pane it is in, which the user drags.
     view()
         .flex_1()
@@ -393,7 +390,8 @@ fn heading(group: ReadSignal<Group>) -> View {
                 .hover(|s| s.bg(row_background(|| false, true)))
                 .on_press(move || {
                     if let Some(account) = account() {
-                        toggle(account);
+                        let open = !open();
+                        global::<Folds>().update(|f| f.set_account_open(account, open));
                     }
                 })
                 .on_context_menu(move |_: &ContextMenuEvent| {

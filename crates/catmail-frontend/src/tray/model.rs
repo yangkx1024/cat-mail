@@ -73,6 +73,7 @@ impl TrayModel {
 
 #[cfg(test)]
 mod tests {
+    use super::super::icon;
     use super::*;
 
     #[test]
@@ -103,7 +104,7 @@ mod tests {
         tray.counted(Some(3));
         let three = tray.draw().unwrap();
         assert_eq!(three.unread, 3);
-        assert_eq!(three.icon, Some(super::super::icon(false, 3)));
+        assert_eq!(three.icon, Some(icon(false, 3)));
         // Counted again while the icon for 3 is drawn: it waits for that one.
         tray.count();
         assert_eq!(tray.counted(Some(5)), (true, false));
@@ -128,22 +129,9 @@ mod tests {
         if cfg!(target_os = "macos") {
             assert_eq!(dark.icon, None);
         } else {
-            assert_eq!(dark.icon, Some(super::super::icon(true, 0)));
+            assert_eq!(dark.icon, Some(icon(true, 0)));
         }
         tray.shown(dark);
         assert_eq!(tray.draw().unwrap().icon, None);
-    }
-
-    #[test]
-    fn the_icon_is_the_apps_with_the_count_or_the_menu_bars_template() {
-        let (light, sizes) = super::super::icon(false, 7);
-        if cfg!(target_os = "macos") {
-            assert_eq!(light, super::super::MENU_BAR_ICON);
-            assert_eq!(sizes, super::super::MENU_BAR_SIZES);
-        } else {
-            assert!(light.contains(super::super::LIGHT_ICON) && light.contains(">7</text>"));
-            assert!(super::super::icon(true, 0).0 == super::super::DARK_ICON);
-            assert_eq!(sizes, super::super::badged::SIZES);
-        }
     }
 }

@@ -18,12 +18,8 @@ impl Rgba {
     /// As [`Rgb::parse`], keeping a trailing alpha (`#rrggbbaa`), as the theme files write
     /// translucent colors.
     pub fn parse(s: &str) -> Option<Self> {
-        let rgb = Rgb::parse(s)?;
-        let hex = s.trim().trim_start_matches('#');
-        let alpha = match hex.len() {
-            8 => u8::from_str_radix(&hex[6..], 16).ok()?,
-            _ => 255,
-        };
+        let (rgb, alpha) = Rgb::parse_with_alpha(s)?;
+        let alpha = alpha.unwrap_or(255);
         Some(Self { rgb, alpha })
     }
 
@@ -129,5 +125,6 @@ mod tests {
         assert_eq!(rgba("#102030").alpha, 255);
         assert_eq!(rgba("#10203080").rgb, Rgb::new(0x10, 0x20, 0x30));
         assert_eq!(rgba("#102030").opacity(0.5).alpha, 128);
+        assert_eq!(rgba("0x10203080").alpha, 0x80);
     }
 }

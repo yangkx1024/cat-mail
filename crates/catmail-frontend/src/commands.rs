@@ -6,12 +6,12 @@
 use std::collections::HashSet;
 
 use catmail_core::{
-    AccountId, DeleteMode, DeleteOutcome, Flags, FolderId, MessageId, MessageSummary, OpKind,
-    OpStatus, PendingOp,
+    AccountId, DeleteMode, DeleteOutcome, Flags, FolderId, MailClient, MessageId, MessageSummary,
+    OpKind, OpStatus, PendingOp,
 };
 
 use crate::format;
-use crate::mailbox::AccountEntry;
+use crate::mailbox::{AccountEntry, Source};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageCommand {
@@ -81,7 +81,8 @@ impl Applies {
     {
         let messages = messages.into_iter();
         let archive = messages.clone().any(|m| can_archive(accounts, m));
-        let move_to = one_account(messages.clone()).is_some_and(|a| account(accounts, a).is_some());
+        let move_to = one_account(messages.clone())
+            .is_some_and(|a| AccountEntry::find(accounts, a).is_some());
         Self {
             flags: common_flags(messages),
             archive,
@@ -106,68 +107,104 @@ impl Applies {
     }
 }
 
-fn account(accounts: &[AccountEntry], id: AccountId) -> Option<&AccountEntry> {
-    accounts.iter().find(|e| e.account.id == id)
-}
-
 fn can_archive(accounts: &[AccountEntry], message: &MessageSummary) -> bool {
-    account(accounts, message.account_id).is_some_and(|e| e.folders.can_archive(message))
+    AccountEntry::find(accounts, message.account_id).is_some_and(|e| e.folders.can_archive(message))
 }
 
-/// A change to some messages: which, and what it does, for its failure ("Couldn't
-/// {what}").
+/// What a change asks of the engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Op {
+    Archive,
+    /// To `to`, from the folder they are looked at in ([`Source::shown_in`]).
+    Move {
+        shown_in: Option<FolderId>,
+        to: FolderId,
+    },
+    Delete(DeleteMode),
+    Flags {
+        add: Flags,
+        remove: Flags,
+    },
+    Labels {
+        add: Vec<FolderId>,
+        remove: Vec<FolderId>,
+    },
+}
+
+/// A change to some messages: which, what it asks of the engine, and what it does, for
+/// its failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Change {
     pub ids: Vec<MessageId>,
+    pub op: Op,
+    /// "archive the messages": "Couldn't archive the messages".
     pub what: &'static str,
 }
 
 impl Change {
-    fn new(ids: Vec<MessageId>, one: &'static str, many: &'static str) -> Self {
+    fn new(ids: Vec<MessageId>, op: Op, one: &'static str, many: &'static str) -> Self {
         let what = if ids.len() == 1 { one } else { many };
-        Self { ids, what }
+        Self { ids, op, what }
     }
 
     /// Whether it changes no message: nothing to do.
     pub fn is_empty(&self) -> bool {
         self.ids.is_empty()
     }
-}
 
-/// Setting and clearing flags on messages.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FlagChange {
-    pub change: Change,
-    pub add: Flags,
-    pub remove: Flags,
+    /// What to say if it fails.
+    pub fn failure(&self) -> String {
+        format!("Couldn't {}", self.what)
+    }
+
+    /// Whether the messages may leave the list: all but a change of flags (off the label
+    /// listed, a label change takes one away).
+    pub fn may_remove(&self) -> bool {
+        !matches!(self.op, Op::Flags { .. })
+    }
+
+    /// Whether the messages are dealt with, and no longer checked, even if still listed
+    /// (on Gmail, one moved to a label from All Mail): archived, moved or deleted.
+    pub fn unchecks(&self) -> bool {
+        matches!(self.op, Op::Archive | Op::Move { .. } | Op::Delete(_))
+    }
+
+    /// Asks the engine for it.
+    pub async fn run(&self, client: &MailClient) -> catmail_core::Result<Vec<AccountId>> {
+        let ids = self.ids.clone();
+        match &self.op {
+            Op::Archive => client.archive_messages(ids).await,
+            &Op::Move { shown_in, to } => client.move_messages(ids, shown_in, to).await,
+            &Op::Delete(mode) => client.delete_messages(ids, mode).await,
+            &Op::Flags { add, remove } => client.set_flags(ids, add, remove).await,
+            Op::Labels { add, remove } => {
+                let (add, remove) = (add.clone(), remove.clone());
+                client.label_messages(ids, add, remove).await
+            }
+        }
+    }
 }
 
 /// What toggling `flag` on the messages does: it comes off if they all have it, or else
 /// goes on them all.
-pub fn toggled(messages: &[MessageSummary], flag: Flags) -> FlagChange {
+pub fn toggled(messages: &[MessageSummary], flag: Flags) -> Change {
     let (add, remove) = if common_flags(messages).contains(flag) {
         (Flags::empty(), flag)
     } else {
         (flag, Flags::empty())
     };
     let ids = messages.iter().map(|m| m.id).collect();
-    FlagChange {
-        change: Change::new(ids, "change the message", "change the messages"),
-        add,
-        remove,
-    }
+    let op = Op::Flags { add, remove };
+    Change::new(ids, op, "change the message", "change the messages")
 }
 
 /// Marking a message read, as opening it does.
-pub fn mark_read(id: MessageId) -> FlagChange {
-    FlagChange {
-        change: Change {
-            ids: vec![id],
-            what: "mark the message as read",
-        },
+pub fn mark_read(id: MessageId) -> Change {
+    let op = Op::Flags {
         add: Flags::SEEN,
         remove: Flags::empty(),
-    }
+    };
+    Change::new(vec![id], op, "mark the message as read", "")
 }
 
 /// Those of the messages Archive does anything to: their account has an Archive folder
@@ -178,39 +215,59 @@ pub fn archivable(messages: &[MessageSummary], accounts: &[AccountEntry]) -> Cha
         .filter(|m| can_archive(accounts, m))
         .map(|m| m.id)
         .collect();
-    Change::new(ids, "archive the message", "archive the messages")
+    Change::new(
+        ids,
+        Op::Archive,
+        "archive the message",
+        "archive the messages",
+    )
 }
 
-/// Those of the messages, all of one account and looked at in `shown_in`
-/// ([`Source::shown_in`](crate::mailbox::Source::shown_in)), that moving to `to` changes;
-/// none if they are of more than one.
+/// The account the messages are all of, among `accounts`, and the folder they are looked
+/// at in, listed in `source`.
+fn moving<'a>(
+    messages: &[MessageSummary],
+    accounts: &'a [AccountEntry],
+    source: Option<&Source>,
+) -> Option<(&'a AccountEntry, Option<FolderId>)> {
+    let entry = AccountEntry::find(accounts, one_account(messages)?)?;
+    Some((entry, source.and_then(|s| s.shown_in(entry))))
+}
+
+/// Those of the messages, all of one account and listed in `source`, that moving to `to`
+/// changes; none if they are of more than one.
 pub fn movable(
     messages: &[MessageSummary],
     accounts: &[AccountEntry],
-    shown_in: Option<FolderId>,
+    source: Option<&Source>,
     to: FolderId,
 ) -> Change {
-    let folders = one_account(messages).and_then(|a| account(accounts, a));
-    let ids = folders.map_or_else(Vec::new, |entry| {
-        messages
-            .iter()
-            .filter(|m| entry.folders.can_move(m.folder_id, shown_in, to))
-            .map(|m| m.id)
-            .collect()
-    });
-    Change::new(ids, "move the message", "move the messages")
+    let (ids, shown_in) = match moving(messages, accounts, source) {
+        Some((entry, shown_in)) => {
+            let moved = messages
+                .iter()
+                .filter(|m| entry.folders.can_move(m.folder_id, shown_in, to))
+                .map(|m| m.id)
+                .collect();
+            (moved, shown_in)
+        }
+        None => (Vec::new(), None),
+    };
+    let op = Op::Move { shown_in, to };
+    Change::new(ids, op, "move the message", "move the messages")
 }
 
-/// The folders "Move to" offers for the messages, all of one account and looked at in
-/// `shown_in`: those moving any of them to changes, by
+/// The folders "Move to" offers for the messages, all of one account and listed in
+/// `source`: those moving any of them to changes, by
 /// [`AccountFolders::paths`](crate::folders::AccountFolders::paths). None if the messages
 /// are of more than one account, or one not among `accounts`.
 pub fn move_targets(
     messages: &[MessageSummary],
     accounts: &[AccountEntry],
-    shown_in: Option<FolderId>,
+    source: Option<&Source>,
 ) -> Option<Vec<(FolderId, String)>> {
-    let folders = &account(accounts, one_account(messages)?)?.folders;
+    let (entry, shown_in) = moving(messages, accounts, source)?;
+    let folders = &entry.folders;
     // Whether a move changes a message depends on its folder only: each once, not each
     // message once ("Select all").
     let from: HashSet<FolderId> = messages.iter().map(|m| m.folder_id).collect();
@@ -226,29 +283,15 @@ pub fn move_targets(
     Some(targets)
 }
 
-/// Adding labels to a message and taking them off.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LabelChange {
-    pub change: Change,
-    pub add: Vec<FolderId>,
-    pub remove: Vec<FolderId>,
-}
-
 /// What picking `label` in "Labels" does to the message, as it has the label now.
-pub fn label_change(message: &MessageSummary, label: FolderId) -> LabelChange {
+pub fn label_change(message: &MessageSummary, label: FolderId) -> Change {
     let (add, remove) = if message.labels.contains(&label) {
         (Vec::new(), vec![label])
     } else {
         (vec![label], Vec::new())
     };
-    LabelChange {
-        change: Change {
-            ids: vec![message.id],
-            what: "change the labels",
-        },
-        add,
-        remove,
-    }
+    let op = Op::Labels { add, remove };
+    Change::new(vec![message.id], op, "change the labels", "")
 }
 
 /// Which of a folder picker's entries, by name, show for what is typed.
@@ -272,7 +315,6 @@ pub fn picker_empty_text(labels: bool, any: bool) -> &'static str {
 #[derive(Debug, PartialEq)]
 pub struct Deletion {
     pub change: Change,
-    pub mode: DeleteMode,
     /// Some go for good and can't be brought back: the user is asked first, once for them
     /// all.
     pub confirm: Option<Confirm>,
@@ -295,7 +337,7 @@ pub fn deletion(messages: &[MessageSummary], accounts: &[AccountEntry]) -> Delet
     // Trash went away since its folders were listed here, the engine refuses.
     let mut mode = DeleteMode::ToTrash;
     for message in messages {
-        let Some(entry) = account(accounts, message.account_id) else {
+        let Some(entry) = AccountEntry::find(accounts, message.account_id) else {
             continue;
         };
         ids.push(message.id);
@@ -324,8 +366,12 @@ pub fn deletion(messages: &[MessageSummary], accounts: &[AccountEntry]) -> Delet
         }),
     };
     Deletion {
-        change: Change::new(ids, "delete the message", "delete the messages"),
-        mode,
+        change: Change::new(
+            ids,
+            Op::Delete(mode),
+            "delete the message",
+            "delete the messages",
+        ),
         confirm,
     }
 }
@@ -415,13 +461,25 @@ mod tests {
         let messages = [work];
         let (inbox, work) = (FolderId(31), FolderId(34));
         // Looked at in Work, moved to INBOX: Work comes off. In All Mail it only gets INBOX.
-        let shown_in = Source::Folder(work).shown_in(AccountId(3), &accounts);
-        assert_eq!(shown_in, Some(work));
-        let change = movable(&messages, &accounts, shown_in, inbox);
+        let listed = Source::Folder(work);
+        let change = movable(&messages, &accounts, Some(&listed), inbox);
         assert_eq!((ids(&change), change.what), (vec![1], "move the message"));
-        let targets = move_targets(&messages, &accounts, shown_in).unwrap();
+        let to = inbox;
+        assert_eq!(
+            change.op,
+            Op::Move {
+                shown_in: Some(work),
+                to
+            }
+        );
+        assert!(change.unchecks() && change.may_remove());
+        let targets = move_targets(&messages, &accounts, Some(&listed)).unwrap();
         assert!(targets.iter().any(|(id, _)| *id == inbox));
         assert!(!targets.iter().any(|(id, _)| *id == work), "it is there");
+        // Search results come from anywhere: nothing comes off.
+        let search = Source::Search("lunch".into());
+        let change = movable(&messages, &accounts, Some(&search), inbox);
+        assert_eq!(change.op, Op::Move { shown_in: None, to });
         // Of two accounts: nowhere to move to.
         let two = [message(1, 1, 11), message(2, 2, 21)];
         assert_eq!(move_targets(&two, &accounts, None), None);
@@ -431,7 +489,7 @@ mod tests {
     #[test]
     fn a_message_is_looked_at_where_the_list_shows_it() {
         let accounts = accounts();
-        let (one, gmail) = (AccountId(1), AccountId(3));
+        let (one, gmail) = (&accounts[0], &accounts[2]);
         #[rustfmt::skip]
         let cases = [
             (Source::Inboxes, one, Some(11)),
@@ -440,15 +498,26 @@ mod tests {
             // Not a folder of the message's account.
             (Source::Folder(FolderId(12)), gmail, None),
             (Source::Search("lunch".into()), one, None),
-            (Source::Drafts(one), one, None),
-            (Source::Inboxes, AccountId(9), None),
+            (Source::Drafts(one.account.id), one, None),
         ];
-        for (source, account, expected) in cases {
-            let shown_in = source.shown_in(account, &accounts);
-            assert_eq!(shown_in, expected.map(FolderId), "{source:?} {account:?}");
+        for (source, entry, expected) in cases {
+            let shown_in = source.shown_in(entry);
+            assert_eq!(
+                shown_in,
+                expected.map(FolderId),
+                "{source:?} {:?}",
+                entry.account.id
+            );
         }
-        let inbox = accounts[2].folders.with_role(FolderRole::Inbox).unwrap();
-        assert_eq!(Source::Inboxes.shown_in(gmail, &accounts), Some(inbox.id));
+        let inbox = gmail.folders.with_role(FolderRole::Inbox).unwrap();
+        let each = Source::Inboxes.shown_in_each(&accounts);
+        assert_eq!(each.get(&AccountId(3)), Some(&inbox.id));
+        assert_eq!(each.len(), 3);
+        assert!(
+            Source::Search("lunch".into())
+                .shown_in_each(&accounts)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -460,17 +529,18 @@ mod tests {
         from_trash.subject = Some("Lunch".into());
         let no_trash = message(3, 2, 21);
         let one = delete(std::slice::from_ref(&to_trash));
-        assert_eq!((one.mode, one.confirm), (DeleteMode::ToTrash, None));
+        assert_eq!(one.change.op, Op::Delete(DeleteMode::ToTrash));
+        assert_eq!(one.confirm, None);
         assert_eq!(one.change.what, "delete the message");
 
         let two = delete(&[to_trash, from_trash.clone()]);
-        assert_eq!(two.mode, DeleteMode::ToTrash);
+        assert_eq!(two.change.op, Op::Delete(DeleteMode::ToTrash));
         assert_eq!(two.confirm.unwrap().title, "Delete “Lunch” for good?");
-        assert_eq!(two.change.what, "delete the messages");
+        assert_eq!(two.change.failure(), "Couldn't delete the messages");
 
         let for_good = delete(&[from_trash, no_trash, message(4, 9, 91)]);
         assert_eq!(ids(&for_good.change), [2, 3], "not of an account not shown");
-        assert_eq!(for_good.mode, DeleteMode::ByOutcome);
+        assert_eq!(for_good.change.op, Op::Delete(DeleteMode::ByOutcome));
         assert_eq!(
             for_good.confirm.unwrap().title,
             "Delete 2 messages for good?"
@@ -482,20 +552,29 @@ mod tests {
         let mut read = message(1, 1, 11);
         read.flags = Flags::SEEN;
         let unread = message(2, 1, 11);
+        let flags = |add, remove| Op::Flags { add, remove };
         let toggle = toggled(&[read.clone(), unread.clone()], Flags::SEEN);
-        assert_eq!((toggle.add, toggle.remove), (Flags::SEEN, Flags::empty()));
-        assert_eq!(toggle.change.what, "change the messages");
+        assert_eq!(toggle.op, flags(Flags::SEEN, Flags::empty()));
+        assert_eq!(toggle.what, "change the messages");
+        // Marks don't take messages out of the list, or uncheck them.
+        assert!(!toggle.may_remove() && !toggle.unchecks());
         let toggle = toggled(std::slice::from_ref(&read), Flags::SEEN);
-        assert_eq!((toggle.add, toggle.remove), (Flags::empty(), Flags::SEEN));
-        assert_eq!(toggle.change.what, "change the message");
-        assert_eq!(mark_read(MessageId(2)).add, Flags::SEEN);
+        assert_eq!(toggle.op, flags(Flags::empty(), Flags::SEEN));
+        assert_eq!(toggle.what, "change the message");
+        assert_eq!(
+            mark_read(MessageId(2)).op,
+            flags(Flags::SEEN, Flags::empty())
+        );
 
         read.labels = vec![FolderId(34)];
         let off = label_change(&read, FolderId(34));
-        assert_eq!((off.add, off.remove), (vec![], vec![FolderId(34)]));
+        let labels = |add, remove| Op::Labels { add, remove };
+        assert_eq!(off.op, labels(vec![], vec![FolderId(34)]));
         let on = label_change(&read, FolderId(35));
-        assert_eq!((on.add, on.remove), (vec![FolderId(35)], vec![]));
-        assert_eq!(on.change.what, "change the labels");
+        assert_eq!(on.op, labels(vec![FolderId(35)], vec![]));
+        assert_eq!(on.what, "change the labels");
+        // Off the label listed, the message leaves; it stays checked.
+        assert!(on.may_remove() && !on.unchecks());
     }
 
     #[test]

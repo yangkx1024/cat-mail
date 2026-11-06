@@ -38,14 +38,9 @@ impl Folds {
             .unwrap_or_else(unfolded)
     }
 
-    pub fn toggle_account(&mut self, accounts: &[AccountEntry], account: AccountId) {
-        let open = self.account_open(accounts, account);
-        self.accounts.insert(account, !open);
-    }
-
-    /// Opens the account: a place of it is selected.
-    pub fn unfold(&mut self, account: AccountId) {
-        self.accounts.insert(account, true);
+    /// Opens or folds the account: the user pressed its heading, or selected a place of it.
+    pub fn set_account_open(&mut self, account: AccountId, open: bool) {
+        self.accounts.insert(account, open);
     }
 
     /// Folds or unfolds the item with `key`.
@@ -116,7 +111,7 @@ impl Item {
             count: 0,
             attention: false,
             open: None,
-            children: Rc::new([]),
+            children: Rc::default(),
         }
     }
 
@@ -145,28 +140,21 @@ impl Item {
 pub fn sidebar_groups(accounts: &[AccountEntry], folds: &Folds) -> Vec<Group> {
     let mut groups = Vec::new();
     if Place::Inboxes.is_in(accounts) {
-        let inboxes = accounts
-            .iter()
-            .filter_map(|a| a.folders.with_role(FolderRole::Inbox));
-        let unread = folders::unread(inboxes) as usize;
+        let unread = folders::unread(Place::Inboxes.folders(accounts)) as usize;
         groups.push(Group {
             key: "inboxes".to_owned(),
             heading: None,
             items: Rc::new([Item::of(Place::Inboxes, accounts, unread)]),
-            labels: Rc::new([]),
+            labels: Rc::default(),
         });
     }
     for (ix, entry) in accounts.iter().enumerate() {
         let account = entry.account.id;
         let open = folds.account_open(accounts, account);
-        let path = format!("{account}");
         let (items, labels) = if open {
-            let labels = (entry.folders.labels.iter())
-                .map(|node| folder_item(account, node, &path, folds))
-                .collect();
-            (places(accounts, entry, folds), labels)
+            places(accounts, entry, folds)
         } else {
-            (Rc::new([]) as Rc<[Item]>, Rc::new([]) as Rc<[Item]>)
+            Default::default()
         };
         groups.push(Group {
             key: format!("account-{account}"),
@@ -184,11 +172,16 @@ pub fn sidebar_groups(accounts: &[AccountEntry], folds: &Folds) -> Vec<Group> {
     groups
 }
 
-/// Folders with a role first, the drafts and outbox after the inbox, then the rest of
-/// the folders; not the labels, which have a section of their own.
-fn places(accounts: &[AccountEntry], entry: &AccountEntry, folds: &Folds) -> Rc<[Item]> {
+/// An account's places, and its labels for a section of their own: folders with a role
+/// first, the drafts and outbox after the inbox, then the rest of the folders.
+fn places(
+    accounts: &[AccountEntry],
+    entry: &AccountEntry,
+    folds: &Folds,
+) -> (Rc<[Item]>, Rc<[Item]>) {
     let account = entry.account.id;
     let path = format!("{account}");
+    let item = |node| folder_item(account, node, &path, folds);
     let mut items = Vec::new();
     let mut roles = entry.folders.roles.iter();
     // The inbox, if the account has one (it always has), leads.
@@ -198,7 +191,7 @@ fn places(accounts: &[AccountEntry], entry: &AccountEntry, folds: &Folds) -> Rc<
         .first()
         .filter(|n| n.role() == Some(FolderRole::Inbox))
     {
-        items.push(folder_item(account, inbox, &path, folds));
+        items.push(item(inbox));
         roles.next();
     }
     items.push(Item {
@@ -212,12 +205,9 @@ fn places(accounts: &[AccountEntry], entry: &AccountEntry, folds: &Folds) -> Rc<
             ..Item::of(Place::Outbox(account), accounts, entry.outbox.len())
         });
     }
-    items.extend(
-        roles
-            .chain(&entry.folders.others)
-            .map(|node| folder_item(account, node, &path, folds)),
-    );
-    items.into()
+    items.extend(roles.chain(&entry.folders.others).map(item));
+    let labels = entry.folders.labels.iter().map(item).collect();
+    (items.into(), labels)
 }
 
 /// The node and the folders in it, unless it is folded. `path` names the levels above,
@@ -286,17 +276,24 @@ pub struct Read(DraftCounts);
 #[derive(Debug, Clone, PartialEq)]
 pub struct Loaded {
     pub accounts: Vec<AccountEntry>,
-    /// Where the selection goes, if it moves: where the mailbox was asked to go, or where
-    /// it starts, when nothing was selected yet or the place selected is gone.
-    pub select: Option<Option<Place>>,
-    /// The place selected stays, and lists a folder more or less (All Inboxes, an
-    /// account's first INBOX): its messages' events may have come first, taken for a
-    /// folder not shown, so the list reads again.
-    pub refresh_list: bool,
+    pub selection: Selection,
     /// The message to open once the list has it: what a notification was about.
     pub reveal: Option<MessageId>,
     /// A message to write was asked for before the read.
     pub compose: bool,
+}
+
+/// What becomes of the sidebar's selection after a read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Selection {
+    Keep,
+    /// The place selected stays, and lists a folder more or less (All Inboxes, an
+    /// account's first INBOX): its messages' events may have come first, taken for a
+    /// folder not shown, so the list reads again.
+    KeepAndRefresh,
+    /// Where the mailbox was asked to go, or where it starts, when nothing was selected
+    /// yet or the place selected is gone.
+    Go(Option<Place>),
 }
 
 impl SidebarModel {
@@ -339,7 +336,7 @@ impl SidebarModel {
                 // A count started since the read is the one to show.
                 if !self.draft_counts.read_is_latest(&read.0, id)
                     && let Some(drafts) = shown
-                        .and_then(|a| a.iter().find(|e| e.account.id == id))
+                        .and_then(|a| AccountEntry::find(a, id))
                         .map(|e| e.drafts)
                 {
                     entry.drafts = drafts;
@@ -353,19 +350,20 @@ impl SidebarModel {
         let waiting = self.waiting.take().unwrap_or_default();
         let going = waiting.to.and_then(|to| to.find(&accounts));
         let still_there = place.is_some_and(|place| place.is_in(&accounts));
-        let select = match going {
-            Some((place, _)) => Some(Some(place)),
-            None => (!still_there).then(|| Place::start(&accounts)),
-        };
         let folders = |accounts: &[AccountEntry]| -> Vec<FolderId> {
             let folders = place.map(|p| p.folders(accounts)).unwrap_or_default();
             folders.iter().map(|f| f.id).collect()
         };
-        let refresh_list =
-            select.is_none() && folders(shown.unwrap_or_default()) != folders(&accounts);
+        let selection = match going {
+            Some((place, _)) => Selection::Go(Some(place)),
+            None if !still_there => Selection::Go(Place::start(&accounts)),
+            None if folders(shown.unwrap_or_default()) != folders(&accounts) => {
+                Selection::KeepAndRefresh
+            }
+            None => Selection::Keep,
+        };
         Some(Loaded {
-            select,
-            refresh_list,
+            selection,
             reveal: going.and_then(|(_, message)| message),
             compose: waiting.compose,
             accounts,
@@ -416,7 +414,9 @@ mod tests {
     use catmail_core::OutboxStatus;
 
     use super::*;
-    use crate::fixtures::{account, folder, gmail, gmail_folder, outbox_entry, overview, unread};
+    use crate::fixtures::{
+        account, folder, gmail, gmail_folder, outbox_entry, standard_overview, unread,
+    };
 
     /// Each item's label, depth first, indented by its depth, with its count and whether
     /// it is open.
@@ -515,7 +515,7 @@ mod tests {
                 "user2@example.com +"
             ]
         );
-        folds.toggle_account(&accounts, AccountId(2));
+        folds.set_account_open(AccountId(2), true);
         assert_eq!(
             shape(&sidebar_groups(&accounts, &folds))[3..],
             [
@@ -544,18 +544,9 @@ mod tests {
         assert_eq!(lists.children[0].key, "folder-12");
     }
 
-    fn inbox_of(accounts: &[AccountEntry], id: i64) -> Place {
-        let entry = accounts.iter().find(|a| a.account.id.0 == id).unwrap();
-        Place::Folder(entry.folders.with_role(FolderRole::Inbox).unwrap().id)
-    }
-
-    fn standard_overview(id: i64) -> AccountOverview {
-        let mut overview = overview(id, Vec::new());
-        overview.folders = vec![
-            folder(id * 10 + 1, id, "INBOX"),
-            folder(id * 10 + 2, id, "Sent"),
-        ];
-        overview
+    /// Account `id`'s INBOX, as `standard_overview` numbers it.
+    fn inbox(id: i64) -> Place {
+        Place::Folder(FolderId(id * 10 + 1))
     }
 
     fn load(
@@ -581,8 +572,8 @@ mod tests {
             None,
         );
         let loaded = loaded.unwrap();
-        assert_eq!(loaded.select, Some(Some(Place::Inboxes)));
-        assert!(!loaded.refresh_list && !loaded.compose && loaded.reveal.is_none());
+        assert_eq!(loaded.selection, Selection::Go(Some(Place::Inboxes)));
+        assert!(!loaded.compose && loaded.reveal.is_none());
 
         // Asked for before the read: an account's INBOX and a message there, and a new
         // message.
@@ -600,13 +591,13 @@ mod tests {
             None,
         );
         let loaded = loaded.unwrap();
-        assert_eq!(loaded.select, Some(Some(inbox_of(&loaded.accounts, 2))));
+        assert_eq!(loaded.selection, Selection::Go(Some(inbox(2))));
         assert_eq!(loaded.reveal, Some(MessageId(7)));
         assert!(loaded.compose);
         // From now on, at once.
         assert_eq!(
             model.go_to(to, &loaded.accounts),
-            Some((inbox_of(&loaded.accounts, 2), Some(MessageId(7))))
+            Some((inbox(2), Some(MessageId(7))))
         );
         assert!(model.compose());
 
@@ -614,7 +605,7 @@ mod tests {
         let mut model = SidebarModel::default();
         model.go_to(Destination::Place(Place::Folder(FolderId(99))), &[]);
         let loaded = load(&mut model, vec![standard_overview(1)], None, None).unwrap();
-        assert_eq!(loaded.select, Some(Some(inbox_of(&loaded.accounts, 1))));
+        assert_eq!(loaded.selection, Selection::Go(Some(inbox(1))));
     }
 
     #[test]
@@ -636,21 +627,20 @@ mod tests {
 
         // Another folder came: the place stays, the list shows the same.
         let mut more = standard_overview(1);
-        more.folders.push(folder(13, 1, "Archive"));
+        more.folders.push(folder(15, 1, "Projects"));
         let loaded = load(&mut model, vec![more], Some(&shown), Some(sent)).unwrap();
-        assert_eq!(loaded.select, None);
-        assert!(!loaded.refresh_list);
+        assert_eq!(loaded.selection, Selection::Keep);
 
         // Sent went away: back to where the mailbox starts.
         let mut fewer = standard_overview(1);
         fewer.folders.truncate(1);
         let loaded = load(&mut model, vec![fewer], Some(&shown), Some(sent)).unwrap();
-        assert_eq!(loaded.select, Some(Some(inbox_of(&loaded.accounts, 1))));
+        assert_eq!(loaded.selection, Selection::Go(Some(inbox(1))));
 
         // What was asked for before the first read is done with.
         model.go_to(Destination::Place(Place::Folder(FolderId(11))), &shown);
         let loaded = load(&mut model, vec![standard_overview(1)], Some(&[]), None).unwrap();
-        assert_eq!(loaded.select, Some(Some(inbox_of(&loaded.accounts, 1))));
+        assert_eq!(loaded.selection, Selection::Go(Some(inbox(1))));
         assert!(!loaded.compose);
     }
 
@@ -671,8 +661,7 @@ mod tests {
             standard_overview(3),
         ];
         let loaded = load(&mut model, three, Some(&shown), Some(Place::Inboxes)).unwrap();
-        assert_eq!(loaded.select, None);
-        assert!(loaded.refresh_list);
+        assert_eq!(loaded.selection, Selection::KeepAndRefresh);
     }
 
     #[test]

@@ -3,6 +3,7 @@
 
 pub mod sidebar;
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use catmail_core::{
@@ -141,9 +142,7 @@ impl Destination {
         match self {
             Destination::Place(place) => place.is_in(accounts).then_some((place, None)),
             Destination::Inbox { account, message } => {
-                let inbox = accounts
-                    .iter()
-                    .find(|entry| entry.account.id == account)?
+                let inbox = AccountEntry::find(accounts, account)?
                     .folders
                     .with_role(FolderRole::Inbox)?;
                 Some((Place::Folder(inbox.id), message))
@@ -172,16 +171,22 @@ impl Source {
         )
     }
 
-    /// The folder a message of `account` listed here is looked at in: on Gmail, the label
+    /// The folder a message of `entry`'s listed here is looked at in: on Gmail, the label
     /// it leaves when moved to another, and one its row needn't name. In All Inboxes its
     /// account's INBOX; none for search results, which come from anywhere.
-    pub fn shown_in(&self, account: AccountId, accounts: &[AccountEntry]) -> Option<FolderId> {
-        let entry = accounts.iter().find(|e| e.account.id == account)?;
+    pub fn shown_in(&self, entry: &AccountEntry) -> Option<FolderId> {
         match self {
             Source::Inboxes => entry.folders.with_role(FolderRole::Inbox).map(|f| f.id),
-            Source::Folder(id) => entry.folders.find(*id).map(|_| *id),
+            Source::Folder(id) => entry.folders.get(*id).map(|f| f.id),
             Source::Search(_) | Source::Drafts(_) | Source::Outbox(_) => None,
         }
+    }
+
+    /// [`shown_in`](Self::shown_in) for each account that has such a folder: worked out
+    /// once for the rows, which look theirs up.
+    pub fn shown_in_each(&self, accounts: &[AccountEntry]) -> HashMap<AccountId, FolderId> {
+        let shown_in = |entry: &AccountEntry| Some((entry.account.id, self.shown_in(entry)?));
+        accounts.iter().filter_map(shown_in).collect()
     }
 }
 
@@ -210,9 +215,7 @@ pub fn list_note(
             let unread = crate::folders::unread(place?.folders(accounts));
             (unread > 0).then(|| format!("{unread} unread"))
         }
-        Source::Outbox(account) => accounts
-            .iter()
-            .find(|a| a.account.id == *account)
+        Source::Outbox(account) => AccountEntry::find(accounts, *account)
             .filter(|a| !a.status.send.is_empty() || a.status.sync.is_some())
             .map(|_| "Sending resumes when the connection is back.".to_owned()),
         _ => None,
@@ -242,6 +245,11 @@ impl AccountEntry {
             outbox: overview.outbox,
             status,
         }
+    }
+
+    /// Account `id`, among `accounts`.
+    pub fn find(accounts: &[AccountEntry], id: AccountId) -> Option<&AccountEntry> {
+        accounts.iter().find(|e| e.account.id == id)
     }
 
     /// Whether something in the outbox waits for the user.

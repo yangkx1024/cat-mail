@@ -98,17 +98,20 @@ pub fn gmail(id: i64, folders: Vec<Folder>) -> AccountEntry {
 }
 
 /// The standard account `id`: INBOX `id * 10 + 1`, Sent `+ 2`, Archive `+ 3`, Trash `+ 4`.
-pub fn standard(id: i64) -> AccountEntry {
+pub fn standard_overview(id: i64) -> AccountOverview {
     let folder = |n: i64, name: &str| folder(id * 10 + n, id, name);
-    account(
-        id,
-        vec![
-            folder(1, "INBOX"),
-            folder(2, "Sent"),
-            folder(3, "Archive"),
-            folder(4, "Trash"),
-        ],
-    )
+    let folders = vec![
+        folder(1, "INBOX"),
+        folder(2, "Sent"),
+        folder(3, "Archive"),
+        folder(4, "Trash"),
+    ];
+    overview(id, folders)
+}
+
+/// The same, as the sidebar shows it.
+pub fn standard(id: i64) -> AccountEntry {
+    AccountEntry::new(standard_overview(id), AccountStatus::default())
 }
 
 pub fn message(id: i64, account: i64, folder: i64) -> MessageSummary {
@@ -126,6 +129,13 @@ pub fn message(id: i64, account: i64, folder: i64) -> MessageSummary {
         has_attachments: false,
         labels: Vec::new(),
     }
+}
+
+/// Midday UTC on `day` (`2020-03-02`), in seconds: the same calendar day in nearly every
+/// time zone the tests run in.
+pub fn midday(day: &str) -> i64 {
+    let at = format!("{day}T12:00:00Z").parse::<jiff::Timestamp>();
+    at.expect("a day").as_second()
 }
 
 pub fn outbox_entry(id: i64, account: i64, status: OutboxStatus) -> OutboxEntry {

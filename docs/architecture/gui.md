@@ -195,11 +195,14 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 
 ## 读与改
 
-命令的模型在 `catmail_frontend::commands`（`Applies`、命令的名字、改动哪些邮件和失败时怎么说（`Change::what`，
-"Couldn't {what}"，和删除文件夹、发件箱的选项一样）、"Move to"列出的文件夹、永久删除的确认文案、被拒改动的说明），
-都直接拿账户列表（`&[AccountEntry]`）。快捷键作用于哪些邮件是 `Listing::keyed`，只等选中的那封离开是
+命令的模型在 `catmail_frontend::commands`（`Applies`、命令的名字、"Move to"列出的文件夹、永久删除的确认文案、
+被拒改动的说明），都直接拿账户列表（`&[AccountEntry]`）。每个改动是一个 `Change`：改哪些邮件、向引擎要做什么
+（`Op`，`Change::run` 调对应的 `MailClient` 方法）、失败时怎么说（`Change::failure`，"Couldn't {what}"，和删除
+文件夹、发件箱的选项一样）、会不会让邮件离开列表（`may_remove`，改标记以外都会）、做完要不要去掉勾选
+（`unchecks`，归档、移动、删除）。快捷键作用于哪些邮件是 `Listing::keyed`，只等选中的那封离开是
 `ListModel::expect_removal`，一封邮件"在哪看"（Gmail 上移动会去掉的标签、行上不用再写的标签）是
-`Source::shown_in`，移动和行上的标签名都用它。`mailbox/commands.rs` 只调用 `MailClient`、显示通知和画按钮。
+`Source::shown_in`，移动和行上的标签名都用它（行上的按账户先算好一份，`shown_in_each`）。`mailbox/commands.rs`
+只有一个 `run_change`：按 `Change` 去掉勾选、等选中的那封离开、运行、出错时通知；其余是画按钮。
 
 - **三处同一套按钮**：读信区工具栏、勾选工具栏、悬停的行都由 `commands::group` 生成，只显示图标，按用途分组：
   位置（Archive、Delete、Move to）；标记（已读 / 未读、Flag）；读信区另有内容（Show remote images、Open in
