@@ -1,9 +1,6 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-# A workspace of its own: built with the rest, Blitz turns on taffy's `calc`, which
-# nsh-core 0.4.0 doesn't handle (a match without the `Calc` arm).
-exclude = ["crates/catmail-nsh"]
 
 [workspace.package]
 version = "0.1.0"
@@ -55,6 +52,8 @@ color = "0.3.3"
 futures-channel = "0.3.34"
 # Runs an outbox pass's SMTP connections side by side within the pass's own task.
 futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
+# SIGINT and SIGTERM on GTK's loop in catmail-nsh; the glib that gtk4 uses.
+glib-unix = "0.22"
 # Pins the matching GPUI crates; never depend on GPUI directly (two copies would link).
 # `gpui-fast` swaps the backend from gpui-pre to GPUI Fast behind the same imports.
 gpui-kit = { version = "0.9.0", features = ["gpui-fast"] }
@@ -77,6 +76,13 @@ libc = "0.2.191"
 mail-builder = { version = "1.0.0", default-features = false }
 mail-parser = { version = "0.11.9", features = ["full_encoding"] }
 mime_guess = "2.0.5"
+# Native Shell (GTK 4 on Linux, bodies in WebKitGTK web views), for the catmail-nsh spike.
+# Unreleased main, for its handling of taffy's `calc` (longbridge/nsh#966), which Blitz
+# turns on: 0.4.0 doesn't compile in this workspace. Back to crates.io (and the
+# repository out of `allow-git` in deny.toml) once a release has it.
+nsh-core = { git = "https://github.com/longbridge/nsh", rev = "f8cfd1a650640bd4b2668201d364e08e3b0ab570" }
+nsh-base = { git = "https://github.com/longbridge/nsh", rev = "f8cfd1a650640bd4b2668201d364e08e3b0ab570", default-features = false }
+nsh-platform-linux = { git = "https://github.com/longbridge/nsh", rev = "f8cfd1a650640bd4b2668201d364e08e3b0ab570", default-features = false, features = ["webview"] }
 # The macOS status item (menu bar icon, its menu, the Dock badge): AppKit straight, no
 # tray crate. The versions GPUI's macOS platform uses.
 objc2 = "0.6.5"
@@ -114,6 +120,8 @@ pollster = "1"
 # ring configuration (`use_preconfigured_tls`), no native-tls, no HTTP/2, no system proxy
 # lookup.
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls-no-provider"] }
+# catmail-nsh's tray icon pixels: nsh-core's resvg, with text for the badge's digits.
+resvg = { version = "0.46", default-features = false, features = ["text", "system-fonts"] }
 # Reads iTerm2 color schemes (XML property lists); the version GPUI's platform crates use.
 quick-xml = "0.41.0"
 rcgen = "0.14"

@@ -1,3 +1,0 @@
-# The root workspace's target directory: catmail-core and its dependencies are built once.
-[build]
-target-dir = "../../target"

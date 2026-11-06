@@ -201,9 +201,13 @@ Accounts 的确认文案在 `accounts`，与 gpui 版共用；nsh 版把 gpui-ki
 
 - [ ] 字体：Pango 会自己做回退，`fonts.rs` 里那些变通预计用不上。要验证中文各字重、粗体是否正常
 - [ ] 测试：用 nsh-testing 无头驱动窗口，对应 gpui 版的 `mailbox/tests/*`（读信、写信、设置、文件夹）
-- [ ] 回到主 workspace：等 longbridge/nsh#966 修好
-- [ ] CI：Linux job 装 GTK4 和 WebKitGTK；cargo deny 的许可证（CDLA-Permissive-2.0、LLVM-exception）和 bincode advisory
-- [ ] GTK 4.22 上 `gtk_widget_measure` 警告刷屏
+- [x] 回到主 workspace：longbridge/nsh#966 在上游 main 修好（#1022），还没发版，先用 git 依赖钉在 main 的
+      commit 上（根 `Cargo.toml`）；发版后换回 crates.io，并把仓库移出 `deny.toml` 的 `allow-git`
+- [ ] CI：Linux job 已装 GTK4 和 WebKitGTK；cargo deny 还不过：许可证（webpki-roots 的
+      CDLA-Permissive-2.0，target-lexicon、winx 的 LLVM-exception），nsh-updater 用的 zip 8 有四个 advisory
+      （RUSTSEC-2026-0367/0368/0369/0429，要 zip 9；报到上游 longbridge/nsh#1050）。bincode 的 advisory 在 nsh main 上已经没了
+- [ ] GTK 4.22 上 `gtk_widget_measure` 警告刷屏：`NshView::size_allocate` 不 measure 就 allocate 子 widget，
+      报到上游 longbridge/nsh#1048，修复 PR longbridge/nsh#1049
 - [ ] 打包：`.desktop`；运行时依赖 GTK 4.14+ 和 WebKitGTK 6.0
 - [ ] 与 gpui 版对比：内存（含 WebKit 子进程）、滚动帧率、冷启动时间
 - [ ] macOS（WKWebView）、Windows（WebView2）后端

@@ -88,4 +88,7 @@ allow-git = [
     # Blitz 0.3.0-beta.4 with anonymous cells in table rows, pinned in the root
     # Cargo.toml's `[patch.crates-io]`; remove with it once a release has them.
     "https://github.com/yangkx1024/blitz",
+    # Native Shell's unreleased main, for the catmail-nsh spike, pinned in the root
+    # Cargo.toml; remove with it once a release handles taffy's `calc` (nsh#966).
+    "https://github.com/longbridge/nsh",
 ]

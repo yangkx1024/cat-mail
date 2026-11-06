@@ -4,6 +4,7 @@
 //! for another one), with the GUI's settings (`CATMAIL_CONFIG_DIR`): a launch of either
 //! while the other runs brings the running one's window up.
 
+#![forbid(unsafe_code)]
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 #[cfg(target_os = "linux")]
