@@ -6,10 +6,10 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use catmail_core::{MailClient, MessageCursor, MessageId, MessageSummary};
+use catmail_core::{MailClient, MessageCursor, MessageId, MessageSummary, SearchQuery};
 
 use super::{Days, PAGE, Removal, Reveal, Row, RowId, fetch};
-use crate::mailbox::Source;
+use crate::mailbox::{Place, Source};
 use crate::refresh::Coalesce;
 
 /// What the list shows: a source's rows, grouped by day, and the lines they are laid out
@@ -188,6 +188,28 @@ impl Fetch {
     }
 }
 
+/// A change of the search field, counted, for [`ListModel::paused`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Typed(u64);
+
+/// Asking the servers about the search shown (`MailClient::search_server`), for what
+/// local search can't find.
+#[derive(Debug, Clone)]
+pub struct ServerSearch {
+    text: String,
+    /// The source's, as [`Fetch`]'s.
+    generation: u64,
+}
+
+impl ServerSearch {
+    /// What the servers found.
+    pub async fn run(&self, client: &MailClient) -> catmail_core::Result<Vec<MessageId>> {
+        client
+            .search_server(SearchQuery::new(self.text.clone()))
+            .await
+    }
+}
+
 /// What a read of the list changes.
 #[derive(Debug, PartialEq)]
 pub struct Loaded {
@@ -241,6 +263,8 @@ pub struct ListModel {
     /// Search results the servers found that local search can't, by their text: read
     /// with every page of the results.
     found_on_server: Rc<[MessageId]>,
+    /// Keys typed in the search field so far.
+    typed: u64,
     /// Reads of the rows shown started so far (not of more pages).
     reads: u64,
     /// The message the user moved or deleted: once it is gone while still selected, the
@@ -262,11 +286,6 @@ impl ListModel {
         let listing = Listing::new(source);
         let fetch = self.start(&listing, PAGE, None);
         (listing, fetch)
-    }
-
-    /// The source shown, counted: whether one is still shown, for work started for it.
-    pub fn generation(&self) -> u64 {
-        self.generation
     }
 
     /// Whether the list is being read.
@@ -294,14 +313,66 @@ impl ListModel {
         self.start(listing, PAGE, Some(after))
     }
 
-    /// The servers found `found` for the search shown in `generation`: whether to read
-    /// the results again with them.
-    pub fn found_on_server(&mut self, generation: u64, found: Vec<MessageId>) -> bool {
-        if found.is_empty() || generation != self.generation {
-            return false;
+    /// The search field changed, or was cleared: a pause that follows searches, unless
+    /// another key comes first ([`paused`](Self::paused)).
+    pub fn typed(&mut self) -> Typed {
+        self.typed += 1;
+        Typed(self.typed)
+    }
+
+    /// The pause after `typed` is over, with `text` in the search field: the source to
+    /// show, if it changes. The results for the text, or with nothing typed what `place`
+    /// lists. Nothing if another key came since, or that source is shown already.
+    pub fn paused(
+        &self,
+        typed: Typed,
+        text: &str,
+        place: Option<Place>,
+        listing: &Listing,
+    ) -> Option<Option<Source>> {
+        if typed.0 != self.typed {
+            return None;
+        }
+        let text = text.trim();
+        let source = if text.is_empty() {
+            place.map(Place::source)
+        } else {
+            Some(Source::Search(text.to_owned()))
+        };
+        (listing.source() != source.as_ref()).then_some(source)
+    }
+
+    /// For search results `listing` shows: the servers to ask about the text once they
+    /// showed for [`SERVER_SEARCH_DELAY`](super::SERVER_SEARCH_DELAY). A search the user
+    /// moves on from by then isn't asked about ([`is_shown`](Self::is_shown)).
+    pub fn server_search(&self, listing: &Listing) -> Option<ServerSearch> {
+        let Some(Source::Search(text)) = listing.source() else {
+            return None;
+        };
+        Some(ServerSearch {
+            text: text.clone(),
+            generation: self.generation,
+        })
+    }
+
+    /// Whether `search`'s results are still shown.
+    pub fn is_shown(&self, search: &ServerSearch) -> bool {
+        search.generation == self.generation
+    }
+
+    /// The servers found `found` for `search`: the read of `listing`, its results, with
+    /// them, if they found any and the results are still shown.
+    pub fn found_on_server(
+        &mut self,
+        search: &ServerSearch,
+        found: Vec<MessageId>,
+        listing: &Listing,
+    ) -> Option<Fetch> {
+        if found.is_empty() || !self.is_shown(search) {
+            return None;
         }
         self.found_on_server = found.into();
-        true
+        self.refresh(listing)
     }
 
     fn start(
@@ -691,16 +762,61 @@ mod tests {
     #[test]
     fn the_servers_results_are_read_with_the_search_they_were_for() {
         let mut model = ListModel::default();
+        let (folder, _) = model.show(Some(FOLDER));
+        assert!(model.server_search(&folder).is_none(), "not search results");
         let (listing, fetch) = model.show(Some(Source::Search("lunch".into())));
-        let fetch = fetch.unwrap();
-        let generation = model.generation();
-        assert!(!model.found_on_server(generation, Vec::new()));
-        assert!(model.found_on_server(generation, vec![MessageId(4)]));
-        model.loaded(&fetch, None, &listing, None, &HashSet::new());
+        let search = model.server_search(&listing).unwrap();
+        assert_eq!(search.text, "lunch");
+        // Nothing found: nothing to read again.
+        assert!(
+            model
+                .found_on_server(&search, Vec::new(), &listing)
+                .is_none()
+        );
+        // Found while the first page is read: with the read that follows it.
+        let found = vec![MessageId(4)];
+        assert!(
+            model
+                .found_on_server(&search, found.clone(), &listing)
+                .is_none()
+        );
+        let loaded = model.loaded(&fetch.unwrap(), None, &listing, None, &HashSet::new());
+        assert!(loaded.unwrap().again);
         let again = model.refresh(&listing).unwrap();
         assert_eq!(&*again.found_on_server, [MessageId(4)]);
+        model.loaded(&again, None, &listing, None, &HashSet::new());
+        // At once, when nothing is read.
+        let at_once = model
+            .found_on_server(&search, found.clone(), &listing)
+            .unwrap();
+        model.loaded(&at_once, None, &listing, None, &HashSet::new());
+        // The user moved on: not asked, and not read with what was found.
         model.show(Some(FOLDER));
-        assert!(!model.found_on_server(generation, vec![MessageId(4)]));
+        assert!(!model.is_shown(&search));
+        assert!(model.found_on_server(&search, found, &listing).is_none());
+    }
+
+    #[test]
+    fn a_pause_in_typing_searches_or_goes_back_to_the_place() {
+        let mut model = ListModel::default();
+        let (listing, _) = model.show(Some(FOLDER));
+        let place = Some(Place::Folder(FolderId(1)));
+        let search = |text: &str| Some(Some(Source::Search(text.into())));
+        let first = model.typed();
+        let second = model.typed();
+        // Another key came: the pause after the first doesn't search.
+        assert_eq!(model.paused(first, "lun", place, &listing), None);
+        assert_eq!(
+            model.paused(second, " lunch ", place, &listing),
+            search("lunch")
+        );
+        // Nothing typed: the place, which is shown already.
+        assert_eq!(model.paused(second, "  ", place, &listing), None);
+        let (results, _) = model.show(Some(Source::Search("lunch".into())));
+        let typed = model.typed();
+        assert_eq!(model.paused(typed, "lunch", place, &results), None);
+        assert_eq!(model.paused(typed, "", place, &results), Some(Some(FOLDER)));
+        assert_eq!(model.paused(typed, "", None, &results), Some(None));
     }
 
     #[test]

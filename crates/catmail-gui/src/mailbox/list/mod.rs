@@ -11,14 +11,12 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use catmail_core::{
-    AccountId, Draft, Flags, FolderId, MessageId, MessageSummary, OutboxEntry, SearchQuery,
-};
+use catmail_core::{AccountId, Draft, Flags, FolderId, MessageId, MessageSummary, OutboxEntry};
 use catmail_frontend::commands::MessageCommand;
 use catmail_frontend::composer::ComposeFrom;
 use catmail_frontend::list::{
     self, Check, Fetch, ListModel, Listing, Loaded, Row, RowId, Rows, SEARCH_DELAY,
-    SERVER_SEARCH_DELAY, Select,
+    SERVER_SEARCH_DELAY, Select, ServerSearch,
 };
 use catmail_frontend::mailbox::{self, Source};
 use nsh_base::theme;
@@ -61,13 +59,10 @@ struct SearchText(String);
 #[derive(Clone, Default)]
 struct LabelNames(HashMap<FolderId, String>);
 
-/// The reads of the list, and what the view adds to them. Not reactive.
+/// The reads of the list, and the row `CATMAIL_GUI_OPEN` opens. Not reactive.
 #[derive(Default)]
 struct ListState {
     model: ListModel,
-    /// Counts the keys typed in the search field: a pause searches if no other key
-    /// followed.
-    typed: u64,
     /// `CATMAIL_GUI_OPEN` opened its row already.
     opened_from_env: bool,
 }
@@ -84,14 +79,6 @@ fn state<T>(f: impl FnOnce(&mut ListState) -> T) -> T {
 /// `f` with the reads, and the listing they are of. Untracked.
 fn reads<T>(f: impl FnOnce(&mut ListModel, &Listing) -> T) -> T {
     global::<Listing>().with_untracked(|listing| state(|s| f(&mut s.model, listing)))
-}
-
-/// Counts a key typed in the search field, or the field cleared.
-fn count_typed() -> u64 {
-    state(|s| {
-        s.typed += 1;
-        s.typed
-    })
 }
 
 /// The list's handle, for scrolling it.
@@ -118,9 +105,9 @@ pub fn reading() -> bool {
 
 /// Shows `source` from the top, or nothing.
 pub fn show(source: Option<Source>) {
-    let (listing, fetch) = state(|s| s.model.show(source.clone()));
-    if let Some(Source::Search(text)) = source {
-        search_server(text, state(|s| s.model.generation()));
+    let (listing, fetch) = state(|s| s.model.show(source));
+    if let Some(search) = state(|s| s.model.server_search(&listing)) {
+        search_server(search);
     }
     global::<Listing>().set(listing);
     set_shown_in();
@@ -132,26 +119,26 @@ pub fn show(source: Option<Source>) {
     read(fetch);
 }
 
-/// Asks the servers about `text` once the local results showed for
-/// [`SERVER_SEARCH_DELAY`], and reads the results again with what they found, if
-/// anything. Failures leave the local results alone; they are only logged.
-fn search_server(text: String, generation: u64) {
+/// Asks the servers once the local results showed for [`SERVER_SEARCH_DELAY`], and reads
+/// the results again with what they found, if anything. Failures leave the local results
+/// alone; they are only logged.
+fn search_server(search: ServerSearch) {
     in_view(async move {
         timer(SERVER_SEARCH_DELAY).await;
-        if state(|s| s.model.generation()) != generation {
+        if !state(|s| s.model.is_shown(&search)) {
             return;
         }
         // The engine logs what each server said; this is what kept it from asking.
-        let found = match client().search_server(SearchQuery::new(text)).await {
+        let found = match search.run(&client()).await {
             Ok(found) => found,
             Err(e) => {
                 tracing::warn!(error = %e, "couldn't search the servers");
                 return;
             }
         };
-        if state(|s| s.model.found_on_server(generation, found)) {
-            refresh();
-        }
+        read(reads(|model, listing| {
+            model.found_on_server(&search, found, listing)
+        }));
     });
 }
 
@@ -392,22 +379,14 @@ fn set_shown_in() {
 // --- Searching ----------------------------------------------------------------------
 
 /// The search field changed: a pause in typing searches, or with nothing typed shows
-/// the place selected again.
+/// the place selected again (`ListModel::paused`).
 fn typed(text: String) {
     global::<SearchText>().set(SearchText(text.clone()));
-    let typed = count_typed();
+    let typed = state(|s| s.model.typed());
     in_view(async move {
         timer(SEARCH_DELAY).await;
-        if state(|s| s.typed) != typed {
-            return;
-        }
-        let text = text.trim();
-        let source = if text.is_empty() {
-            global::<SelectedPlace>().with_untracked(|p| p.0.map(|p| p.source()))
-        } else {
-            Some(Source::Search(text.to_owned()))
-        };
-        if global::<Listing>().with_untracked(|l| l.source() != source.as_ref()) {
+        let place = global::<SelectedPlace>().with_untracked(|p| p.0);
+        if let Some(source) = reads(|model, listing| model.paused(typed, &text, place, listing)) {
             show(source);
         }
     });
@@ -415,7 +394,7 @@ fn typed(text: String) {
 
 /// Leaving a search for a place: the place's rows, not the results.
 pub fn clear_search() {
-    count_typed();
+    state(|s| s.model.typed());
     global::<SearchText>().set(SearchText::default());
 }
 

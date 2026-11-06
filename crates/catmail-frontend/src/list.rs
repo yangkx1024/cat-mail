@@ -19,7 +19,9 @@ use jiff::civil::Date;
 use crate::format::{self, Calendar};
 use crate::mailbox::Source;
 
-pub use model::{Fetch, Line, LineKey, ListModel, Listing, Loaded, Rows, Select};
+pub use model::{
+    Fetch, Line, LineKey, ListModel, Listing, Loaded, Rows, Select, ServerSearch, Typed,
+};
 
 /// Rows read at a time.
 pub const PAGE: u32 = 200;
