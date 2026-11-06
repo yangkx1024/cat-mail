@@ -29,11 +29,11 @@ use nsh_core::prelude::*;
 
 use crate::app::{client, in_mailbox};
 use crate::commands::{self, Size, icon_button, separator};
-use crate::composer;
 use crate::icons::{Icon, icon};
 use crate::list::{self, Selected};
 use crate::page::{self, Colors, FromPage};
 use crate::toast::{Level, notify};
+use crate::{chrome, composer};
 
 #[derive(Clone, Default, PartialEq)]
 enum State {
@@ -677,15 +677,8 @@ fn toolbar() -> impl IntoElement {
             .with(|r| (r.state == State::Open && !r.remote.is_empty()).then_some(r.loading_remote))
     };
     let has_html = move || global::<Reading>().with(|r| r.html.is_some());
-    view()
-        .flex_row()
-        .items_center()
-        .flex_shrink_0()
-        .h(px(48.0))
-        .px(px(12.0))
+    chrome::toolbar()
         .gap(px(2.0))
-        .border_b_1()
-        .border_color(move || theme().border)
         .child(icon_button(
             || Icon::ArrowLeft,
             || "Back".to_owned(),

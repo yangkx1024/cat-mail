@@ -31,6 +31,7 @@ use nsh_core::file_dialog::OpenDialog;
 use nsh_core::prelude::*;
 
 use crate::app::{client, in_mailbox};
+use crate::chrome;
 use crate::commands::with_accounts;
 use crate::commands::{Size, icon_button, primary_button};
 use crate::icons::{Icon, icon};
@@ -568,6 +569,7 @@ fn Composer() -> impl IntoElement {
         .flex_1()
         .bg(move || theme().background)
         .on_file_drop(dropped)
+        .child(chrome::title_bar_of(title))
         .child(error())
         .child(fields(focus_body))
         .child(body(focus_body))

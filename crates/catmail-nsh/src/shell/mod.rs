@@ -17,6 +17,8 @@ mod toolkit;
 
 #[cfg(target_os = "linux")]
 pub use self::toolkit::application;
+/// Runs a future on the main thread's loop, from the main thread.
+pub use self::toolkit::spawn;
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -156,13 +158,6 @@ pub enum Ask {
     /// Go there, once the folders are read.
     GoTo(Destination),
     /// A new message, from the account shown.
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(
-            dead_code,
-            reason = "the tray's and the notifications', Linux's only so far"
-        )
-    )]
     Compose,
 }
 
@@ -181,13 +176,6 @@ static ASKS: Mutex<Asks> = Mutex::new(Asks {
     left_at: None,
 });
 
-#[cfg_attr(
-    not(target_os = "linux"),
-    expect(
-        dead_code,
-        reason = "the tray's and the notifications', Linux's only so far"
-    )
-)]
 fn ask(ask: Ask) {
     let mut asks = lock(&ASKS);
     let sent = asks
@@ -223,13 +211,6 @@ pub fn left_at(place: Option<Place>) {
 
 /// Shows the main window (opened if there is none), taken to `to`. `activation_token` is
 /// what the tray clicked gave, if anything, to take the focus on Wayland.
-#[cfg_attr(
-    not(target_os = "linux"),
-    expect(
-        dead_code,
-        reason = "the tray's and the notifications', Linux's only so far"
-    )
-)]
 pub fn show_at(to: Option<Destination>, activation_token: Option<&str>) {
     if let Some(to) = to {
         ask(Ask::GoTo(to));
@@ -238,13 +219,6 @@ pub fn show_at(to: Option<Destination>, activation_token: Option<&str>) {
 }
 
 /// Does what was chosen in the tray.
-#[cfg_attr(
-    not(target_os = "linux"),
-    expect(
-        dead_code,
-        reason = "the tray's and the notifications', Linux's only so far"
-    )
-)]
 pub fn chose(command: Command, activation_token: Option<String>) {
     let token = activation_token.as_deref();
     match command {

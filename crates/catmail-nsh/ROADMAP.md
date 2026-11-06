@@ -160,10 +160,10 @@ Accounts 的确认文案在 `accounts`，与 gpui 版共用；nsh 版把 gpui-ki
 
 ## P9 常驻与系统集成（docs/architecture/background.md）
 
-托盘的菜单、提示文字、带角标的图标 SVG 和 Linux 的 StatusNotifierItem（`tray`）、新邮件通知的攒批、措辞和 tag
+托盘的菜单、提示文字、带角标的图标 SVG、Linux 的 StatusNotifierItem 和 macOS 的状态栏项（`tray`）、新邮件通知的攒批、措辞和 tag
 （`new_mail`）、点击后的去处（`mailbox::Destination`）、关窗后的去留（`resident`）、`malloc_trim`（`memory`）、
 列表等待某封邮件出现（`list::Reveal`）都在 `catmail-frontend`，与 gpui 版共用。nsh 版只做计数、绘制和收发
-（`tray.rs`、`new_mail.rs`），常驻与退出在 `shell/`。
+（`tray/`、`new_mail.rs`），常驻与退出在 `shell/`。
 
 - [x] 托盘：ksni（frontend 的 `tray::linux`），显示未读数，菜单是 Open catmail、New message、Sync now、Quit。
       图标用 resvg 在另一个线程上画（nsh-core 已经带了 resvg，这里另外打开 `text`，用来画角标数字）。亮暗跟随
@@ -216,7 +216,13 @@ Accounts 的确认文案在 `accounts`，与 gpui 版共用；nsh 版把 gpui-ki
       dispatch queue 上跑；输入框失焦也自己用事件 monitor 做（同 Linux）。菜单栏、停主循环、外观映射抄了 nsh `run_app` 的私有实现，
       失焦两个后端各一份，宜由 nsh 提供（#248）。菜单栏有应用菜单（⌘Q 走退出流程）、
       Edit、Window（⌘W 走窗口的关闭询问），点 Dock 图标唤回主窗口；信号用 `ctrlc`。快捷键提示用 nsh 的 `key_label`
-- [ ] macOS：状态栏图标（gpui 版的 `tray/macos.rs`，宜先抽进 frontend）、新邮件通知（系统通知要打包成 .app）、
+- [x] macOS 状态栏图标：gpui 版的 `tray/macos.rs` 抽进 frontend（`tray::macos`），两版共用；nsh 版计数、
+      绘制与 Linux 共用（`tray/mod.rs`），模板图用 resvg 画一次，未读数写在图标旁和 Dock 角标上
+- [x] macOS 窗口外框对齐 gpui 版（`chrome.rs`，nsh 的 `set_title_bar(Hidden)` 和 `window_drag`）：主窗口一体式，
+      红绿灯在侧栏左上角、各栏顶部那一行里（52 pt，AppKit unified 工具栏的高度：nsh 的 `title_bar()` 在
+      macOS 27 上报 66 pt，比按钮所在的行高，只用它判断有没有按钮；报到上游 longbridge/nsh#1068），这一行按下拖动窗口；登录页、打不开引擎的页
+      顶部空出这一行。写信窗口保留标题栏，但是应用自己画的：侧栏的颜色、标题（Subject）居中
+- [ ] macOS：新邮件通知（系统通知要打包成 .app）、
       .app 打包（现在菜单栏显示可执行文件名，Dock 没有图标）、注销时不取消（现在 `applicationShouldTerminate`
       先取消，等写信窗口存完再退出）
 - [ ] Windows（WebView2）后端

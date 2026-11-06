@@ -26,6 +26,7 @@ use nsh_core::geometry::Percentage;
 use nsh_core::prelude::*;
 
 use crate::app::{client, in_mailbox, report};
+use crate::chrome;
 use crate::commands::{self, Size};
 use crate::icons::{Icon, icon};
 use crate::sidebar::{self, Accounts, SelectedPlace};
@@ -751,11 +752,12 @@ fn header() -> impl IntoElement {
     global::<SearchRef>().set(SearchRef(Some(search)));
     view()
         .px(px(12.0))
-        .pt(px(12.0))
         .pb(px(8.0))
-        .gap(px(10.0))
+        .gap(px(4.0))
         .child(
-            view()
+            // As tall as the toolbar across from it, and lined up with it: the row that
+            // moves the window, on macOS.
+            chrome::move_row()
                 .flex_row()
                 .items_center()
                 .gap(px(4.0))

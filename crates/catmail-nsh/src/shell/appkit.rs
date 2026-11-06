@@ -4,8 +4,7 @@
 //! text field.
 //!
 //! ⚠️ Not bundled: the menu bar names the app after its executable, the Dock shows no
-//! icon of its own, and there are no notifications (the system's need a bundle). No tray
-//! (status item) yet either: the Dock brings the window back.
+//! icon of its own, and there are no notifications (the system's need a bundle).
 
 // AppKit is Objective-C: its classes are defined and its messages sent with `unsafe`.
 #![allow(unsafe_code)]
@@ -83,8 +82,11 @@ pub fn after(delay: Duration, f: impl FnOnce() + Send + 'static) {
     let _ = DispatchQueue::main().after(when, f);
 }
 
-/// The engine is open. Nothing follows it here yet: no tray, no notifications.
-pub fn engine_opened() {}
+/// The engine is open: the status item follows its mail. No notifications: the system's
+/// need a bundle.
+pub fn engine_opened() {
+    crate::tray::start();
+}
 
 // --- The application ----------------------------------------------------------------
 

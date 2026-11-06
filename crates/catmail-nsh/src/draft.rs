@@ -11,9 +11,9 @@ use nsh_core::prelude::*;
 
 use crate::app::{client, in_mailbox, report};
 use crate::commands::{Size, icon_button, primary_button, separator};
-use crate::composer;
 use crate::icons::{Icon, icon};
 use crate::list::{self, Selected};
+use crate::{chrome, composer};
 
 /// The pane, while a draft is selected.
 pub fn pane() -> impl IntoElement {
@@ -30,15 +30,8 @@ pub fn pane() -> impl IntoElement {
 
 fn toolbar(draft: Memo<Option<Rc<Draft>>>) -> impl IntoElement {
     let id = move || draft.with(|d| d.as_ref().map(|d| d.id));
-    view()
-        .flex_row()
-        .items_center()
-        .flex_shrink_0()
-        .h(px(48.0))
-        .px(px(12.0))
+    chrome::toolbar()
         .gap(px(2.0))
-        .border_b_1()
-        .border_color(move || theme().border)
         .child(icon_button(
             || Icon::ArrowLeft,
             || "Back".to_owned(),

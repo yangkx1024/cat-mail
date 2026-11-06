@@ -14,6 +14,8 @@ use nsh_platform_macos as nsh_platform;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod app;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod chrome;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod commands;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod composer;
@@ -46,7 +48,7 @@ mod sidebar;
 mod theme;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod toast;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod tray;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

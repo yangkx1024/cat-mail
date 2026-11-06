@@ -8,6 +8,7 @@ use nsh_base::{alert_dialog, theme};
 use nsh_core::prelude::*;
 
 use crate::app::{client, in_mailbox, report};
+use crate::chrome;
 use crate::commands::{Size, icon_button, text_button, with_accounts};
 use crate::icons::{Icon, icon};
 use crate::list::{self, Selected};
@@ -18,23 +19,13 @@ pub fn pane() -> impl IntoElement {
     view()
         .flex_1()
         .min_w(px(0.0))
-        .child(
-            view()
-                .flex_row()
-                .items_center()
-                .flex_shrink_0()
-                .h(px(48.0))
-                .px(px(12.0))
-                .border_b_1()
-                .border_color(move || theme().border)
-                .child(icon_button(
-                    || Icon::ArrowLeft,
-                    || "Back".to_owned(),
-                    || true,
-                    Size::Bar,
-                    || global::<Selected>().set(Selected(None)),
-                )),
-        )
+        .child(chrome::toolbar().child(icon_button(
+            || Icon::ArrowLeft,
+            || "Back".to_owned(),
+            || true,
+            Size::Bar,
+            || global::<Selected>().set(Selected(None)),
+        )))
         .child(dynamic(move || match entry.get() {
             Some(entry) => page(entry).into_element(),
             None => view().flex_1().into_element(),

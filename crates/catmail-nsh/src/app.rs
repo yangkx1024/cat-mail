@@ -21,7 +21,7 @@ use crate::login::{self, SignIn};
 use crate::shell::Ask;
 use crate::sidebar::{self, Accounts, SelectedPlace};
 use crate::toast::{Level, notify};
-use crate::{commands, composer, draft, form, outbox, reader, settings, shell, toast};
+use crate::{chrome, commands, composer, draft, form, outbox, reader, settings, shell, toast};
 
 pub fn client() -> MailClient {
     crate::engine::client()
@@ -84,6 +84,7 @@ enum Opening {
 #[component]
 pub fn App() -> impl IntoElement {
     settings::follow();
+    chrome::unified();
     let opening = signal(Opening::Waiting);
     spawn(async move {
         opening.set(match crate::engine::opened().await {
@@ -95,9 +96,9 @@ pub fn App() -> impl IntoElement {
         .flex_1()
         .bg(move || theme().background)
         .child(dynamic(move || match opening.get() {
-            Opening::Waiting => view().into_element(),
+            Opening::Waiting => chrome::page(view()).into_element(),
             Opening::Open => mailbox().into_element(),
-            Opening::Failed(reason) => failed(reason).into_element(),
+            Opening::Failed(reason) => chrome::page(failed(reason)).into_element(),
         }))
         .child(toast::toasts())
 }
@@ -169,7 +170,7 @@ fn mailbox() -> impl IntoElement {
     view()
         .flex_1()
         .child(dynamic(move || match global::<SignIn>().get().0 {
-            Some(cancellable) => login::sign_in_page(cancellable).into_element(),
+            Some(cancellable) => chrome::page(login::sign_in_page(cancellable)).into_element(),
             None => panes().into_element(),
         }))
         .child(settings::dialog())

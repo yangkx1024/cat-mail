@@ -23,7 +23,7 @@ use crate::app::{client, in_mailbox, report};
 use crate::commands::{Size, icon_button, primary_button, tooltip};
 use crate::form::{NameRequest, ask_name, asking_name};
 use crate::icons::{Icon, icon};
-use crate::{composer, settings};
+use crate::{chrome, composer, settings};
 
 /// The accounts as the sidebar shows them; `None` until the first read.
 #[derive(Clone, Default)]
@@ -559,11 +559,19 @@ pub fn sidebar() -> impl IntoElement {
     view()
         .flex_1()
         .bg(move || theme().sidebar)
+        // Under the window's buttons, "Compose" just below their row.
+        .child(when(chrome::has_window_buttons, chrome::move_row))
         // 20 down to the first place, with the 12 above it, as the GUI's.
         .child(
             view()
                 .px(px(12.0))
-                .pt(px(12.0))
+                .pt(move || {
+                    px(if chrome::has_window_buttons() {
+                        0.0
+                    } else {
+                        12.0
+                    })
+                })
                 .pb(px(8.0))
                 .child(primary_button(
                     Icon::PencilSquare,

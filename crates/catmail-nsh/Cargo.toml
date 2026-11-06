@@ -27,10 +27,10 @@ url.workspace = true
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 nsh-core.workspace = true
 nsh-base.workspace = true
+resvg.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 glib-unix.workspace = true
-resvg.workspace = true
 nsh-platform-linux.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
