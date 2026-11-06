@@ -1,7 +1,8 @@
 //! The mailbox's left pane: All Inboxes, each account's places under its address (folders
 //! with a role first, the drafts and outbox after the inbox, then the other folders,
 //! Gmail's labels in a section of their own), and at the bottom what is wrong with the
-//! connection. Its model is `catmail_frontend`'s.
+//! connection. Its model is `catmail_frontend`'s; the commands in a folder's menu are
+//! `folder_commands.rs`'.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -10,18 +11,19 @@ use std::rc::Rc;
 use catmail_core::{AccountId, FolderId, FolderRole};
 use catmail_frontend::folders::{self, FolderIcon, FolderNode, RoleInfo};
 use catmail_frontend::mailbox::{
-    self, ALL_MAIL_HIDDEN, AccountEntry, Destination, FolderMenuEntry, Place, SYNC_ON_OPEN_AFTER,
+    self, ALL_MAIL_HIDDEN, AccountEntry, Destination, Place, SYNC_ON_OPEN_AFTER,
 };
 use catmail_frontend::refresh::{Coalesce, DraftCounts};
-use nsh_base::{alert_dialog, theme};
+use nsh_base::theme;
 use nsh_core::ContextMenuEvent;
-use nsh_core::element::desktop::{MenuItem, popup_menu};
 use nsh_core::prelude::*;
 
-use crate::app::{client, in_mailbox, report};
-use crate::commands::{Size, icon_button, primary_button, tooltip};
-use crate::form::{NameRequest, ask_name, asking_name};
+use crate::buttons::{Size, icon_button, primary_button, tooltip};
+use crate::engine::client;
 use crate::icons::{Icon, icon};
+use crate::mailbox::folder_commands::{folder_menu, rename_selected};
+use crate::tasks::in_view;
+use crate::toast::report;
 use crate::{chrome, composer, settings};
 
 /// The accounts as the sidebar shows them; `None` until the first read.
@@ -31,6 +33,16 @@ pub struct Accounts(pub Option<Vec<AccountEntry>>);
 /// Where the sidebar's selection is.
 #[derive(Clone, Default)]
 pub struct SelectedPlace(pub Option<Place>);
+
+/// `f` with the accounts as the sidebar has them.
+pub fn with_accounts<T>(f: impl FnOnce(&[AccountEntry]) -> T) -> T {
+    global::<Accounts>().with_untracked(|a| f(a.0.as_deref().unwrap_or_default()))
+}
+
+/// `f` with account `id` as the sidebar has it; `None` while it has no such account.
+pub fn with_account<T>(id: AccountId, f: impl FnOnce(&AccountEntry) -> T) -> Option<T> {
+    with_accounts(|a| a.iter().find(|e| e.account.id == id).map(f))
+}
 
 /// What waits for the first read of the folders, asked of the mailbox from outside it
 /// (`shell::Ask`) before then: where to go instead of where it starts, and a message to
@@ -82,12 +94,12 @@ pub fn load() {
         return;
     }
     let counts = reads.borrow().draft_counts.clone();
-    in_mailbox(async move {
+    in_view(async move {
         let loaded = client().overview().await;
         let again = reads.borrow_mut().reading.finish();
         match loaded {
             Ok(overviews) => {
-                let shown = global::<Accounts>();
+                let _shown = global::<Accounts>();
                 let accounts = overviews
                     .into_iter()
                     .map(|overview| {
@@ -95,9 +107,7 @@ pub fn load() {
                         // Not stored: taken now, it is never older than its event.
                         let mut entry = AccountEntry::new(overview, client().account_status(id));
                         if !reads.borrow().draft_counts.read_is_latest(&counts, id)
-                            && let Some(drafts) = shown.with_untracked(|a| {
-                                Some(a.0.as_ref()?.iter().find(|e| e.account.id == id)?.drafts)
-                            })
+                            && let Some(drafts) = with_account(id, |e| e.drafts)
                         {
                             entry.drafts = drafts;
                         }
@@ -135,16 +145,16 @@ fn set_accounts(accounts: Vec<AccountEntry>) {
         None => (!still_there).then(|| Place::start(&accounts)),
     };
     shown.set(Accounts(Some(accounts)));
-    crate::list::set_labels();
+    crate::mailbox::list::set_labels();
     match start {
         Some(start) => select(start),
         // The list shows a folder more (All Inboxes, an account's first INBOX): its
         // messages' events may have come first, taken for a folder not shown.
-        None if shown_folders() != folders_before => crate::list::refresh(),
+        None if shown_folders() != folders_before => crate::mailbox::list::refresh(),
         None => {}
     }
     if let Some((_, Some(message))) = going {
-        crate::list::reveal(message);
+        crate::mailbox::list::reveal(message);
     }
     if waiting.compose {
         composer::new_message();
@@ -159,12 +169,12 @@ pub fn go_to(to: Destination) {
         global::<Waiting>().update(|w| w.to = Some(to));
         return;
     }
-    let Some((place, message)) = crate::commands::with_accounts(|a| to.find(a)) else {
+    let Some((place, message)) = crate::mailbox::sidebar::with_accounts(|a| to.find(a)) else {
         return;
     };
     select(Some(place));
     if let Some(message) = message {
-        crate::list::reveal(message);
+        crate::mailbox::list::reveal(message);
     }
 }
 
@@ -180,7 +190,7 @@ pub fn compose() {
 /// Syncs every account now. The engine's background sync does it: progress and failures
 /// show as the accounts' status.
 pub fn sync() {
-    in_mailbox(async {
+    in_view(async {
         if let Err(e) = client().sync_now().await {
             report("Couldn't sync", e);
         }
@@ -196,7 +206,7 @@ pub fn syncing() -> bool {
 /// so only that is read again.
 pub fn count_drafts(account: AccountId) {
     let change = reads().borrow_mut().draft_counts.changed(account);
-    in_mailbox(async move {
+    in_view(async move {
         let counted = client().count_drafts(account).await;
         if !reads().borrow().draft_counts.is_latest(account, change) {
             return; // A later count is on its way.
@@ -221,21 +231,24 @@ pub fn status_changed(account: AccountId) {
 
 fn update_account(account: AccountId, change: impl FnOnce(&mut AccountEntry)) {
     let accounts = global::<Accounts>();
-    let mut entry = accounts.with_untracked(|a| {
-        a.0.as_ref()?
-            .iter()
+    let shown = |a: &Accounts| {
+        a.0.iter()
+            .flatten()
             .find(|e| e.account.id == account)
             .cloned()
-    });
-    let Some(entry) = entry.as_mut() else {
+    };
+    let Some(mut entry) = accounts.with_untracked(shown) else {
         return;
     };
-    let before = entry.clone();
-    change(entry);
-    if *entry == before {
+    change(&mut entry);
+    let unchanged = accounts.with_untracked(|a| {
+        a.0.iter()
+            .flatten()
+            .any(|e| e.account.id == account && *e == entry)
+    });
+    if unchanged {
         return;
     }
-    let entry = entry.clone();
     accounts.update(|a| {
         if let Some(shown) = a.0.iter_mut().flatten().find(|e| e.account.id == account) {
             *shown = entry;
@@ -261,7 +274,7 @@ pub fn select(place: Option<Place>) {
     }
     selected.set(SelectedPlace(place));
     for folder in shown_folders() {
-        in_mailbox(async move {
+        in_view(async move {
             let error = match client().sync_folder(folder, SYNC_ON_OPEN_AFTER).await {
                 Ok(report) => report.and_then(|r| r.error).map(|e| e.message),
                 Err(e) => Some(e.to_string()),
@@ -277,23 +290,10 @@ pub fn select(place: Option<Place>) {
 /// account's INBOX; none for the drafts and the outbox. Untracked.
 pub fn shown_folders() -> Vec<FolderId> {
     let place = global::<SelectedPlace>().with_untracked(|p| p.0);
-    global::<Accounts>().with_untracked(|a| {
-        let accounts = a.0.as_deref().unwrap_or_default();
-        match place {
-            Some(Place::Inboxes) => accounts
-                .iter()
-                .filter_map(|a| a.folders.with_role(FolderRole::Inbox))
-                .map(|f| f.id)
-                .collect(),
-            Some(Place::Folder(id)) => accounts
-                .iter()
-                .find_map(|a| a.folders.find(id)?.selectable())
-                .map(|f| f.id)
-                .into_iter()
-                .collect(),
-            _ => Vec::new(),
-        }
-    })
+    let Some(place) = place else {
+        return Vec::new();
+    };
+    with_accounts(|accounts| place.folders(accounts).iter().map(|f| f.id).collect())
 }
 
 /// Whether the sidebar shows the account's places: as the user left it, else only for
@@ -870,130 +870,6 @@ fn row_color(selected: impl Fn() -> bool + 'static) -> impl Fn() -> AdaptiveColo
             theme().sidebar_foreground
         }
     }
-}
-
-// --- Folder commands ----------------------------------------------------------------
-
-/// The context menu of a folder (`None`: of the account's heading), with
-/// [`AccountEntry::folder_menu_entries`]. One left with nothing doesn't open.
-fn folder_menu(account: AccountId, folder: Option<FolderId>) {
-    let items = global::<Accounts>().with_untracked(|a| {
-        let entry = a.0.as_ref()?.iter().find(|e| e.account.id == account)?;
-        let mut items = Vec::new();
-        for menu_entry in entry.folder_menu_entries(folder) {
-            // Left out where it would come first.
-            if matches!(menu_entry, FolderMenuEntry::Rename(_)) && !items.is_empty() {
-                items.push(MenuItem::separator());
-            }
-            items.push(
-                MenuItem::new(entry.folder_menu_label(menu_entry))
-                    .on_select(move || run(account, menu_entry)),
-            );
-        }
-        Some(items)
-    });
-    if let Some(items) = items.filter(|items| !items.is_empty()) {
-        // Nothing waits on it closing.
-        drop(popup_menu(items));
-    }
-}
-
-fn run(account: AccountId, entry: FolderMenuEntry) {
-    match entry {
-        FolderMenuEntry::New(parent) => new_folder(account, parent),
-        FolderMenuEntry::Rename(id) => rename_folder(id),
-        FolderMenuEntry::Delete(id) => delete_folder(id),
-    }
-}
-
-/// The account the folder (a level that holds no messages too) is in.
-fn with_entry<R>(folder: FolderId, f: impl FnOnce(&AccountEntry) -> Option<R>) -> Option<R> {
-    global::<Accounts>().with_untracked(|a| {
-        let entry =
-            a.0.as_ref()?
-                .iter()
-                .find(|e| e.folders.get(folder).is_some())?;
-        f(entry)
-    })
-}
-
-fn new_folder(account: AccountId, parent: Option<FolderId>) {
-    let title = global::<Accounts>().with_untracked(|a| {
-        let entry = a.0.as_ref()?.iter().find(|e| e.account.id == account)?;
-        Some(entry.new_folder_title(parent))
-    });
-    if let Some(title) = title {
-        ask_name(NameRequest {
-            title,
-            name: String::new(),
-            placeholder: None,
-            ok: "Create",
-            what: "create it",
-            may_be_empty: false,
-            request: Rc::new(move |name| {
-                Box::pin(async move {
-                    client()
-                        .create_folder(account, parent, &name)
-                        .await
-                        .map(drop)
-                })
-            }),
-        });
-    }
-}
-
-fn rename_folder(id: FolderId) {
-    let name = with_entry(id, |entry| {
-        Some(entry.changeable_folder(id)?.leaf_name().to_owned())
-    });
-    if let Some(name) = name {
-        ask_name(NameRequest {
-            title: format!("Rename “{name}”"),
-            name,
-            placeholder: None,
-            ok: "Rename",
-            what: "rename it",
-            may_be_empty: false,
-            request: Rc::new(move |name| {
-                Box::pin(async move { client().rename_folder(id, &name).await.map(drop) })
-            }),
-        });
-    }
-}
-
-/// F2: renames the folder the sidebar has selected, if the user may.
-fn rename_selected() {
-    if asking_name() {
-        return;
-    }
-    if let Some(Place::Folder(id)) = global::<SelectedPlace>().with_untracked(|p| p.0) {
-        rename_folder(id);
-    }
-}
-
-/// Deletes the folder, the folders in it and their messages once the user confirms: it
-/// can't be undone. A Gmail label only comes off its messages.
-fn delete_folder(id: FolderId) {
-    let Some(deletion) = with_entry(id, |entry| entry.folder_deletion(id)) else {
-        return;
-    };
-    let answer = alert_dialog()
-        .title(deletion.title)
-        .description(deletion.consequence)
-        .cancel("cancel", "Cancel")
-        .destructive("delete", "Delete")
-        .show();
-    in_mailbox(async move {
-        if !answer
-            .await
-            .is_ok_and(|r| r.action.as_deref() == Some("delete"))
-        {
-            return;
-        }
-        if let Err(e) = client().delete_folder(id).await {
-            report(&format!("Couldn't {}", deletion.what), e);
-        }
-    });
 }
 
 #[cfg(test)]

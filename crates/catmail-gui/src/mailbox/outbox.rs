@@ -4,14 +4,19 @@
 use catmail_core::{OutboxEntry, OutboxStatus};
 use catmail_frontend::format;
 use catmail_frontend::outbox::{Choice, State, choices};
-use nsh_base::{alert_dialog, theme};
+use nsh_base::theme;
 use nsh_core::prelude::*;
 
-use crate::app::{client, in_mailbox, report};
+use crate::buttons::text_button;
 use crate::chrome;
-use crate::commands::{Size, icon_button, text_button, with_accounts};
+use crate::engine::client;
+use crate::form::confirmed;
 use crate::icons::{Icon, icon};
-use crate::list::{self, Selected};
+use crate::mailbox::list::{self};
+use crate::mailbox::panes::{back_button, fact};
+use crate::mailbox::sidebar::with_account;
+use crate::tasks::in_view;
+use crate::toast::report;
 
 /// The pane, while an outbox entry is selected.
 pub fn pane() -> impl IntoElement {
@@ -19,13 +24,7 @@ pub fn pane() -> impl IntoElement {
     view()
         .flex_1()
         .min_w(px(0.0))
-        .child(chrome::toolbar().child(icon_button(
-            || Icon::ArrowLeft,
-            || "Back".to_owned(),
-            || true,
-            Size::Bar,
-            || global::<Selected>().set(Selected(None)),
-        )))
+        .child(chrome::toolbar().child(back_button()))
         .child(dynamic(move || match entry.get() {
             Some(entry) => page(entry).into_element(),
             None => view().flex_1().into_element(),
@@ -33,40 +32,14 @@ pub fn pane() -> impl IntoElement {
 }
 
 fn page(entry: OutboxEntry) -> impl IntoElement {
-    let from = with_accounts(|accounts| {
-        accounts
-            .iter()
-            .find(|a| a.account.id == entry.account_id)
-            .map(|a| a.account.email.clone())
-            .unwrap_or_default()
-    });
+    let from = with_account(entry.account_id, |a| a.account.email.clone()).unwrap_or_default();
     let facts = [
         ("To", entry.recipients.join(", ")),
         ("From", from),
         ("Queued", format::date(Some(entry.created_at))),
     ]
     .into_iter()
-    .map(|(name, value)| {
-        view()
-            .flex_row()
-            .items_start()
-            .gap(px(12.0))
-            .child(
-                text(name)
-                    .w(px(64.0))
-                    .flex_shrink_0()
-                    .text_sm()
-                    .text_color(move || theme().muted_foreground),
-            )
-            .child(
-                text(value)
-                    .flex_1()
-                    .text_sm()
-                    .selectable(true)
-                    .text_color(move || theme().foreground),
-            )
-            .into_element()
-    })
+    .map(|(name, value)| fact(name, value).into_element())
     .collect::<Vec<_>>();
     scroll().flex_1().child(
         view()
@@ -174,28 +147,20 @@ fn alert(
 
 /// Does what the user chose; sending again what may have arrived asks first.
 fn choose(choice: Choice, status: OutboxStatus) {
-    let Some((confirm, go_on)) = choice.confirm(status) else {
+    let Some(confirm) = choice.confirm(status) else {
         run(choice);
         return;
     };
-    let answer = alert_dialog()
-        .title(confirm.title)
-        .description(confirm.description)
-        .cancel("cancel", "Cancel")
-        .destructive("go-on", go_on)
-        .show();
-    in_mailbox(async move {
-        if answer
-            .await
-            .is_ok_and(|r| r.action.as_deref() == Some("go-on"))
-        {
+    let answer = confirmed(confirm);
+    in_view(async move {
+        if answer.await {
             run(choice);
         }
     });
 }
 
 fn run(choice: Choice) {
-    in_mailbox(async move {
+    in_view(async move {
         if let Err(e) = choice.run(&client()).await {
             report(&format!("Couldn't {}", choice.what()), e);
         }

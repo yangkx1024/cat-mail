@@ -8,7 +8,6 @@ license.workspace = true
 
 [dependencies]
 catmail-core.workspace = true
-data-url.workspace = true
 directories.workspace = true
 dunce.workspace = true
 futures-channel.workspace = true

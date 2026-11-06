@@ -11,15 +11,11 @@ use nsh_platform_linux as nsh_platform;
 use nsh_platform_macos as nsh_platform;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-mod app;
+mod buttons;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod chrome;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-mod commands;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod composer;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-mod draft;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod engine;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -27,14 +23,11 @@ mod form;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod icons;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-mod list;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod login;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod mailbox;
 #[cfg(target_os = "linux")]
 mod new_mail;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-mod outbox;
-mod page;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod reader;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -42,7 +35,7 @@ mod settings;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod shell;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-mod sidebar;
+mod tasks;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod theme;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -4,14 +4,15 @@
 
 use std::rc::Rc;
 
+use catmail_frontend::commands::Confirm;
 use catmail_frontend::login::Submission;
 use futures_util::future::LocalBoxFuture;
-use nsh_base::{button, dialog, theme};
+use nsh_base::{alert_dialog, button, dialog, theme};
 use nsh_core::ModalAnimation;
 use nsh_core::element::input;
 use nsh_core::prelude::*;
 
-use crate::app::in_mailbox;
+use crate::tasks::in_view;
 
 /// A dialog `width` points wide over the window, dimming it; `cancel` is what Escape or
 /// a press beside it does.
@@ -169,7 +170,7 @@ pub fn submit<T: 'static>(
     let Some(request) = change(submission, |s| s.begin(request)) else {
         return;
     };
-    in_mailbox(async move {
+    in_view(async move {
         let result = request.await;
         if let Some(value) = change(submission, |s| s.ended(result)) {
             done(value);
@@ -182,6 +183,22 @@ fn change<T: Clone + 'static, R>(signal: Signal<T>, f: impl FnOnce(&mut T) -> R)
     let mut out = None;
     signal.update(|value| out = Some(f(value)));
     out.expect("`update` runs `f`")
+}
+
+/// Asks `confirm` about what can't be undone, at once; the future says whether the user
+/// went on.
+pub fn confirmed(confirm: Confirm) -> impl Future<Output = bool> {
+    let answer = alert_dialog()
+        .title(confirm.title)
+        .description(confirm.description)
+        .cancel("cancel", "Cancel")
+        .destructive("go-on", confirm.action)
+        .show();
+    async move {
+        answer
+            .await
+            .is_ok_and(|r| r.action.as_deref() == Some("go-on"))
+    }
 }
 
 // --- The name dialog ----------------------------------------------------------------

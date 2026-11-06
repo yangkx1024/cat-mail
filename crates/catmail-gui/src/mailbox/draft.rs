@@ -4,14 +4,19 @@ use std::rc::Rc;
 
 use catmail_core::{Draft, DraftId};
 use catmail_frontend::composer::ComposeFrom;
+use catmail_frontend::composer::draft_deletion;
 use catmail_frontend::format;
-use nsh_base::{alert_dialog, theme};
+use nsh_base::theme;
 use nsh_core::prelude::*;
 
-use crate::app::{client, in_mailbox, report};
-use crate::commands::{Size, icon_button, primary_button, separator};
+use crate::buttons::{Size, icon_button, primary_button, separator};
+use crate::engine::client;
+use crate::form::confirmed;
 use crate::icons::{Icon, icon};
-use crate::list::{self, Selected};
+use crate::mailbox::list::{self};
+use crate::mailbox::panes::{back_button, fact};
+use crate::tasks::in_view;
+use crate::toast::report;
 use crate::{chrome, composer};
 
 /// The pane, while a draft is selected.
@@ -31,13 +36,7 @@ fn toolbar(draft: Memo<Option<Rc<Draft>>>) -> impl IntoElement {
     let id = move || draft.with(|d| d.as_ref().map(|d| d.id));
     chrome::toolbar()
         .gap(px(2.0))
-        .child(icon_button(
-            || Icon::ArrowLeft,
-            || "Back".to_owned(),
-            || true,
-            Size::Bar,
-            || global::<Selected>().set(Selected(None)),
-        ))
+        .child(back_button())
         .child(separator(Size::Bar))
         .child(primary_button(
             Icon::PencilSquare,
@@ -58,23 +57,16 @@ fn toolbar(draft: Memo<Option<Rc<Draft>>>) -> impl IntoElement {
             Size::Bar,
             move || {
                 if let Some(draft) = draft.get_untracked() {
-                    confirm_delete(draft.id, format::subject(Some(&draft.content.subject)));
+                    confirm_delete(draft.id, Some(&draft.content.subject));
                 }
             },
         ))
 }
 
-fn confirm_delete(id: DraftId, subject: &str) {
-    let answer = alert_dialog()
-        .title(format!("Delete the draft “{subject}”?"))
-        .description("Its copy in the server's Drafts folder is deleted too.")
-        .cancel("cancel", "Cancel")
-        .destructive("delete", "Delete")
-        .show();
-    in_mailbox(async move {
-        if answer
-            .await
-            .is_ok_and(|r| r.action.as_deref() == Some("delete"))
+fn confirm_delete(id: DraftId, subject: Option<&str>) {
+    let answer = confirmed(draft_deletion(subject));
+    in_view(async move {
+        if answer.await
             && let Err(e) = client().delete_draft(id).await
         {
             report("Couldn't delete the draft", e);
@@ -93,27 +85,7 @@ fn page(draft: Rc<Draft>) -> impl IntoElement {
     ]
     .into_iter()
     .filter(|(_, list)| !list.is_empty())
-    .map(|(name, list)| {
-        view()
-            .flex_row()
-            .items_start()
-            .gap(px(12.0))
-            .child(
-                text(name)
-                    .w(px(64.0))
-                    .flex_shrink_0()
-                    .text_sm()
-                    .text_color(muted),
-            )
-            .child(
-                text(format::addresses(list))
-                    .flex_1()
-                    .text_sm()
-                    .selectable(true)
-                    .text_color(move || theme().foreground),
-            )
-            .into_element()
-    })
+    .map(|(name, list)| fact(name, format::addresses(list)).into_element())
     .collect::<Vec<_>>();
     let upload_error = draft.upload_error.clone().map(|error| {
         view()

@@ -345,7 +345,7 @@ fn main_window() -> Window {
             lock(&ASKS).mailbox = None;
         }),
     };
-    let window = open_window(&spec, Root::of::<crate::app::App>(), hooks);
+    let window = open_window(&spec, Root::of::<crate::mailbox::App>(), hooks);
     tracing::info!("main window opened");
     window
 }

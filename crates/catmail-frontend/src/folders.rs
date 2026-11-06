@@ -278,7 +278,7 @@ pub fn unread<'a>(folders: impl IntoIterator<Item = &'a Folder>) -> u32 {
 
 /// Nests the folders by their hierarchy delimiter, keeping the engine's order (INBOX
 /// first) among siblings.
-pub fn folder_tree(folders: &[Folder]) -> Vec<FolderNode> {
+fn folder_tree(folders: &[Folder]) -> Vec<FolderNode> {
     let mut roots = Vec::new();
     for folder in folders {
         let segments: Vec<&str> = match folder.delimiter {

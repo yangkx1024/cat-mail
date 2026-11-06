@@ -30,29 +30,37 @@ crates.io。逐项的进度、未做的事和 nsh 的变通（⚠️）见 [`cra
 
 ## 结构
 
-一个文件一个视图；外壳和托盘各一个目录。
+按窗口和区域分目录，仿照原来 GPUI 版的划分：主窗口的各栏在 `mailbox/`，读信区、写信窗口、设置对话框各一个目录，
+大的视图再把"状态和行为"与"长什么样"（`view.rs`）分开；各处共用的小部件放在 `src/` 下。
 
 ```
 src/
-  main.rs        启动：交给已在运行的实例或成为它（catmail_frontend::instance），日志，引擎的选项，交给 shell::run
-  engine.rs      引擎：属于应用，不属于窗口；打开中、已打开、失败、已关闭
-  shell/         外壳：mod.rs 窗口、设置与主题、托盘和通知的请求、常驻与退出；gtk.rs、appkit.rs 两个工具包
-  chrome.rs      窗口顶部：macOS 的一体式主窗口、写信窗口的标题栏、各栏顶部的工具栏
-  app.rs         主窗口：引擎打开前留空、失败的原因、三栏、引擎事件的刷新
-  sidebar.rs     侧栏：All Inboxes、账户与文件夹、标签、连接说明、文件夹的右键菜单
-  list.rs        中栏：来源、分页、按天分组、两种行形、勾选、搜索
-  commands.rs    对邮件的命令：图标按钮、快捷键、"Move to"与"Labels"对话框、被拒改动的通知
-  reader.rs      读信区：工具栏、头部、正文的 web view、远程与内嵌图片、附件
-  page.rs        正文的页面：CSP、注入脚本和它的消息协议
-  composer.rs    写信窗口
-  draft.rs outbox.rs   草稿、发件箱条目的右栏
-  settings.rs    设置对话框：General、Appearance、Accounts、Reading
-  login.rs form.rs     登录页和发件身份的表单；对话框外框、字段、提交、只要一个名字的对话框
-  theme.rs       主题映射到 nsh（shadcn）的 token
-  toast.rs       窗口里的通知
-  icons.rs       Heroicons
-  tray/          托盘：mod.rs 计数与绘制，linux.rs、macos.rs 交给 frontend 的 StatusNotifierItem、状态栏项
-  new_mail.rs    新邮件的系统通知（Linux）
+  main.rs          启动：交给已在运行的实例或成为它（catmail_frontend::instance），日志，引擎的选项，交给 shell::run
+  engine.rs        引擎：属于应用，不属于窗口；打开中、已打开、失败、已关闭
+  shell/           外壳：mod.rs 窗口、设置与主题、托盘和通知的请求、常驻与退出；gtk.rs、appkit.rs 两个工具包
+  mailbox/         主窗口
+    mod.rs         引擎打开前留空、失败的原因、登录页或三栏、引擎事件的刷新
+    panes.rs       三栏和拖宽度的把手，右栏按选中的是邮件、草稿还是发件箱条目；右栏共用的返回按钮、字段行
+    sidebar.rs     侧栏：All Inboxes、账户与文件夹、标签、连接说明
+    folder_commands.rs  文件夹的右键菜单：新建、改名、删除
+    list/          中栏：mod.rs 来源、分页、按天分组、勾选、搜索；rows.rs 日期标题和三种行
+    commands.rs    对邮件的命令：图标按钮组、快捷键、被拒改动的通知
+    picker.rs      "Move to"与"Labels"对话框
+    draft.rs outbox.rs  草稿、发件箱条目的右栏
+  reader/          读信区：mod.rs 打开、远程与内嵌图片、附件的保存；view.rs 工具栏、头部、正文的 web view、附件
+                   （正文的页面：CSP、注入脚本和它的消息协议在 catmail_frontend::html）
+  composer/        写信窗口：mod.rs 状态、保存发送关闭、附件、发件人；view.rs 窗口
+  settings/        设置对话框：mod.rs 设置的跟随、对话框和 General；appearance.rs、accounts.rs、reading.rs 各一节
+  login.rs         登录页和发件身份的表单
+  form.rs          对话框外框、字段、提交、确认对话框、只要一个名字的对话框
+  tasks.rs         视图开始的工作归谁（随窗口结束），另起线程的工作
+  buttons.rs       图标按钮（工具栏、行两种尺寸）、主按钮、文字按钮、分隔、提示
+  chrome.rs        窗口顶部：macOS 的一体式主窗口、写信窗口的标题栏、各栏顶部的工具栏
+  theme.rs         主题映射到 nsh（shadcn）的 token
+  toast.rs         窗口里的通知；report 记日志并提示出错
+  icons.rs         Heroicons
+  tray/            托盘：mod.rs 计数与绘制，linux.rs、macos.rs 交给 frontend 的 StatusNotifierItem、状态栏项
+  new_mail.rs      新邮件的系统通知（Linux）
 ```
 
 ## 外壳
@@ -94,7 +102,7 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 ## 状态与事件
 
 状态放在 nsh 的 global 里（每种类型一个 signal，每个窗口一份）。主窗口的任务都属于邮箱
-（`app::own_tasks`、`in_mailbox`）：一行的点击开始的工作比这一行活得久，随窗口一起结束。选中文件夹或邮件经
+（`tasks::own_tasks`、`in_view`）：一行的点击开始的工作比这一行活得久，随窗口一起结束。选中文件夹或邮件经
 `effect` 起任务，选中变了，effect 重新运行，还在加载的旧任务随之取消。
 
 客户端开着后台同步、后台发信、预取正文和 GC。GUI 自己不同步账户：Sync 按钮（Ctrl+Shift+N、F5）和托盘的
@@ -126,7 +134,7 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 
 ## 侧栏
 
-模型在 `catmail-frontend`（`folders`、`mailbox`），`sidebar.rs` 只有界面。
+模型在 `catmail-frontend`（`folders`、`mailbox`），`mailbox/sidebar.rs` 只有界面。
 
 有多个账户时第一项是 **All Inboxes**（只有一个账户时不列，它就是那个账户的 Inbox）：每个账户的 INBOX（与引擎
 同样按 `special_folder` 挑；Gmail 上是 INBOX 标签）合成一个列表，`MailClient::list_inboxes` 按与单个文件夹相同
@@ -153,7 +161,7 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 ## 邮件列表
 
 行的模型在 `catmail_frontend::list`（来源怎么分页读、按天分组、重读后选中去哪、按标记勾选、行上的文字），
-`list.rs` 只有界面。
+`mailbox/list/` 只有界面。
 
 - **按天分组**：列表（都是新的在前）按本地日期分组，标题是 Today、Yesterday、今年的"Monday, October 12"、
   更早的"October 12, 2025"，没有日期的归到 No date；行里只显示时间。只合并相邻的同一天，顺序不是按日期时
@@ -179,14 +187,19 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 ## 读与改
 
 命令的模型在 `catmail_frontend::commands`（`Applies`、命令的名字、作用于哪些邮件、"Move to"列出的文件夹、永久
-删除的确认文案、被拒改动的说明），`commands.rs` 只有界面。
+删除的确认文案、被拒改动的说明），`mailbox/commands.rs` 只有界面。
 
 - **三处同一套按钮**：读信区工具栏、勾选工具栏、悬停的行都由 `commands::group` 生成，只显示图标，按用途分组：
-  位置（Archive、Delete、Move to、Labels，Labels 只在 Gmail 上）；标记（已读 / 未读、Flag）；读信区另有内容
-  （Show remote images、Open in browser）和回复（Reply、Reply all、Forward）。Reply all 只在它比 Reply 多写给人时
-  显示（`can_reply_all`）。哪些可用、开关显示哪一面由 `Applies` 按这些邮件算。
-- **快捷键作用于勾选的邮件**：E、Delete / Backspace、L、Ctrl+Shift+M / U / L 有勾选时对勾选的，没有时对选中的
-  那封；读信区工具栏的按钮只对它显示的那封；回复、转发（Ctrl+R、Ctrl+Shift+R、Ctrl+Shift+F）只对选中的那封。
+  位置（Archive、Delete、Move to）；标记（已读 / 未读、Flag）；读信区另有内容（Show remote images、Open in
+  browser）和回复（Reply、Reply all、Forward）。Reply all 只在它比 Reply 多写给人时显示（`can_reply_all`）。
+  哪些可用、开关显示哪一面由 `Applies` 按这些邮件算，一个工具栏的几组共用一份。
+- **Labels 不在这套里**：它只改一封邮件，不是 `MessageCommand`，只有读信区工具栏在位置一组后面单独放一个按钮
+  （Gmail 账户才有，`commands::can_edit_labels`），快捷键 L 也只对选中的那封（`commands::edit_labels`）；
+  勾选工具栏和悬停的行没有它。要三处一致，得先定多封勾选时 Labels 怎么改（只许一封，或者对话框按"全部有 /
+  部分有 / 都没有"三态显示）。
+- **快捷键作用于勾选的邮件**：E、Delete / Backspace、Ctrl+Shift+M / U / L 有勾选时对勾选的，没有时对选中的
+  那封；读信区工具栏的按钮只对它显示的那封；L（Labels）、回复、转发（Ctrl+R、Ctrl+Shift+R、Ctrl+Shift+F）只对
+  选中的那封。
 - **打开即已读**（设置可关）：只在用户选中、或移走后打开下一封时标记，刷新后恢复选中不算。
 - **归档 / 删除 / 移动后打开下一封**（`list::Removal`）：命令先记下要移走的邮件，刷新后它仍是选中的那封却
   不在了，就按身份选中原来排在它后面、现在还在的第一行。邮件不一定离开：Gmail 上在"所有邮件"里移到标签、在
@@ -201,7 +214,7 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 
 ## 读信
 
-读信区（`reader.rs`）：工具栏、标题、头部、正文、附件，在同一个滚动区里。头部的模型（`reader::Header`、附件的
+读信区（`reader/`）：工具栏、标题、头部、正文、附件，在同一个滚动区里。头部的模型（`reader::Header`、附件的
 名字、保存对话框的起始目录）在 frontend。
 
 - **头部**：发件人头像；收件人一行只列名字，"Details"展开完整的 From / To / Cc / Reply-To / Date；Gmail 用户标签。
@@ -215,14 +228,14 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 
 ### 正文在 web view 里
 
-有 HTML 部分就显示清洗后的 HTML，否则把纯文本转义后放进 `<pre>`（`page::body_page`），都在同一个 web view 里。
+有 HTML 部分就显示清洗后的 HTML，否则把纯文本转义后放进 `<pre>`（`catmail_frontend::html::body_page`），都在同一个 web view 里。
 
 - **断网**：WebKit 有自己的网络，nsh 只检查顶层导航，不管页面的子资源，所以由页面自己断网：`<head>` 最前面
   一条 CSP `default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; form-action 'none';
   base-uri 'none'`（后两项不回落到 `default-src`），加 `no-referrer`。要显示的图片都先嵌成 `data:` URL。保证从
   "引擎根本没有网络"（Blitz）降成了"靠 CSP 拦"；用探针页（`<img>`、`srcset`、`@import`、`@font-face`、CSS 背景、
   `<link>`、iframe、`meta refresh`……）指向本机 HTTP 服务器验证过：开着 CSP 时零请求。
-- **脚本**：页面自己的 JS 关掉（`java_script_enabled(false)`）。注入的脚本（`page::BRIDGE`）WebKit 照样运行，
+- **脚本**：页面自己的 JS 关掉（`java_script_enabled(false)`）。注入的脚本（`html::BRIDGE`）WebKit 照样运行，
   经 `window.nsh.postMessage` 回报：载入了（`r`）、页面高度（`h`）、按 web view 的高度画好了（`p`）、点击的链接
   （`o`）、页面里的 `cid:` 图片（`c`）。读信区经 `post_message` 发回图片（`i:<url>\n<data URL>`），脚本把它填进
   对应的 `<img>` 和 `background`。
@@ -232,7 +245,7 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
   滚动。链接只把 `http` / `https` / `mailto` 交给系统打开（`is_openable_link`），页面里不导航。
 - **一个 web view 一直用**：WebKit 每个新 web view 起一个渲染进程（约 100 MB PSS，还要建一次 bwrap 沙箱），
   最后一个没了就结束它。所以读信区和它的 web view 随主窗口一直存在，换邮件只往里载入新页面；没选中邮件时
-  读信区放在列表下面、web view 里放一个空白页（`page::blank_page`），开窗时渲染进程就先起好。开窗后点开第一封，
+  读信区放在列表下面、web view 里放一个空白页（`html::blank_page`），开窗时渲染进程就先起好。开窗后点开第一封，
   内容约 2 帧就出现（原来约 13 帧）。⚠️ 不用 `invisible` 藏起来：一阵没画的 web view 再画时，WebKit 画好之前
   先闪一帧黑；也不能不排版，nsh 只让有尺寸的原生控件可见，WebKit 只往可见的 web view 里载入页面。
 - **换邮件不闪**：载入时继续显示上一封，像浏览器换页，WebKit 把旧页面留到新页面画好；超过 250 ms
@@ -259,7 +272,7 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 ## 写信窗口
 
 写信的模型在 `catmail_frontend::composer`（`ComposeFrom::start`、From 的选项、字段解析、`Lifecycle` 决定何时保存 /
-发送 / 关窗、`OpenComposers` 按草稿登记窗口），`composer.rs` 只有界面。每个写信窗口的视图跑在它自己的 nsh 线程上；
+发送 / 关窗、`OpenComposers` 按草稿登记窗口），`composer/` 只有界面。每个写信窗口的视图跑在它自己的 nsh 线程上；
 窗口由外壳开关（`shell::opened`、`composer_closed`）。
 
 - **每封草稿一个窗口**：再次打开同一草稿时激活已有窗口；正在读的草稿也记下，连点两次 Edit 也只有一个窗口。
@@ -282,7 +295,7 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 ## 发件箱
 
 条目的状态决定右栏给出的选择：可用的由 `OutboxStatus::can_*` 判断，措辞、先后、要先确认的在
-`catmail_frontend::outbox`，`outbox.rs` 只画出来。排队中可以 Send now（`flush_outbox`）或 Back to drafts
+`catmail_frontend::outbox`，`mailbox/outbox.rs` 只画出来。排队中可以 Send now（`flush_outbox`）或 Back to drafts
 （`cancel_outbox`）；被拒绝的可以改回草稿或重试；已发出但没存进 Sent 的可以重试保存或放弃；**发出后未确认
 （unknown）的从不自动重发**，由用户选 Mark as sent、Send again（先确认可能重复）或 Back to drafts。
 

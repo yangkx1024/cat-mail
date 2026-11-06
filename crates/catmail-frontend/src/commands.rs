@@ -3,6 +3,8 @@
 //! messages, what they are called, which changes ask first, and what to say when the
 //! server refuses one.
 
+use std::collections::HashSet;
+
 use catmail_core::{
     AccountId, DeleteMode, DeleteOutcome, Flags, FolderId, MessageId, MessageSummary, OpKind,
     OpStatus, PendingOp,
@@ -158,13 +160,15 @@ pub fn move_targets(
     messages: &[MessageSummary],
     shown_in: Option<FolderId>,
 ) -> Vec<(FolderId, String)> {
+    // Whether a move changes a message depends on its folder only: each once, not each
+    // message once ("Select all").
+    let from: HashSet<FolderId> = messages.iter().map(|m| m.folder_id).collect();
     folders
         .paths()
         .into_iter()
         .filter(|(folder, _)| {
-            messages
-                .iter()
-                .any(|m| folders.can_move(m.folder_id, shown_in, folder.id))
+            from.iter()
+                .any(|&from| folders.can_move(from, shown_in, folder.id))
         })
         .map(|(folder, path)| (folder.id, path))
         .collect()
@@ -208,10 +212,12 @@ pub struct Deletion {
 }
 
 /// What asking about a change that can't be undone says.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Confirm {
     pub title: String,
     pub description: String,
+    /// The button that goes on: "Delete", "Remove".
+    pub action: &'static str,
 }
 
 /// How deleting the messages goes; `folders` gives an account's folders. Messages of an
@@ -245,10 +251,12 @@ pub fn deletion<'a>(
                 format::subject(message.subject.as_deref())
             ),
             description: "It is removed from the server and can't be brought back.".into(),
+            action: "Delete",
         }),
         _ => Some(Confirm {
             title: format!("Delete {} messages for good?", for_good.len()),
             description: "They are removed from the server and can't be brought back.".into(),
+            action: "Delete",
         }),
     };
     Deletion { ids, mode, confirm }

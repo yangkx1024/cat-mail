@@ -179,7 +179,7 @@ impl SettingsFile {
 
 /// Writes through a temporary file next to `path`, so a crash mid-write leaves the old
 /// file. Creates the folder if needed.
-pub fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;

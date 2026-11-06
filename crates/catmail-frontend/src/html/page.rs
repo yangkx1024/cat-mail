@@ -14,6 +14,8 @@ use std::collections::HashMap;
 
 use catmail_core::html::{InlineImage, embed_inline_images};
 
+use super::escape;
+
 /// Nothing may load except the images embedded in the page and its inline styles.
 /// `form-action` and `base-uri` don't fall back to `default-src`.
 const CSP: &str = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; \
@@ -176,13 +178,6 @@ pub struct Colors {
     pub link: String,
 }
 
-fn escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,10 +210,7 @@ mod tests {
     fn inline_images_are_embedded() {
         let inline = HashMap::from([(
             "logo@example".to_owned(),
-            InlineImage {
-                mime_type: "image/png".into(),
-                bytes: vec![1, 2, 3],
-            },
+            InlineImage::new("image/png", &[1, 2, 3]),
         )]);
         let page = body_page(
             1,

@@ -56,21 +56,35 @@ pub fn remote_image_url(url: &str) -> Option<String> {
     matches!(url.scheme(), "http" | "https").then(|| url.into())
 }
 
-/// An inline part's content, to embed in place of its `cid:` URL.
+/// An inline part, to embed in place of its `cid:` URL: its content as a `data:` URL,
+/// encoded once, here (the page made again, the browser's page and a page shown that is
+/// sent it all take the same one). Cloning it is cheap.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlineImage {
-    pub mime_type: String,
-    pub bytes: Vec<u8>,
+    data_url: Arc<str>,
+}
+
+impl InlineImage {
+    pub fn new(mime_type: &str, bytes: &[u8]) -> Self {
+        Self {
+            data_url: data_url(mime_type, bytes).into(),
+        }
+    }
+
+    pub fn data_url(&self) -> &str {
+        &self.data_url
+    }
 }
 
 /// HTML that [`sanitize_html`](crate::sanitize_html) produced, with each `cid:` image whose Content-ID is in
 /// `inline` replaced by a `data:` URL of the part, for a renderer that can't resolve
 /// `cid:` (a browser). The values ammonia's filter returns are not checked again, so the
-/// URL is built here rather than taken from the caller.
+/// URL is built here ([`InlineImage::new`]) rather than taken from the caller.
 pub fn embed_inline_images(html: &str, inline: HashMap<String, InlineImage>) -> String {
     let embedding = sanitizer(
         Some(Box::new(move |src| {
             let image = content_id_from_url(src).and_then(|id| inline.get(&id))?;
-            Some(data_url(&image.mime_type, &image.bytes))
+            Some(image.data_url().to_owned())
         })),
         None,
     );
@@ -158,13 +172,7 @@ mod tests {
     #[test]
     fn the_browser_page_keeps_the_style_sheet() {
         let html = sanitize_html("<style>.a{color:red}</style><img src=\"cid:logo@x\">");
-        let inline = HashMap::from([(
-            "logo@x".to_owned(),
-            InlineImage {
-                mime_type: "image/png".into(),
-                bytes: b"hi".to_vec(),
-            },
-        )]);
+        let inline = HashMap::from([("logo@x".to_owned(), InlineImage::new("image/png", b"hi"))]);
         let page = embed_inline_images(&html, inline);
         assert!(page.starts_with("<style>.a{color:red;}</style>"), "{page}");
         assert!(page.contains("data:image/png;base64,aGk="), "{page}");
@@ -182,19 +190,10 @@ mod tests {
         );
 
         let inline = HashMap::from([
-            (
-                "logo".to_owned(),
-                InlineImage {
-                    mime_type: "image/png".into(),
-                    bytes: b"hi".to_vec(),
-                },
-            ),
+            ("logo".to_owned(), InlineImage::new("image/png", b"hi")),
             (
                 "odd".to_owned(),
-                InlineImage {
-                    mime_type: "image/gif\"><script>".into(),
-                    bytes: b"gif".to_vec(),
-                },
+                InlineImage::new("image/gif\"><script>", b"gif"),
             ),
         ]);
         let clean = format!("{clean}<img src=\"cid:odd\"><img src=\"cid:missing\">");

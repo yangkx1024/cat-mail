@@ -14,9 +14,9 @@ use catmail_frontend::login::{
 use nsh_base::theme;
 use nsh_core::prelude::*;
 
-use crate::app::client;
-use crate::commands::with_accounts;
+use crate::engine::client;
 use crate::form::{self, field, modal, text_input};
+use crate::mailbox::sidebar::with_account;
 
 /// The fields of who signs in.
 #[derive(Clone, Copy)]
@@ -313,7 +313,7 @@ pub fn identity_dialog() -> impl IntoElement {
         let Some(account) = global::<AddIdentity>().get().0 else {
             return view().into_element();
         };
-        let entry = with_accounts(|a| a.iter().find(|e| e.account.id == account).cloned());
+        let entry = with_account(account, Clone::clone);
         match entry {
             Some(entry) => identity_form(
                 account,

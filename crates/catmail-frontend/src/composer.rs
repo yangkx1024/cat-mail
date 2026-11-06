@@ -21,6 +21,7 @@ use catmail_core::{
 use futures_channel::oneshot;
 
 use crate::commands::Confirm;
+use crate::format;
 use crate::mailbox::{AccountEntry, Place};
 
 /// How long typing has to pause before the draft is saved.
@@ -192,6 +193,16 @@ pub fn discard_confirm() -> Confirm {
     Confirm {
         title: "Discard this draft?".into(),
         description: "It is deleted here and from the server's Drafts folder.".into(),
+        action: "Discard",
+    }
+}
+
+/// Deleting a saved draft, from its pane, asked first.
+pub fn draft_deletion(subject: Option<&str>) -> Confirm {
+    Confirm {
+        title: format!("Delete the draft “{}”?", format::subject(subject)),
+        description: "Its copy in the server's Drafts folder is deleted too.".into(),
+        action: "Delete",
     }
 }
 
@@ -594,11 +605,6 @@ impl<W: Clone> OpenComposers<W> {
     /// The draft's window, if it has one.
     pub fn window(&self, draft: DraftId) -> Option<W> {
         self.windows.get(&draft).cloned()
-    }
-
-    /// The windows open.
-    pub fn windows(&self) -> impl Iterator<Item = &W> {
-        self.windows.values()
     }
 
     /// The draft's window starts opening (it is read first); false when it is on its way

@@ -1,12 +1,14 @@
 //! The reading pane: the commands on the message, its header, its body in a web view and
 //! its attachments.
 //!
-//! The body is a page in one web view (see `page.rs`): opening a message loads a new
+//! The body is a page in one web view (`catmail_frontend::html::body_page`): opening a message loads a new
 //! page into it. The view stays while messages are opened one after another, for WebKit
 //! starts a web process for each new view (100 MB, a sandbox to set up), and ends it when
 //! the last goes. Remote images stay blocked until the user asks for them, except those
-//! the engine has cached; those that come are sent to the page (`page::image_message`),
+//! the engine has cached; those that come are sent to the page (`html::image_message`),
 //! which shows them without loading again.
+
+mod view;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -18,22 +20,19 @@ use catmail_core::html::{
     remote_image_urls,
 };
 use catmail_core::{Attachment, MessageId, safe_filename};
-use catmail_frontend::commands::MessageCommand;
-use catmail_frontend::html::{browser_page, is_openable_link};
-use catmail_frontend::list as rows;
+use catmail_frontend::html::{self, Colors, browser_page};
 use catmail_frontend::reader::{self, Header};
 use nsh_base::theme;
 use nsh_core::element::{ElementRef, Spawned, open_path, pick_save_path};
 use nsh_core::file_dialog::SaveDialog;
 use nsh_core::prelude::*;
 
-use crate::app::{client, in_mailbox};
-use crate::commands::{self, Size, icon_button, separator};
-use crate::icons::{Icon, icon};
-use crate::list::{self, Selected};
-use crate::page::{self, Colors, FromPage};
-use crate::toast::{Level, notify};
-use crate::{chrome, composer};
+use crate::engine::client;
+use crate::mailbox::list;
+use crate::tasks::{in_view, off_thread};
+use crate::toast::{Level, notify, report};
+
+pub use view::reader;
 
 #[derive(Clone, Default, PartialEq)]
 enum State {
@@ -53,7 +52,7 @@ struct Reading {
     attachments: Vec<Attachment>,
     /// The HTML as sanitized, for "Open in browser".
     html: Option<Rc<str>>,
-    page: String,
+    page: Rc<str>,
     /// Hidden while a message loads, past [`STAYS_SHOWN`] (or with nothing before it to
     /// show).
     hidden: bool,
@@ -98,7 +97,7 @@ struct Page {
     scroll: Option<ElementRef>,
     /// The message whose page was made last.
     shown: Option<MessageId>,
-    /// The number of the page made last (`page::body_page`): what other pages say, late,
+    /// The number of the page made last (`html::body_page`): what other pages say, late,
     /// is ignored.
     number: u64,
     /// The remote images shown, as `data:` URLs by URL: sent again when the page loads
@@ -161,7 +160,7 @@ pub fn follow_selection() {
         // A blank page in the web view, which stays: its web process is running when a
         // message opens (it takes a moment to start).
         None => global::<Reading>().set(Reading {
-            page: page::blank_page(next_page(), &colors(dark)),
+            page: html::blank_page(next_page(), &colors(dark)).into(),
             page_dark: dark,
             ..Reading::default()
         }),
@@ -185,7 +184,7 @@ async fn open_message(id: MessageId, dark: bool) {
                 r.hidden = true;
             }
         });
-        in_mailbox(async move {
+        in_view(async move {
             timer(STAYS_SHOWN).await;
             let reading = global::<Reading>();
             if reading.with_untracked(|r| r.id == Some(id) && r.state == State::Loading) {
@@ -231,8 +230,8 @@ async fn open_message(id: MessageId, dark: bool) {
     let page_html = recolored.as_deref().or(html);
     // The inline parts already loaded (the page is made again, in a new appearance) are in
     // it; the others go in as they load, after the text shows.
-    let loaded = copy_inline(&page_state().borrow().inline);
-    let page = page::body_page(
+    let loaded = page_state().borrow().inline.clone();
+    let page = html::body_page(
         next_page(),
         page_html,
         body.and_then(|b| b.text.as_deref()),
@@ -255,7 +254,7 @@ async fn open_message(id: MessageId, dark: bool) {
     // than show the web view before it paints, in WebKit's own background.
     let hidden = reading.with_untracked(|r| r.hidden);
     if hidden {
-        in_mailbox(async move {
+        in_view(async move {
             timer(SHOWN_ANYWAY).await;
             show_page(id);
         });
@@ -266,7 +265,7 @@ async fn open_message(id: MessageId, dark: bool) {
         header: Header::of(&message),
         attachments: reader::attachments(&message),
         html: html.map(Rc::from),
-        page,
+        page: page.into(),
         hidden,
         page_dark,
         remote: remote.clone(),
@@ -300,10 +299,7 @@ async fn open_message(id: MessageId, dark: bool) {
         }
         match client().attachment_content(part.id).await {
             Ok(bytes) => {
-                let image = InlineImage {
-                    mime_type: part.mime_type.clone(),
-                    bytes,
-                };
+                let image = InlineImage::new(&part.mime_type, &bytes);
                 add_inline_image(content_id.clone(), image);
             }
             Err(e) => tracing::warn!(attachment = %part.id, error = %e,
@@ -319,16 +315,9 @@ fn add_inline_image(content_id: String, image: InlineImage) {
     if page.ready
         && let Some(view) = page.view
     {
-        let mut urls = page
-            .cids
-            .iter()
-            .filter(|(id, _)| *id == content_id)
-            .peekable();
-        if urls.peek().is_some() {
-            let data = data_url(&image.mime_type, &image.bytes);
-            for (_, url) in urls {
-                view.post_message(page::image_message(url, &data));
-            }
+        let urls = page.cids.iter().filter(|(id, _)| *id == content_id);
+        for (_, url) in urls {
+            view.post_message(html::image_message(url, image.data_url()));
         }
     }
     page.inline.insert(content_id, image);
@@ -434,7 +423,7 @@ fn add_remote_images(id: MessageId, fetched: Vec<(String, RemoteImage)>) -> bool
         && let Some(view) = page.view
     {
         for (url, data) in &images {
-            view.post_message(page::image_message(url, data));
+            view.post_message(html::image_message(url, data));
         }
     }
     page.remote.extend(images);
@@ -451,12 +440,11 @@ fn page_ready() {
         return;
     };
     for (url, data) in &page.remote {
-        view.post_message(page::image_message(url, data));
+        view.post_message(html::image_message(url, data));
     }
     for (content_id, url) in &page.cids {
         if let Some(image) = page.inline.get(content_id) {
-            let data = data_url(&image.mime_type, &image.bytes);
-            view.post_message(page::image_message(url, &data));
+            view.post_message(html::image_message(url, image.data_url()));
         }
     }
 }
@@ -487,20 +475,6 @@ fn show_page(id: MessageId) {
     if reading.with_untracked(|r| r.hidden && r.state == State::Open && r.id == Some(id)) {
         reading.update(|r| r.hidden = false);
     }
-}
-
-/// The inline parts, for a page of their own.
-fn copy_inline(inline: &HashMap<String, InlineImage>) -> HashMap<String, InlineImage> {
-    inline
-        .iter()
-        .map(|(id, image)| {
-            let image = InlineImage {
-                mime_type: image.mime_type.clone(),
-                bytes: image.bytes.clone(),
-            };
-            (id.clone(), image)
-        })
-        .collect()
 }
 
 fn palette() -> DarkPalette {
@@ -538,7 +512,7 @@ fn save_attachment(attachment: Attachment) {
         .file_name(name.clone())
         .directory(reader::download_dir());
     let path = pick_save_path(dialog);
-    in_mailbox(async move {
+    in_view(async move {
         let saved = async {
             let Some(path) = path.await? else {
                 return Ok(None);
@@ -547,8 +521,10 @@ fn save_attachment(attachment: Attachment) {
                 .attachment_content(attachment.id)
                 .await
                 .map_err(|e| e.to_string())?;
-            write_off_thread(path.clone(), bytes)
+            let to = path.clone();
+            off_thread(move || std::fs::write(to, bytes))
                 .await
+                .unwrap_or_else(|| Err(std::io::Error::other("the writer went away")))
                 .map_err(|e| format!("couldn't write {}: {e}", path.display()))?;
             Ok::<_, String>(Some(path))
         }
@@ -559,20 +535,9 @@ fn save_attachment(attachment: Attachment) {
                 notify(Level::Info, format!("Saved “{name}”"));
             }
             Ok(None) => {}
-            Err(e) => notify(Level::Error, format!("Couldn't save “{name}”: {e}")),
+            Err(e) => report(&format!("Couldn't save “{name}”"), e),
         }
     });
-}
-
-/// Writes the file on a thread of its own: an attachment can be large.
-async fn write_off_thread(path: std::path::PathBuf, bytes: Vec<u8>) -> std::io::Result<()> {
-    let (done, written) = futures_channel::oneshot::channel();
-    std::thread::spawn(move || {
-        let _ = done.send(std::fs::write(&path, bytes));
-    });
-    written
-        .await
-        .unwrap_or_else(|_| Err(std::io::Error::other("the writer went away")))
 }
 
 /// Writes the message as a standalone page and hands it to the system browser. The
@@ -584,8 +549,8 @@ fn open_in_browser() {
     }) else {
         return;
     };
-    let inline = copy_inline(&page_state().borrow().inline);
-    in_mailbox(async move {
+    let inline = page_state().borrow().inline.clone();
+    in_view(async move {
         let page = browser_page(&title, &html, inline);
         match client().hand_off("html", page.into_bytes()).await {
             Ok(path) => {
@@ -602,437 +567,6 @@ fn open_in_browser() {
             ),
         }
     });
-}
-
-// --- The pane -----------------------------------------------------------------------
-
-/// The pane, while a message is selected: its toolbar over its page.
-/// The pane: its toolbar over the message. It stays while no message is selected
-/// (`app::panes` keeps it out of sight), and so does its web view.
-pub fn reader() -> View {
-    let failed_ = computed(|| {
-        global::<Reading>().with(|r| match &r.state {
-            State::Failed(error) => Some(error.clone()),
-            _ => None,
-        })
-    });
-    view()
-        .flex_1()
-        .min_w(px(0.0))
-        .child(toolbar())
-        .child(dynamic(move || match failed_.get() {
-            Some(error) => failed(error).into_element(),
-            None => view().into_element(),
-        }))
-        .child(
-            view()
-                .flex_1()
-                .min_h(px(0.0))
-                .style_when(move || failed_.with(Option::is_some), |s| s.hidden())
-                .child(message()),
-        )
-}
-
-fn failed(error: String) -> impl IntoElement {
-    view()
-        .flex_1()
-        .items_center()
-        .justify_center()
-        .gap(px(12.0))
-        .p(px(16.0))
-        .child(
-            text(format!("Couldn't open the message: {error}"))
-                .text_sm()
-                .selectable(true)
-                .text_color(move || theme().muted_foreground),
-        )
-        .child(
-            view()
-                .h(px(32.0))
-                .px(px(14.0))
-                .rounded(px(16.0))
-                .justify_center()
-                .bg(move || theme().secondary)
-                .on_press(|| {
-                    // Opened again from the top.
-                    global::<Reading>().update(|r| r.id = None);
-                    global::<Retry>().update(|r| r.0 += 1);
-                })
-                .child(
-                    text("Try again")
-                        .text_sm()
-                        .text_color(move || theme().secondary_foreground),
-                ),
-        )
-}
-
-/// The commands on the message open, in groups: where it is, its marks, its content,
-/// answering it.
-fn toolbar() -> impl IntoElement {
-    let selected = move || list::selected_message().into_iter().collect::<Vec<_>>();
-    let can_edit_labels =
-        move || list::selected_message().is_some_and(|m| commands::can_edit_labels(&m));
-    let blocked = move || {
-        global::<Reading>()
-            .with(|r| (r.state == State::Open && !r.remote.is_empty()).then_some(r.loading_remote))
-    };
-    let has_html = move || global::<Reading>().with(|r| r.html.is_some());
-    chrome::toolbar()
-        .gap(px(2.0))
-        .child(icon_button(
-            || Icon::ArrowLeft,
-            || "Back".to_owned(),
-            || true,
-            Size::Bar,
-            || global::<Selected>().set(Selected(None)),
-        ))
-        .child(separator(Size::Bar))
-        .child(commands::group(&MessageCommand::PLACE, selected, Size::Bar))
-        .child(when(can_edit_labels, || {
-            view().flex_row().child(icon_button(
-                || Icon::Tag,
-                || "Labels".to_owned(),
-                || true,
-                Size::Bar,
-                commands::edit_labels,
-            ))
-        }))
-        .child(separator(Size::Bar))
-        .child(commands::group(&MessageCommand::MARKS, selected, Size::Bar))
-        .child(separator(Size::Bar))
-        .child(when(
-            move || blocked().is_some(),
-            move || {
-                // Dimmed while they come.
-                icon_button(
-                    || Icon::Photo,
-                    || "Show remote images".to_owned(),
-                    move || blocked() == Some(false),
-                    Size::Bar,
-                    show_remote_images,
-                )
-            },
-        ))
-        .child(icon_button(
-            || Icon::ArrowTopRightOnSquare,
-            || "Open in browser".to_owned(),
-            has_html,
-            Size::Bar,
-            open_in_browser,
-        ))
-        .child(separator(Size::Bar))
-        .child(icon_button(
-            || Icon::ArrowUturnLeft,
-            || "Reply".to_owned(),
-            || true,
-            Size::Bar,
-            || composer::reply(false),
-        ))
-        .child(when(
-            move || global::<Reading>().with(|r| r.can_reply_all),
-            || {
-                icon_button(
-                    || Icon::ArrowUturnLeftDouble,
-                    || "Reply all".to_owned(),
-                    || true,
-                    Size::Bar,
-                    || composer::reply(true),
-                )
-            },
-        ))
-        .child(icon_button(
-            || Icon::ArrowUturnRight,
-            || "Forward".to_owned(),
-            || true,
-            Size::Bar,
-            composer::forward,
-        ))
-}
-
-/// The message: its title, sender, the body and the attachments, scrolling as one.
-fn message() -> impl IntoElement {
-    let reading = global::<Reading>();
-    let header = computed(move || reading.with(|r| r.header.clone()));
-    let field = move |f: fn(&Header) -> String| move || header.with(f);
-    let labels = computed(move || {
-        list::selected_message()
-            .map(|m| list::user_label_names(&m))
-            .unwrap_or_default()
-    });
-    let details = move || global::<ShowDetails>().with(|d| d.0);
-    let muted = move || theme().muted_foreground;
-    let title = view()
-        .gap(px(8.0))
-        .child(
-            text(field(|h| h.subject.clone()))
-                .text_xl()
-                .font_weight(FontWeight::SEMIBOLD)
-                .selectable(true)
-                .text_color(move || theme().foreground),
-        )
-        .child(when(
-            move || labels.with(|l| !l.is_empty()),
-            move || {
-                view().flex_row().flex_wrap().gap(px(4.0)).child(each(
-                    move || labels.get(),
-                    |name| name.clone(),
-                    |name, _| {
-                        text(move || name.get())
-                            .px(px(6.0))
-                            .rounded(px(4.0))
-                            .text_xs()
-                            .bg(move || theme().muted)
-                            .text_color(move || theme().muted_foreground)
-                    },
-                ))
-            },
-        ));
-    let sender = view()
-        .flex_row()
-        .items_start()
-        .gap(px(12.0))
-        .child(
-            view()
-                .w(px(36.0))
-                .h(px(36.0))
-                .flex_shrink_0()
-                .rounded(px(18.0))
-                .items_center()
-                .justify_center()
-                .bg(move || header.with(|h| list::avatar_color(&h.sender_key)))
-                .child(
-                    text(move || header.with(|h| rows::initial(&h.sender)))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(move || theme().foreground),
-                ),
-        )
-        .child(
-            view()
-                .flex_1()
-                .min_w(px(0.0))
-                .gap(px(2.0))
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .flex_wrap()
-                        .gap(px(8.0))
-                        .child(
-                            text(field(|h| h.sender.clone()))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .selectable(true)
-                                .text_color(move || theme().foreground),
-                        )
-                        .child(
-                            text(field(|h| h.sender_email.clone().unwrap_or_default()))
-                                .text_xs()
-                                .selectable(true)
-                                .text_color(muted),
-                        )
-                        .child(view().flex_1())
-                        .child(text(field(|h| h.date.clone())).text_xs().text_color(muted)),
-                )
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(4.0))
-                        .child(
-                            text(field(|h| h.recipients.clone()))
-                                .number_of_lines(1)
-                                .flex_shrink(1.0)
-                                .min_w(px(0.0))
-                                .text_xs()
-                                .text_color(muted),
-                        )
-                        .child(
-                            view()
-                                .px(px(6.0))
-                                .py(px(2.0))
-                                .rounded(px(4.0))
-                                .on_press(move || global::<ShowDetails>().update(|d| d.0 = !d.0))
-                                .child(
-                                    text(
-                                        move || {
-                                            if details() { "Hide details" } else { "Details" }
-                                        },
-                                    )
-                                    .text_xs()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(move || theme().foreground),
-                                ),
-                        ),
-                ),
-        );
-    let full_header = when(details, move || {
-        view()
-            .gap(px(4.0))
-            .p(px(12.0))
-            .rounded(px(10.0))
-            .bg(move || theme().muted)
-            .child(each(
-                move || header.with(|h| h.details.clone()),
-                |(name, _)| *name,
-                move |detail, _| {
-                    view()
-                        .flex_row()
-                        .items_start()
-                        .gap(px(8.0))
-                        .child(
-                            text(move || detail.get().0.to_owned())
-                                .w(px(64.0))
-                                .flex_shrink_0()
-                                .text_xs()
-                                .text_color(muted),
-                        )
-                        .child(
-                            text(move || detail.get().1)
-                                .flex_1()
-                                .text_xs()
-                                .selectable(true)
-                                .text_color(move || theme().foreground),
-                        )
-                },
-            ))
-    });
-    let scroll_ref = element_ref();
-    page_state().borrow_mut().scroll = Some(scroll_ref);
-    // Not the web view's: one not drawn may not paint, and would show what it last had
-    // once it is; [`body`] covers it instead.
-    let shown = move || {
-        if reading.with(|r| r.hidden) {
-            0.0_f32
-        } else {
-            1.0
-        }
-    };
-    scroll().flex_1().element_ref(&scroll_ref).child(
-        view()
-            .px(px(24.0))
-            .pt(px(20.0))
-            .pb(px(32.0))
-            .gap(px(16.0))
-            .child(
-                view()
-                    .gap(px(16.0))
-                    .opacity(shown)
-                    .child(title)
-                    .child(sender)
-                    .child(full_header),
-            )
-            .child(body())
-            .child(view().opacity(shown).child(attachments())),
-    )
-}
-
-fn body() -> impl IntoElement {
-    let reading = global::<Reading>();
-    let view_ref = element_ref();
-    page_state().borrow_mut().view = Some(view_ref);
-    // One web view for every message, made with the pane: a new page loads into it.
-    let hidden = move || reading.with(|r| r.hidden);
-    // The page pads itself.
-    view()
-        .mx(px(-16.0))
-        .child(web_view(view_ref))
-        // Over the web view while the page is hidden: WebKit keeps painting under it.
-        .child(when(hidden, || {
-            view()
-                .absolute()
-                .top(px(0.0))
-                .left(px(0.0))
-                .right(px(0.0))
-                .bottom(px(0.0))
-                .z_index(1)
-                .bg(page_background)
-        }))
-}
-
-/// The page's background, which shows in the web view until the page paints: WebKit's
-/// own is white.
-fn page_background() -> AdaptiveColor {
-    let background = theme().background;
-    let color = if global::<Reading>().with(|r| r.page_dark) {
-        background.dark
-    } else {
-        background.light
-    };
-    AdaptiveColor {
-        light: color,
-        dark: color,
-    }
-}
-
-fn web_view(view_ref: ElementRef) -> impl IntoElement {
-    let reading = global::<Reading>();
-    web_view_html(move || reading.with(|r| r.page.clone()), None)
-        .java_script_enabled(false)
-        .scrollable(false)
-        .injected_java_script(page::BRIDGE.to_owned())
-        .element_ref(&view_ref)
-        .on_message(move |message: &str| match FromPage::parse(message) {
-            Some(FromPage::Inline(number, url)) if is_shown(number) => page_refers_to(url),
-            Some(FromPage::Ready(number)) if is_shown(number) => page_ready(),
-            Some(FromPage::Painted(number, height)) if is_shown(number) => page_painted(height),
-            Some(FromPage::Height(number, height)) if is_shown(number) => {
-                global::<BodyHeight>().set(BodyHeight(height));
-            }
-            Some(FromPage::Open(url)) if is_openable_link(url) => {
-                spawn(open_url(url.to_owned()));
-            }
-            _ => {}
-        })
-        .bg(page_background)
-        .h(move || px(global::<BodyHeight>().with(|h| h.0).max(MIN_BODY_HEIGHT)))
-}
-
-/// Under the text, where reading it ends.
-fn attachments() -> impl IntoElement {
-    let attachments = move || global::<Reading>().with(|r| r.attachments.clone());
-    when(
-        move || global::<Reading>().with(|r| !r.attachments.is_empty()),
-        move || {
-            view()
-                .flex_row()
-                .flex_wrap()
-                .gap(px(8.0))
-                .pt(px(16.0))
-                .border_t_1()
-                .border_color(move || theme().border)
-                .child(each(
-                    attachments,
-                    |a| a.id,
-                    |attachment, _| {
-                        let image = move || attachment.with(|a| a.mime_type.starts_with("image/"));
-                        let names = move || attachment.with(reader::attachment_label);
-                        view()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .h(px(30.0))
-                            .px(px(10.0))
-                            .rounded(px(8.0))
-                            .border_1()
-                            .border_color(move || theme().border)
-                            .hover(|s| s.bg(move || theme().accent))
-                            .on_press(move || save_attachment(attachment.get_untracked()))
-                            .tooltip(commands::tooltip(move || format!("Save “{}”", names().0)))
-                            .child(
-                                icon(
-                                    move || if image() { Icon::Photo } else { Icon::Document },
-                                    16.0,
-                                )
-                                .text_color(move || theme().muted_foreground),
-                            )
-                            .child(
-                                text(move || names().1)
-                                    .text_sm()
-                                    .text_color(move || theme().foreground),
-                            )
-                    },
-                ))
-        },
-    )
 }
 
 #[cfg(test)]

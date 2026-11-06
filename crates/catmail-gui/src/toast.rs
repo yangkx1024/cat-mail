@@ -93,7 +93,7 @@ fn tick() {
     if std::mem::replace(&mut manager().borrow_mut().ticking, true) {
         return;
     }
-    crate::app::in_mailbox(async {
+    crate::tasks::in_view(async {
         loop {
             timer(Duration::from_millis(50)).await;
             let paused = global::<Expanded>()
@@ -185,4 +185,10 @@ pub fn toasts() -> impl IntoElement {
                 },
             )),
     )
+}
+
+/// `what` failed ("Couldn't load folders"), and why: a notification.
+pub fn report(what: &str, error: impl std::fmt::Display) {
+    tracing::warn!(error = format!("{error:#}"), "{what}");
+    notify(Level::Error, format!("{what}: {error}"));
 }

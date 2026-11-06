@@ -132,11 +132,6 @@ impl Coalesce {
         self.running = false;
         std::mem::take(&mut self.again)
     }
-
-    /// Whether a read is running.
-    pub fn is_running(&self) -> bool {
-        self.running
-    }
 }
 
 /// Which draft count to show. Every `DraftsChanged` counts its account's drafts again,

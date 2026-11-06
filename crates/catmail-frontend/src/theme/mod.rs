@@ -17,7 +17,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 pub use builtin::builtin_themes;
-pub use derive::theme_set_json;
 use import::{ImportError, import};
 pub use import::{ImportedTheme, ThemeFormat};
 pub use palette::{Rgb, TerminalPalette};

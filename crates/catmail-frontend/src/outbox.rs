@@ -88,15 +88,11 @@ impl Choice {
 
     /// What to ask first, and the button that goes on, if anything: sending again what
     /// may have arrived.
-    pub fn confirm(self, status: OutboxStatus) -> Option<(Confirm, &'static str)> {
-        (matches!(self, Self::Retry(_)) && status.retry_may_duplicate()).then(|| {
-            (
-                Confirm {
-                    title: "Send it again?".into(),
-                    description: "If the first one did arrive, the recipients get it twice.".into(),
-                },
-                "Send again",
-            )
+    pub fn confirm(self, status: OutboxStatus) -> Option<Confirm> {
+        (matches!(self, Self::Retry(_)) && status.retry_may_duplicate()).then(|| Confirm {
+            title: "Send it again?".into(),
+            description: "If the first one did arrive, the recipients get it twice.".into(),
+            action: "Send again",
         })
     }
 

@@ -24,8 +24,6 @@ clap = { version = "4.6", features = ["derive", "env"] }
 # The GUI quits as the tray's Quit does on SIGINT, SIGTERM and SIGHUP on macOS, on its own
 # thread, without tokio (GTK's loop takes them on Linux).
 ctrlc = { version = "3.5.2", features = ["termination"] }
-# WHATWG data: URL parsing.
-data-url = "0.3.2"
 directories = "6"
 # `canonicalize` without Windows' `\\?\` prefix, which a socket path can't take.
 dunce = "1.0.5"

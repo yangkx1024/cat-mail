@@ -566,7 +566,6 @@ name = "catmail-frontend"
 version = "0.1.0"
 dependencies = [
  "catmail-core",
- "data-url",
  "directories",
  "dunce",
  "futures-channel",
