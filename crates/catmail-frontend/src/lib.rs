@@ -1,0 +1,31 @@
+//! What catmail's desktop frontends share and no UI toolkit needs: the settings file, the
+//! themes (derived from terminal palettes, imported, kept in a folder), one app per data
+//! directory, the sidebar's folders and when the mailbox reads them again, the list's
+//! rows, the commands on messages, when a composer saves, sends and closes, what the
+//! outbox pane offers, the login forms, what Settings › Accounts asks, how message
+//! metadata reads, what the reader says of a message, which parts of a message's HTML it
+//! shows, the tray icon, the new-mail notifications, and running with no window.
+//! `catmail-gui` (GPUI) and the nsh spike both use it.
+//!
+//! `unsafe_code` is denied (the workspace's lint), not forbidden: [`memory`] calls glibc's
+//! `malloc_trim`.
+
+pub mod accounts;
+pub mod commands;
+pub mod composer;
+pub mod folders;
+pub mod format;
+pub mod html;
+pub mod instance;
+pub mod list;
+pub mod login;
+pub mod mailbox;
+pub mod memory;
+pub mod new_mail;
+pub mod outbox;
+pub mod reader;
+pub mod refresh;
+pub mod resident;
+pub mod settings;
+pub mod theme;
+pub mod tray;

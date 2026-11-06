@@ -23,6 +23,11 @@ pub(crate) enum NetError {
     Io(io::Error),
     Timeout,
     InvalidServerName(String),
+    /// TLS from the first byte was asked for, and the server on `port` answered in
+    /// plaintext: it wants STARTTLS (as on 587 and 143), or isn't a mail server.
+    NotTls {
+        port: u16,
+    },
 }
 
 impl From<io::Error> for NetError {
@@ -48,10 +53,35 @@ pub(crate) async fn connect(
     let name = ServerName::try_from(server.host.clone())
         .map_err(|_| NetError::InvalidServerName(server.host.clone()))?;
     let stream: Box<dyn Stream> = match server.security {
-        Security::Tls => Box::new(start_tls(tcp, &name, tls, timeout).await?),
+        Security::Tls => {
+            let stream = start_tls(tcp, &name, tls, timeout)
+                .await
+                .map_err(|e| match e {
+                    NetError::Io(e) if answered_in_plaintext(&e) => {
+                        NetError::NotTls { port: server.port }
+                    }
+                    e => e,
+                })?;
+            Box::new(stream)
+        }
         Security::StartTls | Security::Plain => Box::new(tcp),
     };
     Ok((stream, name))
+}
+
+/// Whether the TLS handshake failed on the server's first bytes not being a TLS record:
+/// a plaintext greeting (`220 …`, `* OK …`). Said as such, it tells what to change in the
+/// settings; rustls' own words ("received corrupt message of type InvalidContentType")
+/// don't.
+fn answered_in_plaintext(e: &io::Error) -> bool {
+    e.get_ref()
+        .and_then(|e| e.downcast_ref::<rustls::Error>())
+        .is_some_and(|e| {
+            matches!(
+                e,
+                rustls::Error::InvalidMessage(rustls::InvalidMessage::InvalidContentType)
+            )
+        })
 }
 
 fn configure(tcp: &TcpStream) -> io::Result<()> {
@@ -87,6 +117,44 @@ pub(crate) async fn with_timeout<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A server that greets in plaintext, as on the STARTTLS ports.
+    async fn plaintext_server(greeting: &'static [u8]) -> u16 {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut tcp, _) = listener.accept().await.unwrap();
+            tcp.write_all(greeting).await.unwrap();
+            // Until the client gives up on the handshake.
+            let mut buf = [0; 1024];
+            while tcp.read(&mut buf).await.is_ok_and(|n| n > 0) {}
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn tls_to_a_plaintext_port_says_so() {
+        for greeting in [
+            &b"220 smtp.example.com ESMTP\r\n"[..],
+            b"* OK IMAP4rev1 ready\r\n",
+        ] {
+            let port = plaintext_server(greeting).await;
+            let server = ServerConfig {
+                host: "localhost".into(),
+                port,
+                security: Security::Tls,
+            };
+            let tls = TlsConfig::with_roots_only([]).unwrap();
+            let Err(e) = connect(&server, &tls, Duration::from_secs(5)).await else {
+                panic!("connected to a plaintext server in TLS");
+            };
+            assert!(
+                matches!(e, NetError::NotTls { port: p } if p == port),
+                "{e:?}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn connections_are_kept_alive() {

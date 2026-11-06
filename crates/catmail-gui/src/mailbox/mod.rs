@@ -9,12 +9,10 @@ mod commands;
 mod draft;
 mod folder_commands;
 mod folder_picker;
-mod folders;
 mod message_commands;
 mod message_list;
 mod outbox;
 mod panes;
-mod refresh;
 mod sidebar;
 #[cfg(test)]
 mod tests;
@@ -24,10 +22,7 @@ pub(crate) use commands::report_failure;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use catmail_core::{
-    Account, AccountId, AccountOverview, AccountStatus, Event, Flags, Folder, FolderId, FolderRole,
-    Identity, MailClient, MessageId, OutboxEntry, RecvError,
-};
+use catmail_core::{AccountId, Event, Flags, Folder, FolderId, MailClient, MessageId, RecvError};
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::list::{ListEvent, ListState};
 use gpui_kit::component::notification::Notification;
@@ -43,106 +38,20 @@ use crate::layout;
 use crate::reader::Reader;
 use crate::settings::Preferences;
 use add_account::{AddAccount, AddAccountEvent};
-use folders::AccountFolders;
+use catmail_frontend::folders;
+use catmail_frontend::list::SEARCH_DELAY;
+pub use catmail_frontend::mailbox::{AccountEntry, Destination, Place};
+use catmail_frontend::mailbox::{REFRESH_INTERVAL, SYNC_ON_OPEN_AFTER};
+pub(crate) use catmail_frontend::refresh::{Coalesce, Refresh};
+use catmail_frontend::refresh::{DraftCounts, Throttle};
 use message_commands::MessageCommand;
 use message_list::{MessageList, Row, RowCommand, Source};
-pub(crate) use refresh::{Coalesce, Refresh};
-use refresh::{DraftCounts, Throttle};
-
-/// How long typing in the search field pauses before it searches.
-const SEARCH_DELAY: Duration = Duration::from_millis(200);
-
-/// Opening a folder synced longer ago than this syncs it. Background sync keeps only
-/// INBOX current between full syncs; the server can't tell us about the others.
-const SYNC_ON_OPEN_AFTER: Duration = Duration::from_secs(60);
-
-/// After reading the sidebar or the list again for the engine's events, how long the
-/// next events wait to be read together. A sync sends one per batch of messages.
-const REFRESH_INTERVAL: Duration = Duration::from_millis(200);
-
-/// Where the sidebar's selection is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Place {
-    /// Every account's INBOX, as one list.
-    Inboxes,
-    Folder(FolderId),
-    /// The drafts kept here (the server's Drafts folder holds copies of them).
-    Drafts(AccountId),
-    Outbox(AccountId),
-}
-
-/// Where to take the mailbox: a place, or an account's INBOX and a message to open there
-/// (what a notification was about), which the mailbox finds among its folders. Not All
-/// Inboxes, even if shown: the message may be too far down to be loaded there.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Destination {
-    Place(Place),
-    Inbox {
-        account: AccountId,
-        message: Option<MessageId>,
-    },
-}
-
-impl Place {
-    fn source(self) -> Source {
-        match self {
-            Place::Inboxes => Source::Inboxes,
-            Place::Folder(id) => Source::Folder(id),
-            Place::Drafts(account) => Source::Drafts(account),
-            Place::Outbox(account) => Source::Outbox(account),
-        }
-    }
-
-    /// The account the place belongs to, among these; none for All Inboxes.
-    fn account_in(self, accounts: &[AccountEntry]) -> Option<&AccountEntry> {
-        accounts.iter().find(|a| match self {
-            Place::Inboxes => false,
-            Place::Folder(id) => a.folders.find(id).is_some(),
-            Place::Drafts(account) | Place::Outbox(account) => a.account.id == account,
-        })
-    }
-
-    /// Whether these accounts have it. All Inboxes only with more than one: of one
-    /// account, it is that account's INBOX.
-    fn is_in(self, accounts: &[AccountEntry]) -> bool {
-        match self {
-            Place::Inboxes => accounts.len() > 1,
-            _ => self.account_in(accounts).is_some(),
-        }
-    }
-}
 
 /// "Labels", open for a message.
 pub(crate) struct LabelsDialog {
     message: MessageId,
     /// Gone once the dialog is closed.
     pub(crate) list: WeakEntity<ListState<folder_picker::FolderPicker>>,
-}
-
-/// One account as the sidebar shows it.
-#[derive(PartialEq)]
-pub struct AccountEntry {
-    pub account: Account,
-    /// The addresses it sends as, the default first.
-    pub identities: Vec<Identity>,
-    pub folders: AccountFolders,
-    pub drafts: usize,
-    /// Still to be sent (sent ones leave the outbox).
-    pub outbox: Vec<OutboxEntry>,
-    pub status: AccountStatus,
-}
-
-impl AccountEntry {
-    fn new(overview: AccountOverview, status: AccountStatus) -> Self {
-        Self {
-            account: overview.account,
-            identities: overview.identities,
-            folders: AccountFolders::new(overview.folders),
-            drafts: overview.drafts,
-            outbox: overview.outbox,
-            status,
-        }
-    }
 }
 
 pub struct Mailbox {
@@ -301,17 +210,7 @@ impl Mailbox {
 
     /// The place `to` is, if still there, and the message to open there.
     fn find(&self, to: Destination) -> Option<(Place, Option<MessageId>)> {
-        let accounts = self.accounts.as_deref()?;
-        match to {
-            Destination::Place(place) => place.is_in(accounts).then_some((place, None)),
-            Destination::Inbox { account, message } => {
-                let inbox = self
-                    .account(account)?
-                    .folders
-                    .with_role(FolderRole::Inbox)?;
-                Some((Place::Folder(inbox.id), message))
-            }
-        }
+        to.find(self.accounts.as_deref()?)
     }
 
     /// Selects `place`, and opens `message` there once it is listed.
@@ -453,33 +352,14 @@ impl Mailbox {
         self.accounts.as_ref()?.iter().find(|a| a.account.id == id)
     }
 
-    /// Each account's INBOX, as All Inboxes lists them.
-    pub(crate) fn inboxes(&self) -> impl Iterator<Item = &Folder> {
-        self.accounts
-            .iter()
-            .flatten()
-            .filter_map(|a| a.folders.with_role(FolderRole::Inbox))
-    }
-
     /// The folders whose messages the selected place lists: one, or for All Inboxes each
     /// account's INBOX; none for the drafts and the outbox.
-    pub(crate) fn shown_folders(&self) -> Box<dyn Iterator<Item = &Folder> + '_> {
-        match self.place {
-            Some(Place::Inboxes) => Box::new(self.inboxes()),
-            Some(Place::Folder(id)) => Box::new(
-                self.accounts
-                    .iter()
-                    .flatten()
-                    .find_map(|a| a.folders.find(id)?.selectable())
-                    .into_iter(),
-            ),
-            _ => Box::new(std::iter::empty()),
-        }
-    }
-
-    /// The account the selected place belongs to.
-    pub(crate) fn current_account(&self) -> Option<&AccountEntry> {
-        self.place?.account_in(self.accounts.as_deref()?)
+    pub(crate) fn shown_folders(&self) -> impl Iterator<Item = &Folder> + '_ {
+        let accounts = self.accounts.as_deref().unwrap_or_default();
+        self.place
+            .map(|place| place.folders(accounts))
+            .unwrap_or_default()
+            .into_iter()
     }
 
     /// Reads the accounts, their folders, drafts and outbox again (see [`Coalesce`]).
@@ -584,18 +464,7 @@ impl Mailbox {
         if let Some((place, message)) = self.reopen_at.take().and_then(|to| self.find(to)) {
             self.show_at(place, message, window, cx);
         } else if !still_there {
-            let accounts = self.accounts.as_deref().unwrap_or_default();
-            let start = Place::Inboxes
-                .is_in(accounts)
-                .then_some(Place::Inboxes)
-                .or_else(|| {
-                    accounts.iter().find_map(|a| {
-                        a.folders
-                            .with_role(FolderRole::Inbox)
-                            .or_else(|| a.folders.nodes().find_map(|n| n.selectable()))
-                            .map(|f| Place::Folder(f.id))
-                    })
-                });
+            let start = Place::start(self.accounts.as_deref().unwrap_or_default());
             self.select_place(start, window, cx);
         } else if !self.shown_folders().map(|f| f.id).eq(shown) && !self.is_searching(cx) {
             // The list shows a folder more (All Inboxes, an account's first INBOX): its
@@ -706,18 +575,7 @@ impl Mailbox {
 
     /// The selected place's name, as the sidebar shows it.
     pub(crate) fn place_label(&self) -> Option<String> {
-        let place = self.place?;
-        Some(match place {
-            Place::Inboxes => "All Inboxes".into(),
-            Place::Folder(id) => place
-                .account_in(self.accounts.as_deref()?)?
-                .folders
-                .find(id)?
-                .label
-                .clone(),
-            Place::Drafts(_) => "Drafts".into(),
-            Place::Outbox(_) => "Outbox".into(),
-        })
+        self.place?.label(self.accounts.as_deref()?)
     }
 
     pub(crate) fn is_searching(&self, cx: &gpui_kit::App) -> bool {

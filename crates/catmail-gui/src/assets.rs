@@ -9,6 +9,7 @@
 
 use std::borrow::Cow;
 
+use catmail_frontend::folders::FolderIcon;
 use gpui_kit::assets::IconNamed;
 use gpui_kit::{AssetSource, SharedString};
 
@@ -129,6 +130,27 @@ heroicons! {
     UserCircle => "outline" / "user-circle" + UserCircleSolid,
     XCircle => "outline" / "x-circle",
     XMark => "outline" / "x-mark",
+}
+
+/// The sidebar's icons, which the frontends share by name.
+impl From<FolderIcon> for Hero {
+    fn from(icon: FolderIcon) -> Self {
+        match icon {
+            FolderIcon::Inbox => Hero::Inbox,
+            FolderIcon::Sent => Hero::PaperAirplane,
+            FolderIcon::Archive => Hero::ArchiveBox,
+            FolderIcon::All => Hero::Envelope,
+            FolderIcon::Important => Hero::Star,
+            FolderIcon::Flagged => Hero::Flag,
+            FolderIcon::Junk => Hero::ShieldExclamation,
+            FolderIcon::Trash => Hero::Trash,
+            FolderIcon::Drafts => Hero::DocumentText,
+            FolderIcon::Label => Hero::Tag,
+            FolderIcon::Folder => Hero::Folder,
+            FolderIcon::Inboxes => Hero::InboxStack,
+            FolderIcon::Outbox => Hero::ArrowUpTray,
+        }
+    }
 }
 
 impl IconNamed for Hero {

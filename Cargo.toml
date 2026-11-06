@@ -14,6 +14,7 @@ catmail-store = { path = "crates/catmail-store" }
 catmail-proto = { path = "crates/catmail-proto" }
 catmail-html = { path = "crates/catmail-html" }
 catmail-core = { path = "crates/catmail-core" }
+catmail-frontend = { path = "crates/catmail-frontend" }
 catmail-testkit = { path = "crates/catmail-testkit" }
 catmail-render = { path = "crates/catmail-render" }
 
@@ -66,7 +67,7 @@ image = { version = "0.25.10", default-features = false }
 # Parses IMAP responses only; catmail-proto encodes commands and drives the connection.
 imap-proto = "0.18.0"
 keyring = "4.2"
-# glibc's malloc_trim, which hands what the GUI's windows freed back to the system.
+# glibc's malloc_trim, which hands what the windows freed back to the system.
 libc = "0.2.191"
 # Builds outgoing messages; the same family as mail-parser. Without `gethostname`:
 # Message-IDs come from the sender's domain, not the machine's name.
@@ -158,9 +159,9 @@ codegen-units = 1
 strip = true
 
 [workspace.lints.rust]
-# Not forbid, which a crate couldn't loosen: catmail-gui's `memory` module calls
-# malloc_trim, and its macOS status item calls AppKit. Every other crate forbids it at
-# its root.
+# Not forbid, which a crate couldn't loosen: catmail-frontend's `memory` module calls
+# malloc_trim, and catmail-gui's macOS status item calls AppKit. Every other crate
+# forbids it at its root.
 unsafe_code = "deny"
 
 [workspace.lints.clippy]

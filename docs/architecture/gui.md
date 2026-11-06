@@ -21,29 +21,24 @@ M5 的界面设计稿（三栏、写信窗口、发件箱、设置与主题导�
 src/
   main.rs            启动：交给已在运行的实例或成为它，设置、主题、快捷键；主窗口（`MainWindow`）
   resident.rs        `Resident`：引擎、主窗口的关闭与重开、常驻时 headless（见[后台运行](background.md)）
-  instance.rs        单实例：数据目录里的 socket，之后的启动经它唤起主窗口
   memory.rs          常驻时把窗口释放的内存还给系统（glibc 的 `malloc_trim`）
   actions.rs         Action、key context 与快捷键
   assets.rs          资源：Heroicons，及替换 gpui-kit 组件图标
-  format.rs html.rs  时刻与日期分组（其余显示格式来自 `catmail_core::display`）；HTML 渲染策略
   layout.rs          共用的窗口（带 app id、macOS 的窗口外框）、工具栏与窗口的拖动区、右栏页面、名称与值的行、附件块、危险操作的确认框
   mailbox/           主窗口
-    mod.rs           状态（账户、Place）、引擎事件、读侧栏、搜索、渲染与 Action 分派
+    mod.rs           状态（账户、选中的位置）、引擎事件、读侧栏、搜索、渲染与 Action 分派
     commands.rs      对邮件的命令（标记、归档、删除、移动，对一封或勾选的多封）、写信、同步、被拒改动的通知
     message_commands.rs   这些命令的图标按钮，读信区、列表标题、悬停的行共用
     sidebar.rs panes.rs draft.rs outbox.rs   侧栏；三栏与邮件工具栏；草稿、发件箱的右栏
-    refresh.rs       哪个引擎事件重读什么、节流（纯逻辑）
     message_list/    中栏列表（mod.rs：来源、加载、选中；rows.rs：三种行的样子）
-    folders.rs       文件夹分区（纯逻辑）
     folder_commands.rs   侧栏文件夹的右键菜单：新建、重命名、删除，及命名的对话框（见[文件夹与标签的管理](folders.md#界面)）
     folder_picker.rs add_account.rs   "Move to"与"Labels"对话框；登录页
     tests/           驱动窗口的集成测试，按读信、写信、设置分文件，另有截图
   reader/            读信：mod.rs 状态与操作，message.rs 打开的邮件，images.rs 内嵌与远程图片，view.rs 渲染，
                      page.rs Blitz 排版的页面
   composer/          写信窗口：mod.rs 打开与编辑，lifecycle.rs 保存 / 发送 / 关闭，view.rs 渲染
-  settings/          mod.rs 偏好（settings.json）；dialog/ 设置对话框（外观与主题、账户、读信分文件）
-  theme/             palette / derive / builtin / import/（纯逻辑：调色板、推导、内置、导入）；
-                     appearance.rs 可选主题与应用；colors.rs 应用自己的颜色
+  settings/          mod.rs 偏好（`Preferences` 全局，文件读写在 catmail-frontend）；dialog/ 设置对话框（外观与主题、账户、读信分文件）
+  theme/             appearance.rs 把 catmail-frontend 的主题转成 gpui-kit 的并应用；colors.rs 应用自己的颜色
 ```
 
 - `Mailbox`：根视图。状态是账户列表（每个账户的文件夹、草稿数、发件箱、连接状态）和侧栏选中的位置
@@ -57,7 +52,18 @@ src/
   搜索结果、本机草稿、发件箱。行按身份（`RowId`）保持选中。搜索框停顿 200 ms 才搜索，不是每个键都
   读一遍。本地结果先显示，1 秒后再问服务器，它找到正文没下载的邮件时再读一遍（见
   [问服务器](storage.md#问服务器)）。
-- 纯逻辑（文件夹分区、日期格式、HTML 策略、设置文件、主题推导与导入）不依赖窗口，单测覆盖。
+- 纯逻辑（文件夹分区、日期格式、HTML 策略、设置文件、主题推导与导入）不依赖窗口，单测覆盖。其中单实例
+  （`instance`）、日期格式（`format`）、HTML 策略（`html`）、设置文件（`settings`）、文件夹分区和侧栏图标的
+  角色（`folders`）、侧栏的模型（`mailbox`：`Place`、`Source`、`AccountEntry`、连接说明、文件夹右键菜单的
+  项和文案）、哪个引擎事件重读什么（`refresh`）和列表的行（`list`：来源怎么分页读、按天分组、重读后选中去哪、
+  按标记勾选、行上的文字；移走后等它离开的 `Removal`）、对邮件的命令（`commands`：`Applies`、命令的名字、
+  归档 / 移动作用于哪些邮件、"Move to"列出的文件夹、永久删除的确认文案、被拒改动的说明）、读信区的头部
+  （`reader`：`Header`、附件的名字、保存对话框的起始目录）和写信窗口的模型（`composer`：从什么开始、From 的
+  选项、字段解析、何时保存 / 发送 / 关窗的 `Lifecycle`、按草稿登记窗口的 `OpenComposers`）和发件箱的右栏
+  （`outbox`：条目的状态、可选的操作）、主题（`theme`：调色板、推导、内置、导入、主题目录）、登录表单
+  （`login`：字段怎么读成 `NewAccount` / `NewIdentity`、提交的状态 `Submission`）和 Settings › Accounts 的确认
+  文案（`accounts`）在 `catmail-frontend`，别的前端也能用。GUI 按原路径引用
+  （`crate::format`、`mailbox` 模块里的 `folders`、`refresh` 等），`assets.rs` 把 `FolderIcon` 对应到 Heroicons。
 
 ## 窗口外框（macOS）
 
@@ -246,6 +252,8 @@ macOS、Windows 用系统字体，不受影响。
   `AccountChanged`、`AccountAdded`、`AccountRemoved`（或漏了事件）就重读身份和存下的草稿：选着的身份还在就
   留着，被删了就换成引擎存下的草稿的身份（删的是它时已改成默认身份），GUI 不自己再推一遍，已输入的内容不动。在那之前的保存也不会失败：存草稿时传来的身份已被删除，引擎就保留草稿
   现在的身份（删除时已改成默认身份；身份 id 不重用）。
+- 保存、发送、关闭的先后由 `catmail_frontend::composer::Lifecycle` 决定（`Composer` 把用户的操作告诉它，按它的
+  回答调用引擎），窗口的登记和 `close_all` 的应答是 `OpenComposers`；`composer/` 只有界面和 GPUI 的任务。
 - 窗口边框的关闭按钮经 `on_window_should_close` 走同一流程（需要先保存时返回 false，存完自己关）。
 - Ctrl Enter 绑在 `Composer > Input` 上直接是 `Send`：多行输入框自己处理时会先插一个换行，再随信发出。
   附件可选文件或拖进窗口（`ExternalPaths`）。
@@ -256,7 +264,7 @@ macOS、Windows 用系统字体，不受影响。
 ## 发件箱
 
 客户端开启 `send_in_background`。条目的状态决定右栏给出的选择（哪些可用由 `OutboxStatus::can_*`
-判断，按钮的措辞和先后在 `outbox.rs`）：排队中可以"Send now"
+判断，右栏说的状态、按钮的措辞和先后、要先确认的选择在 `catmail_frontend::outbox`，`mailbox/outbox.rs` 只画出来）：排队中可以"Send now"
 （`flush_outbox`）或"Back to drafts"（`cancel_outbox`）；被拒绝的可以改回草稿或重试；已发出但
 没存进 Sent 的可以重试保存或放弃；**发出后未确认（unknown）的从不自动重发**，由用户选"Mark as sent"、
 "Send again"（确认可能重复）或"Back to drafts"。
@@ -269,14 +277,17 @@ macOS、Windows 用系统字体，不受影响。
 - **远程图片缓存**属于引擎的数据目录，不是偏好：Settings › Reading 显示它占多少（每次切到这一节时重新
   量，缓存随阅读增长），"Clear image cache"清空；缓存为空时按钮不可用，清空中转圈。已经显示在读信
   区的图片留在内存里，换一封再回来才重新拦截。
-- **主题都从终端调色板推导**（`theme/`）：背景、前景和 16 个 ANSI 色按设计稿的映射表推导出 gpui-kit
+- **主题都从终端调色板推导**（`catmail_frontend::theme`）：背景、前景和 16 个 ANSI 色按设计稿的映射表推导出 gpui-kit
   `ThemeConfig` 的全部颜色键；内置主题也写成调色板，与导入的走同一套规则。导入按内容识别 Alacritty、
   kitty、Ghostty、WezTerm、Windows Terminal、iTerm2、foot、Xresources、base16 / base24 和 gpui-kit
   主题 JSON，推导结果写成 gpui-kit 主题 JSON 放进主题目录（可手工修改，启动时读取）。新主题的文件
   不与别的主题共用（名字不同、文件名相同时加序号）；重新导入的主题写回原来的文件，同一文件里的其他主题
   保留。
+- 主题在 `catmail-frontend` 里是 `ThemeConfig`（名字、明暗、按 gpui-kit 键名的颜色，其余字段原样保留），不依赖
+  gpui-kit；GUI 经 serde 转成 gpui-kit 的 `ThemeConfig`，gpui-kit 读不了的（手改坏的主题文件）记一条警告后不提供。
+  nsh 版把同样的颜色映射到 shadcn 的 token。
 - **不用 gpui-kit 的 `ThemeRegistry`**：它不能替换同名主题（重新导入要覆盖旧的），也会自己监视目录、
-  改全局主题。可选主题由 `appearance::Themes` 全局保存，应用时把选中的配置放进 `Theme::light_theme` /
+  改全局主题。可选主题由 `appearance::Themes` 全局保存（包着 `catmail_frontend::theme::Themes`），应用时把选中的配置放进 `Theme::light_theme` /
   `dark_theme` 再 `Theme::change`。
 - **设置改了就生效**：`appearance::init` 观察 `Preferences` 全局，任何地方 `Preferences::update` 之后
   主题和文字大小随之应用，调用方不必各自记得。
@@ -389,7 +400,7 @@ INBOX，所以打开一个文件夹时同步它（`MailClient::sync_folder`，�
   此时离开也撤销不了，账户照样加上、同步。
 - 空的端口和用户名取与 CLI 相同的默认值；表单只检查端口格式，其余由引擎的校验负责。登录也检查
   SMTP，所以 SMTP 填错同样当场报出。邮箱、密码、名字、用户名和服务器字段在 `login_form.rs`（`LoginFields`、
-  `ServerFields`），与发件身份的表单共用。
+  `ServerFields`），与发件身份的表单共用；字段怎么读、端口的默认值在 `catmail_frontend::login`。
 - **发件身份**在 Settings › Accounts 里，列在各自账户下面（包括随账户建出的那个），和写信窗口的 From 一样显示成
   "名字 <地址>"。操作都是图标按钮，和图标一起对齐第一行：星标实心的是默认身份，空心的点了设为默认；
   默认之外的可以删除；每个都可以改名（编辑图标）：对话框里只有名字

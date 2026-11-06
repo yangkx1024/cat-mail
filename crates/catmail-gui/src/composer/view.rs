@@ -16,6 +16,7 @@ use gpui_kit::{FontWeight, Pixels, px};
 use crate::actions::{self, Attach, CloseComposer, Send};
 use crate::assets::Hero;
 use crate::layout;
+use catmail_frontend::composer::Finish;
 
 use super::*;
 
@@ -79,7 +80,7 @@ impl Composer {
             .child(
                 field_row(
                     label,
-                    header_input(label, input, self.finishing.is_some()),
+                    header_input(label, input, self.life.ending().is_some()),
                     cx,
                 )
                 .children(trailing),
@@ -100,14 +101,9 @@ impl Composer {
 impl Render for Composer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let ending = self.finishing.is_some();
-        let sending = self.finishing == Some(Finish::Send);
-        let status: Option<SharedString> = match (&self.save_state, self.saving && !ending) {
-            (_, true) => Some("Saving…".into()),
-            (SaveState::Saved, _) if !self.dirty => Some("Draft saved".into()),
-            (SaveState::Failed(e), _) => Some(format!("Not saved: {e}").into()),
-            _ => None,
-        };
+        let ending = self.life.ending().is_some();
+        let sending = self.life.ending() == Some(Finish::Send);
+        let status = self.life.status();
         let footer = layout::bottom_bar(cx)
             .gap_2()
             .child(
@@ -135,7 +131,7 @@ impl Render for Composer {
                 div()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(status)
+                    .child(SharedString::from(status))
             }))
             .child(
                 Button::new("discard")

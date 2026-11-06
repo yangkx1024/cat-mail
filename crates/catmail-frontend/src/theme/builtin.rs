@@ -1,13 +1,9 @@
 //! The themes that come with catmail, kept as terminal palettes and derived like
 //! imported ones, so built-in and imported themes follow the same rules.
 
-use gpui_kit::component::ThemeConfig;
-
 use super::derive::theme_config;
 use super::palette::{Rgb, TerminalPalette};
-
-pub const DEFAULT_LIGHT: &str = "catmail Light";
-pub const DEFAULT_DARK: &str = "catmail Dark";
+use super::{DEFAULT_DARK, DEFAULT_LIGHT, ThemeConfig};
 
 /// (name, background, foreground, ANSI 0–15).
 type Scheme = (&'static str, u32, u32, [u32; 16]);
@@ -118,7 +114,7 @@ const fn rgb(value: u32) -> Rgb {
     Rgb::new((value >> 16) as u8, (value >> 8) as u8, value as u8)
 }
 
-pub(crate) fn palettes() -> Vec<TerminalPalette> {
+pub(super) fn palettes() -> Vec<TerminalPalette> {
     SCHEMES
         .iter()
         .map(|&(name, background, foreground, ansi)| TerminalPalette {
@@ -146,8 +142,8 @@ mod tests {
     fn defaults_exist_with_the_right_appearance() {
         let themes = builtin_themes();
         let find = |name: &str| themes.iter().find(|t| t.name == name).unwrap();
-        assert!(!find(DEFAULT_LIGHT).mode.is_dark());
-        assert!(find(DEFAULT_DARK).mode.is_dark());
+        assert!(!find(DEFAULT_LIGHT).is_dark());
+        assert!(find(DEFAULT_DARK).is_dark());
         let mut names: Vec<_> = themes.iter().map(|t| t.name.clone()).collect();
         names.dedup();
         assert_eq!(names.len(), SCHEMES.len());

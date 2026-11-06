@@ -5,7 +5,25 @@ use catmail_core::{
     can_create_in, special_folder,
 };
 
-use crate::assets::Hero;
+/// What a sidebar row draws, which each frontend maps to its own icon set: a folder's
+/// role, a label, any other folder, and the places that aren't folders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FolderIcon {
+    Inbox,
+    Sent,
+    Archive,
+    All,
+    Important,
+    Flagged,
+    Junk,
+    Trash,
+    Drafts,
+    Label,
+    Folder,
+    /// All Inboxes.
+    Inboxes,
+    Outbox,
+}
 
 /// What the sidebar adds to a role ([`FolderRole::label`] names it): its icon, and its
 /// place among the folders with a role, which come first under an account in this order
@@ -13,35 +31,35 @@ use crate::assets::Hero;
 /// drafts kept here, of which the server's Drafts folder holds copies.
 #[derive(Debug, Clone, Copy)]
 pub struct RoleInfo {
-    pub icon: Hero,
+    pub icon: FolderIcon,
     pub order: Option<u8>,
 }
 
 impl RoleInfo {
     pub fn of(role: FolderRole) -> Self {
         let (icon, order) = match role {
-            FolderRole::Inbox => (Hero::Inbox, Some(0)),
-            FolderRole::Sent => (Hero::PaperAirplane, Some(1)),
-            FolderRole::Archive => (Hero::ArchiveBox, Some(2)),
-            FolderRole::All => (Hero::Envelope, Some(3)),
-            FolderRole::Important => (Hero::Star, Some(4)),
-            FolderRole::Flagged => (Hero::Flag, Some(5)),
-            FolderRole::Junk => (Hero::ShieldExclamation, Some(6)),
-            FolderRole::Trash => (Hero::Trash, Some(7)),
-            FolderRole::Drafts => (Hero::DocumentText, None),
+            FolderRole::Inbox => (FolderIcon::Inbox, Some(0)),
+            FolderRole::Sent => (FolderIcon::Sent, Some(1)),
+            FolderRole::Archive => (FolderIcon::Archive, Some(2)),
+            FolderRole::All => (FolderIcon::All, Some(3)),
+            FolderRole::Important => (FolderIcon::Important, Some(4)),
+            FolderRole::Flagged => (FolderIcon::Flagged, Some(5)),
+            FolderRole::Junk => (FolderIcon::Junk, Some(6)),
+            FolderRole::Trash => (FolderIcon::Trash, Some(7)),
+            FolderRole::Drafts => (FolderIcon::Drafts, None),
         };
         Self { icon, order }
     }
 }
 
 /// The icon of a folder, a label or a hierarchy level the server didn't list (`None`).
-pub fn icon(folder: Option<&Folder>) -> Hero {
+pub fn icon(folder: Option<&Folder>) -> FolderIcon {
     match folder {
-        Some(folder) if folder.is_user_label() => Hero::Tag,
+        Some(folder) if folder.is_user_label() => FolderIcon::Label,
         Some(Folder {
             role: Some(role), ..
         }) => RoleInfo::of(*role).icon,
-        _ => Hero::Folder,
+        _ => FolderIcon::Folder,
     }
 }
 

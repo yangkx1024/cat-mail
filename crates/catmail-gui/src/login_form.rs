@@ -1,7 +1,9 @@
 //! A login form, shared by the sign-in page (an account) and the form for another sending
 //! address (an identity): the fields (who it is, the password, and a server).
 
-use catmail_core::{SecretString, Security, ServerConfig};
+use catmail_core::Security;
+pub use catmail_frontend::login::{LoginValues, ServerValues};
+use catmail_frontend::login::{NAME_HELP, PLAIN_WARNING, SECURITY};
 use gpui_kit::component::form::{Field, Form};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::radio::RadioGroup;
@@ -10,41 +12,6 @@ use gpui_kit::{
     App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, SharedString,
     Styled as _, Window, div, prelude::FluentBuilder as _,
 };
-
-/// Security choices, in the order the radio groups show them.
-const SECURITY: [(Security, &str); 3] = [
-    (Security::Tls, "TLS"),
-    (Security::StartTls, "STARTTLS"),
-    (Security::Plain, "None"),
-];
-
-/// Who signs in, as typed.
-#[derive(Debug, Clone)]
-pub struct LoginValues {
-    pub email: String,
-    /// Redacted in `Debug` output.
-    pub password: SecretString,
-    pub name: String,
-    pub username: String,
-}
-
-impl LoginValues {
-    /// The address, the display name if any, and the username: an empty one is the
-    /// address, as in the CLI.
-    pub fn who(&self) -> (String, Option<String>, String) {
-        let email = self.email.trim();
-        let username = match self.username.trim() {
-            "" => email,
-            username => username,
-        };
-        let name = self.name.trim();
-        (
-            email.to_owned(),
-            (!name.is_empty()).then(|| name.to_owned()),
-            username.to_owned(),
-        )
-    }
-}
 
 /// The fields of who signs in. Their element ids start with a prefix.
 pub struct LoginFields {
@@ -116,7 +83,7 @@ impl LoginFields {
             .child(
                 Field::new()
                     .label("Name")
-                    .description("Shown to the people you write to.")
+                    .description(NAME_HELP)
                     .child(Input::new(&self.name).id(id("name"))),
             )
             .child(
@@ -124,34 +91,6 @@ impl LoginFields {
                     .label("Username")
                     .child(Input::new(&self.username).id(id("username"))),
             )
-    }
-}
-
-/// A server's part of the form, as typed.
-#[derive(Debug, Clone)]
-pub struct ServerValues {
-    pub host: String,
-    pub port: String,
-    pub security: Security,
-}
-
-impl ServerValues {
-    /// An empty port means the usual one for the security mode, as in the CLI. The rest
-    /// (an empty host, say) is the engine's to reject.
-    pub fn config(&self, default_port: fn(Security) -> u16) -> Result<ServerConfig, &'static str> {
-        let port = match self.port.trim() {
-            "" => default_port(self.security),
-            port => port
-                .parse::<u16>()
-                .ok()
-                .filter(|&p| p != 0)
-                .ok_or("A port is a number from 1 to 65535.")?,
-        };
-        Ok(ServerConfig {
-            host: self.host.trim().to_owned(),
-            port,
-            security: self.security,
-        })
     }
 }
 
@@ -244,7 +183,7 @@ impl ServerFields {
                             .label("Security")
                             .col_span(3)
                             .when(self.security == Security::Plain, |field| {
-                                field.description("Unencrypted. Only for local test servers.")
+                                field.description(PLAIN_WARNING)
                             })
                             .child(
                                 RadioGroup::horizontal(SharedString::from(format!(

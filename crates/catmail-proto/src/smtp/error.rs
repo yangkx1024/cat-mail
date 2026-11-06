@@ -1,6 +1,6 @@
 use std::io;
 
-use catmail_types::ErrorKind;
+use catmail_types::{ErrorKind, Security};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -11,6 +11,14 @@ pub enum Error {
 
     #[error("invalid server name `{0}`")]
     InvalidServerName(String),
+
+    /// The settings say TLS, and the server answered in plaintext.
+    #[error(
+        "the server on port {port} doesn't start with TLS; choose STARTTLS for it, or port \
+         {tls} for TLS",
+        tls = Security::Tls.default_smtp_port()
+    )]
+    NotTls { port: u16 },
 
     #[error("server timed out")]
     Timeout,
@@ -51,9 +59,10 @@ impl Error {
             Self::Io(_) | Self::Timeout | Self::Closed | Self::Protocol(_) => ErrorKind::Network,
             Self::AuthFailed(_) => ErrorKind::Auth,
             Self::Reply { .. } | Self::TooLarge { .. } => ErrorKind::Refused,
-            Self::InvalidServerName(_) | Self::Unsupported(_) | Self::InvalidAddress(_) => {
-                ErrorKind::Invalid
-            }
+            Self::InvalidServerName(_)
+            | Self::NotTls { .. }
+            | Self::Unsupported(_)
+            | Self::InvalidAddress(_) => ErrorKind::Invalid,
         }
     }
 
@@ -65,6 +74,7 @@ impl Error {
             Self::Unsupported(_)
             | Self::AuthFailed(_)
             | Self::InvalidServerName(_)
+            | Self::NotTls { .. }
             | Self::TooLarge { .. }
             | Self::InvalidAddress(_) => true,
             Self::Io(_) | Self::Timeout | Self::Closed | Self::Protocol(_) => false,
@@ -75,7 +85,7 @@ impl Error {
     pub fn is_fatal(&self) -> bool {
         matches!(
             self,
-            Self::Io(_) | Self::Timeout | Self::Closed | Self::Protocol(_)
+            Self::Io(_) | Self::Timeout | Self::Closed | Self::NotTls { .. } | Self::Protocol(_)
         )
     }
 }
@@ -87,6 +97,7 @@ impl From<crate::net::NetError> for Error {
             NetError::Io(e) => Self::Io(e),
             NetError::Timeout => Self::Timeout,
             NetError::InvalidServerName(name) => Self::InvalidServerName(name),
+            NetError::NotTls { port } => Self::NotTls { port },
         }
     }
 }

@@ -22,7 +22,7 @@ use crate::assets::Hero;
 use crate::layout;
 use crate::mailbox::Mailbox;
 use crate::settings::{Appearance, Preferences, TEXT_SIZES};
-use crate::theme::appearance::ImportCandidate;
+use catmail_frontend::theme::ImportCandidate;
 
 /// The id of the list of sections; GPUI Kit names the items after it (`section_item`).
 const SECTIONS: &str = "settings-sections";

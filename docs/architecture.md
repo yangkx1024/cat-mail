@@ -11,6 +11,7 @@
 | 层 | crate | 内容 |
 |---|---|---|
 | Frontends | `catmail-cli`、`catmail-gui` | 命令行（clap）；图形界面（gpui-kit） |
+| Frontend 共用 | `catmail-frontend` | 桌面前端共用、与 UI 库无关的部分：设置文件、主题、单实例、侧栏的文件夹与模型、引擎事件的重读规则、列表的行、对邮件的命令、写信窗口的模型、发件箱的选择、登录表单、显示格式、读信区的头部与 HTML 策略、托盘（菜单、角标、Linux 的 StatusNotifierItem）、新邮件通知的措辞、关掉最后一个窗口之后怎么办 |
 | Rendering | `catmail-render` | 读信区的 HTML 引擎（Blitz）：在自己的线程上排版、分块绘制成像素；不依赖 UI 库和邮件类型 |
 | Facade | `catmail-core` | `MailClient`：async 方法 + 事件订阅，前端唯一依赖 |
 | Services / Engine | `catmail-core` | 同步、后台同步（IDLE）、操作队列回放、按需下载与后台预取正文、Outbox；每账户状态；运行时桥接；凭据 |
@@ -19,10 +20,11 @@
 | HTML | `catmail-html` | 邮件 HTML 的清洗（ammonia，样式表逐记号重写），以及读信区在清洗结果上做的几遍：图片、内嵌图片、深色时的颜色转换；纯函数，无 IO |
 | Domain | `catmail-types` | `Account`、`Folder`、`MessageSummary`、`Flags`、`Event`、ID 类型；纯数据，无 IO |
 
-依赖方向 `types ← store, proto ← core ← cli / gui`，`html ← proto, core`：store 与 proto 并列、互不依赖；前端不直接
+依赖方向 `types ← store, proto ← core ← cli / gui`，`html ← proto, core`，`core ← frontend ← gui`：store 与 proto 并列、互不依赖；前端不直接
 依赖 store / proto，需要的类型由 `catmail-core` 重新导出。`catmail-testkit`（假 IMAP / SMTP
 服务器）只作为 dev-dependency。`catmail-render` 只被 GUI 依赖，它不认识邮件：读信区交给它清洗后的
-HTML 和决定哪些图片可以加载的函数。
+HTML 和决定哪些图片可以加载的函数。桌面前端里不依赖 UI 库的逻辑放进 `catmail-frontend`，换一个 UI 库
+（如 `nsh-spike` 分支上的 `catmail-nsh`）也能直接用。
 
 ## 关键设计
 

@@ -16,6 +16,8 @@ use gpui_kit::{
     Subscription, Task, TestSupportExt as _, Window, div, rems,
 };
 
+use catmail_frontend::login::Submission;
+
 use crate::actions::DIALOG_BUTTON;
 use crate::layout;
 
@@ -43,12 +45,10 @@ pub fn submit_on_enter<'a, T: 'static>(
         .collect()
 }
 
-/// A form's submission: whether one is running, and why the last one failed.
+/// A form's submission (`Submission`: whether one is running, and why the last one
+/// failed), and its task.
 pub struct Submit {
-    busy: bool,
-    error: Option<SharedString>,
-    /// What submitting does, for the error: "Couldn't sign in".
-    what: &'static str,
+    state: Submission,
     _task: Task<()>,
 }
 
@@ -56,9 +56,7 @@ impl Submit {
     /// `what` submitting does, to say what failed: "sign in".
     pub fn new(what: &'static str) -> Self {
         Self {
-            busy: false,
-            error: None,
-            what,
+            state: Submission::new(what),
             _task: Task::ready(()),
         }
     }
@@ -74,29 +72,15 @@ impl Submit {
         window: &mut Window,
         cx: &mut Context<T>,
     ) {
-        if self.busy {
-            return;
-        }
         cx.notify();
-        let request = match request {
-            Ok(request) => request,
-            Err(problem) => {
-                self.error = Some(problem.into());
-                return;
-            }
+        let Some(request) = self.state.begin(request) else {
+            return;
         };
-        self.busy = true;
-        self.error = None;
         self._task = cx.spawn_in(window, async move |this, cx| {
             let result = request.await;
             this.update_in(cx, |this, window, cx| {
-                submit(this).busy = false;
-                match result {
-                    Ok(value) => done(value, window, cx),
-                    Err(e) => {
-                        let submit = submit(this);
-                        submit.error = Some(format!("Couldn't {}: {e}", submit.what).into());
-                    }
+                if let Some(value) = submit(this).state.ended(result) {
+                    done(value, window, cx);
                 }
                 cx.notify();
             })
@@ -106,7 +90,8 @@ impl Submit {
 
     /// Why the last submission failed, under the form.
     pub fn error(&self, id: &'static str, cx: &App) -> Option<impl IntoElement + use<>> {
-        self.error.clone().map(|error| {
+        self.state.error().map(|error| {
+            let error = SharedString::from(error);
             div()
                 .id(id)
                 .role(Role::Alert)
@@ -122,12 +107,12 @@ impl Submit {
     /// follows: the engine finishes the request whatever the window does (its task
     /// isn't cancelled with the form's).
     pub fn busy(&self) -> bool {
-        self.busy
+        self.state.busy()
     }
 
     /// The form's Cancel button: off while a submission runs.
     pub fn cancel_button(&self, cancel: Button) -> Button {
-        cancel.rounded_full().disabled(self.busy)
+        cancel.rounded_full().disabled(self.busy())
     }
 
     /// The button that submits the form. Running, it spins, as Sync does: `loading` alone
@@ -136,8 +121,8 @@ impl Submit {
         submit
             .primary()
             .rounded_full()
-            .loading(self.busy)
-            .when(self.busy, |submit| submit.icon(Spinner::new()))
+            .loading(self.busy())
+            .when(self.busy(), |submit| submit.icon(Spinner::new()))
     }
 
     /// The buttons under the form: Cancel, if it has one, and the one that submits it.

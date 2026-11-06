@@ -4,8 +4,8 @@
 
 - stderr：按 `RUST_LOG`，默认只有 warn，和以前一样。
 - 数据目录下的 `logs/catmail.log`：按 `CATMAIL_LOG`，默认 warn 加上引擎各 crate（core、proto、store）
-  的 info，再加上前端自己的那部分：GUI 是 `catmail_gui`、`catmail_render` 和 `gpui_wgpu`，CLI 是
-  `catmail`。GUI 把 `gpui_wgpu` 记进来，是因为选到 llvmpipe（CPU 渲染）时应用又慢又大，而 GPUI 只在
+  的 info，再加上前端自己的那部分：GUI 是 `catmail_gui`、`catmail_frontend`、`catmail_render` 和 `gpui_wgpu`，
+  CLI 是 `catmail`。`catmail_frontend` 里有常驻时回收内存（trim 前后的 RSS）和没有托盘这两条。GUI 把 `gpui_wgpu` 记进来，是因为选到 llvmpipe（CPU 渲染）时应用又慢又大，而 GPUI 只在
   info 级别说明为什么跳过了显卡。
 
 全局 subscriber 由前端显式调 `init` 来装，core 自己从不装：测试在一个进程里开很多引擎。

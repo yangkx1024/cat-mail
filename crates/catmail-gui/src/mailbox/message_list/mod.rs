@@ -6,12 +6,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::time::Duration;
 
 use catmail_core::{
-    AccountId, Draft, DraftId, Flags, FolderId, MailClient, MessageCursor, MessageId,
-    MessageSummary, OutboxEntry, OutboxId, SearchQuery,
+    AccountId, FolderId, MailClient, MessageCursor, MessageId, MessageSummary, SearchQuery,
 };
+use catmail_frontend::list::{
+    self, Days, PAGE, Removal, Reselect, Reveal, SERVER_SEARCH_DELAY, fetch,
+};
+pub use catmail_frontend::list::{Check, Row};
+pub use catmail_frontend::mailbox::Source;
 use gpui_kit::component::list::{ListDelegate, ListEvent, ListItem, ListState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, IndexPath, Sizable as _, WindowExt as _};
@@ -19,26 +22,14 @@ use gpui_kit::{
     App, Context, EventEmitter, FontWeight, IntoElement, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, Task, Window, div, prelude::FluentBuilder as _,
 };
-use jiff::civil::Date;
 
 use super::folders::AccountFolders;
 use super::message_commands::{Applies, MessageCommand};
-use crate::format::Calendar;
 use crate::theme::colors::ThemeColors as _;
 
 mod rows;
 
-pub use rows::outbox_status;
 use rows::{Shape, draft_row, message_row, outbox_row};
-
-const PAGE: u32 = 200;
-
-/// How long search results show before the servers are asked about the text too. A
-/// search the user moves on from still has the server finish the command at hand (a scan
-/// of a whole folder's text, on servers without an index), which the next one waits for:
-/// this keeps the pauses in typing from asking, at the cost of server results showing a
-/// little later than they could.
-const SERVER_SEARCH_DELAY: Duration = Duration::from_secs(1);
 
 /// A command on a row's message from the row itself, not the selection: the mailbox
 /// runs it.
@@ -50,168 +41,15 @@ pub struct RowCommand {
 
 impl EventEmitter<RowCommand> for ListState<MessageList> {}
 
-/// Which of the messages listed to check, from the menu beside the list's checkbox.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Check {
-    All,
-    Read,
-    Unread,
-    Flagged,
-    Unflagged,
+/// The list's index of row `flat`, counted top to bottom.
+fn path(days: &Days, flat: usize) -> Option<IndexPath> {
+    let (section, row) = days.path(flat)?;
+    Some(IndexPath::new(row).section(section))
 }
 
-impl Check {
-    pub const MENU: [Check; 5] = [
-        Check::All,
-        Check::Read,
-        Check::Unread,
-        Check::Flagged,
-        Check::Unflagged,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Check::All => "All",
-            Check::Read => "Read",
-            Check::Unread => "Unread",
-            Check::Flagged => "Flagged",
-            Check::Unflagged => "Unflagged",
-        }
-    }
-
-    fn takes(self, flags: Flags) -> bool {
-        match self {
-            Check::All => true,
-            Check::Read => flags.contains(Flags::SEEN),
-            Check::Unread => !flags.contains(Flags::SEEN),
-            Check::Flagged => flags.contains(Flags::FLAGGED),
-            Check::Unflagged => !flags.contains(Flags::FLAGGED),
-        }
-    }
-}
-
-/// What the list shows.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Source {
-    /// Every account's INBOX.
-    Inboxes,
-    Folder(FolderId),
-    Search(String),
-    Drafts(AccountId),
-    Outbox(AccountId),
-}
-
-impl Source {
-    /// Whether it lists messages, which can be checked; not drafts or the outbox.
-    pub fn lists_messages(&self) -> bool {
-        matches!(
-            self,
-            Source::Inboxes | Source::Folder(_) | Source::Search(_)
-        )
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Row {
-    Message(MessageSummary),
-    /// Shared: the right pane shows it, and a draft can hold a whole forwarded message.
-    Draft(Rc<Draft>),
-    Outbox(OutboxEntry),
-}
-
-/// A row's identity, which survives reloads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RowId {
-    Message(MessageId),
-    Draft(DraftId),
-    Outbox(OutboxId),
-}
-
-impl Row {
-    pub fn id(&self) -> RowId {
-        match self {
-            Row::Message(m) => RowId::Message(m.id),
-            Row::Draft(d) => RowId::Draft(d.id),
-            Row::Outbox(e) => RowId::Outbox(e.id),
-        }
-    }
-
-    pub fn message(&self) -> Option<&MessageSummary> {
-        match self {
-            Row::Message(m) => Some(m),
-            _ => None,
-        }
-    }
-
-    /// When it happened, as far as the list goes: a message's date, when a draft was last
-    /// changed, when an entry was put in the outbox.
-    fn date(&self) -> Option<i64> {
-        match self {
-            Row::Message(m) => m.date,
-            Row::Draft(d) => Some(d.updated_at),
-            Row::Outbox(e) => Some(e.created_at),
-        }
-    }
-}
-
-/// A run of rows from the same day, shown under its heading.
-#[derive(Debug, Clone)]
-struct Day {
-    day: Option<Date>,
-    label: SharedString,
-    start: usize,
-    len: usize,
-}
-
-/// The rows grouped by day: the list's sections. Rows are counted top to bottom
-/// (`flat`), the list counts within a section (`IndexPath`).
-#[derive(Debug, Default)]
-struct Days(Vec<Day>);
-
-impl Days {
-    fn new(rows: &[Row]) -> Self {
-        let mut days = Self::default();
-        days.extend(rows, 0);
-        days
-    }
-
-    /// Groups `rows[from..]`, the rows after those already grouped. The rows are newest
-    /// first, so a day is one run; if they weren't, a day would just get a heading more
-    /// than once.
-    fn extend(&mut self, rows: &[Row], from: usize) {
-        let calendar = Calendar::now();
-        for (ix, row) in rows.iter().enumerate().skip(from) {
-            let day = calendar.day(row.date());
-            match self.0.last_mut() {
-                Some(last) if last.day == day => last.len += 1,
-                _ => self.0.push(Day {
-                    day,
-                    label: calendar.heading(day).into(),
-                    start: ix,
-                    len: 1,
-                }),
-            }
-        }
-    }
-
-    fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    fn get(&self, section: usize) -> Option<&Day> {
-        self.0.get(section)
-    }
-
-    fn flat(&self, ix: IndexPath) -> Option<usize> {
-        let day = self.0.get(ix.section)?;
-        (ix.row < day.len).then_some(day.start + ix.row)
-    }
-
-    fn path(&self, flat: usize) -> Option<IndexPath> {
-        let section = self.0.partition_point(|d| d.start <= flat).checked_sub(1)?;
-        let row = flat - self.0[section].start;
-        (row < self.0[section].len).then(|| IndexPath::new(row).section(section))
-    }
+/// Row `ix` of the list, counted top to bottom.
+fn flat(days: &Days, ix: IndexPath) -> Option<usize> {
+    days.flat(ix.section, ix.row)
 }
 
 pub struct MessageList {
@@ -231,20 +69,12 @@ pub struct MessageList {
     /// Bumped when the source changes, so rows fetched for the previous one are dropped.
     generation: u64,
     /// The message the user moved or deleted: once it is gone while still selected, the
-    /// row now at its index is selected, so the next message opens.
-    removing: Option<MessageId>,
-    /// Removals asked for so far: the latest is `removing`'s. An earlier one settling
-    /// says nothing about it (the user may archive, then delete, the same message).
-    removals: u64,
+    /// next row still there is selected, so the next message opens.
+    removal: Removal,
     /// Loads of the rows shown started so far (not of more pages).
     reads: u64,
-    /// The message to select once the rows have it (see [`reveal`]), and the first read
-    /// that must have it: one in flight may have started before it arrived.
-    revealing: Option<(MessageId, u64)>,
-    /// The change behind removal number `.0` is made: the rows of the read numbered `.1`
-    /// or later show it, and if the message is among them it stays (see
-    /// [`removal_settled`]).
-    settled: Option<(u64, u64)>,
+    /// The message to select once the rows have it (see [`reveal`]).
+    reveal: Reveal,
     /// The name of each user label shown, of every account, from `folders`: a row shows
     /// those of its message's labels (see `AccountFolders::user_labels`).
     labels: HashMap<FolderId, SharedString>,
@@ -275,11 +105,9 @@ impl MessageList {
             stale: false,
             has_more: false,
             generation: 0,
-            removing: None,
-            removals: 0,
+            removal: Removal::default(),
             reads: 0,
-            revealing: None,
-            settled: None,
+            reveal: Reveal::default(),
             labels: HashMap::new(),
             folders: HashMap::new(),
             hovered: None,
@@ -291,7 +119,7 @@ impl MessageList {
     }
 
     pub fn row_at(&self, ix: IndexPath) -> Option<&Row> {
-        self.rows.get(self.days.flat(ix)?)
+        self.rows.get(flat(&self.days, ix)?)
     }
 
     pub fn source(&self) -> Option<&Source> {
@@ -344,7 +172,7 @@ impl MessageList {
     /// Whether it waits for a message the user moved to leave, to select the next one.
     #[cfg(test)]
     pub fn waits_for_removal(&self) -> bool {
-        self.removing.is_some()
+        self.removal.is_waiting()
     }
 
     #[cfg(test)]
@@ -373,14 +201,7 @@ impl MessageList {
         message: &MessageSummary,
         except: Option<FolderId>,
     ) -> Vec<SharedString> {
-        let mut names: Vec<_> = message
-            .labels
-            .iter()
-            .filter(|&&id| Some(id) != except)
-            .filter_map(|id| self.labels.get(id).cloned())
-            .collect();
-        names.sort();
-        names
+        list::label_names(&self.labels, message, except)
     }
 
     /// The reading pane, open while a row is selected, leaves the rows less room.
@@ -394,16 +215,13 @@ impl MessageList {
 
     /// Drops the message [`reveal`] waits for: the user chose another meanwhile.
     pub fn forget_reveal(&mut self) {
-        self.revealing = None;
+        self.reveal.forget();
     }
 
     /// Selects the next row once `id`, the selected message, goes away. Returns the
     /// removal's number, for [`removal_settled`].
     pub fn expect_removal(&mut self, id: MessageId) -> u64 {
-        self.removing = Some(id);
-        self.removals += 1;
-        self.settled = None;
-        self.removals
+        self.removal.expect(id)
     }
 }
 
@@ -420,9 +238,8 @@ pub fn show(
     delegate.days = Days::default();
     delegate.has_more = false;
     delegate.stale = false;
-    delegate.removing = None;
-    delegate.revealing = None;
-    delegate.settled = None;
+    delegate.removal.clear();
+    delegate.reveal.forget();
     delegate.generation += 1;
     delegate.found_on_server = Rc::new([]);
     delegate._server = match &delegate.source {
@@ -541,9 +358,9 @@ pub fn reveal(
     let delegate = list.delegate_mut();
     // The next read starts after now, once one in flight is done.
     let reads = delegate.reads;
-    delegate.revealing = Some((id, reads + 1));
+    delegate.reveal.ask(id, reads + 1);
     select_revealed(list, reads, window, cx);
-    if list.delegate().revealing.is_some() {
+    if list.delegate().reveal.is_waiting() {
         refresh(list, window, cx);
     }
 }
@@ -557,19 +374,11 @@ fn select_revealed(
     cx: &mut Context<ListState<MessageList>>,
 ) {
     let delegate = list.delegate_mut();
-    let Some((id, from)) = delegate.revealing else {
-        return;
-    };
-    let ix = delegate
-        .rows
-        .iter()
-        .position(|r| r.id() == RowId::Message(id))
-        .and_then(|ix| delegate.days.path(ix));
-    if ix.is_none() && read < from {
-        return;
-    }
-    delegate.revealing = None;
-    let Some(ix) = ix else {
+    let Some(ix) = delegate
+        .reveal
+        .read(read, &delegate.rows)
+        .and_then(|ix| path(&delegate.days, ix))
+    else {
         return;
     };
     list.set_selected_index(Some(ix), window, cx);
@@ -591,16 +400,11 @@ pub fn removal_settled(
     cx: &mut Context<ListState<MessageList>>,
 ) {
     let delegate = list.delegate_mut();
-    if delegate.removals != removal || delegate.removing.is_none() {
-        return; // A later one, gone already, or the user moved on.
-    }
-    if !made {
-        delegate.removing = None;
-        return;
-    }
     // A read in flight may have started before the change: the next one shows it.
-    delegate.settled = Some((removal, delegate.reads + 1));
-    refresh(list, window, cx);
+    let next_read = delegate.reads + 1;
+    if delegate.removal.settled(removal, made, next_read) {
+        refresh(list, window, cx);
+    }
 }
 
 /// Re-reads the rows already shown (after the engine reported a change), keeping the
@@ -625,41 +429,6 @@ enum Load {
     Replace(u32),
     /// The next page, after the last row shown.
     After(MessageCursor),
-}
-
-async fn fetch(
-    client: &MailClient,
-    source: &Source,
-    found_on_server: &[MessageId],
-    limit: u32,
-    after: Option<MessageCursor>,
-) -> catmail_core::Result<(Vec<Row>, bool)> {
-    // A full page may have more after it.
-    let page = |messages: Vec<MessageSummary>| {
-        let more = messages.len() == limit as usize;
-        (messages.into_iter().map(Row::Message).collect(), more)
-    };
-    Ok(match source {
-        Source::Inboxes => page(client.list_inboxes(limit, after).await?),
-        Source::Folder(folder) => page(client.list_messages(*folder, limit, after).await?),
-        Source::Search(text) => {
-            let mut query = SearchQuery::new(text.clone());
-            query.limit = limit;
-            query.after = after;
-            query.found_on_server = found_on_server.to_vec();
-            page(client.search(query).await?)
-        }
-        Source::Drafts(account) => {
-            let drafts = client.list_drafts(*account).await?;
-            let rows = drafts.into_iter().map(|d| Row::Draft(Rc::new(d))).collect();
-            (rows, false)
-        }
-        Source::Outbox(account) => {
-            let entries = client.list_outbox(Some(*account)).await?;
-            // Newest first, like everything else in the list.
-            (entries.into_iter().rev().map(Row::Outbox).collect(), false)
-        }
-    })
 }
 
 fn load(
@@ -700,18 +469,8 @@ fn load(
             let mut changed = true;
             match result {
                 Ok((rows, more)) => {
-                    if !append
-                        && let Some((removal, from)) = delegate.settled
-                        && read >= from
-                    {
-                        delegate.settled = None;
-                        // `expect_removal` drops a settlement of an earlier removal.
-                        debug_assert_eq!(removal, delegate.removals);
-                        if let Some(id) = delegate.removing
-                            && rows.iter().any(|r| r.id() == RowId::Message(id))
-                        {
-                            delegate.removing = None;
-                        }
+                    if !append {
+                        delegate.removal.read(read, &rows);
                     }
                     let had_more = std::mem::replace(&mut delegate.has_more, more);
                     if append {
@@ -757,7 +516,7 @@ fn replace_rows(
 ) {
     let delegate = list.delegate_mut();
     let selected = delegate.selected.zip(delegate.selected_row().map(Row::id));
-    let next = reselect(selected, delegate.removing.take(), &delegate.rows, &rows);
+    let next = delegate.removal.reselect(selected, &delegate.rows, &rows);
     delegate.days = Days::new(&rows);
     delegate.rows = rows;
     // Those gone are no longer checked: moved, deleted, or expunged on the server.
@@ -767,15 +526,14 @@ fn replace_rows(
         let checked = delegate.checked.intersection(&listed).copied().collect();
         set_checked(list, checked, cx);
     }
-    if let Reselect::Keep { ix, removing } = next {
-        let ix = ix.and_then(|ix| list.delegate().days.path(ix));
+    if let Reselect::Keep { ix, .. } = next {
+        let ix = ix.and_then(|ix| path(&list.delegate().days, ix));
         list.set_selected_index(ix, window, cx);
-        list.delegate_mut().removing = removing;
         return;
     }
     let next = match next {
         // Every row has a path; if one hadn't, it would be as good as gone.
-        Reselect::Next(ix) => list.delegate().days.path(ix),
+        Reselect::Next(ix) => path(&list.delegate().days, ix),
         _ => None,
     };
     list.set_selected_index(next, window, cx);
@@ -783,60 +541,6 @@ fn replace_rows(
         Some(next) => cx.emit(ListEvent::Select(next)),
         // Setting the index emits nothing; deselecting with Escape emits this.
         None => cx.emit(ListEvent::Cancel),
-    }
-}
-
-/// Where the selection goes when the rows are replaced.
-#[derive(Debug, PartialEq, Eq)]
-enum Reselect {
-    /// The selected row, at its index among the new rows; nothing if nothing was
-    /// selected. `removing` is still waited for: the row is still there (a page read
-    /// before the change committed, or the change failed).
-    Keep {
-        ix: Option<usize>,
-        removing: Option<MessageId>,
-    },
-    /// The user moved or deleted the selected message: on to the next row still there,
-    /// at this index among the new rows.
-    Next(usize),
-    /// The selected row is gone (expunged, sent, or a new UIDVALIDITY).
-    Gone,
-}
-
-/// `selected` is the selected row's index and identity in `before`, the rows replaced,
-/// `removing` the message the user moved or deleted (see
-/// [`MessageList::expect_removal`]).
-fn reselect(
-    selected: Option<(usize, RowId)>,
-    removing: Option<MessageId>,
-    before: &[Row],
-    rows: &[Row],
-) -> Reselect {
-    let Some((at, id)) = selected else {
-        return Reselect::Keep {
-            ix: None,
-            removing: None,
-        };
-    };
-    // Only while the message is still the one selected: the user may have moved on.
-    let removing = removing.filter(|m| id == RowId::Message(*m));
-    let position = |id: RowId| rows.iter().position(|r| r.id() == id);
-    match position(id) {
-        Some(ix) => Reselect::Keep {
-            ix: Some(ix),
-            removing,
-        },
-        // The next row that is still there, or else the one before: rows around it may
-        // have gone with it (several moved at once), or come (new mail).
-        None if removing.is_some() => {
-            let after = before.get(at + 1..).unwrap_or_default().iter();
-            let before = before.get(..at).unwrap_or_default().iter().rev();
-            after
-                .chain(before)
-                .find_map(|r| position(r.id()))
-                .map_or(Reselect::Gone, Reselect::Next)
-        }
-        None => Reselect::Gone,
     }
 }
 
@@ -857,7 +561,7 @@ impl ListDelegate for MessageList {
         _: &mut Window,
         cx: &mut Context<ListState<Self>>,
     ) -> Option<impl IntoElement> {
-        let label = self.days.get(section)?.label.clone();
+        let label = SharedString::from(&self.days.get(section)?.label);
         // Lined up with the rows' text (their padding).
         Some(
             div()
@@ -877,7 +581,7 @@ impl ListDelegate for MessageList {
         _: &mut Window,
         cx: &mut Context<ListState<Self>>,
     ) -> Option<ListItem> {
-        let ix = self.days.flat(ix)?;
+        let ix = flat(&self.days, ix)?;
         let row = self.rows.get(ix)?;
         let selected = self.selected == Some(ix);
         let shape = self.shape();
@@ -925,14 +629,7 @@ impl ListDelegate for MessageList {
         _: &mut Window,
         cx: &mut Context<ListState<Self>>,
     ) -> impl IntoElement {
-        let text = match &self.source {
-            None => "No folder selected",
-            Some(Source::Inboxes | Source::Folder(_)) => "No messages",
-            Some(Source::Search(_)) => "Nothing found",
-            Some(Source::Drafts(_)) => "No drafts",
-            Some(Source::Outbox(_)) => "Nothing waiting to be sent",
-        };
-        crate::layout::empty(text, cx)
+        crate::layout::empty(list::empty_text(self.source.as_ref()), cx)
     }
 
     fn loading(&self, _: &App) -> bool {
@@ -947,14 +644,14 @@ impl ListDelegate for MessageList {
         cx: &mut Context<ListState<Self>>,
     ) {
         let (shape, before) = (self.shape(), self.selected);
-        self.selected = ix.and_then(|ix| self.days.flat(ix));
+        self.selected = ix.and_then(|ix| flat(&self.days, ix));
         if self.shape() == shape {
             return;
         }
         // Every row changes height: the one opened, or the one just closed, would move
         // away from under the pointer. (Not when the rows went with it: another source.)
         let row = self.selected.or(before.filter(|&ix| ix < self.rows.len()));
-        if let Some(path) = row.and_then(|ix| self.days.path(ix)) {
+        if let Some(path) = row.and_then(|ix| path(&self.days, ix)) {
             // The list is being updated right now.
             cx.defer_in(window, move |list, window, cx| {
                 list.scroll_to_item(path, gpui_kit::ScrollStrategy::Center, window, cx)
@@ -979,108 +676,5 @@ impl ListDelegate for MessageList {
                 load(list, Load::After(last.cursor()), window, cx);
             }
         });
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use catmail_core::{AccountId, Flags};
-
-    use super::*;
-
-    /// Midday UTC: the same calendar day in nearly every time zone the test runs in.
-    fn message(id: i64, date: Option<&str>) -> Row {
-        let date = date.map(|d| {
-            format!("{d}T12:00:00Z")
-                .parse::<jiff::Timestamp>()
-                .unwrap()
-                .as_second()
-        });
-        Row::Message(MessageSummary {
-            id: MessageId(id),
-            account_id: AccountId(1),
-            folder_id: FolderId(1),
-            subject: None,
-            from: Vec::new(),
-            to: Vec::new(),
-            cc: Vec::new(),
-            date,
-            snippet: None,
-            flags: Flags::empty(),
-            has_attachments: false,
-            labels: Vec::new(),
-        })
-    }
-
-    #[test]
-    fn the_selection_follows_the_row_or_moves_on() {
-        use Reselect::*;
-        let m = |id| RowId::Message(MessageId(id));
-        let rows = |ids: &[i64]| -> Vec<Row> { ids.iter().map(|&id| message(id, None)).collect() };
-        let removing = Some(MessageId(2));
-        #[rustfmt::skip]
-        let cases = [
-            // Nothing selected: nothing is, and a removal isn't waited for.
-            (None, removing, &[1, 2][..], &[1, 2][..], Keep { ix: None, removing: None }),
-            // Still there, wherever it is now.
-            (Some((1, m(2))), None, &[1, 2], &[0, 1, 2], Keep { ix: Some(2), removing: None }),
-            // Moved but still listed: keep waiting.
-            (Some((1, m(2))), removing, &[1, 2, 3], &[1, 2, 3], Keep { ix: Some(1), removing }),
-            // Waiting for another message than the selected one: the user moved on.
-            (Some((0, m(1))), removing, &[1, 2, 3], &[1, 3], Keep { ix: Some(0), removing: None }),
-            // Moved away: the next row still there, or the one before.
-            (Some((1, m(2))), removing, &[1, 2, 3, 4], &[1, 3, 4], Next(1)),
-            (Some((1, m(2))), removing, &[1, 2], &[1], Next(0)),
-            // With those above it: not the row now at its index.
-            (Some((1, m(2))), removing, &[1, 2, 3, 4, 5], &[3, 4, 5], Next(0)),
-            // With those below it, and new mail above.
-            (Some((0, m(2))), removing, &[2, 3, 4], &[9, 4], Next(1)),
-            // Moved away and nothing left of the rows around it, or gone by itself.
-            (Some((0, m(2))), removing, &[2], &[], Gone),
-            (Some((0, m(2))), removing, &[2, 3], &[9], Gone),
-            (Some((1, m(2))), None, &[1, 2, 3], &[1, 3], Gone),
-            (Some((0, RowId::Draft(DraftId(2)))), removing, &[1], &[1], Gone),
-        ];
-        for (selected, removing, before, ids, expected) in cases {
-            assert_eq!(
-                reselect(selected, removing, &rows(before), &rows(ids)),
-                expected,
-                "{selected:?} {removing:?} {before:?} {ids:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn rows_are_grouped_by_day_and_indexed_both_ways() {
-        let rows = vec![
-            message(1, Some("2020-03-02")),
-            message(2, Some("2020-03-02")),
-            message(3, Some("2020-03-01")),
-            message(4, None),
-            message(5, None),
-        ];
-        let days = Days::new(&rows);
-        let shape: Vec<_> = days
-            .0
-            .iter()
-            .map(|s| (s.label.to_string(), s.start, s.len))
-            .collect();
-        assert_eq!(
-            shape,
-            [
-                ("March 2, 2020".to_owned(), 0, 2),
-                ("March 1, 2020".to_owned(), 2, 1),
-                ("No date".to_owned(), 3, 2),
-            ]
-        );
-        for flat in 0..5 {
-            let path = days.path(flat).unwrap();
-            assert_eq!(days.flat(path), Some(flat), "{path:?}");
-        }
-        assert_eq!(days.path(3), Some(IndexPath::new(0).section(2)));
-        assert_eq!(days.path(5), None);
-        assert_eq!(days.flat(IndexPath::new(1).section(1)), None);
-        assert_eq!(days.flat(IndexPath::new(0).section(3)), None);
-        assert!(Days::new(&[]).path(0).is_none());
     }
 }

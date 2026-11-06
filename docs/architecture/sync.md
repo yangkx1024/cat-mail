@@ -82,6 +82,9 @@ flags，重复的批次不产生重复行）。HIGHESTMODSEQ 用 EXAMINE 时刻�
   不推进游标。
 - 认证失败、服务器缺少设置要求的能力（如 STARTTLS）在 core 里转成 `Error::AuthFailed` /
   `Error::Unsupported`，错误信息带给用户的建议，前端直接显示。
+- 设置要 TLS、服务器却用明文打招呼（端口其实是 STARTTLS 的 587 / 143），TLS 握手在第一个记录上就失败：
+  `net::connect` 认出 rustls 的 `InvalidContentType`，报成 `NotTls`（"choose STARTTLS for it, or port 465
+  for TLS"），而不是 rustls 的原话。它算设置错误（`ErrorKind::Invalid`），重试没用。
 - 一个文件夹的命令被拒绝（`Error::is_refusal`，连接仍可用）只记进它的 `FolderSyncReport.error`，
   其余文件夹照常同步；连接断了才让整次同步失败。
 

@@ -496,7 +496,16 @@ impl MailClient {
             .run(async move {
                 let (smtp_max_size, session) = match verify {
                     Verify::Login => {
-                        let (smtp, session) = check_account(&engine, &new, &password).await?;
+                        let (smtp, session) = check_account(&engine, &new, &password)
+                            .await
+                            .inspect_err(|e| {
+                                tracing::warn!(
+                                    imap = %server(&new.imap),
+                                    smtp = %server(&new.smtp),
+                                    error = %e,
+                                    "couldn't sign in to a new account"
+                                );
+                            })?;
                         (smtp, Some(session))
                     }
                     Verify::Skip => (None, None),
@@ -590,10 +599,20 @@ impl MailClient {
         self.shared
             .rt
             .run(async move {
-                let smtp_max_size = match verify {
-                    Verify::Login => check_identity(&engine, &new, &password).await?,
-                    Verify::Skip => None,
-                };
+                let smtp_max_size =
+                    match verify {
+                        Verify::Login => check_identity(&engine, &new, &password)
+                            .await
+                            .inspect_err(|e| {
+                                tracing::warn!(
+                                    %account,
+                                    smtp = %server(&new.smtp),
+                                    error = %e,
+                                    "couldn't sign in for a new sending address"
+                                );
+                            })?,
+                        Verify::Skip => None,
+                    };
                 let identity = blocking({
                     let engine = engine.clone();
                     move || {
@@ -1572,6 +1591,12 @@ async fn check_identity(
         password: password.clone(),
     };
     check_smtp(engine, &new.smtp, &credentials).await
+}
+
+/// A server as the log shows it: where, and how it is secured. The address and username
+/// stay out of the log.
+fn server(server: &ServerConfig) -> String {
+    format!("{}:{} {}", server.host, server.port, server.security)
 }
 
 /// Logs in to the SMTP server `server` and out again; returns the SIZE it announced. Its

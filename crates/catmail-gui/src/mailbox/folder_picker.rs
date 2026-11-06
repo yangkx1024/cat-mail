@@ -5,6 +5,7 @@
 use std::collections::HashSet;
 
 use catmail_core::FolderId;
+use catmail_frontend::commands;
 use gpui_kit::component::list::{List, ListDelegate, ListEvent, ListItem, ListState};
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IndexPath, Sizable as _, WindowExt as _, h_flex,
@@ -64,9 +65,9 @@ impl ListDelegate for FolderPicker {
         _: &mut Window,
         _: &mut Context<ListState<Self>>,
     ) -> Task<()> {
-        let query = query.trim().to_lowercase();
+        let matches = commands::picker_filter(query);
         self.shown = (0..self.folders.len())
-            .filter(|&ix| self.folders[ix].1.to_lowercase().contains(&query))
+            .filter(|&ix| matches(&self.folders[ix].1))
             .collect();
         Task::ready(())
     }
@@ -119,11 +120,7 @@ impl ListDelegate for FolderPicker {
         _: &mut Window,
         cx: &mut Context<ListState<Self>>,
     ) -> impl IntoElement {
-        let text = match (&self.checked, self.folders.is_empty()) {
-            (Some(_), true) => "No labels",
-            (Some(_), false) => "No label by that name",
-            (None, _) => "No folder by that name",
-        };
+        let text = commands::picker_empty_text(self.checked.is_some(), !self.folders.is_empty());
         crate::layout::empty(text, cx)
     }
 

@@ -1,6 +1,6 @@
 use std::io;
 
-use catmail_types::ErrorKind;
+use catmail_types::{ErrorKind, Security};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -11,6 +11,14 @@ pub enum Error {
 
     #[error("invalid server name `{0}`")]
     InvalidServerName(String),
+
+    /// The settings say TLS, and the server answered in plaintext.
+    #[error(
+        "the server on port {port} doesn't start with TLS; choose STARTTLS for it, or port \
+         {tls} for TLS",
+        tls = Security::Tls.default_imap_port()
+    )]
+    NotTls { port: u16 },
 
     #[error("server timed out")]
     Timeout,
@@ -64,9 +72,10 @@ impl Error {
             | Self::Protocol(_) => ErrorKind::Network,
             Self::AuthFailed(_) => ErrorKind::Auth,
             Self::Command { .. } | Self::Incomplete(_) => ErrorKind::Refused,
-            Self::InvalidServerName(_) | Self::Unsupported(_) | Self::InvalidInput(_) => {
-                ErrorKind::Invalid
-            }
+            Self::InvalidServerName(_)
+            | Self::NotTls { .. }
+            | Self::Unsupported(_)
+            | Self::InvalidInput(_) => ErrorKind::Invalid,
         }
     }
 
@@ -134,6 +143,7 @@ impl From<crate::net::NetError> for Error {
             NetError::Io(e) => Self::Io(e),
             NetError::Timeout => Self::Timeout,
             NetError::InvalidServerName(name) => Self::InvalidServerName(name),
+            NetError::NotTls { port } => Self::NotTls { port },
         }
     }
 }

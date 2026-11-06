@@ -6,13 +6,9 @@ mod actions;
 mod assets;
 mod composer;
 mod fonts;
-mod format;
-mod html;
-mod instance;
 mod layout;
 mod login_form;
 mod mailbox;
-mod memory;
 mod new_mail;
 mod reader;
 mod resident;
@@ -25,7 +21,9 @@ mod tray;
 
 use std::path::PathBuf;
 
+// Shared with the other frontends; kept at these paths, where the rest of the GUI finds them.
 use catmail_core::{BodyPrefetch, Config, DEFAULT_GC_INTERVAL, MailClient, SyncSchedule};
+use catmail_frontend::{format, html, instance};
 use clap::Parser;
 use gpui_kit::component::{ActiveTheme as _, StyledExt as _, v_flex};
 use gpui_kit::{
@@ -59,7 +57,9 @@ struct Cli {
 fn main() {
     // The GPU adapter GPUI chose too: rendering on the CPU makes the app slow and big, and
     // only info says why it passed the GPU over.
-    catmail_core::logging::init("catmail_gui=info,catmail_render=info,gpui_wgpu=info");
+    catmail_core::logging::init(
+        "catmail_gui=info,catmail_frontend=info,catmail_render=info,gpui_wgpu=info",
+    );
     let cli = Cli::parse();
     let config_dir = cli
         .config_dir
@@ -84,7 +84,8 @@ fn main() {
                 // Opening the engine says why.
                 Ok(Claim::Unavailable) => (Ok(MailClient::builder(config)), None),
                 Err(e) => {
-                    eprintln!("catmail-gui: {e:#}");
+                    // Through anyhow, for the cause after the error.
+                    eprintln!("catmail-gui: {:#}", anyhow::Error::from(e));
                     std::process::exit(1);
                 }
             }

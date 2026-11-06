@@ -199,7 +199,10 @@ fn archive_is_for_what_is_in_the_inbox(cx: &mut TestAppContext) {
     let can_archive = |cx: &mut TestAppContext| {
         cx.read(|cx| {
             let mailbox = mailbox.read(cx);
-            mailbox.can_archive(&mailbox.selected_message(cx).unwrap())
+            let message = mailbox.selected_message(cx).unwrap();
+            mailbox
+                .account_folders(message.account_id)
+                .is_some_and(|f| f.can_archive(&message))
         })
     };
     assert!(can_archive(cx));

@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, bail};
 use catmail_core::{Config, DataDirLock};
 use futures_channel::mpsc;
 use serde::{Deserialize, Serialize};
@@ -91,6 +90,15 @@ struct Reply {
     error: Option<String>,
 }
 
+/// Why a launch couldn't hand its request to the running app.
+#[derive(Debug, thiserror::Error)]
+pub enum HandError {
+    #[error("the running catmail didn't answer")]
+    NoAnswer(#[source] io::Error),
+    #[error("the running catmail refused: {0}")]
+    Refused(String),
+}
+
 /// Requests from later launches, in the order they came.
 pub type Requests = mpsc::UnboundedReceiver<Request>;
 
@@ -111,12 +119,16 @@ pub enum Claim {
 
 /// Makes this launch the app for the data directory, or hands `request` to the one that
 /// is. Fails if that one doesn't take the request.
-pub fn claim(config: &Config, request: &Request) -> anyhow::Result<Claim> {
+pub fn claim(config: &Config, request: &Request) -> Result<Claim, HandError> {
     claim_in(config, runtime_dir().as_deref(), request)
 }
 
 /// [`claim`], with `runtime` for sockets too long for the data directory.
-fn claim_in(config: &Config, runtime: Option<&Path>, request: &Request) -> anyhow::Result<Claim> {
+fn claim_in(
+    config: &Config,
+    runtime: Option<&Path>,
+    request: &Request,
+) -> Result<Claim, HandError> {
     let deadline = Instant::now() + STARTING;
     loop {
         match config.lock() {
@@ -189,7 +201,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 }
 
 /// Sends `request` to the app listening on `socket`; false if none does.
-fn hand(socket: &Path, request: &Request) -> anyhow::Result<bool> {
+fn hand(socket: &Path, request: &Request) -> Result<bool, HandError> {
     // Missing, or left by a run that ended: nobody to hand it to.
     let Ok(stream) = UnixStream::connect(socket) else {
         return Ok(false);
@@ -205,9 +217,9 @@ fn hand(socket: &Path, request: &Request) -> anyhow::Result<bool> {
         )?;
         Ok(serde_json::from_str(&read_line(&stream)?)?)
     };
-    let reply = ask().context("the running catmail didn't answer")?;
+    let reply = ask().map_err(HandError::NoAnswer)?;
     match reply.error {
-        Some(error) => bail!("the running catmail refused: {error}"),
+        Some(error) => Err(HandError::Refused(error)),
         None => Ok(true),
     }
 }

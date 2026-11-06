@@ -2,10 +2,9 @@
 //! (the list's toolbar), what the keys act on (those checked, or else the selected one)
 //! or a row's; writing, syncing and settings.
 
-use catmail_core::{
-    AccountId, DeleteMode, DeleteOutcome, Flags, FolderId, MessageId, MessageSummary, OpKind,
-    OpStatus, PendingOp,
-};
+use catmail_core::{AccountId, DeleteMode, Flags, FolderId, MessageId, MessageSummary};
+use catmail_frontend::commands::{self, Deletion, MessageCommand, what};
+use catmail_frontend::folders::AccountFolders;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{App, Context, Window};
@@ -13,14 +12,9 @@ use gpui_kit::{App, Context, Window};
 use crate::composer::{self, ComposeFrom};
 use crate::layout;
 
-use super::message_commands::{self, Applies, MessageCommand};
+use super::message_commands::Applies;
 use super::*;
 use crate::settings::dialog as settings_dialog;
-
-/// What a command does, for its failure: "Couldn't {what}".
-fn what(messages: usize, one: &'static str, many: &'static str) -> &'static str {
-    if messages == 1 { one } else { many }
-}
 
 /// Runs an engine call, and tells the user if it fails: "Couldn't {what}: …".
 pub(crate) fn report_failure<T: 'static>(
@@ -69,7 +63,8 @@ impl Mailbox {
             let refused = client.dismiss_settled(None).await.unwrap_or_default();
             this.update_in(cx, |this, window, cx| {
                 for op in &refused {
-                    window.push_notification(Notification::warning(refused_change(op)), cx);
+                    window
+                        .push_notification(Notification::warning(commands::refused_change(op)), cx);
                 }
                 if this.checking_refused.finish() {
                     this.report_refused_changes(window, cx);
@@ -120,9 +115,7 @@ impl Mailbox {
         I: IntoIterator<Item = &'a MessageSummary>,
         I::IntoIter: Clone,
     {
-        Applies::of(messages, |account| {
-            self.account(account).map(|entry| &entry.folders)
-        })
+        Applies::of(messages, |account| self.account_folders(account))
     }
 
     /// Runs `command` on the messages: from a key, a toolbar or a row.
@@ -170,20 +163,14 @@ impl Mailbox {
         if messages.is_empty() {
             return;
         }
-        let (add, remove) = if message_commands::common_flags(messages).contains(flag) {
-            (Flags::empty(), flag)
-        } else {
-            (flag, Flags::empty())
-        };
+        let (add, remove) = commands::toggled(messages, flag);
         let ids = messages.iter().map(|m| m.id).collect();
         self.set_flags(ids, add, remove, window, cx);
     }
 
-    /// Whether Archive does anything to `message`: its account has an Archive folder it
-    /// isn't in, or on Gmail it is in INBOX and All Mail.
-    pub(crate) fn can_archive(&self, message: &MessageSummary) -> bool {
-        self.account(message.account_id)
-            .is_some_and(|a| a.folders.can_archive(message))
+    /// An account's folders, which the commands go by.
+    pub(crate) fn account_folders(&self, account: AccountId) -> Option<&AccountFolders> {
+        self.account(account).map(|entry| &entry.folders)
     }
 
     /// Archives those of the messages Archive does anything to.
@@ -193,11 +180,7 @@ impl Mailbox {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let ids: Vec<_> = messages
-            .iter()
-            .filter(|m| self.can_archive(m))
-            .map(|m| m.id)
-            .collect();
+        let ids = commands::archivable(messages, |account| self.account_folders(account));
         if ids.is_empty() {
             return;
         }
@@ -220,11 +203,7 @@ impl Mailbox {
         let Some((account, shown_in)) = self.move_source(messages, cx) else {
             return;
         };
-        let ids: Vec<_> = messages
-            .iter()
-            .filter(|m| account.folders.can_move(m.folder_id, shown_in, to))
-            .map(|m| m.id)
-            .collect();
+        let ids = commands::movable(&account.folders, messages, shown_in, to);
         if ids.is_empty() {
             return;
         }
@@ -242,7 +221,7 @@ impl Mailbox {
         messages: &[MessageSummary],
         cx: &gpui_kit::App,
     ) -> Option<(&AccountEntry, Option<FolderId>)> {
-        let account = self.account(message_commands::one_account(messages)?)?;
+        let account = self.account(commands::one_account(messages)?)?;
         Some((account, self.shown_in(&messages[0], cx)))
     }
 
@@ -310,41 +289,15 @@ impl Mailbox {
     /// ([`DeleteOutcome`]): one change. A message deleted for good can't be brought back,
     /// so that asks first, once for them all.
     fn delete(&mut self, messages: &[MessageSummary], window: &mut Window, cx: &mut Context<Self>) {
-        let (mut ids, mut for_good) = (Vec::new(), Vec::new());
-        // For good without Trash only where the user is asked about it: if an account's
-        // Trash went away since its folders were listed here, the engine refuses.
-        let mut mode = DeleteMode::ToTrash;
-        for message in messages {
-            let Some(account) = self.account(message.account_id) else {
-                continue;
-            };
-            ids.push(message.id);
-            let outcome = account.folders.delete_outcome(message.folder_id);
-            if outcome == DeleteOutcome::NoTrash {
-                mode = DeleteMode::ByOutcome;
-            }
-            if outcome.is_permanent() {
-                for_good.push(message);
-            }
-        }
-        let (title, description) = match for_good[..] {
-            [] => return self.delete_now(ids, mode, window, cx),
-            [message] => (
-                format!(
-                    "Delete “{}” for good?",
-                    crate::format::subject(message.subject.as_deref())
-                ),
-                "It is removed from the server and can't be brought back.",
-            ),
-            _ => (
-                format!("Delete {} messages for good?", for_good.len()),
-                "They are removed from the server and can't be brought back.",
-            ),
+        let Deletion { ids, mode, confirm } =
+            commands::deletion(messages, |account| self.account_folders(account));
+        let Some(confirm) = confirm else {
+            return self.delete_now(ids, mode, window, cx);
         };
         let this = cx.entity().downgrade();
         layout::confirm_danger(
-            title,
-            description,
+            confirm.title,
+            confirm.description,
             "Delete",
             window,
             cx,
@@ -384,17 +337,7 @@ impl Mailbox {
         let Some((account, shown_in)) = self.move_source(&messages, cx) else {
             return;
         };
-        let folders = account
-            .folders
-            .paths()
-            .into_iter()
-            .filter(|(folder, _)| {
-                messages
-                    .iter()
-                    .any(|m| account.folders.can_move(m.folder_id, shown_in, folder.id))
-            })
-            .map(|(folder, path)| (folder.id, path))
-            .collect();
+        let folders = commands::move_targets(&account.folders, &messages, shown_in);
         let this = cx.entity().downgrade();
         folder_picker::open(folders, window, cx, move |folder, window, cx| {
             this.update(cx, |this, cx| this.move_to(&messages, folder, window, cx))
@@ -473,11 +416,7 @@ impl Mailbox {
         let Some(message) = self.selected_message(cx).filter(|m| m.id == id) else {
             return;
         };
-        let (add, remove) = if message.labels.contains(&label) {
-            (Vec::new(), vec![label])
-        } else {
-            (vec![label], Vec::new())
-        };
+        let (add, remove) = commands::label_change(&message, label);
         // Off the label it is listed in, it leaves the list: on to the next one.
         self.change(
             vec![id],
@@ -502,11 +441,8 @@ impl Mailbox {
             self.compose_once_loaded = true;
             return;
         }
-        let account = self
-            .current_account()
-            .or_else(|| self.accounts.as_deref()?.first())
-            .map(|a| a.account.id);
-        if let Some(account) = account {
+        let accounts = self.accounts.as_deref().unwrap_or_default();
+        if let Some(account) = composer::new_message_account(self.place, accounts) {
             self.compose(ComposeFrom::New(account), window, cx);
         }
     }
@@ -532,28 +468,5 @@ impl Mailbox {
 
     pub(crate) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         settings_dialog::open(self.client.clone(), cx.entity().downgrade(), window, cx);
-    }
-}
-
-/// What to tell the user about a change the server didn't make.
-fn refused_change(op: &PendingOp) -> String {
-    let subject = op.subject.as_deref().unwrap_or("a message");
-    match op.status {
-        OpStatus::Conflict => {
-            format!("A change to “{subject}” was dropped: the folder changed on the server first.")
-        }
-        _ => {
-            let verb = match op.kind {
-                OpKind::Flags { .. } | OpKind::Label { .. } => "change",
-                OpKind::Move { .. } => "move",
-                OpKind::Delete => "delete",
-            };
-            format!(
-                "The server didn't {verb} “{subject}”, so it is as it was. {}",
-                op.last_error.as_deref().unwrap_or_default()
-            )
-            .trim_end()
-            .to_owned()
-        }
     }
 }

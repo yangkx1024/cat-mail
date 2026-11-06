@@ -11,7 +11,6 @@ use gpui_kit::{
 };
 
 use crate::assets::Hero;
-use crate::format;
 use crate::layout;
 use crate::theme::colors::ThemeColors as _;
 
@@ -126,14 +125,7 @@ impl Reader {
                 .border_t_1()
                 .border_color(theme.border)
                 .children(open.attachments.iter().map(|attachment| {
-                    let name = attachment
-                        .filename
-                        .clone()
-                        .unwrap_or_else(|| "Unnamed attachment".into());
-                    let label = match attachment.size {
-                        Some(size) => format!("{name} · {}", format::size(size.into())),
-                        None => name.clone(),
-                    };
+                    let (name, label) = reader::attachment_label(attachment);
                     let icon = if attachment.mime_type.starts_with("image/") {
                         Hero::Photo
                     } else {

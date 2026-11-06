@@ -3,6 +3,7 @@
 //! the toolbar of commands on it, a draft (`draft.rs`) or an outbox entry (`outbox.rs`).
 
 use catmail_core::MessageSummary;
+use catmail_frontend::mailbox;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::Input;
@@ -17,7 +18,6 @@ use gpui_kit::{
 };
 
 use super::Mailbox;
-use super::folders;
 use super::message_commands::{self, Applies, Buttons};
 use super::message_list::{self, Check, Row, Source};
 use crate::actions::{self, *};
@@ -65,21 +65,9 @@ impl Mailbox {
 
     fn render_list_column(&self, reading: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let source = self.messages.read(cx).delegate().source().cloned();
-        let title: SharedString = match &source {
-            Some(Source::Search(text)) => format!("Results for “{text}”").into(),
-            _ => self.place_label().unwrap_or_default().into(),
-        };
-        let note = match &source {
-            Some(Source::Inboxes | Source::Folder(_)) => {
-                let unread = folders::unread(self.shown_folders());
-                (unread > 0).then(|| format!("{unread} unread"))
-            }
-            Some(Source::Outbox(account)) => self
-                .account(*account)
-                .filter(|a| !a.status.send.is_empty() || a.status.sync.is_some())
-                .map(|_| "Sending resumes when the connection is back.".to_owned()),
-            _ => None,
-        };
+        let accounts = self.accounts.as_deref().unwrap_or_default();
+        let title = SharedString::from(mailbox::list_title(source.as_ref(), self.place, accounts));
+        let note = mailbox::list_note(source.as_ref(), self.place, accounts);
         let list = self.messages.read(cx).delegate();
         // What the commands on the messages checked do, while there are some.
         let checked = list

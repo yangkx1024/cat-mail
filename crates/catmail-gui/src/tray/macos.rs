@@ -14,7 +14,9 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSObject, NSSize, NSString, ns_string};
 
-use super::{Chosen, MENU, MENU_BAR_SIZES, Pixmaps};
+use catmail_frontend::tray::MENU;
+
+use super::{Chosen, MENU_BAR_SIZES, Pixmaps};
 
 /// The image's size in points: the menu bar's icons are 18 points high, and the first
 /// size is for 1x displays.
@@ -104,13 +106,15 @@ impl Item {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
-        let badge = super::badge(unread);
+        let badge = catmail_frontend::tray::badge(unread);
         if let Some(button) = self.status.button(mtm) {
             if let Some(image) = icon.as_ref().and_then(template) {
                 button.setImage(Some(&image));
             }
             button.setTitle(&NSString::from_str(badge.as_deref().unwrap_or_default()));
-            button.setToolTip(Some(&NSString::from_str(&super::tool_tip(unread))));
+            button.setToolTip(Some(&NSString::from_str(
+                &catmail_frontend::tray::tool_tip(unread),
+            )));
         }
         // Kept while the app has no Dock icon, for when it has one again.
         let badge = badge.map(|badge| NSString::from_str(&badge));

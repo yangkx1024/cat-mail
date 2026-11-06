@@ -3,7 +3,9 @@
 
 use std::rc::Rc;
 
-use catmail_core::{AccountId, ErrorKind, FolderRole};
+use catmail_core::{AccountId, FolderRole};
+use catmail_frontend::folders::FolderIcon;
+use catmail_frontend::mailbox::{self, ALL_MAIL_HIDDEN};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::collapsible;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu};
@@ -25,10 +27,6 @@ use super::{AccountEntry, Mailbox, Place};
 use crate::actions::{self, NewMessage, OpenSettings};
 use crate::assets::Hero;
 use crate::layout;
-
-/// Why a Gmail account's labels are folders, and how to have labels again.
-const ALL_MAIL_HIDDEN: &str = "Labels show as folders because All Mail is hidden from \
-    IMAP. Turn on “Show in IMAP” for it in Gmail’s settings.";
 
 /// The element id of an account's address, which folds and unfolds its places.
 pub(super) fn account_heading(account: AccountId) -> ElementId {
@@ -71,7 +69,7 @@ impl Mailbox {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let accounts = self.accounts.as_deref().unwrap_or_default();
-        let note = self.connection_note();
+        let note = mailbox::connection_note(accounts).map(SharedString::from);
         let compose = Button::new("new-message")
             .primary()
             .rounded_full()
@@ -120,11 +118,11 @@ impl Mailbox {
                     .children(note),
             );
         let inboxes = Place::Inboxes.is_in(accounts).then(|| {
-            let unread = folders::unread(self.inboxes()) as usize;
+            let unread = folders::unread(Place::Inboxes.folders(accounts)) as usize;
             let mut item = self.place_item(
                 Place::Inboxes,
                 "All Inboxes",
-                Hero::InboxStack,
+                FolderIcon::Inboxes,
                 unread,
                 false,
                 cx,
@@ -195,34 +193,6 @@ impl Mailbox {
         cx.notify();
     }
 
-    /// One line on what is wrong with the connection, if anything: the first account the
-    /// engine can't get through to (each of its addresses that can't send). A sync going
-    /// on is told by the Sync button alone.
-    fn connection_note(&self) -> Option<SharedString> {
-        self.accounts.as_deref()?.iter().find_map(|entry| {
-            let email = &entry.account.email;
-            let status = &entry.status;
-            if let Some(problem) = &status.sync {
-                return Some(
-                    match problem.error.kind {
-                        ErrorKind::Auth => format!("Can't sign in to {email}"),
-                        ErrorKind::Network => format!("Can't reach {email}"),
-                        ErrorKind::OverLimit => {
-                            format!("{email} is over the server's download limit for now")
-                        }
-                        _ => format!("Can't sync {email}"),
-                    }
-                    .into(),
-                );
-            }
-            // Every address whose server is out of reach.
-            (!status.send.is_empty()).then(|| {
-                let from: Vec<_> = status.send.iter().map(|p| p.email.as_str()).collect();
-                format!("Can't send from {}", from.join(", ")).into()
-            })
-        })
-    }
-
     /// Folders with a role first, the drafts and outbox after the inbox, then the rest
     /// of the folders; not the labels, which have a section of their own.
     fn account_items(&self, entry: &AccountEntry, cx: &mut Context<Self>) -> Vec<SidebarMenuItem> {
@@ -248,11 +218,11 @@ impl Mailbox {
             cx,
         ));
         if !entry.outbox.is_empty() {
-            let attention = entry.outbox.iter().any(|e| e.status.needs_user());
+            let attention = entry.outbox_needs_user();
             items.push(self.place_item(
                 Place::Outbox(account),
                 "Outbox",
-                Hero::ArrowUpTray,
+                FolderIcon::Outbox,
                 entry.outbox.len(),
                 attention,
                 cx,
@@ -273,14 +243,15 @@ impl Mailbox {
         &self,
         place: Place,
         label: &'static str,
-        icon: Hero,
+        icon: FolderIcon,
         n: usize,
         attention: bool,
         cx: &mut Context<Self>,
     ) -> SidebarMenuItem {
-        let mut item = layout::sidebar_row(label, icon, self.place == Some(place), cx).on_click(
-            cx.listener(move |this, _, window, cx| this.select_place(Some(place), window, cx)),
-        );
+        let mut item = layout::sidebar_row(label, icon.into(), self.place == Some(place), cx)
+            .on_click(
+                cx.listener(move |this, _, window, cx| this.select_place(Some(place), window, cx)),
+            );
         if attention {
             item = item.accessibility_label(format!("{label}, {n}, needs attention"));
         }
@@ -299,7 +270,7 @@ impl Mailbox {
         let place = node.selectable().map(|folder| Place::Folder(folder.id));
         let mut item = layout::sidebar_row(
             node.label.clone(),
-            folders::icon(node.folder.as_ref()),
+            folders::icon(node.folder.as_ref()).into(),
             place.is_some() && self.place == place,
             cx,
         )

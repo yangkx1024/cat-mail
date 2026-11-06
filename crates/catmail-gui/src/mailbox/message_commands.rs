@@ -4,90 +4,36 @@
 
 use std::rc::Rc;
 
-use catmail_core::{AccountId, Flags, MessageSummary};
+use catmail_core::Flags;
+pub use catmail_frontend::commands::{Applies, MessageCommand};
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::{Action, App, ElementId, Window};
 
-use super::folders::AccountFolders;
 use crate::actions::{self, *};
 use crate::assets::Hero;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MessageCommand {
-    Archive,
-    Delete,
-    Move,
-    ToggleRead,
-    ToggleFlag,
-}
-
-/// The icon and name of the command that marks a message read or unread, by its flags.
-fn read_toggle(flags: Flags) -> (Hero, &'static str) {
-    if flags.contains(Flags::SEEN) {
-        (Hero::Envelope, "Mark as unread")
-    } else {
-        (Hero::EnvelopeOpen, "Mark as read")
+/// A command's icon, for messages that all have `flags`: a toggle shows what it does.
+fn icon(command: MessageCommand, flags: Flags) -> Hero {
+    match command {
+        MessageCommand::Archive => Hero::ArchiveBox,
+        MessageCommand::Delete => Hero::Trash,
+        MessageCommand::Move => Hero::FolderArrowRight,
+        MessageCommand::ToggleRead if flags.contains(Flags::SEEN) => Hero::Envelope,
+        MessageCommand::ToggleRead => Hero::EnvelopeOpen,
+        MessageCommand::ToggleFlag if flags.contains(Flags::FLAGGED) => Hero::FlagSolid,
+        MessageCommand::ToggleFlag => Hero::Flag,
     }
 }
 
-/// The icon and name of the command that flags a message or removes its flag.
-fn flag_toggle(flags: Flags) -> (Hero, &'static str) {
-    if flags.contains(Flags::FLAGGED) {
-        (Hero::FlagSolid, "Remove flag")
-    } else {
-        (Hero::Flag, "Flag")
-    }
-}
-
-/// The flags the messages all have: what a toggle takes off them all; one any of them
-/// lacks it sets on all.
-pub(super) fn common_flags<'a>(messages: impl IntoIterator<Item = &'a MessageSummary>) -> Flags {
-    messages
-        .into_iter()
-        .map(|m| m.flags)
-        .reduce(Flags::intersection)
-        .unwrap_or_default()
-}
-
-/// The account the messages are all of: "Move to" lists its folders. None if there are
-/// none, or they are of more than one.
-pub(super) fn one_account<'a>(
-    messages: impl IntoIterator<Item = &'a MessageSummary>,
-) -> Option<AccountId> {
-    let mut messages = messages.into_iter();
-    let account = messages.next()?.account_id;
-    messages.all(|m| m.account_id == account).then_some(account)
-}
-
-/// What the commands do to some messages, which their buttons show.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Applies {
-    /// The flags they all have: the toggles take those off.
-    flags: Flags,
-    /// Archive changes one of them at least.
-    archive: bool,
-    /// They are of one account, whose folders "Move to" lists.
-    move_to: bool,
-}
-
-impl Applies {
-    /// `folders` gives an account's folders.
-    pub fn of<'a, I>(messages: I, folders: impl Fn(AccountId) -> Option<&'a AccountFolders>) -> Self
-    where
-        I: IntoIterator<Item = &'a MessageSummary>,
-        I::IntoIter: Clone,
-    {
-        let messages = messages.into_iter();
-        let archive = messages
-            .clone()
-            .any(|m| folders(m.account_id).is_some_and(|f| f.can_archive(m)));
-        let move_to = one_account(messages.clone()).is_some_and(|a| folders(a).is_some());
-        Self {
-            flags: common_flags(messages),
-            archive,
-            move_to,
-        }
+/// A command's element name and its action, whose key the tooltip says, in its context.
+fn naming(command: MessageCommand) -> (&'static str, &'static dyn Action, &'static str) {
+    match command {
+        MessageCommand::Archive => ("archive", &Archive, actions::MESSAGE_LIST),
+        MessageCommand::Delete => ("delete", &Delete, actions::MESSAGE_LIST),
+        MessageCommand::Move => ("move", &MoveToFolder, actions::MAILBOX),
+        MessageCommand::ToggleRead => ("toggle-read", &ToggleRead, actions::MAILBOX),
+        MessageCommand::ToggleFlag => ("toggle-flag", &ToggleFlag, actions::MAILBOX),
     }
 }
 
@@ -107,65 +53,23 @@ pub fn buttons(
     on_command: impl Fn(&MessageCommand, &mut Window, &mut App) + 'static,
 ) -> Buttons {
     let on_command = Rc::new(on_command);
-    let (read_icon, read_label) = read_toggle(applies.flags);
-    let (flag_icon, flag_label) = flag_toggle(applies.flags);
-    let (mailbox, list) = (actions::MAILBOX, actions::MESSAGE_LIST);
-    let button = |command, name, icon, label, action: &dyn Action, context| {
+    let flags = applies.flags();
+    let button = |command: MessageCommand| {
         let on_command = on_command.clone();
-        let button = Button::new(id(name)).ghost().icon(icon);
+        let (name, action, context) = naming(command);
+        let label = command.label(flags);
+        let button = Button::new(id(name)).ghost().icon(icon(command, flags));
         let button = if keys {
             button.tooltip_with_action(label, action, Some(context))
         } else {
             button.tooltip(label)
         };
-        button.on_click(move |_, window, cx| on_command(&command, window, cx))
+        button
+            .disabled(!applies.enables(command))
+            .on_click(move |_, window, cx| on_command(&command, window, cx))
     };
     Buttons {
-        place: vec![
-            button(
-                MessageCommand::Archive,
-                "archive",
-                Hero::ArchiveBox,
-                "Archive",
-                &Archive,
-                list,
-            )
-            .disabled(!applies.archive),
-            button(
-                MessageCommand::Delete,
-                "delete",
-                Hero::Trash,
-                "Delete",
-                &Delete,
-                list,
-            ),
-            button(
-                MessageCommand::Move,
-                "move",
-                Hero::FolderArrowRight,
-                "Move to",
-                &MoveToFolder,
-                mailbox,
-            )
-            .disabled(!applies.move_to),
-        ],
-        marks: vec![
-            button(
-                MessageCommand::ToggleRead,
-                "toggle-read",
-                read_icon,
-                read_label,
-                &ToggleRead,
-                mailbox,
-            ),
-            button(
-                MessageCommand::ToggleFlag,
-                "toggle-flag",
-                flag_icon,
-                flag_label,
-                &ToggleFlag,
-                mailbox,
-            ),
-        ],
+        place: MessageCommand::PLACE.into_iter().map(button).collect(),
+        marks: MessageCommand::MARKS.into_iter().map(button).collect(),
     }
 }

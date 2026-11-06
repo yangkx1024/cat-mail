@@ -1,6 +1,7 @@
 //! The tray icon, there with or without a window: the app's icon with the number of
 //! unread messages in the INBOXes, a click to bring the main window back, and a menu to
-//! write a message, sync or quit. Lives with the app, like the engine it shows. See
+//! write a message, sync or quit. Lives with the app, like the engine it shows. What it
+//! shows, and on Linux the item itself, are `catmail_frontend::tray`'s. See
 //! docs/architecture/background.md.
 #![cfg_attr(
     not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")),
@@ -11,16 +12,41 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use catmail_core::RecvError;
+use catmail_frontend::tray::Chosen;
+pub use catmail_frontend::tray::Command;
 use gpui_kit::{App, AppContext as _, Global, RenderImage, SvgRenderer, Task, WindowAppearance};
 
 use crate::mailbox::{Coalesce, Refresh};
 use crate::resident::{QuitReason, Resident};
 use crate::theme::appearance::{self, Themes};
 
-/// Where the desktop may have a tray to register with.
+/// Where the desktop may have a tray to register with: the StatusNotifierItem.
 #[cfg(all(any(target_os = "linux", target_os = "freebsd"), not(test)))]
-#[path = "linux.rs"]
-mod platform;
+mod platform {
+    use catmail_frontend::tray::{Pixmap, linux};
+    use futures_channel::mpsc::UnboundedSender;
+
+    use super::{Chosen, Pixmaps};
+
+    #[derive(Clone)]
+    pub struct Item(linux::Item);
+
+    impl Item {
+        pub async fn spawn(chosen: UnboundedSender<Chosen>) -> Option<Self> {
+            linux::Item::spawn(crate::APP_NAME, chosen).await.map(Self)
+        }
+
+        pub async fn show(&self, icon: Option<Pixmaps>, unread: u32) {
+            let icon = icon.map(|pixmaps| {
+                let pixmaps = pixmaps.into_iter();
+                pixmaps
+                    .map(|(size, bgra)| Pixmap::from_bgra(size, &bgra))
+                    .collect()
+            });
+            self.0.show(icon, unread).await;
+        }
+    }
+}
 
 #[cfg(all(target_os = "macos", not(test)))]
 #[path = "macos.rs"]
@@ -68,7 +94,7 @@ mod platform {
         }
 
         pub async fn show(&self, icon: Option<Pixmaps>, unread: u32) {
-            let shown = (super::tool_tip(unread), icon.is_some());
+            let shown = (catmail_frontend::tray::tool_tip(unread), icon.is_some());
             self.0.lock().unwrap().push(shown);
         }
     }
@@ -76,14 +102,18 @@ mod platform {
 
 use platform::Item;
 
-/// The count drawn on the app's icon.
+/// The app's icon, which the count is drawn on.
 #[cfg(not(all(target_os = "macos", not(test))))]
-mod badged;
+const LIGHT: &str = include_str!("../../assets/app-icon/catmail-light.svg");
+#[cfg(not(all(target_os = "macos", not(test))))]
+const DARK: &str = include_str!("../../assets/app-icon/catmail-dark.svg");
 
 /// What the icon looks like, as an SVG, and the sizes it is drawn at (square).
 #[cfg(not(all(target_os = "macos", not(test))))]
 fn icon(dark: bool, unread: u32) -> (Cow<'static, str>, &'static [u32]) {
-    (badged::svg(dark, unread), &badged::SIZES)
+    use catmail_frontend::tray::badged;
+    let icon = if dark { DARK } else { LIGHT };
+    (badged::svg(icon, unread), &badged::SIZES)
 }
 
 /// A template image, which macOS tints to suit the menu bar; the count is text beside it.
@@ -98,29 +128,6 @@ const MENU_BAR_TEMPLATE: &str = include_str!("../../assets/app-icon/catmail-menu
 /// 18 points high, as the menu bar's icons are, for 1x and 2x displays.
 #[cfg(any(target_os = "macos", test))]
 const MENU_BAR_SIZES: [u32; 2] = [18, 36];
-
-/// What the tray asks the app for. Clicking the icon is `Open` where that doesn't open
-/// the menu.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Command {
-    Open,
-    Compose,
-    Sync,
-    Quit,
-}
-
-/// The menu, top to bottom; `None` is a separator.
-const MENU: [Option<(&str, Command)>; 5] = [
-    Some(("Open catmail", Command::Open)),
-    Some(("New message", Command::Compose)),
-    Some(("Sync now", Command::Sync)),
-    None,
-    Some(("Quit", Command::Quit)),
-];
-
-/// A command, with the token that lets a window take focus on Wayland if the host gave
-/// one.
-type Chosen = (Command, Option<String>);
 
 /// The icon at each of its sizes, square, in straight-alpha BGRA.
 type Pixmaps = Vec<(u32, Vec<u8>)>;
@@ -292,23 +299,6 @@ impl Tray {
     }
 }
 
-fn tool_tip(unread: u32) -> String {
-    match unread {
-        0 => "No unread mail".into(),
-        1 => "1 unread message".into(),
-        n => format!("{n} unread messages"),
-    }
-}
-
-/// What the badge says, if there is one.
-fn badge(unread: u32) -> Option<String> {
-    match unread {
-        0 => None,
-        1..=99 => Some(unread.to_string()),
-        _ => Some("99+".into()),
-    }
-}
-
 /// `svg` at each of `sizes`.
 fn pixmaps(renderer: &SvgRenderer, svg: &str, sizes: &[u32]) -> Pixmaps {
     let svg = match renderer.parse_svg(svg.as_bytes()) {
@@ -389,33 +379,14 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_has_each_command_once() {
-        let commands: Vec<_> = MENU.iter().flatten().map(|(_, command)| *command).collect();
-        let all = [
-            Command::Open,
-            Command::Compose,
-            Command::Sync,
-            Command::Quit,
-        ];
-        assert_eq!(commands, all);
-    }
-
-    #[test]
-    fn the_badge_counts_up_to_99() {
-        assert_eq!(badge(0), None);
-        assert_eq!(badge(7).as_deref(), Some("7"));
-        assert_eq!(badge(99).as_deref(), Some("99"));
-        assert_eq!(badge(100).as_deref(), Some("99+"));
-    }
-
-    #[test]
     fn the_icon_is_drawn_at_every_size_with_its_badge() {
         let renderer = SvgRenderer::new(Arc::new(crate::assets::Assets));
         for dark in [false, true] {
-            let plain = pixmaps(&renderer, &badged::svg(dark, 0), &badged::SIZES);
-            let badged = pixmaps(&renderer, &badged::svg(dark, 12), &badged::SIZES);
-            let sizes: Vec<_> = badged.iter().map(|(size, _)| *size).collect();
-            assert_eq!(sizes, badged::SIZES);
+            let (plain, sizes) = icon(dark, 0);
+            let plain = pixmaps(&renderer, &plain, sizes);
+            let badged = pixmaps(&renderer, &icon(dark, 12).0, sizes);
+            let drawn: Vec<_> = badged.iter().map(|(size, _)| *size).collect();
+            assert_eq!(drawn, sizes);
             for ((size, plain), (_, badged)) in plain.iter().zip(&badged) {
                 assert_eq!(plain.len(), (size * size * 4) as usize);
                 assert_ne!(plain, badged, "{size}");

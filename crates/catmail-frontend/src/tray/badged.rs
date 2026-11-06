@@ -6,13 +6,9 @@ use std::borrow::Cow;
 /// The sizes it is drawn at; the host picks what fits its panel.
 pub const SIZES: [u32; 3] = [22, 32, 64];
 
-const LIGHT: &str = include_str!("../../assets/app-icon/catmail-light.svg");
-const DARK: &str = include_str!("../../assets/app-icon/catmail-dark.svg");
-
-/// The app's icon with the badge on top, as one SVG; the icon keeps its own canvas
-/// (512 × 512) as a nested `<svg>`.
-pub fn svg(dark: bool, unread: u32) -> Cow<'static, str> {
-    let icon = if dark { DARK } else { LIGHT };
+/// `icon` (the app's, a 512 × 512 SVG) with the badge for `unread` on top, as one SVG;
+/// the icon keeps its own canvas as a nested `<svg>`.
+pub fn svg(icon: &'static str, unread: u32) -> Cow<'static, str> {
     let Some(text) = super::badge(unread) else {
         return Cow::Borrowed(icon);
     };
@@ -28,4 +24,26 @@ pub fn svg(dark: bool, unread: u32) -> Cow<'static, str> {
 </svg>"##,
         cx = x + width / 2,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ICON: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512"/>"#;
+
+    #[test]
+    fn no_unread_mail_is_the_icon_alone() {
+        assert_eq!(svg(ICON, 0), ICON);
+    }
+
+    #[test]
+    fn the_badge_widens_with_the_count() {
+        let one = svg(ICON, 7);
+        assert!(one.contains(ICON) && one.contains(">7</text>"), "{one}");
+        assert!(one.contains(r#"width="260""#), "{one}");
+        let many = svg(ICON, 120);
+        assert!(many.contains(">99+</text>"), "{many}");
+        assert!(many.contains(r#"width="480""#), "{many}");
+    }
 }

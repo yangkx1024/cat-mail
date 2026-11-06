@@ -4,10 +4,12 @@
 //! the tray or another launch asks for the window again. See
 //! docs/architecture/background.md.
 
-use std::fmt;
 use std::time::Duration;
 
 use catmail_core::MailClient;
+use catmail_frontend::mailbox::Destination;
+pub use catmail_frontend::resident::QuitReason;
+use catmail_frontend::resident::{AfterLastWindow, after_last_window};
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Context, Entity, FutureExt as _, Global,
     GraphicalEnvironment, SHUTDOWN_TIMEOUT, SharedString, Subscription, Task, WeakEntity, Window,
@@ -16,7 +18,7 @@ use gpui_kit::{
 
 use crate::MainWindow;
 use crate::instance::{Display, Requests};
-use crate::mailbox::{Destination, Mailbox};
+use crate::mailbox::Mailbox;
 use crate::new_mail::Notifier;
 use crate::settings::Preferences;
 use crate::tray::Tray;
@@ -28,37 +30,6 @@ pub enum Engine {
     Failed(SharedString),
     /// The app is quitting and has shut it down.
     Closed,
-}
-
-/// Why the app quits. Said in the log, where an app that was killed or crashed just stops.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum QuitReason {
-    /// The Quit action (Ctrl Q).
-    Shortcut,
-    Tray,
-    /// SIGINT, SIGTERM or SIGHUP; on Windows, a console event.
-    Signal,
-    LastWindowClosed,
-    /// The data directory couldn't be opened, and no window is left to say so.
-    EngineFailed,
-    /// The main window couldn't be opened at launch.
-    NoWindow,
-    /// Not by the app: the platform's own Quit (macOS's app menu or Dock).
-    Platform,
-}
-
-impl fmt::Display for QuitReason {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Shortcut => "shortcut",
-            Self::Tray => "tray",
-            Self::Signal => "signal",
-            Self::LastWindowClosed => "last_window_closed",
-            Self::EngineFailed => "engine_failed",
-            Self::NoWindow => "no_window",
-            Self::Platform => "platform",
-        })
-    }
 }
 
 /// Quits now, for `reason`, which [`Resident::shut_down`] logs.
@@ -77,24 +48,6 @@ enum Windowing {
     /// display a launch asked for the window on meanwhile, shown once it is done.
     Switching(Option<Display>),
     Headless,
-}
-
-/// What the app does once its last window has closed.
-#[derive(Debug, PartialEq, Eq)]
-enum AfterLastWindow {
-    Quit,
-    /// Keep running without the display: on macOS, as an accessory, without a Dock icon
-    /// or menu bar; the status item stays.
-    GoHeadless,
-}
-
-fn after_last_window(keep_running: bool, engine: &Engine, quitting: bool) -> AfterLastWindow {
-    match engine {
-        _ if quitting || !keep_running => AfterLastWindow::Quit,
-        // Nothing would run.
-        Engine::Failed(_) | Engine::Closed => AfterLastWindow::Quit,
-        Engine::Opening | Engine::Open(_) => AfterLastWindow::GoHeadless,
-    }
 }
 
 /// What to show once reconnecting to `display` is done: the window there; or if that
@@ -468,16 +421,22 @@ impl Resident {
         let keep_running = Preferences::get(cx).keep_running;
         let resident = cx.global::<Self>();
         let quitting = resident.quitting;
-        match after_last_window(keep_running, &resident.engine, quitting.is_some()) {
+        // One still opening is there to run.
+        let usable = matches!(resident.engine, Engine::Opening | Engine::Open(_));
+        match after_last_window(keep_running, usable, quitting.is_some()) {
             AfterLastWindow::Quit => exit(quitting.unwrap_or(QuitReason::LastWindowClosed), cx),
-            AfterLastWindow::GoHeadless => {
+            // Without the display: on macOS, as an accessory, without a Dock icon or menu
+            // bar; the status item stays.
+            AfterLastWindow::KeepRunning => {
                 Self::switch(WindowingRequest::Headless, cx, |switched, pending, cx| {
                     cx.global_mut::<Self>().windowing = match switched {
                         Ok(()) => {
                             tracing::info!("no window open; display connection dropped");
                             // Nothing of the windows is left: what they used is free.
-                            cx.background_spawn(async { crate::memory::release_freed() })
-                                .detach();
+                            cx.background_spawn(async {
+                                catmail_frontend::memory::release_freed()
+                            })
+                            .detach();
                             Windowing::Headless
                         }
                         Err(e) => {
@@ -547,9 +506,9 @@ mod tests {
     use crate::composer::ComposeFrom;
     use crate::instance::Request;
     use crate::mailbox::Place;
-    use crate::new_mail::GATHER;
     use crate::test_support::{TestMail, wait_until};
     use crate::tray::Command;
+    use catmail_frontend::new_mail::GATHER;
 
     /// The main window's mailbox, once the engine is in it and it has loaded.
     fn main_mailbox(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Mailbox>) {
@@ -874,31 +833,5 @@ mod tests {
             Some(display("second"))
         );
         assert_eq!(after_reconnecting(false, display("first"), None), None);
-    }
-
-    #[test]
-    fn closing_the_last_window_keeps_the_engine_running_if_asked() {
-        let open = Engine::Opening;
-        assert_eq!(
-            after_last_window(true, &open, false),
-            AfterLastWindow::GoHeadless
-        );
-        assert_eq!(
-            after_last_window(false, &open, false),
-            AfterLastWindow::Quit
-        );
-    }
-
-    #[test]
-    fn quitting_or_a_failed_engine_ends_the_app_with_its_last_window() {
-        assert_eq!(
-            after_last_window(true, &Engine::Opening, true),
-            AfterLastWindow::Quit
-        );
-        let failed = Engine::Failed("in use".into());
-        assert_eq!(
-            after_last_window(true, &failed, false),
-            AfterLastWindow::Quit
-        );
     }
 }

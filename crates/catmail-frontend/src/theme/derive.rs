@@ -1,4 +1,4 @@
-//! A complete GPUI Kit theme from a terminal palette.
+//! A complete theme, by GPUI Kit's color keys, from a terminal palette.
 //!
 //! A color scheme gives a background, a foreground and 16 ANSI colors; a UI needs about
 //! a hundred colors. Every one of them is derived here, so nothing falls back to GPUI
@@ -12,15 +12,15 @@
 //!
 //! Mixing is in gamma-encoded sRGB, like CSS `color-mix(in srgb, …)`.
 
-use gpui_kit::component::{ThemeConfig, ThemeSet};
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 
 use super::palette::{Rgb, TerminalPalette};
+use super::{ThemeConfig, ThemeMode, ThemeSet};
 
 /// The colors the derivation starts from, before they are spread over GPUI Kit's keys.
 /// Kept separate so tests can check the contrast guarantees.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Roles {
+pub(super) struct Roles {
     pub dark: bool,
     pub background: Rgb,
     pub foreground: Rgb,
@@ -142,14 +142,18 @@ fn over(bg: Rgb, target: Rgb, alpha: f64) -> String {
     translucent(color, alpha)
 }
 
-/// The GPUI Kit theme for the palette, with every color key set.
+/// The theme for the palette, with every one of GPUI Kit's color keys set.
 pub fn theme_config(palette: &TerminalPalette) -> ThemeConfig {
-    let value = json!({
-        "name": palette.name,
-        "mode": if palette.is_dark() { "dark" } else { "light" },
-        "colors": colors(palette),
-    });
-    serde_json::from_value(value).expect("the derived theme matches GPUI Kit's schema")
+    ThemeConfig {
+        name: palette.name.clone(),
+        mode: if palette.is_dark() {
+            ThemeMode::Dark
+        } else {
+            ThemeMode::Light
+        },
+        colors: colors(palette),
+        rest: Map::new(),
+    }
 }
 
 fn colors(palette: &TerminalPalette) -> Map<String, Value> {
@@ -335,12 +339,14 @@ fn colors(palette: &TerminalPalette) -> Map<String, Value> {
     colors
 }
 
-/// A theme file for the themes folder: pretty JSON of a GPUI Kit `ThemeSet`, without
+/// A theme file for the themes folder: pretty JSON of a GPUI Kit theme set, without
 /// the unset (null) fields, so it reads well when edited by hand.
 pub fn theme_set_json(configs: &[ThemeConfig]) -> String {
-    let mut set = ThemeSet::default();
-    set.name = configs.first().map(|c| c.name.clone()).unwrap_or_default();
-    set.themes = configs.to_vec();
+    let set = ThemeSet {
+        name: configs.first().map(|c| c.name.clone()).unwrap_or_default(),
+        themes: configs.to_vec(),
+        rest: Map::new(),
+    };
     let mut value = serde_json::to_value(&set).expect("a theme set serializes");
     strip_nulls(&mut value);
     serde_json::to_string_pretty(&value).expect("JSON serializes")
@@ -398,8 +404,8 @@ mod tests {
     fn mode_follows_the_palette() {
         for palette in palettes() {
             let config = theme_config(&palette);
-            assert_eq!(config.mode.is_dark(), palette.is_dark(), "{}", palette.name);
-            assert_eq!(config.name.as_ref(), palette.name);
+            assert_eq!(config.is_dark(), palette.is_dark(), "{}", palette.name);
+            assert_eq!(config.name, palette.name);
         }
         let mocha = palettes()
             .into_iter()
@@ -409,42 +415,12 @@ mod tests {
     }
 
     #[test]
-    fn every_color_key_is_set() {
-        for palette in palettes() {
-            let config = theme_config(&palette);
-            let colors = serde_json::to_value(&config.colors).unwrap();
-            let colors = colors.as_object().unwrap();
-            let unset: Vec<_> = colors
-                .iter()
-                .filter(|(_, v)| v.is_null())
-                .map(|(k, _)| k.as_str())
-                .collect();
-            assert!(unset.is_empty(), "{}: {unset:?}", palette.name);
-            // And nothing we set was dropped as an unknown key.
-            assert_eq!(
-                colors.len(),
-                super::colors(&palette).len(),
-                "{}",
-                palette.name
-            );
-        }
-    }
-
-    #[test]
-    fn theme_files_round_trip_through_gpui_kit() {
+    fn theme_files_round_trip() {
         let configs: Vec<_> = palettes().iter().map(theme_config).collect();
         let json = theme_set_json(&configs);
         assert!(!json.contains("null"));
         let set: ThemeSet = serde_json::from_str(&json).unwrap();
-        assert_eq!(set.themes.len(), configs.len());
-        for (read, written) in set.themes.iter().zip(&configs) {
-            assert_eq!(read.name, written.name);
-            assert_eq!(read.mode, written.mode);
-            assert_eq!(
-                serde_json::to_value(&read.colors).unwrap(),
-                serde_json::to_value(&written.colors).unwrap()
-            );
-        }
+        assert_eq!(set.themes, configs);
     }
 
     #[test]
