@@ -390,6 +390,9 @@ fn web_view(view_ref: ElementRef) -> impl IntoElement {
     // only when it changes, not on each change of what else the pane shows.
     let page = computed(move || reading.with(|r| r.page.clone()));
     web_view_html(move || page.with(|p| p.to_string()), None)
+        // Someone else's HTML: whatever website data it leaves goes with the web view,
+        // and none of it is written to the data directory.
+        .incognito(true)
         .java_script_enabled(false)
         .scrollable(false)
         .injected_java_script(html::BRIDGE.to_owned())

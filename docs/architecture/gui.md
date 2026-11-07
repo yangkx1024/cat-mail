@@ -258,6 +258,10 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
   `src` 规范化后等于 `url` 的 `<img>`（第一次收到图片时按 URL 建一张表，之后只查表：已填上的 `src` 是几百 KB 的
   `data:` URL，每张都重新解析一遍是 O(n²)）。只有 `<img>` 有图：清洗不保留 `background` 属性和样式里的 `url()`（见
   [正文](bodies.md)），表格布局邮件的 `<td background="…">` 背景图不显示。
+- **网站数据**：web view 设成 `incognito`，页面留下的网站数据（cookie、存储、缓存）只在内存里，随 web view
+  一起没了，不写进数据目录：正文是别人写的 HTML，页面的 JS 虽然关了，也不该和应用共用一份持久的网站数据。
+  Linux 上是这个 web view 自己的临时 `NetworkSession`（不再建 `$XDG_DATA_HOME/<app id>/webkit`），macOS 上是
+  不持久的 `WKWebsiteDataStore`。它随 web view 结束，不影响关窗后网络进程退出（longbridge/nsh#1051）。
 - **页面带编号**（`<meta name="catmail-page">`），消息都附上它，读信区只认最后建的那个：空白页、上一封邮件的
   页面晚到的消息不会被当成新页面的。
 - **高度**：web view 不滚动，高度跟着页面报的走；标题、头部和正文由外层一起滚。页面自己的 overflow 隐藏
