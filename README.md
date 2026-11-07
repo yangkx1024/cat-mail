@@ -129,8 +129,8 @@ cargo fmt --all
 cargo deny check
 ```
 
-不用 Nix 时，装好 `rust-toolchain.toml` 指定的 stable 工具链，Linux 上再装 GTK 4 和 WebKitGTK 6.0 的开发包
-（包名见 `.github/workflows/ci.yml`）。
+不用 Nix 时，装好 `rust-toolchain.toml` 指定的 stable 工具链，Linux 上再装 GTK 4、WebKitGTK 6.0 和 GStreamer
+的开发包（包名见 `.github/workflows/ci.yml`）。
 
 对真实的 Dovecot 和 mailpit 测试（Linux，不能以 root 运行）：
 

@@ -57,6 +57,7 @@ src/
   buttons.rs       图标按钮（工具栏、行两种尺寸）、主按钮、文字按钮、分隔、提示
   chrome.rs        窗口顶部：macOS 的一体式主窗口、写信窗口的标题栏、各栏顶部的工具栏
   theme.rs         主题映射到 nsh（shadcn）的 token
+  clock.rs         系统的 12 / 24 小时设置
   toast.rs         窗口里的通知；report 记日志并提示出错
   icons.rs         Heroicons
   tray/            托盘：mod.rs 计数、把图标画成像素（何时数、何时画由 frontend 的 TrayModel 定），linux.rs、
@@ -80,7 +81,7 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
   （`applicationShouldHandleReopen`）。`applicationShouldTerminate` 先答取消，等写信窗口存完再退出循环。
   菜单栏、停主循环、外观映射抄了 nsh `run_app` 的私有实现。
 - **输入框失焦**：在输入框外按下时把焦点从输入框拿走，像浏览器那样，否则作用于邮件的单键（E、X、L）到不了
-  视图。nsh 把焦点留在输入框里，两个后端各用一个事件 monitor 补上（应由 nsh 提供，longbridge/nsh#248）。
+  视图。nsh 把焦点留在输入框里，两个后端各用一个事件 monitor 补上（应由 nsh 提供，#248）。
 - **单实例**：GTK 应用是 `NON_UNIQUE`，不经 D-Bus 判断唯一；一个数据目录一个应用由引擎的锁和 `gui.sock`
   决定（见[后台运行](background.md#单实例与唤起)）。
 - **app id** 是 `net.yangkx.catmail`（`shell::APP_ID`）：Wayland 的 app id、X11 的 `WM_CLASS`、`.desktop`
@@ -178,6 +179,9 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
   更早的"October 12, 2025"，没有日期的归到 No date；行里只显示时间。只合并相邻的同一天，顺序不是按日期时
   一天会出现两次标题。⚠️ 标题是列表里的普通行，不吸顶：nsh 列表的 sticky header 只能在建表时给一次，而分组
   随数据变。
+- **时间**按系统的 12 / 24 小时设置显示（nsh 的 `locale_settings()`，`clock::clock()` 映射成
+  `catmail_frontend::format::Clock`），列表、读信区的头部和发件箱都是；读它会订阅，改了设置立刻跟着变。头部
+  因此只存时间戳，显示时再格式化。命令行和回复里引用的那行"On … wrote"照旧用 24 小时。
 - **两种行形**：读信区关着时列表独占窗口宽度，一行排开：发件人（草稿是收件人）一栏、主题、标记、时间；打开后
   改成两行：发件人和时间在上，主题在下，最多两行，颜色较淡（字重只表示未读）。nsh 列表按行量高度，两行时主题
   按实际行数占高。切换时把刚打开（或刚关上）的那封滚到中间，免得它从指针下跑开。
@@ -258,6 +262,10 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
   `src` 规范化后等于 `url` 的 `<img>`（第一次收到图片时按 URL 建一张表，之后只查表：已填上的 `src` 是几百 KB 的
   `data:` URL，每张都重新解析一遍是 O(n²)）。只有 `<img>` 有图：清洗不保留 `background` 属性和样式里的 `url()`（见
   [正文](bodies.md)），表格布局邮件的 `<td background="…">` 背景图不显示。
+- **网站数据**：web view 设成 `incognito`，页面留下的网站数据（cookie、存储、缓存）只在内存里，随 web view
+  一起没了，不写进数据目录：正文是别人写的 HTML，页面的 JS 虽然关了，也不该和应用共用一份持久的网站数据。
+  Linux 上是这个 web view 自己的临时 `NetworkSession`（不再建 `$XDG_DATA_HOME/<app id>/webkit`），macOS 上是
+  不持久的 `WKWebsiteDataStore`。它随 web view 结束，不影响关窗后网络进程退出（longbridge/nsh#1051）。
 - **页面带编号**（`<meta name="catmail-page">`），消息都附上它，读信区只认最后建的那个：空白页、上一封邮件的
   页面晚到的消息不会被当成新页面的。
 - **高度**：web view 不滚动，高度跟着页面报的走；标题、头部和正文由外层一起滚。页面自己的 overflow 隐藏
@@ -393,16 +401,14 @@ From 是条目实际发出用的身份（`OutboxEntry::identity`），叫法和�
 
 ## 已知问题与上游
 
-- **常驻时的内存**：GTK 常驻时仍连着显示服务器；WebKit 的网络进程在最后一个 web view 关掉后还留着（约 41 MB
-  PSS），而它从不联网。原因在 nsh 一直持有 `NetworkSession`（longbridge/nsh#1051）。数字见
+- **常驻时的内存**：GTK 常驻时仍连着显示服务器。WebKit 的网络进程原来在最后一个 web view 关掉后还留着（约 41 MB
+  PSS），nsh 已改成随最后一个 web view 结束它（longbridge/nsh#1051），还要在 Linux 上确认。数字见
   [后台运行](background.md#引擎属于应用不属于窗口)。
-- **GTK 4.22 上 `gtk_widget_measure` 警告刷屏**：nsh 不 measure 就 allocate 子 widget（longbridge/nsh#1048，修复
-  longbridge/nsh#1049）。
 - **拖动分隔条**：三栏的宽度由应用自己记，用 nsh-base 的 `resize_handle`。⚠️ 它的 `h_resizable` 快速来回拖时会丢掉
   拖动结束，之后分隔线错位；所以每次拖动从开始时的宽度算起，丢了结束也不会累积。
 - **cargo deny 还不过**：nsh 带进来的许可证（webpki-roots 的 CDLA-Permissive-2.0，target-lexicon、winx 的
   LLVM-exception）和 nsh-updater 用的 zip 8 的 advisory（要 zip 9，longbridge/nsh#1050），见 ROADMAP。
-- macOS 的 `title_bar()` 高度（longbridge/nsh#1068）、输入框失焦（longbridge/nsh#248），见上文[外壳](#外壳)。
+- macOS 的 `title_bar()` 高度（longbridge/nsh#1068）、输入框失焦（#248），见上文[外壳](#外壳)。
 - **图片多的邮件载入慢**：nsh 的 web view 没有自定义 URL scheme，图片只能以 `data:` URL 写进脚本发给页面，见上文
   [图片](#图片)。现在一次发一张，换邮件不卡，但总时间跟图片大小成正比。已提 longbridge/nsh#1136；支持后改成由
   WebKit 经 scheme handler 自己读图片，要改的地方见 ROADMAP。

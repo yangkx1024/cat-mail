@@ -2,6 +2,7 @@
 //! view its body is shown in, and its attachments.
 
 use catmail_frontend::commands::MessageCommand;
+use catmail_frontend::format;
 use catmail_frontend::html::{self, FromPage, is_openable_link};
 use catmail_frontend::list as rows;
 use catmail_frontend::reader::{self, Header};
@@ -10,6 +11,7 @@ use nsh_core::element::ElementRef;
 use nsh_core::prelude::*;
 
 use crate::buttons::{Size, icon_button, separator};
+use crate::clock::clock;
 use crate::icons::{Icon, icon};
 use crate::mailbox::commands;
 use crate::mailbox::list::{self};
@@ -251,7 +253,11 @@ fn message() -> impl IntoElement {
                                 .text_color(muted),
                         )
                         .child(view().flex_1())
-                        .child(text(field(|h| h.date.clone())).text_xs().text_color(muted)),
+                        .child(
+                            text(field(|h| format::date(h.date, clock())))
+                                .text_xs()
+                                .text_color(muted),
+                        ),
                 )
                 .child(
                     view()
@@ -292,7 +298,7 @@ fn message() -> impl IntoElement {
             .rounded(px(10.0))
             .bg(move || theme().muted)
             .child(each(
-                move || header.with(|h| h.details.clone()),
+                move || header.with(|h| h.details(clock())),
                 |(name, _)| *name,
                 move |detail, _| {
                     view()
@@ -390,6 +396,9 @@ fn web_view(view_ref: ElementRef) -> impl IntoElement {
     // only when it changes, not on each change of what else the pane shows.
     let page = computed(move || reading.with(|r| r.page.clone()));
     web_view_html(move || page.with(|p| p.to_string()), None)
+        // Someone else's HTML: whatever website data it leaves goes with the web view,
+        // and none of it is written to the data directory.
+        .incognito(true)
         .java_script_enabled(false)
         .scrollable(false)
         .injected_java_script(html::BRIDGE.to_owned())

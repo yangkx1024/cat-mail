@@ -19,20 +19,21 @@ pub struct Header {
     pub sender_key: String,
     /// `To Bob, Carol · Cc Dan`, short names only.
     pub recipients: String,
-    pub date: String,
-    /// From, To, Cc, Reply-To and Date in full, those that are present, for "Details".
-    pub details: Vec<(&'static str, String)>,
+    /// When it was sent, if it says; shown on the user's clock, which can change while the
+    /// message is open.
+    pub date: Option<i64>,
+    /// From, To, Cc and Reply-To in full, those that are present.
+    addresses: Vec<(&'static str, String)>,
 }
 
 impl Header {
     pub fn of(message: &Message) -> Self {
         let summary = &message.summary;
-        let details = [
+        let addresses = [
             ("From", format::addresses(&summary.from)),
             ("To", format::addresses(&summary.to)),
             ("Cc", format::addresses(&summary.cc)),
             ("Reply-To", format::addresses(&message.reply_to)),
-            ("Date", format::date(summary.date)),
         ]
         .into_iter()
         .filter(|(_, value)| !value.is_empty())
@@ -50,9 +51,19 @@ impl Header {
             sender_email: from.filter(|a| a.name.is_some()).map(|a| a.email.clone()),
             sender_key: from.map(|a| a.email.clone()).unwrap_or_default(),
             recipients,
-            date: format::date(summary.date),
-            details,
+            date: summary.date,
+            addresses,
         }
+    }
+
+    /// What "Details" lists: the addresses in full, then the date, if there is one.
+    pub fn details(&self, clock: format::Clock) -> Vec<(&'static str, String)> {
+        let mut details = self.addresses.clone();
+        let date = format::date(self.date, clock);
+        if !date.is_empty() {
+            details.push(("Date", date));
+        }
+        details
     }
 }
 

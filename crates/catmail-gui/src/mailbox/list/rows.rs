@@ -8,6 +8,7 @@ use nsh_base::theme;
 use nsh_core::prelude::*;
 
 use crate::buttons::Size;
+use crate::clock::clock;
 use crate::icons::{Icon, icon};
 use crate::mailbox::commands;
 
@@ -134,7 +135,7 @@ fn message_row(item: Memo<Option<Line>>) -> impl IntoElement {
             .text_sm()
     };
     let time = move || {
-        text(field(|m| format::time(m.date)))
+        text(field(|m| format::time(m.date, clock())))
             .text_xs()
             .flex_shrink_0()
             .text_color(move || theme().muted_foreground)
@@ -145,7 +146,7 @@ fn message_row(item: Memo<Option<Line>>) -> impl IntoElement {
         .label(move || {
             SharedString::from(message.with(|m| {
                 m.as_ref()
-                    .map(|m| list::message_label(m, &label_names(m)))
+                    .map(|m| list::message_label(m, &label_names(m), clock()))
                     .unwrap_or_default()
             }))
         })
@@ -384,7 +385,7 @@ fn draft_row(item: Memo<Option<Line>>) -> impl IntoElement {
         .text_sm()
     };
     let time = move || {
-        text(field(|d| format::time(Some(d.updated_at))))
+        text(field(|d| format::time(Some(d.updated_at), clock())))
             .text_xs()
             .flex_shrink_0()
             .text_color(move || theme().muted_foreground)
@@ -471,7 +472,7 @@ fn outbox_row(item: Memo<Option<Line>>) -> impl IntoElement {
                         .text_color(move || theme().foreground),
                 )
                 .child(
-                    text(field(|e| format::time(Some(e.created_at))))
+                    text(field(|e| format::time(Some(e.created_at), clock())))
                         .text_xs()
                         .text_color(move || theme().muted_foreground),
                 ),
