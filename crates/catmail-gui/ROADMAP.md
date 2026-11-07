@@ -145,9 +145,9 @@
       还要起一次 bwrap 沙箱）。⚠️ 没选中邮件时藏在列表下面，不用 `invisible`：一阵没画的 web view 再画时，WebKit
       画好之前会先闪一帧黑。开窗后点开第一封，内容约 2 帧（约 33 ms）就出现，原来约 13 帧
 - [ ] 常驻时网络进程还留着（41 MB PSS），可它从来不联网（CSP 只放行 `data:`）。原因在 nsh：它按 app id 把
-      `NetworkSession` 一直存在表里，最后一个 web view 没了也不放。改成弱引用之后，WebKit 会结束网络进程（实验已
-      验证），PR 是 longbridge/nsh#1051。合并后升级 nsh 的 rev，再用真实账户确认关窗后网络进程退出，并测一下重新
-      开窗要多花多少时间
+      `NetworkSession` 一直存在表里，最后一个 web view 没了也不放。上游已改成弱引用（longbridge/nsh#1051），nsh
+      的 rev 已升级。还要在 Linux 上用真实账户确认关窗后网络进程退出，测一下重新开窗要多花多少时间，再更新
+      background.md 里的数字
 - [x] 快捷键：Sync（Ctrl+Shift+N、F5）、Ctrl+F 聚焦搜索框、写信窗口的 Escape 关闭和 Ctrl+Shift+A 加附件
 
 ## P10 平台与工程
@@ -155,12 +155,12 @@
 - [ ] 字体：Pango 自己做回退，要验证中文各字重、粗体是否正常
 - [ ] 测试：用 nsh-testing 无头驱动窗口（读信、写信、设置、文件夹）
 - [x] 在主 workspace 里：longbridge/nsh#966 在上游 main 修好（#1022），还没发版，先用 git 依赖钉在 main 的 commit 上
-      （根 `Cargo.toml`）
+      （根 `Cargo.toml`）。nsh 的 Linux 后端从此总是链接 GStreamer（声音），开发 shell 和 CI 都装了它的开发包
 - [ ] nsh 发版后换回 crates.io，并把仓库移出 `deny.toml` 的 `allow-git`
 - [ ] cargo deny：许可证（webpki-roots 的 CDLA-Permissive-2.0，target-lexicon、winx 的 LLVM-exception），nsh-updater
       用的 zip 8 有四个 advisory（RUSTSEC-2026-0367/0368/0369/0429，要 zip 9；报到上游 longbridge/nsh#1050）
-- [ ] GTK 4.22 上 `gtk_widget_measure` 警告刷屏：`NshView::size_allocate` 不 measure 就 allocate 子 widget，报到上游
-      longbridge/nsh#1048，修复 PR longbridge/nsh#1049
+- [x] GTK 4.22 上 `gtk_widget_measure` 警告刷屏：`NshView::size_allocate` 不 measure 就 allocate 子 widget，上游
+      longbridge/nsh#1048 已由 longbridge/nsh#1049 修好，nsh 的 rev 已升级（还要在 GTK 4.22 上看一眼警告没了）
 - [ ] 内存、滚动帧率、冷启动时间的基准
 - [ ] **Linux 的安装包**：AppImage 已从发布里撤下，Linux 上现在只发 CLI。要重新做（AppImage 或别的格式，如 Flatpak），
       主要是带上 WebKitGTK：它的辅助进程（WebKitWebProcess、WebKitNetworkProcess）的路径是编译进库里的，还用 bwrap

@@ -86,13 +86,15 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # What catmail-gui links against on Linux: nsh's GTK 4 backend and WebKitGTK. Its
-      # tests open no window, so no display is needed.
+      # What catmail-gui links against on Linux: nsh's GTK 4 backend, WebKitGTK, and
+      # GStreamer, which nsh's Linux backend always links for its sounds. Its tests open
+      # no window, so no display is needed.
       - name: Install GUI libraries
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgtk-4-dev libwebkitgtk-6.0-dev
+          sudo apt-get install -y --no-install-recommends libgtk-4-dev libwebkitgtk-6.0-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings

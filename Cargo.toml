@@ -58,13 +58,14 @@ mail-builder = { version = "1.0.0", default-features = false }
 mail-parser = { version = "0.11.9", features = ["full_encoding"] }
 mime_guess = "2.0.5"
 # Native Shell, catmail-gui's toolkit: GTK 4 on Linux and AppKit on macOS, bodies in web
-# views (WebKitGTK, WKWebView). Unreleased main, first for its handling of taffy's `calc`
-# (longbridge/nsh#966). Back to crates.io (and the repository out of `allow-git` in
-# deny.toml) once a release has what catmail-gui uses.
-nsh-core = { git = "https://github.com/longbridge/nsh", rev = "f8cfd1a650640bd4b2668201d364e08e3b0ab570" }
-nsh-base = { git = "https://github.com/longbridge/nsh", rev = "f8cfd1a650640bd4b2668201d364e08e3b0ab570", default-features = false }
-nsh-platform-linux = { git = "https://github.com/longbridge/nsh", rev = "f8cfd1a650640bd4b2668201d364e08e3b0ab570", default-features = false, features = ["webview"] }
-nsh-platform-macos = { git = "https://github.com/longbridge/nsh", rev = "f8cfd1a650640bd4b2668201d364e08e3b0ab570", default-features = false }
+# views (WebKitGTK, WKWebView). Unreleased main, for its handling of taffy's `calc`
+# (longbridge/nsh#966), GTK children measured before they are allocated (#1048) and
+# WebKit's network process ending with the last web view (#1051). Back to crates.io (and
+# the repository out of `allow-git` in deny.toml) once a release has what catmail-gui uses.
+nsh-core = { git = "https://github.com/longbridge/nsh", rev = "59091c889c89823190954b987c8d25df7b6cd0b3" }
+nsh-base = { git = "https://github.com/longbridge/nsh", rev = "59091c889c89823190954b987c8d25df7b6cd0b3", default-features = false }
+nsh-platform-linux = { git = "https://github.com/longbridge/nsh", rev = "59091c889c89823190954b987c8d25df7b6cd0b3", default-features = false, features = ["webview"] }
+nsh-platform-macos = { git = "https://github.com/longbridge/nsh", rev = "59091c889c89823190954b987c8d25df7b6cd0b3", default-features = false }
 # catmail-gui's AppKit shell: the main thread's futures on the main dispatch queue
 # (async-task), and the event monitor's block (the versions nsh's macOS platform uses).
 async-task = "4.7.1"

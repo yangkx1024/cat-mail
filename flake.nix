@@ -16,10 +16,13 @@
       devShells = forAllSystems (
         pkgs:
         let
-          # What catmail-gui links against: nsh's GTK 4 backend and the web views of bodies.
+          # What catmail-gui links against: nsh's GTK 4 backend and the web views of bodies,
+          # and GStreamer, which nsh's Linux backend always links for its sounds.
           guiLibs = with pkgs; [
             gtk4
             webkitgtk_6_0
+            gst_all_1.gstreamer
+            gst_all_1.gst-plugins-base
           ];
           # Link with mold: GNU ld turns a one-line change to catmail-gui into a slow
           # rebuild, mostly relinking debug info; mold is several times faster. Only in the
