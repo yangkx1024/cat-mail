@@ -2903,7 +2903,7 @@ dependencies = [
 [[package]]
 name = "nsh-base"
 version = "0.4.0"
-source = "git+https://github.com/longbridge/nsh?rev=59091c889c89823190954b987c8d25df7b6cd0b3#59091c889c89823190954b987c8d25df7b6cd0b3"
+source = "git+https://github.com/longbridge/nsh?rev=0a9fa7b1859d2e24bc7b829385b37692182f6dc3#0a9fa7b1859d2e24bc7b829385b37692182f6dc3"
 dependencies = [
  "chrono",
  "html5ever 0.27.0",
@@ -2922,7 +2922,7 @@ dependencies = [
 [[package]]
 name = "nsh-core"
 version = "0.4.0"
-source = "git+https://github.com/longbridge/nsh?rev=59091c889c89823190954b987c8d25df7b6cd0b3#59091c889c89823190954b987c8d25df7b6cd0b3"
+source = "git+https://github.com/longbridge/nsh?rev=0a9fa7b1859d2e24bc7b829385b37692182f6dc3#0a9fa7b1859d2e24bc7b829385b37692182f6dc3"
 dependencies = [
  "cap-std",
  "crc32fast",
@@ -2958,12 +2958,13 @@ dependencies = [
 [[package]]
 name = "nsh-engine"
 version = "0.4.0"
-source = "git+https://github.com/longbridge/nsh?rev=59091c889c89823190954b987c8d25df7b6cd0b3#59091c889c89823190954b987c8d25df7b6cd0b3"
+source = "git+https://github.com/longbridge/nsh?rev=0a9fa7b1859d2e24bc7b829385b37692182f6dc3#0a9fa7b1859d2e24bc7b829385b37692182f6dc3"
 dependencies = [
  "crossbeam-channel",
  "libc",
  "log",
  "nsh-core",
+ "nsh-updater",
  "rustc-hash",
  "serde_json",
  "tokio",
@@ -2974,7 +2975,7 @@ dependencies = [
 [[package]]
 name = "nsh-macros"
 version = "0.4.0"
-source = "git+https://github.com/longbridge/nsh?rev=59091c889c89823190954b987c8d25df7b6cd0b3#59091c889c89823190954b987c8d25df7b6cd0b3"
+source = "git+https://github.com/longbridge/nsh?rev=0a9fa7b1859d2e24bc7b829385b37692182f6dc3#0a9fa7b1859d2e24bc7b829385b37692182f6dc3"
 dependencies = [
  "imagesize 0.15.0",
  "proc-macro2",
@@ -2987,7 +2988,7 @@ dependencies = [
 [[package]]
 name = "nsh-platform-apple"
 version = "0.4.0"
-source = "git+https://github.com/longbridge/nsh?rev=59091c889c89823190954b987c8d25df7b6cd0b3#59091c889c89823190954b987c8d25df7b6cd0b3"
+source = "git+https://github.com/longbridge/nsh?rev=0a9fa7b1859d2e24bc7b829385b37692182f6dc3#0a9fa7b1859d2e24bc7b829385b37692182f6dc3"
 dependencies = [
  "block2",
  "dispatch2",
@@ -3004,7 +3005,7 @@ dependencies = [
 [[package]]
 name = "nsh-platform-linux"
 version = "0.4.0"
-source = "git+https://github.com/longbridge/nsh?rev=59091c889c89823190954b987c8d25df7b6cd0b3#59091c889c89823190954b987c8d25df7b6cd0b3"
+source = "git+https://github.com/longbridge/nsh?rev=0a9fa7b1859d2e24bc7b829385b37692182f6dc3#0a9fa7b1859d2e24bc7b829385b37692182f6dc3"
 dependencies = [
  "crossbeam-channel",
  "gstreamer",
@@ -3027,7 +3028,7 @@ dependencies = [
 [[package]]
 name = "nsh-platform-macos"
 version = "0.4.0"
-source = "git+https://github.com/longbridge/nsh?rev=59091c889c89823190954b987c8d25df7b6cd0b3#59091c889c89823190954b987c8d25df7b6cd0b3"
+source = "git+https://github.com/longbridge/nsh?rev=0a9fa7b1859d2e24bc7b829385b37692182f6dc3#0a9fa7b1859d2e24bc7b829385b37692182f6dc3"
 dependencies = [
  "block2",
  "crossbeam-channel",
@@ -3054,7 +3055,7 @@ dependencies = [
 [[package]]
 name = "nsh-updater"
 version = "0.4.0"
-source = "git+https://github.com/longbridge/nsh?rev=59091c889c89823190954b987c8d25df7b6cd0b3#59091c889c89823190954b987c8d25df7b6cd0b3"
+source = "git+https://github.com/longbridge/nsh?rev=0a9fa7b1859d2e24bc7b829385b37692182f6dc3#0a9fa7b1859d2e24bc7b829385b37692182f6dc3"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",

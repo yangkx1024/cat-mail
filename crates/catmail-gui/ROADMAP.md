@@ -174,9 +174,9 @@
       走窗口的关闭询问），点 Dock 图标唤回主窗口；信号用 `ctrlc`。快捷键提示用 nsh 的 `key_label`
 - [x] macOS 状态栏图标（frontend 的 `tray::macos`）：计数、绘制与 Linux 共用（`tray/mod.rs`），模板图用 resvg 画一次，
       未读数写在图标旁和 Dock 角标上
-- [x] macOS 窗口外框（`chrome.rs`，nsh 的 `set_title_bar(Hidden)` 和 `window_drag`）：主窗口一体式，红绿灯在侧栏
-      左上角、各栏顶部那一行里（52 pt，AppKit unified 工具栏的高度：nsh 的 `title_bar()` 在 macOS 27 上报 66 pt，
-      只用它判断有没有按钮；报到上游 longbridge/nsh#1068），这一行按下拖动窗口。写信窗口保留标题栏，但是应用自己
+- [x] macOS 窗口外框（`chrome.rs`，nsh 的 `TitleBarStyle::Hidden` 和 `window_drag`）：主窗口一体式，红绿灯在侧栏
+      左上角、各栏顶部那一行里（52 pt，AppKit unified 工具栏给按钮的那一行高；nsh 居中红绿灯，高度从
+      `title_bar()` 读，longbridge/nsh#1068 已修），这一行按下拖动窗口。写信窗口保留标题栏，但是应用自己
       画的
 - [x] macOS 磁盘映像打包这个 `catmail-gui`（`packaging/macos/build-dmg.sh`）：菜单栏显示应用名、Dock 有图标。
       `cargo run` 起的没有 bundle，仍显示可执行文件名
