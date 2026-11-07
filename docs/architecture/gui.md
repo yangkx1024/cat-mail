@@ -91,12 +91,11 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 
 `chrome.rs`。macOS 上主窗口没有系统标题栏：它只写着窗口名，占一行又不提供什么。Linux 上仍用系统的标题栏。
 
-- **主窗口是一体式**（像 Mail.app，nsh 的 `set_title_bar(Hidden)`）：内容一直到窗口顶部，红绿灯在侧栏左上角。
-  顶部一行就是红绿灯所在的行（52 pt，AppKit unified 工具栏的高度）：右栏的工具栏和中栏的同步、搜索一行都是
+- **主窗口是一体式**（像 Mail.app，nsh 的 `TitleBarStyle::Hidden`，经 `current_window().set`）：内容一直到窗口
+  顶部，红绿灯在侧栏左上角。顶部一行就是红绿灯所在的行（向 nsh 要 52 pt，AppKit unified 工具栏给按钮的那一行高，
+  nsh 把红绿灯居中在里面，`title_bar().top` 报的就是它）：右栏的工具栏和中栏的同步、搜索一行都是
   这个高度、互相对齐，侧栏顶部空出这一行。这一行按下拖动窗口（`window_drag`）。全屏时红绿灯隐藏，这一行回到
   平常的 48 pt。登录页、打不开引擎的页顶部空出这一行（`chrome::page`）。
-- nsh 的 `title_bar()` 在 macOS 27 上报 66 pt，比按钮所在的行高（longbridge/nsh#1068），所以只用它判断有没有
-  红绿灯，高度用常量。
 - **写信窗口保留标题栏**，但是应用自己画的：侧栏的颜色，标题（信的 Subject）居中。系统的标题栏配不上导入
   主题的颜色。设置是主窗口里的对话框，没有自己的窗口。
 - 窗口标题仍然设置（窗口菜单、Mission Control、辅助功能读它），只是不显示。
@@ -408,7 +407,7 @@ From 是条目实际发出用的身份（`OutboxEntry::identity`），叫法和�
   拖动结束，之后分隔线错位；所以每次拖动从开始时的宽度算起，丢了结束也不会累积。
 - **cargo deny 还不过**：nsh 带进来的许可证（webpki-roots 的 CDLA-Permissive-2.0，target-lexicon、winx 的
   LLVM-exception）和 nsh-updater 用的 zip 8 的 advisory（要 zip 9，longbridge/nsh#1050），见 ROADMAP。
-- macOS 的 `title_bar()` 高度（longbridge/nsh#1068）、输入框失焦（#248），见上文[外壳](#外壳)。
+- 输入框失焦（#248），见上文[外壳](#外壳)。
 - **图片多的邮件载入慢**：nsh 的 web view 没有自定义 URL scheme，图片只能以 `data:` URL 写进脚本发给页面，见上文
   [图片](#图片)。现在一次发一张，换邮件不卡，但总时间跟图片大小成正比。已提 longbridge/nsh#1136；支持后改成由
   WebKit 经 scheme handler 自己读图片，要改的地方见 ROADMAP。

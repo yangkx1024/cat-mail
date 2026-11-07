@@ -10,7 +10,6 @@ use catmail_frontend::composer::{Field, Finish, Lifecycle, Opening, senders, win
 use catmail_frontend::format;
 use futures_util::StreamExt as _;
 use nsh_base::theme;
-use nsh_core::element::desktop::set_title;
 use nsh_core::element::{Owner, input};
 use nsh_core::prelude::*;
 
@@ -78,7 +77,7 @@ pub fn Composer() -> impl IntoElement {
     spawn(follow_identities(draft.id));
     // The window is named after the subject.
     let title = computed(move || window_title(&global::<Typed>().with(|t| t.subject.clone())));
-    effect(move || set_title(title.get()));
+    chrome::follow_title(title);
     // Ctrl+W is the window's, which asks the view to close.
     on_key("mod+enter", |_| send());
     on_key("escape", |_| close_requested());

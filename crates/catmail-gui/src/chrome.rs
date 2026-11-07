@@ -5,28 +5,50 @@
 //! over every window.
 
 use nsh_base::theme;
-use nsh_core::desktop::TitleBarStyle;
-use nsh_core::element::desktop::{set_title_bar, title_bar};
+use nsh_core::desktop::{TitleBarOptions, TitleBarStyle, WindowAttributes};
+use nsh_core::element::desktop::{current_window, title_bar};
 use nsh_core::prelude::*;
 
 /// How tall the bars at the top of the panes are where nothing else decides it.
 const BAR_HEIGHT: f32 = 48.0;
 
-/// How tall the row of the window's buttons is on macOS: AppKit's unified toolbar's,
-/// which [`unified`] asks for and the buttons are centered in. nsh's [`title_bar`] says
-/// more than that on macOS 27 (the view around the buttons is taller than their row,
-/// longbridge/nsh#1068), so only whether there is one is read from it.
+/// How tall the main window's row of the window's buttons is asked to be on macOS: the
+/// row AppKit's unified toolbar gives them, as in Mail.app.
 const WINDOW_BUTTONS_ROW: f32 = 52.0;
 
 /// How tall the composer's title bar is asked to be: GPUI Kit's.
 const TITLE_BAR_HEIGHT: f32 = 34.0;
 
 /// The main window has no title bar on macOS: its top bars are the row of the window's
-/// buttons, which AppKit centers in it. In the view's root, once.
+/// buttons, which nsh centers in it. In the view's root, once.
 pub fn unified() {
+    hide_title_bar(WINDOW_BUTTONS_ROW);
+}
+
+/// On macOS, takes the system's title bar off the window being rendered for one of the
+/// app's, `height` tall, with the window's buttons centered in it. Elsewhere the system
+/// draws the title bar.
+fn hide_title_bar(height: f32) {
     if cfg!(target_os = "macos") {
-        set_title_bar(TitleBarStyle::Hidden, Some(Points(BAR_HEIGHT)));
+        let mut bar = TitleBarOptions::default();
+        bar.style = TitleBarStyle::Hidden;
+        bar.height = Some(Points(height));
+        let mut attributes = WindowAttributes::default();
+        attributes.title_bar = Some(bar);
+        current_window().set(attributes);
     }
+}
+
+/// Follows `title` with the title of the window being rendered (the window menu, Mission
+/// Control and accessibility read it, also with the title bar hidden). In the view's root,
+/// once.
+pub fn follow_title(title: Memo<String>) {
+    let window = current_window();
+    effect(move || {
+        let mut attributes = WindowAttributes::default();
+        attributes.title = Some(title.get());
+        window.set(attributes);
+    });
 }
 
 /// How tall the bars at the top of the panes are, the toolbars' and the list's search
@@ -34,7 +56,7 @@ pub fn unified() {
 /// in. Follows it (full screen hides the buttons).
 pub fn bar_height() -> f32 {
     if has_window_buttons() {
-        WINDOW_BUTTONS_ROW
+        title_bar().top.0
     } else {
         BAR_HEIGHT
     }
@@ -80,9 +102,7 @@ pub fn page(content: impl IntoElement) -> View {
 /// window, as the system's would be. Nothing elsewhere: the system draws it. In the
 /// view's root, once.
 pub fn title_bar_of(title: Memo<String>) -> impl IntoElement {
-    if cfg!(target_os = "macos") {
-        set_title_bar(TitleBarStyle::Hidden, Some(Points(TITLE_BAR_HEIGHT)));
-    }
+    hide_title_bar(TITLE_BAR_HEIGHT);
     when(has_window_buttons, move || {
         // As much room on the right as the buttons take on the left: the title is in the
         // middle.
