@@ -15,8 +15,11 @@ longbridge/nsh#1068：macOS 上 `set_title_bar(Hidden, 48 pt)` 时 nsh 装上 `U
 
 - nsh 升到 main（`0a9fa7b`），而不是只到 #1196 的 `e12c6f8`：和以前一样跟 main，#1196 依赖的每个窗口的
   `WindowRef`（#1137）也在里面。
-- 主窗口直接向 nsh 要 52 pt（之前要 48 pt、靠 `Unified` 工具栏得到 52 pt 的按钮行），外观不变；各栏顶部的高度
+- 主窗口直接向 nsh 要 52 pt（之前要 48 pt、靠 `Unified` 工具栏得到 52 pt 的按钮行），行高不变；各栏顶部的高度
   改从 `title_bar().top` 读，常量只剩下要的高度。
+- 没有工具栏后，AppKit 把红绿灯放在离左边约 8.5 pt 处，比侧栏内容（Compose，12 pt）靠左。主窗口用 nsh 的
+  `controls_offset` 把关闭按钮放在 (12, 19)：和侧栏对齐，14 pt 高的按钮在 52 pt 的行里居中。写信窗口不对齐什么，
+  用 nsh 居中的默认位置。
 - 写信窗口仍要 34 pt。之前 `UnifiedCompact` 工具栏最少 40 pt，现在真是 34 pt，和 GPUI Kit 的标题栏一样高。
 - 两种窗口的圆角都变成普通标题栏窗口的（不再有工具栏）。
 

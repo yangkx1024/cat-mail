@@ -16,23 +16,38 @@ const BAR_HEIGHT: f32 = 48.0;
 /// row AppKit's unified toolbar gives them, as in Mail.app.
 const WINDOW_BUTTONS_ROW: f32 = 52.0;
 
+/// How far the main window's close button is from the window's left edge on macOS: as
+/// far as the sidebar's content (its 12-pt inset), so the buttons line up with Compose.
+/// AppKit's own place, for a window with no toolbar, is closer to the edge.
+const WINDOW_BUTTONS_LEFT: f32 = 12.0;
+
+/// How tall the window's buttons are on macOS, to center them in their row.
+const WINDOW_BUTTON_SIZE: f32 = 14.0;
+
 /// How tall the composer's title bar is asked to be: GPUI Kit's.
 const TITLE_BAR_HEIGHT: f32 = 34.0;
 
 /// The main window has no title bar on macOS: its top bars are the row of the window's
-/// buttons, which nsh centers in it. In the view's root, once.
+/// buttons, which sit in its middle, lined up with the sidebar. In the view's root, once.
 pub fn unified() {
-    hide_title_bar(WINDOW_BUTTONS_ROW);
+    hide_title_bar(
+        WINDOW_BUTTONS_ROW,
+        Some(Point {
+            x: Points(WINDOW_BUTTONS_LEFT),
+            y: Points((WINDOW_BUTTONS_ROW - WINDOW_BUTTON_SIZE) / 2.0),
+        }),
+    );
 }
 
 /// On macOS, takes the system's title bar off the window being rendered for one of the
-/// app's, `height` tall, with the window's buttons centered in it. Elsewhere the system
-/// draws the title bar.
-fn hide_title_bar(height: f32) {
+/// app's, `height` tall, with the window's buttons centered in it, or with the close
+/// button's top left corner at `buttons`. Elsewhere the system draws the title bar.
+fn hide_title_bar(height: f32, buttons: Option<Point<Points>>) {
     if cfg!(target_os = "macos") {
         let mut bar = TitleBarOptions::default();
         bar.style = TitleBarStyle::Hidden;
         bar.height = Some(Points(height));
+        bar.controls_offset = buttons;
         let mut attributes = WindowAttributes::default();
         attributes.title_bar = Some(bar);
         current_window().set(attributes);
@@ -102,7 +117,7 @@ pub fn page(content: impl IntoElement) -> View {
 /// window, as the system's would be. Nothing elsewhere: the system draws it. In the
 /// view's root, once.
 pub fn title_bar_of(title: Memo<String>) -> impl IntoElement {
-    hide_title_bar(TITLE_BAR_HEIGHT);
+    hide_title_bar(TITLE_BAR_HEIGHT, None);
     when(has_window_buttons, move || {
         // As much room on the right as the buttons take on the left: the title is in the
         // middle.
