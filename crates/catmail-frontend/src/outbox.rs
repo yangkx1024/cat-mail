@@ -13,7 +13,11 @@ use crate::list::outbox_status;
 /// as, named among `identities` (every account's) as a new message's From names it. It
 /// is among them once they are read: an identity can't be removed while the outbox has
 /// messages to send through it.
-pub fn facts(entry: &OutboxEntry, identities: &[Identity]) -> [(&'static str, String); 3] {
+pub fn facts(
+    entry: &OutboxEntry,
+    identities: &[Identity],
+    clock: format::Clock,
+) -> [(&'static str, String); 3] {
     let from = senders(identities)
         .into_iter()
         .find(|s| s.identity == entry.identity)
@@ -22,7 +26,7 @@ pub fn facts(entry: &OutboxEntry, identities: &[Identity]) -> [(&'static str, St
     [
         ("To", entry.recipients.join(", ")),
         ("From", from),
-        ("Queued", format::date(Some(entry.created_at))),
+        ("Queued", format::date(Some(entry.created_at), clock)),
     ]
 }
 
@@ -194,8 +198,15 @@ mod tests {
 
     #[test]
     fn from_is_the_identity_it_goes_out_as() {
-        let from =
-            |identities: &[Identity]| facts(&entry(OutboxStatus::Queued), identities)[1].1.clone();
+        let from = |identities: &[Identity]| {
+            facts(
+                &entry(OutboxStatus::Queued),
+                identities,
+                format::Clock::TwentyFourHour,
+            )[1]
+            .1
+            .clone()
+        };
         let default = identity(1, None, "me@example.com", "smtp.example.com");
         let other = identity(3, Some("Me"), "me@work.example", "smtp.work.example");
         assert_eq!(from(&[default.clone(), other]), "Me <me@work.example>");

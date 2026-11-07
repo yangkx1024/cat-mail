@@ -9,6 +9,7 @@ use nsh_core::prelude::*;
 
 use crate::buttons::text_button;
 use crate::chrome;
+use crate::clock::clock;
 use crate::engine::client;
 use crate::form::confirmed;
 use crate::icons::{Icon, icon};
@@ -38,7 +39,7 @@ fn page(entry: OutboxEntry) -> impl IntoElement {
             .flat_map(|a| a.identities.iter().cloned())
             .collect()
     });
-    let lines = facts(&entry, &identities)
+    let lines = facts(&entry, &identities, clock())
         .into_iter()
         .map(|(name, value)| fact(name, value).into_element())
         .collect::<Vec<_>>();

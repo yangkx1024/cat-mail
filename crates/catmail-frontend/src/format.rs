@@ -1,15 +1,47 @@
 //! How message metadata reads in the window: what `catmail_core::display` doesn't say,
-//! the time of day and the list's day headings.
+//! the times on the user's clock and the list's day headings.
 
 use jiff::civil::Date;
 use jiff::{Timestamp, Zoned, tz::TimeZone};
 
 /// What reads the same as in the CLI.
-pub use catmail_core::display::{addresses, date, names, sender, size, subject};
+pub use catmail_core::display::{addresses, names, sender, size, subject};
+
+/// How the user reads the time of day: the system's setting, else their region's. The
+/// CLI keeps 24-hour time, which scripts can read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Clock {
+    /// `14:05`.
+    TwentyFourHour,
+    /// `2:05 PM`.
+    TwelveHour,
+}
+
+impl Clock {
+    fn time(self) -> &'static str {
+        match self {
+            Clock::TwentyFourHour => "%H:%M",
+            Clock::TwelveHour => "%-I:%M %p",
+        }
+    }
+
+    fn date(self) -> &'static str {
+        match self {
+            Clock::TwentyFourHour => "%Y-%m-%d %H:%M",
+            Clock::TwelveHour => "%Y-%m-%d %-I:%M %p",
+        }
+    }
+}
 
 /// The time of day, as a list row shows it under its day's heading: `14:05`.
-pub fn time(timestamp: Option<i64>) -> String {
-    catmail_core::display::local(timestamp, "%H:%M")
+pub fn time(timestamp: Option<i64>, clock: Clock) -> String {
+    catmail_core::display::local(timestamp, clock.time())
+}
+
+/// A date and time in full, as the reader's header and the outbox show it:
+/// `2026-10-19 14:05`. Empty for none.
+pub fn date(timestamp: Option<i64>, clock: Clock) -> String {
+    catmail_core::display::local(timestamp, clock.date())
 }
 
 /// The local calendar as of one moment, to put many rows under day headings with one
@@ -61,6 +93,38 @@ mod tests {
 
     fn at(rfc3339: &str) -> i64 {
         rfc3339.parse::<Timestamp>().unwrap().as_second()
+    }
+
+    #[test]
+    fn times_follow_the_users_clock() {
+        // In a fixed time zone, not the system's that `time` and `date` use.
+        let tz = TimeZone::fixed(jiff::tz::offset(8));
+        let show = |s, format| {
+            zoned(Some(at(s)), &tz)
+                .unwrap()
+                .strftime(format)
+                .to_string()
+        };
+        let afternoon = "2026-10-19T14:05:00+08:00";
+        assert_eq!(show(afternoon, Clock::TwentyFourHour.time()), "14:05");
+        assert_eq!(show(afternoon, Clock::TwelveHour.time()), "2:05 PM");
+        assert_eq!(
+            show("2026-10-19T00:30:00+08:00", Clock::TwelveHour.time()),
+            "12:30 AM"
+        );
+        assert_eq!(
+            show("2026-10-19T09:07:00+08:00", Clock::TwentyFourHour.time()),
+            "09:07"
+        );
+        assert_eq!(
+            show(afternoon, Clock::TwentyFourHour.date()),
+            "2026-10-19 14:05"
+        );
+        assert_eq!(
+            show(afternoon, Clock::TwelveHour.date()),
+            "2026-10-19 2:05 PM"
+        );
+        assert_eq!(date(None, Clock::TwelveHour), "");
     }
 
     #[test]

@@ -15,6 +15,8 @@ mod buttons;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod chrome;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod clock;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod composer;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod engine;

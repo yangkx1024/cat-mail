@@ -432,14 +432,18 @@ pub fn draft_recipients(draft: &Draft) -> String {
 }
 
 /// What a screen reader says of a message row.
-pub fn message_label(message: &MessageSummary, labels: &[impl AsRef<str>]) -> String {
+pub fn message_label(
+    message: &MessageSummary,
+    labels: &[impl AsRef<str>],
+    clock: format::Clock,
+) -> String {
     let unread = !message.flags.contains(Flags::SEEN);
     let flagged = message.flags.contains(Flags::FLAGGED);
     format!(
         "{}, {}, {}{}{}{}{}",
         format::sender(&message.from),
         format::subject(message.subject.as_deref()),
-        format::time(message.date),
+        format::time(message.date, clock),
         if unread { ", unread" } else { "" },
         if flagged { ", flagged" } else { "" },
         if message.has_attachments {
