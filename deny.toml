@@ -31,14 +31,6 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "zvariant, via zbus" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names, via zbus" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive, via zbus" },
-    # Temporarily, until nsh is back on a release: zip 8 comes only through nsh-updater,
-    # which nsh-core always depends on, and is fixed in 9. The flaws are in
-    # `ZipArchive::extract`, which only nsh's updater calls, to install a downloaded
-    # update; catmail-gui doesn't use the updater. Upstream: longbridge/nsh#1050.
-    { id = "RUSTSEC-2026-0367", reason = "zip extract, via nsh-updater; not used" },
-    { id = "RUSTSEC-2026-0368", reason = "zip extract, via nsh-updater; not used" },
-    { id = "RUSTSEC-2026-0369", reason = "zip extract, via nsh-updater; not used" },
-    { id = "RUSTSEC-2026-0429", reason = "zip extract, via nsh-updater; not used" },
 ]
 
 [licenses]

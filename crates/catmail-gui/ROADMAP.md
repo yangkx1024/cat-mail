@@ -15,7 +15,7 @@
 ## P0 只读三栏
 
 - [x] 文件夹、邮件列表（虚拟列表、滚到底取下一页）、读信区
-- [x] 正文在 web view 里：CSP 断网，内嵌图片嵌成 `data:`，页面 JS 关闭，注入脚本回报高度和链接
+- [x] 正文在 web view 里：CSP 断网，图片由读信区经自定义 scheme 应答，页面 JS 关闭，注入脚本回报高度和链接
 - [x] 暗色重新着色（`recolor_html`）
 - [x] 三栏可以横向拖动（侧栏 192–384 px，读信时列表 256–640 px）。⚠️ 宽度由应用自己记，用 nsh-base 单独的
       `resize_handle`：它的 `h_resizable` 快速来回拖时会丢掉拖动结束，之后分隔线错位；每次拖动从开始时的宽度
@@ -65,16 +65,15 @@
 - [x] "Move to"、"Labels"对话框
 - [x] 服务器拒绝的改动用通知说明。⚠️ nsh-base 只有无样式的 toast 原件，通知的样式和计时在 `toast.rs`；出错也
       改成通知，不再写在侧栏底部
-- [x] 远程图片：先显示缓存里的；点击后逐批显示，换邮件即取消。⚠️ 不重新载入页面：注入脚本收到 `post_message`
-      后把 `data:` URL 填进对应的 `<img>`；页面因外观变化重新载入时（脚本报 `r`）再发一遍。CSP 照样只放行 `data:`
-- [x] 打开时先显示文字、内嵌图片后到。⚠️ 同样不重新载入页面：建页时算出页面里 `cid:` 图片的 URL，取到的内嵌
-      图片用 `post_message` 填进去；已经取到的在页面重建时直接嵌进页面
-- [ ] 图片由 WebKit 自己读。⚠️ 现在只能把 `data:` URL 写进脚本发给页面，大图（一张 1–4 MB）每个字节要在主线程
-      上编码、转义，再被 JSC 解析；只好一次发一张（`d:`），换邮件才不卡，但载入还是慢。等 nsh 支持 URL scheme
-      handler（longbridge/nsh#1136）后：升级 nsh 的 rev，页面里的图片写成自定义 scheme 的 URL（内嵌部分按
-      Content-ID，远程图片按 URL），由 handler 从引擎读（内嵌部分、图片缓存）；CSP 的 `img-src` 放行这个 scheme；
-      删掉 `i:` / `d:` 消息、`PageImages` 的队列和 `data:` 编码，建页时也不再嵌入内嵌部分；"Show remote images"
-      之后改成让页面重新请求被拦下的图片。两个平台都要验证
+- [x] 远程图片：先显示缓存里的；点击后逐批显示，换邮件即取消。不重新载入页面：页面早就请求了这些图片，
+      读信区把请求留着，图片到了再应答
+- [x] 打开时先显示文字、内嵌图片后到，同样是留着的请求取到一张应答一张
+- [x] 图片由 WebKit 自己读：nsh 的 URL scheme handler（longbridge/nsh#1136，#1233）。页面里的 `cid:` 和远程
+      图片改写成 `catmail-image:` 的 URL，CSP 的 `img-src` 放行它；不再把 `data:` URL 写进脚本一次发一张。
+      ⚠️ Linux 上限流：WebKitGTK 按 8 KB 一块读 scheme 的应答，大图一起应答时下一封邮件要等（见 gui.md 的图片）；
+      同时在传的不超过 1 MiB，页面报一张到了再放行（`html::pacer`）。WebKitGTK 按大块读之后去掉
+      （WebKit bug 330624）；不放进 nsh，原因见 gui.md 的图片。macOS 不限流，还要用
+      图片多的邮件看一眼
 - [x] 附件（系统保存对话框，写文件在另一个线程）、头部（"Details"）、在浏览器打开（`hand_off`）
 - [ ] 正文的查找：WebKit 没有自带的查找栏，nsh 也没给 `WebKitFindController`，要自己用注入脚本做。选中、复制、
       全选是 WebKit 自带的
@@ -145,7 +144,7 @@
 - [x] 读信区和它的 web view 随主窗口一直存在，渲染进程开窗时就起好、换邮件不换（原来每封一个，约 100 MB PSS，
       还要起一次 bwrap 沙箱）。⚠️ 没选中邮件时藏在列表下面，不用 `invisible`：一阵没画的 web view 再画时，WebKit
       画好之前会先闪一帧黑。开窗后点开第一封，内容约 2 帧（约 33 ms）就出现，原来约 13 帧
-- [ ] 常驻时网络进程还留着（41 MB PSS），可它从来不联网（CSP 只放行 `data:`）。原因在 nsh：它按 app id 把
+- [ ] 常驻时网络进程还留着（41 MB PSS），可它从来不联网（CSP 只放行 `data:` 和读信区自己的 scheme）。原因在 nsh：它按 app id 把
       `NetworkSession` 一直存在表里，最后一个 web view 没了也不放。上游已改成弱引用（longbridge/nsh#1051），nsh
       的 rev 已升级。还要在 Linux 上用真实账户确认关窗后网络进程退出，测一下重新开窗要多花多少时间，再更新
       background.md 里的数字
@@ -158,8 +157,8 @@
 - [x] 在主 workspace 里：longbridge/nsh#966 在上游 main 修好（#1022），还没发版，先用 git 依赖钉在 main 的 commit 上
       （根 `Cargo.toml`）。nsh 的 Linux 后端从此总是链接 GStreamer（声音），开发 shell 和 CI 都装了它的开发包
 - [ ] nsh 发版后换回 crates.io，并把仓库移出 `deny.toml` 的 `allow-git`
-- [ ] cargo deny：许可证（webpki-roots 的 CDLA-Permissive-2.0，target-lexicon、winx 的 LLVM-exception），nsh-updater
-      用的 zip 8 有四个 advisory（RUSTSEC-2026-0367/0368/0369/0429，要 zip 9；报到上游 longbridge/nsh#1050）
+- [x] cargo deny：许可证（webpki-roots 的 CDLA-Permissive-2.0，target-lexicon、winx 的 LLVM-exception）在
+      `deny.toml` 里逐个放行；nsh-updater 换成 zip 9（longbridge/nsh#1164）后，zip 8 的四个 advisory 不再忽略
 - [x] GTK 4.22 上 `gtk_widget_measure` 警告刷屏：`NshView::size_allocate` 不 measure 就 allocate 子 widget，上游
       longbridge/nsh#1048 已由 longbridge/nsh#1049 修好，nsh 的 rev 已升级（还要在 GTK 4.22 上看一眼警告没了）
 - [ ] 内存、滚动帧率、冷启动时间的基准

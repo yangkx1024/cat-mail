@@ -1,12 +1,13 @@
 //! The reading pane: the commands on the message, its header, its body in a web view and
 //! its attachments.
 //!
-//! The body is a page in one web view (`catmail_frontend::html::PageImages::page`): opening a message loads a new
-//! page into it. The view stays while messages are opened one after another, for WebKit
+//! The body is a page in one web view (`catmail_frontend::html::BodyPages::page`): opening
+//! a message loads a new page into it. The view stays while messages are opened one after another, for WebKit
 //! starts a web process for each new view (100 MB, a sandbox to set up), and ends it when
-//! the last goes. Remote images stay blocked until the user asks for them, except those
-//! the engine has cached; those that come are sent to the page, as inline parts are
-//! (`html::PageImages`), which shows them without loading again.
+//! the last goes. The page's images are the reader's to serve (`html::IMAGE_SCHEME`): the
+//! inline parts as they load, and the remote images the engine has cached or the user
+//! asks for; the others wait, unanswered, and the page shows them once they come,
+//! without loading again.
 
 mod view;
 
@@ -14,14 +15,15 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use catmail_core::html::{DarkPalette, InlineImage, RemoteImage, recolor_html, remote_image_urls};
+use catmail_core::html::{DarkPalette, Image, RemoteImage, recolor_html};
 use catmail_core::{Attachment, MessageId, safe_filename};
-use catmail_frontend::html::{self, Colors, PageImages, browser_page};
+use catmail_frontend::html::{BodyPages, Colors, browser_page};
 use catmail_frontend::reader::{self, Header};
 use nsh_base::theme;
 use nsh_core::element::{ElementRef, Spawned, open_path, pick_save_path};
 use nsh_core::file_dialog::SaveDialog;
 use nsh_core::prelude::*;
+use nsh_core::web_resource::{WebResource, WebResourceRequest};
 
 use crate::engine::client;
 use crate::mailbox::list;
@@ -85,22 +87,39 @@ struct Retry(u64);
 struct ShowDetails(bool);
 
 /// What the page shows besides itself, and the fetch of remote images. Not reactive.
-#[derive(Default)]
 struct Page {
-    /// The web view, for sending it images.
-    view: Option<ElementRef>,
     /// The message's scroll view, taken back to the top for the next message.
     scroll: Option<ElementRef>,
     /// The message whose page was made last.
     shown: Option<MessageId>,
-    /// The number of the page made last (`PageImages::page`): what other pages say, late,
-    /// is ignored.
-    number: u64,
-    /// The open message's images, and which the page shown still needs.
-    images: PageImages,
+    /// The pages made, the open message's images, and the requests of the page shown.
+    pages: BodyPages<WebResourceRequest>,
     /// Fetching the open message's remote images; dropped with the message.
     fetch: Option<Spawned<()>>,
+    /// Watching images held back ([`watch_images`]).
+    watching: bool,
 }
+
+impl Default for Page {
+    fn default() -> Self {
+        Self {
+            scroll: None,
+            shown: None,
+            pages: BodyPages::new(IMAGES_IN_FLIGHT),
+            fetch: None,
+            watching: false,
+        }
+    }
+}
+
+/// The bytes of images on their way to the page at once (`BodyPages::new`; why, in
+/// `catmail_frontend::html`'s pacer): WebKitGTK reads them 8 KiB at a time.
+#[cfg(target_os = "linux")]
+pub(super) const IMAGES_IN_FLIGHT: Option<usize> = Some(1 << 20);
+
+/// `WKURLSchemeHandler` takes each image whole: no limit.
+#[cfg(not(target_os = "linux"))]
+pub(super) const IMAGES_IN_FLIGHT: Option<usize> = None;
 
 #[derive(Clone, Default)]
 struct PageState(Rc<RefCell<Page>>);
@@ -109,17 +128,10 @@ fn page_state() -> Rc<RefCell<Page>> {
     global::<PageState>().with_untracked(|p| p.0.clone())
 }
 
-/// The number of a page about to be made, which is the one shown from now on.
-fn next_page() -> u64 {
-    let page = page_state();
-    let mut page = page.borrow_mut();
-    page.number += 1;
-    page.number
-}
-
-/// Whether what page `number` says is the page shown's.
+/// Whether what page `number` says is the page shown's: what other pages say, late, is
+/// ignored.
 fn is_shown(number: u64) -> bool {
-    page_state().borrow().number == number
+    page_state().borrow().pages.is_shown(number)
 }
 
 /// Opens the message selected; anything else empties the pane (drafts and the outbox
@@ -135,7 +147,7 @@ pub fn follow_selection() {
         global::<ShowDetails>().set(ShowDetails(false));
         let page = page_state();
         let mut page = page.borrow_mut();
-        page.images.forget_message();
+        page.pages.forget_message();
         if let Some(fetch) = page.fetch.take() {
             fetch.cancel();
         }
@@ -147,7 +159,7 @@ pub fn follow_selection() {
         // A blank page in the web view, which stays: its web process is running when a
         // message opens (it takes a moment to start).
         None => global::<Reading>().set(Reading {
-            page: html::blank_page(next_page(), &colors(dark)).into(),
+            page: page_state().borrow_mut().pages.blank(&colors(dark)).into(),
             page_dark: dark,
             ..Reading::default()
         }),
@@ -196,15 +208,6 @@ async fn open_message(id: MessageId, dark: bool) {
     // For checking what the page may load: this file's HTML in place of the message's.
     let probe = std::env::var_os("CATMAIL_GUI_HTML").and_then(|f| std::fs::read_to_string(f).ok());
     let html = probe.as_deref().or(body.and_then(|b| b.html.as_deref()));
-    let remote = {
-        let page = page_state();
-        let page = page.borrow();
-        html.map(remote_image_urls)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|url| !page.images.shows_remote(url))
-            .collect::<Vec<_>>()
-    };
     // A dark page moves the message's colors toward the theme's; one
     // whose colors come from CSS variables can't be moved and stays light.
     let recolored = html
@@ -212,25 +215,25 @@ async fn open_message(id: MessageId, dark: bool) {
         .and_then(|html| recolor_html(html, palette()));
     let page_dark = page_is_dark(dark, html.is_some(), recolored.is_some());
     let page_html = recolored.as_deref().or(html);
-    // The inline parts already loaded (the page is made again, in a new appearance) are in
-    // it; the others go in as they load, after the text shows.
-    let number = next_page();
-    let made = {
+    let (made, remote) = {
         let page = page_state();
         let mut page = page.borrow_mut();
-        let made = page.images.page(
-            number,
+        let made = page.pages.page(
             page_html,
             body.and_then(|b| b.text.as_deref()),
             &colors(page_dark),
         );
+        // Those not shown yet: the cached ones show at once, the others when the user asks.
+        let remote = (made.remote_urls.into_iter())
+            .filter(|url| !page.pages.shows_remote(url))
+            .collect::<Vec<_>>();
         // Another message (not this one again, in a new appearance): from its top.
         if page.shown.replace(id) != Some(id)
             && let Some(scroll) = page.scroll
         {
             scroll.scroll_to(Point::new(px(0.0), px(0.0)), false);
         }
-        made
+        (made.html, remote)
     };
     // Hidden (the first page, or one that took long): until the page has loaded, rather
     // than show the web view before it paints, in WebKit's own background.
@@ -273,12 +276,12 @@ async fn open_message(id: MessageId, dark: bool) {
         let Some(content_id) = &part.content_id else {
             continue;
         };
-        if page_state().borrow().images.has_inline(content_id) {
+        if page_state().borrow().pages.has_inline(content_id) {
             continue;
         }
         match client().attachment_content(part.id).await {
             Ok(bytes) => {
-                let image = InlineImage::new(&part.mime_type, &bytes);
+                let image = Image::new(&part.mime_type, bytes);
                 add_inline_image(content_id.clone(), image);
             }
             Err(e) => tracing::warn!(attachment = %part.id, error = %e,
@@ -288,18 +291,70 @@ async fn open_message(id: MessageId, dark: bool) {
 }
 
 /// Puts an inline part of the open message in its page.
-fn add_inline_image(content_id: String, image: InlineImage) {
-    let page = page_state();
-    let mut page = page.borrow_mut();
-    let message = page.images.add_inline(content_id, image);
-    post(page.view, message);
+fn add_inline_image(content_id: String, image: Image) {
+    let answers = page_state()
+        .borrow_mut()
+        .pages
+        .add_inline(content_id, image);
+    answer(answers);
 }
 
-/// Sends the page shown the image `PageImages` says is due.
-fn post(view: Option<ElementRef>, message: Option<String>) {
-    if let (Some(view), Some(message)) = (view, message) {
-        view.post_message(message);
+/// The page asks for one of its images (`html::IMAGE_SCHEME`): answered once it is here
+/// and the page has taken those before it (`BodyPages::request`).
+fn serve_image(request: WebResourceRequest) {
+    let url = request.url().to_owned();
+    let answers = page_state().borrow_mut().pages.request(&url, request);
+    answer(answers);
+}
+
+/// The page says one of its images has come (or failed): the next go.
+fn image_loaded(url: &str) {
+    let answers = page_state().borrow_mut().pages.loaded(url);
+    answer(answers);
+}
+
+/// Gives the page the images it asked for, and watches those held back.
+fn answer(answers: Vec<(WebResourceRequest, Image)>) {
+    for (request, image) in answers {
+        let resource = WebResource::new(image.mime_type().clone(), image.bytes().clone());
+        request.respond(resource);
     }
+    watch_images();
+}
+
+/// How long images may be held back with none coming before the rest go anyway.
+const UNSTICK_AFTER: Duration = Duration::from_secs(3);
+
+/// While images are held back, checks every [`UNSTICK_AFTER`] that one has come since: a
+/// page that never says so would get no more (`BodyPages::unstick`). One watch at a time.
+fn watch_images() {
+    {
+        let page = page_state();
+        let mut page = page.borrow_mut();
+        if page.watching || !page.pages.holds_back() {
+            return;
+        }
+        page.watching = true;
+    }
+    in_view(async {
+        loop {
+            let progress = page_state().borrow().pages.progress();
+            timer(UNSTICK_AFTER).await;
+            let answers = {
+                let page = page_state();
+                let mut page = page.borrow_mut();
+                if !page.pages.holds_back() {
+                    page.watching = false;
+                    return;
+                }
+                page.pages.unstick(progress)
+            };
+            if !answers.is_empty() {
+                tracing::warn!("the page didn't say its images came; sending the rest");
+            }
+            answer(answers);
+        }
+    });
 }
 
 /// Fetches the open message's remote images and shows each as it comes, because the user
@@ -378,27 +433,9 @@ fn add_remote_images(id: MessageId, fetched: Vec<(String, RemoteImage)>) -> bool
         r.remote
             .retain(|url| !fetched.iter().any(|(had, _)| had == url));
     });
-    let page = page_state();
-    let mut page = page.borrow_mut();
-    let message = page.images.add_remote(fetched);
-    post(page.view, message);
+    let answers = page_state().borrow_mut().pages.add_remote(fetched);
+    answer(answers);
     true
-}
-
-/// The page loaded: it gets the images that came while it did (`PageImages::ready`).
-fn page_ready() {
-    let page = page_state();
-    let mut page = page.borrow_mut();
-    let message = page.images.ready();
-    post(page.view, message);
-}
-
-/// The page has taken the image sent last: the next goes.
-fn image_taken() {
-    let page = page_state();
-    let mut page = page.borrow_mut();
-    let message = page.images.taken();
-    post(page.view, message);
 }
 
 /// The page has painted with the web view `height` points tall: a hidden one shows
@@ -501,7 +538,7 @@ fn open_in_browser() {
     }) else {
         return;
     };
-    let inline = page_state().borrow().images.inline().clone();
+    let inline = page_state().borrow().pages.inline().clone();
     in_view(async move {
         let page = browser_page(&title, &html, inline);
         match client().hand_off("html", page.into_bytes()).await {

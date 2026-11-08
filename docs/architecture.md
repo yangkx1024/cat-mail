@@ -169,7 +169,7 @@ UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UI
   不能结束 `<style>`）；远程图片默认不加载，GUI 读信不发出任何网络
   请求，除非用户对这封信点了"Show remote images"，下载也由引擎做（`MailClient::fetch_remote_images`：
   不带 cookie 和 referrer，只 GET）；正文所在的 WebView 有自己的网络，所以页面关掉脚本，并由 CSP 只放行
-  嵌成 `data:` 的图片和内联样式，要显示的图片都由读信区嵌进去（见 [GUI / 读信](architecture/gui.md#读信)）；服务器给的值（BODYSTRUCTURE、msg-id）写进邮件头之前都要校验。
+  `data:` 图片、读信区自己的 scheme 和内联样式，要显示的图片都由读信区应答（见 [GUI / 读信](architecture/gui.md#读信)）；服务器给的值（BODYSTRUCTURE、msg-id）写进邮件头之前都要校验。
 - **本地数据**：数据目录只有本用户可访问，交给其他程序的文件也放在里面。
 
 ## 子系统

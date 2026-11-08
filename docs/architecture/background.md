@@ -70,7 +70,7 @@ Linux glibc 上，其他平台什么也不做）：glibc 的堆只能从顶上�
 | 关窗后、trim 后 | 265 / 197 | 退出了 | 69 / 41 | 约 238 |
 
 trim 只还回约 14 MB。常驻时主进程里约 107 MB 是文件映射（程序本身和 GTK、WebKitGTK 的库），能和别的进程共用，
-也能被换出。WebKit 的网络进程从不联网（CSP 只放行 `data:`），表里它却一直留着：当时 nsh 一直持有
+也能被换出。WebKit 的网络进程从不联网（CSP 只放行 `data:` 和读信区自己的 scheme），表里它却一直留着：当时 nsh 一直持有
 `NetworkSession`。nsh 已经改成随最后一个 web view 结束它（longbridge/nsh#1051），workspace 也已升级到含这个修复的
 版本；表里的数字是修复之前量的，在 Linux 上重新量过之前先这样（见 `crates/catmail-gui/ROADMAP.md`）。
 

@@ -1,25 +1,26 @@
 //! The page a message body is shown as in the web view.
 //!
 //! WebKit has a network of its own, and nsh only checks top-level navigations, not a
-//! page's subresources. So the page shuts the network out itself: a Content-Security-Policy that allows nothing but `data:`
-//! images and inline styles, with every image the reader shows embedded as a `data:`
-//! URL first: the inline parts loaded when the page is made in it, and the rest of them
-//! and remote ones (cached, or that the user asked for) sent to the page as they come,
-//! which puts them in place of the blocked URLs, so the page doesn't load again and lose
-//! its place.
+//! page's subresources. So the page shuts the network out itself: a
+//! Content-Security-Policy that allows nothing but inline styles and images that are
+//! `data:` URLs or the reader's own ([`IMAGE_SCHEME`](super::IMAGE_SCHEME)). The
+//! message's inline parts and remote images are pointed at the reader's URLs, which the
+//! reader serves ([`BodyPages`](super::BodyPages)): a remote image only once it is
+//! cached or the user asked for it, so the page asks for it, but the network never sees
+//! the request.
 //! The page's own scripts are off (`java_script_enabled(false)`); the bridge below is
 //! an injected user script, which WebKit still runs.
 
-use std::collections::HashMap;
-
-use catmail_core::html::{InlineImage, InlineUrl, embed_inline_images};
+use catmail_core::html::{Served, serve_images};
 
 use super::escape;
+use super::pages::image_base;
 
-/// Nothing may load except the images embedded in the page and its inline styles.
-/// `form-action` and `base-uri` don't fall back to `default-src`.
-const CSP: &str = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; \
-                   font-src data:; form-action 'none'; base-uri 'none'";
+/// Nothing may load except the message's `data:` images, those the reader serves, and
+/// the inline styles. `form-action` and `base-uri` don't fall back to `default-src`.
+const CSP: &str = "default-src 'none'; img-src data: catmail-image:; \
+                   style-src 'unsafe-inline'; font-src data:; form-action 'none'; \
+                   base-uri 'none'";
 
 /// Ours, under the message's own styles: the page has no margins of its own (the
 /// reader pads it) and doesn't scroll (the reader's scroll view does), but a message
@@ -36,19 +37,14 @@ const BASE_STYLE: &str = "html { overflow: hidden !important; } \
 
 /// What the page tells the reader, through `window.nsh.postMessage`, with the page's
 /// number ([`body_page`]: one web view shows page after page, and what an earlier one
-/// says may come late): that it loaded (`r:<n>`), its height (`h:<n>:<px>`), so the web
+/// says may come late): its height (`h:<n>:<px>`), so the web
 /// view can be as tall as the page (the root's box, which holds the body's margins and
 /// its sideways scroller, rounded up: the root's overflow is hidden, so what the view
 /// is short of is cut off; not `scrollHeight`, which is rounded, nor the root's, which
 /// is never less than the view's height and so wouldn't shrink for a shorter message), that it has painted at the web view's height
 /// (`p:<n>:<px>`, two frames after it loaded and after each resize: WebKit has shown it
 /// at that size), the links clicked (`o:<url>`), which open in the system's browser
-/// instead of in the view, and that it has taken the image it was sent last (`d:<n>`),
-/// so the next can come ([`PageImages`](super::PageImages)).
-/// What the reader tells the page ([`image_message`]): the `data:` URL of an image shown,
-/// remote or inline, for the `<img>` elements that refer to it (as `img.src` normalizes
-/// it, which is `remote_image_url`'s spelling too). Only those: the sanitizer keeps no
-/// `background` attribute, and no `url()` in styles.
+/// instead of in the view. Its images are [`WATCH_IMAGES`]'s.
 pub const BRIDGE: &str = r#"(function () {
   var number = document.querySelector('meta[name="catmail-page"]');
   var page = number ? number.content : "0";
@@ -73,39 +69,6 @@ pub const BRIDGE: &str = r#"(function () {
       window.nsh.postMessage("o:" + a.href);
     }
   }, true);
-  function absolute(url) {
-    try { return new URL(url, document.baseURI).href; } catch (e) { return null; }
-  }
-  // The images by the URL they refer to, found once: parsing each image's URL for each
-  // message, once dozens are data: URLs, keeps the page busy for seconds, and the next
-  // page waits behind it.
-  var images = null;
-  function imagesOf(url) {
-    if (!images) {
-      images = new Map();
-      document.querySelectorAll("img[src]").forEach(function (img) {
-        var src = img.getAttribute("src");
-        if (src.trim().slice(0, 5).toLowerCase() === "data:") return;
-        src = absolute(src);
-        if (!src) return;
-        if (images.has(src)) images.get(src).push(img); else images.set(src, [img]);
-      });
-    }
-    return images.get(url) || [];
-  }
-  window.addEventListener("message", function (e) {
-    var d = String(e.data);
-    if (d.slice(0, 2) !== "i:") return;
-    try {
-      var end = d.indexOf("\n");
-      var url = d.slice(2, end), data = d.slice(end + 1);
-      if (data.slice(0, 5) === "data:") imagesOf(url).forEach(function (img) { img.src = data; });
-    } finally {
-      // Whatever became of it: no other image comes until this is said.
-      window.nsh.postMessage("d:" + page);
-    }
-  });
-  window.nsh.postMessage("r:" + page);
   function painted() {
     requestAnimationFrame(function () {
       requestAnimationFrame(function () {
@@ -117,20 +80,29 @@ pub const BRIDGE: &str = r#"(function () {
   painted();
 })();"#;
 
-/// The message that puts an image's `data:` URL in place of `url` in the page.
-pub(super) fn image_message(url: &str, data_url: &str) -> String {
-    format!("i:{url}\n{data_url}")
-}
+/// Tells the reader each of the page's images it serves that has come or failed
+/// (`l:<url>`, the URL carrying the page's number), so the next can go
+/// ([`BodyPages`](super::BodyPages)); others (`data:` ones, megabytes long, and those
+/// blocked) aren't its business. Injected before the page's content, so no image comes
+/// before it listens. An image's load and error don't bubble: they are caught on their
+/// way down.
+pub const WATCH_IMAGES: &str = r#"(function () {
+  function loaded(e) {
+    var src = e.target.tagName === "IMG" ? e.target.src : "";
+    if (src.lastIndexOf("catmail-image:", 0) === 0) window.nsh.postMessage("l:" + src);
+  }
+  document.addEventListener("load", loaded, true);
+  document.addEventListener("error", loaded, true);
+})();"#;
 
-/// What a message from [`BRIDGE`] says, and of which page (its number).
+/// What a message from [`BRIDGE`] or [`WATCH_IMAGES`] says, and of which page (its number).
 #[derive(Debug, PartialEq)]
 pub enum FromPage<'a> {
-    Ready(u64),
     Height(u64, f32),
     /// At the web view's height then, in points.
     Painted(u64, f32),
-    /// It has taken the image sent last.
-    Taken(u64),
+    /// An image has come, or failed: by its URL, which says the page.
+    Loaded(&'a str),
     Open(&'a str),
 }
 
@@ -139,51 +111,39 @@ impl<'a> FromPage<'a> {
         if let Some(url) = message.strip_prefix("o:") {
             return Some(FromPage::Open(url));
         }
+        if let Some(url) = message.strip_prefix("l:") {
+            return Some(FromPage::Loaded(url));
+        }
         let (kind, rest) = message.split_once(':')?;
-        let (page, height) = match rest.split_once(':') {
-            Some((page, height)) => (page.parse().ok()?, Some(height.parse().ok()?)),
-            None => (rest.parse().ok()?, None),
-        };
-        match (kind, height) {
-            ("r", None) => Some(FromPage::Ready(page)),
-            ("d", None) => Some(FromPage::Taken(page)),
-            ("h", Some(height)) => Some(FromPage::Height(page, height)),
-            ("p", Some(height)) => Some(FromPage::Painted(page, height)),
+        let (page, height) = rest.split_once(':')?;
+        let (page, height) = (page.parse().ok()?, height.parse().ok()?);
+        match kind {
+            "h" => Some(FromPage::Height(page, height)),
+            "p" => Some(FromPage::Painted(page, height)),
             _ => None,
         }
     }
 }
 
-/// A page made by [`body_page`].
-pub(super) struct BodyPage {
-    pub html: String,
-    /// The `cid:` images whose parts it isn't made with: what [`image_message`] puts each
-    /// part in place of once it has loaded.
-    pub inline_urls: Vec<InlineUrl>,
-}
-
-/// The page of a body: its sanitized HTML (`MessageBody::html`) with `inline` (by
-/// Content-ID) embedded, or the plain text when there is no HTML part. `number` is in
-/// what the page says ([`FromPage`]).
+/// The page of a body: its sanitized HTML (`MessageBody::html`), its images pointed at
+/// the reader's URLs, or the plain text when there is no HTML part; with the remote
+/// images it refers to. `number` is in what the page says ([`FromPage`]) and in its
+/// images' URLs.
 pub(super) fn body_page(
     number: u64,
     html: Option<&str>,
     text: Option<&str>,
-    inline: HashMap<String, InlineImage>,
     colors: &Colors,
-) -> BodyPage {
-    let (content, inline_urls) = match html {
-        Some(html) => {
-            let embedded = embed_inline_images(html, inline);
-            (embedded.html, embedded.inline_urls)
-        }
-        None => (
-            format!(
+) -> Served {
+    let Served { html, remote_urls } = match html {
+        Some(html) => serve_images(html, &image_base(number)),
+        None => Served {
+            html: format!(
                 "<pre style=\"white-space: pre-wrap; font-family: inherit; margin: 0\">{}</pre>",
                 escape(text.unwrap_or_default())
             ),
-            Vec::new(),
-        ),
+            remote_urls: Vec::new(),
+        },
     };
     let html = format!(
         "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">\
@@ -191,16 +151,16 @@ pub(super) fn body_page(
          <meta name=\"referrer\" content=\"no-referrer\">\
          <meta name=\"catmail-page\" content=\"{number}\">\
          <style>{BASE_STYLE} html {{ color: {}; background: {}; }} a[href] {{ color: {}; }}</style>\
-         </head>\n<body>\n{content}\n</body></html>\n",
+         </head>\n<body>\n{html}\n</body></html>\n",
         colors.foreground, colors.background, colors.link,
     );
-    BodyPage { html, inline_urls }
+    Served { html, remote_urls }
 }
 
 /// A page with nothing in it, in `colors`: what the web view shows while no message is,
 /// so that its web process is running when one opens.
-pub fn blank_page(number: u64, colors: &Colors) -> String {
-    body_page(number, None, None, HashMap::new(), colors).html
+pub(super) fn blank_page(number: u64, colors: &Colors) -> String {
+    body_page(number, None, None, colors).html
 }
 
 /// The reader's colors under the message's own, as CSS colors.
@@ -228,7 +188,6 @@ mod tests {
             1,
             Some("<p>hi <img src=\"https://tracker.example/p.gif\"></p>"),
             None,
-            HashMap::new(),
             &colors(),
         )
         .html;
@@ -236,34 +195,8 @@ mod tests {
         let body = page.find("<body>").unwrap();
         assert!(policy < body);
         assert!(page.contains("default-src 'none'"));
-        assert!(page.contains("img-src data:;"));
-    }
-
-    #[test]
-    fn inline_images_are_embedded_or_sent_as_they_load() {
-        let inline = HashMap::from([(
-            "logo@example".to_owned(),
-            InlineImage::new("image/png", &[1, 2, 3]),
-        )]);
-        let page = body_page(
-            1,
-            Some("<img src=\"cid:logo@example\"><img src=\"CID:chart%40example\">"),
-            None,
-            inline,
-            &colors(),
-        );
-        assert!(
-            page.html.contains("src=\"data:image/png;base64,AQID\""),
-            "{}",
-            page.html
-        );
-        assert_eq!(
-            page.inline_urls,
-            [InlineUrl {
-                content_id: "chart@example".to_owned(),
-                url: "cid:chart%40example".to_owned(),
-            }]
-        );
+        assert!(page.contains(&format!("img-src data: {}:;", super::super::IMAGE_SCHEME)));
+        assert!(!page.contains("src=\"https:"), "{page}");
     }
 
     #[test]
@@ -278,29 +211,25 @@ mod tests {
     }
 
     #[test]
-    fn the_page_finds_its_images_once() {
-        // Not on each image sent: by then those shown are data: URLs, megabytes to parse
-        // again for every image that follows.
-        let handler = &BRIDGE[BRIDGE.find("addEventListener(\"message\"").unwrap()..];
-        let handler = &handler[..handler.find("});").unwrap()];
-        assert!(!handler.contains("querySelectorAll"), "{handler}");
-        assert!(handler.contains("imagesOf(url)"), "{handler}");
-    }
-
-    #[test]
-    fn the_page_says_it_has_taken_each_image() {
-        // Or no other image comes.
-        let handler = &BRIDGE[BRIDGE.find("addEventListener(\"message\"").unwrap()..];
-        let handler = &handler[..handler.find("\n  });").unwrap()];
-        let taken = handler.find("postMessage(\"d:\" + page)").expect(handler);
-        assert!(handler[..taken].contains("finally"), "{handler}");
+    fn the_page_says_each_image_that_came_or_failed() {
+        // Or the images after it wait for the reader to give up on it.
+        for event in ["load", "error"] {
+            let listens = format!("document.addEventListener(\"{event}\", loaded, true)");
+            assert!(WATCH_IMAGES.contains(&listens), "{event}");
+        }
+        assert!(WATCH_IMAGES.contains(r#""l:" + src"#));
+        let only_ours = format!(
+            "src.lastIndexOf(\"{}:\", 0) === 0",
+            super::super::IMAGE_SCHEME
+        );
+        assert!(WATCH_IMAGES.contains(&only_ours), "{WATCH_IMAGES}");
     }
 
     #[test]
     fn plain_text_is_escaped() {
-        let page = body_page(1, None, Some("<b>&"), HashMap::new(), &colors());
+        let page = body_page(1, None, Some("<b>&"), &colors());
         assert!(page.html.contains("&lt;b&gt;&amp;"));
-        assert!(page.inline_urls.is_empty());
+        assert!(page.remote_urls.is_empty());
     }
 
     #[test]
@@ -310,15 +239,15 @@ mod tests {
             FromPage::parse("o:https://example.com/"),
             Some(FromPage::Open("https://example.com/"))
         );
-        assert_eq!(FromPage::parse("r:3"), Some(FromPage::Ready(3)));
         assert_eq!(
             FromPage::parse("p:3:480"),
             Some(FromPage::Painted(3, 480.0))
         );
-        assert_eq!(FromPage::parse("d:3"), Some(FromPage::Taken(3)));
-        for unknown in [
-            "h:3:tall", "h:640", "r", "r:3:1", "p:3", "d:3:1", "x:3", "x",
-        ] {
+        assert_eq!(
+            FromPage::parse("l:catmail-image:3/cid/a%40b"),
+            Some(FromPage::Loaded("catmail-image:3/cid/a%40b"))
+        );
+        for unknown in ["h:3:tall", "h:640", "r:3", "d:3", "p:3", "x:3:1", "x"] {
             assert_eq!(FromPage::parse(unknown), None, "{unknown}");
         }
     }
