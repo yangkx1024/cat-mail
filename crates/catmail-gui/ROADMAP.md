@@ -158,8 +158,8 @@
 - [x] 在主 workspace 里：longbridge/nsh#966 在上游 main 修好（#1022），还没发版，先用 git 依赖钉在 main 的 commit 上
       （根 `Cargo.toml`）。nsh 的 Linux 后端从此总是链接 GStreamer（声音），开发 shell 和 CI 都装了它的开发包
 - [ ] nsh 发版后换回 crates.io，并把仓库移出 `deny.toml` 的 `allow-git`
-- [ ] cargo deny：许可证（webpki-roots 的 CDLA-Permissive-2.0，target-lexicon、winx 的 LLVM-exception），nsh-updater
-      用的 zip 8 有四个 advisory（RUSTSEC-2026-0367/0368/0369/0429，要 zip 9；报到上游 longbridge/nsh#1050）
+- [x] cargo deny：许可证（webpki-roots 的 CDLA-Permissive-2.0，target-lexicon、winx 的 LLVM-exception）在
+      `deny.toml` 里逐个放行；nsh-updater 换成 zip 9（longbridge/nsh#1164）后，zip 8 的四个 advisory 不再忽略
 - [x] GTK 4.22 上 `gtk_widget_measure` 警告刷屏：`NshView::size_allocate` 不 measure 就 allocate 子 widget，上游
       longbridge/nsh#1048 已由 longbridge/nsh#1049 修好，nsh 的 rev 已升级（还要在 GTK 4.22 上看一眼警告没了）
 - [ ] 内存、滚动帧率、冷启动时间的基准

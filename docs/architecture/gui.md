@@ -406,8 +406,6 @@ From 是条目实际发出用的身份（`OutboxEntry::identity`），叫法和�
   [后台运行](background.md#引擎属于应用不属于窗口)。
 - **拖动分隔条**：三栏的宽度由应用自己记，用 nsh-base 的 `resize_handle`。⚠️ 它的 `h_resizable` 快速来回拖时会丢掉
   拖动结束，之后分隔线错位；所以每次拖动从开始时的宽度算起，丢了结束也不会累积。
-- **cargo deny 还不过**：nsh 带进来的许可证（webpki-roots 的 CDLA-Permissive-2.0，target-lexicon、winx 的
-  LLVM-exception）和 nsh-updater 用的 zip 8 的 advisory（要 zip 9，longbridge/nsh#1050），见 ROADMAP。
 - 输入框失焦（#248），见上文[外壳](#外壳)。
 - **图片多的邮件载入慢**：nsh 的 web view 没有自定义 URL scheme，图片只能以 `data:` URL 写进脚本发给页面，见上文
   [图片](#图片)。现在一次发一张，换邮件不卡，但总时间跟图片大小成正比。已提 longbridge/nsh#1136；支持后改成由
