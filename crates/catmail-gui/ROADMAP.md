@@ -70,7 +70,10 @@
 - [x] 打开时先显示文字、内嵌图片后到，同样是留着的请求取到一张应答一张
 - [x] 图片由 WebKit 自己读：nsh 的 URL scheme handler（longbridge/nsh#1136，#1233）。页面里的 `cid:` 和远程
       图片改写成 `catmail-image:` 的 URL，CSP 的 `img-src` 放行它；不再把 `data:` URL 写进脚本一次发一张。
-      还要在两个平台上用真实邮件看一眼（内嵌图片、缓存的和点了才下载的远程图片、换外观、快速换邮件）
+      ⚠️ Linux 上限流：WebKitGTK 按 8 KB 一块读 scheme 的应答，大图一起应答时下一封邮件要等（见 gui.md 的图片）；
+      同时在传的不超过 1 MiB，页面报一张到了再放行（`html::pacer`）。WebKitGTK 按大块读之后去掉
+      （WebKit bug 330624）；不放进 nsh，原因见 gui.md 的图片。macOS 不限流，还要用
+      图片多的邮件看一眼
 - [x] 附件（系统保存对话框，写文件在另一个线程）、头部（"Details"）、在浏览器打开（`hand_off`）
 - [ ] 正文的查找：WebKit 没有自带的查找栏，nsh 也没给 `WebKitFindController`，要自己用注入脚本做。选中、复制、
       全选是 WebKit 自带的

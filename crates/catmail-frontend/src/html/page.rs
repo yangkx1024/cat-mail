@@ -43,8 +43,8 @@ const BASE_STYLE: &str = "html { overflow: hidden !important; } \
 /// is short of is cut off; not `scrollHeight`, which is rounded, nor the root's, which
 /// is never less than the view's height and so wouldn't shrink for a shorter message), that it has painted at the web view's height
 /// (`p:<n>:<px>`, two frames after it loaded and after each resize: WebKit has shown it
-/// at that size), and the links clicked (`o:<url>`), which open in the system's browser
-/// instead of in the view.
+/// at that size), the links clicked (`o:<url>`), which open in the system's browser
+/// instead of in the view. Its images are [`WATCH_IMAGES`]'s.
 pub const BRIDGE: &str = r#"(function () {
   var number = document.querySelector('meta[name="catmail-page"]');
   var page = number ? number.content : "0";
@@ -80,12 +80,29 @@ pub const BRIDGE: &str = r#"(function () {
   painted();
 })();"#;
 
-/// What a message from [`BRIDGE`] says, and of which page (its number).
+/// Tells the reader each of the page's images it serves that has come or failed
+/// (`l:<url>`, the URL carrying the page's number), so the next can go
+/// ([`BodyPages`](super::BodyPages)); others (`data:` ones, megabytes long, and those
+/// blocked) aren't its business. Injected before the page's content, so no image comes
+/// before it listens. An image's load and error don't bubble: they are caught on their
+/// way down.
+pub const WATCH_IMAGES: &str = r#"(function () {
+  function loaded(e) {
+    var src = e.target.tagName === "IMG" ? e.target.src : "";
+    if (src.lastIndexOf("catmail-image:", 0) === 0) window.nsh.postMessage("l:" + src);
+  }
+  document.addEventListener("load", loaded, true);
+  document.addEventListener("error", loaded, true);
+})();"#;
+
+/// What a message from [`BRIDGE`] or [`WATCH_IMAGES`] says, and of which page (its number).
 #[derive(Debug, PartialEq)]
 pub enum FromPage<'a> {
     Height(u64, f32),
     /// At the web view's height then, in points.
     Painted(u64, f32),
+    /// An image has come, or failed: by its URL, which says the page.
+    Loaded(&'a str),
     Open(&'a str),
 }
 
@@ -93,6 +110,9 @@ impl<'a> FromPage<'a> {
     pub fn parse(message: &'a str) -> Option<Self> {
         if let Some(url) = message.strip_prefix("o:") {
             return Some(FromPage::Open(url));
+        }
+        if let Some(url) = message.strip_prefix("l:") {
+            return Some(FromPage::Loaded(url));
         }
         let (kind, rest) = message.split_once(':')?;
         let (page, height) = rest.split_once(':')?;
@@ -191,6 +211,21 @@ mod tests {
     }
 
     #[test]
+    fn the_page_says_each_image_that_came_or_failed() {
+        // Or the images after it wait for the reader to give up on it.
+        for event in ["load", "error"] {
+            let listens = format!("document.addEventListener(\"{event}\", loaded, true)");
+            assert!(WATCH_IMAGES.contains(&listens), "{event}");
+        }
+        assert!(WATCH_IMAGES.contains(r#""l:" + src"#));
+        let only_ours = format!(
+            "src.lastIndexOf(\"{}:\", 0) === 0",
+            super::super::IMAGE_SCHEME
+        );
+        assert!(WATCH_IMAGES.contains(&only_ours), "{WATCH_IMAGES}");
+    }
+
+    #[test]
     fn plain_text_is_escaped() {
         let page = body_page(1, None, Some("<b>&"), &colors());
         assert!(page.html.contains("&lt;b&gt;&amp;"));
@@ -207,6 +242,10 @@ mod tests {
         assert_eq!(
             FromPage::parse("p:3:480"),
             Some(FromPage::Painted(3, 480.0))
+        );
+        assert_eq!(
+            FromPage::parse("l:catmail-image:3/cid/a%40b"),
+            Some(FromPage::Loaded("catmail-image:3/cid/a%40b"))
         );
         for unknown in ["h:3:tall", "h:640", "r:3", "d:3", "p:3", "x:3:1", "x"] {
             assert_eq!(FromPage::parse(unknown), None, "{unknown}");

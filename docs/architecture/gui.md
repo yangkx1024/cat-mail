@@ -258,8 +258,9 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
   "引擎根本没有网络"（Blitz）降成了"靠 CSP 拦"；用探针页（`<img>`、`srcset`、`@import`、`@font-face`、CSS 背景、
   `<link>`、iframe、`meta refresh`……）指向本机 HTTP 服务器验证过：开着 CSP 时零请求。
 - **脚本**：页面自己的 JS 关掉（`java_script_enabled(false)`）。注入的脚本（`html::BRIDGE`）WebKit 照样运行，
-  经 `window.nsh.postMessage` 回报：页面高度（`h`）、按 web view 的高度画好了（`p`）、点击的链接（`o`）。读信区
-  不往页面发消息。
+  经 `window.nsh.postMessage` 回报：页面高度（`h`）、按 web view 的高度画好了（`p`）、点击的链接（`o`）。限流时
+  （Linux）另一段 `html::WATCH_IMAGES` 在页面内容之前注入，回报读信区的每张图片到了或失败了（`l:<URL>`，URL 里
+  带页号；`data:` 图片和被拦下的不报），读信区据此放行下一批（见[图片](#图片)）。读信区不往页面发消息。
 - **网站数据**：web view 设成 `incognito`，页面留下的网站数据（cookie、存储、缓存）只在内存里，随 web view
   一起没了，不写进数据目录：正文是别人写的 HTML，页面的 JS 虽然关了，也不该和应用共用一份持久的网站数据。
   Linux 上是这个 web view 自己的临时 `NetworkSession`（不再建 `$XDG_DATA_HOME/<app id>/webkit`），macOS 上是
@@ -300,6 +301,19 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
   就是空的；点了以后下载到的逐批应答，下载失败的继续留着，按钮回来时可以再试。换邮件不撤这些请求：旧页面在新
   页面画好之前还显示着，应答失败会闪出破图；它们随旧页面被 WebKit 取消，下一个页面的请求来时丢掉。页号不是当前
   页面的请求直接丢掉（失败）。字节是 `Arc<[u8]>`，应答不复制。
+- **限流（Linux）**：WebKitGTK 把 scheme 的应答按 8 KB 一块读、每块一条 IPC 发给网页进程，页面显示着的图片每来
+  一块就重画一次。几十张几 MB 的照片一起应答时网页进程要忙一两秒，下一封邮件的页面排在后面：25 张共 48 MB 的
+  邮件，切到下一封要等到 3 秒，第一张图约 1 秒才出来；同样的图经 HTTP 加载（网络进程，大块）切换只要几十毫秒。
+  所以 Linux 上同时在传的图片不超过 1 MiB（`IMAGES_IN_FLIGHT`，一张更大的单独传），按页面请求的顺序，页面报
+  `l` 再放行下一批；有图片被压着时，每 3 秒看一次有没有进展，没有（某张图没报）就放行剩下的，以免卡住。之后
+  第一张图 35–93 ms，切换最多约 0.37 秒，剩下的差距是每张图仍按 8 KB 一块传。限流是过渡办法，单独在
+  `html::pacer`（`BodyPages` 只是用它），等 WebKitGTK 按大块读之后整块删掉。不放进 nsh 的 Linux 后端：在 nsh 里
+  试过按 WebKit 的 `WebKitWebResource::finished` 放行，效果和这里相当，但光限流不够，换页面时必须立刻停发旧
+  页面的图（切走后再放出一张大图，WebKit 会先把它完整解码，导航多等约 0.5 秒）。哪次导航是换页面只有应用知道：
+  读信区建新页面时（`BodyPages` 换页号）就清空限流队列、不再理旧页面的回报；nsh 只能靠猜（用户手势、URL），猜错
+  要等兜底，还会改变所有应用默认的加载方式。macOS 上 nsh 把整张图作为一个 `NSData` 交给
+  `WKURLSchemeHandler`，没有这个问题，不限流（限流只会让 WebKit 不能并行解码）。传完前把图片藏起来、
+  `decoding="async"` 都量过，没有帮助。
 - **内嵌图片**：取的是 `MessageBody::inline_parts`，内嵌的规则见[正文与附件](bodies.md)，读信区不另加条件。
   打开时先显示文字，内嵌部分一张张取，取到一张就应答等它的请求。没有 HTML 的邮件不取。
 - **远程图片**：建页时 `serve_images` 一并列出正文引用的远程图片，缓存里有的（`cached_remote_images`）
@@ -413,3 +427,6 @@ From 是条目实际发出用的身份（`OutboxEntry::identity`），叫法和�
 - **拖动分隔条**：三栏的宽度由应用自己记，用 nsh-base 的 `resize_handle`。⚠️ 它的 `h_resizable` 快速来回拖时会丢掉
   拖动结束，之后分隔线错位；所以每次拖动从开始时的宽度算起，丢了结束也不会累积。
 - 输入框失焦（#248），见上文[外壳](#外壳)。
+- **WebKitGTK 按 8 KB 一块读 scheme 的应答**（[WebKit bug 330624](https://bugs.webkit.org/show_bug.cgi?id=330624)）：
+  图片多的邮件靠限流缓解（见上文[图片](#图片)），切换仍比 HTTP 加载慢。WebKitGTK 改成按大块读之后，Linux 也可以
+  不限流。

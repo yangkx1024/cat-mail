@@ -8,10 +8,11 @@
 //! ones of a message (`catmail_core::html::serve_images`). The page the reader shows a
 //! body as is [`page`]'s, and the reader serves its images ([`BodyPages`]).
 
+mod pacer;
 mod page;
 mod pages;
 
-pub use page::{BRIDGE, Colors, FromPage};
+pub use page::{BRIDGE, Colors, FromPage, WATCH_IMAGES};
 pub use pages::{BodyPages, IMAGE_SCHEME};
 
 use std::collections::HashMap;

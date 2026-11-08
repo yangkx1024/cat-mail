@@ -87,18 +87,39 @@ struct Retry(u64);
 struct ShowDetails(bool);
 
 /// What the page shows besides itself, and the fetch of remote images. Not reactive.
-#[derive(Default)]
 struct Page {
     /// The message's scroll view, taken back to the top for the next message.
     scroll: Option<ElementRef>,
     /// The message whose page was made last.
     shown: Option<MessageId>,
-    /// The pages made, the open message's images, and the requests of the page shown
-    /// waiting for them.
+    /// The pages made, the open message's images, and the requests of the page shown.
     pages: BodyPages<WebResourceRequest>,
     /// Fetching the open message's remote images; dropped with the message.
     fetch: Option<Spawned<()>>,
+    /// Watching images held back ([`watch_images`]).
+    watching: bool,
 }
+
+impl Default for Page {
+    fn default() -> Self {
+        Self {
+            scroll: None,
+            shown: None,
+            pages: BodyPages::new(IMAGES_IN_FLIGHT),
+            fetch: None,
+            watching: false,
+        }
+    }
+}
+
+/// The bytes of images on their way to the page at once (`BodyPages::new`; why, in
+/// `catmail_frontend::html`'s pacer): WebKitGTK reads them 8 KiB at a time.
+#[cfg(target_os = "linux")]
+pub(super) const IMAGES_IN_FLIGHT: Option<usize> = Some(1 << 20);
+
+/// `WKURLSchemeHandler` takes each image whole: no limit.
+#[cfg(not(target_os = "linux"))]
+pub(super) const IMAGES_IN_FLIGHT: Option<usize> = None;
 
 #[derive(Clone, Default)]
 struct PageState(Rc<RefCell<Page>>);
@@ -278,20 +299,62 @@ fn add_inline_image(content_id: String, image: Image) {
     answer(answers);
 }
 
-/// The page asks for one of its images (`html::IMAGE_SCHEME`): answered now if it is
-/// here, else once it comes.
+/// The page asks for one of its images (`html::IMAGE_SCHEME`): answered once it is here
+/// and the page has taken those before it (`BodyPages::request`).
 fn serve_image(request: WebResourceRequest) {
     let url = request.url().to_owned();
-    let answered = page_state().borrow_mut().pages.request(&url, request);
-    answer(answered);
+    let answers = page_state().borrow_mut().pages.request(&url, request);
+    answer(answers);
 }
 
-/// Gives the page the images it asked for.
-fn answer(answers: impl IntoIterator<Item = (WebResourceRequest, Image)>) {
+/// The page says one of its images has come (or failed): the next go.
+fn image_loaded(url: &str) {
+    let answers = page_state().borrow_mut().pages.loaded(url);
+    answer(answers);
+}
+
+/// Gives the page the images it asked for, and watches those held back.
+fn answer(answers: Vec<(WebResourceRequest, Image)>) {
     for (request, image) in answers {
         let resource = WebResource::new(image.mime_type().clone(), image.bytes().clone());
         request.respond(resource);
     }
+    watch_images();
+}
+
+/// How long images may be held back with none coming before the rest go anyway.
+const UNSTICK_AFTER: Duration = Duration::from_secs(3);
+
+/// While images are held back, checks every [`UNSTICK_AFTER`] that one has come since: a
+/// page that never says so would get no more (`BodyPages::unstick`). One watch at a time.
+fn watch_images() {
+    {
+        let page = page_state();
+        let mut page = page.borrow_mut();
+        if page.watching || !page.pages.holds_back() {
+            return;
+        }
+        page.watching = true;
+    }
+    in_view(async {
+        loop {
+            let progress = page_state().borrow().pages.progress();
+            timer(UNSTICK_AFTER).await;
+            let answers = {
+                let page = page_state();
+                let mut page = page.borrow_mut();
+                if !page.pages.holds_back() {
+                    page.watching = false;
+                    return;
+                }
+                page.pages.unstick(progress)
+            };
+            if !answers.is_empty() {
+                tracing::warn!("the page didn't say its images came; sending the rest");
+            }
+            answer(answers);
+        }
+    });
 }
 
 /// Fetches the open message's remote images and shows each as it comes, because the user

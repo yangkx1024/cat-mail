@@ -19,8 +19,9 @@ use crate::mailbox::panes::back_button;
 use crate::{chrome, composer};
 
 use super::{
-    BodyHeight, MIN_BODY_HEIGHT, Reading, Retry, ShowDetails, State, is_shown, open_in_browser,
-    page_painted, page_state, save_attachment, serve_image, show_remote_images,
+    BodyHeight, IMAGES_IN_FLIGHT, MIN_BODY_HEIGHT, Reading, Retry, ShowDetails, State,
+    image_loaded, is_shown, open_in_browser, page_painted, page_state, save_attachment,
+    serve_image, show_remote_images,
 };
 
 /// The pane: its toolbar over the message. It stays while no message is selected
@@ -401,7 +402,14 @@ fn web_view() -> impl IntoElement {
     // Its own memo: the page (a long message's is large) is copied for the web view only
     // when it changes, not on each change of what else the pane shows.
     let page = computed(move || reading.with(|r| r.page.clone()));
-    web_view_html(move || page.with(|p| p.to_string()), None)
+    let web = web_view_html(move || page.with(|p| p.to_string()), None);
+    // The page says which images came only where they go a few at a time.
+    let web = if IMAGES_IN_FLIGHT.is_some() {
+        web.injected_java_script_before_content(html::WATCH_IMAGES.to_owned())
+    } else {
+        web
+    };
+    web
         // Someone else's HTML: whatever website data it leaves goes with the web view,
         // and none of it is written to the data directory.
         .incognito(true)
@@ -413,6 +421,7 @@ fn web_view() -> impl IntoElement {
             let _ = requests.unbounded_send(request);
         })
         .on_message(move |message: &str| match FromPage::parse(message) {
+            Some(FromPage::Loaded(url)) => image_loaded(url),
             Some(FromPage::Painted(number, height)) if is_shown(number) => page_painted(height),
             Some(FromPage::Height(number, height)) if is_shown(number) => {
                 global::<BodyHeight>().set(BodyHeight(height));
