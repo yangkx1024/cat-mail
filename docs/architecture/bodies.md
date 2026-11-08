@@ -174,9 +174,9 @@ base64 正文），交给 mail-parser 按同样方式解析。于是两条路径
   - 链接只允许 http、https、mailto、cid，`data:` 只允许出现在 `img src`；判断时像 URL 解析器
     一样忽略其中的制表符、换行和开头的控制字符。
   - 图片地址（远程、`cid:`）原样保留，是否加载由渲染端决定，默认应拦截远程图片。
-- **哪些是远程图片**由 `catmail-html` 决定（`remote_image_urls`，经 `catmail_core::html` 导出）：清洗用的
-  同一个 ammonia 配置列出 `img src`（`image_sources`），只留 `http` / `https`，按 `url` 解析后的写法
-  （`remote_image_url`）去重，最多 200 张。下载、缓存和读信区都用这一种写法，调用方传别的写法，缓存
+- **哪些是远程图片**由 `catmail-html` 决定（`serve_images` 改写页面时一并列出，经 `catmail_core::html` 导出）：
+  清洗用的同一个 ammonia 配置遍历 `img src`，只留 `http` / `https`，按 `url` 解析后的写法（`remote_image_url`）
+  去重，最多 200 张；列出的和页面里改写的是同一批。下载、缓存和读信区都用这一种写法，调用方传别的写法，缓存
   也会先规范化。
 - **远程图片**只在前端要求时下载（GUI 是用户点"Show remote images"），`MailClient::fetch_remote_images`
   在引擎运行时上用 `catmail-proto` 的 `http::ImageFetcher`（reqwest，TLS 与邮件服务器共用同一个

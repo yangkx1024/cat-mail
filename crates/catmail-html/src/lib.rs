@@ -20,7 +20,7 @@ mod tokens;
 
 pub use dark::DarkPalette;
 pub use images::{
-    Embedded, InlineImage, InlineUrl, MAX_REMOTE_IMAGES, cid_image_ids, data_url,
-    embed_inline_images, remote_image_url, remote_image_urls, sniff_image,
+    Image, MAX_REMOTE_IMAGES, Served, ServedImage, cid_image_ids, embed_inline_images,
+    remote_image_url, serve_images, sniff_image,
 };
 pub use sanitize::{recolor_html, sanitize_html};

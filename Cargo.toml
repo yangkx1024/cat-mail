@@ -60,8 +60,9 @@ mime_guess = "2.0.5"
 # Native Shell, catmail-gui's toolkit: GTK 4 on Linux and AppKit on macOS, bodies in web
 # views (WebKitGTK, WKWebView). Unreleased main, for its handling of taffy's `calc`
 # (longbridge/nsh#966), GTK children measured before they are allocated (#1048),
-# WebKit's network process ending with the last web view (#1051) and macOS's hidden title
-# bar at the app's height, the traffic lights centered in it (#1068). Back to crates.io (and
+# WebKit's network process ending with the last web view (#1051), macOS's hidden title
+# bar at the app's height, the traffic lights centered in it (#1068), and web views serving
+# URL schemes of the app's own (#1233), the reader's images. Back to crates.io (and
 # the repository out of `allow-git` in deny.toml) once a release has what catmail-gui uses.
 nsh-core = { git = "https://github.com/longbridge/nsh", rev = "71d0b11b13001c9a2394b585ef924473cef36fcb" }
 nsh-base = { git = "https://github.com/longbridge/nsh", rev = "71d0b11b13001c9a2394b585ef924473cef36fcb", default-features = false }
@@ -101,6 +102,9 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSObject",
     "NSString",
 ] }
+# The keys in the reader's image URLs, and Content-IDs in `cid:` URLs. The version `url`
+# uses.
+percent-encoding = "2.3.2"
 pollster = "1"
 # Remote images, when the user asks to see them. Without default features: rustls on our
 # ring configuration (`use_preconfigured_tls`), no native-tls, no HTTP/2, no system proxy

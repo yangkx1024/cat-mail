@@ -6,8 +6,8 @@ use catmail_frontend::format;
 use catmail_frontend::html::{self, FromPage, is_openable_link};
 use catmail_frontend::list as rows;
 use catmail_frontend::reader::{self, Header};
+use futures_util::StreamExt as _;
 use nsh_base::theme;
-use nsh_core::element::ElementRef;
 use nsh_core::prelude::*;
 
 use crate::buttons::{Size, icon_button, separator};
@@ -19,8 +19,8 @@ use crate::mailbox::panes::back_button;
 use crate::{chrome, composer};
 
 use super::{
-    BodyHeight, MIN_BODY_HEIGHT, Reading, Retry, ShowDetails, State, image_taken, is_shown,
-    open_in_browser, page_painted, page_ready, page_state, save_attachment, show_remote_images,
+    BodyHeight, MIN_BODY_HEIGHT, Reading, Retry, ShowDetails, State, is_shown, open_in_browser,
+    page_painted, page_state, save_attachment, serve_image, show_remote_images,
 };
 
 /// The pane: its toolbar over the message. It stays while no message is selected
@@ -354,14 +354,12 @@ fn message() -> impl IntoElement {
 
 fn body() -> impl IntoElement {
     let reading = global::<Reading>();
-    let view_ref = element_ref();
-    page_state().borrow_mut().view = Some(view_ref);
     // One web view for every message, made with the pane: a new page loads into it.
     let hidden = move || reading.with(|r| r.hidden);
     // The page pads itself.
     view()
         .mx(px(-16.0))
-        .child(web_view(view_ref))
+        .child(web_view())
         // Over the web view while the page is hidden: WebKit keeps painting under it.
         .child(when(hidden, || {
             view()
@@ -390,10 +388,18 @@ fn page_background() -> AdaptiveColor {
     }
 }
 
-fn web_view(view_ref: ElementRef) -> impl IntoElement {
+fn web_view() -> impl IntoElement {
     let reading = global::<Reading>();
-    // Its own memo: the page (megabytes, with images in it) is copied for the web view
-    // only when it changes, not on each change of what else the pane shows.
+    // The handler is called on the platform's main thread, outside the view: it hands
+    // each request to the view, which answers it from the open message's images.
+    let (requests, mut requested) = futures_channel::mpsc::unbounded();
+    spawn(async move {
+        while let Some(request) = requested.next().await {
+            serve_image(request);
+        }
+    });
+    // Its own memo: the page (a long message's is large) is copied for the web view only
+    // when it changes, not on each change of what else the pane shows.
     let page = computed(move || reading.with(|r| r.page.clone()));
     web_view_html(move || page.with(|p| p.to_string()), None)
         // Someone else's HTML: whatever website data it leaves goes with the web view,
@@ -402,10 +408,11 @@ fn web_view(view_ref: ElementRef) -> impl IntoElement {
         .java_script_enabled(false)
         .scrollable(false)
         .injected_java_script(html::BRIDGE.to_owned())
-        .element_ref(&view_ref)
+        // Dropped unanswered if the view has gone, which fails it.
+        .url_scheme(html::IMAGE_SCHEME, move |request| {
+            let _ = requests.unbounded_send(request);
+        })
         .on_message(move |message: &str| match FromPage::parse(message) {
-            Some(FromPage::Ready(number)) if is_shown(number) => page_ready(),
-            Some(FromPage::Taken(number)) if is_shown(number) => image_taken(),
             Some(FromPage::Painted(number, height)) if is_shown(number) => page_painted(height),
             Some(FromPage::Height(number, height)) if is_shown(number) => {
                 global::<BodyHeight>().set(BodyHeight(height));

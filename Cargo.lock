@@ -662,6 +662,7 @@ dependencies = [
  "color",
  "cssparser",
  "html5ever 0.40.1",
+ "percent-encoding",
  "url",
 ]
 

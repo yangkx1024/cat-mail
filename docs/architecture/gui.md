@@ -249,19 +249,17 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 
 ### 正文在 web view 里
 
-有 HTML 部分就显示清洗后的 HTML，否则把纯文本转义后放进 `<pre>`（`catmail_frontend::html::PageImages::page`），都在同一个 web view 里。
+有 HTML 部分就显示清洗后的 HTML，否则把纯文本转义后放进 `<pre>`（`catmail_frontend::html::BodyPages::page`），都在同一个 web view 里。
 
 - **断网**：WebKit 有自己的网络，nsh 只检查顶层导航，不管页面的子资源，所以由页面自己断网：`<head>` 最前面
-  一条 CSP `default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; form-action 'none';
-  base-uri 'none'`（后两项不回落到 `default-src`），加 `no-referrer`。要显示的图片都先嵌成 `data:` URL。保证从
+  一条 CSP `default-src 'none'; img-src data: catmail-image:; style-src 'unsafe-inline'; font-src data:;
+  form-action 'none'; base-uri 'none'`（后两项不回落到 `default-src`），加 `no-referrer`。要显示的图片都改写成
+  读信区自己的 scheme（`catmail-image:`，见下文[图片](#图片)），由读信区应答，不经过网络。保证从
   "引擎根本没有网络"（Blitz）降成了"靠 CSP 拦"；用探针页（`<img>`、`srcset`、`@import`、`@font-face`、CSS 背景、
   `<link>`、iframe、`meta refresh`……）指向本机 HTTP 服务器验证过：开着 CSP 时零请求。
 - **脚本**：页面自己的 JS 关掉（`java_script_enabled(false)`）。注入的脚本（`html::BRIDGE`）WebKit 照样运行，
-  经 `window.nsh.postMessage` 回报：载入了（`r`）、页面高度（`h`）、按 web view 的高度画好了（`p`）、点击的链接
-  （`o`）、收下了刚发来的图片（`d`）。读信区经 `post_message` 发回图片（`i:<url>\n<data URL>`），脚本把它填进
-  `src` 规范化后等于 `url` 的 `<img>`（第一次收到图片时按 URL 建一张表，之后只查表：已填上的 `src` 是几百 KB 的
-  `data:` URL，每张都重新解析一遍是 O(n²)）。只有 `<img>` 有图：清洗不保留 `background` 属性和样式里的 `url()`（见
-  [正文](bodies.md)），表格布局邮件的 `<td background="…">` 背景图不显示。
+  经 `window.nsh.postMessage` 回报：页面高度（`h`）、按 web view 的高度画好了（`p`）、点击的链接（`o`）。读信区
+  不往页面发消息。
 - **网站数据**：web view 设成 `incognito`，页面留下的网站数据（cookie、存储、缓存）只在内存里，随 web view
   一起没了，不写进数据目录：正文是别人写的 HTML，页面的 JS 虽然关了，也不该和应用共用一份持久的网站数据。
   Linux 上是这个 web view 自己的临时 `NetworkSession`（不再建 `$XDG_DATA_HOME/<app id>/webkit`），macOS 上是
@@ -286,22 +284,29 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 
 ### 图片
 
+页面里的图片由读信区经 nsh 的 URL scheme handler（`url_scheme`，macOS 上是 `WKURLSchemeHandler`，Linux 上是
+`webkit_web_context_register_uri_scheme`）应答，WebKit 自己读字节，不再编成 `data:` URL 写进脚本。
+
+- **URL**：建页时 `catmail_html::serve_images` 把 `cid:` 图片和前 `MAX_REMOTE_IMAGES` 张远程图片改写成
+  `catmail-image:<页号>/cid/<Content-ID>` 和 `catmail-image:<页号>/remote/<URL>`（URL 按 `remote_image_url` 的写法），
+  同时返回改写了的远程 URL（读信区要下载的就是这一批，不再单独过一遍清洗）。路径必须是不透明的（没有 `//`），
+  否则 `..` 这样的 Content-ID 会被当成点段去掉；
+  键里除 unreserved 字符外都百分号编码：URL 解析器对这样的 URL 不再改写，页面请求时的写法和建页时一样，读信区
+  按它解析回来（`ServedImage`）。别的 URL 照旧，CSP 拦下。只有 `<img>` 有图：清洗不保留 `background` 属性和样式
+  里的 `url()`（见[正文](bodies.md)），表格布局邮件的 `<td background="…">` 背景图不显示。
+- **应答**：handler 在平台主线程上调用，不在视图里，所以只把请求经 channel 交给视图里的任务；它问
+  `catmail_frontend::html::BodyPages`（它也给页面编号、建空白页）：这封邮件已经有的图片（取到的内嵌部分、缓存里的或用户点了才下载的远程
+  图片）立即应答，没有的请求先留着，图片来了再应答。远程图片在用户点"Show remote images"之前一直不应答，页面里
+  就是空的；点了以后下载到的逐批应答，下载失败的继续留着，按钮回来时可以再试。换邮件不撤这些请求：旧页面在新
+  页面画好之前还显示着，应答失败会闪出破图；它们随旧页面被 WebKit 取消，下一个页面的请求来时丢掉。页号不是当前
+  页面的请求直接丢掉（失败）。字节是 `Arc<[u8]>`，应答不复制。
 - **内嵌图片**：取的是 `MessageBody::inline_parts`，内嵌的规则见[正文与附件](bodies.md)，读信区不另加条件。
-  打开时先显示文字。已经取到的内嵌部分在建页时嵌进页面；其余的，建页时就从 HTML 算出它们在页面里的 `cid:`
-  URL（`embed_inline_images` 嵌入时顺便记下没嵌的，按 URL 解析器的写法规范化，和脚本里 `new URL(src).href`
-  一致，同远程图片），取到一个就 `post_message` 填进去，不重新载入页面。没有 HTML 的邮件不取。
-- **发给页面的图片**由 `catmail_frontend::html::PageImages` 管：这封邮件取到的内嵌部分、显示了的远程图片、
-  页面还缺哪些、页面载入了没有（`r`）。它建页面，有图片来就排进队列，页面载入后**一次只发一张**，页面回了 `d`
-  再发下一张；读信区只管把消息发给 web view。换外观重建页面时，取到的内嵌部分直接嵌进去，远程图片在 `r` 后重发。
-  ⚠️ nsh 没有自定义 URL scheme，图片只能以 `data:` URL 写进一段脚本（`evaluateJavaScript`），newsletter 的图片
-  一张就上 MB：GUI 主线程要转义整段字符串，网页进程按顺序执行这些脚本。一次全发出去时界面会卡，换邮件时新页面
-  也要排在这些脚本后面；一次一张，换邮件时剩下的就不发了（`forget_message`）。总的载入时间还是跟图片大小成正比，
-  要让 WebKit 自己读图片得等 nsh 支持 URL scheme handler（longbridge/nsh#1136）。远程图片存原始字节，发送时才编成 `data:` URL。
-- **远程图片**：打开时在后台列出正文引用的远程图片（`remote_image_urls`），缓存里有的（`cached_remote_images`）
-  直接显示，其余的在用户点"Show remote images"后交给 `MailClient::fetch_remote_images`（限制见
-  [正文与附件](bodies.md)），按下载完成的顺序逐批填进页面（`html::data_url`），按钮转圈；一张也没拿到时提示
-  原因、按钮恢复。点击只对这一封、这一次打开有效，换邮件时下载随任务取消；不记住发件人。CSP 照样只放行 `data:`。
-- 页面因外观变化重新建好时（脚本报 `r`），已显示的远程图片再发一遍，已取到的内嵌图片直接嵌进新页面。
+  打开时先显示文字，内嵌部分一张张取，取到一张就应答等它的请求。没有 HTML 的邮件不取。
+- **远程图片**：建页时 `serve_images` 一并列出正文引用的远程图片，缓存里有的（`cached_remote_images`）
+  直接应答，其余的在用户点"Show remote images"后交给 `MailClient::fetch_remote_images`（限制见
+  [正文与附件](bodies.md)），按下载完成的顺序逐批应答，按钮转圈；一张也没拿到时提示原因、按钮恢复。点击只对
+  这一封、这一次打开有效，换邮件时下载随任务取消；不记住发件人。
+- 页面因外观变化重新建好时，新页面的请求都立即应答：图片都还在 `BodyPages` 里，页面不用嵌入什么。
 
 ### 深色
 
@@ -395,7 +400,8 @@ From 是条目实际发出用的身份（`OutboxEntry::identity`），叫法和�
 ## 测试
 
 纯逻辑在 `catmail-frontend`，表驱动测试，不用编译 GTK 和 WebKit（见[测试](testing.md#gui)），读信区的正文页面
-也在那里测（`html`：CSP 在正文之前、`cid:` 图片嵌入、纯文本转义、消息协议的解析、页面编号、载入后补发哪些图片）。
+也在那里测（`html`：CSP 在正文之前、图片改写成读信区的 URL、纯文本转义、消息协议的解析、页面编号、哪些请求
+什么时候应答）。
 这个 crate 只测几处不经窗口的：页面高度够不够、页面算深色还是浅色、主题映射、图标、托盘的绘制。还没有驱动窗口
 的测试（ROADMAP 里的 nsh-testing）。
 
@@ -407,6 +413,3 @@ From 是条目实际发出用的身份（`OutboxEntry::identity`），叫法和�
 - **拖动分隔条**：三栏的宽度由应用自己记，用 nsh-base 的 `resize_handle`。⚠️ 它的 `h_resizable` 快速来回拖时会丢掉
   拖动结束，之后分隔线错位；所以每次拖动从开始时的宽度算起，丢了结束也不会累积。
 - 输入框失焦（#248），见上文[外壳](#外壳)。
-- **图片多的邮件载入慢**：nsh 的 web view 没有自定义 URL scheme，图片只能以 `data:` URL 写进脚本发给页面，见上文
-  [图片](#图片)。现在一次发一张，换邮件不卡，但总时间跟图片大小成正比。已提 longbridge/nsh#1136；支持后改成由
-  WebKit 经 scheme handler 自己读图片，要改的地方见 ROADMAP。

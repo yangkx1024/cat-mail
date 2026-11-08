@@ -5,18 +5,18 @@
 //! links, but leaves image URLs alone. Loading a remote image tells the sender the
 //! message was read (and from where), so only images carried by the message itself are
 //! shown (inline parts, `cid:`, and `data:` URLs) until the user asks for the remote
-//! ones of a message (`catmail_core::html::remote_image_urls`). The page the reader shows
-//! a body as is [`page`]'s, and the images sent to it after it is [`PageImages`]'.
+//! ones of a message (`catmail_core::html::serve_images`). The page the reader shows a
+//! body as is [`page`]'s, and the reader serves its images ([`BodyPages`]).
 
-mod images;
 mod page;
+mod pages;
 
-pub use images::PageImages;
-pub use page::{BRIDGE, Colors, FromPage, blank_page};
+pub use page::{BRIDGE, Colors, FromPage};
+pub use pages::{BodyPages, IMAGE_SCHEME};
 
 use std::collections::HashMap;
 
-use catmail_core::html::{InlineImage, embed_inline_images};
+use catmail_core::html::{Image, embed_inline_images};
 
 /// Content-Security-Policy of the browser page: nothing may load except the images
 /// embedded in the page and its inline styles. Browsers ignore `cid:`, so inline parts are
@@ -35,14 +35,14 @@ pub fn is_openable_link(url: &str) -> bool {
 
 /// A standalone HTML page showing the message in a browser: inline images embedded, and
 /// a CSP so the browser doesn't load the remote content the reader blocks.
-pub fn browser_page(title: &str, html: &str, inline: HashMap<String, InlineImage>) -> String {
+pub fn browser_page(title: &str, html: &str, inline: HashMap<String, Image>) -> String {
     format!(
         "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">\
          <meta http-equiv=\"Content-Security-Policy\" content=\"{BROWSER_CSP}\">\
          <meta name=\"referrer\" content=\"no-referrer\">\
          <title>{}</title></head>\n<body>\n{}\n</body></html>\n",
         escape(title),
-        embed_inline_images(html, inline).html,
+        embed_inline_images(html, inline),
     )
 }
 
@@ -70,7 +70,7 @@ mod tests {
 
     #[test]
     fn browser_page_embeds_inline_images_and_forbids_remote_loads() {
-        let inline = HashMap::from([("logo@x".to_owned(), InlineImage::new("image/png", b"hi"))]);
+        let inline = HashMap::from([("logo@x".to_owned(), Image::new("image/png", *b"hi"))]);
         let html = r#"<img src="cid:logo@x"> <img src="https://x/p.gif">"#;
         let page = browser_page("报告 <Q3>", html, inline);
 
