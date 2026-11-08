@@ -22,6 +22,7 @@ pub fn run(started: impl FnOnce() + 'static) -> u8 {
         .build();
     let started = RefCell::new(Some(started));
     app.connect_startup(move |app| {
+        own_app_id(app.upcast_ref());
         if let Some(started) = started.borrow_mut().take() {
             started();
         }
@@ -36,6 +37,25 @@ pub fn run(started: impl FnOnce() + 'static) -> u8 {
     // GTK must not parse the app's own arguments.
     let code = app.run_with_args::<&str>(&[]);
     code.get()
+}
+
+/// Owns the app id on the session bus, where the desktop looks for the app when one of
+/// its notifications is clicked: the portal (in a Flatpak) and GNOME Shell call
+/// `org.freedesktop.Application.ActivateAction` there. A `NON_UNIQUE` app exports that
+/// interface and its actions at its object path all the same; it only leaves the name
+/// alone. Owned while the app runs. The instance of another data directory may have it
+/// already: then clicks on this one's notifications reach that one, which ignores them.
+fn own_app_id(app: &gtk::gio::Application) {
+    let (Some(bus), Some(id)) = (app.dbus_connection(), app.application_id()) else {
+        return;
+    };
+    gtk::gio::bus_own_name_on_connection(
+        &bus,
+        &id,
+        gtk::gio::BusNameOwnerFlags::DO_NOT_QUEUE,
+        |_, _| {},
+        |_, name| tracing::info!(name, "the app id is another instance's"),
+    );
 }
 
 pub fn application() -> Option<gtk::Application> {
@@ -219,4 +239,106 @@ fn blur_on_press_outside(window: &gtk::ApplicationWindow) {
         }
     });
     window.add_controller(press);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::process::Command;
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    use nsh_platform_linux::gtk4::gio::{self, prelude::*};
+    use nsh_platform_linux::gtk4::glib;
+
+    use super::own_app_id;
+
+    const ID: &str = "net.yangkx.catmail.Test";
+    const CHILD: &str = "shell::toolkit::tests::clicks_reach_the_app_through_its_id";
+
+    /// GLib reads the session bus's address once per process: the test runs again in a
+    /// process of its own, on a bus of its own.
+    #[test]
+    fn a_notification_click_finds_the_non_unique_app() {
+        let run = Command::new("dbus-run-session")
+            .arg("--")
+            .arg(std::env::current_exe().unwrap())
+            .args(["--exact", CHILD, "--ignored", "--test-threads=1"])
+            .output()
+            .expect("dbus-run-session");
+        assert!(
+            run.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "run on a bus of its own by a_notification_click_finds_the_non_unique_app"]
+    fn clicks_reach_the_app_through_its_id() {
+        let app = gio::Application::new(Some(ID), gio::ApplicationFlags::NON_UNIQUE);
+        let clicked = Rc::new(RefCell::new(None));
+        let open = gio::SimpleAction::new("open-mail", Some(glib::VariantTy::STRING));
+        open.connect_activate({
+            let clicked = clicked.clone();
+            move |_, tag| *clicked.borrow_mut() = tag.and_then(|tag| tag.str()).map(str::to_owned)
+        });
+        app.add_action(&open);
+        app.register(gio::Cancellable::NONE).unwrap();
+        own_app_id(&app);
+
+        let address = std::env::var("DBUS_SESSION_BUS_ADDRESS").unwrap();
+        glib::MainContext::default().block_on(async {
+            // The desktop's side, on a connection of its own.
+            let desktop = gio::DBusConnection::for_address_future(
+                &address,
+                gio::DBusConnectionFlags::AUTHENTICATION_CLIENT
+                    | gio::DBusConnectionFlags::MESSAGE_BUS_CONNECTION,
+                None,
+            )
+            .await
+            .unwrap();
+            let mut tries = 0;
+            loop {
+                let owned = desktop
+                    .call_future(
+                        Some("org.freedesktop.DBus"),
+                        "/org/freedesktop/DBus",
+                        "org.freedesktop.DBus",
+                        "NameHasOwner",
+                        Some(&(ID,).to_variant()),
+                        Some(glib::VariantTy::new("(b)").unwrap()),
+                        gio::DBusCallFlags::NONE,
+                        1000,
+                    )
+                    .await
+                    .unwrap();
+                if owned.get::<(bool,)>().unwrap().0 {
+                    break;
+                }
+                tries += 1;
+                assert!(tries < 300, "nobody owns {ID}");
+                glib::timeout_future(Duration::from_millis(10)).await;
+            }
+            // What the portal and GNOME Shell do with a click on the notification.
+            let tag = "new-mail/1/8".to_variant();
+            let platform_data = HashMap::<String, glib::Variant>::new();
+            desktop
+                .call_future(
+                    Some(ID),
+                    "/net/yangkx/catmail/Test",
+                    "org.freedesktop.Application",
+                    "ActivateAction",
+                    Some(&("open-mail", vec![tag], platform_data).to_variant()),
+                    None,
+                    gio::DBusCallFlags::NONE,
+                    5000,
+                )
+                .await
+                .unwrap();
+        });
+        assert_eq!(clicked.borrow().as_deref(), Some("new-mail/1/8"));
+    }
 }

@@ -5,7 +5,7 @@
 
 用 Rust 编写的跨平台邮件客户端，同时提供图形界面（`catmail-gui`）和命令行（`catmail`）。
 
-> 早期开发中：图形界面目前只发布 macOS 版，Linux 上要从源码构建，Windows 上只有命令行；接口和数据库结构
+> 早期开发中：图形界面发布 macOS 版和 Linux 的 Flatpak，Windows 上只有命令行；接口和数据库结构
 > 仍会变化。
 
 ## 特点
@@ -47,8 +47,8 @@
 Linux（x86_64、aarch64）：
 
 - 命令行：`catmail-<版本>-<架构>-linux.tar.gz`（glibc 2.35 及以上，即 Ubuntu 22.04 之后的发行版）
-- 图形界面暂时没有安装包（WebKitGTK 的打包还没做），要[从源码构建](#构建)；运行时需要 GTK 4.14 及以上、
-  WebKitGTK 6.0，以及 Wayland 或 X11
+- 图形界面：`catmail-<版本>-<架构>.flatpak`，`flatpak install --user catmail-<版本>-<架构>.flatpak` 安装（GNOME
+  runtime 从 Flathub 自动装上），命令行也在包里：`flatpak run --command=catmail net.yangkx.catmail`
 
 需要一个 Secret Service 提供者（如 gnome-keyring、KeePassXC）保存密码。
 
@@ -170,7 +170,7 @@ cargo test -p catmail-core --test dovecot --test submission
 | M3 | 草稿、SMTP 发信与 outbox、保存到已发送 | ✅ |
 | M4 | 离线操作队列、IDLE 推送与后台同步、草稿同步到服务器 | ✅ |
 | M5 | 图形界面（起初基于 GPUI，后改用 Native Shell） | ✅ |
-| M6 | 打包：macOS 磁盘映像与 CLI ✅；Linux 图形界面的安装包；Windows（图形界面接上 Native Shell 的 Windows 后端） | 进行中 |
+| M6 | 打包：macOS 磁盘映像与 CLI ✅；Linux 图形界面的 Flatpak ✅（上 Flathub 待做）；Windows（图形界面接上 Native Shell 的 Windows 后端） | 进行中 |
 
 之后：前端通过 IPC 连接正在运行的引擎（让图形界面和命令行能同时使用）。
 

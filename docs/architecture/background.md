@@ -225,8 +225,12 @@ UI 库，在 `catmail_frontend::new_mail`（`Arrivals`、`notifications`、`Targ
 INBOX。这之前用户自己选了别的邮件，就以用户的为准。点击总是去账户的 Inbox，即使窗口正显示 All Inboxes：合并的
 列表里旧一些的新邮件可能不在已加载的那一页。
 
-已知的限制：GNOME Shell 上点击无效。GLib 在那里改用 GNOME 自己的接口，它经 D-Bus 名字唤起应用，而应用不占这个
-名字（`NON_UNIQUE`，单实例靠 socket）。
+在 Flatpak 里 GLib 改走 Notification portal，在 GNOME Shell 上改走 GNOME 自己的接口：点击不再回到进程里，而是由
+portal（xdg-desktop-portal-gtk）或 GNOME Shell 对总线名 `net.yangkx.catmail` 调用
+`org.freedesktop.Application.ActivateAction`（GLib 的 portal 后端不听 `ActionInvoked`）。应用是 `NON_UNIQUE`
+（单实例靠 socket），GApplication 照样在对象路径上导出这个接口和 action，只是不占名字；所以 `shell/gtk.rs` 在
+startup 时自己占用 app id（`DO_NOT_QUEUE`），不改变单实例的做法。另一个数据目录的实例先占了时，这个实例的
+通知点击会到那一个，它找不到邮件、只打开自己的窗口。
 
 **macOS**：还没有。系统通知（`UNUserNotificationCenter`）只能在 bundle 里用，在 bundle 外会让进程崩溃；磁盘映像里
 是 bundle 了，接上之前 macOS 上没有新邮件通知。
@@ -297,10 +301,10 @@ GUI 的 `tray/` 在引擎打开时启动，有窗口时、常驻时都在。`tra
 
 ## 开机启动
 
-`catmail-gui --background`：不开窗口，直接常驻。"开机时启动"的设置写 XDG autostart 文件（Flatpak 用 Background
-portal）、Windows 的 `HKCU\…\Run`、macOS 的 `SMAppService.mainApp`。autostart 的 `Exec` 要写包本身的路径：
-AppImage 之类每次运行挂载到不同目录的包，当前可执行文件的路径下次就不在了（见
-[打包](packaging.md#图形界面暂缓)）。
+`catmail-gui --background`：不开窗口，直接常驻。"开机时启动"的设置写 XDG autostart 文件、Windows 的
+`HKCU\…\Run`、macOS 的 `SMAppService.mainApp`。Linux 的包是 Flatpak（见[打包](packaging.md#图形界面flatpak)），
+沙箱里写不了 `~/.config/autostart`，要用 Background portal 的 `RequestBackground`（`autostart`、
+`commandline` 带 `--background`），由 portal 写出 `flatpak run` 的 autostart 文件；包外运行时才自己写。
 
 ## 与 CLI 的关系
 
