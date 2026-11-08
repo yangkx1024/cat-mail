@@ -168,11 +168,14 @@ jobs:
 
       # Ubuntu 24.04 keeps unprivileged user namespaces, which bwrap (the build's
       # sandbox) needs, from programs without an AppArmor profile of their own.
+      # librsvg2-common is only recommended, but without its SVG loader appstreamcli
+      # compose can't read the icon (`file-read-error`); the arm image happens to have it.
       - name: Flatpak tools
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder \
+            librsvg2-common
           flatpak remote-add --user --if-not-exists flathub \
             https://dl.flathub.org/repo/flathub.flatpakrepo
 
