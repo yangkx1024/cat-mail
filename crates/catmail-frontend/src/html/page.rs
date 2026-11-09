@@ -23,17 +23,28 @@ const CSP: &str = "default-src 'none'; img-src data: catmail-image:; \
                    base-uri 'none'";
 
 /// Ours, under the message's own styles: the page has no margins of its own (the
-/// reader pads it) and doesn't scroll (the reader's scroll view does), but a message
-/// wider than the pane scrolls sideways inside it.
+/// reader pads it).
+const BASE_STYLE: &str = "html, body { margin: 0; } \
+                          body { padding: 16px; overflow-wrap: break-word; \
+                          font-family: sans-serif; }";
+
+/// How tall the root and the body are, in their style attributes (with how they
+/// overflow, [`body_page`]): those win over the message's style sheets, `!important` or
+/// not.
+///
+/// They are as tall as what is in them. A message's `html, body { height: 100% }`
+/// (common in newsletters) would make them as tall as the web view, which is as tall as
+/// the root says, so the view never grew and the body scrolled what didn't fit. Nor are
+/// they positioned: an absolute body would leave the root empty, and with `top: 0;
+/// bottom: 0` be as tall as the view.
+///
 /// The page itself never scrolls: on macOS nsh's `scrollable(false)` only sends the
 /// wheel to the reader, and WebKit shows a scroller of its own for a page a fraction of
 /// a pixel taller than the view, or one a sideways scroller makes taller. With the
 /// root's overflow hidden, the body's no longer goes to the viewport: the body is what
-/// scrolls sideways.
-const BASE_STYLE: &str = "html { overflow: hidden !important; } \
-                          html, body { margin: 0; } \
-                          body { padding: 16px; overflow-x: auto; overflow-wrap: break-word; \
-                          font-family: sans-serif; }";
+/// scrolls a message wider than the pane, and only sideways.
+const SIZE: &str = "height: auto !important; min-height: 0 !important; \
+                    max-height: none !important; position: static !important;";
 
 /// What the page tells the reader, through `window.nsh.postMessage`, with the page's
 /// number ([`body_page`]: one web view shows page after page, and what an earlier one
@@ -156,13 +167,14 @@ pub(super) fn body_page(
         _ => &appearance.light,
     };
     let html = format!(
-        "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">\
+        "<!DOCTYPE html>\n<html style=\"{SIZE} overflow: hidden !important\"><head><meta charset=\"utf-8\">\
          <meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\">\
          <meta name=\"referrer\" content=\"no-referrer\">\
          <meta name=\"catmail-page\" content=\"{number}\">\
          <style>{BASE_STYLE} html {{ color: {}; background: {}; }} a[href] {{ color: {}; }} \
          ::selection {{ background: {}; }}</style>\
-         </head>\n<body>\n{}\n</body></html>\n",
+         </head>\n<body style=\"{SIZE} overflow-x: auto !important; \
+         overflow-y: hidden !important\">\n{}\n</body></html>\n",
         colors.foreground, colors.background, colors.link, colors.selection, served.html,
     );
     Served { html, ..served }
@@ -229,7 +241,7 @@ pub(super) mod tests {
         )
         .html;
         let policy = page.find("Content-Security-Policy").unwrap();
-        let body = page.find("<body>").unwrap();
+        let body = page.find("<body").unwrap();
         assert!(policy < body);
         assert!(page.contains("default-src 'none'"));
         assert!(page.contains(&format!("img-src data: {}:;", super::super::IMAGE_SCHEME)));
@@ -238,12 +250,28 @@ pub(super) mod tests {
 
     #[test]
     fn the_page_itself_never_scrolls() {
-        // WebKit on macOS would show a scroller of its own next to the reader's.
+        // WebKit on macOS would show a scroller of its own next to the reader's, and a
+        // newsletter's `html, body { height: 100% !important }` held the view at its
+        // height and scrolled the body: style attributes outrank any style sheet.
         let page = blank_page(1, &light());
         assert!(
-            page.contains("html { overflow: hidden !important; }"),
+            page.contains(&format!(
+                "<html style=\"{SIZE} overflow: hidden !important\">"
+            )),
             "{page}"
         );
+        assert!(
+            page.contains(&format!(
+                "<body style=\"{SIZE} overflow-x: auto !important; overflow-y: hidden !important\">"
+            )),
+            "{page}"
+        );
+        for tag in ["<html style=\"", "<body style=\""] {
+            let style = &page[page.find(tag).unwrap() + tag.len()..];
+            let style = &style[..style.find('"').unwrap()];
+            // Out of the flow, the body would leave the root empty, or as tall as the view.
+            assert!(style.contains("position: static !important"), "{style}");
+        }
         assert!(!BRIDGE.contains("scrollHeight"));
     }
 

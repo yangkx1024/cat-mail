@@ -270,12 +270,20 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
   不持久的 `WKWebsiteDataStore`。它随 web view 结束，不影响关窗后网络进程退出（longbridge/nsh#1051）。
 - **页面带编号**（`<meta name="catmail-page">`），消息都附上它，读信区只认最后建的那个：空白页、上一封邮件的
   页面晚到的消息不会被当成新页面的。
-- **高度**：web view 不滚动，高度跟着页面报的走；标题、头部和正文由外层一起滚。页面自己的 overflow 隐藏
-  （`html { overflow: hidden }`）：macOS 上 nsh 的 `scrollable(false)` 只把滚轮交给外层，不像 Linux 那样隐藏
-  页面的 overflow，页面比 web view 高出一点（`scrollHeight` 取整、横向滚动条占高度）WebKit 就会画出第二个
-  滚动条。报的高度是根元素的盒子（含 body 的外边距和横向滚动条）向上取整，不用会被取整的 `scrollHeight`，
-  也不用根元素的 `scrollHeight`（不小于 web view 的高度，换到短邮件时缩不回去）。比读信区宽的邮件在 body 里横向
-  滚动。链接只把 `http` / `https` / `mailto` 交给系统打开（`is_openable_link`），页面里不导航。
+- **高度**：web view 不滚动，高度跟着页面报的走；标题、头部和正文由外层一起滚。页面自己的 overflow 隐藏：
+  macOS 上 nsh 的 `scrollable(false)` 只把滚轮交给外层，不像 Linux 那样隐藏页面的 overflow，页面比 web view
+  高出一点（`scrollHeight` 取整、横向滚动条占高度）WebKit 就会画出第二个滚动条。报的高度是根元素的盒子
+  （含 body 的外边距和横向滚动条）向上取整，不用会被取整的 `scrollHeight`，也不用根元素的 `scrollHeight`
+  （不小于 web view 的高度，换到短邮件时缩不回去）。比读信区宽的邮件在 body 里横向滚动，body 不纵向滚动。
+  根元素和 body 的高度固定为 `auto`，`min-height` / `max-height` 压回 `0` / `none`：不少营销邮件写
+  `html, body { height: 100% !important }`，根元素就和 web view 一样高，报的高度永远是 web view 当前的高度，
+  web view 长不高（刚开窗时只露出几行），放不下的由 body 自己纵向滚动。两者也固定为 `position: static`：
+  绝对定位的 body 脱离文档流，根元素就空了，带 `top: 0; bottom: 0` 时又和 web view 一样高。这些高度、定位和
+  overflow 都写在
+  `<html>`、`<body>` 的 `style` 属性里：`style` 属性里的 `!important` 比任何样式表里的都优先，邮件盖不掉
+  （写在我们的 `<style>` 里，邮件在后面同样加 `!important` 就赢了）。邮件里的元素用 `100vh` 定高时 vh 就是
+  web view 的高度，还会撑住，没有处理。链接只把 `http` / `https` / `mailto` 交给系统打开
+  （`is_openable_link`），页面里不导航。
 - **一个 web view 一直用**：WebKit 每个新 web view 起一个渲染进程（约 100 MB PSS，还要建一次 bwrap 沙箱），
   最后一个没了就结束它。所以读信区和它的 web view 随主窗口一直存在，换邮件只往里载入新页面；没选中邮件时
   读信区放在列表下面、web view 里放一个空白页（`html::blank_page`），开窗时渲染进程就先起好。开窗后点开第一封，
