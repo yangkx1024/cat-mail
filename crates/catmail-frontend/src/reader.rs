@@ -57,7 +57,7 @@ impl Header {
     }
 
     /// What "Details" lists: the addresses in full, then the date, if there is one.
-    pub fn details(&self, clock: format::Clock) -> Vec<(&'static str, String)> {
+    pub fn details(&self, clock: &format::Clock) -> Vec<(&'static str, String)> {
         let mut details = self.addresses.clone();
         let date = format::date(self.date, clock);
         if !date.is_empty() {

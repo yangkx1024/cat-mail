@@ -40,7 +40,7 @@ fn page(entry: OutboxEntry) -> impl IntoElement {
             .flat_map(|a| a.identities.iter().cloned())
             .collect()
     });
-    let lines = facts(&entry, &identities, clock())
+    let lines = facts(&entry, &identities, &clock())
         .into_iter()
         .map(|(name, value)| fact(name, value).into_element())
         .collect::<Vec<_>>();

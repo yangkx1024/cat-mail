@@ -135,17 +135,16 @@ pub(crate) struct Day {
 pub(crate) struct Days(Vec<Day>);
 
 impl Days {
-    fn new(rows: &[Row]) -> Self {
+    fn new(rows: &[Row], calendar: &Calendar) -> Self {
         let mut days = Self::default();
-        days.extend(rows, 0);
+        days.extend(rows, 0, calendar);
         days
     }
 
-    /// Groups `rows[from..]`, the rows after those already grouped. The rows are newest
-    /// first, so a day is one run; if they weren't, a day would just get a heading more
-    /// than once.
-    fn extend(&mut self, rows: &[Row], from: usize) {
-        let calendar = Calendar::now();
+    /// Groups `rows[from..]`, the rows after those already grouped (by the same
+    /// calendar). The rows are newest first, so a day is one run; if they weren't, a day
+    /// would just get a heading more than once.
+    fn extend(&mut self, rows: &[Row], from: usize, calendar: &Calendar) {
         for (ix, row) in rows.iter().enumerate().skip(from) {
             let day = calendar.day(row.date());
             match self.0.last_mut() {
@@ -435,7 +434,7 @@ pub fn draft_recipients(draft: &Draft) -> String {
 pub fn message_label(
     message: &MessageSummary,
     labels: &[impl AsRef<str>],
-    clock: format::Clock,
+    clock: &format::Clock,
 ) -> String {
     let unread = !message.flags.contains(Flags::SEEN);
     let flagged = message.flags.contains(Flags::FLAGGED);
@@ -638,7 +637,7 @@ mod tests {
             message(4, None),
             message(5, None),
         ];
-        let days = Days::new(&rows);
+        let days = Days::new(&rows, &Calendar::now(&jiff::tz::TimeZone::UTC));
         let shape: Vec<_> = days
             .iter()
             .map(|s| (s.label.clone(), s.start, s.len))
@@ -651,7 +650,8 @@ mod tests {
                 ("No date".to_owned(), 3, 2),
             ]
         );
-        assert!(Days::new(&[]).get(0).is_none());
+        let calendar = Calendar::now(&jiff::tz::TimeZone::UTC);
+        assert!(Days::new(&[], &calendar).get(0).is_none());
     }
 
     #[test]

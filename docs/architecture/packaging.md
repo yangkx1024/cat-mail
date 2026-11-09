@@ -30,12 +30,14 @@ WebKitGTK 6.0 和 GStreamer 都来自它，包里只有 `catmail-gui` 和 `catma
 另外 GTK 4.14 和 WebKitGTK 6.0 要 Ubuntu 24.04 起，基线升到 glibc 2.39，包也会超过 150 MB。Flatpak 里
 WebKit 的沙箱照常工作：网页进程由 `flatpak-spawn --sandbox` 起在子沙箱里。
 
-**权限**（`net.yangkx.catmail.yml` 的 `finish-args`）：网络、Wayland（X11 兜底）、`/dev/dri`，D-Bus 上只多两个：
+**权限**（`net.yangkx.catmail.yml` 的 `finish-args`）：网络、Wayland（X11 兜底）、`/dev/dri`，会话总线上只多两个，系统总线上一个：
 
 - `org.freedesktop.secrets`：`keyring` 直接说 Secret Service（zbus），不走 portal。
 - `org.kde.StatusNotifierWatcher`：托盘。规范要求托盘项占用 `org.kde.StatusNotifierItem-<pid>-<id>`，沙箱里的
   pid 在每个应用里都是同一个小数字，会撞名（占用它还要通配的 `--own-name`），所以在 Flatpak 里（有
   `/.flatpak-info`）ksni 不占名字，用连接的唯一名注册，watcher 都接受。
+- `org.freedesktop.timedate1`（系统总线）：nsh 从 timedated 读系统的时区，并跟着它的改动变。没有它，沙箱里只能
+  读启动时的 `/etc/localtime`，换了时区要重开应用才显示新的时间。
 
 其余都走 portal，不用额外权限：
 
