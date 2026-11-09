@@ -18,6 +18,8 @@ finish-args:
   - --talk-name=org.freedesktop.secrets
   # The tray icon (StatusNotifierItem), registered by the connection's unique name.
   - --talk-name=org.kde.StatusNotifierWatcher
+  # The system's time zone as timedated keeps it: the times shown follow a change of it.
+  - --system-talk-name=org.freedesktop.timedate1
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
   env:

@@ -135,7 +135,7 @@ fn message_row(item: Memo<Option<Line>>) -> impl IntoElement {
             .text_sm()
     };
     let time = move || {
-        text(field(|m| format::time(m.date, clock())))
+        text(field(|m| format::time(m.date, &clock())))
             .text_xs()
             .flex_shrink_0()
             .text_color(move || theme().muted_foreground)
@@ -146,7 +146,7 @@ fn message_row(item: Memo<Option<Line>>) -> impl IntoElement {
         .label(move || {
             SharedString::from(message.with(|m| {
                 m.as_ref()
-                    .map(|m| list::message_label(m, &label_names(m), clock()))
+                    .map(|m| list::message_label(m, &label_names(m), &clock()))
                     .unwrap_or_default()
             }))
         })
@@ -385,7 +385,7 @@ fn draft_row(item: Memo<Option<Line>>) -> impl IntoElement {
         .text_sm()
     };
     let time = move || {
-        text(field(|d| format::time(Some(d.updated_at), clock())))
+        text(field(|d| format::time(Some(d.updated_at), &clock())))
             .text_xs()
             .flex_shrink_0()
             .text_color(move || theme().muted_foreground)
@@ -472,7 +472,7 @@ fn outbox_row(item: Memo<Option<Line>>) -> impl IntoElement {
                         .text_color(move || theme().foreground),
                 )
                 .child(
-                    text(field(|e| format::time(Some(e.created_at), clock())))
+                    text(field(|e| format::time(Some(e.created_at), &clock())))
                         .text_xs()
                         .text_color(move || theme().muted_foreground),
                 ),

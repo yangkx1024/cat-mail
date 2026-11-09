@@ -256,7 +256,7 @@ fn message() -> impl IntoElement {
                         )
                         .child(view().flex_1())
                         .child(
-                            text(field(|h| format::date(h.date, clock())))
+                            text(field(|h| format::date(h.date, &clock())))
                                 .text_xs()
                                 .text_color(muted),
                         ),
@@ -300,7 +300,7 @@ fn message() -> impl IntoElement {
             .rounded(px(10.0))
             .bg(move || theme().muted)
             .child(each(
-                move || header.with(|h| h.details(clock())),
+                move || header.with(|h| h.details(&clock())),
                 |(name, _)| *name,
                 move |detail, _| {
                     view()

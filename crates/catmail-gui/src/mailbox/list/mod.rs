@@ -27,6 +27,7 @@ use nsh_core::prelude::*;
 
 use crate::buttons::Size;
 use crate::chrome;
+use crate::clock;
 use crate::engine::client;
 use crate::icons::{Icon, icon};
 use crate::mailbox::commands;
@@ -194,7 +195,8 @@ fn show_loaded(loaded: Loaded) {
     }
     let replaced = matches!(loaded.rows, Some(Rows::Replace(..)));
     if let Some(rows) = loaded.rows {
-        global::<Listing>().update(|listing| rows.apply(listing));
+        let calendar = untracked(clock::calendar);
+        global::<Listing>().update(|listing| rows.apply(listing, &calendar));
     }
     match loaded.select {
         Select::Keep => {}
@@ -454,6 +456,7 @@ pub fn list_column() -> impl IntoElement {
     on_key("x", move |_| toggle_selected());
     on_key("enter", move |_| edit_selected_draft());
     bind_command_keys();
+    follow_the_calendar();
     // Opening a row or closing it changes every row's height: the one opened, or just
     // closed, would move away from under the pointer.
     let last_selected = stored(None::<RowId>);
@@ -499,6 +502,17 @@ pub fn list_column() -> impl IntoElement {
             .element_ref(&list)
             .flex_1(),
     )
+}
+
+/// Puts the rows under the days of the user's zone again when it changes, and when a day
+/// is over there: what was Today is Yesterday.
+fn follow_the_calendar() {
+    effect(move || {
+        let calendar = clock::calendar();
+        if !global::<Listing>().with_untracked(|l| l.grouped_by(&calendar)) {
+            global::<Listing>().update(|l| l.regroup(&calendar));
+        }
+    });
 }
 
 /// Syncs every account now; it turns while one is syncing.

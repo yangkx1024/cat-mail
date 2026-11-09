@@ -24,7 +24,7 @@ pub fn date(timestamp: Option<i64>) -> String {
 }
 
 /// The time in the local time zone, as `format` (strftime) has it; empty for none.
-pub fn local(timestamp: Option<i64>, format: &str) -> String {
+pub(crate) fn local(timestamp: Option<i64>, format: &str) -> String {
     timestamp
         .and_then(|t| jiff::Timestamp::from_second(t).ok())
         .map(|t| {

@@ -16,7 +16,7 @@ use crate::list::outbox_status;
 pub fn facts(
     entry: &OutboxEntry,
     identities: &[Identity],
-    clock: format::Clock,
+    clock: &format::Clock,
 ) -> [(&'static str, String); 3] {
     let from = senders(identities)
         .into_iter()
@@ -202,7 +202,10 @@ mod tests {
             facts(
                 &entry(OutboxStatus::Queued),
                 identities,
-                format::Clock::TwentyFourHour,
+                &format::Clock {
+                    zone: jiff::tz::TimeZone::UTC,
+                    hours: format::Hours::TwentyFour,
+                },
             )[1]
             .1
             .clone()

@@ -9,6 +9,7 @@ use std::rc::Rc;
 use catmail_core::{MailClient, MessageCursor, MessageId, MessageSummary, SearchQuery};
 
 use super::{Days, PAGE, Removal, Reveal, Row, RowId, fetch};
+use crate::format::Calendar;
 use crate::mailbox::{Place, Source};
 use crate::refresh::Coalesce;
 
@@ -18,6 +19,8 @@ use crate::refresh::Coalesce;
 pub struct Listing {
     source: Option<Source>,
     rows: Vec<Row>,
+    /// What the days are of: the user's zone, and today.
+    calendar: Option<Calendar>,
     days: Days,
     lines: Vec<LineAt>,
     /// More rows may follow those read.
@@ -133,22 +136,43 @@ impl Listing {
         self.lines.iter().position(|&line| line == LineAt::Row(row))
     }
 
-    fn replace(&mut self, rows: Vec<Row>, more: bool) {
-        self.days = Days::new(&rows);
-        self.rows = rows;
+    /// Whether the rows are under `calendar`'s days, or there are none: if not,
+    /// [`regroup`](Self::regroup) them.
+    pub fn grouped_by(&self, calendar: &Calendar) -> bool {
+        self.rows.is_empty() || self.grouped_by_only(calendar)
+    }
+
+    fn grouped_by_only(&self, calendar: &Calendar) -> bool {
+        self.calendar.as_ref() == Some(calendar)
+    }
+
+    /// Puts the rows under `calendar`'s days: the user's time zone changed, or another day
+    /// began, and with it what Today is.
+    pub fn regroup(&mut self, calendar: &Calendar) {
+        self.days = Days::new(&self.rows, calendar);
+        self.calendar = Some(calendar.clone());
         self.lines.clear();
         self.lay_out(0);
+    }
+
+    fn replace(&mut self, rows: Vec<Row>, more: bool, calendar: &Calendar) {
+        self.rows = rows;
         self.has_more = more;
+        self.regroup(calendar);
     }
 
     /// The page starts after the last row shown, whatever came or went above it since;
     /// the refresh such a change brings updates those.
-    fn append(&mut self, rows: Vec<Row>, more: bool) {
+    fn append(&mut self, rows: Vec<Row>, more: bool, calendar: &Calendar) {
         let from = self.rows.len();
         self.rows.extend(rows);
-        self.days.extend(&self.rows, from);
-        self.lay_out(from);
         self.has_more = more;
+        if self.grouped_by_only(calendar) {
+            self.days.extend(&self.rows, from, calendar);
+            self.lay_out(from);
+        } else {
+            self.regroup(calendar);
+        }
     }
 
     /// Adds the lines of `rows[from..]`: the rest of the last day, then the days after.
@@ -233,10 +257,11 @@ pub enum Rows {
 }
 
 impl Rows {
-    pub fn apply(self, listing: &mut Listing) {
+    /// Into `listing`, under `calendar`'s days.
+    pub fn apply(self, listing: &mut Listing, calendar: &Calendar) {
         match self {
-            Rows::Replace(rows, more) => listing.replace(rows, more),
-            Rows::Append(rows, more) => listing.append(rows, more),
+            Rows::Replace(rows, more) => listing.replace(rows, more, calendar),
+            Rows::Append(rows, more) => listing.append(rows, more, calendar),
         }
     }
 }
@@ -498,6 +523,10 @@ mod tests {
     use super::*;
     use crate::fixtures::{message, midday};
 
+    fn utc() -> Calendar {
+        Calendar::now(&jiff::tz::TimeZone::UTC)
+    }
+
     fn rows(ids: &[i64]) -> Vec<Row> {
         ids.iter()
             .map(|&id| Row::Message(message(id, 1, 1)))
@@ -543,7 +572,7 @@ mod tests {
                 &self.checked,
             )?;
             if let Some(rows) = loaded.rows.clone() {
-                rows.apply(&mut self.listing);
+                rows.apply(&mut self.listing, &utc());
             }
             match loaded.select {
                 Select::Keep => {}
@@ -609,7 +638,7 @@ mod tests {
                 &HashSet::new(),
             )
             .unwrap();
-        loaded.rows.unwrap().apply(&mut list.listing);
+        loaded.rows.unwrap().apply(&mut list.listing, &utc());
         let page = list.model.more(&list.listing).unwrap();
         assert_eq!(page.after, Some(message(2, 1, 1).cursor()));
         assert!(
@@ -682,7 +711,7 @@ mod tests {
         // The read has it, but the rows are as shown: still opens.
         list.model.reveal(MessageId(6), &list.listing);
         let next = list.model.refresh(&list.listing).unwrap();
-        list.listing.replace(rows(&[6, 5, 1, 2]), false);
+        list.listing.replace(rows(&[6, 5, 1, 2]), false, &utc());
         let loaded = list.load(&next, &[6, 5, 1, 2]).unwrap();
         assert_eq!((loaded.rows, loaded.select), (None, Select::Open(m(6))));
 
@@ -827,7 +856,8 @@ mod tests {
             Row::Message(message)
         };
         let mut listing = Listing::new(Some(FOLDER));
-        listing.replace(vec![dated(1, "2020-03-02")], true);
+        let calendar = utc();
+        listing.replace(vec![dated(1, "2020-03-02")], true, &calendar);
         listing.append(
             vec![
                 dated(2, "2020-03-02"),
@@ -835,6 +865,7 @@ mod tests {
                 dated(4, "2020-03-01"),
             ],
             false,
+            &calendar,
         );
         let lines: Vec<_> = (0..listing.len())
             .map(|ix| listing.line(ix).unwrap())
@@ -854,5 +885,54 @@ mod tests {
         assert_eq!(listing.keys()[2..4], [LineKey::Row(m(2)), LineKey::Day(3)]);
         assert_eq!(listing.line_of(m(3)), Some(4));
         assert_eq!(listing.line_of(m(9)), None);
+    }
+
+    #[test]
+    fn the_days_follow_the_users_zone_and_today() {
+        let at = |id, time: &str| {
+            let mut message = message(id, 1, 1);
+            message.date = Some(time.parse::<jiff::Timestamp>().unwrap().as_second());
+            Row::Message(message)
+        };
+        let (late, earlier) = (at(1, "2026-10-18T23:30:00Z"), at(2, "2026-10-18T12:00:00Z"));
+        let calendar = |now: &str| Calendar::at(&now.parse().unwrap());
+        let lines = |listing: &Listing| -> Vec<_> {
+            (0..listing.len())
+                .map(|ix| listing.line(ix).unwrap())
+                .collect()
+        };
+        let day = |label: &str| Line::Day(label.into());
+        let (l, e) = (Line::Row(late.clone()), Line::Row(earlier.clone()));
+
+        let london = calendar("2026-10-19T10:00:00+00:00[UTC]");
+        let mut listing = Listing::new(Some(FOLDER));
+        assert!(listing.grouped_by(&london), "nothing to group yet");
+        listing.replace(vec![late.clone()], true, &london);
+        listing.append(vec![earlier.clone()], false, &london);
+        assert_eq!(lines(&listing), [day("Yesterday"), l.clone(), e.clone()]);
+
+        // The same moment in Beijing: the later one is today there.
+        let beijing = calendar("2026-10-19T18:00:00+08:00[+08:00]");
+        assert!(!listing.grouped_by(&beijing));
+        listing.regroup(&beijing);
+        assert!(listing.grouped_by(&beijing));
+        let in_beijing = [day("Today"), l.clone(), day("Yesterday"), e.clone()];
+        assert_eq!(lines(&listing), in_beijing);
+        assert_eq!(listing.line_of(m(2)), Some(3));
+
+        // A page read before the zone changed comes after: all the rows go by the new one.
+        let mut listing = Listing::new(Some(FOLDER));
+        listing.replace(vec![late], true, &london);
+        listing.append(vec![earlier], false, &beijing);
+        assert_eq!(lines(&listing), in_beijing);
+
+        // Past midnight there, today is another day.
+        let next_day = calendar("2026-10-20T00:00:30+08:00[+08:00]");
+        assert!(!listing.grouped_by(&next_day));
+        listing.regroup(&next_day);
+        assert_eq!(
+            lines(&listing),
+            [day("Yesterday"), l, day("Sunday, October 18"), e]
+        );
     }
 }
