@@ -116,33 +116,49 @@ pub fn sanitize_html(html: &str) -> String {
     with_sheet(&sheet.css, &SANITIZER, html)
 }
 
-/// HTML that [`sanitize_html`] produced, with its own colors moved for a dark page with
-/// `palette`'s colors, as Gmail and Outlook show mail written for white (`dark.rs`): in
-/// its style sheets, `style` attributes, and `bgcolor` and `color` attributes. A message
-/// with dark styles of its own is left as it is (borrowed, not copied): those apply.
+/// HTML that [`sanitize_html`] produced, cleaned again through the sanitizer with the
+/// image hook `on_image` makes, and with whether it is for a dark page. With `dark`, its
+/// own colors are moved for a dark page with that palette's colors, as Gmail and Outlook
+/// show mail written for white (`dark.rs`): in its style sheets, `style` attributes, and
+/// `bgcolor` and `color` attributes. A message with dark styles of its own is for a dark
+/// page with its colors left as they are, since those apply.
 ///
-/// `None` for a message that sets colors with custom properties (`var()`): what a
-/// variable holds where it is used is up to the cascade, which only the engine knows, so
-/// no move where it is set keeps every pair it ends up in readable. Such a message is to
-/// be shown as written, on a light page. Mail clients rarely support them, so mail rarely
-/// uses them.
-pub fn recolor_html(html: &str, palette: DarkPalette) -> Option<Cow<'_, str>> {
-    let sheet = css::sanitize(sanitized_sheet(html).as_slice(), Some(palette));
-    if sheet.adapts_to_dark {
-        return Some(Cow::Borrowed(html));
+/// Not for a message that sets colors with custom properties (`var()`): what a variable
+/// holds where it is used is up to the cascade, which only the engine knows, so no move
+/// where it is set keeps every pair it ends up in readable. Such a message is cleaned
+/// with its colors as written, to be shown on a light page. Mail clients rarely support
+/// them, so mail rarely uses them.
+///
+/// `on_image` is called for each pass, and a hook it makes must start afresh: a pass is
+/// made over when a `style` attribute turns out to use `var()`.
+pub(crate) fn clean_for(
+    html: &str,
+    on_image: &dyn Fn() -> Option<ImageHook>,
+    dark: Option<DarkPalette>,
+) -> (String, bool) {
+    // The sheet alone first, which is cheap: whether the whole is to be recolored.
+    let sheet = dark.map(|palette| {
+        let sheet = css::sanitize(sanitized_sheet(html).as_slice(), Some(palette));
+        (palette, sheet)
+    });
+    if let Some((palette, sheet)) = &sheet
+        && !sheet.adapts_to_dark
+        && !sheet.colors_from_variables
+    {
+        // Known only once the attributes are rewritten; the rare message that uses them
+        // is then cleaned again, as written.
+        let colors_from_variables = Arc::new(AtomicBool::new(false));
+        let recolor = Recolor {
+            palette: *palette,
+            colors_from_variables: colors_from_variables.clone(),
+        };
+        let recolored = with_sheet(&sheet.css, &sanitizer(on_image(), Some(recolor)), html);
+        if !colors_from_variables.load(Ordering::Relaxed) {
+            return (recolored, true);
+        }
     }
-    if sheet.colors_from_variables {
-        return None;
-    }
-    // Known only once the attributes are rewritten; the rare message that uses them is
-    // then rewritten for nothing.
-    let colors_from_variables = Arc::new(AtomicBool::new(false));
-    let recolor = Recolor {
-        palette,
-        colors_from_variables: colors_from_variables.clone(),
-    };
-    let html = with_sheet(&sheet.css, &sanitizer(None, Some(recolor)), html);
-    (!colors_from_variables.load(Ordering::Relaxed)).then_some(Cow::Owned(html))
+    let adapts_to_dark = sheet.is_some_and(|(_, sheet)| sheet.adapts_to_dark);
+    (clean(&sanitizer(on_image(), None), html), adapts_to_dark)
 }
 
 /// HTML that [`sanitize_html`] produced, cleaned again through `builder` (the sanitizer
@@ -260,10 +276,14 @@ fn style_sheets(html: &str) -> Vec<css::Element> {
 mod tests {
     use super::*;
 
-    const PALETTE: DarkPalette = DarkPalette {
-        background: [0x20; 3],
-        foreground: [0xe0; 3],
-    };
+    use crate::dark::TEST_PALETTE as PALETTE;
+
+    /// `html` with its colors moved for a dark page, or `None` for one it is to be shown
+    /// light.
+    fn recolor_html(html: &str) -> Option<String> {
+        let (html, dark) = clean_for(html, &|| None, Some(PALETTE));
+        dark.then_some(html)
+    }
 
     #[test]
     fn keeps_style_sheets_rewritten_in_front() {
@@ -330,8 +350,7 @@ mod tests {
         let adaptive = sanitize_html(
             r#"<style media="(prefers-color-scheme: dark)">.a{color:#eee}</style><p class=a style="color:#333">x</p>"#,
         );
-        let kept = recolor_html(&adaptive, PALETTE);
-        assert!(matches!(kept, Some(Cow::Borrowed(h)) if h == adaptive));
+        assert_eq!(recolor_html(&adaptive).as_deref(), Some(&*adaptive));
     }
 
     #[test]
@@ -341,7 +360,7 @@ mod tests {
             <td style="background:white;padding:4px"><font color="black">x</font>
             <img src="cid:logo@x" width="10"></td></tr></table>"##,
         );
-        let dark = recolor_html(&clean, PALETTE).unwrap();
+        let dark = recolor_html(&clean).unwrap();
         assert!(
             dark.starts_with("<style>.a{color:#e0e0e0;}</style>"),
             "{dark}"
@@ -360,23 +379,17 @@ mod tests {
             r#"<style>.a{color:var(--fg)}</style><p class=a style="--fg:#000">x</p>"#,
             r#"<p style="background:var(--bg, #fff)">x</p><p style="margin:0">y</p>"#,
         ] {
-            assert_eq!(
-                recolor_html(&sanitize_html(custom), PALETTE),
-                None,
-                "{custom}"
-            );
+            assert_eq!(recolor_html(&sanitize_html(custom)), None, "{custom}");
         }
         // A message without colors is left as it was, and one with dark styles of its own
         // keeps its colors for them.
         let plain = sanitize_html("<style>p{margin:0;}</style><p align=\"center\">x</p>");
-        assert_eq!(recolor_html(&plain, PALETTE).as_deref(), Some(&*plain));
+        assert_eq!(recolor_html(&plain).as_deref(), Some(&*plain));
         let adaptive = sanitize_html(
             "<style>@media (prefers-color-scheme: dark){.a{color:#eee}}</style>\
              <p class=a style=\"color:#333\">x</p>",
         );
-        // Not copied: the reader keeps what it has.
-        let kept = recolor_html(&adaptive, PALETTE);
-        assert!(matches!(kept, Some(Cow::Borrowed(h)) if h == adaptive));
+        assert_eq!(recolor_html(&adaptive).as_deref(), Some(&*adaptive));
     }
 
     #[test]
@@ -522,7 +535,7 @@ mod tests {
         // The rewritten value is still only an attribute, also for a dark page.
         let dirty = r#"<p style="color:#000;font-family:'&quot;><script>alert(1)</script>'">x</p>"#;
         let clean = sanitize_html(dirty);
-        for html in [recolor_html(&clean, PALETTE).unwrap().into_owned(), clean] {
+        for html in [recolor_html(&clean).unwrap(), clean] {
             assert!(html.starts_with("<p style=\"color:#"), "{html}");
             assert!(html.ends_with("\">x</p>"), "{html}");
             assert_eq!(html.matches('"').count(), 2, "{html}");

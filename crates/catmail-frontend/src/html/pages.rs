@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use catmail_core::html::{Image, RemoteImage, Served, ServedImage};
 
 use super::pacer::Pacer;
-use super::page::{Colors, blank_page, body_page};
+use super::page::{Appearance, blank_page, body_page};
 
 /// The scheme of the URLs the page's images have: `catmail-image:<page>/<path>`, the
 /// number of the page that refers to them, then [`ServedImage::path`]. The path stays
@@ -80,17 +80,23 @@ impl<R> BodyPages<R> {
     }
 
     /// The page of the open message's body (its sanitized HTML, or the plain text when it
-    /// has none), shown from now on, with the remote images it refers to.
-    pub fn page(&mut self, html: Option<&str>, text: Option<&str>, colors: &Colors) -> Served {
+    /// has none), shown from now on, with the remote images it refers to and whether it is
+    /// dark (on a dark reader, unless the message's colors can't be moved).
+    pub fn page(
+        &mut self,
+        html: Option<&str>,
+        text: Option<&str>,
+        appearance: &Appearance,
+    ) -> Served {
         let number = self.next();
-        body_page(number, html, text, colors)
+        body_page(number, html, text, appearance)
     }
 
     /// A page with nothing in it, shown from now on while no message is: the web view's
     /// web process is running when one opens.
-    pub fn blank(&mut self, colors: &Colors) -> String {
+    pub fn blank(&mut self, appearance: &Appearance) -> String {
         let number = self.next();
-        blank_page(number, colors)
+        blank_page(number, appearance)
     }
 
     /// The number of a page about to be made, which is the one shown from now on.
@@ -203,15 +209,7 @@ impl<R> BodyPages<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn colors() -> Colors {
-        Colors {
-            foreground: "#111".into(),
-            background: "#fff".into(),
-            link: "#06c".into(),
-            selection: "#264F784D".into(),
-        }
-    }
+    use crate::html::page::tests::light;
 
     fn png(bytes: &[u8]) -> Image {
         Image::new("image/png", bytes)
@@ -248,8 +246,8 @@ mod tests {
     #[test]
     fn the_page_refers_to_its_images_by_the_readers_urls() {
         let mut images = BodyPages::<()>::new(None);
-        images.blank(&colors());
-        let page = images.page(Some(HTML), None, &colors());
+        images.blank(&light());
+        let page = images.page(Some(HTML), None, &light());
         assert!(images.is_shown(2));
         assert_eq!(
             image_urls(&page),
@@ -267,7 +265,7 @@ mod tests {
     #[test]
     fn a_request_is_answered_once_its_image_is_here() {
         let mut images = BodyPages::new(None);
-        let page = images.page(Some(HTML), None, &colors());
+        let page = images.page(Some(HTML), None, &light());
         let [logo, gif, logo_again] = <[String; 3]>::try_from(image_urls(&page)).unwrap();
 
         assert!(images.request(&logo, "logo").is_empty());
@@ -295,7 +293,7 @@ mod tests {
     #[test]
     fn a_page_made_again_gets_the_images_at_once() {
         let mut images = BodyPages::new(None);
-        images.page(Some(HTML), None, &colors());
+        images.page(Some(HTML), None, &light());
         assert!(images.add_inline("logo@x".into(), png(b"hi")).is_empty());
         assert!(
             images
@@ -304,7 +302,7 @@ mod tests {
         );
 
         // In another appearance.
-        let page = images.page(Some(HTML), None, &colors());
+        let page = images.page(Some(HTML), None, &light());
         for url in image_urls(&page) {
             assert_eq!(images.request(&url, ()).len(), 1, "{url}");
         }
@@ -313,15 +311,15 @@ mod tests {
     #[test]
     fn only_the_page_shown_is_answered() {
         let mut images = BodyPages::new(None);
-        let old = images.page(Some(HTML), None, &colors());
+        let old = images.page(Some(HTML), None, &light());
         let old = image_urls(&old);
         assert!(images.request(&old[0], "old").is_empty());
 
         images.forget_message();
         // Kept, unanswered, while the old page is still on screen.
-        images.blank(&colors());
+        images.blank(&light());
         assert_eq!(images.replaced, ["old"]);
-        let new = images.page(Some(HTML), None, &colors());
+        let new = images.page(Some(HTML), None, &light());
         let new = image_urls(&new);
         assert!(images.request(&new[0], "new").is_empty());
         // The old page has gone; late, from it.
@@ -339,7 +337,7 @@ mod tests {
     #[test]
     fn another_message_forgets_the_images_of_the_one_before() {
         let mut images = BodyPages::<()>::new(None);
-        images.page(Some(HTML), None, &colors());
+        images.page(Some(HTML), None, &light());
         assert!(images.add_inline("logo@x".into(), png(b"hi")).is_empty());
         assert!(
             images
@@ -351,14 +349,14 @@ mod tests {
         assert!(!images.has_inline("logo@x"));
         assert!(images.inline().is_empty());
         assert!(!images.shows_remote("https://x/a.gif"));
-        let page = images.page(Some(HTML), None, &colors());
+        let page = images.page(Some(HTML), None, &light());
         assert!(images.request(&image_urls(&page)[0], ()).is_empty());
     }
 
     #[test]
     fn urls_the_reader_didnt_write_are_dropped() {
         let mut images = BodyPages::new(None);
-        images.page(Some(HTML), None, &colors());
+        images.page(Some(HTML), None, &light());
         assert!(images.add_inline("logo@x".into(), png(b"hi")).is_empty());
         for url in [
             "catmail-image:1/cid/",
@@ -379,7 +377,7 @@ mod tests {
         let html: String = (0..n)
             .map(|i| format!(r#"<img src="https://x/{i}.jpg">"#))
             .collect();
-        let page = images.page(Some(&html), None, &colors());
+        let page = images.page(Some(&html), None, &light());
         let fetched = (0..n).map(|i| remote(&format!("https://x/{i}.jpg"), &vec![0; size]));
         assert!(images.add_remote(fetched.collect()).is_empty());
         (images, image_urls(&page))
@@ -416,7 +414,7 @@ mod tests {
 
         // The same message in another appearance: the old page keeps its request, and the
         // new one starts with nothing on its way.
-        let page = images.page(Some(r#"<img src="https://x/1.jpg">"#), None, &colors());
+        let page = images.page(Some(r#"<img src="https://x/1.jpg">"#), None, &light());
         assert_eq!(images.replaced, [1]);
         assert!(!images.holds_back());
         assert_eq!(requests(images.request(&image_urls(&page)[0], 7)), [7]);

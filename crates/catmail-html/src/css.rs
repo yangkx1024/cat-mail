@@ -596,10 +596,7 @@ mod tests {
         assert!(sheet(":root{color-scheme:light dark}").adapts_to_dark);
     }
 
-    const PALETTE: DarkPalette = DarkPalette {
-        background: [0x20; 3],
-        foreground: [0xe0; 3],
-    };
+    use crate::dark::TEST_PALETTE as PALETTE;
 
     fn recolored_sheet(source: &str) -> Stylesheet {
         let element = Element {

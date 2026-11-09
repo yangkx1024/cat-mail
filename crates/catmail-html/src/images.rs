@@ -9,7 +9,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 
-use crate::sanitize::{clean, sanitizer};
+use crate::dark::DarkPalette;
+use crate::sanitize::{ImageHook, clean, clean_for, sanitizer};
 
 /// What `f` makes of each image URL in HTML that [`sanitize_html`](crate::sanitize_html)
 /// produced, in document order, leaving out the `None`s; the URLs themselves (a `data:`
@@ -137,6 +138,8 @@ pub struct Served {
     /// The remote images it refers to, as [`remote_image_url`] writes them, each once, in
     /// document order: what the reader fetches when the user asks for them.
     pub remote_urls: Vec<String>,
+    /// It is for a dark page: its colors moved for one, or it has dark styles of its own.
+    pub dark: bool,
 }
 
 /// HTML that [`sanitize_html`](crate::sanitize_html) produced, with the images a reader
@@ -145,13 +148,19 @@ pub struct Served {
 /// shows once they are cached or the user asks for them. Other URLs (`file:`, relative,
 /// remote ones past those) stay as they are, for the page to block.
 ///
+/// With `dark`, its colors are moved for a dark page with that palette, in the same
+/// pass, unless they can't be (they come from CSS variables): [`Served::dark`] says
+/// whether the page is to be dark.
+///
 /// `base` must leave the path opaque (`scheme:...`, not `scheme://...`): a URL parser
 /// resolves dot segments in a hierarchical path, and a Content-ID may be `..`.
-pub fn serve_images(html: &str, base: &str) -> Served {
-    let base = base.to_owned();
+pub fn serve_images(html: &str, base: &str, dark: Option<DarkPalette>) -> Served {
     let remote = Arc::new(Mutex::new(Vec::new()));
-    let picked = remote.clone();
-    let serving = sanitizer(
+    let serving = || -> Option<ImageHook> {
+        // Each pass lists them afresh (`clean_for`).
+        remote.lock().unwrap().clear();
+        let picked = remote.clone();
+        let base = base.to_owned();
         Some(Box::new(move |src| {
             let image = match cid_image_id(src) {
                 Some(content_id) => ServedImage::Inline(content_id),
@@ -168,12 +177,15 @@ pub fn serve_images(html: &str, base: &str) -> Served {
                 }
             };
             Some(format!("{base}{}", image.path()))
-        })),
-        None,
-    );
-    let html = clean(&serving, html);
+        }))
+    };
+    let (html, dark) = clean_for(html, &serving, dark);
     let remote_urls = std::mem::take(&mut *remote.lock().unwrap());
-    Served { html, remote_urls }
+    Served {
+        html,
+        remote_urls,
+        dark,
+    }
 }
 
 /// HTML that [`sanitize_html`](crate::sanitize_html) produced, with each `cid:` image whose Content-ID is in
@@ -255,6 +267,7 @@ fn percent_decode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dark::TEST_PALETTE as PALETTE;
     use crate::sanitize_html;
 
     #[test]
@@ -341,7 +354,7 @@ mod tests {
             <img src="HTTPS://x.example/a b.png?q=1&amp;r=%2F"><img src="data:image/png;base64,aGk">
             <img src="cid:"><img src="file:///etc/passwd"><a href="cid:report@x">report</a>"#,
         );
-        let served = serve_images(&clean, "app:7/");
+        let served = serve_images(&clean, "app:7/", None);
         assert_eq!(
             served.remote_urls,
             ["https://x.example/a%20b.png?q=1&r=%2F"]
@@ -385,13 +398,69 @@ mod tests {
             .map(|i| format!(r#"<img src="https://x.example/{i}.png">"#))
             .chain([r#"<img src="https://x.example/0.png">"#.to_owned()])
             .collect();
-        let served = serve_images(&many, "app:");
+        let served = serve_images(&many, "app:", None);
         assert_eq!(served.remote_urls.len(), MAX_REMOTE_IMAGES);
         assert_eq!(served.remote_urls[0], "https://x.example/0.png");
         let srcs = srcs(&served.html);
         let served_count = srcs.iter().filter(|s| s.starts_with("app:")).count();
         assert_eq!(served_count, MAX_REMOTE_IMAGES + 1, "and the first again");
         assert_eq!(srcs[MAX_REMOTE_IMAGES], "https://x.example/200.png");
+    }
+
+    #[test]
+    fn serves_images_and_moves_colors_in_one_pass() {
+        let images = r#"<img src="cid:logo@x"><img src="https://x.example/a.png">
+            <img src="https://x.example/b.png"><img src="https://x.example/a.png">"#;
+        let light = serve_images(&sanitize_html(images), "app:", None);
+        assert!(!light.dark);
+        let serves_the_same = |served: &Served| {
+            assert_eq!(srcs(&served.html), srcs(&light.html));
+            assert_eq!(served.remote_urls, light.remote_urls);
+        };
+        let recolored = sanitize_html(&format!(
+            r##"<style>.a{{color:#000}}</style><table bgcolor="#ffffff"><tr><td>{images}</td></tr></table>"##
+        ));
+        let served = serve_images(&recolored, "app:", Some(PALETTE));
+        assert!(served.dark);
+        assert!(
+            served.html.starts_with("<style>.a{color:#e0e0e0;}</style>"),
+            "{}",
+            served.html
+        );
+        assert!(
+            served.html.contains(r##"bgcolor="#202020""##),
+            "{}",
+            served.html
+        );
+        serves_the_same(&served);
+        // Its own dark styles apply: its colors stay.
+        let adaptive = sanitize_html(&format!(
+            r#"<style>@media (prefers-color-scheme: dark){{.a{{color:#eee}}}}</style><p class=a style="color:#333">{images}</p>"#
+        ));
+        let served = serve_images(&adaptive, "app:", Some(PALETTE));
+        assert!(served.dark);
+        assert!(
+            served.html.contains(r#"style="color:#333;""#),
+            "{}",
+            served.html
+        );
+        serves_the_same(&served);
+        // Colors from variables, in the sheet or found only in an attribute: as written,
+        // for a light page, the images served all the same.
+        for custom in [
+            format!(r#"<style>.a{{color:var(--fg)}}</style><p bgcolor="white">{images}</p>"#),
+            format!(r#"<p bgcolor="white">{images}</p><p style="color:var(--fg)">x</p>"#),
+        ] {
+            let custom = sanitize_html(&custom);
+            let served = serve_images(&custom, "app:", Some(PALETTE));
+            assert!(!served.dark, "{custom}");
+            assert!(
+                served.html.contains(r#"bgcolor="white""#),
+                "{}",
+                served.html
+            );
+            serves_the_same(&served);
+        }
     }
 
     #[test]
@@ -434,7 +503,7 @@ mod tests {
 
     #[test]
     fn finds_remote_images() {
-        let remote_urls = |html: &str| serve_images(html, "app:").remote_urls;
+        let remote_urls = |html: &str| serve_images(html, "app:", None).remote_urls;
         assert_eq!(
             remote_urls(
                 r#"<p>hi</p><img src="https://Tracker.example/p.gif?a=1&amp;b=2" alt="">

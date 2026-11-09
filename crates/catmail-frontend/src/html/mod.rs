@@ -12,7 +12,7 @@ mod pacer;
 mod page;
 mod pages;
 
-pub use page::{BRIDGE, Colors, FromPage, WATCH_IMAGES};
+pub use page::{Appearance, BRIDGE, Colors, DarkAppearance, FromPage, WATCH_IMAGES};
 pub use pages::{BodyPages, IMAGE_SCHEME};
 
 use std::collections::HashMap;
