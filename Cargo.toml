@@ -64,12 +64,15 @@ mime_guess = "2.0.5"
 # bar at the app's height, the traffic lights centered in it (#1068), web views serving
 # URL schemes of the app's own (#1233), the reader's images, and a focused view taller
 # than its scroll view staying where it is (#1241): a right click on a long message
-# focused the reader's web view, which scrolled back to its top. Back to crates.io (and
+# focused the reader's web view, which scrolled back to its top; a list binding its rows
+# further ahead while it scrolls fast (#1310): a fast drag showed blank strips at the
+# message list's edge, and macOS's text fields drawn while their scroll view scrolls
+# (#1326): the login and settings forms' fields stayed blank. Back to crates.io (and
 # the repository out of `allow-git` in deny.toml) once a release has what catmail-gui uses.
-nsh-core = { git = "https://github.com/longbridge/nsh", rev = "101a426f8c5ef62e62e60ad32d5e6db4e68caa67" }
-nsh-base = { git = "https://github.com/longbridge/nsh", rev = "101a426f8c5ef62e62e60ad32d5e6db4e68caa67", default-features = false }
-nsh-platform-linux = { git = "https://github.com/longbridge/nsh", rev = "101a426f8c5ef62e62e60ad32d5e6db4e68caa67", default-features = false, features = ["webview"] }
-nsh-platform-macos = { git = "https://github.com/longbridge/nsh", rev = "101a426f8c5ef62e62e60ad32d5e6db4e68caa67", default-features = false }
+nsh-core = { git = "https://github.com/longbridge/nsh", rev = "21648204e66b3792090c216383f345a9d628f0b8" }
+nsh-base = { git = "https://github.com/longbridge/nsh", rev = "21648204e66b3792090c216383f345a9d628f0b8", default-features = false }
+nsh-platform-linux = { git = "https://github.com/longbridge/nsh", rev = "21648204e66b3792090c216383f345a9d628f0b8", default-features = false, features = ["webview"] }
+nsh-platform-macos = { git = "https://github.com/longbridge/nsh", rev = "21648204e66b3792090c216383f345a9d628f0b8", default-features = false }
 # catmail-gui's AppKit shell: the main thread's futures on the main dispatch queue
 # (async-task), and the event monitor's block (the versions nsh's macOS platform uses).
 async-task = "4.7.1"
