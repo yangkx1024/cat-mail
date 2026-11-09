@@ -1,0 +1,53 @@
+id: net.yangkx.catmail
+# The GNOME runtime brings GTK 4, WebKitGTK 6.0 and GStreamer, and their security
+# updates: the package carries only our two binaries.
+runtime: org.gnome.Platform
+runtime-version: "51"
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: catmail-gui
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  # WebKit's and GTK's GL renderers.
+  - --device=dri
+  # Account passwords: the keyring crate speaks Secret Service over D-Bus.
+  - --talk-name=org.freedesktop.secrets
+  # The tray icon (StatusNotifierItem), registered by the connection's unique name.
+  - --talk-name=org.kde.StatusNotifierWatcher
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    # build-flatpak.sh writes config.toml here: crates.io and the git dependencies
+    # from the vendored sources, since the build has no network.
+    CARGO_HOME: /run/build/catmail/cargo
+modules:
+  - name: catmail
+    buildsystem: simple
+    build-commands:
+      - cargo --offline build --release --locked -p catmail-gui -p catmail-cli
+      - install -Dm755 target/release/catmail-gui target/release/catmail -t /app/bin
+      - install -Dm644 packaging/linux/net.yangkx.catmail.desktop -t /app/share/applications
+      - install -Dm644 packaging/linux/net.yangkx.catmail.appdata.xml
+        /app/share/metainfo/net.yangkx.catmail.metainfo.xml
+      # The fixed light one: icon loaders ignore catmail.svg's media query.
+      - install -Dm644 crates/catmail-frontend/assets/app-icon/catmail-light.svg
+        /app/share/icons/hicolor/scalable/apps/net.yangkx.catmail.svg
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - result
+          - .direnv
+          - .git
+      - type: dir
+        path: ../../target/flatpak/vendor
+        dest: vendor
+      - type: file
+        path: ../../target/flatpak/cargo-config.toml
+        dest: cargo
+        dest-filename: config.toml

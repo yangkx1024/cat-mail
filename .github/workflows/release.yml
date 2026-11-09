@@ -2,9 +2,9 @@ name: Release
 
 # Run by hand on main, it releases: it sets the workspace version (the patch after the
 # current one, or the version given), commits that to main with the tag `v<version>`,
-# builds the macOS app and the CLI for Linux and macOS from the tag and publishes them as
-# a GitHub release. Linux has no package of the app yet: WebKitGTK has to be bundled first.
-# The macOS ones are signed with the Developer ID and notarized, with the secrets of the
+# builds the macOS app, the Linux app as a Flatpak bundle (on the GNOME runtime, which
+# brings WebKitGTK) and the CLI for Linux and macOS from the tag and publishes them as a
+# GitHub release. The macOS ones are signed with the Developer ID and notarized, with the secrets of the
 # `release` environment; pull requests can't have those and sign ad hoc. Run with
 # `build_only` (on any branch), and pull requests that change the packaging, build them
 # at the current version, uploaded as workflow artifacts only.
@@ -146,6 +146,53 @@ jobs:
           path: target/dist/
           if-no-files-found: error
 
+  flatpak:
+    name: Linux Flatpak (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            os: ubuntu-24.04
+          - arch: aarch64
+            os: ubuntu-24.04-arm
+    needs: version
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.version.outputs.ref }}
+
+      # Only for `cargo vendor` and the version: the app is built with the SDK's Rust.
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Ubuntu 24.04 keeps unprivileged user namespaces, which bwrap (the build's
+      # sandbox) needs, from programs without an AppArmor profile of their own.
+      # librsvg2-common is only recommended, but without its SVG loader appstreamcli
+      # compose can't read the icon (`file-read-error`); the arm image happens to have it.
+      - name: Flatpak tools
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder \
+            librsvg2-common
+          flatpak remote-add --user --if-not-exists flathub \
+            https://dl.flathub.org/repo/flathub.flatpakrepo
+
+      - name: Flatpak bundle
+        run: packaging/linux/build-flatpak.sh --no-install
+
+      - name: Collect the packages
+        run: |
+          mkdir -p target/dist
+          cp target/flatpak/*.flatpak target/dist/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: flatpak-${{ matrix.arch }}
+          path: target/dist/
+          if-no-files-found: error
+
   macos:
     name: macOS (aarch64)
     needs: version
@@ -236,7 +283,7 @@ jobs:
   publish:
     name: Publish
     if: needs.version.outputs.ref != ''
-    needs: [version, linux, macos]
+    needs: [version, linux, flatpak, macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write

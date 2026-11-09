@@ -6,9 +6,9 @@
 //! ⚠️ nsh has no notifications; these are GLib's (`GNotification`), sent through the
 //! application. Without a sandbox GLib speaks `org.freedesktop.Notifications`, and a
 //! click comes back as the app's `open-mail` action, with the host's activation token
-//! for the window. On GNOME, GLib uses GNOME Shell's own interface instead, which
-//! activates the app through its D-Bus name: the app doesn't own one (it isn't unique
-//! through D-Bus, see `shell::run`), so a click there does nothing.
+//! for the window. In a Flatpak GLib uses the notification portal, and on GNOME GNOME
+//! Shell's own interface: there the click activates the action through the app id's
+//! D-Bus name, which the shell owns for that (`own_app_id`).
 
 use std::cell::RefCell;
 

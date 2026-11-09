@@ -1,7 +1,7 @@
 # 打包
 
-> 状态：macOS 的磁盘映像（Apple 芯片）和 Linux、macOS 的 CLI tar.gz 已实现。Linux 的图形界面暂时没有安装包
-> （AppImage 随 GPUI 版撤下，见下）；Windows 的打包是 M6 余下的部分。
+> 状态：macOS 的磁盘映像（Apple 芯片）、Linux 的 Flatpak 包和 Linux、macOS 的 CLI tar.gz 已实现（Flatpak 还没上
+> Flathub）；Windows 的打包是 M6 余下的部分。
 
 ## Linux
 
@@ -11,28 +11,57 @@
 GitHub 上最老的 runner）上用 rustup 的工具链构建：glibc 只向后兼容，程序能在哪些发行版上跑取决于构建时的 glibc。
 CLI 不链接图形库：SQLite 编进程序，TLS 是 rustls 加系统信任库，密钥环走 zbus（纯 Rust 的 D-Bus）。
 
-### 图形界面：暂缓
+### 图形界面：Flatpak
 
-GPUI 版的 GUI 发布为 AppImage（自带少量 X11 库和 CJK 字体，带 zsync 增量更新）。换成 nsh 之后 GUI 链接 GTK 4 和
-WebKitGTK 6.0，AppImage 和它的脚本（`build-appimage.sh`、`AppRun`）撤下了，Linux 的 release 只发 CLI。要重新出包，
-先要解决：
+GUI 发布为 `catmail-<版本>-<架构>.flatpak`（x86_64、aarch64），一个单文件 bundle，用 `flatpak install --user`
+安装；它记着 Flathub 的地址，缺的 runtime 从那里装。运行时是 GNOME runtime（`org.gnome.Platform`），GTK 4、
+WebKitGTK 6.0 和 GStreamer 都来自它，包里只有 `catmail-gui` 和 `catmail` 两个程序（bundle 约 17 MB）。
 
-- **带上 WebKitGTK**：WebKit 的辅助进程（WebKitWebProcess、WebKitNetworkProcess）的路径是编译进库里的，从别处
-  加载的库仍会去找构建时的路径；渲染进程还在 bwrap 沙箱里运行，沙箱要能看到包里的文件。只带 GTK 不够，系统的
-  WebKitGTK 又不一定有 6.0（Ubuntu 22.04 没有）。
-- **基线**：运行时要 GTK 4.14 及以上和 WebKitGTK 6.0，glibc 2.35 的基线要随之重新定。
-- 格式（AppImage、Flatpak 的 GNOME runtime 自带 WebKitGTK，或发行版的包）随这两点一起选。
+**为什么不是 AppImage。** GPUI 版发布过 AppImage（只要带几个 X11 库）。换成 nsh 之后 GUI 链接 WebKitGTK，
+带上它要过三关，每一关都只有 hack：
 
-留下的部分给以后的包用：
+- WebKit 的辅助进程（WebKitWebProcess、WebKitNetworkProcess）的路径编译在库里（`PKGLIBEXECDIR`），
+  `WEBKIT_EXEC_PATH` 只有开发者构建才认。只能改 `.so` 里的字符串，再让 AppRun 先 `cd` 进挂载目录。
+- 6.0 的网页进程一定跑在 bwrap 沙箱里，沙箱只挂 `/usr`、`/lib*`、`PKGLIBEXECDIR` 和 `LD_LIBRARY_PATH`，看不到
+  AppImage 的挂载点；还要宿主机有 bwrap、允许非特权 user namespace（Ubuntu 24.04 默认用 AppArmor 限制）。退路
+  `WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS` 意味着不开沙箱渲染陌生人的 HTML。
+- 包里的 WebKit 冻结在构建时，每个 WebKitGTK 安全公告都要我们重发一版；GNOME runtime 由 Flathub 更新。
 
-- 桌面文件、AppStream 元数据（`packaging/linux/`）的 id 都是 `net.yangkx.catmail`，与 `APP_ID` 相同。每个窗口都
-  设了这个 app id（Wayland 的 app id、X11 的 `WM_CLASS`），桌面文件的 `StartupWMClass` 也是它。任务栏、Alt-Tab
-  靠它找到窗口的图标和名字。
+另外 GTK 4.14 和 WebKitGTK 6.0 要 Ubuntu 24.04 起，基线升到 glibc 2.39，包也会超过 150 MB。Flatpak 里
+WebKit 的沙箱照常工作：网页进程由 `flatpak-spawn --sandbox` 起在子沙箱里。
+
+**权限**（`net.yangkx.catmail.yml` 的 `finish-args`）：网络、Wayland（X11 兜底）、`/dev/dri`，D-Bus 上只多两个：
+
+- `org.freedesktop.secrets`：`keyring` 直接说 Secret Service（zbus），不走 portal。
+- `org.kde.StatusNotifierWatcher`：托盘。规范要求托盘项占用 `org.kde.StatusNotifierItem-<pid>-<id>`，沙箱里的
+  pid 在每个应用里都是同一个小数字，会撞名（占用它还要通配的 `--own-name`），所以在 Flatpak 里（有
+  `/.flatpak-info`）ksni 不占名字，用连接的唯一名注册，watcher 都接受。
+
+其余都走 portal，不用额外权限：
+
+- 通知：GLib 在沙箱里自动用 Notification portal。点击由 portal 对 app id 的总线名调用 `ActivateAction`，应用
+  自己占用这个名字（Flatpak 默认允许占用自己的 id），见[后台运行](background.md#系统通知)。
+- 打开链接和附件（`GtkUriLauncher`、`GtkFileLauncher`）、保存附件（`GtkFileDialog`）。
+- 开机启动要用 Background portal（见[后台运行](background.md#开机启动)，还没实现）。
+
+**数据目录**在 `~/.var/app/net.yangkx.catmail/data/catmail`，与包外的 CLI（`~/.local/share/catmail`）不是同一个，
+所以 CLI 也打进包里：`flatpak run --command=catmail net.yangkx.catmail`。
+
+**构建**：`packaging/linux/build-flatpak.sh`，本地和 CI 都用它。构建没有网络：脚本先 `cargo vendor`
+（crates.io 和 git 依赖）到 `target/flatpak/vendor`，生成指向它的 cargo 配置，manifest 把两者作为 source 带进去，
+用 SDK 扩展 `rust-stable` 的工具链编译。上 Flathub 时要换成 `flatpak-cargo-generator` 生成的、逐个带校验和的
+sources，Flathub 不收本地目录。本地运行 `packaging/linux/build-flatpak.sh` 构建、为当前用户安装并打出 bundle
+（`--no-install` 只打 bundle）；要 flatpak-builder（或 Flathub 的 `org.flatpak.Builder`）和 cargo。和 AppImage
+不同，NixOS 上也能打出能分发的包：编译在 SDK 里进行，不碰 Nix 的工具链。
+
+留下的约定：
+
+- 桌面文件、AppStream 元数据（`packaging/linux/`）的 id 都是 `net.yangkx.catmail`，与 `APP_ID` 和 Flatpak 的
+  app id 相同。每个窗口都设了这个 app id（Wayland 的 app id、X11 的 `WM_CLASS`），桌面文件的 `StartupWMClass`
+  也是它。任务栏、Alt-Tab 靠它找到窗口的图标和名字。
 - 图标用固定亮色的 `catmail-light.svg`：图标加载器不理会 `catmail.svg` 里的媒体查询。
 - 不用 Nix 打包（把整个闭包连同 Nix 的 glibc 一起放进去）：GL / Vulkan 驱动只能来自宿主机，链接的是宿主机的
   glibc，和 Nix 的对不上（nixGL 要解决的就是这个）。
-- 开机启动的 `Exec` 要写包本身的路径：AppImage 每次运行挂载到不同的临时目录，要写 `$APPIMAGE`（见
-  [后台运行](background.md#开机启动)）。
 
 ## macOS：磁盘映像
 
@@ -99,7 +128,9 @@ workflow 建一个临时钥匙串，导入 `.p12` 和它链到的中间证书 De
   （所有 crate 都继承它），`cargo update --workspace` 只更新 `Cargo.lock` 里的工作区 crate，提交
   "Release v<版本>"，打附注标签，用 `git push --atomic` 把提交和标签一起推上去：运行期间 main 有新提交
   时两者都不推，重新运行即可。
-- 然后从这个标签构建：`ubuntu-22.04` 和 `ubuntu-22.04-arm` 上各一份 CLI tar.gz，
+- 然后从这个标签构建：`ubuntu-22.04` 和 `ubuntu-22.04-arm` 上各一份 CLI tar.gz，`ubuntu-24.04` 和
+  `ubuntu-24.04-arm` 上各一份 Flatpak bundle（先关掉 AppArmor 对非特权 user namespace 的限制，flatpak-builder
+  的 bwrap 要用），
   `macos-15` 上一份签名、公证过的磁盘映像和 CLI tar.gz，最后创建 GitHub release（附 `SHA256SUMS`）。
   任何一个平台失败都不发布。
 - 全在一次运行里：用 GITHUB_TOKEN 推的标签不会触发别的 workflow，所以不能靠"推标签触发构建"。也就没有
