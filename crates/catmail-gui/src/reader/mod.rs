@@ -15,9 +15,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use catmail_core::html::{DarkPalette, Image, RemoteImage, recolor_html};
+use catmail_core::html::{DarkPalette, Image, RemoteImage};
 use catmail_core::{Attachment, MessageId, safe_filename};
-use catmail_frontend::html::{BodyPages, Colors, browser_page};
+use catmail_frontend::html::{Appearance, BodyPages, Colors, DarkAppearance, browser_page};
 use catmail_frontend::reader::{self, Header};
 use nsh_base::theme;
 use nsh_core::element::{ElementRef, Spawned, open_path, pick_save_path};
@@ -159,7 +159,11 @@ pub fn follow_selection() {
         // A blank page in the web view, which stays: its web process is running when a
         // message opens (it takes a moment to start).
         None => global::<Reading>().set(Reading {
-            page: page_state().borrow_mut().pages.blank(&colors(dark)).into(),
+            page: page_state()
+                .borrow_mut()
+                .pages
+                .blank(&appearance(dark))
+                .into(),
             page_dark: dark,
             ..Reading::default()
         }),
@@ -208,20 +212,13 @@ async fn open_message(id: MessageId, dark: bool) {
     // For checking what the page may load: this file's HTML in place of the message's.
     let probe = std::env::var_os("CATMAIL_GUI_HTML").and_then(|f| std::fs::read_to_string(f).ok());
     let html = probe.as_deref().or(body.and_then(|b| b.html.as_deref()));
-    // A dark page moves the message's colors toward the theme's; one
-    // whose colors come from CSS variables can't be moved and stays light.
-    let recolored = html
-        .filter(|_| dark)
-        .and_then(|html| recolor_html(html, palette()));
-    let page_dark = page_is_dark(dark, html.is_some(), recolored.is_some());
-    let page_html = recolored.as_deref().or(html);
-    let (made, remote) = {
+    let (made, page_dark, remote) = {
         let page = page_state();
         let mut page = page.borrow_mut();
         let made = page.pages.page(
-            page_html,
+            html,
             body.and_then(|b| b.text.as_deref()),
-            &colors(page_dark),
+            &appearance(dark),
         );
         // Those not shown yet: the cached ones show at once, the others when the user asks.
         let remote = (made.remote_urls.into_iter())
@@ -233,7 +230,7 @@ async fn open_message(id: MessageId, dark: bool) {
         {
             scroll.scroll_to(Point::new(px(0.0), px(0.0)), false);
         }
-        (made.html, remote)
+        (made.html, made.dark, remote)
     };
     // Hidden (the first page, or one that took long): until the page has loaded, rather
     // than show the web view before it paints, in WebKit's own background.
@@ -477,11 +474,16 @@ fn palette() -> DarkPalette {
     }
 }
 
-/// Whether a message's page takes the dark theme's colors: when the reader is dark and
-/// the message's HTML could be moved toward them, or it is plain text, which has no
-/// colors of its own. HTML that couldn't be moved stays light.
-fn page_is_dark(dark: bool, html: bool, recolored: bool) -> bool {
-    dark && (recolored || !html)
+/// What the reader shows a page in: a dark one moves the message's colors toward the
+/// theme's.
+fn appearance(dark: bool) -> Appearance {
+    Appearance {
+        light: colors(false),
+        dark: dark.then(|| DarkAppearance {
+            palette: palette(),
+            colors: colors(true),
+        }),
+    }
 }
 
 fn colors(dark: bool) -> Colors {
@@ -569,16 +571,5 @@ mod tests {
         assert!(tall_enough(620.0, 620.0));
         assert!(tall_enough(619.5, 620.2), "rounded");
         assert!(tall_enough(40.0, 12.0), "shorter than the least height");
-    }
-
-    #[test]
-    fn plain_text_takes_the_dark_theme() {
-        assert!(page_is_dark(true, false, false), "plain text");
-        assert!(page_is_dark(true, true, true), "recolored HTML");
-        assert!(
-            !page_is_dark(true, true, false),
-            "HTML that couldn't be recolored"
-        );
-        assert!(!page_is_dark(false, false, false), "light");
     }
 }

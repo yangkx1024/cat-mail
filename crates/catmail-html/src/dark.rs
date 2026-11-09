@@ -158,6 +158,13 @@ fn in_gamut(l: f32, a: f32, b: f32, alpha: f32) -> Color {
     scaled(lo)
 }
 
+/// The palette the sanitizer's and the style sheets' tests move colors with.
+#[cfg(test)]
+pub(crate) const TEST_PALETTE: DarkPalette = DarkPalette {
+    background: [0x20; 3],
+    foreground: [0xe0; 3],
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -23,4 +23,4 @@ pub use images::{
     Image, MAX_REMOTE_IMAGES, Served, ServedImage, cid_image_ids, embed_inline_images,
     remote_image_url, serve_images, sniff_image,
 };
-pub use sanitize::{recolor_html, sanitize_html};
+pub use sanitize::sanitize_html;
