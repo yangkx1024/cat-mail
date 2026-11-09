@@ -209,6 +209,7 @@ mod tests {
             foreground: "#111".into(),
             background: "#fff".into(),
             link: "#06c".into(),
+            selection: "#264F784D".into(),
         }
     }
 

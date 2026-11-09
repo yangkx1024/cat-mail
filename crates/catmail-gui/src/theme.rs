@@ -130,6 +130,42 @@ pub fn link() -> AdaptiveColor {
     token("link", || theme().primary)
 }
 
+/// How strongly nsh draws a selectable text's selection over its tint (as iOS does), on
+/// Linux and macOS alike.
+const SELECTION_TINT_STRENGTH: f32 = 0.3;
+
+/// The highlight of a selection, the same in the app's texts and in the reader's page:
+/// the theme's `selection` (what nsh-base's components draw), but no stronger than nsh
+/// draws a selectable text's, which can't be.
+pub fn selection() -> AdaptiveColor {
+    theme().selection().map(highlight)
+}
+
+fn highlight(selection: Hsla) -> Hsla {
+    selection.alpha(selection.a.min(SELECTION_TINT_STRENGTH))
+}
+
+/// The tint that has nsh draw [`selection`] as a selectable text's highlight.
+fn selection_tint() -> Hsla {
+    tint_for(color(selection()))
+}
+
+fn tint_for(highlight: Hsla) -> Hsla {
+    highlight.alpha(highlight.a / SELECTION_TINT_STRENGTH)
+}
+
+/// A text the user can select, highlighted in [`selection`]: without a color nsh draws
+/// the system's blue, whatever the theme.
+pub trait SelectableText {
+    fn selectable_text(self) -> Self;
+}
+
+impl SelectableText for Text {
+    fn selectable_text(self) -> Self {
+        self.selectable(true).selection_color(selection_tint)
+    }
+}
+
 /// A sender's avatar: a tint of one of the theme's six hues, picked by the address so a
 /// sender keeps theirs.
 pub fn avatar(seed: &str) -> AdaptiveColor {
@@ -142,6 +178,24 @@ pub fn avatar(seed: &str) -> AdaptiveColor {
 mod tests {
     use super::*;
     use catmail_frontend::theme::{DEFAULT_DARK, DEFAULT_LIGHT, Themes};
+
+    #[test]
+    fn selectable_texts_show_the_themes_selection() {
+        // As drawn: alpha in 8 bits.
+        let alpha = |c: Hsla| (c.a * 255.0).round();
+        let close = |a: Hsla, b: Hsla| alpha(a) == alpha(b) && a.h == b.h && a.l == b.l;
+        // A theme's own, at 30 % like the built-in ones: drawn as it is.
+        let theme_own = Hsla::from(Color::rgba(0xbc, 0xff, 0xff, 0x4d));
+        let shown = highlight(theme_own);
+        assert!(close(shown, theme_own));
+        let drawn = tint_for(shown).opacity(SELECTION_TINT_STRENGTH);
+        assert!(close(drawn, shown), "{drawn:?}");
+        // An opaque one is as strong as nsh draws.
+        let opaque = Hsla::from(Color::rgba(0x26, 0x4f, 0x78, 0xff));
+        let shown = highlight(opaque);
+        assert!((shown.a - SELECTION_TINT_STRENGTH).abs() < 1e-6);
+        assert!((tint_for(shown).a - 1.0).abs() < 1e-6);
+    }
 
     #[test]
     fn the_builtin_themes_set_every_token() {

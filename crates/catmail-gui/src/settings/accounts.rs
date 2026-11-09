@@ -20,6 +20,7 @@ use crate::toast::report;
 use crate::buttons::labelled_button;
 
 use super::{close, help, section_title, toggle};
+use crate::theme::SelectableText as _;
 
 pub fn accounts_section() -> impl IntoElement {
     let accounts = move || global::<Accounts>().with(|a| a.0.clone().unwrap_or_default());
@@ -74,7 +75,7 @@ fn account_rows(entry: catmail_frontend::mailbox::AccountEntry) -> AnyElement {
                         .child(
                             text(identity.address().to_string())
                                 .text_sm()
-                                .selectable(true)
+                                .selectable_text()
                                 .text_color(move || theme().foreground),
                         )
                         .child(help(identity.smtp.host.clone()))
@@ -138,7 +139,7 @@ fn account_rows(entry: catmail_frontend::mailbox::AccountEntry) -> AnyElement {
                         .child(
                             text(account.email.clone())
                                 .text_sm()
-                                .selectable(true)
+                                .selectable_text()
                                 .text_color(move || theme().foreground),
                         )
                         .child(help(account.imap.host.clone())),

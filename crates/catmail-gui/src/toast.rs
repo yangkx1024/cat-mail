@@ -14,6 +14,7 @@ use nsh_core::prelude::*;
 use nsh_core::time::now;
 
 use crate::icons::{Icon, icon};
+use crate::theme::SelectableText as _;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
@@ -179,7 +180,7 @@ pub fn toasts() -> impl IntoElement {
                             text(move || item.get().1.1)
                                 .flex_1()
                                 .text_sm()
-                                .selectable(true)
+                                .selectable_text()
                                 .text_color(move || theme().popover_foreground),
                         )
                 },

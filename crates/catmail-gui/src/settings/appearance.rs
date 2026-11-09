@@ -26,6 +26,7 @@ use crate::toast::{Level, notify, report};
 use crate::buttons::labelled_button;
 
 use super::{help, prefs, section_title};
+use crate::theme::SelectableText as _;
 
 pub fn appearance() -> impl IntoElement {
     let import = signal(None::<Import>);
@@ -464,7 +465,7 @@ fn import_pane(
                     .child(
                         text(error)
                             .text_sm()
-                            .selectable(true)
+                            .selectable_text()
                             .text_color(move || theme().foreground),
                     ),
             )

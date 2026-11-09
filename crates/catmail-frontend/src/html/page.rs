@@ -150,9 +150,10 @@ pub(super) fn body_page(
          <meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\">\
          <meta name=\"referrer\" content=\"no-referrer\">\
          <meta name=\"catmail-page\" content=\"{number}\">\
-         <style>{BASE_STYLE} html {{ color: {}; background: {}; }} a[href] {{ color: {}; }}</style>\
+         <style>{BASE_STYLE} html {{ color: {}; background: {}; }} a[href] {{ color: {}; }} \
+         ::selection {{ background: {}; }}</style>\
          </head>\n<body>\n{html}\n</body></html>\n",
-        colors.foreground, colors.background, colors.link,
+        colors.foreground, colors.background, colors.link, colors.selection,
     );
     Served { html, remote_urls }
 }
@@ -168,6 +169,8 @@ pub struct Colors {
     pub foreground: String,
     pub background: String,
     pub link: String,
+    /// The highlight of a selection, as in the app's texts: without it WebKit's own.
+    pub selection: String,
 }
 
 #[cfg(test)]
@@ -179,6 +182,7 @@ mod tests {
             foreground: "#111".into(),
             background: "#fff".into(),
             link: "#06c".into(),
+            selection: "#264F784D".into(),
         }
     }
 
@@ -208,6 +212,16 @@ mod tests {
             "{page}"
         );
         assert!(!BRIDGE.contains("scrollHeight"));
+    }
+
+    #[test]
+    fn a_selection_on_the_page_is_highlighted_as_in_the_app() {
+        // Or WebKit draws its own blue, whatever the theme.
+        let page = blank_page(1, &colors());
+        assert!(
+            page.contains("::selection { background: #264F784D; }"),
+            "{page}"
+        );
     }
 
     #[test]
