@@ -23,7 +23,6 @@ pub fn run(started: impl FnOnce() + 'static) -> u8 {
     let started = RefCell::new(Some(started));
     app.connect_startup(move |app| {
         own_app_id(app.upcast_ref());
-        style_menus();
         if let Some(started) = started.borrow_mut().take() {
             started();
         }
@@ -56,28 +55,6 @@ fn own_app_id(app: &gtk::gio::Application) {
         gtk::gio::BusNameOwnerFlags::DO_NOT_QUEUE,
         |_, _| {},
         |_, name| tracing::info!(name, "the app id is another instance's"),
-    );
-}
-
-/// ⚠️ A context menu of one item had more room below the item than above. nsh's menus are
-/// `gtk::PopoverMenu`s, whose items sit in a scrolled window that is never shorter than its
-/// vertical scrollbar, shown or not: GTK's theme gives the slider 40px (44 with its
-/// margins), more than one item takes (40). A shorter slider keeps the scrollbar out of
-/// the menu's height. Above nsh's own menu style sheet, which has no such rule yet
-/// (longbridge/nsh#1359).
-const MENU_CSS: &str = "popover.menu > contents > scrolledwindow > scrollbar.vertical > range \
-    > trough > slider { min-height: 16px; }";
-
-fn style_menus() {
-    let Some(display) = gtk::gdk::Display::default() else {
-        return;
-    };
-    let provider = gtk::CssProvider::new();
-    provider.load_from_string(MENU_CSS);
-    gtk::style_context_add_provider_for_display(
-        &display,
-        &provider,
-        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
     );
 }
 
@@ -272,7 +249,7 @@ mod tests {
     use std::rc::Rc;
     use std::time::Duration;
 
-    use nsh_platform_linux::gtk4::{self as gtk, gio, glib, prelude::*};
+    use nsh_platform_linux::gtk4::{gio, glib, prelude::*};
 
     use super::own_app_id;
 
@@ -362,49 +339,5 @@ mod tests {
                 .unwrap();
         });
         assert_eq!(clicked.borrow().as_deref(), Some("new-mail/1/8"));
-    }
-
-    /// A menu of one item is as tall as the item: its scrolled window takes its items'
-    /// natural height (`propagate-natural-height`) and its scrollbar asks for no more. GTK
-    /// needs a display: without one (as in CI) the test does not run.
-    #[test]
-    fn a_menu_of_one_item_fits_it() {
-        if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
-            return;
-        }
-        gtk::init().expect("GTK opens the display");
-        // The item's height in nsh's menu style sheet, which only nsh's app loads.
-        let nsh = gtk::CssProvider::new();
-        nsh.load_from_string("popover.menu modelbutton { min-height: 28px; }");
-        gtk::style_context_add_provider_for_display(
-            &gtk::gdk::Display::default().unwrap(),
-            &nsh,
-            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
-        super::style_menus();
-        let model = gio::Menu::new();
-        model.append(Some("New folder"), Some("app.new-folder"));
-        let menu = gtk::PopoverMenu::from_model(Some(&model));
-        let scrolled = scrolled_window(menu.upcast_ref()).expect("the menu's scrolled window");
-        let (_, window, ..) = scrolled.measure(gtk::Orientation::Vertical, -1);
-        let (_, items, ..) = scrolled
-            .child()
-            .expect("the items")
-            .measure(gtk::Orientation::Vertical, -1);
-        assert_eq!(window, items);
-    }
-
-    fn scrolled_window(widget: &gtk::Widget) -> Option<gtk::ScrolledWindow> {
-        if let Some(scrolled) = widget.downcast_ref::<gtk::ScrolledWindow>() {
-            return Some(scrolled.clone());
-        }
-        let mut child = widget.first_child();
-        while let Some(widget) = child {
-            if let Some(found) = scrolled_window(&widget) {
-                return Some(found);
-            }
-            child = widget.next_sibling();
-        }
-        None
     }
 }
