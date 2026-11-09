@@ -3056,7 +3056,7 @@ dependencies = [
 [[package]]
 name = "nsh-base"
 version = "0.4.0"
-source = "git+https://github.com/longbridge/nsh?rev=101a426f8c5ef62e62e60ad32d5e6db4e68caa67#101a426f8c5ef62e62e60ad32d5e6db4e68caa67"
+source = "git+https://github.com/longbridge/nsh?rev=21648204e66b3792090c216383f345a9d628f0b8#21648204e66b3792090c216383f345a9d628f0b8"
 dependencies = [
  "chrono",
  "html5ever 0.27.0",
@@ -3075,7 +3075,7 @@ dependencies = [
 [[package]]
 name = "nsh-core"
 version = "0.4.0"
-source = "git+https://github.com/longbridge/nsh?rev=101a426f8c5ef62e62e60ad32d5e6db4e68caa67#101a426f8c5ef62e62e60ad32d5e6db4e68caa67"
+source = "git+https://github.com/longbridge/nsh?rev=21648204e66b3792090c216383f345a9d628f0b8#21648204e66b3792090c216383f345a9d628f0b8"
 dependencies = [
  "cap-std",
  "crc32fast",
@@ -3112,13 +3112,14 @@ dependencies = [
 [[package]]
 name = "nsh-engine"
 version = "0.4.0"
-source = "git+https://github.com/longbridge/nsh?rev=101a426f8c5ef62e62e60ad32d5e6db4e68caa67#101a426f8c5ef62e62e60ad32d5e6db4e68caa67"
+source = "git+https://github.com/longbridge/nsh?rev=21648204e66b3792090c216383f345a9d628f0b8#21648204e66b3792090c216383f345a9d628f0b8"
 dependencies = [
  "crossbeam-channel",
  "libc",
  "log",
  "nsh-core",
  "nsh-updater",
+ "objc2-io-surface",
  "rustc-hash",
  "serde_json",
  "tokio",
@@ -3129,7 +3130,7 @@ dependencies = [
 [[package]]
 name = "nsh-macros"
 version = "0.4.0"
-source = "git+https://github.com/longbridge/nsh?rev=101a426f8c5ef62e62e60ad32d5e6db4e68caa67#101a426f8c5ef62e62e60ad32d5e6db4e68caa67"
+source = "git+https://github.com/longbridge/nsh?rev=21648204e66b3792090c216383f345a9d628f0b8#21648204e66b3792090c216383f345a9d628f0b8"
 dependencies = [
  "imagesize 0.15.0",
  "proc-macro2",
@@ -3142,7 +3143,7 @@ dependencies = [
 [[package]]
 name = "nsh-platform-apple"
 version = "0.4.0"
-source = "git+https://github.com/longbridge/nsh?rev=101a426f8c5ef62e62e60ad32d5e6db4e68caa67#101a426f8c5ef62e62e60ad32d5e6db4e68caa67"
+source = "git+https://github.com/longbridge/nsh?rev=21648204e66b3792090c216383f345a9d628f0b8#21648204e66b3792090c216383f345a9d628f0b8"
 dependencies = [
  "block2",
  "dispatch2",
@@ -3159,7 +3160,7 @@ dependencies = [
 [[package]]
 name = "nsh-platform-linux"
 version = "0.4.0"
-source = "git+https://github.com/longbridge/nsh?rev=101a426f8c5ef62e62e60ad32d5e6db4e68caa67#101a426f8c5ef62e62e60ad32d5e6db4e68caa67"
+source = "git+https://github.com/longbridge/nsh?rev=21648204e66b3792090c216383f345a9d628f0b8#21648204e66b3792090c216383f345a9d628f0b8"
 dependencies = [
  "crossbeam-channel",
  "gstreamer",
@@ -3182,7 +3183,7 @@ dependencies = [
 [[package]]
 name = "nsh-platform-macos"
 version = "0.4.0"
-source = "git+https://github.com/longbridge/nsh?rev=101a426f8c5ef62e62e60ad32d5e6db4e68caa67#101a426f8c5ef62e62e60ad32d5e6db4e68caa67"
+source = "git+https://github.com/longbridge/nsh?rev=21648204e66b3792090c216383f345a9d628f0b8#21648204e66b3792090c216383f345a9d628f0b8"
 dependencies = [
  "block2",
  "crossbeam-channel",
@@ -3201,6 +3202,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-image-io",
  "objc2-io-kit",
+ "objc2-io-surface",
  "objc2-quartz-core",
  "rustc-hash",
  "serde_json",
@@ -3209,7 +3211,7 @@ dependencies = [
 [[package]]
 name = "nsh-updater"
 version = "0.4.0"
-source = "git+https://github.com/longbridge/nsh?rev=101a426f8c5ef62e62e60ad32d5e6db4e68caa67#101a426f8c5ef62e62e60ad32d5e6db4e68caa67"
+source = "git+https://github.com/longbridge/nsh?rev=21648204e66b3792090c216383f345a9d628f0b8#21648204e66b3792090c216383f345a9d628f0b8"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -3414,6 +3416,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "180788110936d59bab6bd83b6060ffdfffb3b922ba1396b312ae795e1de9d81d"
 dependencies = [
  "bitflags 2.13.2",
+ "libc",
  "objc2",
  "objc2-core-foundation",
 ]
