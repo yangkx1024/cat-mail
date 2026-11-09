@@ -23,6 +23,7 @@ use super::{
     close_requested, composing, discard, dropped, ending, field_index, focus, follow_identities,
     remove_attachment, send,
 };
+use crate::theme::SelectableText as _;
 
 #[component]
 pub fn Composer() -> impl IntoElement {
@@ -112,7 +113,7 @@ fn error() -> impl IntoElement {
                 .child(
                     text(move || error().unwrap_or_default())
                         .text_sm()
-                        .selectable(true)
+                        .selectable_text()
                         .text_color(move || theme().destructive),
                 )
         },

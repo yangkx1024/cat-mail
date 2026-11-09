@@ -16,6 +16,7 @@ use crate::icons::{Icon, icon};
 use crate::mailbox::list::{self};
 use crate::mailbox::panes::{back_button, fact};
 use crate::tasks::in_view;
+use crate::theme::SelectableText as _;
 use crate::toast::report;
 use crate::{chrome, composer};
 
@@ -104,7 +105,7 @@ fn page(draft: Rc<Draft>) -> impl IntoElement {
             .child(
                 text(error)
                     .text_sm()
-                    .selectable(true)
+                    .selectable_text()
                     .text_color(move || theme().foreground),
             )
             .into_element()
@@ -145,7 +146,7 @@ fn page(draft: Rc<Draft>) -> impl IntoElement {
                 text(format::subject(Some(&draft.content.subject)).to_owned())
                     .text_xl()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .selectable(true)
+                    .selectable_text()
                     .text_color(move || theme().foreground),
             )
             .children(lines)
@@ -156,7 +157,7 @@ fn page(draft: Rc<Draft>) -> impl IntoElement {
                     .border_t_1()
                     .border_color(move || theme().border)
                     .text_sm()
-                    .selectable(true)
+                    .selectable_text()
                     .text_color(move || theme().foreground),
             ),
     )

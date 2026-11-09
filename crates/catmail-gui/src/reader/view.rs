@@ -16,6 +16,7 @@ use crate::icons::{Icon, icon};
 use crate::mailbox::commands;
 use crate::mailbox::list::{self};
 use crate::mailbox::panes::back_button;
+use crate::theme::SelectableText as _;
 use crate::{chrome, composer};
 
 use super::{
@@ -60,7 +61,7 @@ fn failed(error: String) -> impl IntoElement {
         .child(
             text(format!("Couldn't open the message: {error}"))
                 .text_sm()
-                .selectable(true)
+                .selectable_text()
                 .text_color(move || theme().muted_foreground),
         )
         .child(
@@ -191,7 +192,7 @@ fn message() -> impl IntoElement {
             text(field(|h| h.subject.clone()))
                 .text_xl()
                 .font_weight(FontWeight::SEMIBOLD)
-                .selectable(true)
+                .selectable_text()
                 .text_color(move || theme().foreground),
         )
         .child(when(
@@ -244,13 +245,13 @@ fn message() -> impl IntoElement {
                         .child(
                             text(field(|h| h.sender.clone()))
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .selectable(true)
+                                .selectable_text()
                                 .text_color(move || theme().foreground),
                         )
                         .child(
                             text(field(|h| h.sender_email.clone().unwrap_or_default()))
                                 .text_xs()
-                                .selectable(true)
+                                .selectable_text()
                                 .text_color(muted),
                         )
                         .child(view().flex_1())
@@ -317,7 +318,7 @@ fn message() -> impl IntoElement {
                             text(move || detail.get().1)
                                 .flex_1()
                                 .text_xs()
-                                .selectable(true)
+                                .selectable_text()
                                 .text_color(move || theme().foreground),
                         )
                 },

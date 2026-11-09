@@ -27,6 +27,7 @@ use crate::engine::client;
 use crate::login::{self, SignIn};
 use crate::shell::Ask;
 use crate::tasks::{in_view, own_tasks};
+use crate::theme::SelectableText as _;
 use crate::{chrome, composer, form, reader, settings, shell, toast};
 use catmail_frontend::list::Listing;
 use list::Selected;
@@ -83,7 +84,7 @@ fn failed(reason: String) -> impl IntoElement {
         .child(
             text(reason)
                 .text_sm()
-                .selectable(true)
+                .selectable_text()
                 .text_color(move || theme().muted_foreground),
         )
 }

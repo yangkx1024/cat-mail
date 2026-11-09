@@ -13,6 +13,7 @@ use crate::mailbox::list::{self, Selected};
 use crate::mailbox::picker::picker;
 use crate::mailbox::sidebar;
 use crate::reader;
+use crate::theme::SelectableText as _;
 
 /// Which pane the row selected opens.
 #[derive(Clone, Copy, PartialEq)]
@@ -180,7 +181,7 @@ pub fn fact(name: &'static str, value: String) -> View {
             text(value)
                 .flex_1()
                 .text_sm()
-                .selectable(true)
+                .selectable_text()
                 .text_color(move || theme().foreground),
         )
 }

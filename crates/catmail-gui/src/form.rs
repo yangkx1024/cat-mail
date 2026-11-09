@@ -13,6 +13,7 @@ use nsh_core::element::input;
 use nsh_core::prelude::*;
 
 use crate::tasks::in_view;
+use crate::theme::SelectableText as _;
 
 /// A dialog `width` points wide over the window, dimming it; `cancel` is what Escape or
 /// a press beside it does.
@@ -153,7 +154,7 @@ pub fn error(submission: Signal<Submission>) -> impl IntoElement {
         move || {
             text(move || message().unwrap_or_default())
                 .text_sm()
-                .selectable(true)
+                .selectable_text()
                 .text_color(move || theme().destructive)
         },
     )

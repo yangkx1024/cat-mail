@@ -490,6 +490,7 @@ fn colors(dark: bool) -> Colors {
         foreground: pick(theme().foreground),
         background: pick(theme().background),
         link: pick(crate::theme::link()),
+        selection: pick(crate::theme::selection()),
     }
 }
 

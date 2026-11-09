@@ -17,6 +17,7 @@ use crate::mailbox::list::{self};
 use crate::mailbox::panes::{back_button, fact};
 use crate::mailbox::sidebar::with_accounts;
 use crate::tasks::in_view;
+use crate::theme::SelectableText as _;
 use crate::toast::report;
 
 /// The pane, while an outbox entry is selected.
@@ -53,7 +54,7 @@ fn page(entry: OutboxEntry) -> impl IntoElement {
                 text(format::subject(Some(&entry.subject)).to_owned())
                     .text_xl()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .selectable(true)
+                    .selectable_text()
                     .text_color(move || theme().foreground),
             )
             .child(view().gap(px(4.0)).children(lines))
@@ -84,7 +85,7 @@ fn state(entry: &OutboxEntry) -> impl IntoElement {
             .children(reason.map(|reason| {
                 text(reason)
                     .text_sm()
-                    .selectable(true)
+                    .selectable_text()
                     .text_color(muted)
                     .into_element()
             }))
@@ -140,7 +141,7 @@ fn alert(
                 .child(
                     text(about)
                         .text_sm()
-                        .selectable(true)
+                        .selectable_text()
                         .text_color(move || theme().foreground),
                 ),
         )
