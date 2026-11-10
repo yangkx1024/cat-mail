@@ -1,7 +1,7 @@
 # Vendored nsh skills
 
 Copied unmodified from <https://github.com/longbridge/nsh/tree/main/skills> at commit
-`101a426f8c5ef62e62e60ad32d5e6db4e68caa67` (2026-11-08), the revision the workspace
+`506b539284e070f506cd8ac5f554326b58f99483` (2026-11-10), the revision the workspace
 `Cargo.toml` pins:
 
 - `nsh-design-guides`: the Design Guides, for any change to a screen, layout, spacing,
