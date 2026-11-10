@@ -5,7 +5,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.97"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
@@ -69,12 +69,14 @@ mime_guess = "2.0.5"
 # message list's edge, and macOS's text fields drawn while their scroll view scrolls
 # (#1326): the login and settings forms' fields stayed blank, and a Linux menu of one item
 # as tall as the item (#1359): an account's context menu had more room below its New
-# folder than above. Back to crates.io (and the repository out of `allow-git` in
+# folder than above, and macOS key bindings leaving keys to an input method while it
+# composes (#1387): the composer binds Escape (close), which an input method needs to
+# cancel a pinyin composition. Back to crates.io (and the repository out of `allow-git` in
 # deny.toml) once a release has what catmail-gui uses.
-nsh-core = { git = "https://github.com/longbridge/nsh", rev = "ca9d812dff7164383f85bd1f357c521fa5dd3521" }
-nsh-base = { git = "https://github.com/longbridge/nsh", rev = "ca9d812dff7164383f85bd1f357c521fa5dd3521", default-features = false }
-nsh-platform-linux = { git = "https://github.com/longbridge/nsh", rev = "ca9d812dff7164383f85bd1f357c521fa5dd3521", default-features = false, features = ["webview"] }
-nsh-platform-macos = { git = "https://github.com/longbridge/nsh", rev = "ca9d812dff7164383f85bd1f357c521fa5dd3521", default-features = false }
+nsh-core = { git = "https://github.com/longbridge/nsh", rev = "506b539284e070f506cd8ac5f554326b58f99483" }
+nsh-base = { git = "https://github.com/longbridge/nsh", rev = "506b539284e070f506cd8ac5f554326b58f99483", default-features = false }
+nsh-platform-linux = { git = "https://github.com/longbridge/nsh", rev = "506b539284e070f506cd8ac5f554326b58f99483", default-features = false, features = ["webview"] }
+nsh-platform-macos = { git = "https://github.com/longbridge/nsh", rev = "506b539284e070f506cd8ac5f554326b58f99483", default-features = false }
 # catmail-gui's AppKit shell: the main thread's futures on the main dispatch queue
 # (async-task), and the event monitor's block (the versions nsh's macOS platform uses).
 async-task = "4.7.1"
