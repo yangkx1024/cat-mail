@@ -6,9 +6,9 @@
 use std::collections::HashMap;
 
 use catmail_core::{
-    AccountMode, AccountOverview, Address, Attachment, Draft, Flags, Folder, FolderId, FolderRole,
-    FolderSyncReport, Message, MessageSummary, OpKind, OutboxEntry, PendingOp, ReportedError,
-    special_folder,
+    AccountMode, AccountOverview, Address, Attachment, Draft, DraftAttachment, Flags, Folder,
+    FolderId, FolderRole, FolderSyncReport, Identity, Message, MessageSummary, OpKind, OutboxEntry,
+    PendingOp, ReportedError, special_folder,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -18,6 +18,14 @@ fn time(unix: i64) -> Option<String> {
     jiff::Timestamp::from_second(unix)
         .ok()
         .map(|t| t.to_string())
+}
+
+/// `text` up to `max_chars` characters, and whether it was cut.
+pub(crate) fn cut(text: &str, max_chars: usize) -> (String, bool) {
+    match text.char_indices().nth(max_chars) {
+        Some((end, _)) => (text[..end].to_owned(), true),
+        None => (text.to_owned(), false),
+    }
 }
 
 /// `Name <email>`, or the email alone.
@@ -202,10 +210,7 @@ impl MessageRead {
     pub fn new(m: &Message, folders: &HashMap<FolderId, String>, max_chars: usize) -> Self {
         let body = m.body.as_ref();
         let text = body.and_then(|b| b.text.as_deref()).unwrap_or_default();
-        let (body_text, truncated) = match text.char_indices().nth(max_chars) {
-            Some((end, _)) => (text[..end].to_owned(), true),
-            None => (text.to_owned(), false),
-        };
+        let (body_text, truncated) = cut(text, max_chars);
         Self {
             summary: MessageOut::new(&m.summary, folders),
             to: addresses(&m.summary.to),
@@ -233,34 +238,61 @@ pub(crate) struct Drafts {
     pub drafts: Vec<DraftOut>,
 }
 
+/// A draft, which only the user sends.
 #[derive(Serialize, JsonSchema)]
 pub(crate) struct DraftOut {
     pub id: i64,
     pub account: i64,
+    /// The address it is sent as: one of its account's `sends_as`.
+    pub from: Option<String>,
     pub subject: String,
     pub to: Vec<String>,
     pub cc: Vec<String>,
     pub bcc: Vec<String>,
     pub text: String,
-    /// File names.
-    pub attachments: Vec<String>,
+    pub attachments: Vec<DraftAttachmentOut>,
     /// The message it replies to.
     pub replying_to: Option<i64>,
     pub updated_at: Option<String>,
 }
 
-impl From<&Draft> for DraftOut {
-    fn from(d: &Draft) -> Self {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct DraftAttachmentOut {
+    pub id: i64,
+    pub filename: String,
+    pub mime_type: String,
+    /// Bytes.
+    pub size: u64,
+}
+
+impl From<&DraftAttachment> for DraftAttachmentOut {
+    fn from(a: &DraftAttachment) -> Self {
+        Self {
+            id: a.id.0,
+            filename: a.filename.clone(),
+            mime_type: a.mime_type.clone(),
+            size: a.size,
+        }
+    }
+}
+
+impl DraftOut {
+    /// `identities` holds the one it is sent as, among others.
+    pub fn new(d: &Draft, identities: &[Identity]) -> Self {
         let c = &d.content;
         Self {
             id: d.id.0,
             account: d.account_id.0,
+            from: identities
+                .iter()
+                .find(|i| i.id == d.identity)
+                .map(|i| i.address().to_string()),
             subject: c.subject.clone(),
             to: addresses(&c.to),
             cc: addresses(&c.cc),
             bcc: addresses(&c.bcc),
             text: c.text.clone(),
-            attachments: d.attachments.iter().map(|a| a.filename.clone()).collect(),
+            attachments: d.attachments.iter().map(Into::into).collect(),
             replying_to: d.reply_to.map(|id| id.0),
             updated_at: time(d.updated_at),
         }

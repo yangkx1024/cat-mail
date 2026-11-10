@@ -47,9 +47,9 @@ pub use catmail_proto::TlsConfig;
 /// frontends keep elsewhere (MCP tokens in the config directory).
 pub use catmail_store::{create_private_dir, private_file_options};
 pub use catmail_types::*;
-pub use client::{EVENT_CAPACITY, MailClient, MailClientBuilder, Verify};
+pub use client::{DraftEditor, EVENT_CAPACITY, MailClient, MailClientBuilder, Verify};
 pub use config::{Config, DataDirLock};
-pub use drafts::{format_addresses, parse_addresses};
+pub use drafts::{EditMark, format_addresses, parse_addresses};
 pub use engine::{DEFAULT_DRAFT_UPLOAD_DELAY, EngineTuning};
 pub use error::{Error, HttpError, ImapError, Result, SmtpError, StoreError};
 pub use filename::safe_filename;

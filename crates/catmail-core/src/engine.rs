@@ -58,7 +58,13 @@ pub(crate) struct Engine {
     /// messages are refused meanwhile, as the deletion would take those along. Shared
     /// with the write transactions that check it.
     deleting: Arc<Mutex<HashSet<FolderId>>>,
+    /// Drafts open in an editor, and in how many (`drafts::EditMark`): changes to them
+    /// from anyone else are refused. Shared with the write transactions that check it.
+    editing: Editing,
 }
+
+/// Drafts open in an editor, by how many ([`Engine::editing`]).
+pub(crate) type Editing = Arc<Mutex<HashMap<DraftId, usize>>>;
 
 /// Folders marked as being deleted, by [`Engine::deleting`]; unmarked when dropped.
 pub(crate) struct Deleting {
@@ -442,7 +448,14 @@ impl Engine {
             woke: Cutoff::default(),
             accounts: Mutex::default(),
             deleting: Arc::default(),
+            editing: Arc::default(),
         }
+    }
+
+    /// The drafts open in an editor, to mark one or check from inside a write
+    /// transaction.
+    pub fn editing(&self) -> Editing {
+        self.editing.clone()
     }
 
     /// Marks `folders` as being deleted until the guard returned is dropped.

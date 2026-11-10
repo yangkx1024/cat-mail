@@ -34,8 +34,9 @@ pub(crate) enum TokenCommand {
     Add {
         /// What it is for, e.g. the device the agent runs on
         name: String,
-        /// What the agent may do: `read` (list, search, read and sync) or `organize`
-        /// (also mark, move, archive, label and move to Trash)
+        /// What the agent may do: `read` (list, search, read and sync), `organize` (also
+        /// mark, move, archive, label and move to Trash) or `draft` (also write drafts,
+        /// replies and forwards for you to send)
         #[arg(long, default_value_t = Tier::Read)]
         tier: Tier,
         /// Only this account, by address; repeat for more. Every account by default,

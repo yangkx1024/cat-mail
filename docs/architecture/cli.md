@@ -62,7 +62,7 @@ types 加变体会编译失败）。
 比 `watch` 多了发信），同时在 `127.0.0.1` 上提供 MCP（`--port`，默认 8642），
 直到 Ctrl-C 或 SIGTERM（systemd、launchd 停服务时发的），停下时等进行中的请求答完。设计见 [MCP](mcp.md)。
 
-`catmail mcp token add <名字> [--tier read|organize] [--account <地址>]… / list / rm <名字>` 管 agent 用的令牌。
+`catmail mcp token add <名字> [--tier read|organize|draft] [--account <地址>]… / list / rm <名字>` 管 agent 用的令牌。
 `--tier` 缺省是 `read`（只读）；`--account` 可重复，把令牌限定在这些账户，缺省是所有账户（以后加的也算）。账户按地址
 记，不检查它现在是否存在：`add` 不打开引擎。令牌在配置目录的文件里，不在数据库里，
 所以这几个命令不打开引擎，`serve`（或 GUI）运行时照样能用，删掉的令牌立即失效。`add` 把令牌打到 stdout，

@@ -16,7 +16,8 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use catmail_core::{
-    DraftAttachment, DraftAttachmentId, DraftId, Event, Identity, IdentityId, RecvError,
+    DraftAttachment, DraftAttachmentId, DraftChanges, DraftEditor, DraftId, Event, Identity,
+    IdentityId, RecvError,
 };
 use catmail_frontend::composer::{
     AfterAttachment, AfterSave, Closing, ComposeFrom, Field, FieldError, Fields, Finish, Lifecycle,
@@ -110,7 +111,8 @@ pub fn root(start: Arc<Start>) -> Root {
 
 /// The draft and when it saves. Not reactive.
 struct Composing {
-    draft: DraftId,
+    /// The draft open for editing, which the window changes it through.
+    editor: DraftEditor,
     life: Lifecycle,
     /// The save after typing pauses.
     debounce: Option<Spawned<()>>,
@@ -133,8 +135,8 @@ fn with_life<T>(f: impl FnOnce(&mut Lifecycle) -> T) -> T {
     f(&mut composing().borrow_mut().life)
 }
 
-fn draft() -> DraftId {
-    composing().borrow().draft
+fn editor() -> DraftEditor {
+    composing().borrow().editor.clone()
 }
 
 /// Runs `future` for as long as the window is open.
@@ -234,10 +236,11 @@ fn save() {
         return;
     };
     sync();
-    let draft = draft();
+    let editor = editor();
     in_window(async move {
         let Written { from, content } = written.clone();
-        let result = client().update_draft(draft, from, content).await;
+        let changes = DraftChanges::all(from, content);
+        let result = editor.update(changes).await;
         let result = result.map(drop).map_err(|e| error_text(&e));
         match with_life(|l| l.save_ended(written, result)) {
             AfterSave::Finish => run_finish(),
@@ -303,9 +306,9 @@ fn run_finish() {
         return;
     };
     sync();
-    let draft = draft();
+    let editor = editor();
     in_window(async move {
-        let result = steps.run(&client(), draft, written).await;
+        let result = steps.run(&client(), &editor, written).await;
         match with_life(|l| l.finish_ended(result.map_err(|e| e.to_string()))) {
             Ok(()) => close_window(),
             Err(e) => {
@@ -318,7 +321,7 @@ fn run_finish() {
 }
 
 fn close_window() {
-    let draft = draft();
+    let draft = composing().borrow().editor.draft();
     drop(on_main(move || shell::composer_closed(draft)));
 }
 
@@ -386,12 +389,11 @@ fn attach_paths(paths: Vec<PathBuf>) {
     if !with_life(Lifecycle::begin_attachment) {
         return;
     }
-    let draft = draft();
+    let editor = editor();
     in_window(async move {
-        let client = client();
         let mut failed = false;
         for path in paths {
-            match client.attach_file(draft, path.clone()).await {
+            match editor.attach_file(path.clone()).await {
                 Ok(attachment) => global::<Attachments>().update(|a| a.0.push(attachment)),
                 Err(e) => {
                     failed = true;
@@ -408,8 +410,9 @@ fn remove_attachment(attachment: DraftAttachmentId) {
     if !with_life(Lifecycle::begin_attachment) {
         return;
     }
+    let editor = editor();
     in_window(async move {
-        let result = client().remove_draft_attachment(attachment).await;
+        let result = editor.remove_attachment(attachment).await;
         let failed = result.is_err();
         match result {
             Ok(draft) => global::<Attachments>().set(Attachments(draft.attachments)),

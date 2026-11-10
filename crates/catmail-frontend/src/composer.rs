@@ -15,8 +15,8 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use catmail_core::{
-    AccountId, Address, Draft, DraftContent, DraftId, Forwarding, Identity, IdentityId, MailClient,
-    MessageId, parse_addresses,
+    AccountId, Address, Draft, DraftChanges, DraftContent, DraftEditor, DraftId, EditMark,
+    Forwarding, Identity, IdentityId, MailClient, MessageId, parse_addresses,
 };
 use futures_channel::oneshot;
 
@@ -42,6 +42,10 @@ pub struct Opening {
     /// The identities the draft can be sent as, to choose From among.
     pub identities: Vec<Identity>,
     pub draft: Draft,
+    /// What the window changes the draft through. Nothing else may while the
+    /// [`EditMark`] that [`ComposeFrom::start`] returns with it is held: the window's
+    /// owner keeps it for as long as the window is there.
+    pub editor: DraftEditor,
     /// Made for this window, see [`Lifecycle::new`].
     pub created_here: bool,
     /// The text has the focus, not To.
@@ -49,29 +53,31 @@ pub struct Opening {
 }
 
 impl ComposeFrom {
-    /// Makes the draft (or reads it), and who it can be sent as.
-    pub async fn start(self, client: &MailClient) -> catmail_core::Result<Opening> {
-        let draft = match self {
+    /// Makes the draft (or reads it), opens it for editing, and who it can be sent as.
+    pub async fn start(self, client: &MailClient) -> catmail_core::Result<(Opening, EditMark)> {
+        let id = match self {
             ComposeFrom::New(account) => {
                 client
                     .create_draft(account, None, DraftContent::default(), Vec::new())
                     .await?
+                    .id
             }
             ComposeFrom::Reply { message, all } => {
                 client
                     .reply(message, all, None, String::new(), Vec::new())
                     .await?
+                    .id
             }
             ComposeFrom::Forward(message) => {
                 client
                     .forward(message, None, Forwarding::default(), Vec::new())
                     .await?
+                    .id
             }
-            ComposeFrom::Draft(id) => client
-                .get_draft(id)
-                .await?
-                .ok_or(catmail_core::Error::DraftNotFound(id))?,
+            ComposeFrom::Draft(id) => id,
         };
+        // Read again as it is opened: as it is from then on, until the window goes.
+        let (editor, mark, draft) = client.edit_draft(id).await?;
         let identities = client.draft_senders(draft.id).await?;
         // Where the writing starts: the text once there is someone to send to.
         let focus_body = match self {
@@ -79,12 +85,14 @@ impl ComposeFrom {
             ComposeFrom::Draft(_) => !draft.content.to.is_empty(),
             _ => false,
         };
-        Ok(Opening {
+        let opening = Opening {
             identities,
             draft,
+            editor,
             created_here: !matches!(self, ComposeFrom::Draft(_)),
             focus_body,
-        })
+        };
+        Ok((opening, mark))
     }
 }
 
@@ -546,20 +554,20 @@ pub struct Steps {
 }
 
 impl Steps {
-    /// Runs the calls on `draft`, saving `written`.
+    /// Runs the calls on `editor`'s draft, saving `written`.
     pub async fn run(
         self,
         client: &MailClient,
-        draft: DraftId,
+        editor: &DraftEditor,
         written: Written,
     ) -> catmail_core::Result<()> {
+        let draft = editor.draft();
         if self.delete {
             return client.delete_draft(draft).await;
         }
         if self.save {
-            client
-                .update_draft(draft, written.from, written.content)
-                .await?;
+            let changes = DraftChanges::all(written.from, written.content);
+            editor.update(changes).await?;
         }
         if self.send {
             client.send_draft(draft).await?;

@@ -2,8 +2,9 @@
 
 [← 架构](../architecture.md)
 
-> 状态：第 1、2 步和第 3 步的一部分已实现：`catmail-mcp` 的只读与整理工具、`catmail serve`、令牌文件（层级与
-> 账户范围）、GUI 托管（Settings › Agents）、改动的日志。草稿、附件、每个令牌的限额、发信尚未实现，那些小节是设计。
+> 状态：第 1 至 3 步已实现：`catmail-mcp` 的只读、整理与草稿工具（附件以内容传入、传出）、`catmail serve`、
+> 令牌文件（层级与账户范围）、每个令牌的限额、GUI 托管（Settings › Agents）、改动的日志。发信与无界面服务器的
+> 密码尚未实现，那些小节是设计。
 
 把 catmail 的能力经 [MCP](https://modelcontextprotocol.io) 交给 AI agent：一台设备常驻，局域网和
 tailnet 里的 agent 都能读信、整理、写草稿，经确认后发信。
@@ -109,12 +110,11 @@ tailnet 里的设备连得上，同一局域网内是直连。catmail 因此不�
   - 服务端每个请求都重读（文件很小，在 blocking pool 上读），吊销立即生效，也不用担心修改时间的精度；写入
     在 `mcp-tokens.lock` 的文件锁下读、改，先写临时文件再改名，读到的总是完整的。
   - 同一台机器上换宿主（GUI 与 `serve`）令牌不变；GUI 写的也是这个文件。
-- 每个令牌有每日下载预算和请求频率：agent 大量下载正文可能让服务器的下载限额（`OverLimit`）封账户一天，
-  GUI 也跟着受影响。
+- 每个令牌有调用频率和每日下载预算，见下文[限额](#限额)。
 
 ## 工具与权限
 
-权限分四层，层层包含：只读 < 整理 < 草稿 < 发信（已实现前两层）。令牌没有的层级，工具不出现在 `tools/list`
+权限分四层，层层包含：只读 < 整理 < 草稿 < 发信（已实现前三层）。令牌没有的层级，工具不出现在 `tools/list`
 里，调用时得到与不存在的工具相同的错误（`tool not found`）。
 
 - **每个工具的层级逐个写在 `tools::tier_of` 里**，不按注解推断，也没有缺省：新加的工具不写就哪个令牌也看不到、
@@ -128,13 +128,14 @@ tailnet 里的设备连得上，同一局域网内是直连。catmail 因此不�
 
 | 层级 | 工具 |
 |---|---|
-| 只读 | `list_accounts`、`list_folders`、`list_messages`、`search`（本地，可选再问服务器）、`read_message`（纯文本，按字数截断）、`list_drafts`、`list_outbox`、`list_pending`、`sync` |
+| 只读 | `list_accounts`、`list_folders`、`list_messages`、`search`（本地，可选再问服务器）、`read_message`（纯文本，按字数截断）、`read_attachment`、`list_drafts`、`list_outbox`、`list_pending`、`sync` |
 | 整理 | `mark`（已读、星标）、`move`、`archive`、`label`（Gmail）、`trash`，之后立即回放队列 |
-| 草稿 | `create_draft`、`reply`、`forward`、`update_draft`、附件 |
+| 草稿 | `create_draft`、`reply`、`forward`、`update_draft`、`attach`、`remove_attachment` |
 | 发信 | `send_draft` |
 
-不提供：永久删除、删除文件夹、增删账户和身份、`retry_outbox`、`mark_outbox_sent`（`unknown` 只由用户
-处理，见[草稿与发信](sending.md)）。
+不提供：永久删除、删除文件夹、删除草稿、增删账户和身份、`retry_outbox`、`mark_outbox_sent`（`unknown` 只由
+用户处理，见[草稿与发信](sending.md)）。删除草稿也算永久删除：草稿可能是用户自己写的；agent 写坏了可以
+`update_draft` 改掉。
 
 - 读信用 EXAMINE 与 `BODY.PEEK`，agent 读过的信不会变成已读。
 - 工具带 MCP 的 annotations（`readOnlyHint`、`destructiveHint`、`idempotentHint`），客户端据此决定要不要
@@ -153,9 +154,50 @@ tailnet 里的设备连得上，同一局域网内是直连。catmail 因此不�
 - **`trash` 只移到废纸篓，从不永久删除**：引擎的 `DeleteMode::OnlyToTrash`，有一封已在废纸篓或账户没有废纸篓
   就整个拒绝、一封也不动。在同一个事务里判断，不是工具先查再删：两步之间同步可能把邮件移进废纸篓。
 - **改动的日志**：不是只读的工具（`readOnlyHint` 不为 true，`sync` 也算）每次调用记一行 info：令牌的名字、工具、
-  参数、结果（`done` 或错误的文字）。整理的参数只有 id；草稿的工具会带正文，到时再挑字段。
+  参数、结果（`done` 或错误的文字）。字符串只留下 `from`、`to`、`cc`、`bcc` 和文件名（`name`），其余（主题、正文、附件内容，以及以后的工具加的
+  字段）都换成字数（`tools::logged`）：那是邮件本身，又可能很长；记的是 agent 给谁写了什么样的信。按留下的
+  字段写，而不是按要藏的：新字段缺省就不进日志。
 - **工具里没有路径**：路径指的是常驻设备上的文件，对远程 agent 没有意义，还能用来读那台机器上的任意
   文件。附件以内容传入、传出（base64，有大小上限）。
+
+### 草稿
+
+- **草稿只由用户发**：工具写好的草稿和用户自己写的一样，存在本地并上传到 Drafts 文件夹，用户在 GUI 或 CLI 里
+  看过再发。服务端的 instructions 也这么说。
+- **`from` 写地址，不写 id**：`list_accounts` 的 `sends_as` 就是可选的地址（`Name <地址>` 也行），按
+  `MailClient::identity_by_address` 对到账户的身份上，对不上就是 `not_found`。缺省与 GUI 相同：新草稿用账户的
+  缺省身份，回复用邮件寄到的那个。`update_draft` 只在草稿自己的账户里找，不把草稿搬到别的账户（那还要查令牌
+  是否也管那个账户）。
+- **`update_draft` 只改给了的字段**：交给引擎的是 `DraftChanges`，引擎在存它的写事务里读出草稿再换上（见
+  [发信 / 身份](sending.md)），用户在 agent 读出之后存下的其他部分不会被旧值覆盖。什么都没给是 `invalid`。草稿交给
+  发件箱后改不了（`conflict`）。
+- **用户在 GUI 里开着的草稿不能改**：`update_draft`、`attach`、`remove_attachment` 得 `conflict: draft N is open in
+  the app…`，关掉窗口后才行（`MailClient::edit_draft`，见[发信 / 身份](sending.md)）。否则用户发出去的信里有没看到
+  的改动，或编辑器下次保存把 agent 的修改写回去。agent 可以另写一份草稿。
+- **附件以内容传入**：`create_draft`、`reply`、`forward` 的 `attachments` 与 `attach` 都是 `{name, base64}`。引擎为此
+  有了 `NewFile`（路径或内容），`create_draft` 等的 `files` 与 `attach_file` 都收它，CLI、GUI 照旧传路径。
+  内容只有名字，类型按扩展名猜，和路径一样；名字要是 `safe_filename` 原样留下的（没有目录、Windows 不收的
+  字符、控制与方向字符，两端没有点），否则拒绝而不是改掉：agent 给的名字就是附件的名字。一次调用给的文件解码后
+  合计不超过 10 MB，草稿层级令牌的 HTTP 请求体上限因此是 16 MB（base64 多三分之一），其他令牌仍是 1 MB：先验
+  令牌再读请求体，读、整理的令牌让宿主收不了那么多。
+  一封信的附件总量仍由引擎按服务器的 `SIZE`、`APPENDLIMIT` 限制。和 GUI 一样，新草稿连同附件在一个事务里存，
+  一个附件不行就整个不建。
+- **附件以内容传出**：`read_attachment` 不给结构化输出，而是按 MCP 的内容类型给：文本文件给文字（按字数截断，
+  缺省 2 万字），PNG、JPEG、GIF、WebP 给图片（客户端直接交给模型看），其余给 base64 的 blob 资源；前面一行
+  说明文件名、类型、大小，并说明内容是寄件人的。超过 10 MB 的不给。
+
+## 限额
+
+每个令牌有自己的调用频率和每日下载预算（`limits.rs`），对所有令牌相同，`ServeOptions::limits` 可改（测试用；
+还没有设置项）。只在内存里按令牌名记，宿主重启就重新开始：限额防的是失控的 agent，不是要精确计费。
+
+- **调用频率**：每分钟 60 次，可以一下子用完，之后每秒回来一次（令牌桶）。超了答 `over_limit: too many calls;
+  try again in Ns`，作为工具的错误给 agent 读，而不是 HTTP 429：客户端多把 429 当成服务器坏了，模型反而看不到
+  该等多久。`tools/list` 等不算。
+- **下载预算**：服务器限制一个账户一天下载多少（Gmail 的 IMAP 约 2500 MB，超了 `OverLimit` 封一天），GUI 和后台
+  同步也在用它。每个令牌一天 250 MB，从第一次下载起算 24 小时。只算为它的调用从服务器下载的：`read_message`、
+  `reply` 下载还没有的正文（按 `RFC822.SIZE`），`read_attachment` 下载还没有的附件，`forward` 两者都可能。已经
+  在本地的（后台预取过的、读过的）不算。下载前按大小扣，放不下就拒绝（`over_limit`），下载失败退回。
 
 ## 发信的确认
 
@@ -202,7 +244,7 @@ claude mcp add --transport http catmail https://mac.tailnet.ts.net/mcp \
 ## 代码
 
 `crates/catmail-mcp/src/`：`tools.rs`（工具与参数，rmcp 的 `#[tool_router]`）、`output.rs`（逐个写出的输出结构，
-文档注释就是 schema 里的描述）、`tokens.rs`、`connect.rs`（给 agent 的命令示例）、`http.rs`（监听、令牌、交给 rmcp）、`tests.rs`（经 HTTP 对假 IMAP
+文档注释就是 schema 里的描述）、`tokens.rs`、`limits.rs`（调用频率与下载预算）、`connect.rs`（给 agent 的命令示例）、`http.rs`（监听、令牌、交给 rmcp）、`tests.rs`（经 HTTP 对假 IMAP
 服务器端到端）。`tools.snapshot.json` 固定 agent 看到的工具列表，有意改动时 `UPDATE_SNAPSHOTS=1` 重新生成。
 CLI 一侧是 `cmd/mcp.rs`；GUI 一侧是 `catmail-frontend` 的 `mcp.rs`（服务的线程、状态的说法、文案；端口的解析与登录表单共用 `login::parse_port`）、
 `catmail-gui` 的 `settings/agents.rs` 和 `shell/mod.rs` 里托管服务的部分。
@@ -212,7 +254,7 @@ CLI 一侧是 `cmd/mcp.rs`；GUI 一侧是 `catmail-frontend` 的 `mcp.rs`（服
 1. ✅ `catmail-mcp`：只读的工具、监听本机的 HTTP、令牌文件、`Origin` 检查；宿主 `catmail serve`；
    引擎的常驻预设。`rmcp` 3.9 带进的依赖通过了 `cargo deny`。
 2. ✅ GUI 托管：Settings › Agents 里的开关、端口、令牌；不再查 `Host`，`serve` 去掉 `--host`。
-3. 🚧 已做：按层级与账户限定令牌（CLI 的 `--tier`、`--account`，GUI 的两个菜单）、改动的日志、整理的工具。
-   待做：草稿的工具、附件以内容传、每个令牌的限额。
+3. ✅ 按层级与账户限定令牌（CLI 的 `--tier`、`--account`，GUI 的两个菜单）、改动的日志、整理的工具；草稿的
+   工具、附件以内容传入传出、每个令牌的限额。
 4. systemd credentials；systemd、launchd 的示例；GUI 的登录项与 `--background`。
 5. 发信（elicitation，或允许不确认的令牌）；需要时 OAuth。

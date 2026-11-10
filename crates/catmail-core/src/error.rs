@@ -26,9 +26,10 @@ pub enum Error {
     OutgoingServer(Box<Error>),
 
     /// Attaching a file to a new draft failed so; no draft was made.
-    #[error("failed to attach {}: {error}", path.display())]
+    #[error("failed to attach {file}: {error}")]
     Attach {
-        path: std::path::PathBuf,
+        /// Its path, or the name it was given with its content.
+        file: String,
         error: Box<Error>,
     },
 

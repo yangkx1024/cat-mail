@@ -67,11 +67,23 @@
   先后。
 - **草稿选身份**：`drafts.identity_id` 必填，读出的 `Draft::identity` 总是一个具体的身份。身份不在
   `DraftContent` 里：只有新建（`create_draft(account, from: Option<IdentityId>, ..)`）可以不指定，存成
-  账户当时的默认身份；`update_draft(id, from: IdentityId, ..)` 必须给出，自己拼一个 `DraftContent` 的
-  调用方不会无意中把发件人换回默认。`reply`、`forward` 也可以指定身份（`from: Option<IdentityId>`），
+  账户当时的默认身份；`update_draft` 的 `DraftChanges::from` 不给就保持原来的身份，而不是换回默认。`reply`、`forward` 也可以指定身份（`from: Option<IdentityId>`），
   和正文、转发的收件人一样在建草稿时就定下，不再事后 `update_draft`；不指定时回复按原信选，转发用默认身份。建草稿时由 repository
   检查身份属于这个账户（复合外键 `(identity_id, account_id)` 兜底）；改身份和改别的内容一样算一次修改。From 头、MAIL FROM 和
   Message-ID 的域名都来自所选身份；Drafts 里的副本也是。
+- **修改只换给了的部分**：`update_draft(id, DraftChanges)` 的每个字段（身份、主题、收件人、抄送、密送、正文）
+  不给就不动，在存它的那个写事务里读出草稿再换上（`drafts::update`）。编辑器保存的是它显示的全部
+  （`DraftChanges::all`）；只改一部分的调用方（MCP 的 `update_draft`、CLI 的 `draft edit`）不必先读出整份再写回，
+  它读出之后编辑器存下的其他部分不会被旧值覆盖。
+- **编辑器开着时只有它改**：`MailClient::edit_draft` 把草稿记为正在编辑并读出它，返回 `DraftEditor` 和
+  `EditMark`；编辑器的保存、附加、移除附件都经 `DraftEditor` 做（只算它自己那份草稿的）。`EditMark` 在的时候，别处的 `update_draft`、`attach_file`、`remove_draft_attachment` 得
+  `Conflict`（在做修改的写事务里查 `Engine::editing`）。否则用户发出去的是没看到的内容（agent 加的附件不显示在
+  编辑器里），或编辑器下一次保存把别处的修改写回旧值。记下和读出在同一个写事务里：别处的修改要么在之前、
+  读得到，要么在之后、被拒绝。按次数记，同一草稿的两个编辑器（一个窗口还在关、又开了一个）都关了才算关。
+  两样分开：`EditMark` 不能复制，由窗口的主人拿着，丢掉即放开（GUI 外壳放在 `COMPOSERS` 里，窗口移走就丢，不等
+  视图线程）；`DraftEditor` 可以复制，给视图用。移除附件被拒时整个事务回滚（返回错误），不必先另查附件属于哪份草稿。只锁这三样：发送、删除只有用户做（MCP 没有这两样工具）；GUI 开着时 CLI 打不开引擎。放弃的方案：让
+  编辑器跟随草稿的变化、合并两边的修改：要处理正在输入的正文框、两边改同一字段、附件列表和发送前的空隙，
+  以后真需要同时改时再做。
 - **换到另一个账户**：`update_draft` 给的是别的账户的身份时，草稿在同一个事务里搬过去
   （`Drafts::move_to`）：改 `account_id` 和 `identity_id`，旧账户 Drafts 里的副本转成一条没有草稿的上传
   （按 Message-ID 找到后删除，和删除草稿一样），还没结算的上传也解除关联（`draft_id` 置空，结算时删掉它做出的

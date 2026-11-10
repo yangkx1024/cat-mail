@@ -22,6 +22,68 @@ impl DraftContent {
     }
 }
 
+/// What a draft update changes; `None` leaves that part as it is. Made to the draft as it
+/// is when updated, so what someone else changed meanwhile (an editor saving it) to the
+/// other parts stays.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DraftChanges {
+    /// The identity to send it as.
+    pub from: Option<IdentityId>,
+    pub subject: Option<String>,
+    pub to: Option<Vec<Address>>,
+    pub cc: Option<Vec<Address>>,
+    pub bcc: Option<Vec<Address>>,
+    pub text: Option<String>,
+}
+
+impl DraftChanges {
+    /// Everything replaced, as an editor saves what it shows.
+    pub fn all(from: IdentityId, content: DraftContent) -> Self {
+        let DraftContent {
+            subject,
+            to,
+            cc,
+            bcc,
+            text,
+        } = content;
+        Self {
+            from: Some(from),
+            subject: Some(subject),
+            to: Some(to),
+            cc: Some(cc),
+            bcc: Some(bcc),
+            text: Some(text),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Makes the changes to `content`; returns the identity, if one is given.
+    pub fn apply(self, content: &mut DraftContent) -> Option<IdentityId> {
+        let Self {
+            from,
+            subject,
+            to,
+            cc,
+            bcc,
+            text,
+        } = self;
+        fn replace<T>(field: &mut T, value: Option<T>) {
+            if let Some(value) = value {
+                *field = value;
+            }
+        }
+        replace(&mut content.subject, subject);
+        replace(&mut content.to, to);
+        replace(&mut content.cc, cc);
+        replace(&mut content.bcc, bcc);
+        replace(&mut content.text, text);
+        from
+    }
+}
+
 /// What a forward starts with besides the message: who it goes to, and the user's text,
 /// written above the forwarded message.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -78,4 +140,44 @@ pub struct DraftAttachment {
     /// Lower-case `type/subtype`.
     pub mime_type: String,
     pub size: u64,
+}
+
+/// A file to attach to a draft: one on disk, copied in as it is when attached, or the
+/// content itself, as an agent hands it over (it has no access to the files here).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NewFile {
+    Path(std::path::PathBuf),
+    Content {
+        /// The attachment's file name: a name, not a path.
+        name: String,
+        content: Vec<u8>,
+    },
+}
+
+impl NewFile {
+    /// What an error about it calls it: the path, or the name.
+    pub fn describe(&self) -> String {
+        match self {
+            NewFile::Path(path) => path.display().to_string(),
+            NewFile::Content { name, .. } => name.clone(),
+        }
+    }
+}
+
+impl From<std::path::PathBuf> for NewFile {
+    fn from(path: std::path::PathBuf) -> Self {
+        NewFile::Path(path)
+    }
+}
+
+impl From<&std::path::PathBuf> for NewFile {
+    fn from(path: &std::path::PathBuf) -> Self {
+        NewFile::Path(path.clone())
+    }
+}
+
+impl From<&std::path::Path> for NewFile {
+    fn from(path: &std::path::Path) -> Self {
+        NewFile::Path(path.to_owned())
+    }
 }

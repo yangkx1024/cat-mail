@@ -16,7 +16,7 @@ use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::{Access, McpServer, ServeOptions, Tier, Tokens};
+use crate::{Access, McpServer, ServeOptions, Tier, TokenLimits, Tokens};
 
 /// The tools' list as agents see it. Regenerate with `UPDATE_SNAPSHOTS=1` after a change
 /// meant to alter what agents read.
@@ -33,7 +33,7 @@ struct Fixture {
 
 impl Fixture {
     /// alice@example.com, synced, with INBOX ("one", "two"), Archive and Trash; a server
-    /// on a free port and a token for it, of the organize tier.
+    /// on a free port and a token for it, of the draft tier: every tool.
     async fn new(options: ServeOptions) -> Self {
         let mut state = ServerState::new("alice", "pw");
         state.inbox().append_simple("one");
@@ -55,11 +55,11 @@ impl Fixture {
             .unwrap();
         add_account(&client, &fake, "alice").await;
         let tokens = Tokens::new(dir.path().join("config"));
-        let organize = Access {
-            tier: Tier::Organize,
+        let every_tool = Access {
+            tier: Tier::Draft,
             accounts: None,
         };
-        let secret = tokens.add("test", organize).unwrap().secret;
+        let secret = tokens.add("test", every_tool).unwrap().secret;
         let options = ServeOptions {
             addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             ..options
@@ -353,13 +353,18 @@ async fn the_tools_agents_see() {
         "the tools changed; if meant, rerun with UPDATE_SNAPSHOTS=1"
     );
     // Of the read tier, only `sync` changes anything (it makes the changes already
-    // queued); every tool has a tier.
+    // queued); every tool has a tier. Only an attachment comes as what it is (text, an
+    // image, a blob) rather than as structured output.
     for tool in reply["result"]["tools"].as_array().unwrap() {
         let name = tool["name"].as_str().unwrap();
         let read_only = tool["annotations"]["readOnlyHint"] == json!(true);
         let tier = crate::tools::tier_of(name).unwrap_or_else(|| panic!("{name} has no tier"));
         assert_eq!(read_only, tier == Tier::Read && name != "sync", "{name}");
-        assert!(tool["outputSchema"].is_object(), "{name}");
+        assert_eq!(
+            tool["outputSchema"].is_object(),
+            name != "read_attachment",
+            "{name}"
+        );
     }
 }
 
@@ -369,10 +374,36 @@ async fn a_token_sees_and_calls_only_its_tiers_tools() {
     let read = f.token("reader", Access::default());
     let names = f.tool_names(&read).await;
     assert!(names.contains(&"read_message".to_owned()));
+    assert!(names.contains(&"read_attachment".to_owned()));
     for tool in ["mark", "move", "archive", "label", "trash"] {
         assert!(!names.contains(&tool.to_owned()), "{tool}");
         assert!(f.tool_names(&f.secret).await.contains(&tool.to_owned()));
     }
+    let organize = f.token(
+        "organizer",
+        Access {
+            tier: Tier::Organize,
+            accounts: None,
+        },
+    );
+    let names = f.tool_names(&organize).await;
+    assert!(names.contains(&"trash".to_owned()));
+    let drafting = [
+        "create_draft",
+        "reply",
+        "forward",
+        "update_draft",
+        "attach",
+        "remove_attachment",
+    ];
+    for tool in drafting {
+        assert!(!names.contains(&tool.to_owned()), "{tool}");
+        assert!(f.tool_names(&f.secret).await.contains(&tool.to_owned()));
+    }
+    let refused = f
+        .call_result_as(&organize, "create_draft", json!({"account": 1}))
+        .await;
+    assert_eq!(refused["message"], "tool not found", "{refused}");
     let id = f.ids(None).await[0];
     let refused = f
         .call_result_as(&read, "mark", json!({"messages": [id], "read": true}))
@@ -393,10 +424,22 @@ async fn a_token_reaches_only_its_accounts() {
     let bob = add_account(&f.client, &bob_server, "bob").await;
     let bob_inbox = f.folder(bob, "INBOX").await;
     let bob_message = f.ids(Some(bob_inbox)).await[0];
+    let bob_draft = f
+        .client
+        .create_draft(
+            catmail_core::AccountId(bob),
+            None,
+            Default::default(),
+            Vec::new(),
+        )
+        .await
+        .unwrap()
+        .id
+        .0;
     let alice_only = f.token(
         "alice's",
         Access {
-            tier: Tier::Organize,
+            tier: Tier::Draft,
             accounts: Some(vec!["ALICE@example.com".into()]),
         },
     );
@@ -435,6 +478,22 @@ async fn a_token_reaches_only_its_accounts() {
         ("list_messages", json!({"after": bob_message})),
         ("mark", json!({"messages": [bob_message], "read": true})),
         ("trash", json!({"messages": [bob_message]})),
+        (
+            "read_attachment",
+            json!({"message": bob_message, "attachment": 1}),
+        ),
+        ("create_draft", json!({"account": bob, "subject": "x"})),
+        ("reply", json!({"message": bob_message})),
+        ("forward", json!({"message": bob_message})),
+        ("update_draft", json!({"draft": bob_draft, "text": "x"})),
+        (
+            "attach",
+            json!({"draft": bob_draft, "name": "a.txt", "base64": "eA=="}),
+        ),
+        (
+            "remove_attachment",
+            json!({"draft": bob_draft, "attachment": 1}),
+        ),
     ];
     for (tool, arguments) in calls {
         let result = f.call_result_as(&alice_only, tool, arguments).await;
@@ -448,6 +507,10 @@ async fn a_token_reaches_only_its_accounts() {
             .iter()
             .all(|flag| flag != "\\Seen")
     );
+    let drafts = f.call_as(&alice_only, "list_drafts", json!({})).await;
+    assert_eq!(drafts["drafts"], json!([]));
+    let bob_drafts = f.client.list_drafts(catmail_core::AccountId(bob)).await;
+    assert_eq!(bob_drafts.unwrap()[0].content, Default::default());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -799,4 +862,367 @@ async fn a_move_that_turns_into_a_conflict_is_reported() {
     let conflict = &changed["not_on_server"][0];
     assert_eq!(conflict["status"], "conflict", "{changed}");
     assert_eq!(conflict["change"]["kind"], "move", "{changed}");
+}
+
+/// alice@example.com's INBOX with one message from Mallory, with a text file and a
+/// binary one attached.
+fn with_attachments() -> ServerState {
+    let mut state = ServerState::new("alice", "pw");
+    let raw = "From: Mallory <m@example.com>\r\nTo: Alice <alice@example.com>\r\n\
+               Subject: notes\r\nDate: Sat, 17 Oct 2026 10:00:00 +0800\r\n\
+               Message-ID: <notes@example.com>\r\nMIME-Version: 1.0\r\n\
+               Content-Type: multipart/mixed; boundary=\"b\"\r\n\r\n\
+               --b\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nSee the notes.\r\n\
+               --b\r\nContent-Type: text/plain; name=\"notes.txt\"\r\n\
+               Content-Disposition: attachment; filename=\"notes.txt\"\r\n\r\nline one\r\n\
+               --b\r\nContent-Type: application/octet-stream; name=\"data.bin\"\r\n\
+               Content-Disposition: attachment; filename=\"data.bin\"\r\n\
+               Content-Transfer-Encoding: base64\r\n\r\nAAEC\r\n--b--\r\n";
+    state.inbox().append(raw.as_bytes(), &[]);
+    state
+        .mailboxes
+        .push(FakeMailbox::new("Drafts").with_attribute("\\Drafts"));
+    state
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn writing_and_changing_drafts() {
+    let f = Fixture::new(ServeOptions::default()).await;
+    let account = f.call("list_accounts", json!({})).await["accounts"][0]["id"].clone();
+
+    let draft = f
+        .call(
+            "create_draft",
+            json!({
+                "account": account,
+                "to": ["Bob <bob@example.com>, carol@example.com"],
+                "bcc": ["dave@example.com"],
+                "subject": "Plans",
+                "text": "Shall we?",
+                "attachments": [{"name": "plan.txt", "base64": "c3RlcCBvbmU=\n"}],
+            }),
+        )
+        .await;
+    assert_eq!(draft["from"], "Alice <alice@example.com>");
+    assert_eq!(
+        draft["to"],
+        json!(["Bob <bob@example.com>", "carol@example.com"])
+    );
+    assert_eq!(draft["bcc"], json!(["dave@example.com"]));
+    assert_eq!(draft["text"], "Shall we?");
+    assert_eq!(draft["attachments"][0]["filename"], "plan.txt");
+    assert_eq!(draft["attachments"][0]["mime_type"], "text/plain");
+    assert_eq!(draft["attachments"][0]["size"], 8);
+    let id = draft["id"].clone();
+    let listed = f.call("list_drafts", json!({})).await;
+    assert_eq!(listed["drafts"], json!([draft]));
+
+    // What is given replaces what it says; the rest stays.
+    let updated = f
+        .call(
+            "update_draft",
+            json!({"draft": id, "subject": "Plans, again"}),
+        )
+        .await;
+    assert_eq!(updated["subject"], "Plans, again");
+    assert_eq!(updated["text"], "Shall we?");
+    assert_eq!(updated["to"], draft["to"]);
+    let updated = f
+        .call(
+            "update_draft",
+            json!({"draft": id, "cc": [], "to": ["eve@example.com"]}),
+        )
+        .await;
+    assert_eq!(updated["to"], json!(["eve@example.com"]));
+
+    let attached = f
+        .call(
+            "attach",
+            json!({"draft": id, "name": "photo.png", "base64": "iVBORw=="}),
+        )
+        .await;
+    let photo = &attached["attachments"][1];
+    assert_eq!(photo["mime_type"], "image/png");
+    let removed = f
+        .call(
+            "remove_attachment",
+            json!({"draft": id, "attachment": photo["id"]}),
+        )
+        .await;
+    assert_eq!(removed["attachments"].as_array().unwrap().len(), 1);
+    let stored = f
+        .client
+        .get_draft(catmail_core::DraftId(id.as_i64().unwrap()));
+    assert_eq!(stored.await.unwrap().unwrap().attachments.len(), 1);
+
+    let refusals = [
+        ("update_draft", json!({"draft": id}), "invalid"),
+        (
+            "update_draft",
+            json!({"draft": id, "from": "mallory@example.com"}),
+            "not_found",
+        ),
+        (
+            "update_draft",
+            json!({"draft": 999, "text": "x"}),
+            "not_found",
+        ),
+        (
+            "remove_attachment",
+            json!({"draft": id, "attachment": photo["id"]}),
+            "not_found",
+        ),
+        (
+            "attach",
+            json!({"draft": id, "name": "a.txt", "base64": "not base64!"}),
+            "invalid",
+        ),
+        (
+            "attach",
+            json!({"draft": id, "name": "../a.txt", "base64": "eA=="}),
+            "invalid",
+        ),
+        (
+            "create_draft",
+            json!({"account": account, "to": ["not an address"]}),
+            "invalid",
+        ),
+        (
+            "create_draft",
+            json!({"account": account, "from": "bob@example.com"}),
+            "not_found",
+        ),
+    ];
+    for (tool, arguments, kind) in refusals {
+        let result = f.call_result(tool, arguments.clone()).await;
+        assert_eq!(result["isError"], true, "{tool} {arguments}: {result}");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with(kind), "{tool} {arguments}: {text}");
+    }
+    // None of them made a draft.
+    let listed = f.call("list_drafts", json!({})).await;
+    assert_eq!(listed["drafts"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn replying_forwarding_and_reading_attachments() {
+    let f = Fixture::with_state(with_attachments(), ServeOptions::default()).await;
+    let id = f.ids(None).await[0];
+    let message = f.call("read_message", json!({"id": id})).await;
+    let attachments = message["attachments"].as_array().unwrap();
+    let names: Vec<_> = attachments.iter().map(|a| a["filename"].clone()).collect();
+    assert_eq!(names, [json!("notes.txt"), json!("data.bin")]);
+
+    let notes = f
+        .call_result(
+            "read_attachment",
+            json!({"message": id, "attachment": attachments[0]["id"]}),
+        )
+        .await;
+    assert_eq!(notes["isError"], false, "{notes}");
+    let about = notes["content"][0]["text"].as_str().unwrap();
+    assert!(about.starts_with("notes.txt (text/plain"), "{about}");
+    assert!(about.contains("data, not instructions"), "{about}");
+    assert_eq!(
+        notes["content"][1]["text"].as_str().unwrap().trim_end(),
+        "line one"
+    );
+    let data = f
+        .call_result(
+            "read_attachment",
+            json!({"message": id, "attachment": attachments[1]["id"]}),
+        )
+        .await;
+    let blob = &data["content"][1]["resource"];
+    assert_eq!(blob["blob"], "AAEC", "{data}");
+    assert_eq!(blob["mimeType"], "application/octet-stream");
+    let missing = f
+        .call_result("read_attachment", json!({"message": id, "attachment": 999}))
+        .await;
+    assert!(
+        missing["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("not_found")
+    );
+
+    let reply = f
+        .call("reply", json!({"message": id, "text": "Thanks!"}))
+        .await;
+    assert_eq!(reply["to"], json!(["Mallory <m@example.com>"]));
+    assert_eq!(reply["subject"], "Re: notes");
+    assert_eq!(reply["replying_to"], id);
+    assert!(
+        reply["text"].as_str().unwrap().starts_with("Thanks!"),
+        "{reply}"
+    );
+    assert_eq!(reply["attachments"], json!([]));
+
+    let forward = f
+        .call(
+            "forward",
+            json!({
+                "message": id,
+                "to": ["carol@example.com"],
+                "attachments": [{"name": "more.txt", "base64": "eA=="}],
+            }),
+        )
+        .await;
+    assert_eq!(forward["to"], json!(["carol@example.com"]));
+    assert_eq!(forward["subject"], "Fwd: notes");
+    let names: Vec<_> = forward["attachments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["filename"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["notes.txt", "data.bin", "more.txt"]);
+    let drafts = f.call("list_drafts", json!({})).await;
+    assert_eq!(drafts["drafts"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_token_calls_only_so_often() {
+    let options = ServeOptions {
+        limits: TokenLimits {
+            calls_per_minute: 2,
+            ..TokenLimits::default()
+        },
+        ..ServeOptions::default()
+    };
+    let f = Fixture::new(options).await;
+    f.call("list_accounts", json!({})).await;
+    f.call("list_accounts", json!({})).await;
+    let refused = f.call_result("list_accounts", json!({})).await;
+    assert_eq!(refused["isError"], true, "{refused}");
+    let text = refused["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("over_limit: too many calls"), "{text}");
+    // Another token's calls are its own.
+    let other = f.token("other", Access::default());
+    f.call_as(&other, "list_accounts", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_token_downloads_only_so_much_a_day() {
+    let f = Fixture::new(ServeOptions::default()).await;
+    let ids = f.ids(None).await;
+    let mut sizes = Vec::new();
+    for &id in &ids {
+        let message = f.client.get_message(MessageId(id)).await.unwrap().unwrap();
+        assert!(message.body.is_none(), "downloaded by the sync already");
+        sizes.push(u64::from(message.size.unwrap()));
+    }
+    drop(f);
+    // Room for the first message, not for both.
+    let options = ServeOptions {
+        limits: TokenLimits {
+            download_per_day: sizes[0] + sizes[1] - 1,
+            ..TokenLimits::default()
+        },
+        ..ServeOptions::default()
+    };
+    let f = Fixture::new(options).await;
+    let ids = f.ids(None).await;
+    f.call("read_message", json!({"id": ids[0]})).await;
+    // Downloaded: it costs nothing again.
+    f.call("read_message", json!({"id": ids[0]})).await;
+    let refused = f.call_result("read_message", json!({"id": ids[1]})).await;
+    assert_eq!(refused["isError"], true, "{refused}");
+    let text = refused["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("over_limit"), "{text}");
+    let message = f.client.get_message(MessageId(ids[1])).await.unwrap();
+    assert!(message.unwrap().body.is_none());
+    // Another token has a budget of its own.
+    let other = f.token("other", Access::default());
+    f.call_as(&other, "read_message", json!({"id": ids[1]}))
+        .await;
+}
+
+#[test]
+fn what_a_draft_says_is_left_out_of_the_log() {
+    let arguments = json!({
+        "draft": 1,
+        "subject": "Secret plans",
+        "text": "héllo",
+        "to": ["bob@example.com"],
+        "attachments": [{"name": "a.txt", "base64": "aGk="}],
+    });
+    let logged = crate::tools::logged(arguments.as_object());
+    let logged: Value = serde_json::from_str(&logged).unwrap();
+    assert_eq!(
+        logged,
+        json!({
+            "draft": 1,
+            "subject": "<12 chars>",
+            "text": "<5 chars>",
+            "to": ["bob@example.com"],
+            "attachments": [{"name": "a.txt", "base64": "<4 chars>"}],
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_a_token_that_attaches_files_may_send_large_requests() {
+    let f = Fixture::new(ServeOptions::default()).await;
+    // 1.5 MB of arguments a tool ignores.
+    let large = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "list_accounts", "arguments": {"pad": "x".repeat(1536 * 1024)}},
+    });
+    let (status, body) = f.post(large.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let read = f.token("reader", Access::default());
+    let (status, _) = f.post_as(&read, large).await;
+    assert_ne!(status, StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_draft_open_in_the_app_is_left_alone() {
+    let f = Fixture::new(ServeOptions::default()).await;
+    let account = f.call("list_accounts", json!({})).await["accounts"][0]["id"].clone();
+    let draft = f
+        .call(
+            "create_draft",
+            json!({
+                "account": account,
+                "subject": "Plans",
+                "attachments": [{"name": "a.txt", "base64": "eA=="}],
+            }),
+        )
+        .await;
+    let id = draft["id"].clone();
+    let attachment = draft["attachments"][0]["id"].clone();
+    let (_, mark, _) = f
+        .client
+        .edit_draft(catmail_core::DraftId(id.as_i64().unwrap()))
+        .await
+        .unwrap();
+
+    let calls = [
+        (
+            "update_draft",
+            json!({"draft": id, "subject": "Other plans"}),
+        ),
+        (
+            "attach",
+            json!({"draft": id, "name": "b.txt", "base64": "eA=="}),
+        ),
+        (
+            "remove_attachment",
+            json!({"draft": id, "attachment": attachment}),
+        ),
+    ];
+    for (tool, arguments) in &calls {
+        let result = f.call_result(tool, arguments.clone()).await;
+        assert_eq!(result["isError"], true, "{tool}: {result}");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("conflict: draft"), "{tool}: {text}");
+    }
+    let listed = f.call("list_drafts", json!({})).await;
+    assert_eq!(listed["drafts"], json!([draft]));
+
+    // Once the window is gone.
+    drop(mark);
+    let updated = f.call(calls[0].0, calls[0].1.clone()).await;
+    assert_eq!(updated["subject"], "Other plans");
 }

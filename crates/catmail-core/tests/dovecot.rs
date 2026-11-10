@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use catmail_core::{
-    AccountId, Address, DeleteMode, DraftContent, Flags, FolderRole, MailClient, MessageSummary,
-    OutboxStatus, SearchQuery, Security, ServerConfig, SyncReport,
+    AccountId, Address, DeleteMode, DraftChanges, DraftContent, Flags, FolderRole, MailClient,
+    MessageSummary, OutboxStatus, SearchQuery, Security, ServerConfig, SyncReport,
 };
 use catmail_testkit::{FakeSmtp, SmtpState};
 use testenv::{add_account, open_client, run_tag, sent_copies};
@@ -566,7 +566,7 @@ async fn drafts_are_kept_in_dovecots_drafts_folder() {
     assert_eq!(copies(), [(format!("{run} one"), "DS".into())]);
 
     client
-        .update_draft(draft.id, draft.identity, content("two"))
+        .update_draft(draft.id, DraftChanges::all(draft.identity, content("two")))
         .await
         .unwrap();
     client.replay_pending(account).await.unwrap();

@@ -673,6 +673,7 @@ dependencies = [
 name = "catmail-mcp"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "catmail-core",
  "catmail-testkit",
  "futures-util",
