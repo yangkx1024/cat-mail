@@ -44,6 +44,17 @@ MCP 的第 2 步（`docs/architecture/mcp.md`）。第 1 步只有 `catmail serv
   `catmail_mcp::connect` 里，两边共用。Codex 只能从环境变量读令牌（`bearer_token` 在它的配置里不被支持），示例
   因此是 `codex mcp add … --bearer-token-env-var CATMAIL_MCP_TOKEN` 加一行 `export`。长命令在选项之间用 `\` 换行，
   界面里窄的时候不会从 `--header` 中间折开。
+- **review 后修的两处视图生命周期问题**（codex 指出）：
+  - 设置对话框的 `dynamic` 在建一节时把节里读到的设置也订阅了（Agents 的端口框读了一次），之后开关或端口一变
+    整节重建，刚显示的令牌和正在输入的名字随之丢掉。改为只按选中的节重建，建节的过程 `untracked`（nsh 的
+    `dynamic` 用法）。其他几节读设置都在绑定里，不受影响。
+  - 令牌的读取、新增、删除在 `in_view`（属于邮箱）里跑，离开这一节或关掉设置后才结束时，写已销毁的信号会
+    panic；令牌文件被锁住时等得更久。读取改为属于这一节（`effect` 里 `spawn`，随节结束取消）；新增、删除照常
+    做完，只在这一节还在时更新显示（`form::submit` 在表单已不在时不再写它的信号）。Settings › Reading 量、清
+    图片缓存原有同样的问题，一并改了。
+- **Windows 上工具列表快照的测试一直失败**（#275 合并后 `main` 就是红的）：GitHub 的 Windows runner 检出文本文件时
+  换成 CRLF，`include_str!` 嵌进去的快照带 `\r\n`，生成的 JSON 是 `\n`。`.gitattributes` 把
+  `tools.snapshot.json` 定为 `eol=lf`，和 `.eml` 夹具一样按字节保持。
 - 新增 heroicons：`sparkles`（导航）、`clipboard-document`（复制），`key` 原已在资源里。
 
 ## 方案

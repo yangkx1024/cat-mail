@@ -162,7 +162,9 @@ pub fn error(submission: Signal<Submission>) -> impl IntoElement {
 
 /// Runs a form's request, unless one is running (or the values are wrong, which the
 /// form then says), and `done` with what it gave. The request is the engine's: leaving
-/// the form doesn't stop it, hence Cancel being off meanwhile.
+/// the form doesn't stop it, hence Cancel being off meanwhile. A form that can go anyway
+/// (a section of Settings, closed) is gone when the request ends: nothing is shown, and
+/// `done` doesn't run.
 pub fn submit<T: 'static, E: std::fmt::Display + 'static>(
     submission: Signal<Submission>,
     request: Result<LocalBoxFuture<'static, Result<T, E>>, &'static str>,
@@ -173,6 +175,10 @@ pub fn submit<T: 'static, E: std::fmt::Display + 'static>(
     };
     in_view(async move {
         let result = request.await;
+        // Its signals went with the form.
+        if submission.try_get().is_none() {
+            return;
+        }
         if let Some(value) = change(submission, |s| s.ended(result)) {
             done(value);
         }

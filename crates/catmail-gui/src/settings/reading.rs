@@ -17,9 +17,10 @@ use super::{help, prefs, section_title, toggle};
 pub fn reading() -> impl IntoElement {
     // Measured each time the section shows: the cache grows as messages show their
     // remote images.
+    // The section's: it stops when the section goes, with what shows the size.
     let size = signal(None::<u64>);
     let clearing = signal(false);
-    in_view(async move {
+    spawn(async move {
         match client().image_cache_size().await {
             Ok(bytes) => size.set(Some(bytes)),
             Err(e) => tracing::warn!(error = %e, "couldn't measure the image cache"),
@@ -30,12 +31,15 @@ pub fn reading() -> impl IntoElement {
             return;
         }
         clearing.set(true);
+        // Cleared even if the section goes meanwhile; only what it shows goes with it.
         in_view(async move {
             let cleared = client().clear_image_cache().await;
-            size.set(client().image_cache_size().await.ok());
-            clearing.set(false);
             if let Err(e) = cleared {
                 report("Couldn't clear the image cache", e);
+            }
+            let measured = client().image_cache_size().await.ok();
+            if size.try_set(measured) {
+                clearing.set(false);
             }
         });
     };

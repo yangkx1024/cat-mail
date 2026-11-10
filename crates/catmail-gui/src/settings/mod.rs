@@ -131,12 +131,18 @@ fn settings_dialog() -> impl IntoElement {
                 .on_press(move || section.set(which))
                 .into_element()
         }));
-    let content = dynamic(move || match section.get() {
-        Section::General => general().into_element(),
-        Section::Appearance => appearance::appearance().into_element(),
-        Section::Accounts => accounts_section().into_element(),
-        Section::Reading => reading::reading().into_element(),
-        Section::Agents => agents::agents().into_element(),
+    // Made again only when another section is chosen: what a section reads as it is
+    // built (the settings, say) doesn't remake it, which would drop what it holds (a
+    // token just made, a name being typed).
+    let content = dynamic(move || {
+        let which = section.get();
+        untracked(|| match which {
+            Section::General => general().into_element(),
+            Section::Appearance => appearance::appearance().into_element(),
+            Section::Accounts => accounts_section().into_element(),
+            Section::Reading => reading::reading().into_element(),
+            Section::Agents => agents::agents().into_element(),
+        })
     });
     modal(
         800.0,

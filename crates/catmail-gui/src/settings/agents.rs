@@ -137,14 +137,15 @@ fn port_field() -> impl IntoElement {
 fn tokens_list(tokens: Tokens, made: Made) -> impl IntoElement {
     let list = signal(Vec::<Token>::new());
     // Read when the section shows (`catmail mcp token` changes them too), and again
-    // each time one is added or removed here.
+    // each time one is added or removed here. The reading is the section's: it stops
+    // when the section goes, with the list it fills.
     let reads = signal(0_u32);
     {
         let tokens = tokens.clone();
         effect(move || {
             reads.get();
             let tokens = tokens.clone();
-            in_view(async move {
+            spawn(async move {
                 match off_thread(move || tokens.list()).await {
                     Some(Ok(read)) => list.set(read),
                     Some(Err(e)) => report("Couldn't read the tokens", e),
@@ -219,10 +220,15 @@ fn token_row(token: Token, tokens: Tokens, made: Made, reads: Signal<u32>) -> An
     let remove = move || {
         let (name, tokens) = (name.clone(), tokens.clone());
         confirm_then(mcp::remove_token(&name), move || {
+            // Done even if the section goes meanwhile (the file's lock can keep it
+            // waiting); only what it shows goes with it.
             in_view(async move {
                 let gone = name.clone();
                 if let Some(Err(e)) = off_thread(move || tokens.remove(&gone)).await {
                     report("Couldn't remove the token", e);
+                    return;
+                }
+                if reads.try_get().is_none() {
                     return;
                 }
                 // Shown just now, it can't be used anymore.
