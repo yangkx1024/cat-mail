@@ -47,7 +47,7 @@ mod tray;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn main() -> anyhow::Result<std::process::ExitCode> {
-    use catmail_core::{BodyPrefetch, Config, DEFAULT_GC_INTERVAL, MailClient, SyncSchedule};
+    use catmail_core::{Config, MailClient};
     use catmail_frontend::instance::{self, Claim, Display, Request};
     use catmail_frontend::settings::SettingsFile;
 
@@ -74,11 +74,7 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
     };
     // The engine syncs, prefetches, sends and collects garbage on its
     // own, and its futures don't need tokio, which the toolkit's loop isn't.
-    let builder = builder
-        .sync_in_background(Some(SyncSchedule::default()))
-        .prefetch_bodies(Some(BodyPrefetch::default()))
-        .send_in_background(true)
-        .collect_garbage_every(Some(DEFAULT_GC_INTERVAL));
+    let builder = builder.resident();
     let code = shell::run(builder, requests, config_dir.map(SettingsFile::new));
     Ok(std::process::ExitCode::from(code))
 }

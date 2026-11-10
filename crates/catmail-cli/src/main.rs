@@ -11,11 +11,14 @@ mod test_support;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::Result;
-use catmail_core::{BodyPrefetch, Config, DEFAULT_GC_INTERVAL, DraftId, MailClient, SyncSchedule};
+use anyhow::{Context, Result};
+use catmail_core::{Config, DraftId, MailClient};
+use catmail_mcp::Tokens;
 use clap::{Parser, Subcommand};
 
-use crate::cmd::{account, compose, folder, gc, identity, ops, outbox, read, search, sync, watch};
+use crate::cmd::{
+    account, compose, folder, gc, identity, mcp, ops, outbox, read, search, sync, watch,
+};
 use crate::output::printable_text;
 
 #[derive(Parser)]
@@ -36,6 +39,10 @@ struct Cli {
     /// Directory for the database and blobs [default: platform data dir]
     #[arg(long, global = true, env = "CATMAIL_DATA_DIR")]
     data_dir: Option<PathBuf>,
+
+    /// Directory for settings and MCP tokens, the app's too [default: platform config dir]
+    #[arg(long, global = true, env = "CATMAIL_CONFIG_DIR")]
+    config_dir: Option<PathBuf>,
 
     /// Print machine-readable JSON instead of tables
     #[arg(long, global = true)]
@@ -62,6 +69,12 @@ enum Command {
     /// arrives as the server announces it (IDLE), other folders are synced every 15
     /// minutes, and changes to messages reach the server at once
     Watch,
+    /// Keep every account in sync as `watch` does (sending too), and let AI agents use
+    /// the mail over MCP, until interrupted
+    Serve(mcp::Serve),
+    /// The tokens AI agents use `catmail serve` with
+    #[command(subcommand)]
+    Mcp(mcp::McpCommand),
     /// List folders, or the messages in a folder
     Ls(search::Ls),
     /// Create, rename or delete folders (on Gmail, labels), on the server at once
@@ -140,38 +153,45 @@ fn open_failed(e: catmail_core::Error) -> anyhow::Error {
 }
 
 async fn run() -> Result<()> {
-    catmail_core::logging::init("catmail=info");
+    catmail_core::logging::init(&format!("catmail=info,{}", catmail_mcp::LOG_FILTER));
 
     let cli = Cli::parse();
+    let tokens = || -> Result<Tokens> {
+        let dir = match &cli.config_dir {
+            Some(dir) => dir.clone(),
+            None => {
+                Config::platform_config_dir().context("no config directory; use --config-dir")?
+            }
+        };
+        Ok(Tokens::new(dir))
+    };
+    // Tokens are a file of their own: managing them works while `serve` runs.
+    if let Command::Mcp(command) = cli.command {
+        return mcp::mcp(&tokens()?, command, cli.json);
+    }
     let config = match cli.data_dir {
         Some(dir) => Config::with_data_dir(dir),
         None => Config::platform_default()?,
     };
-    let watching = matches!(cli.command, Command::Watch);
     catmail_core::logging::write_file(&config, "cli");
-    let client = MailClient::builder(config)
-        .runtime(tokio::runtime::Handle::current())
-        .sync_in_background(watching.then(SyncSchedule::default))
-        .prefetch_bodies(watching.then(BodyPrefetch::default))
-        // While this holds the data directory, `catmail gc` can't run.
-        .collect_garbage_every(watching.then_some(DEFAULT_GC_INTERVAL))
-        .open()
-        .map_err(open_failed)?;
+    let builder = MailClient::builder(config).runtime(tokio::runtime::Handle::current());
+    // While a long-running one holds the data directory, `catmail gc` can't run: it
+    // collects garbage itself.
+    let builder = match &cli.command {
+        Command::Serve(_) => builder.resident(),
+        // Sends nothing behind the user's back: `send` and `outbox flush` do.
+        Command::Watch => builder.resident().send_in_background(false),
+        _ => builder,
+    };
+    let client = builder.open().map_err(open_failed)?;
 
     match cli.command {
         Command::Account(cmd) => account::account(&client, cmd, cli.json).await,
         Command::Identity(cmd) => identity::identity(&client, cmd, cli.json).await,
         Command::Sync { account } => sync::sync(&client, account.as_deref(), cli.json).await,
-        Command::Watch => {
-            let interrupted = async {
-                if let Err(e) = tokio::signal::ctrl_c().await {
-                    tracing::warn!(error = %e, "can't wait for Ctrl-C");
-                    std::future::pending::<()>().await;
-                }
-                tracing::info!("interrupted; stopping");
-            };
-            watch::watch(&client, cli.json, interrupted).await
-        }
+        Command::Watch => watch::watch(&client, cli.json, interrupted()).await,
+        Command::Serve(args) => mcp::serve(&client, tokens()?, args, interrupted()).await,
+        Command::Mcp(_) => unreachable!("handled before opening the engine"),
         Command::Ls(args) => search::ls(&client, args, cli.json).await,
         Command::Folder(cmd) => folder::folder(&client, cmd, cli.json).await,
         Command::Read(args) => read::read(&client, args, cli.json).await,
@@ -197,6 +217,36 @@ async fn run() -> Result<()> {
         }
         Command::Gc => gc::gc(&client, cli.json).await,
     }
+}
+
+/// Ctrl-C, or (on Unix) SIGTERM, as a service manager stops a service.
+async fn interrupted() {
+    let ctrl_c = async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::warn!(error = %e, "can't wait for Ctrl-C");
+            std::future::pending::<()>().await;
+        }
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                terminate.recv().await;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "can't wait for SIGTERM");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        () = ctrl_c => {}
+        () = terminate => {}
+    }
+    tracing::info!("interrupted; stopping");
 }
 
 #[cfg(test)]

@@ -170,6 +170,16 @@ impl MailClientBuilder {
         self
     }
 
+    /// Everything a frontend that stays up does in the background: syncs, prefetches
+    /// bodies, sends and collects garbage, as usual. The app's, and `catmail serve`'s:
+    /// one engine on a data directory behaves the same whichever of them holds it.
+    pub fn resident(self) -> Self {
+        self.sync_in_background(Some(SyncSchedule::default()))
+            .prefetch_bodies(Some(BodyPrefetch::default()))
+            .send_in_background(true)
+            .collect_garbage_every(Some(crate::DEFAULT_GC_INTERVAL))
+    }
+
     /// Batch sizes, the whole-message limit and the keepalive of idle connections
     /// [default: `EngineTuning::default()`].
     /// Batch sizes below 1 count as 1.
@@ -931,6 +941,20 @@ impl MailClient {
         self.shared
             .rt
             .run(async move { engine.read(move |db| db.messages().get(id)).await })
+            .await
+    }
+
+    /// Where the page after message `id` starts, for [`list_messages`](Self::list_messages)
+    /// and [`search`](Self::search); `None` if there is no such message. Reads its headers
+    /// only.
+    pub async fn message_cursor(&self, id: MessageId) -> Result<Option<MessageCursor>> {
+        let engine = self.engine()?;
+        self.shared
+            .rt
+            .run(async move {
+                let message = engine.read(move |db| db.messages().headers(id)).await?;
+                Ok(message.map(|m| m.summary.cursor()))
+            })
             .await
     }
 

@@ -6,6 +6,7 @@ pub(crate) mod compose;
 pub(crate) mod folder;
 pub(crate) mod gc;
 pub(crate) mod identity;
+pub(crate) mod mcp;
 pub(crate) mod ops;
 pub(crate) mod outbox;
 pub(crate) mod read;
@@ -63,11 +64,11 @@ pub(crate) async fn cursor_after(
     let Some(id) = id else {
         return Ok(None);
     };
-    let message = client
-        .get_message(MessageId(id))
+    let cursor = client
+        .message_cursor(MessageId(id))
         .await?
         .with_context(|| format!("no message {id}"))?;
-    Ok(Some(message.summary.cursor()))
+    Ok(Some(cursor))
 }
 
 /// The accounts' folders, by id: for FOLDER columns, and the names of labels.
