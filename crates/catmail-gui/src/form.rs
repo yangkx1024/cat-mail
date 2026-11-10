@@ -149,6 +149,7 @@ pub fn menu_field(
         .child(
             text(chosen)
                 .flex_1()
+                .number_of_lines(1)
                 .text_sm()
                 .text_color(move || theme().foreground),
         )
