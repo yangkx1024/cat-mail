@@ -2,8 +2,8 @@
 
 [← 架构](../architecture.md)
 
-> 状态：第 1 步已实现：`catmail-mcp` 的只读工具、`catmail serve`、令牌文件。GUI 托管、权限层级、改动邮件的
-> 工具、发信尚未实现，那些小节是设计。
+> 状态：第 1、2 步已实现：`catmail-mcp` 的只读工具、`catmail serve`、令牌文件、GUI 托管（Settings › Agents）。
+> 权限层级、改动邮件的工具、发信尚未实现，那些小节是设计。
 
 把 catmail 的能力经 [MCP](https://modelcontextprotocol.io) 交给 AI agent：一台设备常驻，局域网和
 tailnet 里的 agent 都能读信、整理、写草稿，经确认后发信。
@@ -15,13 +15,15 @@ MCP 不是第三个各自打开数据库的前端，而是一个库 `catmail-mcp
 
 ```
                  catmail-mcp（工具、权限、令牌、HTTP 服务端）
-                 McpServer::start(client, config, tokens) -> Handle { stop() }
+                 McpServer::start(client, tokens, options) -> McpServer { stop() }
                         ▲                                ▲
-          catmail-gui（设置里的开关）            catmail serve（CLI，无界面常驻）
+          catmail-frontend 的 mcp::Host            catmail serve（CLI，无界面常驻）
           专门的线程，自己的 tokio runtime        #[tokio::main] 的 runtime
+                        ▲
+          catmail-gui（Settings › Agents）
 ```
 
-依赖方向 `core ← mcp ← cli, gui`。
+依赖方向 `core ← mcp ← cli, frontend ← gui`。
 
 - **为什么不让 MCP 自己打开引擎**：一个数据目录一个引擎，GUI 常驻时 MCP 打不开；反过来 MCP 开着时 GUI 启动不了。
 - **为什么不先做通用 IPC**：`MailClient` 有 86 个公开方法，事件、流（远程图片）、大块数据（附件）、同步方法
@@ -29,17 +31,41 @@ MCP 不是第三个各自打开数据库的前端，而是一个库 `catmail-mcp
   有版本的公开协议，托管在引擎所在的进程里不需要私有协议。
 - 同一个数据目录只会有一个宿主，引擎的锁保证。两个宿主的引擎配置相同（后台同步、预取正文、后台发信、
   GC）：`MailClientBuilder::resident()`，GUI 和 `serve` 都用它。
-- GUI 里的服务跑在专门的线程上，用它自己的 current-thread tokio runtime，不碰工具包的主循环；`MailClient`
-  的 future 不依赖 executor（见[运行时桥接](../architecture.md#运行时桥接)）。开关随时启停，不重启 GUI。
+- GUI 里的服务跑在专门的线程上（`catmail_frontend::mcp::Host`），用它自己的 current-thread tokio runtime，
+  不碰工具包的主循环；`MailClient` 的 future 不依赖 executor（见[运行时桥接](../architecture.md#运行时桥接)）。
+  开关随时启停，不重启 GUI。详见下文 [GUI 托管](#gui-托管)。
 - `catmail serve` 也是 Windows 上唯一的宿主（那里还没有 GUI）。
 
 | | GUI | `catmail serve` |
 |---|---|---|
-| 开关、端口 | 设置 | 参数或配置文件 |
-| 令牌 | 设置里增删 | `catmail mcp token add / list / rm` |
+| 开关、端口 | Settings › Agents（存在 `settings.json`） | `--port` |
+| 令牌 | Settings › Agents 里增删 | `catmail mcp token add / list / rm` |
 | 开机自启 | 登录项与 `--background`（见[后台运行](background.md)） | systemd 用户服务、launchd |
 | 添加账户 | 设置 | 先停掉 `serve`，`catmail account add` |
 | 密码 | 系统密钥环 | 密钥环；无 Secret Service 时见[无界面服务器的密码](#无界面服务器的密码) |
+
+## GUI 托管
+
+Settings › Agents：开关、端口，下面是令牌。
+
+- **服务的线程**（`catmail_frontend::mcp::Host`）：引擎打开后由外壳（`shell/mod.rs`）建好，一直到应用退出；
+  服务按设置开、关、换端口。外壳像视图一样跟随设置，每变一次把**当时生效的**设置交给它（两个视图线程上的两次
+  修改可能以任意顺序到达），`update_settings` 本身不认识 MCP。它只看最新的一个，与正在用的相同就不动：改别的设置不会重启服务，也不会重试刚失败的端口（关掉再
+  打开才重试）。换端口时先停旧的再开新的。
+- **状态**：没在监听、在监听（显示本机的地址，可选中复制）、失败（端口被占用、没有权限……一句话说明）。开关打开
+  而还没在监听时显示"Starting…"（`Status::line`）。关掉时"没在监听"在端口真正释放之后才报告，换端口时先报告它
+  再停旧的。状态由外壳转给正显示这一节的视图：读当前状态和开始跟随在同一把锁下（`Watched`，与设置共用），中间的变化不会丢。
+- **停下等多久**：GUI 停服务时让正在答的请求最多再跑 5 秒（`serve` 是 30 秒）：有人等着应用。退出时先停服务、
+  再关引擎，正在答的请求能答完而不是撞上已关闭的引擎。
+- **端口**按 Return 或离开输入框时才生效，逐字生效会让服务在 8、86、864 上依次开一遍。
+- **令牌**：列表在进入这一节时读（`catmail mcp token` 也会改它）；新令牌显示在列表下面，只这一次，旁边是复制
+  按钮；删掉前确认，删掉即失效。读写令牌文件在单独的线程上做，不卡视图。
+- **Connect an agent**：把服务加进 Claude Code、Codex 的命令，地址跟着端口；刚加了令牌时填上它，可以直接粘贴，
+  否则是 `<token>`。每段一个复制按钮。长命令用 `\` 在选项之间换行，窄的地方也不会从选项中间折开。
+- **示例的文字**在 `catmail_mcp::connect`，GUI 和 `catmail mcp token add` 共用。Codex 只从环境变量读 Bearer
+  令牌（`--bearer-token-env-var`，配置里不能写令牌本身），所以它的示例是两行：`codex mcp add` 和
+  `export CATMAIL_MCP_TOKEN=…`，并说明要在 Codex 运行的环境里设好。
+- 日志：GUI 的日志过滤加上 `catmail_mcp::LOG_FILTER`，监听、停止、被拒的令牌都记下来。
 
 ## 传输：只听本机，网络交给 Tailscale
 
@@ -56,9 +82,13 @@ tailnet 里的设备连得上，同一局域网内是直连。catmail 因此不�
   请求体一直没发完的客户端，rmcp 的 token 和 hyper 的优雅关闭都等不到头。
 - Cloudflare Tunnel 也能用，但服务到了公网，TLS 终止在 Cloudflare（邮件内容在那里是明文），应在前面加
   Cloudflare Access。
-- 经隧道来的请求源地址都是 `127.0.0.1`，所以本机的请求同样要令牌（`http.rs`，在交给 rmcp 之前查）；`Host`
-  只接受 `localhost`、`127.0.0.1`、`::1` 和 `--host` 给的名字（`*.ts.net` 的那个），挡住 DNS rebinding；带
-  `Origin` 的请求一律拒绝：agent 不是网页，浏览器里的页面不该连上来。这两项由 rmcp 查。
+- 经隧道来的请求源地址都是 `127.0.0.1`，所以本机的请求同样要令牌（`http.rs`，在交给 rmcp 之前查）；带
+  `Origin` 的请求一律拒绝（rmcp 查）：agent 不是网页，浏览器里的页面不该连上来。
+- **不查 `Host`**（rmcp 的 `disable_allowed_hosts`）。`Host` 白名单防的是 DNS rebinding：网页把自己的域名解析到
+  127.0.0.1 来访问本机端口。这样的请求过不了上面两关：浏览器不会自动带 `Authorization`，网页也拿不到令牌；
+  浏览器发 POST 总带 `Origin`，同源的也带（MCP 的请求都是 POST）。剩下能做到的只是看到 401，知道这里开着
+  catmail。而查 `Host` 的代价是每个隧道的名字都要配置：`tailscale serve` 和 Cloudflare Tunnel 默认保留原来的
+  `Host`（`*.ts.net`），漏配时被拒，报错又不指向这项配置。所以第 1 步的 `--host` 去掉了。
 - claude.ai 网页、手机 App 的远程连接器需要 OAuth（或者不认证），带不了固定的请求头；要用它们时再做
   OAuth 2.1，在此之前只支持 Claude Code、Codex、Cursor 这类能配请求头的客户端。
 
@@ -130,27 +160,29 @@ tailnet 里的设备连得上，同一局域网内是直连。catmail 因此不�
 ## 使用
 
 ```sh
-catmail mcp token add laptop          # 只显示这一次
-catmail serve --host mac.tailnet.ts.net
+catmail mcp token add laptop          # 只显示这一次，后面附上 Claude Code、Codex 的命令
+catmail serve
 tailscale serve --bg 8642             # https://mac.tailnet.ts.net/ → 127.0.0.1:8642
 claude mcp add --transport http catmail https://mac.tailnet.ts.net/mcp \
     --header "Authorization: Bearer catmail_…"
 ```
 
 本机的 agent 直接用 `http://127.0.0.1:8642/mcp`。`serve` 运行时 `catmail mcp token add / list / rm` 照样能用。
+开着 GUI 时不用 `serve`：在 Settings › Agents 里打开开关、加令牌。
 
 ## 代码
 
 `crates/catmail-mcp/src/`：`tools.rs`（工具与参数，rmcp 的 `#[tool_router]`）、`output.rs`（逐个写出的输出结构，
-文档注释就是 schema 里的描述）、`tokens.rs`、`http.rs`（监听、令牌、交给 rmcp）、`tests.rs`（经 HTTP 对假 IMAP
+文档注释就是 schema 里的描述）、`tokens.rs`、`connect.rs`（给 agent 的命令示例）、`http.rs`（监听、令牌、交给 rmcp）、`tests.rs`（经 HTTP 对假 IMAP
 服务器端到端）。`tools.snapshot.json` 固定 agent 看到的工具列表，有意改动时 `UPDATE_SNAPSHOTS=1` 重新生成。
-CLI 一侧是 `cmd/mcp.rs`。
+CLI 一侧是 `cmd/mcp.rs`；GUI 一侧是 `catmail-frontend` 的 `mcp.rs`（服务的线程、状态的说法、文案；端口的解析与登录表单共用 `login::parse_port`）、
+`catmail-gui` 的 `settings/agents.rs` 和 `shell/mod.rs` 里托管服务的部分。
 
 ## 步骤
 
-1. ✅ `catmail-mcp`：只读的工具、监听本机的 HTTP、令牌文件、`Host` 与 `Origin` 检查；宿主 `catmail serve`；
+1. ✅ `catmail-mcp`：只读的工具、监听本机的 HTTP、令牌文件、`Origin` 检查；宿主 `catmail serve`；
    引擎的常驻预设。`rmcp` 3.9 带进的依赖通过了 `cargo deny`。
-2. GUI 托管：设置里的开关、端口、令牌。
+2. ✅ GUI 托管：Settings › Agents 里的开关、端口、令牌；不再查 `Host`，`serve` 去掉 `--host`。
 3. 按层级与账户限定令牌、日志、每个令牌的限额；整理、草稿的工具；附件以内容传。
 4. systemd credentials；systemd、launchd 的示例；GUI 的登录项与 `--background`。
 5. 发信（elicitation，或允许不确认的令牌）；需要时 OAuth。

@@ -4,7 +4,9 @@
 //! rows, the commands on messages, when a composer saves, sends and closes, what the
 //! outbox pane offers, the login forms, what Settings › Accounts asks, how message
 //! metadata reads, what the reader says of a message, which parts of a message's HTML it
-//! shows and the page it shows a body as, the tray icon, the new-mail notifications, and running with no window.
+//! shows and the page it shows a body as, the tray icon, the new-mail notifications,
+//! running with no window, the MCP server for AI agents, and the values views follow
+//! from their own threads ([`watched`]).
 //! `catmail-gui` draws it; kept apart from it so that it is tested without GTK, WebKit
 //! or nsh, and holds no type of theirs.
 //!
@@ -23,6 +25,7 @@ pub mod instance;
 pub mod list;
 pub mod login;
 pub mod mailbox;
+pub mod mcp;
 pub mod memory;
 pub mod new_mail;
 pub mod outbox;
@@ -32,6 +35,7 @@ pub mod resident;
 pub mod settings;
 pub mod theme;
 pub mod tray;
+pub mod watched;
 
 /// FNV-1a: stable across Rust versions, runs and platforms, unlike `DefaultHasher`.
 fn fnv1a(bytes: impl IntoIterator<Item = u8>) -> u64 {

@@ -1,6 +1,6 @@
 //! The application around the nsh views: its windows, what later launches, the tray and
-//! notifications ask for, running on with no window, quitting, and the engine's opening
-//! and shutting down. nsh's `run_app` runs one view in one window and ends with it; the
+//! notifications ask for, running on with no window, quitting, the engine's opening
+//! and shutting down, and the MCP server for AI agents, which runs while the engine does. nsh's `run_app` runs one view in one window and ends with it; the
 //! app runs the toolkit's application itself instead (`gtk::Application` on Linux,
 //! `NSApplication` on macOS: [`toolkit`]), so that windows can come and go while the
 //! engine stays (composer windows, running without a window).
@@ -26,14 +26,16 @@ use std::rc::{Rc, Weak};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
-use catmail_core::{DraftId, MailClientBuilder};
+use catmail_core::{DraftId, MailClient, MailClientBuilder};
 use catmail_frontend::composer::{ComposeFrom, OpenComposers, Opening, window_title};
 use catmail_frontend::instance::{Request, Requests};
 use catmail_frontend::mailbox::{Destination, Place};
+use catmail_frontend::mcp;
 use catmail_frontend::resident::{AfterLastWindow, QuitReason, after_last_window};
-use catmail_frontend::settings::{self, Settings, SettingsFile};
+use catmail_frontend::settings::{self, McpSettings, Settings, SettingsFile};
 use catmail_frontend::theme::{DEFAULT_DARK, DEFAULT_LIGHT, Themes};
 use catmail_frontend::tray::Command;
+use catmail_frontend::watched::Watched;
 use futures_channel::{mpsc, oneshot};
 use futures_util::StreamExt as _;
 
@@ -52,8 +54,8 @@ pub const APP_NAME: &str = "catmail";
 // Process-wide: every window's view reads them, each on its own thread, and the settings
 // dialog changes them from the main window's.
 
-/// The settings in effect.
-static SETTINGS: Mutex<Option<Settings>> = Mutex::new(None);
+/// The settings in effect, and the views following them.
+static SETTINGS: LazyLock<Watched<Settings>> = LazyLock::new(|| Watched::new(Settings::default()));
 
 /// Where the settings are written, and the themes folder next to them; `None` without a
 /// config directory, and they stay in memory.
@@ -62,46 +64,39 @@ static FILE: OnceLock<Option<Arc<SettingsFile>>> = OnceLock::new();
 /// The themes on offer.
 static THEMES: LazyLock<Mutex<Themes>> = LazyLock::new(Mutex::default);
 
-/// The views following the settings ([`follow_settings`]).
-static FOLLOWERS: Mutex<Vec<mpsc::UnboundedSender<Settings>>> = Mutex::new(Vec::new());
-
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// The settings in effect.
 pub fn settings() -> Settings {
-    lock(&SETTINGS).clone().unwrap_or_default()
+    SETTINGS.get()
 }
 
 /// Changes the settings, from any view: they are written out in the background and take
 /// effect in every window.
 pub fn update_settings(change: impl FnOnce(&mut Settings)) {
-    let settings = {
-        let mut current = lock(&SETTINGS);
-        let settings = current.get_or_insert_with(Settings::default);
-        let before = settings.clone();
-        change(settings);
-        if *settings == before {
-            return;
+    let file = FILE.get().cloned().flatten();
+    // Queued in order with the changes, so that the newest queued is the newest.
+    let queue = |settings: &Settings| {
+        if let Some(file) = &file {
+            file.queue(settings.clone());
         }
-        settings.clone()
     };
-    if let Some(file) = FILE.get().cloned().flatten() {
-        file.queue(settings.clone());
+    if SETTINGS.update(change, queue).is_none() {
+        return;
+    }
+    if let Some(file) = file {
         // Writes take the newest settings queued, whichever thread finishes first.
         std::thread::spawn(move || file.write_pending());
     }
-    lock(&FOLLOWERS).retain(|follower| follower.unbounded_send(settings.clone()).is_ok());
     toolkit::invoke(restyle_views);
 }
 
-/// The settings each time they change, for a view to follow (its appearance, the dialog
-/// that shows them).
-pub fn follow_settings() -> mpsc::UnboundedReceiver<Settings> {
-    let (follower, changes) = mpsc::unbounded();
-    lock(&FOLLOWERS).push(follower);
-    changes
+/// The settings now, and each time they change, for a view to follow (its appearance,
+/// the dialog that shows them).
+pub fn follow_settings() -> (Settings, mpsc::UnboundedReceiver<Settings>) {
+    SETTINGS.follow()
 }
 
 /// The themes folder, if there is one.
@@ -148,6 +143,68 @@ fn restyle_views() {
         views.retain(|view| view.upgrade().inspect(|v| restyle(v, &settings)).is_some());
     });
     toolkit::set_appearance(appearance(&settings));
+}
+
+// --- The MCP server for AI agents ---------------------------------------------------
+//
+// It runs on a thread of its own (`catmail_frontend::mcp::Host`), from the engine's
+// opening until the app quits, as the settings say.
+
+/// The server's host, once the engine is open.
+static MCP: Mutex<Option<mcp::Host>> = Mutex::new(None);
+
+/// Where the server is, as it last said, and the views following it.
+static MCP_STATUS: Watched<mcp::Status> = Watched::new(mcp::Status::Off);
+
+/// The tokens agents present, in the config directory; `None` without one.
+pub fn tokens() -> Option<mcp::Tokens> {
+    FILE.get()?
+        .as_ref()
+        .map(|file| mcp::Tokens::new(file.dir()))
+}
+
+/// Where the server is now, and each time that changes, for a view to follow.
+pub fn follow_mcp() -> (mcp::Status, mpsc::UnboundedReceiver<mcp::Status>) {
+    MCP_STATUS.follow()
+}
+
+fn mcp_said(status: mcp::Status) {
+    MCP_STATUS.set(status);
+}
+
+/// The server's settings in effect.
+fn mcp_settings() -> McpSettings {
+    SETTINGS.with(|s| s.mcp)
+}
+
+/// The engine is open: the server starts if the settings say so, and follows them.
+fn serve_agents(client: MailClient) {
+    let Some(tokens) = tokens() else {
+        mcp_said(mcp::Status::Failed(mcp::NO_CONFIG_DIR.into()));
+        return;
+    };
+    // Before reading them: a change while the host starts isn't missed.
+    let (_, mut changes) = follow_settings();
+    match mcp::Host::start(client, tokens, mcp_said) {
+        Ok(host) => {
+            host.want(&mcp_settings());
+            *lock(&MCP) = Some(host);
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "couldn't start the MCP server's thread");
+            mcp_said(mcp::Status::Failed(format!("Couldn't start serving: {e}.")));
+            return;
+        }
+    }
+    toolkit::spawn(async move {
+        while changes.next().await.is_some() {
+            // The settings in effect, not those of the change: two changes on two
+            // threads may arrive in either order. The host ignores what it has.
+            if let Some(host) = &*lock(&MCP) {
+                host.want(&mcp_settings());
+            }
+        }
+    });
 }
 
 // --- The main window's mailbox, asked from outside it --------------------------------
@@ -272,7 +329,7 @@ pub fn run(
     file: Option<SettingsFile>,
 ) -> u8 {
     let file = FILE.get_or_init(|| file.map(Arc::new));
-    *lock(&SETTINGS) = Some(file.as_ref().map(|file| file.load()).unwrap_or_default());
+    SETTINGS.set(file.as_ref().map(|file| file.load()).unwrap_or_default());
     let themes_dir = file.as_ref().map(|file| file.themes_dir());
     *lock(&THEMES) = Themes::load(themes_dir.as_deref());
     let code = toolkit::run(move || {
@@ -281,6 +338,11 @@ pub fn run(
     });
     let reason = QUITTING.get().unwrap_or(QuitReason::Platform);
     tracing::info!(%reason, "quitting");
+    // Before the engine, for the requests being answered to end with an answer.
+    let host = lock(&MCP).take();
+    if let Some(host) = host {
+        host.shut_down();
+    }
     if let Some(client) = engine::take() {
         client.shut_down();
         // The loop is over: nothing else runs on this thread meanwhile.
@@ -295,8 +357,9 @@ fn started(builder: MailClientBuilder, requests: Option<Requests>) {
     // On the main thread's loop: the client does the work on the engine's own runtime.
     toolkit::spawn(async move {
         engine::opened_with(builder.open_async().await);
-        if engine::open().is_some() {
+        if let Some(client) = engine::open() {
             toolkit::engine_opened();
+            serve_agents(client);
         } else if toolkit::windows().is_empty() {
             // The window was closed while it opened: there is nothing to run on.
             exit(QuitReason::EngineFailed);

@@ -51,7 +51,10 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
     use catmail_frontend::instance::{self, Claim, Display, Request};
     use catmail_frontend::settings::SettingsFile;
 
-    catmail_core::logging::init("catmail_gui=info,catmail_frontend=info");
+    catmail_core::logging::init(&format!(
+        "catmail_gui=info,catmail_frontend=info,{}",
+        catmail_frontend::mcp::LOG_FILTER
+    ));
     let config = match std::env::var_os("CATMAIL_DATA_DIR") {
         Some(dir) => Config::with_data_dir(dir),
         None => Config::platform_default()?,

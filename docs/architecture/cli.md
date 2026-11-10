@@ -59,12 +59,12 @@ types 加变体会编译失败）。
 ## `serve` 与 MCP 令牌
 
 `catmail serve` 像 GUI 一样常驻：引擎用 `MailClientBuilder::resident()`（后台同步、预取正文、后台发信、GC，
-比 `watch` 多了发信），同时在 `127.0.0.1` 上提供 MCP（`--port`，默认 8642；`--host` 是隧道转来时的名字），
+比 `watch` 多了发信），同时在 `127.0.0.1` 上提供 MCP（`--port`，默认 8642），
 直到 Ctrl-C 或 SIGTERM（systemd、launchd 停服务时发的），停下时等进行中的请求答完。设计见 [MCP](mcp.md)。
 
 `catmail mcp token add <名字> / list / rm <名字>` 管 agent 用的令牌。令牌在配置目录的文件里，不在数据库里，
 所以这几个命令不打开引擎，`serve`（或 GUI）运行时照样能用，删掉的令牌立即失效。`add` 把令牌打到 stdout，
-只这一次；`--json` 是 `{"token": {name, created_at, secret}}`，`list` 是 `{"tokens": [...]}`，不带 `secret`。
+只这一次，再往 stderr 打出把服务加进 Claude Code、Codex 的命令（令牌已填好，地址是默认端口）；`--json` 是 `{"token": {name, created_at, secret}}`，`list` 是 `{"tokens": [...]}`，不带 `secret`。
 
 配置目录是 `--config-dir`（`CATMAIL_CONFIG_DIR`），缺省与 GUI 相同。
 

@@ -1,10 +1,11 @@
 //! catmail over the Model Context Protocol: the tools AI agents call, the tokens they
 //! present, and the Streamable HTTP server on a local address that runs them. Hosted by
-//! whichever process holds the engine (`catmail serve`, later the app): this crate only
+//! whichever process holds the engine (`catmail serve`, the app): this crate only
 //! needs a [`MailClient`](catmail_core::MailClient). See `docs/architecture/mcp.md`.
 
 #![forbid(unsafe_code)]
 
+pub mod connect;
 mod http;
 mod output;
 #[cfg(test)]

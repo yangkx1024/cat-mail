@@ -1,5 +1,5 @@
 //! The window's preferences: running in the background, appearance, themes, text size,
-//! reading. They belong to the frontends, not to the engine, so they live in
+//! reading, serving AI agents. They belong to the frontends, not to the engine, so they live in
 //! `settings.json` in the config directory instead of the database, next to the imported
 //! themes. Every frontend reads and writes the same file.
 
@@ -61,6 +61,27 @@ pub struct Settings {
     /// New mail in an INBOX shows a system notification while the main window isn't in
     /// front.
     pub notify_new_mail: bool,
+    /// The MCP server for AI agents, while the app runs.
+    pub mcp: McpSettings,
+}
+
+/// The MCP server the app hosts ([`crate::mcp`]); `catmail serve` takes the same as its
+/// options instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpSettings {
+    pub enabled: bool,
+    /// On 127.0.0.1.
+    pub port: u16,
+}
+
+impl Default for McpSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: catmail_mcp::DEFAULT_PORT,
+        }
+    }
 }
 
 impl Default for Settings {
@@ -73,6 +94,7 @@ impl Default for Settings {
             mark_read_on_open: true,
             keep_running: true,
             notify_new_mail: true,
+            mcp: McpSettings::default(),
         }
     }
 }
@@ -122,6 +144,12 @@ impl SettingsFile {
             pending: Mutex::default(),
             writing: Mutex::default(),
         }
+    }
+
+    /// The config directory the file is in, with the other files frontends keep there
+    /// (the MCP tokens).
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 
     /// Where imported themes are kept.
@@ -218,6 +246,10 @@ mod tests {
             dark_theme: "Nord".into(),
             text_size: 18.,
             mark_read_on_open: false,
+            mcp: McpSettings {
+                enabled: true,
+                port: 9000,
+            },
             ..Settings::default()
         };
         file.save(&settings).unwrap();
@@ -237,6 +269,11 @@ mod tests {
         assert_eq!(loaded.appearance, Appearance::Light);
         assert!(loaded.mark_read_on_open);
         assert!(loaded.keep_running);
+        assert_eq!(loaded.mcp, McpSettings::default());
+        std::fs::write(file.path(), r#"{"mcp":{"enabled":true}}"#).unwrap();
+        let loaded = file.load().mcp;
+        assert!(loaded.enabled);
+        assert_eq!(loaded.port, catmail_mcp::DEFAULT_PORT);
     }
 
     #[test]

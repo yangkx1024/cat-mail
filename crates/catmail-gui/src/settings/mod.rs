@@ -1,12 +1,13 @@
 //! The Settings dialog: appearance (light or dark, the theme for each, importing a terminal
-//! color scheme, text size), accounts and the addresses they send as, and reading (with the
-//! cache of remote images). The settings are `shell`'s, shared by every window; the themes
-//! and their import are `catmail_frontend::theme`'s, the wording of Accounts
-//! `catmail_frontend::accounts`'.
+//! color scheme, text size), accounts and the addresses they send as, reading (with the
+//! cache of remote images), and agents (the MCP server, its tokens). The settings are
+//! `shell`'s, shared by every window; the themes and their import are
+//! `catmail_frontend::theme`'s, the wording of Accounts `catmail_frontend::accounts`'.
 //!
 //! General (running in the background, new mail notifications) comes with them (P9).
 
 mod accounts;
+mod agents;
 mod appearance;
 mod reading;
 
@@ -33,8 +34,9 @@ pub struct Prefs(pub Settings);
 /// Follows the settings in this view: its appearance, and what shows them. For every
 /// window's root.
 pub fn follow() {
-    global::<Prefs>().set(Prefs(shell::settings()));
-    let mut changes = shell::follow_settings();
+    // Read and followed at once: a change from another window meanwhile isn't missed.
+    let (now, mut changes) = shell::follow_settings();
+    global::<Prefs>().set(Prefs(now));
     spawn(async move {
         while let Some(settings) = changes.next().await {
             set_color_scheme(shell::appearance(&settings));
@@ -85,14 +87,16 @@ enum Section {
     Appearance,
     Accounts,
     Reading,
+    Agents,
 }
 
 impl Section {
-    const ALL: [(Section, &'static str, Icon); 4] = [
+    const ALL: [(Section, &'static str, Icon); 5] = [
         (Section::General, "General", Icon::Cog6Tooth),
         (Section::Appearance, "Appearance", Icon::Swatch),
         (Section::Accounts, "Accounts", Icon::UserCircle),
         (Section::Reading, "Reading", Icon::EnvelopeOpen),
+        (Section::Agents, "Agents", Icon::Sparkles),
     ];
 }
 
@@ -102,12 +106,13 @@ pub fn dialog() -> impl IntoElement {
 }
 
 fn settings_dialog() -> impl IntoElement {
-    // `CATMAIL_GUI_SETTINGS=appearance` (or `accounts`, `reading`) shows that section
+    // `CATMAIL_GUI_SETTINGS=appearance` (or `accounts`, `reading`, `agents`) shows that section
     // first, for looking at it without a mouse (screenshots).
     let first = match std::env::var("CATMAIL_GUI_SETTINGS").as_deref() {
         Ok("appearance") => Section::Appearance,
         Ok("accounts") => Section::Accounts,
         Ok("reading") => Section::Reading,
+        Ok("agents") => Section::Agents,
         _ => Section::General,
     };
     let section = signal(first);
@@ -131,6 +136,7 @@ fn settings_dialog() -> impl IntoElement {
         Section::Appearance => appearance::appearance().into_element(),
         Section::Accounts => accounts_section().into_element(),
         Section::Reading => reading::reading().into_element(),
+        Section::Agents => agents::agents().into_element(),
     });
     modal(
         800.0,
