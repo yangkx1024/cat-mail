@@ -4,7 +4,9 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use catmail_core::{Config, MailClient, MemorySecrets, NewAccount, Security, ServerConfig, Verify};
+use catmail_core::{
+    Config, Flags, MailClient, MemorySecrets, MessageId, NewAccount, Security, ServerConfig, Verify,
+};
 use catmail_testkit::{FakeImap, FakeMailbox, ServerState};
 use http::{Request, StatusCode, header};
 use http_body_util::{BodyExt, Full};
@@ -21,6 +23,7 @@ const TOOLS_SNAPSHOT: &str = include_str!("tools.snapshot.json");
 struct Fixture {
     fake: FakeImap,
     _dir: tempfile::TempDir,
+    client: MailClient,
     tokens: Tokens,
     secret: String,
     server: McpServer,
@@ -78,6 +81,7 @@ impl Fixture {
         Self {
             fake,
             _dir: dir,
+            client,
             tokens,
             secret,
             server,
@@ -376,6 +380,52 @@ async fn sync_reports_what_changed() {
 
     let unknown = f.call_result("sync", json!({"account": 7})).await;
     assert_eq!(unknown["isError"], true);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_reports_a_change_the_server_refused() {
+    let f = Fixture::new(ServeOptions::default()).await;
+    let first = f.call("list_messages", json!({"limit": 1})).await;
+    let id = first["messages"][0]["id"].as_i64().unwrap();
+    // Queued here; no background sync to make it before the agent's sync.
+    f.client
+        .set_flags(vec![MessageId(id)], Flags::FLAGGED, Flags::empty())
+        .await
+        .unwrap();
+    f.fake.state().faults.refuse_changes = Some("[CANNOT] Permission denied".into());
+
+    let synced = f.call("sync", json!({"account": 1})).await;
+    let inbox = &synced["accounts"][0]["folders"][0];
+    assert_eq!(inbox["name"], "INBOX", "{synced}");
+    assert_eq!(inbox["changes_refused"], 1);
+    assert_eq!(inbox["changes_applied"], 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_lets_the_requests_being_answered_finish() {
+    let f = Fixture::new(ServeOptions::default()).await;
+    let first = f.call("list_messages", json!({"limit": 1})).await;
+    let id = first["messages"][0]["id"].clone();
+    let gate = f.fake.state().hold_body_fetches();
+    let (addr, auth) = (f.server.local_addr(), f.auth());
+    let read = tokio::spawn(async move {
+        let call = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "read_message", "arguments": {"id": id}},
+        });
+        send(addr, "/mcp", &[("authorization", &auth)], call).await
+    });
+    f.fake.wait_until(|s| s.body_fetches() > 0).await;
+
+    let stopping = tokio::spawn(f.server.stop());
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(!stopping.is_finished(), "stopped with a download under way");
+    gate.add_permits(1);
+    let (status, body) = read.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let reply: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(reply["result"]["isError"], false, "{body}");
+    stopping.await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

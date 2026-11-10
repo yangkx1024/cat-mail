@@ -393,19 +393,28 @@ pub(crate) struct FolderSynced {
     pub updated: u32,
     /// Messages gone from the server.
     pub removed: u32,
+    /// Changes made here that reached the server first.
+    pub changes_applied: u32,
+    /// Changes made here that the server refused: they were undone here.
+    pub changes_refused: u32,
     pub error: Option<ErrorOut>,
 }
 
 impl FolderSynced {
-    /// `None` if nothing changed in the folder.
+    /// `None` if nothing changed in the folder, here or on the server.
     pub fn new(f: &FolderSyncReport) -> Option<Self> {
-        let changed = f.added > 0 || f.updated > 0 || f.removed > 0 || f.error.is_some();
+        let changed = [f.added, f.updated, f.removed, f.ops_applied, f.ops_failed]
+            .iter()
+            .any(|&n| n > 0)
+            || f.error.is_some();
         changed.then(|| Self {
             folder: f.folder.0,
             name: f.name.clone(),
             added: f.added,
             updated: f.updated,
             removed: f.removed,
+            changes_applied: f.ops_applied,
+            changes_refused: f.ops_failed,
             error: f.error.as_ref().map(Into::into),
         })
     }

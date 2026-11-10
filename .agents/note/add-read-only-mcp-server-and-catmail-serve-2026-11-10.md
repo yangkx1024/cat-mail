@@ -34,6 +34,6 @@
 - CLI：`catmail serve`（`--port`、`--host`，Ctrl-C 或 SIGTERM 停下）、`catmail mcp token add / list / rm`、全局
   `--config-dir`（`CATMAIL_CONFIG_DIR`）；日志过滤加上 `catmail_mcp`。GUI 的 `main.rs` 改用 `resident()`。
 - 文档：新增 `docs/architecture/mcp.md`；`architecture.md`、`cli.md`、`storage.md`、README、AGENTS.md 相应更新。
-- 验证：`catmail-mcp` 13 个测试，包括对假 IMAP 服务器的端到端 HTTP 测试（令牌、吊销、Host 与 Origin、工具列表
-  快照、分页、搜索、读信后服务器上仍未读、同步报告、停止后不再监听）；CLI 加令牌命令与 JSON 快照测试。手动
+- 验证：`catmail-mcp` 15 个测试，包括对假 IMAP 服务器的端到端 HTTP 测试（令牌、吊销、Host 与 Origin、工具列表
+  快照、分页、搜索、读信后服务器上仍未读、同步报告（含服务器拒绝的改动）、停止时等下载答完、停止后不再监听）；CLI 加令牌命令与 JSON 快照测试。手动
   用 curl 对 `catmail serve` 走了一遍：无令牌 401、initialize、调用工具、运行中删令牌立即 401、SIGTERM 正常退出。

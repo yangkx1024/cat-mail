@@ -1161,6 +1161,18 @@
               "minimum": 0,
               "type": "integer"
             },
+            "changes_applied": {
+              "description": "Changes made here that reached the server first.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "changes_refused": {
+              "description": "Changes made here that the server refused: they were undone here.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
             "error": {
               "anyOf": [
                 {
@@ -1197,6 +1209,8 @@
             "added",
             "updated",
             "removed",
+            "changes_applied",
+            "changes_refused",
             "error"
           ],
           "type": "object"

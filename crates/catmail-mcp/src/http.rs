@@ -31,6 +31,9 @@ pub const DEFAULT_PORT: u16 = 8642;
 const PATH: &str = "/mcp";
 /// Enough for any tool's arguments; rmcp answers 413 above it.
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+/// How long stopping waits for the requests being answered (a sync, a download) before
+/// it cuts them off.
+const DRAIN: Duration = Duration::from_secs(30);
 
 type Service = StreamableHttpService<Mail, NeverSessionManager>;
 type Body = BoxBody<Bytes, Infallible>;
@@ -73,6 +76,7 @@ impl McpServer {
         let listener = TcpListener::bind(options.addr).await?;
         let addr = listener.local_addr()?;
         let stop = CancellationToken::new();
+        let handlers = CancellationToken::new();
         let hosts = ["localhost", "127.0.0.1", "::1"]
             .into_iter()
             .map(String::from)
@@ -86,7 +90,9 @@ impl McpServer {
             .with_legacy_session_mode(false)
             .with_json_response(true)
             .with_max_request_body_bytes(MAX_REQUEST_BYTES)
-            .with_cancellation_token(stop.child_token());
+            // Not `stop`'s child: rmcp gives up on a response the moment its token is
+            // cancelled, so it is cancelled only once the requests had their chance to end.
+            .with_cancellation_token(handlers.clone());
         // rmcp makes a handler for every request; they share one client and router.
         let mail = Mail::new(client);
         let service: Arc<Service> = Arc::new(StreamableHttpService::new(
@@ -94,7 +100,7 @@ impl McpServer {
             Arc::default(),
             config,
         ));
-        let task = tokio::spawn(accept(listener, service, tokens, stop.clone()));
+        let task = tokio::spawn(accept(listener, service, tokens, stop.clone(), handlers));
         tracing::info!(%addr, "MCP server listening");
         Ok(Self {
             addr,
@@ -119,6 +125,7 @@ async fn accept(
     service: Arc<Service>,
     tokens: Tokens,
     stop: CancellationToken,
+    handlers: CancellationToken,
 ) {
     let mut connections = tokio::task::JoinSet::new();
     loop {
@@ -160,6 +167,12 @@ async fn accept(
         while connections.try_join_next().is_some() {}
     }
     drop(listener);
+    // Each connection answers what it is answering, then closes.
+    let drained = async { while connections.join_next().await.is_some() {} };
+    if tokio::time::timeout(DRAIN, drained).await.is_err() {
+        tracing::warn!("MCP requests still running after {DRAIN:?}; cutting them off");
+    }
+    handlers.cancel();
     while connections.join_next().await.is_some() {}
     tracing::info!("MCP server stopped");
 }
