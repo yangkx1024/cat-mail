@@ -182,6 +182,7 @@ impl Change {
                 client.label_messages(ids, add, remove).await
             }
         }
+        .map(|change| change.accounts)
     }
 }
 

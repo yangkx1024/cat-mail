@@ -787,3 +787,16 @@ async fn a_stopped_server_listens_no_more() {
     f.server.stop().await;
     assert!(tokio::net::TcpStream::connect(addr).await.is_err());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_that_turns_into_a_conflict_is_reported() {
+    let f = Fixture::new(ServeOptions::default()).await;
+    let id = f.ids(None).await[0];
+    // INBOX is rebuilt on the server: the move's UID is of a generation gone, so the
+    // replay turns it into a conflict and drops the row it moved here.
+    f.fake.state().inbox().reset_uidvalidity(2);
+    let changed = f.call("archive", json!({"messages": [id]})).await;
+    let conflict = &changed["not_on_server"][0];
+    assert_eq!(conflict["status"], "conflict", "{changed}");
+    assert_eq!(conflict["change"]["kind"], "move", "{changed}");
+}

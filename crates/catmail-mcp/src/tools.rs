@@ -3,14 +3,14 @@
 //! organize tier, marking, moving, archiving, labelling and moving to Trash. Each call
 //! is limited to what its token allows ([`Scope`]).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 use catmail_core::{
-    Account, AccountId, DeleteMode, Flags, Folder, FolderId, MailClient, MessageCursor, MessageId,
-    MessageSummary, SearchQuery,
+    Account, AccountId, ChangeReport, DeleteMode, Flags, Folder, FolderId, MailClient,
+    MessageCursor, MessageId, MessageSummary, SearchQuery,
 };
 use futures_util::future::join_all;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -358,12 +358,12 @@ impl Mail {
         make: impl FnOnce(Vec<MessageId>) -> F,
     ) -> Result<Json<Changed>, Failed>
     where
-        F: Future<Output = catmail_core::Result<Vec<AccountId>>>,
+        F: Future<Output = catmail_core::Result<ChangeReport>>,
     {
         let messages = self.messages(messages).await?;
-        let accounts = make(messages.iter().map(|m| m.id).collect()).await?;
+        let change = make(messages.iter().map(|m| m.id).collect()).await?;
         // The engine replays it on its own too; this is to answer with the outcome.
-        let replays = join_all(accounts.iter().map(|&account| async move {
+        let replays = join_all(change.accounts.iter().map(|&account| async move {
             let replay = tokio::time::timeout(REPLAY_WAIT, self.client.replay_pending(account));
             (account, replay.await)
         }))
@@ -381,13 +381,13 @@ impl Mail {
                 error,
             }));
         }
-        let ids: HashSet<MessageId> = messages.iter().map(|m| m.id).collect();
         let pending = self.client.list_pending(None).await?;
         Ok(Json(Changed {
             messages: messages.len(),
             not_on_server: pending
                 .iter()
-                .filter(|op| op.message_id.is_some_and(|id| ids.contains(&id)))
+                // By op: a move turned into a conflict has lost its message's row.
+                .filter(|op| change.ops.contains(&op.id))
                 .map(PendingOut::from)
                 .collect(),
             errors,

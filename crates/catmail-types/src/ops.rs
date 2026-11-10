@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 
@@ -24,6 +25,17 @@ pub enum OpKind {
         label: FolderId,
         add: bool,
     },
+}
+
+/// What a change to messages did: the accounts whose messages changed, and the ops it
+/// queued for their servers (or sent elsewhere: a move still on its way). Of those, the
+/// ones `MailClient::list_pending` still has are on their way, refused or in conflict;
+/// the others were made. By op rather than by message, as a message's row can go (a move
+/// that turned into a conflict leaves where the server has it to the next sync).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChangeReport {
+    pub accounts: Vec<AccountId>,
+    pub ops: BTreeSet<PendingOpId>,
 }
 
 /// Where a queued change is. Applied changes are gone.

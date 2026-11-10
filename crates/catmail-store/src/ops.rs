@@ -22,7 +22,8 @@ use crate::folders::Folders;
 use crate::messages::shown;
 use crate::{Error, Result};
 
-/// What a change did, for change events.
+/// What a change did, for change events; for a change to messages, also the ops it
+/// queued, for its caller to follow.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Touched {
     /// Folders it changed messages in: where they are, where they went, and the labels
@@ -33,6 +34,10 @@ pub struct Touched {
     pub shown: BTreeSet<(AccountId, FolderId)>,
     /// Accounts some of whose queued changes it made fail or turned into conflicts.
     pub refused: BTreeSet<AccountId>,
+    /// The ops a change to messages queued or redirected (a move still on its way):
+    /// what became of them is in the queue, even once their message's row is gone.
+    /// No event's: their folders are in `folders`.
+    pub ops: BTreeSet<PendingOpId>,
 }
 
 impl Touched {
@@ -40,6 +45,7 @@ impl Touched {
         Self::default()
     }
 
+    /// Nothing to announce.
     pub fn is_empty(&self) -> bool {
         self.folders.is_empty() && self.shown.is_empty() && self.refused.is_empty()
     }
@@ -49,11 +55,23 @@ impl Touched {
         self.folders.extend(other.folders);
         self.shown.extend(other.shown);
         self.refused.extend(other.refused);
+        self.ops.extend(other.ops);
     }
 
     /// Every folder whose list of messages it changed, once.
     pub fn lists(&self) -> impl Iterator<Item = (AccountId, FolderId)> + '_ {
         self.folders.union(&self.shown).copied()
+    }
+}
+
+#[cfg(test)]
+impl Touched {
+    /// The rest, for comparing with what a test expects of the events.
+    pub(crate) fn without_ops(self) -> Self {
+        Self {
+            ops: BTreeSet::new(),
+            ..self
+        }
     }
 }
 
@@ -232,7 +250,9 @@ impl<'c> PendingOps<'c> {
                 .execute(params![id.0, m.flags.apply(add, remove).bits()])?;
             // A message moved here locally is still where its move says, and the flag
             // change goes there; it is replayed before the move.
-            self.queue(&m, OpKind::Flags { add, remove }, now)?;
+            touched
+                .ops
+                .insert(self.queue(&m, OpKind::Flags { add, remove }, now)?);
             touched.folders.insert((m.account, m.folder));
         }
         Ok(touched)
@@ -393,7 +413,9 @@ impl<'c> PendingOps<'c> {
         touched
             .folders
             .extend([(m.account, label), (m.account, m.folder)]);
-        self.queue(m, OpKind::Label { label, add }, now)?;
+        touched
+            .ops
+            .insert(self.queue(m, OpKind::Label { label, add }, now)?);
         Ok(true)
     }
 
@@ -459,7 +481,7 @@ impl<'c> PendingOps<'c> {
                     DeleteOutcome::NoTrash | DeleteOutcome::Permanent => {}
                 }
             }
-            match m.moving {
+            let op = match m.moving {
                 // Never made it to the target: delete it where the server still has it.
                 // What waited for the move was meant for where it was going, and goes: on
                 // Gmail, `+\Inbox` in Trash would take it out of Trash before the delete.
@@ -473,9 +495,11 @@ impl<'c> PendingOps<'c> {
                     self.conn
                         .prepare_cached("DELETE FROM pending_ops WHERE after_op = ?1")?
                         .execute([op.0])?;
+                    op
                 }
                 None => self.queue(&m, OpKind::Delete, now)?,
-            }
+            };
+            touched.ops.insert(op);
             self.touch_shown(id, false, &mut touched)?;
             self.conn
                 .prepare_cached("DELETE FROM messages WHERE id = ?1")?
@@ -555,16 +579,18 @@ impl<'c> PendingOps<'c> {
         // Its labels and Starred show it no more, or again, as it leaves or enters All
         // Mail; they are the same either side of the move.
         self.touch_shown(m.id, false, touched)?;
-        match m.moving {
+        let op = match m.moving {
             // Still on its way: send it to the new place instead. Back to where the server
             // has it, the op stays, and is resolved locally at replay; it may be in flight.
             Some(op) => {
                 self.conn
                     .prepare_cached("UPDATE pending_ops SET target_folder_id = ?2 WHERE id = ?1")?
                     .execute(params![op.0, to.0])?;
+                op
             }
             None => self.queue(m, OpKind::Move { to }, now)?,
-        }
+        };
+        touched.ops.insert(op);
         // MODSEQ is per mailbox.
         self.conn
             .prepare_cached(
@@ -575,7 +601,7 @@ impl<'c> PendingOps<'c> {
     }
 
     /// Queues `kind` for the message, where the server has it.
-    fn queue(&self, m: &Local, kind: OpKind, now: i64) -> Result<()> {
+    fn queue(&self, m: &Local, kind: OpKind, now: i64) -> Result<PendingOpId> {
         // Every row has a UID or a pending move; the repository keeps it so.
         let server = m.server.ok_or_else(|| {
             Error::Conflict(format!(
@@ -602,7 +628,7 @@ impl<'c> PendingOps<'c> {
         message: Option<MessageId>,
         after: Option<PendingOpId>,
         now: i64,
-    ) -> Result<()> {
+    ) -> Result<PendingOpId> {
         let none = Flags::empty();
         let (name, add, remove, target, label_add) = match kind {
             OpKind::Flags { add, remove } => ("flags", add, remove, None, None),
@@ -631,7 +657,7 @@ impl<'c> PendingOps<'c> {
                 after.map(|op| op.0),
                 now
             ])?;
-        Ok(())
+        Ok(PendingOpId(self.conn.last_insert_rowid()))
     }
 
     /// Records in `touched` the folders that show the message besides its location
@@ -1534,7 +1560,7 @@ mod tests {
 
         assert!(delete(2).is_empty(), "moved by the user meanwhile");
         // A row of that generation goes with it; a UID never synced is queued all the same.
-        assert_eq!(delete(3), Touched::from([(account, inbox)]));
+        assert_eq!(delete(3).without_ops(), Touched::from([(account, inbox)]));
         assert_eq!(f.row(f.message(inbox, 1)).map(|r| r.1), Some(Some(1)));
         assert_eq!(delete(9), Touched::from([(account, inbox)]));
         assert_eq!(f.counts(inbox), (1, 0));
@@ -1574,7 +1600,7 @@ mod tests {
             db.ops()
                 .set_flags(&[m1, m2], Flags::SEEN | Flags::FLAGGED, Flags::empty(), 0)
         });
-        assert_eq!(touched, Touched::from([(f.account, f.inbox)]));
+        assert_eq!(touched.without_ops(), Touched::from([(f.account, f.inbox)]));
         assert_eq!(f.row(m2).unwrap().2, Flags::SEEN | Flags::FLAGGED);
         assert_eq!(f.counts(f.inbox), (3, 1));
         let kinds: Vec<OpKind> = f
@@ -1716,7 +1742,7 @@ mod tests {
         let m2 = f.message(f.inbox, 2);
         let touched = f.write(|db| db.ops().move_messages(&[m2], None, f.archive, 0));
         assert_eq!(
-            touched,
+            touched.without_ops(),
             Touched::from([(f.account, f.inbox), (f.account, f.archive)])
         );
         assert_eq!(f.row(m2), Some((f.archive, None, Flags::empty())));
@@ -1969,6 +1995,37 @@ mod tests {
             Err(Error::Invalid(_))
         ));
         assert!(f.row(m1).is_some());
+    }
+
+    #[test]
+    fn a_change_tells_its_ops_even_once_their_row_is_gone() {
+        let f = setup();
+        let (m1, m2) = (f.message(f.inbox, 1), f.message(f.inbox, 2));
+        let queued = |f: &Fixture| f.ops().iter().map(|op| op.id).collect::<BTreeSet<_>>();
+
+        let flagged = f
+            .write(|db| db.ops().set_flags(&[m1], Flags::FLAGGED, Flags::empty(), 0))
+            .ops;
+        let moved = f
+            .write(|db| db.ops().move_messages(&[m2], None, f.archive, 0))
+            .ops;
+        assert_eq!(&flagged | &moved, queued(&f));
+        // Still on its way: sent elsewhere (back, then to Trash) by the same op.
+        let redirected = f.write(|db| db.ops().move_messages(&[m2], None, f.inbox, 0));
+        assert_eq!(redirected.ops, moved);
+        let trashed = f.write(|db| db.ops().delete_messages(&[m2], DeleteMode::OnlyToTrash, 0));
+        assert_eq!(trashed.ops, moved);
+
+        // INBOX rebuilt on the server: the move's row goes, its op stays, as a conflict.
+        f.write(|db| db.folders().reset_uidvalidity(f.inbox, 2));
+        assert_eq!(f.row(m2), None);
+        let conflict = f
+            .ops()
+            .into_iter()
+            .find(|op| moved.contains(&op.id))
+            .unwrap();
+        assert_eq!(conflict.message_id, None);
+        assert_eq!(conflict.status, OpStatus::Conflict);
     }
 
     #[test]

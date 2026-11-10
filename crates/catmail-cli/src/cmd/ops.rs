@@ -105,7 +105,8 @@ pub(crate) async fn mark(client: &MailClient, args: Mark, json: bool) -> Result<
     }
     let accounts = client
         .set_flags(message_ids(&args.ids), add, remove)
-        .await?;
+        .await?
+        .accounts;
     replay(client, accounts, json).await
 }
 
@@ -153,7 +154,10 @@ pub(crate) async fn label(client: &MailClient, args: Label, json: bool) -> Resul
 }
 
 pub(crate) async fn archive(client: &MailClient, args: Archive, json: bool) -> Result<()> {
-    let accounts = client.archive_messages(message_ids(&args.ids)).await?;
+    let accounts = client
+        .archive_messages(message_ids(&args.ids))
+        .await?
+        .accounts;
     replay(client, accounts, json).await
 }
 
@@ -163,7 +167,10 @@ pub(crate) async fn remove(client: &MailClient, args: Remove, json: bool) -> Res
     } else {
         DeleteMode::ToTrash
     };
-    let accounts = client.delete_messages(message_ids(&args.ids), mode).await?;
+    let accounts = client
+        .delete_messages(message_ids(&args.ids), mode)
+        .await?
+        .accounts;
     replay(client, accounts, json).await
 }
 

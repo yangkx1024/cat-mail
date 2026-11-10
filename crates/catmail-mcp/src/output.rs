@@ -373,9 +373,10 @@ impl From<&PendingOp> for PendingOut {
 pub(crate) struct Changed {
     /// How many messages it changed.
     pub messages: usize,
-    /// Changes to these messages that the server doesn't have yet (they are made at
-    /// the next sync), or refused (they were undone here). Empty once all of it is on
-    /// the server.
+    /// What of the change the server doesn't have yet (made at the next sync), refused
+    /// (undone here), or couldn't take as asked (`conflict`: the folder changed on the
+    /// server first; the next sync shows the messages where they are). Empty once all of
+    /// it is on the server.
     pub not_on_server: Vec<PendingOut>,
     /// Accounts whose server couldn't take it now.
     pub errors: Vec<AccountError>,

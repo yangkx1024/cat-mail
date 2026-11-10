@@ -213,7 +213,7 @@
           "type": "integer"
         },
         "not_on_server": {
-          "description": "Changes to these messages that the server doesn't have yet (they are made at\nthe next sync), or refused (they were undone here). Empty once all of it is on\nthe server.",
+          "description": "What of the change the server doesn't have yet (made at the next sync), refused\n(undone here), or couldn't take as asked (`conflict`: the folder changed on the\nserver first; the next sync shows the messages where they are). Empty once all of\nit is on the server.",
           "items": {
             "$ref": "#/$defs/PendingOut"
           },
@@ -460,7 +460,7 @@
           "type": "integer"
         },
         "not_on_server": {
-          "description": "Changes to these messages that the server doesn't have yet (they are made at\nthe next sync), or refused (they were undone here). Empty once all of it is on\nthe server.",
+          "description": "What of the change the server doesn't have yet (made at the next sync), refused\n(undone here), or couldn't take as asked (`conflict`: the folder changed on the\nserver first; the next sync shows the messages where they are). Empty once all of\nit is on the server.",
           "items": {
             "$ref": "#/$defs/PendingOut"
           },
@@ -1410,7 +1410,7 @@
           "type": "integer"
         },
         "not_on_server": {
-          "description": "Changes to these messages that the server doesn't have yet (they are made at\nthe next sync), or refused (they were undone here). Empty once all of it is on\nthe server.",
+          "description": "What of the change the server doesn't have yet (made at the next sync), refused\n(undone here), or couldn't take as asked (`conflict`: the folder changed on the\nserver first; the next sync shows the messages where they are). Empty once all of\nit is on the server.",
           "items": {
             "$ref": "#/$defs/PendingOut"
           },
@@ -1653,7 +1653,7 @@
           "type": "integer"
         },
         "not_on_server": {
-          "description": "Changes to these messages that the server doesn't have yet (they are made at\nthe next sync), or refused (they were undone here). Empty once all of it is on\nthe server.",
+          "description": "What of the change the server doesn't have yet (made at the next sync), refused\n(undone here), or couldn't take as asked (`conflict`: the folder changed on the\nserver first; the next sync shows the messages where they are). Empty once all of\nit is on the server.",
           "items": {
             "$ref": "#/$defs/PendingOut"
           },
@@ -2407,7 +2407,7 @@
           "type": "integer"
         },
         "not_on_server": {
-          "description": "Changes to these messages that the server doesn't have yet (they are made at\nthe next sync), or refused (they were undone here). Empty once all of it is on\nthe server.",
+          "description": "What of the change the server doesn't have yet (made at the next sync), refused\n(undone here), or couldn't take as asked (`conflict`: the folder changed on the\nserver first; the next sync shows the messages where they are). Empty once all of\nit is on the server.",
           "items": {
             "$ref": "#/$defs/PendingOut"
           },

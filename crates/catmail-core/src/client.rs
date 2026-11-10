@@ -8,11 +8,12 @@ use catmail_proto::imap::Session;
 use catmail_proto::{Credentials, TlsConfig};
 use catmail_store::{BlobStore, Db, Identities, Store};
 use catmail_types::{
-    Account, AccountId, AccountOverview, AccountStatus, AttachmentId, DeleteMode, Draft,
-    DraftAttachment, DraftAttachmentId, DraftContent, DraftId, Event, Flags, FlushReport, Folder,
-    FolderId, FolderRole, FolderSyncReport, Forwarding, GcReport, Identity, IdentityId, Message,
-    MessageCursor, MessageId, MessageSummary, NewAccount, NewIdentity, OutboxEntry, OutboxId,
-    PendingOp, PendingOpId, ReplayReport, SearchQuery, ServerConfig, SyncReport, special_folder,
+    Account, AccountId, AccountOverview, AccountStatus, AttachmentId, ChangeReport, DeleteMode,
+    Draft, DraftAttachment, DraftAttachmentId, DraftContent, DraftId, Event, Flags, FlushReport,
+    Folder, FolderId, FolderRole, FolderSyncReport, Forwarding, GcReport, Identity, IdentityId,
+    Message, MessageCursor, MessageId, MessageSummary, NewAccount, NewIdentity, OutboxEntry,
+    OutboxId, PendingOp, PendingOpId, ReplayReport, SearchQuery, ServerConfig, SyncReport,
+    special_folder,
 };
 use secrecy::{ExposeSecret, SecretString};
 use tokio::runtime::Handle;
@@ -1096,13 +1097,14 @@ impl MailClient {
     /// sync or [`replay_pending`](Self::replay_pending), or right away with
     /// [`sync_in_background`](MailClientBuilder::sync_in_background); one the server
     /// refuses is undone. Fails, changing nothing, if a message doesn't exist. Returns
-    /// the accounts whose messages changed.
+    /// the accounts whose messages changed, and the ops queued for their servers
+    /// ([`ChangeReport`]); so do the other changes to messages below.
     pub async fn set_flags(
         &self,
         messages: Vec<MessageId>,
         add: Flags,
         remove: Flags,
-    ) -> Result<Vec<AccountId>> {
+    ) -> Result<ChangeReport> {
         self.shared
             .rt
             .run(ops::set_flags(self.engine()?, messages, add, remove))
@@ -1122,7 +1124,7 @@ impl MailClient {
         messages: Vec<MessageId>,
         shown_in: Option<FolderId>,
         to: FolderId,
-    ) -> Result<Vec<AccountId>> {
+    ) -> Result<ChangeReport> {
         self.shared
             .rt
             .run(ops::move_messages(self.engine()?, messages, shown_in, to))
@@ -1136,7 +1138,7 @@ impl MailClient {
     /// [`set_flags`](Self::set_flags).
     ///
     /// [`MovePlan::archive`]: catmail_types::MovePlan::archive
-    pub async fn archive_messages(&self, messages: Vec<MessageId>) -> Result<Vec<AccountId>> {
+    pub async fn archive_messages(&self, messages: Vec<MessageId>) -> Result<ChangeReport> {
         self.shared
             .rt
             .run(ops::archive_messages(self.engine()?, messages))
@@ -1152,7 +1154,7 @@ impl MailClient {
         messages: Vec<MessageId>,
         add: Vec<FolderId>,
         remove: Vec<FolderId>,
-    ) -> Result<Vec<AccountId>> {
+    ) -> Result<ChangeReport> {
         self.shared
             .rt
             .run(ops::label_messages(self.engine()?, messages, add, remove))
@@ -1169,7 +1171,7 @@ impl MailClient {
         &self,
         messages: Vec<MessageId>,
         mode: DeleteMode,
-    ) -> Result<Vec<AccountId>> {
+    ) -> Result<ChangeReport> {
         self.shared
             .rt
             .run(ops::delete_messages(self.engine()?, messages, mode))
