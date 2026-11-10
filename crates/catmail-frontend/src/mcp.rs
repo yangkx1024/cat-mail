@@ -52,6 +52,7 @@ fn serve_options(settings: &McpSettings) -> Option<ServeOptions> {
     settings.enabled.then(|| ServeOptions {
         addr: SocketAddr::from((Ipv4Addr::LOCALHOST, settings.port)),
         drain: DRAIN,
+        ..ServeOptions::default()
     })
 }
 
@@ -160,6 +161,7 @@ pub fn tier_label(tier: Tier) -> &'static str {
     match tier {
         Tier::Read => "Read only",
         Tier::Organize => "Read and organize",
+        Tier::Draft => "Read, organize and write drafts",
     }
 }
 

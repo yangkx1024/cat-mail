@@ -4,9 +4,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use catmail_core::{
-    AccountId, Address, Config, Draft, DraftContent, DraftId, Event, Flags, Folder, FolderId,
-    FolderSyncReport, MailClient, MailClientBuilder, MemorySecrets, MessageId, MessageSummary,
-    NewAccount, ReplayReport, SearchQuery, Security, ServerConfig, SyncReport, Verify,
+    AccountId, Address, Config, Draft, DraftChanges, DraftContent, DraftId, Event, Flags, Folder,
+    FolderId, FolderSyncReport, MailClient, MailClientBuilder, MemorySecrets, MessageId,
+    MessageSummary, NewAccount, ReplayReport, SearchQuery, Security, ServerConfig, SyncReport,
+    Verify,
 };
 use catmail_testkit::{FakeImap, FakeMailbox, FakeSmtp, ServerState, SmtpState};
 use tokio::runtime::Handle;
@@ -44,7 +45,8 @@ impl Env {
     #[allow(dead_code)]
     pub async fn edit(&self, id: DraftId, content: DraftContent) -> catmail_core::Result<Draft> {
         let draft = self.client.get_draft(id).await?.expect("the draft");
-        self.client.update_draft(id, draft.identity, content).await
+        let changes = DraftChanges::all(draft.identity, content);
+        self.client.update_draft(id, changes).await
     }
 
     /// Starts `f` with the server holding its answer to `command`, and waits until the

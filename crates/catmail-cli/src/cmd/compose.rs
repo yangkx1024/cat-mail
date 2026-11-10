@@ -9,8 +9,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use catmail_core::{
-    AccountId, Address, Draft, DraftAttachmentId, DraftContent, DraftId, Forwarding, IdentityId,
-    MailClient, MessageId, display, parse_addresses,
+    AccountId, Address, Draft, DraftAttachmentId, DraftChanges, DraftContent, DraftId, Forwarding,
+    IdentityId, MailClient, MessageId, NewFile, display, parse_addresses,
 };
 use clap::{Args, Subcommand};
 
@@ -173,9 +173,10 @@ pub(crate) enum DraftCommand {
 pub(crate) async fn compose(client: &MailClient, args: Compose, json: bool) -> Result<()> {
     let account = one_account(client, args.account.as_deref()).await?;
     let identity = args.fields.from.resolve(client, account.id).await?;
-    let content = args.fields.apply(DraftContent::default())?;
+    let mut content = DraftContent::default();
+    args.fields.changes()?.apply(&mut content);
     let draft = client
-        .create_draft(account.id, identity, content, args.attach)
+        .create_draft(account.id, identity, content, files(args.attach))
         .await?;
     finish_draft(client, draft, args.send, json).await
 }
@@ -190,7 +191,7 @@ pub(crate) async fn reply(client: &MailClient, args: Reply, json: bool) -> Resul
             args.all,
             from,
             text.unwrap_or_default(),
-            args.attach,
+            files(args.attach),
         )
         .await?;
     finish_draft(client, draft, args.send, json).await
@@ -211,7 +212,7 @@ pub(crate) async fn forward(client: &MailClient, args: Forward, json: bool) -> R
     }
     let from = from_for(client, &args.from, MessageId(args.id)).await?;
     let draft = client
-        .forward(MessageId(args.id), from, forwarding, args.attach)
+        .forward(MessageId(args.id), from, forwarding, files(args.attach))
         .await?;
     finish_draft(client, draft, args.send, json).await
 }
@@ -233,6 +234,11 @@ async fn from_for(
         .summary
         .account_id;
     from.resolve(client, account).await
+}
+
+/// The files of `--attach`, to go with a new draft.
+fn files(paths: Vec<PathBuf>) -> Vec<NewFile> {
+    paths.into_iter().map(NewFile::Path).collect()
 }
 
 /// Sends the new draft or shows it. Its files were attached as it was made: a file that
@@ -290,10 +296,13 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
         DraftCommand::Edit { id, fields } => {
             let draft = get_draft(client, id).await?;
             let was_in = draft.account_id;
-            let identity = fields.from.resolve_for(client, &draft).await?;
-            let from = identity.unwrap_or(draft.identity);
-            let content = fields.apply(draft.content)?;
-            let draft = client.update_draft(draft.id, from, content).await?;
+            let from = fields.from.resolve_for(client, &draft).await?;
+            // Only what was given: the engine makes it to the draft as it is then.
+            let changes = DraftChanges {
+                from,
+                ..fields.changes()?
+            };
+            let draft = client.update_draft(draft.id, changes).await?;
             if json {
                 print_draft_json(&draft)?;
             } else {
@@ -380,29 +389,18 @@ impl Recipients {
     }
 }
 
-/// Replaces the recipients that were given.
-fn set_recipients(recipients: ParsedRecipients, content: &mut DraftContent) {
-    for (field, value) in [&mut content.to, &mut content.cc, &mut content.bcc]
-        .into_iter()
-        .zip(recipients)
-    {
-        if let Some(value) = value {
-            *field = value;
-        }
-    }
-}
-
 impl Fields {
-    /// `content` with the fields that were given replaced.
-    fn apply(self, mut content: DraftContent) -> Result<DraftContent> {
-        set_recipients(self.recipients.parse()?, &mut content);
-        if let Some(subject) = self.subject {
-            content.subject = subject;
-        }
-        if let Some(text) = read_body(self.body, self.body_file.as_ref())? {
-            content.text = text;
-        }
-        Ok(content)
+    /// The fields that were given, besides who it is from (which needs the engine).
+    fn changes(self) -> Result<DraftChanges> {
+        let [to, cc, bcc] = self.recipients.parse()?;
+        Ok(DraftChanges {
+            from: None,
+            subject: self.subject,
+            to,
+            cc,
+            bcc,
+            text: read_body(self.body, self.body_file.as_ref())?,
+        })
     }
 }
 

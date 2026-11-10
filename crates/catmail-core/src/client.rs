@@ -9,11 +9,11 @@ use catmail_proto::{Credentials, TlsConfig};
 use catmail_store::{BlobStore, Db, Identities, Store};
 use catmail_types::{
     Account, AccountId, AccountOverview, AccountStatus, AttachmentId, ChangeReport, DeleteMode,
-    Draft, DraftAttachment, DraftAttachmentId, DraftContent, DraftId, Event, Flags, FlushReport,
-    Folder, FolderId, FolderRole, FolderSyncReport, Forwarding, GcReport, Identity, IdentityId,
-    Message, MessageCursor, MessageId, MessageSummary, NewAccount, NewIdentity, OutboxEntry,
-    OutboxId, PendingOp, PendingOpId, ReplayReport, SearchQuery, ServerConfig, SyncReport,
-    special_folder,
+    Draft, DraftAttachment, DraftAttachmentId, DraftChanges, DraftContent, DraftId, Event, Flags,
+    FlushReport, Folder, FolderId, FolderRole, FolderSyncReport, Forwarding, GcReport, Identity,
+    IdentityId, Message, MessageCursor, MessageId, MessageSummary, NewAccount, NewFile,
+    NewIdentity, OutboxEntry, OutboxId, PendingOp, PendingOpId, ReplayReport, SearchQuery,
+    ServerConfig, SyncReport, special_folder,
 };
 use secrecy::{ExposeSecret, SecretString};
 use tokio::runtime::Handle;
@@ -30,8 +30,8 @@ use crate::runtime::Runtime;
 use crate::secrets::{KeyringSecrets, SecretStore};
 use crate::watch::{self, SyncSchedule};
 use crate::{
-    BodyPrefetch, Config, DataDirLock, Error, Result, body, connection, drafts, folders, gc,
-    images, ops, prefetch, rebuild, search, send, sleep, sync,
+    BodyPrefetch, Config, DataDirLock, EditMark, Error, Result, body, connection, drafts, folders,
+    gc, images, ops, prefetch, rebuild, search, send, sleep, sync,
 };
 
 /// Starts the background work the engine does per account (sync, prefetch of bodies), if
@@ -1266,13 +1266,13 @@ impl MailClient {
     ///
     /// `files` are attached as [`attach_file`](Self::attach_file) would, but along with
     /// the draft: if one can't be, the error ([`Error::Attach`]) names it and no draft is
-    /// made.
+    /// made. A file given by its content must have a name without directories.
     pub async fn create_draft(
         &self,
         account: AccountId,
         from: Option<IdentityId>,
         content: DraftContent,
-        files: Vec<PathBuf>,
+        files: Vec<NewFile>,
     ) -> Result<Draft> {
         let engine = self.engine()?;
         self.shared
@@ -1295,7 +1295,7 @@ impl MailClient {
         all: bool,
         from: Option<IdentityId>,
         text: String,
-        files: Vec<PathBuf>,
+        files: Vec<NewFile>,
     ) -> Result<Draft> {
         let engine = self.engine()?;
         self.shared
@@ -1328,7 +1328,7 @@ impl MailClient {
         message: MessageId,
         from: Option<IdentityId>,
         forwarding: Forwarding,
-        files: Vec<PathBuf>,
+        files: Vec<NewFile>,
     ) -> Result<Draft> {
         let engine = self.engine()?;
         self.shared
@@ -1337,23 +1337,51 @@ impl MailClient {
             .await
     }
 
-    /// Replaces what the draft says, and the identity it is sent as: one of
-    /// [`draft_senders`](Self::draft_senders). One of another account moves the draft
+    /// Changes what the draft says, and the identity it is sent as: one of
+    /// [`draft_senders`](Self::draft_senders). Only the parts `changes` gives are
+    /// replaced, in the draft as it is then. One of another account moves the draft
     /// there, with its copy in the Drafts folder. An identity removed meanwhile leaves it
     /// from the one it has: the default, which removing the identity made it. Fails with
-    /// [`Error::Conflict`] while it is in the outbox, [`Error::InvalidInput`] for another
-    /// account's identity if the draft is a reply.
-    pub async fn update_draft(
+    /// [`Error::Conflict`] while it is in the outbox or open in an editor (see
+    /// [`edit_draft`](Self::edit_draft)), [`Error::InvalidInput`] for another account's
+    /// identity if the draft is a reply.
+    pub async fn update_draft(&self, id: DraftId, changes: DraftChanges) -> Result<Draft> {
+        self.update_as(id, changes, None).await
+    }
+
+    /// `editor`: the draft the caller is the editor of, see [`DraftEditor`].
+    async fn update_as(
         &self,
         id: DraftId,
-        from: IdentityId,
-        content: DraftContent,
+        changes: DraftChanges,
+        editor: Option<DraftId>,
     ) -> Result<Draft> {
         let engine = self.engine()?;
         self.shared
             .rt
-            .run(async move { drafts::update(&engine, id, from, content).await })
+            .run(async move { drafts::update(&engine, id, changes, editor).await })
             .await
+    }
+
+    /// Opens the draft in an editor: returns it, the [`DraftEditor`] the editor changes
+    /// it through, and the [`EditMark`] that keeps everyone else from changing what it
+    /// says or its attachments until dropped ([`update_draft`](Self::update_draft),
+    /// [`attach_file`](Self::attach_file),
+    /// [`remove_draft_attachment`](Self::remove_draft_attachment) fail with
+    /// [`Error::Conflict`]): an agent changing it meanwhile would have the user send
+    /// what they never saw, or the editor save over the change.
+    pub async fn edit_draft(&self, id: DraftId) -> Result<(DraftEditor, EditMark, Draft)> {
+        let engine = self.engine()?;
+        let (mark, draft) = self
+            .shared
+            .rt
+            .run(async move { drafts::open(&engine, id).await })
+            .await?;
+        let editor = DraftEditor {
+            client: self.clone(),
+            draft: id,
+        };
+        Ok((editor, mark, draft))
     }
 
     /// The identities the draft can be sent as: every account's, by account and each
@@ -1410,27 +1438,46 @@ impl MailClient {
             .await
     }
 
-    /// Attaches a copy of the file: changing or deleting the file afterwards doesn't
-    /// affect the draft.
+    /// Attaches a copy of the file, or the content given: changing or deleting the file
+    /// afterwards doesn't affect the draft.
+    /// Fails with [`Error::Conflict`] while the draft is open in an editor (see
+    /// [`edit_draft`](Self::edit_draft)).
     pub async fn attach_file(
         &self,
         draft: DraftId,
-        path: impl Into<PathBuf>,
+        file: impl Into<NewFile>,
+    ) -> Result<DraftAttachment> {
+        self.attach_as(draft, file.into(), None).await
+    }
+
+    async fn attach_as(
+        &self,
+        draft: DraftId,
+        file: NewFile,
+        editor: Option<DraftId>,
     ) -> Result<DraftAttachment> {
         let engine = self.engine()?;
-        let path = path.into();
         self.shared
             .rt
-            .run(async move { drafts::attach_file(&engine, draft, path).await })
+            .run(async move { drafts::attach_file(&engine, draft, file, editor).await })
             .await
     }
 
-    /// Returns the draft as it is now.
+    /// Returns the draft as it is now. Fails with [`Error::Conflict`] while the draft is
+    /// open in an editor (see [`edit_draft`](Self::edit_draft)).
     pub async fn remove_draft_attachment(&self, id: DraftAttachmentId) -> Result<Draft> {
+        self.remove_attachment_as(id, None).await
+    }
+
+    async fn remove_attachment_as(
+        &self,
+        id: DraftAttachmentId,
+        editor: Option<DraftId>,
+    ) -> Result<Draft> {
         let engine = self.engine()?;
         self.shared
             .rt
-            .run(async move { drafts::remove_attachment(&engine, id).await })
+            .run(async move { drafts::remove_attachment(&engine, id, editor).await })
             .await
     }
 
@@ -1729,6 +1776,47 @@ fn validate_server(proto: &str, server: &ServerConfig) -> Result<()> {
         return Err(Error::InvalidInput(format!("{proto} port must not be 0")));
     }
     Ok(())
+}
+
+/// What an editor changes the draft it has open through, from
+/// [`MailClient::edit_draft`]: its changes to that draft go through while the
+/// [`EditMark`] keeps everyone else's out. Cheap to clone.
+#[derive(Clone)]
+pub struct DraftEditor {
+    client: MailClient,
+    draft: DraftId,
+}
+
+impl std::fmt::Debug for DraftEditor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DraftEditor")
+            .field("draft", &self.draft)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DraftEditor {
+    pub fn draft(&self) -> DraftId {
+        self.draft
+    }
+
+    /// [`MailClient::update_draft`], as the editor: an editor saves everything it shows
+    /// ([`DraftChanges::all`]).
+    pub async fn update(&self, changes: DraftChanges) -> Result<Draft> {
+        let draft = self.draft;
+        self.client.update_as(draft, changes, Some(draft)).await
+    }
+
+    /// [`MailClient::attach_file`], as the editor.
+    pub async fn attach_file(&self, file: impl Into<NewFile>) -> Result<DraftAttachment> {
+        let draft = self.draft;
+        self.client.attach_as(draft, file.into(), Some(draft)).await
+    }
+
+    /// [`MailClient::remove_draft_attachment`], as the editor: only one of its draft's.
+    pub async fn remove_attachment(&self, id: DraftAttachmentId) -> Result<Draft> {
+        self.client.remove_attachment_as(id, Some(self.draft)).await
+    }
 }
 
 #[cfg(test)]

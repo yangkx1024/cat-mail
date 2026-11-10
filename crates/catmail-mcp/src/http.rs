@@ -15,7 +15,7 @@ use std::time::Duration;
 use catmail_core::MailClient;
 use http::{Request, Response, StatusCode, header};
 use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -26,15 +26,21 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
-use crate::tokens::Tokens;
+use crate::limits::TokenLimits;
+use crate::tokens::{Tier, Tokens};
 use crate::tools::Mail;
 
 /// The port `catmail serve` listens on unless told otherwise.
 pub const DEFAULT_PORT: u16 = 8642;
 /// Where on the address agents reach the server.
 pub(crate) const PATH: &str = "/mcp";
-/// Enough for any tool's arguments; rmcp answers 413 above it.
-const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+/// Enough for any tool's arguments, attachments given to a draft too (base64, at most
+/// `tools::drafts::MAX_FILE_BYTES`); rmcp answers 413 above it. Read only once the token is
+/// checked.
+const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+/// Enough for the arguments of every tool but those given files, which only a token of
+/// the draft tier calls: other tokens can't have that much held in memory.
+const MAX_SMALL_REQUEST_BYTES: usize = 1024 * 1024;
 /// How long stopping waits for the requests being answered by default.
 const DRAIN: Duration = Duration::from_secs(30);
 
@@ -48,6 +54,8 @@ pub struct ServeOptions {
     /// How long stopping waits for the requests being answered (a sync, a download)
     /// before it cuts them off, and the connections with them.
     pub drain: Duration,
+    /// What each token may use.
+    pub limits: TokenLimits,
 }
 
 impl Default for ServeOptions {
@@ -55,6 +63,7 @@ impl Default for ServeOptions {
         Self {
             addr: SocketAddr::from((Ipv4Addr::LOCALHOST, DEFAULT_PORT)),
             drain: DRAIN,
+            limits: TokenLimits::default(),
         }
     }
 }
@@ -93,7 +102,7 @@ impl McpServer {
             // cancelled, so it is cancelled only once the requests had their chance to end.
             .with_cancellation_token(handlers.clone());
         // rmcp makes a handler for every request; they share one client and router.
-        let mail = Mail::new(client);
+        let mail = Mail::new(client, options.limits);
         let service: Arc<Service> = Arc::new(StreamableHttpService::new(
             move || Ok(mail.clone()),
             Arc::default(),
@@ -211,9 +220,15 @@ async fn respond(
     match verified {
         Ok(Ok(Some(token))) => {
             tracing::debug!(token = %token.name, method = %request.method(), "MCP request");
+            let small = token.access.tier < Tier::Draft;
             // For the tools: rmcp hands them the request's parts (`tools::token_of`).
             request.extensions_mut().insert(token);
-            service.handle(request).await
+            if small {
+                let request = request.map(|body| Limited::new(body, MAX_SMALL_REQUEST_BYTES));
+                service.handle(request).await
+            } else {
+                service.handle(request).await
+            }
         }
         Ok(Ok(None)) => {
             tracing::warn!("MCP request with an unknown token turned away");

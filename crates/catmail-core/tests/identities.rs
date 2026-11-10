@@ -465,13 +465,13 @@ async fn attachments_fit_the_server_that_sends_the_draft() {
             env.account,
             Some(identity.id),
             content("theirs"),
-            vec![file.clone()],
+            vec![file.clone().into()],
         )
         .await
         .unwrap_err();
     assert!(matches!(err.kind(), ErrorKind::Invalid), "{err:?}");
     env.client
-        .create_draft(env.account, None, content("own"), vec![file])
+        .create_draft(env.account, None, content("own"), vec![file.into()])
         .await
         .unwrap();
 }
@@ -514,7 +514,7 @@ async fn files_are_checked_for_the_identity_the_draft_is_made_as() {
     for _ in 0..20 {
         let made = env
             .client
-            .create_draft(env.account, None, content("big"), vec![file.clone()])
+            .create_draft(env.account, None, content("big"), vec![file.clone().into()])
             .await;
         match made {
             Ok(draft) => assert_eq!(draft.identity, own),

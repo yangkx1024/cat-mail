@@ -41,7 +41,7 @@ pub fn Composer() -> impl IntoElement {
     crate::settings::follow();
     crate::settings::bind_keys(false);
     global::<Shared>().set(Shared(Some(Rc::new(RefCell::new(Composing {
-        draft: draft.id,
+        editor: start.opening.editor.clone(),
         life: Lifecycle::new(&start.opening),
         debounce: None,
         owner: Owner::current(),

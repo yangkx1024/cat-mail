@@ -347,6 +347,9 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 发送 / 关窗、`OpenComposers` 按草稿登记窗口），`composer/` 只有界面。每个写信窗口的视图跑在它自己的 nsh 线程上；
 窗口由外壳开关（`shell::opened`、`composer_closed`）。
 
+- **开着的草稿只由窗口改**：`ComposeFrom::start` 用 `edit_draft` 打开草稿，窗口的保存、附件都经
+  `Opening::editor`（`DraftEditor`）做；别处（MCP 的 agent）这时改不了它。`start` 一并返回的 `EditMark` 由外壳
+  连同窗口放在 `COMPOSERS` 里，窗口移走即放开，见[发信 / 身份](sending.md)。
 - **每封草稿一个窗口**：再次打开同一草稿时激活已有窗口；正在读的草稿也记下，连点两次 Edit 也只有一个窗口。
 - **一开始就是草稿**：新邮件 `create_draft`、回复 `reply`、转发 `forward`，窗口编辑的总是一个已存在的草稿。
   什么都没改就关闭时删除它；没改就发送照常发出。

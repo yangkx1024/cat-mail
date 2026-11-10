@@ -7,6 +7,7 @@
 
 pub mod connect;
 mod http;
+mod limits;
 mod output;
 #[cfg(test)]
 mod tests;
@@ -14,6 +15,7 @@ mod tokens;
 mod tools;
 
 pub use http::{DEFAULT_PORT, McpServer, ServeOptions};
+pub use limits::TokenLimits;
 pub use tokens::{Access, NewToken, Tier, Token, TokenError, Tokens};
 
 /// What a host adds to its log filter for the server's own lines (listening, stopped,

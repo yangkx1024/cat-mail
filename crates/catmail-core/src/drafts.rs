@@ -2,19 +2,19 @@
 //! (`draft_sync.rs`), sent through the outbox (`send.rs`).
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use catmail_proto::mime::{Outgoing, OutgoingAttachment, build_message};
 use catmail_proto::smtp;
 use catmail_store::{BlobStore, DraftReply, DraftSnapshot, NewDraftAttachment};
 use catmail_types::{
-    AccountId, Address, BlobHash, Draft, DraftAttachment, DraftAttachmentId, DraftContent, DraftId,
-    Event, Forwarding, IdentityId, Message, MessageId,
+    AccountId, Address, BlobHash, Draft, DraftAttachment, DraftAttachmentId, DraftChanges,
+    DraftContent, DraftId, Event, Forwarding, IdentityId, Message, MessageId, NewFile,
 };
 use uuid::Uuid;
 
-use crate::engine::{Engine, blocking, now};
+use crate::engine::{Editing, Engine, blocking, lock, now};
 use crate::{Error, Result, body, display};
 
 pub(crate) async fn create(
@@ -22,22 +22,88 @@ pub(crate) async fn create(
     account: AccountId,
     from: Option<IdentityId>,
     content: DraftContent,
-    files: Vec<PathBuf>,
+    files: Vec<NewFile>,
 ) -> Result<Draft> {
     validate(&content)?;
     insert(engine, account, from, content, None, Vec::new(), files).await
 }
 
+/// Marks a draft as open in an editor until dropped, from
+/// [`MailClient::edit_draft`](crate::MailClient::edit_draft): meanwhile nothing but the
+/// editor changes what it says or its attachments. Whoever owns the editor's window
+/// holds it, for as long as the window is there.
+#[derive(Debug)]
+pub struct EditMark {
+    editing: Editing,
+    draft: DraftId,
+}
+
+impl Drop for EditMark {
+    fn drop(&mut self) {
+        let mut editing = lock(&self.editing);
+        if let Some(count) = editing.get_mut(&self.draft) {
+            *count -= 1;
+            if *count == 0 {
+                editing.remove(&self.draft);
+            }
+        }
+    }
+}
+
+/// Marks the draft as open in an editor, and reads it. In a write transaction, so a
+/// change from someone else is either made before (and read) or refused after.
+pub(crate) async fn open(engine: &Arc<Engine>, id: DraftId) -> Result<(EditMark, Draft)> {
+    let editing = engine.editing();
+    engine
+        .write(move |db| {
+            let Some(draft) = db.drafts().get(id)? else {
+                return Ok(None);
+            };
+            // Counted: a window still closing as another opens on the same draft.
+            *lock(&editing).entry(id).or_default() += 1;
+            Ok(Some((EditMark { editing, draft: id }, draft)))
+        })
+        .await?
+        .ok_or(Error::DraftNotFound(id))
+}
+
+/// Refuses a change to `draft` while an editor has it open, unless the change is that
+/// editor's (`editor` is the draft it edits): the user would send what they never saw,
+/// or their editor would save over the change. Checked inside the write transaction
+/// that makes it.
+fn not_open_elsewhere(
+    editing: &Editing,
+    draft: DraftId,
+    editor: Option<DraftId>,
+) -> catmail_store::Result<()> {
+    if editor != Some(draft) && lock(editing).contains_key(&draft) {
+        return Err(catmail_store::Error::Conflict(format!(
+            "draft {draft} is open in the app, where the user is writing it; it can be \
+             changed once they close it"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) async fn update(
     engine: &Arc<Engine>,
     id: DraftId,
-    from: IdentityId,
-    content: DraftContent,
+    changes: DraftChanges,
+    editor: Option<DraftId>,
 ) -> Result<Draft> {
-    validate(&content)?;
-    let content = without_nul(content);
+    let editing = engine.editing();
     let (draft, was_in) = engine
         .write(move |db| {
+            // Made to the draft as it is now, in the transaction that stores it: what
+            // changed since the caller read it, in the parts it leaves alone, stays.
+            let Some(draft) = db.drafts().get(id)? else {
+                return Ok(None);
+            };
+            not_open_elsewhere(&editing, id, editor)?;
+            let mut content = draft.content;
+            let from = changes.apply(&mut content).unwrap_or(draft.identity);
+            validate(&content).map_err(|e| catmail_store::Error::Invalid(invalid_text(e)))?;
+            let content = without_nul(content);
             let Some(was_in) = db.drafts().update(id, from, &content, now())? else {
                 return Ok(None);
             };
@@ -145,7 +211,19 @@ fn copy_within(
 
 /// Copies the file into the blob store, to be attached to a draft whose attachments take
 /// `used` bytes of its `limit`. Blocking.
-fn copy_file(blobs: &BlobStore, path: &Path, used: u64, limit: u64) -> Result<NewDraftAttachment> {
+fn copy_file(
+    blobs: &BlobStore,
+    file: &NewFile,
+    used: u64,
+    limit: u64,
+) -> Result<NewDraftAttachment> {
+    match file {
+        NewFile::Path(path) => copy_path(blobs, path, used, limit),
+        NewFile::Content { name, content } => store_content(blobs, name, content, used, limit),
+    }
+}
+
+fn copy_path(blobs: &BlobStore, path: &Path, used: u64, limit: u64) -> Result<NewDraftAttachment> {
     let budget = limit.saturating_sub(used);
     // Before opening: on Windows, opening a directory fails as access denied.
     if !std::fs::metadata(path)?.is_file() {
@@ -167,13 +245,56 @@ fn copy_file(blobs: &BlobStore, path: &Path, used: u64, limit: u64) -> Result<Ne
         copy_within(blobs, file, budget)?.ok_or_else(|| attachments_too_large(limit))?;
     Ok(NewDraftAttachment {
         blob,
-        mime_type: mime_guess::from_path(path)
-            .first_or_octet_stream()
-            .essence_str()
-            .to_owned(),
+        mime_type: mime_type_of(&filename),
         filename,
         size,
     })
+}
+
+/// Stores `content`, to be attached as `name`.
+fn store_content(
+    blobs: &BlobStore,
+    name: &str,
+    content: &[u8],
+    used: u64,
+    limit: u64,
+) -> Result<NewDraftAttachment> {
+    let filename = file_name(name)?;
+    let size = content.len() as u64;
+    if size > limit.saturating_sub(used) {
+        return Err(attachments_too_large(limit));
+    }
+    Ok(NewDraftAttachment {
+        blob: blobs.put(content)?,
+        mime_type: mime_type_of(&filename),
+        filename,
+        size,
+    })
+}
+
+/// `name`, trimmed, if it is an attachment's file name as the recipient would save it
+/// ([`safe_filename`](crate::safe_filename) leaves it as it is): no directories, nothing
+/// that makes `invoice\u{202e}fdp.exe` look like a PDF. Refused rather than changed: what
+/// is attached goes by the name it was given.
+fn file_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() || crate::safe_filename(Some(name), "") != name {
+        return Err(Error::InvalidInput(format!(
+            "`{}` can't be an attachment's name: no directories, characters some systems \
+             refuse (`<>:\"|?*`, control and direction characters), dots at either end, or \
+             more than 200 bytes",
+            name.escape_debug()
+        )));
+    }
+    Ok(name.to_owned())
+}
+
+/// Guessed from the name's extension, as the recipient's mail client will.
+fn mime_type_of(filename: &str) -> String {
+    mime_guess::from_path(filename)
+        .first_or_octet_stream()
+        .essence_str()
+        .to_owned()
 }
 
 /// Copies the files to attach to a new draft of `account`, sent as `from`, into the blob
@@ -185,7 +306,7 @@ fn copy_files(
     account: AccountId,
     from: Option<IdentityId>,
     mut used: u64,
-    files: &[PathBuf],
+    files: &[NewFile],
 ) -> Result<(IdentityId, Vec<NewDraftAttachment>)> {
     let (identity, (smtp, append)) = engine
         .store
@@ -201,10 +322,10 @@ fn copy_files(
     // can attach to it before then. Files copied before one fails are left for GC.
     let attachments = files
         .iter()
-        .map(|path| {
+        .map(|file| {
             let attachment =
-                copy_file(&engine.blobs, path, used, limit).map_err(|e| Error::Attach {
-                    path: path.clone(),
+                copy_file(&engine.blobs, file, used, limit).map_err(|e| Error::Attach {
+                    file: file.describe(),
                     error: Box::new(e),
                 })?;
             used += attachment.size;
@@ -219,11 +340,15 @@ fn copy_files(
 pub(crate) async fn attach_file(
     engine: &Arc<Engine>,
     draft: DraftId,
-    path: PathBuf,
+    file: NewFile,
+    editor: Option<DraftId>,
 ) -> Result<DraftAttachment> {
     let attachment = blocking({
         let engine = engine.clone();
         move || {
+            let editing = engine.editing();
+            // Before copying the file too, which can be large.
+            not_open_elsewhere(&editing, draft, editor)?;
             let (used, limits) = engine
                 .store
                 .read(|db| {
@@ -239,10 +364,11 @@ pub(crate) async fn attach_file(
                 })?
                 .ok_or(Error::DraftNotFound(draft))?;
             let limit = attachments_limit(limits);
-            let new = copy_file(&engine.blobs, &path, used, limit)?;
+            let new = copy_file(&engine.blobs, &file, used, limit)?;
             // An attachment refused here, like one whose draft is gone, leaves an unreferenced
             // blob for GC.
             engine.store.write(|db| {
+                not_open_elsewhere(&editing, draft, editor)?;
                 // Again, for the draft: another file may have been attached meanwhile.
                 if db.drafts().attachments_size(draft)? + new.size > limit {
                     return Ok(Err(attachments_too_large(limit)));
@@ -264,12 +390,16 @@ pub(crate) async fn attach_file(
 pub(crate) async fn remove_attachment(
     engine: &Arc<Engine>,
     id: DraftAttachmentId,
+    editor: Option<DraftId>,
 ) -> Result<Draft> {
+    let editing = engine.editing();
     let draft = engine
         .write(move |db| {
             let Some(draft) = db.drafts().remove_attachment(id, now())? else {
                 return Ok(None);
             };
+            // Undone if refused: the error rolls the transaction back.
+            not_open_elsewhere(&editing, draft, editor)?;
             db.drafts().get(draft)
         })
         .await?
@@ -288,7 +418,7 @@ pub(crate) async fn reply(
     all: bool,
     from: Option<IdentityId>,
     text: String,
-    files: Vec<PathBuf>,
+    files: Vec<NewFile>,
 ) -> Result<Draft> {
     let message = with_body(engine, id).await?;
     let account_id = message.summary.account_id;
@@ -367,7 +497,7 @@ pub(crate) async fn forward(
     id: MessageId,
     from: Option<IdentityId>,
     forwarding: Forwarding,
-    files: Vec<PathBuf>,
+    files: Vec<NewFile>,
 ) -> Result<Draft> {
     // Before downloading anything.
     for address in forwarding.recipients() {
@@ -434,7 +564,7 @@ async fn insert(
     content: DraftContent,
     reply: Option<DraftReply>,
     mut attachments: Vec<NewDraftAttachment>,
-    files: Vec<PathBuf>,
+    files: Vec<NewFile>,
 ) -> Result<Draft> {
     let content = without_nul(content);
     let draft = blocking({
@@ -646,6 +776,14 @@ fn without_nul(mut content: DraftContent) -> DraftContent {
 
 /// Addresses must be usable as they are in the SMTP envelope. Checked when saving, so a
 /// mistake shows up while the user is still writing.
+/// The text of a [`validate`] error, for one returned from a write transaction.
+fn invalid_text(e: Error) -> String {
+    match e {
+        Error::InvalidInput(text) => text,
+        other => other.to_string(),
+    }
+}
+
 pub(crate) fn validate(content: &DraftContent) -> Result<()> {
     for address in content.recipients() {
         check_address(&address.email)?;

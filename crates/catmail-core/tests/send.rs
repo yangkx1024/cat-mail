@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use catmail_core::{
-    Address, DraftContent, Error, ErrorKind, Event, IdentityId, OutboxEntry, OutboxStatus,
+    Address, DraftContent, Error, ErrorKind, Event, IdentityId, NewFile, OutboxEntry, OutboxStatus,
     RecvError, Verify,
 };
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
@@ -796,6 +796,93 @@ async fn attachments_are_copied_when_added() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn attachments_can_be_given_by_their_content() {
+    let env = env(state()).await;
+    let given = |name: &str, content: &[u8]| NewFile::Content {
+        name: name.into(),
+        content: content.to_vec(),
+    };
+
+    let draft = env
+        .client
+        .create_draft(
+            env.account,
+            None,
+            content("with content"),
+            vec![given(" notes.txt ", b"hello")],
+        )
+        .await
+        .unwrap();
+    let notes = &draft.attachments[0];
+    assert_eq!(
+        (
+            notes.filename.as_str(),
+            notes.mime_type.as_str(),
+            notes.size
+        ),
+        ("notes.txt", "text/plain", 5)
+    );
+    let pdf = env
+        .client
+        .attach_file(draft.id, given("报告.pdf", b"%PDF-1.4"))
+        .await
+        .unwrap();
+    assert_eq!(pdf.mime_type, "application/pdf");
+
+    // A name as the recipient would save it: no path, nothing that disguises it.
+    let names = [
+        "",
+        "  ",
+        "../notes.txt",
+        "a\\b.txt",
+        "a\nb.txt",
+        "invoice\u{202e}fdp.exe",
+        "what?.txt",
+    ];
+    for name in names {
+        let err = env
+            .client
+            .attach_file(draft.id, given(name, b"x"))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Invalid, "{name:?}: {err:?}");
+        let err = env
+            .client
+            .create_draft(env.account, None, content("bad"), vec![given(name, b"x")])
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, Error::Attach { .. }), "{name:?}: {err:?}");
+    }
+    let err = env
+        .client
+        .attach_file(draft.id, given("huge.bin", &vec![0; 26 * 1024 * 1024]))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("add up to"), "{err}");
+
+    env.client.send_draft(draft.id).await.unwrap();
+    env.flush().await;
+    let received = env.smtp.state().received[0].data.clone();
+    let m = MessageParser::new().parse(&received).unwrap();
+    let contents: Vec<_> = m
+        .attachments()
+        .map(|a| {
+            (
+                a.attachment_name().unwrap().to_owned(),
+                a.contents().to_vec(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        contents,
+        [
+            ("notes.txt".to_owned(), b"hello".to_vec()),
+            ("报告.pdf".to_owned(), b"%PDF-1.4".to_vec())
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn attachments_are_limited_in_size() {
     const LIMIT: u64 = 25 * 1024 * 1024;
     let env = env(state()).await;
@@ -859,7 +946,7 @@ async fn files_given_with_a_new_draft_come_with_it_or_no_draft_is_made() {
     const LIMIT: u64 = 25 * 1024 * 1024;
     let env = env(state()).await;
     let dir = tempfile::tempdir().unwrap();
-    let file = |name: &str, size: u64| sparse(dir.path(), name, size);
+    let file = |name: &str, size: u64| NewFile::from(sparse(dir.path(), name, size));
     let create = |files| {
         env.client
             .create_draft(env.account, None, content("with files"), files)
@@ -870,15 +957,15 @@ async fn files_given_with_a_new_draft_come_with_it_or_no_draft_is_made() {
         .await
         .unwrap_err();
     assert!(
-        matches!(&err, Error::Attach { path, error }
-            if path.ends_with("five.txt") && matches!(**error, Error::InvalidInput(_))),
+        matches!(&err, Error::Attach { file, error }
+            if file.ends_with("five.txt") && matches!(**error, Error::InvalidInput(_))),
         "{err:?}"
     );
     assert_eq!(err.kind(), ErrorKind::Invalid);
     let missing = dir.path().join("missing.pdf");
-    let err = create(vec![missing.clone()]).await.unwrap_err();
+    let err = create(vec![missing.clone().into()]).await.unwrap_err();
     assert!(
-        matches!(&err, Error::Attach { path, .. } if *path == missing),
+        matches!(&err, Error::Attach { file, .. } if *file == missing.display().to_string()),
         "{err:?}"
     );
     assert!(err.to_string().contains("missing.pdf"), "{err}");

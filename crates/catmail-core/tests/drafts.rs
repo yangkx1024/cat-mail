@@ -8,7 +8,8 @@ mod common;
 use std::time::Duration;
 
 use catmail_core::{
-    Address, DraftContent, DraftId, Forwarding, MailClientBuilder, ReplayReport, SyncSchedule,
+    Address, DraftChanges, DraftContent, DraftId, Forwarding, MailClientBuilder, ReplayReport,
+    SyncSchedule,
 };
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 use common::{Env, addr, env, env_built, eventually, synced_env};
@@ -185,7 +186,7 @@ async fn a_draft_sent_from_another_account_moves_there() {
     let mut events = env.client.subscribe();
     let moved = env
         .client
-        .update_draft(id, senders[1].id, content("two"))
+        .update_draft(id, DraftChanges::all(senders[1].id, content("two")))
         .await
         .unwrap();
     assert_eq!((moved.account_id, moved.identity), (bob, senders[1].id));
@@ -214,6 +215,105 @@ async fn a_draft_sent_from_another_account_moves_there() {
     );
     env.client.replay_pending(bob).await.unwrap();
     assert_eq!(subjects(&drafts_on(&other)), ["two"]);
+}
+
+/// A caller that changes some parts (an agent, `draft edit`) leaves the others as they
+/// are when it does, not as it read them: what an editor saved meanwhile stays.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_change_to_some_parts_keeps_what_was_saved_meanwhile() {
+    let env = env_unsynced().await;
+    let id = env.draft("one").await;
+    let read = env.client.get_draft(id).await.unwrap().unwrap();
+    // The editor saves what the user typed.
+    let typed = DraftContent {
+        text: "typed meanwhile".into(),
+        ..content("one")
+    };
+    env.client
+        .update_draft(id, DraftChanges::all(read.identity, typed))
+        .await
+        .unwrap();
+
+    // Then the change made from what was read before.
+    let subject = DraftChanges {
+        subject: Some("two".into()),
+        ..Default::default()
+    };
+    let draft = env.client.update_draft(id, subject).await.unwrap();
+    assert_eq!(draft.content.subject, "two");
+    assert_eq!(draft.content.text, "typed meanwhile");
+    assert_eq!(draft.content.to, read.content.to);
+    assert_eq!(draft.identity, read.identity);
+
+    // A bad address refuses the whole change.
+    let bad = DraftChanges {
+        text: Some("lost".into()),
+        cc: Some(vec![addr("not an address")]),
+        ..Default::default()
+    };
+    let err = env.client.update_draft(id, bad).await.unwrap_err();
+    assert_eq!(err.kind(), catmail_core::ErrorKind::Invalid, "{err:?}");
+    let draft = env.client.get_draft(id).await.unwrap().unwrap();
+    assert_eq!(draft.content.text, "typed meanwhile");
+    let gone = env
+        .client
+        .update_draft(DraftId(999), DraftChanges::default())
+        .await;
+    assert!(matches!(gone, Err(catmail_core::Error::DraftNotFound(_))));
+}
+
+/// While the draft is open in an editor, only the editor changes it: an agent changing
+/// it meanwhile would have the user send what they never saw.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_draft_open_in_an_editor_is_changed_only_by_it() {
+    let env = env_unsynced().await;
+    let id = env.draft("one").await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("notes.txt");
+    std::fs::write(&file, "notes").unwrap();
+    let kept = env.client.attach_file(id, &file).await.unwrap();
+
+    let (editor, mark, read) = env.client.edit_draft(id).await.unwrap();
+    assert_eq!((read.id, editor.draft()), (id, id));
+    let subject = |s: &str| DraftChanges {
+        subject: Some(s.into()),
+        ..Default::default()
+    };
+    let refused = [
+        env.client.update_draft(id, subject("two")).await.map(drop),
+        env.client.attach_file(id, &file).await.map(drop),
+        env.client.remove_draft_attachment(kept.id).await.map(drop),
+    ];
+    for result in refused {
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), catmail_core::ErrorKind::Conflict, "{err:?}");
+        assert!(err.to_string().contains("open in the app"), "{err}");
+    }
+    let draft = env.client.get_draft(id).await.unwrap().unwrap();
+    assert_eq!(draft.content.subject, "one");
+    assert_eq!(draft.attachments.len(), 1, "the removal was rolled back");
+
+    // The editor's own go through; it is the editor of its own draft only.
+    editor.update(subject("by the editor")).await.unwrap();
+    let added = editor.attach_file(&file).await.unwrap();
+    editor.remove_attachment(added.id).await.unwrap();
+    let other = env.draft("other").await;
+    let (in_other, _other_mark, _) = env.client.edit_draft(other).await.unwrap();
+    let added = in_other.attach_file(&file).await.unwrap();
+    assert!(editor.remove_attachment(added.id).await.is_err());
+
+    // A second mark on it (a window still closing as another opens) holds it too.
+    let (_, second, _) = env.client.edit_draft(id).await.unwrap();
+    drop(mark);
+    assert!(env.client.update_draft(id, subject("x")).await.is_err());
+    drop(second);
+    let draft = env.client.update_draft(id, subject("two")).await.unwrap();
+    assert_eq!(draft.content.subject, "two");
+    let missing = env.client.edit_draft(DraftId(999)).await;
+    assert!(matches!(
+        missing,
+        Err(catmail_core::Error::DraftNotFound(_))
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -731,7 +831,7 @@ async fn answers_are_made_with_the_users_text_and_recipients() {
     std::fs::write(&notes, "my notes").unwrap();
     let draft = env
         .client
-        .forward(id, None, forwarding, vec![notes.clone()])
+        .forward(id, None, forwarding, vec![notes.clone().into()])
         .await
         .unwrap();
     assert_eq!(draft.content.to, [addr("bob@example.com")]);
@@ -752,7 +852,7 @@ async fn answers_are_made_with_the_users_text_and_recipients() {
 
     let draft = env
         .client
-        .reply(id, false, None, "Thanks!".into(), vec![notes])
+        .reply(id, false, None, "Thanks!".into(), vec![notes.into()])
         .await
         .unwrap();
     let text = &draft.content.text;

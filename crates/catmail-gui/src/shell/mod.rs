@@ -26,7 +26,7 @@ use std::rc::{Rc, Weak};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
-use catmail_core::{DraftId, MailClient, MailClientBuilder};
+use catmail_core::{DraftId, EditMark, MailClient, MailClientBuilder};
 use catmail_frontend::composer::{ComposeFrom, OpenComposers, Opening, window_title};
 use catmail_frontend::instance::{Request, Requests};
 use catmail_frontend::mailbox::{Destination, Place};
@@ -299,8 +299,10 @@ pub fn chose(command: Command, activation_token: Option<String>) {
     }
 }
 
-/// A composer's window, and how to ask its view to close it.
-type ComposerWindow = (Window, mpsc::UnboundedSender<()>);
+/// A composer's window, how to ask its view to close it, and the mark that keeps others
+/// (an agent) from changing its draft: dropped once the window is gone from
+/// [`COMPOSERS`], however long the view holds on.
+type ComposerWindow = (Window, mpsc::UnboundedSender<()>, Rc<EditMark>);
 
 thread_local! {
     /// The main window, while it is open.
@@ -451,7 +453,9 @@ fn open_window(spec: &Spec, root: Root, hooks: Hooks) -> Window {
 /// Brings the draft's window forward, if it has one.
 fn activate(draft: DraftId) -> bool {
     let window = COMPOSERS.with_borrow(|open| open.window(draft));
-    window.inspect(|(window, _)| window.present(None)).is_some()
+    window
+        .inspect(|(window, ..)| window.present(None))
+        .is_some()
 }
 
 /// Whether to read `from`'s draft for a window: not when it has one (brought forward
@@ -468,11 +472,11 @@ pub fn begin_opening(from: ComposeFrom) -> bool {
 /// `from`'s draft was made or read (or couldn't be, `None`): opens a window on it, or
 /// brings forward the one it has (a reply or forward made it, and it was opened from the
 /// drafts before its window came up).
-pub fn opened(from: ComposeFrom, opening: Option<Opening>) {
+pub fn opened(from: ComposeFrom, opening: Option<(Opening, EditMark)>) {
     if let ComposeFrom::Draft(id) = from {
         COMPOSERS.with_borrow_mut(|open| open.end_opening(id));
     }
-    let Some(opening) = opening else {
+    let Some((opening, mark)) = opening else {
         return;
     };
     let id = opening.draft.id;
@@ -498,7 +502,7 @@ pub fn opened(from: ComposeFrom, opening: Option<Opening>) {
         gone: Box::new(move || COMPOSERS.with_borrow_mut(|open| open.remove(id))),
     };
     let window = open_window(&spec, crate::composer::root(start), hooks);
-    COMPOSERS.with_borrow_mut(|open| open.insert(id, (window.clone(), asks)));
+    COMPOSERS.with_borrow_mut(|open| open.insert(id, (window.clone(), asks, Rc::new(mark))));
     window.present(None);
 }
 
@@ -509,7 +513,7 @@ pub fn composer_closed(draft: DraftId) {
         open.remove(draft);
         window
     });
-    if let Some((window, _)) = window {
+    if let Some((window, ..)) = window {
         window.destroy();
     }
 }
@@ -523,7 +527,7 @@ pub fn stop_closing_all() {
 /// has, false as soon as one can't (an address to correct, a save that failed).
 fn close_all() -> oneshot::Receiver<bool> {
     let (windows, answer) = COMPOSERS.with_borrow_mut(|open| open.close_all());
-    for (_, asks) in windows {
+    for (_, asks, _) in windows {
         let _ = asks.unbounded_send(());
     }
     answer

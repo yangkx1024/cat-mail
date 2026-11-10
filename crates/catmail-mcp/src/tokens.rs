@@ -61,15 +61,19 @@ pub enum Tier {
     Read,
     /// Also mark messages, move, archive, label them and move them to Trash.
     Organize,
+    /// Also write drafts (new ones, replies, forwards) and change them and their
+    /// attachments, for the user to send.
+    Draft,
 }
 
 impl Tier {
-    pub const ALL: [Tier; 2] = [Tier::Read, Tier::Organize];
+    pub const ALL: [Tier; 3] = [Tier::Read, Tier::Organize, Tier::Draft];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Tier::Read => "read",
             Tier::Organize => "organize",
+            Tier::Draft => "draft",
         }
     }
 }
@@ -470,8 +474,9 @@ mod tests {
     #[test]
     fn tiers_parse_and_order() {
         assert_eq!("Organize".parse::<Tier>(), Ok(Tier::Organize));
+        assert_eq!(" draft".parse::<Tier>(), Ok(Tier::Draft));
         assert!("send".parse::<Tier>().is_err());
-        assert!(Tier::Read < Tier::Organize);
+        assert!(Tier::Read < Tier::Organize && Tier::Organize < Tier::Draft);
     }
 
     #[test]
