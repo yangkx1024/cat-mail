@@ -164,9 +164,11 @@ fn settings_dialog() -> impl IntoElement {
             )
             .child(
                 view().flex_row().h(px(512.0)).child(nav).child(
+                    // The scroll bar overlays the content: kept clear of it, as in the
+                    // sidebar and the message list.
                     scroll()
                         .flex_1()
-                        .child(view().pl(px(20.0)).pr(px(4.0)).child(content)),
+                        .child(view().pl(px(20.0)).pr(px(12.0)).child(content)),
                 ),
             ),
     )

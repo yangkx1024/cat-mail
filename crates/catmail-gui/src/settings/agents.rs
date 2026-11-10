@@ -5,6 +5,8 @@
 //! is `shell`'s, what this says `catmail_frontend::mcp`'s, the commands `catmail_mcp`'s
 //! (`catmail mcp token add` prints them too).
 
+use std::time::Duration;
+
 use catmail_frontend::format;
 use catmail_frontend::login::{Submission, parse_port};
 use catmail_frontend::mcp::connect::{self, Example};
@@ -16,7 +18,7 @@ use nsh_core::prelude::*;
 
 use crate::buttons::{Size, icon_button, labelled_button};
 use crate::clock::clock;
-use crate::form::{confirm_then, error, field, menu_field, submit, text_input};
+use crate::form::{confirm_then, error, menu_field, submit, text_input};
 use crate::icons::{Icon, icon};
 use crate::mailbox::sidebar::with_accounts;
 use crate::shell;
@@ -42,19 +44,15 @@ pub fn agents() -> impl IntoElement {
         .child(part("Connect an agent").child(connecting(made)))
 }
 
-/// A part of the section, under a line, with its heading.
+/// A part of the section, with its heading: set apart by the space above it, more than
+/// what is inside a part has between its rows.
 fn part(heading: &'static str) -> View {
-    view()
-        .gap(px(12.0))
-        .pt(px(16.0))
-        .border_t_1()
-        .border_color(move || theme().border)
-        .child(
-            text(heading)
-                .text_sm()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(move || theme().foreground),
-        )
+    view().gap(px(12.0)).pt(px(8.0)).child(
+        text(heading)
+            .text_sm()
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(move || theme().foreground),
+    )
 }
 
 // --- The server ---------------------------------------------------------------------
@@ -110,28 +108,37 @@ fn port_field() -> impl IntoElement {
         }
         Err(why) => error.set(Some(why)),
     };
-    field(
-        "Port",
-        None,
-        view()
-            .gap(px(6.0))
-            .child(
-                text_input()
-                    .w(px(120.0))
-                    .default_value(typed.get_untracked())
-                    .on_change(move |text: &str| typed.set(text.to_owned()))
-                    .on_submit(move |_: &str| take())
-                    .on_blur(take),
-            )
-            .child(when(
-                move || error.get().is_some(),
-                move || {
-                    text(move || error.get().unwrap_or_default())
-                        .text_xs()
-                        .text_color(move || theme().destructive)
-                },
-            )),
-    )
+    // The label before the field, on one line: a port is short.
+    view()
+        .gap(px(6.0))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(12.0))
+                .child(
+                    text("Port")
+                        .text_sm()
+                        .text_color(move || theme().foreground),
+                )
+                .child(
+                    text_input()
+                        .w(px(120.0))
+                        .label("Port")
+                        .default_value(typed.get_untracked())
+                        .on_change(move |text: &str| typed.set(text.to_owned()))
+                        .on_submit(move |_: &str| take())
+                        .on_blur(take),
+                ),
+        )
+        .child(when(
+            move || error.get().is_some(),
+            move || {
+                text(move || error.get().unwrap_or_default())
+                    .text_xs()
+                    .text_color(move || theme().destructive)
+            },
+        ))
 }
 
 // --- Tokens -------------------------------------------------------------------------
@@ -200,12 +207,27 @@ fn tokens_list(tokens: Tokens, made: Made) -> impl IntoElement {
         .child(view().child(rows))
         .child(when(move || made.get().is_some(), move || made_token(made)))
         .child(
-            text_input()
-                .placeholder("Name, such as the agent's device")
-                .value(move || name.get())
-                .on_change(move |text: &str| name.set(text.to_owned()))
-                .on_submit(move |_: &str| add_on_enter()),
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    text_input()
+                        .flex_1()
+                        .placeholder("Name, such as the agent's device")
+                        .value(move || name.get())
+                        .on_change(move |text: &str| name.set(text.to_owned()))
+                        .on_submit(move |_: &str| add_on_enter()),
+                )
+                .child(labelled_button(
+                    Icon::Plus,
+                    "Add token",
+                    true,
+                    move || !busy() && !name.with(|n| n.trim().is_empty()),
+                    add,
+                )),
         )
+        // On a row of their own, halves wide enough for the longest choice on one line.
         .child(
             view()
                 .flex_row()
@@ -217,7 +239,7 @@ fn tokens_list(tokens: Tokens, made: Made) -> impl IntoElement {
                         move || mcp::tier_label(access.with(|a| a.tier)).to_owned(),
                         move || choose_tier(access),
                     )
-                    .w(px(180.0)),
+                    .flex_1(),
                 )
                 .child(
                     menu_field(
@@ -226,14 +248,7 @@ fn tokens_list(tokens: Tokens, made: Made) -> impl IntoElement {
                         move || choose_account(access),
                     )
                     .flex_1(),
-                )
-                .child(labelled_button(
-                    Icon::Plus,
-                    "Add token",
-                    true,
-                    move || !busy() && !name.with(|n| n.trim().is_empty()),
-                    add,
-                )),
+                ),
         )
         .child(error(submission))
 }
@@ -357,15 +372,39 @@ fn made_token(made: Made) -> impl IntoElement {
         ))
 }
 
+/// Copies what `text_` gives, and shows it did: a check, for a moment.
 fn copy_button(text_: impl Fn() -> String + 'static) -> impl IntoElement {
+    let copied = signal(false);
+    // Each press restarts the moment: only the last press's timer ends it.
+    let presses = signal(0_u32);
     icon_button(
-        || Icon::ClipboardDocument,
-        || "Copy".to_owned(),
+        move || {
+            if copied.get() {
+                Icon::Check
+            } else {
+                Icon::ClipboardDocument
+            }
+        },
+        move || if copied.get() { "Copied" } else { "Copy" }.to_owned(),
         || true,
         Size::Row,
-        move || set_clipboard(text_()),
+        move || {
+            set_clipboard(text_());
+            copied.set(true);
+            presses.update(|n| *n += 1);
+            let this = presses.get_untracked();
+            spawn(async move {
+                timer(COPIED_SHOWN).await;
+                if presses.try_get() == Some(this) {
+                    copied.try_set(false);
+                }
+            });
+        },
     )
 }
+
+/// How long the copy button shows its check.
+const COPIED_SHOWN: Duration = Duration::from_millis(1500);
 
 // --- Connecting ---------------------------------------------------------------------
 
