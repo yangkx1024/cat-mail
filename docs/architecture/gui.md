@@ -37,7 +37,7 @@ crates.io。逐项的进度、未做的事和 nsh 的变通（⚠️）见 [`cra
 src/
   main.rs          启动：交给已在运行的实例或成为它（catmail_frontend::instance），日志，引擎的选项，交给 shell::run
   engine.rs        引擎：属于应用，不属于窗口；打开中、已打开、失败、已关闭
-  shell/           外壳：mod.rs 窗口、设置与主题、托盘和通知的请求、常驻与退出；gtk.rs、appkit.rs 两个工具包
+  shell/           外壳：mod.rs 窗口、设置与主题、托盘和通知的请求、MCP 服务、常驻与退出；gtk.rs、appkit.rs 两个工具包
   mailbox/         主窗口
     mod.rs         引擎打开前留空、失败的原因、登录页或三栏、引擎事件的刷新
     panes.rs       三栏和拖宽度的把手，右栏按选中的是邮件、草稿还是发件箱条目；右栏共用的返回按钮、字段行
@@ -50,7 +50,7 @@ src/
   reader/          读信区：mod.rs 打开、远程与内嵌图片、附件的保存；view.rs 工具栏、头部、正文的 web view、附件
                    （正文的页面：CSP、注入脚本和它的消息协议在 catmail_frontend::html）
   composer/        写信窗口：mod.rs 状态、保存发送关闭、附件、发件人；view.rs 窗口
-  settings/        设置对话框：mod.rs 设置的跟随、对话框和 General；appearance.rs、accounts.rs、reading.rs 各一节
+  settings/        设置对话框：mod.rs 设置的跟随、对话框和 General；appearance.rs、accounts.rs、reading.rs、agents.rs 各一节
   login.rs         登录页和发件身份的表单
   form.rs          对话框外框、字段、提交、确认对话框、只要一个名字的对话框
   tasks.rs         视图开始的工作归谁（随窗口结束），另起线程的工作
@@ -375,12 +375,15 @@ From 是条目实际发出用的身份（`OutboxEntry::identity`），叫法和�
 
 ## 主题与设置
 
-- **设置**（关窗后常驻、新邮件通知、外观、浅色 / 深色各自的主题、文字大小、打开即已读、远程图片缓存）是这个
+- **设置**（关窗后常驻、新邮件通知、外观、浅色 / 深色各自的主题、文字大小、打开即已读、远程图片缓存、MCP 服务）是这个
   前端的偏好，存在配置目录的 `settings.json`（`CATMAIL_CONFIG_DIR` 可换），不进引擎的数据库。读写在
   `catmail_frontend::settings`：写入经临时文件替换，在后台按顺序进行，晚到的写不会把旧设置写回去。
 - 设置和主题是进程级的（`shell/`）：每个窗口的视图各在自己的线程上读，设置对话框从主窗口改。改了就写回文件，
   所有窗口（包括写信窗口）随之更新：主题和文字大小由主线程设给每个 `AppView`，外观由各视图自己
   `set_color_scheme`。
+- 设置放在 `catmail_frontend::watched::Watched` 里：视图读当前值和开始跟随在同一把锁下，改设置、排队写文件、
+  通知跟随者也在同一把锁下。两个窗口的线程同时改设置时，各视图按改的先后收到，最后停在最新的值上，文件写的
+  也是最新的；读和跟随之间的修改不会漏掉。外壳里的 MCP 状态也用它。
 - **文字大小**是 nsh 的 `AppView::set_font_scale`；Ctrl + / Ctrl − / Ctrl 0 改它，Ctrl+, 打开设置。
 - **主题都从终端调色板推导**（`catmail_frontend::theme`）：背景、前景和 16 个 ANSI 色推导出全部颜色；内置主题
   也写成调色板。导入按内容识别 Alacritty、kitty、Ghostty、WezTerm、Windows Terminal、iTerm2、foot、Xresources、
@@ -392,6 +395,8 @@ From 是条目实际发出用的身份（`OutboxEntry::identity`），叫法和�
   旗标、头像、徽章、发件箱的警告都用 token，不写死颜色。
 - **跟随系统外观**是 nsh 自带的（Linux 上经 XDG portal）。
 - **远程图片缓存**属于引擎的数据目录，不是偏好：Settings › Reading 显示它占多少，"Clear image cache"清空。
+- **Agents**：给 AI agent 的 MCP 服务（开关、端口）和令牌，服务由外壳在自己的线程上托管，见
+  [MCP / GUI 托管](mcp.md#gui-托管)。
 - **Accounts**：账户列表、Add account；发件身份的默认、改名、删除、"Server saves to Sent"、Add sending address。
   确认文案在 `catmail_frontend::accounts`。
 

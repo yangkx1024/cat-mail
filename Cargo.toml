@@ -169,6 +169,13 @@ unicode-width = "0.2.2"
 url = "2.5.8"
 uuid = { version = "1.28", features = ["v4"] }
 
+# Dependencies a little optimized in dev builds and tests (our crates stay at 0, for
+# quick rebuilds and debugging). Unoptimized, catmail-gui's unwind tables outgrew what
+# macOS's linker encodes (16 MB of __eh_frame; 8.8 MB at opt-level 1), and it says so on
+# every link. Runs faster too: SQLite, HTML sanitizing, IMAP parsing.
+[profile.dev.package."*"]
+opt-level = 1
+
 # Thin LTO with one codegen unit, and stripped of symbols: a smaller binary. A panic's
 # backtrace then shows addresses only; the message and location are still logged.
 [profile.release]

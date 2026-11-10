@@ -59,11 +59,7 @@ impl ServerValues {
     pub fn config(&self, default_port: fn(Security) -> u16) -> Result<ServerConfig, &'static str> {
         let port = match self.port.trim() {
             "" => default_port(self.security),
-            port => port
-                .parse::<u16>()
-                .ok()
-                .filter(|&p| p != 0)
-                .ok_or("A port is a number from 1 to 65535.")?,
+            port => parse_port(port)?,
         };
         Ok(ServerConfig {
             host: self.host.trim().to_owned(),
@@ -114,6 +110,15 @@ impl IdentityValues {
     }
 }
 
+/// A port as typed: a server's in the login form, the MCP server's in Settings › Agents.
+pub fn parse_port(text: &str) -> Result<u16, &'static str> {
+    text.trim()
+        .parse::<u16>()
+        .ok()
+        .filter(|&p| p != 0)
+        .ok_or("A port is a number from 1 to 65535.")
+}
+
 /// A form's submission: whether one is running, and why the last one failed. The form
 /// runs the request; this says whether to, and what to show.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,7 +159,7 @@ impl Submission {
     }
 
     /// The request ended: its value, or `None` with its failure shown.
-    pub fn ended<T>(&mut self, result: catmail_core::Result<T>) -> Option<T> {
+    pub fn ended<T, E: std::fmt::Display>(&mut self, result: Result<T, E>) -> Option<T> {
         self.busy = false;
         result
             .inspect_err(|e| self.error = Some(format!("Couldn't {}: {e}", self.what)))
@@ -303,6 +308,6 @@ mod tests {
                 .error()
                 .is_some_and(|e| e.starts_with("Couldn't sign in: "))
         );
-        assert_eq!(submit.ended(Ok(3)), Some(3));
+        assert_eq!(submit.ended(Ok::<_, catmail_core::Error>(3)), Some(3));
     }
 }

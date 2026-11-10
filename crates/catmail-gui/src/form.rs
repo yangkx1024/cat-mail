@@ -162,10 +162,12 @@ pub fn error(submission: Signal<Submission>) -> impl IntoElement {
 
 /// Runs a form's request, unless one is running (or the values are wrong, which the
 /// form then says), and `done` with what it gave. The request is the engine's: leaving
-/// the form doesn't stop it, hence Cancel being off meanwhile.
-pub fn submit<T: 'static>(
+/// the form doesn't stop it, hence Cancel being off meanwhile. A form that can go anyway
+/// (a section of Settings, closed) is gone when the request ends: nothing is shown, and
+/// `done` doesn't run.
+pub fn submit<T: 'static, E: std::fmt::Display + 'static>(
     submission: Signal<Submission>,
-    request: Result<LocalBoxFuture<'static, catmail_core::Result<T>>, &'static str>,
+    request: Result<LocalBoxFuture<'static, Result<T, E>>, &'static str>,
     done: impl FnOnce(T) + 'static,
 ) {
     let Some(request) = change(submission, |s| s.begin(request)) else {
@@ -173,6 +175,10 @@ pub fn submit<T: 'static>(
     };
     in_view(async move {
         let result = request.await;
+        // Its signals went with the form.
+        if submission.try_get().is_none() {
+            return;
+        }
         if let Some(value) = change(submission, |s| s.ended(result)) {
             done(value);
         }
@@ -200,6 +206,16 @@ pub fn confirmed(confirm: Confirm) -> impl Future<Output = bool> {
             .await
             .is_ok_and(|r| r.action.as_deref() == Some("go-on"))
     }
+}
+
+/// Asks first, then does `go`: what can't be undone.
+pub fn confirm_then(confirm: Confirm, go: impl FnOnce() + 'static) {
+    let answer = confirmed(confirm);
+    in_view(async move {
+        if answer.await {
+            go();
+        }
+    });
 }
 
 // --- The name dialog ----------------------------------------------------------------

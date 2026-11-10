@@ -43,7 +43,7 @@ ignored there with a reason, never by loosening the check.
 
 ## Crates and layering
 
-`types ← store, proto ← core ← cli / gui`, `html ← proto, core`, `core ← frontend ← gui`, and `core ← mcp ← cli`
+`types ← store, proto ← core ← cli / gui`, `html ← proto, core`, `core ← frontend ← gui`, and `core ← mcp ← cli, frontend`
 
 | Crate | Role |
 |---|---|
@@ -54,8 +54,8 @@ ignored there with a reason, never by loosening the check.
 | `catmail-core` | Engine, services, runtime bridge, secrets, the `MailClient` facade |
 | `catmail-cli` | The `catmail` binary |
 | `catmail-gui` | The `catmail-gui` desktop binary, on Native Shell (nsh): GTK 4 and WebKitGTK on Linux, AppKit and WKWebView on macOS; message bodies in a web view |
-| `catmail-frontend` | The desktop logic no UI toolkit needs: the settings file, the themes, single instance, the sidebar's folders and model, which engine events read what again, the list's rows, the commands on messages, the composer's model, the outbox's choices, the login forms, display formats, the reader's header and HTML policy, the tray icon (its menu, badge, the Linux StatusNotifierItem, the macOS status item), what new-mail notifications say, what happens once the last window closes |
-| `catmail-mcp` | The tools AI agents call over MCP, their tokens (a file in the config directory, not the database), and the Streamable HTTP server on a local address that runs them; hosted by whichever process holds the engine (`catmail serve`, later the app). See [docs/architecture/mcp.md](docs/architecture/mcp.md) |
+| `catmail-frontend` | The desktop logic no UI toolkit needs: the settings file, the themes, single instance, the sidebar's folders and model, which engine events read what again, the list's rows, the commands on messages, the composer's model, the outbox's choices, the login forms, display formats, the reader's header and HTML policy, the tray icon (its menu, badge, the Linux StatusNotifierItem, the macOS status item), what new-mail notifications say, what happens once the last window closes, the MCP server the app hosts (its thread, following the settings) |
+| `catmail-mcp` | The tools AI agents call over MCP, their tokens (a file in the config directory, not the database), and the Streamable HTTP server on a local address that runs them; hosted by whichever process holds the engine (`catmail serve`, the app). See [docs/architecture/mcp.md](docs/architecture/mcp.md) |
 | `catmail-testkit` | Fake IMAP and SMTP servers with fault injection; dev-dependency only |
 
 Frontends depend on `catmail-core` only; it re-exports the types they need. Desktop logic that

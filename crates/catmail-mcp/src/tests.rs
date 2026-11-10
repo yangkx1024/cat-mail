@@ -214,27 +214,15 @@ async fn every_request_needs_a_known_token() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn other_paths_hosts_and_browser_pages_are_turned_away() {
-    let options = ServeOptions {
-        hosts: vec!["mac.tailnet.ts.net".into()],
-        ..ServeOptions::default()
-    };
-    let f = Fixture::new(options).await;
+async fn other_paths_and_browser_pages_are_turned_away() {
+    let f = Fixture::new(ServeOptions::default()).await;
     let addr = f.server.local_addr();
     let auth = f.auth();
     let auth = ("authorization", auth.as_str());
 
     let (status, _) = send(addr, "/", &[auth], initialize()).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    // DNS rebinding: a name that resolves here but isn't this server's.
-    let (status, _) = send(
-        addr,
-        "/mcp",
-        &[auth, ("host", "evil.example")],
-        initialize(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    // Through a tunnel: addressed to the name it forwards as, with nothing to configure.
     let (status, body) = send(
         addr,
         "/mcp",
@@ -243,6 +231,19 @@ async fn other_paths_hosts_and_browser_pages_are_turned_away() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    // DNS rebinding: a page whose name now resolves here. It has no token, and its
+    // browser says where it is from.
+    let rebound = ("host", "evil.example");
+    let (status, _) = send(addr, "/mcp", &[rebound], initialize()).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = send(
+        addr,
+        "/mcp",
+        &[auth, rebound, ("origin", "http://evil.example")],
+        initialize(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
     let (status, _) = send(
         addr,
         "/mcp",

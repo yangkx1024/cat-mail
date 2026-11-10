@@ -102,7 +102,8 @@ catmail mv 42 --to Archive
 catmail rm 42                   # 移到已删除；--permanent 永久删除
 catmail folder add 2026 --parent Archive
 
-# 让 AI agent 经 MCP 使用邮箱（只读）：常驻同步，在 127.0.0.1:8642/mcp 上提供服务
+# 让 AI agent 经 MCP 使用邮箱（只读）：常驻同步，在 127.0.0.1:8642/mcp 上提供服务；
+# 开着图形界面时改在 Settings › Agents 里打开
 catmail mcp token add laptop    # 给 agent 的令牌，只显示一次
 catmail serve                   # 其他设备经 tailscale serve 等隧道访问，见 docs/architecture/mcp.md
 ```
@@ -157,12 +158,12 @@ cargo test -p catmail-core --test dovecot --test submission
 | `catmail-html` | 邮件 HTML 的清洗与读信区的处理（图片、深色配色），纯函数 |
 | `catmail-core` | 引擎与 `MailClient` 门面，前端唯一依赖 |
 | `catmail-cli` | `catmail` 命令行 |
-| `catmail-mcp` | 经 MCP 交给 AI agent 的工具、令牌与本机的 HTTP 服务，由 `catmail serve`（以后也由图形界面）托管 |
+| `catmail-mcp` | 经 MCP 交给 AI agent 的工具、令牌与本机的 HTTP 服务，由 `catmail serve` 或图形界面（Settings › Agents）托管 |
 | `catmail-frontend` | 桌面前端里与 UI 库无关的逻辑：设置、主题、侧栏与列表的模型、命令、写信与发件箱的模型、托盘等 |
 | `catmail-gui` | `catmail-gui` 图形界面（Native Shell：GTK 4 / AppKit，正文在 WebView 里） |
 | `catmail-testkit` | 可注入故障的假 IMAP / SMTP 服务器，只用于测试 |
 
-依赖方向：`types ← store, proto ← core ← cli / gui`，`core ← frontend ← gui`，`core ← mcp ← cli`。设计细节见
+依赖方向：`types ← store, proto ← core ← cli / gui`，`core ← frontend ← gui`，`core ← mcp ← cli, frontend`。设计细节见
 [docs/architecture.md](docs/architecture.md) 及 [docs/architecture/](docs/architecture/)。
 
 ## 路线图
@@ -176,7 +177,7 @@ cargo test -p catmail-core --test dovecot --test submission
 | M4 | 离线操作队列、IDLE 推送与后台同步、草稿同步到服务器 | ✅ |
 | M5 | 图形界面（起初基于 GPUI，后改用 Native Shell） | ✅ |
 | M6 | 打包：macOS 磁盘映像与 CLI ✅；Linux 图形界面的 Flatpak ✅（上 Flathub 待做）；Windows（图形界面接上 Native Shell 的 Windows 后端） | 进行中 |
-| M7 | MCP：让 AI agent 经常驻的图形界面或 `catmail serve` 读信、整理、写草稿（[设计](docs/architecture/mcp.md)）：只读与 `catmail serve` ✅；图形界面托管、整理与草稿、发信 | 进行中 |
+| M7 | MCP：让 AI agent 经常驻的图形界面或 `catmail serve` 读信、整理、写草稿（[设计](docs/architecture/mcp.md)）：只读、`catmail serve` 与图形界面托管 ✅；整理与草稿、发信 | 进行中 |
 
 之后：前端通过 IPC 连接正在运行的引擎（让图形界面和命令行能同时使用）。
 

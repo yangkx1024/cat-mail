@@ -7,7 +7,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use anyhow::{Context, Result, bail};
 use catmail_core::{MailClient, display};
-use catmail_mcp::{DEFAULT_PORT, McpServer, ServeOptions, Tokens};
+use catmail_mcp::{DEFAULT_PORT, McpServer, ServeOptions, Tokens, connect};
 use clap::{Args, Subcommand};
 
 use crate::json::{self, JsonToken};
@@ -19,10 +19,6 @@ pub(crate) struct Serve {
     /// or a tunnel
     #[arg(long, default_value_t = DEFAULT_PORT)]
     port: u16,
-    /// A name requests may be addressed to besides localhost, as the tunnel forwards
-    /// them (e.g. mac.tailnet.ts.net); repeat for several
-    #[arg(long = "host", value_name = "NAME")]
-    hosts: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -61,15 +57,14 @@ pub(crate) async fn serve(
     }
     let options = ServeOptions {
         addr: SocketAddr::from((Ipv4Addr::LOCALHOST, args.port)),
-        hosts: args.hosts,
         ..ServeOptions::default()
     };
     let server = McpServer::start(client.clone(), tokens, options)
         .await
         .with_context(|| format!("failed to listen on 127.0.0.1:{}", args.port))?;
     eprintln!(
-        "Serving MCP on http://{}/mcp; press Ctrl-C to stop",
-        server.local_addr()
+        "Serving MCP on {}; press Ctrl-C to stop",
+        connect::local_url(server.local_addr().port())
     );
     stop.await;
     server.stop().await;
@@ -90,6 +85,7 @@ pub(crate) fn mcp(tokens: &Tokens, command: McpCommand, json: bool) -> Result<()
                     printable(&new.token.name)
                 );
                 println!("{}", new.secret);
+                eprintln!("\n{}", connecting(&new.secret));
             }
         }
         TokenCommand::List => {
@@ -124,6 +120,26 @@ pub(crate) fn mcp(tokens: &Tokens, command: McpCommand, json: bool) -> Result<()
     Ok(())
 }
 
+/// After a token is made: adding the server to the agents, with it.
+fn connecting(secret: &str) -> String {
+    let url = connect::local_url(DEFAULT_PORT);
+    let mut text = String::from(
+        "To add catmail to an agent on this machine (`catmail serve` on its default port):\n",
+    );
+    for example in connect::examples(&url, secret) {
+        text.push_str(&format!("\n  {}:\n", example.agent));
+        for line in example.commands.lines() {
+            text.push_str(&format!("    {line}\n"));
+        }
+        if let Some(note) = example.note {
+            text.push_str(&format!("    {note}\n"));
+        }
+    }
+    text.push('\n');
+    text.push_str(connect::REMOTE_NOTE);
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,5 +159,15 @@ mod tests {
         let e = mcp(&tokens, McpCommand::Token(rm()), true).unwrap_err();
         assert!(e.to_string().contains("no token named"));
         assert!(tokens.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_new_token_comes_with_the_commands_that_use_it() {
+        let text = connecting("catmail_00");
+        assert!(text.contains(
+            "    claude mcp add --transport http catmail http://127.0.0.1:8642/mcp \\\n      \
+             --header \"Authorization: Bearer catmail_00\"\n"
+        ));
+        assert!(text.contains("    export CATMAIL_MCP_TOKEN=catmail_00\n"));
     }
 }

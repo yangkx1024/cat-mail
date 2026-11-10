@@ -10,7 +10,7 @@ use nsh_core::prelude::*;
 
 use crate::buttons::{Size, icon_button};
 use crate::engine::client;
-use crate::form::{NameRequest, ask_name, confirmed};
+use crate::form::{NameRequest, ask_name, confirm_then};
 use crate::icons::{Icon, icon};
 use crate::login;
 use crate::mailbox::sidebar::{Accounts, with_account};
@@ -172,16 +172,6 @@ fn account_rows(entry: catmail_frontend::mailbox::AccountEntry) -> AnyElement {
 
 fn entry(id: AccountId) -> Option<catmail_frontend::mailbox::AccountEntry> {
     with_account(id, Clone::clone)
-}
-
-/// Asks first, then does `go`: what can't be undone.
-fn confirm_then(confirm: catmail_frontend::commands::Confirm, go: impl FnOnce() + 'static) {
-    let answer = confirmed(confirm);
-    in_view(async move {
-        if answer.await {
-            go();
-        }
-    });
 }
 
 fn remove_account(id: AccountId) {

@@ -1,7 +1,10 @@
 //! The Streamable HTTP endpoint, `/mcp`, on a local address. Every request carries a
 //! token from the token file, the local ones too: a request through `tailscale serve`
 //! or a tunnel comes from this machine as well. Encryption and reaching it from other
-//! devices are the tunnel's; rmcp checks `Host` (against DNS rebinding) and `Origin`.
+//! devices are the tunnel's. A web page can't get in either, DNS rebinding or not: it has
+//! no token, and rmcp turns away every request with an `Origin`, which a browser sends
+//! with every POST. So `Host` isn't checked: the name a tunnel forwards as (`tailscale
+//! serve` keeps the `*.ts.net` one) would have to be configured for nothing.
 
 use std::convert::Infallible;
 use std::io;
@@ -28,7 +31,8 @@ use crate::tools::Mail;
 
 /// The port `catmail serve` listens on unless told otherwise.
 pub const DEFAULT_PORT: u16 = 8642;
-const PATH: &str = "/mcp";
+/// Where on the address agents reach the server.
+pub(crate) const PATH: &str = "/mcp";
 /// Enough for any tool's arguments; rmcp answers 413 above it.
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 /// How long stopping waits for the requests being answered by default.
@@ -37,14 +41,10 @@ const DRAIN: Duration = Duration::from_secs(30);
 type Service = StreamableHttpService<Mail, NeverSessionManager>;
 type Body = BoxBody<Bytes, Infallible>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServeOptions {
     /// Where to listen: this machine only, by default.
     pub addr: SocketAddr,
-    /// Names requests may be addressed to besides this machine's loopback ones: the
-    /// name `tailscale serve` or a tunnel forwards as (`mac.tailnet.ts.net`). A name
-    /// alone allows any port; `name:port`, only that one.
-    pub hosts: Vec<String>,
     /// How long stopping waits for the requests being answered (a sync, a download)
     /// before it cuts them off, and the connections with them.
     pub drain: Duration,
@@ -54,7 +54,6 @@ impl Default for ServeOptions {
     fn default() -> Self {
         Self {
             addr: SocketAddr::from((Ipv4Addr::LOCALHOST, DEFAULT_PORT)),
-            hosts: Vec::new(),
             drain: DRAIN,
         }
     }
@@ -80,14 +79,11 @@ impl McpServer {
         let addr = listener.local_addr()?;
         let stop = CancellationToken::new();
         let handlers = CancellationToken::new();
-        let hosts = ["localhost", "127.0.0.1", "::1"]
-            .into_iter()
-            .map(String::from)
-            .chain(options.hosts);
         // No sessions: each request stands alone (as in MCP 2026-07-28), so a restart or
         // another tunnel in between loses nothing, and answers are plain JSON.
         let config = StreamableHttpServerConfig::default()
-            .with_allowed_hosts(hosts)
+            // Any name: the token and `Origin` keep web pages out (see above).
+            .disable_allowed_hosts()
             // Agents aren't web pages: a request from a browser page is turned away.
             .enforce_origin_validation()
             .with_legacy_session_mode(false)
