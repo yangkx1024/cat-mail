@@ -102,9 +102,9 @@ catmail mv 42 --to Archive
 catmail rm 42                   # 移到已删除；--permanent 永久删除
 catmail folder add 2026 --parent Archive
 
-# 让 AI agent 经 MCP 使用邮箱（读信，或再加整理、写草稿）：常驻同步，在 127.0.0.1:8642/mcp 上提供服务；
+# 让 AI agent 经 MCP 使用邮箱（读信，或再加整理、写草稿、发信）：常驻同步，在 127.0.0.1:8642/mcp 上提供服务；
 # 开着图形界面时改在 Settings › Agents 里打开
-catmail mcp token add laptop    # 给 agent 的令牌，只显示一次；--tier organize 可整理、draft 再可写草稿，--account 限定账户
+catmail mcp token add laptop    # 给 agent 的令牌，只显示一次；--tier organize 可整理、draft 再可写草稿、send 再可发信（先问你）、send_unasked 不问就发，--account 限定账户
 catmail serve                   # 其他设备经 tailscale serve 等隧道访问，见 docs/architecture/mcp.md
 ```
 
@@ -177,7 +177,7 @@ cargo test -p catmail-core --test dovecot --test submission
 | M4 | 离线操作队列、IDLE 推送与后台同步、草稿同步到服务器 | ✅ |
 | M5 | 图形界面（起初基于 GPUI，后改用 Native Shell） | ✅ |
 | M6 | 打包：macOS 磁盘映像与 CLI ✅；Linux 图形界面的 Flatpak ✅（上 Flathub 待做）；Windows（图形界面接上 Native Shell 的 Windows 后端） | 进行中 |
-| M7 | MCP：让 AI agent 经常驻的图形界面或 `catmail serve` 读信、整理、写草稿（[设计](docs/architecture/mcp.md)）：只读、`catmail serve` 与图形界面托管、令牌的层级与账户范围、整理、草稿与附件、每个令牌的限额 ✅；发信 | 进行中 |
+| M7 | MCP：让 AI agent 经常驻的图形界面或 `catmail serve` 读信、整理、写草稿、发信（[设计](docs/architecture/mcp.md)）：只读、`catmail serve` 与图形界面托管、令牌的层级与账户范围、整理、草稿与附件、每个令牌的限额、经确认的发信 ✅；无界面服务器的密码、开机自启 | 进行中 |
 
 之后：前端通过 IPC 连接正在运行的引擎（让图形界面和命令行能同时使用）。
 

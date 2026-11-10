@@ -238,7 +238,7 @@ pub(crate) struct Drafts {
     pub drafts: Vec<DraftOut>,
 }
 
-/// A draft, which only the user sends.
+/// A draft, which the user sends, or `send_draft` with their leave.
 #[derive(Serialize, JsonSchema)]
 pub(crate) struct DraftOut {
     pub id: i64,

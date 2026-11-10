@@ -64,16 +64,29 @@ pub enum Tier {
     /// Also write drafts (new ones, replies, forwards) and change them and their
     /// attachments, for the user to send.
     Draft,
+    /// Also send drafts, each once the user confirms it in the agent's client.
+    Send,
+    /// Also send drafts without asking the user: for an agent whose client can't ask, or
+    /// that works on its own.
+    SendUnasked,
 }
 
 impl Tier {
-    pub const ALL: [Tier; 3] = [Tier::Read, Tier::Organize, Tier::Draft];
+    pub const ALL: [Tier; 5] = [
+        Tier::Read,
+        Tier::Organize,
+        Tier::Draft,
+        Tier::Send,
+        Tier::SendUnasked,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Tier::Read => "read",
             Tier::Organize => "organize",
             Tier::Draft => "draft",
+            Tier::Send => "send",
+            Tier::SendUnasked => "send_unasked",
         }
     }
 }
@@ -475,8 +488,13 @@ mod tests {
     fn tiers_parse_and_order() {
         assert_eq!("Organize".parse::<Tier>(), Ok(Tier::Organize));
         assert_eq!(" draft".parse::<Tier>(), Ok(Tier::Draft));
-        assert!("send".parse::<Tier>().is_err());
-        assert!(Tier::Read < Tier::Organize && Tier::Organize < Tier::Draft);
+        assert_eq!("send_unasked".parse::<Tier>(), Ok(Tier::SendUnasked));
+        assert!("everything".parse::<Tier>().is_err());
+        assert!(Tier::ALL.is_sorted_by(|a, b| a < b));
+        // The file says what the CLI does.
+        for tier in Tier::ALL {
+            assert_eq!(serde_json::to_value(tier).unwrap(), tier.as_str());
+        }
     }
 
     #[test]

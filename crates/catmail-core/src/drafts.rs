@@ -67,19 +67,19 @@ pub(crate) async fn open(engine: &Arc<Engine>, id: DraftId) -> Result<(EditMark,
         .ok_or(Error::DraftNotFound(id))
 }
 
-/// Refuses a change to `draft` while an editor has it open, unless the change is that
-/// editor's (`editor` is the draft it edits): the user would send what they never saw,
-/// or their editor would save over the change. Checked inside the write transaction
-/// that makes it.
-fn not_open_elsewhere(
+/// Refuses a change to `draft`, or sending it, while an editor has it open, unless it is
+/// that editor's doing (`editor` is the draft it edits): the user would send what they
+/// never saw, or their editor would save over the change. Checked inside the write
+/// transaction that makes it.
+pub(crate) fn not_open_elsewhere(
     editing: &Editing,
     draft: DraftId,
     editor: Option<DraftId>,
 ) -> catmail_store::Result<()> {
     if editor != Some(draft) && lock(editing).contains_key(&draft) {
         return Err(catmail_store::Error::Conflict(format!(
-            "draft {draft} is open in the app, where the user is writing it; it can be \
-             changed once they close it"
+            "draft {draft} is open in the app, where the user is writing it; try again once \
+             they close it"
         )));
     }
     Ok(())

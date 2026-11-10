@@ -1139,7 +1139,7 @@
           "type": "object"
         },
         "DraftOut": {
-          "description": "A draft, which only the user sends.",
+          "description": "A draft, which the user sends, or `send_draft` with their leave.",
           "properties": {
             "account": {
               "format": "int64",
@@ -2951,6 +2951,84 @@
       "required": [
         "messages",
         "next_after"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Sends a draft. First the user is asked, in this client, to confirm it as it would go out (unless they let this token send without asking); declined, it stays in Drafts. Confirmed, it goes to the outbox, which sends it in the background: `list_outbox` shows how it went. A draft changed after it was shown is asked about again.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "draft": {
+          "description": "Draft id.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "draft"
+      ],
+      "type": "object"
+    },
+    "name": "send_draft",
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "account": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "attempts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "last_error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "next_attempt_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recipients": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "status": {
+          "description": "`queued`, `sending`; `accepted` (sent, not saved to Sent yet); `unknown` (may or\nmay not have gone out: only the user can tell); `failed`; `done`.",
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "account",
+        "subject",
+        "recipients",
+        "status",
+        "attempts",
+        "last_error",
+        "next_attempt_at"
       ],
       "type": "object"
     }

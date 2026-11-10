@@ -162,6 +162,8 @@ pub fn tier_label(tier: Tier) -> &'static str {
         Tier::Read => "Read only",
         Tier::Organize => "Read and organize",
         Tier::Draft => "Read, organize and write drafts",
+        Tier::Send => "Also send, asking first",
+        Tier::SendUnasked => "Also send, without asking",
     }
 }
 
