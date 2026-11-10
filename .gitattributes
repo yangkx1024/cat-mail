@@ -1,2 +1,5 @@
 # Raw RFC 5322 fixtures: keep their CRLF line endings byte for byte.
 testenv/fixtures/*.eml -text
+# Compared byte for byte with what the test generates (`include_str!`): LF everywhere,
+# also where Git checks text out with CRLF (Windows).
+crates/catmail-mcp/src/tools.snapshot.json text eol=lf
