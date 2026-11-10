@@ -12,8 +12,7 @@ use anyhow::Result;
 use catmail_core::{
     Account, AccountMode, Address, Attachment, Draft, DraftAttachment, ErrorKind, Event, Flags,
     Folder, FolderRole, FolderSyncReport, GcReport, Identity, Message, MessageSummary, OpKind,
-    OpStatus, OutboxEntry, OutboxStatus, PendingOp, ReplayReport, ReportedError, Security,
-    ServerConfig, SyncReport,
+    OutboxEntry, PendingOp, ReplayReport, ReportedError, ServerConfig, SyncReport,
 };
 use serde::Serialize;
 
@@ -74,17 +73,7 @@ fn time(unix: i64) -> Option<String> {
 }
 
 fn flags(flags: Flags) -> Vec<&'static str> {
-    [
-        (Flags::SEEN, "seen"),
-        (Flags::FLAGGED, "flagged"),
-        (Flags::ANSWERED, "answered"),
-        (Flags::DRAFT, "draft"),
-        (Flags::DELETED, "deleted"),
-    ]
-    .into_iter()
-    .filter(|&(flag, _)| flags.contains(flag))
-    .map(|(_, name)| name)
-    .collect()
+    flags.names()
 }
 
 #[derive(Serialize)]
@@ -171,11 +160,7 @@ impl From<&ServerConfig> for JsonServer {
         Self {
             host: s.host.clone(),
             port: s.port,
-            security: match s.security {
-                Security::Tls => "tls",
-                Security::StartTls => "starttls",
-                Security::Plain => "plain",
-            },
+            security: s.security.as_str(),
         }
     }
 }
@@ -188,18 +173,10 @@ pub(crate) struct JsonError {
 
 impl JsonError {
     pub(crate) fn new(kind: ErrorKind, message: String) -> Self {
-        let kind = match kind {
-            ErrorKind::Network => "network",
-            ErrorKind::Auth => "auth",
-            ErrorKind::OverLimit => "over_limit",
-            ErrorKind::Refused => "refused",
-            ErrorKind::OutOfSync => "out_of_sync",
-            ErrorKind::NotFound => "not_found",
-            ErrorKind::Invalid => "invalid",
-            ErrorKind::Conflict => "conflict",
-            ErrorKind::Internal => "internal",
-        };
-        Self { kind, message }
+        Self {
+            kind: kind.as_str(),
+            message,
+        }
     }
 }
 
@@ -514,14 +491,7 @@ impl From<&OutboxEntry> for JsonOutboxEntry {
             subject: e.subject.clone(),
             recipients: e.recipients.clone(),
             message_id: e.message_id.clone(),
-            status: match e.status {
-                OutboxStatus::Queued => "queued",
-                OutboxStatus::Sending => "sending",
-                OutboxStatus::Accepted => "accepted",
-                OutboxStatus::Unknown => "unknown",
-                OutboxStatus::Done => "done",
-                OutboxStatus::Failed => "failed",
-            },
+            status: e.status.as_str(),
             attempts: e.attempts,
             next_attempt_at: e.next_attempt_at.and_then(time),
             last_error: e.last_error.clone(),
@@ -582,11 +552,7 @@ impl From<&PendingOp> for JsonPendingOp {
                     add,
                 },
             },
-            status: match op.status {
-                OpStatus::Pending => "pending",
-                OpStatus::Failed => "failed",
-                OpStatus::Conflict => "conflict",
-            },
+            status: op.status.as_str(),
             attempts: op.attempts,
             last_error: op.last_error.clone(),
             created_at: time(op.created_at),
@@ -631,6 +597,25 @@ impl From<&GcReport> for JsonGc {
         Self {
             removed: r.removed,
             bytes: r.bytes,
+        }
+    }
+}
+
+/// An MCP token: what it is for, and only when just made, the token itself.
+#[derive(Serialize)]
+pub(crate) struct JsonToken {
+    name: String,
+    created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    secret: Option<String>,
+}
+
+impl JsonToken {
+    pub(crate) fn new(token: &catmail_mcp::Token, secret: Option<String>) -> Self {
+        Self {
+            name: token.name.clone(),
+            created_at: time(token.created_at),
+            secret,
         }
     }
 }
@@ -694,7 +679,7 @@ fn list<'a, J: From<&'a T>, T: 'a>(items: impl IntoIterator<Item = &'a T>) -> Ve
 mod tests {
     use catmail_core::{
         AccountId, AttachmentId, DraftAttachmentId, DraftContent, DraftId, FolderId, IdentityId,
-        MessageBody, MessageId, OutboxId, PendingOpId,
+        MessageBody, MessageId, OpStatus, OutboxId, OutboxStatus, PendingOpId,
     };
     use serde_json::json;
 
@@ -968,6 +953,22 @@ mod tests {
         assert_eq!(
             document(&JsonEvent::from(&new_mail)),
             json!({"schema_version": 1, "event": "new_mail", "account": 1, "messages": [3, 4]})
+        );
+    }
+
+    #[test]
+    fn token_snapshot() {
+        let token = catmail_mcp::Token {
+            name: "laptop".into(),
+            created_at: 0,
+        };
+        assert_eq!(
+            serde_json::to_value(JsonToken::new(&token, None)).unwrap(),
+            json!({"name": "laptop", "created_at": "1970-01-01T00:00:00Z"})
+        );
+        assert_eq!(
+            serde_json::to_value(JsonToken::new(&token, Some("catmail_x".into()))).unwrap()["secret"],
+            json!("catmail_x")
         );
     }
 }

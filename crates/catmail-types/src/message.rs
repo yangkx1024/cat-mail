@@ -38,6 +38,22 @@ impl Flags {
         Self(0)
     }
 
+    /// The names of the flags set (`seen`, `flagged`, `answered`, `draft`, `deleted`), for
+    /// scripts and agents.
+    pub fn names(self) -> Vec<&'static str> {
+        [
+            (Self::SEEN, "seen"),
+            (Self::FLAGGED, "flagged"),
+            (Self::ANSWERED, "answered"),
+            (Self::DRAFT, "draft"),
+            (Self::DELETED, "deleted"),
+        ]
+        .into_iter()
+        .filter(|&(flag, _)| self.contains(flag))
+        .map(|(_, name)| name)
+        .collect()
+    }
+
     pub const fn from_bits(bits: u32) -> Self {
         Self(bits)
     }

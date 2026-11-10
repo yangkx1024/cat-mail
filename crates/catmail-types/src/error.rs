@@ -31,6 +31,23 @@ pub enum ErrorKind {
     Internal,
 }
 
+impl ErrorKind {
+    /// Its name for scripts and agents, as serde writes it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Network => "network",
+            Self::Auth => "auth",
+            Self::OverLimit => "over_limit",
+            Self::Refused => "refused",
+            Self::OutOfSync => "out_of_sync",
+            Self::NotFound => "not_found",
+            Self::Invalid => "invalid",
+            Self::Conflict => "conflict",
+            Self::Internal => "internal",
+        }
+    }
+}
+
 /// An error as background work reports it to frontends: its kind and its text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReportedError {

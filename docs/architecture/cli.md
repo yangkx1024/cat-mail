@@ -1,7 +1,8 @@
 # CLI
 
-`catmail-cli` 只依赖 `catmail-core`，借用 `#[tokio::main]` 的 runtime 打开 `MailClient`。除
-`catmail watch` 外不开后台同步和后台发信：改动、草稿、发信都在命令里当场做完，做不完的留在队列里。
+`catmail-cli` 依赖 `catmail-core`（和托管 MCP 的 `catmail-mcp`），借用 `#[tokio::main]` 的 runtime 打开
+`MailClient`。除 `catmail watch` 和 `catmail serve` 外不开后台同步和后台发信：改动、草稿、发信都在命令里当场
+做完，做不完的留在队列里。
 
 ## 代码结构
 
@@ -10,7 +11,8 @@ src/
   main.rs        clap 的顶层 `Cli` / `Command`，开日志文件（见[日志](logging.md)）、打开 MailClient，分发，按错误决定退出码
   cmd/           每组命令一个文件，各自带 clap 参数类型：account、sync、search（ls / search）、
                  read（read / attachment）、ops（mark / mv / archive / rm / label / ops）、folder（新建、重命名、删除文件夹）、
-                 compose（compose / reply / forward / draft）、outbox（send / outbox）、watch、gc；
+                 compose（compose / reply / forward / draft）、outbox（send / outbox）、watch、gc、
+                 mcp（serve、mcp token）；
                  mod.rs 是它们共用的查找（账户、分页游标、文件夹名）
   output.rs      给人看的输出：转义陌生人给的文本、对齐的表格、各命令的表格和信件视图
   json.rs        给脚本的 `--json` 输出
@@ -53,6 +55,18 @@ types 加变体会编译失败）。
 `catmail folder add <名字> [--parent <文件夹>]`、`folder rename <文件夹> <新名字>`、`folder rm <文件夹>`：当场在服务器上
 做（不进队列），连不上就失败、退出码 1。文件夹按名字找（与 `ls` 相同）；Gmail 上是标签。`--json` 输出
 `{"folder": …}`，结构同 `ls` 的文件夹，`rm` 的是删除前的样子。规则见[文件夹与标签的管理](folders.md)。
+
+## `serve` 与 MCP 令牌
+
+`catmail serve` 像 GUI 一样常驻：引擎用 `MailClientBuilder::resident()`（后台同步、预取正文、后台发信、GC，
+比 `watch` 多了发信），同时在 `127.0.0.1` 上提供 MCP（`--port`，默认 8642；`--host` 是隧道转来时的名字），
+直到 Ctrl-C 或 SIGTERM（systemd、launchd 停服务时发的），停下时等进行中的请求答完。设计见 [MCP](mcp.md)。
+
+`catmail mcp token add <名字> / list / rm <名字>` 管 agent 用的令牌。令牌在配置目录的文件里，不在数据库里，
+所以这几个命令不打开引擎，`serve`（或 GUI）运行时照样能用，删掉的令牌立即失效。`add` 把令牌打到 stdout，
+只这一次；`--json` 是 `{"token": {name, created_at, secret}}`，`list` 是 `{"tokens": [...]}`，不带 `secret`。
+
+配置目录是 `--config-dir`（`CATMAIL_CONFIG_DIR`），缺省与 GUI 相同。
 
 ## 退出码
 

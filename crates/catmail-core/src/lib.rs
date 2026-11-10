@@ -43,6 +43,9 @@ mod version;
 mod watch;
 
 pub use catmail_proto::TlsConfig;
+/// Files and directories for the user alone, as the data directory's are: for what
+/// frontends keep elsewhere (MCP tokens in the config directory).
+pub use catmail_store::{create_private_dir, private_file_options};
 pub use catmail_types::*;
 pub use client::{EVENT_CAPACITY, MailClient, MailClientBuilder, Verify};
 pub use config::{Config, DataDirLock};

@@ -187,4 +187,4 @@ Windows Credential Manager），service 为 `catmail`，键为 `account:{email}:
 任何能看到这一行的人也一定能看到它的密钥，所以并发删除不会留下孤立凭据。唯一的残留窗口是进程恰好
 在"写密钥"与"插入行"之间崩溃，只会留下一条无害的孤立条目。
 
-待办：无 Secret Service 的环境（纯 TTY）提供加密文件降级。
+待办：无 Secret Service 的环境（无界面的服务器）读 systemd 的 credentials，见 [MCP / 无界面服务器的密码](mcp.md#无界面服务器的密码)。

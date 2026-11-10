@@ -1,0 +1,36 @@
+[package]
+name = "catmail-mcp"
+description = "catmail over the Model Context Protocol: the tools AI agents call, their tokens, and the HTTP server that runs them"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+catmail-core.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+jiff.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "rt", "macros", "time"] }
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+catmail-testkit.workspace = true
+hyper = { workspace = true, features = ["client"] }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[lints]
+workspace = true

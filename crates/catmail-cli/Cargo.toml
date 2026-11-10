@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 catmail-core.workspace = true
+catmail-mcp.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 jiff.workspace = true

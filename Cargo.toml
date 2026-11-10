@@ -15,6 +15,7 @@ catmail-proto = { path = "crates/catmail-proto" }
 catmail-html = { path = "crates/catmail-html" }
 catmail-core = { path = "crates/catmail-core" }
 catmail-frontend = { path = "crates/catmail-frontend" }
+catmail-mcp = { path = "crates/catmail-mcp" }
 catmail-testkit = { path = "crates/catmail-testkit" }
 
 ammonia = "4.2.4"
@@ -38,12 +39,20 @@ color = "0.3.3"
 futures-channel = "0.3.34"
 # Runs an outbox pass's SMTP connections side by side within the pass's own task.
 futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
+# Random bytes for MCP tokens; the version already in the tree.
+getrandom = "0.4.3"
 # SIGINT and SIGTERM on GTK's loop in catmail-gui; the glib that gtk4 uses.
 glib-unix = "0.22"
 hex = "0.4"
 # The version ammonia uses, so the sanitizer and the layout pass share one parser.
 html5ever = "0.40.1"
 jiff = "0.2.38"
+# The MCP server's HTTP/1.1 on the local address (`catmail-mcp`), under rmcp's
+# Streamable HTTP service; the versions reqwest already uses.
+http = "1.5.0"
+http-body-util = "0.1.5"
+hyper = { version = "1.12.0", features = ["server", "http1"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
 # The Linux tray icon (StatusNotifierItem over D-Bus, no GTK). On async-io, the runtime
 # of the zbus already in the tree (notifications, the keyring), not tokio.
 ksni = { version = "0.3.7", default-features = false, features = ["async-io"] }
@@ -124,6 +133,9 @@ resvg = { version = "0.46", default-features = false, features = ["text", "syste
 # Reads iTerm2 color schemes (XML property lists).
 quick-xml = "0.41.0"
 rcgen = "0.14"
+# The Model Context Protocol (`catmail-mcp`): its tool macros and Streamable HTTP
+# service, without the client side, OAuth or reqwest.
+rmcp = { version = "3.9.0", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }
 rpassword = "7"
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 # ring instead of the default aws-lc-rs: no cmake/NASM needed on Windows CI.
@@ -131,6 +143,8 @@ rustls = { version = "0.23.46", default-features = false, features = ["ring", "s
 rustls-platform-verifier = "0.7.1"
 # The current user, to check who owns the data directory (std has no safe getuid).
 rustix = { version = "1.1.5", features = ["process"] }
+# The JSON schemas of the MCP tools' input and output; the version rmcp uses.
+schemars = "1.2.3"
 # Keeps passwords out of Debug output and zeroes them when dropped.
 secrecy = "0.10.3"
 serde = { version = "1", features = ["derive"] }
@@ -141,6 +155,8 @@ socket2 = "0.6.5"
 tempfile = "3"
 thiserror = "2"
 tokio = "1.53"
+# Stops the MCP server's connections (CancellationToken); the version rmcp uses.
+tokio-util = "0.7.20"
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
 # Reads Alacritty and WezTerm color schemes.
 toml = "1.1.8"
