@@ -6,7 +6,7 @@ pub enum Error {
     Sqlite(#[from] rusqlite::Error),
 
     #[error("database migration failed: {0}")]
-    Migration(#[from] rusqlite_migration::Error),
+    Migration(String),
 
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),

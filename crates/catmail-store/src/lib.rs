@@ -14,6 +14,7 @@ mod folders;
 mod fts;
 mod identities;
 mod messages;
+mod migrate;
 mod ops;
 mod outbox;
 mod prefetch;
@@ -26,7 +27,6 @@ use std::time::Duration;
 
 use catmail_types::BlobHash;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
-use rusqlite_migration::{M, Migrations};
 
 pub use accounts::Accounts;
 pub use attachments::{AttachmentSource, Attachments, NewAttachment};
@@ -48,7 +48,8 @@ const BLOB_REFERENCES: &str = "
     UNION ALL SELECT blob_hash FROM draft_attachments
     UNION ALL SELECT raw_blob_hash FROM outbox";
 
-const MIGRATIONS: &[M<'static>] = &[M::up(include_str!("../migrations/0001_init.sql"))];
+/// In order; see [`migrate`].
+const MIGRATIONS: &[&str] = &[include_str!("../migrations/0001_init.sql")];
 
 /// Read connections, opened with the store; further concurrent reads wait for one to
 /// come back.
@@ -221,7 +222,7 @@ impl Store {
         conn.pragma_update(None, "secure_delete", true)?;
         conn.pragma_update(None, "foreign_keys", true)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
-        Migrations::from_slice(MIGRATIONS).to_latest(&mut conn)?;
+        migrate::to_latest(&mut conn, MIGRATIONS)?;
         Ok(Self {
             inner: Arc::new(Inner {
                 // After the migration, so no read sees an older schema.
@@ -510,11 +511,6 @@ mod tests {
                 "{table}.{column} is not in BLOB_REFERENCES"
             );
         }
-    }
-
-    #[test]
-    fn migrations_are_valid() {
-        Migrations::from_slice(MIGRATIONS).validate().unwrap();
     }
 
     #[test]

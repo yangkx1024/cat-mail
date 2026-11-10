@@ -14,8 +14,13 @@
   读里套读可能把池耗尽。
 - `secure_delete=ON`：删除账户、UIDVALIDITY 重建、GC 之后，正文不会留在空闲页里等着被覆盖。代价是
   被释放的页都要（经 WAL）写一遍零，包括 FTS 合并释放的。没有用 `FAST`：它不清零进入空闲列表的溢出页，而大段正文正在溢出页里。
-- 迁移在 `crates/catmail-store/migrations/`，由 `rusqlite_migration`（`user_version`）执行。发布
-  之后迁移文件不可修改，改 schema 一律新增文件。
+- 迁移在 `crates/catmail-store/migrations/`，由 store 自己的 `migrate::to_latest` 执行：
+  `user_version` 记库已经跑过几个迁移，没跑过的按顺序在一个事务里跑完，提交前 `foreign_key_check`，
+  失败就整个回滚；库的版本比程序认识的新（较新的 catmail 迁移过）就拒绝打开。
+  发布之后迁移文件不可修改，改 schema 一律新增文件，迁移不能重排、删除。
+  - 计数与 `rusqlite_migration` 相同，两者可以互换：这是约束，不要改成别的记法。
+  - 迁移在事务里，`PRAGMA foreign_keys` 在其中无效。重建表的迁移关不掉外键，弄坏的引用由提交前的
+    检查拦下。
 - 约定：时间为 unix 秒；枚举列为 TEXT 不加 CHECK（新增变体无需重建表）；地址列表为 JSON；外部可见
   的 ID（accounts / folders / messages / drafts）用 `AUTOINCREMENT`，删除后不复用。
 
