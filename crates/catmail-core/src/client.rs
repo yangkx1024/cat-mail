@@ -30,8 +30,8 @@ use crate::runtime::Runtime;
 use crate::secrets::{KeyringSecrets, SecretStore};
 use crate::watch::{self, SyncSchedule};
 use crate::{
-    BodyPrefetch, Config, DataDirLock, EditMark, Error, Result, body, connection, drafts, folders,
-    gc, images, ops, prefetch, rebuild, search, send, sleep, sync,
+    BodyPrefetch, Config, DataDirLock, DraftRevision, EditMark, Error, Result, SendPreview, body,
+    connection, drafts, folders, gc, images, ops, prefetch, rebuild, search, send, sleep, sync,
 };
 
 /// Starts the background work the engine does per account (sync, prefetch of bodies), if
@@ -1485,13 +1485,47 @@ impl MailClient {
     /// sent; the draft stays locked until it is sent (then it is deleted) or the send is
     /// cancelled. Sending happens in the background if the client was built with
     /// [`MailClientBuilder::send_in_background`], else on
-    /// [`flush_outbox`](Self::flush_outbox).
+    /// [`flush_outbox`](Self::flush_outbox). Fails with [`Error::Conflict`] while the
+    /// draft is open in an editor (see [`edit_draft`](Self::edit_draft)).
     pub async fn send_draft(&self, id: DraftId) -> Result<OutboxEntry> {
+        self.send_as(id, None, None).await
+    }
+
+    /// `editor`: the draft the caller is the editor of, see [`DraftEditor`].
+    async fn send_as(
+        &self,
+        id: DraftId,
+        editor: Option<DraftId>,
+        previewed: Option<DraftRevision>,
+    ) -> Result<OutboxEntry> {
         let engine = self.engine()?;
         self.shared
             .rt
-            .run(async move { send::queue_draft(&engine, id).await })
+            .run(async move { send::queue_draft(&engine, id, editor, previewed).await })
             .await
+    }
+
+    /// The draft as [`send_draft`](Self::send_draft) would send it, for the user to
+    /// confirm before someone other than its editor (an agent) sends it with
+    /// [`send_previewed`](Self::send_previewed). Fails where `send_draft` would, and
+    /// with [`Error::Conflict`] while the draft is open in an editor.
+    pub async fn preview_send(&self, id: DraftId) -> Result<SendPreview> {
+        let engine = self.engine()?;
+        self.shared
+            .rt
+            .run(async move { send::preview(&engine, id).await })
+            .await
+    }
+
+    /// [`send_draft`](Self::send_draft), if the draft is still the `revision` a
+    /// [`preview_send`](Self::preview_send) showed: what the user confirmed is what goes
+    /// out. Fails with [`Error::Conflict`] otherwise.
+    pub async fn send_previewed(
+        &self,
+        id: DraftId,
+        revision: DraftRevision,
+    ) -> Result<OutboxEntry> {
+        self.send_as(id, None, Some(revision)).await
     }
 
     /// Every entry still in the outbox (sent ones are gone), oldest first; all
@@ -1811,6 +1845,12 @@ impl DraftEditor {
     pub async fn attach_file(&self, file: impl Into<NewFile>) -> Result<DraftAttachment> {
         let draft = self.draft;
         self.client.attach_as(draft, file.into(), Some(draft)).await
+    }
+
+    /// [`MailClient::send_draft`], as the editor.
+    pub async fn send(&self) -> Result<OutboxEntry> {
+        let draft = self.draft;
+        self.client.send_as(draft, Some(draft), None).await
     }
 
     /// [`MailClient::remove_draft_attachment`], as the editor: only one of its draft's.
@@ -2545,6 +2585,59 @@ mod tests {
         let queued = client.send_draft(draft.id).await;
         assert!(matches!(queued, Err(Error::InvalidInput(_))), "{queued:?}");
         assert!(client.list_outbox(None).await.unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_previewed_send_goes_out_only_as_it_was_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(MemorySecrets::default());
+        let (client, account) = client_with_account(dir.path(), secrets, "a@example.com").await;
+        let draft = draft_to_b(&client, account).await;
+        let shown = client.preview_send(draft.id).await.unwrap();
+        assert_eq!(shown.from.email, "a@example.com");
+
+        // Changed after it was shown: what was confirmed isn't what would go out.
+        let changes = catmail_types::DraftChanges {
+            subject: Some("changed".into()),
+            ..Default::default()
+        };
+        client.update_draft(draft.id, changes).await.unwrap();
+        let queued = client.send_previewed(draft.id, shown.revision).await;
+        assert!(matches!(queued, Err(Error::Conflict(_))), "{queued:?}");
+
+        // Open in an editor, where the user may be changing it.
+        let shown = client.preview_send(draft.id).await.unwrap();
+        let (_editor, mark, _) = client.edit_draft(draft.id).await.unwrap();
+        let queued = client.send_previewed(draft.id, shown.revision).await;
+        assert!(matches!(queued, Err(Error::Conflict(_))), "{queued:?}");
+        let previewed = client.preview_send(draft.id).await;
+        assert!(
+            matches!(previewed, Err(Error::Conflict(_))),
+            "{previewed:?}"
+        );
+        let sent = client.send_draft(draft.id).await;
+        assert!(matches!(sent, Err(Error::Conflict(_))), "{sent:?}");
+        assert!(client.list_outbox(None).await.unwrap().is_empty());
+
+        drop(mark);
+        let entry = client
+            .send_previewed(draft.id, shown.revision)
+            .await
+            .unwrap();
+        assert_eq!(entry.subject, "changed");
+        let again = client.preview_send(draft.id).await;
+        assert!(matches!(again, Err(Error::Conflict(_))), "{again:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_editor_sends_the_draft_it_has_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(MemorySecrets::default());
+        let (client, account) = client_with_account(dir.path(), secrets, "a@example.com").await;
+        let draft = draft_to_b(&client, account).await;
+        let (editor, _mark, _) = client.edit_draft(draft.id).await.unwrap();
+        let entry = editor.send().await.unwrap();
+        assert_eq!(entry.recipients, ["b@example.com"]);
     }
 
     #[cfg(unix)]

@@ -20,9 +20,9 @@ use std::time::Duration;
 
 use catmail_proto::imap::Session;
 use catmail_proto::smtp;
-use catmail_store::{NewOutboxEntry, Outbox, OutboxJob, Touched};
+use catmail_store::{DraftSnapshot, NewOutboxEntry, Outbox, OutboxJob, Touched};
 use catmail_types::{
-    Account, AccountId, Address, BlobHash, DraftId, ErrorKind, Event, Flags, FlushReport,
+    Account, AccountId, Address, BlobHash, Draft, DraftId, ErrorKind, Event, Flags, FlushReport,
     FolderRole, Identity, IdentityId, OutboxEntry, OutboxId, OutboxStatus, ReportedError,
 };
 use futures_util::future::join_all;
@@ -40,15 +40,45 @@ const MAX_BACKOFF: i64 = 30 * 60;
 /// much later (see [`Failures::retry_in`](crate::engine::Failures::retry_in)).
 const RETRY_AFTER_WAKE: i64 = 2;
 
-/// Freezes the draft into an outbox entry: the message is built and stored now, with
-/// its Message-ID and Date, and the draft is locked until the entry is done or
-/// cancelled.
-pub(crate) async fn queue_draft(engine: &Arc<Engine>, id: DraftId) -> Result<OutboxEntry> {
-    let (snapshot, sender) = engine
+/// A draft as queueing it now would send it, for the user to confirm before someone
+/// other than its editor (an agent) sends it: see
+/// [`MailClient::preview_send`](crate::MailClient::preview_send).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendPreview {
+    pub draft: Draft,
+    /// The identity it is sent as.
+    pub from: Address,
+    /// What [`MailClient::send_previewed`](crate::MailClient::send_previewed) takes back.
+    pub revision: DraftRevision,
+}
+
+/// A version of a draft: changing what it says, its attachments or the identity it is
+/// sent as makes a new one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DraftRevision(i64);
+
+/// The draft as it would be sent, failing where queueing it not as its editor would.
+pub(crate) async fn preview(engine: &Arc<Engine>, id: DraftId) -> Result<SendPreview> {
+    let (snapshot, sender) = sending(engine, id).await?;
+    sendable(id, &snapshot, &sender)?;
+    drafts::not_open_elsewhere(&engine.editing(), id, None)?;
+    Ok(SendPreview {
+        revision: DraftRevision(snapshot.revision),
+        draft: snapshot.draft,
+        from: sender,
+    })
+}
+
+/// The draft with what building its message needs, and the address it is sent from.
+async fn sending(engine: &Arc<Engine>, id: DraftId) -> Result<(DraftSnapshot, Address)> {
+    engine
         .read(move |db| connection::draft_sender(db, id))
         .await?
-        .ok_or(Error::DraftNotFound(id))?;
-    let account_id = snapshot.draft.account_id;
+        .ok_or(Error::DraftNotFound(id))
+}
+
+/// The draft's envelope recipients, if it can be queued.
+fn sendable(id: DraftId, snapshot: &DraftSnapshot, sender: &Address) -> Result<Vec<String>> {
     if let Some(outbox) = snapshot.draft.outbox {
         return Err(Error::Conflict(format!(
             "draft {id} is already in the outbox (entry {outbox})"
@@ -62,9 +92,34 @@ pub(crate) async fn queue_draft(engine: &Arc<Engine>, id: DraftId) -> Result<Out
     if recipients.is_empty() {
         return Err(Error::InvalidInput("the draft has no recipients".into()));
     }
+    Ok(recipients)
+}
+
+/// Freezes the draft into an outbox entry: the message is built and stored now, with
+/// its Message-ID and Date, and the draft is locked until the entry is done or
+/// cancelled. Refused while an editor other than `editor` (the draft it edits) has it
+/// open, and with `previewed`, unless the draft is still that revision: what was
+/// confirmed is what is sent. Both are checked in the transaction that queues it.
+pub(crate) async fn queue_draft(
+    engine: &Arc<Engine>,
+    id: DraftId,
+    editor: Option<DraftId>,
+    previewed: Option<DraftRevision>,
+) -> Result<OutboxEntry> {
+    let (snapshot, sender) = sending(engine, id).await?;
+    let account_id = snapshot.draft.account_id;
+    if previewed.is_some_and(|r| r.0 != snapshot.revision) {
+        return Err(Error::Conflict(format!(
+            "draft {id} changed since it was shown; it has to be confirmed again"
+        )));
+    }
+    let recipients = sendable(id, &snapshot, &sender)?;
+    let editing = engine.editing();
+    // Before building the message as well: it reads every attachment.
+    drafts::not_open_elsewhere(&editing, id, editor)?;
 
     let message_id = drafts::new_message_id(&sender.email);
-    let (revision, subject) = (snapshot.revision, content.subject.clone());
+    let (revision, subject) = (snapshot.revision, snapshot.draft.content.subject.clone());
     let envelope_from = sender.email.clone();
     let raw = blocking({
         let (engine, message_id) = (engine.clone(), message_id.clone());
@@ -87,6 +142,7 @@ pub(crate) async fn queue_draft(engine: &Arc<Engine>, id: DraftId) -> Result<Out
     };
     let entry = engine
         .write(move |db| {
+            drafts::not_open_elsewhere(&editing, id, editor)?;
             let id = db.outbox().queue(&entry, now())?;
             db.outbox().get(id)
         })

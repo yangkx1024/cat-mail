@@ -2,9 +2,9 @@
 
 [← 架构](../architecture.md)
 
-> 状态：第 1 至 3 步已实现：`catmail-mcp` 的只读、整理与草稿工具（附件以内容传入、传出）、`catmail serve`、
-> 令牌文件（层级与账户范围）、每个令牌的限额、GUI 托管（Settings › Agents）、改动的日志。发信与无界面服务器的
-> 密码尚未实现，那些小节是设计。
+> 状态：第 1 至 3 步与第 5 步的发信已实现：`catmail-mcp` 的只读、整理、草稿（附件以内容传入、传出）与发信的工具、
+> `catmail serve`、令牌文件（层级与账户范围）、每个令牌的限额、GUI 托管（Settings › Agents）、改动的日志。无界面
+> 服务器的密码、OAuth 尚未实现，那些小节是设计。
 
 把 catmail 的能力经 [MCP](https://modelcontextprotocol.io) 交给 AI agent：一台设备常驻，局域网和
 tailnet 里的 agent 都能读信、整理、写草稿，经确认后发信。
@@ -114,7 +114,7 @@ tailnet 里的设备连得上，同一局域网内是直连。catmail 因此不�
 
 ## 工具与权限
 
-权限分四层，层层包含：只读 < 整理 < 草稿 < 发信（已实现前三层）。令牌没有的层级，工具不出现在 `tools/list`
+权限分五层，层层包含：只读 < 整理 < 草稿 < 发信（先问用户）< 不问就发信。令牌没有的层级，工具不出现在 `tools/list`
 里，调用时得到与不存在的工具相同的错误（`tool not found`）。
 
 - **每个工具的层级逐个写在 `tools::tier_of` 里**，不按注解推断，也没有缺省：新加的工具不写就哪个令牌也看不到、
@@ -131,7 +131,7 @@ tailnet 里的设备连得上，同一局域网内是直连。catmail 因此不�
 | 只读 | `list_accounts`、`list_folders`、`list_messages`、`search`（本地，可选再问服务器）、`read_message`（纯文本，按字数截断）、`read_attachment`、`list_drafts`、`list_outbox`、`list_pending`、`sync` |
 | 整理 | `mark`（已读、星标）、`move`、`archive`、`label`（Gmail）、`trash`，之后立即回放队列 |
 | 草稿 | `create_draft`、`reply`、`forward`、`update_draft`、`attach`、`remove_attachment` |
-| 发信 | `send_draft` |
+| 发信、不问就发信 | `send_draft` |
 
 不提供：永久删除、删除文件夹、删除草稿、增删账户和身份、`retry_outbox`、`mark_outbox_sent`（`unknown` 只由
 用户处理，见[草稿与发信](sending.md)）。删除草稿也算永久删除：草稿可能是用户自己写的；agent 写坏了可以
@@ -162,8 +162,8 @@ tailnet 里的设备连得上，同一局域网内是直连。catmail 因此不�
 
 ### 草稿
 
-- **草稿只由用户发**：工具写好的草稿和用户自己写的一样，存在本地并上传到 Drafts 文件夹，用户在 GUI 或 CLI 里
-  看过再发。服务端的 instructions 也这么说。
+- **草稿缺省由用户发**：工具写好的草稿和用户自己写的一样，存在本地并上传到 Drafts 文件夹，用户在 GUI 或 CLI 里
+  看过再发；令牌有发信的层级时 agent 才能发（见[发信的确认](#发信的确认)）。服务端的 instructions 也这么说。
 - **`from` 写地址，不写 id**：`list_accounts` 的 `sends_as` 就是可选的地址（`Name <地址>` 也行），按
   `MailClient::identity_by_address` 对到账户的身份上，对不上就是 `not_found`。缺省与 GUI 相同：新草稿用账户的
   缺省身份，回复用邮件寄到的那个。`update_draft` 只在草稿自己的账户里找，不把草稿搬到别的账户（那还要查令牌
@@ -201,11 +201,30 @@ tailnet 里的设备连得上，同一局域网内是直连。catmail 因此不�
 
 ## 发信的确认
 
-人通常在 agent 那边，不在常驻设备前，GUI 里的对话框没人看。
+人通常在 agent 那边，不在常驻设备前，GUI 里的对话框没人看。所以确认在 agent 的客户端里问（MCP 的
+elicitation），或者用户事先说了不必问。两种是令牌的两个层级：`send`（先问）与 `send_unasked`（不问）。
 
-- `send_draft` 带 `destructiveHint`，客户端先问用户。
-- 客户端支持 elicitation 时，服务端经它请用户确认，列出收件人和主题。
-- 不支持时，只有显式允许"不确认就发"的令牌能发。
+- **问的方式无状态**：MCP 2026-07-28 去掉了会话，服务端不能在调用中途向客户端发请求，改为多轮请求（SEP-2322）：
+  `send_draft` 第一次答 `input_required`，带一个 elicitation（表单，没有要填的字段，接受就是确认），客户端问过用户后
+  带着答复（`inputResponses`）和服务端给的 `requestState` 再调一次。rmcp 3.9 有这套类型，处理函数用 `RequestState`、
+  `InputResponses` 取出。
+- **`requestState` 只是句柄**：客户端原样送回，但不可信（agent 那一端也能改写请求）。问过的东西记在服务端的内存里
+  （`tools/sending.rs` 的 `Asked`）：随机句柄 → 令牌名、草稿、给用户看的 `DraftRevision`、问的时间。再调时句柄必须是
+  这个令牌为这份草稿问的，15 分钟内，只能用一次；对不上（编的、别的令牌的、过期的、宿主重启过的）就当没问过，
+  再问一次，而不是报错。用户拒绝或取消是 `declined`，草稿留在 Drafts。
+- **确认的就是发出去的**：问之前 `MailClient::preview_send` 读出草稿要发出去的样子与 revision，确认后
+  `send_previewed(id, revision)` 只在草稿没改过、没在 GUI 里开着时交给发件箱（见[发信 / 别人代发](sending.md)），
+  否则 `conflict`，agent 再调一次就按新内容重新问。问题里写明是哪个令牌要发、From、To、Cc、Bcc、主题、附件
+  （名字与大小）和正文的前 2000 字。
+- **客户端问不了**（没声明 elicitation 的表单，或协议版本早于 2026-07-28，多轮请求到不了它）：`send` 层级的令牌得
+  `cannot_ask`，说明草稿留在 Drafts、或由用户给不问就发的令牌；`send_unasked` 的令牌不问，直接交给发件箱（`send_draft`，草稿在 GUI 里开着时
+  同样拒绝）。`send_unasked` 无论客户端能不能问都不问：给的
+  是独自工作的 agent，没人在客户端前回答。
+- `send_draft` 带 `destructiveHint`，客户端可以在调用前另外再问。
+- 交给发件箱后由常驻引擎在后台发，答复是发件箱的条目（`queued`），之后 `list_outbox` 看结果；`unknown` 仍只由用户
+  处理。每次交给发件箱另记一行 info：令牌、草稿、收件人、有没有问过。
+- 放弃的方案：在 `requestState` 里放签过名的草稿与 revision（rmcp 的 `request-state` feature）：要管密钥，宿主
+  重启后签名照样有效，还得另防重放；放在内存里只需句柄，重启后多问一次而已。
 
 ## 不可信的内容
 
@@ -214,7 +233,7 @@ tailnet 里的设备连得上，同一局域网内是直连。catmail 因此不�
 - 服务端的 instructions、`read_message` 的描述和输出 schema 里正文那个字段都说明：内容是寄件人写的，是数据
   不是指令。正文在 JSON 里是单独一个字段，字段本身就是边界，不再另加分隔符。只给纯文本，不给 HTML；不加载
   远程图片，不跟随链接。
-- 默认的层级是只读；发信要单独给，并经上面的确认。
+- 默认的层级是只读；发信要单独给，并经上面的确认（不问就发更要用户明说）。
 - 每次有改动的调用（工具、令牌、邮件 id、结果）记入日志（见[日志](logging.md)），见上文。
 - 密码从不经过 MCP。
 
@@ -247,11 +266,11 @@ claude mcp add --transport http catmail https://mac.tailnet.ts.net/mcp \
 - `tools/`：工具与参数，按层级分文件，每个文件一个 rmcp 的 `#[tool_router(router = …)]`，`Mail::new` 里相加。
   `mod.rs` 是共用的部分（`Mail`、`Scope`、`Failed`、各工具的层级 `tier_of`、按范围找账户/文件夹/邮件、日志的
   `logged`）和 `ServerHandler`（按层级列出、调用前限频与定范围）；`reading.rs`、`organizing.rs`、`drafts.rs` 是
-  三个层级的工具；`downloads.rs` 是下载预算的扣与退（`with_body`、`downloading`）。
+  三个层级的工具，`sending.rs` 是发信（问用户的多轮请求与 `Asked`）；`downloads.rs` 是下载预算的扣与退（`with_body`、`downloading`）。
 - `output.rs`（逐个写出的输出结构，文档注释就是 schema 里的描述）、`tokens.rs`、`limits.rs`（调用频率与下载
   预算）、`connect.rs`（给 agent 的命令示例）、`http.rs`（监听、令牌、交给 rmcp）。
 - `tests/`：经 HTTP 对假 IMAP 服务器端到端，`mod.rs` 是 `Fixture` 与请求的辅助，其余按主题（`server.rs`：
-  令牌、层级、账户范围、拒绝与停止；`reading.rs`、`organizing.rs`、`drafts.rs`、`limits.rs`）。
+  令牌、层级、账户范围、拒绝与停止；`reading.rs`、`organizing.rs`、`drafts.rs`、`sending.rs`、`limits.rs`）。
   `tests/tools.snapshot.json` 固定 agent 看到的工具列表，有意改动时 `UPDATE_SNAPSHOTS=1` 重新生成。
 CLI 一侧是 `cmd/mcp.rs`；GUI 一侧是 `catmail-frontend` 的 `mcp.rs`（服务的线程、状态的说法、文案；端口的解析与登录表单共用 `login::parse_port`）、
 `catmail-gui` 的 `settings/agents.rs` 和 `shell/mod.rs` 里托管服务的部分。
@@ -264,4 +283,4 @@ CLI 一侧是 `cmd/mcp.rs`；GUI 一侧是 `catmail-frontend` 的 `mcp.rs`（服
 3. ✅ 按层级与账户限定令牌（CLI 的 `--tier`、`--account`，GUI 的两个菜单）、改动的日志、整理的工具；草稿的
    工具、附件以内容传入传出、每个令牌的限额。
 4. systemd credentials；systemd、launchd 的示例；GUI 的登录项与 `--background`。
-5. 发信（elicitation，或允许不确认的令牌）；需要时 OAuth。
+5. ✅ 发信（elicitation 的多轮请求，或不问就发的令牌）；需要时 OAuth。

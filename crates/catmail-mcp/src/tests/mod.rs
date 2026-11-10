@@ -5,6 +5,7 @@ mod drafts;
 mod limits;
 mod organizing;
 mod reading;
+mod sending;
 mod server;
 
 use std::net::SocketAddr;
@@ -35,7 +36,7 @@ struct Fixture {
 
 impl Fixture {
     /// alice@example.com, synced, with INBOX ("one", "two"), Archive and Trash; a server
-    /// on a free port and a token for it, of the draft tier: every tool.
+    /// on a free port and a token for it, of the highest tier: every tool.
     async fn new(options: ServeOptions) -> Self {
         let mut state = ServerState::new("alice", "pw");
         state.inbox().append_simple("one");
@@ -58,7 +59,7 @@ impl Fixture {
         add_account(&client, &fake, "alice").await;
         let tokens = Tokens::new(dir.path().join("config"));
         let every_tool = Access {
-            tier: Tier::Draft,
+            tier: Tier::SendUnasked,
             accounts: None,
         };
         let secret = tokens.add("test", every_tool).unwrap().secret;
@@ -90,14 +91,20 @@ impl Fixture {
     }
 
     async fn post_as(&self, secret: &str, body: Value) -> (StatusCode, String) {
+        self.post_with(secret, &[], body).await
+    }
+
+    /// [`post_as`](Self::post_as), with more headers.
+    async fn post_with(
+        &self,
+        secret: &str,
+        headers: &[(&str, &str)],
+        body: Value,
+    ) -> (StatusCode, String) {
         let auth = format!("Bearer {secret}");
-        send(
-            self.server.local_addr(),
-            "/mcp",
-            &[("authorization", &auth)],
-            body,
-        )
-        .await
+        let mut all = vec![("authorization", auth.as_str())];
+        all.extend_from_slice(headers);
+        send(self.server.local_addr(), "/mcp", &all, body).await
     }
 
     /// The result of calling `tool` with `arguments`, which must have succeeded.
@@ -126,12 +133,7 @@ impl Fixture {
                 }),
             )
             .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        let reply: Value = serde_json::from_str(&body).unwrap();
-        if reply.get("error").is_some() {
-            return reply["error"].clone();
-        }
-        reply["result"].clone()
+        result_of(status, &body)
     }
 
     /// The tools `secret`'s token is shown.
@@ -181,6 +183,16 @@ impl Fixture {
             .as_i64()
             .unwrap()
     }
+}
+
+/// The JSON-RPC reply's `result`, or its `error`.
+fn result_of(status: StatusCode, body: &str) -> Value {
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let reply: Value = serde_json::from_str(body).unwrap();
+    if reply.get("error").is_some() {
+        return reply["error"].clone();
+    }
+    reply["result"].clone()
 }
 
 /// Adds `user`@example.com, on `fake` with password "pw", and syncs it.

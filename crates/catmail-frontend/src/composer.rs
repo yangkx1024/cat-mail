@@ -570,7 +570,7 @@ impl Steps {
             editor.update(changes).await?;
         }
         if self.send {
-            client.send_draft(draft).await?;
+            editor.send().await?;
         }
         Ok(())
     }

@@ -58,6 +58,7 @@ pub use images::RemoteImageStream;
 pub use prefetch::BodyPrefetch;
 pub use secrecy::{ExposeSecret, SecretString};
 pub use secrets::{KeyringSecrets, MemorySecrets, SecretStore};
+pub use send::{DraftRevision, SendPreview};
 /// What [`MailClient::subscribe`]'s receiver returns when it falls behind or the engine
 /// is gone.
 pub use tokio::sync::broadcast::error::RecvError;

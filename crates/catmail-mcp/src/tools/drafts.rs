@@ -138,7 +138,7 @@ pub(crate) struct RemoveAttachmentParams {
 
 impl Mail {
     /// Draft `id`, if it is of one of the call's accounts.
-    async fn draft(&self, id: i64) -> Result<Draft, Failed> {
+    pub(super) async fn draft(&self, id: i64) -> Result<Draft, Failed> {
         self.client
             .get_draft(DraftId(id))
             .await?
