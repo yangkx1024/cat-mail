@@ -62,6 +62,7 @@ pub(crate) async fn serve(
     let options = ServeOptions {
         addr: SocketAddr::from((Ipv4Addr::LOCALHOST, args.port)),
         hosts: args.hosts,
+        ..ServeOptions::default()
     };
     let server = McpServer::start(client.clone(), tokens, options)
         .await

@@ -3,6 +3,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use catmail_core::{
     Config, Flags, MailClient, MemorySecrets, MessageId, NewAccount, Security, ServerConfig, Verify,
@@ -13,6 +14,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{McpServer, ServeOptions, Tokens};
 
@@ -164,6 +166,18 @@ fn initialize() -> Value {
             "clientInfo": {"name": "test", "version": "1"},
         },
     })
+}
+
+/// Returns once nothing listens on `addr` any more: the server began to stop.
+async fn stopped_listening(addr: SocketAddr) {
+    let refused = async {
+        while tokio::net::TcpStream::connect(addr).await.is_ok() {
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(30), refused)
+        .await
+        .expect("the server kept listening");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -418,7 +432,8 @@ async fn stopping_lets_the_requests_being_answered_finish() {
     f.fake.wait_until(|s| s.body_fetches() > 0).await;
 
     let stopping = tokio::spawn(f.server.stop());
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    stopped_listening(addr).await;
+    // The download is still held, so stopping waits on it.
     assert!(!stopping.is_finished(), "stopped with a download under way");
     gate.add_permits(1);
     let (status, body) = read.await.unwrap();
@@ -426,6 +441,45 @@ async fn stopping_lets_the_requests_being_answered_finish() {
     let reply: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(reply["result"]["isError"], false, "{body}");
     stopping.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_cuts_off_a_request_whose_body_never_ends() {
+    let options = ServeOptions {
+        drain: Duration::from_millis(200),
+        ..ServeOptions::default()
+    };
+    let f = Fixture::new(options).await;
+    let addr = f.server.local_addr();
+    // Headers that promise a body. hyper answers `100 Continue` once the handler starts
+    // reading it: the request is in, past the token check, waiting on its body.
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let head = format!(
+        "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: {}\r\n\
+         Content-Type: application/json\r\nAccept: application/json, text/event-stream\r\n\
+         Content-Length: 1000\r\nExpect: 100-continue\r\n\r\n",
+        f.auth()
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    let mut answer = Vec::new();
+    while !answer.windows(3).any(|w| w == b"100") {
+        let mut chunk = [0; 256];
+        let n = stream.read(&mut chunk).await.unwrap();
+        assert!(
+            n > 0,
+            "closed instead of continuing: {}",
+            String::from_utf8_lossy(&answer)
+        );
+        answer.extend_from_slice(&chunk[..n]);
+    }
+    // Only part of the body, and never the rest.
+    stream.write_all(br#"{"jsonrpc""#).await.unwrap();
+
+    // Generous, for a loaded machine: without cutting it off, stopping never ends.
+    tokio::time::timeout(Duration::from_secs(30), f.server.stop())
+        .await
+        .expect("stop waits on the unfinished request for ever");
+    drop(stream);
 }
 
 #[tokio::test(flavor = "multi_thread")]

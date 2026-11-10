@@ -31,8 +31,7 @@ pub const DEFAULT_PORT: u16 = 8642;
 const PATH: &str = "/mcp";
 /// Enough for any tool's arguments; rmcp answers 413 above it.
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-/// How long stopping waits for the requests being answered (a sync, a download) before
-/// it cuts them off.
+/// How long stopping waits for the requests being answered by default.
 const DRAIN: Duration = Duration::from_secs(30);
 
 type Service = StreamableHttpService<Mail, NeverSessionManager>;
@@ -46,6 +45,9 @@ pub struct ServeOptions {
     /// name `tailscale serve` or a tunnel forwards as (`mac.tailnet.ts.net`). A name
     /// alone allows any port; `name:port`, only that one.
     pub hosts: Vec<String>,
+    /// How long stopping waits for the requests being answered (a sync, a download)
+    /// before it cuts them off, and the connections with them.
+    pub drain: Duration,
 }
 
 impl Default for ServeOptions {
@@ -53,6 +55,7 @@ impl Default for ServeOptions {
         Self {
             addr: SocketAddr::from((Ipv4Addr::LOCALHOST, DEFAULT_PORT)),
             hosts: Vec::new(),
+            drain: DRAIN,
         }
     }
 }
@@ -100,7 +103,16 @@ impl McpServer {
             Arc::default(),
             config,
         ));
-        let task = tokio::spawn(accept(listener, service, tokens, stop.clone(), handlers));
+        let task = tokio::spawn(accept(
+            listener,
+            service,
+            tokens,
+            Stopping {
+                stop: stop.clone(),
+                handlers,
+                drain: options.drain,
+            },
+        ));
         tracing::info!(%addr, "MCP server listening");
         Ok(Self {
             addr,
@@ -120,13 +132,20 @@ impl McpServer {
     }
 }
 
-async fn accept(
-    listener: TcpListener,
-    service: Arc<Service>,
-    tokens: Tokens,
+/// How [`accept`] stops: `stop` ends listening and lets connections finish, then
+/// `handlers` (rmcp's) is cancelled, within `drain`.
+struct Stopping {
     stop: CancellationToken,
     handlers: CancellationToken,
-) {
+    drain: Duration,
+}
+
+async fn accept(listener: TcpListener, service: Arc<Service>, tokens: Tokens, stopping: Stopping) {
+    let Stopping {
+        stop,
+        handlers,
+        drain,
+    } = stopping;
     let mut connections = tokio::task::JoinSet::new();
     loop {
         let stream = tokio::select! {
@@ -169,8 +188,11 @@ async fn accept(
     drop(listener);
     // Each connection answers what it is answering, then closes.
     let drained = async { while connections.join_next().await.is_some() {} };
-    if tokio::time::timeout(DRAIN, drained).await.is_err() {
-        tracing::warn!("MCP requests still running after {DRAIN:?}; cutting them off");
+    if tokio::time::timeout(drain, drained).await.is_err() {
+        // Waiting on longer may never end: a client can leave its request's body
+        // unfinished, which neither rmcp's token nor hyper's graceful shutdown ends.
+        tracing::warn!("MCP requests still running after {drain:?}; cutting them off");
+        connections.abort_all();
     }
     handlers.cancel();
     while connections.join_next().await.is_some() {}
