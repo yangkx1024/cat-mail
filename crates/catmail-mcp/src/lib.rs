@@ -14,7 +14,7 @@ mod tokens;
 mod tools;
 
 pub use http::{DEFAULT_PORT, McpServer, ServeOptions};
-pub use tokens::{NewToken, Token, TokenError, Tokens};
+pub use tokens::{Access, NewToken, Tier, Token, TokenError, Tokens};
 
 /// What a host adds to its log filter for the server's own lines (listening, stopped,
 /// tokens turned away).

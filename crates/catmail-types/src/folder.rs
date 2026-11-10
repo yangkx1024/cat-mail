@@ -244,6 +244,9 @@ pub enum DeleteMode {
     /// To Trash, or for good from Trash. Refused for an account without Trash: nothing
     /// is deleted for good there unless asked.
     ToTrash,
+    /// To Trash, never for good: refused, deleting none, if one is in a Trash folder
+    /// already or its account has none. What an AI agent may do.
+    OnlyToTrash,
     /// As its [`DeleteOutcome`] says, for good without a Trash too: whoever asks has
     /// told the user which go for good.
     ByOutcome,

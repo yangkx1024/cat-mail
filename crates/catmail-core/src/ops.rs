@@ -19,8 +19,8 @@ use std::sync::{Arc, Mutex};
 use catmail_proto::imap::{CopyUid, Session};
 use catmail_store::{CopyCheckpoint, Moved, ReplayFolder, ReplayKind, ReplayOp, Touched};
 use catmail_types::{
-    AccountId, DeleteMode, Event, Flags, FolderId, MessageId, PendingOp, PendingOpId, ReplayReport,
-    ReportedError,
+    AccountId, ChangeReport, DeleteMode, Event, Flags, FolderId, MessageId, PendingOp, PendingOpId,
+    ReplayReport, ReportedError,
 };
 
 use crate::draft_sync::{Uploaded, Uploads};
@@ -33,7 +33,7 @@ pub(crate) async fn set_flags(
     messages: Vec<MessageId>,
     add: Flags,
     remove: Flags,
-) -> Result<Vec<AccountId>> {
+) -> Result<ChangeReport> {
     change(&engine, move |db| {
         db.ops().set_flags(&messages, add, remove, now())
     })
@@ -45,7 +45,7 @@ pub(crate) async fn move_messages(
     messages: Vec<MessageId>,
     shown_in: Option<FolderId>,
     to: FolderId,
-) -> Result<Vec<AccountId>> {
+) -> Result<ChangeReport> {
     change(&engine, move |db| {
         db.ops().move_messages(&messages, shown_in, to, now())
     })
@@ -57,7 +57,7 @@ pub(crate) async fn label_messages(
     messages: Vec<MessageId>,
     add: Vec<FolderId>,
     remove: Vec<FolderId>,
-) -> Result<Vec<AccountId>> {
+) -> Result<ChangeReport> {
     change(&engine, move |db| {
         db.ops().label_messages(&messages, &add, &remove, now())
     })
@@ -67,7 +67,7 @@ pub(crate) async fn label_messages(
 pub(crate) async fn archive_messages(
     engine: Arc<Engine>,
     messages: Vec<MessageId>,
-) -> Result<Vec<AccountId>> {
+) -> Result<ChangeReport> {
     change(&engine, move |db| {
         db.ops().archive_messages(&messages, now())
     })
@@ -78,7 +78,7 @@ pub(crate) async fn delete_messages(
     engine: Arc<Engine>,
     messages: Vec<MessageId>,
     mode: DeleteMode,
-) -> Result<Vec<AccountId>> {
+) -> Result<ChangeReport> {
     change(&engine, move |db| {
         db.ops().delete_messages(&messages, mode, now())
     })
@@ -86,15 +86,15 @@ pub(crate) async fn delete_messages(
 }
 
 /// Makes a local change, all of it or nothing, and announces it. Returns the accounts
-/// it touched. Refused if it changes messages in a folder being deleted, or adds or
-/// takes off that label: the deletion would take the change along (a message moved out
-/// of it, say), or the label would come back. One that only shows the messages (a label
-/// they carry) is no matter. Checked in the transaction, after which a deletion's own
-/// check sees the change (see `folders::delete`).
+/// it touched and the ops it queued. Refused if it changes messages in a folder being
+/// deleted, or adds or takes off that label: the deletion would take the change along (a
+/// message moved out of it, say), or the label would come back. One that only shows the
+/// messages (a label they carry) is no matter. Checked in the transaction, after which a
+/// deletion's own check sees the change (see `folders::delete`).
 async fn change(
     engine: &Arc<Engine>,
     f: impl FnOnce(&catmail_store::Db<'_>) -> catmail_store::Result<Touched> + Send + 'static,
-) -> Result<Vec<AccountId>> {
+) -> Result<ChangeReport> {
     let deleting = engine.being_deleted();
     let touched = engine
         .write(move |db| {
@@ -108,7 +108,10 @@ async fn change(
             Ok(touched)
         })
         .await?;
-    Ok(announce(engine, &touched))
+    Ok(ChangeReport {
+        accounts: announce(engine, &touched),
+        ops: touched.ops,
+    })
 }
 
 /// Emits the events for `touched`, and wakes the accounts' background sync to make any

@@ -92,10 +92,10 @@ pub(crate) async fn search(client: &MailClient, args: Search, json: bool) -> Res
             .find_folder(account.id, name)
             .await?
             .with_context(|| format!("no folder `{name}` in {}", account.email))?;
-        query.account = Some(account.id);
+        query.accounts = Some(vec![account.id]);
         query.folder = Some(folder.id);
     } else if let Some(selector) = &args.account {
-        query.account = Some(resolve_account(client, selector).await?.id);
+        query.accounts = Some(vec![resolve_account(client, selector).await?.id]);
     }
     if args.server {
         query.found_on_server = client.search_server(query.clone()).await?;

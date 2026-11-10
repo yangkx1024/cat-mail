@@ -1121,7 +1121,7 @@ mod tests {
             })
             .unwrap();
         let touched = settle(&store, &second, 7, &[6]);
-        assert_eq!(touched, Touched::from([(account, folder)]));
+        assert_eq!(touched.without_ops(), Touched::from([(account, folder)]));
         assert_eq!(store.read(|db| db.messages().count(folder)).unwrap(), 0);
         assert_eq!(deletions(&store, folder), [5], "the copy it replaced");
         assert!(get(&store, draft).on_server);

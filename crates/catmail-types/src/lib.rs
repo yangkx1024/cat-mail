@@ -37,7 +37,7 @@ pub use message::{
     Address, Attachment, FlagState, Flags, GmailLabel, Message, MessageBody, MessageCursor,
     MessageSummary,
 };
-pub use ops::{OpKind, OpStatus, PendingOp, ReplayReport};
+pub use ops::{ChangeReport, OpKind, OpStatus, PendingOp, ReplayReport};
 pub use outbox::{FlushReport, OutboxEntry, OutboxStatus};
 pub use search::{SearchField, SearchQuery, SearchTerm};
 pub use sync::{FolderSyncReport, GcReport, SyncReport};

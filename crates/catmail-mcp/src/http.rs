@@ -195,7 +195,11 @@ async fn accept(listener: TcpListener, service: Arc<Service>, tokens: Tokens, st
     tracing::info!("MCP server stopped");
 }
 
-async fn respond(request: Request<Incoming>, service: &Service, tokens: Tokens) -> Response<Body> {
+async fn respond(
+    mut request: Request<Incoming>,
+    service: &Service,
+    tokens: Tokens,
+) -> Response<Body> {
     if request.uri().path() != PATH {
         return plain(StatusCode::NOT_FOUND, "not found; the endpoint is /mcp");
     }
@@ -207,6 +211,8 @@ async fn respond(request: Request<Incoming>, service: &Service, tokens: Tokens) 
     match verified {
         Ok(Ok(Some(token))) => {
             tracing::debug!(token = %token.name, method = %request.method(), "MCP request");
+            // For the tools: rmcp hands them the request's parts (`tools::token_of`).
+            request.extensions_mut().insert(token);
             service.handle(request).await
         }
         Ok(Ok(None)) => {

@@ -768,7 +768,7 @@ async fn bodies_not_downloaded_are_searched_on_dovecot() {
 
     let search = async |text: &str, folder| {
         let mut query = SearchQuery::new(text);
-        (query.account, query.folder) = (Some(account), folder);
+        (query.accounts, query.folder) = (Some(vec![account]), folder);
         assert!(client.search(query.clone()).await.unwrap().is_empty());
         query.found_on_server = client.search_server(query.clone()).await.unwrap();
         let found = client.search(query).await.unwrap();

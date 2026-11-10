@@ -1,6 +1,482 @@
 [
   {
     "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Archives messages: to their account's Archive folder, or on Gmail out of the inbox.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "messages": {
+          "description": "Message ids, at most 100.",
+          "items": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "messages"
+      ],
+      "type": "object"
+    },
+    "name": "archive",
+    "outputSchema": {
+      "$defs": {
+        "AccountError": {
+          "properties": {
+            "account": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "error": {
+              "$ref": "#/$defs/ErrorOut"
+            }
+          },
+          "required": [
+            "account",
+            "error"
+          ],
+          "type": "object"
+        },
+        "Change": {
+          "oneOf": [
+            {
+              "properties": {
+                "add": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "kind": {
+                  "const": "flags",
+                  "type": "string"
+                },
+                "remove": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "kind",
+                "add",
+                "remove"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "kind": {
+                  "const": "move",
+                  "type": "string"
+                },
+                "to": {
+                  "description": "Folder id.",
+                  "format": "int64",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "kind",
+                "to"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "kind": {
+                  "const": "delete",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "add": {
+                  "type": "boolean"
+                },
+                "kind": {
+                  "const": "label",
+                  "type": "string"
+                },
+                "label": {
+                  "description": "Label (folder) id.",
+                  "format": "int64",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "kind",
+                "label",
+                "add"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ErrorOut": {
+          "properties": {
+            "kind": {
+              "description": "`network`, `auth`, `over_limit`, `refused`, `out_of_sync`, `not_found`,\n`invalid`, `conflict`, `internal`.",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ],
+          "type": "object"
+        },
+        "PendingOut": {
+          "description": "A change made here that the server doesn't have yet, or refused.",
+          "properties": {
+            "account": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "attempts": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "change": {
+              "$ref": "#/$defs/Change"
+            },
+            "id": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "last_error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "message": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "status": {
+              "description": "`pending`; `failed` (the server refused it, and it was undone here);\n`conflict` (the folder changed on the server first).",
+              "type": "string"
+            },
+            "subject": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "account",
+            "message",
+            "subject",
+            "change",
+            "status",
+            "attempts",
+            "last_error"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "errors": {
+          "description": "Accounts whose server couldn't take it now.",
+          "items": {
+            "$ref": "#/$defs/AccountError"
+          },
+          "type": "array"
+        },
+        "messages": {
+          "description": "How many messages it changed.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "not_on_server": {
+          "description": "What of the change the server doesn't have yet (made at the next sync), refused\n(undone here), or couldn't take as asked (`conflict`: the folder changed on the\nserver first; the next sync shows the messages where they are). Empty once all of\nit is on the server.",
+          "items": {
+            "$ref": "#/$defs/PendingOut"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "messages",
+        "not_on_server",
+        "errors"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Puts Gmail labels on messages and takes others off.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "add": {
+          "default": [],
+          "description": "Labels (folder ids, from `list_folders`) to put on them.",
+          "items": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "messages": {
+          "description": "Message ids, at most 100, of one Gmail account.",
+          "items": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "remove": {
+          "default": [],
+          "description": "Labels to take off them.",
+          "items": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "messages"
+      ],
+      "type": "object"
+    },
+    "name": "label",
+    "outputSchema": {
+      "$defs": {
+        "AccountError": {
+          "properties": {
+            "account": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "error": {
+              "$ref": "#/$defs/ErrorOut"
+            }
+          },
+          "required": [
+            "account",
+            "error"
+          ],
+          "type": "object"
+        },
+        "Change": {
+          "oneOf": [
+            {
+              "properties": {
+                "add": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "kind": {
+                  "const": "flags",
+                  "type": "string"
+                },
+                "remove": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "kind",
+                "add",
+                "remove"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "kind": {
+                  "const": "move",
+                  "type": "string"
+                },
+                "to": {
+                  "description": "Folder id.",
+                  "format": "int64",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "kind",
+                "to"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "kind": {
+                  "const": "delete",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "add": {
+                  "type": "boolean"
+                },
+                "kind": {
+                  "const": "label",
+                  "type": "string"
+                },
+                "label": {
+                  "description": "Label (folder) id.",
+                  "format": "int64",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "kind",
+                "label",
+                "add"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ErrorOut": {
+          "properties": {
+            "kind": {
+              "description": "`network`, `auth`, `over_limit`, `refused`, `out_of_sync`, `not_found`,\n`invalid`, `conflict`, `internal`.",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ],
+          "type": "object"
+        },
+        "PendingOut": {
+          "description": "A change made here that the server doesn't have yet, or refused.",
+          "properties": {
+            "account": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "attempts": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "change": {
+              "$ref": "#/$defs/Change"
+            },
+            "id": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "last_error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "message": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "status": {
+              "description": "`pending`; `failed` (the server refused it, and it was undone here);\n`conflict` (the folder changed on the server first).",
+              "type": "string"
+            },
+            "subject": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "account",
+            "message",
+            "subject",
+            "change",
+            "status",
+            "attempts",
+            "last_error"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "errors": {
+          "description": "Accounts whose server couldn't take it now.",
+          "items": {
+            "$ref": "#/$defs/AccountError"
+          },
+          "type": "array"
+        },
+        "messages": {
+          "description": "How many messages it changed.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "not_on_server": {
+          "description": "What of the change the server doesn't have yet (made at the next sync), refused\n(undone here), or couldn't take as asked (`conflict`: the folder changed on the\nserver first; the next sync shows the messages where they are). Empty once all of\nit is on the server.",
+          "items": {
+            "$ref": "#/$defs/PendingOut"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "messages",
+        "not_on_server",
+        "errors"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
       "openWorldHint": false,
       "readOnlyHint": true
     },
@@ -708,6 +1184,492 @@
   },
   {
     "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Marks messages read or unread, starred or not, here and then on the server.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "messages": {
+          "description": "Message ids, at most 100.",
+          "items": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "read": {
+          "description": "Mark them read, or unread with false; left out, as they are.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "starred": {
+          "description": "Star (flag) them, or take the star off with false; left out, as they are.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "messages"
+      ],
+      "type": "object"
+    },
+    "name": "mark",
+    "outputSchema": {
+      "$defs": {
+        "AccountError": {
+          "properties": {
+            "account": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "error": {
+              "$ref": "#/$defs/ErrorOut"
+            }
+          },
+          "required": [
+            "account",
+            "error"
+          ],
+          "type": "object"
+        },
+        "Change": {
+          "oneOf": [
+            {
+              "properties": {
+                "add": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "kind": {
+                  "const": "flags",
+                  "type": "string"
+                },
+                "remove": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "kind",
+                "add",
+                "remove"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "kind": {
+                  "const": "move",
+                  "type": "string"
+                },
+                "to": {
+                  "description": "Folder id.",
+                  "format": "int64",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "kind",
+                "to"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "kind": {
+                  "const": "delete",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "add": {
+                  "type": "boolean"
+                },
+                "kind": {
+                  "const": "label",
+                  "type": "string"
+                },
+                "label": {
+                  "description": "Label (folder) id.",
+                  "format": "int64",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "kind",
+                "label",
+                "add"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ErrorOut": {
+          "properties": {
+            "kind": {
+              "description": "`network`, `auth`, `over_limit`, `refused`, `out_of_sync`, `not_found`,\n`invalid`, `conflict`, `internal`.",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ],
+          "type": "object"
+        },
+        "PendingOut": {
+          "description": "A change made here that the server doesn't have yet, or refused.",
+          "properties": {
+            "account": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "attempts": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "change": {
+              "$ref": "#/$defs/Change"
+            },
+            "id": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "last_error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "message": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "status": {
+              "description": "`pending`; `failed` (the server refused it, and it was undone here);\n`conflict` (the folder changed on the server first).",
+              "type": "string"
+            },
+            "subject": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "account",
+            "message",
+            "subject",
+            "change",
+            "status",
+            "attempts",
+            "last_error"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "errors": {
+          "description": "Accounts whose server couldn't take it now.",
+          "items": {
+            "$ref": "#/$defs/AccountError"
+          },
+          "type": "array"
+        },
+        "messages": {
+          "description": "How many messages it changed.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "not_on_server": {
+          "description": "What of the change the server doesn't have yet (made at the next sync), refused\n(undone here), or couldn't take as asked (`conflict`: the folder changed on the\nserver first; the next sync shows the messages where they are). Empty once all of\nit is on the server.",
+          "items": {
+            "$ref": "#/$defs/PendingOut"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "messages",
+        "not_on_server",
+        "errors"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Moves messages to another folder of their account. On Gmail, where folders are labels, it takes off the label of `from` and puts on `to`'s; moving to Trash or Spam takes the message there.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "from": {
+          "description": "The folder or label they were listed in, if any: on Gmail, moving takes that\nlabel off them.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "messages": {
+          "description": "Message ids, at most 100, of one account.",
+          "items": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "to": {
+          "description": "The folder to move them to, of their account (on Gmail: a label, Trash or Spam).",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "messages",
+        "to"
+      ],
+      "type": "object"
+    },
+    "name": "move",
+    "outputSchema": {
+      "$defs": {
+        "AccountError": {
+          "properties": {
+            "account": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "error": {
+              "$ref": "#/$defs/ErrorOut"
+            }
+          },
+          "required": [
+            "account",
+            "error"
+          ],
+          "type": "object"
+        },
+        "Change": {
+          "oneOf": [
+            {
+              "properties": {
+                "add": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "kind": {
+                  "const": "flags",
+                  "type": "string"
+                },
+                "remove": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "kind",
+                "add",
+                "remove"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "kind": {
+                  "const": "move",
+                  "type": "string"
+                },
+                "to": {
+                  "description": "Folder id.",
+                  "format": "int64",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "kind",
+                "to"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "kind": {
+                  "const": "delete",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "add": {
+                  "type": "boolean"
+                },
+                "kind": {
+                  "const": "label",
+                  "type": "string"
+                },
+                "label": {
+                  "description": "Label (folder) id.",
+                  "format": "int64",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "kind",
+                "label",
+                "add"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ErrorOut": {
+          "properties": {
+            "kind": {
+              "description": "`network`, `auth`, `over_limit`, `refused`, `out_of_sync`, `not_found`,\n`invalid`, `conflict`, `internal`.",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ],
+          "type": "object"
+        },
+        "PendingOut": {
+          "description": "A change made here that the server doesn't have yet, or refused.",
+          "properties": {
+            "account": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "attempts": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "change": {
+              "$ref": "#/$defs/Change"
+            },
+            "id": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "last_error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "message": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "status": {
+              "description": "`pending`; `failed` (the server refused it, and it was undone here);\n`conflict` (the folder changed on the server first).",
+              "type": "string"
+            },
+            "subject": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "account",
+            "message",
+            "subject",
+            "change",
+            "status",
+            "attempts",
+            "last_error"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "errors": {
+          "description": "Accounts whose server couldn't take it now.",
+          "items": {
+            "$ref": "#/$defs/AccountError"
+          },
+          "type": "array"
+        },
+        "messages": {
+          "description": "How many messages it changed.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "not_on_server": {
+          "description": "What of the change the server doesn't have yet (made at the next sync), refused\n(undone here), or couldn't take as asked (`conflict`: the folder changed on the\nserver first; the next sync shows the messages where they are). Empty once all of\nit is on the server.",
+          "items": {
+            "$ref": "#/$defs/PendingOut"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "messages",
+        "not_on_server",
+        "errors"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
       "openWorldHint": true,
       "readOnlyHint": true
     },
@@ -1227,6 +2189,235 @@
       },
       "required": [
         "accounts"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Moves messages to their account's Trash, where they can be brought back from. Refused for messages in Trash already: nothing is deleted for good.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "messages": {
+          "description": "Message ids, at most 100.",
+          "items": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "messages"
+      ],
+      "type": "object"
+    },
+    "name": "trash",
+    "outputSchema": {
+      "$defs": {
+        "AccountError": {
+          "properties": {
+            "account": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "error": {
+              "$ref": "#/$defs/ErrorOut"
+            }
+          },
+          "required": [
+            "account",
+            "error"
+          ],
+          "type": "object"
+        },
+        "Change": {
+          "oneOf": [
+            {
+              "properties": {
+                "add": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "kind": {
+                  "const": "flags",
+                  "type": "string"
+                },
+                "remove": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "kind",
+                "add",
+                "remove"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "kind": {
+                  "const": "move",
+                  "type": "string"
+                },
+                "to": {
+                  "description": "Folder id.",
+                  "format": "int64",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "kind",
+                "to"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "kind": {
+                  "const": "delete",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "add": {
+                  "type": "boolean"
+                },
+                "kind": {
+                  "const": "label",
+                  "type": "string"
+                },
+                "label": {
+                  "description": "Label (folder) id.",
+                  "format": "int64",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "kind",
+                "label",
+                "add"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ErrorOut": {
+          "properties": {
+            "kind": {
+              "description": "`network`, `auth`, `over_limit`, `refused`, `out_of_sync`, `not_found`,\n`invalid`, `conflict`, `internal`.",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ],
+          "type": "object"
+        },
+        "PendingOut": {
+          "description": "A change made here that the server doesn't have yet, or refused.",
+          "properties": {
+            "account": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "attempts": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "change": {
+              "$ref": "#/$defs/Change"
+            },
+            "id": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "last_error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "message": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "status": {
+              "description": "`pending`; `failed` (the server refused it, and it was undone here);\n`conflict` (the folder changed on the server first).",
+              "type": "string"
+            },
+            "subject": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "account",
+            "message",
+            "subject",
+            "change",
+            "status",
+            "attempts",
+            "last_error"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "errors": {
+          "description": "Accounts whose server couldn't take it now.",
+          "items": {
+            "$ref": "#/$defs/AccountError"
+          },
+          "type": "array"
+        },
+        "messages": {
+          "description": "How many messages it changed.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "not_on_server": {
+          "description": "What of the change the server doesn't have yet (made at the next sync), refused\n(undone here), or couldn't take as asked (`conflict`: the folder changed on the\nserver first; the next sync shows the messages where they are). Empty once all of\nit is on the server.",
+          "items": {
+            "$ref": "#/$defs/PendingOut"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "messages",
+        "not_on_server",
+        "errors"
       ],
       "type": "object"
     }

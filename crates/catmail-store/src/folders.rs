@@ -6,7 +6,7 @@ use catmail_types::{
 use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
 use crate::Result;
-use crate::columns::{parse_opt_text, parse_text};
+use crate::columns::{parse_opt_text, parse_text, to_json};
 use crate::drafts::Drafts;
 use crate::ops::{PendingOps, Touched};
 
@@ -179,20 +179,20 @@ impl<'c> Folders<'c> {
     /// can't search text have none.
     pub fn searched_on_server(
         &self,
-        account: Option<AccountId>,
+        accounts: Option<&[AccountId]>,
         folder: Option<FolderId>,
     ) -> Result<Vec<(AccountId, Vec<FolderSyncState>)>> {
-        let mut accounts = self.conn.prepare_cached(
+        let mut found = self.conn.prepare_cached(
             "SELECT id FROM accounts
              WHERE searches_text
-               AND (:account IS NULL OR id = :account)
+               AND (:accounts IS NULL OR id IN (SELECT value FROM json_each(:accounts)))
                AND (:folder IS NULL OR id = (SELECT account_id FROM folders WHERE id = :folder))
              ORDER BY id",
         )?;
-        let (account, folder) = (account.map(|a| a.0), folder.map(|f| f.0));
-        let accounts = accounts
+        let (accounts, folder) = (accounts.map(to_json), folder.map(|f| f.0));
+        let accounts = found
             .query_map(
-                named_params! {":account": account, ":folder": folder},
+                named_params! {":accounts": accounts, ":folder": folder},
                 |r| Ok(AccountId(r.get(0)?)),
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;

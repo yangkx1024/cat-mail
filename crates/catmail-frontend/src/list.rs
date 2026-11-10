@@ -98,7 +98,7 @@ pub(crate) async fn fetch(
         (messages.into_iter().map(Row::Message).collect(), more)
     };
     Ok(match source {
-        Source::Inboxes => page(client.list_inboxes(limit, after).await?),
+        Source::Inboxes => page(client.list_inboxes(None, limit, after).await?),
         Source::Folder(folder) => page(client.list_messages(*folder, limit, after).await?),
         Source::Search(text) => {
             let mut query = SearchQuery::new(text.clone());

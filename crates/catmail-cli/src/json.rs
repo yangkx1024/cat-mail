@@ -605,6 +605,9 @@ impl From<&GcReport> for JsonGc {
 #[derive(Serialize)]
 pub(crate) struct JsonToken {
     name: String,
+    tier: catmail_mcp::Tier,
+    /// Every account with `None`.
+    accounts: Option<Vec<String>>,
     created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     secret: Option<String>,
@@ -614,6 +617,8 @@ impl JsonToken {
     pub(crate) fn new(token: &catmail_mcp::Token, secret: Option<String>) -> Self {
         Self {
             name: token.name.clone(),
+            tier: token.access.tier,
+            accounts: token.access.accounts.clone(),
             created_at: time(token.created_at),
             secret,
         }
@@ -958,14 +963,25 @@ mod tests {
 
     #[test]
     fn token_snapshot() {
-        let token = catmail_mcp::Token {
+        let mut token = catmail_mcp::Token {
             name: "laptop".into(),
             created_at: 0,
+            access: catmail_mcp::Access::default(),
         };
         assert_eq!(
             serde_json::to_value(JsonToken::new(&token, None)).unwrap(),
-            json!({"name": "laptop", "created_at": "1970-01-01T00:00:00Z"})
+            json!({
+                "name": "laptop", "tier": "read", "accounts": null,
+                "created_at": "1970-01-01T00:00:00Z",
+            })
         );
+        token.access = catmail_mcp::Access {
+            tier: catmail_mcp::Tier::Organize,
+            accounts: Some(vec!["a@example.com".into()]),
+        };
+        let organize = serde_json::to_value(JsonToken::new(&token, None)).unwrap();
+        assert_eq!(organize["tier"], "organize");
+        assert_eq!(organize["accounts"], json!(["a@example.com"]));
         assert_eq!(
             serde_json::to_value(JsonToken::new(&token, Some("catmail_x".into()))).unwrap()["secret"],
             json!("catmail_x")
