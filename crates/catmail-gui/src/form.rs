@@ -12,6 +12,7 @@ use nsh_core::ModalAnimation;
 use nsh_core::element::input;
 use nsh_core::prelude::*;
 
+use crate::icons::{Icon, icon};
 use crate::tasks::in_view;
 use crate::theme::SelectableText as _;
 
@@ -125,6 +126,33 @@ pub fn text_input() -> Input {
         .border_color(move || theme().input)
         .text_sm()
         .text_color(move || theme().foreground)
+}
+
+/// A choice shown as what is chosen, opening a menu of the others (`popup_menu`) when
+/// pressed. `label` names it for screen readers.
+pub fn menu_field(
+    label: &'static str,
+    chosen: impl Fn() -> String + 'static,
+    open: impl Fn() + 'static,
+) -> View {
+    view()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .h(px(30.0))
+        .px(px(10.0))
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(move || theme().input)
+        .label(label)
+        .on_press(open)
+        .child(
+            text(chosen)
+                .flex_1()
+                .text_sm()
+                .text_color(move || theme().foreground),
+        )
+        .child(icon(|| Icon::ChevronDown, 14.0).text_color(move || theme().muted_foreground))
 }
 
 /// A field with its label above it, and what it is for under it, if that needs saying.

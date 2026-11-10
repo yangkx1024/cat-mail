@@ -121,7 +121,7 @@ impl Abandoned {
     }
 }
 
-/// Searches the servers of `query`'s account (of every account with none) for its text,
+/// Searches the servers of `query`'s accounts (of every account with none) for its text,
 /// within its folder if it has one, and returns the messages found whose bodies aren't
 /// downloaded, by id; what it found until then once `abandoned`.
 pub(crate) async fn on_servers(
@@ -133,9 +133,9 @@ pub(crate) async fn on_servers(
     if terms.is_empty() {
         return Ok(Vec::new());
     }
-    let (account, folder) = (query.account, query.folder);
+    let (accounts, folder) = (query.accounts, query.folder);
     let accounts = engine
-        .read(move |db| db.folders().searched_on_server(account, folder))
+        .read(move |db| db.folders().searched_on_server(accounts.as_deref(), folder))
         .await?;
     let found = join_all(
         accounts
@@ -156,7 +156,10 @@ pub(crate) async fn on_servers(
 /// again, as their own would.
 pub(crate) async fn connect_ahead(engine: Arc<Engine>, account: Option<AccountId>) -> Result<()> {
     let accounts = engine
-        .read(move |db| db.folders().searched_on_server(account, None))
+        .read(move |db| {
+            db.folders()
+                .searched_on_server(account.as_ref().map(std::slice::from_ref), None)
+        })
         .await?;
     join_all(
         accounts

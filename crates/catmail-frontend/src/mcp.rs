@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use crate::commands::Confirm;
 use crate::settings::McpSettings;
 
-pub use catmail_mcp::{LOG_FILTER, NewToken, Token, Tokens, connect};
+pub use catmail_mcp::{Access, LOG_FILTER, NewToken, Tier, Token, Tokens, connect};
 
 /// How long turning the server off, or quitting, lets the requests being answered run
 /// on: shorter than `catmail serve`'s, as someone is waiting on the app.
@@ -153,6 +153,31 @@ fn failed(addr: SocketAddr, e: &io::Error) -> String {
         io::ErrorKind::PermissionDenied => format!("Not allowed to listen on port {port}."),
         _ => format!("Couldn't listen on port {port}: {e}."),
     }
+}
+
+/// A tier, as the menu of a new token and the row of one name it.
+pub fn tier_label(tier: Tier) -> &'static str {
+    match tier {
+        Tier::Read => "Read only",
+        Tier::Organize => "Read and organize",
+    }
+}
+
+/// The accounts a token reaches, by address; every account with `None`.
+pub fn accounts_label(accounts: Option<&[String]>) -> String {
+    match accounts {
+        None => "All accounts".to_owned(),
+        Some(list) => list.join(", "),
+    }
+}
+
+/// Under a token's name: what it may do, with which accounts, and `made`, when it was.
+pub fn token_line(access: &Access, made: &str) -> String {
+    format!(
+        "{} · {} · {made}",
+        tier_label(access.tier),
+        accounts_label(access.accounts.as_deref())
+    )
 }
 
 /// Before taking the token named `name` away.
@@ -296,5 +321,22 @@ mod tests {
         assert_eq!(Status::Listening(addr).line(), "http://127.0.0.1:9000/mcp");
         assert_eq!(Status::Off.line(), "Starting…");
         assert_eq!(Status::Failed("Why.".into()).line(), "Why.");
+    }
+
+    #[test]
+    fn what_a_token_may_do() {
+        let all = Access::default();
+        assert_eq!(
+            token_line(&all, "Today"),
+            "Read only · All accounts · Today"
+        );
+        let some = Access {
+            tier: Tier::Organize,
+            accounts: Some(vec!["a@example.com".into(), "b@example.com".into()]),
+        };
+        assert_eq!(
+            token_line(&some, "Today"),
+            "Read and organize · a@example.com, b@example.com · Today"
+        );
     }
 }

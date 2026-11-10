@@ -368,6 +368,25 @@ impl From<&PendingOp> for PendingOut {
     }
 }
 
+/// A change made: here at once, then on the server.
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct Changed {
+    /// How many messages it changed.
+    pub messages: usize,
+    /// Changes to these messages that the server doesn't have yet (they are made at
+    /// the next sync), or refused (they were undone here). Empty once all of it is on
+    /// the server.
+    pub not_on_server: Vec<PendingOut>,
+    /// Accounts whose server couldn't take it now.
+    pub errors: Vec<AccountError>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct AccountError {
+    pub account: i64,
+    pub error: ErrorOut,
+}
+
 #[derive(Serialize, JsonSchema)]
 pub(crate) struct Synced {
     pub accounts: Vec<AccountSynced>,

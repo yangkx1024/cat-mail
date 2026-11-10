@@ -102,7 +102,7 @@
 - [x] 主题：gpui-kit 主题 JSON 的颜色键映射到 shadcn 的 token，再加上应用自己的，经 `set_theme_overrides` 给每个视图；
       导入各种终端配色格式
 - [x] 跟随系统外观（nsh 自带，经 XDG portal）
-- [x] Agents：MCP 服务的开关、端口，令牌的增删（新令牌只在这里显示一次，可复制）；服务由
+- [x] Agents：MCP 服务的开关、端口，令牌的增删（新令牌只在这里显示一次，可复制；加时选层级和账户）；服务由
       frontend 的 `mcp::Host` 在自己的线程上运行，引擎打开后启动，退出时先于引擎停下
 
 ## P8 登录页（gui.md「登录页」）

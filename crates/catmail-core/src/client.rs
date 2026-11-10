@@ -916,10 +916,11 @@ impl MailClient {
             .await
     }
 
-    /// The messages of every account's INBOX as one list, paged like
-    /// [`list_messages`](Self::list_messages).
+    /// The messages of the INBOX of every account (of those of `accounts`, if given) as
+    /// one list, paged like [`list_messages`](Self::list_messages).
     pub async fn list_inboxes(
         &self,
+        accounts: Option<Vec<AccountId>>,
         limit: u32,
         after: Option<MessageCursor>,
     ) -> Result<Vec<MessageSummary>> {
@@ -928,7 +929,28 @@ impl MailClient {
             .rt
             .run(async move {
                 engine
-                    .read(move |db| db.messages().list_merged(&inbox_ids(db)?, limit, after))
+                    .read(move |db| {
+                        let inboxes: Vec<FolderId> = inboxes(db)?
+                            .iter()
+                            .filter(|f| accounts.as_ref().is_none_or(|a| a.contains(&f.account_id)))
+                            .map(|f| f.id)
+                            .collect();
+                        db.messages().list_merged(&inboxes, limit, after)
+                    })
+                    .await
+            })
+            .await
+    }
+
+    /// Of `messages`, those that exist, without their bodies, in no particular order:
+    /// which account and folder each is in.
+    pub async fn message_summaries(&self, messages: Vec<MessageId>) -> Result<Vec<MessageSummary>> {
+        let engine = self.engine()?;
+        self.shared
+            .rt
+            .run(async move {
+                engine
+                    .read(move |db| db.messages().summaries(&messages))
                     .await
             })
             .await

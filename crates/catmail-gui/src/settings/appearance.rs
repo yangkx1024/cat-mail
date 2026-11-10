@@ -166,28 +166,12 @@ fn themes_pane(
                         ))),
                 )
                 .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .w(px(160.0))
-                        .h(px(30.0))
-                        .px(px(10.0))
-                        .rounded(px(8.0))
-                        .border_1()
-                        .border_color(move || theme().input)
-                        .label("Text size")
-                        .on_press(choose_text_size)
-                        .child(
-                            text(move || text_size().to_owned())
-                                .flex_1()
-                                .text_sm()
-                                .text_color(move || theme().foreground),
-                        )
-                        .child(
-                            icon(|| Icon::ChevronDown, 14.0)
-                                .text_color(move || theme().muted_foreground),
-                        ),
+                    form::menu_field(
+                        "Text size",
+                        move || text_size().to_owned(),
+                        choose_text_size,
+                    )
+                    .w(px(160.0)),
                 ),
         )
 }

@@ -749,7 +749,8 @@ impl<'c> Messages<'c> {
             "SELECT {SUMMARY_COLUMNS} FROM messages m
              WHERE (m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH :expr)
                     OR m.id IN (SELECT value FROM json_each(:found)))
-               AND (:account IS NULL OR m.account_id = :account)
+               AND (:accounts IS NULL
+                    OR m.account_id IN (SELECT value FROM json_each(:accounts)))
                AND ({SEARCHED})
                AND {AFTER}
              ORDER BY {NEWEST_FIRST} LIMIT :limit"
@@ -760,7 +761,7 @@ impl<'c> Messages<'c> {
             named_params! {
                 ":expr": expr,
                 ":found": to_json(&query.found_on_server),
-                ":account": query.account.map(|a| a.0),
+                ":accounts": query.accounts.as_deref().map(to_json),
                 ":folder": query.folder.map(|f| f.0),
                 ":after_date": after_date,
                 ":after_id": after_id,
@@ -836,6 +837,17 @@ impl<'c> Messages<'c> {
                 },
             )
             .optional()?)
+    }
+
+    /// Those of `ids` that exist, in no particular order.
+    pub fn summaries(&self, ids: &[MessageId]) -> Result<Vec<MessageSummary>> {
+        let sql = format!(
+            "SELECT {SUMMARY_COLUMNS} FROM messages m
+             WHERE m.id IN (SELECT value FROM json_each(?1))"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map([to_json(ids)], summary_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// The message with its full headers, and its body and attachments if downloaded.
@@ -1856,9 +1868,9 @@ mod tests {
             })
             .unwrap();
 
-        let run = |account, folder| {
+        let run = |account: Option<AccountId>, folder| {
             let mut q = SearchQuery::new("alice");
-            q.account = account;
+            q.accounts = account.map(|a| vec![a]);
             q.folder = folder;
             store
                 .read(|db| db.messages().search(&q))
@@ -1871,6 +1883,36 @@ mod tests {
         assert_eq!(run(Some(account), None), ["subject 1"]);
         assert_eq!(run(None, Some(other_folder)), ["subject 7"]);
         assert!(run(Some(account), Some(other_folder)).is_empty());
+
+        let within = |accounts: Vec<AccountId>| {
+            let mut q = SearchQuery::new("alice");
+            q.accounts = Some(accounts);
+            store.read(|db| db.messages().search(&q)).unwrap().len()
+        };
+        assert_eq!(within(vec![other]), 1);
+        assert_eq!(within(vec![account, other]), 2);
+        // Narrowed to none: nothing, not everything.
+        assert_eq!(within(Vec::new()), 0);
+    }
+
+    #[test]
+    fn summaries_of_the_messages_that_exist() {
+        let (store, account, folder) = setup();
+        store
+            .write(|db| {
+                db.messages()
+                    .upsert(account, folder.id, &[message(1, None, Flags::empty())])
+            })
+            .unwrap();
+        let id = store
+            .read(|db| db.messages().list(folder.id, 1, None))
+            .unwrap()[0]
+            .id;
+        let found = store
+            .read(|db| db.messages().summaries(&[id, MessageId(999)]))
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].id, found[0].account_id), (id, account));
     }
 
     /// The account's folders by name, after creating them with these roles (and
@@ -1966,7 +2008,8 @@ mod tests {
             let mut after = None;
             loop {
                 let mut q = SearchQuery::new("alice");
-                (q.account, q.folder, q.limit, q.after) = (Some(account), folder, limit, after);
+                (q.accounts, q.folder, q.limit, q.after) =
+                    (Some(vec![account]), folder, limit, after);
                 let page = store.read(|db| db.messages().search(&q)).unwrap();
                 let Some(last) = page.last() else {
                     return found;
@@ -2058,9 +2101,9 @@ mod tests {
         assert_eq!(without_body(o["INBOX"], 1, &[10, 11], 1), [ten]);
 
         // They match whatever the text, within the account and folder.
-        let run = |account, folder, found: Vec<MessageId>| {
+        let run = |account: Option<AccountId>, folder, found: Vec<MessageId>| {
             let mut q = SearchQuery::new("pelican");
-            (q.account, q.folder, q.found_on_server) = (account, folder, found);
+            (q.accounts, q.folder, q.found_on_server) = (account.map(|a| vec![a]), folder, found);
             let found = store.read(|db| db.messages().search(&q)).unwrap();
             found.into_iter().map(|m| m.id).collect::<Vec<_>>()
         };
@@ -2073,9 +2116,12 @@ mod tests {
         assert!(run(None, Some(o["All"]), all).is_empty());
 
         // The server is asked about the folders search covers, by account.
-        let searched = |account, folder| {
+        let searched = |account: Option<AccountId>, folder| {
             let found = store
-                .read(|db| db.folders().searched_on_server(account, folder))
+                .read(|db| {
+                    db.folders()
+                        .searched_on_server(account.as_ref().map(std::slice::from_ref), folder)
+                })
                 .unwrap();
             found
                 .into_iter()

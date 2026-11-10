@@ -447,6 +447,15 @@ impl<'c> PendingOps<'c> {
                             "the account has no Trash folder; delete permanently instead".into(),
                         ));
                     }
+                    DeleteOutcome::NoTrash if mode == DeleteMode::OnlyToTrash => {
+                        return Err(Error::Invalid("the account has no Trash folder".into()));
+                    }
+                    DeleteOutcome::Permanent if mode == DeleteMode::OnlyToTrash => {
+                        return Err(Error::Invalid(format!(
+                            "message {} is in Trash already",
+                            id.0
+                        )));
+                    }
                     DeleteOutcome::NoTrash | DeleteOutcome::Permanent => {}
                 }
             }
@@ -1957,6 +1966,35 @@ mod tests {
         assert!(matches!(
             f.store
                 .write(|db| db.ops().delete_messages(&[m1], DeleteMode::ToTrash, 0)),
+            Err(Error::Invalid(_))
+        ));
+        assert!(f.row(m1).is_some());
+    }
+
+    #[test]
+    fn only_to_trash_never_deletes_for_good() {
+        let f = setup();
+        let (m1, m2) = (f.message(f.inbox, 1), f.message(f.inbox, 2));
+        let m1_before = f.row(m1);
+        f.write(|db| db.ops().delete_messages(&[m2], DeleteMode::OnlyToTrash, 0));
+        assert_eq!(f.row(m2), Some((f.trash, None, Flags::empty())));
+        // One of them in Trash already: none of them goes.
+        assert!(matches!(
+            f.store.write(|db| db
+                .ops()
+                .delete_messages(&[m1, m2], DeleteMode::OnlyToTrash, 0)),
+            Err(Error::Invalid(_))
+        ));
+        assert_eq!(f.row(m1), m1_before);
+        assert_eq!(f.row(m2), Some((f.trash, None, Flags::empty())));
+
+        f.write(|db| {
+            db.conn.execute("UPDATE folders SET role = NULL", [])?;
+            Ok(())
+        });
+        assert!(matches!(
+            f.store
+                .write(|db| db.ops().delete_messages(&[m1], DeleteMode::OnlyToTrash, 0)),
             Err(Error::Invalid(_))
         ));
         assert!(f.row(m1).is_some());

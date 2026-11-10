@@ -7,7 +7,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use anyhow::{Context, Result, bail};
 use catmail_core::{MailClient, display};
-use catmail_mcp::{DEFAULT_PORT, McpServer, ServeOptions, Tokens, connect};
+use catmail_mcp::{Access, DEFAULT_PORT, McpServer, ServeOptions, Tier, Tokens, connect};
 use clap::{Args, Subcommand};
 
 use crate::json::{self, JsonToken};
@@ -34,6 +34,14 @@ pub(crate) enum TokenCommand {
     Add {
         /// What it is for, e.g. the device the agent runs on
         name: String,
+        /// What the agent may do: `read` (list, search, read and sync) or `organize`
+        /// (also mark, move, archive, label and move to Trash)
+        #[arg(long, default_value_t = Tier::Read)]
+        tier: Tier,
+        /// Only this account, by address; repeat for more. Every account by default,
+        /// those added later too
+        #[arg(long = "account", value_name = "EMAIL")]
+        accounts: Vec<String>,
     },
     /// List the tokens
     List,
@@ -74,8 +82,16 @@ pub(crate) async fn serve(
 pub(crate) fn mcp(tokens: &Tokens, command: McpCommand, json: bool) -> Result<()> {
     let McpCommand::Token(command) = command;
     match command {
-        TokenCommand::Add { name } => {
-            let new = tokens.add(&name)?;
+        TokenCommand::Add {
+            name,
+            tier,
+            accounts,
+        } => {
+            let access = Access {
+                tier,
+                accounts: (!accounts.is_empty()).then_some(accounts),
+            };
+            let new = tokens.add(&name, access)?;
             if json {
                 json::print_keyed("token", &JsonToken::new(&new.token, Some(new.secret)))?;
             } else {
@@ -101,11 +117,16 @@ pub(crate) fn mcp(tokens: &Tokens, command: McpCommand, json: bool) -> Result<()
                     .map(|t| {
                         vec![
                             printable(&t.name).into_owned(),
+                            t.access.tier.to_string(),
+                            t.access.accounts.as_ref().map_or_else(
+                                || "all".to_owned(),
+                                |a| printable(&a.join(", ")).into_owned(),
+                            ),
                             display::date(Some(t.created_at)),
                         ]
                     })
                     .collect();
-                print_table(&["NAME", "CREATED"], rows);
+                print_table(&["NAME", "TIER", "ACCOUNTS", "CREATED"], rows);
             }
         }
         TokenCommand::Rm { name } => {
@@ -148,9 +169,19 @@ mod tests {
     fn tokens_are_added_listed_and_removed() {
         let dir = tempfile::tempdir().unwrap();
         let tokens = Tokens::new(dir.path());
-        let add = |name: &str| TokenCommand::Add { name: name.into() };
+        let add = |name: &str| TokenCommand::Add {
+            name: name.into(),
+            tier: Tier::Organize,
+            accounts: vec!["a@example.com".into()],
+        };
         mcp(&tokens, McpCommand::Token(add("laptop")), true).unwrap();
         assert!(mcp(&tokens, McpCommand::Token(add("laptop")), true).is_err());
+        let access = &tokens.list().unwrap()[0].access;
+        assert_eq!(access.tier, Tier::Organize);
+        assert_eq!(
+            access.accounts.as_deref(),
+            Some(&["a@example.com".to_owned()][..])
+        );
         mcp(&tokens, McpCommand::Token(TokenCommand::List), true).unwrap();
         let rm = || TokenCommand::Rm {
             name: "laptop".into(),

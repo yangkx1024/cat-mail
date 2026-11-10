@@ -16,7 +16,7 @@ use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::{McpServer, ServeOptions, Tokens};
+use crate::{Access, McpServer, ServeOptions, Tier, Tokens};
 
 /// The tools' list as agents see it. Regenerate with `UPDATE_SNAPSHOTS=1` after a change
 /// meant to alter what agents read.
@@ -32,13 +32,16 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// alice@example.com, synced, with INBOX ("one", "two") and Archive; a server on a
-    /// free port and a token for it.
+    /// alice@example.com, synced, with INBOX ("one", "two"), Archive and Trash; a server
+    /// on a free port and a token for it, of the organize tier.
     async fn new(options: ServeOptions) -> Self {
         let mut state = ServerState::new("alice", "pw");
         state.inbox().append_simple("one");
         state.inbox().append_simple("two");
         state.mailboxes.push(FakeMailbox::new("Archive"));
+        state
+            .mailboxes
+            .push(FakeMailbox::new("Trash").with_attribute("\\Trash"));
         Self::with_state(state, options).await
     }
 
@@ -50,29 +53,13 @@ impl Fixture {
             .secrets(Arc::new(MemorySecrets::default()))
             .open()
             .unwrap();
-        let server = |port| ServerConfig {
-            host: "127.0.0.1".into(),
-            port,
-            security: Security::Plain,
-        };
-        let account = client
-            .add_account(
-                NewAccount {
-                    email: "alice@example.com".into(),
-                    display_name: Some("Alice".into()),
-                    username: "alice".into(),
-                    imap: server(fake.port()),
-                    smtp: server(fake.port()),
-                },
-                "pw".into(),
-                Verify::Skip,
-            )
-            .await
-            .unwrap()
-            .id;
-        client.sync_account(account).await.unwrap();
+        add_account(&client, &fake, "alice").await;
         let tokens = Tokens::new(dir.path().join("config"));
-        let secret = tokens.add("test").unwrap().secret;
+        let organize = Access {
+            tier: Tier::Organize,
+            accounts: None,
+        };
+        let secret = tokens.add("test", organize).unwrap().secret;
         let options = ServeOptions {
             addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             ..options
@@ -97,7 +84,11 @@ impl Fixture {
 
     /// Posts `body` to `/mcp` with the fixture's token.
     async fn post(&self, body: Value) -> (StatusCode, String) {
-        let auth = self.auth();
+        self.post_as(&self.secret, body).await
+    }
+
+    async fn post_as(&self, secret: &str, body: Value) -> (StatusCode, String) {
+        let auth = format!("Bearer {secret}");
         send(
             self.server.local_addr(),
             "/mcp",
@@ -109,22 +100,111 @@ impl Fixture {
 
     /// The result of calling `tool` with `arguments`, which must have succeeded.
     async fn call(&self, tool: &str, arguments: Value) -> Value {
-        let result = self.call_result(tool, arguments).await;
+        self.call_as(&self.secret, tool, arguments).await
+    }
+
+    async fn call_as(&self, secret: &str, tool: &str, arguments: Value) -> Value {
+        let result = self.call_result_as(secret, tool, arguments).await;
         assert_eq!(result["isError"], json!(false), "{tool}: {result}");
         result["structuredContent"].clone()
     }
 
     async fn call_result(&self, tool: &str, arguments: Value) -> Value {
+        self.call_result_as(&self.secret, tool, arguments).await
+    }
+
+    /// The JSON-RPC reply's `result`, or its `error`.
+    async fn call_result_as(&self, secret: &str, tool: &str, arguments: Value) -> Value {
         let (status, body) = self
-            .post(json!({
-                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                "params": {"name": tool, "arguments": arguments},
-            }))
+            .post_as(
+                secret,
+                json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": tool, "arguments": arguments},
+                }),
+            )
             .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         let reply: Value = serde_json::from_str(&body).unwrap();
+        if reply.get("error").is_some() {
+            return reply["error"].clone();
+        }
         reply["result"].clone()
     }
+
+    /// The tools `secret`'s token is shown.
+    async fn tool_names(&self, secret: &str) -> Vec<String> {
+        let (status, body) = self
+            .post_as(
+                secret,
+                json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let reply: Value = serde_json::from_str(&body).unwrap();
+        reply["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// A token named `name` with `access`.
+    fn token(&self, name: &str, access: Access) -> String {
+        self.tokens.add(name, access).unwrap().secret
+    }
+
+    /// The ids of the messages `list_messages` lists in folder `folder` (every INBOX
+    /// with `None`), newest first.
+    async fn ids(&self, folder: Option<i64>) -> Vec<i64> {
+        let listed = self.call("list_messages", json!({"folder": folder})).await;
+        listed["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_i64().unwrap())
+            .collect()
+    }
+
+    /// The id of the account's folder named `name`.
+    async fn folder(&self, account: i64, name: &str) -> i64 {
+        let folders = self.call("list_folders", json!({"account": account})).await;
+        folders["folders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == name)
+            .unwrap_or_else(|| panic!("no folder {name}: {folders}"))["id"]
+            .as_i64()
+            .unwrap()
+    }
+}
+
+/// Adds `user`@example.com, on `fake` with password "pw", and syncs it.
+async fn add_account(client: &MailClient, fake: &FakeImap, user: &str) -> i64 {
+    let server = |port| ServerConfig {
+        host: "127.0.0.1".into(),
+        port,
+        security: Security::Plain,
+    };
+    let account = client
+        .add_account(
+            NewAccount {
+                email: format!("{user}@example.com"),
+                display_name: (user == "alice").then(|| "Alice".into()),
+                username: user.into(),
+                imap: server(fake.port()),
+                smtp: server(fake.port()),
+            },
+            "pw".into(),
+            Verify::Skip,
+        )
+        .await
+        .unwrap()
+        .id;
+    client.sync_account(account).await.unwrap();
+    account.0
 }
 
 /// One HTTP/1.1 POST to the server at `addr`, as `localhost` unless `headers` says.
@@ -272,12 +352,229 @@ async fn the_tools_agents_see() {
         tools, TOOLS_SNAPSHOT,
         "the tools changed; if meant, rerun with UPDATE_SNAPSHOTS=1"
     );
-    // Only `sync` changes anything (it makes the changes already queued).
+    // Of the read tier, only `sync` changes anything (it makes the changes already
+    // queued); every tool has a tier.
     for tool in reply["result"]["tools"].as_array().unwrap() {
+        let name = tool["name"].as_str().unwrap();
         let read_only = tool["annotations"]["readOnlyHint"] == json!(true);
-        assert_eq!(read_only, tool["name"] != "sync", "{}", tool["name"]);
-        assert!(tool["outputSchema"].is_object(), "{}", tool["name"]);
+        let tier = crate::tools::tier_of(name).unwrap_or_else(|| panic!("{name} has no tier"));
+        assert_eq!(read_only, tier == Tier::Read && name != "sync", "{name}");
+        assert!(tool["outputSchema"].is_object(), "{name}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_token_sees_and_calls_only_its_tiers_tools() {
+    let f = Fixture::new(ServeOptions::default()).await;
+    let read = f.token("reader", Access::default());
+    let names = f.tool_names(&read).await;
+    assert!(names.contains(&"read_message".to_owned()));
+    for tool in ["mark", "move", "archive", "label", "trash"] {
+        assert!(!names.contains(&tool.to_owned()), "{tool}");
+        assert!(f.tool_names(&f.secret).await.contains(&tool.to_owned()));
+    }
+    let id = f.ids(None).await[0];
+    let refused = f
+        .call_result_as(&read, "mark", json!({"messages": [id], "read": true}))
+        .await;
+    assert_eq!(refused["message"], "tool not found", "{refused}");
+    assert_eq!(
+        f.call("list_messages", json!({})).await["messages"][0]["unread"],
+        true
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_token_reaches_only_its_accounts() {
+    let f = Fixture::new(ServeOptions::default()).await;
+    let mut state = ServerState::new("bob", "pw");
+    state.inbox().append_simple("bob's");
+    let bob_server = FakeImap::start(state).await;
+    let bob = add_account(&f.client, &bob_server, "bob").await;
+    let bob_inbox = f.folder(bob, "INBOX").await;
+    let bob_message = f.ids(Some(bob_inbox)).await[0];
+    let alice_only = f.token(
+        "alice's",
+        Access {
+            tier: Tier::Organize,
+            accounts: Some(vec!["ALICE@example.com".into()]),
+        },
+    );
+
+    let accounts = f.call_as(&alice_only, "list_accounts", json!({})).await;
+    assert_eq!(accounts["accounts"].as_array().unwrap().len(), 1);
+    assert_eq!(accounts["accounts"][0]["email"], "alice@example.com");
+    // Every INBOX together: only Alice's.
+    let inboxes = f.call_as(&alice_only, "list_messages", json!({})).await;
+    let subjects: Vec<_> = inboxes["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["subject"].as_str().unwrap())
+        .collect();
+    assert_eq!(subjects, ["two", "one"]);
+    let found = f
+        .call_as(&alice_only, "search", json!({"query": "subject:bob's"}))
+        .await;
+    assert_eq!(found["messages"], json!([]));
+    assert_eq!(
+        f.call("search", json!({"query": "subject:bob's"})).await["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Bob's account, folders and messages don't exist for it.
+    let calls = [
+        ("list_folders", json!({"account": bob})),
+        ("sync", json!({"account": bob})),
+        ("list_messages", json!({"folder": bob_inbox})),
+        ("search", json!({"query": "one", "folder": bob_inbox})),
+        ("read_message", json!({"id": bob_message})),
+        ("list_messages", json!({"after": bob_message})),
+        ("mark", json!({"messages": [bob_message], "read": true})),
+        ("trash", json!({"messages": [bob_message]})),
+    ];
+    for (tool, arguments) in calls {
+        let result = f.call_result_as(&alice_only, tool, arguments).await;
+        assert_eq!(result["isError"], true, "{tool}: {result}");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("not_found"), "{tool}: {text}");
+    }
+    assert!(
+        bob_server.state().inbox().messages[0]
+            .flags
+            .iter()
+            .all(|flag| flag != "\\Seen")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn marking_reaches_the_server() {
+    let f = Fixture::new(ServeOptions::default()).await;
+    let ids = f.ids(None).await;
+    let changed = f
+        .call(
+            "mark",
+            json!({"messages": ids, "read": true, "starred": true}),
+        )
+        .await;
+    assert_eq!(
+        changed,
+        json!({"messages": 2, "not_on_server": [], "errors": []})
+    );
+    for message in &f.fake.state().inbox().messages {
+        assert!(message.flags.iter().any(|flag| flag == "\\Seen"));
+        assert!(message.flags.iter().any(|flag| flag == "\\Flagged"));
+    }
+    let listed = f.call("list_messages", json!({})).await;
+    assert_eq!(listed["messages"][0]["unread"], false);
+
+    let nothing = f.call_result("mark", json!({"messages": ids})).await;
+    assert_eq!(nothing["isError"], true);
+    let none = f
+        .call_result("mark", json!({"messages": [], "read": true}))
+        .await;
+    assert_eq!(none["isError"], true);
+    let too_many: Vec<i64> = (1..=101).collect();
+    let many = f
+        .call_result("mark", json!({"messages": too_many, "read": true}))
+        .await;
+    assert_eq!(many["isError"], true);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn moving_archiving_and_trashing() {
+    let f = Fixture::new(ServeOptions::default()).await;
+    let (inbox, archive, trash) = (
+        f.folder(1, "INBOX").await,
+        f.folder(1, "Archive").await,
+        f.folder(1, "Trash").await,
+    );
+    let ids = f.ids(Some(inbox)).await;
+    let subject = |state: &ServerState, mailbox: &str| -> Vec<String> {
+        state
+            .mailboxes
+            .iter()
+            .find(|m| m.name == mailbox)
+            .unwrap()
+            .messages
+            .iter()
+            .map(|m| {
+                String::from_utf8_lossy(&m.raw)
+                    .lines()
+                    .find_map(|l| l.strip_prefix("Subject: ").map(str::to_owned))
+                    .unwrap()
+            })
+            .collect()
+    };
+
+    let archived = f.call("archive", json!({"messages": [ids[0]]})).await;
+    assert_eq!(archived["not_on_server"], json!([]), "{archived}");
+    assert_eq!(subject(&f.fake.state(), "Archive"), ["two"]);
+
+    let moved = f
+        .call(
+            "move",
+            json!({"messages": [ids[1]], "to": trash, "from": inbox}),
+        )
+        .await;
+    assert_eq!(moved["not_on_server"], json!([]), "{moved}");
+    assert_eq!(subject(&f.fake.state(), "Trash"), ["one"]);
+    assert!(subject(&f.fake.state(), "INBOX").is_empty());
+
+    // Out of Trash and back: never deleted for good.
+    let in_archive = f.ids(Some(archive)).await;
+    f.call("trash", json!({"messages": in_archive})).await;
+    let in_trash = f.ids(Some(trash)).await;
+    assert_eq!(in_trash.len(), 2);
+    let refused = f.call_result("trash", json!({"messages": in_trash})).await;
+    assert_eq!(refused["isError"], true);
+    assert!(
+        refused["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("in Trash already"),
+        "{refused}"
+    );
+    assert_eq!(subject(&f.fake.state(), "Trash").len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_change_the_server_refuses_is_reported() {
+    let f = Fixture::new(ServeOptions::default()).await;
+    let id = f.ids(None).await[0];
+    f.fake.state().faults.refuse_changes = Some("[CANNOT] Permission denied".into());
+    let changed = f
+        .call("mark", json!({"messages": [id], "starred": true}))
+        .await;
+    let refused = &changed["not_on_server"][0];
+    assert_eq!(refused["message"], id, "{changed}");
+    assert_eq!(refused["status"], "failed");
+    // Undone here.
+    let listed = f.call("list_messages", json!({"limit": 1})).await;
+    assert_eq!(listed["messages"][0]["flagged"], false);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn labelling_on_gmail() {
+    let mut state = ServerState::gmail("alice", "pw");
+    let uid = state.all_mail().append_simple("hello");
+    state.all_mail().set_labels(uid, &["\\Inbox"]);
+    state.mailboxes.push(FakeMailbox::new("Work"));
+    let f = Fixture::with_state(state, ServeOptions::default()).await;
+    let work = f.folder(1, "Work").await;
+    let id = f.ids(None).await[0];
+
+    let changed = f
+        .call("label", json!({"messages": [id], "add": [work]}))
+        .await;
+    assert_eq!(changed["not_on_server"], json!([]), "{changed}");
+    let labelled = f.ids(Some(work)).await;
+    assert_eq!(labelled, [id]);
+    let labels = f.fake.state().all_mail().messages[0].labels.clone();
+    assert!(labels.iter().any(|l| l == "Work"), "{labels:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -300,7 +597,7 @@ async fn listing_and_paging() {
         .iter()
         .map(|f| f["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["INBOX", "Archive"]);
+    assert_eq!(names, ["INBOX", "Archive", "Trash"]);
     let inbox = folders["folders"][0]["id"].clone();
 
     let first = f

@@ -656,15 +656,18 @@ async fn every_accounts_inbox_is_listed_together() {
         page.iter().filter_map(|m| m.subject.clone()).collect()
     };
     // Newest first; "three" and "one" have the same date, and "three" was stored later.
-    let all = env.client.list_inboxes(10, None).await.unwrap();
+    let all = env.client.list_inboxes(None, 10, None).await.unwrap();
     assert_eq!(subjects(&all), ["four", "three", "one"]);
-    let next = env.client.list_inboxes(1, Some(all[0].cursor())).await;
+    let next = env
+        .client
+        .list_inboxes(None, 1, Some(all[0].cursor()))
+        .await;
     assert_eq!(subjects(&next.unwrap()), ["three"]);
 
     // Archived on Gmail, it leaves.
     let one = env.id_of("INBOX", "one").await;
     env.client.archive_messages(vec![one]).await.unwrap();
-    let all = env.client.list_inboxes(10, None).await.unwrap();
+    let all = env.client.list_inboxes(None, 10, None).await.unwrap();
     assert_eq!(subjects(&all), ["four", "three"]);
 }
 

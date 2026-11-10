@@ -1,21 +1,24 @@
 //! Settings › Agents: the MCP server AI agents connect to (on this machine's loopback
-//! address; from other devices through a tunnel such as `tailscale serve`), and the
-//! tokens they present, and the commands that add it to Claude Code and Codex. The server
+//! address; from other devices through a tunnel such as `tailscale serve`), the tokens
+//! they present, each with what it may do and with which accounts, and the commands that
+//! add it to Claude Code and Codex. The server
 //! is `shell`'s, what this says `catmail_frontend::mcp`'s, the commands `catmail_mcp`'s
 //! (`catmail mcp token add` prints them too).
 
 use catmail_frontend::format;
 use catmail_frontend::login::{Submission, parse_port};
 use catmail_frontend::mcp::connect::{self, Example};
-use catmail_frontend::mcp::{self, NewToken, Status, Token, Tokens};
+use catmail_frontend::mcp::{self, Access, NewToken, Status, Tier, Token, Tokens};
 use futures_util::StreamExt as _;
 use nsh_base::theme;
+use nsh_core::element::desktop::{MenuItem, popup_menu};
 use nsh_core::prelude::*;
 
 use crate::buttons::{Size, icon_button, labelled_button};
 use crate::clock::clock;
-use crate::form::{confirm_then, error, field, submit, text_input};
+use crate::form::{confirm_then, error, field, menu_field, submit, text_input};
 use crate::icons::{Icon, icon};
+use crate::mailbox::sidebar::with_accounts;
 use crate::shell;
 use crate::tasks::{in_view, off_thread};
 use crate::theme::SelectableText as _;
@@ -155,6 +158,9 @@ fn tokens_list(tokens: Tokens, made: Made) -> impl IntoElement {
         });
     }
     let name = signal(String::new());
+    // What the next token may do: reading only, with every account, unless chosen
+    // otherwise (one account at most, here).
+    let access = signal(Access::default());
     let submission = signal(Submission::new("add the token"));
     let busy = move || submission.with(Submission::busy);
     let add = {
@@ -164,9 +170,10 @@ fn tokens_list(tokens: Tokens, made: Made) -> impl IntoElement {
             if wanted.trim().is_empty() {
                 return;
             }
+            let may = access.get_untracked();
             let tokens = tokens.clone();
             let request = async move {
-                off_thread(move || tokens.add(&wanted).map_err(|e| e.to_string()))
+                off_thread(move || tokens.add(&wanted, may).map_err(|e| e.to_string()))
                     .await
                     .unwrap_or_else(|| Err("its thread stopped".to_owned()))
             };
@@ -175,6 +182,7 @@ fn tokens_list(tokens: Tokens, made: Made) -> impl IntoElement {
                 Ok(Box::pin(request)),
                 move |NewToken { token, secret }| {
                     name.set(String::new());
+                    access.set(Access::default());
                     made.set(Some((token.name, secret)));
                     reads.update(|n| *n += 1);
                 },
@@ -192,17 +200,32 @@ fn tokens_list(tokens: Tokens, made: Made) -> impl IntoElement {
         .child(view().child(rows))
         .child(when(move || made.get().is_some(), move || made_token(made)))
         .child(
+            text_input()
+                .placeholder("Name, such as the agent's device")
+                .value(move || name.get())
+                .on_change(move |text: &str| name.set(text.to_owned()))
+                .on_submit(move |_: &str| add_on_enter()),
+        )
+        .child(
             view()
                 .flex_row()
                 .items_center()
                 .gap(px(8.0))
                 .child(
-                    text_input()
-                        .flex_1()
-                        .placeholder("Name, such as the agent's device")
-                        .value(move || name.get())
-                        .on_change(move |text: &str| name.set(text.to_owned()))
-                        .on_submit(move |_: &str| add_on_enter()),
+                    menu_field(
+                        "What the agent may do",
+                        move || mcp::tier_label(access.with(|a| a.tier)).to_owned(),
+                        move || choose_tier(access),
+                    )
+                    .w(px(180.0)),
+                )
+                .child(
+                    menu_field(
+                        "Accounts",
+                        move || access.with(|a| mcp::accounts_label(a.accounts.as_deref())),
+                        move || choose_account(access),
+                    )
+                    .flex_1(),
                 )
                 .child(labelled_button(
                     Icon::Plus,
@@ -213,6 +236,38 @@ fn tokens_list(tokens: Tokens, made: Made) -> impl IntoElement {
                 )),
         )
         .child(error(submission))
+}
+
+fn choose_tier(access: Signal<Access>) {
+    let current = access.with_untracked(|a| a.tier);
+    let items = Tier::ALL
+        .into_iter()
+        .map(|t| {
+            MenuItem::new(mcp::tier_label(t))
+                .checked(t == current)
+                .on_select(move || access.update(|a| a.tier = t))
+        })
+        .collect();
+    drop(popup_menu(items));
+}
+
+/// Every account, or one of them; more than one is `catmail mcp token add`'s.
+fn choose_account(access: Signal<Access>) {
+    let current = access.with_untracked(|a| a.accounts.clone());
+    let emails: Vec<String> =
+        with_accounts(|list| list.iter().map(|e| e.account.email.clone()).collect());
+    let all = MenuItem::new(mcp::accounts_label(None))
+        .checked(current.is_none())
+        .on_select(move || access.update(|a| a.accounts = None));
+    let items = std::iter::once(all)
+        .chain(emails.into_iter().map(|email| {
+            let chosen = current.as_deref() == Some(std::slice::from_ref(&email));
+            MenuItem::new(email.clone())
+                .checked(chosen)
+                .on_select(move || access.update(|a| a.accounts = Some(vec![email.clone()])))
+        }))
+        .collect();
+    drop(popup_menu(items));
 }
 
 fn token_row(token: Token, tokens: Tokens, made: Made, reads: Signal<u32>) -> AnyElement {
@@ -255,7 +310,12 @@ fn token_row(token: Token, tokens: Tokens, made: Made, reads: Signal<u32>) -> An
                         .selectable_text()
                         .text_color(move || theme().foreground),
                 )
-                .child(help(move || format::date(Some(token.created_at), &clock()))),
+                .child(help(move || {
+                    mcp::token_line(
+                        &token.access,
+                        &format::date(Some(token.created_at), &clock()),
+                    )
+                })),
         )
         .child(icon_button(
             || Icon::Trash,

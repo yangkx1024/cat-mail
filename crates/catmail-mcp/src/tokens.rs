@@ -2,11 +2,14 @@
 //! the config directory rather than the database: managing them doesn't need the
 //! engine, so `catmail mcp token add` works while `catmail serve` holds the data
 //! directory, and the hosts (the app, `catmail serve`) share them. Only a token's
-//! SHA-256 is stored; the token itself is shown once, when made.
+//! SHA-256 is stored; the token itself is shown once, when made. Each says what the
+//! agent may do ([`Access`]).
 
+use std::fmt;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use catmail_core::{create_private_dir, private_file_options};
 use serde::{Deserialize, Serialize};
@@ -20,6 +23,8 @@ const VERSION: u32 = 1;
 /// Tells a catmail token apart from others, for people and for secret scanners.
 const PREFIX: &str = "catmail_";
 const MAX_NAME_CHARS: usize = 64;
+/// More than anyone has; a list that long is a mistake.
+const MAX_ACCOUNTS: usize = 100;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TokenError {
@@ -36,8 +41,108 @@ pub enum TokenError {
     NameTaken(String),
     #[error("a token's name is 1 to {MAX_NAME_CHARS} characters, without control characters")]
     BadName,
+    #[error("`{0}` isn't an email address")]
+    BadAccount(String),
+    #[error("a token limited to accounts needs at least one, and at most {MAX_ACCOUNTS}")]
+    BadAccounts,
     #[error("can't get random bytes for a token: {0}")]
     Random(getrandom::Error),
+}
+
+/// What a token lets an agent do. Each tier can do what those before it can; an agent
+/// doesn't see the tools of a tier above its token's.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Tier {
+    /// List, search and read mail, and sync.
+    #[default]
+    Read,
+    /// Also mark messages, move, archive, label them and move them to Trash.
+    Organize,
+}
+
+impl Tier {
+    pub const ALL: [Tier; 2] = [Tier::Read, Tier::Organize];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Tier::Read => "read",
+            Tier::Organize => "organize",
+        }
+    }
+}
+
+impl fmt::Display for Tier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Tier {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        Tier::ALL
+            .into_iter()
+            .find(|t| t.as_str().eq_ignore_ascii_case(s.trim()))
+            .ok_or_else(|| {
+                let names: Vec<_> = Tier::ALL.iter().map(|t| t.as_str()).collect();
+                format!("`{s}` isn't a tier; one of {}", names.join(", "))
+            })
+    }
+}
+
+/// What an agent with the token may do, and with which accounts. A token from before
+/// tiers reads as reading only, with every account.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Access {
+    #[serde(default)]
+    pub tier: Tier,
+    /// The accounts, by email address; every account with `None`, those added later too.
+    /// By address rather than id: what the user named, and the same again if the
+    /// account is removed and added back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounts: Option<Vec<String>>,
+}
+
+impl Access {
+    /// Whether the account with this address is one of the token's.
+    pub fn allows(&self, email: &str) -> bool {
+        self.accounts
+            .as_ref()
+            .is_none_or(|list| list.iter().any(|a| a.eq_ignore_ascii_case(email)))
+    }
+
+    /// Trimmed, checked, and each address once.
+    fn checked(mut self) -> Result<Self, TokenError> {
+        if let Some(list) = &mut self.accounts {
+            let mut seen: Vec<String> = Vec::new();
+            for email in list.iter() {
+                let email = email.trim();
+                if !plausible_email(email) {
+                    return Err(TokenError::BadAccount(email.to_owned()));
+                }
+                if !seen.iter().any(|s| s.eq_ignore_ascii_case(email)) {
+                    seen.push(email.to_owned());
+                }
+            }
+            if seen.is_empty() || seen.len() > MAX_ACCOUNTS {
+                return Err(TokenError::BadAccounts);
+            }
+            *list = seen;
+        }
+        Ok(self)
+    }
+}
+
+/// Enough to catch a name given where an address was meant; the accounts themselves
+/// aren't known here (making a token doesn't open the engine).
+fn plausible_email(email: &str) -> bool {
+    email.split_once('@').is_some_and(|(local, domain)| {
+        !local.is_empty() && !domain.is_empty() && !domain.contains('@')
+    }) && !email.chars().any(|c| c.is_control() || c.is_whitespace())
 }
 
 /// A token as stored: what it is for, never what it is.
@@ -47,6 +152,7 @@ pub struct Token {
     pub name: String,
     /// Unix timestamp, seconds.
     pub created_at: i64,
+    pub access: Access,
 }
 
 /// A token just made: `secret` is what the agent sends, and is not kept.
@@ -74,6 +180,8 @@ struct Entry {
     /// Hex.
     sha256: String,
     created_at: i64,
+    #[serde(flatten)]
+    access: Access,
 }
 
 impl Tokens {
@@ -104,7 +212,7 @@ impl Tokens {
             .map(Entry::token))
     }
 
-    pub fn add(&self, name: &str) -> Result<NewToken, TokenError> {
+    pub fn add(&self, name: &str, access: Access) -> Result<NewToken, TokenError> {
         let name = name.trim();
         if name.is_empty()
             || name.chars().count() > MAX_NAME_CHARS
@@ -112,12 +220,14 @@ impl Tokens {
         {
             return Err(TokenError::BadName);
         }
+        let access = access.checked()?;
         let mut bytes = [0u8; 32];
         getrandom::fill(&mut bytes).map_err(TokenError::Random)?;
         let secret = format!("{PREFIX}{}", hex::encode(bytes));
         let token = Token {
             name: name.to_owned(),
             created_at: jiff::Timestamp::now().as_second(),
+            access,
         };
         self.change(|file| {
             if file.tokens.iter().any(|e| e.name == token.name) {
@@ -127,6 +237,7 @@ impl Tokens {
                 name: token.name.clone(),
                 sha256: digest(&secret),
                 created_at: token.created_at,
+                access: token.access.clone(),
             });
             Ok(())
         })?;
@@ -216,6 +327,7 @@ impl Entry {
         Token {
             name: self.name.clone(),
             created_at: self.created_at,
+            access: self.access.clone(),
         }
     }
 }
@@ -233,10 +345,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tokens = Tokens::new(dir.path().join("config"));
         assert!(tokens.list().unwrap().is_empty());
-        let laptop = tokens.add(" laptop ").unwrap();
+        let laptop = tokens.add(" laptop ", Access::default()).unwrap();
         assert_eq!(laptop.token.name, "laptop");
         assert!(laptop.secret.starts_with(PREFIX));
-        let phone = tokens.add("phone").unwrap();
+        let phone = tokens.add("phone", Access::default()).unwrap();
         assert_ne!(laptop.secret, phone.secret);
 
         assert_eq!(
@@ -257,7 +369,7 @@ mod tests {
     fn only_hashes_are_stored() {
         let dir = tempfile::tempdir().unwrap();
         let tokens = Tokens::new(dir.path());
-        let new = tokens.add("laptop").unwrap();
+        let new = tokens.add("laptop", Access::default()).unwrap();
         let stored = fs::read_to_string(tokens.path()).unwrap();
         assert!(!stored.contains(&new.secret));
         assert!(stored.contains(&digest(&new.secret)));
@@ -270,7 +382,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config");
         let tokens = Tokens::new(&config);
-        tokens.add("laptop").unwrap();
+        tokens.add("laptop", Access::default()).unwrap();
         let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&config), 0o700);
         assert_eq!(mode(&tokens.path()), 0o600);
@@ -280,18 +392,86 @@ mod tests {
     fn names_are_checked() {
         let dir = tempfile::tempdir().unwrap();
         let tokens = Tokens::new(dir.path());
-        tokens.add("laptop").unwrap();
+        tokens.add("laptop", Access::default()).unwrap();
         assert!(matches!(
-            tokens.add("laptop"),
+            tokens.add("laptop", Access::default()),
             Err(TokenError::NameTaken(_))
         ));
-        assert!(matches!(tokens.add("  "), Err(TokenError::BadName)));
-        assert!(matches!(tokens.add("a\nb"), Err(TokenError::BadName)));
         assert!(matches!(
-            tokens.add(&"x".repeat(65)),
+            tokens.add("  ", Access::default()),
+            Err(TokenError::BadName)
+        ));
+        assert!(matches!(
+            tokens.add("a\nb", Access::default()),
+            Err(TokenError::BadName)
+        ));
+        assert!(matches!(
+            tokens.add(&"x".repeat(65), Access::default()),
             Err(TokenError::BadName)
         ));
         assert_eq!(tokens.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn access_is_kept_with_the_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokens = Tokens::new(dir.path());
+        let organize = Access {
+            tier: Tier::Organize,
+            accounts: Some(vec![
+                " a@example.com".into(),
+                "A@example.com".into(),
+                "b@x".into(),
+            ]),
+        };
+        let new = tokens.add("laptop", organize).unwrap();
+        let access = tokens.verify(&new.secret).unwrap().unwrap().access;
+        assert_eq!(access.tier, Tier::Organize);
+        assert_eq!(
+            access.accounts.as_deref(),
+            Some(&["a@example.com".to_owned(), "b@x".to_owned()][..])
+        );
+        assert!(access.allows("A@Example.com"));
+        assert!(!access.allows("c@example.com"));
+        assert!(Access::default().allows("c@example.com"));
+
+        let only = |accounts: Vec<&str>| Access {
+            tier: Tier::Read,
+            accounts: Some(accounts.into_iter().map(Into::into).collect()),
+        };
+        assert!(matches!(
+            tokens.add("phone", only(vec![])),
+            Err(TokenError::BadAccounts)
+        ));
+        assert!(matches!(
+            tokens.add("phone", only(vec!["alice"])),
+            Err(TokenError::BadAccount(_))
+        ));
+    }
+
+    #[test]
+    fn a_token_from_before_tiers_reads_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokens = Tokens::new(dir.path());
+        let secret = "catmail_old";
+        fs::write(
+            tokens.path(),
+            format!(
+                r#"{{"version": 1, "tokens": [{{"name": "old", "sha256": "{}", "created_at": 0}}]}}"#,
+                digest(secret)
+            ),
+        )
+        .unwrap();
+        let token = tokens.verify(secret).unwrap().unwrap();
+        assert_eq!(token.access, Access::default());
+        assert_eq!(token.access.tier, Tier::Read);
+    }
+
+    #[test]
+    fn tiers_parse_and_order() {
+        assert_eq!("Organize".parse::<Tier>(), Ok(Tier::Organize));
+        assert!("send".parse::<Tier>().is_err());
+        assert!(Tier::Read < Tier::Organize);
     }
 
     #[test]
@@ -304,6 +484,6 @@ mod tests {
             Err(TokenError::Version { version: 2, .. })
         ));
         // Nor written over.
-        assert!(tokens.add("laptop").is_err());
+        assert!(tokens.add("laptop", Access::default()).is_err());
     }
 }

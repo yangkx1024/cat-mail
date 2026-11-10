@@ -11,8 +11,8 @@ use crate::{AccountId, FolderId, MessageCursor, MessageId};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchQuery {
     pub text: String,
-    /// Only this account; `None` searches every account.
-    pub account: Option<AccountId>,
+    /// Only these accounts; `None` searches every account, an empty list none.
+    pub accounts: Option<Vec<AccountId>>,
     /// Only this folder.
     pub folder: Option<FolderId>,
     pub limit: u32,
@@ -28,7 +28,7 @@ impl SearchQuery {
     pub fn new(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
-            account: None,
+            accounts: None,
             folder: None,
             limit: 50,
             after: None,
