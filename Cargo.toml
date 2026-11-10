@@ -123,8 +123,7 @@ resvg = { version = "0.46", default-features = false, features = ["text", "syste
 quick-xml = "0.41.0"
 rcgen = "0.14"
 rpassword = "7"
-rusqlite = { version = "0.40", features = ["bundled"] }
-rusqlite_migration = "2.6"
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 # ring instead of the default aws-lc-rs: no cmake/NASM needed on Windows CI.
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-platform-verifier = "0.7.1"
