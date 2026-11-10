@@ -104,8 +104,9 @@ if [[ ! -x $resvg || $("$resvg" --version) != "$resvg_version" ]]; then
     --version "$resvg_version" resvg
 fi
 
-cargo build --release --locked -p catmail-gui --manifest-path "$repo/Cargo.toml"
-cargo build --release --locked -p catmail-cli --manifest-path "$repo/Cargo.toml"
+# One build for both: built one at a time, each resolves its own features, and the CLI's
+# build compiles every dependency they share again.
+cargo build --release --locked -p catmail-gui -p catmail-cli --manifest-path "$repo/Cargo.toml"
 gui=$target_dir/release/catmail-gui
 cli=$target_dir/release/catmail
 pkgid=$(cargo pkgid -p catmail-gui --manifest-path "$repo/Cargo.toml")

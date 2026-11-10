@@ -210,6 +210,21 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # build-dmg.sh installs resvg from source when it has none of the version it pins;
+      # keyed by that version. Caches written by a pull request are kept to its own ref,
+      # so a release only runs a resvg that a run on main built.
+      - name: resvg version
+        id: resvg
+        run: |
+          version=$(sed -n 's/^resvg_version=//p' packaging/macos/build-dmg.sh)
+          [[ -n $version ]] || { echo "error: no resvg_version in build-dmg.sh" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v6
+        with:
+          path: target/macos/tools/bin
+          key: resvg-${{ steps.resvg.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
+
       # A keychain of its own, holding the identity and the intermediate it chains to.
       - name: Signing identity
         if: env.SIGNED == 'true'
