@@ -1138,6 +1138,42 @@ async fn a_token_downloads_only_so_much_a_day() {
         .await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_draft_failing_after_its_download_keeps_it_charged() {
+    let f = Fixture::new(ServeOptions::default()).await;
+    let ids = f.ids(None).await;
+    let mut sizes = Vec::new();
+    for &id in &ids {
+        let message = f.client.get_message(MessageId(id)).await.unwrap().unwrap();
+        sizes.push(u64::from(message.size.unwrap()));
+    }
+    drop(f);
+    // Room for the first message, not for both.
+    let options = ServeOptions {
+        limits: TokenLimits {
+            download_per_day: sizes[0] + sizes[1] - 1,
+            ..TokenLimits::default()
+        },
+        ..ServeOptions::default()
+    };
+    let f = Fixture::new(options).await;
+    let ids = f.ids(None).await;
+    // The file's name is checked once the message is here.
+    let bad_file = json!([{"name": "../bad.txt", "base64": "aGk="}]);
+    let refused = f
+        .call_result(
+            "reply",
+            json!({"message": ids[0], "text": "hi", "attachments": bad_file}),
+        )
+        .await;
+    assert_eq!(refused["isError"], true, "{refused}");
+    let message = f.client.get_message(MessageId(ids[0])).await.unwrap();
+    assert!(message.unwrap().body.is_some());
+    let refused = f.call_result("read_message", json!({"id": ids[1]})).await;
+    let text = refused["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("over_limit"), "{text}");
+}
+
 #[test]
 fn what_a_draft_says_is_left_out_of_the_log() {
     let arguments = json!({

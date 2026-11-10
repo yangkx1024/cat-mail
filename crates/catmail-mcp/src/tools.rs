@@ -5,7 +5,7 @@
 //! token allows ([`Scope`]) and may use ([`Limits`]).
 
 use std::collections::HashMap;
-use std::future::Future;
+use std::future::{Future, ready};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -602,20 +602,24 @@ impl Mail {
     }
 
     /// The message with its body, downloading it within the token's budget if needed.
+    /// Through the engine even when it is here: opening rebuilds a body an older version
+    /// stored.
     async fn with_body(&self, message: Message) -> Result<Message, Failed> {
-        if message.body.is_some() {
-            return Ok(message);
-        }
+        let cost = body_cost(&message);
         let download = self.client.download_message(message.summary.id);
-        self.downloading(body_cost(&message), download).await
+        // A download that fails has stored nothing.
+        self.downloading(cost, download, ready(cost)).await
     }
 
     /// Runs `work`, which downloads about `bytes` from the mail servers, if they fit in
-    /// the token's budget; gives them back if it fails.
+    /// the token's budget. If it fails, gives back what `left` says is still to
+    /// download: what it got before failing stays spent, or a call failing after its
+    /// download (a reply with a bad file name) would download for free.
     async fn downloading<T>(
         &self,
         bytes: u64,
         work: impl Future<Output = catmail_core::Result<T>>,
+        left: impl Future<Output = u64>,
     ) -> Result<T, Failed> {
         if bytes == 0 {
             return Ok(work.await?);
@@ -625,9 +629,19 @@ impl Mail {
             .map_err(over_limit)?;
         let result = work.await;
         if result.is_err() {
-            self.limits.refund(&self.caller, bytes, Instant::now());
+            let left = left.await.min(bytes);
+            self.limits.refund(&self.caller, left, Instant::now());
         }
         Ok(result?)
+    }
+
+    /// What `cost` says message `id` still takes to download; all of it if that can't
+    /// be told.
+    async fn left_of(&self, id: MessageId, cost: fn(&Message) -> u64) -> u64 {
+        match self.client.get_message(id).await {
+            Ok(Some(message)) => cost(&message),
+            _ => u64::MAX,
+        }
     }
 }
 
@@ -1159,12 +1173,10 @@ impl Mail {
         {
             return Err(too_large());
         }
-        let content = self
-            .downloading(
-                attachment_cost(&attachment),
-                self.client.attachment_content(attachment.id),
-            )
-            .await?;
+        let cost = attachment_cost(&attachment);
+        let download = self.client.attachment_content(attachment.id);
+        // A download that fails has stored nothing.
+        let content = self.downloading(cost, download, ready(cost)).await?;
         if content.len() > MAX_ATTACHMENT_BYTES {
             return Err(too_large());
         }
@@ -1233,16 +1245,13 @@ impl Mail {
         let from = self
             .identity(message.summary.account_id, p.from.as_deref())
             .await?;
+        let id = message.summary.id;
         let draft = self
             .downloading(
                 body_cost(&message),
-                self.client.reply(
-                    message.summary.id,
-                    p.all.unwrap_or(false),
-                    from,
-                    p.text,
-                    files,
-                ),
+                self.client
+                    .reply(id, p.all.unwrap_or(false), from, p.text, files),
+                self.left_of(id, body_cost),
             )
             .await?;
         self.draft_out(&draft).await
@@ -1274,11 +1283,12 @@ impl Mail {
         let from = self
             .identity(message.summary.account_id, p.from.as_deref())
             .await?;
+        let id = message.summary.id;
         let draft = self
             .downloading(
                 forward_cost(&message),
-                self.client
-                    .forward(message.summary.id, from, forwarding, files),
+                self.client.forward(id, from, forwarding, files),
+                self.left_of(id, forward_cost),
             )
             .await?;
         self.draft_out(&draft).await
