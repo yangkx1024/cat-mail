@@ -71,7 +71,8 @@ GUI 发布为 `catmail-<版本>-aarch64.dmg`，里面是 `catmail.app` 和一个
 就装好了。CLI 另发 `catmail-<版本>-aarch64-macos.tar.gz`（`catmail` 和许可证）。只出 Apple 芯片的包：
 Intel Mac 越来越少，universal 二进制要把包撑大一倍。
 
-`packaging/macos/build-dmg.sh` 做全部工作，本地和 CI 都调用它：release 构建两个二进制，检查，组装
+`packaging/macos/build-dmg.sh` 做全部工作，本地和 CI 都调用它：一次 `cargo build` 构建两个二进制（分两次时
+各自合并 feature，CLI 那次会把共用的依赖重编一遍），检查，组装
 bundle，签名、公证，打成磁盘映像和 tarball，输出到 `target/macos/`。要 Apple 芯片的 Mac 和 Xcode。
 GUI 是 nsh 的 AppKit 后端，正文用系统的 WKWebView，bundle 里不带别的库和字体。
 
@@ -91,7 +92,8 @@ catmail.app/Contents/
   （`UNUserNotificationCenter`）在 bundle 外会让进程崩溃，macOS 的新邮件通知因此只能在 bundle 里做（还没做）；
   LaunchServices 也按 bundle 把再次打开交给已在运行的那个（见[后台运行](background.md#单实例与唤起)）。bundle id 是 `net.yangkx.catmail`，与 `APP_ID`
   和数据目录的限定名相同。
-- **图标**由 `catmail-light.svg` 渲染（resvg，从 crates.io 装固定版本）。源文件的底板占 512 中的 480，
+- **图标**由 `catmail-light.svg` 渲染（resvg，从 crates.io 装固定版本；CI 按版本缓存装好的 `resvg`，PR 写的
+  缓存只有它自己的分支读得到，发布用的只会是 main 上的运行装的）。源文件的底板占 512 中的 480，
   直接用会比系统的图标大一圈：脚本改它的 `viewBox`，让底板落在 Apple 图标网格的 824/1024 上，四周留出
   系统图标都有的边距，再用 `iconutil` 生成 16 到 1024 的 `.icns`。
 - **签名**：Developer ID Application 证书，开 hardened runtime（公证的要求），带安全时间戳。不需要任何
