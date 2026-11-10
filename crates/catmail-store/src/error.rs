@@ -8,10 +8,6 @@ pub enum Error {
     #[error("database migration failed: {0}")]
     Migration(String),
 
-    /// The database was migrated by a newer catmail, whose schema this one doesn't know.
-    #[error("the database is from a newer catmail (schema {found}, this one knows {known})")]
-    SchemaTooNew { found: u32, known: u32 },
-
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
 

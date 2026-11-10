@@ -19,16 +19,16 @@ PR（cljoly/rusqlite_migration#370）还没合，也没发版，挡住了升级�
   发版：时间不确定，`cargo deny` 期间一直是红的。用 `[patch.crates-io]` 指向 #370 的分支：要把仓库
   放进 `allow-git`，钉在 dependabot 分支上，不取。
 - 计数与 rusqlite_migration 相同（`user_version` 是跑过的迁移个数），现有的库不用动，以后也能换回去。
-- 比原来多两项检查：库比程序新时拒绝（`Error::SchemaTooNew`），提交前 `PRAGMA foreign_key_check`
+- 比原来多两项检查：库比程序新时拒绝，提交前 `PRAGMA foreign_key_check`
   （重建表时外键在事务里关不掉）。不做反向迁移、Rust 写的数据迁移，用到时再加。
 
 ## 方案
 
 - `crates/catmail-store/src/migrate.rs`：`to_latest`，一个 IMMEDIATE 事务里读 `user_version`、跑没跑过的
   迁移、检查外键、写回版本号。`lib.rs` 的 `MIGRATIONS` 改成 `&[&str]`；`error.rs` 的 `Migration` 改成
-  带文字，新增 `SchemaTooNew`。
+  带文字。事务用 store 已有的 `Store::transact`（IMMEDIATE，成功才提交）。
 - rusqlite 0.40 → 0.41.1，libsqlite3-sys 0.38.2 → 0.39.1，其余代码不用改。
 - `docs/architecture/storage.md` 记下迁移的规则和与 rusqlite_migration 计数一致这条约束。
 - 测试（`migrate::tests`）：新库跑全部、已迁移的不重跑、从中间版本（如 rusqlite_migration 留下的库）
-  只跑剩下的、较新的库拒绝且不动、失败整个回滚、弄坏外键回滚、负的版本号拒绝；`migrations_are_valid`
-  改为在内存库上跑一遍 `MIGRATIONS`。全量测试、clippy、fmt 通过（macOS）。
+  只跑剩下的、较新的库拒绝且不动、失败整个回滚、弄坏外键回滚、负的版本号拒绝。去掉了 `migrations_are_valid`：
+  每个 store 测试都经 `Store::open` 跑一遍 `MIGRATIONS`。全量测试、clippy、fmt 通过（macOS）。

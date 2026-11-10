@@ -48,7 +48,7 @@ const BLOB_REFERENCES: &str = "
     UNION ALL SELECT blob_hash FROM draft_attachments
     UNION ALL SELECT raw_blob_hash FROM outbox";
 
-/// In order, never renumbered or removed: see [`migrate`].
+/// In order; see [`migrate`].
 const MIGRATIONS: &[&str] = &[include_str!("../migrations/0001_init.sql")];
 
 /// Read connections, opened with the store; further concurrent reads wait for one to
@@ -511,13 +511,6 @@ mod tests {
                 "{table}.{column} is not in BLOB_REFERENCES"
             );
         }
-    }
-
-    #[test]
-    fn migrations_are_valid() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        conn.pragma_update(None, "foreign_keys", true).unwrap();
-        migrate::to_latest(&mut conn, MIGRATIONS).unwrap();
     }
 
     #[test]

@@ -1,13 +1,10 @@
-//! Schema migrations, counted in `PRAGMA user_version`.
-//!
-//! `user_version` is the number of migrations the database has had, as `rusqlite_migration`
-//! counted them (which this replaced: it held back SQLite updates until it followed
-//! rusqlite), so a database it migrated carries on here and the two stay interchangeable.
-//! Keep it that way: never renumber, reorder or remove a migration.
+//! Schema migrations, counted in `PRAGMA user_version`: the number of migrations the
+//! database has had, as `rusqlite_migration` counted them, so the two stay interchangeable.
+//! Once released, a migration is never renumbered, reordered or removed.
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension};
 
-use crate::{Error, Result};
+use crate::{Error, Result, Store};
 
 /// Brings the database to the last of `migrations`: runs the ones it hasn't had, in order,
 /// in one transaction with the new `user_version`, so a failure leaves it as it was. Refuses
@@ -17,35 +14,37 @@ use crate::{Error, Result};
 /// `PRAGMA foreign_keys` is a no-op inside a transaction: a migration that rebuilds a table
 /// can't turn foreign keys off, and what it may break is caught by the check before commit.
 pub(crate) fn to_latest(conn: &mut Connection, migrations: &[&str]) -> Result<()> {
-    let known = u32::try_from(migrations.len()).expect("fewer than 2^32 migrations");
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let found: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    let found = u32::try_from(found).map_err(|_| {
-        Error::Migration(format!(
-            "the database's schema version {found} is not one of ours"
-        ))
-    })?;
-    if found > known {
-        return Err(Error::SchemaTooNew { found, known });
-    }
-    if found == known {
-        return Ok(());
-    }
-    for (i, sql) in migrations.iter().enumerate().skip(found as usize) {
-        tx.execute_batch(sql)
-            .map_err(|e| Error::Migration(format!("migration {}: {e}", i + 1)))?;
-    }
-    let broken: Option<String> = tx
-        .query_row("PRAGMA foreign_key_check", [], |row| row.get(0))
-        .optional()?;
-    if let Some(table) = broken {
-        return Err(Error::Migration(format!(
-            "migrating to {known} left a foreign key in {table} pointing at no row"
-        )));
-    }
-    tx.pragma_update(None, "user_version", known)?;
-    tx.commit()?;
-    Ok(())
+    let known = migrations.len();
+    Store::transact(conn, |db| {
+        let conn = db.conn;
+        // A negative version is out of range for u32: an error, as it should be.
+        let found: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let found = found as usize;
+        if found > known {
+            return Err(Error::Migration(format!(
+                "the database is from a newer catmail (schema {found}, this one knows {known})"
+            )));
+        }
+        if found == known {
+            return Ok(());
+        }
+        for (i, sql) in migrations.iter().enumerate().skip(found) {
+            conn.execute_batch(sql)
+                .map_err(|e| Error::Migration(format!("migration {}: {e}", i + 1)))?;
+        }
+        if let Some(table) = conn
+            .query_row("PRAGMA foreign_key_check", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()?
+        {
+            return Err(Error::Migration(format!(
+                "migrating to {known} left a foreign key in {table} pointing at no row"
+            )));
+        }
+        conn.pragma_update(None, "user_version", known as u32)?;
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -107,10 +106,7 @@ mod tests {
         conn.execute_batch("CREATE TABLE a (x); PRAGMA user_version = 3;")
             .unwrap();
         let err = to_latest(&mut conn, &["CREATE TABLE a (x)"]).unwrap_err();
-        assert!(
-            matches!(err, Error::SchemaTooNew { found: 3, known: 1 }),
-            "{err}"
-        );
+        assert!(err.to_string().contains("newer catmail"), "{err}");
         assert_eq!(version(&conn), 3);
     }
 
@@ -154,9 +150,6 @@ mod tests {
     fn a_negative_version_is_refused() {
         let mut conn = conn();
         conn.pragma_update(None, "user_version", -1).unwrap();
-        assert!(matches!(
-            to_latest(&mut conn, &["CREATE TABLE a (x)"]),
-            Err(Error::Migration(_))
-        ));
+        assert!(to_latest(&mut conn, &["CREATE TABLE a (x)"]).is_err());
     }
 }
