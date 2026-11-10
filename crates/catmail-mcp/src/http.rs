@@ -35,7 +35,7 @@ pub const DEFAULT_PORT: u16 = 8642;
 /// Where on the address agents reach the server.
 pub(crate) const PATH: &str = "/mcp";
 /// Enough for any tool's arguments, attachments given to a draft too (base64, at most
-/// `tools::MAX_FILE_BYTES`); rmcp answers 413 above it. Read only once the token is
+/// `tools::drafts::MAX_FILE_BYTES`); rmcp answers 413 above it. Read only once the token is
 /// checked.
 const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 /// Enough for the arguments of every tool but those given files, which only a token of

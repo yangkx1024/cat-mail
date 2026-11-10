@@ -243,9 +243,16 @@ claude mcp add --transport http catmail https://mac.tailnet.ts.net/mcp \
 
 ## 代码
 
-`crates/catmail-mcp/src/`：`tools.rs`（工具与参数，rmcp 的 `#[tool_router]`）、`output.rs`（逐个写出的输出结构，
-文档注释就是 schema 里的描述）、`tokens.rs`、`limits.rs`（调用频率与下载预算）、`connect.rs`（给 agent 的命令示例）、`http.rs`（监听、令牌、交给 rmcp）、`tests.rs`（经 HTTP 对假 IMAP
-服务器端到端）。`tools.snapshot.json` 固定 agent 看到的工具列表，有意改动时 `UPDATE_SNAPSHOTS=1` 重新生成。
+`crates/catmail-mcp/src/`：
+- `tools/`：工具与参数，按层级分文件，每个文件一个 rmcp 的 `#[tool_router(router = …)]`，`Mail::new` 里相加。
+  `mod.rs` 是共用的部分（`Mail`、`Scope`、`Failed`、各工具的层级 `tier_of`、按范围找账户/文件夹/邮件、日志的
+  `logged`）和 `ServerHandler`（按层级列出、调用前限频与定范围）；`reading.rs`、`organizing.rs`、`drafts.rs` 是
+  三个层级的工具；`downloads.rs` 是下载预算的扣与退（`with_body`、`downloading`）。
+- `output.rs`（逐个写出的输出结构，文档注释就是 schema 里的描述）、`tokens.rs`、`limits.rs`（调用频率与下载
+  预算）、`connect.rs`（给 agent 的命令示例）、`http.rs`（监听、令牌、交给 rmcp）。
+- `tests/`：经 HTTP 对假 IMAP 服务器端到端，`mod.rs` 是 `Fixture` 与请求的辅助，其余按主题（`server.rs`：
+  令牌、层级、账户范围、拒绝与停止；`reading.rs`、`organizing.rs`、`drafts.rs`、`limits.rs`）。
+  `tests/tools.snapshot.json` 固定 agent 看到的工具列表，有意改动时 `UPDATE_SNAPSHOTS=1` 重新生成。
 CLI 一侧是 `cmd/mcp.rs`；GUI 一侧是 `catmail-frontend` 的 `mcp.rs`（服务的线程、状态的说法、文案；端口的解析与登录表单共用 `login::parse_port`）、
 `catmail-gui` 的 `settings/agents.rs` 和 `shell/mod.rs` 里托管服务的部分。
 
