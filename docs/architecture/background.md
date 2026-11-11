@@ -38,8 +38,10 @@ GUI 关掉主窗口后继续同步、发信、提醒新邮件，并能从托盘�
   桌面（GNOME 未装 AppIndicator 扩展）也能从启动器再点一次回到窗口（见[单实例与唤起](#单实例与唤起)），不会
   "找不回来"。
 - 写信窗口也算窗口：关掉主窗口时还有写信窗口开着，就等它们都关掉才进入常驻。
-- macOS 上常驻时 Dock 图标还在（`Regular` 的激活策略），点它回到窗口。GPUI 版常驻时切到 Accessory，只留状态栏
-  图标；现在没有切换。
+- macOS 上常驻时切到 Accessory 的激活策略（`toolkit::resident`）：没有 Dock 图标，不在应用切换器里，只留状态栏
+  图标；显示窗口时（`Window::present`）切回 Regular 并激活应用。`--background` 启动一开始就是 Accessory，Dock 图标
+  不先闪一下；登录时的启动要到启动完成才知道，bundle 的 Dock 图标会短暂出现。常驻时从 Finder、启动台再打开仍经
+  `applicationShouldHandleReopen` 回到窗口；Dock 角标照旧设置，回到 Regular 时就在。
 
 ## 引擎属于应用，不属于窗口
 
