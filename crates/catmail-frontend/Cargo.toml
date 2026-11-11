@@ -1,6 +1,6 @@
 [package]
 name = "catmail-frontend"
-description = "What catmail's desktop frontends share: settings, themes, single instance, the sidebar's and list's models, the commands on messages, the composer's model, the outbox's choices, the login forms, display formats, the reader's header and HTML policy, the tray icon, new-mail notifications, running with no window, the MCP server it hosts"
+description = "What catmail's desktop frontends share: settings, themes, single instance, the sidebar's and list's models, the commands on messages, the composer's model, the outbox's choices, the login forms, display formats, the reader's header and HTML policy, the tray icon, new-mail notifications, running with no window, opening at login, the MCP server it hosts"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -28,7 +28,13 @@ ksni.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true
 objc2-app-kit.workspace = true
-objc2-foundation.workspace = true
+objc2-foundation = { workspace = true, features = [
+    "NSAppleEventDescriptor",
+    "NSAppleEventManager",
+    "NSBundle",
+    "NSError",
+] }
+objc2-service-management.workspace = true
 
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 libc.workspace = true

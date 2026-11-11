@@ -187,7 +187,7 @@ UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UI
 | [存储](architecture/storage.md) | SQLite 约定、计数、跨账户约束、全文搜索、BlobStore 与 GC、凭据 |
 | [CLI](architecture/cli.md) | 命令的代码结构、`--json` 的结构与版本、退出码、添加账户前的登录检查、不覆盖文件 |
 | [GUI](architecture/gui.md) | 选型、外壳与线程、视图结构、事件刷新、正文在 WebView 里（断网、图片、深色）、写信窗口、发件箱、主题与设置、已知问题 |
-| [后台运行](architecture/background.md) | 关窗后常驻、单实例与唤起、睡眠唤醒、新邮件事件；通知、托盘、开机启动（设计中） |
+| [后台运行](architecture/background.md) | 关窗后常驻、单实例与唤起、睡眠唤醒、新邮件事件；通知、托盘、开机启动 |
 | [MCP](architecture/mcp.md) | 经 MCP 把能力交给 AI agent：GUI 或 `catmail serve` 托管、只听本机的 HTTP 加 Tailscale、令牌与权限层级、发信的确认（只读、整理、草稿与经确认的发信，令牌的层级、账户与限额，`serve` 与 GUI 托管已实现） |
 | [日志](architecture/logging.md) | stderr 与数据目录里的日志文件、谁能写、记什么、轮转 |
 | [测试](architecture/testing.md) | 假 IMAP / SMTP 服务器、真实 Dovecot 与 mailpit、GUI 的测试 |

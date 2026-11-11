@@ -1,6 +1,6 @@
-//! What the app does once its last window is gone, and why it quits: the decisions of
-//! running without a window ("Keep running after the window is closed"), which every
-//! desktop frontend makes the same way. See docs/architecture/background.md.
+//! Whether the app opens a window at launch, what it does once its last window is gone,
+//! and why it quits: the decisions of running without a window ("Keep running after the
+//! window is closed"), which every desktop frontend makes the same way. See docs/architecture/background.md.
 
 use std::fmt;
 
@@ -13,7 +13,7 @@ pub enum QuitReason {
     /// SIGINT, SIGTERM or SIGHUP; on Windows, a console event.
     Signal,
     LastWindowClosed,
-    /// The data directory couldn't be opened, and no window is left to say so.
+    /// The data directory couldn't be opened, and the window that said so was closed.
     EngineFailed,
     /// The main window couldn't be opened at launch.
     NoWindow,
@@ -32,6 +32,27 @@ impl fmt::Display for QuitReason {
             Self::NoWindow => "no_window",
             Self::Platform => "platform",
         })
+    }
+}
+
+/// What the app opens with.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AtLaunch {
+    Window,
+    /// No window: the app runs as it does once its last window is closed.
+    NoWindow,
+}
+
+/// A launch that asks for no window (`--background`, or the login's) gets none, if the
+/// app would run on once its last window closed ([`after_last_window`]): a failed
+/// engine leaves the window to say why.
+pub fn at_launch(hidden: bool, keep_running: bool, engine_usable: bool) -> AtLaunch {
+    if hidden
+        && after_last_window(keep_running, engine_usable, false) == AfterLastWindow::KeepRunning
+    {
+        AtLaunch::NoWindow
+    } else {
+        AtLaunch::Window
     }
 }
 
@@ -76,5 +97,14 @@ mod tests {
     fn quitting_or_a_failed_engine_ends_the_app_with_its_last_window() {
         assert_eq!(after_last_window(true, true, true), AfterLastWindow::Quit);
         assert_eq!(after_last_window(true, false, false), AfterLastWindow::Quit);
+    }
+
+    #[test]
+    fn a_launch_without_a_window_needs_keep_running_and_an_engine() {
+        assert_eq!(at_launch(true, true, true), AtLaunch::NoWindow);
+        assert_eq!(at_launch(false, true, true), AtLaunch::Window);
+        // Closing the window would quit: one that never opened would leave nothing.
+        assert_eq!(at_launch(true, false, true), AtLaunch::Window);
+        assert_eq!(at_launch(true, true, false), AtLaunch::Window);
     }
 }

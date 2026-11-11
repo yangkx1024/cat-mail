@@ -31,7 +31,9 @@ use catmail_frontend::composer::{ComposeFrom, OpenComposers, Opening, window_tit
 use catmail_frontend::instance::{Request, Requests};
 use catmail_frontend::mailbox::{Destination, Place};
 use catmail_frontend::mcp;
-use catmail_frontend::resident::{AfterLastWindow, QuitReason, after_last_window};
+use catmail_frontend::resident::{
+    AfterLastWindow, AtLaunch, QuitReason, after_last_window, at_launch,
+};
 use catmail_frontend::settings::{self, McpSettings, Settings, SettingsFile};
 use catmail_frontend::theme::{DEFAULT_DARK, DEFAULT_LIGHT, Themes};
 use catmail_frontend::tray::Command;
@@ -310,6 +312,8 @@ thread_local! {
     static COMPOSERS: RefCell<OpenComposers<ComposerWindow>> = RefCell::default();
     /// Quit was asked for, and why: the composers are closing, or the app is quitting.
     static QUITTING: Cell<Option<QuitReason>> = const { Cell::new(None) };
+    /// The launch asked for no window (`--background`).
+    static HIDDEN: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Runs `f` on the main thread, from a view's: at once, whether the answer is awaited or
@@ -325,11 +329,14 @@ pub fn on_main<R: Send + 'static>(
 }
 
 /// Runs the app until it quits, then shuts the engine down: the process's exit code.
+/// `hidden`, it opens no window at launch, as once its last is closed.
 pub fn run(
     builder: MailClientBuilder,
     requests: Option<Requests>,
     file: Option<SettingsFile>,
+    hidden: bool,
 ) -> u8 {
+    HIDDEN.set(hidden);
     let file = FILE.get_or_init(|| file.map(Arc::new));
     SETTINGS.set(file.as_ref().map(|file| file.load()).unwrap_or_default());
     let themes_dir = file.as_ref().map(|file| file.themes_dir());
@@ -363,8 +370,9 @@ fn started(builder: MailClientBuilder, requests: Option<Requests>) {
             toolkit::engine_opened();
             serve_agents(client);
         } else if toolkit::windows().is_empty() {
-            // The window was closed while it opened: there is nothing to run on.
-            exit(QuitReason::EngineFailed);
+            // Launched without one, or it was closed while the engine opened: the window
+            // says why, and the app quits once it is closed (`after_last_window`).
+            show(None);
         }
     });
     if let Some(requests) = requests {
@@ -378,6 +386,18 @@ async fn answer(mut requests: Requests) {
         match request {
             Request::Activate { display } => show(display.activation_token.as_deref()),
         }
+    }
+}
+
+/// The toolkit has launched the app (GTK's `activate`, AppKit's
+/// `applicationDidFinishLaunching:`): the main window opens, unless the launch asked for
+/// none (`--background`, or `at_login`) and the app may run without one. Once, at
+/// launch.
+pub fn launched(at_login: bool) {
+    let hidden = HIDDEN.get() || at_login;
+    match at_launch(hidden, settings().keep_running, engine::usable()) {
+        AtLaunch::Window => show(None),
+        AtLaunch::NoWindow => tracing::info!(at_login, "launched without a window; running on"),
     }
 }
 
@@ -565,7 +585,12 @@ fn window_removed() {
         quitting.is_some(),
     ) {
         AfterLastWindow::Quit => {
-            QUITTING.set(Some(quitting.unwrap_or(QuitReason::LastWindowClosed)));
+            let reason = if engine::usable() {
+                QuitReason::LastWindowClosed
+            } else {
+                QuitReason::EngineFailed
+            };
+            QUITTING.set(Some(quitting.unwrap_or(reason)));
             toolkit::end();
         }
         AfterLastWindow::KeepRunning => {

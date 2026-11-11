@@ -5,8 +5,8 @@
 //! outbox pane offers, the login forms, what Settings › Accounts asks, how message
 //! metadata reads, what the reader says of a message, which parts of a message's HTML it
 //! shows and the page it shows a body as, the tray icon, the new-mail notifications,
-//! running with no window, the MCP server for AI agents, and the values views follow
-//! from their own threads ([`watched`]).
+//! running with no window, opening at login, the MCP server for AI agents, and the values
+//! views follow from their own threads ([`watched`]).
 //! `catmail-gui` draws it; kept apart from it so that it is tested without GTK, WebKit
 //! or nsh, and holds no type of theirs.
 //!
@@ -14,6 +14,7 @@
 //! `malloc_trim`.
 
 pub mod accounts;
+pub mod autostart;
 pub mod commands;
 pub mod composer;
 #[cfg(test)]

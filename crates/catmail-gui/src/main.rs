@@ -1,7 +1,7 @@
 //! `catmail-gui`: catmail's desktop app, on Native Shell (nsh): its GTK 4 backend on
 //! Linux, its AppKit one on macOS, message bodies in web views. `CATMAIL_DATA_DIR` opens
 //! another data directory, `CATMAIL_CONFIG_DIR` reads other settings; a second launch
-//! brings the running one's window up.
+//! brings the running one's window up. `--background` opens no window, as at login.
 
 #![cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 
@@ -78,7 +78,8 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
     // The engine syncs, prefetches, sends and collects garbage on its
     // own, and its futures don't need tokio, which the toolkit's loop isn't.
     let builder = builder.resident();
-    let code = shell::run(builder, requests, config_dir.map(SettingsFile::new));
+    let hidden = std::env::args_os().skip(1).any(|arg| arg == "--background");
+    let code = shell::run(builder, requests, config_dir.map(SettingsFile::new), hidden);
     Ok(std::process::ExitCode::from(code))
 }
 
