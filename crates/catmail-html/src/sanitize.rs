@@ -51,6 +51,9 @@ pub(crate) fn sanitizer(on_image: Option<ImageHook>, recolor: Option<Recolor>) -
     let mut builder = Builder::default();
     builder
         .add_tags(["font"])
+        // The document's title, which no mail client shows as part of the message; ammonia
+        // would keep its text, as the body's first words.
+        .add_clean_content_tags(["title"])
         .add_generic_attributes(LAYOUT_ATTRIBUTES)
         .url_schemes(HashSet::from(["http", "https", "mailto", "cid", "data"]))
         // Relative URLs have no base in an email.
@@ -107,7 +110,10 @@ fn is_data_url(value: &str) -> bool {
 /// handlers, links only to web, mail and `cid:` targets. Inline `style` attributes and
 /// table layout attributes stay, since most email is laid out with them.
 /// Style sheets are rewritten rule by rule (`css.rs`) and put back as one `<style>` at the
-/// start: what could fetch is dropped, and the sheet can't end its element. `style`
+/// start: what could fetch is dropped, and the sheet can't end its element. That
+/// `<style>` is the output's only one and has no attributes, which others rely on: the
+/// readers' passes take the sheet from there, and `catmail-proto` converts the output to
+/// text with mail-parser, which skips only a `<style>` without attributes. `style`
 /// attributes are rewritten as a rule's declarations.
 /// Image sources (remote URLs, `cid:`, `data:`) are kept: whether remote images load
 /// is the renderer's decision, and it should block them by default.
@@ -440,7 +446,7 @@ mod tests {
 
     #[test]
     fn strips_active_content_and_keeps_layout() {
-        let dirty = r##"<html><head><style>p{}</style><script>alert(1)</script></head>
+        let dirty = r##"<html><head><title>Template v2</title><style>p{}</style><script>alert(1)</script></head>
             <body onload="x()"><table width="600" bgcolor="#fff"><tr>
             <td style="padding:4px" onclick="y()"><font color="red">你好</font>
             <img src="https://tracker.example/p.gif"><img src="cid:logo@x">
@@ -460,6 +466,8 @@ mod tests {
             "<form",
             "<input",
             "data:text",
+            // Not shown, unlike the text the sanitizer keeps of the tags it drops.
+            "Template",
         ] {
             assert!(!clean.contains(gone), "{gone} survived: {clean}");
         }

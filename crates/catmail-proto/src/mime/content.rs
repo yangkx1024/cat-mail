@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use catmail_html::{cid_image_ids, sanitize_html};
+use mail_parser::decoders::html::html_to_text;
 use mail_parser::parsers::MessageStream;
 use mail_parser::{Encoding, Message, MessageParser, MessagePart, MimeHeaders, PartType};
 
@@ -18,7 +19,7 @@ const SNIPPET_CHARS: usize = 200;
 /// so that the change is a decision.
 ///
 /// [`MimeNode::content`]: super::MimeNode::content
-pub const CONTENT_VERSION: u32 = 2;
+pub const CONTENT_VERSION: u32 = 3;
 
 /// What a reader shows of a message.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -94,10 +95,6 @@ pub(super) fn extract(
     also_listed: &[u32],
     headers: &HashMap<String, Vec<u8>>,
 ) -> Content {
-    let text = joined(
-        (0..message.text_body_count()).filter_map(|i| message.body_text(i)),
-        "\n",
-    );
     let has_html = message
         .html_body
         .iter()
@@ -111,6 +108,7 @@ pub(super) fn extract(
         })
         .flatten()
         .map(|html| sanitize_html(&html));
+    let text = text(message, html.as_deref());
     let sections = sections(message);
     let text_charsets = text_charsets(message);
     // Part ids follow MIME order. A set, not `contains` on each part: a message may
@@ -240,6 +238,159 @@ fn text_charsets<'a>(message: &'a Message<'_>) -> Vec<&'a str> {
                 .then(|| content_type.attribute("charset"))?
         })
         .collect()
+}
+
+/// The text of the message's body parts. An HTML part's is converted from it sanitized:
+/// mail-parser's conversion skips only a `<style>` without attributes, which is all that
+/// [`sanitize_html`] leaves; of the HTML as sent, it would give the rest of the message's
+/// style sheets as its text. A text part is
+/// taken as the sender wrote it, unless it is markup that the HTML doesn't show
+/// ([`is_markup`]); then the text is the HTML's (`html`, the sanitized HTML of the
+/// message). The HTML is the same message in another form, so converting it when the
+/// text part was fine loses no more than the text's layout.
+fn text(message: &Message<'_>, html: Option<&str>) -> Option<String> {
+    let of_html = |html: &str| Some(html_to_text(html)).filter(|text| !text.trim().is_empty());
+    // Most often the HTML parts are the whole body, and sanitized already.
+    if message.text_body == message.html_body
+        && message.text_bodies().all(MessagePart::is_text_html)
+    {
+        return html.and_then(of_html);
+    }
+    let text = joined(
+        message.text_bodies().filter_map(|part| match &part.body {
+            PartType::Text(text) => Some(Cow::Borrowed(text.as_ref())),
+            PartType::Html(html) => Some(Cow::Owned(html_to_text(&sanitize_html(html)))),
+            _ => None,
+        }),
+        "\n",
+    );
+    match (text, html) {
+        // An HTML of images alone shows no text: the text part, markup and all, still has
+        // more to find than nothing.
+        (Some(text), Some(html)) if is_markup(&text, || html_to_text(html)) => {
+            of_html(html).or(Some(text))
+        }
+        (text, _) => text,
+    }
+}
+
+/// Characters, whitespace aside, at the start of a text part that [`is_markup`] reads.
+const MARKUP_LEAD: usize = 1000;
+
+/// Whether `text`, from a text part, is markup rather than text: at least half of its
+/// first [`MARKUP_LEAD`] characters, whitespace aside, are words of tags, CSS comments
+/// or blocks in braces that the text the HTML shows (`shown`) doesn't have. Some
+/// senders' text part is their HTML source or style sheet, whole or at the start.
+/// Markup is judged at the start, which lists and readers show; a message about code or
+/// markup shows it in its HTML too, so its words don't count.
+fn is_markup(text: &str, shown: impl FnOnce() -> String) -> bool {
+    let mut lead = Vec::new();
+    let mut total = 0;
+    for word in text.split_whitespace() {
+        if total >= MARKUP_LEAD {
+            break;
+        }
+        total += word.chars().count();
+        lead.push((word.as_ptr().addr() - text.as_ptr().addr(), word));
+    }
+    let limit = lead.last().map_or(0, |&(at, word)| at + word.len());
+    let mut spans = markup_spans(text, limit).into_iter().peekable();
+    let marked: Vec<&str> = lead
+        .into_iter()
+        .filter(|&(at, _)| {
+            while spans.next_if(|&(_, end)| end <= at).is_some() {}
+            spans.peek().is_some_and(|&(start, _)| start <= at)
+        })
+        .map(|(_, word)| word)
+        .collect();
+    let in_markup: usize = marked.iter().map(|word| word.chars().count()).sum();
+    // Too little markup to matter whatever the HTML shows: most text parts with any
+    // stop here, before the HTML is converted.
+    if marked.is_empty() || in_markup * 2 < total {
+        return false;
+    }
+    let shown = shown();
+    let shown: HashSet<&str> = shown.split_whitespace().collect();
+    let hidden: usize = marked
+        .iter()
+        .filter(|word| !shown.contains(**word))
+        .map(|word| word.chars().count())
+        .sum();
+    hidden * 2 >= total
+}
+
+/// Byte ranges of `text` that look like markup, in order, from those that start before
+/// `limit`: tags (`<p>`, `</td>`, `<!doctype …>`, not `<https://…>`), `/* … */`
+/// comments, and blocks in braces with what they hold. Linear in the text's length,
+/// which the sender chooses.
+fn markup_spans(text: &str, limit: usize) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut spans = Vec::new();
+    let (mut i, mut depth, mut block) = (0, 0, 0);
+    // Once a comment has no end, no later one has.
+    let mut comments_end = true;
+    while i < bytes.len() && (i < limit || depth > 0) {
+        if depth == 0 {
+            let rest = &bytes[i..];
+            // Both start after an ASCII byte, at a character boundary.
+            let end = if comments_end && rest.starts_with(b"/*") {
+                let end = text[i + 2..].find("*/").map(|end| i + 2 + end + 2);
+                comments_end = end.is_some();
+                end
+            } else if is_tag_start(rest) {
+                // Up to the next `<` at most, so that each byte is read once.
+                rest[1..]
+                    .iter()
+                    .position(|&b| matches!(b, b'<' | b'>'))
+                    .filter(|&end| rest[1 + end] == b'>')
+                    .map(|end| i + 1 + end + 1)
+            } else {
+                None
+            };
+            if let Some(end) = end {
+                spans.push((i, end));
+                i = end;
+                continue;
+            }
+        }
+        match bytes[i] {
+            b'{' => {
+                if depth == 0 {
+                    block = i;
+                }
+                depth += 1;
+            }
+            b'}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    spans.push((block, i + 1));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    spans
+}
+
+/// Whether `rest` starts with what starts a tag: `<!`, or `<` or `</` and a name ending
+/// at a space, `/` or `>`.
+fn is_tag_start(rest: &[u8]) -> bool {
+    let Some(rest) = rest.strip_prefix(b"<") else {
+        return false;
+    };
+    if rest.starts_with(b"!") {
+        return true;
+    }
+    let name = rest.strip_prefix(b"/").unwrap_or(rest);
+    let len = name
+        .iter()
+        .take_while(|b| b.is_ascii_alphanumeric() || **b == b'-')
+        .count();
+    name.first().is_some_and(u8::is_ascii_alphabetic)
+        && name
+            .get(len)
+            .is_some_and(|b| b.is_ascii_whitespace() || matches!(b, b'/' | b'>'))
 }
 
 fn joined<S: AsRef<str>>(pieces: impl Iterator<Item = S>, separator: &str) -> Option<String> {
@@ -577,6 +728,138 @@ mod tests {
         assert!(inner.ends_with(b"--n--"));
     }
 
+    /// A text part that is the HTML's style sheet, then its text, as some senders make it
+    /// (a Shopify order confirmation).
+    const STYLE_AS_TEXT: &[u8] = b"Subject: Order confirmed\r\n\
+        Content-Type: multipart/alternative; boundary=a\r\n\r\n\
+        --a\r\n\
+        Content-Type: text/plain; charset=utf-8\r\n\r\n\
+        96\r\n\r\n\
+        /* What it does: Remove spaces around the email design\r\n\
+        added by some email clients. */\r\n\
+        html, body { Margin: 0 auto !important; padding: 0 !important; height: 100% !important; }\r\n\
+        table, td { mso-table-lspace: 0pt !important; mso-table-rspace: 0pt !important; }\r\n\
+        @media screen and (max-width: 600px) { .email-container { width: 100% !important; } }\r\n\
+        \r\n\
+        Thank you for your purchase. Order #1234 is confirmed.\r\n\
+        --a\r\n\
+        Content-Type: text/html; charset=utf-8\r\n\r\n\
+        <html><head><title>Order</title><style>td{padding:0}</style></head><body>\
+        <p>Thank you for your purchase.</p><p>Order #1234 is confirmed.</p></body></html>\r\n\
+        --a--\r\n";
+
+    #[test]
+    fn a_text_part_of_markup_gives_way_to_the_html() {
+        let content = parse_message(STYLE_AS_TEXT);
+        let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let expected = "Thank you for your purchase. Order #1234 is confirmed.";
+        assert_eq!(
+            content.text.as_deref().map(words).as_deref(),
+            Some(expected)
+        );
+        assert_eq!(content.snippet.as_deref(), Some(expected));
+
+        // The HTML source itself.
+        let raw = alternative(
+            "<!doctype html>\r\n<html>\r\n<head>\r\n<meta charset=\"utf-8\">\r\n\
+            <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\r\n</head>\r\n\
+            <body>\r\n<table cellpadding=\"0\" cellspacing=\"0\" width=\"100%\" role=\"presentation\">\r\n\
+            <tr><td>Happy birthday!</td></tr>\r\n</table>\r\n</body>\r\n</html>",
+            "<table cellpadding=\"0\"><tr><td>Happy birthday!</td></tr></table>",
+        );
+        let content = parse_message(&raw);
+        assert_eq!(
+            content.text.as_deref().map(str::trim),
+            Some("Happy birthday!")
+        );
+
+        // But not to an HTML with no text.
+        let text = "/* What it does: Remove spaces around the email design. */\r\n\
+            html, body { Margin: 0 auto !important; padding: 0 !important; }\r\n\
+            table, td { mso-table-lspace: 0pt !important; mso-table-rspace: 0pt !important; }\r\n\
+            Order #1234 is confirmed.";
+        let raw = alternative(text, "<img src=\"https://example.com/order.png\">");
+        assert_eq!(parse_message(&raw).text.as_deref(), Some(text));
+    }
+
+    /// A `multipart/alternative` message of `text` and `html`.
+    fn alternative(text: &str, html: &str) -> Vec<u8> {
+        format!(
+            "Content-Type: multipart/alternative; boundary=a\r\n\r\n\
+            --a\r\nContent-Type: text/plain\r\n\r\n{text}\r\n\
+            --a\r\nContent-Type: text/html\r\n\r\n{html}\r\n\
+            --a--\r\n"
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn a_text_part_about_markup_is_kept() {
+        // Mostly style rules, which the HTML shows too; and links in angle brackets.
+        let text = "Try these rules:\r\n\r\n\
+            .button { color: red !important; background: white; }\r\n\
+            .link { text-decoration: none !important; }\r\n\r\n\
+            From <https://example.com/css>, <a@example.com>.";
+        let html = "<p>Try these rules:</p><pre>.button { color: red !important; background: white; }\n\
+            .link { text-decoration: none !important; }</pre>\
+            <p>From https://example.com/css, a@example.com.</p>";
+        let content = parse_message(&alternative(text, html));
+        assert_eq!(content.text.as_deref(), Some(text));
+
+        // Markup that the HTML doesn't show, but little of it.
+        let raw = alternative(
+            "Your code is 4721. It expires in ten minutes; if you didn't ask for it,\r\n\
+            you can ignore this message. <b>Don't share it.</b>",
+            "<p>Your code is <b>4721</b>.</p>",
+        );
+        let text = parse_message(&raw).text.unwrap();
+        assert!(text.starts_with("Your code is 4721. It expires"), "{text}");
+    }
+
+    #[test]
+    fn html_text_leaves_out_style_sheets_and_the_title() {
+        // mail-parser's own conversion skips only a `<style>` without attributes.
+        let raw = b"Content-Type: text/html; charset=utf-8\r\n\r\n\
+            <html><head><title>Newsletter</title></head><body>\
+            <style type=\"text/css\">div.preheader { display: none !important; }</style>\
+            <p>Your parcel has arrived.</p></body></html>\r\n";
+        let content = parse_message(raw);
+        assert_eq!(
+            content.text.as_deref().map(str::trim),
+            Some("Your parcel has arrived.")
+        );
+        assert_eq!(content.snippet.as_deref(), Some("Your parcel has arrived."));
+
+        // With a text part beside it, each converted on its own.
+        let raw = b"Content-Type: multipart/mixed; boundary=m\r\n\r\n\
+            --m\r\n\
+            Content-Type: text/plain\r\n\r\n\
+            Hello\r\n\
+            --m\r\n\
+            Content-Type: text/html\r\n\r\n\
+            <style media=\"screen\">p { margin: 0 }</style><p>World</p>\r\n\
+            --m--\r\n";
+        let text = parse_message(raw).text.unwrap();
+        assert_eq!(
+            text.split_whitespace().collect::<Vec<_>>(),
+            ["Hello", "World"]
+        );
+    }
+
+    #[test]
+    fn markup_spans_are_tags_comments_and_blocks() {
+        fn spans(text: &str) -> Vec<&str> {
+            let spans = markup_spans(text, text.len()).into_iter();
+            spans.map(|(start, end)| &text[start..end]).collect()
+        }
+        assert_eq!(
+            spans("a <p class=\"x\">b</p> <https://x.y> 1 < 2 > 0 /* c */ s { t { u } } v"),
+            ["<p class=\"x\">", "</p>", "/* c */", "{ t { u } }"]
+        );
+        // What doesn't end is no span, and leaves the rest to be read.
+        assert_eq!(spans("/* open <a <b> é { x"), ["<b>"]);
+    }
+
     #[test]
     fn decodes_transfer_encodings_leniently() {
         assert_eq!(
@@ -743,7 +1026,13 @@ mod tests {
     #[test]
     fn fingerprint_follows_content_version() {
         let mut hash = 0xcbf2_9ce4_8422_2325;
-        for raw in [MIXED, &raw_gbk_names("gbk"), HTML_ONLY, PLAIN] {
+        for raw in [
+            MIXED,
+            &raw_gbk_names("gbk"),
+            HTML_ONLY,
+            PLAIN,
+            STYLE_AS_TEXT,
+        ] {
             let content = parse_message(raw);
             let h = &mut hash;
             fnv(h, content.text.as_deref().map(str::as_bytes));
@@ -765,7 +1054,7 @@ mod tests {
         // either way, record the new fingerprint here.
         assert_eq!(
             (CONTENT_VERSION, format!("{hash:016x}")),
-            (2, "e8e4810e0d9cd7b3".to_owned()),
+            (3, "9cf3f92174e6d84f".to_owned()),
         );
     }
 }
