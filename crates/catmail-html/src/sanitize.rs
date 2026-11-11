@@ -74,6 +74,8 @@ pub(crate) fn sanitizer(on_image: Option<ImageHook>, recolor: Option<Recolor>) -
                     recolor.colors_from_variables.store(true, Ordering::Relaxed);
                 }
                 (!style.css.is_empty()).then_some(Cow::Owned(style.css))
+            } else if let Some(span) = bounded_span(attribute, value) {
+                Some(Cow::Owned(span))
             } else if let Some(replaced) =
                 on_image.as_ref().filter(|_| image).and_then(|f| f(value))
             {
@@ -87,6 +89,20 @@ pub(crate) fn sanitizer(on_image: Option<ImageHook>, recolor: Option<Recolor>) -
             }
         });
     builder
+}
+
+/// A table cell's `colspan` or `rowspan` above the largest a browser uses (1000 and
+/// 65534 in HTML), cut to that, so the reader lays it out the same; `None` for any other
+/// attribute or value. html2text ([`text`](crate::text)) overflows on spans near
+/// `usize::MAX` and panics.
+fn bounded_span(attribute: &str, value: &str) -> Option<String> {
+    let limit: u64 = match attribute {
+        "colspan" => 1000,
+        "rowspan" => 65534,
+        _ => return None,
+    };
+    let span: u64 = value.trim().parse().ok()?;
+    (span > limit).then(|| limit.to_string())
 }
 
 /// An attribute's value with its colors moved for a dark page, or `None` for one that

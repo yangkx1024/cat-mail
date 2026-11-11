@@ -37,6 +37,18 @@
   原来的摘要就是那个链接，没有信息量。
 - 放弃：只用 CSS 之后的文字做摘要（与 #123 不一致，也不是常规做法）；自己写选择器匹配找隐藏元素
   （html2text 已经做了，排两遍更简单）。
+- PR review（Codex）提的四条，都在本机复现后量了影响（3709 封清洗后的 HTML，改前改后各转一遍）：
+  - `colspan="18446744073709551615"` 让 html2text 溢出 panic（debug、release 都是），`Result` 接不住，
+    发件人能让一封信下载失败、重建批次中断。清洗时把 `colspan` / `rowspan` 截到 HTML 的上限
+    （1000、65534），浏览器本来就这样截，读信区不变。放在清洗而不是 `text`：`text` 只接清洗的输出。
+  - 隐藏的 preheader 是行内元素、后面紧跟正文（`<span hidden>预览</span>正文`）时，不看 CSS 的那份两段
+    在同一行，整行比较找不到，preheader 丢了。改成按顺序找第一行是它、或以它结尾的那一行（完整行是
+    前面只有空白的特例）。最初先找完整行、找不到再找行尾，正文后面再出现同一句时会匹配到后面，把正文
+    混进 preheader（Codex 的第二轮意见）。代价：藏起来的一行恰好以正文第一行结尾时，preheader 少这一截。
+  - 链接文字和地址只差大小写（`?token=abc` 对 `?token=ABC`）时地址被省掉了。改成只有主机不分大小写。
+  - 样式表 `display: none`、行内 `display: block` 的元素仍然不转：html2text 0.17.4（最新版）只记录
+    `none`，其他值直接丢掉。在 html2text 的一份拷贝上补上后，本机 0 封变化，所以这里不处理，留给上游。
+  - 前三条改后本机输出也是 0 封变化，都是边角情况。
 - `CONTENT_VERSION` 4 → 5：所有 HTML 邮件的文本格式都变了。`sanitize_html` 文档里"proto 依赖只有一个不带
   属性的 `<style>`"的约定不再需要，删掉。
 
@@ -50,7 +62,8 @@
 - 文档：`docs/architecture/bodies.md` 的"正文的组成"（文本转换、新的 `snippet` 一条），crate 说明。
 - 测试：`catmail-html` 的 `leaves_out_what_style_sheets_and_attributes_hide`、
   `lays_out_blocks_lists_tables_and_quotes`、`writes_a_link_address_after_its_text`、
-  `visible_keeps_what_joins_emoji`、
+  `visible_keeps_what_joins_emoji`、`link_text_is_its_address_only_with_the_same_path_and_query`、
+  `lays_out_tables_with_any_span`、
   `preheader_is_what_is_hidden_in_front`、`no_preheader_without_hidden_text_in_front`；proto 的
   `snippet_starts_with_the_html_preheader`、`snippet_leaves_out_what_takes_no_room_or_is_not_read`。
   macOS 上 `cargo fmt`、`clippy -D warnings`、全部测试、`cargo deny` 通过（系统 cargo，本机没有 Nix）。

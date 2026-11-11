@@ -57,10 +57,13 @@ fn preheader(all: &str, shown: &str) -> Option<String> {
         Some(first) => {
             let mut lines = all.split_inclusive('\n').scan(0, |end, line| {
                 *end += line.len();
-                Some((*end - line.len(), line))
+                Some((*end - line.len(), line.trim_end()))
             });
-            // Laid out differently than shown: what is hidden can't be told apart.
-            let (end, _) = lines.find(|(_, line)| line.trim() == first)?;
+            // The first line that is it, or ends with it: hidden inline in front of it.
+            let end = lines.find_map(|(start, line)| {
+                line.strip_suffix(first).map(|lead| start + lead.len())
+            })?;
+            // Otherwise laid out differently than shown: what is hidden can't be told apart.
             &all[..end]
         }
         None => all,
@@ -333,18 +336,22 @@ fn write_lines(lines: &[TaggedLine<Vec<Link>>]) -> String {
 }
 
 /// Whether a link's text is its address, written as people write addresses: without the
-/// scheme, a trailing `/`, or a mail link's fields (`?subject=…`).
+/// scheme, a trailing `/`, or a mail link's fields (`?subject=…`), and the host in any
+/// case. The path and query must match exactly: case can matter there (a reset token).
 fn same_address(text: &str, url: &str) -> bool {
-    fn bare(address: &str) -> &str {
+    /// The host (or mail address) and the rest.
+    fn bare(address: &str) -> (&str, &str) {
         let address = address.trim();
         let address = match split_address(address) {
-            Some(("mailto:", rest)) => rest.split('?').next().unwrap_or_default(),
+            Some(("mailto:", rest)) => return (rest.split('?').next().unwrap_or_default(), ""),
             Some((_, rest)) => rest,
             None => address,
         };
-        address.trim_end_matches('/')
+        let address = address.trim_end_matches('/');
+        address.split_at(address.find(['/', '?', '#']).unwrap_or(address.len()))
     }
-    bare(text).eq_ignore_ascii_case(bare(url))
+    let ((host, rest), (url_host, url_rest)) = (bare(text), bare(url));
+    host.eq_ignore_ascii_case(url_host) && rest == url_rest
 }
 
 #[cfg(test)]
@@ -400,6 +407,28 @@ mod tests {
     }
 
     #[test]
+    fn link_text_is_its_address_only_with_the_same_path_and_query() {
+        assert!(same_address("Example.com/a", "https://example.com/a/"));
+        assert!(same_address("Me@Example.com", "mailto:me@example.com"));
+        assert!(!same_address(
+            "https://example.com/reset?token=abc",
+            "https://example.com/reset?token=ABC"
+        ));
+        assert!(!same_address("example.com/A", "https://example.com/a"));
+    }
+
+    #[test]
+    fn lays_out_tables_with_any_span() {
+        for span in ["18446744073709551615", "4294967295", "0", "x"] {
+            let html = format!(
+                "<table><tr><td colspan=\"{span}\">a</td><td>b</td></tr>\
+                 <tr><td rowspan=\"{span}\">c</td></tr></table>"
+            );
+            assert_eq!(shown(&html), "a\nb\nc\n", "{span}");
+        }
+    }
+
+    #[test]
     fn visible_keeps_what_joins_emoji() {
         assert_eq!(visible("plain"), "plain");
         assert_eq!(visible("a\u{200c}\u{34f}b\u{ad}c\u{feff}"), "abc");
@@ -426,6 +455,15 @@ mod tests {
         let (text, preheader) = text_and_preheader(&html);
         assert_eq!(text, "Dear reader,\n\nOur sale\n");
         assert_eq!(preheader.as_deref(), Some("Up to 50% off this week"));
+
+        // Hidden inline, on the line of the first shown text.
+        let html = sanitize_html(
+            "<span style=\"display:none\">Preview text</span>Hello world\
+             <p>Body</p><p>Hello world</p>",
+        );
+        let (text, preheader) = text_and_preheader(&html);
+        assert_eq!(text, "Hello world\n\nBody\n\nHello world\n");
+        assert_eq!(preheader.as_deref(), Some("Preview text"));
 
         // An unfilled field is no preheader.
         let html =
