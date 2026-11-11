@@ -145,7 +145,7 @@ fn content_type(mime_type: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use mail_parser::{MessageParser, MimeHeaders};
+    use mail_parser::MessageParser;
 
     use super::*;
 
@@ -204,7 +204,7 @@ mod tests {
         let to: Vec<_> = m
             .to()
             .unwrap()
-            .iter()
+            .mailboxes()
             .map(|a| (a.name(), a.address()))
             .collect();
         assert_eq!(
@@ -220,9 +220,9 @@ mod tests {
         );
         assert!(m.bcc().is_none());
         assert_eq!(m.message_id(), Some("abc.123@example.com"));
-        assert_eq!(m.in_reply_to().as_text(), Some("parent@x"));
+        assert_eq!(m.in_reply_to().unwrap().first(), Some("parent@x"));
         assert_eq!(
-            m.references().as_text_list().unwrap().to_vec(),
+            m.references().unwrap().iter().collect::<Vec<_>>(),
             ["root@x", "parent@x"]
         );
         assert_eq!(m.date().unwrap().to_timestamp(), 1_792_200_600);
@@ -230,10 +230,10 @@ mod tests {
             m.body_text(0).unwrap().replace("\r\n", "\n"),
             "第一行\n.\nlast line with trailing space "
         );
-        let attachment = m.attachment(0).unwrap();
+        let attachment = m.attachments().next().unwrap();
         assert_eq!(attachment.attachment_name(), Some("报告 \"final\".pdf"));
         assert_eq!(attachment.content_type().unwrap().ctype(), "application");
-        assert_eq!(attachment.contents(), b"%PDF-1.4\x00\xff");
+        assert_eq!(&*attachment.decoded(), b"%PDF-1.4\x00\xff");
     }
 
     #[test]
@@ -259,9 +259,9 @@ mod tests {
             "no bare CR"
         );
         let m = MessageParser::new().parse(&raw).unwrap();
-        assert!(m.header("X-Injected").is_none() && m.header("X-R").is_none());
-        assert!(m.in_reply_to().is_empty());
-        assert_eq!(m.references().as_text(), Some("ok@x"));
+        assert!(m.headers().get("X-Injected").is_none() && m.headers().get("X-R").is_none());
+        assert!(m.in_reply_to().is_none_or(|ids| ids.is_empty()));
+        assert_eq!(m.references().unwrap().iter().collect::<Vec<_>>(), ["ok@x"]);
     }
 
     #[test]
@@ -319,7 +319,7 @@ mod tests {
             (bcc.name(), bcc.address()),
             (Some("Dave X-Evil: 1"), Some("d@example.com"))
         );
-        assert!(m.to().is_none() && m.header("X-Evil").is_none());
+        assert!(m.to().is_none() && m.headers().get("X-Evil").is_none());
     }
 
     #[test]

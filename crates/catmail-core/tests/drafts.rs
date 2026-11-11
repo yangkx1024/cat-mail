@@ -13,7 +13,7 @@ use catmail_core::{
 };
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 use common::{Env, addr, env, env_built, eventually, synced_env};
-use mail_parser::{MessageParser, MimeHeaders};
+use mail_parser::MessageParser;
 use tokio::sync::Semaphore;
 
 fn content(subject: &str) -> DraftContent {
@@ -728,10 +728,10 @@ async fn a_forward_carries_the_attachments_but_not_the_inline_images() {
         .raw
         .clone();
     let parsed = MessageParser::new().parse(&raw).unwrap();
-    assert_eq!(parsed.attachment_count(), 1);
-    let pdf = parsed.attachment(0).unwrap();
+    assert_eq!(parsed.attachments().len(), 1);
+    let pdf = parsed.attachments().next().unwrap();
     assert_eq!(pdf.attachment_name(), Some("report.pdf"));
-    assert_eq!(pdf.contents(), b"%PDF-1.4\n");
+    assert_eq!(&*pdf.decoded(), b"%PDF-1.4\n");
 }
 
 /// Over the whole-message limit, so its attachment is fetched on its own when needed.

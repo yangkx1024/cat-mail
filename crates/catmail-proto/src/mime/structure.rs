@@ -89,7 +89,7 @@ impl MimeNode {
             return Vec::new();
         };
         let leaves = self.leaves();
-        let mut wanted: Vec<String> = body_text(&message, &leaves)
+        let mut wanted: Vec<String> = body_text(&message, &sections(&message), &leaves)
             .into_iter()
             .filter(|(_, _, leaf)| leaf.size <= max_size)
             .map(|(_, section, _)| section)
@@ -118,12 +118,13 @@ impl MimeNode {
             return Content::default();
         };
         let leaves = self.leaves();
-        let unfetched: Vec<u32> = body_text(&message, &leaves)
+        let sections = sections(&message);
+        let unfetched: Vec<u32> = body_text(&message, &sections, &leaves)
             .into_iter()
             .filter(|(_, section, _)| !fetched.contains_key(section))
             .map(|(id, _, _)| id)
             .collect();
-        let mut content = extract(&message, &raw, &unfetched, headers);
+        let mut content = extract(&message, &sections, &unfetched, headers);
         for part in &mut content.parts {
             let Some(leaf) = leaves.get(&part.section) else {
                 // The stand-in didn't parse like the structure; whatever this is, it
@@ -282,17 +283,17 @@ impl MimeNode {
 
 /// The plain text and HTML parts that `message`, the stand-in for the structure with
 /// these `leaves`, shows as its body: mail-parser part id, section and leaf. May repeat
-/// a part.
+/// a part. `sections` are those of `message`.
 fn body_text<'a>(
     message: &Message<'_>,
+    sections: &HashMap<u32, String>,
     leaves: &HashMap<String, &'a Leaf>,
 ) -> Vec<(u32, String, &'a Leaf)> {
-    let sections = sections(message);
-    message
-        .text_body
-        .iter()
-        .chain(&message.html_body)
-        .filter_map(|&id| {
+    let root = message.root();
+    root.text_body()
+        .chain(root.html_body())
+        .filter_map(|part| {
+            let id = part.id();
             let section = sections.get(&id)?;
             let leaf = *leaves.get(section)?;
             (leaf.is("text", "plain") || leaf.is("text", "html"))

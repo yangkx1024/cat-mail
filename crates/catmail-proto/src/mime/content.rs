@@ -1,10 +1,10 @@
 use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use catmail_html::{cid_image_ids, sanitize_html};
 use mail_parser::decoders::html::html_to_text;
-use mail_parser::parsers::MessageStream;
-use mail_parser::{Encoding, Message, MessageParser, MessagePart, MimeHeaders, PartType};
+use mail_parser::{Encoding, Message, MessageParser, MessagePart, PartKind, PartRole};
 
 use super::transcode_fields;
 
@@ -19,7 +19,7 @@ const SNIPPET_CHARS: usize = 200;
 /// so that the change is a decision.
 ///
 /// [`MimeNode::content`]: super::MimeNode::content
-pub const CONTENT_VERSION: u32 = 3;
+pub const CONTENT_VERSION: u32 = 4;
 
 /// What a reader shows of a message.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -61,90 +61,63 @@ pub struct Part {
 /// make sense of has no content.
 pub fn parse_message(raw: &[u8]) -> Content {
     match MessageParser::new().parse(raw) {
-        Some(message) => extract(&message, raw, &[], &HashMap::new()),
+        Some(message) => extract(&message, &sections(&message), &[], &HashMap::new()),
         None => Content::default(),
     }
 }
 
 /// Undoes a Content-Transfer-Encoding (`base64`, `quoted-printable`; anything else is
-/// returned as is), as leniently as mail-parser does for whole messages.
+/// returned as is), as mail-parser does for whole messages: malformed input is decoded
+/// as far as it goes, as RFC 2045 asks and other mail clients do (bytes outside the
+/// base64 alphabet skipped, a malformed quoted-printable escape kept as written).
 pub fn decode_transfer(encoding: Option<&str>, data: &[u8]) -> Vec<u8> {
-    let mut stream = MessageStream::new(data);
-    let (end, decoded) = match encoding.map(str::to_ascii_lowercase).as_deref() {
-        Some("base64") => stream.decode_base64_mime(b""),
-        Some("quoted-printable") => stream.decode_quoted_printable_mime(b""),
+    let encoding = match encoding.map(str::trim) {
+        Some(e) if e.eq_ignore_ascii_case("base64") => Encoding::Base64,
+        Some(e) if e.eq_ignore_ascii_case("quoted-printable") => Encoding::QuotedPrintable,
         _ => return data.to_vec(),
     };
-    // Undecodable: keep the bytes, as mail-parser does for a message body.
-    if end == usize::MAX {
-        data.to_vec()
-    } else {
-        decoded.into_owned()
-    }
+    encoding.decode(data).into_owned()
 }
 
-/// `raw` is what `message` was parsed from. Binary parts come decoded from the parser;
-/// text parts and attached messages are cut from `raw` and decoded again, so text keeps
-/// its original bytes and charset (the parser converts it to UTF-8). The parts with ids
-/// in `also_listed` are listed with the attachments even if they belong to the body.
-/// A part's header as the sender wrote it is in `headers` by section (as
-/// `BODY[<section>.MIME]` returns it), else in `raw`.
+/// `sections` are those of `message` ([`sections`]). Every part's data is its body with
+/// the transfer encoding undone: text keeps its original bytes and charset. The parts with ids in `also_listed` are listed with the
+/// attachments even if they belong to the body. A part's header as the sender wrote it
+/// is in `headers` by section (as `BODY[<section>.MIME]` returns it), else in the
+/// message.
 pub(super) fn extract(
     message: &Message<'_>,
-    raw: &[u8],
+    sections: &HashMap<u32, String>,
     also_listed: &[u32],
     headers: &HashMap<String, Vec<u8>>,
 ) -> Content {
-    let has_html = message
-        .html_body
-        .iter()
-        .any(|&id| matches!(message.parts[id as usize].body, PartType::Html(_)));
+    let root = message.root();
+    let has_html = root
+        .html_body()
+        .any(|part| matches!(part.kind(), PartKind::Html));
     let html = has_html
-        .then(|| {
-            joined(
-                (0..message.html_body_count()).filter_map(|i| message.body_html(i)),
-                "<br>",
-            )
-        })
+        .then(|| joined(root.html_bodies(), "<br>"))
         .flatten()
         .map(|html| sanitize_html(&html));
     let text = text(message, html.as_deref());
-    let sections = sections(message);
     let text_charsets = text_charsets(message);
     // Part ids follow MIME order. A set, not `contains` on each part: a message may
     // have thousands of parts.
-    let listed: BTreeSet<u32> = message
-        .attachments
-        .iter()
-        .chain(also_listed)
-        .copied()
+    let listed: BTreeSet<u32> = root
+        .parts()
+        .filter(is_listed)
+        .map(|part| part.id())
+        .chain(also_listed.iter().copied())
         .collect();
     let mut parts: Vec<Part> = listed
         .into_iter()
         .filter_map(|id| {
-            let part = &message.parts[id as usize];
+            let part = message.part(id)?;
             let section = sections.get(&id)?;
             let header = headers
                 .get(section)
-                .map(Vec::as_slice)
-                .or_else(|| raw.get(part.offset_header as usize..part.offset_body as usize));
-            let data = match &part.body {
-                PartType::Binary(data) | PartType::InlineBinary(data) => Some(data.to_vec()),
-                _ => raw
-                    .get(part.offset_body as usize..part.offset_end as usize)
-                    .map(|encoded| {
-                        let encoding = match part.encoding {
-                            Encoding::Base64 => Some("base64"),
-                            Encoding::QuotedPrintable => Some("quoted-printable"),
-                            Encoding::None => None,
-                        };
-                        decode_transfer(encoding, encoded)
-                    }),
-            };
-            let content_id = part
-                .content_id()
-                .map(|id| id.trim().trim_start_matches('<').trim_end_matches('>'))
-                .filter(|id| !id.is_empty());
+                .map_or_else(|| part.raw_headers(), Vec::as_slice);
+            let data = part.decoded().into_owned();
+            let content_id = part.content_id().map(str::trim).filter(|id| !id.is_empty());
             let mime_type = part
                 .content_type()
                 .map(|ct| match ct.subtype() {
@@ -158,13 +131,13 @@ pub(super) fn extract(
                 transfer_encoding: part
                     .content_transfer_encoding()
                     .map(|e| e.trim().to_ascii_lowercase()),
-                filename: filename(part, header, &text_charsets),
+                filename: filename(&part, header, &text_charsets),
                 // Below.
                 inline: false,
                 mime_type,
                 content_id: content_id.map(String::from),
-                size: data.as_ref().map(|d| d.len() as u32),
-                data,
+                size: Some(data.len() as u32),
+                data: Some(data),
             })
         })
         .collect();
@@ -189,24 +162,27 @@ pub(super) fn extract(
     }
 }
 
+/// Whether a part is listed with the attachments: an attachment, or an image, audio or
+/// video part that the body shows. mail-parser no longer counts media shown in both
+/// bodies (a `multipart/mixed` of text and images) as an attachment (RFC 8621); listed,
+/// such a part is shown inline when the HTML refers to it ([`is_inline`]) and offered as
+/// a file otherwise, as it was before.
+fn is_listed(part: &MessagePart<'_>) -> bool {
+    part.is_attachment() || part.role() == PartRole::MediaBody
+}
+
 /// The part's file name. A name in raw 8-bit bytes comes out of the parser with U+FFFD
 /// for each byte that isn't UTF-8; then the part's `header` is read again in the charset
 /// of the part or of the message's text, as other mail clients do (see
 /// [`transcode_fields`]).
-fn filename(
-    part: &MessagePart<'_>,
-    header: Option<&[u8]>,
-    text_charsets: &[&str],
-) -> Option<String> {
+fn filename(part: &MessagePart<'_>, header: &[u8], text_charsets: &[&str]) -> Option<String> {
     fn name_of<'a>(part: &'a MessagePart<'_>) -> Option<&'a str> {
         part.attachment_name()
             .map(str::trim)
             .filter(|n| !n.is_empty())
     }
     let name = name_of(part)?;
-    if name.contains(char::REPLACEMENT_CHARACTER)
-        && let Some(header) = header
-    {
+    if name.contains(char::REPLACEMENT_CHARACTER) {
         let own = part.content_type().and_then(|ct| ct.attribute("charset"));
         let hints: Vec<&str> = own
             .into_iter()
@@ -214,7 +190,7 @@ fn filename(
             .collect();
         if let Cow::Owned(fields) = transcode_fields(header, &hints)
             && let Some(message) = MessageParser::new().parse_headers(&fields)
-            && let Some(found) = message.parts.first().and_then(name_of)
+            && let Some(found) = name_of(&message.root_part())
         {
             return Some(found.to_owned());
         }
@@ -228,8 +204,8 @@ fn filename(
 /// [`MimeNode::text_charsets`]: super::MimeNode::text_charsets
 fn text_charsets<'a>(message: &'a Message<'_>) -> Vec<&'a str> {
     message
-        .parts
-        .iter()
+        .root()
+        .parts()
         .filter_map(|part| {
             let content_type = part.content_type()?;
             content_type
@@ -240,38 +216,49 @@ fn text_charsets<'a>(message: &'a Message<'_>) -> Vec<&'a str> {
         .collect()
 }
 
-/// The text of the message's body parts. An HTML part's is converted from it sanitized:
-/// mail-parser's conversion skips only a `<style>` without attributes, which is all that
-/// [`sanitize_html`] leaves; of the HTML as sent, it would give the rest of the message's
-/// style sheets as its text. A text part is
+/// The text of the message's body parts. An HTML part's is converted from it sanitized,
+/// so that it is the text the reader shows: sanitizing takes out the `<title>` and what
+/// else the reader doesn't show. A text part is
 /// taken as the sender wrote it, unless it is markup that the HTML doesn't show
 /// ([`is_markup`]); then the text is the HTML's (`html`, the sanitized HTML of the
 /// message). The HTML is the same message in another form, so converting it when the
 /// text part was fine loses no more than the text's layout.
 fn text(message: &Message<'_>, html: Option<&str>) -> Option<String> {
     let of_html = |html: &str| Some(html_to_text(html)).filter(|text| !text.trim().is_empty());
+    let root = message.root();
     // Most often the HTML parts are the whole body, and sanitized already.
-    if message.text_body == message.html_body
-        && message.text_bodies().all(MessagePart::is_text_html)
+    if root
+        .text_body()
+        .map(|part| part.id())
+        .eq(root.html_body().map(|part| part.id()))
+        && root
+            .text_body()
+            .all(|part| matches!(part.kind(), PartKind::Html))
     {
         return html.and_then(of_html);
     }
     let text = joined(
-        message.text_bodies().filter_map(|part| match &part.body {
-            PartType::Text(text) => Some(Cow::Borrowed(text.as_ref())),
-            PartType::Html(html) => Some(Cow::Owned(html_to_text(&sanitize_html(html)))),
+        root.text_body().filter_map(|part| match part.kind() {
+            PartKind::Text => part.text(),
+            PartKind::Html => Some(Cow::Owned(html_to_text(&sanitize_html(&part.text()?)))),
             _ => None,
         }),
         "\n",
     );
-    match (text, html) {
-        // An HTML of images alone shows no text: the text part, markup and all, still has
-        // more to find than nothing.
-        (Some(text), Some(html)) if is_markup(&text, || html_to_text(html)) => {
-            of_html(html).or(Some(text))
-        }
-        (text, _) => text,
+    let (text, html) = match (text, html) {
+        (Some(text), Some(html)) => (text, html),
+        (text, _) => return text,
+    };
+    // Converted once, and only if the text part is markup enough to ask.
+    let shown = OnceCell::new();
+    if is_markup(&text, || shown.get_or_init(|| html_to_text(html)))
+        // An HTML of images alone shows no text: the text part, markup and all, still
+        // has more to find than nothing.
+        && let Some(shown) = shown.into_inner().filter(|s| !s.trim().is_empty())
+    {
+        return Some(shown);
     }
+    Some(text)
 }
 
 /// Characters, whitespace aside, at the start of a text part that [`is_markup`] reads.
@@ -283,7 +270,7 @@ const MARKUP_LEAD: usize = 1000;
 /// senders' text part is their HTML source or style sheet, whole or at the start.
 /// Markup is judged at the start, which lists and readers show; a message about code or
 /// markup shows it in its HTML too, so its words don't count.
-fn is_markup(text: &str, shown: impl FnOnce() -> String) -> bool {
+fn is_markup<'s>(text: &str, shown: impl FnOnce() -> &'s str) -> bool {
     let mut lead = Vec::new();
     let mut total = 0;
     for word in text.split_whitespace() {
@@ -309,8 +296,7 @@ fn is_markup(text: &str, shown: impl FnOnce() -> String) -> bool {
     if marked.is_empty() || in_markup * 2 < total {
         return false;
     }
-    let shown = shown();
-    let shown: HashSet<&str> = shown.split_whitespace().collect();
+    let shown: HashSet<&str> = shown().split_whitespace().collect();
     let hidden: usize = marked
         .iter()
         .filter(|word| !shown.contains(**word))
@@ -427,24 +413,21 @@ fn may_be_image(mime_type: &str) -> bool {
 /// multipart are numbered from 1 below its own number, and a message that isn't
 /// multipart has the single part `1`. Attached messages count as one part.
 pub(super) fn sections(message: &Message<'_>) -> HashMap<u32, String> {
-    fn number(message: &Message<'_>, id: u32, section: String, out: &mut HashMap<u32, String>) {
-        if let Some(children) = message.parts[id as usize].sub_parts() {
-            for (i, &child) in children.iter().enumerate() {
-                number(message, child, format!("{section}.{}", i + 1), out);
-            }
+    // The children of an attached message's part are none: its parts aren't numbered.
+    fn number(part: MessagePart<'_>, section: String, out: &mut HashMap<u32, String>) {
+        for (i, child) in part.children().enumerate() {
+            number(child, format!("{section}.{}", i + 1), out);
         }
-        out.insert(id, section);
+        out.insert(part.id(), section);
     }
     let mut out = HashMap::new();
-    match message.parts.first().and_then(|root| root.sub_parts()) {
-        Some(children) => {
-            for (i, &child) in children.iter().enumerate() {
-                number(message, child, (i + 1).to_string(), &mut out);
-            }
+    let root = message.root_part();
+    if root.is_multipart() {
+        for (i, child) in root.children().enumerate() {
+            number(child, (i + 1).to_string(), &mut out);
         }
-        None => {
-            out.insert(0, "1".into());
-        }
+    } else {
+        out.insert(root.id(), "1".into());
     }
     out
 }
@@ -689,6 +672,59 @@ mod tests {
         assert_eq!(png.data.as_deref(), Some(&b"\x89PNG\r\n\x1a\n"[..]));
     }
 
+    /// Images in a `multipart/mixed` between the texts are in both bodies, which RFC 8621
+    /// doesn't count as attachments: still listed, inline when the HTML shows them.
+    #[test]
+    fn media_shown_in_both_bodies_are_listed() {
+        let raw = b"Content-Type: multipart/mixed; boundary=m\r\n\r\n\
+            --m\r\n\
+            Content-Type: text/html\r\n\r\n\
+            <p>Look: <img src=\"cid:pic@x\"></p>\r\n\
+            --m\r\n\
+            Content-Type: image/png\r\n\
+            Content-ID: <pic@x>\r\n\
+            Content-Disposition: inline\r\n\
+            Content-Transfer-Encoding: base64\r\n\r\n\
+            iVBORw0KGgo=\r\n\
+            --m\r\n\
+            Content-Type: text/html\r\n\r\n\
+            <p>Bye</p>\r\n\
+            --m--\r\n";
+        let content = parse_message(raw);
+        let parts: Vec<_> = content
+            .parts
+            .iter()
+            .map(|p| (p.section.as_str(), p.mime_type.as_str(), p.inline))
+            .collect();
+        assert_eq!(parts, [("2", "image/png", true)]);
+        assert_eq!(
+            content.parts[0].data.as_deref(),
+            Some(&b"\x89PNG\r\n\x1a\n"[..])
+        );
+
+        // No HTML to show it in: a file to open.
+        let raw = b"Content-Type: multipart/mixed; boundary=m\r\n\r\n\
+            --m\r\n\
+            Content-Type: text/plain\r\n\r\n\
+            Before.\r\n\
+            --m\r\n\
+            Content-Type: image/jpeg; name=photo.jpg\r\n\
+            Content-Disposition: inline; filename=photo.jpg\r\n\r\n\
+            JPEG\r\n\
+            --m\r\n\
+            Content-Type: text/plain\r\n\r\n\
+            After.\r\n\
+            --m--\r\n";
+        let content = parse_message(raw);
+        assert_eq!(content.text.as_deref(), Some("Before.\nAfter."));
+        let parts: Vec<_> = content
+            .parts
+            .iter()
+            .map(|p| (p.section.as_str(), p.filename.as_deref(), p.inline))
+            .collect();
+        assert_eq!(parts, [("2", Some("photo.jpg"), false)]);
+    }
+
     #[test]
     fn single_part_and_attached_messages() {
         let plain = parse_message(b"Subject: hi\r\n\r\nJust text.\r\n> quoted\r\nmore\r\n");
@@ -871,11 +907,28 @@ mod tests {
             "café!".as_bytes()
         );
         assert_eq!(decode_transfer(Some("7bit"), b"as is"), b"as is");
-        assert_eq!(
-            decode_transfer(Some("base64"), b"not base64!"),
-            b"not base64!"
-        );
+        assert_eq!(decode_transfer(Some("x-unknown"), b"as is"), b"as is");
         assert_eq!(decode_transfer(None, b"as is"), b"as is");
+    }
+
+    const MALFORMED_QP: &[u8] = b"Content-Type: text/plain; charset=utf-8\r\n\
+        Content-Transfer-Encoding: quoted-printable\r\n\r\n\
+        1+1==2 caf=C3=A9\r\n";
+
+    /// Malformed input is decoded as far as it goes, as RFC 2045 asks: one bad escape or
+    /// stray byte doesn't leave a whole part encoded.
+    #[test]
+    fn decodes_malformed_transfer_encodings_as_far_as_they_go() {
+        assert_eq!(decode_transfer(Some("base64"), b"aGVs!bG8=\r\n"), b"hello");
+        assert_eq!(
+            decode_transfer(Some("quoted-printable"), b"1+1==2 caf=C3=A9 =ZZ"),
+            "1+1==2 caf\u{e9} =ZZ".as_bytes()
+        );
+        let content = parse_message(MALFORMED_QP);
+        assert_eq!(
+            content.text.as_deref().map(str::trim),
+            Some("1+1==2 caf\u{e9}")
+        );
     }
 
     #[test]
@@ -1032,6 +1085,7 @@ mod tests {
             HTML_ONLY,
             PLAIN,
             STYLE_AS_TEXT,
+            MALFORMED_QP,
         ] {
             let content = parse_message(raw);
             let h = &mut hash;
@@ -1054,7 +1108,7 @@ mod tests {
         // either way, record the new fingerprint here.
         assert_eq!(
             (CONTENT_VERSION, format!("{hash:016x}")),
-            (3, "9cf3f92174e6d84f".to_owned()),
+            (4, "14b6727582a2c06d".to_owned()),
         );
     }
 }

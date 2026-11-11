@@ -1,13 +1,13 @@
 //! What a server derives from a raw message: BODYSTRUCTURE and body sections.
 
-use mail_parser::{Attribute, Message, MessageParser, MessagePart, MimeHeaders, PartType};
+use mail_parser::{MessageParser, MessagePart};
 
 use crate::imap::{literal, quote};
 
 /// The BODYSTRUCTURE of `raw`, in wire form (may contain literals).
 pub(crate) fn body_structure(raw: &[u8]) -> Vec<u8> {
     match MessageParser::new().parse(raw) {
-        Some(message) => node(&message, 0, raw),
+        Some(message) => node(message.root_part()),
         None => b"(\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 0 0)".to_vec(),
     }
 }
@@ -23,61 +23,57 @@ pub(crate) fn section(raw: &[u8], spec: &str) -> Option<Vec<u8>> {
         None => (spec, false),
     };
     let message = MessageParser::new().parse(raw)?;
-    let mut id = 0u32;
+    let mut part = message.root_part();
     for (depth, n) in spec.split('.').enumerate() {
         let n: usize = n.parse().ok()?;
-        match message.parts[id as usize].sub_parts() {
-            Some(children) => id = *children.get(n.checked_sub(1)?)?,
+        if part.is_multipart() {
+            part = part.children().nth(n.checked_sub(1)?)?;
+        } else if depth > 0 || n != 1 {
             // A message that isn't multipart has just part 1.
-            None if depth == 0 && n == 1 => {}
-            None => return None,
+            return None;
         }
     }
-    let part = &message.parts[id as usize];
-    let (start, end) = if header {
-        (part.offset_header, part.offset_body)
+    let bytes = if header {
+        part.raw_headers()
     } else {
-        (part.offset_body, part.offset_end)
+        part.raw_body()
     };
-    raw.get(start as usize..end as usize).map(<[u8]>::to_vec)
+    Some(bytes.to_vec())
 }
 
-fn node(message: &Message<'_>, id: u32, raw: &[u8]) -> Vec<u8> {
-    let part = &message.parts[id as usize];
+fn node(part: MessagePart<'_>) -> Vec<u8> {
     let mut out = b"(".to_vec();
-    if let Some(children) = part.sub_parts() {
-        for &child in children {
-            out.extend(node(message, child, raw));
+    if part.is_multipart() {
+        for child in part.children() {
+            out.extend(node(child));
         }
         out.push(b' ');
-        out.extend(string(subtype(part).as_deref().unwrap_or("MIXED")));
+        out.extend(string(subtype(&part).as_deref().unwrap_or("MIXED")));
         out.push(b')');
         return out;
     }
 
     let (kind, sub) = match part.content_type() {
-        Some(ct) => (ct.ctype().to_owned(), subtype(part).unwrap_or_default()),
+        Some(ct) => (ct.ctype().to_owned(), subtype(&part).unwrap_or_default()),
         None => ("text".to_owned(), "plain".to_owned()),
     };
     out.extend(string(&kind));
     out.push(b' ');
     out.extend(string(&sub));
     out.push(b' ');
-    out.extend(list(part.content_type().and_then(|ct| ct.attributes())));
+    out.extend(list(part.content_type().map(|ct| ct.attributes())));
     out.push(b' ');
     out.extend(nstring(
         part.content_id().map(|id| format!("<{id}>")).as_deref(),
     ));
     out.extend(b" NIL ");
     out.extend(string(part.content_transfer_encoding().unwrap_or("7BIT")));
-    let body = raw
-        .get(part.offset_body as usize..part.offset_end as usize)
-        .unwrap_or_default();
+    let body = part.raw_body();
     out.extend(format!(" {}", body.len()).as_bytes());
     let lines = body.iter().filter(|&&b| b == b'\n').count();
-    if let PartType::Message(nested) = &part.body {
+    if let Some(nested) = part.nested() {
         out.extend(b" (NIL NIL NIL NIL NIL NIL NIL NIL NIL NIL) ");
-        out.extend(node(nested, 0, nested.raw_message()));
+        out.extend(node(nested.root_part()));
         out.extend(format!(" {lines}").as_bytes());
     } else if kind.eq_ignore_ascii_case("text") {
         out.extend(format!(" {lines}").as_bytes());
@@ -89,7 +85,7 @@ fn node(message: &Message<'_>, id: u32, raw: &[u8]) -> Vec<u8> {
             out.push(b'(');
             out.extend(string(d.ctype()));
             out.push(b' ');
-            out.extend(list(d.attributes()));
+            out.extend(list(Some(d.attributes())));
             out.push(b')');
         }
         None => out.extend(b"NIL"),
@@ -102,18 +98,18 @@ fn subtype(part: &MessagePart<'_>) -> Option<String> {
     part.content_type()?.subtype().map(str::to_owned)
 }
 
-fn list(attributes: Option<&[Attribute<'_>]>) -> Vec<u8> {
-    let Some(attributes) = attributes.filter(|a| !a.is_empty()) else {
+fn list<'a>(attributes: Option<impl ExactSizeIterator<Item = (&'a str, &'a str)>>) -> Vec<u8> {
+    let Some(attributes) = attributes.filter(|a| a.len() > 0) else {
         return b"NIL".to_vec();
     };
     let mut out = b"(".to_vec();
-    for (i, a) in attributes.iter().enumerate() {
+    for (i, (name, value)) in attributes.enumerate() {
         if i > 0 {
             out.push(b' ');
         }
-        out.extend(string(&a.name));
+        out.extend(string(name));
         out.push(b' ');
-        out.extend(string(&a.value));
+        out.extend(string(value));
     }
     out.push(b')');
     out

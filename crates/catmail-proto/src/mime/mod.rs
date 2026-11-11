@@ -11,7 +11,7 @@ use std::borrow::Cow;
 
 use catmail_types::Address;
 use encoding_rs::{Encoding, UTF_8};
-use mail_parser::{HeaderValue, MessageParser};
+use mail_parser::{AddressList, MessageParser, TextList};
 
 pub use build::{InvalidHeader, Outgoing, OutgoingAttachment, build_message};
 pub use content::{
@@ -61,26 +61,25 @@ fn summary_headers(raw: &[u8]) -> Headers {
     let Some(msg) = MessageParser::new().parse_headers(raw) else {
         return Headers::default();
     };
-    let addresses = |a: Option<&mail_parser::Address<'_>>| -> Vec<Address> {
-        a.map(|a| {
-            a.iter()
-                .filter_map(|addr| {
-                    Some(Address {
-                        name: addr
-                            .name
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|n| !n.is_empty())
-                            .map(String::from),
-                        email: addr.address.as_deref()?.trim().to_owned(),
-                    })
+    let addresses = |a: Option<AddressList<'_>>| -> Vec<Address> {
+        a.into_iter()
+            .flat_map(|a| a.mailboxes())
+            .filter_map(|mailbox| {
+                Some(Address {
+                    name: mailbox
+                        .name()
+                        .map(str::trim)
+                        .filter(|n| !n.is_empty())
+                        .map(String::from),
+                    email: mailbox.address()?.trim().to_owned(),
                 })
-                .collect()
-        })
-        .unwrap_or_default()
+            })
+            .collect()
     };
     Headers {
-        subject: msg.subject().map(String::from),
+        // 1.0 gives an empty field as `Some("")`; kept as no subject, like the rows stored
+        // before it.
+        subject: msg.subject().filter(|s| !s.is_empty()).map(String::from),
         from: addresses(msg.from()),
         to: addresses(msg.to()),
         cc: addresses(msg.cc()),
@@ -115,7 +114,8 @@ pub(crate) fn transcode_fields<'a>(raw: &'a [u8], hints: &[&str]) -> Cow<'a, [u8
     let mut fields = String::new();
     let mut converted = false;
     for header in message.headers() {
-        let Some(field) = raw.get(header.offset_field as usize..header.offset_end as usize) else {
+        let Some(field) = raw.get(header.offset_field() as usize..header.offset_end() as usize)
+        else {
             return Cow::Borrowed(raw);
         };
         if let Ok(field) = std::str::from_utf8(field) {
@@ -161,16 +161,13 @@ fn legacy_encodings(labels: &[&str]) -> Vec<&'static Encoding> {
     encodings
 }
 
-fn id_list(value: &HeaderValue<'_>) -> Vec<String> {
+fn id_list(value: Option<TextList<'_>>) -> Vec<String> {
     value
-        .as_text_list()
-        .map(|ids| {
-            ids.iter()
-                .filter(|id| fits_in_angle_brackets(id))
-                .map(|id| id.to_string())
-                .collect()
-        })
-        .unwrap_or_default()
+        .into_iter()
+        .flat_map(|ids| ids.iter())
+        .filter(|id| fits_in_angle_brackets(id))
+        .map(String::from)
+        .collect()
 }
 
 /// What may stand between `<` and `>` in a header or an SMTP command: visible ASCII
