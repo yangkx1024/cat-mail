@@ -42,6 +42,10 @@ GUI 关掉主窗口后继续同步、发信、提醒新邮件，并能从托盘�
   图标；显示窗口时（`Window::present`）切回 Regular 并激活应用。`--background` 启动一开始就是 Accessory，Dock 图标
   不先闪一下；登录时的启动要到启动完成才知道，bundle 的 Dock 图标会短暂出现。常驻时从 Finder、启动台再打开仍经
   `applicationShouldHandleReopen` 回到窗口；Dock 角标照旧设置，回到 Regular 时就在。
+- 已知限制：有窗口时（Regular）在别的应用的全屏 Space 里点状态栏图标，图标高亮但菜单不出来；常驻时（Accessory）
+  正常。这是 AppKit 对 Regular 应用状态栏项的限制（Apple 开发者论坛 thread 85994，popover 同样如此），弹出时
+  切换激活策略无效。DTS 的办法是把状态栏项放进单独的 `LSUIElement` 辅助应用，要多一个进程、经 IPC 拿未读数和
+  转发菜单命令，暂不做；有窗口时也一直 Accessory 则没有 Dock 图标、应用切换器和应用自己的菜单栏，也不做。
 
 ## 引擎属于应用，不属于窗口
 
