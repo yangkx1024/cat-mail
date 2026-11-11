@@ -110,6 +110,9 @@ pub fn end() {
     }
 }
 
+/// The app runs on with no window: nothing changes, the tray's item was there already.
+pub fn resident() {}
+
 /// Each view sets its window's appearance itself.
 pub fn set_appearance(_appearance: Appearance) {}
 

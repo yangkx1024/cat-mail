@@ -397,7 +397,10 @@ pub fn launched(at_login: bool) {
     let hidden = HIDDEN.get() || at_login;
     match at_launch(hidden, settings().keep_running, engine::usable()) {
         AtLaunch::Window => show(None),
-        AtLaunch::NoWindow => tracing::info!(at_login, "launched without a window; running on"),
+        AtLaunch::NoWindow => {
+            tracing::info!(at_login, "launched without a window; running on");
+            toolkit::resident();
+        }
     }
 }
 
@@ -572,8 +575,8 @@ pub fn appearance(settings: &Settings) -> Appearance {
 
 /// A window is gone. The last: the app quits, or with "Keep running after the window is
 /// closed" on, runs on until the tray, a notification or another launch shows the window
-/// again (on macOS, the Dock too). ⚠️ On Linux, GTK stays connected to the display
-/// meanwhile.
+/// again (on macOS, with no Dock icon meanwhile: opening it from Finder or Launchpad).
+/// ⚠️ On Linux, GTK stays connected to the display meanwhile.
 fn window_removed() {
     if !toolkit::windows().is_empty() {
         return;
@@ -595,6 +598,7 @@ fn window_removed() {
         }
         AfterLastWindow::KeepRunning => {
             tracing::info!("no window open; running on");
+            toolkit::resident();
             // Once the views' threads have let go of what they held.
             toolkit::after(Duration::from_secs(2), || {
                 if toolkit::windows().is_empty() && QUITTING.get().is_none() {

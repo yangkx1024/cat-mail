@@ -44,7 +44,16 @@ fn main_thread() -> MainThreadMarker {
 pub fn run(started: impl FnOnce() + 'static) -> u8 {
     let mtm = main_thread();
     let app = NSApplication::sharedApplication(mtm);
-    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    // With `--background`, the Dock icon doesn't flash up first (a login's launch is only
+    // known once it has finished: `super::launched`). Showing a window makes the app
+    // regular (`Window::present`), whatever the launch. Not accessory for every launch:
+    // the bundle's Dock icon is up already (Info.plist), and would go and come back.
+    let policy = if super::HIDDEN.get() {
+        NSApplicationActivationPolicy::Accessory
+    } else {
+        NSApplicationActivationPolicy::Regular
+    };
+    app.setActivationPolicy(policy);
     let delegate = AppDelegate::new(mtm);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     app.setMainMenu(Some(&main_menu(mtm)));
@@ -135,6 +144,15 @@ impl AppDelegate {
         // SAFETY: NSObject's `init`, on a subclass that adds nothing.
         unsafe { msg_send![Self::alloc(mtm), init] }
     }
+}
+
+/// The app runs on with no window: an accessory app, which only the status item shows (no
+/// Dock icon, not in the app switcher), until [`Window::present`] makes it regular again.
+/// Opening it again (Finder, Launchpad, a Dock icon kept there) still reaches
+/// `applicationShouldHandleReopen:`.
+pub fn resident() {
+    NSApplication::sharedApplication(main_thread())
+        .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 }
 
 /// The app ends: AppKit's loop stops, and [`run`] returns, with whatever windows it has.
@@ -376,9 +394,14 @@ impl Window {
         window
     }
 
-    /// Shows the window in front, and the app with it (a menu bar click leaves it behind
-    /// the others). Activation tokens are Wayland's.
+    /// Shows the window in front, and the app with it, a regular app again if it was
+    /// running without a window ([`resident`]): the status item's menu leaves it behind the
+    /// others, and so does becoming regular. Activation tokens are Wayland's.
     pub fn present(&self, _activation_token: Option<&str>) {
+        let app = NSApplication::sharedApplication(main_thread());
+        if app.activationPolicy() != NSApplicationActivationPolicy::Regular {
+            app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+        }
         let window = &self.0.window;
         if window.isMiniaturized() {
             window.deminiaturize(None);
@@ -386,7 +409,7 @@ impl Window {
         window.makeKeyAndOrderFront(None);
         // `activate` is macOS 14's.
         #[allow(deprecated)]
-        NSApplication::sharedApplication(main_thread()).activateIgnoringOtherApps(true);
+        app.activateIgnoringOtherApps(true);
     }
 
     /// Closes the window as the user would: [`Hooks::close_requested`] may keep it.

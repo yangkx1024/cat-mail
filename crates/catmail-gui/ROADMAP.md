@@ -129,8 +129,8 @@
       启动的 Apple Event 判断，⚠️ 还没在真的登录上确认过（看日志的 `launched opened=…`）
 - [ ] 开机启动（Linux）：XDG autostart 文件，Flatpak 里经 Background portal 的 `RequestBackground`，都带
       `--background`
-- [ ] macOS 常驻时切到 Accessory 激活策略：只留状态栏图标，Dock 图标和应用切换器里都没有，开窗时切回 Regular
-      （GPUI 版就是这样）。现在关窗后 Dock 图标一直在
+- [x] macOS 常驻时切到 Accessory 激活策略：只留状态栏图标，Dock 图标和应用切换器里都没有，开窗时切回 Regular
+      （`toolkit::resident`、`Window::present`）；`--background` 一开始就是 Accessory
 - [ ] 退出时等引擎关闭要有上限：现在 `shell::quit` 之后 `pollster::block_on(client.closed())` 不限时，引擎里一次卡住的
       写入就让进程退不出去（会话结束时系统等不到它退出）。GPUI 版最多等 GPUI 给的 `SHUTDOWN_TIMEOUT`；到时间就记一条
       日志直接退出
