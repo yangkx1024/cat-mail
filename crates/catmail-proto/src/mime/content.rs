@@ -265,7 +265,11 @@ fn text(message: &Message<'_>, html: Option<&str>) -> Option<String> {
         "\n",
     );
     match (text, html) {
-        (Some(text), Some(html)) if is_markup(&text, || html_to_text(html)) => of_html(html),
+        // An HTML of images alone shows no text: the text part, markup and all, still has
+        // more to find than nothing.
+        (Some(text), Some(html)) if is_markup(&text, || html_to_text(html)) => {
+            of_html(html).or(Some(text))
+        }
         (text, _) => text,
     }
 }
@@ -768,6 +772,14 @@ mod tests {
             content.text.as_deref().map(str::trim),
             Some("Happy birthday!")
         );
+
+        // But not to an HTML with no text.
+        let text = "/* What it does: Remove spaces around the email design. */\r\n\
+            html, body { Margin: 0 auto !important; padding: 0 !important; }\r\n\
+            table, td { mso-table-lspace: 0pt !important; mso-table-rspace: 0pt !important; }\r\n\
+            Order #1234 is confirmed.";
+        let raw = alternative(text, "<img src=\"https://example.com/order.png\">");
+        assert_eq!(parse_message(&raw).text.as_deref(), Some(text));
     }
 
     /// A `multipart/alternative` message of `text` and `html`.
