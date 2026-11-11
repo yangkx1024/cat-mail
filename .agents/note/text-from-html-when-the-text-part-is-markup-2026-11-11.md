@@ -43,6 +43,6 @@
   只是开头少了标题或样式，其余是 mail-parser 截断的正文变完整、`style`/`target` 等属性碎片消失。少数开头多出
   浏览器也会显示的内容（`<!-->` 之后的 Word 元数据，Mailchimp 隐藏的预览文字）。
 - 未处理：有的营销邮件开头是大段不可见的填充字符（`&zwnj;` 等），摘要仍然看起来是空的；改用 html2text 按 DOM
-  和 CSS 转文本见 #291。mail-parser 1.0 已修好带属性的 `<style>`，升级见 #290。
+  和 CSS 转文本见 #294。mail-parser 1.0 已修好带属性的 `<style>`，升级见 #293。
 - review 后：`is_markup` 先数开头落在标记里的字符，不到一半就不转 HTML；`text` 用 mail-parser 的
   `text_bodies()` / `is_text_html`；`sanitize_html` 的文档写明"只有开头一个不带属性的 `<style>`"是 proto 依赖的约定。
