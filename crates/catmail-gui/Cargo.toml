@@ -50,8 +50,9 @@ objc2-app-kit = { workspace = true, features = [
     "NSText",
     "NSTextField",
     "NSWindow",
+    "NSWorkspace",
 ] }
-objc2-foundation = { workspace = true, features = ["NSNotification"] }
+objc2-foundation = { workspace = true, features = ["block2", "NSNotification", "NSOperation"] }
 
 [lints]
 workspace = true

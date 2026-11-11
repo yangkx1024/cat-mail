@@ -70,10 +70,11 @@ pub fn application() -> Option<gtk::Application> {
     gtk::gio::Application::default().and_downcast()
 }
 
-/// The engine is open: the tray and the notifications follow it.
+/// The engine is open: the tray and the notifications follow it, and it hears of wakes.
 pub fn engine_opened() {
     crate::new_mail::start();
     crate::tray::start();
+    crate::wake::follow();
 }
 
 /// Runs `future` on the main thread's loop.

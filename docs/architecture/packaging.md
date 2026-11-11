@@ -30,7 +30,7 @@ WebKitGTK 6.0 和 GStreamer 都来自它，包里只有 `catmail-gui` 和 `catma
 另外 GTK 4.14 和 WebKitGTK 6.0 要 Ubuntu 24.04 起，基线升到 glibc 2.39，包也会超过 150 MB。Flatpak 里
 WebKit 的沙箱照常工作：网页进程由 `flatpak-spawn --sandbox` 起在子沙箱里。
 
-**权限**（`net.yangkx.catmail.yml` 的 `finish-args`）：网络、Wayland（X11 兜底）、`/dev/dri`，会话总线上只多两个，系统总线上一个：
+**权限**（`net.yangkx.catmail.yml` 的 `finish-args`）：网络、Wayland（X11 兜底）、`/dev/dri`，会话总线上只多两个，系统总线上两个：
 
 - `org.freedesktop.secrets`：`keyring` 直接说 Secret Service（zbus），不走 portal。
 - `org.kde.StatusNotifierWatcher`：托盘。规范要求托盘项占用 `org.kde.StatusNotifierItem-<pid>-<id>`，沙箱里的
@@ -38,6 +38,8 @@ WebKit 的沙箱照常工作：网页进程由 `flatpak-spawn --sandbox` 起在�
   `/.flatpak-info`）ksni 不占名字，用连接的唯一名注册，watcher 都接受。
 - `org.freedesktop.timedate1`（系统总线）：nsh 从 timedated 读系统的时区，并跟着它的改动变。没有它，沙箱里只能
   读启动时的 `/etc/localtime`，换了时区要重开应用才显示新的时间。
+- `org.freedesktop.login1`（系统总线）：听 logind 的 `PrepareForSleep`，醒来就同步（见
+  [后台运行](background.md#系统睡眠与唤醒)）。只收信号，不调用它的方法。没有它，引擎自己发现睡眠，最多晚 30 秒。
 
 其余都走 portal，不用额外权限：
 

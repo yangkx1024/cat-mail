@@ -2,7 +2,7 @@
 
 [← 架构](../architecture.md)
 
-> 状态：常驻与单实例唤起、引擎自己发现睡眠、新邮件事件、Linux 的系统通知与托盘、macOS 的状态栏、`--background`、
+> 状态：常驻与单实例唤起、引擎自己发现睡眠、GUI 听系统唤醒、新邮件事件、Linux 的系统通知与托盘、macOS 的状态栏、`--background`、
 > macOS 的开机启动已实现。macOS 的新邮件通知、Linux 的开机启动尚未实现；Windows 还没有 GUI（见 [GUI](gui.md)）。
 > 没实现的小节是设计。
 
@@ -117,9 +117,12 @@ data"。macOS 上 LaunchServices 把同一个 bundle 的再次打开交给已在
 
 ## 系统睡眠与唤醒
 
-`Engine::resume` 有两个来源：前端知道系统醒了时调 `MailClient::resume()`；引擎自己发现睡眠（见下）。现在的 GUI
-只靠后者：nsh 不听 logind 或 `NSWorkspaceDidWakeNotification`（GPUI 版在 GPUI 的 `on_system_wake` 里调用）。常驻
-之后这是最容易出问题的一处：
+`Engine::resume` 有两个来源：前端知道系统醒了时调 `MailClient::resume()`；引擎自己发现睡眠（见下）。nsh 不转告
+系统唤醒，GUI 自己听（`catmail-gui` 的 `wake.rs`，引擎打开后开始，直到退出）：Linux 上是系统总线上 logind 的
+`PrepareForSleep(false)`（GIO 的 D-Bus，在 GTK 的主循环上；systemd 和 elogind 都有，Flatpak 里要
+`--system-talk-name=org.freedesktop.login1`），macOS 上是 `NSWorkspace` 通知中心的
+`NSWorkspaceDidWakeNotification`。两边都只是调 `resume`；听不到（没有系统总线、没有 logind）时还有引擎自己发现。
+`catmail watch` 只靠后者。常驻之后这是最容易出问题的一处：
 
 - Linux、macOS 上 `Instant` 和 tokio 的定时器不计睡眠时间，醒来后下一次完整同步最多还要再等 15 分钟；
   发件箱等重试的定时器同样晚到。
