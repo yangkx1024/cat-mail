@@ -91,10 +91,11 @@ pub fn after(delay: Duration, f: impl FnOnce() + Send + 'static) {
     let _ = DispatchQueue::main().after(when, f);
 }
 
-/// The engine is open: the status item follows its mail. No notifications: the system's
-/// need a bundle.
+/// The engine is open: the status item follows its mail, and it hears of wakes. No
+/// notifications: the system's need a bundle.
 pub fn engine_opened() {
     crate::tray::start();
+    crate::wake::follow();
 }
 
 // --- The application ----------------------------------------------------------------

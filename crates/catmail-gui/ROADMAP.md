@@ -120,17 +120,19 @@
 - [x] 新邮件通知（Linux）：⚠️ nsh 没有通知，改用 GLib 的 `GNotification`。点击走应用的 `open-mail` action，打开
       对应账户的 Inbox，列表读到那封后选中它（`Reveal`）。GNOME Shell 上点击无效：GLib 在那里改用 GNOME 自己的
       接口，它经 D-Bus 名字唤起应用，而应用不占这个名字（`NON_UNIQUE`，单实例靠 socket）
-- [x] 系统唤醒：nsh 不听 logind，靠引擎自己发现睡眠（`sleep.rs`，最多晚 30 秒）
-- [ ] 系统唤醒后马上同步：自己听 logind 的 `PrepareForSleep(false)`（Linux，zbus 已随 ksni、keyring 进来）和
-      `NSWorkspaceDidWakeNotification`（macOS），调 `MailClient::resume()`。GPUI 版在 GPUI 的 `on_system_wake` 里调用，
-      醒来就同步；现在要等引擎自己发现
+- [x] 系统唤醒后马上同步：⚠️ nsh 不转告系统唤醒，自己听 logind 的 `PrepareForSleep(false)`（Linux，GIO 的 D-Bus，
+      Flatpak 里要 `--system-talk-name=org.freedesktop.login1`）和 `NSWorkspaceDidWakeNotification`（macOS），调
+      `MailClient::resume()`（`wake.rs`）。听不到时靠引擎自己发现睡眠（`sleep.rs`，最多晚 30 秒）。⚠️ 还没在真机的
+      睡眠上确认过（看日志的 `the frontend says the computer woke`）
 - [x] 开机启动（macOS）：Settings › General 的 "Open at login" 是 `SMAppService.mainApp`（frontend 的 `autostart`），
       只在 bundle 里、macOS 13 起显示。`--background` 和登录时的启动不开窗口（`shell::launched`）；登录时的启动按
       启动的 Apple Event 判断，⚠️ 还没在真的登录上确认过（看日志的 `launched opened=…`）
 - [ ] 开机启动（Linux）：XDG autostart 文件，Flatpak 里经 Background portal 的 `RequestBackground`，都带
       `--background`
 - [x] macOS 常驻时切到 Accessory 激活策略：只留状态栏图标，Dock 图标和应用切换器里都没有，开窗时切回 Regular
-      （`toolkit::resident`、`Window::present`）；`--background` 一开始就是 Accessory
+      （`toolkit::resident`、`Window::present`）；`--background` 一开始就是 Accessory。⚠️ 有窗口（Regular）时在别的
+      应用的全屏 Space 里点状态栏图标不出菜单，是 AppKit 的限制，见 background.md「两个状态」；要解决得把状态栏项
+      拆成单独的 `LSUIElement` 辅助应用
 - [ ] 退出时等引擎关闭要有上限：现在 `shell::quit` 之后 `pollster::block_on(client.closed())` 不限时，引擎里一次卡住的
       写入就让进程退不出去（会话结束时系统等不到它退出）。GPUI 版最多等 GPUI 给的 `SHUTDOWN_TIMEOUT`；到时间就记一条
       日志直接退出

@@ -20,6 +20,8 @@ finish-args:
   - --talk-name=org.kde.StatusNotifierWatcher
   # The system's time zone as timedated keeps it: the times shown follow a change of it.
   - --system-talk-name=org.freedesktop.timedate1
+  # Syncing as soon as the computer wakes: logind's `PrepareForSleep`.
+  - --system-talk-name=org.freedesktop.login1
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
   env:
