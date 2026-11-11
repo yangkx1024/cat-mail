@@ -17,7 +17,9 @@ pub(crate) mod watch;
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
-use catmail_core::{Account, AccountId, Folder, FolderId, MailClient, MessageCursor, MessageId};
+use catmail_core::{
+    Account, AccountId, Folder, FolderId, MailClient, MessageCursor, MessageId, MessageSummary,
+};
 
 /// The account `selector` names, or the only account there is.
 pub(crate) async fn one_account(client: &MailClient, selector: Option<&str>) -> Result<Account> {
@@ -64,11 +66,17 @@ pub(crate) async fn cursor_after(
     let Some(id) = id else {
         return Ok(None);
     };
-    let cursor = client
-        .message_cursor(MessageId(id))
+    Ok(Some(summary(client, MessageId(id)).await?.cursor()))
+}
+
+/// Message `id` without its body; fails if there is no such message.
+pub(crate) async fn summary(client: &MailClient, id: MessageId) -> Result<MessageSummary> {
+    client
+        .message_summaries(vec![id])
         .await?
-        .with_context(|| format!("no message {id}"))?;
-    Ok(Some(cursor))
+        .into_iter()
+        .next()
+        .with_context(|| format!("message {id} not found"))
 }
 
 /// The accounts' folders, by id: for FOLDER columns, and the names of labels.

@@ -967,20 +967,6 @@ impl MailClient {
             .await
     }
 
-    /// Where the page after message `id` starts, for [`list_messages`](Self::list_messages)
-    /// and [`search`](Self::search); `None` if there is no such message. Reads its headers
-    /// only.
-    pub async fn message_cursor(&self, id: MessageId) -> Result<Option<MessageCursor>> {
-        let engine = self.engine()?;
-        self.shared
-            .rt
-            .run(async move {
-                let message = engine.read(move |db| db.messages().headers(id)).await?;
-                Ok(message.map(|m| m.summary.cursor()))
-            })
-            .await
-    }
-
     /// Of `messages`, which [`Event::NewMail`]s announced, those still unread in their
     /// account's INBOX, newest first: what to tell the user about. Mail read or moved
     /// since, on another device or here, is left out.

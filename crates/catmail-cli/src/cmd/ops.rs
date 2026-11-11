@@ -2,7 +2,7 @@
 //! the server at once, like `catmail send`. What can't be made on the server waits in
 //! the queue for the next `catmail sync` or `catmail ops flush`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::Result;
 use catmail_core::{
@@ -203,21 +203,26 @@ fn message_ids(ids: &[i64]) -> Vec<MessageId> {
     ids.iter().copied().map(MessageId).collect()
 }
 
-/// The messages grouped by account, which each name their target folder in; fails if
-/// one doesn't exist.
+/// The messages grouped by account, which each name their target folder in, in the
+/// order given; fails if one doesn't exist.
 async fn by_account(
     client: &MailClient,
     ids: &[i64],
 ) -> Result<BTreeMap<AccountId, Vec<MessageId>>> {
+    // One read for them all; the summaries come in no particular order and leave out
+    // what doesn't exist, so the ids given decide both.
+    let accounts: HashMap<i64, AccountId> = client
+        .message_summaries(message_ids(ids))
+        .await?
+        .into_iter()
+        .map(|m| (m.id.0, m.account_id))
+        .collect();
     let mut out: BTreeMap<AccountId, Vec<MessageId>> = BTreeMap::new();
     for &id in ids {
-        let message = client
-            .get_message(MessageId(id))
-            .await?
+        let account = accounts
+            .get(&id)
             .ok_or_else(|| anyhow::anyhow!("message {id} not found"))?;
-        out.entry(message.summary.account_id)
-            .or_default()
-            .push(message.summary.id);
+        out.entry(*account).or_default().push(MessageId(id));
     }
     Ok(out)
 }
@@ -302,7 +307,7 @@ mod tests {
     use catmail_testkit::{FakeImap, FakeMailbox, ServerState};
 
     use super::*;
-    use crate::test_support::synced;
+    use crate::test_support::{add_synced, synced};
 
     /// A client synced with INBOX ("one", "two") and Archive, and the INBOX messages' ids.
     async fn synced_inbox() -> (FakeImap, tempfile::TempDir, MailClient, AccountId, Vec<i64>) {
@@ -313,15 +318,20 @@ mod tests {
         let fake = FakeImap::start(state).await;
         let dir = tempfile::tempdir().unwrap();
         let (client, account) = synced(&fake, dir.path()).await;
+        let ids = inbox_ids(&client, account).await;
+        (fake, dir, client, account, ids)
+    }
+
+    /// The ids of the messages in `account`'s INBOX.
+    async fn inbox_ids(client: &MailClient, account: AccountId) -> Vec<i64> {
         let inbox = client.find_folder(account, "INBOX").await.unwrap().unwrap();
-        let ids: Vec<i64> = client
+        client
             .list_messages(inbox.id, 10, None)
             .await
             .unwrap()
             .iter()
             .map(|m| m.id.0)
-            .collect();
-        (fake, dir, client, account, ids)
+            .collect()
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -381,6 +391,32 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(client.list_pending(Some(account)).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn messages_are_grouped_by_account_in_the_order_given() {
+        let (_alice_server, _dir, client, alice, alice_ids) = synced_inbox().await;
+        let mut state = ServerState::new("bob", "pw");
+        state.inbox().append_simple("three");
+        let bob_server = FakeImap::start(state).await;
+        let bob = add_synced(&client, bob_server.port(), bob_server.port(), "bob").await;
+        let bob_id = inbox_ids(&client, bob).await[0];
+
+        let (a, b) = (alice_ids[0], alice_ids[1]);
+        let grouped = by_account(&client, &[b, bob_id, a]).await.unwrap();
+        assert_eq!(
+            grouped,
+            BTreeMap::from([
+                (alice, vec![MessageId(b), MessageId(a)]),
+                (bob, vec![MessageId(bob_id)]),
+            ])
+        );
+
+        // The one missing is the one named, wherever it is among the others.
+        let err = by_account(&client, &[a, i64::MAX, bob_id])
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), format!("message {} not found", i64::MAX));
     }
 
     #[tokio::test(flavor = "multi_thread")]
