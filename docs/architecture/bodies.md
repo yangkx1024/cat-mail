@@ -130,10 +130,10 @@ base64 正文），交给 mail-parser 按同样方式解析。于是两条路径
 ## 正文的组成
 
 - `text`：所有正文文本部分；只有 HTML 时由 HTML 转换。
-  - HTML 转文本用的是**清洗后**的 HTML（mail-parser 的 `html_to_text`）。直接转发来的原文不行：
-    mail-parser 只认不带属性的 `<style>`，`<style type="text/css">` 里的规则会成为正文、摘要和索引的开头；
-    它跳过 `<head>` 的办法也和浏览器不同。清洗后只剩开头一个不带属性的 `<style>`，`<title>` 连同文字被
-    去掉，转出的就是读信区显示的文字。只有 HTML 的邮件（最常见）直接转已经清洗好的 `html`，不另清洗一遍。
+  - HTML 转文本用的是**清洗后**的 HTML（mail-parser 的 `html_to_text`）：`<title>` 连同文字被去掉、
+    不显示的内容不在了，转出的就是读信区显示的文字。只有 HTML 的邮件（最常见）直接转已经清洗好的 `html`，
+    不另清洗一遍。起初这样做还因为 mail-parser 0.11 只认不带属性的 `<style>`，`<style type="text/css">`
+    里的规则会成为正文、摘要和索引的开头（#280）；1.0 已修好。
   - 发件人的 `text/plain` 按原样取，除非它其实是标记（`is_markup`）：有的发件人把 HTML 源码或样式表放进
     文本部分（整份，或者开头一大段样式表、后面才是正文）。判断看文本开头 1000 个非空白字符：落在标签
     （`<p>`、`</td>`、`<!…>`，不含 `<https://…>` 这样的链接）、`/* … */` 注释或花括号块里，**并且**不出现在
@@ -217,6 +217,15 @@ base64 正文），交给 mail-parser 按同样方式解析。于是两条路径
     任何信号。缓存按 URL，不按邮件：另一封信引用同一个 URL 也直接显示。不看 `Cache-Control`：
     邮件里的图片基本不变，按 `no-store` 再去取反而又给发件人一次信号。
   - 总大小上限 256 MiB，有新图片存入的那次下载结束后按最后使用时间（读取时更新 mtime）从最旧的删起。`image_cache_size`、`clear_image_cache` 给设置界面用。
+- **列出哪些部分**（`parts`）：mail-parser 的附件（RFC 8621 `parseStructure` 的 `attachments`），加上正文
+  显示的图片、音频、视频。RFC 8621 不把同时出现在两份正文里的媒体算作附件（比如 `multipart/mixed` 里夹在
+  文字之间的图片），mail-parser 1.0 照此办；我们仍然列出它，HTML 引用了就内嵌，否则作为附件，否则它哪里都
+  看不到。正文列表也按 RFC 8621：`text/plain` 之后带名字的 `text/html` 备选算附件，HTML 正文由 `text/plain`
+  转成。
+- **传输编码坏了尽量解码**（mail-parser 的 `decoded`，单独下载的部分用 `mime::decode_transfer`，规则相同）：
+  base64 跳过字母表以外的字节，quoted-printable 不合法的转义（`==`、`=ZZ`）原样保留，这是 RFC 2045 §6.7、
+  §6.8 的要求，Thunderbird、mutt 也这样。mail-parser 0.11 遇到一处不合法就整个部分不解码，正文显示成一屏
+  `=E4=BD=A0`，附件存下的是 base64 文本。不认识的传输编码原样给出字节（RFC 2045 §6.4）。
 - **内嵌**（`inline`）指正文把它当图片显示（proto 的 `mime::is_inline`）：HTML 里有 `<img src="cid:…">` 引用它
   （`catmail_html::cid_image_ids`，按 RFC 2392 取出完整的引用值、百分号解码后精确比较，`cid:logo-long` 不会让
   `logo` 也算内嵌），而且它能当图片显示（`image/*`，或发信端常标的 `application/octet-stream`，显示时按开头字节

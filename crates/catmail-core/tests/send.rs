@@ -11,7 +11,7 @@ use catmail_core::{
 };
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 use common::{Env, addr, drain, env, env_with, eventually, files, sparse, status_changes};
-use mail_parser::{MessageParser, MimeHeaders};
+use mail_parser::MessageParser;
 use tokio::sync::Semaphore;
 
 fn content(subject: &str) -> DraftContent {
@@ -733,9 +733,9 @@ async fn replies_are_threaded_and_quoted() {
     env.flush().await;
     let received = env.smtp.state().received[0].data.clone();
     let m = MessageParser::new().parse(&received).unwrap();
-    assert_eq!(m.in_reply_to().as_text(), Some("q3@example.com"));
+    assert_eq!(m.in_reply_to().unwrap().first(), Some("q3@example.com"));
     assert_eq!(
-        m.references().as_text_list().unwrap().to_vec(),
+        m.references().unwrap().iter().collect::<Vec<_>>(),
         ["root@example.com", "q3@example.com"]
     );
 }
@@ -789,10 +789,10 @@ async fn attachments_are_copied_when_added() {
     env.flush().await;
     let received = env.smtp.state().received[0].data.clone();
     let m = MessageParser::new().parse(&received).unwrap();
-    assert_eq!(m.attachment_count(), 1);
-    let attachment = m.attachment(0).unwrap();
+    assert_eq!(m.attachments().len(), 1);
+    let attachment = m.attachments().next().unwrap();
     assert_eq!(attachment.attachment_name(), Some("报告.pdf"));
-    assert_eq!(attachment.contents(), b"%PDF-1.4 first");
+    assert_eq!(&*attachment.decoded(), b"%PDF-1.4 first");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -869,7 +869,7 @@ async fn attachments_can_be_given_by_their_content() {
         .map(|a| {
             (
                 a.attachment_name().unwrap().to_owned(),
-                a.contents().to_vec(),
+                a.decoded().to_vec(),
             )
         })
         .collect();

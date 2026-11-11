@@ -11,7 +11,7 @@ use catmail_core::{
     AccountId, Address, DraftContent, ErrorKind, MailClient, OutboxEntry, OutboxStatus,
     ServerConfig, TlsConfig,
 };
-use mail_parser::{MessageParser, MimeHeaders};
+use mail_parser::MessageParser;
 use serde_json::Value;
 use testenv::{TestEnv, add_account, open_client, run_tag, sent_copies};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -167,8 +167,14 @@ async fn sends_with_starttls_and_saves_to_sent() {
     assert_eq!(m.subject(), Some(subject.as_str()));
     assert!(m.bcc().is_none(), "Bcc stays out of the message");
     assert_eq!(m.body_text(0).unwrap().replace("\r\n", "\n"), text);
-    assert_eq!(m.attachment(0).unwrap().contents(), attachment.as_slice());
-    assert_eq!(m.attachment(0).unwrap().attachment_name(), Some("数据.bin"));
+    assert_eq!(
+        &*m.attachments().next().unwrap().decoded(),
+        attachment.as_slice()
+    );
+    assert_eq!(
+        m.attachments().next().unwrap().attachment_name(),
+        Some("数据.bin")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
