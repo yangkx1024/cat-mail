@@ -155,7 +155,7 @@ cargo test -p catmail-core --test dovecot --test submission
 | `catmail-types` | 领域类型，纯数据 |
 | `catmail-store` | SQLite、迁移、repository、内容寻址的 BlobStore |
 | `catmail-proto` | IMAP / SMTP / MIME |
-| `catmail-html` | 邮件 HTML 的清洗与读信区的处理（图片、深色配色），纯函数 |
+| `catmail-html` | 邮件 HTML 的清洗与读信区的处理（图片、深色配色），转成文本，纯函数 |
 | `catmail-core` | 引擎与 `MailClient` 门面，前端唯一依赖 |
 | `catmail-cli` | `catmail` 命令行 |
 | `catmail-mcp` | 经 MCP 交给 AI agent 的工具、令牌与本机的 HTTP 服务，由 `catmail serve` 或图形界面（Settings › Agents）托管 |

@@ -46,6 +46,9 @@ glib-unix = "0.22"
 hex = "0.4"
 # The version ammonia uses, so the sanitizer and the layout pass share one parser.
 html5ever = "0.40.1"
+# The text of a message's HTML, as laid out by its DOM and style sheets (`css`: what
+# they hide stays out). On the html5ever above.
+html2text = { version = "0.17.4", features = ["css"] }
 jiff = "0.2.38"
 # The MCP server's HTTP/1.1 on the local address (`catmail-mcp`), under rmcp's
 # Streamable HTTP service; the versions reqwest already uses.

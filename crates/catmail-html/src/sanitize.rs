@@ -111,10 +111,9 @@ fn is_data_url(value: &str) -> bool {
 /// table layout attributes stay, since most email is laid out with them.
 /// Style sheets are rewritten rule by rule (`css.rs`) and put back as one `<style>` at the
 /// start: what could fetch is dropped, and the sheet can't end its element. That
-/// `<style>` is the output's only one and has no attributes, which others rely on: the
-/// readers' passes take the sheet from there, and `catmail-proto` converts the output to
-/// text with mail-parser, which skips only a `<style>` without attributes. `style`
-/// attributes are rewritten as a rule's declarations.
+/// `<style>` is the output's only one and has no attributes, which the readers' passes
+/// rely on: they take the sheet from there. `style` attributes are rewritten as a rule's
+/// declarations.
 /// Image sources (remote URLs, `cid:`, `data:`) are kept: whether remote images load
 /// is the renderer's decision, and it should block them by default.
 pub fn sanitize_html(html: &str) -> String {

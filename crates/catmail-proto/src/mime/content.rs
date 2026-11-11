@@ -2,8 +2,7 @@ use std::borrow::Cow;
 use std::cell::OnceCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use catmail_html::{cid_image_ids, sanitize_html};
-use mail_parser::decoders::html::html_to_text;
+use catmail_html::{cid_image_ids, sanitize_html, split_address, text_and_preheader, visible};
 use mail_parser::{Encoding, Message, MessageParser, MessagePart, PartKind, PartRole};
 
 use super::transcode_fields;
@@ -19,7 +18,7 @@ const SNIPPET_CHARS: usize = 200;
 /// so that the change is a decision.
 ///
 /// [`MimeNode::content`]: super::MimeNode::content
-pub const CONTENT_VERSION: u32 = 4;
+pub const CONTENT_VERSION: u32 = 5;
 
 /// What a reader shows of a message.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -98,7 +97,8 @@ pub(super) fn extract(
         .then(|| joined(root.html_bodies(), "<br>"))
         .flatten()
         .map(|html| sanitize_html(&html));
-    let text = text(message, html.as_deref());
+    let (text, preheader) = text(message, html.as_deref());
+    let snippet = snippet(text.as_deref().unwrap_or_default(), preheader.as_deref());
     let text_charsets = text_charsets(message);
     // Part ids follow MIME order. A set, not `contains` on each part: a message may
     // have thousands of parts.
@@ -155,7 +155,7 @@ pub(super) fn extract(
     }
 
     Content {
-        snippet: text.as_deref().and_then(snippet),
+        snippet,
         text,
         html,
         parts,
@@ -216,15 +216,19 @@ fn text_charsets<'a>(message: &'a Message<'_>) -> Vec<&'a str> {
         .collect()
 }
 
-/// The text of the message's body parts. An HTML part's is converted from it sanitized,
-/// so that it is the text the reader shows: sanitizing takes out the `<title>` and what
-/// else the reader doesn't show. A text part is
+/// The text of the message's body parts, and the preheader of the HTML it was converted
+/// from, if it was. An HTML part's text is converted from it sanitized
+/// ([`catmail_html::text`]), so that it is the text the reader shows: sanitizing takes
+/// out the `<title>`, and what the style sheets hide stays out. A text part is
 /// taken as the sender wrote it, unless it is markup that the HTML doesn't show
 /// ([`is_markup`]); then the text is the HTML's (`html`, the sanitized HTML of the
 /// message). The HTML is the same message in another form, so converting it when the
 /// text part was fine loses no more than the text's layout.
-fn text(message: &Message<'_>, html: Option<&str>) -> Option<String> {
-    let of_html = |html: &str| Some(html_to_text(html)).filter(|text| !text.trim().is_empty());
+fn text(message: &Message<'_>, html: Option<&str>) -> (Option<String>, Option<String>) {
+    let of_html = |html: &str| {
+        let (text, preheader) = text_and_preheader(html);
+        (Some(text).filter(|text| !text.trim().is_empty()), preheader)
+    };
     let root = message.root();
     // Most often the HTML parts are the whole body, and sanitized already.
     if root
@@ -235,30 +239,35 @@ fn text(message: &Message<'_>, html: Option<&str>) -> Option<String> {
             .text_body()
             .all(|part| matches!(part.kind(), PartKind::Html))
     {
-        return html.and_then(of_html);
+        return html.map_or((None, None), of_html);
     }
     let text = joined(
         root.text_body().filter_map(|part| match part.kind() {
             PartKind::Text => part.text(),
-            PartKind::Html => Some(Cow::Owned(html_to_text(&sanitize_html(&part.text()?)))),
+            PartKind::Html => Some(Cow::Owned(catmail_html::text(&sanitize_html(
+                &part.text()?,
+            )))),
             _ => None,
         }),
         "\n",
     );
     let (text, html) = match (text, html) {
         (Some(text), Some(html)) => (text, html),
-        (text, _) => return text,
+        (text, _) => return (text, None),
     };
     // Converted once, and only if the text part is markup enough to ask.
     let shown = OnceCell::new();
-    if is_markup(&text, || shown.get_or_init(|| html_to_text(html)))
+    if is_markup(&text, || {
+        let (shown, _) = shown.get_or_init(|| of_html(html));
+        shown.as_deref().unwrap_or_default()
+    })
         // An HTML of images alone shows no text: the text part, markup and all, still
         // has more to find than nothing.
-        && let Some(shown) = shown.into_inner().filter(|s| !s.trim().is_empty())
+        && let Some((Some(shown), preheader)) = shown.into_inner()
     {
-        return Some(shown);
+        return (Some(shown), preheader);
     }
-    Some(text)
+    (Some(text), None)
 }
 
 /// Characters, whitespace aside, at the start of a text part that [`is_markup`] reads.
@@ -432,16 +441,24 @@ pub(super) fn sections(message: &Message<'_>) -> HashMap<u32, String> {
     out
 }
 
-/// The text on one line: quoted lines (`> …`) dropped, whitespace collapsed, cut at a
-/// character boundary.
-fn snippet(text: &str) -> Option<String> {
+/// The start of the message for lists, on one line: the preheader of the HTML the text
+/// was converted from, if it has one that the text doesn't start with (as other mail
+/// clients' lists show it), then the text. Quoted lines (`> …`), link addresses
+/// (`<https://…>`) and characters that take no room ([`visible`]) are left out,
+/// whitespace is collapsed, and it is cut at a character boundary, between words where
+/// the next doesn't fit.
+fn snippet(text: &str, preheader: Option<&str>) -> Option<String> {
+    let lead = preheader
+        .map(|p| snippet_words(p).collect::<Vec<_>>())
+        .filter(|lead| {
+            !snippet_words(text)
+                .take(lead.len())
+                .eq(lead.iter().cloned())
+        })
+        .unwrap_or_default();
     let mut out = String::new();
     let mut chars = 0;
-    for word in text
-        .lines()
-        .filter(|line| !line.trim_start().starts_with('>'))
-        .flat_map(str::split_whitespace)
-    {
+    for word in lead.into_iter().chain(snippet_words(text)) {
         if chars > 0 {
             // Only if a character of the next word still fits after it.
             if chars + 1 >= SNIPPET_CHARS {
@@ -459,6 +476,45 @@ fn snippet(text: &str) -> Option<String> {
         }
     }
     (!out.is_empty()).then_some(out)
+}
+
+/// The words of `text` that [`snippet`] shows, a line at a time.
+fn snippet_words(text: &str) -> impl Iterator<Item = String> {
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with('>'))
+        .flat_map(|line| {
+            let line = visible(&without_addresses(line));
+            line.split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+}
+
+/// `line` without the addresses in angle brackets that follow links' text
+/// (`text <https://…>`), as the HTML's text and many senders' plain text write them.
+fn without_addresses(line: &str) -> Cow<'_, str> {
+    if !line.contains('<') {
+        return Cow::Borrowed(line);
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(at) = rest.find('<') {
+        let inside = &rest[at + 1..];
+        match inside.find(|c: char| c == '>' || c.is_whitespace()) {
+            Some(end)
+                if inside[end..].starts_with('>') && split_address(&inside[..end]).is_some() =>
+            {
+                out.push_str(rest[..at].trim_end());
+                rest = &inside[end + 1..];
+            }
+            _ => {
+                out.push_str(&rest[..=at]);
+                rest = inside;
+            }
+        }
+    }
+    out.push_str(rest);
+    Cow::Owned(out)
 }
 
 #[cfg(test)]
@@ -882,6 +938,68 @@ mod tests {
         );
     }
 
+    /// Mail for lists: a preheader hidden in front, then characters that take no room.
+    const PREHEADER: &[u8] = b"Subject: Sale\r\n\
+        Content-Type: text/html; charset=utf-8\r\n\r\n\
+        <html><head><style>.pre { display: none; max-height: 0 }</style></head><body>\
+        <div class=\"pre\">Up to 50% off this week</div>\
+        <div style=\"display:none\">&zwnj;&#847; &zwnj;&#847; &zwnj;&#847; &#8203;</div>\
+        <p>Dear reader,</p><p>Our <a href=\"https://shop.example/sale\">sale</a> starts.</p>\
+        </body></html>\r\n";
+
+    #[test]
+    fn snippet_starts_with_the_html_preheader() {
+        let content = parse_message(PREHEADER);
+        assert_eq!(
+            content.text.as_deref(),
+            Some("Dear reader,\n\nOur sale <https://shop.example/sale> starts.\n")
+        );
+        assert_eq!(
+            content.snippet.as_deref(),
+            Some("Up to 50% off this week Dear reader, Our sale starts.")
+        );
+
+        // An unfilled preheader is left out.
+        let raw = b"Content-Type: text/html\r\n\r\n\
+            <span style=\"display:none\">*|MC_PREVIEW_TEXT|*</span><p>Hello</p>\r\n";
+        assert_eq!(parse_message(raw).snippet.as_deref(), Some("Hello"));
+
+        // A text part is the sender's own: its snippet has no preheader.
+        let raw = b"Content-Type: multipart/alternative; boundary=a\r\n\r\n\
+            --a\r\n\
+            Content-Type: text/plain\r\n\r\n\
+            Hello\r\n\
+            --a\r\n\
+            Content-Type: text/html\r\n\r\n\
+            <span style=\"display:none\">Preview</span><p>Hello</p>\r\n\
+            --a--\r\n";
+        assert_eq!(parse_message(raw).snippet.as_deref(), Some("Hello"));
+    }
+
+    #[test]
+    fn snippet_leaves_out_what_takes_no_room_or_is_not_read() {
+        assert_eq!(
+            snippet(
+                "Read <https://x.example/a?b>. \u{200c}\u{34f} \u{feff}\n\
+                 1 <2> <mailto:a@b.example> <a@b.example> <https:// x>",
+                None
+            )
+            .as_deref(),
+            Some("Read. 1 <2> <a@b.example> <https:// x>")
+        );
+        // Words of filler alone are left out.
+        assert_eq!(
+            snippet("Hi \u{200d} \u{200d} there", None).as_deref(),
+            Some("Hi there")
+        );
+        // A preheader that the text starts with is said once.
+        assert_eq!(
+            snippet("Hello there\nmore", Some("Hello  there")).as_deref(),
+            Some("Hello there more")
+        );
+        assert_eq!(snippet("", Some("\u{200c} Only")).as_deref(), Some("Only"));
+    }
+
     #[test]
     fn markup_spans_are_tags_comments_and_blocks() {
         fn spans(text: &str) -> Vec<&str> {
@@ -1010,12 +1128,12 @@ mod tests {
     #[test]
     fn snippet_stops_at_the_limit_between_words() {
         let text = format!("{} b c d", "a".repeat(SNIPPET_CHARS));
-        assert_eq!(snippet(&text).unwrap(), "a".repeat(SNIPPET_CHARS));
+        assert_eq!(snippet(&text, None).unwrap(), "a".repeat(SNIPPET_CHARS));
         let text = format!("{} {}", "a".repeat(SNIPPET_CHARS - 1), "bcd ".repeat(100));
-        assert_eq!(snippet(&text).unwrap(), "a".repeat(SNIPPET_CHARS - 1));
+        assert_eq!(snippet(&text, None).unwrap(), "a".repeat(SNIPPET_CHARS - 1));
         let text = format!("{} {}", "a".repeat(SNIPPET_CHARS - 2), "bcd ".repeat(100));
         assert_eq!(
-            snippet(&text).unwrap(),
+            snippet(&text, None).unwrap(),
             format!("{} b", "a".repeat(SNIPPET_CHARS - 2))
         );
     }
@@ -1023,9 +1141,9 @@ mod tests {
     #[test]
     fn snippet_is_cut_at_char_boundary() {
         let long = "字".repeat(300);
-        let s = snippet(&long).unwrap();
+        let s = snippet(&long, None).unwrap();
         assert_eq!(s.chars().count(), SNIPPET_CHARS);
-        assert_eq!(snippet("  \n> only quoted\n"), None);
+        assert_eq!(snippet("  \n> only quoted\n", None), None);
     }
 
     /// What a sender may write in HTML, for the sanitizer.
@@ -1086,6 +1204,7 @@ mod tests {
             PLAIN,
             STYLE_AS_TEXT,
             MALFORMED_QP,
+            PREHEADER,
         ] {
             let content = parse_message(raw);
             let h = &mut hash;
@@ -1108,7 +1227,7 @@ mod tests {
         // either way, record the new fingerprint here.
         assert_eq!(
             (CONTENT_VERSION, format!("{hash:016x}")),
-            (4, "14b6727582a2c06d".to_owned()),
+            (5, "82f9c788d385ac37".to_owned()),
         );
     }
 }
