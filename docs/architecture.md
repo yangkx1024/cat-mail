@@ -17,7 +17,7 @@
 | Services / Engine | `catmail-core` | 同步、后台同步（IDLE）、操作队列回放、按需下载与后台预取正文、Outbox；每账户状态；运行时桥接；凭据 |
 | Storage | `catmail-store` | SQLite schema 与迁移、事务化 Repository、FTS5、内容寻址 `BlobStore`；全部同步 API |
 | Protocol | `catmail-proto` | IMAP（自己的命令编码与连接驱动，imap-proto 解析响应）、SMTP（自己实现）、MIME 解析（mail-parser）与构建（mail-builder）、远程图片的 HTTP 下载（reqwest） |
-| HTML | `catmail-html` | 邮件 HTML 的清洗（ammonia，样式表逐记号重写），以及读信区在清洗结果上做的几遍：图片、内嵌图片、深色时的颜色转换；纯函数，无 IO |
+| HTML | `catmail-html` | 邮件 HTML 的清洗（ammonia，样式表逐记号重写），以及读信区在清洗结果上做的几遍：图片、内嵌图片、深色时的颜色转换，和转成读信区显示的文字（html2text）；纯函数，无 IO |
 | Domain | `catmail-types` | `Account`、`Folder`、`MessageSummary`、`Flags`、`Event`、ID 类型；纯数据，无 IO |
 
 依赖方向 `types ← store, proto ← core ← cli / gui`，`html ← proto, core`，`core ← frontend ← gui`，`core ← mcp ← cli, frontend`：store 与 proto 并列、互不依赖；前端不直接

@@ -5,6 +5,8 @@
 //! that they can't fetch anything (`css.rs`). The other passes run on what it produced, with the same sanitizer,
 //! so they can't let through what it didn't: the images a reader resolves or blocks, the
 //! inline parts embedded for a browser, and the colors moved for a dark page (`dark.rs`).
+//! [`text`] is what a reader shows of it as text, for the stored text, snippets and
+//! search.
 //!
 //! Pure functions over strings: no IO, nothing async, nothing of mail protocols.
 //!
@@ -16,6 +18,7 @@ mod css;
 mod dark;
 mod images;
 mod sanitize;
+mod text;
 mod tokens;
 
 pub use dark::DarkPalette;
@@ -24,3 +27,4 @@ pub use images::{
     remote_image_url, serve_images, sniff_image,
 };
 pub use sanitize::sanitize_html;
+pub use text::{split_address, text, text_and_preheader, visible};

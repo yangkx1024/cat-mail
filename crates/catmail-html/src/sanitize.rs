@@ -74,6 +74,8 @@ pub(crate) fn sanitizer(on_image: Option<ImageHook>, recolor: Option<Recolor>) -
                     recolor.colors_from_variables.store(true, Ordering::Relaxed);
                 }
                 (!style.css.is_empty()).then_some(Cow::Owned(style.css))
+            } else if let Some(span) = bounded_span(attribute, value) {
+                Some(Cow::Owned(span))
             } else if let Some(replaced) =
                 on_image.as_ref().filter(|_| image).and_then(|f| f(value))
             {
@@ -87,6 +89,20 @@ pub(crate) fn sanitizer(on_image: Option<ImageHook>, recolor: Option<Recolor>) -
             }
         });
     builder
+}
+
+/// A table cell's `colspan` or `rowspan` above the largest a browser uses (1000 and
+/// 65534 in HTML), cut to that, so the reader lays it out the same; `None` for any other
+/// attribute or value. html2text ([`text`](crate::text)) overflows on spans near
+/// `usize::MAX` and panics.
+fn bounded_span(attribute: &str, value: &str) -> Option<String> {
+    let limit: u64 = match attribute {
+        "colspan" => 1000,
+        "rowspan" => 65534,
+        _ => return None,
+    };
+    let span: u64 = value.trim().parse().ok()?;
+    (span > limit).then(|| limit.to_string())
 }
 
 /// An attribute's value with its colors moved for a dark page, or `None` for one that
@@ -111,10 +127,9 @@ fn is_data_url(value: &str) -> bool {
 /// table layout attributes stay, since most email is laid out with them.
 /// Style sheets are rewritten rule by rule (`css.rs`) and put back as one `<style>` at the
 /// start: what could fetch is dropped, and the sheet can't end its element. That
-/// `<style>` is the output's only one and has no attributes, which others rely on: the
-/// readers' passes take the sheet from there, and `catmail-proto` converts the output to
-/// text with mail-parser, which skips only a `<style>` without attributes. `style`
-/// attributes are rewritten as a rule's declarations.
+/// `<style>` is the output's only one and has no attributes, which the readers' passes
+/// rely on: they take the sheet from there. `style` attributes are rewritten as a rule's
+/// declarations.
 /// Image sources (remote URLs, `cid:`, `data:`) are kept: whether remote images load
 /// is the renderer's decision, and it should block them by default.
 pub fn sanitize_html(html: &str) -> String {
