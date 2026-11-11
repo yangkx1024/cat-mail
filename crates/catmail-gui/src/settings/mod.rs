@@ -15,7 +15,7 @@ mod reading;
 use catmail_frontend::autostart::{self, State};
 use catmail_frontend::settings::{DEFAULT_TEXT_SIZE, Settings};
 use futures_util::StreamExt as _;
-use nsh_base::{switch, theme};
+use nsh_base::{SwitchElement, switch, theme};
 use nsh_core::element::set_color_scheme;
 use nsh_core::prelude::*;
 
@@ -195,7 +195,7 @@ fn toggle(
     label: &'static str,
     checked: impl Fn() -> bool + Copy + 'static,
     change: impl Fn(bool) + 'static,
-) -> impl IntoElement {
+) -> SwitchElement {
     switch()
         .checked(checked)
         .on_change(move |on: &bool| change(*on))
@@ -229,16 +229,25 @@ fn general() -> impl IntoElement {
         ))
 }
 
-/// The system's login item, as it is when the section opens: System Settings may have
-/// changed it since.
+/// The system's login item, read again as the section opens: System Settings may have
+/// changed it since. The switch takes no presses while the system answers: its answer
+/// can't be foretold (it may need approval), and two presses could finish in either
+/// order.
 fn open_at_login() -> impl IntoElement {
-    let on = signal(autostart::state() == State::On);
+    let on = signal(false);
+    let busy = signal(true);
+    spawn(async move {
+        if let Some(now) = off_thread(autostart::state).await {
+            on.set(now == State::On);
+        }
+        busy.set(false);
+    });
     toggle(
         "Open at login",
         move || on.get(),
         move |want| {
-            // At once, and again with what the system made of it.
             on.set(want);
+            busy.set(true);
             spawn(async move {
                 if let Some((now, done)) = off_thread(move || autostart::set(want)).await {
                     on.set(now == State::On);
@@ -246,7 +255,9 @@ fn open_at_login() -> impl IntoElement {
                         report("Couldn't change opening at login", e);
                     }
                 }
+                busy.set(false);
             });
         },
     )
+    .disabled(move || busy.get())
 }

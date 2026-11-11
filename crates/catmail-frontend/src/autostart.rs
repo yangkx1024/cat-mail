@@ -5,6 +5,8 @@
 //! file. Linux (an XDG autostart file, or the Background portal in the Flatpak) and
 //! Windows come later. See docs/architecture/background.md.
 
+use std::sync::{Mutex, PoisonError};
+
 use thiserror::Error;
 
 #[cfg(target_os = "macos")]
@@ -58,9 +60,10 @@ pub fn available() -> bool {
     platform::available()
 }
 
-/// Whether the app opens at login now; `Off` where it can't.
+/// Whether the app opens at login now; `Off` where it can't. Waits for a change under
+/// way.
 pub fn state() -> State {
-    platform::state()
+    one_at_a_time(platform::state)
 }
 
 /// Turns opening at login on or off: what it is afterwards, and whether the system
@@ -68,7 +71,17 @@ pub fn state() -> State {
 /// items, where it is allowed. A blocking call to the system, which may also tell the
 /// user it added a login item.
 pub fn set(on: bool) -> (State, Result<(), Error>) {
-    platform::set(on)
+    one_at_a_time(|| platform::set(on))
+}
+
+/// Runs `f` while no other change or reading of the login item runs. A change runs on a
+/// thread of its own, which outlives the page that asked for it: one asked for from the
+/// page opened again could otherwise run at the same time and finish first, an
+/// unregister before the register it should follow.
+fn one_at_a_time<R>(f: impl FnOnce() -> R) -> R {
+    static SYSTEM: Mutex<()> = Mutex::new(());
+    let _turn = SYSTEM.lock().unwrap_or_else(PoisonError::into_inner);
+    f()
 }
 
 /// Whether this launch was the login's. On macOS, asked once the app has finished

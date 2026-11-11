@@ -32,8 +32,12 @@ background.md 早就设计了"开机时启动"和 `catmail-gui --background`，�
 - `catmail-gui`：`main.rs` 读 `--background`；`shell::launched` 在 GTK 的 `activate`、AppKit 的
   `applicationDidFinishLaunching:` 里决定开不开主窗口（AppKit 原来在 `app.run()` 之前就开窗口，现在挪到
   启动完成时，好读启动事件）；引擎失败时没有窗口就开一个说明原因（原来引擎打开期间关掉窗口会直接退出，
-  现在也一样开窗口，关掉后退出）。Settings › General 加 "Open at login"。
-- 测试：`resident::at_launch` 的单元测试。手动：用临时数据目录分别以 `--background` 和普通方式运行
+  现在也一样开窗口，关掉后退出）。Settings › General 加 "Open at login"，系统答复之前开关不接受按动（快速
+  连按时两次改动可能在两个线程上先后颠倒，最后留下与用户选择相反的登录项；Codex 的 review 指出）；改动的
+  线程比页面活得久，`autostart` 的 `set`、`state` 因此在全应用串行（一把锁）；页面打开时在另一个线程上读状态，
+  读到之前开关不接受按动，重开的页面读到改动之后的状态，视图线程不等锁。
+- 测试：`resident::at_launch` 的单元测试。开关的串行没有测试：要换掉系统调用才测得到 `set`、`state` 本身，
+  只测那把锁等于测 `Mutex`；视图还不能无头驱动（P10）。手动：用临时数据目录分别以 `--background` 和普通方式运行
   `catmail-gui`，日志里前者 `launched without a window`、后者 `main window opened`，SIGTERM 都正常退出；
   shell 启动读到的事件是 `Unopened`。bundle 里的开关和真实登录还要在打包后的应用上试。
 - 文档：background.md「开机启动」、`crates/catmail-gui/ROADMAP.md` P9。
