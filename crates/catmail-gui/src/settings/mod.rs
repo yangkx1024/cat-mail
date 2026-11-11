@@ -4,13 +4,15 @@
 //! `shell`'s, shared by every window; the themes and their import are
 //! `catmail_frontend::theme`'s, the wording of Accounts `catmail_frontend::accounts`'.
 //!
-//! General (running in the background, new mail notifications) comes with them (P9).
+//! General: opening at login (the system's, `catmail_frontend::autostart`), running in the
+//! background, new mail notifications.
 
 mod accounts;
 mod agents;
 mod appearance;
 mod reading;
 
+use catmail_frontend::autostart::{self, State};
 use catmail_frontend::settings::{DEFAULT_TEXT_SIZE, Settings};
 use futures_util::StreamExt as _;
 use nsh_base::{switch, theme};
@@ -22,6 +24,8 @@ use crate::form::{self, modal};
 use crate::icons::Icon;
 use crate::mailbox::sidebar;
 use crate::shell;
+use crate::tasks::off_thread;
+use crate::toast::report;
 
 use accounts::accounts_section;
 
@@ -205,11 +209,14 @@ fn toggle(
 
 // --- General ------------------------------------------------------------------------
 
-/// Whether the app keeps running once its windows are closed, and tells about new mail.
+/// Whether the app opens at login, keeps running once its windows are closed, and tells
+/// about new mail.
 fn general() -> impl IntoElement {
+    let at_login = autostart::available();
     view()
         .gap(px(16.0))
         .child(section_title("General"))
+        .child(when(move || at_login, open_at_login))
         .child(toggle(
             "Keep running after the window is closed",
             move || prefs(|s| s.keep_running),
@@ -220,4 +227,26 @@ fn general() -> impl IntoElement {
             move || prefs(|s| s.notify_new_mail),
             |on| shell::update_settings(|s| s.notify_new_mail = on),
         ))
+}
+
+/// The system's login item, as it is when the section opens: System Settings may have
+/// changed it since.
+fn open_at_login() -> impl IntoElement {
+    let on = signal(autostart::state() == State::On);
+    toggle(
+        "Open at login",
+        move || on.get(),
+        move |want| {
+            // At once, and again with what the system made of it.
+            on.set(want);
+            spawn(async move {
+                if let Some((now, done)) = off_thread(move || autostart::set(want)).await {
+                    on.set(now == State::On);
+                    if let Err(e) = done {
+                        report("Couldn't change opening at login", e);
+                    }
+                }
+            });
+        },
+    )
 }

@@ -1,7 +1,7 @@
 //! The shell on GTK 4 (Linux): a `gtk::Application`, its windows, and GLib's loop for the
 //! main thread's work.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -29,7 +29,15 @@ pub fn run(started: impl FnOnce() + 'static) -> u8 {
         install_quit(app);
         quit_on_signals();
     });
-    app.connect_activate(|_| super::show(None));
+    // The launch's, then the desktop's (its bus name activated).
+    let launched = Cell::new(false);
+    app.connect_activate(move |_| {
+        if launched.replace(true) {
+            super::show(None);
+        } else {
+            super::launched(false);
+        }
+    });
     app.connect_window_removed(|_, _| super::window_removed());
     // Held for as long as it runs: GTK's app would end with its last window, and the
     // shell decides that ([`end`]).

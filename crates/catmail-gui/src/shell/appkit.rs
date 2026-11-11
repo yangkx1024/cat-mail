@@ -51,7 +51,7 @@ pub fn run(started: impl FnOnce() + 'static) -> u8 {
     quit_on_signals();
     let _monitor = blur_on_press_outside();
     started();
-    super::show(None);
+    // The main window opens once the app has launched (`did_finish_launching`).
     app.run();
     app.setDelegate(None);
     0
@@ -100,6 +100,13 @@ define_class!(
     unsafe impl NSObjectProtocol for AppDelegate {}
 
     unsafe impl NSApplicationDelegate for AppDelegate {
+        /// While the launch's Apple Event is the current one, which says whether it was
+        /// the login's.
+        #[unsafe(method(applicationDidFinishLaunching:))]
+        fn did_finish_launching(&self, _notification: &NSNotification) {
+            super::launched(catmail_frontend::autostart::launched_at_login());
+        }
+
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
         fn should_terminate_after_last_window_closed(&self, _app: &NSApplication) -> bool {
             false

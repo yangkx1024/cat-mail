@@ -124,6 +124,11 @@
 - [ ] 系统唤醒后马上同步：自己听 logind 的 `PrepareForSleep(false)`（Linux，zbus 已随 ksni、keyring 进来）和
       `NSWorkspaceDidWakeNotification`（macOS），调 `MailClient::resume()`。GPUI 版在 GPUI 的 `on_system_wake` 里调用，
       醒来就同步；现在要等引擎自己发现
+- [x] 开机启动（macOS）：Settings › General 的 "Open at login" 是 `SMAppService.mainApp`（frontend 的 `autostart`），
+      只在 bundle 里、macOS 13 起显示。`--background` 和登录时的启动不开窗口（`shell::launched`）；登录时的启动按
+      启动的 Apple Event 判断，⚠️ 还没在真的登录上确认过（看日志的 `launched opened=…`）
+- [ ] 开机启动（Linux）：XDG autostart 文件，Flatpak 里经 Background portal 的 `RequestBackground`，都带
+      `--background`
 - [ ] macOS 常驻时切到 Accessory 激活策略：只留状态栏图标，Dock 图标和应用切换器里都没有，开窗时切回 Regular
       （GPUI 版就是这样）。现在关窗后 Dock 图标一直在
 - [ ] 退出时等引擎关闭要有上限：现在 `shell::quit` 之后 `pollster::block_on(client.closed())` 不限时，引擎里一次卡住的

@@ -2,8 +2,9 @@
 
 [← 架构](../architecture.md)
 
-> 状态：常驻与单实例唤起、引擎自己发现睡眠、新邮件事件、Linux 的系统通知与托盘、macOS 的状态栏已实现。macOS 的
-> 新邮件通知、开机启动尚未实现；Windows 还没有 GUI（见 [GUI](gui.md)）。没实现的小节是设计。
+> 状态：常驻与单实例唤起、引擎自己发现睡眠、新邮件事件、Linux 的系统通知与托盘、macOS 的状态栏、`--background`、
+> macOS 的开机启动已实现。macOS 的新邮件通知、Linux 的开机启动尚未实现；Windows 还没有 GUI（见 [GUI](gui.md)）。
+> 没实现的小节是设计。
 
 GUI 关掉主窗口后继续同步、发信、提醒新邮件，并能从托盘、再次启动或通知回到窗口。
 
@@ -301,10 +302,40 @@ GUI 的 `tray/` 在引擎打开时启动，有窗口时、常驻时都在。`tra
 
 ## 开机启动
 
-`catmail-gui --background`：不开窗口，直接常驻。"开机时启动"的设置写 XDG autostart 文件、Windows 的
-`HKCU\…\Run`、macOS 的 `SMAppService.mainApp`。Linux 的包是 Flatpak（见[打包](packaging.md#图形界面flatpak)），
-沙箱里写不了 `~/.config/autostart`，要用 Background portal 的 `RequestBackground`（`autostart`、
-`commandline` 带 `--background`），由 portal 写出 `flatpak run` 的 autostart 文件；包外运行时才自己写。
+启动时开不开窗口由外壳在工具包启动完时决定（`shell::launched`：GTK 的 `activate`，AppKit 的
+`applicationDidFinishLaunching:`），规则是纯函数 `catmail_frontend::resident::at_launch`：启动要求不开窗口
+（`catmail-gui --background`，或者是登录时的启动），开着"关闭窗口后保持运行"，引擎也没打开失败，就不开窗口，
+直接常驻，同最后一个窗口关掉之后一样；否则照常开主窗口。关着"保持运行"时关窗就退出，从不开窗口的启动会什么也
+留不下，所以照常开窗口。引擎打开失败要有窗口说明原因：启动时已知就开窗口；失败时没有窗口（不开窗口的启动，或引擎打开期间
+窗口被关掉了）就开一个，关掉它应用就退出（`after_last_window`，记 `engine_failed`）。
+
+"开机时启动"（Settings › General 的 "Open at login"）在系统那里，不进 `settings.json`：用户也能在系统设置里改，
+所以每次打开设置时读系统的状态（`catmail_frontend::autostart`）。只在能用的地方显示这个开关（`available`）。
+
+- **macOS**：`SMAppService.mainApp`（macOS 13 起），出现在系统设置 › 通用 › 登录项的"登录时打开"里，带应用的
+  名字和图标。打开开关时 `register`，关掉时 `unregister`，在另一个线程上调（是对系统的阻塞调用，打开时系统还会
+  通知用户加了登录项）；之后按系统的状态显示开关。状态是 `requiresApproval`（在系统设置里被关掉了）时打开
+  系统设置的登录项页面。只在开关上调用 `register`，启动时不调：否则用户在系统设置里关掉的又会被打开。
+  - 只在 bundle 里能用：`cargo run` 的二进制没有 bundle id，不显示开关。最低 macOS 12，12 上没有 `SMAppService`
+    这个类，也不显示（直接用会 panic）。
+  - 没有考虑旧的 `SMLoginItemSetEnabled`（要在 bundle 里另带一个辅助应用）和 `SMAppService.agent`（LaunchAgent
+    的 plist 能直接带 `--background`，但它列在"允许在后台"而不是"登录时打开"里，用户找不到它是什么）。
+- **怎么知道是登录时的启动**：macOS 不给参数，看启动时的 Apple Event（`autostart::launched_at_login`，在
+  `applicationDidFinishLaunching:` 里，那时它还是当前的事件）：
+  - 旧的登录项打开应用时，"open application" 带 `keyAEPropData` = `keyAELaunchedAsLogInItem`：是登录时的启动。
+  - 没人打开应用时（从 shell 或由 launchd 直接启动），AppKit 给自己发一个空的 "open application"，发送方
+    （`keySenderPIDAttr`）是自己的进程（实测，macOS 27）。有报告说 `SMAppService.mainApp` 的登录项由 launchd
+    启动，没有启动事件；于是"没人打开、登录项开着"也算登录时的启动。从 shell 直接运行 bundle 里的二进制、登录项
+    又开着时，因此也不开窗口，再启动一次就开。
+  - Finder、Dock、`open` 打开的：不是。
+  - 日志记一行 `launched opened=… at_login=…`。⚠️ 还没在真的登录上确认过哪一种。
+- **Linux**（还没做）：写 XDG autostart 文件，`Exec` 带 `--background`。包是 Flatpak（见
+  [打包](packaging.md#图形界面flatpak)），沙箱里写不了 `~/.config/autostart`，要用 Background portal 的
+  `RequestBackground`（`autostart`、`commandline` 带 `--background`），由 portal 写出 `flatpak run` 的 autostart
+  文件；包外运行时才自己写。
+- **Windows**（随 Windows 的 GUI）：`HKCU\…\Run`。
+
+`--background` 只管这一次启动：已经有实例在运行时，它照样把 `Activate` 交给那个实例，主窗口会出来。
 
 ## 与 CLI 的关系
 
@@ -318,6 +349,6 @@ GUI 常驻就一直持有数据目录锁，CLI 更常遇到 `AlreadyRunning`。C
 3. ✅ 引擎：`resume()`、自己发现睡眠、`Event::NewMail`，各有假服务器测试（#106）。
 4. 系统通知：✅ Linux（#82）；macOS。
 5. 各平台托盘：✅ Linux（#107）；✅ macOS（#108）；Windows（#109，随 Windows 的 GUI）。
-6. `--background` 与开机启动（新 issue）。
+6. `--background` 与开机启动：✅ `--background`；✅ macOS；Linux；Windows。
 
 这几步最初在 GPUI 版上做完，换到 nsh 时外壳重写，frontend 里的部分没动。
