@@ -235,13 +235,16 @@
       "openWorldHint": true,
       "readOnlyHint": false
     },
-    "description": "Attaches a file, given by its content (at most 10 MB), to a draft.",
+    "description": "Attaches a file to a draft: its content in base64 if it is small, else put to an upload's URL (`prepare_upload`). At most 10 MB.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "base64": {
-          "description": "Its content, base64.",
-          "type": "string"
+          "description": "Its content, base64: for a small file. Give this or `upload`.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "draft": {
           "description": "Draft id.",
@@ -251,12 +254,18 @@
         "name": {
           "description": "Its file name, e.g. `report.pdf`, which tells its type.",
           "type": "string"
+        },
+        "upload": {
+          "description": "The `upload` of `prepare_upload`, once the file is put to its URL.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
         "draft",
-        "name",
-        "base64"
+        "name"
       ],
       "type": "object"
     },
@@ -380,20 +389,29 @@
     "inputSchema": {
       "$defs": {
         "FileIn": {
-          "description": "A file to attach, given by its content.",
+          "description": "A file to attach: its content in base64, or put to an upload's URL. Base64 passes\nthrough the model, which has to write it out, so it suits only a small file.",
           "properties": {
             "base64": {
-              "description": "Its content, base64.",
-              "type": "string"
+              "description": "Its content, base64: for a small file. Give this or `upload`.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "name": {
               "description": "Its file name, e.g. `report.pdf`, which tells its type.",
               "type": "string"
+            },
+            "upload": {
+              "description": "The `upload` of `prepare_upload`, once the file is put to its URL.",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
-            "name",
-            "base64"
+            "name"
           ],
           "type": "object"
         }
@@ -577,20 +595,29 @@
     "inputSchema": {
       "$defs": {
         "FileIn": {
-          "description": "A file to attach, given by its content.",
+          "description": "A file to attach: its content in base64, or put to an upload's URL. Base64 passes\nthrough the model, which has to write it out, so it suits only a small file.",
           "properties": {
             "base64": {
-              "description": "Its content, base64.",
-              "type": "string"
+              "description": "Its content, base64: for a small file. Give this or `upload`.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "name": {
               "description": "Its file name, e.g. `report.pdf`, which tells its type.",
               "type": "string"
+            },
+            "upload": {
+              "description": "The `upload` of `prepare_upload`, once the file is put to its URL.",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
-            "name",
-            "base64"
+            "name"
           ],
           "type": "object"
         }
@@ -2236,6 +2263,45 @@
   },
   {
     "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Gets a URL to put a file to for a draft, so its content needn't be written out as base64: for any file but a small one, e.g. one the user has on disk. Put the file's bytes there as they are, from a shell (`curl -sS -T report.pdf '<url>'`; the URL is all it needs, no token), then give `{name, upload}` in place of `{name, base64}` to `attach`, `create_draft`, `reply` or `forward`. Each URL takes one file of at most 10 MB, within 15 minutes.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "prepare_upload",
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "expires_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "upload": {
+          "description": "What to give as `upload`, with the file's `name`, once the file is put.",
+          "type": "string"
+        },
+        "url": {
+          "description": "Where to put the file's bytes, as they are: `curl -sS -T <file> '<url>'`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "upload",
+        "url",
+        "expires_at"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
       "openWorldHint": true,
       "readOnlyHint": true
     },
@@ -2617,20 +2683,29 @@
     "inputSchema": {
       "$defs": {
         "FileIn": {
-          "description": "A file to attach, given by its content.",
+          "description": "A file to attach: its content in base64, or put to an upload's URL. Base64 passes\nthrough the model, which has to write it out, so it suits only a small file.",
           "properties": {
             "base64": {
-              "description": "Its content, base64.",
-              "type": "string"
+              "description": "Its content, base64: for a small file. Give this or `upload`.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "name": {
               "description": "Its file name, e.g. `report.pdf`, which tells its type.",
               "type": "string"
+            },
+            "upload": {
+              "description": "The `upload` of `prepare_upload`, once the file is put to its URL.",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
-            "name",
-            "base64"
+            "name"
           ],
           "type": "object"
         }

@@ -239,27 +239,53 @@ async fn try_send(
     headers: &[(&str, &str)],
     body: Value,
 ) -> Result<(StatusCode, String), hyper::Error> {
+    let mut all = vec![
+        ("content-type", "application/json"),
+        ("accept", "application/json, text/event-stream"),
+    ];
+    all.extend_from_slice(headers);
+    let body = body.to_string().into_bytes();
+    send_bytes(addr, http::Method::POST, path, &all, body).await
+}
+
+/// One HTTP/1.1 request of `method` to the server at `addr`, as `localhost` unless
+/// `headers` says, with `body` as it is: what `curl -T` sends an upload's URL.
+async fn send_bytes(
+    addr: SocketAddr,
+    method: http::Method,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: Vec<u8>,
+) -> Result<(StatusCode, String), hyper::Error> {
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
         .await
         .unwrap();
     tokio::spawn(connection);
-    let mut request = Request::post(path)
-        .header(header::CONTENT_TYPE, "application/json")
-        .header(header::ACCEPT, "application/json, text/event-stream");
+    let mut request = Request::builder().method(method).uri(path);
     if !headers.iter().any(|(name, _)| *name == "host") {
         request = request.header(header::HOST, format!("localhost:{}", addr.port()));
     }
     for (name, value) in headers {
         request = request.header(*name, *value);
     }
-    let request = request
-        .body(Full::new(Bytes::from(body.to_string())))
-        .unwrap();
+    let request = request.body(Full::new(Bytes::from(body))).unwrap();
     let response = sender.send_request(request).await?;
     let status = response.status();
     let body = response.into_body().collect().await?.to_bytes();
     Ok((status, String::from_utf8_lossy(&body).into_owned()))
+}
+
+/// Whether the connection was reset under the request.
+fn is_reset(e: &hyper::Error) -> bool {
+    std::error::Error::source(e)
+        .and_then(|source| source.downcast_ref::<std::io::Error>())
+        .is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+            )
+        })
 }
 
 fn initialize() -> Value {

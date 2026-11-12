@@ -256,6 +256,28 @@ pub(crate) struct DraftOut {
     pub updated_at: Option<String>,
 }
 
+/// Where to put a file for a draft.
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct UploadOut {
+    /// What to give as `upload`, with the file's `name`, once the file is put.
+    pub upload: String,
+    /// Where to put the file's bytes, as they are: `curl -sS -T <file> '<url>'`.
+    pub url: String,
+    pub expires_at: Option<String>,
+}
+
+impl UploadOut {
+    pub fn new(upload: String, url: String) -> Self {
+        let expires =
+            jiff::Timestamp::now().as_second() + crate::uploads::UPLOAD_WITHIN.as_secs() as i64;
+        Self {
+            upload,
+            url,
+            expires_at: time(expires),
+        }
+    }
+}
+
 #[derive(Serialize, JsonSchema)]
 pub(crate) struct DraftAttachmentOut {
     pub id: i64,

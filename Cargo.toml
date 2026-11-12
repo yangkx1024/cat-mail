@@ -21,6 +21,9 @@ catmail-testkit = { path = "crates/catmail-testkit" }
 ammonia = "4.2.4"
 anyhow = "1"
 base64 = "0.22.1"
+# Buffers shared without copying: a file an agent puts to the MCP server reaches the
+# engine as hyper received it, while the upload keeps it for a call that may fail.
+bytes = "1.12.1"
 clap = { version = "4.6", features = ["derive", "env"] }
 # The GUI quits as the tray's Quit does on SIGINT, SIGTERM and SIGHUP on macOS, on its own
 # thread, without tokio (GTK's loop takes them on Linux).
