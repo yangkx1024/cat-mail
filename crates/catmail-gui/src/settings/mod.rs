@@ -158,21 +158,27 @@ fn settings_dialog() -> impl IntoElement {
                     .flex_row()
                     .items_center()
                     .child(form::title("Settings").flex_1())
-                    .child(icon_button(
-                        || Icon::XMark,
-                        || "Close".to_owned(),
-                        || true,
-                        Size::Bar,
-                        close,
-                    )),
+                    // Taller than the title: it overhangs the row, so the title sits
+                    // as far below the dialog's top as the content ends above its bottom.
+                    .child(
+                        icon_button(
+                            || Icon::XMark,
+                            || "Close".to_owned(),
+                            || true,
+                            Size::Bar,
+                            close,
+                        )
+                        .my(px(-8.0)),
+                    ),
             )
             .child(
                 view().flex_row().h(px(512.0)).child(nav).child(
-                    // The scroll bar overlays the content: kept clear of it, as in the
-                    // sidebar and the message list.
+                    // Out to the dialog's right edge, so the scroll bar runs along it; the
+                    // content keeps the dialog's padding, clear of the bar that overlays it.
                     scroll()
                         .flex_1()
-                        .child(view().pl(px(20.0)).pr(px(12.0)).child(content)),
+                        .mr(px(-form::PADDING))
+                        .child(view().pl(px(20.0)).pr(px(form::PADDING)).child(content)),
                 ),
             ),
     )

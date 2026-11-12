@@ -16,6 +16,9 @@ use crate::icons::{Icon, icon};
 use crate::tasks::in_view;
 use crate::theme::SelectableText as _;
 
+/// The space inside a dialog's edges.
+pub const PADDING: f32 = 24.0;
+
 /// A dialog `width` points wide over the window, dimming it; `cancel` is what Escape or
 /// a press beside it does.
 pub fn modal(
@@ -35,7 +38,7 @@ pub fn modal(
                 .child(
                     view()
                         .w(px(width))
-                        .p(px(24.0))
+                        .p(px(PADDING))
                         .gap(px(16.0))
                         .rounded(px(12.0))
                         .border_1()
