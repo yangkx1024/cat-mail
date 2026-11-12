@@ -210,6 +210,34 @@ fn inline_text(node: &Value, out: &mut String) {
     }
 }
 
+/// The address a link goes to, as typed in the link dialog: `None` for nothing (the
+/// link comes off). An address without a scheme gets one, as browsers' address bars
+/// do: `mailto:` for an email address, else `https://`. Whether a scheme may be a link
+/// at all (`javascript:` may not) is the editor's to say.
+pub fn link_href(typed: &str) -> Option<String> {
+    let typed = typed.trim();
+    if typed.is_empty() {
+        return None;
+    }
+    let scheme = typed.split_once(':').map(|(scheme, _)| scheme);
+    let has_scheme = scheme.is_some_and(|s| {
+        s.starts_with(|c: char| c.is_ascii_alphabetic())
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    });
+    // `localhost:8080` and `example.com:443/x` are a host and a port, not a scheme.
+    let port = typed
+        .split_once(':')
+        .is_some_and(|(_, rest)| rest.starts_with(|c: char| c.is_ascii_digit()));
+    Some(if has_scheme && !port {
+        typed.to_owned()
+    } else if typed.contains('@') && !typed.contains('/') {
+        format!("mailto:{typed}")
+    } else {
+        format!("https://{typed}")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -270,6 +298,22 @@ mod tests {
             doc_to_text(&json!({"type": "doc", "content": [{"type": "paragraph"}]})),
             ""
         );
+    }
+
+    #[test]
+    fn typed_addresses_become_links() {
+        assert_eq!(link_href("  "), None);
+        for (typed, href) in [
+            ("https://example.com/a", "https://example.com/a"),
+            (" example.com ", "https://example.com"),
+            ("example.com:8443/x", "https://example.com:8443/x"),
+            ("a@example.com", "mailto:a@example.com"),
+            ("mailto:a@example.com", "mailto:a@example.com"),
+            ("tel:+861234", "tel:+861234"),
+            ("javascript:alert(1)", "javascript:alert(1)"),
+        ] {
+            assert_eq!(link_href(typed).as_deref(), Some(href), "{typed}");
+        }
     }
 
     #[test]

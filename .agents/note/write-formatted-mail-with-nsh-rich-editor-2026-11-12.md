@@ -34,6 +34,12 @@
   先拿走窗口绑定的键（`keymap.rs`：platform 匹配后消费），Ctrl+Enter 仍是发送。
 - 正文写出（JSON → HTML 和纯文本）按编辑器状态的 revision 缓存：只改了主题、收件人时自动保存不再重写正文。没有
   图片时直接序列化文档，不经 JSON 往返。
+- **编辑器里的格式要应用给样式**：RichEditor 和 Tiptap 一样是 headless 的，节点和 mark 没有自己的样式，不给
+  `classes.nodes` / `classes.marks` 就看不出加粗、斜体、列表缩进（发出的信是对的）。`rich::classes` 给出这些类，
+  测试用带设计 token 的 Tailwind 主题解析，防止类名写错被 nsh 静默忽略。
+- **链接要另加插件**：starter kit 的 `link` 只有 mark，自动识别、粘贴链接、点击打开在 `link::link(LinkOptions)`
+  插件里，起初没加，用户加不了链接。现在加上（默认协议改成 `https`），再给一个对话框（底栏按钮、Ctrl+K）。窗口的
+  Escape 先于对话框拿到按键，所以对话框开着时 Escape 只关对话框。
 - 编辑器的命令会同步触发视图的 change 回调，所以 `Rich` 单独放在 `Rc` 里、内部用 `Cell` / `RefCell`，跑命令时不借用
   窗口的 `Composing`，避免 RefCell 重入 panic。
 

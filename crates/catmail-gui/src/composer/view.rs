@@ -9,21 +9,22 @@ use catmail_core::{DraftAttachment, format_addresses};
 use catmail_frontend::composer::{Field, Finish, Lifecycle, Opening, senders, window_title};
 use catmail_frontend::format;
 use futures_util::StreamExt as _;
-use nsh_base::rich_editor::view::{RichEditorClasses, rich_editor};
+use nsh_base::rich_editor::view::rich_editor;
 use nsh_base::theme;
 use nsh_core::element::{Owner, input};
 use nsh_core::prelude::*;
 
 use crate::buttons::{Size, icon_button, primary_button, separator};
 use crate::chrome;
+use crate::form;
 use crate::icons::{Icon, icon};
 use crate::toast;
 
 use super::{
-    Attachments, Composing, Formatting, From, START, Shared, Shown, Typed, attach, changed,
-    choose_sender, close_requested, composing, discard, dropped, ending, field_index, focus,
-    follow_identities, format, formatted, formatting_moved, insert_images, pasted,
-    remove_attachment, rich, send, text_changed,
+    Attachments, Composing, Formatting, From, LinkDialog, START, Shared, Shown, Typed, ask_link,
+    attach, changed, choose_sender, close_link_dialog, close_requested, composing, discard,
+    dropped, ending, field_index, focus, follow_identities, format, formatted, formatting_moved,
+    insert_images, link_to, pasted, remove_attachment, rich, send, text_changed,
 };
 use crate::theme::SelectableText as _;
 
@@ -89,8 +90,17 @@ pub fn Composer() -> impl IntoElement {
     chrome::follow_title(title);
     // Ctrl+W is the window's, which asks the view to close.
     on_key("mod+enter", |_| send());
-    on_key("escape", |_| close_requested());
+    // The window's keys come first: Escape closes the link dialog, when it is open.
+    on_key("escape", |_| {
+        if global::<LinkDialog>().with_untracked(|d| d.0.is_some()) {
+            close_link_dialog();
+        } else {
+            close_requested();
+        }
+    });
     on_key("mod+shift+a", |_| attach());
+    on_key("mod+k", |_| ask_link());
+    global::<LinkDialog>().set(LinkDialog::default());
 
     view()
         .flex_1()
@@ -102,6 +112,7 @@ pub fn Composer() -> impl IntoElement {
         .child(body(focus_body))
         .child(attachments())
         .child(footer())
+        .child(link_dialog())
         .child(toast::toasts())
 }
 
@@ -313,14 +324,11 @@ fn address_row(
 }
 
 fn body(focus_body: bool) -> impl IntoElement {
-    let mut classes = RichEditorClasses::default();
-    // As far in as the fields' labels, and a line's room under the end.
-    classes.content = Some("px-5 pt-2.5 pb-10".into());
     rich_editor()
         .editor(super::rich().session())
         .editable(move || !ending())
         .auto_focus(focus_body)
-        .classes(classes)
+        .classes(rich::classes())
         .on_change(|_: &_| text_changed())
         .on_selection_change(|_: &_| formatting_moved())
         .on_paste_files(pasted)
@@ -415,6 +423,22 @@ fn footer() -> impl IntoElement {
         ))
         .child(separator(Size::Bar))
         .children(FORMATS.map(format_button))
+        .child(
+            icon_button(
+                || Icon::Link,
+                || format!("Link ({})", key_label("mod+k")),
+                move || !ending(),
+                Size::Bar,
+                ask_link,
+            )
+            .bg(move || {
+                if formatted("link") {
+                    theme().accent
+                } else {
+                    AdaptiveColor::TRANSPARENT
+                }
+            }),
+        )
         .child(view().flex_1())
         .child(
             text(move || status().unwrap_or_default().into_owned())
@@ -482,4 +506,53 @@ fn format_button(
             AdaptiveColor::TRANSPARENT
         }
     })
+}
+
+/// Where the selection links to, asked while the dialog is open: an address, or none to
+/// take the link off.
+fn link_dialog() -> impl IntoElement {
+    dynamic(move || match global::<LinkDialog>().get().0 {
+        Some(href) => link_form(href).into_element(),
+        None => view().into_element(),
+    })
+}
+
+fn link_form(href: String) -> impl IntoElement {
+    let value = signal(href.clone());
+    let refused = signal(false);
+    let submit = move || refused.set(!link_to(&value.get_untracked()));
+    let length = href.chars().count() as u32;
+    form::modal(
+        400.0,
+        close_link_dialog,
+        view()
+            .gap(px(12.0))
+            .child(form::title("Link"))
+            .child(
+                form::text_input()
+                    .default_value(href)
+                    .placeholder("https://".to_owned())
+                    .selected_range((0, length))
+                    .auto_focus(true)
+                    .on_change(move |typed: &str| {
+                        value.set(typed.to_owned());
+                        refused.set(false);
+                    })
+                    .on_submit(move |_: &str| submit()),
+            )
+            .child(when(
+                move || refused.get(),
+                || {
+                    text("A link can't go there.")
+                        .text_sm()
+                        .text_color(move || theme().destructive)
+                },
+            ))
+            .child(form::actions(
+                Some(Rc::new(close_link_dialog)),
+                "Link",
+                || false,
+                submit,
+            )),
+    )
 }

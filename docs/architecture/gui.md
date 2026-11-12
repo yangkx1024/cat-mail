@@ -365,9 +365,17 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
   拦下，交给视图决定，视图存好后请外壳销毁窗口。
 - Ctrl+Enter 发送；附件可选文件（Ctrl+Shift+A）或拖进窗口。
 - **正文是富文本**：nsh 的 `RichEditor`（ProseMirror 的移植，`composer/rich.rs`），starter kit 去掉任务列表
-  （邮件里显示不了勾选框）。底栏有加粗、斜体、下划线、项目列表、编号列表，按钮按选区的状态高亮；其余格式
-  （标题、引用、链接、代码）用 starter kit 的快捷键和 Markdown 式输入规则。窗口的快捷键（Ctrl+Enter、Escape）
-  由平台的键表先拿走，编辑器的同名绑定（Mod-Enter 换行）不起作用。
+  （邮件里显示不了勾选框）。底栏有加粗、斜体、下划线、项目列表、编号列表、链接，按钮按选区的状态高亮；其余格式
+  （标题、引用、代码）用 starter kit 的快捷键和 Markdown 式输入规则。窗口的快捷键（Ctrl+Enter、Escape、Ctrl+K）
+  由平台的键表先拿走，编辑器的同名绑定（Mod-Enter 换行）不起作用；链接对话框开着时 Escape 只关它。
+  - **链接**：starter kit 的 `link` 只是 mark，行为在 nsh 的 `link::link` 插件里，另外加上：输入的网址在空格或回车
+    后变成链接、粘贴的文本里的网址也是，选中文字后粘贴网址链接选中的文字，按住 Ctrl/Cmd 点链接打开。没有协议的
+    补 `https://`。底栏的链接按钮（Ctrl+K）问地址（`rich_text::link_href`：没有协议的补上，邮件地址补 `mailto:`）：
+    有选区就链接选区，光标在链接里就改整个链接，都没有就把地址本身作为链接写进去；清空地址去掉链接；
+    `javascript:` 这类 nsh 不许的地址对话框说不行、不关。
+  - **格式的样子由应用给**：和 Tiptap 一样，RichEditor 的节点和 mark 自己没有样式，加粗只有在 `classes` 说它
+    `font-bold` 时才是粗的。`rich::classes` 按节点、mark 的名字给出 Tailwind 类（标题、引用、列表留出左边放标记的
+    空间、代码、链接等），尽量接近收信端显示的样子；测试检查每个类 nsh 都认识、每个名字都在 schema 里。
   - **打开**：解析时保留空白（`Whitespace::Full`），缩进、连续空格、Tab 照写的保留。草稿有 HTML 就解析它；纯文本草稿（回复的引文、CLI 和 agent 写的）按行转成段落，`>` 开头的行转成
     （嵌套的）引用（`rich_text::text_to_html`）。
   - **保存**：从编辑器的文档（ProseMirror JSON）写出 HTML（nsh 的 `doc_to_html`），同时按同一规则写出纯文本

@@ -19,6 +19,7 @@ use catmail_core::{
     DraftAttachment, DraftAttachmentId, DraftChanges, DraftEditor, DraftId, Event, Identity,
     IdentityId, NewFile, RecvError, named_as_image,
 };
+use catmail_frontend::composer::rich_text::link_href;
 use catmail_frontend::composer::{
     AfterAttachment, AfterSave, Closing, ComposeFrom, Field, FieldError, Fields, Finish, Lifecycle,
     Opening, SAVE_DELAY, Sender, Written, discard_confirm, error_text, new_message_account,
@@ -158,6 +159,10 @@ struct Typed {
     subject: String,
 }
 
+/// The link dialog, while it is open: the address it starts with.
+#[derive(Clone, Default)]
+struct LinkDialog(Option<String>);
+
 /// Counts the changes of the text and of its selection: what the formatting shown reads
 /// again on.
 #[derive(Clone, Copy, Default)]
@@ -261,6 +266,30 @@ fn format(name: &'static str) {
 fn formatted(name: &'static str) -> bool {
     global::<Formatting>().with(|_| ());
     rich().is_active(name)
+}
+
+/// Asks where the selection, or the link the caret is in, goes.
+fn ask_link() {
+    if untracked(ending) {
+        return;
+    }
+    let href = rich().link().unwrap_or_default();
+    global::<LinkDialog>().set(LinkDialog(Some(href)));
+}
+
+/// The link dialog's address, as typed: links to it, or takes the link off with none.
+/// False, and the dialog stays, if it can't be a link.
+fn link_to(typed: &str) -> bool {
+    let linked = rich().set_link(link_href(typed).as_deref());
+    if linked {
+        close_link_dialog();
+    }
+    linked
+}
+
+fn close_link_dialog() {
+    global::<LinkDialog>().set(LinkDialog(None));
+    rich().focus();
 }
 
 fn rich() -> Rc<rich::Rich> {
