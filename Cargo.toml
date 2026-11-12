@@ -70,25 +70,11 @@ mail-builder = { version = "1.0.0", default-features = false }
 mail-parser = { version = "1.0.1", features = ["full_encoding"] }
 mime_guess = "2.0.5"
 # Native Shell, catmail-gui's toolkit: GTK 4 on Linux and AppKit on macOS, bodies in web
-# views (WebKitGTK, WKWebView). Unreleased main, for its handling of taffy's `calc`
-# (longbridge/nsh#966), GTK children measured before they are allocated (#1048),
-# WebKit's network process ending with the last web view (#1051), macOS's hidden title
-# bar at the app's height, the traffic lights centered in it (#1068), web views serving
-# URL schemes of the app's own (#1233), the reader's images, and a focused view taller
-# than its scroll view staying where it is (#1241): a right click on a long message
-# focused the reader's web view, which scrolled back to its top; a list binding its rows
-# further ahead while it scrolls fast (#1310): a fast drag showed blank strips at the
-# message list's edge, and macOS's text fields drawn while their scroll view scrolls
-# (#1326): the login and settings forms' fields stayed blank, and a Linux menu of one item
-# as tall as the item (#1359): an account's context menu had more room below its New
-# folder than above, and macOS key bindings leaving keys to an input method while it
-# composes (#1387): the composer binds Escape (close), which an input method needs to
-# cancel a pinyin composition. Back to crates.io (and the repository out of `allow-git` in
-# deny.toml) once a release has what catmail-gui uses.
-nsh-core = { git = "https://github.com/longbridge/nsh", rev = "506b539284e070f506cd8ac5f554326b58f99483" }
-nsh-base = { git = "https://github.com/longbridge/nsh", rev = "506b539284e070f506cd8ac5f554326b58f99483", default-features = false }
-nsh-platform-linux = { git = "https://github.com/longbridge/nsh", rev = "506b539284e070f506cd8ac5f554326b58f99483", default-features = false, features = ["webview"] }
-nsh-platform-macos = { git = "https://github.com/longbridge/nsh", rev = "506b539284e070f506cd8ac5f554326b58f99483", default-features = false }
+# views (WebKitGTK, WKWebView).
+nsh-core = "0.5.0"
+nsh-base = { version = "0.5.0", default-features = false }
+nsh-platform-linux = { version = "0.5.0", default-features = false, features = ["webview"] }
+nsh-platform-macos = { version = "0.5.0", default-features = false }
 # catmail-gui's AppKit shell: the main thread's futures on the main dispatch queue
 # (async-task), and the event monitor's block (the versions nsh's macOS platform uses).
 async-task = "4.7.1"

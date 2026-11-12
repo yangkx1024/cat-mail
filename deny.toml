@@ -52,18 +52,17 @@ allow = [
     "Zlib",
 ]
 confidence-threshold = 0.8
-# Temporarily allowed for the crates Native Shell (catmail-gui's toolkit, pinned to an
-# unreleased commit in the root Cargo.toml) brings in, and for them only: no license is
-# added to the list above. Both are permissive, but neither is reviewed for the whole
-# graph yet. Revisit when nsh is back on a release (the `allow-git` entry below goes then
-# too).
+# Allowed for the crates Native Shell (catmail-gui's toolkit) brings in, and for them
+# only: no license is added to the list above. Both are permissive, but neither is
+# reviewed for the whole graph.
 exceptions = [
     # Apache-2.0 with an exception that only loosens it. Build-time only: the GTK and
     # WebKitGTK -sys crates' build scripts (system-deps → cfg-expr).
     { crate = "target-lexicon", allow = ["Apache-2.0 WITH LLVM-exception"] },
     # The same license; Windows only, through nsh-core's cap-std.
     { crate = "winx", allow = ["Apache-2.0 WITH LLVM-exception"] },
-    # Mozilla's root certificates as data: nsh-core's own, and its tokio-tungstenite's.
+    # Mozilla's root certificates as data: nsh-core's image downloads (ureq) and its
+    # tokio-tungstenite's.
     { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
 ]
 
@@ -99,7 +98,4 @@ allow-git = [
     # The unreleased 0.18.0, pinned to a commit in the root Cargo.toml's
     # `[patch.crates-io]`; remove with it once 0.18.0 is on crates.io (#130).
     "https://github.com/djc/imap-proto",
-    # Native Shell's unreleased main, catmail-gui's toolkit, pinned in the root
-    # Cargo.toml; remove with it once a release has what catmail-gui uses.
-    "https://github.com/longbridge/nsh",
 ]

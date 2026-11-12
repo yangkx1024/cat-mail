@@ -9,8 +9,7 @@ Direct2D、DirectWrite、WebView2），`catmail-gui` 还没接上它：Windows �
 Windows 用户目前只有 CLI。
 
 与 UI 库无关的模型都在 `catmail-frontend`（侧栏、列表、命令、写信、发件箱、登录表单、主题、设置、托盘、通知
-的措辞……），这个 crate 只有视图和外壳。nsh 用 git 依赖钉在上游 main 的一个提交上（根 `Cargo.toml`），发版后换回
-crates.io。逐项的进度、未做的事和 nsh 的变通（⚠️）见 [`crates/catmail-gui/ROADMAP.md`](../../crates/catmail-gui/ROADMAP.md)。
+的措辞……），这个 crate 只有视图和外壳。nsh 用 crates.io 上的版本（根 `Cargo.toml`）。逐项的进度、未做的事和 nsh 的变通（⚠️）见 [`crates/catmail-gui/ROADMAP.md`](../../crates/catmail-gui/ROADMAP.md)。
 
 ## 选型
 
