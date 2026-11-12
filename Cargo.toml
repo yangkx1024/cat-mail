@@ -117,6 +117,19 @@ objc2-service-management = { version = "0.3.2", default-features = false, featur
     "objc2-foundation",
     "SMAppService",
 ] }
+# New mail's notifications on macOS (`UNUserNotificationCenter`). The version of the other
+# objc2 crates.
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "UNNotification",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationResponse",
+    "UNNotificationSound",
+    "UNNotificationTrigger",
+    "UNUserNotificationCenter",
+] }
 # The keys in the reader's image URLs, and Content-IDs in `cid:` URLs. The version `url`
 # uses.
 percent-encoding = "2.3.2"

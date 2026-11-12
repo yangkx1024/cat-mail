@@ -61,7 +61,7 @@ src/
   icons.rs         Heroicons
   tray/            托盘：mod.rs 计数、把图标画成像素（何时数、何时画由 frontend 的 TrayModel 定），linux.rs、
                    macos.rs 交给 frontend 的 StatusNotifierItem、状态栏项
-  new_mail.rs      新邮件的系统通知（Linux）
+  new_mail/        新邮件的系统通知：mod.rs 攒与重读；linux.rs GNotification，macos.rs UserNotifications
 ```
 
 ## 外壳

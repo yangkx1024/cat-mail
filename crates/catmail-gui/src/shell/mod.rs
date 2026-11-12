@@ -17,6 +17,9 @@ mod toolkit;
 
 #[cfg(target_os = "linux")]
 pub use self::toolkit::application;
+/// Runs a function on the main thread, from any.
+#[cfg(target_os = "macos")]
+pub use self::toolkit::invoke;
 /// Runs a future on the main thread's loop, from the main thread.
 pub use self::toolkit::spawn;
 
@@ -316,6 +319,15 @@ thread_local! {
     static HIDDEN: Cell<bool> = const { Cell::new(false) };
 }
 
+/// Waits `delay` on the main thread's loop.
+pub async fn sleep(delay: Duration) {
+    let (done, slept) = oneshot::channel();
+    toolkit::after(delay, move || {
+        let _ = done.send(());
+    });
+    let _ = slept.await;
+}
+
 /// Runs `f` on the main thread, from a view's: at once, whether the answer is awaited or
 /// not. `None` once the app has stopped.
 pub fn on_main<R: Send + 'static>(
@@ -367,7 +379,10 @@ fn started(builder: MailClientBuilder, requests: Option<Requests>) {
     toolkit::spawn(async move {
         engine::opened_with(builder.open_async().await);
         if let Some(client) = engine::open() {
-            toolkit::engine_opened();
+            // The tray and the notifications follow it, and it hears of wakes.
+            crate::new_mail::start();
+            crate::tray::start();
+            crate::wake::follow();
             serve_agents(client);
         } else if toolkit::windows().is_empty() {
             // Launched without one, or it was closed while the engine opened: the window
