@@ -1,8 +1,8 @@
 # Vendored nsh skills
 
-Copied unmodified from <https://github.com/longbridge/nsh/tree/main/skills> at commit
-`506b539284e070f506cd8ac5f554326b58f99483` (2026-11-10), the revision the workspace
-`Cargo.toml` pins:
+Copied unmodified from <https://github.com/longbridge/nsh/tree/v0.5.0/skills> at the
+`v0.5.0` tag (`f4d68f7f9f31eb7b3ecc8a4cbc31096d5c6238a1`, 2026-11-11), the release the
+workspace `Cargo.toml` uses:
 
 - `nsh-design-guides`: the Design Guides, for any change to a screen, layout, spacing,
   color, component, interaction state or interface copy.
@@ -15,5 +15,5 @@ catmail-gui is a Rust app that uses nsh as a library and brings its own shell
 Copyright 2026 Longbridge, licensed under the Apache License 2.0
 ([LICENSE-APACHE](LICENSE-APACHE)).
 
-To update, replace both directories with the upstream versions at the revision the
-workspace pins, and record that commit here.
+To update, replace both directories with the upstream versions at the release the
+workspace uses, and record its tag and commit here.
