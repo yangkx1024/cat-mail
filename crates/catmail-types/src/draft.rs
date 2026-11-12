@@ -150,7 +150,9 @@ pub enum NewFile {
     Content {
         /// The attachment's file name: a name, not a path.
         name: String,
-        content: Vec<u8>,
+        /// Shared: cloning it doesn't copy the file, so a caller can keep it as well (an
+        /// upload, for a call that fails).
+        content: bytes::Bytes,
     },
 }
 

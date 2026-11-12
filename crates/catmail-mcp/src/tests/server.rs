@@ -141,6 +141,7 @@ async fn a_token_sees_and_calls_only_its_tiers_tools() {
         "update_draft",
         "attach",
         "remove_attachment",
+        "prepare_upload",
     ];
     for tool in drafting {
         assert!(!names.contains(&tool.to_owned()), "{tool}");
@@ -353,16 +354,4 @@ async fn only_a_token_that_attaches_files_may_send_large_requests() {
         Ok((status, body)) => assert_ne!(status, StatusCode::OK, "{body}"),
         Err(e) => assert!(e.is_incomplete_message() || is_reset(&e), "{e:?}"),
     }
-}
-
-/// Whether the connection was reset under the request.
-fn is_reset(e: &hyper::Error) -> bool {
-    std::error::Error::source(e)
-        .and_then(|source| source.downcast_ref::<std::io::Error>())
-        .is_some_and(|io| {
-            matches!(
-                io.kind(),
-                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
-            )
-        })
 }

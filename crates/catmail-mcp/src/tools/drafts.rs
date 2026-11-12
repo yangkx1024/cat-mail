@@ -1,32 +1,45 @@
 //! The draft tier's tools: writing drafts, replies and forwards, changing them and their
 //! attachments. None sends anything.
 
+use std::time::Instant;
+
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use catmail_core::{
     AccountId, Address, Draft, DraftAttachmentId, DraftChanges, DraftId, Forwarding, IdentityId,
     NewFile, display, parse_addresses,
 };
+use hyper::body::Bytes;
+use rmcp::RoleServer;
 use rmcp::handler::server::wrapper::{Json, Parameters};
+use rmcp::service::RequestContext;
 use rmcp::{tool, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::downloads::{body_cost, forward_cost};
 use super::{Failed, Mail, not_found};
-use crate::output::DraftOut;
+use crate::http::BaseUrl;
+use crate::output::{DraftOut, UploadOut};
+use crate::uploads::{self, MAX_FILE_BYTES, Missing, TooMany};
 
-/// What the files given to a draft in one call may add up to, decoded. Base64 makes
-/// them a third larger in the request (`http::MAX_REQUEST_BYTES`).
-const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
-
-/// A file to attach, given by its content.
+/// A file to attach: its content in base64, or put to an upload's URL. Base64 passes
+/// through the model, which has to write it out, so it suits only a small file.
 #[derive(Deserialize, JsonSchema)]
 pub(crate) struct FileIn {
     /// Its file name, e.g. `report.pdf`, which tells its type.
     pub name: String,
-    /// Its content, base64.
-    pub base64: String,
+    /// Its content, base64: for a small file. Give this or `upload`.
+    pub base64: Option<String>,
+    /// The `upload` of `prepare_upload`, once the file is put to its URL.
+    pub upload: Option<String>,
+}
+
+/// The files of a call, and the uploads they came from: those are used once the call
+/// succeeds.
+struct Given {
+    files: Vec<NewFile>,
+    uploads: Vec<String>,
 }
 
 /// Who a new draft goes to.
@@ -186,9 +199,69 @@ fn addresses(entries: &[String]) -> Result<Vec<Address>, Failed> {
     Ok(list)
 }
 
-/// The file given, decoded: within [`MAX_FILE_BYTES`].
-fn file(file: FileIn) -> Result<NewFile, Failed> {
-    let FileIn { name, base64 } = file;
+impl Mail {
+    /// The files given, decoded or put: within [`MAX_FILE_BYTES`] together.
+    fn files(&self, given: Vec<FileIn>) -> Result<Given, Failed> {
+        let now = Instant::now();
+        let mut total = 0;
+        let mut uploads = Vec::new();
+        let mut files = Vec::new();
+        for FileIn {
+            name,
+            base64,
+            upload,
+        } in given
+        {
+            let content = match (base64, upload) {
+                (Some(base64), None) => decoded(&name, base64)?.into(),
+                (None, Some(upload)) => {
+                    if uploads.contains(&upload) {
+                        return Err(Failed(format!(
+                            "invalid: the upload of {name} is given for another file as well; \
+                             each takes one file"
+                        )));
+                    }
+                    // Shared with the upload, not copied: it stays the upload's until the
+                    // call succeeds.
+                    let put = self.uploaded(&name, &upload, now)?;
+                    uploads.push(upload);
+                    put
+                }
+                _ => {
+                    return Err(Failed(format!(
+                        "invalid: give {name} by `base64` or by `upload`, one of them"
+                    )));
+                }
+            };
+            total += content.len();
+            if total > MAX_FILE_BYTES {
+                return Err(files_too_large());
+            }
+            files.push(NewFile::Content { name, content });
+        }
+        Ok(Given { files, uploads })
+    }
+
+    /// The file put to the caller's upload `handle`, given as `name`. A failure names the
+    /// file, never the handle: it is logged (`call_tool`), and a handle nothing was put
+    /// to yet would let whoever reads the log put a file of their own.
+    fn uploaded(&self, name: &str, handle: &str, now: Instant) -> Result<Bytes, Failed> {
+        match self.uploads.file(handle, &self.caller, now) {
+            Ok(content) => Ok(content),
+            Err(Missing::NotPut) => Err(Failed(format!(
+                "invalid: nothing was put to the URL of the upload of {name} yet"
+            ))),
+            Err(Missing::Unknown) => Err(Failed(format!(
+                "not_found: no such upload for {name}; uploads expire {} minutes after \
+                 `prepare_upload`, and are gone once attached",
+                uploads::UPLOAD_WITHIN.as_secs() / 60
+            ))),
+        }
+    }
+}
+
+/// Content given as base64, decoded: within [`MAX_FILE_BYTES`].
+fn decoded(name: &str, base64: String) -> Result<Vec<u8>, Failed> {
     // Lines of base64 are fine too, at the cost of a copy.
     let decoded = if base64.bytes().any(|b| b.is_ascii_whitespace()) {
         let joined: Vec<u8> = base64
@@ -204,25 +277,7 @@ fn file(file: FileIn) -> Result<NewFile, Failed> {
     if content.len() > MAX_FILE_BYTES {
         return Err(files_too_large());
     }
-    Ok(NewFile::Content { name, content })
-}
-
-/// The files given, decoded: within [`MAX_FILE_BYTES`] together.
-fn files(given: Vec<FileIn>) -> Result<Vec<NewFile>, Failed> {
-    let mut total = 0;
-    given
-        .into_iter()
-        .map(|given| {
-            let new = file(given)?;
-            if let NewFile::Content { content, .. } = &new {
-                total += content.len();
-            }
-            if total > MAX_FILE_BYTES {
-                return Err(files_too_large());
-            }
-            Ok(new)
-        })
-        .collect()
+    Ok(content)
 }
 
 fn files_too_large() -> Failed {
@@ -259,12 +314,13 @@ impl Mail {
             bcc,
             text: p.text,
         };
-        let files = files(p.attachments)?;
+        let given = self.files(p.attachments)?;
         let from = self.identity(account, p.from.as_deref()).await?;
         let draft = self
             .client
-            .create_draft(account, from, content, files)
+            .create_draft(account, from, content, given.files)
             .await?;
+        self.uploads.used(&given.uploads);
         self.draft_out(&draft).await
     }
 
@@ -284,7 +340,7 @@ impl Mail {
         Parameters(p): Parameters<ReplyParams>,
     ) -> Result<Json<DraftOut>, Failed> {
         let message = self.full_message(p.message).await?;
-        let files = files(p.attachments)?;
+        let given = self.files(p.attachments)?;
         let from = self
             .identity(message.summary.account_id, p.from.as_deref())
             .await?;
@@ -293,10 +349,11 @@ impl Mail {
             .downloading(
                 body_cost(&message),
                 self.client
-                    .reply(id, p.all.unwrap_or(false), from, p.text, files),
+                    .reply(id, p.all.unwrap_or(false), from, p.text, given.files),
                 self.left_of(id, body_cost),
             )
             .await?;
+        self.uploads.used(&given.uploads);
         self.draft_out(&draft).await
     }
 
@@ -322,7 +379,7 @@ impl Mail {
             bcc,
             text: p.text,
         };
-        let files = files(p.attachments)?;
+        let given = self.files(p.attachments)?;
         let from = self
             .identity(message.summary.account_id, p.from.as_deref())
             .await?;
@@ -330,10 +387,11 @@ impl Mail {
         let draft = self
             .downloading(
                 forward_cost(&message),
-                self.client.forward(id, from, forwarding, files),
+                self.client.forward(id, from, forwarding, given.files),
                 self.left_of(id, forward_cost),
             )
             .await?;
+        self.uploads.used(&given.uploads);
         self.draft_out(&draft).await
     }
 
@@ -371,7 +429,46 @@ impl Mail {
     }
 
     #[tool(
-        description = "Attaches a file, given by its content (at most 10 MB), to a draft.",
+        description = "Gets a URL to put a file to for a draft, so its content needn't be \
+                       written out as base64: for any file but a small one, e.g. one the \
+                       user has on disk. Put the file's bytes there as they are, from a \
+                       shell (`curl -sS -T report.pdf '<url>'`; the URL is all it needs, \
+                       no token), then give `{name, upload}` in place of `{name, base64}` \
+                       to `attach`, `create_draft`, `reply` or `forward`. Each URL takes \
+                       one file of at most 10 MB, within 15 minutes.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn prepare_upload(
+        &self,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<UploadOut>, Failed> {
+        let handle = self
+            .uploads
+            .prepare(&self.caller, Instant::now())
+            .map_err(|TooMany| {
+                Failed(
+                    "over_limit: this token has too many uploads not used yet; attach them, \
+                     or wait until they expire"
+                        .into(),
+                )
+            })?;
+        let BaseUrl(base) = context
+            .extensions
+            .get::<http::request::Parts>()
+            .and_then(|parts| parts.extensions.get::<BaseUrl>())
+            .ok_or_else(|| Failed("internal: the request has no address".into()))?;
+        let url = format!("{base}{}{handle}", uploads::PATH);
+        Ok(Json(UploadOut::new(handle, url)))
+    }
+
+    #[tool(
+        description = "Attaches a file to a draft: its content in base64 if it is small, \
+                       else put to an upload's URL (`prepare_upload`). At most 10 MB.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -384,7 +481,10 @@ impl Mail {
         Parameters(p): Parameters<AttachParams>,
     ) -> Result<Json<DraftOut>, Failed> {
         let draft = self.draft(p.draft).await?;
-        self.client.attach_file(draft.id, file(p.file)?).await?;
+        let Given { files, uploads } = self.files(vec![p.file])?;
+        let file = files.into_iter().next().expect("one file given");
+        self.client.attach_file(draft.id, file).await?;
+        self.uploads.used(&uploads);
         let draft = self.draft(p.draft).await?;
         self.draft_out(&draft).await
     }

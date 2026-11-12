@@ -198,6 +198,149 @@ async fn replying_forwarding_and_reading_attachments() {
     assert_eq!(drafts["drafts"].as_array().unwrap().len(), 2);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn files_put_to_an_upload_go_into_drafts() {
+    let f = Fixture::new(ServeOptions::default()).await;
+    let addr = f.server.local_addr();
+    let account = f.call("list_accounts", json!({})).await["accounts"][0]["id"].clone();
+    let put = |path: String, headers: &'static [(&'static str, &'static str)], body| async move {
+        send_bytes(addr, http::Method::PUT, &path, headers, body).await
+    };
+    let failure = |result: Value| {
+        assert_eq!(result["isError"], true, "{result}");
+        result["content"][0]["text"].as_str().unwrap().to_owned()
+    };
+
+    let prepared = f.call("prepare_upload", json!({})).await;
+    let handle = prepared["upload"].as_str().unwrap().to_owned();
+    let path = format!("/mcp/uploads/{handle}");
+    // On the address the request came to.
+    assert_eq!(
+        prepared["url"],
+        format!("http://localhost:{}{path}", addr.port())
+    );
+    let given = |name: &str| json!([{"name": name, "upload": handle}]);
+    let early = f
+        .call_result(
+            "create_draft",
+            json!({"account": account, "attachments": given("receipt.pdf")}),
+        )
+        .await;
+    let early = failure(early);
+    assert!(early.starts_with("invalid: nothing was put"), "{early}");
+    // Logged as it is, so it doesn't give away the handle, which takes a file still.
+    assert!(
+        early.contains("receipt.pdf") && !early.contains(&handle),
+        "{early}"
+    );
+
+    // Not from a web page, and only put.
+    let (status, _) = put(path.clone(), &[("origin", "https://evil.example")], vec![1])
+        .await
+        .unwrap();
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = send_bytes(addr, http::Method::GET, &path, &[], Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    let (status, _) = put("/mcp/uploads/made-up".into(), &[], vec![1])
+        .await
+        .unwrap();
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // No token: the URL is enough.
+    let receipt: Vec<u8> = (0..300 * 1024).map(|i| (i % 251) as u8).collect();
+    let (status, body) = put(path.clone(), &[], receipt.clone()).await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains(&handle), "{body}");
+    let (status, _) = put(path.clone(), &[], vec![1]).await.unwrap();
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // A call that fails leaves the file for the next.
+    let refused = f
+        .call_result(
+            "create_draft",
+            json!({"account": account, "attachments": given("../receipt.pdf")}),
+        )
+        .await;
+    assert!(failure(refused).starts_with("invalid"));
+    let both = json!([{"name": "a.pdf", "base64": "eA==", "upload": handle}]);
+    let refused = f
+        .call_result(
+            "create_draft",
+            json!({"account": account, "attachments": both}),
+        )
+        .await;
+    assert!(failure(refused).starts_with("invalid: give a.pdf"));
+    let twice = json!([
+        {"name": "a.pdf", "upload": handle},
+        {"name": "b.pdf", "upload": handle},
+    ]);
+    let refused = f
+        .call_result(
+            "create_draft",
+            json!({"account": account, "attachments": twice}),
+        )
+        .await;
+    let refused = failure(refused);
+    assert!(
+        refused.starts_with("invalid: the upload of b.pdf"),
+        "{refused}"
+    );
+    assert!(!refused.contains(&handle), "{refused}");
+
+    let draft = f
+        .call(
+            "create_draft",
+            json!({"account": account, "attachments": given("receipt.pdf")}),
+        )
+        .await;
+    assert_eq!(draft["attachments"][0]["filename"], "receipt.pdf");
+    assert_eq!(draft["attachments"][0]["mime_type"], "application/pdf");
+    assert_eq!(draft["attachments"][0]["size"], receipt.len());
+    let id = draft["id"].clone();
+    // Used once.
+    let again = f
+        .call_result(
+            "attach",
+            json!({"draft": id, "name": "receipt.pdf", "upload": handle}),
+        )
+        .await;
+    assert!(failure(again).starts_with("not_found: no such upload"));
+    let (status, _) = put(path, &[], vec![1]).await.unwrap();
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Another token's uploads aren't this one's.
+    let other = f.token(
+        "other",
+        Access {
+            tier: Tier::Draft,
+            accounts: None,
+        },
+    );
+    let theirs = f.call_as(&other, "prepare_upload", json!({})).await;
+    let theirs = theirs["upload"].as_str().unwrap().to_owned();
+    let (status, _) = put(format!("/mcp/uploads/{theirs}"), &[], b"notes".to_vec())
+        .await
+        .unwrap();
+    assert_eq!(status, StatusCode::OK);
+    let attach = json!({"draft": id, "name": "notes.txt", "upload": theirs});
+    let refused = f.call_result("attach", attach.clone()).await;
+    assert!(failure(refused).starts_with("not_found: no such upload"));
+    let attached = f.call_as(&other, "attach", attach).await;
+    assert_eq!(attached["attachments"][1]["filename"], "notes.txt");
+
+    // At most 10 MB; one too large can be put again.
+    let prepared = f.call("prepare_upload", json!({})).await;
+    let path = format!("/mcp/uploads/{}", prepared["upload"].as_str().unwrap());
+    match put(path.clone(), &[], vec![0; 10 * 1024 * 1024 + 1]).await {
+        Ok((status, body)) => assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}"),
+        Err(e) => assert!(e.is_incomplete_message() || is_reset(&e), "{e:?}"),
+    }
+    let (status, body) = put(path, &[], vec![1]).await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
 #[test]
 fn what_a_draft_says_is_left_out_of_the_log() {
     let arguments = json!({

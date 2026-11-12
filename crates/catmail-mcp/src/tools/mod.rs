@@ -31,6 +31,7 @@ use downloads::over_limit;
 
 use crate::limits::{Limits, TokenLimits};
 use crate::tokens::{Tier, Token};
+use crate::uploads::Uploads;
 
 /// What the agent is told about the server as it connects.
 pub(crate) const INSTRUCTIONS: &str = "\
@@ -51,9 +52,8 @@ pub(crate) fn tier_of(tool: &str) -> Option<Tier> {
             Some(Tier::Read)
         }
         "mark" | "move" | "archive" | "label" | "trash" => Some(Tier::Organize),
-        "create_draft" | "reply" | "forward" | "update_draft" | "attach" | "remove_attachment" => {
-            Some(Tier::Draft)
-        }
+        "create_draft" | "reply" | "forward" | "update_draft" | "attach" | "remove_attachment"
+        | "prepare_upload" => Some(Tier::Draft),
         "send_draft" => Some(Tier::Send),
         _ => None,
     }
@@ -133,10 +133,12 @@ pub(crate) struct Mail {
     caller: String,
     /// Sends the user is being asked about.
     asked: Arc<sending::Asked>,
+    /// Files put for drafts, which `http.rs` receives.
+    uploads: Arc<Uploads>,
 }
 
 impl Mail {
-    pub fn new(client: MailClient, limits: TokenLimits) -> Self {
+    pub fn new(client: MailClient, limits: TokenLimits, uploads: Arc<Uploads>) -> Self {
         Self {
             client,
             tool_router: Arc::new(
@@ -151,6 +153,7 @@ impl Mail {
             },
             caller: String::new(),
             asked: Arc::default(),
+            uploads,
         }
     }
 

@@ -800,7 +800,7 @@ async fn attachments_can_be_given_by_their_content() {
     let env = env(state()).await;
     let given = |name: &str, content: &[u8]| NewFile::Content {
         name: name.into(),
-        content: content.to_vec(),
+        content: content.to_vec().into(),
     };
 
     let draft = env

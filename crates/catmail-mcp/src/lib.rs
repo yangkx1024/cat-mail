@@ -13,10 +13,19 @@ mod output;
 mod tests;
 mod tokens;
 mod tools;
+mod uploads;
 
 pub use http::{DEFAULT_PORT, McpServer, ServeOptions};
 pub use limits::TokenLimits;
 pub use tokens::{Access, NewToken, Tier, Token, TokenError, Tokens};
+
+/// A handle a client is given and gives back (`requestState`, an upload's URL): 16 random
+/// bytes in hex, so that knowing one is as good as being given it.
+pub(crate) fn random_handle() -> String {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).expect("random bytes");
+    hex::encode(bytes)
+}
 
 /// What a host adds to its log filter for the server's own lines (listening, stopped,
 /// tokens turned away).

@@ -2,7 +2,7 @@
 
 [← 架构](../architecture.md)
 
-> 状态：第 1 至 3 步与第 5 步的发信已实现：`catmail-mcp` 的只读、整理、草稿（附件以内容传入、传出）与发信的工具、
+> 状态：第 1 至 3 步与第 5 步的发信已实现：`catmail-mcp` 的只读、整理、草稿（附件以内容或经上传传入、以内容传出）与发信的工具、
 > `catmail serve`、令牌文件（层级与账户范围）、每个令牌的限额、GUI 托管（Settings › Agents）、改动的日志。无界面
 > 服务器的密码、OAuth 尚未实现，那些小节是设计。
 
@@ -87,7 +87,8 @@ tailnet 里的设备连得上，同一局域网内是直连。catmail 因此不�
 - Cloudflare Tunnel 也能用，但服务到了公网，TLS 终止在 Cloudflare（邮件内容在那里是明文），应在前面加
   Cloudflare Access。
 - 经隧道来的请求源地址都是 `127.0.0.1`，所以本机的请求同样要令牌（`http.rs`，在交给 rmcp 之前查）；带
-  `Origin` 的请求一律拒绝（rmcp 查）：agent 不是网页，浏览器里的页面不该连上来。
+  `Origin` 的请求一律拒绝（rmcp 查）：agent 不是网页，浏览器里的页面不该连上来。唯一的例外是上传地址
+  `/mcp/uploads/<句柄>`：凭的是地址里的句柄而不是令牌，带 `Origin` 的同样拒绝（见[附件经上传传入](#草稿)）。
 - **不查 `Host`**（rmcp 的 `disable_allowed_hosts`）。`Host` 白名单防的是 DNS rebinding：网页把自己的域名解析到
   127.0.0.1 来访问本机端口。这样的请求过不了上面两关：浏览器不会自动带 `Authorization`，网页也拿不到令牌；
   浏览器发 POST 总带 `Origin`，同源的也带（MCP 的请求都是 POST）。剩下能做到的只是看到 401，知道这里开着
@@ -130,7 +131,7 @@ tailnet 里的设备连得上，同一局域网内是直连。catmail 因此不�
 |---|---|
 | 只读 | `list_accounts`、`list_folders`、`list_messages`、`search`（本地，可选再问服务器）、`read_message`（纯文本，按字数截断）、`read_attachment`、`list_drafts`、`list_outbox`、`list_pending`、`sync` |
 | 整理 | `mark`（已读、星标）、`move`、`archive`、`label`（Gmail）、`trash`，之后立即回放队列 |
-| 草稿 | `create_draft`、`reply`、`forward`、`update_draft`、`attach`、`remove_attachment` |
+| 草稿 | `create_draft`、`reply`、`forward`、`update_draft`、`attach`、`remove_attachment`、`prepare_upload` |
 | 发信、不问就发信 | `send_draft` |
 
 不提供：永久删除、删除文件夹、删除草稿、增删账户和身份、`retry_outbox`、`mark_outbox_sent`（`unknown` 只由
@@ -158,7 +159,7 @@ tailnet 里的设备连得上，同一局域网内是直连。catmail 因此不�
   字段）都换成字数（`tools::logged`）：那是邮件本身，又可能很长；记的是 agent 给谁写了什么样的信。按留下的
   字段写，而不是按要藏的：新字段缺省就不进日志。
 - **工具里没有路径**：路径指的是常驻设备上的文件，对远程 agent 没有意义，还能用来读那台机器上的任意
-  文件。附件以内容传入、传出（base64，有大小上限）。
+  文件。附件以内容传入、传出（base64，有大小上限），或由 agent 自己把文件上传过来（见下文）。
 
 ### 草稿
 
@@ -182,6 +183,31 @@ tailnet 里的设备连得上，同一局域网内是直连。catmail 因此不�
   令牌再读请求体，读、整理的令牌让宿主收不了那么多。
   一封信的附件总量仍由引擎按服务器的 `SIZE`、`APPENDLIMIT` 限制。和 GUI 一样，新草稿连同附件在一个事务里存，
   一个附件不行就整个不建。
+- **附件经上传传入**：base64 要由模型在工具参数里逐字写出，一份 200 KB 的 PDF 就是 28 万字，超出模型一次能
+  可靠写完的长度，写到一半被截断。所以文件也可以不经过模型（`uploads.rs`）：
+  - `prepare_upload`（草稿层级）给一个上传地址 `<scheme>://<host>/mcp/uploads/<句柄>` 和句柄；agent 在自己的
+    shell 里 `curl -T 文件 地址` 把原始字节传上来，再把 `{name, upload}` 代替 `{name, base64}` 交给 `attach`、
+    `create_draft`、`reply`、`forward`。两者给且只给一个。
+  - **地址本身就是凭据，不要令牌**：令牌在客户端的配置里（Claude Code 的请求头），模型看不到，shell 里也就
+    没有；让模型去读配置等于把长期有效的令牌交给 shell。句柄是 16 字节的随机数，属于要它的令牌，只收一个
+    文件，15 分钟内有效；别的令牌拿到句柄也用不了它的文件。带 `Origin` 的上传照样拒绝。
+  - **地址按请求来的地方拼**：模型不知道自己连的是 `http://127.0.0.1:8642` 还是 `https://*.ts.net`，所以服务端
+    给出完整的地址（`http.rs` 算出请求的 `BaseUrl`，和令牌一样放进请求的 extensions）：主机取 `X-Forwarded-Host`，否则 `Host`（`tailscale serve` 和 Cloudflare Tunnel 都保留原来的
+    名字），都没有或不像主机名时用监听的地址；协议取 `X-Forwarded-Proto`，没有时本机的名字用 `http`，别的名字
+    用 `https`：只有代理会带来别的名字，而它们都提供 HTTPS。代理若把服务挂在子路径下，地址里没有那段路径。
+  - **不违反"工具里没有路径"**：服务端仍然只收内容，从不碰路径。读文件的是 agent 自己的进程，用的是它自己的
+    权限，和它自己读出文件再 base64 一样，只是内容不经过模型。远程的 agent 传的是它那台机器上的文件，正合适。
+  - **在内存里，用过即删**：句柄、收到的内容放在内存里（仿照发信确认的 `Asked`），宿主重启就没了。调用成功后
+    才删掉用到的上传，失败（名字不对、草稿开着）的调用留着它给下一次；一次调用里同一个句柄不能给两次。每个
+    令牌最多 16 个没用掉的上传，收到而没用掉的合计不超过 20 MB（两次调用的量，一次失败了还能准备下一次），
+    一个文件不超过 10 MB：失控的 agent 占不满宿主的内存。每次准备、上传、取用时清掉过期的。接收中的上传由
+    `Receiving` 守着，没收完（断开、太大、停止时被中止）就回到可以再传。
+  - **不复制文件**：hyper 收到的 `Bytes` 存进上传，交给引擎的 `NewFile::Content` 也是 `Bytes`（共享，克隆只加引用
+    计数），引擎只借用它写进 blob。所以失败的调用留着上传，也不必为每次调用另复制一份。`prepare_upload` 算一次调用，计入调用频率。
+  - 上传记一行 info：令牌、句柄的前 8 位、大小。句柄从不完整进日志：参数里的 `upload` 照常换成字数，工具的
+    错误（原样记进日志）只写是哪个文件，不写句柄。一个还没收到文件的句柄谁拿到都能往里传。
+  - 放弃的方案：给工具加路径参数，哪怕只限本机：agent 被注入后能把任意文件附进外发的信；分块追加 base64：
+    内容仍经过模型，只是拆成十几次调用，慢且费 token；上传时带 Bearer 令牌：模型拿不到令牌（见上）。
 - **附件以内容传出**：`read_attachment` 不给结构化输出，而是按 MCP 的内容类型给：文本文件给文字（按字数截断，
   缺省 2 万字），PNG、JPEG、GIF、WebP 给图片（客户端直接交给模型看），其余给 base64 的 blob 资源；前面一行
   说明文件名、类型、大小，并说明内容是寄件人的。超过 10 MB 的不给。
@@ -268,7 +294,8 @@ claude mcp add --transport http catmail https://mac.tailnet.ts.net/mcp \
   `logged`）和 `ServerHandler`（按层级列出、调用前限频与定范围）；`reading.rs`、`organizing.rs`、`drafts.rs` 是
   三个层级的工具，`sending.rs` 是发信（问用户的多轮请求与 `Asked`）；`downloads.rs` 是下载预算的扣与退（`with_body`、`downloading`）。
 - `output.rs`（逐个写出的输出结构，文档注释就是 schema 里的描述）、`tokens.rs`、`limits.rs`（调用频率与下载
-  预算）、`connect.rs`（给 agent 的命令示例）、`http.rs`（监听、令牌、交给 rmcp）。
+  预算）、`connect.rs`（给 agent 的命令示例）、`http.rs`（监听、令牌、交给 rmcp；收上传；请求来的地址）、`uploads.rs`
+  （上传的句柄与内容）。
 - `tests/`：经 HTTP 对假 IMAP 服务器端到端，`mod.rs` 是 `Fixture` 与请求的辅助，其余按主题（`server.rs`：
   令牌、层级、账户范围、拒绝与停止；`reading.rs`、`organizing.rs`、`drafts.rs`、`sending.rs`、`limits.rs`）。
   `tests/tools.snapshot.json` 固定 agent 看到的工具列表，有意改动时 `UPDATE_SNAPSHOTS=1` 重新生成。

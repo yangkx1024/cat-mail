@@ -63,9 +63,7 @@ struct Question<R> {
 impl<R: Copy> Asked<R> {
     /// Keeps the question, returning its handle.
     fn ask(&self, token: &str, draft: DraftId, revision: R, now: Instant) -> String {
-        let mut bytes = [0u8; 16];
-        getrandom::fill(&mut bytes).expect("random bytes");
-        let handle = hex::encode(bytes);
+        let handle = crate::random_handle();
         let mut asked = self.0.lock().expect("asked");
         // Those no one answered.
         asked.retain(|_, q| now.duration_since(q.asked_at) < ANSWER_WITHIN);
