@@ -1,47 +1,45 @@
 //! The system's notifications for new mail: what the engine announces (`Event::NewMail`) is
 //! gathered for a moment, read again, and told about; clicking a notification shows the
 //! main window on the message. There with or without a window. What they say and where a
-//! click goes are `catmail_frontend::new_mail`'s.
+//! click goes are `catmail_frontend::new_mail`'s; showing them and hearing their clicks
+//! is the platform's: GLib's `GNotification` on Linux (`linux.rs`), UserNotifications on
+//! macOS (`macos.rs`).
 //!
-//! ⚠️ nsh has no notifications; these are GLib's (`GNotification`), sent through the
-//! application. Without a sandbox GLib speaks `org.freedesktop.Notifications`, and a
-//! click comes back as the app's `open-mail` action, with the host's activation token
-//! for the window. In a Flatpak GLib uses the notification portal, and on GNOME GNOME
-//! Shell's own interface: there the click activates the action through the app id's
-//! D-Bus name, which the shell owns for that (`own_app_id`).
+//! ⚠️ nsh's notifications go through a view's root, and the app runs on without one.
 
 use std::cell::RefCell;
 
 use catmail_core::{Event, MessageId, RecvError};
 use catmail_frontend::new_mail::{Arrivals, GATHER, Target, notifications};
-use nsh_platform_linux::gtk4::{gio, glib, prelude::*};
 
 use crate::{engine, shell};
 
-/// The action a notification's click runs, with its tag.
-const OPEN: &str = "open-mail";
+#[cfg(target_os = "linux")]
+#[path = "linux.rs"]
+mod platform;
+#[cfg(target_os = "macos")]
+#[path = "macos.rs"]
+mod platform;
+
+#[cfg(target_os = "macos")]
+pub use self::platform::install;
 
 thread_local! {
-    /// Announced and not yet told about (GTK's thread).
+    /// Announced and not yet told about (the main thread).
     static ARRIVALS: RefCell<Arrivals> = RefCell::default();
 }
 
 /// Tells about the new mail the open engine announces from now on, until it closes. On
-/// GTK's thread.
+/// the main thread.
 pub fn start() {
-    let (Some(client), Some(app)) = (engine::open(), shell::application()) else {
+    let Some(client) = engine::open() else {
         return;
     };
-    let open = gio::SimpleAction::new(OPEN, Some(glib::VariantTy::STRING));
-    open.connect_activate(|_, tag| {
-        let target = tag.and_then(|tag| tag.str()).and_then(Target::from_tag);
-        if let Some(target) = target {
-            shell::show_at(target.destination(), None);
-        }
-    });
-    app.add_action(&open);
+    if !platform::listen() {
+        return;
+    }
     let mut events = client.subscribe();
-    glib::spawn_future_local(async move {
+    shell::spawn(async move {
         loop {
             match events.recv().await {
                 Ok(Event::NewMail { messages, .. }) => arrived(messages),
@@ -60,8 +58,8 @@ fn arrived(messages: Vec<MessageId>) {
     if !ARRIVALS.with_borrow_mut(|arrivals| arrivals.arrived(messages)) {
         return;
     }
-    glib::spawn_future_local(async {
-        glib::timeout_future(GATHER).await;
+    shell::spawn(async {
+        shell::sleep(GATHER).await;
         let arrived = ARRIVALS.with_borrow_mut(Arrivals::take);
         if !shell::settings().notify_new_mail {
             return;
@@ -75,19 +73,16 @@ fn arrived(messages: Vec<MessageId>) {
             Ok(still_new) => still_new,
             Err(e) => return tracing::warn!(error = %e, "couldn't read new mail"),
         };
-        let Some(app) = shell::application() else {
-            return;
-        };
         for notice in notifications(&still_new) {
-            let notification = gio::Notification::new(&notice.title);
-            notification.set_body(Some(&notice.body));
-            notification.set_category(Some("email.arrived"));
-            notification.set_default_action_and_target_value(
-                &format!("app.{OPEN}"),
-                Some(&notice.tag.to_variant()),
-            );
-            // By its tag: one for several messages replaces the one before.
-            app.send_notification(Some(&notice.tag), &notification);
+            platform::show(&notice);
         }
     });
+}
+
+/// The notification tagged `tag` was clicked: the main window shows where it says. On the
+/// main thread.
+fn clicked(tag: &str) {
+    if let Some(target) = Target::from_tag(tag) {
+        shell::show_at(target.destination(), None);
+    }
 }

@@ -117,7 +117,7 @@
       `color-scheme`，即桌面的外观而不是应用的，常驻时也跟随
 - [x] 关窗后常驻，重开时回到上次的位置（`shell::left_at`）。Quit（Ctrl+Q、托盘、SIGHUP / SIGINT / SIGTERM）先关写信
       窗口，第二个信号直接退出；日志记 `quitting reason=…`。⚠️ GTK 常驻时仍连着显示服务器
-- [x] 新邮件通知（Linux）：⚠️ nsh 没有通知，改用 GLib 的 `GNotification`。点击走应用的 `open-mail` action，打开
+- [x] 新邮件通知（Linux）：⚠️ nsh 的通知要经过视图的根，常驻时没有视图，改用 GLib 的 `GNotification`。点击走应用的 `open-mail` action，打开
       对应账户的 Inbox，列表读到那封后选中它（`Reveal`）。GNOME Shell 上点击无效：GLib 在那里改用 GNOME 自己的
       接口，它经 D-Bus 名字唤起应用，而应用不占这个名字（`NON_UNIQUE`，单实例靠 socket）
 - [x] 系统唤醒后马上同步：⚠️ nsh 不转告系统唤醒，自己听 logind 的 `PrepareForSleep(false)`（Linux，GIO 的 D-Bus，
@@ -189,8 +189,9 @@
       画的
 - [x] macOS 磁盘映像打包这个 `catmail-gui`（`packaging/macos/build-dmg.sh`）：菜单栏显示应用名、Dock 有图标。
       `cargo run` 起的没有 bundle，仍显示可执行文件名
-- [ ] macOS：新邮件通知（`UNUserNotificationCenter`，要在 bundle 里运行）；注销时不取消（现在
-      `applicationShouldTerminate` 先取消，等写信窗口存完再退出）
+- [x] macOS 新邮件通知：⚠️ nsh 的通知要经过视图的根，常驻时没有视图，所以应用直接用 `UNUserNotificationCenter`，
+      自己做 delegate（`new_mail/macos.rs`）。只在 bundle 里有，`cargo run` 起的没有
+- [ ] macOS：注销时不取消（现在 `applicationShouldTerminate` 先取消，等写信窗口存完再退出）
 - [ ] **Windows**：接上 nsh 的 Windows 后端（`nsh-platform-windows`：Win32、Direct2D、DirectWrite、正文在 WebView2）。
       要做的是外壳的第三个工具包（窗口与主循环、信号与退出）、托盘（frontend 的 `tray` 里加 Windows 的实现，#109）、
       新邮件通知；单实例已在 `catmail_frontend::instance`，三个平台一套。再加 Windows 的打包。之前 Windows 上只有 CLI

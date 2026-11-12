@@ -28,7 +28,7 @@ mod icons;
 mod login;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod mailbox;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod new_mail;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod reader;

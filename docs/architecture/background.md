@@ -2,8 +2,8 @@
 
 [← 架构](../architecture.md)
 
-> 状态：常驻与单实例唤起、引擎自己发现睡眠、GUI 听系统唤醒、新邮件事件、Linux 的系统通知与托盘、macOS 的状态栏、`--background`、
-> macOS 的开机启动已实现。macOS 的新邮件通知、Linux 的开机启动尚未实现；Windows 还没有 GUI（见 [GUI](gui.md)）。
+> 状态：常驻与单实例唤起、引擎自己发现睡眠、GUI 听系统唤醒、新邮件事件与系统通知、Linux 的托盘、macOS 的状态栏、`--background`、
+> macOS 的开机启动已实现。Linux 的开机启动尚未实现；Windows 还没有 GUI（见 [GUI](gui.md)）。
 > 没实现的小节是设计。
 
 GUI 关掉主窗口后继续同步、发信、提醒新邮件，并能从托盘、再次启动或通知回到窗口。
@@ -213,8 +213,10 @@ data"。macOS 上 LaunchServices 把同一个 bundle 的再次打开交给已在
 
 ### 系统通知
 
-GUI 的 `new_mail.rs` 在引擎打开时订阅事件，有窗口时、常驻时都在。攒、措辞、每条通知的 tag 和点击后的去处不依赖
-UI 库，在 `catmail_frontend::new_mail`（`Arrivals`、`notifications`、`Target`）：
+GUI 的 `new_mail/` 在引擎打开时订阅事件，有窗口时、常驻时都在。攒、措辞、每条通知的 tag 和点击后的去处不依赖
+UI 库，在 `catmail_frontend::new_mail`（`Arrivals`、`notifications`、`Target`）；攒、重读和点击后转过去两个平台共用
+（`new_mail/mod.rs`），发出通知、听点击各平台自己做（`linux.rs`、`macos.rs`）。⚠️ nsh 的通知要经过某个视图的根，
+而应用常驻时没有视图，所以两边都不用它：
 
 - **先攒 1 秒再说**（`GATHER`）。一次同步按批提交、每批一个 `NewMail`，醒来后各账户又同时同步；不攒的话一阵
   新邮件会弹出好几条。同一个 tag 的通知替换前一条（`send_notification` 的 id）。
@@ -226,7 +228,7 @@ UI 库，在 `catmail_frontend::new_mail`（`Arrivals`、`notifications`、`Targ
   标题按规范是纯文本，不转义。
 - 设置"Notify about new mail"（Settings › General）默认开，关掉时攒够也不重读、不发。
 
-**Linux**：⚠️ nsh 没有通知，用 GLib 的 `GNotification`，经 `gtk::Application` 发出（`category` 是
+**Linux**：GLib 的 `GNotification`，经 `gtk::Application` 发出（`category` 是
 `email.arrived`）。没有沙箱时 GLib 走 `org.freedesktop.Notifications`，点击回来是应用的 `open-mail` action，带着
 通知的 tag（`Target`：`new-mail/账户/邮件`、`new-mail/账户`，多个账户的合成通知是 `new-mail`）。它变成一个去处
 （`Destination::Inbox { account, message }`），交给 `shell::show_at`：主窗口开着就转过去；没开就记下，打开主窗口，
@@ -242,8 +244,13 @@ portal（xdg-desktop-portal-gtk）或 GNOME Shell 对总线名 `net.yangkx.catma
 startup 时自己占用 app id（`DO_NOT_QUEUE`），不改变单实例的做法。另一个数据目录的实例先占了时，这个实例的
 通知点击会到那一个，它找不到邮件、只打开自己的窗口。
 
-**macOS**：还没有。系统通知（`UNUserNotificationCenter`）只能在 bundle 里用，在 bundle 外会让进程崩溃；磁盘映像里
-是 bundle 了，接上之前 macOS 上没有新邮件通知。
+**macOS**：UserNotifications（`UNUserNotificationCenter`，`objc2-user-notifications`）。应用自己做通知中心的
+delegate，在 `NSApplication` 运行之前设好（`new_mail::install`），点击通知启动应用时那次点击才能收到；nsh 的视图
+不抢（`AppOptions::notifications` 关着，nsh 只在它开着时才设 delegate）。通知的 identifier 就是 tag：同一个 tag
+的新通知替换前一条，点击（默认动作）带回 tag，回到主线程后与 Linux 一样交给 `shell::show_at`。应用在前台时
+`willPresentNotification` 照样显示横幅和声音。引擎打开时请求授权（提醒和声音），只在第一次弹出询问；用户在
+系统设置里关掉了就什么也不显示，日志记一行。正文是纯文本，不转义。通知中心只能在 bundle 里用，在 bundle 外
+（`cargo run`）碰它会让进程崩溃，所以没有 bundle identifier 时不订阅、不发。
 
 ## 托盘
 

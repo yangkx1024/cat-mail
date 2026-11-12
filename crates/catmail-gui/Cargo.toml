@@ -52,7 +52,14 @@ objc2-app-kit = { workspace = true, features = [
     "NSWindow",
     "NSWorkspace",
 ] }
-objc2-foundation = { workspace = true, features = ["block2", "NSNotification", "NSOperation"] }
+objc2-foundation = { workspace = true, features = [
+    "block2",
+    "NSBundle",
+    "NSError",
+    "NSNotification",
+    "NSOperation",
+] }
+objc2-user-notifications.workspace = true
 
 [lints]
 workspace = true

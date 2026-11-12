@@ -3,8 +3,8 @@
 //! has and nsh's AppKit backend hasn't is here: the press that takes the focus off a
 //! text field.
 //!
-//! ⚠️ Not bundled: the menu bar names the app after its executable, the Dock shows no
-//! icon of its own, and there are no notifications (the system's need a bundle).
+//! ⚠️ Not bundled (`cargo run`): the menu bar names the app after its executable, the Dock
+//! shows no icon of its own, and there are no notifications (the system's need a bundle).
 
 // AppKit is Objective-C: its classes are defined and its messages sent with `unsafe`.
 #![allow(unsafe_code)]
@@ -58,6 +58,7 @@ pub fn run(started: impl FnOnce() + 'static) -> u8 {
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     app.setMainMenu(Some(&main_menu(mtm)));
     quit_on_signals();
+    crate::new_mail::install();
     let _monitor = blur_on_press_outside();
     started();
     // The main window opens once the app has launched (`did_finish_launching`).
@@ -89,13 +90,6 @@ pub fn invoke(f: impl FnOnce() + Send + 'static) {
 pub fn after(delay: Duration, f: impl FnOnce() + Send + 'static) {
     let when = DispatchTime::try_from(delay).unwrap_or(DispatchTime::FOREVER);
     let _ = DispatchQueue::main().after(when, f);
-}
-
-/// The engine is open: the status item follows its mail, and it hears of wakes. No
-/// notifications: the system's need a bundle.
-pub fn engine_opened() {
-    crate::tray::start();
-    crate::wake::follow();
 }
 
 // --- The application ----------------------------------------------------------------
