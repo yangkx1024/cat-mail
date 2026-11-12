@@ -15,7 +15,7 @@ use catmail_core::{
 use clap::{Args, Subcommand};
 
 use crate::cmd::ops::{self, NEXT_FLUSH};
-use crate::cmd::{identity, one_account, outbox};
+use crate::cmd::{identity, one_account, outbox, summary};
 use crate::json::{self, JsonDraft, JsonDraftAttachment};
 use crate::output::{print_draft, print_drafts, printable};
 
@@ -227,12 +227,7 @@ async fn from_for(
     if from.from.is_none() {
         return Ok(None);
     }
-    let account = client
-        .get_message(message)
-        .await?
-        .with_context(|| format!("no message {message}"))?
-        .summary
-        .account_id;
+    let account = summary(client, message).await?.account_id;
     from.resolve(client, account).await
 }
 

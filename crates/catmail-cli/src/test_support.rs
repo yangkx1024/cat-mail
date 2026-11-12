@@ -61,6 +61,18 @@ pub(crate) async fn synced_with_smtp(
     dir: &std::path::Path,
 ) -> (MailClient, AccountId) {
     let (client, _) = client(dir);
+    let account = add_synced(&client, fake.port(), smtp_port, "alice").await;
+    (client, account)
+}
+
+/// Adds `user`@example.com with password "pw", on the IMAP server on `imap_port` and
+/// sending through `smtp_port`, and syncs it once.
+pub(crate) async fn add_synced(
+    client: &MailClient,
+    imap_port: u16,
+    smtp_port: u16,
+    user: &str,
+) -> AccountId {
     let server = |port| ServerConfig {
         host: "127.0.0.1".into(),
         port,
@@ -69,10 +81,10 @@ pub(crate) async fn synced_with_smtp(
     let account = client
         .add_account(
             NewAccount {
-                email: "alice@example.com".into(),
+                email: format!("{user}@example.com"),
                 display_name: None,
-                username: "alice".into(),
-                imap: server(fake.port()),
+                username: user.into(),
+                imap: server(imap_port),
                 smtp: server(smtp_port),
             },
             "pw".into(),
@@ -82,7 +94,7 @@ pub(crate) async fn synced_with_smtp(
         .unwrap()
         .id;
     client.sync_account(account).await.unwrap();
-    (client, account)
+    account
 }
 
 /// Adds news@example.org, logging in to `smtp` as `resend`, without checking the login.
