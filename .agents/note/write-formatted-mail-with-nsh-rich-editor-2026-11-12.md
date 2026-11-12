@@ -19,9 +19,15 @@
 - **图片是带 Content-ID 的草稿附件**（`draft_attachments.content_id`），HTML 用 `cid:` 引用。没选 data URI：编辑器
   每次保存都要序列化整篇文档，几 MB 的 base64 会跟着走一遍。编辑器里 `src` 是 blob 的文件路径
   （`attach_image` 一并返回，打开时 `DraftEditor::images` 一次取齐），存的时候在 ProseMirror JSON 上换回 `cid:`，不在 HTML 字符串上替换，避开属性转义。
-- **发信只带 HTML 显示的图片**；从正文删掉的图片，附件行在窗口结束（关窗、发送）时才删
-  （`DraftEditor::drop_unshown_images`）：编辑中保存就删的话，撤销把图片带回来时它已经没了内容。只给纯文本、清掉 HTML
+- **发信只带 HTML 显示的图片**；从正文删掉的图片，附件行在关窗时才删（`DraftEditor::drop_unshown_images`）：编辑中
+  保存就删的话，撤销把图片带回来时它已经没了内容。发送时不删，发送失败窗口和撤销都还在。为此去掉了
+  `Closing::Now`：什么都存好了的关窗也经过 `Steps`，否则最常见的"自动保存后关窗"就漏掉了清理。只给纯文本、清掉 HTML
   的修改（agent、CLI）当场删掉全部内嵌图片，没有撤销的问题。
+- **空白照写的保留**：打开草稿时按 `Whitespace::Full` 解析（默认会把缩进、连续空格压成一个，第一次编辑后就永久丢了，
+  回复引文里的表格、代码最明显），发出的 HTML 加 `body { white-space: pre-wrap }`。
+- **发出的段落和编辑器里一样**：编辑器里一段一行、段间没有间距，浏览器给 `<p>` 默认上下边距，收信人看到的每行都隔开；
+  空段落（空行）没有高度、被吞掉。发出的 HTML 加 `p { margin: 0 }`，空段落写成 `<p><br></p>`（`fill_empty_paragraphs`，
+  只在 proto 构建时做，草稿里存的不变）。
 - **MIME 结构**自己用 `MimePart` 拼：mail-builder 的默认结构把内嵌图片放进 `multipart/mixed`，不是标准的
   `multipart/related`。
 - 编辑器配置：starter kit 去掉任务列表（邮件里显示不了勾选框）。Mod-Enter 在 starter kit 里是换行，但 nsh 的平台键表

@@ -11,7 +11,7 @@ use nsh_base::rich_editor::commands::CommandRegistry;
 use nsh_base::rich_editor::extensions::extension::ExtensionManager;
 use nsh_base::rich_editor::extensions::kit::starter_kit;
 use nsh_base::rich_editor::formats::{DomParser, ParseOptions, doc_to_html};
-use nsh_base::rich_editor::model::Schema;
+use nsh_base::rich_editor::model::{Schema, Whitespace};
 use nsh_base::rich_editor::state::{EditorState, EditorStateConfig};
 use nsh_base::rich_editor::view::{EditorSession, NodeViews};
 use serde_json::{Value, json};
@@ -43,7 +43,12 @@ impl Rich {
             Some(html) => html.to_owned(),
             None => text_to_html(text),
         };
-        let mut doc = DomParser::from_schema(&schema).parse(&html, &ParseOptions::default());
+        // As written: indentation and runs of spaces (a quoted table, code) are the
+        // author's. The HTML is the editor's, or `text_to_html`'s: no whitespace between
+        // its tags to keep out.
+        let mut options = ParseOptions::default();
+        options.preserve_whitespace = Some(Whitespace::Full);
+        let mut doc = DomParser::from_schema(&schema).parse(&html, &options);
         if !images.is_empty() {
             let mut json = doc.to_json();
             images.to_files(&mut json);
@@ -161,6 +166,19 @@ mod tests {
             html.contains("<blockquote><p>hi</p></blockquote>"),
             "{html}"
         );
+    }
+
+    #[test]
+    fn whitespace_stays_as_written() {
+        let text = "    indented\nA  B\tC\n> |  x  |  y |\n";
+        let rich = Rich::new(None, text, Images::default());
+        rich.touch();
+        let (written, html) = rich.written().unwrap();
+        assert_eq!(written, text);
+        // And again, from the HTML saved.
+        let again = Rich::new(Some(&html), "", Images::default());
+        again.touch();
+        assert_eq!(again.written().unwrap().0, text);
     }
 
     #[test]

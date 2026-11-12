@@ -145,14 +145,43 @@ fn wrap<'a>(kind: &'static str, first: MimePart<'a>, rest: Vec<MimePart<'a>>) ->
     MimePart::new(kind, parts)
 }
 
-/// The body's content as a document of its own, its images no wider than the reader's
-/// window.
+/// The body's content as a document of its own, shown as the editor showed it: a
+/// paragraph is a line, with no room around it, and an empty one an empty line; spaces
+/// as written (runs of them, indentation; the content has no whitespace between its
+/// tags); images no wider than the reader's window.
 fn html_document(content: &str) -> String {
     format!(
         "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">\
-         <style>img {{ max-width: 100%; height: auto; }}</style></head>\n\
-         <body>{content}</body></html>\n"
+         <style>body {{ white-space: pre-wrap; }} p {{ margin: 0; }} \
+         img {{ max-width: 100%; height: auto; }}</style></head>\n\
+         <body>{}</body></html>\n",
+        fill_empty_paragraphs(content)
     )
+}
+
+/// Puts a line break in each empty paragraph (`<p></p>`, `<p style="…"></p>`): with
+/// nothing in it a paragraph has no height, and the empty line it is in the editor
+/// would be gone.
+fn fill_empty_paragraphs(html: &str) -> Cow<'_, str> {
+    if !html.contains("></p>") {
+        return Cow::Borrowed(html);
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(end) = rest.find("></p>") {
+        let (before, after) = rest.split_at(end + 1);
+        out.push_str(before);
+        let tag = &before[before.rfind('<').unwrap_or(0)..];
+        let empty_p = tag
+            .strip_prefix("<p")
+            .is_some_and(|attrs| attrs.starts_with(['>', ' ']));
+        if empty_p {
+            out.push_str("<br>");
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    Cow::Owned(out)
 }
 
 fn address(a: &Address) -> Result<BuilderAddress<'_>, InvalidHeader> {
@@ -465,6 +494,20 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn empty_paragraphs_keep_their_line() {
+        assert_eq!(
+            fill_empty_paragraphs(
+                r#"<p>a</p><p></p><p style="text-align: center"></p><blockquote><p></p></blockquote><p><b>x</b></p><pre></pre>"#
+            ),
+            r#"<p>a</p><p><br></p><p style="text-align: center"><br></p><blockquote><p><br></p></blockquote><p><b>x</b></p><pre></pre>"#
+        );
+        assert!(matches!(
+            fill_empty_paragraphs("<p>a</p>"),
+            Cow::Borrowed(_)
+        ));
     }
 
     #[test]

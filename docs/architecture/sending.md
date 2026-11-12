@@ -9,15 +9,20 @@
 
 - **正文**是纯文本（`body_text`），可以再有一份带格式的 HTML（`body_html`，写信窗口写的；只是 `<body>` 的内容）。
   有 HTML 时纯文本是它的另一种形式，两者都由编辑器写出、一起存；发出去是 `multipart/alternative`（纯文本在前），
-  HTML 里的图片和它 `multipart/related`，其余附件再包一层 `multipart/mixed`。HTML 外面套上文档头，加一条
-  `img { max-width: 100% }`。
+  HTML 里的图片和它 `multipart/related`，其余附件再包一层 `multipart/mixed`。HTML 外面套上文档头，加
+  样式，让它看起来和编辑器里一样：`body { white-space: pre-wrap }`（连续空格、缩进照写的显示；编辑器写出的 HTML
+  标签之间没有空白）、`p { margin: 0 }`（编辑器里一段就是一行，回车不空出一段距离）、`img { max-width: 100% }`。
+  空段落（空行）发出时写成 `<p><br></p>`，否则它没有高度、空行就没了；只在发出的信里这样写，草稿里存编辑器原样的
+  HTML（存成 `<br>` 再打开会多一个换行）。不处理 `<style>` 的客户端按默认样式显示：段落之间有间距。
   - **只改文字就去掉 HTML**：`DraftChanges::text` 给了而 `html` 没给时，HTML 清空（agent 的 `update_draft`、CLI 的
     `draft edit` 只写纯文本，留着旧的 HTML 会发出两份不一样的内容）。MCP 的草稿输出用 `formatted` 告诉 agent 这一点。
   - **图片是内嵌附件**：`draft_attachments.content_id` 不为空的附件，HTML 用 `cid:` 引用它（`DraftEditor::attach_image`
     添加，Content-ID 随机生成；文件名要是图片的类型）。和别的附件一样计入大小上限。发信时只带 HTML 实际显示的
     图片（`catmail_html::cid_image_ids`），没有 HTML 时一张也不带：用户已经把它从正文里删掉了。
-  - **删掉的图片何时删附件**：编辑器保存时不删，它的撤销还能把图片带回来，那时附件已经没了；窗口结束（关窗、
-    发送，`Steps::run` 在最后一次保存之后）调 `DraftEditor::drop_unshown_images`，删掉 HTML 不再显示的。只给纯文本、
+  - **删掉的图片何时删附件**：编辑器保存时不删，它的撤销还能把图片带回来，那时附件已经没了；关窗时（`Steps::run`
+    在最后一次保存之后，什么都存好了也一样经过这一步）调 `DraftEditor::drop_unshown_images`，删掉 HTML 不再显示的；
+    删不掉只记日志，不挡关窗，下次关窗再删。发送时不删：发出去的只带 HTML 显示的图片，草稿发出后也会删掉，而
+    发送失败时窗口和它的撤销都还在。只给纯文本、
     清掉了 HTML 的修改（agent、CLI）在同一个写事务里删掉全部内嵌附件。删了就和别的修改一样加 `revision`。
 - **附件**在添加时复制进 BlobStore（`draft_attachments`），原文件之后改动或删除都不影响。
   一封草稿的附件合计有上限（见下），超出报 `InvalidInput`：复制前按文件大小先拒一次，复制最多读到

@@ -317,8 +317,8 @@ fn send() {
 
 /// The window asks to close: now if everything is saved, after saving what isn't.
 fn close_requested() {
-    let (written, problem) = written();
-    match with_life(|l| l.close(&written, problem.is_some())) {
+    let (_, problem) = written();
+    match with_life(|l| l.close(problem.is_some())) {
         Closing::Wait => {}
         Closing::Fix => {
             if let Some(problem) = problem {
@@ -326,7 +326,6 @@ fn close_requested() {
             }
             stop_closing_all();
         }
-        Closing::Now => close_window(),
         Closing::Finish => finish(Finish::Close),
     }
 }
