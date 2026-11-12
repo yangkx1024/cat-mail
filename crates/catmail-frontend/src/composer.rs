@@ -10,6 +10,8 @@
 //! before the next starts, and sending or closing waits for it, so an older save can't
 //! land after the content that was sent.
 
+pub mod rich_text;
+
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -23,6 +25,7 @@ use futures_channel::oneshot;
 use crate::commands::Confirm;
 use crate::format;
 use crate::mailbox::{AccountEntry, Place};
+use rich_text::Images;
 
 /// How long typing has to pause before the draft is saved.
 pub const SAVE_DELAY: Duration = Duration::from_millis(800);
@@ -50,6 +53,8 @@ pub struct Opening {
     pub created_here: bool,
     /// The text has the focus, not To.
     pub focus_body: bool,
+    /// The files of the images the draft's HTML shows.
+    pub images: Images,
 }
 
 impl ComposeFrom {
@@ -79,6 +84,10 @@ impl ComposeFrom {
         // Read again as it is opened: as it is from then on, until the window goes.
         let (editor, mark, draft) = client.edit_draft(id).await?;
         let identities = client.draft_senders(draft.id).await?;
+        let mut images = Images::default();
+        for (id, path) in editor.images().await? {
+            images.insert(id, path);
+        }
         // Where the writing starts: the text once there is someone to send to.
         let focus_body = match self {
             ComposeFrom::Reply { .. } => true,
@@ -91,6 +100,7 @@ impl ComposeFrom {
             editor,
             created_here: !matches!(self, ComposeFrom::Draft(_)),
             focus_body,
+            images,
         };
         Ok((opening, mark))
     }
@@ -194,6 +204,8 @@ pub struct Fields<'a> {
     pub bcc: &'a str,
     pub subject: &'a str,
     pub text: &'a str,
+    /// The text formatted, its images by `cid:` URL.
+    pub html: Option<&'a str>,
 }
 
 /// What asking before discarding a draft says.
@@ -333,6 +345,7 @@ impl Lifecycle {
             cc,
             bcc,
             text: fields.text.to_string(),
+            html: fields.html.map(str::to_owned),
         };
         (Written { from, content }, problem)
     }
@@ -569,6 +582,8 @@ impl Steps {
             let changes = DraftChanges::all(written.from, written.content);
             editor.update(changes).await?;
         }
+        // The window's undo goes with it.
+        editor.drop_unshown_images().await?;
         if self.send {
             editor.send().await?;
         }
@@ -831,6 +846,7 @@ mod tests {
             bcc: "",
             subject: "Hi",
             text: "",
+            html: None,
         };
         let (written, problem) = life.written(fields, IdentityId(2));
         assert_eq!(written.content.to, life.saved.content.to);

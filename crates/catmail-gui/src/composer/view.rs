@@ -9,19 +9,21 @@ use catmail_core::{DraftAttachment, format_addresses};
 use catmail_frontend::composer::{Field, Finish, Lifecycle, Opening, senders, window_title};
 use catmail_frontend::format;
 use futures_util::StreamExt as _;
+use nsh_base::rich_editor::view::{RichEditorClasses, rich_editor};
 use nsh_base::theme;
 use nsh_core::element::{Owner, input};
 use nsh_core::prelude::*;
 
-use crate::buttons::{Size, icon_button, primary_button};
+use crate::buttons::{Size, icon_button, primary_button, separator};
 use crate::chrome;
 use crate::icons::{Icon, icon};
 use crate::toast;
 
 use super::{
-    Attachments, Composing, From, START, Shared, Shown, Typed, attach, changed, choose_sender,
-    close_requested, composing, discard, dropped, ending, field_index, focus, follow_identities,
-    remove_attachment, send,
+    Attachments, Composing, Formatting, From, START, Shared, Shown, Typed, attach, changed,
+    choose_sender, close_requested, composing, discard, dropped, ending, field_index, focus,
+    follow_identities, format, formatted, formatting_moved, insert_images, pasted,
+    remove_attachment, rich, send, text_changed,
 };
 use crate::theme::SelectableText as _;
 
@@ -34,6 +36,7 @@ pub fn Composer() -> impl IntoElement {
         identities,
         draft,
         focus_body,
+        images,
         ..
     } = start.opening.clone();
     let content = &draft.content;
@@ -46,19 +49,24 @@ pub fn Composer() -> impl IntoElement {
         debounce: None,
         owner: Owner::current(),
         inputs: [None; 3],
+        rich: Rc::new(rich::Rich::new(
+            content.html.as_deref(),
+            &content.text,
+            images,
+        )),
     })))));
+    global::<Formatting>().set(Formatting::default());
     global::<Typed>().set(Typed {
         to: format_addresses(&content.to),
         cc: format_addresses(&content.cc),
         bcc: format_addresses(&content.bcc),
         subject: content.subject.clone(),
-        text: content.text.clone(),
     });
     global::<From>().set(From {
         senders: senders(&identities),
         chosen: Some(draft.identity),
     });
-    global::<Attachments>().set(Attachments(draft.attachments.clone()));
+    global::<Attachments>().set(Attachments::of(&draft.attachments));
     global::<Shown>().set(Shown {
         cc_bcc: !content.cc.is_empty() || !content.bcc.is_empty(),
         ..Shown::default()
@@ -305,29 +313,21 @@ fn address_row(
 }
 
 fn body(focus_body: bool) -> impl IntoElement {
-    let text_ = global::<Typed>().with_untracked(|t| t.text.clone());
-    let mut body = input()
-        .multiline(true)
-        .default_value(text_)
-        .on_change(|text: &str| {
-            global::<Typed>().update(|t| t.text = text.to_owned());
-            changed();
-        })
-        .readonly(ending)
+    let mut classes = RichEditorClasses::default();
+    // As far in as the fields' labels, and a line's room under the end.
+    classes.content = Some("px-5 pt-2.5 pb-10".into());
+    rich_editor()
+        .editor(super::rich().session())
+        .editable(move || !ending())
         .auto_focus(focus_body)
-        .flex_1()
-        .text_sm()
-        .text_color(move || theme().foreground);
-    if focus_body {
-        // Above the quote.
-        body = body.selected_range((0, 0));
-    }
-    view()
+        .classes(classes)
+        .on_change(|_: &_| text_changed())
+        .on_selection_change(|_: &_| formatting_moved())
+        .on_paste_files(pasted)
         .flex_1()
         .min_h(px(0.0))
-        .px(px(20.0))
-        .py(px(10.0))
-        .child(body)
+        .text_sm()
+        .text_color(move || theme().foreground)
 }
 
 /// Many of them scroll, in no more than a few rows: the bar under them stays in the
@@ -406,6 +406,15 @@ fn footer() -> impl IntoElement {
             Size::Bar,
             attach,
         ))
+        .child(icon_button(
+            || Icon::Photo,
+            || "Insert images".to_owned(),
+            move || !ending(),
+            Size::Bar,
+            insert_images,
+        ))
+        .child(separator(Size::Bar))
+        .children(FORMATS.map(format_button))
         .child(view().flex_1())
         .child(
             text(move || status().unwrap_or_default().into_owned())
@@ -419,4 +428,58 @@ fn footer() -> impl IntoElement {
             Size::Bar,
             discard,
         ))
+}
+
+/// The formatting the bar has: the icon, the name, the key, the mark or node it puts
+/// on (or takes off) the selection, and the editor's command that does.
+const FORMATS: [(Icon, &str, &str, &str, &str); 5] = [
+    (Icon::Bold, "Bold", "mod+b", "bold", "toggleBold"),
+    (Icon::Italic, "Italic", "mod+i", "italic", "toggleItalic"),
+    (
+        Icon::Underline,
+        "Underline",
+        "mod+u",
+        "underline",
+        "toggleUnderline",
+    ),
+    (
+        Icon::ListBullet,
+        "Bulleted list",
+        "mod+shift+8",
+        "bulletList",
+        "toggleBulletList",
+    ),
+    (
+        Icon::NumberedList,
+        "Numbered list",
+        "mod+shift+7",
+        "orderedList",
+        "toggleOrderedList",
+    ),
+];
+
+/// One of [`FORMATS`]: on while the selection has its mark, or is in its node.
+fn format_button(
+    (which, name, key, active, command): (
+        Icon,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+    ),
+) -> View {
+    icon_button(
+        move || which,
+        move || format!("{name} ({})", key_label(key)),
+        move || !ending(),
+        Size::Bar,
+        move || format(command),
+    )
+    .bg(move || {
+        if formatted(active) {
+            theme().accent
+        } else {
+            AdaptiveColor::TRANSPARENT
+        }
+    })
 }

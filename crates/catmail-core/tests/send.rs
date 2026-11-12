@@ -24,6 +24,7 @@ fn content(subject: &str) -> DraftContent {
         cc: vec![addr("carol@example.com")],
         bcc: vec![addr("dave@example.com"), addr("BOB@example.com")],
         text: "你好，\n\n.see you\n".into(),
+        html: None,
     }
 }
 
@@ -793,6 +794,98 @@ async fn attachments_are_copied_when_added() {
     let attachment = m.attachments().next().unwrap();
     assert_eq!(attachment.attachment_name(), Some("报告.pdf"));
     assert_eq!(&*attachment.decoded(), b"%PDF-1.4 first");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn html_is_sent_with_the_images_it_shows() {
+    let env = env(state()).await;
+    let given = |name: &str, content: &[u8]| NewFile::Content {
+        name: name.into(),
+        content: content.to_vec().into(),
+    };
+    let draft = env
+        .client
+        .create_draft(env.account, None, content("formatted"), Vec::new())
+        .await
+        .unwrap();
+    let (editor, _mark, _) = env.client.edit_draft(draft.id).await.unwrap();
+    assert!(matches!(
+        editor.attach_image(given("notes.txt", b"hello")).await,
+        Err(Error::InvalidInput(_))
+    ));
+    let (shown, path) = editor
+        .attach_image(given("shot.png", b"\x89PNG shown"))
+        .await
+        .unwrap();
+    let (removed, _) = editor
+        .attach_image(given("old.png", b"\x89PNG removed"))
+        .await
+        .unwrap();
+    let cid = shown.content_id.clone().unwrap();
+    assert_ne!(Some(&cid), removed.content_id.as_ref());
+    assert_eq!(std::fs::read(&path).unwrap(), b"\x89PNG shown");
+    let images = editor.images().await.unwrap();
+    assert!(images.contains(&(cid.clone(), path)), "{images:?}");
+
+    let mut written = content("formatted");
+    written.text = "Look\n".into();
+    written.html = Some(format!(r#"<p><b>Look</b> <img src="cid:{cid}"></p>"#));
+    editor
+        .update(catmail_core::DraftChanges::all(draft.identity, written))
+        .await
+        .unwrap();
+    let stored = env.client.get_draft(draft.id).await.unwrap().unwrap();
+    assert!(stored.content.html.as_deref().unwrap().contains(&cid));
+    assert_eq!(stored.attachments[0].content_id.as_ref(), Some(&cid));
+
+    editor.send().await.unwrap();
+    env.flush().await;
+    let received = env.smtp.state().received[0].data.clone();
+    let m = MessageParser::new().parse(&received).unwrap();
+    assert_eq!(m.body_text(0).unwrap().replace("\r\n", "\n"), "Look\n");
+    assert!(m.body_html(0).unwrap().contains("<b>Look</b>"));
+    let images: Vec<_> = m.attachments().map(|a| a.decoded().to_vec()).collect();
+    assert_eq!(images, [b"\x89PNG shown".to_vec()]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn images_taken_out_of_the_text_go_once_its_editor_is_done() {
+    let env = env(state()).await;
+    let given = |name: &str| NewFile::Content {
+        name: name.into(),
+        content: b"\x89PNG".to_vec().into(),
+    };
+    let draft = env
+        .client
+        .create_draft(env.account, None, content("images"), Vec::new())
+        .await
+        .unwrap();
+    let (editor, mark, _) = env.client.edit_draft(draft.id).await.unwrap();
+    let (kept, _) = editor.attach_image(given("kept.png")).await.unwrap();
+    let (taken_out, _) = editor.attach_image(given("out.png")).await.unwrap();
+    let cid = kept.content_id.clone().unwrap();
+    let mut written = content("images");
+    written.html = Some(format!(r#"<p><img src="cid:{cid}"></p>"#));
+    editor
+        .update(catmail_core::DraftChanges::all(draft.identity, written))
+        .await
+        .unwrap();
+    let ids = |d: catmail_core::Draft| d.attachments.iter().map(|a| a.id).collect::<Vec<_>>();
+    let stored = || async { env.client.get_draft(draft.id).await.unwrap().unwrap() };
+    // Undo in the editor can still bring it back.
+    assert_eq!(ids(stored().await), [kept.id, taken_out.id]);
+    editor.drop_unshown_images().await.unwrap();
+    assert_eq!(ids(stored().await), [kept.id]);
+    drop(mark);
+
+    // A text without formatting has no images.
+    let changes = catmail_core::DraftChanges {
+        text: Some("plain\n".into()),
+        ..Default::default()
+    };
+    let draft = env.client.update_draft(draft.id, changes).await.unwrap();
+    assert_eq!(draft.content.html, None);
+    assert!(draft.attachments.is_empty(), "{:?}", draft.attachments);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -250,6 +250,10 @@ pub(crate) struct DraftOut {
     pub cc: Vec<String>,
     pub bcc: Vec<String>,
     pub text: String,
+    /// The user formatted the text (it is sent as HTML too, `text` its plain form). A
+    /// new `text` replaces it unformatted.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub formatted: bool,
     pub attachments: Vec<DraftAttachmentOut>,
     /// The message it replies to.
     pub replying_to: Option<i64>,
@@ -285,6 +289,10 @@ pub(crate) struct DraftAttachmentOut {
     pub mime_type: String,
     /// Bytes.
     pub size: u64,
+    /// An image in the formatted text, not a file attached: sent only while the text
+    /// shows it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub in_text: bool,
 }
 
 impl From<&DraftAttachment> for DraftAttachmentOut {
@@ -294,6 +302,7 @@ impl From<&DraftAttachment> for DraftAttachmentOut {
             filename: a.filename.clone(),
             mime_type: a.mime_type.clone(),
             size: a.size,
+            in_text: a.in_text(),
         }
     }
 }
@@ -314,6 +323,7 @@ impl DraftOut {
             cc: addresses(&c.cc),
             bcc: addresses(&c.bcc),
             text: c.text.clone(),
+            formatted: c.html.is_some(),
             attachments: d.attachments.iter().map(Into::into).collect(),
             replying_to: d.reply_to.map(|id| id.0),
             updated_at: time(d.updated_at),

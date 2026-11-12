@@ -372,6 +372,9 @@ CREATE TABLE drafts (
     cc_json             TEXT    NOT NULL DEFAULT '[]',
     bcc_json            TEXT    NOT NULL DEFAULT '[]',
     body_text           TEXT    NOT NULL DEFAULT '',
+    -- The message formatted, or NULL for plain text (body_text is then all of it). Its
+    -- images are the draft's attachments with a content_id, by cid: URL.
+    body_html           TEXT,
     -- Bumped by every change, attachments included. Sending builds the message outside
     -- the transaction that queues it, and queues only if this hasn't moved meanwhile.
     revision            INTEGER NOT NULL DEFAULT 0,
@@ -431,7 +434,9 @@ CREATE TABLE draft_attachments (
     blob_hash TEXT    NOT NULL,
     filename  TEXT    NOT NULL,
     mime_type TEXT    NOT NULL,
-    size      INTEGER NOT NULL
+    size      INTEGER NOT NULL,
+    -- An image in body_html (cid: it), not a file attached; sent only while shown there.
+    content_id TEXT
 ) STRICT;
 
 CREATE INDEX draft_attachments_draft ON draft_attachments (draft_id);

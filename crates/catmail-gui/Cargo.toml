@@ -26,7 +26,7 @@ url.workspace = true
 # nsh has backends for Linux and macOS; elsewhere the binary says so and exits.
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 nsh-core.workspace = true
-nsh-base.workspace = true
+nsh-base = { workspace = true, features = ["rich-editor"] }
 resvg.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

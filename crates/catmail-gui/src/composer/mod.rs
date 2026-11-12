@@ -7,17 +7,17 @@
 //! (`shell::opened`), and closing it asks the view, which saves first and then
 //! closes it (`shell::composer_closed`). State is nsh globals, the view's own.
 
+mod rich;
 mod view;
 
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use catmail_core::{
     DraftAttachment, DraftAttachmentId, DraftChanges, DraftEditor, DraftId, Event, Identity,
-    IdentityId, RecvError,
+    IdentityId, NewFile, RecvError, named_as_image,
 };
 use catmail_frontend::composer::{
     AfterAttachment, AfterSave, Closing, ComposeFrom, Field, FieldError, Fields, Finish, Lifecycle,
@@ -25,6 +25,7 @@ use catmail_frontend::composer::{
     senders, unsendable,
 };
 use futures_channel::mpsc;
+use nsh_base::rich_editor::view::RichEditorPastedFiles;
 use nsh_core::element::desktop::{MenuItem, popup_menu};
 use nsh_core::element::{ElementRef, FileDropEvent, Owner, Spawned, pick_paths};
 use nsh_core::file_dialog::OpenDialog;
@@ -120,6 +121,8 @@ struct Composing {
     owner: Owner,
     /// The address fields, to put the focus in one to fix.
     inputs: [Option<ElementRef>; 3],
+    /// The text.
+    rich: Rc<rich::Rich>,
 }
 
 #[derive(Clone, Default)]
@@ -145,15 +148,20 @@ fn in_window(future: impl Future<Output = ()> + 'static) -> Spawned<()> {
     owner.run(|| spawn(future))
 }
 
-/// The fields as typed: what a save takes. The inputs keep their own text.
+/// The fields as typed: what a save takes. The inputs keep their own text, and the
+/// editor its own ([`Composing::rich`]).
 #[derive(Clone, Default)]
 struct Typed {
     to: String,
     cc: String,
     bcc: String,
     subject: String,
-    text: String,
 }
+
+/// Counts the changes of the text and of its selection: what the formatting shown reads
+/// again on.
+#[derive(Clone, Copy, Default)]
+struct Formatting(u64);
 
 /// Who the draft can be from, and who it is.
 #[derive(Clone, Default)]
@@ -175,8 +183,22 @@ struct Shown {
     cc_bcc: bool,
 }
 
+/// The files attached: the draft's attachments but the images of its text, which are
+/// in it.
 #[derive(Clone, Default)]
 struct Attachments(Vec<DraftAttachment>);
+
+impl Attachments {
+    fn of(attachments: &[DraftAttachment]) -> Self {
+        Attachments(
+            attachments
+                .iter()
+                .filter(|a| !a.in_text())
+                .cloned()
+                .collect(),
+        )
+    }
+}
 
 fn ending() -> bool {
     global::<Shown>().with(|s| s.ending.is_some())
@@ -200,15 +222,49 @@ fn written() -> (Written, Option<FieldError>) {
     let chosen = global::<From>().with_untracked(|f| f.chosen);
     let composing = composing();
     let composing = composing.borrow();
-    let from = chosen.unwrap_or(composing.life.saved().from);
+    let saved = composing.life.saved();
+    let from = chosen.unwrap_or(saved.from);
+    let (text, html) = match composing.rich.written() {
+        Some((text, html)) => (text, Some(html)),
+        None => (saved.content.text.clone(), saved.content.html.clone()),
+    };
     let fields = Fields {
         to: &typed.to,
         cc: &typed.cc,
         bcc: &typed.bcc,
         subject: &typed.subject,
-        text: &typed.text,
+        text: &text,
+        html: html.as_deref(),
     };
     composing.life.written(fields, from)
+}
+
+/// The text changed: it is saved like a field. Its formatting is shown again on the
+/// selection's change, which every change of the text comes with.
+fn text_changed() {
+    rich().touch();
+    changed();
+}
+
+/// The selection moved: the buttons show what is under it.
+fn formatting_moved() {
+    global::<Formatting>().update(|f| f.0 += 1);
+}
+
+/// Formats the text with the editor's command `name`.
+fn format(name: &'static str) {
+    rich().run(name, serde_json::Value::Null);
+}
+
+/// Whether the selection has the mark, or is in the node, `name`; read again as it
+/// moves.
+fn formatted(name: &'static str) -> bool {
+    global::<Formatting>().with(|_| ());
+    rich().is_active(name)
+}
+
+fn rich() -> Rc<rich::Rich> {
+    composing().borrow().rich.clone()
 }
 
 /// A field changed: the draft is saved once typing pauses.
@@ -363,43 +419,83 @@ fn field_index(field: Field) -> usize {
 // --- Attachments --------------------------------------------------------------------
 
 fn attach() {
-    let picked = pick_paths(OpenDialog::files().multiple(true).button_label("Attach"));
+    pick("Attach", false);
+}
+
+/// Images chosen to show in the text, where the selection is.
+fn insert_images() {
+    pick("Insert", true);
+}
+
+/// Files chosen in a dialog that says `button`, added as [`add_files`] does.
+fn pick(button: &str, to_text: bool) {
+    let picked = pick_paths(OpenDialog::files().multiple(true).button_label(button));
     in_window(async move {
         match picked.await {
-            Ok(Some(paths)) => attach_paths(paths),
+            Ok(Some(paths)) => add_files(paths.into_iter().map(NewFile::from).collect(), to_text),
             Ok(None) => {}
             Err(e) => report("Couldn't choose files", e),
         }
     });
 }
 
-/// Dropped on the window: its `file:` URLs, as paths.
+/// Dropped on the window: attached.
 fn dropped(event: &FileDropEvent) {
-    let paths = event
-        .uris
-        .iter()
-        .filter_map(|uri| url::Url::parse(uri).ok()?.to_file_path().ok())
-        .collect::<Vec<_>>();
-    if !paths.is_empty() {
-        attach_paths(paths);
+    let files = files_at(&event.uris);
+    if !files.is_empty() {
+        add_files(files, false);
     }
 }
 
-fn attach_paths(paths: Vec<PathBuf>) {
+/// Pasted into the text: images go into it, other files are attached.
+fn pasted(paste: &RichEditorPastedFiles) {
+    let mut files: Vec<NewFile> = paste
+        .files
+        .iter()
+        .map(|f| NewFile::Content {
+            name: f.name.clone(),
+            content: f.data.clone().into(),
+        })
+        .collect();
+    files.extend(files_at(&paste.uris));
+    if !files.is_empty() {
+        add_files(files, true);
+    }
+}
+
+/// The files of `file:` URLs.
+fn files_at(uris: &[String]) -> Vec<NewFile> {
+    uris.iter()
+        .filter_map(|uri| url::Url::parse(uri).ok()?.to_file_path().ok())
+        .map(NewFile::from)
+        .collect()
+}
+
+/// Attaches the files; `to_text`, those named as images go into the text instead.
+fn add_files(files: Vec<NewFile>, to_text: bool) {
     if !with_life(Lifecycle::begin_attachment) {
         return;
     }
     let editor = editor();
     in_window(async move {
         let mut failed = false;
-        for path in paths {
-            match editor.attach_file(path.clone()).await {
-                Ok(attachment) => global::<Attachments>().update(|a| a.0.push(attachment)),
-                Err(e) => {
-                    failed = true;
-                    let name = path.file_name().unwrap_or_default().to_string_lossy();
-                    report(&format!("Couldn't attach {name}"), e);
-                }
+        for file in files {
+            let name = file.name();
+            let result = if to_text && named_as_image(&name) {
+                editor.attach_image(file).await.map(|(attachment, path)| {
+                    if let Some(content_id) = attachment.content_id {
+                        rich().insert_image(content_id, path, &name);
+                    }
+                })
+            } else {
+                editor
+                    .attach_file(file)
+                    .await
+                    .map(|attachment| global::<Attachments>().update(|a| a.0.push(attachment)))
+            };
+            if let Err(e) = result {
+                failed = true;
+                report(&format!("Couldn't attach {name}"), e);
             }
         }
         attached(failed);
@@ -415,7 +511,7 @@ fn remove_attachment(attachment: DraftAttachmentId) {
         let result = editor.remove_attachment(attachment).await;
         let failed = result.is_err();
         match result {
-            Ok(draft) => global::<Attachments>().set(Attachments(draft.attachments)),
+            Ok(draft) => global::<Attachments>().set(Attachments::of(&draft.attachments)),
             Err(e) => report("Couldn't remove the attachment", e),
         }
         attached(failed);

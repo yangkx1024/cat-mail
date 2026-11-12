@@ -5,7 +5,9 @@ use std::borrow::Cow;
 use catmail_types::Address;
 use mail_builder::MessageBuilder;
 use mail_builder::headers::address::Address as BuilderAddress;
+use mail_builder::headers::content_type::ContentType;
 use mail_builder::headers::message_id::MessageId;
+use mail_builder::mime::MimePart;
 
 use super::fits_in_angle_brackets;
 
@@ -19,8 +21,11 @@ pub struct Outgoing<'a> {
     /// envelope.
     pub bcc: &'a [Address],
     pub subject: &'a str,
-    /// Plain text; line breaks may be LF or CRLF.
+    /// Plain text; line breaks may be LF or CRLF. With `html`, its alternative for
+    /// readers that show only text.
     pub text: &'a str,
+    /// The body formatted: the content of an HTML `<body>`, its images by `cid:` URL.
+    pub html: Option<&'a str>,
     /// Without angle brackets.
     pub message_id: &'a str,
     pub in_reply_to: Option<&'a str>,
@@ -35,6 +40,9 @@ pub struct OutgoingAttachment<'a> {
     pub filename: &'a str,
     /// `type/subtype`; anything else is sent as `application/octet-stream`.
     pub mime_type: &'a str,
+    /// An image of the HTML, which shows it by this Content-ID (without angle
+    /// brackets), rather than a file attached. Left out unless the HTML shows it.
+    pub content_id: Option<&'a str>,
     pub data: &'a [u8],
 }
 
@@ -53,7 +61,6 @@ pub fn build_message(message: &Outgoing<'_>) -> Result<Vec<u8>, InvalidHeader> {
         .message_id(bracketed("Message-ID", message.message_id)?)
         .date(message.date)
         .subject(one_line(message.subject))
-        .text_body(message.text)
         .from(address(message.from)?);
     if !message.to.is_empty() {
         builder = builder.to(address_list(message.to)?);
@@ -78,16 +85,74 @@ pub fn build_message(message: &Outgoing<'_>) -> Result<Vec<u8>, InvalidHeader> {
     if !references.is_empty() {
         builder = builder.references(MessageId::new_list(references.into_iter()));
     }
-    for a in &message.attachments {
-        builder = builder.attachment(
-            content_type(a.mime_type),
-            one_line(a.filename).into_owned(),
-            a.data,
-        );
-    }
     Ok(builder
+        .body(body(message))
         .write_to_vec()
         .expect("writing into a Vec can't fail"))
+}
+
+/// The text alone, or as the alternative of the HTML, which is `multipart/related` to
+/// the images it shows; then the files attached (`multipart/mixed`). An inline image the
+/// HTML doesn't show (any, without HTML) is left out: the user took it out of the text.
+fn body<'a>(message: &Outgoing<'a>) -> MimePart<'a> {
+    let text = MimePart::new("text/plain", message.text);
+    let content = match message.html {
+        None => text,
+        Some(html) => {
+            let alternative = MimePart::new(
+                "multipart/alternative",
+                vec![text, MimePart::new("text/html", html_document(html))],
+            );
+            let shown = catmail_html::cid_image_ids(html);
+            let images: Vec<MimePart<'a>> = message
+                .attachments
+                .iter()
+                .filter_map(|a| {
+                    let cid = a.content_id.filter(|cid| shown.contains(*cid))?;
+                    Some(
+                        MimePart::new(content_type(a.mime_type), a.data)
+                            .header(
+                                "Content-Disposition",
+                                ContentType::new("inline")
+                                    .attribute("filename", one_line(a.filename).into_owned()),
+                            )
+                            .cid(cid),
+                    )
+                })
+                .collect();
+            wrap("multipart/related", alternative, images)
+        }
+    };
+    let files: Vec<MimePart<'a>> = message
+        .attachments
+        .iter()
+        .filter(|a| a.content_id.is_none())
+        .map(|a| {
+            MimePart::new(content_type(a.mime_type), a.data)
+                .attachment(one_line(a.filename).into_owned())
+        })
+        .collect();
+    wrap("multipart/mixed", content, files)
+}
+
+/// `first` alone, or with `rest` in a multipart of `kind`.
+fn wrap<'a>(kind: &'static str, first: MimePart<'a>, rest: Vec<MimePart<'a>>) -> MimePart<'a> {
+    if rest.is_empty() {
+        return first;
+    }
+    let mut parts = vec![first];
+    parts.extend(rest);
+    MimePart::new(kind, parts)
+}
+
+/// The body's content as a document of its own, its images no wider than the reader's
+/// window.
+fn html_document(content: &str) -> String {
+    format!(
+        "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">\
+         <style>img {{ max-width: 100%; height: auto; }}</style></head>\n\
+         <body>{content}</body></html>\n"
+    )
 }
 
 fn address(a: &Address) -> Result<BuilderAddress<'_>, InvalidHeader> {
@@ -171,6 +236,7 @@ mod tests {
             bcc: &[],
             subject: "季度报告\r\nBcc: injected@evil.example",
             text: "第一行\n.\nlast line with trailing space ",
+            html: None,
             message_id: "abc.123@example.com",
             in_reply_to: Some("parent@x"),
             references: &references,
@@ -178,6 +244,7 @@ mod tests {
             attachments: vec![OutgoingAttachment {
                 filename: "报告 \"final\".pdf",
                 mime_type: "application/pdf",
+                content_id: None,
                 data: b"%PDF-1.4\x00\xff",
             }],
         })
@@ -247,6 +314,7 @@ mod tests {
             bcc: &[],
             subject: "Re: hi",
             text: "hi",
+            html: None,
             message_id: "m@example.com",
             in_reply_to: Some("evil\rX-Injected: yes@x"),
             references: &references,
@@ -277,6 +345,7 @@ mod tests {
             bcc: &[],
             subject: "hi",
             text: "hi",
+            html: None,
             message_id,
             in_reply_to: None,
             references: &[],
@@ -306,6 +375,7 @@ mod tests {
             bcc: &[addr(Some("Dave\r\nX-Evil: 1"), "d@example.com")],
             subject: "",
             text: "",
+            html: None,
             message_id: "m@example.com",
             in_reply_to: None,
             references: &[],
@@ -320,6 +390,81 @@ mod tests {
             (Some("Dave X-Evil: 1"), Some("d@example.com"))
         );
         assert!(m.to().is_none() && m.headers().get("X-Evil").is_none());
+    }
+
+    #[test]
+    fn html_goes_with_its_text_and_the_images_it_shows() {
+        let from = addr(None, "a@example.com");
+        let image = |content_id| OutgoingAttachment {
+            filename: "shot.png",
+            mime_type: "image/png",
+            content_id: Some(content_id),
+            data: b"\x89PNG",
+        };
+        let message = |html| Outgoing {
+            from: &from,
+            to: &[],
+            cc: &[],
+            bcc: &[],
+            subject: "",
+            text: "Look\n",
+            html,
+            message_id: "m@example.com",
+            in_reply_to: None,
+            references: &[],
+            date: 0,
+            attachments: vec![
+                image("shown@catmail"),
+                // Taken out of the text since.
+                image("gone@catmail"),
+                OutgoingAttachment {
+                    filename: "a.pdf",
+                    mime_type: "application/pdf",
+                    content_id: None,
+                    data: b"%PDF",
+                },
+            ],
+        };
+        let raw = build_message(&message(Some(
+            r#"<p>Look</p><p><img src="cid:shown@catmail" alt="shot.png"></p>"#,
+        )))
+        .unwrap();
+        let wire = String::from_utf8_lossy(&raw);
+        let at = |s: &str| wire.find(s).unwrap_or_else(|| panic!("{s} in {wire}"));
+        assert!(
+            at("multipart/mixed") < at("multipart/related")
+                && at("multipart/related") < at("multipart/alternative")
+                && at("multipart/alternative") < at("text/plain")
+                && at("text/plain") < at("text/html")
+                && at("text/html") < at("Content-ID: <shown@catmail>")
+                && at("Content-ID: <shown@catmail>") < at("a.pdf"),
+            "{wire}"
+        );
+        assert!(!wire.contains("gone@catmail"), "{wire}");
+        let m = MessageParser::new().parse(&raw).unwrap();
+        assert_eq!(m.body_text(0).unwrap().replace("\r\n", "\n"), "Look\n");
+        assert!(
+            m.body_html(0)
+                .unwrap()
+                .contains(r#"<img src="cid:shown@catmail""#)
+        );
+        assert_eq!(m.attachments().count(), 2);
+
+        // Without HTML, the text has no images.
+        let raw = build_message(&message(None)).unwrap();
+        let wire = String::from_utf8_lossy(&raw);
+        assert!(
+            !wire.contains("Content-ID") && !wire.contains("text/html"),
+            "{wire}"
+        );
+        assert_eq!(
+            MessageParser::new()
+                .parse(&raw)
+                .unwrap()
+                .attachments()
+                .count(),
+            1
+        );
     }
 
     #[test]

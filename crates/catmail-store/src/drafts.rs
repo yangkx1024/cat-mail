@@ -2,6 +2,8 @@ use catmail_types::{
     AccountId, BlobHash, Draft, DraftAttachment, DraftAttachmentId, DraftContent, DraftId,
     FolderId, FolderRole, IdentityId, MessageId, OutboxId,
 };
+use std::collections::HashSet;
+
 use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
 use crate::columns::{id_list, json, parse_text, size_limit, to_id_list, to_json};
@@ -11,7 +13,8 @@ use crate::ops::{PendingOps, Touched};
 use crate::{Error, Result};
 
 const COLUMNS: &str = "d.id, d.account_id, d.reply_to_message_id, d.in_reply_to, d.references_hdr,
-    d.identity_id, d.subject, d.to_json, d.cc_json, d.bcc_json, d.body_text, d.revision,
+    d.identity_id, d.subject, d.to_json, d.cc_json, d.bcc_json, d.body_text, d.body_html,
+    d.revision,
     d.updated_at,
     d.remote_revision IS d.revision AS on_server, d.upload_error, o.id AS outbox_id";
 
@@ -50,6 +53,8 @@ pub struct NewDraftAttachment {
     pub filename: String,
     pub mime_type: String,
     pub size: u64,
+    /// An image of the draft's HTML ([`DraftAttachment::content_id`]).
+    pub content_id: Option<String>,
 }
 
 /// An upload of a draft to the Drafts folder (see the `draft_uploads` schema).
@@ -114,9 +119,10 @@ impl<'c> Drafts<'c> {
             .prepare_cached(
                 "INSERT INTO drafts (account_id, reply_to_message_id, in_reply_to, references_hdr,
                                      identity_id, subject, to_json, cc_json, bcc_json, body_text,
-                                     updated_at)
+                                     body_html, updated_at)
                  VALUES (:account, (SELECT id FROM messages WHERE id = :reply), :in_reply_to,
-                         :references, :identity, :subject, :to, :cc, :bcc, :text, :now)",
+                         :references, :identity, :subject, :to, :cc, :bcc, :text, :html,
+                         :now)",
             )?
             .execute(named_params! {
                 ":account": account.0,
@@ -129,6 +135,7 @@ impl<'c> Drafts<'c> {
                 ":cc": to_json(&content.cc),
                 ":bcc": to_json(&content.bcc),
                 ":text": content.text,
+                ":html": content.html,
                 ":now": now,
             })?;
         Ok(DraftId(self.conn.last_insert_rowid()))
@@ -232,7 +239,7 @@ impl<'c> Drafts<'c> {
                 "UPDATE drafts SET identity_id = coalesce(:identity, identity_id),
                                    subject = :subject, to_json = :to,
                                    cc_json = :cc, bcc_json = :bcc, body_text = :text,
-                                   revision = revision + 1, updated_at = :now
+                                   body_html = :html, revision = revision + 1, updated_at = :now
                  WHERE id = :id",
             )?
             .execute(named_params! {
@@ -243,6 +250,7 @@ impl<'c> Drafts<'c> {
                 ":cc": to_json(&content.cc),
                 ":bcc": to_json(&content.bcc),
                 ":text": content.text,
+                ":html": content.html,
                 ":now": now,
             })?;
         Ok(Some(account))
@@ -525,14 +533,16 @@ impl<'c> Drafts<'c> {
             return Ok(None);
         }
         self.conn.execute(
-            "INSERT INTO draft_attachments (draft_id, blob_hash, filename, mime_type, size)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO draft_attachments (draft_id, blob_hash, filename, mime_type, size,
+                                            content_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 draft.0,
                 attachment.blob.as_str(),
                 attachment.filename,
                 attachment.mime_type,
                 attachment.size as i64,
+                attachment.content_id,
             ],
         )?;
         let id = DraftAttachmentId(self.conn.last_insert_rowid());
@@ -542,6 +552,7 @@ impl<'c> Drafts<'c> {
             filename: attachment.filename.clone(),
             mime_type: attachment.mime_type.clone(),
             size: attachment.size,
+            content_id: attachment.content_id.clone(),
         }))
     }
 
@@ -594,6 +605,34 @@ impl<'c> Drafts<'c> {
             |r| r.get(0),
         )?;
         Ok(size as u64)
+    }
+
+    /// The images of the draft's HTML: each one's Content-ID and content.
+    pub fn images(&self, draft: DraftId) -> Result<Vec<(String, BlobHash)>> {
+        Ok(self
+            .attachments(draft)?
+            .into_iter()
+            .filter_map(|(a, blob)| Some((a.content_id?, blob)))
+            .collect())
+    }
+
+    /// Removes the images of the draft's HTML but those in `shown`; true if there were
+    /// others (the draft changed).
+    pub fn remove_images(&self, draft: DraftId, shown: &HashSet<String>, now: i64) -> Result<bool> {
+        let mut removed = false;
+        for (id, _) in self.images(draft)? {
+            if !shown.contains(&id) {
+                self.conn.execute(
+                    "DELETE FROM draft_attachments WHERE draft_id = ?1 AND content_id = ?2",
+                    params![draft.0, id],
+                )?;
+                removed = true;
+            }
+        }
+        if removed {
+            self.touch(draft, now)?;
+        }
+        Ok(removed)
     }
 
     /// Returns the draft it was attached to, or `None` if there is no such attachment.
@@ -671,7 +710,7 @@ impl<'c> Drafts<'c> {
 
     fn attachments(&self, draft: DraftId) -> Result<Vec<(DraftAttachment, BlobHash)>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, filename, mime_type, size, blob_hash FROM draft_attachments
+            "SELECT id, filename, mime_type, size, content_id, blob_hash FROM draft_attachments
              WHERE draft_id = ?1 ORDER BY id",
         )?;
         let rows = stmt.query_map([draft.0], |r| {
@@ -681,6 +720,7 @@ impl<'c> Drafts<'c> {
                     filename: r.get("filename")?,
                     mime_type: r.get("mime_type")?,
                     size: r.get::<_, i64>("size")? as u64,
+                    content_id: r.get("content_id")?,
                 },
                 parse_text(r, "blob_hash")?,
             ))
@@ -716,6 +756,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Draft> {
             cc: json(row, "cc_json")?,
             bcc: json(row, "bcc_json")?,
             text: row.get("body_text")?,
+            html: row.get("body_html")?,
         },
         attachments: Vec::new(),
         reply_to: row
@@ -774,6 +815,7 @@ mod tests {
             filename: name.into(),
             mime_type: "application/pdf".into(),
             size: 3,
+            content_id: None,
         }
     }
 

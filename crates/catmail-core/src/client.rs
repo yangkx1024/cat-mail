@@ -1433,7 +1433,7 @@ impl MailClient {
         draft: DraftId,
         file: impl Into<NewFile>,
     ) -> Result<DraftAttachment> {
-        self.attach_as(draft, file.into(), None).await
+        Ok(self.attach_as(draft, file.into(), None, false).await?.0)
     }
 
     async fn attach_as(
@@ -1441,11 +1441,12 @@ impl MailClient {
         draft: DraftId,
         file: NewFile,
         editor: Option<DraftId>,
-    ) -> Result<DraftAttachment> {
+        inline: bool,
+    ) -> Result<(DraftAttachment, PathBuf)> {
         let engine = self.engine()?;
         self.shared
             .rt
-            .run(async move { drafts::attach_file(&engine, draft, file, editor).await })
+            .run(async move { drafts::attach_file(&engine, draft, file, editor, inline).await })
             .await
     }
 
@@ -1830,7 +1831,55 @@ impl DraftEditor {
     /// [`MailClient::attach_file`], as the editor.
     pub async fn attach_file(&self, file: impl Into<NewFile>) -> Result<DraftAttachment> {
         let draft = self.draft;
-        self.client.attach_as(draft, file.into(), Some(draft)).await
+        Ok(self
+            .client
+            .attach_as(draft, file.into(), Some(draft), false)
+            .await?
+            .0)
+    }
+
+    /// An image for the draft's HTML: attached like a file
+    /// ([`attach_file`](Self::attach_file)), with a Content-ID the HTML shows it by
+    /// (`cid:`). Sent only while the HTML has it. The file must be named as an image
+    /// ([`named_as_image`](crate::named_as_image)). Returns the attachment, and the file
+    /// its content is in, as [`images`](Self::images) does.
+    pub async fn attach_image(
+        &self,
+        file: impl Into<NewFile>,
+    ) -> Result<(DraftAttachment, PathBuf)> {
+        let draft = self.draft;
+        self.client
+            .attach_as(draft, file.into(), Some(draft), true)
+            .await
+    }
+
+    /// The images of the draft's HTML, to show them: each one's Content-ID, and the file
+    /// its content is in, which stays as it is while the attachment does. Not to be
+    /// changed.
+    pub async fn images(&self) -> Result<Vec<(String, PathBuf)>> {
+        let (draft, engine) = (self.draft, self.client.engine()?);
+        self.client
+            .shared
+            .rt
+            .run(async move {
+                let images = engine.read(move |db| db.drafts().images(draft)).await?;
+                Ok(images
+                    .into_iter()
+                    .map(|(id, blob)| (id, engine.blobs.path(&blob)))
+                    .collect())
+            })
+            .await
+    }
+
+    /// Removes the images the draft's HTML no longer shows, once the editor is done with
+    /// it (closing, sending): until then its undo can bring them back.
+    pub async fn drop_unshown_images(&self) -> Result<()> {
+        let (draft, engine) = (self.draft, self.client.engine()?);
+        self.client
+            .shared
+            .rt
+            .run(async move { drafts::drop_unshown_images(&engine, draft, Some(draft)).await })
+            .await
     }
 
     /// [`MailClient::send_draft`], as the editor.

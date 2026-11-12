@@ -48,7 +48,7 @@ src/
     draft.rs outbox.rs  草稿、发件箱条目的右栏
   reader/          读信区：mod.rs 打开、远程与内嵌图片、附件的保存；view.rs 工具栏、头部、正文的 web view、附件
                    （正文的页面：CSP、注入脚本和它的消息协议在 catmail_frontend::html）
-  composer/        写信窗口：mod.rs 状态、保存发送关闭、附件、发件人；view.rs 窗口
+  composer/        写信窗口：mod.rs 状态、保存发送关闭、附件、发件人、格式与图片；rich.rs 正文的编辑器；view.rs 窗口
   settings/        设置对话框：mod.rs 设置的跟随、对话框和 General；appearance.rs、accounts.rs、reading.rs、agents.rs 各一节
   login.rs         登录页和发件身份的表单
   form.rs          对话框外框、字段、提交、确认对话框、只要一个名字的对话框
@@ -363,6 +363,18 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 - **关窗**：关窗按钮、Ctrl+W、Escape 都走同一流程。GTK 的 `close-request`（macOS 的 `windowShouldClose:`）总是
   拦下，交给视图决定，视图存好后请外壳销毁窗口。
 - Ctrl+Enter 发送；附件可选文件（Ctrl+Shift+A）或拖进窗口。
+- **正文是富文本**：nsh 的 `RichEditor`（ProseMirror 的移植，`composer/rich.rs`），starter kit 去掉任务列表
+  （邮件里显示不了勾选框）。底栏有加粗、斜体、下划线、项目列表、编号列表，按钮按选区的状态高亮；其余格式
+  （标题、引用、链接、代码）用 starter kit 的快捷键和 Markdown 式输入规则。窗口的快捷键（Ctrl+Enter、Escape）
+  由平台的键表先拿走，编辑器的同名绑定（Mod-Enter 换行）不起作用。
+  - **打开**：草稿有 HTML 就解析它；纯文本草稿（回复的引文、CLI 和 agent 写的）按行转成段落，`>` 开头的行转成
+    （嵌套的）引用（`rich_text::text_to_html`）。
+  - **保存**：从编辑器的文档（ProseMirror JSON）写出 HTML（nsh 的 `doc_to_html`），同时按同一规则写出纯文本
+    （`rich_text::doc_to_text`：一段一行、引用加 `> `、列表加 `* ` / 序号、链接后附地址），一起存进草稿。用户
+    没动过正文就存草稿原来的文本和 HTML：打开一封纯文本草稿再关掉，不会把它改存成 HTML。
+  - **图片**：底栏的图片按钮选图片文件，粘贴的图片（截图）和文件管理器里复制的图片文件也放进正文，别的文件
+    当附件（是不是图片按 `named_as_image`，与引擎同一个判断）。图片经 `DraftEditor::attach_image` 存成草稿的内嵌附件（有 Content-ID），编辑器里的 `src` 是它在
+    BlobStore 里的文件（`attach_image` 一并返回，打开时 `DraftEditor::images` 一次取齐），存草稿时换回 `cid:`（`rich_text::Images`）。内嵌附件不在附件栏里。
 - **退出**前先让每个写信窗口走关闭流程（`OpenComposers::close_all`），有一个关不了（地址要改、保存失败）就不退出，
   那个窗口留下。写信窗口只管"关不关得了"，不知道退出这回事（见[后台运行 / 退出](background.md#退出)）。
 
