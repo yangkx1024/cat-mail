@@ -10,6 +10,8 @@
 //! before the next starts, and sending or closing waits for it, so an older save can't
 //! land after the content that was sent.
 
+pub mod rich_text;
+
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -23,6 +25,7 @@ use futures_channel::oneshot;
 use crate::commands::Confirm;
 use crate::format;
 use crate::mailbox::{AccountEntry, Place};
+use rich_text::Images;
 
 /// How long typing has to pause before the draft is saved.
 pub const SAVE_DELAY: Duration = Duration::from_millis(800);
@@ -50,6 +53,8 @@ pub struct Opening {
     pub created_here: bool,
     /// The text has the focus, not To.
     pub focus_body: bool,
+    /// The files of the images the draft's HTML shows.
+    pub images: Images,
 }
 
 impl ComposeFrom {
@@ -79,6 +84,10 @@ impl ComposeFrom {
         // Read again as it is opened: as it is from then on, until the window goes.
         let (editor, mark, draft) = client.edit_draft(id).await?;
         let identities = client.draft_senders(draft.id).await?;
+        let mut images = Images::default();
+        for (id, path) in editor.images().await? {
+            images.insert(id, path);
+        }
         // Where the writing starts: the text once there is someone to send to.
         let focus_body = match self {
             ComposeFrom::Reply { .. } => true,
@@ -91,6 +100,7 @@ impl ComposeFrom {
             editor,
             created_here: !matches!(self, ComposeFrom::Draft(_)),
             focus_body,
+            images,
         };
         Ok((opening, mark))
     }
@@ -194,6 +204,8 @@ pub struct Fields<'a> {
     pub bcc: &'a str,
     pub subject: &'a str,
     pub text: &'a str,
+    /// The text formatted, its images by `cid:` URL.
+    pub html: Option<&'a str>,
 }
 
 /// What asking before discarding a draft says.
@@ -333,6 +345,7 @@ impl Lifecycle {
             cc,
             bcc,
             text: fields.text.to_string(),
+            html: fields.html.map(str::to_owned),
         };
         (Written { from, content }, problem)
     }
@@ -440,17 +453,19 @@ impl Lifecycle {
         self.created_here && !self.edited
     }
 
-    /// What asking the window to close does, with the fields `written` (`unparsed`: an
-    /// address field doesn't parse). What the fields hold counts, not whether they
-    /// changed: the last keys may not have been seen yet.
-    pub fn close(&self, written: &Written, unparsed: bool) -> Closing {
-        closing(CloseState {
-            finishing: self.finishing.is_some(),
-            unparsed,
-            busy: self.busy(),
-            unsaved: *written != self.saved,
-            untouched: self.untouched(),
-        })
+    /// What asking the window to close does (`unparsed`: an address field doesn't parse).
+    /// Even with everything saved it ends through [`Self::finish`]: the images taken out
+    /// of the text go then ([`Steps::drop_images`]).
+    pub fn close(&self, unparsed: bool) -> Closing {
+        if self.finishing.is_some() {
+            Closing::Wait
+        } else if unparsed {
+            // A field that doesn't parse was never saved (what is saved always parses
+            // back, see `format_addresses`): closing would lose what was typed there.
+            Closing::Fix
+        } else {
+            Closing::Finish
+        }
     }
 
     /// The window ends `how`. True: go on now ([`Self::begin_finish`]); false: it is
@@ -499,21 +514,6 @@ impl Lifecycle {
     }
 }
 
-/// What [`closing`] goes by.
-#[derive(Debug, Clone, Copy)]
-struct CloseState {
-    /// The window is already ending (see [`Finish`]).
-    finishing: bool,
-    /// An address field doesn't parse.
-    unparsed: bool,
-    /// A save or an attachment change is with the engine.
-    busy: bool,
-    /// The fields hold something else than what was last handed to the engine.
-    unsaved: bool,
-    /// Made for this window and never changed (see [`Lifecycle::untouched`]).
-    untouched: bool,
-}
-
 /// What asking the window to close does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Closing {
@@ -521,25 +521,9 @@ pub enum Closing {
     Wait,
     /// It stays, showing the field to fix.
     Fix,
-    /// It closes now: everything is saved.
-    Now,
     /// It closes once what is left is saved, or the untouched draft deleted
     /// ([`Lifecycle::finish`] with [`Finish::Close`]).
     Finish,
-}
-
-fn closing(state: CloseState) -> Closing {
-    if state.finishing {
-        Closing::Wait
-    } else if state.unparsed {
-        // A field that doesn't parse was never saved (what is saved always parses back,
-        // see `format_addresses`): closing would lose what was typed there.
-        Closing::Fix
-    } else if !state.busy && !state.unsaved && !state.untouched {
-        Closing::Now
-    } else {
-        Closing::Finish
-    }
 }
 
 /// The engine calls that end the window, in this order.
@@ -551,6 +535,10 @@ pub struct Steps {
     pub save: bool,
     /// `send_draft`.
     pub send: bool,
+    /// `drop_unshown_images`: the window's undo, which could bring them back, goes with
+    /// it. Not when sending: what is sent has only the images its HTML shows, and the
+    /// draft goes once sent; a send that fails leaves the window, and its undo, open.
+    pub drop_images: bool,
 }
 
 impl Steps {
@@ -569,6 +557,12 @@ impl Steps {
             let changes = DraftChanges::all(written.from, written.content);
             editor.update(changes).await?;
         }
+        if self.drop_images
+            && let Err(e) = editor.drop_unshown_images().await
+        {
+            // Left for the next time the window closes; nothing is lost meanwhile.
+            tracing::warn!(draft = %draft, "couldn't remove the images taken out of the text: {e}");
+        }
         if self.send {
             editor.send().await?;
         }
@@ -583,6 +577,7 @@ fn steps(how: Finish, untouched: bool, unsaved: bool) -> Steps {
         delete,
         save: !delete && unsaved,
         send: how == Finish::Send,
+        drop_images: how == Finish::Close && !delete,
     }
 }
 
@@ -668,48 +663,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn closing_waits_fixes_closes_or_saves_first() {
-        use Closing::*;
-        let state = |finishing, unparsed, busy, unsaved, untouched| CloseState {
-            finishing,
-            unparsed,
-            busy,
-            unsaved,
-            untouched,
-        };
-        #[rustfmt::skip]
-        let cases = [
-            // finishing, unparsed, busy, unsaved, untouched
-            (state(true, true, true, true, false), Wait),
-            (state(true, false, false, false, false), Wait),
-            // Even with nothing else to do: what was typed in the field would be lost.
-            (state(false, true, false, false, false), Fix),
-            (state(false, true, true, true, true), Fix),
-            (state(false, false, false, false, false), Now),
-            // A save in flight, or something it hasn't seen yet.
-            (state(false, false, true, false, false), Finish),
-            (state(false, false, false, true, false), Finish),
-            // Nothing written: the draft made for it goes too.
-            (state(false, false, false, false, true), Finish),
-        ];
-        for (state, expected) in cases {
-            assert_eq!(closing(state), expected, "{state:?}");
-        }
+    fn closing_waits_fixes_or_finishes() {
+        let mut life = lifecycle();
+        assert_eq!(life.close(true), Closing::Fix);
+        // Everything saved, it still ends through the steps: they drop the images.
+        assert_eq!(life.close(false), Closing::Finish);
+        assert!(life.finish(Finish::Close));
+        assert_eq!(life.close(true), Closing::Wait);
     }
 
     #[test]
     fn the_window_ends_with_these_calls() {
-        let steps_are = |delete, save, send| Steps { delete, save, send };
+        let steps_are = |delete, save, send, drop_images| Steps {
+            delete,
+            save,
+            send,
+            drop_images,
+        };
         #[rustfmt::skip]
         let cases = [
             // how, untouched, unsaved
-            (Finish::Close, false, false, steps_are(false, false, false)),
-            (Finish::Close, false, true, steps_are(false, true, false)),
-            (Finish::Close, true, false, steps_are(true, false, false)),
-            (Finish::Send, false, true, steps_are(false, true, true)),
+            (Finish::Close, false, false, steps_are(false, false, false, true)),
+            (Finish::Close, false, true, steps_are(false, true, false, true)),
+            (Finish::Close, true, false, steps_are(true, false, false, false)),
+            (Finish::Send, false, true, steps_are(false, true, true, false)),
             // A reply that needs no words still goes.
-            (Finish::Send, true, false, steps_are(false, false, true)),
-            (Finish::Discard, false, true, steps_are(true, false, false)),
+            (Finish::Send, true, false, steps_are(false, false, true, false)),
+            (Finish::Discard, false, true, steps_are(true, false, false, false)),
         ];
         for (how, untouched, unsaved, expected) in cases {
             assert_eq!(
@@ -763,7 +743,8 @@ mod tests {
             Steps {
                 delete: false,
                 save: true,
-                send: true
+                send: true,
+                drop_images: false,
             }
         );
         assert_eq!(life.finish_ended(Ok(())), Ok(()));
@@ -810,7 +791,7 @@ mod tests {
     fn an_untouched_draft_goes_with_its_window() {
         let mut life = lifecycle();
         let fields = life.saved().clone();
-        assert_eq!(life.close(&fields, false), Closing::Finish);
+        assert_eq!(life.close(false), Closing::Finish);
         assert!(life.finish(Finish::Close));
         let steps = life.begin_finish(&fields).unwrap();
         assert!(steps.delete);
@@ -831,13 +812,14 @@ mod tests {
             bcc: "",
             subject: "Hi",
             text: "",
+            html: None,
         };
         let (written, problem) = life.written(fields, IdentityId(2));
         assert_eq!(written.content.to, life.saved.content.to);
         assert_eq!(written.content.cc[0].email, "b@example.com");
         assert_eq!(written.from, IdentityId(2));
         assert_eq!(problem.map(|(field, _)| field), Some(Field::To));
-        assert_eq!(life.close(&written, true), Closing::Fix);
+        assert_eq!(life.close(true), Closing::Fix);
     }
 
     #[test]

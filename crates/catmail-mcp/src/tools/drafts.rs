@@ -129,7 +129,8 @@ pub(crate) struct UpdateDraftParams {
     pub to: Option<Vec<String>>,
     pub cc: Option<Vec<String>>,
     pub bcc: Option<Vec<String>>,
-    /// The whole text, a quote included.
+    /// The whole text, a quote included. Replaces the formatting too, if the draft is
+    /// `formatted`.
     pub text: Option<String>,
 }
 
@@ -313,6 +314,7 @@ impl Mail {
             cc,
             bcc,
             text: p.text,
+            html: None,
         };
         let given = self.files(p.attachments)?;
         let from = self.identity(account, p.from.as_deref()).await?;
@@ -418,6 +420,7 @@ impl Mail {
             cc: parsed(p.cc)?,
             bcc: parsed(p.bcc)?,
             text: p.text,
+            html: None,
         };
         if changes.is_empty() {
             return Err(Failed("invalid: nothing to change".into()));

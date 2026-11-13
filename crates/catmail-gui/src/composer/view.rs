@@ -9,19 +9,22 @@ use catmail_core::{DraftAttachment, format_addresses};
 use catmail_frontend::composer::{Field, Finish, Lifecycle, Opening, senders, window_title};
 use catmail_frontend::format;
 use futures_util::StreamExt as _;
+use nsh_base::rich_editor::view::rich_editor;
 use nsh_base::theme;
 use nsh_core::element::{Owner, input};
 use nsh_core::prelude::*;
 
-use crate::buttons::{Size, icon_button, primary_button};
+use crate::buttons::{Size, icon_button, primary_button, separator};
 use crate::chrome;
+use crate::form;
 use crate::icons::{Icon, icon};
 use crate::toast;
 
 use super::{
-    Attachments, Composing, From, START, Shared, Shown, Typed, attach, changed, choose_sender,
-    close_requested, composing, discard, dropped, ending, field_index, focus, follow_identities,
-    remove_attachment, send,
+    Attachments, Composing, Formatting, From, LinkDialog, START, Shared, Shown, Typed, ask_link,
+    attach, changed, choose_sender, close_link_dialog, close_requested, composing, discard,
+    dropped, ending, field_index, focus, follow_identities, format, formatted, formatting_moved,
+    insert_images, link_to, pasted, remove_attachment, rich, send, text_changed,
 };
 use crate::theme::SelectableText as _;
 
@@ -34,6 +37,7 @@ pub fn Composer() -> impl IntoElement {
         identities,
         draft,
         focus_body,
+        images,
         ..
     } = start.opening.clone();
     let content = &draft.content;
@@ -46,19 +50,24 @@ pub fn Composer() -> impl IntoElement {
         debounce: None,
         owner: Owner::current(),
         inputs: [None; 3],
+        rich: Rc::new(rich::Rich::new(
+            content.html.as_deref(),
+            &content.text,
+            images,
+        )),
     })))));
+    global::<Formatting>().set(Formatting::default());
     global::<Typed>().set(Typed {
         to: format_addresses(&content.to),
         cc: format_addresses(&content.cc),
         bcc: format_addresses(&content.bcc),
         subject: content.subject.clone(),
-        text: content.text.clone(),
     });
     global::<From>().set(From {
         senders: senders(&identities),
         chosen: Some(draft.identity),
     });
-    global::<Attachments>().set(Attachments(draft.attachments.clone()));
+    global::<Attachments>().set(Attachments::of(&draft.attachments));
     global::<Shown>().set(Shown {
         cc_bcc: !content.cc.is_empty() || !content.bcc.is_empty(),
         ..Shown::default()
@@ -81,8 +90,17 @@ pub fn Composer() -> impl IntoElement {
     chrome::follow_title(title);
     // Ctrl+W is the window's, which asks the view to close.
     on_key("mod+enter", |_| send());
-    on_key("escape", |_| close_requested());
+    // The window's keys come first: Escape closes the link dialog, when it is open.
+    on_key("escape", |_| {
+        if global::<LinkDialog>().with_untracked(|d| d.0.is_some()) {
+            close_link_dialog();
+        } else {
+            close_requested();
+        }
+    });
     on_key("mod+shift+a", |_| attach());
+    on_key("mod+k", |_| ask_link());
+    global::<LinkDialog>().set(LinkDialog::default());
 
     view()
         .flex_1()
@@ -94,6 +112,7 @@ pub fn Composer() -> impl IntoElement {
         .child(body(focus_body))
         .child(attachments())
         .child(footer())
+        .child(link_dialog())
         .child(toast::toasts())
 }
 
@@ -305,29 +324,18 @@ fn address_row(
 }
 
 fn body(focus_body: bool) -> impl IntoElement {
-    let text_ = global::<Typed>().with_untracked(|t| t.text.clone());
-    let mut body = input()
-        .multiline(true)
-        .default_value(text_)
-        .on_change(|text: &str| {
-            global::<Typed>().update(|t| t.text = text.to_owned());
-            changed();
-        })
-        .readonly(ending)
+    rich_editor()
+        .editor(super::rich().session())
+        .editable(move || !ending())
         .auto_focus(focus_body)
-        .flex_1()
-        .text_sm()
-        .text_color(move || theme().foreground);
-    if focus_body {
-        // Above the quote.
-        body = body.selected_range((0, 0));
-    }
-    view()
+        .classes(rich::classes())
+        .on_change(|_: &_| text_changed())
+        .on_selection_change(|_: &_| formatting_moved())
+        .on_paste_files(pasted)
         .flex_1()
         .min_h(px(0.0))
-        .px(px(20.0))
-        .py(px(10.0))
-        .child(body)
+        .text_sm()
+        .text_color(move || theme().foreground)
 }
 
 /// Many of them scroll, in no more than a few rows: the bar under them stays in the
@@ -406,6 +414,31 @@ fn footer() -> impl IntoElement {
             Size::Bar,
             attach,
         ))
+        .child(icon_button(
+            || Icon::Photo,
+            || "Insert images".to_owned(),
+            move || !ending(),
+            Size::Bar,
+            insert_images,
+        ))
+        .child(separator(Size::Bar))
+        .children(FORMATS.map(format_button))
+        .child(
+            icon_button(
+                || Icon::Link,
+                || format!("Link ({})", key_label("mod+k")),
+                move || !ending(),
+                Size::Bar,
+                ask_link,
+            )
+            .bg(move || {
+                if formatted("link") {
+                    theme().accent
+                } else {
+                    AdaptiveColor::TRANSPARENT
+                }
+            }),
+        )
         .child(view().flex_1())
         .child(
             text(move || status().unwrap_or_default().into_owned())
@@ -419,4 +452,107 @@ fn footer() -> impl IntoElement {
             Size::Bar,
             discard,
         ))
+}
+
+/// The formatting the bar has: the icon, the name, the key, the mark or node it puts
+/// on (or takes off) the selection, and the editor's command that does.
+const FORMATS: [(Icon, &str, &str, &str, &str); 5] = [
+    (Icon::Bold, "Bold", "mod+b", "bold", "toggleBold"),
+    (Icon::Italic, "Italic", "mod+i", "italic", "toggleItalic"),
+    (
+        Icon::Underline,
+        "Underline",
+        "mod+u",
+        "underline",
+        "toggleUnderline",
+    ),
+    (
+        Icon::ListBullet,
+        "Bulleted list",
+        "mod+shift+8",
+        "bulletList",
+        "toggleBulletList",
+    ),
+    (
+        Icon::NumberedList,
+        "Numbered list",
+        "mod+shift+7",
+        "orderedList",
+        "toggleOrderedList",
+    ),
+];
+
+/// One of [`FORMATS`]: on while the selection has its mark, or is in its node.
+fn format_button(
+    (which, name, key, active, command): (
+        Icon,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+    ),
+) -> View {
+    icon_button(
+        move || which,
+        move || format!("{name} ({})", key_label(key)),
+        move || !ending(),
+        Size::Bar,
+        move || format(command),
+    )
+    .bg(move || {
+        if formatted(active) {
+            theme().accent
+        } else {
+            AdaptiveColor::TRANSPARENT
+        }
+    })
+}
+
+/// Where the selection links to, asked while the dialog is open: an address, or none to
+/// take the link off.
+fn link_dialog() -> impl IntoElement {
+    dynamic(move || match global::<LinkDialog>().get().0 {
+        Some(href) => link_form(href).into_element(),
+        None => view().into_element(),
+    })
+}
+
+fn link_form(href: String) -> impl IntoElement {
+    let value = signal(href.clone());
+    let refused = signal(false);
+    let submit = move || refused.set(!link_to(&value.get_untracked()));
+    let length = href.chars().count() as u32;
+    form::modal(
+        400.0,
+        close_link_dialog,
+        view()
+            .gap(px(12.0))
+            .child(form::title("Link"))
+            .child(
+                form::text_input()
+                    .default_value(href)
+                    .placeholder("https://".to_owned())
+                    .selected_range((0, length))
+                    .auto_focus(true)
+                    .on_change(move |typed: &str| {
+                        value.set(typed.to_owned());
+                        refused.set(false);
+                    })
+                    .on_submit(move |_: &str| submit()),
+            )
+            .child(when(
+                move || refused.get(),
+                || {
+                    text("A link can't go there.")
+                        .text_sm()
+                        .text_color(move || theme().destructive)
+                },
+            ))
+            .child(form::actions(
+                Some(Rc::new(close_link_dialog)),
+                "Link",
+                || false,
+                submit,
+            )),
+    )
 }

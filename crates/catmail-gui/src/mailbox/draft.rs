@@ -116,6 +116,12 @@ fn page(draft: Rc<Draft>) -> impl IntoElement {
             .flex_wrap()
             .gap(px(8.0))
             .children(draft.attachments.iter().map(|a| {
+                // The text below is plain: the images in the formatted one show here.
+                let which = if a.in_text() {
+                    Icon::Photo
+                } else {
+                    Icon::Document
+                };
                 view()
                     .flex_row()
                     .items_center()
@@ -125,7 +131,7 @@ fn page(draft: Rc<Draft>) -> impl IntoElement {
                     .rounded(px(8.0))
                     .border_1()
                     .border_color(move || theme().border)
-                    .child(icon(|| Icon::Document, 16.0).text_color(muted))
+                    .child(icon(move || which, 16.0).text_color(muted))
                     .child(
                         text(format!("{} · {}", a.filename, format::size(a.size)))
                             .text_sm()

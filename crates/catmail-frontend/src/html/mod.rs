@@ -48,7 +48,7 @@ pub fn browser_page(title: &str, html: &str, inline: HashMap<String, Image>) -> 
 }
 
 /// `text` as HTML text or an attribute's value.
-fn escape(text: &str) -> String {
+pub(crate) fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")

@@ -281,6 +281,10 @@
               "format": "int64",
               "type": "integer"
             },
+            "in_text": {
+              "description": "An image in the formatted text, not a file attached: sent only while the text\nshows it.",
+              "type": "boolean"
+            },
             "mime_type": {
               "type": "string"
             },
@@ -323,6 +327,10 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "formatted": {
+          "description": "The user formatted the text (it is sent as HTML too, `text` its plain form). A\nnew `text` replaces it unformatted.",
+          "type": "boolean"
         },
         "from": {
           "description": "The address it is sent as: one of its account's `sends_as`.",
@@ -487,6 +495,10 @@
               "format": "int64",
               "type": "integer"
             },
+            "in_text": {
+              "description": "An image in the formatted text, not a file attached: sent only while the text\nshows it.",
+              "type": "boolean"
+            },
             "mime_type": {
               "type": "string"
             },
@@ -529,6 +541,10 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "formatted": {
+          "description": "The user formatted the text (it is sent as HTML too, `text` its plain form). A\nnew `text` replaces it unformatted.",
+          "type": "boolean"
         },
         "from": {
           "description": "The address it is sent as: one of its account's `sends_as`.",
@@ -689,6 +705,10 @@
               "format": "int64",
               "type": "integer"
             },
+            "in_text": {
+              "description": "An image in the formatted text, not a file attached: sent only while the text\nshows it.",
+              "type": "boolean"
+            },
             "mime_type": {
               "type": "string"
             },
@@ -731,6 +751,10 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "formatted": {
+          "description": "The user formatted the text (it is sent as HTML too, `text` its plain form). A\nnew `text` replaces it unformatted.",
+          "type": "boolean"
         },
         "from": {
           "description": "The address it is sent as: one of its account's `sends_as`.",
@@ -1147,6 +1171,10 @@
               "format": "int64",
               "type": "integer"
             },
+            "in_text": {
+              "description": "An image in the formatted text, not a file attached: sent only while the text\nshows it.",
+              "type": "boolean"
+            },
             "mime_type": {
               "type": "string"
             },
@@ -1189,6 +1217,10 @@
                 "type": "string"
               },
               "type": "array"
+            },
+            "formatted": {
+              "description": "The user formatted the text (it is sent as HTML too, `text` its plain form). A\nnew `text` replaces it unformatted.",
+              "type": "boolean"
             },
             "from": {
               "description": "The address it is sent as: one of its account's `sends_as`.",
@@ -2575,6 +2607,10 @@
               "format": "int64",
               "type": "integer"
             },
+            "in_text": {
+              "description": "An image in the formatted text, not a file attached: sent only while the text\nshows it.",
+              "type": "boolean"
+            },
             "mime_type": {
               "type": "string"
             },
@@ -2617,6 +2653,10 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "formatted": {
+          "description": "The user formatted the text (it is sent as HTML too, `text` its plain form). A\nnew `text` replaces it unformatted.",
+          "type": "boolean"
         },
         "from": {
           "description": "The address it is sent as: one of its account's `sends_as`.",
@@ -2761,6 +2801,10 @@
               "format": "int64",
               "type": "integer"
             },
+            "in_text": {
+              "description": "An image in the formatted text, not a file attached: sent only while the text\nshows it.",
+              "type": "boolean"
+            },
             "mime_type": {
               "type": "string"
             },
@@ -2803,6 +2847,10 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "formatted": {
+          "description": "The user formatted the text (it is sent as HTML too, `text` its plain form). A\nnew `text` replaces it unformatted.",
+          "type": "boolean"
         },
         "from": {
           "description": "The address it is sent as: one of its account's `sends_as`.",
@@ -3540,7 +3588,7 @@
           ]
         },
         "text": {
-          "description": "The whole text, a quote included.",
+          "description": "The whole text, a quote included. Replaces the formatting too, if the draft is\n`formatted`.",
           "type": [
             "string",
             "null"
@@ -3573,6 +3621,10 @@
             "id": {
               "format": "int64",
               "type": "integer"
+            },
+            "in_text": {
+              "description": "An image in the formatted text, not a file attached: sent only while the text\nshows it.",
+              "type": "boolean"
             },
             "mime_type": {
               "type": "string"
@@ -3616,6 +3668,10 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "formatted": {
+          "description": "The user formatted the text (it is sent as HTML too, `text` its plain form). A\nnew `text` replaces it unformatted.",
+          "type": "boolean"
         },
         "from": {
           "description": "The address it is sent as: one of its account's `sends_as`.",

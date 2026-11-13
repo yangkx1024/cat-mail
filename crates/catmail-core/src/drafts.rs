@@ -2,7 +2,7 @@
 //! (`draft_sync.rs`), sent through the outbox (`send.rs`).
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use catmail_proto::mime::{Outgoing, OutgoingAttachment, build_message};
@@ -107,6 +107,12 @@ pub(crate) async fn update(
             let Some(was_in) = db.drafts().update(id, from, &content, now())? else {
                 return Ok(None);
             };
+            // A text without formatting (an agent's, the CLI's) has no images. Images taken
+            // out of the HTML stay until its editor is done (`drop_unshown_images`): undo
+            // there can bring them back.
+            if content.html.is_none() {
+                db.drafts().remove_images(id, &HashSet::new(), now())?;
+            }
             Ok(db.drafts().get(id)?.map(|draft| (draft, was_in)))
         })
         .await?
@@ -118,6 +124,39 @@ pub(crate) async fn update(
     }
     edited(engine, draft.account_id, id);
     Ok(draft)
+}
+
+/// Removes the images of the draft that its HTML no longer shows, all of them without
+/// HTML: an editor that is done with the draft, whose undo can't bring them back.
+pub(crate) async fn drop_unshown_images(
+    engine: &Arc<Engine>,
+    id: DraftId,
+    editor: Option<DraftId>,
+) -> Result<()> {
+    let editing = engine.editing();
+    let account = engine
+        .write(move |db| {
+            let Some(draft) = db.drafts().get(id)? else {
+                return Ok(None);
+            };
+            not_open_elsewhere(&editing, id, editor)?;
+            if db.drafts().editable(id)?.is_none() {
+                return Ok(None);
+            }
+            let shown = draft
+                .content
+                .html
+                .as_deref()
+                .map(catmail_html::cid_image_ids)
+                .unwrap_or_default();
+            let removed = db.drafts().remove_images(id, &shown, now())?;
+            Ok(removed.then_some(draft.account_id))
+        })
+        .await?;
+    if let Some(account) = account {
+        edited(engine, account, id);
+    }
+    Ok(())
 }
 
 /// Deletes the draft; its copy on the server goes with the next upload pass.
@@ -248,6 +287,7 @@ fn copy_path(blobs: &BlobStore, path: &Path, used: u64, limit: u64) -> Result<Ne
         mime_type: mime_type_of(&filename),
         filename,
         size,
+        content_id: None,
     })
 }
 
@@ -269,6 +309,7 @@ fn store_content(
         mime_type: mime_type_of(&filename),
         filename,
         size,
+        content_id: None,
     })
 }
 
@@ -287,6 +328,13 @@ fn file_name(name: &str) -> Result<String> {
         )));
     }
     Ok(name.to_owned())
+}
+
+/// Whether a file of this name can be an image of a draft's HTML
+/// ([`DraftEditor::attach_image`](crate::DraftEditor::attach_image)): its type, guessed
+/// from the name, is an image's.
+pub fn named_as_image(filename: &str) -> bool {
+    mime_type_of(filename).starts_with("image/")
 }
 
 /// Guessed from the name's extension, as the recipient's mail client will.
@@ -336,13 +384,22 @@ fn copy_files(
 }
 
 /// Copies the file into the blob store and attaches it; later changes to the file
-/// don't affect the draft.
+/// don't affect the draft. An `inline` one is an image of the draft's HTML, which it
+/// shows by the attachment's new Content-ID; it must be named as an image. Returns the
+/// attachment, and the file its content is in.
 pub(crate) async fn attach_file(
     engine: &Arc<Engine>,
     draft: DraftId,
     file: NewFile,
     editor: Option<DraftId>,
-) -> Result<DraftAttachment> {
+    inline: bool,
+) -> Result<(DraftAttachment, PathBuf)> {
+    if inline && !named_as_image(&file.name()) {
+        return Err(Error::InvalidInput(format!(
+            "{} is not an image",
+            file.describe()
+        )));
+    }
     let attachment = blocking({
         let engine = engine.clone();
         move || {
@@ -364,7 +421,10 @@ pub(crate) async fn attach_file(
                 })?
                 .ok_or(Error::DraftNotFound(draft))?;
             let limit = attachments_limit(limits);
-            let new = copy_file(&engine.blobs, &file, used, limit)?;
+            let mut new = copy_file(&engine.blobs, &file, used, limit)?;
+            if inline {
+                new.content_id = Some(new_content_id());
+            }
             // An attachment refused here, like one whose draft is gone, leaves an unreferenced
             // blob for GC.
             engine.store.write(|db| {
@@ -376,14 +436,18 @@ pub(crate) async fn attach_file(
                 let Some(attachment) = db.drafts().add_attachment(draft, &new, now())? else {
                     return Ok(Ok(None));
                 };
-                Ok(Ok(db.drafts().account_of(draft)?.map(|a| (a, attachment))))
+                let path = engine.blobs.path(&new.blob);
+                Ok(Ok(db
+                    .drafts()
+                    .account_of(draft)?
+                    .map(|a| (a, attachment, path))))
             })?
         }
     })
     .await?;
-    let (account, attachment) = attachment.ok_or(Error::DraftNotFound(draft))?;
+    let (account, attachment, path) = attachment.ok_or(Error::DraftNotFound(draft))?;
     edited(engine, account, draft);
-    Ok(attachment)
+    Ok((attachment, path))
 }
 
 /// Returns the draft as it is now.
@@ -519,6 +583,7 @@ pub(crate) async fn forward(
                 .unwrap_or_else(|| "attachment".into()),
             mime_type: original.mime_type.clone(),
             size,
+            content_id: None,
         });
     }
     let Forwarding { to, cc, bcc, text } = forwarding;
@@ -598,6 +663,12 @@ async fn insert(
     Ok(draft)
 }
 
+/// A Content-ID for an image of a draft's HTML: random, and unique within any message
+/// it goes into.
+fn new_content_id() -> String {
+    format!("{}@catmail", Uuid::new_v4().simple())
+}
+
 /// A new Message-ID, from the account's domain. Random, so it gives nothing away.
 pub(crate) fn new_message_id(email: &str) -> String {
     let domain = email.rsplit_once('@').map_or("localhost", |(_, d)| d);
@@ -627,6 +698,7 @@ pub(crate) fn build(
         bcc: if with_bcc { &draft.content.bcc } else { &[] },
         subject: &draft.content.subject,
         text: &draft.content.text,
+        html: draft.content.html.as_deref(),
         message_id,
         in_reply_to: draft.in_reply_to.as_deref(),
         references: &draft.references,
@@ -638,6 +710,7 @@ pub(crate) fn build(
             .map(|(a, data)| OutgoingAttachment {
                 filename: &a.filename,
                 mime_type: &a.mime_type,
+                content_id: a.content_id.as_deref(),
                 data,
             })
             .collect(),
@@ -761,6 +834,9 @@ fn without_nul(mut content: DraftContent) -> DraftContent {
     let strip = |s: &mut String| s.retain(|c| c != '\0');
     strip(&mut content.subject);
     strip(&mut content.text);
+    if let Some(html) = &mut content.html {
+        strip(html);
+    }
     for address in content
         .to
         .iter_mut()
@@ -821,6 +897,7 @@ fn reply_content(message: &Message, own: &[Own], all: bool) -> (DraftContent, Op
         cc,
         bcc: Vec::new(),
         text: quote(message),
+        html: None,
     };
     (content, written_as)
 }

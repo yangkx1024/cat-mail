@@ -395,6 +395,7 @@ impl Fields {
             cc,
             bcc,
             text: read_body(self.body, self.body_file.as_ref())?,
+            html: None,
         })
     }
 }

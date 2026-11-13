@@ -141,6 +141,7 @@ async fn sends_with_starttls_and_saves_to_sent() {
         bcc: vec![addr(None, "boss@example.com")],
         subject: subject.clone(),
         text: text.into(),
+        html: None,
     };
     let entry = send(&client, account, content, Some(&attachment)).await;
     assert_eq!(entry.status, OutboxStatus::Done, "{entry:?}");

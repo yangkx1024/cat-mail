@@ -11,8 +11,14 @@ pub struct DraftContent {
     pub cc: Vec<Address>,
     /// Sent to, but left out of the headers.
     pub bcc: Vec<Address>,
-    /// Plain text.
+    /// Plain text. With `html`, the same message for readers that show only text: it
+    /// is sent as the HTML's alternative.
     pub text: String,
+    /// The message formatted, as the composer writes it, or `None` for plain text. Its
+    /// images are inline attachments of the draft, by `cid:` URL
+    /// ([`DraftAttachment::content_id`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub html: Option<String>,
 }
 
 impl DraftContent {
@@ -33,7 +39,12 @@ pub struct DraftChanges {
     pub to: Option<Vec<Address>>,
     pub cc: Option<Vec<Address>>,
     pub bcc: Option<Vec<Address>>,
+    /// A new text also replaces the HTML: with `html`, or else none, as a text without
+    /// formatting (an agent's) would otherwise be sent under HTML that says something
+    /// else.
     pub text: Option<String>,
+    /// Taken only with `text`.
+    pub html: Option<String>,
 }
 
 impl DraftChanges {
@@ -45,6 +56,7 @@ impl DraftChanges {
             cc,
             bcc,
             text,
+            html,
         } = content;
         Self {
             from: Some(from),
@@ -53,6 +65,7 @@ impl DraftChanges {
             cc: Some(cc),
             bcc: Some(bcc),
             text: Some(text),
+            html,
         }
     }
 
@@ -69,6 +82,7 @@ impl DraftChanges {
             cc,
             bcc,
             text,
+            html,
         } = self;
         fn replace<T>(field: &mut T, value: Option<T>) {
             if let Some(value) = value {
@@ -79,7 +93,10 @@ impl DraftChanges {
         replace(&mut content.to, to);
         replace(&mut content.cc, cc);
         replace(&mut content.bcc, bcc);
-        replace(&mut content.text, text);
+        if let Some(text) = text {
+            content.text = text;
+            content.html = html;
+        }
         from
     }
 }
@@ -140,6 +157,17 @@ pub struct DraftAttachment {
     /// Lower-case `type/subtype`.
     pub mime_type: String,
     pub size: u64,
+    /// An image in the draft's HTML (`cid:` this), not a file attached to it. Sent only
+    /// while the HTML shows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_id: Option<String>,
+}
+
+impl DraftAttachment {
+    /// An image of the draft's text rather than a file attached.
+    pub fn in_text(&self) -> bool {
+        self.content_id.is_some()
+    }
 }
 
 /// A file to attach to a draft: one on disk, copied in as it is when attached, or the
@@ -157,6 +185,18 @@ pub enum NewFile {
 }
 
 impl NewFile {
+    /// Its file name, as the attachment will be called.
+    pub fn name(&self) -> String {
+        match self {
+            NewFile::Path(path) => path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            NewFile::Content { name, .. } => name.clone(),
+        }
+    }
+
     /// What an error about it calls it: the path, or the name.
     pub fn describe(&self) -> String {
         match self {
@@ -181,5 +221,31 @@ impl From<&std::path::PathBuf> for NewFile {
 impl From<&std::path::Path> for NewFile {
     fn from(path: &std::path::Path) -> Self {
         NewFile::Path(path.to_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_new_text_replaces_the_html() {
+        let mut content = DraftContent {
+            text: "Hi\n".into(),
+            html: Some("<p><b>Hi</b></p>".into()),
+            ..DraftContent::default()
+        };
+        DraftChanges {
+            subject: Some("Re: x".into()),
+            ..DraftChanges::default()
+        }
+        .apply(&mut content);
+        assert_eq!(content.html.as_deref(), Some("<p><b>Hi</b></p>"));
+        DraftChanges {
+            text: Some("Bye\n".into()),
+            ..DraftChanges::default()
+        }
+        .apply(&mut content);
+        assert_eq!((content.text.as_str(), content.html), ("Bye\n", None));
     }
 }
