@@ -18,7 +18,7 @@ catmail-frontend = { path = "crates/catmail-frontend" }
 catmail-mcp = { path = "crates/catmail-mcp" }
 catmail-testkit = { path = "crates/catmail-testkit" }
 
-ammonia = "4.2.4"
+ammonia = "4.2.5"
 anyhow = "1"
 base64 = "0.22.1"
 # Buffers shared without copying: a file an agent puts to the MCP server reaches the
