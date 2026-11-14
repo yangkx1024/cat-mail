@@ -50,11 +50,7 @@ pub fn Composer() -> impl IntoElement {
         debounce: None,
         owner: Owner::current(),
         inputs: [None; 3],
-        rich: Rc::new(rich::Rich::new(
-            content.html.as_deref(),
-            &content.text,
-            images,
-        )),
+        rich: Rc::new(rich::Rich::new(&content.body, images)),
     })))));
     global::<Formatting>().set(Formatting::default());
     global::<Typed>().set(Typed {

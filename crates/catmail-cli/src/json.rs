@@ -433,7 +433,7 @@ impl From<&Draft> for JsonDraft {
             to: addresses(&c.to),
             cc: addresses(&c.cc),
             bcc: addresses(&c.bcc),
-            text: c.text.clone(),
+            text: c.body.text.clone(),
             attachments: d.attachments.iter().map(Into::into).collect(),
             reply_to: d.reply_to.map(|id| id.0),
             in_reply_to: d.in_reply_to.clone(),
@@ -683,8 +683,8 @@ fn list<'a, J: From<&'a T>, T: 'a>(items: impl IntoIterator<Item = &'a T>) -> Ve
 #[cfg(test)]
 mod tests {
     use catmail_core::{
-        AccountId, AttachmentId, DraftAttachmentId, DraftContent, DraftId, FolderId, IdentityId,
-        MessageBody, MessageId, OpStatus, OutboxId, OutboxStatus, PendingOpId,
+        AccountId, AttachmentId, DraftAttachmentId, DraftBody, DraftContent, DraftId, FolderId,
+        IdentityId, MessageBody, MessageId, OpStatus, OutboxId, OutboxStatus, PendingOpId,
     };
     use serde_json::json;
 
@@ -853,8 +853,7 @@ mod tests {
                 }],
                 cc: Vec::new(),
                 bcc: Vec::new(),
-                text: "hello".into(),
-                html: None,
+                body: DraftBody::plain("hello"),
             },
             attachments: vec![DraftAttachment {
                 id: DraftAttachmentId(9),

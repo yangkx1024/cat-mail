@@ -17,8 +17,8 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use catmail_core::{
-    AccountId, Address, Draft, DraftChanges, DraftContent, DraftEditor, DraftId, EditMark,
-    Forwarding, Identity, IdentityId, MailClient, MessageId, parse_addresses,
+    AccountId, Address, Draft, DraftBody, DraftChanges, DraftContent, DraftEditor, DraftId,
+    EditMark, Forwarding, Identity, IdentityId, MailClient, MessageId, parse_addresses,
 };
 use futures_channel::oneshot;
 
@@ -197,15 +197,13 @@ pub enum Field {
 pub type FieldError = (Field, String);
 
 /// The text of the fields, as typed.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Fields<'a> {
     pub to: &'a str,
     pub cc: &'a str,
     pub bcc: &'a str,
     pub subject: &'a str,
-    pub text: &'a str,
-    /// The text formatted, its images by `cid:` URL.
-    pub html: Option<&'a str>,
+    pub body: DraftBody,
 }
 
 /// What asking before discarding a draft says.
@@ -344,8 +342,7 @@ impl Lifecycle {
             to,
             cc,
             bcc,
-            text: fields.text.to_string(),
-            html: fields.html.map(str::to_owned),
+            body: fields.body,
         };
         (Written { from, content }, problem)
     }
@@ -811,8 +808,7 @@ mod tests {
             cc: "b@example.com",
             bcc: "",
             subject: "Hi",
-            text: "",
-            html: None,
+            body: DraftBody::default(),
         };
         let (written, problem) = life.written(fields, IdentityId(2));
         assert_eq!(written.content.to, life.saved.content.to);

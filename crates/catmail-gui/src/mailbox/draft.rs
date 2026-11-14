@@ -158,7 +158,7 @@ fn page(draft: Rc<Draft>) -> impl IntoElement {
             .children(lines)
             .children(attachments)
             .child(
-                text(draft.content.text.clone())
+                text(draft.content.body.text.clone())
                     .pt(px(12.0))
                     .border_t_1()
                     .border_color(move || theme().border)

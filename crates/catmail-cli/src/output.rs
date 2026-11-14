@@ -483,7 +483,7 @@ pub(crate) fn print_draft(draft: &Draft, from: Option<&Identity>) {
         None => {}
     }
     println!();
-    println!("{}", printable_text(c.text.trim_end()));
+    println!("{}", printable_text(c.body.text.trim_end()));
     if !draft.attachments.is_empty() {
         println!();
         let rows = draft

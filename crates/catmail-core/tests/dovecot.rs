@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use catmail_core::{
-    AccountId, Address, DeleteMode, DraftChanges, DraftContent, Flags, FolderRole, MailClient,
-    MessageSummary, OutboxStatus, SearchQuery, Security, ServerConfig, SyncReport,
+    AccountId, Address, DeleteMode, DraftBody, DraftChanges, DraftContent, Flags, FolderRole,
+    MailClient, MessageSummary, OutboxStatus, SearchQuery, Security, ServerConfig, SyncReport,
 };
 use catmail_testkit::{FakeSmtp, SmtpState};
 use testenv::{add_account, open_client, run_tag, sent_copies};
@@ -321,7 +321,7 @@ async fn check_saving_to_sent(
                     name: None,
                     email: "bob@example.com".into(),
                 }],
-                text: "发送测试".into(),
+                body: DraftBody::plain("发送测试"),
                 ..Default::default()
             },
             Vec::new(),

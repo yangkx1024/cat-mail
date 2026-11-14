@@ -8,7 +8,7 @@
 mod testenv;
 
 use catmail_core::{
-    AccountId, Address, DraftContent, ErrorKind, MailClient, OutboxEntry, OutboxStatus,
+    AccountId, Address, DraftBody, DraftContent, ErrorKind, MailClient, OutboxEntry, OutboxStatus,
     ServerConfig, TlsConfig,
 };
 use mail_parser::MessageParser;
@@ -52,7 +52,7 @@ fn note(subject: &str) -> DraftContent {
     DraftContent {
         to: vec![addr(None, "zhang@example.com")],
         subject: subject.into(),
-        text: "hi\n".into(),
+        body: DraftBody::plain("hi\n"),
         ..Default::default()
     }
 }
@@ -140,8 +140,7 @@ async fn sends_with_starttls_and_saves_to_sent() {
         cc: vec![addr(None, "li@example.com")],
         bcc: vec![addr(None, "boss@example.com")],
         subject: subject.clone(),
-        text: text.into(),
-        html: None,
+        body: DraftBody::plain(text),
     };
     let entry = send(&client, account, content, Some(&attachment)).await;
     assert_eq!(entry.status, OutboxStatus::Done, "{entry:?}");

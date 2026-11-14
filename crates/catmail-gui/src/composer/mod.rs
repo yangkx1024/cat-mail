@@ -229,17 +229,16 @@ fn written() -> (Written, Option<FieldError>) {
     let composing = composing.borrow();
     let saved = composing.life.saved();
     let from = chosen.unwrap_or(saved.from);
-    let (text, html) = match composing.rich.written() {
-        Some((text, html)) => (text, Some(html)),
-        None => (saved.content.text.clone(), saved.content.html.clone()),
-    };
+    let body = composing
+        .rich
+        .written()
+        .unwrap_or_else(|| saved.content.body.clone());
     let fields = Fields {
         to: &typed.to,
         cc: &typed.cc,
         bcc: &typed.bcc,
         subject: &typed.subject,
-        text: &text,
-        html: html.as_deref(),
+        body,
     };
     composing.life.written(fields, from)
 }

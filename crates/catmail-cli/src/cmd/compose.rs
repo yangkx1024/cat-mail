@@ -9,8 +9,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use catmail_core::{
-    AccountId, Address, Draft, DraftAttachmentId, DraftChanges, DraftContent, DraftId, Forwarding,
-    IdentityId, MailClient, MessageId, NewFile, display, parse_addresses,
+    AccountId, Address, Draft, DraftAttachmentId, DraftBody, DraftChanges, DraftContent, DraftId,
+    Forwarding, IdentityId, MailClient, MessageId, NewFile, display, parse_addresses,
 };
 use clap::{Args, Subcommand};
 
@@ -394,8 +394,7 @@ impl Fields {
             to,
             cc,
             bcc,
-            text: read_body(self.body, self.body_file.as_ref())?,
-            html: None,
+            body: read_body(self.body, self.body_file.as_ref())?.map(DraftBody::plain),
         })
     }
 }
@@ -563,10 +562,13 @@ mod tests {
             "{drafts:?}"
         );
         // Most recent first.
-        assert!(drafts[0].content.text.starts_with("fyi\n\n"), "{drafts:?}");
+        assert!(
+            drafts[0].content.body.text.starts_with("fyi\n\n"),
+            "{drafts:?}"
+        );
         assert_eq!(drafts[0].content.to[0].email, "bob@example.com");
         assert!(
-            drafts[1].content.text.starts_with("thanks\n\n"),
+            drafts[1].content.body.text.starts_with("thanks\n\n"),
             "{drafts:?}"
         );
     }
