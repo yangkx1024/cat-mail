@@ -8,8 +8,8 @@ mod common;
 use std::time::Duration;
 
 use catmail_core::{
-    Address, DraftChanges, DraftContent, DraftId, Forwarding, MailClientBuilder, ReplayReport,
-    SyncSchedule,
+    Address, DraftBody, DraftChanges, DraftContent, DraftId, Forwarding, MailClientBuilder,
+    ReplayReport, SyncSchedule,
 };
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 use common::{Env, addr, env, env_built, eventually, synced_env};
@@ -27,7 +27,7 @@ fn content(subject: &str) -> DraftContent {
             name: None,
             email: "dave@example.com".into(),
         }],
-        text: "draft text".into(),
+        body: DraftBody::plain("draft text"),
         ..Default::default()
     }
 }
@@ -226,7 +226,7 @@ async fn a_change_to_some_parts_keeps_what_was_saved_meanwhile() {
     let read = env.client.get_draft(id).await.unwrap().unwrap();
     // The editor saves what the user typed.
     let typed = DraftContent {
-        text: "typed meanwhile".into(),
+        body: DraftBody::plain("typed meanwhile"),
         ..content("one")
     };
     env.client
@@ -241,20 +241,20 @@ async fn a_change_to_some_parts_keeps_what_was_saved_meanwhile() {
     };
     let draft = env.client.update_draft(id, subject).await.unwrap();
     assert_eq!(draft.content.subject, "two");
-    assert_eq!(draft.content.text, "typed meanwhile");
+    assert_eq!(draft.content.body.text, "typed meanwhile");
     assert_eq!(draft.content.to, read.content.to);
     assert_eq!(draft.identity, read.identity);
 
     // A bad address refuses the whole change.
     let bad = DraftChanges {
-        text: Some("lost".into()),
+        body: Some(DraftBody::plain("lost")),
         cc: Some(vec![addr("not an address")]),
         ..Default::default()
     };
     let err = env.client.update_draft(id, bad).await.unwrap_err();
     assert_eq!(err.kind(), catmail_core::ErrorKind::Invalid, "{err:?}");
     let draft = env.client.get_draft(id).await.unwrap().unwrap();
-    assert_eq!(draft.content.text, "typed meanwhile");
+    assert_eq!(draft.content.body.text, "typed meanwhile");
     let gone = env
         .client
         .update_draft(DraftId(999), DraftChanges::default())
@@ -627,7 +627,7 @@ async fn a_reply_quoting_a_nul_doesnt_stop_the_sync() {
         .reply(odd, false, None, String::new(), Vec::new())
         .await
         .unwrap();
-    assert!(draft.content.text.contains("beforeafter"), "{draft:?}");
+    assert!(draft.content.body.text.contains("beforeafter"), "{draft:?}");
 
     let report = env.replay().await;
     assert_eq!((report.drafts_uploaded, report.drafts_failed), (1, 0));
@@ -636,14 +636,17 @@ async fn a_reply_quoting_a_nul_doesnt_stop_the_sync() {
 
     // Nor can it be typed in.
     let mut nul = content("nul\0subject");
-    nul.text = "a\0b".into();
+    nul.body.text = "a\0b".into();
     let draft = env
         .client
         .create_draft(env.account, None, nul, Vec::new())
         .await
         .unwrap();
     assert_eq!(
-        (draft.content.subject.as_str(), draft.content.text.as_str()),
+        (
+            draft.content.subject.as_str(),
+            draft.content.body.text.as_str()
+        ),
         ("nulsubject", "ab")
     );
 }
@@ -703,7 +706,7 @@ async fn a_forward_carries_the_attachments_but_not_the_inline_images() {
     assert_eq!(draft.content.subject, "Fwd: Report");
     assert!(draft.content.recipients().next().is_none());
     assert!(draft.in_reply_to.is_none() && draft.references.is_empty());
-    let text = &draft.content.text;
+    let text = &draft.content.body.text;
     assert!(
         text.starts_with(
             "\n\n---------- Forwarded message ---------\nFrom: Zhang <zhang@example.com>\nDate: 2026-"
@@ -836,7 +839,7 @@ async fn answers_are_made_with_the_users_text_and_recipients() {
         .unwrap();
     assert_eq!(draft.content.to, [addr("bob@example.com")]);
     assert_eq!(draft.content.bcc, [addr("dave@example.com")]);
-    let text = &draft.content.text;
+    let text = &draft.content.body.text;
     assert!(
         text.starts_with("Have a look.\n\n---------- Forwarded message"),
         "{text:?}"
@@ -855,7 +858,7 @@ async fn answers_are_made_with_the_users_text_and_recipients() {
         .reply(id, false, None, "Thanks!".into(), vec![notes.into()])
         .await
         .unwrap();
-    let text = &draft.content.text;
+    let text = &draft.content.body.text;
     assert!(text.starts_with("Thanks!\n\nOn "), "{text:?}");
     assert!(text.ends_with("wrote:\n> See the report.\n"), "{text:?}");
     assert_eq!(names(&draft), ["notes.txt"]);

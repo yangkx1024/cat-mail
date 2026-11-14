@@ -1,7 +1,8 @@
 //! Local changes (flags, moves, deletions) and their replay against the fake IMAP server.
 
 use catmail_core::{
-    DeleteMode, DraftContent, Error, ErrorKind, Event, Flags, MessageId, OpKind, OpStatus,
+    DeleteMode, DraftBody, DraftContent, Error, ErrorKind, Event, Flags, MessageId, OpKind,
+    OpStatus,
 };
 use catmail_testkit::{FakeMailbox, ServerState};
 
@@ -978,7 +979,7 @@ async fn sent_replies_mark_the_original_answered() {
     env.edit(
         draft.id,
         DraftContent {
-            text: "Thanks".into(),
+            body: DraftBody::plain("Thanks"),
             ..draft.content
         },
     )

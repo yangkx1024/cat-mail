@@ -127,7 +127,7 @@ fn question(preview: &SendPreview, token: &str) -> String {
             .collect();
         text.push_str(&format!("Attachments: {}\n", files.join(", ")));
     }
-    let body = content.text.trim_end();
+    let body = content.body.text.trim_end();
     if !body.is_empty() {
         text.push('\n');
         let (shown, cut_off) = cut(body, SHOWN_CHARS);

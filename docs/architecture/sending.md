@@ -14,8 +14,10 @@
   标签之间没有空白）、`p { margin: 0 }`（编辑器里一段就是一行，回车不空出一段距离）、`img { max-width: 100% }`。
   空段落（空行）发出时写成 `<p><br></p>`，否则它没有高度、空行就没了；只在发出的信里这样写，草稿里存编辑器原样的
   HTML（存成 `<br>` 再打开会多一个换行）。不处理 `<style>` 的客户端按默认样式显示：段落之间有间距。
-  - **只改文字就去掉 HTML**：`DraftChanges::text` 给了而 `html` 没给时，HTML 清空（agent 的 `update_draft`、CLI 的
-    `draft edit` 只写纯文本，留着旧的 HTML 会发出两份不一样的内容）。MCP 的草稿输出用 `formatted` 告诉 agent 这一点。
+  - **正文是一个整体**：纯文本和 HTML 是同一封信的两种形式，由编辑器一起写出，合在 `DraftBody` 里，只能整个换
+    （`DraftChanges::body`），类型上就写不出只换一半的组合。只写纯文本的调用方（agent 的 `update_draft`、CLI 的
+    `draft edit`）给 `DraftBody::plain`，格式随之去掉：留着旧的 HTML 会发出两份不一样的内容。MCP 的草稿输出用
+    `formatted` 告诉 agent 这一点。
   - **图片是内嵌附件**：`draft_attachments.content_id` 不为空的附件，HTML 用 `cid:` 引用它（`DraftEditor::attach_image`
     添加，Content-ID 随机生成；文件名要是图片的类型）。和别的附件一样计入大小上限。发信时只带 HTML 实际显示的
     图片（`catmail_html::cid_image_ids`），没有 HTML 时一张也不带：用户已经把它从正文里删掉了。

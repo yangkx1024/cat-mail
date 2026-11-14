@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use catmail_core::{
-    Address, DraftContent, Error, ErrorKind, Event, IdentityId, NewFile, OutboxEntry, OutboxStatus,
-    RecvError, Verify,
+    Address, DraftBody, DraftContent, Error, ErrorKind, Event, IdentityId, NewFile, OutboxEntry,
+    OutboxStatus, RecvError, Verify,
 };
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 use common::{Env, addr, drain, env, env_with, eventually, files, sparse, status_changes};
@@ -23,8 +23,7 @@ fn content(subject: &str) -> DraftContent {
         }],
         cc: vec![addr("carol@example.com")],
         bcc: vec![addr("dave@example.com"), addr("BOB@example.com")],
-        text: "你好，\n\n.see you\n".into(),
-        html: None,
+        body: DraftBody::plain("你好，\n\n.see you\n"),
     }
 }
 
@@ -725,6 +724,7 @@ async fn replies_are_threaded_and_quoted() {
     assert!(
         draft
             .content
+            .body
             .text
             .contains("Zhang San <zhang@example.com> wrote:\n> Numbers attached.")
     );
@@ -828,14 +828,16 @@ async fn html_is_sent_with_the_images_it_shows() {
     assert!(images.contains(&(cid.clone(), path)), "{images:?}");
 
     let mut written = content("formatted");
-    written.text = "Look\n".into();
-    written.html = Some(format!(r#"<p><b>Look</b> <img src="cid:{cid}"></p>"#));
+    written.body = DraftBody {
+        text: "Look\n".into(),
+        html: Some(format!(r#"<p><b>Look</b> <img src="cid:{cid}"></p>"#)),
+    };
     editor
         .update(catmail_core::DraftChanges::all(draft.identity, written))
         .await
         .unwrap();
     let stored = env.client.get_draft(draft.id).await.unwrap().unwrap();
-    assert!(stored.content.html.as_deref().unwrap().contains(&cid));
+    assert!(stored.content.body.html.as_deref().unwrap().contains(&cid));
     assert_eq!(stored.attachments[0].content_id.as_ref(), Some(&cid));
 
     editor.send().await.unwrap();
@@ -865,7 +867,7 @@ async fn images_taken_out_of_the_text_go_once_its_editor_is_done() {
     let (taken_out, _) = editor.attach_image(given("out.png")).await.unwrap();
     let cid = kept.content_id.clone().unwrap();
     let mut written = content("images");
-    written.html = Some(format!(r#"<p><img src="cid:{cid}"></p>"#));
+    written.body.html = Some(format!(r#"<p><img src="cid:{cid}"></p>"#));
     editor
         .update(catmail_core::DraftChanges::all(draft.identity, written))
         .await
@@ -880,11 +882,11 @@ async fn images_taken_out_of_the_text_go_once_its_editor_is_done() {
 
     // A text without formatting has no images.
     let changes = catmail_core::DraftChanges {
-        text: Some("plain\n".into()),
+        body: Some(DraftBody::plain("plain\n")),
         ..Default::default()
     };
     let draft = env.client.update_draft(draft.id, changes).await.unwrap();
-    assert_eq!(draft.content.html, None);
+    assert!(!draft.content.body.is_formatted());
     assert!(draft.attachments.is_empty(), "{:?}", draft.attachments);
 }
 
