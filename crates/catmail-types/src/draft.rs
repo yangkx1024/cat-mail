@@ -11,6 +11,21 @@ pub struct DraftContent {
     pub cc: Vec<Address>,
     /// Sent to, but left out of the headers.
     pub bcc: Vec<Address>,
+    pub body: DraftBody,
+}
+
+impl DraftContent {
+    /// To, Cc and Bcc, in that order.
+    pub fn recipients(&self) -> impl Iterator<Item = &Address> {
+        self.to.iter().chain(&self.cc).chain(&self.bcc)
+    }
+}
+
+/// The message's text, plain or formatted. One value: the plain text of a formatted
+/// message is its other form, written with the HTML, so the two are only ever replaced
+/// together.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DraftBody {
     /// Plain text. With `html`, the same message for readers that show only text: it
     /// is sent as the HTML's alternative.
     pub text: String,
@@ -21,10 +36,17 @@ pub struct DraftContent {
     pub html: Option<String>,
 }
 
-impl DraftContent {
-    /// To, Cc and Bcc, in that order.
-    pub fn recipients(&self) -> impl Iterator<Item = &Address> {
-        self.to.iter().chain(&self.cc).chain(&self.bcc)
+impl DraftBody {
+    /// Text without formatting, as an agent or the CLI writes it.
+    pub fn plain(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            html: None,
+        }
+    }
+
+    pub fn is_formatted(&self) -> bool {
+        self.html.is_some()
     }
 }
 
@@ -39,12 +61,8 @@ pub struct DraftChanges {
     pub to: Option<Vec<Address>>,
     pub cc: Option<Vec<Address>>,
     pub bcc: Option<Vec<Address>>,
-    /// A new text also replaces the HTML: with `html`, or else none, as a text without
-    /// formatting (an agent's) would otherwise be sent under HTML that says something
-    /// else.
-    pub text: Option<String>,
-    /// Taken only with `text`.
-    pub html: Option<String>,
+    /// The whole body: a plain one ([`DraftBody::plain`]) takes the formatting off.
+    pub body: Option<DraftBody>,
 }
 
 impl DraftChanges {
@@ -55,8 +73,7 @@ impl DraftChanges {
             to,
             cc,
             bcc,
-            text,
-            html,
+            body,
         } = content;
         Self {
             from: Some(from),
@@ -64,8 +81,7 @@ impl DraftChanges {
             to: Some(to),
             cc: Some(cc),
             bcc: Some(bcc),
-            text: Some(text),
-            html,
+            body: Some(body),
         }
     }
 
@@ -81,8 +97,7 @@ impl DraftChanges {
             to,
             cc,
             bcc,
-            text,
-            html,
+            body,
         } = self;
         fn replace<T>(field: &mut T, value: Option<T>) {
             if let Some(value) = value {
@@ -93,10 +108,7 @@ impl DraftChanges {
         replace(&mut content.to, to);
         replace(&mut content.cc, cc);
         replace(&mut content.bcc, bcc);
-        if let Some(text) = text {
-            content.text = text;
-            content.html = html;
-        }
+        replace(&mut content.body, body);
         from
     }
 }
@@ -229,10 +241,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_new_text_replaces_the_html() {
-        let mut content = DraftContent {
+    fn a_plain_body_takes_the_formatting_off() {
+        let formatted = DraftBody {
             text: "Hi\n".into(),
             html: Some("<p><b>Hi</b></p>".into()),
+        };
+        let mut content = DraftContent {
+            body: formatted.clone(),
             ..DraftContent::default()
         };
         DraftChanges {
@@ -240,12 +255,12 @@ mod tests {
             ..DraftChanges::default()
         }
         .apply(&mut content);
-        assert_eq!(content.html.as_deref(), Some("<p><b>Hi</b></p>"));
+        assert_eq!(content.body, formatted);
         DraftChanges {
-            text: Some("Bye\n".into()),
+            body: Some(DraftBody::plain("Bye\n")),
             ..DraftChanges::default()
         }
         .apply(&mut content);
-        assert_eq!((content.text.as_str(), content.html), ("Bye\n", None));
+        assert_eq!(content.body, DraftBody::plain("Bye\n"));
     }
 }

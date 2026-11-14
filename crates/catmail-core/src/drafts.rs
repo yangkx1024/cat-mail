@@ -9,8 +9,9 @@ use catmail_proto::mime::{Outgoing, OutgoingAttachment, build_message};
 use catmail_proto::smtp;
 use catmail_store::{BlobStore, DraftReply, DraftSnapshot, NewDraftAttachment};
 use catmail_types::{
-    AccountId, Address, BlobHash, Draft, DraftAttachment, DraftAttachmentId, DraftChanges,
-    DraftContent, DraftId, Event, Forwarding, IdentityId, Message, MessageId, NewFile,
+    AccountId, Address, BlobHash, Draft, DraftAttachment, DraftAttachmentId, DraftBody,
+    DraftChanges, DraftContent, DraftId, Event, Forwarding, IdentityId, Message, MessageId,
+    NewFile,
 };
 use uuid::Uuid;
 
@@ -110,7 +111,7 @@ pub(crate) async fn update(
             // A text without formatting (an agent's, the CLI's) has no images. Images taken
             // out of the HTML stay until its editor is done (`drop_unshown_images`): undo
             // there can bring them back.
-            if content.html.is_none() {
+            if !content.body.is_formatted() {
                 db.drafts().remove_images(id, &HashSet::new(), now())?;
             }
             Ok(db.drafts().get(id)?.map(|draft| (draft, was_in)))
@@ -145,6 +146,7 @@ pub(crate) async fn drop_unshown_images(
             }
             let shown = draft
                 .content
+                .body
                 .html
                 .as_deref()
                 .map(catmail_html::cid_image_ids)
@@ -608,7 +610,7 @@ pub(crate) async fn forward(
 
 /// The user's text in front of what a reply or forward starts with.
 fn write_above(text: &str, content: &mut DraftContent) {
-    content.text.insert_str(0, text.trim_end());
+    content.body.text.insert_str(0, text.trim_end());
 }
 
 /// The message with its body, downloading it if needed.
@@ -697,8 +699,8 @@ pub(crate) fn build(
         cc: &draft.content.cc,
         bcc: if with_bcc { &draft.content.bcc } else { &[] },
         subject: &draft.content.subject,
-        text: &draft.content.text,
-        html: draft.content.html.as_deref(),
+        text: &draft.content.body.text,
+        html: draft.content.body.html.as_deref(),
         message_id,
         in_reply_to: draft.in_reply_to.as_deref(),
         references: &draft.references,
@@ -833,8 +835,8 @@ pub(crate) fn clean_name(name: Option<&str>) -> Option<String> {
 fn without_nul(mut content: DraftContent) -> DraftContent {
     let strip = |s: &mut String| s.retain(|c| c != '\0');
     strip(&mut content.subject);
-    strip(&mut content.text);
-    if let Some(html) = &mut content.html {
+    strip(&mut content.body.text);
+    if let Some(html) = &mut content.body.html {
         strip(html);
     }
     for address in content
@@ -896,8 +898,7 @@ fn reply_content(message: &Message, own: &[Own], all: bool) -> (DraftContent, Op
         to,
         cc,
         bcc: Vec::new(),
-        text: quote(message),
-        html: None,
+        body: DraftBody::plain(quote(message)),
     };
     (content, written_as)
 }
@@ -1043,7 +1044,7 @@ fn forward_content(message: &Message) -> DraftContent {
     }
     DraftContent {
         subject: forward_subject(subject),
-        text,
+        body: DraftBody::plain(text),
         ..Default::default()
     }
 }
@@ -1147,7 +1148,7 @@ mod tests {
         assert!(reply.cc.is_empty());
         assert_eq!(reply.subject, "Re: 季度报告");
         assert_eq!(
-            reply.text,
+            reply.body.text,
             "\n\n张三 <zhang@example.com> wrote:\n> 第一行\n>\n> second\n"
         );
 
@@ -1257,7 +1258,7 @@ mod tests {
         assert_eq!(forward.subject, "Fwd: 季度报告");
         assert!(forward.recipients().next().is_none());
         assert_eq!(
-            forward.text,
+            forward.body.text,
             "\n\n---------- Forwarded message ---------\n\
              From: 张三 <zhang@example.com>\n\
              Subject: 季度报告\n\

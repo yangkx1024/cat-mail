@@ -22,7 +22,9 @@ pub use account::{
     Account, AccountMode, AccountOverview, AccountStatus, Identity, NewAccount, NewIdentity,
     Security, SendProblem, ServerConfig, ServerProblem,
 };
-pub use draft::{Draft, DraftAttachment, DraftChanges, DraftContent, Forwarding, NewFile};
+pub use draft::{
+    Draft, DraftAttachment, DraftBody, DraftChanges, DraftContent, Forwarding, NewFile,
+};
 pub use error::{ErrorKind, ReportedError};
 pub use event::Event;
 pub use folder::{

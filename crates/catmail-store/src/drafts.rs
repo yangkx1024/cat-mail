@@ -1,6 +1,6 @@
 use catmail_types::{
-    AccountId, BlobHash, Draft, DraftAttachment, DraftAttachmentId, DraftContent, DraftId,
-    FolderId, FolderRole, IdentityId, MessageId, OutboxId,
+    AccountId, BlobHash, Draft, DraftAttachment, DraftAttachmentId, DraftBody, DraftContent,
+    DraftId, FolderId, FolderRole, IdentityId, MessageId, OutboxId,
 };
 use std::collections::HashSet;
 
@@ -134,8 +134,8 @@ impl<'c> Drafts<'c> {
                 ":to": to_json(&content.to),
                 ":cc": to_json(&content.cc),
                 ":bcc": to_json(&content.bcc),
-                ":text": content.text,
-                ":html": content.html,
+                ":text": content.body.text,
+                ":html": content.body.html,
                 ":now": now,
             })?;
         Ok(DraftId(self.conn.last_insert_rowid()))
@@ -249,8 +249,8 @@ impl<'c> Drafts<'c> {
                 ":to": to_json(&content.to),
                 ":cc": to_json(&content.cc),
                 ":bcc": to_json(&content.bcc),
-                ":text": content.text,
-                ":html": content.html,
+                ":text": content.body.text,
+                ":html": content.body.html,
                 ":now": now,
             })?;
         Ok(Some(account))
@@ -755,8 +755,10 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Draft> {
             to: json(row, "to_json")?,
             cc: json(row, "cc_json")?,
             bcc: json(row, "bcc_json")?,
-            text: row.get("body_text")?,
-            html: row.get("body_html")?,
+            body: DraftBody {
+                text: row.get("body_text")?,
+                html: row.get("body_html")?,
+            },
         },
         attachments: Vec::new(),
         reply_to: row
@@ -794,7 +796,7 @@ mod tests {
                 name: None,
                 email: "secret@example.com".into(),
             }],
-            text: "你好".into(),
+            body: DraftBody::plain("你好"),
             ..Default::default()
         }
     }
