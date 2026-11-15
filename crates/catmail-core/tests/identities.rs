@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use catmail_core::{
-    Address, DraftContent, Error, ErrorKind, Event, Forwarding, Identity, IdentityId, NewIdentity,
-    OutboxStatus, Verify,
+    Address, DraftBody, DraftContent, Error, ErrorKind, Event, Forwarding, Identity, IdentityId,
+    NewIdentity, OutboxStatus, Verify,
 };
 use catmail_testkit::{FakeMailbox, FakeSmtp, ServerState, SmtpState};
 use common::{Env, drain, env, eventually, local_server, sparse};
@@ -60,7 +60,7 @@ fn content(subject: &str) -> DraftContent {
             name: None,
             email: "bob@example.com".into(),
         }],
-        text: "hi\n".into(),
+        body: DraftBody::plain("hi\n"),
         ..Default::default()
     }
 }

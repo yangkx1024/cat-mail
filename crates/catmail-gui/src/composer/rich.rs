@@ -6,6 +6,7 @@
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
+use catmail_core::DraftBody;
 use catmail_frontend::composer::rich_text::{Images, doc_to_text, text_to_html};
 use nsh_base::rich_editor::commands::CommandRegistry;
 use nsh_base::rich_editor::extensions::extension::ExtensionManager;
@@ -76,19 +77,19 @@ pub struct Rich {
     touched: Cell<bool>,
     /// What [`Self::written`] last wrote, and of which revision of the editor's state:
     /// saves of the other fields don't write the text out again.
-    written: RefCell<Option<(u64, String, String)>>,
+    written: RefCell<Option<(u64, DraftBody)>>,
 }
 
 impl Rich {
-    /// Shows `html`, or else `text`; `images` are the files of the images in the HTML.
-    pub fn new(html: Option<&str>, text: &str, images: Images) -> Self {
+    /// Shows `body`, formatted or not; `images` are the files of the images in its HTML.
+    pub fn new(body: &DraftBody, images: Images) -> Self {
         // Without what mail can't show: task lists' checkboxes.
         let kit = starter_kit().configure(json!({ "taskList": false, "taskItem": false }));
         let manager = ExtensionManager::with_core(vec![kit]).expect("the starter kit is valid");
         let schema = manager.schema().clone();
-        let html = match html {
-            Some(html) => html.to_owned(),
-            None => text_to_html(text),
+        let html = match &body.html {
+            Some(html) => html.clone(),
+            None => text_to_html(&body.text),
         };
         // As written: indentation and runs of spaces (a quoted table, code) are the
         // author's. The HTML is the editor's, or `text_to_html`'s: no whitespace between
@@ -137,17 +138,16 @@ impl Rich {
         self.touched.set(true);
     }
 
-    /// What the text says now, as plain text and as HTML; `None` until the user changes
-    /// it.
-    pub fn written(&self) -> Option<(String, String)> {
+    /// What the text says now, formatted; `None` until the user changes it.
+    pub fn written(&self) -> Option<DraftBody> {
         if !self.touched.get() {
             return None;
         }
         let state = self.session.state();
-        if let Some((revision, text, html)) = &*self.written.borrow()
+        if let Some((revision, body)) = &*self.written.borrow()
             && *revision == state.revision()
         {
-            return Some((text.clone(), html.clone()));
+            return Some(body.clone());
         }
         let mut json = state.doc().to_json();
         let images = self.images.borrow();
@@ -161,9 +161,12 @@ impl Rich {
                 .expect("the schema's document, with other sources");
             doc_to_html(&doc)
         };
-        let text = doc_to_text(&json);
-        *self.written.borrow_mut() = Some((state.revision(), text.clone(), html.clone()));
-        Some((text, html))
+        let body = DraftBody {
+            text: doc_to_text(&json),
+            html: Some(html),
+        };
+        *self.written.borrow_mut() = Some((state.revision(), body.clone()));
+        Some(body)
     }
 
     /// Runs the editor's command `name`; false if it doesn't apply here.
@@ -241,6 +244,19 @@ mod tests {
 
     use super::*;
 
+    fn formatted(html: &str) -> DraftBody {
+        DraftBody {
+            text: String::new(),
+            html: Some(html.into()),
+        }
+    }
+
+    /// What it writes, as plain text and as HTML.
+    fn written(rich: &Rich) -> (String, String) {
+        let body = rich.written().unwrap();
+        (body.text, body.html.unwrap())
+    }
+
     fn image_src(rich: &Rich) -> String {
         let mut src = String::new();
         rich.session
@@ -258,13 +274,12 @@ mod tests {
     #[test]
     fn a_plain_draft_is_kept_until_changed_then_saved_with_html() {
         let rich = Rich::new(
-            None,
-            "Thanks\n\nOn Monday, A wrote:\n> hi\n",
+            &DraftBody::plain("Thanks\n\nOn Monday, A wrote:\n> hi\n"),
             Images::default(),
         );
         assert_eq!(rich.written(), None);
         rich.touch();
-        let (text, html) = rich.written().unwrap();
+        let (text, html) = written(&rich);
         assert_eq!(text, "Thanks\n\nOn Monday, A wrote:\n> hi\n");
         assert!(
             html.contains("<blockquote><p>hi</p></blockquote>"),
@@ -275,14 +290,14 @@ mod tests {
     #[test]
     fn whitespace_stays_as_written() {
         let text = "    indented\nA  B\tC\n> |  x  |  y |\n";
-        let rich = Rich::new(None, text, Images::default());
+        let rich = Rich::new(&DraftBody::plain(text), Images::default());
         rich.touch();
-        let (written, html) = rich.written().unwrap();
-        assert_eq!(written, text);
+        let (plain, html) = written(&rich);
+        assert_eq!(plain, text);
         // And again, from the HTML saved.
-        let again = Rich::new(Some(&html), "", Images::default());
+        let again = Rich::new(&formatted(&html), Images::default());
         again.touch();
-        assert_eq!(again.written().unwrap().0, text);
+        assert_eq!(written(&again).0, text);
     }
 
     #[test]
@@ -299,7 +314,7 @@ mod tests {
             );
         }
         // Every one is a type of the editor's schema.
-        let rich = Rich::new(None, "", Images::default());
+        let rich = Rich::new(&DraftBody::default(), Images::default());
         for (part, _) in NODE_CLASSES {
             let name = part.split('[').next().unwrap();
             assert!(rich.schema.node_type(name).is_some(), "{name}");
@@ -311,7 +326,7 @@ mod tests {
 
     #[test]
     fn links_are_set_changed_written_and_taken_off() {
-        let rich = Rich::new(Some("<p>Hello world</p>"), "", Images::default());
+        let rich = Rich::new(&formatted("<p>Hello world</p>"), Images::default());
         let select = |from: usize, to: usize| {
             rich.run(
                 "setTextSelection",
@@ -320,7 +335,7 @@ mod tests {
         };
         let html = || {
             rich.touch();
-            rich.written().unwrap().1
+            written(&rich).1
         };
         // The selection, linked.
         select(1, 6);
@@ -360,7 +375,7 @@ mod tests {
 
     #[test]
     fn typed_urls_become_links() {
-        let rich = Rich::new(Some("<p>See</p>"), "", Images::default());
+        let rich = Rich::new(&formatted("<p>See</p>"), Images::default());
         let end = rich.session.state().doc().content().size() - 1;
         rich.run("setTextSelection", json!({ "position": end }));
         rich.run(
@@ -368,7 +383,7 @@ mod tests {
             json!({ "position": end, "content": { "type": "text", "text": " example.com " } }),
         );
         rich.touch();
-        let html = rich.written().unwrap().1;
+        let html = written(&rich).1;
         assert!(
             html.contains(r#"<a href="https://example.com">example.com</a>"#),
             "{html}"
@@ -377,7 +392,7 @@ mod tests {
 
     #[test]
     fn formats_the_selection() {
-        let rich = Rich::new(Some("<p>Hello world</p>"), "", Images::default());
+        let rich = Rich::new(&formatted("<p>Hello world</p>"), Images::default());
         assert!(rich.run(
             "setTextSelection",
             json!({ "position": { "from": 1, "to": 6 } })
@@ -386,7 +401,7 @@ mod tests {
         assert!(rich.is_active("bold"));
         assert!(rich.run("toggleBulletList", Value::Null));
         rich.touch();
-        let (text, html) = rich.written().unwrap();
+        let (text, html) = written(&rich);
         assert_eq!(text, "* Hello world\n");
         assert!(
             html.contains("<ul><li><p><strong>Hello</strong> world</p></li></ul>"),
@@ -398,12 +413,15 @@ mod tests {
     fn images_show_from_their_files_and_are_saved_by_content_id() {
         let mut images = Images::default();
         images.insert("a@catmail".into(), PathBuf::from("/blobs/a"));
-        let rich = Rich::new(Some(r#"<p>See <img src="cid:a@catmail"></p>"#), "", images);
+        let rich = Rich::new(
+            &formatted(r#"<p>See <img src="cid:a@catmail"></p>"#),
+            images,
+        );
         assert_eq!(image_src(&rich), "/blobs/a");
         rich.insert_image("b@catmail".into(), PathBuf::from("/blobs/b"), "b.png");
         // The view's change touches it.
         rich.touch();
-        let (text, html) = rich.written().unwrap();
+        let (text, html) = written(&rich);
         assert_eq!(text, "See \n");
         assert!(html.contains(r#"src="cid:a@catmail""#), "{html}");
         assert!(

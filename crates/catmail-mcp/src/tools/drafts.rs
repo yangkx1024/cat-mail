@@ -313,8 +313,7 @@ impl Mail {
             to,
             cc,
             bcc,
-            text: p.text,
-            html: None,
+            body: catmail_core::DraftBody::plain(p.text),
         };
         let given = self.files(p.attachments)?;
         let from = self.identity(account, p.from.as_deref()).await?;
@@ -419,8 +418,7 @@ impl Mail {
             to: parsed(p.to)?,
             cc: parsed(p.cc)?,
             bcc: parsed(p.bcc)?,
-            text: p.text,
-            html: None,
+            body: p.text.map(catmail_core::DraftBody::plain),
         };
         if changes.is_empty() {
             return Err(Failed("invalid: nothing to change".into()));
