@@ -38,9 +38,7 @@ pub mod theme;
 pub mod tray;
 pub mod watched;
 
-/// The application id: Wayland's app id, X11's WM_CLASS, the `.desktop` file's name and
-/// its autostart entry's, the Flatpak's id.
-pub const APP_ID: &str = "net.yangkx.catmail";
+pub use catmail_core::APP_ID;
 
 /// Whether the app runs in its Flatpak: Flatpak puts this file at the root of every
 /// sandbox it runs.

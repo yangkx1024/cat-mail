@@ -151,13 +151,16 @@ mod tests {
 
     #[test]
     fn the_entry_quotes_the_program_as_the_specification_asks() {
-        let text = entry(Path::new("/opt/cat mail/catmail-gui")).unwrap();
+        let text = entry(Path::new("/opt/with space/catmail-gui")).unwrap();
         assert_eq!(
             text,
-            "[Desktop Entry]\nType=Application\nName=catmail\n\
-             Exec=\"/opt/cat mail/catmail-gui\" --background\n\
-             TryExec=/opt/cat mail/catmail-gui\nIcon=net.yangkx.catmail\nTerminal=false\n\
-             X-GNOME-Autostart-enabled=true\n"
+            format!(
+                "[Desktop Entry]\nType=Application\nName=catmail\n\
+                 Exec=\"/opt/with space/catmail-gui\" --background\n\
+                 TryExec=/opt/with space/catmail-gui\nIcon={}\nTerminal=false\n\
+                 X-GNOME-Autostart-enabled=true\n",
+                crate::APP_ID
+            )
         );
         // Quoted, then escaped as a string: a backslash is four.
         let text = entry(Path::new(r#"/a "b" $c 100%/d\e"#)).unwrap();
@@ -172,7 +175,7 @@ mod tests {
     #[test]
     fn the_entry_is_the_setting() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("net.yangkx.catmail.desktop");
+        let path = dir.path().join(format!("{}.desktop", crate::APP_ID));
         let exe = Path::new("/opt/catmail/catmail-gui");
         assert_eq!(state_of(&path), State::Off);
         enable(&path, exe).unwrap();

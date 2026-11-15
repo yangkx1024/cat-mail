@@ -61,7 +61,10 @@ sources，Flathub 不收本地目录。本地运行 `packaging/linux/build-flatp
 留下的约定：
 
 - 桌面文件、AppStream 元数据（`packaging/linux/`）的 id 都是 `net.yangkx.catmail`，与 `APP_ID` 和 Flatpak 的
-  app id 相同。每个窗口都设了这个 app id（Wayland 的 app id、X11 的 `WM_CLASS`），桌面文件的 `StartupWMClass`
+  app id 相同。`APP_ID` 只在 `catmail-core` 里定义，数据目录由它的三段拼出；包里的文件引用不了它，由
+  `catmail-frontend` 的集成测试（`tests/packaging.rs`）核对：文件名、`id:` 和安装路径、`Icon=`、
+  `StartupWMClass=`、`<id>`、`<launchable>` 和 `Info.plist` 的 bundle id。打包脚本不写 id，从 manifest、
+  `Info.plist` 里读。每个窗口都设了这个 app id（Wayland 的 app id、X11 的 `WM_CLASS`），桌面文件的 `StartupWMClass`
   也是它。任务栏、Alt-Tab 靠它找到窗口的图标和名字。
 - 图标用固定亮色的 `catmail-light.svg`：图标加载器不理会 `catmail.svg` 里的媒体查询。
 - 不用 Nix 打包（把整个闭包连同 Nix 的 glibc 一起放进去）：GL / Vulkan 驱动只能来自宿主机，链接的是宿主机的
@@ -101,7 +104,7 @@ catmail.app/Contents/
 - **签名**：Developer ID Application 证书，开 hardened runtime（公证的要求），带安全时间戳。不需要任何
   entitlement：没有 JIT、不进沙盒，钥匙串用的是不要 entitlement 的 generic password（`keyring`）。钥匙串
   条目只信任创建它的程序的签名要求（团队 ID 加 bundle id），之后同一张证书签的新版本直接能读；未签名的
-  开发构建、CLI 读 GUI 存的密码时，系统会问一次是否允许。CLI 的签名标识是 `net.yangkx.catmail.cli`。
+  开发构建、CLI 读 GUI 存的密码时，系统会问一次是否允许。CLI 的签名标识是 bundle id 加 `.cli`。
 - **公证**两轮，用 App Store Connect API key（`notarytool`，以 Apple 的结论为准，不是退出码；不通过时
   打印公证日志）。第一轮把 app 和 CLI 打成一个 zip 提交，通过后把票据钉在 app 上，这样从磁盘映像拷出来的
   app 离线也能打开；单个可执行文件钉不了票据，CLI 由 Gatekeeper 联网查。第二轮提交签好名的磁盘映像，

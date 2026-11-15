@@ -12,12 +12,15 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$root"
-manifest=packaging/linux/net.yangkx.catmail.yml
 out=target/flatpak
 install=--install
 [[ ${1:-} == --no-install ]] && install=
 
 die() { echo "error: $*" >&2; exit 1; }
+
+# The app's manifest, the one with an id (APP_ID in catmail-core), not a module's.
+manifest=$(grep -l '^id: ' packaging/linux/*.yml) || die "no manifest in packaging/linux"
+app_id=$(sed -n 's/^id: *//p' "$manifest")
 
 if command -v flatpak-builder > /dev/null; then
   builder=(flatpak-builder)
@@ -46,5 +49,5 @@ grep -q '^directory = "/run/build/catmail/vendor"$' "$out/cargo-config.toml" ||
 
 bundle=$out/catmail-$version-$arch.flatpak
 flatpak build-bundle --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
-  "$out/repo" "$bundle" net.yangkx.catmail
+  "$out/repo" "$bundle" "$app_id"
 echo "$bundle"
