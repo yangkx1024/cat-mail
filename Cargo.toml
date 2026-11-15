@@ -140,7 +140,7 @@ pollster = "1"
 # Remote images, when the user asks to see them. Without default features: rustls on our
 # ring configuration (`use_preconfigured_tls`), no native-tls, no HTTP/2, no system proxy
 # lookup.
-reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls-no-provider"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
 # catmail-gui's tray icon pixels: nsh-core's resvg, with text for the badge's digits.
 resvg = { version = "0.46", default-features = false, features = ["text", "system-fonts"] }
 # Reads iTerm2 color schemes (XML property lists).
