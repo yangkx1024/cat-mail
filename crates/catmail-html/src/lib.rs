@@ -24,7 +24,7 @@ mod tokens;
 pub use dark::DarkPalette;
 pub use images::{
     Image, MAX_REMOTE_IMAGES, Served, ServedImage, cid_image_ids, embed_inline_images,
-    remote_image_url, serve_images, sniff_image,
+    remote_image_url, rename_cid_images, serve_images, sniff_image,
 };
-pub use sanitize::sanitize_html;
-pub use text::{split_address, text, text_and_preheader, visible};
+pub use sanitize::{nested, sanitize_html};
+pub use text::{escape, split_address, text, text_and_preheader, visible};

@@ -11,9 +11,8 @@
 //! The page's own scripts are off (`java_script_enabled(false)`); the bridge below is
 //! an injected user script, which WebKit still runs.
 
-use catmail_core::html::{DarkPalette, Served, serve_images};
+use catmail_core::html::{DarkPalette, Served, escape, serve_images};
 
-use super::escape;
 use super::pages::image_base;
 
 /// Nothing may load except the message's `data:` images, those the reader serves, and

@@ -203,6 +203,21 @@ pub fn embed_inline_images(html: &str, inline: HashMap<String, Image>) -> String
     clean(&embedding, html)
 }
 
+/// HTML that [`sanitize_html`](crate::sanitize_html) produced, each `cid:` image whose
+/// Content-ID is a key of `renamed` showing the part of that value's Content-ID instead:
+/// the message's images copied into another message, under Content-IDs of their own.
+/// The new Content-IDs are written into the URL as they are.
+pub fn rename_cid_images(html: &str, renamed: HashMap<String, String>) -> String {
+    let renaming = sanitizer(
+        Some(Box::new(move |src| {
+            let new = renamed.get(&cid_image_id(src)?)?;
+            Some(format!("cid:{new}"))
+        })),
+        None,
+    );
+    clean(&renaming, html)
+}
+
 /// The type of a well-known raster image, from its first bytes. Senders and servers
 /// label images loosely (`application/octet-stream`, or the wrong format); what decodes
 /// them goes by the type.
@@ -390,6 +405,32 @@ mod tests {
             let path = src.strip_prefix("app:7/").unwrap();
             assert_eq!(ServedImage::from_path(path), Some(image));
         }
+    }
+
+    #[test]
+    fn renamed_images_show_their_new_parts() {
+        let html = sanitize_html(
+            r#"<style>p{color:red}</style><img src="cid:a@x"><img src="CID:%62@x"><img src="cid:c@x"><a href="cid:a@x">a</a><img src="https://x.example/a.png">"#,
+        );
+        let renamed = HashMap::from([
+            ("a@x".to_owned(), "1@catmail".to_owned()),
+            ("b@x".to_owned(), "2@catmail".to_owned()),
+        ]);
+        let html = rename_cid_images(&html, renamed);
+        assert!(html.starts_with("<style>p{color:red;}</style>"), "{html}");
+        assert_eq!(
+            srcs(&html),
+            [
+                "cid:1@catmail",
+                "cid:2@catmail",
+                "cid:c@x",
+                "https://x.example/a.png"
+            ]
+        );
+        assert!(
+            html.contains(r#"href="cid:a@x""#),
+            "a link isn't an image: {html}"
+        );
     }
 
     #[test]

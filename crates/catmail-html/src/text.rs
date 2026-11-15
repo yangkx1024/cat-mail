@@ -354,6 +354,14 @@ fn same_address(text: &str, url: &str) -> bool {
     host.eq_ignore_ascii_case(url_host) && rest == url_rest
 }
 
+/// `text` as HTML text or an attribute's value.
+pub fn escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
