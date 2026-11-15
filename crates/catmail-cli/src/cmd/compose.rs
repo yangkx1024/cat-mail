@@ -20,7 +20,7 @@ use crate::json::{self, JsonDraft, JsonDraftAttachment};
 use crate::output::{print_draft, print_drafts, printable};
 
 fn print_draft_json(draft: &Draft) -> Result<()> {
-    json::print_keyed("draft", &JsonDraft::from(draft))
+    json::print_keyed("draft", &JsonDraft::from(&draft.into()))
 }
 
 #[derive(Args)]
@@ -157,6 +157,9 @@ pub(crate) enum DraftCommand {
         id: i64,
         #[command(flatten)]
         fields: Fields,
+        /// Take out the message a reply or forward quotes; `--body` alone keeps it
+        #[arg(long)]
+        no_quote: bool,
     },
     /// Attach files to a draft
     Attach {
@@ -288,13 +291,18 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
             }
             None
         }
-        DraftCommand::Edit { id, fields } => {
+        DraftCommand::Edit {
+            id,
+            fields,
+            no_quote,
+        } => {
             let draft = get_draft(client, id).await?;
             let was_in = draft.account_id;
             let from = fields.from.resolve_for(client, &draft).await?;
             // Only what was given: the engine makes it to the draft as it is then.
             let changes = DraftChanges {
                 from,
+                quote: no_quote.then_some(None),
                 ..fields.changes()?
             };
             let draft = client.update_draft(draft.id, changes).await?;
@@ -395,6 +403,7 @@ impl Fields {
             cc,
             bcc,
             body: read_body(self.body, self.body_file.as_ref())?.map(DraftBody::plain),
+            quote: None,
         })
     }
 }
@@ -562,15 +571,11 @@ mod tests {
             "{drafts:?}"
         );
         // Most recent first.
-        assert!(
-            drafts[0].content.body.text.starts_with("fyi\n\n"),
-            "{drafts:?}"
-        );
-        assert_eq!(drafts[0].content.to[0].email, "bob@example.com");
-        assert!(
-            drafts[1].content.body.text.starts_with("thanks\n\n"),
-            "{drafts:?}"
-        );
+        assert_eq!(drafts[0].text, "fyi", "{drafts:?}");
+        assert!(drafts[0].quote.is_some(), "{drafts:?}");
+        assert_eq!(drafts[0].to[0].email, "bob@example.com");
+        assert_eq!(drafts[1].text, "thanks", "{drafts:?}");
+        assert!(drafts[1].quote.is_some(), "{drafts:?}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -615,6 +620,7 @@ mod tests {
                 body: None,
                 body_file: None,
             },
+            no_quote: false,
         };
         let new = client
             .create_draft(alice, None, DraftContent::default(), Vec::new())

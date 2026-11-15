@@ -75,11 +75,20 @@ pub(super) fn attachment_cost(attachment: &Attachment) -> u64 {
     }
 }
 
-/// What forwarding the message downloads: its body, or the attachments not here yet
-/// (a large message's body comes without them).
+/// What replying to the message downloads: its body, or the images it shows not here
+/// yet (a large message's body comes without them), which the quote carries.
+pub(super) fn reply_cost(message: &Message) -> u64 {
+    match &message.body {
+        Some(body) => body.inline_parts().map(attachment_cost).sum(),
+        None => body_cost(message),
+    }
+}
+
+/// What forwarding the message downloads: its body, or the attachments and images not
+/// here yet.
 pub(super) fn forward_cost(message: &Message) -> u64 {
     match &message.body {
-        Some(body) => body.files().map(attachment_cost).sum(),
+        Some(body) => body.attachments.iter().map(attachment_cost).sum(),
         None => body_cost(message),
     }
 }

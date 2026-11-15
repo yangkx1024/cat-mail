@@ -369,7 +369,7 @@ fn draft_row(item: Memo<Option<Line>>) -> impl IntoElement {
         Some(Line::Row(Row::Draft(d))) => Some(d),
         _ => None,
     });
-    let field = move |f: fn(&catmail_core::Draft) -> String| {
+    let field = move |f: fn(&catmail_core::DraftSummary) -> String| {
         move || draft.with(|d| d.as_deref().map(f).unwrap_or_default())
     };
     let who = move || {
@@ -378,11 +378,9 @@ fn draft_row(item: Memo<Option<Line>>) -> impl IntoElement {
             .text_sm()
     };
     let subject = move || {
-        text(field(|d| {
-            format::subject(Some(&d.content.subject)).to_owned()
-        }))
-        .number_of_lines(1)
-        .text_sm()
+        text(field(|d| format::subject(Some(&d.subject)).to_owned()))
+            .number_of_lines(1)
+            .text_sm()
     };
     let time = move || {
         text(field(|d| format::time(Some(d.updated_at), &clock())))

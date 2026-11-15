@@ -17,7 +17,7 @@ pub use pages::{BodyPages, IMAGE_SCHEME};
 
 use std::collections::HashMap;
 
-use catmail_core::html::{Image, embed_inline_images};
+use catmail_core::html::{Image, embed_inline_images, escape};
 
 /// Content-Security-Policy of the browser page: nothing may load except the images
 /// embedded in the page and its inline styles. Browsers ignore `cid:`, so inline parts are
@@ -45,14 +45,6 @@ pub fn browser_page(title: &str, html: &str, inline: HashMap<String, Image>) -> 
         escape(title),
         embed_inline_images(html, inline),
     )
-}
-
-/// `text` as HTML text or an attribute's value.
-pub(crate) fn escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
 
 #[cfg(test)]

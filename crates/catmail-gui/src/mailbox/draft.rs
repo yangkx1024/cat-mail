@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use catmail_core::{Draft, DraftId};
+use catmail_core::{DraftId, DraftSummary};
 use catmail_frontend::composer::ComposeFrom;
 use catmail_frontend::composer::draft_deletion;
 use catmail_frontend::format;
@@ -33,7 +33,7 @@ pub fn pane() -> impl IntoElement {
         }))
 }
 
-fn toolbar(draft: Memo<Option<Rc<Draft>>>) -> impl IntoElement {
+fn toolbar(draft: Memo<Option<Rc<DraftSummary>>>) -> impl IntoElement {
     let id = move || draft.with(|d| d.as_ref().map(|d| d.id));
     chrome::toolbar()
         .gap(px(2.0))
@@ -58,7 +58,7 @@ fn toolbar(draft: Memo<Option<Rc<Draft>>>) -> impl IntoElement {
             Size::Bar,
             move || {
                 if let Some(draft) = draft.get_untracked() {
-                    confirm_delete(draft.id, Some(&draft.content.subject));
+                    confirm_delete(draft.id, Some(&draft.subject));
                 }
             },
         ))
@@ -77,17 +77,13 @@ fn confirm_delete(id: DraftId, subject: Option<&str>) {
 
 /// What the draft says: the server's complaint if it couldn't keep a copy, its subject,
 /// recipients, attachments and text.
-fn page(draft: Rc<Draft>) -> impl IntoElement {
+fn page(draft: Rc<DraftSummary>) -> impl IntoElement {
     let muted = move || theme().muted_foreground;
-    let lines = [
-        ("To", &draft.content.to),
-        ("Cc", &draft.content.cc),
-        ("Bcc", &draft.content.bcc),
-    ]
-    .into_iter()
-    .filter(|(_, list)| !list.is_empty())
-    .map(|(name, list)| fact(name, format::addresses(list)).into_element())
-    .collect::<Vec<_>>();
+    let lines = [("To", &draft.to), ("Cc", &draft.cc), ("Bcc", &draft.bcc)]
+        .into_iter()
+        .filter(|(_, list)| !list.is_empty())
+        .map(|(name, list)| fact(name, format::addresses(list)).into_element())
+        .collect::<Vec<_>>();
     let upload_error = draft.upload_error.clone().map(|error| {
         view()
             .gap(px(4.0))
@@ -149,7 +145,7 @@ fn page(draft: Rc<Draft>) -> impl IntoElement {
             .gap(px(12.0))
             .children(upload_error)
             .child(
-                text(format::subject(Some(&draft.content.subject)).to_owned())
+                text(format::subject(Some(&draft.subject)).to_owned())
                     .text_xl()
                     .font_weight(FontWeight::SEMIBOLD)
                     .selectable_text()
@@ -158,7 +154,7 @@ fn page(draft: Rc<Draft>) -> impl IntoElement {
             .children(lines)
             .children(attachments)
             .child(
-                text(draft.content.body.text.clone())
+                text(draft.text_as_sent())
                     .pt(px(12.0))
                     .border_t_1()
                     .border_color(move || theme().border)

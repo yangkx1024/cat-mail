@@ -6,8 +6,9 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use catmail_core::{
-    Account, Draft, Flags, Folder, FolderId, FolderKind, Identity, Message, MessageSummary, OpKind,
-    OpStatus, OutboxEntry, OutboxStatus, PendingOp, ServerConfig, SyncReport, display,
+    Account, Draft, DraftSummary, Flags, Folder, FolderId, FolderKind, Identity, Message,
+    MessageSummary, OpKind, OpStatus, OutboxEntry, OutboxStatus, PendingOp, ServerConfig,
+    SyncReport, display,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -438,7 +439,7 @@ fn change(kind: OpKind, folder: &impl Fn(FolderId) -> String) -> String {
     }
 }
 
-pub(crate) fn print_drafts(drafts: &[Draft]) {
+pub(crate) fn print_drafts(drafts: &[DraftSummary]) {
     if drafts.is_empty() {
         println!("No drafts.");
         return;
@@ -449,10 +450,10 @@ pub(crate) fn print_drafts(drafts: &[Draft]) {
             vec![
                 d.id.to_string(),
                 display::date(Some(d.updated_at)),
-                server_status(d).into(),
-                truncate(&display::names(d.content.recipients()), 30),
+                server_status(d.on_server, d.upload_error.as_ref()).into(),
+                truncate(&display::names(d.recipients()), 30),
                 if d.attachments.is_empty() { "" } else { "@" }.into(),
-                display::subject(Some(&d.content.subject)).to_owned(),
+                display::subject(Some(&d.subject)).to_owned(),
             ]
         })
         .collect();
@@ -483,7 +484,7 @@ pub(crate) fn print_draft(draft: &Draft, from: Option<&Identity>) {
         None => {}
     }
     println!();
-    println!("{}", printable_text(c.body.text.trim_end()));
+    println!("{}", printable_text(c.text_as_sent().trim_end()));
     if !draft.attachments.is_empty() {
         println!();
         let rows = draft
@@ -503,8 +504,10 @@ pub(crate) fn print_draft(draft: &Draft, from: Option<&Identity>) {
 }
 
 /// Whether the server's Drafts folder has the draft as it is.
-fn server_status(draft: &Draft) -> &'static str {
-    match (draft.on_server, &draft.upload_error) {
+/// Whether the server has the draft's copy: `on_server`, or refused it with
+/// `upload_error`.
+fn server_status(on_server: bool, upload_error: Option<&String>) -> &'static str {
+    match (on_server, upload_error) {
         (true, _) => "saved",
         (false, Some(_)) => "refused",
         (false, None) => "",

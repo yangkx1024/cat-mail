@@ -74,18 +74,15 @@ pub(super) struct Element {
 /// ends with its sheet), the rules of one for some media only inside an `@media` block.
 /// With a palette, their colors are moved for a dark page.
 pub(super) fn sanitize(elements: &[Element], recolor: Option<DarkPalette>) -> Stylesheet {
-    let mut sheet = Sheet::new(MAX_LEN, recolor);
-    for element in elements {
-        if sheet.full() {
-            break;
-        }
-        sheet.element(element);
-    }
-    Stylesheet {
-        css: sheet.out.replace('<', "\\3c "),
-        adapts_to_dark: sheet.dark,
-        colors_from_variables: sheet.variables,
-    }
+    Sheet::new(MAX_LEN, recolor, None).all(elements)
+}
+
+/// [`sanitize`], each rule made to apply only within the element of class `scope`, as the
+/// message's sheet once the message is put inside another document: `html`, `body` and
+/// `:root` at the start of a selector are that element, and any other selector matches
+/// only inside it. `scope` must be an identifier.
+pub(super) fn sanitize_scoped(elements: &[Element], scope: &str) -> Stylesheet {
+    Sheet::new(MAX_LEN, None, Some(scope)).all(elements)
 }
 
 /// A token that is never written back: a URL, a [refused](REFUSED) function, or an at-rule
@@ -110,7 +107,7 @@ pub(super) fn sanitize_style(style: &str, recolor: Option<DarkPalette>) -> Style
     }
 }
 
-struct Sheet {
+struct Sheet<'s> {
     out: String,
     /// Bytes `out` may still take.
     budget: usize,
@@ -118,10 +115,12 @@ struct Sheet {
     dark: bool,
     variables: bool,
     recolor: Option<DarkPalette>,
+    /// The class of the element the rules are scoped to ([`sanitize_scoped`]).
+    scope: Option<&'s str>,
 }
 
-impl Sheet {
-    fn new(budget: usize, recolor: Option<DarkPalette>) -> Self {
+impl<'s> Sheet<'s> {
+    fn new(budget: usize, recolor: Option<DarkPalette>, scope: Option<&'s str>) -> Self {
         Self {
             out: String::new(),
             budget,
@@ -129,6 +128,22 @@ impl Sheet {
             dark: false,
             variables: false,
             recolor,
+            scope,
+        }
+    }
+
+    /// The sheets' rules, kept as one.
+    fn all(mut self, elements: &[Element]) -> Stylesheet {
+        for element in elements {
+            if self.full() {
+                break;
+            }
+            self.element(element);
+        }
+        Stylesheet {
+            css: self.out.replace('<', "\\3c "),
+            adapts_to_dark: self.dark,
+            colors_from_variables: self.variables,
         }
     }
 
@@ -173,8 +188,12 @@ impl Sheet {
     }
 
     fn style_rule<'i>(&mut self, parser: &mut Parser<'i>, first: &Token<'i>) {
-        let mut selector = Css::default();
-        let mut kept = copy(parser, first, &mut selector, Context::Selector).is_ok();
+        let mut selector = Selector {
+            css: Css::default(),
+            scope: self.scope,
+            lead: Lead::Start,
+        };
+        let mut kept = selector.copy(parser, first).is_ok();
         loop {
             // Ended without a block: not a rule.
             let Ok(token) = parser.next_including_whitespace().cloned() else {
@@ -182,11 +201,10 @@ impl Sheet {
             };
             match token {
                 Token::CurlyBracketBlock => break,
-                token => {
-                    kept = kept && copy(parser, &token, &mut selector, Context::Selector).is_ok()
-                }
+                token => kept = kept && selector.copy(parser, &token).is_ok(),
             }
         }
+        let selector = selector.css;
         let mut declarations = Declarations::new(self.recolor);
         let _ = parser.parse_nested_block(|block| {
             declarations.parse(block);
@@ -239,7 +257,7 @@ impl Sheet {
             name == "media" && query.contains("prefers-color-scheme") && query.contains("dark");
         let head = format!("@{name} {}{{", prelude.trim());
         let budget = self.budget.saturating_sub(self.out.len() + head.len() + 1);
-        let mut inner = Sheet::new(budget, self.recolor);
+        let mut inner = Sheet::new(budget, self.recolor, self.scope);
         inner.rules = self.rules;
         inner.rules(block, depth + 1);
         self.rules = inner.rules;
@@ -251,6 +269,107 @@ impl Sheet {
             self.out.push('}');
         }
     }
+}
+
+/// A rule's selector list as it is written back, scoped if the sheet is.
+struct Selector<'s> {
+    css: Css,
+    scope: Option<&'s str>,
+    /// Where in the current selector of the list the next token is.
+    lead: Lead,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Lead {
+    /// At its start, before anything but whitespace.
+    Start,
+    /// Right after `html` or `:root`, written as the scope, which a `body` below it (a
+    /// descendant, `html body`, or a child, `html > body`) is too; with the whitespace and
+    /// `>` between them held back.
+    AfterRoot {
+        space: bool,
+        child: bool,
+    },
+    Rest,
+}
+
+impl Selector<'_> {
+    /// Writes a token of the selector list, as [`copy`] does.
+    fn copy<'i>(&mut self, parser: &mut Parser<'i>, token: &Token<'i>) -> Result<(), ()> {
+        if self.scope.is_none() {
+            return copy(parser, token, &mut self.css, Context::Selector);
+        }
+        // Commas inside a function (`:is(a, b)`) are copied with it: this one is between
+        // two selectors of the list.
+        if *token == Token::Comma {
+            self.lead = Lead::Start;
+            return self.css.push(token);
+        }
+        let ident = |name: &str| matches!(token, Token::Ident(n) if n.eq_ignore_ascii_case(name));
+        match self.lead {
+            Lead::Start if matches!(token, Token::WhiteSpace(_)) => Ok(()),
+            Lead::Start if ident("html") || (*token == Token::Colon && is_root(parser)) => {
+                self.lead = Lead::AfterRoot {
+                    space: false,
+                    child: false,
+                };
+                self.push_scope()
+            }
+            Lead::Start if ident("body") => {
+                self.lead = Lead::Rest;
+                self.push_scope()
+            }
+            Lead::Start => {
+                self.lead = Lead::Rest;
+                self.push_scope()?;
+                self.css.push(&Token::WhiteSpace(" "))?;
+                copy(parser, token, &mut self.css, Context::Selector)
+            }
+            Lead::AfterRoot { child, .. } if matches!(token, Token::WhiteSpace(_)) => {
+                self.lead = Lead::AfterRoot { space: true, child };
+                Ok(())
+            }
+            Lead::AfterRoot {
+                space,
+                child: false,
+            } if *token == Token::Delim('>') => {
+                self.lead = Lead::AfterRoot { space, child: true };
+                Ok(())
+            }
+            Lead::AfterRoot { space, child } if (space || child) && ident("body") => {
+                self.lead = Lead::Rest;
+                Ok(())
+            }
+            Lead::AfterRoot { space, child } => {
+                self.lead = Lead::Rest;
+                if child {
+                    self.css.push(&Token::WhiteSpace(" "))?;
+                    self.css.push(&Token::Delim('>'))?;
+                }
+                if space || child {
+                    self.css.push(&Token::WhiteSpace(" "))?;
+                }
+                copy(parser, token, &mut self.css, Context::Selector)
+            }
+            Lead::Rest => copy(parser, token, &mut self.css, Context::Selector),
+        }
+    }
+
+    fn push_scope(&mut self) -> Result<(), ()> {
+        let scope = self.scope.unwrap_or_default();
+        self.css.push(&Token::Delim('.'))?;
+        self.css.push(&Token::Ident(scope.into()))
+    }
+}
+
+/// Whether the tokens after a `:` are `root`, which are then taken.
+fn is_root(parser: &mut Parser<'_>) -> bool {
+    parser
+        .try_parse(|p| match p.next_including_whitespace() {
+            Ok(Token::Ident(name)) if name.eq_ignore_ascii_case("root") => Ok(()),
+            _ => Err(()),
+        })
+        .is_ok()
 }
 
 /// The declarations of a rule or a `style` attribute.
@@ -492,6 +611,41 @@ mod tests {
             css("@media a{@media b{@media c{@media d{.x{color:red}}}}}"),
             "",
             "nested too deep"
+        );
+    }
+
+    fn scoped(source: &str) -> String {
+        let elements = [Element {
+            media: None,
+            css: source.into(),
+        }];
+        sanitize_scoped(&elements, "q").css
+    }
+
+    #[test]
+    fn a_scoped_sheet_applies_only_within_its_element() {
+        assert_eq!(
+            scoped("body{margin:0}html body .a{color:red} :root{color:blue}"),
+            ".q{margin:0;}.q .a{color:red;}.q{color:blue;}"
+        );
+        assert_eq!(
+            scoped("p, .a > b, html{x:1} * {y:2}"),
+            ".q p,.q .a > b,.q{x:1;}.q *{y:2;}"
+        );
+        // `body` as the root's child is the scope as well.
+        assert_eq!(
+            scoped("html > body p{x:1}html>body{y:2}html > p{z:3}"),
+            ".q p{x:1;}.q{y:2;}.q > p{z:3;}"
+        );
+        // Commas within a function separate nothing; `body` past the start is any body.
+        assert_eq!(
+            scoped(":is(p, li) a{x:1}div body{y:2}"),
+            ".q :is(p, li) a{x:1;}.q div body{y:2;}"
+        );
+        // `html.dark` is the scope with that class, which it doesn't have.
+        assert_eq!(
+            scoped("@media (max-width:600px){html.dark p{x:1}}"),
+            "@media (max-width:600px){.q.dark p{x:1;}}"
         );
     }
 

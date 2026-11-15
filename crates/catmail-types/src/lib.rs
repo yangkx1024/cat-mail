@@ -23,7 +23,8 @@ pub use account::{
     Security, SendProblem, ServerConfig, ServerProblem,
 };
 pub use draft::{
-    Draft, DraftAttachment, DraftBody, DraftChanges, DraftContent, Forwarding, NewFile,
+    Draft, DraftAttachment, DraftBody, DraftChanges, DraftContent, DraftSummary, Forwarding,
+    NewFile, Quote, QuoteKind,
 };
 pub use error::{ErrorKind, ReportedError};
 pub use event::Event;

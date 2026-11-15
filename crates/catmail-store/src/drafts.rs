@@ -1,20 +1,28 @@
 use catmail_types::{
     AccountId, BlobHash, Draft, DraftAttachment, DraftAttachmentId, DraftBody, DraftContent,
-    DraftId, FolderId, FolderRole, IdentityId, MessageId, OutboxId,
+    DraftId, DraftSummary, FolderId, FolderRole, IdentityId, MessageId, OutboxId, Quote, QuoteKind,
 };
 use std::collections::HashSet;
 
 use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
-use crate::columns::{id_list, json, parse_text, size_limit, to_id_list, to_json};
+use crate::columns::{id_list, json, parse_opt_text, parse_text, size_limit, to_id_list, to_json};
 use crate::folders::Folders;
 use crate::identities::Identities;
 use crate::ops::{PendingOps, Touched};
 use crate::{Error, Result};
 
+/// What a [`DraftSummary`] is read from, with the draft joined to its outbox entry `o`.
+const SUMMARY_COLUMNS: &str = "d.id, d.account_id, d.reply_to_message_id, d.in_reply_to,
+    d.references_hdr, d.identity_id, d.subject, d.to_json, d.cc_json, d.bcc_json,
+    d.body_text, d.body_html IS NOT NULL AS formatted, d.quote_kind, d.quote_intro,
+    d.quote_text, d.revision, d.updated_at,
+    d.remote_revision IS d.revision AS on_server, d.upload_error, o.id AS outbox_id";
+
+/// What a [`Draft`] is read from: a summary's and the HTML.
 const COLUMNS: &str = "d.id, d.account_id, d.reply_to_message_id, d.in_reply_to, d.references_hdr,
     d.identity_id, d.subject, d.to_json, d.cc_json, d.bcc_json, d.body_text, d.body_html,
-    d.revision,
+    d.quote_kind, d.quote_intro, d.quote_text, d.quote_html, d.revision,
     d.updated_at,
     d.remote_revision IS d.revision AS on_server, d.upload_error, o.id AS outbox_id";
 
@@ -115,14 +123,16 @@ impl<'c> Drafts<'c> {
             }
         }
         let identity = Identities::new(self.conn).resolve(account, identity)?;
+        let quote = content.quote.as_ref();
         self.conn
             .prepare_cached(
                 "INSERT INTO drafts (account_id, reply_to_message_id, in_reply_to, references_hdr,
                                      identity_id, subject, to_json, cc_json, bcc_json, body_text,
-                                     body_html, updated_at)
+                                     body_html, quote_kind, quote_intro, quote_text, quote_html,
+                                     updated_at)
                  VALUES (:account, (SELECT id FROM messages WHERE id = :reply), :in_reply_to,
                          :references, :identity, :subject, :to, :cc, :bcc, :text, :html,
-                         :now)",
+                         :quote_kind, :quote_intro, :quote_text, :quote_html, :now)",
             )?
             .execute(named_params! {
                 ":account": account.0,
@@ -136,6 +146,10 @@ impl<'c> Drafts<'c> {
                 ":bcc": to_json(&content.bcc),
                 ":text": content.body.text,
                 ":html": content.body.html,
+                ":quote_kind": quote.map(|q| q.kind.as_str()),
+                ":quote_intro": quote.map(|q| &q.intro),
+                ":quote_text": quote.map(|q| &q.text),
+                ":quote_html": quote.and_then(|q| q.html.as_deref()),
                 ":now": now,
             })?;
         Ok(DraftId(self.conn.last_insert_rowid()))
@@ -154,16 +168,16 @@ impl<'c> Drafts<'c> {
         Ok(self.snapshot(id)?.map(|s| s.draft))
     }
 
-    /// The account's drafts that can be edited, most recently changed first. Drafts
-    /// being sent are in the outbox instead.
-    pub fn list(&self, account: AccountId) -> Result<Vec<Draft>> {
+    /// The account's drafts that can be edited, most recently changed first, without
+    /// their HTML. Drafts being sent are in the outbox instead.
+    pub fn list(&self, account: AccountId) -> Result<Vec<DraftSummary>> {
         let sql = format!(
-            "SELECT {COLUMNS} FROM drafts d LEFT JOIN outbox o ON o.draft_id = d.id
+            "SELECT {SUMMARY_COLUMNS} FROM drafts d LEFT JOIN outbox o ON o.draft_id = d.id
              WHERE d.account_id = ?1 AND o.id IS NULL
              ORDER BY d.updated_at DESC, d.id DESC"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
-        let rows = stmt.query_map([account.0], from_row)?;
+        let rows = stmt.query_map([account.0], summary_from_row)?;
         let mut drafts = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         for draft in &mut drafts {
             draft.attachments = self
@@ -234,12 +248,16 @@ impl<'c> Drafts<'c> {
             // `Identities::delete` made it. Ids aren't reused.
             None => None,
         };
+        let quote = content.quote.as_ref();
         self.conn
             .prepare_cached(
                 "UPDATE drafts SET identity_id = coalesce(:identity, identity_id),
                                    subject = :subject, to_json = :to,
                                    cc_json = :cc, bcc_json = :bcc, body_text = :text,
-                                   body_html = :html, revision = revision + 1, updated_at = :now
+                                   body_html = :html, quote_kind = :quote_kind,
+                                   quote_intro = :quote_intro, quote_text = :quote_text,
+                                   quote_html = :quote_html, revision = revision + 1,
+                                   updated_at = :now
                  WHERE id = :id",
             )?
             .execute(named_params! {
@@ -251,6 +269,10 @@ impl<'c> Drafts<'c> {
                 ":bcc": to_json(&content.bcc),
                 ":text": content.body.text,
                 ":html": content.body.html,
+                ":quote_kind": quote.map(|q| q.kind.as_str()),
+                ":quote_intro": quote.map(|q| &q.intro),
+                ":quote_text": quote.map(|q| &q.text),
+                ":quote_html": quote.and_then(|q| q.html.as_deref()),
                 ":now": now,
             })?;
         Ok(Some(account))
@@ -607,7 +629,7 @@ impl<'c> Drafts<'c> {
         Ok(size as u64)
     }
 
-    /// The images of the draft's HTML: each one's Content-ID and content.
+    /// The images of the draft's HTML and its quote's: each one's Content-ID and content.
     pub fn images(&self, draft: DraftId) -> Result<Vec<(String, BlobHash)>> {
         Ok(self
             .attachments(draft)?
@@ -616,7 +638,7 @@ impl<'c> Drafts<'c> {
             .collect())
     }
 
-    /// Removes the images of the draft's HTML but those in `shown`; true if there were
+    /// Removes the images of the draft's HTML and quote but those in `shown`; true if there were
     /// others (the draft changed).
     pub fn remove_images(&self, draft: DraftId, shown: &HashSet<String>, now: i64) -> Result<bool> {
         let mut removed = false;
@@ -744,6 +766,45 @@ fn upload_from_row(r: &Row<'_>) -> rusqlite::Result<DraftUpload> {
     })
 }
 
+/// The quote of a draft row with `html` read already, if it has one.
+fn quote(row: &Row<'_>, html: Option<String>) -> rusqlite::Result<Option<Quote>> {
+    let Some(kind) = parse_opt_text::<QuoteKind>(row, "quote_kind")? else {
+        return Ok(None);
+    };
+    Ok(Some(Quote {
+        kind,
+        intro: row.get("quote_intro")?,
+        text: row.get("quote_text")?,
+        html,
+    }))
+}
+
+/// Without attachments.
+fn summary_from_row(row: &Row<'_>) -> rusqlite::Result<DraftSummary> {
+    Ok(DraftSummary {
+        id: DraftId(row.get("id")?),
+        account_id: AccountId(row.get("account_id")?),
+        identity: IdentityId(row.get("identity_id")?),
+        subject: row.get("subject")?,
+        to: json(row, "to_json")?,
+        cc: json(row, "cc_json")?,
+        bcc: json(row, "bcc_json")?,
+        text: row.get("body_text")?,
+        formatted: row.get("formatted")?,
+        quote: quote(row, None)?.as_ref().map(Quote::as_text),
+        attachments: Vec::new(),
+        reply_to: row
+            .get::<_, Option<i64>>("reply_to_message_id")?
+            .map(MessageId),
+        in_reply_to: row.get("in_reply_to")?,
+        references: id_list(row, "references_hdr")?,
+        outbox: row.get::<_, Option<i64>>("outbox_id")?.map(OutboxId),
+        on_server: row.get("on_server")?,
+        upload_error: row.get("upload_error")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
 /// Without attachments.
 fn from_row(row: &Row<'_>) -> rusqlite::Result<Draft> {
     Ok(Draft {
@@ -759,6 +820,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Draft> {
                 text: row.get("body_text")?,
                 html: row.get("body_html")?,
             },
+            quote: quote(row, row.get("quote_html")?)?,
         },
         attachments: Vec::new(),
         reply_to: row
@@ -910,6 +972,40 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn the_quote_is_kept_and_taken_out() {
+        let store = test_util::store();
+        let account = test_util::account(&store, "a@example.com");
+        let quoted = DraftContent {
+            body: DraftBody {
+                text: "好的".into(),
+                html: Some("<p><b>好的</b></p>".into()),
+            },
+            quote: Some(Quote {
+                kind: QuoteKind::Reply,
+                intro: "On Monday, 张三 wrote:".into(),
+                text: "你好".into(),
+                html: Some("<style>p{color:red;}</style><p>你好</p>".into()),
+            }),
+            ..content("Re: hi")
+        };
+        let id = store
+            .write(|db| db.drafts().insert(account, None, &quoted, None, 1))
+            .unwrap();
+        let get = || store.read(|db| db.drafts().get(id)).unwrap().unwrap();
+        assert_eq!(get().content, quoted);
+        // Listed without the HTML, the same otherwise.
+        let listed = store.read(|db| db.drafts().list(account)).unwrap();
+        assert_eq!(listed, [DraftSummary::from(&get())]);
+        assert!(listed[0].formatted && listed[0].quote.is_some());
+        assert!(
+            store
+                .write(|db| edit(db, id, &content("Re: hi"), 2))
+                .unwrap()
+        );
+        assert_eq!(get().content.quote, None);
     }
 
     fn locked<T>(r: Result<T>) -> bool {

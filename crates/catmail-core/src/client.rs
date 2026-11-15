@@ -9,10 +9,10 @@ use catmail_proto::{Credentials, TlsConfig};
 use catmail_store::{BlobStore, Db, Identities, Store};
 use catmail_types::{
     Account, AccountId, AccountOverview, AccountStatus, AttachmentId, ChangeReport, DeleteMode,
-    Draft, DraftAttachment, DraftAttachmentId, DraftChanges, DraftContent, DraftId, Event, Flags,
-    FlushReport, Folder, FolderId, FolderRole, FolderSyncReport, Forwarding, GcReport, Identity,
-    IdentityId, Message, MessageCursor, MessageId, MessageSummary, NewAccount, NewFile,
-    NewIdentity, OutboxEntry, OutboxId, PendingOp, PendingOpId, ReplayReport, SearchQuery,
+    Draft, DraftAttachment, DraftAttachmentId, DraftChanges, DraftContent, DraftId, DraftSummary,
+    Event, Flags, FlushReport, Folder, FolderId, FolderRole, FolderSyncReport, Forwarding,
+    GcReport, Identity, IdentityId, Message, MessageCursor, MessageId, MessageSummary, NewAccount,
+    NewFile, NewIdentity, OutboxEntry, OutboxId, PendingOp, PendingOpId, ReplayReport, SearchQuery,
     ServerConfig, SyncReport, special_folder,
 };
 use secrecy::{ExposeSecret, SecretString};
@@ -1268,11 +1268,13 @@ impl MailClient {
     }
 
     /// A new draft answering the message, to its sender (or Reply-To) and, with `all`,
-    /// to everyone else it went to, quoting its text and threaded to it. Sent as `from`,
-    /// one of the message's account's identities; with `None`, as the identity the
-    /// message came from or went to (see [`identity_by_address`]), else the default.
-    /// `text`, if not empty, is written above the quote. Downloads the body first if
-    /// needed. `files` are attached as in [`create_draft`](Self::create_draft).
+    /// to everyone else it went to, quoting it ([`DraftContent::quote`]: its text, and its
+    /// HTML with the images it shows) and threaded to it. Sent as `from`, one of the
+    /// message's account's identities; with `None`, as the identity the message came from
+    /// or went to (see [`identity_by_address`]), else the default. `text` is the body,
+    /// sent above the quote. Downloads the body first if needed, and the images the quote
+    /// shows; one that can't be had, or doesn't fit in what the attachments may add up to,
+    /// is left out. `files` are attached as in [`create_draft`](Self::create_draft).
     ///
     /// [`identity_by_address`]: Self::identity_by_address
     pub async fn reply(
@@ -1302,11 +1304,12 @@ impl MailClient {
     }
 
     /// A new draft forwarding the message to the recipients `forwarding` names (none with
-    /// [`Forwarding::default`]): `Fwd:` and its subject, its headers and text below an
-    /// empty start or `forwarding.text`, and copies of its attachments (not the images
-    /// shown within it). Addresses are checked as in [`create_draft`](Self::create_draft).
-    /// Downloads the body and attachments first if needed; fails, creating nothing, if
-    /// one can't be had. Sent as `from`, one of the message's account's identities, its
+    /// [`Forwarding::default`]): `Fwd:` and its subject, the message with its headers as
+    /// the quote ([`DraftContent::quote`]) below `forwarding.text`, and copies of its
+    /// attachments and of the images it shows. Addresses are checked as in
+    /// [`create_draft`](Self::create_draft). Downloads the body and attachments first if
+    /// needed; fails, creating nothing, if an attachment can't be had (an image is left
+    /// out, as in [`reply`](Self::reply)). Sent as `from`, one of the message's account's identities, its
     /// default with `None`. `files` are attached besides the message's attachments, as in
     /// [`create_draft`](Self::create_draft).
     pub async fn forward(
@@ -1395,9 +1398,10 @@ impl MailClient {
             .await
     }
 
-    /// The account's drafts, most recently changed first. Drafts being sent are not
-    /// among them; see [`list_outbox`](Self::list_outbox).
-    pub async fn list_drafts(&self, account: AccountId) -> Result<Vec<Draft>> {
+    /// The account's drafts, most recently changed first, as a list shows them: without
+    /// the HTML of their text and quote ([`get_draft`](Self::get_draft) has it). Drafts
+    /// being sent are not among them; see [`list_outbox`](Self::list_outbox).
+    pub async fn list_drafts(&self, account: AccountId) -> Result<Vec<DraftSummary>> {
         let engine = self.engine()?;
         self.shared
             .rt

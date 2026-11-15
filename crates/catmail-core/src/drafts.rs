@@ -1,7 +1,7 @@
 //! Drafts: written and kept locally, copied to the server's Drafts folder
 //! (`draft_sync.rs`), sent through the outbox (`send.rs`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -11,7 +11,7 @@ use catmail_store::{BlobStore, DraftReply, DraftSnapshot, NewDraftAttachment};
 use catmail_types::{
     AccountId, Address, BlobHash, Draft, DraftAttachment, DraftAttachmentId, DraftBody,
     DraftChanges, DraftContent, DraftId, Event, Forwarding, IdentityId, Message, MessageId,
-    NewFile,
+    NewFile, Quote, QuoteKind,
 };
 use uuid::Uuid;
 
@@ -108,11 +108,13 @@ pub(crate) async fn update(
             let Some(was_in) = db.drafts().update(id, from, &content, now())? else {
                 return Ok(None);
             };
-            // A text without formatting (an agent's, the CLI's) has no images. Images taken
-            // out of the HTML stay until its editor is done (`drop_unshown_images`): undo
-            // there can bring them back.
-            if !content.body.is_formatted() {
-                db.drafts().remove_images(id, &HashSet::new(), now())?;
+            // Images an agent's or the CLI's change leaves unshown (a text without
+            // formatting has none, a quote taken out takes its own) go at once. Those an
+            // editor takes out stay until it is done (`drop_unshown_images`): undo there
+            // can bring them back.
+            if editor.is_none() {
+                db.drafts()
+                    .remove_images(id, &shown_images(&content), now())?;
             }
             Ok(db.drafts().get(id)?.map(|draft| (draft, was_in)))
         })
@@ -144,13 +146,7 @@ pub(crate) async fn drop_unshown_images(
             if db.drafts().editable(id)?.is_none() {
                 return Ok(None);
             }
-            let shown = draft
-                .content
-                .body
-                .html
-                .as_deref()
-                .map(catmail_html::cid_image_ids)
-                .unwrap_or_default();
+            let shown = shown_images(&draft.content);
             let removed = db.drafts().remove_images(id, &shown, now())?;
             Ok(removed.then_some(draft.account_id))
         })
@@ -159,6 +155,16 @@ pub(crate) async fn drop_unshown_images(
         edited(engine, account, id);
     }
     Ok(())
+}
+
+/// The Content-IDs of the images the draft's HTML and its quote's show.
+fn shown_images(content: &DraftContent) -> HashSet<String> {
+    let quote = content.quote.as_ref().and_then(|q| q.html.as_deref());
+    [content.body.html.as_deref(), quote]
+        .into_iter()
+        .flatten()
+        .flat_map(catmail_html::cid_image_ids)
+        .collect()
 }
 
 /// Deletes the draft; its copy on the server goes with the next upload pass.
@@ -217,6 +223,24 @@ pub(crate) struct SizeLimits {
     pub smtp: Option<u64>,
     /// IMAP `APPENDLIMIT` (RFC 7889) of the account, for the copies in Drafts and Sent.
     pub append: Option<u64>,
+}
+
+impl From<(Option<u64>, Option<u64>)> for SizeLimits {
+    /// As the store reads them: SMTP, then IMAP.
+    fn from((smtp, append): (Option<u64>, Option<u64>)) -> Self {
+        Self { smtp, append }
+    }
+}
+
+/// What the attachments of a new draft of `account`, sent as `from`, may add up to, and
+/// the identity that is (the default with `None`).
+fn new_attachments_limit(
+    db: &catmail_store::Db<'_>,
+    account: AccountId,
+    from: Option<IdentityId>,
+) -> catmail_store::Result<(IdentityId, u64)> {
+    let (identity, limits) = db.drafts().new_size_limits(account, from)?;
+    Ok((identity, attachments_limit(limits.into())))
 }
 
 /// What a draft's attached files may add up to, given what the servers said: the SMTP
@@ -347,27 +371,35 @@ fn mime_type_of(filename: &str) -> String {
         .to_owned()
 }
 
+/// Files copied for a new draft, and what they were checked against.
+struct Copied {
+    /// The identity they were checked for, which the draft must be made as: the default
+    /// may change while they are copied.
+    identity: IdentityId,
+    /// What the draft's attachments may add up to, sent as it.
+    limit: u64,
+    attachments: Vec<NewDraftAttachment>,
+}
+
 /// Copies the files to attach to a new draft of `account`, sent as `from`, into the blob
 /// store: within what its attachments may add up to, with `used` taken by those it starts
-/// with. Returns them and the identity they were checked for, which the draft must be
-/// made as: with `None`, the default may change while they are copied. Blocking.
+/// with. Blocking.
 fn copy_files(
     engine: &Engine,
     account: AccountId,
     from: Option<IdentityId>,
     mut used: u64,
     files: &[NewFile],
-) -> Result<(IdentityId, Vec<NewDraftAttachment>)> {
-    let (identity, (smtp, append)) = engine
+) -> Result<Copied> {
+    let (identity, limit) = engine
         .store
         .read(|db| {
             if db.accounts().get(account)?.is_none() {
                 return Ok(None);
             }
-            db.drafts().new_size_limits(account, from).map(Some)
+            new_attachments_limit(db, account, from).map(Some)
         })?
         .ok_or_else(|| Error::AccountNotFound(account.to_string()))?;
-    let limit = attachments_limit(SizeLimits { smtp, append });
     // Unlike `attach_file`, nothing to check again when the draft is stored: nothing else
     // can attach to it before then. Files copied before one fails are left for GC.
     let attachments = files
@@ -382,7 +414,11 @@ fn copy_files(
             Ok(attachment)
         })
         .collect::<Result<_>>()?;
-    Ok((identity, attachments))
+    Ok(Copied {
+        identity,
+        limit,
+        attachments,
+    })
 }
 
 /// Copies the file into the blob store and attaches it; later changes to the file
@@ -419,7 +455,7 @@ pub(crate) async fn attach_file(
                         return Ok(None);
                     };
                     let used = db.drafts().attachments_size(draft)?;
-                    Ok(Some((used, SizeLimits { smtp, append })))
+                    Ok(Some((used, SizeLimits::from((smtp, append)))))
                 })?
                 .ok_or(Error::DraftNotFound(draft))?;
             let limit = attachments_limit(limits);
@@ -475,9 +511,9 @@ pub(crate) async fn remove_attachment(
 }
 
 /// A new draft answering `message`: to its sender (or Reply-To), and with `all` to its
-/// other recipients too, `text` above its quoted text. Sent as `from`, else as the
-/// account's identity the message came from or went to. Downloads the body first if
-/// needed.
+/// other recipients too, `text` above its quote. Sent as `from`, else as the account's
+/// identity the message came from or went to. Downloads the body first if needed, and
+/// the images the quote shows.
 pub(crate) async fn reply(
     engine: &Arc<Engine>,
     id: MessageId,
@@ -490,7 +526,17 @@ pub(crate) async fn reply(
     let account_id = message.summary.account_id;
     let own = own_addresses(engine, &message).await?;
     let (mut content, written_as) = reply_content(&message, &own, all);
-    write_above(&text, &mut content);
+    content.body = DraftBody::plain(text.trim_end());
+    let from = from.or(written_as);
+    let (from, attachments) = answer_attachments(
+        engine,
+        &message,
+        from,
+        Vec::new(),
+        files,
+        &mut content.quote,
+    )
+    .await?;
     let mut references = message.references.clone();
     references.extend(message.message_id.clone());
     let reply = DraftReply {
@@ -498,15 +544,14 @@ pub(crate) async fn reply(
         in_reply_to: message.message_id.clone(),
         references,
     };
-    let from = from.or(written_as);
     insert(
         engine,
         account_id,
-        from,
+        Some(from),
         content,
         Some(reply),
+        attachments,
         Vec::new(),
-        files,
     )
     .await
 }
@@ -555,9 +600,10 @@ async fn own_addresses(engine: &Arc<Engine>, message: &Message) -> Result<Vec<Ow
         .ok_or_else(|| Error::AccountNotFound(account_id.to_string()))
 }
 
-/// A new draft forwarding `message`, with its attachments, as `forwarding` says.
-/// Everything is downloaded first and stored in one transaction, so a failure leaves no
-/// draft behind. Sent as `from`, the account's default with `None`.
+/// A new draft forwarding `message`, with its attachments and the images its HTML shows,
+/// as `forwarding` says. Everything is downloaded first and stored in one transaction,
+/// so a failure leaves no draft behind (an image that can't be had is left out). Sent as
+/// `from`, the account's default with `None`.
 pub(crate) async fn forward(
     engine: &Arc<Engine>,
     id: MessageId,
@@ -570,19 +616,14 @@ pub(crate) async fn forward(
         check_address(&address.email)?;
     }
     let message = with_body(engine, id).await?;
-    let mut attachments = Vec::new();
+    let mut originals = Vec::new();
     for original in message.body.iter().flat_map(|b| b.files()) {
         // The blob the message already has, its GC grace period restarted to cover the
         // gap until the transaction below refers to it.
         let (blob, size) = body::attachment_blob(engine.clone(), original.id).await?;
-        attachments.push(NewDraftAttachment {
+        originals.push(NewDraftAttachment {
             blob,
-            filename: original
-                .filename
-                .as_deref()
-                .map(|name| name.replace('\0', ""))
-                .filter(|name| !name.trim().is_empty())
-                .unwrap_or_else(|| "attachment".into()),
+            filename: attachment_name(original.filename.as_deref(), "attachment"),
             mime_type: original.mime_type.clone(),
             size,
             content_id: None,
@@ -593,24 +634,118 @@ pub(crate) async fn forward(
         to,
         cc,
         bcc,
+        body: DraftBody::plain(text.trim_end()),
         ..forward_content(&message)
     };
-    write_above(&text, &mut content);
+    let (from, attachments) =
+        answer_attachments(engine, &message, from, originals, files, &mut content.quote).await?;
     insert(
         engine,
         message.summary.account_id,
-        from,
+        Some(from),
         content,
         None,
         attachments,
-        files,
+        Vec::new(),
     )
     .await
 }
 
-/// The user's text in front of what a reply or forward starts with.
-fn write_above(text: &str, content: &mut DraftContent) {
-    content.body.text.insert_str(0, text.trim_end());
+/// The attachments of a reply or forward of `message`, sent as `from`: those it starts
+/// with (a forward's, the message's), the `files` asked for, copied in, then the images
+/// the quote shows in what room is left. The files come first: they were asked for, and
+/// the images are only taken if they fit. Returns them, and the identity they were
+/// checked for, which the draft must be made as.
+async fn answer_attachments(
+    engine: &Arc<Engine>,
+    message: &Message,
+    from: Option<IdentityId>,
+    mut attachments: Vec<NewDraftAttachment>,
+    files: Vec<NewFile>,
+    quote: &mut Option<Quote>,
+) -> Result<(IdentityId, Vec<NewDraftAttachment>)> {
+    let account = message.summary.account_id;
+    let used = attachments.iter().map(|a| a.size).sum();
+    let copied = blocking({
+        let engine = engine.clone();
+        move || copy_files(&engine, account, from, used, &files)
+    })
+    .await?;
+    let used = used + copied.attachments.iter().map(|a| a.size).sum::<u64>();
+    attachments.extend(quoted_images(engine, message, copied.limit, used, quote).await);
+    attachments.extend(copied.attachments);
+    Ok((copied.identity, attachments))
+}
+
+/// Copies the images the quote's HTML shows into the draft to be, under Content-IDs of
+/// their own (unique in the message it goes into, and among the draft's images, which
+/// are told apart by them), downloading those not here yet. Within `limit`, what the
+/// draft's attachments may add up to, with `used` taken: the quote is the user's to
+/// send, not what they attach, so an image that doesn't fit or can't be had is left out
+/// (it shows as missing) rather than failing the reply.
+async fn quoted_images(
+    engine: &Arc<Engine>,
+    message: &Message,
+    limit: u64,
+    mut used: u64,
+    quote: &mut Option<Quote>,
+) -> Vec<NewDraftAttachment> {
+    let Some(html) = quote.as_mut().and_then(|q| q.html.as_mut()) else {
+        return Vec::new();
+    };
+    let shown = catmail_html::cid_image_ids(html);
+    let parts: Vec<_> = message
+        .body
+        .iter()
+        .flat_map(|b| b.inline_parts())
+        .filter_map(|a| Some((a.content_id.as_ref().filter(|id| shown.contains(*id))?, a)))
+        .collect();
+    if parts.is_empty() {
+        return Vec::new();
+    }
+    let (mut images, mut renamed) = (Vec::new(), HashMap::new());
+    for (id, part) in parts {
+        // Its size as the message said: one that can't fit isn't downloaded for nothing.
+        let said = part.size.map_or(0, u64::from);
+        if renamed.contains_key(id) || used + said > limit {
+            continue;
+        }
+        // The blob the message already has, its GC grace period restarted to cover the
+        // gap until the draft refers to it.
+        let (blob, size) = match body::attachment_blob(engine.clone(), part.id).await {
+            Ok(found) => found,
+            Err(e) => {
+                tracing::warn!(attachment = %part.id, "left a quoted image out: {e}");
+                continue;
+            }
+        };
+        if used + size > limit {
+            tracing::info!(attachment = %part.id, "left a quoted image out: too large");
+            continue;
+        }
+        used += size;
+        let content_id = new_content_id();
+        renamed.insert(id.clone(), content_id.clone());
+        images.push(NewDraftAttachment {
+            blob,
+            filename: attachment_name(part.filename.as_deref(), "image"),
+            mime_type: part.mime_type.clone(),
+            size,
+            content_id: Some(content_id),
+        });
+    }
+    if !renamed.is_empty() {
+        *html = catmail_html::rename_cid_images(html, renamed);
+    }
+    images
+}
+
+/// An attachment's file name as copied into a draft: without NULs, `fallback` if it has
+/// none.
+fn attachment_name(name: Option<&str>, fallback: &str) -> String {
+    name.map(|name| name.replace('\0', ""))
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| fallback.into())
 }
 
 /// The message with its body, downloading it if needed.
@@ -640,9 +775,9 @@ async fn insert(
             let mut from = from;
             if !files.is_empty() {
                 let used = attachments.iter().map(|a| a.size).sum();
-                let (identity, copied) = copy_files(&engine, account, from, used, &files)?;
-                from = Some(identity);
-                attachments.extend(copied);
+                let copied = copy_files(&engine, account, from, used, &files)?;
+                from = Some(copied.identity);
+                attachments.extend(copied.attachments);
             }
             Ok(engine.store.write(|db| {
                 if db.accounts().get(account)?.is_none() {
@@ -701,6 +836,7 @@ pub(crate) fn build(
         subject: &draft.content.subject,
         text: &draft.content.body.text,
         html: draft.content.body.html.as_deref(),
+        quote: draft.content.quote.as_ref(),
         message_id,
         in_reply_to: draft.in_reply_to.as_deref(),
         references: &draft.references,
@@ -839,6 +975,13 @@ fn without_nul(mut content: DraftContent) -> DraftContent {
     if let Some(html) = &mut content.body.html {
         strip(html);
     }
+    if let Some(quote) = &mut content.quote {
+        strip(&mut quote.intro);
+        strip(&mut quote.text);
+        if let Some(html) = &mut quote.html {
+            strip(html);
+        }
+    }
     for address in content
         .to
         .iter_mut()
@@ -887,7 +1030,7 @@ pub(crate) fn check_address(email: &str) -> Result<()> {
 /// An address of the account: an identity's, or its own (`None`, written as the default).
 type Own = (Option<IdentityId>, String);
 
-/// Recipients, subject and quoted text of a reply to `message`, written by the account
+/// Recipients, subject and quote of a reply to `message`, written by the account
 /// whose addresses are `own` (each with the identity that sends as it), and the identity
 /// it is sent as: that of the address the message came from or went to (`None`, the
 /// default, for none).
@@ -898,7 +1041,8 @@ fn reply_content(message: &Message, own: &[Own], all: bool) -> (DraftContent, Op
         to,
         cc,
         bcc: Vec::new(),
-        body: DraftBody::plain(quote(message)),
+        body: DraftBody::default(),
+        quote: Some(quote(message, QuoteKind::Reply, attribution(message))),
     };
     (content, written_as)
 }
@@ -987,44 +1131,33 @@ fn prefixed(subject: &str, prefix: &str, known: &[&str]) -> String {
     }
 }
 
-/// The text of the message, without trailing whitespace; empty if it has none.
-fn text_of(message: &Message) -> &str {
-    message
-        .body
-        .as_ref()
-        .and_then(|b| b.text.as_deref())
-        .unwrap_or_default()
-        .trim_end()
+/// `message` quoted, introduced by `intro`: its text, and its HTML if it has any.
+fn quote(message: &Message, kind: QuoteKind, intro: String) -> Quote {
+    let body = message.body.as_ref();
+    Quote {
+        kind,
+        intro,
+        text: body.and_then(|b| b.text.clone()).unwrap_or_default(),
+        html: body.and_then(|b| b.html.clone()),
+    }
 }
 
-/// An empty line to write on, then the attribution and the original text, `> `-quoted.
-fn quote(message: &Message) -> String {
-    let text = text_of(message);
+/// Who wrote the message, and when.
+fn attribution(message: &Message) -> String {
     let sender = message
         .summary
         .from
         .first()
         .map_or_else(|| "someone".into(), Address::to_string);
     let date = display::local(message.summary.date, "On %Y-%m-%d %H:%M, ");
-    let mut out = format!("\n\n{date}{sender} wrote:\n");
-    for line in text.lines() {
-        if line.is_empty() {
-            out.push_str(">\n");
-        } else {
-            out.push_str("> ");
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-    out
+    format!("{date}{sender} wrote:")
 }
 
-/// Subject and text of a forward of `message`: an empty start, then its headers and
-/// text as they were, unquoted.
+/// Subject and quote of a forward of `message`: its headers, then the message as it was.
 fn forward_content(message: &Message) -> DraftContent {
     let subject = message.summary.subject.as_deref().unwrap_or_default();
     let date = display::date(message.summary.date);
-    let mut text = String::from("\n\n---------- Forwarded message ---------\n");
+    let mut intro = String::from("---------- Forwarded message ---------");
     for (name, value) in [
         ("From", display::addresses(&message.summary.from)),
         ("Date", date),
@@ -1033,18 +1166,12 @@ fn forward_content(message: &Message) -> DraftContent {
         ("Cc", display::addresses(&message.summary.cc)),
     ] {
         if !value.is_empty() {
-            text.push_str(&format!("{name}: {value}\n"));
+            intro.push_str(&format!("\n{name}: {value}"));
         }
-    }
-    text.push('\n');
-    let original = text_of(message);
-    if !original.is_empty() {
-        text.push_str(original);
-        text.push('\n');
     }
     DraftContent {
         subject: forward_subject(subject),
-        body: DraftBody::plain(text),
+        quote: Some(quote(message, QuoteKind::Forward, intro)),
         ..Default::default()
     }
 }
@@ -1147,9 +1274,10 @@ mod tests {
         assert_eq!(emails(&reply.to), ["zhang@example.com"]);
         assert!(reply.cc.is_empty());
         assert_eq!(reply.subject, "Re: 季度报告");
+        assert_eq!(reply.body, DraftBody::default(), "the user's to write");
         assert_eq!(
-            reply.body.text,
-            "\n\n张三 <zhang@example.com> wrote:\n> 第一行\n>\n> second\n"
+            reply.text_as_sent(),
+            "张三 <zhang@example.com> wrote:\n> 第一行\n>\n> second\n"
         );
 
         let (all, _) = reply_content(&m, &me(), true);
@@ -1257,9 +1385,12 @@ mod tests {
         let forward = forward_content(&m);
         assert_eq!(forward.subject, "Fwd: 季度报告");
         assert!(forward.recipients().next().is_none());
+        assert_eq!(forward.body, DraftBody::default());
+        let quote = forward.quote.as_ref().unwrap();
+        assert_eq!(quote.kind, QuoteKind::Forward);
         assert_eq!(
-            forward.body.text,
-            "\n\n---------- Forwarded message ---------\n\
+            forward.text_as_sent(),
+            "---------- Forwarded message ---------\n\
              From: 张三 <zhang@example.com>\n\
              Subject: 季度报告\n\
              To: me@example.com, li@example.com\n\

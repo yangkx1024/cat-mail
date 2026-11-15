@@ -11,7 +11,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use catmail_core::{
-    Draft, DraftId, Flags, FolderId, MailClient, MessageCursor, MessageId, MessageSummary,
+    DraftId, DraftSummary, Flags, FolderId, MailClient, MessageCursor, MessageId, MessageSummary,
     OutboxEntry, OutboxId, OutboxStatus, SearchQuery,
 };
 use jiff::civil::Date;
@@ -42,8 +42,8 @@ pub const ROW_LABELS: usize = 2;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Row {
     Message(MessageSummary),
-    /// Shared: the right pane shows it, and a draft can hold a whole forwarded message.
-    Draft(Rc<Draft>),
+    /// Shared: the right pane shows it, and its text can be a whole forwarded message.
+    Draft(Rc<DraftSummary>),
     Outbox(OutboxEntry),
 }
 
@@ -421,8 +421,8 @@ pub fn recipients(message: &MessageSummary) -> String {
 }
 
 /// Whom a draft row says it goes to.
-pub fn draft_recipients(draft: &Draft) -> String {
-    let to = format::names(draft.content.recipients());
+pub fn draft_recipients(draft: &DraftSummary) -> String {
+    let to = format::names(draft.recipients());
     if to.is_empty() {
         "No recipients".to_owned()
     } else {

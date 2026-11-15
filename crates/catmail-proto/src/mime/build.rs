@@ -1,8 +1,10 @@
 //! Building outgoing messages with `mail-builder`.
 
 use std::borrow::Cow;
+use std::fmt::Write as _;
 
-use catmail_types::Address;
+use catmail_html::escape;
+use catmail_types::{Address, Quote, QuoteKind};
 use mail_builder::MessageBuilder;
 use mail_builder::headers::address::Address as BuilderAddress;
 use mail_builder::headers::content_type::ContentType;
@@ -26,6 +28,9 @@ pub struct Outgoing<'a> {
     pub text: &'a str,
     /// The body formatted: the content of an HTML `<body>`, its images by `cid:` URL.
     pub html: Option<&'a str>,
+    /// Sent below the body, in the text and in the HTML. A quote of HTML makes the
+    /// message HTML, the body's text written as paragraphs if it has no HTML.
+    pub quote: Option<&'a Quote>,
     /// Without angle brackets.
     pub message_id: &'a str,
     pub in_reply_to: Option<&'a str>,
@@ -95,15 +100,18 @@ pub fn build_message(message: &Outgoing<'_>) -> Result<Vec<u8>, InvalidHeader> {
 /// the images it shows; then the files attached (`multipart/mixed`). An inline image the
 /// HTML doesn't show (any, without HTML) is left out: the user took it out of the text.
 fn body<'a>(message: &Outgoing<'a>) -> MimePart<'a> {
-    let text = MimePart::new("text/plain", message.text);
-    let content = match message.html {
+    let text = match message.quote {
+        Some(quote) => MimePart::new("text/plain", quote.below(message.text)),
+        None => MimePart::new("text/plain", message.text),
+    };
+    let content = match html(message) {
         None => text,
-        Some(html) => {
+        Some(document) => {
+            let shown = catmail_html::cid_image_ids(&document);
             let alternative = MimePart::new(
                 "multipart/alternative",
-                vec![text, MimePart::new("text/html", html_document(html))],
+                vec![text, MimePart::new("text/html", document)],
             );
-            let shown = catmail_html::cid_image_ids(html);
             let images: Vec<MimePart<'a>> = message
                 .attachments
                 .iter()
@@ -145,17 +153,131 @@ fn wrap<'a>(kind: &'static str, first: MimePart<'a>, rest: Vec<MimePart<'a>>) ->
     MimePart::new(kind, parts)
 }
 
-/// The body's content as a document of its own, shown as the editor showed it: a
-/// paragraph is a line, with no room around it, and an empty one an empty line; spaces
-/// as written (runs of them, indentation; the content has no whitespace between its
-/// tags); images no wider than the reader's window.
-fn html_document(content: &str) -> String {
+/// What the user wrote is in an element of this class, laid out as the editor shows it
+/// ([`html_document`]); so is the text of a message quoted that has no HTML.
+const TEXT_CLASS: &str = "catmail-text";
+
+/// The HTML of a message quoted is in an element of this class, which its style sheet is
+/// scoped to: left as it was, it would restyle the whole message.
+const ORIGINAL_CLASS: &str = "catmail-original";
+
+/// A reply's quote: set off by a line on its left, as Gmail draws it.
+const CITE: &str = r#"<blockquote type="cite" style="margin:0 0 0 0.8ex;border-left:1px solid #ccc;padding-left:1ex">"#;
+
+/// The message as an HTML document: the body's HTML (or its text as paragraphs), then
+/// the quote. `None` for a body of text with no quote of HTML, which the text says all
+/// of.
+fn html(message: &Outgoing<'_>) -> Option<String> {
+    let quote = message.quote;
+    if message.html.is_none() && quote.is_none_or(|q| q.html.is_none()) {
+        return None;
+    }
+    let mut body = format!(r#"<div class="{TEXT_CLASS}">"#);
+    match message.html {
+        Some(html) => body.push_str(&fill_empty_paragraphs(html)),
+        None => paragraphs(message.text, &mut body),
+    }
+    body.push_str("</div>");
+    let sheet = quote
+        .map(|quote| {
+            body.push_str("<br>");
+            quote_html(quote, &mut body)
+        })
+        .unwrap_or_default();
+    Some(html_document(&sheet, &body))
+}
+
+/// Writes the quote as HTML to `out`: its intro, then the message quoted, in a
+/// `<blockquote type="cite">` for a reply (what mail clients recognize as a quote). The
+/// message's HTML if it has any, its style sheet returned to go in the document's head;
+/// else its text, as paragraphs.
+fn quote_html(quote: &Quote, out: &mut String) -> String {
+    let intro: Vec<String> = quote.intro.trim_end().lines().map(escape).collect();
+    let _ = write!(
+        out,
+        r#"<div class="catmail-quote"><div>{}</div>"#,
+        intro.join("<br>")
+    );
+    let reply = quote.kind == QuoteKind::Reply;
+    out.push_str(if reply { CITE } else { "<br>" });
+    let sheet = match &quote.html {
+        Some(html) => {
+            let (sheet, rest) = catmail_html::nested(html, ORIGINAL_CLASS);
+            let _ = write!(out, r#"<div class="{ORIGINAL_CLASS}">{rest}</div>"#);
+            sheet
+        }
+        None => {
+            let _ = write!(out, r#"<div class="{TEXT_CLASS}">"#);
+            quoted_paragraphs(&quote.text, out);
+            out.push_str("</div>");
+            String::new()
+        }
+    };
+    if reply {
+        out.push_str("</blockquote>");
+    }
+    out.push_str("</div>");
+    sheet
+}
+
+/// `text` as paragraphs, one a line, as the editor writes them.
+fn paragraphs(text: &str, out: &mut String) {
+    for line in text.trim_end().lines() {
+        paragraph(line, out);
+    }
+}
+
+fn paragraph(line: &str, out: &mut String) {
+    if line.is_empty() {
+        out.push_str("<p><br></p>");
+    } else {
+        let _ = write!(out, "<p>{}</p>", escape(line));
+    }
+}
+
+/// The text of a message quoted, as paragraphs, its lines that start with `>` (what it
+/// quotes in turn, RFC 3676 §4.5) in as many nested quotes: the one place a `>` is read
+/// as a quote, since it is a text mail clients wrote.
+fn quoted_paragraphs(text: &str, out: &mut String) {
+    let mut depth = 0;
+    for line in text.trim_end().lines() {
+        let (level, line) = quote_depth(line);
+        for _ in depth..level {
+            out.push_str(CITE);
+        }
+        for _ in level..depth {
+            out.push_str("</blockquote>");
+        }
+        depth = level;
+        paragraph(line, out);
+    }
+    for _ in 0..depth {
+        out.push_str("</blockquote>");
+    }
+}
+
+/// How deeply the line is quoted (`>> a`, `> > a`), and the rest of it: each `>` may be
+/// followed by a space.
+fn quote_depth(mut line: &str) -> (usize, &str) {
+    let mut depth = 0;
+    while let Some(rest) = line.strip_prefix('>') {
+        depth += 1;
+        line = rest.strip_prefix(' ').unwrap_or(rest);
+    }
+    (depth, line)
+}
+
+/// The body as a document of its own, with `sheet` (a quoted message's) in its head.
+/// What the user wrote is shown as the editor showed it: a paragraph is a line, with no
+/// room around it, and an empty one an empty line; spaces as written (runs of them,
+/// indentation; the editor writes no whitespace between its tags). Images are no wider
+/// than the reader's window.
+fn html_document(sheet: &str, body: &str) -> String {
     format!(
         "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">\
-         <style>body {{ white-space: pre-wrap; }} p {{ margin: 0; }} \
-         img {{ max-width: 100%; height: auto; }}</style></head>\n\
-         <body>{}</body></html>\n",
-        fill_empty_paragraphs(content)
+         <style>.{TEXT_CLASS} {{ white-space: pre-wrap; }} .{TEXT_CLASS} p {{ margin: 0; }} \
+         img {{ max-width: 100%; height: auto; }}{sheet}</style></head>\n\
+         <body>{body}</body></html>\n"
     )
 }
 
@@ -267,6 +389,7 @@ mod tests {
             subject: "季度报告\r\nBcc: injected@evil.example",
             text: "第一行\n.\nlast line with trailing space ",
             html: None,
+            quote: None,
             message_id: "abc.123@example.com",
             in_reply_to: Some("parent@x"),
             references: &references,
@@ -345,6 +468,7 @@ mod tests {
             subject: "Re: hi",
             text: "hi",
             html: None,
+            quote: None,
             message_id: "m@example.com",
             in_reply_to: Some("evil\rX-Injected: yes@x"),
             references: &references,
@@ -376,6 +500,7 @@ mod tests {
             subject: "hi",
             text: "hi",
             html: None,
+            quote: None,
             message_id,
             in_reply_to: None,
             references: &[],
@@ -406,6 +531,7 @@ mod tests {
             subject: "",
             text: "",
             html: None,
+            quote: None,
             message_id: "m@example.com",
             in_reply_to: None,
             references: &[],
@@ -439,6 +565,7 @@ mod tests {
             subject: "",
             text: "Look\n",
             html,
+            quote: None,
             message_id: "m@example.com",
             in_reply_to: None,
             references: &[],
@@ -494,6 +621,140 @@ mod tests {
                 .attachments()
                 .count(),
             1
+        );
+    }
+
+    fn quoting<'a>(
+        from: &'a Address,
+        text: &'a str,
+        html: Option<&'a str>,
+        quote: &'a Quote,
+        attachments: Vec<OutgoingAttachment<'a>>,
+    ) -> Outgoing<'a> {
+        Outgoing {
+            from,
+            to: &[],
+            cc: &[],
+            bcc: &[],
+            subject: "Re: hi",
+            text,
+            html,
+            quote: Some(quote),
+            message_id: "m@example.com",
+            in_reply_to: None,
+            references: &[],
+            date: 0,
+            attachments,
+        }
+    }
+
+    fn reply_quote(text: &str, html: Option<&str>) -> Quote {
+        Quote {
+            kind: QuoteKind::Reply,
+            intro: "On Monday, A <a@example.com> wrote:".into(),
+            text: text.into(),
+            html: html.map(String::from),
+        }
+    }
+
+    /// The text, and the HTML (which the parser makes from the text if there is none).
+    fn parts(raw: &[u8]) -> (String, Option<String>) {
+        let m = MessageParser::new().parse(raw).unwrap();
+        let text = m.body_text(0).unwrap().replace("\r\n", "\n");
+        (text, m.body_html(0).map(|h| h.into_owned()))
+    }
+
+    #[test]
+    fn a_reply_to_html_quotes_it_whole_with_its_styles_kept_to_it() {
+        let from = addr(None, "b@example.com");
+        let original = catmail_html::sanitize_html(
+            r#"<style>body{background:#eee}p{color:red}</style><p>Hi <b>there</b></p><img src="cid:logo@catmail">"#,
+        );
+        let quote = reply_quote("Hi there", Some(&original));
+        let logo = OutgoingAttachment {
+            filename: "logo.png",
+            mime_type: "image/png",
+            content_id: Some("logo@catmail"),
+            data: b"\x89PNG",
+        };
+        // A body without HTML of its own is written as paragraphs.
+        let raw = build_message(&quoting(
+            &from,
+            "Thanks <3\n\nB\n",
+            None,
+            &quote,
+            vec![logo],
+        ))
+        .unwrap();
+        let (text, html) = parts(&raw);
+        assert_eq!(
+            text,
+            "Thanks <3\n\nB\n\nOn Monday, A <a@example.com> wrote:\n> Hi there\n"
+        );
+        let html = html.unwrap();
+        for expected in [
+            ".catmail-original{background:#eee;}.catmail-original p{color:red;}</style></head>",
+            r#"<div class="catmail-text"><p>Thanks &lt;3</p><p><br></p><p>B</p></div>"#,
+            "<div>On Monday, A &lt;a@example.com&gt; wrote:</div><blockquote type=\"cite\"",
+            r#"<div class="catmail-original"><p>Hi <b>there</b></p><img src="cid:logo@catmail"></div></blockquote>"#,
+        ] {
+            assert!(html.contains(expected), "{expected} in {html}");
+        }
+        assert!(
+            String::from_utf8_lossy(&raw).contains("Content-ID: <logo@catmail>"),
+            "the quote's image goes with it"
+        );
+    }
+
+    #[test]
+    fn a_reply_to_text_stays_text() {
+        let from = addr(None, "b@example.com");
+        let quote = reply_quote("Hi\n> earlier\n>> first\nback", None);
+        let raw = build_message(&quoting(&from, "Thanks", None, &quote, vec![])).unwrap();
+        assert_eq!(
+            parts(&raw).0,
+            "Thanks\n\nOn Monday, A <a@example.com> wrote:\n> Hi\n> > earlier\n> >> first\n> back\n"
+        );
+        assert!(!String::from_utf8_lossy(&raw).contains("text/html"));
+        // Under HTML, its quotes are quotes.
+        let raw = build_message(&quoting(
+            &from,
+            "Thanks",
+            Some("<p><b>Thanks</b></p>"),
+            &quote,
+            vec![],
+        ))
+        .unwrap();
+        let html = parts(&raw).1.unwrap();
+        let expected = format!(
+            r#"{CITE}<div class="catmail-text"><p>Hi</p>{CITE}<p>earlier</p>{CITE}<p>first</p></blockquote></blockquote><p>back</p></div></blockquote>"#
+        );
+        assert!(html.contains(&expected), "{expected} in {html}");
+        assert!(html.contains(r#"<div class="catmail-text"><p><b>Thanks</b></p></div>"#));
+    }
+
+    #[test]
+    fn a_forward_is_not_quoted() {
+        let from = addr(None, "b@example.com");
+        let quote = Quote {
+            kind: QuoteKind::Forward,
+            intro: "---------- Forwarded message ---------\nFrom: A".into(),
+            text: "> not a quote of ours".into(),
+            html: Some("<p>Original</p>".into()),
+        };
+        let raw = build_message(&quoting(&from, "", None, &quote, vec![])).unwrap();
+        let (text, html) = parts(&raw);
+        assert_eq!(
+            text,
+            "---------- Forwarded message ---------\nFrom: A\n\n> not a quote of ours\n"
+        );
+        let html = html.unwrap();
+        assert!(!html.contains("<blockquote"), "{html}");
+        assert!(
+            html.contains(
+                r#"<div>---------- Forwarded message ---------<br>From: A</div><br><div class="catmail-original"><p>Original</p></div>"#
+            ),
+            "{html}"
         );
     }
 

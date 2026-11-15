@@ -56,23 +56,60 @@
 - **地址**在保存时检查（`parse_addresses`）：逗号或分号分隔，每一项只能是裸地址或
   "显示名 <地址>"，严格解析，任何一项不合规就报错，不会悄悄少一个收件人；地址必须能原样放进
   `MAIL FROM:<…>` / `RCPT TO:<…>`。非 ASCII 地址需要 SMTPUTF8，暂不支持。
-- **NUL** 在保存时从主题、正文和显示名里去掉：它在文本里没有意义，而 IMAP literal 不能带，存进草稿
+- **NUL** 在保存时从主题、正文、引文和显示名里去掉：它在文本里没有意义，而 IMAP literal 不能带，存进草稿
   会让每次上传失败（以前还会让整个账户的同步失败，因为上传在同步之前）。引用一封带 `=00` 的来信
   就会遇到。
 - **回复**（`MailClient::reply`）：发给原信的 Reply-To，没有时发给发件人；回复自己发出的信则发给
   原收件人。回复全部再加上原信的收件人和抄送，去掉自己、去重（地址不分大小写）。主题加 `Re: `
-  （已以 `Re:` / `回复：` / `答复：` 开头的不加），正文引用原文（`> `），调用方给的文字写在引文上方，
+  （已以 `Re:` / `回复：` / `答复：` 开头的不加），原信作为[引文](#引文)，调用方给的文字是正文，发出时在引文上方；
 正文没下载时先下载。原信
   的 Message-ID 和 References 复制进草稿（`in_reply_to` / `references_hdr`），原信之后被删也不会
   断开会话；发出后经操作队列给原信加 `\Answered`。`MailClient::can_reply_all` 用同一套收件人规则判断
   回复全部是否比回复多出收件人（抄送不为空），只读头部、不下载正文，界面据此决定是否显示 Reply all。
 - **转发**（`MailClient::forward`）：新草稿，收件人和写在转发内容上方的文字由调用方给（`Forwarding`，
   默认都为空；地址在下载之前就检查）；主题加 `Fwd: `（已以 `Fwd:` / `Fw:` /
-  `转发：` 开头的不加），正文是空的两行、`---------- Forwarded message ---------` 和原信的 From /
-  Date / Subject / To / Cc，再接原文（不加 `> `）。原信的附件（不含 HTML 里显示的内嵌图片）复制进草稿；
+  `转发：` 开头的不加），正文是调用方给的文字，原信作为[引文](#引文)：`---------- Forwarded message ---------`
+  和原信的 From / Date / Subject / To / Cc，再接原信（不加 `> `、不缩进）。原信的附件复制进草稿；
   正文和附件没下载的先下载。全部下载完、内容放进 BlobStore 之后，草稿和它的附件在**同一个事务**里写入，
-  任何一个附件取不到就什么也不留；`put` 紧挨着这个事务，GC 的宽限期覆盖其间。不设 In-Reply-To /
+  任何一个附件取不到就什么也不留（引文的图片取不到只是少一张，见[引文](#引文)）；`put` 紧挨着这个事务，GC 的宽限期覆盖其间。不设 In-Reply-To /
   References：转发开始的是另一段对话。
+
+## 引文
+
+`DraftContent::quote`（`Quote`）：回复和转发带着的原信，和正文分开存
+（`drafts.quote_kind` / `quote_intro` / `quote_text` / `quote_html`），发出时接在正文下面。存的是建草稿那一刻的快照：开场白（"On …, … wrote:"，或转发的
+头部几行）、原信的纯文本、原信清洗后存下的 HTML（没有 HTML 的信为 `None`）。不存原信的 id：原信之后可能被删、
+被 expunge，回复里引的应该是用户回复时看到的样子。
+
+**列出草稿不读 HTML**：`list_drafts` 返回 `DraftSummary`（和 `MessageSummary` 一样是列表用的那一份）：正文和引文的
+纯文本、有没有格式，不带 `body_html` 和 `quote_html`。GUI 的草稿列表每次 `DraftsChanged`（每次保存、每次上传结果）
+都重新读一遍，带上 HTML 就是每份草稿都读出、留下一整封原信；列表和右栏、CLI 和 MCP 的列表只用纯文本。要 HTML 的
+（编辑、发送、上传）用 `get_draft` / `edit_draft` 读整份 `Draft`。引文因此分成几列存，不是一列 JSON：列表只取得到
+文字，而不必解析整段 JSON。
+
+- **为什么不放进正文**：编辑器（nsh RichEditor，ProseMirror 式的 schema）放不下一封邮件的 HTML，`<style>`、
+  表格布局、`font` 和颜色解析时会丢或变形。主流客户端（Gmail、Apple Mail、Thunderbird、Outlook）都把原信
+  HTML 整块放进引文，它们的编辑器是 contenteditable；移动端（Gmail、Outlook 的 app）把引文放在编辑器外面，
+  发信时接上。catmail 走后一种：编辑器只放用户写的，原信原样发出。也省得每次保存把整封原信序列化一遍。
+  放弃的方案：按 schema 能表达的保留（丢格式）；把原信作为编辑器里不可编辑的节点（要自定义节点和序列化）。
+- **怎么发出**（`catmail_proto::mime::build`）：纯文本是正文、空一行、开场白，再接原信的文本，回复每行加
+  `> `（`Quote::below`，CLI、MCP 显示的也是它）。HTML 是正文的 HTML（正文是纯文本就一行一段）、开场白，再接
+  原信：回复放在 `<blockquote type="cite">` 里（收信端认它为引文，左边一条线），转发不缩进。原信有 HTML
+  就用它，样式表改写成只作用于它所在的元素（`catmail_html::nested`：选择器前加 `.catmail-original`，`html`、
+  `body`、`:root` 就是那个元素），放进文档头，否则原信的 `body { background }`、`p { … }` 会改掉整封信；没有 HTML
+  就把文本按行转成段落，`>` 开头的行按层数转成嵌套的引用（RFC 3676 的引用层级）。这是唯一把 `>` 读作引用
+  的地方：用户自己写的 `>` 只是文字。正文和原信都没有 HTML 时只发纯文本。正文的编辑器样式（`white-space:
+  pre-wrap`、段落无边距）只作用于 `.catmail-text`，不碰原信。
+- **图片**：原信 HTML 里 `cid:` 显示的图片复制成草稿的内嵌附件，换新的 Content-ID（在发出的信里唯一，草稿的
+  图片也按它区分），HTML 随之改写（`catmail_html::rename_cid_images`）；没下载的先下载。取不到的、加上就超过
+  附件上限的不复制，引文里那张显示为缺失，回复照样建出来：引文是顺带的，不该因为原信的图片让回复失败。
+  调用方要附上的文件先复制（`answer_attachments`），图片只用剩下的额度：否则图片先占了额度，单独放得下的文件
+  反而让回复失败。额度按复制文件时定下的身份算，草稿也用这个身份建，中途换了默认身份也不会对不上。远程
+  图片保留原 URL，加不加载由收信端决定。
+- **改动**：`DraftChanges::quote`，`Some(None)` 去掉引文。只改正文（MCP 的 `update_draft`、CLI 的 `draft edit
+  --body`）不动引文；编辑器保存的 `DraftChanges::all` 也不动它（写信窗口不持有引文），边打字边保存时不必每次把
+  整封原信交回去、重写一遍。不是编辑器做的修改当场删掉不再显示的图片（正文和引文的 HTML 都不显示的）；编辑器做的要等
+  它关掉（`drop_unshown_images`），撤销还能把引文连同图片带回来。
 
 ## 发件身份
 
@@ -90,7 +127,7 @@
   和正文、转发的收件人一样在建草稿时就定下，不再事后 `update_draft`；不指定时回复按原信选，转发用默认身份。建草稿时由 repository
   检查身份属于这个账户（复合外键 `(identity_id, account_id)` 兜底）；改身份和改别的内容一样算一次修改。From 头、MAIL FROM 和
   Message-ID 的域名都来自所选身份；Drafts 里的副本也是。
-- **修改只换给了的部分**：`update_draft(id, DraftChanges)` 的每个字段（身份、主题、收件人、抄送、密送、正文）
+- **修改只换给了的部分**：`update_draft(id, DraftChanges)` 的每个字段（身份、主题、收件人、抄送、密送、正文、引文）
   不给就不动，在存它的那个写事务里读出草稿再换上（`drafts::update`）。编辑器保存的是它显示的全部
   （`DraftChanges::all`）；只改一部分的调用方（MCP 的 `update_draft`、CLI 的 `draft edit`）不必先读出整份再写回，
   它读出之后编辑器存下的其他部分不会被旧值覆盖。

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use crate::html::escape;
+use catmail_core::html::escape;
 
 /// The images of a draft's HTML: the file each one's content is in
 /// ([`DraftEditor::images`](catmail_core::DraftEditor::images)), by Content-ID. The

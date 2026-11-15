@@ -257,7 +257,11 @@ async fn a_token_reaches_only_its_accounts() {
     let drafts = f.call_as(&alice_only, "list_drafts", json!({})).await;
     assert_eq!(drafts["drafts"], json!([]));
     let bob_drafts = f.client.list_drafts(catmail_core::AccountId(bob)).await;
-    assert_eq!(bob_drafts.unwrap()[0].content, Default::default());
+    let bob_draft = &bob_drafts.unwrap()[0];
+    assert_eq!(
+        (bob_draft.subject.as_str(), bob_draft.text.as_str()),
+        ("", "")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

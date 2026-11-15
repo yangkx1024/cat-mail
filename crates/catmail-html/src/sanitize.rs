@@ -137,6 +137,17 @@ pub fn sanitize_html(html: &str) -> String {
     with_sheet(&sheet.css, &SANITIZER, html)
 }
 
+/// HTML that [`sanitize_html`] produced, to be put inside an element of class `class` of
+/// another document (a reply quoting the message): its style sheet with every rule
+/// scoped to that element (`html`, `body` and `:root` are the element), and the rest of
+/// it. Left in front of the rest, the sheet would apply to the whole document. The sheet
+/// has no `<`, so it can't end the `<style>` it is put in; `class` must be an identifier.
+pub fn nested<'a>(html: &'a str, class: &str) -> (String, &'a str) {
+    let (sheet, rest) = sanitized_sheet(html);
+    let scoped = sheet.map(|sheet| css::sanitize_scoped(&[sheet], class).css);
+    (scoped.unwrap_or_default(), rest)
+}
+
 /// HTML that [`sanitize_html`] produced, cleaned again through the sanitizer with the
 /// image hook `on_image` makes, and with whether it is for a dark page. With `dark`, its
 /// own colors are moved for a dark page with that palette's colors, as Gmail and Outlook
@@ -159,7 +170,7 @@ pub(crate) fn clean_for(
 ) -> (String, bool) {
     // The sheet alone first, which is cheap: whether the whole is to be recolored.
     let sheet = dark.map(|palette| {
-        let sheet = css::sanitize(sanitized_sheet(html).as_slice(), Some(palette));
+        let sheet = css::sanitize(sanitized_sheet(html).0.as_slice(), Some(palette));
         (palette, sheet)
     });
     if let Some((palette, sheet)) = &sheet
@@ -185,7 +196,7 @@ pub(crate) fn clean_for(
 /// HTML that [`sanitize_html`] produced, cleaned again through `builder` (the sanitizer
 /// with a filter of its own).
 pub(crate) fn clean(builder: &Builder<'_>, html: &str) -> String {
-    let sheet = css::sanitize(sanitized_sheet(html).as_slice(), None);
+    let sheet = css::sanitize(sanitized_sheet(html).0.as_slice(), None);
     with_sheet(&sheet.css, builder, html)
 }
 
@@ -211,13 +222,20 @@ fn with_sheet(sheet: &str, builder: &Builder<'_>, html: &str) -> String {
 /// one `<style>` it writes in front, with no attributes. Its text has no `<` (`css.rs`), so
 /// the first `</style>` ends it; ammonia drops every other `<style>`. Bodies stored before
 /// sheets were kept have none, and their HTML doesn't start with one either. Other HTML
-/// loses its style sheets, which the sanitizer drops anyway.
-fn sanitized_sheet(html: &str) -> Option<css::Element> {
-    let (css, _) = html.strip_prefix("<style>")?.split_once("</style>")?;
-    Some(css::Element {
+/// loses its style sheets, which the sanitizer drops anyway. Returns the rest of the HTML
+/// too.
+fn sanitized_sheet(html: &str) -> (Option<css::Element>, &str) {
+    let Some((css, rest)) = html
+        .strip_prefix("<style>")
+        .and_then(|html| html.split_once("</style>"))
+    else {
+        return (None, html);
+    };
+    let sheet = css::Element {
         media: None,
         css: css.to_owned(),
-    })
+    };
+    (Some(sheet), rest)
 }
 
 /// Finds the style sheets of HTML by tokenizing it as the tree builder would switch to raw
@@ -307,6 +325,16 @@ mod tests {
     }
 
     #[test]
+    fn a_nested_message_keeps_its_styles_to_itself() {
+        let clean = sanitize_html("<style>body{margin:0}p{color:red}</style><p>x</p>");
+        assert_eq!(
+            nested(&clean, "q"),
+            (".q{margin:0;}.q p{color:red;}".to_owned(), "<p>x</p>")
+        );
+        assert_eq!(nested("<p>x</p>", "q"), (String::new(), "<p>x</p>"));
+    }
+
+    #[test]
     fn keeps_style_sheets_rewritten_in_front() {
         let dirty = r#"<html><head><style>.a{color:red;background:url(https://t.example/p.gif)}</style>
             <style>@import "https://t.example/s.css";@media (max-width:600px){.a{width:100%}}</style>
@@ -338,7 +366,7 @@ mod tests {
             for gone in ["onerror", "<script", "alert(1)<"] {
                 assert!(!clean.contains(gone), "{gone} survived {dirty}: {clean}");
             }
-            let sheet = sanitized_sheet(&clean);
+            let (sheet, _) = sanitized_sheet(&clean);
             assert_eq!(sheet.as_slice(), style_sheets(&clean), "{dirty}: {clean}");
             assert!(
                 sheet.is_none_or(|s| !s.css.contains('<')),
@@ -428,7 +456,7 @@ mod tests {
             "<svg><style>.a{color:red}</style></svg><textarea><style>.b{}</style></textarea>",
         ] {
             let clean = sanitize_html(dirty);
-            let sheet = sanitized_sheet(&clean);
+            let (sheet, _) = sanitized_sheet(&clean);
             assert_eq!(sheet.as_slice(), style_sheets(&clean), "{dirty}: {clean}");
         }
     }

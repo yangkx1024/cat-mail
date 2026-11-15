@@ -343,6 +343,13 @@
           "format": "int64",
           "type": "integer"
         },
+        "quote": {
+          "description": "The message a reply or forward carries, as plain text: sent below `text`, with\nits formatting and images.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "replying_to": {
           "description": "The message it replies to.",
           "format": "int64",
@@ -355,6 +362,7 @@
           "type": "string"
         },
         "text": {
+          "description": "What is written, above the quote.",
           "type": "string"
         },
         "to": {
@@ -557,6 +565,13 @@
           "format": "int64",
           "type": "integer"
         },
+        "quote": {
+          "description": "The message a reply or forward carries, as plain text: sent below `text`, with\nits formatting and images.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "replying_to": {
           "description": "The message it replies to.",
           "format": "int64",
@@ -569,6 +584,7 @@
           "type": "string"
         },
         "text": {
+          "description": "What is written, above the quote.",
           "type": "string"
         },
         "to": {
@@ -767,6 +783,13 @@
           "format": "int64",
           "type": "integer"
         },
+        "quote": {
+          "description": "The message a reply or forward carries, as plain text: sent below `text`, with\nits formatting and images.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "replying_to": {
           "description": "The message it replies to.",
           "format": "int64",
@@ -779,6 +802,7 @@
           "type": "string"
         },
         "text": {
+          "description": "What is written, above the quote.",
           "type": "string"
         },
         "to": {
@@ -1233,6 +1257,13 @@
               "format": "int64",
               "type": "integer"
             },
+            "quote": {
+              "description": "The message a reply or forward carries, as plain text: sent below `text`, with\nits formatting and images.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "replying_to": {
               "description": "The message it replies to.",
               "format": "int64",
@@ -1245,6 +1276,7 @@
               "type": "string"
             },
             "text": {
+              "description": "What is written, above the quote.",
               "type": "string"
             },
             "to": {
@@ -2669,6 +2701,13 @@
           "format": "int64",
           "type": "integer"
         },
+        "quote": {
+          "description": "The message a reply or forward carries, as plain text: sent below `text`, with\nits formatting and images.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "replying_to": {
           "description": "The message it replies to.",
           "format": "int64",
@@ -2681,6 +2720,7 @@
           "type": "string"
         },
         "text": {
+          "description": "What is written, above the quote.",
           "type": "string"
         },
         "to": {
@@ -2863,6 +2903,13 @@
           "format": "int64",
           "type": "integer"
         },
+        "quote": {
+          "description": "The message a reply or forward carries, as plain text: sent below `text`, with\nits formatting and images.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "replying_to": {
           "description": "The message it replies to.",
           "format": "int64",
@@ -2875,6 +2922,7 @@
           "type": "string"
         },
         "text": {
+          "description": "What is written, above the quote.",
           "type": "string"
         },
         "to": {
@@ -3581,6 +3629,13 @@
             "null"
           ]
         },
+        "remove_quote": {
+          "description": "Takes the quote out (`true`), and the images it shows.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "subject": {
           "type": [
             "string",
@@ -3588,7 +3643,7 @@
           ]
         },
         "text": {
-          "description": "The whole text, a quote included. Replaces the formatting too, if the draft is\n`formatted`.",
+          "description": "The text written above the quote (which stays). Replaces the formatting too, if\nthe draft is `formatted`.",
           "type": [
             "string",
             "null"
@@ -3684,6 +3739,13 @@
           "format": "int64",
           "type": "integer"
         },
+        "quote": {
+          "description": "The message a reply or forward carries, as plain text: sent below `text`, with\nits formatting and images.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "replying_to": {
           "description": "The message it replies to.",
           "format": "int64",
@@ -3696,6 +3758,7 @@
           "type": "string"
         },
         "text": {
+          "description": "What is written, above the quote.",
           "type": "string"
         },
         "to": {
