@@ -573,7 +573,7 @@ dependencies = [
 name = "catmail-core"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "catmail-core",
  "catmail-html",
  "catmail-proto",
@@ -663,7 +663,7 @@ name = "catmail-html"
 version = "0.1.0"
 dependencies = [
  "ammonia",
- "base64 0.22.1",
+ "base64 0.23.1",
  "color",
  "cssparser",
  "html2text",
@@ -676,7 +676,7 @@ dependencies = [
 name = "catmail-mcp"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "catmail-core",
  "catmail-testkit",
  "futures-util",
@@ -703,7 +703,7 @@ dependencies = [
 name = "catmail-proto"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "catmail-html",
  "catmail-testkit",
  "catmail-types",
@@ -743,7 +743,7 @@ dependencies = [
 name = "catmail-testkit"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "mail-parser",
  "rcgen",
  "rustls",
