@@ -196,9 +196,10 @@ fn address_list(list: &[Address]) -> Result<BuilderAddress<'_>, InvalidHeader> {
     Ok(BuilderAddress::new_list(list))
 }
 
-/// mail-builder writes addresses and the Message-ID between angle brackets as they are,
-/// and a bare CR in one becomes a line break on the way out, starting a header of the
-/// sender's choosing. Unlike threading IDs, they can't just be left out.
+/// mail-builder writes the Message-ID between angle brackets as it is, and a bare CR in
+/// it becomes a line break on the way out, starting a header of the sender's choosing.
+/// From an address it drops control characters, so the message would go to another
+/// address than the draft's. Unlike threading IDs, neither can just be left out.
 fn bracketed<'a>(field: &'static str, value: &'a str) -> Result<&'a str, InvalidHeader> {
     if fits_in_angle_brackets(value) {
         Ok(value)

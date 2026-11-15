@@ -20,7 +20,7 @@ catmail-testkit = { path = "crates/catmail-testkit" }
 
 ammonia = "4.2.5"
 anyhow = "1"
-base64 = "0.22.1"
+base64 = "0.23.1"
 # Buffers shared without copying: a file an agent puts to the MCP server reaches the
 # engine as hyper received it, while the upload keeps it for a call that may fail.
 bytes = "1.12.1"
@@ -69,15 +69,15 @@ keyring = "4.2"
 libc = "0.2.191"
 # Builds outgoing messages; the same family as mail-parser. Without `gethostname`:
 # Message-IDs come from the sender's domain, not the machine's name.
-mail-builder = { version = "1.0.0", default-features = false }
+mail-builder = { version = "2.0.1", default-features = false }
 mail-parser = { version = "1.0.1", features = ["full_encoding"] }
 mime_guess = "2.0.5"
 # Native Shell, catmail-gui's toolkit: GTK 4 on Linux and AppKit on macOS, bodies in web
 # views (WebKitGTK, WKWebView).
-nsh-core = "0.5.0"
-nsh-base = { version = "0.5.0", default-features = false }
-nsh-platform-linux = { version = "0.5.0", default-features = false, features = ["webview"] }
-nsh-platform-macos = { version = "0.5.0", default-features = false }
+nsh-core = "0.5.1"
+nsh-base = { version = "0.5.1", default-features = false }
+nsh-platform-linux = { version = "0.5.1", default-features = false, features = ["webview"] }
+nsh-platform-macos = { version = "0.5.1", default-features = false }
 # catmail-gui's AppKit shell: the main thread's futures on the main dispatch queue
 # (async-task), and the event monitor's block (the versions nsh's macOS platform uses).
 async-task = "4.7.1"
@@ -140,17 +140,17 @@ pollster = "1"
 # Remote images, when the user asks to see them. Without default features: rustls on our
 # ring configuration (`use_preconfigured_tls`), no native-tls, no HTTP/2, no system proxy
 # lookup.
-reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls-no-provider"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
 # catmail-gui's tray icon pixels: nsh-core's resvg, with text for the badge's digits.
 resvg = { version = "0.46", default-features = false, features = ["text", "system-fonts"] }
 # Reads iTerm2 color schemes (XML property lists).
-quick-xml = "0.41.0"
+quick-xml = "0.42.0"
 rcgen = "0.14"
 # The Model Context Protocol (`catmail-mcp`): its tool macros and Streamable HTTP
 # service, without the client side, OAuth or reqwest.
 rmcp = { version = "3.9.0", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }
 rpassword = "7"
-rusqlite = { version = "0.41.1", features = ["bundled"] }
+rusqlite = { version = "0.42.0", features = ["bundled"] }
 # ring instead of the default aws-lc-rs: no cmake/NASM needed on Windows CI.
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-platform-verifier = "0.7.1"
