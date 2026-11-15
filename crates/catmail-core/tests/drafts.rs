@@ -13,7 +13,7 @@ use catmail_core::{
     QuoteKind, ReplayReport, SyncSchedule,
 };
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
-use common::{Env, addr, env, env_built, eventually, synced_env};
+use common::{Env, addr, env, env_built, eventually, sparse, synced_env};
 use mail_parser::MessageParser;
 use tokio::sync::Semaphore;
 
@@ -813,6 +813,51 @@ async fn a_quote_taken_out_takes_its_images() {
     let draft = env.client.update_draft(draft.id, changes).await.unwrap();
     assert_eq!(draft.content.text_as_sent(), "Thanks");
     assert!(draft.attachments.is_empty(), "{:?}", draft.attachments);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn files_asked_for_come_before_the_quoted_images() {
+    // What the attachments may add up to while the server hasn't said.
+    const LIMIT: u64 = 25 * 1024 * 1024;
+    let mut state = state();
+    state.inbox().append(REPORT, &[]);
+    let env = synced_env(state).await;
+    let id = env.id_of("INBOX", "Report").await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = |name: &str, size: u64| sparse(dir.path(), name, size).into();
+    let names = |draft: &Draft| -> Vec<String> {
+        draft
+            .attachments
+            .iter()
+            .map(|a| a.filename.clone())
+            .collect()
+    };
+
+    // The file fits alone, not with the quote's 8-byte image, which is left out.
+    let draft = env
+        .client
+        .reply(
+            id,
+            false,
+            None,
+            String::new(),
+            vec![file("most.bin", LIMIT - 4)],
+        )
+        .await
+        .unwrap();
+    assert_eq!(names(&draft), ["most.bin"]);
+    // A forward's own attachment (9 bytes) is no image: it comes along all the same.
+    let draft = env
+        .client
+        .forward(
+            id,
+            None,
+            Forwarding::default(),
+            vec![file("rest.bin", LIMIT - 13)],
+        )
+        .await
+        .unwrap();
+    assert_eq!(names(&draft), ["report.pdf", "rest.bin"]);
 }
 
 /// Over the whole-message limit, so its parts are fetched on their own: HTML showing an

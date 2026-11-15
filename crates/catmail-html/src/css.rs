@@ -283,10 +283,12 @@ struct Selector<'s> {
 enum Lead {
     /// At its start, before anything but whitespace.
     Start,
-    /// Right after `html` or `:root`, written as the scope, which a descendant `body`
-    /// is too; with whitespace held back.
+    /// Right after `html` or `:root`, written as the scope, which a `body` below it (a
+    /// descendant, `html body`, or a child, `html > body`) is too; with the whitespace and
+    /// `>` between them held back.
     AfterRoot {
         space: bool,
+        child: bool,
     },
     Rest,
 }
@@ -307,7 +309,10 @@ impl Selector<'_> {
         match self.lead {
             Lead::Start if matches!(token, Token::WhiteSpace(_)) => Ok(()),
             Lead::Start if ident("html") || (*token == Token::Colon && is_root(parser)) => {
-                self.lead = Lead::AfterRoot { space: false };
+                self.lead = Lead::AfterRoot {
+                    space: false,
+                    child: false,
+                };
                 self.push_scope()
             }
             Lead::Start if ident("body") => {
@@ -320,17 +325,28 @@ impl Selector<'_> {
                 self.css.push(&Token::WhiteSpace(" "))?;
                 copy(parser, token, &mut self.css, Context::Selector)
             }
-            Lead::AfterRoot { .. } if matches!(token, Token::WhiteSpace(_)) => {
-                self.lead = Lead::AfterRoot { space: true };
+            Lead::AfterRoot { child, .. } if matches!(token, Token::WhiteSpace(_)) => {
+                self.lead = Lead::AfterRoot { space: true, child };
                 Ok(())
             }
-            Lead::AfterRoot { space: true } if ident("body") => {
+            Lead::AfterRoot {
+                space,
+                child: false,
+            } if *token == Token::Delim('>') => {
+                self.lead = Lead::AfterRoot { space, child: true };
+                Ok(())
+            }
+            Lead::AfterRoot { space, child } if (space || child) && ident("body") => {
                 self.lead = Lead::Rest;
                 Ok(())
             }
-            Lead::AfterRoot { space } => {
+            Lead::AfterRoot { space, child } => {
                 self.lead = Lead::Rest;
-                if space {
+                if child {
+                    self.css.push(&Token::WhiteSpace(" "))?;
+                    self.css.push(&Token::Delim('>'))?;
+                }
+                if space || child {
                     self.css.push(&Token::WhiteSpace(" "))?;
                 }
                 copy(parser, token, &mut self.css, Context::Selector)
@@ -615,6 +631,11 @@ mod tests {
         assert_eq!(
             scoped("p, .a > b, html{x:1} * {y:2}"),
             ".q p,.q .a > b,.q{x:1;}.q *{y:2;}"
+        );
+        // `body` as the root's child is the scope as well.
+        assert_eq!(
+            scoped("html > body p{x:1}html>body{y:2}html > p{z:3}"),
+            ".q p{x:1;}.q{y:2;}.q > p{z:3;}"
         );
         // Commas within a function separate nothing; `body` past the start is any body.
         assert_eq!(

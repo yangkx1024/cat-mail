@@ -371,17 +371,26 @@ fn mime_type_of(filename: &str) -> String {
         .to_owned()
 }
 
+/// Files copied for a new draft, and what they were checked against.
+struct Copied {
+    /// The identity they were checked for, which the draft must be made as: the default
+    /// may change while they are copied.
+    identity: IdentityId,
+    /// What the draft's attachments may add up to, sent as it.
+    limit: u64,
+    attachments: Vec<NewDraftAttachment>,
+}
+
 /// Copies the files to attach to a new draft of `account`, sent as `from`, into the blob
 /// store: within what its attachments may add up to, with `used` taken by those it starts
-/// with. Returns them and the identity they were checked for, which the draft must be
-/// made as: with `None`, the default may change while they are copied. Blocking.
+/// with. Blocking.
 fn copy_files(
     engine: &Engine,
     account: AccountId,
     from: Option<IdentityId>,
     mut used: u64,
     files: &[NewFile],
-) -> Result<(IdentityId, Vec<NewDraftAttachment>)> {
+) -> Result<Copied> {
     let (identity, limit) = engine
         .store
         .read(|db| {
@@ -405,7 +414,11 @@ fn copy_files(
             Ok(attachment)
         })
         .collect::<Result<_>>()?;
-    Ok((identity, attachments))
+    Ok(Copied {
+        identity,
+        limit,
+        attachments,
+    })
 }
 
 /// Copies the file into the blob store and attaches it; later changes to the file
@@ -515,7 +528,15 @@ pub(crate) async fn reply(
     let (mut content, written_as) = reply_content(&message, &own, all);
     content.body = DraftBody::plain(text.trim_end());
     let from = from.or(written_as);
-    let images = quoted_images(engine, &message, from, 0, &mut content.quote).await?;
+    let (from, attachments) = answer_attachments(
+        engine,
+        &message,
+        from,
+        Vec::new(),
+        files,
+        &mut content.quote,
+    )
+    .await?;
     let mut references = message.references.clone();
     references.extend(message.message_id.clone());
     let reply = DraftReply {
@@ -526,11 +547,11 @@ pub(crate) async fn reply(
     insert(
         engine,
         account_id,
-        from,
+        Some(from),
         content,
         Some(reply),
-        images,
-        files,
+        attachments,
+        Vec::new(),
     )
     .await
 }
@@ -595,12 +616,12 @@ pub(crate) async fn forward(
         check_address(&address.email)?;
     }
     let message = with_body(engine, id).await?;
-    let mut attachments = Vec::new();
+    let mut originals = Vec::new();
     for original in message.body.iter().flat_map(|b| b.files()) {
         // The blob the message already has, its GC grace period restarted to cover the
         // gap until the transaction below refers to it.
         let (blob, size) = body::attachment_blob(engine.clone(), original.id).await?;
-        attachments.push(NewDraftAttachment {
+        originals.push(NewDraftAttachment {
             blob,
             filename: attachment_name(original.filename.as_deref(), "attachment"),
             mime_type: original.mime_type.clone(),
@@ -616,36 +637,61 @@ pub(crate) async fn forward(
         body: DraftBody::plain(text.trim_end()),
         ..forward_content(&message)
     };
-    let used = attachments.iter().map(|a| a.size).sum();
-    let images = quoted_images(engine, &message, from, used, &mut content.quote).await?;
-    attachments.extend(images);
+    let (from, attachments) =
+        answer_attachments(engine, &message, from, originals, files, &mut content.quote).await?;
     insert(
         engine,
         message.summary.account_id,
-        from,
+        Some(from),
         content,
         None,
         attachments,
-        files,
+        Vec::new(),
     )
     .await
 }
 
-/// Copies the images the quote's HTML shows into the draft to be, under Content-IDs of
-/// their own (unique in the message it goes into, and among the draft's images, which
-/// are told apart by them), downloading those not here yet. Within what the draft's
-/// attachments may add up to, sent as `from`, with `used` taken: the quote is the user's
-/// to send, not what they attach, so an image that doesn't fit or can't be had is left
-/// out (it shows as missing) rather than failing the reply.
-async fn quoted_images(
+/// The attachments of a reply or forward of `message`, sent as `from`: those it starts
+/// with (a forward's, the message's), the `files` asked for, copied in, then the images
+/// the quote shows in what room is left. The files come first: they were asked for, and
+/// the images are only taken if they fit. Returns them, and the identity they were
+/// checked for, which the draft must be made as.
+async fn answer_attachments(
     engine: &Arc<Engine>,
     message: &Message,
     from: Option<IdentityId>,
+    mut attachments: Vec<NewDraftAttachment>,
+    files: Vec<NewFile>,
+    quote: &mut Option<Quote>,
+) -> Result<(IdentityId, Vec<NewDraftAttachment>)> {
+    let account = message.summary.account_id;
+    let used = attachments.iter().map(|a| a.size).sum();
+    let copied = blocking({
+        let engine = engine.clone();
+        move || copy_files(&engine, account, from, used, &files)
+    })
+    .await?;
+    let used = used + copied.attachments.iter().map(|a| a.size).sum::<u64>();
+    attachments.extend(quoted_images(engine, message, copied.limit, used, quote).await);
+    attachments.extend(copied.attachments);
+    Ok((copied.identity, attachments))
+}
+
+/// Copies the images the quote's HTML shows into the draft to be, under Content-IDs of
+/// their own (unique in the message it goes into, and among the draft's images, which
+/// are told apart by them), downloading those not here yet. Within `limit`, what the
+/// draft's attachments may add up to, with `used` taken: the quote is the user's to
+/// send, not what they attach, so an image that doesn't fit or can't be had is left out
+/// (it shows as missing) rather than failing the reply.
+async fn quoted_images(
+    engine: &Arc<Engine>,
+    message: &Message,
+    limit: u64,
     mut used: u64,
     quote: &mut Option<Quote>,
-) -> Result<Vec<NewDraftAttachment>> {
+) -> Vec<NewDraftAttachment> {
     let Some(html) = quote.as_mut().and_then(|q| q.html.as_mut()) else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
     let shown = catmail_html::cid_image_ids(html);
     let parts: Vec<_> = message
@@ -655,12 +701,8 @@ async fn quoted_images(
         .filter_map(|a| Some((a.content_id.as_ref().filter(|id| shown.contains(*id))?, a)))
         .collect();
     if parts.is_empty() {
-        return Ok(Vec::new());
+        return Vec::new();
     }
-    let account = message.summary.account_id;
-    let (_, limit) = engine
-        .read(move |db| new_attachments_limit(db, account, from))
-        .await?;
     let (mut images, mut renamed) = (Vec::new(), HashMap::new());
     for (id, part) in parts {
         // Its size as the message said: one that can't fit isn't downloaded for nothing.
@@ -695,7 +737,7 @@ async fn quoted_images(
     if !renamed.is_empty() {
         *html = catmail_html::rename_cid_images(html, renamed);
     }
-    Ok(images)
+    images
 }
 
 /// An attachment's file name as copied into a draft: without NULs, `fallback` if it has
@@ -733,9 +775,9 @@ async fn insert(
             let mut from = from;
             if !files.is_empty() {
                 let used = attachments.iter().map(|a| a.size).sum();
-                let (identity, copied) = copy_files(&engine, account, from, used, &files)?;
-                from = Some(identity);
-                attachments.extend(copied);
+                let copied = copy_files(&engine, account, from, used, &files)?;
+                from = Some(copied.identity);
+                attachments.extend(copied.attachments);
             }
             Ok(engine.store.write(|db| {
                 if db.accounts().get(account)?.is_none() {
