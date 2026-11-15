@@ -23,7 +23,10 @@ tokio = { workspace = true, features = ["rt", "sync"] }
 tracing.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+futures-util.workspace = true
 ksni.workspace = true
+pollster.workspace = true
+zbus.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true

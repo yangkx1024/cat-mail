@@ -38,6 +38,17 @@ pub mod theme;
 pub mod tray;
 pub mod watched;
 
+/// The application id: Wayland's app id, X11's WM_CLASS, the `.desktop` file's name and
+/// its autostart entry's, the Flatpak's id.
+pub const APP_ID: &str = "net.yangkx.catmail";
+
+/// Whether the app runs in its Flatpak: Flatpak puts this file at the root of every
+/// sandbox it runs.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn in_flatpak() -> bool {
+    std::path::Path::new("/.flatpak-info").exists()
+}
+
 /// FNV-1a: stable across Rust versions, runs and platforms, unlike `DefaultHasher`.
 fn fnv1a(bytes: impl IntoIterator<Item = u8>) -> u64 {
     bytes.into_iter().fold(0xcbf2_9ce4_8422_2325, |hash, b| {

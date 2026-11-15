@@ -89,7 +89,7 @@ impl Item {
         // Flatpak the pid is the sandbox's, the same small number in every app, so the
         // names collide (and owning one takes a wildcard permission): register by the
         // unique name instead, as the watchers accept.
-        match item.disable_dbus_name(in_flatpak()).spawn().await {
+        match item.disable_dbus_name(crate::in_flatpak()).spawn().await {
             Ok(handle) => Some(Self(handle)),
             Err(e) => {
                 tracing::info!(error = %e, "no tray icon");
@@ -111,11 +111,6 @@ impl Item {
             })
             .await;
     }
-}
-
-/// Flatpak puts this file at the root of every sandbox it runs.
-fn in_flatpak() -> bool {
-    std::path::Path::new("/.flatpak-info").exists()
 }
 
 fn argb(pixmap: Pixmap) -> Icon {
