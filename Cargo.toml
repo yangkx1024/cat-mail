@@ -74,10 +74,10 @@ mail-parser = { version = "1.0.1", features = ["full_encoding"] }
 mime_guess = "2.0.5"
 # Native Shell, catmail-gui's toolkit: GTK 4 on Linux and AppKit on macOS, bodies in web
 # views (WebKitGTK, WKWebView).
-nsh-core = "0.5.0"
-nsh-base = { version = "0.5.0", default-features = false }
-nsh-platform-linux = { version = "0.5.0", default-features = false, features = ["webview"] }
-nsh-platform-macos = { version = "0.5.0", default-features = false }
+nsh-core = "0.5.1"
+nsh-base = { version = "0.5.1", default-features = false }
+nsh-platform-linux = { version = "0.5.1", default-features = false, features = ["webview"] }
+nsh-platform-macos = { version = "0.5.1", default-features = false }
 # catmail-gui's AppKit shell: the main thread's futures on the main dispatch queue
 # (async-task), and the event monitor's block (the versions nsh's macOS platform uses).
 async-task = "4.7.1"
