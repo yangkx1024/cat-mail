@@ -131,8 +131,10 @@
 - [x] 开机启动（macOS）：Settings › General 的 "Open at login" 是 `SMAppService.mainApp`（frontend 的 `autostart`），
       只在 bundle 里、macOS 13 起显示。`--background` 和登录时的启动不开窗口（`shell::launched`）；登录时的启动按
       启动的 Apple Event 判断，⚠️ 还没在真的登录上确认过（看日志的 `launched opened=…`）
-- [ ] 开机启动（Linux）：XDG autostart 文件，Flatpak 里经 Background portal 的 `RequestBackground`，都带
-      `--background`
+- [x] 开机启动（Linux）：XDG autostart 文件，Flatpak 里经 Background portal 的 `RequestBackground`，都带
+      `--background`（frontend 的 `autostart::platform`）。Flatpak 里的状态是 portal 上次的答复。Flatpak 里对真
+      portal 的请求试过，写出、删掉都对。⚠️ 还没在真的登录上确认过；portal 配置里没有 Background 的桌面
+      （wlroots 系常见）按开关会报错
 - [x] macOS 常驻时切到 Accessory 激活策略：只留状态栏图标，Dock 图标和应用切换器里都没有，开窗时切回 Regular
       （`toolkit::resident`、`Window::present`）；`--background` 一开始就是 Accessory。⚠️ 有窗口（Regular）时在别的
       应用的全屏 Space 里点状态栏图标不出菜单，是 AppKit 的限制，见 background.md「两个状态」；要解决得把状态栏项

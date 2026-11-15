@@ -326,7 +326,7 @@ GUI 的 `tray/` 在引擎打开时启动，有窗口时、常驻时都在。`tra
 窗口被关掉了）就开一个，关掉它应用就退出（`after_last_window`，记 `engine_failed`）。
 
 "开机时启动"（Settings › General 的 "Open at login"）在系统那里，不进 `settings.json`：用户也能在系统设置里改，
-所以每次打开设置时读系统的状态（`catmail_frontend::autostart`）。只在能用的地方显示这个开关（`available`）。
+所以每次打开设置时读系统的状态（`catmail_frontend::autostart`；Flatpak 里读不到，见下）。只在能用的地方显示这个开关（`available`）。
 
 - **macOS**：`SMAppService.mainApp`（macOS 13 起），出现在系统设置 › 通用 › 登录项的"登录时打开"里，带应用的
   名字和图标。打开开关时 `register`，关掉时 `unregister`，在另一个线程上调（是对系统的阻塞调用，打开时系统还会
@@ -350,10 +350,28 @@ GUI 的 `tray/` 在引擎打开时启动，有窗口时、常驻时都在。`tra
     又开着时，因此也不开窗口，再启动一次就开。
   - Finder、Dock、`open` 打开的：不是。
   - 日志记一行 `launched opened=… at_login=…`。⚠️ 还没在真的登录上确认过哪一种。
-- **Linux**（还没做）：写 XDG autostart 文件，`Exec` 带 `--background`。包是 Flatpak（见
-  [打包](packaging.md#图形界面flatpak)），沙箱里写不了 `~/.config/autostart`，要用 Background portal 的
-  `RequestBackground`（`autostart`、`commandline` 带 `--background`），由 portal 写出 `flatpak run` 的 autostart
-  文件；包外运行时才自己写。
+- **Linux**：XDG autostart 文件 `$XDG_CONFIG_HOME/autostart/net.yangkx.catmail.desktop`，GNOME、KDE 等桌面
+  在登录时启动它，并列在自己的自启动设置里。`Exec` 带 `--background`，所以不用像 macOS 那样判断是不是登录时的
+  启动（`launched_at_login` 在 Linux 上总是 false）。
+  - 包外运行：自己写这个文件。文件就是设置：在就是开着，桌面关掉的（`Hidden=true`、
+    `X-GNOME-Autostart-enabled=false`）读作关着，再打开时整个重写。`Exec` 是当前的可执行文件（`current_exe`），
+    `TryExec` 让桌面在它不在了时跳过。文件名按 app id，不分是哪一份拷贝写的，同 macOS 的登录项按 bundle id 一样。
+  - Flatpak（[打包](packaging.md#图形界面flatpak)）：沙箱写不了 `~/.config/autostart`，用 Background portal 的
+    `RequestBackground`（`autostart`，`commandline` 是 `catmail-gui --background`），portal 写出
+    `flatpak run --command=catmail-gui net.yangkx.catmail --background`。portal 不提供读的接口，沙箱也看不到
+    那个文件，所以它最后一次的答复记在应用的配置目录里（空文件 `open-at-login`），当作状态读。配置目录是
+    设置文件所在的那个，外壳启动时告诉 `autostart`（`use_config_dir`），不由 `autostart` 自己再找一遍：
+    `CATMAIL_CONFIG_DIR` 因此对它同样有效。在应用之外
+    关掉的（桌面的自启动设置、应用的后台权限），开关仍显示开着，再按一次就问 portal；不允许后台运行时 portal
+    答复没有 autostart，开关关上并报错；用户关掉 portal 的对话框则什么也不变。portal 在按调用者和
+    `handle_token` 命名的请求对象上答复：先订阅它的 `Response` 再调用，否则答复可能先到。接下请求的
+    portal 离开总线（崩溃、重启）就不再等：新的 portal 不知道这个请求，答复永远不会来，而等着的改动占着
+    `autostart` 的锁，开关会一直不能按。看的是回复的发送方（唯一名），不是 well-known 名：portal 还没运行时
+    总线为这次调用启动它，well-known 名也会换主人，那不是离开。答复记不下来（配置目录写不了）时开关按 portal 的答复显示并报错，不按旧的记录。没有给父窗口：要从
+    工具包拿开关所在窗口的句柄，不值得。
+  - 没有用 `--filesystem=xdg-config/autostart:ro` 去读真实的文件：只为显示开关多要一项文件权限，不划算。
+  - 也没有用 nsh 新加的 `launch_at_login`（longbridge/nsh#1884）：只给 `run_app` 的独立应用视图，我们自带外壳拿不到；
+    Flatpak 里它不可用，`Exec` 也不能带参数。
 - **Windows**（随 Windows 的 GUI）：`HKCU\…\Run`。
 
 `--background` 只管这一次启动：已经有实例在运行时，它照样把 `Activate` 交给那个实例，主窗口会出来。

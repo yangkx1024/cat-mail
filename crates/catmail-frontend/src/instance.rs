@@ -7,7 +7,6 @@
 //! A socket's path is limited to about a hundred bytes. A longer data directory's socket
 //! goes in the user's runtime directory instead, named after the data directory.
 
-use std::fs;
 use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -220,17 +219,13 @@ fn hand(socket: &Path, request: &Request) -> Result<bool, HandError> {
 /// Listens on `socket` for the rest of the process.
 fn serve(socket: &Path) -> io::Result<Requests> {
     // Left by a run that ended without removing it.
-    match fs::remove_file(socket) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
+    crate::settings::remove_if_present(socket)?;
     let listener = UnixListener::bind(socket)?;
     // The directory already keeps others out unless the user widened it.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(socket, fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
     }
     let (sender, requests) = mpsc::unbounded();
     thread::Builder::new()
@@ -371,7 +366,7 @@ mod tests {
             .path()
             .join("a-data-directory-whose-path-is-longer".repeat(3));
         let link = dir.path().join("d");
-        fs::create_dir(&data).unwrap();
+        std::fs::create_dir(&data).unwrap();
         std::os::unix::fs::symlink(&data, &link).unwrap();
 
         let (_lock, requests) = first(&Config::with_data_dir(&data), Some(runtime.path()));

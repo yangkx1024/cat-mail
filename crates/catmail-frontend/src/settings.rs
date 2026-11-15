@@ -217,6 +217,14 @@ pub(crate) fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<
     Ok(())
 }
 
+/// Removes the file at `path`: one that isn't there is removed already.
+pub(crate) fn remove_if_present(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

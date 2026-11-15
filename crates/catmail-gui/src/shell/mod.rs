@@ -48,8 +48,7 @@ use self::toolkit::Window;
 use crate::engine;
 use crate::nsh_platform::{App, AppOptions, AppView, Appearance, Root};
 
-/// The application id: Wayland's app id, X11's WM_CLASS, the `.desktop` file's name.
-pub const APP_ID: &str = "net.yangkx.catmail";
+pub use catmail_frontend::APP_ID;
 
 /// The app's name: the main window's title, the tray item's.
 pub const APP_NAME: &str = "catmail";
@@ -350,6 +349,9 @@ pub fn run(
 ) -> u8 {
     HIDDEN.set(hidden);
     let file = FILE.get_or_init(|| file.map(Arc::new));
+    if let Some(file) = file {
+        catmail_frontend::autostart::use_config_dir(file.dir().to_owned());
+    }
     SETTINGS.set(file.as_ref().map(|file| file.load()).unwrap_or_default());
     let themes_dir = file.as_ref().map(|file| file.themes_dir());
     *lock(&THEMES) = Themes::load(themes_dir.as_deref());

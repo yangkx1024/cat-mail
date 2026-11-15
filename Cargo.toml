@@ -181,6 +181,9 @@ unicode-width = "0.2.2"
 # The URL parser ammonia uses; the sanitizer's own checks must agree with it.
 url = "2.5.8"
 uuid = { version = "1.28", features = ["v4"] }
+# Opening at login in the Flatpak (the Background portal). The zbus already in the tree
+# (the tray, notifications, the keyring), its blocking calls on async-io.
+zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
 
 # Dependencies a little optimized in dev builds and tests (our crates stay at 0, for
 # quick rebuilds and debugging). Unoptimized, catmail-gui's unwind tables outgrew what

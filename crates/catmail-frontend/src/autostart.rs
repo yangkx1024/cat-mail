@@ -1,11 +1,14 @@
 //! Opening the app when the user logs in ("Open at login"), and telling whether this
-//! launch was that one. On macOS it is a login item (`SMAppService.mainApp`, macOS 13).
+//! launch was that one. On macOS it is a login item (`SMAppService.mainApp`, macOS 13);
+//! on Linux an XDG autostart entry, which the Background portal writes for the Flatpak.
 //! The system owns it: the user can also turn it off in System Settings › General ›
-//! Login Items, so it is read from there each time rather than kept in the settings
-//! file. Linux (an XDG autostart file, or the Background portal in the Flatpak) and
-//! Windows come later. See docs/architecture/background.md.
+//! Login Items, or in the desktop's autostart settings, so it is read from there each
+//! time rather than kept in the settings file (where it can't be read, in the Flatpak,
+//! the portal's last answer is kept: [`use_config_dir`]). Windows comes later. See
+//! docs/architecture/background.md.
 
-use std::sync::{Mutex, PoisonError};
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use thiserror::Error;
 
@@ -17,8 +20,16 @@ use thiserror::Error;
 #[path = "autostart/macos.rs"]
 mod platform;
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[path = "autostart/linux.rs"]
+mod platform;
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[path = "autostart/portal.rs"]
+mod portal;
+
 /// Where the app can't open at login.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "freebsd")))]
 mod platform {
     use super::{Error, State};
 
@@ -54,8 +65,21 @@ pub enum State {
 #[error("{0}")]
 pub struct Error(String);
 
-/// Whether the app can open at login here: on macOS 13 and later, from its bundle. A
-/// binary run on its own, as by `cargo run`, has no login item.
+/// The app's configuration folder (the settings file's), as the shell found it.
+static CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Where the app keeps its configuration, told once at launch, before [`state`] or
+/// [`set`]: what opening at login must remember itself goes there. Without it, the
+/// Flatpak can't open at login.
+pub fn use_config_dir(dir: PathBuf) {
+    if CONFIG_DIR.set(dir).is_err() {
+        tracing::warn!("the configuration folder was told twice; the first one stays");
+    }
+}
+
+/// Whether the app can open at login here: on macOS 13 and later, from its bundle (a
+/// binary run on its own, as by `cargo run`, has no login item); on Linux with a
+/// configuration folder (in the Flatpak, the app's: [`use_config_dir`]).
 pub fn available() -> bool {
     platform::available()
 }
@@ -86,7 +110,7 @@ fn one_at_a_time<R>(f: impl FnOnce() -> R) -> R {
 
 /// Whether this launch was the login's. On macOS, asked once the app has finished
 /// launching (`applicationDidFinishLaunching:`), while its launch's Apple Event is the
-/// current one.
+/// current one. Never on Linux, where the login's launch says `--background`.
 pub fn launched_at_login() -> bool {
     platform::launched_at_login()
 }

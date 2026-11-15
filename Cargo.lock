@@ -610,6 +610,7 @@ dependencies = [
  "directories",
  "dunce",
  "futures-channel",
+ "futures-util",
  "jiff",
  "ksni",
  "libc",
@@ -617,6 +618,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "objc2-service-management",
+ "pollster",
  "quick-xml",
  "serde",
  "serde_json",
@@ -626,6 +628,7 @@ dependencies = [
  "toml 1.2.1+spec-1.1.0",
  "tracing",
  "uds_windows",
+ "zbus",
 ]
 
 [[package]]

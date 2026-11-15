@@ -46,7 +46,7 @@ WebKit 的沙箱照常工作：网页进程由 `flatpak-spawn --sandbox` 起在�
 - 通知：GLib 在沙箱里自动用 Notification portal。点击由 portal 对 app id 的总线名调用 `ActivateAction`，应用
   自己占用这个名字（Flatpak 默认允许占用自己的 id），见[后台运行](background.md#系统通知)。
 - 打开链接和附件（`GtkUriLauncher`、`GtkFileLauncher`）、保存附件（`GtkFileDialog`）。
-- 开机启动要用 Background portal（见[后台运行](background.md#开机启动)，还没实现）。
+- 开机启动：Background portal 的 `RequestBackground` 替沙箱写 autostart 文件（见[后台运行](background.md#开机启动)）。
 
 **数据目录**在 `~/.var/app/net.yangkx.catmail/data/catmail`，与包外的 CLI（`~/.local/share/catmail`）不是同一个，
 所以 CLI 也打进包里：`flatpak run --command=catmail net.yangkx.catmail`。
