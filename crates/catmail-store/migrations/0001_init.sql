@@ -375,6 +375,15 @@ CREATE TABLE drafts (
     -- The message formatted, or NULL for plain text (body_text is then all of it). Its
     -- images are the draft's attachments with a content_id, by cid: URL.
     body_html           TEXT,
+    -- What a reply or forward carries of the message it answers (catmail_types::Quote),
+    -- sent below the body: 'reply' or 'forward' with its intro and text, all NULL for
+    -- none. quote_html is NULL for a message of text only; its images are attachments
+    -- with a content_id too. Columns of their own, so a list of drafts reads the text
+    -- without the HTML.
+    quote_kind          TEXT CHECK (quote_kind IN ('reply', 'forward')),
+    quote_intro         TEXT,
+    quote_text          TEXT,
+    quote_html          TEXT,
     -- Bumped by every change, attachments included. Sending builds the message outside
     -- the transaction that queues it, and queues only if this hasn't moved meanwhile.
     revision            INTEGER NOT NULL DEFAULT 0,
@@ -398,6 +407,9 @@ CREATE TABLE drafts (
        AND (remote_folder_id IS NULL) = (remote_uid IS NULL)
        AND (remote_folder_id IS NULL) = (remote_message_id IS NULL)
        AND (remote_folder_id IS NULL) = (remote_revision IS NULL)),
+    CHECK ((quote_kind IS NULL) = (quote_intro IS NULL)
+       AND (quote_kind IS NULL) = (quote_text IS NULL)
+       AND (quote_kind IS NOT NULL OR quote_html IS NULL)),
     FOREIGN KEY (identity_id, account_id) REFERENCES identities(id, account_id)
 ) STRICT;
 
@@ -435,7 +447,8 @@ CREATE TABLE draft_attachments (
     filename  TEXT    NOT NULL,
     mime_type TEXT    NOT NULL,
     size      INTEGER NOT NULL,
-    -- An image in body_html (cid: it), not a file attached; sent only while shown there.
+    -- An image in body_html or the quote (cid: it), not a file attached; sent only while
+    -- shown there.
     content_id TEXT
 ) STRICT;
 

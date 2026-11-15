@@ -376,7 +376,7 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
   - **格式的样子由应用给**：和 Tiptap 一样，RichEditor 的节点和 mark 自己没有样式，加粗只有在 `classes` 说它
     `font-bold` 时才是粗的。`rich::classes` 按节点、mark 的名字给出 Tailwind 类（标题、引用、列表留出左边放标记的
     空间、代码、链接等），尽量接近收信端显示的样子；测试检查每个类 nsh 都认识、每个名字都在 schema 里。
-  - **打开**：解析时保留空白（`Whitespace::Full`），缩进、连续空格、Tab 照写的保留。草稿有 HTML 就解析它；纯文本草稿（回复的引文、CLI 和 agent 写的）按行转成段落，`>` 开头的行转成
+  - **打开**：解析时保留空白（`Whitespace::Full`），缩进、连续空格、Tab 照写的保留。草稿有 HTML 就解析它；纯文本草稿（CLI 和 agent 写的；回复、转发的原信是[引文](sending.md#引文)，不在正文里，写信窗口还不显示它）按行转成段落，`>` 开头的行转成
     （嵌套的）引用（`rich_text::text_to_html`）。
   - **保存**：从编辑器的文档（ProseMirror JSON）写出 HTML（nsh 的 `doc_to_html`），同时按同一规则写出纯文本
     （`rich_text::doc_to_text`：一段一行、引用加 `> `、列表加 `* ` / 序号、链接后附地址），一起存进草稿。用户

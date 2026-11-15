@@ -17,7 +17,7 @@ use rmcp::{tool, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::downloads::{body_cost, forward_cost};
+use super::downloads::{forward_cost, reply_cost};
 use super::{Failed, Mail, not_found};
 use crate::http::BaseUrl;
 use crate::output::{DraftOut, UploadOut};
@@ -129,9 +129,11 @@ pub(crate) struct UpdateDraftParams {
     pub to: Option<Vec<String>>,
     pub cc: Option<Vec<String>>,
     pub bcc: Option<Vec<String>>,
-    /// The whole text, a quote included. Replaces the formatting too, if the draft is
-    /// `formatted`.
+    /// The text written above the quote (which stays). Replaces the formatting too, if
+    /// the draft is `formatted`.
     pub text: Option<String>,
+    /// Takes the quote out (`true`), and the images it shows.
+    pub remove_quote: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -163,7 +165,7 @@ impl Mail {
     /// The draft as the agent reads it.
     async fn draft_out(&self, draft: &Draft) -> Result<Json<DraftOut>, Failed> {
         let identities = self.client.list_identities(draft.account_id).await?;
-        Ok(Json(DraftOut::new(draft, &identities)))
+        Ok(Json(DraftOut::new(&draft.into(), &identities)))
     }
 
     /// The account's identity that sends as `from` (an address, or `Name <address>`), if
@@ -314,6 +316,7 @@ impl Mail {
             cc,
             bcc,
             body: catmail_core::DraftBody::plain(p.text),
+            quote: None,
         };
         let given = self.files(p.attachments)?;
         let from = self.identity(account, p.from.as_deref()).await?;
@@ -348,10 +351,10 @@ impl Mail {
         let id = message.summary.id;
         let draft = self
             .downloading(
-                body_cost(&message),
+                reply_cost(&message),
                 self.client
                     .reply(id, p.all.unwrap_or(false), from, p.text, given.files),
-                self.left_of(id, body_cost),
+                self.left_of(id, reply_cost),
             )
             .await?;
         self.uploads.used(&given.uploads);
@@ -419,6 +422,7 @@ impl Mail {
             cc: parsed(p.cc)?,
             bcc: parsed(p.bcc)?,
             body: p.text.map(catmail_core::DraftBody::plain),
+            quote: p.remove_quote.unwrap_or(false).then_some(None),
         };
         if changes.is_empty() {
             return Err(Failed("invalid: nothing to change".into()));

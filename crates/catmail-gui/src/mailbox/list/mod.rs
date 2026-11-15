@@ -11,7 +11,9 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use catmail_core::{AccountId, Draft, Flags, FolderId, MessageId, MessageSummary, OutboxEntry};
+use catmail_core::{
+    AccountId, DraftSummary, Flags, FolderId, MessageId, MessageSummary, OutboxEntry,
+};
 use catmail_frontend::commands::MessageCommand;
 use catmail_frontend::composer::ComposeFrom;
 use catmail_frontend::list::{
@@ -271,7 +273,7 @@ pub fn selected_id() -> Option<MessageId> {
 }
 
 /// The selected draft, as the list has it now. Tracked.
-pub fn selected_draft() -> Option<Rc<Draft>> {
+pub fn selected_draft() -> Option<Rc<DraftSummary>> {
     selected_row(|row| match row {
         Row::Draft(draft) => Some(draft.clone()),
         _ => None,

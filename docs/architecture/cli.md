@@ -112,7 +112,9 @@ From 里的名字，不给或空白只用地址）、`identity default`、`ident
 默认身份，`reply` 用原信寄给的那个地址。`draft edit` 在 `draft_senders` 给的身份里找：地址先在草稿自己的
 账户里找，再依次找其他账户，选了别的账户的身份草稿就搬过去（回复不行，见
 [发信 / 发件身份](sending.md#发件身份)），之后两个账户都保存到服务器（旧账户删掉 Drafts 里的副本）。`reply`、`forward` 先读原信得知账户，把身份连同 `--body` 和
-`forward` 的收件人一起交给 `reply` / `forward`，草稿一次建成，不再事后 `update_draft`。`account list` 的 SMTP 列和 `--json` 的 `smtp` 是默认身份的服务器。
+`forward` 的收件人一起交给 `reply` / `forward`，草稿一次建成，不再事后 `update_draft`。`--body` 是写在
+[引文](sending.md#引文)上面的那段；`draft edit --body` 只换这段，`--no-quote` 去掉引文。`draft show` 显示发出时的
+纯文本（正文和引文），`--json` 里 `text` 和 `quote` 分开。`account list` 的 SMTP 列和 `--json` 的 `smtp` 是默认身份的服务器。
 
 ## 写文件
 

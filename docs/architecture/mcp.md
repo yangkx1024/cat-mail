@@ -172,6 +172,9 @@ tailnet 里的设备连得上，同一局域网内是直连。catmail 因此不�
 - **`update_draft` 只改给了的字段**：交给引擎的是 `DraftChanges`，引擎在存它的写事务里读出草稿再换上（见
   [发信 / 身份](sending.md)），用户在 agent 读出之后存下的其他部分不会被旧值覆盖。什么都没给是 `invalid`。草稿交给
   发件箱后改不了（`conflict`）。
+- **引文不在 `text` 里**：回复、转发的原信是草稿的[引文](sending.md#引文)，输出里的 `quote` 是它的纯文本形式，只读；
+  `text` 只是写在它上面的那段，`update_draft` 给新的 `text` 不动引文，`remove_quote` 去掉它。agent 改写回复时
+  不必把引文抄回来，也不会因为漏抄把它弄丢。
 - **用户在 GUI 里开着的草稿不能改**：`update_draft`、`attach`、`remove_attachment` 得 `conflict: draft N is open in
   the app…`，关掉窗口后才行（`MailClient::edit_draft`，见[发信 / 身份](sending.md)）。否则用户发出去的信里有没看到
   的改动，或编辑器下次保存把 agent 的修改写回去。agent 可以另写一份草稿。
@@ -222,7 +225,8 @@ tailnet 里的设备连得上，同一局域网内是直连。catmail 因此不�
   该等多久。`tools/list` 等不算。
 - **下载预算**：服务器限制一个账户一天下载多少（Gmail 的 IMAP 约 2500 MB，超了 `OverLimit` 封一天），GUI 和后台
   同步也在用它。每个令牌一天 250 MB，从第一次下载起算 24 小时。只算为它的调用从服务器下载的：`read_message`、
-  `reply` 下载还没有的正文（按 `RFC822.SIZE`），`read_attachment` 下载还没有的附件，`forward` 两者都可能。已经
+  `reply` 下载还没有的正文（按 `RFC822.SIZE`）或引文要显示的图片，`read_attachment` 下载还没有的附件，`forward`
+  下载正文或附件和图片。已经
   在本地的（后台预取过的、读过的）不算。下载前按大小扣，放不下就拒绝（`over_limit`）；调用失败只退回还没下载的部分：下载完了才失败的（回复带了坏文件名）照扣，否则反复失败就能白下载。读正文总经过引擎，正文已在本地也一样：打开时会重建旧版本存下的正文。
 
 ## 发信的确认

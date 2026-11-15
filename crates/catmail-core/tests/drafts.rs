@@ -1,15 +1,16 @@
 //! Drafts copied to the server's Drafts folder, against the fake IMAP server: uploads
 //! replacing the copy, deletion with the draft or once it is sent, lost and refused
 //! APPENDs, a rebuilt folder, and uploads made in the background once a draft settles.
-//! Also forwards, which copy the original's attachments into the draft.
+//! Also replies and forwards, which quote the original and copy its attachments and
+//! images into the draft.
 
 mod common;
 
 use std::time::Duration;
 
 use catmail_core::{
-    Address, DraftBody, DraftChanges, DraftContent, DraftId, Forwarding, MailClientBuilder,
-    ReplayReport, SyncSchedule,
+    Address, Draft, DraftBody, DraftChanges, DraftContent, DraftId, Forwarding, MailClientBuilder,
+    QuoteKind, ReplayReport, SyncSchedule,
 };
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 use common::{Env, addr, env, env_built, eventually, synced_env};
@@ -627,7 +628,10 @@ async fn a_reply_quoting_a_nul_doesnt_stop_the_sync() {
         .reply(odd, false, None, String::new(), Vec::new())
         .await
         .unwrap();
-    assert!(draft.content.body.text.contains("beforeafter"), "{draft:?}");
+    assert!(
+        draft.content.text_as_sent().contains("beforeafter"),
+        "{draft:?}"
+    );
 
     let report = env.replay().await;
     assert_eq!((report.drafts_uploaded, report.drafts_failed), (1, 0));
@@ -682,8 +686,20 @@ const REPORT: &[u8] = b"From: Zhang <zhang@example.com>\r\n\
     JVBERi0xLjQK\r\n\
     --outer--\r\n";
 
+/// The Content-ID of the draft's one image, its filename and size.
+fn image_of(draft: &Draft) -> (&str, &str, u64) {
+    let images: Vec<_> = draft.attachments.iter().filter(|a| a.in_text()).collect();
+    assert_eq!(images.len(), 1, "{:?}", draft.attachments);
+    let image = images[0];
+    (
+        image.content_id.as_deref().unwrap(),
+        image.filename.as_str(),
+        image.size,
+    )
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn a_forward_carries_the_attachments_but_not_the_inline_images() {
+async fn a_forward_carries_the_message_its_attachments_and_images() {
     let mut state = state();
     state.inbox().append(REPORT, &[]);
     let env = synced_env(state).await;
@@ -706,10 +722,11 @@ async fn a_forward_carries_the_attachments_but_not_the_inline_images() {
     assert_eq!(draft.content.subject, "Fwd: Report");
     assert!(draft.content.recipients().next().is_none());
     assert!(draft.in_reply_to.is_none() && draft.references.is_empty());
-    let text = &draft.content.body.text;
+    assert_eq!(draft.content.body, DraftBody::default());
+    let text = draft.content.text_as_sent();
     assert!(
         text.starts_with(
-            "\n\n---------- Forwarded message ---------\nFrom: Zhang <zhang@example.com>\nDate: 2026-"
+            "---------- Forwarded message ---------\nFrom: Zhang <zhang@example.com>\nDate: 2026-"
         ),
         "{text:?}"
     );
@@ -717,24 +734,148 @@ async fn a_forward_carries_the_attachments_but_not_the_inline_images() {
         text.ends_with("Subject: Report\nTo: alice@example.com\n\nSee the report.\n"),
         "{text:?}"
     );
-    let attachments: Vec<_> = draft
+    let files: Vec<_> = draft
         .attachments
         .iter()
+        .filter(|a| !a.in_text())
         .map(|a| (a.filename.as_str(), a.mime_type.as_str(), a.size))
         .collect();
-    assert_eq!(attachments, [("report.pdf", "application/pdf", 9)]);
-    assert_eq!(env.client.list_drafts(env.account).await.unwrap(), [draft]);
+    assert_eq!(files, [("report.pdf", "application/pdf", 9)]);
+    // The image, under a Content-ID of the draft's.
+    let (cid, filename, size) = image_of(&draft);
+    assert_eq!((filename, size), ("image", 8));
+    let quote = draft.content.quote.as_ref().unwrap();
+    assert_eq!(quote.kind, QuoteKind::Forward);
+    let html = quote.html.as_deref().unwrap();
+    assert!(
+        html.contains(&format!(r#"<img src="cid:{cid}">"#)),
+        "{html}"
+    );
+    assert_eq!(
+        env.client.list_drafts(env.account).await.unwrap(),
+        [(&draft).into()]
+    );
 
     // As it goes out: the copy on the server is built like the message sent.
     env.replay().await;
     let raw = env.fake.state().mailbox_mut("Drafts").messages[0]
         .raw
         .clone();
+    let wire = String::from_utf8_lossy(&raw);
+    assert!(wire.contains(&format!("Content-ID: <{cid}>")), "{wire}");
     let parsed = MessageParser::new().parse(&raw).unwrap();
-    assert_eq!(parsed.attachments().len(), 1);
-    let pdf = parsed.attachments().next().unwrap();
-    assert_eq!(pdf.attachment_name(), Some("report.pdf"));
+    assert!(
+        parsed.body_html(0).unwrap().contains("See the report."),
+        "{wire}"
+    );
+    let pdf = parsed
+        .attachments()
+        .find(|a| a.attachment_name() == Some("report.pdf"))
+        .unwrap();
     assert_eq!(&*pdf.decoded(), b"%PDF-1.4\n");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_quote_taken_out_takes_its_images() {
+    let mut state = state();
+    state.inbox().append(REPORT, &[]);
+    let env = synced_env(state).await;
+    let id = env.id_of("INBOX", "Report").await;
+    let reply = |text: &str| env.client.reply(id, false, None, text.into(), Vec::new());
+
+    // An editor's: undo there can bring the quote back, with its image.
+    let draft = reply("").await.unwrap();
+    let (editor, mark, read) = env.client.edit_draft(draft.id).await.unwrap();
+    let changes = DraftChanges {
+        quote: Some(None),
+        ..DraftChanges::all(read.identity, read.content)
+    };
+    editor.update(changes).await.unwrap();
+    image_of(&env.client.get_draft(draft.id).await.unwrap().unwrap());
+    editor.drop_unshown_images().await.unwrap();
+    let draft = env.client.get_draft(draft.id).await.unwrap().unwrap();
+    assert!(draft.attachments.is_empty(), "{:?}", draft.attachments);
+    drop(mark);
+
+    // An agent's goes at once; a new text keeps the quote.
+    let draft = reply("").await.unwrap();
+    let changes = DraftChanges {
+        body: Some(DraftBody::plain("Thanks")),
+        ..Default::default()
+    };
+    let draft = env.client.update_draft(draft.id, changes).await.unwrap();
+    assert!(draft.content.quote.is_some());
+    image_of(&draft);
+    let changes = DraftChanges {
+        quote: Some(None),
+        ..Default::default()
+    };
+    let draft = env.client.update_draft(draft.id, changes).await.unwrap();
+    assert_eq!(draft.content.text_as_sent(), "Thanks");
+    assert!(draft.attachments.is_empty(), "{:?}", draft.attachments);
+}
+
+/// Over the whole-message limit, so its parts are fetched on their own: HTML showing an
+/// inline image.
+fn large_html_message() -> Vec<u8> {
+    let mut raw = b"From: Bob <bob@example.com>\r\n\
+        Subject: Big picture\r\n\
+        Content-Type: multipart/related; boundary=\"b\"\r\n\r\n\
+        --b\r\n\
+        Content-Type: text/html\r\n\r\n\
+        <p>Look<img src=\"cid:big@x\"></p>\r\n\
+        --b\r\n\
+        Content-Type: image/png\r\n\
+        Content-ID: <big@x>\r\n\
+        Content-Transfer-Encoding: base64\r\n\r\n"
+        .to_vec();
+    for _ in 0..(3 * 1024 * 1024 / 76) {
+        raw.extend_from_slice(&[b'A'; 76]);
+        raw.extend_from_slice(b"\r\n");
+    }
+    raw.extend_from_slice(b"--b--\r\n");
+    raw
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_leaves_out_a_quoted_image_it_cant_have() {
+    let mut state = state();
+    state.inbox().append(&large_html_message(), &[]);
+    let env = synced_env(state).await;
+    let id = env.id_of("INBOX", "Big picture").await;
+    env.client.download_message(id).await.unwrap();
+
+    // The body is here; the image, still on the server, can't be had.
+    env.fake.state().faults.nil_sections = true;
+    let draft = env
+        .client
+        .reply(id, false, None, String::new(), Vec::new())
+        .await
+        .unwrap();
+    assert!(draft.attachments.is_empty(), "{:?}", draft.attachments);
+    let html = draft.content.quote.unwrap().html.unwrap();
+    assert!(html.contains(r#"<img src="cid:big@x">"#), "{html}");
+
+    env.fake.state().faults.nil_sections = false;
+    let draft = env
+        .client
+        .reply(id, false, None, String::new(), Vec::new())
+        .await
+        .unwrap();
+    let (cid, _, size) = image_of(&draft);
+    assert_eq!(size, 3 * 1024 * 1024 / 76 * 57);
+    let html = draft
+        .content
+        .quote
+        .as_ref()
+        .unwrap()
+        .html
+        .as_deref()
+        .unwrap();
+    assert!(
+        html.contains(&format!(r#"<img src="cid:{cid}">"#)),
+        "{html}"
+    );
 }
 
 /// Over the whole-message limit, so its attachment is fetched on its own when needed.
@@ -839,7 +980,8 @@ async fn answers_are_made_with_the_users_text_and_recipients() {
         .unwrap();
     assert_eq!(draft.content.to, [addr("bob@example.com")]);
     assert_eq!(draft.content.bcc, [addr("dave@example.com")]);
-    let text = &draft.content.body.text;
+    assert_eq!(draft.content.body, DraftBody::plain("Have a look."));
+    let text = draft.content.text_as_sent();
     assert!(
         text.starts_with("Have a look.\n\n---------- Forwarded message"),
         "{text:?}"
@@ -851,17 +993,18 @@ async fn answers_are_made_with_the_users_text_and_recipients() {
             .map(|a| a.filename.clone())
             .collect()
     };
-    assert_eq!(names(&draft), ["report.pdf", "notes.txt"]);
+    assert_eq!(names(&draft), ["report.pdf", "image", "notes.txt"]);
 
     let draft = env
         .client
         .reply(id, false, None, "Thanks!".into(), vec![notes.into()])
         .await
         .unwrap();
-    let text = &draft.content.body.text;
+    assert_eq!(draft.content.body, DraftBody::plain("Thanks!"));
+    let text = draft.content.text_as_sent();
     assert!(text.starts_with("Thanks!\n\nOn "), "{text:?}");
     assert!(text.ends_with("wrote:\n> See the report.\n"), "{text:?}");
-    assert_eq!(names(&draft), ["notes.txt"]);
+    assert_eq!(names(&draft), ["image", "notes.txt"]);
 }
 
 /// Syncing in the background, a draft uploaded once it was left alone for `delay`.

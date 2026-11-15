@@ -176,11 +176,14 @@ pub struct Written {
 }
 
 impl Written {
-    /// What the stored draft is.
+    /// What the stored draft is, but its quote, which the window doesn't write.
     pub fn of(draft: &Draft) -> Self {
         Written {
             from: draft.identity,
-            content: draft.content.clone(),
+            content: DraftContent {
+                quote: None,
+                ..draft.content.clone()
+            },
         }
     }
 }
@@ -343,6 +346,8 @@ impl Lifecycle {
             cc,
             bcc,
             body: fields.body,
+            // Not the window's to write: `DraftChanges::all` leaves it as it is.
+            quote: None,
         };
         (Written { from, content }, problem)
     }

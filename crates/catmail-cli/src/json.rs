@@ -10,9 +10,9 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use catmail_core::{
-    Account, AccountMode, Address, Attachment, Draft, DraftAttachment, ErrorKind, Event, Flags,
-    Folder, FolderRole, FolderSyncReport, GcReport, Identity, Message, MessageSummary, OpKind,
-    OutboxEntry, PendingOp, ReplayReport, ReportedError, ServerConfig, SyncReport,
+    Account, AccountMode, Address, Attachment, DraftAttachment, DraftSummary, ErrorKind, Event,
+    Flags, Folder, FolderRole, FolderSyncReport, GcReport, Identity, Message, MessageSummary,
+    OpKind, OutboxEntry, PendingOp, ReplayReport, ReportedError, ServerConfig, SyncReport,
 };
 use serde::Serialize;
 
@@ -411,7 +411,10 @@ pub(crate) struct JsonDraft {
     to: Vec<JsonAddress>,
     cc: Vec<JsonAddress>,
     bcc: Vec<JsonAddress>,
+    /// What is written, above the quote.
     text: String,
+    /// The message a reply or forward carries, as plain text.
+    quote: Option<String>,
     attachments: Vec<JsonDraftAttachment>,
     reply_to: Option<i64>,
     in_reply_to: Option<String>,
@@ -422,18 +425,18 @@ pub(crate) struct JsonDraft {
     updated_at: Option<String>,
 }
 
-impl From<&Draft> for JsonDraft {
-    fn from(d: &Draft) -> Self {
-        let c = &d.content;
+impl From<&DraftSummary> for JsonDraft {
+    fn from(d: &DraftSummary) -> Self {
         Self {
             id: d.id.0,
             account: d.account_id.0,
             identity: d.identity.0,
-            subject: c.subject.clone(),
-            to: addresses(&c.to),
-            cc: addresses(&c.cc),
-            bcc: addresses(&c.bcc),
-            text: c.body.text.clone(),
+            subject: d.subject.clone(),
+            to: addresses(&d.to),
+            cc: addresses(&d.cc),
+            bcc: addresses(&d.bcc),
+            text: d.text.clone(),
+            quote: d.quote.clone(),
             attachments: d.attachments.iter().map(Into::into).collect(),
             reply_to: d.reply_to.map(|id| id.0),
             in_reply_to: d.in_reply_to.clone(),
@@ -683,8 +686,9 @@ fn list<'a, J: From<&'a T>, T: 'a>(items: impl IntoIterator<Item = &'a T>) -> Ve
 #[cfg(test)]
 mod tests {
     use catmail_core::{
-        AccountId, AttachmentId, DraftAttachmentId, DraftBody, DraftContent, DraftId, FolderId,
-        IdentityId, MessageBody, MessageId, OpStatus, OutboxId, OutboxStatus, PendingOpId,
+        AccountId, AttachmentId, Draft, DraftAttachmentId, DraftBody, DraftContent, DraftId,
+        FolderId, IdentityId, MessageBody, MessageId, OpStatus, OutboxId, OutboxStatus,
+        PendingOpId,
     };
     use serde_json::json;
 
@@ -854,6 +858,7 @@ mod tests {
                 cc: Vec::new(),
                 bcc: Vec::new(),
                 body: DraftBody::plain("hello"),
+                quote: None,
             },
             attachments: vec![DraftAttachment {
                 id: DraftAttachmentId(9),
@@ -901,7 +906,7 @@ mod tests {
         };
 
         assert_eq!(
-            serde_json::to_value(JsonDraft::from(&draft)).unwrap(),
+            serde_json::to_value(JsonDraft::from(&DraftSummary::from(&draft))).unwrap(),
             json!({
                 "id": 5,
                 "account": 1,
@@ -911,6 +916,7 @@ mod tests {
                 "cc": [],
                 "bcc": [],
                 "text": "hello",
+                "quote": null,
                 "attachments": [
                     {"id": 9, "filename": "a.txt", "mime_type": "text/plain", "size": 3},
                 ],

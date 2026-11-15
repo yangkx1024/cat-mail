@@ -24,6 +24,7 @@ fn content(subject: &str) -> DraftContent {
         cc: vec![addr("carol@example.com")],
         bcc: vec![addr("dave@example.com"), addr("BOB@example.com")],
         body: DraftBody::plain("你好，\n\n.see you\n"),
+        quote: None,
     }
 }
 
@@ -721,19 +722,25 @@ async fn replies_are_threaded_and_quoted() {
         (to, cc),
         (vec!["zhang@example.com"], vec!["li@example.com"])
     );
-    assert!(
-        draft
-            .content
-            .body
-            .text
-            .contains("Zhang San <zhang@example.com> wrote:\n> Numbers attached.")
-    );
+    let quoted = "Zhang San <zhang@example.com> wrote:\n> Numbers attached.";
+    assert!(draft.content.text_as_sent().contains(quoted));
     assert_eq!(draft.reply_to, Some(original));
 
     env.client.send_draft(draft.id).await.unwrap();
     env.flush().await;
     let received = env.smtp.state().received[0].data.clone();
     let m = MessageParser::new().parse(&received).unwrap();
+    assert!(
+        m.body_text(0)
+            .unwrap()
+            .replace("\r\n", "\n")
+            .contains(quoted),
+        "the quote is sent"
+    );
+    assert!(
+        !String::from_utf8_lossy(&received).contains("text/html"),
+        "a reply to text is text"
+    );
     assert_eq!(m.in_reply_to().unwrap().first(), Some("q3@example.com"));
     assert_eq!(
         m.references().unwrap().iter().collect::<Vec<_>>(),
@@ -1081,7 +1088,10 @@ async fn files_given_with_a_new_draft_come_with_it_or_no_draft_is_made() {
         .map(|a| (a.filename.as_str(), a.size))
         .collect();
     assert_eq!(names, [("most.bin", LIMIT - 4), ("four.txt", 4)]);
-    assert_eq!(env.client.list_drafts(env.account).await.unwrap(), [draft]);
+    assert_eq!(
+        env.client.list_drafts(env.account).await.unwrap(),
+        [(&draft).into()]
+    );
 }
 
 /// What attaching `size` bytes to `draft` does: `Some` with the attachment, `None` if

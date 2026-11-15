@@ -6,9 +6,9 @@
 use std::collections::HashMap;
 
 use catmail_core::{
-    AccountMode, AccountOverview, Address, Attachment, Draft, DraftAttachment, Flags, Folder,
-    FolderId, FolderRole, FolderSyncReport, Identity, Message, MessageSummary, OpKind, OutboxEntry,
-    PendingOp, ReportedError, special_folder,
+    AccountMode, AccountOverview, Address, Attachment, DraftAttachment, DraftSummary, Flags,
+    Folder, FolderId, FolderRole, FolderSyncReport, Identity, Message, MessageSummary, OpKind,
+    OutboxEntry, PendingOp, ReportedError, special_folder,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -249,11 +249,16 @@ pub(crate) struct DraftOut {
     pub to: Vec<String>,
     pub cc: Vec<String>,
     pub bcc: Vec<String>,
+    /// What is written, above the quote.
     pub text: String,
     /// The user formatted the text (it is sent as HTML too, `text` its plain form). A
     /// new `text` replaces it unformatted.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub formatted: bool,
+    /// The message a reply or forward carries, as plain text: sent below `text`, with
+    /// its formatting and images.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quote: Option<String>,
     pub attachments: Vec<DraftAttachmentOut>,
     /// The message it replies to.
     pub replying_to: Option<i64>,
@@ -309,8 +314,7 @@ impl From<&DraftAttachment> for DraftAttachmentOut {
 
 impl DraftOut {
     /// `identities` holds the one it is sent as, among others.
-    pub fn new(d: &Draft, identities: &[Identity]) -> Self {
-        let c = &d.content;
+    pub fn new(d: &DraftSummary, identities: &[Identity]) -> Self {
         Self {
             id: d.id.0,
             account: d.account_id.0,
@@ -318,12 +322,13 @@ impl DraftOut {
                 .iter()
                 .find(|i| i.id == d.identity)
                 .map(|i| i.address().to_string()),
-            subject: c.subject.clone(),
-            to: addresses(&c.to),
-            cc: addresses(&c.cc),
-            bcc: addresses(&c.bcc),
-            text: c.body.text.clone(),
-            formatted: c.body.is_formatted(),
+            subject: d.subject.clone(),
+            to: addresses(&d.to),
+            cc: addresses(&d.cc),
+            bcc: addresses(&d.bcc),
+            text: d.text.clone(),
+            formatted: d.formatted,
+            quote: d.quote.clone(),
             attachments: d.attachments.iter().map(Into::into).collect(),
             replying_to: d.reply_to.map(|id| id.0),
             updated_at: time(d.updated_at),
