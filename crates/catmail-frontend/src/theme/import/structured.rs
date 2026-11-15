@@ -79,7 +79,7 @@ pub(super) fn iterm2(contents: &str, stem: &str) -> Result<TerminalPalette> {
     loop {
         match reader.read_event().map_err(|e| syntax(e.to_string()))? {
             Event::Start(tag) => {
-                element = String::from_utf8_lossy(tag.name().as_ref()).into_owned();
+                element = tag.name().into_inner().to_owned();
                 match element.as_str() {
                     "plist" => seen_plist = true,
                     "dict" => depth += 1,
@@ -87,7 +87,7 @@ pub(super) fn iterm2(contents: &str, stem: &str) -> Result<TerminalPalette> {
                 }
             }
             Event::End(tag) => {
-                if tag.name().as_ref() == b"dict" {
+                if tag.name().into_inner() == "dict" {
                     depth -= 1;
                     if depth == 1 {
                         entry = None;
@@ -96,7 +96,6 @@ pub(super) fn iterm2(contents: &str, stem: &str) -> Result<TerminalPalette> {
                 element.clear();
             }
             Event::Text(text) => {
-                let text = text.decode().map_err(|e| syntax(e.to_string()))?;
                 let text = text.trim();
                 match (element.as_str(), depth) {
                     ("key", 1) => entry = Some(text.to_owned()),

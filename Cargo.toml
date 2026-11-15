@@ -144,13 +144,13 @@ reqwest = { version = "0.12.28", default-features = false, features = ["rustls-t
 # catmail-gui's tray icon pixels: nsh-core's resvg, with text for the badge's digits.
 resvg = { version = "0.46", default-features = false, features = ["text", "system-fonts"] }
 # Reads iTerm2 color schemes (XML property lists).
-quick-xml = "0.41.0"
+quick-xml = "0.42.0"
 rcgen = "0.14"
 # The Model Context Protocol (`catmail-mcp`): its tool macros and Streamable HTTP
 # service, without the client side, OAuth or reqwest.
 rmcp = { version = "3.9.0", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }
 rpassword = "7"
-rusqlite = { version = "0.41.1", features = ["bundled"] }
+rusqlite = { version = "0.42.0", features = ["bundled"] }
 # ring instead of the default aws-lc-rs: no cmake/NASM needed on Windows CI.
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-platform-verifier = "0.7.1"
