@@ -5,6 +5,10 @@ use directories::ProjectDirs;
 
 use crate::{Error, Result};
 
+/// The application id: the macOS bundle id, the Flatpak's, Wayland's app id; the
+/// platform directories are made of its three parts. See `docs/architecture/packaging.md`.
+pub const APP_ID: &str = "net.yangkx.catmail";
+
 /// Where catmail keeps its local state.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -155,6 +159,19 @@ fn warn_if_listable(dir: &Path) {
     let _ = dir;
 }
 
+/// Linux names them after the application alone, Windows after the organization and the
+/// application, macOS after the whole id.
 fn project_dirs() -> Option<ProjectDirs> {
-    ProjectDirs::from("net", "yangkx", "catmail")
+    let mut parts = APP_ID.splitn(3, '.');
+    ProjectDirs::from(parts.next()?, parts.next()?, parts.next()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_app_id_is_qualifier_organization_application() {
+        assert_eq!(APP_ID.split('.').count(), 3);
+    }
 }

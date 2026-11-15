@@ -147,7 +147,9 @@ cli_dir=$out/cli/catmail-$version-$arch-macos
 rm -rf "$out/cli"
 mkdir -p "$cli_dir"
 cp "$cli" "$cli_dir/catmail"
-sign --identifier net.yangkx.catmail.cli "$cli_dir/catmail"
+# The CLI's identifier is the bundle's (APP_ID in catmail-core), with `.cli`.
+bundle_id=$(plutil -extract CFBundleIdentifier raw "$app/Contents/Info.plist")
+sign --identifier "$bundle_id.cli" "$cli_dir/catmail"
 check_signature "$cli_dir/catmail"
 cp "$repo/LICENSE-MIT" "$repo/LICENSE-APACHE" "$cli_dir/"
 

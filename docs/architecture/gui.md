@@ -83,8 +83,8 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
   视图。nsh 把焦点留在输入框里，两个后端各用一个事件 monitor 补上（应由 nsh 提供，#248）。
 - **单实例**：GTK 应用是 `NON_UNIQUE`，不经 D-Bus 判断唯一；一个数据目录一个应用由引擎的锁和 `gui.sock`
   决定（见[后台运行](background.md#单实例与唤起)）。
-- **app id** 是 `net.yangkx.catmail`（`shell::APP_ID`）：Wayland 的 app id、X11 的 `WM_CLASS`、`.desktop`
-  文件名、macOS 的 bundle id。
+- **app id** 是 `net.yangkx.catmail`（`catmail_core::APP_ID`，frontend 和 `shell` 重新导出）：Wayland 的
+  app id、X11 的 `WM_CLASS`、`.desktop` 文件名、macOS 的 bundle id。
 
 ### 窗口外框（macOS）
 
