@@ -69,7 +69,7 @@ keyring = "4.2"
 libc = "0.2.191"
 # Builds outgoing messages; the same family as mail-parser. Without `gethostname`:
 # Message-IDs come from the sender's domain, not the machine's name.
-mail-builder = { version = "1.0.0", default-features = false }
+mail-builder = { version = "2.0.1", default-features = false }
 mail-parser = { version = "1.0.1", features = ["full_encoding"] }
 mime_guess = "2.0.5"
 # Native Shell, catmail-gui's toolkit: GTK 4 on Linux and AppKit on macOS, bodies in web
