@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use catmail_proto::imap::{self, Session};
 use catmail_proto::mime::{self, Content};
 use catmail_store::{AttachmentSource, Db, MessageLocation, NewAttachment, NewBody};
-use catmail_types::{AttachmentId, BlobHash, Event, Message, MessageId};
+use catmail_types::{AttachmentId, BlobHash, ErrorKind, Event, Message, MessageId};
 
 use crate::engine::{Engine, blocking};
 use crate::pool::with_session;
@@ -140,46 +140,82 @@ struct Missing {
     source: AttachmentSource,
 }
 
+/// What [`attachment_blobs`] got.
+pub(crate) struct Blobs {
+    /// The parts it had or fetched, and those that failed alone, with why.
+    pub parts: HashMap<AttachmentId, Result<(BlobHash, u64)>>,
+    /// Why the parts in neither weren't fetched: something about the server or the
+    /// account as a whole ([`account_wide`]), which stopped the fetching there.
+    pub stopped: Option<Error>,
+}
+
+impl Blobs {
+    /// The part's blob and size, or why it can't be had.
+    pub fn take(&mut self, id: AttachmentId) -> Result<(BlobHash, u64)> {
+        match self.parts.remove(&id) {
+            Some(found) => found,
+            None => Err(self.stopped.take().unwrap_or(Error::AttachmentNotFound(id))),
+        }
+    }
+}
+
 /// The blobs and sizes of `parts`, attachments each with the size the server gave,
 /// downloading those not stored yet with as few FETCHes as [`BATCH_BYTES`] allows, not
 /// one each: a reply or forward of a large message that wasn't read needs its images
 /// and attachments, which came without it. Their GC grace periods restart, as with
 /// [`attachment_blob`].
 ///
-/// Each part has an outcome of its own: one the server sends nothing for fails alone,
-/// and a FETCH refused, or answered so that it can't be read, as a whole is tried again
-/// a part at a time, so one bad part doesn't take the others with it. A failure to reach
-/// the server, or the message gone from it, fails the call, once what came before it is
-/// stored.
+/// Each part has an outcome of its own: one the server sends nothing for, or refuses,
+/// fails alone, and a FETCH of several refused, or answered so that it can't be read, as
+/// a whole is tried again a part at a time, so one bad part doesn't take the others with
+/// it. A failure of the server or the account as a whole stops the fetching
+/// ([`Blobs::stopped`]); what was here or came before it is kept.
 pub(crate) async fn attachment_blobs(
     engine: &Arc<Engine>,
     parts: &[(AttachmentId, u64)],
-) -> Result<HashMap<AttachmentId, Result<(BlobHash, u64)>>> {
-    let mut done = HashMap::new();
+) -> Result<Blobs> {
+    let mut found = HashMap::new();
     let mut missing = Vec::new();
     for &(id, size) in parts {
-        if done.contains_key(&id) || missing.iter().any(|m: &Missing| m.id == id) {
+        if found.contains_key(&id) || missing.iter().any(|m: &Missing| m.id == id) {
             continue;
         }
         let source = match attachment_source(engine, id).await {
             Ok(source) => source,
             Err(e) => {
-                done.insert(id, Err(e));
+                found.insert(id, Err(e));
                 continue;
             }
         };
         match refreshed(engine, source.blob.clone()).await? {
             Some(stored) => {
-                done.insert(id, Ok(stored));
+                found.insert(id, Ok(stored));
             }
             // Missing from disk too: fetched again.
             None => missing.push(Missing { id, size, source }),
         }
     }
+    let mut blobs = Blobs {
+        parts: found,
+        stopped: None,
+    };
     for batch in batches(missing) {
-        done.extend(fetch_batch(engine, batch).await?);
+        if let Err(e) = fetch_batch(engine, batch, &mut blobs.parts).await {
+            blobs.stopped = Some(e);
+            break;
+        }
     }
-    Ok(done)
+    Ok(blobs)
+}
+
+/// Whether `e` is about the server or the account as a whole rather than one part:
+/// another FETCH would fare no better, and one to an account over its download limit
+/// only adds to it.
+fn account_wide(e: &Error) -> bool {
+    matches!(
+        e.kind(),
+        ErrorKind::Network | ErrorKind::Auth | ErrorKind::OverLimit
+    ) || matches!(e, Error::Cancelled)
 }
 
 /// `missing` in batches to fetch together: of one message, within [`BATCH_BYTES`], in
@@ -202,36 +238,51 @@ fn batches(missing: Vec<Missing>) -> Vec<Vec<Missing>> {
     batches
 }
 
-/// Fetches the parts of `batch`, all of one message, with one FETCH, and stores them.
+/// Fetches the parts of `batch`, all of one message, with one FETCH, stores them, and
+/// puts each one's outcome in `found`. Fails, for the parts not in `found`, with what
+/// is wrong with the server or the account as a whole ([`account_wide`]).
 async fn fetch_batch(
     engine: &Arc<Engine>,
     batch: Vec<Missing>,
-) -> Result<Vec<(AttachmentId, Result<(BlobHash, u64)>)>> {
+    found: &mut HashMap<AttachmentId, Result<(BlobHash, u64)>>,
+) -> Result<()> {
     let location = batch[0].source.message.clone();
     let (account, folder, uid) = (location.account, location.folder, location.uid);
     let sections: Vec<String> = batch.iter().map(|p| p.source.section.clone()).collect();
-    let several = sections.len() > 1;
     let answer = on_server(engine, location, async move |session, location| {
         match session.fetch_sections(location.uid, &sections).await {
-            Ok(Some(parts)) => Ok(Some(Some(parts))),
+            Ok(Some(parts)) => Ok(Some(Ok(parts))),
             Ok(None) => Ok(None),
-            // About the answer as a whole: refused, or couldn't be read.
-            Err(imap::Error::Command { .. } | imap::Error::Incomplete(_)) if several => {
-                Ok(Some(None))
+            // Refused, or couldn't be read: about these parts, unless the account went
+            // over its limit, which every FETCH would be refused for.
+            Err(e @ (imap::Error::Command { .. } | imap::Error::Incomplete(_)))
+                if !e.is_over_limit() =>
+            {
+                Ok(Some(Err(e)))
             }
             Err(e) => Err(e.into()),
         }
     })
     .await?;
-    let Some(mut parts) = answer else {
-        tracing::warn!(%account, uid, parts = batch.len(),
-            "couldn't fetch the parts together; fetching them one at a time");
-        let mut done = Vec::new();
-        for part in batch {
-            let blob = attachment_blob(engine.clone(), part.id).await;
-            done.push((part.id, blob));
+    let mut parts = match answer {
+        Ok(parts) => parts,
+        Err(e) if batch.len() == 1 => {
+            found.insert(batch[0].id, Err(e.into()));
+            return Ok(());
         }
-        return Ok(done);
+        Err(_) => {
+            tracing::warn!(%account, uid, parts = batch.len(),
+                "couldn't fetch the parts together; fetching them one at a time");
+            for part in batch {
+                match attachment_blob(engine.clone(), part.id).await {
+                    Err(e) if account_wide(&e) => return Err(e),
+                    blob => {
+                        found.insert(part.id, blob);
+                    }
+                }
+            }
+            return Ok(());
+        }
     };
     let done = blocking({
         let engine = engine.clone();
@@ -270,9 +321,10 @@ async fn fetch_batch(
         }
     })
     .await?;
+    found.extend(done);
     // Stored now, with their sizes as decoded.
     engine.emit(Event::MessagesChanged { account, folder });
-    Ok(done)
+    Ok(())
 }
 
 async fn stored_blob(engine: &Arc<Engine>, id: AttachmentId) -> Result<Option<(BlobHash, u64)>> {

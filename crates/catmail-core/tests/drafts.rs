@@ -9,11 +9,11 @@ mod common;
 use std::time::Duration;
 
 use catmail_core::{
-    Address, Draft, DraftBody, DraftChanges, DraftContent, DraftId, Forwarding, MailClientBuilder,
-    QuoteKind, ReplayReport, SyncSchedule,
+    Address, Draft, DraftBody, DraftChanges, DraftContent, DraftId, ErrorKind, Forwarding,
+    MailClientBuilder, QuoteKind, ReplayReport, SyncSchedule,
 };
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
-use common::{Env, addr, env, env_built, eventually, sparse, synced_env};
+use common::{Env, NETEASE_OVER_LIMIT, addr, env, env_built, eventually, sparse, synced_env};
 use mail_parser::MessageParser;
 use tokio::sync::Semaphore;
 
@@ -1089,6 +1089,66 @@ async fn parts_refused_together_are_fetched_one_at_a_time() {
         .map(|a| a.filename.as_str())
         .collect();
     assert_eq!(names, ["notes.txt", "clip.mp4", "image", "image"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_quote_keeps_the_images_here_when_another_cant_be_had() {
+    let mut state = state();
+    state.inbox().append(&large_message_of_parts(), &[]);
+    let env = synced_env(state).await;
+    let id = env.id_of("INBOX", "Many parts").await;
+    let body = env.client.download_message(id).await.unwrap().body.unwrap();
+    let cached = body
+        .attachments
+        .iter()
+        .find(|a| a.content_id.as_deref() == Some("b@x"))
+        .unwrap();
+    env.client.attachment_content(cached.id).await.unwrap();
+
+    // The other image is refused: the quote has the one here all the same.
+    let uid = env
+        .fake
+        .state()
+        .mailbox_mut("INBOX")
+        .messages
+        .last()
+        .unwrap()
+        .uid;
+    env.fake.state().faults.refuse_body_fetch = vec![uid];
+    let draft = env
+        .client
+        .reply(id, false, None, String::new(), Vec::new())
+        .await
+        .unwrap();
+    image_of(&draft);
+    assert_eq!(draft.attachments.len(), 1, "{:?}", draft.attachments);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_account_over_its_limit_isnt_asked_part_by_part() {
+    let mut state = state();
+    state.inbox().append(&large_message_of_parts(), &[]);
+    let env = synced_env(state).await;
+    let id = env.id_of("INBOX", "Many parts").await;
+    env.client.download_message(id).await.unwrap();
+    let body_fetches = || {
+        env.fake
+            .state()
+            .log
+            .iter()
+            .filter(|c| c.line.contains("BODY.PEEK["))
+            .count()
+    };
+
+    env.fake.state().faults.body_fetch_refusal = Some(NETEASE_OVER_LIMIT.into());
+    let before = body_fetches();
+    let e = env
+        .client
+        .forward(id, None, Forwarding::default(), Vec::new())
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::OverLimit, "{e}");
+    assert_eq!(body_fetches(), before + 1, "one refusal is enough");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -17,9 +17,15 @@ MCP 预扣下载额度的规则（`reply_cost` / `forward_cost`）是另写的�
 - 部分失败：
   - 某个 section 回 NIL：只有它失败。
   - 整条 FETCH 被拒（NO）或回复读不出：改为逐个取，一个坏部分不连累别的。
-  - 连不上服务器、邮件已不在服务器上：整个调用失败，但前面几批已存下的留着。
+  - 整个服务器或账户的问题（连不上、登录被拒、超出下载限额）：就此停下（`Blobs::stopped`），已有的和前面几批
+    取到的照样给出。
 
   调用方保留原来的规则：转发的附件有一个取不到就不建草稿，引文的图片取不到只是少一张。
+- 审查（codex）指出两处，已修：
+  - 整批失败曾让整个调用失败，引文连已缓存的图片都丢掉，比原来逐张取时更差。现在 `attachment_blobs` 返回
+    `Blobs`：已有的和取到的照给，整个服务器或账户的问题记在 `stopped`；只取一个部分的 FETCH 被拒算它自己失败。
+  - 超出下载限额的 NO 是 `Command` 错误，曾被当成"整条被拒"而逐个重试，账户已超限时再多几次被拒的 FETCH。现在
+    超限不退回逐个取，逐个取时遇到网络、登录、超限这类错误（`account_wide`）也立即停。
 - 转发仍是两次 FETCH：先取附件，再在剩下的额度里取引文的图片。图片要等附件占了多少定下来才能选。
 - 下载多少由引擎给（`MailClient::answer_download_size`，按 `Answer`），MCP 用它预扣，也用它算失败后退还多少。
   规则只剩一份，也覆盖作为附件转发。
@@ -36,3 +42,5 @@ MCP 预扣下载额度的规则（`reply_cost` / `forward_cost`）是另写的�
   - `the_parts_an_answer_needs_are_fetched_together`：回复的两张图片一条 FETCH；某张回 NIL 时另一张照常；转发缺
     一个附件时不建草稿，但已取到的留下；之后只补缺的部分，全部在本地后不再 FETCH。
   - `parts_refused_together_are_fetched_one_at_a_time`：整条 FETCH 被拒时逐个取。
+  - `a_quote_keeps_the_images_here_when_another_cant_be_had`、`an_account_over_its_limit_isnt_asked_part_by_part`：
+    上面两处，修之前都失败（0 张图片；5 次 FETCH 而不是 1 次）。

@@ -628,9 +628,7 @@ pub(crate) async fn forward(
     let mut blobs = body::attachment_blobs(engine, &wanted).await?;
     let mut originals = Vec::new();
     for original in theirs {
-        let (blob, size) = blobs
-            .remove(&original.id)
-            .ok_or(Error::AttachmentNotFound(original.id))??;
+        let (blob, size) = blobs.take(original.id)?;
         originals.push(NewDraftAttachment {
             blob,
             filename: attachment_name(original.filename.as_deref(), "attachment"),
@@ -852,17 +850,20 @@ async fn quoted_images(
             return Vec::new();
         }
     };
+    if let Some(e) = &blobs.stopped {
+        tracing::warn!(message = %message.summary.id,
+            "left out the quoted images not here yet: {e}");
+    }
     let (mut images, mut renamed) = (Vec::new(), HashMap::new());
     for (id, part) in wanted {
-        let found = blobs
-            .remove(&part.id)
-            .unwrap_or(Err(Error::AttachmentNotFound(part.id)));
-        let (blob, size) = match found {
-            Ok(found) => found,
-            Err(e) => {
+        let (blob, size) = match blobs.parts.remove(&part.id) {
+            Some(Ok(found)) => found,
+            Some(Err(e)) => {
                 tracing::warn!(attachment = %part.id, "left a quoted image out: {e}");
                 continue;
             }
+            // Not fetched: see `stopped`.
+            None => continue,
         };
         if used + size > limit {
             tracing::info!(attachment = %part.id, "left a quoted image out: too large");
