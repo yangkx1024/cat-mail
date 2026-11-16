@@ -152,6 +152,10 @@ CREATE TABLE messages (
     reply_to_json   TEXT    NOT NULL DEFAULT '[]',
     date            INTEGER, -- the Date header, else INTERNALDATE; the list sort key
     snippet         TEXT,
+    -- The server's preview (RFC 8970 PREVIEW) came: in `snippet` until the body is
+    -- stored, or there was none to be had. Until then, one is asked for while the body
+    -- isn't stored.
+    previewed       INTEGER NOT NULL DEFAULT 0,
     has_attachments INTEGER NOT NULL DEFAULT 0,
     body_state      TEXT    NOT NULL DEFAULT 'headers', -- headers | full (see message_bodies)
     -- The list sort key: `date`, with a missing one sorted last. Lists are ordered by
@@ -178,6 +182,11 @@ CREATE INDEX messages_flagged ON messages (account_id, list_date) WHERE flags & 
 -- arrive.
 CREATE INDEX messages_prefetch ON messages (account_id, list_date)
     WHERE body_state = 'headers' AND uid IS NOT NULL;
+-- The messages of a location whose preview the server is asked for next, newest first
+-- (Messages::unpreviewed). Shrinks as previews and bodies arrive; on a server without
+-- PREVIEW it is never read.
+CREATE INDEX messages_preview ON messages (folder_id, list_date)
+    WHERE body_state = 'headers' AND previewed = 0 AND uid IS NOT NULL;
 
 -- Folder counts follow every change to `messages`, whoever makes it (sync, local flag
 -- changes, cascading deletes), so no writer can forget them. Unread = no \Seen (bit 0).

@@ -122,6 +122,11 @@ pub struct FetchedMessage {
     /// X-GM-MSGID and X-GM-THRID, with [`Items::Gmail`].
     pub gm_msgid: Option<u64>,
     pub gm_thrid: Option<u64>,
+    /// The server's preview of the text (RFC 8970 PREVIEW), if it had one ready: asked
+    /// for lazily, a server without one at hand sends none. Made into a snippet as one of
+    /// the body is ([`preview_snippet`](crate::mime::preview_snippet)): `Some(None)` if
+    /// nothing is left of it, or the server can't make one, which it won't later either.
+    pub preview: Option<Option<String>>,
 }
 
 #[cfg(test)]

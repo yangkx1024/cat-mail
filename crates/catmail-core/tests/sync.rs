@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use catmail_core::{EngineTuning, Error, ErrorKind, Event, Flags, FolderRole, SyncReport, Verify};
-use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
+use catmail_testkit::{FakeMailbox, Previews, ServerState, SmtpState};
 
 mod common;
 
@@ -328,6 +328,124 @@ async fn new_messages_are_fetched_in_batches_of_the_tuned_size() {
     // Newest first.
     assert_eq!(fetches, ["4:5", "2:3", "1"]);
     assert_eq!(env.subjects("INBOX").await, newest_first(&subjects));
+}
+
+impl Env {
+    /// (subject, snippet) of the folder's messages, newest first.
+    async fn snippets(&self, name: &str) -> Vec<(String, Option<String>)> {
+        self.list(name)
+            .await
+            .into_iter()
+            .map(|m| (m.subject.unwrap_or_default(), m.snippet))
+            .collect()
+    }
+
+    /// The UID sets of the FETCHes of previews since `start`, made without LAZY.
+    fn preview_fetches(&self, start: usize) -> Vec<String> {
+        self.commands_since(start)
+            .into_iter()
+            .filter(|c| c.starts_with("UID FETCH") && c.ends_with("(PREVIEW)"))
+            .map(|c| c.split(' ').nth(2).unwrap().to_owned())
+            .collect()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn previews_the_server_makes_fill_in_snippets_a_batch_per_sync() {
+    let mut state = ServerState::new("alice", "pw");
+    state.faults.preview = Some(Previews::OnDemand);
+    let inbox = state.inbox();
+    inbox.append_text("empty", "");
+    // Cleaned as a snippet made here is: the link's address is left out.
+    inbox.append_text(
+        "link",
+        "Hello Bob,\r\nthe meeting moved. <https://example.com/x>\r\n",
+    );
+    inbox.append_text("fill", "Sale\u{200c}\u{34f}\u{200c} now\r\n");
+    let env = env_built(state, SmtpState::new("alice", "pw"), |b| {
+        b.tuning(EngineTuning {
+            fetch_batch: 2,
+            ..EngineTuning::default()
+        })
+    })
+    .await;
+
+    // The headers ask lazily, and the server has none at hand: then the newest batch is
+    // asked for, the next one by the next sync.
+    let start = env.fake.state().log.len();
+    env.sync().await;
+    let commands = env.commands_since(start);
+    assert!(
+        commands
+            .iter()
+            .any(|c| c.starts_with("UID FETCH 2:3") && c.contains(" PREVIEW (LAZY)")),
+        "{commands:?}"
+    );
+    assert_eq!(env.preview_fetches(start), ["2:3"]);
+    let snippet = |s: &str| Some(s.to_owned());
+    assert_eq!(
+        env.snippets("INBOX").await,
+        [
+            ("fill".into(), snippet("Sale now")),
+            ("link".into(), snippet("Hello Bob, the meeting moved.")),
+            ("empty".into(), None),
+        ]
+    );
+
+    let start = env.fake.state().log.len();
+    env.sync().await;
+    assert_eq!(env.preview_fetches(start), ["1"]);
+    // None is asked for again, the one the server had none of included.
+    let start = env.fake.state().log.len();
+    env.sync().await;
+    assert!(env.preview_fetches(start).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn previews_at_hand_come_with_the_headers() {
+    let mut state = state_with(&["one"]);
+    state.faults.preview = Some(Previews::AtHand);
+    let env = env(state).await;
+    let start = env.fake.state().log.len();
+    env.sync().await;
+    assert!(env.preview_fetches(start).is_empty());
+    assert_eq!(
+        env.snippets("INBOX").await,
+        [("one".into(), Some("Hello".into()))]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn previews_are_asked_for_only_where_the_server_makes_them() {
+    let env = env(state_with(&["one"])).await;
+    let start = env.fake.state().log.len();
+    env.sync().await;
+    let commands = env.commands_since(start);
+    assert!(
+        !commands.iter().any(|c| c.contains("PREVIEW")),
+        "{commands:?}"
+    );
+    assert_eq!(env.snippets("INBOX").await, [("one".into(), None)]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn previews_refused_leave_the_sync_complete() {
+    let mut state = state_with(&["one"]);
+    state.faults.preview = Some(Previews::Refused);
+    let env = env(state).await;
+    let report = env.sync().await;
+    assert!(folder_report(&report, "INBOX").error.is_none());
+    assert_eq!(env.snippets("INBOX").await, [("one".into(), None)]);
+
+    // Asked for again next time, and given then.
+    env.fake.state().faults.preview = Some(Previews::OnDemand);
+    let start = env.fake.state().log.len();
+    env.sync().await;
+    assert_eq!(env.preview_fetches(start), ["1"]);
+    assert_eq!(
+        env.snippets("INBOX").await,
+        [("one".into(), Some("Hello".into()))]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

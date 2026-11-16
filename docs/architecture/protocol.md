@@ -26,7 +26,7 @@ SMTP 客户端见[草稿与发信](sending.md#smtp-客户端)。
   只在 release 构建脱敏的凭据，以及 imap-codec 漏开的 `nom/alloc`。它负责的连接部分我们大多已经自己写了。
 - **imap-proto** 只解析响应，正好是客户端需要的部分：语法里最复杂、安全上最敏感的（BODYSTRUCTURE、
   ENVELOPE、literal）用它的，最常需要扩展的（发什么命令）由我们控制。它已经支持 `X-GM-LABELS` /
-  `X-GM-MSGID` / `X-GM-THRID`、`EMAILID` / `THREADID`（RFC 8474）、VANISHED 和 MODSEQ；FETCH 里不认识的
+  `X-GM-MSGID` / `X-GM-THRID`、`EMAILID` / `THREADID`（RFC 8474）、PREVIEW（RFC 8970）、VANISHED 和 MODSEQ；FETCH 里不认识的
   项返回 `AttributeValue::Unknown`，不认识的响应码当作文字（连接层按名字记下，如 `[NOMODSEQ]`），都不会让
   整条响应解析失败。它也是 async-imap（Delta Chat）的解析器，见过大量真实服务器。缺少的响应语法给上游提 PR。
 - 不用 async-imap：它是持有连接的会话层，又会回到在别人的状态机外面打补丁。不自己写响应解析器：IMAP

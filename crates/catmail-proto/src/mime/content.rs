@@ -478,6 +478,14 @@ fn snippet(text: &str, preheader: Option<&str>) -> Option<String> {
     (!out.is_empty()).then_some(out)
 }
 
+/// The snippet of a server's preview of the message (RFC 8970 PREVIEW), left out and cut
+/// as one made here: Dovecot's, say, keeps the characters that take no room after a
+/// preheader, plain text's link addresses, and quoted text (as `>text`) when there is
+/// nothing else, all of which ours leaves out.
+pub fn preview_snippet(preview: &str) -> Option<String> {
+    snippet(preview, None)
+}
+
 /// The words of `text` that [`snippet`] shows, a line at a time.
 fn snippet_words(text: &str) -> impl Iterator<Item = String> {
     text.lines()
@@ -998,6 +1006,21 @@ mod tests {
             Some("Hello there more")
         );
         assert_eq!(snippet("", Some("\u{200c} Only")).as_deref(), Some("Only"));
+    }
+
+    #[test]
+    fn preview_snippet_says_what_the_local_one_does() {
+        // Dovecot 2.4's PREVIEW of the same message: the filler kept, the rest the same.
+        let preview = "Up to 50% off this week\u{200c}\u{34f}\u{200c}\u{34f} \
+                       Dear reader, Our sale starts.";
+        assert_eq!(preview_snippet(preview), parse_message(PREHEADER).snippet);
+        assert_eq!(
+            preview_snippet("Hello Bob, the meeting moved. <https://example.com/x>").as_deref(),
+            Some("Hello Bob, the meeting moved.")
+        );
+        // Quoted text, which Dovecot gives when there is nothing else, and none at all.
+        assert_eq!(preview_snippet(">only quoted text"), None);
+        assert_eq!(preview_snippet(""), None);
     }
 
     #[test]

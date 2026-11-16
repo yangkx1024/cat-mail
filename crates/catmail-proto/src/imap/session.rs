@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::ops::RangeInclusive;
@@ -20,7 +21,7 @@ use super::{
     UidStatus, utf7,
 };
 use crate::Credentials;
-use crate::mime::{Headers, MimeNode, SUMMARY_HEADER_FIELDS, parse_headers};
+use crate::mime::{Headers, MimeNode, SUMMARY_HEADER_FIELDS, parse_headers, preview_snippet};
 use crate::{TlsConfig, net};
 
 /// How [`Session::login`] introduces us (ID, RFC 2971).
@@ -767,10 +768,11 @@ impl Session {
         items: Items,
     ) -> Result<Vec<FetchedMessage>> {
         let (mut fetched, skipped) = self.fetch_summaries_once(uids, true, items).await?;
-        // A BODYSTRUCTURE the parser rejects loses the message's answer, whole or just
-        // that item. Without asking for it again, such a message is never stored and the
-        // folder never gets a complete sync. Attachment presence is then unknown until the
-        // body is downloaded, which doesn't depend on it.
+        // An optional item the parser rejects (BODYSTRUCTURE, say) loses the message's
+        // answer, whole or just that item. Without asking for it again, such a message is
+        // never stored and the folder never gets a complete sync. Attachment presence and
+        // the preview are then unknown until the body is downloaded, which doesn't
+        // depend on them.
         if skipped > 0 {
             let got: HashSet<u32> = fetched.iter().map(|m| m.state.uid).collect();
             let missing: Vec<u32> = uids.iter().copied().filter(|u| !got.contains(u)).collect();
@@ -779,11 +781,13 @@ impl Session {
         Ok(fetched)
     }
 
-    /// The summaries, and how many responses or BODYSTRUCTUREs couldn't be parsed.
+    /// The summaries, and how many responses or BODYSTRUCTUREs couldn't be parsed. With
+    /// `optional`, also what a message can be stored without and the parser may reject:
+    /// BODYSTRUCTURE and the server's preview.
     async fn fetch_summaries_once(
         &mut self,
         uids: &[u32],
-        structure: bool,
+        optional: bool,
         items: Items,
     ) -> Result<(Vec<FetchedMessage>, usize)> {
         let Some(set) = uid_set(uids) else {
@@ -793,8 +797,14 @@ impl Session {
             "UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS ({})]",
             SUMMARY_HEADER_FIELDS.join(" ")
         );
-        if structure {
+        if optional {
             asked.push_str(" BODYSTRUCTURE");
+        }
+        // Lazily: the server sends only previews it has at hand, instead of reading each
+        // message to make one (Dovecot has none of a message until one is asked for
+        // without LAZY). The others are asked for with `fetch_previews`.
+        if optional && self.supports_preview() {
+            asked.push_str(" PREVIEW (LAZY)");
         }
         if self.modseq_enabled() {
             asked.push_str(" MODSEQ");
@@ -815,7 +825,7 @@ impl Session {
                 // malformed item as one it doesn't know).
                 let has_attachments = match m.has_attachments {
                     Some(has) => has,
-                    None if structure => {
+                    None if optional => {
                         skipped += 1;
                         return None;
                     }
@@ -837,10 +847,33 @@ impl Session {
                     has_attachments,
                     gm_msgid,
                     gm_thrid,
+                    preview: m.preview.map(|p| preview_snippet(&p)),
                 })
             })
             .collect();
         Ok((fetched, skipped))
+    }
+
+    /// Whether the server makes previews of messages' text (RFC 8970 PREVIEW).
+    pub fn supports_preview(&self) -> bool {
+        self.caps.has("PREVIEW")
+    }
+
+    /// The snippets of the server's previews of the text of the messages at `uids` (RFC
+    /// 8970 PREVIEW, see [`FetchedMessage::preview`]), made now where it has none at
+    /// hand: `None` for a message it can't make one of. Messages the server no longer
+    /// has, or whose answer couldn't be parsed, are simply absent. Only with
+    /// [`supports_preview`](Self::supports_preview).
+    pub async fn fetch_previews(&mut self, uids: &[u32]) -> Result<BTreeMap<u32, Option<String>>> {
+        let Some(set) = uid_set(uids) else {
+            return Ok(BTreeMap::new());
+        };
+        let response = self.conn.execute_lossy(uid_fetch(&set, "PREVIEW")).await?;
+        let wanted: HashSet<u32> = uids.iter().copied().collect();
+        Ok(merge_fetches(response, |uid| wanted.contains(&uid))
+            .into_iter()
+            .filter_map(|(uid, m)| Some((uid, preview_snippet(&m.preview?))))
+            .collect())
     }
 
     /// Current flags of messages with UIDs in these ranges, or with CONDSTORE only of
@@ -1252,6 +1285,8 @@ struct MergedFetch {
     gm_msgid: Option<u64>,
     gm_thrid: Option<u64>,
     labels: Option<Vec<GmailLabel>>,
+    /// `None` also for `PREVIEW NIL`, which says there is none at hand yet.
+    preview: Option<String>,
 }
 
 impl MergedFetch {
@@ -1298,6 +1333,7 @@ fn merge_fetches(response: Response, wanted: impl Fn(u32) -> bool) -> BTreeMap<u
                     AttributeValue::GmailLabels(labels) => {
                         m.labels = Some(labels.iter().filter_map(|l| gmail_label(l)).collect());
                     }
+                    AttributeValue::Preview(preview) => m.preview = preview.map(Cow::into_owned),
                     _ => {}
                 }
             }

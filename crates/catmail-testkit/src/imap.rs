@@ -98,11 +98,16 @@ impl FakeMailbox {
 
     /// Appends a simple message with the given subject and returns its UID.
     pub fn append_simple(&mut self, subject: &str) -> u32 {
+        self.append_text(subject, "Hello\r\n")
+    }
+
+    /// Like [`append_simple`](Self::append_simple), with `text` as its body.
+    pub fn append_text(&mut self, subject: &str, text: &str) -> u32 {
         let uid = self.uidnext;
         let raw = format!(
             "From: Alice <alice@example.com>\r\nTo: bob@example.com\r\nSubject: {subject}\r\n\
              Date: Sat, 17 Oct 2026 {} +0800\r\nMessage-ID: <{uid}.{subject}@example.com>\r\n\
-             \r\nHello\r\n",
+             \r\n{text}",
             time_of(uid)
         );
         self.append(raw.as_bytes(), &[])
@@ -390,6 +395,22 @@ pub struct Faults {
     /// Close a connection that sent no command for this long, without a word, as NetEase
     /// does after about a minute. Not while it idles.
     pub idle_timeout: Option<Duration>,
+    /// Advertise PREVIEW (RFC 8970), and answer it as this says.
+    pub preview: Option<Previews>,
+}
+
+/// How a server with [`Faults::preview`] answers PREVIEW: with the start of the message's
+/// first part on one line, `""` if that is empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Previews {
+    /// Made when asked for: asked for with LAZY, answer NIL, as Dovecot does about a
+    /// message it hasn't made one of yet.
+    OnDemand,
+    /// Made when the message arrived: LAZY gets them too.
+    AtHand,
+    /// Like `OnDemand`, but refuse with NO every FETCH that asks for them without LAZY,
+    /// as a server might that can't make them right then.
+    Refused,
 }
 
 impl Default for Faults {
@@ -458,6 +479,7 @@ impl Default for Faults {
             qq_mail: false,
             coremail: false,
             idle_timeout: None,
+            preview: None,
         }
     }
 }
@@ -1349,6 +1371,9 @@ fn capabilities(state: &ServerState, session: &Session) -> String {
     if state.gmail {
         caps.push("X-GM-EXT-1");
     }
+    if state.faults.preview.is_some() {
+        caps.push("PREVIEW");
+    }
     caps.extend(append_limit.as_deref());
     caps.join(" ")
 }
@@ -1820,6 +1845,11 @@ async fn handle(
                 } else {
                     faults.body_fetch_refusal.clone()
                 }
+            } else if lock(state).faults.preview == Some(Previews::Refused)
+                && items.iter().any(|i| i.eq_ignore_ascii_case("PREVIEW"))
+                && !items.iter().any(|i| i.eq_ignore_ascii_case("LAZY"))
+            {
+                Some("[UNAVAILABLE] No previews now".to_string())
             } else {
                 None
             };
@@ -2391,6 +2421,17 @@ fn fetch(
             let size = msg.raw.len() + usize::from(faults.inexact_sizes);
             parts.push(format!("RFC822.SIZE {size}").into_bytes());
         }
+        if let Some(previews) = faults.preview
+            && wants("PREVIEW")
+        {
+            let mut part = b"PREVIEW ".to_vec();
+            if wants("LAZY") && previews != Previews::AtHand {
+                part.extend(b"NIL");
+            } else {
+                part.extend(literal(preview(&msg.raw).as_bytes()));
+            }
+            parts.push(part);
+        }
         if wants("BODYSTRUCTURE") {
             let mut part = b"BODYSTRUCTURE ".to_vec();
             if faults.broken_bodystructure.contains(&msg.uid) {
@@ -2443,6 +2484,17 @@ fn fetch(
     }
     out.extend_from_slice(format!("{tag} OK FETCH completed\r\n").as_bytes());
     out
+}
+
+/// What [`Faults::preview`] answers PREVIEW with: the first 200 characters of the first
+/// part, its whitespace collapsed.
+fn preview(raw: &[u8]) -> String {
+    let text = mime::section(raw, "1").unwrap_or_default();
+    let words = String::from_utf8_lossy(&text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    words.chars().take(200).collect()
 }
 
 fn fetch_response(seq: usize, items: &[Vec<u8>]) -> Vec<u8> {
