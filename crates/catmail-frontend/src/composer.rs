@@ -18,7 +18,8 @@ use std::time::Duration;
 
 use catmail_core::{
     AccountId, Address, Draft, DraftBody, DraftChanges, DraftContent, DraftEditor, DraftId,
-    EditMark, Forwarding, Identity, IdentityId, MailClient, MessageId, parse_addresses,
+    EditMark, Forwarding, Identity, IdentityId, MailClient, MessageId, Quote, QuoteKind,
+    parse_addresses,
 };
 use futures_channel::oneshot;
 
@@ -168,23 +169,54 @@ pub fn error_text(e: &catmail_core::Error) -> String {
     sentence
 }
 
-/// What a save hands to the engine: who the draft is from, and what it says.
+/// What a save hands to the engine: who the draft is from, what it says, and whether it
+/// keeps its quote.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Written {
     pub from: IdentityId,
+    /// Without the quote, which the window doesn't write: it only takes it out.
     pub content: DraftContent,
+    /// The quote stays. Taken out, it is gone for good: the window can't put it back.
+    pub quoted: bool,
 }
 
 impl Written {
-    /// What the stored draft is, but its quote, which the window doesn't write.
+    /// What the stored draft is. Its quote isn't copied: the window keeps only the
+    /// message quoted, which can be large, once.
     pub fn of(draft: &Draft) -> Self {
+        let content = &draft.content;
         Written {
             from: draft.identity,
             content: DraftContent {
+                subject: content.subject.clone(),
+                to: content.to.clone(),
+                cc: content.cc.clone(),
+                bcc: content.bcc.clone(),
+                body: content.body.clone(),
                 quote: None,
-                ..draft.content.clone()
             },
+            quoted: content.quote.is_some(),
         }
+    }
+
+    /// The changes that make the draft this: everything the user writes, and the quote
+    /// out if it is. One change: answering in the quote moves it into the text, and the
+    /// draft never has it in neither, or twice.
+    pub fn changes(self) -> DraftChanges {
+        let mut changes = DraftChanges::all(self.from, self.content);
+        if !self.quoted {
+            changes.quote = Some(None);
+        }
+        changes
+    }
+}
+
+/// What the quote's bar says of it: who wrote the message answered, or that one is
+/// forwarded.
+pub fn quote_heading(quote: &Quote) -> String {
+    match quote.kind {
+        QuoteKind::Reply => quote.intro.trim_end().to_owned(),
+        QuoteKind::Forward => "Forwarded message".to_owned(),
     }
 }
 
@@ -207,6 +239,8 @@ pub struct Fields<'a> {
     pub bcc: &'a str,
     pub subject: &'a str,
     pub body: DraftBody,
+    /// The quote hasn't been taken out.
+    pub quoted: bool,
 }
 
 /// What asking before discarding a draft says.
@@ -349,7 +383,12 @@ impl Lifecycle {
             // Not the window's to write: `DraftChanges::all` leaves it as it is.
             quote: None,
         };
-        (Written { from, content }, problem)
+        let written = Written {
+            from,
+            content,
+            quoted: fields.quoted,
+        };
+        (written, problem)
     }
 
     /// The user changed a field. False while the window is ending: what it sends was
@@ -556,8 +595,7 @@ impl Steps {
             return client.delete_draft(draft).await;
         }
         if self.save {
-            let changes = DraftChanges::all(written.from, written.content);
-            editor.update(changes).await?;
+            editor.update(written.changes()).await?;
         }
         if self.drop_images
             && let Err(e) = editor.drop_unshown_images().await
@@ -714,6 +752,7 @@ mod tests {
             saved: Written {
                 from: IdentityId(1),
                 content: DraftContent::default(),
+                quoted: false,
             },
         }
     }
@@ -725,6 +764,7 @@ mod tests {
                 subject: subject.into(),
                 ..DraftContent::default()
             },
+            quoted: false,
         }
     }
 
@@ -814,13 +854,44 @@ mod tests {
             bcc: "",
             subject: "Hi",
             body: DraftBody::default(),
+            quoted: true,
         };
         let (written, problem) = life.written(fields, IdentityId(2));
         assert_eq!(written.content.to, life.saved.content.to);
         assert_eq!(written.content.cc[0].email, "b@example.com");
         assert_eq!(written.from, IdentityId(2));
+        assert!(written.quoted);
         assert_eq!(problem.map(|(field, _)| field), Some(Field::To));
         assert_eq!(life.close(true), Closing::Fix);
+    }
+
+    #[test]
+    fn the_quote_goes_with_the_save_that_takes_it_out() {
+        let mut written = with_subject("Re: Hi");
+        written.quoted = true;
+        let kept = written.clone().changes();
+        assert_eq!(kept.quote, None, "left as it is");
+        assert_eq!(kept.subject.as_deref(), Some("Re: Hi"));
+        written.quoted = false;
+        let out = written.changes();
+        assert_eq!(out.quote, Some(None));
+        assert_eq!(out.subject.as_deref(), Some("Re: Hi"));
+    }
+
+    #[test]
+    fn the_quotes_bar_says_whose_or_that_it_is_forwarded() {
+        let mut quote = Quote {
+            kind: QuoteKind::Reply,
+            intro: "On 2026-11-03 10:00, A <a@example.com> wrote:\n".into(),
+            text: String::new(),
+            html: None,
+        };
+        assert_eq!(
+            quote_heading(&quote),
+            "On 2026-11-03 10:00, A <a@example.com> wrote:"
+        );
+        quote.kind = QuoteKind::Forward;
+        assert_eq!(quote_heading(&quote), "Forwarded message");
     }
 
     #[test]

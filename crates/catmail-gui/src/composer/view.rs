@@ -33,13 +33,15 @@ pub fn Composer() -> impl IntoElement {
     let start = START
         .with_borrow(Clone::clone)
         .expect("a composer's view is made by `root`");
+    // Borrowed, not copied: the draft has the whole message quoted.
     let Opening {
         identities,
         draft,
         focus_body,
         images,
         ..
-    } = start.opening.clone();
+    } = &start.opening;
+    let focus_body = *focus_body;
     let content = &draft.content;
     crate::tasks::own_tasks(Owner::current());
     crate::settings::follow();
@@ -50,7 +52,7 @@ pub fn Composer() -> impl IntoElement {
         debounce: None,
         owner: Owner::current(),
         inputs: [None; 3],
-        rich: Rc::new(rich::Rich::new(&content.body, images)),
+        rich: Rc::new(rich::Rich::new(&content.body, images.clone())),
     })))));
     global::<Formatting>().set(Formatting::default());
     global::<Typed>().set(Typed {
@@ -60,10 +62,11 @@ pub fn Composer() -> impl IntoElement {
         subject: content.subject.clone(),
     });
     global::<From>().set(From {
-        senders: senders(&identities),
+        senders: senders(identities),
         chosen: Some(draft.identity),
     });
     global::<Attachments>().set(Attachments::of(&draft.attachments));
+    super::quote::start(&start.opening);
     global::<Shown>().set(Shown {
         cc_bcc: !content.cc.is_empty() || !content.bcc.is_empty(),
         ..Shown::default()
@@ -106,6 +109,7 @@ pub fn Composer() -> impl IntoElement {
         .child(error())
         .child(fields(focus_body))
         .child(body(focus_body))
+        .child(super::quote::quote())
         .child(attachments())
         .child(footer())
         .child(link_dialog())

@@ -1,19 +1,20 @@
 //! The text of the message, formatted: nsh's `RichEditor` over the draft's HTML (a plain
-//! draft, a reply's quote, opens as paragraphs and quotes), its images shown from their
-//! attachments' files. A save takes the HTML back with `cid:` URLs, and the plain text
-//! sent along with it.
+//! draft opens as paragraphs), its images shown from their attachments' files. A save
+//! takes the HTML back with `cid:` URLs, and the plain text sent along with it. A
+//! reply's or forward's quote isn't in it, unless the user answers in it
+//! ([`Rich::answer_in`]).
 
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
-use catmail_core::DraftBody;
-use catmail_frontend::composer::rich_text::{Images, doc_to_text, text_to_html};
+use catmail_core::{DraftBody, Quote};
+use catmail_frontend::composer::rich_text::{Images, doc_to_text, quote_to_html, text_to_html};
 use nsh_base::rich_editor::commands::CommandRegistry;
 use nsh_base::rich_editor::extensions::extension::ExtensionManager;
 use nsh_base::rich_editor::extensions::kit::starter_kit;
 use nsh_base::rich_editor::extensions::link::{LinkOptions, is_allowed_uri, link};
 use nsh_base::rich_editor::formats::{DomParser, ParseOptions, doc_to_html};
-use nsh_base::rich_editor::model::{Schema, Whitespace};
+use nsh_base::rich_editor::model::{Node, Schema, Whitespace};
 use nsh_base::rich_editor::state::{EditorState, EditorStateConfig};
 use nsh_base::rich_editor::view::{EditorSession, NodeViews, RichEditorClasses};
 use serde_json::{Value, json};
@@ -82,7 +83,7 @@ pub struct Rich {
 
 impl Rich {
     /// Shows `body`, formatted or not; `images` are the files of the images in its HTML.
-    pub fn new(body: &DraftBody, images: Images) -> Self {
+    pub fn new(body: &DraftBody, mut images: Images) -> Self {
         // Without what mail can't show: task lists' checkboxes.
         let kit = starter_kit().configure(json!({ "taskList": false, "taskItem": false }));
         let manager = ExtensionManager::with_core(vec![kit]).expect("the starter kit is valid");
@@ -91,19 +92,7 @@ impl Rich {
             Some(html) => html.clone(),
             None => text_to_html(&body.text),
         };
-        // As written: indentation and runs of spaces (a quoted table, code) are the
-        // author's. The HTML is the editor's, or `text_to_html`'s: no whitespace between
-        // its tags to keep out.
-        let mut options = ParseOptions::default();
-        options.preserve_whitespace = Some(Whitespace::Full);
-        let mut doc = DomParser::from_schema(&schema).parse(&html, &options);
-        if !images.is_empty() {
-            let mut json = doc.to_json();
-            images.to_files(&mut json);
-            doc = schema
-                .node_from_json(&json)
-                .expect("the schema's document, with other sources");
-        }
+        let doc = parse(&schema, &html, &mut images);
         // The starter kit's link is only the mark: these link URLs as they are typed or
         // pasted, a selection a URL is pasted over, and open a link pressed with Mod.
         let mut plugins = manager.plugins();
@@ -122,6 +111,27 @@ impl Rich {
             images: RefCell::new(images),
             touched: Cell::new(false),
             written: RefCell::new(None),
+        }
+    }
+
+    /// Puts `quote` at the end of the text, what of it the editor can hold, for the user
+    /// to answer in. Not undone: the draft has the quote no longer.
+    pub fn answer_in(&self, quote: &Quote) {
+        let state = self.session.state();
+        let quoted = parse(
+            &self.schema,
+            &quote_to_html(quote),
+            &mut self.images.borrow_mut(),
+        );
+        let mut tr = state.tr();
+        let end = state.doc().content().size();
+        if tr.insert(end, quoted.content().clone()).is_err() {
+            tracing::warn!("the quote couldn't go into the text");
+            return;
+        }
+        tr.set_add_to_history(false);
+        if let Err(e) = self.session.dispatch(tr) {
+            tracing::warn!("the quote couldn't go into the text: {e:?}");
         }
     }
 
@@ -238,6 +248,22 @@ impl Rich {
     }
 }
 
+/// `html` as a document of the editor, its images (`cid:`) shown from their files and
+/// remote ones blocked ([`Images::to_files`]).
+fn parse(schema: &Schema, html: &str, images: &mut Images) -> Node {
+    // As written: indentation and runs of spaces (a quoted table, code) are the author's.
+    // The HTML is the editor's, or `text_to_html`'s: no whitespace between its tags to
+    // keep out.
+    let mut options = ParseOptions::default();
+    options.preserve_whitespace = Some(Whitespace::Full);
+    let doc = DomParser::from_schema(schema).parse(html, &options);
+    let mut json = doc.to_json();
+    images.to_files(&mut json);
+    schema
+        .node_from_json(&json)
+        .expect("the schema's document, with other sources")
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -273,18 +299,62 @@ mod tests {
 
     #[test]
     fn a_plain_draft_is_kept_until_changed_then_saved_with_html() {
-        let rich = Rich::new(
-            &DraftBody::plain("Thanks\n\nOn Monday, A wrote:\n> hi\n"),
-            Images::default(),
-        );
+        let rich = Rich::new(&DraftBody::plain("Thanks\n\n> hi\n"), Images::default());
         assert_eq!(rich.written(), None);
         rich.touch();
         let (text, html) = written(&rich);
-        assert_eq!(text, "Thanks\n\nOn Monday, A wrote:\n> hi\n");
+        assert_eq!(text, "Thanks\n\n> hi\n");
+        // The user's `>` is theirs.
+        assert!(html.contains("<p>&gt; hi</p>"), "{html}");
+    }
+
+    #[test]
+    fn a_quote_answered_in_is_at_the_end_and_not_undone() {
+        let mut images = Images::default();
+        images.insert("logo@catmail".into(), PathBuf::from("/blobs/logo"));
+        let rich = Rich::new(&formatted("<p>Thanks</p>"), images);
+        let quote = Quote {
+            kind: catmail_core::QuoteKind::Reply,
+            intro: "On Monday, A wrote:".into(),
+            text: "Hi\n".into(),
+            html: Some(
+                r#"<style>p{color:red}</style><p><b>Hi</b> <img src="cid:logo@catmail"></p>"#
+                    .into(),
+            ),
+        };
+        rich.answer_in(&quote);
+        assert_eq!(image_src(&rich), "/blobs/logo");
+        rich.run("undo", Value::Null);
+        rich.touch();
+        let (text, html) = written(&rich);
+        assert_eq!(text, "Thanks\n\nOn Monday, A wrote:\n> Hi \n");
         assert!(
-            html.contains("<blockquote><p>hi</p></blockquote>"),
+            html.contains(r#"<blockquote><p><strong>Hi</strong> <img src="cid:logo@catmail""#),
             "{html}"
         );
+        assert!(!html.contains("color"), "{html}");
+    }
+
+    #[test]
+    fn remote_images_are_not_loaded_but_sent() {
+        let pixel = r#"<img src="https://t.example/open.gif?u=1">"#;
+        // A quote answered in.
+        let rich = Rich::new(&formatted("<p>Thanks</p>"), Images::default());
+        let quote = Quote {
+            kind: catmail_core::QuoteKind::Forward,
+            intro: "From: A".into(),
+            text: "Hi\n".into(),
+            html: Some(format!("<p>Hi {pixel}</p>")),
+        };
+        rich.answer_in(&quote);
+        assert!(image_src(&rich).starts_with("catmail-blocked:"));
+        rich.touch();
+        assert!(written(&rich).1.contains(pixel), "{}", written(&rich).1);
+        // A draft that has one, opened again.
+        let rich = Rich::new(&formatted(&format!("<p>{pixel}</p>")), Images::default());
+        assert!(image_src(&rich).starts_with("catmail-blocked:"));
+        rich.touch();
+        assert!(written(&rich).1.contains(pixel), "{}", written(&rich).1);
     }
 
     #[test]

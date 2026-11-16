@@ -13,7 +13,7 @@ mod page;
 mod pages;
 
 pub use page::{Appearance, BRIDGE, Colors, DarkAppearance, FromPage, WATCH_IMAGES};
-pub use pages::{BodyPages, IMAGE_SCHEME};
+pub use pages::{BodyPages, IMAGE_SCHEME, RemoteImages};
 
 use std::collections::HashMap;
 

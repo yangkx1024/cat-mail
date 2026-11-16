@@ -1,23 +1,34 @@
 //! The composer's formatted text, without the editor: the HTML a plain draft opens as,
 //! the plain text sent with the HTML, and the images, which the editor shows from files
-//! and the draft refers to by Content-ID.
+//! and the draft refers to by Content-ID. Remote images it doesn't show at all.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use catmail_core::html::escape;
+use catmail_core::html::{escape, nested, quoted_text_html};
+use catmail_core::{Quote, QuoteKind};
 
 /// The images of a draft's HTML: the file each one's content is in
 /// ([`DraftEditor::images`](catmail_core::DraftEditor::images)), by Content-ID. The
 /// editor shows the files; the draft keeps `cid:` URLs.
+///
+/// Any other image but a `data:` one would be loaded from where it points, by the editor,
+/// outside the reader's rules: a quote answered in (or a draft that has one) would tell
+/// its sender, through a tracking pixel, that it was read. Those show as
+/// [`BLOCKED_SCHEME`] URLs, which load nothing, and are sent as they were.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Images {
     paths: HashMap<String, PathBuf>,
     /// The other way: Content-IDs by the path the editor shows.
     ids: HashMap<String, String>,
+    /// The images not shown: their URLs by the one the editor has instead.
+    blocked: HashMap<String, String>,
 }
+
+/// The scheme of the URLs remote images have in the editor: `catmail-blocked:<n>`.
+pub const BLOCKED_SCHEME: &str = "catmail-blocked";
 
 impl Images {
     pub fn insert(&mut self, content_id: String, path: PathBuf) {
@@ -26,34 +37,51 @@ impl Images {
         self.paths.insert(content_id, path);
     }
 
+    /// None to show from files, and none blocked: the editor's document is the draft's.
     pub fn is_empty(&self) -> bool {
-        self.paths.is_empty()
+        self.paths.is_empty() && self.blocked.is_empty()
+    }
+
+    /// The file of the image `content_id`.
+    pub fn path(&self, content_id: &str) -> Option<&Path> {
+        self.paths.get(content_id).map(PathBuf::as_path)
     }
 
     /// The images of `doc` (ProseMirror's JSON of a document) by their files, for the
-    /// editor: `cid:` URLs of the draft's images become their paths. Others stay.
-    pub fn to_files(&self, doc: &mut Value) {
-        map_image_sources(doc, &|src| {
-            let id = src.strip_prefix("cid:")?;
-            Some(self.paths.get(id)?.to_string_lossy().into_owned())
+    /// editor: `cid:` URLs of the draft's images become their paths, and every other but
+    /// a `cid:` or `data:` one is blocked. Those load nothing from anywhere.
+    pub fn to_files(&mut self, doc: &mut Value) {
+        map_image_sources(doc, &mut |src| {
+            if let Some(id) = src.strip_prefix("cid:") {
+                return Some(self.paths.get(id)?.to_string_lossy().into_owned());
+            }
+            if src.starts_with("data:") {
+                return None;
+            }
+            let shown = format!("{BLOCKED_SCHEME}:{}", self.blocked.len());
+            self.blocked.insert(shown.clone(), src.to_owned());
+            Some(shown)
         });
     }
 
     /// The images of `doc` by Content-ID, for the draft: the paths [`Self::to_files`]
-    /// gave become `cid:` URLs again.
+    /// gave become `cid:` URLs again, and those it blocked their own URLs.
     pub fn to_content_ids(&self, doc: &mut Value) {
-        map_image_sources(doc, &|src| Some(format!("cid:{}", self.ids.get(src)?)));
+        map_image_sources(doc, &mut |src| match self.blocked.get(src) {
+            Some(url) => Some(url.clone()),
+            None => Some(format!("cid:{}", self.ids.get(src)?)),
+        });
     }
 }
 
 /// Replaces the `src` of every image node of `doc` that `f` has a replacement for.
-fn map_image_sources(doc: &mut Value, f: &dyn Fn(&str) -> Option<String>) {
+fn map_image_sources(doc: &mut Value, f: &mut dyn FnMut(&str) -> Option<String>) {
     let Value::Object(node) = doc else {
         return;
     };
     if node.get("type").and_then(Value::as_str) == Some("image")
         && let Some(Value::Object(attrs)) = node.get_mut("attrs")
-        && let Some(new) = attrs.get("src").and_then(Value::as_str).and_then(f)
+        && let Some(new) = attrs.get("src").and_then(Value::as_str).and_then(&mut *f)
     {
         attrs.insert("src".into(), Value::String(new));
     }
@@ -64,43 +92,37 @@ fn map_image_sources(doc: &mut Value, f: &dyn Fn(&str) -> Option<String>) {
     }
 }
 
-/// The HTML a plain text opens as in the editor: a paragraph per line, and the lines
-/// quoted with `>` (a reply's original) in a quote, nested as they are.
+/// The HTML a plain text opens as in the editor: a paragraph per line. A `>` the user
+/// typed is theirs, not a quote.
 pub fn text_to_html(text: &str) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut html = String::new();
-    blocks(&lines, &mut html);
+    text.lines()
+        .map(|line| format!("<p>{}</p>", escape(line)))
+        .collect()
+}
+
+/// The HTML a quote goes into the editor as, when the user answers in it: its intro, then
+/// the message quoted (in a quote, for a reply), what of its HTML the editor can hold
+/// (without its style sheet, which the editor has no place for), or its text, a
+/// paragraph a line, nested as it quotes in turn.
+pub fn quote_to_html(quote: &Quote) -> String {
+    let mut html = String::from("<p></p>");
+    html.push_str(&text_to_html(quote.intro.trim_end()));
+    let (open, close) = match quote.kind {
+        QuoteKind::Reply => ("<blockquote>", "</blockquote>"),
+        QuoteKind::Forward => ("<p></p>", ""),
+    };
+    html.push_str(open);
+    match &quote.html {
+        Some(original) => html.push_str(nested(original, "catmail-original").1),
+        None => html.push_str(&quoted_text_html(&quote.text, "", "<p></p>")),
+    }
+    html.push_str(close);
     html
 }
 
-fn blocks(lines: &[&str], html: &mut String) {
-    let mut i = 0;
-    while i < lines.len() {
-        if quoted(lines[i]).is_some() {
-            let inner: Vec<&str> = lines[i..].iter().map_while(|line| quoted(line)).collect();
-            i += inner.len();
-            html.push_str("<blockquote>");
-            blocks(&inner, html);
-            html.push_str("</blockquote>");
-        } else {
-            html.push_str("<p>");
-            html.push_str(&escape(lines[i]));
-            html.push_str("</p>");
-            i += 1;
-        }
-    }
-}
-
-/// The line without its quote mark (`>` and the space after it), if it is quoted.
-fn quoted(line: &str) -> Option<&str> {
-    let rest = line.strip_prefix('>')?;
-    Some(rest.strip_prefix(' ').unwrap_or(rest))
-}
-
 /// The plain text sent with the editor's document (ProseMirror's JSON), for readers
-/// that show only text; as [`text_to_html`] reads it: a line per paragraph, `> ` before
-/// quoted lines. List items start with `* ` or their number, a link's address follows
-/// its text, images are left out.
+/// that show only text: a line per paragraph, `> ` before quoted lines. List items start
+/// with `* ` or their number, a link's address follows its text, images are left out.
 pub fn doc_to_text(doc: &Value) -> String {
     let mut lines = Vec::new();
     for block in children(doc) {
@@ -245,13 +267,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plain_text_opens_as_paragraphs_and_quotes() {
+    fn plain_text_opens_as_paragraphs_its_marks_as_typed() {
         assert_eq!(text_to_html(""), "");
         assert_eq!(
-            text_to_html("Hi <you> & co\n\nOn Monday, A wrote:\n> first\n>> older\n> last\nbye"),
-            "<p>Hi &lt;you&gt; &amp; co</p><p></p><p>On Monday, A wrote:</p>\
-             <blockquote><p>first</p><blockquote><p>older</p></blockquote><p>last</p>\
-             </blockquote><p>bye</p>"
+            text_to_html("Hi <you> & co\n\n> not a quote"),
+            "<p>Hi &lt;you&gt; &amp; co</p><p></p><p>&gt; not a quote</p>"
+        );
+    }
+
+    #[test]
+    fn a_quote_answered_in_goes_into_the_text_whole() {
+        let mut quote = Quote {
+            kind: QuoteKind::Reply,
+            intro: "On Monday, A wrote:".into(),
+            text: "first\n> older\n".into(),
+            html: None,
+        };
+        assert_eq!(
+            quote_to_html(&quote),
+            "<p></p><p>On Monday, A wrote:</p><blockquote><p>first</p>\
+             <blockquote><p>older</p></blockquote></blockquote>"
+        );
+        quote.kind = QuoteKind::Forward;
+        quote.intro = "---------- Forwarded message ---------\nFrom: A".into();
+        quote.html = Some("<style>p { color: red }</style><p><b>Hi</b></p>".into());
+        assert_eq!(
+            quote_to_html(&quote),
+            "<p></p><p>---------- Forwarded message ---------</p><p>From: A</p><p></p>\
+             <p><b>Hi</b></p>"
         );
     }
 
@@ -324,9 +367,16 @@ mod tests {
             {"type": "image", "attrs": {"src": "cid:a@catmail", "alt": null}},
             {"type": "image", "attrs": {"src": "cid:other@x"}},
             {"type": "image", "attrs": {"src": "https://example.com/x.png"}},
+            {"type": "image", "attrs": {"src": "data:image/png;base64,aGk="}},
         ]}]});
+        assert_eq!(images.path("a@catmail"), Some(Path::new("/blobs/aa/aaaa")));
         let mut doc = draft.clone();
         images.to_files(&mut doc);
+        // Loaded from nowhere, not even the file it would be at.
+        let blocked = doc["content"][0]["content"][2]["attrs"]["src"]
+            .as_str()
+            .unwrap();
+        assert_eq!(blocked, "catmail-blocked:0");
         assert_eq!(
             doc["content"][0]["content"][0]["attrs"]["src"],
             "/blobs/aa/aaaa"
@@ -335,6 +385,7 @@ mod tests {
             doc["content"][0]["content"][1]["attrs"]["src"],
             "cid:other@x"
         );
+        assert!(doc["content"][0]["content"][3]["attrs"]["src"] == "data:image/png;base64,aGk=");
         images.to_content_ids(&mut doc);
         assert_eq!(doc, draft);
     }

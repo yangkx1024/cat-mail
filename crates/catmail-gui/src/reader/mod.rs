@@ -4,7 +4,7 @@
 //! The body is a page in one web view (`catmail_frontend::html::BodyPages::page`): opening
 //! a message loads a new page into it. The view stays while messages are opened one after another, for WebKit
 //! starts a web process for each new view (100 MB, a sandbox to set up), and ends it when
-//! the last goes. The page's images are the reader's to serve (`html::IMAGE_SCHEME`): the
+//! the last goes. The page's images are served as they come (`crate::web`): the
 //! inline parts as they load, and the remote images the engine has cached or the user
 //! asks for; the others wait, unanswered, and the page shows them once they come,
 //! without loading again.
@@ -15,20 +15,19 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use catmail_core::html::{DarkPalette, Image, RemoteImage};
+use catmail_core::html::Image;
 use catmail_core::{Attachment, MessageId, safe_filename};
-use catmail_frontend::html::{Appearance, BodyPages, Colors, DarkAppearance, browser_page};
+use catmail_frontend::html::{RemoteImages, browser_page};
 use catmail_frontend::reader::{self, Header};
-use nsh_base::theme;
 use nsh_core::element::{ElementRef, Spawned, open_path, pick_save_path};
 use nsh_core::file_dialog::SaveDialog;
 use nsh_core::prelude::*;
-use nsh_core::web_resource::{WebResource, WebResourceRequest};
 
 use crate::engine::client;
 use crate::mailbox::list;
 use crate::tasks::{in_view, off_thread};
 use crate::toast::{Level, notify, report};
+use crate::web;
 
 pub use view::reader;
 
@@ -59,8 +58,7 @@ struct Reading {
     page_dark: bool,
     /// The remote images the HTML refers to that aren't shown yet: the cached ones show
     /// at once, the others when the user asks.
-    remote: Vec<String>,
-    loading_remote: bool,
+    remote: RemoteImages,
     /// Replying to all writes to more than replying does.
     can_reply_all: bool,
 }
@@ -70,9 +68,6 @@ const STAYS_SHOWN: Duration = Duration::from_millis(250);
 
 /// A hidden page shows once it has loaded, or after this if it doesn't say so.
 const SHOWN_ANYWAY: Duration = Duration::from_secs(1);
-
-/// The web view's height before the page says its own.
-const MIN_BODY_HEIGHT: f32 = 40.0;
 
 /// The body's height in points, as the page reports it.
 #[derive(Clone, Default)]
@@ -86,52 +81,23 @@ struct Retry(u64);
 #[derive(Clone, Default)]
 struct ShowDetails(bool);
 
-/// What the page shows besides itself, and the fetch of remote images. Not reactive.
+/// What the page shows besides itself, and the fetch of remote images; the pages are
+/// the view's ([`web`]). Not reactive.
+#[derive(Default)]
 struct Page {
     /// The message's scroll view, taken back to the top for the next message.
     scroll: Option<ElementRef>,
     /// The message whose page was made last.
     shown: Option<MessageId>,
-    /// The pages made, the open message's images, and the requests of the page shown.
-    pages: BodyPages<WebResourceRequest>,
     /// Fetching the open message's remote images; dropped with the message.
     fetch: Option<Spawned<()>>,
-    /// Watching images held back ([`watch_images`]).
-    watching: bool,
 }
-
-impl Default for Page {
-    fn default() -> Self {
-        Self {
-            scroll: None,
-            shown: None,
-            pages: BodyPages::new(IMAGES_IN_FLIGHT),
-            fetch: None,
-            watching: false,
-        }
-    }
-}
-
-/// The bytes of images on their way to the page at once (`BodyPages::new`; why, in
-/// `catmail_frontend::html`'s pacer): WebKitGTK reads them 8 KiB at a time.
-#[cfg(target_os = "linux")]
-pub(super) const IMAGES_IN_FLIGHT: Option<usize> = Some(1 << 20);
-
-/// `WKURLSchemeHandler` takes each image whole: no limit.
-#[cfg(not(target_os = "linux"))]
-pub(super) const IMAGES_IN_FLIGHT: Option<usize> = None;
 
 #[derive(Clone, Default)]
 struct PageState(Rc<RefCell<Page>>);
 
 fn page_state() -> Rc<RefCell<Page>> {
     global::<PageState>().with_untracked(|p| p.0.clone())
-}
-
-/// Whether what page `number` says is the page shown's: what other pages say, late, is
-/// ignored.
-fn is_shown(number: u64) -> bool {
-    page_state().borrow().pages.is_shown(number)
 }
 
 /// Opens the message selected; anything else empties the pane (drafts and the outbox
@@ -145,10 +111,8 @@ pub fn follow_selection() {
     let id = untracked(|| global::<Reading>().with(|r| r.id));
     if id != selected {
         global::<ShowDetails>().set(ShowDetails(false));
-        let page = page_state();
-        let mut page = page.borrow_mut();
-        page.pages.forget_message();
-        if let Some(fetch) = page.fetch.take() {
+        web::with_pages(|p| p.forget_message());
+        if let Some(fetch) = page_state().borrow_mut().fetch.take() {
             fetch.cancel();
         }
     }
@@ -159,11 +123,7 @@ pub fn follow_selection() {
         // A blank page in the web view, which stays: its web process is running when a
         // message opens (it takes a moment to start).
         None => global::<Reading>().set(Reading {
-            page: page_state()
-                .borrow_mut()
-                .pages
-                .blank(&appearance(dark))
-                .into(),
+            page: web::with_pages(|p| p.blank(&web::appearance(dark))).into(),
             page_dark: dark,
             ..Reading::default()
         }),
@@ -172,7 +132,10 @@ pub fn follow_selection() {
 
 async fn open_message(id: MessageId, dark: bool) {
     let reading = global::<Reading>();
-    if reading.with_untracked(|r| r.id != Some(id)) {
+    // Open already, made again (in another appearance): its fetch of remote images, which
+    // only another message cancels, goes on.
+    let again = reading.with_untracked(|r| r.id == Some(id));
+    if !again {
         // The message before stays shown, and its page until this one's paints (WebKit
         // keeps it), as a browser goes from page to page: emptied in between, the pane
         // would show its own background where the message's was. Only if this one takes
@@ -213,25 +176,23 @@ async fn open_message(id: MessageId, dark: bool) {
     let probe = std::env::var_os("CATMAIL_GUI_HTML").and_then(|f| std::fs::read_to_string(f).ok());
     let html = probe.as_deref().or(body.and_then(|b| b.html.as_deref()));
     let (made, page_dark, remote) = {
+        let text = body.and_then(|b| b.text.as_deref());
+        let made = web::with_pages(|p| p.page(html, text, &web::appearance(dark)));
         let page = page_state();
         let mut page = page.borrow_mut();
-        let made = page.pages.page(
-            html,
-            body.and_then(|b| b.text.as_deref()),
-            &appearance(dark),
-        );
-        // Those not shown yet: the cached ones show at once, the others when the user asks.
-        let remote = (made.remote_urls.into_iter())
-            .filter(|url| !page.pages.shows_remote(url))
-            .collect::<Vec<_>>();
         // Another message (not this one again, in a new appearance): from its top.
         if page.shown.replace(id) != Some(id)
             && let Some(scroll) = page.scroll
         {
             scroll.scroll_to(Point::new(px(0.0), px(0.0)), false);
         }
-        (made.html, made.dark, remote)
+        (made.html, made.dark, made.remote_urls)
     };
+    let mut blocked = RemoteImages::default();
+    if again {
+        blocked = reading.with_untracked(|r| r.remote.clone());
+    }
+    blocked.again(remote.clone());
     // Hidden (the first page, or one that took long): until the page has loaded, rather
     // than show the web view before it paints, in WebKit's own background.
     let hidden = reading.with_untracked(|r| r.hidden);
@@ -250,20 +211,10 @@ async fn open_message(id: MessageId, dark: bool) {
         page: made.into(),
         hidden,
         page_dark,
-        remote: remote.clone(),
-        loading_remote: false,
+        remote: blocked,
         can_reply_all,
     });
-    // Those cached need no request: they show without asking.
-    if !remote.is_empty() {
-        match client().cached_remote_images(remote).await {
-            Ok(cached) if !cached.is_empty() => {
-                add_remote_images(id, cached);
-            }
-            Ok(_) => {}
-            Err(e) => tracing::warn!(error = %e, "couldn't read the image cache"),
-        }
-    }
+    add_remote_images(id, web::cached_remote_images(remote).await);
     // Only HTML shows inline parts. One at a time; this task goes
     // with the message.
     let Some(body) = body.filter(|b| b.html.is_some()) else {
@@ -273,13 +224,13 @@ async fn open_message(id: MessageId, dark: bool) {
         let Some(content_id) = &part.content_id else {
             continue;
         };
-        if page_state().borrow().pages.has_inline(content_id) {
+        if web::with_pages(|p| p.has_inline(content_id)) {
             continue;
         }
         match client().attachment_content(part.id).await {
             Ok(bytes) => {
                 let image = Image::new(&part.mime_type, bytes);
-                add_inline_image(content_id.clone(), image);
+                web::add_inline(content_id.clone(), image);
             }
             Err(e) => tracing::warn!(attachment = %part.id, error = %e,
                 "failed to load inline image"),
@@ -287,130 +238,23 @@ async fn open_message(id: MessageId, dark: bool) {
     }
 }
 
-/// Puts an inline part of the open message in its page.
-fn add_inline_image(content_id: String, image: Image) {
-    let answers = page_state()
-        .borrow_mut()
-        .pages
-        .add_inline(content_id, image);
-    answer(answers);
-}
-
-/// The page asks for one of its images (`html::IMAGE_SCHEME`): answered once it is here
-/// and the page has taken those before it (`BodyPages::request`).
-fn serve_image(request: WebResourceRequest) {
-    let url = request.url().to_owned();
-    let answers = page_state().borrow_mut().pages.request(&url, request);
-    answer(answers);
-}
-
-/// The page says one of its images has come (or failed): the next go.
-fn image_loaded(url: &str) {
-    let answers = page_state().borrow_mut().pages.loaded(url);
-    answer(answers);
-}
-
-/// Gives the page the images it asked for, and watches those held back.
-fn answer(answers: Vec<(WebResourceRequest, Image)>) {
-    for (request, image) in answers {
-        let resource = WebResource::new(image.mime_type().clone(), image.bytes().clone());
-        request.respond(resource);
-    }
-    watch_images();
-}
-
-/// How long images may be held back with none coming before the rest go anyway.
-const UNSTICK_AFTER: Duration = Duration::from_secs(3);
-
-/// While images are held back, checks every [`UNSTICK_AFTER`] that one has come since: a
-/// page that never says so would get no more (`BodyPages::unstick`). One watch at a time.
-fn watch_images() {
-    {
-        let page = page_state();
-        let mut page = page.borrow_mut();
-        if page.watching || !page.pages.holds_back() {
-            return;
-        }
-        page.watching = true;
-    }
-    in_view(async {
-        loop {
-            let progress = page_state().borrow().pages.progress();
-            timer(UNSTICK_AFTER).await;
-            let answers = {
-                let page = page_state();
-                let mut page = page.borrow_mut();
-                if !page.pages.holds_back() {
-                    page.watching = false;
-                    return;
-                }
-                page.pages.unstick(progress)
-            };
-            if !answers.is_empty() {
-                tracing::warn!("the page didn't say its images came; sending the rest");
-            }
-            answer(answers);
-        }
-    });
-}
-
 /// Fetches the open message's remote images and shows each as it comes, because the user
 /// asked. If none could be had, says why and leaves them blocked, to try again.
 fn show_remote_images() {
     let reading = global::<Reading>();
-    let Some((id, urls)) = reading.with_untracked(|r| {
-        (!r.loading_remote && !r.remote.is_empty()).then(|| (r.id, r.remote.clone()))
-    }) else {
+    let Some(id) = reading.with_untracked(|r| r.id) else {
         return;
     };
-    let Some(id) = id else {
+    let mut urls = None;
+    reading.update(|r| urls = r.remote.start());
+    let Some(urls) = urls else {
         return;
     };
-    reading.update(|r| r.loading_remote = true);
     let task = spawn(async move {
-        let (mut shown, mut error) = (false, None);
-        match client().fetch_remote_images(urls).await {
-            Ok(mut stream) => {
-                while let Some(first) = stream.next().await {
-                    // Those that finished together go to the page together.
-                    let ready = std::iter::from_fn(|| stream.next_ready());
-                    let mut fetched = Vec::new();
-                    for (url, image) in std::iter::once(first).chain(ready) {
-                        match image {
-                            Ok(image) => fetched.push((url, image)),
-                            Err(e) => {
-                                tracing::debug!(%url, error = %e, "remote image not loaded");
-                                error.get_or_insert_with(|| e.to_string());
-                            }
-                        }
-                    }
-                    if fetched.is_empty() {
-                        continue;
-                    }
-                    shown = true;
-                    if !add_remote_images(id, fetched) {
-                        return;
-                    }
-                }
-            }
-            Err(e) => error = Some(e.to_string()),
-        }
-        if global::<Reading>().with_untracked(|r| r.id != Some(id)) {
-            return;
-        }
-        let keep = !shown && error.is_some();
-        global::<Reading>().update(|r| {
-            r.loading_remote = false;
-            // Those that failed stay blank; with none shown, the button comes back.
-            if !keep {
-                r.remote.clear();
-            }
-        });
-        if keep && let Some(error) = error {
-            notify(
-                Level::Error,
-                format!("Couldn't load remote images: {error}"),
-            );
+        if web::fetch_remote_images(urls, |fetched| add_remote_images(id, fetched)).await {
+            let mut result = Ok(());
+            global::<Reading>().update(|r| result = r.remote.ended());
+            web::fetch_ended(result);
         }
     });
     // Under the mailbox: not the button's, which goes when the images are all shown.
@@ -421,17 +265,17 @@ fn show_remote_images() {
 
 /// Shows remote images that came for message `id` (fetched, or from the cache); false if
 /// it is no longer open.
-fn add_remote_images(id: MessageId, fetched: Vec<(String, RemoteImage)>) -> bool {
+fn add_remote_images(id: MessageId, fetched: web::Fetched) -> bool {
     let reading = global::<Reading>();
     if reading.with_untracked(|r| r.id != Some(id)) {
         return false;
     }
-    reading.update(|r| {
-        r.remote
-            .retain(|url| !fetched.iter().any(|(had, _)| had == url));
-    });
-    let answers = page_state().borrow_mut().pages.add_remote(fetched);
-    answer(answers);
+    if fetched.is_empty() {
+        return true;
+    }
+    let mut shown = Vec::new();
+    reading.update(|r| shown = r.remote.came(fetched));
+    web::add_remote(shown);
     true
 }
 
@@ -450,9 +294,9 @@ fn page_painted(height: f32) {
 }
 
 /// Whether a web view `height` points tall shows all of a page `page_height` points tall
-/// (as tall as it is made, [`MIN_BODY_HEIGHT`] at least; to the pixel).
+/// (as tall as it is made, [`web::MIN_HEIGHT`] at least; to the pixel).
 fn tall_enough(height: f32, page_height: f32) -> bool {
-    height + 1.0 >= page_height.max(MIN_BODY_HEIGHT)
+    height + 1.0 >= page_height.max(web::MIN_HEIGHT)
 }
 
 /// Shows message `id`'s page if it is the one open and still hidden.
@@ -460,39 +304,6 @@ fn show_page(id: MessageId) {
     let reading = global::<Reading>();
     if reading.with_untracked(|r| r.hidden && r.state == State::Open && r.id == Some(id)) {
         reading.update(|r| r.hidden = false);
-    }
-}
-
-fn palette() -> DarkPalette {
-    let rgb = |c: AdaptiveColor| {
-        let c = c.dark.to_rgb();
-        [c.r, c.g, c.b].map(|v| (v * 255.0).round() as u8)
-    };
-    DarkPalette {
-        background: rgb(theme().background),
-        foreground: rgb(theme().foreground),
-    }
-}
-
-/// What the reader shows a page in: a dark one moves the message's colors toward the
-/// theme's.
-fn appearance(dark: bool) -> Appearance {
-    Appearance {
-        light: colors(false),
-        dark: dark.then(|| DarkAppearance {
-            palette: palette(),
-            colors: colors(true),
-        }),
-    }
-}
-
-fn colors(dark: bool) -> Colors {
-    let pick = |c: AdaptiveColor| if dark { c.dark } else { c.light }.to_hex();
-    Colors {
-        foreground: pick(theme().foreground),
-        background: pick(theme().background),
-        link: pick(crate::theme::link()),
-        selection: pick(crate::theme::selection()),
     }
 }
 
@@ -541,7 +352,7 @@ fn open_in_browser() {
     }) else {
         return;
     };
-    let inline = page_state().borrow().pages.inline().clone();
+    let inline = web::with_pages(|p| p.inline().clone());
     in_view(async move {
         let page = browser_page(&title, &html, inline);
         match client().hand_off("html", page.into_bytes()).await {

@@ -88,7 +88,21 @@ pub enum QuoteKind {
     Forward,
 }
 
+/// The line a forward's intro starts with, its headers (`From: …`) after it.
+pub const FORWARD_SEPARATOR: &str = "---------- Forwarded message ---------";
+
 impl Quote {
+    /// A forward's header lines (`From: …`, `Subject: …`): its intro after
+    /// [`FORWARD_SEPARATOR`]. `None` for a reply, or a forward without them.
+    pub fn forward_headers(&self) -> Option<&str> {
+        if self.kind != QuoteKind::Forward {
+            return None;
+        }
+        let intro = self.intro.trim();
+        let headers = intro.strip_prefix(FORWARD_SEPARATOR).unwrap_or(intro);
+        Some(headers.trim_start()).filter(|h| !h.is_empty())
+    }
+
     /// `text`, then the quote, as the plain text of a message shows them.
     pub fn below(&self, text: &str) -> String {
         with_quote(text, &self.as_text())
@@ -475,6 +489,23 @@ mod tests {
             content.text_as_sent(),
             "On Monday, A wrote:\n> hi\n>\n> > earlier\n"
         );
+    }
+
+    #[test]
+    fn a_forwards_headers_follow_its_separator() {
+        let mut quote = Quote {
+            kind: QuoteKind::Forward,
+            intro: format!("{FORWARD_SEPARATOR}\nFrom: A\nSubject: Hi\n"),
+            text: String::new(),
+            html: None,
+        };
+        assert_eq!(quote.forward_headers(), Some("From: A\nSubject: Hi"));
+        quote.intro = FORWARD_SEPARATOR.into();
+        assert_eq!(quote.forward_headers(), None);
+        quote.intro = "From: A".into();
+        assert_eq!(quote.forward_headers(), Some("From: A"));
+        quote.kind = QuoteKind::Reply;
+        assert_eq!(quote.forward_headers(), None);
     }
 
     #[test]

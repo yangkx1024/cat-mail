@@ -47,8 +47,10 @@ src/
     picker.rs      "Move to"与"Labels"对话框
     draft.rs outbox.rs  草稿、发件箱条目的右栏
   reader/          读信区：mod.rs 打开、远程与内嵌图片、附件的保存；view.rs 工具栏、头部、正文的 web view、附件
-                   （正文的页面：CSP、注入脚本和它的消息协议在 catmail_frontend::html）
-  composer/        写信窗口：mod.rs 状态、保存发送关闭、附件、发件人、格式与图片；rich.rs 正文的编辑器；view.rs 窗口
+  web.rs           显示邮件 HTML 的 web view 和它的图片应答，读信区和写信窗口的引文共用
+                   （页面：CSP、注入脚本和它的消息协议在 catmail_frontend::html）
+  composer/        写信窗口：mod.rs 状态、保存发送关闭、附件、发件人、格式与图片；rich.rs 正文的编辑器；
+                   quote.rs 引文；view.rs 窗口
   settings/        设置对话框：mod.rs 设置的跟随、对话框和 General；appearance.rs、accounts.rs、reading.rs、agents.rs 各一节
   login.rs         登录页和发件身份的表单
   form.rs          对话框外框、字段、提交、确认对话框、只要一个名字的对话框
@@ -252,6 +254,8 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 ### 正文在 web view 里
 
 有 HTML 部分就显示清洗后的 HTML，否则把纯文本转义后放进 `<pre>`（`catmail_frontend::html::BodyPages::page`），都在同一个 web view 里。
+web view、图片的应答、远程图片的下载在 `web.rs`，写信窗口的引文用同一套（见[写信窗口](#写信窗口)）；每个视图在
+自己的线程上，各有一份。
 
 - **断网**：WebKit 有自己的网络，nsh 只检查顶层导航，不管页面的子资源，所以由页面自己断网：`<head>` 最前面
   一条 CSP `default-src 'none'; img-src data: catmail-image:; style-src 'unsafe-inline'; font-src data:;
@@ -376,14 +380,30 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
   - **格式的样子由应用给**：和 Tiptap 一样，RichEditor 的节点和 mark 自己没有样式，加粗只有在 `classes` 说它
     `font-bold` 时才是粗的。`rich::classes` 按节点、mark 的名字给出 Tailwind 类（标题、引用、列表留出左边放标记的
     空间、代码、链接等），尽量接近收信端显示的样子；测试检查每个类 nsh 都认识、每个名字都在 schema 里。
-  - **打开**：解析时保留空白（`Whitespace::Full`），缩进、连续空格、Tab 照写的保留。草稿有 HTML 就解析它；纯文本草稿（CLI 和 agent 写的；回复、转发的原信是[引文](sending.md#引文)，不在正文里，写信窗口还不显示它）按行转成段落，`>` 开头的行转成
-    （嵌套的）引用（`rich_text::text_to_html`）。
+  - **打开**：解析时保留空白（`Whitespace::Full`），缩进、连续空格、Tab 照写的保留。草稿有 HTML 就解析它；纯文本草稿（CLI 和 agent 写的）按行转成段落
+    （`rich_text::text_to_html`）。`>` 开头的行是用户自己写的，照原样是文字，不当引用：回复、转发的原信是
+    [引文](sending.md#引文)，不在正文里。
   - **保存**：从编辑器的文档（ProseMirror JSON）写出 HTML（nsh 的 `doc_to_html`），同时按同一规则写出纯文本
     （`rich_text::doc_to_text`：一段一行、引用加 `> `、列表加 `* ` / 序号、链接后附地址），一起存进草稿。用户
     没动过正文就存草稿原来的文本和 HTML：打开一封纯文本草稿再关掉，不会把它改存成 HTML。
   - **图片**：底栏的图片按钮选图片文件，粘贴的图片（截图）和文件管理器里复制的图片文件也放进正文，别的文件
     当附件（是不是图片按 `named_as_image`，与引擎同一个判断）。图片经 `DraftEditor::attach_image` 存成草稿的内嵌附件（有 Content-ID），编辑器里的 `src` 是它在
     BlobStore 里的文件（`attach_image` 一并返回，打开时 `DraftEditor::images` 一次取齐），存草稿时换回 `cid:`（`rich_text::Images`）。内嵌附件不在附件栏里。
+    **远程图片不显示**：编辑器（nsh 的 `image`）会直接从网上取图，不经过读信区的 CSP 和"Show remote images"；在引文里回复、
+    或打开带着这种图片的草稿时，原信的跟踪像素就会告诉发信人信被读了。所以除了草稿自己的图片和 `data:`，别的图片在
+    编辑器里换成什么也不加载的 `catmail-blocked:` 地址，存草稿时换回原来的 URL，照样发出。
+- **引文**（`composer/quote.rs`）：回复、转发的原信在编辑器下面，一条横栏：展开 / 收起、开场白（转发显示
+  "Forwarded message"）、在引文里回复、去掉引文。默认收起；展开后和正文各占一半高度，上面是转发的头部几行（`Quote::forward_headers`），下面是
+  原信，和读信区一样显示（`web.rs` 的 web view 和页面，CSP、深色、内嵌图片从草稿的附件文件读，远程图片缓存过的
+  直接显示、其余点按钮才下载，`html::RemoteImages` 两处共用）。web view 第一次展开时才建，之后收起只是藏起来：
+  每建一个 web view WebKit 就起一个渲染进程。编辑器的单一滚动区里放不下它：编辑器只把光标滚进自己的滚动区，外面再套一层滚动
+  时打字打到底下会看不见光标。
+  - **去掉引文**：窗口记下，随下一次保存一起存（`Written::quoted` → `DraftChanges::quote = Some(None)`），和附件的
+    删除一样不能撤销；只有引文显示的图片等关窗时删（`drop_unshown_images`）。
+  - **在引文里回复**（Gmail 的 "Respond inline"）：开场白和原信（回复放进引用）按 schema 能表达的部分接到正文
+    末尾（`rich_text::quote_to_html`、`Rich::answer_in`），同时去掉引文，两者在同一次保存里，草稿不会两边都没有
+    或有两份。纯文本原信的 `>` 按层数转成嵌套引用，和发信同一个函数（`catmail_html::quoted_text_html`）。这一步
+    不进编辑器的撤销历史：引文已经去掉，撤销掉接上的内容就两边都没有了。原信的样式、表格布局会丢，只有用户选了这一步才会。
 - **退出**前先让每个写信窗口走关闭流程（`OpenComposers::close_all`），有一个关不了（地址要改、保存失败）就不退出，
   那个窗口留下。写信窗口只管"关不关得了"，不知道退出这回事（见[后台运行 / 退出](background.md#退出)）。
 
