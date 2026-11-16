@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use catmail_html::escape;
-use catmail_types::{Address, Quote, QuoteKind};
+use catmail_types::{Address, FORWARD_SEPARATOR, Quote, QuoteHead};
 use mail_builder::MessageBuilder;
 use mail_builder::headers::address::Address as BuilderAddress;
 use mail_builder::headers::content_type::ContentType;
@@ -211,6 +211,13 @@ const ORIGINAL_CLASS: &str = "catmail-original";
 const CITE: &str =
     r#" type="cite" style="margin:0 0 0 0.8ex;border-left:1px solid #ccc;padding-left:1ex""#;
 
+/// A forward's headers: a table, their names bold in a column of their own, as Gmail and
+/// Apple Mail lay them out.
+const HEADERS_TABLE: &str =
+    r#"<table cellpadding="0" cellspacing="0" style="border-collapse:collapse">"#;
+const HEADER_NAME: &str =
+    r#" style="padding:0 1ex 0 0;font-weight:bold;vertical-align:top;white-space:nowrap""#;
+
 /// The message as an HTML document: the body's HTML (or its text as paragraphs), then
 /// the quote. `None` for a body of text with no quote of HTML, which the text says all
 /// of.
@@ -234,23 +241,36 @@ fn html(message: &Outgoing<'_>) -> Option<String> {
     Some(html_document(&sheet, &body))
 }
 
-/// Writes the quote as HTML to `out`: its intro, then the message quoted, in a
+/// Writes the quote as HTML to `out`: its head, then the message quoted, in a
 /// `<blockquote type="cite">` for a reply (what mail clients recognize as a quote). The
 /// message's HTML if it has any, its style sheet returned to go in the document's head;
 /// else its text, as paragraphs.
 fn quote_html(quote: &Quote, out: &mut String) -> String {
-    let intro: Vec<String> = quote.intro.trim_end().lines().map(escape).collect();
-    let _ = write!(
-        out,
-        r#"<div class="catmail-quote"><div>{}</div>"#,
-        intro.join("<br>")
-    );
-    let reply = quote.kind == QuoteKind::Reply;
-    if reply {
-        let _ = write!(out, "<blockquote{CITE}>");
-    } else {
-        out.push_str("<br>");
-    }
+    out.push_str(r#"<div class="catmail-quote">"#);
+    let close = match &quote.head {
+        QuoteHead::Reply(attribution) => {
+            let attribution = escape(&attribution.to_string());
+            let _ = write!(out, "<div>{attribution}</div><blockquote{CITE}>");
+            "</blockquote>"
+        }
+        QuoteHead::Forward(headers) => {
+            let _ = write!(out, "<div>{}</div>", escape(FORWARD_SEPARATOR));
+            if !headers.is_empty() {
+                out.push_str(HEADERS_TABLE);
+                for (field, value) in headers {
+                    let _ = write!(
+                        out,
+                        "<tr><td{HEADER_NAME}>{}:</td><td>{}</td></tr>",
+                        field.label(),
+                        escape(value)
+                    );
+                }
+                out.push_str("</table>");
+            }
+            out.push_str("<br>");
+            ""
+        }
+    };
     let sheet = match &quote.html {
         Some(html) => {
             let (sheet, rest) = catmail_html::nested(html, ORIGINAL_CLASS);
@@ -268,9 +288,7 @@ fn quote_html(quote: &Quote, out: &mut String) -> String {
             String::new()
         }
     };
-    if reply {
-        out.push_str("</blockquote>");
-    }
+    out.push_str(close);
     out.push_str("</div>");
     sheet
 }
@@ -388,6 +406,7 @@ fn content_type(mime_type: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use catmail_types::{Attribution, ForwardField};
     use mail_parser::MessageParser;
 
     use super::*;
@@ -682,8 +701,10 @@ mod tests {
 
     fn reply_quote(text: &str, html: Option<&str>) -> Quote {
         Quote {
-            kind: QuoteKind::Reply,
-            intro: "On Monday, A <a@example.com> wrote:".into(),
+            head: QuoteHead::Reply(Attribution {
+                from: Some("A <a@example.com>".into()),
+                date: Some("2026-11-02 09:30".into()),
+            }),
             text: text.into(),
             html: html.map(String::from),
         }
@@ -721,13 +742,13 @@ mod tests {
         let (text, html) = parts(&raw);
         assert_eq!(
             text,
-            "Thanks <3\n\nB\n\nOn Monday, A <a@example.com> wrote:\n> Hi there\n"
+            "Thanks <3\n\nB\n\nOn 2026-11-02 09:30, A <a@example.com> wrote:\n> Hi there\n"
         );
         let html = html.unwrap();
         for expected in [
             ".catmail-original{background:#eee;}.catmail-original p{color:red;}</style></head>",
             r#"<div class="catmail-text"><p>Thanks &lt;3</p><p><br></p><p>B</p></div>"#,
-            "<div>On Monday, A &lt;a@example.com&gt; wrote:</div><blockquote type=\"cite\"",
+            "<div>On 2026-11-02 09:30, A &lt;a@example.com&gt; wrote:</div><blockquote type=\"cite\"",
             r#"<div class="catmail-original"><p>Hi <b>there</b></p><img src="cid:logo@catmail"></div></blockquote>"#,
         ] {
             assert!(html.contains(expected), "{expected} in {html}");
@@ -745,7 +766,7 @@ mod tests {
         let raw = build_message(&quoting(&from, "Thanks", None, &quote, vec![])).unwrap();
         assert_eq!(
             parts(&raw).0,
-            "Thanks\n\nOn Monday, A <a@example.com> wrote:\n> Hi\n> > earlier\n> >> first\n> back\n"
+            "Thanks\n\nOn 2026-11-02 09:30, A <a@example.com> wrote:\n> Hi\n> > earlier\n> >> first\n> back\n"
         );
         assert!(!String::from_utf8_lossy(&raw).contains("text/html"));
         // Under HTML, its quotes are quotes.
@@ -770,8 +791,10 @@ mod tests {
     fn a_forward_is_not_quoted() {
         let from = addr(None, "b@example.com");
         let quote = Quote {
-            kind: QuoteKind::Forward,
-            intro: "---------- Forwarded message ---------\nFrom: A".into(),
+            head: QuoteHead::Forward(vec![
+                (ForwardField::From, "A <a@example.com>".into()),
+                (ForwardField::Subject, "Hi".into()),
+            ]),
             text: "> not a quote of ours".into(),
             html: Some("<p>Original</p>".into()),
         };
@@ -779,16 +802,15 @@ mod tests {
         let (text, html) = parts(&raw);
         assert_eq!(
             text,
-            "---------- Forwarded message ---------\nFrom: A\n\n> not a quote of ours\n"
+            "---------- Forwarded message ---------\nFrom: A <a@example.com>\nSubject: Hi\n\n\
+             > not a quote of ours\n"
         );
         let html = html.unwrap();
         assert!(!html.contains("<blockquote"), "{html}");
-        assert!(
-            html.contains(
-                r#"<div>---------- Forwarded message ---------<br>From: A</div><br><div class="catmail-original"><p>Original</p></div>"#
-            ),
-            "{html}"
+        let expected = format!(
+            r#"<div>---------- Forwarded message ---------</div>{HEADERS_TABLE}<tr><td{HEADER_NAME}>From:</td><td>A &lt;a@example.com&gt;</td></tr><tr><td{HEADER_NAME}>Subject:</td><td>Hi</td></tr></table><br><div class="catmail-original"><p>Original</p></div>"#
         );
+        assert!(html.contains(&expected), "{expected} in {html}");
     }
 
     #[test]

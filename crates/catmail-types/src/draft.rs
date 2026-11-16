@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{AccountId, Address, DraftAttachmentId, DraftId, IdentityId, MessageId, OutboxId};
@@ -66,10 +68,8 @@ impl DraftBody {
 /// below what the user wrote.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Quote {
-    pub kind: QuoteKind,
-    /// What introduces it, as plain text: who wrote it and when (`On …, … wrote:`), or a
-    /// forward's header lines.
-    pub intro: String,
+    /// What introduces it: who wrote the message and when, or a forward's headers.
+    pub head: QuoteHead,
     /// The message's text.
     pub text: String,
     /// The message's HTML as it was sanitized when stored (a style sheet in front, if
@@ -79,51 +79,60 @@ pub struct Quote {
     pub html: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// What introduces a quote, as data, and how the message follows it: quoted under a
+/// reply's attribution (`> ` in the text, a `<blockquote type="cite">` in the HTML), as it
+/// was under a forward's headers. Worded here ([`Attribution`]'s line,
+/// [`ForwardField::label`], [`FORWARD_SEPARATOR`]); each place that shows it lays it out
+/// (a table in the HTML sent, names and values apart in the composer). The values are the
+/// text shown, as they read when the draft was made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum QuoteKind {
-    /// Quoted: `> ` in the text, a `<blockquote type="cite">` in the HTML.
-    Reply,
-    /// As it was, below its headers.
-    Forward,
+pub enum QuoteHead {
+    Reply(Attribution),
+    /// The message's headers, those it has, in the order shown.
+    Forward(Vec<(ForwardField, String)>),
 }
 
-/// The line a forward's intro starts with, its headers (`From: …`) after it.
+/// Who wrote the message a reply quotes, and when.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attribution {
+    /// The sender, `Name <address>`; `None` for a message without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// When it was sent, `2026-10-19 14:05` in the time zone the draft was made in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+}
+
+/// A header a forward shows of the message it carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForwardField {
+    From,
+    Date,
+    Subject,
+    To,
+    Cc,
+}
+
+/// The line a forward's headers follow, wherever it is shown as text.
 pub const FORWARD_SEPARATOR: &str = "---------- Forwarded message ---------";
 
 impl Quote {
-    /// A forward's header lines (`From: …`, `Subject: …`): its intro after
-    /// [`FORWARD_SEPARATOR`]. `None` for a reply, or a forward without them.
-    pub fn forward_headers(&self) -> Option<&str> {
-        if self.kind != QuoteKind::Forward {
-            return None;
-        }
-        let intro = self.intro.trim();
-        let headers = intro.strip_prefix(FORWARD_SEPARATOR).unwrap_or(intro);
-        Some(headers.trim_start()).filter(|h| !h.is_empty())
-    }
-
     /// `text`, then the quote, as the plain text of a message shows them.
     pub fn below(&self, text: &str) -> String {
         with_quote(text, &self.as_text())
     }
 
-    /// The quote as plain text: its intro, then the message's text, `> `-quoted in a
-    /// reply.
+    /// The quote as plain text: a reply's attribution, then the message's text
+    /// `> `-quoted; or a forward's separator, a `Name: value` line for each header, and
+    /// the message's text as it was.
     pub fn as_text(&self) -> String {
-        self.kind.as_text(&self.intro, &self.text)
-    }
-}
-
-impl QuoteKind {
-    /// A quote of this kind as plain text ([`Quote::as_text`]), from its intro and the
-    /// message's text.
-    pub fn as_text(self, intro: &str, text: &str) -> String {
-        let mut out = intro.trim_end().to_owned();
-        out.push('\n');
-        let text = text.trim_end();
-        match self {
-            QuoteKind::Reply => {
+        let text = self.text.trim_end();
+        let mut out = String::new();
+        match &self.head {
+            QuoteHead::Reply(attribution) => {
+                let _ = writeln!(out, "{attribution}");
                 for line in text.lines() {
                     out.push('>');
                     if !line.is_empty() {
@@ -133,7 +142,12 @@ impl QuoteKind {
                     out.push('\n');
                 }
             }
-            QuoteKind::Forward => {
+            QuoteHead::Forward(headers) => {
+                out.push_str(FORWARD_SEPARATOR);
+                out.push('\n');
+                for (field, value) in headers {
+                    let _ = writeln!(out, "{}: {value}", field.label());
+                }
                 out.push('\n');
                 if !text.is_empty() {
                     out.push_str(text);
@@ -143,23 +157,44 @@ impl QuoteKind {
         }
         out
     }
+}
 
-    pub fn as_str(self) -> &'static str {
-        match self {
-            QuoteKind::Reply => "reply",
-            QuoteKind::Forward => "forward",
-        }
+impl QuoteHead {
+    /// Every value it shows, to change in place.
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut String> {
+        let (attribution, headers) = match self {
+            QuoteHead::Reply(Attribution { from, date }) => {
+                (Some(from.iter_mut().chain(date)), None)
+            }
+            QuoteHead::Forward(headers) => (None, Some(headers.iter_mut().map(|(_, v)| v))),
+        };
+        attribution
+            .into_iter()
+            .flatten()
+            .chain(headers.into_iter().flatten())
     }
 }
 
-impl std::str::FromStr for QuoteKind {
-    type Err = String;
+/// `On 2026-10-19 14:05, A <a@example.com> wrote:`.
+impl std::fmt::Display for Attribution {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(date) = &self.date {
+            write!(f, "On {date}, ")?;
+        }
+        let from = self.from.as_deref().unwrap_or("someone");
+        write!(f, "{from} wrote:")
+    }
+}
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "reply" => Ok(Self::Reply),
-            "forward" => Ok(Self::Forward),
-            other => Err(format!("unknown quote kind `{other}`")),
+impl ForwardField {
+    /// The header's name as shown.
+    pub fn label(self) -> &'static str {
+        match self {
+            ForwardField::From => "From",
+            ForwardField::Date => "Date",
+            ForwardField::Subject => "Subject",
+            ForwardField::To => "To",
+            ForwardField::Cc => "Cc",
         }
     }
 }
@@ -489,63 +524,105 @@ mod tests {
         assert_eq!(content.body, DraftBody::plain("Bye\n"));
     }
 
-    fn quote(kind: QuoteKind) -> Quote {
+    fn quote(head: QuoteHead) -> Quote {
         Quote {
-            kind,
-            intro: "On Monday, A wrote:".into(),
+            head,
             text: "hi\n\n> earlier\n\n".into(),
             html: None,
         }
+    }
+
+    fn reply() -> Quote {
+        quote(QuoteHead::Reply(Attribution {
+            from: Some("A".into()),
+            date: Some("2026-11-02 09:30".into()),
+        }))
     }
 
     #[test]
     fn a_reply_quotes_the_text_below_the_body() {
         let mut content = DraftContent {
             body: DraftBody::plain("Thanks\n\n"),
-            quote: Some(quote(QuoteKind::Reply)),
+            quote: Some(reply()),
             ..DraftContent::default()
         };
         assert_eq!(
             content.text_as_sent(),
-            "Thanks\n\nOn Monday, A wrote:\n> hi\n>\n> > earlier\n"
+            "Thanks\n\nOn 2026-11-02 09:30, A wrote:\n> hi\n>\n> > earlier\n"
         );
         content.body = DraftBody::default();
         assert_eq!(
             content.text_as_sent(),
-            "On Monday, A wrote:\n> hi\n>\n> > earlier\n"
+            "On 2026-11-02 09:30, A wrote:\n> hi\n>\n> > earlier\n"
         );
     }
 
     #[test]
-    fn a_forwards_headers_follow_its_separator() {
-        let mut quote = Quote {
-            kind: QuoteKind::Forward,
-            intro: format!("{FORWARD_SEPARATOR}\nFrom: A\nSubject: Hi\n"),
-            text: String::new(),
-            html: None,
+    fn an_attribution_says_what_it_knows() {
+        let mut attribution = Attribution {
+            from: Some("A <a@example.com>".into()),
+            date: Some("2026-11-02 09:30".into()),
         };
-        assert_eq!(quote.forward_headers(), Some("From: A\nSubject: Hi"));
-        quote.intro = FORWARD_SEPARATOR.into();
-        assert_eq!(quote.forward_headers(), None);
-        quote.intro = "From: A".into();
-        assert_eq!(quote.forward_headers(), Some("From: A"));
-        quote.kind = QuoteKind::Reply;
-        assert_eq!(quote.forward_headers(), None);
+        assert_eq!(
+            attribution.to_string(),
+            "On 2026-11-02 09:30, A <a@example.com> wrote:"
+        );
+        attribution.date = None;
+        assert_eq!(attribution.to_string(), "A <a@example.com> wrote:");
+        assert_eq!(Attribution::default().to_string(), "someone wrote:");
     }
 
     #[test]
-    fn a_forward_carries_the_text_as_it_was() {
-        let content = DraftContent {
+    fn a_forward_carries_the_text_as_it_was_below_its_headers() {
+        let mut content = DraftContent {
             body: DraftBody::plain("FYI"),
-            quote: Some(Quote {
-                intro: "---------- Forwarded message ---------\nFrom: A".into(),
-                ..quote(QuoteKind::Forward)
-            }),
+            quote: Some(quote(QuoteHead::Forward(vec![
+                (ForwardField::From, "A".into()),
+                (ForwardField::Subject, "Hi".into()),
+            ]))),
             ..DraftContent::default()
         };
         assert_eq!(
             content.text_as_sent(),
-            "FYI\n\n---------- Forwarded message ---------\nFrom: A\n\nhi\n\n> earlier\n"
+            "FYI\n\n---------- Forwarded message ---------\nFrom: A\nSubject: Hi\n\n\
+             hi\n\n> earlier\n"
+        );
+        content.quote.as_mut().unwrap().head = QuoteHead::Forward(Vec::new());
+        assert_eq!(
+            content.text_as_sent(),
+            "FYI\n\n---------- Forwarded message ---------\n\nhi\n\n> earlier\n"
+        );
+    }
+
+    #[test]
+    fn a_quote_reads_back_as_it_was_written() {
+        let forward = quote(QuoteHead::Forward(vec![(ForwardField::Cc, "B".into())]));
+        for quote in [reply(), forward] {
+            let json = serde_json::to_string(&quote).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Quote>(&json).unwrap(),
+                quote,
+                "{json}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_value_of_a_head_can_be_changed() {
+        let mut head = reply().head;
+        head.values_mut().for_each(|v| v.push('!'));
+        assert_eq!(
+            head,
+            QuoteHead::Reply(Attribution {
+                from: Some("A!".into()),
+                date: Some("2026-11-02 09:30!".into()),
+            })
+        );
+        let mut head = QuoteHead::Forward(vec![(ForwardField::To, "B".into())]);
+        head.values_mut().for_each(|v| v.push('!'));
+        assert_eq!(
+            head,
+            QuoteHead::Forward(vec![(ForwardField::To, "B!".into())])
         );
     }
 
@@ -562,7 +639,7 @@ mod tests {
                 },
                 quote: Some(Quote {
                     html: Some("<p>hi</p>".into()),
-                    ..quote(QuoteKind::Reply)
+                    ..reply()
                 }),
                 ..DraftContent::default()
             },
@@ -583,7 +660,7 @@ mod tests {
     #[test]
     fn the_quote_changes_only_when_given() {
         let mut content = DraftContent {
-            quote: Some(quote(QuoteKind::Reply)),
+            quote: Some(reply()),
             ..DraftContent::default()
         };
         DraftChanges {
