@@ -112,7 +112,8 @@ fn make_page(quote: &Quote, dark: bool) -> (Rc<str>, bool) {
         )
     });
     let remote = made.remote_urls;
-    global::<Quoting>().update(|q| q.remote = RemoteImages::new(remote.clone()));
+    // Made again in another appearance: a fetch on its way goes on.
+    global::<Quoting>().update(|q| q.remote.again(remote.clone()));
     load_images();
     in_window(async move {
         add_remote_images(web::cached_remote_images(remote).await);

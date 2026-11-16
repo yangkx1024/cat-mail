@@ -132,7 +132,10 @@ pub fn follow_selection() {
 
 async fn open_message(id: MessageId, dark: bool) {
     let reading = global::<Reading>();
-    if reading.with_untracked(|r| r.id != Some(id)) {
+    // Open already, made again (in another appearance): its fetch of remote images, which
+    // only another message cancels, goes on.
+    let again = reading.with_untracked(|r| r.id == Some(id));
+    if !again {
         // The message before stays shown, and its page until this one's paints (WebKit
         // keeps it), as a browser goes from page to page: emptied in between, the pane
         // would show its own background where the message's was. Only if this one takes
@@ -185,6 +188,11 @@ async fn open_message(id: MessageId, dark: bool) {
         }
         (made.html, made.dark, made.remote_urls)
     };
+    let mut blocked = RemoteImages::default();
+    if again {
+        blocked = reading.with_untracked(|r| r.remote.clone());
+    }
+    blocked.again(remote.clone());
     // Hidden (the first page, or one that took long): until the page has loaded, rather
     // than show the web view before it paints, in WebKit's own background.
     let hidden = reading.with_untracked(|r| r.hidden);
@@ -203,7 +211,7 @@ async fn open_message(id: MessageId, dark: bool) {
         page: made.into(),
         hidden,
         page_dark,
-        remote: RemoteImages::new(remote.clone()),
+        remote: blocked,
         can_reply_all,
     });
     add_remote_images(id, web::cached_remote_images(remote).await);

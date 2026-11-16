@@ -1,6 +1,6 @@
 //! The composer's formatted text, without the editor: the HTML a plain draft opens as,
 //! the plain text sent with the HTML, and the images, which the editor shows from files
-//! and the draft refers to by Content-ID.
+//! and the draft refers to by Content-ID. Remote images it doesn't show at all.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -13,12 +13,22 @@ use catmail_core::{Quote, QuoteKind};
 /// The images of a draft's HTML: the file each one's content is in
 /// ([`DraftEditor::images`](catmail_core::DraftEditor::images)), by Content-ID. The
 /// editor shows the files; the draft keeps `cid:` URLs.
+///
+/// Any other image but a `data:` one would be loaded from where it points, by the editor,
+/// outside the reader's rules: a quote answered in (or a draft that has one) would tell
+/// its sender, through a tracking pixel, that it was read. Those show as
+/// [`BLOCKED_SCHEME`] URLs, which load nothing, and are sent as they were.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Images {
     paths: HashMap<String, PathBuf>,
     /// The other way: Content-IDs by the path the editor shows.
     ids: HashMap<String, String>,
+    /// The images not shown: their URLs by the one the editor has instead.
+    blocked: HashMap<String, String>,
 }
+
+/// The scheme of the URLs remote images have in the editor: `catmail-blocked:<n>`.
+pub const BLOCKED_SCHEME: &str = "catmail-blocked";
 
 impl Images {
     pub fn insert(&mut self, content_id: String, path: PathBuf) {
@@ -27,8 +37,9 @@ impl Images {
         self.paths.insert(content_id, path);
     }
 
+    /// None to show from files, and none blocked: the editor's document is the draft's.
     pub fn is_empty(&self) -> bool {
-        self.paths.is_empty()
+        self.paths.is_empty() && self.blocked.is_empty()
     }
 
     /// The file of the image `content_id`.
@@ -37,29 +48,40 @@ impl Images {
     }
 
     /// The images of `doc` (ProseMirror's JSON of a document) by their files, for the
-    /// editor: `cid:` URLs of the draft's images become their paths. Others stay.
-    pub fn to_files(&self, doc: &mut Value) {
-        map_image_sources(doc, &|src| {
-            let id = src.strip_prefix("cid:")?;
-            Some(self.paths.get(id)?.to_string_lossy().into_owned())
+    /// editor: `cid:` URLs of the draft's images become their paths, and every other but
+    /// a `cid:` or `data:` one is blocked. Those load nothing from anywhere.
+    pub fn to_files(&mut self, doc: &mut Value) {
+        map_image_sources(doc, &mut |src| {
+            if let Some(id) = src.strip_prefix("cid:") {
+                return Some(self.paths.get(id)?.to_string_lossy().into_owned());
+            }
+            if src.starts_with("data:") {
+                return None;
+            }
+            let shown = format!("{BLOCKED_SCHEME}:{}", self.blocked.len());
+            self.blocked.insert(shown.clone(), src.to_owned());
+            Some(shown)
         });
     }
 
     /// The images of `doc` by Content-ID, for the draft: the paths [`Self::to_files`]
-    /// gave become `cid:` URLs again.
+    /// gave become `cid:` URLs again, and those it blocked their own URLs.
     pub fn to_content_ids(&self, doc: &mut Value) {
-        map_image_sources(doc, &|src| Some(format!("cid:{}", self.ids.get(src)?)));
+        map_image_sources(doc, &mut |src| match self.blocked.get(src) {
+            Some(url) => Some(url.clone()),
+            None => Some(format!("cid:{}", self.ids.get(src)?)),
+        });
     }
 }
 
 /// Replaces the `src` of every image node of `doc` that `f` has a replacement for.
-fn map_image_sources(doc: &mut Value, f: &dyn Fn(&str) -> Option<String>) {
+fn map_image_sources(doc: &mut Value, f: &mut dyn FnMut(&str) -> Option<String>) {
     let Value::Object(node) = doc else {
         return;
     };
     if node.get("type").and_then(Value::as_str) == Some("image")
         && let Some(Value::Object(attrs)) = node.get_mut("attrs")
-        && let Some(new) = attrs.get("src").and_then(Value::as_str).and_then(f)
+        && let Some(new) = attrs.get("src").and_then(Value::as_str).and_then(&mut *f)
     {
         attrs.insert("src".into(), Value::String(new));
     }
@@ -345,10 +367,16 @@ mod tests {
             {"type": "image", "attrs": {"src": "cid:a@catmail", "alt": null}},
             {"type": "image", "attrs": {"src": "cid:other@x"}},
             {"type": "image", "attrs": {"src": "https://example.com/x.png"}},
+            {"type": "image", "attrs": {"src": "data:image/png;base64,aGk="}},
         ]}]});
         assert_eq!(images.path("a@catmail"), Some(Path::new("/blobs/aa/aaaa")));
         let mut doc = draft.clone();
         images.to_files(&mut doc);
+        // Loaded from nowhere, not even the file it would be at.
+        let blocked = doc["content"][0]["content"][2]["attrs"]["src"]
+            .as_str()
+            .unwrap();
+        assert_eq!(blocked, "catmail-blocked:0");
         assert_eq!(
             doc["content"][0]["content"][0]["attrs"]["src"],
             "/blobs/aa/aaaa"
@@ -357,6 +385,7 @@ mod tests {
             doc["content"][0]["content"][1]["attrs"]["src"],
             "cid:other@x"
         );
+        assert!(doc["content"][0]["content"][3]["attrs"]["src"] == "data:image/png;base64,aGk=");
         images.to_content_ids(&mut doc);
         assert_eq!(doc, draft);
     }

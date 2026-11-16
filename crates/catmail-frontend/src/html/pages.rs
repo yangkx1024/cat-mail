@@ -229,6 +229,12 @@ impl RemoteImages {
         }
     }
 
+    /// The same message's page made again (in another appearance), `blocked` those of its
+    /// remote images not shown: a fetch on its way goes on, and says how it went.
+    pub fn again(&mut self, blocked: Vec<String>) {
+        self.blocked = blocked;
+    }
+
     /// Whether some are blocked, and if so whether they are coming: the button, dimmed
     /// while they come.
     pub fn offered(&self) -> Option<bool> {
@@ -397,6 +403,27 @@ mod tests {
         assert_eq!(remote.came(vec![ok("b")]), [("b".to_owned(), ())]);
         assert_eq!(remote.ended(), Ok(()));
         assert_eq!(remote.offered(), None);
+    }
+
+    #[test]
+    fn a_page_made_again_keeps_the_fetch_on_its_way() {
+        let mut remote = RemoteImages::new(vec!["a".into(), "b".into()]);
+        assert!(remote.start().is_some());
+        // The appearance changed meanwhile: the same two, still blocked.
+        remote.again(vec!["a".into(), "b".into()]);
+        assert_eq!(remote.offered(), Some(true));
+        assert!(
+            remote
+                .came(vec![("a".to_owned(), Err::<(), _>("gone".to_owned()))])
+                .is_empty()
+        );
+        assert!(
+            remote
+                .came(vec![("b".to_owned(), Err::<(), _>("gone".to_owned()))])
+                .is_empty()
+        );
+        assert_eq!(remote.ended(), Err("gone".into()));
+        assert_eq!(remote.offered(), Some(false), "offered again");
     }
 
     #[test]

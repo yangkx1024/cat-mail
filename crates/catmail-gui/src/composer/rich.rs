@@ -83,7 +83,7 @@ pub struct Rich {
 
 impl Rich {
     /// Shows `body`, formatted or not; `images` are the files of the images in its HTML.
-    pub fn new(body: &DraftBody, images: Images) -> Self {
+    pub fn new(body: &DraftBody, mut images: Images) -> Self {
         // Without what mail can't show: task lists' checkboxes.
         let kit = starter_kit().configure(json!({ "taskList": false, "taskItem": false }));
         let manager = ExtensionManager::with_core(vec![kit]).expect("the starter kit is valid");
@@ -92,7 +92,7 @@ impl Rich {
             Some(html) => html.clone(),
             None => text_to_html(&body.text),
         };
-        let doc = parse(&schema, &html, &images);
+        let doc = parse(&schema, &html, &mut images);
         // The starter kit's link is only the mark: these link URLs as they are typed or
         // pasted, a selection a URL is pasted over, and open a link pressed with Mod.
         let mut plugins = manager.plugins();
@@ -118,7 +118,11 @@ impl Rich {
     /// to answer in. Not undone: the draft has the quote no longer.
     pub fn answer_in(&self, quote: &Quote) {
         let state = self.session.state();
-        let quoted = parse(&self.schema, &quote_to_html(quote), &self.images.borrow());
+        let quoted = parse(
+            &self.schema,
+            &quote_to_html(quote),
+            &mut self.images.borrow_mut(),
+        );
         let mut tr = state.tr();
         let end = state.doc().content().size();
         if tr.insert(end, quoted.content().clone()).is_err() {
@@ -244,17 +248,15 @@ impl Rich {
     }
 }
 
-/// `html` as a document of the editor, its images (`cid:`) shown from their files.
-fn parse(schema: &Schema, html: &str, images: &Images) -> Node {
+/// `html` as a document of the editor, its images (`cid:`) shown from their files and
+/// remote ones blocked ([`Images::to_files`]).
+fn parse(schema: &Schema, html: &str, images: &mut Images) -> Node {
     // As written: indentation and runs of spaces (a quoted table, code) are the author's.
     // The HTML is the editor's, or `text_to_html`'s: no whitespace between its tags to
     // keep out.
     let mut options = ParseOptions::default();
     options.preserve_whitespace = Some(Whitespace::Full);
     let doc = DomParser::from_schema(schema).parse(html, &options);
-    if images.is_empty() {
-        return doc;
-    }
     let mut json = doc.to_json();
     images.to_files(&mut json);
     schema
@@ -331,6 +333,28 @@ mod tests {
             "{html}"
         );
         assert!(!html.contains("color"), "{html}");
+    }
+
+    #[test]
+    fn remote_images_are_not_loaded_but_sent() {
+        let pixel = r#"<img src="https://t.example/open.gif?u=1">"#;
+        // A quote answered in.
+        let rich = Rich::new(&formatted("<p>Thanks</p>"), Images::default());
+        let quote = Quote {
+            kind: catmail_core::QuoteKind::Forward,
+            intro: "From: A".into(),
+            text: "Hi\n".into(),
+            html: Some(format!("<p>Hi {pixel}</p>")),
+        };
+        rich.answer_in(&quote);
+        assert!(image_src(&rich).starts_with("catmail-blocked:"));
+        rich.touch();
+        assert!(written(&rich).1.contains(pixel), "{}", written(&rich).1);
+        // A draft that has one, opened again.
+        let rich = Rich::new(&formatted(&format!("<p>{pixel}</p>")), Images::default());
+        assert!(image_src(&rich).starts_with("catmail-blocked:"));
+        rich.touch();
+        assert!(written(&rich).1.contains(pixel), "{}", written(&rich).1);
     }
 
     #[test]
