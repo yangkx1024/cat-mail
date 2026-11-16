@@ -380,12 +380,13 @@ CREATE TABLE drafts (
     -- images are the draft's attachments with a content_id, by cid: URL.
     body_html           TEXT,
     -- What a reply or forward carries of the message it answers (catmail_types::Quote),
-    -- sent below the body: 'reply' or 'forward' with its intro and text, all NULL for
-    -- none. quote_html is NULL for a message of text only; its images are attachments
-    -- with a content_id too. Columns of their own, so a list of drafts reads the text
-    -- without the HTML.
-    quote_kind          TEXT CHECK (quote_kind IN ('reply', 'forward')),
-    quote_intro         TEXT,
+    -- sent below the body: its head and text, all NULL for none. quote_head is
+    -- catmail_types::QuoteHead as JSON, what introduces the quote as data and whether it
+    -- is a reply's or a forward's: {"reply": {"from": …, "date": …}} or
+    -- {"forward": [[field, value], …]}. quote_html is NULL for a message of text only;
+    -- its images are attachments with a content_id too. Columns of their own, so a list
+    -- of drafts reads the text without the HTML.
+    quote_head          TEXT CHECK (json_valid(quote_head)),
     quote_text          TEXT,
     quote_html          TEXT,
     -- Bumped by every change, attachments included. Sending builds the message outside
@@ -411,9 +412,8 @@ CREATE TABLE drafts (
        AND (remote_folder_id IS NULL) = (remote_uid IS NULL)
        AND (remote_folder_id IS NULL) = (remote_message_id IS NULL)
        AND (remote_folder_id IS NULL) = (remote_revision IS NULL)),
-    CHECK ((quote_kind IS NULL) = (quote_intro IS NULL)
-       AND (quote_kind IS NULL) = (quote_text IS NULL)
-       AND (quote_kind IS NOT NULL OR quote_html IS NULL)),
+    CHECK ((quote_head IS NULL) = (quote_text IS NULL)
+       AND (quote_head IS NOT NULL OR quote_html IS NULL)),
     FOREIGN KEY (identity_id, account_id) REFERENCES identities(id, account_id)
 ) STRICT;
 

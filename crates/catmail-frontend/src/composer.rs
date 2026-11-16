@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use catmail_core::{
     AccountId, Address, Draft, DraftBody, DraftChanges, DraftContent, DraftEditor, DraftId,
-    EditMark, Forwarding, Identity, IdentityId, MailClient, MessageId, Quote, QuoteKind,
+    EditMark, Forwarding, Identity, IdentityId, MailClient, MessageId, Quote, QuoteHead,
     parse_addresses,
 };
 use futures_channel::oneshot;
@@ -228,9 +228,9 @@ impl Written {
 /// What the quote's bar says of it: who wrote the message answered, or that one is
 /// forwarded.
 pub fn quote_heading(quote: &Quote) -> String {
-    match quote.kind {
-        QuoteKind::Reply => quote.intro.trim_end().to_owned(),
-        QuoteKind::Forward => "Forwarded message".to_owned(),
+    match &quote.head {
+        QuoteHead::Reply(attribution) => attribution.to_string(),
+        QuoteHead::Forward(_) => "Forwarded message".to_owned(),
     }
 }
 
@@ -714,6 +714,8 @@ impl<W: Clone> OpenComposers<W> {
 
 #[cfg(test)]
 mod tests {
+    use catmail_core::Attribution;
+
     use super::*;
 
     #[test]
@@ -895,8 +897,10 @@ mod tests {
     #[test]
     fn the_quotes_bar_says_whose_or_that_it_is_forwarded() {
         let mut quote = Quote {
-            kind: QuoteKind::Reply,
-            intro: "On 2026-11-03 10:00, A <a@example.com> wrote:\n".into(),
+            head: QuoteHead::Reply(Attribution {
+                from: Some("A <a@example.com>".into()),
+                date: Some("2026-11-03 10:00".into()),
+            }),
             text: String::new(),
             html: None,
         };
@@ -904,7 +908,7 @@ mod tests {
             quote_heading(&quote),
             "On 2026-11-03 10:00, A <a@example.com> wrote:"
         );
-        quote.kind = QuoteKind::Forward;
+        quote.head = QuoteHead::Forward(Vec::new());
         assert_eq!(quote_heading(&quote), "Forwarded message");
     }
 

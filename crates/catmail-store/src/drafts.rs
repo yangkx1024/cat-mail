@@ -1,12 +1,13 @@
 use catmail_types::{
     AccountId, BlobHash, Draft, DraftAttachment, DraftAttachmentId, DraftBody, DraftContent,
-    DraftId, DraftSummary, FolderId, FolderRole, IdentityId, MessageId, OutboxId, Quote, QuoteKind,
+    DraftId, DraftSummary, FolderId, FolderRole, IdentityId, MessageId, OutboxId, Quote,
 };
 use std::collections::HashSet;
 
+use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
-use crate::columns::{id_list, json, parse_opt_text, parse_text, size_limit, to_id_list, to_json};
+use crate::columns::{id_list, json, parse_text, size_limit, to_id_list, to_json};
 use crate::folders::Folders;
 use crate::identities::Identities;
 use crate::ops::{PendingOps, Touched};
@@ -15,14 +16,14 @@ use crate::{Error, Result};
 /// What a [`DraftSummary`] is read from, with the draft joined to its outbox entry `o`.
 const SUMMARY_COLUMNS: &str = "d.id, d.account_id, d.reply_to_message_id, d.in_reply_to,
     d.references_hdr, d.identity_id, d.subject, d.to_json, d.cc_json, d.bcc_json,
-    d.body_text, d.body_html IS NOT NULL AS formatted, d.quote_kind, d.quote_intro,
+    d.body_text, d.body_html IS NOT NULL AS formatted, d.quote_head,
     d.quote_text, d.revision, d.updated_at,
     d.remote_revision IS d.revision AS on_server, d.upload_error, o.id AS outbox_id";
 
 /// What a [`Draft`] is read from: a summary's and the HTML.
 const COLUMNS: &str = "d.id, d.account_id, d.reply_to_message_id, d.in_reply_to, d.references_hdr,
     d.identity_id, d.subject, d.to_json, d.cc_json, d.bcc_json, d.body_text, d.body_html,
-    d.quote_kind, d.quote_intro, d.quote_text, d.quote_html, d.revision,
+    d.quote_head, d.quote_text, d.quote_html, d.revision,
     d.updated_at,
     d.remote_revision IS d.revision AS on_server, d.upload_error, o.id AS outbox_id";
 
@@ -128,11 +129,11 @@ impl<'c> Drafts<'c> {
             .prepare_cached(
                 "INSERT INTO drafts (account_id, reply_to_message_id, in_reply_to, references_hdr,
                                      identity_id, subject, to_json, cc_json, bcc_json, body_text,
-                                     body_html, quote_kind, quote_intro, quote_text, quote_html,
+                                     body_html, quote_head, quote_text, quote_html,
                                      updated_at)
                  VALUES (:account, (SELECT id FROM messages WHERE id = :reply), :in_reply_to,
                          :references, :identity, :subject, :to, :cc, :bcc, :text, :html,
-                         :quote_kind, :quote_intro, :quote_text, :quote_html, :now)",
+                         :quote_head, :quote_text, :quote_html, :now)",
             )?
             .execute(named_params! {
                 ":account": account.0,
@@ -146,8 +147,7 @@ impl<'c> Drafts<'c> {
                 ":bcc": to_json(&content.bcc),
                 ":text": content.body.text,
                 ":html": content.body.html,
-                ":quote_kind": quote.map(|q| q.kind.as_str()),
-                ":quote_intro": quote.map(|q| &q.intro),
+                ":quote_head": quote.map(|q| to_json(&q.head)),
                 ":quote_text": quote.map(|q| &q.text),
                 ":quote_html": quote.and_then(|q| q.html.as_deref()),
                 ":now": now,
@@ -254,8 +254,8 @@ impl<'c> Drafts<'c> {
                 "UPDATE drafts SET identity_id = coalesce(:identity, identity_id),
                                    subject = :subject, to_json = :to,
                                    cc_json = :cc, bcc_json = :bcc, body_text = :text,
-                                   body_html = :html, quote_kind = :quote_kind,
-                                   quote_intro = :quote_intro, quote_text = :quote_text,
+                                   body_html = :html, quote_head = :quote_head,
+                                   quote_text = :quote_text,
                                    quote_html = :quote_html, revision = revision + 1,
                                    updated_at = :now
                  WHERE id = :id",
@@ -269,8 +269,7 @@ impl<'c> Drafts<'c> {
                 ":bcc": to_json(&content.bcc),
                 ":text": content.body.text,
                 ":html": content.body.html,
-                ":quote_kind": quote.map(|q| q.kind.as_str()),
-                ":quote_intro": quote.map(|q| &q.intro),
+                ":quote_head": quote.map(|q| to_json(&q.head)),
                 ":quote_text": quote.map(|q| &q.text),
                 ":quote_html": quote.and_then(|q| q.html.as_deref()),
                 ":now": now,
@@ -768,12 +767,11 @@ fn upload_from_row(r: &Row<'_>) -> rusqlite::Result<DraftUpload> {
 
 /// The quote of a draft row with `html` read already, if it has one.
 fn quote(row: &Row<'_>, html: Option<String>) -> rusqlite::Result<Option<Quote>> {
-    let Some(kind) = parse_opt_text::<QuoteKind>(row, "quote_kind")? else {
+    if row.get_ref("quote_head")? == ValueRef::Null {
         return Ok(None);
-    };
+    }
     Ok(Some(Quote {
-        kind,
-        intro: row.get("quote_intro")?,
+        head: json(row, "quote_head")?,
         text: row.get("quote_text")?,
         html,
     }))
@@ -837,7 +835,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Draft> {
 
 #[cfg(test)]
 mod tests {
-    use catmail_types::{Address, FlagState, OutboxStatus};
+    use catmail_types::{Address, Attribution, FlagState, ForwardField, OutboxStatus, QuoteHead};
 
     use super::*;
     use crate::folders::RemoteFolder;
@@ -984,8 +982,10 @@ mod tests {
                 html: Some("<p><b>好的</b></p>".into()),
             },
             quote: Some(Quote {
-                kind: QuoteKind::Reply,
-                intro: "On Monday, 张三 wrote:".into(),
+                head: QuoteHead::Reply(Attribution {
+                    from: Some("张三 <zhang@example.com>".into()),
+                    date: Some("2026-11-02 09:30".into()),
+                }),
                 text: "你好".into(),
                 html: Some("<style>p{color:red;}</style><p>你好</p>".into()),
             }),
@@ -1000,9 +1000,17 @@ mod tests {
         let listed = store.read(|db| db.drafts().list(account)).unwrap();
         assert_eq!(listed, [DraftSummary::from(&get())]);
         assert!(listed[0].formatted && listed[0].quote.is_some());
+        // A forward's headers, in their order.
+        let mut forward = quoted.clone();
+        forward.quote.as_mut().unwrap().head = QuoteHead::Forward(vec![
+            (ForwardField::From, "张三 <zhang@example.com>".into()),
+            (ForwardField::Subject, "hi".into()),
+        ]);
+        assert!(store.write(|db| edit(db, id, &forward, 2)).unwrap());
+        assert_eq!(get().content, forward);
         assert!(
             store
-                .write(|db| edit(db, id, &content("Re: hi"), 2))
+                .write(|db| edit(db, id, &content("Re: hi"), 3))
                 .unwrap()
         );
         assert_eq!(get().content.quote, None);

@@ -7,8 +7,8 @@
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use catmail_core::Quote;
 use catmail_core::html::{Image, cid_image_ids};
+use catmail_core::{ForwardField, Quote, QuoteHead};
 use catmail_frontend::composer::{Opening, quote_heading};
 use catmail_frontend::html::RemoteImages;
 use nsh_base::theme;
@@ -16,8 +16,8 @@ use nsh_core::prelude::*;
 
 use crate::buttons::{Size, icon_button};
 use crate::icons::Icon;
+use crate::mailbox::panes::fact;
 use crate::tasks::off_thread;
-use crate::theme::SelectableText as _;
 use crate::web;
 
 use super::{changed, ending, in_window, rich, text_changed};
@@ -278,7 +278,10 @@ fn bar(heading: String) -> impl IntoElement {
 fn message(quote: Rc<Quote>) -> impl IntoElement {
     let page = signal((Rc::<str>::from(""), false));
     let height = signal(0.0_f32);
-    let headers = quote.forward_headers().map(str::to_owned);
+    let headers = match &quote.head {
+        QuoteHead::Forward(headers) if !headers.is_empty() => Some(headers.clone()),
+        _ => None,
+    };
     // Made again when the appearance changes.
     effect(move || {
         let dark = dark();
@@ -295,14 +298,7 @@ fn message(quote: Rc<Quote>) -> impl IntoElement {
         .flex_1()
         .min_h(px(0.0))
         .style_when(move || !expanded(), |s| s.hidden())
-        .children(headers.map(|headers| {
-            text(headers)
-                .px(px(20.0))
-                .pb(px(8.0))
-                .text_xs()
-                .selectable_text()
-                .text_color(move || theme().muted_foreground)
-        }))
+        .children(headers.map(forward_headers))
         // The page pads itself, a little less than the text is.
         .child(
             scroll()
@@ -310,4 +306,14 @@ fn message(quote: Rc<Quote>) -> impl IntoElement {
                 .min_h(px(0.0))
                 .child(view().px(px(4.0)).child(web)),
         )
+}
+
+/// A forward's headers over the message, a row each, as the draft's pane shows its
+/// recipients.
+fn forward_headers(headers: Vec<(ForwardField, String)>) -> View {
+    view().gap(px(4.0)).px(px(20.0)).pb(px(8.0)).children(
+        headers
+            .into_iter()
+            .map(|(field, value)| fact(field.label(), value)),
+    )
 }

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use catmail_core::{
     Address, Draft, DraftBody, DraftChanges, DraftContent, DraftId, ErrorKind, Forwarding,
-    MailClientBuilder, QuoteKind, ReplayReport, SyncSchedule,
+    MailClientBuilder, QuoteHead, ReplayReport, SyncSchedule,
 };
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 use common::{Env, NETEASE_OVER_LIMIT, addr, env, env_built, eventually, sparse, synced_env};
@@ -745,7 +745,7 @@ async fn a_forward_carries_the_message_its_attachments_and_images() {
     let (cid, filename, size) = image_of(&draft);
     assert_eq!((filename, size), ("image", 8));
     let quote = draft.content.quote.as_ref().unwrap();
-    assert_eq!(quote.kind, QuoteKind::Forward);
+    assert!(matches!(quote.head, QuoteHead::Forward(_)));
     let html = quote.html.as_deref().unwrap();
     assert!(
         html.contains(&format!(r#"<img src="cid:{cid}">"#)),

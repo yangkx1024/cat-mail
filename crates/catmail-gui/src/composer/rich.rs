@@ -314,8 +314,10 @@ mod tests {
         images.insert("logo@catmail".into(), PathBuf::from("/blobs/logo"));
         let rich = Rich::new(&formatted("<p>Thanks</p>"), images);
         let quote = Quote {
-            kind: catmail_core::QuoteKind::Reply,
-            intro: "On Monday, A wrote:".into(),
+            head: catmail_core::QuoteHead::Reply(catmail_core::Attribution {
+                from: Some("A".into()),
+                date: None,
+            }),
             text: "Hi\n".into(),
             html: Some(
                 r#"<style>p{color:red}</style><p><b>Hi</b> <img src="cid:logo@catmail"></p>"#
@@ -327,7 +329,7 @@ mod tests {
         rich.run("undo", Value::Null);
         rich.touch();
         let (text, html) = written(&rich);
-        assert_eq!(text, "Thanks\n\nOn Monday, A wrote:\n> Hi \n");
+        assert_eq!(text, "Thanks\n\nA wrote:\n> Hi \n");
         assert!(
             html.contains(r#"<blockquote><p><strong>Hi</strong> <img src="cid:logo@catmail""#),
             "{html}"
@@ -341,8 +343,10 @@ mod tests {
         // A quote answered in.
         let rich = Rich::new(&formatted("<p>Thanks</p>"), Images::default());
         let quote = Quote {
-            kind: catmail_core::QuoteKind::Forward,
-            intro: "From: A".into(),
+            head: catmail_core::QuoteHead::Forward(vec![(
+                catmail_core::ForwardField::From,
+                "A".into(),
+            )]),
             text: "Hi\n".into(),
             html: Some(format!("<p>Hi {pixel}</p>")),
         };

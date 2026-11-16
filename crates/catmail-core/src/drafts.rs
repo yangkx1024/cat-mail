@@ -9,9 +9,9 @@ use catmail_proto::mime::{Outgoing, OutgoingAttachment, build_message};
 use catmail_proto::smtp;
 use catmail_store::{BlobStore, DraftReply, DraftSnapshot, NewDraftAttachment};
 use catmail_types::{
-    AccountId, Address, Answer, Attachment, BlobHash, Draft, DraftAttachment, DraftAttachmentId,
-    DraftBody, DraftChanges, DraftContent, DraftId, Event, FORWARD_SEPARATOR, Forwarding,
-    IdentityId, Message, MessageId, NewFile, Quote, QuoteKind,
+    AccountId, Address, Answer, Attachment, Attribution, BlobHash, Draft, DraftAttachment,
+    DraftAttachmentId, DraftBody, DraftChanges, DraftContent, DraftId, Event, ForwardField,
+    Forwarding, IdentityId, Message, MessageId, NewFile, Quote, QuoteHead,
 };
 use uuid::Uuid;
 
@@ -1149,7 +1149,7 @@ fn without_nul(mut content: DraftContent) -> DraftContent {
         strip(html);
     }
     if let Some(quote) = &mut content.quote {
-        strip(&mut quote.intro);
+        quote.head.values_mut().for_each(strip);
         strip(&mut quote.text);
         if let Some(html) = &mut quote.html {
             strip(html);
@@ -1215,7 +1215,7 @@ fn reply_content(message: &Message, own: &[Own], all: bool) -> (DraftContent, Op
         cc,
         bcc: Vec::new(),
         body: DraftBody::default(),
-        quote: Some(quote(message, QuoteKind::Reply, attribution(message))),
+        quote: Some(quote(message, QuoteHead::Reply(attribution(message)))),
     };
     (content, written_as)
 }
@@ -1304,47 +1304,43 @@ fn prefixed(subject: &str, prefix: &str, known: &[&str]) -> String {
     }
 }
 
-/// `message` quoted, introduced by `intro`: its text, and its HTML if it has any.
-fn quote(message: &Message, kind: QuoteKind, intro: String) -> Quote {
+/// `message` quoted, introduced by `head`: its text, and its HTML if it has any.
+fn quote(message: &Message, head: QuoteHead) -> Quote {
     let body = message.body.as_ref();
     Quote {
-        kind,
-        intro,
+        head,
         text: body.and_then(|b| b.text.clone()).unwrap_or_default(),
         html: body.and_then(|b| b.html.clone()),
     }
 }
 
 /// Who wrote the message, and when.
-fn attribution(message: &Message) -> String {
-    let sender = message
-        .summary
-        .from
-        .first()
-        .map_or_else(|| "someone".into(), Address::to_string);
-    let date = display::local(message.summary.date, "On %Y-%m-%d %H:%M, ");
-    format!("{date}{sender} wrote:")
+fn attribution(message: &Message) -> Attribution {
+    Attribution {
+        from: message.summary.from.first().map(Address::to_string),
+        date: display::local_date(message.summary.date),
+    }
 }
 
 /// Subject and quote of a forward of `message`: its headers, then the message as it was.
 fn forward_content(message: &Message) -> DraftContent {
     let subject = message.summary.subject.as_deref().unwrap_or_default();
-    let date = display::date(message.summary.date);
-    let mut intro = String::from(FORWARD_SEPARATOR);
-    for (name, value) in [
-        ("From", display::addresses(&message.summary.from)),
-        ("Date", date),
-        ("Subject", subject.trim().to_owned()),
-        ("To", display::addresses(&message.summary.to)),
-        ("Cc", display::addresses(&message.summary.cc)),
-    ] {
-        if !value.is_empty() {
-            intro.push_str(&format!("\n{name}: {value}"));
-        }
-    }
+    let headers = [
+        (
+            ForwardField::From,
+            display::addresses(&message.summary.from),
+        ),
+        (ForwardField::Date, display::date(message.summary.date)),
+        (ForwardField::Subject, subject.trim().to_owned()),
+        (ForwardField::To, display::addresses(&message.summary.to)),
+        (ForwardField::Cc, display::addresses(&message.summary.cc)),
+    ]
+    .into_iter()
+    .filter(|(_, value)| !value.is_empty())
+    .collect();
     DraftContent {
         subject: forward_subject(subject),
-        quote: Some(quote(message, QuoteKind::Forward, intro)),
+        quote: Some(quote(message, QuoteHead::Forward(headers))),
         ..Default::default()
     }
 }
@@ -1571,7 +1567,14 @@ mod tests {
         assert!(forward.recipients().next().is_none());
         assert_eq!(forward.body, DraftBody::default());
         let quote = forward.quote.as_ref().unwrap();
-        assert_eq!(quote.kind, QuoteKind::Forward);
+        assert_eq!(
+            quote.head,
+            QuoteHead::Forward(vec![
+                (ForwardField::From, "张三 <zhang@example.com>".into()),
+                (ForwardField::Subject, "季度报告".into()),
+                (ForwardField::To, "me@example.com, li@example.com".into()),
+            ])
+        );
         assert_eq!(
             forward.text_as_sent(),
             "---------- Forwarded message ---------\n\

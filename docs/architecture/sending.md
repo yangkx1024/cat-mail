@@ -86,9 +86,17 @@
 ## 引文
 
 `DraftContent::quote`（`Quote`）：回复和转发带着的原信，和正文分开存
-（`drafts.quote_kind` / `quote_intro` / `quote_text` / `quote_html`），发出时接在正文下面。存的是建草稿那一刻的快照：开场白（"On …, … wrote:"，或转发的
-头部几行）、原信的纯文本、原信清洗后存下的 HTML（没有 HTML 的信为 `None`）。不存原信的 id：原信之后可能被删、
+（`drafts.quote_head` / `quote_text` / `quote_html`），发出时接在正文下面。存的是建草稿那一刻的快照：引文的头
+（`QuoteHead`）、原信的纯文本、原信清洗后存下的 HTML（没有 HTML 的信为 `None`）。不存原信的 id：原信之后可能被删、
 被 expunge，回复里引的应该是用户回复时看到的样子。
+
+**引文的头是数据，不是文字**：回复是署名（`Attribution`：发件人、时间），转发是原信的头部（`ForwardField` 加值，
+From、Date、Subject、To、Cc，有的才有）。措辞只在 `catmail-types` 一处（`Attribution` 的 "On …, … wrote:"、
+`ForwardField::label`、分隔行 `FORWARD_SEPARATOR`），排版各处自己做：纯文本是署名一行，或分隔行加一行一个
+`名字: 值`（`Quote::as_text`）；发出的 HTML 把转发的头部排成表格，名字加粗一列；写信窗口按名字、值两列排。存的是名字的键，不是 "From" 这些文字：将来按语言换措辞时不用改草稿。值是建草稿时
+写好的文字（地址 `Name <a@example.com>`，时间按当时的时区），不是 `Address` 和时间戳：快照本该是用户当时看到的
+样子，`catmail-types` 也不必为了显示时间引入时区。`drafts.quote_head` 是整个 `QuoteHead` 的 JSON，类别是它的
+标签（`{"reply": …}` / `{"forward": …}`），不另占一列。
 
 **列出草稿不读 HTML**：`list_drafts` 返回 `DraftSummary`（和 `MessageSummary` 一样是列表用的那一份）：正文和引文的
 纯文本、有没有格式，不带 `body_html` 和 `quote_html`。GUI 的草稿列表每次 `DraftsChanged`（每次保存、每次上传结果）
@@ -101,8 +109,8 @@
   HTML 整块放进引文，它们的编辑器是 contenteditable；移动端（Gmail、Outlook 的 app）把引文放在编辑器外面，
   发信时接上。catmail 走后一种：编辑器只放用户写的，原信原样发出。也省得每次保存把整封原信序列化一遍。
   放弃的方案：按 schema 能表达的保留（丢格式）；把原信作为编辑器里不可编辑的节点（要自定义节点和序列化）。
-- **怎么发出**（`catmail_proto::mime::build`）：纯文本是正文、空一行、开场白，再接原信的文本，回复每行加
-  `> `（`Quote::below`，CLI、MCP 显示的也是它）。HTML 是正文的 HTML（正文是纯文本就一行一段）、开场白，再接
+- **怎么发出**（`catmail_proto::mime::build`）：纯文本是正文、空一行、引文的头，再接原信的文本，回复每行加
+  `> `（`Quote::below`，CLI、MCP 显示的也是它）。HTML 是正文的 HTML（正文是纯文本就一行一段）、引文的头（转发的头部是表格），再接
   原信：回复放在 `<blockquote type="cite">` 里（收信端认它为引文，左边一条线），转发不缩进。原信有 HTML
   就用它，样式表改写成只作用于它所在的元素（`catmail_html::nested`：选择器前加 `.catmail-original`，`html`、
   `body`、`:root` 就是那个元素），放进文档头，否则原信的 `body { background }`、`p { … }` 会改掉整封信；没有 HTML

@@ -3,12 +3,13 @@
 //! and the draft refers to by Content-ID. Remote images it doesn't show at all.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
 use catmail_core::html::{escape, nested, quoted_text_html};
-use catmail_core::{Quote, QuoteKind};
+use catmail_core::{FORWARD_SEPARATOR, Quote, QuoteHead};
 
 /// The images of a draft's HTML: the file each one's content is in
 /// ([`DraftEditor::images`](catmail_core::DraftEditor::images)), by Content-ID. The
@@ -100,16 +101,25 @@ pub fn text_to_html(text: &str) -> String {
         .collect()
 }
 
-/// The HTML a quote goes into the editor as, when the user answers in it: its intro, then
-/// the message quoted (in a quote, for a reply), what of its HTML the editor can hold
-/// (without its style sheet, which the editor has no place for), or its text, a
-/// paragraph a line, nested as it quotes in turn.
+/// The HTML a quote goes into the editor as, when the user answers in it: its head (a
+/// forward's headers a paragraph each, their names bold), then the message quoted (in a
+/// quote, for a reply), what of its HTML the editor can hold (without its style sheet,
+/// which the editor has no place for), or its text, a paragraph a line, nested as it
+/// quotes in turn.
 pub fn quote_to_html(quote: &Quote) -> String {
     let mut html = String::from("<p></p>");
-    html.push_str(&text_to_html(quote.intro.trim_end()));
-    let (open, close) = match quote.kind {
-        QuoteKind::Reply => ("<blockquote>", "</blockquote>"),
-        QuoteKind::Forward => ("<p></p>", ""),
+    let (open, close) = match &quote.head {
+        QuoteHead::Reply(attribution) => {
+            html.push_str(&text_to_html(&attribution.to_string()));
+            ("<blockquote>", "</blockquote>")
+        }
+        QuoteHead::Forward(headers) => {
+            html.push_str(&text_to_html(FORWARD_SEPARATOR));
+            for (field, value) in headers {
+                let _ = write!(html, "<p><b>{}:</b> {}</p>", field.label(), escape(value));
+            }
+            ("<p></p>", "")
+        }
     };
     html.push_str(open);
     match &quote.html {
@@ -264,6 +274,8 @@ pub fn link_href(typed: &str) -> Option<String> {
 mod tests {
     use serde_json::json;
 
+    use catmail_core::{Attribution, ForwardField};
+
     use super::*;
 
     #[test]
@@ -278,23 +290,24 @@ mod tests {
     #[test]
     fn a_quote_answered_in_goes_into_the_text_whole() {
         let mut quote = Quote {
-            kind: QuoteKind::Reply,
-            intro: "On Monday, A wrote:".into(),
+            head: QuoteHead::Reply(Attribution {
+                from: Some("A".into()),
+                date: None,
+            }),
             text: "first\n> older\n".into(),
             html: None,
         };
         assert_eq!(
             quote_to_html(&quote),
-            "<p></p><p>On Monday, A wrote:</p><blockquote><p>first</p>\
+            "<p></p><p>A wrote:</p><blockquote><p>first</p>\
              <blockquote><p>older</p></blockquote></blockquote>"
         );
-        quote.kind = QuoteKind::Forward;
-        quote.intro = "---------- Forwarded message ---------\nFrom: A".into();
+        quote.head = QuoteHead::Forward(vec![(ForwardField::From, "A <a@example.com>".into())]);
         quote.html = Some("<style>p { color: red }</style><p><b>Hi</b></p>".into());
         assert_eq!(
             quote_to_html(&quote),
-            "<p></p><p>---------- Forwarded message ---------</p><p>From: A</p><p></p>\
-             <p><b>Hi</b></p>"
+            "<p></p><p>---------- Forwarded message ---------</p>\
+             <p><b>From:</b> A &lt;a@example.com&gt;</p><p></p><p><b>Hi</b></p>"
         );
     }
 

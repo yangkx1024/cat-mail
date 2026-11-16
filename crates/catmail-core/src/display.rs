@@ -20,19 +20,18 @@ pub fn size(bytes: u64) -> String {
 
 /// The full date in the local time zone, `2026-10-19 14:05`; empty for none.
 pub fn date(timestamp: Option<i64>) -> String {
-    local(timestamp, "%Y-%m-%d %H:%M")
+    local_date(timestamp).unwrap_or_default()
 }
 
-/// The time in the local time zone, as `format` (strftime) has it; empty for none.
-pub(crate) fn local(timestamp: Option<i64>, format: &str) -> String {
-    timestamp
-        .and_then(|t| jiff::Timestamp::from_second(t).ok())
-        .map(|t| {
-            t.to_zoned(jiff::tz::TimeZone::system())
-                .strftime(format)
-                .to_string()
-        })
-        .unwrap_or_default()
+/// [`date`], `None` for none.
+pub(crate) fn local_date(timestamp: Option<i64>) -> Option<String> {
+    let timestamp = jiff::Timestamp::from_second(timestamp?).ok()?;
+    Some(
+        timestamp
+            .to_zoned(jiff::tz::TimeZone::system())
+            .strftime("%Y-%m-%d %H:%M")
+            .to_string(),
+    )
 }
 
 /// The name, or the address where there is none.
