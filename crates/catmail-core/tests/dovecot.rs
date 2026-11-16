@@ -105,6 +105,16 @@ async fn syncs_against_dovecot() {
     let report = client.sync_account(account).await.unwrap();
     assert_eq!(added(&report, "INBOX"), (6, 0, 0));
     assert_eq!(added(&report, &run), (2, 0, 0));
+    // No body is downloaded there: the snippets are Dovecot's previews (RFC 8970).
+    let folder = client.find_folder(account, &run).await.unwrap().unwrap();
+    let snippets: Vec<_> = client
+        .list_messages(folder.id, 10, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|m| m.snippet)
+        .collect();
+    assert_eq!(snippets, [Some("body".into()), Some("body".into())]);
 
     let folders = client.list_folders(account).await.unwrap();
     let find = |name: &str| folders.iter().find(|f| f.name == name).unwrap();

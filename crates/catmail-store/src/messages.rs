@@ -166,6 +166,10 @@ pub struct NewMessage {
     /// X-GM-MSGID and X-GM-THRID, on Gmail.
     pub gm_msgid: Option<u64>,
     pub gm_thrid: Option<u64>,
+    /// The server's preview came with it (see [`Messages::store_previews`]), as this
+    /// snippet.
+    pub previewed: bool,
+    pub snippet: Option<String>,
 }
 
 /// What [`Messages::upsert`] did.
@@ -330,11 +334,12 @@ impl<'c> Messages<'c> {
             "INSERT INTO messages (account_id, folder_id, uid, flags, keywords_json, modseq,
                                    gm_msgid, gm_thrid, internal_date, size, message_id_hdr,
                                    in_reply_to, references_hdr, subject, from_json, to_json,
-                                   cc_json, reply_to_json, date, has_attachments)
+                                   cc_json, reply_to_json, date, has_attachments,
+                                   previewed, snippet)
              SELECT :account, :folder, :uid, :flags, :keywords, :modseq,
                     :gm_msgid, :gm_thrid, :internal_date, :size, :message_id,
                     :in_reply_to, :references, :subject, :from, :to, :cc, :reply_to, :date,
-                    :has_attachments
+                    :has_attachments, :previewed, :snippet
              WHERE NOT EXISTS (
                  SELECT 1 FROM pending_ops
                  WHERE folder_id = :folder AND status = 'pending' AND uid = :uid
@@ -412,6 +417,8 @@ impl<'c> Messages<'c> {
                 ":reply_to": to_json(&m.reply_to),
                 ":date": m.date.or(m.internal_date),
                 ":has_attachments": m.has_attachments,
+                ":previewed": m.previewed,
+                ":snippet": m.snippet,
             })?;
             if added > 0 {
                 let id = self.conn.last_insert_rowid();
@@ -800,6 +807,49 @@ impl<'c> Messages<'c> {
             |r| Ok(MessageId(r.get(0)?)),
         )?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// UIDs of the messages in `folder` whose preview to ask the server for (RFC 8970
+    /// PREVIEW): neither it nor the body came yet. At most `limit`, newest first, as
+    /// lists show them. [`store_previews`](Self::store_previews) checks the UIDVALIDITY
+    /// they were asked for in.
+    pub fn unpreviewed(&self, folder: FolderId, limit: usize) -> Result<Vec<u32>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT uid FROM messages
+             WHERE folder_id = ?1
+               AND body_state = 'headers' AND previewed = 0 AND uid IS NOT NULL
+             ORDER BY list_date DESC, id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![folder.0, limit as i64], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Stores the snippets the server's previews make of the messages at these UIDs in
+    /// `folder`, while its UIDVALIDITY is `uidvalidity` (`None`: it had none to give),
+    /// and that they came, so they aren't asked for again. Not where the body is stored:
+    /// its snippet, made here, is kept. Returns how many snippets were stored.
+    pub fn store_previews(
+        &self,
+        folder: FolderId,
+        uidvalidity: u32,
+        previews: &[(u32, Option<String>)],
+    ) -> Result<usize> {
+        let mut update = self.conn.prepare_cached(
+            "UPDATE messages SET previewed = 1, snippet = ?4
+             WHERE folder_id = ?1 AND uid = ?3 AND body_state = 'headers' AND previewed = 0
+               AND EXISTS (SELECT 1 FROM folders WHERE id = ?1 AND uidvalidity = ?2)",
+        )?;
+        let mut shown = Vec::new();
+        for (uid, snippet) in previews {
+            let updated = update.execute(params![folder.0, uidvalidity, uid, snippet])?;
+            if updated > 0 && snippet.is_some() {
+                shown.push(*uid);
+            }
+        }
+        if !shown.is_empty() {
+            self.note_shown_in(folder, Some(&shown))?;
+        }
+        Ok(shown.len())
     }
 
     /// `None` if the message is gone. A message moved locally is where the server has
@@ -1554,6 +1604,83 @@ mod tests {
             ],
             version: 1,
         }
+    }
+
+    #[test]
+    fn previews_fill_snippets_until_the_body_comes() {
+        let (store, account, folder) = setup();
+        let previewed = NewMessage {
+            previewed: true,
+            snippet: Some("From the server".into()),
+            ..message(4, Some(4_000), Flags::empty())
+        };
+        let batch = [
+            message(1, Some(1_000), Flags::empty()),
+            message(2, Some(2_000), Flags::empty()),
+            message(3, Some(3_000), Flags::empty()),
+            previewed,
+        ];
+        store
+            .write(|db| {
+                db.folders().reset_uidvalidity(folder.id, 7)?;
+                db.messages().upsert(account, folder.id, &batch)
+            })
+            .unwrap();
+        let id = |uid| test_util::message_id(&store, folder.id, uid);
+        let snippet = |uid| {
+            store
+                .read(|db| db.messages().get(id(uid)))
+                .unwrap()
+                .unwrap()
+                .summary
+                .snippet
+        };
+        assert_eq!(snippet(4).as_deref(), Some("From the server"));
+        store
+            .write(|db| db.messages().store_body(id(3), &body()))
+            .unwrap();
+        let unpreviewed = |limit| {
+            store
+                .read(|db| db.messages().unpreviewed(folder.id, limit))
+                .unwrap()
+        };
+        // Newest first; not one whose body or preview came.
+        assert_eq!(unpreviewed(9), [2, 1]);
+        assert_eq!(unpreviewed(1), [2]);
+
+        let store_previews = |uidvalidity, previews: &[(u32, Option<String>)]| {
+            store
+                .write(|db| {
+                    db.messages()
+                        .store_previews(folder.id, uidvalidity, previews)
+                })
+                .unwrap()
+        };
+        assert_eq!(store_previews(8, &[(2, Some("Stale".into()))]), 0);
+        let previews = [
+            (1, None),
+            (2, Some("Two".into())),
+            // The body's snippet is kept, and so is a preview that came.
+            (3, Some("Three".into())),
+            (4, Some("Four".into())),
+        ];
+        assert_eq!(store_previews(7, &previews), 1);
+        assert_eq!(
+            [snippet(1), snippet(2), snippet(3), snippet(4)],
+            [
+                None,
+                Some("Two".into()),
+                body().snippet,
+                Some("From the server".into())
+            ]
+        );
+        // Neither is asked for again: one had none to give.
+        assert!(unpreviewed(9).is_empty());
+        // The body's snippet replaces the server's.
+        store
+            .write(|db| db.messages().store_body(id(2), &body()))
+            .unwrap();
+        assert_eq!(snippet(2), body().snippet);
     }
 
     #[test]

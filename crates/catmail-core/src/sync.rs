@@ -721,6 +721,57 @@ async fn sync_folder(
             engine.set_folder_synced(account, id, began);
         }
     }
+
+    // After the cursor: a server that won't make previews doesn't hold up the sync.
+    match fill_previews(engine, session, account, id, status.uidvalidity).await {
+        Err(e) if e.is_refusal() => {
+            tracing::warn!(folder = %id, error = %e, "previews not fetched");
+        }
+        other => other?,
+    }
+    Ok(())
+}
+
+/// Asks the server for the previews of the next messages in location `id`, which is
+/// selected, whose preview and body haven't come (RFC 8970 PREVIEW): one batch, newest
+/// first, so that each sync fills in more of the list without holding it up for long.
+/// A server makes those it has none of at hand now, which it wouldn't when the messages
+/// were fetched (lazily, see [`Session::fetch_summaries`]). Nothing on a server without
+/// PREVIEW.
+async fn fill_previews(
+    engine: &Arc<Engine>,
+    session: &mut Session,
+    account: AccountId,
+    id: FolderId,
+    uidvalidity: u32,
+) -> Result<()> {
+    if !session.supports_preview() {
+        return Ok(());
+    }
+    let limit = engine.tuning.fetch_batch;
+    let uids = engine
+        .read(move |db| db.messages().unpreviewed(id, limit))
+        .await?;
+    if uids.is_empty() {
+        return Ok(());
+    }
+    let mut answered = session.fetch_previews(&uids).await?;
+    // One not answered is gone, or its answer couldn't be parsed and wouldn't be next
+    // time either: it has none, so that it isn't asked for again and again.
+    let previews: Vec<(u32, Option<String>)> = uids
+        .into_iter()
+        .map(|uid| (uid, answered.remove(&uid).flatten()))
+        .collect();
+    let (stored, labels) = engine
+        .write(move |db| {
+            let messages = db.messages();
+            let stored = messages.store_previews(id, uidvalidity, &previews)?;
+            Ok((stored, messages.touched_labels()))
+        })
+        .await?;
+    if stored > 0 {
+        emit_changed(engine, account, [id].into_iter().chain(labels));
+    }
     Ok(())
 }
 
@@ -924,6 +975,8 @@ fn new_message(m: FetchedMessage) -> NewMessage {
         has_attachments: m.has_attachments,
         gm_msgid: m.gm_msgid,
         gm_thrid: m.gm_thrid,
+        previewed: m.preview.is_some(),
+        snippet: m.preview.flatten(),
     }
 }
 

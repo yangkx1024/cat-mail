@@ -15,7 +15,8 @@ use mail_parser::{AddressList, MessageParser, TextList};
 
 pub use build::{InvalidHeader, Outgoing, OutgoingAttachment, build_message};
 pub use content::{
-    CONTENT_VERSION, Content, Part, decode_transfer, is_inline, parse_message, sanitized_html,
+    CONTENT_VERSION, Content, Part, decode_transfer, is_inline, parse_message, preview_snippet,
+    sanitized_html,
 };
 pub use structure::{Leaf, MimeNode, Params};
 

@@ -19,6 +19,6 @@ mod smtp;
 mod tls;
 
 pub use http::{FakeHttp, Reply, response};
-pub use imap::{FakeImap, FakeMailbox, FakeMessage, Faults, LoggedCommand, ServerState};
+pub use imap::{FakeImap, FakeMailbox, FakeMessage, Faults, LoggedCommand, Previews, ServerState};
 pub use smtp::{FakeSmtp, ReceivedMessage, SmtpFaults, SmtpState};
 pub use tls::TestCert;

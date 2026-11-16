@@ -47,9 +47,11 @@
    `UID FETCH (UID FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (…)])`，
    每批一个事务，提交后发 `MessagesChanged`，界面先看到最新的邮件。同一 UIDVALIDITY 下 UID 不小于游标
    UIDNEXT、进了 INBOX 的未读邮件另发 `NewMail`（见[后台运行 / 新邮件](background.md#新邮件)）。
+   服务器支持 PREVIEW（RFC 8970）时还带 `PREVIEW (LAZY)`，见[服务器的摘要](#服务器的摘要)。
 7. **写游标。** 文件夹全部完成后才写（UIDNEXT、HIGHESTMODSEQ，取自 EXAMINE 时刻）。某批拿回的
    邮件比请求的少（SEARCH 之后被删，或响应无法解析）时不写，下次完整求差集。EXAMINE 不给 UIDNEXT
    （网易）时游标记为本地最大 UID + 1，见下节。
+8. **补服务器的摘要。** 支持 PREVIEW 时，在游标之后再取一批还没有摘要的邮件的 PREVIEW，见下文。
 
 ## 游标与断点续传
 
@@ -246,3 +248,26 @@ UTF-8。直接用原始 8 位字节写的主题、显示名（不按 RFC 2047 �
 没有 BODYSTRUCTURE 或没有线索时保持 mail-parser 的有损结果。没有（或无法解析）Date 头时用 INTERNALDATE 排序。不合法的 msg-id（mail-parser 会保留
 其中的裸 CR，回复时会注入邮件头）在这里就丢掉。`has_attachments` 先由 BODYSTRUCTURE 粗略判断
 （`MimeNode::has_attachments`），下载正文后按完整 MIME 树重算。
+
+## 服务器的摘要
+
+列表里的摘要（`snippet`）原本只能取到正文后在本地算（见[正文与附件](bodies.md#正文的组成)），没预取、也没打开过的
+邮件没有摘要。服务器支持 PREVIEW（RFC 8970，能力 `PREVIEW`；Dovecot、Cyrus / Fastmail、Stalwart 有，Gmail
+没有）时，同步时就向它要，不下载正文。
+
+- **随邮件头懒取。** 拉取新邮件的 FETCH 带 `PREVIEW (LAZY)`：服务器只给手头已有的，没有的回 NIL，不为此
+  去读邮件。Dovecot 2.4 对没生成过摘要的邮件一律回 NIL（实测），某个客户端不带 LAZY 取过一次后才有缓存；
+  预先生成摘要的服务器则在这一步就给了。
+- **再补一批。** 文件夹同步的最后（写游标之后，失败不影响游标），从新到旧取至多 `fetch_batch` 封还没有摘要、
+  也没下载正文的邮件，`UID FETCH <set> (PREVIEW)`，服务器当场生成。每次同步补一批，大文件夹几次同步之后补齐，
+  不让一次同步卡在服务器读邮件上。服务器拒绝（NO）只记日志，下次再试；连接断了照常报错。查询走部分索引
+  `messages_preview`（`body_state = 'headers' AND previewed = 0`，下载正文、取到摘要后离开索引）。
+- **只问一次。** 服务器回了摘要或空串（RFC 8970：生成不了，之后也不会有）就记下 `previewed`，不再问；
+  回答里缺了的（之后被删，或无法解析）也记下，免得每次同步都问同一封。重试拉取新邮件时（BODYSTRUCTURE
+  无法解析）不带 PREVIEW：它也可能让那一封解析不了。
+- **和本地摘要说法一致。** 服务器的摘要和本地的一样清理（`mime::preview_snippet`：去引用行、链接地址和不占位置的
+  字符，压缩空白，截到 200 个字符）：Dovecot 不看 CSS，营销邮件的 preheader 和后面的 `&zwnj;&#847;` 填充
+  原样在开头，只有引用时给 `>…`。本地摘要也以 preheader 开头（#294），取到正文后换成本地的，不会突然变成
+  另一段话。
+- **本地的优先。** 只写还没下载正文的邮件（`Messages::store_previews` 带 `body_state = 'headers'`），存正文时
+  照常覆盖。读信不改服务器：RFC 8970 规定 PREVIEW 不设 `\Seen`。
