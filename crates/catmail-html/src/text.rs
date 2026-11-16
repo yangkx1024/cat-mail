@@ -362,6 +362,50 @@ pub fn escape(text: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// The text of a message quoted, as HTML: a paragraph a line (`empty` for an empty
+/// line), its lines that start with `>` (what it quotes in turn, RFC 3676 §4.5) in as
+/// many nested `<blockquote>`s, with the attributes `cite` (` type="cite"`, or none). The
+/// one place a `>` is read as a quote: in a text mail clients wrote, never in what the
+/// user types.
+pub fn quoted_text_html(text: &str, cite: &str, empty: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0;
+    for line in text.trim_end().lines() {
+        let (level, line) = quote_depth(line);
+        for _ in depth..level {
+            out.push_str("<blockquote");
+            out.push_str(cite);
+            out.push('>');
+        }
+        for _ in level..depth {
+            out.push_str("</blockquote>");
+        }
+        depth = level;
+        if line.is_empty() {
+            out.push_str(empty);
+        } else {
+            out.push_str("<p>");
+            out.push_str(&escape(line));
+            out.push_str("</p>");
+        }
+    }
+    for _ in 0..depth {
+        out.push_str("</blockquote>");
+    }
+    out
+}
+
+/// How deeply the line is quoted (`>> a`, `> > a`), and the rest of it: each `>` may be
+/// followed by a space.
+fn quote_depth(mut line: &str) -> (usize, &str) {
+    let mut depth = 0;
+    while let Some(rest) = line.strip_prefix('>') {
+        depth += 1;
+        line = rest.strip_prefix(' ').unwrap_or(rest);
+    }
+    (depth, line)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,6 +413,20 @@ mod tests {
 
     fn shown(html: &str) -> String {
         text(&sanitize_html(html))
+    }
+
+    #[test]
+    fn quoted_lines_nest_as_deep_as_they_are_quoted() {
+        let text = "Hi <you>\n\n> first\n>> older\n> > also older\n> last\nbye\n";
+        assert_eq!(
+            quoted_text_html(text, "", "<p></p>"),
+            "<p>Hi &lt;you&gt;</p><p></p><blockquote><p>first</p><blockquote>\
+             <p>older</p><p>also older</p></blockquote><p>last</p></blockquote><p>bye</p>"
+        );
+        assert_eq!(
+            quoted_text_html(">> deep", r#" type="cite""#, ""),
+            r#"<blockquote type="cite"><blockquote type="cite"><p>deep</p></blockquote></blockquote>"#
+        );
     }
 
     #[test]

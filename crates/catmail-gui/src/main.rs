@@ -46,6 +46,8 @@ mod toast;
 mod tray;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod wake;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod web;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn main() -> anyhow::Result<std::process::ExitCode> {

@@ -3,10 +3,8 @@
 
 use catmail_frontend::commands::MessageCommand;
 use catmail_frontend::format;
-use catmail_frontend::html::{self, FromPage, is_openable_link};
 use catmail_frontend::list as rows;
 use catmail_frontend::reader::{self, Header};
-use futures_util::StreamExt as _;
 use nsh_base::theme;
 use nsh_core::prelude::*;
 
@@ -17,12 +15,11 @@ use crate::mailbox::commands;
 use crate::mailbox::list::{self};
 use crate::mailbox::panes::back_button;
 use crate::theme::SelectableText as _;
-use crate::{chrome, composer};
+use crate::{chrome, composer, web};
 
 use super::{
-    BodyHeight, IMAGES_IN_FLIGHT, MIN_BODY_HEIGHT, Reading, Retry, ShowDetails, State,
-    image_loaded, is_shown, open_in_browser, page_painted, page_state, save_attachment,
-    serve_image, show_remote_images,
+    BodyHeight, Reading, Retry, ShowDetails, State, open_in_browser, page_painted, page_state,
+    save_attachment, show_remote_images,
 };
 
 /// The pane: its toolbar over the message. It stays while no message is selected
@@ -93,10 +90,8 @@ fn toolbar() -> impl IntoElement {
     let applies = computed(move || commands::applies(&selected()));
     let can_edit_labels =
         move || message.with(|m| m.as_ref().is_some_and(commands::can_edit_labels));
-    let blocked = move || {
-        global::<Reading>()
-            .with(|r| (r.state == State::Open && !r.remote.is_empty()).then_some(r.loading_remote))
-    };
+    let offered =
+        move || global::<Reading>().with(|r| r.remote.offered().filter(|_| r.state == State::Open));
     let has_html = move || global::<Reading>().with(|r| r.html.is_some());
     chrome::toolbar()
         .gap(px(2.0))
@@ -125,18 +120,10 @@ fn toolbar() -> impl IntoElement {
             Size::Bar,
         ))
         .child(separator(Size::Bar))
-        .child(when(
-            move || blocked().is_some(),
-            move || {
-                // Dimmed while they come.
-                icon_button(
-                    || Icon::Photo,
-                    || "Show remote images".to_owned(),
-                    move || blocked() == Some(false),
-                    Size::Bar,
-                    show_remote_images,
-                )
-            },
+        .child(web::remote_images_button(
+            offered,
+            Size::Bar,
+            show_remote_images,
         ))
         .child(icon_button(
             || Icon::ArrowTopRightOnSquare,
@@ -375,65 +362,23 @@ fn body() -> impl IntoElement {
         }))
 }
 
-/// The page's background, which shows in the web view until the page paints: WebKit's
-/// own is white.
+/// The page's background, which shows in the web view until the page paints.
 fn page_background() -> AdaptiveColor {
-    let background = theme().background;
-    let color = if global::<Reading>().with(|r| r.page_dark) {
-        background.dark
-    } else {
-        background.light
-    };
-    AdaptiveColor {
-        light: color,
-        dark: color,
-    }
+    web::background(global::<Reading>().with(|r| r.page_dark))
 }
 
 fn web_view() -> impl IntoElement {
     let reading = global::<Reading>();
-    // The handler is called on the platform's main thread, outside the view: it hands
-    // each request to the view, which answers it from the open message's images.
-    let (requests, mut requested) = futures_channel::mpsc::unbounded();
-    spawn(async move {
-        while let Some(request) = requested.next().await {
-            serve_image(request);
-        }
-    });
     // Its own memo: the page (a long message's is large) is copied for the web view only
     // when it changes, not on each change of what else the pane shows.
     let page = computed(move || reading.with(|r| r.page.clone()));
-    let web = web_view_html(move || page.with(|p| p.to_string()), None);
-    // The page says which images came only where they go a few at a time.
-    let web = if IMAGES_IN_FLIGHT.is_some() {
-        web.injected_java_script_before_content(html::WATCH_IMAGES.to_owned())
-    } else {
-        web
-    };
-    web
-        // Someone else's HTML: whatever website data it leaves goes with the web view,
-        // and none of it is written to the data directory.
-        .incognito(true)
-        .java_script_enabled(false)
-        .scrollable(false)
-        .injected_java_script(html::BRIDGE.to_owned())
-        // Dropped unanswered if the view has gone, which fails it.
-        .url_scheme(html::IMAGE_SCHEME, move |request| {
-            let _ = requests.unbounded_send(request);
-        })
-        .on_message(move |message: &str| match FromPage::parse(message) {
-            Some(FromPage::Loaded(url)) => image_loaded(url),
-            Some(FromPage::Painted(number, height)) if is_shown(number) => page_painted(height),
-            Some(FromPage::Height(number, height)) if is_shown(number) => {
-                global::<BodyHeight>().set(BodyHeight(height));
-            }
-            Some(FromPage::Open(url)) if is_openable_link(url) => {
-                spawn(open_url(url.to_owned()));
-            }
-            _ => {}
-        })
-        .bg(page_background)
-        .h(move || px(global::<BodyHeight>().with(|h| h.0).max(MIN_BODY_HEIGHT)))
+    web::web_view(
+        move || page.with(|p| p.to_string()),
+        |height| global::<BodyHeight>().set(BodyHeight(height)),
+        page_painted,
+    )
+    .bg(page_background)
+    .h(move || px(global::<BodyHeight>().with(|h| h.0).max(web::MIN_HEIGHT)))
 }
 
 /// Under the text, where reading it ends.

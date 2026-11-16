@@ -3,11 +3,12 @@
 //! and the draft refers to by Content-ID.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use catmail_core::html::escape;
+use catmail_core::html::{escape, nested, quoted_text_html};
+use catmail_core::{Quote, QuoteKind};
 
 /// The images of a draft's HTML: the file each one's content is in
 /// ([`DraftEditor::images`](catmail_core::DraftEditor::images)), by Content-ID. The
@@ -28,6 +29,11 @@ impl Images {
 
     pub fn is_empty(&self) -> bool {
         self.paths.is_empty()
+    }
+
+    /// The file of the image `content_id`.
+    pub fn path(&self, content_id: &str) -> Option<&Path> {
+        self.paths.get(content_id).map(PathBuf::as_path)
     }
 
     /// The images of `doc` (ProseMirror's JSON of a document) by their files, for the
@@ -64,43 +70,37 @@ fn map_image_sources(doc: &mut Value, f: &dyn Fn(&str) -> Option<String>) {
     }
 }
 
-/// The HTML a plain text opens as in the editor: a paragraph per line, and the lines
-/// quoted with `>` (a reply's original) in a quote, nested as they are.
+/// The HTML a plain text opens as in the editor: a paragraph per line. A `>` the user
+/// typed is theirs, not a quote.
 pub fn text_to_html(text: &str) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut html = String::new();
-    blocks(&lines, &mut html);
+    text.lines()
+        .map(|line| format!("<p>{}</p>", escape(line)))
+        .collect()
+}
+
+/// The HTML a quote goes into the editor as, when the user answers in it: its intro, then
+/// the message quoted (in a quote, for a reply), what of its HTML the editor can hold
+/// (without its style sheet, which the editor has no place for), or its text, a
+/// paragraph a line, nested as it quotes in turn.
+pub fn quote_to_html(quote: &Quote) -> String {
+    let mut html = String::from("<p></p>");
+    html.push_str(&text_to_html(quote.intro.trim_end()));
+    let (open, close) = match quote.kind {
+        QuoteKind::Reply => ("<blockquote>", "</blockquote>"),
+        QuoteKind::Forward => ("<p></p>", ""),
+    };
+    html.push_str(open);
+    match &quote.html {
+        Some(original) => html.push_str(nested(original, "catmail-original").1),
+        None => html.push_str(&quoted_text_html(&quote.text, "", "<p></p>")),
+    }
+    html.push_str(close);
     html
 }
 
-fn blocks(lines: &[&str], html: &mut String) {
-    let mut i = 0;
-    while i < lines.len() {
-        if quoted(lines[i]).is_some() {
-            let inner: Vec<&str> = lines[i..].iter().map_while(|line| quoted(line)).collect();
-            i += inner.len();
-            html.push_str("<blockquote>");
-            blocks(&inner, html);
-            html.push_str("</blockquote>");
-        } else {
-            html.push_str("<p>");
-            html.push_str(&escape(lines[i]));
-            html.push_str("</p>");
-            i += 1;
-        }
-    }
-}
-
-/// The line without its quote mark (`>` and the space after it), if it is quoted.
-fn quoted(line: &str) -> Option<&str> {
-    let rest = line.strip_prefix('>')?;
-    Some(rest.strip_prefix(' ').unwrap_or(rest))
-}
-
 /// The plain text sent with the editor's document (ProseMirror's JSON), for readers
-/// that show only text; as [`text_to_html`] reads it: a line per paragraph, `> ` before
-/// quoted lines. List items start with `* ` or their number, a link's address follows
-/// its text, images are left out.
+/// that show only text: a line per paragraph, `> ` before quoted lines. List items start
+/// with `* ` or their number, a link's address follows its text, images are left out.
 pub fn doc_to_text(doc: &Value) -> String {
     let mut lines = Vec::new();
     for block in children(doc) {
@@ -245,13 +245,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plain_text_opens_as_paragraphs_and_quotes() {
+    fn plain_text_opens_as_paragraphs_its_marks_as_typed() {
         assert_eq!(text_to_html(""), "");
         assert_eq!(
-            text_to_html("Hi <you> & co\n\nOn Monday, A wrote:\n> first\n>> older\n> last\nbye"),
-            "<p>Hi &lt;you&gt; &amp; co</p><p></p><p>On Monday, A wrote:</p>\
-             <blockquote><p>first</p><blockquote><p>older</p></blockquote><p>last</p>\
-             </blockquote><p>bye</p>"
+            text_to_html("Hi <you> & co\n\n> not a quote"),
+            "<p>Hi &lt;you&gt; &amp; co</p><p></p><p>&gt; not a quote</p>"
+        );
+    }
+
+    #[test]
+    fn a_quote_answered_in_goes_into_the_text_whole() {
+        let mut quote = Quote {
+            kind: QuoteKind::Reply,
+            intro: "On Monday, A wrote:".into(),
+            text: "first\n> older\n".into(),
+            html: None,
+        };
+        assert_eq!(
+            quote_to_html(&quote),
+            "<p></p><p>On Monday, A wrote:</p><blockquote><p>first</p>\
+             <blockquote><p>older</p></blockquote></blockquote>"
+        );
+        quote.kind = QuoteKind::Forward;
+        quote.intro = "---------- Forwarded message ---------\nFrom: A".into();
+        quote.html = Some("<style>p { color: red }</style><p><b>Hi</b></p>".into());
+        assert_eq!(
+            quote_to_html(&quote),
+            "<p></p><p>---------- Forwarded message ---------</p><p>From: A</p><p></p>\
+             <p><b>Hi</b></p>"
         );
     }
 
@@ -325,6 +346,7 @@ mod tests {
             {"type": "image", "attrs": {"src": "cid:other@x"}},
             {"type": "image", "attrs": {"src": "https://example.com/x.png"}},
         ]}]});
+        assert_eq!(images.path("a@catmail"), Some(Path::new("/blobs/aa/aaaa")));
         let mut doc = draft.clone();
         images.to_files(&mut doc);
         assert_eq!(

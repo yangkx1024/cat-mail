@@ -10,8 +10,8 @@ use catmail_proto::smtp;
 use catmail_store::{BlobStore, DraftReply, DraftSnapshot, NewDraftAttachment};
 use catmail_types::{
     AccountId, Address, BlobHash, Draft, DraftAttachment, DraftAttachmentId, DraftBody,
-    DraftChanges, DraftContent, DraftId, Event, Forwarding, IdentityId, Message, MessageId,
-    NewFile, Quote, QuoteKind,
+    DraftChanges, DraftContent, DraftId, Event, FORWARD_SEPARATOR, Forwarding, IdentityId, Message,
+    MessageId, NewFile, Quote, QuoteKind,
 };
 use uuid::Uuid;
 
@@ -1157,7 +1157,7 @@ fn attribution(message: &Message) -> String {
 fn forward_content(message: &Message) -> DraftContent {
     let subject = message.summary.subject.as_deref().unwrap_or_default();
     let date = display::date(message.summary.date);
-    let mut intro = String::from("---------- Forwarded message ---------");
+    let mut intro = String::from(FORWARD_SEPARATOR);
     for (name, value) in [
         ("From", display::addresses(&message.summary.from)),
         ("Date", date),

@@ -1,12 +1,13 @@
-//! Writing a message, each in its own window: From, To, Cc, Bcc, Subject, the text, the
-//! attachments and the bar of commands. When it saves, sends and closes is
-//! `catmail_frontend::composer`'s ([`Lifecycle`]); here is what the window does with it,
-//! `view.rs` how it looks.
+//! Writing a message, each in its own window: From, To, Cc, Bcc, Subject, the text, a
+//! reply's or forward's quote (`quote.rs`), the attachments and the bar of commands. When
+//! it saves, sends and closes is `catmail_frontend::composer`'s ([`Lifecycle`]); here is
+//! what the window does with it, `view.rs` how it looks.
 //!
 //! A composer's view runs on its window's own nsh thread; the window is the shell's
 //! (`shell::opened`), and closing it asks the view, which saves first and then
 //! closes it (`shell::composer_closed`). State is nsh globals, the view's own.
 
+mod quote;
 mod rich;
 mod view;
 
@@ -16,8 +17,8 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use catmail_core::{
-    DraftAttachment, DraftAttachmentId, DraftChanges, DraftEditor, DraftId, Event, Identity,
-    IdentityId, NewFile, RecvError, named_as_image,
+    DraftAttachment, DraftAttachmentId, DraftEditor, DraftId, Event, Identity, IdentityId, NewFile,
+    RecvError, named_as_image,
 };
 use catmail_frontend::composer::rich_text::link_href;
 use catmail_frontend::composer::{
@@ -239,6 +240,7 @@ fn written() -> (Written, Option<FieldError>) {
         bcc: &typed.bcc,
         subject: &typed.subject,
         body,
+        quoted: quote::quoted(),
     };
     composing.life.written(fields, from)
 }
@@ -322,9 +324,7 @@ fn save() {
     sync();
     let editor = editor();
     in_window(async move {
-        let Written { from, content } = written.clone();
-        let changes = DraftChanges::all(from, content);
-        let result = editor.update(changes).await;
+        let result = editor.update(written.clone().changes()).await;
         let result = result.map(drop).map_err(|e| error_text(&e));
         match with_life(|l| l.save_ended(written, result)) {
             AfterSave::Finish => run_finish(),

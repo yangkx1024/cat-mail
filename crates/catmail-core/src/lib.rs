@@ -24,7 +24,8 @@ pub mod logging;
 /// What renderers of [`MessageBody::html`] need to resolve and block its images.
 pub mod html {
     pub use catmail_html::{
-        DarkPalette, Image, Served, ServedImage, embed_inline_images, escape, serve_images,
+        DarkPalette, Image, Served, ServedImage, cid_image_ids, embed_inline_images, escape,
+        nested, quoted_text_html, serve_images,
     };
     pub use catmail_proto::http::RemoteImage;
 }

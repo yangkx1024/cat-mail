@@ -80,7 +80,8 @@ impl<R> BodyPages<R> {
     }
 
     /// The page of the open message's body (its sanitized HTML, or the plain text when it
-    /// has none), shown from now on, with the remote images it refers to and whether it is
+    /// has none), shown from now on, with the remote images it refers to that aren't shown
+    /// yet (the cached ones show at once, the others when the user asks) and whether it is
     /// dark (on a dark reader, unless the message's colors can't be moved).
     pub fn page(
         &mut self,
@@ -89,7 +90,11 @@ impl<R> BodyPages<R> {
         appearance: &Appearance,
     ) -> Served {
         let number = self.next();
-        body_page(number, html, text, appearance)
+        let mut served = body_page(number, html, text, appearance);
+        served
+            .remote_urls
+            .retain(|url| !self.remote.contains_key(url));
+        served
     }
 
     /// A page with nothing in it, shown from now on while no message is: the web view's
@@ -206,6 +211,75 @@ impl<R> BodyPages<R> {
     }
 }
 
+/// The remote images of the page shown that aren't shown yet, and whether they are being
+/// fetched: what "Show remote images" offers.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RemoteImages {
+    blocked: Vec<String>,
+    /// Being fetched: whether one has come since, and why the first that failed did.
+    fetch: Option<(bool, Option<String>)>,
+}
+
+impl RemoteImages {
+    /// Those of a page just made (`Served::remote_urls`).
+    pub fn new(blocked: Vec<String>) -> Self {
+        RemoteImages {
+            blocked,
+            fetch: None,
+        }
+    }
+
+    /// Whether some are blocked, and if so whether they are coming: the button, dimmed
+    /// while they come.
+    pub fn offered(&self) -> Option<bool> {
+        (!self.blocked.is_empty()).then_some(self.fetch.is_some())
+    }
+
+    /// The user asked for them: those to fetch, unless they are on their way already.
+    pub fn start(&mut self) -> Option<Vec<String>> {
+        if self.fetch.is_some() || self.blocked.is_empty() {
+            return None;
+        }
+        self.fetch = Some((false, None));
+        Some(self.blocked.clone())
+    }
+
+    /// What came (fetched, or from the cache), each image or why it couldn't be had: those
+    /// to show.
+    pub fn came<I>(&mut self, batch: Vec<(String, Result<I, String>)>) -> Vec<(String, I)> {
+        let mut shown = Vec::new();
+        for (url, image) in batch {
+            match image {
+                Ok(image) => {
+                    self.blocked.retain(|blocked| *blocked != url);
+                    shown.push((url, image));
+                }
+                Err(e) => {
+                    if let Some((_, error)) = &mut self.fetch {
+                        error.get_or_insert(e);
+                    }
+                }
+            }
+        }
+        if let Some((came, _)) = &mut self.fetch {
+            *came |= !shown.is_empty();
+        }
+        shown
+    }
+
+    /// The fetch is over. Those that failed while others came stay blank; if none came
+    /// and one failed, they stay blocked, to try again, and this says why.
+    pub fn ended(&mut self) -> Result<(), String> {
+        match self.fetch.take() {
+            Some((false, Some(error))) => Err(error),
+            _ => {
+                self.blocked.clear();
+                Ok(())
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,6 +362,41 @@ mod tests {
             [("gif", b"gif".to_vec())]
         );
         assert!(images.shows_remote("https://x/a.gif"));
+        // Made again, it has none to fetch.
+        assert!(
+            images
+                .page(Some(HTML), None, &light())
+                .remote_urls
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn remote_images_are_offered_until_they_come() {
+        let ok = |url: &str| (url.to_owned(), Ok(()));
+        let failed = |url: &str| (url.to_owned(), Err::<(), _>(format!("{url} failed")));
+        let urls = |list: &[&str]| list.iter().map(|u| u.to_string()).collect::<Vec<_>>();
+        let mut remote = RemoteImages::new(Vec::new());
+        assert_eq!(remote.offered(), None);
+        assert_eq!(remote.start(), None);
+
+        let mut remote = RemoteImages::new(urls(&["a", "b", "c"]));
+        assert_eq!(remote.offered(), Some(false));
+        // From the cache, before anyone asked.
+        assert_eq!(remote.came(vec![ok("a")]).len(), 1);
+        assert_eq!(remote.start(), Some(urls(&["b", "c"])));
+        assert_eq!(remote.offered(), Some(true));
+        assert_eq!(remote.start(), None, "on their way");
+        // None could be had: offered again, saying why.
+        assert!(remote.came(vec![failed("b"), failed("c")]).is_empty());
+        assert_eq!(remote.ended(), Err("b failed".into()));
+        assert_eq!(remote.offered(), Some(false));
+        // One came, one failed: that one stays blank.
+        assert!(remote.start().is_some());
+        assert!(remote.came(vec![failed("c")]).is_empty());
+        assert_eq!(remote.came(vec![ok("b")]), [("b".to_owned(), ())]);
+        assert_eq!(remote.ended(), Ok(()));
+        assert_eq!(remote.offered(), None);
     }
 
     #[test]

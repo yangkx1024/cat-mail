@@ -161,8 +161,9 @@ const TEXT_CLASS: &str = "catmail-text";
 /// scoped to: left as it was, it would restyle the whole message.
 const ORIGINAL_CLASS: &str = "catmail-original";
 
-/// A reply's quote: set off by a line on its left, as Gmail draws it.
-const CITE: &str = r#"<blockquote type="cite" style="margin:0 0 0 0.8ex;border-left:1px solid #ccc;padding-left:1ex">"#;
+/// The attributes of a reply's quote: set off by a line on its left, as Gmail draws it.
+const CITE: &str =
+    r#" type="cite" style="margin:0 0 0 0.8ex;border-left:1px solid #ccc;padding-left:1ex""#;
 
 /// The message as an HTML document: the body's HTML (or its text as paragraphs), then
 /// the quote. `None` for a body of text with no quote of HTML, which the text says all
@@ -199,7 +200,11 @@ fn quote_html(quote: &Quote, out: &mut String) -> String {
         intro.join("<br>")
     );
     let reply = quote.kind == QuoteKind::Reply;
-    out.push_str(if reply { CITE } else { "<br>" });
+    if reply {
+        let _ = write!(out, "<blockquote{CITE}>");
+    } else {
+        out.push_str("<br>");
+    }
     let sheet = match &quote.html {
         Some(html) => {
             let (sheet, rest) = catmail_html::nested(html, ORIGINAL_CLASS);
@@ -208,7 +213,11 @@ fn quote_html(quote: &Quote, out: &mut String) -> String {
         }
         None => {
             let _ = write!(out, r#"<div class="{TEXT_CLASS}">"#);
-            quoted_paragraphs(&quote.text, out);
+            out.push_str(&catmail_html::quoted_text_html(
+                &quote.text,
+                CITE,
+                EMPTY_LINE,
+            ));
             out.push_str("</div>");
             String::new()
         }
@@ -227,44 +236,15 @@ fn paragraphs(text: &str, out: &mut String) {
     }
 }
 
+/// An empty paragraph has no height: a line break in it keeps the empty line.
+const EMPTY_LINE: &str = "<p><br></p>";
+
 fn paragraph(line: &str, out: &mut String) {
     if line.is_empty() {
-        out.push_str("<p><br></p>");
+        out.push_str(EMPTY_LINE);
     } else {
         let _ = write!(out, "<p>{}</p>", escape(line));
     }
-}
-
-/// The text of a message quoted, as paragraphs, its lines that start with `>` (what it
-/// quotes in turn, RFC 3676 §4.5) in as many nested quotes: the one place a `>` is read
-/// as a quote, since it is a text mail clients wrote.
-fn quoted_paragraphs(text: &str, out: &mut String) {
-    let mut depth = 0;
-    for line in text.trim_end().lines() {
-        let (level, line) = quote_depth(line);
-        for _ in depth..level {
-            out.push_str(CITE);
-        }
-        for _ in level..depth {
-            out.push_str("</blockquote>");
-        }
-        depth = level;
-        paragraph(line, out);
-    }
-    for _ in 0..depth {
-        out.push_str("</blockquote>");
-    }
-}
-
-/// How deeply the line is quoted (`>> a`, `> > a`), and the rest of it: each `>` may be
-/// followed by a space.
-fn quote_depth(mut line: &str) -> (usize, &str) {
-    let mut depth = 0;
-    while let Some(rest) = line.strip_prefix('>') {
-        depth += 1;
-        line = rest.strip_prefix(' ').unwrap_or(rest);
-    }
-    (depth, line)
 }
 
 /// The body as a document of its own, with `sheet` (a quoted message's) in its head.
@@ -726,8 +706,9 @@ mod tests {
         ))
         .unwrap();
         let html = parts(&raw).1.unwrap();
+        let cite = format!("<blockquote{CITE}>");
         let expected = format!(
-            r#"{CITE}<div class="catmail-text"><p>Hi</p>{CITE}<p>earlier</p>{CITE}<p>first</p></blockquote></blockquote><p>back</p></div></blockquote>"#
+            r#"{cite}<div class="catmail-text"><p>Hi</p>{cite}<p>earlier</p>{cite}<p>first</p></blockquote></blockquote><p>back</p></div></blockquote>"#
         );
         assert!(html.contains(&expected), "{expected} in {html}");
         assert!(html.contains(r#"<div class="catmail-text"><p><b>Thanks</b></p></div>"#));
