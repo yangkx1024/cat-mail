@@ -211,17 +211,15 @@ impl<'c> Identities<'c> {
             .conn
             .prepare_cached(&sql)?
             .query_row(named_params! { ":account": account.0, ":id": id.0 }, |r| {
+                let max_size = size_limit(r, "smtp_max_size")?;
+                let eight_bit: Option<bool> = r.get("smtp_8bitmime")?;
                 Ok(Sending {
                     identity: from_row(r)?,
-                    smtp: r
-                        .get::<_, Option<bool>>("smtp_8bitmime")?
-                        .map(|eight_bit_mime| {
-                            Ok::<_, rusqlite::Error>(SmtpAnnounced {
-                                max_size: size_limit(r, "smtp_max_size")?,
-                                eight_bit_mime,
-                            })
-                        })
-                        .transpose()?,
+                    // Recorded together: not connected to yet without it.
+                    smtp: eight_bit.map(|eight_bit_mime| SmtpAnnounced {
+                        max_size,
+                        eight_bit_mime,
+                    }),
                     login_key: r.get("login_key")?,
                 })
             })

@@ -355,7 +355,7 @@ impl Mail {
         let id = message.summary.id;
         let draft = self
             .downloading(
-                self.to_download(id, Answer::Reply).await?,
+                self.client.answer_download_size(id, Answer::Reply).await?,
                 self.client
                     .reply(id, p.all.unwrap_or(false), from, p.text, given.files),
                 self.left_of(id, Answer::Reply),
@@ -396,7 +396,7 @@ impl Mail {
         let answer = forwarding.answer();
         let draft = self
             .downloading(
-                self.to_download(id, answer).await?,
+                self.client.answer_download_size(id, answer).await?,
                 self.client.forward(id, from, forwarding, given.files),
                 self.left_of(id, answer),
             )

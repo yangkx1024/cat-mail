@@ -44,11 +44,6 @@ impl Mail {
         Ok(result?)
     }
 
-    /// What making `answer` to message `id` downloads, as the engine tells it.
-    pub(super) async fn to_download(&self, id: MessageId, answer: Answer) -> Result<u64, Failed> {
-        Ok(self.client.answer_download_size(id, answer).await?)
-    }
-
     /// What making `answer` to message `id` still takes to download; all of it if that
     /// can't be told.
     pub(super) async fn left_of(&self, id: MessageId, answer: Answer) -> u64 {

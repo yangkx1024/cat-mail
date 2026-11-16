@@ -76,7 +76,7 @@
   References：转发开始的是另一段对话。没下载的附件和图片合并成尽量少的 FETCH 取（见
   [正文与附件 / 回复和转发要的部分](bodies.md#回复和转发要的部分)）。
 - **作为附件转发**（`Forwarding::as_attachment`，Thunderbird、Outlook 都有）：原信整封作为一个 `message/rfc822`
-  附件，文件名是主题加 `.eml`（去掉文件名里不能有的字符，最长 100 个字符，没有主题时 `message.eml`），草稿没有
+  附件，文件名是主题加 `.eml`（主题里的 `/` 不当目录，再经 `safe_filename` 处理成能安全保存的名字，没有主题时 `message.eml`），草稿没有
   引文，正文只是调用方给的文字，主题照样加 `Fwd: `。原信完整的头部（Received、DKIM 签名、Message-ID 等）和 MIME
   结构原样带上：转给管理员核查可疑邮件、转交要核对原件的、交给别的工具处理时要的就是这些。原文用
   `body::raw_message` 那条路：已存原文的直接引用它的 blob，没有的整封取一次（同时存下正文）。不读正文，也不复制

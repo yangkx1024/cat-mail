@@ -16,6 +16,7 @@ use catmail_types::{
 use uuid::Uuid;
 
 use crate::engine::{Editing, Engine, blocking, lock, now};
+use crate::filename::safe_filename;
 use crate::{Error, Result, body, display};
 
 pub(crate) async fn create(
@@ -686,13 +687,12 @@ pub(crate) async fn download_size(
         return Ok(whole);
     };
     let missing = |a: &&Attachment| !a.downloaded;
-    let size = |a: &Attachment| a.size.map_or(0, u64::from);
     Ok(match answer {
         Answer::ForwardAttached if raw.is_some() => 0,
         Answer::ForwardAttached => whole,
         // The images it shows, which the quote carries.
-        Answer::Reply => body.inline_parts().filter(missing).map(size).sum(),
-        Answer::Forward => body.attachments.iter().filter(missing).map(size).sum(),
+        Answer::Reply => body.inline_parts().filter(missing).map(said_size).sum(),
+        Answer::Forward => body.attachments.iter().filter(missing).map(said_size).sum(),
     })
 }
 
@@ -714,29 +714,27 @@ async fn forward_attached(
         .await?
         .ok_or(Error::MessageNotFound(id))?;
     let account = message.summary.account_id;
-    let limit = engine
-        .read(move |db| {
-            if db.accounts().get(account)?.is_none() {
-                return Ok(None);
-            }
-            new_attachments_limit(db, account, from).map(|(_, limit)| Some(limit))
-        })
-        .await?
-        .ok_or_else(|| Error::AccountNotFound(account.to_string()))?;
-    if message.size.is_some_and(|size| u64::from(size) > limit) {
-        return Err(attachments_too_large(limit));
-    }
-    // Its GC grace period restarted, to cover the gap until the draft refers to it.
-    let (blob, size) = body::raw_blob(engine.clone(), id).await?;
+    // The files first, with room for the message as big as the server said, which tells
+    // what the attachments may add up to.
+    let said = message.size.map_or(0, u64::from);
     let copied = blocking({
         let engine = engine.clone();
-        move || copy_files(&engine, account, from, size, &files)
+        move || copy_files(&engine, account, from, said, &files)
     })
     .await?;
-    // Again, as it is, and for the identity the files were checked for.
-    if size > copied.limit {
-        return Err(attachments_too_large(copied.limit));
-    }
+    let room = |size: u64| {
+        let files: u64 = copied.attachments.iter().map(|a| a.size).sum();
+        if size + files > copied.limit {
+            Err(attachments_too_large(copied.limit))
+        } else {
+            Ok(())
+        }
+    };
+    room(said)?;
+    // Its GC grace period restarted, to cover the gap until the draft refers to it.
+    let (blob, size) = body::raw_blob(engine.clone(), id).await?;
+    // Again, as it is.
+    room(size)?;
     let subject = message.summary.subject.as_deref().unwrap_or_default();
     let mut attachments = vec![NewDraftAttachment {
         blob,
@@ -770,31 +768,15 @@ async fn forward_attached(
 }
 
 /// What a message attached whole is named: its subject, as Thunderbird and Outlook name
-/// it, with `.eml`; without what can't be in a file name where it may be saved, and not
-/// too long for one.
+/// it, with `.eml`, made safe to save (see [`safe_filename`]).
 fn eml_name(subject: &str) -> String {
-    let cleaned: String = subject
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => ' ',
-            c if c.is_control() => ' ',
-            c => c,
-        })
-        .collect();
-    let name: String = cleaned
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(100)
-        .collect();
-    // Windows drops a trailing dot or space from a file name.
-    let name = name.trim_end_matches(['.', ' ']);
-    if name.is_empty() {
-        "message.eml".into()
-    } else {
-        format!("{name}.eml")
+    // A slash is part of the subject, not a directory.
+    let subject = subject.replace(['/', '\\'], "_");
+    let subject = subject.trim_matches(|c: char| c == '.' || c.is_whitespace());
+    if subject.is_empty() {
+        return "message.eml".into();
     }
+    safe_filename(Some(&format!("{subject}.eml")), "message.eml")
 }
 
 /// The attachments of a reply or forward of `message`, sent as `from`: those it starts
@@ -850,22 +832,19 @@ async fn quoted_images(
         return Vec::new();
     }
     // By the sizes the message said: one that can't fit isn't downloaded for nothing.
-    let mut wanted = Vec::new();
+    let (mut wanted, mut fetch, mut seen) = (Vec::new(), Vec::new(), HashSet::new());
     let mut said = used;
-    for &(id, part) in &parts {
+    for (id, part) in parts {
         let size = said_size(part);
-        if wanted.iter().any(|&(_, (shown, _))| shown == id) || said + size > limit {
+        if said + size > limit || !seen.insert(id) {
             continue;
         }
         said += size;
-        wanted.push((part, (id, size)));
+        wanted.push((id, part));
+        fetch.push((part.id, size));
     }
     // The blobs the message already has, their GC grace periods restarted to cover the
     // gap until the draft refers to them; those not here yet fetched together.
-    let fetch: Vec<_> = wanted
-        .iter()
-        .map(|&(part, (_, size))| (part.id, size))
-        .collect();
     let mut blobs = match body::attachment_blobs(engine, &fetch).await {
         Ok(blobs) => blobs,
         Err(e) => {
@@ -874,7 +853,7 @@ async fn quoted_images(
         }
     };
     let (mut images, mut renamed) = (Vec::new(), HashMap::new());
-    for (part, (id, _)) in wanted {
+    for (id, part) in wanted {
         let found = blobs
             .remove(&part.id)
             .unwrap_or(Err(Error::AttachmentNotFound(part.id)));
@@ -1562,13 +1541,12 @@ mod tests {
     #[test]
     fn a_message_attached_whole_is_named_after_its_subject() {
         assert_eq!(eml_name("Report"), "Report.eml");
-        assert_eq!(eml_name("Re: a/b\\c?\t*x*  "), "Re a b c x.eml");
+        assert_eq!(eml_name("Re: a/b\\c?*x*  "), "Re_ a_b_c__x_.eml");
         assert_eq!(eml_name("Sent..."), "Sent.eml");
-        assert_eq!(eml_name(" \0 "), "message.eml");
-        assert_eq!(
-            eml_name(&"长".repeat(300)),
-            format!("{}.eml", "长".repeat(100))
-        );
+        assert_eq!(eml_name(" ... "), "message.eml");
+        assert_eq!(eml_name("CON"), "_CON.eml");
+        let long = eml_name(&"长".repeat(300));
+        assert!(long.len() <= 200 && long.ends_with("长.eml"), "{long}");
     }
 
     #[test]

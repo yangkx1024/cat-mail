@@ -168,14 +168,7 @@ pub(crate) async fn attachment_blobs(
                 continue;
             }
         };
-        let stored = match source.blob.clone() {
-            Some(blob) => {
-                let engine = engine.clone();
-                blocking(move || Ok(engine.blobs.refresh(&blob)?.map(|size| (blob, size)))).await?
-            }
-            None => None,
-        };
-        match stored {
+        match refreshed(engine, source.blob.clone()).await? {
             Some(stored) => {
                 done.insert(id, Ok(stored));
             }
@@ -243,22 +236,37 @@ async fn fetch_batch(
     let done = blocking({
         let engine = engine.clone();
         move || {
-            Ok(batch
-                .into_iter()
-                .map(|part| {
-                    let Missing { id, source, .. } = part;
-                    let Some(encoded) = parts.remove(&source.section) else {
-                        let left_out = imap::Error::Protocol(format!(
-                            "the server sent nothing for part {} of UID {uid}",
-                            source.section
-                        ));
-                        return (id, Err(left_out.into()));
-                    };
-                    let data = mime::decode_transfer(source.transfer_encoding.as_deref(), &encoded);
-                    drop(encoded);
-                    (id, store_part(&engine, id, &data))
-                })
-                .collect::<Vec<_>>())
+            // Each decoded and put in the blob store, then recorded in one transaction.
+            let mut done: Vec<(AttachmentId, Result<(BlobHash, u64)>)> = Vec::new();
+            for Missing { id, source, .. } in batch {
+                let Some(encoded) = parts.remove(&source.section) else {
+                    let left_out = imap::Error::Protocol(format!(
+                        "the server sent nothing for part {} of UID {uid}",
+                        source.section
+                    ));
+                    done.push((id, Err(left_out.into())));
+                    continue;
+                };
+                let data = mime::decode_transfer(source.transfer_encoding.as_deref(), &encoded);
+                drop(encoded);
+                let size = data.len() as u64;
+                done.push((id, Ok((engine.blobs.put_bytes(&data)?, size))));
+            }
+            let gone = engine.store.write(|db| {
+                let mut gone = Vec::new();
+                for (i, (id, stored)) in done.iter().enumerate() {
+                    if let Ok((hash, size)) = stored
+                        && !db.attachments().set_blob(*id, hash, *size as u32)?
+                    {
+                        gone.push(i);
+                    }
+                }
+                Ok(gone)
+            })?;
+            for i in gone {
+                done[i].1 = Err(Error::AttachmentNotFound(done[i].0));
+            }
+            Ok(done)
         }
     })
     .await?;
@@ -267,22 +275,16 @@ async fn fetch_batch(
     Ok(done)
 }
 
-/// Stores an attachment's decoded content. Blocking.
-fn store_part(engine: &Engine, id: AttachmentId, data: &[u8]) -> Result<(BlobHash, u64)> {
-    let hash = engine.blobs.put_bytes(data)?;
-    let size = data.len() as u64;
-    let recorded = engine
-        .store
-        .write(|db| db.attachments().set_blob(id, &hash, size as u32))?;
-    if recorded {
-        Ok((hash, size))
-    } else {
-        Err(Error::AttachmentNotFound(id))
-    }
+async fn stored_blob(engine: &Arc<Engine>, id: AttachmentId) -> Result<Option<(BlobHash, u64)>> {
+    refreshed(engine, attachment_source(engine, id).await?.blob).await
 }
 
-async fn stored_blob(engine: &Arc<Engine>, id: AttachmentId) -> Result<Option<(BlobHash, u64)>> {
-    let Some(blob) = attachment_source(engine, id).await?.blob else {
+/// `blob` and its size, its GC grace period restarted, if it is on disk.
+async fn refreshed(
+    engine: &Arc<Engine>,
+    blob: Option<BlobHash>,
+) -> Result<Option<(BlobHash, u64)>> {
+    let Some(blob) = blob else {
         return Ok(None);
     };
     let engine = engine.clone();
@@ -292,21 +294,14 @@ async fn stored_blob(engine: &Arc<Engine>, id: AttachmentId) -> Result<Option<(B
 /// The raw message's blob and size, downloading it first if needed, without reading it.
 /// Its GC grace period restarts, as with [`attachment_blob`].
 pub(crate) async fn raw_blob(engine: Arc<Engine>, id: MessageId) -> Result<(BlobHash, u64)> {
-    if let Some(stored) = stored_raw(&engine, id).await? {
+    // Not downloaded yet: fetch it whole, which stores the raw message too.
+    ensure_downloaded(&engine, id, true).await?;
+    let location = locate(&engine, id).await?;
+    if let Some(stored) = refreshed(&engine, location.raw.clone()).await? {
         return Ok(stored);
     }
-    raw_message(engine.clone(), id).await?;
-    stored_raw(&engine, id)
-        .await?
-        .ok_or(Error::MessageNotFound(id))
-}
-
-async fn stored_raw(engine: &Arc<Engine>, id: MessageId) -> Result<Option<(BlobHash, u64)>> {
-    let Some(raw) = locate(engine, id).await?.raw else {
-        return Ok(None);
-    };
-    let engine = engine.clone();
-    blocking(move || Ok(engine.blobs.refresh(&raw)?.map(|size| (raw, size)))).await
+    let (hash, raw) = fetch_raw(&engine, location).await?;
+    Ok((hash, raw.len() as u64))
 }
 
 /// The raw message, fetching it if only its parts were downloaded.
@@ -319,26 +314,32 @@ pub(crate) async fn raw_message(engine: Arc<Engine>, id: MessageId) -> Result<Ve
     {
         return Ok(data);
     }
-    let (account, folder) = (location.account, location.folder);
-    let raw = on_server(&engine, location, async move |session, location| {
+    Ok(fetch_raw(&engine, location).await?.1)
+}
+
+/// Fetches the raw message of a message downloaded without it (or whose blob went
+/// missing), and stores it.
+async fn fetch_raw(engine: &Arc<Engine>, location: MessageLocation) -> Result<(BlobHash, Vec<u8>)> {
+    let (id, account, folder) = (location.id, location.account, location.folder);
+    let raw = on_server(engine, location, async move |session, location| {
         Ok(session.fetch_raw(location.uid).await?)
     })
     .await?;
-    let raw = blocking({
+    let stored = blocking({
         let engine = engine.clone();
         move || {
-            store_blob(
+            let hash = store_blob(
                 &engine,
                 &raw,
                 |db, hash| db.messages().set_raw(id, hash),
                 Error::MessageNotFound(id),
             )?;
-            Ok(raw)
+            Ok((hash, raw))
         }
     })
     .await?;
     engine.emit(Event::MessagesChanged { account, folder });
-    Ok(raw)
+    Ok(stored)
 }
 
 /// Runs `op` against the message's folder on the server (see [`in_folder`]), on one of
@@ -674,16 +675,16 @@ pub(crate) fn new_body(engine: &Engine, content: Content, raw: Option<&[u8]>) ->
 }
 
 /// Stores `data` and records it with `record`, which returns false if the row it
-/// belongs to is gone (then `gone` is the error).
+/// belongs to is gone (then `gone` is the error). Returns its hash.
 fn store_blob(
     engine: &Engine,
     data: &[u8],
     record: impl FnOnce(&Db<'_>, &BlobHash) -> catmail_store::Result<bool>,
     gone: Error,
-) -> Result<()> {
+) -> Result<BlobHash> {
     let hash = engine.blobs.put_bytes(data)?;
     if engine.store.write(|db| record(db, &hash))? {
-        Ok(())
+        Ok(hash)
     } else {
         Err(gone)
     }
