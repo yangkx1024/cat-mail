@@ -253,9 +253,34 @@ pub struct Forwarding {
     pub cc: Vec<Address>,
     pub bcc: Vec<Address>,
     pub text: String,
+    /// Attaches the message whole, exactly as the server stores it (`message/rfc822`,
+    /// named after its subject with `.eml`), instead of quoting it and copying its
+    /// attachments: its every header and its MIME structure go along, for whoever has to
+    /// check the original (a suspicious message to an administrator) or process it.
+    pub as_attachment: bool,
+}
+
+/// A draft made from a message, by what it takes of the message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    /// A reply: the body, quoted, with the images it shows.
+    Reply,
+    /// A forward: the body, quoted, with the images it shows, and the attachments.
+    Forward,
+    /// A forward as an attachment ([`Forwarding::as_attachment`]): the raw message.
+    ForwardAttached,
 }
 
 impl Forwarding {
+    /// What forwarding takes of the message.
+    pub fn answer(&self) -> Answer {
+        if self.as_attachment {
+            Answer::ForwardAttached
+        } else {
+            Answer::Forward
+        }
+    }
+
     /// To, Cc and Bcc, in that order.
     pub fn recipients(&self) -> impl Iterator<Item = &Address> {
         self.to.iter().chain(&self.cc).chain(&self.bcc)

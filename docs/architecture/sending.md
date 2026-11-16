@@ -48,7 +48,8 @@
   - `APPENDLIMIT=0`（RFC 7889 §5：根本不收 APPEND）由 `Capabilities::append_limit` 照实返回 0，但
     记录时（`connection::announced_append_limit`）不当作大小：副本多小都存不进去，没有要放得下的东西，
     限制附件也帮不上，发信本身不受影响。
-  - 值记在 `identities.smtp_max_size` 和 `accounts.imap_append_limit`，**每次连接**都与
+  - 值记在 `identities.smtp_max_size` 和 `accounts.imap_append_limit`（SMTP 服务器是否公布 8BITMIME 一起记在
+    `identities.smtp_8bitmime`，见 [Outbox 快照](#outbox-快照)），**每次连接**都与
     服务器现在说的比较，不同就更新（服务器会调整上限，也会不再公布）：发信连 SMTP、同步等连 IMAP 时。
     添加时登录检查（`Verify::Login`）拿到的值由 `add_account` / `add_identity` 在插入的同一事务里写进去，
     第一次发信之前就知道；`Verify::Skip` 添加的要等第一次连接。记录失败只写日志，
@@ -72,7 +73,15 @@
   和原信的 From / Date / Subject / To / Cc，再接原信（不加 `> `、不缩进）。原信的附件复制进草稿；
   正文和附件没下载的先下载。全部下载完、内容放进 BlobStore 之后，草稿和它的附件在**同一个事务**里写入，
   任何一个附件取不到就什么也不留（引文的图片取不到只是少一张，见[引文](#引文)）；`put` 紧挨着这个事务，GC 的宽限期覆盖其间。不设 In-Reply-To /
-  References：转发开始的是另一段对话。
+  References：转发开始的是另一段对话。没下载的附件和图片合并成尽量少的 FETCH 取（见
+  [正文与附件 / 回复和转发要的部分](bodies.md#回复和转发要的部分)）。
+- **作为附件转发**（`Forwarding::as_attachment`，Thunderbird、Outlook 都有）：原信整封作为一个 `message/rfc822`
+  附件，文件名是主题加 `.eml`（主题里的 `/` 不当目录，再经 `safe_filename` 处理成能安全保存的名字，没有主题时 `message.eml`），草稿没有
+  引文，正文只是调用方给的文字，主题照样加 `Fwd: `。原信完整的头部（Received、DKIM 签名、Message-ID 等）和 MIME
+  结构原样带上：转给管理员核查可疑邮件、转交要核对原件的、交给别的工具处理时要的就是这些。原文用
+  `body::raw_message` 那条路：已存原文的直接引用它的 blob，没有的整封取一次（同时存下正文）。不读正文，也不复制
+  原信的附件和图片。原信计入附件上限：先按 `RFC822.SIZE` 检查，放不下就报错、不下载；下载后再按实际大小查一次。
+  发出时的编码见 [Outbox 快照](#outbox-快照)。
 
 ## 引文
 
@@ -221,11 +230,21 @@ outbox 里时，上传一份新的，再删除旧的：
 
 `send_draft` 把草稿冻结成 outbox 的一行：
 
-- 完整的 MIME 原文此时构建（mail-builder：7-bit、CRLF、RFC 2047 头、RFC 2231 文件名；
+- 完整的 MIME 原文此时构建（mail-builder：7-bit（作为附件转发的原信除外，见下）、CRLF、RFC 2047 头、RFC 2231 文件名；
   Message-ID 为 `<uuid@发件人域名>`，不泄露主机名；In-Reply-To / References 里的 msg-id 再按收信时
   的规则检查一遍，不合规的丢掉；地址和本信的 Message-ID 丢不得，放不进 `<>`（裸 CR 等）就直接报错，
   不靠调用方先校验）并存成 blob，
   之后每次尝试都发这同一份字节，重试不再读草稿。
+- **作为附件转发的原信**（`message/rfc822`）原样放进去：RFC 2046 §5.2.1 只允许它用 7bit / 8bit / binary，原信的
+  每个头、DKIM 签名才能一字不差地到收件人那里。全是 ASCII 的用 `7bit`；有 8 位内容的用 `8bit`，只要它去的地方收：
+  Drafts 的副本（IMAP 收 8 位内容）总是，SMTP 服务器要上次连接时公布了 8BITMIME（RFC 6152；还没连过的当它公布了，
+  几乎所有提交服务器都公布）。服务器没公布、或原信不能原样走 SMTP（NUL、孤立的 CR / LF、超过 998 字节的行），
+  就交给 mail-builder 按 base64 编码：这违反 RFC 2046，但 Outlook / Exchange 一直这样发，主流客户端都读得出，
+  比发不出去或被服务器改行强。放弃的方案：没有 8BITMIME 时拒发（对用户不友好）；把原信逐层重新编码成 7-bit
+  （复杂，还会破坏原信的 DKIM 签名，而保留原样正是作为附件转发的意义）。
+  - 编码在构建时定，构建在入队时（"所确认的就是所发的"），所以服务器的能力只能用记下的：在发信连接、添加账户和
+    身份的登录检查时记下（`identities.smtp_8bitmime`，与 SIZE 一起，见[草稿](#草稿)）。服务器不再公布 8BITMIME 后
+    的第一封仍按 8bit 发出（`begin` 不带 `BODY=8BITMIME`，大多数服务器照收），之后入队的才改成 base64。
 - SMTP 信封 `envelope_from` 和 `recipients_json`（所有 RCPT TO，含不在 MIME 头里的密送）单独存。
 - 构建在事务外进行，入队时检查草稿的 `revision`（每次修改、增删附件都加一）没变，期间被改过就报
   `Conflict`，不会把旧内容发出去。
@@ -272,7 +291,8 @@ lettre 的 `send` 不暴露这一点；自己实现还能共用 `TlsConfig`、�
 - 正文里孤立的 CR 或 LF 一律改成 CRLF 再做点填充，没有服务器能在别处看到结束标记（SMTP smuggling）。
 - EHLO 用 `[127.0.0.1]`：地址字面量合法，又不暴露主机名和内网地址。
 - 服务器声明 SIZE 时，超出的邮件直接失败；有 SIZE 时在 MAIL FROM 带上大小。连上时记下 SIZE，用来限制
-  草稿的附件（见[草稿](#草稿)）。
+  草稿的附件（见[草稿](#草稿)），也记下是否声明 8BITMIME（见 [Outbox 快照](#outbox-快照)）。邮件不全是 ASCII
+  且服务器声明了 8BITMIME 时在 MAIL FROM 带 `BODY=8BITMIME`。
 - 服务器不提供 AUTH 时不登录（本地中继）；STARTTLS 配置了就必须成功。
 - EHLO 回 4xx 是暂时失败；5xx 才算不支持 ESMTP。
 - 结束标记之后：2xx 都算接受；4xx / 5xx 是拒绝，服务器已丢弃邮件；其他答复按结果未知处理。

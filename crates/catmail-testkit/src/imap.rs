@@ -254,12 +254,17 @@ pub struct Faults {
     pub body_fetch_gate: Option<Arc<Semaphore>>,
     /// Answer `BODY.PEEK[<section>]` with NIL, as if the part had no content.
     pub nil_sections: bool,
+    /// Likewise, for these sections only.
+    pub nil_parts: Vec<&'static str>,
     /// Answer this many UID FETCHes that ask for a body with nothing but OK, as a server
     /// does about a UID the connection's view of the mailbox doesn't have.
     pub empty_body_fetches: usize,
     /// UIDs whose body FETCHes are refused with NO, every time, as a server does with a
     /// message it can't read.
     pub refuse_body_fetch: Vec<u32>,
+    /// Refuse with NO a FETCH that asks for more than one body section, as a server
+    /// might when one of them is beyond what it can serve.
+    pub refuse_several_sections: bool,
     /// Refuse every body FETCH with `NO <text>`, e.g. NetEase's `Fetch volume limit
     /// exceed` once an account went over its download limit.
     pub body_fetch_refusal: Option<String>,
@@ -399,8 +404,10 @@ impl Default for Faults {
             hang_on_body_fetch: false,
             body_fetch_gate: None,
             nil_sections: false,
+            nil_parts: Vec::new(),
             empty_body_fetches: 0,
             refuse_body_fetch: Vec::new(),
+            refuse_several_sections: false,
             body_fetch_refusal: None,
             duplicate_fetch: false,
             inexact_sizes: false,
@@ -1806,6 +1813,10 @@ async fn handle(
                     .any(|&uid| set_contains(&set, uid, || u32::MAX))
                 {
                     Some("[SERVERBUG] Message can't be read".to_string())
+                } else if faults.refuse_several_sections
+                    && items.iter().filter(|i| body_section(i).is_some()).count() > 1
+                {
+                    Some("Too many sections".to_string())
                 } else {
                     faults.body_fetch_refusal.clone()
                 }
@@ -2393,6 +2404,7 @@ fn fetch(
             let mut part = format!("BODY[{spec}] ").into_bytes();
             match mime::section(&msg.raw, spec) {
                 Some(_) if faults.nil_sections && !spec.is_empty() => part.extend(b"NIL"),
+                Some(_) if faults.nil_parts.contains(&spec) => part.extend(b"NIL"),
                 Some(data) => part.extend(literal(&data)),
                 None => part.extend(b"NIL"),
             }

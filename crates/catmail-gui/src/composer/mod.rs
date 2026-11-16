@@ -75,10 +75,25 @@ pub fn reply(all: bool) {
     }
 }
 
-pub fn forward() {
+/// A forward of the message open: quoting it, or with `as_attachment` attaching it
+/// whole.
+pub fn forward(as_attachment: bool) {
     if let Some(message) = untracked(list::selected_id) {
-        open(ComposeFrom::Forward(message));
+        open(ComposeFrom::Forward {
+            message,
+            as_attachment,
+        });
     }
+}
+
+/// The ways to forward the message open, in a menu.
+pub fn choose_forward() {
+    let items = vec![
+        MenuItem::new("Forward").on_select(|| forward(false)),
+        MenuItem::new("Forward as attachment").on_select(|| forward(true)),
+    ];
+    // Nothing waits on it closing.
+    drop(popup_menu(items));
 }
 
 /// The keys that start a message.
@@ -86,7 +101,7 @@ pub fn bind_keys() {
     on_key("mod+n", |_| new_message());
     on_key("mod+r", |_| reply(false));
     on_key("mod+shift+r", |_| reply(true));
-    on_key("mod+shift+f", |_| forward());
+    on_key("mod+shift+f", |_| forward(false));
 }
 
 // --- The view's state ---------------------------------------------------------------

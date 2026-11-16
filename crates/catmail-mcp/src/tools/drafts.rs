@@ -6,8 +6,8 @@ use std::time::Instant;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use catmail_core::{
-    AccountId, Address, Draft, DraftAttachmentId, DraftChanges, DraftId, Forwarding, IdentityId,
-    NewFile, display, parse_addresses,
+    AccountId, Address, Answer, Draft, DraftAttachmentId, DraftChanges, DraftId, Forwarding,
+    IdentityId, NewFile, display, parse_addresses,
 };
 use hyper::body::Bytes;
 use rmcp::RoleServer;
@@ -17,7 +17,6 @@ use rmcp::{tool, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::downloads::{forward_cost, reply_cost};
 use super::{Failed, Mail, not_found};
 use crate::http::BaseUrl;
 use crate::output::{DraftOut, UploadOut};
@@ -115,6 +114,11 @@ pub(crate) struct ForwardParams {
     /// Files to attach besides the message's own, together at most 10 MB.
     #[serde(default)]
     pub attachments: Vec<FileIn>,
+    /// Attaches the message whole, exactly as the server has it (an `.eml` with every
+    /// header), instead of quoting it and copying its attachments: for whoever has to
+    /// check the original, a suspicious message say.
+    #[serde(default)]
+    pub as_attachment: bool,
 }
 
 /// What is given replaces what the draft says; what is left out stays.
@@ -351,10 +355,10 @@ impl Mail {
         let id = message.summary.id;
         let draft = self
             .downloading(
-                reply_cost(&message),
+                self.client.answer_download_size(id, Answer::Reply).await?,
                 self.client
                     .reply(id, p.all.unwrap_or(false), from, p.text, given.files),
-                self.left_of(id, reply_cost),
+                self.left_of(id, Answer::Reply),
             )
             .await?;
         self.uploads.used(&given.uploads);
@@ -382,17 +386,19 @@ impl Mail {
             cc,
             bcc,
             text: p.text,
+            as_attachment: p.as_attachment,
         };
         let given = self.files(p.attachments)?;
         let from = self
             .identity(message.summary.account_id, p.from.as_deref())
             .await?;
         let id = message.summary.id;
+        let answer = forwarding.answer();
         let draft = self
             .downloading(
-                forward_cost(&message),
+                self.client.answer_download_size(id, answer).await?,
                 self.client.forward(id, from, forwarding, given.files),
-                self.left_of(id, forward_cost),
+                self.left_of(id, answer),
             )
             .await?;
         self.uploads.used(&given.uploads);

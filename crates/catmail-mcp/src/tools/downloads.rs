@@ -4,7 +4,7 @@
 use std::future::{Future, ready};
 use std::time::Instant;
 
-use catmail_core::{Attachment, Message, MessageId};
+use catmail_core::{Answer, Attachment, Message, MessageId};
 
 use super::{Failed, Mail};
 use crate::limits::OverLimit;
@@ -44,13 +44,13 @@ impl Mail {
         Ok(result?)
     }
 
-    /// What `cost` says message `id` still takes to download; all of it if that can't
-    /// be told.
-    pub(super) async fn left_of(&self, id: MessageId, cost: fn(&Message) -> u64) -> u64 {
-        match self.client.get_message(id).await {
-            Ok(Some(message)) => cost(&message),
-            _ => u64::MAX,
-        }
+    /// What making `answer` to message `id` still takes to download; all of it if that
+    /// can't be told.
+    pub(super) async fn left_of(&self, id: MessageId, answer: Answer) -> u64 {
+        self.client
+            .answer_download_size(id, answer)
+            .await
+            .unwrap_or(u64::MAX)
     }
 }
 
@@ -72,23 +72,5 @@ pub(super) fn attachment_cost(attachment: &Attachment) -> u64 {
         0
     } else {
         attachment.size.map_or(0, u64::from)
-    }
-}
-
-/// What replying to the message downloads: its body, or the images it shows not here
-/// yet (a large message's body comes without them), which the quote carries.
-pub(super) fn reply_cost(message: &Message) -> u64 {
-    match &message.body {
-        Some(body) => body.inline_parts().map(attachment_cost).sum(),
-        None => body_cost(message),
-    }
-}
-
-/// What forwarding the message downloads: its body, or the attachments and images not
-/// here yet.
-pub(super) fn forward_cost(message: &Message) -> u64 {
-    match &message.body {
-        Some(body) => body.attachments.iter().map(attachment_cost).sum(),
-        None => body_cost(message),
     }
 }

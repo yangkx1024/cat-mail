@@ -38,6 +38,9 @@ pub struct Outgoing<'a> {
     /// Unix seconds.
     pub date: i64,
     pub attachments: Vec<OutgoingAttachment<'a>>,
+    /// Whether what it goes through takes 8-bit content: an IMAP server does, an SMTP
+    /// server if it announces 8BITMIME. Only a message attached whole needs it.
+    pub eight_bit: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -60,7 +63,8 @@ pub struct InvalidHeader {
 }
 
 /// The message in wire form: CRLF line endings, 7-bit clean (headers as RFC 2047
-/// encoded words, bodies as quoted-printable or base64 where needed).
+/// encoded words, bodies as quoted-printable or base64 where needed), except a message
+/// attached whole, which goes as it is (see [`attached_message`]).
 pub fn build_message(message: &Outgoing<'_>) -> Result<Vec<u8>, InvalidHeader> {
     let mut builder = MessageBuilder::new()
         .message_id(bracketed("Message-ID", message.message_id)?)
@@ -136,11 +140,53 @@ fn body<'a>(message: &Outgoing<'a>) -> MimePart<'a> {
         .iter()
         .filter(|a| a.content_id.is_none())
         .map(|a| {
-            MimePart::new(content_type(a.mime_type), a.data)
-                .attachment(one_line(a.filename).into_owned())
+            let part = MimePart::new(content_type(a.mime_type), a.data)
+                .attachment(one_line(a.filename).into_owned());
+            match attached_message(a, message.eight_bit) {
+                Some(encoding) => part.transfer_encoding(encoding),
+                // mail-builder's choice: base64, which isn't text.
+                None => part,
+            }
         })
         .collect();
     wrap("multipart/mixed", content, files)
+}
+
+/// The Content-Transfer-Encoding of an attached message that goes as it is: `7bit`, or
+/// with `eight_bit` `8bit`. RFC 2046 §5.2.1 allows no other for `message/rfc822` (bar
+/// `binary`, which SMTP can't carry), so its every header, signature included, reaches
+/// the recipient untouched. `None` to leave it to mail-builder, which base64-encodes it:
+/// another type, or one that can't go as it is (a NUL, a lone CR or LF, a line over the
+/// 998 octets SMTP allows, 8-bit content where it may not go). That breaks the RFC, but
+/// Outlook sends attached messages so all the time, and mail clients read them; it beats
+/// a message that can't be sent, or one whose lines a server rewraps.
+fn attached_message(a: &OutgoingAttachment<'_>, eight_bit: bool) -> Option<&'static str> {
+    if !a.mime_type.eq_ignore_ascii_case("message/rfc822") {
+        return None;
+    }
+    let data = a.data;
+    let (mut ascii, mut line) = (true, 0usize);
+    for (i, &byte) in data.iter().enumerate() {
+        match byte {
+            0 => return None,
+            b'\r' if data.get(i + 1) != Some(&b'\n') => return None,
+            b'\n' if i == 0 || data[i - 1] != b'\r' => return None,
+            b'\r' => {}
+            b'\n' => line = 0,
+            _ => {
+                line += 1;
+                if line > 998 {
+                    return None;
+                }
+                ascii &= byte.is_ascii();
+            }
+        }
+    }
+    match (ascii, eight_bit) {
+        (true, _) => Some("7bit"),
+        (false, true) => Some("8bit"),
+        (false, false) => None,
+    }
 }
 
 /// `first` alone, or with `rest` in a multipart of `kind`.
@@ -374,6 +420,7 @@ mod tests {
             in_reply_to: Some("parent@x"),
             references: &references,
             date: 1_792_200_600,
+            eight_bit: false,
             attachments: vec![OutgoingAttachment {
                 filename: "报告 \"final\".pdf",
                 mime_type: "application/pdf",
@@ -453,6 +500,7 @@ mod tests {
             in_reply_to: Some("evil\rX-Injected: yes@x"),
             references: &references,
             date: 0,
+            eight_bit: false,
             attachments: Vec::new(),
         })
         .unwrap();
@@ -485,6 +533,7 @@ mod tests {
             in_reply_to: None,
             references: &[],
             date: 0,
+            eight_bit: false,
             attachments: Vec::new(),
         };
         let cases: [(&Address, &[Address], &str, &str); 4] = [
@@ -516,6 +565,7 @@ mod tests {
             in_reply_to: None,
             references: &[],
             date: 0,
+            eight_bit: false,
             attachments: Vec::new(),
         })
         .unwrap();
@@ -550,6 +600,7 @@ mod tests {
             in_reply_to: None,
             references: &[],
             date: 0,
+            eight_bit: false,
             attachments: vec![
                 image("shown@catmail"),
                 // Taken out of the text since.
@@ -624,6 +675,7 @@ mod tests {
             in_reply_to: None,
             references: &[],
             date: 0,
+            eight_bit: false,
             attachments,
         }
     }
@@ -762,5 +814,84 @@ mod tests {
         );
         assert_eq!(content_type("bogus"), "application/octet-stream");
         assert_eq!(content_type("a/b\r\nX-Evil: 1"), "application/octet-stream");
+    }
+
+    #[test]
+    fn a_message_attached_whole_goes_as_it_is() {
+        const ORIGINAL: &[u8] = b"From: a@example.com\r\n\
+            DKIM-Signature: v=1; b=abc\r\n\
+            Subject: Original\r\n\
+            Content-Type: text/plain; charset=utf-8\r\n\
+            Content-Transfer-Encoding: 8bit\r\n\r\n\
+            \xe4\xbd\xa0\xe5\xa5\xbd\r\n";
+        let from = addr(None, "b@example.com");
+        let build = |data: &'static [u8], eight_bit| {
+            let raw = build_message(&Outgoing {
+                from: &from,
+                to: &[],
+                cc: &[],
+                bcc: &[],
+                subject: "Fwd: Original",
+                text: "See below.",
+                html: None,
+                quote: None,
+                message_id: "m@example.com",
+                in_reply_to: None,
+                references: &[],
+                date: 0,
+                attachments: vec![OutgoingAttachment {
+                    filename: "Original.eml",
+                    mime_type: "message/rfc822",
+                    content_id: None,
+                    data,
+                }],
+                eight_bit,
+            })
+            .unwrap();
+            let encoding = String::from_utf8_lossy(&raw)
+                .split("Content-Type: message/rfc822")
+                .nth(1)
+                .and_then(|part| part.split("Content-Transfer-Encoding: ").nth(1))
+                .and_then(|rest| rest.split("\r\n").next())
+                .map(String::from);
+            (raw, encoding)
+        };
+        let contains = |raw: &[u8], data: &[u8]| raw.windows(data.len()).any(|w| w == data);
+
+        // Where 8-bit content may go: untouched, signature and all.
+        let (raw, encoding) = build(ORIGINAL, true);
+        assert_eq!(encoding.as_deref(), Some("8bit"));
+        assert!(contains(&raw, ORIGINAL));
+        let parsed = MessageParser::new().parse(&raw).unwrap();
+        let attached = parsed.attachments().next().unwrap();
+        assert_eq!(attached.attachment_name(), Some("Original.eml"));
+        let mail_parser::PartKind::Message(inner) = attached.kind() else {
+            panic!("not read as a message: {:?}", attached.kind());
+        };
+        assert_eq!(inner.subject(), Some("Original"));
+        assert_eq!(inner.body_text(0).unwrap().trim_end(), "你好");
+
+        // 7-bit clean goes as it is anywhere.
+        let ascii: &[u8] = b"Subject: Plain\r\n\r\nHello\r\n";
+        let (raw, encoding) = build(ascii, false);
+        assert_eq!(encoding.as_deref(), Some("7bit"));
+        assert!(contains(&raw, ascii) && raw.is_ascii());
+
+        // Where it may not, or what no SMTP server would carry as it is: base64.
+        let long: &'static [u8] = Box::leak(
+            [&b"Subject: Long\r\n\r\n"[..], &[b'a'; 999], b"\r\n"]
+                .concat()
+                .into_boxed_slice(),
+        );
+        for data in [
+            ORIGINAL,
+            b"Subject: LF\n\nHello\n",
+            b"Subject: \0\r\n",
+            long,
+        ] {
+            let (raw, encoding) = build(data, data != ORIGINAL);
+            assert_eq!(encoding.as_deref(), Some("base64"), "{data:?}");
+            assert!(raw.is_ascii());
+        }
     }
 }

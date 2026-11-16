@@ -32,6 +32,8 @@ pub struct SmtpFaults {
     pub reject_login: bool,
     /// Advertise `SIZE <n>` and refuse bigger messages.
     pub size_limit: Option<u64>,
+    /// Leave 8BITMIME out of the EHLO reply.
+    pub no_8bitmime: bool,
     /// RCPT TO for these addresses gets this reply code, e.g. 550 or 450.
     pub reject_recipients: Vec<(String, u16)>,
     /// Answer MAIL FROM with 451 this many times.
@@ -65,6 +67,7 @@ impl Default for SmtpFaults {
             auth_mechanisms: vec!["PLAIN", "LOGIN"],
             reject_login: false,
             size_limit: None,
+            no_8bitmime: false,
             reject_recipients: Vec::new(),
             busy: 0,
             drop_on_mail: 0,
@@ -233,7 +236,10 @@ async fn serve(
                     return Ok(());
                 }
                 let st = lock(&state);
-                let mut lines = vec!["fake.example".to_owned(), "8BITMIME".into()];
+                let mut lines = vec!["fake.example".to_owned()];
+                if !st.faults.no_8bitmime {
+                    lines.push("8BITMIME".into());
+                }
                 if let Some(limit) = st.faults.size_limit {
                     lines.push(format!("SIZE {limit}"));
                 }

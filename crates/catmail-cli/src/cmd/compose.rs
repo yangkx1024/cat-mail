@@ -137,6 +137,10 @@ pub(crate) struct Forward {
     /// Attach a file (repeatable), besides the message's own attachments
     #[arg(long, value_name = "FILE")]
     attach: Vec<PathBuf>,
+    /// Attach the message whole, exactly as the server has it (an .eml with every
+    /// header), instead of quoting it and copying its attachments
+    #[arg(long)]
+    as_attachment: bool,
     /// Send it right away instead of keeping it as a draft
     #[arg(long)]
     send: bool,
@@ -209,6 +213,7 @@ pub(crate) async fn forward(client: &MailClient, args: Forward, json: bool) -> R
         cc,
         bcc,
         text: text.unwrap_or_default(),
+        as_attachment: args.as_attachment,
     };
     if args.send && forwarding.recipients().next().is_none() {
         bail!("--send needs a recipient: --to, --cc or --bcc");
@@ -561,6 +566,7 @@ mod tests {
             body: Some("fyi".into()),
             body_file: None,
             attach: Vec::new(),
+            as_attachment: false,
             send: false,
         };
         forward(&client, forwarding, false).await.unwrap();
@@ -576,6 +582,33 @@ mod tests {
         assert_eq!(drafts[0].to[0].email, "bob@example.com");
         assert_eq!(drafts[1].text, "thanks", "{drafts:?}");
         assert!(drafts[1].quote.is_some(), "{drafts:?}");
+
+        // As an attachment: nothing quoted, the message attached whole.
+        let forwarding = Forward {
+            id: 1,
+            from: SendAs { from: None },
+            recipients: Recipients {
+                to: Some("bob@example.com".into()),
+                cc: None,
+                bcc: None,
+            },
+            body: Some("original attached".into()),
+            body_file: None,
+            attach: Vec::new(),
+            as_attachment: true,
+            send: false,
+        };
+        forward(&client, forwarding, false).await.unwrap();
+        let drafts = client.list_drafts(account).await.unwrap();
+        assert_eq!(drafts[0].text, "original attached", "{drafts:?}");
+        assert!(drafts[0].quote.is_none(), "{drafts:?}");
+        let draft = client.get_draft(drafts[0].id).await.unwrap().unwrap();
+        let attached: Vec<_> = draft
+            .attachments
+            .iter()
+            .map(|a| a.mime_type.as_str())
+            .collect();
+        assert_eq!(attached, ["message/rfc822"]);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -692,6 +725,7 @@ mod tests {
             body: None,
             body_file,
             attach: Vec::new(),
+            as_attachment: false,
             send,
         };
         let err = forward(

@@ -34,7 +34,7 @@ pub use blob::BlobStore;
 pub use drafts::{DraftReply, DraftSnapshot, DraftUpload, Drafts, NewDraftAttachment};
 pub use error::{Error, Result};
 pub use folders::{FolderSyncState, Folders, Reconciled, RemoteFolder};
-pub use identities::{DeletedIdentity, Identities, Sending};
+pub use identities::{DeletedIdentity, Identities, Sending, SmtpAnnounced};
 pub use messages::{MessageLocation, Messages, NewBody, NewMessage, StaleBody, Upserted};
 pub use ops::{CopyCheckpoint, Moved, PendingOps, ReplayFolder, ReplayKind, ReplayOp, Touched};
 pub use outbox::{NewOutboxEntry, Outbox, OutboxJob};

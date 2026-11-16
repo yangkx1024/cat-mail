@@ -76,6 +76,30 @@ pub fn icon_button(
         .child(icon(which, size.icon_size()).text_color(move || theme().foreground))
 }
 
+/// The narrow chevron beside a button that opens a menu of other ways to do what the
+/// button does (`open` shows it): one control with it, as far as hover goes.
+pub fn menu_button(
+    name: impl Fn() -> String + Copy + 'static,
+    size: Size,
+    open: impl Fn() + 'static,
+) -> View {
+    view()
+        .w(px(size.box_size() / 2.0))
+        .h(px(size.box_size()))
+        .flex_shrink_0()
+        .rounded(px(6.0))
+        .items_center()
+        .justify_center()
+        .hover(|s| s.bg(move || theme().accent))
+        .label(move || SharedString::from(name()))
+        .on_press(open)
+        .tooltip(tooltip(name))
+        .child(
+            icon(|| Icon::ChevronDown, size.icon_size() * 2.0 / 3.0)
+                .text_color(move || theme().muted_foreground),
+        )
+}
+
 /// The button of the main thing to do where it is (Compose, Send, Edit): filled, round,
 /// with an icon and a label.
 pub fn primary_button(

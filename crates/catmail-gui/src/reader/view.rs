@@ -8,7 +8,7 @@ use catmail_frontend::reader::{self, Header};
 use nsh_base::theme;
 use nsh_core::prelude::*;
 
-use crate::buttons::{Size, icon_button, separator};
+use crate::buttons::{Size, icon_button, menu_button, separator};
 use crate::clock::clock;
 use crate::icons::{Icon, icon};
 use crate::mailbox::commands;
@@ -157,7 +157,12 @@ fn toolbar() -> impl IntoElement {
             || "Forward".to_owned(),
             || true,
             Size::Bar,
-            composer::forward,
+            || composer::forward(false),
+        ))
+        .child(menu_button(
+            || "More ways to forward".to_owned(),
+            Size::Bar,
+            composer::choose_forward,
         ))
 }
 

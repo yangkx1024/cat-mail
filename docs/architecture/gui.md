@@ -217,6 +217,8 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 - **三处同一套按钮**：读信区工具栏、勾选工具栏、悬停的行都由 `commands::group` 生成，只显示图标，按用途分组：
   位置（Archive、Delete、Move to）；标记（已读 / 未读、Flag）；读信区另有内容（Show remote images、Open in
   browser）和回复（Reply、Reply all、Forward）。Reply all 只在它比 Reply 多写给人时显示（`can_reply_all`）。
+  Forward 旁边一个窄的下拉箭头（`buttons::menu_button`）弹出菜单：Forward、Forward as attachment。常用的转发仍是
+  一次点击，作为附件转发不常用，放在菜单里。
   哪些可用、开关显示哪一面由 `Applies` 按这些邮件算，一个工具栏的几组共用一份。
 - **Labels 不在这套里**：它只改一封邮件，不是 `MessageCommand`，只有读信区工具栏在位置一组后面单独放一个按钮
   （Gmail 账户才有，`commands::can_edit_labels`），快捷键 L 也只对选中的那封（`commands::edit_labels`）；
