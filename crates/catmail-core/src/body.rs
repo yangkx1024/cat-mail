@@ -128,12 +128,185 @@ pub(crate) async fn attachment_blob(
         .ok_or(Error::AttachmentNotFound(id))
 }
 
+/// What one FETCH of [`attachment_blobs`] brings back at most, by the sizes the server
+/// gave: the parts are held in memory together until stored. A larger part comes alone.
+const BATCH_BYTES: u64 = 16 * 1024 * 1024;
+
+/// A part to fetch with others: the attachment, the size the server gave, and where it
+/// is.
+struct Missing {
+    id: AttachmentId,
+    size: u64,
+    source: AttachmentSource,
+}
+
+/// The blobs and sizes of `parts`, attachments each with the size the server gave,
+/// downloading those not stored yet with as few FETCHes as [`BATCH_BYTES`] allows, not
+/// one each: a reply or forward of a large message that wasn't read needs its images
+/// and attachments, which came without it. Their GC grace periods restart, as with
+/// [`attachment_blob`].
+///
+/// Each part has an outcome of its own: one the server sends nothing for fails alone,
+/// and a FETCH refused, or answered so that it can't be read, as a whole is tried again
+/// a part at a time, so one bad part doesn't take the others with it. A failure to reach
+/// the server, or the message gone from it, fails the call, once what came before it is
+/// stored.
+pub(crate) async fn attachment_blobs(
+    engine: &Arc<Engine>,
+    parts: &[(AttachmentId, u64)],
+) -> Result<HashMap<AttachmentId, Result<(BlobHash, u64)>>> {
+    let mut done = HashMap::new();
+    let mut missing = Vec::new();
+    for &(id, size) in parts {
+        if done.contains_key(&id) || missing.iter().any(|m: &Missing| m.id == id) {
+            continue;
+        }
+        let source = match attachment_source(engine, id).await {
+            Ok(source) => source,
+            Err(e) => {
+                done.insert(id, Err(e));
+                continue;
+            }
+        };
+        let stored = match source.blob.clone() {
+            Some(blob) => {
+                let engine = engine.clone();
+                blocking(move || Ok(engine.blobs.refresh(&blob)?.map(|size| (blob, size)))).await?
+            }
+            None => None,
+        };
+        match stored {
+            Some(stored) => {
+                done.insert(id, Ok(stored));
+            }
+            // Missing from disk too: fetched again.
+            None => missing.push(Missing { id, size, source }),
+        }
+    }
+    for batch in batches(missing) {
+        done.extend(fetch_batch(engine, batch).await?);
+    }
+    Ok(done)
+}
+
+/// `missing` in batches to fetch together: of one message, within [`BATCH_BYTES`], in
+/// order.
+fn batches(missing: Vec<Missing>) -> Vec<Vec<Missing>> {
+    let mut batches: Vec<Vec<Missing>> = Vec::new();
+    let mut bytes = 0;
+    for part in missing {
+        let joins = batches.last().is_some_and(|batch| {
+            batch[0].source.message.id == part.source.message.id && bytes + part.size <= BATCH_BYTES
+        });
+        if joins {
+            bytes += part.size;
+            batches.last_mut().expect("joins one").push(part);
+        } else {
+            bytes = part.size;
+            batches.push(vec![part]);
+        }
+    }
+    batches
+}
+
+/// Fetches the parts of `batch`, all of one message, with one FETCH, and stores them.
+async fn fetch_batch(
+    engine: &Arc<Engine>,
+    batch: Vec<Missing>,
+) -> Result<Vec<(AttachmentId, Result<(BlobHash, u64)>)>> {
+    let location = batch[0].source.message.clone();
+    let (account, folder, uid) = (location.account, location.folder, location.uid);
+    let sections: Vec<String> = batch.iter().map(|p| p.source.section.clone()).collect();
+    let several = sections.len() > 1;
+    let answer = on_server(engine, location, async move |session, location| {
+        match session.fetch_sections(location.uid, &sections).await {
+            Ok(Some(parts)) => Ok(Some(Some(parts))),
+            Ok(None) => Ok(None),
+            // About the answer as a whole: refused, or couldn't be read.
+            Err(imap::Error::Command { .. } | imap::Error::Incomplete(_)) if several => {
+                Ok(Some(None))
+            }
+            Err(e) => Err(e.into()),
+        }
+    })
+    .await?;
+    let Some(mut parts) = answer else {
+        tracing::warn!(%account, uid, parts = batch.len(),
+            "couldn't fetch the parts together; fetching them one at a time");
+        let mut done = Vec::new();
+        for part in batch {
+            let blob = attachment_blob(engine.clone(), part.id).await;
+            done.push((part.id, blob));
+        }
+        return Ok(done);
+    };
+    let done = blocking({
+        let engine = engine.clone();
+        move || {
+            Ok(batch
+                .into_iter()
+                .map(|part| {
+                    let Missing { id, source, .. } = part;
+                    let Some(encoded) = parts.remove(&source.section) else {
+                        let left_out = imap::Error::Protocol(format!(
+                            "the server sent nothing for part {} of UID {uid}",
+                            source.section
+                        ));
+                        return (id, Err(left_out.into()));
+                    };
+                    let data = mime::decode_transfer(source.transfer_encoding.as_deref(), &encoded);
+                    drop(encoded);
+                    (id, store_part(&engine, id, &data))
+                })
+                .collect::<Vec<_>>())
+        }
+    })
+    .await?;
+    // Stored now, with their sizes as decoded.
+    engine.emit(Event::MessagesChanged { account, folder });
+    Ok(done)
+}
+
+/// Stores an attachment's decoded content. Blocking.
+fn store_part(engine: &Engine, id: AttachmentId, data: &[u8]) -> Result<(BlobHash, u64)> {
+    let hash = engine.blobs.put_bytes(data)?;
+    let size = data.len() as u64;
+    let recorded = engine
+        .store
+        .write(|db| db.attachments().set_blob(id, &hash, size as u32))?;
+    if recorded {
+        Ok((hash, size))
+    } else {
+        Err(Error::AttachmentNotFound(id))
+    }
+}
+
 async fn stored_blob(engine: &Arc<Engine>, id: AttachmentId) -> Result<Option<(BlobHash, u64)>> {
     let Some(blob) = attachment_source(engine, id).await?.blob else {
         return Ok(None);
     };
     let engine = engine.clone();
     blocking(move || Ok(engine.blobs.refresh(&blob)?.map(|size| (blob, size)))).await
+}
+
+/// The raw message's blob and size, downloading it first if needed, without reading it.
+/// Its GC grace period restarts, as with [`attachment_blob`].
+pub(crate) async fn raw_blob(engine: Arc<Engine>, id: MessageId) -> Result<(BlobHash, u64)> {
+    if let Some(stored) = stored_raw(&engine, id).await? {
+        return Ok(stored);
+    }
+    raw_message(engine.clone(), id).await?;
+    stored_raw(&engine, id)
+        .await?
+        .ok_or(Error::MessageNotFound(id))
+}
+
+async fn stored_raw(engine: &Arc<Engine>, id: MessageId) -> Result<Option<(BlobHash, u64)>> {
+    let Some(raw) = locate(engine, id).await?.raw else {
+        return Ok(None);
+    };
+    let engine = engine.clone();
+    blocking(move || Ok(engine.blobs.refresh(&raw)?.map(|size| (raw, size)))).await
 }
 
 /// The raw message, fetching it if only its parts were downloaded.

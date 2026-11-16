@@ -10,12 +10,20 @@ use crate::{Error, Result};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sending {
     pub identity: Identity,
-    /// The SIZE its SMTP server announced when last connected to; `None` if not yet, or
-    /// none.
-    pub smtp_max_size: Option<u64>,
+    /// What its SMTP server announced when last connected to; `None` if not yet.
+    pub smtp: Option<SmtpAnnounced>,
     /// Keyring entry name of the password its SMTP server takes: its own, or its
     /// account's.
     pub login_key: String,
+}
+
+/// What an SMTP server announced when connected to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SmtpAnnounced {
+    /// SIZE (RFC 1870), the largest message it accepts; `None` for none.
+    pub max_size: Option<u64>,
+    /// 8BITMIME (RFC 6152): it takes bodies that aren't 7-bit clean.
+    pub eight_bit_mime: bool,
 }
 
 /// What [`Identities::delete`] removed.
@@ -41,16 +49,16 @@ impl<'c> Identities<'c> {
     }
 
     /// `secret_key` names the keyring entry that already holds the identity's password;
-    /// `smtp_max_size` is the SIZE its server announced, if known. `None` if there is no
-    /// such account.
+    /// `smtp` is what its server announced, if known. `None` if there is no such
+    /// account.
     pub fn insert(
         &self,
         account: AccountId,
         new: &NewIdentity,
         secret_key: &str,
-        smtp_max_size: Option<u64>,
+        smtp: Option<SmtpAnnounced>,
     ) -> Result<Option<Identity>> {
-        self.insert_row(account, new, Some(secret_key), false, smtp_max_size)
+        self.insert_row(account, new, Some(secret_key), false, smtp)
     }
 
     /// The account's first identity, its default: it logs in with the account's password.
@@ -65,15 +73,15 @@ impl<'c> Identities<'c> {
         new: &NewIdentity,
         secret_key: Option<&str>,
         is_default: bool,
-        smtp_max_size: Option<u64>,
+        smtp: Option<SmtpAnnounced>,
     ) -> Result<Option<Identity>> {
         let sql = format!(
             "INSERT INTO identities (account_id, email, display_name, username,
                                      smtp_host, smtp_port, smtp_security, secret_key,
-                                     is_default, smtp_max_size)
+                                     is_default, smtp_max_size, smtp_8bitmime)
              SELECT id, :email, :display_name, :username,
                     :smtp_host, :smtp_port, :smtp_security, :secret_key, :is_default,
-                    :smtp_max_size
+                    :smtp_max_size, :smtp_8bitmime
              FROM accounts WHERE id = :account
              RETURNING {COLUMNS}"
         );
@@ -90,7 +98,8 @@ impl<'c> Identities<'c> {
                     ":smtp_security": new.smtp.security.as_str(),
                     ":secret_key": secret_key,
                     ":is_default": is_default,
-                    ":smtp_max_size": size_limit_column(smtp_max_size),
+                    ":smtp_max_size": size_limit_column(smtp.and_then(|s| s.max_size)),
+                    ":smtp_8bitmime": smtp.map(|s| s.eight_bit_mime),
                 },
                 from_row,
             )
@@ -192,7 +201,7 @@ impl<'c> Identities<'c> {
     /// The account's identity `id`; `None` if there is no such identity of the account.
     pub fn sending(&self, account: AccountId, id: IdentityId) -> Result<Option<Sending>> {
         let sql = format!(
-            "SELECT {COLUMNS}, smtp_max_size,
+            "SELECT {COLUMNS}, smtp_max_size, smtp_8bitmime,
                     coalesce(secret_key, (SELECT a.secret_key FROM accounts a
                                           WHERE a.id = identities.account_id)) AS login_key
              FROM identities
@@ -204,18 +213,26 @@ impl<'c> Identities<'c> {
             .query_row(named_params! { ":account": account.0, ":id": id.0 }, |r| {
                 Ok(Sending {
                     identity: from_row(r)?,
-                    smtp_max_size: size_limit(r, "smtp_max_size")?,
+                    smtp: r
+                        .get::<_, Option<bool>>("smtp_8bitmime")?
+                        .map(|eight_bit_mime| {
+                            Ok::<_, rusqlite::Error>(SmtpAnnounced {
+                                max_size: size_limit(r, "smtp_max_size")?,
+                                eight_bit_mime,
+                            })
+                        })
+                        .transpose()?,
                     login_key: r.get("login_key")?,
                 })
             })
             .optional()?)
     }
 
-    /// Records the SIZE its SMTP server announced; `None` for none.
-    pub fn set_smtp_max_size(&self, id: IdentityId, limit: Option<u64>) -> Result<()> {
+    /// Records what its SMTP server announced.
+    pub fn set_smtp_announced(&self, id: IdentityId, smtp: SmtpAnnounced) -> Result<()> {
         self.conn.execute(
-            "UPDATE identities SET smtp_max_size = ?2 WHERE id = ?1",
-            (id.0, size_limit_column(limit)),
+            "UPDATE identities SET smtp_max_size = ?2, smtp_8bitmime = ?3 WHERE id = ?1",
+            (id.0, size_limit_column(smtp.max_size), smtp.eight_bit_mime),
         )?;
         Ok(())
     }
@@ -428,11 +445,15 @@ mod tests {
             format!("key:{a}:news@example.com"),
             "its own password"
         );
-        assert_eq!(sending(first.id).smtp_max_size, None);
+        assert_eq!(sending(first.id).smtp, None);
+        let announced = SmtpAnnounced {
+            max_size: Some(1000),
+            eight_bit_mime: false,
+        };
         store
-            .write(|db| db.identities().set_smtp_max_size(first.id, Some(1000)))
+            .write(|db| db.identities().set_smtp_announced(first.id, announced))
             .unwrap();
-        assert_eq!(sending(first.id).smtp_max_size, Some(1000));
+        assert_eq!(sending(first.id).smtp, Some(announced));
 
         // The same address, server and login.
         let twice = store.write(|db| {

@@ -656,6 +656,11 @@
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "as_attachment": {
+          "default": false,
+          "description": "Attaches the message whole, exactly as the server has it (an `.eml` with every\nheader), instead of quoting it and copying its attachments: for whoever has to\ncheck the original, a suspicious message say.",
+          "type": "boolean"
+        },
         "attachments": {
           "description": "Files to attach besides the message's own, together at most 10 MB.",
           "items": {

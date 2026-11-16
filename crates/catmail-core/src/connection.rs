@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use catmail_proto::imap::{Session, TextSearch};
 use catmail_proto::{Credentials, smtp};
-use catmail_store::{Db, DraftSnapshot};
+use catmail_store::{Db, DraftSnapshot, SmtpAnnounced};
 use catmail_types::{Account, AccountId, Address, DraftId, Event, IdentityId, ServerConfig};
 use secrecy::{ExposeSecret, SecretString};
 
@@ -114,8 +114,8 @@ pub(crate) fn draft_sender(
 /// Identities of an account that send over the same SMTP login: the same server,
 /// username and password, as aliases set up at one provider are.
 pub(crate) struct SmtpLogin {
-    /// With the SIZE recorded for each.
-    identities: Vec<(SendAs, Option<u64>)>,
+    /// With what was recorded of the server's announcements for each.
+    identities: Vec<(SendAs, Option<SmtpAnnounced>)>,
     server: ServerConfig,
     credentials: Credentials,
 }
@@ -125,29 +125,37 @@ impl SmtpLogin {
         self.identities.iter().map(|(identity, _)| identity)
     }
 
-    /// Opens a new connection and logs in. The SIZE the server announces is recorded for
-    /// every identity sending over it, as [`connect`] does the APPENDLIMIT.
+    /// Opens a new connection and logs in. What the server announces (SIZE, 8BITMIME) is
+    /// recorded for every identity sending over it, as [`connect`] does the APPENDLIMIT.
     pub async fn connect(&mut self, engine: &Arc<Engine>) -> Result<smtp::Session> {
         let session = smtp_login(engine, &self.server, &self.credentials).await?;
-        let announced = session.max_size();
+        let announced = announced(&session);
         let changed: Vec<_> = self
             .identities
             .iter_mut()
-            .filter(|(_, recorded)| *recorded != announced)
+            .filter(|(_, recorded)| *recorded != Some(announced))
             .map(|(identity, recorded)| {
-                *recorded = announced;
+                *recorded = Some(announced);
                 identity.id
             })
             .collect();
         if !changed.is_empty() {
             record_limit(engine, move |db| {
-                changed
-                    .into_iter()
-                    .try_for_each(|identity| db.identities().set_smtp_max_size(identity, announced))
+                changed.into_iter().try_for_each(|identity| {
+                    db.identities().set_smtp_announced(identity, announced)
+                })
             })
             .await;
         }
         Ok(session)
+    }
+}
+
+/// What the SMTP server announced that sending depends on.
+pub(crate) fn announced(session: &smtp::Session) -> SmtpAnnounced {
+    SmtpAnnounced {
+        max_size: session.max_size(),
+        eight_bit_mime: session.eight_bit_mime(),
     }
 }
 
@@ -209,9 +217,9 @@ pub(crate) async fn smtp_logins(
                 && login.credentials.password.expose_secret() == password.expose_secret()
         });
         match shared {
-            Some(login) => login.identities.push((send_as, sending.smtp_max_size)),
+            Some(login) => login.identities.push((send_as, sending.smtp)),
             None => logins.push(Ok(SmtpLogin {
-                identities: vec![(send_as, sending.smtp_max_size)],
+                identities: vec![(send_as, sending.smtp)],
                 server,
                 credentials: Credentials { username, password },
             })),

@@ -9,9 +9,9 @@ use catmail_proto::mime::{Outgoing, OutgoingAttachment, build_message};
 use catmail_proto::smtp;
 use catmail_store::{BlobStore, DraftReply, DraftSnapshot, NewDraftAttachment};
 use catmail_types::{
-    AccountId, Address, BlobHash, Draft, DraftAttachment, DraftAttachmentId, DraftBody,
-    DraftChanges, DraftContent, DraftId, Event, FORWARD_SEPARATOR, Forwarding, IdentityId, Message,
-    MessageId, NewFile, Quote, QuoteKind,
+    AccountId, Address, Answer, Attachment, BlobHash, Draft, DraftAttachment, DraftAttachmentId,
+    DraftBody, DraftChanges, DraftContent, DraftId, Event, FORWARD_SEPARATOR, Forwarding,
+    IdentityId, Message, MessageId, NewFile, Quote, QuoteKind,
 };
 use uuid::Uuid;
 
@@ -615,12 +615,21 @@ pub(crate) async fn forward(
     for address in forwarding.recipients() {
         check_address(&address.email)?;
     }
+    if forwarding.as_attachment {
+        return forward_attached(engine, id, from, forwarding, files).await;
+    }
     let message = with_body(engine, id).await?;
+    let theirs: Vec<_> = message.body.iter().flat_map(|b| b.files()).collect();
+    // The blobs the message already has, their GC grace periods restarted to cover the
+    // gap until the transaction below refers to them; those not here yet fetched
+    // together.
+    let wanted: Vec<_> = theirs.iter().map(|a| (a.id, said_size(a))).collect();
+    let mut blobs = body::attachment_blobs(engine, &wanted).await?;
     let mut originals = Vec::new();
-    for original in message.body.iter().flat_map(|b| b.files()) {
-        // The blob the message already has, its GC grace period restarted to cover the
-        // gap until the transaction below refers to it.
-        let (blob, size) = body::attachment_blob(engine.clone(), original.id).await?;
+    for original in theirs {
+        let (blob, size) = blobs
+            .remove(&original.id)
+            .ok_or(Error::AttachmentNotFound(original.id))??;
         originals.push(NewDraftAttachment {
             blob,
             filename: attachment_name(original.filename.as_deref(), "attachment"),
@@ -629,7 +638,9 @@ pub(crate) async fn forward(
             content_id: None,
         });
     }
-    let Forwarding { to, cc, bcc, text } = forwarding;
+    let Forwarding {
+        to, cc, bcc, text, ..
+    } = forwarding;
     let mut content = DraftContent {
         to,
         cc,
@@ -649,6 +660,141 @@ pub(crate) async fn forward(
         Vec::new(),
     )
     .await
+}
+
+/// What making `answer` to the message downloads from the server, in bytes, about (as
+/// the server gave the sizes): nothing once all it takes is here. For a caller that keeps
+/// to a download budget, as [`reply`] and [`forward`] go about it.
+pub(crate) async fn download_size(
+    engine: &Arc<Engine>,
+    id: MessageId,
+    answer: Answer,
+) -> Result<u64> {
+    let (message, raw) = engine
+        .read(move |db| {
+            let messages = db.messages();
+            let Some(message) = messages.get(id)? else {
+                return Ok(None);
+            };
+            Ok(messages.location(id)?.map(|l| (message, l.raw)))
+        })
+        .await?
+        .ok_or(Error::MessageNotFound(id))?;
+    // Fetched whole, or the body as it opens, with the images and attachments after.
+    let whole = message.size.map_or(0, u64::from);
+    let Some(body) = &message.body else {
+        return Ok(whole);
+    };
+    let missing = |a: &&Attachment| !a.downloaded;
+    let size = |a: &Attachment| a.size.map_or(0, u64::from);
+    Ok(match answer {
+        Answer::ForwardAttached if raw.is_some() => 0,
+        Answer::ForwardAttached => whole,
+        // The images it shows, which the quote carries.
+        Answer::Reply => body.inline_parts().filter(missing).map(size).sum(),
+        Answer::Forward => body.attachments.iter().filter(missing).map(size).sum(),
+    })
+}
+
+/// A forward of the message as an attachment ([`Forwarding::as_attachment`]): the raw
+/// message, downloaded whole first if needed, is the draft's first attachment, and
+/// `forwarding.text` all it says. It counts against what the attachments may add up to,
+/// checked by the size the server gave before it is downloaded, so a message that can't
+/// be sent isn't fetched for nothing.
+async fn forward_attached(
+    engine: &Arc<Engine>,
+    id: MessageId,
+    from: Option<IdentityId>,
+    forwarding: Forwarding,
+    files: Vec<NewFile>,
+) -> Result<Draft> {
+    // Its headers are enough: the body isn't quoted.
+    let message = engine
+        .read(move |db| db.messages().headers(id))
+        .await?
+        .ok_or(Error::MessageNotFound(id))?;
+    let account = message.summary.account_id;
+    let limit = engine
+        .read(move |db| {
+            if db.accounts().get(account)?.is_none() {
+                return Ok(None);
+            }
+            new_attachments_limit(db, account, from).map(|(_, limit)| Some(limit))
+        })
+        .await?
+        .ok_or_else(|| Error::AccountNotFound(account.to_string()))?;
+    if message.size.is_some_and(|size| u64::from(size) > limit) {
+        return Err(attachments_too_large(limit));
+    }
+    // Its GC grace period restarted, to cover the gap until the draft refers to it.
+    let (blob, size) = body::raw_blob(engine.clone(), id).await?;
+    let copied = blocking({
+        let engine = engine.clone();
+        move || copy_files(&engine, account, from, size, &files)
+    })
+    .await?;
+    // Again, as it is, and for the identity the files were checked for.
+    if size > copied.limit {
+        return Err(attachments_too_large(copied.limit));
+    }
+    let subject = message.summary.subject.as_deref().unwrap_or_default();
+    let mut attachments = vec![NewDraftAttachment {
+        blob,
+        filename: eml_name(subject),
+        mime_type: "message/rfc822".into(),
+        size,
+        content_id: None,
+    }];
+    attachments.extend(copied.attachments);
+    let Forwarding {
+        to, cc, bcc, text, ..
+    } = forwarding;
+    let content = DraftContent {
+        subject: forward_subject(subject),
+        to,
+        cc,
+        bcc,
+        body: DraftBody::plain(text.trim_end()),
+        quote: None,
+    };
+    insert(
+        engine,
+        account,
+        Some(copied.identity),
+        content,
+        None,
+        attachments,
+        Vec::new(),
+    )
+    .await
+}
+
+/// What a message attached whole is named: its subject, as Thunderbird and Outlook name
+/// it, with `.eml`; without what can't be in a file name where it may be saved, and not
+/// too long for one.
+fn eml_name(subject: &str) -> String {
+    let cleaned: String = subject
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => ' ',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect();
+    let name: String = cleaned
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(100)
+        .collect();
+    // Windows drops a trailing dot or space from a file name.
+    let name = name.trim_end_matches(['.', ' ']);
+    if name.is_empty() {
+        "message.eml".into()
+    } else {
+        format!("{name}.eml")
+    }
 }
 
 /// The attachments of a reply or forward of `message`, sent as `from`: those it starts
@@ -703,16 +849,36 @@ async fn quoted_images(
     if parts.is_empty() {
         return Vec::new();
     }
-    let (mut images, mut renamed) = (Vec::new(), HashMap::new());
-    for (id, part) in parts {
-        // Its size as the message said: one that can't fit isn't downloaded for nothing.
-        let said = part.size.map_or(0, u64::from);
-        if renamed.contains_key(id) || used + said > limit {
+    // By the sizes the message said: one that can't fit isn't downloaded for nothing.
+    let mut wanted = Vec::new();
+    let mut said = used;
+    for &(id, part) in &parts {
+        let size = said_size(part);
+        if wanted.iter().any(|&(_, (shown, _))| shown == id) || said + size > limit {
             continue;
         }
-        // The blob the message already has, its GC grace period restarted to cover the
-        // gap until the draft refers to it.
-        let (blob, size) = match body::attachment_blob(engine.clone(), part.id).await {
+        said += size;
+        wanted.push((part, (id, size)));
+    }
+    // The blobs the message already has, their GC grace periods restarted to cover the
+    // gap until the draft refers to them; those not here yet fetched together.
+    let fetch: Vec<_> = wanted
+        .iter()
+        .map(|&(part, (_, size))| (part.id, size))
+        .collect();
+    let mut blobs = match body::attachment_blobs(engine, &fetch).await {
+        Ok(blobs) => blobs,
+        Err(e) => {
+            tracing::warn!(message = %message.summary.id, "left the quoted images out: {e}");
+            return Vec::new();
+        }
+    };
+    let (mut images, mut renamed) = (Vec::new(), HashMap::new());
+    for (part, (id, _)) in wanted {
+        let found = blobs
+            .remove(&part.id)
+            .unwrap_or(Err(Error::AttachmentNotFound(part.id)));
+        let (blob, size) = match found {
             Ok(found) => found,
             Err(e) => {
                 tracing::warn!(attachment = %part.id, "left a quoted image out: {e}");
@@ -738,6 +904,11 @@ async fn quoted_images(
         *html = catmail_html::rename_cid_images(html, renamed);
     }
     images
+}
+
+/// An attachment's size as the message said, until it is downloaded.
+fn said_size(attachment: &Attachment) -> u64 {
+    attachment.size.map_or(0, u64::from)
 }
 
 /// An attachment's file name as copied into a draft: without NULs, `fallback` if it has
@@ -812,15 +983,26 @@ pub(crate) fn new_message_id(email: &str) -> String {
     format!("{}@{domain}", Uuid::new_v4().simple())
 }
 
+/// Where a draft built as a message goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Destination {
+    /// Its copy in the Drafts folder: with its Bcc recipients in the headers, and 8-bit
+    /// content, which IMAP takes.
+    Drafts,
+    /// Out through its identity's SMTP server: Bcc only in the envelope, 8-bit content
+    /// only if the server announced 8BITMIME when last connected to (taken to, until it
+    /// was: nearly every one does).
+    Smtp,
+}
+
 /// The draft as a message `from` its sender, dated now, its attachments read from the
-/// blob store. Bcc recipients go into the headers only `with_bcc`, for the draft's copy
-/// on the server. Blocking.
+/// blob store, made for where it goes. Blocking.
 pub(crate) fn build(
     engine: &Engine,
     from: &Address,
     snapshot: &DraftSnapshot,
     message_id: &str,
-    with_bcc: bool,
+    destination: Destination,
 ) -> Result<Vec<u8>> {
     let data = snapshot
         .blobs
@@ -828,6 +1010,16 @@ pub(crate) fn build(
         .map(|blob| engine.blobs.read(blob))
         .collect::<std::io::Result<Vec<_>>>()?;
     let draft = &snapshot.draft;
+    let (with_bcc, eight_bit) = match destination {
+        Destination::Drafts => (true, true),
+        Destination::Smtp => {
+            let announced = engine.store.read(|db| {
+                let sending = db.identities().sending(draft.account_id, draft.identity)?;
+                Ok(sending.and_then(|s| s.smtp))
+            })?;
+            (false, announced.is_none_or(|a| a.eight_bit_mime))
+        }
+    };
     build_message(&Outgoing {
         from,
         to: &draft.content.to,
@@ -852,6 +1044,7 @@ pub(crate) fn build(
                 data,
             })
             .collect(),
+        eight_bit,
     })
     .map_err(|e| Error::InvalidInput(e.to_string()))
 }
@@ -1364,6 +1557,18 @@ mod tests {
         assert_eq!(reply_subject("RE: hello"), "RE: hello");
         assert_eq!(reply_subject("回复：你好"), "回复：你好");
         assert_eq!(reply_subject(""), "Re: ");
+    }
+
+    #[test]
+    fn a_message_attached_whole_is_named_after_its_subject() {
+        assert_eq!(eml_name("Report"), "Report.eml");
+        assert_eq!(eml_name("Re: a/b\\c?\t*x*  "), "Re a b c x.eml");
+        assert_eq!(eml_name("Sent..."), "Sent.eml");
+        assert_eq!(eml_name(" \0 "), "message.eml");
+        assert_eq!(
+            eml_name(&"长".repeat(300)),
+            format!("{}.eml", "长".repeat(100))
+        );
     }
 
     #[test]

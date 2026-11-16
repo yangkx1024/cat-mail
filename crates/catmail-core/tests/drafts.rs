@@ -945,6 +945,152 @@ fn large_message() -> Vec<u8> {
     raw
 }
 
+/// Over the whole-message limit, with two images its HTML shows (1.2, 1.3) and two
+/// files (2, 3), none fetched with the body.
+fn large_message_of_parts() -> Vec<u8> {
+    let mut raw = b"From: Bob <bob@example.com>\r\n\
+        Subject: Many parts\r\n\
+        Content-Type: multipart/mixed; boundary=\"m\"\r\n\r\n\
+        --m\r\n\
+        Content-Type: multipart/related; boundary=\"r\"\r\n\r\n\
+        --r\r\n\
+        Content-Type: text/html\r\n\r\n\
+        <p><img src=\"cid:a@x\"><img src=\"cid:b@x\"></p>\r\n\
+        --r\r\n\
+        Content-Type: image/png\r\n\
+        Content-ID: <a@x>\r\n\
+        Content-Transfer-Encoding: base64\r\n\r\n\
+        iVBORw0KGgo=\r\n\
+        --r\r\n\
+        Content-Type: image/png\r\n\
+        Content-ID: <b@x>\r\n\
+        Content-Transfer-Encoding: base64\r\n\r\n\
+        iVBORw0KGgoA\r\n\
+        --r--\r\n\
+        --m\r\n\
+        Content-Type: text/plain; name=\"notes.txt\"\r\n\
+        Content-Disposition: attachment; filename=\"notes.txt\"\r\n\r\n\
+        notes\r\n\
+        --m\r\n\
+        Content-Type: video/mp4; name=\"clip.mp4\"\r\n\
+        Content-Disposition: attachment; filename=\"clip.mp4\"\r\n\
+        Content-Transfer-Encoding: base64\r\n\r\n"
+        .to_vec();
+    for _ in 0..(3 * 1024 * 1024 / 76) {
+        raw.extend_from_slice(&[b'A'; 76]);
+        raw.extend_from_slice(b"\r\n");
+    }
+    raw.extend_from_slice(b"--m--\r\n");
+    raw
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_parts_an_answer_needs_are_fetched_together() {
+    let mut state = state();
+    state.inbox().append(&large_message_of_parts(), &[]);
+    let env = synced_env(state).await;
+    let id = env.id_of("INBOX", "Many parts").await;
+    env.client.download_message(id).await.unwrap();
+    let fetches = |env: &Env| -> Vec<String> {
+        env.fake
+            .state()
+            .log
+            .iter()
+            .filter(|c| c.line.contains("BODY.PEEK[1.2]") || c.line.contains("BODY.PEEK[2]"))
+            .map(|c| c.line.clone())
+            .collect()
+    };
+    let names = |draft: &Draft| -> Vec<String> {
+        draft
+            .attachments
+            .iter()
+            .map(|a| a.filename.clone())
+            .collect()
+    };
+
+    // A part the server sends nothing for fails alone: the quote keeps the other image.
+    env.fake.state().faults.nil_parts = vec!["1.2"];
+    let draft = env
+        .client
+        .reply(id, false, None, String::new(), Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(names(&draft), ["image"]);
+    let [fetch] = &fetches(&env)[..] else {
+        panic!("{:?}", fetches(&env));
+    };
+    assert!(fetch.contains("BODY.PEEK[1.3]"), "one FETCH: {fetch}");
+
+    // A forward without one of its files leaves no draft, but keeps what came.
+    env.fake.state().faults.nil_parts = vec!["2"];
+    env.client
+        .forward(id, None, Forwarding::default(), Vec::new())
+        .await
+        .unwrap_err();
+    assert_eq!(env.client.list_drafts(env.account).await.unwrap().len(), 1);
+    let attachments = env
+        .client
+        .get_message(id)
+        .await
+        .unwrap()
+        .unwrap()
+        .body
+        .unwrap();
+    let downloaded: Vec<_> = attachments
+        .attachments
+        .iter()
+        .filter(|a| a.downloaded)
+        .map(|a| a.filename.as_deref().unwrap_or("image"))
+        .collect();
+    assert_eq!(downloaded, ["image", "clip.mp4"]);
+
+    // Then only what is still missing: the files, then the images in the room they
+    // leave.
+    env.fake.state().faults.nil_parts = Vec::new();
+    let before = fetches(&env).len();
+    let draft = env
+        .client
+        .forward(id, None, Forwarding::default(), Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(names(&draft), ["notes.txt", "clip.mp4", "image", "image"]);
+    let now = fetches(&env);
+    let [files, images] = &now[before..] else {
+        panic!("{now:?}");
+    };
+    assert!(files.contains("BODY.PEEK[2]") && !files.contains("BODY.PEEK[3]"));
+    assert!(images.contains("BODY.PEEK[1.2]") && !images.contains("BODY.PEEK[1.3]"));
+    // Nothing left to fetch.
+    let before = fetches(&env).len();
+    env.client
+        .forward(id, None, Forwarding::default(), Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(fetches(&env).len(), before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn parts_refused_together_are_fetched_one_at_a_time() {
+    let mut state = state();
+    state.inbox().append(&large_message_of_parts(), &[]);
+    state.faults.refuse_several_sections = true;
+    let env = synced_env(state).await;
+    let id = env.id_of("INBOX", "Many parts").await;
+    env.client.download_message(id).await.unwrap();
+
+    let draft = env
+        .client
+        .forward(id, None, Forwarding::default(), Vec::new())
+        .await
+        .unwrap();
+    let names: Vec<_> = draft
+        .attachments
+        .iter()
+        .map(|a| a.filename.as_str())
+        .collect();
+    assert_eq!(names, ["notes.txt", "clip.mp4", "image", "image"]);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_forward_without_its_attachment_leaves_no_draft() {
     let mut state = state();
@@ -1014,6 +1160,7 @@ async fn answers_are_made_with_the_users_text_and_recipients() {
         cc: Vec::new(),
         bcc: vec![addr("dave@example.com")],
         text: "Have a look.\n\n".into(),
+        as_attachment: false,
     };
     let dir = tempfile::tempdir().unwrap();
     let notes = dir.path().join("notes.txt");
@@ -1050,6 +1197,80 @@ async fn answers_are_made_with_the_users_text_and_recipients() {
     assert!(text.starts_with("Thanks!\n\nOn "), "{text:?}");
     assert!(text.ends_with("wrote:\n> See the report.\n"), "{text:?}");
     assert_eq!(names(&draft), ["image", "notes.txt"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forward_as_an_attachment_carries_the_message_as_it_is() {
+    let mut report = state();
+    report.inbox().append(REPORT, &[]);
+    let env = synced_env(report).await;
+    let id = env.id_of("INBOX", "Report").await;
+    let forwarding = Forwarding {
+        to: vec![addr("bob@example.com")],
+        text: "Is this real?\n".into(),
+        as_attachment: true,
+        ..Default::default()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let notes = dir.path().join("notes.txt");
+    std::fs::write(&notes, "my notes").unwrap();
+    let draft = env
+        .client
+        .forward(id, None, forwarding.clone(), vec![notes.into()])
+        .await
+        .unwrap();
+    assert_eq!(draft.content.subject, "Fwd: Report");
+    assert_eq!(draft.content.body, DraftBody::plain("Is this real?"));
+    assert!(draft.content.quote.is_none(), "nothing quoted");
+    let files: Vec<_> = draft
+        .attachments
+        .iter()
+        .map(|a| (a.filename.as_str(), a.mime_type.as_str(), a.size))
+        .collect();
+    assert_eq!(
+        files,
+        [
+            ("Report.eml", "message/rfc822", REPORT.len() as u64),
+            ("notes.txt", "text/plain", 8)
+        ]
+    );
+    // Fetched whole, so the body came with it.
+    let message = env.client.get_message(id).await.unwrap().unwrap();
+    assert!(message.body.is_some());
+
+    // The copy on the server carries it byte for byte, every header kept.
+    env.replay().await;
+    let raw = env.fake.state().mailbox_mut("Drafts").messages[0]
+        .raw
+        .clone();
+    assert!(raw.windows(REPORT.len()).any(|w| w == REPORT));
+    let wire = String::from_utf8_lossy(&raw);
+    assert!(
+        wire.contains("Content-Transfer-Encoding: 7bit"),
+        "as it is: {wire}"
+    );
+
+    // One that can't be sent isn't downloaded for nothing.
+    let mut large = state();
+    large.inbox().append(&large_message(), &[]);
+    large.faults.append_limit = Some(1024 * 1024);
+    let env = synced_env(large).await;
+    let id = env.id_of("INBOX", "Big file").await;
+    let fetches = env.fake.state().received("FETCH");
+    let e = env
+        .client
+        .forward(id, None, forwarding, Vec::new())
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("add up to"), "{e}");
+    assert_eq!(env.fake.state().received("FETCH"), fetches);
+    assert!(
+        env.client
+            .list_drafts(env.account)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// Syncing in the background, a draft uploaded once it was left alone for `delay`.

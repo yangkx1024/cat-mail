@@ -6,14 +6,14 @@ use std::time::Duration;
 
 use catmail_proto::imap::Session;
 use catmail_proto::{Credentials, TlsConfig};
-use catmail_store::{BlobStore, Db, Identities, Store};
+use catmail_store::{BlobStore, Db, Identities, SmtpAnnounced, Store};
 use catmail_types::{
-    Account, AccountId, AccountOverview, AccountStatus, AttachmentId, ChangeReport, DeleteMode,
-    Draft, DraftAttachment, DraftAttachmentId, DraftChanges, DraftContent, DraftId, DraftSummary,
-    Event, Flags, FlushReport, Folder, FolderId, FolderRole, FolderSyncReport, Forwarding,
-    GcReport, Identity, IdentityId, Message, MessageCursor, MessageId, MessageSummary, NewAccount,
-    NewFile, NewIdentity, OutboxEntry, OutboxId, PendingOp, PendingOpId, ReplayReport, SearchQuery,
-    ServerConfig, SyncReport, special_folder,
+    Account, AccountId, AccountOverview, AccountStatus, Answer, AttachmentId, ChangeReport,
+    DeleteMode, Draft, DraftAttachment, DraftAttachmentId, DraftChanges, DraftContent, DraftId,
+    DraftSummary, Event, Flags, FlushReport, Folder, FolderId, FolderRole, FolderSyncReport,
+    Forwarding, GcReport, Identity, IdentityId, Message, MessageCursor, MessageId, MessageSummary,
+    NewAccount, NewFile, NewIdentity, OutboxEntry, OutboxId, PendingOp, PendingOpId, ReplayReport,
+    SearchQuery, ServerConfig, SyncReport, special_folder,
 };
 use secrecy::{ExposeSecret, SecretString};
 use tokio::runtime::Handle;
@@ -505,7 +505,7 @@ impl MailClient {
         self.shared
             .rt
             .run(async move {
-                let (smtp_max_size, session) = match verify {
+                let (smtp, session) = match verify {
                     Verify::Login => {
                         let (smtp, session) = check_account(&engine, &new, &password)
                             .await
@@ -517,7 +517,7 @@ impl MailClient {
                                     "couldn't sign in to a new account"
                                 );
                             })?;
-                        (smtp, Some(session))
+                        (Some(smtp), Some(session))
                     }
                     Verify::Skip => (None, None),
                 };
@@ -529,8 +529,10 @@ impl MailClient {
                             Ok(engine.store.write(|db| {
                                 let account = db.accounts().insert(&new, key)?;
                                 announced.record(db, account.id)?;
-                                if let Some(own) = db.identities().default_of(account.id)? {
-                                    db.identities().set_smtp_max_size(own, smtp_max_size)?;
+                                if let Some(own) = db.identities().default_of(account.id)?
+                                    && let Some(smtp) = smtp
+                                {
+                                    db.identities().set_smtp_announced(own, smtp)?;
                                 }
                                 Ok(Account {
                                     gmail_server: announced.gmail,
@@ -610,29 +612,27 @@ impl MailClient {
         self.shared
             .rt
             .run(async move {
-                let smtp_max_size =
-                    match verify {
-                        Verify::Login => check_identity(&engine, &new, &password)
-                            .await
-                            .inspect_err(|e| {
-                                tracing::warn!(
-                                    %account,
-                                    smtp = %server(&new.smtp),
-                                    error = %e,
-                                    "couldn't sign in for a new sending address"
-                                );
-                            })?,
-                        Verify::Skip => None,
-                    };
+                let smtp = match verify {
+                    Verify::Login => check_identity(&engine, &new, &password)
+                        .await
+                        .inspect_err(|e| {
+                            tracing::warn!(
+                                %account,
+                                smtp = %server(&new.smtp),
+                                error = %e,
+                                "couldn't sign in for a new sending address"
+                            );
+                        })
+                        .map(Some)?,
+                    Verify::Skip => None,
+                };
                 let identity = blocking({
                     let engine = engine.clone();
                     move || {
                         insert_with_secret(&engine, "identity", &new.email, &password, |key| {
                             engine
                                 .store
-                                .write(|db| {
-                                    db.identities().insert(account, &new, key, smtp_max_size)
-                                })?
+                                .write(|db| db.identities().insert(account, &new, key, smtp))?
                                 .ok_or_else(|| Error::AccountNotFound(account.to_string()))
                         })
                     }
@@ -1326,6 +1326,17 @@ impl MailClient {
             .await
     }
 
+    /// What making `answer` to the message ([`reply`](Self::reply),
+    /// [`forward`](Self::forward)) downloads from its server, in bytes, about: nothing
+    /// once all it takes is here. For a caller that keeps to a download budget.
+    pub async fn answer_download_size(&self, message: MessageId, answer: Answer) -> Result<u64> {
+        let engine = self.engine()?;
+        self.shared
+            .rt
+            .run(async move { drafts::download_size(&engine, message, answer).await })
+            .await
+    }
+
     /// Changes what the draft says, and the identity it is sent as: one of
     /// [`draft_senders`](Self::draft_senders). Only the parts `changes` gives are
     /// replaced, in the draft as it is then. One of another account moves the draft
@@ -1673,12 +1684,12 @@ fn check_password(password: &SecretString) -> Result<()> {
 }
 
 /// Logs in to the account's IMAP and SMTP servers, both at once, and out of the SMTP
-/// server again; returns the SIZE the SMTP server announced, and the IMAP connection.
+/// server again; returns what the SMTP server announced, and the IMAP connection.
 async fn check_account(
     engine: &Engine,
     new: &NewAccount,
     password: &SecretString,
-) -> Result<(Option<u64>, Session)> {
+) -> Result<(SmtpAnnounced, Session)> {
     let credentials = Credentials {
         username: new.username.clone(),
         password: password.clone(),
@@ -1700,12 +1711,12 @@ async fn check_account(
     }
 }
 
-/// Logs in to the identity's SMTP server and out again; returns the SIZE it announced.
+/// Logs in to the identity's SMTP server and out again; returns what it announced.
 async fn check_identity(
     engine: &Engine,
     new: &NewIdentity,
     password: &SecretString,
-) -> Result<Option<u64>> {
+) -> Result<SmtpAnnounced> {
     let credentials = Credentials {
         username: new.username.clone(),
         password: password.clone(),
@@ -1719,19 +1730,19 @@ fn server(server: &ServerConfig) -> String {
     format!("{}:{} {}", server.host, server.port, server.security)
 }
 
-/// Logs in to the SMTP server `server` and out again; returns the SIZE it announced. Its
+/// Logs in to the SMTP server `server` and out again; returns what it announced. Its
 /// failure as [`Error::OutgoingServer`].
 async fn check_smtp(
     engine: &Engine,
     server: &ServerConfig,
     credentials: &Credentials,
-) -> Result<Option<u64>> {
+) -> Result<SmtpAnnounced> {
     let session = connection::smtp_login(engine, server, credentials)
         .await
         .map_err(|e| Error::OutgoingServer(Box::new(e)))?;
-    let limit = session.max_size();
+    let announced = connection::announced(&session);
     session.quit().await;
-    Ok(limit)
+    Ok(announced)
 }
 
 /// Stores `password` in the keyring under a new key for a `kind` (`account`, `identity`)

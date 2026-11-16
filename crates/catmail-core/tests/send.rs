@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use catmail_core::{
-    Address, DraftBody, DraftContent, Error, ErrorKind, Event, IdentityId, NewFile, OutboxEntry,
-    OutboxStatus, RecvError, Verify,
+    Address, DraftBody, DraftContent, Error, ErrorKind, Event, Forwarding, IdentityId, MessageId,
+    NewFile, OutboxEntry, OutboxStatus, RecvError, Verify,
 };
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 use common::{Env, addr, drain, env, env_with, eventually, files, sparse, status_changes};
@@ -1344,4 +1344,57 @@ async fn the_overview_counts_drafts_and_lists_the_outbox() {
     // The one handed to "send" is in the outbox, not among the drafts.
     assert_eq!(account.drafts, 1);
     assert_eq!(account.outbox, [queued]);
+}
+
+/// As many senders write mail: 8-bit text, not encoded.
+const EIGHT_BIT: &[u8] = b"From: Zhang <zhang@example.com>\r\n\
+    To: alice@example.com\r\n\
+    Subject: Notice\r\n\
+    DKIM-Signature: v=1; a=rsa-sha256; b=abc\r\n\
+    Content-Type: text/plain; charset=utf-8\r\n\
+    Content-Transfer-Encoding: 8bit\r\n\r\n\
+    \xe4\xbd\xa0\xe5\xa5\xbd\r\n";
+
+/// Forwards the message whole to Bob and sends it; what the server got.
+async fn forward_whole(env: &Env, id: MessageId) -> Vec<u8> {
+    let forwarding = Forwarding {
+        to: vec![addr("bob@example.com")],
+        as_attachment: true,
+        ..Default::default()
+    };
+    let draft = env
+        .client
+        .forward(id, None, forwarding, Vec::new())
+        .await
+        .unwrap();
+    env.client.send_draft(draft.id).await.unwrap();
+    env.flush().await;
+    env.smtp.state().received.last().unwrap().data.clone()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_forwarded_whole_goes_8bit_only_where_the_server_takes_it() {
+    let mut state = state();
+    state.inbox().append(EIGHT_BIT, &[]);
+    let env = env(state).await;
+    env.client.sync_account(env.account).await.unwrap();
+    let id = env.id_of("INBOX", "Notice").await;
+    let as_it_is = |data: &[u8]| data.windows(EIGHT_BIT.len()).any(|w| w == EIGHT_BIT);
+
+    // Not connected to yet: taken to take 8-bit content, as nearly every server does.
+    let data = forward_whole(&env, id).await;
+    assert!(as_it_is(&data));
+    assert!(String::from_utf8_lossy(&data).contains("Content-Transfer-Encoding: 8bit"));
+
+    // A server without 8BITMIME: what was built before sending told is sent as it was,
+    // and the next one is base64, as Outlook sends them.
+    env.smtp.state().faults.no_8bitmime = true;
+    assert!(as_it_is(&forward_whole(&env, id).await));
+    let data = forward_whole(&env, id).await;
+    assert!(data.is_ascii() && !as_it_is(&data));
+    let parsed = MessageParser::new().parse(&data).unwrap();
+    let attached = parsed.attachments().next().unwrap();
+    assert_eq!(attached.attachment_name(), Some("Notice.eml"));
+    assert_eq!(&*attached.decoded(), EIGHT_BIT);
+    assert_eq!(env.sent_folder().last().unwrap(), &data);
 }

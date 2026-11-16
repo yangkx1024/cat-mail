@@ -94,3 +94,37 @@ async fn a_draft_failing_after_its_download_keeps_it_charged() {
     let text = refused["content"][0]["text"].as_str().unwrap();
     assert!(text.starts_with("over_limit"), "{text}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forward_as_an_attachment_costs_the_raw_message_once() {
+    let f = Fixture::new(ServeOptions::default()).await;
+    let ids = f.ids(None).await;
+    let mut sizes = Vec::new();
+    for &id in &ids {
+        let message = f.client.get_message(MessageId(id)).await.unwrap().unwrap();
+        sizes.push(u64::from(message.size.unwrap()));
+    }
+    drop(f);
+    // Room for the first message, not for both.
+    let options = ServeOptions {
+        limits: TokenLimits {
+            download_per_day: sizes[0] + sizes[1] - 1,
+            ..TokenLimits::default()
+        },
+        ..ServeOptions::default()
+    };
+    let f = Fixture::new(options).await;
+    let ids = f.ids(None).await;
+    let whole = |id| json!({"message": id, "as_attachment": true});
+    f.call("read_message", json!({"id": ids[0]})).await;
+    // Read whole, so its raw form is here: nothing more to download.
+    let draft = f.call("forward", whole(ids[0])).await;
+    assert_eq!(
+        draft["attachments"][0]["mime_type"], "message/rfc822",
+        "{draft}"
+    );
+    let refused = f.call_result("forward", whole(ids[1])).await;
+    assert_eq!(refused["isError"], true, "{refused}");
+    let text = refused["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("over_limit"), "{text}");
+}

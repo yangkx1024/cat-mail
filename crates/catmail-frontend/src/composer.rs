@@ -35,8 +35,15 @@ pub const SAVE_DELAY: Duration = Duration::from_millis(800);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComposeFrom {
     New(AccountId),
-    Reply { message: MessageId, all: bool },
-    Forward(MessageId),
+    Reply {
+        message: MessageId,
+        all: bool,
+    },
+    /// With `as_attachment`, the message attached whole ([`Forwarding::as_attachment`]).
+    Forward {
+        message: MessageId,
+        as_attachment: bool,
+    },
     Draft(DraftId),
 }
 
@@ -74,9 +81,16 @@ impl ComposeFrom {
                     .await?
                     .id
             }
-            ComposeFrom::Forward(message) => {
+            ComposeFrom::Forward {
+                message,
+                as_attachment,
+            } => {
+                let forwarding = Forwarding {
+                    as_attachment,
+                    ..Default::default()
+                };
                 client
-                    .forward(message, None, Forwarding::default(), Vec::new())
+                    .forward(message, None, forwarding, Vec::new())
                     .await?
                     .id
             }

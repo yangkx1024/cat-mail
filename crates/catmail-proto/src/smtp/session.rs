@@ -98,6 +98,13 @@ impl Session {
             .filter(|&limit| limit > 0)
     }
 
+    /// Whether the server announced 8BITMIME (RFC 6152): it takes bodies that aren't
+    /// 7-bit clean. Without it a message must be, though [`begin`](Self::begin) doesn't
+    /// refuse one that isn't: most servers take it all the same.
+    pub fn eight_bit_mime(&self) -> bool {
+        self.has("8BITMIME")
+    }
+
     /// Authenticates with AUTH PLAIN, else AUTH LOGIN. A server that doesn't offer AUTH
     /// is taken to need none (a local relay); STARTTLS can't have been stripped, since
     /// it is required whenever it is configured.

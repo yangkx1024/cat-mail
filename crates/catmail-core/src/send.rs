@@ -124,8 +124,13 @@ pub(crate) async fn queue_draft(
     let raw = blocking({
         let (engine, message_id) = (engine.clone(), message_id.clone());
         move || {
-            // Bcc only in the envelope.
-            let raw = drafts::build(&engine, &sender, &snapshot, &message_id, false)?;
+            let raw = drafts::build(
+                &engine,
+                &sender,
+                &snapshot,
+                &message_id,
+                drafts::Destination::Smtp,
+            )?;
             Ok(engine.blobs.put_bytes(&raw)?)
         }
     })
