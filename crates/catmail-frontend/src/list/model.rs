@@ -321,10 +321,12 @@ impl ListModel {
     /// The rows `listing` shows (at least a page), read again after the engine reported
     /// a change, keeping the selected row selected. During a sync changes come faster
     /// than a page is read: at most one read runs, and one more follows if asked for
-    /// meanwhile ([`Loaded::again`]).
+    /// meanwhile ([`Loaded::again`]). A page more than is shown is read, so that messages
+    /// that arrived don't push the last rows out ([`loaded`](Self::loaded) cuts it after
+    /// them).
     pub fn refresh(&mut self, listing: &Listing) -> Option<Fetch> {
         let shown = u32::try_from(listing.rows.len()).unwrap_or(u32::MAX);
-        self.start(listing, shown.max(PAGE), None)
+        self.start(listing, shown.max(PAGE).saturating_add(PAGE), None)
     }
 
     /// The next page, when the list is scrolled to its end: only of messages (folders,
@@ -445,13 +447,28 @@ impl ListModel {
             checked: None,
             again,
         };
-        let Some((rows, more)) = result else {
+        let Some((mut rows, mut more)) = result else {
             return Some(loaded);
         };
         let Some(read) = fetch.read else {
             loaded.rows = Some(Rows::Append(rows, more));
             return Some(loaded);
         };
+        // Down to the last row shown, wherever arrivals moved it, or to as many rows as
+        // were shown if it is gone: what follows is the next page's. Drafts and the
+        // outbox are read whole and have no next page, so they keep every row.
+        let paged = !matches!(fetch.source, Source::Drafts(_) | Source::Outbox(_));
+        let page = PAGE as usize;
+        let keep = listing
+            .rows
+            .last()
+            .and_then(|last| rows.iter().position(|row| row.id() == last.id()))
+            .map_or(listing.rows.len(), |at| at + 1)
+            .max(page);
+        if paged && keep < rows.len() {
+            rows.truncate(keep);
+            more = true;
+        }
         self.removal.read(read, &rows);
         // A sync's events often bring nothing this list shows.
         let unchanged = !rows.is_empty() && listing.rows == rows && listing.has_more == more;
@@ -518,10 +535,10 @@ impl ListModel {
 
 #[cfg(test)]
 mod tests {
-    use catmail_core::FolderId;
+    use catmail_core::{FolderId, OutboxStatus};
 
     use super::*;
-    use crate::fixtures::{message, midday};
+    use crate::fixtures::{message, midday, outbox_entry};
 
     fn utc() -> Calendar {
         Calendar::now(&jiff::tz::TimeZone::UTC)
@@ -657,8 +674,49 @@ mod tests {
 
         // Read again, the same: nothing to change. At least a page, or what is shown.
         let again = list.model.refresh(&list.listing).unwrap();
-        assert_eq!(again.limit, PAGE);
+        assert_eq!(again.limit, 2 * PAGE);
         assert_eq!(list.load(&again, &[1, 2, 3]).unwrap().rows, None);
+    }
+
+    #[test]
+    fn arrivals_do_not_push_the_last_rows_out() {
+        let (mut list, first) = List::new();
+        let shown: Vec<i64> = (1..=i64::from(PAGE)).collect();
+        list.load(&first, &shown);
+        let last = m(i64::from(PAGE));
+        list.open(last);
+        // One arrived, and the folder goes on after what is shown.
+        let read: Vec<i64> = (0..=i64::from(PAGE) + 50).collect();
+        let again = list.model.refresh(&list.listing).unwrap();
+        let loaded = list.load(&again, &read).unwrap();
+        assert_eq!(loaded.select, Select::Keep);
+        assert_eq!(list.selected, Some(last));
+        assert_eq!(list.ids().first(), Some(&m(0)));
+        assert_eq!(list.ids().last(), Some(&last), "the rest is the next page");
+        assert!(list.listing.has_more);
+    }
+
+    #[test]
+    fn the_outbox_keeps_every_row_past_a_page() {
+        let mut model = ListModel::default();
+        let (mut listing, fetch) = model.show(Some(Source::Outbox(catmail_core::AccountId(1))));
+        let fetch = fetch.unwrap();
+        // Read whole, with no next page to load the rest from.
+        let entries: Vec<Row> = (1..=i64::from(PAGE) + 1)
+            .map(|id| Row::Outbox(outbox_entry(id, 1, OutboxStatus::Queued)))
+            .collect();
+        let loaded = model
+            .loaded(
+                &fetch,
+                Some((entries, false)),
+                &listing,
+                None,
+                &HashSet::new(),
+            )
+            .unwrap();
+        loaded.rows.unwrap().apply(&mut listing, &utc());
+        assert_eq!(listing.rows.len(), PAGE as usize + 1);
+        assert!(!listing.has_more);
     }
 
     #[test]

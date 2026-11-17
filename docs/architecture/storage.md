@@ -59,8 +59,8 @@
 `list_date`（`date`，没有日期时为 `i64::MIN`），从不为空。
 
 文件夹的一页是 `messages_folder_date (folder_id, list_date)` 上的两次定位（倒着读；索引末尾本来就带着
-rowid 即 `id`，不必再列一次）：先取游标那个日期里 `id` 更小的（`LIST_SAME_DATE`，定位到
-`folder_id, list_date, rowid`），不够一页再取更早的日期（`LIST_OLDER`）。一个行值条件
+rowid 即 `id`，不必再列一次）：先取游标那个日期里 `id` 更小的（`Page::same_date`，定位到
+`folder_id, list_date, rowid`），不够一页再取更早的日期（`Page::older`）。一个行值条件
 `(list_date, id) < (…)` 看似等价，但 SQLite 只用 `list_date` 定位，要逐行跨过同一日期里 `id` 更大的
 所有行：几万封同一时间（或都没有日期）的邮件里，越往后翻每页越慢，比 OFFSET 还慢。没有游标时绑定
 `(i64::MAX, i64::MAX)`。有测试比较翻到一组同日期邮件末尾和开头时 `list` 走的 VM 步数。

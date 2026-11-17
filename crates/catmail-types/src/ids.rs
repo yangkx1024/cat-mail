@@ -30,10 +30,11 @@ row_id!(
     FolderId
 );
 row_id!(
-    /// Local identifier of a message in one folder, i.e. of one IMAP (mailbox, UID)
-    /// pair. A copy in another folder has its own id. A message moved here keeps its id
-    /// if the server tells its new UID (UIDPLUS); otherwise the next sync gives it a new
-    /// one.
+    /// Local identifier of one server message. On a standard account that is one IMAP
+    /// (mailbox, UID) pair: a copy in another folder has its own id, and a message moved
+    /// here keeps its id if the server tells its new UID (UIDPLUS); otherwise the next
+    /// sync gives it a new one. On Gmail it is one `X-GM-MSGID`, which keeps its id
+    /// wherever it is found.
     MessageId
 );
 row_id!(

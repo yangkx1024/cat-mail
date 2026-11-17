@@ -1168,8 +1168,6 @@ fn without_nul(mut content: DraftContent) -> DraftContent {
     content
 }
 
-/// Addresses must be usable as they are in the SMTP envelope. Checked when saving, so a
-/// mistake shows up while the user is still writing.
 /// The text of a [`validate`] error, for one returned from a write transaction.
 fn invalid_text(e: Error) -> String {
     match e {
@@ -1178,6 +1176,8 @@ fn invalid_text(e: Error) -> String {
     }
 }
 
+/// Addresses must be usable as they are in the SMTP envelope. Checked when saving, so a
+/// mistake shows up while the user is still writing.
 pub(crate) fn validate(content: &DraftContent) -> Result<()> {
     for address in content.recipients() {
         check_address(&address.email)?;

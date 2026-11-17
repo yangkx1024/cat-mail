@@ -645,7 +645,6 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "glib-unix",
- "jiff",
  "nsh-base",
  "nsh-core",
  "nsh-platform-linux",
@@ -724,7 +723,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
- "url",
  "uuid",
 ]
 

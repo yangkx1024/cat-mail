@@ -257,10 +257,21 @@ pub fn link_href(typed: &str) -> Option<String> {
             && s.chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
     });
-    // `localhost:8080` and `example.com:443/x` are a host and a port, not a scheme.
-    let port = typed
-        .split_once(':')
-        .is_some_and(|(_, rest)| rest.starts_with(|c: char| c.is_ascii_digit()));
+    // `localhost:8080`, `intranet:8080/help` and `example.com:443/x` are a host and a
+    // port, not a scheme: up to five digits, no more than 65535, ending the address or
+    // its host. The numbers of `tel:5551234` and `tel:110` are not ports.
+    let port = typed.split_once(':').is_some_and(|(host, rest)| {
+        let digits = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        let (number, after) = rest.split_at(digits);
+        !["tel", "sms", "fax"]
+            .iter()
+            .any(|s| host.eq_ignore_ascii_case(s))
+            && (1..=5).contains(&number.len())
+            && number.parse::<u32>().is_ok_and(|n| n <= 65535)
+            && (after.is_empty() || after.starts_with(['/', '?', '#']))
+    });
     Some(if has_scheme && !port {
         typed.to_owned()
     } else if typed.contains('@') && !typed.contains('/') {
@@ -366,6 +377,14 @@ mod tests {
             ("a@example.com", "mailto:a@example.com"),
             ("mailto:a@example.com", "mailto:a@example.com"),
             ("tel:+861234", "tel:+861234"),
+            ("tel:5551234", "tel:5551234"),
+            ("tel:110", "tel:110"),
+            ("TEL:110", "TEL:110"),
+            ("localhost:8080", "https://localhost:8080"),
+            ("LOCALHOST:8080", "https://LOCALHOST:8080"),
+            ("intranet:8080/help", "https://intranet:8080/help"),
+            ("intranet:8080?q=1", "https://intranet:8080?q=1"),
+            ("geo:37.78,-122.4", "geo:37.78,-122.4"),
             ("javascript:alert(1)", "javascript:alert(1)"),
         ] {
             assert_eq!(link_href(typed).as_deref(), Some(href), "{typed}");

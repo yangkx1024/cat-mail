@@ -290,7 +290,18 @@ enum Lead {
         space: bool,
         child: bool,
     },
+    /// In the compound selector the scope was written in place of (`body.a:hover`), or
+    /// in the whitespace after it: a sibling combinator here would reach outside the
+    /// scope's element, so the rule is refused.
+    AfterScope {
+        space: bool,
+    },
     Rest,
+}
+
+/// Whether `token` is a sibling combinator, `~` or `+`.
+fn is_sibling(token: &Token<'_>) -> bool {
+    matches!(token, Token::Delim('~' | '+'))
 }
 
 impl Selector<'_> {
@@ -316,8 +327,12 @@ impl Selector<'_> {
                 self.push_scope()
             }
             Lead::Start if ident("body") => {
-                self.lead = Lead::Rest;
+                self.lead = Lead::AfterScope { space: false };
                 self.push_scope()
+            }
+            // Nothing a message's own page matches; of the scope's siblings once scoped.
+            Lead::Start | Lead::AfterRoot { .. } | Lead::AfterScope { .. } if is_sibling(token) => {
+                Err(())
             }
             Lead::Start => {
                 self.lead = Lead::Rest;
@@ -337,11 +352,15 @@ impl Selector<'_> {
                 Ok(())
             }
             Lead::AfterRoot { space, child } if (space || child) && ident("body") => {
-                self.lead = Lead::Rest;
+                self.lead = Lead::AfterScope { space: false };
                 Ok(())
             }
             Lead::AfterRoot { space, child } => {
-                self.lead = Lead::Rest;
+                self.lead = if space || child {
+                    Lead::Rest
+                } else {
+                    Lead::AfterScope { space: false }
+                };
                 if child {
                     self.css.push(&Token::WhiteSpace(" "))?;
                     self.css.push(&Token::Delim('>'))?;
@@ -349,6 +368,15 @@ impl Selector<'_> {
                 if space || child {
                     self.css.push(&Token::WhiteSpace(" "))?;
                 }
+                copy(parser, token, &mut self.css, Context::Selector)
+            }
+            Lead::AfterScope { space } => {
+                self.lead = match token {
+                    Token::WhiteSpace(_) => Lead::AfterScope { space: true },
+                    Token::Delim('>') => Lead::Rest,
+                    _ if space => Lead::Rest,
+                    _ => Lead::AfterScope { space: false },
+                };
                 copy(parser, token, &mut self.css, Context::Selector)
             }
             Lead::Rest => copy(parser, token, &mut self.css, Context::Selector),
@@ -620,6 +648,32 @@ mod tests {
             css: source.into(),
         }];
         sanitize_scoped(&elements, "q").css
+    }
+
+    #[test]
+    fn a_scoped_sheet_does_not_reach_its_elements_siblings() {
+        for outside in [
+            "body ~ div{display:none}",
+            "body + div{display:none}",
+            "body.a:hover ~ div{display:none}",
+            "html ~ div{display:none}",
+            "html.a + div{display:none}",
+            "html > body ~ div{display:none}",
+            ":root + div{display:none}",
+            "~ div{display:none}",
+            "+ div{display:none}",
+        ] {
+            assert_eq!(
+                scoped(&format!("{outside}.b{{color:red}}")),
+                ".q .b{color:red;}",
+                "{outside}"
+            );
+        }
+        // Siblings inside it are the message's own.
+        assert_eq!(
+            scoped("body .a ~ .b{color:red}body > .a + .b{color:red}h1 + p{color:red}"),
+            ".q .a ~ .b{color:red;}.q > .a + .b{color:red;}.q h1 + p{color:red;}"
+        );
     }
 
     #[test]

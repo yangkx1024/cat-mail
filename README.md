@@ -24,7 +24,7 @@
 - 邮件 HTML 先清洗再显示；正文页面不运行脚本，也不联网，远程图片默认拦截，要你点一下才由引擎下载
 - 阅读不改变服务器上的任何东西（`EXAMINE`、`BODY.PEEK`）；打开即已读可以关闭
 - 发出后没收到服务器确认的邮件不会自动重发，由你决定
-- TLS 只用 rustls，禁止 OpenSSL 等第二套加密实现；全工作区禁用 `unsafe`；依赖每周做安全审计
+- TLS 只用 rustls，禁止 OpenSSL 等第二套加密实现；引擎各 crate 禁用 `unsafe`（只有桌面前端调用 AppKit、`malloc_trim` 等系统接口处例外）；依赖每周做安全审计
 
 **简洁高效**
 
@@ -163,7 +163,7 @@ cargo test -p catmail-core --test dovecot --test submission
 | `catmail-gui` | `catmail-gui` 图形界面（Native Shell：GTK 4 / AppKit，正文在 WebView 里） |
 | `catmail-testkit` | 可注入故障的假 IMAP / SMTP 服务器，只用于测试 |
 
-依赖方向：`types ← store, proto ← core ← cli / gui`，`core ← frontend ← gui`，`core ← mcp ← cli, frontend`。设计细节见
+依赖方向：`types ← store, proto ← core ← cli / gui`，`html ← proto, core`，`core ← frontend ← gui`，`core ← mcp ← cli, frontend`。设计细节见
 [docs/architecture.md](docs/architecture.md) 及 [docs/architecture/](docs/architecture/)。
 
 ## 路线图

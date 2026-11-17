@@ -1,7 +1,7 @@
 //! Giving the memory the windows used back to the system once they are gone.
 
 /// Returns to the system what the allocator holds free. glibc's heaps only shrink from
-/// their top, so what the windows freed (layouts, the reader's tiles, the renderer's
+/// their top, so what the windows freed (layouts, the rows, the toolkit's
 /// buffers) stays the process's, scattered among what is still in use: an app left
 /// running with no window would keep the most it ever used. Elsewhere a no-op: other
 /// allocators give it back on their own.

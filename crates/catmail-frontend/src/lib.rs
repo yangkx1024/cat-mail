@@ -11,7 +11,8 @@
 //! or nsh, and holds no type of theirs.
 //!
 //! `unsafe_code` is denied (the workspace's lint), not forbidden: [`memory`] calls glibc's
-//! `malloc_trim`.
+//! `malloc_trim`, and the macOS status item ([`tray`]) and login item ([`autostart`]) call
+//! AppKit and ServiceManagement.
 
 pub mod accounts;
 pub mod autostart;

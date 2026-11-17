@@ -14,6 +14,8 @@
 //! to its output fails a fingerprint test in `catmail-proto`, which then decides whether
 //! stored bodies are made again (`catmail_proto::mime::CONTENT_VERSION`).
 
+#![forbid(unsafe_code)]
+
 mod css;
 mod dark;
 mod images;

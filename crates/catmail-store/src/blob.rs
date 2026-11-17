@@ -51,10 +51,6 @@ impl BlobStore {
         })
     }
 
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
     /// Streams `reader` into the store and returns the content hash.
     pub fn put(&self, mut reader: impl Read) -> io::Result<BlobHash> {
         let mut tmp = NamedTempFile::new_in(self.root.join("tmp"))?;
@@ -140,8 +136,9 @@ impl BlobStore {
         File::open(self.path(hash))
     }
 
-    /// Returns whether a blob was removed.
-    pub fn remove(&self, hash: &BlobHash) -> io::Result<bool> {
+    /// Returns whether a blob was removed. Not public: only the collection, which holds
+    /// the lock and checks the grace period, deletes blobs.
+    fn remove(&self, hash: &BlobHash) -> io::Result<bool> {
         remove_if_exists(&self.path(hash))
     }
 

@@ -1,7 +1,7 @@
 //! Remote protocol adapters for catmail.
 //!
-//! - [`imap`]: an IMAP session: read-only sync and bodies, plus APPEND (saving sent
-//!   messages); flag changes and IDLE come in M4
+//! - [`imap`]: an IMAP session: read-only sync and bodies, the changes the operation
+//!   queue replays (flags, moves, deletions, labels, APPEND) and IDLE
 //! - [`smtp`]: an SMTP submission client
 //! - [`mime`]: header parsing, message content (text, sanitized HTML, attachments), and
 //!   building outgoing messages

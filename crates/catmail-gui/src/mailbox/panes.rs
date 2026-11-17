@@ -23,8 +23,8 @@ enum Pane {
     Outbox,
 }
 
-/// How wide the sidebar and the list are, as the user dragged them, for as long as the app
-/// runs.
+/// How wide the sidebar and the list are, as the user dragged them, for as long as the window
+/// is open.
 #[derive(Clone, Copy, PartialEq)]
 struct PaneWidths {
     sidebar: f32,

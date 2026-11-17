@@ -183,7 +183,8 @@ impl<R> BodyPages<R> {
         self.arrived()
     }
 
-    pub fn shows_remote(&self, url: &str) -> bool {
+    #[cfg(test)]
+    fn shows_remote(&self, url: &str) -> bool {
         self.remote.contains_key(url)
     }
 

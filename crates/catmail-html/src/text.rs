@@ -395,11 +395,17 @@ pub fn quoted_text_html(text: &str, cite: &str, empty: &str) -> String {
     out
 }
 
+/// How deeply quotes nest at most: no conversation gets there, and a line of a thousand
+/// `>` must not become as many elements.
+const MAX_QUOTE_DEPTH: usize = 32;
+
 /// How deeply the line is quoted (`>> a`, `> > a`), and the rest of it: each `>` may be
-/// followed by a space.
+/// followed by a space. Past [`MAX_QUOTE_DEPTH`] the `>` are left in the text.
 fn quote_depth(mut line: &str) -> (usize, &str) {
     let mut depth = 0;
-    while let Some(rest) = line.strip_prefix('>') {
+    while depth < MAX_QUOTE_DEPTH
+        && let Some(rest) = line.strip_prefix('>')
+    {
         depth += 1;
         line = rest.strip_prefix(' ').unwrap_or(rest);
     }
@@ -413,6 +419,17 @@ mod tests {
 
     fn shown(html: &str) -> String {
         text(&sanitize_html(html))
+    }
+
+    #[test]
+    fn quotes_nest_only_so_deep() {
+        let html = quoted_text_html(&format!("{} a", ">".repeat(1000)), "", "");
+        assert_eq!(html.matches("<blockquote>").count(), MAX_QUOTE_DEPTH);
+        assert_eq!(html.matches("</blockquote>").count(), MAX_QUOTE_DEPTH);
+        assert!(html.contains(&format!(
+            "<p>{} a</p>",
+            "&gt;".repeat(1000 - MAX_QUOTE_DEPTH)
+        )));
     }
 
     #[test]

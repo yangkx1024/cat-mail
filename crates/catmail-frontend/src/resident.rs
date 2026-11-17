@@ -1,6 +1,6 @@
 //! Whether the app opens a window at launch, what it does once its last window is gone,
 //! and why it quits: the decisions of running without a window ("Keep running after the
-//! window is closed"), which every desktop frontend makes the same way. See docs/architecture/background.md.
+//! window is closed"). See docs/architecture/background.md.
 
 use std::fmt;
 

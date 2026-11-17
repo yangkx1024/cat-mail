@@ -94,7 +94,7 @@ catmail.app/Contents/
   `minos` 是 12.0，并且只链接 `/System/Library` 和 `/usr/lib` 下的库：从 Homebrew 或 Nix 链进来的库
   在用户的 Mac 上没有。
 - **为什么一定要 bundle。** 没有 bundle 时菜单栏显示可执行文件名、Dock 没有图标；系统通知
-  （`UNUserNotificationCenter`）在 bundle 外会让进程崩溃，macOS 的新邮件通知因此只能在 bundle 里做（还没做）；
+  （`UNUserNotificationCenter`）在 bundle 外会让进程崩溃，macOS 的新邮件通知因此只能在 bundle 里做；
   LaunchServices 也按 bundle 把再次打开交给已在运行的那个（见[后台运行](background.md#单实例与唤起)）。bundle id 是 `net.yangkx.catmail`，与 `APP_ID`
   和数据目录的限定名相同。
 - **图标**由 `catmail-light.svg` 渲染（resvg，从 crates.io 装固定版本；CI 按版本缓存装好的 `resvg`，PR 写的

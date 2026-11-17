@@ -15,7 +15,7 @@
 //! reused and a UIDVALIDITY change deletes the rows of the old generation, so an
 //! existing row is still the same (folder, UID) as when the download started.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -481,11 +481,17 @@ async fn in_folder<T>(
 /// Deletes the local copy of a message the server no longer has at `location`.
 async fn forget(engine: &Arc<Engine>, location: MessageLocation) -> Result<()> {
     let (account, folder) = (location.account, location.folder);
-    let deleted = engine
-        .write(move |db| db.messages().delete_gone(&location))
+    let (deleted, labels) = engine
+        .write(move |db| {
+            let messages = db.messages();
+            Ok((messages.delete_gone(&location)?, messages.touched_labels()))
+        })
         .await?;
     if deleted {
-        engine.emit(Event::MessagesChanged { account, folder });
+        // On Gmail the labels that listed it too.
+        for folder in BTreeSet::from_iter(labels.into_iter().chain([folder])) {
+            engine.emit(Event::MessagesChanged { account, folder });
+        }
     }
     Ok(())
 }
