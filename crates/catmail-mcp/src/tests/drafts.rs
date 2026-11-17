@@ -410,6 +410,18 @@ fn what_a_draft_says_is_left_out_of_the_log() {
     );
 }
 
+#[test]
+fn what_the_log_keeps_of_an_agent_s_text_is_cut_short() {
+    let long = "é".repeat(5000);
+    let logged = crate::tools::logged(json!({"to": [long], "name": "a\nb"}).as_object());
+    assert!(!logged.contains('\n'), "{logged}");
+    let logged: Value = serde_json::from_str(&logged).unwrap();
+    assert_eq!(logged["to"][0], format!("{}…", "é".repeat(200)));
+    assert_eq!(logged["name"], "a\nb");
+    assert_eq!(crate::tools::capped("short"), "short");
+    assert_eq!(crate::tools::capped(&"x".repeat(200)), "x".repeat(200));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_draft_open_in_the_app_is_left_alone() {
     let f = Fixture::new(ServeOptions::default()).await;

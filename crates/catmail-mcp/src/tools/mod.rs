@@ -234,16 +234,29 @@ impl Mail {
     }
 }
 
-/// The arguments as logged: ids, flags and whom a draft is for and from, with every other
-/// text (a draft's subject and text, a file's content, and whatever a tool takes later)
-/// as its length: it is mail, and can be long.
+/// The most of an agent's text that one log field keeps.
+const LOGGED_CHARS: usize = 200;
+
+/// `text` cut to [`LOGGED_CHARS`], marked where it was cut: a request can be megabytes,
+/// and a log line is read by a person.
+pub(crate) fn capped(text: &str) -> String {
+    match text.char_indices().nth(LOGGED_CHARS) {
+        Some((end, _)) => format!("{}…", &text[..end]),
+        None => text.to_owned(),
+    }
+}
+
+/// The arguments as logged: ids, flags and whom a draft is for and from (each cut to
+/// [`LOGGED_CHARS`]), with every other text (a draft's subject and text, a file's content,
+/// and whatever a tool takes later) as its length: it is mail, and can be long.
 pub(crate) fn logged(arguments: Option<&JsonObject>) -> String {
     use serde_json::Value;
     fn redacted(key: &str, value: &Value) -> Value {
         match value {
-            Value::String(text) if !matches!(key, "from" | "to" | "cc" | "bcc" | "name") => {
-                format!("<{} chars>", text.chars().count()).into()
+            Value::String(text) if matches!(key, "from" | "to" | "cc" | "bcc" | "name") => {
+                capped(text).into()
             }
+            Value::String(text) => format!("<{} chars>", text.chars().count()).into(),
             Value::Object(object) => Value::Object(
                 object
                     .iter()
@@ -337,7 +350,10 @@ impl ServerHandler for Mail {
                 Ok(_) => "done".into(),
                 Err(e) => e.message.to_string(),
             };
-            tracing::info!(token = %token.name, %tool, %arguments, %outcome, "MCP change");
+            // Quoted, as the arguments' JSON is: the error can repeat what the agent sent (a
+            // file's name), and a line break in it would forge a log line.
+            let outcome = capped(&outcome);
+            tracing::info!(token = %token.name, %tool, %arguments, ?outcome, "MCP change");
         }
         response
     }
