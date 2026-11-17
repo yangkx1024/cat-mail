@@ -113,7 +113,11 @@ From、Date、Subject、To、Cc，有的才有）。措辞只在 `catmail-types`
   `> `（`Quote::below`，CLI、MCP 显示的也是它）。HTML 是正文的 HTML（正文是纯文本就一行一段）、引文的头（转发的头部是表格），再接
   原信：回复放在 `<blockquote type="cite">` 里（收信端认它为引文，左边一条线），转发不缩进。原信有 HTML
   就用它，样式表改写成只作用于它所在的元素（`catmail_html::nested`：选择器前加 `.catmail-original`，`html`、
-  `body`、`:root` 就是那个元素），放进文档头，否则原信的 `body { background }`、`p { … }` 会改掉整封信；没有 HTML
+  `body`、`:root` 就是那个元素），放进文档头，否则原信的 `body { background }`、`p { … }` 会改掉整封信。那个元素
+  外面再包一层 `position:relative;overflow:auto;contain:paint` 的 div，原信画出这个框的部分被裁掉：清洗不限制
+  属性，原信能用 `position: fixed`、负外边距、`transform` 把内容挪到用户写的字和转发的头部上（伪造 From、
+  Date）。框是外面那层，不是 `.catmail-original` 本身，因为原信的样式表能选中后者（它的 `body`），整个挪走或盖掉
+  它的样式，却选不中外层。没在清洗时丢掉 `position`（Gmail 的做法）：那只堵一种写法，还会改阅读区的显示；没有 HTML
   就把文本按行转成段落，`>` 开头的行按层数转成嵌套的引用（RFC 3676 的引用层级，`catmail_html::quoted_text_html`，
   写信窗口"在引文里回复"也用它）。这是唯一把 `>` 读作引用的地方：用户自己写的 `>` 只是文字。正文和原信都没有 HTML 时只发纯文本。正文的编辑器样式（`white-space:
   pre-wrap`、段落无边距）只作用于 `.catmail-text`，不碰原信。
