@@ -1778,7 +1778,7 @@ fn forget_secret(engine: &Engine, key: &str) {
 
 fn validate_new_identity(new: &NewIdentity) -> Result<()> {
     // It goes into MAIL FROM and the From header.
-    drafts::check_address(&new.email)?;
+    crate::addresses::check_address(&new.email)?;
     if new.username.is_empty() {
         return Err(Error::InvalidInput("username must not be empty".into()));
     }

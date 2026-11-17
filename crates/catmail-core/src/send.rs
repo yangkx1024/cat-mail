@@ -31,7 +31,7 @@ use tokio::sync::Notify;
 use crate::connection::{self, SendAs, SmtpLogin};
 use crate::engine::{Activity, Closing, Engine, Permit, blocking, now};
 use crate::pool::with_session;
-use crate::{Error, Result, body, drafts, ops, sync};
+use crate::{Error, Result, addresses, body, drafts, ops, sync};
 
 /// First retry after this long, doubling up to [`MAX_BACKOFF`].
 const FIRST_BACKOFF: i64 = 30;
@@ -85,9 +85,9 @@ fn sendable(id: DraftId, snapshot: &DraftSnapshot, sender: &Address) -> Result<V
         )));
     }
     // The sender's address goes into MAIL FROM and the Message-ID.
-    drafts::check_address(&sender.email)?;
+    addresses::check_address(&sender.email)?;
     let content = &snapshot.draft.content;
-    drafts::validate(content)?;
+    addresses::validate(content)?;
     let recipients = envelope_recipients(content.recipients());
     if recipients.is_empty() {
         return Err(Error::InvalidInput("the draft has no recipients".into()));

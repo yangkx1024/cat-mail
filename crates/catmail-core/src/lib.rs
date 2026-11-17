@@ -6,6 +6,8 @@
 
 #![forbid(unsafe_code)]
 
+mod addresses;
+mod answer;
 mod body;
 mod client;
 mod config;
@@ -43,6 +45,7 @@ mod system;
 mod version;
 mod watch;
 
+pub use addresses::{format_addresses, parse_addresses};
 pub use catmail_proto::TlsConfig;
 /// Files and directories for the user alone, as the data directory's are: for what
 /// frontends keep elsewhere (MCP tokens in the config directory).
@@ -50,7 +53,7 @@ pub use catmail_store::{create_private_dir, private_file_options};
 pub use catmail_types::*;
 pub use client::{DraftEditor, EVENT_CAPACITY, MailClient, MailClientBuilder, Verify};
 pub use config::{APP_ID, Config, DataDirLock};
-pub use drafts::{EditMark, format_addresses, named_as_image, parse_addresses};
+pub use drafts::{EditMark, named_as_image};
 pub use engine::{DEFAULT_DRAFT_UPLOAD_DELAY, EngineTuning};
 pub use error::{Error, HttpError, ImapError, Result, SmtpError, StoreError};
 pub use filename::safe_filename;
