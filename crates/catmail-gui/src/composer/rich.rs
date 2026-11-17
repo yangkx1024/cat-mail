@@ -1,11 +1,11 @@
 //! The text of the message, formatted: nsh's `RichEditor` over the draft's HTML (a plain
-//! draft opens as paragraphs), its images shown from their attachments' files. A save
-//! takes the HTML back with `cid:` URLs, and the plain text sent along with it. A
+//! draft opens as paragraphs), its images shown from their attachments' files
+//! ([`ImageView`]). A save takes the HTML back, and the plain text sent along with it. A
 //! reply's or forward's quote isn't in it, unless the user answers in it
 //! ([`Rich::answer_in`]).
 
 use std::cell::{Cell, RefCell};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use catmail_core::{DraftBody, Quote};
 use catmail_frontend::composer::rich_text::{Images, doc_to_text, quote_to_html, text_to_html};
@@ -14,10 +14,15 @@ use nsh_base::rich_editor::extensions::extension::ExtensionManager;
 use nsh_base::rich_editor::extensions::kit::starter_kit;
 use nsh_base::rich_editor::extensions::link::{LinkOptions, is_allowed_uri, link};
 use nsh_base::rich_editor::formats::{DomParser, ParseOptions, doc_to_html};
-use nsh_base::rich_editor::model::{Node, Schema, Whitespace};
-use nsh_base::rich_editor::state::{EditorState, EditorStateConfig};
-use nsh_base::rich_editor::view::{EditorSession, NodeViews, RichEditorClasses};
+use nsh_base::rich_editor::model::{Node, Schema, Slice, Whitespace};
+use nsh_base::rich_editor::state::{EditorState, EditorStateConfig, PluginSpec};
+use nsh_base::rich_editor::view::{
+    EditorSession, NodeView, NodeViewCx, NodeViews, RichEditorClasses,
+};
+use nsh_core::prelude::*;
 use serde_json::{Value, json};
+
+use crate::shell::lock;
 
 /// How the formatting looks in the editor. Its nodes and marks have no look of their
 /// own (as Tiptap's): bold is bold only as these say. Near what readers show of the
@@ -72,7 +77,8 @@ pub struct Rich {
     session: EditorSession,
     schema: Schema,
     commands: Arc<CommandRegistry>,
-    images: RefCell<Images>,
+    /// Shared with the editor's [`ImageView`] and [`PastedImages`].
+    images: Arc<Mutex<Images>>,
     /// The user changed the text. Until then the draft's own is what it says: opening a
     /// plain draft and closing it again doesn't save it as HTML.
     touched: Cell<bool>,
@@ -83,7 +89,7 @@ pub struct Rich {
 
 impl Rich {
     /// Shows `body`, formatted or not; `images` are the files of the images in its HTML.
-    pub fn new(body: &DraftBody, mut images: Images) -> Self {
+    pub fn new(body: &DraftBody, images: Images) -> Self {
         // Without what mail can't show: task lists' checkboxes.
         let kit = starter_kit().configure(json!({ "taskList": false, "taskItem": false }));
         let manager = ExtensionManager::with_core(vec![kit]).expect("the starter kit is valid");
@@ -92,7 +98,7 @@ impl Rich {
             Some(html) => html.clone(),
             None => text_to_html(&body.text),
         };
-        let doc = parse(&schema, &html, &mut images);
+        let doc = parse(&schema, &html);
         // The starter kit's link is only the mark: these link URLs as they are typed or
         // pasted, a selection a URL is pasted over, and open a link pressed with Mod.
         let mut plugins = manager.plugins();
@@ -100,15 +106,18 @@ impl Rich {
         // As the link dialog's addresses (`link_href`).
         options.default_protocol = "https".into();
         plugins.extend(link(options));
+        let images = Arc::new(Mutex::new(images));
+        plugins.push(Arc::new(PastedImages(images.clone())));
+        let views = NodeViews::new().with("image", Arc::new(ImageView(images.clone())));
         let config = EditorStateConfig::new(schema.clone())
             .doc(doc)
             .plugins(plugins);
         let state = EditorState::create(config).expect("a document of the schema");
         Rich {
-            session: EditorSession::new(state, NodeViews::new()),
+            session: EditorSession::new(state, views),
             schema,
             commands: manager.commands().clone(),
-            images: RefCell::new(images),
+            images,
             touched: Cell::new(false),
             written: RefCell::new(None),
         }
@@ -118,11 +127,7 @@ impl Rich {
     /// to answer in. Not undone: the draft has the quote no longer.
     pub fn answer_in(&self, quote: &Quote) {
         let state = self.session.state();
-        let quoted = parse(
-            &self.schema,
-            &quote_to_html(quote),
-            &mut self.images.borrow_mut(),
-        );
+        let quoted = parse(&self.schema, &quote_to_html(quote));
         let mut tr = state.tr();
         let end = state.doc().content().size();
         if tr.insert(end, quoted.content().clone()).is_err() {
@@ -159,21 +164,9 @@ impl Rich {
         {
             return Some(body.clone());
         }
-        let mut json = state.doc().to_json();
-        let images = self.images.borrow();
-        let html = if images.is_empty() {
-            doc_to_html(state.doc())
-        } else {
-            images.to_content_ids(&mut json);
-            let doc = self
-                .schema
-                .node_from_json(&json)
-                .expect("the schema's document, with other sources");
-            doc_to_html(&doc)
-        };
         let body = DraftBody {
-            text: doc_to_text(&json),
-            html: Some(html),
+            text: doc_to_text(&state.doc().to_json()),
+            html: Some(doc_to_html(state.doc())),
         };
         *self.written.borrow_mut() = Some((state.revision(), body.clone()));
         Some(body)
@@ -242,26 +235,107 @@ impl Rich {
     /// Puts an image of the draft at the selection: its Content-ID, and the file it shows
     /// from.
     pub fn insert_image(&self, content_id: String, path: std::path::PathBuf, name: &str) {
-        let src = path.to_string_lossy().into_owned();
-        self.images.borrow_mut().insert(content_id, path);
+        let src = format!("cid:{content_id}");
+        lock(&self.images).insert(content_id, path);
         self.run("setImage", json!({ "src": src, "alt": name }));
     }
 }
 
-/// `html` as a document of the editor, its images (`cid:`) shown from their files and
-/// remote ones blocked ([`Images::to_files`]).
-fn parse(schema: &Schema, html: &str, images: &mut Images) -> Node {
+/// The editor's images. nsh's own would load any `src` from where it points, outside the
+/// reader's rules: a remote image in a quote answered in, a draft or a paste would tell
+/// its sender, through a tracking pixel, that it was read. This loads only what
+/// [`Images::shown`] has (the draft's images, from their files, and `data:` ones); any
+/// other is an empty box of the size it asks for. What the document has, and what is
+/// sent, is the image's own URL.
+struct ImageView(Arc<Mutex<Images>>);
+
+impl NodeView for ImageView {
+    fn create(&self, _: &NodeViewCx, node: &Node) -> AnyElement {
+        let attrs = node.attrs();
+        let src = attrs.get("src").and_then(Value::as_str).unwrap_or_default();
+        let number = |key: &str| {
+            attrs.get(key).and_then(|v| {
+                v.as_f64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                    .map(|n| n as f32)
+            })
+        };
+        let (width, height) = (number("width"), number("height"));
+        let natural = signal(None::<(f32, f32)>);
+        let size = move || image_box(width, height, natural.get());
+        let Some(shown) = lock(&self.0).shown(src) else {
+            return view()
+                .w(move || px(size().0))
+                .h(move || px(size().1))
+                .into_element();
+        };
+        // Its natural size, for the sides it leaves out (as nsh's own).
+        if width.is_none() || height.is_none() {
+            let shown = shown.clone();
+            spawn(async move {
+                if let Ok(size) = image_size(shown).await {
+                    natural.set(Some((size.width.0 as f32, size.height.0 as f32)));
+                }
+            });
+        }
+        let mut el = image(shown);
+        if let Some(alt) = attrs.get("alt").and_then(Value::as_str) {
+            el = el.label(alt.to_owned());
+        }
+        el.w(move || px(size().0))
+            .h(move || px(size().1))
+            .into_element()
+    }
+}
+
+/// The size an image shows at, in points (nsh's own `image_box`): the `width` and
+/// `height` it asks for; a side it leaves out from the other and the aspect ratio of its
+/// `natural` size; its natural size when it asks for neither. A side not known yet is 0.
+fn image_box(width: Option<f32>, height: Option<f32>, natural: Option<(f32, f32)>) -> (f32, f32) {
+    let natural = natural.filter(|(w, h)| *w > 0.0 && *h > 0.0);
+    let aspect = natural.map(|(w, h)| w / h);
+    match (width, height) {
+        (Some(w), Some(h)) => (w, h),
+        (Some(w), None) => (w, aspect.map_or(0.0, |a| w / a)),
+        (None, Some(h)) => (aspect.map_or(0.0, |a| h * a), h),
+        (None, None) => natural.unwrap_or_default(),
+    }
+}
+
+/// Takes the images the draft can't send out of what is pasted into the text
+/// ([`Images::drop_unsendable`]): nsh's paste reads the clipboard's HTML with its own
+/// parser, so a copy from the reader, another message or a file manager could otherwise
+/// put in what the recipient would see broken, or this computer's paths.
+struct PastedImages(Arc<Mutex<Images>>);
+
+impl PluginSpec for PastedImages {
+    fn transform_pasted(&self, state: &EditorState, slice: Slice) -> Slice {
+        let mut has_images = false;
+        slice.content.descendants(&mut |node, _, _, _| {
+            has_images |= node.ty().name() == "image";
+            !has_images
+        });
+        if !has_images {
+            return slice;
+        }
+        let mut json = slice.to_json();
+        lock(&self.0).drop_unsendable(&mut json);
+        Slice::from_json(state.schema(), &json).unwrap_or_else(|e| {
+            // Nothing, rather than what the draft can't send.
+            tracing::warn!("the pasted content couldn't be read back: {e:?}");
+            Slice::empty()
+        })
+    }
+}
+
+/// `html` as a document of the editor.
+fn parse(schema: &Schema, html: &str) -> Node {
     // As written: indentation and runs of spaces (a quoted table, code) are the author's.
     // The HTML is the editor's, or `text_to_html`'s: no whitespace between its tags to
     // keep out.
     let mut options = ParseOptions::default();
     options.preserve_whitespace = Some(Whitespace::Full);
-    let doc = DomParser::from_schema(schema).parse(html, &options);
-    let mut json = doc.to_json();
-    images.to_files(&mut json);
-    schema
-        .node_from_json(&json)
-        .expect("the schema's document, with other sources")
+    DomParser::from_schema(schema).parse(html, &options)
 }
 
 #[cfg(test)]
@@ -283,18 +357,28 @@ mod tests {
         (body.text, body.html.unwrap())
     }
 
-    fn image_src(rich: &Rich) -> String {
-        let mut src = String::new();
+    fn image_srcs(rich: &Rich) -> Vec<String> {
+        let mut srcs = Vec::new();
         rich.session
             .state()
             .doc()
             .descendants(&mut |node, _, _, _| {
                 if node.ty().name() == "image" {
-                    src = node.attrs()["src"].as_str().unwrap_or_default().to_owned();
+                    srcs.push(node.attrs()["src"].as_str().unwrap_or_default().to_owned());
                 }
                 true
             });
-        src
+        srcs
+    }
+
+    /// What the editor shows each image from ([`ImageView`]): `None` loads nothing.
+    fn shown(rich: &Rich) -> Vec<Option<String>> {
+        assert!(rich.session.node_views().get("image").is_some());
+        let images = lock(&rich.images);
+        image_srcs(rich)
+            .iter()
+            .map(|src| images.shown(src))
+            .collect()
     }
 
     #[test]
@@ -325,7 +409,7 @@ mod tests {
             ),
         };
         rich.answer_in(&quote);
-        assert_eq!(image_src(&rich), "/blobs/logo");
+        assert_eq!(shown(&rich), [Some("/blobs/logo".into())]);
         rich.run("undo", Value::Null);
         rich.touch();
         let (text, html) = written(&rich);
@@ -351,14 +435,81 @@ mod tests {
             html: Some(format!("<p>Hi {pixel}</p>")),
         };
         rich.answer_in(&quote);
-        assert!(image_src(&rich).starts_with("catmail-blocked:"));
+        assert_eq!(shown(&rich), [None]);
         rich.touch();
         assert!(written(&rich).1.contains(pixel), "{}", written(&rich).1);
         // A draft that has one, opened again.
         let rich = Rich::new(&formatted(&format!("<p>{pixel}</p>")), Images::default());
-        assert!(image_src(&rich).starts_with("catmail-blocked:"));
+        assert_eq!(shown(&rich), [None]);
         rich.touch();
         assert!(written(&rich).1.contains(pixel), "{}", written(&rich).1);
+        // Typed as Markdown (the starter kit's input rule).
+        let rich = Rich::new(&formatted("<p></p>"), Images::default());
+        rich.run(
+            "insertContentAt",
+            json!({ "position": 1, "content": { "type": "text", "text": "![x](https://t.example/p.gif" } }),
+        );
+        let state = rich.session.state();
+        let end = state.selection().from();
+        let mut typed = None;
+        assert!(
+            state.plugins().iter().any(|p| {
+                p.handle_text_input(&state, end, end, ")", &mut |tr| typed = Some(tr))
+            })
+        );
+        rich.session.dispatch(typed.unwrap()).unwrap();
+        assert_eq!(image_srcs(&rich), ["https://t.example/p.gif"]);
+        assert_eq!(shown(&rich), [None]);
+    }
+
+    /// Pastes `html` at the selection as nsh's view does: the clipboard parser, then the
+    /// plugins' `transform_pasted`.
+    fn paste(rich: &Rich, html: &str) {
+        let state = rich.session.state();
+        let from = state.selection().resolved_from().clone();
+        let slice = DomParser::from_schema(state.schema()).parse_with_context(html, &from);
+        let slice = state
+            .plugins()
+            .iter()
+            .fold(slice, |s, p| p.transform_pasted(&state, s));
+        let mut tr = state.tr();
+        tr.replace_selection(slice);
+        rich.session.dispatch(tr).unwrap();
+    }
+
+    #[test]
+    fn pasted_images_are_not_loaded_and_only_sendable_ones_are_sent() {
+        let mut images = Images::default();
+        images.insert("a@catmail".into(), PathBuf::from("/blobs/a"));
+        let rich = Rich::new(&formatted("<p>Thanks</p>"), images);
+        let pixel = r#"<img src="https://t.example/open.gif?u=1">"#;
+        // From a web page, another client, catmail's reader, files.
+        paste(
+            &rich,
+            &format!(
+                r#"<p>Hi {pixel}<img src="cid:a@catmail"><img src="cid:other@x"><img src="catmail-image:3/cid/a%40b"><img src="file:///Users/me/a.png"><img src="/Users/me/a.png"><img src="data:image/png;base64,aGk="></p>"#
+            ),
+        );
+        let data = "data:image/png;base64,aGk=";
+        assert_eq!(
+            image_srcs(&rich),
+            ["https://t.example/open.gif?u=1", "cid:a@catmail", data]
+        );
+        assert_eq!(
+            shown(&rich),
+            [None, Some("/blobs/a".into()), Some(data.into())]
+        );
+        rich.touch();
+        let html = written(&rich).1;
+        assert!(html.contains(pixel), "{html}");
+        assert!(html.contains(r#"src="cid:a@catmail""#), "{html}");
+        for gone in ["other@x", "catmail-image", "/Users/me"] {
+            assert!(!html.contains(gone), "{gone}: {html}");
+        }
+        // Without images, as it was.
+        paste(&rich, "<p><b>bold</b></p>");
+        rich.touch();
+        assert!(written(&rich).1.contains("<strong>bold</strong>"));
     }
 
     #[test]
@@ -491,8 +642,13 @@ mod tests {
             &formatted(r#"<p>See <img src="cid:a@catmail"></p>"#),
             images,
         );
-        assert_eq!(image_src(&rich), "/blobs/a");
+        assert_eq!(shown(&rich), [Some("/blobs/a".into())]);
         rich.insert_image("b@catmail".into(), PathBuf::from("/blobs/b"), "b.png");
+        // At the selection: the start.
+        assert_eq!(
+            shown(&rich),
+            [Some("/blobs/b".into()), Some("/blobs/a".into())]
+        );
         // The view's change touches it.
         rich.touch();
         let (text, html) = written(&rich);

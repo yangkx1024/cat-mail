@@ -390,11 +390,17 @@ web view、图片的应答、远程图片的下载在 `web.rs`，写信窗口的
     （`rich_text::doc_to_text`：一段一行、引用加 `> `、列表加 `* ` / 序号、链接后附地址），一起存进草稿。用户
     没动过正文就存草稿原来的文本和 HTML：打开一封纯文本草稿再关掉，不会把它改存成 HTML。
   - **图片**：底栏的图片按钮选图片文件，粘贴的图片（截图）和文件管理器里复制的图片文件也放进正文，别的文件
-    当附件（是不是图片按 `named_as_image`，与引擎同一个判断）。图片经 `DraftEditor::attach_image` 存成草稿的内嵌附件（有 Content-ID），编辑器里的 `src` 是它在
-    BlobStore 里的文件（`attach_image` 一并返回，打开时 `DraftEditor::images` 一次取齐），存草稿时换回 `cid:`（`rich_text::Images`）。内嵌附件不在附件栏里。
-    **远程图片不显示**：编辑器（nsh 的 `image`）会直接从网上取图，不经过读信区的 CSP 和"Show remote images"；在引文里回复、
-    或打开带着这种图片的草稿时，原信的跟踪像素就会告诉发信人信被读了。所以除了草稿自己的图片和 `data:`，别的图片在
-    编辑器里换成什么也不加载的 `catmail-blocked:` 地址，存草稿时换回原来的 URL，照样发出。
+    当附件（是不是图片按 `named_as_image`，与引擎同一个判断）。图片经 `DraftEditor::attach_image` 存成草稿的内嵌附件（有 Content-ID），编辑器的文档里就是
+    `cid:` URL，和草稿、发出的一样；显示时从它在 BlobStore 里的文件读（`attach_image` 一并返回，打开时
+    `DraftEditor::images` 一次取齐，`rich_text::Images`）。内嵌附件不在附件栏里。
+    **远程图片不显示**：nsh 自带的图片显示（`image`）会直接从网上取图，不经过读信区的 CSP 和"Show remote images"；
+    在引文里回复、打开带着这种图片的草稿、从网页粘贴、输入 Markdown 的 `![](…)` 时，跟踪像素就会告诉发信人信被读了。
+    所以编辑器的 `image` 节点由 `rich.rs` 的 `ImageView`（NodeView）显示，只加载 `Images::shown` 给的：草稿自己的
+    图片（`cid:` → 文件）和 `data:`；别的都是按它要的宽高留出的空框，文档里仍是原来的 URL，照样发出。规则只在显示
+    这一处，图片从哪条路进文档都一样。
+    **粘贴的 HTML** 里草稿发不出的图片去掉（插件 `PastedImages` 的 `transform_pasted`，`Images::drop_unsendable`）：
+    别的邮件的 `cid:`、读信区的 `catmail-image:`、本机文件（`file:`、路径），否则收件人看到坏图或本机的路径；草稿
+    自己的 `cid:`、`data:`、`http(s):` 的留下。
 - **引文**（`composer/quote.rs`）：回复、转发的原信在编辑器下面，一条横栏：展开 / 收起、回复的署名（转发显示
   "Forwarded message"）、在引文里回复、去掉引文。默认收起；展开后和正文各占一半高度，上面是转发的头部（`QuoteHead::Forward`，名字一列、值一列），下面是
   原信，和读信区一样显示（`web.rs` 的 web view 和页面，CSP、深色、内嵌图片从草稿的附件文件读，远程图片缓存过的

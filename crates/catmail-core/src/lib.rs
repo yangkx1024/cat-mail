@@ -28,7 +28,7 @@ pub mod logging;
 pub mod html {
     pub use catmail_html::{
         DarkPalette, Image, Served, ServedImage, cid_image_ids, embed_inline_images, escape,
-        nested, quoted_text_html, serve_images,
+        nested, quoted_text_html, remote_image_url, serve_images,
     };
     pub use catmail_proto::http::RemoteImage;
 }

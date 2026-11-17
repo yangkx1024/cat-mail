@@ -8,39 +8,21 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use catmail_core::html::{escape, nested, quoted_text_html};
+use catmail_core::html::{escape, nested, quoted_text_html, remote_image_url};
 use catmail_core::{FORWARD_SEPARATOR, Quote, QuoteHead};
 
 /// The images of a draft's HTML: the file each one's content is in
 /// ([`DraftEditor::images`](catmail_core::DraftEditor::images)), by Content-ID. The
-/// editor shows the files; the draft keeps `cid:` URLs.
-///
-/// Any other image but a `data:` one would be loaded from where it points, by the editor,
-/// outside the reader's rules: a quote answered in (or a draft that has one) would tell
-/// its sender, through a tracking pixel, that it was read. Those show as
-/// [`BLOCKED_SCHEME`] URLs, which load nothing, and are sent as they were.
+/// editor's document has the draft's URLs, as they are sent (`cid:` ones for these);
+/// what it shows of each is [`Self::shown`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Images {
     paths: HashMap<String, PathBuf>,
-    /// The other way: Content-IDs by the path the editor shows.
-    ids: HashMap<String, String>,
-    /// The images not shown: their URLs by the one the editor has instead.
-    blocked: HashMap<String, String>,
 }
-
-/// The scheme of the URLs remote images have in the editor: `catmail-blocked:<n>`.
-pub const BLOCKED_SCHEME: &str = "catmail-blocked";
 
 impl Images {
     pub fn insert(&mut self, content_id: String, path: PathBuf) {
-        self.ids
-            .insert(path.to_string_lossy().into_owned(), content_id.clone());
         self.paths.insert(content_id, path);
-    }
-
-    /// None to show from files, and none blocked: the editor's document is the draft's.
-    pub fn is_empty(&self) -> bool {
-        self.paths.is_empty() && self.blocked.is_empty()
     }
 
     /// The file of the image `content_id`.
@@ -48,49 +30,48 @@ impl Images {
         self.paths.get(content_id).map(PathBuf::as_path)
     }
 
-    /// The images of `doc` (ProseMirror's JSON of a document) by their files, for the
-    /// editor: `cid:` URLs of the draft's images become their paths, and every other but
-    /// a `cid:` or `data:` one is blocked. Those load nothing from anywhere.
-    pub fn to_files(&mut self, doc: &mut Value) {
-        map_image_sources(doc, &mut |src| {
-            if let Some(id) = src.strip_prefix("cid:") {
-                return Some(self.paths.get(id)?.to_string_lossy().into_owned());
-            }
-            if src.starts_with("data:") {
-                return None;
-            }
-            let shown = format!("{BLOCKED_SCHEME}:{}", self.blocked.len());
-            self.blocked.insert(shown.clone(), src.to_owned());
-            Some(shown)
-        });
+    /// What the editor shows an image of `src` from: the file of one of the draft's
+    /// images (`cid:`), or a `data:` URL. Nothing else: the editor would load it from
+    /// where it points, outside the reader's rules, and a quote answered in (or a draft
+    /// that has one, or what is pasted from a web page) would tell its sender, through a
+    /// tracking pixel, that it was read. Those show as an empty box, and are sent as they
+    /// are.
+    pub fn shown(&self, src: &str) -> Option<String> {
+        if let Some(id) = src.strip_prefix("cid:") {
+            return Some(self.path(id)?.to_string_lossy().into_owned());
+        }
+        src.starts_with("data:").then(|| src.to_owned())
     }
 
-    /// The images of `doc` by Content-ID, for the draft: the paths [`Self::to_files`]
-    /// gave become `cid:` URLs again, and those it blocked their own URLs.
-    pub fn to_content_ids(&self, doc: &mut Value) {
-        map_image_sources(doc, &mut |src| match self.blocked.get(src) {
-            Some(url) => Some(url.clone()),
-            None => Some(format!("cid:{}", self.ids.get(src)?)),
+    /// Takes out of content pasted into the editor (ProseMirror's JSON of a slice) the
+    /// images the draft can't send: `cid:` ones of another message's parts, the reader's
+    /// [`IMAGE_SCHEME`](crate::html::IMAGE_SCHEME) ones, files on this computer. The
+    /// recipient would see a broken image, or this computer's paths. The draft's own
+    /// images stay, `data:` ones, and web ones (not shown, [`Self::shown`]).
+    pub fn drop_unsendable(&self, slice: &mut Value) {
+        retain_images(slice, &mut |src| match src.strip_prefix("cid:") {
+            Some(id) => self.paths.contains_key(id),
+            None => src.starts_with("data:") || remote_image_url(src).is_some(),
         });
     }
 }
 
-/// Replaces the `src` of every image node of `doc` that `f` has a replacement for.
-fn map_image_sources(doc: &mut Value, f: &mut dyn FnMut(&str) -> Option<String>) {
-    let Value::Object(node) = doc else {
+/// Takes out of `doc`'s content (ProseMirror's JSON) the images whose `src` `keep` says
+/// no to.
+fn retain_images(doc: &mut Value, keep: &mut dyn FnMut(&str) -> bool) {
+    let Some(Value::Array(content)) = doc.get_mut("content") else {
         return;
     };
-    if node.get("type").and_then(Value::as_str) == Some("image")
-        && let Some(Value::Object(attrs)) = node.get_mut("attrs")
-        && let Some(new) = attrs.get("src").and_then(Value::as_str).and_then(&mut *f)
-    {
-        attrs.insert("src".into(), Value::String(new));
-    }
-    if let Some(Value::Array(content)) = node.get_mut("content") {
-        for child in content {
-            map_image_sources(child, f);
+    content.retain_mut(|child| {
+        if child.get("type").and_then(Value::as_str) != Some("image") {
+            retain_images(child, keep);
+            return true;
         }
-    }
+        match child.pointer("/attrs/src").and_then(Value::as_str) {
+            Some(src) => keep(src),
+            None => true,
+        }
+    });
 }
 
 /// The HTML a plain text opens as in the editor: a paragraph per line. A `>` the user
@@ -392,33 +373,62 @@ mod tests {
     }
 
     #[test]
-    fn images_go_between_content_ids_and_files() {
+    fn only_the_drafts_images_and_data_urls_are_shown() {
         let mut images = Images::default();
         images.insert("a@catmail".into(), PathBuf::from("/blobs/aa/aaaa"));
-        let draft = json!({"type": "doc", "content": [{"type": "paragraph", "content": [
-            {"type": "image", "attrs": {"src": "cid:a@catmail", "alt": null}},
-            {"type": "image", "attrs": {"src": "cid:other@x"}},
-            {"type": "image", "attrs": {"src": "https://example.com/x.png"}},
-            {"type": "image", "attrs": {"src": "data:image/png;base64,aGk="}},
-        ]}]});
         assert_eq!(images.path("a@catmail"), Some(Path::new("/blobs/aa/aaaa")));
-        let mut doc = draft.clone();
-        images.to_files(&mut doc);
-        // Loaded from nowhere, not even the file it would be at.
-        let blocked = doc["content"][0]["content"][2]["attrs"]["src"]
-            .as_str()
-            .unwrap();
-        assert_eq!(blocked, "catmail-blocked:0");
         assert_eq!(
-            doc["content"][0]["content"][0]["attrs"]["src"],
-            "/blobs/aa/aaaa"
+            images.shown("cid:a@catmail").as_deref(),
+            Some("/blobs/aa/aaaa")
         );
-        assert_eq!(
-            doc["content"][0]["content"][1]["attrs"]["src"],
-            "cid:other@x"
-        );
-        assert!(doc["content"][0]["content"][3]["attrs"]["src"] == "data:image/png;base64,aGk=");
-        images.to_content_ids(&mut doc);
-        assert_eq!(doc, draft);
+        let data = "data:image/png;base64,aGk=";
+        assert_eq!(images.shown(data).as_deref(), Some(data));
+        // Loaded from nowhere, not even a file the editor shows another image from.
+        for src in [
+            "cid:other@x",
+            "https://example.com/x.png",
+            "/blobs/aa/aaaa",
+            "file:///blobs/aa/aaaa",
+            "catmail-image:3/cid/a%40b",
+            "",
+        ] {
+            assert_eq!(images.shown(src), None, "{src}");
+        }
+    }
+
+    #[test]
+    fn pasted_images_keep_only_what_the_draft_can_send() {
+        let mut images = Images::default();
+        images.insert("a@catmail".into(), PathBuf::from("/blobs/aa/aaaa"));
+        let image = |src: &str| json!({"type": "image", "attrs": {"src": src}});
+        let sendable = [
+            "cid:a@catmail",
+            "data:image/png;base64,aGk=",
+            "https://t.example/open.gif?u=1",
+            "HTTP://t.example/b.gif",
+        ];
+        let unsendable = [
+            // Another message's part, the reader's, files.
+            "cid:other@x",
+            "catmail-image:3/cid/a%40b",
+            "catmail-image:3/remote/https%3A%2F%2Fx%2Fa.gif",
+            "/blobs/aa/aaaa",
+            "/Users/me/secret.png",
+            "file:///Users/me/secret.png",
+            "images/a.png",
+            "javascript:alert(1)",
+        ];
+        let mut slice = json!({"content": [{"type": "paragraph", "content":
+            unsendable.iter().chain(&sendable).map(|src| image(src)).collect::<Vec<_>>()}],
+            "openStart": 1});
+        images.drop_unsendable(&mut slice);
+        let srcs: Vec<&str> = slice["content"][0]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["attrs"]["src"].as_str().unwrap())
+            .collect();
+        assert_eq!(srcs, sendable);
+        assert_eq!(slice["openStart"], 1);
     }
 }
