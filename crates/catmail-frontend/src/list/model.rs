@@ -455,7 +455,9 @@ impl ListModel {
             return Some(loaded);
         };
         // Down to the last row shown, wherever arrivals moved it, or to as many rows as
-        // were shown if it is gone: what follows is the next page's.
+        // were shown if it is gone: what follows is the next page's. Drafts and the
+        // outbox are read whole and have no next page, so they keep every row.
+        let paged = !matches!(fetch.source, Source::Drafts(_) | Source::Outbox(_));
         let page = PAGE as usize;
         let keep = listing
             .rows
@@ -463,7 +465,7 @@ impl ListModel {
             .and_then(|last| rows.iter().position(|row| row.id() == last.id()))
             .map_or(listing.rows.len(), |at| at + 1)
             .max(page);
-        if keep < rows.len() {
+        if paged && keep < rows.len() {
             rows.truncate(keep);
             more = true;
         }
@@ -533,10 +535,10 @@ impl ListModel {
 
 #[cfg(test)]
 mod tests {
-    use catmail_core::FolderId;
+    use catmail_core::{FolderId, OutboxStatus};
 
     use super::*;
-    use crate::fixtures::{message, midday};
+    use crate::fixtures::{message, midday, outbox_entry};
 
     fn utc() -> Calendar {
         Calendar::now(&jiff::tz::TimeZone::UTC)
@@ -692,6 +694,29 @@ mod tests {
         assert_eq!(list.ids().first(), Some(&m(0)));
         assert_eq!(list.ids().last(), Some(&last), "the rest is the next page");
         assert!(list.listing.has_more);
+    }
+
+    #[test]
+    fn the_outbox_keeps_every_row_past_a_page() {
+        let mut model = ListModel::default();
+        let (mut listing, fetch) = model.show(Some(Source::Outbox(catmail_core::AccountId(1))));
+        let fetch = fetch.unwrap();
+        // Read whole, with no next page to load the rest from.
+        let entries: Vec<Row> = (1..=i64::from(PAGE) + 1)
+            .map(|id| Row::Outbox(outbox_entry(id, 1, OutboxStatus::Queued)))
+            .collect();
+        let loaded = model
+            .loaded(
+                &fetch,
+                Some((entries, false)),
+                &listing,
+                None,
+                &HashSet::new(),
+            )
+            .unwrap();
+        loaded.rows.unwrap().apply(&mut listing, &utc());
+        assert_eq!(listing.rows.len(), PAGE as usize + 1);
+        assert!(!listing.has_more);
     }
 
     #[test]
