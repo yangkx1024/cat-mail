@@ -28,11 +28,19 @@ const COLUMNS: &str = "d.id, d.account_id, d.reply_to_message_id, d.in_reply_to,
     d.remote_revision IS d.revision AS on_server, d.upload_error, o.id AS outbox_id";
 
 /// Drafts whose copy on the server is missing or out of date, and that may be uploaded:
-/// not being sent, and with no upload of theirs left to settle.
+/// not being sent, and with no upload of theirs left to settle. With an [`UploadDue`]
+/// (`?2`, `?3`), not those whose revision the server refused until their backoff runs
+/// out.
 const STALE: &str = "SELECT d.id FROM drafts d
      WHERE d.account_id = ?1 AND d.remote_revision IS NOT d.revision
        AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.draft_id = d.id)
-       AND NOT EXISTS (SELECT 1 FROM draft_uploads u WHERE u.draft_id = d.id)";
+       AND NOT EXISTS (SELECT 1 FROM draft_uploads u WHERE u.draft_id = d.id)
+       AND (?2 IS NULL OR d.upload_failed_revision IS NOT d.revision
+            OR d.upload_retry_at <= ?2 OR d.upload_retry_at > ?2 + ?3)";
+
+/// Forgets why uploads of a draft failed, and their backoff (`upload_failures` and
+/// `upload_retry_at` count only with `upload_failed_revision`).
+const UPLOAD_OK: &str = "upload_error = NULL, upload_failed_revision = NULL";
 
 /// Whether the draft `d` is a reply, which is sent from its account only. Its original
 /// may be gone, but not the Message-ID it answers, unless it had none.
@@ -45,6 +53,16 @@ const NO_COPY: &str = "remote_folder_id = NULL, remote_uidvalidity = NULL, remot
 /// The SIZE of the SMTP server that sends a draft and the APPENDLIMIT of its account's
 /// IMAP server, as last announced.
 type SizeLimits = (Option<u64>, Option<u64>);
+
+/// When a refused draft's backoff counts as run out: by `now`, or if it would still
+/// run longer than `max_wait`, the longest any backoff is set for. Such a time was set
+/// before the clock went back, and would otherwise hold the draft until the clock caught
+/// up. The time is wall-clock as it has to outlast the process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UploadDue {
+    pub now: i64,
+    pub max_wait: i64,
+}
 
 /// What a reply draft keeps of the message it answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -299,8 +317,7 @@ impl<'c> Drafts<'c> {
         )?;
         self.conn.execute(
             &format!(
-                "UPDATE drafts SET account_id = ?2, identity_id = ?3, {NO_COPY},
-                                   upload_error = NULL
+                "UPDATE drafts SET account_id = ?2, identity_id = ?3, {NO_COPY}, {UPLOAD_OK}
                  WHERE id = ?1"
             ),
             params![id.0, account.0, identity.0],
@@ -343,15 +360,16 @@ impl<'c> Drafts<'c> {
     }
 
     /// Whether the account has uploads to settle, or drafts to upload and a Drafts
-    /// folder to upload them to.
-    pub fn need_upload(&self, account: AccountId) -> Result<bool> {
+    /// folder to upload them to. With `due`, only drafts [`stale`](Self::stale) takes
+    /// then.
+    pub fn need_upload(&self, account: AccountId, due: Option<UploadDue>) -> Result<bool> {
         let (unsettled, stale): (bool, bool) = self
             .conn
             .prepare_cached(&format!(
                 "SELECT EXISTS (SELECT 1 FROM draft_uploads WHERE account_id = ?1),
                         EXISTS ({STALE})"
             ))?
-            .query_row([account.0], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            .query_row(due_params(account, due), |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(unsettled
             || stale
                 && Folders::new(self.conn)
@@ -360,13 +378,14 @@ impl<'c> Drafts<'c> {
     }
 
     /// Drafts to upload: their copy on the server is missing or out of date, they are
-    /// not being sent, and no upload of theirs is left to settle. Least recently
+    /// not being sent, and no upload of theirs is left to settle. With `due`, not those
+    /// the server refused as they are and whose backoff runs out later. Least recently
     /// changed first.
-    pub fn stale(&self, account: AccountId) -> Result<Vec<DraftId>> {
+    pub fn stale(&self, account: AccountId, due: Option<UploadDue>) -> Result<Vec<DraftId>> {
         let mut stmt = self
             .conn
             .prepare_cached(&format!("{STALE} ORDER BY d.updated_at, d.id"))?;
-        let rows = stmt.query_map([account.0], |r| Ok(DraftId(r.get(0)?)))?;
+        let rows = stmt.query_map(due_params(account, due), |r| Ok(DraftId(r.get(0)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -463,12 +482,12 @@ impl<'c> Drafts<'c> {
                 None => {}
             }
             self.conn
-                .prepare_cached(
+                .prepare_cached(&format!(
                     "UPDATE drafts SET remote_folder_id = ?2, remote_uidvalidity = ?3,
                                        remote_uid = ?4, remote_message_id = ?5,
-                                       remote_revision = ?6, upload_error = NULL
-                     WHERE id = ?1",
-                )?
+                                       remote_revision = ?6, {UPLOAD_OK}
+                     WHERE id = ?1"
+                ))?
                 .execute(params![
                     draft.0,
                     upload.folder.0,
@@ -511,10 +530,16 @@ impl<'c> Drafts<'c> {
         Ok(())
     }
 
-    /// The server refused the upload, which so stored nothing.
-    pub fn upload_refused(&self, upload: &DraftUpload, error: &str) -> Result<()> {
+    /// The server refused the upload, which so stored nothing. See
+    /// [`upload_failed`](Self::upload_failed).
+    pub fn upload_refused(
+        &self,
+        upload: &DraftUpload,
+        error: &str,
+        retry_at: impl FnOnce(u32) -> i64,
+    ) -> Result<()> {
         match self.end_upload(upload)? {
-            Some(draft) => self.upload_failed(draft, error),
+            Some(draft) => self.upload_failed(draft, upload.revision, error, retry_at),
             None => Ok(()),
         }
     }
@@ -533,13 +558,34 @@ impl<'c> Drafts<'c> {
         Ok(draft.flatten().map(DraftId))
     }
 
-    /// Records why the draft couldn't be uploaded; the next upload that succeeds clears
-    /// it.
-    pub fn upload_failed(&self, draft: DraftId, error: &str) -> Result<()> {
-        self.conn.execute(
-            "UPDATE drafts SET upload_error = ?2 WHERE id = ?1",
-            params![draft.0, error],
-        )?;
+    /// Records why the draft couldn't be uploaded as it was at `revision`; the next
+    /// upload that succeeds clears it. Background sync uploads that revision again at
+    /// `retry_at` of the refusals of it in a row, this one included; a change, at once.
+    pub fn upload_failed(
+        &self,
+        draft: DraftId,
+        revision: i64,
+        error: &str,
+        retry_at: impl FnOnce(u32) -> i64,
+    ) -> Result<()> {
+        let failures: Option<u32> = self
+            .conn
+            .query_row(
+                "UPDATE drafts SET upload_error = ?2,
+                     upload_failures = CASE WHEN upload_failed_revision IS ?3
+                                            THEN upload_failures + 1 ELSE 1 END,
+                     upload_failed_revision = ?3
+                 WHERE id = ?1 RETURNING upload_failures",
+                params![draft.0, error, revision],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(failures) = failures {
+            self.conn.execute(
+                "UPDATE drafts SET upload_retry_at = ?2 WHERE id = ?1",
+                params![draft.0, retry_at(failures)],
+            )?;
+        }
         Ok(())
     }
 
@@ -831,6 +877,11 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Draft> {
         upload_error: row.get("upload_error")?,
         updated_at: row.get("updated_at")?,
     })
+}
+
+/// [`STALE`]'s parameters.
+fn due_params(account: AccountId, due: Option<UploadDue>) -> [Option<i64>; 3] {
+    [Some(account.0), due.map(|d| d.now), due.map(|d| d.max_wait)]
 }
 
 #[cfg(test)]
@@ -1230,11 +1281,20 @@ mod tests {
     }
 
     fn stale(store: &Store, account: AccountId) -> (Vec<DraftId>, bool) {
+        stale_at(store, account, None)
+    }
+
+    /// Due by `now`, waits of 5000 at most.
+    fn stale_at(store: &Store, account: AccountId, now: Option<i64>) -> (Vec<DraftId>, bool) {
+        let due = now.map(|now| UploadDue {
+            now,
+            max_wait: 5000,
+        });
         store
             .read(|db| {
                 Ok((
-                    db.drafts().stale(account)?,
-                    db.drafts().need_upload(account)?,
+                    db.drafts().stale(account, due)?,
+                    db.drafts().need_upload(account, due)?,
                 ))
             })
             .unwrap()
@@ -1440,7 +1500,10 @@ mod tests {
 
         let refused = begin_at(0).unwrap();
         store
-            .write(|db| db.drafts().upload_refused(&refused, "NO [OVERQUOTA]"))
+            .write(|db| {
+                db.drafts()
+                    .upload_refused(&refused, "NO [OVERQUOTA]", |_| 1000)
+            })
             .unwrap();
         let draft_now = get(&store, draft);
         assert_eq!(draft_now.upload_error.as_deref(), Some("NO [OVERQUOTA]"));
@@ -1455,6 +1518,56 @@ mod tests {
         queue(&store, account, draft).unwrap();
         assert!(begin_at(1).is_none(), "being sent");
         assert_eq!(stale(&store, account), (vec![], false));
+    }
+
+    #[test]
+    fn a_refused_draft_waits_for_its_backoff_unless_it_changes() {
+        let (store, account, folder, draft) = with_drafts_folder();
+        let refuse = || {
+            let upload = begin(&store, draft, folder, "x@x");
+            let mut failures = 0;
+            store
+                .write(|db| {
+                    db.drafts().upload_refused(&upload, "NO [OVERQUOTA]", |n| {
+                        failures = n;
+                        1000 * i64::from(n)
+                    })
+                })
+                .unwrap();
+            failures
+        };
+        assert_eq!(refuse(), 1);
+        assert_eq!(stale_at(&store, account, Some(999)), (vec![], false));
+        assert_eq!(
+            stale_at(&store, account, Some(-4001)),
+            (vec![draft], true),
+            "the clock went back: the wait is longer than any is set for"
+        );
+        assert_eq!(
+            stale_at(&store, account, Some(1000)),
+            (vec![draft], true),
+            "backoff ran out"
+        );
+        assert_eq!(stale(&store, account), (vec![draft], true), "asked for");
+
+        assert_eq!(refuse(), 2, "refused again as it is");
+        assert_eq!(stale_at(&store, account, Some(1999)), (vec![], false));
+
+        store
+            .write(|db| edit(db, draft, &content("two"), 2))
+            .unwrap();
+        assert_eq!(
+            stale_at(&store, account, Some(0)),
+            (vec![draft], true),
+            "changed: at once"
+        );
+        assert_eq!(refuse(), 1, "counted afresh");
+
+        settle(&store, &begin(&store, draft, folder, "y@x"), 7, &[3]);
+        store
+            .write(|db| edit(db, draft, &content("three"), 3))
+            .unwrap();
+        assert_eq!(refuse(), 1, "an upload went through since");
     }
 
     #[test]

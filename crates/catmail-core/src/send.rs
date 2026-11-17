@@ -6,13 +6,13 @@
 //!
 //! - `queued` → `sending` (counted as an attempt) → MAIL / RCPT / DATA and the message
 //!   body. A failure here can't have delivered anything: back to `queued` with backoff,
-//!   or `failed` if the server refused for good.
+//!   or `failed` if the server refused for good or this was the [`MAX_ATTEMPTS`]th.
 //! - `unknown` is committed *before* the final dot. The server's 250 makes it
 //!   `accepted`; a refusal makes it `queued` or `failed`; anything else (lost
 //!   connection, timeout, crash) leaves it `unknown`, and only the user resends it.
 //! - `accepted` → APPEND to the Sent folder (at once, then retried with backoff),
 //!   checking first whether an earlier APPEND arrived after all → done: the entry and
-//!   its draft go. Gmail saves what its own SMTP server sends to Sent itself: no APPEND.
+//!   its draft go. `unsaved` after [`MAX_ATTEMPTS`] failures, for the user. Gmail saves what its own SMTP server sends to Sent itself: no APPEND.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
@@ -36,6 +36,10 @@ use crate::{Error, Result, addresses, body, drafts, ops, sync};
 /// First retry after this long, doubling up to [`MAX_BACKOFF`].
 const FIRST_BACKOFF: i64 = 30;
 const MAX_BACKOFF: i64 = 30 * 60;
+/// Attempts at a step (sending, saving to Sent) before the user is told it failed,
+/// instead of retrying for as long as the failure lasts: one that fails three times in
+/// a row is seldom about to work, and the user can try again once it might.
+const MAX_ATTEMPTS: u32 = 3;
 /// After the computer woke, the first retry of a server that can't be reached is this
 /// much later (see [`Failures::retry_in`](crate::engine::Failures::retry_in)).
 const RETRY_AFTER_WAKE: i64 = 2;
@@ -469,15 +473,18 @@ async fn send_one(
                 None => engine.read(move |db| db.outbox().get(id)).await,
             }
         }
-        Outcome::NotSent(e) if is_permanent(&e) => {
-            tracing::warn!(%id, error = %e, "message refused");
-            let error = e.to_string();
-            record(engine, id, move |o| o.fail(id, &error, now)).await
-        }
         Outcome::NotSent(e) => {
-            tracing::info!(%id, error = %e, "sending failed; will retry");
-            let (next, error) = (now + backoff(attempts), e.to_string());
-            record(engine, id, move |o| o.requeue(id, next, &error, now)).await
+            let error = e.to_string();
+            match next_attempt(now, attempts).filter(|_| !is_permanent(&e)) {
+                Some(next) => {
+                    tracing::info!(%id, %error, "sending failed; will retry");
+                    record(engine, id, move |o| o.requeue(id, next, &error, now)).await
+                }
+                None => {
+                    tracing::warn!(%id, %attempts, %error, "message not sent; giving up");
+                    record(engine, id, move |o| o.fail(id, &error, now)).await
+                }
+            }
         }
         Outcome::Unknown(e) => {
             tracing::warn!(%id, error = %e, "no answer to the end of the message; outcome unknown");
@@ -565,9 +572,17 @@ async fn save_one(
             }))
         }
         Err(e) => {
-            tracing::info!(%id, error = %e, "saving to Sent failed; will retry");
-            let (next, error) = (now + backoff(job.entry.attempts), e.to_string());
-            record(engine, id, move |o| o.save_later(id, next, &error, now)).await
+            let (attempts, error) = (job.entry.attempts, e.to_string());
+            match next_attempt(now, attempts) {
+                Some(next) => {
+                    tracing::info!(%id, %error, "saving to Sent failed; will retry");
+                    record(engine, id, move |o| o.save_later(id, next, &error, now)).await
+                }
+                None => {
+                    tracing::warn!(%id, %attempts, %error, "saving to Sent failed; giving up");
+                    record(engine, id, move |o| o.give_up_saving(id, &error, now)).await
+                }
+            }
         }
     }
 }
@@ -685,6 +700,12 @@ fn is_permanent(e: &Error) -> bool {
         e.kind(),
         ErrorKind::Refused | ErrorKind::Invalid | ErrorKind::Conflict
     ) && !e.is_transient()
+}
+
+/// When to try a step again after its `attempts`-th attempt failed for now, or `None`
+/// once that was the last: the user is told instead.
+fn next_attempt(now: i64, attempts: u32) -> Option<i64> {
+    (attempts < MAX_ATTEMPTS).then(|| now + backoff(attempts))
 }
 
 /// Seconds to wait after the `attempts`-th failed attempt.

@@ -17,14 +17,18 @@ pub enum OutboxStatus {
     /// The server accepted the message; saving a copy to the Sent folder is pending.
     /// Only that is retried from here, never the send itself.
     Accepted,
+    /// Accepted, but saving a copy to Sent failed a few times in a row (`last_error`
+    /// says why), and isn't tried again on its own: save it again, or give up the copy.
+    Unsaved,
     /// The connection was lost after the whole message was handed over, before the
     /// server confirmed it. It may or may not have been delivered, so it is never
     /// resent automatically: retry, mark it sent, or cancel.
     Unknown,
     /// Sent, and saved to Sent where there is one. The entry and its draft are gone.
     Done,
-    /// The server refused the message for good (`last_error` says why). Retry once
-    /// the cause is fixed, or cancel to edit the draft again.
+    /// The server refused the message for good, or it failed for now a few times in a
+    /// row (`last_error` says why). Retry once the cause is fixed, or cancel to edit the
+    /// draft again.
     Failed,
 }
 
@@ -34,6 +38,7 @@ impl OutboxStatus {
             Self::Queued => "queued",
             Self::Sending => "sending",
             Self::Accepted => "accepted",
+            Self::Unsaved => "unsaved",
             Self::Unknown => "unknown",
             Self::Done => "done",
             Self::Failed => "failed",
@@ -42,12 +47,12 @@ impl OutboxStatus {
 
     /// The message went out; at most saving it to Sent is left.
     pub fn went_out(self) -> bool {
-        matches!(self, Self::Accepted | Self::Done)
+        matches!(self, Self::Accepted | Self::Unsaved | Self::Done)
     }
 
     /// Nothing more happens on its own: the user has to choose what to do.
     pub fn needs_user(self) -> bool {
-        matches!(self, Self::Unknown | Self::Failed)
+        matches!(self, Self::Unknown | Self::Unsaved | Self::Failed)
     }
 
     /// What `MailClient::retry_outbox` makes of an entry in this state, if it applies:
@@ -56,6 +61,7 @@ impl OutboxStatus {
     pub fn retry_to(self) -> Option<Self> {
         match self {
             Self::Failed | Self::Unknown => Some(Self::Queued),
+            Self::Unsaved => Some(Self::Accepted),
             Self::Queued | Self::Accepted => Some(self),
             Self::Sending | Self::Done => None,
         }
@@ -83,7 +89,7 @@ impl OutboxStatus {
     pub fn can_cancel(self) -> bool {
         matches!(
             self,
-            Self::Queued | Self::Failed | Self::Unknown | Self::Accepted
+            Self::Queued | Self::Failed | Self::Unknown | Self::Accepted | Self::Unsaved
         )
     }
 }
@@ -102,6 +108,7 @@ impl FromStr for OutboxStatus {
             "queued" => Self::Queued,
             "sending" => Self::Sending,
             "accepted" => Self::Accepted,
+            "unsaved" => Self::Unsaved,
             "unknown" => Self::Unknown,
             "done" => Self::Done,
             "failed" => Self::Failed,
@@ -159,6 +166,7 @@ mod tests {
         assert_eq!(Queued.retry_to(), Some(Queued));
         // Sent already: only saving to Sent is tried again.
         assert_eq!(Accepted.retry_to(), Some(Accepted));
+        assert_eq!(Unsaved.retry_to(), Some(Accepted));
         assert_eq!(Sending.retry_to(), None);
         assert_eq!(Done.retry_to(), None);
     }

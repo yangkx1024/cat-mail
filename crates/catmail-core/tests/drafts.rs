@@ -13,7 +13,9 @@ use catmail_core::{
     MailClientBuilder, QuoteHead, ReplayReport, SyncSchedule,
 };
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
-use common::{Env, NETEASE_OVER_LIMIT, addr, env, env_built, eventually, sparse, synced_env};
+use common::{
+    Env, NETEASE_OVER_LIMIT, addr, drain, env, env_built, eventually, sparse, synced_env,
+};
 use mail_parser::MessageParser;
 use tokio::sync::Semaphore;
 
@@ -1403,6 +1405,57 @@ async fn a_draft_that_settles_during_a_sync_is_uploaded_after_it() {
     gate.add_permits(Semaphore::MAX_PERMITS);
     eventually("the draft on the server", async || env.on_server(id).await).await;
     assert_eq!(subjects(&env.server_drafts()), ["one"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn background_sync_uploads_a_refused_draft_again_only_once_it_changes() {
+    let mut state = state();
+    state.faults.reject_appends = 10;
+    let env = env_built(
+        state,
+        SmtpState::new("alice", "pw"),
+        background(Duration::ZERO),
+    )
+    .await;
+    let id = env.draft("one").await;
+    eventually("the refusal", async || {
+        let draft = env.client.get_draft(id).await.unwrap().unwrap();
+        draft.upload_error.is_some()
+    })
+    .await;
+
+    // New mail wakes background sync, which replays before syncing INBOX: the draft
+    // isn't sent again as it is, nor is anything announced.
+    let mut events = env.client.subscribe();
+    for subject in ["new", "newer"] {
+        env.fake.state().inbox().append_simple(subject);
+        eventually("the new mail", async || {
+            env.messages("INBOX")
+                .await
+                .iter()
+                .any(|(s, _)| s == subject)
+        })
+        .await;
+    }
+    assert_eq!(env.appends(), 1);
+    let drafts_changed = drain(&mut events)
+        .into_iter()
+        .filter(|e| matches!(e, catmail_core::Event::DraftsChanged { .. }))
+        .count();
+    assert_eq!(drafts_changed, 0);
+
+    // Asked for, it is.
+    let report = env.replay().await;
+    assert_eq!((report.drafts_uploaded, report.drafts_failed), (0, 1));
+    assert_eq!(env.appends(), 2);
+
+    // Changed, it is uploaded at once.
+    env.fake.state().faults.reject_appends = 0;
+    env.edit(id, content("two")).await.unwrap();
+    eventually("the changed draft on the server", async || {
+        subjects(&env.server_drafts()) == ["two"]
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

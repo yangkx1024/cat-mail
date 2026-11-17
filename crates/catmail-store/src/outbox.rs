@@ -279,7 +279,7 @@ impl<'c> Outbox<'c> {
         )
     }
 
-    /// The server refused the message for good.
+    /// The server refused the message for good, or for now once too often.
     pub fn fail(&self, id: OutboxId, error: &str, now: i64) -> Result<bool> {
         self.transition(
             id,
@@ -303,6 +303,18 @@ impl<'c> Outbox<'c> {
         )
     }
 
+    /// Saving to Sent failed again: no more automatic attempts, the user decides.
+    pub fn give_up_saving(&self, id: OutboxId, error: &str, now: i64) -> Result<bool> {
+        self.transition(
+            id,
+            &[OutboxStatus::Accepted],
+            OutboxStatus::Unsaved,
+            now,
+            None,
+            Some(error),
+        )
+    }
+
     /// Sent and saved: deletes the entry and the draft it came from (whose copy on the
     /// server goes with the next upload pass). Returns false if the entry is gone
     /// (cancelled meanwhile).
@@ -310,7 +322,8 @@ impl<'c> Outbox<'c> {
         let draft: Option<Option<i64>> = self
             .conn
             .query_row(
-                "DELETE FROM outbox WHERE id = ?1 AND status = 'accepted' RETURNING draft_id",
+                "DELETE FROM outbox WHERE id = ?1 AND status IN ('accepted', 'unsaved')
+                 RETURNING draft_id",
                 [id.0],
                 |r| r.get(0),
             )
@@ -431,7 +444,7 @@ fn conflict(id: OutboxId, status: OutboxStatus, action: &str) -> Error {
         OutboxStatus::Sending => "is being sent",
         OutboxStatus::Done => "is done",
         OutboxStatus::Queued => "is queued",
-        OutboxStatus::Accepted => "was sent",
+        OutboxStatus::Accepted | OutboxStatus::Unsaved => "was sent",
         OutboxStatus::Unknown => "has an unknown outcome",
         OutboxStatus::Failed => "failed",
     };

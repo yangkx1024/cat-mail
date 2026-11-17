@@ -17,13 +17,21 @@
 
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use catmail_proto::imap::{Error as ImapError, Session};
-use catmail_store::{DraftUpload, Touched};
+use catmail_store::{DraftUpload, Touched, UploadDue};
 use catmail_types::{AccountId, DraftId, Event, Flags, FolderId, FolderRole};
 
-use crate::engine::{Engine, blocking, now};
+use crate::engine::{Engine, backoff, blocking, now};
 use crate::{Result, connection, drafts, ops};
+
+/// Background sync uploads a draft the server refused again after this long, doubling
+/// with each refusal of it as it is up to [`MAX_REFUSED_BACKOFF`]: it is sent in full
+/// every time, and what was refused (a full mailbox, a message too large) seldom changes
+/// soon. Changing the draft, or the user asking, uploads it at once.
+const FIRST_REFUSED_BACKOFF: Duration = Duration::from_secs(5 * 60);
+const MAX_REFUSED_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Which of the drafts to upload an upload pass takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,8 +40,34 @@ pub(crate) enum Uploads {
     All,
     /// Those not changed within the engine's
     /// [`draft_upload_delay`](Engine::draft_upload_delay), for background sync: a draft
-    /// being written is uploaded once the user pauses, not with every save.
+    /// being written is uploaded once the user pauses, not with every save. Nor those
+    /// the server refused, until their backoff runs out.
     Settled,
+}
+
+/// What an upload pass leaves out, worked out once at its start.
+struct Taken {
+    /// When a refused draft's backoff has run out, if it counts.
+    due: Option<UploadDue>,
+    held: HashSet<DraftId>,
+}
+
+impl Uploads {
+    fn taken(self, engine: &Engine, account: AccountId) -> Taken {
+        match self {
+            Self::All => Taken {
+                due: None,
+                held: HashSet::new(),
+            },
+            Self::Settled => Taken {
+                due: Some(UploadDue {
+                    now: now(),
+                    max_wait: MAX_REFUSED_BACKOFF.as_secs() as i64,
+                }),
+                held: engine.held_drafts(account),
+            },
+        }
+    }
 }
 
 /// The drafts an upload pass, or several in a row, saved to the server and those it
@@ -62,19 +96,33 @@ pub(crate) async fn upload(
     uploads: Uploads,
     done: &mut Uploaded,
 ) -> Result<()> {
+    let taken = uploads.taken(engine, account);
+    let due = taken.due;
     if !engine
-        .read(move |db| db.drafts().need_upload(account))
+        .read(move |db| db.drafts().need_upload(account, due))
         .await?
     {
         return Ok(());
     }
     let mut touched = Touched::new();
-    let result = run(engine, session, account, uploads, done, &mut touched).await;
+    let mut changed = false;
+    let result = run(
+        engine,
+        session,
+        account,
+        taken,
+        done,
+        &mut touched,
+        &mut changed,
+    )
+    .await;
     // Whatever was committed before a failure too.
     if !touched.is_empty() {
         ops::replayed(engine, account, &touched);
     }
-    engine.emit(Event::DraftsChanged { account });
+    if changed {
+        engine.emit(Event::DraftsChanged { account });
+    }
     result
 }
 
@@ -82,9 +130,10 @@ async fn run(
     engine: &Arc<Engine>,
     session: &mut Session,
     account: AccountId,
-    uploads: Uploads,
+    taken: Taken,
     done: &mut Uploaded,
     touched: &mut Touched,
+    changed: &mut bool,
 ) -> Result<()> {
     let (unsettled, target) = engine
         .read(move |db| {
@@ -95,28 +144,28 @@ async fn run(
         })
         .await?;
     for upload in unsettled {
-        touched.merge(
-            try_settle(engine, session, &upload, None)
-                .await?
-                .unwrap_or_default(),
-        );
+        if let Some(settled) = try_settle(engine, session, &upload, None).await? {
+            touched.merge(settled);
+            *changed = true;
+        }
     }
     let Some((folder, remote_name)) = target else {
         return Ok(());
     };
-    let stale = engine.read(move |db| db.drafts().stale(account)).await?;
-    let held = match uploads {
-        Uploads::All => HashSet::new(),
-        Uploads::Settled => engine.held_drafts(account),
-    };
+    let Taken { due, held } = taken;
+    let stale = engine
+        .read(move |db| db.drafts().stale(account, due))
+        .await?;
     for draft in stale.into_iter().filter(|d| !held.contains(d)) {
         match upload_one(engine, session, draft, (folder, &remote_name)).await? {
-            Outcome::Uploaded(changed) => {
+            Outcome::Uploaded(queued) => {
                 done.saved(draft);
-                touched.merge(changed);
+                touched.merge(queued);
+                *changed = true;
             }
             Outcome::Failed => {
                 done.refused.insert(draft);
+                *changed = true;
             }
             Outcome::Skipped => {}
         }
@@ -166,7 +215,8 @@ async fn upload_one(
         Ok(raw) => raw,
         // A local problem (an attachment's blob gone, say): the rest can still go.
         Err(e) => {
-            return failed(engine, draft, None, format!("can't build the message: {e}")).await;
+            let error = format!("can't build the message: {e}");
+            return failed(engine, draft, revision, None, error).await;
         }
     };
     let remote = remote_name.to_owned();
@@ -188,7 +238,7 @@ async fn upload_one(
         // refused before its message went out (Dovecot does that when it can't store
         // anything). Not one saying the account went over its limit, which lifts.
         Err(e @ (ImapError::Command { .. } | ImapError::InvalidInput(_))) if !e.is_over_limit() => {
-            return failed(engine, draft, Some(upload), e.to_string()).await;
+            return failed(engine, draft, revision, Some(upload), e.to_string()).await;
         }
         // Answered OK, but not all of the answer could be read: stored, at a UID to be
         // found by searching.
@@ -204,18 +254,24 @@ async fn upload_one(
         .map_or(Outcome::Skipped, Outcome::Uploaded))
 }
 
-/// Records why the draft couldn't be uploaded, ending `upload` if there is one.
+/// Records why the draft couldn't be uploaded as it was at `revision`, ending `upload`
+/// if there is one, and puts off the next background attempt.
 async fn failed(
     engine: &Arc<Engine>,
     draft: DraftId,
+    revision: i64,
     upload: Option<DraftUpload>,
     error: String,
 ) -> Result<Outcome> {
     tracing::warn!(%draft, %error, "can't upload draft");
+    let now = now();
+    let retry_at = move |failures| {
+        now + backoff(FIRST_REFUSED_BACKOFF, failures, MAX_REFUSED_BACKOFF).as_secs() as i64
+    };
     engine
         .write(move |db| match &upload {
-            Some(upload) => db.drafts().upload_refused(upload, &error),
-            None => db.drafts().upload_failed(draft, &error),
+            Some(upload) => db.drafts().upload_refused(upload, &error, retry_at),
+            None => db.drafts().upload_failed(draft, revision, &error, retry_at),
         })
         .await?;
     Ok(Outcome::Failed)

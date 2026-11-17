@@ -1631,7 +1631,7 @@
               "type": "array"
             },
             "status": {
-              "description": "`queued`, `sending`; `accepted` (sent, not saved to Sent yet); `unknown` (may or\nmay not have gone out: only the user can tell); `failed`; `done`.",
+              "description": "`queued`, `sending`; `accepted` (sent, not saved to Sent yet); `unsaved` (sent,\nbut saving to Sent kept failing: the user decides); `unknown` (may or may not have\ngone out: only the user can tell); `failed`; `done`.",
               "type": "string"
             },
             "subject": {
@@ -3189,7 +3189,7 @@
           "type": "array"
         },
         "status": {
-          "description": "`queued`, `sending`; `accepted` (sent, not saved to Sent yet); `unknown` (may or\nmay not have gone out: only the user can tell); `failed`; `done`.",
+          "description": "`queued`, `sending`; `accepted` (sent, not saved to Sent yet); `unsaved` (sent,\nbut saving to Sent kept failing: the user decides); `unknown` (may or may not have\ngone out: only the user can tell); `failed`; `done`.",
           "type": "string"
         },
         "subject": {

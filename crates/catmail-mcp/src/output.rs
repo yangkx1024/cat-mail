@@ -348,8 +348,9 @@ pub(crate) struct OutboxOut {
     pub account: i64,
     pub subject: String,
     pub recipients: Vec<String>,
-    /// `queued`, `sending`; `accepted` (sent, not saved to Sent yet); `unknown` (may or
-    /// may not have gone out: only the user can tell); `failed`; `done`.
+    /// `queued`, `sending`; `accepted` (sent, not saved to Sent yet); `unsaved` (sent,
+    /// but saving to Sent kept failing: the user decides); `unknown` (may or may not have
+    /// gone out: only the user can tell); `failed`; `done`.
     pub status: &'static str,
     pub attempts: u32,
     pub last_error: Option<String>,

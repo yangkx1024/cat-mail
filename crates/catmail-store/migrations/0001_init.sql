@@ -415,6 +415,12 @@ CREATE TABLE drafts (
     remote_revision     INTEGER,
     -- Why the server refused the last upload; cleared by one that succeeds.
     upload_error        TEXT,
+    -- Refusals of this revision in a row, and when background sync may upload it again
+    -- (unix seconds): a refused draft isn't sent in full on every pass. Count only while
+    -- upload_failed_revision is the draft's revision: a change uploads at once.
+    upload_failed_revision INTEGER,
+    upload_failures     INTEGER NOT NULL DEFAULT 0,
+    upload_retry_at     INTEGER,
     updated_at          INTEGER NOT NULL DEFAULT (unixepoch()),
     CHECK ((remote_folder_id IS NULL) = (remote_uidvalidity IS NULL)
        AND (remote_folder_id IS NULL) = (remote_uid IS NULL)
@@ -488,7 +494,10 @@ CREATE INDEX draft_attachments_draft ON draft_attachments (draft_id);
 --             deliver twice. The user decides: retry, mark sent, or cancel.
 --   accepted  server accepted the message (250 after DATA); saving to Sent is pending.
 --             Only the APPEND is retried from here, never the SMTP send.
---   failed    permanently rejected (e.g. 5xx); last_error says why
+--   unsaved   accepted, but saving to Sent failed a few times in a row: no more
+--             automatic attempts. The user saves it again or gives up the copy.
+--   failed    rejected for good (e.g. 5xx), or a temporary failure (4xx, a dropped
+--             connection) a few times in a row; last_error says why
 --   (done)    sent and, where needed, saved to Sent: the row and its draft are deleted.
 --
 -- attempts counts tries at the current step and is bumped *before* each try: SMTP
