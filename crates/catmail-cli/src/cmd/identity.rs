@@ -8,7 +8,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use crate::cmd::account::{Login, SmtpServer, read_password};
 use crate::cmd::one_account;
 use crate::json::{self, JsonIdentity};
-use crate::output::print_identities;
+use crate::output::{outln, print_identities};
 
 #[derive(Subcommand)]
 pub(crate) enum IdentityCommand {
@@ -104,13 +104,13 @@ pub(crate) async fn identity(client: &MailClient, cmd: IdentityCommand, json: bo
                     .collect();
                 json::print_keyed("identities", &list)?;
             } else {
-                print_identities(&account, &identities);
+                print_identities(&account, &identities)?;
             }
         }
         IdentityCommand::Default { id } => {
             client.set_default_identity(IdentityId(id)).await?;
             if !json {
-                println!("Identity {id} is the default now.");
+                outln!("Identity {id} is the default now.")?;
             }
         }
         IdentityCommand::Name { id, name } => {
@@ -118,13 +118,13 @@ pub(crate) async fn identity(client: &MailClient, cmd: IdentityCommand, json: bo
                 .set_identity_name(IdentityId(id), name.as_deref())
                 .await?;
             if !json {
-                println!("Updated identity {id}.");
+                outln!("Updated identity {id}.")?;
             }
         }
         IdentityCommand::Rm { id } => {
             client.remove_identity(IdentityId(id)).await?;
             if !json {
-                println!("Removed identity {id}.");
+                outln!("Removed identity {id}.")?;
             }
         }
         IdentityCommand::SavesSent { id, saves } => {
@@ -132,7 +132,7 @@ pub(crate) async fn identity(client: &MailClient, cmd: IdentityCommand, json: bo
                 .set_identity_saves_sent(IdentityId(id), saves.setting())
                 .await?;
             if !json {
-                println!("Updated identity {id}.");
+                outln!("Updated identity {id}.")?;
             }
         }
     }
@@ -160,10 +160,12 @@ async fn add(
     if json {
         json::print_keyed("identity", &JsonIdentity::new(&identity, account))?;
     } else {
-        println!(
+        outln!(
             "Added identity {} ({}) to {}",
-            identity.id, identity.email, account.email
-        );
+            identity.id,
+            identity.email,
+            account.email
+        )?;
     }
     Ok(())
 }

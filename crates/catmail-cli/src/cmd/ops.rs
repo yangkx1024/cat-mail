@@ -182,7 +182,7 @@ pub(crate) async fn ops(client: &MailClient, cmd: OpsCommand, json: bool) -> Res
                 json::print_list::<JsonPendingOp, _>("ops", &ops)?;
             } else {
                 let accounts: BTreeSet<AccountId> = ops.iter().map(|op| op.account_id).collect();
-                print_ops(&ops, &account_folders(client, accounts).await?);
+                print_ops(&ops, &account_folders(client, accounts).await?)?;
             }
             Ok(())
         }

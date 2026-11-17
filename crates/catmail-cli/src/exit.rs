@@ -52,6 +52,21 @@ impl fmt::Display for Exit {
 
 impl std::error::Error for Exit {}
 
+/// 128 + SIGPIPE, as a shell reports a program that signal killed. Under `pipefail`,
+/// `catmail search x | head` fails as `cat file | head` does.
+const STDOUT_CLOSED: u8 = 141;
+
+/// What a command that ended with `result` exits with; `stdout_closed` if whoever read
+/// its output stopped before the end. How the command failed comes first: a reader
+/// that went away must not hide that a message may have been delivered.
+pub(crate) fn code(result: &anyhow::Result<()>, stdout_closed: bool) -> u8 {
+    match result {
+        Err(e) => outcome(e).code(),
+        Ok(()) if stdout_closed => STDOUT_CLOSED,
+        Ok(()) => 0,
+    }
+}
+
 /// How a command that failed with `error` ended.
 pub(crate) fn outcome(error: &anyhow::Error) -> Outcome {
     error
@@ -72,5 +87,14 @@ mod tests {
         assert_eq!(outcome(&error), Outcome::Unknown);
         assert_eq!(outcome(&anyhow::anyhow!("other")), Outcome::Failed);
         assert!(Outcome::Queued < Outcome::Failed && Outcome::Failed < Outcome::Unknown);
+    }
+
+    #[test]
+    fn a_failure_outranks_a_closed_stdout() {
+        let unknown = Err(Exit::new(Outcome::Unknown, "lost").into());
+        assert_eq!(code(&unknown, true), 4);
+        assert_eq!(code(&Err(anyhow::anyhow!("other")), true), 1);
+        assert_eq!(code(&Ok(()), true), 141);
+        assert_eq!(code(&Ok(()), false), 0);
     }
 }

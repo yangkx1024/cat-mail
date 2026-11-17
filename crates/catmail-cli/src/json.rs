@@ -16,6 +16,8 @@ use catmail_core::{
 };
 use serde::Serialize;
 
+use crate::output::outln;
+
 const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Serialize)]
@@ -27,8 +29,7 @@ struct Document<'a, T> {
 
 /// Prints `body`, an object, as an indented document.
 pub(crate) fn print(body: &impl Serialize) -> Result<()> {
-    println!("{}", to_string(body, true)?);
-    Ok(())
+    outln!("{}", to_string(body, true)?)
 }
 
 /// Prints a document with `value` under `key`.
@@ -50,8 +51,7 @@ fn keyed<T>(key: &'static str, value: T) -> BTreeMap<&'static str, T> {
 
 /// Prints `body` as a document on one line, for streams of them.
 pub(crate) fn print_line(body: &impl Serialize) -> Result<()> {
-    println!("{}", to_string(body, false)?);
-    Ok(())
+    outln!("{}", to_string(body, false)?)
 }
 
 fn to_string(body: &impl Serialize, pretty: bool) -> Result<String> {

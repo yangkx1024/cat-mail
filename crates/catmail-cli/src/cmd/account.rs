@@ -11,7 +11,7 @@ use clap::{Args, Subcommand};
 
 use crate::cmd::resolve_account;
 use crate::json::{self, JsonAccount};
-use crate::output::print_accounts;
+use crate::output::{outln, print_accounts};
 
 #[derive(Subcommand)]
 pub(crate) enum AccountCommand {
@@ -126,7 +126,7 @@ pub(crate) async fn account(client: &MailClient, cmd: AccountCommand, json: bool
                     .collect();
                 json::print_keyed("accounts", &list)?;
             } else {
-                print_accounts(&accounts);
+                print_accounts(&accounts)?;
             }
         }
         AccountCommand::Remove { account } => {
@@ -137,7 +137,7 @@ pub(crate) async fn account(client: &MailClient, cmd: AccountCommand, json: bool
             if json {
                 json::print_keyed("account", &JsonAccount::new(&account, &identities))?;
             } else {
-                println!("Removed account {} ({})", account.id, account.email);
+                outln!("Removed account {} ({})", account.id, account.email)?;
             }
         }
     }
@@ -171,7 +171,7 @@ async fn add(
         let (account, identities) = with_identities(client, account).await?;
         json::print_keyed("account", &JsonAccount::new(&account, &identities))?;
     } else {
-        println!("Added account {} ({})", account.id, account.email);
+        outln!("Added account {} ({})", account.id, account.email)?;
     }
     Ok(())
 }

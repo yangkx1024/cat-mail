@@ -12,7 +12,7 @@ use clap::Subcommand;
 use crate::cmd::compose::save_to_server;
 use crate::exit::{Exit, Outcome};
 use crate::json::{self, JsonOutboxEntry};
-use crate::output::{print_outbox, printable};
+use crate::output::{errln, outln, print_outbox, printable};
 
 #[derive(Subcommand)]
 pub(crate) enum OutboxCommand {
@@ -66,7 +66,7 @@ pub(crate) async fn outbox(client: &MailClient, cmd: OutboxCommand, json: bool) 
             if json {
                 json::print_list::<JsonOutboxEntry, _>("entries", &entries)?;
             } else {
-                print_outbox(&entries);
+                print_outbox(&entries)?;
             }
         }
         OutboxCommand::Flush => {
@@ -99,9 +99,9 @@ pub(crate) async fn outbox(client: &MailClient, cmd: OutboxCommand, json: bool) 
             if json {
                 json::print_list::<JsonOutboxEntry, _>("entries", &results)?;
             } else if !results.is_empty() {
-                print_outbox(&results);
+                print_outbox(&results)?;
             } else if errors.is_empty() {
-                println!("Nothing to send.");
+                outln!("Nothing to send.")?;
             }
             // Like `catmail send`: an error unless everything went out.
             let failed = (!errors.is_empty()).then_some(Outcome::Failed);
@@ -129,11 +129,11 @@ pub(crate) async fn outbox(client: &MailClient, cmd: OutboxCommand, json: bool) 
             if json {
                 json::print_keyed("entry", &JsonOutboxEntry::from(&entry))?;
             } else if entry.status.went_out() {
-                println!("Removed {id}; the message was sent but not saved to Sent.");
+                outln!("Removed {id}; the message was sent but not saved to Sent.")?;
             } else if let Some(draft) = entry.draft_id {
-                println!("Cancelled {id}; it is draft {draft} again.");
+                outln!("Cancelled {id}; it is draft {draft} again.")?;
             } else {
-                println!("Cancelled {id}.");
+                outln!("Cancelled {id}.")?;
             }
         }
     }
@@ -164,12 +164,12 @@ fn report(entry: &OutboxEntry, blocked: Option<&ReportedError>, json: bool) -> R
     let message = match entry.status {
         OutboxStatus::Done => {
             if !json {
-                println!("Sent.");
+                outln!("Sent.")?;
             }
             return Ok(());
         }
         OutboxStatus::Accepted | OutboxStatus::Unsaved => {
-            eprintln!(
+            errln!(
                 "Sent, but saving a copy to Sent failed: {}\n\
                  `catmail outbox retry {id}` tries again.",
                 error

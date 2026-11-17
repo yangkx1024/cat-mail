@@ -19,7 +19,7 @@ use clap::{Parser, Subcommand};
 use crate::cmd::{
     account, compose, folder, gc, identity, mcp, ops, outbox, read, search, sync, watch,
 };
-use crate::output::printable_text;
+use crate::output::{errln, printable_text};
 
 #[derive(Parser)]
 #[command(
@@ -32,7 +32,8 @@ use crate::output::printable_text;
         "  1  failed\n",
         "  2  wrong usage\n",
         "  3  not done yet, but kept: `catmail sync`, `ops flush` or `outbox flush` does it\n",
-        "  4  a message may or may not have been delivered; see `catmail outbox`",
+        "  4  a message may or may not have been delivered; see `catmail outbox`\n",
+        "  141  nothing failed, but stdout was closed before the end, as `| head` does",
     )
 )]
 struct Cli {
@@ -129,15 +130,13 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    match run().await {
-        Ok(()) => ExitCode::SUCCESS,
-        // Errors can carry server-supplied text, so they are escaped too; line breaks
-        // stay, for the hints some errors end with.
-        Err(e) => {
-            eprintln!("Error: {}", printable_text(&format!("{e:#}")));
-            ExitCode::from(exit::outcome(&e).code())
-        }
+    let result = run().await;
+    // Errors can carry server-supplied text, so they are escaped too; line breaks stay,
+    // for the hints some errors end with.
+    if let Err(e) = &result {
+        errln!("Error: {}", printable_text(&format!("{e:#}")));
     }
+    ExitCode::from(exit::code(&result, output::stdout_closed()))
 }
 
 /// The app holding the data directory may have no window to show it is there.

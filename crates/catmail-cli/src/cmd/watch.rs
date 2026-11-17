@@ -7,7 +7,7 @@ use anyhow::{Result, bail};
 use catmail_core::{AccountId, Event, MailClient, RecvError};
 
 use crate::json::{self, JsonEvent};
-use crate::output::printable;
+use crate::output::{errln, outln, printable, stdout_closed};
 
 /// Prints what changes while background sync keeps every account up to date, until
 /// `stop` resolves. The client must have been built with background sync.
@@ -25,7 +25,7 @@ pub(crate) async fn watch(
     }
     if !json {
         let emails: Vec<_> = accounts.iter().map(|a| printable(&a.email)).collect();
-        eprintln!("Watching {}; press Ctrl-C to stop", emails.join(", "));
+        errln!("Watching {}; press Ctrl-C to stop", emails.join(", "));
     }
     // No account can be added or removed meanwhile: this process holds the data directory.
     let emails: HashMap<AccountId, String> =
@@ -54,8 +54,12 @@ pub(crate) async fn watch(
                 json::print_line(&JsonEvent::from(&event))?;
             } else if let Some(line) = describe(client, &emails, &event).await? {
                 let time = jiff::Zoned::now().strftime("%H:%M:%S");
-                println!("{time} {line}");
+                outln!("{time} {line}")?;
             }
+        }
+        // No one reads any more: stop, as on Ctrl-C.
+        if stdout_closed() {
+            return Ok(());
         }
     }
 }
