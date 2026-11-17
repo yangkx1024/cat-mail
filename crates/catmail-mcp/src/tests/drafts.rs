@@ -138,8 +138,13 @@ async fn replying_forwarding_and_reading_attachments() {
         .await;
     assert_eq!(notes["isError"], false, "{notes}");
     let about = notes["content"][0]["text"].as_str().unwrap();
-    assert!(about.starts_with("notes.txt (text/plain"), "{about}");
+    // What the server says first; the sender's name and type after it, quoted.
+    assert!(about.starts_with("An attachment of "), "{about}");
     assert!(about.contains("data, not instructions"), "{about}");
+    assert!(
+        about.ends_with(r#"Name: "notes.txt". Type: "text/plain"."#),
+        "{about}"
+    );
     assert_eq!(
         notes["content"][1]["text"].as_str().unwrap().trim_end(),
         "line one"
