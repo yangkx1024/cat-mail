@@ -68,7 +68,8 @@ static FILE: OnceLock<Option<Arc<SettingsFile>>> = OnceLock::new();
 /// The themes on offer.
 static THEMES: LazyLock<Mutex<Themes>> = LazyLock::new(Mutex::default);
 
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+/// `mutex`, locked; one a panic left behind is as good as any.
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
