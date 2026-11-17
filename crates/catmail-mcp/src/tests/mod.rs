@@ -276,6 +276,25 @@ async fn send_bytes(
     Ok((status, String::from_utf8_lossy(&body).into_owned()))
 }
 
+/// A request whose body is to come, sent as `head`: returns once hyper asks for the body
+/// (`100 Continue`, which `head` has to expect), so the handler has begun reading it.
+async fn awaiting_body(addr: SocketAddr, head: &str) -> tokio::net::TcpStream {
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    stream.write_all(head.as_bytes()).await.unwrap();
+    let mut answer = Vec::new();
+    while !answer.windows(3).any(|w| w == b"100") {
+        let mut chunk = [0; 256];
+        let n = stream.read(&mut chunk).await.unwrap();
+        assert!(
+            n > 0,
+            "closed instead of continuing: {}",
+            String::from_utf8_lossy(&answer)
+        );
+        answer.extend_from_slice(&chunk[..n]);
+    }
+    stream
+}
+
 /// Whether the connection was reset under the request.
 fn is_reset(e: &hyper::Error) -> bool {
     std::error::Error::source(e)

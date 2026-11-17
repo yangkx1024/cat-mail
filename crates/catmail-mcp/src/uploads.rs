@@ -8,6 +8,9 @@
 //! is random, belongs to the token that prepared it, takes one file within
 //! [`UPLOAD_WITHIN`], and is gone once a call that used it succeeds. Kept in memory: a
 //! restart of the host forgets them, as it does questions asked before sending.
+//!
+//! What a token's uploads hold counts the files being put too, as large as they may
+//! grow: otherwise each of many puts begun together could buffer a whole file.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
@@ -26,8 +29,9 @@ pub(crate) const UPLOAD_WITHIN: Duration = Duration::from_secs(15 * 60);
 /// What a token may have prepared and not used at once: every upload is a slot in
 /// memory until it expires.
 const PREPARED_PER_TOKEN: usize = 16;
-/// What the files a token has put and not used may add up to: two calls' worth, so
-/// that one which failed doesn't keep it from preparing the files of another.
+/// What the files a token has put and not used, and those being put, may add up to: two
+/// calls' worth, so that one which failed doesn't keep it from preparing the files of
+/// another.
 const HELD_PER_TOKEN: usize = 2 * MAX_FILE_BYTES;
 
 #[derive(Default)]
@@ -42,8 +46,13 @@ struct Upload {
 
 enum State {
     Waiting,
-    /// Its file is being put ([`Receiving`]): no one else may put one meanwhile.
-    Receiving,
+    /// Its file is being put ([`Receiving`]): no one else may put one meanwhile. Holds
+    /// as much as the file may grow to, `reserved`, and outlives the upload's expiry
+    /// until the put ends, so that its slot and room aren't given out again while the
+    /// body is still buffered.
+    Receiving {
+        reserved: usize,
+    },
     Received(Bytes),
 }
 
@@ -60,7 +69,8 @@ pub(crate) enum PutRefused {
     Taken,
     /// Larger than [`MAX_FILE_BYTES`].
     TooLarge,
-    /// The token's uploads hold too much already: `room` is what is left.
+    /// The token's uploads, with those being put, hold too much already: `room` is what
+    /// is left.
     Full { room: usize },
 }
 
@@ -92,22 +102,35 @@ impl Uploads {
         Ok(handle)
     }
 
-    /// Starts putting the file of `handle`: no one else can while the [`Receiving`] lasts.
-    pub fn begin<'a>(&'a self, handle: &'a str, now: Instant) -> Result<Receiving<'a>, PutRefused> {
+    /// Starts putting the file of `handle`, `declared` bytes long if the request says:
+    /// no one else can while the [`Receiving`] lasts. It holds room for the file as
+    /// large as it may be, so a declared length holds only that.
+    pub fn begin<'a>(
+        &'a self,
+        handle: &'a str,
+        declared: Option<usize>,
+        now: Instant,
+    ) -> Result<Receiving<'a>, PutRefused> {
         let mut uploads = self.live(now);
         let upload = uploads.get(handle).ok_or(PutRefused::Unknown)?;
         if !matches!(upload.state, State::Waiting) {
             return Err(PutRefused::Taken);
         }
-        let room = room(&uploads, &upload.token);
-        if room == 0 {
-            return Err(PutRefused::Full { room });
-        }
-        uploads.get_mut(handle).expect("found above").state = State::Receiving;
+        let room = room(&uploads, &upload.token).min(MAX_FILE_BYTES);
+        let limit = match declared {
+            Some(size) if size > MAX_FILE_BYTES => return Err(PutRefused::TooLarge),
+            Some(size) if size > room => return Err(PutRefused::Full { room }),
+            Some(size) => size,
+            None if room == 0 => return Err(PutRefused::Full { room }),
+            None => room,
+        };
+        let upload = uploads.get_mut(handle).expect("found above");
+        upload.state = State::Receiving { reserved: limit };
         Ok(Receiving {
             uploads: self,
             handle,
-            limit: room.min(MAX_FILE_BYTES),
+            limit,
+            until: upload.prepared_at + UPLOAD_WITHIN,
             put: false,
         })
     }
@@ -122,7 +145,7 @@ impl Uploads {
             .ok_or(Missing::Unknown)?;
         match &upload.state {
             State::Received(content) => Ok(content.clone()),
-            State::Waiting | State::Receiving => Err(Missing::NotPut),
+            State::Waiting | State::Receiving { .. } => Err(Missing::NotPut),
         }
     }
 
@@ -139,27 +162,36 @@ impl Uploads {
     }
 
     /// The uploads, without those expired: each use clears them, so what they hold isn't
-    /// kept until the next `prepare_upload`.
+    /// kept until the next `prepare_upload`. One being put stays until its
+    /// [`Receiving`] ends.
     fn live(&self, now: Instant) -> MutexGuard<'_, HashMap<String, Upload>> {
         let mut uploads = self.lock();
-        uploads.retain(|_, u| now.duration_since(u.prepared_at) < UPLOAD_WITHIN);
+        uploads.retain(|_, u| {
+            now.duration_since(u.prepared_at) < UPLOAD_WITHIN
+                || matches!(u.state, State::Receiving { .. })
+        });
         uploads
     }
 }
 
 /// A file being put to an upload's URL. Dropped without [`put`](Self::put) (the body
-/// broke off, was too large, or the request was cut off), the upload can be put again.
+/// broke off, was too large, took until the upload expired, or the request was cut
+/// off), the upload can be put again until it expires.
 pub(crate) struct Receiving<'a> {
     uploads: &'a Uploads,
     handle: &'a str,
-    /// How large the file may be: a file's most, or what the token's uploads have room
-    /// for.
+    /// How large the file may be, and what it holds of the token's room meanwhile: its
+    /// declared length, or what the token's uploads have room for, at most a file's
+    /// most.
     pub limit: usize,
+    /// When the upload expires: the file has to arrive whole before.
+    pub until: Instant,
     put: bool,
 }
 
 impl Receiving<'_> {
-    /// Why a file larger than [`limit`](Self::limit) is refused.
+    /// Why a file larger than [`limit`](Self::limit) is refused. Only one without a
+    /// declared length can be: a body is never longer than it says.
     pub fn too_large(&self) -> PutRefused {
         if self.limit == MAX_FILE_BYTES {
             PutRefused::TooLarge
@@ -168,16 +200,14 @@ impl Receiving<'_> {
         }
     }
 
-    /// Keeps the file, unless the token's uploads came to hold too much meanwhile (two
-    /// put at once). Returns the name of the upload's token.
+    /// Keeps the file and returns the name of the upload's token. Its room was held since
+    /// [`Uploads::begin`], so the token's uploads can't have come to hold too much; a file
+    /// that came by [`until`](Self::until) is kept even if the upload expired just after,
+    /// and the next use clears it.
     pub fn put(mut self, content: Bytes) -> Result<String, PutRefused> {
         let mut uploads = self.uploads.lock();
-        let upload = uploads.get(self.handle).ok_or(PutRefused::Unknown)?;
-        let room = room(&uploads, &upload.token);
-        if content.len() > room {
-            return Err(PutRefused::Full { room });
-        }
-        let upload = uploads.get_mut(self.handle).expect("found above");
+        let upload = uploads.get_mut(self.handle).ok_or(PutRefused::Unknown)?;
+        debug_assert!(content.len() <= self.limit, "`Limited` keeps to the limit");
         upload.state = State::Received(content);
         self.put = true;
         Ok(upload.token.clone())
@@ -193,19 +223,22 @@ impl Drop for Receiving<'_> {
         if let Ok(mut uploads) = self.uploads.0.lock()
             && let Some(upload) = uploads.get_mut(self.handle)
         {
+            // Expired, the next use clears it.
             upload.state = State::Waiting;
         }
     }
 }
 
-/// What the files `token` has put and not used have room for still.
+/// What the files `token` has put and not used, and those it is putting, have room for
+/// still.
 fn room(uploads: &HashMap<String, Upload>, token: &str) -> usize {
     let held: usize = uploads
         .values()
         .filter(|u| u.token == token)
         .map(|u| match &u.state {
             State::Received(content) => content.len(),
-            State::Waiting | State::Receiving => 0,
+            State::Receiving { reserved } => *reserved,
+            State::Waiting => 0,
         })
         .sum();
     HELD_PER_TOKEN.saturating_sub(held)
@@ -221,12 +254,19 @@ mod tests {
         let start = Instant::now();
         let handle = uploads.prepare("laptop", start).unwrap();
         assert_eq!(uploads.file(&handle, "laptop", start), Err(Missing::NotPut));
-        let receiving = uploads.begin(&handle, start).unwrap();
+        let receiving = uploads.begin(&handle, None, start).unwrap();
         assert_eq!(receiving.limit, MAX_FILE_BYTES);
+        assert_eq!(receiving.until, start + UPLOAD_WITHIN);
         assert_eq!(receiving.too_large(), PutRefused::TooLarge);
-        assert_eq!(uploads.begin(&handle, start).err(), Some(PutRefused::Taken));
+        assert_eq!(
+            uploads.begin(&handle, None, start).err(),
+            Some(PutRefused::Taken)
+        );
         receiving.put(Bytes::from_static(b"receipt")).unwrap();
-        assert_eq!(uploads.begin(&handle, start).err(), Some(PutRefused::Taken));
+        assert_eq!(
+            uploads.begin(&handle, None, start).err(),
+            Some(PutRefused::Taken)
+        );
 
         assert_eq!(uploads.file(&handle, "laptop", start).unwrap(), "receipt");
         // Still there for another call, until one that used it succeeds.
@@ -238,13 +278,13 @@ mod tests {
             Err(Missing::Unknown)
         );
         assert_eq!(
-            uploads.begin("made up", start).err(),
+            uploads.begin("made up", None, start).err(),
             Some(PutRefused::Unknown)
         );
 
         let late = uploads.prepare("laptop", start).unwrap();
         assert_eq!(
-            uploads.begin(&late, start + UPLOAD_WITHIN).err(),
+            uploads.begin(&late, None, start + UPLOAD_WITHIN).err(),
             Some(PutRefused::Unknown)
         );
     }
@@ -254,34 +294,57 @@ mod tests {
         let uploads = Uploads::default();
         let now = Instant::now();
         let handle = uploads.prepare("laptop", now).unwrap();
-        drop(uploads.begin(&handle, now).unwrap());
-        assert!(uploads.begin(&handle, now).is_ok());
+        drop(uploads.begin(&handle, None, now).unwrap());
+        assert!(uploads.begin(&handle, None, now).is_ok());
     }
 
     #[test]
-    fn a_token_holds_only_so_much() {
+    fn a_token_holds_only_so_much_with_the_files_being_put() {
         let uploads = Uploads::default();
         let now = Instant::now();
-        let [first, second, third] = [(); 3].map(|()| uploads.prepare("laptop", now).unwrap());
-        // Begun together: each may be as large as a file can be.
-        let a = uploads.begin(&first, now).unwrap();
-        let b = uploads.begin(&second, now).unwrap();
+        let [first, second, third, fourth] =
+            [(); 4].map(|()| uploads.prepare("laptop", now).unwrap());
+        // Begun together without a length, each holds a whole file's room meanwhile.
+        let a = uploads.begin(&first, None, now).unwrap();
+        let b = uploads.begin(&second, None, now).unwrap();
         assert_eq!((a.limit, b.limit), (MAX_FILE_BYTES, MAX_FILE_BYTES));
-        a.put(vec![0; MAX_FILE_BYTES].into()).unwrap();
-        b.put(vec![0; MAX_FILE_BYTES - 1].into()).unwrap();
-        let c = uploads.begin(&third, now).unwrap();
-        assert_eq!(c.limit, 1);
-        assert_eq!(c.too_large(), PutRefused::Full { room: 1 });
         assert_eq!(
-            c.put(vec![0; 2].into()).err(),
-            Some(PutRefused::Full { room: 1 })
+            uploads.begin(&third, None, now).err(),
+            Some(PutRefused::Full { room: 0 })
         );
+        // One that ends without its file gives it back. A declared length holds only that.
+        drop(b);
+        let c = uploads.begin(&third, Some(3), now).unwrap();
+        assert_eq!(c.limit, 3);
+        a.put(vec![0; MAX_FILE_BYTES - 1].into()).unwrap();
+        let room = MAX_FILE_BYTES - 2;
+        let d = uploads.begin(&fourth, None, now).unwrap();
+        assert_eq!(d.limit, room);
+        assert_eq!(d.too_large(), PutRefused::Full { room });
+        drop(d);
+        assert_eq!(
+            uploads.begin(&fourth, Some(room + 1), now).err(),
+            Some(PutRefused::Full { room })
+        );
+        assert_eq!(
+            uploads.begin(&fourth, Some(MAX_FILE_BYTES + 1), now).err(),
+            Some(PutRefused::TooLarge)
+        );
+        c.put(Bytes::from_static(b"abc")).unwrap();
+        assert_eq!(uploads.begin(&fourth, None, now).unwrap().limit, room);
+
         // Another token's are its own.
         let other = uploads.prepare("phone", now).unwrap();
-        assert_eq!(uploads.begin(&other, now).unwrap().limit, MAX_FILE_BYTES);
+        assert_eq!(
+            uploads.begin(&other, None, now).unwrap().limit,
+            MAX_FILE_BYTES
+        );
 
         uploads.used(&[first]);
-        assert_eq!(uploads.begin(&third, now).unwrap().limit, MAX_FILE_BYTES);
+        assert_eq!(
+            uploads.begin(&fourth, None, now).unwrap().limit,
+            MAX_FILE_BYTES
+        );
     }
 
     #[test]
@@ -297,5 +360,35 @@ mod tests {
         let later = start + UPLOAD_WITHIN;
         assert_eq!(uploads.file(&theirs, "phone", later), Err(Missing::Unknown));
         assert!(uploads.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_file_being_put_holds_its_slot_and_room_past_the_expiry() {
+        let uploads = Uploads::default();
+        let start = Instant::now();
+        let [first, second] = [(); 2].map(|()| uploads.prepare("laptop", start).unwrap());
+        let a = uploads.begin(&first, None, start).unwrap();
+        let b = uploads.begin(&second, None, start).unwrap();
+
+        // Expired, the two still being put count until their puts end.
+        let later = start + UPLOAD_WITHIN;
+        let new = uploads.prepare("laptop", later).unwrap();
+        assert_eq!(
+            uploads.begin(&new, None, later).err(),
+            Some(PutRefused::Full { room: 0 })
+        );
+        for _ in 3..PREPARED_PER_TOKEN {
+            uploads.prepare("laptop", later).unwrap();
+        }
+        assert_eq!(uploads.prepare("laptop", later), Err(TooMany));
+
+        // Once the puts end, they are forgotten.
+        drop((a, b));
+        assert_eq!(uploads.file(&first, "laptop", later), Err(Missing::Unknown));
+        assert_eq!(
+            uploads.begin(&new, None, later).unwrap().limit,
+            MAX_FILE_BYTES
+        );
+        assert!(uploads.prepare("laptop", later).is_ok());
     }
 }

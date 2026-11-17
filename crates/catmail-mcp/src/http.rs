@@ -9,20 +9,24 @@
 //! Files for drafts are put to `/mcp/uploads/<handle>` (see [`crate::uploads`]): the
 //! handle in the URL stands in for the token there.
 
+use std::collections::HashMap;
 use std::convert::Infallible;
+use std::future::Future as _;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use catmail_core::MailClient;
 use http::{HeaderMap, Method, Request, Response, StatusCode, header};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
-use hyper::body::{Bytes, Incoming};
+use hyper::body::{Body as _, Bytes, Frame, Incoming, SizeHint};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
 use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 use tokio::net::TcpListener;
@@ -47,9 +51,20 @@ const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SMALL_REQUEST_BYTES: usize = 1024 * 1024;
 /// How long stopping waits for the requests being answered by default.
 const DRAIN: Duration = Duration::from_secs(30);
+/// How long a client may take to send a request's headers: hyper's default, which takes
+/// effect only with a timer.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a request's body may go without any of it arriving, as nginx's
+/// `client_body_timeout`: a client that stops sending doesn't keep what was buffered.
+const BODY_READ_TIMEOUT: Duration = Duration::from_secs(60);
+/// How many requests to `/mcp` a token may have being answered at once: each may buffer
+/// its whole body (16 MB for a draft token) while it arrives, however slowly. Its
+/// uploads are as many at most, one for each it may prepare.
+const REQUESTS_PER_TOKEN: usize = 16;
 
 type Service = StreamableHttpService<Mail, NeverSessionManager>;
 type Body = BoxBody<Bytes, Infallible>;
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServeOptions {
@@ -119,6 +134,7 @@ impl McpServer {
                 service,
                 tokens,
                 uploads,
+                in_flight: Arc::default(),
                 addr,
             },
             Stopping {
@@ -153,6 +169,7 @@ struct Routes {
     service: Arc<Service>,
     tokens: Tokens,
     uploads: Arc<Uploads>,
+    in_flight: Arc<InFlight>,
     /// Where the server listens.
     addr: SocketAddr,
 }
@@ -198,7 +215,10 @@ async fn accept(listener: TcpListener, routes: Routes, stopping: Stopping) {
                 let routes = routes.clone();
                 async move { Ok::<_, Infallible>(respond(request, routes).await) }
             });
-            let connection = http1::Builder::new().serve_connection(TokioIo::new(stream), handler);
+            let connection = http1::Builder::new()
+                .timer(TokioTimer::new())
+                .header_read_timeout(HEADER_READ_TIMEOUT)
+                .serve_connection(TokioIo::new(stream), handler);
             let mut connection = std::pin::pin!(connection);
             let result = tokio::select! {
                 result = connection.as_mut() => result,
@@ -228,13 +248,15 @@ async fn accept(listener: TcpListener, routes: Routes, stopping: Stopping) {
     tracing::info!("MCP server stopped");
 }
 
-async fn respond(mut request: Request<Incoming>, routes: Routes) -> Response<Body> {
+async fn respond(request: Request<Incoming>, routes: Routes) -> Response<Body> {
     let Routes {
         service,
         tokens,
         uploads,
+        in_flight,
         addr,
     } = routes;
+    let mut request = request.map(ReadTimeout::new);
     if let Some(handle) = request.uri().path().strip_prefix(uploads::PATH) {
         let handle = handle.to_owned();
         return upload(request, &handle, &uploads).await;
@@ -249,6 +271,16 @@ async fn respond(mut request: Request<Incoming>, routes: Routes) -> Response<Bod
     let verified = tokio::task::spawn_blocking(move || tokens.verify(&secret)).await;
     match verified {
         Ok(Ok(Some(token))) => {
+            let Some(_answering) = in_flight.enter(&token.name) else {
+                tracing::warn!(token = %token.name, "MCP request turned away: too many at once");
+                return text(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    format!(
+                        "this token has {REQUESTS_PER_TOKEN} requests being answered already; \
+                         wait for one to end\n"
+                    ),
+                );
+            };
             tracing::debug!(token = %token.name, method = %request.method(), "MCP request");
             let small = token.access.tier < Tier::Draft;
             // For the tools: rmcp hands them the request's parts (`tools::token_of`).
@@ -285,7 +317,11 @@ async fn respond(mut request: Request<Incoming>, routes: Routes) -> Response<Bod
 
 /// Keeps the file put to an upload's URL: the body as it is. The handle is what lets it
 /// in, not a token: the agent's shell has none. Like `/mcp`, no web page may.
-async fn upload(request: Request<Incoming>, handle: &str, uploads: &Uploads) -> Response<Body> {
+async fn upload(
+    request: Request<ReadTimeout<Incoming>>,
+    handle: &str,
+    uploads: &Uploads,
+) -> Response<Body> {
     if request.method() != Method::PUT && request.method() != Method::POST {
         let mut response = text(
             StatusCode::METHOD_NOT_ALLOWED,
@@ -299,24 +335,43 @@ async fn upload(request: Request<Incoming>, handle: &str, uploads: &Uploads) -> 
     if request.headers().contains_key(header::ORIGIN) {
         return text(StatusCode::FORBIDDEN, "uploads aren't for web pages");
     }
-    let receiving = match uploads.begin(handle, Instant::now()) {
+    // `Content-Length`, which `curl -T` sends: the put holds only that much of the
+    // token's room while it lasts, not a whole file's.
+    let declared = request
+        .body()
+        .size_hint()
+        .exact()
+        .map(|size| usize::try_from(size).unwrap_or(usize::MAX));
+    let receiving = match uploads.begin(handle, declared, Instant::now()) {
         Ok(receiving) => receiving,
         Err(refused) => return refused_upload(refused),
     };
     // Dropping `receiving` without putting the file, below or when the request is cut
-    // off, lets it be put again.
-    let body = Limited::new(request.into_body(), receiving.limit)
-        .collect()
-        .await;
-    let content = match body {
-        Ok(body) => body.to_bytes(),
-        Err(e) if e.downcast_ref::<LengthLimitError>().is_some() => {
+    // off, lets it be put again. A body that hasn't arrived by the time the upload
+    // expires is given up, so it can't hold its room and slot on.
+    let body = Limited::new(request.into_body(), receiving.limit).collect();
+    let content = match tokio::time::timeout_at(receiving.until.into(), body).await {
+        Ok(Ok(body)) => body.to_bytes(),
+        Ok(Err(e)) if e.downcast_ref::<LengthLimitError>().is_some() => {
             return refused_upload(receiving.too_large());
         }
-        Err(e) => {
+        Ok(Err(e)) if e.downcast_ref::<BodyTimedOut>().is_some() => {
+            return text(
+                StatusCode::REQUEST_TIMEOUT,
+                format!("{e}; put the file again\n"),
+            );
+        }
+        Ok(Err(e)) => {
             // The connection broke off: no one to answer.
             tracing::debug!(error = %e, "MCP upload broke off");
             return text(StatusCode::BAD_REQUEST, "the file didn't arrive whole");
+        }
+        Err(_) => {
+            return text(
+                StatusCode::REQUEST_TIMEOUT,
+                "the upload expired before the file arrived whole; prepare_upload gives \
+                 another\n",
+            );
         }
     };
     let size = content.len();
@@ -357,11 +412,107 @@ fn refused_upload(refused: PutRefused) -> Response<Body> {
         PutRefused::Full { room } => text(
             StatusCode::PAYLOAD_TOO_LARGE,
             format!(
-                "this token's uploads not used yet hold all but {}; attach them, or wait \
-                 until they expire\n",
+                "this token's uploads not used yet, and those being put, hold all but {}; \
+                 attach them, or wait until they are put or expire\n",
                 catmail_core::display::size(room as u64)
             ),
         ),
+    }
+}
+
+/// The requests to `/mcp` being answered, by the name of their token.
+#[derive(Default)]
+struct InFlight(Mutex<HashMap<String, usize>>);
+
+impl InFlight {
+    /// Counts a request of `token` while the guard lasts, unless the token has
+    /// [`REQUESTS_PER_TOKEN`] being answered already.
+    fn enter(&self, token: &str) -> Option<Answering<'_>> {
+        let mut counts = self.0.lock().expect("requests in flight");
+        let count = counts.entry(token.to_owned()).or_default();
+        if *count >= REQUESTS_PER_TOKEN {
+            return None;
+        }
+        *count += 1;
+        Some(Answering {
+            in_flight: self,
+            token: token.to_owned(),
+        })
+    }
+}
+
+/// A request to `/mcp` being answered: counted until it is dropped, with the response
+/// made or the request cut off.
+struct Answering<'a> {
+    in_flight: &'a InFlight,
+    token: String,
+}
+
+impl Drop for Answering<'_> {
+    fn drop(&mut self) {
+        // Not `expect`: this may run while a panic unwinds.
+        if let Ok(mut counts) = self.in_flight.0.lock()
+            && let Some(count) = counts.get_mut(&self.token)
+        {
+            *count -= 1;
+            if *count == 0 {
+                counts.remove(&self.token);
+            }
+        }
+    }
+}
+
+/// A request's body that fails once none of it arrived for [`BODY_READ_TIMEOUT`]: the
+/// time between pieces, not the whole, so a large body over a slow link still arrives.
+struct ReadTimeout<B> {
+    body: B,
+    timer: Pin<Box<tokio::time::Sleep>>,
+}
+
+/// Why a body ended: none of it arrived for [`BODY_READ_TIMEOUT`].
+#[derive(Debug, thiserror::Error)]
+#[error("nothing more of the request arrived for {} s", BODY_READ_TIMEOUT.as_secs())]
+struct BodyTimedOut;
+
+impl<B> ReadTimeout<B> {
+    fn new(body: B) -> Self {
+        Self {
+            body,
+            timer: Box::pin(tokio::time::sleep(BODY_READ_TIMEOUT)),
+        }
+    }
+}
+
+impl<B> hyper::body::Body for ReadTimeout<B>
+where
+    B: hyper::body::Body + Unpin,
+    B::Error: Into<BoxError>,
+{
+    type Data = B::Data;
+    type Error = BoxError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<B::Data>, BoxError>>> {
+        let this = &mut *self;
+        if let Poll::Ready(frame) = Pin::new(&mut this.body).poll_frame(cx) {
+            let next = tokio::time::Instant::now() + BODY_READ_TIMEOUT;
+            this.timer.as_mut().reset(next);
+            return Poll::Ready(frame.map(|frame| frame.map_err(Into::into)));
+        }
+        match this.timer.as_mut().poll(cx) {
+            Poll::Ready(()) => Poll::Ready(Some(Err(BodyTimedOut.into()))),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.body.size_hint()
     }
 }
 
@@ -499,5 +650,39 @@ mod tests {
             "http://127.0.0.1:8642"
         );
         assert_eq!(url_of(&[]), "http://127.0.0.1:8642");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_body_times_out_only_once_none_of_it_arrives_for_long() {
+        use futures_util::StreamExt as _;
+        use http_body_util::StreamBody;
+
+        let piece = || Ok::<_, Infallible>(Frame::data(Bytes::from_static(b"ab")));
+        // Longer in all than the timeout, but never that long between pieces.
+        let slow = futures_util::stream::unfold(0, |n| async move {
+            (n < 3).then_some(())?;
+            tokio::time::sleep(BODY_READ_TIMEOUT - Duration::from_secs(1)).await;
+            Some((piece(), n + 1))
+        });
+        let body = ReadTimeout::new(StreamBody::new(Box::pin(slow)));
+        assert_eq!(body.collect().await.unwrap().to_bytes(), "ababab");
+
+        let stalled = futures_util::stream::iter([piece()]).chain(futures_util::stream::pending());
+        let body = ReadTimeout::new(StreamBody::new(Box::pin(stalled)));
+        let error = body.collect().await.err().unwrap();
+        assert!(error.is::<BodyTimedOut>(), "{error}");
+    }
+
+    #[test]
+    fn a_token_has_only_so_many_requests_answered_at_once() {
+        let in_flight = InFlight::default();
+        let answering: Vec<_> = (0..REQUESTS_PER_TOKEN)
+            .map(|_| in_flight.enter("laptop").unwrap())
+            .collect();
+        assert!(in_flight.enter("laptop").is_none());
+        assert!(in_flight.enter("phone").is_some());
+        drop(answering);
+        assert!(in_flight.enter("laptop").is_some());
+        assert!(in_flight.0.lock().unwrap().is_empty());
     }
 }
