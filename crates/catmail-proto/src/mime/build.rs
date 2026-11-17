@@ -207,6 +207,17 @@ const TEXT_CLASS: &str = "catmail-text";
 /// scoped to: left as it was, it would restyle the whole message.
 const ORIGINAL_CLASS: &str = "catmail-original";
 
+/// Around the element of [`ORIGINAL_CLASS`]: what the message quoted draws is cut off at
+/// this box, so it can't cover what is outside it (what the user wrote, a forward's
+/// headers) by moving its content (`position`, negative margins, `transform`).
+/// `contain: paint` makes it what `position: fixed` is placed by, and clips there;
+/// `position: relative` and `overflow` do the same for everything else in clients that
+/// don't know `contain`. `auto`, not `hidden`, so a message wider than the recipient's
+/// window can still be scrolled. This element, not the one of [`ORIGINAL_CLASS`]: the
+/// message's sheet, scoped, reaches that one (as its `body`) and could move it whole or
+/// undo its styles, never one around it.
+const CONTAINED: &str = r#"<div style="position:relative;overflow:auto;contain:paint">"#;
+
 /// The attributes of a reply's quote: set off by a line on its left, as Gmail draws it.
 const CITE: &str =
     r#" type="cite" style="margin:0 0 0 0.8ex;border-left:1px solid #ccc;padding-left:1ex""#;
@@ -274,7 +285,10 @@ fn quote_html(quote: &Quote, out: &mut String) -> String {
     let sheet = match &quote.html {
         Some(html) => {
             let (sheet, rest) = catmail_html::nested(html, ORIGINAL_CLASS);
-            let _ = write!(out, r#"<div class="{ORIGINAL_CLASS}">{rest}</div>"#);
+            let _ = write!(
+                out,
+                r#"{CONTAINED}<div class="{ORIGINAL_CLASS}">{rest}</div></div>"#
+            );
             sheet
         }
         None => {
@@ -749,7 +763,9 @@ mod tests {
             ".catmail-original{background:#eee;}.catmail-original p{color:red;}</style></head>",
             r#"<div class="catmail-text"><p>Thanks &lt;3</p><p><br></p><p>B</p></div>"#,
             "<div>On 2026-11-02 09:30, A &lt;a@example.com&gt; wrote:</div><blockquote type=\"cite\"",
-            r#"<div class="catmail-original"><p>Hi <b>there</b></p><img src="cid:logo@catmail"></div></blockquote>"#,
+            &format!(
+                r#"{CONTAINED}<div class="catmail-original"><p>Hi <b>there</b></p><img src="cid:logo@catmail"></div></div></blockquote>"#
+            ),
         ] {
             assert!(html.contains(expected), "{expected} in {html}");
         }
@@ -808,9 +824,37 @@ mod tests {
         let html = html.unwrap();
         assert!(!html.contains("<blockquote"), "{html}");
         let expected = format!(
-            r#"<div>---------- Forwarded message ---------</div>{HEADERS_TABLE}<tr><td{HEADER_NAME}>From:</td><td>A &lt;a@example.com&gt;</td></tr><tr><td{HEADER_NAME}>Subject:</td><td>Hi</td></tr></table><br><div class="catmail-original"><p>Original</p></div>"#
+            r#"<div>---------- Forwarded message ---------</div>{HEADERS_TABLE}<tr><td{HEADER_NAME}>From:</td><td>A &lt;a@example.com&gt;</td></tr><tr><td{HEADER_NAME}>Subject:</td><td>Hi</td></tr></table><br>{CONTAINED}<div class="catmail-original"><p>Original</p></div></div>"#
         );
         assert!(html.contains(&expected), "{expected} in {html}");
+    }
+
+    #[test]
+    fn a_quote_is_kept_from_covering_what_is_around_it() {
+        let from = addr(None, "b@example.com");
+        // Its own content moved over the forward's headers, and its `body` (the element
+        // the sheet is scoped to) moved whole.
+        let original = catmail_html::sanitize_html(
+            r#"<style>body{margin-top:-400px!important;transform:translateY(-400px)}</style><div style="position:fixed;inset:0;background:#fff;z-index:9999">fake</div>"#,
+        );
+        let quote = Quote {
+            head: QuoteHead::Forward(vec![(ForwardField::From, "A <a@example.com>".into())]),
+            text: "fake".into(),
+            html: Some(original),
+        };
+        let raw = build_message(&quoting(&from, "", None, &quote, vec![])).unwrap();
+        let html = parts(&raw).1.unwrap();
+        // The sheet reaches the element of its class, never the one clipping it.
+        assert!(
+            html.contains(".catmail-original{margin-top:-400px!important;transform:"),
+            "{html}"
+        );
+        let expected = format!(
+            r#"</table><br>{CONTAINED}<div class="catmail-original"><div style="position:fixed;"#
+        );
+        assert!(html.contains(&expected), "{expected} in {html}");
+        assert!(CONTAINED.contains("contain:paint") && CONTAINED.contains("overflow:auto"));
+        assert!(!CONTAINED.contains("class="));
     }
 
     #[test]
