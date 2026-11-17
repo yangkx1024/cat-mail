@@ -12,10 +12,11 @@ use crate::buttons::{Size, icon_button, menu_button, separator};
 use crate::clock::clock;
 use crate::icons::{Icon, icon};
 use crate::mailbox::commands;
+use crate::mailbox::compose;
 use crate::mailbox::list::{self};
 use crate::mailbox::panes::back_button;
 use crate::theme::SelectableText as _;
-use crate::{chrome, composer, web};
+use crate::{chrome, web};
 
 use super::{
     BodyHeight, Reading, Retry, ShowDetails, State, open_in_browser, page_painted, page_state,
@@ -138,7 +139,7 @@ fn toolbar() -> impl IntoElement {
             || "Reply".to_owned(),
             || true,
             Size::Bar,
-            || composer::reply(false),
+            || compose::reply(false),
         ))
         .child(when(
             move || global::<Reading>().with(|r| r.can_reply_all),
@@ -148,7 +149,7 @@ fn toolbar() -> impl IntoElement {
                     || "Reply all".to_owned(),
                     || true,
                     Size::Bar,
-                    || composer::reply(true),
+                    || compose::reply(true),
                 )
             },
         ))
@@ -157,12 +158,12 @@ fn toolbar() -> impl IntoElement {
             || "Forward".to_owned(),
             || true,
             Size::Bar,
-            || composer::forward(false),
+            || compose::forward(false),
         ))
         .child(menu_button(
             || "More ways to forward".to_owned(),
             Size::Bar,
-            composer::choose_forward,
+            compose::choose_forward,
         ))
 }
 

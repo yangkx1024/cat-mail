@@ -116,7 +116,7 @@ fn make_page(quote: &Quote, dark: bool) -> (Rc<str>, bool) {
     global::<Quoting>().update(|q| q.remote.again(remote.clone()));
     load_images();
     in_window(async move {
-        add_remote_images(web::cached_remote_images(remote).await);
+        web::add_remote_images(Quoted, web::cached_remote_images(remote).await);
     });
     (made.html.into(), made.dark)
 }
@@ -152,35 +152,28 @@ fn load_images() {
     });
 }
 
-/// Fetches the remote images of the message quoted, because the user asked.
+/// Fetches the remote images of the message quoted, because the user asked (`web`).
 fn show_remote_images() {
-    let mut urls = None;
-    global::<Quoting>().update(|q| urls = q.remote.start());
-    let Some(urls) = urls else {
-        return;
-    };
-    in_window(async move {
-        if web::fetch_remote_images(urls, add_remote_images).await {
-            let mut result = Ok(());
-            global::<Quoting>().update(|q| result = q.remote.ended());
-            web::fetch_ended(result);
-        }
-    });
+    if let Some(fetch) = web::show_remote_images(Quoted) {
+        in_window(fetch);
+    }
 }
 
-/// Shows remote images that came (fetched, or from the cache); false once the quote is
-/// out.
-fn add_remote_images(fetched: web::Fetched) -> bool {
-    if !quoted() {
-        return false;
+/// The remote images of the message quoted, while the draft has the quote.
+#[derive(Clone, Copy)]
+struct Quoted;
+
+impl web::RemoteImagesAt for Quoted {
+    fn wanted(self) -> bool {
+        quoted()
     }
-    if fetched.is_empty() {
-        return true;
+
+    fn update<T>(self, f: impl FnOnce(&mut RemoteImages) -> T) -> Option<T> {
+        let mut f = Some(f);
+        let mut out = None;
+        global::<Quoting>().update(|q| out = f.take().map(|f| f(&mut q.remote)));
+        out
     }
-    let mut shown = Vec::new();
-    global::<Quoting>().update(|q| shown = q.remote.came(fetched));
-    web::add_remote(shown);
-    true
 }
 
 // --- How it looks -------------------------------------------------------------------

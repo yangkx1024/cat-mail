@@ -5,7 +5,8 @@
 //!
 //! A composer's view runs on its window's own nsh thread; the window is the shell's
 //! (`shell::opened`), and closing it asks the view, which saves first and then
-//! closes it (`shell::composer_closed`). State is nsh globals, the view's own.
+//! closes it (`shell::composer_closed`). State is nsh globals, the view's own: what
+//! starts a message runs in the mailbox's view, and is `mailbox::compose`.
 
 mod quote;
 mod rich;
@@ -22,9 +23,8 @@ use catmail_core::{
 };
 use catmail_frontend::composer::rich_text::link_href;
 use catmail_frontend::composer::{
-    AfterAttachment, AfterSave, Closing, ComposeFrom, Field, FieldError, Fields, Finish, Lifecycle,
-    Opening, SAVE_DELAY, Sender, Written, discard_confirm, error_text, new_message_account,
-    senders, unsendable,
+    AfterAttachment, AfterSave, Closing, Field, FieldError, Fields, Finish, Lifecycle, Opening,
+    SAVE_DELAY, Sender, Written, discard_confirm, error_text, senders, unsendable,
 };
 use futures_channel::mpsc;
 use nsh_base::rich_editor::view::RichEditorPastedFiles;
@@ -35,74 +35,11 @@ use nsh_core::prelude::*;
 
 use crate::engine::client;
 use crate::form::confirmed;
-use crate::mailbox::list;
-use crate::mailbox::sidebar::{SelectedPlace, with_accounts};
 use crate::nsh_platform::Root;
 use crate::shell::{self, on_main};
-use crate::tasks::in_view;
 use crate::toast::report;
 
 use view::Composer;
-
-/// Opens a composer window for `from`, from the mailbox. The draft is made (or read)
-/// first; failures are reported in the mailbox.
-pub fn open(from: ComposeFrom) {
-    in_view(async move {
-        if on_main(move || shell::begin_opening(from)).await != Some(true) {
-            return;
-        }
-        let opened = from.start(&client()).await;
-        if let Err(e) = &opened {
-            report("Couldn't start the message", e);
-        }
-        let _ = on_main(move || shell::opened(from, opened.ok())).await;
-    });
-}
-
-/// A new message, from the account of the place shown (or else the first).
-pub fn new_message() {
-    let place = global::<SelectedPlace>().with_untracked(|p| p.0);
-    let account = with_accounts(|accounts| new_message_account(place, accounts));
-    if let Some(account) = account {
-        open(ComposeFrom::New(account));
-    }
-}
-
-/// A reply to the message open, to its sender or to everyone it went to.
-pub fn reply(all: bool) {
-    if let Some(message) = untracked(list::selected_id) {
-        open(ComposeFrom::Reply { message, all });
-    }
-}
-
-/// A forward of the message open: quoting it, or with `as_attachment` attaching it
-/// whole.
-pub fn forward(as_attachment: bool) {
-    if let Some(message) = untracked(list::selected_id) {
-        open(ComposeFrom::Forward {
-            message,
-            as_attachment,
-        });
-    }
-}
-
-/// The ways to forward the message open, in a menu.
-pub fn choose_forward() {
-    let items = vec![
-        MenuItem::new("Forward").on_select(|| forward(false)),
-        MenuItem::new("Forward as attachment").on_select(|| forward(true)),
-    ];
-    // Nothing waits on it closing.
-    drop(popup_menu(items));
-}
-
-/// The keys that start a message.
-pub fn bind_keys() {
-    on_key("mod+n", |_| new_message());
-    on_key("mod+r", |_| reply(false));
-    on_key("mod+shift+r", |_| reply(true));
-    on_key("mod+shift+f", |_| forward(false));
-}
 
 // --- The view's state ---------------------------------------------------------------
 

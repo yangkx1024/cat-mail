@@ -214,7 +214,7 @@ async fn open_message(id: MessageId, dark: bool) {
         remote: blocked,
         can_reply_all,
     });
-    add_remote_images(id, web::cached_remote_images(remote).await);
+    web::add_remote_images(Open(id), web::cached_remote_images(remote).await);
     // Only HTML shows inline parts. One at a time; this task goes
     // with the message.
     let Some(body) = body.filter(|b| b.html.is_some()) else {
@@ -238,45 +238,35 @@ async fn open_message(id: MessageId, dark: bool) {
     }
 }
 
-/// Fetches the open message's remote images and shows each as it comes, because the user
-/// asked. If none could be had, says why and leaves them blocked, to try again.
+/// Fetches the open message's remote images, because the user asked (`web`).
 fn show_remote_images() {
-    let reading = global::<Reading>();
-    let Some(id) = reading.with_untracked(|r| r.id) else {
+    let Some(id) = global::<Reading>().with_untracked(|r| r.id) else {
         return;
     };
-    let mut urls = None;
-    reading.update(|r| urls = r.remote.start());
-    let Some(urls) = urls else {
+    let Some(fetch) = web::show_remote_images(Open(id)) else {
         return;
     };
-    let task = spawn(async move {
-        if web::fetch_remote_images(urls, |fetched| add_remote_images(id, fetched)).await {
-            let mut result = Ok(());
-            global::<Reading>().update(|r| result = r.remote.ended());
-            web::fetch_ended(result);
-        }
-    });
     // Under the mailbox: not the button's, which goes when the images are all shown.
-    if let Some(old) = page_state().borrow_mut().fetch.replace(task) {
+    if let Some(old) = page_state().borrow_mut().fetch.replace(spawn(fetch)) {
         old.cancel();
     }
 }
 
-/// Shows remote images that came for message `id` (fetched, or from the cache); false if
-/// it is no longer open.
-fn add_remote_images(id: MessageId, fetched: web::Fetched) -> bool {
-    let reading = global::<Reading>();
-    if reading.with_untracked(|r| r.id != Some(id)) {
-        return false;
+/// The remote images of message `id`, while it is the one open.
+#[derive(Clone, Copy)]
+struct Open(MessageId);
+
+impl web::RemoteImagesAt for Open {
+    fn wanted(self) -> bool {
+        global::<Reading>().with_untracked(|r| r.id == Some(self.0))
     }
-    if fetched.is_empty() {
-        return true;
+
+    fn update<T>(self, f: impl FnOnce(&mut RemoteImages) -> T) -> Option<T> {
+        let mut f = Some(f);
+        let mut out = None;
+        global::<Reading>().update(|r| out = f.take().map(|f| f(&mut r.remote)));
+        out
     }
-    let mut shown = Vec::new();
-    reading.update(|r| shown = r.remote.came(fetched));
-    web::add_remote(shown);
-    true
 }
 
 /// The page has painted with the web view `height` points tall: a hidden one shows

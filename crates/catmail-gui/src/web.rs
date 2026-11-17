@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use catmail_core::html::{DarkPalette, Image, RemoteImage};
 use catmail_frontend::html::{
-    self, Appearance, BodyPages, Colors, DarkAppearance, FromPage, is_openable_link,
+    self, Appearance, BodyPages, Colors, DarkAppearance, FromPage, RemoteImages, is_openable_link,
 };
 use futures_util::StreamExt as _;
 use nsh_base::theme;
@@ -129,7 +129,7 @@ pub fn add_inline(content_id: String, image: Image) {
 }
 
 /// Remote images of the message shown came (fetched, or from the cache).
-pub fn add_remote(images: Vec<(String, RemoteImage)>) {
+fn add_remote(images: Vec<(String, RemoteImage)>) {
     if images.is_empty() {
         return;
     }
@@ -161,7 +161,7 @@ pub async fn cached_remote_images(urls: Vec<String>) -> Fetched {
 /// Fetches `urls`, the remote images the user asked for, handing them to `add` as they
 /// come (those that finished together together). False as soon as `add` says they are no
 /// longer wanted (false), true once all came or failed ([`fetch_ended`]).
-pub async fn fetch_remote_images(urls: Vec<String>, mut add: impl FnMut(Fetched) -> bool) -> bool {
+async fn fetch_remote_images(urls: Vec<String>, mut add: impl FnMut(Fetched) -> bool) -> bool {
     let mut stream = match client().fetch_remote_images(urls.clone()).await {
         Ok(stream) => stream,
         Err(e) => {
@@ -190,13 +190,48 @@ pub async fn fetch_remote_images(urls: Vec<String>, mut add: impl FnMut(Fetched)
 
 /// The fetch the user asked for is over (`RemoteImages::ended`): says why, if none could
 /// be had.
-pub fn fetch_ended(result: Result<(), String>) {
+fn fetch_ended(result: Result<(), String>) {
     if let Err(error) = result {
         notify(
             Level::Error,
             format!("Couldn't load remote images: {error}"),
         );
     }
+}
+
+/// Where a view keeps the [`RemoteImages`] of the page it shows: the reading pane's of
+/// the message open, a composer's of its quote.
+pub trait RemoteImagesAt: Copy + 'static {
+    /// Whether the page they are for is still shown.
+    fn wanted(self) -> bool;
+    /// Runs `f` on them; none if it couldn't.
+    fn update<T>(self, f: impl FnOnce(&mut RemoteImages) -> T) -> Option<T>;
+}
+
+/// Fetches the page's blocked remote images, because the user asked, showing each as it
+/// comes: the work, for the view to run while the page is shown; none if there is nothing
+/// to fetch. If none could be had, it says why and leaves them blocked, to try again.
+pub fn show_remote_images(at: impl RemoteImagesAt) -> Option<impl Future<Output = ()>> {
+    let urls = at.update(RemoteImages::start).flatten()?;
+    Some(async move {
+        if fetch_remote_images(urls, |fetched| add_remote_images(at, fetched)).await
+            && let Some(result) = at.update(RemoteImages::ended)
+        {
+            fetch_ended(result);
+        }
+    })
+}
+
+/// Shows remote images that came (fetched, or from the cache); false once the page isn't.
+pub fn add_remote_images(at: impl RemoteImagesAt, fetched: Fetched) -> bool {
+    if !at.wanted() {
+        return false;
+    }
+    if fetched.is_empty() {
+        return true;
+    }
+    add_remote(at.update(|r| r.came(fetched)).unwrap_or_default());
+    true
 }
 
 /// "Show remote images", while some are `offered` (`RemoteImages::offered`): dimmed while

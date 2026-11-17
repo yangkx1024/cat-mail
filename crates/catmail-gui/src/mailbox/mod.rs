@@ -4,6 +4,7 @@
 //! awaited in nsh tasks on the UI thread; the engine does the work on its own runtime.
 
 pub mod commands;
+pub mod compose;
 mod draft;
 mod folder_commands;
 pub mod list;
@@ -28,7 +29,7 @@ use crate::login::{self, SignIn};
 use crate::shell::Ask;
 use crate::tasks::{in_view, own_tasks};
 use crate::theme::SelectableText as _;
-use crate::{chrome, composer, form, reader, settings, shell, toast};
+use crate::{chrome, form, reader, settings, shell, toast};
 use catmail_frontend::list::Listing;
 use list::Selected;
 use sidebar::{Accounts, SelectedPlace};
@@ -121,7 +122,7 @@ fn mailbox() -> impl IntoElement {
             login::add_account(false);
         }
     });
-    composer::bind_keys();
+    compose::bind_keys();
     settings::bind_keys(true);
     on_key("mod+shift+n", |_| sidebar::sync());
     on_key("F5", |_| sidebar::sync());

@@ -297,7 +297,7 @@ fn selected_row<T>(pick: impl FnOnce(&Row) -> Option<T>) -> Option<T> {
 /// A draft opens in its window: on Enter, or a second click on its row.
 fn edit_selected_draft() {
     if let Some(RowId::Draft(id)) = global::<Selected>().with_untracked(|s| s.0) {
-        crate::composer::open(ComposeFrom::Draft(id));
+        super::compose::open(ComposeFrom::Draft(id));
     }
 }
 

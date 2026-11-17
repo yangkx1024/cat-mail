@@ -10,15 +10,16 @@ use nsh_base::theme;
 use nsh_core::prelude::*;
 
 use crate::buttons::{Size, icon_button, primary_button, separator};
+use crate::chrome;
 use crate::engine::client;
 use crate::form::confirmed;
 use crate::icons::{Icon, icon};
+use crate::mailbox::compose;
 use crate::mailbox::list::{self};
 use crate::mailbox::panes::{back_button, fact};
 use crate::tasks::in_view;
 use crate::theme::SelectableText as _;
 use crate::toast::report;
-use crate::{chrome, composer};
 
 /// The pane, while a draft is selected.
 pub fn pane() -> impl IntoElement {
@@ -46,7 +47,7 @@ fn toolbar(draft: Memo<Option<Rc<DraftSummary>>>) -> impl IntoElement {
             move || id().is_some(),
             move || {
                 if let Some(id) = untracked(id) {
-                    composer::open(ComposeFrom::Draft(id));
+                    compose::open(ComposeFrom::Draft(id));
                 }
             },
         ))
