@@ -180,7 +180,7 @@ Windows Credential Manager），service 为 `catmail`，键为 `account:{email}:
 [发信](sending.md#发件身份)）各有自己的密码，键为 `identity:{email}:{随机 uuid}`，规则相同；随账户建出的
 那个身份没有自己的条目（`secret_key` 为空），用账户的密码。
 
-- 添加：先写密钥，再插入行；插入失败则删除刚写的密钥。
+- 添加：先写密钥，再插入行；插入失败则删除刚写的密钥（`catmail-core` 的 `accounts.rs`，`insert_with_secret`）。
 - 删除：`DELETE … RETURNING secret_key` 原子地删行并取得键，再删密钥。删除账户时在同一个事务里先读出
   它的身份自己的键（身份随账户级联删除），再一并删掉。
 

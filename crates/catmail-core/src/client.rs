@@ -1,46 +1,34 @@
-use std::fs;
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use catmail_proto::imap::Session;
-use catmail_proto::{Credentials, TlsConfig};
-use catmail_store::{BlobStore, Db, Identities, SmtpAnnounced, Store};
+use catmail_store::{Db, Identities};
 use catmail_types::{
     Account, AccountId, AccountOverview, AccountStatus, Answer, AttachmentId, ChangeReport,
     DeleteMode, Draft, DraftAttachment, DraftAttachmentId, DraftChanges, DraftContent, DraftId,
     DraftSummary, Event, Flags, FlushReport, Folder, FolderId, FolderRole, FolderSyncReport,
     Forwarding, GcReport, Identity, IdentityId, Message, MessageCursor, MessageId, MessageSummary,
     NewAccount, NewFile, NewIdentity, OutboxEntry, OutboxId, PendingOp, PendingOpId, ReplayReport,
-    SearchQuery, ServerConfig, SyncReport, special_folder,
+    SearchQuery, SyncReport, special_folder,
 };
-use secrecy::{ExposeSecret, SecretString};
-use tokio::runtime::Handle;
+use secrecy::SecretString;
 use tokio::sync::broadcast;
-use uuid::Uuid;
 
-use crate::connection::Announced;
-use crate::engine::{
-    Closing, DEFAULT_DRAFT_UPLOAD_DELAY, Engine, EngineTuning, blocking, lock, now,
-};
+use crate::engine::{Closing, Engine, lock};
 use crate::html::RemoteImage;
 use crate::images::RemoteImageStream;
 use crate::runtime::Runtime;
-use crate::secrets::{KeyringSecrets, SecretStore};
-use crate::watch::{self, SyncSchedule};
 use crate::{
-    BodyPrefetch, Config, DataDirLock, DraftRevision, EditMark, Error, Result, SendPreview, body,
-    connection, drafts, folders, gc, images, ops, prefetch, rebuild, search, send, sleep, sync,
+    Config, DraftRevision, EditMark, Error, Result, SendPreview, Verify, accounts, body, drafts,
+    folders, gc, images, ops, search, send, sync,
 };
 
-/// Starts the background work the engine does per account (sync, prefetch of bodies), if
-/// it does any: for an account added, or kept after a removal failed. Call from inside the
-/// engine runtime.
-fn spawn_background(engine: &Arc<Engine>, account: AccountId) {
-    watch::spawn(engine, account);
-    prefetch::spawn(engine, account);
-}
+mod builder;
+#[cfg(test)]
+pub(crate) mod fixtures;
+
+pub use builder::MailClientBuilder;
 
 /// How many events [`MailClient::subscribe`]'s receivers keep unread before the oldest
 /// are dropped and they get `RecvError::Lagged`.
@@ -66,289 +54,23 @@ struct Shared {
     closing: Closing,
 }
 
-/// Whether [`MailClient::add_account`] and [`MailClient::add_identity`] log in to the
-/// servers before storing anything.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Verify {
-    /// Log in first; store nothing if that fails.
-    Login,
-    /// Store without contacting the servers (offline, or a server not up yet).
-    Skip,
-}
-
-pub struct MailClientBuilder {
-    config: Config,
-    /// Taken before the builder, by [`MailClient::builder_locked`].
-    lock: Option<DataDirLock>,
-    runtime: Option<Handle>,
-    secrets: Option<Arc<dyn SecretStore>>,
-    tls: Option<TlsConfig>,
-    send_in_background: bool,
-    sync_in_background: Option<SyncSchedule>,
-    prefetch_bodies: Option<BodyPrefetch>,
-    collect_garbage_every: Option<Duration>,
-    draft_upload_delay: Duration,
-    tuning: EngineTuning,
-}
-
-/// What [`MailClientBuilder::open_engine`] opened, for [`MailClient::start`]. Background
-/// sync is the engine's to know: it starts for accounts added later too.
-struct Opened {
-    engine: Engine,
-    /// The accounts to keep in sync, and fetch bodies of, in the background.
-    watched: Vec<Account>,
-    config: Config,
-    send_in_background: bool,
-    collect_garbage_every: Option<Duration>,
-}
-
-impl MailClientBuilder {
-    /// Run engine work on an existing tokio runtime instead of creating one.
-    /// Use this when the caller already lives inside tokio (e.g. the CLI).
-    pub fn runtime(mut self, handle: Handle) -> Self {
-        self.runtime = Some(handle);
-        self
-    }
-
-    /// Replace the OS keyring, e.g. with [`crate::MemorySecrets`] in tests.
-    pub fn secrets(mut self, secrets: Arc<dyn SecretStore>) -> Self {
-        self.secrets = Some(secrets);
-        self
-    }
-
-    /// How server certificates are verified [default: the platform verifier].
-    pub fn tls(mut self, tls: TlsConfig) -> Self {
-        self.tls = Some(tls);
-        self
-    }
-
-    /// Send queued messages in the background as they come due, retrying with backoff,
-    /// for as long as the client exists [default: off]. For long-running frontends
-    /// (the GUI); a short-lived one calls [`MailClient::flush_outbox`] instead, so that
-    /// nothing is sent behind the user's back by an unrelated command.
-    pub fn send_in_background(mut self, on: bool) -> Self {
-        self.send_in_background = on;
-        self
-    }
-
-    /// Keep every account in sync in the background for as long as the client exists
-    /// [default: off]: all folders now and then, INBOX as it changes (pushed by the
-    /// server with IDLE, else checked often), and changes to messages made on the server
-    /// as soon as they are queued. For long-running frontends; a short-lived one calls
-    /// [`MailClient::sync_account`] and [`MailClient::replay_pending`] instead. The
-    /// [`SyncSchedule`] says how often, `SyncSchedule::default()` for the usual.
-    pub fn sync_in_background(mut self, schedule: Option<SyncSchedule>) -> Self {
-        self.sync_in_background = schedule;
-        self
-    }
-
-    /// Fetch bodies in the background for as long as the client exists, so that search
-    /// finds messages never opened by their text too [default: off]: the newest first,
-    /// each account on a connection of its own, starting once its folders were synced,
-    /// within a daily budget. For long-running frontends. The [`BodyPrefetch`] says how,
-    /// `BodyPrefetch::default()` for the usual.
-    pub fn prefetch_bodies(mut self, prefetch: Option<BodyPrefetch>) -> Self {
-        self.prefetch_bodies = prefetch;
-        self
-    }
-
-    /// Delete stored bodies and attachments nothing refers to any more (see
-    /// [`MailClient::collect_garbage`]) this often, for as long as the client exists,
-    /// starting a few minutes after it opens [default: never]. For long-running
-    /// frontends: while one has the data directory, nothing else can do it.
-    pub fn collect_garbage_every(mut self, every: Option<Duration>) -> Self {
-        self.collect_garbage_every = every;
-        self
-    }
-
-    /// How long background sync waits after a draft last changed before copying it to
-    /// the server's Drafts folder [default: [`DEFAULT_DRAFT_UPLOAD_DELAY`], 15 seconds],
-    /// so that a frontend saving as the user types doesn't replace the copy with each
-    /// save. Uploads asked for ([`MailClient::replay_pending`],
-    /// [`MailClient::sync_account`]) don't wait.
-    pub fn draft_upload_delay(mut self, delay: Duration) -> Self {
-        self.draft_upload_delay = delay;
-        self
-    }
-
-    /// Everything a frontend that stays up does in the background: syncs, prefetches
-    /// bodies, sends and collects garbage, as usual. The app's, and `catmail serve`'s:
-    /// one engine on a data directory behaves the same whichever of them holds it.
-    pub fn resident(self) -> Self {
-        self.sync_in_background(Some(SyncSchedule::default()))
-            .prefetch_bodies(Some(BodyPrefetch::default()))
-            .send_in_background(true)
-            .collect_garbage_every(Some(crate::DEFAULT_GC_INTERVAL))
-    }
-
-    /// Batch sizes, the whole-message limit and the keepalive of idle connections
-    /// [default: `EngineTuning::default()`].
-    /// Batch sizes below 1 count as 1.
-    pub fn tuning(mut self, tuning: EngineTuning) -> Self {
-        self.tuning = tuning.checked();
-        self
-    }
-
-    /// Locks the data directory, empties [`Config::handoff_dir`], then opens the database
-    /// (migrating it if needed) and the blob store. Blocks the calling thread meanwhile,
-    /// which a migration can make take a while: a frontend with a UI thread uses
-    /// [`open_async`](Self::open_async). Fails with [`Error::AlreadyRunning`] if another
-    /// engine, in this or another process, has the directory open, and with
-    /// [`Error::DataDirNotOwned`] if it belongs to another user. Sends a previous engine
-    /// left unfinished before the end of the message go back to the queue.
-    pub fn open(mut self) -> Result<MailClient> {
-        let rt = self.take_runtime()?;
-        let opened = self.open_engine()?;
-        Ok(MailClient::start(rt, opened))
-    }
-
-    /// [`open`](Self::open), on the engine runtime's blocking pool. Like the client's
-    /// methods, the future can be polled by any executor.
-    pub async fn open_async(mut self) -> Result<MailClient> {
-        let rt = self.take_runtime()?;
-        let opened = rt.run_blocking(move || self.open_engine()).await?;
-        Ok(MailClient::start(rt, opened))
-    }
-
-    fn take_runtime(&mut self) -> Result<Runtime> {
-        match self.runtime.take() {
-            Some(handle) => Ok(Runtime::shared(handle)),
-            None => Runtime::owned(),
-        }
-    }
-
-    /// Blocking.
-    fn open_engine(mut self) -> Result<Opened> {
-        let data_dir_lock = match self.lock.take() {
-            Some(lock) => lock,
-            None => self.config.lock()?,
-        };
-        let handoff_dir = self.config.handoff_dir();
-        clear_handoff_dir(&handoff_dir);
-        catmail_store::create_private_dir(&handoff_dir)?;
-        let store = Store::open(&self.config.db_path())?;
-        // The lock means no engine is sending; see Outbox::recover_interrupted.
-        let interrupted = store.write(|db| db.outbox().recover_interrupted(None, now()))?;
-        if interrupted > 0 {
-            tracing::info!(
-                interrupted,
-                "requeued sends interrupted before the message ended"
-            );
-        }
-        // Read now: no account can be added before the client exists.
-        let watched = if self.sync_in_background.is_some() || self.prefetch_bodies.is_some() {
-            store.read(|db| db.accounts().list())?
-        } else {
-            Vec::new()
-        };
-        let blobs = BlobStore::open(self.config.blob_dir())?;
-        let secrets = self
-            .secrets
-            .unwrap_or_else(|| Arc::new(KeyringSecrets::default()));
-        let (events, _) = broadcast::channel(EVENT_CAPACITY);
-        tracing::info!(
-            background_sync = self.sync_in_background.is_some(),
-            prefetch_bodies = self.prefetch_bodies.is_some(),
-            accounts = watched.len(),
-            "engine opened"
-        );
-
-        let mut engine = Engine::new(
-            &self.config,
-            data_dir_lock,
-            store,
-            blobs,
-            secrets,
-            events,
-            self.tls,
-        );
-        engine.sync_in_background = self.sync_in_background;
-        engine.prefetch = self.prefetch_bodies;
-        engine.draft_upload_delay = self.draft_upload_delay;
-        engine.tuning = self.tuning;
-        Ok(Opened {
-            engine,
-            watched,
-            config: self.config,
-            send_in_background: self.send_in_background,
-            collect_garbage_every: self.collect_garbage_every,
-        })
-    }
-}
-
 impl MailClient {
-    pub fn builder(config: Config) -> MailClientBuilder {
-        MailClientBuilder {
-            config,
-            lock: None,
-            runtime: None,
-            secrets: None,
-            tls: None,
-            send_in_background: false,
-            sync_in_background: None,
-            prefetch_bodies: None,
-            collect_garbage_every: None,
-            draft_upload_delay: DEFAULT_DRAFT_UPLOAD_DELAY,
-            tuning: EngineTuning::default(),
-        }
-    }
-
-    /// [`builder`](Self::builder) for a data directory already locked, e.g. by a frontend
-    /// that has to know it is the one for it before the engine is opened.
-    pub fn builder_locked(lock: DataDirLock) -> MailClientBuilder {
-        let mut builder = Self::builder(lock.config().clone());
-        builder.lock = Some(lock);
-        builder
-    }
-
-    /// Starts the background work asked for on the engine just opened.
-    fn start(rt: Runtime, opened: Opened) -> Self {
-        let engine = Arc::new(opened.engine);
-        if opened.send_in_background {
-            rt.spawn(send::worker(
-                Arc::downgrade(&engine),
-                engine.outbox_kick.clone(),
-                engine.closing(),
-            ));
-        }
-        rt.spawn(sleep::run(
-            Arc::downgrade(&engine),
-            sleep::CHECK_EVERY,
-            sleep::Clocks::now,
-            engine.closing(),
-        ));
-        if let Some(every) = opened.collect_garbage_every {
-            rt.spawn(gc::run(Arc::downgrade(&engine), every, engine.closing()));
-        }
-        rt.spawn(rebuild::run(
-            Arc::downgrade(&engine),
-            engine.tuning.rebuild_delay,
-            engine.closing(),
-        ));
-        // As `spawn_background`, from outside the runtime.
-        for account in opened.watched {
-            if let Some(schedule) = engine.sync_in_background {
-                let task = watch::task(&engine, account.id, schedule);
-                rt.spawn(task);
-            }
-            if let Some(settings) = engine.prefetch {
-                let task = prefetch::task(&engine, account.id, settings);
-                rt.spawn(task);
-            }
-        }
-        MailClient {
-            shared: Arc::new(Shared {
-                rt,
-                closing: engine.closing(),
-                config: opened.config,
-                engine: Mutex::new(Some(engine)),
-            }),
-        }
-    }
-
     /// The engine, unless it was [shut down](Self::shut_down).
     pub(crate) fn engine(&self) -> Result<Arc<Engine>> {
         lock(&self.shared.engine).clone().ok_or(Error::Closed)
+    }
+
+    /// Runs a read of the database on the engine runtime's blocking pool: what the
+    /// methods that only read do.
+    async fn read<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&Db<'_>) -> catmail_store::Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let engine = self.engine()?;
+        self.shared
+            .rt
+            .run_blocking(move || Ok(engine.store.read(f)?))
+            .await
     }
 
     pub fn config(&self) -> &Config {
@@ -425,60 +147,39 @@ impl MailClient {
     }
 
     pub async fn list_accounts(&self) -> Result<Vec<Account>> {
-        let engine = self.engine()?;
-        self.shared
-            .rt
-            .run_blocking(move || Ok(engine.store.read(|db| db.accounts().list())?))
-            .await
+        self.read(|db| db.accounts().list()).await
     }
 
     /// Every account with its identities, folders, drafts and outbox, in one read: what a sidebar
     /// shows, consistent with itself. Their status is
     /// [`account_status`](Self::account_status), which isn't stored.
     pub async fn overview(&self) -> Result<Vec<AccountOverview>> {
-        let engine = self.engine()?;
-        self.shared
-            .rt
-            .run_blocking(move || {
-                Ok(engine.store.read(|db| {
-                    let mut outbox = db.outbox().list(None)?;
-                    let mut accounts = Vec::new();
-                    for account in db.accounts().list()? {
-                        let (own, rest) =
-                            outbox.into_iter().partition(|e| e.account_id == account.id);
-                        outbox = rest;
-                        accounts.push(AccountOverview {
-                            identities: db.identities().list(account.id)?,
-                            folders: db.folders().list(account.id)?,
-                            drafts: db.drafts().count(account.id)?,
-                            outbox: own,
-                            account,
-                        });
-                    }
-                    Ok(accounts)
-                })?)
-            })
-            .await
+        self.read(|db| {
+            let mut outbox = db.outbox().list(None)?;
+            let mut accounts = Vec::new();
+            for account in db.accounts().list()? {
+                let (own, rest) = outbox.into_iter().partition(|e| e.account_id == account.id);
+                outbox = rest;
+                accounts.push(AccountOverview {
+                    identities: db.identities().list(account.id)?,
+                    folders: db.folders().list(account.id)?,
+                    drafts: db.drafts().count(account.id)?,
+                    outbox: own,
+                    account,
+                });
+            }
+            Ok(accounts)
+        })
+        .await
     }
 
     pub async fn get_account(&self, id: AccountId) -> Result<Option<Account>> {
-        let engine = self.engine()?;
-        self.shared
-            .rt
-            .run_blocking(move || Ok(engine.store.read(|db| db.accounts().get(id))?))
-            .await
+        self.read(move |db| db.accounts().get(id)).await
     }
 
     pub async fn find_account_by_email(&self, email: &str) -> Result<Option<Account>> {
-        let engine = self.engine()?;
         let email = email.to_owned();
-        self.shared
-            .rt
-            .run_blocking(move || {
-                Ok(engine
-                    .store
-                    .read(|db| db.accounts().find_by_email(&email))?)
-            })
+        self.read(move |db| db.accounts().find_by_email(&email))
             .await
     }
 
@@ -498,80 +199,16 @@ impl MailClient {
         password: SecretString,
         verify: Verify,
     ) -> Result<Account> {
-        new.display_name = drafts::clean_name(new.display_name.as_deref());
-        validate_new_account(&new)?;
-        check_password(&password)?;
-        let engine = self.engine()?;
+        accounts::check_new_account(&mut new, &password)?;
         self.shared
             .rt
-            .run(async move {
-                let (smtp, session) = match verify {
-                    Verify::Login => {
-                        let (smtp, session) = check_account(&engine, &new, &password)
-                            .await
-                            .inspect_err(|e| {
-                                tracing::warn!(
-                                    imap = %server(&new.imap),
-                                    smtp = %server(&new.smtp),
-                                    error = %e,
-                                    "couldn't sign in to a new account"
-                                );
-                            })?;
-                        (Some(smtp), Some(session))
-                    }
-                    Verify::Skip => (None, None),
-                };
-                let announced = session.as_ref().map(Announced::of).unwrap_or_default();
-                let inserted = blocking({
-                    let engine = engine.clone();
-                    move || {
-                        insert_with_secret(&engine, "account", &new.email, &password, |key| {
-                            Ok(engine.store.write(|db| {
-                                let account = db.accounts().insert(&new, key)?;
-                                announced.record(db, account.id)?;
-                                if let Some(own) = db.identities().default_of(account.id)?
-                                    && let Some(smtp) = smtp
-                                {
-                                    db.identities().set_smtp_announced(own, smtp)?;
-                                }
-                                Ok(Account {
-                                    gmail_server: announced.gmail,
-                                    ..account
-                                })
-                            })?)
-                        })
-                    }
-                })
-                .await;
-                let account = match inserted {
-                    Ok(account) => account,
-                    Err(e) => {
-                        if let Some(session) = session {
-                            session.logout().await;
-                        }
-                        return Err(e);
-                    }
-                };
-                engine.emit(Event::AccountAdded {
-                    account: account.id,
-                });
-                // For background sync to start on, or the next request.
-                if let Some(session) = session {
-                    engine.pool(account.id).put(&engine, session);
-                }
-                spawn_background(&engine, account.id);
-                Ok(account)
-            })
+            .run(accounts::add_account(self.engine()?, new, password, verify))
             .await
     }
 
     /// The account's identities: the default first, then the others oldest first.
     pub async fn list_identities(&self, account: AccountId) -> Result<Vec<Identity>> {
-        let engine = self.engine()?;
-        self.shared
-            .rt
-            .run_blocking(move || Ok(engine.store.read(|db| db.identities().list(account))?))
-            .await
+        self.read(move |db| db.identities().list(account)).await
     }
 
     /// The account's identity that sends as `email`, in any case. For an address two
@@ -582,15 +219,8 @@ impl MailClient {
         account: AccountId,
         email: &str,
     ) -> Result<Option<IdentityId>> {
-        let engine = self.engine()?;
         let email = email.to_owned();
-        self.shared
-            .rt
-            .run_blocking(move || {
-                Ok(engine
-                    .store
-                    .read(|db| db.identities().by_email(account, &email))?)
-            })
+        self.read(move |db| db.identities().by_email(account, &email))
             .await
     }
 
@@ -605,42 +235,16 @@ impl MailClient {
         password: SecretString,
         verify: Verify,
     ) -> Result<Identity> {
-        new.display_name = drafts::clean_name(new.display_name.as_deref());
-        validate_new_identity(&new)?;
-        check_password(&password)?;
-        let engine = self.engine()?;
+        accounts::check_new_identity(&mut new, &password)?;
         self.shared
             .rt
-            .run(async move {
-                let smtp = match verify {
-                    Verify::Login => check_identity(&engine, &new, &password)
-                        .await
-                        .inspect_err(|e| {
-                            tracing::warn!(
-                                %account,
-                                smtp = %server(&new.smtp),
-                                error = %e,
-                                "couldn't sign in for a new sending address"
-                            );
-                        })
-                        .map(Some)?,
-                    Verify::Skip => None,
-                };
-                let identity = blocking({
-                    let engine = engine.clone();
-                    move || {
-                        insert_with_secret(&engine, "identity", &new.email, &password, |key| {
-                            engine
-                                .store
-                                .write(|db| db.identities().insert(account, &new, key, smtp))?
-                                .ok_or_else(|| Error::AccountNotFound(account.to_string()))
-                        })
-                    }
-                })
-                .await?;
-                engine.emit(Event::AccountChanged { account });
-                Ok(identity)
-            })
+            .run(accounts::add_identity(
+                self.engine()?,
+                account,
+                new,
+                password,
+                verify,
+            ))
             .await
     }
 
@@ -687,17 +291,7 @@ impl MailClient {
         let engine = self.engine()?;
         self.shared
             .rt
-            .run_blocking(move || {
-                let (account, drafts) = engine
-                    .store
-                    .write(|db| change(&db.identities()))?
-                    .ok_or(Error::IdentityNotFound(id))?;
-                engine.emit(Event::AccountChanged { account });
-                if drafts > 0 {
-                    drafts::changed(&engine, account);
-                }
-                Ok(())
-            })
+            .run_blocking(move || accounts::update_identity(&engine, id, change))
             .await
     }
 
@@ -708,62 +302,16 @@ impl MailClient {
         let engine = self.engine()?;
         self.shared
             .rt
-            .run_blocking(move || {
-                let deleted = engine
-                    .store
-                    .write(|db| db.identities().delete(id, now()))?
-                    .ok_or(Error::IdentityNotFound(id))?;
-                if let Some(key) = &deleted.secret_key {
-                    forget_secret(&engine, key);
-                }
-                let account = deleted.account;
-                engine.forget_identity(account, id);
-                engine.emit(Event::AccountChanged { account });
-                if deleted.drafts > 0 {
-                    drafts::changed(&engine, account);
-                }
-                Ok(())
-            })
+            .run_blocking(move || accounts::remove_identity(&engine, id))
             .await
     }
 
     /// Removes the account, all local data cached for it, and its stored password.
     /// A sync of the account that is running is cancelled first.
     pub async fn remove_account(&self, id: AccountId) -> Result<()> {
-        let engine = self.engine()?;
         self.shared
             .rt
-            .run(async move {
-                let _stopped = engine.start_removal(id).await;
-                let result = blocking({
-                    let engine = engine.clone();
-                    move || {
-                        let deleted = engine.store.write(|db| {
-                            // Its identities go with it.
-                            let identities = db.identities().secret_keys(id)?;
-                            Ok(db.accounts().delete(id)?.map(|key| (key, identities)))
-                        })?;
-                        let Some((secret_key, identities)) = deleted else {
-                            return Err(Error::AccountNotFound(id.to_string()));
-                        };
-                        for key in std::iter::once(secret_key).chain(identities) {
-                            forget_secret(&engine, &key);
-                        }
-                        engine.emit(Event::AccountRemoved { account: id });
-                        Ok(())
-                    }
-                })
-                .await;
-                if let Err(e) = &result {
-                    // Nothing was removed.
-                    engine.cancel_removal(id);
-                    // Its background sync stopped for the removal; the account stays.
-                    if !matches!(e, Error::AccountNotFound(_)) {
-                        spawn_background(&engine, id);
-                    }
-                }
-                result
-            })
+            .run(accounts::remove_account(self.engine()?, id))
             .await
     }
 
@@ -824,32 +372,17 @@ impl MailClient {
 
     /// The account's folders, INBOX first.
     pub async fn list_folders(&self, account: AccountId) -> Result<Vec<Folder>> {
-        let engine = self.engine()?;
-        self.shared
-            .rt
-            .run(async move { engine.read(move |db| db.folders().list(account)).await })
-            .await
+        self.read(move |db| db.folders().list(account)).await
     }
 
     pub async fn get_folder(&self, id: FolderId) -> Result<Option<Folder>> {
-        let engine = self.engine()?;
-        self.shared
-            .rt
-            .run(async move { engine.read(move |db| db.folders().get(id)).await })
-            .await
+        self.read(move |db| db.folders().get(id)).await
     }
 
     /// By display name (`已发送`), server name (`&XfJT0ZAB-`), or `inbox` in any case.
     pub async fn find_folder(&self, account: AccountId, name: &str) -> Result<Option<Folder>> {
-        let engine = self.engine()?;
         let name = name.to_owned();
-        self.shared
-            .rt
-            .run(async move {
-                engine
-                    .read(move |db| db.folders().find_by_name(account, &name))
-                    .await
-            })
+        self.read(move |db| db.folders().find_by_name(account, &name))
             .await
     }
 
@@ -906,14 +439,7 @@ impl MailClient {
         limit: u32,
         after: Option<MessageCursor>,
     ) -> Result<Vec<MessageSummary>> {
-        let engine = self.engine()?;
-        self.shared
-            .rt
-            .run(async move {
-                engine
-                    .read(move |db| db.messages().list(folder, limit, after))
-                    .await
-            })
+        self.read(move |db| db.messages().list(folder, limit, after))
             .await
     }
 
@@ -925,74 +451,42 @@ impl MailClient {
         limit: u32,
         after: Option<MessageCursor>,
     ) -> Result<Vec<MessageSummary>> {
-        let engine = self.engine()?;
-        self.shared
-            .rt
-            .run(async move {
-                engine
-                    .read(move |db| {
-                        let inboxes: Vec<FolderId> = inboxes(db)?
-                            .iter()
-                            .filter(|f| accounts.as_ref().is_none_or(|a| a.contains(&f.account_id)))
-                            .map(|f| f.id)
-                            .collect();
-                        db.messages().list_merged(&inboxes, limit, after)
-                    })
-                    .await
-            })
-            .await
+        self.read(move |db| {
+            let inboxes: Vec<FolderId> = inboxes(db)?
+                .iter()
+                .filter(|f| accounts.as_ref().is_none_or(|a| a.contains(&f.account_id)))
+                .map(|f| f.id)
+                .collect();
+            db.messages().list_merged(&inboxes, limit, after)
+        })
+        .await
     }
 
     /// Of `messages`, those that exist, without their bodies, in no particular order:
     /// which account and folder each is in.
     pub async fn message_summaries(&self, messages: Vec<MessageId>) -> Result<Vec<MessageSummary>> {
-        let engine = self.engine()?;
-        self.shared
-            .rt
-            .run(async move {
-                engine
-                    .read(move |db| db.messages().summaries(&messages))
-                    .await
-            })
+        self.read(move |db| db.messages().summaries(&messages))
             .await
     }
 
     /// The message as stored locally; `body` is `None` until downloaded, and as an older
     /// version parsed it until [`download_message`](Self::download_message) makes it again.
     pub async fn get_message(&self, id: MessageId) -> Result<Option<Message>> {
-        let engine = self.engine()?;
-        self.shared
-            .rt
-            .run(async move { engine.read(move |db| db.messages().get(id)).await })
-            .await
+        self.read(move |db| db.messages().get(id)).await
     }
 
     /// Of `messages`, which [`Event::NewMail`]s announced, those still unread in their
     /// account's INBOX, newest first: what to tell the user about. Mail read or moved
     /// since, on another device or here, is left out.
     pub async fn unread_in_inbox(&self, messages: Vec<MessageId>) -> Result<Vec<MessageSummary>> {
-        let engine = self.engine()?;
-        self.shared
-            .rt
-            .run(async move {
-                engine
-                    .read(move |db| db.messages().unread_in_inbox(&messages, &inbox_ids(db)?))
-                    .await
-            })
+        self.read(move |db| db.messages().unread_in_inbox(&messages, &inbox_ids(db)?))
             .await
     }
 
     /// How many messages are unread in the accounts' INBOXes together (on Gmail, labelled
     /// INBOX): what the tray shows.
     pub async fn count_unread_in_inboxes(&self) -> Result<u32> {
-        let engine = self.engine()?;
-        self.shared
-            .rt
-            .run(async move {
-                engine
-                    .read(|db| Ok(inboxes(db)?.iter().map(|f| f.unread_count).sum()))
-                    .await
-            })
+        self.read(move |db| Ok(inboxes(db)?.iter().map(|f| f.unread_count).sum()))
             .await
     }
 
@@ -1201,11 +695,7 @@ impl MailClient {
     /// of downloaded bodies. Newest first. Messages [`search_server`](Self::search_server)
     /// found, given in the query's `found_on_server`, are among the results too.
     pub async fn search(&self, query: SearchQuery) -> Result<Vec<MessageSummary>> {
-        let engine = self.engine()?;
-        self.shared
-            .rt
-            .run(async move { engine.read(move |db| db.messages().search(&query)).await })
-            .await
+        self.read(move |db| db.messages().search(&query)).await
     }
 
     /// Asks the servers about the query's text, in its account (every account with
@@ -1388,12 +878,7 @@ impl MailClient {
     /// one's default first. A reply goes from the account of the message it answers, as
     /// one of its identities.
     pub async fn draft_senders(&self, id: DraftId) -> Result<Vec<Identity>> {
-        let engine = self.engine()?;
-        let senders = self
-            .shared
-            .rt
-            .run_blocking(move || Ok(engine.store.read(|db| db.identities().of_draft(id))?))
-            .await?;
+        let senders = self.read(move |db| db.identities().of_draft(id)).await?;
         // Every account has its default identity.
         if senders.is_empty() {
             return Err(Error::DraftNotFound(id));
@@ -1402,31 +887,19 @@ impl MailClient {
     }
 
     pub async fn get_draft(&self, id: DraftId) -> Result<Option<Draft>> {
-        let engine = self.engine()?;
-        self.shared
-            .rt
-            .run(async move { engine.read(move |db| db.drafts().get(id)).await })
-            .await
+        self.read(move |db| db.drafts().get(id)).await
     }
 
     /// The account's drafts, most recently changed first, as a list shows them: without
     /// the HTML of their text and quote ([`get_draft`](Self::get_draft) has it). Drafts
     /// being sent are not among them; see [`list_outbox`](Self::list_outbox).
     pub async fn list_drafts(&self, account: AccountId) -> Result<Vec<DraftSummary>> {
-        let engine = self.engine()?;
-        self.shared
-            .rt
-            .run(async move { engine.read(move |db| db.drafts().list(account)).await })
-            .await
+        self.read(move |db| db.drafts().list(account)).await
     }
 
     /// How many drafts [`list_drafts`](Self::list_drafts) returns.
     pub async fn count_drafts(&self, account: AccountId) -> Result<usize> {
-        let engine = self.engine()?;
-        self.shared
-            .rt
-            .run(async move { engine.read(move |db| db.drafts().count(account)).await })
-            .await
+        self.read(move |db| db.drafts().count(account)).await
     }
 
     /// Deletes the draft, and its copy on the server the way changes to messages are
@@ -1533,11 +1006,7 @@ impl MailClient {
     /// Every entry still in the outbox (sent ones are gone), oldest first; all
     /// accounts' with `None`.
     pub async fn list_outbox(&self, account: Option<AccountId>) -> Result<Vec<OutboxEntry>> {
-        let engine = self.engine()?;
-        self.shared
-            .rt
-            .run(async move { engine.read(move |db| db.outbox().list(account)).await })
-            .await
+        self.read(move |db| db.outbox().list(account)).await
     }
 
     /// Sends everything queued and saves what was sent to Sent, now, without waiting
@@ -1607,7 +1076,7 @@ impl MailClient {
             .run_blocking(move || {
                 // Held until written: the engine holds the data directory's lock.
                 let _engine = engine;
-                remove_old_files(&dir, KEEP_HANDED_OFF);
+                builder::remove_old_files(&dir, builder::KEEP_HANDED_OFF);
                 let mut file = tempfile::Builder::new()
                     .prefix("catmail-")
                     .suffix(&suffix)
@@ -1617,47 +1086,6 @@ impl MailClient {
                 Ok(path)
             })
             .await
-    }
-}
-
-/// How long a handed-off file is kept within a session. The other program reads it as
-/// soon as it opens it; after that it is only a copy of a message lying on disk, and a
-/// GUI left open for days would otherwise keep days of them.
-const KEEP_HANDED_OFF: Duration = Duration::from_secs(10 * 60);
-
-/// Files handed to other programs in earlier sessions hold whole messages. The lock just
-/// taken means no frontend is writing them any more. Cleared at start rather than on
-/// close: another program may still be reading them then, and destructors don't always
-/// run (macOS terminates the app). Failing only costs disk space.
-fn clear_handoff_dir(dir: &Path) {
-    match fs::remove_dir_all(dir) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            tracing::warn!(error = %e, dir = %dir.display(), "couldn't clear handed-off files")
-        }
-    }
-}
-
-/// Deletes the files in `dir` last written more than `age` ago. Failing only costs disk
-/// space (Windows refuses while another program still has the file open).
-fn remove_old_files(dir: &Path, age: Duration) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let old = entry.metadata().is_ok_and(|meta| {
-            meta.is_file()
-                && meta
-                    .modified()
-                    .ok()
-                    .and_then(|modified| modified.elapsed().ok())
-                    .is_some_and(|elapsed| elapsed > age)
-        });
-        if old && let Err(e) = fs::remove_file(entry.path()) {
-            tracing::debug!(error = %e, path = %entry.path().display(),
-                "couldn't remove handed-off file");
-        }
     }
 }
 
@@ -1674,144 +1102,6 @@ fn inboxes(db: &Db<'_>) -> catmail_store::Result<Vec<Folder>> {
 /// The ids of [`inboxes`].
 fn inbox_ids(db: &Db<'_>) -> catmail_store::Result<Vec<FolderId>> {
     Ok(inboxes(db)?.iter().map(|f| f.id).collect())
-}
-
-fn check_password(password: &SecretString) -> Result<()> {
-    if password.expose_secret().is_empty() {
-        return Err(Error::InvalidInput("password must not be empty".into()));
-    }
-    Ok(())
-}
-
-/// Logs in to the account's IMAP and SMTP servers, both at once, and out of the SMTP
-/// server again; returns what the SMTP server announced, and the IMAP connection.
-async fn check_account(
-    engine: &Engine,
-    new: &NewAccount,
-    password: &SecretString,
-) -> Result<(SmtpAnnounced, Session)> {
-    let credentials = Credentials {
-        username: new.username.clone(),
-        password: password.clone(),
-    };
-    // IMAP's failure is the one to report if both fail, and once it has failed SMTP's
-    // answer isn't waited for.
-    let mut imap = std::pin::pin!(connection::login(engine, &new.imap, &credentials));
-    let mut smtp = std::pin::pin!(check_smtp(engine, &new.smtp, &credentials));
-    let (session, smtp) = tokio::select! {
-        session = &mut imap => (session?, smtp.await),
-        smtp = &mut smtp => (imap.await?, smtp),
-    };
-    match smtp {
-        Ok(smtp) => Ok((smtp, session)),
-        Err(e) => {
-            session.logout().await;
-            Err(e)
-        }
-    }
-}
-
-/// Logs in to the identity's SMTP server and out again; returns what it announced.
-async fn check_identity(
-    engine: &Engine,
-    new: &NewIdentity,
-    password: &SecretString,
-) -> Result<SmtpAnnounced> {
-    let credentials = Credentials {
-        username: new.username.clone(),
-        password: password.clone(),
-    };
-    check_smtp(engine, &new.smtp, &credentials).await
-}
-
-/// A server as the log shows it: where, and how it is secured. The address and username
-/// stay out of the log.
-fn server(server: &ServerConfig) -> String {
-    format!("{}:{} {}", server.host, server.port, server.security)
-}
-
-/// Logs in to the SMTP server `server` and out again; returns what it announced. Its
-/// failure as [`Error::OutgoingServer`].
-async fn check_smtp(
-    engine: &Engine,
-    server: &ServerConfig,
-    credentials: &Credentials,
-) -> Result<SmtpAnnounced> {
-    let session = connection::smtp_login(engine, server, credentials)
-        .await
-        .map_err(|e| Error::OutgoingServer(Box::new(e)))?;
-    let announced = connection::announced(&session);
-    session.quit().await;
-    Ok(announced)
-}
-
-/// Stores `password` in the keyring under a new key for a `kind` (`account`, `identity`)
-/// with that address, then runs `insert`, which stores the row naming the key; deletes
-/// the key again if that fails. Secret first, row second: whoever can see the row can
-/// also see its secret, so a concurrent removal always finds and deletes it. The random
-/// key keeps data directories apart.
-fn insert_with_secret<T>(
-    engine: &Engine,
-    kind: &str,
-    email: &str,
-    password: &SecretString,
-    insert: impl FnOnce(&str) -> Result<T>,
-) -> Result<T> {
-    let key = format!("{kind}:{email}:{}", Uuid::new_v4().simple());
-    engine.secrets.set(&key, password)?;
-    let inserted = insert(&key);
-    if inserted.is_err()
-        && let Err(e) = engine.secrets.delete(&key)
-    {
-        tracing::warn!(error = %e, "failed to delete password after {kind} insert failed");
-    }
-    inserted
-}
-
-/// Deletes the keyring entry of a row already deleted: left behind, it would only be
-/// clutter.
-fn forget_secret(engine: &Engine, key: &str) {
-    if let Err(e) = engine.secrets.delete(key) {
-        tracing::warn!(error = %e, "failed to delete stored password");
-    }
-}
-
-fn validate_new_identity(new: &NewIdentity) -> Result<()> {
-    // It goes into MAIL FROM and the From header.
-    crate::addresses::check_address(&new.email)?;
-    if new.username.is_empty() {
-        return Err(Error::InvalidInput("username must not be empty".into()));
-    }
-    validate_server("SMTP", &new.smtp)
-}
-
-fn validate_new_account(new: &NewAccount) -> Result<()> {
-    let invalid = |msg: &str| Err(Error::InvalidInput(msg.into()));
-    // Not checked as an address to send from: an account whose address can't be sent
-    // from yet (non-ASCII) still reads its mail, and is refused when queueing.
-    let Some((local, domain)) = new.email.split_once('@') else {
-        return invalid("email must contain `@`");
-    };
-    if local.is_empty() || domain.is_empty() {
-        return invalid("email must have a local part and a domain");
-    }
-    if new.username.is_empty() {
-        return invalid("username must not be empty");
-    }
-    validate_server("IMAP", &new.imap)?;
-    validate_server("SMTP", &new.smtp)
-}
-
-fn validate_server(proto: &str, server: &ServerConfig) -> Result<()> {
-    if server.host.is_empty() {
-        return Err(Error::InvalidInput(format!(
-            "{proto} host must not be empty"
-        )));
-    }
-    if server.port == 0 {
-        return Err(Error::InvalidInput(format!("{proto} port must not be 0")));
-    }
-    Ok(())
 }
 
 /// What an editor changes the draft it has open through, from
@@ -1874,10 +1164,8 @@ impl DraftEditor {
     pub async fn images(&self) -> Result<Vec<(String, PathBuf)>> {
         let (draft, engine) = (self.draft, self.client.engine()?);
         self.client
-            .shared
-            .rt
-            .run(async move {
-                let images = engine.read(move |db| db.drafts().images(draft)).await?;
+            .read(move |db| {
+                let images = db.drafts().images(draft)?;
                 Ok(images
                     .into_iter()
                     .map(|(id, blob)| (id, engine.blobs.path(&blob)))
@@ -1911,102 +1199,15 @@ impl DraftEditor {
 
 #[cfg(test)]
 mod tests {
-    use catmail_types::{Security, ServerConfig};
-    use futures_util::FutureExt as _;
-
-    use std::sync::Mutex;
     use std::time::Instant;
 
+    use futures_util::FutureExt as _;
+
+    use super::fixtures::{
+        GatedSecrets, client_with_account, draft_to_b, new_account, open_client,
+    };
     use super::*;
-    use crate::MemorySecrets;
-
-    fn secret_key(client: &MailClient, id: AccountId) -> String {
-        client
-            .engine()
-            .unwrap()
-            .store
-            .read(|db| db.accounts().secret_key(id))
-            .unwrap()
-            .unwrap()
-    }
-
-    fn new_account(email: &str) -> NewAccount {
-        NewAccount {
-            email: email.into(),
-            display_name: None,
-            username: email.into(),
-            imap: ServerConfig {
-                host: "imap.example.com".into(),
-                port: 993,
-                security: Security::Tls,
-            },
-            smtp: ServerConfig {
-                host: "smtp.example.com".into(),
-                port: 465,
-                security: Security::Tls,
-            },
-        }
-    }
-
-    /// Blocks inside `set` until the test releases it, to widen race windows.
-    struct GatedSecrets {
-        inner: MemorySecrets,
-        entered: Arc<tokio::sync::Notify>,
-        release: Mutex<std::sync::mpsc::Receiver<()>>,
-    }
-
-    impl GatedSecrets {
-        fn new() -> (Arc<Self>, std::sync::mpsc::Sender<()>) {
-            let (tx, rx) = std::sync::mpsc::channel();
-            let secrets = Arc::new(Self {
-                inner: MemorySecrets::default(),
-                entered: Arc::default(),
-                release: Mutex::new(rx),
-            });
-            (secrets, tx)
-        }
-    }
-
-    impl SecretStore for GatedSecrets {
-        fn set(&self, key: &str, secret: &SecretString) -> Result<()> {
-            self.entered.notify_one();
-            self.release.lock().unwrap().recv().unwrap();
-            self.inner.set(key, secret)
-        }
-        fn get(&self, key: &str) -> Result<Option<SecretString>> {
-            self.inner.get(key)
-        }
-        fn delete(&self, key: &str) -> Result<()> {
-            self.inner.delete(key)
-        }
-    }
-
-    fn stored(secrets: &MemorySecrets, key: &str) -> Option<String> {
-        let secret = secrets.get(key).unwrap()?;
-        Some(secret.expose_secret().to_owned())
-    }
-
-    fn open_client(dir: &std::path::Path, secrets: Arc<dyn SecretStore>) -> MailClient {
-        MailClient::builder(Config::with_data_dir(dir))
-            .runtime(Handle::current())
-            .secrets(secrets)
-            .open()
-            .unwrap()
-    }
-
-    struct FailingSecrets;
-
-    impl SecretStore for FailingSecrets {
-        fn set(&self, _: &str, _: &SecretString) -> Result<()> {
-            Err(Error::Secrets("locked".into()))
-        }
-        fn get(&self, _: &str) -> Result<Option<SecretString>> {
-            Ok(None)
-        }
-        fn delete(&self, _: &str) -> Result<()> {
-            Ok(())
-        }
-    }
+    use crate::{MemorySecrets, SyncSchedule, sleep};
 
     #[test]
     fn closed_resolves_once_the_last_handle_is_gone() {
@@ -2037,138 +1238,6 @@ mod tests {
         });
         // Closed means the data directory is free again.
         open().unwrap();
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn account_lifecycle_on_shared_runtime() {
-        let dir = tempfile::tempdir().unwrap();
-        let secrets = Arc::new(MemorySecrets::default());
-        let client = MailClient::builder(Config::with_data_dir(dir.path()))
-            .runtime(Handle::current())
-            .secrets(secrets.clone())
-            .open()
-            .unwrap();
-        let mut events = client.subscribe();
-
-        let account = client
-            .add_account(new_account("a@example.com"), "hunter2".into(), Verify::Skip)
-            .await
-            .unwrap();
-        assert_eq!(
-            events.recv().await.unwrap(),
-            Event::AccountAdded {
-                account: account.id
-            }
-        );
-        let key = secret_key(&client, account.id);
-        assert_eq!(stored(&secrets, &key).as_deref(), Some("hunter2"));
-        assert_eq!(client.list_accounts().await.unwrap(), vec![account.clone()]);
-
-        client.remove_account(account.id).await.unwrap();
-        assert_eq!(
-            events.recv().await.unwrap(),
-            Event::AccountRemoved {
-                account: account.id
-            }
-        );
-        assert!(secrets.get(&key).unwrap().is_none());
-        assert!(matches!(
-            client.remove_account(account.id).await,
-            Err(Error::AccountNotFound(_))
-        ));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn identity_passwords_are_kept_apart_and_removed_with_them() {
-        let dir = tempfile::tempdir().unwrap();
-        let secrets = Arc::new(MemorySecrets::default());
-        let client = open_client(dir.path(), secrets.clone());
-        let account = client
-            .add_account(new_account("a@example.com"), "imap-pw".into(), Verify::Skip)
-            .await
-            .unwrap();
-        let new = NewIdentity {
-            email: "news@example.com".into(),
-            display_name: None,
-            username: "resend".into(),
-            smtp: new_account("a@example.com").smtp,
-        };
-        let identity = client
-            .add_identity(account.id, new.clone(), "api-key".into(), Verify::Skip)
-            .await
-            .unwrap();
-        let key = |id| {
-            client
-                .engine()
-                .unwrap()
-                .store
-                .read(|db| db.identities().sending(account.id, id))
-                .unwrap()
-                .unwrap()
-                .login_key
-        };
-        assert_eq!(
-            stored(&secrets, &key(identity.id)).as_deref(),
-            Some("api-key")
-        );
-        assert_eq!(secrets.len(), 2);
-
-        // A duplicate leaves no password behind, nor does a missing account.
-        let again = client
-            .add_identity(account.id, new.clone(), "other".into(), Verify::Skip)
-            .await;
-        assert!(matches!(again, Err(Error::AlreadyExists(_))), "{again:?}");
-        let missing = client
-            .add_identity(AccountId(99), new.clone(), "other".into(), Verify::Skip)
-            .await;
-        assert!(
-            matches!(missing, Err(Error::AccountNotFound(_))),
-            "{missing:?}"
-        );
-        assert_eq!(secrets.len(), 2);
-
-        client.remove_identity(identity.id).await.unwrap();
-        assert_eq!(secrets.len(), 1);
-        assert!(matches!(
-            client.remove_identity(identity.id).await,
-            Err(Error::IdentityNotFound(_))
-        ));
-
-        client
-            .add_identity(account.id, new, "api-key".into(), Verify::Skip)
-            .await
-            .unwrap();
-        assert_eq!(secrets.len(), 2);
-        client.remove_account(account.id).await.unwrap();
-        assert_eq!(secrets.len(), 0, "the identity's went with the account");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn background_tasks_end_with_the_client_on_a_shared_runtime() {
-        let dir = tempfile::tempdir().unwrap();
-        let metrics = Handle::current().metrics();
-        let before = metrics.num_alive_tasks();
-        let client = MailClient::builder(Config::with_data_dir(dir.path()))
-            .runtime(Handle::current())
-            .secrets(Arc::new(MemorySecrets::default()))
-            .send_in_background(true)
-            .collect_garbage_every(Some(crate::DEFAULT_GC_INTERVAL))
-            .open()
-            .unwrap();
-        assert_eq!(metrics.num_alive_tasks(), before + 4);
-        // Waiting: the outbox is empty, the first collection and the rebuild of stale
-        // bodies are minutes away, and the clocks are compared every half minute.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        drop(client);
-        let ended = async {
-            while metrics.num_alive_tasks() > before {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        };
-        tokio::time::timeout(Duration::from_secs(5), ended)
-            .await
-            .expect("the outbox worker, GC and sleep detection end once the client is gone");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2223,43 +1292,6 @@ mod tests {
         assert!(engine.since_woke(told), "not resumed again");
     }
 
-    #[test]
-    fn open_async_from_a_foreign_executor() {
-        let dir = tempfile::tempdir().unwrap();
-        let builder = || {
-            MailClient::builder(Config::with_data_dir(dir.path()))
-                .secrets(Arc::new(MemorySecrets::default()))
-        };
-        let client = pollster::block_on(builder().open_async()).unwrap();
-        pollster::block_on(client.add_account(
-            new_account("a@example.com"),
-            "pw".into(),
-            Verify::Skip,
-        ))
-        .unwrap();
-        assert!(matches!(
-            pollster::block_on(builder().open_async()),
-            Err(Error::AlreadyRunning(_))
-        ));
-        drop(client);
-        let client = pollster::block_on(builder().open_async()).unwrap();
-        assert_eq!(pollster::block_on(client.list_accounts()).unwrap().len(), 1);
-    }
-
-    #[test]
-    fn a_lock_taken_first_is_the_engines() {
-        let config = Config::with_data_dir(tempfile::tempdir().unwrap().path().join("data"));
-        let lock = config.lock().unwrap();
-        assert!(matches!(config.lock(), Err(Error::AlreadyRunning(_))));
-        let client = MailClient::builder_locked(lock)
-            .secrets(Arc::new(MemorySecrets::default()))
-            .open()
-            .unwrap();
-        assert!(matches!(config.lock(), Err(Error::AlreadyRunning(_))));
-        drop(client);
-        config.lock().unwrap();
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn asking_about_an_account_keeps_nothing_for_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -2310,375 +1342,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn secret_store_failure_rolls_back_account() {
-        let dir = tempfile::tempdir().unwrap();
-        let client = MailClient::builder(Config::with_data_dir(dir.path()))
-            .secrets(Arc::new(FailingSecrets))
-            .open()
-            .unwrap();
-
-        let result = pollster::block_on(client.add_account(
-            new_account("a@example.com"),
-            "pw".into(),
-            Verify::Skip,
-        ));
-        assert!(matches!(result, Err(Error::Secrets(_))));
-        assert!(
-            pollster::block_on(client.list_accounts())
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn rejects_invalid_input() {
-        let dir = tempfile::tempdir().unwrap();
-        let client = MailClient::builder(Config::with_data_dir(dir.path()))
-            .secrets(Arc::new(MemorySecrets::default()))
-            .open()
-            .unwrap();
-
-        let mut bad = new_account("no-at-sign");
-        let r = pollster::block_on(client.add_account(bad.clone(), "pw".into(), Verify::Skip));
-        assert!(matches!(r, Err(Error::InvalidInput(_))));
-
-        bad.email = "a@example.com".into();
-        bad.imap.port = 0;
-        let r = pollster::block_on(client.add_account(bad, "pw".into(), Verify::Skip));
-        assert!(matches!(r, Err(Error::InvalidInput(_))));
-
-        let r = pollster::block_on(client.add_account(
-            new_account("a@example.com"),
-            "".into(),
-            Verify::Skip,
-        ));
-        assert!(matches!(r, Err(Error::InvalidInput(_))));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn data_dirs_do_not_share_credentials() {
-        let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let secrets = Arc::new(MemorySecrets::default());
-        let a = open_client(dir_a.path(), secrets.clone());
-        let b = open_client(dir_b.path(), secrets.clone());
-
-        let acc_a = a
-            .add_account(new_account("a@example.com"), "pw-a".into(), Verify::Skip)
-            .await
-            .unwrap();
-        let acc_b = b
-            .add_account(new_account("b@example.com"), "pw-b".into(), Verify::Skip)
-            .await
-            .unwrap();
-        assert_eq!(acc_a.id, acc_b.id, "both databases start at the same id");
-
-        b.remove_account(acc_b.id).await.unwrap();
-        assert_eq!(
-            stored(&secrets, &secret_key(&a, acc_a.id)).as_deref(),
-            Some("pw-a")
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn remove_during_add_leaves_no_orphaned_secret() {
-        let dir = tempfile::tempdir().unwrap();
-        let (secrets, release) = GatedSecrets::new();
-        let client = open_client(dir.path(), secrets.clone());
-
-        let add = tokio::spawn({
-            let client = client.clone();
-            async move {
-                client
-                    .add_account(new_account("a@example.com"), "pw".into(), Verify::Skip)
-                    .await
-            }
-        });
-        // The password write is in flight; the row must not be visible yet.
-        secrets.entered.notified().await;
-        let id = AccountId(1);
-        assert!(matches!(
-            client.remove_account(id).await,
-            Err(Error::AccountNotFound(_))
-        ));
-        release.send(()).unwrap();
-        assert_eq!(add.await.unwrap().unwrap().id, id);
-        assert!(
-            !client.engine().unwrap().cancellation(id).is_cancelled(),
-            "the failed removal must not leave the new account marked removed"
-        );
-
-        client.remove_account(id).await.unwrap();
-        assert_eq!(secrets.inner.len(), 0, "no orphaned credential");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn one_engine_per_data_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let secrets = Arc::new(MemorySecrets::default());
-        let first = open_client(dir.path(), secrets.clone());
-
-        let second = MailClient::builder(Config::with_data_dir(dir.path()))
-            .runtime(Handle::current())
-            .secrets(secrets.clone())
-            .open();
-        assert!(matches!(second, Err(Error::AlreadyRunning(_))));
-
-        // A clone shares the engine; dropping every handle releases the lock.
-        let clone = first.clone();
-        drop(first);
-        drop(clone);
-        open_client(dir.path(), secrets);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn handed_off_files_are_removed_once_old() {
-        let dir = tempfile::tempdir().unwrap();
-        let client = open_client(dir.path(), Arc::new(MemorySecrets::default()));
-        let old = client
-            .hand_off("html", b"<p>old</p>".to_vec())
-            .await
-            .unwrap();
-        let recent = client
-            .hand_off("html", b"<p>recent</p>".to_vec())
-            .await
-            .unwrap();
-        assert!(old.starts_with(client.config().handoff_dir()));
-        assert_eq!(old.extension().unwrap(), "html");
-        assert_ne!(old, recent);
-        let written = std::time::SystemTime::now() - KEEP_HANDED_OFF - Duration::from_secs(60);
-        std::fs::File::options()
-            .write(true)
-            .open(&old)
-            .unwrap()
-            .set_modified(written)
-            .unwrap();
-
-        let new = client
-            .hand_off("html", b"<p>new</p>".to_vec())
-            .await
-            .unwrap();
-        assert!(!old.exists());
-        assert_eq!(fs::read_to_string(&recent).unwrap(), "<p>recent</p>");
-        assert_eq!(fs::read_to_string(&new).unwrap(), "<p>new</p>");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn handed_off_files_last_until_the_next_engine_opens() {
-        let dir = tempfile::tempdir().unwrap();
-        let secrets = Arc::new(MemorySecrets::default());
-        let first = open_client(dir.path(), secrets.clone());
-        let handoff = first.config().handoff_dir();
-        let page = handoff.join("message.html");
-        fs::write(&page, "<p>hi</p>").unwrap();
-
-        // An engine that can't take the lock leaves them alone.
-        let second = MailClient::builder(Config::with_data_dir(dir.path()))
-            .runtime(Handle::current())
-            .secrets(secrets.clone())
-            .open();
-        assert!(matches!(second, Err(Error::AlreadyRunning(_))));
-        assert!(page.exists());
-
-        drop(first);
-        let reopened = open_client(dir.path(), secrets);
-        assert!(!page.exists());
-        let handoff = reopened.config().handoff_dir();
-        assert_eq!(fs::read_dir(handoff).unwrap().count(), 0);
-    }
-
-    /// A client on `dir` with one account, `email`.
-    async fn client_with_account(
-        dir: &std::path::Path,
-        secrets: Arc<dyn SecretStore>,
-        email: &str,
-    ) -> (MailClient, AccountId) {
-        let client = open_client(dir, secrets);
-        let account = client
-            .add_account(new_account(email), "pw".into(), Verify::Skip)
-            .await
-            .unwrap();
-        (client, account.id)
-    }
-
-    /// A draft to `b@example.com`.
-    async fn draft_to_b(client: &MailClient, account: AccountId) -> catmail_types::Draft {
-        let content = catmail_types::DraftContent {
-            to: vec![catmail_types::Address {
-                name: None,
-                email: "b@example.com".into(),
-            }],
-            ..Default::default()
-        };
-        client
-            .create_draft(account, None, content, Vec::new())
-            .await
-            .unwrap()
-    }
-
-    async fn queue_one(client: &MailClient, account: AccountId) -> catmail_types::OutboxEntry {
-        let draft = draft_to_b(client, account).await;
-        client.send_draft(draft.id).await.unwrap()
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn sends_interrupted_before_the_end_go_back_to_the_queue() {
-        let dir = tempfile::tempdir().unwrap();
-        let secrets = Arc::new(MemorySecrets::default());
-        let (client, account) =
-            client_with_account(dir.path(), secrets.clone(), "a@example.com").await;
-        let mut entries = Vec::new();
-        for _ in 0..2 {
-            entries.push(queue_one(&client, account).await.id);
-        }
-        // The process dies sending both: the first before the end of the message, the
-        // second after.
-        client
-            .engine()
-            .unwrap()
-            .store
-            .write(|db| {
-                db.outbox().begin_send(entries[0], 1)?;
-                db.outbox().begin_send(entries[1], 1)?;
-                db.outbox().mark_unknown(entries[1], None, 1)
-            })
-            .unwrap();
-        drop(client);
-
-        let client = open_client(dir.path(), secrets);
-        let statuses: Vec<_> = client
-            .list_outbox(None)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|e| e.status)
-            .collect();
-        assert_eq!(
-            statuses,
-            [
-                catmail_types::OutboxStatus::Queued,
-                catmail_types::OutboxStatus::Unknown
-            ]
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn sends_left_unfinished_are_requeued_without_a_restart() {
-        let dir = tempfile::tempdir().unwrap();
-        let secrets = Arc::new(MemorySecrets::default());
-        let (client, account) = client_with_account(dir.path(), secrets, "a@example.com").await;
-        let entry = queue_one(&client, account).await;
-        // An attempt that couldn't record how it ended, e.g. a failed write.
-        client
-            .engine()
-            .unwrap()
-            .store
-            .write(|db| db.outbox().begin_send(entry.id, 1))
-            .unwrap();
-
-        let cancelled = client.cancel_outbox(entry.id).await.unwrap();
-        assert_eq!(cancelled.status, catmail_types::OutboxStatus::Queued);
-        assert!(client.list_outbox(None).await.unwrap().is_empty());
-    }
-
-    /// Like a Secret Service whose collection is locked: works once unlocked.
-    #[derive(Default)]
-    struct LockableSecrets {
-        inner: MemorySecrets,
-        locked: std::sync::atomic::AtomicBool,
-    }
-
-    impl SecretStore for LockableSecrets {
-        fn set(&self, key: &str, secret: &SecretString) -> Result<()> {
-            self.inner.set(key, secret)
-        }
-        fn get(&self, key: &str) -> Result<Option<SecretString>> {
-            if self.locked.load(std::sync::atomic::Ordering::SeqCst) {
-                return Err(Error::Secrets("collection is locked".into()));
-            }
-            self.inner.get(key)
-        }
-        fn delete(&self, key: &str) -> Result<()> {
-            self.inner.delete(key)
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn locked_keyring_postpones_sending() {
-        let dir = tempfile::tempdir().unwrap();
-        let secrets = Arc::new(LockableSecrets::default());
-        let (client, account) =
-            client_with_account(dir.path(), secrets.clone(), "a@example.com").await;
-        queue_one(&client, account).await;
-        secrets
-            .locked
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-
-        // Fails before any connection is made, so the fake host doesn't matter.
-        let flushed = client.flush_outbox(account).await.unwrap();
-        assert_eq!(flushed.entries.len(), 1);
-        assert_eq!(
-            flushed.entries[0].status,
-            catmail_types::OutboxStatus::Queued
-        );
-        let error = flushed.entries[0].last_error.as_deref().unwrap();
-        assert!(error.contains("locked"));
-        assert_eq!(flushed.errors.into_values().next().unwrap().message, error);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn account_address_is_checked_before_queueing() {
-        let dir = tempfile::tempdir().unwrap();
-        let secrets = Arc::new(MemorySecrets::default());
-        let (client, account) = client_with_account(dir.path(), secrets, "张三@example.com").await;
-        let draft = draft_to_b(&client, account).await;
-        let queued = client.send_draft(draft.id).await;
-        assert!(matches!(queued, Err(Error::InvalidInput(_))), "{queued:?}");
-        assert!(client.list_outbox(None).await.unwrap().is_empty());
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_previewed_send_goes_out_only_as_it_was_shown() {
-        let dir = tempfile::tempdir().unwrap();
-        let secrets = Arc::new(MemorySecrets::default());
-        let (client, account) = client_with_account(dir.path(), secrets, "a@example.com").await;
-        let draft = draft_to_b(&client, account).await;
-        let shown = client.preview_send(draft.id).await.unwrap();
-        assert_eq!(shown.from.email, "a@example.com");
-
-        // Changed after it was shown: what was confirmed isn't what would go out.
-        let changes = catmail_types::DraftChanges {
-            subject: Some("changed".into()),
-            ..Default::default()
-        };
-        client.update_draft(draft.id, changes).await.unwrap();
-        let queued = client.send_previewed(draft.id, shown.revision).await;
-        assert!(matches!(queued, Err(Error::Conflict(_))), "{queued:?}");
-
-        // Open in an editor, where the user may be changing it.
-        let shown = client.preview_send(draft.id).await.unwrap();
-        let (_editor, mark, _) = client.edit_draft(draft.id).await.unwrap();
-        let queued = client.send_previewed(draft.id, shown.revision).await;
-        assert!(matches!(queued, Err(Error::Conflict(_))), "{queued:?}");
-        let previewed = client.preview_send(draft.id).await;
-        assert!(
-            matches!(previewed, Err(Error::Conflict(_))),
-            "{previewed:?}"
-        );
-        let sent = client.send_draft(draft.id).await;
-        assert!(matches!(sent, Err(Error::Conflict(_))), "{sent:?}");
-        assert!(client.list_outbox(None).await.unwrap().is_empty());
-
-        drop(mark);
-        let entry = client
-            .send_previewed(draft.id, shown.revision)
-            .await
-            .unwrap();
-        assert_eq!(entry.subject, "changed");
-        let again = client.preview_send(draft.id).await;
-        assert!(matches!(again, Err(Error::Conflict(_))), "{again:?}");
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn the_editor_sends_the_draft_it_has_open() {
         let dir = tempfile::tempdir().unwrap();
@@ -2688,75 +1351,6 @@ mod tests {
         let (editor, _mark, _) = client.edit_draft(draft.id).await.unwrap();
         let entry = editor.send().await.unwrap();
         assert_eq!(entry.recipients, ["b@example.com"]);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread")]
-    async fn data_dir_is_private() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let data = dir.path().join("new").join("catmail");
-        open_client(&data, Arc::new(MemorySecrets::default()));
-        let mode = fs::metadata(&data).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o700, "{mode:o}");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread")]
-    async fn files_in_a_shared_data_dir_are_private() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let data = dir.path().join("shared");
-        fs::create_dir(&data).unwrap();
-        fs::set_permissions(&data, fs::Permissions::from_mode(0o755)).unwrap();
-        let client = open_client(&data, Arc::new(MemorySecrets::default()));
-        let config = client.config();
-        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode(&data), 0o755, "the user's directory is left as it is");
-        assert_eq!(mode(&config.db_path()), 0o600);
-        assert_eq!(mode(&config.handoff_dir()), 0o700);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread")]
-    async fn data_dir_of_another_user_is_refused() {
-        if rustix::process::geteuid().is_root() {
-            return; // Root owns the directory below.
-        }
-        // As if someone planted a link to a directory of theirs in a shared location.
-        let dir = tempfile::tempdir().unwrap();
-        let data = dir.path().join("catmail");
-        std::os::unix::fs::symlink("/", &data).unwrap();
-        let opened = MailClient::builder(Config::with_data_dir(&data))
-            .runtime(Handle::current())
-            .secrets(Arc::new(MemorySecrets::default()))
-            .open();
-        assert!(matches!(opened, Err(Error::DataDirNotOwned(_))));
-
-        // A link to a directory of the user's own is fine.
-        let own = dir.path().join("own");
-        fs::create_dir(&own).unwrap();
-        fs::remove_file(&data).unwrap();
-        std::os::unix::fs::symlink(&own, &data).unwrap();
-        open_client(&data, Arc::new(MemorySecrets::default()));
-        assert!(own.join("catmail.db").exists());
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn failed_insert_deletes_the_new_secret() {
-        let dir = tempfile::tempdir().unwrap();
-        let secrets = Arc::new(MemorySecrets::default());
-        let client = open_client(dir.path(), secrets.clone());
-
-        client
-            .add_account(new_account("a@example.com"), "pw".into(), Verify::Skip)
-            .await
-            .unwrap();
-        let dup = client
-            .add_account(new_account("A@example.com"), "pw".into(), Verify::Skip)
-            .await;
-        assert!(matches!(dup, Err(Error::AlreadyExists(_))), "{dup:?}");
-        assert_eq!(secrets.len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
