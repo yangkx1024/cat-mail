@@ -36,6 +36,36 @@ pub fn is_openable_link(url: &str) -> bool {
     })
 }
 
+/// Keeps a web view on the pages it is given (loaded as HTML, at `about:blank`). nsh lets
+/// a Rust app's web view go anywhere, and [`BRIDGE`] only stops what the page sees: the
+/// rest (whatever WebKit's own menus and drops do) still mustn't show a remote page in
+/// the reader, without its CSP. Told where the view is going, it says when to load the
+/// page again, which puts it back (or stops what started).
+#[derive(Debug, Default)]
+pub struct StaysOnPage {
+    /// The page is loading again: until it is back, where the view says it is may be
+    /// where it went, and loading it once more would only start over.
+    returning: bool,
+}
+
+impl StaysOnPage {
+    /// The view started or finished loading `url`: true when the page must be loaded
+    /// again.
+    pub fn navigated(&mut self, url: &str) -> bool {
+        // Empty before anything has loaded.
+        if url.is_empty() || url == "about:blank" {
+            return false;
+        }
+        !std::mem::replace(&mut self.returning, true)
+    }
+
+    /// The page shown said something ([`BRIDGE`]): it is back. Not when it has finished
+    /// loading, which a remote image the user hasn't asked for holds off for good.
+    pub fn on_page(&mut self) {
+        self.returning = false;
+    }
+}
+
 /// A standalone HTML page showing the message in a browser: inline images embedded, and
 /// a CSP so the browser doesn't load the remote content the reader blocks.
 pub fn browser_page(title: &str, html: &str, inline: HashMap<String, Image>) -> String {
@@ -61,6 +91,35 @@ mod tests {
         assert!(!is_openable_link("cid:part1"));
         assert!(!is_openable_link("file:///etc/passwd"));
         assert!(!is_openable_link("example.com"));
+    }
+
+    #[test]
+    fn a_page_left_is_loaded_again_once() {
+        let mut stays = StaysOnPage::default();
+        assert!(!stays.navigated(""));
+        assert!(!stays.navigated("about:blank"));
+
+        // "Open Link" from WebKit's menu: the page loads again.
+        assert!(stays.navigated("https://example.com/"));
+        // Not again while it does, whatever the view says meanwhile (the remote page
+        // finishing first, or the view still at it as the page starts).
+        assert!(!stays.navigated("https://example.com/"));
+        assert!(!stays.navigated("about:blank"));
+
+        // Back on the page: the next one leaving it is caught too.
+        stays.on_page();
+        assert!(stays.navigated("file:///tmp/dropped.html"));
+    }
+
+    #[test]
+    fn a_page_back_is_watched_before_its_images_have_all_come() {
+        // A remote image the user hasn't asked for is never answered, so the page put
+        // back never finishes loading: what it says is all there is to go by.
+        let mut stays = StaysOnPage::default();
+        assert!(stays.navigated("https://example.com/"));
+        assert!(!stays.navigated("about:blank"));
+        stays.on_page();
+        assert!(stays.navigated("https://example.com/again"));
     }
 
     #[test]

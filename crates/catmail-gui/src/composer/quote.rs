@@ -281,7 +281,7 @@ fn message(quote: Rc<Quote>) -> impl IntoElement {
         page.set(untracked(|| make_page(&quote, dark)));
     });
     let web = web::web_view(
-        move || page.with(|p| p.0.to_string()),
+        move || page.with(|p| p.0.clone()),
         move |h| height.set(h),
         |_| {},
     )

@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use catmail_core::html::{DarkPalette, Image, RemoteImage};
 use catmail_frontend::html::{
-    self, Appearance, BodyPages, Colors, DarkAppearance, FromPage, RemoteImages, is_openable_link,
+    self, Appearance, BodyPages, Colors, DarkAppearance, FromPage, RemoteImages, StaysOnPage,
+    is_openable_link,
 };
 use futures_util::StreamExt as _;
 use nsh_base::theme;
@@ -81,7 +82,7 @@ fn is_shown(number: u64) -> bool {
 /// is (`height`, in points) and when it has painted at the web view's height
 /// (`painted`); the links clicked in it open in the system's browser.
 pub fn web_view(
-    page: impl Fn() -> String + 'static,
+    page: impl Fn() -> Rc<str> + 'static,
     height: impl Fn(f32) + 'static,
     painted: impl Fn(f32) + 'static,
 ) -> WebView {
@@ -93,7 +94,33 @@ pub fn web_view(
             serve_image(request);
         }
     });
-    let web = web_view_html(page, None);
+    // Whatever leads the view away from its page (WebKit's own menus and drops, which
+    // the page's script doesn't stop) loads the page again: the same page, told apart
+    // from the one loaded by a newline after it, as the same HTML wouldn't load again.
+    let stays = Rc::new(RefCell::new(StaysOnPage::default()));
+    let again = signal(false);
+    let page = move || {
+        let (page, again) = (page(), again.get());
+        // The one copy the web view needs, room for the newline included.
+        let mut html = String::with_capacity(page.len() + usize::from(again));
+        html.push_str(&page);
+        if again {
+            html.push('\n');
+        }
+        html
+    };
+    let navigated = {
+        let stays = stays.clone();
+        move |navigation: &WebNavigation| {
+            if stays.borrow_mut().navigated(&navigation.url) {
+                tracing::warn!(url = %navigation.url, "the message's page was left: showing it again");
+                again.update(|a| *a = !*a);
+            }
+        }
+    };
+    let web = web_view_html(page, None)
+        .on_load_start(navigated.clone())
+        .on_load(navigated);
     // The page says which images came only where they go a few at a time.
     let web = if IMAGES_IN_FLIGHT.is_some() {
         web.injected_java_script_before_content(html::WATCH_IMAGES.to_owned())
@@ -113,8 +140,14 @@ pub fn web_view(
         })
         .on_message(move |message: &str| match FromPage::parse(message) {
             Some(FromPage::Loaded(url)) => image_loaded(url),
-            Some(FromPage::Painted(number, at)) if is_shown(number) => painted(at),
-            Some(FromPage::Height(number, h)) if is_shown(number) => height(h),
+            Some(FromPage::Painted(number, at)) if is_shown(number) => {
+                stays.borrow_mut().on_page();
+                painted(at);
+            }
+            Some(FromPage::Height(number, h)) if is_shown(number) => {
+                stays.borrow_mut().on_page();
+                height(h);
+            }
             Some(FromPage::Open(url)) if is_openable_link(url) => {
                 spawn(open_url(url.to_owned()));
             }
