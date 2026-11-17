@@ -31,7 +31,7 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 pub use accounts::Accounts;
 pub use attachments::{AttachmentSource, Attachments, NewAttachment};
 pub use blob::BlobStore;
-pub use drafts::{DraftReply, DraftSnapshot, DraftUpload, Drafts, NewDraftAttachment};
+pub use drafts::{DraftReply, DraftSnapshot, DraftUpload, Drafts, NewDraftAttachment, UploadDue};
 pub use error::{Error, Result};
 pub use folders::{FolderSyncState, Folders, Reconciled, RemoteFolder};
 pub use identities::{DeletedIdentity, Identities, Sending, SmtpAnnounced};

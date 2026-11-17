@@ -452,6 +452,27 @@ async fn odd_reply_to_the_end_is_not_taken_as_a_refusal() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn temporary_failures_fail_after_a_few_attempts() {
+    let mut smtp = SmtpState::new("alice", "pw");
+    smtp.faults.busy = 3;
+    let env = env_with(state(), smtp, false).await;
+    let entry = env.queue("busy").await;
+
+    assert_eq!(env.flush().await, [(OutboxStatus::Queued, 1)]);
+    assert_eq!(env.flush().await, [(OutboxStatus::Queued, 2)]);
+    // Told, rather than retried for as long as it lasts.
+    assert_eq!(env.flush().await, [(OutboxStatus::Failed, 3)]);
+    let failed = &env.outbox().await[0];
+    assert!(failed.last_error.as_deref().unwrap().contains("451"));
+    assert_eq!(failed.next_attempt_at, None);
+    assert!(env.flush().await.is_empty(), "not retried on its own");
+
+    env.client.retry_outbox(entry.id).await.unwrap();
+    assert_eq!(env.flush().await, [(OutboxStatus::Done, 1)]);
+    assert_eq!(env.delivered(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn connection_lost_before_the_end_is_retried() {
     let mut smtp = SmtpState::new("alice", "pw");
     smtp.faults.drop_on_mail = 1;
@@ -586,6 +607,48 @@ async fn saving_to_sent_is_retried_without_resending() {
     assert_eq!(env.flush().await, [(OutboxStatus::Done, 2)]);
     assert_eq!(env.delivered(), 1, "the send is never repeated");
     assert_eq!(env.sent_folder().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn saving_to_sent_gives_up_after_a_few_attempts() {
+    let mut state = state();
+    state.faults.reject_appends = 3;
+    let env = env(state).await;
+    env.client.sync_account(env.account).await.unwrap();
+    let entry = env.queue("hi").await;
+
+    assert_eq!(env.flush().await, [(OutboxStatus::Accepted, 1)]);
+    assert_eq!(env.flush().await, [(OutboxStatus::Accepted, 2)]);
+    assert_eq!(env.flush().await, [(OutboxStatus::Unsaved, 3)]);
+    let unsaved = &env.outbox().await[0];
+    assert!(unsaved.last_error.as_deref().unwrap().contains("Quota"));
+    assert_eq!(unsaved.next_attempt_at, None);
+    assert!(unsaved.status.needs_user());
+    assert!(env.flush().await.is_empty(), "not retried on its own");
+
+    // Saved again when the user asks; the send is never repeated.
+    env.client.retry_outbox(entry.id).await.unwrap();
+    assert_eq!(env.flush().await, [(OutboxStatus::Done, 4)]);
+    assert_eq!(env.delivered(), 1);
+    assert_eq!(env.sent_folder().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unsaved_copy_can_be_given_up() {
+    let mut state = state();
+    state.faults.reject_appends = 3;
+    let env = env(state).await;
+    env.client.sync_account(env.account).await.unwrap();
+    let entry = env.queue("hi").await;
+    for _ in 0..3 {
+        env.flush().await;
+    }
+    assert_eq!(env.outbox().await[0].status, OutboxStatus::Unsaved);
+
+    env.client.cancel_outbox(entry.id).await.unwrap();
+    assert!(env.outbox().await.is_empty());
+    let draft = entry.draft_id.unwrap();
+    assert!(env.client.get_draft(draft).await.unwrap().is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]

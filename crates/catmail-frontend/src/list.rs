@@ -293,8 +293,9 @@ pub fn outbox_status(entry: &OutboxEntry) -> (&'static str, Option<Severity>) {
         OutboxStatus::Queued => "Waiting to send",
         OutboxStatus::Sending => "Sending…",
         OutboxStatus::Accepted => "Sent · saving to Sent",
+        OutboxStatus::Unsaved => "Sent · not saved to Sent",
         OutboxStatus::Unknown => "Not confirmed",
-        OutboxStatus::Failed => "Rejected",
+        OutboxStatus::Failed => "Not sent",
         OutboxStatus::Done => "Sent",
     };
     let severity = entry.status.needs_user().then_some(match entry.status {

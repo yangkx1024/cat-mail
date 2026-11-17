@@ -194,7 +194,7 @@ pub(crate) async fn replay_account(
         let needed = engine
             .read(move |db| {
                 Ok(!db.ops().pending_folders(account)?.is_empty()
-                    || db.drafts().need_upload(account)?)
+                    || db.drafts().need_upload(account, None)?)
             })
             .await?;
         let mut report = ReplayReport::default();

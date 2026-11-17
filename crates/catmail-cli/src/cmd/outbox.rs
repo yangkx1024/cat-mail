@@ -168,10 +168,10 @@ fn report(entry: &OutboxEntry, blocked: Option<&ReportedError>, json: bool) -> R
             }
             return Ok(());
         }
-        OutboxStatus::Accepted => {
+        OutboxStatus::Accepted | OutboxStatus::Unsaved => {
             eprintln!(
                 "Sent, but saving a copy to Sent failed: {}\n\
-                 `catmail outbox flush` tries again.",
+                 `catmail outbox retry {id}` tries again.",
                 error
             );
             return Ok(());
@@ -186,7 +186,7 @@ fn report(entry: &OutboxEntry, blocked: Option<&ReportedError>, json: bool) -> R
              `catmail outbox cancel {id}` makes it a draft again."
         ),
         OutboxStatus::Failed => format!(
-            "the server refused the message: {error}\n\
+            "the message wasn't sent: {error}\n\
              `catmail outbox cancel {id}` makes it a draft again to fix it; \
              `catmail outbox retry {id}` sends it as it is."
         ),

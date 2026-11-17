@@ -38,7 +38,7 @@ pub enum State {
         title: &'static str,
         text: &'static str,
     },
-    /// The server turned it down, for `reason`.
+    /// It failed, for `reason`, and won't be tried again on its own.
     Rejected {
         title: &'static str,
         reason: String,
@@ -62,7 +62,11 @@ impl State {
                        check with a recipient, then choose.",
             },
             OutboxStatus::Failed => State::Rejected {
-                title: "The server rejected this message",
+                title: "This message couldn't be sent",
+                reason: reason.unwrap_or_default(),
+            },
+            OutboxStatus::Unsaved => State::Rejected {
+                title: "Sent, but a copy couldn't be saved to the Sent folder",
                 reason: reason.unwrap_or_default(),
             },
             OutboxStatus::Sending => State::Sending,
@@ -241,6 +245,10 @@ mod tests {
         );
         assert_eq!(
             labels(OutboxStatus::Accepted),
+            ["Save the copy now", "Don't keep a copy"]
+        );
+        assert_eq!(
+            labels(OutboxStatus::Unsaved),
             ["Save the copy now", "Don't keep a copy"]
         );
         assert_eq!(labels(OutboxStatus::Queued), ["Send now", "Back to drafts"]);
