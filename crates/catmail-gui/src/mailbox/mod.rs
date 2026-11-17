@@ -130,8 +130,10 @@ fn mailbox() -> impl IntoElement {
     if std::env::var_os("CATMAIL_GUI_SETTINGS").is_some() {
         settings::open();
     }
-    // Escape closes what is open.
-    on_key("escape", |_| global::<Selected>().set(Selected(None)));
+    // Escape closes what is open: a dialog first, which takes it then.
+    form::keys_without_dialog(|| {
+        on_key("escape", |_| global::<Selected>().set(Selected(None)));
+    });
     view()
         .flex_1()
         .child(dynamic(move || match global::<SignIn>().get().0 {

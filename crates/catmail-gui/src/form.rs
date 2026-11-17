@@ -19,6 +19,28 @@ use crate::theme::SelectableText as _;
 /// The space inside a dialog's edges.
 pub const PADDING: f32 = 24.0;
 
+/// How many dialogs are open over the window: [`modal`]'s, and the picker's.
+#[derive(Clone, Copy, Default)]
+struct OpenDialogs(u32);
+
+/// Counts the dialog being built as open over the window until it is gone.
+pub fn count_as_open() {
+    let open = global::<OpenDialogs>();
+    open.update(|o| o.0 += 1);
+    cleanup(move || open.update(|o| o.0 -= 1));
+}
+
+/// Binds the keys `bind` binds while no dialog is open over the window. The window's
+/// keys come before a dialog's and the focus isn't kept in it: bound all along, the
+/// list's would act on the messages behind a dialog, and Escape wouldn't reach it.
+pub fn keys_without_dialog(bind: impl Fn() + 'static) {
+    effect(move || {
+        if global::<OpenDialogs>().with(|o| o.0 == 0) {
+            untracked(&bind);
+        }
+    });
+}
+
 /// A dialog `width` points wide over the window, dimming it; `cancel` is what Escape or
 /// a press beside it does.
 pub fn modal(
@@ -26,6 +48,7 @@ pub fn modal(
     cancel: impl Fn() + 'static,
     content: impl IntoElement,
 ) -> impl IntoElement {
+    count_as_open();
     dialog()
         .animation(ModalAnimation::Fade)
         .on_cancel(cancel)
