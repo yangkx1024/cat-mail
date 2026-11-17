@@ -219,7 +219,7 @@ fn hand(socket: &Path, request: &Request) -> Result<bool, HandError> {
 /// Listens on `socket` for the rest of the process.
 fn serve(socket: &Path) -> io::Result<Requests> {
     // Left by a run that ended without removing it.
-    crate::settings::remove_if_present(socket)?;
+    crate::fs::remove_if_present(socket)?;
     let listener = UnixListener::bind(socket)?;
     // The directory already keeps others out unless the user widened it.
     #[cfg(unix)]

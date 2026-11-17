@@ -99,9 +99,9 @@ fn settle(
 
 fn keep(record: &Path, entry: bool) -> std::io::Result<()> {
     if entry {
-        crate::settings::write_atomically(record, b"")
+        crate::fs::write_atomically(record, b"")
     } else {
-        crate::settings::remove_if_present(record)
+        crate::fs::remove_if_present(record)
     }
 }
 

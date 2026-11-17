@@ -22,11 +22,12 @@ use nsh_core::prelude::*;
 use crate::buttons::{Size, icon_button, primary_button, tooltip};
 use crate::engine::client;
 use crate::icons::{Icon, icon};
+use crate::mailbox::compose;
 use crate::mailbox::folder_commands::{folder_menu, rename_selected};
 use crate::mailbox::list;
 use crate::tasks::in_view;
 use crate::toast::report;
-use crate::{chrome, composer, settings};
+use crate::{chrome, settings};
 
 /// The accounts as the sidebar shows them; `None` until the first read.
 #[derive(Clone, Default)]
@@ -118,7 +119,7 @@ fn show(loaded: Loaded) {
         crate::mailbox::list::reveal(message);
     }
     if loaded.compose {
-        composer::new_message();
+        compose::new_message();
     }
 }
 
@@ -138,7 +139,7 @@ pub fn go_to(to: Destination) {
 /// A new message, from the account shown, once the folders are read.
 pub fn compose() {
     if reads().borrow_mut().compose() {
-        composer::new_message();
+        compose::new_message();
     }
 }
 
@@ -296,7 +297,7 @@ pub fn sidebar() -> impl IntoElement {
                     || "Compose".to_owned(),
                     || format!("Compose ({})", key_label("mod+n")),
                     has_accounts,
-                    composer::new_message,
+                    compose::new_message,
                 )),
         )
         .child(

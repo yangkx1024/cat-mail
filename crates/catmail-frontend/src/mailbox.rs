@@ -1,6 +1,8 @@
 //! What the mailbox window shows, apart from how: the places the sidebar selects, what
-//! the message list lists, and each account as the sidebar shows it.
+//! the message list lists, each account as the sidebar shows it, and what the tray and
+//! the notifications ask of it ([`Asks`]).
 
+mod asks;
 pub mod sidebar;
 
 use std::collections::HashMap;
@@ -13,6 +15,8 @@ use catmail_core::{
 
 use crate::commands::Confirm;
 use crate::folders::{self, AccountFolders, FolderIcon};
+
+pub use asks::{Ask, Asks};
 
 /// Opening a folder synced longer ago than this syncs it. Background sync keeps only
 /// INBOX current between full syncs; the server can't tell us about the others.

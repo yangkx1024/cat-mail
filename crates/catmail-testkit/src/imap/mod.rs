@@ -1,17 +1,23 @@
+mod search;
+pub(crate) mod wire;
+
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
+use self::search::{SearchKey, search_key};
+use self::wire::{Tok, literal, quote, read_command, tokenize};
 use crate::TestCert;
 use crate::mime;
+use crate::tls::{Stream, TlsMode, lock};
 
 /// One message in a [`FakeMailbox`].
 #[derive(Debug, Clone)]
@@ -903,13 +909,6 @@ impl ServerState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TlsMode {
-    None,
-    Implicit,
-    StartTls,
-}
-
 /// A running fake server. Dropping it stops accepting connections.
 pub struct FakeImap {
     addr: SocketAddr,
@@ -1008,13 +1007,6 @@ impl FakeImap {
         }
     }
 }
-
-fn lock(state: &Mutex<ServerState>) -> MutexGuard<'_, ServerState> {
-    state.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
-impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
 
 struct Session {
     id: usize,
@@ -1180,161 +1172,6 @@ async fn serve(
             }
         }
     }
-}
-
-/// Reads one command line, inlining `{n}` / `{n+}` literals, which are also returned as
-/// they came (APPEND needs the exact bytes). `None` at EOF. With `refuse_append`, an
-/// APPEND is answered with NO instead of being asked for its message, and skipped. With
-/// `qq_mail`, a literal in a UID SEARCH is inlined as its `{n}`.
-async fn read_command(
-    io: &mut BufReader<Box<dyn Stream>>,
-    refuse_append: bool,
-    qq_mail: bool,
-) -> std::io::Result<Option<(Vec<u8>, Vec<Vec<u8>>)>> {
-    let mut line = Vec::new();
-    let mut literals = Vec::new();
-    loop {
-        let mut chunk = Vec::new();
-        if io.read_until(b'\n', &mut chunk).await? == 0 {
-            return Ok(None);
-        }
-        while matches!(chunk.last(), Some(b'\n' | b'\r')) {
-            chunk.pop();
-        }
-        let literal = parse_literal_suffix(&chunk);
-        match literal {
-            Some((len, non_sync, prefix_len)) => {
-                line.extend_from_slice(&chunk[..prefix_len]);
-                let text = String::from_utf8_lossy(&line).to_ascii_uppercase();
-                if refuse_append && !non_sync && text.split(' ').nth(1) == Some("APPEND") {
-                    let tag = text.split(' ').next().unwrap_or_default();
-                    io.get_mut()
-                        .write_all(format!("{tag} NO [SERVERBUG] Internal error\r\n").as_bytes())
-                        .await?;
-                    // Answered; read the next command instead.
-                    line.clear();
-                    literals.clear();
-                    continue;
-                }
-                if !non_sync {
-                    io.get_mut()
-                        .write_all(b"+ Ready for literal data\r\n")
-                        .await?;
-                }
-                let mut data = vec![0; len];
-                io.read_exact(&mut data).await?;
-                let searching = text.split(' ').skip(1).take(2).eq(["UID", "SEARCH"]);
-                let inlined = match qq_mail && searching {
-                    true => format!("{{{len}}}").into_bytes(),
-                    false => data.clone(),
-                };
-                // Inline as a quoted string so the tokenizer sees one token.
-                line.push(b'"');
-                for &b in &inlined {
-                    if b == b'"' || b == b'\\' {
-                        line.push(b'\\');
-                    }
-                    line.push(b);
-                }
-                line.push(b'"');
-                literals.push(data);
-            }
-            None => {
-                line.extend_from_slice(&chunk);
-                return Ok(Some((line, literals)));
-            }
-        }
-    }
-}
-
-/// `… {12}` → (12, false, offset of `{`).
-fn parse_literal_suffix(chunk: &[u8]) -> Option<(usize, bool, usize)> {
-    if chunk.last() != Some(&b'}') {
-        return None;
-    }
-    let open = chunk.iter().rposition(|&b| b == b'{')?;
-    let inner = std::str::from_utf8(&chunk[open + 1..chunk.len() - 1]).ok()?;
-    let (digits, non_sync) = match inner.strip_suffix('+') {
-        Some(d) => (d, true),
-        None => (inner, false),
-    };
-    Some((digits.parse().ok()?, non_sync, open))
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Tok {
-    Atom(String),
-    Str(String),
-    List(Vec<Tok>),
-}
-
-impl Tok {
-    fn text(&self) -> String {
-        match self {
-            Tok::Atom(s) | Tok::Str(s) => s.clone(),
-            Tok::List(items) => items.iter().map(Tok::text).collect::<Vec<_>>().join(" "),
-        }
-    }
-}
-
-fn tokenize(input: &str) -> Vec<Tok> {
-    fn parse(
-        chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
-        until: Option<char>,
-    ) -> Vec<Tok> {
-        let mut out = Vec::new();
-        while let Some(&c) = chars.peek() {
-            match c {
-                ' ' => {
-                    chars.next();
-                }
-                ')' if until == Some(')') => {
-                    chars.next();
-                    return out;
-                }
-                '(' => {
-                    chars.next();
-                    out.push(Tok::List(parse(chars, Some(')'))));
-                }
-                '"' => {
-                    chars.next();
-                    let mut s = String::new();
-                    while let Some(c) = chars.next() {
-                        match c {
-                            '\\' => s.extend(chars.next()),
-                            '"' => break,
-                            c => s.push(c),
-                        }
-                    }
-                    out.push(Tok::Str(s));
-                }
-                _ => {
-                    // Brackets may contain spaces: BODY.PEEK[HEADER.FIELDS (DATE FROM)].
-                    let mut s = String::new();
-                    let mut depth = 0;
-                    while let Some(&c) = chars.peek() {
-                        if depth == 0 && matches!(c, ' ' | '(' | ')') {
-                            break;
-                        }
-                        match c {
-                            '[' => depth += 1,
-                            ']' => depth -= 1,
-                            _ => {}
-                        }
-                        s.push(c);
-                        chars.next();
-                    }
-                    if s.is_empty() {
-                        chars.next(); // A stray `)`.
-                    } else {
-                        out.push(Tok::Atom(s));
-                    }
-                }
-            }
-        }
-        out
-    }
-    parse(&mut input.chars().peekable(), None)
 }
 
 fn capabilities(state: &ServerState, session: &Session) -> String {
@@ -2515,12 +2352,6 @@ fn count_fetch(count: &mut usize, drop_on: &mut Option<usize>, hang: bool) -> Op
     Some(hang)
 }
 
-pub(crate) fn literal(data: &[u8]) -> Vec<u8> {
-    let mut out = format!("{{{}}}\r\n", data.len()).into_bytes();
-    out.extend(data);
-    out
-}
-
 /// `BODY.PEEK[]` → `""`, `BODY.PEEK[1.2]` → `"1.2"`, `BODY.PEEK[1.2.MIME]` →
 /// `"1.2.MIME"`; `None` for other items, including `BODY.PEEK[HEADER.FIELDS …]`.
 fn body_section(item: &str) -> Option<&str> {
@@ -2580,145 +2411,6 @@ fn replace_line(pattern: &mut Option<String>, out: Vec<u8>, with: &[u8]) -> Vec<
     result
 }
 
-/// A UID SEARCH key the fake understands: `ALL`, `UID <set>`, `HEADER <field> <text>`,
-/// `TEXT` / `BODY <text>`, `FROM` / `TO` / `CC` / `SUBJECT <text>`, `OR <key> <key>`,
-/// and on Gmail `X-GM-MSGID <id>` and `X-GM-RAW <query>` (see [`gm_raw_matches`]). Text
-/// matches as a substring, whatever its case, as Dovecot without full-text search matches
-/// it; MIME encodings aren't decoded.
-enum SearchKey {
-    All,
-    Uid(String),
-    /// A header field, lowercase, and the text.
-    Header(String, String),
-    /// Anywhere in the message.
-    Text(String),
-    /// After the header.
-    Body(String),
-    GmMsgid(u64),
-    GmRaw(String),
-    Or(Box<SearchKey>, Box<SearchKey>),
-}
-
-/// The key at `args[*i]`, moving `i` past it; `None` if it isn't one.
-fn search_key(args: &[Tok], i: &mut usize, gmail: bool) -> Option<SearchKey> {
-    let mut next = || {
-        let tok = args.get(*i).map(Tok::text);
-        *i += 1;
-        tok
-    };
-    let name = next()?.to_ascii_uppercase();
-    Some(match name.as_str() {
-        "ALL" => SearchKey::All,
-        "UID" => SearchKey::Uid(next()?),
-        "HEADER" => SearchKey::Header(next()?.to_ascii_lowercase(), next()?),
-        "TEXT" => SearchKey::Text(next()?),
-        "BODY" => SearchKey::Body(next()?),
-        "FROM" | "TO" | "CC" | "SUBJECT" => SearchKey::Header(name.to_ascii_lowercase(), next()?),
-        "X-GM-MSGID" if gmail => SearchKey::GmMsgid(next()?.parse().ok()?),
-        "X-GM-RAW" if gmail => SearchKey::GmRaw(next()?),
-        "OR" => SearchKey::Or(
-            Box::new(search_key(args, i, gmail)?),
-            Box::new(search_key(args, i, gmail)?),
-        ),
-        _ => return None,
-    })
-}
-
-impl SearchKey {
-    /// `max_uid` is the mailbox's highest UID, which `*` stands for.
-    fn matches(&self, m: &FakeMessage, max_uid: u32) -> bool {
-        match self {
-            SearchKey::All => true,
-            SearchKey::Uid(set) => set_contains(set, m.uid, || max_uid),
-            SearchKey::Header(field, text) => header_has(&m.raw, field, text),
-            SearchKey::Text(text) => contains(&String::from_utf8_lossy(&m.raw), text),
-            SearchKey::Body(text) => {
-                contains(&String::from_utf8_lossy(&m.raw[header_end(&m.raw)..]), text)
-            }
-            SearchKey::GmMsgid(id) => m.gm_msgid == *id,
-            SearchKey::GmRaw(query) => gm_raw_matches(query, &m.raw),
-            SearchKey::Or(a, b) => a.matches(m, max_uid) || b.matches(m, max_uid),
-        }
-    }
-
-    /// Whether this key or one in it is `what`.
-    fn has(&self, what: impl Fn(&SearchKey) -> bool + Copy) -> bool {
-        what(self)
-            || match self {
-                SearchKey::Or(a, b) => a.has(what) || b.has(what),
-                _ => false,
-            }
-    }
-}
-
-fn contains(haystack: &str, needle: &str) -> bool {
-    haystack.to_lowercase().contains(&needle.to_lowercase())
-}
-
-/// Whether a value of the header `field` (lowercase) holds `text`.
-fn header_has(raw: &[u8], field: &str, text: &str) -> bool {
-    let found = filter_headers(raw, &[field.to_owned()]);
-    String::from_utf8_lossy(&found)
-        .lines()
-        .filter_map(|line| line.split_once(':').map(|(_, value)| value))
-        .any(|value| contains(value, text))
-}
-
-/// A Gmail search as far as catmail writes one: terms ANDed, each a word or a `"phrase"`,
-/// optionally prefixed with `from:`, `to:`, `cc:` or `subject:`; `{…}` ORs the terms in it.
-fn gm_raw_matches(query: &str, raw: &[u8]) -> bool {
-    enum Item {
-        Term(Option<String>, String),
-        AnyOf(Vec<Item>),
-    }
-    fn items(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Vec<Item> {
-        let mut out = Vec::new();
-        while let Some(&c) = chars.peek() {
-            match c {
-                ' ' => {
-                    chars.next();
-                }
-                '{' => {
-                    chars.next();
-                    out.push(Item::AnyOf(items(chars)));
-                }
-                '}' => {
-                    chars.next();
-                    return out;
-                }
-                _ => {
-                    let mut field = None;
-                    let mut text = String::new();
-                    let mut quoted = false;
-                    while let Some(&c) = chars.peek() {
-                        match c {
-                            '"' => quoted = !quoted,
-                            ' ' | '{' | '}' if !quoted => break,
-                            ':' if !quoted && field.is_none() => {
-                                field = Some(std::mem::take(&mut text).to_ascii_lowercase());
-                            }
-                            c => text.push(c),
-                        }
-                        chars.next();
-                    }
-                    out.push(Item::Term(field, text));
-                }
-            }
-        }
-        out
-    }
-    fn matches(item: &Item, raw: &[u8]) -> bool {
-        match item {
-            Item::Term(Some(field), text) => header_has(raw, field, text),
-            Item::Term(None, text) => contains(&String::from_utf8_lossy(raw), text),
-            Item::AnyOf(items) => items.iter().any(|i| matches(i, raw)),
-        }
-    }
-    items(&mut query.chars().peekable())
-        .iter()
-        .all(|item| matches(item, raw))
-}
-
 /// Whether a UID is in an IMAP UID set like `1:3,7,9:*`, with `*` meaning the highest
 /// UID in the mailbox (so `5:*` matches it even when it is below 5). Made once per
 /// command and asked about every message: it finds the highest UID once, where finding
@@ -2750,8 +2442,6 @@ fn set_contains(set: &str, n: u32, star: impl Fn() -> u32) -> bool {
     })
 }
 
-/// The header lines (with continuations) whose names are in `fields`, plus the blank
-/// line that ends a header block.
 /// Where the header of `raw` ends, its last CRLF included; all of it without a blank line.
 fn header_end(raw: &[u8]) -> usize {
     raw.windows(4)
@@ -2759,6 +2449,8 @@ fn header_end(raw: &[u8]) -> usize {
         .map_or(raw.len(), |p| p + 2)
 }
 
+/// The header lines (with continuations) whose names are in `fields`, plus the blank
+/// line that ends a header block.
 fn filter_headers(raw: &[u8], fields: &[String]) -> Vec<u8> {
     let end = header_end(raw);
     let mut out = Vec::new();
@@ -2776,43 +2468,9 @@ fn filter_headers(raw: &[u8], fields: &[String]) -> Vec<u8> {
     out
 }
 
-pub(crate) fn quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tokenizes_fetch_arguments() {
-        let toks = tokenize(
-            "UID FETCH 1:3,5 (UID FLAGS BODY.PEEK[HEADER.FIELDS (DATE FROM)]) (CHANGEDSINCE 7)",
-        );
-        assert_eq!(toks[2], Tok::Atom("1:3,5".into()));
-        let Tok::List(items) = &toks[3] else {
-            panic!("{toks:?}")
-        };
-        assert_eq!(
-            items[2],
-            Tok::Atom("BODY.PEEK[HEADER.FIELDS (DATE FROM)]".into())
-        );
-        assert_eq!(
-            toks[4],
-            Tok::List(vec![
-                Tok::Atom("CHANGEDSINCE".into()),
-                Tok::Atom("7".into())
-            ])
-        );
-        assert_eq!(
-            tokenize(r#"LOGIN "a\"b" pw"#),
-            vec![
-                Tok::Atom("LOGIN".into()),
-                Tok::Str("a\"b".into()),
-                Tok::Atom("pw".into())
-            ]
-        );
-    }
 
     #[test]
     fn filters_header_fields() {

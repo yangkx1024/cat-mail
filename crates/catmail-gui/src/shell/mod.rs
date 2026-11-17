@@ -32,7 +32,7 @@ use std::time::Duration;
 use catmail_core::{DraftId, EditMark, MailClient, MailClientBuilder};
 use catmail_frontend::composer::{ComposeFrom, OpenComposers, Opening, window_title};
 use catmail_frontend::instance::{Request, Requests};
-use catmail_frontend::mailbox::{Destination, Place};
+use catmail_frontend::mailbox::{Ask, Asks, Destination, Place};
 use catmail_frontend::mcp;
 use catmail_frontend::resident::{
     AfterLastWindow, AtLaunch, QuitReason, after_last_window, at_launch,
@@ -213,61 +213,23 @@ fn serve_agents(client: MailClient) {
 
 // --- The main window's mailbox, asked from outside it --------------------------------
 
-/// What the tray or a notification asks of the main window's mailbox.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Ask {
-    /// Go there, once the folders are read.
-    GoTo(Destination),
-    /// A new message, from the account shown.
-    Compose,
-}
-
-struct Asks {
-    /// The main window's mailbox, while it follows them.
-    mailbox: Option<mpsc::UnboundedSender<Ask>>,
-    /// Asked while there was none: the next takes them.
-    waiting: Vec<Ask>,
-    /// Where the last one was, for the next to open there.
-    left_at: Option<Place>,
-}
-
-static ASKS: Mutex<Asks> = Mutex::new(Asks {
-    mailbox: None,
-    waiting: Vec::new(),
-    left_at: None,
-});
+/// What the tray and the notifications ask of the main window's mailbox, and where the
+/// last one was.
+static ASKS: Mutex<Asks> = Mutex::new(Asks::new());
 
 fn ask(ask: Ask) {
-    let mut asks = lock(&ASKS);
-    let sent = asks
-        .mailbox
-        .as_ref()
-        .is_some_and(|mailbox| mailbox.unbounded_send(ask).is_ok());
-    if !sent {
-        asks.mailbox = None;
-        asks.waiting.push(ask);
-    }
+    lock(&ASKS).ask(ask);
 }
 
 /// For the main window's mailbox, as it opens: what was asked of it while there was none,
-/// starting with where the last one was (unless a notification asked for elsewhere), and
-/// what is asked from now on.
+/// and what is asked from now on ([`Asks::follow`]).
 pub fn follow_asks() -> (Vec<Ask>, mpsc::UnboundedReceiver<Ask>) {
-    let (mailbox, asks_) = mpsc::unbounded();
-    let mut asks = lock(&ASKS);
-    asks.mailbox = Some(mailbox);
-    let mut waiting = std::mem::take(&mut asks.waiting);
-    if !waiting.iter().any(|ask| matches!(ask, Ask::GoTo(_)))
-        && let Some(place) = asks.left_at
-    {
-        waiting.insert(0, Ask::GoTo(Destination::Place(place)));
-    }
-    (waiting, asks_)
+    lock(&ASKS).follow()
 }
 
 /// The main window's mailbox shows `place`: the next opens there.
 pub fn left_at(place: Option<Place>) {
-    lock(&ASKS).left_at = place;
+    lock(&ASKS).left_at(place);
 }
 
 /// Shows the main window (opened if there is none), taken to `to`. `activation_token` is
@@ -447,7 +409,7 @@ fn main_window() -> Window {
         gone: Box::new(|| {
             tracing::info!("main window closed");
             MAIN.take();
-            lock(&ASKS).mailbox = None;
+            lock(&ASKS).closed();
         }),
     };
     let window = open_window(&spec, Root::of::<crate::mailbox::App>(), hooks);
