@@ -54,7 +54,11 @@ const SIZE: &str = "height: auto !important; min-height: 0 !important; \
 /// is never less than the view's height and so wouldn't shrink for a shorter message), that it has painted at the web view's height
 /// (`p:<n>:<px>`, two frames after it loaded and after each resize: WebKit has shown it
 /// at that size), the links clicked (`o:<url>`), which open in the system's browser
-/// instead of in the view. Its images are [`WATCH_IMAGES`]'s.
+/// instead of in the view. Nothing else leads the view away from the page: a link's
+/// menu, whose "Open Link" would load it in the view and "Download Linked File" save it,
+/// isn't shown (WebKit's menu elsewhere, with Copy, is), and nothing dropped on the page
+/// is taken (a link dropped on a web view loads in it; links still drag out of it). Its
+/// images are [`WATCH_IMAGES`]'s.
 pub const BRIDGE: &str = r#"(function () {
   var number = document.querySelector('meta[name="catmail-page"]');
   var page = number ? number.content : "0";
@@ -72,13 +76,26 @@ pub const BRIDGE: &str = r#"(function () {
   new ResizeObserver(report).observe(root, { box: "border-box" });
   window.addEventListener("load", report);
   report();
+  function link(e) {
+    return e.target.closest ? e.target.closest("a[href]") : null;
+  }
   document.addEventListener("click", function (e) {
-    var a = e.target.closest ? e.target.closest("a[href]") : null;
+    var a = link(e);
     if (a) {
       e.preventDefault();
       window.nsh.postMessage("o:" + a.href);
     }
   }, true);
+  document.addEventListener("contextmenu", function (e) {
+    if (link(e)) {
+      e.preventDefault();
+    }
+  }, true);
+  function refuse(e) {
+    e.preventDefault();
+  }
+  document.addEventListener("dragover", refuse, true);
+  document.addEventListener("drop", refuse, true);
   function painted() {
     requestAnimationFrame(function () {
       requestAnimationFrame(function () {
@@ -307,6 +324,15 @@ pub(super) mod tests {
             super::super::IMAGE_SCHEME
         );
         assert!(WATCH_IMAGES.contains(&only_ours), "{WATCH_IMAGES}");
+    }
+
+    #[test]
+    fn nothing_but_a_click_leads_the_page_to_a_link() {
+        // A link's menu opens it in the view, and a link dropped on the view loads there:
+        // a remote page, with none of the reader's CSP.
+        for event in ["contextmenu", "dragover", "drop"] {
+            assert!(BRIDGE.contains(&format!("\"{event}\"")), "{event}");
+        }
     }
 
     #[test]

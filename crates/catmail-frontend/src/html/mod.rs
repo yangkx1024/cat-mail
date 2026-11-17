@@ -36,6 +36,33 @@ pub fn is_openable_link(url: &str) -> bool {
     })
 }
 
+/// Keeps a web view on the pages it is given (loaded as HTML, at `about:blank`). nsh lets
+/// a Rust app's web view go anywhere, and [`BRIDGE`] only stops what the page sees: the
+/// rest (whatever WebKit's own menus and drops do) still mustn't show a remote page in
+/// the reader, without its CSP. Told where the view is going, it says when to load the
+/// page again, which puts it back (or stops what started).
+#[derive(Debug, Default)]
+pub struct StaysOnPage {
+    /// The page is loading again: until it has, where the view says it is may be where
+    /// it went, and loading it once more would only start over.
+    returning: bool,
+}
+
+impl StaysOnPage {
+    /// The view started loading `url`, or (`finished`) has: true when the page must be
+    /// loaded again.
+    pub fn navigated(&mut self, url: &str, finished: bool) -> bool {
+        // Empty before anything has loaded.
+        if url.is_empty() || url == "about:blank" {
+            if finished {
+                self.returning = false;
+            }
+            return false;
+        }
+        !std::mem::replace(&mut self.returning, true)
+    }
+}
+
 /// A standalone HTML page showing the message in a browser: inline images embedded, and
 /// a CSP so the browser doesn't load the remote content the reader blocks.
 pub fn browser_page(title: &str, html: &str, inline: HashMap<String, Image>) -> String {
@@ -61,6 +88,27 @@ mod tests {
         assert!(!is_openable_link("cid:part1"));
         assert!(!is_openable_link("file:///etc/passwd"));
         assert!(!is_openable_link("example.com"));
+    }
+
+    #[test]
+    fn a_page_left_is_loaded_again_once() {
+        let mut stays = StaysOnPage::default();
+        assert!(!stays.navigated("", false));
+        assert!(!stays.navigated("about:blank", false));
+        assert!(!stays.navigated("about:blank", true));
+
+        // "Open Link" from WebKit's menu: the page loads again.
+        assert!(stays.navigated("https://example.com/", false));
+        // Not again while it does, whatever the view says meanwhile (the remote page
+        // finishing first, or the view still at it as the page starts).
+        assert!(!stays.navigated("https://example.com/", true));
+        assert!(!stays.navigated("https://example.com/", false));
+        assert!(!stays.navigated("about:blank", false));
+        assert!(!stays.navigated("about:blank", true));
+
+        // Back on the page: the next one leaving it is caught too, even only once loaded.
+        assert!(stays.navigated("file:///tmp/dropped.html", true));
+        assert!(!stays.navigated("about:blank", true));
     }
 
     #[test]

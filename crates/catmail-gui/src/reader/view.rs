@@ -379,7 +379,7 @@ fn web_view() -> impl IntoElement {
     // when it changes, not on each change of what else the pane shows.
     let page = computed(move || reading.with(|r| r.page.clone()));
     web::web_view(
-        move || page.with(|p| p.to_string()),
+        move || page.get(),
         |height| global::<BodyHeight>().set(BodyHeight(height)),
         page_painted,
     )
