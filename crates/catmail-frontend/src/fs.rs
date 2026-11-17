@@ -5,13 +5,23 @@ use std::path::Path;
 
 /// Writes through a temporary file next to `path`, so a crash mid-write leaves the old
 /// file. Creates the folder if needed.
+///
+/// The contents reach the disk before the rename: otherwise a power cut can leave the
+/// rename done and the file empty. On Unix the folder is synced after it too, so the
+/// rename itself lasts (Windows has no handle on a folder to sync).
 pub(crate) fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
-    let dir = path.parent().unwrap_or(Path::new("."));
+    let dir = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
     let mut file = tempfile::NamedTempFile::new_in(dir)?;
     file.write_all(contents)?;
+    file.as_file().sync_all()?;
     file.persist(path)?;
+    #[cfg(unix)]
+    std::fs::File::open(dir)?.sync_all()?;
     Ok(())
 }
 
