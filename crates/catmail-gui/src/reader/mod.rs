@@ -274,19 +274,13 @@ impl web::RemoteImagesAt for Open {
 /// shows the part grown blank until it paints there.
 fn page_painted(height: f32) {
     let page_height = global::<BodyHeight>().with_untracked(|h| h.0);
-    if !tall_enough(height, page_height) {
+    if !catmail_frontend::html::tall_enough(height, page_height) {
         return;
     }
     let shown = page_state().borrow().shown;
     if let Some(id) = shown {
         show_page(id);
     }
-}
-
-/// Whether a web view `height` points tall shows all of a page `page_height` points tall
-/// (as tall as it is made, [`web::MIN_HEIGHT`] at least; to the pixel).
-fn tall_enough(height: f32, page_height: f32) -> bool {
-    height + 1.0 >= page_height.max(web::MIN_HEIGHT)
 }
 
 /// Shows message `id`'s page if it is the one open and still hidden.
@@ -360,17 +354,4 @@ fn open_in_browser() {
             ),
         }
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_page_shows_once_the_web_view_has_grown_to_it() {
-        assert!(!tall_enough(40.0, 620.0), "not grown yet");
-        assert!(tall_enough(620.0, 620.0));
-        assert!(tall_enough(619.5, 620.2), "rounded");
-        assert!(tall_enough(40.0, 12.0), "shorter than the least height");
-    }
 }

@@ -40,7 +40,7 @@ pub fn set(on: bool) -> (State, Result<(), Error>) {
     let done = if on {
         std::env::current_exe().and_then(|exe| enable(&path, &exe))
     } else {
-        crate::settings::remove_if_present(&path)
+        crate::fs::remove_if_present(&path)
     };
     let done = done.map_err(|e| {
         tracing::warn!(on, error = %e, path = %path.display(), "couldn't change the autostart entry");
@@ -77,7 +77,7 @@ fn state_of(path: &Path) -> State {
 /// Writes the entry that starts `exe` at login, over whatever is there: also one
 /// another copy of the app wrote, or one the desktop's settings turned off.
 fn enable(path: &Path, exe: &Path) -> io::Result<()> {
-    crate::settings::write_atomically(path, entry(exe)?.as_bytes())
+    crate::fs::write_atomically(path, entry(exe)?.as_bytes())
 }
 
 /// The entry that starts `exe` at login, opening no window. `TryExec` lets the desktop
@@ -205,7 +205,7 @@ mod tests {
                 .contains("/elsewhere/")
         );
 
-        crate::settings::remove_if_present(&path).unwrap();
+        crate::fs::remove_if_present(&path).unwrap();
         assert!(!path.exists());
         assert_eq!(state_of(&path), State::Off);
     }

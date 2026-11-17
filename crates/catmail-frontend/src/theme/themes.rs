@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use super::derive::theme_set_json;
 use super::{ImportError, ImportedTheme, ThemeConfig, ThemeSet, builtin_themes, import};
-use crate::settings::write_atomically;
+use crate::fs::write_atomically;
 
 /// Under the Import button: what can be imported.
 pub const IMPORT_HELP: &str = "Color schemes from Alacritty, kitty, Ghostty, WezTerm, Windows \

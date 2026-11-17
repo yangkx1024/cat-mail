@@ -2,7 +2,7 @@
 
 use mail_parser::{MessageParser, MessagePart};
 
-use crate::imap::{literal, quote};
+use crate::imap::wire::{literal, quote};
 
 /// The BODYSTRUCTURE of `raw`, in wire form (may contain literals).
 pub(crate) fn body_structure(raw: &[u8]) -> Vec<u8> {

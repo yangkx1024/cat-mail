@@ -22,6 +22,7 @@ pub mod composer;
 mod fixtures;
 pub mod folders;
 pub mod format;
+mod fs;
 pub mod html;
 pub mod instance;
 pub mod list;

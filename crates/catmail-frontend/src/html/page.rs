@@ -135,6 +135,16 @@ impl<'a> FromPage<'a> {
     }
 }
 
+/// The web view's height before the page says its own, in points.
+pub const MIN_HEIGHT: f32 = 40.0;
+
+/// Whether a web view `height` points tall shows all of a page `page_height` points tall
+/// (as tall as it is made, [`MIN_HEIGHT`] at least; to the pixel): what
+/// [`FromPage::Painted`] says against the last [`FromPage::Height`].
+pub fn tall_enough(height: f32, page_height: f32) -> bool {
+    height + 1.0 >= page_height.max(MIN_HEIGHT)
+}
+
 /// The page of a body: its sanitized HTML (`MessageBody::html`), its images pointed at
 /// the reader's URLs, or the plain text when there is no HTML part; with the remote
 /// images it refers to, and whether it is dark. `number` is in what the page says
@@ -377,6 +387,27 @@ pub(super) mod tests {
         assert!(
             page.contains("<meta name=\"catmail-page\" content=\"7\">"),
             "{page}"
+        );
+    }
+
+    #[test]
+    fn a_page_shows_once_the_web_view_has_grown_to_it() {
+        assert!(!tall_enough(MIN_HEIGHT, 620.0), "not grown yet");
+        assert!(tall_enough(620.0, 620.0));
+        assert!(tall_enough(700.0, 620.0), "taller than the page");
+        // To the pixel: the sizes are rounded, and the page's to the next point up.
+        assert!(tall_enough(619.5, 620.2), "rounded");
+        assert!(tall_enough(619.0, 620.0), "a point short");
+        assert!(!tall_enough(618.9, 620.0), "more than a point short");
+        // A page shorter than the least height is shown at that height.
+        assert!(
+            tall_enough(MIN_HEIGHT, 12.0),
+            "shorter than the least height"
+        );
+        assert!(tall_enough(MIN_HEIGHT - 1.0, 12.0));
+        assert!(
+            !tall_enough(MIN_HEIGHT - 2.0, 12.0),
+            "not yet at the least height"
         );
     }
 }

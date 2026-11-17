@@ -17,7 +17,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use catmail_core::{Event, RecvError};
-use catmail_frontend::mailbox::{Place, REFRESH_INTERVAL};
+use catmail_frontend::mailbox::{Ask, Place, REFRESH_INTERVAL};
 use catmail_frontend::refresh::{Refresh, Throttle};
 use futures_util::StreamExt as _;
 use nsh_base::theme;
@@ -26,7 +26,6 @@ use nsh_core::prelude::*;
 
 use crate::engine::client;
 use crate::login::{self, SignIn};
-use crate::shell::Ask;
 use crate::tasks::{in_view, own_tasks};
 use crate::theme::SelectableText as _;
 use crate::{chrome, form, reader, settings, shell, toast};

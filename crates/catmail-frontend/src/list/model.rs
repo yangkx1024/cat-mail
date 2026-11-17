@@ -8,7 +8,8 @@ use std::rc::Rc;
 
 use catmail_core::{MailClient, MessageCursor, MessageId, MessageSummary, SearchQuery};
 
-use super::{Days, PAGE, Removal, Reveal, Row, RowId, fetch};
+use super::selection::{Removal, Reveal};
+use super::{Days, PAGE, Row, RowId, fetch};
 use crate::format::Calendar;
 use crate::mailbox::{Place, Source};
 use crate::refresh::Coalesce;

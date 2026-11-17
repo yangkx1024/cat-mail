@@ -26,6 +26,9 @@ use crate::icons::Icon;
 use crate::tasks::in_view;
 use crate::toast::{Level, notify};
 
+/// The web view's height before the page says its own.
+pub use catmail_frontend::html::MIN_HEIGHT;
+
 /// The bytes of images on their way to the page at once (`BodyPages::new`; why, in
 /// `catmail_frontend::html`'s pacer): WebKitGTK reads them 8 KiB at a time.
 #[cfg(target_os = "linux")]
@@ -34,9 +37,6 @@ const IMAGES_IN_FLIGHT: Option<usize> = Some(1 << 20);
 /// `WKURLSchemeHandler` takes each image whole: no limit.
 #[cfg(not(target_os = "linux"))]
 const IMAGES_IN_FLIGHT: Option<usize> = None;
-
-/// The web view's height before the page says its own.
-pub const MIN_HEIGHT: f32 = 40.0;
 
 /// How long images may be held back with none coming before the rest go anyway.
 const UNSTICK_AFTER: Duration = Duration::from_secs(3);

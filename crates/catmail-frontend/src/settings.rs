@@ -201,27 +201,7 @@ impl SettingsFile {
     }
 
     fn save(&self, settings: &Settings) -> std::io::Result<()> {
-        write_atomically(&self.path(), &serde_json::to_vec_pretty(settings)?)
-    }
-}
-
-/// Writes through a temporary file next to `path`, so a crash mid-write leaves the old
-/// file. Creates the folder if needed.
-pub(crate) fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    use std::io::Write as _;
-    let dir = path.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(dir)?;
-    let mut file = tempfile::NamedTempFile::new_in(dir)?;
-    file.write_all(contents)?;
-    file.persist(path)?;
-    Ok(())
-}
-
-/// Removes the file at `path`: one that isn't there is removed already.
-pub(crate) fn remove_if_present(path: &Path) -> std::io::Result<()> {
-    match std::fs::remove_file(path) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-        _ => Ok(()),
+        crate::fs::write_atomically(&self.path(), &serde_json::to_vec_pretty(settings)?)
     }
 }
 

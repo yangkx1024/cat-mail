@@ -1,15 +1,16 @@
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
 use crate::TestCert;
 use crate::imap::LoggedCommand;
+use crate::tls::{Stream, TlsMode, lock};
 
 /// A message the fake server accepted (or took in before dropping the connection).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,13 +106,6 @@ impl SmtpState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TlsMode {
-    None,
-    Implicit,
-    StartTls,
-}
-
 /// A running fake SMTP server. Dropping it stops accepting connections.
 pub struct FakeSmtp {
     addr: SocketAddr,
@@ -180,13 +174,6 @@ impl FakeSmtp {
         lock(&self.state)
     }
 }
-
-fn lock(state: &Mutex<SmtpState>) -> MutexGuard<'_, SmtpState> {
-    state.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
-impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
 
 #[derive(Default)]
 struct Transaction {

@@ -1,6 +1,7 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 /// A self-signed certificate for `localhost` / `127.0.0.1`, generated per test.
 #[derive(Clone)]
@@ -38,4 +39,21 @@ impl TestCert {
     pub(crate) fn acceptor(&self) -> tokio_rustls::TlsAcceptor {
         tokio_rustls::TlsAcceptor::from(self.server_config.clone())
     }
+}
+
+/// How a fake server's connections start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TlsMode {
+    None,
+    Implicit,
+    StartTls,
+}
+
+/// A connection, plaintext or TLS, as a fake server's session reads and writes it.
+pub(crate) trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
+
+/// Locks a fake server's state: a test that panicked holding it doesn't stop the server.
+pub(crate) fn lock<T>(state: &Mutex<T>) -> MutexGuard<'_, T> {
+    state.lock().unwrap_or_else(PoisonError::into_inner)
 }
