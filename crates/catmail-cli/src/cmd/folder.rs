@@ -8,7 +8,7 @@ use clap::Subcommand;
 
 use crate::cmd::{find_folder, one_account};
 use crate::json::{self, JsonFolder};
-use crate::output::printable;
+use crate::output::{outln, printable};
 
 #[derive(Subcommand)]
 pub(crate) enum FolderCommand {
@@ -91,7 +91,7 @@ fn print(folder: &Folder, line: &str, json: bool) -> Result<()> {
     if json {
         json::print_keyed("folder", &JsonFolder::from(folder))
     } else {
-        println!("{line}");
+        outln!("{line}")?;
         Ok(())
     }
 }

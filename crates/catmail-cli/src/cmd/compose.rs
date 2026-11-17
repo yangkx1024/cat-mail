@@ -17,7 +17,7 @@ use clap::{Args, Subcommand};
 use crate::cmd::ops::{self, NEXT_FLUSH};
 use crate::cmd::{identity, one_account, outbox, summary};
 use crate::json::{self, JsonDraft, JsonDraftAttachment};
-use crate::output::{print_draft, print_drafts, printable};
+use crate::output::{errln, outln, print_draft, print_drafts, printable};
 
 fn print_draft_json(draft: &Draft) -> Result<()> {
     json::print_keyed("draft", &JsonDraft::from(&draft.into()))
@@ -270,10 +270,11 @@ async fn finish_draft(
     if json {
         print_draft_json(&draft)?;
     } else {
-        println!(
+        outln!(
             "Saved draft {}. Send it with `catmail send {}`.",
-            draft.id, draft.id
-        );
+            draft.id,
+            draft.id
+        )?;
     }
     Ok(())
 }
@@ -287,7 +288,7 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
             if json {
                 json::print_list::<JsonDraft, _>("drafts", &drafts)?;
             } else {
-                print_drafts(&drafts);
+                print_drafts(&drafts)?;
             }
             None
         }
@@ -298,7 +299,7 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
             } else {
                 let identities = client.list_identities(draft.account_id).await?;
                 let from = identities.iter().find(|i| i.id == draft.identity);
-                print_draft(&draft, from);
+                print_draft(&draft, from)?;
             }
             None
         }
@@ -320,7 +321,7 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
             if json {
                 print_draft_json(&draft)?;
             } else {
-                println!("Saved draft {}.", draft.id);
+                outln!("Saved draft {}.", draft.id)?;
             }
             if was_in != draft.account_id {
                 // Moved: its copy there goes.
@@ -337,12 +338,12 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
                     .await
                     .with_context(|| format!("failed to attach {}", path.display()))?;
                 if !json {
-                    println!(
+                    outln!(
                         "Attached {} ({}) as {}.",
                         printable(&a.filename),
                         display::size(a.size),
                         a.id
-                    );
+                    )?;
                 }
                 attached.push(a);
             }
@@ -361,7 +362,7 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
             let account = get_draft(client, id).await?.account_id;
             client.delete_draft(DraftId(id)).await?;
             if !json {
-                println!("Deleted draft {id}.");
+                outln!("Deleted draft {id}.")?;
             }
             Some(account)
         }
@@ -379,14 +380,14 @@ pub(crate) async fn save_to_server(client: &MailClient, account: AccountId) {
     let error = match client.replay_pending(account).await {
         Ok(report) => {
             if report.drafts_failed > 0 {
-                eprintln!("warning: {}", ops::refused_drafts(report.drafts_failed));
+                errln!("warning: {}", ops::refused_drafts(report.drafts_failed));
             }
             report.error.map(|e| e.to_string())
         }
         Err(e) => Some(e.to_string()),
     };
     if let Some(e) = error {
-        eprintln!(
+        errln!(
             "warning: the draft is saved here, but not in the server's Drafts folder yet \
              ({}); {NEXT_FLUSH} puts it there",
             printable(&e)
@@ -427,7 +428,7 @@ fn read_body(body: Option<String>, file: Option<&PathBuf>) -> Result<Option<Stri
     let mut bytes = Vec::new();
     if path.as_os_str() == "-" {
         if io::stdin().is_terminal() {
-            eprintln!("Type the message, then Ctrl-D:");
+            errln!("Type the message, then Ctrl-D:");
         }
         io::stdin().lock().read_to_end(&mut bytes)?;
     } else {

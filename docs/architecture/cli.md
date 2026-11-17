@@ -14,7 +14,7 @@ src/
                  compose（compose / reply / forward / draft）、identity（发信身份）、outbox（send / outbox）、watch、gc、
                  mcp（serve、mcp token）；
                  mod.rs 是它们共用的查找（账户、分页游标、文件夹名）
-  output.rs      给人看的输出：转义陌生人给的文本、对齐的表格、各命令的表格和信件视图
+  output.rs      给人看的输出：写 stdout / stderr、转义陌生人给的文本、对齐的表格、各命令的表格和信件视图
   json.rs        给脚本的 `--json` 输出
   exit.rs        退出码
   files.rs       把附件写到磁盘
@@ -81,9 +81,15 @@ types 加变体会编译失败）。
 | 2 | 用法错误（clap） |
 | 3 | 没做完，但什么也没丢、也没被拒绝：留在队列里，`catmail sync` / `ops flush` / `outbox flush` 再做 |
 | 4 | 有邮件可能已送达、也可能没有（outbox 的 `unknown`），只有用户能判断 |
+| 141 | 没失败，但读输出的一方先关了 stdout（`\| head`）；128 + SIGPIPE，与被这个信号杀掉的程序相同 |
 
 命令以 `exit::Exit { outcome, message }` 错误表达 3 和 4，其他错误都是 1。一次命令有多种结果时取
 最需要用户处理的：4 > 1 > 3，所以 3 只在"只是还没轮到"时出现，脚本可以放心地稍后重跑。
+
+stdout 被关不是失败（crate 禁用 `unsafe`，不能恢复 SIGPIPE 的默认处理）：`output.rs` 的 `outln!` 等写到
+broken pipe 时记下来，之后的输出丢掉，命令照常做完（信照发、草稿副本照删、账户照同步），`main` 再按
+`exit::code` 退出——命令失败时取它的码，不让一个不再读的管道盖住"可能已送达"；没失败才是 141。不会自己结束的
+`watch` 发现 stdout 关了就像 Ctrl-C 一样停下。stderr 写不进去（`2>&1 | head`）就丢掉那一行（`errln!`）。
 
 - `mark` / `mv` / `archive` / `rm` / `label` / `ops flush`：连不上服务器或超出下载限额（`ReplayReport.error` 的
   `transient`，改动都还在队列里）是 3；登录被拒绝也留着改动，但重跑没用、要先改密码，所以是 1；服务器拒绝了改动或

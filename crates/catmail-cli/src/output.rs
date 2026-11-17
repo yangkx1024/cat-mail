@@ -4,13 +4,98 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt;
+use std::io::{self, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 
+use anyhow::{Context, Result};
 use catmail_core::{
     Account, Draft, DraftSummary, Flags, Folder, FolderId, FolderKind, Identity, Message,
     MessageSummary, OpKind, OpStatus, OutboxEntry, OutboxStatus, PendingOp, ServerConfig,
     SyncReport, display,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+/// Like `println!`, but a closed stdout is no failure: see [`write_stdout`].
+macro_rules! outln {
+    () => {
+        $crate::output::write_line(format_args!(""))
+    };
+    ($($arg:tt)*) => {
+        $crate::output::write_line(format_args!($($arg)*))
+    };
+}
+pub(crate) use outln;
+
+/// Like `eprintln!`, but a closed stderr loses the line rather than panicking: no one
+/// reads it, as after `2>&1 | head`.
+macro_rules! errln {
+    ($($arg:tt)*) => {
+        $crate::output::write_error_line(format_args!($($arg)*))
+    };
+}
+pub(crate) use errln;
+
+/// Whether stdout was found closed: whoever read it stopped, as `| head` does once it
+/// has its lines.
+static STDOUT_CLOSED: AtomicBool = AtomicBool::new(false);
+
+/// Whether stdout was found closed, so nothing printed is read any more.
+pub(crate) fn stdout_closed() -> bool {
+    STDOUT_CLOSED.load(Ordering::Relaxed)
+}
+
+/// [`outln!`]'s line.
+pub(crate) fn write_line(line: fmt::Arguments<'_>) -> Result<()> {
+    // The test harness captures only what `print!` and its kin print.
+    #[cfg(test)]
+    {
+        println!("{line}");
+        Ok(())
+    }
+    #[cfg(not(test))]
+    write_stdout(|stdout| writeln!(stdout, "{line}"))
+}
+
+/// Writes `bytes` to stdout as they are, such as a whole message or an attachment.
+pub(crate) fn write_bytes(bytes: &[u8]) -> Result<()> {
+    write_stdout(|stdout| {
+        stdout.write_all(bytes)?;
+        stdout.flush()
+    })
+}
+
+/// Writes to stdout with `write`, unless it was found closed. A closed stdout is no
+/// failure: the command goes on with its work (a message it sends is sent, the draft's
+/// copy on the server goes), what it prints is lost, and it exits as `exit::code`
+/// says. Any other error writing is a failure.
+fn write_stdout(write: impl FnOnce(&mut io::StdoutLock<'static>) -> io::Result<()>) -> Result<()> {
+    if stdout_closed() {
+        return Ok(());
+    }
+    closed_is_no_failure(write(&mut io::stdout().lock()), &STDOUT_CLOSED)
+}
+
+/// What writing stdout with `written` means for the command; `closed` notes a broken
+/// pipe.
+fn closed_is_no_failure(written: io::Result<()>, closed: &AtomicBool) -> Result<()> {
+    match written {
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
+            closed.store(true, Ordering::Relaxed);
+            Ok(())
+        }
+        written => written.context("failed to write to stdout"),
+    }
+}
+
+/// [`errln!`]'s line.
+pub(crate) fn write_error_line(line: fmt::Arguments<'_>) {
+    #[cfg(test)]
+    eprintln!("{line}");
+    // Nowhere to tell of it.
+    #[cfg(not(test))]
+    let _ = writeln!(io::stderr(), "{line}");
+}
 
 /// Shortens to at most `width` terminal columns, marking the cut with `…`.
 pub(crate) fn truncate(s: &str, width: usize) -> String {
@@ -51,7 +136,7 @@ pub(crate) fn printable(s: &str) -> Cow<'_, str> {
 
 /// Left-aligned columns, padded by display width so CJK text lines up. Cells are
 /// escaped with [`printable`] before measuring.
-pub(crate) fn print_table(header: &[&str], rows: Vec<Vec<String>>) {
+pub(crate) fn print_table(header: &[&str], rows: Vec<Vec<String>>) -> Result<()> {
     let rows: Vec<Vec<String>> = rows
         .into_iter()
         .map(|row| {
@@ -79,8 +164,9 @@ pub(crate) fn print_table(header: &[&str], rows: Vec<Vec<String>>) {
             .zip(&widths)
             .map(|(cell, w)| format!("{cell}{}", " ".repeat(w - cell.width())))
             .collect();
-        println!("{}", line.join("  ").trim_end());
+        outln!("{}", line.join("  ").trim_end())?;
     }
+    Ok(())
 }
 
 /// C0/C1 controls and bidi overrides: what a terminal would act on or reorder rather
@@ -107,10 +193,10 @@ pub(crate) fn printable_text(s: &str) -> String {
 }
 
 /// Each with its identities: SMTP is its default's.
-pub(crate) fn print_accounts(accounts: &[(Account, Vec<Identity>)]) {
+pub(crate) fn print_accounts(accounts: &[(Account, Vec<Identity>)]) -> Result<()> {
     if accounts.is_empty() {
-        println!("No accounts. Add one with `catmail account add`.");
-        return;
+        outln!("No accounts. Add one with `catmail account add`.")?;
+        return Ok(());
     }
     let rows = accounts
         .iter()
@@ -124,7 +210,7 @@ pub(crate) fn print_accounts(accounts: &[(Account, Vec<Identity>)]) {
             ]
         })
         .collect();
-    print_table(&["ID", "EMAIL", "IMAP", "SMTP"], rows);
+    print_table(&["ID", "EMAIL", "IMAP", "SMTP"], rows)
 }
 
 /// `host:port (security)`.
@@ -134,10 +220,10 @@ fn server(s: &ServerConfig) -> String {
 
 /// The account's identities. SAVES SENT: whether the server saves what goes out to Sent
 /// itself, "(auto)" when guessed.
-pub(crate) fn print_identities(account: &Account, identities: &[Identity]) {
+pub(crate) fn print_identities(account: &Account, identities: &[Identity]) -> Result<()> {
     if identities.is_empty() {
-        println!("No identities. Add one with `catmail identity add`.");
-        return;
+        outln!("No identities. Add one with `catmail identity add`.")?;
+        return Ok(());
     }
     let rows = identities
         .iter()
@@ -161,10 +247,10 @@ pub(crate) fn print_identities(account: &Account, identities: &[Identity]) {
             ]
         })
         .collect();
-    print_table(&["ID", "EMAIL", "SMTP", "DEFAULT", "SAVES SENT"], rows);
+    print_table(&["ID", "EMAIL", "SMTP", "DEFAULT", "SAVES SENT"], rows)
 }
 
-pub(crate) fn print_sync_report(report: &SyncReport) {
+pub(crate) fn print_sync_report(report: &SyncReport) -> Result<()> {
     let mut quiet = true;
     for folder in &report.folders {
         let mut parts = Vec::new();
@@ -190,23 +276,24 @@ pub(crate) fn print_sync_report(report: &SyncReport) {
         }
         if !parts.is_empty() {
             quiet = false;
-            println!(
+            outln!(
                 "  {}: {}",
                 printable(&folder.name),
                 printable(&parts.join(", "))
-            );
+            )?;
         }
     }
     if report.drafts_failed > 0 {
         quiet = false;
-        println!(
+        outln!(
             "  {} draft(s) refused by the server's Drafts folder (see `catmail draft show`)",
             report.drafts_failed
-        );
+        )?;
     }
     if quiet {
-        println!("  up to date ({} folders)", report.folders.len());
+        outln!("  up to date ({} folders)", report.folders.len())?;
     }
+    Ok(())
 }
 
 /// Why a Gmail account's labels are synced as folders, and how to have labels again.
@@ -216,9 +303,9 @@ pub(crate) const ALL_MAIL_HIDDEN: &str = "Gmail's All Mail is hidden from IMAP, 
 /// An account's folders. Gmail's labels hidden from IMAP in its settings are left out,
 /// as the GUI leaves them out; a KIND column tells labels from folders, on an account
 /// that has them.
-pub(crate) fn print_folders(folders: &[Folder]) {
+pub(crate) fn print_folders(folders: &[Folder]) -> Result<()> {
     let (header, rows) = folder_table(folders);
-    print_table(&header, rows);
+    print_table(&header, rows)
 }
 
 fn folder_table(folders: &[Folder]) -> (Vec<&'static str>, Vec<Vec<String>>) {
@@ -280,9 +367,9 @@ pub(crate) fn print_message_table(
     messages: &[MessageSummary],
     folders: &HashMap<FolderId, Folder>,
     listed_in: Option<FolderId>,
-) {
+) -> Result<()> {
     let (header, rows) = message_table(messages, folders, listed_in);
-    print_table(&header, rows);
+    print_table(&header, rows)
 }
 
 fn message_table(
@@ -336,24 +423,27 @@ fn message_table(
     (header, rows)
 }
 
+/// A header line of a message or draft, unless `value` is empty.
+fn header(name: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        return Ok(());
+    }
+    outln!("{name:<9}{}", printable(value))
+}
+
 /// `labels` are the names of its user labels.
-pub(crate) fn print_message(message: &Message, labels: &[String], html: bool) {
+pub(crate) fn print_message(message: &Message, labels: &[String], html: bool) -> Result<()> {
     let m = &message.summary;
-    let header = |name: &str, value: &str| {
-        if !value.is_empty() {
-            println!("{name:<9}{}", printable(value));
-        }
-    };
-    header("From:", &display::addresses(&m.from));
-    header("To:", &display::addresses(&m.to));
-    header("Cc:", &display::addresses(&m.cc));
-    header("Date:", &display::date(m.date));
-    header("Subject:", display::subject(m.subject.as_deref()));
-    header("Labels:", &labels.join(", "));
-    println!();
+    header("From:", &display::addresses(&m.from))?;
+    header("To:", &display::addresses(&m.to))?;
+    header("Cc:", &display::addresses(&m.cc))?;
+    header("Date:", &display::date(m.date))?;
+    header("Subject:", display::subject(m.subject.as_deref()))?;
+    header("Labels:", &labels.join(", "))?;
+    outln!()?;
     let Some(body) = &message.body else {
-        println!("(body not downloaded; run without --offline)");
-        return;
+        outln!("(body not downloaded; run without --offline)")?;
+        return Ok(());
     };
     let text = if html {
         body.html.as_deref().or(body.text.as_deref())
@@ -361,12 +451,12 @@ pub(crate) fn print_message(message: &Message, labels: &[String], html: bool) {
         body.text.as_deref()
     };
     match text {
-        Some(text) => println!("{}", printable_text(text.trim_end())),
-        None => println!("(no text)"),
+        Some(text) => outln!("{}", printable_text(text.trim_end()))?,
+        None => outln!("(no text)")?,
     }
     let attachments: Vec<_> = body.files().collect();
     if !attachments.is_empty() {
-        println!();
+        outln!()?;
         let rows = attachments
             .iter()
             .map(|a| {
@@ -382,15 +472,16 @@ pub(crate) fn print_message(message: &Message, labels: &[String], html: bool) {
                 ]
             })
             .collect();
-        print_table(&["ATTACHMENT", "NAME", "TYPE", "SIZE"], rows);
+        print_table(&["ATTACHMENT", "NAME", "TYPE", "SIZE"], rows)?;
     }
+    Ok(())
 }
 
 /// `folders` are those the changes are in or move to.
-pub(crate) fn print_ops(ops: &[PendingOp], folders: &HashMap<FolderId, Folder>) {
+pub(crate) fn print_ops(ops: &[PendingOp], folders: &HashMap<FolderId, Folder>) -> Result<()> {
     if ops.is_empty() {
-        println!("No changes waiting for the server.");
-        return;
+        outln!("No changes waiting for the server.")?;
+        return Ok(());
     }
     let name = |id: FolderId| {
         folders
@@ -416,7 +507,7 @@ pub(crate) fn print_ops(ops: &[PendingOp], folders: &HashMap<FolderId, Folder>) 
     print_table(
         &["ID", "STATUS", "CHANGE", "FOLDER", "SUBJECT", "LAST ERROR"],
         rows,
-    );
+    )
 }
 
 fn change(kind: OpKind, folder: &impl Fn(FolderId) -> String) -> String {
@@ -446,10 +537,10 @@ fn change(kind: OpKind, folder: &impl Fn(FolderId) -> String) -> String {
     }
 }
 
-pub(crate) fn print_drafts(drafts: &[DraftSummary]) {
+pub(crate) fn print_drafts(drafts: &[DraftSummary]) -> Result<()> {
     if drafts.is_empty() {
-        println!("No drafts.");
-        return;
+        outln!("No drafts.")?;
+        return Ok(());
     }
     let rows = drafts
         .iter()
@@ -464,36 +555,31 @@ pub(crate) fn print_drafts(drafts: &[DraftSummary]) {
             ]
         })
         .collect();
-    print_table(&["ID", "CHANGED", "SERVER", "TO", "", "SUBJECT"], rows);
+    print_table(&["ID", "CHANGED", "SERVER", "TO", "", "SUBJECT"], rows)
 }
 
 /// `from` is the identity it is sent as.
-pub(crate) fn print_draft(draft: &Draft, from: Option<&Identity>) {
+pub(crate) fn print_draft(draft: &Draft, from: Option<&Identity>) -> Result<()> {
     let c = &draft.content;
-    let header = |name: &str, value: &str| {
-        if !value.is_empty() {
-            println!("{name:<9}{}", printable(value));
-        }
-    };
     if let Some(from) = from {
-        header("From:", &from.email);
+        header("From:", &from.email)?;
     }
-    header("To:", &display::addresses(&c.to));
-    header("Cc:", &display::addresses(&c.cc));
-    header("Bcc:", &display::addresses(&c.bcc));
-    header("Subject:", display::subject(Some(&c.subject)));
+    header("To:", &display::addresses(&c.to))?;
+    header("Cc:", &display::addresses(&c.cc))?;
+    header("Bcc:", &display::addresses(&c.bcc))?;
+    header("Subject:", display::subject(Some(&c.subject)))?;
     if let Some(outbox) = draft.outbox {
-        header("Status:", &format!("being sent (outbox entry {outbox})"));
+        header("Status:", &format!("being sent (outbox entry {outbox})"))?;
     }
     match &draft.upload_error {
-        Some(error) => header("Server:", &format!("refused to store it: {error}")),
-        None if !draft.on_server => header("Server:", "not in the Drafts folder yet"),
+        Some(error) => header("Server:", &format!("refused to store it: {error}"))?,
+        None if !draft.on_server => header("Server:", "not in the Drafts folder yet")?,
         None => {}
     }
-    println!();
-    println!("{}", printable_text(c.text_as_sent().trim_end()));
+    outln!()?;
+    outln!("{}", printable_text(c.text_as_sent().trim_end()))?;
     if !draft.attachments.is_empty() {
-        println!();
+        outln!()?;
         let rows = draft
             .attachments
             .iter()
@@ -506,8 +592,9 @@ pub(crate) fn print_draft(draft: &Draft, from: Option<&Identity>) {
                 ]
             })
             .collect();
-        print_table(&["ATTACHMENT", "NAME", "TYPE", "SIZE"], rows);
+        print_table(&["ATTACHMENT", "NAME", "TYPE", "SIZE"], rows)?;
     }
+    Ok(())
 }
 
 /// Whether the server's Drafts folder has the draft as it is.
@@ -521,10 +608,10 @@ fn server_status(on_server: bool, upload_error: Option<&String>) -> &'static str
     }
 }
 
-pub(crate) fn print_outbox(entries: &[OutboxEntry]) {
+pub(crate) fn print_outbox(entries: &[OutboxEntry]) -> Result<()> {
     if entries.is_empty() {
-        println!("The outbox is empty.");
-        return;
+        outln!("The outbox is empty.")?;
+        return Ok(());
     }
     let rows = entries
         .iter()
@@ -544,7 +631,7 @@ pub(crate) fn print_outbox(entries: &[OutboxEntry]) {
             ]
         })
         .collect();
-    print_table(&["ID", "STATUS", "TO", "SUBJECT", "LAST ERROR"], rows);
+    print_table(&["ID", "STATUS", "TO", "SUBJECT", "LAST ERROR"], rows)
 }
 
 #[cfg(test)]
@@ -552,6 +639,15 @@ mod tests {
     use catmail_core::{AccountId, FolderRole, MessageId};
 
     use super::*;
+
+    #[test]
+    fn only_a_broken_pipe_is_no_failure() {
+        let closed = AtomicBool::new(false);
+        closed_is_no_failure(Err(io::Error::other("disk full")), &closed).unwrap_err();
+        assert!(!closed.load(Ordering::Relaxed));
+        closed_is_no_failure(Err(io::ErrorKind::BrokenPipe.into()), &closed).unwrap();
+        assert!(closed.load(Ordering::Relaxed));
+    }
 
     #[test]
     fn printable_escapes_terminal_controls() {

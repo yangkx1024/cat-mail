@@ -11,7 +11,7 @@ use catmail_mcp::{Access, DEFAULT_PORT, McpServer, ServeOptions, Tier, Tokens, c
 use clap::{Args, Subcommand};
 
 use crate::json::{self, JsonToken};
-use crate::output::{print_table, printable};
+use crate::output::{errln, outln, print_table, printable};
 
 #[derive(Args)]
 pub(crate) struct Serve {
@@ -60,7 +60,7 @@ pub(crate) async fn serve(
     stop: impl Future<Output = ()>,
 ) -> Result<()> {
     if tokens.list()?.is_empty() {
-        eprintln!(
+        errln!(
             "No MCP tokens yet, so every agent is turned away; add one with \
              `catmail mcp token add <name>` (no restart needed)"
         );
@@ -72,7 +72,7 @@ pub(crate) async fn serve(
     let server = McpServer::start(client.clone(), tokens, options)
         .await
         .with_context(|| format!("failed to listen on 127.0.0.1:{}", args.port))?;
-    eprintln!(
+    errln!(
         "Serving MCP on {}; press Ctrl-C to stop",
         connect::local_url(server.local_addr().port())
     );
@@ -97,13 +97,13 @@ pub(crate) fn mcp(tokens: &Tokens, command: McpCommand, json: bool) -> Result<()
             if json {
                 json::print_keyed("token", &JsonToken::new(&new.token, Some(new.secret)))?;
             } else {
-                eprintln!(
+                errln!(
                     "Token `{}` made; the agent sends it as `Authorization: Bearer <token>`. \
                      It isn't shown again:",
                     printable(&new.token.name)
                 );
-                println!("{}", new.secret);
-                eprintln!("\n{}", connecting(&new.secret));
+                outln!("{}", new.secret)?;
+                errln!("\n{}", connecting(&new.secret));
             }
         }
         TokenCommand::List => {
@@ -112,7 +112,7 @@ pub(crate) fn mcp(tokens: &Tokens, command: McpCommand, json: bool) -> Result<()
                 let list: Vec<_> = list.iter().map(|t| JsonToken::new(t, None)).collect();
                 json::print_keyed("tokens", &list)?;
             } else if list.is_empty() {
-                eprintln!("No tokens; add one with `catmail mcp token add <name>`");
+                errln!("No tokens; add one with `catmail mcp token add <name>`");
             } else {
                 let rows = list
                     .iter()
@@ -128,7 +128,7 @@ pub(crate) fn mcp(tokens: &Tokens, command: McpCommand, json: bool) -> Result<()
                         ]
                     })
                     .collect();
-                print_table(&["NAME", "TIER", "ACCOUNTS", "CREATED"], rows);
+                print_table(&["NAME", "TIER", "ACCOUNTS", "CREATED"], rows)?;
             }
         }
         TokenCommand::Rm { name } => {
@@ -136,7 +136,7 @@ pub(crate) fn mcp(tokens: &Tokens, command: McpCommand, json: bool) -> Result<()
                 bail!("no token named `{name}`");
             }
             if !json {
-                eprintln!("Token `{}` taken away", printable(&name));
+                errln!("Token `{}` taken away", printable(&name));
             }
         }
     }

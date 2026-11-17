@@ -1,6 +1,6 @@
 //! `catmail read` and `catmail attachment`: a message and what it carries.
 
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -10,7 +10,7 @@ use clap::Args;
 use crate::cmd::account_folders;
 use crate::files;
 use crate::json::{self, JsonRead};
-use crate::output::{print_message, printable, printable_text, user_labels};
+use crate::output::{outln, print_message, printable, printable_text, user_labels, write_bytes};
 
 #[derive(Args)]
 pub(crate) struct Read {
@@ -43,13 +43,11 @@ pub(crate) async fn read(client: &MailClient, args: Read, json: bool) -> Result<
     let id = MessageId(args.id);
     if args.raw {
         let raw = client.raw_message(id).await?;
-        let mut stdout = io::stdout().lock();
-        if stdout.is_terminal() {
-            write!(stdout, "{}", printable_text(&String::from_utf8_lossy(&raw)))?;
+        return if io::stdout().is_terminal() {
+            write_bytes(printable_text(&String::from_utf8_lossy(&raw)).as_bytes())
         } else {
-            stdout.write_all(&raw)?;
-        }
-        return Ok(());
+            write_bytes(&raw)
+        };
     }
     let message = if args.offline {
         client
@@ -80,9 +78,9 @@ pub(crate) async fn read(client: &MailClient, args: Read, json: bool) -> Result<
     }
     let folders = account_folders(client, [message.summary.account_id]).await?;
     let labels = user_labels(&message.summary, &folders, None);
-    print_message(&message, &labels, args.html);
+    print_message(&message, &labels, args.html)?;
     for path in saved {
-        println!("Saved {}", printable(&path.display().to_string()));
+        outln!("Saved {}", printable(&path.display().to_string()))?;
     }
     Ok(())
 }
@@ -102,11 +100,10 @@ pub(crate) async fn save_attachment(client: &MailClient, args: SaveAttachment) -
             }
         }
         None => {
-            let mut stdout = io::stdout().lock();
-            if stdout.is_terminal() {
+            if io::stdout().is_terminal() {
                 bail!("refusing to write an attachment to the terminal; use --output");
             }
-            stdout.write_all(&data)?;
+            write_bytes(&data)?;
         }
     }
     Ok(())

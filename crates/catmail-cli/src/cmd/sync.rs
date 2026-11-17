@@ -6,7 +6,7 @@ use catmail_core::{MailClient, SyncReport};
 use crate::cmd::ops::{refused_changes, refused_drafts};
 use crate::cmd::resolve_account;
 use crate::json::{self, JsonAccountSync};
-use crate::output::{ALL_MAIL_HIDDEN, print_sync_report, printable};
+use crate::output::{ALL_MAIL_HIDDEN, errln, outln, print_sync_report, printable};
 
 pub(crate) async fn sync(client: &MailClient, selector: Option<&str>, json: bool) -> Result<()> {
     let accounts = match selector {
@@ -19,13 +19,13 @@ pub(crate) async fn sync(client: &MailClient, selector: Option<&str>, json: bool
     let (mut synced, mut reports) = (Vec::new(), Vec::new());
     for account in &accounts {
         if !json {
-            println!("Syncing {}…", account.email);
+            outln!("Syncing {}…", account.email)?;
         }
         let result = client.sync_account(account.id).await;
         match &result {
-            Ok(report) if !json => print_sync_report(report),
+            Ok(report) if !json => print_sync_report(report)?,
             Ok(_) => {}
-            Err(e) => eprintln!("{}: {}", account.email, printable(&e.to_string())),
+            Err(e) => errln!("{}: {}", account.email, printable(&e.to_string())),
         }
         // As the sync found the server.
         let account = client
@@ -33,7 +33,7 @@ pub(crate) async fn sync(client: &MailClient, selector: Option<&str>, json: bool
             .await?
             .unwrap_or_else(|| account.clone());
         if !json && account.all_mail_hidden() {
-            println!("  {ALL_MAIL_HIDDEN}");
+            outln!("  {ALL_MAIL_HIDDEN}")?;
         }
         synced.push(JsonAccountSync::new(&account, result.as_ref()));
         reports.extend(result.ok());
