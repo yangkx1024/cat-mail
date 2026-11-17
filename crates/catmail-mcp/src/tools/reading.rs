@@ -375,7 +375,7 @@ impl Mail {
             .into_iter()
             .zip(reports)
             .map(|(account, report)| {
-                let (error, folders) = match report {
+                let (error, folders, drafts_refused) = match report {
                     Ok(report) => (
                         None,
                         report
@@ -383,14 +383,16 @@ impl Mail {
                             .iter()
                             .filter_map(FolderSynced::new)
                             .collect(),
+                        report.drafts_failed,
                     ),
-                    Err(e) => (Some(ErrorOut::from(&e)), Vec::new()),
+                    Err(e) => (Some(ErrorOut::from(&e)), Vec::new(), 0),
                 };
                 AccountSynced {
                     account: account.id.0,
                     email: account.email,
                     error,
                     folders,
+                    drafts_refused,
                 }
             })
             .collect();

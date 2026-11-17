@@ -197,6 +197,13 @@ pub(crate) fn print_sync_report(report: &SyncReport) {
             );
         }
     }
+    if report.drafts_failed > 0 {
+        quiet = false;
+        println!(
+            "  {} draft(s) refused by the server's Drafts folder (see `catmail draft show`)",
+            report.drafts_failed
+        );
+    }
     if quiet {
         println!("  up to date ({} folders)", report.folders.len());
     }

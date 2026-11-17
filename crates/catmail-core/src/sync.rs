@@ -139,7 +139,7 @@ pub(crate) async fn run(
     uploads: Uploads,
 ) -> Result<SyncReport> {
     let permit = engine.sync_permit(account_id).await;
-    let (start, mut replayed, ids, mode) = permit
+    let (start, replayed, ids, mode) = permit
         .run(async {
             // Taken holding the permit: a sync completed after this began after it too,
             // and saw the server as it is now or later. One that held the permit before
@@ -156,14 +156,16 @@ pub(crate) async fn run(
             let ids = engine
                 .read(move |db| db.folders().location_ids(account_id))
                 .await?;
-            Ok((start, replayed.folders, ids, mode))
+            Ok((start, replayed, ids, mode))
         })
         .await?;
 
     let mut report = SyncReport {
         account: account_id,
         folders: Vec::new(),
+        drafts_failed: replayed.drafts.refused.len() as u32,
     };
+    let mut replayed = replayed.folders;
     let mut unit = Unit::new(mode);
     for &id in &ids {
         let replayed = replayed.remove(&id);
@@ -219,6 +221,8 @@ fn log_report(report: &SyncReport, began: Instant) {
         updated = sum(|f| f.updated),
         removed = sum(|f| f.removed),
         rebuilt = folders.iter().filter(|f| f.uidvalidity_changed).count(),
+        changes_refused = report.changes_refused(),
+        drafts_refused = report.drafts_failed,
         took = ?began.elapsed(),
         "synced every folder"
     );

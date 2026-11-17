@@ -471,6 +471,8 @@ pub(crate) struct AccountSynced {
     pub error: Option<ErrorOut>,
     /// The folders where something changed or went wrong.
     pub folders: Vec<FolderSynced>,
+    /// Drafts the server refused to store in its Drafts folder: they are kept here only.
+    pub drafts_refused: u32,
 }
 
 #[derive(Serialize, JsonSchema)]

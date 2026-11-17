@@ -272,9 +272,7 @@ async fn replay(
     let pending: u32 = results.iter().map(|(_, r)| r.pending).sum();
     if failed > 0 {
         outcome = Outcome::Failed;
-        errors.push(format!(
-            "the server refused {failed} change(s), which were undone; `catmail ops` shows why"
-        ));
+        errors.push(refused_changes(failed));
     }
     let drafts_failed: u32 = results.iter().map(|(_, r)| r.drafts_failed).sum();
     if drafts_failed > 0 {
@@ -294,6 +292,10 @@ async fn replay(
 
 /// What makes on the server whatever couldn't be made there yet.
 pub(crate) const NEXT_FLUSH: &str = "the next `catmail sync` or `catmail ops flush`";
+
+pub(crate) fn refused_changes(count: u32) -> String {
+    format!("the server refused {count} change(s), which were undone; `catmail ops` shows why")
+}
 
 pub(crate) fn refused_drafts(count: u32) -> String {
     format!(

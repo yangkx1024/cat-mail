@@ -106,7 +106,13 @@ async fn sync_reports_what_changed() {
     let quiet = f.call("sync", json!({})).await;
     assert_eq!(
         quiet["accounts"],
-        json!([{"account": 1, "email": "alice@example.com", "error": null, "folders": []}])
+        json!([{
+            "account": 1,
+            "email": "alice@example.com",
+            "error": null,
+            "folders": [],
+            "drafts_refused": 0
+        }])
     );
 
     f.fake.state().inbox().append_simple("three");
