@@ -302,7 +302,10 @@ fn is_reset(e: &hyper::Error) -> bool {
         .is_some_and(|io| {
             matches!(
                 io.kind(),
-                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::BrokenPipe
+                    // Windows' word for a reset while writing (WSAECONNABORTED).
+                    | std::io::ErrorKind::ConnectionAborted
             )
         })
 }
