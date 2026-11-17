@@ -17,7 +17,9 @@ web view 的顶层导航全部放行，应用改不了。右键邮件里的链�
   拖放已经不收，往外拖链接（拖到浏览器）无害。
 - 页面看不到的兜底：`on_load_start` / `on_load` 报的 URL 不是 `about:blank`（或空）就把当前页面再载一遍。
   新的载入会取代还没 commit 的远程导航，已经载入的也被换掉；页号不变。同样的 HTML nsh 不会重载，所以在后面
-  交替加一个换行。`StaysOnPage` 在重载完成前不再触发，免得 URL 滞后时来回重载。
+  交替加一个换行。`StaysOnPage` 在页面回来前不再触发，免得 URL 滞后时来回重载。
+  「回来」以这一页的 `BRIDGE` 报高度或画好（`h` / `p`，页号对得上）为准，不等 `on_load`：用户没要的远程图片，
+  `BodyPages` 一直不应答，页面永远载不完，最初按载完重新布防的版本会从此失效（PR 审查发现）。
 - 兜底不打开链接：分不清是不是用户发起的，万一是页面自己跳转，会反复开浏览器。
 - 没用 `ElementRef::stop_loading` 当主路径：命令异步到达，远程页面可能已经 commit，重载仍然要留，两套机制并存；
   重载走同一条路径，时机一样。
@@ -32,7 +34,8 @@ web view 的顶层导航全部放行，应用改不了。右键邮件里的链�
 - `catmail-frontend/src/html/mod.rs`：`StaysOnPage`。
 - `catmail-gui/src/web.rs`：`web_view` 接上两个事件和换行切换；`reader/view.rs`、`composer/quote.rs` 改传 `Rc<str>`。
 - `docs/architecture/gui.md`：「不离开页面」一条。
-- 测试：`a_page_left_is_loaded_again_once`（先报开始、远程先载完、URL 滞后、只在载完时才发现）、
+- 测试：`a_page_left_is_loaded_again_once`（先报开始、远程先载完、URL 滞后、回来后再次离开）、
+  `a_page_back_is_watched_before_its_images_have_all_come`（有远程图片挂着、载不完时也重新布防）、
   `nothing_but_a_click_leads_the_page_to_a_link`。
 - 未在 app 里实际验证：右键链接没有菜单、从 Safari 拖链接进来不载入、左键仍交给浏览器、选中文字右键仍有复制；
   兜底的重载也没在真机触发过。

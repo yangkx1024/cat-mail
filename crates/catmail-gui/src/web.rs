@@ -109,16 +109,18 @@ pub fn web_view(
         }
         html
     };
-    let navigated = move |navigation: &WebNavigation, finished: bool| {
-        if stays.borrow_mut().navigated(&navigation.url, finished) {
-            tracing::warn!(url = %navigation.url, "the message's page was left: showing it again");
-            again.update(|a| *a = !*a);
+    let navigated = {
+        let stays = stays.clone();
+        move |navigation: &WebNavigation| {
+            if stays.borrow_mut().navigated(&navigation.url) {
+                tracing::warn!(url = %navigation.url, "the message's page was left: showing it again");
+                again.update(|a| *a = !*a);
+            }
         }
     };
-    let started = navigated.clone();
     let web = web_view_html(page, None)
-        .on_load_start(move |n: &WebNavigation| started(n, false))
-        .on_load(move |n: &WebNavigation| navigated(n, true));
+        .on_load_start(navigated.clone())
+        .on_load(navigated);
     // The page says which images came only where they go a few at a time.
     let web = if IMAGES_IN_FLIGHT.is_some() {
         web.injected_java_script_before_content(html::WATCH_IMAGES.to_owned())
@@ -138,8 +140,14 @@ pub fn web_view(
         })
         .on_message(move |message: &str| match FromPage::parse(message) {
             Some(FromPage::Loaded(url)) => image_loaded(url),
-            Some(FromPage::Painted(number, at)) if is_shown(number) => painted(at),
-            Some(FromPage::Height(number, h)) if is_shown(number) => height(h),
+            Some(FromPage::Painted(number, at)) if is_shown(number) => {
+                stays.borrow_mut().on_page();
+                painted(at);
+            }
+            Some(FromPage::Height(number, h)) if is_shown(number) => {
+                stays.borrow_mut().on_page();
+                height(h);
+            }
             Some(FromPage::Open(url)) if is_openable_link(url) => {
                 spawn(open_url(url.to_owned()));
             }

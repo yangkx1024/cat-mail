@@ -43,23 +43,26 @@ pub fn is_openable_link(url: &str) -> bool {
 /// page again, which puts it back (or stops what started).
 #[derive(Debug, Default)]
 pub struct StaysOnPage {
-    /// The page is loading again: until it has, where the view says it is may be where
-    /// it went, and loading it once more would only start over.
+    /// The page is loading again: until it is back, where the view says it is may be
+    /// where it went, and loading it once more would only start over.
     returning: bool,
 }
 
 impl StaysOnPage {
-    /// The view started loading `url`, or (`finished`) has: true when the page must be
-    /// loaded again.
-    pub fn navigated(&mut self, url: &str, finished: bool) -> bool {
+    /// The view started or finished loading `url`: true when the page must be loaded
+    /// again.
+    pub fn navigated(&mut self, url: &str) -> bool {
         // Empty before anything has loaded.
         if url.is_empty() || url == "about:blank" {
-            if finished {
-                self.returning = false;
-            }
             return false;
         }
         !std::mem::replace(&mut self.returning, true)
+    }
+
+    /// The page shown said something ([`BRIDGE`]): it is back. Not when it has finished
+    /// loading, which a remote image the user hasn't asked for holds off for good.
+    pub fn on_page(&mut self) {
+        self.returning = false;
     }
 }
 
@@ -93,22 +96,30 @@ mod tests {
     #[test]
     fn a_page_left_is_loaded_again_once() {
         let mut stays = StaysOnPage::default();
-        assert!(!stays.navigated("", false));
-        assert!(!stays.navigated("about:blank", false));
-        assert!(!stays.navigated("about:blank", true));
+        assert!(!stays.navigated(""));
+        assert!(!stays.navigated("about:blank"));
 
         // "Open Link" from WebKit's menu: the page loads again.
-        assert!(stays.navigated("https://example.com/", false));
+        assert!(stays.navigated("https://example.com/"));
         // Not again while it does, whatever the view says meanwhile (the remote page
         // finishing first, or the view still at it as the page starts).
-        assert!(!stays.navigated("https://example.com/", true));
-        assert!(!stays.navigated("https://example.com/", false));
-        assert!(!stays.navigated("about:blank", false));
-        assert!(!stays.navigated("about:blank", true));
+        assert!(!stays.navigated("https://example.com/"));
+        assert!(!stays.navigated("about:blank"));
 
-        // Back on the page: the next one leaving it is caught too, even only once loaded.
-        assert!(stays.navigated("file:///tmp/dropped.html", true));
-        assert!(!stays.navigated("about:blank", true));
+        // Back on the page: the next one leaving it is caught too.
+        stays.on_page();
+        assert!(stays.navigated("file:///tmp/dropped.html"));
+    }
+
+    #[test]
+    fn a_page_back_is_watched_before_its_images_have_all_come() {
+        // A remote image the user hasn't asked for is never answered, so the page put
+        // back never finishes loading: what it says is all there is to go by.
+        let mut stays = StaysOnPage::default();
+        assert!(stays.navigated("https://example.com/"));
+        assert!(!stays.navigated("about:blank"));
+        stays.on_page();
+        assert!(stays.navigated("https://example.com/again"));
     }
 
     #[test]
