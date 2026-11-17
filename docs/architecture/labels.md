@@ -156,7 +156,7 @@
 ## 操作队列
 
 操作仍然绑定位置的（文件夹, UIDVALIDITY, UID），在 SELECT 下核对 op 自己记下的 UIDVALIDITY 后回放
-（见[操作队列](op-queue.md)，代码在 `catmail-store/src/ops.rs` 与 `catmail-core/src/ops.rs`）。
+（见[操作队列](op-queue.md)，代码在 `catmail-store/src/ops/` 与 `catmail-core/src/ops.rs`）。
 
 - **标签操作**（`MailClient::label_messages`，op 的 `kind = 'label'`）：本地立即改 `message_labels`，
   回放 `UID STORE <uid> +X-GM-LABELS (…)` / `-X-GM-LABELS (…)`，在邮件的位置里。与 flags 一样只记实际
