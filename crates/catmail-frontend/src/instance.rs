@@ -32,6 +32,9 @@ const PATIENCE: Duration = Duration::from_secs(5);
 /// How long a launch waits for the one holding the data directory to start answering: the
 /// moment between its locking and its listening. Longer, and it's not an app (the CLI).
 const STARTING: Duration = Duration::from_secs(1);
+/// How long a launch waits for an app that is quitting to let go of the data directory:
+/// its MCP server's requests end (at most five seconds) and its engine closes.
+const QUITTING: Duration = Duration::from_secs(30);
 /// A request is one short line; anything longer isn't one.
 const MAX_REQUEST: u64 = 64 * 1024;
 
@@ -84,9 +87,30 @@ struct Version {
     version: u32,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct Reply {
     error: Option<String>,
+    /// The app is quitting and takes no more requests: the launch waits for it to let go
+    /// of the data directory, and is the app then. `error` says so too, for launches that
+    /// don't know this.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    quitting: bool,
+}
+
+impl Reply {
+    fn error(error: String) -> Self {
+        Self {
+            error: Some(error),
+            quitting: false,
+        }
+    }
+
+    fn quitting() -> Self {
+        Self {
+            error: Some("it is quitting".to_owned()),
+            quitting: true,
+        }
+    }
 }
 
 /// Why a launch couldn't hand its request to the running app.
@@ -128,7 +152,12 @@ fn claim_in(
     runtime: Option<&Path>,
     request: &Request,
 ) -> Result<Claim, HandError> {
-    let deadline = Instant::now() + STARTING;
+    // Once: the lock is retried below. Opening the engine says why it can't be had.
+    if config.prepare_data_dir().is_err() {
+        return Ok(Claim::Unavailable);
+    }
+    let start = Instant::now();
+    let mut quitting = false;
     loop {
         match config.lock() {
             Ok(lock) => {
@@ -144,13 +173,16 @@ fn claim_in(
             Err(catmail_core::Error::AlreadyRunning(_)) => {}
             Err(_) => return Ok(Claim::Unavailable),
         }
-        // Held, so it exists and has a path.
-        if let Ok(socket) = socket_path(config.data_dir(), runtime)
-            && hand(&socket, request)?
-        {
-            return Ok(Claim::Handed);
+        // Held, so it exists and has a path. Once the app has said it is quitting, only the
+        // lock is waited for.
+        if !quitting && let Ok(socket) = socket_path(config.data_dir(), runtime) {
+            match hand(&socket, request)? {
+                Handing::Taken => return Ok(Claim::Handed),
+                Handing::Quitting => quitting = true,
+                Handing::Nobody => {}
+            }
         }
-        if Instant::now() >= deadline {
+        if start.elapsed() >= if quitting { QUITTING } else { STARTING } {
             return Ok(Claim::Unavailable);
         }
         thread::sleep(Duration::from_millis(50));
@@ -192,11 +224,20 @@ fn runtime_dir() -> Option<PathBuf> {
     }
 }
 
-/// Sends `request` to the app listening on `socket`; false if none does.
-fn hand(socket: &Path, request: &Request) -> Result<bool, HandError> {
+/// How handing a request to the app went, when it didn't fail.
+enum Handing {
+    Taken,
+    /// Nobody listens.
+    Nobody,
+    /// The app is quitting: it will let go of the data directory.
+    Quitting,
+}
+
+/// Sends `request` to the app listening on `socket`.
+fn hand(socket: &Path, request: &Request) -> Result<Handing, HandError> {
     // Missing, or left by a run that ended: nobody to hand it to.
     let Ok(stream) = UnixStream::connect(socket) else {
-        return Ok(false);
+        return Ok(Handing::Nobody);
     };
     let ask = || -> io::Result<Reply> {
         be_patient(&stream)?;
@@ -209,10 +250,12 @@ fn hand(socket: &Path, request: &Request) -> Result<bool, HandError> {
         )?;
         Ok(serde_json::from_str(&read_line(&stream)?)?)
     };
-    let reply = ask().map_err(HandError::NoAnswer)?;
-    match reply.error {
-        Some(error) => Err(HandError::Refused(error)),
-        None => Ok(true),
+    match ask().map_err(HandError::NoAnswer)? {
+        Reply { quitting: true, .. } => Ok(Handing::Quitting),
+        Reply {
+            error: Some(error), ..
+        } => Err(HandError::Refused(error)),
+        Reply { error: None, .. } => Ok(Handing::Taken),
     }
 }
 
@@ -248,20 +291,21 @@ fn serve(socket: &Path) -> io::Result<Requests> {
 fn answer(stream: &UnixStream, sender: &mpsc::UnboundedSender<Request>) -> io::Result<()> {
     be_patient(stream)?;
     let line = read_line(stream)?;
-    let error = match serde_json::from_str::<Version>(&line).map(|v| v.version) {
+    let reply = match serde_json::from_str::<Version>(&line).map(|v| v.version) {
         Ok(VERSION) => match serde_json::from_str::<Envelope>(&line) {
-            Ok(Envelope { request, .. }) => sender
-                .unbounded_send(request)
-                .err()
-                .map(|_| "it is quitting".to_owned()),
-            Err(e) => Some(format!("unknown request: {e}")),
+            Ok(Envelope { request, .. }) => match sender.unbounded_send(request) {
+                Ok(()) => Reply::default(),
+                // The app let go of the receiving end: it is quitting.
+                Err(_) => Reply::quitting(),
+            },
+            Err(e) => Reply::error(format!("unknown request: {e}")),
         },
-        Ok(version) => Some(format!(
+        Ok(version) => Reply::error(format!(
             "it speaks version {VERSION}, not {version}; quit it and start this one again"
         )),
-        Err(e) => Some(format!("unknown request: {e}")),
+        Err(e) => Reply::error(format!("unknown request: {e}")),
     };
-    write_line(stream, &Reply { error })
+    write_line(stream, &reply)
 }
 
 fn be_patient(stream: &UnixStream) -> io::Result<()> {
@@ -395,6 +439,37 @@ mod tests {
         let mut requests = starting.join().unwrap();
         assert_eq!(requests.try_recv().ok(), Some(activate("second")));
         drop(lock);
+    }
+
+    #[test]
+    fn a_launch_waits_for_one_that_is_quitting_and_takes_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::with_data_dir(dir.path());
+        let (lock, requests) = first(&config, None);
+        // Quitting: it takes no more requests, and lets go of the data directory later
+        // than a starting launch waits.
+        drop(requests);
+        let quitting = thread::spawn(move || {
+            thread::sleep(STARTING + Duration::from_millis(300));
+            drop(lock);
+        });
+        let (_lock, requests) = first(&config, None);
+        quitting.join().unwrap();
+        hands_over(&config, None, requests);
+    }
+
+    #[test]
+    fn a_launch_without_quitting_replies_still_reads_one_as_an_error() {
+        #[derive(Deserialize)]
+        struct Old {
+            error: Option<String>,
+        }
+        let line = serde_json::to_string(&Reply::quitting()).unwrap();
+        assert!(serde_json::from_str::<Old>(&line).unwrap().error.is_some());
+        assert_eq!(
+            serde_json::to_string(&Reply::default()).unwrap(),
+            r#"{"error":null}"#
+        );
     }
 
     #[test]
