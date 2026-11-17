@@ -3240,6 +3240,12 @@
               "format": "int64",
               "type": "integer"
             },
+            "drafts_refused": {
+              "description": "Drafts the server refused to store in its Drafts folder: they are kept here only.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
             "email": {
               "type": "string"
             },
@@ -3266,7 +3272,8 @@
             "account",
             "email",
             "error",
-            "folders"
+            "folders",
+            "drafts_refused"
           ],
           "type": "object"
         },

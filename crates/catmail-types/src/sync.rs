@@ -7,6 +7,9 @@ use crate::{AccountId, FolderId, ReportedError};
 pub struct SyncReport {
     pub account: AccountId,
     pub folders: Vec<FolderSyncReport>,
+    /// Drafts the server refused to store in its Drafts folder, uploaded before the
+    /// folders synced; [`Draft::upload_error`](crate::Draft::upload_error) says why.
+    pub drafts_failed: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,6 +30,13 @@ pub struct FolderSyncReport {
     pub uidvalidity_changed: bool,
     /// Set if this folder failed while the rest of the account synced.
     pub error: Option<ReportedError>,
+}
+
+impl SyncReport {
+    /// Queued local changes the server refused, in every folder.
+    pub fn changes_refused(&self) -> u32 {
+        self.folders.iter().map(|f| f.ops_failed).sum()
+    }
 }
 
 impl FolderSyncReport {

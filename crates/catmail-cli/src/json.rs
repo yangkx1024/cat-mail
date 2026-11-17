@@ -194,26 +194,28 @@ pub(crate) struct JsonAccountSync {
     /// As the sync found the server (see [`JsonAccount`]).
     all_mail_hidden: bool,
     folders: Vec<JsonFolderSync>,
+    /// Drafts the server refused to store, uploaded before the folders synced.
+    drafts_refused: u32,
     error: Option<JsonError>,
 }
 
 impl JsonAccountSync {
-    pub(crate) fn new(account: &Account, result: Result<SyncReport, JsonError>) -> Self {
-        let (folders, error) = match result {
-            Ok(report) => (list(&report.folders), None),
-            Err(e) => (Vec::new(), Some(e)),
+    pub(crate) fn new(
+        account: &Account,
+        result: Result<&SyncReport, &catmail_core::Error>,
+    ) -> Self {
+        let (folders, drafts_refused, error) = match result {
+            Ok(report) => (list(&report.folders), report.drafts_failed, None),
+            Err(e) => (Vec::new(), 0, Some(JsonError::new(e.kind(), e.to_string()))),
         };
         Self {
             account: account.id.0,
             email: account.email.clone(),
             all_mail_hidden: account.all_mail_hidden(),
             folders,
+            drafts_refused,
             error,
         }
-    }
-
-    pub(crate) fn failed(&self) -> bool {
-        self.error.is_some()
     }
 }
 
