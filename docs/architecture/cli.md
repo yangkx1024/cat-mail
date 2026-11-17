@@ -28,6 +28,9 @@ types 加变体会编译失败）。
 
 - 每次输出是一个对象，带 `"schema_version": 1`。项目尚未发布，发布前调整结构保持版本 1；首次发布后，
   删除字段、改名或改变含义时加一，只增加字段不加。
+  只做改动、没有东西可交回的命令（`draft rm`、`identity default` / `name` / `rm` / `saves-sent`、
+  `mcp token rm`、`ops dismiss`）在 `--json` 下什么也不输出，做成没有看退出码。改了一个对象、手里有它新样子的
+  照常输出它（`draft edit`、`draft detach` 输出改后的草稿）。
   列表放在对象的一个键下（`{"messages": [...]}`），以后可以并列加分页等信息。
 - 时间是 UTC 的 RFC 3339 字符串；标记是单词数组（`"flags": ["seen", "flagged"]`），状态和类别是
   小写单词；ID 是整数，引用别的对象用对象名作键（`"account": 1`、`"folder": 3`）。

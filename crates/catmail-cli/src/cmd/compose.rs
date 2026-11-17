@@ -356,6 +356,11 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
             let draft = client
                 .remove_draft_attachment(DraftAttachmentId(attachment))
                 .await?;
+            if json {
+                print_draft_json(&draft)?;
+            } else {
+                outln!("Removed attachment {attachment} from draft {}.", draft.id)?;
+            }
             Some(draft.account_id)
         }
         DraftCommand::Rm { id } => {
