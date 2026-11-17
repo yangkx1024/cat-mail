@@ -55,11 +55,18 @@ pub(crate) fn sanitizer(on_image: Option<ImageHook>, recolor: Option<Recolor>) -
         // would keep its text, as the body's first words.
         .add_clean_content_tags(["title"])
         .add_generic_attributes(LAYOUT_ATTRIBUTES)
+        // A quote's source URL, which ammonia keeps without checking its scheme
+        // (`javascript:` included). Browsers neither show nor follow it. (The
+        // `type="cite"` that marks quotes in the mail catmail writes is another attribute.)
+        .rm_tag_attributes("blockquote", &["cite"])
+        .rm_tag_attributes("q", &["cite"])
+        .rm_tag_attributes("del", &["cite"])
+        .rm_tag_attributes("ins", &["cite"])
         .url_schemes(HashSet::from(["http", "https", "mailto", "cid", "data"]))
         // Relative URLs have no base in an email.
         .url_relative(UrlRelative::Deny)
         .attribute_filter(move |element, attribute, value| {
-            let url_attribute = matches!(attribute, "href" | "src" | "cite");
+            let url_attribute = matches!(attribute, "href" | "src");
             let image = element == "img" && attribute == "src";
             if url_attribute && is_data_url(value) && !image {
                 // Inline images may be data: URLs; a data: link could carry a whole page.
@@ -551,6 +558,22 @@ mod tests {
             assert!(
                 clean.contains("<p>x</p>") && !clean.contains("style"),
                 "{style} → {clean}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_quote_s_source_url_is_removed() {
+        for dirty in [
+            r#"<blockquote cite="javascript:alert(1)">a</blockquote>"#,
+            r#"<q cite="https://t.example/">a</q>"#,
+            r#"<del cite="javascript:alert(1)">a</del>"#,
+            r#"<ins cite="data:text/html,x">a</ins>"#,
+        ] {
+            let clean = sanitize_html(dirty);
+            assert!(
+                clean.contains(">a</") && !clean.contains("cite"),
+                "{dirty} → {clean}"
             );
         }
     }
