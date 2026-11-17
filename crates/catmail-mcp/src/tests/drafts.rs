@@ -341,6 +341,52 @@ async fn files_put_to_an_upload_go_into_drafts() {
     assert_eq!(status, StatusCode::OK, "{body}");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn files_being_put_hold_their_room_until_they_end() {
+    let f = Fixture::new(ServeOptions::default()).await;
+    let addr = f.server.local_addr();
+    let prepare = || async {
+        let prepared = f.call("prepare_upload", json!({})).await;
+        format!("/mcp/uploads/{}", prepared["upload"].as_str().unwrap())
+    };
+    // A put without a length whose body doesn't come.
+    let stall = |path: String| async move {
+        let head = format!(
+            "PUT {path} HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\
+             Expect: 100-continue\r\n\r\n"
+        );
+        awaiting_body(addr, &head).await
+    };
+
+    // Two, each of which may grow to a whole file, hold all of the token's room.
+    let first = stall(prepare().await).await;
+    let _second = stall(prepare().await).await;
+    let path = prepare().await;
+    let (status, body) = send_bytes(addr, http::Method::PUT, &path, &[], vec![1])
+        .await
+        .unwrap();
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert!(body.contains("being put"), "{body}");
+
+    // Cut off, one gives its room back.
+    drop(first);
+    let put = async {
+        loop {
+            let (status, body) = send_bytes(addr, http::Method::PUT, &path, &[], vec![1])
+                .await
+                .unwrap();
+            if status == StatusCode::OK {
+                break;
+            }
+            assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(30), put)
+        .await
+        .expect("the put cut off kept its room");
+}
+
 #[test]
 fn what_a_draft_says_is_left_out_of_the_log() {
     let arguments = json!({

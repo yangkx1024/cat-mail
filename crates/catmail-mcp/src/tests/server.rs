@@ -302,25 +302,13 @@ async fn stopping_cuts_off_a_request_whose_body_never_ends() {
     let addr = f.server.local_addr();
     // Headers that promise a body. hyper answers `100 Continue` once the handler starts
     // reading it: the request is in, past the token check, waiting on its body.
-    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let head = format!(
         "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: {}\r\n\
          Content-Type: application/json\r\nAccept: application/json, text/event-stream\r\n\
          Content-Length: 1000\r\nExpect: 100-continue\r\n\r\n",
         f.auth()
     );
-    stream.write_all(head.as_bytes()).await.unwrap();
-    let mut answer = Vec::new();
-    while !answer.windows(3).any(|w| w == b"100") {
-        let mut chunk = [0; 256];
-        let n = stream.read(&mut chunk).await.unwrap();
-        assert!(
-            n > 0,
-            "closed instead of continuing: {}",
-            String::from_utf8_lossy(&answer)
-        );
-        answer.extend_from_slice(&chunk[..n]);
-    }
+    let mut stream = awaiting_body(addr, &head).await;
     // Only part of the body, and never the rest.
     stream.write_all(br#"{"jsonrpc""#).await.unwrap();
 
@@ -329,6 +317,45 @@ async fn stopping_cuts_off_a_request_whose_body_never_ends() {
         .await
         .expect("stop waits on the unfinished request for ever");
     drop(stream);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_token_has_only_so_many_requests_answered_at_once() {
+    let f = Fixture::new(ServeOptions::default()).await;
+    let addr = f.server.local_addr();
+    // Requests whose bodies never come, past the token check.
+    let head = format!(
+        "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: {}\r\n\
+         Content-Type: application/json\r\nAccept: application/json, text/event-stream\r\n\
+         Content-Length: 1000\r\nExpect: 100-continue\r\n\r\n",
+        f.auth()
+    );
+    let mut stalled = Vec::new();
+    for _ in 0..16 {
+        stalled.push(awaiting_body(addr, &head).await);
+    }
+    let (status, body) = f.post(initialize()).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    // Another token's are its own.
+    let other = f.token("other", Access::default());
+    let (status, body) = f.post_as(&other, initialize()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Cut off, one is no longer counted.
+    drop(stalled.pop());
+    let answered = async {
+        loop {
+            let (status, body) = f.post(initialize()).await;
+            if status == StatusCode::OK {
+                break;
+            }
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(30), answered)
+        .await
+        .expect("the request cut off was still counted");
 }
 
 #[tokio::test(flavor = "multi_thread")]
