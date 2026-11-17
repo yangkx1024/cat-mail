@@ -12,7 +12,9 @@ use catmail_core::{AccountId, FolderId};
 use catmail_frontend::mailbox::sidebar::{
     Folds, Group, Heading, Item, Loaded, Selection, SidebarModel, sidebar_groups,
 };
-use catmail_frontend::mailbox::{self, AccountEntry, Destination, Place, SYNC_ON_OPEN_AFTER};
+use catmail_frontend::mailbox::{
+    self, AccountEntry, Destination, Place, SYNC_ON_OPEN_AFTER, Source,
+};
 use nsh_base::theme;
 use nsh_core::ContextMenuEvent;
 use nsh_core::prelude::*;
@@ -21,6 +23,7 @@ use crate::buttons::{Size, icon_button, primary_button, tooltip};
 use crate::engine::client;
 use crate::icons::{Icon, icon};
 use crate::mailbox::folder_commands::{folder_menu, rename_selected};
+use crate::mailbox::list;
 use crate::tasks::in_view;
 use crate::toast::report;
 use crate::{chrome, composer, settings};
@@ -215,6 +218,12 @@ fn update_account(account: AccountId, change: impl FnOnce(&mut AccountEntry)) {
 pub fn select(place: Option<Place>) {
     let selected = global::<SelectedPlace>();
     if selected.with_untracked(|p| p.0) == place && place.is_some() {
+        // Back from a search to the place it was made in: nothing follows the selection,
+        // which didn't change.
+        if matches!(list::source(), Some(Source::Search(_))) {
+            list::clear_search();
+            list::show(place.map(Place::source));
+        }
         return;
     }
     let account = global::<Accounts>()

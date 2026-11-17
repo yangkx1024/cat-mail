@@ -508,7 +508,8 @@ fn without_addresses(line: &str) -> Cow<'_, str> {
     let mut rest = line;
     while let Some(at) = rest.find('<') {
         let inside = &rest[at + 1..];
-        match inside.find(|c: char| c == '>' || c.is_whitespace()) {
+        // Up to the next `<` at most, so that each byte is read once: an address has none.
+        match inside.find(|c: char| c == '>' || c == '<' || c.is_whitespace()) {
             Some(end)
                 if inside[end..].starts_with('>') && split_address(&inside[..end]).is_some() =>
             {
@@ -528,6 +529,17 @@ fn without_addresses(line: &str) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_line_of_angle_brackets_is_read_once() {
+        // Quadratic, this is 10^12 steps: the test would not end.
+        let line = format!("{}>", "<".repeat(1 << 20));
+        assert_eq!(without_addresses(&line), line);
+        assert_eq!(
+            without_addresses("see <<https://example.com/a> now"),
+            "see < now"
+        );
+    }
 
     const MIXED: &[u8] = b"From: a@example.com\r\n\
         Subject: =?UTF-8?B?5oql5ZGK?=\r\n\

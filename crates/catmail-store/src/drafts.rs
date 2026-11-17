@@ -1188,6 +1188,15 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn a_draft_with_a_copy_on_the_server_goes_with_its_account() {
+        let (store, account, folder, draft) = with_drafts_folder();
+        settle(&store, &begin(&store, draft, folder, "one@x"), 7, &[3]);
+        let key = store.write(|db| db.accounts().delete(account)).unwrap();
+        assert!(key.is_some());
+        assert_eq!(store.read(|db| db.drafts().snapshot(draft)).unwrap(), None);
+    }
+
     /// UIDs queued for deletion in the folder.
     fn deletions(store: &Store, folder: FolderId) -> Vec<u32> {
         store

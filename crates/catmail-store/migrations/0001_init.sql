@@ -171,7 +171,6 @@ CREATE TABLE messages (
 -- Read backwards for (list_date DESC, id DESC): every index ends with the rowid (`id`),
 -- so listing it again would only store it twice.
 CREATE INDEX messages_folder_date ON messages (folder_id, list_date);
-CREATE INDEX messages_message_id_hdr ON messages (account_id, message_id_hdr);
 CREATE UNIQUE INDEX messages_gm_msgid ON messages (account_id, gm_msgid)
     WHERE gm_msgid IS NOT NULL;
 -- Gmail's Starred, which is \Flagged rather than a label row; read like
@@ -428,6 +427,9 @@ CREATE TABLE drafts (
 
 CREATE INDEX drafts_account ON drafts (account_id, updated_at DESC);
 CREATE INDEX drafts_identity ON drafts (identity_id);
+-- For the foreign key: without it every deleted message scans the drafts.
+CREATE INDEX drafts_reply_to ON drafts (reply_to_message_id)
+    WHERE reply_to_message_id IS NOT NULL;
 
 -- An APPEND of a draft to the Drafts folder whose outcome isn't recorded yet. Each
 -- upload has a Message-ID of its own, and the row is committed before the APPEND: if

@@ -26,6 +26,9 @@ pub(crate) type Data = imap_proto::Response<'static>;
 /// broken or hostile server gets near this.
 const MAX_ANSWER: usize = 256 * 1024 * 1024;
 
+/// How much of a command is written under one timeout, as SMTP's DATA is.
+const WRITE_PIECE: usize = 64 * 1024;
+
 /// How many messages with changed flags a connection keeps track of while idling; past
 /// that it only remembers that flags changed.
 const MAX_CHANGED_FLAGS: usize = 1000;
@@ -215,6 +218,9 @@ impl Connection {
         let mut stop = std::pin::pin!(stop);
         // Between the server's `+` and our DONE.
         let mut idling = false;
+        // Once DONE is sent there is no idling again, whatever the server says: `stop`
+        // may have resolved, and must not be polled after that.
+        let mut done = false;
         // What IDLE brings counts only as a change.
         let mut ignored = Response::default();
         loop {
@@ -233,10 +239,11 @@ impl Connection {
             let Some(raw) = raw else {
                 self.write(&[b"DONE\r\n"]).await?;
                 idling = false;
+                done = true;
                 continue;
             };
             match self.step(&raw, &tag, "IDLE", &mut ignored, true)? {
-                Step::Continue => idling = true,
+                Step::Continue => idling = !done,
                 // Also how a server ends IDLE on its own: a tagged OK before DONE.
                 Step::Done(Status::Ok, _) => return Ok(self.changed),
                 Step::Done(_, outcome) => {
@@ -453,16 +460,16 @@ impl Connection {
         }
     }
 
-    /// Writes `chunks` one after the other, then flushes.
+    /// Writes `chunks` one after the other, then flushes. The timeout is for each piece
+    /// of [`WRITE_PIECE`], not for the whole: a message being appended takes as long as
+    /// the link needs, and only a stalled one is given up.
     async fn write(&mut self, chunks: &[impl AsRef<[u8]>]) -> Result<()> {
-        let stream = &mut self.stream;
-        with_timeout(self.timeout, async {
-            for chunk in chunks {
-                stream.write_all(chunk.as_ref()).await?;
+        for chunk in chunks {
+            for piece in chunk.as_ref().chunks(WRITE_PIECE) {
+                with_timeout(self.timeout, self.stream.write_all(piece)).await?;
             }
-            stream.flush().await
-        })
-        .await?;
+        }
+        with_timeout(self.timeout, self.stream.flush()).await?;
         Ok(())
     }
 
@@ -591,6 +598,51 @@ mod tests {
         // 3 became 2 and then went; 4 became 3 and then 2.
         assert_eq!(conn.take_changed_flags(), Some(vec![2]));
         assert_eq!(conn.take_changed_flags(), Some(Vec::new()));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_continuation_after_done_does_not_idle_again() {
+        let (ours, theirs) = tokio::io::duplex(64 * 1024);
+        let (idling, stop) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut theirs = BufReader::new(theirs);
+            let mut command = String::new();
+            theirs.read_line(&mut command).await.unwrap();
+            assert_eq!(command, "C1 IDLE\r\n");
+            theirs.get_mut().write_all(b"+ idling\r\n").await.unwrap();
+            idling.send(()).unwrap();
+            command.clear();
+            theirs.read_line(&mut command).await.unwrap();
+            assert_eq!(command, "DONE\r\n");
+            let answer = b"+ still idling\r\nC1 OK done\r\n";
+            theirs.get_mut().write_all(answer).await.unwrap();
+        });
+        let mut conn = Connection::new(Box::new(ours), Duration::from_secs(10));
+        conn.mailbox_opened(5);
+
+        // An `async` block panics if polled once it has ended.
+        let stop = async { _ = stop.await };
+        assert!(!conn.idle(stop, Duration::from_secs(10)).await.unwrap());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_slow_write_is_not_a_stalled_one() {
+        // 16 KiB every 50 ms: a piece takes 200 ms, the whole 1.6 s.
+        let (ours, mut theirs) = tokio::io::duplex(16 * 1024);
+        let size = 512 * 1024;
+        let server = tokio::spawn(async move {
+            let mut buf = vec![0; 16 * 1024];
+            let mut read = 0;
+            while read < size {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                read += theirs.read(&mut buf).await.unwrap();
+            }
+        });
+        let mut conn = Connection::new(Box::new(ours), Duration::from_millis(500));
+
+        conn.write(&[vec![b'a'; size]]).await.unwrap();
         server.await.unwrap();
     }
 

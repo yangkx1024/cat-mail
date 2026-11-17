@@ -66,7 +66,7 @@ GUI 关掉主窗口后继续同步、发信、提醒新邮件，并能从托盘�
 它们持有的东西之后）在另一个线程上调一次 glibc 的 `malloc_trim(0)`（`catmail_frontend::memory::release_freed`，只在
 Linux glibc 上，其他平台什么也不做）：glibc 的堆只能从顶上缩，释放的内存夹在仍在用的块之间，留在进程里。
 `unsafe_code` 因此在 frontend 里是 `deny` 而不是 `forbid`，由 `memory` 模块单独放行（还有 macOS 的状态栏，见
-[托盘](#托盘)）。
+[托盘](#托盘)，以及 macOS 的登录项 `autostart/macos.rs`）。
 
 实测（release，两个真实账户，Linux），单位 MB，RSS / PSS：
 

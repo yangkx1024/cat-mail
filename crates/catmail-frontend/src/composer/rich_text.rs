@@ -257,10 +257,12 @@ pub fn link_href(typed: &str) -> Option<String> {
             && s.chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
     });
-    // `localhost:8080` and `example.com:443/x` are a host and a port, not a scheme.
-    let port = typed
-        .split_once(':')
-        .is_some_and(|(_, rest)| rest.starts_with(|c: char| c.is_ascii_digit()));
+    // `localhost:8080` and `example.com:443/x` are a host and a port, not a scheme; the
+    // digits of `tel:5551234` are not a port.
+    let port = typed.split_once(':').is_some_and(|(host, rest)| {
+        (host == "localhost" || host.contains('.'))
+            && rest.starts_with(|c: char| c.is_ascii_digit())
+    });
     Some(if has_scheme && !port {
         typed.to_owned()
     } else if typed.contains('@') && !typed.contains('/') {
@@ -366,6 +368,7 @@ mod tests {
             ("a@example.com", "mailto:a@example.com"),
             ("mailto:a@example.com", "mailto:a@example.com"),
             ("tel:+861234", "tel:+861234"),
+            ("tel:5551234", "tel:5551234"),
             ("javascript:alert(1)", "javascript:alert(1)"),
         ] {
             assert_eq!(link_href(typed).as_deref(), Some(href), "{typed}");

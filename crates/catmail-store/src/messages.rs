@@ -254,7 +254,8 @@ impl<'c> Messages<'c> {
     /// On Gmail, the label folders whose lists the changes made through this so far
     /// changed, besides the locations changed (a label shows messages of All Mail, Starred
     /// the flagged ones), and forgets them. Covers [`upsert`](Self::upsert),
-    /// [`update_flags`](Self::update_flags), [`delete_uids`](Self::delete_uids) and the
+    /// [`update_flags`](Self::update_flags), [`delete_uids`](Self::delete_uids),
+    /// [`delete_gone`](Self::delete_gone) and the
     /// bodies stored ([`store_body`](Self::store_body), [`rebuild_body`](Self::rebuild_body),
     /// [`refresh_html`](Self::refresh_html)): snippets and attachment markers show there
     /// too.
@@ -274,17 +275,21 @@ impl<'c> Messages<'c> {
     /// Notes the folders that show the messages at `uids` in `folder` (all of them if
     /// `None`) besides their location, as [`shown`] does, in one query.
     fn note_shown_in(&self, folder: FolderId, uids: Option<&[u32]>) -> Result<()> {
-        let mut stmt = self.conn.prepare_cached(
+        // Two statements, so that a few UIDs are looked up by (folder, UID) rather than
+        // among every row of the folder: this runs for each message a sync removes.
+        let which = match uids {
+            Some(_) => "AND uid IN (SELECT value FROM json_each(?2))",
+            None => "AND ?2 IS NULL",
+        };
+        let mut stmt = self.conn.prepare_cached(&format!(
             "WITH m AS MATERIALIZED (
-                 SELECT id, flags FROM messages
-                 WHERE folder_id = ?1
-                   AND (?2 IS NULL OR uid IN (SELECT value FROM json_each(?2))))
+                 SELECT id, flags FROM messages WHERE folder_id = ?1 {which})
              SELECT DISTINCT folder_id FROM message_labels
              WHERE message_id IN (SELECT id FROM m)
              UNION
              SELECT s.id FROM folders f JOIN starred s ON s.account_id = f.account_id
-             WHERE f.id = ?1 AND EXISTS (SELECT 1 FROM m WHERE flags & 2 <> 0)",
-        )?;
+             WHERE f.id = ?1 AND EXISTS (SELECT 1 FROM m WHERE flags & 2 <> 0)"
+        ))?;
         let uids = uids.map(to_json);
         let shown = stmt.query_map(params![folder.0, uids], |r| Ok(FolderId(r.get(0)?)))?;
         let mut touched = self.touched.borrow_mut();
@@ -615,8 +620,9 @@ impl<'c> Messages<'c> {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Returns how many rows were deleted.
-    pub fn delete_uids(&self, folder: FolderId, uids: &[u32]) -> Result<usize> {
+    /// Returns how many rows were deleted. Callers go through
+    /// [`delete_uids_of`](Self::delete_uids_of), which checks the UIDVALIDITY.
+    pub(crate) fn delete_uids(&self, folder: FolderId, uids: &[u32]) -> Result<usize> {
         self.note_shown_in(folder, Some(uids))?;
         let mut delete = self
             .conn
@@ -654,6 +660,7 @@ impl<'c> Messages<'c> {
     /// since `location` was looked up: it is in another folder now, though maybe under
     /// the same UID and UIDVALIDITY. Returns whether it was deleted.
     pub fn delete_gone(&self, location: &MessageLocation) -> Result<bool> {
+        self.note_shown_in(location.server_folder, Some(&[location.uid]))?;
         let deleted = self.conn.execute(
             "DELETE FROM messages
              WHERE id = ?1 AND folder_id = ?2 AND uid = ?3
@@ -2601,10 +2608,28 @@ mod tests {
         assert_eq!(subjects(&store, f["Work"]), s(&[3, 2]));
         assert_eq!(counts(&store, account)["[Gmail]/Starred"], (2, 1));
 
-        // Gone from the server, and with it from its labels.
-        store
-            .write(|db| db.messages().delete_uids(all_mail, &[3]))
+        // Gone from the server, and with it from its labels, whose lists change.
+        let gone = store
+            .read(|db| {
+                let messages = db.messages();
+                let listed = messages.list(all_mail, 50, None)?;
+                let gone = listed
+                    .iter()
+                    .find(|m| m.subject.as_deref() == Some("subject 3"));
+                messages.location(gone.unwrap().id)
+            })
+            .unwrap()
             .unwrap();
+        let (deleted, touched) = store
+            .write(|db| {
+                let messages = db.messages();
+                Ok((messages.delete_gone(&gone)?, messages.touched_labels()))
+            })
+            .unwrap();
+        assert!(deleted);
+        let mut expected = vec![f["Work"], hidden.id, f["[Gmail]/Starred"]];
+        expected.sort();
+        assert_eq!(touched, expected);
         let counted = counts(&store, account);
         assert_eq!(counted["Work"], (1, 0));
         assert_eq!(counted["Hidden"], (1, 0));

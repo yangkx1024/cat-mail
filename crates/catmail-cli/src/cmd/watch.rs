@@ -97,7 +97,11 @@ async fn describe(
         Event::AccountStatusChanged { account } => {
             let status = client.account_status(account);
             Some(match status.sync {
-                Some(problem) => format!("{}: can't sync: {}", email(account), problem.error),
+                Some(problem) => format!(
+                    "{}: can't sync: {}",
+                    email(account),
+                    printable(&problem.error.to_string())
+                ),
                 None if status.syncing => format!("{}: syncing", email(account)),
                 None => format!("{}: synced", email(account)),
             })

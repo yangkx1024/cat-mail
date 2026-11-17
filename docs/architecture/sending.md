@@ -46,7 +46,7 @@
     24.96 MiB）。
   - 无论服务器收多大都不超过 50 MiB：整封信在内存里构建，每次修改后还要整封复制到 Drafts。
   - `APPENDLIMIT=0`（RFC 7889 §5：根本不收 APPEND）由 `Capabilities::append_limit` 照实返回 0，但
-    记录时（`connection::announced_append_limit`）不当作大小：副本多小都存不进去，没有要放得下的东西，
+    记录时（`connection::Announced::of`）不当作大小：副本多小都存不进去，没有要放得下的东西，
     限制附件也帮不上，发信本身不受影响。
   - 值记在 `identities.smtp_max_size` 和 `accounts.imap_append_limit`（SMTP 服务器是否公布 8BITMIME 一起记在
     `identities.smtp_8bitmime`，见 [Outbox 快照](#outbox-快照)），**每次连接**都与

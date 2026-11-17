@@ -80,7 +80,7 @@ tailnet 里的设备连得上，同一局域网内是直连。catmail 因此不�
 - 不做 stdio：常驻的宿主不是 agent 启动的子进程，本机也走 HTTP，只有一种传输。
 - 不建会话（rmcp 的 `legacy_session_mode` 关掉）：每个请求自成一体，与 MCP 2026-07-28 去掉会话一致，重启或换一条
   隧道都不丢东西；答复是普通的 JSON（`json_response`），要推送通知时 rmcp 才改用 SSE。
-- 底下是 hyper 的 HTTP/1.1，加 rmcp 的 `StreamableHttpService::handle`，没有 axum。请求体最多 1 MB。
+- 底下是 hyper 的 HTTP/1.1，加 rmcp 的 `StreamableHttpService::handle`，没有 axum。请求体最多 1 MB（草稿及以上层级的令牌是 16 MB，见[草稿](#草稿)）。
 - 停下时先不再接受连接，让正在答的请求（同步、下载正文）答完，最多等 30 秒（`ServeOptions::drain`），之后才取消
   rmcp 的 token：rmcp 一见它取消就放弃等答复、回 500，所以它不能是停止信号的子 token。到时还没结束的连接直接中止：
   请求体一直没发完的客户端，rmcp 的 token 和 hyper 的优雅关闭都等不到头。

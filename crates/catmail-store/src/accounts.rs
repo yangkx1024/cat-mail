@@ -164,6 +164,11 @@ impl<'c> Accounts<'c> {
     /// Returns the deleted account's secret key, or `None` if there was no such account.
     pub fn delete(&self, id: AccountId) -> Result<Option<String>> {
         let conn = self.conn;
+        // Its drafts first, not by the cascade: a draft's copy on the server names its
+        // folder (`ON DELETE SET NULL`) together with a UIDVALIDITY and a UID (a CHECK),
+        // so a folder that cascaded away before its drafts would fail the delete, and
+        // which goes first is only the order the tables were made in.
+        conn.execute("DELETE FROM drafts WHERE account_id = ?1", [id.0])?;
         Ok(conn
             .query_row(
                 "DELETE FROM accounts WHERE id = ?1 RETURNING secret_key",

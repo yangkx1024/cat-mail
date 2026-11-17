@@ -59,6 +59,7 @@ src/
   chrome.rs        窗口顶部：macOS 的一体式主窗口、写信窗口的标题栏、各栏顶部的工具栏
   theme.rs         主题映射到 nsh（shadcn）的 token
   clock.rs         系统的时区和 12 / 24 小时设置，日期分组用的今天
+  wake.rs          系统唤醒：告诉引擎重新连接并立即同步（logind、NSWorkspace）
   toast.rs         窗口里的通知；report 记日志并提示出错
   icons.rs         Heroicons
   tray/            托盘：mod.rs 计数、把图标画成像素（何时数、何时画由 frontend 的 TrayModel 定），linux.rs、
@@ -148,7 +149,7 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 的顺序和游标分页。计数是各收件箱未读之和。打开窗口时默认选中它，原来的位置不在了时也回到这里；选中时同步
 每个收件箱。在这里移动 Gmail 的邮件，看作是在它账户的 INBOX 里看的，移到别的标签会去掉 INBOX。
 
-每个账户先列有角色的文件夹，顺序固定（Inbox、Drafts、Outbox、Sent、Archive、All Mail、Flagged、Junk、Trash），
+每个账户先列有角色的文件夹，顺序固定（Inbox、Drafts、Outbox、Sent、Archive、All Mail、Important、Flagged、Junk、Trash），
 名字用角色名（`FolderRole::label`）而不是服务器上的名字；不论嵌套在哪（Dovecot 的 `INBOX.Sent`）都提到这一层，
 原父级没有其他内容时去掉（`folders::AccountFolders`）。其余文件夹按服务器的层级跟在后面。
 
@@ -479,7 +480,7 @@ From 是条目实际发出用的身份（`OutboxEntry::identity`），叫法和�
 纯逻辑在 `catmail-frontend`，表驱动测试，不用编译 GTK 和 WebKit（见[测试](testing.md#gui)），读信区的正文页面
 也在那里测（`html`：CSP 在正文之前、图片改写成读信区的 URL、纯文本转义、消息协议的解析、页面编号、哪些请求
 什么时候应答）。
-这个 crate 只测几处不经窗口的：页面高度够不够、页面算深色还是浅色、主题映射、图标、托盘的绘制。还没有驱动窗口
+这个 crate 只测几处不经窗口的：页面高度够不够、主题映射、图标、托盘的绘制、编辑器的正文、系统唤醒的解析。还没有驱动窗口
 的测试（ROADMAP 里的 nsh-testing）。
 
 ## 已知问题与上游

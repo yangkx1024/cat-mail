@@ -787,6 +787,31 @@ async fn refused_label_changes_are_undone() {
     );
 }
 
+/// Two changes to one label go to the server as one. A location that can't be selected
+/// leaves both queued, and the replay ends rather than trying it again for the one that
+/// was folded into the other.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_location_ends_the_replay_of_folded_changes() {
+    let env = synced_env(gmail_later()).await;
+    let one = env.id_of("INBOX", "one").await;
+    let (inbox, later) = (env.folder("INBOX").await.id, env.folder("Later").await.id);
+    let moved = env.client.move_messages(vec![one], Some(inbox), later);
+    moved.await.unwrap();
+    let back = env.client.move_messages(vec![one], Some(later), inbox);
+    back.await.unwrap();
+    // Renamed on the server since the folders were listed.
+    env.fake.state().mailbox_mut(ALL_MAIL).name = "[Gmail]/Renamed".into();
+
+    let replay = env.client.replay_pending(env.account);
+    let report = tokio::time::timeout(Duration::from_secs(20), replay)
+        .await
+        .expect("the replay ends")
+        .unwrap();
+    assert_eq!(report.applied, 0);
+    let ops = env.client.list_pending(Some(env.account)).await.unwrap();
+    assert!(!ops.is_empty(), "still queued");
+}
+
 /// Drafts is a label, which keeps no UIDVALIDITY locally: the copy a newer one replaces
 /// is deleted all the same, under the generation APPENDUID gave.
 #[tokio::test(flavor = "multi_thread")]

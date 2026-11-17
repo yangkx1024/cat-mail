@@ -177,11 +177,17 @@ pub(crate) enum DraftCommand {
     Rm { id: i64 },
 }
 
+const NO_RECIPIENT: &str = "--send needs a recipient: --to, --cc or --bcc";
+
 pub(crate) async fn compose(client: &MailClient, args: Compose, json: bool) -> Result<()> {
     let account = one_account(client, args.account.as_deref()).await?;
     let identity = args.fields.from.resolve(client, account.id).await?;
     let mut content = DraftContent::default();
     args.fields.changes()?.apply(&mut content);
+    // Before the draft exists, so a mistake doesn't leave one behind.
+    if args.send && content.recipients().next().is_none() {
+        bail!(NO_RECIPIENT);
+    }
     let draft = client
         .create_draft(account.id, identity, content, files(args.attach))
         .await?;
@@ -216,7 +222,7 @@ pub(crate) async fn forward(client: &MailClient, args: Forward, json: bool) -> R
         as_attachment: args.as_attachment,
     };
     if args.send && forwarding.recipients().next().is_none() {
-        bail!("--send needs a recipient: --to, --cc or --bcc");
+        bail!(NO_RECIPIENT);
     }
     let from = from_for(client, &args.from, MessageId(args.id)).await?;
     let draft = client
@@ -382,7 +388,8 @@ pub(crate) async fn save_to_server(client: &MailClient, account: AccountId) {
     if let Some(e) = error {
         eprintln!(
             "warning: the draft is saved here, but not in the server's Drafts folder yet \
-             ({e}); {NEXT_FLUSH} puts it there"
+             ({}); {NEXT_FLUSH} puts it there",
+            printable(&e)
         );
     }
 }
@@ -750,6 +757,24 @@ mod tests {
         let err = forward(&client, forwarding(None, None, true), false)
             .await
             .unwrap_err();
+        assert!(format!("{err:#}").contains("needs a recipient"), "{err:#}");
+        let args = Compose {
+            account: None,
+            fields: Fields {
+                from: SendAs { from: None },
+                recipients: Recipients {
+                    to: None,
+                    cc: None,
+                    bcc: None,
+                },
+                subject: Some("s".into()),
+                body: Some("b".into()),
+                body_file: None,
+            },
+            attach: Vec::new(),
+            send: true,
+        };
+        let err = compose(&client, args, false).await.unwrap_err();
         assert!(format!("{err:#}").contains("needs a recipient"), "{err:#}");
 
         let account = client.list_accounts().await.unwrap()[0].id;

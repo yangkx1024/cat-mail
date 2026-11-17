@@ -42,7 +42,7 @@ SMTP 客户端见[草稿与发信](sending.md#smtp-客户端)。
   也算）就放弃这条连接。只有 LF 的行尾补上 CR：有的服务器偶尔这样发，而解析器只认 CRLF。
 - **默认严格。** 无法解析的响应由连接层计数，`Connection::execute` 只要丢弃过一条就返回
   `Incomplete`：LIST、SEARCH、EXAMINE、flags 这类结果缺一行就会被误当成删除或"没变化"。新命令
-  默认就是安全的；只有明确能处理缺行的调用（拉邮件头）用 `execute_lossy`，见
+  默认就是安全的；只有明确能处理缺行的调用（拉邮件头和预览、NOOP、ID，以及 STORE / COPY / MOVE / EXPUNGE 这些改动）用 `execute_lossy`，见
   [同步 / 容错](sync.md#容错)。
 - **请求过的 FETCH 项必须都在。** imap-proto 把格式坏掉的已知项（`FLAGS NIL`、只有类型的
   BODYSTRUCTURE）也读成 `AttributeValue::Unknown`，整行照样解析成功。所以 `Session` 检查每封有答复的

@@ -59,7 +59,7 @@ pub(crate) fn sanitizer(on_image: Option<ImageHook>, recolor: Option<Recolor>) -
         // Relative URLs have no base in an email.
         .url_relative(UrlRelative::Deny)
         .attribute_filter(move |element, attribute, value| {
-            let url_attribute = matches!(attribute, "href" | "src" | "cite" | "action");
+            let url_attribute = matches!(attribute, "href" | "src" | "cite");
             let image = element == "img" && attribute == "src";
             if url_attribute && is_data_url(value) && !image {
                 // Inline images may be data: URLs; a data: link could carry a whole page.

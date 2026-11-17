@@ -339,7 +339,7 @@ async fn replay_folder(
 ) -> Result<()> {
     let id = folder.id;
     let mut ops = engine.read(move |db| db.ops().pending(id)).await?;
-    seen.extend(ops.iter().map(|op| (id, op.id)));
+    seen.extend(ops.iter().flat_map(ReplayOp::settled).map(|op| (id, op.id)));
     if ops.is_empty() {
         return Ok(());
     }
@@ -376,7 +376,7 @@ async fn replay_folder(
             return Ok(());
         }
         let ops = engine.read(move |db| db.ops().pending(id)).await?;
-        seen.extend(ops.iter().map(|op| (id, op.id)));
+        seen.extend(ops.iter().flat_map(ReplayOp::settled).map(|op| (id, op.id)));
         ops
     };
     for batch in batches(&ops, engine.tuning.replay_batch) {

@@ -19,7 +19,6 @@ catmail-frontend.workspace = true
 anyhow.workspace = true
 futures-channel.workspace = true
 futures-util.workspace = true
-jiff.workspace = true
 pollster.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
@@ -43,7 +42,6 @@ objc2-app-kit = { workspace = true, features = [
     "block2",
     "NSAppearance",
     "NSEvent",
-    "NSGraphics",
     "NSRunningApplication",
     "NSScrollView",
     "NSText",

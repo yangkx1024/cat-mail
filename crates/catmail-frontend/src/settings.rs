@@ -1,7 +1,7 @@
 //! The window's preferences: running in the background, appearance, themes, text size,
 //! reading, serving AI agents. They belong to the frontends, not to the engine, so they live in
 //! `settings.json` in the config directory instead of the database, next to the imported
-//! themes. Every frontend reads and writes the same file.
+//! themes.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};

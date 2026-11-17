@@ -302,16 +302,26 @@ fn body_text<'a>(
         .collect()
 }
 
-/// A boundary that occurs in none of the fetched parts.
+/// A boundary that occurs in none of the fetched parts: one `_` longer than the longest
+/// run of them that follows it in one, found reading each part once.
 fn boundary(fetched: &HashMap<String, Vec<u8>>) -> String {
-    let mut boundary = "=_catmail_skeleton".to_owned();
-    while fetched.values().any(|body| {
-        body.windows(boundary.len())
-            .any(|w| w == boundary.as_bytes())
-    }) {
-        boundary.push('_');
+    const BASE: &str = "=_catmail_skeleton";
+    let longest = fetched
+        .values()
+        .flat_map(|body| {
+            body.windows(BASE.len())
+                .enumerate()
+                .filter(|(_, w)| *w == BASE.as_bytes())
+                .map(|(at, _)| {
+                    let after = &body[at + BASE.len()..];
+                    after.iter().take_while(|b| **b == b'_').count()
+                })
+        })
+        .max();
+    match longest {
+        Some(run) => format!("{BASE}{}", "_".repeat(run + 1)),
+        None => BASE.to_owned(),
     }
-    boundary
 }
 
 /// `; name="value"` for each parameter. RFC 2231 extended values (`name*=utf-8''…`)
