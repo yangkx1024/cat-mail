@@ -27,6 +27,7 @@ use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, PoisonError};
+use std::task::Poll;
 use std::time::Duration;
 
 use catmail_core::{DraftId, EditMark, MailClient, MailClientBuilder};
@@ -279,6 +280,8 @@ thread_local! {
     static QUITTING: Cell<Option<QuitReason>> = const { Cell::new(None) };
     /// The launch asked for no window (`--background`).
     static HIDDEN: Cell<bool> = const { Cell::new(false) };
+    /// What later launches ask for, until the app is sure to quit ([`stop_answering`]).
+    static REQUESTS: RefCell<Option<Requests>> = RefCell::default();
 }
 
 /// Waits `delay` on the main thread's loop.
@@ -322,6 +325,8 @@ pub fn run(
         toolkit::set_appearance(appearance(&settings()));
         started(builder, requests);
     });
+    // However the loop ended.
+    stop_answering();
     let reason = QUITTING.get().unwrap_or(QuitReason::Platform);
     tracing::info!(%reason, "quitting");
     // Before the engine, for the requests being answered to end with an answer.
@@ -355,17 +360,43 @@ fn started(builder: MailClientBuilder, requests: Option<Requests>) {
             show(None);
         }
     });
-    if let Some(requests) = requests {
-        toolkit::spawn(answer(requests));
-    }
+    REQUESTS.set(requests);
+    toolkit::spawn(answer());
 }
 
-/// What later launches ask for, for as long as the app runs.
-async fn answer(mut requests: Requests) {
-    while let Some(request) = requests.next().await {
+/// What later launches ask for, until the app is sure to quit.
+async fn answer() {
+    // From [`REQUESTS`], which quitting empties at once, without waiting for this to be
+    // polled: the loop may be over.
+    let next = || {
+        std::future::poll_fn(|cx| {
+            REQUESTS.with_borrow_mut(|requests| {
+                requests
+                    .as_mut()
+                    .map_or(Poll::Ready(None), |requests| requests.poll_next_unpin(cx))
+            })
+        })
+    };
+    while let Some(request) = next().await {
         match request {
             Request::Activate { display } => show(display.activation_token.as_deref()),
         }
+    }
+}
+
+/// The app is sure to quit, for `reason`: unlike [`quit`], which the composers may call
+/// off.
+fn quitting(reason: QuitReason) {
+    QUITTING.set(Some(reason));
+    stop_answering();
+}
+
+/// Later launches are told the app is quitting, and wait to be the app themselves, rather
+/// than handing their request to one that won't answer it, or opening a window that
+/// keeps it from quitting.
+fn stop_answering() {
+    if REQUESTS.take().is_some() {
+        tracing::info!("no longer answering later launches");
     }
 }
 
@@ -573,7 +604,7 @@ fn window_removed() {
             } else {
                 QuitReason::EngineFailed
             };
-            QUITTING.set(Some(quitting.unwrap_or(reason)));
+            self::quitting(quitting.unwrap_or(reason));
             toolkit::end();
         }
         AfterLastWindow::KeepRunning => {
@@ -610,7 +641,7 @@ pub fn quit(reason: QuitReason) {
 /// Quits now, for `reason`: every window closes, and the app ends with the last (at once
 /// if it has none). The engine shuts down after the loop.
 fn exit(reason: QuitReason) {
-    QUITTING.set(Some(reason));
+    quitting(reason);
     let windows = toolkit::windows();
     if windows.is_empty() {
         toolkit::end();
@@ -629,7 +660,7 @@ fn signalled(signal: &str) {
         quit(QuitReason::Signal);
     } else {
         tracing::info!(signal, "quitting at once, on another signal");
-        QUITTING.set(Some(QuitReason::Signal));
+        quitting(QuitReason::Signal);
         // The views stop with their windows, while the thread's locals they use are there.
         for window in toolkit::windows() {
             window.destroy();

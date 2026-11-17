@@ -69,14 +69,22 @@ impl Config {
         self.data_dir.join("logs")
     }
 
-    /// Locks the data directory for one engine, creating it if needed (see
-    /// [`create_data_dir`]). Fails with [`Error::AlreadyRunning`] if another engine, in
-    /// this or another process, has it, and with [`Error::DataDirNotOwned`] if it belongs
-    /// to another user. Opening the engine does this, unless given the lock
+    /// Makes the data directory ready for an engine, before [`lock`](Self::lock): creates
+    /// it if needed (see [`create_data_dir`]), failing with [`Error::DataDirNotOwned`] if
+    /// it belongs to another user, and says so if other users can list it. Opening the
+    /// engine does this, unless given the lock
     /// ([`MailClient::builder_locked`](crate::MailClient::builder_locked)).
-    pub fn lock(&self) -> Result<DataDirLock> {
+    pub fn prepare_data_dir(&self) -> Result<()> {
         create_data_dir(&self.data_dir)?;
         warn_if_listable(&self.data_dir);
+        Ok(())
+    }
+
+    /// Locks the data directory, made ready by [`prepare_data_dir`](Self::prepare_data_dir),
+    /// for one engine. Fails with [`Error::AlreadyRunning`] if another engine, in this or
+    /// another process, has it. Only the lock: retrying it while another has it costs one
+    /// file opened. Opening the engine does this, unless given the lock.
+    pub fn lock(&self) -> Result<DataDirLock> {
         let file = File::options()
             .create(true)
             .truncate(false)
@@ -137,8 +145,8 @@ fn check_data_dir_owner(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Says so if other users can list the directory: once, as the engine locks it, though
-/// the log file creates it too.
+/// Says so if other users can list the directory: once, as it is made ready for the
+/// engine, though the log file creates it too.
 fn warn_if_listable(dir: &Path) {
     #[cfg(unix)]
     {

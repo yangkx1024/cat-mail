@@ -32,7 +32,8 @@ UI 库的类型进不了模型；以后换 UI 库或加一个前端，模型照�
 ### 每个数据目录一个引擎
 
 `MailClient::open` 对 `<data>/lock` 加独占文件锁并持有到引擎关闭，已被占用时返回
-`Error::AlreadyRunning`。前端也可以先自己加锁（`Config::lock`）再交给引擎（`MailClient::builder_locked`）：
+`Error::AlreadyRunning`。前端也可以先自己加锁（`Config::prepare_data_dir` 建好数据目录，再 `Config::lock`）再交给引擎
+（`MailClient::builder_locked`）。`Config::lock` 只开锁文件、试一次锁，重试它不会每次都建目录、打警告：
 GUI 这样在打开引擎之前就知道自己是这个数据目录的实例（见[后台运行](architecture/background.md#单实例与唤起)）。同一个数据目录只有一个引擎在同步、发信、发事件，因此不需要跨进程的
 任务领取、租约或变更通知。
 

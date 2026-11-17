@@ -168,7 +168,10 @@ impl MailClientBuilder {
     fn open_engine(mut self) -> Result<Opened> {
         let data_dir_lock = match self.lock.take() {
             Some(lock) => lock,
-            None => self.config.lock()?,
+            None => {
+                self.config.prepare_data_dir()?;
+                self.config.lock()?
+            }
         };
         let handoff_dir = self.config.handoff_dir();
         clear_handoff_dir(&handoff_dir);
@@ -395,6 +398,7 @@ mod tests {
     #[test]
     fn a_lock_taken_first_is_the_engines() {
         let config = Config::with_data_dir(tempfile::tempdir().unwrap().path().join("data"));
+        config.prepare_data_dir().unwrap();
         let lock = config.lock().unwrap();
         assert!(matches!(config.lock(), Err(Error::AlreadyRunning(_))));
         let client = MailClient::builder_locked(lock)
