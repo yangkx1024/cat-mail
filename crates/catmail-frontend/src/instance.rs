@@ -173,9 +173,9 @@ fn claim_in(
             Err(catmail_core::Error::AlreadyRunning(_)) => {}
             Err(_) => return Ok(Claim::Unavailable),
         }
-        // Held, so it exists and has a path. Once the app has said it is quitting, only the
-        // lock is waited for.
-        if !quitting && let Ok(socket) = socket_path(config.data_dir(), runtime) {
+        // Held, so it exists and has a path. Asked again even once the app has said it is
+        // quitting: another launch waiting for it may take over and answer.
+        if let Ok(socket) = socket_path(config.data_dir(), runtime) {
             match hand(&socket, request)? {
                 Handing::Taken => return Ok(Claim::Handed),
                 Handing::Quitting => quitting = true,
@@ -456,6 +456,32 @@ mod tests {
         let (_lock, requests) = first(&config, None);
         quitting.join().unwrap();
         hands_over(&config, None, requests);
+    }
+
+    #[test]
+    fn launches_waiting_for_one_that_is_quitting_find_the_one_that_takes_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::with_data_dir(dir.path());
+        let (lock, requests) = first(&config, None);
+        drop(requests);
+        let waiting: Vec<_> = (0..2)
+            .map(|_| {
+                let config = config.clone();
+                thread::spawn(move || claim_in(&config, None, &activate("second")).unwrap())
+            })
+            .collect();
+        // Both have been told it is quitting.
+        thread::sleep(Duration::from_millis(300));
+        drop(lock);
+        let claims: Vec<_> = waiting.into_iter().map(|w| w.join().unwrap()).collect();
+        let mut firsts = claims.into_iter().filter_map(|claim| match claim {
+            Claim::First { lock, requests } => Some((lock, requests.unwrap())),
+            Claim::Handed => None,
+            Claim::Unavailable => panic!("the data directory was let go of"),
+        });
+        let (_lock, mut requests) = firsts.next().expect("one takes over");
+        assert!(firsts.next().is_none());
+        assert_eq!(requests.try_recv().ok(), Some(activate("second")));
     }
 
     #[test]

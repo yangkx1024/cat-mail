@@ -16,7 +16,9 @@
 ## 决策
 
 - 答复加 `quitting` 字段，`error` 照写"it is quitting"：旧版本的启动照旧报错，而不是误以为交出去了，
-  协议版本不用改。新启动收到后不再连 socket，只等锁，最多 30 秒，拿到锁就成为新实例。
+  协议版本不用改。新启动收到后接着等，最多 30 秒，拿到锁就成为新实例。
+  等的时候仍每轮问 socket：两个启动同时等时，先拿到锁的成为新实例，另一个要交给它。起初为省事收到
+  `quitting` 后只等锁，codex 审查发现另一个会一直等到 30 秒、报数据目录被占用，改回每轮都问。
 - GUI 一确定退出就丢掉请求的接收端（`shell/mod.rs` 的 `quitting(reason)`：`exit`、关掉最后一个窗口而
   退出、第二个信号；主循环结束后再兜底一次）。`quit()` 等写信窗口保存时可能被取消，那时照旧接请求。
   不等主循环结束才丢，是因为退出途中来的请求会再开出主窗口，把退出卡住。
@@ -34,11 +36,12 @@
 ## 方案
 
 - `catmail-frontend/src/instance.rs`：`Reply.quitting`、`Reply::quitting()`；`hand` 返回 `Handing`
-  （`Taken`、`Nobody`、`Quitting`）；`claim_in` 收到 `Quitting` 后只等锁，期限 `QUITTING`（30 秒）。
+  （`Taken`、`Nobody`、`Quitting`）；`claim_in` 收到 `Quitting` 后期限改为 `QUITTING`（30 秒）。
 - `catmail-gui/src/shell/mod.rs`：`REQUESTS`、`quitting(reason)`、`stop_answering()`。
 - `catmail-core/src/config.rs`：`Config::prepare_data_dir`；`client/builder.rs` 打开引擎时先调用它。
 - 文档：`docs/architecture/background.md`（单实例第 1、5 步）、`docs/architecture.md`、
   `docs/architecture/logging.md`。
 - 测试：`a_launch_waits_for_one_that_is_quitting_and_takes_over`（对方持锁超过启动期限 1 秒后放开，
-  新启动成为实例，之后的启动交给它）；`a_launch_without_quitting_replies_still_reads_one_as_an_error`。
+  新启动成为实例，之后的启动交给它）；`launches_waiting_for_one_that_is_quitting_find_the_one_that_takes_over`
+  （两个启动同时等，一个接手，另一个交给它）；`a_launch_without_quitting_replies_still_reads_one_as_an_error`。
   没在真实应用里验证"退出后立刻重开"。
