@@ -166,6 +166,8 @@
       0.5.0 已包含。还要在 Linux 上用真实账户确认关窗后网络进程退出，测一下重新开窗要多花多少时间，再更新
       background.md 里的数字
 - [x] 快捷键：Sync（Ctrl+Shift+N、F5）、Ctrl+F 聚焦搜索框、写信窗口的 Escape 关闭和 Ctrl+Shift+A 加附件
+- [x] 对话框开着时列表的键（E、X、L、Delete、Enter、Escape、F2 等）不作用于后面的邮件。⚠️ nsh 的键不按模态框
+      分范围，应用自己数开着的对话框，有就解绑（`form::keys_without_dialog`）
 
 ## P10 平台与工程
 

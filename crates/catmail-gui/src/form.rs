@@ -19,6 +19,28 @@ use crate::theme::SelectableText as _;
 /// The space inside a dialog's edges.
 pub const PADDING: f32 = 24.0;
 
+/// How many dialogs are open over the window: [`modal`]'s, and the picker's.
+#[derive(Clone, Copy, Default)]
+struct OpenDialogs(u32);
+
+/// Counts the dialog being built as open over the window until it is gone.
+pub fn count_as_open() {
+    let open = global::<OpenDialogs>();
+    open.update(|o| o.0 += 1);
+    cleanup(move || open.update(|o| o.0 -= 1));
+}
+
+/// Binds the keys `bind` binds while no dialog is open over the window. The window's
+/// keys come before a dialog's and the focus isn't kept in it: bound all along, the
+/// list's would act on the messages behind a dialog, and Escape wouldn't reach it.
+pub fn keys_without_dialog(bind: impl Fn() + 'static) {
+    effect(move || {
+        if global::<OpenDialogs>().with(|o| o.0 == 0) {
+            untracked(&bind);
+        }
+    });
+}
+
 /// A dialog `width` points wide over the window, dimming it; `cancel` is what Escape or
 /// a press beside it does.
 pub fn modal(
@@ -26,6 +48,7 @@ pub fn modal(
     cancel: impl Fn() + 'static,
     content: impl IntoElement,
 ) -> impl IntoElement {
+    count_as_open();
     dialog()
         .animation(ModalAnimation::Fade)
         .on_cancel(cancel)
@@ -338,4 +361,45 @@ fn name_form(request: NameRequest) -> impl IntoElement {
                 move || submit_(),
             )),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use nsh_core::element::{Runtime, create_root};
+
+    use super::*;
+
+    thread_local! {
+        static BOUND: Cell<u32> = const { Cell::new(0) };
+    }
+
+    /// Stands in for `on_key`: bound until its owner is cleaned up.
+    fn bind() {
+        BOUND.with(|b| b.set(b.get() + 1));
+        cleanup(|| BOUND.with(|b| b.set(b.get() - 1)));
+    }
+
+    fn bound() -> bool {
+        BOUND.with(|b| b.get()) > 0
+    }
+
+    #[test]
+    fn keys_unbind_while_any_dialog_is_open() {
+        let runtime = Runtime::default();
+        let _entered = runtime.enter();
+        let (_window, ()) = create_root(|| keys_without_dialog(bind));
+        assert!(bound());
+
+        let (settings, ()) = create_root(count_as_open);
+        assert!(!bound(), "bound behind the dialog");
+        let (picker, ()) = create_root(count_as_open);
+        picker.dispose();
+        assert!(!bound(), "bound again with a dialog still open");
+
+        settings.dispose();
+        assert!(bound(), "not bound again once the dialogs closed");
+        assert_eq!(BOUND.with(|b| b.get()), 1);
+    }
 }

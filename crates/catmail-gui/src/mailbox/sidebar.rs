@@ -27,7 +27,7 @@ use crate::mailbox::folder_commands::{folder_menu, rename_selected};
 use crate::mailbox::list;
 use crate::tasks::in_view;
 use crate::toast::report;
-use crate::{chrome, settings};
+use crate::{chrome, form, settings};
 
 /// The accounts as the sidebar shows them; `None` until the first read.
 #[derive(Clone, Default)]
@@ -273,7 +273,7 @@ pub fn sidebar() -> impl IntoElement {
             .with(|folds| global::<Accounts>().with(|a| sidebar_groups(a.list(), folds)))
     });
     let note = computed(move || global::<Accounts>().with(|a| mailbox::connection_note(a.list())));
-    on_key("F2", move |_| rename_selected());
+    form::keys_without_dialog(|| on_key("F2", move |_| rename_selected()));
     // As wide as the pane it is in, which the user drags.
     view()
         .flex_1()

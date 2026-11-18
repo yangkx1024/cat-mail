@@ -11,6 +11,7 @@ use nsh_core::ModalAnimation;
 use nsh_core::element::input;
 use nsh_core::prelude::*;
 
+use crate::form;
 use crate::icons::{Icon, icon};
 use crate::mailbox::commands::{move_to, toggle_label};
 use crate::mailbox::list;
@@ -170,6 +171,7 @@ fn picker_dialog(picker: Picker) -> impl IntoElement {
                 icon(|| Icon::Check, 16.0).text_color(move || theme().primary)
             }))
     };
+    form::count_as_open();
     nsh_base::dialog()
         .animation(ModalAnimation::Fade)
         .on_cancel(close_picker)

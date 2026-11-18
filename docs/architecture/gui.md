@@ -84,6 +84,10 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
   菜单栏、停主循环、外观映射抄了 nsh `run_app` 的私有实现。
 - **输入框失焦**：在输入框外按下时把焦点从输入框拿走，像浏览器那样，否则作用于邮件的单键（E、X、L）到不了
   视图。nsh 把焦点留在输入框里，两个后端各用一个事件 monitor 补上（应由 nsh 提供，#248）。
+- **对话框开着时停掉列表的键**：nsh 的窗口键表先于对话框拿到按键，对话框打开时也不把焦点留在里面，所以
+  列表的键（E、X、L、Delete / Backspace、Enter、Ctrl+Shift+M / U / L、F2）会作用于对话框后面的邮件，Escape
+  也被「关上读信区」拿走、到不了对话框的取消。`form::modal` 和 picker 打开时记一个数（`form::count_as_open`），
+  这些键只在没有对话框时绑定（`form::keys_without_dialog`），对话框一开就解绑，Escape 交给对话框。
 - **单实例**：GTK 应用是 `NON_UNIQUE`，不经 D-Bus 判断唯一；一个数据目录一个应用由引擎的锁和 `gui.sock`
   决定（见[后台运行](background.md#单实例与唤起)）。
 - **app id** 是 `net.yangkx.catmail`（`catmail_core::APP_ID`，frontend 和 `shell` 重新导出）：Wayland 的

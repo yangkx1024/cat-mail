@@ -31,6 +31,7 @@ use crate::buttons::Size;
 use crate::chrome;
 use crate::clock;
 use crate::engine::client;
+use crate::form;
 use crate::icons::{Icon, icon};
 use crate::mailbox::commands;
 use crate::mailbox::sidebar::{self, Accounts, SelectedPlace};
@@ -455,9 +456,11 @@ fn toggle_selected() {
 pub fn list_column() -> impl IntoElement {
     let list = element_ref();
     global::<ListRef>().set(ListRef(Some(list)));
-    on_key("x", move |_| toggle_selected());
-    on_key("enter", move |_| edit_selected_draft());
-    bind_command_keys();
+    form::keys_without_dialog(|| {
+        on_key("x", move |_| toggle_selected());
+        on_key("enter", move |_| edit_selected_draft());
+        bind_command_keys();
+    });
     follow_the_calendar();
     // Opening a row or closing it changes every row's height: the one opened, or just
     // closed, would move away from under the pointer.
