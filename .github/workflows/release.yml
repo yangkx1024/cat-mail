@@ -52,7 +52,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
 
       - name: Version
         id: version
@@ -123,7 +123,7 @@ jobs:
         with:
           ref: ${{ needs.version.outputs.ref }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
 
       - name: CLI tarball
         run: |
@@ -164,7 +164,7 @@ jobs:
           ref: ${{ needs.version.outputs.ref }}
 
       # Only for `cargo vendor` and the version: the app is built with the SDK's Rust.
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
 
       # Ubuntu 24.04 keeps unprivileged user namespaces, which bwrap (the build's
       # sandbox) needs, from programs without an AppArmor profile of their own.
@@ -208,7 +208,7 @@ jobs:
         with:
           ref: ${{ needs.version.outputs.ref }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
 
       # build-dmg.sh installs resvg from source when it has none of the version it pins;
       # keyed by that version. Caches written by a pull request are kept to its own ref,
