@@ -125,9 +125,9 @@
 - [x] 新邮件通知（Linux）：⚠️ nsh 的通知要经过视图的根，常驻时没有视图，改用 GLib 的 `GNotification`。点击走应用的 `open-mail` action，打开
       对应账户的 Inbox，列表读到那封后选中它（`Reveal`）。GNOME Shell 上点击无效：GLib 在那里改用 GNOME 自己的
       接口，它经 D-Bus 名字唤起应用，而应用不占这个名字（`NON_UNIQUE`，单实例靠 socket）
-- [x] 系统唤醒后马上同步：⚠️ nsh 不转告系统唤醒，自己听 logind 的 `PrepareForSleep(false)`（Linux，GIO 的 D-Bus，
-      Flatpak 里要 `--system-talk-name=org.freedesktop.login1`）和 `NSWorkspaceDidWakeNotification`（macOS），调
-      `MailClient::resume()`（`wake.rs`）。听不到时靠引擎自己发现睡眠（`sleep.rs`，最多晚 30 秒）。⚠️ 还没在真机的
+- [x] 系统唤醒后马上同步：⚠️ nsh 的 `wake_count()` 记在视图上，常驻时没有视图，所以自己听 logind 的
+      `PrepareForSleep(false)`（Linux，GIO 的 D-Bus，Flatpak 里要 `--system-talk-name=org.freedesktop.login1`）和
+      `NSWorkspaceDidWakeNotification`（macOS），调 `MailClient::resume()`（`wake.rs`）。听不到时靠引擎自己发现睡眠（`sleep.rs`，最多晚 30 秒）。⚠️ 还没在真机的
       睡眠上确认过（看日志的 `the frontend says the computer woke`）
 - [x] 开机启动（macOS）：Settings › General 的 "Open at login" 是 `SMAppService.mainApp`（frontend 的 `autostart`），
       只在 bundle 里、macOS 13 起显示。`--background` 和登录时的启动不开窗口（`shell::launched`）；登录时的启动按
@@ -174,9 +174,10 @@
 - [ ] 字体：Pango 自己做回退，要验证中文各字重、粗体是否正常
 - [ ] 测试：用 nsh-testing 无头驱动窗口（读信、写信、设置、文件夹）
 - [x] 在主 workspace 里：longbridge/nsh#966 在上游 main 修好（#1022），曾用 git 依赖钉在 main 的 commit 上。
-      nsh 的 Linux 后端总是链接 GStreamer（声音），开发 shell 和 CI 都装了它的开发包
+      nsh 0.6.0 起声音（GStreamer）、HTTP、WebSocket、SVG 都是可选的 feature，只打开 `webview` 和画图标的
+      `svg`，开发 shell 和 CI 不再装 GStreamer 的开发包
 - [x] 换回 crates.io：nsh 0.5.0 包含之前钉的所有修复，仓库已移出 `deny.toml` 的 `allow-git`
-- [x] cargo deny：许可证（webpki-roots 的 CDLA-Permissive-2.0，target-lexicon、winx 的 LLVM-exception）在
+- [x] cargo deny：许可证（target-lexicon、winx 的 LLVM-exception）在
       `deny.toml` 里逐个放行；nsh-updater 换成 zip 9（longbridge/nsh#1164）后，zip 8 的四个 advisory 不再忽略
 - [x] GTK 4.22 上 `gtk_widget_measure` 警告刷屏：`NshView::size_allocate` 不 measure 就 allocate 子 widget，上游
       longbridge/nsh#1048 已由 longbridge/nsh#1049 修好，nsh 0.5.0 已包含（还要在 GTK 4.22 上看一眼警告没了）

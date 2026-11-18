@@ -64,9 +64,6 @@ exceptions = [
     { crate = "target-lexicon", allow = ["Apache-2.0 WITH LLVM-exception"] },
     # The same license; Windows only, through nsh-core's cap-std.
     { crate = "winx", allow = ["Apache-2.0 WITH LLVM-exception"] },
-    # Mozilla's root certificates as data: nsh-core's image downloads (ureq) and its
-    # tokio-tungstenite's.
-    { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
 ]
 
 [licenses.private]
