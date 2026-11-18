@@ -82,7 +82,9 @@ pub struct Notice {
     pub tag: String,
     /// Plain text.
     pub title: String,
-    /// Markup on Linux ([`plain`]), plain text elsewhere.
+    /// Plain text. Where it goes to a notification server that reads the body as markup
+    /// (the XDG `body-markup` capability, on Linux), the GUI escapes it: passed on as it
+    /// is, a subject's `<b>` would be bold, and its `<a href>` a link.
     pub body: String,
 }
 
@@ -99,7 +101,7 @@ pub fn notifications(arrived: &[MessageSummary]) -> Vec<Notice> {
                     "" => "(no sender)".into(),
                     sender => sender.to_owned(),
                 },
-                body: plain(format::subject(m.subject.as_deref())),
+                body: format::subject(m.subject.as_deref()).to_owned(),
             })
             .collect();
     }
@@ -113,22 +115,8 @@ pub fn notifications(arrived: &[MessageSummary]) -> Vec<Notice> {
     vec![Notice {
         tag: target.tag(),
         title: format!("{} new messages", arrived.len()),
-        body: plain(&senders.join(", ")),
+        body: senders.join(", "),
     }]
-}
-
-/// `text` as a notification's body, which is markup on Linux where the notification
-/// server takes it (the XDG `body-markup` capability, which most do): passed on as it
-/// is, a subject's `<b>` would be bold, and its `<a href>` a link. The title is plain
-/// text everywhere.
-fn plain(text: &str) -> String {
-    if cfg!(any(target_os = "linux", target_os = "freebsd")) {
-        text.replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-    } else {
-        text.to_owned()
-    }
 }
 
 /// The arrivals announced and not yet told about, gathered for [`GATHER`].
@@ -219,17 +207,22 @@ mod tests {
         assert_eq!(Target::from_tag(&shown[0].tag), Some(Target::Window));
     }
 
+    /// Plain text on every platform: GNOME Shell and the portal show the body as it is,
+    /// and only the GUI's Linux side knows whether it goes to a server that reads markup.
     #[test]
-    fn what_the_mail_says_shows_as_written() {
-        let subject = "<b>Invoice</b> & <a href=\"https://example.com\">pay</a>";
+    fn what_the_mail_says_is_plain_text() {
+        let subject = "<b>Q&A</b> & <a href=\"https://example.com\">pay</a>";
         let shown = notifications(&[message(1, 1, "<i>Bob</i>", subject)]);
-        let body = if cfg!(any(target_os = "linux", target_os = "freebsd")) {
-            "&lt;b&gt;Invoice&lt;/b&gt; &amp; &lt;a href=\"https://example.com\"&gt;pay&lt;/a&gt;"
-        } else {
-            subject
-        };
-        assert_eq!(shown[0].body, body);
+        assert_eq!(shown[0].body, subject);
         assert_eq!(shown[0].title, "<i>Bob</i>");
+
+        let many: Vec<_> = (1..=4)
+            .map(|id| message(1, id, &format!("<A&B {id}>"), "x"))
+            .collect();
+        assert_eq!(
+            notifications(&many)[0].body,
+            "<A&B 1>, <A&B 2>, <A&B 3>, <A&B 4>"
+        );
     }
 
     #[test]

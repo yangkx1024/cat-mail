@@ -45,7 +45,7 @@ pub use catmail_core::APP_ID;
 /// Whether the app runs in its Flatpak: Flatpak puts this file at the root of every
 /// sandbox it runs.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-fn in_flatpak() -> bool {
+pub fn in_flatpak() -> bool {
     std::path::Path::new("/.flatpak-info").exists()
 }
 
