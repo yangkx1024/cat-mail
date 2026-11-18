@@ -27,5 +27,6 @@ nsh 的 `on_key` 对整个窗口生效，不按模态框分范围，而且窗口
   的 cleanup 解绑这些键，按键交给对话框，Escape 到它的取消；关上后重新绑定。
 - 列表的键（`list::list_column`、`bind_command_keys`）、邮箱的 Escape、侧栏的 F2 改用它。文档在 `gui.md`。
 - 验证：在 macOS 上手动试过，设置开着时按 E 不再归档选中的邮件，Escape 关上设置，关上后 E 照常归档。Linux 上
-  没跑（同一段代码；键表和焦点的行为是读 nsh-platform-linux 的源码得出的）。`catmail-gui` 没有无窗口的 UI 测试
-  （没有 `nsh-testing`），所以没有自动测试。
+  没跑（同一段代码；键表和焦点的行为是读 nsh-platform-linux 的源码得出的）。
+  `form::tests` 在无窗口的 `Runtime` 里测计数和解绑：对话框开着时键解绑，嵌套时关一个不提前重绑，都关上后只
+  重绑一次；去掉判断后测试失败。

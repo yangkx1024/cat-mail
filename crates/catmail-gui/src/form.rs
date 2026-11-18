@@ -362,3 +362,44 @@ fn name_form(request: NameRequest) -> impl IntoElement {
             )),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use nsh_core::element::{Runtime, create_root};
+
+    use super::*;
+
+    thread_local! {
+        static BOUND: Cell<u32> = const { Cell::new(0) };
+    }
+
+    /// Stands in for `on_key`: bound until its owner is cleaned up.
+    fn bind() {
+        BOUND.with(|b| b.set(b.get() + 1));
+        cleanup(|| BOUND.with(|b| b.set(b.get() - 1)));
+    }
+
+    fn bound() -> bool {
+        BOUND.with(|b| b.get()) > 0
+    }
+
+    #[test]
+    fn keys_unbind_while_any_dialog_is_open() {
+        let runtime = Runtime::default();
+        let _entered = runtime.enter();
+        let (_window, ()) = create_root(|| keys_without_dialog(bind));
+        assert!(bound());
+
+        let (settings, ()) = create_root(count_as_open);
+        assert!(!bound(), "bound behind the dialog");
+        let (picker, ()) = create_root(count_as_open);
+        picker.dispose();
+        assert!(!bound(), "bound again with a dialog still open");
+
+        settings.dispose();
+        assert!(bound(), "not bound again once the dialogs closed");
+        assert_eq!(BOUND.with(|b| b.get()), 1);
+    }
+}
