@@ -129,8 +129,8 @@ data"。macOS 上 LaunchServices 把同一个 bundle 的再次打开交给已在
 
 ## 系统睡眠与唤醒
 
-`Engine::resume` 有两个来源：前端知道系统醒了时调 `MailClient::resume()`；引擎自己发现睡眠（见下）。nsh 不转告
-系统唤醒，GUI 自己听（`catmail-gui` 的 `wake.rs`，引擎打开后开始，直到退出）：Linux 上是系统总线上 logind 的
+`Engine::resume` 有两个来源：前端知道系统醒了时调 `MailClient::resume()`；引擎自己发现睡眠（见下）。nsh 0.6.0 的
+`wake_count()` 只记在 surface（视图）上，常驻时没有视图就听不到，所以 GUI 自己听（`catmail-gui` 的 `wake.rs`，引擎打开后开始，直到退出）：Linux 上是系统总线上 logind 的
 `PrepareForSleep(false)`（GIO 的 D-Bus，在 GTK 的主循环上；systemd 和 elogind 都有，Flatpak 里要
 `--system-talk-name=org.freedesktop.login1`），macOS 上是 `NSWorkspace` 通知中心的
 `NSWorkspaceDidWakeNotification`。两边都只是调 `resume`；听不到（没有系统总线、没有 logind）时还有引擎自己发现。
