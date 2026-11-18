@@ -14,7 +14,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
 use self::search::{SearchKey, search_key};
-use self::wire::{Tok, literal, quote, read_command, tokenize};
+use self::wire::{Read, Tok, literal, quote, read_command, tokenize};
 use crate::TestCert;
 use crate::mime;
 use crate::tls::{Stream, TlsMode, lock};
@@ -403,6 +403,12 @@ pub struct Faults {
     pub idle_timeout: Option<Duration>,
     /// Advertise PREVIEW (RFC 8970), and answer it as this says.
     pub preview: Option<Previews>,
+    /// Advertise LITERAL+ (RFC 7888): any literal may be sent without waiting for `+`.
+    /// Without it or `literal_minus`, a non-synchronizing literal closes the connection.
+    pub literal_plus: bool,
+    /// Advertise LITERAL- (RFC 7888), as Gmail does: literals up to 4096 bytes may be sent
+    /// without waiting for `+`.
+    pub literal_minus: bool,
 }
 
 /// How a server with [`Faults::preview`] answers PREVIEW: with the start of the message's
@@ -486,6 +492,8 @@ impl Default for Faults {
             coremail: false,
             idle_timeout: None,
             preview: None,
+            literal_plus: false,
+            literal_minus: false,
         }
     }
 }
@@ -533,6 +541,8 @@ pub struct ServerState {
     pub open_connections: usize,
     header_fetches: usize,
     body_fetches: usize,
+    /// Literals the server asked for with `+`; the others came non-synchronizing.
+    pub synchronized_literals: usize,
     /// Connections numbered up to this one are closed at their next command.
     dropped_through: usize,
     /// Connections numbered up to this one answer nothing more, and stay open.
@@ -554,6 +564,7 @@ impl ServerState {
             open_connections: 0,
             header_fetches: 0,
             body_fetches: 0,
+            synchronized_literals: 0,
             dropped_through: 0,
             silenced_through: 0,
         }
@@ -571,6 +582,8 @@ impl ServerState {
     pub fn gmail(username: &str, password: &str) -> Self {
         let mut state = Self::new(username, password);
         state.gmail = true;
+        // As Gmail advertises it.
+        state.faults.literal_minus = true;
         let mailbox =
             |name: &str, attribute: &str| FakeMailbox::new(name).with_attribute(attribute);
         state.mailboxes.extend([
@@ -1142,23 +1155,35 @@ async fn serve(
             .await?;
     }
     loop {
-        let (refuse, qq_mail, idle_timeout) = {
+        let (refuse, qq_mail, idle_timeout, non_sync_up_to) = {
             let faults = &lock(&state).faults;
+            let non_sync_up_to = match (faults.literal_plus, faults.literal_minus) {
+                (true, _) => Some(usize::MAX),
+                (false, true) => Some(4096),
+                (false, false) => None,
+            };
             (
                 faults.reject_append_literal,
                 faults.qq_mail,
                 faults.idle_timeout,
+                non_sync_up_to,
             )
         };
-        let command = read_command(&mut io, refuse, qq_mail);
+        let command = read_command(&mut io, refuse, qq_mail, non_sync_up_to);
         // Timed out: closed as at EOF.
         let command = match idle_timeout {
             Some(t) => tokio::time::timeout(t, command).await.unwrap_or(Ok(None)),
             None => command.await,
         };
-        let Some((line, literals)) = command? else {
+        let Some(Read {
+            line,
+            literals,
+            synchronized,
+        }) = command?
+        else {
             return Ok(());
         };
+        lock(&state).synchronized_literals += synchronized;
         match handle(&mut io, &mut session, &state, &line, literals).await? {
             Next::Continue => {}
             Next::Close => return Ok(()),
@@ -1210,6 +1235,11 @@ fn capabilities(state: &ServerState, session: &Session) -> String {
     }
     if state.faults.preview.is_some() {
         caps.push("PREVIEW");
+    }
+    if state.faults.literal_plus {
+        caps.push("LITERAL+");
+    } else if state.faults.literal_minus {
+        caps.push("LITERAL-");
     }
     caps.extend(append_limit.as_deref());
     caps.join(" ")

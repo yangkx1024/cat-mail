@@ -23,7 +23,8 @@
     连接一段时间没有命令就断开（`idle_timeout`，像网易那样，IDLE 中不算），NOOP 回 NO 或回 BYE 断开；
   - 响应：重复或倒序的 FETCH、不带 UID 的主动 FETCH、section 回 NIL、要正文的 UID FETCH 只回 OK（前 n 次）、比原文多一字节的 RFC822.SIZE、
     STARTTLS 之后的明文注入；
-  - 能力与状态：没有 CONDSTORE，关掉 MOVE、UIDPLUS 和 IDLE，UIDVALIDITY 改变，带 CHARSET 的 SEARCH 回
+  - 能力与状态：没有 CONDSTORE，关掉 MOVE、UIDPLUS 和 IDLE，通告 `LITERAL+` 或 `LITERAL-`（Gmail 模式默认
+    `LITERAL-`；不允许的 `{n+}` 回 BAD 并断开，记下要过 `+` 的 literal 数），UIDVALIDITY 改变，带 CHARSET 的 SEARCH 回
     `NO [BADCHARSET]`，带文字的 SEARCH 无视文字、返回全部；
   - 服务器软件：QQ 邮箱（问候语 `QQMail XMIMAP4Server ready`，带 `TEXT` 的 SEARCH 返回全部，SEARCH 里的字面量
     当成 `{n}` 本身来搜）、Coremail 的问候语 `Coremail System IMap Server Ready`；
