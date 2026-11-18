@@ -7,7 +7,7 @@ use tokio::sync::Semaphore;
 
 mod common;
 
-use common::{Env, env_added, synced_env as env};
+use common::{ALL_MAIL, Env, env_added, synced_env as env};
 
 /// A plain message, dated by `minute`.
 fn mail(subject: &str, minute: u32, body: &str) -> Vec<u8> {
@@ -439,8 +439,6 @@ async fn a_server_refusing_the_login_isnt_asked_again_until_a_sync_gets_through(
         );
     }
 }
-
-const ALL_MAIL: &str = "[Gmail]/All Mail";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn gmail_is_searched_where_messages_are_in_its_own_syntax() {

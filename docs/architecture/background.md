@@ -120,8 +120,8 @@ data"。macOS 上 LaunchServices 把同一个 bundle 的再次打开交给已在
   - 起初 GUI 另有一把 `gui.lock`，因为引擎在 `open_async` 里才加锁；改为让核心单独提供加锁，只剩一把锁，
     也不用对外公开创建数据目录的规则。
 - **协议**：一行一个 JSON 请求、一行答复，带版本号；版本不同时答复说明原因，而不是解析失败。先只有
-  `Activate { display }`，`display` 是请求方的 `WAYLAND_DISPLAY`、`DISPLAY`、`XDG_RUNTIME_DIR` 和
-  `XDG_ACTIVATION_TOKEN`（只在 Linux 上有）。以后加 `Compose { mailto }`（注册为默认邮件程序时用）、
+  `Activate { activation_token }`，是请求方的 `XDG_ACTIVATION_TOKEN`（只在 Linux 上有）。起初还带请求方的
+  `WAYLAND_DISPLAY`、`DISPLAY`、`XDG_RUNTIME_DIR`，但应用不按它们重连（见下一条），没人读，删掉（版本 2）。以后加 `Compose { mailto }`（注册为默认邮件程序时用）、
   打开某封邮件，也可以长成"其他前端经 IPC 连接正在运行的引擎"。
 - 收到 `Activate`：打开主窗口（没有时）并放到前面，用请求方的激活令牌，Wayland 上它才能获得焦点。常驻时 GTK
   仍连着原来的显示服务器，不按请求方的显示环境重连。

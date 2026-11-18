@@ -159,7 +159,7 @@ impl Cutoff {
 }
 
 /// [`Engine::draft_upload_delay`] unless the builder sets it.
-pub const DEFAULT_DRAFT_UPLOAD_DELAY: Duration = Duration::from_secs(15);
+pub(crate) const DEFAULT_DRAFT_UPLOAD_DELAY: Duration = Duration::from_secs(15);
 
 /// What the engine keeps per account.
 ///

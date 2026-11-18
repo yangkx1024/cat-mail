@@ -149,9 +149,9 @@ impl<'c> Folders<'c> {
         Ok(self.remote_name(id)?.map(|remote_name| (id, remote_name)))
     }
 
-    /// The account's locations, which sync goes through (labels have no sync state), in
+    /// The sync state of the account's locations (labels have none), in
     /// [`LOCATION_ORDER`].
-    pub fn sync_states(&self, account: AccountId) -> Result<Vec<FolderSyncState>> {
+    pub(crate) fn sync_states(&self, account: AccountId) -> Result<Vec<FolderSyncState>> {
         let mut stmt = self.conn.prepare(&format!(
             "{SYNC_STATE} WHERE account_id = ?1 AND kind = 'location' {LOCATION_ORDER}"
         ))?;

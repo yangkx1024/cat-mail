@@ -24,6 +24,34 @@ pub const GMAIL_OVER_LIMIT: &str =
 #[allow(dead_code)]
 pub const NETEASE_OVER_LIMIT: &str = "Fetch volume limit exceed";
 
+/// Gmail's mailbox holding every message, a location.
+#[allow(dead_code)]
+pub const ALL_MAIL: &str = "[Gmail]/All Mail";
+
+/// Over the whole-message limit, with text and a 3 MiB base64 attachment: its body is
+/// fetched without the attachment, which is fetched on its own when needed.
+#[allow(dead_code)]
+pub fn large_message() -> Vec<u8> {
+    let mut raw = b"From: Bob <bob@example.com>\r\n\
+        Subject: Big file\r\n\
+        Content-Type: multipart/mixed; boundary=\"b\"\r\n\r\n\
+        --b\r\n\
+        Content-Type: text/plain\r\n\r\n\
+        The video is attached.\r\n\
+        --b\r\n\
+        Content-Type: video/mp4; name=\"clip.mp4\"\r\n\
+        Content-Disposition: attachment; filename=\"clip.mp4\"\r\n\
+        Content-Transfer-Encoding: base64\r\n\r\n"
+        .to_vec();
+    // 3 MiB of 'A' encodes to zeros.
+    for _ in 0..(3 * 1024 * 1024 / 76) {
+        raw.extend_from_slice(&[b'A'; 76]);
+        raw.extend_from_slice(b"\r\n");
+    }
+    raw.extend_from_slice(b"--b--\r\n");
+    raw
+}
+
 /// Fake servers and a client with one account on them (alice@example.com, logging in
 /// as alice / pw), not yet synced.
 pub struct Env {

@@ -120,7 +120,7 @@ fn settings_dialog() -> impl IntoElement {
         _ => Section::General,
     };
     let section = signal(first);
-    // GPUI Kit's sidebar menu, 10 rem wide.
+    // The sections' menu down the left, 160 px wide.
     let nav = view()
         .w(px(160.0))
         .flex_shrink_0()

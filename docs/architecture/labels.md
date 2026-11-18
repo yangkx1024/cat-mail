@@ -50,8 +50,8 @@
 改 `0001_init.sql`（项目未发布），已有的本地数据库要重建。
 
 - `folders.kind`：`location` / `label`，对账文件夹时按上面的规则写入。`folders.listed`：LIST 里有没有它。
-- `messages.gm_msgid`、`gm_thrid`：可空，Gmail 账户上 `UNIQUE (account_id, gm_msgid)`。会话里第一封的
-  `X-GM-THRID` 等于它自己的 `X-GM-MSGID`。
+- `messages.gm_msgid`：可空，Gmail 账户上 `UNIQUE (account_id, gm_msgid)`。`X-GM-THRID` 协议层照常取到，
+  不存（会话分组见[存储](storage.md)）。
 - `message_labels (message_id, folder_id, account_id, list_date)`：主键 (message_id, folder_id)，到
   `messages`、`folders` 都用 `(id, account_id)` 复合外键。`list_date` 冗余一份邮件的排序键（日期不变），
   索引 `(folder_id, list_date, message_id)`：标签的翻页与文件夹一样是两次定位（见
@@ -83,7 +83,7 @@
   不认识的系统标签（不在 `\Inbox`、`\Sent`、`\Draft`、`\Important`、`\Starred` 之中）忽略；系统标签
   找不到对应角色的文件夹（在 Gmail 设置里被隐藏）时也忽略，因为不知道它的邮箱名。它的邮箱后来又出现时，
   邮件的 MODSEQ 不会因此变大，所以对账时清空各个位置的 HIGHESTMODSEQ，下次同步重拉全部 flags 和标签。
-- **`X-GM-MSGID` / `X-GM-THRID` 是无符号 64 位**，按位存成 SQLite 的 INTEGER（与 MODSEQ 相同），只比较
+- **`X-GM-MSGID` 是无符号 64 位**，按位存成 SQLite 的 INTEGER（与 MODSEQ 相同），只比较
   相等，不比较大小。
 
 ## 同步

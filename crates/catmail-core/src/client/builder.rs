@@ -106,7 +106,7 @@ impl MailClientBuilder {
     }
 
     /// How long background sync waits after a draft last changed before copying it to
-    /// the server's Drafts folder [default: [`DEFAULT_DRAFT_UPLOAD_DELAY`], 15 seconds],
+    /// the server's Drafts folder [default: 15 seconds],
     /// so that a frontend saving as the user types doesn't replace the copy with each
     /// save. Uploads asked for ([`MailClient::replay_pending`],
     /// [`MailClient::sync_account`]) don't wait.
@@ -122,7 +122,7 @@ impl MailClientBuilder {
         self.sync_in_background(Some(SyncSchedule::default()))
             .prefetch_bodies(Some(BodyPrefetch::default()))
             .send_in_background(true)
-            .collect_garbage_every(Some(crate::DEFAULT_GC_INTERVAL))
+            .collect_garbage_every(Some(crate::gc::DEFAULT_GC_INTERVAL))
     }
 
     /// Batch sizes, the whole-message limit and the keepalive of idle connections
@@ -353,7 +353,7 @@ mod tests {
             .runtime(Handle::current())
             .secrets(Arc::new(MemorySecrets::default()))
             .send_in_background(true)
-            .collect_garbage_every(Some(crate::DEFAULT_GC_INTERVAL))
+            .collect_garbage_every(Some(crate::gc::DEFAULT_GC_INTERVAL))
             .open()
             .unwrap();
         assert_eq!(metrics.num_alive_tasks(), before + 4);

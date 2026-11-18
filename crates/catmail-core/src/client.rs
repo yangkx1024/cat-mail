@@ -32,7 +32,7 @@ pub use builder::MailClientBuilder;
 
 /// How many events [`MailClient::subscribe`]'s receivers keep unread before the oldest
 /// are dropped and they get `RecvError::Lagged`.
-pub const EVENT_CAPACITY: usize = 256;
+pub(crate) const EVENT_CAPACITY: usize = 256;
 
 /// The only entry point frontends use. Cheap to clone; all clones share one engine, which
 /// closes once they are all dropped, or [`shut_down`](MailClient::shut_down).

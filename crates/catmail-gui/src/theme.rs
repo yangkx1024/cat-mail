@@ -115,7 +115,7 @@ pub fn danger_badge() -> AdaptiveColor {
     tint(theme().destructive)
 }
 
-/// A list's selected row, as GPUI Kit's lists draw it.
+/// A list's selected row.
 pub fn list_active() -> AdaptiveColor {
     token("list-active", || theme().accent)
 }

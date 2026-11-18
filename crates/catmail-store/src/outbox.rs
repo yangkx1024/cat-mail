@@ -77,9 +77,9 @@ impl<'c> Outbox<'c> {
             .prepare_cached(
                 "INSERT INTO outbox (account_id, identity_id, draft_id, raw_blob_hash,
                                      message_id_hdr, subject, envelope_from, recipients_json,
-                                     next_attempt_at, created_at, updated_at)
+                                     next_attempt_at, created_at)
                  VALUES (:account, (SELECT identity_id FROM drafts WHERE id = :draft), :draft,
-                         :raw, :message_id, :subject, :from, :recipients, :now, :now, :now)",
+                         :raw, :message_id, :subject, :from, :recipients, :now, :now)",
             )?
             .execute(named_params! {
                 ":account": entry.account.0,
@@ -165,14 +165,14 @@ impl<'c> Outbox<'c> {
 
     /// Starts sending a queued entry: it becomes `sending`, and the attempt is counted
     /// before it is made. `None` if the entry isn't queued (any more).
-    pub fn begin_send(&self, id: OutboxId, now: i64) -> Result<Option<OutboxJob>> {
-        self.begin(id, OutboxStatus::Queued, OutboxStatus::Sending, now)
+    pub fn begin_send(&self, id: OutboxId) -> Result<Option<OutboxJob>> {
+        self.begin(id, OutboxStatus::Queued, OutboxStatus::Sending)
     }
 
     /// Starts saving an accepted entry to Sent, counting the attempt before it is made.
     /// `None` if the entry isn't accepted (any more).
-    pub fn begin_save(&self, id: OutboxId, now: i64) -> Result<Option<OutboxJob>> {
-        self.begin(id, OutboxStatus::Accepted, OutboxStatus::Accepted, now)
+    pub fn begin_save(&self, id: OutboxId) -> Result<Option<OutboxJob>> {
+        self.begin(id, OutboxStatus::Accepted, OutboxStatus::Accepted)
     }
 
     fn begin(
@@ -180,12 +180,11 @@ impl<'c> Outbox<'c> {
         id: OutboxId,
         from: OutboxStatus,
         to: OutboxStatus,
-        now: i64,
     ) -> Result<Option<OutboxJob>> {
         let updated = self.conn.execute(
-            "UPDATE outbox SET status = ?3, attempts = attempts + 1, updated_at = ?4
+            "UPDATE outbox SET status = ?3, attempts = attempts + 1
              WHERE id = ?1 AND status = ?2",
-            params![id.0, from.as_str(), to.as_str(), now],
+            params![id.0, from.as_str(), to.as_str()],
         )?;
         if updated == 0 {
             return Ok(None);
@@ -207,12 +206,11 @@ impl<'c> Outbox<'c> {
     /// Written right before the end of the message is sent, when the server may accept
     /// it at any moment: whatever happens next, the message must not be resent on its
     /// own. Written again with the error if no verdict arrives.
-    pub fn mark_unknown(&self, id: OutboxId, error: Option<&str>, now: i64) -> Result<bool> {
+    pub fn mark_unknown(&self, id: OutboxId, error: Option<&str>) -> Result<bool> {
         self.transition(
             id,
             &[OutboxStatus::Sending, OutboxStatus::Unknown],
             OutboxStatus::Unknown,
-            now,
             None,
             error,
         )
@@ -224,7 +222,7 @@ impl<'c> Outbox<'c> {
     pub fn mark_accepted(&self, id: OutboxId, now: i64) -> Result<Option<Touched>> {
         let updated = self.conn.execute(
             "UPDATE outbox SET status = 'accepted', attempts = 0, next_attempt_at = ?2,
-                               last_error = NULL, updated_at = ?2
+                               last_error = NULL
              WHERE id = ?1 AND status IN ('sending', 'unknown')",
             params![id.0, now],
         )?;
@@ -255,12 +253,11 @@ impl<'c> Outbox<'c> {
     }
 
     /// A temporary failure before the server accepted anything: try again at `next`.
-    pub fn requeue(&self, id: OutboxId, next: i64, error: &str, now: i64) -> Result<bool> {
+    pub fn requeue(&self, id: OutboxId, next: i64, error: &str) -> Result<bool> {
         self.transition(
             id,
             &[OutboxStatus::Sending, OutboxStatus::Unknown],
             OutboxStatus::Queued,
-            now,
             Some(next),
             Some(error),
         )
@@ -268,48 +265,44 @@ impl<'c> Outbox<'c> {
 
     /// Puts off a queued entry that wasn't attempted, because the server couldn't be
     /// reached for an earlier one. Its attempts don't count up.
-    pub fn postpone(&self, id: OutboxId, next: i64, error: &str, now: i64) -> Result<bool> {
+    pub fn postpone(&self, id: OutboxId, next: i64, error: &str) -> Result<bool> {
         self.transition(
             id,
             &[OutboxStatus::Queued],
             OutboxStatus::Queued,
-            now,
             Some(next),
             Some(error),
         )
     }
 
     /// The server refused the message for good, or for now once too often.
-    pub fn fail(&self, id: OutboxId, error: &str, now: i64) -> Result<bool> {
+    pub fn fail(&self, id: OutboxId, error: &str) -> Result<bool> {
         self.transition(
             id,
             &[OutboxStatus::Sending, OutboxStatus::Unknown],
             OutboxStatus::Failed,
-            now,
             None,
             Some(error),
         )
     }
 
     /// Saving to Sent failed; try again at `next`.
-    pub fn save_later(&self, id: OutboxId, next: i64, error: &str, now: i64) -> Result<bool> {
+    pub fn save_later(&self, id: OutboxId, next: i64, error: &str) -> Result<bool> {
         self.transition(
             id,
             &[OutboxStatus::Accepted],
             OutboxStatus::Accepted,
-            now,
             Some(next),
             Some(error),
         )
     }
 
     /// Saving to Sent failed again: no more automatic attempts, the user decides.
-    pub fn give_up_saving(&self, id: OutboxId, error: &str, now: i64) -> Result<bool> {
+    pub fn give_up_saving(&self, id: OutboxId, error: &str) -> Result<bool> {
         self.transition(
             id,
             &[OutboxStatus::Accepted],
             OutboxStatus::Unsaved,
-            now,
             None,
             Some(error),
         )
@@ -343,7 +336,7 @@ impl<'c> Outbox<'c> {
     /// running: at start-up, or under the account's send permit.
     pub fn recover_interrupted(&self, account: Option<AccountId>, now: i64) -> Result<usize> {
         Ok(self.conn.execute(
-            "UPDATE outbox SET status = 'queued', next_attempt_at = ?1, updated_at = ?1
+            "UPDATE outbox SET status = 'queued', next_attempt_at = ?1
              WHERE status = 'sending' AND (?2 IS NULL OR account_id = ?2)",
             params![now, account.map(|a| a.0)],
         )?)
@@ -360,7 +353,7 @@ impl<'c> Outbox<'c> {
         };
         self.conn.execute(
             // Saving keeps its count: past the first attempt, it checks Sent first.
-            "UPDATE outbox SET status = ?2, next_attempt_at = ?3, updated_at = ?3,
+            "UPDATE outbox SET status = ?2, next_attempt_at = ?3,
                                attempts = CASE WHEN ?2 = 'accepted' THEN attempts ELSE 0 END
              WHERE id = ?1",
             params![id.0, to.as_str(), now],
@@ -417,14 +410,12 @@ impl<'c> Outbox<'c> {
         id: OutboxId,
         from: &[OutboxStatus],
         to: OutboxStatus,
-        now: i64,
         next: Option<i64>,
         error: Option<&str>,
     ) -> Result<bool> {
         let from = to_json(&from.iter().map(|s| s.as_str()).collect::<Vec<_>>());
         let updated = self.conn.execute(
-            "UPDATE outbox SET status = :to, next_attempt_at = :next, last_error = :error,
-                               updated_at = :now
+            "UPDATE outbox SET status = :to, next_attempt_at = :next, last_error = :error
              WHERE id = :id AND status IN (SELECT value FROM json_each(:from))",
             named_params! {
                 ":id": id.0,
@@ -432,7 +423,6 @@ impl<'c> Outbox<'c> {
                 ":to": to.as_str(),
                 ":next": next,
                 ":error": error,
-                ":now": now,
             },
         )?;
         Ok(updated > 0)
@@ -548,7 +538,7 @@ mod tests {
         );
 
         let job = store
-            .write(|db| db.outbox().begin_send(id, 11))
+            .write(|db| db.outbox().begin_send(id))
             .unwrap()
             .unwrap();
         assert_eq!(job.raw, hash('a'));
@@ -556,7 +546,7 @@ mod tests {
         assert_eq!(status(&store, id), Some((OutboxStatus::Sending, 1)));
         assert!(
             store
-                .write(|db| db.outbox().begin_send(id, 11))
+                .write(|db| db.outbox().begin_send(id))
                 .unwrap()
                 .is_none(),
             "one attempt at a time"
@@ -569,7 +559,7 @@ mod tests {
 
         assert!(
             store
-                .write(|db| db.outbox().mark_unknown(id, None, 12))
+                .write(|db| db.outbox().mark_unknown(id, None))
                 .unwrap()
         );
         assert!(
@@ -580,7 +570,7 @@ mod tests {
         );
         assert!(
             store
-                .write(|db| db.outbox().begin_send(id, 13))
+                .write(|db| db.outbox().begin_send(id))
                 .unwrap()
                 .is_none(),
             "never sent again"
@@ -589,12 +579,12 @@ mod tests {
 
         // Saving to Sent fails once, then works.
         store
-            .write(|db| db.outbox().begin_save(id, 13))
+            .write(|db| db.outbox().begin_save(id))
             .unwrap()
             .unwrap();
         assert!(
             store
-                .write(|db| db.outbox().save_later(id, 60, "NO quota", 13))
+                .write(|db| db.outbox().save_later(id, 60, "NO quota"))
                 .unwrap()
         );
         let entry = store.read(|db| db.outbox().get(id)).unwrap().unwrap();
@@ -612,7 +602,7 @@ mod tests {
             Some(60)
         );
         store
-            .write(|db| db.outbox().begin_save(id, 60))
+            .write(|db| db.outbox().begin_save(id))
             .unwrap()
             .unwrap();
         assert_eq!(status(&store, id), Some((OutboxStatus::Accepted, 2)));
@@ -630,9 +620,9 @@ mod tests {
     #[test]
     fn attempts_set_before_the_clock_went_back_are_brought_forward() {
         let (store, account, _, id) = setup();
-        store.write(|db| db.outbox().begin_send(id, 940)).unwrap();
+        store.write(|db| db.outbox().begin_send(id)).unwrap();
         store
-            .write(|db| db.outbox().requeue(id, 1000, "421 busy", 940))
+            .write(|db| db.outbox().requeue(id, 1000, "421 busy"))
             .unwrap();
         let bring_forward = |now| {
             store
@@ -651,10 +641,10 @@ mod tests {
     #[test]
     fn failures_and_user_decisions() {
         let (store, account, draft, id) = setup();
-        store.write(|db| db.outbox().begin_send(id, 11)).unwrap();
+        store.write(|db| db.outbox().begin_send(id)).unwrap();
         assert!(
             store
-                .write(|db| db.outbox().requeue(id, 40, "421 busy", 11))
+                .write(|db| db.outbox().requeue(id, 40, "421 busy"))
                 .unwrap()
         );
         assert_eq!(status(&store, id), Some((OutboxStatus::Queued, 1)));
@@ -665,10 +655,10 @@ mod tests {
                 .is_empty()
         );
 
-        store.write(|db| db.outbox().begin_send(id, 40)).unwrap();
+        store.write(|db| db.outbox().begin_send(id)).unwrap();
         assert!(
             store
-                .write(|db| db.outbox().fail(id, "550 no such user", 40))
+                .write(|db| db.outbox().fail(id, "550 no such user"))
                 .unwrap()
         );
         assert_eq!(status(&store, id), Some((OutboxStatus::Failed, 2)));
@@ -693,9 +683,9 @@ mod tests {
         );
 
         // Lost the connection after the final dot.
-        store.write(|db| db.outbox().begin_send(id, 42)).unwrap();
+        store.write(|db| db.outbox().begin_send(id)).unwrap();
         store
-            .write(|db| db.outbox().mark_unknown(id, None, 42))
+            .write(|db| db.outbox().mark_unknown(id, None))
             .unwrap();
         for status in [OutboxStatus::Queued, OutboxStatus::Accepted] {
             assert!(
@@ -707,7 +697,7 @@ mod tests {
             );
         }
         store
-            .write(|db| db.outbox().mark_unknown(id, Some("connection closed"), 42))
+            .write(|db| db.outbox().mark_unknown(id, Some("connection closed")))
             .unwrap();
         let (sent, _) = store
             .write(|db| db.outbox().mark_sent(id, 43))
@@ -719,9 +709,9 @@ mod tests {
         );
 
         // Saving keeps its attempt count across a retry, so it still checks Sent first.
-        store.write(|db| db.outbox().begin_save(id, 43)).unwrap();
+        store.write(|db| db.outbox().begin_save(id)).unwrap();
         store
-            .write(|db| db.outbox().save_later(id, 99, "BYE", 43))
+            .write(|db| db.outbox().save_later(id, 99, "BYE"))
             .unwrap();
         let retried = store
             .write(|db| db.outbox().retry(id, 44))
@@ -742,7 +732,7 @@ mod tests {
     #[test]
     fn interrupted_sends_go_back_to_the_queue() {
         let (store, account, _, id) = setup();
-        store.write(|db| db.outbox().begin_send(id, 11)).unwrap();
+        store.write(|db| db.outbox().begin_send(id)).unwrap();
         let other = AccountId(account.0 + 1);
         assert_eq!(
             store
@@ -760,9 +750,9 @@ mod tests {
         assert_eq!(status(&store, id), Some((OutboxStatus::Queued, 1)));
 
         // Past the point where the server may have accepted it, it stays unknown.
-        store.write(|db| db.outbox().begin_send(id, 21)).unwrap();
+        store.write(|db| db.outbox().begin_send(id)).unwrap();
         store
-            .write(|db| db.outbox().mark_unknown(id, None, 21))
+            .write(|db| db.outbox().mark_unknown(id, None))
             .unwrap();
         assert_eq!(
             store

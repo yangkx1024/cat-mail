@@ -28,7 +28,7 @@ pub mod logging;
 pub mod html {
     pub use catmail_html::{
         DarkPalette, Image, Served, ServedImage, cid_image_ids, embed_inline_images, escape,
-        nested, quoted_text_html, remote_image_url, serve_images,
+        quoted_text_html, remote_image_url, serve_images, without_sheet,
     };
     pub use catmail_proto::http::RemoteImage;
 }
@@ -53,17 +53,16 @@ pub use catmail_proto::TlsConfig;
 /// frontends keep elsewhere (MCP tokens in the config directory).
 pub use catmail_store::{create_private_dir, private_file_options};
 pub use catmail_types::*;
-pub use client::{DraftEditor, EVENT_CAPACITY, MailClient, MailClientBuilder};
+pub use client::{DraftEditor, MailClient, MailClientBuilder};
 pub use config::{APP_ID, Config, DataDirLock};
 pub use drafts::{EditMark, named_as_image};
-pub use engine::{DEFAULT_DRAFT_UPLOAD_DELAY, EngineTuning};
+pub use engine::EngineTuning;
 pub use error::{Error, HttpError, ImapError, Result, SmtpError, StoreError};
 pub use filename::safe_filename;
-pub use gc::DEFAULT_GC_INTERVAL;
 pub use images::RemoteImageStream;
 pub use prefetch::BodyPrefetch;
 pub use secrecy::{ExposeSecret, SecretString};
-pub use secrets::{KeyringSecrets, MemorySecrets, SecretStore};
+pub use secrets::{MemorySecrets, SecretStore};
 pub use send::{DraftRevision, SendPreview};
 /// What [`MailClient::subscribe`]'s receiver returns when it falls behind or the engine
 /// is gone.

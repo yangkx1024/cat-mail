@@ -153,7 +153,6 @@ pub struct NewMessage {
     pub internal_date: Option<i64>,
     pub size: Option<u32>,
     pub message_id: Option<String>,
-    pub in_reply_to: Option<String>,
     pub references: Vec<String>,
     pub subject: Option<String>,
     pub from: Vec<Address>,
@@ -163,9 +162,8 @@ pub struct NewMessage {
     /// The Date header; INTERNALDATE is used when it is missing.
     pub date: Option<i64>,
     pub has_attachments: bool,
-    /// X-GM-MSGID and X-GM-THRID, on Gmail.
+    /// X-GM-MSGID, on Gmail.
     pub gm_msgid: Option<u64>,
-    pub gm_thrid: Option<u64>,
     /// The server's preview came with it (see [`Messages::store_previews`]), as this
     /// snippet.
     pub previewed: bool,
@@ -258,7 +256,8 @@ impl<'c> Messages<'c> {
     /// [`delete_gone`](Self::delete_gone) and the
     /// bodies stored ([`store_body`](Self::store_body), [`rebuild_body`](Self::rebuild_body),
     /// [`refresh_html`](Self::refresh_html)): snippets and attachment markers show there
-    /// too.
+    /// too. Only this `Messages`' changes: another from [`Db::messages`](crate::Db::messages)
+    /// knows none of them.
     pub fn touched_labels(&self) -> Vec<FolderId> {
         self.touched.take().into_iter().collect()
     }
@@ -313,7 +312,8 @@ impl<'c> Messages<'c> {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    pub fn count(&self, folder: FolderId) -> Result<u32> {
+    #[cfg(test)]
+    pub(crate) fn count(&self, folder: FolderId) -> Result<u32> {
         Ok(self.conn.query_row(
             "SELECT count(*) FROM messages WHERE folder_id = ?1",
             [folder.0],
@@ -337,14 +337,12 @@ impl<'c> Messages<'c> {
     ) -> Result<Upserted> {
         let mut insert = self.conn.prepare_cached(
             "INSERT INTO messages (account_id, folder_id, uid, flags, keywords_json, modseq,
-                                   gm_msgid, gm_thrid, internal_date, size, message_id_hdr,
-                                   in_reply_to, references_hdr, subject, from_json, to_json,
-                                   cc_json, reply_to_json, date, has_attachments,
-                                   previewed, snippet)
+                                   gm_msgid, size, message_id_hdr, references_hdr, subject,
+                                   from_json, to_json, cc_json, reply_to_json, date,
+                                   has_attachments, previewed, snippet)
              SELECT :account, :folder, :uid, :flags, :keywords, :modseq,
-                    :gm_msgid, :gm_thrid, :internal_date, :size, :message_id,
-                    :in_reply_to, :references, :subject, :from, :to, :cc, :reply_to, :date,
-                    :has_attachments, :previewed, :snippet
+                    :gm_msgid, :size, :message_id, :references, :subject,
+                    :from, :to, :cc, :reply_to, :date, :has_attachments, :previewed, :snippet
              WHERE NOT EXISTS (
                  SELECT 1 FROM pending_ops
                  WHERE folder_id = :folder AND status = 'pending' AND uid = :uid
@@ -409,11 +407,8 @@ impl<'c> Messages<'c> {
                 ":keywords": to_json(&m.state.keywords),
                 ":modseq": m.state.modseq.map(|v| v as i64),
                 ":gm_msgid": m.gm_msgid.map(|v| v as i64),
-                ":gm_thrid": m.gm_thrid.map(|v| v as i64),
-                ":internal_date": m.internal_date,
                 ":size": m.size,
                 ":message_id": m.message_id,
-                ":in_reply_to": m.in_reply_to,
                 ":references": to_id_list(&m.references),
                 ":subject": m.subject,
                 ":from": to_json(&m.from),
@@ -2395,7 +2390,7 @@ mod tests {
     fn labelled(uid: u32, flags: Flags, labels: Vec<GmailLabel>) -> NewMessage {
         let mut m = message(uid, Some(uid as i64), flags);
         m.state.labels = Some(labels);
-        (m.gm_msgid, m.gm_thrid) = (Some(100 + uid as u64), Some(100 + uid as u64));
+        m.gm_msgid = Some(100 + uid as u64);
         m
     }
 

@@ -15,7 +15,7 @@ pub trait SecretStore: Send + Sync {
 
 /// The OS credential store: Secret Service on Linux, Keychain on macOS,
 /// Credential Manager on Windows.
-pub struct KeyringSecrets {
+pub(crate) struct KeyringSecrets {
     service: String,
 }
 

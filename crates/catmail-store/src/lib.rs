@@ -160,6 +160,9 @@ impl<'c> Db<'c> {
         Folders::new(self.conn)
     }
 
+    /// A new [`Messages`] each call, with its own [`touched_labels`](Messages::touched_labels):
+    /// keep the one the changes are made through and ask that one, since
+    /// `db.messages().upsert(..)?; db.messages().touched_labels()` always returns nothing.
     pub fn messages(&self) -> Messages<'c> {
         Messages::new(self.conn)
     }

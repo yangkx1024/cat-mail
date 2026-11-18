@@ -24,7 +24,8 @@ const WINDOW_BUTTONS_LEFT: f32 = 12.0;
 /// How tall the window's buttons are on macOS, to center them in their row.
 const WINDOW_BUTTON_SIZE: f32 = 14.0;
 
-/// How tall the composer's title bar is asked to be: GPUI Kit's.
+/// How tall the composer's title bar is asked to be on macOS, the window's buttons
+/// centered in it.
 const TITLE_BAR_HEIGHT: f32 = 34.0;
 
 /// The main window has no title bar on macOS: its top bars are the row of the window's

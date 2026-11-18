@@ -123,17 +123,14 @@ impl BlobStore {
         self.root.join(prefix).join(rest)
     }
 
-    pub fn contains(&self, hash: &BlobHash) -> bool {
+    #[cfg(test)]
+    fn contains(&self, hash: &BlobHash) -> bool {
         self.path(hash).is_file()
     }
 
     /// The whole content; `NotFound` if it is missing.
     pub fn read(&self, hash: &BlobHash) -> io::Result<Vec<u8>> {
         fs::read(self.path(hash))
-    }
-
-    pub fn open_blob(&self, hash: &BlobHash) -> io::Result<File> {
-        File::open(self.path(hash))
     }
 
     /// Returns whether a blob was removed. Not public: only the collection, which holds
@@ -314,13 +311,7 @@ mod tests {
             dir.path().join("2c").join(&hash.as_str()[2..])
         );
 
-        let mut content = String::new();
-        blobs
-            .open_blob(&hash)
-            .unwrap()
-            .read_to_string(&mut content)
-            .unwrap();
-        assert_eq!(content, "hello");
+        assert_eq!(blobs.read(&hash).unwrap(), b"hello");
 
         // Same content dedupes to the same blob and leaves no temp files behind.
         assert_eq!(blobs.put(&b"hello"[..]).unwrap(), hash);

@@ -53,7 +53,7 @@ fn edge_handle(field: fn(&mut PaneWidths) -> &mut f32, range: (f32, f32)) -> imp
     let from = stored(0.0_f32);
     resize_handle()
         .edge(HandleEdge::Trailing)
-        // As GPUI Kit's: a grip on the line while the pointer is there.
+        // A grip on the line while the pointer is there, longer and darker while dragged.
         .thumb_class(
             "h-5 w-[3px] rounded-full bg-muted-foreground opacity-0 \
              group-hover:opacity-35 group-active:h-11 group-active:opacity-90 transition",

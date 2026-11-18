@@ -10,7 +10,9 @@ use catmail_testkit::{FakeHttp, Reply, ServerState, SmtpState, response};
 
 mod common;
 
-use common::{Env, NETEASE_OVER_LIMIT, drain, env_built, eventually, files, synced_env as env};
+use common::{
+    Env, NETEASE_OVER_LIMIT, drain, env_built, eventually, files, large_message, synced_env as env,
+};
 
 impl Env {
     /// Message ids in INBOX, by UID: the fixtures' dates say nothing about it.
@@ -73,28 +75,6 @@ const NEWSLETTER: &[u8] = b"From: =?UTF-8?B?5byg5LiJ?= <zhang@example.com>\r\n\
     Content-Transfer-Encoding: base64\r\n\r\n\
     JVBERi0xLjQK\r\n\
     --outer--\r\n";
-
-/// Over the whole-message limit: text plus a large base64 attachment.
-fn large_message() -> Vec<u8> {
-    let mut raw = b"From: Bob <bob@example.com>\r\n\
-        Subject: Big file\r\n\
-        Content-Type: multipart/mixed; boundary=\"b\"\r\n\r\n\
-        --b\r\n\
-        Content-Type: text/plain\r\n\r\n\
-        The video is attached.\r\n\
-        --b\r\n\
-        Content-Type: video/mp4; name=\"clip.mp4\"\r\n\
-        Content-Disposition: attachment; filename=\"clip.mp4\"\r\n\
-        Content-Transfer-Encoding: base64\r\n\r\n"
-        .to_vec();
-    // 3 MiB of 'A' encodes to zeros.
-    for _ in 0..(3 * 1024 * 1024 / 76) {
-        raw.extend_from_slice(&[b'A'; 76]);
-        raw.extend_from_slice(b"\r\n");
-    }
-    raw.extend_from_slice(b"--b--\r\n");
-    raw
-}
 
 fn state(messages: &[&[u8]]) -> ServerState {
     let mut state = ServerState::new("alice", "pw");
