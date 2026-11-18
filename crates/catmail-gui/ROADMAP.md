@@ -143,9 +143,9 @@
 - [ ] 退出时等引擎关闭要有上限：现在 `shell::quit` 之后 `pollster::block_on(client.closed())` 不限时，引擎里一次卡住的
       写入就让进程退不出去（会话结束时系统等不到它退出）。GPUI 版最多等 GPUI 给的 `SHUTDOWN_TIMEOUT`；到时间就记一条
       日志直接退出
-- [ ] 确认 Linux 新邮件通知的正文没有转义两次：frontend 的 `new_mail::plain` 按 XDG `body-markup` 替通知服务器转义了
-      `&`、`<`（GPUI 版直接给 `org.freedesktop.Notifications`），现在经 `GNotification`，要看 GLib 的 freedesktop
-      后端会不会再转义一次。用主题带 `&` 的邮件在 GNOME 和 KDE 上各试一次；重复了就让 Linux 也给纯文本
+- [ ] 在 GNOME、KDE 和 Flatpak 里各用主题带 `&`、`<` 的邮件试一次 Linux 新邮件通知：GLib 的 freedesktop 后端不转义，
+      portal 和 `org.gtk.Notifications` 不读标记，所以 `new_mail/linux.rs` 照 GLib 的选路决定转不转义（#331，见
+      background.md「Linux」），代码改好了，还没在这几处实际看过
 - [x] 常驻时回收内存：关掉最后一个窗口 2 秒后 `malloc_trim`。实测（release，两个真实账户，2026-11-05），单位 MB，
       RSS / PSS：
 

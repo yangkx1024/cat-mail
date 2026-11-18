@@ -245,12 +245,14 @@ UI 库，在 `catmail_frontend::new_mail`（`Arrivals`、`notifications`、`Targ
 INBOX。这之前用户自己选了别的邮件，就以用户的为准。点击总是去账户的 Inbox，即使窗口正显示 All Inboxes：合并的
 列表里旧一些的新邮件可能不在已加载的那一页。
 
-正文要不要转义看 GLib 走哪条路。GLib 在第一条通知时选一次，依次是：沙箱里（Flatpak、Snap、`GIO_USE_PORTALS=1`）
+正文要不要转义看 GLib 走哪条路。GLib 在第一条通知时选一次，依次是：沙箱里（Flatpak、`GIO_USE_PORTALS=1`）
 走 portal，它的 `body` 是纯文本；总线上有人占着 `org.gtk.Notifications`（GNOME Shell）就走它，正文照原样显示；
 否则走 `org.freedesktop.Notifications`，GLib 把正文原样交给通知服务，服务有 `body-markup` 能力时按标记读。
 `linux.rs` 在第一条通知前照这个顺序问一次（`NameHasOwner`、`GetCapabilities`，异步，不卡 GTK 的线程），记住
 结果，只在最后一种情况下用 `glib::markup_escape_text` 转义；问的时候要发的通知排队，按原来的顺序发。问不到
 能力时按会读标记处理，转义。否则 GNOME 上和 Flatpak 里 `Q&A <draft>` 会显示成 `Q&amp;A &lt;draft&gt;`（#331）。
+设了 `GNOTIFICATION_BACKEND=freedesktop` 时 GLib 先试它、它总是可用，所以跳过前两步、只问能力；设成 `portal`、
+`gtk` 结果不变（都不读标记，不可用时 GLib 照常按顺序选）。不发 Snap，GLib 的 Snap 分支不照抄。
 
 在 Flatpak 里 GLib 改走 Notification portal，在 GNOME Shell 上改走 GNOME 自己的接口：点击不再回到进程里，而是由
 portal（xdg-desktop-portal-gtk）或 GNOME Shell 对总线名 `net.yangkx.catmail` 调用

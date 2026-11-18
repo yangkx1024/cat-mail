@@ -15,9 +15,11 @@
 
 - 转义与否只有发通知的一侧知道，从不依赖 UI 库的 `catmail-frontend` 挪到 `catmail-gui/src/new_mail/linux.rs`；
   `Notice` 的正文改为各平台都是纯文本，macOS 不变。
-- 照 GLib 的顺序判断：沙箱（`/.flatpak-info`、`SNAP`、`GIO_USE_PORTALS=1`）→ 不转义；`org.gtk.Notifications`
-  有主人 → 不转义；否则问通知服务的 `GetCapabilities`，有 `body-markup` 才转义（与 nsh 自己的 Linux 通知相同）。
-  问不到能力时转义，大多数服务读标记。
+- 照 GLib 的顺序判断：沙箱（`/.flatpak-info`、`GIO_USE_PORTALS=1`；不发 Snap，不看 GLib 的 Snap 分支）→ 不转义；`org.gtk.Notifications`
+  有主人 → 不转义；否则问通知服务的 `GetCapabilities`，有 `body-markup` 才转义。
+  问不到能力时转义，大多数服务读标记（nsh 自己的 Linux 通知问不到时不转义，两边有意不同）。
+  `GNOTIFICATION_BACKEND=freedesktop` 时 GLib 直接走 freedesktop（它总是可用），跳过前两步只问能力；设成
+  `portal`、`gtk` 不影响结果：两者都不读标记，不可用时 GLib 照常按顺序选。
 - D-Bus 调用异步（`call_future`），只在第一条通知前问一次并记住：GLib 也是在第一条通知时选一次路。问的期间
   要发的通知排队，答案回来后按顺序发。
 - 没有改成绕开 GLib 自己发 freedesktop 通知：改动大，点击和 portal 的处理都要重做。
