@@ -6,17 +6,32 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 use crate::tls::Stream;
 
+/// One command as [`read_command`] read it.
+pub(super) struct Read {
+    /// The command line without CRLF, its literals inlined as quoted strings.
+    pub line: Vec<u8>,
+    /// The literals, as they came.
+    pub literals: Vec<Vec<u8>>,
+    /// How many of them the server asked for with `+`.
+    pub synchronized: usize,
+}
+
 /// Reads one command line, inlining `{n}` / `{n+}` literals, which are also returned as
 /// they came (APPEND needs the exact bytes). `None` at EOF. With `refuse_append`, an
 /// APPEND is answered with NO instead of being asked for its message, and skipped. With
-/// `qq_mail`, a literal in a UID SEARCH is inlined as its `{n}`.
+/// `qq_mail`, a literal in a UID SEARCH is inlined as its `{n}`. A non-synchronizing
+/// literal (`{n+}`) is taken up to `non_sync_up_to` bytes (none without LITERAL+ or
+/// LITERAL-); a longer one is refused with BAD and the connection closed (RFC 7888), so a
+/// client sending one where it may not fails instead of passing unnoticed.
 pub(super) async fn read_command(
     io: &mut BufReader<Box<dyn Stream>>,
     refuse_append: bool,
     qq_mail: bool,
-) -> std::io::Result<Option<(Vec<u8>, Vec<Vec<u8>>)>> {
+    non_sync_up_to: Option<usize>,
+) -> std::io::Result<Option<Read>> {
     let mut line = Vec::new();
     let mut literals = Vec::new();
+    let mut synchronized = 0;
     loop {
         let mut chunk = Vec::new();
         if io.read_until(b'\n', &mut chunk).await? == 0 {
@@ -40,10 +55,21 @@ pub(super) async fn read_command(
                     literals.clear();
                     continue;
                 }
+                if non_sync && non_sync_up_to.is_none_or(|max| len > max) {
+                    let tag = text.split(' ').next().unwrap_or_default();
+                    io.get_mut()
+                        .write_all(
+                            format!("{tag} BAD [TOOBIG] Non-synchronizing literal not allowed\r\n")
+                                .as_bytes(),
+                        )
+                        .await?;
+                    return Ok(None);
+                }
                 if !non_sync {
                     io.get_mut()
                         .write_all(b"+ Ready for literal data\r\n")
                         .await?;
+                    synchronized += 1;
                 }
                 let mut data = vec![0; len];
                 io.read_exact(&mut data).await?;
@@ -65,7 +91,11 @@ pub(super) async fn read_command(
             }
             None => {
                 line.extend_from_slice(&chunk);
-                return Ok(Some((line, literals)));
+                return Ok(Some(Read {
+                    line,
+                    literals,
+                    synchronized,
+                }));
             }
         }
     }

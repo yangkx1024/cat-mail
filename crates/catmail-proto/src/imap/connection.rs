@@ -20,11 +20,17 @@ use crate::net::with_timeout;
 /// A response other than a status or a continuation request: EXISTS, FETCH, LIST, …
 pub(crate) type Data = imap_proto::Response<'static>;
 
-/// How many bytes the server may send in answer to one command. Each response is capped
-/// at [`MAX_RESPONSE`], but not how many there are, and a command's whole answer is kept
-/// until it completes. The largest answer we ask for is one whole message, so only a
-/// broken or hostile server gets near this.
+/// How many bytes the server may send in answer to one command, counting each response
+/// as [`RESPONSE_COST`] more. Each response is capped at [`MAX_RESPONSE`], but not how
+/// many there are, and a command's whole answer is kept until it completes. The largest
+/// answer we ask for is one whole message, so only a broken or hostile server gets near
+/// this.
 const MAX_ANSWER: usize = 256 * 1024 * 1024;
+
+/// What keeping one response costs beyond its bytes: the parsed `Data` is 112 bytes even
+/// for a 12-byte `* 1 EXISTS`, so counting bytes alone would let a flood of small ones
+/// take many times [`MAX_ANSWER`].
+const RESPONSE_COST: usize = 128;
 
 /// How much of a command is written under one timeout, as SMTP's DATA is.
 const WRITE_PIECE: usize = 64 * 1024;
@@ -99,8 +105,10 @@ pub(crate) struct Connection {
     /// ([`MAX_ANSWER`] but in tests).
     received: usize,
     max_answer: usize,
-    /// Set once a command is given up half-way through its answer, so the rest can't be
-    /// taken for the answer to the next one.
+    /// Set from sending a command until its tagged completion is read. A command given up
+    /// half-way (an error while reading its answer, or its future dropped by a timeout or
+    /// a `select!`) leaves it set, so the rest of its answer can't be taken for the
+    /// answer to the next one.
     out_of_step: bool,
     /// What the server said about the selected mailbox in passing, in the answers to any
     /// command (servers report new mail and expunges whenever they can): the last EXISTS
@@ -326,7 +334,10 @@ impl Connection {
                 tag: done,
                 status,
                 outcome,
-            } if done.0 == tag => return Ok(Step::Done(status, outcome)),
+            } if done.0 == tag => {
+                self.out_of_step = false;
+                return Ok(Step::Done(status, outcome));
+            }
             Data::Done { tag, .. } => {
                 tracing::warn!(tag = %tag.0, "ignoring status for an unknown tag");
             }
@@ -351,13 +362,15 @@ impl Connection {
     }
 
     /// A new tag, once the connection is known to be in step (see `out_of_step`): a caller
-    /// that kept it after such an error can't use it by mistake.
+    /// that kept it after giving up a command can't use it by mistake. The command is
+    /// under way from here.
     fn next_tag(&mut self) -> Result<String> {
         if self.out_of_step {
             return Err(Error::Protocol(
                 "connection unusable after a command was given up half-way".into(),
             ));
         }
+        self.out_of_step = true;
         self.received = 0;
         self.last_tag += 1;
         Ok(format!("C{}", self.last_tag))
@@ -434,20 +447,31 @@ impl Connection {
     async fn next_response(&mut self, limited: bool) -> Result<Vec<u8>> {
         loop {
             if let Some(raw) = self.framer.next() {
+                if limited {
+                    self.received = self.received.saturating_add(RESPONSE_COST);
+                    self.check_answer()?;
+                }
                 return Ok(raw);
             }
             match tokio::time::timeout(self.timeout, self.read()).await {
                 Ok(result) => result?,
                 Err(_) => return Err(Error::Timeout),
             }
-            if limited && self.received > self.max_answer {
-                self.out_of_step = true;
-                return Err(Error::Protocol(format!(
-                    "server sent more than {} MiB in answer to one command",
-                    self.max_answer / (1024 * 1024)
-                )));
+            if limited {
+                self.check_answer()?;
             }
         }
+    }
+
+    /// Gives up the command once its answer is over [`MAX_ANSWER`].
+    fn check_answer(&mut self) -> Result<()> {
+        if self.received > self.max_answer {
+            return Err(Error::Protocol(format!(
+                "server sent more than {} MiB in answer to one command",
+                self.max_answer / (1024 * 1024)
+            )));
+        }
+        Ok(())
     }
 
     /// Like `next_response` without a timeout, for IDLE. Cancel-safe.
@@ -482,7 +506,6 @@ impl Connection {
         }
         self.received = self.received.saturating_add(n);
         if self.framer.push(&self.buf[..n]).is_err() {
-            self.out_of_step = true;
             return Err(Error::Protocol(format!(
                 "server sent a response over {} MiB",
                 MAX_RESPONSE / (1024 * 1024)
@@ -564,6 +587,79 @@ mod tests {
             matches!(&err, Error::Protocol(text) if text.contains("half-way")),
             "{err}"
         );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn many_small_responses_count_for_more_than_their_bytes() {
+        let (ours, theirs) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            let mut theirs = BufReader::new(theirs);
+            let mut command = String::new();
+            theirs.read_line(&mut command).await.unwrap();
+            // 12 KiB on the wire, each kept as a parsed response many times its size.
+            let flood = b"* 1 EXISTS\r\n".repeat(1024);
+            _ = theirs.get_mut().write_all(&flood).await;
+            _ = theirs.get_mut().write_all(b"C1 OK done\r\n").await;
+        });
+        let mut conn = Connection::new(Box::new(ours), Duration::from_secs(10));
+        conn.max_answer = 64 * 1024;
+
+        let err = conn.execute(Command::new("NOOP")).await.unwrap_err();
+        assert!(
+            matches!(&err, Error::Protocol(text) if text.contains("more than")),
+            "{err}"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_command_dropped_half_way_leaves_the_connection_unusable() {
+        let (ours, theirs) = tokio::io::duplex(64 * 1024);
+        let (asked, answer) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut theirs = BufReader::new(theirs);
+            let mut command = String::new();
+            theirs.read_line(&mut command).await.unwrap();
+            assert_eq!(command, "C1 NOOP\r\n");
+            // Answered only once the caller has given up on it.
+            answer.await.unwrap();
+            let late = b"* 3 EXISTS\r\nC1 OK done\r\n";
+            _ = theirs.get_mut().write_all(late).await;
+        });
+        let mut conn = Connection::new(Box::new(ours), Duration::from_secs(10));
+
+        let gave_up = tokio::time::timeout(
+            Duration::from_millis(50),
+            conn.execute(Command::new("NOOP")),
+        )
+        .await;
+        assert!(gave_up.is_err());
+        asked.send(()).unwrap();
+        let err = conn.execute(Command::new("NOOP")).await.unwrap_err();
+        assert!(
+            matches!(&err, Error::Protocol(text) if text.contains("half-way")),
+            "{err}"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_refused_command_leaves_the_connection_in_step() {
+        let (ours, theirs) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            let mut theirs = BufReader::new(theirs);
+            for answer in ["C1 NO not now\r\n", "C2 OK done\r\n"] {
+                let mut command = String::new();
+                theirs.read_line(&mut command).await.unwrap();
+                theirs.get_mut().write_all(answer.as_bytes()).await.unwrap();
+            }
+        });
+        let mut conn = Connection::new(Box::new(ours), Duration::from_secs(10));
+
+        let err = conn.execute(Command::new("NOOP")).await.unwrap_err();
+        assert!(matches!(err, Error::Command { .. }), "{err}");
+        conn.execute(Command::new("NOOP")).await.unwrap();
         server.await.unwrap();
     }
 
@@ -659,7 +755,8 @@ mod tests {
             }
         });
         let mut conn = Connection::new(Box::new(ours), Duration::from_secs(10));
-        conn.max_answer = 4096;
+        // Room for one answer, not for two.
+        conn.max_answer = 300 * (12 + RESPONSE_COST);
         for _ in 0..3 {
             let response = conn.execute(Command::new("NOOP")).await.unwrap();
             assert_eq!(response.data.len(), 200);

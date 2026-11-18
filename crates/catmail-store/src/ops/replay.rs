@@ -8,6 +8,7 @@ use rusqlite::{OptionalExtension, Params, Row, params};
 use super::{PendingOps, Touched, kind};
 use crate::Result;
 use crate::columns::parse_opt_text;
+use crate::messages::shown;
 
 /// Whether op `o` waits for a move of its message (`after_op`) that is still pending.
 const WAITING: &str =
@@ -235,11 +236,13 @@ impl PendingOps<'_> {
                 .query_row(params![op.id.0, to.0], |r| r.get(0))
                 .optional()?;
             if let Some(Some(row)) = row {
-                touched.folders.extend(self.place(
+                let placed = self.place(
                     MessageId(row),
                     to,
                     new_place.map(|(_, uid)| uid),
-                )?);
+                    &mut touched,
+                )?;
+                touched.folders.extend(placed);
             }
             match new_place {
                 Some((new_uidvalidity, new_uid)) => {
@@ -578,29 +581,47 @@ impl PendingOps<'_> {
     }
 
     /// Deletes the rows, still without a UID, of the pending moves matching `filter`.
-    /// Returns their folders.
+    /// Returns their folders, and the lists that showed them.
     fn drop_moving_rows(&self, filter: &str, params: impl Params) -> Result<Touched> {
-        let mut stmt = self.conn.prepare_cached(&format!(
-            "DELETE FROM messages WHERE uid IS NULL AND id IN (
-                 SELECT message_id FROM pending_ops
-                 WHERE {filter} AND kind = 'move' AND status = 'pending')
-             RETURNING account_id, folder_id"
-        ))?;
-        let rows = stmt.query_map(params, folder_of)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let rows: Vec<MessageId> = self
+            .conn
+            .prepare_cached(&format!(
+                "SELECT id FROM messages WHERE uid IS NULL AND id IN (
+                     SELECT message_id FROM pending_ops
+                     WHERE {filter} AND kind = 'move' AND status = 'pending')"
+            ))?
+            .query_map(params, |r| Ok(MessageId(r.get(0)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut touched = Touched::new();
+        for row in rows {
+            let dropped = self.drop_unplaced(row, &mut touched)?;
+            touched.folders.extend(dropped);
+        }
+        Ok(touched)
     }
 
     /// Deletes a message moved locally whose place on the server isn't known; the next
-    /// sync fetches it where it is. Returns its folder, if it was there.
-    fn drop_unplaced(&self, row: MessageId) -> Result<Option<(AccountId, FolderId)>> {
-        Ok(self
+    /// sync fetches it where it is. Records the lists that showed it in `touched`.
+    /// Returns its folder, if it was there.
+    fn drop_unplaced(
+        &self,
+        row: MessageId,
+        touched: &mut Touched,
+    ) -> Result<Option<(AccountId, FolderId)>> {
+        // Its labels go with the row, without a change of their own to announce it.
+        let shown = shown(self.conn, row.0, false)?;
+        let dropped = self
             .conn
             .prepare_cached(
                 "DELETE FROM messages WHERE id = ?1 AND uid IS NULL
                  RETURNING account_id, folder_id",
             )?
             .query_row([row.0], folder_of)
-            .optional()?)
+            .optional()?;
+        if dropped.is_some() {
+            touched.shown.extend(shown);
+        }
+        Ok(dropped)
     }
 
     /// Gives a message moved to `folder` its UID there, or drops its row if that isn't
@@ -611,6 +632,7 @@ impl PendingOps<'_> {
         row: MessageId,
         folder: FolderId,
         uid: Option<u32>,
+        touched: &mut Touched,
     ) -> Result<Option<(AccountId, FolderId)>> {
         if let Some(uid) = uid {
             let placed = self
@@ -626,7 +648,7 @@ impl PendingOps<'_> {
                 return Ok(placed);
             }
         }
-        self.drop_unplaced(row)
+        self.drop_unplaced(row, touched)
     }
 
     /// Puts a message moved locally back where the server has it, `uid` in `folder`.
@@ -654,7 +676,7 @@ impl PendingOps<'_> {
             .query_row(params![row.0, folder.0, uid], folder_of)
             .optional()?;
         if restored.is_none() {
-            self.drop_unplaced(row)?;
+            self.drop_unplaced(row, &mut touched)?;
         }
         touched
             .folders
@@ -1121,6 +1143,43 @@ mod tests {
             "{:?}",
             g.pending("All Mail")
         );
+    }
+
+    #[test]
+    fn dropped_rows_change_the_lists_that_showed_them() {
+        let gone = |g: &Gmail, m| {
+            g.store
+                .read(|db| db.messages().location(m))
+                .unwrap()
+                .is_none()
+        };
+        let shown = |g: &Gmail, names: &[&str]| -> BTreeSet<_> {
+            names.iter().map(|name| (g.account, g.f[name])).collect()
+        };
+        // Starred and Important, on its way to Trash; the server answers without COPYUID.
+        let g = gmail();
+        let (m1, f) = (g.message(1), &g.f);
+        g.write(|db| {
+            db.ops()
+                .set_flags(&[m1], Flags::FLAGGED, Flags::empty(), 0)?;
+            db.ops().delete_messages(&[m1], DeleteMode::ToTrash, 0)
+        });
+        let ops: Vec<ReplayOp> = g
+            .replay_ops("All Mail")
+            .into_iter()
+            .filter(|op| matches!(op.kind, ReplayKind::Move { .. }))
+            .collect();
+        let touched = g.write(|db| db.ops().moved(f["All Mail"], 1, f["Trash"], &ops, None));
+        assert!(gone(&g, m1));
+        assert_eq!(touched.shown, shown(&g, &["Important", "Starred"]));
+
+        // A new generation of the folder it is moving out of drops it the same way.
+        let g = gmail();
+        let (m1, f) = (g.message(1), &g.f);
+        g.write(|db| db.ops().delete_messages(&[m1], DeleteMode::ToTrash, 0));
+        let touched = g.write(|db| db.ops().end_generation(f["All Mail"], Some(2)));
+        assert!(gone(&g, m1));
+        assert_eq!(touched.shown, shown(&g, &["Important"]));
     }
 
     #[test]

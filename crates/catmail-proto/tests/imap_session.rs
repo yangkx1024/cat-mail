@@ -848,6 +848,32 @@ async fn a_message_imap_cant_carry_is_not_sent() {
 }
 
 #[tokio::test]
+async fn literals_wait_for_the_server_only_where_it_asks() {
+    let small = b"Subject: small\r\n\r\nhi\r\n".to_vec();
+    let mut large = b"Subject: large\r\n\r\n".to_vec();
+    large.extend(b"0123456789abcdef\r\n".repeat(400));
+    assert!(large.len() > 4096);
+    // (LITERAL+, LITERAL-) → how many of the two messages wait for `+`.
+    for (plus, minus, waits) in [(false, false, 2), (false, true, 1), (true, false, 0)] {
+        let mut state = sample_state();
+        (state.faults.literal_plus, state.faults.literal_minus) = (plus, minus);
+        let fake = FakeImap::start(state).await;
+        let mut session = login(&fake).await;
+        for raw in [&small, &large] {
+            session.append("INBOX", Flags::empty(), raw).await.unwrap();
+        }
+        let state = fake.state();
+        assert_eq!(
+            state.synchronized_literals, waits,
+            "LITERAL+ {plus}, LITERAL- {minus}"
+        );
+        let messages = &state.mailboxes[0].messages;
+        let stored = messages[messages.len() - 2..].iter().map(|m| &m.raw[..]);
+        assert!(stored.eq([&small[..], &large[..]]), "stored byte for byte");
+    }
+}
+
+#[tokio::test]
 async fn append_refused_before_the_message_is_a_refusal() {
     let mut state = sample_state();
     state.faults.reject_append_literal = true;
