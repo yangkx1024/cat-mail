@@ -103,7 +103,9 @@
 ## P7 设置与主题（gui.md「主题与设置」）
 
 - [x] 设置对话框：General、Appearance、Accounts、Reading；Ctrl+,，Ctrl + / Ctrl − / Ctrl 0 改文字大小。改了就写回
-      `settings.json`，所有窗口（包括写信窗口）随之更新
+      `settings.json`，所有窗口（包括写信窗口）随之更新。下拉选择是原生的 `popup_menu`，当前项打勾
+      ⚠️ Linux 上勾是 nsh 用两条边框转 45° 画的，但它是 GTK 的内置图标，不小于 `-gtk-icon-size`（16 px），盒子被撑成
+      正方形，勾成了一个大 "V"；shell 自己加样式把图标尺寸设成盒子宽度（`shell/gtk.rs` 的 `MENU_CSS`），nsh 有了（longbridge/nsh#2383）就删
 - [x] 主题：gpui-kit 主题 JSON 的颜色键映射到 shadcn 的 token，再加上应用自己的，经 `set_theme_overrides` 给每个视图；
       导入各种终端配色格式
 - [x] 跟随系统外观（nsh 自带，经 XDG portal）
