@@ -45,7 +45,6 @@ modules:
         path: ../..
         skip:
           - target
-          - result
           - .direnv
           - .git
       - type: dir

@@ -253,7 +253,7 @@ elicitation），或者用户事先说了不必问。两种是令牌的两个层
 
 - **问的方式无状态**：MCP 2026-07-28 去掉了会话，服务端不能在调用中途向客户端发请求，改为多轮请求（SEP-2322）：
   `send_draft` 第一次答 `input_required`，带一个 elicitation（表单，没有要填的字段，接受就是确认），客户端问过用户后
-  带着答复（`inputResponses`）和服务端给的 `requestState` 再调一次。rmcp 3.9 有这套类型，处理函数用 `RequestState`、
+  带着答复（`inputResponses`）和服务端给的 `requestState` 再调一次。rmcp 3.10 有这套类型，处理函数用 `RequestState`、
   `InputResponses` 取出。
 - **`requestState` 只是句柄**：客户端原样送回，但不可信（agent 那一端也能改写请求）。问过的东西记在服务端的内存里
   （`tools/sending.rs` 的 `Asked`）：随机句柄 → 令牌名、草稿、给用户看的 `DraftRevision`、问的时间。再调时句柄必须是
@@ -326,7 +326,7 @@ CLI 一侧是 `cmd/mcp.rs`；GUI 一侧是 `catmail-frontend` 的 `mcp.rs`（服
 ## 步骤
 
 1. ✅ `catmail-mcp`：只读的工具、监听本机的 HTTP、令牌文件、`Origin` 检查；宿主 `catmail serve`；
-   引擎的常驻预设。`rmcp` 3.9 带进的依赖通过了 `cargo deny`。
+   引擎的常驻预设。`rmcp` 3.10 带进的依赖通过了 `cargo deny`。
 2. ✅ GUI 托管：Settings › Agents 里的开关、端口、令牌；不再查 `Host`，`serve` 去掉 `--host`。
 3. ✅ 按层级与账户限定令牌（CLI 的 `--tier`、`--account`，GUI 的两个菜单）、改动的日志、整理的工具；草稿的
    工具、附件以内容传入传出、每个令牌的限额。

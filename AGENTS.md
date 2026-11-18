@@ -14,7 +14,7 @@ frontends on top of it.
 
 ## Build and test
 
-The toolchain comes from the Nix flake. Run cargo through it:
+On Linux the toolchain comes from the Nix flake. Run cargo through it:
 
 ```sh
 nix develop -c cargo test --workspace
@@ -23,7 +23,11 @@ nix develop -c cargo fmt --all
 nix develop -c cargo deny check   # after changing dependencies
 ```
 
-Flakes only see git-tracked files: `git add -N` new files before `nix develop` / `nix build`.
+Flakes only see git-tracked files: `git add -N` new files before `nix develop`.
+
+The flake has no macOS shell. On macOS run cargo directly (the same commands without
+`nix develop -c`), with the toolchain `rust-toolchain.toml` names (rustup picks it up) and
+`cargo-deny` installed; the GUI needs nothing else.
 
 Before reporting work as done, `cargo fmt`, `clippy -D warnings` and the full test suite
 must pass. Say so explicitly if any of them could not be run.
@@ -82,8 +86,10 @@ fake-server test, with a fault injected if the change is about recovering from o
   `tokio::spawn` or block on tokio from frontend code; the GUI's main loop (GTK's,
   AppKit's) and nsh's view threads are not tokio.
 - **Database access** goes through `Store::read` / `Store::write`. Everything that must be
-  atomic (a local change plus its `pending_ops` row, synced messages plus the folder
-  cursor) happens inside one `write` closure. Never call back into the `Store` from inside
+  atomic (a local change plus its `pending_ops` row; a new UIDVALIDITY with the deletion
+  of the folder's messages and its cursor) happens inside one `write` closure. Sync
+  commits each batch of fetched messages on its own and writes the folder's cursor last,
+  in a later transaction: the cursor promises that everything below it is stored. Never call back into the `Store` from inside
   a `read` or `write` closure (one write connection: a nested write deadlocks, a nested
   read misses the uncommitted change).
 - **Events** are emitted after the commit, from inside the engine task that made the
