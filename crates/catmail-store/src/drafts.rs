@@ -1605,7 +1605,7 @@ mod tests {
         assert!(
             store
                 .write(|db| {
-                    db.outbox().begin_send(outbox, 2)?;
+                    db.outbox().begin_send(outbox)?;
                     db.outbox().mark_accepted(outbox, 2)?;
                     db.outbox().finish(outbox)
                 })

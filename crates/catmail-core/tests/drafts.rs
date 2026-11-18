@@ -14,7 +14,8 @@ use catmail_core::{
 };
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 use common::{
-    Env, NETEASE_OVER_LIMIT, addr, drain, env, env_built, eventually, sparse, synced_env,
+    Env, NETEASE_OVER_LIMIT, addr, drain, env, env_built, eventually, large_message, sparse,
+    synced_env,
 };
 use mail_parser::MessageParser;
 use tokio::sync::Semaphore;
@@ -923,28 +924,6 @@ async fn a_reply_leaves_out_a_quoted_image_it_cant_have() {
         html.contains(&format!(r#"<img src="cid:{cid}">"#)),
         "{html}"
     );
-}
-
-/// Over the whole-message limit, so its attachment is fetched on its own when needed.
-fn large_message() -> Vec<u8> {
-    let mut raw = b"From: Bob <bob@example.com>\r\n\
-        Subject: Big file\r\n\
-        Content-Type: multipart/mixed; boundary=\"b\"\r\n\r\n\
-        --b\r\n\
-        Content-Type: text/plain\r\n\r\n\
-        The video is attached.\r\n\
-        --b\r\n\
-        Content-Type: video/mp4; name=\"clip.mp4\"\r\n\
-        Content-Disposition: attachment; filename=\"clip.mp4\"\r\n\
-        Content-Transfer-Encoding: base64\r\n\r\n"
-        .to_vec();
-    // 3 MiB of 'A' encodes to zeros.
-    for _ in 0..(3 * 1024 * 1024 / 76) {
-        raw.extend_from_slice(&[b'A'; 76]);
-        raw.extend_from_slice(b"\r\n");
-    }
-    raw.extend_from_slice(b"--b--\r\n");
-    raw
 }
 
 /// Over the whole-message limit, with two images its HTML shows (1.2, 1.3) and two

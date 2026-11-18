@@ -155,6 +155,12 @@ pub fn nested<'a>(html: &'a str, class: &str) -> (String, &'a str) {
     (scoped.unwrap_or_default(), rest)
 }
 
+/// HTML that [`sanitize_html`] produced, without its style sheet: for a document with no
+/// place for one (the composer's editor).
+pub fn without_sheet(html: &str) -> &str {
+    sanitized_sheet(html).1
+}
+
 /// HTML that [`sanitize_html`] produced, cleaned again through the sanitizer with the
 /// image hook `on_image` makes, and with whether it is for a dark page. With `dark`, its
 /// own colors are moved for a dark page with that palette's colors, as Gmail and Outlook
@@ -339,6 +345,8 @@ mod tests {
             (".q{margin:0;}.q p{color:red;}".to_owned(), "<p>x</p>")
         );
         assert_eq!(nested("<p>x</p>", "q"), (String::new(), "<p>x</p>"));
+        assert_eq!(without_sheet(&clean), "<p>x</p>");
+        assert_eq!(without_sheet("<p>x</p>"), "<p>x</p>");
     }
 
     #[test]

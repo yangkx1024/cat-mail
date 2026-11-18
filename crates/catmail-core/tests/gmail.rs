@@ -16,10 +16,10 @@ use tokio::task::JoinHandle;
 mod common;
 
 use common::{
-    Env, drain, env, env_added, env_built, eventually, folder_report, new_mail, synced_env,
+    ALL_MAIL, Env, drain, env, env_added, env_built, eventually, folder_report, new_mail,
+    synced_env,
 };
 
-const ALL_MAIL: &str = "[Gmail]/All Mail";
 const TRASH: &str = "[Gmail]/Trash";
 
 /// "one" in INBOX and Work, "two" archived (in All Mail alone), "old" in Trash.

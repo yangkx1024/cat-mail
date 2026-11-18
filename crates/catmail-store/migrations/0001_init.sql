@@ -135,15 +135,12 @@ CREATE TABLE messages (
     flags           INTEGER NOT NULL DEFAULT 0, -- system flags bitset, see catmail_types::Flags
     keywords_json   TEXT    NOT NULL DEFAULT '[]', -- non-system flags, e.g. ["$Junk"]
     modseq          INTEGER,
-    -- Gmail's X-GM-MSGID and X-GM-THRID (unsigned 64-bit, stored as their bits); NULL
-    -- on a standard account. The message id stays the same in every location.
+    -- Gmail's X-GM-MSGID (unsigned 64-bit, stored as its bits); NULL on a standard
+    -- account. It stays the same in every location.
     gm_msgid        INTEGER,
-    gm_thrid        INTEGER,
     -- Immutable for the lifetime of the (folder, uid) pair.
-    internal_date   INTEGER,
     size            INTEGER,
     message_id_hdr  TEXT,
-    in_reply_to     TEXT,
     references_hdr  TEXT,
     subject         TEXT,
     from_json       TEXT    NOT NULL DEFAULT '[]',
@@ -521,7 +518,6 @@ CREATE TABLE outbox (
     next_attempt_at INTEGER,
     last_error      TEXT,
     created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
-    updated_at      INTEGER NOT NULL DEFAULT (unixepoch()),
     FOREIGN KEY (identity_id, account_id) REFERENCES identities(id, account_id)
 ) STRICT;
 

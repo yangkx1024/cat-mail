@@ -1,9 +1,11 @@
-//! A complete theme, by GPUI Kit's color keys, from a terminal palette.
+//! A theme from a terminal palette, by the color keys the GUI reads (GPUI Kit's names,
+//! which theme files are written in; see `catmail-gui`'s `theme.rs` and [`super::Swatch`]).
 //!
-//! A color scheme gives a background, a foreground and 16 ANSI colors; a UI needs about
-//! a hundred colors. Every one of them is derived here, so nothing falls back to GPUI
-//! Kit's own (neutral grey) defaults and clashes with the scheme. The rules are the
-//! design's "Terminal palette → UI roles" board:
+//! A color scheme gives a background, a foreground and 16 ANSI colors; the app needs a
+//! few dozen colors. Every one it reads is derived here, so none falls back to nsh's
+//! (neutral grey) defaults and clashes with the scheme. Other keys aren't written; a
+//! theme file that has them (an older one, or GPUI Kit's own) still loads, and they are
+//! ignored. The rules are the design's "Terminal palette → UI roles" board:
 //!
 //! - surfaces and borders are the background mixed a little toward the foreground;
 //! - the accent is the blue slot, the status colors red, green, yellow and cyan, each
@@ -17,14 +19,14 @@ use serde_json::{Map, Value};
 use super::palette::{Rgb, TerminalPalette};
 use super::{ThemeConfig, ThemeMode, ThemeSet};
 
-/// The colors the derivation starts from, before they are spread over GPUI Kit's keys.
+/// The colors the derivation starts from, before they are spread over the keys.
 /// Kept separate so tests can check the contrast guarantees.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Roles {
     pub dark: bool,
     pub background: Rgb,
     pub foreground: Rgb,
-    /// Sidebar, title bar and status bar.
+    /// The sidebar.
     pub sidebar: Rgb,
     pub popover: Rgb,
     /// Hover and muted surfaces.
@@ -120,15 +122,14 @@ fn on(color: Rgb, bg: Rgb, fg: Rgb) -> Rgb {
     }
 }
 
-/// `color` drawn at `alpha` over the background: GPUI Kit composites a few colors
-/// (selected list and table rows, text selection) with at most 20% or 30% opacity,
-/// whatever the theme says, so they are given as translucent colors.
+/// `color` at `alpha`, drawn over whatever is under it: a selected row keeps the
+/// sidebar's or the list's surface showing through.
 fn translucent(color: Rgb, alpha: f64) -> String {
     format!("{}{:02x}", color.to_hex(), (alpha * 255.0).round() as u8)
 }
 
 /// The translucent color that, drawn at `alpha` over `bg`, gives `target`: a scheme's
-/// opaque selection color survives GPUI Kit's 30% cap on the selection's opacity.
+/// opaque selection color survives the 30% the GUI draws a selection at, at most.
 fn over(bg: Rgb, target: Rgb, alpha: f64) -> String {
     let channel = |b: u8, t: u8| {
         let (b, t) = (f64::from(b), f64::from(t));
@@ -142,7 +143,7 @@ fn over(bg: Rgb, target: Rgb, alpha: f64) -> String {
     translucent(color, alpha)
 }
 
-/// The theme for the palette, with every one of GPUI Kit's color keys set.
+/// The theme for the palette, with every key the GUI reads set.
 pub fn theme_config(palette: &TerminalPalette) -> ThemeConfig {
     ThemeConfig {
         name: palette.name.clone(),
@@ -159,16 +160,7 @@ pub fn theme_config(palette: &TerminalPalette) -> ThemeConfig {
 fn colors(palette: &TerminalPalette) -> Map<String, Value> {
     let r = Roles::new(palette);
     let (bg, fg, ansi) = (r.background, r.foreground, &palette.ansi);
-    let surface = |t: f64| bg.mix(fg, t);
-    // Filled buttons and badges: hover moves toward the background, pressing toward the
-    // foreground, by the same step for every hue, so states read alike across colors.
-    let hover = |c: Rgb| c.mix(bg, 0.12);
-    let active = |c: Rgb| c.mix(fg, 0.12);
-    // Tinted (non-filled) buttons: the hue over the background, text in the hue.
-    let tint = |c: Rgb, light: f64, dark: f64| bg.mix(c, if r.dark { dark } else { light });
-    let tint_text = |c: Rgb, under: Rgb| raise(c, fg, under, 4.5);
-    let button = if r.dark { surface(0.1) } else { bg };
-    let secondary = surface(if r.dark { 0.1 } else { 0.08 });
+    let secondary = bg.mix(fg, if r.dark { 0.1 } else { 0.08 });
     let selected_alpha = if r.dark { 0.2 } else { 0.11 };
 
     let mut colors = Map::new();
@@ -182,7 +174,6 @@ fn colors(palette: &TerminalPalette) -> Map<String, Value> {
     set("border", hex(r.border));
     set("input.border", hex(r.input));
     set("ring", hex(r.primary));
-    set("caret", hex(palette.cursor.unwrap_or(fg)));
     set(
         "selection.background",
         match palette.selection_background {
@@ -190,11 +181,6 @@ fn colors(palette: &TerminalPalette) -> Map<String, Value> {
             None => translucent(r.primary, 0.3),
         },
     );
-    set(
-        "overlay",
-        translucent(Rgb::BLACK, if r.dark { 0.4 } else { 0.2 }),
-    );
-    set("window.border", hex(r.border));
 
     set("accent.background", hex(r.hover));
     set("accent.foreground", hex(fg));
@@ -202,86 +188,23 @@ fn colors(palette: &TerminalPalette) -> Map<String, Value> {
     set("muted.foreground", hex(r.muted_foreground));
     set("popover.background", hex(r.popover));
     set("popover.foreground", hex(fg));
-    set("accordion.background", hex(bg));
-    set("group_box.background", hex(r.sidebar));
-    set("group_box.foreground", hex(fg));
-    set("group_box.title.foreground", hex(fg));
-    set("description_list.label.background", hex(surface(0.03)));
-    set("description_list.label.foreground", hex(r.muted_foreground));
-    set("skeleton.background", hex(r.hover));
 
     set("primary.background", hex(r.primary));
     set("primary.foreground", hex(r.on_primary));
-    set("primary.hover.background", hex(hover(r.primary)));
-    set("primary.active.background", hex(active(r.primary)));
     set("secondary.background", hex(secondary));
     set("secondary.foreground", hex(fg));
-    set("secondary.hover.background", hex(surface(0.12)));
-    set("secondary.active.background", hex(surface(0.16)));
 
-    set("button.background", hex(button));
-    set("button.foreground", hex(fg));
-    set("button.hover.background", hex(button.mix(fg, 0.06)));
-    set("button.active.background", hex(button.mix(fg, 0.1)));
-    set("button.primary.background", hex(r.primary));
-    set("button.primary.foreground", hex(r.on_primary));
-    set("button.primary.hover.background", hex(hover(r.primary)));
-    set("button.primary.active.background", hex(active(r.primary)));
-    set("button.secondary.background", hex(secondary));
-    set("button.secondary.foreground", hex(fg));
-    set("button.secondary.hover.background", hex(surface(0.12)));
-    set("button.secondary.active.background", hex(surface(0.16)));
-
-    for (name, color) in [
-        ("danger", r.danger),
-        ("success", r.success),
-        ("warning", r.warning),
-        ("info", r.info),
-    ] {
-        set(&format!("{name}.background"), hex(color));
-        set(&format!("{name}.foreground"), hex(on(color, bg, fg)));
-        set(&format!("{name}.hover.background"), hex(hover(color)));
-        set(&format!("{name}.active.background"), hex(active(color)));
-        let (rest, hovered, pressed) = (
-            tint(color, 0.14, 0.2),
-            tint(color, 0.2, 0.28),
-            tint(color, 0.26, 0.36),
-        );
-        set(&format!("button.{name}.background"), hex(rest));
-        set(
-            &format!("button.{name}.foreground"),
-            hex(tint_text(color, rest)),
-        );
-        set(&format!("button.{name}.hover.background"), hex(hovered));
-        set(&format!("button.{name}.active.background"), hex(pressed));
-    }
-
+    set("danger.background", hex(r.danger));
+    set("success.background", hex(r.success));
+    set("warning.background", hex(r.warning));
+    set("info.background", hex(r.info));
     set("link", hex(r.link));
-    set("link.hover", hex(r.link.mix(fg, 0.25)));
-    set("link.active", hex(r.link));
 
-    set("list.background", hex(bg));
     set(
         "list.active.background",
         translucent(r.primary, selected_alpha),
     );
-    set("list.active.border", hex(r.primary));
-    set("list.even.background", hex(surface(0.02)));
-    set("list.head.background", hex(r.sidebar));
     set("list.hover.background", hex(r.hover));
-    set("table.background", hex(bg));
-    set(
-        "table.active.background",
-        translucent(r.primary, selected_alpha),
-    );
-    set("table.active.border", hex(r.primary));
-    set("table.even.background", hex(surface(0.02)));
-    set("table.head.background", hex(r.sidebar));
-    set("table.head.foreground", hex(r.muted_foreground));
-    set("table.foot.background", hex(r.sidebar));
-    set("table.foot.foreground", hex(r.muted_foreground));
-    set("table.hover.background", hex(r.hover));
-    set("table.row.border", hex(r.border));
 
     set("sidebar.background", hex(r.sidebar));
     set("sidebar.foreground", hex(fg));
@@ -290,51 +213,19 @@ fn colors(palette: &TerminalPalette) -> Map<String, Value> {
     set("sidebar.accent.foreground", hex(fg));
     set("sidebar.primary.background", hex(r.primary));
     set("sidebar.primary.foreground", hex(r.on_primary));
-    set("title_bar.background", hex(r.sidebar));
-    set("title_bar.border", hex(r.border));
-    set("status_bar.background", hex(r.sidebar));
-    set("status_bar.border", hex(r.border));
-
-    set("tab.background", translucent(bg, 0.0));
-    set("tab.foreground", hex(r.muted_foreground));
-    set(
-        "tab.active.background",
-        hex(if r.dark { surface(0.12) } else { bg }),
-    );
-    set("tab.active.foreground", hex(fg));
-    set("tab_bar.background", hex(r.sidebar));
-    set("tab_bar.segmented.background", hex(r.hover));
-
-    set("scrollbar.background", translucent(bg, 0.0));
-    set("scrollbar.thumb.background", hex(surface(0.28)));
-    set("scrollbar.thumb.hover.background", hex(surface(0.4)));
-    set(
-        "switch.background",
-        hex(surface(if r.dark { 0.25 } else { 0.2 })),
-    );
-    set("switch.thumb.background", hex(bg));
-    set("slider.background", hex(r.primary));
-    set("slider.thumb.background", hex(bg));
-    set("progress.bar.background", hex(r.primary));
-    set("drag.border", hex(r.primary));
-    set("drop_target.background", translucent(r.primary, 0.2));
 
     set("chart.1", hex(r.primary));
     set("chart.2", hex(r.success));
     set("chart.3", hex(r.warning));
     set("chart.4", hex(r.magenta));
     set("chart.5", hex(r.info));
-    set("chart.bullish", hex(r.success));
-    set("chart.bearish", hex(r.danger));
-    set("chart.grid", hex(r.border));
 
-    // The raw ANSI hues, normal and bright, for whatever wants the scheme's own colors.
+    // The raw ANSI hues, for whatever wants the scheme's own colors (avatars).
     for (n, name) in ["red", "green", "yellow", "blue", "magenta", "cyan"]
         .into_iter()
         .enumerate()
     {
         set(&format!("base.{name}"), hex(ansi[n + 1]));
-        set(&format!("base.{name}.light"), hex(ansi[n + 9]));
     }
     colors
 }

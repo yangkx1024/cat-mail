@@ -397,6 +397,17 @@ fn typed(text: String) {
     });
 }
 
+/// The search field took the focus: logs in to the servers a search asks, for the first
+/// one not to wait for the login (`MailClient::connect_for_search`). An account already
+/// connected, or that a search wouldn't ask, is left alone.
+fn connect_ahead() {
+    in_view(async {
+        if let Err(e) = client().connect_for_search(None).await {
+            tracing::warn!(error = %e, "couldn't connect ahead of a search");
+        }
+    });
+}
+
 /// Leaving a search for a place: the place's rows, not the results.
 pub fn clear_search() {
     state(|s| s.model.typed());
@@ -644,6 +655,7 @@ fn search_field(search: ElementRef) -> impl IntoElement {
                 .value(move || global::<SearchText>().with(|t| t.0.clone()))
                 .placeholder("Search".to_owned())
                 .on_change(move |text: &str| typed(text.to_owned()))
+                .on_focus(connect_ahead)
                 .element_ref(&search)
                 .flex_1()
                 .text_sm()

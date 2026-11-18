@@ -205,7 +205,7 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 - **未读只靠字重**；**Gmail 的用户标签**是主题后面的小标签，最多两个、其余计数，不显示正在看的那个。
 - **搜索**：停顿 200 ms 才搜索；本地结果先显示，1 秒后再问服务器（`search_server`），它找到本地没有的再读一遍
   （见[问服务器](storage.md#问服务器)）。Ctrl+F 聚焦搜索框，选侧栏时清空搜索。搜索框获得焦点时提前登录
-  （`connect_for_search`）还没接上（ROADMAP）。
+  （`connect_for_search`）。
 - Escape 关上读信区。
 
 ## 读与改
@@ -455,7 +455,8 @@ From 是条目实际发出用的身份（`OutboxEntry::identity`），叫法和�
 - **主题都从终端调色板推导**（`catmail_frontend::theme`）：背景、前景和 16 个 ANSI 色推导出全部颜色；内置主题
   也写成调色板。导入按内容识别 Alacritty、kitty、Ghostty、WezTerm、Windows Terminal、iTerm2、foot、Xresources、
   base16 / base24 和主题 JSON，结果写进主题目录（可手工修改，启动时读取）。主题文件的格式沿用 gpui-kit 的主题
-  JSON（GPUI 版留下的，已有的主题目录照样能用），frontend 不依赖它。
+  JSON（GPUI 版留下的，已有的主题目录照样能用），frontend 不依赖它。推导只写 GUI 读的键（下一条的映射表和
+  设置里的主题卡片），gpui-kit 组件的键（`button.*`、`tab.*`、`table.*` 等）不再写；文件里有的照样加载、忽略。
 - **映射到 nsh**（`theme.rs`）：nsh 的主题是 shadcn 的 token。gpui-kit 的颜色键一张表映射到 shadcn 的 token，
   再加上应用自己的（`warning`、`link`、`list-hover`、六个色相等），浅色主题给浅色外观、深色给深色，经
   `set_theme_overrides` 给每个视图。nsh 读不了的颜色值（手改坏的主题文件）跳过，那个 token 用 nsh 的默认值。

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use catmail_core::html::{escape, nested, quoted_text_html, remote_image_url};
+use catmail_core::html::{escape, quoted_text_html, remote_image_url, without_sheet};
 use catmail_core::{FORWARD_SEPARATOR, Quote, QuoteHead};
 
 /// The images of a draft's HTML: the file each one's content is in
@@ -104,7 +104,7 @@ pub fn quote_to_html(quote: &Quote) -> String {
     };
     html.push_str(open);
     match &quote.html {
-        Some(original) => html.push_str(nested(original, "catmail-original").1),
+        Some(original) => html.push_str(without_sheet(original)),
         None => html.push_str(&quoted_text_html(&quote.text, "", "<p></p>")),
     }
     html.push_str(close);

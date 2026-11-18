@@ -52,7 +52,7 @@ mod web;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn main() -> anyhow::Result<std::process::ExitCode> {
     use catmail_core::{Config, MailClient};
-    use catmail_frontend::instance::{self, Claim, Display, Request};
+    use catmail_frontend::instance::{self, Claim, Request};
     use catmail_frontend::settings::SettingsFile;
 
     catmail_core::logging::init(&format!(
@@ -67,9 +67,7 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
         .map(Into::into)
         .or_else(Config::platform_config_dir);
     // Before any window: a launch that only hands over shows nothing of its own.
-    let activate = Request::Activate {
-        display: Display::current(),
-    };
+    let activate = Request::activate();
     let (builder, requests) = match instance::claim(&config, &activate)? {
         Claim::Handed => return Ok(std::process::ExitCode::SUCCESS),
         Claim::First { lock, requests } => {

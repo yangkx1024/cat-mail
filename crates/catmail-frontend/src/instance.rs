@@ -26,7 +26,7 @@ const SOCKET: &str = "gui.sock";
 /// included.
 const MAX_SOCKET_PATH: usize = 100;
 /// Bumped when a request or the reply changes in a way the other side can't read.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 /// How long a launch waits for an answer.
 const PATIENCE: Duration = Duration::from_secs(5);
 /// How long a launch waits for the one holding the data directory to start answering: the
@@ -42,35 +42,20 @@ const MAX_REQUEST: u64 = 64 * 1024;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
 pub enum Request {
-    /// Show the main window, on the asking launch's display.
-    Activate { display: Display },
+    /// Show the main window. On Wayland the asking launch's activation token lets it take
+    /// the focus; the app stays on the display it is connected to.
+    Activate { activation_token: Option<String> },
 }
 
-/// The graphical session a launch was started in. The app may have none (it drops its
-/// display connection while no window is open), so it opens the window on this one; on
-/// Wayland the activation token lets that window take focus. Empty outside Linux, where a
-/// process can only show windows in its own session.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct Display {
-    pub wayland_display: Option<String>,
-    pub x11_display: Option<String>,
-    pub xdg_runtime_dir: Option<String>,
-    pub activation_token: Option<String>,
-}
-
-impl Display {
-    /// This process's, from its environment.
-    pub fn current() -> Self {
-        if !cfg!(any(target_os = "linux", target_os = "freebsd")) {
-            return Self::default();
-        }
-        let var = |name| std::env::var(name).ok().filter(|v| !v.is_empty());
-        Self {
-            wayland_display: var("WAYLAND_DISPLAY"),
-            x11_display: var("DISPLAY"),
-            xdg_runtime_dir: var("XDG_RUNTIME_DIR"),
-            activation_token: var("XDG_ACTIVATION_TOKEN"),
-        }
+impl Request {
+    /// Show the main window, with this process's activation token (`XDG_ACTIVATION_TOKEN`,
+    /// only set on Linux).
+    pub fn activate() -> Self {
+        let activation_token = cfg!(any(target_os = "linux", target_os = "freebsd"))
+            .then(|| std::env::var("XDG_ACTIVATION_TOKEN").ok())
+            .flatten()
+            .filter(|v| !v.is_empty());
+        Self::Activate { activation_token }
     }
 }
 
@@ -333,10 +318,7 @@ mod tests {
 
     fn activate(token: &str) -> Request {
         Request::Activate {
-            display: Display {
-                activation_token: Some(token.into()),
-                ..Display::default()
-            },
+            activation_token: Some(token.into()),
         }
     }
 
@@ -517,29 +499,24 @@ mod tests {
         let (_lock, mut requests) = first(&config, None);
         let stream = UnixStream::connect(dir.path().join(SOCKET)).unwrap();
         (&stream)
-            .write_all(b"{\"version\":2,\"request\":\"something_new\"}\n")
+            .write_all(b"{\"version\":3,\"request\":\"something_new\"}\n")
             .unwrap();
         let reply: Reply = serde_json::from_str(&read_line(&stream).unwrap()).unwrap();
-        assert!(reply.error.unwrap().contains("not 2"));
+        assert!(reply.error.unwrap().contains("not 3"));
         assert!(requests.try_recv().is_err());
     }
 
     #[test]
     fn a_request_arrives_as_sent() {
         let request = Request::Activate {
-            display: Display {
-                wayland_display: Some("wayland-1".into()),
-                x11_display: None,
-                xdg_runtime_dir: Some("/run/user/1000".into()),
-                activation_token: Some("token".into()),
-            },
+            activation_token: Some("token".into()),
         };
         let line = serde_json::to_string(&Envelope {
             version: VERSION,
             request: request.clone(),
         })
         .unwrap();
-        assert!(line.starts_with("{\"version\":1,\"request\":\"activate\""));
+        assert!(line.starts_with("{\"version\":2,\"request\":\"activate\""));
         let back: Envelope = serde_json::from_str(&line).unwrap();
         assert_eq!(back.request, request);
     }

@@ -28,5 +28,5 @@ pub use images::{
     Image, MAX_REMOTE_IMAGES, Served, ServedImage, cid_image_ids, embed_inline_images,
     remote_image_url, rename_cid_images, serve_images, sniff_image,
 };
-pub use sanitize::{nested, sanitize_html};
+pub use sanitize::{nested, sanitize_html, without_sheet};
 pub use text::{escape, quoted_text_html, split_address, text, text_and_preheader, visible};

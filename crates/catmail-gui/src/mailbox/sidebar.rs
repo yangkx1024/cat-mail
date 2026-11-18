@@ -363,7 +363,7 @@ fn group(group: ReadSignal<Group>, _ix: ReadSignal<usize>) -> AnyElement {
         .into_element()
 }
 
-/// A section's title, as GPUI Kit's `SidebarGroup` draws its label.
+/// A section's title: a 32 px row with its label small and dimmed.
 fn title(label: &'static str) -> View {
     view().h(px(32.0)).px(px(8.0)).justify_center().child(
         text(label)
@@ -372,7 +372,7 @@ fn title(label: &'static str) -> View {
     )
 }
 
-/// GPUI Kit's sidebar menu: its items 8 apart.
+/// A sidebar menu: its items 8 apart.
 fn menu(items: impl Fn() -> Vec<Item> + 'static) -> View {
     view()
         .gap(px(8.0))
@@ -446,8 +446,8 @@ fn heading(group: ReadSignal<Group>) -> View {
         ))
 }
 
-/// An item and, while it is open, its subfolders: in GPUI Kit's submenu, 4 apart in a
-/// list with a line down its left.
+/// An item and, while it is open, its subfolders: 4 apart in a list with a line down
+/// its left.
 fn menu_entry(item: ReadSignal<Item>, _ix: ReadSignal<usize>) -> AnyElement {
     view()
         .child(place_row(item))
@@ -537,8 +537,8 @@ fn place_row(item: ReadSignal<Item>) -> View {
     ))
 }
 
-/// An item of a sidebar menu, the mailbox's or the settings': GPUI Kit's. Selected, the icon fills and the icon and label take the
-/// primary color; the label keeps its weight.
+/// An item of a sidebar menu, the mailbox's or the settings'. Selected, the icon fills
+/// and the icon and label take the primary color; the label keeps its weight.
 pub fn menu_item(
     which: impl Fn() -> Icon + 'static,
     label: impl IntoReactive<SharedString>,
@@ -553,7 +553,7 @@ pub fn menu_item(
         .rounded(px(6.0))
         .bg(row_background(selected, false))
         .hover(move |s| s.bg(row_background(selected, true)))
-        // As large as the label's text, as GPUI Kit draws it.
+        // As large as the label's text.
         .child(
             icon(
                 move || if selected() { which().solid() } else { which() },
@@ -570,8 +570,7 @@ pub fn menu_item(
         )
 }
 
-/// A sidebar row's background, as GPUI Kit's sidebar draws it: the accent when selected,
-/// lighter under the pointer.
+/// A sidebar row's background: the accent when selected, lighter under the pointer.
 fn row_background(
     selected: impl Fn() -> bool + 'static,
     hovered: bool,

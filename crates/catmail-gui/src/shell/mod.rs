@@ -379,7 +379,7 @@ async fn answer() {
     };
     while let Some(request) = next().await {
         match request {
-            Request::Activate { display } => show(display.activation_token.as_deref()),
+            Request::Activate { activation_token } => show(activation_token.as_deref()),
         }
     }
 }

@@ -71,7 +71,7 @@ fn row_box(item: Memo<Option<Line>>) -> View {
         id.is_some() && global::<Hovered>().with(|h| h.0) == id
     };
     // Apart from the next row, so a selected row's background and a hovered neighbour's
-    // don't touch (GPUI Kit's list has no gap of its own).
+    // don't touch (the list puts no gap between rows).
     view()
         .rounded(px(8.0))
         .my(px(2.0))

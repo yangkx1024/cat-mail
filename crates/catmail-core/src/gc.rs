@@ -17,7 +17,7 @@ const BLOB_GRACE: Duration = Duration::from_secs(60 * 60);
 
 /// What long-running frontends pass to
 /// [`collect_garbage_every`](crate::MailClientBuilder::collect_garbage_every).
-pub const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+pub(crate) const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// The first background collection waits at most this long after the engine opens:
 /// not at once, where it would compete with the first sync, but before a frontend

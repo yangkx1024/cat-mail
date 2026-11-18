@@ -228,7 +228,7 @@ async fn pass(
             continue;
         }
         let Some(job) = engine
-            .write_durable(move |db| db.outbox().begin_save(id, now()))
+            .write_durable(move |db| db.outbox().begin_save(id))
             .await?
         else {
             continue;
@@ -310,10 +310,7 @@ async fn send_route(
             }
             Smtp::None => unreachable!("connected above"),
         };
-        let Some(job) = engine
-            .write(move |db| db.outbox().begin_send(id, now()))
-            .await?
-        else {
+        let Some(job) = engine.write(move |db| db.outbox().begin_send(id)).await? else {
             continue; // Cancelled meanwhile.
         };
         let (entry, usable) = send_one(engine, session, job).await?;
@@ -410,7 +407,7 @@ impl Down {
         report: &mut FlushReport,
     ) -> Result<()> {
         let (error, next) = (self.error.clone(), self.next);
-        let postponed = record(engine, id, move |o| o.postpone(id, next, &error, now()));
+        let postponed = record(engine, id, move |o| o.postpone(id, next, &error));
         report.entries.extend(postponed.await?);
         Ok(())
     }
@@ -459,7 +456,7 @@ async fn send_one(
             let (save, replied) = engine
                 .write_durable(move |db| {
                     let replied = db.outbox().mark_accepted(id, now)?.unwrap_or_default();
-                    Ok((db.outbox().begin_save(id, now)?, replied))
+                    Ok((db.outbox().begin_save(id)?, replied))
                 })
                 .await?;
             tracing::info!(%id, %account, "message sent");
@@ -478,18 +475,18 @@ async fn send_one(
             match next_attempt(now, attempts).filter(|_| !is_permanent(&e)) {
                 Some(next) => {
                     tracing::info!(%id, %error, "sending failed; will retry");
-                    record(engine, id, move |o| o.requeue(id, next, &error, now)).await
+                    record(engine, id, move |o| o.requeue(id, next, &error)).await
                 }
                 None => {
                     tracing::warn!(%id, %attempts, %error, "message not sent; giving up");
-                    record(engine, id, move |o| o.fail(id, &error, now)).await
+                    record(engine, id, move |o| o.fail(id, &error)).await
                 }
             }
         }
         Outcome::Unknown(e) => {
             tracing::warn!(%id, error = %e, "no answer to the end of the message; outcome unknown");
             let error = e.to_string();
-            record(engine, id, move |o| o.mark_unknown(id, Some(&error), now)).await
+            record(engine, id, move |o| o.mark_unknown(id, Some(&error))).await
         }
         Outcome::Gone => Ok(None),
     };
@@ -530,7 +527,7 @@ async fn transact(
     // On disk before the end marker goes out: a commit lost to a power cut would leave
     // the entry `sending`, which is sent again.
     match engine
-        .write_durable(move |db| db.outbox().mark_unknown(id, None, now()))
+        .write_durable(move |db| db.outbox().mark_unknown(id, None))
         .await
     {
         Ok(true) => {}
@@ -576,11 +573,11 @@ async fn save_one(
             match next_attempt(now, attempts) {
                 Some(next) => {
                     tracing::info!(%id, %error, "saving to Sent failed; will retry");
-                    record(engine, id, move |o| o.save_later(id, next, &error, now)).await
+                    record(engine, id, move |o| o.save_later(id, next, &error)).await
                 }
                 None => {
                     tracing::warn!(%id, %attempts, %error, "saving to Sent failed; giving up");
-                    record(engine, id, move |o| o.give_up_saving(id, &error, now)).await
+                    record(engine, id, move |o| o.give_up_saving(id, &error)).await
                 }
             }
         }
@@ -909,9 +906,9 @@ mod tests {
             .unwrap()
             .store
             .write(|db| {
-                db.outbox().begin_send(entries[0], 1)?;
-                db.outbox().begin_send(entries[1], 1)?;
-                db.outbox().mark_unknown(entries[1], None, 1)
+                db.outbox().begin_send(entries[0])?;
+                db.outbox().begin_send(entries[1])?;
+                db.outbox().mark_unknown(entries[1], None)
             })
             .unwrap();
         drop(client);
@@ -944,7 +941,7 @@ mod tests {
             .engine()
             .unwrap()
             .store
-            .write(|db| db.outbox().begin_send(entry.id, 1))
+            .write(|db| db.outbox().begin_send(entry.id))
             .unwrap();
 
         let cancelled = client.cancel_outbox(entry.id).await.unwrap();

@@ -53,7 +53,7 @@
 - [x] 头像、未读只用字重、Gmail 用户标签；悬停的行显示 To / Cc 和操作按钮
 - [x] 勾选多封（点头像或 X）、按标记勾选的菜单（原生 `popup_menu`）、勾选时的批量工具栏
 - [x] 搜索：200 ms 防抖；先显示本地结果，1 s 后再问服务器
-- [ ] 搜索框获得焦点时提前登录（`connect_for_search`，见 docs/architecture/storage.md「问服务器」）
+- [x] 搜索框获得焦点时提前登录（`connect_for_search`，见 docs/architecture/storage.md「问服务器」）
 - [x] 刷新：节流、合并请求、结果没变不替换、按行的身份保持选中；选中的邮件消失时清空读信区
 - [x] 草稿、发件箱两个来源；Escape 关上读信区
 

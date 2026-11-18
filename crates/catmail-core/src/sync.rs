@@ -968,7 +968,6 @@ fn new_message(m: FetchedMessage) -> NewMessage {
         internal_date: m.internal_date,
         size: m.size,
         message_id: h.message_id,
-        in_reply_to: h.in_reply_to.into_iter().next(),
         references: h.references,
         subject: h.subject,
         from: h.from,
@@ -978,7 +977,6 @@ fn new_message(m: FetchedMessage) -> NewMessage {
         date: h.date,
         has_attachments: m.has_attachments,
         gm_msgid: m.gm_msgid,
-        gm_thrid: m.gm_thrid,
         previewed: m.preview.is_some(),
         snippet: m.preview.flatten(),
     }
