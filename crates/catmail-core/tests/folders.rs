@@ -257,6 +257,40 @@ async fn a_change_whose_answer_was_lost_is_not_made_twice() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_rename_whose_answer_was_lost_on_a_new_connection_keeps_queued_changes() {
+    let env = synced_env(state()).await;
+    let plan = env.id_of("Projects", "plan").await;
+    env.client
+        .set_flags(vec![plan], Flags::FLAGGED, Flags::empty())
+        .await
+        .unwrap();
+    let projects = env.folder("Projects").await;
+    // The pooled connection is from before a sleep: the rename goes on a new one.
+    env.client.resume();
+    let start = env.fake.state().log.len();
+
+    env.fake.state().faults.drop_after_mailbox_change = true;
+    let work = env.client.rename_folder(projects.id, "Work").await.unwrap();
+    assert_eq!((work.id, work.name.as_str()), (projects.id, "Work"));
+    let renames = env
+        .commands_since(start)
+        .into_iter()
+        .filter(|c| c.contains("RENAME"))
+        .count();
+    assert_eq!(renames, 1);
+
+    // Not taken for a folder that went away, with the change queued in it: the sync
+    // replays it.
+    env.client.sync_account(env.account).await.unwrap();
+    assert_eq!(env.folder_names().await, ["INBOX", "Work"]);
+    assert_eq!(env.id_of("Work", "plan").await, plan);
+    let flags = env.fake.state().mailbox_mut("Work").messages[0]
+        .flags
+        .clone();
+    assert!(flags.iter().any(|f| f == "\\Flagged"), "{flags:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn gmail_labels_are_created_renamed_and_deleted() {
     let mut state = ServerState::gmail("alice", "pw");
     let all = state.all_mail();

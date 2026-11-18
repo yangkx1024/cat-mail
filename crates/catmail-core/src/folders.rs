@@ -18,7 +18,7 @@ use catmail_types::{
 
 use crate::draft_sync::Uploads;
 use crate::engine::{Engine, lock};
-use crate::pool::with_session;
+use crate::pool::with_session_redone;
 use crate::{Error, Result, ops, sync};
 
 /// Creates a folder named `name` under `parent`, which must allow one
@@ -74,14 +74,12 @@ pub(crate) async fn create(
             };
             check_free(&folders, &name, None)?;
 
-            with_session(&engine, account, {
+            with_session_redone(&engine, account, {
                 let engine = engine.clone();
-                let mut again = false;
-                async move |session| {
-                    if !listed_again(session, &mut again)
-                        .await?
-                        .is_some_and(|names| names.contains(&remote_name))
-                    {
+                async move |session, again| {
+                    // A broken connection may have taken the command before failing, and
+                    // doing it once more would be refused.
+                    if !again || !listed_names(session).await?.contains(&remote_name) {
                         session.create(&remote_name).await?;
                     }
                     sync::store_folders(&engine, session, account, |_| Ok(Reconciled::default()))
@@ -118,16 +116,15 @@ pub(crate) async fn rename(engine: Arc<Engine>, id: FolderId, name: String) -> R
             }
             check_free(&folders, &name, Some(id))?;
 
-            with_session(&engine, account, {
+            with_session_redone(&engine, account, {
                 let engine = engine.clone();
-                let mut again = false;
-                async move |session| {
-                    if !listed_again(session, &mut again)
-                        .await?
-                        .is_some_and(|names| {
-                            names.contains(&remote_name) && !names.contains(&old_remote)
-                        })
-                    {
+                async move |session, again| {
+                    // As when creating: it may have been renamed before the connection broke.
+                    let done = again && {
+                        let names = listed_names(session).await?;
+                        names.contains(&remote_name) && !names.contains(&old_remote)
+                    };
+                    if !done {
                         session.rename(&old_remote, &remote_name).await?;
                     }
                     let (remote_name, name) = (remote_name.clone(), name.clone());
@@ -187,10 +184,10 @@ pub(crate) async fn delete(engine: Arc<Engine>, id: FolderId) -> Result<()> {
             // Every try adds to what was refused, as replaying does (see `replay_account`).
             let replayed = Arc::new(Mutex::new(ops::Replayed::default()));
 
-            with_session(&engine, account, {
+            with_session_redone(&engine, account, {
                 let (engine, folder_name) = (engine.clone(), folder.name.clone());
                 let delimiter = folder.delimiter;
-                async move |session| {
+                async move |session, _| {
                     let mut done = std::mem::take(&mut *lock(&replayed));
                     let result =
                         ops::replay_queued(&engine, session, account, Uploads::All, &mut done)
@@ -361,16 +358,6 @@ fn named(parent: Option<(&str, &str, char)>, leaf: &str) -> (String, String) {
         ),
         None => (utf7::encode(leaf), leaf.to_owned()),
     }
-}
-
-/// On a try after the first (`again`, set by this), the names of the server's mailboxes:
-/// a dead connection may have taken the command before failing, and doing what it did
-/// once more would be refused.
-async fn listed_again(session: &mut Session, again: &mut bool) -> Result<Option<HashSet<String>>> {
-    if !std::mem::replace(again, true) {
-        return Ok(None);
-    }
-    listed_names(session).await.map(Some)
 }
 
 /// The names of the server's mailboxes, as commands spell them.

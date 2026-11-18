@@ -1,7 +1,7 @@
 //! Logged-in IMAP connections kept between on-demand requests (bodies, attachments,
 //! saving to Sent, replays, the sync of an opened folder), so that opening messages one
 //! after another doesn't log in each time; and the rules for using a connection again,
-//! pooled or not ([`with_session`], [`on_session`]). Sync of every folder and background
+//! pooled or not ([`with_session`], [`on_session`], [`with_session_redone`]). Sync of every folder and background
 //! sync keep connections of their own, which follow the same rules.
 //!
 //! While a connection waits in the pool it is kept alive: every
@@ -244,11 +244,35 @@ pub(crate) async fn ping(
 pub(crate) async fn with_session<T>(
     engine: &Arc<Engine>,
     account: AccountId,
-    op: impl AsyncFnMut(&mut Session) -> Result<T>,
+    mut op: impl AsyncFnMut(&mut Session) -> Result<T>,
+) -> Result<T> {
+    pooled(engine, account, false, async move |session, _| {
+        op(session).await
+    })
+    .await
+}
+
+/// As [`with_session`], for a change the server may have made before its answer was lost:
+/// `op` also runs once more if a new connection breaks while it runs, not only a reused
+/// one, and is told whether this is a try after the first, when it should look at what
+/// the server already did rather than do it again.
+pub(crate) async fn with_session_redone<T>(
+    engine: &Arc<Engine>,
+    account: AccountId,
+    op: impl AsyncFnMut(&mut Session, bool) -> Result<T>,
+) -> Result<T> {
+    pooled(engine, account, true, op).await
+}
+
+async fn pooled<T>(
+    engine: &Arc<Engine>,
+    account: AccountId,
+    redo_new: bool,
+    op: impl AsyncFnMut(&mut Session, bool) -> Result<T>,
 ) -> Result<T> {
     let pool = engine.pool(account);
     let mut slot = pool.take();
-    let result = on_session(engine, account, &mut slot, op).await;
+    let result = trying(engine, account, &mut slot, redo_new, op).await;
     if let Some(session) = slot
         && result.as_ref().err().is_none_or(|e| !e.breaks_connection())
     {
@@ -266,22 +290,47 @@ pub(crate) async fn on_session<T>(
     slot: &mut Option<Session>,
     mut op: impl AsyncFnMut(&mut Session) -> Result<T>,
 ) -> Result<T> {
+    trying(engine, account, slot, false, async move |session, _| {
+        op(session).await
+    })
+    .await
+}
+
+/// [`on_session`], and with `redo_new` once more on a fresh connection if the new one
+/// broke too; `op` is told whether it runs after a try that broke.
+async fn trying<T>(
+    engine: &Arc<Engine>,
+    account: AccountId,
+    slot: &mut Option<Session>,
+    redo_new: bool,
+    mut op: impl AsyncFnMut(&mut Session, bool) -> Result<T>,
+) -> Result<T> {
     if slot.as_ref().is_some_and(|s| !usable(engine, s)) {
         tracing::info!(%account, "connection from before a sleep; reconnecting");
         *slot = None;
     }
+    let mut again = false;
     if let Some(session) = slot {
-        match op(session).await {
+        match op(session, again).await {
             // A fresh connection, not another idle one: those are likely dead too.
-            Err(e) if e.imap().is_some_and(imap::Error::is_disconnected) => {
+            Err(e) if e.is_disconnected() => {
                 tracing::info!(%account, error = %e, "reused connection was dead; reconnecting");
+                again = true;
             }
             result => return result,
         }
     }
     *slot = None;
     let session = slot.insert(connect(engine, account).await?);
-    op(session).await
+    match op(session, again).await {
+        Err(e) if redo_new && e.is_disconnected() => {
+            tracing::info!(%account, error = %e, "new connection broke; trying again");
+            *slot = None;
+            let session = slot.insert(connect(engine, account).await?);
+            op(session, true).await
+        }
+        result => result,
+    }
 }
 
 #[cfg(test)]
