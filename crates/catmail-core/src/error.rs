@@ -213,6 +213,12 @@ impl Error {
         }
     }
 
+    /// Whether the IMAP connection broke (see [`imap::Error::is_disconnected`]): a command
+    /// sent on it may have been carried out, and a new connection may work.
+    pub(crate) fn is_disconnected(&self) -> bool {
+        self.imap().is_some_and(imap::Error::is_disconnected)
+    }
+
     /// The IMAP failure this is, if it is one without a variant of its own.
     pub(crate) fn imap(&self) -> Option<&imap::Error> {
         match self {

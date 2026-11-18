@@ -13,18 +13,21 @@ Issue #331。`folders::rename` 在新建的连接上发 `RENAME` 后连接断开
 
 ## 决策
 
-- 在 `folders.rs` 里加 `on_server`：操作跑过、连接断开（`is_disconnected`）时在新连接上再来一次，告诉
-  操作这是重来，由已有的 `LIST` 检查决定是否再发命令，并照常更新本地记录。没改 `pool::on_session`：它被
-  同步、正文、回放等共用，那些地方新连接失败后再试一次只会把超时翻倍，而它们的失败本来就会在下次重来。
+- 在 `pool.rs` 里加 `with_session_redone`：操作跑过、连接断开（`is_disconnected`）时，不只复用的连接，
+  新建的连接也在新连接上再来一次，告诉操作这是重来，由已有的 `LIST` 检查决定是否再发命令，并照常更新本地
+  记录。`with_session` / `on_session` 行为不变（共用同一个 `trying`，只多一个开关）：它们被同步、正文、回放等
+  共用，那些地方新连接失败后再试一次只会把超时翻倍，而它们的失败本来就会在下次重来。最初写在 `folders.rs`
+  的外层重来（`on_server`）要克隆闭包、用 `AtomicBool` 推断"跑过没有"，重来时还会从池里拿另一条可能也死了
+  的连接、离线时多等一次连接超时；放进连接池的循环里这些都不需要。
 - 新建、删除走同一个函数，顺带也不再把做成了的操作报成失败；删除的重来本来就按服务器现在的层级删。
 - 还没连上就失败的（离线）不重来：命令没发出去，再连一次只多等一次超时。
-- 操作闭包改为 `Clone`、按值交给 `with_session` 两次，而不是借出去：借出的 `AsyncFnMut` 的 future 编译器
-  证明不了 `Send`。重来与否由参数传入，不再靠闭包里的 `again` 状态。
 - 再来一次也失败（网络整个断了）时问题仍在；要彻底解决得记下做到一半的改名，留待以后。
 
 ## 方案
 
-- `crates/catmail-core/src/folders.rs`：`on_server`，`listed_again` 改为接收 `again: bool`，三个操作改用它。
+- `crates/catmail-core/src/pool.rs`：`with_session_redone`，与 `with_session` / `on_session` 共用 `trying`。
+- `crates/catmail-core/src/error.rs`：`Error::is_disconnected`。
+- `crates/catmail-core/src/folders.rs`：三个操作改用 `with_session_redone`，`listed_again` 并入调用处。
 - `docs/architecture/folders.md`：更新"答复丢了不当成拒绝"与测试一节。
 - 测试：`tests/folders.rs` 的 `a_rename_whose_answer_was_lost_on_a_new_connection_keeps_queued_changes`，
   `resume()` 让池里的连接作废、重命名走新连接，`drop_after_mailbox_change` 让答复丢失；检查重命名成功、

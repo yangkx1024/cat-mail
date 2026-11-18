@@ -8,10 +8,9 @@
 //! `docs/architecture/folders.md`.
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use catmail_proto::imap::{self, Session, utf7};
+use catmail_proto::imap::{Session, utf7};
 use catmail_store::Reconciled;
 use catmail_types::{
     AccountId, Folder, FolderId, FolderRole, can_change_folder, can_create_in, special_folder,
@@ -19,7 +18,7 @@ use catmail_types::{
 
 use crate::draft_sync::Uploads;
 use crate::engine::{Engine, lock};
-use crate::pool::with_session;
+use crate::pool::with_session_redone;
 use crate::{Error, Result, ops, sync};
 
 /// Creates a folder named `name` under `parent`, which must allow one
@@ -75,13 +74,12 @@ pub(crate) async fn create(
             };
             check_free(&folders, &name, None)?;
 
-            on_server(&engine, account, {
+            with_session_redone(&engine, account, {
                 let engine = engine.clone();
                 async move |session, again| {
-                    if !listed_again(session, again)
-                        .await?
-                        .is_some_and(|names| names.contains(&remote_name))
-                    {
+                    // A broken connection may have taken the command before failing, and
+                    // doing it once more would be refused.
+                    if !again || !listed_names(session).await?.contains(&remote_name) {
                         session.create(&remote_name).await?;
                     }
                     sync::store_folders(&engine, session, account, |_| Ok(Reconciled::default()))
@@ -118,12 +116,15 @@ pub(crate) async fn rename(engine: Arc<Engine>, id: FolderId, name: String) -> R
             }
             check_free(&folders, &name, Some(id))?;
 
-            on_server(&engine, account, {
+            with_session_redone(&engine, account, {
                 let engine = engine.clone();
                 async move |session, again| {
-                    if !listed_again(session, again).await?.is_some_and(|names| {
+                    // As when creating: it may have been renamed before the connection broke.
+                    let done = again && {
+                        let names = listed_names(session).await?;
                         names.contains(&remote_name) && !names.contains(&old_remote)
-                    }) {
+                    };
+                    if !done {
                         session.rename(&old_remote, &remote_name).await?;
                     }
                     let (remote_name, name) = (remote_name.clone(), name.clone());
@@ -183,7 +184,7 @@ pub(crate) async fn delete(engine: Arc<Engine>, id: FolderId) -> Result<()> {
             // Every try adds to what was refused, as replaying does (see `replay_account`).
             let replayed = Arc::new(Mutex::new(ops::Replayed::default()));
 
-            on_server(&engine, account, {
+            with_session_redone(&engine, account, {
                 let (engine, folder_name) = (engine.clone(), folder.name.clone());
                 let delimiter = folder.delimiter;
                 async move |session, _| {
@@ -357,53 +358,6 @@ fn named(parent: Option<(&str, &str, char)>, leaf: &str) -> (String, String) {
         ),
         None => (utf7::encode(leaf), leaf.to_owned()),
     }
-}
-
-/// Runs `op` as [`with_session`] does, telling it whether this is a try after the first,
-/// and once more on a new connection if the one it ran on broke, whether pooled or new:
-/// the server may have made the change before its answer was lost. Failing there, a
-/// renamed folder would keep its old name here, and the next sync take it for one that
-/// went away, deleting it with the changes queued in it.
-///
-/// `op` is cloned for the second call rather than lent to the first (the future of a
-/// lent closure can't be proven `Send`, see [`with_session`]), so what one try leaves
-/// for the next goes behind an `Arc`.
-async fn on_server<T>(
-    engine: &Arc<Engine>,
-    account: AccountId,
-    op: impl AsyncFnMut(&mut Session, bool) -> Result<T> + Clone,
-) -> Result<T> {
-    // Shared with the closure `with_session` takes.
-    let tried = Arc::new(AtomicBool::new(false));
-    let first = {
-        let (mut op, tried) = (op.clone(), tried.clone());
-        async move |session: &mut Session| op(session, tried.swap(true, Ordering::Relaxed)).await
-    };
-    match with_session(engine, account, first).await {
-        // Not when it never ran, connecting failed: nothing was sent.
-        Err(e)
-            if tried.load(Ordering::Relaxed)
-                && e.imap().is_some_and(imap::Error::is_disconnected) =>
-        {
-            tracing::info!(%account, error = %e, "connection broke during a folder change; trying again");
-            let mut op = op;
-            with_session(engine, account, async move |session| {
-                op(session, true).await
-            })
-            .await
-        }
-        result => result,
-    }
-}
-
-/// On a try after the first (`again`), the names of the server's mailboxes: a broken
-/// connection may have taken the command before failing, and doing what it did once
-/// more would be refused.
-async fn listed_again(session: &mut Session, again: bool) -> Result<Option<HashSet<String>>> {
-    if !again {
-        return Ok(None);
-    }
-    listed_names(session).await.map(Some)
 }
 
 /// The names of the server's mailboxes, as commands spell them.
