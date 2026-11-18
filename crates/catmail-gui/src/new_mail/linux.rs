@@ -146,7 +146,7 @@ async fn reads_markup() -> bool {
 
 /// `method` of the interface `name` at `path`, on the bus `name`; its reply, if it came
 /// in time and as `T`.
-async fn call<T: glib::FromVariant>(
+async fn call<T: glib::variant::FromVariant>(
     bus: &gio::DBusConnection,
     name: &str,
     path: &str,
