@@ -18,7 +18,7 @@ const SNIPPET_CHARS: usize = 200;
 /// so that the change is a decision.
 ///
 /// [`MimeNode::content`]: super::MimeNode::content
-pub const CONTENT_VERSION: u32 = 5;
+pub const CONTENT_VERSION: u32 = 6;
 
 /// What a reader shows of a message.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1262,7 +1262,7 @@ mod tests {
         // either way, record the new fingerprint here.
         assert_eq!(
             (CONTENT_VERSION, format!("{hash:016x}")),
-            (5, "82f9c788d385ac37".to_owned()),
+            (6, "82f9c788d385ac37".to_owned()),
         );
     }
 }

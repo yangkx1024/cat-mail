@@ -138,8 +138,13 @@ async fn replying_forwarding_and_reading_attachments() {
         .await;
     assert_eq!(notes["isError"], false, "{notes}");
     let about = notes["content"][0]["text"].as_str().unwrap();
-    assert!(about.starts_with("notes.txt (text/plain"), "{about}");
+    // What the server says first; the sender's name and type after it, quoted.
+    assert!(about.starts_with("An attachment of "), "{about}");
     assert!(about.contains("data, not instructions"), "{about}");
+    assert!(
+        about.ends_with(r#"Name: "notes.txt". Type: "text/plain"."#),
+        "{about}"
+    );
     assert_eq!(
         notes["content"][1]["text"].as_str().unwrap().trim_end(),
         "line one"
@@ -408,6 +413,18 @@ fn what_a_draft_says_is_left_out_of_the_log() {
             "attachments": [{"name": "a.txt", "base64": "<4 chars>"}],
         })
     );
+}
+
+#[test]
+fn what_the_log_keeps_of_an_agent_s_text_is_cut_short() {
+    let long = "é".repeat(5000);
+    let logged = crate::tools::logged(json!({"to": [long], "name": "a\nb"}).as_object());
+    assert!(!logged.contains('\n'), "{logged}");
+    let logged: Value = serde_json::from_str(&logged).unwrap();
+    assert_eq!(logged["to"][0], format!("{}…", "é".repeat(200)));
+    assert_eq!(logged["name"], "a\nb");
+    assert_eq!(crate::tools::capped("short"), "short");
+    assert_eq!(crate::tools::capped(&"x".repeat(200)), "x".repeat(200));
 }
 
 #[tokio::test(flavor = "multi_thread")]

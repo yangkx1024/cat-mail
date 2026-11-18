@@ -13,7 +13,7 @@ use clap::{ArgGroup, Args, Subcommand};
 use crate::cmd::{account_folders, find_folder};
 use crate::exit::{Exit, Outcome};
 use crate::json::{self, JsonPendingOp, JsonReplay};
-use crate::output::print_ops;
+use crate::output::{outln, print_ops};
 
 #[derive(Args)]
 #[command(group(ArgGroup::new("change").required(true).multiple(true)))]
@@ -193,6 +193,9 @@ pub(crate) async fn ops(client: &MailClient, cmd: OpsCommand, json: bool) -> Res
         OpsCommand::Dismiss { ids } => {
             for id in ids {
                 client.dismiss_pending(PendingOpId(id)).await?;
+                if !json {
+                    outln!("Dismissed change {id}.")?;
+                }
             }
             Ok(())
         }

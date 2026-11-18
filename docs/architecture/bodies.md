@@ -237,7 +237,8 @@ base64 正文），交给 mail-parser 按同样方式解析。于是两条路径
     `style` 规则，深色只是同一遍里多换颜色。`background` 属性（`<td background="…">` 的背景图）不在保留
     之列：要支持它，背景图得像 `<img>` 一样算进远程图片、内嵌部分和页面的图片消息，没有实际需求之前不做；
   - 链接只允许 http、https、mailto、cid，`data:` 只允许出现在 `img src`；判断时像 URL 解析器
-    一样忽略其中的制表符、换行和开头的控制字符。
+    一样忽略其中的制表符、换行和开头的控制字符。引用的来源 `cite`（`blockquote`、`q`、`del`、`ins` 上）整个
+    去掉：ammonia 保留它却不查 scheme（`javascript:` 也留下），浏览器既不显示也不跳转，留着没有用处。
   - 图片地址（远程、`cid:`）原样保留，是否加载由渲染端决定，默认应拦截远程图片。
 - **哪些是远程图片**由 `catmail-html` 决定（`serve_images` 改写页面时一并列出，经 `catmail_core::html` 导出）：
   清洗用的同一个 ammonia 配置遍历 `img src`，只留 `http` / `https`，按 `url` 解析后的写法（`remote_image_url`）
