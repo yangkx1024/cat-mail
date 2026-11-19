@@ -59,8 +59,9 @@ const SIZE: &str = "height: auto !important; min-height: 0 !important; \
 /// is short of is cut off; not `scrollHeight`, which is rounded, nor the root's, which
 /// is never less than the view's height and so wouldn't shrink for a shorter message), that it has painted at the web view's height
 /// (`p:<n>:<px>`, two frames after it loaded and after each resize: WebKit has shown it
-/// at that size), how the body is scrolled sideways (`x:<n>:<scrollLeft>:<clientWidth>:
-/// <scrollWidth>`, when it changes: scrolled, resized, an image come), the links clicked
+/// at that size), how the body is scrolled sideways (`x:<n>:<offset>:<clientWidth>:
+/// <scrollWidth>`, when it changes: scrolled, resized, an image come; the offset from the
+/// left edge whatever the page's direction, see [`scroll_sideways`]), the links clicked
 /// (`o:<url>`), which open in the system's browser
 /// instead of in the view. Nothing else leads the view away from the page: a link's
 /// menu, whose "Open Link" would load it in the view and "Download Linked File" save it,
@@ -87,7 +88,13 @@ pub const BRIDGE: &str = r#"(function () {
   var body = document.body;
   var across = "";
   function sideways() {
-    var now = body.scrollLeft + ":" + body.clientWidth + ":" + body.scrollWidth;
+    // A right-to-left body (the message's sheet may say so) starts at the right edge,
+    // its scrollLeft 0 there and negative leftwards.
+    var offset = body.scrollLeft;
+    if (getComputedStyle(body).direction === "rtl") {
+      offset += body.scrollWidth - body.clientWidth;
+    }
+    var now = offset + ":" + body.clientWidth + ":" + body.scrollWidth;
     if (now !== across) {
       across = now;
       window.nsh.postMessage("x:" + page + ":" + now);
@@ -206,6 +213,16 @@ impl<'a> FromPage<'a> {
 
 /// The web view's height before the page says its own, in points.
 pub const MIN_HEIGHT: f32 = 40.0;
+
+/// The script that scrolls the body sideways to `offset` from its left edge, as
+/// [`BRIDGE`] says it is (`x`), whatever the page's direction. On its own: it may not
+/// run where [`BRIDGE`]'s functions are.
+pub fn scroll_sideways(offset: f32) -> String {
+    format!(
+        "(function (b) {{ b.scrollLeft = getComputedStyle(b).direction === \"rtl\" \
+         ? {offset} - (b.scrollWidth - b.clientWidth) : {offset}; }})(document.body);"
+    )
+}
 
 /// Whether a web view `height` points tall shows all of a page `page_height` points tall
 /// (as tall as it is made, [`MIN_HEIGHT`] at least; to the pixel): what
@@ -364,11 +381,25 @@ pub(super) mod tests {
         );
         assert!(BRIDGE.contains(r#""x:" + page + ":" + now"#), "{BRIDGE}");
         assert!(
-            BRIDGE
-                .contains("body.scrollLeft + \":\" + body.clientWidth + \":\" + body.scrollWidth"),
+            BRIDGE.contains("offset + \":\" + body.clientWidth + \":\" + body.scrollWidth"),
             "{BRIDGE}"
         );
         assert!(BRIDGE.contains(r#"body.addEventListener("scroll", sideways"#));
+    }
+
+    #[test]
+    fn a_right_to_left_body_is_scrolled_from_its_left_edge_too() {
+        // Its scrollLeft is 0 at the right edge and negative leftwards: the page says,
+        // and is scrolled to, the offset from the left edge, as the bar's thumb goes.
+        assert!(
+            BRIDGE.contains("offset += body.scrollWidth - body.clientWidth"),
+            "{BRIDGE}"
+        );
+        assert_eq!(
+            scroll_sideways(300.0),
+            "(function (b) { b.scrollLeft = getComputedStyle(b).direction === \"rtl\" \
+             ? 300 - (b.scrollWidth - b.clientWidth) : 300; })(document.body);"
+        );
     }
 
     #[test]

@@ -161,8 +161,7 @@ impl Sideways {
         if at.offset == offset {
             return;
         }
-        self.web
-            .inject_java_script(format!("document.body.scrollLeft = {offset};"));
+        self.web.inject_java_script(html::scroll_sideways(offset));
         self.at.set(html::Sideways { offset, ..at });
     }
 

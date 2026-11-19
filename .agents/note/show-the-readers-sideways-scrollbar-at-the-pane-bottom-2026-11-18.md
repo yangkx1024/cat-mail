@@ -27,12 +27,14 @@ body 的横向滚动条就画在 body 底部，也就是整封邮件的末尾。
 
 - `catmail-frontend/src/html/page.rs`：body 的 `style` 属性加 `scrollbar-width: none !important`，`BASE_STYLE` 加
   `body::-webkit-scrollbar { display: none !important; }`（不认 `scrollbar-width` 的 WebKit）；`BRIDGE` 在 body
-  滚动、body 和它的子元素尺寸变化、图片到了时，有变化才报（尺寸变化和图片一帧并成一次：读宽度要排版） `x:<页号>:<scrollLeft>:<clientWidth>:<scrollWidth>`；
+  滚动、body 和它的子元素尺寸变化、图片到了时，有变化才报（尺寸变化和图片一帧并成一次：读宽度要排版）
+  `x:<页号>:<偏移>:<clientWidth>:<scrollWidth>`，偏移从左边算起：邮件的样式表能让 body 从右往左排
+  （`direction: rtl`），那时 `scrollLeft` 在右端是 0、往左是负数，要换算（PR 上 Codex 指出的）；
   `FromPage::Sideways` 解析它，解析改成按段数匹配，多出、缺少、非有限的数都不认。高度不再含横向滚动条。
 - `catmail-frontend/src/html/sideways.rs`：`Sideways`，滑块的长度和位置（最短 32pt）、拖动和点击滑块旁边对应的偏移，纯函数加测试。
 - `catmail-gui/src/web/sideways.rs`：`web::Sideways`，每个 web view 一个：收页面的回报，画滚动条，拖动、点击时注入
-  `document.body.scrollLeft = …`（页面 JS 关着也照样执行：macOS 关的是 `allowsContentJavaScript`，Linux 关的是
-  `enable-javascript-markup`）。拖动中页面晚到的位置不跟，滑块跟着指针。
+  `html::scroll_sideways` 的脚本，同样按方向换算，不依赖 `BRIDGE` 里的函数（页面 JS 关着也照样执行：
+  macOS 关的是 `allowsContentJavaScript`，Linux 关的是 `enable-javascript-markup`）。拖动中页面晚到的位置不跟，滑块跟着指针。
 - `web::web_view` 多一个 `Sideways` 参数；读信区（`reader/view.rs`）和写信窗口的引文（`composer/quote.rs`）
   把滚动区交给 `Sideways::around`，由它放进同一个 view 并挂上滚动区的 `on_scroll`、这个 view 的
   `on_mouse_move`，让滚动条出现，调用处不用各接一遍。macOS 读 `AppleShowScrollBars` 要 `objc2-foundation` 的 `NSString`、`NSUserDefaults` 两个 feature。

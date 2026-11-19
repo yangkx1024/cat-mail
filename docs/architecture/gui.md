@@ -272,11 +272,12 @@ web view、图片的应答、远程图片的下载在 `web.rs`，写信窗口的
   `<link>`、iframe、`meta refresh`……）指向本机 HTTP 服务器验证过：开着 CSP 时零请求。
 - **脚本**：页面自己的 JS 关掉（`java_script_enabled(false)`）。注入的脚本（`html::BRIDGE`）WebKit 照样运行，
   经 `window.nsh.postMessage` 回报：页面高度（`h`）、按 web view 的高度画好了（`p`）、body 的横向滚动
-  （`x:<页号>:<scrollLeft>:<clientWidth>:<scrollWidth>`，滚动、尺寸变化、图片到了时有变化才报）、点击的链接（`o`）。限流时
+  （`x:<页号>:<偏移>:<clientWidth>:<scrollWidth>`，滚动、尺寸变化、图片到了时有变化才报；偏移从左边算起，从右往左排的
+  body 的 `scrollLeft` 在右端是 0、往左是负数，换算过来）、点击的链接（`o`）。限流时
   （Linux）另一段 `html::WATCH_IMAGES` 在页面内容之前注入，回报读信区的每张图片到了或失败了（`l:<URL>`，URL 里
   带页号；`data:` 图片和被拦下的不报），读信区据此放行下一批（见[图片](#图片)）。读信区只在拖横向滚动条时往页面
-  注入一句 `document.body.scrollLeft = …`（页面 JS 关着也照样执行：macOS 关的是 `allowsContentJavaScript`，
-  Linux 关的是 `enable-javascript-markup`，都只拦页面自己的脚本）。
+  注入一句设 `document.body.scrollLeft` 的脚本（`html::scroll_sideways`，同样按方向换算；页面 JS 关着也照样执行：
+  macOS 关的是 `allowsContentJavaScript`，Linux 关的是 `enable-javascript-markup`，都只拦页面自己的脚本）。
 - **网站数据**：web view 设成 `incognito`，页面留下的网站数据（cookie、存储、缓存）只在内存里，随 web view
   一起没了，不写进数据目录：正文是别人写的 HTML，页面的 JS 虽然关了，也不该和应用共用一份持久的网站数据。
   Linux 上是这个 web view 自己的临时 `NetworkSession`（不再建 `$XDG_DATA_HOME/<app id>/webkit`），macOS 上是
