@@ -129,6 +129,20 @@ impl Mail {
         }
     }
 
+    /// The page of a list, or of search results, that the parameters ask for.
+    async fn list_query(
+        &self,
+        limit: u32,
+        after: Option<i64>,
+        only: Option<Only>,
+    ) -> Result<ListQuery, Failed> {
+        Ok(ListQuery {
+            limit,
+            after: self.cursor(after).await?,
+            filter: Only::filter(only),
+        })
+    }
+
     /// The names of the accounts' folders and labels, for messages to say where they are.
     async fn folder_names(
         &self,
@@ -265,11 +279,7 @@ impl Mail {
         Parameters(p): Parameters<ListMessagesParams>,
     ) -> Result<Json<Messages>, Failed> {
         let limit = limit(p.limit);
-        let query = ListQuery {
-            limit,
-            after: self.cursor(p.after).await?,
-            filter: Only::filter(p.only),
-        };
+        let query = self.list_query(limit, p.after, p.only).await?;
         let messages = match p.folder {
             Some(id) => {
                 let folder = self.folder(id).await?;
@@ -298,9 +308,7 @@ impl Mail {
         if let Some(id) = p.folder {
             query.folder = Some(self.folder(id).await?.id);
         }
-        query.limit = limit;
-        query.after = self.cursor(p.after).await?;
-        query.filter = Only::filter(p.only);
+        query.page = self.list_query(limit, p.after, p.only).await?;
         if p.ask_servers.unwrap_or(false) {
             query.found_on_server = self.client.search_server(query.clone()).await?;
         }

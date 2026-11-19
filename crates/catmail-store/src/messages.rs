@@ -777,8 +777,8 @@ impl<'c> Messages<'c> {
              ORDER BY {NEWEST_FIRST} LIMIT :limit"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
-        let (after_date, after_id) = cursor_params(query.after);
-        let (mask, want, also) = filter_params(&query.filter);
+        let (after_date, after_id) = cursor_params(query.page.after);
+        let (mask, want, also) = filter_params(&query.page.filter);
         let rows = stmt.query_map(
             named_params! {
                 ":expr": expr,
@@ -790,7 +790,7 @@ impl<'c> Messages<'c> {
                 ":folder": query.folder.map(|f| f.0),
                 ":after_date": after_date,
                 ":after_id": after_id,
-                ":limit": query.limit,
+                ":limit": query.page.limit,
             },
             summary_from_row,
         )?;
@@ -1392,9 +1392,11 @@ mod tests {
                 .unwrap()
         };
         let search = |limit, after| {
-            let mut query = SearchQuery::new("subject");
-            query.limit = limit;
-            query.after = after;
+            let page = ListQuery {
+                after,
+                ..ListQuery::new(limit)
+            };
+            let query = SearchQuery::paged("subject", page);
             ids(store.read(|db| db.messages().search(&query)).unwrap())
         };
 
@@ -2085,7 +2087,7 @@ mod tests {
         assert_eq!(subjects(merged).len(), 3);
 
         let mut query = SearchQuery::new("alice");
-        query.filter = ListFilter::new(FlagFilter::Flagged);
+        query.page.filter = ListFilter::new(FlagFilter::Flagged);
         let found = store.read(|db| db.messages().search(&query)).unwrap();
         assert_eq!(subjects(found), ["subject 3"]);
     }
@@ -2244,7 +2246,7 @@ mod tests {
             let mut after = None;
             loop {
                 let mut q = SearchQuery::new("alice");
-                (q.accounts, q.folder, q.limit, q.after) =
+                (q.accounts, q.folder, q.page.limit, q.page.after) =
                     (Some(vec![account]), folder, limit, after);
                 let page = store.read(|db| db.messages().search(&q)).unwrap();
                 let Some(last) = page.last() else {

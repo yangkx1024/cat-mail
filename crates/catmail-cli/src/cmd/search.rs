@@ -103,11 +103,7 @@ pub(crate) async fn ls(client: &MailClient, args: Ls, json: bool) -> Result<()> 
         .find_folder(account.id, &name)
         .await?
         .with_context(|| format!("no folder `{name}` in {}", account.email))?;
-    let query = ListQuery {
-        limit: args.limit,
-        after: cursor_after(client, args.after).await?,
-        filter: Only::filter(args.only),
-    };
+    let query = list_query(client, args.limit, args.after, args.only).await?;
     let messages = client.list_messages(folder.id, query).await?;
     if json {
         print_messages(&messages)
@@ -123,10 +119,8 @@ pub(crate) async fn ls(client: &MailClient, args: Ls, json: bool) -> Result<()> 
 }
 
 pub(crate) async fn search(client: &MailClient, args: Search, json: bool) -> Result<()> {
-    let mut query = SearchQuery::new(args.query.join(" "));
-    query.limit = args.limit;
-    query.after = cursor_after(client, args.after).await?;
-    query.filter = Only::filter(args.only);
+    let page = list_query(client, args.limit, args.after, args.only).await?;
+    let mut query = SearchQuery::paged(args.query.join(" "), page);
     if let Some(name) = &args.folder {
         let account = one_account(client, args.account.as_deref()).await?;
         let folder = client
@@ -153,6 +147,20 @@ pub(crate) async fn search(client: &MailClient, args: Search, json: bool) -> Res
     let folders = account_folders(client, accounts).await?;
     print_message_table(&messages, &folders, None)?;
     Ok(())
+}
+
+/// The page of a list, or of search results, that `-n`, `--after` and `--only` ask for.
+async fn list_query(
+    client: &MailClient,
+    limit: u32,
+    after: Option<i64>,
+    only: Option<Only>,
+) -> Result<ListQuery> {
+    Ok(ListQuery {
+        limit,
+        after: cursor_after(client, after).await?,
+        filter: Only::filter(only),
+    })
 }
 
 fn print_messages(messages: &[MessageSummary]) -> Result<()> {

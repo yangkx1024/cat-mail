@@ -15,34 +15,36 @@ pub struct SearchQuery {
     pub accounts: Option<Vec<AccountId>>,
     /// Only this folder.
     pub folder: Option<FolderId>,
-    pub limit: u32,
-    /// Only the matches after this one; the next page after a page ending with it.
-    pub after: Option<MessageCursor>,
+    /// Which page of the matches, and only those its filter takes: paged and filtered
+    /// as a list is.
+    #[serde(flatten)]
+    pub page: ListQuery,
     /// Messages the servers found for this text whose bodies aren't downloaded (see
     /// `MailClient::search_server`): they match too, within the account and folder.
     #[serde(default)]
     pub found_on_server: Vec<MessageId>,
-    /// Only the matches it takes.
-    #[serde(default)]
-    pub filter: ListFilter,
 }
 
 impl SearchQuery {
+    /// The first 50 matches, whatever their flags.
     pub fn new(text: impl Into<String>) -> Self {
+        Self::paged(text, ListQuery::new(50))
+    }
+
+    /// The matches `page` asks for.
+    pub fn paged(text: impl Into<String>, page: ListQuery) -> Self {
         Self {
             text: text.into(),
             accounts: None,
             folder: None,
-            limit: 50,
-            after: None,
+            page,
             found_on_server: Vec::new(),
-            filter: ListFilter::default(),
         }
     }
 }
 
-/// A page of a list of messages (a folder, the inboxes together), newest first: the
-/// first `limit` that `filter` takes, or the `limit` after `after`.
+/// A page of a list of messages (a folder, the inboxes together, search results),
+/// newest first: the first `limit` that `filter` takes, or the `limit` after `after`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListQuery {
     pub limit: u32,
@@ -188,6 +190,27 @@ mod tests {
             field,
             text: text.into(),
         }
+    }
+
+    #[test]
+    fn a_search_keeps_its_page_beside_its_text() {
+        let mut query = SearchQuery::paged("lunch", ListQuery::new(10));
+        query.page.filter = ListFilter::new(FlagFilter::Unread);
+        let json = serde_json::to_value(&query).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "text": "lunch", "accounts": null, "folder": null, "limit": 10, "after": null,
+                "filter": {"flags": "unread", "also": []}, "found_on_server": [],
+            })
+        );
+        assert_eq!(serde_json::from_value::<SearchQuery>(json).unwrap(), query);
+        // Without a filter, as before there was one.
+        let old = serde_json::json!({"text": "lunch", "accounts": null, "folder": null, "limit": 10, "after": null});
+        assert_eq!(
+            serde_json::from_value::<SearchQuery>(old).unwrap(),
+            SearchQuery::paged("lunch", ListQuery::new(10))
+        );
     }
 
     #[test]
