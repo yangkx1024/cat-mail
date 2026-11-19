@@ -91,6 +91,9 @@ SMTP 客户端见[草稿与发信](sending.md#smtp-客户端)。
     UID 也算一封，一段不会超过 N 封。
   - 没给 `LastUID`、或者 `LastUID` 没有比上一次更低（服务器出错，续下去会死循环）时，剩下的没法要，
     返回 `Error::Truncated`（不是致命错误）：结果不完整，不能当成完整的用，改动可能只做了一部分。
+    数读不出来的码（如 `[MESSAGELIMIT 0 0]`：两个数都必须非零，imap-proto 不认，留成
+    `Code::Other("MESSAGELIMIT")`）也一样：服务器还是说了停在半路，只是不知道停在哪。tagged NO 里的这种
+    码就是普通的拒绝（`Error::Command`）。
   - COPY 本来"被拒绝就什么都没复制"，分段以后前面的段可能已经复制了：后面一段被拒（如 `OVERQUOTA`）时
     返回 `Truncated` 而不是 `Error::Command`。没有 MOVE 时的移动（COPY 再删除）把它当成答复丢失：op
     留着，下次重放先从 checkpoint 找出已经复制的那些（见[操作队列 / 没有 MOVE 的服务器](op-queue.md#没有-move-的服务器)），不会复制第二遍。

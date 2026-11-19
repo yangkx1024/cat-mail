@@ -96,12 +96,25 @@ impl Response {
 
     /// Whether the server stopped short at its limit on messages in one command
     /// (`[MESSAGELIMIT <limit> <LastUID>]`, RFC 9738, in the tagged OK or an untagged NO),
-    /// and if so the lowest UID it got to, if it said.
+    /// and if so the lowest UID it got to, if it said. A code imap-proto can't read (`[MESSAGELIMIT
+    /// 0 0]`, its numbers not the nonzero ones they must be) still says it stopped: where
+    /// is then unknown.
     pub fn message_limit(&self) -> Option<Option<u32>> {
-        self.codes.iter().find_map(|code| match code {
-            Code::Known(ResponseCode::MessageLimit { last_uid, .. }) => Some(*last_uid),
-            _ => None,
-        })
+        let mut limited = None;
+        for code in &self.codes {
+            match code {
+                Code::Known(ResponseCode::MessageLimit {
+                    last_uid: Some(last),
+                    ..
+                }) => return Some(Some(*last)),
+                Code::Known(ResponseCode::MessageLimit { last_uid: None, .. }) => {
+                    limited = Some(None);
+                }
+                Code::Other(name) if name == "MESSAGELIMIT" => limited = Some(None),
+                _ => {}
+            }
+        }
+        limited
     }
 }
 
