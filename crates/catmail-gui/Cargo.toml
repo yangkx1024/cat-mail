@@ -55,6 +55,8 @@ objc2-foundation = { workspace = true, features = [
     "NSError",
     "NSNotification",
     "NSOperation",
+    "NSString",
+    "NSUserDefaults",
 ] }
 objc2-user-notifications.workspace = true
 

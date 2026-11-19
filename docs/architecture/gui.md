@@ -271,9 +271,12 @@ web view、图片的应答、远程图片的下载在 `web.rs`，写信窗口的
   "引擎根本没有网络"（Blitz）降成了"靠 CSP 拦"；用探针页（`<img>`、`srcset`、`@import`、`@font-face`、CSS 背景、
   `<link>`、iframe、`meta refresh`……）指向本机 HTTP 服务器验证过：开着 CSP 时零请求。
 - **脚本**：页面自己的 JS 关掉（`java_script_enabled(false)`）。注入的脚本（`html::BRIDGE`）WebKit 照样运行，
-  经 `window.nsh.postMessage` 回报：页面高度（`h`）、按 web view 的高度画好了（`p`）、点击的链接（`o`）。限流时
+  经 `window.nsh.postMessage` 回报：页面高度（`h`）、按 web view 的高度画好了（`p`）、body 的横向滚动
+  （`x:<页号>:<scrollLeft>:<clientWidth>:<scrollWidth>`，滚动、尺寸变化、图片到了时有变化才报）、点击的链接（`o`）。限流时
   （Linux）另一段 `html::WATCH_IMAGES` 在页面内容之前注入，回报读信区的每张图片到了或失败了（`l:<URL>`，URL 里
-  带页号；`data:` 图片和被拦下的不报），读信区据此放行下一批（见[图片](#图片)）。读信区不往页面发消息。
+  带页号；`data:` 图片和被拦下的不报），读信区据此放行下一批（见[图片](#图片)）。读信区只在拖横向滚动条时往页面
+  注入一句 `document.body.scrollLeft = …`（页面 JS 关着也照样执行：macOS 关的是 `allowsContentJavaScript`，
+  Linux 关的是 `enable-javascript-markup`，都只拦页面自己的脚本）。
 - **网站数据**：web view 设成 `incognito`，页面留下的网站数据（cookie、存储、缓存）只在内存里，随 web view
   一起没了，不写进数据目录：正文是别人写的 HTML，页面的 JS 虽然关了，也不该和应用共用一份持久的网站数据。
   Linux 上是这个 web view 自己的临时 `NetworkSession`（不再建 `$XDG_DATA_HOME/<app id>/webkit`），macOS 上是
@@ -282,9 +285,17 @@ web view、图片的应答、远程图片的下载在 `web.rs`，写信窗口的
   页面晚到的消息不会被当成新页面的。
 - **高度**：web view 不滚动，高度跟着页面报的走；标题、头部和正文由外层一起滚。页面自己的 overflow 隐藏：
   macOS 上 nsh 的 `scrollable(false)` 只把滚轮交给外层，不像 Linux 那样隐藏页面的 overflow，页面比 web view
-  高出一点（`scrollHeight` 取整、横向滚动条占高度）WebKit 就会画出第二个滚动条。报的高度是根元素的盒子
-  （含 body 的外边距和横向滚动条）向上取整，不用会被取整的 `scrollHeight`，也不用根元素的 `scrollHeight`
-  （不小于 web view 的高度，换到短邮件时缩不回去）。比读信区宽的邮件在 body 里横向滚动，body 不纵向滚动。
+  高出一点（`scrollHeight` 取整）WebKit 就会画出第二个滚动条。报的高度是根元素的盒子（含 body 的外边距）
+  向上取整，不用会被取整的 `scrollHeight`，也不用根元素的 `scrollHeight`（不小于 web view 的高度，换到短邮件
+  时缩不回去）。比读信区宽的邮件在 body 里横向滚动，body 不纵向滚动。
+- **横向滚动条**：body 自己的横向滚动条画在 body 底部，也就是整封邮件的末尾，要纵向滚到底才看得见（#355）。
+  所以页面把它藏起来（body 的 `style` 属性里 `scrollbar-width: none`，不认它的 WebKit 用
+  `body::-webkit-scrollbar { display: none }`），回报横向滚动（`x`），读信区在滚动区底部自己画一条
+  （`web::Sideways`），和外层的纵向指示条一个样子、一样来去：页面或外层滚动时、鼠标在读信区上移动时（Linux 上是移到滑块上时；macOS 的“显示滚动条”设为
+  “滚动时”就不随鼠标出现）出现，停下 700 ms 后 300 ms 淡出；
+  拖动滑块、点滑块旁边都会让页面横向滚动。滑块的长度和位置是 `catmail_frontend::html::Sideways` 算的。触控板
+  横向滑动、Shift + 滚轮照旧由 body 自己滚。⚠️ 没让外层两个方向一起滚：nsh 的滚动区只沿一个方向，两个方向都滚
+  只有 `zoomable` 且后端支持缩放时才行，macOS 和 Linux 后端都不支持。写信窗口的引文同样处理。
   根元素和 body 的高度固定为 `auto`，`min-height` / `max-height` 压回 `0` / `none`：不少营销邮件写
   `html, body { height: 100% !important }`，根元素就和 web view 一样高，报的高度永远是 web view 当前的高度，
   web view 长不高（刚开窗时只露出几行），放不下的由 body 自己纵向滚动。两者也固定为 `position: static`：

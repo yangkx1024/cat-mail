@@ -280,10 +280,12 @@ fn message(quote: Rc<Quote>) -> impl IntoElement {
         let dark = dark();
         page.set(untracked(|| make_page(&quote, dark)));
     });
+    let sideways = web::Sideways::new();
     let web = web::web_view(
         move || page.with(|p| p.0.clone()),
         move |h| height.set(h),
         |_| {},
+        sideways,
     )
     .bg(move || web::background(page.with(|p| p.1)))
     .h(move || px(height.get().max(web::MIN_HEIGHT)));
@@ -292,12 +294,15 @@ fn message(quote: Rc<Quote>) -> impl IntoElement {
         .min_h(px(0.0))
         .style_when(move || !expanded(), |s| s.hidden())
         .children(headers.map(forward_headers))
-        // The page pads itself, a little less than the text is.
+        // The page pads itself, a little less than the text is; its sideways bar is at
+        // the bottom of the scroll view.
         .child(
-            scroll()
-                .flex_1()
-                .min_h(px(0.0))
-                .child(view().px(px(4.0)).child(web)),
+            sideways.around(
+                scroll()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .child(view().px(px(4.0)).child(web)),
+            ),
         )
 }
 

@@ -11,11 +11,13 @@
 mod pacer;
 mod page;
 mod pages;
+mod sideways;
 
 pub use page::{
     Appearance, BRIDGE, Colors, DarkAppearance, FromPage, MIN_HEIGHT, WATCH_IMAGES, tall_enough,
 };
 pub use pages::{BodyPages, IMAGE_SCHEME, RemoteImages};
+pub use sideways::Sideways;
 
 use std::collections::HashMap;
 

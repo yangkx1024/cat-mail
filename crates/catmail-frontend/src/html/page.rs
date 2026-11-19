@@ -14,6 +14,7 @@
 use catmail_core::html::{DarkPalette, Served, escape, serve_images};
 
 use super::pages::image_base;
+use super::sideways::Sideways;
 
 /// Nothing may load except the message's `data:` images, those the reader serves, and
 /// the inline styles. `form-action` and `base-uri` don't fall back to `default-src`.
@@ -22,10 +23,12 @@ const CSP: &str = "default-src 'none'; img-src data: catmail-image:; \
                    base-uri 'none'";
 
 /// Ours, under the message's own styles: the page has no margins of its own (the
-/// reader pads it).
+/// reader pads it). Nor has the body a sideways scroller ([`SIZE`]): here for the
+/// WebKits that don't know its `scrollbar-width`.
 const BASE_STYLE: &str = "html, body { margin: 0; } \
                           body { padding: 16px; overflow-wrap: break-word; \
-                          font-family: sans-serif; }";
+                          font-family: sans-serif; } \
+                          body::-webkit-scrollbar { display: none !important; }";
 
 /// How tall the root and the body are, in their style attributes (with how they
 /// overflow, [`body_page`]): those win over the message's style sheets, `!important` or
@@ -41,19 +44,24 @@ const BASE_STYLE: &str = "html, body { margin: 0; } \
 /// wheel to the reader, and WebKit shows a scroller of its own for a page a fraction of
 /// a pixel taller than the view, or one a sideways scroller makes taller. With the
 /// root's overflow hidden, the body's no longer goes to the viewport: the body is what
-/// scrolls a message wider than the pane, and only sideways.
+/// scrolls a message wider than the pane, and only sideways. It shows no scroller of its
+/// own, which would be at the end of the message: it says how it is scrolled
+/// ([`FromPage::Sideways`]) and the reader shows a bar for it at the bottom of the pane
+/// (`crate::html::Sideways`).
 const SIZE: &str = "height: auto !important; min-height: 0 !important; \
                     max-height: none !important; position: static !important;";
 
 /// What the page tells the reader, through `window.nsh.postMessage`, with the page's
 /// number ([`body_page`]: one web view shows page after page, and what an earlier one
 /// says may come late): its height (`h:<n>:<px>`), so the web
-/// view can be as tall as the page (the root's box, which holds the body's margins and
-/// its sideways scroller, rounded up: the root's overflow is hidden, so what the view
+/// view can be as tall as the page (the root's box, which holds the body's margins,
+/// rounded up: the root's overflow is hidden, so what the view
 /// is short of is cut off; not `scrollHeight`, which is rounded, nor the root's, which
 /// is never less than the view's height and so wouldn't shrink for a shorter message), that it has painted at the web view's height
 /// (`p:<n>:<px>`, two frames after it loaded and after each resize: WebKit has shown it
-/// at that size), the links clicked (`o:<url>`), which open in the system's browser
+/// at that size), how the body is scrolled sideways (`x:<n>:<scrollLeft>:<clientWidth>:
+/// <scrollWidth>`, when it changes: scrolled, resized, an image come), the links clicked
+/// (`o:<url>`), which open in the system's browser
 /// instead of in the view. Nothing else leads the view away from the page: a link's
 /// menu, whose "Open Link" would load it in the view and "Download Linked File" save it,
 /// isn't shown (WebKit's menu elsewhere, with Copy, is), and nothing dropped on the page
@@ -76,6 +84,37 @@ pub const BRIDGE: &str = r#"(function () {
   new ResizeObserver(report).observe(root, { box: "border-box" });
   window.addEventListener("load", report);
   report();
+  var body = document.body;
+  var across = "";
+  function sideways() {
+    var now = body.scrollLeft + ":" + body.clientWidth + ":" + body.scrollWidth;
+    if (now !== across) {
+      across = now;
+      window.nsh.postMessage("x:" + page + ":" + now);
+    }
+  }
+  // Once a frame, as many images may come in one: reading the widths lays the page out.
+  var queued = false;
+  function soon() {
+    if (!queued) {
+      queued = true;
+      requestAnimationFrame(function () {
+        queued = false;
+        sideways();
+      });
+    }
+  }
+  body.addEventListener("scroll", sideways, { passive: true });
+  // What is in the body grows wider without the body changing: its children resized,
+  // an image come.
+  var widths = new ResizeObserver(soon);
+  widths.observe(body);
+  for (var child = body.firstElementChild; child; child = child.nextElementSibling) {
+    widths.observe(child);
+  }
+  document.addEventListener("load", soon, true);
+  window.addEventListener("load", soon);
+  sideways();
   function link(e) {
     return e.target.closest ? e.target.closest("a[href]") : null;
   }
@@ -131,6 +170,7 @@ pub enum FromPage<'a> {
     /// An image has come, or failed: by its URL, which says the page.
     Loaded(&'a str),
     Open(&'a str),
+    Sideways(u64, Sideways),
 }
 
 impl<'a> FromPage<'a> {
@@ -142,11 +182,23 @@ impl<'a> FromPage<'a> {
             return Some(FromPage::Loaded(url));
         }
         let (kind, rest) = message.split_once(':')?;
-        let (page, height) = rest.split_once(':')?;
-        let (page, height) = (page.parse().ok()?, height.parse().ok()?);
-        match kind {
-            "h" => Some(FromPage::Height(page, height)),
-            "p" => Some(FromPage::Painted(page, height)),
+        let (page, rest) = rest.split_once(':')?;
+        let page = page.parse().ok()?;
+        let numbers = rest
+            .split(':')
+            .map(|n| n.parse().ok().filter(|n: &f32| n.is_finite()))
+            .collect::<Option<Vec<f32>>>()?;
+        match (kind, numbers.as_slice()) {
+            ("h", &[height]) => Some(FromPage::Height(page, height)),
+            ("p", &[height]) => Some(FromPage::Painted(page, height)),
+            ("x", &[offset, view, content]) => Some(FromPage::Sideways(
+                page,
+                Sideways {
+                    offset,
+                    view,
+                    content,
+                },
+            )),
             _ => None,
         }
     }
@@ -200,7 +252,7 @@ pub(super) fn body_page(
          <style>{BASE_STYLE} html {{ color: {}; background: {}; }} a[href] {{ color: {}; }} \
          ::selection {{ background: {}; }}</style>\
          </head>\n<body style=\"{SIZE} overflow-x: auto !important; \
-         overflow-y: hidden !important\">\n{}\n</body></html>\n",
+         overflow-y: hidden !important; scrollbar-width: none !important\">\n{}\n</body></html>\n",
         colors.foreground, colors.background, colors.link, colors.selection, served.html,
     );
     Served { html, ..served }
@@ -288,7 +340,7 @@ pub(super) mod tests {
         );
         assert!(
             page.contains(&format!(
-                "<body style=\"{SIZE} overflow-x: auto !important; overflow-y: hidden !important\">"
+                "<body style=\"{SIZE} overflow-x: auto !important; overflow-y: hidden !important; scrollbar-width: none !important\">"
             )),
             "{page}"
         );
@@ -299,6 +351,24 @@ pub(super) mod tests {
             assert!(style.contains("position: static !important"), "{style}");
         }
         assert!(!BRIDGE.contains("scrollHeight"));
+    }
+
+    #[test]
+    fn the_body_shows_no_sideways_scroller_and_says_how_it_is_scrolled() {
+        // Its scroller would be at the end of the message, under the reader's view of
+        // it: the reader shows a bar for it at the bottom of the pane instead.
+        let page = blank_page(1, &light());
+        assert!(
+            page.contains("body::-webkit-scrollbar { display: none !important; }"),
+            "{page}"
+        );
+        assert!(BRIDGE.contains(r#""x:" + page + ":" + now"#), "{BRIDGE}");
+        assert!(
+            BRIDGE
+                .contains("body.scrollLeft + \":\" + body.clientWidth + \":\" + body.scrollWidth"),
+            "{BRIDGE}"
+        );
+        assert!(BRIDGE.contains(r#"body.addEventListener("scroll", sideways"#));
     }
 
     #[test]
@@ -402,7 +472,31 @@ pub(super) mod tests {
             FromPage::parse("l:catmail-image:3/cid/a%40b"),
             Some(FromPage::Loaded("catmail-image:3/cid/a%40b"))
         );
-        for unknown in ["h:3:tall", "h:640", "r:3", "d:3", "p:3", "x:3:1", "x"] {
+        assert_eq!(
+            FromPage::parse("x:3:120.5:400:1600"),
+            Some(FromPage::Sideways(
+                3,
+                Sideways {
+                    offset: 120.5,
+                    view: 400.0,
+                    content: 1600.0
+                }
+            ))
+        );
+        for unknown in [
+            "h:3:tall",
+            "h:640",
+            "h:3:640:1",
+            "h:3:NaN",
+            "r:3",
+            "d:3",
+            "p:3",
+            "x:3:1",
+            "x:3:1:400",
+            "x:3:1:400:1600:2",
+            "x:3:1:wide:1600",
+            "x",
+        ] {
             assert_eq!(FromPage::parse(unknown), None, "{unknown}");
         }
     }
