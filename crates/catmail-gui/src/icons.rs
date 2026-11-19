@@ -46,6 +46,9 @@ pub enum Icon {
     /// Filled, as a mark on a flagged message.
     FlagSolid,
     FolderArrowRight,
+    Funnel,
+    /// Filled, as the list's filter while it filters.
+    FunnelSolid,
     InformationCircle,
     Italic,
     Key,
@@ -150,6 +153,8 @@ impl Icon {
             Icon::Flag => hero!("flag"),
             Icon::FlagSolid => hero!("solid", "flag"),
             Icon::FolderArrowRight => hero!("folder-arrow-right"),
+            Icon::Funnel => hero!("funnel"),
+            Icon::FunnelSolid => hero!("solid", "funnel"),
             Icon::InformationCircle => hero!("information-circle"),
             Icon::Italic => hero!("italic"),
             Icon::Key => hero!("key"),

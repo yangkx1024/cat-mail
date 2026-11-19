@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{AccountId, FolderId, MessageCursor, MessageId};
+use crate::{AccountId, Flags, FolderId, MessageCursor, MessageId};
 
 /// A full-text search over subjects, addresses and downloaded bodies.
 ///
@@ -22,6 +22,9 @@ pub struct SearchQuery {
     /// `MailClient::search_server`): they match too, within the account and folder.
     #[serde(default)]
     pub found_on_server: Vec<MessageId>,
+    /// Only the matches it takes.
+    #[serde(default)]
+    pub filter: ListFilter,
 }
 
 impl SearchQuery {
@@ -33,6 +36,52 @@ impl SearchQuery {
             limit: 50,
             after: None,
             found_on_server: Vec::new(),
+            filter: ListFilter::default(),
+        }
+    }
+}
+
+/// Which of a list's messages to show, by their flags.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FlagFilter {
+    #[default]
+    All,
+    Read,
+    Unread,
+    Flagged,
+    Unflagged,
+}
+
+impl FlagFilter {
+    /// The flags it looks at, and what they must be: `flags & mask == want`.
+    pub const fn mask(self) -> (Flags, Flags) {
+        match self {
+            FlagFilter::All => (Flags::empty(), Flags::empty()),
+            FlagFilter::Read => (Flags::SEEN, Flags::SEEN),
+            FlagFilter::Unread => (Flags::SEEN, Flags::empty()),
+            FlagFilter::Flagged => (Flags::FLAGGED, Flags::FLAGGED),
+            FlagFilter::Unflagged => (Flags::FLAGGED, Flags::empty()),
+        }
+    }
+}
+
+/// Which messages of a list (or of search results) to list: those whose flags `flags`
+/// takes, and `also` these whatever their flags, if the list has them. `also` keeps the
+/// rows shown in a view that a change took out of it (read in Unread) until it is left.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListFilter {
+    #[serde(default)]
+    pub flags: FlagFilter,
+    #[serde(default)]
+    pub also: Vec<MessageId>,
+}
+
+impl ListFilter {
+    pub fn new(flags: FlagFilter) -> Self {
+        Self {
+            flags,
+            also: Vec::new(),
         }
     }
 }

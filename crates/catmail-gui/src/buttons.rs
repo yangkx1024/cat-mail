@@ -16,7 +16,7 @@ pub enum Size {
 }
 
 impl Size {
-    fn box_size(self) -> f32 {
+    pub fn box_size(self) -> f32 {
         match self {
             Size::Bar => 30.0,
             Size::Row => 24.0,
