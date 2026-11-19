@@ -79,6 +79,8 @@ pub enum Icon {
     UserCircle,
     UserCircleSolid,
     XCircle,
+    /// Filled, as a search field's clear button.
+    XCircleSolid,
     XMark,
 }
 
@@ -185,6 +187,7 @@ impl Icon {
             Icon::UserCircle => hero!("user-circle"),
             Icon::UserCircleSolid => hero!("solid", "user-circle"),
             Icon::XCircle => hero!("x-circle"),
+            Icon::XCircleSolid => hero!("solid", "x-circle"),
             Icon::XMark => hero!("x-mark"),
         }
     }

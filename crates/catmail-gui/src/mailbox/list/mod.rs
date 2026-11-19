@@ -18,7 +18,7 @@ use catmail_frontend::commands::MessageCommand;
 use catmail_frontend::composer::ComposeFrom;
 use catmail_frontend::list::{
     self, Fetch, ListModel, Listing, Loaded, Row, RowId, Rows, SEARCH_DELAY, SERVER_SEARCH_DELAY,
-    Select, ServerSearch,
+    Select, ServerSearch, Typed,
 };
 use catmail_frontend::mailbox::{self, Source};
 use nsh_base::theme;
@@ -401,11 +401,17 @@ fn typed(text: String) {
     let typed = state(|s| s.model.typed());
     in_view(async move {
         timer(SEARCH_DELAY).await;
-        let place = global::<SelectedPlace>().with_untracked(|p| p.0);
-        if let Some(source) = reads(|model, listing| model.paused(typed, &text, place, listing)) {
-            show(source);
-        }
+        settle(typed, &text);
     });
+}
+
+/// The search field holds `text` since `typed`: its results, or with nothing typed the
+/// place selected, unless shown already or another key came since.
+fn settle(typed: Typed, text: &str) {
+    let place = global::<SelectedPlace>().with_untracked(|p| p.0);
+    if let Some(source) = reads(|model, listing| model.paused(typed, text, place, listing)) {
+        show(source);
+    }
 }
 
 /// The search field took the focus: logs in to the servers a search asks, for the first
@@ -420,9 +426,17 @@ fn connect_ahead() {
 }
 
 /// Leaving a search for a place: the place's rows, not the results.
-pub fn clear_search() {
-    state(|s| s.model.typed());
+pub fn clear_search() -> Typed {
+    let typed = state(|s| s.model.typed());
     global::<SearchText>().set(SearchText::default());
+    typed
+}
+
+/// The search field's clear button: nothing typed, and the place selected shown again
+/// now rather than after a pause; the keys go back to the list.
+fn clear_search_field(search: ElementRef) {
+    settle(clear_search(), "");
+    search.blur();
 }
 
 // --- Checking -----------------------------------------------------------------------
@@ -640,13 +654,30 @@ fn search_field(search: ElementRef) -> impl IntoElement {
                 .text_sm()
                 .text_color(move || theme().foreground),
         )
+        // As AppKit's search field: only with something typed.
+        .child(when(
+            move || global::<SearchText>().with(|t| !t.0.is_empty()),
+            move || {
+                view()
+                    .flex_shrink_0()
+                    .mr(px(-4.0))
+                    .p(px(2.0))
+                    .rounded(px(10.0))
+                    .text_color(move || theme().muted_foreground)
+                    .hover(|s| s.text_color(move || theme().foreground))
+                    .label("Clear search")
+                    .on_press(move || clear_search_field(search))
+                    .child(icon(|| Icon::XCircleSolid, 16.0))
+            },
+        ))
 }
 
 fn has_checked() -> bool {
     global::<Checked>().with(|c| !c.0.is_empty())
 }
 
-/// Checks every message listed, or none; its menu checks those read, flagged and so on.
+/// Checks every message listed, or none; beside it, the menu of the list's views: only
+/// those read, flagged and so on.
 fn check_all() -> impl IntoElement {
     let counts = computed(move || {
         let listed = global::<Listing>().with(|l| l.messages().count());
