@@ -42,6 +42,20 @@ pub enum Error {
     #[error("{command} failed: {text}")]
     Command { command: &'static str, text: String },
 
+    /// The server refused a command for naming more messages than it takes in one
+    /// (`NO [MESSAGELIMIT <limit>]`, RFC 9738): nothing was done. The connection is still
+    /// usable.
+    #[error("{command} failed: the server takes at most {limit} messages in one command")]
+    MessageLimit { command: &'static str, limit: u32 },
+
+    /// The server stopped short at its limit on messages in one command (`OK
+    /// [MESSAGELIMIT]`, RFC 9738) without saying where, or not further down than the time
+    /// before: the rest can't be asked for. What it answered is only part of the result,
+    /// and a change may have been made to some of the messages only. The connection is
+    /// still usable.
+    #[error("{0} stopped short at the server's limit on messages in one command")]
+    Truncated(&'static str),
+
     /// Part of the answer to a command couldn't be parsed. Results count only when
     /// whole (a missing LIST, SEARCH or EXISTS line would read as something deleted),
     /// so this is the default for every command but the header FETCH and the ones that
@@ -71,7 +85,10 @@ impl Error {
             | Self::Rejected(_)
             | Self::Protocol(_) => ErrorKind::Network,
             Self::AuthFailed(_) => ErrorKind::Auth,
-            Self::Command { .. } | Self::Incomplete(_) => ErrorKind::Refused,
+            Self::Command { .. }
+            | Self::MessageLimit { .. }
+            | Self::Truncated(_)
+            | Self::Incomplete(_) => ErrorKind::Refused,
             Self::InvalidServerName(_)
             | Self::NotTls { .. }
             | Self::Unsupported(_)
@@ -88,6 +105,8 @@ impl Error {
             || !matches!(
                 self,
                 Self::Command { .. }
+                    | Self::MessageLimit { .. }
+                    | Self::Truncated(_)
                     | Self::Incomplete(_)
                     | Self::InvalidServerName(_)
                     | Self::InvalidInput(_)

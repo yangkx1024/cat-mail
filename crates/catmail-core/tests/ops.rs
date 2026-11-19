@@ -991,3 +991,110 @@ async fn sent_replies_mark_the_original_answered() {
     env.client.replay_pending(env.account).await.unwrap();
     assert_eq!(env.remote("INBOX")[0].1, ["\\Answered"]);
 }
+
+/// INBOX with `n` messages, "m1" (UID 1) and on, and an empty Archive.
+fn numbered(n: u32) -> ServerState {
+    let mut state = ServerState::new("alice", "pw");
+    for i in 1..=n {
+        state.inbox().append_simple(&format!("m{i}"));
+    }
+    state.mailboxes.push(FakeMailbox::new("Archive"));
+    state
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn changes_to_more_messages_than_the_server_takes_at_once_reach_them_all() {
+    // RFC 9738, a server taking 3 messages per command. Advertised: they are sent 3 at a
+    // time. Not: STORE and MOVE are sent again below where the server stopped, and a
+    // COPY it refused is sent 3 at a time (without MOVE: COPY, STORE, UID EXPUNGE).
+    for (move_command, hidden) in [(true, false), (true, true), (false, false), (false, true)] {
+        let mut state = numbered(8);
+        state.faults.move_command = move_command;
+        let env = synced_env(state).await;
+        let ids: Vec<MessageId> = env.list("INBOX").await.iter().map(|m| m.id).collect();
+        assert_eq!(ids.len(), 8);
+        let archive = env.folder("Archive").await;
+        {
+            let mut st = env.fake.state();
+            st.faults.message_limit = Some(3);
+            st.faults.hide_message_limit = hidden;
+            // So that the limit is advertised to the connections that make the changes.
+            st.drop_open_connections();
+        }
+
+        env.client
+            .set_flags(ids.clone(), Flags::SEEN, Flags::empty())
+            .await
+            .unwrap();
+        let report = env.client.replay_pending(env.account).await.unwrap();
+        let case = format!("MOVE: {move_command}, hidden: {hidden}");
+        assert_eq!(
+            (report.applied, report.failed, report.pending),
+            (8, 0, 0),
+            "{case}"
+        );
+        assert!(
+            env.remote("INBOX")
+                .iter()
+                .all(|(_, flags)| flags == &["\\Seen"]),
+            "{case}"
+        );
+
+        env.client
+            .move_messages(ids, None, archive.id)
+            .await
+            .unwrap();
+        let report = env.client.replay_pending(env.account).await.unwrap();
+        assert_eq!(
+            (report.applied, report.failed, report.pending),
+            (8, 0, 0),
+            "{case}"
+        );
+        assert!(env.remote("INBOX").is_empty(), "{case}");
+        let archived = env.remote("Archive");
+        assert_eq!(archived.len(), 8, "{case}: each copied once");
+        assert!(
+            archived.iter().all(|(_, flags)| flags == &["\\Seen"]),
+            "{case}"
+        );
+
+        env.client.sync_account(env.account).await.unwrap();
+        assert_eq!(env.local("Archive").await.len(), 8, "{case}");
+        assert!(env.local("INBOX").await.is_empty(), "{case}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_copied_in_part_is_finished_without_copying_twice() {
+    // Without MOVE, on a server taking 3 messages in one command: COPY three at a time,
+    // and the server out of room after the first three.
+    let mut state = numbered(5);
+    state.faults.move_command = false;
+    state.faults.message_limit = Some(3);
+    state.faults.refuse_copies_after = Some(1);
+    let env = synced_env(state).await;
+    let ids: Vec<MessageId> = env.list("INBOX").await.iter().map(|m| m.id).collect();
+    let archive = env.folder("Archive").await;
+    env.client
+        .move_messages(ids, None, archive.id)
+        .await
+        .unwrap();
+
+    // Not refused: some were copied, and the ops stay for the next try to find which.
+    let report = env.client.replay_pending(env.account).await.unwrap();
+    assert_eq!((report.applied, report.failed, report.pending), (0, 0, 5));
+    assert_eq!(names(&env.remote("Archive")), ["m3", "m4", "m5"]);
+    assert_eq!(env.remote("INBOX").len(), 5);
+
+    env.fake.state().faults.refuse_copies_after = None;
+    let report = env.client.replay_pending(env.account).await.unwrap();
+    assert_eq!((report.applied, report.failed, report.pending), (5, 0, 0));
+    assert_eq!(
+        names(&env.remote("Archive")),
+        ["m1", "m2", "m3", "m4", "m5"],
+        "each copied once"
+    );
+    assert!(env.remote("INBOX").is_empty());
+    env.client.sync_account(env.account).await.unwrap();
+    assert_eq!(env.local("Archive").await.len(), 5);
+}

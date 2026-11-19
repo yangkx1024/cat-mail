@@ -2440,7 +2440,7 @@ checksum = "65b27460c2c92b037f3f94c538ed9a3342f3fdf923606781629ccb35f82d042a"
 [[package]]
 name = "imap-proto"
 version = "0.18.0"
-source = "git+https://github.com/djc/imap-proto?rev=0dac3af59a2cfcd649c30034d5f221c4d8edbf34#0dac3af59a2cfcd649c30034d5f221c4d8edbf34"
+source = "git+https://github.com/djc/imap-proto?rev=25f47f439af7ffc0a0305cf1d08198a9a84e2fef#25f47f439af7ffc0a0305cf1d08198a9a84e2fef"
 dependencies = [
  "nom 8.0.0",
 ]

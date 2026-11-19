@@ -1217,3 +1217,53 @@ async fn syncing_now_needs_background_sync() {
     assert_eq!(status_changes(&mut events, env.account), 0);
     assert_eq!(env.fake.state().connections, 0);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_s_limit_on_messages_per_command_loses_nothing() {
+    // RFC 9738: SEARCH and FETCH get to the 3 highest UIDs, and the rest is asked for
+    // below where they stopped. Taken for whole answers, the 7 older messages would read
+    // as deleted, and changes to their flags would be missed.
+    for condstore in [true, false] {
+        let state = |message_limit| {
+            let mut state = ServerState::new("alice", "pw");
+            state.faults.condstore = condstore;
+            state.faults.message_limit = message_limit;
+            for i in 1..=10 {
+                state.inbox().append_simple(&format!("m{i}"));
+            }
+            state
+        };
+        let env = env(state(None)).await;
+        assert_eq!(folder_report(&env.sync().await, "INBOX").added, 10);
+
+        {
+            let mut st = env.fake.state();
+            st.faults.message_limit = Some(3);
+            let inbox = st.inbox();
+            inbox.set_flags(1, &["\\Seen"]);
+            inbox.expunge(2);
+            inbox.append_simple("m11");
+        }
+        let start = env.fake.state().log.len();
+        let report = env.sync().await;
+        let inbox = folder_report(&report, "INBOX");
+        assert_eq!(
+            (inbox.added, inbox.updated, inbox.removed),
+            (1, 1, 1),
+            "condstore: {condstore}"
+        );
+        let messages = env.messages("INBOX").await;
+        assert_eq!(messages.len(), 10, "condstore: {condstore}");
+        assert!(messages.contains(&("m1".into(), Flags::SEEN)));
+        assert!(!messages.iter().any(|(subject, _)| subject == "m2"));
+        let commands = env.commands_since(start);
+        assert!(
+            commands.contains(&"UID SEARCH ALL UID 1:8".to_owned()),
+            "{commands:?}"
+        );
+
+        // And a folder synced from scratch.
+        let fresh = common::env(state(Some(3))).await;
+        assert_eq!(folder_report(&fresh.sync().await, "INBOX").added, 10);
+    }
+}

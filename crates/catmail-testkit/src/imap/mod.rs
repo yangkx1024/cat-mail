@@ -409,6 +409,22 @@ pub struct Faults {
     /// Advertise LITERAL- (RFC 7888), as Gmail does: literals up to 4096 bytes may be sent
     /// without waiting for `+`.
     pub literal_minus: bool,
+    /// Advertise `MESSAGELIMIT=<n>` (RFC 9738) and keep to it: UID SEARCH, UID FETCH, UID
+    /// STORE, UID MOVE and UID EXPUNGE get to at most this many messages, from the highest
+    /// UID down, and say where they stopped (`OK [MESSAGELIMIT <n> <LastUID>]`); a UID COPY
+    /// of more is refused (`NO [MESSAGELIMIT <n>]`). A SEARCH counts the messages its `UID`
+    /// keys leave it, matching or not. Not on Gmail.
+    pub message_limit: Option<u32>,
+    /// Keep to `message_limit` without advertising it, as a server does that enforces a
+    /// limit above the one it advertises (RFC 9738 §4.2): a client can't send the messages
+    /// a part at a time from the start.
+    pub hide_message_limit: bool,
+    /// Say where `message_limit` stopped a command without the UID: `[MESSAGELIMIT <n>]`,
+    /// as RFC 9738 allows when the server doesn't know it.
+    pub message_limit_without_uid: bool,
+    /// Make this many UID COPYs, then refuse every other with `NO [OVERQUOTA] Quota
+    /// exceeded`, as a server running out of room does.
+    pub refuse_copies_after: Option<usize>,
 }
 
 /// How a server with [`Faults::preview`] answers PREVIEW: with the start of the message's
@@ -494,6 +510,10 @@ impl Default for Faults {
             preview: None,
             literal_plus: false,
             literal_minus: false,
+            message_limit: None,
+            hide_message_limit: false,
+            message_limit_without_uid: false,
+            refuse_copies_after: None,
         }
     }
 }
@@ -1004,6 +1024,14 @@ impl FakeImap {
         lock(&self.state)
     }
 
+    /// Commands the server received from the `start`-th on, without tags.
+    pub fn commands_since(&self, start: usize) -> Vec<String> {
+        self.state().log[start..]
+            .iter()
+            .map(|c| c.line.clone())
+            .collect()
+    }
+
     /// Waits until `ready` holds for the server state, looking every few milliseconds.
     /// Panics after 10 seconds.
     pub async fn wait_until(&self, ready: impl Fn(&ServerState) -> bool) {
@@ -1242,6 +1270,12 @@ fn capabilities(state: &ServerState, session: &Session) -> String {
         caps.push("LITERAL-");
     }
     caps.extend(append_limit.as_deref());
+    let message_limit = state
+        .faults
+        .message_limit
+        .filter(|_| !state.faults.hide_message_limit && !state.gmail)
+        .map(|n| format!("MESSAGELIMIT={n}"));
+    caps.extend(message_limit.as_deref());
     caps.join(" ")
 }
 
@@ -1575,15 +1609,27 @@ async fn handle(
                                 })
                                 || f.qq_mail && k.has(|k| matches!(k, SearchKey::Text(_)))
                         });
+                        // What the search looks at: its UID keys' messages.
+                        let scanned = mb
+                            .messages
+                            .iter()
+                            .filter(|m| {
+                                keys.iter().all(|key| {
+                                    !matches!(key, SearchKey::Uid(_)) || key.matches(m, max_uid)
+                                })
+                            })
+                            .map(|m| m.uid);
+                        let (first, code) = message_limit(f, st.gmail, scanned);
                         let uids: Vec<String> = mb
                             .messages
                             .iter()
+                            .filter(|m| m.uid >= first)
                             .filter(|m| ignored || keys.iter().all(|key| key.matches(m, max_uid)))
                             .map(|m| m.uid.to_string())
                             .collect();
                         out += &format!("* SEARCH {}\r\n", uids.join(" "))
                             .replace("SEARCH \r", "SEARCH\r");
-                        out += &format!("{tag} OK SEARCH completed\r\n");
+                        out += &format!("{tag} OK {code}SEARCH completed\r\n");
                     }
                     None => out += &format!("{tag} BAD No mailbox selected\r\n"),
                 }
@@ -1918,15 +1964,35 @@ async fn silent(io: &mut BufReader<Box<dyn Stream>>) -> std::io::Result<Next> {
 /// STORE, COPY, MOVE and EXPUNGE (all but the last by UID) on mailbox `selected`.
 fn change(st: &mut ServerState, selected: usize, command: &str, args: &[Tok], tag: &str) -> String {
     let set = args.first().map(Tok::text).unwrap_or_default();
-    let uids: Vec<u32> = {
+    // UID EXPUNGE counts only those it removes.
+    let deleted_only = command == "UID EXPUNGE";
+    let mut uids: Vec<u32> = {
         let mb = &st.mailboxes[selected];
         let in_set = uid_set(&set, mb);
         mb.messages
             .iter()
+            .filter(|m| !deleted_only || has(&m.flags, "\\Deleted"))
             .map(|m| m.uid)
             .filter(|&uid| in_set(uid))
             .collect()
     };
+    let (first, code) = match command {
+        "EXPUNGE" => (0, String::new()),
+        _ => message_limit(&st.faults, st.gmail, uids.iter().copied()),
+    };
+    if command == "UID COPY" {
+        // All or nothing.
+        if !code.is_empty() {
+            return format!("{tag} NO {code}Too many messages to copy\r\n");
+        }
+        match &mut st.faults.refuse_copies_after {
+            Some(0) => return format!("{tag} NO [OVERQUOTA] Quota exceeded\r\n"),
+            Some(n) => *n -= 1,
+            None => {}
+        }
+    }
+    uids.retain(|&uid| uid >= first);
+    let ok = format!("{tag} OK {code}");
     let mut out = String::new();
     match command {
         "UID STORE" => {
@@ -1950,7 +2016,7 @@ fn change(st: &mut ServerState, selected: usize, command: &str, args: &[Tok], ta
                     );
                 }
             }
-            out += &format!("{tag} OK STORE completed\r\n");
+            out += &format!("{ok}STORE completed\r\n");
         }
         "UID COPY" | "UID MOVE" => {
             let name = args.get(1).map(Tok::text).unwrap_or_default();
@@ -1979,14 +2045,14 @@ fn change(st: &mut ServerState, selected: usize, command: &str, args: &[Tok], ta
                     mb.change_flag(uid, "\\Deleted", true);
                 }
                 out += &mb.expunge_deleted(Some(&uids));
-                out += &format!("{tag} OK MOVE completed\r\n");
+                out += &format!("{ok}MOVE completed\r\n");
             } else {
                 out += &format!("{tag} OK {code}COPY completed\r\n");
             }
         }
         "UID EXPUNGE" => {
             out += &st.mailboxes[selected].expunge_deleted(Some(&uids));
-            out += &format!("{tag} OK EXPUNGE completed\r\n");
+            out += &format!("{ok}EXPUNGE completed\r\n");
         }
         _ => {
             out += &st.mailboxes[selected].expunge_deleted(None);
@@ -2246,6 +2312,13 @@ fn fetch(
         _ => None,
     };
     let in_set = uid_set(&set, mb);
+    // What the FETCH gets to, CHANGEDSINCE or not.
+    let fetched = mb
+        .messages
+        .iter()
+        .map(|m| m.uid)
+        .filter(|&uid| uid <= known && in_set(uid));
+    let (first, code) = message_limit(faults, gmail, fetched);
     let upper: Vec<String> = items.iter().map(|i| i.to_ascii_uppercase()).collect();
     let wants = |name: &str| upper.iter().any(|i| i == name);
     let header_item = header_item(&items);
@@ -2253,6 +2326,7 @@ fn fetch(
     let mut responses = Vec::new();
     for (i, msg) in mb.messages.iter().enumerate() {
         if msg.uid > known
+            || msg.uid < first
             || !in_set(msg.uid)
             || changed_since.is_some_and(|since| msg.modseq <= since)
         {
@@ -2349,8 +2423,33 @@ fn fetch(
     if faults.unsolicited {
         out.extend_from_slice(format!("* {} EXISTS\r\n", mb.messages.len()).as_bytes());
     }
-    out.extend_from_slice(format!("{tag} OK FETCH completed\r\n").as_bytes());
+    out.extend_from_slice(format!("{tag} OK {code}FETCH completed\r\n").as_bytes());
     out
+}
+
+/// Where a command on `uids` (ascending) stops with [`Faults::message_limit`] (not on
+/// Gmail), going from the highest down: the lowest UID it gets to, and the code saying so
+/// (`[MESSAGELIMIT <n> <LastUID>] `). `(0, "")` if it gets to all of them. Looks at no more
+/// than `n + 1` of them.
+fn message_limit(
+    faults: &Faults,
+    gmail: bool,
+    uids: impl DoubleEndedIterator<Item = u32>,
+) -> (u32, String) {
+    let Some(n) = faults.message_limit.filter(|&n| n > 0 && !gmail) else {
+        return (0, String::new());
+    };
+    let highest: Vec<u32> = uids.rev().take(n as usize + 1).collect();
+    if highest.len() <= n as usize {
+        return (0, String::new());
+    }
+    let last = highest[n as usize - 1];
+    let code = if faults.message_limit_without_uid {
+        format!("[MESSAGELIMIT {n}] ")
+    } else {
+        format!("[MESSAGELIMIT {n} {last}] ")
+    };
+    (last, code)
 }
 
 /// What [`Faults::preview`] answers PREVIEW with: the first 200 characters of the first

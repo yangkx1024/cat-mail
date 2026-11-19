@@ -78,6 +78,33 @@ pub(crate) struct Response {
     pub skipped: usize,
 }
 
+impl Response {
+    /// Adds what the server sent in answer to the same command again, for other messages.
+    /// Into an empty one, takes `other` as it is rather than copying it.
+    pub fn merge(&mut self, other: Self) {
+        if self.data.is_empty() && self.codes.is_empty() {
+            *self = Self {
+                skipped: self.skipped + other.skipped,
+                ..other
+            };
+            return;
+        }
+        self.data.extend(other.data);
+        self.codes.extend(other.codes);
+        self.skipped += other.skipped;
+    }
+
+    /// Whether the server stopped short at its limit on messages in one command
+    /// (`[MESSAGELIMIT <limit> <LastUID>]`, RFC 9738, in the tagged OK or an untagged NO),
+    /// and if so the lowest UID it got to, if it said.
+    pub fn message_limit(&self) -> Option<Option<u32>> {
+        self.codes.iter().find_map(|code| match code {
+            Code::Known(ResponseCode::MessageLimit { last_uid, .. }) => Some(*last_uid),
+            _ => None,
+        })
+    }
+}
+
 /// What is left of a response for the command to decide on.
 enum Step {
     /// The server asks for the rest of the command (`+`).
@@ -168,12 +195,18 @@ impl Connection {
     /// Sends one command and collects everything up to its tagged completion.
     /// NO and BAD become [`Error::Command`]. If any response couldn't be parsed, the
     /// answer is [`Error::Incomplete`]: most results (LIST, SEARCH, EXAMINE, flags) are
-    /// only meaningful whole, and a missing line would read as something deleted.
+    /// only meaningful whole, and a missing line would read as something deleted. For
+    /// the same reason, an answer the server cut short at its limit on messages in one
+    /// command is [`Error::Truncated`] (see [`Response::message_limit`]); the commands
+    /// that go on below where it stopped use [`execute_lossy`](Self::execute_lossy).
     pub async fn execute(&mut self, command: Command) -> Result<Response> {
         let name = command.name;
         let response = self.execute_lossy(command).await?;
         if response.skipped > 0 {
             return Err(Error::Incomplete(name));
+        }
+        if response.message_limit().is_some() {
+            return Err(Error::Truncated(name));
         }
         Ok(response)
     }
@@ -200,6 +233,19 @@ impl Connection {
                 Step::Done(Status::Ok, outcome) => {
                     response.codes.extend(Code::of(outcome));
                     return Ok(response);
+                }
+                // Too many messages for the server: nothing was done (RFC 9738 §3.1).
+                Step::Done(
+                    _,
+                    Outcome {
+                        code: Some(ResponseCode::MessageLimit { limit, .. }),
+                        ..
+                    },
+                ) => {
+                    return Err(Error::MessageLimit {
+                        command: command.name,
+                        limit,
+                    });
                 }
                 // Also a NO before all of the command was sent (an APPEND refused before
                 // its message): the rest is simply not sent.

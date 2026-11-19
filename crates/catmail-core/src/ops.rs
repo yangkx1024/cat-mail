@@ -16,7 +16,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use catmail_proto::imap::{CopyUid, Session};
+use catmail_proto::imap::{CopyUid, Error as ImapError, Session};
 use catmail_store::{CopyCheckpoint, Moved, ReplayFolder, ReplayKind, ReplayOp, Touched};
 use catmail_types::{
     AccountId, ChangeReport, DeleteMode, Event, Flags, FolderId, MessageId, PendingOp, PendingOpId,
@@ -457,18 +457,22 @@ impl Settle<'_> {
             // Refused; the connection is fine.
             Err(e) if !e.is_fatal() => Outcome::Refused(e.to_string()),
             Err(e) => {
-                let (ops, error) = (settled(ops), e.to_string());
-                if let Err(record) = self
-                    .engine
-                    .write(move |db| db.ops().attempted(&ops, &error))
-                    .await
-                {
+                if let Err(record) = self.attempted(ops, &e).await {
                     tracing::warn!(error = %record, "failed to record the attempt");
                 }
                 return Err(e.into());
             }
         };
         self.settle(ops, outcome).await
+    }
+
+    /// Records an attempt whose outcome isn't known: the ops stay pending, for the next
+    /// replay to find out what became of them.
+    async fn attempted(&self, ops: &[ReplayOp], error: &ImapError) -> Result<()> {
+        let (ops, error) = (settled(ops), error.to_string());
+        self.engine
+            .write(move |db| db.ops().attempted(&ops, &error))
+            .await
     }
 
     async fn settle(&mut self, ops: &[ReplayOp], outcome: Outcome) -> Result<()> {
@@ -553,6 +557,10 @@ async fn copy_move(
     // A refused COPY copied nothing (RFC 3501), so failing the ops leaves no copy behind.
     let copied = match session.uid_copy(&uids, target).await {
         Ok(copied) => copied,
+        // Sent in parts (a server's limit on messages in one command), and only some of
+        // them copied: which, the next try finds from the checkpoint, as after a lost
+        // answer.
+        Err(e @ ImapError::Truncated(_)) => return done.attempted(ops, &e).await.map(|()| true),
         Err(e) => return done.outcome(ops, Err(e)).await.map(|()| true),
     };
     // Which message is the copy, for when the answer to the delete is lost: the original
