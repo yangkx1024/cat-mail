@@ -319,6 +319,7 @@ fn message() -> impl IntoElement {
     });
     let scroll_ref = element_ref();
     page_state().borrow_mut().scroll = Some(scroll_ref);
+    let sideways = web::Sideways::new();
     // Not the web view's: one not drawn may not paint, and would show what it last had
     // once it is; [`body`] covers it instead.
     let shown = move || {
@@ -328,7 +329,7 @@ fn message() -> impl IntoElement {
             1.0
         }
     };
-    scroll().flex_1().element_ref(&scroll_ref).child(
+    let pane = scroll().flex_1().element_ref(&scroll_ref).child(
         view()
             .px(px(24.0))
             .pt(px(20.0))
@@ -342,19 +343,21 @@ fn message() -> impl IntoElement {
                     .child(sender)
                     .child(full_header),
             )
-            .child(body())
+            .child(body(sideways))
             .child(view().opacity(shown).child(attachments())),
-    )
+    );
+    // The page's sideways bar at the bottom of the pane, where its own would be.
+    sideways.around(pane)
 }
 
-fn body() -> impl IntoElement {
+fn body(sideways: web::Sideways) -> impl IntoElement {
     let reading = global::<Reading>();
     // One web view for every message, made with the pane: a new page loads into it.
     let hidden = move || reading.with(|r| r.hidden);
     // The page pads itself.
     view()
         .mx(px(-16.0))
-        .child(web_view())
+        .child(web_view(sideways))
         // Over the web view while the page is hidden: WebKit keeps painting under it.
         .child(when(hidden, || {
             view()
@@ -373,7 +376,7 @@ fn page_background() -> AdaptiveColor {
     web::background(global::<Reading>().with(|r| r.page_dark))
 }
 
-fn web_view() -> impl IntoElement {
+fn web_view(sideways: web::Sideways) -> impl IntoElement {
     let reading = global::<Reading>();
     // Its own memo: the page (a long message's is large) is copied for the web view only
     // when it changes, not on each change of what else the pane shows.
@@ -382,6 +385,7 @@ fn web_view() -> impl IntoElement {
         move || page.get(),
         |height| global::<BodyHeight>().set(BodyHeight(height)),
         page_painted,
+        sideways,
     )
     .bg(page_background)
     .h(move || px(global::<BodyHeight>().with(|h| h.0).max(web::MIN_HEIGHT)))

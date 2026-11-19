@@ -27,6 +27,10 @@ use crate::icons::Icon;
 use crate::tasks::in_view;
 use crate::toast::{Level, notify};
 
+mod sideways;
+
+pub use sideways::Sideways;
+
 /// The web view's height before the page says its own.
 pub use catmail_frontend::html::MIN_HEIGHT;
 
@@ -80,11 +84,14 @@ fn is_shown(number: u64) -> bool {
 
 /// The web view of the pages `page` gives, one after another. It says how tall the page
 /// is (`height`, in points) and when it has painted at the web view's height
-/// (`painted`); the links clicked in it open in the system's browser.
+/// (`painted`), and how it is scrolled sideways to `sideways`, whose bar scrolls it; the
+/// links clicked in it open in the system's browser. Its element ref is `sideways`'s: one
+/// set on it after would take the bar's place.
 pub fn web_view(
     page: impl Fn() -> Rc<str> + 'static,
     height: impl Fn(f32) + 'static,
     painted: impl Fn(f32) + 'static,
+    sideways: Sideways,
 ) -> WebView {
     // The handler is called on the platform's main thread, outside the view: it hands
     // each request to the view, which answers it from the images of the message shown.
@@ -127,7 +134,7 @@ pub fn web_view(
     } else {
         web
     };
-    web
+    web.element_ref(&sideways.web)
         // Someone else's HTML: whatever website data it leaves goes with the web view,
         // and none of it is written to the data directory.
         .incognito(true)
@@ -148,6 +155,7 @@ pub fn web_view(
                 stays.borrow_mut().on_page();
                 height(h);
             }
+            Some(FromPage::Sideways(number, at)) if is_shown(number) => sideways.said(at),
             Some(FromPage::Open(url)) if is_openable_link(url) => {
                 spawn(open_url(url.to_owned()));
             }
