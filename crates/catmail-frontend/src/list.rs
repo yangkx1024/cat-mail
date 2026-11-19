@@ -110,11 +110,8 @@ pub(crate) async fn fetch(
         Source::Inboxes => page(client.list_inboxes(None, query).await?),
         Source::Folder(folder) => page(client.list_messages(*folder, query).await?),
         Source::Search(text) => {
-            let mut search = SearchQuery::new(text.clone());
-            search.limit = limit;
-            search.after = after;
+            let mut search = SearchQuery::paged(text.clone(), query);
             search.found_on_server = found_on_server.to_vec();
-            search.filter = query.filter;
             page(client.search(search).await?)
         }
         Source::Drafts(account) => {
