@@ -13,8 +13,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use catmail_core::{
-    DraftId, DraftSummary, Flags, FolderId, MailClient, MessageCursor, MessageId, MessageSummary,
-    OutboxEntry, OutboxId, OutboxStatus, SearchQuery,
+    DraftId, DraftSummary, FlagFilter, Flags, FolderId, ListFilter, MailClient, MessageCursor,
+    MessageId, MessageSummary, OutboxEntry, OutboxId, OutboxStatus, SearchQuery,
 };
 use jiff::civil::Date;
 
@@ -84,12 +84,14 @@ impl Row {
     }
 }
 
-/// Reads `limit` rows of `source`, after `after`; and whether there may be more.
-/// `found_on_server` are the search results the servers found that local search can't
-/// (see `MailClient::search_server`).
+/// Reads `limit` rows of `source` that `filter` takes, after `after`; and whether there
+/// may be more. `found_on_server` are the search results the servers found that local
+/// search can't (see `MailClient::search_server`). The drafts and the outbox aren't
+/// filtered.
 pub(crate) async fn fetch(
     client: &MailClient,
     source: &Source,
+    filter: ListFilter,
     found_on_server: &[MessageId],
     limit: u32,
     after: Option<MessageCursor>,
@@ -100,13 +102,22 @@ pub(crate) async fn fetch(
         (messages.into_iter().map(Row::Message).collect(), more)
     };
     Ok(match source {
-        Source::Inboxes => page(client.list_inboxes(None, limit, after).await?),
-        Source::Folder(folder) => page(client.list_messages(*folder, limit, after).await?),
+        Source::Inboxes => page(
+            client
+                .list_inboxes_filtered(None, filter, limit, after)
+                .await?,
+        ),
+        Source::Folder(folder) => page(
+            client
+                .list_messages_filtered(*folder, filter, limit, after)
+                .await?,
+        ),
         Source::Search(text) => {
             let mut query = SearchQuery::new(text.clone());
             query.limit = limit;
             query.after = after;
             query.found_on_server = found_on_server.to_vec();
+            query.filter = filter;
             page(client.search(query).await?)
         }
         Source::Drafts(account) => {
@@ -170,43 +181,23 @@ impl Days {
     }
 }
 
-/// Which of the messages listed to check, from the menu beside the list's checkbox.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Check {
-    All,
-    Read,
-    Unread,
-    Flagged,
-    Unflagged,
-}
+/// The views of a list of messages the menu beside its checkbox shows, in its order.
+pub const FILTERS: [FlagFilter; 5] = [
+    FlagFilter::All,
+    FlagFilter::Read,
+    FlagFilter::Unread,
+    FlagFilter::Flagged,
+    FlagFilter::Unflagged,
+];
 
-impl Check {
-    pub const MENU: [Check; 5] = [
-        Check::All,
-        Check::Read,
-        Check::Unread,
-        Check::Flagged,
-        Check::Unflagged,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Check::All => "All",
-            Check::Read => "Read",
-            Check::Unread => "Unread",
-            Check::Flagged => "Flagged",
-            Check::Unflagged => "Unflagged",
-        }
-    }
-
-    pub fn takes(self, flags: Flags) -> bool {
-        match self {
-            Check::All => true,
-            Check::Read => flags.contains(Flags::SEEN),
-            Check::Unread => !flags.contains(Flags::SEEN),
-            Check::Flagged => flags.contains(Flags::FLAGGED),
-            Check::Unflagged => !flags.contains(Flags::FLAGGED),
-        }
+/// The name of a view of the list, as its menu shows it.
+pub fn filter_label(filter: FlagFilter) -> &'static str {
+    match filter {
+        FlagFilter::All => "All",
+        FlagFilter::Read => "Read",
+        FlagFilter::Unread => "Unread",
+        FlagFilter::Flagged => "Flagged",
+        FlagFilter::Unflagged => "Unflagged",
     }
 }
 
@@ -306,10 +297,16 @@ pub fn outbox_status(entry: &OutboxEntry) -> (&'static str, Option<Severity>) {
 }
 
 /// What the list says when `source` lists nothing.
-pub fn empty_text(source: Option<&Source>) -> &'static str {
+pub fn empty_text(source: Option<&Source>, filter: FlagFilter) -> &'static str {
     match source {
         None => "No folder selected",
-        Some(Source::Inboxes | Source::Folder(_)) => "No messages",
+        Some(Source::Inboxes | Source::Folder(_)) => match filter {
+            FlagFilter::All => "No messages",
+            FlagFilter::Read => "No read messages",
+            FlagFilter::Unread => "No unread messages",
+            FlagFilter::Flagged => "No flagged messages",
+            FlagFilter::Unflagged => "No unflagged messages",
+        },
         Some(Source::Search(_)) => "Nothing found",
         Some(Source::Drafts(_)) => "No drafts",
         Some(Source::Outbox(_)) => "Nothing waiting to be sent",

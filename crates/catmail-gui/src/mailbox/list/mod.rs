@@ -12,13 +12,13 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use catmail_core::{
-    AccountId, DraftSummary, Flags, FolderId, MessageId, MessageSummary, OutboxEntry,
+    AccountId, DraftSummary, FlagFilter, Flags, FolderId, MessageId, MessageSummary, OutboxEntry,
 };
 use catmail_frontend::commands::MessageCommand;
 use catmail_frontend::composer::ComposeFrom;
 use catmail_frontend::list::{
-    self, Check, Fetch, ListModel, Listing, Loaded, Row, RowId, Rows, SEARCH_DELAY,
-    SERVER_SEARCH_DELAY, Select, ServerSearch,
+    self, Fetch, ListModel, Listing, Loaded, Row, RowId, Rows, SEARCH_DELAY, SERVER_SEARCH_DELAY,
+    Select, ServerSearch, Typed,
 };
 use catmail_frontend::mailbox::{self, Source};
 use nsh_base::theme;
@@ -110,6 +110,17 @@ pub fn reading() -> bool {
 /// Shows `source` from the top, or nothing.
 pub fn show(source: Option<Source>) {
     let (listing, fetch) = state(|s| s.model.show(source));
+    shown(listing, fetch);
+}
+
+/// Shows the source shown from the top again, only the messages `filter` takes.
+fn filter(filter: FlagFilter) {
+    let (listing, fetch) = reads(|model, listing| model.filter(listing, filter));
+    shown(listing, fetch);
+}
+
+/// `listing` is shown in place of the list's rows, with `fetch` its first read.
+fn shown(listing: Listing, fetch: Option<Fetch>) {
     if let Some(search) = state(|s| s.model.server_search(&listing)) {
         search_server(search);
     }
@@ -390,11 +401,17 @@ fn typed(text: String) {
     let typed = state(|s| s.model.typed());
     in_view(async move {
         timer(SEARCH_DELAY).await;
-        let place = global::<SelectedPlace>().with_untracked(|p| p.0);
-        if let Some(source) = reads(|model, listing| model.paused(typed, &text, place, listing)) {
-            show(source);
-        }
+        settle(typed, &text);
     });
+}
+
+/// The search field holds `text` since `typed`: its results, or with nothing typed the
+/// place selected, unless shown already or another key came since.
+fn settle(typed: Typed, text: &str) {
+    let place = global::<SelectedPlace>().with_untracked(|p| p.0);
+    if let Some(source) = reads(|model, listing| model.paused(typed, text, place, listing)) {
+        show(source);
+    }
 }
 
 /// The search field took the focus: logs in to the servers a search asks, for the first
@@ -409,9 +426,17 @@ fn connect_ahead() {
 }
 
 /// Leaving a search for a place: the place's rows, not the results.
-pub fn clear_search() {
-    state(|s| s.model.typed());
+pub fn clear_search() -> Typed {
+    let typed = state(|s| s.model.typed());
     global::<SearchText>().set(SearchText::default());
+    typed
+}
+
+/// The search field's clear button: nothing typed, and the place selected shown again
+/// now rather than after a pause; the keys go back to the list.
+fn clear_search_field(search: ElementRef) {
+    settle(clear_search(), "");
+    search.blur();
 }
 
 // --- Checking -----------------------------------------------------------------------
@@ -422,18 +447,6 @@ fn toggle_checked(id: MessageId) {
             c.0.insert(id);
         }
     });
-}
-
-/// Checks the messages listed that `which` takes, and only those: of a folder, those of
-/// the pages read.
-fn check(which: Check) {
-    let checked = global::<Listing>().with_untracked(|l| {
-        l.messages()
-            .filter(|m| which.takes(m.flags))
-            .map(|m| m.id)
-            .collect()
-    });
-    global::<Checked>().set(Checked(checked));
 }
 
 /// The keys of the commands on messages: on those checked, or else
@@ -506,8 +519,9 @@ pub fn list_column() -> impl IntoElement {
                             if global::<Loading>().get().0 {
                                 String::new()
                             } else {
-                                let source = global::<Listing>().with(|l| l.source().cloned());
-                                list::empty_text(source.as_ref()).to_owned()
+                                global::<Listing>()
+                                    .with(|l| list::empty_text(l.source(), l.filter()))
+                                    .to_owned()
                             }
                         })
                         .text_sm()
@@ -531,46 +545,25 @@ fn follow_the_calendar() {
     });
 }
 
-/// Syncs every account now; it turns while one is syncing.
+/// Syncs every account now; the spinner shows while one is syncing.
 fn sync_button() -> impl IntoElement {
     // Only when it starts or stops: the accounts are read again many times meanwhile, and
-    // starting the turn again each time would jerk it back.
+    // starting the spinner again each time would jerk it back.
     let syncing = computed(sidebar::syncing);
-    let angle = animated_value(0.0);
-    let turning =
-        Animation::timing(&angle, 360.0, Timing::new(TURN_MS, Easing::Linear)).looped(None);
-    effect(move || {
-        if syncing.get() {
-            let _ = turning.start();
-        } else {
-            spawn(finish_turn(angle));
-        }
-    });
-    crate::buttons::icon_button(
+    crate::buttons::busy_icon_button(
         || Icon::ArrowPath,
-        || "Sync now".to_owned(),
-        move || sidebar::has_accounts() && !syncing.get(),
+        move || {
+            if syncing.get() {
+                "Syncing".to_owned()
+            } else {
+                "Sync now".to_owned()
+            }
+        },
+        sidebar::has_accounts,
+        move || syncing.get(),
         Size::Bar,
         sidebar::sync,
     )
-    .bind_rotate(&angle)
-}
-
-/// How long a turn of the sync button takes, in milliseconds.
-const TURN_MS: f32 = 1000.0;
-
-/// Stops the sync button's turning once it is upright again, rather than snapping back.
-async fn finish_turn(angle: AnimatedValue) {
-    angle.stop();
-    let at = angle.value().await;
-    if at <= 0.0 {
-        return;
-    }
-    let left = TURN_MS * (360.0 - at) / 360.0;
-    // Not if a sync started meanwhile, which turns it again.
-    if angle.timing(360.0, left, Easing::Linear).await {
-        angle.set(0.0);
-    }
 }
 
 fn header() -> impl IntoElement {
@@ -604,11 +597,16 @@ fn header() -> impl IntoElement {
                 .child(search_field(search)),
         )
         .child(
+            // As tall as the commands that take the note's place, so checking a message
+            // doesn't move the rows. Lined up with the sync button's icon above and the
+            // days' headings below.
             view()
                 .flex_row()
                 .items_center()
                 .gap(px(8.0))
-                .px(px(4.0))
+                .h(px(Size::Bar.box_size()))
+                .pl(px(8.0))
+                .pr(px(4.0))
                 .child(when(lists_messages, check_all))
                 .child(
                     text(move || title.with(|t| t.0.clone()))
@@ -619,14 +617,9 @@ fn header() -> impl IntoElement {
                         .text_color(move || theme().foreground),
                 )
                 .child(dynamic(move || {
-                    // The commands on the messages checked take the note's room.
+                    // The commands on the messages checked take the note's place.
                     if has_checked() {
-                        view()
-                            .flex_1()
-                            .flex_row()
-                            .justify_end()
-                            .child(commands::buttons(checked_messages, Size::Bar))
-                            .into_element()
+                        commands::buttons(checked_messages, Size::Bar).into_element()
                     } else {
                         text(move || title.with(|t| t.1.clone().unwrap_or_default()))
                             .text_xs()
@@ -661,13 +654,30 @@ fn search_field(search: ElementRef) -> impl IntoElement {
                 .text_sm()
                 .text_color(move || theme().foreground),
         )
+        // As AppKit's search field: only with something typed.
+        .child(when(
+            move || global::<SearchText>().with(|t| !t.0.is_empty()),
+            move || {
+                view()
+                    .flex_shrink_0()
+                    .mr(px(-4.0))
+                    .p(px(2.0))
+                    .rounded(px(10.0))
+                    .text_color(move || theme().muted_foreground)
+                    .hover(|s| s.text_color(move || theme().foreground))
+                    .label("Clear search")
+                    .on_press(move || clear_search_field(search))
+                    .child(icon(|| Icon::XCircleSolid, 16.0))
+            },
+        ))
 }
 
 fn has_checked() -> bool {
     global::<Checked>().with(|c| !c.0.is_empty())
 }
 
-/// Checks every message listed, or none; its menu checks those read, flagged and so on.
+/// Checks every message listed, or none; beside it, the menu of the list's views: only
+/// those read, flagged and so on.
 fn check_all() -> impl IntoElement {
     let counts = computed(move || {
         let listed = global::<Listing>().with(|l| l.messages().count());
@@ -675,14 +685,17 @@ fn check_all() -> impl IntoElement {
         (listed, checked)
     });
     let all = move || counts.with(|&(listed, checked)| checked > 0 && checked == listed);
+    let shown = computed(move || global::<Listing>().with(Listing::filter));
+    let filtered = move || shown.get() != FlagFilter::All;
     view()
         .flex_row()
         .items_center()
-        .gap(px(2.0))
+        .gap(px(4.0))
         .child(
             view()
                 .w(px(16.0))
                 .h(px(16.0))
+                .flex_shrink_0()
                 .rounded(px(4.0))
                 .border_1()
                 .items_center()
@@ -706,7 +719,10 @@ fn check_all() -> impl IntoElement {
                     if all() {
                         global::<Checked>().set(Checked::default());
                     } else {
-                        check(Check::All);
+                        // Those the filter shows, of the pages read.
+                        let listed = global::<Listing>()
+                            .with_untracked(|l| l.messages().map(|m| m.id).collect());
+                        global::<Checked>().set(Checked(listed));
                     }
                 })
                 .child(when(all, || {
@@ -714,19 +730,59 @@ fn check_all() -> impl IntoElement {
                 })),
         )
         .child(
+            // A funnel, filled and named while it filters.
             view()
-                .p(px(2.0))
-                .label("Select")
-                .on_press(|| {
-                    let items = Check::MENU
+                .flex_row()
+                .items_center()
+                .flex_shrink_0()
+                .gap(px(4.0))
+                .h(px(24.0))
+                .px(px(4.0))
+                .rounded(px(6.0))
+                .hover(|s| s.bg(move || theme().accent))
+                .label("Filter")
+                .tooltip(crate::buttons::tooltip(|| "Filter".to_owned()))
+                .on_press(move || {
+                    let current = shown.get_untracked();
+                    let items = list::FILTERS
                         .into_iter()
-                        .map(|which| MenuItem::new(which.label()).on_select(move || check(which)))
+                        .map(|which| {
+                            MenuItem::new(list::filter_label(which))
+                                .checked(which == current)
+                                .on_select(move || {
+                                    if which != current {
+                                        filter(which);
+                                    }
+                                })
+                        })
                         .collect();
                     // Nothing waits on it closing.
                     drop(popup_menu(items));
                 })
                 .child(
-                    icon(|| Icon::ChevronDown, 12.0).text_color(move || theme().muted_foreground),
-                ),
+                    icon(
+                        move || {
+                            if filtered() {
+                                Icon::FunnelSolid
+                            } else {
+                                Icon::Funnel
+                            }
+                        },
+                        15.0,
+                    )
+                    .text_color(move || {
+                        if filtered() {
+                            theme().primary
+                        } else {
+                            theme().muted_foreground
+                        }
+                    }),
+                )
+                .child(when(filtered, move || {
+                    text(move || list::filter_label(shown.get()).to_owned())
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(move || theme().primary)
+                })),
         )
 }

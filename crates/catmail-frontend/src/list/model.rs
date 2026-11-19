@@ -6,7 +6,9 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use catmail_core::{MailClient, MessageCursor, MessageId, MessageSummary, SearchQuery};
+use catmail_core::{
+    FlagFilter, ListFilter, MailClient, MessageCursor, MessageId, MessageSummary, SearchQuery,
+};
 
 use super::selection::{Removal, Reveal};
 use super::{Days, PAGE, Row, RowId, fetch};
@@ -14,11 +16,13 @@ use crate::format::Calendar;
 use crate::mailbox::{Place, Source};
 use crate::refresh::Coalesce;
 
-/// What the list shows: a source's rows, grouped by day, and the lines they are laid out
-/// as. The lines refer to the rows and the days, so a page more only adds lines.
+/// What the list shows: a source's rows (those of its messages the filter takes), grouped
+/// by day, and the lines they are laid out as. The lines refer to the rows and the days, so
+/// a page more only adds lines.
 #[derive(Debug, Clone, Default)]
 pub struct Listing {
     source: Option<Source>,
+    filter: FlagFilter,
     rows: Vec<Row>,
     /// What the days are of: the user's zone, and today.
     calendar: Option<Calendar>,
@@ -61,6 +65,12 @@ impl Listing {
 
     pub fn source(&self) -> Option<&Source> {
         self.source.as_ref()
+    }
+
+    /// Which of the source's messages are listed. Rows a change took out of it since they
+    /// were read stay until it changes, or another source is shown.
+    pub fn filter(&self) -> FlagFilter {
+        self.filter
     }
 
     pub fn rows(&self) -> &[Row] {
@@ -196,6 +206,7 @@ impl Listing {
 #[derive(Debug, Clone)]
 pub struct Fetch {
     source: Source,
+    filter: ListFilter,
     found_on_server: Rc<[MessageId]>,
     limit: u32,
     after: Option<MessageCursor>,
@@ -209,7 +220,15 @@ impl Fetch {
     /// Reads the rows, and whether there may be more.
     pub async fn run(&self, client: &MailClient) -> catmail_core::Result<(Vec<Row>, bool)> {
         let (source, found) = (&self.source, &self.found_on_server);
-        fetch(client, source, found, self.limit, self.after).await
+        fetch(
+            client,
+            source,
+            self.filter.clone(),
+            found,
+            self.limit,
+            self.after,
+        )
+        .await
     }
 }
 
@@ -304,12 +323,29 @@ impl ListModel {
     /// Shows `source` from the top, or nothing: the listing to show, and its first read.
     /// Whatever was waited for of the source before is no longer.
     pub fn show(&mut self, source: Option<Source>) -> (Listing, Option<Fetch>) {
+        self.show_filtered(source, FlagFilter::All)
+    }
+
+    /// Shows the source of `listing` from the top again, only the messages `filter`
+    /// takes: as [`show`](Self::show).
+    pub fn filter(&mut self, listing: &Listing, filter: FlagFilter) -> (Listing, Option<Fetch>) {
+        self.show_filtered(listing.source.clone(), filter)
+    }
+
+    fn show_filtered(
+        &mut self,
+        source: Option<Source>,
+        filter: FlagFilter,
+    ) -> (Listing, Option<Fetch>) {
         self.generation += 1;
         self.reading = Coalesce::default();
         self.found_on_server = Rc::new([]);
         self.removal.clear();
         self.reveal.forget();
-        let listing = Listing::new(source);
+        let listing = Listing {
+            filter,
+            ..Listing::new(source)
+        };
         let fetch = self.start(&listing, PAGE, None);
         (listing, fetch)
     }
@@ -417,8 +453,15 @@ impl ListModel {
             self.reads += 1;
             self.reads
         });
+        // Read again, the rows shown stay, whatever changed about them since: a message
+        // opened in Unread is read now, and leaving would close it.
+        let mut filter = ListFilter::new(listing.filter);
+        if read.is_some() && listing.filter != FlagFilter::All {
+            filter.also = listing.messages().map(|m| m.id).collect();
+        }
         Some(Fetch {
             source,
+            filter,
             found_on_server: self.found_on_server.clone(),
             limit,
             after,
@@ -641,6 +684,39 @@ mod tests {
         let (nothing, fetch) = list.model.show(None);
         assert!(fetch.is_none());
         assert!(list.model.refresh(&nothing).is_none());
+    }
+
+    #[test]
+    fn a_filter_shows_the_source_again_and_keeps_the_rows_shown_when_read_again() {
+        let (mut list, first) = List::new();
+        assert_eq!(first.filter, ListFilter::default());
+        list.load(&first, &[1, 2, 3]);
+        list.open(m(2));
+        list.checked.insert(MessageId(3));
+
+        // From the top, of the same source, only what it takes.
+        let (listing, fetch) = list.model.filter(&list.listing, FlagFilter::Unread);
+        assert_eq!(listing.source(), Some(&FOLDER));
+        assert_eq!(listing.filter(), FlagFilter::Unread);
+        assert!(listing.rows().is_empty());
+        let fetch = fetch.unwrap();
+        assert_eq!(fetch.filter, ListFilter::new(FlagFilter::Unread));
+        list.listing = listing;
+        list.load(&fetch, &[1, 3]);
+
+        // Read again: the rows shown stay, though no longer unread. A page more is
+        // only of what the filter takes.
+        let again = list.model.refresh(&list.listing).unwrap();
+        assert_eq!(again.filter.flags, FlagFilter::Unread);
+        assert_eq!(again.filter.also, [MessageId(1), MessageId(3)]);
+        list.load(&again, &[1, 3]);
+        let page = list.model.more(&list.listing);
+        assert!(page.is_none(), "no more after a short page");
+
+        // Another source: every message again.
+        let (listing, fetch) = list.model.show(Some(Source::Inboxes));
+        assert_eq!(listing.filter(), FlagFilter::All);
+        assert_eq!(fetch.unwrap().filter, ListFilter::default());
     }
 
     #[test]

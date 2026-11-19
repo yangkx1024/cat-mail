@@ -1,4 +1,4 @@
-//! The icons, Heroicons (`assets/heroicons`, MIT), drawn with
+//! The icons, Heroicons (`assets/heroicons`, MIT) and a spinner of our own, drawn with
 //! `currentColor`, so they take the text color of where they are.
 
 use catmail_core::FolderRole;
@@ -46,6 +46,9 @@ pub enum Icon {
     /// Filled, as a mark on a flagged message.
     FlagSolid,
     FolderArrowRight,
+    Funnel,
+    /// Filled, as the list's filter while it filters.
+    FunnelSolid,
     InformationCircle,
     Italic,
     Key,
@@ -61,6 +64,9 @@ pub enum Icon {
     Plus,
     Sparkles,
     SparklesSolid,
+    /// Not Heroicons': macOS's spinner, twelve spokes fading behind the first; it turns a
+    /// spoke at a time.
+    Spinner,
     Star,
     /// Filled, as the default address's mark.
     StarSolid,
@@ -73,6 +79,8 @@ pub enum Icon {
     UserCircle,
     UserCircleSolid,
     XCircle,
+    /// Filled, as a search field's clear button.
+    XCircleSolid,
     XMark,
 }
 
@@ -87,7 +95,7 @@ macro_rules! folder_icon {
                 FolderRole::All => hero!($style, "envelope"),
                 FolderRole::Important => hero!($style, "star"),
                 FolderRole::Flagged => hero!($style, "flag"),
-                FolderRole::Junk => hero!($style, "shield-exclamation"),
+                FolderRole::Junk => hero!($style, "no-symbol"),
                 FolderRole::Trash => hero!($style, "trash"),
                 FolderRole::Drafts => hero!($style, "document-text"),
             },
@@ -150,6 +158,8 @@ impl Icon {
             Icon::Flag => hero!("flag"),
             Icon::FlagSolid => hero!("solid", "flag"),
             Icon::FolderArrowRight => hero!("folder-arrow-right"),
+            Icon::Funnel => hero!("funnel"),
+            Icon::FunnelSolid => hero!("solid", "funnel"),
             Icon::InformationCircle => hero!("information-circle"),
             Icon::Italic => hero!("italic"),
             Icon::Key => hero!("key"),
@@ -165,6 +175,7 @@ impl Icon {
             Icon::Plus => hero!("plus"),
             Icon::Sparkles => hero!("sparkles"),
             Icon::SparklesSolid => hero!("solid", "sparkles"),
+            Icon::Spinner => include_str!("../assets/spinner.svg"),
             Icon::Star => hero!("star"),
             Icon::StarSolid => hero!("solid", "star"),
             Icon::Sun => hero!("sun"),
@@ -176,6 +187,7 @@ impl Icon {
             Icon::UserCircle => hero!("user-circle"),
             Icon::UserCircleSolid => hero!("solid", "user-circle"),
             Icon::XCircle => hero!("x-circle"),
+            Icon::XCircleSolid => hero!("solid", "x-circle"),
             Icon::XMark => hero!("x-mark"),
         }
     }
