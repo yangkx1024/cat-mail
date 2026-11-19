@@ -85,6 +85,7 @@ catmail account list --json
 # 同步与阅读
 catmail sync                    # 同步一次；catmail watch 持续同步直到 Ctrl-C
 catmail ls INBOX -n 20          # 最新 20 封（标记列：* 未读，! 星标，@ 附件）
+catmail ls INBOX --only unread  # 只列未读；还有 read、flagged、unflagged，search 也能用
 catmail read 42 --save ~/下载    # 阅读并保存附件
 catmail search from:张三 季度报告
 

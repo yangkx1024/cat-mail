@@ -206,7 +206,7 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
   换来源时全部清空。
 - **视图过滤**：勾选框旁的菜单（All、Read、Unread、Flagged、Unflagged，原生 `popup_menu`，当前项打勾）只列出
   按标记过滤的邮件。按钮是漏斗图标（Heroicons `funnel`），不是 All 时换成填充的漏斗、主色，后面跟视图名。过滤
-  在引擎里做（`ListFilter`，`list_*_filtered` 和 `SearchQuery::filter`），分页跟着过滤后的行走；重读时已显示的
+  在引擎里做（`ListQuery::filter` 和 `SearchQuery::filter`），分页跟着过滤后的行走；重读时已显示的
   行放进 `also` 一起列出，读过的邮件不会在 Unread 里从指针下消失、打开的那封也不会关掉，直到换视图或换来源。
   换来源时回到 All。稀疏的过滤（只有几封未读或带旗标）每次重读要走完整个文件夹的索引：5 万封约 7–9 ms，
   暂不为它建部分索引。

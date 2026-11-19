@@ -1431,10 +1431,22 @@
     },
     "description": "Messages in a folder, or in every INBOX together, newest first, as last synced.",
     "inputSchema": {
+      "$defs": {
+        "Only": {
+          "description": "Which messages to list, by their flags.",
+          "enum": [
+            "unread",
+            "read",
+            "flagged",
+            "unflagged"
+          ],
+          "type": "string"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "after": {
-          "description": "The `next_after` of the previous page.",
+          "description": "The `next_after` of the previous page; pass the same `only` again.",
           "format": "int64",
           "type": [
             "integer",
@@ -1457,6 +1469,17 @@
             "integer",
             "null"
           ]
+        },
+        "only": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Only"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Only the unread, read, flagged or unflagged messages [default: all]."
         }
       },
       "type": "object"
@@ -2966,6 +2989,18 @@
     },
     "description": "Searches subjects, addresses and downloaded bodies, newest first; optionally asks the mail servers too.",
     "inputSchema": {
+      "$defs": {
+        "Only": {
+          "description": "Which messages to list, by their flags.",
+          "enum": [
+            "unread",
+            "read",
+            "flagged",
+            "unflagged"
+          ],
+          "type": "string"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "account": {
@@ -3007,6 +3042,17 @@
             "integer",
             "null"
           ]
+        },
+        "only": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Only"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Only the unread, read, flagged or unflagged matches [default: all]."
         },
         "query": {
           "description": "Terms that must all match: words, \"quoted phrases\", or either after `from:`,\n`to:` (Cc too) or `subject:`. Chinese, Japanese and Korean match as substrings.",

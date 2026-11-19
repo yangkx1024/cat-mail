@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
-use catmail_core::{EngineTuning, Error, ErrorKind, Event, Flags, FolderRole, SyncReport, Verify};
+use catmail_core::{
+    EngineTuning, Error, ErrorKind, Event, Flags, FolderRole, ListQuery, SyncReport, Verify,
+};
 use catmail_testkit::{FakeMailbox, Previews, ServerState, SmtpState};
 
 mod common;
@@ -490,7 +492,7 @@ async fn uidvalidity_change_refetches_the_folder() {
     let old_ids: Vec<_> = {
         let folder = env.folder("INBOX").await;
         env.client
-            .list_messages(folder.id, 10, None)
+            .list_messages(folder.id, ListQuery::new(10))
             .await
             .unwrap()
             .into_iter()
@@ -512,7 +514,7 @@ async fn uidvalidity_change_refetches_the_folder() {
     let folder = env.folder("INBOX").await;
     let new_ids: Vec<_> = env
         .client
-        .list_messages(folder.id, 10, None)
+        .list_messages(folder.id, ListQuery::new(10))
         .await
         .unwrap()
         .into_iter()
@@ -803,7 +805,11 @@ async fn headers_in_raw_bytes_are_read_in_the_charset_of_the_text() {
     let env = env(state).await;
     env.sync().await;
     let inbox = env.folder("INBOX").await;
-    let list = env.client.list_messages(inbox.id, 10, None).await.unwrap();
+    let list = env
+        .client
+        .list_messages(inbox.id, ListQuery::new(10))
+        .await
+        .unwrap();
     assert_eq!(list[0].subject.as_deref(), Some("报告"));
     assert_eq!(list[0].from[0].name.as_deref(), Some("张三"));
 }
@@ -838,7 +844,11 @@ async fn unparsable_bodystructure_does_not_hide_the_message() {
 
     // Unknown until the body is downloaded, which doesn't need the BODYSTRUCTURE.
     let inbox = env.folder("INBOX").await;
-    let list = env.client.list_messages(inbox.id, 10, None).await.unwrap();
+    let list = env
+        .client
+        .list_messages(inbox.id, ListQuery::new(10))
+        .await
+        .unwrap();
     let two = list
         .iter()
         .find(|m| m.subject.as_deref() == Some("two"))

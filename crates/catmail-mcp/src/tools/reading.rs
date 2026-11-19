@@ -7,7 +7,8 @@ use std::future::ready;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use catmail_core::{
-    AccountId, Attachment, FolderId, MessageCursor, MessageSummary, SearchQuery, display,
+    AccountId, Attachment, FlagFilter, FolderId, ListFilter, ListQuery, MessageCursor,
+    MessageSummary, SearchQuery, display,
 };
 use futures_util::future::join_all;
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -49,8 +50,10 @@ pub(crate) struct ListMessagesParams {
     pub folder: Option<i64>,
     /// How many, at most 100 [default: 25].
     pub limit: Option<u32>,
-    /// The `next_after` of the previous page.
+    /// The `next_after` of the previous page; pass the same `only` again.
     pub after: Option<i64>,
+    /// Only the unread, read, flagged or unflagged messages [default: all].
+    pub only: Option<Only>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -69,6 +72,30 @@ pub(crate) struct SearchParams {
     /// Also ask the mail servers, for messages whose bodies aren't downloaded here.
     /// Slower [default: false].
     pub ask_servers: Option<bool>,
+    /// Only the unread, read, flagged or unflagged matches [default: all].
+    pub only: Option<Only>,
+}
+
+/// Which messages to list, by their flags.
+#[derive(Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Only {
+    Unread,
+    Read,
+    Flagged,
+    Unflagged,
+}
+
+impl Only {
+    fn filter(only: Option<Self>) -> ListFilter {
+        ListFilter::new(match only {
+            None => FlagFilter::All,
+            Some(Self::Unread) => FlagFilter::Unread,
+            Some(Self::Read) => FlagFilter::Read,
+            Some(Self::Flagged) => FlagFilter::Flagged,
+            Some(Self::Unflagged) => FlagFilter::Unflagged,
+        })
+    }
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -238,15 +265,19 @@ impl Mail {
         Parameters(p): Parameters<ListMessagesParams>,
     ) -> Result<Json<Messages>, Failed> {
         let limit = limit(p.limit);
-        let after = self.cursor(p.after).await?;
+        let query = ListQuery {
+            limit,
+            after: self.cursor(p.after).await?,
+            filter: Only::filter(p.only),
+        };
         let messages = match p.folder {
             Some(id) => {
                 let folder = self.folder(id).await?;
-                self.client.list_messages(folder.id, limit, after).await?
+                self.client.list_messages(folder.id, query).await?
             }
             None => {
                 let accounts = self.scope.accounts.clone();
-                self.client.list_inboxes(accounts, limit, after).await?
+                self.client.list_inboxes(accounts, query).await?
             }
         };
         Ok(Json(self.page(messages, limit).await?))
@@ -269,6 +300,7 @@ impl Mail {
         }
         query.limit = limit;
         query.after = self.cursor(p.after).await?;
+        query.filter = Only::filter(p.only);
         if p.ask_servers.unwrap_or(false) {
             query.found_on_server = self.client.search_server(query.clone()).await?;
         }

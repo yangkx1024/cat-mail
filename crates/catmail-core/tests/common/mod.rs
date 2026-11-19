@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use catmail_core::{
     AccountId, Address, Config, Draft, DraftChanges, DraftContent, DraftId, Event, Flags, Folder,
-    FolderId, FolderSyncReport, MailClient, MailClientBuilder, MemorySecrets, MessageId,
+    FolderId, FolderSyncReport, ListQuery, MailClient, MailClientBuilder, MemorySecrets, MessageId,
     MessageSummary, NewAccount, ReplayReport, SearchQuery, Security, ServerConfig, SyncReport,
     Verify,
 };
@@ -365,7 +365,7 @@ impl Env {
     pub async fn list(&self, name: &str) -> Vec<MessageSummary> {
         let folder = self.folder(name).await;
         self.client
-            .list_messages(folder.id, 100, None)
+            .list_messages(folder.id, ListQuery::new(100))
             .await
             .unwrap()
     }
@@ -385,7 +385,7 @@ impl Env {
     pub async fn messages(&self, name: &str) -> Vec<(String, Flags)> {
         let folder = self.folder(name).await;
         self.client
-            .list_messages(folder.id, 10_000, None)
+            .list_messages(folder.id, ListQuery::new(10_000))
             .await
             .unwrap()
             .into_iter()

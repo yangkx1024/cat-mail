@@ -309,6 +309,7 @@ pub(crate) fn refused_drafts(count: u32) -> String {
 
 #[cfg(test)]
 mod tests {
+    use catmail_core::ListQuery;
     use catmail_testkit::{FakeImap, FakeMailbox, ServerState};
 
     use super::*;
@@ -331,7 +332,7 @@ mod tests {
     async fn inbox_ids(client: &MailClient, account: AccountId) -> Vec<i64> {
         let inbox = client.find_folder(account, "INBOX").await.unwrap().unwrap();
         client
-            .list_messages(inbox.id, 10, None)
+            .list_messages(inbox.id, ListQuery::new(10))
             .await
             .unwrap()
             .iter()
@@ -373,7 +374,7 @@ mod tests {
         assert_eq!(crate::exit::outcome(&err), Outcome::Failed);
         assert_eq!(
             client
-                .list_messages(inbox.id, 10, None)
+                .list_messages(inbox.id, ListQuery::new(10))
                 .await
                 .unwrap()
                 .len(),
@@ -390,7 +391,7 @@ mod tests {
         assert_eq!(crate::exit::outcome(&err), Outcome::Queued);
         assert!(
             client
-                .list_messages(inbox.id, 10, None)
+                .list_messages(inbox.id, ListQuery::new(10))
                 .await
                 .unwrap()
                 .is_empty()

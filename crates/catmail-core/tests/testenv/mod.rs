@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use catmail_core::{
-    AccountId, Config, MailClient, MemorySecrets, MessageSummary, NewAccount, Security,
+    AccountId, Config, ListQuery, MailClient, MemorySecrets, MessageSummary, NewAccount, Security,
     ServerConfig, TlsConfig, Verify,
 };
 use tokio::runtime::Handle;
@@ -114,7 +114,7 @@ pub async fn sent_copies(
     client.sync_account(account).await.unwrap();
     let sent = client.find_folder(account, "Sent").await.unwrap().unwrap();
     client
-        .list_messages(sent.id, u32::MAX, None)
+        .list_messages(sent.id, ListQuery::new(u32::MAX))
         .await
         .unwrap()
         .into_iter()

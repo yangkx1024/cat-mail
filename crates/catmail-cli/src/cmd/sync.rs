@@ -75,7 +75,7 @@ pub(crate) async fn sync(client: &MailClient, selector: Option<&str>, json: bool
 
 #[cfg(test)]
 mod tests {
-    use catmail_core::{Address, DraftBody, DraftContent, Flags};
+    use catmail_core::{Address, DraftBody, DraftContent, Flags, ListQuery};
     use catmail_testkit::{FakeImap, FakeMailbox, ServerState};
 
     use super::*;
@@ -104,7 +104,11 @@ mod tests {
 
         // A change the server refuses, undone.
         let inbox = client.find_folder(account, "INBOX").await.unwrap().unwrap();
-        let one = client.list_messages(inbox.id, 10, None).await.unwrap()[0].id;
+        let one = client
+            .list_messages(inbox.id, ListQuery::new(10))
+            .await
+            .unwrap()[0]
+            .id;
         fake.state().faults.refuse_changes = Some("[CANNOT] Permission denied".into());
         client
             .set_flags(vec![one], Flags::FLAGGED, Flags::empty())

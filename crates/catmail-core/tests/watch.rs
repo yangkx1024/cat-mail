@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use catmail_core::{Config, Flags, MailClient, ServerProblem, SyncSchedule, Verify};
+use catmail_core::{Config, Flags, ListQuery, MailClient, ServerProblem, SyncSchedule, Verify};
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 use tokio::runtime::Handle;
 use tokio::sync::Semaphore;
@@ -52,7 +52,7 @@ impl Env {
         };
         let messages = self
             .client
-            .list_messages(folder.id, 100, None)
+            .list_messages(folder.id, ListQuery::new(100))
             .await
             .unwrap();
         let mut subjects: Vec<_> = messages
@@ -853,7 +853,7 @@ async fn stops_with_the_client_and_starts_with_it() {
     let inbox = client.find_folder(account, "INBOX").await.unwrap().unwrap();
     eventually("three to arrive", async || {
         client
-            .list_messages(inbox.id, 10, None)
+            .list_messages(inbox.id, ListQuery::new(10))
             .await
             .unwrap()
             .len()

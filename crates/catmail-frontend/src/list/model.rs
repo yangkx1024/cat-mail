@@ -320,23 +320,10 @@ pub struct ListModel {
 }
 
 impl ListModel {
-    /// Shows `source` from the top, or nothing: the listing to show, and its first read.
-    /// Whatever was waited for of the source before is no longer.
-    pub fn show(&mut self, source: Option<Source>) -> (Listing, Option<Fetch>) {
-        self.show_filtered(source, FlagFilter::All)
-    }
-
-    /// Shows the source of `listing` from the top again, only the messages `filter`
-    /// takes: as [`show`](Self::show).
-    pub fn filter(&mut self, listing: &Listing, filter: FlagFilter) -> (Listing, Option<Fetch>) {
-        self.show_filtered(listing.source.clone(), filter)
-    }
-
-    fn show_filtered(
-        &mut self,
-        source: Option<Source>,
-        filter: FlagFilter,
-    ) -> (Listing, Option<Fetch>) {
+    /// Shows `source` from the top, only the messages `filter` takes, or nothing: the
+    /// listing to show, and its first read. Whatever was waited for of the source before
+    /// is no longer.
+    pub fn show(&mut self, source: Option<Source>, filter: FlagFilter) -> (Listing, Option<Fetch>) {
         self.generation += 1;
         self.reading = Coalesce::default();
         self.found_on_server = Rc::new([]);
@@ -613,7 +600,7 @@ mod tests {
         /// `FOLDER` shown, with its first read on its way.
         fn new() -> (Self, Fetch) {
             let mut model = ListModel::default();
-            let (listing, fetch) = model.show(Some(FOLDER));
+            let (listing, fetch) = model.show(Some(FOLDER), FlagFilter::All);
             let list = Self {
                 model,
                 listing,
@@ -671,7 +658,7 @@ mod tests {
 
         // Another source shown: what was read for this one is dropped.
         let stale = list.model.refresh(&list.listing).unwrap();
-        let (listing, next) = list.model.show(Some(Source::Inboxes));
+        let (listing, next) = list.model.show(Some(Source::Inboxes), FlagFilter::All);
         list.listing = listing;
         assert_eq!(list.load(&stale, &[1, 2]), None);
         assert!(
@@ -681,7 +668,7 @@ mod tests {
         list.load(&next.unwrap(), &[3]);
         assert_eq!(list.ids(), [m(3)]);
         // Nothing shown: nothing read.
-        let (nothing, fetch) = list.model.show(None);
+        let (nothing, fetch) = list.model.show(None, FlagFilter::All);
         assert!(fetch.is_none());
         assert!(list.model.refresh(&nothing).is_none());
     }
@@ -695,7 +682,9 @@ mod tests {
         list.checked.insert(MessageId(3));
 
         // From the top, of the same source, only what it takes.
-        let (listing, fetch) = list.model.filter(&list.listing, FlagFilter::Unread);
+        let (listing, fetch) = list
+            .model
+            .show(list.listing.source().cloned(), FlagFilter::Unread);
         assert_eq!(listing.source(), Some(&FOLDER));
         assert_eq!(listing.filter(), FlagFilter::Unread);
         assert!(listing.rows().is_empty());
@@ -714,7 +703,7 @@ mod tests {
         assert!(page.is_none(), "no more after a short page");
 
         // Another source: every message again.
-        let (listing, fetch) = list.model.show(Some(Source::Inboxes));
+        let (listing, fetch) = list.model.show(Some(Source::Inboxes), FlagFilter::All);
         assert_eq!(listing.filter(), FlagFilter::All);
         assert_eq!(fetch.unwrap().filter, ListFilter::default());
     }
@@ -776,7 +765,10 @@ mod tests {
     #[test]
     fn the_outbox_keeps_every_row_past_a_page() {
         let mut model = ListModel::default();
-        let (mut listing, fetch) = model.show(Some(Source::Outbox(catmail_core::AccountId(1))));
+        let (mut listing, fetch) = model.show(
+            Some(Source::Outbox(catmail_core::AccountId(1))),
+            FlagFilter::All,
+        );
         let fetch = fetch.unwrap();
         // Read whole, with no next page to load the rest from.
         let entries: Vec<Row> = (1..=i64::from(PAGE) + 1)
@@ -926,9 +918,9 @@ mod tests {
     #[test]
     fn the_servers_results_are_read_with_the_search_they_were_for() {
         let mut model = ListModel::default();
-        let (folder, _) = model.show(Some(FOLDER));
+        let (folder, _) = model.show(Some(FOLDER), FlagFilter::All);
         assert!(model.server_search(&folder).is_none(), "not search results");
-        let (listing, fetch) = model.show(Some(Source::Search("lunch".into())));
+        let (listing, fetch) = model.show(Some(Source::Search("lunch".into())), FlagFilter::All);
         let search = model.server_search(&listing).unwrap();
         assert_eq!(search.text, "lunch");
         // Nothing found: nothing to read again.
@@ -955,7 +947,7 @@ mod tests {
             .unwrap();
         model.loaded(&at_once, None, &listing, None, &HashSet::new());
         // The user moved on: not asked, and not read with what was found.
-        model.show(Some(FOLDER));
+        model.show(Some(FOLDER), FlagFilter::All);
         assert!(!model.is_shown(&search));
         assert!(model.found_on_server(&search, found, &listing).is_none());
     }
@@ -963,7 +955,7 @@ mod tests {
     #[test]
     fn a_pause_in_typing_searches_or_goes_back_to_the_place() {
         let mut model = ListModel::default();
-        let (listing, _) = model.show(Some(FOLDER));
+        let (listing, _) = model.show(Some(FOLDER), FlagFilter::All);
         let place = Some(Place::Folder(FolderId(1)));
         let search = |text: &str| Some(Some(Source::Search(text.into())));
         let first = model.typed();
@@ -976,7 +968,7 @@ mod tests {
         );
         // Nothing typed: the place, which is shown already.
         assert_eq!(model.paused(second, "  ", place, &listing), None);
-        let (results, _) = model.show(Some(Source::Search("lunch".into())));
+        let (results, _) = model.show(Some(Source::Search("lunch".into())), FlagFilter::All);
         let typed = model.typed();
         assert_eq!(model.paused(typed, "lunch", place, &results), None);
         assert_eq!(model.paused(typed, "", place, &results), Some(Some(FOLDER)));

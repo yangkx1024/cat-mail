@@ -162,13 +162,7 @@ impl Fixture {
     /// The ids of the messages `list_messages` lists in folder `folder` (every INBOX
     /// with `None`), newest first.
     async fn ids(&self, folder: Option<i64>) -> Vec<i64> {
-        let listed = self.call("list_messages", json!({"folder": folder})).await;
-        listed["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|m| m["id"].as_i64().unwrap())
-            .collect()
+        message_ids(&self.call("list_messages", json!({"folder": folder})).await)
     }
 
     /// The id of the account's folder named `name`.
@@ -183,6 +177,16 @@ impl Fixture {
             .as_i64()
             .unwrap()
     }
+}
+
+/// The ids of the `messages` a tool listed, in order.
+fn message_ids(listed: &Value) -> Vec<i64> {
+    listed["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_i64().unwrap())
+        .collect()
 }
 
 /// The JSON-RPC reply's `result`, or its `error`.
