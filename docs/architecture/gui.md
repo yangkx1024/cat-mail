@@ -115,7 +115,8 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 
 客户端开着后台同步、后台发信、预取正文和 GC。GUI 自己不同步账户：Sync 按钮（Ctrl+Shift+N、F5）和托盘的
 "Sync now"调 `MailClient::sync_now`，由后台同步来做（见[同步 / 后台同步](sync.md#后台同步与-idle)）；有账户
-`syncing` 时搜索框旁的 Sync 按钮转圈，转完当前一圈才停，失败时侧栏底部显示连接问题。后台同步在两次完整
+`syncing` 时搜索框旁的 Sync 按钮换成 macOS 式的菊花转（`assets/spinner.svg`：12 根辐条依次变淡，`Easing::Steps`
+按一根辐条 30° 跳着转，一秒一圈，不变暗），停了换回图标；失败时侧栏底部显示连接问题。后台同步在两次完整
 同步之间只盯 INBOX，所以打开一个文件夹时同步它（`sync_folder`，见[同步 / 打开的文件夹](sync.md#打开的文件夹)），
 失败只记日志。
 

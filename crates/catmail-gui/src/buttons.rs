@@ -49,6 +49,43 @@ pub fn icon_button(
     size: Size,
     press: impl Fn() + 'static,
 ) -> View {
+    button_box(name, enabled, enabled, size, press)
+        .child(icon(which, size.icon_size()).text_color(move || theme().foreground))
+}
+
+/// An [`icon_button`] that shows macOS's spinner in place of its icon while `busy`: it
+/// does nothing then, but isn't dimmed, the spinner saying why.
+pub fn busy_icon_button(
+    which: impl Fn() -> Icon + Copy + 'static,
+    name: impl Fn() -> String + Copy + 'static,
+    enabled: impl Fn() -> bool + Copy + 'static,
+    busy: impl Fn() -> bool + Copy + 'static,
+    size: Size,
+    press: impl Fn() + 'static,
+) -> View {
+    let active = move || enabled() && !busy();
+    button_box(name, active, enabled, size, press).child(dynamic(move || {
+        if busy() {
+            spinner(size.icon_size() - 2.0)
+                .text_color(move || theme().muted_foreground)
+                .into_element()
+        } else {
+            icon(which, size.icon_size())
+                .text_color(move || theme().foreground)
+                .into_element()
+        }
+    }))
+}
+
+/// An icon button's box, without the icon: it does `press` while `active`, and is dimmed
+/// unless `lit`.
+fn button_box(
+    name: impl Fn() -> String + Copy + 'static,
+    active: impl Fn() -> bool + Copy + 'static,
+    lit: impl Fn() -> bool + 'static,
+    size: Size,
+    press: impl Fn() + 'static,
+) -> View {
     view()
         .w(px(size.box_size()))
         .h(px(size.box_size()))
@@ -56,10 +93,10 @@ pub fn icon_button(
         .rounded(px(6.0))
         .items_center()
         .justify_center()
-        .opacity(move || if enabled() { 1.0_f32 } else { 0.4 })
+        .opacity(move || if lit() { 1.0_f32 } else { 0.4 })
         .hover(move |s| {
             s.bg(move || {
-                if enabled() {
+                if active() {
                     theme().accent
                 } else {
                     AdaptiveColor::TRANSPARENT
@@ -68,12 +105,24 @@ pub fn icon_button(
         })
         .label(move || SharedString::from(name()))
         .on_press(move || {
-            if untracked(enabled) {
+            if untracked(active) {
                 press();
             }
         })
         .tooltip(tooltip(name))
-        .child(icon(which, size.icon_size()).text_color(move || theme().foreground))
+}
+
+/// macOS's spinner, `size` points square, turning while shown: a spoke at a time, as
+/// AppKit's does.
+fn spinner(size: f32) -> Svg {
+    const SPOKES: u32 = 12;
+    const TURN_MS: f32 = 1000.0;
+    let angle = animated_value(0.0);
+    let steps = Easing::Steps(SPOKES, StepPosition::JumpEnd);
+    let turning = Animation::timing(&angle, 360.0, Timing::new(TURN_MS, steps)).looped(None);
+    // Nothing waits on it ending: it ends with the spinner.
+    let _ = turning.start();
+    icon(|| Icon::Spinner, size).bind_rotate(&angle)
 }
 
 /// The narrow chevron beside a button that opens a menu of other ways to do what the

@@ -1,4 +1,4 @@
-//! The icons, Heroicons (`assets/heroicons`, MIT), drawn with
+//! The icons, Heroicons (`assets/heroicons`, MIT) and a spinner of our own, drawn with
 //! `currentColor`, so they take the text color of where they are.
 
 use catmail_core::FolderRole;
@@ -64,6 +64,9 @@ pub enum Icon {
     Plus,
     Sparkles,
     SparklesSolid,
+    /// Not Heroicons': macOS's spinner, twelve spokes fading behind the first; it turns a
+    /// spoke at a time.
+    Spinner,
     Star,
     /// Filled, as the default address's mark.
     StarSolid,
@@ -90,7 +93,7 @@ macro_rules! folder_icon {
                 FolderRole::All => hero!($style, "envelope"),
                 FolderRole::Important => hero!($style, "star"),
                 FolderRole::Flagged => hero!($style, "flag"),
-                FolderRole::Junk => hero!($style, "shield-exclamation"),
+                FolderRole::Junk => hero!($style, "no-symbol"),
                 FolderRole::Trash => hero!($style, "trash"),
                 FolderRole::Drafts => hero!($style, "document-text"),
             },
@@ -170,6 +173,7 @@ impl Icon {
             Icon::Plus => hero!("plus"),
             Icon::Sparkles => hero!("sparkles"),
             Icon::SparklesSolid => hero!("solid", "sparkles"),
+            Icon::Spinner => include_str!("../assets/spinner.svg"),
             Icon::Star => hero!("star"),
             Icon::StarSolid => hero!("solid", "star"),
             Icon::Sun => hero!("sun"),

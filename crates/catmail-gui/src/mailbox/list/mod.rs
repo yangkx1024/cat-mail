@@ -531,46 +531,25 @@ fn follow_the_calendar() {
     });
 }
 
-/// Syncs every account now; it turns while one is syncing.
+/// Syncs every account now; the spinner shows while one is syncing.
 fn sync_button() -> impl IntoElement {
     // Only when it starts or stops: the accounts are read again many times meanwhile, and
-    // starting the turn again each time would jerk it back.
+    // starting the spinner again each time would jerk it back.
     let syncing = computed(sidebar::syncing);
-    let angle = animated_value(0.0);
-    let turning =
-        Animation::timing(&angle, 360.0, Timing::new(TURN_MS, Easing::Linear)).looped(None);
-    effect(move || {
-        if syncing.get() {
-            let _ = turning.start();
-        } else {
-            spawn(finish_turn(angle));
-        }
-    });
-    crate::buttons::icon_button(
+    crate::buttons::busy_icon_button(
         || Icon::ArrowPath,
-        || "Sync now".to_owned(),
-        move || sidebar::has_accounts() && !syncing.get(),
+        move || {
+            if syncing.get() {
+                "Syncing".to_owned()
+            } else {
+                "Sync now".to_owned()
+            }
+        },
+        sidebar::has_accounts,
+        move || syncing.get(),
         Size::Bar,
         sidebar::sync,
     )
-    .bind_rotate(&angle)
-}
-
-/// How long a turn of the sync button takes, in milliseconds.
-const TURN_MS: f32 = 1000.0;
-
-/// Stops the sync button's turning once it is upright again, rather than snapping back.
-async fn finish_turn(angle: AnimatedValue) {
-    angle.stop();
-    let at = angle.value().await;
-    if at <= 0.0 {
-        return;
-    }
-    let left = TURN_MS * (360.0 - at) / 360.0;
-    // Not if a sync started meanwhile, which turns it again.
-    if angle.timing(360.0, left, Easing::Linear).await {
-        angle.set(0.0);
-    }
 }
 
 fn header() -> impl IntoElement {
