@@ -212,8 +212,9 @@ unsafe_code = "deny"
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 
-# Unreleased imap-proto 0.18.0, for its unescaping of quoted strings (djc/imap-proto#209).
+# Unreleased imap-proto 0.18.0, for its unescaping of quoted strings (djc/imap-proto#209)
+# and the MESSAGELIMIT response code (RFC 9738).
 # Replace with the crates.io release once it is out, and take the repository out of
 # `allow-git` in deny.toml (#130).
 [patch.crates-io]
-imap-proto = { git = "https://github.com/djc/imap-proto", rev = "0dac3af59a2cfcd649c30034d5f221c4d8edbf34" }
+imap-proto = { git = "https://github.com/djc/imap-proto", rev = "25f47f439af7ffc0a0305cf1d08198a9a84e2fef" }

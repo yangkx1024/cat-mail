@@ -366,10 +366,7 @@ async fn mailbox_names_with_line_breaks_go_as_literals() {
 
     // The fake ends a command at a line break unless a literal carries it, so the name
     // arriving whole, in one command, means it went as a literal.
-    let lines: Vec<_> = fake.state().log[start..]
-        .iter()
-        .map(|c| c.line.clone())
-        .collect();
+    let lines = fake.commands_since(start);
     assert_eq!(lines, [format!("EXAMINE \"{name}\" (CONDSTORE)")]);
 }
 
@@ -424,10 +421,7 @@ async fn a_malformed_bodystructure_is_asked_for_again_without() {
         !second.has_attachments,
         "unknown until the body is downloaded"
     );
-    let fetches: Vec<String> = fake.state().log[start..]
-        .iter()
-        .map(|c| c.line.clone())
-        .collect();
+    let fetches = fake.commands_since(start);
     assert_eq!(fetches.len(), 2, "{fetches:?}");
     assert!(
         fetches[1].starts_with("UID FETCH 2 ") && !fetches[1].contains("BODYSTRUCTURE"),
@@ -537,10 +531,7 @@ async fn unparsable_lines_make_authoritative_answers_fail() {
     let mut uids: Vec<u32> = messages.iter().map(|m| m.state.uid).collect();
     uids.sort_unstable();
     assert_eq!(uids, [1, 2]);
-    let fetches: Vec<String> = fake.state().log[start..]
-        .iter()
-        .map(|c| c.line.clone())
-        .collect();
+    let fetches = fake.commands_since(start);
     assert_eq!(fetches.len(), 2, "{fetches:?}");
     assert!(fetches[0].contains("BODYSTRUCTURE"), "{fetches:?}");
     assert!(
@@ -1477,4 +1468,189 @@ async fn creates_renames_and_deletes_mailboxes() {
     assert_eq!(fake.state().mailbox_names(), ["INBOX"]);
     // The session still works: it left the mailbox before deleting it.
     session.examine("INBOX").await.unwrap();
+}
+
+/// INBOX with 8 messages, on a server taking 3 in one command (RFC 9738); and Archive.
+fn limited(hidden: bool) -> ServerState {
+    let mut state = ServerState::new("alice", "pw");
+    for i in 1..=8 {
+        state.inbox().append_simple(&format!("m{i}"));
+    }
+    state.mailboxes.push(FakeMailbox::new("Archive"));
+    state.faults.message_limit = Some(3);
+    state.faults.hide_message_limit = hidden;
+    state
+}
+
+#[tokio::test]
+async fn searches_and_fetches_go_on_below_where_the_server_stopped() {
+    let fake = FakeImap::start(limited(false)).await;
+    let mut session = login(&fake).await;
+    assert_eq!(session.capabilities().message_limit(false), Some(3));
+    session.examine("INBOX").await.unwrap();
+
+    let start = fake.state().log.len();
+    assert_eq!(
+        session.uid_search_all().await.unwrap(),
+        (1..=8).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        fake.commands_since(start),
+        [
+            "UID SEARCH ALL",
+            "UID SEARCH ALL UID 1:5",
+            "UID SEARCH ALL UID 1:2"
+        ]
+    );
+    assert_eq!(
+        session.uid_search_from(2).await.unwrap(),
+        [2, 3, 4, 5, 6, 7, 8]
+    );
+
+    let start = fake.state().log.len();
+    let flags = session
+        .fetch_flags(&[2..=8], None, Items::Standard)
+        .await
+        .unwrap();
+    assert_eq!(
+        flags.iter().map(|f| f.uid).collect::<Vec<_>>(),
+        [2, 3, 4, 5, 6, 7, 8]
+    );
+    let fetches = fake.commands_since(start);
+    assert!(
+        fetches[0].starts_with("UID FETCH 2:8 ")
+            && fetches[1].starts_with("UID FETCH 2:5 ")
+            && fetches[2].starts_with("UID FETCH 2 "),
+        "{fetches:?}"
+    );
+    let summaries = session
+        .fetch_summaries(&[1, 2, 5, 6, 7, 8], Items::Standard)
+        .await
+        .unwrap();
+    assert_eq!(summaries.len(), 6);
+
+    // Where the server doesn't say where it stopped, the rest can't be asked for: a part
+    // taken for the whole would read as messages deleted, or flags unchanged.
+    fake.state().faults.message_limit_without_uid = true;
+    let err = session.uid_search_all().await.unwrap_err();
+    assert!(
+        matches!(err, Error::Truncated("UID SEARCH")) && !err.is_fatal(),
+        "{err}"
+    );
+    let err = session
+        .fetch_flags(&[1..=8], None, Items::Standard)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Truncated("UID FETCH")), "{err}");
+    assert_eq!(session.uid_search_uids(&[1, 2]).await.unwrap(), [1, 2]);
+}
+
+#[tokio::test]
+async fn changes_reach_every_message_a_part_at_a_time() {
+    for hidden in [false, true] {
+        let fake = FakeImap::start(limited(hidden)).await;
+        let mut session = login(&fake).await;
+        session.select("INBOX").await.unwrap();
+
+        let start = fake.state().log.len();
+        session
+            .uid_store(&(1..=8).collect::<Vec<_>>(), Flags::SEEN, Flags::empty())
+            .await
+            .unwrap();
+        assert!(
+            uids(&fake, "INBOX")
+                .iter()
+                .all(|(_, flags)| flags == &["\\Seen"]),
+            "hidden: {hidden}"
+        );
+        let expected = if hidden {
+            // Sent again below where it stopped.
+            [
+                "UID STORE 1:8 +FLAGS.SILENT (\\Seen)",
+                "UID STORE 1:5 +FLAGS.SILENT (\\Seen)",
+                "UID STORE 1:2 +FLAGS.SILENT (\\Seen)",
+            ]
+        } else {
+            // Three at a time, the highest first, as the server would.
+            [
+                "UID STORE 6:8 +FLAGS.SILENT (\\Seen)",
+                "UID STORE 3:5 +FLAGS.SILENT (\\Seen)",
+                "UID STORE 1:2 +FLAGS.SILENT (\\Seen)",
+            ]
+        };
+        assert_eq!(fake.commands_since(start), expected);
+
+        // A COPY of too many is refused, and sent three at a time instead.
+        let start = fake.state().log.len();
+        let copied = session
+            .uid_copy(&[1, 2, 3, 4, 5], "Archive")
+            .await
+            .unwrap()
+            .unwrap();
+        let mut pairs = copied.uids.clone();
+        pairs.sort_unstable();
+        assert_eq!(
+            pairs.iter().map(|p| p.0).collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5]
+        );
+        let copies = fake.commands_since(start);
+        let expected: &[&str] = if hidden {
+            &[
+                "UID COPY 1:5 Archive",
+                "UID COPY 3:5 Archive",
+                "UID COPY 1:2 Archive",
+            ]
+        } else {
+            &["UID COPY 3:5 Archive", "UID COPY 1:2 Archive"]
+        };
+        assert_eq!(copies, expected, "hidden: {hidden}");
+
+        let moved = session.uid_move(&[6, 7, 8], "Archive").await.unwrap();
+        assert_eq!(moved.unwrap().uids.len(), 3);
+        session.uid_delete(&[1, 2, 3, 4, 5]).await.unwrap();
+        assert!(uids(&fake, "INBOX").is_empty(), "hidden: {hidden}");
+        assert_eq!(uids(&fake, "Archive").len(), 8, "each copied once");
+    }
+}
+
+#[tokio::test]
+async fn a_copy_refused_after_some_parts_is_not_a_refusal_of_all() {
+    let mut state = limited(false);
+    state.faults.refuse_copies_after = Some(1);
+    let fake = FakeImap::start(state).await;
+    let mut session = login(&fake).await;
+    session.select("INBOX").await.unwrap();
+
+    // Three were copied: the caller must not take the error for "nothing was".
+    let err = session
+        .uid_copy(&[1, 2, 3, 4, 5], "Archive")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::Truncated("UID COPY")) && !err.is_fatal(),
+        "{err}"
+    );
+    assert_eq!(uids(&fake, "Archive").len(), 3);
+    // Refused at once, it is the refusal it is.
+    let err = session.uid_copy(&[1, 2], "Archive").await.unwrap_err();
+    assert!(matches!(err, Error::Command { .. }), "{err}");
+}
+
+#[tokio::test]
+async fn a_server_that_stops_without_saying_where_fails_a_change() {
+    let mut state = limited(true);
+    state.faults.message_limit_without_uid = true;
+    let fake = FakeImap::start(state).await;
+    let mut session = login(&fake).await;
+    session.select("INBOX").await.unwrap();
+    let err = session
+        .uid_store(&[1, 2, 3, 4], Flags::SEEN, Flags::empty())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Truncated("UID STORE")), "{err}");
+    // The connection is fine.
+    session
+        .uid_store(&[1], Flags::SEEN, Flags::empty())
+        .await
+        .unwrap();
 }

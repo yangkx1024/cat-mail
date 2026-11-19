@@ -453,18 +453,15 @@ impl Session {
     /// Sets `add` and clears `remove` on messages of the selected mailbox, leaving their
     /// other flags alone. UIDs the mailbox doesn't have are skipped, as IMAP does.
     pub async fn uid_store(&mut self, uids: &[u32], add: Flags, remove: Flags) -> Result<()> {
-        let Some(set) = uid_set(uids) else {
-            return Ok(());
-        };
         for (kind, flags) in [("+FLAGS.SILENT", add), ("-FLAGS.SILENT", remove)] {
             if flags.is_empty() {
                 continue;
             }
-            let store = Command::new("UID STORE")
-                .raw(&set)
-                .raw(kind)
-                .raw(&format!("({})", system_flags(flags)));
-            self.change(store).await?;
+            let flags = format!("({})", system_flags(flags));
+            self.change_uids(uids, false, |set| {
+                Ok(Command::new("UID STORE").raw(set).raw(kind).raw(&flags))
+            })
+            .await?;
         }
         Ok(())
     }
@@ -493,16 +490,13 @@ impl Session {
         remove: &[GmailLabel],
     ) -> Result<()> {
         self.require_gmail()?;
-        let Some(set) = uid_set(uids) else {
-            return Ok(());
-        };
         for (kind, labels) in [("+X-GM-LABELS", add), ("-X-GM-LABELS", remove)] {
             if labels.is_empty() {
                 continue;
             }
-            let store =
+            self.change_uids(uids, false, |set| {
                 Command::new("UID STORE")
-                    .raw(&set)
+                    .raw(set)
                     .raw(kind)
                     .list(labels, |command, label| match label {
                         GmailLabel::System(role) => system_label(*role)
@@ -513,8 +507,9 @@ impl Session {
                         GmailLabel::User { remote_name, .. } => {
                             command.astring(remote_name.as_bytes())
                         }
-                    })?;
-            self.change(store).await?;
+                    })
+            })
+            .await?;
         }
         Ok(())
     }
@@ -571,11 +566,13 @@ impl Session {
         to: &str,
         command: &'static str,
     ) -> Result<Option<CopyUid>> {
-        let Some(set) = uid_set(uids) else {
-            return Ok(None);
-        };
-        let body = Command::new(command).raw(&set).astring(to.as_bytes())?;
-        Ok(copy_uid(&self.change(body).await?, uids.len()))
+        let copy = command == "UID COPY";
+        let answers = self
+            .change_uids(uids, copy, |set| {
+                Command::new(command).raw(set).astring(to.as_bytes())
+            })
+            .await?;
+        Ok(copy_uids(&answers, uids.len()))
     }
 
     /// Deletes messages of the selected mailbox for good: `\Deleted`, then UID EXPUNGE
@@ -583,17 +580,83 @@ impl Session {
     /// any other message someone marked `\Deleted` in this mailbox; as in every client,
     /// that is what the mark asks for.
     pub async fn uid_delete(&mut self, uids: &[u32]) -> Result<()> {
-        let Some(set) = uid_set(uids) else {
+        if uids.iter().all(|&uid| uid == 0) {
             return Ok(());
-        };
+        }
         self.uid_store(uids, Flags::DELETED, Flags::empty()).await?;
-        let expunge = if self.caps.has("UIDPLUS") {
-            Command::new("UID EXPUNGE").raw(&set)
+        if self.caps.has("UIDPLUS") {
+            self.change_uids(uids, false, |set| Ok(Command::new("UID EXPUNGE").raw(set)))
+                .await?;
         } else {
-            Command::new("EXPUNGE")
-        };
-        self.change(expunge).await?;
+            // Never stops at a limit (RFC 9738 §3.1).
+            self.change(Command::new("EXPUNGE")).await?;
+        }
         Ok(())
+    }
+
+    /// Runs a command that changes the messages of the selected mailbox with these UIDs
+    /// (see [`change`](Self::change)), which `command` makes for a UID set; returns each
+    /// answer. A server with a limit on messages in one command (RFC 9738) is sent them a
+    /// part at a time:
+    ///
+    /// - as many as it says it takes (`MESSAGELIMIT=<n>`, for a COPY also `SAVELIMIT=<n>`),
+    ///   highest first, as it would make them;
+    /// - fewer, if it refuses the command for naming too many (`NO [MESSAGELIMIT <n>]`,
+    ///   as it does a COPY): then nothing was done;
+    /// - those below where it stopped, if it made it for some of them only (`OK
+    ///   [MESSAGELIMIT <n> <LastUID>]`, from the highest UID down). One that doesn't say
+    ///   where, or doesn't get further down, fails it with [`Error::Truncated`].
+    ///
+    /// UIDs the mailbox doesn't have count as messages, so a part never has more than it
+    /// takes. Parts made before one fails stay made; for a COPY, whose refusal otherwise
+    /// means nothing was copied, the error is then [`Error::Truncated`].
+    async fn change_uids(
+        &mut self,
+        uids: &[u32],
+        copy: bool,
+        command: impl Fn(&str) -> Result<Command>,
+    ) -> Result<Vec<Response>> {
+        let mut rest = uids.to_vec();
+        rest.sort_unstable();
+        rest.dedup();
+        rest.retain(|&uid| uid != 0);
+        let mut size = self
+            .caps
+            .message_limit(copy)
+            .map_or(rest.len(), |limit| limit as usize);
+        let mut answers = Vec::new();
+        while !rest.is_empty() {
+            let start = rest.len().saturating_sub(size);
+            let part = &rest[start..];
+            let set = uid_set(part).expect("a part has a UID");
+            let body = command(&set)?;
+            let name = body.name;
+            let response = match self.change(body).await {
+                Ok(response) => response,
+                Err(Error::MessageLimit { limit, .. }) if (limit as usize) < part.len() => {
+                    size = limit as usize;
+                    continue;
+                }
+                // A refused COPY copies nothing, but the parts before it were copied: the
+                // caller can't take it for a refusal of the whole.
+                Err(e) if copy && !answers.is_empty() && !e.is_fatal() => {
+                    tracing::debug!(error = %e, "COPY refused after some parts were copied");
+                    return Err(Error::Truncated(name));
+                }
+                Err(e) => return Err(e),
+            };
+            // Those of the part it didn't get to.
+            let kept = match response.message_limit() {
+                None => 0,
+                Some(Some(last)) if part.last().is_some_and(|&highest| last <= highest) => {
+                    part.partition_point(|&uid| uid < last)
+                }
+                Some(_) => return Err(Error::Truncated(name)),
+            };
+            answers.push(response);
+            rest.truncate(start + kept);
+        }
+        Ok(answers)
     }
 
     /// Runs a command that changes the selected mailbox. Its answer only matters for
@@ -738,11 +801,25 @@ impl Session {
             .await
     }
 
+    /// A server that stops at its limit on messages in one command (RFC 9738) searches
+    /// from the highest UID down and says where it stopped; it is asked again for the
+    /// messages below that, until it doesn't stop. A server that doesn't say where, or
+    /// doesn't get further down, makes the result [`Error::Truncated`]: part of the
+    /// mailbox missing from it would read as deleted.
     async fn uid_search(&mut self, search: Command) -> Result<Vec<u32>> {
         if self.selected_exists()? == 0 {
             return Ok(Vec::new());
         }
-        let response = self.conn.execute(search).await?;
+        // Search keys are ANDed: below where it stopped is the same search with a UID key.
+        let every_uid = 1..=u32::MAX;
+        let response = self
+            .execute_below(
+                search.clone(),
+                std::slice::from_ref(&every_uid),
+                false,
+                |set| search.clone().raw("UID").raw(set),
+            )
+            .await?;
         let mut uids: Vec<u32> = response
             .data
             .into_iter()
@@ -790,9 +867,10 @@ impl Session {
         optional: bool,
         items: Items,
     ) -> Result<(Vec<FetchedMessage>, usize)> {
-        let Some(set) = uid_set(uids) else {
+        let ranges = uid_ranges(uids);
+        if ranges.is_empty() {
             return Ok((Vec::new(), 0));
-        };
+        }
         let mut asked = format!(
             "UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS ({})]",
             SUMMARY_HEADER_FIELDS.join(" ")
@@ -814,7 +892,9 @@ impl Session {
         }
         // Lossy: a message whose answer can't be parsed is just missing, and the caller
         // notices the gap.
-        let response = self.conn.execute_lossy(uid_fetch(&set, &asked)).await?;
+        let response = self
+            .uid_fetch_all(&ranges, true, |set| uid_fetch(set, &asked))
+            .await?;
 
         let mut skipped = response.skipped;
         let wanted: HashSet<u32> = uids.iter().copied().collect();
@@ -865,10 +945,13 @@ impl Session {
     /// has, or whose answer couldn't be parsed, are simply absent. Only with
     /// [`supports_preview`](Self::supports_preview).
     pub async fn fetch_previews(&mut self, uids: &[u32]) -> Result<BTreeMap<u32, Option<String>>> {
-        let Some(set) = uid_set(uids) else {
+        let ranges = uid_ranges(uids);
+        if ranges.is_empty() {
             return Ok(BTreeMap::new());
-        };
-        let response = self.conn.execute_lossy(uid_fetch(&set, "PREVIEW")).await?;
+        }
+        let response = self
+            .uid_fetch_all(&ranges, true, |set| uid_fetch(set, "PREVIEW"))
+            .await?;
         let wanted: HashSet<u32> = uids.iter().copied().collect();
         Ok(merge_fetches(response, |uid| wanted.contains(&uid))
             .into_iter()
@@ -886,10 +969,7 @@ impl Session {
         items: Items,
     ) -> Result<Vec<FlagState>> {
         let uids = merge_ranges(uids.iter().cloned());
-        let Some(set) = sequence_set(&uids) else {
-            return Ok(Vec::new());
-        };
-        if self.selected_exists()? == 0 {
+        if uids.is_empty() || self.selected_exists()? == 0 {
             return Ok(Vec::new());
         }
         let modseq = self.modseq_enabled();
@@ -900,13 +980,17 @@ impl Session {
         if items == Items::Gmail {
             asked.push_str(" X-GM-LABELS");
         }
-        let mut command = uid_fetch(&set, &asked);
-        if let Some(since) = changed_since.filter(|&s| modseq && s > 0) {
-            command = command.raw(&format!("(CHANGEDSINCE {since})"));
-        }
-        // Strict: a lost line would hide a flag change for good once the caller stores
-        // the new HIGHESTMODSEQ.
-        let response = self.conn.execute(command).await?;
+        let since = changed_since.filter(|&s| modseq && s > 0);
+        let command = |set: &str| {
+            let command = uid_fetch(set, &asked);
+            match since {
+                Some(since) => command.raw(&format!("(CHANGEDSINCE {since})")),
+                None => command,
+            }
+        };
+        // Strict: a lost line, or messages left out, would hide a flag change for good
+        // once the caller stores the new HIGHESTMODSEQ.
+        let response = self.uid_fetch_all(&uids, false, command).await?;
 
         // Some servers answer a range above the highest UID with that one, as for `n:*`.
         let wanted = |uid| {
@@ -925,12 +1009,12 @@ impl Session {
     /// RFC822.SIZE of the messages of the selected mailbox with these UIDs; ones it
     /// doesn't have are absent.
     pub async fn fetch_sizes(&mut self, uids: &[u32]) -> Result<HashMap<u32, u32>> {
-        let Some(set) = uid_set(uids) else {
+        let ranges = uid_ranges(uids);
+        if ranges.is_empty() {
             return Ok(HashMap::new());
-        };
+        }
         let response = self
-            .conn
-            .execute(uid_fetch(&set, "UID RFC822.SIZE"))
+            .uid_fetch_all(&ranges, false, |set| uid_fetch(set, "UID RFC822.SIZE"))
             .await?;
         let wanted: HashSet<u32> = uids.iter().copied().collect();
         merge_fetches(response, |uid| wanted.contains(&uid))
@@ -1034,6 +1118,62 @@ impl Session {
                 .filter_map(|(section, data)| Some((section, data?.into_owned())))
                 .collect(),
         ))
+    }
+
+    /// A UID FETCH of the messages in `ranges` (as [`merge_ranges`] leaves them), which
+    /// `command` makes for a UID set; see [`execute_below`](Self::execute_below).
+    async fn uid_fetch_all(
+        &mut self,
+        ranges: &[RangeInclusive<u32>],
+        lossy: bool,
+        command: impl Fn(&str) -> Command,
+    ) -> Result<Response> {
+        match sequence_set(ranges) {
+            Some(set) => {
+                self.execute_below(command(&set), ranges, lossy, command)
+                    .await
+            }
+            None => Ok(Response::default()),
+        }
+    }
+
+    /// Runs `first`, a command on the messages with UIDs in `ranges`, and merges the
+    /// answers; with `lossy`, answered as [`Connection::execute_lossy`] does, else as
+    /// [`Connection::execute`] does. A server that stops at its limit on messages in one
+    /// command (RFC 9738) goes from the highest UID down and says where it stopped: `next`
+    /// makes the command again for the UID set below that, until it doesn't stop. One
+    /// that doesn't say where, or doesn't get further down, makes the answer
+    /// [`Error::Truncated`].
+    async fn execute_below(
+        &mut self,
+        first: Command,
+        ranges: &[RangeInclusive<u32>],
+        lossy: bool,
+        next: impl Fn(&str) -> Command,
+    ) -> Result<Response> {
+        let mut command = first;
+        let mut ranges = Cow::Borrowed(ranges);
+        let mut whole = Response::default();
+        loop {
+            let name = command.name;
+            let response = self.conn.execute_lossy(command).await?;
+            if !lossy && response.skipped > 0 {
+                return Err(Error::Incomplete(name));
+            }
+            let limited = response.message_limit();
+            whole.merge(response);
+            match limited {
+                None => return Ok(whole),
+                Some(Some(last)) if ranges.last().is_some_and(|r| last <= *r.end()) => {
+                    ranges = Cow::Owned(below(&ranges, last));
+                }
+                Some(_) => return Err(Error::Truncated(name)),
+            }
+            match sequence_set(&ranges) {
+                Some(set) => command = next(&set),
+                None => return Ok(whole),
+            }
+        }
     }
 
     /// Items about one message, merged across FETCH responses; `None` if the server sent
@@ -1157,6 +1297,15 @@ impl Session {
     }
 }
 
+/// The parts of `ranges` below `uid`.
+fn below(ranges: &[RangeInclusive<u32>], uid: u32) -> Vec<RangeInclusive<u32>> {
+    ranges
+        .iter()
+        .filter(|r| *r.start() < uid)
+        .map(|r| *r.start()..=(*r.end()).min(uid - 1))
+        .collect()
+}
+
 /// `\Seen \Flagged`, for a flag list.
 fn system_flags(flags: Flags) -> String {
     SYSTEM_FLAGS
@@ -1174,6 +1323,22 @@ fn expand(set: &[UidSetMember]) -> impl Iterator<Item = u32> + '_ {
         UidSetMember::Uid(uid) => *uid..=*uid,
         UidSetMember::UidRange(range) => range.clone(),
     })
+}
+
+/// The COPYUIDs in the answers to the parts of one COPY or MOVE (see
+/// [`Session::change_uids`]), together. `None` if one has none, they don't name the same
+/// mailbox, or together they name more than the `requested` UIDs.
+fn copy_uids(answers: &[Response], requested: usize) -> Option<CopyUid> {
+    let mut parts = answers.iter().map(|a| copy_uid(a, requested));
+    let mut whole = parts.next()??;
+    for part in parts {
+        let part = part?;
+        if part.uidvalidity != whole.uidvalidity {
+            return None;
+        }
+        whole.uids.extend(part.uids);
+    }
+    (whole.uids.len() <= requested).then_some(whole)
 }
 
 /// The COPYUID in an answer to COPY or MOVE (MOVE sends it untagged). `None` if there is
@@ -1481,7 +1646,12 @@ fn internal_date(value: &str) -> Option<i64> {
 
 /// Compresses UIDs into ranges: `[1, 2, 3, 7]` → `1:3,7`.
 fn uid_set(uids: &[u32]) -> Option<String> {
-    sequence_set(&merge_ranges(uids.iter().map(|&uid| uid..=uid)))
+    sequence_set(&uid_ranges(uids))
+}
+
+/// UIDs as ranges, as [`merge_ranges`] leaves them: `[1, 2, 3, 7]` → `1..=3, 7..=7`.
+fn uid_ranges(uids: &[u32]) -> Vec<RangeInclusive<u32>> {
+    merge_ranges(uids.iter().map(|&uid| uid..=uid))
 }
 
 /// The ranges sorted, overlapping and adjacent ones joined; 0, which no UID or sequence

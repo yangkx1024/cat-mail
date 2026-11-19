@@ -31,12 +31,14 @@ impl Literals {
 
 /// A command without its tag. Its bytes are zeroed when dropped: LOGIN carries a
 /// password.
+#[derive(Clone)]
 pub(crate) struct Command {
     /// For errors and logs, which never show the arguments.
     pub name: &'static str,
     parts: Vec<Part>,
 }
 
+#[derive(Clone)]
 enum Part {
     Text(Zeroizing<Vec<u8>>),
     Literal(Zeroizing<Vec<u8>>),

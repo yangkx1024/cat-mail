@@ -448,10 +448,7 @@ impl Env {
     /// Commands the server received from the `start`-th on, without tags.
     #[allow(dead_code)]
     pub fn commands_since(&self, start: usize) -> Vec<String> {
-        self.fake.state().log[start..]
-            .iter()
-            .map(|c| c.line.clone())
-            .collect()
+        self.fake.commands_since(start)
     }
 }
 

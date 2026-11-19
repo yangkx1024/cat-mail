@@ -13,7 +13,8 @@ SMTP 客户端见[草稿与发信](sending.md#smtp-客户端)。
 
 **暂时依赖 imap-proto 的 main。** 0.17.0 不还原带引号字符串里的转义（`"\\Inbox"` 解析出来是
 `\\Inbox`），而解析出来的值看不出原来是带引号的字符串还是 literal，在我们这边没法可靠地补。修复
-（djc/imap-proto#209）在未发版的 0.18.0 里，所以工作区用 `[patch.crates-io]` 固定到 main 的一个 commit。
+（djc/imap-proto#209）在未发版的 0.18.0 里，所以工作区用 `[patch.crates-io]` 固定到 main 的一个 commit；
+`MESSAGELIMIT` 响应码（`ResponseCode::MessageLimit`，djc/imap-proto@e27fa0c）也是从那里来的。
 `cargo deny` 只接受 crates.io 和 `deny.toml` 的 `allow-git` 里列出的 git 仓库，imap-proto 的仓库列在那里；
 0.18.0 发版、换成 crates.io 的版本时一起删掉（#130）。
 
@@ -75,6 +76,28 @@ SMTP 客户端见[草稿与发信](sending.md#smtp-客户端)。
   无声地忘掉连接时几分钟内就能发现，而不是等到下一条命令或 IDLE 到期。
 - 命令装不下的输入（APPEND 的邮件里有 NUL，IMAP literal 不能带）返回 `Error::InvalidInput`：什么也没
   发出，连接照常可用，不是致命错误。
+- **每条命令的邮件数上限**（MESSAGELIMIT，RFC 9738）。服务器可以只处理一条命令里的 N 封：SEARCH、
+  FETCH、STORE、MOVE（都是 UID 形式）和 UID EXPUNGE 从最大的 UID 往下做 N 封就停，照样回 OK，带
+  `[MESSAGELIMIT N LastUID]`（在 tagged OK 里，也可能在 untagged NO 里），`LastUID` 是做到的最小 UID；
+  COPY 超过 N 封就整条拒绝（`NO [MESSAGELIMIT N]`，一封也不复制）。把截断的结果当成完整的，同步会把
+  更早的邮件当成服务器上已经删了，标志的变化会漏掉，批量改动只做了一部分。所以 `Session` 自己续完，
+  调用方看到的总是完整的结果：
+  - SEARCH 在原来的条件后面加上 `UID 1:<LastUID-1>` 再发，FETCH 把 UID 集合截到 `LastUID` 以下再发，
+    结果合并，直到不再带这个码（`execute_below`）。和缺行一样，`Connection::execute` 把带这个码的回答
+    当成不完整（`Truncated`）：新命令默认安全，只有续发的地方自己处理这个码。
+  - STORE、MOVE、UID EXPUNGE、COPY 按 UID 分段（`change_uids`）：服务器声明了 `MESSAGELIMIT=N`（COPY
+    还看 `SAVELIMIT=N`）时一开始就按 N 封一段、从最大的 UID 往下发；被 `NO [MESSAGELIMIT N]` 拒绝时
+    （什么都没做）按 N 封重分；带着码的 OK 只做了一部分，就对 `LastUID` 以下的再发。集合里服务器没有的
+    UID 也算一封，一段不会超过 N 封。
+  - 没给 `LastUID`、或者 `LastUID` 没有比上一次更低（服务器出错，续下去会死循环）时，剩下的没法要，
+    返回 `Error::Truncated`（不是致命错误）：结果不完整，不能当成完整的用，改动可能只做了一部分。
+  - COPY 本来"被拒绝就什么都没复制"，分段以后前面的段可能已经复制了：后面一段被拒（如 `OVERQUOTA`）时
+    返回 `Truncated` 而不是 `Error::Command`。没有 MOVE 时的移动（COPY 再删除）把它当成答复丢失：op
+    留着，下次重放先从 checkpoint 找出已经复制的那些（见[操作队列 / 没有 MOVE 的服务器](op-queue.md#没有-move-的服务器)），不会复制第二遍。
+  - APPEND 一次只追加一封，不受上限影响；EXPUNGE、CLOSE 和 `STATUS` 按 RFC 不受限制。IDLE 之后按序号
+    问 UID 的 FETCH 被截断时，当作不知道哪些邮件的标志变了（`ChangedFlags::Unknown`）。
+  - 接过的服务器（Gmail、QQ、163、iCloud、Dovecot）都没见过这个码；testkit 的假服务器用
+    `Faults::message_limit` 模拟（可以不声明能力，或不给 `LastUID`）。
 - **Gmail 的扩展**（`X-GM-EXT-1`）：FETCH 的 `Items::Gmail`、`uid_store_labels`、`uid_search_gm_msgid`，
   见[位置与标签 / 协议](labels.md#协议)。
 

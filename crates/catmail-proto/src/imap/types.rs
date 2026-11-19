@@ -27,6 +27,21 @@ impl Capabilities {
             .find_map(|c| c.strip_prefix("APPENDLIMIT="))
             .and_then(|limit| limit.parse().ok())
     }
+
+    /// The most messages the server takes in one command that changes them, if it says
+    /// (RFC 9738): `MESSAGELIMIT=<n>` for every command, `SAVELIMIT=<n>` only for COPY
+    /// (and APPEND), so that one counts only with `copy`. The lower of the two.
+    pub fn message_limit(&self, copy: bool) -> Option<u32> {
+        self.0
+            .iter()
+            .filter_map(|c| {
+                c.strip_prefix("MESSAGELIMIT=")
+                    .or_else(|| c.strip_prefix("SAVELIMIT=").filter(|_| copy))
+            })
+            .filter_map(|limit| limit.parse().ok())
+            .filter(|&limit| limit > 0)
+            .min()
+    }
 }
 
 impl<S: AsRef<str>> FromIterator<S> for Capabilities {
