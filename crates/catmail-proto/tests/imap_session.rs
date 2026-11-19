@@ -1654,3 +1654,37 @@ async fn a_server_that_stops_without_saying_where_fails_a_change() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn a_server_that_says_zero_where_it_stopped_fails_the_command() {
+    // `[MESSAGELIMIT 0 0]` isn't a code imap-proto knows (both are nonzero numbers): it
+    // still says the server stopped short, and where can't be read. The limit isn't
+    // advertised, so every command meets it.
+    let mut state = limited(true);
+    state.faults.message_limit_zero = true;
+    let fake = FakeImap::start(state).await;
+    let mut session = login(&fake).await;
+    session.select("INBOX").await.unwrap();
+
+    let err = session.uid_search_all().await.unwrap_err();
+    assert!(matches!(err, Error::Truncated("UID SEARCH")), "{err}");
+    let err = session
+        .fetch_flags(&[1..=8], None, Items::Standard)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Truncated("UID FETCH")), "{err}");
+    let err = session
+        .uid_store(&(1..=8).collect::<Vec<_>>(), Flags::SEEN, Flags::empty())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Truncated("UID STORE")), "{err}");
+    // A COPY of too many is refused all the same, and nothing copied.
+    let err = session
+        .uid_copy(&[1, 2, 3, 4, 5], "Archive")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Command { .. }), "{err}");
+    assert!(uids(&fake, "Archive").is_empty());
+    // The connection is fine.
+    assert_eq!(session.uid_search_uids(&[1, 2]).await.unwrap(), [1, 2]);
+}

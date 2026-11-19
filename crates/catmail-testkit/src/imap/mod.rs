@@ -422,6 +422,9 @@ pub struct Faults {
     /// Say where `message_limit` stopped a command without the UID: `[MESSAGELIMIT <n>]`,
     /// as RFC 9738 allows when the server doesn't know it.
     pub message_limit_without_uid: bool,
+    /// Say 0 for both numbers where `message_limit` stopped a command (`[MESSAGELIMIT 0
+    /// 0]`), as a broken server might: both must be nonzero (RFC 9738).
+    pub message_limit_zero: bool,
     /// Make this many UID COPYs, then refuse every other with `NO [OVERQUOTA] Quota
     /// exceeded`, as a server running out of room does.
     pub refuse_copies_after: Option<usize>,
@@ -513,6 +516,7 @@ impl Default for Faults {
             message_limit: None,
             hide_message_limit: false,
             message_limit_without_uid: false,
+            message_limit_zero: false,
             refuse_copies_after: None,
         }
     }
@@ -2444,7 +2448,9 @@ fn message_limit(
         return (0, String::new());
     }
     let last = highest[n as usize - 1];
-    let code = if faults.message_limit_without_uid {
+    let code = if faults.message_limit_zero {
+        "[MESSAGELIMIT 0 0] ".to_owned()
+    } else if faults.message_limit_without_uid {
         format!("[MESSAGELIMIT {n}] ")
     } else {
         format!("[MESSAGELIMIT {n} {last}] ")
