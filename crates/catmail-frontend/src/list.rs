@@ -13,8 +13,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use catmail_core::{
-    DraftId, DraftSummary, FlagFilter, Flags, FolderId, ListFilter, MailClient, MessageCursor,
-    MessageId, MessageSummary, OutboxEntry, OutboxId, OutboxStatus, SearchQuery,
+    DraftId, DraftSummary, FlagFilter, Flags, FolderId, ListFilter, ListQuery, MailClient,
+    MessageCursor, MessageId, MessageSummary, OutboxEntry, OutboxId, OutboxStatus, SearchQuery,
 };
 use jiff::civil::Date;
 
@@ -101,24 +101,21 @@ pub(crate) async fn fetch(
         let more = messages.len() == limit as usize;
         (messages.into_iter().map(Row::Message).collect(), more)
     };
+    let query = ListQuery {
+        limit,
+        after,
+        filter,
+    };
     Ok(match source {
-        Source::Inboxes => page(
-            client
-                .list_inboxes_filtered(None, filter, limit, after)
-                .await?,
-        ),
-        Source::Folder(folder) => page(
-            client
-                .list_messages_filtered(*folder, filter, limit, after)
-                .await?,
-        ),
+        Source::Inboxes => page(client.list_inboxes(None, query).await?),
+        Source::Folder(folder) => page(client.list_messages(*folder, query).await?),
         Source::Search(text) => {
-            let mut query = SearchQuery::new(text.clone());
-            query.limit = limit;
-            query.after = after;
-            query.found_on_server = found_on_server.to_vec();
-            query.filter = filter;
-            page(client.search(query).await?)
+            let mut search = SearchQuery::new(text.clone());
+            search.limit = limit;
+            search.after = after;
+            search.found_on_server = found_on_server.to_vec();
+            search.filter = query.filter;
+            page(client.search(search).await?)
         }
         Source::Drafts(account) => {
             let drafts = client.list_drafts(*account).await?;

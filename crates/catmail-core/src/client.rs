@@ -8,9 +8,9 @@ use catmail_types::{
     Account, AccountId, AccountOverview, AccountStatus, Answer, AttachmentId, ChangeReport,
     DeleteMode, Draft, DraftAttachment, DraftAttachmentId, DraftChanges, DraftContent, DraftId,
     DraftSummary, Event, Flags, FlushReport, Folder, FolderId, FolderRole, FolderSyncReport,
-    Forwarding, GcReport, Identity, IdentityId, ListFilter, Message, MessageCursor, MessageId,
-    MessageSummary, NewAccount, NewFile, NewIdentity, OutboxEntry, OutboxId, PendingOp,
-    PendingOpId, ReplayReport, SearchQuery, SyncReport, special_folder,
+    Forwarding, GcReport, Identity, IdentityId, ListQuery, Message, MessageId, MessageSummary,
+    NewAccount, NewFile, NewIdentity, OutboxEntry, OutboxId, PendingOp, PendingOpId, ReplayReport,
+    SearchQuery, SyncReport, special_folder,
 };
 use secrecy::SecretString;
 use tokio::sync::broadcast;
@@ -431,27 +431,13 @@ impl MailClient {
             .await
     }
 
-    /// Messages in the folder, newest first: the first `limit`, or the `limit` after
-    /// `after` (the cursor of the last one shown, for the next page).
+    /// The page of the folder's messages `query` asks for, newest first.
     pub async fn list_messages(
         &self,
         folder: FolderId,
-        limit: u32,
-        after: Option<MessageCursor>,
+        query: ListQuery,
     ) -> Result<Vec<MessageSummary>> {
-        self.list_messages_filtered(folder, ListFilter::default(), limit, after)
-            .await
-    }
-
-    /// As [`list_messages`](Self::list_messages), only the messages `filter` takes.
-    pub async fn list_messages_filtered(
-        &self,
-        folder: FolderId,
-        filter: ListFilter,
-        limit: u32,
-        after: Option<MessageCursor>,
-    ) -> Result<Vec<MessageSummary>> {
-        self.read(move |db| db.messages().list_filtered(folder, &filter, limit, after))
+        self.read(move |db| db.messages().list(folder, &query))
             .await
     }
 
@@ -460,20 +446,7 @@ impl MailClient {
     pub async fn list_inboxes(
         &self,
         accounts: Option<Vec<AccountId>>,
-        limit: u32,
-        after: Option<MessageCursor>,
-    ) -> Result<Vec<MessageSummary>> {
-        self.list_inboxes_filtered(accounts, ListFilter::default(), limit, after)
-            .await
-    }
-
-    /// As [`list_inboxes`](Self::list_inboxes), only the messages `filter` takes.
-    pub async fn list_inboxes_filtered(
-        &self,
-        accounts: Option<Vec<AccountId>>,
-        filter: ListFilter,
-        limit: u32,
-        after: Option<MessageCursor>,
+        query: ListQuery,
     ) -> Result<Vec<MessageSummary>> {
         self.read(move |db| {
             let inboxes: Vec<FolderId> = inboxes(db)?
@@ -481,7 +454,7 @@ impl MailClient {
                 .filter(|f| accounts.as_ref().is_none_or(|a| a.contains(&f.account_id)))
                 .map(|f| f.id)
                 .collect();
-            db.messages().list_merged(&inboxes, &filter, limit, after)
+            db.messages().list_merged(&inboxes, &query)
         })
         .await
     }

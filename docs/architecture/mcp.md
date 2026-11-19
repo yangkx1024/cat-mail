@@ -130,6 +130,10 @@ tailnet 里的设备连得上，同一局域网内是直连。catmail 因此不�
   不存在一样，agent 分不出来。列表（所有收件箱、搜索、草稿、发件箱、待同步的改动）只含范围内的账户：
   `MailClient::list_inboxes` 的 `accounts` 与 `SearchQuery::accounts` 在数据库里筛，分页不乱；服务器搜索也只问这些
   账户。列出所有账户的东西都经 `Mail::narrowed`（令牌的账户，再按 `account` 参数收窄），不另写筛选。
+- **按标记列出**：`list_messages`、`search` 的 `only`（`unread`、`read`、`flagged`、`unflagged`）与 GUI 的视图过滤
+  是同一个条件（`ListQuery::filter`、`SearchQuery::filter`），在数据库里筛，分页跟着筛过的行走。agent 要找未读
+  或带旗标的邮件时不必翻完整个文件夹再自己挑。工具里的枚举是 `catmail-mcp` 自己的一份（`Only`），不给
+  `catmail-types` 加 `schemars`；CLI 的 `--only` 同理用 clap 的 `ValueEnum`。
 
 | 层级 | 工具 |
 |---|---|

@@ -41,6 +41,29 @@ impl SearchQuery {
     }
 }
 
+/// A page of a list of messages (a folder, the inboxes together), newest first: the
+/// first `limit` that `filter` takes, or the `limit` after `after`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListQuery {
+    pub limit: u32,
+    /// Only the messages after this one; the next page after a page ending with it.
+    pub after: Option<MessageCursor>,
+    /// Only the messages it takes.
+    #[serde(default)]
+    pub filter: ListFilter,
+}
+
+impl ListQuery {
+    /// The first `limit` messages, whatever their flags.
+    pub fn new(limit: u32) -> Self {
+        Self {
+            limit,
+            after: None,
+            filter: ListFilter::default(),
+        }
+    }
+}
+
 /// Which of a list's messages to show, by their flags.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use catmail_core::{
-    Address, DraftBody, DraftContent, Error, ErrorKind, Event, Forwarding, IdentityId, MessageId,
-    NewFile, OutboxEntry, OutboxStatus, RecvError, Verify,
+    Address, DraftBody, DraftContent, Error, ErrorKind, Event, Forwarding, IdentityId, ListQuery,
+    MessageId, NewFile, OutboxEntry, OutboxStatus, RecvError, Verify,
 };
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
 use common::{Env, addr, drain, env, env_with, eventually, files, sparse, status_changes};
@@ -664,7 +664,12 @@ async fn append_refused_before_the_message_does_not_stall_the_connection() {
         .await
         .unwrap()
         .unwrap();
-    let hello = env.client.list_messages(inbox.id, 1, None).await.unwrap()[0].id;
+    let hello = env
+        .client
+        .list_messages(inbox.id, ListQuery::new(1))
+        .await
+        .unwrap()[0]
+        .id;
     env.client.download_message(hello).await.unwrap();
     env.queue("hi").await;
 

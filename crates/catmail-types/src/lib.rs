@@ -42,5 +42,5 @@ pub use message::{
 };
 pub use ops::{ChangeReport, OpKind, OpStatus, PendingOp, ReplayReport};
 pub use outbox::{FlushReport, OutboxEntry, OutboxStatus};
-pub use search::{FlagFilter, ListFilter, SearchField, SearchQuery, SearchTerm};
+pub use search::{FlagFilter, ListFilter, ListQuery, SearchField, SearchQuery, SearchTerm};
 pub use sync::{FolderSyncReport, GcReport, SyncReport};

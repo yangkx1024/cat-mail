@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use catmail_core::{
     AccountId, Address, DeleteMode, DraftBody, DraftChanges, DraftContent, Flags, FolderRole,
-    MailClient, MessageSummary, OutboxStatus, SearchQuery, Security, ServerConfig, SyncReport,
+    ListQuery, MailClient, MessageSummary, OutboxStatus, SearchQuery, Security, ServerConfig,
+    SyncReport,
 };
 use catmail_testkit::{FakeSmtp, SmtpState};
 use testenv::{add_account, open_client, run_tag, sent_copies};
@@ -108,7 +109,7 @@ async fn syncs_against_dovecot() {
     // No body is downloaded there: the snippets are Dovecot's previews (RFC 8970).
     let folder = client.find_folder(account, &run).await.unwrap().unwrap();
     let snippets: Vec<_> = client
-        .list_messages(folder.id, 10, None)
+        .list_messages(folder.id, ListQuery::new(10))
         .await
         .unwrap()
         .into_iter()
@@ -131,7 +132,10 @@ async fn syncs_against_dovecot() {
     let inbox = find("INBOX");
     assert_eq!((inbox.unread_count, inbox.total_count), (5, 6));
 
-    let messages = client.list_messages(inbox.id, 10, None).await.unwrap();
+    let messages = client
+        .list_messages(inbox.id, ListQuery::new(10))
+        .await
+        .unwrap();
     let rows: Vec<_> = messages
         .iter()
         .map(|m| {
@@ -200,7 +204,10 @@ async fn syncs_against_dovecot() {
     let report = client.sync_account(account).await.unwrap();
     assert_eq!(added(&report, &run), (1, 1, 1));
     let folder = client.find_folder(account, &run).await.unwrap().unwrap();
-    let messages = client.list_messages(folder.id, 10, None).await.unwrap();
+    let messages = client
+        .list_messages(folder.id, ListQuery::new(10))
+        .await
+        .unwrap();
     let rows: Vec<_> = messages
         .iter()
         .map(|m| (m.subject.clone().unwrap(), m.flags))
@@ -219,7 +226,11 @@ async fn syncs_against_dovecot() {
     let video = vec![7u8; 3 * 1024 * 1024];
     fs::write(folder_dir.join("new").join("4.d"), large_message(&video)).unwrap();
     client.sync_account(account).await.unwrap();
-    let big = client.list_messages(folder.id, 10, None).await.unwrap()[0].clone();
+    let big = client
+        .list_messages(folder.id, ListQuery::new(10))
+        .await
+        .unwrap()[0]
+        .clone();
     assert_eq!(big.subject.as_deref(), Some("large"));
     assert_eq!(big.from[0].name.as_deref(), Some("张三"));
     let message = client.download_message(big.id).await.unwrap();
@@ -248,7 +259,10 @@ async fn check_changes(client: &MailClient, account: AccountId, maildir: &Path, 
     client.sync_account(account).await.unwrap();
     let folder = client.find_folder(account, run).await.unwrap().unwrap();
     let moved_to = client.find_folder(account, &target).await.unwrap().unwrap();
-    let messages = client.list_messages(folder.id, 10, None).await.unwrap();
+    let messages = client
+        .list_messages(folder.id, ListQuery::new(10))
+        .await
+        .unwrap();
     let id = |subject: &str| {
         messages
             .iter()
@@ -284,7 +298,10 @@ async fn check_changes(client: &MailClient, account: AccountId, maildir: &Path, 
     // Dovecot said where the message went, so the sync finds it already in place.
     let report = client.sync_account(account).await.unwrap();
     assert_eq!(added(&report, &target), (0, 0, 0));
-    let moved = client.list_messages(moved_to.id, 10, None).await.unwrap();
+    let moved = client
+        .list_messages(moved_to.id, ListQuery::new(10))
+        .await
+        .unwrap();
     assert_eq!(
         (moved.len(), moved[0].id, moved[0].flags),
         (1, third, Flags::FLAGGED)
@@ -519,7 +536,10 @@ async fn new_mail_is_pushed_by_dovecot() {
     // Dovecot notices at once with inotify, else within mailbox_idle_check_interval (30 s).
     let arrived = tokio::time::timeout(Duration::from_secs(45), async {
         loop {
-            let messages = client.list_messages(inbox.id, 100, None).await.unwrap();
+            let messages = client
+                .list_messages(inbox.id, ListQuery::new(100))
+                .await
+                .unwrap();
             if messages
                 .iter()
                 .any(|m| m.subject.as_deref() == Some(&subject))
@@ -632,7 +652,11 @@ async fn folders_are_created_renamed_and_deleted_on_dovecot() {
     .unwrap();
     let report = client.sync_account(account).await.unwrap();
     assert_eq!(added(&report, &run), (1, 0, 0));
-    let kept = client.list_messages(parent.id, 10, None).await.unwrap()[0].id;
+    let kept = client
+        .list_messages(parent.id, ListQuery::new(10))
+        .await
+        .unwrap()[0]
+        .id;
 
     let renamed = format!("{run}-renamed");
     let folder = client.rename_folder(parent.id, &renamed).await.unwrap();
@@ -641,7 +665,11 @@ async fn folders_are_created_renamed_and_deleted_on_dovecot() {
     // Dovecot keeps the UIDVALIDITY: the message is the one stored, not fetched again.
     assert_eq!(added(&report, &renamed), (0, 0, 0));
     assert_eq!(
-        client.list_messages(parent.id, 10, None).await.unwrap()[0].id,
+        client
+            .list_messages(parent.id, ListQuery::new(10))
+            .await
+            .unwrap()[0]
+            .id,
         kept
     );
     let names: Vec<String> = client
@@ -703,7 +731,10 @@ async fn bodies_are_prefetched_from_dovecot() {
 
     let downloaded = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let messages = client.list_messages(inbox.id, 1000, None).await.unwrap();
+            let messages = client
+                .list_messages(inbox.id, ListQuery::new(1000))
+                .await
+                .unwrap();
             let mut bodies = Vec::new();
             for m in &messages {
                 let subject = m.subject.as_deref().unwrap_or_default();

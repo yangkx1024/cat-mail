@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use catmail_core::{
-    AccountMode, DeleteMode, Event, Flags, FolderKind, MessageId, OpStatus, SearchQuery,
+    AccountMode, DeleteMode, Event, Flags, FolderKind, ListQuery, MessageId, OpStatus, SearchQuery,
     SyncReport, SyncSchedule, Verify,
 };
 use catmail_testkit::{FakeMailbox, ServerState, SmtpState};
@@ -302,7 +302,10 @@ async fn background_sync_idles_on_inbox_and_syncs_the_locations() {
         let found = env.client.find_folder(env.account, "INBOX").await.unwrap();
         match found {
             Some(folder) => {
-                let list = env.client.list_messages(folder.id, 10, None).await;
+                let list = env
+                    .client
+                    .list_messages(folder.id, ListQuery::new(10))
+                    .await;
                 list.unwrap()
                     .into_iter()
                     .filter_map(|m| m.subject)
@@ -656,18 +659,32 @@ async fn every_accounts_inbox_is_listed_together() {
         page.iter().filter_map(|m| m.subject.clone()).collect()
     };
     // Newest first; "three" and "one" have the same date, and "three" was stored later.
-    let all = env.client.list_inboxes(None, 10, None).await.unwrap();
+    let all = env
+        .client
+        .list_inboxes(None, ListQuery::new(10))
+        .await
+        .unwrap();
     assert_eq!(subjects(&all), ["four", "three", "one"]);
     let next = env
         .client
-        .list_inboxes(None, 1, Some(all[0].cursor()))
+        .list_inboxes(
+            None,
+            ListQuery {
+                after: Some(all[0].cursor()),
+                ..ListQuery::new(1)
+            },
+        )
         .await;
     assert_eq!(subjects(&next.unwrap()), ["three"]);
 
     // Archived on Gmail, it leaves.
     let one = env.id_of("INBOX", "one").await;
     env.client.archive_messages(vec![one]).await.unwrap();
-    let all = env.client.list_inboxes(None, 10, None).await.unwrap();
+    let all = env
+        .client
+        .list_inboxes(None, ListQuery::new(10))
+        .await
+        .unwrap();
     assert_eq!(subjects(&all), ["four", "three"]);
 }
 

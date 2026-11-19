@@ -61,6 +61,60 @@ async fn listing_and_paging() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn listing_only_messages_with_some_flags() {
+    let f = Fixture::new(ServeOptions::default()).await;
+    let inbox = f.folder(1, "INBOX").await;
+    // "two", then "one": "one" read and starred.
+    let [two, one] = f.ids(Some(inbox)).await[..] else {
+        panic!("not two messages")
+    };
+    f.call(
+        "mark",
+        json!({"messages": [one], "read": true, "starred": true}),
+    )
+    .await;
+
+    let only = async |folder: Option<i64>, only: &str| {
+        let listed = f
+            .call("list_messages", json!({"folder": folder, "only": only}))
+            .await;
+        message_ids(&listed)
+    };
+    assert_eq!(only(Some(inbox), "unread").await, [two]);
+    assert_eq!(only(Some(inbox), "read").await, [one]);
+    assert_eq!(only(Some(inbox), "flagged").await, [one]);
+    assert_eq!(only(Some(inbox), "unflagged").await, [two]);
+    // Every INBOX together.
+    assert_eq!(only(None, "unread").await, [two]);
+
+    // Pages follow the messages it takes: none after the only unread one.
+    let after = f
+        .call(
+            "list_messages",
+            json!({"folder": inbox, "only": "unread", "limit": 1}),
+        )
+        .await;
+    assert_eq!(after["next_after"], json!(two));
+    let rest = f
+        .call(
+            "list_messages",
+            json!({"folder": inbox, "only": "unread", "after": two}),
+        )
+        .await;
+    assert_eq!(rest["messages"], json!([]));
+
+    let found = f
+        .call("search", json!({"query": "alice", "only": "flagged"}))
+        .await;
+    assert_eq!(message_ids(&found), [one]);
+
+    let wrong = f
+        .call_result("list_messages", json!({"only": "starred"}))
+        .await;
+    assert_eq!(wrong["isError"], true, "{wrong}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn reading_downloads_the_body_and_leaves_the_message_unread() {
     let mut state = ServerState::new("alice", "pw");
     let long = "word ".repeat(100);

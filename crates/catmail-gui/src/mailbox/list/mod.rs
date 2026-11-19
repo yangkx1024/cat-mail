@@ -109,13 +109,13 @@ pub fn reading() -> bool {
 
 /// Shows `source` from the top, or nothing.
 pub fn show(source: Option<Source>) {
-    let (listing, fetch) = state(|s| s.model.show(source));
+    let (listing, fetch) = state(|s| s.model.show(source, FlagFilter::All));
     shown(listing, fetch);
 }
 
 /// Shows the source shown from the top again, only the messages `filter` takes.
 fn filter(filter: FlagFilter) {
-    let (listing, fetch) = reads(|model, listing| model.filter(listing, filter));
+    let (listing, fetch) = reads(|model, listing| model.show(listing.source().cloned(), filter));
     shown(listing, fetch);
 }
 

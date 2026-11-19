@@ -4,8 +4,8 @@ use std::sync::LazyLock;
 
 use catmail_types::{
     AccountId, Address, Attachment, BlobHash, FlagState, Flags, FolderId, FolderKind, FolderRole,
-    GmailLabel, ListFilter, Message, MessageBody, MessageCursor, MessageId, MessageSummary,
-    SearchQuery,
+    GmailLabel, ListFilter, ListQuery, Message, MessageBody, MessageCursor, MessageId,
+    MessageSummary, SearchQuery,
 };
 use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
@@ -681,26 +681,9 @@ impl<'c> Messages<'c> {
         Ok(deleted > 0)
     }
 
-    /// Newest first (see [`MessageCursor`]): the first `limit`, or the `limit` after
-    /// `after`. A label lists the messages with it that are in All Mail; Starred, on
-    /// Gmail, the flagged ones.
-    pub fn list(
-        &self,
-        folder: FolderId,
-        limit: u32,
-        after: Option<MessageCursor>,
-    ) -> Result<Vec<MessageSummary>> {
-        self.list_filtered(folder, &ListFilter::default(), limit, after)
-    }
-
-    /// As [`list`](Self::list), only the messages `filter` takes.
-    pub fn list_filtered(
-        &self,
-        folder: FolderId,
-        filter: &ListFilter,
-        limit: u32,
-        after: Option<MessageCursor>,
-    ) -> Result<Vec<MessageSummary>> {
+    /// The page `query` asks for, newest first (see [`MessageCursor`]). A label lists the
+    /// messages with it that are in All Mail; Starred, on Gmail, the flagged ones.
+    pub fn list(&self, folder: FolderId, query: &ListQuery) -> Result<Vec<MessageSummary>> {
         let Some((account, kind, role)) = self
             .conn
             .prepare_cached("SELECT account_id, kind, role FROM folders WHERE id = ?1")?
@@ -720,8 +703,8 @@ impl<'c> Messages<'c> {
             (FolderKind::Label, Some(FolderRole::Flagged)) => (&*LIST_STARRED, account),
             (FolderKind::Label, _) => (&*LIST_LABEL, folder.0),
         };
-        let (after_date, after_id) = cursor_params(after);
-        let (mask, want, also) = filter_params(filter);
+        let (after_date, after_id) = cursor_params(query.after);
+        let (mask, want, also) = filter_params(&query.filter);
         let mut same_date = self.conn.prepare_cached(&sql.same_date)?;
         let mut page = same_date
             .query_map(
@@ -732,12 +715,12 @@ impl<'c> Messages<'c> {
                     ":also": also,
                     ":after_date": after_date,
                     ":after_id": after_id,
-                    ":limit": limit,
+                    ":limit": query.limit,
                 },
                 summary_from_row,
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let left = limit - page.len() as u32;
+        let left = query.limit - page.len() as u32;
         if left > 0 {
             let mut older = self.conn.prepare_cached(&sql.older)?;
             let rows = older.query_map(
@@ -761,19 +744,17 @@ impl<'c> Messages<'c> {
     pub fn list_merged(
         &self,
         folders: &[FolderId],
-        filter: &ListFilter,
-        limit: u32,
-        after: Option<MessageCursor>,
+        query: &ListQuery,
     ) -> Result<Vec<MessageSummary>> {
         let mut merged = Vec::new();
         for &folder in folders {
-            merged.extend(self.list_filtered(folder, filter, limit, after)?);
+            merged.extend(self.list(folder, query)?);
         }
         // `NEWEST_FIRST`, as the cursors bind it.
         merged.sort_unstable_by_key(|m| std::cmp::Reverse(cursor_params(Some(m.cursor()))));
         // Sorted by id within a date: a message two of the folders list is listed once.
         merged.dedup_by_key(|m| m.id);
-        merged.truncate(limit as usize);
+        merged.truncate(query.limit as usize);
         Ok(merged)
     }
 
@@ -1351,7 +1332,7 @@ mod tests {
         );
 
         let list = store
-            .read(|db| db.messages().list(folder.id, 10, None))
+            .read(|db| db.messages().list(folder.id, &ListQuery::new(10)))
             .unwrap();
         // UID 2 has no Date header and sorts by its INTERNALDATE (1002).
         let order: Vec<_> = list
@@ -1402,8 +1383,12 @@ mod tests {
             .unwrap();
         let ids = |rows: Vec<MessageSummary>| rows.iter().map(|m| m.id.0).collect::<Vec<_>>();
         let list = |limit, after| {
+            let query = ListQuery {
+                after,
+                ..ListQuery::new(limit)
+            };
             store
-                .read(|db| db.messages().list(folder.id, limit, after))
+                .read(|db| db.messages().list(folder.id, &query))
                 .unwrap()
         };
         let search = |limit, after| {
@@ -1476,11 +1461,12 @@ mod tests {
             .unwrap();
         let folders = [folder.id, other_folder];
         let list = |limit, after| {
+            let query = ListQuery {
+                after,
+                ..ListQuery::new(limit)
+            };
             store
-                .read(|db| {
-                    db.messages()
-                        .list_merged(&folders, &ListFilter::default(), limit, after)
-                })
+                .read(|db| db.messages().list_merged(&folders, &query))
                 .unwrap()
         };
         let ids = |rows: &[MessageSummary]| rows.iter().map(|m| m.id.0).collect::<Vec<_>>();
@@ -1497,7 +1483,7 @@ mod tests {
         let twice = store
             .read(|db| {
                 db.messages()
-                    .list_merged(&[folder.id, folder.id], &ListFilter::default(), 10, None)
+                    .list_merged(&[folder.id, folder.id], &ListQuery::new(10))
             })
             .unwrap();
         assert_eq!(ids(&twice), [1, 3, 2]);
@@ -1521,8 +1507,12 @@ mod tests {
             date: Some(1_000),
             id: MessageId(2),
         };
+        let query = ListQuery {
+            after: Some(second),
+            ..ListQuery::new(2)
+        };
         let page = store
-            .read(|db| db.messages().list(folder.id, 2, Some(second)))
+            .read(|db| db.messages().list(folder.id, &query))
             .unwrap();
         let ids: Vec<_> = page.iter().map(|m| m.id.0).collect();
         assert_eq!(ids, [1, 2_001]);
@@ -1538,7 +1528,11 @@ mod tests {
                     };
                     steps(&LIST_FOLDER.same_date)?;
                     steps(&LIST_FOLDER.older)?;
-                    db.messages().list(folder.id, 2, Some(after))?;
+                    let query = ListQuery {
+                        after: Some(after),
+                        ..ListQuery::new(2)
+                    };
+                    db.messages().list(folder.id, &query)?;
                     Ok(steps(&LIST_FOLDER.same_date)? + steps(&LIST_FOLDER.older)?)
                 })
                 .unwrap()
@@ -1736,7 +1730,7 @@ mod tests {
             })
             .unwrap();
         let id = store
-            .read(|db| db.messages().list(folder.id, 1, None))
+            .read(|db| db.messages().list(folder.id, &ListQuery::new(1)))
             .unwrap()[0]
             .id;
         store
@@ -1899,7 +1893,7 @@ mod tests {
             })
             .unwrap();
         let id = store
-            .read(|db| db.messages().list(folder.id, 1, None))
+            .read(|db| db.messages().list(folder.id, &ListQuery::new(1)))
             .unwrap()[0]
             .id;
         assert_eq!(
@@ -2041,12 +2035,17 @@ mod tests {
         let subjects = |messages: Vec<MessageSummary>| -> Vec<String> {
             messages.into_iter().map(|m| m.subject.unwrap()).collect()
         };
-        let list = |filter: &ListFilter, limit, after| {
-            let page = store
-                .read(|db| db.messages().list_filtered(folder.id, filter, limit, after))
-                .unwrap();
-            subjects(page)
+        let page = |filter: &ListFilter, limit, after| {
+            let query = ListQuery {
+                limit,
+                after,
+                filter: filter.clone(),
+            };
+            store
+                .read(|db| db.messages().list(folder.id, &query))
+                .unwrap()
         };
+        let list = |filter: &ListFilter, limit, after| subjects(page(filter, limit, after));
         let only = |flags| list(&ListFilter::new(flags), 10, None);
         assert_eq!(only(FlagFilter::All).len(), 4);
         assert_eq!(only(FlagFilter::Unread), ["subject 4", "subject 2"]);
@@ -2059,15 +2058,11 @@ mod tests {
 
         // Pages follow the rows the filter takes.
         let unread = ListFilter::new(FlagFilter::Unread);
-        let first = store
-            .read(|db| db.messages().list_filtered(folder.id, &unread, 1, None))
-            .unwrap();
+        let first = page(&unread, 1, None);
         assert_eq!(list(&unread, 1, Some(first[0].cursor())), ["subject 2"]);
 
         // A row shown that was read since stays, in its place.
-        let read_since = store
-            .read(|db| db.messages().list(folder.id, 10, None))
-            .unwrap()
+        let read_since = page(&ListFilter::default(), 10, None)
             .into_iter()
             .find(|m| m.subject.as_deref() == Some("subject 3"))
             .unwrap()
@@ -2080,8 +2075,12 @@ mod tests {
             list(&kept, 10, None),
             ["subject 4", "subject 3", "subject 2"]
         );
+        let query = ListQuery {
+            filter: kept,
+            ..ListQuery::new(10)
+        };
         let merged = store
-            .read(|db| db.messages().list_merged(&[folder.id], &kept, 10, None))
+            .read(|db| db.messages().list_merged(&[folder.id], &query))
             .unwrap();
         assert_eq!(subjects(merged).len(), 3);
 
@@ -2142,7 +2141,7 @@ mod tests {
             })
             .unwrap();
         let id = store
-            .read(|db| db.messages().list(folder.id, 1, None))
+            .read(|db| db.messages().list(folder.id, &ListQuery::new(1)))
             .unwrap()[0]
             .id;
         let found = store
@@ -2432,7 +2431,7 @@ mod tests {
             })
             .unwrap();
         let ids: Vec<_> = store
-            .read(|db| db.messages().list(f["INBOX"], 2, None))
+            .read(|db| db.messages().list(f["INBOX"], &ListQuery::new(2)))
             .unwrap()
             .into_iter()
             .map(|m| m.id)
@@ -2476,7 +2475,7 @@ mod tests {
         assert!(delete(&gone));
         assert!(!delete(&gone));
         let left: Vec<_> = store
-            .read(|db| db.messages().list(f["Kept"], 5, None))
+            .read(|db| db.messages().list(f["Kept"], &ListQuery::new(5)))
             .unwrap()
             .into_iter()
             .map(|m| m.id)
@@ -2484,7 +2483,7 @@ mod tests {
         assert_eq!(left, [ids[1]]);
         assert!(
             store
-                .read(|db| db.messages().list(f["INBOX"], 5, None))
+                .read(|db| db.messages().list(f["INBOX"], &ListQuery::new(5)))
                 .unwrap()
                 .is_empty()
         );
@@ -2517,7 +2516,7 @@ mod tests {
 
     fn subjects(store: &Store, folder: FolderId) -> Vec<String> {
         store
-            .read(|db| db.messages().list(folder, 50, None))
+            .read(|db| db.messages().list(folder, &ListQuery::new(50)))
             .unwrap()
             .into_iter()
             .map(|m| m.subject.unwrap())
@@ -2530,7 +2529,7 @@ mod tests {
             .read(|db| {
                 let mut counts = HashMap::new();
                 for f in db.folders().list(account)? {
-                    let shown = db.messages().list(f.id, u32::MAX, None)?;
+                    let shown = db.messages().list(f.id, &ListQuery::new(u32::MAX))?;
                     let unread = shown
                         .iter()
                         .filter(|m| !m.flags.contains(Flags::SEEN))
@@ -2589,7 +2588,7 @@ mod tests {
         assert_eq!(subjects(&store, f["[Gmail]/All Mail"]), s(&[3, 2, 1]));
         // Each row says which labels it has, wherever it is listed.
         let listed = store
-            .read(|db| db.messages().list(f["Work"], 10, None))
+            .read(|db| db.messages().list(f["Work"], &ListQuery::new(10)))
             .unwrap();
         let labels: BTreeSet<_> = listed[1].labels.iter().copied().collect();
         assert_eq!(
@@ -2715,7 +2714,7 @@ mod tests {
         let gone = store
             .read(|db| {
                 let messages = db.messages();
-                let listed = messages.list(all_mail, 50, None)?;
+                let listed = messages.list(all_mail, &ListQuery::new(50))?;
                 let gone = listed
                     .iter()
                     .find(|m| m.subject.as_deref() == Some("subject 3"));
@@ -2743,7 +2742,7 @@ mod tests {
         let trash = f["[Gmail]/Trash"];
         let id = |folder| {
             store
-                .read(|db| db.messages().list(folder, 50, None))
+                .read(|db| db.messages().list(folder, &ListQuery::new(50)))
                 .unwrap()
                 .into_iter()
                 .find(|m| m.subject.as_deref() == Some("subject 2"))
@@ -2803,7 +2802,7 @@ mod tests {
             })
             .unwrap();
         let id = store
-            .read(|db| db.messages().list(all_mail, 1, None))
+            .read(|db| db.messages().list(all_mail, &ListQuery::new(1)))
             .unwrap()[0]
             .id;
         store
