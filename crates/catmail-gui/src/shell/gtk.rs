@@ -127,6 +127,10 @@ pub fn end() {
     }
 }
 
+/// [`super::quit`] was called off: GTK asked nothing of the app, so there is no one to
+/// answer.
+pub fn quit_called_off() {}
+
 /// The app runs on with no window: nothing changes, the tray's item was there already.
 pub fn resident() {}
 
