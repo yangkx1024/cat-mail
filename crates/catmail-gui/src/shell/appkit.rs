@@ -9,7 +9,7 @@
 // AppKit is Objective-C: its classes are defined and its messages sent with `unsafe`.
 #![allow(unsafe_code)]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::time::Duration;
@@ -112,13 +112,24 @@ define_class!(
             false
         }
 
-        /// The app menu's Quit, the Dock's, or the session ending: the composers save
-        /// first, and the loop ends rather than the process (the engine shuts down after
-        /// it). ⚠️ A logout waits for nothing: it is called off, and asked again.
+        /// The app menu's Quit, the Dock's, or the session ending: answered later, once
+        /// the composers have saved ([`Termination`]).
         #[unsafe(method(applicationShouldTerminate:))]
         fn should_terminate(&self, _app: &NSApplication) -> NSApplicationTerminateReply {
+            if TERMINATION.get() == Termination::Ending {
+                // Too late to be answered later: the loop is stopping.
+                return NSApplicationTerminateReply::TerminateNow;
+            }
+            TERMINATION.set(Termination::Asked);
             super::quit(QuitReason::Platform);
-            NSApplicationTerminateReply::TerminateCancel
+            NSApplicationTerminateReply::TerminateLater
+        }
+
+        /// AppKit ends the process on return, without [`run`] returning: the engine shuts
+        /// down here.
+        #[unsafe(method(applicationWillTerminate:))]
+        fn will_terminate(&self, _notification: &NSNotification) {
+            super::finish();
         }
 
         /// The Dock icon was clicked: the main window shows, opened if there is none.
@@ -146,9 +157,42 @@ pub fn resident() {
         .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 }
 
-/// The app ends: AppKit's loop stops, and [`run`] returns, with whatever windows it has.
+/// Where the app is in quitting, as far as AppKit is concerned. When AppKit asks to
+/// terminate, it is answered later (`TerminateLater`), and runs the loop meanwhile: yes
+/// from [`end`], and it ends the process itself after `applicationWillTerminate:`; no from
+/// [`quit_called_off`]. Answering at once, by cancelling and ending the loop later, would
+/// call a logout off.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum Termination {
+    #[default]
+    Running,
+    /// AppKit asked to terminate, and waits for the answer.
+    Asked,
+    /// [`end`] has run: the loop is stopping, or AppKit was told it can terminate.
+    Ending,
+}
+
+thread_local! {
+    static TERMINATION: Cell<Termination> = Cell::default();
+}
+
+/// [`super::quit`] was called off: a logout is too, for the composer that couldn't close
+/// to be seen to.
+pub fn quit_called_off() {
+    if TERMINATION.get() == Termination::Asked {
+        TERMINATION.set(Termination::Running);
+        NSApplication::sharedApplication(main_thread()).replyToApplicationShouldTerminate(false);
+    }
+}
+
+/// The app ends, with whatever windows it has: AppKit terminates if it asked
+/// ([`Termination`]), else its loop stops and [`run`] returns.
 pub fn end() {
     let app = NSApplication::sharedApplication(main_thread());
+    if TERMINATION.replace(Termination::Ending) == Termination::Asked {
+        app.replyToApplicationShouldTerminate(true);
+        return;
+    }
     app.stop(None);
     // `stop:` takes effect after the next event, and this may come from the dispatch
     // queue rather than an event: one is posted, as nsh's `run_app` does.

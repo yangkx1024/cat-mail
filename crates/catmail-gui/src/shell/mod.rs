@@ -316,7 +316,18 @@ pub fn run(
         toolkit::set_appearance(appearance(&settings()));
         started(builder, requests);
     });
-    // However the loop ended.
+    finish();
+    code
+}
+
+/// How long quitting waits for the engine to close: well over the millisecond it takes
+/// (the logs), and short enough that a write stuck in it doesn't keep the process from
+/// ending, nor the session ending from waiting for it.
+const ENGINE_CLOSING: Duration = Duration::from_secs(2);
+
+/// The app has stopped, however its loop ended: the engine shuts down, and the process
+/// waits for it to close, up to [`ENGINE_CLOSING`].
+fn finish() {
     stop_answering();
     let reason = QUITTING.get().unwrap_or(QuitReason::Platform);
     tracing::info!(%reason, "quitting");
@@ -327,10 +338,29 @@ pub fn run(
     }
     if let Some(client) = engine::take() {
         client.shut_down();
-        // The loop is over: nothing else runs on this thread meanwhile.
-        pollster::block_on(client.closed());
+        if !closes_within(client.closed(), ENGINE_CLOSING) {
+            // The process ends anyway: the database is left as a crash would leave it,
+            // which it recovers from on opening.
+            tracing::warn!(waited = ?ENGINE_CLOSING, "the engine didn't close in time, quitting without it");
+        }
     }
-    code
+}
+
+/// Whether `closed` resolves within `limit`. It is waited for on a thread of its own, left
+/// behind if it doesn't: the loop is over, and the process is about to end.
+fn closes_within(closed: impl Future<Output = ()> + Send + 'static, limit: Duration) -> bool {
+    let (done, waited) = std::sync::mpsc::channel();
+    let waiting = std::thread::Builder::new()
+        .name("catmail-quit".into())
+        .spawn(move || {
+            pollster::block_on(closed);
+            let _ = done.send(());
+        });
+    if let Err(e) = waiting {
+        tracing::warn!(error = %e, "couldn't wait for the engine to close");
+        return false;
+    }
+    waited.recv_timeout(limit).is_ok()
 }
 
 /// The toolkit's application has started, before its first window: the engine opens,
@@ -619,6 +649,7 @@ pub fn quit(reason: QuitReason) {
         } else {
             tracing::info!(%reason, "quit called off: a composer stayed open");
             QUITTING.set(None);
+            toolkit::quit_called_off();
         }
     });
 }
@@ -651,5 +682,25 @@ fn signalled(signal: &str) {
             window.destroy();
         }
         toolkit::end();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::closes_within;
+
+    #[test]
+    fn an_engine_that_closes_is_waited_for() {
+        assert!(closes_within(async {}, Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn an_engine_stuck_closing_is_left_behind() {
+        assert!(!closes_within(
+            std::future::pending(),
+            Duration::from_millis(20)
+        ));
     }
 }

@@ -142,9 +142,8 @@
       （`toolkit::resident`、`Window::present`）；`--background` 一开始就是 Accessory。⚠️ 有窗口（Regular）时在别的
       应用的全屏 Space 里点状态栏图标不出菜单，是 AppKit 的限制，见 background.md「两个状态」；要解决得把状态栏项
       拆成单独的 `LSUIElement` 辅助应用
-- [ ] 退出时等引擎关闭要有上限：现在 `shell::quit` 之后 `pollster::block_on(client.closed())` 不限时，引擎里一次卡住的
-      写入就让进程退不出去（会话结束时系统等不到它退出）。GPUI 版最多等 GPUI 给的 `SHUTDOWN_TIMEOUT`；到时间就记一条
-      日志直接退出
+- [x] 退出时等引擎关闭有上限：主循环结束后最多等 2 秒（`shell::ENGINE_CLOSING`，平时关引擎不到 1 ms），到时间记
+      `the engine didn't close in time` 直接退出，引擎里一次卡住的写入不再让进程退不出去、会话结束时等不到它
 - [ ] 在 GNOME、KDE 和 Flatpak 里各用主题带 `&`、`<` 的邮件试一次 Linux 新邮件通知：GLib 的 freedesktop 后端不转义，
       portal 和 `org.gtk.Notifications` 不读标记，所以 `new_mail/linux.rs` 照 GLib 的选路决定转不转义（#331，见
       background.md「Linux」），代码改好了，还没在这几处实际看过
@@ -187,10 +186,9 @@
 - [x] GTK 4.22 上 `gtk_widget_measure` 警告刷屏：`NshView::size_allocate` 不 measure 就 allocate 子 widget，上游
       longbridge/nsh#1048 已由 longbridge/nsh#1049 修好，nsh 0.5.0 已包含（还要在 GTK 4.22 上看一眼警告没了）
 - [ ] 内存、滚动帧率、冷启动时间的基准
-- [ ] **Linux 的安装包**：AppImage 已从发布里撤下，Linux 上现在只发 CLI。要重新做（AppImage 或别的格式，如 Flatpak），
-      主要是带上 WebKitGTK：它的辅助进程（WebKitWebProcess、WebKitNetworkProcess）的路径是编译进库里的，还用 bwrap
-      沙箱。运行时依赖 GTK 4.14+ 和 WebKitGTK 6.0，Ubuntu 22.04 没有 WebKitGTK 6.0，glibc 2.35 的基线要重新定。
-      `.desktop` 和 AppStream 文件留在 `packaging/linux/`
+- [x] **Linux 的安装包**：图形界面打成 Flatpak（`packaging/linux/`），用 GNOME runtime 带上 GTK 4 和 WebKitGTK，
+      发布时随 CLI 一起发 `.flatpak` 包（docs/architecture/packaging.md）
+- [ ] 上 Flathub
 - [x] macOS 后端（AppKit，正文在 WKWebView）：`shell/` 分成共用的部分和两个工具包（`gtk.rs`、`appkit.rs`），窗口、
       退出流程、常驻、设置和主题两边共用。⚠️ AppKit 没有 GLib 那样的主循环 future 执行器，用 `async-task` 在主
       dispatch queue 上跑；输入框失焦自己用事件 monitor 做（同 Linux）。菜单栏、停主循环、外观映射抄了 nsh `run_app`
@@ -206,7 +204,8 @@
       `cargo run` 起的没有 bundle，仍显示可执行文件名
 - [x] macOS 新邮件通知：⚠️ nsh 的通知要经过视图的根，常驻时没有视图，所以应用直接用 `UNUserNotificationCenter`，
       自己做 delegate（`new_mail/macos.rs`）。只在 bundle 里有，`cargo run` 起的没有
-- [ ] macOS：注销时不取消（现在 `applicationShouldTerminate` 先取消，等写信窗口存完再退出）
+- [x] macOS：注销时不取消。`applicationShouldTerminate` 答 `TerminateLater`，写信窗口存完再答可以退出，AppKit 自己
+      结束进程，引擎在 `applicationWillTerminate:` 里关；有写信窗口关不了时答不退出，注销随之取消
 - [ ] **Windows**：接上 nsh 的 Windows 后端（`nsh-platform-windows`：Win32、Direct2D、DirectWrite、正文在 WebView2）。
       要做的是外壳的第三个工具包（窗口与主循环、信号与退出）、托盘（frontend 的 `tray` 里加 Windows 的实现，#109）、
       新邮件通知；单实例已在 `catmail_frontend::instance`，三个平台一套。再加 Windows 的打包。之前 Windows 上只有 CLI
