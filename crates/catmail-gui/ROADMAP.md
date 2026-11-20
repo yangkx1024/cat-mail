@@ -191,8 +191,8 @@
 - [ ] 上 Flathub
 - [x] macOS 后端（AppKit，正文在 WKWebView）：`shell/` 分成共用的部分和两个工具包（`gtk.rs`、`appkit.rs`），窗口、
       退出流程、常驻、设置和主题两边共用。⚠️ AppKit 没有 GLib 那样的主循环 future 执行器，用 `async-task` 在主
-      dispatch queue 上跑；输入框失焦自己用事件 monitor 做（同 Linux）。菜单栏、停主循环、外观映射抄了 nsh `run_app`
-      的私有实现，失焦两个后端各一份，宜由 nsh 提供（#248）。菜单栏有应用菜单（⌘Q 走退出流程）、Edit、Window（⌘W
+      dispatch queue 上跑；输入框失焦自己用事件 monitor 做（同 Linux）。菜单栏、外观映射抄了 nsh `run_app` 的私有
+      实现（停主循环原来也抄了，现在退出都经过 AppKit 的 `terminate:`，用不着了，#366），失焦两个后端各一份，宜由 nsh 提供（#248）。菜单栏有应用菜单（⌘Q 走退出流程）、Edit、Window（⌘W
       走窗口的关闭询问），点 Dock 图标唤回主窗口；信号用 `ctrlc`。快捷键提示用 nsh 的 `key_label`
 - [x] macOS 状态栏图标（frontend 的 `tray::macos`）：计数、绘制与 Linux 共用（`tray/mod.rs`），模板图用 resvg 画一次，
       未读数写在图标旁和 Dock 角标上

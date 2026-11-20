@@ -321,18 +321,23 @@ GUI 的 `tray/` 在引擎打开时启动，有窗口时、常驻时都在。`tra
 - 退出途中最后一个窗口关掉时，`after_last_window` 看到正在退出，不会进入常驻。
 - 写信窗口只回答"关不关得了"，不知道退出：起初退出状态放在写信窗口模块里，由最后一个关掉的写信窗口让应用退出，
   退出的决定分在两处，以后加入口（托盘）或退出前的确认都得改两边。
-- 主循环结束后记一行 `quitting reason=…`（`QuitReason`：`shortcut`、`tray`、`signal`、`last_window_closed`、
+- 收尾时记一行 `quitting reason=…`（`QuitReason`：`shortcut`、`tray`、`signal`、`last_window_closed`、
   `engine_failed`、`no_window`；没记原因的是平台自己的退出，记 `platform`），以前日志只是停住，分不清正常退出和
   进程被杀、崩溃。
-- macOS 上应用菜单和 Dock 的 Quit、注销都先问 `applicationShouldTerminate`。它答 `TerminateLater`，走同样的流程，
-  AppKit 这期间照样跑主循环；写信窗口都存完时（`toolkit::end`）答可以退出，AppKit 接着发
-  `applicationWillTerminate:` 再自己结束进程，`run` 不再返回，所以引擎在那里关（`shell::finish`）。有一个关不了时
-  答不退出，注销也就取消了，那个窗口要用户处理。以前先答取消、存完再停主循环，注销时会被系统当成应用拒绝退出，
-  过一会儿再问一次。
+- macOS 上每次退出都以 AppKit 的 `terminate:` 结束：AppKit 发 `applicationWillTerminate:` 后自己结束进程，`run`
+  不返回，所以收尾都在那里（`shell::finish`），只有这一处。
+  - 应用菜单和 Dock 的 Quit、注销是 AppKit 先问 `applicationShouldTerminate`。它答 `TerminateLater`，走同样的流程，
+    AppKit 这期间照样跑主循环；写信窗口都存完时（`toolkit::end`）答可以退出。有一个关不了时答不退出，注销也就
+    取消了，那个窗口要用户处理。以前先答取消、存完再停主循环，注销时会被系统当成应用拒绝退出，过一会儿再问一次。
+  - 应用自己的退出（Ctrl Q、托盘、信号、最后一个窗口）由 `toolkit::end` 调 `terminate:`，AppKit 来问时直接答
+    `TerminateNow`。以前这些路径用 `stop:` 加一个假事件结束主循环（照抄 nsh `run_app`），`run` 返回后再收尾，
+    收尾分在两处、两种上下文里（#366）。
+  - 弹出菜单在跟踪、或有应用级模态面板时，主 dispatch queue 不跑，退出要等它们关掉才开始；`stop:` 也一样。
+    nsh 的 alert 和文件面板都是窗口上的 sheet，不挡退出。
 - SIGHUP、SIGINT、SIGTERM 走同一个 `shell::quit`，写信窗口先存好再退出：会话注销时系统发的是 SIGTERM，这样没保存
   的草稿也能留下。第二个信号不再等写信窗口，直接销毁窗口、结束主循环。Linux 上用 GLib 的 unix 信号源，直接在
   主循环上；macOS 上用 `ctrlc` 在它自己的线程上等，再回到主线程。主循环不是 tokio，用不了 `tokio::signal`。
-- 不能指望最后一个 `MailClient` 句柄被 drop（视图、全局、等结果的任务都可能拿着）。主循环结束后外壳从
+- 不能指望最后一个 `MailClient` 句柄被 drop（视图、全局、等结果的任务都可能拿着）。收尾时外壳从
   `engine.rs` 取出引擎并调 `MailClient::shut_down`：不管谁还拿着句柄，引擎都关闭，记 `engine closed`；runtime 是
   自建的，进行中的工作随之停下，它们的调用得到 `Error::Closed`。然后等 `MailClient::closed()`，这时主线程上已经
   没有别的事。最多等 2 秒（`ENGINE_CLOSING`；平时不到 1 ms），到时间记 `the engine didn't close in time` 直接退出：
