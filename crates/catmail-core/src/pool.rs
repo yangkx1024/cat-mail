@@ -186,7 +186,6 @@ async fn keep_alive(
     }
 }
 
-/// How a [`ping`] went.
 pub(crate) enum Pinged {
     /// Answered, or refused: as usable as it was.
     Alive,

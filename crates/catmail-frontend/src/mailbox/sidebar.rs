@@ -12,8 +12,6 @@ use super::{ALL_MAIL_HIDDEN, AccountEntry, Destination, Place};
 use crate::folders::{self, FolderIcon, FolderNode};
 use crate::refresh::{Coalesce, DraftCounts};
 
-// --- Groups -------------------------------------------------------------------------
-
 /// Which accounts and folders are open.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Folds {
@@ -43,7 +41,6 @@ impl Folds {
         self.accounts.insert(account, open);
     }
 
-    /// Folds or unfolds the item with `key`.
     pub fn toggle_folder(&mut self, key: &str) {
         if !self.folders.remove(key) {
             self.folders.insert(key.to_owned());
@@ -237,8 +234,6 @@ fn folder_item(account: AccountId, node: &FolderNode, path: &str, folds: &Folds)
     }
     item
 }
-
-// --- Reads --------------------------------------------------------------------------
 
 /// The reads of the accounts (`MailClient::overview`) and what waits for the first: one
 /// read at a time, which draft count is the latest, and where the mailbox was asked to

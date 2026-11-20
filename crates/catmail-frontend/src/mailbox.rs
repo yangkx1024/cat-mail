@@ -42,7 +42,6 @@ pub enum Place {
 }
 
 impl Place {
-    /// What the list shows for it.
     pub fn source(self) -> Source {
         match self {
             Place::Inboxes => Source::Inboxes,
@@ -103,7 +102,6 @@ impl Place {
         }
     }
 
-    /// Its name, as the sidebar shows it.
     pub fn label(self, accounts: &[AccountEntry]) -> Option<String> {
         Some(match self {
             Place::Inboxes => "All Inboxes".into(),
@@ -113,7 +111,6 @@ impl Place {
         })
     }
 
-    /// Its icon, as the sidebar shows it.
     pub fn icon(self, accounts: &[AccountEntry]) -> FolderIcon {
         match self {
             Place::Inboxes => FolderIcon::Inboxes,
@@ -155,7 +152,6 @@ impl Destination {
     }
 }
 
-/// What the list shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
     /// Every account's INBOX.
@@ -226,7 +222,6 @@ pub fn list_note(
     }
 }
 
-/// One account as the sidebar shows it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AccountEntry {
     pub account: Account,
@@ -251,12 +246,10 @@ impl AccountEntry {
         }
     }
 
-    /// Account `id`, among `accounts`.
     pub fn find(accounts: &[AccountEntry], id: AccountId) -> Option<&AccountEntry> {
         accounts.iter().find(|e| e.account.id == id)
     }
 
-    /// Whether something in the outbox waits for the user.
     pub fn outbox_needs_user(&self) -> bool {
         self.outbox.iter().any(|e| e.status.needs_user())
     }
@@ -266,7 +259,6 @@ impl AccountEntry {
         self.account.mode == Some(AccountMode::Gmail)
     }
 
-    /// What its folders are called.
     pub fn folder_noun(&self) -> &'static str {
         if self.has_labels() { "label" } else { "folder" }
     }
@@ -289,7 +281,6 @@ impl AccountEntry {
         entries
     }
 
-    /// The words of a folder menu's item.
     pub fn folder_menu_label(&self, entry: FolderMenuEntry) -> &'static str {
         match entry {
             FolderMenuEntry::New(_) if self.has_labels() => "New label",
@@ -340,7 +331,6 @@ impl AccountEntry {
     }
 }
 
-/// An item of a folder's context menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FolderMenuEntry {
     /// A new folder in this one, or at the top of the account's.
@@ -349,7 +339,6 @@ pub enum FolderMenuEntry {
     Delete(FolderId),
 }
 
-/// The confirmation of deleting a folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderDeletion {
     /// The question, and what goes with the folder.

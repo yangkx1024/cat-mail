@@ -231,7 +231,6 @@ impl DeleteOutcome {
         }
     }
 
-    /// Whether the message can't be brought back afterwards.
     pub fn is_permanent(self) -> bool {
         !matches!(self, Self::ToTrash(_))
     }
@@ -396,7 +395,6 @@ fn taken_off_in(folders: &[Folder], location: &Folder) -> Vec<FolderId> {
         .collect()
 }
 
-/// Gmail's INBOX, a label.
 fn inbox_label(folders: &[Folder]) -> Option<FolderId> {
     special_folder(folders, FolderRole::Inbox)
         .filter(|f| f.kind == FolderKind::Label)

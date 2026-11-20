@@ -84,7 +84,6 @@ pub fn Composer() -> impl IntoElement {
         });
     }
     spawn(follow_identities(draft.id));
-    // The window is named after the subject.
     let title = computed(move || window_title(&global::<Typed>().with(|t| t.subject.clone())));
     chrome::follow_title(title);
     // Ctrl+W is the window's, which asks the view to close.
@@ -139,7 +138,6 @@ fn error() -> impl IntoElement {
     )
 }
 
-/// The field's name in a column, then the field.
 fn field_row(label: &'static str) -> View {
     view()
         .flex_row()

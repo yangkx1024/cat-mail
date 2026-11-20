@@ -127,7 +127,6 @@ enum Step {
     Other,
 }
 
-/// The server's first words.
 pub(crate) struct Greeting {
     pub status: Status,
     pub code: Option<Code>,
@@ -188,7 +187,6 @@ impl Connection {
         self.stream
     }
 
-    /// How literals in commands are sent, from the server's capabilities.
     pub fn set_literals(&mut self, literals: Literals) {
         self.literals = literals;
     }
@@ -522,7 +520,6 @@ impl Connection {
         }
     }
 
-    /// Gives up the command once its answer is over [`MAX_ANSWER`].
     fn check_answer(&mut self) -> Result<()> {
         if self.received > self.max_answer {
             return Err(Error::Protocol(format!(

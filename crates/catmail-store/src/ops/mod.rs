@@ -56,7 +56,6 @@ impl Touched {
         self.folders.is_empty() && self.shown.is_empty() && self.refused.is_empty()
     }
 
-    /// Adds what `other` did.
     pub fn merge(&mut self, other: Touched) {
         self.folders.extend(other.folders);
         self.shown.extend(other.shown);
@@ -117,7 +116,6 @@ impl<'c> PendingOps<'c> {
         Self { conn }
     }
 
-    /// Adds `label` to message `row` or takes it off. Returns whether that changed it.
     fn set_label(&self, row: MessageId, label: FolderId, add: bool) -> Result<bool> {
         let changed = if add {
             self.conn

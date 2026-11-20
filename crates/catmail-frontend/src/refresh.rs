@@ -11,7 +11,6 @@ use crate::mailbox::Source;
 pub struct Refresh {
     /// The accounts, their folders and counts, drafts and outbox.
     pub sidebar: bool,
-    /// The rows the list shows.
     pub list: bool,
 }
 
@@ -127,7 +126,6 @@ impl Coalesce {
         true
     }
 
-    /// Whether a read is running.
     pub fn is_running(&self) -> bool {
         self.running
     }

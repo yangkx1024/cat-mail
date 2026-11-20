@@ -15,7 +15,6 @@
 
 use color::{AlphaColor, Oklab, Srgb};
 
-/// A color as CSS has it: sRGB with alpha.
 pub(crate) type Color = AlphaColor<Srgb>;
 
 /// How much of the range from the reader's text to its background text is inverted over.
@@ -67,7 +66,6 @@ impl Role {
 }
 
 impl DarkPalette {
-    /// `color` moved for a dark page, as used for `role`.
     pub(crate) fn recolor(&self, color: Color, role: Role) -> Color {
         let [l, a, b, alpha] = color.convert::<Oklab>().components;
         let [background, foreground] =
@@ -158,7 +156,6 @@ fn in_gamut(l: f32, a: f32, b: f32, alpha: f32) -> Color {
     scaled(lo)
 }
 
-/// The palette the sanitizer's and the style sheets' tests move colors with.
 #[cfg(test)]
 pub(crate) const TEST_PALETTE: DarkPalette = DarkPalette {
     background: [0x20; 3],

@@ -7,7 +7,6 @@ use secrecy::zeroize::Zeroizing;
 
 use super::{Error, Result};
 
-/// How the server takes literals in commands.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum Literals {
     /// `{n}`, then wait for the server's `+` before sending the bytes.

@@ -32,12 +32,10 @@ pub(crate) fn print(body: &impl Serialize) -> Result<()> {
     outln!("{}", to_string(body, true)?)
 }
 
-/// Prints a document with `value` under `key`.
 pub(crate) fn print_keyed(key: &'static str, value: &impl Serialize) -> Result<()> {
     print(&keyed(key, value))
 }
 
-/// Prints a document with each of `items`, as a `J`, in a list under `key`.
 pub(crate) fn print_list<'a, J: From<&'a T> + Serialize, T: 'a>(
     key: &'static str,
     items: impl IntoIterator<Item = &'a T>,

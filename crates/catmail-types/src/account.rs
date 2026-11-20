@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{AccountId, Address, Folder, IdentityId, OutboxEntry, ReportedError};
 
-/// Transport security for an IMAP or SMTP connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Security {
@@ -155,7 +154,6 @@ pub struct Identity {
     /// The From address, and MAIL FROM.
     pub email: String,
     pub display_name: Option<String>,
-    /// Login name for its SMTP server.
     pub username: String,
     pub smtp: ServerConfig,
     /// New messages are from it. Exactly one of an account's identities is.
@@ -169,7 +167,6 @@ pub struct Identity {
 }
 
 impl Identity {
-    /// What messages sent as it are from.
     pub fn address(&self) -> Address {
         Address {
             name: self.display_name.clone(),
@@ -198,7 +195,6 @@ impl Identity {
     }
 }
 
-/// Input for adding an [`Identity`] to an account.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewIdentity {
     pub email: String,
@@ -216,18 +212,15 @@ pub struct AccountStatus {
     /// since the engine started, or one asked for (`MailClient::sync_now`), until the
     /// attempt ends, however it ends. Background sync's later syncs don't count.
     pub syncing: bool,
-    /// Syncing with the IMAP server failed.
     pub sync: Option<ServerProblem>,
     /// Reaching identities' SMTP servers to send failed, in identity order. The messages
     /// queued for each wait meanwhile, without any of them counting it as an attempt.
     pub send: Vec<SendProblem>,
 }
 
-/// An identity whose SMTP server couldn't be reached to send.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SendProblem {
     pub identity: IdentityId,
-    /// The address it sends as.
     pub email: String,
     pub problem: ServerProblem,
 }
@@ -261,7 +254,6 @@ pub struct ServerProblem {
 }
 
 impl ServerProblem {
-    /// Whether the server rejected the login.
     pub fn login_rejected(&self) -> bool {
         self.error.kind == crate::ErrorKind::Auth
     }

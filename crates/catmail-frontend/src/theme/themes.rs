@@ -20,7 +20,6 @@ pub const IMPORTABLE_FORMATS: &str = "catmail reads color schemes from Alacritty
                                       (.json), iTerm2 (.itermcolors), foot (.ini), Xresources, \
                                       base16 / base24 (.yaml) and GPUI Kit themes (.json).";
 
-/// A theme the settings offer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThemeEntry {
     pub config: Arc<ThemeConfig>,
@@ -182,7 +181,6 @@ fn theme_file(dir: &Path, name: &str, n: Option<u32>) -> PathBuf {
     dir.join(format!("{stem}.json"))
 }
 
-/// A file read for importing, and what it holds.
 #[derive(Debug, Clone)]
 pub struct ImportCandidate {
     pub file_name: String,

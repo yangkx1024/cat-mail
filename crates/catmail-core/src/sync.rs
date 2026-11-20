@@ -527,7 +527,6 @@ fn report_on(folder: &Folder, reports: Vec<FolderSyncReport>) -> FolderSyncRepor
     on
 }
 
-/// Tells frontends that the messages of these folders changed.
 fn emit_changed(engine: &Engine, account: AccountId, folders: impl IntoIterator<Item = FolderId>) {
     for folder in folders.into_iter().collect::<BTreeSet<_>>() {
         engine.emit(Event::MessagesChanged { account, folder });
@@ -779,7 +778,6 @@ async fn fill_previews(
     Ok(())
 }
 
-/// Messages for [`fetch_new`] to fetch.
 struct Fetch<'a> {
     uids: &'a [u32],
     items: Items,

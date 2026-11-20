@@ -70,7 +70,6 @@ impl Default for ChangedFlags {
     }
 }
 
-/// One mailbox from LIST.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListedMailbox {
     /// The name exactly as the server sent it; use this in commands.

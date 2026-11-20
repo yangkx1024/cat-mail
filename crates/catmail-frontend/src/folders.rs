@@ -12,7 +12,6 @@ pub enum FolderIcon {
     Role(FolderRole),
     Label,
     Folder,
-    /// All Inboxes.
     Inboxes,
     Outbox,
 }
@@ -160,7 +159,6 @@ impl AccountFolders {
         special_folder(&self.folders, role)
     }
 
-    /// What Delete does to a message in `folder`.
     pub fn delete_outcome(&self, folder: FolderId) -> DeleteOutcome {
         DeleteOutcome::of(&self.folders, folder)
     }
@@ -188,12 +186,10 @@ impl AccountFolders {
         can_change_folder(&self.folders, id)
     }
 
-    /// Whether the user may make a folder in the folder ([`can_create_in`]).
     pub fn can_create_in(&self, id: FolderId) -> bool {
         can_create_in(&self.folders, id)
     }
 
-    /// Whether other folders are under the folder.
     pub fn has_subfolders(&self, id: FolderId) -> bool {
         self.get(id)
             .is_some_and(|folder| self.folders.iter().any(|f| folder.is_above(f)))

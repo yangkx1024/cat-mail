@@ -28,7 +28,6 @@ pub struct Listing {
     calendar: Option<Calendar>,
     days: Days,
     lines: Vec<LineAt>,
-    /// More rows may follow those read.
     has_more: bool,
 }
 
@@ -55,7 +54,6 @@ pub enum LineKey {
 }
 
 impl Listing {
-    /// `source`'s, with nothing read yet.
     pub fn new(source: Option<Source>) -> Self {
         Self {
             source,
@@ -115,7 +113,6 @@ impl Listing {
         selected.into_iter().cloned().collect()
     }
 
-    /// How many lines the list has.
     pub fn len(&self) -> usize {
         self.lines.len()
     }
@@ -124,7 +121,6 @@ impl Listing {
         self.lines.is_empty()
     }
 
-    /// The line at `ix`.
     pub fn line(&self, ix: usize) -> Option<Line> {
         Some(match *self.lines.get(ix)? {
             LineAt::Day(day) => Line::Day(self.days.get(day)?.label.clone()),
@@ -141,7 +137,6 @@ impl Listing {
         self.lines.iter().enumerate().map(key).collect()
     }
 
-    /// The line of row `id`, if it is listed.
     pub fn line_of(&self, id: RowId) -> Option<usize> {
         let row = self.rows.iter().position(|row| row.id() == id)?;
         self.lines.iter().position(|&line| line == LineAt::Row(row))
@@ -246,7 +241,6 @@ pub struct ServerSearch {
 }
 
 impl ServerSearch {
-    /// What the servers found.
     pub async fn run(&self, client: &MailClient) -> catmail_core::Result<Vec<MessageId>> {
         client
             .search_server(SearchQuery::new(self.text.clone()))
@@ -277,7 +271,6 @@ pub enum Rows {
 }
 
 impl Rows {
-    /// Into `listing`, under `calendar`'s days.
     pub fn apply(self, listing: &mut Listing, calendar: &Calendar) {
         match self {
             Rows::Replace(rows, more) => listing.replace(rows, more, calendar),
@@ -286,7 +279,6 @@ impl Rows {
     }
 }
 
-/// Where the selection goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Select {
     Keep,
@@ -337,7 +329,6 @@ impl ListModel {
         (listing, fetch)
     }
 
-    /// Whether the list is being read.
     pub fn is_reading(&self) -> bool {
         self.reading.is_running()
     }

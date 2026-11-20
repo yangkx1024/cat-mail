@@ -142,7 +142,6 @@ impl<'c> Accounts<'c> {
             .unwrap_or(true))
     }
 
-    /// Records whether the account's IMAP server searches text, as found on connecting.
     pub fn set_searches_text(&self, id: AccountId, searches: bool) -> Result<()> {
         self.conn.execute(
             "UPDATE accounts SET searches_text = ?2 WHERE id = ?1",

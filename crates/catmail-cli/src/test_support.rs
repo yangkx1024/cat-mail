@@ -17,7 +17,6 @@ pub(crate) struct CountingSecrets {
 }
 
 impl CountingSecrets {
-    /// Whether nothing was ever stored.
     pub(crate) fn is_empty(&self) -> bool {
         self.stored.load(Ordering::SeqCst) == 0
     }

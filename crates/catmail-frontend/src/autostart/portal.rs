@@ -50,7 +50,6 @@ pub(super) fn set(on: bool) -> (State, Result<(), Error>) {
     settle(&record, on, answer)
 }
 
-/// Where the portal's last answer is kept, in the app's configuration folder.
 fn record() -> Option<PathBuf> {
     CONFIG_DIR.get().map(|dir| dir.join("open-at-login"))
 }
@@ -408,7 +407,6 @@ mod tests {
             .unwrap();
         assert_eq!(commandline, ["catmail-gui", "--background"]);
 
-        // And off again.
         let (state, done, options) = ask(Says::Entry(false), &record, false);
         assert_eq!(state, State::Off);
         done.unwrap();

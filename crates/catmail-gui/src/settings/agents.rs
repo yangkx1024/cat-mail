@@ -55,9 +55,6 @@ fn part(heading: &'static str) -> View {
     )
 }
 
-// --- The server ---------------------------------------------------------------------
-
-/// The switch, where the server is, and what it listens with.
 fn server() -> impl IntoElement {
     let (now, mut changes) = shell::follow_mcp();
     let status = signal(now);
@@ -141,9 +138,6 @@ fn port_field() -> impl IntoElement {
         ))
 }
 
-// --- Tokens -------------------------------------------------------------------------
-
-/// The tokens, one per agent, the one just made, and making another.
 fn tokens_list(tokens: Tokens, made: Made) -> impl IntoElement {
     let list = signal(Vec::<Token>::new());
     // Read when the section shows (`catmail mcp token` changes them too), and again
@@ -403,10 +397,7 @@ fn copy_button(text_: impl Fn() -> String + 'static) -> impl IntoElement {
     )
 }
 
-/// How long the copy button shows its check.
 const COPIED_SHOWN: Duration = Duration::from_millis(1500);
-
-// --- Connecting ---------------------------------------------------------------------
 
 /// The commands that add the server to Claude Code and Codex: with the token just made,
 /// ready to paste, or with a placeholder for one.

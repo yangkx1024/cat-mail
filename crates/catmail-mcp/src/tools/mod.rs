@@ -59,7 +59,6 @@ pub(crate) fn tier_of(tool: &str) -> Option<Tier> {
     }
 }
 
-/// Whether a token of tier `has` may see and call `tool`.
 fn allowed(tool: &str, has: Tier) -> bool {
     tier_of(tool).is_some_and(|needs| needs <= has)
 }
@@ -97,7 +96,6 @@ impl IntoContents for Failed {
     }
 }
 
-/// What `id` names, or a `not_found` failure.
 fn found<T>(item: Option<T>, what: &str, id: i64) -> Result<T, Failed> {
     item.ok_or_else(|| not_found(what, id))
 }

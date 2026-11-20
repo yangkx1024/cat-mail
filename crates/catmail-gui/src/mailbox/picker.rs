@@ -30,7 +30,6 @@ pub struct Picker {
     pub folders: Vec<(FolderId, String)>,
 }
 
-/// The picker open, if one is.
 #[derive(Clone, Default)]
 struct OpenPicker(Option<Picker>);
 

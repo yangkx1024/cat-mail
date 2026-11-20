@@ -94,7 +94,6 @@ fn configure(tcp: &TcpStream) -> io::Result<()> {
     socket2::SockRef::from(tcp).set_tcp_keepalive(&keepalive)
 }
 
-/// Wraps `stream` in TLS, verifying the server as `name`.
 pub(crate) async fn start_tls<S: Stream>(
     stream: S,
     name: &ServerName<'static>,

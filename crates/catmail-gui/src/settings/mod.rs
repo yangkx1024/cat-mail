@@ -29,8 +29,6 @@ use crate::toast::report;
 
 use accounts::accounts_section;
 
-// --- The settings in a view ---------------------------------------------------------
-
 /// The settings, as this view last heard of them.
 #[derive(Clone, Default, PartialEq)]
 pub struct Prefs(pub Settings);
@@ -72,8 +70,6 @@ fn step_text_size(step: isize) {
     shell::update_settings(|s| s.text_size = s.stepped_text_size(step));
 }
 
-// --- The dialog ---------------------------------------------------------------------
-
 #[derive(Clone, Copy, Default, PartialEq)]
 struct SettingsOpen(bool);
 
@@ -104,7 +100,6 @@ impl Section {
     ];
 }
 
-/// The dialog, while it is open.
 pub fn dialog() -> impl IntoElement {
     when(move || global::<SettingsOpen>().get().0, settings_dialog)
 }
@@ -196,7 +191,6 @@ fn help(text_: impl IntoReactive<SharedString>) -> Text {
         .text_color(move || theme().muted_foreground)
 }
 
-/// A switch for a setting, with its label after it.
 fn toggle(
     label: &'static str,
     checked: impl Fn() -> bool + Copy + 'static,
@@ -212,8 +206,6 @@ fn toggle(
         .thumb_class("size-4 rounded-full bg-background checked:translate-x-4")
         .child(text(label).text_sm().text_color(move || theme().foreground))
 }
-
-// --- General ------------------------------------------------------------------------
 
 /// Whether the app opens at login, keeps running once its windows are closed, and tells
 /// about new mail.

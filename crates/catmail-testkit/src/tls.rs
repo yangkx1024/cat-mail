@@ -41,7 +41,6 @@ impl TestCert {
     }
 }
 
-/// How a fake server's connections start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TlsMode {
     None,

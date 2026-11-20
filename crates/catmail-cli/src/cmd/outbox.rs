@@ -41,7 +41,6 @@ pub(crate) async fn send(client: &MailClient, id: DraftId, json: bool) -> Result
     Ok(())
 }
 
-/// Works through the entry's outbox and tells the user how the entry fared.
 async fn flush_and_report(client: &MailClient, entry: OutboxEntry, json: bool) -> Result<()> {
     let FlushReport { entries, errors } = client.flush_outbox(entry.account_id).await?;
     let entry = entries

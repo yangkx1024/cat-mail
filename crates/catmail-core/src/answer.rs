@@ -129,7 +129,6 @@ fn quote(message: &Message, head: QuoteHead) -> Quote {
     }
 }
 
-/// Who wrote the message, and when.
 fn attribution(message: &Message) -> Attribution {
     Attribution {
         from: message.summary.from.first().map(Address::to_string),

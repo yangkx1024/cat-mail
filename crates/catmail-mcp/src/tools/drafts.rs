@@ -166,7 +166,6 @@ impl Mail {
             .ok_or_else(|| not_found("draft", id))
     }
 
-    /// The draft as the agent reads it.
     async fn draft_out(&self, draft: &Draft) -> Result<Json<DraftOut>, Failed> {
         let identities = self.client.list_identities(draft.account_id).await?;
         Ok(Json(DraftOut::new(&draft.into(), &identities)))

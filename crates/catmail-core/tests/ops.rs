@@ -400,7 +400,6 @@ async fn changes_refused_over_the_servers_limit_wait_for_it_to_lift() {
     assert_eq!(env.remote("INBOX")[0].1, ["\\Flagged"]);
 }
 
-/// How many times `events` say changes were refused.
 fn refusals(events: &[Event]) -> usize {
     events
         .iter()

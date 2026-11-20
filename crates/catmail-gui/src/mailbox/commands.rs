@@ -25,7 +25,6 @@ pub fn applies(messages: &[MessageSummary]) -> Applies {
     global::<Accounts>().with(|a| Applies::of(messages, a.list()))
 }
 
-/// Runs `command` on the messages: from a key, a toolbar or a row.
 pub fn run(command: MessageCommand, messages: Vec<MessageSummary>) {
     if messages.is_empty() {
         return;
@@ -161,8 +160,6 @@ pub fn report_refused_changes() {
 
 #[derive(Clone, Default)]
 struct RefusedCheck(std::rc::Rc<std::cell::RefCell<catmail_frontend::refresh::Coalesce>>);
-
-// --- Buttons ------------------------------------------------------------------------
 
 /// A command's icon, for messages that all have `flags`: a toggle shows what it does.
 fn command_icon(command: MessageCommand, flags: Flags) -> Icon {

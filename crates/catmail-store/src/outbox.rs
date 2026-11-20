@@ -132,7 +132,6 @@ impl<'c> Outbox<'c> {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Accounts with entries due by `now`.
     pub fn accounts_due(&self, now: i64) -> Result<Vec<AccountId>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT DISTINCT account_id FROM outbox

@@ -78,7 +78,6 @@ pub struct AccountValues {
 }
 
 impl AccountValues {
-    /// The account to add.
     pub fn new_account(&self) -> Result<NewAccount, &'static str> {
         let (email, display_name, username) = self.login.who();
         Ok(NewAccount {
@@ -173,7 +172,6 @@ impl Submission {
         self.busy
     }
 
-    /// Why the last submission failed.
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }

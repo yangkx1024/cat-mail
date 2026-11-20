@@ -52,7 +52,6 @@ const MARK_CLASSES: &[(&str, &str)] = &[
     ("highlight", "bg-yellow-200 text-black"),
 ];
 
-/// The editor's classes: room around the text, and the look of the formatting.
 pub fn classes() -> RichEditorClasses {
     let map = |pairs: &[(&str, &str)]| {
         Some(
@@ -144,7 +143,6 @@ impl Rich {
         self.session.clone()
     }
 
-    /// Gives the editor the focus back (after a dialog).
     pub fn focus(&self) {
         self.session.focus();
     }
@@ -187,7 +185,6 @@ impl Rich {
         self.session.is_active(Some(name), None)
     }
 
-    /// Where the link at the selection goes, if it is in one.
     pub fn link(&self) -> Option<String> {
         if !self.is_active("link") {
             return None;
@@ -328,7 +325,6 @@ impl PluginSpec for PastedImages {
     }
 }
 
-/// `html` as a document of the editor.
 fn parse(schema: &Schema, html: &str) -> Node {
     // As written: indentation and runs of spaces (a quoted table, code) are the author's.
     // The HTML is the editor's, or `text_to_html`'s: no whitespace between its tags to

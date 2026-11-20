@@ -281,19 +281,15 @@ pub(super) fn blank_page(number: u64, appearance: &Appearance) -> String {
     body_page(number, None, None, appearance).html
 }
 
-/// What the reader shows a page in.
 pub struct Appearance {
-    /// Its colors on a light page.
     pub light: Colors,
     /// When it is dark.
     pub dark: Option<DarkAppearance>,
 }
 
-/// What a dark reader shows a page in.
 pub struct DarkAppearance {
     /// What a message's colors move toward.
     pub palette: DarkPalette,
-    /// Its colors on a dark page.
     pub colors: Colors,
 }
 

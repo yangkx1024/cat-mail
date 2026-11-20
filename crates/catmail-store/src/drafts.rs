@@ -173,7 +173,6 @@ impl<'c> Drafts<'c> {
         Ok(DraftId(self.conn.last_insert_rowid()))
     }
 
-    /// The account a draft belongs to, if the draft exists.
     pub fn account_of(&self, id: DraftId) -> Result<Option<AccountId>> {
         Ok(self
             .conn
@@ -219,7 +218,6 @@ impl<'c> Drafts<'c> {
         Ok(n as usize)
     }
 
-    /// The draft with its revision and attachment blobs.
     pub fn snapshot(&self, id: DraftId) -> Result<Option<DraftSnapshot>> {
         let sql = format!(
             "SELECT {COLUMNS} FROM drafts d LEFT JOIN outbox o ON o.draft_id = d.id
@@ -1248,7 +1246,6 @@ mod tests {
         assert_eq!(store.read(|db| db.drafts().snapshot(draft)).unwrap(), None);
     }
 
-    /// UIDs queued for deletion in the folder.
     fn deletions(store: &Store, folder: FolderId) -> Vec<u32> {
         store
             .read(|db| db.ops().pending(folder))

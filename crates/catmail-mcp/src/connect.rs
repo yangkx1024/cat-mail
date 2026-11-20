@@ -19,7 +19,6 @@ const NAME: &str = "catmail";
 pub const REMOTE_NOTE: &str =
     "On another device, use the HTTPS address tailscale serve or the tunnel gives instead.";
 
-/// The address agents on this machine connect to, with the server on `port`.
 pub fn local_url(port: u16) -> String {
     format!("http://{}:{port}{PATH}", Ipv4Addr::LOCALHOST)
 }

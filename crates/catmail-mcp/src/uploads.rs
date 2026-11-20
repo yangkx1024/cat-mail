@@ -60,7 +60,6 @@ enum State {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct TooMany;
 
-/// Why a file can't be put to a URL.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum PutRefused {
     /// No upload has the handle: made up, expired, used, or from before a restart.

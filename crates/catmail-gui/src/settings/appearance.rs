@@ -223,7 +223,6 @@ fn color(color: Rgba) -> Hsla {
     Color::rgba(r, g, b, color.alpha).into()
 }
 
-/// A theme drawn small, in its own colors, with its name.
 fn theme_card(entry: ThemeEntry, dark: bool) -> AnyElement {
     let swatch = Swatch::of(&entry.config);
     let hues = swatch.hues.map(color).into_iter();

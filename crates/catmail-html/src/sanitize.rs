@@ -35,7 +35,6 @@ pub(crate) type ImageHook = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 static SANITIZER: LazyLock<Builder<'static>> = LazyLock::new(|| sanitizer(None, None));
 
-/// Colors moved for a dark page as the sanitizer goes.
 pub(crate) struct Recolor {
     palette: DarkPalette,
     /// Set when a `style` attribute sets colors with custom properties (`var()`), which

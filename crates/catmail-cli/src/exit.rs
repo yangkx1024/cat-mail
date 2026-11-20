@@ -67,7 +67,6 @@ pub(crate) fn code(result: &anyhow::Result<()>, stdout_closed: bool) -> u8 {
     }
 }
 
-/// How a command that failed with `error` ended.
 pub(crate) fn outcome(error: &anyhow::Error) -> Outcome {
     error
         .downcast_ref::<Exit>()

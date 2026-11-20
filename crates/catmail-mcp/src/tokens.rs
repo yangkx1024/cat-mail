@@ -125,7 +125,6 @@ pub struct Access {
 }
 
 impl Access {
-    /// Whether the account with this address is one of the token's.
     pub fn allows(&self, email: &str) -> bool {
         self.accounts
             .as_ref()

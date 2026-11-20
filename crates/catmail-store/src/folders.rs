@@ -13,7 +13,6 @@ use crate::ops::{PendingOps, Touched};
 const COLUMNS: &str = "id, account_id, name, delimiter, role, kind, listed, selectable,
     inferiors, unread_count, total_count, last_synced_at";
 
-/// A mailbox as listed by the server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteFolder {
     pub remote_name: String,
@@ -26,10 +25,8 @@ pub struct RemoteFolder {
     pub inferiors: bool,
 }
 
-/// What [`Folders::reconcile`] changed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Reconciled {
-    /// Folders were added, removed or changed.
     pub changed: bool,
     /// Other folders whose messages changed with them, and the accounts whose queued
     /// changes did: messages moved locally into a deleted folder go back.
@@ -617,7 +614,6 @@ mod tests {
         }
     }
 
-    /// An account with the one folder `name`.
     fn one_folder(store: &crate::Store, name: &str) -> (AccountId, FolderId) {
         let account = test_util::account(store, "a@example.com");
         store

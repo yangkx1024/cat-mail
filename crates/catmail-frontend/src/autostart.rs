@@ -28,7 +28,6 @@ mod platform;
 #[path = "autostart/portal.rs"]
 mod portal;
 
-/// Where the app can't open at login.
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "freebsd")))]
 mod platform {
     use super::{Error, State};
@@ -51,7 +50,6 @@ mod platform {
     }
 }
 
-/// Whether the app opens at login.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
     On,

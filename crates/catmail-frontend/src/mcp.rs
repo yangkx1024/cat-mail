@@ -25,7 +25,6 @@ const DRAIN: Duration = Duration::from_secs(5);
 /// Why there are no tokens, nor a server to present them to.
 pub const NO_CONFIG_DIR: &str = "There is no config directory to keep the tokens in.";
 
-/// Where the server is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
     /// Not listening: turned off, not started yet, or moving to another port.
@@ -146,7 +145,6 @@ async fn follow(
     }
 }
 
-/// Why the server couldn't listen on `addr`.
 fn failed(addr: SocketAddr, e: &io::Error) -> String {
     let port = addr.port();
     match e.kind() {
@@ -184,7 +182,6 @@ pub fn token_line(access: &Access, made: &str) -> String {
     )
 }
 
-/// Before taking the token named `name` away.
 pub fn remove_token(name: &str) -> Confirm {
     Confirm {
         title: format!("Remove the token “{name}”?"),

@@ -181,7 +181,6 @@ pub struct NewMessage {
     pub snippet: Option<String>,
 }
 
-/// What [`Messages::upsert`] did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Upserted {
     /// Rows inserted, in the order given.
@@ -231,16 +230,13 @@ pub struct MessageLocation {
     pub folder: FolderId,
     /// The folder that has the message on the server.
     pub server_folder: FolderId,
-    /// That folder's name on the server.
     pub remote_name: String,
     /// That folder's current UIDVALIDITY; `uid` is only meaningful within it.
     pub uidvalidity: Option<u32>,
     pub uid: u32,
     /// RFC822.SIZE.
     pub size: Option<u32>,
-    /// Whether the body is stored.
     pub downloaded: bool,
-    /// The content version of the stored body.
     pub body_version: Option<u32>,
     pub raw: Option<BlobHash>,
 }
@@ -1131,7 +1127,6 @@ impl<'c> Messages<'c> {
              FROM messages m LEFT JOIN message_bodies b ON b.message_id = m.id
              WHERE m.id = ?1",
         )?;
-        // Subject, sender, recipients, body.
         let [subject, from, to, body]: [String; 4] = read.query_row([id], |r| {
             let (to, cc): (Vec<Address>, Vec<Address>) = (json(r, "to_json")?, json(r, "cc_json")?);
             Ok([
@@ -2503,7 +2498,6 @@ mod tests {
         m
     }
 
-    /// Upserts `messages` into `folder`, returning the rows inserted.
     fn inserted(
         store: &Store,
         account: AccountId,

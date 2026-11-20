@@ -111,7 +111,6 @@ const BUSY: u32 = 10;
 /// before INBOX is checked at intervals instead.
 const CUT_SHORT: u32 = 3;
 
-/// How an IDLE ended.
 enum Idled {
     /// The server reported a change.
     Changed,

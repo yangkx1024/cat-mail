@@ -15,7 +15,6 @@ use crate::mailbox::sidebar;
 use crate::reader;
 use crate::theme::SelectableText as _;
 
-/// Which pane the row selected opens.
 #[derive(Clone, Copy, PartialEq)]
 enum Pane {
     Reader,

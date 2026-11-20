@@ -59,7 +59,6 @@ impl Env {
         );
     }
 
-    /// Whether the message's body is stored, so that it needn't be downloaded again.
     async fn has_body(&self, id: MessageId) -> bool {
         let message = self.client.get_message(id).await.unwrap();
         message.is_some_and(|m| m.body.is_some())
@@ -560,7 +559,6 @@ impl Env {
     }
 }
 
-/// [`gmail`] with a second user label, Later.
 fn gmail_later() -> ServerState {
     let mut state = gmail();
     state.mailboxes.push(FakeMailbox::new("Later"));

@@ -55,7 +55,6 @@ struct Shared {
 }
 
 impl MailClient {
-    /// The engine, unless it was [shut down](Self::shut_down).
     pub(crate) fn engine(&self) -> Result<Arc<Engine>> {
         lock(&self.shared.engine).clone().ok_or(Error::Closed)
     }
@@ -1096,7 +1095,6 @@ fn inboxes(db: &Db<'_>) -> catmail_store::Result<Vec<Folder>> {
     Ok(inboxes)
 }
 
-/// The ids of [`inboxes`].
 fn inbox_ids(db: &Db<'_>) -> catmail_store::Result<Vec<FolderId>> {
     Ok(inboxes(db)?.iter().map(|f| f.id).collect())
 }

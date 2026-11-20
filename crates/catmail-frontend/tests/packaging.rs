@@ -7,7 +7,6 @@ use std::path::PathBuf;
 
 use catmail_frontend::APP_ID;
 
-/// Asserts that the repository's file at `path` says each of `needles`.
 fn says(path: &str, needles: &[String]) {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")

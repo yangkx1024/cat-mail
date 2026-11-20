@@ -37,7 +37,6 @@ use sidebar::{Accounts, SelectedPlace};
 #[derive(Clone, Default)]
 struct Throttled(Rc<RefCell<Throttle>>);
 
-/// Whether the engine is open yet.
 #[derive(Clone, PartialEq)]
 enum Opening {
     Waiting,

@@ -22,7 +22,6 @@ use crate::web;
 
 use super::{changed, ending, in_window, rich, text_changed};
 
-/// The quote, and how it is shown.
 #[derive(Clone, Default)]
 struct Quoting {
     /// The draft's, until the user takes it out (or answers in it).
@@ -38,7 +37,6 @@ struct Quoting {
     remote: RemoteImages,
 }
 
-/// The quote of the draft opened.
 pub(super) fn start(opening: &Opening) {
     let quote = opening.draft.content.quote.clone().map(Rc::new);
     let shown = quote
@@ -176,8 +174,6 @@ impl web::RemoteImagesAt for Quoted {
     }
 }
 
-// --- How it looks -------------------------------------------------------------------
-
 /// Under the text, while the draft has a quote: its bar, and the message once shown,
 /// which shares the window's height with the text.
 pub(super) fn quote() -> impl IntoElement {
@@ -275,7 +271,6 @@ fn message(quote: Rc<Quote>) -> impl IntoElement {
         QuoteHead::Forward(headers) if !headers.is_empty() => Some(headers.clone()),
         _ => None,
     };
-    // Made again when the appearance changes.
     effect(move || {
         let dark = dark();
         page.set(untracked(|| make_page(&quote, dark)));

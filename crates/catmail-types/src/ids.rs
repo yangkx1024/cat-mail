@@ -17,14 +17,8 @@ macro_rules! row_id {
     };
 }
 
-row_id!(
-    /// Local identifier of an account.
-    AccountId
-);
-row_id!(
-    /// Local identifier of an [`Identity`](crate::Identity) an account sends as.
-    IdentityId
-);
+row_id!(AccountId);
+row_id!(IdentityId);
 row_id!(
     /// Local identifier of a folder (IMAP mailbox).
     FolderId
@@ -41,22 +35,10 @@ row_id!(
     /// Local identifier of an attachment (or inline part) of a downloaded message.
     AttachmentId
 );
-row_id!(
-    /// Local identifier of a draft.
-    DraftId
-);
-row_id!(
-    /// Local identifier of a file attached to a draft.
-    DraftAttachmentId
-);
-row_id!(
-    /// Local identifier of a message handed to the outbox for sending.
-    OutboxId
-);
-row_id!(
-    /// Local identifier of a change queued for the server.
-    PendingOpId
-);
+row_id!(DraftId);
+row_id!(DraftAttachmentId);
+row_id!(OutboxId);
+row_id!(PendingOpId);
 
 /// Lowercase hex SHA-256 of a blob's contents.
 ///

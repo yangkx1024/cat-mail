@@ -4,7 +4,6 @@
 use html5ever::tokenizer::states::RawKind;
 use html5ever::tokenizer::{BufferQueue, TokenSink, TokenSinkResult, Tokenizer, TokenizerOpts};
 
-/// Runs `sink` over `html` and hands it back.
 pub(super) fn tokenize<S: TokenSink>(html: &str, sink: S) -> S {
     let input = BufferQueue::default();
     input.push_back(html.into());

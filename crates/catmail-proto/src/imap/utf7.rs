@@ -43,7 +43,6 @@ pub fn decode(name: &str) -> Option<String> {
     Some(out)
 }
 
-/// Encodes a mailbox name for the wire.
 pub fn encode(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut pending: Vec<u16> = Vec::new();

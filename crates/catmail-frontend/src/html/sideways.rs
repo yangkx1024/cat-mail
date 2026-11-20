@@ -11,11 +11,8 @@
 /// `clientWidth` and `scrollWidth` say.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Sideways {
-    /// How far it is scrolled.
     pub offset: f32,
-    /// How wide what shows of it is.
     pub view: f32,
-    /// How wide it is.
     pub content: f32,
 }
 
@@ -24,7 +21,6 @@ pub struct Sideways {
 const MIN_THUMB: f32 = 32.0;
 
 impl Sideways {
-    /// How far it scrolls.
     pub fn range(self) -> f32 {
         (self.content - self.view).max(0.0)
     }

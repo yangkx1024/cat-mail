@@ -90,7 +90,6 @@ pub struct PendingOp {
     pub folder_id: FolderId,
     /// The local message showing the change, while there is one.
     pub message_id: Option<MessageId>,
-    /// That message's subject.
     pub subject: Option<String>,
     #[serde(flatten)]
     pub kind: OpKind,
@@ -105,14 +104,12 @@ pub struct PendingOp {
 /// What replaying an account's queued changes did.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayReport {
-    /// Made on the server.
     pub applied: u32,
     /// Refused by the server, and undone locally.
     pub failed: u32,
     /// Still pending: their folder couldn't be opened, or was rebuilt on the server and
     /// needs a sync first, or `error` stopped the replay before them.
     pub pending: u32,
-    /// Drafts saved to the server's Drafts folder.
     pub drafts_uploaded: u32,
     /// Drafts the server refused to store; [`Draft::upload_error`](crate::Draft::upload_error) says why.
     pub drafts_failed: u32,

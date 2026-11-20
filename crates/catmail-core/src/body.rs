@@ -140,7 +140,6 @@ struct Missing {
     source: AttachmentSource,
 }
 
-/// What [`attachment_blobs`] got.
 pub(crate) struct Blobs {
     /// The parts it had or fetched, and those that failed alone, with why.
     pub parts: HashMap<AttachmentId, Result<(BlobHash, u64)>>,

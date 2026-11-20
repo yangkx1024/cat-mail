@@ -894,7 +894,6 @@ mod tests {
         assert_eq!(parse_message(&raw).text.as_deref(), Some(text));
     }
 
-    /// A `multipart/alternative` message of `text` and `html`.
     fn alternative(text: &str, html: &str) -> Vec<u8> {
         format!(
             "Content-Type: multipart/alternative; boundary=a\r\n\r\n\

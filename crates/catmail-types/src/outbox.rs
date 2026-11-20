@@ -12,7 +12,6 @@ use crate::{AccountId, DraftId, IdentityId, OutboxId, ReportedError};
 pub enum OutboxStatus {
     /// Waiting for an attempt; retried with backoff after temporary failures.
     Queued,
-    /// The SMTP transaction is running.
     Sending,
     /// The server accepted the message; saving a copy to the Sent folder is pending.
     /// Only that is retried from here, never the send itself.
@@ -67,7 +66,6 @@ impl OutboxStatus {
         }
     }
 
-    /// Whether [`retry_to`](Self::retry_to) applies.
     pub fn can_retry(self) -> bool {
         self.retry_to().is_some()
     }
@@ -122,7 +120,6 @@ impl FromStr for OutboxStatus {
 pub struct OutboxEntry {
     pub id: OutboxId,
     pub account_id: AccountId,
-    /// Sent as this identity of the account, through its SMTP server.
     pub identity: IdentityId,
     /// Returns to the drafts when the send is cancelled before it went out.
     pub draft_id: Option<DraftId>,

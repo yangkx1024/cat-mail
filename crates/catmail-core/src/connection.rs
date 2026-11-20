@@ -159,7 +159,6 @@ pub(crate) fn announced(session: &smtp::Session) -> SmtpAnnounced {
     }
 }
 
-/// An identity of an account, with the address it sends as.
 #[derive(Clone)]
 pub(crate) struct SendAs {
     pub id: IdentityId,
@@ -228,7 +227,6 @@ pub(crate) async fn smtp_logins(
     Ok(logins)
 }
 
-/// Opens a new connection to the SMTP server `server` and logs in.
 pub(crate) async fn smtp_login(
     engine: &Engine,
     server: &ServerConfig,
@@ -286,7 +284,6 @@ async fn password(engine: &Arc<Engine>, secret_key: String, email: &str) -> Resu
         })
 }
 
-/// Opens a new connection to `server` and logs in.
 pub(crate) async fn login(
     engine: &Engine,
     server: &ServerConfig,

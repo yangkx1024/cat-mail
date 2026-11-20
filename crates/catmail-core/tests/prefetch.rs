@@ -68,7 +68,6 @@ async fn env(state: ServerState, prefetch: BodyPrefetch) -> Env {
 }
 
 impl Env {
-    /// [`mail`] `n` in `folder`.
     async fn id(&self, folder: &str, n: u32) -> MessageId {
         self.id_of(folder, &format!("Message {n}")).await
     }

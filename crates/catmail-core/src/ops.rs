@@ -133,7 +133,6 @@ pub(crate) fn announce(engine: &Engine, touched: &Touched) -> Vec<AccountId> {
     accounts.into_iter().collect()
 }
 
-/// Tells that the messages of the folders `touched` lists changed.
 fn emit_lists(engine: &Engine, touched: &Touched) {
     for (account, folder) in touched.lists() {
         engine.emit(Event::MessagesChanged { account, folder });
@@ -234,7 +233,6 @@ pub(crate) async fn replay_account(
     permit.run(run).await
 }
 
-/// What [`replay_queued`] did.
 #[derive(Debug, Default)]
 pub(crate) struct Replayed {
     pub drafts: Uploaded,
@@ -427,11 +425,9 @@ async fn replay_folder(
 
 /// What became of a batch of ops on the server.
 enum Outcome {
-    /// Made.
     Done,
     /// Moved to the folder, at the new UIDs if the server said.
     Moved(FolderId, Option<Moved>),
-    /// Refused; the text says why.
     Refused(String),
 }
 

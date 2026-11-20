@@ -17,7 +17,6 @@ pub struct Sending {
     pub login_key: String,
 }
 
-/// What an SMTP server announced when connected to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SmtpAnnounced {
     /// SIZE (RFC 1870), the largest message it accepts; `None` for none.
@@ -26,7 +25,6 @@ pub struct SmtpAnnounced {
     pub eight_bit_mime: bool,
 }
 
-/// What [`Identities::delete`] removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeletedIdentity {
     pub account: AccountId,
@@ -226,7 +224,6 @@ impl<'c> Identities<'c> {
             .optional()?)
     }
 
-    /// Records what its SMTP server announced.
     pub fn set_smtp_announced(&self, id: IdentityId, smtp: SmtpAnnounced) -> Result<()> {
         self.conn.execute(
             "UPDATE identities SET smtp_max_size = ?2, smtp_8bitmime = ?3 WHERE id = ?1",

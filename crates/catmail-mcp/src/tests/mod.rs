@@ -80,12 +80,10 @@ impl Fixture {
         }
     }
 
-    /// The `Authorization` header's value with the fixture's token.
     fn auth(&self) -> String {
         format!("Bearer {}", self.secret)
     }
 
-    /// Posts `body` to `/mcp` with the fixture's token.
     async fn post(&self, body: Value) -> (StatusCode, String) {
         self.post_as(&self.secret, body).await
     }
@@ -94,7 +92,6 @@ impl Fixture {
         self.post_with(secret, &[], body).await
     }
 
-    /// [`post_as`](Self::post_as), with more headers.
     async fn post_with(
         &self,
         secret: &str,
@@ -136,7 +133,6 @@ impl Fixture {
         result_of(status, &body)
     }
 
-    /// The tools `secret`'s token is shown.
     async fn tool_names(&self, secret: &str) -> Vec<String> {
         let (status, body) = self
             .post_as(
@@ -154,7 +150,6 @@ impl Fixture {
             .collect()
     }
 
-    /// A token named `name` with `access`.
     fn token(&self, name: &str, access: Access) -> String {
         self.tokens.add(name, access).unwrap().secret
     }
@@ -165,7 +160,6 @@ impl Fixture {
         message_ids(&self.call("list_messages", json!({"folder": folder})).await)
     }
 
-    /// The id of the account's folder named `name`.
     async fn folder(&self, account: i64, name: &str) -> i64 {
         let folders = self.call("list_folders", json!({"account": account})).await;
         folders["folders"]
@@ -299,7 +293,6 @@ async fn awaiting_body(addr: SocketAddr, head: &str) -> tokio::net::TcpStream {
     stream
 }
 
-/// Whether the connection was reset under the request.
 fn is_reset(e: &hyper::Error) -> bool {
     std::error::Error::source(e)
         .and_then(|source| source.downcast_ref::<std::io::Error>())

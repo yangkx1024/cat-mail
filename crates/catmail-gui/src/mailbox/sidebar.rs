@@ -45,11 +45,9 @@ pub fn has_accounts() -> bool {
     global::<Accounts>().with(|a| !a.list().is_empty())
 }
 
-/// Where the sidebar's selection is.
 #[derive(Clone, Default)]
 pub struct SelectedPlace(pub Option<Place>);
 
-/// `f` with the accounts as the sidebar has them.
 pub fn with_accounts<T>(f: impl FnOnce(&[AccountEntry]) -> T) -> T {
     global::<Accounts>().with_untracked(|a| f(a.list()))
 }
@@ -72,8 +70,6 @@ fn reads() -> Rc<RefCell<SidebarModel>> {
 pub fn missed_events() {
     reads().borrow_mut().missed_events();
 }
-
-// --- Reading ------------------------------------------------------------------------
 
 /// Reads the accounts, their folders, drafts and outbox again (one read at a time; one
 /// asked for meanwhile follows it).
@@ -179,7 +175,6 @@ pub fn count_drafts(account: AccountId) {
     });
 }
 
-/// The account's connection changed.
 pub fn status_changed(account: AccountId) {
     let status = client().account_status(account);
     update_account(account, |entry| entry.status = status);
@@ -211,8 +206,6 @@ fn update_account(account: AccountId, change: impl FnOnce(&mut AccountEntry)) {
         }
     });
 }
-
-// --- Selecting ----------------------------------------------------------------------
 
 /// Selects `place`, unfolding its account, and syncs the folders it shows that weren't
 /// synced lately: background sync keeps only INBOX current.
@@ -259,8 +252,6 @@ pub fn shown_folders() -> Vec<FolderId> {
 fn toggle_folder(key: &str) {
     global::<Folds>().update(|f| f.toggle_folder(key));
 }
-
-// --- The pane -----------------------------------------------------------------------
 
 pub fn sidebar() -> impl IntoElement {
     // `CATMAIL_GUI_UNFOLD` set opens every account, for looking at the places without a
@@ -363,7 +354,6 @@ fn group(group: ReadSignal<Group>, _ix: ReadSignal<usize>) -> AnyElement {
         .into_element()
 }
 
-/// A section's title: a 32 px row with its label small and dimmed.
 fn title(label: &'static str) -> View {
     view().h(px(32.0)).px(px(8.0)).justify_center().child(
         text(label)
@@ -372,7 +362,6 @@ fn title(label: &'static str) -> View {
     )
 }
 
-/// A sidebar menu: its items 8 apart.
 fn menu(items: impl Fn() -> Vec<Item> + 'static) -> View {
     view()
         .gap(px(8.0))
@@ -570,7 +559,6 @@ pub fn menu_item(
         )
 }
 
-/// A sidebar row's background: the accent when selected, lighter under the pointer.
 fn row_background(
     selected: impl Fn() -> bool + 'static,
     hovered: bool,

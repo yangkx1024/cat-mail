@@ -71,7 +71,6 @@ impl Env {
         .await;
     }
 
-    /// Waits until the server has received the `n`-th IDLE.
     async fn wait_for_idle(&self, n: usize) {
         self.fake.wait_until(|st| st.received("IDLE") >= n).await;
     }
@@ -88,7 +87,6 @@ impl Env {
         self.wait_for_problem(ServerProblem::login_rejected).await;
     }
 
-    /// Waits until the account's sync problem is one `is` holds for.
     async fn wait_for_problem(&self, is: impl Fn(&ServerProblem) -> bool) {
         eventually("the failure to be reported", async || {
             self.client

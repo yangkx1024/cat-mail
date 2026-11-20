@@ -18,7 +18,6 @@ use super::page::{Appearance, blank_page, body_page};
 /// opaque (no `//`), as `serve_images` needs.
 pub const IMAGE_SCHEME: &str = "catmail-image";
 
-/// The base URL of page `number`'s images.
 pub(super) fn image_base(number: u64) -> String {
     format!("{IMAGE_SCHEME}:{number}/")
 }
@@ -67,7 +66,6 @@ impl<R> BodyPages<R> {
         }
     }
 
-    /// Whether what page `number` says is the page shown's.
     pub fn is_shown(&self, number: u64) -> bool {
         self.shown == number
     }

@@ -149,7 +149,6 @@ pub(crate) async fn search(client: &MailClient, args: Search, json: bool) -> Res
     Ok(())
 }
 
-/// The page of a list, or of search results, that `-n`, `--after` and `--only` ask for.
 async fn list_query(
     client: &MailClient,
     limit: u32,

@@ -67,8 +67,6 @@ pub fn run(started: impl FnOnce() + 'static) -> u8 {
     0
 }
 
-// --- The main thread's work ---------------------------------------------------------
-
 /// Runs `future` on the main thread's loop: each wake queues a poll on the main dispatch
 /// queue, which AppKit's loop drains.
 pub fn spawn(future: impl Future<Output = ()> + 'static) {
@@ -91,8 +89,6 @@ pub fn after(delay: Duration, f: impl FnOnce() + Send + 'static) {
     let when = DispatchTime::try_from(delay).unwrap_or(DispatchTime::FOREVER);
     let _ = DispatchQueue::main().after(when, f);
 }
-
-// --- The application ----------------------------------------------------------------
 
 define_class!(
     /// The app's answers to AppKit: it decides itself when it quits.
@@ -258,8 +254,6 @@ fn main_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
     bar
 }
 
-// --- Windows ------------------------------------------------------------------------
-
 pub fn new_view(options: AppOptions) -> Rc<AppView> {
     AppView::new(main_thread(), options)
 }
@@ -274,7 +268,6 @@ struct Kept {
 }
 
 impl Kept {
-    /// Whether the window may close now.
     fn may_close(&self) -> bool {
         !self.close_requested.as_ref().is_some_and(|asked| asked())
     }
@@ -335,7 +328,6 @@ thread_local! {
     static WINDOWS: RefCell<Vec<Window>> = RefCell::default();
 }
 
-/// The app's windows.
 pub fn windows() -> Vec<Window> {
     WINDOWS.with_borrow(Clone::clone)
 }
@@ -438,8 +430,6 @@ pub fn set_appearance(appearance: Appearance) {
 fn root_of(content: &NSView) -> Option<Retained<NSView>> {
     content.subviews().firstObject()
 }
-
-// --- Taking the focus off a field ---------------------------------------------------
 
 /// A press outside the text field that has the focus takes the focus off it, as in a
 /// browser and as on Linux (`gtk.rs`): nsh leaves it in the field, as desktops do, and

@@ -40,7 +40,6 @@ use crate::uploads::{self, PutRefused, Uploads};
 
 /// The port `catmail serve` listens on unless told otherwise.
 pub const DEFAULT_PORT: u16 = 8642;
-/// Where on the address agents reach the server.
 pub(crate) const PATH: &str = "/mcp";
 /// Enough for any tool's arguments, attachments given to a draft too (base64, at most
 /// [`uploads::MAX_FILE_BYTES`]); rmcp answers 413 above it. Read only once the token is
@@ -73,7 +72,6 @@ pub struct ServeOptions {
     /// How long stopping waits for the requests being answered (a sync, a download)
     /// before it cuts them off, and the connections with them.
     pub drain: Duration,
-    /// What each token may use.
     pub limits: TokenLimits,
 }
 
@@ -231,7 +229,6 @@ async fn accept(listener: TcpListener, routes: Routes, stopping: Stopping) {
                 tracing::debug!(error = %e, "MCP connection ended");
             }
         });
-        // Reap the finished ones as we go.
         while connections.try_join_next().is_some() {}
     }
     drop(listener);
@@ -516,7 +513,6 @@ where
     }
 }
 
-/// The token of an `Authorization: Bearer <token>` header.
 fn bearer<B>(request: &Request<B>) -> Option<String> {
     let value = request
         .headers()

@@ -109,7 +109,6 @@ pub fn after(delay: Duration, f: impl FnOnce() + 'static) {
     glib::timeout_add_local_once(delay, f);
 }
 
-/// The app's windows.
 pub fn windows() -> Vec<Window> {
     let Some(app) = application() else {
         return Vec::new();

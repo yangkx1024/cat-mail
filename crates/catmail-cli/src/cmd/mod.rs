@@ -58,7 +58,6 @@ pub(crate) async fn find_folder(
         .with_context(|| format!("no folder `{name}` in account {account}"))
 }
 
-/// Where the page after message `id` starts.
 pub(crate) async fn cursor_after(
     client: &MailClient,
     id: Option<i64>,

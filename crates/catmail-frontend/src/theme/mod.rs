@@ -31,7 +31,6 @@ pub use themes::{
 pub const DEFAULT_LIGHT: &str = "catmail Light";
 pub const DEFAULT_DARK: &str = "catmail Dark";
 
-/// Light or dark, as a theme says it is.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeMode {
@@ -65,7 +64,6 @@ impl ThemeConfig {
         self.mode.is_dark()
     }
 
-    /// The color at GPUI Kit's `key`, if the theme sets it.
     pub fn color(&self, key: &str) -> Option<&str> {
         self.colors.get(key).and_then(Value::as_str)
     }

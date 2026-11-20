@@ -328,7 +328,6 @@ mod tests {
         (fake, dir, client, account, ids)
     }
 
-    /// The ids of the messages in `account`'s INBOX.
     async fn inbox_ids(client: &MailClient, account: AccountId) -> Vec<i64> {
         let inbox = client.find_folder(account, "INBOX").await.unwrap().unwrap();
         client

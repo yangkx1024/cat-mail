@@ -3,7 +3,6 @@
 
 use super::{Rgb, ThemeConfig};
 
-/// A color with its opacity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rgba {
     pub rgb: Rgb,

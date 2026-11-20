@@ -380,7 +380,6 @@ impl Drop for Engine {
 pub(crate) struct Closing(watch::Receiver<()>);
 
 impl Closing {
-    /// Resolves once the engine is gone.
     pub async fn closed(&mut self) {
         // Nothing is ever sent: this ends when the sender, owned by the engine, is gone.
         let _ = self.0.changed().await;
@@ -604,12 +603,10 @@ impl Engine {
             .is_some_and(|state| lock(&state.status).sync.as_ref().is_some_and(is))
     }
 
-    /// What [`wake`](Self::wake) notifies.
     pub fn wake_signal(&self, account: AccountId) -> Arc<Notify> {
         self.account(account).wake.clone()
     }
 
-    /// What [`resume`](Self::resume) notifies.
     pub fn resume_signal(&self, account: AccountId) -> Arc<Notify> {
         self.account(account).resume.clone()
     }
@@ -914,12 +911,10 @@ impl Engine {
         }
     }
 
-    /// The account's idle connections (see [`pool`](crate::pool)).
     pub fn pool(&self, account: AccountId) -> Arc<Pool> {
         self.account(account).pool.clone()
     }
 
-    /// The connection searches of the account on the server use.
     pub fn search_slot(&self, account: AccountId) -> Arc<SearchSlot> {
         self.account(account).search.clone()
     }

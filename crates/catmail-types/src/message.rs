@@ -66,12 +66,10 @@ impl Flags {
         self.0 == 0
     }
 
-    /// The flags in both.
     pub const fn intersection(self, other: Self) -> Self {
         Self(self.0 & other.0)
     }
 
-    /// The flags in `self` but not in `other`.
     pub const fn difference(self, other: Self) -> Self {
         Self(self.0 & !other.0)
     }
@@ -233,12 +231,10 @@ pub struct MessageBody {
 }
 
 impl MessageBody {
-    /// The parts the HTML shows as images.
     pub fn inline_parts(&self) -> impl Iterator<Item = &Attachment> {
         self.attachments.iter().filter(|a| a.inline)
     }
 
-    /// The parts offered as files: every one the body doesn't show.
     pub fn files(&self) -> impl Iterator<Item = &Attachment> {
         self.attachments.iter().filter(|a| !a.inline)
     }

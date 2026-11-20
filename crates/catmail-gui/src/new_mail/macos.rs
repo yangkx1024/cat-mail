@@ -27,7 +27,6 @@ use objc2_user_notifications::{
 use crate::shell;
 
 define_class!(
-    /// The app's answers to the notification center.
     #[unsafe(super(NSObject))]
     #[name = "CatmailNotificationDelegate"]
     struct Delegate;
@@ -95,7 +94,6 @@ pub fn install() {
     });
 }
 
-/// What the error a completion handler was given says, if there was one.
 fn failure(error: *mut NSError) -> Option<String> {
     // SAFETY: the call's error, or nil.
     unsafe { error.as_ref() }.map(|error| error.localizedDescription().to_string())

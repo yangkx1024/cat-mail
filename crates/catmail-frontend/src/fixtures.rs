@@ -36,7 +36,6 @@ pub fn folder(id: i64, account: i64, name: &str) -> Folder {
     }
 }
 
-/// The same, with `unread` messages unread.
 pub fn unread(folder: Folder, unread: u32) -> Folder {
     Folder {
         unread_count: unread,
@@ -89,7 +88,6 @@ pub fn overview(id: i64, folders: Vec<Folder>) -> AccountOverview {
     }
 }
 
-/// Account `id` with these folders.
 pub fn account(id: i64, folders: Vec<Folder>) -> AccountEntry {
     AccountEntry::new(overview(id, folders), AccountStatus::default())
 }
@@ -114,7 +112,6 @@ pub fn standard_overview(id: i64) -> AccountOverview {
     overview(id, folders)
 }
 
-/// The same, as the sidebar shows it.
 pub fn standard(id: i64) -> AccountEntry {
     AccountEntry::new(standard_overview(id), AccountStatus::default())
 }

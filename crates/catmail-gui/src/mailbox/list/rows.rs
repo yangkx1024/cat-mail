@@ -229,7 +229,6 @@ fn message_row(item: Memo<Option<Line>>) -> impl IntoElement {
                         )
                     }))
                     .child(view().flex_1())
-                    // Whom it went to, while hovered.
                     .child(when(hovered, move || {
                         text(field(list::recipients))
                             .number_of_lines(1)
@@ -300,7 +299,6 @@ fn marks(message: Memo<Option<MessageSummary>>) -> View {
         }))
 }
 
-/// An avatar's background, by the sender's address (`theme::avatar`).
 pub fn avatar_color(seed: &str) -> AdaptiveColor {
     crate::theme::avatar(seed)
 }

@@ -69,7 +69,6 @@ pub struct Env {
 }
 
 impl Env {
-    /// Replaces what the draft says, keeping who it is from.
     #[allow(dead_code)]
     pub async fn edit(&self, id: DraftId, content: DraftContent) -> catmail_core::Result<Draft> {
         let draft = self.client.get_draft(id).await?.expect("the draft");
@@ -137,8 +136,6 @@ pub async fn env(state: ServerState) -> Env {
     env_with(state, SmtpState::new("alice", "pw"), false).await
 }
 
-/// The events received and not read yet.
-/// A recipient without a display name.
 #[allow(dead_code)]
 pub fn addr(email: &str) -> Address {
     Address {
@@ -147,12 +144,12 @@ pub fn addr(email: &str) -> Address {
     }
 }
 
+/// The events received and not read yet.
 #[allow(dead_code)]
 pub fn drain(events: &mut tokio::sync::broadcast::Receiver<Event>) -> Vec<Event> {
     std::iter::from_fn(|| events.try_recv().ok()).collect()
 }
 
-/// The messages each `NewMail` among `events` announced.
 #[allow(dead_code)]
 pub fn new_mail(events: Vec<Event>) -> Vec<Vec<MessageId>> {
     events
@@ -164,7 +161,6 @@ pub fn new_mail(events: Vec<Event>) -> Vec<Vec<MessageId>> {
         .collect()
 }
 
-/// How many `AccountStatusChanged` for `account` are waiting in `events`.
 #[allow(dead_code)]
 pub fn status_changes(
     events: &mut tokio::sync::broadcast::Receiver<Event>,
@@ -176,7 +172,6 @@ pub fn status_changes(
         .count()
 }
 
-/// [`env`], synced once.
 #[allow(dead_code)]
 pub async fn synced_env(state: ServerState) -> Env {
     let env = env(state).await;
@@ -184,7 +179,6 @@ pub async fn synced_env(state: ServerState) -> Env {
     env
 }
 
-/// With `background`, the client sends queued messages on its own.
 pub async fn env_with(state: ServerState, smtp: SmtpState, background: bool) -> Env {
     env_built(state, smtp, |b| b.send_in_background(background)).await
 }
@@ -199,7 +193,6 @@ pub async fn env_built(
     env_added(state, smtp, Verify::Skip, build).await
 }
 
-/// [`env_built`], the account added with `verify`.
 pub async fn env_added(
     state: ServerState,
     smtp: SmtpState,
@@ -288,7 +281,6 @@ impl Env {
     }
 }
 
-/// A fake server on this machine, without TLS.
 pub fn local_server(port: u16) -> ServerConfig {
     ServerConfig {
         host: "127.0.0.1".into(),
@@ -323,7 +315,6 @@ impl Env {
         identities[0].clone()
     }
 
-    /// Where the fake SMTP server listens.
     #[allow(dead_code)]
     pub fn smtp_config(&self) -> ServerConfig {
         local_server(self.smtp.port())
@@ -352,7 +343,6 @@ impl Env {
             .unwrap();
     }
 
-    /// The one value `sql` selects, read behind the client's back.
     #[allow(dead_code)]
     pub fn query<T: rusqlite::types::FromSql>(&self, sql: &str) -> T {
         rusqlite::Connection::open(self.client.config().db_path())
@@ -420,7 +410,6 @@ impl Env {
         self.client.replay_pending(self.account).await.unwrap()
     }
 
-    /// Mailboxes the server was asked to EXAMINE, from the `start`-th command on.
     #[allow(dead_code)]
     pub fn examined(&self, start: usize) -> Vec<String> {
         self.commands_since(start)
@@ -436,7 +425,6 @@ impl Env {
             .collect()
     }
 
-    /// UID SEARCH commands the server received from the `start`-th on.
     #[allow(dead_code)]
     pub fn searches(&self, start: usize) -> Vec<String> {
         self.commands_since(start)
@@ -452,7 +440,6 @@ impl Env {
     }
 }
 
-/// The report on the folder named `name`.
 #[allow(dead_code)]
 pub fn folder_report<'a>(report: &'a SyncReport, name: &str) -> &'a FolderSyncReport {
     report.folders.iter().find(|f| f.name == name).unwrap()
@@ -484,7 +471,6 @@ pub fn sparse(dir: &std::path::Path, name: &str, size: u64) -> std::path::PathBu
     path
 }
 
-/// Every file under `dir`.
 #[allow(dead_code)]
 pub fn files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
