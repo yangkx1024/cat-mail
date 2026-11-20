@@ -26,7 +26,6 @@ pub(super) struct Roles {
     pub dark: bool,
     pub background: Rgb,
     pub foreground: Rgb,
-    /// The sidebar.
     pub sidebar: Rgb,
     pub popover: Rgb,
     /// Hover and muted surfaces.
@@ -35,7 +34,6 @@ pub(super) struct Roles {
     pub input: Rgb,
     pub muted_foreground: Rgb,
     pub primary: Rgb,
-    /// Text on `primary`.
     pub on_primary: Rgb,
     /// The selected sidebar item: neutral, so the accent stays on the message list.
     pub sidebar_selected: Rgb,

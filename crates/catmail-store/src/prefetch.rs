@@ -14,7 +14,6 @@ use crate::columns::to_json;
 const RETRY_AFTER: Duration = Duration::from_secs(60 * 60);
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-/// What [`Prefetch::usage`] returns.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Usage {
     pub bytes: u64,

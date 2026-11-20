@@ -55,7 +55,6 @@ pub fn forward(as_attachment: bool) {
     }
 }
 
-/// The ways to forward the message open, in a menu.
 pub fn choose_forward() {
     let items = vec![
         MenuItem::new("Forward").on_select(|| forward(false)),
@@ -65,7 +64,6 @@ pub fn choose_forward() {
     drop(popup_menu(items));
 }
 
-/// The keys that start a message.
 pub fn bind_keys() {
     on_key("mod+n", |_| new_message());
     on_key("mod+r", |_| reply(false));

@@ -45,7 +45,6 @@ pub struct Sideways {
     rail: Signal<f32>,
     /// The page or the pane scrolled a moment ago.
     active: Signal<bool>,
-    /// The pointer is over the bar.
     over: Signal<bool>,
     /// The pane's height, the bar at its bottom: where the mouse reveals it on Linux.
     #[cfg(not(target_os = "macos"))]

@@ -16,7 +16,6 @@ use crate::icons::{Icon, icon};
 use crate::tasks::in_view;
 use crate::theme::SelectableText as _;
 
-/// The space inside a dialog's edges.
 pub const PADDING: f32 = 24.0;
 
 /// How many dialogs are open over the window: [`modal`]'s, and the picker's.
@@ -72,7 +71,6 @@ pub fn modal(
         )
 }
 
-/// A dialog's title.
 pub fn title(text_: impl Into<String>) -> Text {
     text(text_.into())
         .font_weight(FontWeight::SEMIBOLD)
@@ -124,7 +122,6 @@ pub fn form_button(
         )
 }
 
-/// Cancel and the button that submits, at the end of a row.
 pub fn actions(
     cancel: Option<Rc<dyn Fn()>>,
     ok: &'static str,
@@ -142,7 +139,6 @@ pub fn actions(
         .child(form_button(ok, true, busy, submit))
 }
 
-/// A text field's look.
 pub fn text_input() -> Input {
     input()
         .h(px(34.0))
@@ -201,7 +197,6 @@ pub fn field(label: &'static str, help: Option<&'static str>, input: impl IntoEl
         }))
 }
 
-/// Why the last submission failed, under the form.
 pub fn error(submission: Signal<Submission>) -> impl IntoElement {
     let message = move || submission.with(|s| s.error().map(str::to_owned));
     when(
@@ -240,7 +235,6 @@ pub fn submit<T: 'static, E: std::fmt::Display + 'static>(
     });
 }
 
-/// Changes the signal's value with `f`, and gives what `f` did.
 fn change<T: Clone + 'static, R>(signal: Signal<T>, f: impl FnOnce(&mut T) -> R) -> R {
     let mut out = None;
     signal.update(|value| out = Some(f(value)));
@@ -273,15 +267,11 @@ pub fn confirm_then(confirm: Confirm, go: impl FnOnce() + 'static) {
     });
 }
 
-// --- The name dialog ----------------------------------------------------------------
-
-/// What a name is asked for.
 #[derive(Clone)]
 pub struct NameRequest {
     pub title: String,
     /// What the field starts with, selected, so that what is typed replaces it.
     pub name: String,
-    /// Shown while the field is empty.
     pub placeholder: Option<&'static str>,
     /// The button that submits the name.
     pub ok: &'static str,

@@ -40,7 +40,6 @@ enum State {
     Open,
 }
 
-/// The message the pane shows.
 #[derive(Clone, Default)]
 struct Reading {
     id: Option<MessageId>,

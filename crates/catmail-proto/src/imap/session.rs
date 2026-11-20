@@ -38,7 +38,6 @@ pub struct Session {
     /// From a PREAUTH greeting, or after `login`.
     authenticated: bool,
     selected: Option<Opened>,
-    /// What IDLE reported about flags in `selected`.
     changed_flags: ChangedFlags,
     opened: Instant,
     /// How the greeting says to search text, unless the server turns out to be Gmail.
@@ -76,7 +75,6 @@ impl TextSearch {
     }
 }
 
-/// The mailbox a session has open.
 struct Opened {
     /// As the server spells it.
     name: String,
@@ -374,7 +372,6 @@ impl Session {
             .map(|o| (o.name.as_str(), o.status.uidvalidity))
     }
 
-    /// The mailbox open now, if read-only.
     fn read_only(&self) -> Option<&Opened> {
         self.selected.as_ref().filter(|o| !o.writable)
     }
@@ -713,7 +710,6 @@ impl Session {
         self.uid_search(search).await
     }
 
-    /// How [`uid_search_text`](Self::uid_search_text) asks this server.
     pub fn text_search(&self) -> TextSearch {
         match self.is_gmail() {
             true => TextSearch::GmRaw,
@@ -1297,7 +1293,6 @@ impl Session {
     }
 }
 
-/// The parts of `ranges` below `uid`.
 fn below(ranges: &[RangeInclusive<u32>], uid: u32) -> Vec<RangeInclusive<u32>> {
     ranges
         .iter()
@@ -1605,7 +1600,6 @@ fn gmail_label(label: &str) -> Option<GmailLabel> {
     found
 }
 
-/// The system flags stored as [`Flags`] bits.
 const SYSTEM_FLAGS: [(Flags, &str); 5] = [
     (Flags::SEEN, "\\Seen"),
     (Flags::FLAGGED, "\\Flagged"),

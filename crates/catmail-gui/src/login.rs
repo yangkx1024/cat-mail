@@ -18,7 +18,6 @@ use crate::engine::client;
 use crate::form::{self, field, modal, text_input};
 use crate::mailbox::sidebar::with_account;
 
-/// The fields of who signs in.
 #[derive(Clone, Copy)]
 struct LoginFields {
     email: Signal<String>,
@@ -28,7 +27,6 @@ struct LoginFields {
 }
 
 impl LoginFields {
-    /// `name` fills the Name field.
     fn new(name: Option<String>) -> Self {
         Self {
             email: signal(String::new()),
@@ -215,8 +213,6 @@ fn radio(chosen: Signal<Security>, mode: Security, label: &'static str) -> AnyEl
         .into_element()
 }
 
-// --- The sign-in page ---------------------------------------------------------------
-
 /// The sign-in page in the window's place: `Some(cancellable)`, false for the first
 /// account (there is nothing to go back to).
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -290,8 +286,6 @@ pub fn sign_in_page(cancellable: bool) -> impl IntoElement {
         ),
     )
 }
-
-// --- Another sending address --------------------------------------------------------
 
 /// The form for another address of the account, while it is open.
 #[derive(Clone, Copy, Default, PartialEq)]

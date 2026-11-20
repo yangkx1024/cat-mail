@@ -7,7 +7,6 @@ use catmail_core::{Attachment, Message};
 
 use crate::format;
 
-/// A message's header as the pane shows it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Header {
     pub subject: String,

@@ -25,7 +25,6 @@ pub enum MessageCommand {
 impl MessageCommand {
     /// Those about where the messages are, in a toolbar's order.
     pub const PLACE: [MessageCommand; 3] = [Self::Archive, Self::Delete, Self::Move];
-    /// Those about their marks.
     pub const MARKS: [MessageCommand; 2] = [Self::ToggleRead, Self::ToggleFlag];
 
     /// Its name, for messages that all have `flags`: a toggle says what it does to them.
@@ -147,12 +146,10 @@ impl Change {
         Self { ids, op, what }
     }
 
-    /// Whether it changes no message: nothing to do.
     pub fn is_empty(&self) -> bool {
         self.ids.is_empty()
     }
 
-    /// What to say if it fails.
     pub fn failure(&self) -> String {
         format!("Couldn't {}", self.what)
     }
@@ -169,7 +166,6 @@ impl Change {
         matches!(self.op, Op::Archive | Op::Move { .. } | Op::Delete(_))
     }
 
-    /// Asks the engine for it.
     pub async fn run(&self, client: &MailClient) -> catmail_core::Result<Vec<AccountId>> {
         let ids = self.ids.clone();
         match &self.op {

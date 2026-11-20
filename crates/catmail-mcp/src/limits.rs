@@ -62,7 +62,6 @@ pub(crate) struct Limits {
     used: Mutex<HashMap<String, Used>>,
 }
 
-/// What a token has used.
 struct Used {
     /// Calls it may make at once now, refilled as time passes.
     calls: f64,

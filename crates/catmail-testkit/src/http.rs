@@ -6,7 +6,6 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
-/// What the server does with a request.
 pub enum Reply {
     /// Sends this response, then closes the connection.
     Send(Vec<u8>),
@@ -93,7 +92,6 @@ impl FakeHttp {
         server
     }
 
-    /// `path` on this server, as a URL.
     pub fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base)
     }

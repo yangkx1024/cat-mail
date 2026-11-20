@@ -130,7 +130,6 @@ impl<'c> Attachments<'c> {
         Ok(())
     }
 
-    /// Marks the message's attachments inline or not, as `inline` decides.
     pub(crate) fn mark_inline(
         &self,
         message: MessageId,

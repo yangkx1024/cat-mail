@@ -317,7 +317,6 @@ pub(crate) mod test_util {
         }
     }
 
-    /// The message in `folder` with `uid`.
     pub(crate) fn message_id(store: &Store, folder: FolderId, uid: u32) -> MessageId {
         store
             .read(|db| {

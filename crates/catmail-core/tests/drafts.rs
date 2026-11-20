@@ -58,7 +58,6 @@ impl Env {
             .id
     }
 
-    /// (subject, flags) of the messages in the server's Drafts folder.
     fn server_drafts(&self) -> Vec<(String, Vec<String>)> {
         drafts_on(&self.fake)
     }

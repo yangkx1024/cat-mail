@@ -54,7 +54,6 @@ pub use catmail_frontend::APP_ID;
 /// The app's name: the main window's title, the tray item's.
 pub const APP_NAME: &str = "catmail";
 
-// --- Settings and themes ------------------------------------------------------------
 //
 // Process-wide: every window's view reads them, each on its own thread, and the settings
 // dialog changes them from the main window's.
@@ -66,7 +65,6 @@ static SETTINGS: LazyLock<Watched<Settings>> = LazyLock::new(|| Watched::new(Set
 /// config directory, and they stay in memory.
 static FILE: OnceLock<Option<Arc<SettingsFile>>> = OnceLock::new();
 
-/// The themes on offer.
 static THEMES: LazyLock<Mutex<Themes>> = LazyLock::new(Mutex::default);
 
 /// `mutex`, locked; one a panic left behind is as good as any.
@@ -74,7 +72,6 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The settings in effect.
 pub fn settings() -> Settings {
     SETTINGS.get()
 }
@@ -105,7 +102,6 @@ pub fn follow_settings() -> (Settings, mpsc::UnboundedReceiver<Settings>) {
     SETTINGS.follow()
 }
 
-/// The themes folder, if there is one.
 pub fn themes_dir() -> Option<PathBuf> {
     FILE.get()?.as_ref().map(|file| file.themes_dir())
 }
@@ -151,7 +147,6 @@ fn restyle_views() {
     toolkit::set_appearance(appearance(&settings));
 }
 
-// --- The MCP server for AI agents ---------------------------------------------------
 //
 // It runs on a thread of its own (`catmail_frontend::mcp::Host`), from the engine's
 // opening until the app quits, as the settings say.
@@ -178,7 +173,6 @@ fn mcp_said(status: mcp::Status) {
     MCP_STATUS.set(status);
 }
 
-/// The server's settings in effect.
 fn mcp_settings() -> McpSettings {
     SETTINGS.with(|s| s.mcp)
 }
@@ -213,8 +207,6 @@ fn serve_agents(client: MailClient) {
     });
 }
 
-// --- The main window's mailbox, asked from outside it --------------------------------
-
 /// What the tray and the notifications ask of the main window's mailbox, and where the
 /// last one was.
 static ASKS: Mutex<Asks> = Mutex::new(Asks::new());
@@ -243,7 +235,6 @@ pub fn show_at(to: Option<Destination>, activation_token: Option<&str>) {
     show(activation_token);
 }
 
-/// Does what was chosen in the tray.
 pub fn chose(command: Command, activation_token: Option<String>) {
     let token = activation_token.as_deref();
     match command {
@@ -449,7 +440,6 @@ fn main_window() -> Window {
     window
 }
 
-/// What a window opens with.
 pub struct Spec<'a> {
     pub title: &'a str,
     pub size: (i32, i32),
@@ -461,7 +451,6 @@ pub struct Hooks {
     /// The user asked to close it: true if the app sees to it, and the window stays for
     /// now.
     pub close_requested: Option<Box<dyn Fn() -> bool>>,
-    /// The window is gone.
     pub gone: Box<dyn FnOnce()>,
 }
 
@@ -481,8 +470,6 @@ fn open_window(spec: &Spec, root: Root, hooks: Hooks) -> Window {
     view.load(App::Rust(root));
     window
 }
-
-// --- Composer windows ---------------------------------------------------------------
 
 /// Brings the draft's window forward, if it has one.
 fn activate(draft: DraftId) -> bool {
@@ -581,8 +568,6 @@ pub fn appearance(settings: &Settings) -> Appearance {
         settings::Appearance::Dark => Appearance::Dark,
     }
 }
-
-// --- Running without a window, and quitting -----------------------------------------
 
 /// A window is gone. The last: the app quits, or with "Keep running after the window is
 /// closed" on, runs on until the tray, a notification or another launch shows the window

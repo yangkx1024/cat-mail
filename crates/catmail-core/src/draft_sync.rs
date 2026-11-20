@@ -184,7 +184,6 @@ enum Outcome {
     Skipped,
 }
 
-/// Uploads the draft as it is now to `target`.
 async fn upload_one(
     engine: &Arc<Engine>,
     session: &mut Session,

@@ -41,9 +41,6 @@ use crate::toast::report;
 
 use view::Composer;
 
-// --- The view's state ---------------------------------------------------------------
-
-/// What a composer's view is made with ([`root`]).
 pub struct Start {
     pub opening: Opening,
     /// The window's asks to close: its close button, Ctrl+W, quitting.
@@ -56,7 +53,6 @@ thread_local! {
     static START: RefCell<Option<Arc<Start>>> = const { RefCell::new(None) };
 }
 
-/// The root of a composer window's view.
 pub fn root(start: Arc<Start>) -> Root {
     Root::new::<Composer>(move || {
         START.set(Some(start.clone()));
@@ -66,7 +62,6 @@ pub fn root(start: Arc<Start>) -> Root {
 
 /// The draft and when it saves. Not reactive.
 struct Composing {
-    /// The draft open for editing, which the window changes it through.
     editor: DraftEditor,
     life: Lifecycle,
     /// The save after typing pauses.
@@ -75,7 +70,6 @@ struct Composing {
     owner: Owner,
     /// The address fields, to put the focus in one to fix.
     inputs: [Option<ElementRef>; 3],
-    /// The text.
     rich: Rc<rich::Rich>,
 }
 
@@ -121,14 +115,12 @@ struct LinkDialog(Option<String>);
 #[derive(Clone, Copy, Default)]
 struct Formatting(u64);
 
-/// Who the draft can be from, and who it is.
 #[derive(Clone, Default)]
 struct From {
     senders: Vec<Sender>,
     chosen: Option<IdentityId>,
 }
 
-/// How the window is doing.
 #[derive(Clone, Default, PartialEq)]
 struct Shown {
     ending: Option<Finish>,
@@ -171,8 +163,6 @@ fn sync() {
     });
 }
 
-// --- Saving, sending, closing -------------------------------------------------------
-
 /// The draft as typed. An address field that doesn't parse keeps its last saved value,
 /// and is reported.
 fn written() -> (Written, Option<FieldError>) {
@@ -209,7 +199,6 @@ fn formatting_moved() {
     global::<Formatting>().update(|f| f.0 += 1);
 }
 
-/// Formats the text with the editor's command `name`.
 fn format(name: &'static str) {
     rich().run(name, serde_json::Value::Null);
 }
@@ -395,8 +384,6 @@ fn field_index(field: Field) -> usize {
     }
 }
 
-// --- Attachments --------------------------------------------------------------------
-
 fn attach() {
     pick("Attach", false);
 }
@@ -418,7 +405,6 @@ fn pick(button: &str, to_text: bool) {
     });
 }
 
-/// Dropped on the window: attached.
 fn dropped(event: &FileDropEvent) {
     let files = files_at(&event.uris);
     if !files.is_empty() {
@@ -442,7 +428,6 @@ fn pasted(paste: &RichEditorPastedFiles) {
     }
 }
 
-/// The files of `file:` URLs.
 fn files_at(uris: &[String]) -> Vec<NewFile> {
     uris.iter()
         .filter_map(|uri| url::Url::parse(uri).ok()?.to_file_path().ok())
@@ -509,8 +494,6 @@ fn attached(failed: bool) {
     }
     sync();
 }
-
-// --- From ---------------------------------------------------------------------------
 
 /// Reads the identities the draft can be sent as again whenever the engine says an
 /// account's changed, or came or went (or events were missed).

@@ -5,7 +5,6 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// A database failure.
     #[error(transparent)]
     Store(StoreError),
 
@@ -17,7 +16,6 @@ pub enum Error {
     #[error(transparent)]
     Smtp(SmtpError),
 
-    /// A remote image couldn't be had.
     #[error(transparent)]
     Http(HttpError),
 
@@ -33,7 +31,6 @@ pub enum Error {
         error: Box<Error>,
     },
 
-    /// The server rejected the credentials.
     #[error("login rejected by the server ({0}); check the username and password")]
     AuthFailed(String),
 

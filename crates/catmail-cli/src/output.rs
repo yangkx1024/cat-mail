@@ -40,7 +40,6 @@ pub(crate) use errln;
 /// has its lines.
 static STDOUT_CLOSED: AtomicBool = AtomicBool::new(false);
 
-/// Whether stdout was found closed, so nothing printed is read any more.
 pub(crate) fn stdout_closed() -> bool {
     STDOUT_CLOSED.load(Ordering::Relaxed)
 }
@@ -213,7 +212,6 @@ pub(crate) fn print_accounts(accounts: &[(Account, Vec<Identity>)]) -> Result<()
     print_table(&["ID", "EMAIL", "IMAP", "SMTP"], rows)
 }
 
-/// `host:port (security)`.
 fn server(s: &ServerConfig) -> String {
     format!("{}:{} ({})", s.host, s.port, s.security)
 }
@@ -423,7 +421,6 @@ fn message_table(
     (header, rows)
 }
 
-/// A header line of a message or draft, unless `value` is empty.
 fn header(name: &str, value: &str) -> Result<()> {
     if value.is_empty() {
         return Ok(());
@@ -597,7 +594,6 @@ pub(crate) fn print_draft(draft: &Draft, from: Option<&Identity>) -> Result<()> 
     Ok(())
 }
 
-/// Whether the server's Drafts folder has the draft as it is.
 /// Whether the server has the draft's copy: `on_server`, or refused it with
 /// `upload_error`.
 fn server_status(on_server: bool, upload_error: Option<&String>) -> &'static str {

@@ -18,7 +18,6 @@ pub struct Clock {
     pub hours: Hours,
 }
 
-/// How the time of day reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hours {
     /// `14:05`.
@@ -98,12 +97,10 @@ pub struct Calendar {
 }
 
 impl Calendar {
-    /// Today in `zone`.
     pub fn now(zone: &TimeZone) -> Self {
         Self::at(&Zoned::now().with_time_zone(zone.clone()))
     }
 
-    /// As of `now`, in its zone.
     pub fn at(now: &Zoned) -> Self {
         Self {
             tz: now.time_zone().clone(),

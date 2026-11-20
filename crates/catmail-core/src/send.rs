@@ -50,7 +50,6 @@ const RETRY_AFTER_WAKE: i64 = 2;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendPreview {
     pub draft: Draft,
-    /// The identity it is sent as.
     pub from: Address,
     /// What [`MailClient::send_previewed`](crate::MailClient::send_previewed) takes back.
     pub revision: DraftRevision,

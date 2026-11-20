@@ -185,7 +185,6 @@ impl Reveal {
         at
     }
 
-    /// Whether a message is waited for.
     pub fn is_waiting(&self) -> bool {
         self.0.is_some()
     }

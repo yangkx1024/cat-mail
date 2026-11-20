@@ -31,7 +31,6 @@ use rich_text::Images;
 /// How long typing has to pause before the draft is saved.
 pub const SAVE_DELAY: Duration = Duration::from_millis(800);
 
-/// What a composer window starts from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComposeFrom {
     New(AccountId),
@@ -47,7 +46,6 @@ pub enum ComposeFrom {
     Draft(DraftId),
 }
 
-/// What a composer window is opened with.
 #[derive(Debug, Clone)]
 pub struct Opening {
     /// The identities the draft can be sent as, to choose From among.
@@ -129,7 +127,6 @@ pub fn new_message_account(place: Option<Place>, accounts: &[AccountEntry]) -> O
         .map(|entry| entry.account.id)
 }
 
-/// The window's title: the message's subject.
 pub fn window_title(subject: &str) -> String {
     match subject.trim() {
         "" => "New message".into(),
@@ -169,7 +166,6 @@ pub fn senders(identities: &[Identity]) -> Vec<Sender> {
         .collect()
 }
 
-/// The engine's message, as a sentence for the window.
 pub fn error_text(e: &catmail_core::Error) -> String {
     let text = e.to_string();
     let mut chars = text.chars();
@@ -257,7 +253,6 @@ pub struct Fields<'a> {
     pub quoted: bool,
 }
 
-/// What asking before discarding a draft says.
 pub fn discard_confirm() -> Confirm {
     Confirm {
         title: "Discard this draft?".into(),
@@ -266,7 +261,6 @@ pub fn discard_confirm() -> Confirm {
     }
 }
 
-/// Deleting a saved draft, from its pane, asked first.
 pub fn draft_deletion(subject: Option<&str>) -> Confirm {
     Confirm {
         title: format!("Delete the draft “{}”?", format::subject(subject)),
@@ -287,7 +281,6 @@ pub fn unsendable(written: &Written, problem: Option<FieldError>) -> Option<Fiel
     })
 }
 
-/// How the window ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Finish {
     Send,
@@ -302,7 +295,6 @@ enum SaveState {
     Failed(String),
 }
 
-/// What to do once a save is back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AfterSave {
     /// End the window ([`Lifecycle::begin_finish`]): it was waiting for the save.
@@ -312,7 +304,6 @@ pub enum AfterSave {
     Nothing,
 }
 
-/// What to do once an attachment is added or removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AfterAttachment {
     /// End the window ([`Lifecycle::begin_finish`]): it was waiting for the attachment.
@@ -348,7 +339,6 @@ pub struct Lifecycle {
 }
 
 impl Lifecycle {
-    /// For a window opened on `opening`'s draft.
     pub fn new(opening: &Opening) -> Self {
         Lifecycle {
             created_here: opening.created_here,
@@ -438,7 +428,6 @@ impl Lifecycle {
         Some(written)
     }
 
-    /// The save of `written` is back.
     pub fn save_ended(&mut self, written: Written, result: Result<(), String>) -> AfterSave {
         self.saving = false;
         match result {
@@ -498,7 +487,6 @@ impl Lifecycle {
         }
     }
 
-    /// Something for this draft is with the engine.
     fn busy(&self) -> bool {
         self.saving || self.attaching > 0
     }
@@ -569,7 +557,6 @@ impl Lifecycle {
     }
 }
 
-/// What asking the window to close does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Closing {
     /// It is ending already, and closes itself when that is done.
@@ -588,7 +575,6 @@ pub struct Steps {
     pub delete: bool,
     /// `update_draft` with what the fields hold.
     pub save: bool,
-    /// `send_draft`.
     pub send: bool,
     /// `drop_unshown_images`: the window's undo, which could bring them back, goes with
     /// it. Not when sending: what is sent has only the images its HTML shows, and the
@@ -659,7 +645,6 @@ impl<W> Default for OpenComposers<W> {
 }
 
 impl<W: Clone> OpenComposers<W> {
-    /// The draft's window, if it has one.
     pub fn window(&self, draft: DraftId) -> Option<W> {
         self.windows.get(&draft).cloned()
     }
@@ -675,7 +660,6 @@ impl<W: Clone> OpenComposers<W> {
         self.opening.remove(&draft);
     }
 
-    /// The draft's window opened.
     pub fn insert(&mut self, draft: DraftId, window: W) {
         self.windows.insert(draft, window);
     }

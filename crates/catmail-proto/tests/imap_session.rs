@@ -1345,7 +1345,6 @@ async fn gmail_extensions_need_server_support() {
     assert!(matches!(err, Error::Unsupported(_)), "{err}");
 }
 
-/// The UID and labels of the message with this X-GM-MSGID in `mailbox`.
 async fn labels_in(session: &mut Session, msgid: u64, mailbox: &str) -> (u32, Vec<GmailLabel>) {
     session.examine(mailbox).await.unwrap();
     let uids = session.uid_search_gm_msgid(msgid).await.unwrap();

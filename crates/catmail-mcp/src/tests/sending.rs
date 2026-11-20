@@ -17,7 +17,6 @@ impl Fixture {
         )
     }
 
-    /// A draft to Bob, from the fixture's token.
     async fn draft_to_bob(&self) -> i64 {
         let account = self.call("list_accounts", json!({})).await["accounts"][0]["id"].clone();
         let draft = self

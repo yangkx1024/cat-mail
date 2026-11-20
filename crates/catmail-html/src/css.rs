@@ -55,7 +55,6 @@ pub(super) struct Stylesheet {
     pub(super) colors_from_variables: bool,
 }
 
-/// A `style` attribute as kept.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct Style {
     pub(super) css: String,
@@ -63,7 +62,6 @@ pub(super) struct Style {
     pub(super) colors_from_variables: bool,
 }
 
-/// A `<style>` element of a message: its text, and its `media` attribute.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct Element {
     pub(super) media: Option<String>,
@@ -132,7 +130,6 @@ impl<'s> Sheet<'s> {
         }
     }
 
-    /// The sheets' rules, kept as one.
     fn all(mut self, elements: &[Element]) -> Stylesheet {
         for element in elements {
             if self.full() {
@@ -172,7 +169,6 @@ impl<'s> Sheet<'s> {
         self.conditional("media", &prelude.text, 0, &mut rules);
     }
 
-    /// The rules of a sheet or of a conditional block.
     fn rules(&mut self, parser: &mut Parser<'_>, depth: usize) {
         while !self.full() {
             let Ok(token) = parser.next().cloned() else {
@@ -299,7 +295,6 @@ enum Lead {
     Rest,
 }
 
-/// Whether `token` is a sibling combinator, `~` or `+`.
 fn is_sibling(token: &Token<'_>) -> bool {
     matches!(token, Token::Delim('~' | '+'))
 }
@@ -400,7 +395,6 @@ fn is_root(parser: &mut Parser<'_>) -> bool {
         .is_ok()
 }
 
-/// The declarations of a rule or a `style` attribute.
 struct Declarations {
     out: String,
     dark: bool,

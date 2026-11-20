@@ -65,7 +65,6 @@ pub(crate) struct SendAs {
 }
 
 impl SendAs {
-    /// The identity named among `account`'s, if one was.
     async fn resolve(&self, client: &MailClient, account: AccountId) -> Result<Option<IdentityId>> {
         let Some(from) = &self.from else {
             return Ok(None);
@@ -245,7 +244,6 @@ async fn from_for(
     from.resolve(client, account).await
 }
 
-/// The files of `--attach`, to go with a new draft.
 fn files(paths: Vec<PathBuf>) -> Vec<NewFile> {
     paths.into_iter().map(NewFile::Path).collect()
 }

@@ -51,7 +51,6 @@ impl BlobStore {
         })
     }
 
-    /// Streams `reader` into the store and returns the content hash.
     pub fn put(&self, mut reader: impl Read) -> io::Result<BlobHash> {
         let mut tmp = NamedTempFile::new_in(self.root.join("tmp"))?;
         let mut hasher = Sha256::new();
@@ -225,7 +224,6 @@ fn removable(path: &Path, grace: Duration) -> io::Result<Option<u64>> {
     Ok((meta.is_file() && age > grace).then_some(meta.len()))
 }
 
-/// Returns whether the file was there.
 fn remove_if_exists(path: &Path) -> io::Result<bool> {
     match fs::remove_file(path) {
         Ok(()) => Ok(true),

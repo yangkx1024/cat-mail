@@ -6,7 +6,6 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 use crate::tls::Stream;
 
-/// One command as [`read_command`] read it.
 pub(super) struct Read {
     /// The command line without CRLF, its literals inlined as quoted strings.
     pub line: Vec<u8>,

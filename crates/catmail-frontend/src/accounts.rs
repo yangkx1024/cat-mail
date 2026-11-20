@@ -6,7 +6,6 @@ use catmail_core::{Identity, IdentityId};
 use crate::commands::Confirm;
 use crate::mailbox::AccountEntry;
 
-/// Removing the account, asked first.
 pub fn remove_account(entry: &AccountEntry) -> Confirm {
     Confirm {
         title: format!("Remove “{}”?", entry.account.email),
@@ -39,12 +38,10 @@ pub fn identity(entry: &AccountEntry, id: IdentityId) -> Option<&Identity> {
     entry.identities.iter().find(|i| i.id == id)
 }
 
-/// The title of the dialog that renames the address.
 pub fn rename_title(identity: &Identity) -> String {
     format!("Name for {}", identity.email)
 }
 
-/// The title of the form for another address of the account.
 pub fn new_identity_title(entry: &AccountEntry) -> String {
     format!("New address for {}", entry.account.email)
 }

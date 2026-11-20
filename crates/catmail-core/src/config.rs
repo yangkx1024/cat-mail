@@ -64,7 +64,6 @@ impl Config {
         self.data_dir.join("remote-images")
     }
 
-    /// The log files a frontend keeps, for finding out later what happened.
     pub fn log_dir(&self) -> PathBuf {
         self.data_dir.join("logs")
     }

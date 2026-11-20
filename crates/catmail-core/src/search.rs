@@ -265,7 +265,6 @@ struct Progress {
     opened: usize,
     examine: Duration,
     search: Duration,
-    /// The server turned out unable to search text.
     unsearchable: bool,
 }
 
@@ -396,7 +395,6 @@ async fn in_folders(
     Ok(())
 }
 
-/// What came of searching a folder.
 enum Searched {
     /// The UIDs matching, ascending, and how long opening the folder (`None` if it was
     /// open already) and searching it took.
@@ -409,7 +407,6 @@ enum Searched {
     Abandoned,
     /// Its UIDVALIDITY on the server isn't the one synced.
     Rebuilt,
-    /// The server wouldn't open it.
     Unopened(Error),
     /// The server wouldn't search it.
     Refused(Error),

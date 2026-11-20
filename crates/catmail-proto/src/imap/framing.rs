@@ -12,9 +12,7 @@ pub(crate) struct TooLarge;
 
 #[derive(Debug)]
 pub(crate) struct Framer {
-    /// The response being read.
     current: Vec<u8>,
-    /// How far the current line is into announcing a literal.
     announcing: Announcing,
     /// Bytes of the current literal still to come.
     literal: usize,
@@ -88,7 +86,6 @@ impl Framer {
         Ok(())
     }
 
-    /// The next whole response, if one has arrived.
     pub fn next(&mut self) -> Option<Vec<u8>> {
         self.ready.pop_front()
     }

@@ -73,7 +73,6 @@ impl Default for BodyPrefetch {
     }
 }
 
-/// The longest wait after a failure.
 const MAX_RETRY: Duration = Duration::from_secs(30 * 60);
 
 /// With nothing to fetch, how long to wait without news of the account before looking
@@ -95,7 +94,6 @@ pub(crate) fn spawn(engine: &Arc<Engine>, account: AccountId) {
     }
 }
 
-/// The task that fetches `account`'s bodies.
 pub(crate) fn task(
     engine: &Arc<Engine>,
     account: AccountId,
@@ -111,7 +109,6 @@ enum Next {
     Synced,
     /// Look again on news of the account, or after this long.
     News(Duration),
-    /// Look again after this long.
     Sleep(Duration),
 }
 
@@ -119,7 +116,6 @@ enum Next {
 enum Batch {
     /// There may be more to fetch.
     More,
-    /// Nothing left.
     Done,
     /// The day's budget is used up.
     Spent,

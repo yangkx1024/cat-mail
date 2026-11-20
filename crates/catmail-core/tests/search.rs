@@ -9,7 +9,6 @@ mod common;
 
 use common::{ALL_MAIL, Env, env_added, synced_env as env};
 
-/// A plain message, dated by `minute`.
 fn mail(subject: &str, minute: u32, body: &str) -> Vec<u8> {
     format!(
         "From: Bob <bob@example.com>\r\nTo: alice@example.com\r\nSubject: {subject}\r\n\

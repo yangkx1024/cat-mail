@@ -25,7 +25,6 @@ impl Images {
         self.paths.insert(content_id, path);
     }
 
-    /// The file of the image `content_id`.
     pub fn path(&self, content_id: &str) -> Option<&Path> {
         self.paths.get(content_id).map(PathBuf::as_path)
     }
@@ -140,7 +139,6 @@ fn node_type(node: &Value) -> &str {
     node.get("type").and_then(Value::as_str).unwrap_or_default()
 }
 
-/// The lines of a block, added to `lines`.
 fn block_lines(block: &Value, lines: &mut Vec<String>) {
     match node_type(block) {
         "blockquote" => {

@@ -19,7 +19,6 @@ use crate::TestCert;
 use crate::mime;
 use crate::tls::{Stream, TlsMode, lock};
 
-/// One message in a [`FakeMailbox`].
 #[derive(Debug, Clone)]
 pub struct FakeMessage {
     pub uid: u32,
@@ -84,7 +83,6 @@ impl FakeMailbox {
         self
     }
 
-    /// Appends a message and returns its UID.
     pub fn append(&mut self, raw: &[u8], flags: &[&str]) -> u32 {
         let uid = self.uidnext;
         self.uidnext += 1;
@@ -102,12 +100,10 @@ impl FakeMailbox {
         uid
     }
 
-    /// Appends a simple message with the given subject and returns its UID.
     pub fn append_simple(&mut self, subject: &str) -> u32 {
         self.append_text(subject, "Hello\r\n")
     }
 
-    /// Like [`append_simple`](Self::append_simple), with `text` as its body.
     pub fn append_text(&mut self, subject: &str, text: &str) -> u32 {
         let uid = self.uidnext;
         let raw = format!(
@@ -152,7 +148,6 @@ impl FakeMailbox {
         self.change(uid, |msg| toggle(&mut msg.flags, flag, on))
     }
 
-    /// [`change_flag`](Self::change_flag) for a Gmail label.
     fn change_label(&mut self, uid: u32, label: &str, on: bool) -> bool {
         self.change(uid, |msg| toggle(&mut msg.labels, label, on))
     }
@@ -524,7 +519,6 @@ impl Default for Faults {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoggedCommand {
-    /// Whether the command arrived over TLS.
     pub tls: bool,
     /// The command line without the tag; literals inlined.
     pub line: String,
@@ -623,7 +617,6 @@ impl ServerState {
         state
     }
 
-    /// On Gmail, All Mail.
     pub fn all_mail(&mut self) -> &mut FakeMailbox {
         let i = self.all_mail_index().expect("a Gmail server has All Mail");
         &mut self.mailboxes[i]
@@ -1023,7 +1016,6 @@ impl FakeImap {
         self.addr.port()
     }
 
-    /// Locks the server state, e.g. to add messages or set faults between syncs.
     pub fn state(&self) -> MutexGuard<'_, ServerState> {
         lock(&self.state)
     }

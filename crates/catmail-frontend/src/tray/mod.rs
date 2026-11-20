@@ -99,7 +99,6 @@ pub fn tool_tip(unread: u32) -> String {
     }
 }
 
-/// What the badge says, if there is one.
 pub fn badge(unread: u32) -> Option<String> {
     match unread {
         0 => None,

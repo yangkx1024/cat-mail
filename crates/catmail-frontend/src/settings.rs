@@ -12,7 +12,6 @@ use serde_json::{Map, Value};
 
 use crate::theme::{DEFAULT_DARK, DEFAULT_LIGHT};
 
-/// Light or dark, or whichever the system uses.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Appearance {
@@ -140,7 +139,6 @@ pub struct SettingsFile {
     dir: PathBuf,
     /// The newest settings not written yet.
     pending: Mutex<Option<Settings>>,
-    /// Held while writing.
     writing: Mutex<()>,
     /// The file couldn't be read, nor kept aside: writes are dropped rather than replace
     /// what may still hold the user's settings.
@@ -166,7 +164,6 @@ impl SettingsFile {
         &self.dir
     }
 
-    /// Where imported themes are kept.
     pub fn themes_dir(&self) -> PathBuf {
         self.dir.join("themes")
     }

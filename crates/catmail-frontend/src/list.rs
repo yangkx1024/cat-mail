@@ -184,7 +184,6 @@ pub const FILTERS: [FlagFilter; 5] = [
     FlagFilter::Unflagged,
 ];
 
-/// The name of a view of the list, as its menu shows it.
 pub fn filter_label(filter: FlagFilter) -> &'static str {
     match filter {
         FlagFilter::All => "All",
@@ -225,7 +224,6 @@ pub fn recipients(message: &MessageSummary) -> String {
         .join(", ")
 }
 
-/// Whom a draft row says it goes to.
 pub fn draft_recipients(draft: &DraftSummary) -> String {
     let to = format::names(draft.recipients());
     if to.is_empty() {

@@ -75,7 +75,6 @@ impl Target {
     }
 }
 
-/// One notification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notice {
     /// [`Target::tag`].

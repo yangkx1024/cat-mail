@@ -261,7 +261,6 @@ async fn check_account(
     }
 }
 
-/// Logs in to the identity's SMTP server and out again; returns what it announced.
 async fn check_identity(
     engine: &Engine,
     new: &NewIdentity,

@@ -35,7 +35,6 @@ impl fmt::Display for QuitReason {
     }
 }
 
-/// What the app opens with.
 #[derive(Debug, PartialEq, Eq)]
 pub enum AtLaunch {
     Window,
@@ -56,7 +55,6 @@ pub fn at_launch(hidden: bool, keep_running: bool, engine_usable: bool) -> AtLau
     }
 }
 
-/// What the app does once its last window has closed.
 #[derive(Debug, PartialEq, Eq)]
 pub enum AfterLastWindow {
     Quit,

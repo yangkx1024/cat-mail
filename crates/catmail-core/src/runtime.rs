@@ -43,7 +43,6 @@ impl Runtime {
         self.handle.spawn(fut).await.map_err(run_error)?
     }
 
-    /// Starts `fut` on the engine runtime and leaves it running.
     pub(crate) fn spawn<F>(&self, fut: F)
     where
         F: Future<Output = ()> + Send + 'static,

@@ -54,7 +54,6 @@ pub struct Checked(pub HashSet<MessageId>);
 #[derive(Clone, Copy, Default, PartialEq)]
 struct Loading(bool);
 
-/// What the search field holds.
 #[derive(Clone, Default)]
 struct SearchText(String);
 
@@ -74,7 +73,6 @@ struct ListState {
 #[derive(Clone, Default)]
 struct State(Rc<RefCell<ListState>>);
 
-/// `f` with the list's state.
 fn state<T>(f: impl FnOnce(&mut ListState) -> T) -> T {
     let state = global::<State>().with_untracked(|s| s.0.clone());
     f(&mut state.borrow_mut())
@@ -85,15 +83,12 @@ fn reads<T>(f: impl FnOnce(&mut ListModel, &Listing) -> T) -> T {
     global::<Listing>().with_untracked(|listing| state(|s| f(&mut s.model, listing)))
 }
 
-/// The list's handle, for scrolling it.
 #[derive(Clone, Default)]
 struct ListRef(Option<ElementRef>);
 
-/// The search field's, for Ctrl+F.
 #[derive(Clone, Default)]
 struct SearchRef(Option<ElementRef>);
 
-/// Puts the keys in the search field.
 pub fn focus_search() {
     if let Some(search) = global::<SearchRef>().with_untracked(|r| r.0) {
         search.focus();
@@ -104,8 +99,6 @@ pub fn focus_search() {
 pub fn reading() -> bool {
     global::<Selected>().with(|s| s.0.is_some())
 }
-
-// --- Reading the rows ---------------------------------------------------------------
 
 /// Shows `source` from the top, or nothing.
 pub fn show(source: Option<Source>) {
@@ -392,8 +385,6 @@ fn set_shown_in() {
     }
 }
 
-// --- Searching ----------------------------------------------------------------------
-
 /// The search field changed: a pause in typing searches, or with nothing typed shows
 /// the place selected again (`ListModel::paused`).
 fn typed(text: String) {
@@ -439,8 +430,6 @@ fn clear_search_field(search: ElementRef) {
     search.blur();
 }
 
-// --- Checking -----------------------------------------------------------------------
-
 fn toggle_checked(id: MessageId) {
     global::<Checked>().update(|c| {
         if !c.0.remove(&id) {
@@ -474,9 +463,6 @@ fn toggle_selected() {
     }
 }
 
-// --- The pane -----------------------------------------------------------------------
-
-/// The list column: the search field, the title, and the rows.
 pub fn list_column() -> impl IntoElement {
     let list = element_ref();
     global::<ListRef>().set(ListRef(Some(list)));
@@ -545,7 +531,6 @@ fn follow_the_calendar() {
     });
 }
 
-/// Syncs every account now; the spinner shows while one is syncing.
 fn sync_button() -> impl IntoElement {
     // Only when it starts or stops: the accounts are read again many times meanwhile, and
     // starting the spinner again each time would jerk it back.

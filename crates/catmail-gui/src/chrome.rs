@@ -95,7 +95,6 @@ pub fn move_row() -> View {
         .window_drag(true)
 }
 
-/// The bar of commands at the top of a pane, a [`move_row`] with a line under it.
 pub fn toolbar() -> View {
     move_row()
         .flex_row()

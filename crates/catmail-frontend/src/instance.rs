@@ -212,13 +212,11 @@ fn runtime_dir() -> Option<PathBuf> {
 /// How handing a request to the app went, when it didn't fail.
 enum Handing {
     Taken,
-    /// Nobody listens.
     Nobody,
     /// The app is quitting: it will let go of the data directory.
     Quitting,
 }
 
-/// Sends `request` to the app listening on `socket`.
 fn hand(socket: &Path, request: &Request) -> Result<Handing, HandError> {
     // Missing, or left by a run that ended: nobody to hand it to.
     let Ok(stream) = UnixStream::connect(socket) else {

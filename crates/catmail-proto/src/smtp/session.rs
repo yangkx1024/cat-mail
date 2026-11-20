@@ -29,7 +29,6 @@ const MAX_REPLY: u64 = 64 * 1024;
 /// The message is dot-stuffed and written this much at a time, rather than copied whole.
 const DATA_CHUNK: usize = 64 * 1024;
 
-/// An SMTP connection, from greeting to QUIT.
 pub struct Session {
     io: BufReader<Box<dyn Stream>>,
     /// EHLO keywords, upper-cased, with their parameters.

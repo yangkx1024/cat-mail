@@ -176,7 +176,6 @@ async fn add(
     Ok(())
 }
 
-/// The account with the addresses it sends as.
 async fn with_identities(
     client: &MailClient,
     account: Account,

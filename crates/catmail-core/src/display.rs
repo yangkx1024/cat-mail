@@ -34,7 +34,6 @@ pub(crate) fn local_date(timestamp: Option<i64>) -> Option<String> {
     )
 }
 
-/// The name, or the address where there is none.
 fn name(address: &Address) -> &str {
     address.name.as_deref().unwrap_or(&address.email)
 }

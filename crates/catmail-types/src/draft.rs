@@ -20,7 +20,6 @@ pub struct DraftContent {
 }
 
 impl DraftContent {
-    /// To, Cc and Bcc, in that order.
     pub fn recipients(&self) -> impl Iterator<Item = &Address> {
         self.to.iter().chain(&self.cc).chain(&self.bcc)
     }
@@ -70,7 +69,6 @@ impl DraftBody {
 pub struct Quote {
     /// What introduces it: who wrote the message and when, or a forward's headers.
     pub head: QuoteHead,
-    /// The message's text.
     pub text: String,
     /// The message's HTML as it was sanitized when stored (a style sheet in front, if
     /// any), its images inline attachments of the draft by `cid:` URL
@@ -160,7 +158,6 @@ impl Quote {
 }
 
 impl QuoteHead {
-    /// Every value it shows, to change in place.
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut String> {
         let (attribution, headers) = match self {
             QuoteHead::Reply(Attribution { from, date }) => {
@@ -187,7 +184,6 @@ impl std::fmt::Display for Attribution {
 }
 
 impl ForwardField {
-    /// The header's name as shown.
     pub fn label(self) -> &'static str {
         match self {
             ForwardField::From => "From",
@@ -214,7 +210,6 @@ fn with_quote(text: &str, quote: &str) -> String {
 /// other parts stays.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DraftChanges {
-    /// The identity to send it as.
     pub from: Option<IdentityId>,
     pub subject: Option<String>,
     pub to: Option<Vec<Address>>,
@@ -307,7 +302,6 @@ pub enum Answer {
 }
 
 impl Forwarding {
-    /// What forwarding takes of the message.
     pub fn answer(&self) -> Answer {
         if self.as_attachment {
             Answer::ForwardAttached
@@ -316,7 +310,6 @@ impl Forwarding {
         }
     }
 
-    /// To, Cc and Bcc, in that order.
     pub fn recipients(&self) -> impl Iterator<Item = &Address> {
         self.to.iter().chain(&self.cc).chain(&self.bcc)
     }
@@ -328,7 +321,6 @@ impl Forwarding {
 pub struct Draft {
     pub id: DraftId,
     pub account_id: AccountId,
-    /// Sent as this identity of the account.
     pub identity: IdentityId,
     #[serde(flatten)]
     pub content: DraftContent,
@@ -388,7 +380,6 @@ impl DraftSummary {
         }
     }
 
-    /// To, Cc and Bcc, in that order.
     pub fn recipients(&self) -> impl Iterator<Item = &Address> {
         self.to.iter().chain(&self.cc).chain(&self.bcc)
     }
@@ -457,7 +448,6 @@ pub enum NewFile {
 }
 
 impl NewFile {
-    /// Its file name, as the attachment will be called.
     pub fn name(&self) -> String {
         match self {
             NewFile::Path(path) => path

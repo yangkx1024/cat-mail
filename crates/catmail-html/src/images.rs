@@ -118,7 +118,6 @@ impl ServedImage {
         format!("{kind}/{}", utf8_percent_encode(key, RESERVED))
     }
 
-    /// The image a [`path`](Self::path) names, or `None` for anything else.
     pub fn from_path(path: &str) -> Option<Self> {
         let (kind, key) = path.split_once('/')?;
         let key = percent_decode(key);

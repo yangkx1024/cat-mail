@@ -14,7 +14,6 @@ use crate::messages::shown;
 const WAITING: &str =
     "EXISTS (SELECT 1 FROM pending_ops w WHERE w.id = o.after_op AND w.status = 'pending')";
 
-/// A queued op, as replay needs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayOp {
     pub id: PendingOpId,
@@ -69,7 +68,6 @@ pub enum ReplayKind {
     },
 }
 
-/// A folder with ops to replay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayFolder {
     pub id: FolderId,

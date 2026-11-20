@@ -22,7 +22,6 @@ pub(crate) fn open_client(dir: &Path, secrets: Arc<dyn SecretStore>) -> MailClie
         .unwrap()
 }
 
-/// A client on `dir` with one account, `email`.
 pub(crate) async fn client_with_account(
     dir: &Path,
     secrets: Arc<dyn SecretStore>,
@@ -54,7 +53,6 @@ pub(crate) fn new_account(email: &str) -> NewAccount {
     }
 }
 
-/// A draft to `b@example.com`.
 pub(crate) async fn draft_to_b(client: &MailClient, account: AccountId) -> Draft {
     let content = DraftContent {
         to: vec![Address {
@@ -74,7 +72,6 @@ pub(crate) async fn queue_one(client: &MailClient, account: AccountId) -> Outbox
     client.send_draft(draft.id).await.unwrap()
 }
 
-/// The key the account's password is stored under.
 pub(crate) fn secret_key(client: &MailClient, id: AccountId) -> String {
     client
         .engine()

@@ -169,7 +169,6 @@ impl FakeSmtp {
         self.addr.port()
     }
 
-    /// Locks the server state, e.g. to set faults or look at what was delivered.
     pub fn state(&self) -> MutexGuard<'_, SmtpState> {
         lock(&self.state)
     }

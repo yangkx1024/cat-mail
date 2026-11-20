@@ -13,7 +13,6 @@ pub struct SearchQuery {
     pub text: String,
     /// Only these accounts; `None` searches every account, an empty list none.
     pub accounts: Option<Vec<AccountId>>,
-    /// Only this folder.
     pub folder: Option<FolderId>,
     /// Which page of the matches, and only those its filter takes: paged and filtered
     /// as a list is.
@@ -31,7 +30,6 @@ impl SearchQuery {
         Self::paged(text, ListQuery::new(50))
     }
 
-    /// The matches `page` asks for.
     pub fn paged(text: impl Into<String>, page: ListQuery) -> Self {
         Self {
             text: text.into(),
@@ -50,7 +48,6 @@ pub struct ListQuery {
     pub limit: u32,
     /// Only the messages after this one; the next page after a page ending with it.
     pub after: Option<MessageCursor>,
-    /// Only the messages it takes.
     #[serde(default)]
     pub filter: ListFilter,
 }
@@ -66,7 +63,6 @@ impl ListQuery {
     }
 }
 
-/// Which of a list's messages to show, by their flags.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FlagFilter {
@@ -111,7 +107,6 @@ impl ListFilter {
     }
 }
 
-/// One term of a [`SearchQuery`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchTerm {
     pub field: SearchField,
@@ -119,7 +114,6 @@ pub struct SearchTerm {
     pub text: String,
 }
 
-/// What a [`SearchTerm`] is matched against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchField {
     /// The subject, the addresses and the body.
@@ -174,7 +168,6 @@ impl SearchTerm {
     }
 }
 
-/// Query prefixes and the fields they restrict a term to.
 const PREFIXES: [(&str, SearchField); 3] = [
     ("from:", SearchField::From),
     ("to:", SearchField::To),

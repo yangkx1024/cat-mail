@@ -121,7 +121,6 @@ fn limit(asked: Option<u32>) -> u32 {
 }
 
 impl Mail {
-    /// Where the page after message `id` starts.
     async fn cursor(&self, id: Option<i64>) -> Result<Option<MessageCursor>, Failed> {
         match id {
             Some(id) => Ok(Some(self.message(id).await?.cursor())),
@@ -129,7 +128,6 @@ impl Mail {
         }
     }
 
-    /// The page of a list, or of search results, that the parameters ask for.
     async fn list_query(
         &self,
         limit: u32,

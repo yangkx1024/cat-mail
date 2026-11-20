@@ -31,7 +31,6 @@ impl Size {
     }
 }
 
-/// Between groups of a toolbar's buttons.
 pub fn separator(size: Size) -> View {
     view()
         .w(px(1.0))
@@ -215,7 +214,6 @@ pub fn text_button(label: &'static str, outlined: bool, press: impl Fn() + 'stat
         )
 }
 
-/// A tooltip that says `text`.
 pub fn tooltip(text_: impl Fn() -> String + 'static) -> AnyElement {
     view()
         .max_w(px(320.0))
@@ -233,7 +231,6 @@ pub fn tooltip(text_: impl Fn() -> String + 'static) -> AnyElement {
         .into_element()
 }
 
-/// A small button with an icon and a label: outlined, or plain.
 pub fn labelled_button(
     glyph: Icon,
     label: &'static str,

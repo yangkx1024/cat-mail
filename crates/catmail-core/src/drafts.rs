@@ -321,7 +321,6 @@ fn copy_path(blobs: &BlobStore, path: &Path, used: u64, limit: u64) -> Result<Ne
     })
 }
 
-/// Stores `content`, to be attached as `name`.
 fn store_content(
     blobs: &BlobStore,
     name: &str,
@@ -954,7 +953,6 @@ pub(crate) fn new_message_id(email: &str) -> String {
     format!("{}@{domain}", Uuid::new_v4().simple())
 }
 
-/// Where a draft built as a message goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Destination {
     /// Its copy in the Drafts folder: with its Bcc recipients in the headers, and 8-bit

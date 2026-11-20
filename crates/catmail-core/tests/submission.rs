@@ -47,7 +47,6 @@ fn addr(name: Option<&str>, email: &str) -> Address {
     }
 }
 
-/// A short message to zhang@example.com.
 fn note(subject: &str) -> DraftContent {
     DraftContent {
         to: vec![addr(None, "zhang@example.com")],

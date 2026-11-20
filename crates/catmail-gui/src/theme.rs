@@ -95,7 +95,6 @@ pub fn tint(hue: AdaptiveColor) -> AdaptiveColor {
     }
 }
 
-/// A flagged message's flag.
 pub fn flag() -> AdaptiveColor {
     warning()
 }
@@ -105,22 +104,18 @@ pub fn warning() -> AdaptiveColor {
     token("warning", || theme().destructive)
 }
 
-/// A badge for something that needs a look.
 pub fn warning_badge() -> AdaptiveColor {
     tint(warning())
 }
 
-/// A badge for something that failed.
 pub fn danger_badge() -> AdaptiveColor {
     tint(theme().destructive)
 }
 
-/// A list's selected row.
 pub fn list_active() -> AdaptiveColor {
     token("list-active", || theme().accent)
 }
 
-/// A list's row under the pointer.
 pub fn list_hover() -> AdaptiveColor {
     token("list-hover", || theme().accent)
 }

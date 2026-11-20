@@ -59,7 +59,6 @@ fn manager() -> Rc<RefCell<Manager>> {
     global::<Toasts>().with_untracked(|t| t.0.clone())
 }
 
-/// Shows `text` for a while.
 pub fn notify(level: Level, text: impl Into<String>) {
     let manager = manager();
     {
@@ -127,7 +126,6 @@ fn dismiss(id: u64) {
     tick();
 }
 
-/// The stack, over the window.
 pub fn toasts() -> impl IntoElement {
     let state = ToastStackState::new();
     global::<Expanded>().set(Expanded(Some(state)));

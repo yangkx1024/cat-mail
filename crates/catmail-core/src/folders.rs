@@ -269,7 +269,6 @@ pub(crate) async fn delete(engine: Arc<Engine>, id: FolderId) -> Result<()> {
         .await
 }
 
-/// The account the folder is in.
 pub(crate) async fn account_of(engine: &Arc<Engine>, id: FolderId) -> Result<AccountId> {
     engine
         .read(move |db| db.folders().get(id))
