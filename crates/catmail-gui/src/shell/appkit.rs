@@ -27,8 +27,8 @@ use objc2::{
 use objc2_app_kit::{
     NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
     NSApplicationActivationPolicy, NSApplicationDelegate, NSApplicationTerminateReply,
-    NSBackingStoreType, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSMenu,
-    NSMenuItem, NSText, NSTextField, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSBackingStoreType, NSEvent, NSEventMask, NSEventModifierFlags, NSMenu, NSMenuItem, NSText,
+    NSTextField, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -63,6 +63,8 @@ pub fn run(started: impl FnOnce() + 'static) -> u8 {
     started();
     // The main window opens once the app has launched (`did_finish_launching`).
     app.run();
+    // Only if something else stops the loop: quitting ends the process in `terminate:`
+    // ([`end`]).
     app.setDelegate(None);
     0
 }
@@ -117,7 +119,7 @@ define_class!(
         #[unsafe(method(applicationShouldTerminate:))]
         fn should_terminate(&self, _app: &NSApplication) -> NSApplicationTerminateReply {
             if TERMINATION.get() == Termination::Ending {
-                // Too late to be answered later: the loop is stopping.
+                // From `end`: the app has decided.
                 return NSApplicationTerminateReply::TerminateNow;
             }
             TERMINATION.set(Termination::Asked);
@@ -125,8 +127,8 @@ define_class!(
             NSApplicationTerminateReply::TerminateLater
         }
 
-        /// AppKit ends the process on return, without [`run`] returning: the engine shuts
-        /// down here.
+        /// However the app quits: AppKit ends the process on return, without [`run`]
+        /// returning, so the engine shuts down here.
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _notification: &NSNotification) {
             super::finish();
@@ -157,18 +159,20 @@ pub fn resident() {
         .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 }
 
-/// Where the app is in quitting, as far as AppKit is concerned. When AppKit asks to
-/// terminate, it is answered later (`TerminateLater`), and runs the loop meanwhile: yes
-/// from [`end`], and it ends the process itself after `applicationWillTerminate:`; no from
+/// Where the app is in quitting, as far as AppKit is concerned. Every quit ends in AppKit
+/// terminating, which ends the process itself after `applicationWillTerminate:`. When it
+/// asks (Quit in the app menu or the Dock, a logout), it is answered later
+/// (`TerminateLater`), and runs the loop meanwhile: yes from [`end`], no from
 /// [`quit_called_off`]. Answering at once, by cancelling and ending the loop later, would
-/// call a logout off.
+/// call a logout off. A quit of the app's own (Ctrl+Q, the tray, a signal, the last
+/// window) asks it from [`end`], and is answered at once.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum Termination {
     #[default]
     Running,
     /// AppKit asked to terminate, and waits for the answer.
     Asked,
-    /// [`end`] has run: the loop is stopping, or AppKit was told it can terminate.
+    /// [`end`] has run: AppKit was told it can terminate, or asked to.
     Ending,
 }
 
@@ -185,30 +189,14 @@ pub fn quit_called_off() {
     }
 }
 
-/// The app ends, with whatever windows it has: AppKit terminates if it asked
-/// ([`Termination`]), else its loop stops and [`run`] returns.
+/// The app ends, with whatever windows it has: AppKit terminates, answered yes if it asked
+/// ([`Termination`]), else asked now, and the process ends in `applicationWillTerminate:`.
 pub fn end() {
     let app = NSApplication::sharedApplication(main_thread());
     if TERMINATION.replace(Termination::Ending) == Termination::Asked {
         app.replyToApplicationShouldTerminate(true);
-        return;
-    }
-    app.stop(None);
-    // `stop:` takes effect after the next event, and this may come from the dispatch
-    // queue rather than an event: one is posted, as nsh's `run_app` does.
-    let event = NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
-        NSEventType::ApplicationDefined,
-        NSPoint::new(0.0, 0.0),
-        NSEventModifierFlags::empty(),
-        0.0,
-        0,
-        None,
-        0,
-        0,
-        0,
-    );
-    if let Some(event) = event {
-        app.postEvent_atStart(&event, true);
+    } else {
+        app.terminate(None);
     }
 }
 

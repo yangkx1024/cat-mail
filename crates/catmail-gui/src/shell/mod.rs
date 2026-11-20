@@ -297,7 +297,8 @@ pub fn on_main<R: Send + 'static>(
 }
 
 /// Runs the app until it quits, then shuts the engine down: the process's exit code.
-/// `hidden`, it opens no window at launch, as once its last is closed.
+/// `hidden`, it opens no window at launch, as once its last is closed. On macOS it doesn't
+/// return: AppKit ends the process, after [`finish`].
 pub fn run(
     builder: MailClientBuilder,
     requests: Option<Requests>,
