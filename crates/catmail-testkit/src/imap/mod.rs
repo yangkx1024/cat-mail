@@ -367,6 +367,8 @@ pub struct Faults {
     pub noop_refusal: Option<String>,
     /// Answer every NOOP by closing the connection with `* BYE <text>`.
     pub bye_on_noop: Option<String>,
+    /// Answer every NOOP with a line no parser accepts before OK.
+    pub garble_noop: bool,
     /// Hold each command that starts with this text (`DELETE`) until it gets a permit,
     /// e.g. to make changes while the server is at it, or to keep a sync from reporting
     /// that it finished (`LOGOUT`). Logged before it waits; one already waiting keeps
@@ -495,6 +497,7 @@ impl Default for Faults {
             bye_on_idle: None,
             noop_refusal: None,
             bye_on_noop: None,
+            garble_noop: false,
             gate: None,
             refuse_connections: 0,
             drop_after_mailbox_change: false,
@@ -1347,6 +1350,9 @@ async fn handle(
                     next = Next::Close;
                 }
                 (None, None) => {
+                    if st.faults.garble_noop {
+                        out += "* GARBLED (((\r\n";
+                    }
                     if let (Some(mb), Some(view)) = (session.mailbox(&st), &mut session.view) {
                         out += &view.catch_up(View::of(mb));
                     }

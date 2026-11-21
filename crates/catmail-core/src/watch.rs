@@ -135,11 +135,20 @@ enum Wait {
     InboxFailed,
 }
 
+impl Wait {
+    /// Whether INBOX was synced and left selected, so keepalive NOOPs while polling can
+    /// check it for changes.
+    fn watches_inbox(&self) -> bool {
+        matches!(self, Self::Idle | Self::Poll)
+    }
+}
+
 enum KeepAlive {
-    /// Connection stayed quiet, died, or was closed.
-    Quiet,
-    /// The server reported a change to the selected mailbox.
-    Changed,
+    /// The connection answered and stays open; `changed` is whether the server reported a
+    /// change to INBOX (only asked when polling it).
+    Alive { changed: bool },
+    /// The connection was closed (died, from before a sleep, or cancelled).
+    Closed,
     /// The server said the account went over its download limit.
     OverLimit(catmail_proto::imap::Error),
 }
@@ -161,7 +170,8 @@ async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
     };
     // IDLEs in a row that the connection was lost in soon after they began.
     let mut idle_losses = 0;
-    // IDLEs in a row that ended with a change soon after they began.
+    // IDLEs in a row that ended with a change soon after they began, or keepalive NOOPs
+    // in a row that woke polling early.
     let mut busy = 0;
     // Cleared if the server refuses IDLE even though it offers it, or cuts it short.
     let mut idle_works = true;
@@ -188,10 +198,9 @@ async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
             .map_or(full, |drafts| full.min(drafts));
         drop(strong);
 
-        let inbox_selected = matches!(result, Ok(Wait::Idle | Wait::Poll | Wait::InboxFailed));
-        // `stop_on_change`: only between normal polls of INBOX, never during backoff or
-        // after INBOX failed.
-        let (pause, stop_on_change) = match result {
+        // `poll_inbox`: check INBOX for changes in keepalive NOOPs only between normal
+        // polls of INBOX, never during backoff, after INBOX failed, or without an INBOX.
+        let (pause, poll_inbox) = match result {
             Ok(_) if due.is_zero() => continue,
             Ok(wait) => match (wait, session.as_mut()) {
                 (Wait::Idle, Some(s)) if idle_works => {
@@ -265,8 +274,7 @@ async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
                         }
                     }
                 }
-                (Wait::Idle | Wait::Poll, _) => (schedule.poll.min(due), true),
-                (Wait::NoInbox | Wait::InboxFailed, _) => (schedule.poll.min(due), false),
+                (wait, _) => (schedule.poll.min(due), wait.watches_inbox()),
             },
             Err(Error::AccountNotFound(_) | Error::Cancelled) => return,
             Err(e) => {
@@ -300,16 +308,33 @@ async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
             if !noop {
                 break;
             }
-            match keep_alive(&engine, account, &mut session, &mut cancellation).await {
-                KeepAlive::Quiet => {}
-                KeepAlive::Changed => {
-                    if inbox_selected && let Some(s) = &session {
+            match keep_alive(
+                &engine,
+                account,
+                &mut session,
+                poll_inbox,
+                &mut cancellation,
+            )
+            .await
+            {
+                KeepAlive::Alive { changed: true } => {
+                    if let Some(s) = &session {
                         add_changed_flags(&mut changed_flags, s.changed_flags());
                     }
-                    if stop_on_change {
+                    busy = busy.saturating_add(1);
+                    if busy <= BUSY {
                         break;
                     }
+                    if busy == BUSY + 1 {
+                        tracing::debug!(%account, "INBOX keeps changing; slowing down");
+                    }
                 }
+                KeepAlive::Alive { changed: false } => {
+                    if poll_inbox {
+                        busy = 0;
+                    }
+                }
+                KeepAlive::Closed => {}
                 KeepAlive::OverLimit(e) => {
                     let delay = went_over_limit(&engine, account, e, &schedule);
                     until = tokio::time::Instant::now() + delay;
@@ -339,40 +364,46 @@ fn went_over_limit(
 
 /// Sends the connection background sync waits on a NOOP, so that the server doesn't
 /// close it as idle before the next step: NetEase does after a minute, and offers no
-/// IDLE, so that each check of INBOX would log in again. Closes one that died, or one
-/// from before a sleep (see [`pool::usable`]); reports whether the server announced a
-/// change to the selected mailbox or said the account went over its download limit.
-/// Queued changes and waking from sleep don't cut the NOOP short, which would leave its
-/// answer half read: their signals keep a permit, so the wait after it ends at once.
+/// IDLE, so that each check of INBOX would log in again. With `poll_inbox`, also checks
+/// the answer for changes to INBOX ([`pool::poll`]). Closes one that died, or one from
+/// before a sleep (see [`pool::usable`]); reports if the server said the account went
+/// over its download limit. Queued changes and waking from sleep don't cut the NOOP
+/// short, which would leave its answer half read: their signals keep a permit, so the
+/// wait after it ends at once.
 async fn keep_alive(
     engine: &Weak<Engine>,
     account: AccountId,
     slot: &mut Option<Session>,
+    poll_inbox: bool,
     cancellation: &mut Cancellation,
 ) -> KeepAlive {
     let Some(session) = slot.as_mut() else {
-        return KeepAlive::Quiet;
+        return KeepAlive::Closed;
     };
     // The task ends at its next look if the engine is gone.
     let Some(usable) = engine.upgrade().map(|e| pool::usable(&e, session)) else {
-        return KeepAlive::Quiet;
+        return KeepAlive::Closed;
     };
     if !usable {
         tracing::debug!(%account, "waiting connection from before a sleep; closed");
         *slot = None;
-        return KeepAlive::Quiet;
+        return KeepAlive::Closed;
     }
     let stop = cancellation.cancelled();
-    match pool::ping(account, session, "background sync", stop).await {
-        Some(Pinged::Alive { changed: true }) => KeepAlive::Changed,
-        Some(Pinged::Alive { changed: false }) => KeepAlive::Quiet,
+    let pinged = if poll_inbox {
+        pool::poll(account, session, "background sync", stop).await
+    } else {
+        pool::ping(account, session, "background sync", stop).await
+    };
+    match pinged {
+        Some(Pinged::Alive { changed }) => KeepAlive::Alive { changed },
         Some(Pinged::OverLimit(e)) => {
             *slot = None;
             KeepAlive::OverLimit(e)
         }
         Some(Pinged::Died) | None => {
             *slot = None;
-            KeepAlive::Quiet
+            KeepAlive::Closed
         }
     }
 }

@@ -585,29 +585,59 @@ async fn keepalive_noop_wakes_poll_on_changes() {
     assert_eq!((st.connections, st.received("LIST")), (1, 1));
 }
 
-/// While backing off because INBOX keeps changing, a keepalive NOOP that reports another
-/// change must not cut the backoff short.
+/// While backing off because INBOX keeps changing, keepalive NOOPs run without cutting
+/// the backoff short.
 #[tokio::test(flavor = "multi_thread")]
 async fn keepalive_noop_does_not_cut_backoff_short() {
     let mut state = state();
     state.faults.garble_idle = true;
     let schedule = SyncSchedule {
         poll: HOUR,
-        retry: Duration::from_secs(2),
+        retry: Duration::from_secs(10),
         keepalive: Duration::from_millis(50),
         ..schedule(HOUR, HOUR)
     };
     let env = watching(state, schedule).await;
-    // Eleven immediate IDLEs (`BUSY` + 1) enter the 2-second backoff, during which NOOPs run.
+    // Eleven immediate IDLEs (`BUSY` + 1) enter the 10-second backoff, with INBOX already
+    // marked changed on the connection; keepalive NOOPs during backoff must not wake it.
     env.wait_for_idle(11).await;
-    env.fake.wait_until(|st| st.received("NOOP") >= 1).await;
-    let noops = env.fake.state().received("NOOP");
-    env.fake.state().inbox().append_simple("three");
-    // Wait for NOOPs that see the new message; backoff must still hold.
-    env.fake
-        .wait_until(|st| st.received("NOOP") >= noops + 3)
-        .await;
+    env.fake.wait_until(|st| st.received("NOOP") >= 3).await;
     assert_eq!(env.fake.state().received("IDLE"), 11);
+}
+
+/// A server whose NOOP reports a change (or a malformed line) every time must not sync
+/// INBOX on every keepalive forever: past `BUSY` early wakes in a row it falls back to
+/// the full `poll` interval until a NOOP is quiet.
+#[tokio::test(flavor = "multi_thread")]
+async fn noop_reporting_changes_every_time_slows_down() {
+    let mut state = state();
+    state.faults.idle = false;
+    state.faults.garble_noop = true;
+    let schedule = SyncSchedule {
+        poll: HOUR,
+        keepalive: Duration::from_millis(20),
+        ..schedule(HOUR, HOUR)
+    };
+    let env = watching(state, schedule).await;
+    // First 10 NOOPs (`BUSY`) each wake early and EXAMINE INBOX; from the 11th on, NOOPs
+    // keep running without waking until `poll` (1 hour).
+    env.fake.wait_until(|st| st.received("NOOP") >= 15).await;
+    // Initial full sync (INBOX + Archive) + INBOX before waiting + 10 early wakes.
+    assert_eq!(env.fake.state().received("EXAMINE"), 13);
+
+    // Clear the fault and re-EXAMINE INBOX (which resets `changed` on the connection);
+    // once a quiet NOOP clears `busy`, early wakeups resume well before `poll` (1 hour).
+    env.fake.state().faults.garble_noop = false;
+    env.client.sync_now().await.unwrap();
+    env.wait_until_synced().await;
+    let noops = env.fake.state().received("NOOP");
+    // The second clean NOOP guarantees the first was processed and cleared `busy`.
+    env.fake
+        .wait_until(|st| st.received("NOOP") >= noops + 2)
+        .await;
+    env.fake.state().inbox().append_simple("three");
+    env.wait_for_subjects("INBOX", &["one", "three", "two"])
+        .await;
 }
 
 /// A connection found dead by a NOOP while waiting is closed, and the next check of

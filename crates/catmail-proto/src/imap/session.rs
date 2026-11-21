@@ -376,20 +376,24 @@ impl Session {
         self.selected.as_ref().filter(|o| !o.writable)
     }
 
-    /// Asks the server for nothing but news of the opened mailbox (RFC 3501 §6.1.2),
-    /// which keeps a quiet connection from being closed and tells whether it still works.
-    /// Returns whether the server has reported a change to the selected mailbox since it
-    /// was opened (in this answer or an earlier one); always `false` with none selected.
-    /// Flag changes it reported are resolved for [`changed_flags`](Self::changed_flags),
-    /// as after [`idle`](Self::idle).
-    pub async fn noop(&mut self) -> Result<bool> {
+    /// Keeps a quiet connection from being closed and tells whether it still works
+    /// (NOOP). Doesn't inspect change reports in the answer; use [`poll`](Self::poll) to
+    /// check the selected mailbox.
+    pub async fn noop(&mut self) -> Result<()> {
+        // Only the tagged answer matters.
+        self.conn.execute_lossy(Command::new("NOOP")).await?;
+        Ok(())
+    }
+
+    /// Asks the server for news of the selected mailbox (NOOP, RFC 3501 §6.1.2), the
+    /// non-IDLE counterpart to [`idle`](Self::idle). Returns whether the server has
+    /// reported a change since the mailbox was opened (in this answer or an earlier one),
+    /// and resolves any flag changes it reported for [`changed_flags`](Self::changed_flags).
+    /// Fails, as `idle` does, if no mailbox is selected.
+    pub async fn poll(&mut self) -> Result<bool> {
+        self.selected_status()?;
         let changed = self.conn.noop().await?;
-        if self.selected.is_none() {
-            return Ok(false);
-        }
-        if changed {
-            self.resolve_changed_flags().await?;
-        }
+        self.resolve_changed_flags().await?;
         Ok(changed)
     }
 
@@ -419,49 +423,40 @@ impl Session {
     }
 
     /// The messages whose flags the server reported changed in the selected mailbox in
-    /// [`idle`](Self::idle) or [`noop`](Self::noop) since it was opened. Only those say
-    /// so: outside them, a FETCH is usually the answer to our own. Always `Unknown` for a
-    /// change with CONDSTORE, where what changed is found by MODSEQ instead.
+    /// the last [`idle`](Self::idle) or [`poll`](Self::poll) since it was opened. Only
+    /// those say so: outside them, a FETCH is usually the answer to our own. Always
+    /// `Unknown` for a change with CONDSTORE, where what changed is found by MODSEQ
+    /// instead.
     pub fn changed_flags(&self) -> &ChangedFlags {
         &self.changed_flags
     }
 
-    /// Adds the messages the connection saw flags change on, by UID, to `changed_flags`.
+    /// Sets `changed_flags` to the messages the connection saw flags change on, by UID.
     /// It knows them by sequence number, which the next EXPUNGE may change and the next
     /// command may bring one: but not a FETCH by sequence number (RFC 3501 §7.4.1).
     async fn resolve_changed_flags(&mut self) -> Result<()> {
+        self.changed_flags = ChangedFlags::Unknown;
         let seqs = match self.conn.take_changed_flags() {
-            Some(seqs) if seqs.is_empty() => return Ok(()),
-            Some(seqs) if !self.modseq_enabled() => seqs,
-            _ => {
-                self.changed_flags = ChangedFlags::Unknown;
+            Some(seqs) if seqs.is_empty() => {
+                self.changed_flags = ChangedFlags::default();
                 return Ok(());
             }
+            Some(seqs) if !self.modseq_enabled() => seqs,
+            _ => return Ok(()),
         };
-        if self.changed_flags == ChangedFlags::Unknown {
-            return Ok(());
-        }
         let Some(set) = uid_set(&seqs) else {
             return Ok(());
         };
         let fetch = Command::new("FETCH").raw(&set).raw("(UID)");
         match self.conn.execute(fetch).await {
             Ok(response) => {
-                let uids = group_fetches(response, |_| true).into_keys();
-                if let ChangedFlags::Uids(existing) = &mut self.changed_flags {
-                    existing.extend(uids);
-                    existing.sort_unstable();
-                    existing.dedup();
-                }
+                let uids = group_fetches(response, |_| true).into_keys().collect();
+                self.changed_flags = ChangedFlags::Uids(uids);
             }
             Err(e) if !e.is_fatal() => {
-                self.changed_flags = ChangedFlags::Unknown;
                 tracing::debug!(error = %e, "can't tell whose flags changed");
             }
-            Err(e) => {
-                self.changed_flags = ChangedFlags::Unknown;
-                return Err(e);
-            }
+            Err(e) => return Err(e),
         }
         Ok(())
     }

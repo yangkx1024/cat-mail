@@ -16,14 +16,15 @@
 
 ## 决策
 
-- **让 `Session::noop()` 返回 `Result<bool>` 并与 `IDLE` 同样解析 `changed_flags`**：NOOP 本身不会产生自己的 FETCH 响应，因此 NOOP 期间的 `FETCH` 与无法解析的行都可以像 IDLE 一样视为变化；没有变化或开启 CONDSTORE 时不发额外命令，无额外往返。`resolve_changed_flags` 改为向 `Session::changed_flags` 合并而不是覆盖，避免退避期间多次 NOOP 丢失前面记录的 UID。
-- **严格限定提前结束等待的范围**：只有正常轮询且 INBOX 处于选中状态（`Wait::Poll` 以及因 `!idle_works` 降级轮询的 `Wait::Idle`）才在 NOOP 报告变化时提前退出等待；退避（`busy > BUSY`）、INBOX 同步被拒（`Wait::InboxFailed`）及无 INBOX（`Wait::NoInbox`）均不提前唤醒，以免破坏退避策略或把其他文件夹的变化当成 INBOX。
+- **区分 `Session::noop()` 与 `Session::poll()`**：连接池保活、退避与失败重试等只需保活的场景继续用 `Session::noop()`，不看答复里的变化，避免在无 CONDSTORE 服务器上因为别的客户端改了 flags 而多发一次无人使用的 `FETCH <seq> (UID)`。轮询 INBOX 用新增的 `Session::poll()`（`IDLE` 的非 IDLE 对等方法），追踪 NOOP 中的 `FETCH` 与畸形行并沿用原有的 `resolve_changed_flags` 逻辑。
+- **轮询路径复用 `busy` / `BUSY` 防抖**：连续超过 `BUSY`（10）次由 NOOP 提前唤醒（例如服务器每次 NOOP 都返回无法解析的行或持续报变化）后不再提前结束等待，退回按完整 `poll` 间隔检查，直到收到一次安静的 NOOP 才恢复提前唤醒。
+- **只在正常轮询 INBOX 时使用 `poll`**：通过 `Wait::watches_inbox()` 决定 `poll_inbox`，退避（`busy > BUSY`）、INBOX 同步被拒（`Wait::InboxFailed`）及无 INBOX（`Wait::NoInbox`）均只走 `pool::ping` 保活。
 
 ## 方案
 
 - `crates/catmail-proto/src/imap/connection.rs`：新增 `Connection::noop()`，与 `IDLE` 共用变化追踪模式（`Mode::Noop`），把 NOOP 中的 `FETCH` 和畸形行计入 `changed` / `changed_flags`。
-- `crates/catmail-proto/src/imap/session.rs`：`Session::noop()` 返回 `Result<bool>`（未选中文件夹时返回 `false`），有变化时调用合并式的 `resolve_changed_flags()`。
-- `crates/catmail-core/src/pool.rs`：`Pinged::Alive` 携带 `changed: bool`。
-- `crates/catmail-core/src/watch.rs`：区分 `Wait::Poll` 与 `Wait::NoInbox`，在等待循环里根据 `stop_on_change` 决定是否在 `KeepAlive::Changed` 时提前结束等待，并在 INBOX 选中时将 `changed_flags` 合并保留。
-- `crates/catmail-testkit/src/imap/mod.rs`：假服务器的 `NOOP` 改为调用 `view.catch_up` 以报告 `EXPUNGE`、`EXISTS` 与 `FETCH FLAGS`。
-- 文档与测试：更新 `docs/architecture/sync.md`、`docs/architecture/protocol.md`；补充 `connection.rs`、`imap_session.rs` 和 `watch.rs` 的测试（并调整 `keeps_the_connection_open_between_polls` 使其在提前唤醒下仍确实越过 `idle_timeout`），运行 `cargo fmt`、`cargo clippy --workspace --all-targets -- -D warnings` 和 `cargo test --workspace` 验证。
+- `crates/catmail-proto/src/imap/session.rs`：保留 `Session::noop()` 供纯保活使用，新增 `Session::poll() -> Result<bool>` 返回是否有变化并调用 `resolve_changed_flags()`。
+- `crates/catmail-core/src/pool.rs`：`Pinged::Alive` 携带 `changed: bool`，拆出 `pool::ping`（纯保活）与 `pool::poll`（轮询变化）。
+- `crates/catmail-core/src/watch.rs`：区分 `Wait::Poll` 与 `Wait::NoInbox` 并提供 `Wait::watches_inbox()`；`KeepAlive` 拆为 `Alive { changed }`、`Closed` 与 `OverLimit`；轮询路径对连续 NOOP 提前唤醒套用 `busy` / `BUSY` 保护。
+- `crates/catmail-testkit/src/imap/mod.rs`：假服务器的 `NOOP` 改为调用 `view.catch_up` 报告 `EXPUNGE`、`EXISTS` 与 `FETCH FLAGS`，并新增 `Faults::garble_noop`。
+- 文档与测试：更新 `docs/architecture/sync.md`、`docs/architecture/protocol.md`；补充 `connection.rs`、`imap_session.rs` 和 `watch.rs` 的测试（含 NOOP 连续报变化时的降速与恢复测试），运行 `cargo fmt`、`cargo clippy --workspace --all-targets -- -D warnings` 和 `cargo test --workspace` 验证。

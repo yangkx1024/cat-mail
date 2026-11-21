@@ -187,8 +187,9 @@ async fn keep_alive(
 }
 
 pub(crate) enum Pinged {
-    /// Answered (`changed`: whether the server has reported a change to the selected
-    /// mailbox since it was opened), or refused (`changed: false`): as usable as it was.
+    /// Answered (with `changed` true if polled and the server reported a change to the
+    /// selected mailbox since it was opened), or refused (`changed: false`): as usable as
+    /// it was.
     Alive { changed: bool },
     /// The connection died: closed.
     Died,
@@ -207,12 +208,38 @@ pub(crate) async fn ping(
     whose: &'static str,
     stop: impl Future<Output = ()>,
 ) -> Option<Pinged> {
+    let opened = session.opened();
+    let noop = async { session.noop().await.map(|()| false) };
+    answered(account, whose, opened, noop, stop).await
+}
+
+/// Like [`ping`], but asks the server for changes to the selected mailbox
+/// ([`Session::poll`]) rather than ignoring the answer.
+pub(crate) async fn poll(
+    account: AccountId,
+    session: &mut Session,
+    whose: &'static str,
+    stop: impl Future<Output = ()>,
+) -> Option<Pinged> {
+    let opened = session.opened();
+    answered(account, whose, opened, session.poll(), stop).await
+}
+
+/// What the `noop` of a session `opened` then says about it, unless `stop` resolves
+/// first.
+async fn answered(
+    account: AccountId,
+    whose: &'static str,
+    opened: Instant,
+    noop: impl Future<Output = imap::Result<bool>>,
+    stop: impl Future<Output = ()>,
+) -> Option<Pinged> {
     let began = Instant::now();
     let result = tokio::select! {
-        result = session.noop() => result,
+        result = noop => result,
         () = stop => return None,
     };
-    let (took, age) = (began.elapsed(), session.opened().elapsed());
+    let (took, age) = (began.elapsed(), opened.elapsed());
     Some(match result {
         Ok(changed) => {
             tracing::debug!(%account, whose, changed, ?took, ?age, "kept an idle connection alive");
