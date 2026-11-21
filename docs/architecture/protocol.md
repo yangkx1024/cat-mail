@@ -116,16 +116,17 @@ VANISHED、FETCH）、`stop` 完成或过了 `max`，然后发 DONE、等 tagged
   的行当作"有变化"。
 - **顺带报告的变化。** 服务器可以在任何命令的答复里报告选中文件夹的变化，而且只说一次。连接层对每个
   答复记下 EXISTS（数量变了才算）、EXPUNGE、VANISHED，`Session` 打开文件夹时让它从头记起
-  （`Connection::mailbox_opened`）：打开以来已有变化时 `idle` 立即返回 true，不发 IDLE。IDLE 以外的
-  FETCH 不算（那通常是自己的 FETCH 的答复），别的客户端同时改的 flags 要等下一次同步。同一份 EXISTS
-  也让 SEARCH 知道文件夹是否已空。
-- **flags 变了的邮件。** IDLE 期间的 FETCH 记下序号，随后的 EXPUNGE 让它们跟着前移（被删的那封去掉）。
-  序号下一个 EXPUNGE 就可能变，而 IDLE 之后的下一条命令就可能带来 EXPUNGE，所以 `Session::idle` 在
-  IDLE 结束时立即用 `FETCH <序号> (UID)` 换成 UID：按序号的 FETCH 期间服务器不许发 EXPUNGE
-  （RFC 3501 §7.4.1），换出来的一定对。结果是 `Session::changed_flags`（最近一次 IDLE 的报告，打开文件夹时
-  清空）。说不清是哪几封时为 `ChangedFlags::Unknown`：IDLE 期间有无法解析的行、超过一千封（不再逐个记）、
-  有序号对不上的 VANISHED，或换 UID 的 FETCH 被拒绝。有 CONDSTORE 时不换、也是 `Unknown`：同步按 MODSEQ
-  找出变化，用不上这些 UID，省一次往返。后台同步据此只拉这几封的 flags（见[后台同步](sync.md#后台同步与-idle)）。
+  （`Connection::mailbox_opened`）：打开以来已有变化时 `idle` 立即返回 true，不发 IDLE；`Session::noop`
+  也返回打开以来是否报告过变化（未选中文件夹时始终为 false）。IDLE 和 NOOP 本身不发 FETCH，所以它们
+  答复里的 FETCH（以及无法解析的行）都按变化处理；其余命令里的 FETCH 不算（那通常是自己的 FETCH 的答复），
+  别的客户端同时改的 flags 要等下一次同步。同一份 EXISTS 也让 SEARCH 知道文件夹是否已空。
+- **flags 变了的邮件。** IDLE 和 NOOP 期间的 FETCH 记下序号，随后的 EXPUNGE 让它们跟着前移（被删的那封去掉）。
+  序号下一个 EXPUNGE 就可能变，而之后的下一条命令就可能带来 EXPUNGE，所以 `Session::idle` 和 `Session::noop`
+  在结束时立即用 `FETCH <序号> (UID)` 换成 UID 并合并进 `Session::changed_flags`（打开文件夹时清空；
+  同一文件夹多次 NOOP 间不会覆盖前一次的结果）：按序号的 FETCH 期间服务器不许发 EXPUNGE
+  （RFC 3501 §7.4.1），换出来的一定对。说不清是哪几封时为 `ChangedFlags::Unknown`：IDLE / NOOP 期间有
+  无法解析的行、超过一千封（不再逐个记）、有序号对不上的 VANISHED，或换 UID 的 FETCH 被拒绝。有
+  CONDSTORE 时不换、也是 `Unknown`：同步按 MODSEQ 找出变化，用不上这些 UID，省一次往返。后台同步据此只拉这几封的 flags（见[后台同步](sync.md#后台同步与-idle)）。
 
 ## 连接池
 

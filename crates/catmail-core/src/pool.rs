@@ -177,7 +177,7 @@ async fn keep_alive(
     // Not holding the engine meanwhile, which would keep it from closing.
     if !matches!(
         ping(account, &mut session, "pooled", closing.closed()).await,
-        Some(Pinged::Alive)
+        Some(Pinged::Alive { .. })
     ) {
         return;
     }
@@ -187,8 +187,9 @@ async fn keep_alive(
 }
 
 pub(crate) enum Pinged {
-    /// Answered, or refused: as usable as it was.
-    Alive,
+    /// Answered (`changed`: whether the server has reported a change to the selected
+    /// mailbox since it was opened), or refused (`changed: false`): as usable as it was.
+    Alive { changed: bool },
     /// The connection died: closed.
     Died,
     /// The server said the account went over its download limit, refusing the NOOP or
@@ -213,9 +214,9 @@ pub(crate) async fn ping(
     };
     let (took, age) = (began.elapsed(), session.opened().elapsed());
     Some(match result {
-        Ok(()) => {
-            tracing::debug!(%account, whose, ?took, ?age, "kept an idle connection alive");
-            Pinged::Alive
+        Ok(changed) => {
+            tracing::debug!(%account, whose, changed, ?took, ?age, "kept an idle connection alive");
+            Pinged::Alive { changed }
         }
         Err(e) if e.is_over_limit() => {
             tracing::info!(%account, whose, error = %e, "idle connection over the limit; closed");
@@ -223,7 +224,7 @@ pub(crate) async fn ping(
         }
         Err(e) if survives(&e) => {
             tracing::debug!(%account, whose, error = %e, ?took, "keepalive NOOP refused");
-            Pinged::Alive
+            Pinged::Alive { changed: false }
         }
         Err(e) => {
             tracing::info!(%account, whose, error = %e, ?took, ?age,

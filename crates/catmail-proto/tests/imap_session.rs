@@ -1182,6 +1182,52 @@ async fn idle_needs_server_support() {
     assert!(matches!(err, Error::Unsupported("IDLE")), "{err:?}");
 }
 
+#[tokio::test]
+async fn noop_reports_changes_and_changed_flags() {
+    let mut state = three_messages();
+    state.faults.condstore = false;
+    let fake = FakeImap::start(state).await;
+    let mut session = login(&fake).await;
+    // With nothing selected, NOOP only checks the connection.
+    assert!(!session.noop().await.unwrap());
+
+    session.examine("INBOX").await.unwrap();
+    assert!(!session.noop().await.unwrap());
+    assert_eq!(session.changed_flags(), &ChangedFlags::default());
+
+    // New mail.
+    fake.state().inbox().append_simple("four");
+    assert!(session.noop().await.unwrap());
+    assert_eq!(session.changed_flags(), &ChangedFlags::default());
+
+    // Expunge and flag change: resolved by UID, and kept across a second NOOP.
+    session.examine("INBOX").await.unwrap();
+    {
+        let mut st = fake.state();
+        st.inbox().expunge(1);
+        st.inbox().set_flags(3, &["\\Seen"]);
+    }
+    assert!(session.noop().await.unwrap());
+    assert_eq!(session.changed_flags(), &ChangedFlags::Uids(vec![3]));
+
+    fake.state().inbox().set_flags(2, &["\\Flagged"]);
+    assert!(session.noop().await.unwrap());
+    assert_eq!(session.changed_flags(), &ChangedFlags::Uids(vec![2, 3]));
+    // A quiet NOOP afterwards keeps what was already seen until the mailbox is opened again.
+    assert!(session.noop().await.unwrap());
+    assert_eq!(session.changed_flags(), &ChangedFlags::Uids(vec![2, 3]));
+
+    // With CONDSTORE, MODSEQs tell which flags changed, so no extra FETCH is sent.
+    let fake = FakeImap::start(three_messages()).await;
+    let mut session = login(&fake).await;
+    session.examine("INBOX").await.unwrap();
+    fake.state().inbox().set_flags(2, &["\\Seen"]);
+    let start = fake.state().log.len();
+    assert!(session.noop().await.unwrap());
+    assert_eq!(session.changed_flags(), &ChangedFlags::Unknown);
+    assert_eq!(fake.commands_since(start), ["NOOP"]);
+}
+
 /// Gmail with "one" (UID 1 in All Mail, INBOX, Important and Work; starred) and "two"
 /// (UID 2, Work and a label hidden from IMAP).
 fn gmail_state() -> ServerState {

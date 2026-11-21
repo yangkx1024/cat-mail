@@ -518,20 +518,96 @@ async fn keeps_the_connection_open_between_polls() {
     state.faults.idle = false;
     state.faults.idle_timeout = Some(Duration::from_secs(1));
     let schedule = SyncSchedule {
-        poll: Duration::from_secs(2),
+        poll: Duration::from_secs(3),
         keepalive: Duration::from_millis(100),
         ..schedule(HOUR, HOUR)
     };
     let env = watching(state, schedule).await;
-    // Waiting, past the first step: until then it could still sync INBOX once more and
-    // find new mail without any wait.
-    env.fake.wait_until(|st| st.received("NOOP") > 0).await;
+    // Past the server's idle timeout: only the keepalive NOOPs kept the connection open.
+    env.fake.wait_until(|st| st.received("NOOP") >= 12).await;
 
-    // Next checked after a wait longer than the server keeps a quiet connection.
     env.fake.state().inbox().append_simple("three");
     env.wait_for_subjects("INBOX", &["one", "three", "two"])
         .await;
     assert_eq!(env.fake.state().connections, 1);
+}
+
+/// Without IDLE, a change the server reports in answer to a keepalive NOOP ends the wait
+/// early rather than waiting out the poll interval; without CONDSTORE, only the flags
+/// NOOP reported changed are fetched.
+#[tokio::test(flavor = "multi_thread")]
+async fn keepalive_noop_wakes_poll_on_changes() {
+    let mut state = state();
+    state.faults.idle = false;
+    state.faults.condstore = false;
+    let schedule = SyncSchedule {
+        poll: HOUR,
+        keepalive: Duration::from_millis(50),
+        ..schedule(HOUR, HOUR)
+    };
+    let env = watching(state, schedule).await;
+    env.fake.wait_until(|st| st.received("NOOP") > 0).await;
+    let flags_fetches = || {
+        let st = env.fake.state();
+        st.log
+            .iter()
+            .filter(|c| c.line.ends_with("(UID FLAGS)"))
+            .map(|c| c.line.clone())
+            .collect::<Vec<_>>()
+    };
+    let before = flags_fetches();
+
+    // New mail arrives well before `poll` (1 hour) expires.
+    env.fake.state().inbox().append_simple("three");
+    env.wait_for_subjects("INBOX", &["one", "three", "two"])
+        .await;
+    assert_eq!(flags_fetches(), before, "new mail fetches no flags");
+
+    // Another client's flag change: only that message's flags are fetched.
+    let noops = env.fake.state().received("NOOP");
+    env.fake.wait_until(|st| st.received("NOOP") > noops).await;
+    env.fake.state().inbox().set_flags(2, &["\\Seen"]);
+    eventually("two to be read", async || {
+        env.messages("INBOX")
+            .await
+            .contains(&("two".into(), Flags::SEEN))
+    })
+    .await;
+    assert_eq!(flags_fetches()[before.len()..], ["UID FETCH 2 (UID FLAGS)"]);
+
+    // Expunge wakes the poll early too.
+    let noops = env.fake.state().received("NOOP");
+    env.fake.wait_until(|st| st.received("NOOP") > noops).await;
+    env.fake.state().inbox().expunge(1);
+    env.wait_for_subjects("INBOX", &["three", "two"]).await;
+
+    let st = env.fake.state();
+    assert_eq!((st.connections, st.received("LIST")), (1, 1));
+}
+
+/// While backing off because INBOX keeps changing, a keepalive NOOP that reports another
+/// change must not cut the backoff short.
+#[tokio::test(flavor = "multi_thread")]
+async fn keepalive_noop_does_not_cut_backoff_short() {
+    let mut state = state();
+    state.faults.garble_idle = true;
+    let schedule = SyncSchedule {
+        poll: HOUR,
+        retry: Duration::from_secs(2),
+        keepalive: Duration::from_millis(50),
+        ..schedule(HOUR, HOUR)
+    };
+    let env = watching(state, schedule).await;
+    // Eleven immediate IDLEs (`BUSY` + 1) enter the 2-second backoff, during which NOOPs run.
+    env.wait_for_idle(11).await;
+    env.fake.wait_until(|st| st.received("NOOP") >= 1).await;
+    let noops = env.fake.state().received("NOOP");
+    env.fake.state().inbox().append_simple("three");
+    // Wait for NOOPs that see the new message; backoff must still hold.
+    env.fake
+        .wait_until(|st| st.received("NOOP") >= noops + 3)
+        .await;
+    assert_eq!(env.fake.state().received("IDLE"), 11);
 }
 
 /// A connection found dead by a NOOP while waiting is closed, and the next check of

@@ -376,12 +376,21 @@ impl Session {
         self.selected.as_ref().filter(|o| !o.writable)
     }
 
-    /// Asks the server for nothing but news of the opened mailbox, which keeps a quiet
-    /// connection from being closed, and tells whether it still works.
-    pub async fn noop(&mut self) -> Result<()> {
-        // Only the tagged answer matters.
-        self.conn.execute_lossy(Command::new("NOOP")).await?;
-        Ok(())
+    /// Asks the server for nothing but news of the opened mailbox (RFC 3501 §6.1.2),
+    /// which keeps a quiet connection from being closed and tells whether it still works.
+    /// Returns whether the server has reported a change to the selected mailbox since it
+    /// was opened (in this answer or an earlier one); always `false` with none selected.
+    /// Flag changes it reported are resolved for [`changed_flags`](Self::changed_flags),
+    /// as after [`idle`](Self::idle).
+    pub async fn noop(&mut self) -> Result<bool> {
+        let changed = self.conn.noop().await?;
+        if self.selected.is_none() {
+            return Ok(false);
+        }
+        if changed {
+            self.resolve_changed_flags().await?;
+        }
+        Ok(changed)
     }
 
     /// Whether [`idle`](Self::idle) is available (IDLE, RFC 2177).
@@ -410,39 +419,49 @@ impl Session {
     }
 
     /// The messages whose flags the server reported changed in the selected mailbox in
-    /// the last [`idle`](Self::idle) since it was opened. Only IDLE says so: outside it,
-    /// a FETCH is usually the answer to our own. Always `Unknown` for a change with
-    /// CONDSTORE, where what changed is found by MODSEQ instead.
+    /// [`idle`](Self::idle) or [`noop`](Self::noop) since it was opened. Only those say
+    /// so: outside them, a FETCH is usually the answer to our own. Always `Unknown` for a
+    /// change with CONDSTORE, where what changed is found by MODSEQ instead.
     pub fn changed_flags(&self) -> &ChangedFlags {
         &self.changed_flags
     }
 
-    /// Sets `changed_flags` to the messages the connection saw flags change on, by UID.
+    /// Adds the messages the connection saw flags change on, by UID, to `changed_flags`.
     /// It knows them by sequence number, which the next EXPUNGE may change and the next
     /// command may bring one: but not a FETCH by sequence number (RFC 3501 §7.4.1).
     async fn resolve_changed_flags(&mut self) -> Result<()> {
-        self.changed_flags = ChangedFlags::Unknown;
         let seqs = match self.conn.take_changed_flags() {
-            Some(seqs) if seqs.is_empty() => {
-                self.changed_flags = ChangedFlags::default();
+            Some(seqs) if seqs.is_empty() => return Ok(()),
+            Some(seqs) if !self.modseq_enabled() => seqs,
+            _ => {
+                self.changed_flags = ChangedFlags::Unknown;
                 return Ok(());
             }
-            Some(seqs) if !self.modseq_enabled() => seqs,
-            _ => return Ok(()),
         };
+        if self.changed_flags == ChangedFlags::Unknown {
+            return Ok(());
+        }
         let Some(set) = uid_set(&seqs) else {
             return Ok(());
         };
         let fetch = Command::new("FETCH").raw(&set).raw("(UID)");
         match self.conn.execute(fetch).await {
             Ok(response) => {
-                let uids = group_fetches(response, |_| true).into_keys().collect();
-                self.changed_flags = ChangedFlags::Uids(uids);
+                let uids = group_fetches(response, |_| true).into_keys();
+                if let ChangedFlags::Uids(existing) = &mut self.changed_flags {
+                    existing.extend(uids);
+                    existing.sort_unstable();
+                    existing.dedup();
+                }
             }
             Err(e) if !e.is_fatal() => {
+                self.changed_flags = ChangedFlags::Unknown;
                 tracing::debug!(error = %e, "can't tell whose flags changed");
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                self.changed_flags = ChangedFlags::Unknown;
+                return Err(e);
+            }
         }
         Ok(())
     }

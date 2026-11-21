@@ -127,6 +127,25 @@ enum Step {
     Other,
 }
 
+/// How [`Connection::step`] treats untagged responses.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// An ordinary command: data is kept in `Response::data`, and FETCHes are usually
+    /// answers to our own FETCH.
+    Command,
+    /// NOOP: only the status and change reports matter; any FETCH or unparsable line is a
+    /// change to the selected mailbox.
+    Noop,
+    /// IDLE: like `Noop`, with untimed reads between `+` and `DONE`.
+    Idle,
+}
+
+impl Mode {
+    fn watches(self) -> bool {
+        matches!(self, Self::Noop | Self::Idle)
+    }
+}
+
 pub(crate) struct Greeting {
     pub status: Status,
     pub code: Option<Code>,
@@ -152,8 +171,8 @@ pub(crate) struct Connection {
     /// What the server said about the selected mailbox in passing, in the answers to any
     /// command (servers report new mail and expunges whenever they can): the last EXISTS
     /// less the EXPUNGEs since, and whether it reported a change since the mailbox was
-    /// opened. A change is an EXISTS with a new count, an EXPUNGE, a VANISHED, and while
-    /// idling a FETCH (outside IDLE that is usually the answer to our own FETCH).
+    /// opened. A change is an EXISTS with a new count, an EXPUNGE, a VANISHED, and in
+    /// IDLE or NOOP a FETCH (outside those, that is usually the answer to our own FETCH).
     exists: u32,
     changed: bool,
     /// The sequence numbers of those FETCHes, ascending, kept up to date with EXPUNGEs;
@@ -226,6 +245,19 @@ impl Connection {
     /// too, counted in [`Response::skipped`]. Only for results that are useful in part and
     /// whose caller notices what is missing.
     pub async fn execute_lossy(&mut self, command: Command) -> Result<Response> {
+        self.run(command, Mode::Command).await
+    }
+
+    /// Sends NOOP and returns whether the server has reported a change to the selected
+    /// mailbox since it was opened (in this answer or an earlier one). Like IDLE, NOOP
+    /// has no FETCH of its own, so any FETCH in its answer is a flag change, and an
+    /// unparsable line counts as a change too.
+    pub async fn noop(&mut self) -> Result<bool> {
+        self.run(Command::new("NOOP"), Mode::Noop).await?;
+        Ok(self.changed)
+    }
+
+    async fn run(&mut self, command: Command, mode: Mode) -> Result<Response> {
         let tag = self.next_tag()?;
         let mut segments = command.encode(&tag, self.literals).into_iter();
         self.write(&segments.next().expect("a command has a first line"))
@@ -233,7 +265,7 @@ impl Connection {
         let mut response = Response::default();
         loop {
             let raw = self.next_response(true).await?;
-            match self.step(&raw, &tag, command.name, &mut response, false)? {
+            match self.step(&raw, &tag, command.name, &mut response, mode)? {
                 Step::Continue => match segments.next() {
                     Some(segment) => self.write(&segment).await?,
                     None => tracing::debug!(
@@ -307,7 +339,7 @@ impl Connection {
                 done = true;
                 continue;
             };
-            match self.step(&raw, &tag, "IDLE", &mut ignored, true)? {
+            match self.step(&raw, &tag, "IDLE", &mut ignored, Mode::Idle)? {
                 Step::Continue => idling = !done,
                 // Also how a server ends IDLE on its own: a tagged OK before DONE.
                 Step::Done(Status::Ok, _) => return Ok(self.changed),
@@ -337,7 +369,7 @@ impl Connection {
         let mut response = Response::default();
         loop {
             let raw = self.next_response(true).await?;
-            match self.step(&raw, &tag, "AUTHENTICATE", &mut response, false)? {
+            match self.step(&raw, &tag, "AUTHENTICATE", &mut response, Mode::Command)? {
                 Step::Continue => {
                     // A second challenge means the server didn't take the answer; cancel
                     // and let it send the tagged NO.
@@ -358,20 +390,20 @@ impl Connection {
     }
 
     /// Takes in one response to the command tagged `tag`, as every command does: keeps
-    /// data in `response` (only tracks it while `idling`) and the codes of untagged
-    /// statuses, counts what can't be parsed, fails on BYE. Returns what is left for
-    /// the command itself.
+    /// data in `response` (for ordinary commands; NOOP and IDLE only track changes) and
+    /// the codes of untagged statuses, counts what can't be parsed, fails on BYE. Returns
+    /// what is left for the command itself.
     fn step(
         &mut self,
         raw: &[u8],
         tag: &str,
         command: &'static str,
         response: &mut Response,
-        idling: bool,
+        mode: Mode,
     ) -> Result<Step> {
         let Some(data) = parse(raw) else {
             // One response we can't parse (a buggy BODYSTRUCTURE, say) shouldn't take the
-            // whole session down, but the result may now be incomplete; while idling,
+            // whole session down, but the result may now be incomplete; in IDLE or NOOP,
             // whatever it was, look at the mailbox (and its flags) again.
             tracing::warn!(
                 command,
@@ -379,7 +411,7 @@ impl Connection {
                 "skipping malformed server response"
             );
             response.skipped += 1;
-            if idling {
+            if mode.watches() {
                 self.changed = true;
                 self.changed_flags = None;
             }
@@ -409,8 +441,8 @@ impl Connection {
                 response.codes.extend(Code::of(outcome));
             }
             data => {
-                self.track(&data, idling);
-                if !idling {
+                self.track(&data, mode.watches());
+                if mode == Mode::Command {
                     response.data.push(data);
                 }
             }
@@ -452,13 +484,13 @@ impl Connection {
     }
 
     /// The sequence numbers of the messages whose flags the server reported changed in
-    /// the selected mailbox while idling, since it was opened or this was last called;
+    /// the selected mailbox in IDLE or NOOP, since it was opened or this was last called;
     /// `None` if flags changed but it can't tell where.
     pub fn take_changed_flags(&mut self) -> Option<Vec<u32>> {
         self.changed_flags.replace(Vec::new())
     }
 
-    fn track(&mut self, data: &Data, idling: bool) {
+    fn track(&mut self, data: &Data, watch: bool) {
         match data {
             Data::MailboxData(MailboxDatum::Exists(n)) => {
                 self.changed |= self.exists != *n;
@@ -484,7 +516,7 @@ impl Connection {
                     self.changed_flags = None;
                 }
             }
-            Data::Fetch(seq, _) if idling => {
+            Data::Fetch(seq, _) if watch => {
                 self.changed = true;
                 if let Some(changed) = &mut self.changed_flags
                     && let Err(i) = changed.binary_search(seq)
@@ -857,6 +889,39 @@ mod tests {
                 "Known(ReadOnly)"
             ]
         );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn noop_tracks_changes_flags_and_malformed_lines() {
+        let (ours, theirs) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            let mut theirs = BufReader::new(theirs);
+            let answers = [
+                // Same count as when opened: NetEase sends this on flag changes.
+                "* 5 EXISTS\r\nC1 OK done\r\n",
+                "* 3 FETCH (FLAGS (\\Seen))\r\n* 1 EXPUNGE\r\nC2 OK done\r\n",
+                "* GARBLED (((\r\nC3 OK done\r\n",
+            ];
+            for answer in answers {
+                let mut command = String::new();
+                theirs.read_line(&mut command).await.unwrap();
+                theirs.get_mut().write_all(answer.as_bytes()).await.unwrap();
+            }
+        });
+        let mut conn = Connection::new(Box::new(ours), Duration::from_secs(10));
+        conn.mailbox_opened(5);
+
+        assert!(!conn.noop().await.unwrap());
+        assert_eq!(conn.take_changed_flags(), Some(Vec::new()));
+
+        assert!(conn.noop().await.unwrap());
+        // 3 moved down to 2 after `* 1 EXPUNGE`.
+        assert_eq!(conn.take_changed_flags(), Some(vec![2]));
+
+        conn.mailbox_opened(4);
+        assert!(conn.noop().await.unwrap());
+        assert_eq!(conn.take_changed_flags(), None);
         server.await.unwrap();
     }
 }

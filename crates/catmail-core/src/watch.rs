@@ -42,7 +42,8 @@ pub struct SyncSchedule {
     pub poll: Duration,
     /// While waiting other than in IDLE (between checks, or before trying again), the
     /// connection is sent a NOOP this often, so that it is still open for the next step
-    /// [45 seconds: NetEase closes one quiet for a minute].
+    /// [45 seconds: NetEase closes one quiet for a minute]. Between polls, a change to
+    /// INBOX the server reports in answer to the NOOP ends the wait early.
     pub keepalive: Duration,
     /// How long one IDLE lasts before it is started over, so that a connection that died
     /// without a word (a NAT box forgetting it, say) is noticed [10 minutes].
@@ -125,11 +126,22 @@ enum Idled {
 enum Wait {
     /// IDLE on INBOX, which the step left selected.
     Idle,
-    /// Nothing; check again later.
+    /// Check INBOX again later; the step left it selected.
     Poll,
-    /// As `Poll`, but INBOX couldn't be synced: flag changes IDLE reported are still to
-    /// be fetched.
+    /// The account has no INBOX to watch; check again later.
+    NoInbox,
+    /// As `Poll`, but INBOX couldn't be synced: flag changes reported earlier are still
+    /// to be fetched.
     InboxFailed,
+}
+
+enum KeepAlive {
+    /// Connection stayed quiet, died, or was closed.
+    Quiet,
+    /// The server reported a change to the selected mailbox.
+    Changed,
+    /// The server said the account went over its download limit.
+    OverLimit(catmail_proto::imap::Error),
 }
 
 /// Keeps one account in sync until it is removed or the engine is gone.
@@ -164,7 +176,7 @@ async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
         }
         let began = Instant::now();
         let result = step(&strong, &mut session, account, schedule, &changed_flags).await;
-        if matches!(result, Ok(Wait::Idle | Wait::Poll)) {
+        if matches!(result, Ok(Wait::Idle | Wait::Poll | Wait::NoInbox)) {
             changed_flags = ChangedFlags::default();
         }
         let failures = strong.report(account, Activity::SyncBegun(began), &result);
@@ -176,7 +188,10 @@ async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
             .map_or(full, |drafts| full.min(drafts));
         drop(strong);
 
-        let pause = match result {
+        let inbox_selected = matches!(result, Ok(Wait::Idle | Wait::Poll | Wait::InboxFailed));
+        // `stop_on_change`: only between normal polls of INBOX, never during backoff or
+        // after INBOX failed.
+        let (pause, stop_on_change) = match result {
             Ok(_) if due.is_zero() => continue,
             Ok(wait) => match (wait, session.as_mut()) {
                 (Wait::Idle, Some(s)) if idle_works => {
@@ -210,7 +225,7 @@ async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
                             }
                             let delay = backoff(schedule.retry, busy - BUSY, schedule.poll);
                             tracing::debug!(%account, ?delay, "INBOX keeps changing; slowing down");
-                            delay
+                            (delay, false)
                         }
                         Ok(Idled::CutShort) => {
                             tracing::info!(%account,
@@ -222,7 +237,7 @@ async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
                         // the account until it lifts, as for a step that fails so.
                         Err(e) if e.is_over_limit() => {
                             session = None;
-                            went_over_limit(&engine, account, e, &schedule)
+                            (went_over_limit(&engine, account, e, &schedule), false)
                         }
                         Err(catmail_proto::imap::Error::Command { text, .. }) => {
                             tracing::info!(%account, %text,
@@ -246,11 +261,12 @@ async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
                                 backoff(schedule.retry, idle_losses - 1, schedule.full_sync);
                             tracing::warn!(%account, error = %e, ?delay,
                                 "IDLE connection keeps getting lost; trying again later");
-                            delay
+                            (delay, false)
                         }
                     }
                 }
-                _ => schedule.poll.min(due),
+                (Wait::Idle | Wait::Poll, _) => (schedule.poll.min(due), true),
+                (Wait::NoInbox | Wait::InboxFailed, _) => (schedule.poll.min(due), false),
             },
             Err(Error::AccountNotFound(_) | Error::Cancelled) => return,
             Err(e) => {
@@ -268,7 +284,7 @@ async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
                 };
                 tracing::warn!(%account, error = %e, ?delay,
                     "background sync failed; trying again later");
-                delay
+                (delay, false)
             }
         };
         let mut until = tokio::time::Instant::now() + pause;
@@ -284,9 +300,20 @@ async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
             if !noop {
                 break;
             }
-            if let Some(e) = keep_alive(&engine, account, &mut session, &mut cancellation).await {
-                let delay = went_over_limit(&engine, account, e, &schedule);
-                until = tokio::time::Instant::now() + delay;
+            match keep_alive(&engine, account, &mut session, &mut cancellation).await {
+                KeepAlive::Quiet => {}
+                KeepAlive::Changed => {
+                    if inbox_selected && let Some(s) = &session {
+                        add_changed_flags(&mut changed_flags, s.changed_flags());
+                    }
+                    if stop_on_change {
+                        break;
+                    }
+                }
+                KeepAlive::OverLimit(e) => {
+                    let delay = went_over_limit(&engine, account, e, &schedule);
+                    until = tokio::time::Instant::now() + delay;
+                }
             }
         }
     }
@@ -313,34 +340,39 @@ fn went_over_limit(
 /// Sends the connection background sync waits on a NOOP, so that the server doesn't
 /// close it as idle before the next step: NetEase does after a minute, and offers no
 /// IDLE, so that each check of INBOX would log in again. Closes one that died, or one
-/// from before a sleep (see [`pool::usable`]); returns the error if the server said the
-/// account went over its download limit. Queued changes and waking from sleep don't cut
-/// the NOOP short, which would leave its answer half read: their signals keep a permit,
-/// so the wait after it ends at once.
+/// from before a sleep (see [`pool::usable`]); reports whether the server announced a
+/// change to the selected mailbox or said the account went over its download limit.
+/// Queued changes and waking from sleep don't cut the NOOP short, which would leave its
+/// answer half read: their signals keep a permit, so the wait after it ends at once.
 async fn keep_alive(
     engine: &Weak<Engine>,
     account: AccountId,
     slot: &mut Option<Session>,
     cancellation: &mut Cancellation,
-) -> Option<catmail_proto::imap::Error> {
-    let session = slot.as_mut()?;
+) -> KeepAlive {
+    let Some(session) = slot.as_mut() else {
+        return KeepAlive::Quiet;
+    };
     // The task ends at its next look if the engine is gone.
-    let usable = engine.upgrade().map(|e| pool::usable(&e, session))?;
+    let Some(usable) = engine.upgrade().map(|e| pool::usable(&e, session)) else {
+        return KeepAlive::Quiet;
+    };
     if !usable {
         tracing::debug!(%account, "waiting connection from before a sleep; closed");
         *slot = None;
-        return None;
+        return KeepAlive::Quiet;
     }
     let stop = cancellation.cancelled();
     match pool::ping(account, session, "background sync", stop).await {
-        Some(Pinged::Alive) => None,
+        Some(Pinged::Alive { changed: true }) => KeepAlive::Changed,
+        Some(Pinged::Alive { changed: false }) => KeepAlive::Quiet,
         Some(Pinged::OverLimit(e)) => {
             *slot = None;
-            Some(e)
+            KeepAlive::OverLimit(e)
         }
         Some(Pinged::Died) | None => {
             *slot = None;
-            None
+            KeepAlive::Quiet
         }
     }
 }
@@ -489,12 +521,13 @@ async fn work(
                 ops::replay_queued(engine, session, account, Uploads::Settled, &mut replayed)
                     .await?;
             }
-            // Last, so that it is the selected mailbox to IDLE on. Only the flags the
-            // server said changed are fetched: without CONDSTORE the rest would be every
-            // message's, too much for each new one.
+            // Last, so that it is the selected mailbox to IDLE on (or poll with NOOP).
+            // Only the flags the server said changed are fetched: without CONDSTORE the
+            // rest would be every message's, too much for each new one.
             match sync::sync_inbox(engine, session, account, changed_flags).await {
                 Ok(true) if session.can_idle() => Ok(Wait::Idle),
-                Ok(_) => Ok(Wait::Poll),
+                Ok(true) => Ok(Wait::Poll),
+                Ok(false) => Ok(Wait::NoInbox),
                 Err(e) if e.is_refusal() => {
                     tracing::warn!(%account, error = %e, "can't sync INBOX");
                     Ok(Wait::InboxFailed)

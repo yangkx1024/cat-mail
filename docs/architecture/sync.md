@@ -139,7 +139,7 @@ flags，重复的批次不产生重复行）。HIGHESTMODSEQ 用 EXAMINE 时刻�
   保持选中，然后 IDLE。只盯 INBOX，是因为一条连接只能 IDLE 一个文件夹，而 NOTIFY（RFC 5465）支持的
   服务器太少；其他文件夹靠定时的完整同步，和用户打开它时的同步（见[打开的文件夹](#打开的文件夹)）。
 - **等待时保持连接。** 不在 IDLE 的等待（两次检查之间、重试之前）中，每隔 `keepalive`（45 秒）给连接发一次
-  NOOP（`watch::keep_alive`，与连接池共用 `pool::ping`），下一步接着用这条连接；NOOP 发现连接断开就关掉，下一步新建。网易（Coremail）
+  NOOP（`watch::keep_alive`，与连接池共用 `pool::ping`），下一步接着用这条连接；NOOP 发现连接断开就关掉，下一步新建。正常轮询 INBOX 期间（退避和 INBOX 失败重试除外），如果服务器在 NOOP 答复里报告了 INBOX 的变化（EXISTS、EXPUNGE、FETCH FLAGS 等，RFC 3501 §6.1.2），就提前结束等待、立即同步 INBOX，不必等到 `poll`（2 分钟）到期；实测网易 163 会在几秒刷新延迟后通过 NOOP 报告新邮件（EXISTS）与删除（EXPUNGE），因此新邮件出现延迟从最多约 2 分钟降到约 45 秒。网易（Coremail）
   不支持 IDLE，连接 60–70 秒没有命令就被断开，以前每 2 分钟一次的检查因此每次都重新登录（每次 2.5–7 秒，
   #227）。它另有一个约 3 分钟的时限，NOOP 不算数、EXAMINE 才算，每次检查本身就是 EXAMINE INBOX，所以连接
   可以一直用下去。NOOP 不被本地改动或睡眠唤醒的信号打断（否则答复读到一半，连接没法再用）：信号留着，
@@ -184,13 +184,13 @@ flags，重复的批次不产生重复行）。HIGHESTMODSEQ 用 EXAMINE 时刻�
   就直接再 IDLE，不同步：IDLE 与 DONE 的往返已经说明连接还活着，无声断开的连接（NAT 忘了它）在那时
   超时。很多家用 NAT 五分钟左右就忘掉安静的连接，所以连接都开着 TCP keepalive（见[连接层](protocol.md#连接层)），
   几分钟内发现，不必等到这次 IDLE 到期。
-- **INBOX 的 flags。** 没有 CONDSTORE 时，两次完整同步之间的 INBOX 步骤只拉 IDLE 报告了 flags 变化的
+- **INBOX 的 flags。** 没有 CONDSTORE 时，两次完整同步之间的 INBOX 步骤只拉 IDLE 或 NOOP 报告了 flags 变化的
   那几封（`Session::changed_flags`，`UID FETCH <这些 UID> (UID FLAGS)`）；新邮件、删除、本地改动唤醒
-  的步骤和轮询都不拉，否则五万封的收件箱每来一封新邮件、每读一封邮件就是一次全量 flags 遍历。说不清
-  是哪几封时（IDLE 期间有无法解析的行、报告超过一千封或遇到 VANISHED，见[连接 / IDLE](protocol.md#idle)）
-  才按窗口全量拉。报告记到 INBOX 真的同步成功为止，在几次失败的步骤间累积（同步时仍按窗口分批）：这一步
+  的步骤和无变化报告的轮询都不拉，否则五万封的收件箱每来一封新邮件、每读一封邮件就是一次全量 flags 遍历。说不清
+  是哪几封时（IDLE / NOOP 期间有无法解析的行、报告超过一千封或遇到 VANISHED，见[连接 / IDLE](protocol.md#idle)）
+  才按窗口全量拉。报告记到 INBOX 真的同步成功为止，在几次失败的步骤或退避期间的 NOOP 间累积（同步时仍按窗口分批）：这一步
   失败（包括只让 INBOX 失败的非致命错误）时，下一步还会拉。只拉部分 flags 的同步不更新
-  `last_synced_at` 和 `Engine::folder_synced`，所以不会让 INBOX 显得刚同步过。IDLE 以外的变化（轮询、IDLE 之间的同步、断线期间）
+  `last_synced_at` 和 `Engine::folder_synced`，所以不会让 INBOX 显得刚同步过。IDLE / NOOP 以外的变化（不报 FETCH FLAGS 的服务器上的轮询、IDLE 之间的同步、断线期间）
   其他客户端改的 flags 要等下一次完整同步，或用户打开 INBOX 时的同步。
 - **不正常的 IDLE。** 服务器自己用 OK 结束 IDLE 算安静地结束，照常再 IDLE；但连续三次一开始就这样
   结束（不到一半时长、也不到一分钟）说明 IDLE 对它没用，改为轮询，否则就是一个接一个的往返。反过来，
