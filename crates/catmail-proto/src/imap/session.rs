@@ -376,12 +376,25 @@ impl Session {
         self.selected.as_ref().filter(|o| !o.writable)
     }
 
-    /// Asks the server for nothing but news of the opened mailbox, which keeps a quiet
-    /// connection from being closed, and tells whether it still works.
+    /// Keeps a quiet connection from being closed and tells whether it still works
+    /// (NOOP). Doesn't inspect change reports in the answer; use [`poll`](Self::poll) to
+    /// check the selected mailbox.
     pub async fn noop(&mut self) -> Result<()> {
         // Only the tagged answer matters.
         self.conn.execute_lossy(Command::new("NOOP")).await?;
         Ok(())
+    }
+
+    /// Asks the server for news of the selected mailbox (NOOP, RFC 3501 §6.1.2), the
+    /// non-IDLE counterpart to [`idle`](Self::idle). Returns whether the server has
+    /// reported a change since the mailbox was opened (in this answer or an earlier one),
+    /// and resolves any flag changes it reported for [`changed_flags`](Self::changed_flags).
+    /// Fails, as `idle` does, if no mailbox is selected.
+    pub async fn poll(&mut self) -> Result<bool> {
+        self.selected_status()?;
+        let changed = self.conn.noop().await?;
+        self.resolve_changed_flags().await?;
+        Ok(changed)
     }
 
     /// Whether [`idle`](Self::idle) is available (IDLE, RFC 2177).
@@ -410,9 +423,10 @@ impl Session {
     }
 
     /// The messages whose flags the server reported changed in the selected mailbox in
-    /// the last [`idle`](Self::idle) since it was opened. Only IDLE says so: outside it,
-    /// a FETCH is usually the answer to our own. Always `Unknown` for a change with
-    /// CONDSTORE, where what changed is found by MODSEQ instead.
+    /// the last [`idle`](Self::idle) or [`poll`](Self::poll) since it was opened. Only
+    /// those say so: outside them, a FETCH is usually the answer to our own. Always
+    /// `Unknown` for a change with CONDSTORE, where what changed is found by MODSEQ
+    /// instead.
     pub fn changed_flags(&self) -> &ChangedFlags {
         &self.changed_flags
     }

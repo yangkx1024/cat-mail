@@ -367,6 +367,8 @@ pub struct Faults {
     pub noop_refusal: Option<String>,
     /// Answer every NOOP by closing the connection with `* BYE <text>`.
     pub bye_on_noop: Option<String>,
+    /// Answer every NOOP with a line no parser accepts before OK.
+    pub garble_noop: bool,
     /// Hold each command that starts with this text (`DELETE`) until it gets a permit,
     /// e.g. to make changes while the server is at it, or to keep a sync from reporting
     /// that it finished (`LOGOUT`). Logged before it waits; one already waiting keeps
@@ -495,6 +497,7 @@ impl Default for Faults {
             bye_on_idle: None,
             noop_refusal: None,
             bye_on_noop: None,
+            garble_noop: false,
             gate: None,
             refuse_connections: 0,
             drop_after_mailbox_change: false,
@@ -1073,8 +1076,8 @@ impl Session {
 }
 
 /// What a connection knows about its selected mailbox. Changes others make since are
-/// reported like a server does: new messages with the answer to any command, the rest
-/// while idling.
+/// reported like a server does: new messages with the answer to any command, and expunges
+/// and flag changes too in IDLE and NOOP.
 #[derive(Debug, Clone, PartialEq)]
 struct View {
     uidvalidity: u32,
@@ -1339,14 +1342,22 @@ async fn handle(
             out += &format!("* CAPABILITY {caps}\r\n{tag} OK CAPABILITY completed\r\n");
         }
         "NOOP" => {
-            let faults = &lock(state).faults;
-            match (&faults.noop_refusal, &faults.bye_on_noop) {
+            let st = lock(state);
+            match (&st.faults.noop_refusal, &st.faults.bye_on_noop) {
                 (Some(text), _) => out += &format!("{tag} NO {text}\r\n"),
                 (None, Some(text)) => {
                     out += &format!("* BYE {text}\r\n");
                     next = Next::Close;
                 }
-                (None, None) => out += &format!("{tag} OK NOOP completed\r\n"),
+                (None, None) => {
+                    if st.faults.garble_noop {
+                        out += "* GARBLED (((\r\n";
+                    }
+                    if let (Some(mb), Some(view)) = (session.mailbox(&st), &mut session.view) {
+                        out += &view.catch_up(View::of(mb));
+                    }
+                    out += &format!("{tag} OK NOOP completed\r\n");
+                }
             }
         }
         "LOGOUT" => {
@@ -1800,7 +1811,7 @@ async fn handle(
         _ => out += &format!("{tag} BAD Unknown command\r\n"),
     }
     let mut out = fetched.unwrap_or_else(|| out.into_bytes());
-    if !matches!(command.as_str(), "EXAMINE" | "SELECT" | "LOGOUT") {
+    if !matches!(command.as_str(), "EXAMINE" | "SELECT" | "LOGOUT" | "NOOP") {
         let arrived = new_messages(session, &lock(state));
         insert_before_last_line(&mut out, arrived.as_bytes());
     }
