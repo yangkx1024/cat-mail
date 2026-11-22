@@ -69,18 +69,20 @@ Linux glibc 上，其他平台什么也不做）：glibc 的堆只能从顶上�
 `unsafe_code` 因此在 frontend 里是 `deny` 而不是 `forbid`，由 `memory` 模块单独放行（还有 macOS 的状态栏，见
 [托盘](#托盘)，以及 macOS 的登录项 `autostart/macos.rs`）。
 
-实测（release，两个真实账户，Linux），单位 MB，RSS / PSS：
+实测（release，真实账户，Linux），单位 MB，RSS / PSS：
 
 | | 主进程 | WebKit 渲染进程 | WebKit 网络进程 | 合计 PSS |
 |---|---|---|---|---|
-| 刚启动、还没开邮件 | 226 / 193 | — | — | 193 |
-| 开着窗口读信 | 280 / 192 | 195 / 107 | 69 / 32 | 约 335 |
-| 关窗后、trim 后 | 265 / 197 | 退出了 | 69 / 41 | 约 238 |
+| 刚启动、还没开邮件（2026-11-05） | 226 / 193 | — | — | 193 |
+| 开着窗口读信（2026-11-05） | 280 / 192 | 195 / 107 | 69 / 32 | 约 335 |
+| 关窗后、trim 后（2026-11-22，Flatpak，nsh 0.6.1） | 231 / 216 | 退出了 | 退出了 | 约 216 |
 
-trim 只还回约 14 MB。常驻时主进程里约 107 MB 是文件映射（程序本身和 GTK、WebKitGTK 的库），能和别的进程共用，
-也能被换出。WebKit 的网络进程从不联网（CSP 只放行 `data:` 和读信区自己的 scheme），表里它却一直留着：当时 nsh 一直持有
-`NetworkSession`。nsh 已经改成随最后一个 web view 结束它（longbridge/nsh#1051），workspace 也已升级到含这个修复的
-版本；表里的数字是修复之前量的，在 Linux 上重新量过之前先这样（见 `crates/catmail-gui/ROADMAP.md`）。
+常驻时主进程里约 148 MB PSS 是文件映射（程序本身和 GTK、WebKitGTK 的库，能和别的进程共用，也能被换出），匿名内存
+约 68 MB。WebKit 的网络进程从不联网（CSP 只放行 `data:` 和读信区自己的 scheme），以前因 nsh 一直持有
+`NetworkSession` 而滞留（69 MB RSS / 41 MB PSS，常驻合计约 238 MB PSS）；nsh 0.5.0 起已随最后一个 web view
+释放（longbridge/nsh#1051），加上正文 web view 使用 `incognito` 临时会话，关窗后约 50–60 ms 渲染进程和网络进程
+均退出。重开窗口时重新拉起网络进程多花约 34 ms（WebKitGTK 2.54.1 / GTK 4.22.4 实测：冷启 web view 首次绘制约
+242 ms，网络进程常驻时约 207 ms）。
 
 打开邮箱时不做启动同步（后台同步打开时就完整同步一遍），重开窗口不会多出同步；打开时查一次被拒绝的改动，
 正好报告常驻期间被拒绝的。

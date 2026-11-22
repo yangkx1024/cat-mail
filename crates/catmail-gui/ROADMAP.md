@@ -144,38 +144,32 @@
       拆成单独的 `LSUIElement` 辅助应用
 - [x] 退出时等引擎关闭有上限：主循环结束后最多等 2 秒（`shell::ENGINE_CLOSING`，平时关引擎不到 1 ms），到时间记
       `the engine didn't close in time` 直接退出，引擎里一次卡住的写入不再让进程退不出去、会话结束时等不到它
-- [ ] 在 GNOME、KDE 和 Flatpak 里各用主题带 `&`、`<` 的邮件试一次 Linux 新邮件通知：GLib 的 freedesktop 后端不转义，
-      portal 和 `org.gtk.Notifications` 不读标记，所以 `new_mail/linux.rs` 照 GLib 的选路决定转不转义（#331，见
-      background.md「Linux」），代码改好了，还没在这几处实际看过
-- [x] 常驻时回收内存：关掉最后一个窗口 2 秒后 `malloc_trim`。实测（release，两个真实账户，2026-11-05），单位 MB，
-      RSS / PSS：
-
-      | | 主进程 | WebKit 渲染进程 | WebKit 网络进程 | 合计 PSS |
-      |---|---|---|---|---|
-      | 刚启动、还没开邮件 | 226 / 193 | — | — | 193 |
-      | 开着窗口读信 | 280 / 192 | 195 / 107 | 69 / 32 | 约 335 |
-      | 关窗后、trim 后 | 265 / 197 | 退出了 | 69 / 41 | 约 238 |
-
-      trim 只还回约 14 MB（主进程 anon 从 104 降到 90；GPUI 版当时能还回约 76 MB，常驻约 151 MB RSS）。常驻时主进程
-      里约 107 MB 是文件映射（程序本身和 GTK、WebKitGTK 的库），能和别的进程共用，也能被换出。渲染进程随窗口退出，
-      网络进程留着：bwrap 沙箱和 `xdg-dbus-proxy` 合计约 3 MB
+- [x] Linux 新邮件通知的正文转义（主题带 `&`、`<`）：GLib 的 freedesktop 后端不转义，portal 和
+      `org.gtk.Notifications` 不读标记，`new_mail/linux.rs` 照 GLib 的选路决定转不转义（#331，见
+      background.md「Linux」）。Flatpak（`xdg-desktop-portal-gtk` + `noctalia`）已真机实测，`new_mail/linux.rs` 的
+      `dbus-run-session` 测试覆盖了全部 5 条 GLib 选路（`body-markup`、无标记 freedesktop、`org.gtk.Notifications`、
+      portal、`GNOTIFICATION_BACKEND=freedesktop`）
+- [x] 常驻时回收内存：关掉最后一个窗口 2 秒后 `malloc_trim`。nsh 0.5.0+（longbridge/nsh#1051）与 web view 的
+      `incognito` 之后，关窗时 WebKit 渲染进程和网络进程都在约 50–60 ms 内退出。2026-11-22 实测（Flatpak release，
+      nsh 0.6.1，真实账户常驻关窗 + trim 后）：主进程 231 MB RSS / 216 MB PSS（anon 68 MB、file 148 MB），
+      WebKit 渲染进程和网络进程均已退出，合计约 216 MB PSS（旧版网络进程滞留时约 238 MB，见 background.md）
 - [x] 读信区和它的 web view 随主窗口一直存在，渲染进程开窗时就起好、换邮件不换（原来每封一个，约 100 MB PSS，
       还要起一次 bwrap 沙箱）。⚠️ 没选中邮件时藏在列表下面，不用 `invisible`：一阵没画的 web view 再画时，WebKit
       画好之前会先闪一帧黑。开窗后点开第一封，内容约 2 帧（约 33 ms）就出现，原来约 13 帧
 - [x] 比读信区宽的邮件，横向滚动条在读信区底部，不用纵向滚到底才看得见（#355）。⚠️ nsh 的滚动区只沿一个方向
       滚（两个方向都滚要后端支持缩放，macOS、Linux 都不支持），所以页面藏起 body 自己的横向滚动条、回报横向
       滚动，读信区自己画一条（`web::Sideways`）
-- [ ] 常驻时网络进程还留着（41 MB PSS），可它从来不联网（CSP 只放行 `data:` 和读信区自己的 scheme）。原因在 nsh：它按 app id 把
-      `NetworkSession` 一直存在表里，最后一个 web view 没了也不放。上游已改成弱引用（longbridge/nsh#1051），nsh
-      0.5.0 已包含。还要在 Linux 上用真实账户确认关窗后网络进程退出，测一下重新开窗要多花多少时间，再更新
-      background.md 里的数字
+- [x] 常驻时网络进程随最后一个 web view 退出（longbridge/nsh#1051、nsh 0.6.1 + `incognito`）：Linux 上已用真实账户
+      （Flatpak release）确认关窗后 `WebKitNetworkProcess` 和 `WebKitWebProcess` 均退出（约 50–60 ms）；重开窗口时
+      重新拉起网络进程多花约 34 ms（WebKitGTK 2.54.1 / GTK 4.22.4 实测：冷启约 242 ms vs 网络进程常驻约 207 ms），
+      数字已更新到 background.md
 - [x] 快捷键：Sync（Ctrl+Shift+N、F5）、Ctrl+F 聚焦搜索框、写信窗口的 Escape 关闭和 Ctrl+Shift+A 加附件
 - [x] 对话框开着时列表的键（E、X、L、Delete、Enter、Escape、F2 等）不作用于后面的邮件。⚠️ nsh 的键不按模态框
       分范围，应用自己数开着的对话框，有就解绑（`form::keys_without_dialog`）
 
 ## P10 平台与工程
 
-- [ ] 字体：Pango 自己做回退，要验证中文各字重、粗体是否正常
+- [x] 字体：Pango 自己做回退，已确认中文各字重、粗体正常
 - [ ] 测试：用 nsh-testing 无头驱动窗口（读信、写信、设置、文件夹）
 - [x] 在主 workspace 里：longbridge/nsh#966 在上游 main 修好（#1022），曾用 git 依赖钉在 main 的 commit 上。
       nsh 0.6.0 起声音（GStreamer）、HTTP、WebSocket、SVG 都是可选的 feature，只打开 `webview` 和画图标的
@@ -184,7 +178,7 @@
 - [x] cargo deny：许可证（target-lexicon、winx 的 LLVM-exception）在
       `deny.toml` 里逐个放行；nsh-updater 换成 zip 9（longbridge/nsh#1164）后，zip 8 的四个 advisory 不再忽略
 - [x] GTK 4.22 上 `gtk_widget_measure` 警告刷屏：`NshView::size_allocate` 不 measure 就 allocate 子 widget，上游
-      longbridge/nsh#1048 已由 longbridge/nsh#1049 修好，nsh 0.5.0 已包含（还要在 GTK 4.22 上看一眼警告没了）
+      longbridge/nsh#1048 已由 longbridge/nsh#1049 修好，nsh 0.5.0 已包含（已在 GTK 4.22.4 上确认无警告）
 - [ ] 内存、滚动帧率、冷启动时间的基准
 - [x] **Linux 的安装包**：图形界面打成 Flatpak（`packaging/linux/`），用 GNOME runtime 带上 GTK 4 和 WebKitGTK，
       发布时随 CLI 一起发 `.flatpak` 包（docs/architecture/packaging.md）

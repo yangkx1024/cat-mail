@@ -15,8 +15,6 @@ mod toolkit;
 #[path = "gtk.rs"]
 mod toolkit;
 
-#[cfg(target_os = "linux")]
-pub use self::toolkit::application;
 /// Runs a function on the main thread, from any.
 #[cfg(target_os = "macos")]
 pub use self::toolkit::invoke;
