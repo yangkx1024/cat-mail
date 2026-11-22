@@ -282,11 +282,7 @@ mod tests {
         let service = FakeSmtp::start(SmtpState::new("resend", "key")).await;
         let dir = tempfile::tempdir().unwrap();
         let (client, account) = synced_with_smtp(&fake, smtp.port(), dir.path()).await;
-        let through = catmail_core::ServerConfig {
-            host: "127.0.0.1".into(),
-            port: service.port(),
-            security: catmail_core::Security::Plain,
-        };
+        let through = catmail_core::test_support::local_server(service.port());
         let identity = add_news_identity(&client, account, through).await;
         let queue = |identity| {
             let content = DraftContent {

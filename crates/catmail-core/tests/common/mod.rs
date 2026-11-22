@@ -3,11 +3,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use catmail_core::test_support::{add_synced_account, local_account, local_server};
 use catmail_core::{
     AccountId, Address, Config, Draft, DraftChanges, DraftContent, DraftId, Event, Flags, Folder,
     FolderId, FolderSyncReport, ListQuery, MailClient, MailClientBuilder, MemorySecrets, MessageId,
-    MessageSummary, NewAccount, ReplayReport, SearchQuery, Security, ServerConfig, SyncReport,
-    Verify,
+    MessageSummary, ReplayReport, SearchQuery, ServerConfig, SyncReport, Verify,
 };
 use catmail_testkit::{FakeImap, FakeMailbox, FakeSmtp, ServerState, SmtpState};
 use tokio::runtime::Handle;
@@ -212,13 +212,7 @@ pub async fn env_added(
     .unwrap();
     let account = client
         .add_account(
-            NewAccount {
-                email: "alice@example.com".into(),
-                display_name: None,
-                username: "alice".into(),
-                imap: local_server(fake.port()),
-                smtp: local_server(smtp.port()),
-            },
+            local_account("alice", fake.port(), smtp.port()),
             "pw".into(),
             verify,
         )
@@ -260,32 +254,10 @@ impl Env {
     pub async fn add_fake_account(&self, state: ServerState, email: &str) -> (FakeImap, AccountId) {
         let (username, password) = (state.username.clone(), state.password.clone());
         let fake = FakeImap::start(state).await;
-        let account = self
-            .client
-            .add_account(
-                NewAccount {
-                    email: email.into(),
-                    display_name: None,
-                    username,
-                    imap: local_server(fake.port()),
-                    smtp: local_server(self.smtp.port()),
-                },
-                password.into(),
-                Verify::Skip,
-            )
-            .await
-            .unwrap()
-            .id;
-        self.client.sync_account(account).await.unwrap();
+        let mut new = local_account(&username, fake.port(), self.smtp.port());
+        new.email = email.into();
+        let account = add_synced_account(&self.client, new, &password).await;
         (fake, account)
-    }
-}
-
-pub fn local_server(port: u16) -> ServerConfig {
-    ServerConfig {
-        host: "127.0.0.1".into(),
-        port,
-        security: Security::Plain,
     }
 }
 

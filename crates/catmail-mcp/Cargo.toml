@@ -29,6 +29,7 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+catmail-core = { workspace = true, features = ["test-support"] }
 catmail-testkit.workspace = true
 hyper = { workspace = true, features = ["client"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }

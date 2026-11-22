@@ -3,13 +3,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use catmail_core::{Config, Error, MailClient, MemorySecrets, NewAccount, Verify};
+use catmail_core::test_support::local_account;
+use catmail_core::{Config, Error, MailClient, MemorySecrets, Verify};
 use catmail_testkit::{FakeImap, ServerState};
 use tokio::sync::broadcast::error::RecvError;
 
 mod common;
 
-use common::{env, local_server};
+use common::env;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn shutting_down_a_client_on_its_own_runtime_stops_the_work_under_way() {
@@ -22,15 +23,12 @@ async fn shutting_down_a_client_on_its_own_runtime_stops_the_work_under_way() {
         .secrets(Arc::new(MemorySecrets::default()))
         .open()
         .unwrap();
-    let new = NewAccount {
-        email: "alice@example.com".into(),
-        display_name: None,
-        username: "alice".into(),
-        imap: local_server(fake.port()),
-        smtp: local_server(fake.port()),
-    };
     let account = client
-        .add_account(new, "pw".into(), Verify::Skip)
+        .add_account(
+            local_account("alice", fake.port(), fake.port()),
+            "pw".into(),
+            Verify::Skip,
+        )
         .await
         .unwrap()
         .id;

@@ -30,6 +30,7 @@ resvg.workspace = true
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
 # The headless shell's main thread runs its futures as AppKit's does.
 async-task.workspace = true
+catmail-core = { workspace = true, features = ["test-support"] }
 catmail-testkit.workspace = true
 mail-parser.workspace = true
 nsh-engine.workspace = true

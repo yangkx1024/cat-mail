@@ -7,12 +7,13 @@ mod common;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use catmail_core::test_support::local_server;
 use catmail_core::{
     Address, DraftBody, DraftContent, Error, ErrorKind, Event, Forwarding, Identity, IdentityId,
     NewIdentity, OutboxStatus, Verify,
 };
 use catmail_testkit::{FakeMailbox, FakeSmtp, ServerState, SmtpState};
-use common::{Env, drain, env, eventually, local_server, sparse};
+use common::{Env, drain, env, eventually, sparse};
 use mail_parser::MessageParser;
 
 /// An INBOX, a Sent and a Drafts folder.

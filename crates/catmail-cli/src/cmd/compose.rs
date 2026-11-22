@@ -629,23 +629,10 @@ mod tests {
         let fake = FakeImap::start(state).await;
         let dir = tempfile::tempdir().unwrap();
         let (client, alice) = synced(&fake, dir.path()).await;
-        let server = ServerConfig {
-            host: "127.0.0.1".into(),
-            port: fake.port(),
-            security: Security::Plain,
-        };
+        let mut new = catmail_core::test_support::local_account("alice", fake.port(), fake.port());
+        new.email = "bob@example.org".into();
         let bob = client
-            .add_account(
-                NewAccount {
-                    email: "bob@example.org".into(),
-                    display_name: None,
-                    username: "alice".into(),
-                    imap: server.clone(),
-                    smtp: server,
-                },
-                "pw".into(),
-                Verify::Skip,
-            )
+            .add_account(new, "pw".into(), Verify::Skip)
             .await
             .unwrap()
             .id;
