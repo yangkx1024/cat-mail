@@ -528,8 +528,8 @@ From 是条目实际发出用的身份（`OutboxEntry::identity`），叫法和�
 
 ## 已知问题与上游
 
-- **常驻时的内存**：GTK 常驻时仍连着显示服务器。WebKit 的网络进程原来在最后一个 web view 关掉后还留着（约 41 MB
-  PSS），nsh 已改成随最后一个 web view 结束它（longbridge/nsh#1051），还要在 Linux 上确认。数字见
+- **常驻时的内存**：GTK 常驻时仍连着显示服务器。WebKit 的渲染进程和网络进程都已随最后一个 web view 退出
+  （longbridge/nsh#1051 及 `incognito` 临时会话），实测数字见
   [后台运行](background.md#引擎属于应用不属于窗口)。
 - **拖动分隔条**：三栏的宽度由应用自己记，用 nsh-base 的 `resize_handle`。⚠️ 它的 `h_resizable` 快速来回拖时会丢掉
   拖动结束，之后分隔线错位；所以每次拖动从开始时的宽度算起，丢了结束也不会累积。

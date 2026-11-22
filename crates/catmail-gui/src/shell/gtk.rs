@@ -90,7 +90,7 @@ fn style_menus() {
     );
 }
 
-pub fn application() -> Option<gtk::Application> {
+fn application() -> Option<gtk::Application> {
     gtk::gio::Application::default().and_downcast()
 }
 
