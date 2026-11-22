@@ -24,6 +24,7 @@ tracing.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]
+catmail-core = { workspace = true, features = ["test-support"] }
 catmail-testkit.workspace = true
 tempfile.workspace = true
 

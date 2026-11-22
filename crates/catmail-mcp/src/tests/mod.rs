@@ -12,9 +12,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use catmail_core::{
-    Config, Flags, MailClient, MemorySecrets, MessageId, NewAccount, Security, ServerConfig, Verify,
-};
+use catmail_core::test_support::{add_synced_account, local_account};
+use catmail_core::{Config, Flags, MailClient, MemorySecrets, MessageId};
 use catmail_testkit::{FakeImap, FakeMailbox, ServerState};
 use http::{Request, StatusCode, header};
 use http_body_util::{BodyExt, Full};
@@ -195,28 +194,9 @@ fn result_of(status: StatusCode, body: &str) -> Value {
 
 /// Adds `user`@example.com, on `fake` with password "pw", and syncs it.
 async fn add_account(client: &MailClient, fake: &FakeImap, user: &str) -> i64 {
-    let server = |port| ServerConfig {
-        host: "127.0.0.1".into(),
-        port,
-        security: Security::Plain,
-    };
-    let account = client
-        .add_account(
-            NewAccount {
-                email: format!("{user}@example.com"),
-                display_name: (user == "alice").then(|| "Alice".into()),
-                username: user.into(),
-                imap: server(fake.port()),
-                smtp: server(fake.port()),
-            },
-            "pw".into(),
-            Verify::Skip,
-        )
-        .await
-        .unwrap()
-        .id;
-    client.sync_account(account).await.unwrap();
-    account.0
+    let mut new = local_account(user, fake.port(), fake.port());
+    new.display_name = (user == "alice").then(|| "Alice".into());
+    add_synced_account(client, new, "pw").await.0
 }
 
 /// One HTTP/1.1 POST to the server at `addr`, as `localhost` unless `headers` says.

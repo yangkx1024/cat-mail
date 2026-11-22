@@ -13,10 +13,8 @@ mod writing;
 
 use std::sync::Arc;
 
-use catmail_core::{
-    AccountId, Config, DraftSummary, MailClient, MemorySecrets, NewAccount, Security, ServerConfig,
-    SyncSchedule, Verify,
-};
+use catmail_core::test_support::{add_synced_account, local_account};
+use catmail_core::{AccountId, Config, DraftSummary, MailClient, MemorySecrets, SyncSchedule};
 use catmail_testkit::{FakeImap, FakeMailbox, FakeSmtp, ServerState, SmtpState};
 use mail_parser::{Message, MessageParser};
 use nsh_testing::Headless;
@@ -57,20 +55,9 @@ impl TestMail {
     /// alice@example.com (password "pw"), with [`INBOX`] and [`FOLDERS`], synced.
     pub fn start() -> Self {
         let mut mail = Self::without_account();
-        let account = pollster::block_on(mail.client.add_account(
-            NewAccount {
-                email: "alice@example.com".into(),
-                display_name: Some("Alice".into()),
-                username: "alice".into(),
-                imap: local(mail.imap.port()),
-                smtp: local(mail.smtp.port()),
-            },
-            "pw".into(),
-            Verify::Skip,
-        ))
-        .unwrap()
-        .id;
-        pollster::block_on(mail.client.sync_account(account)).unwrap();
+        let mut new = local_account("alice", mail.imap.port(), mail.smtp.port());
+        new.display_name = Some("Alice".into());
+        let account = pollster::block_on(add_synced_account(&mail.client, new, "pw"));
         mail.account = Some(account);
         mail
     }
@@ -172,14 +159,6 @@ fn open_client(dir: &std::path::Path) -> MailClient {
         .send_in_background(true)
         .open()
         .unwrap()
-}
-
-fn local(port: u16) -> ServerConfig {
-    ServerConfig {
-        host: "127.0.0.1".into(),
-        port,
-        security: Security::Plain,
-    }
 }
 
 pub fn parse(raw: &[u8]) -> Message<'_> {

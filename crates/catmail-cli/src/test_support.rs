@@ -3,9 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use catmail_core::test_support::{add_synced_account, local_account};
 use catmail_core::{
-    AccountId, Config, Identity, MailClient, MemorySecrets, NewAccount, NewIdentity, SecretStore,
-    SecretString, Security, ServerConfig, Verify,
+    AccountId, Config, Identity, MailClient, MemorySecrets, NewIdentity, SecretStore, SecretString,
+    ServerConfig, Verify,
 };
 use catmail_testkit::FakeImap;
 
@@ -72,28 +73,7 @@ pub(crate) async fn add_synced(
     smtp_port: u16,
     user: &str,
 ) -> AccountId {
-    let server = |port| ServerConfig {
-        host: "127.0.0.1".into(),
-        port,
-        security: Security::Plain,
-    };
-    let account = client
-        .add_account(
-            NewAccount {
-                email: format!("{user}@example.com"),
-                display_name: None,
-                username: user.into(),
-                imap: server(imap_port),
-                smtp: server(smtp_port),
-            },
-            "pw".into(),
-            Verify::Skip,
-        )
-        .await
-        .unwrap()
-        .id;
-    client.sync_account(account).await.unwrap();
-    account
+    add_synced_account(client, local_account(user, imap_port, smtp_port), "pw").await
 }
 
 /// Adds news@example.org, logging in to `smtp` as `resend`, without checking the login.

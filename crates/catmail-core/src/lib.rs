@@ -43,6 +43,8 @@ mod send;
 mod sleep;
 mod sync;
 mod system;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 mod version;
 mod watch;
 

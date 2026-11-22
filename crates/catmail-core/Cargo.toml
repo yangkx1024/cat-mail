@@ -27,7 +27,7 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [features]
-# Lets tests see inside the engine: `MailClient::sync_waiting`.
+# Helpers for tests against local fake servers, and engine inspection (`MailClient::sync_waiting`).
 test-support = []
 
 [target.'cfg(unix)'.dependencies]
