@@ -232,6 +232,7 @@ fn fields(focus_body: bool) -> impl IntoElement {
                 .border_color(border)
                 .child(
                     header_input(typed.subject, |t, text| t.subject = text)
+                        .label("Subject")
                         .placeholder("Subject".to_owned()),
                 ),
         )
@@ -303,6 +304,7 @@ fn address_row(
             field_row(label)
                 .child(
                     header_input(value, on_change)
+                        .label(label)
                         .auto_focus(auto_focus)
                         .element_ref(&input_ref),
                 )
@@ -326,6 +328,7 @@ fn body(focus_body: bool) -> impl IntoElement {
         .editor(super::rich().session())
         .editable(move || !ending())
         .auto_focus(focus_body)
+        .accessibility_label(Some("Message".into()))
         .classes(rich::classes())
         .on_change(|_: &_| text_changed())
         .on_selection_change(|_: &_| formatting_moved())
@@ -528,6 +531,7 @@ fn link_form(href: String) -> impl IntoElement {
             .child(form::title("Link"))
             .child(
                 form::text_input()
+                    .label("Link")
                     .default_value(href)
                     .placeholder("https://".to_owned())
                     .selected_range((0, length))

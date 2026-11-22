@@ -38,6 +38,8 @@ mod settings;
 mod shell;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod tasks;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod tests;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod theme;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

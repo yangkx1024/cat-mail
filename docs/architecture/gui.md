@@ -71,7 +71,8 @@ src/
 
 nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我们要多个窗口（写信窗口）、关掉主窗口后常驻，所以
 自己运行工具包的应用（`shell/`）：Linux 上是 `gtk::Application`，macOS 上是 `NSApplication`。窗口、退出流程、
-常驻、设置和主题两边共用（`shell/mod.rs`），工具包的差别在 `gtk.rs`、`appkit.rs`。
+常驻、设置和主题两边共用（`shell/mod.rs`），工具包的差别在 `gtk.rs`、`appkit.rs`；测试构建换成无头的
+`headless.rs`（见[测试](testing.md#gui)）。
 
 - **线程**：外壳在主线程（工具包的）上；每个窗口一个 `AppView`，它的视图跑在 nsh 自己的引擎线程上。视图经
   `shell::on_main` 请主线程做事（开窗、关窗、改设置），主线程经通道回话（写信窗口的关闭请求）。
@@ -523,8 +524,9 @@ From 是条目实际发出用的身份（`OutboxEntry::identity`），叫法和�
 纯逻辑在 `catmail-frontend`，表驱动测试，不用编译 GTK 和 WebKit（见[测试](testing.md#gui)），读信区的正文页面
 也在那里测（`html`：CSP 在正文之前、图片改写成读信区的 URL、纯文本转义、消息协议的解析、页面编号、哪些请求
 什么时候应答）。
-这个 crate 只测几处不经窗口的：页面高度够不够、主题映射、图标、托盘的绘制、编辑器的正文、系统唤醒的解析。还没有驱动窗口
-的测试（ROADMAP 里的 nsh-testing）。
+这个 crate 自己测几处不经窗口的（页面高度够不够、主题映射、图标、托盘的绘制、编辑器的正文、系统唤醒的解析），
+窗口则由 `src/tests/` 用 nsh-testing 无头驱动：外壳换成无头的工具包（`shell/headless.rs`），每个窗口一个
+`Headless`，读信、写信、设置、文件夹对着假服务器走一遍（见[测试](testing.md#gui)）。
 
 ## 已知问题与上游
 

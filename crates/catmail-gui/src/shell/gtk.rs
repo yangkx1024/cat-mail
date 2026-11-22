@@ -137,6 +137,9 @@ pub fn resident() {}
 /// Each view sets its window's appearance itself.
 pub fn set_appearance(_appearance: Appearance) {}
 
+/// A window's view.
+pub type View = AppView;
+
 pub fn new_view(options: AppOptions) -> Rc<AppView> {
     AppView::new(options)
 }
@@ -286,7 +289,7 @@ mod tests {
     use super::own_app_id;
 
     const ID: &str = "net.yangkx.catmail.Test";
-    const CHILD: &str = "shell::toolkit::tests::clicks_reach_the_app_through_its_id";
+    const CHILD: &str = "shell::gtk::tests::clicks_reach_the_app_through_its_id";
 
     /// GLib reads the session bus's address once per process: the test runs again in a
     /// process of its own, on a bus of its own.

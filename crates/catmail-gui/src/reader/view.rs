@@ -44,6 +44,8 @@ pub fn reader() -> View {
             view()
                 .flex_1()
                 .min_h(px(0.0))
+                // Told apart from the message's row by the tests.
+                .test_id("reader")
                 .style_when(move || failed_.with(Option::is_some), |s| s.hidden())
                 .child(message()),
         )

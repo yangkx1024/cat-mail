@@ -178,8 +178,9 @@ pub fn menu_field(
         .child(icon(|| Icon::ChevronDown, 14.0).text_color(move || theme().muted_foreground))
 }
 
-/// A field with its label above it, and what it is for under it, if that needs saying.
-pub fn field(label: &'static str, help: Option<&'static str>, input: impl IntoElement) -> View {
+/// A field with its label above it, which names the input for screen readers too, and
+/// what it is for under it, if that needs saying.
+pub fn field(label: &'static str, help: Option<&'static str>, input: Input) -> View {
     view()
         .gap(px(6.0))
         .child(
@@ -188,7 +189,7 @@ pub fn field(label: &'static str, help: Option<&'static str>, input: impl IntoEl
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || theme().foreground),
         )
-        .child(input)
+        .child(input.label(label))
         .children(help.map(|help| {
             text(help)
                 .text_xs()
@@ -336,6 +337,8 @@ fn name_form(request: NameRequest) -> impl IntoElement {
             .child(title(request.title.clone()))
             .child(
                 text_input()
+                    // The title names it for screen readers, as it does on screen.
+                    .label(request.title.clone())
                     .default_value(request.name.clone())
                     .placeholder(request.placeholder.unwrap_or_default().to_owned())
                     .selected_range((0, length))

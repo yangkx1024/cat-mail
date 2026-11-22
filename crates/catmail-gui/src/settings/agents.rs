@@ -208,6 +208,7 @@ fn tokens_list(tokens: Tokens, made: Made) -> impl IntoElement {
                 .child(
                     text_input()
                         .flex_1()
+                        .label("Token name")
                         .placeholder("Name, such as the agent's device")
                         .value(move || name.get())
                         .on_change(move |text: &str| name.set(text.to_owned()))
