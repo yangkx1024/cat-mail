@@ -631,6 +631,7 @@ fn search_field(search: ElementRef) -> impl IntoElement {
         .child(
             input()
                 .value(move || global::<SearchText>().with(|t| t.0.clone()))
+                .label("Search")
                 .placeholder("Search".to_owned())
                 .on_change(move |text: &str| typed(text.to_owned()))
                 .on_focus(connect_ahead)

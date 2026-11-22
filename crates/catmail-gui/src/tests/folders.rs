@@ -16,12 +16,7 @@ fn folders_are_made_renamed_and_deleted_from_the_sidebar() {
     app.press("Create").unwrap();
     app.wait_for_gone("label:New folder", WAIT).unwrap();
     app.wait_for_within("Projects", WAIT).unwrap();
-    assert!(
-        mail.imap
-            .state()
-            .mailbox_names()
-            .contains(&"Projects".to_owned())
-    );
+    assert!(mail.has_folder("Projects"));
 
     app.right_click("Projects").unwrap();
     app.choose_menu_item("Rename").unwrap();
@@ -31,18 +26,13 @@ fn folders_are_made_renamed_and_deleted_from_the_sidebar() {
     app.submit(rename).unwrap();
     app.wait_for_within("Clients", WAIT).unwrap();
     app.wait_for_gone("Projects", WAIT).unwrap();
-    let names = mail.imap.state().mailbox_names();
-    assert!(names.contains(&"Clients".to_owned()) && !names.contains(&"Projects".to_owned()));
+    assert!(mail.has_folder("Clients") && !mail.has_folder("Projects"));
 
     app.on_dialog(|_| DialogAnswer::Press("Delete".into()));
     app.right_click("Clients").unwrap();
     app.choose_menu_item("Delete").unwrap();
     app.wait_for_gone("Clients", WAIT).unwrap();
     wait_until("Clients is deleted on the server", || {
-        !mail
-            .imap
-            .state()
-            .mailbox_names()
-            .contains(&"Clients".to_owned())
+        !mail.has_folder("Clients")
     });
 }

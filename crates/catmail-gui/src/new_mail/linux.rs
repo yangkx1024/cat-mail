@@ -54,8 +54,8 @@ pub fn show(notice: &Notice) {
         }
         Markup::Unknown => {
             *state = Markup::Asking(vec![notice.clone()]);
-            // Queued: runs on GLib's loop after this borrow ends (not the shell's, which
-            // is headless in tests).
+            // Queued: runs on GLib's loop, which D-Bus answers on, after this borrow
+            // ends.
             glib::spawn_future_local(post_waiting());
             None
         }

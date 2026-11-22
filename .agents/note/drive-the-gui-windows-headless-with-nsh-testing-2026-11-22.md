@@ -16,15 +16,18 @@ GPUI 版删掉后，catmail-gui 没有驱动窗口的测试（ROADMAP P10 的 ns
   `appkit.rs` 同一套接口，`View` 是新的类型别名）：主线程是测试起的线程，自己跑循环（`async-task` 跑 future，
   `invoke` 和定时器排队），外壳开的每个窗口起一个 `Headless` 交给测试。开写信窗口、关窗询问、存完再关、退出、
   常驻都走真实的外壳代码。考虑过在 `shell::opened` 里加测试钩子，放弃：只绕过一处，关窗和退出就测不到。
-- **测试一个接一个跑**：引擎、设置、托盘的请求是进程级的（和应用里一样），`Desktop` 持一把锁，开始时复原
-  外壳的状态（`shell::reset`）。主线程的队列带着运行编号，失败的测试留下的线程收尾时不会清掉下一个的。
-- **GTK / AppKit 的工具包在测试构建里照样编译**（`#[allow(dead_code)]`）：`gtk.rs` 的测试还要跑，
-  `--all-targets` 也还检查它们。`gtk.rs` 里子进程测试的名字改成由 `module_path!()` 算出。
-  `new_mail/linux.rs` 原来经 `shell::spawn` 用 GLib 的循环，测试构建里那变成无头的循环，它的测试就收不到
-  通知；它本来就是 GTK 专用的代码，改成直接 `glib::spawn_future_local`。
+- **测试一个接一个跑**：引擎、设置、托盘的请求是进程级的（和应用里一样），测试在搭假服务器和客户端之前就
+  拿到一把锁（`Turn`），排队的测试手里还没有服务器和客户端；`Desktop` 开始时复原外壳的状态（`shell::reset`，
+  设置和主题与启动时同一段 `load_settings`）。
+- **GTK / AppKit 的工具包在测试构建里照样编译**：`mod gtk;` / `mod appkit;` / `mod headless;` 各声明一次，
+  `toolkit` 是按构建选的别名（测试构建里 `allow(dead_code)`）；`gtk.rs` 的测试还要跑，`--all-targets` 也还
+  检查它们，模块路径也不随构建变。`new_mail/linux.rs` 原来经 `shell::spawn` 用 GLib 的循环，测试构建里那变成
+  无头的循环，它的测试就收不到通知；它是 GLib 上的代码（D-Bus 在 GLib 的循环上应答），改成直接
+  `glib::spawn_future_local`。
 - **选择器用用户看得见的名字**：给没有名字的输入框加无障碍标签（写信的 To / Cc / Bcc / Subject、`form::field`
-  用它显示的标签、命名对话框用它的标题），读屏本来就需要；富文本编辑器自己不收标签，外面包一层带
-  `test_id("message")` 的 view；读信区加 `test_id("reader")`，把标题和列表行分开。
+  用它显示的标签、命名对话框用它的标题、正文编辑器的 `accessibility_label`，顺带链接对话框、令牌名、搜索框），
+  读屏本来就需要；只有读信区用 `test_id("reader")`，把标题和列表行分开（容器上的标签会让读屏只念标签）。
+  发出的邮件用 `mail-parser` 读，不自己解析头部。
 - **客户端在后台同步、发信**，和应用一样，窗口里的改动自己到达服务器，测试只等最终状态，不手动 replay。
 - 依赖：dev-dependency `nsh-testing`、`nsh-engine`（不带 JS）。它打开 nsh-core 的 HTTP / WebSocket，带进
   `webpki-roots`（CDLA-Permissive-2.0），只在测试里，`deny.toml` 对这一个 crate 放行。

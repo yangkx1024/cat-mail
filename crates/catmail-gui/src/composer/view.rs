@@ -324,21 +324,19 @@ fn address_row(
 }
 
 fn body(focus_body: bool) -> impl IntoElement {
-    // Named for the tests, which type into the editor through it.
-    view().flex_1().min_h(px(0.0)).test_id("message").child(
-        rich_editor()
-            .editor(super::rich().session())
-            .editable(move || !ending())
-            .auto_focus(focus_body)
-            .classes(rich::classes())
-            .on_change(|_: &_| text_changed())
-            .on_selection_change(|_: &_| formatting_moved())
-            .on_paste_files(pasted)
-            .flex_1()
-            .min_h(px(0.0))
-            .text_sm()
-            .text_color(move || theme().foreground),
-    )
+    rich_editor()
+        .editor(super::rich().session())
+        .editable(move || !ending())
+        .auto_focus(focus_body)
+        .accessibility_label(Some("Message".into()))
+        .classes(rich::classes())
+        .on_change(|_: &_| text_changed())
+        .on_selection_change(|_: &_| formatting_moved())
+        .on_paste_files(pasted)
+        .flex_1()
+        .min_h(px(0.0))
+        .text_sm()
+        .text_color(move || theme().foreground)
 }
 
 /// Many of them scroll, in no more than a few rows: the bar under them stays in the
@@ -533,6 +531,7 @@ fn link_form(href: String) -> impl IntoElement {
             .child(form::title("Link"))
             .child(
                 form::text_input()
+                    .label("Link")
                     .default_value(href)
                     .placeholder("https://".to_owned())
                     .selected_range((0, length))

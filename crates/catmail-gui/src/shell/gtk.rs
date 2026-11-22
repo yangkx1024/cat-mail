@@ -289,20 +289,16 @@ mod tests {
     use super::own_app_id;
 
     const ID: &str = "net.yangkx.catmail.Test";
+    const CHILD: &str = "shell::gtk::tests::clicks_reach_the_app_through_its_id";
 
     /// GLib reads the session bus's address once per process: the test runs again in a
     /// process of its own, on a bus of its own.
     #[test]
     fn a_notification_click_finds_the_non_unique_app() {
-        // The test's name, as the harness takes it: without the crate's.
-        let child = module_path!()
-            .split_once("::")
-            .map(|(_, path)| format!("{path}::clicks_reach_the_app_through_its_id"))
-            .unwrap();
         let run = Command::new("dbus-run-session")
             .arg("--")
             .arg(std::env::current_exe().unwrap())
-            .args(["--exact", &child, "--ignored", "--test-threads=1"])
+            .args(["--exact", CHILD, "--ignored", "--test-threads=1"])
             .output()
             .expect("dbus-run-session");
         assert!(

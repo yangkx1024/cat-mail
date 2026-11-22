@@ -12,18 +12,16 @@ mod settings;
 mod writing;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use catmail_core::{
     AccountId, Config, DraftSummary, MailClient, MemorySecrets, NewAccount, Security, ServerConfig,
     SyncSchedule, Verify,
 };
 use catmail_testkit::{FakeImap, FakeMailbox, FakeSmtp, ServerState, SmtpState};
+use mail_parser::{Message, MessageParser};
+use nsh_testing::Headless;
 
-use crate::shell::toolkit::{Desktop, TestWindow};
-
-/// How long a step waits for what it started (a sync, a send) to show.
-const WAIT: Duration = Duration::from_secs(10);
+use crate::shell::headless::{Desktop, TestWindow, Turn, WAIT, poll_until};
 
 /// INBOX, oldest first: (subject, text), from Bob to the account.
 const INBOX: &[(&str, &str)] = &[
@@ -43,13 +41,16 @@ const FOLDERS: &[(&str, &str)] = &[
 /// The fake servers, a client and, unless [`TestMail::without_account`], an account on
 /// them that it has synced.
 pub struct TestMail {
-    pub client: MailClient,
-    pub account: Option<AccountId>,
+    client: MailClient,
+    account: Option<AccountId>,
     pub imap: FakeImap,
     pub smtp: FakeSmtp,
     dir: tempfile::TempDir,
     // The fake servers' only; the client runs its own runtime, as in the app.
     _servers: tokio::runtime::Runtime,
+    // Taken first and let go of last: a test waiting for its turn holds no servers or
+    // client yet.
+    turn: Turn,
 }
 
 impl TestMail {
@@ -76,6 +77,7 @@ impl TestMail {
 
     /// The servers of [`start`](Self::start), and a client with no account yet.
     pub fn without_account() -> Self {
+        let turn = Turn::take();
         let mut state = ServerState::new("alice", "pw");
         for (n, (subject, text)) in INBOX.iter().enumerate() {
             let raw = format!(
@@ -90,7 +92,11 @@ impl TestMail {
                 .mailboxes
                 .push(FakeMailbox::new(name).with_attribute(attribute));
         }
-        let servers = tokio::runtime::Runtime::new().unwrap();
+        let servers = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
         let imap = servers.block_on(FakeImap::start(state));
         let smtp = servers.block_on(FakeSmtp::start(SmtpState::new("alice", "pw")));
         let dir = tempfile::tempdir().unwrap();
@@ -101,11 +107,8 @@ impl TestMail {
             smtp,
             dir,
             _servers: servers,
+            turn,
         }
-    }
-
-    pub fn account(&self) -> AccountId {
-        self.account.expect("an account")
     }
 
     /// The subjects in the server's mailbox `name`, in UID order.
@@ -117,17 +120,22 @@ impl TestMail {
         mailbox
             .messages
             .iter()
-            .filter_map(|m| header(&String::from_utf8_lossy(&m.raw), "Subject"))
+            .filter_map(|m| Some(parse(&m.raw).subject()?.to_owned()))
             .collect()
     }
 
-    /// The messages the SMTP server delivered, in order, as text.
-    pub fn delivered(&self) -> Vec<String> {
+    /// Whether the server has a mailbox `name`.
+    pub fn has_folder(&self, name: &str) -> bool {
+        self.imap.state().mailbox_names().iter().any(|n| n == name)
+    }
+
+    /// The messages the SMTP server delivered, in order.
+    pub fn delivered(&self) -> Vec<Vec<u8>> {
         self.smtp
             .state()
             .received
             .iter()
-            .map(|m| String::from_utf8_lossy(&m.data).into_owned())
+            .map(|m| m.data.clone())
             .collect()
     }
 
@@ -143,7 +151,7 @@ impl TestMail {
 
     /// The app on this client, and its main window as it opens.
     pub fn open_window(&self) -> (Desktop, TestWindow) {
-        let desktop = Desktop::start(self.client.clone());
+        let desktop = Desktop::start(self.client.clone(), &self.turn);
         let main = desktop.window(crate::shell::APP_NAME);
         (desktop, main)
     }
@@ -152,7 +160,8 @@ impl TestMail {
     /// the app has quit.
     pub fn drafts_after_quitting(&self) -> Vec<DraftSummary> {
         let client = open_client(self.dir.path());
-        pollster::block_on(client.list_drafts(self.account())).unwrap()
+        let account = self.account.expect("an account");
+        pollster::block_on(client.list_drafts(account)).unwrap()
     }
 }
 
@@ -173,21 +182,27 @@ fn local(port: u16) -> ServerConfig {
     }
 }
 
-/// The value of the header field `name` of the message `raw`.
-pub fn header(raw: &str, name: &str) -> Option<String> {
-    let prefix = format!("{name}: ");
-    raw.lines()
-        .take_while(|line| !line.is_empty())
-        .find_map(|line| line.strip_prefix(&prefix))
-        .map(str::to_owned)
+pub fn parse(raw: &[u8]) -> Message<'_> {
+    MessageParser::new().parse(raw).expect("a message")
 }
 
 /// Waits for `done` to hold, for what a step started outside the window (on the
 /// servers).
-pub fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
-    let until = std::time::Instant::now() + WAIT;
-    while !done() {
-        assert!(std::time::Instant::now() < until, "timed out: {what}");
-        std::thread::sleep(Duration::from_millis(10));
-    }
+pub fn wait_until(what: &str, done: impl FnMut() -> bool) {
+    assert!(poll_until(WAIT, done), "timed out: {what}");
+}
+
+/// Opens the message `subject` from the list, and waits for the reader to show it.
+pub fn open_message(app: &mut Headless, subject: &str) {
+    app.press(subject).unwrap();
+    app.wait_for_within(&format!("id:reader >> text:{subject}"), WAIT)
+        .unwrap();
+}
+
+/// A new message's composer, opened from the main window.
+pub fn compose(desktop: &Desktop, main: &mut TestWindow) -> TestWindow {
+    main.app.press("Compose").unwrap();
+    let mut composer = desktop.window("New message");
+    composer.app.wait_for_within("label:To", WAIT).unwrap();
+    composer
 }

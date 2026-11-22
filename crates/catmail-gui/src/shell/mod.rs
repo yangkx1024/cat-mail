@@ -8,24 +8,23 @@
 //! All of this runs on the main thread, the toolkit's. Each window's view runs on a
 //! thread of its own (nsh's engine thread), and reaches what is here with [`on_main`].
 
-// In a test build, the platform's toolkit is built all the same, for its own tests and
-// so that `--all-targets` checks it.
-#[cfg(all(target_os = "macos", test))]
-#[allow(dead_code)]
+// In a test build the platform's toolkit is built all the same, for its own tests and so
+// that `--all-targets` checks it, but the windows' views run headless, for the tests to
+// drive.
+#[cfg(target_os = "macos")]
+#[cfg_attr(test, allow(dead_code))]
 mod appkit;
-#[cfg(all(target_os = "linux", test))]
-#[allow(dead_code)]
+#[cfg(target_os = "linux")]
+#[cfg_attr(test, allow(dead_code))]
 mod gtk;
-#[cfg(all(target_os = "macos", not(test)))]
-#[path = "appkit.rs"]
-mod toolkit;
-#[cfg(all(target_os = "linux", not(test)))]
-#[path = "gtk.rs"]
-mod toolkit;
-/// In tests, the windows' views run headless, for the tests to drive.
 #[cfg(test)]
-#[path = "headless.rs"]
-pub mod toolkit;
+pub mod headless;
+#[cfg(all(target_os = "macos", not(test)))]
+use self::appkit as toolkit;
+#[cfg(all(target_os = "linux", not(test)))]
+use self::gtk as toolkit;
+#[cfg(test)]
+use self::headless as toolkit;
 
 /// Runs a function on the main thread, from any.
 #[cfg(target_os = "macos")]
@@ -320,9 +319,7 @@ pub fn run(
     if let Some(file) = file {
         catmail_frontend::autostart::use_config_dir(file.dir().to_owned());
     }
-    SETTINGS.set(file.as_ref().map(|file| file.load()).unwrap_or_default());
-    let themes_dir = file.as_ref().map(|file| file.themes_dir());
-    *lock(&THEMES) = Themes::load(themes_dir.as_deref());
+    load_settings(file.as_deref());
     let code = toolkit::run(move || {
         toolkit::set_appearance(appearance(&settings()));
         started(builder, requests);
@@ -331,12 +328,17 @@ pub fn run(
     code
 }
 
+/// The settings in `file` and the themes next to it, or without one the defaults.
+fn load_settings(file: Option<&SettingsFile>) {
+    SETTINGS.set(file.map(SettingsFile::load).unwrap_or_default());
+    *lock(&THEMES) = Themes::load(file.map(SettingsFile::themes_dir).as_deref());
+}
+
 /// What a test's app starts with, as a launch with no settings file: what the previous
 /// test left in the process's state is gone.
 #[cfg(test)]
 fn reset() {
-    SETTINGS.set(Settings::default());
-    *lock(&THEMES) = Themes::load(None);
+    load_settings(None);
     *lock(&ASKS) = Asks::new();
     MCP_STATUS.set(mcp::Status::Off);
 }

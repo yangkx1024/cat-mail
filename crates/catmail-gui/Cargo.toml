@@ -31,6 +31,7 @@ resvg.workspace = true
 # The headless shell's main thread runs its futures as AppKit's does.
 async-task.workspace = true
 catmail-testkit.workspace = true
+mail-parser.workspace = true
 nsh-engine.workspace = true
 nsh-testing.workspace = true
 tempfile.workspace = true

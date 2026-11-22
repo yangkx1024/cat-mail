@@ -9,7 +9,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -17,30 +17,21 @@ use std::time::{Duration, Instant};
 
 use catmail_core::MailClient;
 use catmail_frontend::resident::QuitReason;
+use nsh_core::platform::{Idiom, Os};
 use nsh_engine::{ColorScheme, EngineConfig, Environment, Points, Size};
 use nsh_testing::Headless;
 
 use super::{Hooks, Spec, lock};
 use crate::nsh_platform::{App, AppOptions, Appearance};
 
+/// How long the test waits for what a step started (a window, a sync, a send) to show.
+pub const WAIT: Duration = Duration::from_secs(10);
+
 /// What the main thread is asked to do, from any thread.
-enum Job {
-    Call(Box<dyn FnOnce() + Send>),
-    Poll(async_task::Runnable),
-}
+type Job = Box<dyn FnOnce() + Send>;
 
-/// The main thread's queue while a [`Desktop`] runs, with the run's number: a run that
-/// ends late (a test that failed left it stuck) doesn't take the next one's.
-static QUEUE: Mutex<Option<(u64, mpsc::Sender<Job>)>> = Mutex::new(None);
-
-static RUNS: AtomicU64 = AtomicU64::new(0);
-
-fn send(job: Job) {
-    if let Some((_, queue)) = &*lock(&QUEUE) {
-        // Gone once the loop is over: as on a platform, what comes later never runs.
-        let _ = queue.send(job);
-    }
-}
+/// The queue of the [`Desktop`] running, or of the last one.
+static QUEUE: Mutex<Option<mpsc::Sender<Job>>> = Mutex::new(None);
 
 /// What [`after`] put off, by when and in order.
 type Timers = BTreeMap<(Instant, u64), Box<dyn FnOnce()>>;
@@ -56,8 +47,7 @@ thread_local! {
 /// launched, as the toolkits do.
 pub fn run(started: impl FnOnce() + 'static) -> u8 {
     let (queue, jobs) = mpsc::channel();
-    let run = RUNS.fetch_add(1, Ordering::SeqCst);
-    *lock(&QUEUE) = Some((run, queue));
+    *lock(&QUEUE) = Some(queue);
     started();
     super::launched(false);
     while !ENDED.get() {
@@ -67,17 +57,10 @@ pub fn run(started: impl FnOnce() + 'static) -> u8 {
             None => jobs.recv().map_err(|_| RecvTimeoutError::Disconnected),
         };
         match job {
-            Ok(Job::Call(f)) => f(),
-            Ok(Job::Poll(runnable)) => {
-                runnable.run();
-            }
+            Ok(f) => f(),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
-    }
-    let mut queue = lock(&QUEUE);
-    if queue.as_ref().is_some_and(|(of, _)| *of == run) {
-        queue.take();
     }
     0
 }
@@ -87,31 +70,40 @@ fn run_due_timers() -> Option<Instant> {
     loop {
         let now = Instant::now();
         let due = TIMERS.with_borrow_mut(|timers| {
-            let (&(at, _), _) = timers.first_key_value()?;
+            let timer = timers.first_entry()?;
+            let (at, _) = *timer.key();
             Some(if at <= now {
-                Ok(timers.pop_first().map(|(_, f)| f))
+                Ok(timer.remove())
             } else {
                 Err(at)
             })
         });
-        match due {
-            Some(Ok(Some(f))) => f(),
-            Some(Err(at)) => return Some(at),
-            Some(Ok(None)) | None => return None,
+        match due? {
+            Ok(f) => f(),
+            Err(at) => return Some(at),
         }
     }
 }
 
 /// Runs `future` on the main thread's loop, from the main thread.
 pub fn spawn(future: impl Future<Output = ()> + 'static) {
-    let (runnable, task) = async_task::spawn_local(future, |runnable| send(Job::Poll(runnable)));
+    let (runnable, task) = async_task::spawn_local(future, |runnable: async_task::Runnable| {
+        invoke(move || {
+            runnable.run();
+        });
+    });
     runnable.schedule();
     task.detach();
 }
 
 /// Runs `f` on the main thread, from any.
 pub fn invoke(f: impl FnOnce() + Send + 'static) {
-    send(Job::Call(Box::new(f)));
+    // Out of the lock: a job dropped unsent may drop a waker that sends.
+    let queue = lock(&QUEUE).clone();
+    if let Some(queue) = queue {
+        // Gone once the loop is over: as on a platform, what comes later never runs.
+        let _ = queue.send(Box::new(f));
+    }
 }
 
 /// Runs `f` on the main thread once `delay` is over.
@@ -170,24 +162,22 @@ impl View {
             panic!("catmail's windows run Rust roots");
         };
         let (width, height) = self.size.get();
-        let mut environment = Environment {
+        let environment = Environment {
             color_scheme: match self.appearance {
                 Appearance::Dark => ColorScheme::Dark,
                 _ => ColorScheme::Light,
             },
             // Dialogs show at once, not sliding in.
             reduce_motion: true,
-            idiom: nsh_core::platform::Idiom::Desktop,
+            idiom: Idiom::Desktop,
+            // Not the default, a phone's.
+            os: if cfg!(target_os = "macos") {
+                Os::MacOs
+            } else {
+                Os::Linux
+            },
             ..Environment::default()
         };
-        #[cfg(target_os = "linux")]
-        {
-            environment.os = nsh_core::platform::Os::Linux;
-        }
-        #[cfg(target_os = "macos")]
-        {
-            environment.os = nsh_core::platform::Os::MacOs;
-        }
         let config = EngineConfig {
             viewport: Size::new(Points(width as f32), Points(height as f32)),
             environment,
@@ -199,7 +189,7 @@ impl View {
             app,
             open: self.open.clone(),
         };
-        let (opened_windows, arrived) = &*OPENED;
+        let (opened_windows, arrived) = &OPENED;
         lock(opened_windows).push(opened);
         arrived.notify_all();
     }
@@ -255,8 +245,7 @@ impl Window {
 }
 
 /// The windows opened and not yet taken by the test, in order.
-static OPENED: std::sync::LazyLock<(Mutex<Vec<TestWindow>>, Condvar)> =
-    std::sync::LazyLock::new(Default::default);
+static OPENED: (Mutex<Vec<TestWindow>>, Condvar) = (Mutex::new(Vec::new()), Condvar::new());
 
 /// A window the app opened: its view, for the test to drive.
 pub struct TestWindow {
@@ -272,15 +261,24 @@ impl TestWindow {
     }
 
     /// Waits for the app to close it.
-    pub fn wait_closed(&self, timeout: Duration) -> Result<(), String> {
-        let until = Instant::now() + timeout;
-        while self.is_open() {
-            if Instant::now() > until {
-                return Err(format!("{:?} is still open", self.title));
-            }
-            std::thread::sleep(Duration::from_millis(5));
+    pub fn wait_closed(&self) {
+        let closed = poll_until(WAIT, || !self.is_open());
+        assert!(closed, "{:?} is still open", self.title);
+    }
+}
+
+/// Whether `done` holds within `timeout`, checked every few milliseconds: for what has no
+/// signal to wait on.
+pub fn poll_until(timeout: Duration, mut done: impl FnMut() -> bool) -> bool {
+    let until = Instant::now() + timeout;
+    loop {
+        if done() {
+            return true;
         }
-        Ok(())
+        if Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -288,16 +286,27 @@ impl TestWindow {
 /// process's, as in the app.
 static TURN: Mutex<()> = Mutex::new(());
 
+/// A test's turn, from before it sets up what its app runs on (servers, a client) until
+/// it lets go.
+pub struct Turn {
+    _held: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Turn {
+    pub fn take() -> Self {
+        Self { _held: lock(&TURN) }
+    }
+}
+
 /// The app with `client` for its engine, its main thread running: as launched, its main
 /// window opens ([`Desktop::window`]). Dropping it quits, and shuts the engine down.
 pub struct Desktop {
     main: Option<JoinHandle<()>>,
-    _turn: std::sync::MutexGuard<'static, ()>,
 }
 
 impl Desktop {
-    pub fn start(client: MailClient) -> Self {
-        let turn = lock(&TURN);
+    /// Starts the app, on the test's turn.
+    pub fn start(client: MailClient, _turn: &Turn) -> Self {
         lock(&OPENED.0).clear();
         super::reset();
         let main = std::thread::Builder::new()
@@ -307,33 +316,22 @@ impl Desktop {
                 super::finish();
             })
             .expect("the main thread starts");
-        Self {
-            main: Some(main),
-            _turn: turn,
-        }
+        Self { main: Some(main) }
     }
 
     /// The next window titled `title` the app opens, once it has.
     pub fn window(&self, title: &str) -> TestWindow {
-        let timeout = Duration::from_secs(10);
-        let (opened, arrived) = &*OPENED;
-        let mut windows = lock(opened);
-        let until = Instant::now() + timeout;
-        loop {
-            if let Some(i) = windows.iter().position(|w| w.title == title) {
-                return windows.remove(i);
-            }
-            let left = until.saturating_duration_since(Instant::now());
-            assert!(
-                !left.is_zero(),
-                "no window {title:?} opened; opened: {:?}",
-                windows.iter().map(|w| &w.title).collect::<Vec<_>>()
-            );
-            windows = arrived
-                .wait_timeout(windows, left)
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .0;
-        }
+        let (opened, arrived) = &OPENED;
+        let (mut windows, _) = arrived
+            .wait_timeout_while(lock(opened), WAIT, |windows| {
+                !windows.iter().any(|w| w.title == title)
+            })
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(i) = windows.iter().position(|w| w.title == title) else {
+            let opened: Vec<_> = windows.iter().map(|w| &w.title).collect();
+            panic!("no window {title:?} opened; opened: {opened:?}");
+        };
+        windows.remove(i)
     }
 
     /// Runs `f` on the main thread and waits for it.
@@ -357,19 +355,12 @@ impl Desktop {
         invoke(|| super::quit(QuitReason::Shortcut));
     }
 
-    /// Waits for the app to have quit.
-    pub fn wait_quit(mut self, timeout: Duration) -> Result<(), String> {
-        let main = self.main.take().expect("running");
-        let until = Instant::now() + timeout;
-        while !main.is_finished() {
-            if Instant::now() > until {
-                self.main = Some(main);
-                return Err("the app didn't quit".into());
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        main.join()
-            .map_err(|_| "the main thread panicked".to_owned())
+    /// Waits for the app to have quit, and its engine to have shut down.
+    pub fn wait_quit(&self) {
+        let quit = poll_until(WAIT, || {
+            self.main.as_ref().is_none_or(JoinHandle::is_finished)
+        });
+        assert!(quit, "the app didn't quit");
     }
 }
 
@@ -380,10 +371,7 @@ impl Drop for Desktop {
         };
         invoke(end);
         // A test that failed may have left the app stuck: the next goes on all the same.
-        let until = Instant::now() + Duration::from_secs(5);
-        while !main.is_finished() && Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        poll_until(Duration::from_secs(5), || main.is_finished());
         if main.is_finished() && main.join().is_err() && !std::thread::panicking() {
             panic!("the main thread panicked");
         }

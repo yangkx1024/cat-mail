@@ -41,7 +41,7 @@ fn runs_on_without_a_window_until_told_not_to() {
     let mail = TestMail::start();
     let (desktop, main) = mail.open();
     desktop.close(shell::APP_NAME);
-    main.wait_closed(WAIT).unwrap();
+    main.wait_closed();
     // Running on: the tray, say, opens the window again.
     desktop.on_main(|| shell::show_at(None, None));
     let mut main = desktop.window(shell::APP_NAME);
@@ -53,7 +53,7 @@ fn runs_on_without_a_window_until_told_not_to() {
         .unwrap();
     wait_until("keeping running is off", || !shell::settings().keep_running);
     desktop.close(shell::APP_NAME);
-    desktop.wait_quit(WAIT).unwrap();
+    desktop.wait_quit();
 }
 
 #[test]

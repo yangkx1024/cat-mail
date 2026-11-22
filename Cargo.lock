@@ -649,6 +649,7 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "glib-unix",
+ "mail-parser",
  "nsh-base",
  "nsh-core",
  "nsh-engine",

@@ -2,7 +2,7 @@
 
 use nsh_testing::DialogAnswer;
 
-use super::{TestMail, WAIT, wait_until};
+use super::{TestMail, WAIT, open_message, wait_until};
 
 #[test]
 fn opens_a_message_from_the_list_and_marks_it_read() {
@@ -11,9 +11,7 @@ fn opens_a_message_from_the_list_and_marks_it_read() {
     let app = &mut main.app;
     app.wait_for("3 unread").unwrap();
 
-    app.press("Lunch on Friday").unwrap();
-    app.wait_for_within("id:reader >> text:Lunch on Friday", WAIT)
-        .unwrap();
+    open_message(app, "Lunch on Friday");
     assert!(
         app.screen()
             .matches("id:reader >> text:To alice@example.com")
@@ -21,8 +19,9 @@ fn opens_a_message_from_the_list_and_marks_it_read() {
     );
     app.wait_for("2 unread").unwrap();
     wait_until("the server has it read", || {
-        let state = mail.imap.state();
-        state.mailboxes[0]
+        let mut state = mail.imap.state();
+        state
+            .inbox()
             .messages
             .iter()
             .find(|m| String::from_utf8_lossy(&m.raw).contains("Lunch on Friday"))
@@ -36,9 +35,7 @@ fn archiving_opens_the_next_message() {
     let (_desktop, mut main) = mail.open();
     let app = &mut main.app;
 
-    app.press("Quarterly report").unwrap();
-    app.wait_for_within("id:reader >> text:Quarterly report", WAIT)
-        .unwrap();
+    open_message(app, "Quarterly report");
     app.press("label:Archive").unwrap();
     app.wait_for_gone("Quarterly report", WAIT).unwrap();
     app.wait_for_within("id:reader >> text:Lunch on Friday", WAIT)
@@ -54,9 +51,7 @@ fn deleting_from_trash_asks_first() {
     let (_desktop, mut main) = mail.open();
     let app = &mut main.app;
 
-    app.press("Weekend plans").unwrap();
-    app.wait_for_within("id:reader >> text:Weekend plans", WAIT)
-        .unwrap();
+    open_message(app, "Weekend plans");
     app.press("label:Delete").unwrap();
     app.wait_for_gone("Weekend plans", WAIT).unwrap();
     wait_until("the server has it in Trash", || {
@@ -65,9 +60,7 @@ fn deleting_from_trash_asks_first() {
 
     app.press("Trash").unwrap();
     app.wait_for_within("Weekend plans", WAIT).unwrap();
-    app.press("Weekend plans").unwrap();
-    app.wait_for_within("id:reader >> text:Weekend plans", WAIT)
-        .unwrap();
+    open_message(app, "Weekend plans");
     app.on_dialog(|dialog| {
         assert!(
             dialog
