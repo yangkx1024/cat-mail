@@ -232,6 +232,7 @@ fn fields(focus_body: bool) -> impl IntoElement {
                 .border_color(border)
                 .child(
                     header_input(typed.subject, |t, text| t.subject = text)
+                        .label("Subject")
                         .placeholder("Subject".to_owned()),
                 ),
         )
@@ -303,6 +304,7 @@ fn address_row(
             field_row(label)
                 .child(
                     header_input(value, on_change)
+                        .label(label)
                         .auto_focus(auto_focus)
                         .element_ref(&input_ref),
                 )
@@ -322,18 +324,21 @@ fn address_row(
 }
 
 fn body(focus_body: bool) -> impl IntoElement {
-    rich_editor()
-        .editor(super::rich().session())
-        .editable(move || !ending())
-        .auto_focus(focus_body)
-        .classes(rich::classes())
-        .on_change(|_: &_| text_changed())
-        .on_selection_change(|_: &_| formatting_moved())
-        .on_paste_files(pasted)
-        .flex_1()
-        .min_h(px(0.0))
-        .text_sm()
-        .text_color(move || theme().foreground)
+    // Named for the tests, which type into the editor through it.
+    view().flex_1().min_h(px(0.0)).test_id("message").child(
+        rich_editor()
+            .editor(super::rich().session())
+            .editable(move || !ending())
+            .auto_focus(focus_body)
+            .classes(rich::classes())
+            .on_change(|_: &_| text_changed())
+            .on_selection_change(|_: &_| formatting_moved())
+            .on_paste_files(pasted)
+            .flex_1()
+            .min_h(px(0.0))
+            .text_sm()
+            .text_color(move || theme().foreground),
+    )
 }
 
 /// Many of them scroll, in no more than a few rows: the bar under them stays in the

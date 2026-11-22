@@ -78,6 +78,9 @@ Protocol behaviour is tested against `catmail-testkit`'s fake servers (every OS)
 Dovecot (`testenv/dovecot/run.sh`, run by the Linux CI test job; IMAP, and SMTP submission relaying to a
 mailpit sink). New sync or protocol behaviour gets a
 fake-server test, with a fault injected if the change is about recovering from one.
+What the windows do is tested headless in `catmail-gui`'s `src/tests/` (nsh-testing, on
+the shell's headless toolkit, against the same fake servers): see
+[docs/architecture/testing.md](docs/architecture/testing.md#gui).
 
 ## Rules that are easy to break
 

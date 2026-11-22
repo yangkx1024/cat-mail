@@ -170,7 +170,9 @@
 ## P10 平台与工程
 
 - [x] 字体：Pango 自己做回退，已确认中文各字重、粗体正常
-- [ ] 测试：用 nsh-testing 无头驱动窗口（读信、写信、设置、文件夹）
+- [x] 测试：用 nsh-testing 无头驱动窗口（读信、写信、设置、文件夹），对着假 IMAP / SMTP 服务器（`src/tests/`）。
+      外壳在测试里换成无头的工具包（`shell/headless.rs`）：每个窗口一个 `Headless`，开写信窗口、关窗、退出、
+      常驻都走真实的外壳代码。web view 里的正文、画出来的样子不在其内（docs/architecture/testing.md）
 - [x] 在主 workspace 里：longbridge/nsh#966 在上游 main 修好（#1022），曾用 git 依赖钉在 main 的 commit 上。
       nsh 0.6.0 起声音（GStreamer）、HTTP、WebSocket、SVG 都是可选的 feature，只打开 `webview` 和画图标的
       `svg`，开发 shell 和 CI 不再装 GStreamer 的开发包

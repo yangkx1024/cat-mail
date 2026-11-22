@@ -286,6 +286,9 @@ fn main_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
     bar
 }
 
+/// A window's view.
+pub type View = AppView;
+
 pub fn new_view(options: AppOptions) -> Rc<AppView> {
     AppView::new(main_thread(), options)
 }

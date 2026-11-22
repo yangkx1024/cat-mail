@@ -8,12 +8,24 @@
 //! All of this runs on the main thread, the toolkit's. Each window's view runs on a
 //! thread of its own (nsh's engine thread), and reaches what is here with [`on_main`].
 
-#[cfg(target_os = "macos")]
+// In a test build, the platform's toolkit is built all the same, for its own tests and
+// so that `--all-targets` checks it.
+#[cfg(all(target_os = "macos", test))]
+#[allow(dead_code)]
+mod appkit;
+#[cfg(all(target_os = "linux", test))]
+#[allow(dead_code)]
+mod gtk;
+#[cfg(all(target_os = "macos", not(test)))]
 #[path = "appkit.rs"]
 mod toolkit;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(test)))]
 #[path = "gtk.rs"]
 mod toolkit;
+/// In tests, the windows' views run headless, for the tests to drive.
+#[cfg(test)]
+#[path = "headless.rs"]
+pub mod toolkit;
 
 /// Runs a function on the main thread, from any.
 #[cfg(target_os = "macos")]
@@ -43,9 +55,9 @@ use catmail_frontend::watched::Watched;
 use futures_channel::{mpsc, oneshot};
 use futures_util::StreamExt as _;
 
-use self::toolkit::Window;
+use self::toolkit::{View, Window};
 use crate::engine;
-use crate::nsh_platform::{App, AppOptions, AppView, Appearance, Root};
+use crate::nsh_platform::{App, AppOptions, Appearance, Root};
 
 pub use catmail_frontend::APP_ID;
 
@@ -125,12 +137,12 @@ fn theme_overrides(settings: &Settings) -> Option<String> {
 
 thread_local! {
     /// Every window's view, for the settings to reach (the main thread).
-    static VIEWS: RefCell<Vec<Weak<AppView>>> = RefCell::default();
+    static VIEWS: RefCell<Vec<Weak<View>>> = RefCell::default();
 }
 
 /// Gives `view` the settings' theme and text size. Its appearance is the view's to set
 /// (`set_color_scheme`), on its own thread.
-fn restyle(view: &AppView, settings: &Settings) {
+fn restyle(view: &View, settings: &Settings) {
     view.set_font_scale(Some(settings.text_size / settings::DEFAULT_TEXT_SIZE));
     if let Err(e) = view.set_theme_overrides(theme_overrides(settings).as_deref()) {
         tracing::warn!(error = %e, "couldn't apply the theme");
@@ -317,6 +329,16 @@ pub fn run(
     });
     finish();
     code
+}
+
+/// What a test's app starts with, as a launch with no settings file: what the previous
+/// test left in the process's state is gone.
+#[cfg(test)]
+fn reset() {
+    SETTINGS.set(Settings::default());
+    *lock(&THEMES) = Themes::load(None);
+    *lock(&ASKS) = Asks::new();
+    MCP_STATUS.set(mcp::Status::Off);
 }
 
 /// How long quitting waits for the engine to close: well over the millisecond it takes

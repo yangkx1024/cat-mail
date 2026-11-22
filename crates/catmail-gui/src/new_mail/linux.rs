@@ -10,8 +10,6 @@ use std::cell::RefCell;
 use catmail_frontend::new_mail::Notice;
 use nsh_platform_linux::gtk4::{gio, glib, prelude::*};
 
-use crate::shell;
-
 /// The action a notification's click runs, with its tag.
 const OPEN: &str = "open-mail";
 
@@ -56,8 +54,9 @@ pub fn show(notice: &Notice) {
         }
         Markup::Unknown => {
             *state = Markup::Asking(vec![notice.clone()]);
-            // Queued: runs on the main loop after this borrow ends.
-            shell::spawn(post_waiting());
+            // Queued: runs on GLib's loop after this borrow ends (not the shell's, which
+            // is headless in tests).
+            glib::spawn_future_local(post_waiting());
             None
         }
     });

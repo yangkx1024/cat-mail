@@ -64,6 +64,10 @@ exceptions = [
     { crate = "target-lexicon", allow = ["Apache-2.0 WITH LLVM-exception"] },
     # The same license; Windows only, through nsh-core's cap-std.
     { crate = "winx", allow = ["Apache-2.0 WITH LLVM-exception"] },
+    # Mozilla's root certificates, as data under a permissive data license. Tests only:
+    # nsh-testing (catmail-gui's window tests) turns on nsh-core's HTTP and WebSocket,
+    # through ureq and tokio-tungstenite.
+    { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
 ]
 
 [licenses.private]
