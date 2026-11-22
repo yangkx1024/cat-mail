@@ -181,7 +181,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uds_windows = "1.2.1"
 unicode-width = "0.2.2"
 # The URL parser ammonia uses; the sanitizer's own checks must agree with it.
-url = "2.5.8"
+url = "2.5.9"
 uuid = { version = "1.28", features = ["v4"] }
 # Opening at login in the Flatpak (the Background portal). The zbus already in the tree
 # (the tray, notifications, the keyring), its blocking calls on async-io.
