@@ -113,7 +113,7 @@ fn button_box(
 
 /// macOS's spinner, `size` points square, turning while shown: a spoke at a time, as
 /// AppKit's does.
-fn spinner(size: f32) -> Svg {
+pub fn spinner(size: f32) -> Svg {
     const SPOKES: u32 = 12;
     const TURN_MS: f32 = 1000.0;
     let angle = animated_value(0.0);

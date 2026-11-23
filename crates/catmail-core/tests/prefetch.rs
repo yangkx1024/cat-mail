@@ -182,6 +182,58 @@ async fn new_mail_is_fetched_as_it_arrives() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn new_mail_is_fetched_by_the_sync_that_finds_it() {
+    let env = env(state(&[mail("pelican", 1)]), prefetching()).await;
+    env.client.sync_account(env.account).await.unwrap();
+    eventually("the bodies there are", async || {
+        env.downloaded("INBOX", 1).await && env.downloaded("Trash", 23).await
+    })
+    .await;
+    env.fake.wait_until(|st| st.open_connections == 0).await;
+
+    let mut events = env.client.subscribe();
+    env.fake.state().inbox().append(&mail("heron", 2), &[]);
+    env.fake.state().inbox().append(&mail("heron", 3), &[]);
+    env.client.sync_account(env.account).await.unwrap();
+    // Here once the sync is done: its notification opens it at once.
+    assert!(env.downloaded("INBOX", 2).await && env.downloaded("INBOX", 3).await);
+    // Claimed as announced: the background prefetch, which hears of them too, leaves
+    // them alone.
+    a_while().await;
+    assert_eq!(env.fake.state().body_fetches(), 4);
+    let events = drain(&mut events);
+    let announced = events
+        .iter()
+        .position(|e| matches!(e, Event::NewMail { .. }))
+        .expect("new mail announced");
+    let stored = events
+        .iter()
+        .rposition(|e| matches!(e, Event::MessagesChanged { .. }))
+        .unwrap();
+    assert!(announced < stored, "announced before its body is fetched");
+    assert_eq!(env.found("heron").await, 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn new_mail_waits_to_be_opened_once_the_budget_is_spent() {
+    let env = env(
+        state(&[mail("pelican", 1)]),
+        BodyPrefetch {
+            daily_budget: 1,
+            ..prefetching()
+        },
+    )
+    .await;
+    env.client.sync_account(env.account).await.unwrap();
+    eventually("the first body", async || env.downloaded("INBOX", 1).await).await;
+
+    env.fake.state().inbox().append(&mail("heron", 2), &[]);
+    env.client.sync_account(env.account).await.unwrap();
+    assert!(!env.downloaded("INBOX", 2).await);
+    assert_eq!(env.fake.state().body_fetches(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn bodies_are_stored_and_announced_a_batch_at_a_time() {
     let inbox: Vec<_> = (1..=4).map(|n| mail("pelican", n)).collect();
     let env = env(

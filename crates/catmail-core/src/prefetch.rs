@@ -23,20 +23,23 @@
 //!
 //! Like background sync, the task holds the engine weakly: dropping the last client ends
 //! it, and with it its connection.
+//!
+//! New mail is not left to the task, which would log in for it ([`Arrivals`]): the sync
+//! that announces it fetches its bodies on its own connection, within the same budget.
 
 use std::collections::{BTreeSet, HashSet};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use catmail_proto::imap::{self, Session};
-use catmail_store::NewBody;
+use catmail_store::{NewBody, Usage};
 use catmail_types::{AccountId, Event, FolderId, MessageId};
 use tokio::sync::broadcast::{
     self,
     error::{RecvError, TryRecvError},
 };
 
-use crate::body::{self, Limits};
+use crate::body::{self, Claim, Claimed, Limits};
 use crate::engine::{Cancellation, Engine, backoff, blocking, now};
 use crate::{Error, Result, pool};
 
@@ -291,6 +294,40 @@ enum One {
     OverLimit(Error),
 }
 
+/// What the account may fetch today.
+enum Allowance {
+    /// Nothing for this long: the server said the account went over its download limit.
+    Paused(Duration),
+    /// Until `used` reaches `budget`.
+    Open { used: u64, budget: u64, gmail: bool },
+}
+
+impl BodyPrefetch {
+    /// As of `now`, with `usage` the day's so far, on a Gmail server or not.
+    fn allowance(&self, usage: &Usage, gmail: bool, now: i64) -> Allowance {
+        if let Some(until) = usage.paused_until.filter(|&until| until > now) {
+            return Allowance::Paused(Duration::from_secs((until - now) as u64));
+        }
+        let budget = if gmail {
+            self.gmail_daily_budget
+        } else {
+            self.daily_budget
+        };
+        Allowance::Open {
+            used: usage.bytes,
+            budget,
+            gmail,
+        }
+    }
+
+    fn limits(&self, engine: &Engine) -> Limits {
+        Limits {
+            whole: self.whole_limit,
+            text: engine.tuning.whole_message_limit,
+        }
+    }
+}
+
 /// Fetches the next batch of bodies on `session` (connecting if it is empty) and stores
 /// them, leaving out the folders in `skip` and adding those found rebuilt, and counting
 /// the messages the server refused in a row in `refused`. Stores what it fetched also if
@@ -320,31 +357,27 @@ async fn batch(
     let Some(gmail) = gmail else {
         return Err(Error::AccountNotFound(account.to_string()));
     };
-    let used = usage.bytes;
-    if let Some(until) = usage.paused_until.filter(|&until| until > now) {
-        let wait = Duration::from_secs((until - now) as u64);
-        tracing::info!(%account, until, ?wait,
-            "prefetch paused: the server said the account went over its download limit");
-        return Ok(Batch::Paused(wait));
-    }
+    let (used, budget) = match settings.allowance(&usage, gmail, now) {
+        Allowance::Paused(wait) => {
+            tracing::info!(%account, until = usage.paused_until, ?wait,
+                "prefetch paused: the server said the account went over its download limit");
+            return Ok(Batch::Paused(wait));
+        }
+        Allowance::Open { used, budget, .. } => (used, budget),
+    };
+    // Being fetched for the user, or as they arrived: stored as they come, they are news
+    // when they are. Else a batch of only those would be fetched again and again.
+    next.retain(|&(id, _)| !engine.downloading.claimed(id));
     if next.is_empty() {
         return Ok(Batch::Done);
     }
     // Newest first, but a folder at a time within the batch: each switch opens a folder.
     next.sort_by_key(|&(_, folder)| folder);
-    let budget = if gmail {
-        settings.gmail_daily_budget
-    } else {
-        settings.daily_budget
-    };
     if used >= budget {
         tracing::debug!(%account, used, budget, "today's budget for prefetching is used up");
         return Ok(Batch::Spent);
     }
-    let limits = Limits {
-        whole: settings.whole_limit,
-        text: engine.tuning.whole_message_limit,
-    };
+    let limits = settings.limits(engine);
     let began = Instant::now();
     let mut fetched = Fetched::default();
     let mut result = Ok(Batch::More);
@@ -385,9 +418,7 @@ async fn batch(
                 }
             }
             Ok(One::OverLimit(e)) => {
-                tracing::warn!(%account, message_id = %id, error = %e, wait = ?OVER_LIMIT,
-                    used_today = used + fetched.bytes, budget, gmail,
-                    "the server says the account went over its download limit; prefetch paused");
+                over_limit(account, id, &e, used + fetched.bytes, budget, gmail);
                 fetched.over_limit = true;
                 result = Ok(Batch::Paused(OVER_LIMIT));
                 break;
@@ -413,6 +444,12 @@ async fn batch(
     result
 }
 
+fn over_limit(account: AccountId, id: MessageId, e: &Error, used: u64, budget: u64, gmail: bool) {
+    tracing::warn!(%account, message_id = %id, error = %e, wait = ?OVER_LIMIT,
+        used_today = used, budget, gmail,
+        "the server says the account went over its download limit; prefetch paused");
+}
+
 /// Fetches and parses one body. A failure that isn't the message's is returned as an
 /// error; a connection it leaves unusable is dropped.
 async fn one(
@@ -426,10 +463,11 @@ async fn one(
     let Some(location) = engine.read(move |db| db.messages().location(id)).await? else {
         return Ok(One::Skipped);
     };
-    if location.downloaded {
+    // Claimed since the batch was read: stored as it comes, not with this batch.
+    if location.downloaded || engine.downloading.claimed(id) {
         return Ok(One::Skipped);
     }
-    let (folder, size) = (location.folder, location.size);
+    let folder = location.folder;
     let result = tokio::select! {
         result = pool::on_session(engine, account, session, {
             let engine = engine.clone();
@@ -437,10 +475,27 @@ async fn one(
         }) => result,
         () = cancellation.cancelled() => Err(Error::Cancelled),
     };
-    match result {
+    if let Err(e) = &result
+        && e.breaks_connection()
+    {
+        *session = None;
+    }
+    outcome(engine, account, id, folder, result).await
+}
+
+/// What came of fetching message `id`'s body in `folder`: the body parsed, or the failure
+/// sorted. A failure that isn't the message's is returned as an error.
+async fn outcome(
+    engine: &Arc<Engine>,
+    account: AccountId,
+    id: MessageId,
+    folder: FolderId,
+    fetched: Result<(body::Fetched, body::Took)>,
+) -> Result<One> {
+    match fetched {
         Ok((fetched, took)) => {
             let bytes = fetched.len();
-            tracing::debug!(%account, message_id = %id, %folder, size = ?size, bytes,
+            tracing::debug!(%account, message_id = %id, %folder, bytes,
                 whole = matches!(fetched, body::Fetched::Whole(_)), examine = ?took.examine,
                 fetch = ?took.fetch, "prefetched a body");
             let engine = engine.clone();
@@ -451,25 +506,147 @@ async fn one(
                 bytes,
             })
         }
-        Err(e) => {
-            if e.breaks_connection() {
-                *session = None;
+        Err(e @ Error::OverLimit(_)) => Ok(One::OverLimit(e)),
+        Err(e) if body::folder_rebuilt(&e) => Ok(One::Rebuilt(folder)),
+        Err(Error::OutOfSync(_) | Error::MessageNotFound(_)) => Ok(One::Skipped),
+        // Refused, or left out of the answer while the server has it.
+        Err(e) if e.is_refusal() || matches!(e.imap(), Some(imap::Error::Protocol(_))) => {
+            Ok(One::Refused(e))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// New mail sync is announcing (`Event::NewMail`), whose bodies it fetches on its own
+/// connection once the headers are stored ([`fetch`](Self::fetch)): before the
+/// background task would (it logs in anew for each, as it keeps no connection while
+/// idle), so that the message opens at once from its notification.
+///
+/// Claimed (see [`Downloading`](crate::body::Downloading)) as they are announced, before
+/// the background task hears of them: opening one waits for this fetch rather than make
+/// its own, and the background task leaves them out. At most a batch, the first
+/// announced first: the rest of a burst is the background task's. None unless the engine
+/// prefetches.
+pub(crate) struct Arrivals {
+    claimed: Vec<(MessageId, Claimed)>,
+    room: usize,
+}
+
+impl Arrivals {
+    pub fn new(engine: &Engine) -> Self {
+        Self {
+            claimed: Vec::new(),
+            room: engine.prefetch.map_or(0, |settings| settings.batch),
+        }
+    }
+
+    /// Claims those of `messages` there is room for. Call before announcing them.
+    pub fn claim(&mut self, engine: &Engine, messages: &[MessageId]) {
+        for &id in messages {
+            if self.claimed.len() >= self.room {
+                return;
             }
-            if let Error::OverLimit(_) = e {
-                return Ok(One::OverLimit(e));
-            }
-            if body::folder_rebuilt(&e) {
-                return Ok(One::Rebuilt(folder));
-            }
-            match e {
-                Error::OutOfSync(_) | Error::MessageNotFound(_) => Ok(One::Skipped),
-                // Refused, or left out of the answer while the server has it.
-                e if e.is_refusal() || matches!(e.imap(), Some(imap::Error::Protocol(_))) => {
-                    Ok(One::Refused(e))
-                }
-                e => Err(e),
+            if let Claim::Mine(claimed) = engine.downloading.claim(id) {
+                self.claimed.push((id, claimed));
             }
         }
+    }
+
+    /// Fetches and stores the bodies claimed on `session`, which has their folder open
+    /// (saving a login and an EXAMINE), each stored as it comes and released then. Within
+    /// the prefetch's budget, and recording refusals as it does.
+    ///
+    /// Fails only for what leaves the connection unusable: sync goes on with it
+    /// otherwise, and the rest is the background task's.
+    pub async fn fetch(
+        self,
+        engine: &Arc<Engine>,
+        session: &mut Session,
+        account: AccountId,
+    ) -> Result<()> {
+        let Some(settings) = engine.prefetch else {
+            return Ok(());
+        };
+        if self.claimed.is_empty() || engine.waits_out(account) {
+            return Ok(());
+        }
+        let (now, day) = (now(), today());
+        let (usage, gmail) = engine
+            .read(move |db| {
+                let gmail = db.accounts().get(account)?.map(|a| a.gmail_server);
+                Ok((db.prefetch().usage(account, day)?, gmail))
+            })
+            .await?;
+        let Some(gmail) = gmail else {
+            return Ok(());
+        };
+        let Allowance::Open {
+            mut used,
+            budget,
+            gmail,
+        } = settings.allowance(&usage, gmail, now)
+        else {
+            return Ok(());
+        };
+        let limits = settings.limits(engine);
+        for (id, _claimed) in self.claimed {
+            if used >= budget {
+                tracing::debug!(%account, used, budget,
+                    "today's budget for prefetching is used up; new mail waits to be opened");
+                return Ok(());
+            }
+            let Some(location) = engine.read(move |db| db.messages().location(id)).await? else {
+                continue;
+            };
+            if location.downloaded {
+                continue;
+            }
+            let folder = location.folder;
+            let result = body::fetch_body(engine, session, &location, limits).await;
+            let mut fetched = Fetched::default();
+            // What leaves the connection unusable, which sync is to hear of.
+            let broke = match outcome(engine, account, id, folder, result).await {
+                Ok(One::Body {
+                    folder,
+                    body,
+                    bytes,
+                }) => {
+                    fetched.bodies.push((id, folder, body));
+                    fetched.bytes = bytes;
+                    None
+                }
+                Ok(One::Skipped | One::Rebuilt(_)) => None,
+                Ok(One::Refused(e)) => {
+                    tracing::warn!(%account, message_id = %id, error = %e,
+                        "can't fetch new mail's body; trying it again later");
+                    fetched.failed.push(id);
+                    e.breaks_connection().then_some(e)
+                }
+                Ok(One::OverLimit(e)) => {
+                    over_limit(account, id, &e, used, budget, gmail);
+                    fetched.over_limit = true;
+                    Some(e)
+                }
+                Err(e) if e.breaks_connection() => Some(e),
+                Err(e) => {
+                    tracing::info!(%account, message_id = %id, error = %e,
+                        "couldn't fetch new mail's body; left to the prefetch");
+                    None
+                }
+            };
+            let bytes = fetched.bytes;
+            let stored = !fetched.bodies.is_empty();
+            store(engine, account, now, day, fetched).await?;
+            used += bytes;
+            if stored {
+                tracing::info!(%account, message_id = %id, bytes, used_today = used, budget,
+                    "fetched new mail's body as it arrived");
+            }
+            if let Some(e) = broke {
+                return Err(e);
+            }
+        }
+        Ok(())
     }
 }
 

@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use catmail_core::{Attachment, Message};
+use catmail_core::{Address, Attachment, Message, MessageSummary};
 
 use crate::format;
 
@@ -27,12 +27,21 @@ pub struct Header {
 
 impl Header {
     pub fn of(message: &Message) -> Self {
-        let summary = &message.summary;
+        Self::with_reply_to(&message.summary, &message.reply_to)
+    }
+
+    /// As the list has the message: all but Reply-To, which only the message itself has.
+    /// For showing while the message loads.
+    pub fn of_summary(summary: &MessageSummary) -> Self {
+        Self::with_reply_to(summary, &[])
+    }
+
+    fn with_reply_to(summary: &MessageSummary, reply_to: &[Address]) -> Self {
         let addresses = [
             ("From", format::addresses(&summary.from)),
             ("To", format::addresses(&summary.to)),
             ("Cc", format::addresses(&summary.cc)),
-            ("Reply-To", format::addresses(&message.reply_to)),
+            ("Reply-To", format::addresses(reply_to)),
         ]
         .into_iter()
         .filter(|(_, value)| !value.is_empty())

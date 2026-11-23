@@ -32,7 +32,7 @@ use catmail_types::{
 use crate::draft_sync::Uploads;
 use crate::engine::{Activity, Engine};
 use crate::pool::with_session;
-use crate::{Error, Result, connection, folders, ops};
+use crate::{Error, Result, connection, folders, ops, prefetch};
 
 /// Stored messages per flags FETCH, and per transaction, on a server that can't say
 /// which changed: the whole answer is held in memory.
@@ -803,6 +803,7 @@ async fn fetch_new(
     report: &mut FolderSyncReport,
 ) -> Result<bool> {
     let mut complete = true;
+    let mut arrivals = prefetch::Arrivals::new(engine);
     for batch in uids.rchunks(engine.tuning.fetch_batch) {
         let fetched: Vec<NewMessage> = session
             .fetch_summaries(batch, items)
@@ -830,6 +831,8 @@ async fn fetch_new(
         report.added += (upserted.added.len() + upserted.moved) as u32;
         // On Gmail, the labels showing them and the locations they moved from.
         touched.extend(upserted.moved_from);
+        // Before the background prefetch hears of them.
+        arrivals.claim(engine, &new_mail);
         emit_changed(engine, account, [id].into_iter().chain(touched));
         if !new_mail.is_empty() {
             engine.emit(Event::NewMail {
@@ -838,6 +841,10 @@ async fn fetch_new(
             });
         }
     }
+    // Their bodies once every header is stored, after the news: a failure here mustn't
+    // lose it, as the headers are stored already. The notification waits a moment, which
+    // this mostly fits in.
+    arrivals.fetch(engine, session, account).await?;
     Ok(complete)
 }
 

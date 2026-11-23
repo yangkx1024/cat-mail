@@ -13,7 +13,7 @@ mod view;
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use catmail_core::html::Image;
 use catmail_core::{Attachment, MessageId, safe_filename};
@@ -45,12 +45,16 @@ struct Reading {
     id: Option<MessageId>,
     state: State,
     header: Header,
+    /// The header shown isn't the message's: it is loading, and the list didn't have
+    /// it to say what it is.
+    header_hidden: bool,
     attachments: Vec<Attachment>,
     /// The HTML as sanitized, for "Open in browser".
     html: Option<Rc<str>>,
     page: Rc<str>,
-    /// Hidden while a message loads, past [`STAYS_SHOWN`] (or with nothing before it to
-    /// show).
+    /// The page (and the attachments) hidden while a message loads, past [`STAYS_SHOWN`]
+    /// (or with nothing before it to show): its header shows then, as the list has it,
+    /// over a spinner.
     hidden: bool,
     /// Whether the page has the dark theme's colors: the web view's background, which
     /// shows until the page paints, is the page's.
@@ -146,25 +150,32 @@ async fn open_message(id: MessageId, dark: bool) {
             // The pane was closed: nothing before it to show.
             if was == State::Empty {
                 r.page_dark = dark;
-                r.hidden = true;
+                show_loading(r, id);
             }
         });
         in_view(async move {
             timer(STAYS_SHOWN).await;
             let reading = global::<Reading>();
             if reading.with_untracked(|r| r.id == Some(id) && r.state == State::Loading) {
-                reading.update(|r| r.hidden = true);
+                tracing::debug!(message = %id, "still loading; showing that it is");
+                reading.update(|r| show_loading(r, id));
             }
         });
     }
+    let began = Instant::now();
     let message = match client().download_message(id).await {
         Ok(message) => message,
         Err(e) => {
-            tracing::warn!(message = %id, error = %e, "couldn't open the message");
+            tracing::warn!(message = %id, error = %e, took = ?began.elapsed(),
+                "couldn't open the message");
             reading.update(|r| r.state = State::Failed(e.to_string()));
             return;
         }
     };
+    let took = began.elapsed();
+    if took >= STAYS_SHOWN {
+        tracing::info!(message = %id, ?took, "opened a message that took a while");
+    }
     // Offered when unsure: it only adds recipients the user can remove.
     let can_reply_all = client().can_reply_all(id).await.unwrap_or_else(|e| {
         tracing::warn!(message = %id, error = %e, "couldn't tell who replying to all writes to");
@@ -198,13 +209,14 @@ async fn open_message(id: MessageId, dark: bool) {
     if hidden {
         in_view(async move {
             timer(SHOWN_ANYWAY).await;
-            show_page(id);
+            show_page(id, "the page didn't say it painted; shown anyway");
         });
     }
     reading.set(Reading {
         id: Some(id),
         state: State::Open,
         header: Header::of(&message),
+        header_hidden: false,
         attachments: reader::attachments(&message),
         html: html.map(Rc::from),
         page: made.into(),
@@ -234,6 +246,19 @@ async fn open_message(id: MessageId, dark: bool) {
             Err(e) => tracing::warn!(attachment = %part.id, error = %e,
                 "failed to load inline image"),
         }
+    }
+}
+
+/// Message `id` is loading: its page and attachments are hidden (with a spinner in
+/// their place), and its header shows as the list has it.
+fn show_loading(r: &mut Reading, id: MessageId) {
+    r.hidden = true;
+    match untracked(|| list::message(id)) {
+        Some(summary) => {
+            r.header = Header::of_summary(&summary);
+            r.header_hidden = false;
+        }
+        None => r.header_hidden = true,
     }
 }
 
@@ -278,14 +303,15 @@ fn page_painted(height: f32) {
     }
     let shown = page_state().borrow().shown;
     if let Some(id) = shown {
-        show_page(id);
+        show_page(id, "page painted; shown");
     }
 }
 
-/// Shows message `id`'s page if it is the one open and still hidden.
-fn show_page(id: MessageId) {
+/// Shows message `id`'s page if it is the one open and still hidden, logging `why`.
+fn show_page(id: MessageId, why: &'static str) {
     let reading = global::<Reading>();
     if reading.with_untracked(|r| r.hidden && r.state == State::Open && r.id == Some(id)) {
+        tracing::info!(message = %id, "{why}");
         reading.update(|r| r.hidden = false);
     }
 }

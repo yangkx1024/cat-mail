@@ -176,6 +176,58 @@ async fn downloads_a_small_message_whole() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn opening_a_message_being_fetched_waits_for_that_fetch() {
+    let env = env(state(&[NEWSLETTER])).await;
+    let id = env.id(0).await;
+    let gate = env.fake.state().hold_body_fetches();
+    let first = tokio::spawn({
+        let client = env.client.clone();
+        async move { client.download_message(id).await.unwrap() }
+    });
+    env.fake.wait_until(|st| st.body_fetches() == 1).await;
+    // Opened again meanwhile (from its notification, say): no second fetch.
+    let second = tokio::spawn({
+        let client = env.client.clone();
+        async move { client.download_message(id).await.unwrap() }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!second.is_finished());
+    gate.add_permits(100);
+    let (first, second) = (first.await.unwrap(), second.await.unwrap());
+    assert_eq!(first, second);
+    assert!(first.body.is_some());
+    assert_eq!(env.fake.state().body_fetches(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_fetch_leaves_the_one_waiting_to_fetch_it_itself() {
+    let env = env(state(&[NEWSLETTER])).await;
+    let id = env.id(0).await;
+    let gate = {
+        let mut state = env.fake.state();
+        state.faults.refuse_body_fetch = vec![1];
+        state.hold_body_fetches()
+    };
+    let first = tokio::spawn({
+        let client = env.client.clone();
+        async move { client.download_message(id).await }
+    });
+    env.fake.wait_until(|st| st.body_fetches() == 1).await;
+    let second = tokio::spawn({
+        let client = env.client.clone();
+        async move { client.download_message(id).await.unwrap() }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The first is refused; the second then fetches it itself, and gets it.
+    gate.add_permits(1);
+    assert!(first.await.unwrap().is_err());
+    env.fake.wait_until(|st| st.body_fetches() == 2).await;
+    env.fake.state().faults.refuse_body_fetch.clear();
+    gate.add_permits(100);
+    assert!(second.await.unwrap().body.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn large_messages_leave_attachments_on_the_server_until_opened() {
     let raw = large_message();
     let env = env(state(&[&raw])).await;
