@@ -26,6 +26,9 @@
 //!
 //! New mail is not left to the task, which would log in for it ([`Arrivals`]): the sync
 //! that announces it fetches its bodies on its own connection, within the same budget.
+//! Neither sees what the other is fetching until it is stored, so together they may go a
+//! batch over the budget: well within the margin to the server's limit, and only once, as
+//! the next batch or sync reads what was used.
 
 use std::collections::{BTreeSet, HashSet};
 use std::sync::{Arc, Weak};
