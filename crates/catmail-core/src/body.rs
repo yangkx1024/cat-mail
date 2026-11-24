@@ -16,7 +16,7 @@
 //! existing row is still the same (folder, UID) as when the download started.
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use catmail_proto::imap::{self, Session};
@@ -24,7 +24,9 @@ use catmail_proto::mime::{self, Content};
 use catmail_store::{AttachmentSource, Db, MessageLocation, NewAttachment, NewBody};
 use catmail_types::{AttachmentId, BlobHash, ErrorKind, Event, Message, MessageId};
 
-use crate::engine::{Engine, blocking};
+use tokio::sync::watch;
+
+use crate::engine::{Engine, blocking, lock};
 use crate::pool::with_session;
 use crate::rebuild;
 use crate::{Error, Result};
@@ -527,16 +529,30 @@ pub(crate) struct Parts {
 /// Downloads and stores the body unless it is stored already. `whole` fetches even a
 /// large message whole, for its raw form.
 async fn ensure_downloaded(engine: &Arc<Engine>, id: MessageId, whole: bool) -> Result<()> {
-    let location = locate(engine, id).await?;
-    if location.downloaded {
-        if location
-            .body_version
-            .is_some_and(|v| v < mime::CONTENT_VERSION)
-        {
-            rebuild::on_open(engine, id).await;
+    // Held until the body is stored: another fetch of it waits for this one.
+    let (location, _claim) = loop {
+        let location = locate(engine, id).await?;
+        if location.downloaded {
+            if location
+                .body_version
+                .is_some_and(|v| v < mime::CONTENT_VERSION)
+            {
+                rebuild::on_open(engine, id).await;
+            }
+            return Ok(());
         }
-        return Ok(());
-    }
+        match engine.downloading.claim(id) {
+            Claim::Mine(claimed) => break (location, claimed),
+            // Then it is here, or that fetch failed and this one tries.
+            Claim::Theirs(mut fetched) => {
+                let began = Instant::now();
+                // Never sent to: it ends when that claim is released.
+                let _ = fetched.changed().await;
+                tracing::debug!(account = %location.account, message_id = %id,
+                    waited = ?began.elapsed(), "waited for the body fetched already");
+            }
+        }
+    };
     let (account, folder) = (location.account, location.folder);
     let limits = if whole {
         Limits::RAW
@@ -579,8 +595,64 @@ async fn ensure_downloaded(engine: &Arc<Engine>, id: MessageId, whole: bool) -> 
     Ok(())
 }
 
+/// Bodies being fetched for someone waiting on them (a message opened, new mail fetched
+/// as it arrives), so that another fetch of the same body waits for that one rather than
+/// fetching it too, on another connection. Not the background prefetch's, which stores
+/// a batch at a time: it leaves these out instead.
+#[derive(Default)]
+pub(crate) struct Downloading(Claims);
+
+/// The bodies claimed, each with what ends when its claim is released.
+type Claims = Arc<Mutex<HashMap<MessageId, watch::Receiver<()>>>>;
+
+/// Whose fetch of a body it is, as [`Downloading::claim`] says.
+pub(crate) enum Claim {
+    /// This caller's, until the claim is dropped: once the body is stored, or the fetch
+    /// failed or was given up on.
+    Mine(Claimed),
+    /// Another's, released (the body stored, or not after all) once this sees a change,
+    /// which is never sent: the sender is dropped.
+    Theirs(watch::Receiver<()>),
+}
+
+/// A body claimed for fetching (see [`Downloading`]); released when dropped.
+pub(crate) struct Claimed {
+    set: Claims,
+    id: MessageId,
+    /// Dropped after the claim is released: those waiting wake to find it gone.
+    _done: watch::Sender<()>,
+}
+
+impl Drop for Claimed {
+    fn drop(&mut self) {
+        lock(&self.set).remove(&self.id);
+    }
+}
+
+impl Downloading {
+    /// Claims the body of `id` for fetching, unless another fetch has it.
+    pub fn claim(&self, id: MessageId) -> Claim {
+        let mut set = lock(&self.0);
+        if let Some(theirs) = set.get(&id) {
+            return Claim::Theirs(theirs.clone());
+        }
+        let (done, waiting) = watch::channel(());
+        set.insert(id, waiting);
+        Claim::Mine(Claimed {
+            set: self.0.clone(),
+            id,
+            _done: done,
+        })
+    }
+
+    /// Whether some fetch has the body of `id` claimed.
+    pub fn claimed(&self, id: MessageId) -> bool {
+        lock(&self.0).contains_key(&id)
+    }
+}
+
 /// Fetches the message's body on `session` (see [`in_folder`]), for the background
-/// prefetch, which has a connection of its own.
+/// prefetch, which has a connection of its own, and for new mail as sync finds it.
 pub(crate) async fn fetch_body(
     engine: &Arc<Engine>,
     session: &mut Session,

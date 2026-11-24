@@ -239,6 +239,8 @@ fn open_from_env() {
 /// meanwhile.
 pub fn reveal(id: MessageId) {
     let (row, again) = reads(|model, listing| model.reveal(id, listing));
+    tracing::info!(message = %id, listed = row.is_some(), read_again = again,
+        "revealing a message");
     if let Some(row) = row {
         open(row);
     }

@@ -15,6 +15,7 @@ use catmail_types::{
 use tokio::sync::{Notify, OwnedMutexGuard, broadcast, watch};
 use tokio::task::unconstrained;
 
+use crate::body::Downloading;
 use crate::image_cache::ImageCache;
 use crate::pool::Pool;
 use crate::prefetch::BodyPrefetch;
@@ -61,6 +62,8 @@ pub(crate) struct Engine {
     /// Drafts open in an editor, and in how many (`drafts::EditMark`): changes to them
     /// from anyone else are refused. Shared with the write transactions that check it.
     editing: Editing,
+    /// Bodies being fetched for someone waiting on them: another fetch waits for that.
+    pub downloading: Downloading,
 }
 
 /// Drafts open in an editor, by how many ([`Engine::editing`]).
@@ -448,6 +451,7 @@ impl Engine {
             accounts: Mutex::default(),
             deleting: Arc::default(),
             editing: Arc::default(),
+            downloading: Downloading::default(),
         }
     }
 

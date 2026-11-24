@@ -30,6 +30,31 @@ fn opens_a_message_from_the_list_and_marks_it_read() {
 }
 
 #[test]
+fn a_message_still_downloading_shows_its_header_and_that_it_loads() {
+    let mail = TestMail::start();
+    let (_desktop, mut main) = mail.open();
+    let app = &mut main.app;
+    let gate = mail.imap.state().hold_body_fetches();
+
+    app.press("Quarterly report").unwrap();
+    // As the list has it, while the body is on its way.
+    app.wait_for_within("id:reader >> text:Loading the message…", WAIT)
+        .unwrap();
+    assert!(
+        app.screen()
+            .matches("id:reader >> text:Quarterly report")
+            .unwrap()
+    );
+    gate.add_permits(100);
+    app.wait_for_gone("Loading the message…", WAIT).unwrap();
+    assert!(
+        app.screen()
+            .matches("id:reader >> text:Quarterly report")
+            .unwrap()
+    );
+}
+
+#[test]
 fn archiving_opens_the_next_message() {
     let mail = TestMail::start();
     let (_desktop, mut main) = mail.open();

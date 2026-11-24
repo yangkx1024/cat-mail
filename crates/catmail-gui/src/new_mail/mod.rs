@@ -82,7 +82,13 @@ fn arrived(messages: Vec<MessageId>) {
 /// The notification tagged `tag` was clicked: the main window shows where it says. On the
 /// main thread.
 fn clicked(tag: &str) {
-    if let Some(target) = Target::from_tag(tag) {
+    let target = Target::from_tag(tag);
+    tracing::info!(
+        tag,
+        known = target.is_some(),
+        "new mail's notification clicked"
+    );
+    if let Some(target) = target {
         shell::show_at(target.destination(), None);
     }
 }

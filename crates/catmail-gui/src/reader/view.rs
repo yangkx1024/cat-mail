@@ -8,7 +8,7 @@ use catmail_frontend::reader::{self, Header};
 use nsh_base::theme;
 use nsh_core::prelude::*;
 
-use crate::buttons::{Size, icon_button, menu_button, separator};
+use crate::buttons::{Size, icon_button, menu_button, separator, spinner};
 use crate::clock::clock;
 use crate::icons::{Icon, icon};
 use crate::mailbox::commands;
@@ -322,15 +322,12 @@ fn message() -> impl IntoElement {
     let scroll_ref = element_ref();
     page_state().borrow_mut().scroll = Some(scroll_ref);
     let sideways = web::Sideways::new();
+    let opacity = |hidden: bool| if hidden { 0.0_f32 } else { 1.0 };
+    // While the message loads, as the list has it.
+    let header_shown = move || opacity(reading.with(|r| r.header_hidden));
     // Not the web view's: one not drawn may not paint, and would show what it last had
     // once it is; [`body`] covers it instead.
-    let shown = move || {
-        if reading.with(|r| r.hidden) {
-            0.0_f32
-        } else {
-            1.0
-        }
-    };
+    let shown = move || opacity(reading.with(|r| r.hidden));
     let pane = scroll().flex_1().element_ref(&scroll_ref).child(
         view()
             .px(px(24.0))
@@ -340,7 +337,7 @@ fn message() -> impl IntoElement {
             .child(
                 view()
                     .gap(px(16.0))
-                    .opacity(shown)
+                    .opacity(header_shown)
                     .child(title)
                     .child(sender)
                     .child(full_header),
@@ -356,12 +353,13 @@ fn body(sideways: web::Sideways) -> impl IntoElement {
     let reading = global::<Reading>();
     // One web view for every message, made with the pane: a new page loads into it.
     let hidden = move || reading.with(|r| r.hidden);
+    let loading = move || reading.with(|r| r.state == State::Loading);
     // The page pads itself.
     view()
         .mx(px(-16.0))
         .child(web_view(sideways))
         // Over the web view while the page is hidden: WebKit keeps painting under it.
-        .child(when(hidden, || {
+        .child(when(hidden, move || {
             view()
                 .absolute()
                 .top(px(0.0))
@@ -370,7 +368,24 @@ fn body(sideways: web::Sideways) -> impl IntoElement {
                 .bottom(px(0.0))
                 .z_index(1)
                 .bg(page_background)
+                .items_center()
+                .pt(px(32.0))
+                .child(when(loading, loading_message))
         }))
+}
+
+/// Where the body will be, while the message loads (from the server, likely).
+fn loading_message() -> impl IntoElement {
+    view()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .child(spinner(16.0).text_color(move || theme().muted_foreground))
+        .child(
+            text("Loading the message…")
+                .text_sm()
+                .text_color(move || theme().muted_foreground),
+        )
 }
 
 /// The page's background, which shows in the web view until the page paints.
