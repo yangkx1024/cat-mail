@@ -29,6 +29,8 @@ mod login;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod mailbox;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod motion;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod new_mail;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod reader;

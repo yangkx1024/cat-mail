@@ -92,7 +92,7 @@ pub struct Item {
     pub attention: bool,
     /// Whether its subfolders show; none for a folder without subfolders.
     pub open: Option<bool>,
-    /// The subfolders that show: none while it is folded.
+    /// Its subfolders, folded or not: the view keeps them while it folds them away.
     pub children: Rc<[Item]>,
 }
 
@@ -148,11 +148,7 @@ pub fn sidebar_groups(accounts: &[AccountEntry], folds: &Folds) -> Vec<Group> {
     for (ix, entry) in accounts.iter().enumerate() {
         let account = entry.account.id;
         let open = folds.account_open(accounts, account);
-        let (items, labels) = if open {
-            places(accounts, entry, folds)
-        } else {
-            Default::default()
-        };
+        let (items, labels) = places(accounts, entry, folds);
         groups.push(Group {
             key: format!("account-{account}"),
             heading: Some(Heading {
@@ -207,8 +203,8 @@ fn places(
     (items.into(), labels)
 }
 
-/// The node and the folders in it, unless it is folded. `path` names the levels above,
-/// for the key of a level the server didn't list.
+/// The node and the folders in it. `path` names the levels above, for the key of a
+/// level the server didn't list.
 fn folder_item(account: AccountId, node: &FolderNode, path: &str, folds: &Folds) -> Item {
     let path = format!("{path}/{}", node.label);
     let icon = folders::icon(node.folder.as_ref());
@@ -224,13 +220,10 @@ fn folder_item(account: AccountId, node: &FolderNode, path: &str, folds: &Folds)
     item.account = Some(account);
     item.folder = node.folder.as_ref().map(|f| f.id);
     if !node.children.is_empty() {
-        let open = !folds.folders.contains(&item.key);
-        item.open = Some(open);
-        if open {
-            item.children = (node.children.iter())
-                .map(|child| folder_item(account, child, &path, folds))
-                .collect();
-        }
+        item.open = Some(!folds.folders.contains(&item.key));
+        item.children = (node.children.iter())
+            .map(|child| folder_item(account, child, &path, folds))
+            .collect();
     }
     item
 }
@@ -413,8 +406,8 @@ mod tests {
         account, folder, gmail, gmail_folder, outbox_entry, standard_overview, unread,
     };
 
-    /// Each item's label, depth first, indented by its depth, with its count and whether
-    /// it is open.
+    /// Each item that shows, depth first, indented by its depth, with its count and
+    /// whether it is open.
     fn shape(groups: &[Group]) -> Vec<String> {
         fn walk(item: &Item, depth: usize, out: &mut Vec<String>) {
             let mut line = format!("{}{}", "  ".repeat(depth), item.label);
@@ -430,8 +423,10 @@ mod tests {
                 None => {}
             }
             out.push(line);
-            for child in item.children.iter() {
-                walk(child, depth + 1, out);
+            if item.open == Some(true) {
+                for child in item.children.iter() {
+                    walk(child, depth + 1, out);
+                }
             }
         }
         let mut out = Vec::new();
@@ -439,6 +434,9 @@ mod tests {
             if let Some(heading) = &group.heading {
                 let fold = if heading.open { "-" } else { "+" };
                 out.push(format!("{} {fold}", heading.email));
+                if !heading.open {
+                    continue;
+                }
             }
             group.items.iter().for_each(|i| walk(i, 1, &mut out));
             if !group.labels.is_empty() {
@@ -483,6 +481,8 @@ mod tests {
         folds.toggle_folder("folder-13");
         let groups = sidebar_groups(&[entry], &folds);
         assert_eq!(shape(&groups)[3..], ["  Sent", "  Trash", "  Projects 2 +"]);
+        // Kept, for the view to fold away.
+        assert_eq!(groups[0].items[4].children[0].label, "2026");
         let drafts = &groups[0].items[1];
         assert_eq!(drafts.place, Some(Place::Drafts(AccountId(1))));
         assert_eq!(drafts.icon, FolderIcon::Role(FolderRole::Drafts));
@@ -510,6 +510,9 @@ mod tests {
                 "user2@example.com +"
             ]
         );
+        // Kept, for the view to fold away.
+        let folded = sidebar_groups(&accounts, &folds);
+        assert_eq!((folded[2].items.len(), folded[2].labels.len()), (2, 1));
         folds.set_account_open(AccountId(2), true);
         assert_eq!(
             shape(&sidebar_groups(&accounts, &folds))[3..],

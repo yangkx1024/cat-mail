@@ -40,7 +40,7 @@
       `alert_dialog`，命名用 `dialog()` 加输入框
 - [x] 打开文件夹时同步它（`sync_folder`）
 - [x] 账户折叠（一个账户默认展开，多个默认折叠）、子文件夹折叠
-- [ ] 折叠的动画
+- [x] 折叠的动画：`Collapsible` 的 `reveal` 弹簧收拢高度，箭头转动
 - [x] Compose（Ctrl+N）、Settings 按钮、Sync 按钮（在搜索框左边，同步时转圈，nsh 的循环动画）
 
 ## P3 邮件列表（gui.md「邮件列表」）
@@ -56,6 +56,9 @@
 - [x] 搜索框获得焦点时提前登录（`connect_for_search`，见 docs/architecture/storage.md「问服务器」）
 - [x] 刷新：节流、合并请求、结果没变不替换、按行的身份保持选中；选中的邮件消失时清空读信区
 - [x] 草稿、发件箱两个来源；Escape 关上读信区
+- [x] 行的增删动画：重读前 `animate_layout`，留下的行滑动、新来的淡入；日期标题按日期作身份
+- [x] 右栏打开、关上的动画：右栏固定在打开时的位置压在列表下，列表的边滑动露出、盖回
+      ⚠️ macOS 上 nsh 的滚动指示器不跟着动画中的 frame 走（longbridge/nsh#3188），动画期间隐藏列表和侧栏的指示器（`motion::hide_indicators`）
 
 ## P4 读信与操作（gui.md「读与改」「读信」）
 

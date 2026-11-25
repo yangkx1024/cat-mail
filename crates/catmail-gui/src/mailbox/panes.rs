@@ -12,6 +12,7 @@ use crate::icons::Icon;
 use crate::mailbox::list::{self, Selected};
 use crate::mailbox::picker::picker;
 use crate::mailbox::sidebar;
+use crate::motion;
 use crate::reader;
 use crate::theme::SelectableText as _;
 
@@ -81,13 +82,47 @@ pub fn panes() -> impl IntoElement {
         })
     });
     let open = move || pane.get().is_some();
-    let reading = move || pane.get() == Some(Pane::Reader);
+    // The pane last open: it stays while the list closes over it.
+    let last = stored(None::<Pane>);
+    let shown = computed(move || match pane.get() {
+        Some(now) => {
+            last.replace(Some(now));
+            Some(now)
+        }
+        None => last.get(),
+    });
     let widths = global::<PaneWidths>();
     // Apart, so a drag of one edge restyles only what that width places.
     let sidebar_width = computed(move || widths.with(|w| w.sidebar));
     let list_width = computed(move || widths.with(|w| w.list));
     let sidebar_width = move || sidebar_width.get();
     let list_width = move || list_width.get();
+    // How wide the right pane was when last open: closed, it keeps that width, so resizing
+    // the window or dragging an edge doesn't make its web view lay out a page no one sees.
+    // Nothing before it first opens, when the web view is empty: it follows the window.
+    let frozen = signal(None::<f32>);
+    let measure = move |frame: &Bounds<Points>| {
+        if untracked(open) && frozen.get_untracked() != Some(frame.size.width.0) {
+            frozen.set(Some(frame.size.width.0));
+        }
+    };
+    let closed_width = move || if open() { None } else { frozen.get() };
+    // Where the right pane is, open or not: the list draws over it while nothing is open,
+    // and uncovers it by narrowing (covers it again by widening), so opening and closing
+    // slide the list's edge, not the pane, whose web view would lay its page out again
+    // at every width it passed (it does once, if the window changed while it was closed).
+    let right_pane = move |pane: View| {
+        pane.absolute()
+            .top(px(0.0))
+            .bottom(px(0.0))
+            .left(move || px(sidebar_width() + list_width()))
+            .style_with(move |s| match closed_width() {
+                Some(width) => s.w(px(width)),
+                None => s.right(px(0.0)),
+            })
+            .accessibility_elements_hidden(move || !open())
+    };
+    motion::glide_when(open);
     view()
         .flex_1()
         .flex_row()
@@ -97,18 +132,22 @@ pub fn panes() -> impl IntoElement {
         // not drawn (`invisible`): a web view that isn't drawn for a while shows a black
         // frame when it is drawn again, before WebKit paints. Not left out of the layout
         // either: nsh shows a native view only with a size, and WebKit loads a page only
-        // into one shown. Placed by the widths, so it stays one view whatever pane shows;
-        // first, so everything else is drawn over it.
+        // into one shown. One view whatever pane shows; first, so everything else is
+        // drawn over it.
+        .child(right_pane(reader::reader()).on_layout(measure))
+        // The draft's and the outbox entry's, over the reader.
         .child(
-            reader::reader()
-                .absolute()
-                .top(px(0.0))
-                .bottom(px(0.0))
-                .left(move || px(sidebar_width() + if reading() { list_width() } else { 0.0 }))
-                .style_when(reading, |s| s.right(px(0.0)))
-                // Under the list: as wide as the list can be narrow, so dragging the
-                // list's edge doesn't resize a web view no one sees.
-                .style_when(move || !reading(), |s| s.w(px(LIST_WIDTHS.0))),
+            right_pane(view().bg(move || theme().background).child(dynamic(
+                move || match shown.get() {
+                    Some(Pane::Draft) => draft::pane().into_element(),
+                    Some(Pane::Outbox) => outbox::pane().into_element(),
+                    Some(Pane::Reader) | None => view().into_element(),
+                },
+            )))
+            .style_when(
+                move || !matches!(shown.get(), Some(Pane::Draft | Pane::Outbox)),
+                |s| s.hidden(),
+            ),
         )
         .child(
             view()
@@ -142,12 +181,6 @@ pub fn panes() -> impl IntoElement {
                 .child(list::list_column())
                 .child(when(open, || edge_handle(|w| &mut w.list, LIST_WIDTHS))),
         )
-        .child(dynamic(move || match pane.get() {
-            Some(Pane::Reader) => view().into_element(),
-            Some(Pane::Draft) => draft::pane().into_element(),
-            Some(Pane::Outbox) => outbox::pane().into_element(),
-            None => view().into_element(),
-        }))
         .child(picker())
 }
 

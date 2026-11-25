@@ -19,12 +19,13 @@ use nsh_base::theme;
 use nsh_core::ContextMenuEvent;
 use nsh_core::prelude::*;
 
-use crate::buttons::{Size, icon_button, primary_button, tooltip};
+use crate::buttons::{Size, fold_button, icon_button, primary_button, tooltip};
 use crate::engine::client;
 use crate::icons::{Icon, icon};
 use crate::mailbox::compose;
 use crate::mailbox::folder_commands::{folder_menu, rename_selected};
 use crate::mailbox::list;
+use crate::motion::{self, chevron};
 use crate::tasks::in_view;
 use crate::toast::report;
 use crate::{chrome, form, settings};
@@ -291,15 +292,13 @@ pub fn sidebar() -> impl IntoElement {
                     compose::new_message,
                 )),
         )
-        .child(
-            scroll()
-                .flex_1()
-                .child(view().px(px(12.0)).py(px(12.0)).child(each(
-                    move || groups.get(),
-                    |group| group.key.clone(),
-                    group,
-                ))),
-        )
+        .child(scroll().flex_1().scrollbar(motion::indicators_shown).child(
+            view().px(px(12.0)).py(px(12.0)).child(each(
+                move || groups.get(),
+                |group| group.key.clone(),
+                group,
+            )),
+        ))
         .child(
             view()
                 .flex_row()
@@ -328,11 +327,12 @@ pub fn sidebar() -> impl IntoElement {
 }
 
 /// A group: an account's address 8 below the places above (the first has
-/// the section's title over it instead), its places 8 below it.
+/// the section's title over it instead), its places 8 below it. Folding the account
+/// closes them up under the address; what follows moves up with them.
 fn group(group: ReadSignal<Group>, _ix: ReadSignal<usize>) -> AnyElement {
     let headed = group.with_untracked(|g| g.heading.is_some());
-    view()
-        .child(when(move || headed, move || heading(group)))
+    let open = move || group.with(|g| g.heading.as_ref().is_none_or(|h| h.open));
+    let places = view()
         .child(when(
             move || group.with(|g| !g.items.is_empty()),
             move || {
@@ -350,7 +350,10 @@ fn group(group: ReadSignal<Group>, _ix: ReadSignal<usize>) -> AnyElement {
                     .child(title("Labels"))
                     .child(menu(move || group.with(|g| g.labels.to_vec())))
             },
-        ))
+        ));
+    motion::fold(open)
+        .child(when(move || headed, move || heading(group)))
+        .content(places)
         .into_element()
 }
 
@@ -410,19 +413,7 @@ fn heading(group: ReadSignal<Group>) -> View {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(move || theme().sidebar_foreground),
                 )
-                .child(
-                    icon(
-                        move || {
-                            if open() {
-                                Icon::ChevronDown
-                            } else {
-                                Icon::ChevronRight
-                            }
-                        },
-                        12.0,
-                    )
-                    .text_color(move || theme().muted_foreground),
-                ),
+                .child(chevron(open, 12.0).text_color(move || theme().muted_foreground)),
         )
         .child(when(
             move || note().is_some(),
@@ -436,27 +427,28 @@ fn heading(group: ReadSignal<Group>) -> View {
 }
 
 /// An item and, while it is open, its subfolders: 4 apart in a list with a line down
-/// its left.
+/// its left, which close up under it as it folds.
 fn menu_entry(item: ReadSignal<Item>, _ix: ReadSignal<usize>) -> AnyElement {
-    view()
+    let subfolders = when(
+        move || item.with(|i| !i.children.is_empty()),
+        move || {
+            view()
+                .ml(px(14.0))
+                .border_l_1()
+                .border_color(move || theme().sidebar_border)
+                .pl(px(10.0))
+                .py(px(2.0))
+                .gap(px(4.0))
+                .child(each(
+                    move || item.with(|i| i.children.to_vec()),
+                    |item| item.key.clone(),
+                    menu_entry,
+                ))
+        },
+    );
+    motion::fold(move || item.with(|i| i.open == Some(true)))
         .child(place_row(item))
-        .child(when(
-            move || item.with(|i| !i.children.is_empty()),
-            move || {
-                view()
-                    .ml(px(14.0))
-                    .border_l_1()
-                    .border_color(move || theme().sidebar_border)
-                    .pl(px(10.0))
-                    .py(px(2.0))
-                    .gap(px(4.0))
-                    .child(each(
-                        move || item.with(|i| i.children.to_vec()),
-                        |item| item.key.clone(),
-                        menu_entry,
-                    ))
-            },
-        ))
+        .content(subfolders)
         .into_element()
 }
 
@@ -501,14 +493,8 @@ fn place_row(item: ReadSignal<Item>) -> View {
     .child(when(
         move || item.with(|i| i.open.is_some()),
         move || {
-            icon_button(
-                move || {
-                    if open() {
-                        Icon::ChevronDown
-                    } else {
-                        Icon::ChevronRight
-                    }
-                },
+            fold_button(
+                open,
                 move || {
                     let label = item.with(|i| i.label.clone());
                     if open() {
@@ -517,7 +503,6 @@ fn place_row(item: ReadSignal<Item>) -> View {
                         format!("Expand {label}")
                     }
                 },
-                || true,
                 Size::Row,
                 move || toggle_folder(&item.with_untracked(|i| i.key.clone())),
             )

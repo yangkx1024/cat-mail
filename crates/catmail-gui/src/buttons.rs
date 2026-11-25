@@ -52,6 +52,19 @@ pub fn icon_button(
         .child(icon(which, size.icon_size()).text_color(move || theme().foreground))
 }
 
+/// An [`icon_button`] whose chevron folds and unfolds something: it turns down while
+/// `open`.
+pub fn fold_button(
+    open: impl Fn() -> bool + 'static,
+    name: impl Fn() -> String + Copy + 'static,
+    size: Size,
+    press: impl Fn() + 'static,
+) -> View {
+    button_box(name, || true, || true, size, press).child(
+        crate::motion::chevron(open, size.icon_size()).text_color(move || theme().foreground),
+    )
+}
+
 /// An [`icon_button`] that shows macOS's spinner in place of its icon while `busy`: it
 /// does nothing then, but isn't dimmed, the spinner saying why.
 pub fn busy_icon_button(

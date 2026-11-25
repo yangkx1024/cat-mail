@@ -36,3 +36,39 @@ fn folders_are_made_renamed_and_deleted_from_the_sidebar() {
         !mail.has_folder("Clients")
     });
 }
+
+#[test]
+fn accounts_and_folders_fold_and_unfold() {
+    let mail = TestMail::start();
+    let (_desktop, mut main) = mail.open();
+    let app = &mut main.app;
+    let new_folder = |app: &mut nsh_testing::Headless, on: &str, label: &str, name: &str| {
+        app.right_click(on).unwrap();
+        app.choose_menu_item("New folder").unwrap();
+        app.type_text(label, name).unwrap();
+        app.press("Create").unwrap();
+        app.wait_for_gone(label, WAIT).unwrap();
+        app.wait_for_within(name, WAIT).unwrap();
+    };
+    new_folder(
+        app,
+        "text:alice@example.com >> nth=0",
+        "label:New folder",
+        "Projects",
+    );
+    new_folder(app, "Projects", "label:New folder in “Projects”", "2026");
+
+    app.press("label:Collapse Projects").unwrap();
+    app.wait_for_gone("2026", WAIT).unwrap();
+    app.press("label:Expand Projects").unwrap();
+    app.wait_for_within("2026", WAIT).unwrap();
+
+    // The account folds its places away, subfolders and all, and brings them back as
+    // they were.
+    app.press("text:alice@example.com >> nth=0").unwrap();
+    app.wait_for_gone("Projects", WAIT).unwrap();
+    app.wait_for_gone("2026", WAIT).unwrap();
+    app.press("text:alice@example.com >> nth=0").unwrap();
+    app.wait_for_within("Projects", WAIT).unwrap();
+    app.wait_for_within("2026", WAIT).unwrap();
+}

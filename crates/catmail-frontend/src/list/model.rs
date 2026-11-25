@@ -3,12 +3,13 @@
 //! before dropped, a page more or the rows shown again, and where the selection goes once
 //! they come, with the messages the user moved or a notification asked for.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use catmail_core::{
     FlagFilter, ListFilter, MailClient, MessageCursor, MessageId, MessageSummary, SearchQuery,
 };
+use jiff::civil::Date;
 
 use super::selection::{Removal, Reveal};
 use super::{Days, PAGE, Row, RowId, fetch};
@@ -48,8 +49,10 @@ pub enum Line {
 /// A line's identity, across reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LineKey {
-    /// A day can head two runs, when the rows aren't by date: by its position.
-    Day(usize),
+    /// A day's heading, by its date (none for rows without one) and how many runs of it
+    /// came before (a day can head two runs, when the rows aren't by date): it keeps its
+    /// identity as rows come and go above it, so it moves with them.
+    Day(Option<Date>, usize),
     Row(RowId),
 }
 
@@ -130,11 +133,17 @@ impl Listing {
 
     /// Each line's identity, top to bottom.
     pub fn keys(&self) -> Vec<LineKey> {
-        let key = |(ix, line): (usize, &LineAt)| match *line {
-            LineAt::Day(_) => LineKey::Day(ix),
+        let mut runs: HashMap<Option<Date>, usize> = HashMap::new();
+        let key = |line: &LineAt| match *line {
+            LineAt::Day(ix) => {
+                let day = self.days.get(ix).and_then(|d| d.day);
+                let run = runs.entry(day).or_default();
+                *run += 1;
+                LineKey::Day(day, *run - 1)
+            }
             LineAt::Row(row) => LineKey::Row(self.rows[row].id()),
         };
-        self.lines.iter().enumerate().map(key).collect()
+        self.lines.iter().map(key).collect()
     }
 
     pub fn line_of(&self, id: RowId) -> Option<usize> {
@@ -1000,9 +1009,40 @@ mod tests {
                 row(4),
             ]
         );
-        assert_eq!(listing.keys()[2..4], [LineKey::Row(m(2)), LineKey::Day(3)]);
+        let march = |d| Some(jiff::civil::date(2020, 3, d));
+        assert_eq!(
+            listing.keys()[..4],
+            [
+                LineKey::Day(march(2), 0),
+                LineKey::Row(m(1)),
+                LineKey::Row(m(2)),
+                LineKey::Day(march(1), 0)
+            ]
+        );
         assert_eq!(listing.line_of(m(3)), Some(4));
         assert_eq!(listing.line_of(m(9)), None);
+        // A day's heading keeps its key as rows come above it, so it moves with them; a
+        // day heading a second run has a key of its own.
+        listing.replace(
+            vec![
+                dated(5, "2020-03-01"),
+                dated(1, "2020-03-02"),
+                dated(3, "2020-03-01"),
+            ],
+            false,
+            &calendar,
+        );
+        assert_eq!(
+            listing.keys(),
+            [
+                LineKey::Day(march(1), 0),
+                LineKey::Row(m(5)),
+                LineKey::Day(march(2), 0),
+                LineKey::Row(m(1)),
+                LineKey::Day(march(1), 1),
+                LineKey::Row(m(3)),
+            ]
+        );
     }
 
     #[test]

@@ -35,6 +35,7 @@ use crate::form;
 use crate::icons::{Icon, icon};
 use crate::mailbox::commands;
 use crate::mailbox::sidebar::{self, Accounts, SelectedPlace};
+use crate::motion;
 use crate::tasks::in_view;
 use crate::toast::report;
 
@@ -202,6 +203,9 @@ fn show_loaded(loaded: Loaded) {
     }
     let replaced = matches!(loaded.rows, Some(Rows::Replace(..)));
     if let Some(rows) = loaded.rows {
+        if glides(&rows) {
+            motion::glide_rows();
+        }
         let calendar = untracked(clock::calendar);
         global::<Listing>().update(|listing| rows.apply(listing, &calendar));
     }
@@ -216,6 +220,13 @@ fn show_loaded(loaded: Loaded) {
     if loaded.again {
         refresh();
     }
+}
+
+/// Whether `rows` glide in: the rows shown read again, with messages come or gone (new
+/// mail, one moved or deleted), rather than a source's first rows. Should the reading
+/// pane open or close with them, its glide replaces this one (`motion::glide_rows`).
+fn glides(rows: &Rows) -> bool {
+    matches!(rows, Rows::Replace(..)) && !global::<Listing>().with_untracked(Listing::is_empty)
 }
 
 /// For looking at the reading pane without a mouse (screenshots): the row
@@ -487,7 +498,11 @@ pub fn list_column() -> impl IntoElement {
             .or(before)
             .and_then(|row| global::<Listing>().with_untracked(|l| l.line_of(row)));
         if let Some(ix) = ix {
-            list.scroll_to_index(ix as u32, Percentage(0.5), px(0.0), false);
+            // Scrolling along as the rows glide to their new shape (`motion::glide_when`):
+            // a jump would move them all at once first. nsh keeps rows in place only for
+            // the scrolls it makes itself.
+            let animated = !reduce_motion();
+            list.scroll_to_index(ix as u32, Percentage(0.5), px(0.0), animated);
         }
     });
     view().flex_1().min_w(px(0.0)).child(header()).child(
@@ -517,6 +532,7 @@ pub fn list_column() -> impl IntoElement {
                     ),
             )
             .estimated_item_size(px(48.0))
+            .scrollbar(motion::indicators_shown)
             .element_ref(&list)
             .flex_1(),
     )
