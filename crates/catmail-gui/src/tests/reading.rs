@@ -111,3 +111,18 @@ fn deleting_from_trash_asks_first() {
         mail.on_server("Trash").is_empty()
     });
 }
+
+#[test]
+fn the_move_to_picker_closes_from_its_button() {
+    let mail = TestMail::start();
+    let (_desktop, mut main) = mail.open();
+    let app = &mut main.app;
+
+    open_message(app, "Lunch on Friday");
+    app.press_key("mod+shift+m").unwrap();
+    app.wait_for_within("text:Move to", WAIT).unwrap();
+    app.press("Close").unwrap();
+    app.wait_for_gone("text:Move to", WAIT).unwrap();
+    // Nothing moved.
+    assert!(app.screen().matches("Lunch on Friday").unwrap());
+}

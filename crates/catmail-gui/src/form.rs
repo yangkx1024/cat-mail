@@ -40,8 +40,9 @@ pub fn keys_without_dialog(bind: impl Fn() + 'static) {
     });
 }
 
-/// A dialog `width` points wide over the window, dimming it; `cancel` is what Escape or
-/// a press beside it does.
+/// A dialog `width` points wide over the window, dimming it; `cancel` is what Escape
+/// does (a press on the dimmed window does nothing: nsh leaves a backdrop the app draws
+/// to the app).
 pub fn modal(
     width: f32,
     cancel: impl Fn() + 'static,

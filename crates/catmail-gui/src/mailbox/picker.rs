@@ -11,6 +11,7 @@ use nsh_core::ModalAnimation;
 use nsh_core::element::input;
 use nsh_core::prelude::*;
 
+use crate::buttons::{Size, icon_button};
 use crate::form;
 use crate::icons::{Icon, icon};
 use crate::mailbox::commands::{move_to, toggle_label};
@@ -191,9 +192,27 @@ fn picker_dialog(picker: Picker) -> impl IntoElement {
                         .border_color(move || theme().border)
                         .bg(move || theme().popover)
                         .child(
-                            text(title)
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(move || theme().popover_foreground),
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .child(
+                                    text(title)
+                                        .flex_1()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(move || theme().popover_foreground),
+                                )
+                                // Closes it with the pointer, as Escape does. Taller than
+                                // the title: it overhangs the row.
+                                .child(
+                                    icon_button(
+                                        || Icon::XMark,
+                                        || "Close".to_owned(),
+                                        || true,
+                                        Size::Row,
+                                        close_picker,
+                                    )
+                                    .my(px(-4.0)),
+                                ),
                         )
                         .child(
                             input()
