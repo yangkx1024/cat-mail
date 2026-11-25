@@ -2,9 +2,9 @@
 
 [← 架构](../architecture.md)
 
-> 状态：常驻与单实例唤起、引擎自己发现睡眠、GUI 听系统唤醒、新邮件事件与系统通知、Linux 的托盘、macOS 的状态栏、`--background`、
-> macOS 的开机启动已实现。Linux 的开机启动尚未实现；Windows 还没有 GUI（见 [GUI](gui.md)）。
-> 没实现的小节是设计。
+> 状态：常驻与单实例唤起、引擎自己发现睡眠、GUI 听系统唤醒、新邮件事件与系统通知（Linux / macOS）、
+> 托盘（Linux StatusNotifierItem / macOS 状态栏与 Dock 角标）、`--background`、开机启动（macOS / Linux）均已实现。
+> Windows 还没有 GUI（见 [GUI](gui.md)），其托盘、通知与开机启动随 Windows GUI 一起做。
 
 GUI 关掉主窗口后继续同步、发信、提醒新邮件，并能从托盘、再次启动或通知回到窗口。
 
@@ -14,7 +14,7 @@ GUI 关掉主窗口后继续同步、发信、提醒新邮件，并能从托盘�
 
 考虑过"守护进程持有引擎、GUI 经 IPC 连接它"，没有采用，按可维护性也不更好：
 
-- `MailClient` 的六十多个 async 方法、事件流、文件交接都要过 IPC，两个进程的版本要配对。
+- `MailClient` 的八十多个公开方法、事件流、文件交接都要过 IPC，两个进程的版本要配对。
 - 守护进程省不掉 UI 循环：macOS 的状态栏图标要 NSApplication 主线程，它实际上还是一个 UI 进程。
 - 常驻 GUI 的开销接近守护进程：窗口、它的视图线程和 WebKit 渲染进程都随窗口退出，Linux 上的托盘
   （StatusNotifierItem）和通知都走 D-Bus。⚠️ GTK 常驻时仍连着显示服务器（GPUI 版能断开），实测见下。
@@ -109,7 +109,7 @@ data"。macOS 上 LaunchServices 把同一个 bundle 的再次打开交给已在
      （`Config::lock`）。拿到了，这个启动就是实例：删掉残留的 socket、绑定、开线程
      监听，再把锁交给引擎（`MailClient::builder_locked`），引擎打开时不再加锁。锁在 `main` 里同步地拿，
      迁移仍在后台：其间再启动的那个已经连得上 socket。
-  2. 锁被占用：向 socket 发 `Activate { display }`，得到答复就退出。
+  2. 锁被占用：向 socket 发 `Activate { activation_token }`，得到答复就退出。
   3. 连不上：可能另一个启动正在加锁和绑定之间，每 50 ms 重试，最多 1 秒；仍然不行就是不听 socket 的
      进程占着锁（CLI），照常启动，打开引擎时显示"数据目录被占用"。
   4. 绑定失败只记日志，引擎照常打开；之后的启动走第 3 步，显示"数据目录被占用"。
@@ -416,8 +416,8 @@ GUI 常驻就一直持有数据目录锁，CLI 更常遇到 `AlreadyRunning`。C
 1. ✅ 引擎属于应用；"关闭窗口后保持运行"（Settings › General）；主窗口可以反复关闭、重开（#106）。
 2. ✅ 单实例与唤起：数据目录里的 socket、激活令牌（#106）。
 3. ✅ 引擎：`resume()`、自己发现睡眠、`Event::NewMail`，各有假服务器测试（#106）。
-4. 系统通知：✅ Linux（#82）；macOS。
+4. 系统通知：✅ Linux（#82）；✅ macOS；Windows（随 Windows 的 GUI）。
 5. 各平台托盘：✅ Linux（#107）；✅ macOS（#108）；Windows（#109，随 Windows 的 GUI）。
-6. `--background` 与开机启动：✅ `--background`；✅ macOS；Linux；Windows。
+6. `--background` 与开机启动：✅ `--background`；✅ macOS；✅ Linux；Windows（随 Windows 的 GUI）。
 
 这几步最初在 GPUI 版上做完，换到 nsh 时外壳重写，frontend 里的部分没动。

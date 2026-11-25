@@ -1,11 +1,13 @@
 # 日志
 
+[← 架构](../architecture.md)
+
 `catmail_core::logging`。两个前端在 `main` 一开始调 `logging::init`，装两层输出：
 
 - stderr：按 `RUST_LOG`，默认只有 warn，和以前一样。
 - 数据目录下的 `logs/catmail.log`：按 `CATMAIL_LOG`，默认 warn 加上引擎各 crate（core、proto、store）
-  的 info，再加上前端自己的那部分：GUI 是 `catmail_gui` 和 `catmail_frontend`，CLI 是 `catmail`。
-  `catmail_frontend` 里有常驻时回收内存（trim 前后的 RSS）和没有托盘这两条。
+  的 info，再加上前端自己的那部分：GUI 是 `catmail_gui`、`catmail_frontend` 和 `catmail_mcp`（`LOG_FILTER`），
+  CLI 是 `catmail` 和 `catmail_mcp`。`catmail_frontend` 里有常驻时回收内存（trim 前后的 RSS）和没有托盘这两条。
 
 全局 subscriber 由前端显式调 `init` 来装，core 自己从不装：测试在一个进程里开很多引擎。
 
@@ -79,7 +81,7 @@ INFO catmail_core::logging: running on os="NixOS 26.11 (Zokor)" kernel="7.2.11-z
   因登录被拒或超限不问的账户记在 debug：`CATMAIL_LOG=info,catmail_core::search=debug`；提前连接
   失败记 info 一行（连上的是通常的 `logged in to IMAP`）。GUI 发起搜索或提前连接失败时 warn 一行。
 - 退出：GUI 退出时记一行 `quitting reason=…`，退出被取消时记 `quit called off`（见[后台运行](background.md#退出)），
-  `MailClient::shut_down` 记 `shutting down the engine`，引擎关闭时 core 记 `engine closed`；`catmail watch` 被 Ctrl+C 中断时记 `interrupted; stopping`。日志停在别处，
+  `MailClient::shut_down` 记 `shutting down the engine`，引擎关闭时 core 记 `engine closed`；`catmail watch` 和 `catmail serve` 被 Ctrl+C 或 SIGTERM 中断时记 `interrupted; stopping`。日志停在别处，
   就是进程被杀或崩溃了。
 - GUI：打不开邮件、附件、图片缓存时的错误（warn）；主窗口开关、进入常驻、trim 前后的 RSS
   （见[后台运行](background.md#引擎属于应用不属于窗口)）。

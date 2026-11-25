@@ -12,7 +12,7 @@
 |---|---|---|
 | Frontends | `catmail-cli`、`catmail-gui` | 命令行（clap）；图形界面（Native Shell：Linux 上 GTK 4 与 WebKitGTK，macOS 上 AppKit 与 WKWebView） |
 | MCP | `catmail-mcp` | 给 AI agent 的工具、令牌与本机的 Streamable HTTP 服务（rmcp、hyper），由持有引擎的前端托管：`catmail serve` 和 GUI（见 [MCP](architecture/mcp.md)） |
-| Desktop 逻辑 | `catmail-frontend` | 桌面前端里与 UI 库无关的部分：设置文件、主题、单实例、侧栏的文件夹与模型、引擎事件的重读规则、列表的行、对邮件的命令、写信窗口的模型、发件箱的选择、登录表单、显示格式、读信区的头部与 HTML 策略、托盘（菜单、角标、Linux 的 StatusNotifierItem、macOS 的状态栏项）、新邮件通知的措辞、关掉最后一个窗口之后怎么办 |
+| Desktop 逻辑 | `catmail-frontend` | 桌面前端里与 UI 库无关的部分：设置文件、主题、单实例、侧栏的文件夹与模型、引擎事件的重读规则、列表的行、对邮件的命令、写信窗口的模型、发件箱的选择、登录表单、显示格式、读信区的头部与 HTML 策略、托盘（菜单、角标、Linux 的 StatusNotifierItem、macOS 的状态栏项）、新邮件通知的措辞、关窗常驻、开机启动、托管给 GUI 的 MCP 服务线程 |
 | Facade | `catmail-core` | `MailClient`：async 方法 + 事件订阅，前端唯一依赖 |
 | Services / Engine | `catmail-core` | 同步、后台同步（IDLE）、操作队列回放、按需下载与后台预取正文、Outbox；每账户状态；运行时桥接；凭据 |
 | Storage | `catmail-store` | SQLite schema 与迁移、事务化 Repository、FTS5、内容寻址 `BlobStore`；全部同步 API |
@@ -20,12 +20,22 @@
 | HTML | `catmail-html` | 邮件 HTML 的清洗（ammonia，样式表逐记号重写），以及读信区在清洗结果上做的几遍：图片、内嵌图片、深色时的颜色转换，和转成读信区显示的文字（html2text）；纯函数，无 IO |
 | Domain | `catmail-types` | `Account`、`Folder`、`MessageSummary`、`Flags`、`Event`、ID 类型；纯数据，无 IO |
 
-依赖方向 `types ← store, proto ← core ← cli / gui`，`html ← proto, core`，`core ← frontend ← gui`，`core ← mcp ← cli, frontend`：store 与 proto 并列、互不依赖；前端不直接
-依赖 store / proto，需要的类型由 `catmail-core` 重新导出。`catmail-testkit`（假 IMAP / SMTP
-服务器）只作为 dev-dependency。桌面前端里不依赖 UI 库的逻辑放进 `catmail-frontend`，`catmail-gui` 只有
-视图和外壳（窗口、主循环、退出）：模型的测试不用编译 GTK、WebKit 和 nsh，增量构建快；crate 的边界也让
-UI 库的类型进不了模型；以后换 UI 库或加一个前端，模型照样能用（GUI 就从 GPUI 换到 Native Shell 过一次，
-见 [GUI](architecture/gui.md#选型)）。
+依赖方向：
+
+```text
+          catmail-cli ──────────┐
+                                ▼
+catmail-gui ─▶ catmail-frontend ─▶ catmail-mcp
+     │                │                 │
+     └────────────────┴─────────────────┴─▶ catmail-core
+                                              ├──▶ catmail-store ─▶ catmail-types
+                                              ├──▶ catmail-proto ─▶ catmail-types, catmail-html
+                                              └──▶ catmail-html
+```
+
+`store` 与 `proto` 并列、互不依赖；前端不直接依赖 `store` / `proto`，需要的类型由 `catmail-core` 重新导出；`catmail-testkit`（假 IMAP / SMTP 服务器）仅作为 dev-dependency。
+
+桌面前端里不依赖 UI 库的逻辑放进 `catmail-frontend`，`catmail-gui` 只保留视图和外壳（窗口、主循环、退出）：模型测试无需编译 GTK、WebKit 和 nsh，增量构建快；crate 边界也让 UI 库类型进不了模型；更换 UI 库或新增前端时模型可复用（GUI 就从 GPUI 换到 Native Shell 过一次，见 [GUI](architecture/gui.md#选型)）。
 
 ## 关键设计
 
@@ -120,9 +130,7 @@ store / IMAP / SMTP 错误包在不透明的 `StoreError` / `ImapError` / `SmtpE
 邮件、两行，一封已读、一封未读都可以；不按 Message-ID 合并（它不可靠），相同的原文由内容寻址的
 BlobStore 自然只存一份。
 
-Gmail 的文件夹是标签，同一封邮件出现在几个邮箱里。决定改为按 `X-GM-MSGID` 一封一行：它有一个位置
-（"所有邮件"、已删除或垃圾邮件里的 UID），其余邮箱是它的标签。普通账户是没有标签的特例，两者是同一套
-模型，见[位置与标签](architecture/labels.md)。
+Gmail 的文件夹是标签，同一封邮件会出现在多个邮箱里。catmail 按 `X-GM-MSGID` 一封一行建模：邮件有唯一的位置（“所有邮件”、已删除或垃圾邮件里的 UID），其余邮箱是它的标签。普通账户是没有标签的特例，两者共用同一套模型，见[位置与标签](architecture/labels.md)。
 
 UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UID 的东西（操作队列、草稿的远端
 副本）都同时记下文件夹和它的 UIDVALIDITY，使用前核对。UIDVALIDITY 变化时这个文件夹的旧代际
@@ -189,10 +197,10 @@ UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UI
 | [CLI](architecture/cli.md) | 命令的代码结构、`--json` 的结构与版本、退出码、添加账户前的登录检查、不覆盖文件 |
 | [GUI](architecture/gui.md) | 选型、外壳与线程、视图结构、事件刷新、正文在 WebView 里（断网、图片、深色）、写信窗口、发件箱、主题与设置、已知问题 |
 | [后台运行](architecture/background.md) | 关窗后常驻、单实例与唤起、睡眠唤醒、新邮件事件；通知、托盘、开机启动 |
-| [MCP](architecture/mcp.md) | 经 MCP 把能力交给 AI agent：GUI 或 `catmail serve` 托管、只听本机的 HTTP 加 Tailscale、令牌与权限层级、发信的确认（只读、整理、草稿与经确认的发信，令牌的层级、账户与限额，`serve` 与 GUI 托管已实现） |
+| [MCP](architecture/mcp.md) | 经 MCP 把能力交给 AI agent：GUI 或 `catmail serve` 托管、只听本机的 HTTP 加 Tailscale、令牌与权限层级、限额、草稿上传与发信确认 |
 | [日志](architecture/logging.md) | stderr 与数据目录里的日志文件、谁能写、记什么、轮转 |
 | [测试](architecture/testing.md) | 假 IMAP / SMTP 服务器、真实 Dovecot 与 mailpit、GUI 的测试 |
-| [打包](architecture/packaging.md) | Linux：CLI 的 tarball，图形界面的包为什么暂缓；macOS 磁盘映像：bundle、签名与公证；发布 |
+| [打包](architecture/packaging.md) | Linux（CLI 的 tarball、图形界面的 Flatpak 打包与权限）、macOS（磁盘映像、签名与公证）、发布流程 |
 
 ## 数据目录
 
@@ -210,11 +218,8 @@ CLI 和 GUI 都可用 `CATMAIL_DATA_DIR` 覆盖，CLI 另有 `--data-dir`。
 | `remote-images/` | 用户要求显示过的远程图片的缓存（见[正文与附件](architecture/bodies.md)） |
 | `logs/` | 前端的日志文件和它的锁（见[日志](architecture/logging.md)） |
 
-目录新建时只有本用户可访问（Unix 上 0700）。已存在的目录不改权限：它可能是用户指定的位置（比如
-家目录），宽于 0700 时只打一条 warn；但必须属于当前用户，否则拒绝打开（`Error::DataDirNotOwned`），
-这也挡住了别人在共享位置预先放置的、指向他自己目录的符号链接（指向自己目录的链接照常可用）。里面的
-东西不依赖外层目录：`catmail.db` 及其 WAL 文件是 0600，`blobs/`、`blobs/tmp`、`handoff/`、`remote-images/` 是 0700，
-已存在的在打开时收紧，blob 和交接文件本身是 0600。Windows 上一律继承父目录的 ACL。`MailClient::open`
-拿到锁之后清空并重建 `handoff/`：锁保证没有前端还在往里写，各前端不必各自清理。在打开时而不是关闭时
-清，是因为关闭时别的程序可能还在读，macOS 上应用退出也不执行析构。前端不自己写这个目录，而是调
-`MailClient::hand_off`：它建 0600 的文件，并顺手删掉超过 10 分钟的旧文件，免得 GUI 开几天就留下几天的邮件。
+权限与清理约定：
+
+- **目录所有权与权限**：新建数据目录时仅本用户可访问（Unix 上 `0700`）。已存在的目录不改权限（可能是用户指定的位置），宽于 `0700` 时打 warn；但必须属于当前用户，否则拒绝打开（`Error::DataDirNotOwned`），防止他人在共享位置预先放置符号链接（指向自己目录的符号链接照常可用）。
+- **内部文件收紧**：不依赖外层目录权限。`catmail.db` 及其 WAL 文件为 `0600`；`blobs/`、`blobs/tmp`、`handoff/`、`remote-images/` 为 `0700`（已存在时在打开阶段收紧），blob 与交接文件本身为 `0600`。Windows 上继承父目录 ACL。
+- **`handoff/` 清理**：`MailClient::open` 拿到锁后清空并重建 `handoff/`（持锁保证没有前端在写；不在关闭时清，因为外部程序可能还在读，macOS 退出时也不执行析构）。前端不直接写该目录，而是调 `MailClient::hand_off` 创建 `0600` 文件，并顺手删掉超过 10 分钟的旧文件。

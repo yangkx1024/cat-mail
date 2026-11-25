@@ -4,7 +4,12 @@
 `nsh-spike` 分支上的试验前端 `catmail-nsh`，逐项对齐到原来基于 GPUI 的 `catmail-gui`；对齐之后 GPUI 版删掉了，
 由它接替 `catmail-gui` 的名字（为什么换见 [docs/architecture/gui.md](../../docs/architecture/gui.md#选型)）。
 
-设计以 gui.md 为准，这里记进度、还没做的事，以及 nsh 没有对应能力、要换做法的地方（标 ⚠️）。
+设计以 [gui.md](../../docs/architecture/gui.md) 为准，这里记进度、还没做的事，以及 nsh 没有对应能力、要换做法的地方（标 ⚠️）。
+
+**当前剩余未完成项**（完整上下文见下文各节）：
+- P4：正文的页内查找（需注入脚本实现）
+- P5：正文里直接拖入图片作为内嵌图
+- P10：内存、滚动帧率与冷启动时间基准；Flatpak 上架 Flathub；Windows 后端与打包
 
 **做法**
 
@@ -51,7 +56,7 @@
 - [x] 两种行形：读信区关着时一行排开，打开后两行；切换时把选中的那封滚到中间。nsh 列表按行量高度，两行时主题
       按实际行数占高
 - [x] 头像、未读只用字重、Gmail 用户标签；悬停的行显示 To / Cc 和操作按钮
-- [x] 勾选多封（点头像或 X）、按标记勾选的菜单（原生 `popup_menu`）、勾选时的批量工具栏
+- [x] 勾选多封（点头像或 X）、视图过滤菜单（All / Read / Unread / Flagged / Unflagged，原生 `popup_menu`）、勾选时的批量工具栏
 - [x] 搜索：200 ms 防抖；先显示本地结果，1 s 后再问服务器
 - [x] 搜索框获得焦点时提前登录（`connect_for_search`，见 docs/architecture/storage.md「问服务器」）
 - [x] 刷新：节流、合并请求、结果没变不替换、按行的身份保持选中；选中的邮件消失时清空读信区
@@ -126,8 +131,9 @@
 - [x] 关窗后常驻，重开时回到上次的位置（`shell::left_at`）。Quit（Ctrl+Q、托盘、SIGHUP / SIGINT / SIGTERM）先关写信
       窗口，第二个信号直接退出；日志记 `quitting reason=…`。⚠️ GTK 常驻时仍连着显示服务器
 - [x] 新邮件通知（Linux）：⚠️ nsh 的通知要经过视图的根，常驻时没有视图，改用 GLib 的 `GNotification`。点击走应用的 `open-mail` action，打开
-      对应账户的 Inbox，列表读到那封后选中它（`Reveal`）。GNOME Shell 上点击无效：GLib 在那里改用 GNOME 自己的
-      接口，它经 D-Bus 名字唤起应用，而应用不占这个名字（`NON_UNIQUE`，单实例靠 socket）
+      对应账户的 Inbox，列表读到那封后选中它（`Reveal`）。为让 Flatpak Notification portal 和 GNOME Shell 的点击
+      能经 `org.freedesktop.Application.ActivateAction` 唤起应用，`shell/gtk.rs` 在 startup 时主动占用 app id
+      （`DO_NOT_QUEUE`，单实例仍由 socket 负责，见 `background.md`）
 - [x] 系统唤醒后马上同步：⚠️ nsh 的 `wake_count()` 记在视图上，常驻时没有视图，所以自己听 logind 的
       `PrepareForSleep(false)`（Linux，GIO 的 D-Bus，Flatpak 里要 `--system-talk-name=org.freedesktop.login1`）和
       `NSWorkspaceDidWakeNotification`（macOS），调 `MailClient::resume()`（`wake.rs`）。听不到时靠引擎自己发现睡眠（`sleep.rs`，最多晚 30 秒）。⚠️ 还没在真机的
@@ -194,9 +200,9 @@
 - [x] macOS 状态栏图标（frontend 的 `tray::macos`）：计数、绘制与 Linux 共用（`tray/mod.rs`），模板图用 resvg 画一次，
       未读数写在图标旁和 Dock 角标上
 - [x] macOS 窗口外框（`chrome.rs`，nsh 的 `TitleBarStyle::Hidden` 和 `window_drag`）：主窗口一体式，红绿灯在侧栏
-      左上角、各栏顶部那一行里（52 pt，AppKit unified 工具栏给按钮的那一行高；nsh 居中红绿灯，高度从
-      `title_bar()` 读，longbridge/nsh#1068 已修），这一行按下拖动窗口。写信窗口保留标题栏，但是应用自己
-      画的
+      左上角、各栏顶部那一行里（52 pt，AppKit unified 工具栏给按钮的那一行高；主窗口通过 `controls_offset` 居中并
+      与侧栏 12 pt 左边距对齐，写信窗口由 nsh 居中；高度从 `title_bar()` 读，longbridge/nsh#1068 已修），这一行按下
+      拖动窗口。写信窗口保留标题栏，但是应用自己画的
 - [x] macOS 磁盘映像打包这个 `catmail-gui`（`packaging/macos/build-dmg.sh`）：菜单栏显示应用名、Dock 有图标。
       `cargo run` 起的没有 bundle，仍显示可执行文件名
 - [x] macOS 新邮件通知：⚠️ nsh 的通知要经过视图的根，常驻时没有视图，所以应用直接用 `UNUserNotificationCenter`，

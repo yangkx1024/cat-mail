@@ -178,7 +178,7 @@ VANISHED、FETCH）、`stop` 完成或过了 `max`，然后发 DONE、等 tagged
 ## 认证
 
 `catmail_proto::Credentials { username, password }` 是协议层看到的全部，IMAP 和 SMTP 共用。只支持
-密码登录，不做 OAuth2（原因见 README 的"范围"）。IMAP 有 `AUTH=PLAIN` 就用 `AUTHENTICATE PLAIN`，
+密码登录，不做 OAuth2（见 [README](../../README.md#特点)）。IMAP 有 `AUTH=PLAIN` 就用 `AUTHENTICATE PLAIN`，
 否则 `LOGIN`（`LOGINDISABLED` 时报错）；SMTP 优先 `AUTH PLAIN`，其次 `AUTH LOGIN`。
 
 IMAP 登录之后（PREAUTH 也一样）、打开任何邮箱之前，服务器的 CAPABILITY 里有 `ID` 就发一次

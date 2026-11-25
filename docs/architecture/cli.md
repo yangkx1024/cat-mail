@@ -1,5 +1,7 @@
 # CLI
 
+[← 架构](../architecture.md)
+
 `catmail-cli` 依赖 `catmail-core`（和托管 MCP 的 `catmail-mcp`），借用 `#[tokio::main]` 的 runtime 打开
 `MailClient`。除 `catmail watch` 和 `catmail serve` 外不开后台同步和后台发信：改动、草稿、发信都在命令里当场
 做完，做不完的留在队列里。
@@ -107,27 +109,25 @@ broken pipe 时记下来，之后的输出丢掉，命令照常做完（信照�
   `drafts_refused`），或某个文件夹失败（文件夹的 `error`：只有服务器拒绝才留在文件夹上，连不上是整个账户
   失败）。`mv` 等退出 3 后，脚本跑 `sync` 就能知道改动最后有没有做成。
 
-## 添加账户
+## 添加账户与发件身份
 
-`account add` 用 `add_account(.., Verify::Login)`（与 GUI 的添加账户对话框相同），IMAP 和 SMTP 都登录成功才写
-keyring 和账户行，拼错的密码不会留下任何东西；SMTP 失败的错误以 "outgoing mail server (SMTP)" 开头，分得清
-是哪一个。`--no-verify` 换成 `Verify::Skip`，用于离线时或脚本里的本地测试服务器；这时密码错误要到第一次
-`sync` 或发信才发现。
-
-`identity add` 给账户加一个发件身份（另一个地址，经它自己的 SMTP 服务器和登录发信，如 Resend），同样
-用 `add_identity(.., Verify::Login)` 先登录，`--no-verify` 跳过；`identity list`（默认的标 `*`、
-排在最前；SAVES SENT 列是服务器会不会自动存已发送，猜的标 `(auto)`）、`identity name <id> [<name>]`（改
-From 里的名字，不给或空白只用地址）、`identity default`、`identity rm`
-（默认的不能删）、`identity saves-sent <id> yes|no|auto`（`auto` 放回去重新猜，见
-[发信 / 保存到 Sent](sending.md#保存到-sent)）。`compose`、`reply`、`forward`、`draft edit`
-的 `--from` 按 id 或地址（`identity_by_address`，几个身份地址相同时取默认的或较早的）选身份；不给时新信用
-默认身份，`reply` 用原信寄给的那个地址。`draft edit` 在 `draft_senders` 给的身份里找：地址先在草稿自己的
-账户里找，再依次找其他账户，选了别的账户的身份草稿就搬过去（回复不行，见
-[发信 / 发件身份](sending.md#发件身份)），之后两个账户都保存到服务器（旧账户删掉 Drafts 里的副本）。`reply`、`forward` 先读原信得知账户，把身份连同 `--body` 和
-`forward` 的收件人一起交给 `reply` / `forward`，草稿一次建成，不再事后 `update_draft`。`--body` 是写在
-[引文](sending.md#引文)上面的那段；`draft edit --body` 只换这段，`--no-quote` 去掉引文。`forward --as-attachment` 把原信
-整封作为 `.eml` 附件，不引用（见[发信 / 草稿](sending.md#草稿)）。`draft show` 显示发出时的
-纯文本（正文和引文），`--json` 里 `text` 和 `quote` 分开。`account list` 的 SMTP 列和 `--json` 的 `smtp` 是默认身份的服务器。
+- **账户**：`account add` 用 `add_account(.., Verify::Login)`（与 GUI 的添加账户对话框相同），IMAP 和 SMTP 都登录成功才写
+  keyring 和账户行，拼错的密码不会留下任何东西；SMTP 失败的错误以 `"outgoing mail server (SMTP)"` 开头，分得清
+  是哪一个。`--no-verify` 换成 `Verify::Skip`，用于离线时或脚本里的本地测试服务器；这时密码错误要到第一次
+  `sync` 或发信才发现。`account list` 的 SMTP 列和 `--json` 的 `smtp` 是默认身份的服务器。
+- **发件身份**：`identity add` 给账户加一个发件身份（另一个地址，经它自己的 SMTP 服务器和登录发信，如 Resend），同样
+  用 `add_identity(.., Verify::Login)` 先登录，`--no-verify` 跳过；`identity list`（默认的标 `*`、排在最前；
+  `SAVES SENT` 列是服务器会不会自动存已发送，猜的标 `(auto)`）、`identity name <id> [<name>]`（改 From 里的名字，
+  不给或空白只用地址）、`identity default`、`identity rm`（默认的不能删）、`identity saves-sent <id> yes|no|auto`
+  （`auto` 放回去重新猜，见[发信 / 保存到 Sent](sending.md#保存到-sent)）。
+- **草稿与 `--from`**：`compose`、`reply`、`forward`、`draft edit` 的 `--from` 按 id 或地址（`identity_by_address`，
+  几个身份地址相同时取默认的或较早的）选身份；不给时新信用默认身份，`reply` 用原信寄给的那个地址。`draft edit` 在
+  `draft_senders` 给的身份里找：地址先在草稿自己的账户里找，再依次找其他账户，选了别的账户的身份草稿就搬过去
+  （回复不行，见[发信 / 发件身份](sending.md#发件身份)），之后两个账户都保存到服务器（旧账户删掉 Drafts 里的副本）。
+- **回复与转发**：`reply`、`forward` 先读原信得知账户，把身份连同 `--body` 和 `forward` 的收件人一起交给 `reply` /
+  `forward`，草稿一次建成，不再事后 `update_draft`。`--body` 是写在[引文](sending.md#引文)上面的那段；`draft edit --body`
+  只换这段，`--no-quote` 去掉引文。`forward --as-attachment` 把原信整封作为 `.eml` 附件，不引用（见
+  [发信 / 草稿](sending.md#草稿)）。`draft show` 显示发出时的纯文本（正文和引文），`--json` 里 `text` 和 `quote` 分开。
 
 ## 写文件
 
