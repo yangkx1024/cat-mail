@@ -71,4 +71,20 @@ fn accounts_and_folders_fold_and_unfold() {
     app.press("text:alice@example.com >> nth=0").unwrap();
     app.wait_for_within("Projects", WAIT).unwrap();
     app.wait_for_within("2026", WAIT).unwrap();
+
+    // A double press on the folder's row folds it as well as selecting it.
+    app.press("Projects").unwrap();
+    app.press("Projects").unwrap();
+    app.wait_for_gone("2026", WAIT).unwrap();
+    app.press("label:Expand Projects").unwrap();
+    app.wait_for_within("2026", WAIT).unwrap();
+
+    // The account's chevron folds it as its row does (the selected folder's name stays,
+    // over the list).
+    app.press("label:Collapse alice@example.com").unwrap();
+    app.wait_for_within("label:Expand alice@example.com", WAIT)
+        .unwrap();
+    app.wait_for_gone("2026", WAIT).unwrap();
+    app.press("label:Expand alice@example.com").unwrap();
+    app.wait_for_within("2026", WAIT).unwrap();
 }
