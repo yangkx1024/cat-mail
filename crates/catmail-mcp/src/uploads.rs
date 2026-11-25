@@ -34,6 +34,12 @@ const PREPARED_PER_TOKEN: usize = 16;
 /// another.
 const HELD_PER_TOKEN: usize = 2 * MAX_FILE_BYTES;
 
+/// Where a request came to, as its client reached it: `<scheme>://<host>`, for the URLs
+/// `prepare_upload` gives out, which the agent's shell then reaches as its client did.
+/// Among the request's extensions (set by `http.rs`), as its token is.
+#[derive(Clone)]
+pub(crate) struct BaseUrl(pub String);
+
 #[derive(Default)]
 pub(crate) struct Uploads(Mutex<HashMap<String, Upload>>);
 

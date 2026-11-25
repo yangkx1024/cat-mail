@@ -7,14 +7,11 @@ use nsh_base::{HandleEdge, resize_handle, theme};
 use nsh_core::prelude::*;
 
 use super::{draft, outbox};
-use crate::buttons::{Size, icon_button};
-use crate::icons::Icon;
 use crate::mailbox::list::{self, Selected};
 use crate::mailbox::picker::picker;
 use crate::mailbox::sidebar;
 use crate::motion;
 use crate::reader;
-use crate::theme::SelectableText as _;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Pane {
@@ -204,38 +201,4 @@ pub fn panes() -> impl IntoElement {
                 })),
         )
         .child(picker())
-}
-
-/// The right pane's first button, which closes it: the selection goes.
-pub fn back_button() -> View {
-    icon_button(
-        || Icon::ArrowLeft,
-        || "Back".to_owned(),
-        || true,
-        Size::Bar,
-        || global::<Selected>().set(Selected(None)),
-    )
-}
-
-/// A fact of a draft or an outbox entry, its name in a column of its own: "To", the
-/// addresses.
-pub fn fact(name: &'static str, value: String) -> View {
-    view()
-        .flex_row()
-        .items_start()
-        .gap(px(12.0))
-        .child(
-            text(name)
-                .w(px(64.0))
-                .flex_shrink_0()
-                .text_sm()
-                .text_color(move || theme().muted_foreground),
-        )
-        .child(
-            text(value)
-                .flex_1()
-                .text_sm()
-                .selectable_text()
-                .text_color(move || theme().foreground),
-        )
 }

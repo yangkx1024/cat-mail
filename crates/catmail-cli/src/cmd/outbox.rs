@@ -9,7 +9,7 @@ use catmail_core::{
 };
 use clap::Subcommand;
 
-use crate::cmd::compose::save_to_server;
+use crate::cmd::ops::save_to_server;
 use crate::exit::{Exit, Outcome};
 use crate::json::{self, JsonOutboxEntry};
 use crate::output::{errln, outln, print_outbox, printable};

@@ -11,7 +11,7 @@ use catmail_core::{
 };
 use jiff::civil::Date;
 
-use super::selection::{Removal, Reveal};
+use super::selection::{Removal, Reveal, Select};
 use super::{Days, PAGE, Row, RowId, fetch};
 use crate::format::Calendar;
 use crate::mailbox::{Place, Source};
@@ -286,16 +286,6 @@ impl Rows {
             Rows::Append(rows, more) => listing.append(rows, more, calendar),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Select {
-    Keep,
-    /// As if the user opened it: the next row after one the user moved, or the message a
-    /// notification was about.
-    Open(RowId),
-    /// The row selected is gone by itself: expunged, sent, a new UIDVALIDITY.
-    Clear,
 }
 
 /// The reads of the list. Not what it shows: that is the [`Listing`], which the frontend

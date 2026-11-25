@@ -14,7 +14,7 @@ use catmail_core::{
 };
 use clap::{Args, Subcommand};
 
-use crate::cmd::ops::{self, NEXT_FLUSH};
+use crate::cmd::ops::save_to_server;
 use crate::cmd::{identity, one_account, outbox, summary};
 use crate::json::{self, JsonDraft, JsonDraftAttachment};
 use crate::output::{errln, outln, print_draft, print_drafts, printable};
@@ -374,28 +374,6 @@ pub(crate) async fn draft(client: &MailClient, cmd: DraftCommand, json: bool) ->
         save_to_server(client, account).await;
     }
     Ok(())
-}
-
-/// Saves the account's changed drafts to its Drafts folder, deleting what they replace
-/// there (and making its other queued changes), warning if that can't be done: the
-/// drafts are saved locally all the same.
-pub(crate) async fn save_to_server(client: &MailClient, account: AccountId) {
-    let error = match client.replay_pending(account).await {
-        Ok(report) => {
-            if report.drafts_failed > 0 {
-                errln!("warning: {}", ops::refused_drafts(report.drafts_failed));
-            }
-            report.error.map(|e| e.to_string())
-        }
-        Err(e) => Some(e.to_string()),
-    };
-    if let Some(e) = error {
-        errln!(
-            "warning: the draft is saved here, but not in the server's Drafts folder yet \
-             ({}); {NEXT_FLUSH} puts it there",
-            printable(&e)
-        );
-    }
 }
 
 /// To, Cc and Bcc, each `None` if it wasn't given.

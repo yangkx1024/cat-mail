@@ -11,16 +11,7 @@ use std::collections::HashMap;
 use catmail_core::html::{Image, RemoteImage, Served, ServedImage};
 
 use super::pacer::Pacer;
-use super::page::{Appearance, blank_page, body_page};
-
-/// The scheme of the URLs the page's images have: `catmail-image:<page>/<path>`, the
-/// number of the page that refers to them, then [`ServedImage::path`]. The path stays
-/// opaque (no `//`), as `serve_images` needs.
-pub const IMAGE_SCHEME: &str = "catmail-image";
-
-pub(super) fn image_base(number: u64) -> String {
-    format!("{IMAGE_SCHEME}:{number}/")
-}
+use super::page::{Appearance, IMAGE_SCHEME, blank_page, body_page};
 
 /// The page that asks for `url`, and what it asks for; `None` for a URL the reader didn't
 /// write.

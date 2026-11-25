@@ -2,9 +2,9 @@
 //! database has had, as `rusqlite_migration` counted them, so the two stay interchangeable.
 //! Once released, a migration is never renumbered, reordered or removed.
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
-use crate::{Error, Result, Store};
+use crate::{Error, Result};
 
 /// Brings the database to the last of `migrations`: runs the ones it hasn't had, in order,
 /// in one transaction with the new `user_version`, so a failure leaves it as it was. Refuses
@@ -15,36 +15,36 @@ use crate::{Error, Result, Store};
 /// can't turn foreign keys off, and what it may break is caught by the check before commit.
 pub(crate) fn to_latest(conn: &mut Connection, migrations: &[&str]) -> Result<()> {
     let known = migrations.len();
-    Store::transact(conn, |db| {
-        let conn = db.conn;
-        // A negative version is out of range for u32: an error, as it should be.
-        let found: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        let found = found as usize;
-        if found > known {
-            return Err(Error::Migration(format!(
-                "the database is from a newer catmail (schema {found}, this one knows {known})"
-            )));
-        }
-        if found == known {
-            return Ok(());
-        }
-        for (i, sql) in migrations.iter().enumerate().skip(found) {
-            conn.execute_batch(sql)
-                .map_err(|e| Error::Migration(format!("migration {}: {e}", i + 1)))?;
-        }
-        if let Some(table) = conn
-            .query_row("PRAGMA foreign_key_check", [], |row| {
-                row.get::<_, String>(0)
-            })
-            .optional()?
-        {
-            return Err(Error::Migration(format!(
-                "migrating to {known} left a foreign key in {table} pointing at no row"
-            )));
-        }
-        conn.pragma_update(None, "user_version", known as u32)?;
-        Ok(())
-    })
+    // IMMEDIATE takes the write lock up front instead of failing on upgrade later.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // A negative version is out of range for u32: an error, as it should be.
+    let found: u32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let found = found as usize;
+    if found > known {
+        return Err(Error::Migration(format!(
+            "the database is from a newer catmail (schema {found}, this one knows {known})"
+        )));
+    }
+    if found == known {
+        return Ok(());
+    }
+    for (i, sql) in migrations.iter().enumerate().skip(found) {
+        tx.execute_batch(sql)
+            .map_err(|e| Error::Migration(format!("migration {}: {e}", i + 1)))?;
+    }
+    if let Some(table) = tx
+        .query_row("PRAGMA foreign_key_check", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()?
+    {
+        return Err(Error::Migration(format!(
+            "migrating to {known} left a foreign key in {table} pointing at no row"
+        )));
+    }
+    tx.pragma_update(None, "user_version", known as u32)?;
+    tx.commit()?;
+    Ok(())
 }
 
 #[cfg(test)]

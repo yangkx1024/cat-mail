@@ -13,8 +13,8 @@ use crate::clock::clock;
 use crate::icons::{Icon, icon};
 use crate::mailbox::commands;
 use crate::mailbox::compose;
+use crate::mailbox::list::back_button;
 use crate::mailbox::list::{self};
-use crate::mailbox::panes::back_button;
 use crate::theme::SelectableText as _;
 use crate::{chrome, web};
 
