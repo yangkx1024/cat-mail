@@ -1,7 +1,7 @@
 # Tooling
 
-Commands for all three modes, Rust first. "Rust" is an app with `nsh.json` `"root"`. "Mixed" has `"rust"` and no
-`"root"`, so `App.tsx` is the entry. "TSX" has neither. Mode pages: [rust.md](rust.md), [mixed.md](mixed.md), [tsx.md](tsx.md).
+Commands for all three modes. "TSX" is an app with no Rust of its own. "Mixed" is a TSX entry with Rust nshm crates in `ext/` (`"dependencies"` by path), or `"rust"` and no
+`"root"`, so `App.tsx` is the entry. "Rust" is an app with `nsh.json` `"root"`. Mode pages: [tsx.md](tsx.md), [mixed.md](mixed.md), [rust.md](rust.md).
 
 ## First-run setup
 
@@ -11,7 +11,7 @@ supported distribution and install method. Installing this skill provides guidan
 the `nsh` CLI is installed separately. Use an existing project’s required CLI version
 rather than updating it as a side effect of a feature change.
 
-Rust and mixed apps also need Cargo and the target’s native build prerequisites;
+Mixed and Rust apps also need Cargo and the target’s native build prerequisites;
 TSX apps use the prebuilt runtime. Check only the target the user needs in
 [Platforms and prerequisites](#platforms-and-prerequisites). Follow the environment’s
 permissions when installing tools, and leave installing toolchains to the user: never
@@ -42,20 +42,20 @@ For TSX and mixed changes, also run `nsh build` to check bundler diagnostics.
 
 Every command takes `[ENTRY]`: the app's directory (default `.`) or a TSX entry file. `-v` (or `NSH_VERBOSE=1`) prints everything. `nsh <command> --help` lists flags.
 
-| Command | Rust | Mixed | TSX |
+| Command | TSX | Mixed | Rust |
 | --- | --- | --- | --- |
-| `nsh init DIR --template` | `rust` | `mixed` | `ts` (the default off a terminal) |
-| `nsh check` | `cargo check --all-targets`; `tsc` on test files if there is a `tsconfig.json` | `cargo check --all-targets`, then `tsc` | `tsc` |
-| `nsh build` | Describes the crates; writes `app.json`, `assets/` | Describes the crates, bundles, compiles to bytecode | Bundles, compiles to bytecode |
-| `nsh test` | `cargo test`, then `*.test.tsx` | Same | `*.test.tsx` |
-| `nsh run` | Builds the app's runner, no QuickJS, restarts on change | Hosts built with the crate; TSX hot, Rust restarts | Prebuilt host; hot updates |
-| `nsh dev` (`--server-only` for your own hosts) | Refused: use `nsh run` | Dev server and host | Dev server and host |
-| `nsh package --target` | Runner from Cargo | Runner with the crate, from Cargo | Prebuilt runtime; no Rust toolchain |
-| `nsh publish` | Refused | TSX only; crates ship in the host | Yes |
+| `nsh init DIR --template` | `ts` (the default off a terminal) | `mixed` | `rust` |
+| `nsh check` | `tsc` | `cargo check --all-targets`, then `tsc` | `cargo check --all-targets`; `tsc` on test files if there is a `tsconfig.json` |
+| `nsh build` | Bundles, compiles to bytecode | Describes the crates, bundles, compiles to bytecode | Describes the crates; writes `app.json`, `assets/` |
+| `nsh test` | `*.test.tsx` | `cargo test`, then `*.test.tsx` | `cargo test`, then `*.test.tsx` |
+| `nsh run` | Prebuilt host; hot updates | Hosts built with the crate; TSX hot, Rust restarts | Builds the app's runner, no QuickJS, restarts on change |
+| `nsh dev` (`--server-only` for your own hosts) | Dev server and host | Dev server and host | Refused: use `nsh run` |
+| `nsh package --target` | Prebuilt runtime; no Rust toolchain | Runner with the crate, from Cargo | Runner from Cargo |
+| `nsh publish` | Yes | TSX only; crates ship in the host | Refused |
 | `nsh update-manifest` | Yes | Yes | Yes |
-| `nsh keygen`, `certify`, `verify`, `revoke`, `symbolicate` | Keys only | Yes | Yes |
-| `cargo run` | Runs `src/main.rs` on the desktop backend | - | - |
-| `cargo test`, `cargo check` | Direct | Direct, for the crate | - |
+| `nsh keygen`, `certify`, `verify`, `revoke`, `symbolicate` | Yes | Yes | Keys only |
+| `cargo run` | - | - | Runs `src/main.rs` on the desktop backend |
+| `cargo test`, `cargo check` | - | Direct, for the crate | Direct |
 
 `nsh --help` says `nsh package` needs no Rust. That holds for TSX only.
 
@@ -72,8 +72,8 @@ Every command takes `[ENTRY]`: the app's directory (default `.`) or a TSX entry 
 
 ```sh
 # Rust or mixed, from the app's directory; TSX the same, or name the entry
-nsh run                          # this machine's backend
-nsh run --target ios             # catalyst, ios, android, macos, linux, windows, gpui, tui, web
+nsh run                          # this machine's backend: macos on macOS (AppKit)
+nsh run --target ios             # ios, android, macos, linux, windows, gpui, tui, web
 nsh dev --server-only            # TSX and mixed: serve hosts you start yourself
 ```
 
@@ -82,7 +82,7 @@ nsh dev --server-only            # TSX and mixed: serve hosts you start yourself
 - **Rust edits:** rebuild and restart; state starts afresh. Build errors print in the terminal, and the next save that compiles runs.
 - **TSX edits:** a patch of changed modules, about 120 ms. Edited components render again; the others keep their state. Top-level `signal(..)` and `createNavStack(..)` keep their values while the initializer is unchanged.
 - **Full reload instead:** first import of a new NSH module, a `capabilities` change, a host on an older build, or a patch that cannot apply.
-- **`--release`:** minified, no hot updates. Hardening stays off for anything loaded from a dev server.
+- **`--release`:** minified, no hot updates. Hardening stays off for anything loaded from a dev server. On `nsh run` and `nsh test`, an app with Rust crates also builds its development hosts (and `nsh test`'s headless runner and `cargo test`) in release mode (`--release`).
 - **Devices:** the server prints LAN URLs. A device needs the port reachable. Android uses `adb reverse`, which `nsh run` sets up.
 
 **Reading the terminal:** `✓` done, `→` where to connect, `•` what a device did, `warn` and `error` problems, plain lines the app's own output.
@@ -119,7 +119,6 @@ Each desktop packages only on itself. Phones are reached from a computer.
 | `linux` | GTK 4.14+ | GTK 4 | Rust and GTK's dev packages |
 | `windows` | Windows 10 1809+ | WebView2 for web views | Rust |
 | `ios`, `ios-simulator` (package only) | iOS 15+; from macOS | Xcode and a simulator runtime | `rustup target add aarch64-apple-ios-sim aarch64-apple-ios` |
-| `catalyst` (run only) | Mac, iPhone-sized window | Xcode | `rustup target add aarch64-apple-ios-macabi` |
 | `android` | API 26+; from macOS, Linux or Windows | Android SDK (`ANDROID_HOME`), a JDK, a device or emulator | The NDK, and `rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android` |
 | `web` | Modern browsers | - | `rustup target add wasm32-unknown-unknown`, `clang`, `llvm-ar` |
 | `gpui` (run only) | macOS, Windows, Linux with a GPU | Inside a GPUI app | TSX and mixed entries; a Rust root embeds instead |
@@ -127,10 +126,15 @@ Each desktop packages only on itself. Phones are reached from a computer.
 
 Notes:
 
+- On macOS, run and check apps with plain `nsh run` (AppKit, `macos`). For a phone, use `--target ios`.
 - `nsh run` on Linux opens a 390×844 window, and on macOS and Windows 1200×800. Set `--window-size` for TSX entries.
 - `--target tui` logs to `.nsh/tui.log`; `C-h e` opens logs and errors.
 - A Rust crate calling browser APIs needs the `wasm-bindgen` CLI at the version `nsh` names (`NSH_WASM_BINDGEN` overrides the path).
 - On Linux, a crate that wants web views enables `webview` on `nsh-platform-linux`, which needs WebKitGTK 6.0.
+
+### Development tool: Mac Catalyst
+
+`--target catalyst` (run only) runs the iOS backend in an iPhone-sized Mac Catalyst window; it needs Xcode, and for Rust or mixed `rustup target add aarch64-apple-ios-macabi`. Use it only when the task needs Catalyst: behavior specific to it, or an app embedding NSH in a Mac Catalyst app. Do not pick it to preview mobile UI or to run a Mac app.
 
 ## Platform-specific code
 
@@ -152,7 +156,7 @@ Notes:
 - Desktop means macOS, Windows, Linux, and browsers in the desktop idiom. Mobile means iOS, Android, Mac Catalyst and browsers in the phone or tablet idiom.
 - Gate layout and input on `platform.desktop`. Gate windows and `Menu` calls on `isAvailable` from `nsh/desktop`, which is false in browsers.
 - Mac Catalyst reports `"ios"` and takes `ios={{…}}` props.
-- Web has no registered native components. On the desktops, `#[native_components]` is one function per platform, each registering the same names, with `nsh-platform-*` per-target dependencies.
+- Web has no registered native components. On the desktops, iOS and Android, `#[native_components]` is one function per platform, each registering the same names, with `nsh-platform-*` per-target dependencies.
 
 ```tsx
 import { platform, Text } from "nsh";
@@ -270,15 +274,16 @@ nsh verify .nsh/out/com.example.app-2.nshpkg --root keys/root.pub
 
 Run the whole loop for your mode before calling work done. Skip full builds when `check` and headless tests answer the question.
 
-**Rust**
+**TSX**
 
 ```sh
-cargo check --all-targets      # or nsh check, which also checks TS tests
-cargo test                     # headless, through the UI, with nsh_testing::Headless
+nsh check                      # the only type check: fix every error
+nsh build                      # treat every warn as a finding
+nsh test                       # headless, hardened
 nsh run                        # look at it
 ```
 
-**Rust + TSX**
+**TSX with Rust (mixed)**
 
 ```sh
 nsh check                      # cargo check --all-targets, then tsc against the generated types
@@ -287,12 +292,11 @@ nsh test                       # cargo test, then *.test.tsx in a runner linked 
 nsh run                        # TSX hot; Rust restarts
 ```
 
-**TSX**
+**Rust**
 
 ```sh
-nsh check                      # the only type check: fix every error
-nsh build                      # treat every warn as a finding
-nsh test                       # headless, hardened
+cargo check --all-targets      # or nsh check, which also checks TS tests
+cargo test                     # headless, through the UI, with nsh_testing::Headless
 nsh run                        # look at it
 ```
 

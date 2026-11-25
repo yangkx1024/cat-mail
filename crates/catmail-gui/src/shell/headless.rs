@@ -181,6 +181,9 @@ impl View {
         let config = EngineConfig {
             viewport: Size::new(Points(width as f32), Points(height as f32)),
             environment,
+            // The shell's own windows: without a backend for windows, nsh-testing takes
+            // a desktop root for the invisible app host and shows nothing of it.
+            windows: Some(Arc::new(ShellWindows)),
             ..EngineConfig::new(root)
         };
         let app = Headless::start(config).expect("a headless engine starts");
@@ -193,6 +196,14 @@ impl View {
         lock(opened_windows).push(opened);
         arrived.notify_all();
     }
+}
+
+/// The windows nsh would open, as the shell's are: each view's root is its window, as
+/// in GTK's and AppKit's `AppView`, and catmail declares no nsh windows of its own.
+struct ShellWindows;
+
+impl nsh_core::desktop::WindowBackend for ShellWindows {
+    fn command(&self, _window: nsh_core::NodeId, _command: &nsh_core::desktop::DesktopCommand) {}
 }
 
 /// A window, which the list of open windows keeps until it is destroyed.
