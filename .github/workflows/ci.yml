@@ -39,6 +39,32 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+  # Module structure (deslop-please: module cycles, tangles, field leaks, shallow modules,
+  # wide directories, long files). The debt that was there when it came in is listed in
+  # `.deslop-please.allow`; anything new fails. On macOS, the configuration that list was
+  # made in: code behind another OS's `cfg` isn't indexed, so Linux would see other
+  # modules. The version is pinned, as its findings, and so the list, follow it.
+  structure:
+    name: Module structure
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-analyzer
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: deslop-please@0.1.4
+
+      - name: deslop-please
+        run: deslop-please --allow .deslop-please.allow
+
   # The core must stay platform-neutral, so lint and test on every target OS from the
   # start, even though only Linux is shipped for now. Pull requests run the tests on Linux
   # and macOS, where the desktop app runs: Windows still compiles them (clippy covers all
