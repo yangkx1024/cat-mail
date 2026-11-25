@@ -13,10 +13,8 @@ use crate::icons::{Icon, icon};
 const BASE_MS: f32 = 240.0;
 /// Leaving, which is faster than coming.
 const FAST_MS: f32 = 180.0;
-/// How long nsh's animated scrolls run (`ANIMATION` in nsh-platform-macos'
-/// `scroll.rs`), with a frame to spare. Checked on each nsh upgrade (gui.md, "升级 nsh
-/// 时核对").
-const SCROLL_MS: f32 = 300.0 + 20.0;
+/// How long a glide ([`GLIDE`]) runs, with a frame to spare.
+const GLIDE_OVER_MS: f32 = BASE_MS + 20.0;
 
 /// How the layout's changes glide: frames move between where they were and where they
 /// go (ease-in-out), what comes in fades in.
@@ -80,12 +78,26 @@ pub fn indicators_shown() -> bool {
     !global::<HiddenIndicators>().with(|h| h.hidden)
 }
 
+/// Whether rows read again glide ([`glide_rows`]): not while [`still_rows`] holds them.
+#[derive(Clone, Copy, Default, PartialEq)]
+struct RowsStill(bool);
+
+/// From now until `still_rows(false)`, rows read again don't glide ([`glide_rows`]): a
+/// list changes its shape at once, with a scroll that keeps a row where it was. A glide in
+/// that commit would animate the change too, under the scroll, which nsh doesn't move the
+/// rows along with (`list::follow_selection`): the list was left scrolled past its start.
+/// The commits around it may glide as usual, the pane's too ([`glide_when`]).
+pub fn still_rows(still: bool) {
+    global::<RowsStill>().set(RowsStill(still));
+}
+
 /// The rows of a list change in the next commit (messages arriving, going away): the
 /// rows that stay slide to their new places, the ones that come fade in, the ones that
 /// go fade out. A glide asked for later in the same turn ([`glide_when`]) takes its
-/// place: nsh animates a commit with the last one.
+/// place: nsh animates a commit with the last one. Nothing while [`still_rows`] holds
+/// them.
 pub fn glide_rows() {
-    if reduce_motion() {
+    if reduce_motion() || global::<RowsStill>().get_untracked().0 {
         return;
     }
     animate_layout(LayoutAnimation {
@@ -94,18 +106,107 @@ pub fn glide_rows() {
     });
 }
 
-/// Each time `on` changes, the whole commit's layout glides: a list among it slides its
-/// rows only so (nsh-core's `list_motion.rs` keeps them where they showed as the list
-/// scrolls).
+/// Each time `on` changes, the whole commit's layout glides (the right pane sliding in or
+/// out, the list beside it keeping its shape: `list::follow_selection`).
 pub fn glide_when(on: impl Fn() -> bool + 'static) {
     on_toggle(on, || {
         if reduce_motion() {
             return;
         }
-        // The list's, which moves and scrolls; the sidebar's while at it.
-        hide_indicators(BASE_MS.max(SCROLL_MS));
+        // The list's and the sidebar's, beside what moves.
+        hide_indicators(GLIDE_OVER_MS);
         animate_layout(GLIDE);
+        meter_frames("glide", GLIDE_OVER_MS);
     });
+}
+
+/// Waits until a glide asked for now ([`glide_when`]) is over: at once with reduced motion,
+/// which glides nothing.
+pub async fn glide_over() {
+    if !reduce_motion() {
+        timer(Duration::from_millis(GLIDE_OVER_MS as u64)).await;
+    }
+}
+
+/// With `CATMAIL_GUI_FRAMES` set: logs the display frames of the next `ms` (an
+/// animation's): how long its first frame took to come, the gaps between the frames, and
+/// how many were missed (a gap of more than one and a half of the usual one), to compare
+/// changes by numbers rather than by eye. In the log file (`catmail_gui` at info) and on
+/// stderr.
+fn meter_frames(what: &'static str, ms: f32) {
+    if std::env::var_os("CATMAIL_GUI_FRAMES").is_none() {
+        return;
+    }
+    let asked = nsh_core::time::now();
+    let until = asked + Duration::from_millis(ms as u64);
+    spawn(async move {
+        let mut frames = Vec::new();
+        loop {
+            let at = next_frame().await;
+            frames.push(at);
+            if at >= until {
+                break;
+            }
+        }
+        let gaps: Vec<f64> = frames
+            .windows(2)
+            .map(|w| (w[1] - w[0]).as_secs_f64() * 1000.0)
+            .collect();
+        let first_ms = (frames[0] - asked).as_secs_f64() * 1000.0;
+        let Some(stats) = FrameStats::of(gaps) else {
+            return;
+        };
+        let FrameStats {
+            fps,
+            p50,
+            p95,
+            max,
+            missed,
+        } = stats;
+        let summary = format!(
+            "{} frames, first {first_ms:.1} ms, {fps:.1} fps, \
+             gap p50 {p50:.1} / p95 {p95:.1} / max {max:.1} ms, {missed} missed",
+            frames.len(),
+        );
+        tracing::info!(what, "animation frames: {summary}");
+        eprintln!("[frames] {what}: {summary}");
+    });
+}
+
+/// The gaps between an animation's frames, summed up.
+#[derive(Debug, PartialEq)]
+struct FrameStats {
+    fps: f64,
+    p50: f64,
+    p95: f64,
+    max: f64,
+    /// Frames that should have come and didn't: a gap of n usual ones misses n - 1. The
+    /// usual gap is the median, the display's period: not the shortest, as a frame that
+    /// comes early after a late one would make every gap on time look missed.
+    missed: u32,
+}
+
+impl FrameStats {
+    fn of(mut gaps: Vec<f64>) -> Option<Self> {
+        if gaps.is_empty() {
+            return None;
+        }
+        gaps.sort_by(f64::total_cmp);
+        let at = |q: f64| gaps[((gaps.len() - 1) as f64 * q).round() as usize];
+        let period = at(0.5).max(1.0);
+        let missed = gaps
+            .iter()
+            .filter(|g| **g > period * 1.5)
+            .map(|g| (g / period).round() as u32 - 1)
+            .sum();
+        Some(Self {
+            fps: gaps.len() as f64 * 1000.0 / gaps.iter().sum::<f64>(),
+            p50: at(0.5),
+            p95: at(0.95),
+            max: gaps[gaps.len() - 1],
+            missed,
+        })
+    }
 }
 
 /// A section that folds away under what heads it: `Collapsible`'s reveal, the clipped
@@ -125,4 +226,31 @@ pub fn chevron(open: impl Fn() -> bool + 'static, size: f32) -> Svg {
         .transition_transform()
         .duration(BASE_MS)
         .ease_in_out()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FrameStats;
+
+    #[test]
+    fn frame_stats_count_the_frames_a_long_gap_missed() {
+        // At 60 Hz: one gap of three periods misses two frames.
+        let s = FrameStats::of(vec![16.7, 16.7, 50.1, 16.7]).unwrap();
+        assert_eq!(s.missed, 2);
+        assert_eq!(s.max, 50.1);
+        assert_eq!(s.p50, 16.7);
+        assert!((s.fps - 4.0 * 1000.0 / 100.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn frame_stats_take_an_early_frame_for_no_period() {
+        // A frame 11 ms after one 22 ms late: the gaps on time miss nothing.
+        let s = FrameStats::of(vec![16.6, 22.2, 11.0, 16.6, 16.7, 16.6]).unwrap();
+        assert_eq!(s.missed, 0);
+    }
+
+    #[test]
+    fn frame_stats_of_no_gaps_is_nothing() {
+        assert_eq!(FrameStats::of(vec![]), None);
+    }
 }

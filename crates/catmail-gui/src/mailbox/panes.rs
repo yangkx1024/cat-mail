@@ -81,8 +81,11 @@ pub fn panes() -> impl IntoElement {
             })
         })
     });
-    let open = move || pane.get().is_some();
-    // The pane last open: it stays while the list closes over it.
+    // Whether the right pane is in, and whether the list is laid out beside it: a row
+    // selected changes the list first, then the pane (`list::follow_selection`).
+    let open = list::pane_open;
+    let list_open = list::list_open;
+    // The pane last open: it stays while it slides out.
     let last = stored(None::<Pane>);
     let shown = computed(move || match pane.get() {
         Some(now) => {
@@ -106,19 +109,36 @@ pub fn panes() -> impl IntoElement {
             frozen.set(Some(frame.size.width.0));
         }
     };
-    let closed_width = move || if open() { None } else { frozen.get() };
-    // Where the right pane is, open or not: the list draws over it while nothing is open,
-    // and uncovers it by narrowing (covers it again by widening), so opening and closing
-    // slide the list's edge, not the pane, whose web view would lay its page out again
-    // at every width it passed (it does once, if the window changed while it was closed).
+    // How wide all the panes are, for placing the right pane past their trailing edge.
+    let total = signal(None::<f32>);
+    let measure_total = move |frame: &Bounds<Points>| total.set(Some(frame.size.width.0));
+    let opened_left = move || sidebar_width() + list_width();
+    // Where the right pane is, open or not: closed, just past the window's trailing edge,
+    // as wide as it was when last open (as wide as it would be open, before it first
+    // opens), so opening slides it in from the right, over the room the list left it a
+    // frame before, and closing slides it back out, the list widening only once it is
+    // out (`list::follow_selection`). Moved, never resized: its web view would lay its page
+    // out again at every width it passed (it does once, if the window changed while it
+    // was closed). Until the panes are first measured, where it goes when open. One memo
+    // for both panes, tracking only what the closed place depends on.
+    let placement = computed(move || {
+        if open() {
+            return None;
+        }
+        total.get().map(|total| {
+            let width = frozen
+                .get()
+                .unwrap_or_else(|| (total - opened_left()).max(0.0));
+            (total, width)
+        })
+    });
     let right_pane = move |pane: View| {
         pane.absolute()
             .top(px(0.0))
             .bottom(px(0.0))
-            .left(move || px(sidebar_width() + list_width()))
-            .style_with(move |s| match closed_width() {
-                Some(width) => s.w(px(width)),
-                None => s.right(px(0.0)),
+            .style_with(move |s| match placement.get() {
+                Some((left, width)) => s.left(px(left)).w(px(width)),
+                None => s.left(px(opened_left())).right(px(0.0)),
             })
             .accessibility_elements_hidden(move || !open())
     };
@@ -126,9 +146,10 @@ pub fn panes() -> impl IntoElement {
     view()
         .flex_1()
         .flex_row()
+        .on_layout(measure_total)
         // Always there, and out of sight while no message is selected: its web view keeps
         // its web process (100 MB, and a moment to start), so the first message opened
-        // shows as quickly as the next. Under the list then, which covers it, rather than
+        // shows as quickly as the next. Past the window's trailing edge then, rather than
         // not drawn (`invisible`): a web view that isn't drawn for a while shows a black
         // frame when it is drawn again, before WebKit paints. Not left out of the layout
         // either: nsh shows a native view only with a size, and WebKit loads a page only
@@ -165,21 +186,22 @@ pub fn panes() -> impl IntoElement {
                 .relative()
                 .flex_row()
                 .w(move || {
-                    if open() {
+                    if list_open() {
                         px(list_width()).into()
                     } else {
                         Length::Auto
                     }
                 })
-                .flex_grow(move || if open() { 0.0_f32 } else { 1.0 })
+                .flex_grow(move || if list_open() { 0.0_f32 } else { 1.0 })
                 .flex_shrink_0()
-                // Opaque: the reader may be under it.
                 .bg(move || theme().background)
-                .style_when(open, |s| {
+                .style_when(list_open, |s| {
                     s.border_r_1().border_color(move || theme().border)
                 })
                 .child(list::list_column())
-                .child(when(open, || edge_handle(|w| &mut w.list, LIST_WIDTHS))),
+                .child(when(list_open, || {
+                    edge_handle(|w| &mut w.list, LIST_WIDTHS)
+                })),
         )
         .child(picker())
 }

@@ -2,7 +2,10 @@
 
 use nsh_testing::DialogAnswer;
 
-use super::{TestMail, WAIT, open_message, wait_until};
+use catmail_frontend::mailbox::Destination;
+
+use super::{TestMail, WAIT, older_subject, open_message, wait_until};
+use crate::shell;
 
 #[test]
 fn opens_a_message_from_the_list_and_marks_it_read() {
@@ -27,6 +30,50 @@ fn opens_a_message_from_the_list_and_marks_it_read() {
             .find(|m| String::from_utf8_lossy(&m.raw).contains("Lunch on Friday"))
             .is_some_and(|m| m.flags.iter().any(|f| f == "\\Seen"))
     });
+}
+
+#[test]
+fn escape_pressed_twice_still_lays_the_list_out_alone() {
+    let mail = TestMail::start();
+    let (_desktop, mut main) = mail.open();
+    let app = &mut main.app;
+    app.wait_for("3 unread").unwrap();
+    let alone = app.screen().layout("text:Quarterly report").unwrap();
+
+    open_message(app, "Lunch on Friday");
+    assert_ne!(app.screen().layout("text:Quarterly report").unwrap(), alone);
+    // The second selects nothing again while the pane slides out.
+    app.press_keys(&["escape", "escape"]).unwrap();
+    app.wait(std::time::Duration::from_secs(1)).unwrap();
+    assert_eq!(app.screen().layout("text:Quarterly report").unwrap(), alone);
+}
+
+#[test]
+fn a_notification_opening_a_message_far_down_the_list_scrolls_to_it() {
+    let mail = TestMail::start_with_older(60);
+    let (desktop, mut main) = mail.open();
+    let oldest = older_subject(0);
+    let (account, message) = mail.inbox_message(&oldest);
+    let in_list = format!("id:list >> text:{oldest}");
+    // Too far down for its row to be made.
+    assert!(!main.app.screen().matches(&in_list).unwrap());
+
+    desktop.on_main(move || {
+        let to = Destination::Inbox {
+            account,
+            message: Some(message),
+        };
+        shell::show_at(Some(to), None);
+    });
+    let app = &mut main.app;
+    app.wait_for_within(&format!("id:reader >> text:{oldest}"), WAIT)
+        .unwrap();
+    app.wait(std::time::Duration::from_secs(1)).unwrap();
+    let row = app.screen().layout(&in_list).unwrap();
+    assert!(
+        row.as_ref().is_some_and(|row| !row.hidden && !row.clipped),
+        "{row:?}"
+    );
 }
 
 #[test]
