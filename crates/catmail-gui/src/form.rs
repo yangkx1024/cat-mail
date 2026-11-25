@@ -12,6 +12,7 @@ use nsh_core::ModalAnimation;
 use nsh_core::element::input;
 use nsh_core::prelude::*;
 
+use crate::buttons::spinner;
 use crate::icons::{Icon, icon};
 use crate::tasks::in_view;
 use crate::theme::SelectableText as _;
@@ -79,13 +80,15 @@ pub fn title(text_: impl Into<String>) -> Text {
 }
 
 /// A dialog's or form's button, round: filled for the one that does what it is for.
-/// Off while `busy`; the filled one shows it by dimming.
+/// Off while `busy`; the filled one shows macOS's spinner in place of its label then, as
+/// wide as before.
 pub fn form_button(
     label: &'static str,
     primary: bool,
     busy: impl Fn() -> bool + Copy + 'static,
     press: impl Fn() + 'static,
 ) -> impl IntoElement {
+    let spinning = move || primary && busy();
     button()
         .disabled(busy)
         .on_press(press)
@@ -93,7 +96,6 @@ pub fn form_button(
         .px(px(16.0))
         .rounded(px(16.0))
         .justify_center()
-        .opacity(move || if primary && busy() { 0.6_f32 } else { 1.0 })
         .border_1()
         .border_color(move || {
             if primary {
@@ -113,6 +115,8 @@ pub fn form_button(
             text(label)
                 .text_sm()
                 .font_weight(FontWeight::MEDIUM)
+                // Still there, hidden, while the spinner shows: it keeps the width.
+                .opacity(move || if spinning() { 0.0_f32 } else { 1.0 })
                 .text_color(move || {
                     if primary {
                         theme().primary_foreground
@@ -121,6 +125,14 @@ pub fn form_button(
                     }
                 }),
         )
+        .child(when(spinning, move || {
+            view()
+                .absolute()
+                .inset_0()
+                .items_center()
+                .justify_center()
+                .child(spinner(14.0).text_color(move || theme().primary_foreground))
+        }))
 }
 
 pub fn actions(
