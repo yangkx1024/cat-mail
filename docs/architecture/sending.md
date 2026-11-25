@@ -178,7 +178,8 @@ From、Date、Subject、To、Cc，有的才有）。措辞只在 `catmail-types`
   发出后要在那里加 `\Answered`，而 `reply_to_message_id` 只引用本账户的邮件；判断依据是
   `reply_to_message_id` 或 `in_reply_to` 不为空（原信被删后 In-Reply-To 还在）。转发和新邮件可以换。
   `MailClient::draft_senders` 列出一封草稿可选的身份：回复只有本账户的，其余是所有账户的，按账户排列，
-  每个账户的默认身份在前。CLI 的 `--from` 仍只在草稿的账户里按地址找身份。
+  每个账户的默认身份在前。CLI 的 `draft edit --from` 同样在 `draft_senders` 中按地址查找（先草稿自己的
+  账户，再依次其他账户，见 [CLI](cli.md#添加账户与发件身份)），选了别的账户的身份同样会把草稿搬过去。
 - **按地址找身份**只有一处：`Identities::by_email`（`MailClient::identity_by_address`），不分大小写；
   几个身份地址相同（经不同服务器）时默认的优先，其次最早添加的。回复和 CLI 的 `--from` 都用它。
 - **回复**用原信寄给的那个地址：在原信的 To、Cc 里按顺序找第一个是账户身份的地址；回复自己发出的信

@@ -36,27 +36,29 @@ Windows 用户目前只有 CLI。
 src/
   main.rs          启动：交给已在运行的实例或成为它（catmail_frontend::instance），日志，引擎的选项，交给 shell::run
   engine.rs        引擎：属于应用，不属于窗口；打开中、已打开、失败、已关闭
-  shell/           外壳：mod.rs 窗口、设置与主题、托盘和通知的请求、MCP 服务、常驻与退出；gtk.rs、appkit.rs 两个工具包
+  shell/           外壳：mod.rs 窗口、设置与主题、托盘和通知的请求、MCP 服务、常驻与退出；gtk.rs、appkit.rs、headless.rs
   mailbox/         主窗口
     mod.rs         引擎打开前留空、失败的原因、登录页或三栏、引擎事件的刷新
     panes.rs       三栏和拖宽度的把手，右栏按选中的是邮件、草稿还是发件箱条目；右栏共用的返回按钮、字段行
     sidebar.rs     侧栏：All Inboxes、账户与文件夹、标签、连接说明
     folder_commands.rs  文件夹的右键菜单：新建、改名、删除
-    list/          中栏：mod.rs 发起读取并交给 frontend 的 ListModel、勾选、搜索；rows.rs 日期标题和三种行
+    list/          中栏：mod.rs 发起读取并交给 frontend 的 ListModel、勾选、视图过滤、搜索；rows.rs 日期标题和三种行
     commands.rs    对邮件的命令：图标按钮组、快捷键、被拒改动的通知
+    compose.rs     从主窗口发起新邮件、回复、转发与对应快捷键
     picker.rs      "Move to"与"Labels"对话框
     draft.rs outbox.rs  草稿、发件箱条目的右栏
   reader/          读信区：mod.rs 打开、远程与内嵌图片、附件的保存；view.rs 工具栏、头部、正文的 web view、附件
-  web.rs           显示邮件 HTML 的 web view 和它的图片应答，读信区和写信窗口的引文共用
-                   （页面：CSP、注入脚本和它的消息协议在 catmail_frontend::html）
+  web/             web.rs 邮件 HTML 的 web view 与图片应答（读信区和写信引文共用）；sideways.rs 自定义横向滚动条
+                   （页面：CSP、注入脚本和消息协议在 catmail_frontend::html）
   composer/        写信窗口：mod.rs 状态、保存发送关闭、附件、发件人、格式与图片；rich.rs 正文的编辑器；
                    quote.rs 引文；view.rs 窗口
   settings/        设置对话框：mod.rs 设置的跟随、对话框和 General；appearance.rs、accounts.rs、reading.rs、agents.rs 各一节
   login.rs         登录页和发件身份的表单
-  form.rs          对话框外框、字段、提交、确认对话框、只要一个名字的对话框
+  form.rs          对话框外框、字段、提交（含忙碌转圈）、确认对话框、只要一个名字的对话框
   tasks.rs         视图开始的工作归谁（随窗口结束），另起线程的工作
-  buttons.rs       图标按钮（工具栏、行两种尺寸）、主按钮、文字按钮、分隔、提示
+  buttons.rs       图标按钮（工具栏、行两种尺寸）、主按钮、文字按钮、分隔、提示、折叠按钮与转圈
   chrome.rs        窗口顶部：macOS 的一体式主窗口、写信窗口的标题栏、各栏顶部的工具栏
+  motion.rs        动画参数、布局动画、减弱动态效果检查与 macOS 动画期间隐藏滚动指示器
   theme.rs         主题映射到 nsh（shadcn）的 token
   clock.rs         系统的时区和 12 / 24 小时设置，日期分组用的今天
   wake.rs          系统唤醒：告诉引擎重新连接并立即同步（logind、NSWorkspace）
@@ -65,6 +67,7 @@ src/
   tray/            托盘：mod.rs 计数、把图标画成像素（何时数、何时画由 frontend 的 TrayModel 定），linux.rs、
                    macos.rs 交给 frontend 的 StatusNotifierItem、状态栏项
   new_mail/        新邮件的系统通知：mod.rs 攒与重读；linux.rs GNotification，macos.rs UserNotifications
+  tests/           nsh-testing 无头窗口测试：mod.rs（Desktop 夹具）、reading.rs、writing.rs、settings.rs、folders.rs
 ```
 
 ## 外壳
@@ -81,8 +84,10 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
   门面的 future 在 nsh 的任务里（UI 线程上的本地 executor）await，工作在引擎自己的 runtime 上做。
 - **macOS** 没有 GLib 那样的主循环 future 执行器：主线程的 future 用 `async-task` 跑在主 dispatch queue 上。
   菜单栏有应用菜单（⌘Q 走退出流程）、Edit、Window（⌘W 走窗口的关闭询问），点 Dock 图标唤回主窗口
-  （`applicationShouldHandleReopen`）。`applicationShouldTerminate` 先答取消，等写信窗口存完再退出循环。
-  菜单栏、停主循环、外观映射抄了 nsh `run_app` 的私有实现。
+  （`applicationShouldHandleReopen`）。应用菜单、Dock 和系统注销触发的 `applicationShouldTerminate` 答
+  `TerminateLater`，等写信窗口存完再答可以退出（有一个关不了就取消退出）；每次退出都以 AppKit 的
+  `terminate:` 结束，收尾在 `applicationWillTerminate:` 里统一做（见[后台运行 / 退出](background.md#退出)）。
+  菜单栏与外观映射参考了 nsh `run_app` 的私有实现。
 - **输入框失焦**：在输入框外按下时把焦点从输入框拿走，像浏览器那样，否则作用于邮件的单键（E、X、L）到不了
   视图。nsh 把焦点留在输入框里，两个后端各用一个事件 monitor 补上（应由 nsh 提供，#248）。
 - **对话框开着时停掉列表的键**：nsh 的窗口键表先于对话框拿到按键，对话框打开时也不把焦点留在里面，所以
@@ -321,20 +326,17 @@ web view、图片的应答、远程图片的下载在 `web.rs`，写信窗口的
 - **横向滚动条**：body 自己的横向滚动条画在 body 底部，也就是整封邮件的末尾，要纵向滚到底才看得见（#355）。
   所以页面把它藏起来（body 的 `style` 属性里 `scrollbar-width: none`，不认它的 WebKit 用
   `body::-webkit-scrollbar { display: none }`），回报横向滚动（`x`），读信区在滚动区底部自己画一条
-  （`web::Sideways`），和外层的纵向指示条一个样子、一样来去：页面或外层滚动时、鼠标在读信区上移动时（Linux 上是移到滑块上时；macOS 的“显示滚动条”设为
-  “滚动时”就不随鼠标出现）出现，停下 700 ms 后 300 ms 淡出；
-  拖动滑块、点滑块旁边都会让页面横向滚动。滑块的长度和位置是 `catmail_frontend::html::Sideways` 算的。触控板
-  横向滑动、Shift + 滚轮照旧由 body 自己滚。⚠️ 没让外层两个方向一起滚：nsh 的滚动区只沿一个方向，两个方向都滚
-  只有 `zoomable` 且后端支持缩放时才行，macOS 和 Linux 后端都不支持。写信窗口的引文同样处理。
-  根元素和 body 的高度固定为 `auto`，`min-height` / `max-height` 压回 `0` / `none`：不少营销邮件写
-  `html, body { height: 100% !important }`，根元素就和 web view 一样高，报的高度永远是 web view 当前的高度，
-  web view 长不高（刚开窗时只露出几行），放不下的由 body 自己纵向滚动。两者也固定为 `position: static`：
-  绝对定位的 body 脱离文档流，根元素就空了，带 `top: 0; bottom: 0` 时又和 web view 一样高。这些高度、定位和
-  overflow 都写在
-  `<html>`、`<body>` 的 `style` 属性里：`style` 属性里的 `!important` 比任何样式表里的都优先，邮件盖不掉
-  （写在我们的 `<style>` 里，邮件在后面同样加 `!important` 就赢了）。邮件里的元素用 `100vh` 定高时 vh 就是
-  web view 的高度，还会撑住，没有处理。链接只把 `http` / `https` / `mailto` 交给系统打开
-  （`is_openable_link`），页面里不导航。
+  （`web::Sideways`），和外层的纵向指示条一个样子、一样来去：页面或外层滚动时、鼠标在读信区上移动时
+  （Linux 上是移到滑块上时；macOS 的“显示滚动条”设为“滚动时”就不随鼠标出现）出现，停下 700 ms 后 300 ms
+  淡出；拖动滑块、点滑块旁边都会让页面横向滚动。滑块的长度和位置是 `catmail_frontend::html::Sideways` 算的。
+  触控板横向滑动、Shift + 滚轮照旧由 body 自己滚。⚠️ 没让外层两个方向一起滚：nsh 的滚动区只沿一个方向，
+  两个方向都滚只有 `zoomable` 且后端支持缩放时才行，macOS 和 Linux 后端都不支持。写信窗口的引文同样处理。
+- **压制邮件自带的高度与定位**：根元素和 body 的高度固定为 `auto`，`min-height` / `max-height` 压回
+  `0` / `none`（不少营销邮件写 `html, body { height: 100% !important }`，会让根元素一直等于 web view 的当前
+  高度、长不高），`position` 固定为 `static`（防止绝对定位的 body 脱离文档流）。这些高度、定位和 overflow 都
+  写在 `<html>`、`<body>` 的 `style` 属性里：`style` 属性里的 `!important` 比任何样式表里的都优先，邮件盖不
+  掉。邮件里的元素用 `100vh` 定高时 vh 就是 web view 的高度，还会撑住，暂不处理。
+- **链接**：只把 `http` / `https` / `mailto` 交给系统打开（`is_openable_link`），不在页面里导航。
 - **不离开页面**：nsh 给 Rust 应用的策略放行 web view 的所有顶层导航，应用也改不了，所以 web view 不能去别处
   要我们自己拦。点链接由 `BRIDGE` 的 `click` 交给系统；链接上的右键菜单不显示（WebKit 的「打开链接」会在
   web view 里载入远程页面，没有我们的 CSP，「下载链接文件」会存下来），别处的菜单（复制）照旧；页面上
@@ -348,10 +350,11 @@ web view、图片的应答、远程图片的下载在 `web.rs`，写信窗口的
   读信区放在列表下面、web view 里放一个空白页（`html::blank_page`），开窗时渲染进程就先起好。开窗后点开第一封，
   内容约 2 帧就出现（原来约 13 帧）。⚠️ 不用 `invisible` 藏起来：一阵没画的 web view 再画时，WebKit 画好之前
   先闪一帧黑；也不能不排版，nsh 只让有尺寸的原生控件可见，WebKit 只往可见的 web view 里载入页面。
-- **换邮件不闪**：载入时继续显示上一封，像浏览器换页，WebKit 把旧页面留到新页面画好；超过 250 ms
-  （`STAYS_SHOWN`，比如要从服务器下载正文）才藏起来。藏起来时（也包括第一封）表头和附件透明，web view 上盖一层
-  与页面同色的遮罩，等页面在自己的高度上画好（`p` 报的高度够了，`catmail_frontend::html::tall_enough`）再一起
-  显示，最多等 1 秒。web view 的背景设成页面的背景：WebKit 自己的底色是白的，画好之前会露出来。
+- **换邮件不闪与加载提示**：载入时继续显示上一封，像浏览器换页，WebKit 把旧页面留到新页面画好；超过 250 ms
+  （`STAYS_SHOWN`，比如要从服务器下载正文）或之前没有显示内容时，藏起旧正文和附件，若列表里有这封信的摘要就先
+  显示头部并在正文位置显示转圈（没有摘要时头部也藏起），web view 上盖一层与页面同色的遮罩，等新页面在自己的高
+  度上画好（`p` 报的高度够了，`catmail_frontend::html::tall_enough`）再一起显示，最多等 1 秒。web view 的背
+  景设成页面的背景：WebKit 自己的底色是白的，画好之前会露出来。
 
 ### 图片
 

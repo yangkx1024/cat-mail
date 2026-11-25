@@ -2,9 +2,9 @@
 
 [← 架构](../architecture.md)
 
-**状态：已实现。** 存储、协议、同步、操作队列和界面都按这个模型（[迁移步骤](#迁移步骤) 4–6）：Gmail 账户只
-同步三个位置，一封邮件一行，移动和归档改的是标签，侧栏分开列出标签，邮件显示它的标签。下面关于 Gmail 行为的说法都已在真实账户上验证过
-（见[验证结果](#验证结果)）。
+> 状态：已实现。存储、协议、同步、操作队列与前端（GUI / CLI）均采用这套模型：Gmail 账户只同步三个位置，
+> 一封邮件一行，移动和归档改的是标签，侧栏分开列出标签，邮件显示它带的用户标签。下文关于 Gmail 行为的
+> 结论均已在真实账户上验证（见[验证结果](#验证结果)）。
 
 ## 目标
 
@@ -47,7 +47,7 @@
 
 ## 存储
 
-改 `0001_init.sql`（项目未发布），已有的本地数据库要重建。
+相关表结构定义在 `0001_init.sql` 中：
 
 - `folders.kind`：`location` / `label`，对账文件夹时按上面的规则写入。`folders.listed`：LIST 里有没有它。
 - `messages.gm_msgid`：可空，Gmail 账户上 `UNIQUE (account_id, gm_msgid)`。`X-GM-THRID` 协议层照常取到，
@@ -273,14 +273,9 @@
 （"移到已删除"、"立即永久删除"）下标签邮箱里 `\Deleted` 的效果——我们不在标签邮箱里 STORE `\Deleted`，
 不依赖它。
 
-## 迁移步骤
+## 实现状态
 
-1. ~~记下决定（本文、[IMAP 库](protocol.md#imap-库)、AGENTS.md）。~~
-2. ~~用真实 Gmail 验证上面几点，同时试用 imap-proto。~~
-3. ~~协议层改用 imap-proto，`Session` 的接口不变，现有的假服务器和 Dovecot 测试做回归。~~ imap-proto 暂时来自
-   main，0.18.0 发版后换成 crates.io 的版本（见 [IMAP 库](protocol.md#imap-库)）。
-4. ~~存储与同步：`folders.kind` / `listed`、`message_labels`、`gm_msgid` / `gm_thrid`、账户的模式；协议层的
-   `X-GM-*`；假服务器支持 `X-GM-EXT-1`（#126）；按三个位置同步（#127）。~~ CI 里没有真的 Gmail，与真实
-   服务器的行为只能手动验证。
-5. ~~操作队列：标签操作、动作到操作的映射；删除按 Message-ID 找副本的机制（#128）。~~
-6. ~~GUI：侧栏分开位置和标签，显示邮件的标签，加 / 去标签（#129）。~~
+存储、协议（`imap-proto` 与 `X-GM-*`）、假服务器支持、按三个位置同步、标签操作队列以及 GUI / CLI 展示均已完成（#126–#129）。余下两项注意：
+
+- `imap-proto` 目前仍通过 `[patch.crates-io]` 固定在 `main` 分支的提交，待 `0.18.0` 发布到 crates.io 后切回正式版（见 [IMAP 库](protocol.md#imap-库)，#130）。
+- CI 中没有真实 Gmail 环境，与真实 Gmail 服务器交互的行为变化需手动验证。

@@ -1,5 +1,7 @@
 # 打包
 
+[← 架构](../architecture.md)
+
 > 状态：macOS 的磁盘映像（Apple 芯片）、Linux 的 Flatpak 包和 Linux、macOS 的 CLI tar.gz 已实现（Flatpak 还没上
 > Flathub）；Windows 的打包是 M6 余下的部分。
 
@@ -14,8 +16,9 @@ CLI 不链接图形库：SQLite 编进程序，TLS 是 rustls 加系统信任库
 ### 图形界面：Flatpak
 
 GUI 发布为 `catmail-<版本>-<架构>.flatpak`（x86_64、aarch64），一个单文件 bundle，用 `flatpak install --user`
-安装；它记着 Flathub 的地址，缺的 runtime 从那里装。运行时是 GNOME runtime（`org.gnome.Platform`），GTK 4、
-WebKitGTK 6.0 和 GStreamer 都来自它，包里只有 `catmail-gui` 和 `catmail` 两个程序（bundle 约 17 MB）。
+安装；它记着 Flathub 的地址，缺的 runtime 从那里装。运行时是 GNOME runtime（`org.gnome.Platform` 51），GTK 4
+和 WebKitGTK 6.0（及其运行依赖）都来自它（`catmail-gui` 本身未开启 nsh 的 GStreamer 声音 feature），包里只有
+`catmail-gui` 和 `catmail` 两个程序（bundle 约 17 MB）。
 
 **为什么不是 AppImage。** GPUI 版发布过 AppImage（只要带几个 X11 库）。换成 nsh 之后 GUI 链接 WebKitGTK，
 带上它要过三关，每一关都只有 hack：
@@ -153,5 +156,3 @@ workflow 建一个临时钥匙串，导入 `.p12` 和它链到的中间证书 De
   任何分支都行，用当前版本，不改版本、不打标签、不发布，包作为 artifact 上传。和 PR 走同一条路径；
   同时填了 `version` 会报错。它有自己的 concurrency 组，不会排在发布后面，也不会顶掉排队中的发布。
   macOS 的包照样签名、公证。本地没有签名身份时，要一个能分发的包就用它。
-
-本地打包：macOS 要 Apple 芯片的 Mac 和 Xcode。

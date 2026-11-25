@@ -3,7 +3,7 @@
 [← 架构](../architecture.md)
 
 协议行为先对进程内的假服务器测试（三个平台都跑），再对真实的 Dovecot 与 mailpit 测试（Linux CI 的
-测试 job 里与其余测试一起跑）。运行方式见 README"构建"一节。
+测试 job 里与其余测试一起跑）。运行方式见 [README / 构建](../../README.md#构建)。
 
 ## 假服务器（`catmail-testkit`）
 

@@ -207,9 +207,11 @@ base64 正文），交给 mail-parser 按同样方式解析。于是两条路径
   不加 preheader。摘要不收：引用行（`> `）、链接地址（`<https://…>`、`<mailto:…>`），以及不占位置的字符（`catmail_html::visible`：零宽空格、`&zwnj;`、`U+034F`、软连字符、
   方向标记等，preheader 后面用来把正文挤出列表的就是这些；零宽连接符只在两个可见字符之间保留，变体
   选择符只跟在可见字符后面时保留，emoji 由它们组成）。只剩跟踪链接的文本没有摘要。
-- `html`：只在有真正的 HTML 部分时存在。proto 解析正文时用 `catmail-html` 的 `sanitize_html` 清洗
-  （经 `ammonia`）。这个 crate 只管 HTML：清洗，以及读信区在清洗结果上做的几遍处理；纯函数，不碰
-  协议，前端经 `catmail_core::html` 使用。清洗规则：
+### HTML 清洗与深色改写
+
+`html` 只在有真正的 HTML 部分时存在。proto 解析正文时用 `catmail-html` 的 `sanitize_html` 清洗
+（经 `ammonia`）。这个 crate 只管 HTML：清洗，以及读信区在清洗结果上做的几遍处理；纯函数，不碰
+协议，前端经 `catmail_core::html` 使用。清洗规则：
   - 去掉脚本、表单、iframe、事件属性和 `javascript:` 链接；`<title>` 连同文字去掉（ammonia 去掉不允许的
     标签时保留里面的文字，标题会显示成正文的第一行）；
   - `colspan`、`rowspan` 超过浏览器的上限（HTML 规定的 1000、65534）时改成上限，读信区的排版不变：
@@ -257,6 +259,9 @@ base64 正文），交给 mail-parser 按同样方式解析。于是两条路径
     一样忽略其中的制表符、换行和开头的控制字符。引用的来源 `cite`（`blockquote`、`q`、`del`、`ins` 上）整个
     去掉：ammonia 保留它却不查 scheme（`javascript:` 也留下），浏览器既不显示也不跳转，留着没有用处。
   - 图片地址（远程、`cid:`）原样保留，是否加载由渲染端决定，默认应拦截远程图片。
+
+### 远程图片与缓存
+
 - **哪些是远程图片**由 `catmail-html` 决定（`serve_images` 改写页面时一并列出，经 `catmail_core::html` 导出）：
   清洗用的同一个 ammonia 配置遍历 `img src`，只留 `http` / `https`，按 `url` 解析后的写法（`remote_image_url`）
   去重，最多 200 张；列出的和页面里改写的是同一批。下载、缓存和读信区都用这一种写法，调用方传别的写法，缓存
@@ -285,6 +290,9 @@ base64 正文），交给 mail-parser 按同样方式解析。于是两条路径
     任何信号。缓存按 URL，不按邮件：另一封信引用同一个 URL 也直接显示。不看 `Cache-Control`：
     邮件里的图片基本不变，按 `no-store` 再去取反而又给发件人一次信号。
   - 总大小上限 256 MiB，有新图片存入的那次下载结束后按最后使用时间（读取时更新 mtime）从最旧的删起。`image_cache_size`、`clear_image_cache` 给设置界面用。
+
+### 附件与内嵌部分
+
 - **列出哪些部分**（`parts`）：mail-parser 的附件（RFC 8621 `parseStructure` 的 `attachments`），加上正文
   显示的图片、音频、视频。RFC 8621 不把同时出现在两份正文里的媒体算作附件（比如 `multipart/mixed` 里夹在
   文字之间的图片），mail-parser 1.0 照此办；我们仍然列出它，HTML 引用了就内嵌，否则作为附件，否则它哪里都
