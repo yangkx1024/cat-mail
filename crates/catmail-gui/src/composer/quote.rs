@@ -14,7 +14,7 @@ use catmail_frontend::html::RemoteImages;
 use nsh_base::theme;
 use nsh_core::prelude::*;
 
-use crate::buttons::{Size, icon_button};
+use crate::buttons::{Size, fold_button, icon_button};
 use crate::icons::Icon;
 use crate::mailbox::panes::fact;
 use crate::tasks::off_thread;
@@ -212,14 +212,8 @@ fn bar(heading: String) -> impl IntoElement {
         .pl(px(14.0))
         .pr(px(16.0))
         .gap(px(4.0))
-        .child(icon_button(
-            || {
-                if expanded() {
-                    Icon::ChevronDown
-                } else {
-                    Icon::ChevronRight
-                }
-            },
+        .child(fold_button(
+            expanded,
             || {
                 if expanded() {
                     "Hide quoted text"
@@ -228,7 +222,6 @@ fn bar(heading: String) -> impl IntoElement {
                 }
                 .to_owned()
             },
-            || true,
             Size::Row,
             toggle,
         ))
