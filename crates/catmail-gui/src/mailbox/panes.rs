@@ -84,7 +84,7 @@ pub fn panes() -> impl IntoElement {
     // Whether the right pane is in, and whether the list is laid out beside it: a row
     // selected changes the list first, then the pane (`list::follow_selection`).
     let open = list::pane_open;
-    let list_open = list::reading;
+    let list_open = list::list_open;
     // The pane last open: it stays while it slides out.
     let last = stored(None::<Pane>);
     let shown = computed(move || match pane.get() {
@@ -111,11 +111,7 @@ pub fn panes() -> impl IntoElement {
     };
     // How wide all the panes are, for placing the right pane past their trailing edge.
     let total = signal(None::<f32>);
-    let measure_total = move |frame: &Bounds<Points>| {
-        if total.get_untracked() != Some(frame.size.width.0) {
-            total.set(Some(frame.size.width.0));
-        }
-    };
+    let measure_total = move |frame: &Bounds<Points>| total.set(Some(frame.size.width.0));
     let opened_left = move || sidebar_width() + list_width();
     // Where the right pane is, open or not: closed, just past the window's trailing edge,
     // as wide as it was when last open (as wide as it would be open, before it first
@@ -123,19 +119,24 @@ pub fn panes() -> impl IntoElement {
     // frame before, and closing slides it back out, the list widening only once it is
     // out (`list::follow_selection`). Moved, never resized: its web view would lay its page
     // out again at every width it passed (it does once, if the window changed while it
-    // was closed). Until the panes are first measured, where it goes when open.
-    let placement = move || match (open(), total.get()) {
-        (false, Some(total)) => Some((
-            total,
-            frozen.get().unwrap_or((total - opened_left()).max(0.0)),
-        )),
-        _ => None,
-    };
+    // was closed). Until the panes are first measured, where it goes when open. One memo
+    // for both panes, tracking only what the closed place depends on.
+    let placement = computed(move || {
+        if open() {
+            return None;
+        }
+        total.get().map(|total| {
+            let width = frozen
+                .get()
+                .unwrap_or_else(|| (total - opened_left()).max(0.0));
+            (total, width)
+        })
+    });
     let right_pane = move |pane: View| {
         pane.absolute()
             .top(px(0.0))
             .bottom(px(0.0))
-            .style_with(move |s| match placement() {
+            .style_with(move |s| match placement.get() {
                 Some((left, width)) => s.left(px(left)).w(px(width)),
                 None => s.left(px(opened_left())).right(px(0.0)),
             })

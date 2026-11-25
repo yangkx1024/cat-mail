@@ -30,6 +30,22 @@ fn opens_a_message_from_the_list_and_marks_it_read() {
 }
 
 #[test]
+fn escape_pressed_twice_still_lays_the_list_out_alone() {
+    let mail = TestMail::start();
+    let (_desktop, mut main) = mail.open();
+    let app = &mut main.app;
+    app.wait_for("3 unread").unwrap();
+    let alone = app.screen().layout("text:Quarterly report").unwrap();
+
+    open_message(app, "Lunch on Friday");
+    assert_ne!(app.screen().layout("text:Quarterly report").unwrap(), alone);
+    // The second selects nothing again while the pane slides out.
+    app.press_keys(&["escape", "escape"]).unwrap();
+    app.wait(std::time::Duration::from_secs(1)).unwrap();
+    assert_eq!(app.screen().layout("text:Quarterly report").unwrap(), alone);
+}
+
+#[test]
 fn a_message_still_downloading_shows_its_header_and_that_it_loads() {
     let mail = TestMail::start();
     let (_desktop, mut main) = mail.open();

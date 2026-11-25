@@ -13,10 +13,8 @@ use crate::icons::{Icon, icon};
 const BASE_MS: f32 = 240.0;
 /// Leaving, which is faster than coming.
 const FAST_MS: f32 = 180.0;
-/// How long nsh's animated scrolls run (`ANIMATION` in nsh-platform-macos'
-/// `scroll.rs`), with a frame to spare. Checked on each nsh upgrade (gui.md, "升级 nsh
-/// 时核对").
-const SCROLL_MS: f32 = 300.0 + 20.0;
+/// How long a glide ([`GLIDE`]) runs, with a frame to spare.
+const GLIDE_OVER_MS: f32 = BASE_MS + 20.0;
 
 /// How the layout's changes glide: frames move between where they were and where they
 /// go (ease-in-out), what comes in fades in.
@@ -80,12 +78,26 @@ pub fn indicators_shown() -> bool {
     !global::<HiddenIndicators>().with(|h| h.hidden)
 }
 
+/// Whether rows read again glide ([`glide_rows`]): not while [`still_rows`] holds them.
+#[derive(Clone, Copy, Default, PartialEq)]
+struct RowsStill(bool);
+
+/// From now until `still_rows(false)`, rows read again don't glide ([`glide_rows`]): a
+/// list changes its shape at once, with a scroll that keeps a row where it was. A glide in
+/// that commit would animate the change too, under the scroll, which nsh doesn't move the
+/// rows along with (`list::follow_selection`): the list was left scrolled past its start.
+/// The commits around it may glide as usual, the pane's too ([`glide_when`]).
+pub fn still_rows(still: bool) {
+    global::<RowsStill>().set(RowsStill(still));
+}
+
 /// The rows of a list change in the next commit (messages arriving, going away): the
 /// rows that stay slide to their new places, the ones that come fade in, the ones that
 /// go fade out. A glide asked for later in the same turn ([`glide_when`]) takes its
-/// place: nsh animates a commit with the last one.
+/// place: nsh animates a commit with the last one. Nothing while [`still_rows`] holds
+/// them.
 pub fn glide_rows() {
-    if reduce_motion() {
+    if reduce_motion() || global::<RowsStill>().get_untracked().0 {
         return;
     }
     animate_layout(LayoutAnimation {
@@ -94,18 +106,17 @@ pub fn glide_rows() {
     });
 }
 
-/// Each time `on` changes, the whole commit's layout glides: a list among it slides its
-/// rows only so (nsh-core's `list_motion.rs` keeps them where they showed as the list
-/// scrolls).
+/// Each time `on` changes, the whole commit's layout glides (the right pane sliding in or
+/// out, the list beside it keeping its shape: `list::follow_selection`).
 pub fn glide_when(on: impl Fn() -> bool + 'static) {
     on_toggle(on, || {
         if reduce_motion() {
             return;
         }
-        // The list's, which moves and scrolls; the sidebar's while at it.
-        hide_indicators(BASE_MS.max(SCROLL_MS));
+        // The list's and the sidebar's, beside what moves.
+        hide_indicators(GLIDE_OVER_MS);
         animate_layout(GLIDE);
-        meter_frames("glide", BASE_MS.max(SCROLL_MS));
+        meter_frames("glide", GLIDE_OVER_MS);
     });
 }
 
@@ -113,15 +124,15 @@ pub fn glide_when(on: impl Fn() -> bool + 'static) {
 /// which glides nothing.
 pub async fn glide_over() {
     if !reduce_motion() {
-        // A frame to spare.
-        timer(Duration::from_millis(BASE_MS as u64 + 20)).await;
+        timer(Duration::from_millis(GLIDE_OVER_MS as u64)).await;
     }
 }
 
 /// With `CATMAIL_GUI_FRAMES` set: logs the display frames of the next `ms` (an
 /// animation's): how long its first frame took to come, the gaps between the frames, and
 /// how many were missed (a gap of more than one and a half of the usual one), to compare
-/// changes by numbers rather than by eye. In the log file (`catmail_gui` at info).
+/// changes by numbers rather than by eye. In the log file (`catmail_gui` at info) and on
+/// stderr.
 fn meter_frames(what: &'static str, ms: f32) {
     if std::env::var_os("CATMAIL_GUI_FRAMES").is_none() {
         return;
@@ -145,26 +156,20 @@ fn meter_frames(what: &'static str, ms: f32) {
         let Some(stats) = FrameStats::of(gaps) else {
             return;
         };
-        tracing::info!(
-            what,
-            frames = frames.len(),
-            first_ms = format!("{first_ms:.1}"),
-            fps = format!("{:.1}", stats.fps),
-            p50_ms = format!("{:.1}", stats.p50),
-            p95_ms = format!("{:.1}", stats.p95),
-            max_ms = format!("{:.1}", stats.max),
-            missed = stats.missed,
-            "animation frames"
-        );
-        eprintln!(
-            "[frames] {what}: {} frames, first {first_ms:.1} ms, {:.1} fps, gap p50 {:.1} / p95 {:.1} / max {:.1} ms, {} missed",
+        let FrameStats {
+            fps,
+            p50,
+            p95,
+            max,
+            missed,
+        } = stats;
+        let summary = format!(
+            "{} frames, first {first_ms:.1} ms, {fps:.1} fps, \
+             gap p50 {p50:.1} / p95 {p95:.1} / max {max:.1} ms, {missed} missed",
             frames.len(),
-            stats.fps,
-            stats.p50,
-            stats.p95,
-            stats.max,
-            stats.missed,
         );
+        tracing::info!(what, "animation frames: {summary}");
+        eprintln!("[frames] {what}: {summary}");
     });
 }
 

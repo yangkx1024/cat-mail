@@ -13,8 +13,8 @@ use crate::icons::{Icon, icon};
 use crate::mailbox::commands;
 
 use super::{
-    AnchorRef, Anchored, Checked, LabelNames, Selected, ShownIn, edit_selected_draft, open,
-    reading, toggle_checked,
+    AnchorRef, Anchored, Checked, LabelNames, Selected, ShownIn, edit_selected_draft, list_open,
+    open, toggle_checked,
 };
 
 /// The row the pointer is on. One for the list rather than one per row: a cell that
@@ -52,6 +52,10 @@ pub fn item(at: Position) -> impl IntoElement {
     })
 }
 
+/// The margin above and below a row's box, inside its cell (`follow_selection` measures
+/// the cell around it).
+pub(super) const ROW_MARGIN_Y: f32 = 2.0;
+
 /// A row's box: selected or under the pointer, it has the list's colors behind it; pressed,
 /// it opens.
 fn row_box(item: Memo<Option<Line>>) -> View {
@@ -63,36 +67,27 @@ fn row_box(item: Memo<Option<Line>>) -> View {
         })
     });
     let id = move || id.get();
-    let selected = move || {
+    // Whether `other` is this row.
+    let is = move |other: Option<RowId>| {
         let id = id();
-        id.is_some() && global::<Selected>().with(|s| s.0) == id
+        id.is_some() && other == id
     };
-    let hovered = move || {
-        let id = id();
-        id.is_some() && global::<Hovered>().with(|h| h.0) == id
-    };
-    let anchored = move || {
-        let id = id();
-        id.is_some() && global::<Anchored>().with(|a| a.0) == id
-    };
+    let selected = move || is(global::<Selected>().with(|s| s.0));
+    let hovered = move || is(global::<Hovered>().with(|h| h.0));
+    let anchored = move || is(global::<Anchored>().with(|a| a.0));
     // Apart from the next row, so a selected row's background and a hovered neighbour's
     // don't touch (the list puts no gap between rows).
     view()
         // Where the row opened or closed shows, for keeping it there (`follow_selection`).
         .child(when(anchored, || {
-            let marker = view()
-                .absolute()
-                .top(px(0.0))
-                .left(px(0.0))
-                .right(px(0.0))
-                .bottom(px(0.0));
+            let marker = view().absolute().inset_0();
             match global::<AnchorRef>().with_untracked(|r| r.0) {
                 Some(anchor) => marker.element_ref(&anchor),
                 None => marker,
             }
         }))
         .rounded(px(8.0))
-        .my(px(2.0))
+        .my(px(ROW_MARGIN_Y))
         .bg(move || {
             if selected() {
                 crate::theme::list_active()
@@ -119,8 +114,8 @@ fn row_box(item: Memo<Option<Line>>) -> View {
 }
 
 fn message_row(item: Memo<Option<Line>>) -> impl IntoElement {
-    // Only a change between reading and not makes the row again, not each selection.
-    let reading = computed(reading);
+    // Only a change of the list's shape makes the row again, not each selection.
+    let list_open = computed(list_open);
     let message = computed(move || match item.get() {
         Some(Line::Row(Row::Message(m))) => Some(m),
         _ => None,
@@ -169,7 +164,7 @@ fn message_row(item: Memo<Option<Line>>) -> impl IntoElement {
             }))
         })
         .child(dynamic(move || {
-            if reading.get() {
+            if list_open.get() {
                 // The subject under the sender, as the reading pane leaves the rows less
                 // room; the avatar as on one line.
                 view()
@@ -379,8 +374,8 @@ fn avatar(message: Memo<Option<MessageSummary>>) -> View {
 }
 
 fn draft_row(item: Memo<Option<Line>>) -> impl IntoElement {
-    // Only a change between reading and not makes the row again, not each selection.
-    let reading = computed(reading);
+    // Only a change of the list's shape makes the row again, not each selection.
+    let list_open = computed(list_open);
     let draft = computed(move || match item.get() {
         Some(Line::Row(Row::Draft(d))) => Some(d),
         _ => None,
@@ -411,7 +406,7 @@ fn draft_row(item: Memo<Option<Line>>) -> impl IntoElement {
         )
     };
     row_box(item).child(dynamic(move || {
-        if reading.get() {
+        if list_open.get() {
             view()
                 .px(px(8.0))
                 .py(px(8.0))
