@@ -25,7 +25,7 @@ use crate::icons::{Icon, icon};
 use crate::mailbox::compose;
 use crate::mailbox::folder_commands::{folder_menu, rename_selected};
 use crate::mailbox::list;
-use crate::motion::{self, chevron};
+use crate::motion;
 use crate::tasks::in_view;
 use crate::toast::report;
 use crate::{chrome, form, settings};
@@ -378,6 +378,12 @@ fn heading(group: ReadSignal<Group>) -> View {
     let note = move || group.with(|g| g.heading.as_ref().and_then(|h| h.note));
     let open = heading(|h| h.open);
     let first = heading(|h| h.first);
+    let toggle = move || {
+        if let Some(account) = account() {
+            let open = !open();
+            global::<Folds>().update(|f| f.set_account_open(account, open));
+        }
+    };
     view()
         .pt(move || px(if first() { 0.0 } else { 8.0 }))
         .child(when(first, || title("Accounts")))
@@ -390,12 +396,9 @@ fn heading(group: ReadSignal<Group>) -> View {
                 .px(px(8.0))
                 .rounded(px(6.0))
                 .hover(|s| s.bg(row_background(|| false, true)))
-                .on_press(move || {
-                    if let Some(account) = account() {
-                        let open = !open();
-                        global::<Folds>().update(|f| f.set_account_open(account, open));
-                    }
-                })
+                // The whole row folds the account, which has nothing else to do on a
+                // press; its chevron is a folder's, in the same lane.
+                .on_press(toggle)
                 .on_context_menu(move |_: &ContextMenuEvent| {
                     if let Some(account) = account() {
                         folder_menu(account, None);
@@ -413,7 +416,24 @@ fn heading(group: ReadSignal<Group>) -> View {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(move || theme().sidebar_foreground),
                 )
-                .child(chevron(open, 12.0).text_color(move || theme().muted_foreground)),
+                .child(
+                    fold_button(
+                        open,
+                        move || {
+                            let email = group
+                                .with(|g| g.heading.as_ref().map(|h| h.email.clone()))
+                                .unwrap_or_default();
+                            if open() {
+                                format!("Collapse {email}")
+                            } else {
+                                format!("Expand {email}")
+                            }
+                        },
+                        Size::Row,
+                        toggle,
+                    )
+                    .mr(px(-4.0)),
+                ),
         )
         .child(when(
             move || note().is_some(),
@@ -464,9 +484,13 @@ fn place_row(item: ReadSignal<Item>) -> View {
         move || item.with(|i| i.label.clone()),
         selected,
     )
-    .on_press(move || {
+    // A press selects the folder; a double press folds it too, as its chevron does.
+    .on_press(move |press: &PressEvent| {
         if let Some(place) = place() {
             select(Some(place));
+        }
+        if press.clicks == 2 && item.with_untracked(|i| i.open.is_some()) {
+            toggle_folder(&item.with_untracked(|i| i.key.clone()));
         }
     })
     .on_context_menu(move |_: &ContextMenuEvent| {
