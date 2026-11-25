@@ -37,6 +37,6 @@ jobs:
         run: nix flake check
 
       # The dev shell is the documented way to build; make sure it still provides a
-      # working toolchain.
+      # working toolchain, and the structure check.
       - name: Dev shell
-        run: nix develop -c cargo --version
+        run: nix develop -c sh -c 'cargo --version && command -v deslop-please'

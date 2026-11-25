@@ -44,7 +44,8 @@ jobs:
   # `.deslop-please.allow`; anything new fails. A run indexes one configuration, and code
   # behind another OS's `cfg` isn't in it, so `scripts/deslop.sh` checks each OS with
   # `--target`, from this one host: the way the list is written, from any host. The
-  # version is pinned, as its findings, and so the list, follow it.
+  # version is pinned, as its findings, and so the list, follow it; `flake.nix` builds the
+  # same one for the dev shell.
   structure:
     name: Module structure
     runs-on: ubuntu-latest

@@ -29,6 +29,17 @@
             "CARGO_TARGET_${pkgs.stdenv.hostPlatform.rust.cargoEnvVarTarget}_RUSTFLAGS" =
               "-C link-arg=-fuse-ld=mold";
           };
+          # Checks module structure (scripts/deslop.sh). Not in nixpkgs. The version CI
+          # installs (`structure` in ci.yml): the list of findings follows it.
+          deslop-please = pkgs.rustPlatform.buildRustPackage rec {
+            pname = "deslop-please";
+            version = "0.1.4";
+            src = pkgs.fetchCrate {
+              inherit pname version;
+              hash = "sha256-H0amaSCPuDRHjYh9SX5qgQGXWHT32Ft0hfT5rF0uwco=";
+            };
+            cargoHash = "sha256-f2fNM2ZklAofTsizFPzKeWVjzbdN3xN62HDiRKYzNRE=";
+          };
           default = pkgs.mkShell {
             packages =
               with pkgs;
@@ -39,6 +50,7 @@
                 rustfmt
                 rust-analyzer
                 cargo-deny
+                deslop-please
                 mold
                 pkg-config
                 sqlite-interactive
