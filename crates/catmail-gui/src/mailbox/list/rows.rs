@@ -13,7 +13,8 @@ use crate::icons::{Icon, icon};
 use crate::mailbox::commands;
 
 use super::{
-    Checked, LabelNames, Selected, ShownIn, edit_selected_draft, open, reading, toggle_checked,
+    AnchorRef, Anchored, Checked, LabelNames, Selected, ShownIn, edit_selected_draft, open,
+    reading, toggle_checked,
 };
 
 /// The row the pointer is on. One for the list rather than one per row: a cell that
@@ -70,9 +71,26 @@ fn row_box(item: Memo<Option<Line>>) -> View {
         let id = id();
         id.is_some() && global::<Hovered>().with(|h| h.0) == id
     };
+    let anchored = move || {
+        let id = id();
+        id.is_some() && global::<Anchored>().with(|a| a.0) == id
+    };
     // Apart from the next row, so a selected row's background and a hovered neighbour's
     // don't touch (the list puts no gap between rows).
     view()
+        // Where the row opened or closed shows, for keeping it there (`follow_selection`).
+        .child(when(anchored, || {
+            let marker = view()
+                .absolute()
+                .top(px(0.0))
+                .left(px(0.0))
+                .right(px(0.0))
+                .bottom(px(0.0));
+            match global::<AnchorRef>().with_untracked(|r| r.0) {
+                Some(anchor) => marker.element_ref(&anchor),
+                None => marker,
+            }
+        }))
         .rounded(px(8.0))
         .my(px(2.0))
         .bg(move || {

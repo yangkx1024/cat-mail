@@ -87,6 +87,30 @@ fn reads<T>(f: impl FnOnce(&mut ListModel, &Listing) -> T) -> T {
 #[derive(Clone, Default)]
 struct ListRef(Option<ElementRef>);
 
+/// Whether the list is laid out beside the right pane: narrowed to its column, its rows
+/// in two lines. Opening, it changes before [`PaneOpen`]; closing, after
+/// ([`follow_selection`]).
+#[derive(Clone, Copy, Default, PartialEq)]
+struct ListOpen(bool);
+
+/// Whether the right pane is in ([`follow_selection`]).
+#[derive(Clone, Copy, Default, PartialEq)]
+struct PaneOpen(bool);
+
+/// Whether the list is switching its shape ([`follow_selection`]), from the selection
+/// toggling until the commit that switches it has gone: rows read again meanwhile don't
+/// glide ([`glides`]).
+#[derive(Clone, Copy, Default, PartialEq)]
+struct Switching(bool);
+
+/// The row last opened or closed, which [`follow_selection`] measures: a view in it
+/// carries [`AnchorRef`].
+#[derive(Clone, Copy, Default, PartialEq)]
+pub(super) struct Anchored(pub(super) Option<RowId>);
+
+#[derive(Clone, Default)]
+pub(super) struct AnchorRef(pub(super) Option<ElementRef>);
+
 #[derive(Clone, Default)]
 struct SearchRef(Option<ElementRef>);
 
@@ -96,9 +120,14 @@ pub fn focus_search() {
     }
 }
 
-/// Whether the reading pane is open: a row is selected.
+/// Whether the list is laid out beside the right pane ([`ListOpen`]).
 pub fn reading() -> bool {
-    global::<Selected>().with(|s| s.0.is_some())
+    global::<ListOpen>().get().0
+}
+
+/// Whether the right pane is in ([`PaneOpen`]).
+pub fn pane_open() -> bool {
+    global::<PaneOpen>().get().0
 }
 
 /// Shows `source` from the top, or nothing.
@@ -223,10 +252,14 @@ fn show_loaded(loaded: Loaded) {
 }
 
 /// Whether `rows` glide in: the rows shown read again, with messages come or gone (new
-/// mail, one moved or deleted), rather than a source's first rows. Should the reading
-/// pane open or close with them, its glide replaces this one (`motion::glide_rows`).
+/// mail, one moved or deleted), rather than a source's first rows. Not while the list
+/// switches its shape: a glide in the commit that switches it would animate the switch
+/// too, under the scroll that keeps the row opened in place, which nsh doesn't move the
+/// rows along with (`follow_selection`); the list was left scrolled past its start.
 fn glides(rows: &Rows) -> bool {
-    matches!(rows, Rows::Replace(..)) && !global::<Listing>().with_untracked(Listing::is_empty)
+    matches!(rows, Rows::Replace(..))
+        && !global::<Listing>().with_untracked(Listing::is_empty)
+        && !global::<Switching>().get_untracked().0
 }
 
 /// For looking at the reading pane without a mouse (screenshots): the row
@@ -485,26 +518,7 @@ pub fn list_column() -> impl IntoElement {
         bind_command_keys();
     });
     follow_the_calendar();
-    // Opening a row or closing it changes every row's height: the one opened, or just
-    // closed, would move away from under the pointer.
-    let last_selected = stored(None::<RowId>);
-    effect(move || {
-        let selected = global::<Selected>().with(|s| s.0);
-        let before = last_selected.replace(selected);
-        if selected.is_some() == before.is_some() {
-            return;
-        }
-        let ix = selected
-            .or(before)
-            .and_then(|row| global::<Listing>().with_untracked(|l| l.line_of(row)));
-        if let Some(ix) = ix {
-            // Scrolling along as the rows glide to their new shape (`motion::glide_when`):
-            // a jump would move them all at once first. nsh keeps rows in place only for
-            // the scrolls it makes itself.
-            let animated = !reduce_motion();
-            list.scroll_to_index(ix as u32, Percentage(0.5), px(0.0), animated);
-        }
-    });
+    follow_selection(list);
     view().flex_1().min_w(px(0.0)).child(header()).child(
         virtual_list(move || global::<Listing>().with(Listing::len), item)
             .content_padding_x(px(12.0))
@@ -536,6 +550,113 @@ pub fn list_column() -> impl IntoElement {
             .element_ref(&list)
             .flex_1(),
     )
+}
+
+/// Lays the panes out for the selection, keeping the row opened (or closed) where it shows
+/// on the list though every row changes its height.
+///
+/// The list changes at once, not gliding: its rows in their new shape and a scroll that
+/// puts the row back where it was, in one commit, so nothing on the list moves but the
+/// rows around it. Opening, the list first, then (a frame later) the right pane sliding
+/// in over the room the list left it; closing, the pane sliding out first, then (once it
+/// is out) the list: the list widening while the pane slides would run under it. Not the rows gliding with a scroll: nsh moves them along
+/// with the scrolls it makes itself (`list_motion.rs`), not with a scroll command, which
+/// either jumps them under the glide or (animated, on macOS) runs on a curve of its own,
+/// moved along again by the list's own scroll in the same batch, so the row wandered
+/// before it settled whatever was tried.
+///
+/// The row's place is measured first (a view in it carries [`AnchorRef`], laid out a frame
+/// after it is made): its top stays there, or, near the viewport's bottom, its bottom, so
+/// that it grows upwards and stays in sight. A row partly out of sight comes into it.
+/// How near the viewport's bottom a row keeps its bottom rather than its top.
+const ROOM_TO_GROW: f32 = 40.0;
+
+fn follow_selection(list: ElementRef) {
+    let anchor = element_ref();
+    global::<AnchorRef>().set(AnchorRef(Some(anchor)));
+    let last_selected = stored(None::<RowId>);
+    // Which toggle is under way: one toggled back before it lands drops it.
+    let toggles = stored(0_u64);
+    effect(move || {
+        let selected = global::<Selected>().with(|s| s.0);
+        let before = last_selected.replace(selected);
+        let open = selected.is_some();
+        if open == before.is_some() {
+            return;
+        }
+        let toggle = toggles.get().wrapping_add(1);
+        toggles.replace(toggle);
+        global::<Switching>().set(Switching(true));
+        let row = selected.or(before);
+        if let Some(row) = row {
+            global::<Anchored>().set(Anchored(Some(row)));
+        }
+        spawn(async move {
+            if open {
+                // The view in the row, made with this turn's commit, is laid out in the
+                // next.
+                next_frame().await;
+            } else {
+                // The pane out first, the list keeping its shape beside it.
+                global::<PaneOpen>().set(PaneOpen(false));
+                motion::glide_over().await;
+            }
+            let (at, of) = (anchor.measure().await, list.measure().await);
+            if toggles.get() != toggle {
+                return;
+            }
+            let ix = row.and_then(|row| global::<Listing>().with_untracked(|l| l.line_of(row)));
+            global::<ListOpen>().set(ListOpen(open));
+            if let (Some(at), Some(of), Some(ix)) = (at, of, ix) {
+                // The cell's, around the row's margins (`rows::row_box`).
+                let top = at.page.y.0 - 2.0 - of.page.y.0;
+                let bottom = top + at.frame.size.height.0 + 4.0;
+                let viewport = of.frame.size.height.0;
+                // Its top where it was, or its bottom near the viewport's: a row there
+                // grows upwards, staying in sight (a subject on two lines adds 34 points).
+                let (position, offset) = if bottom + ROOM_TO_GROW <= viewport {
+                    (0.0, top.max(0.0))
+                } else {
+                    (1.0, (bottom - viewport).min(0.0))
+                };
+                list.scroll_to_index(ix as u32, Percentage(position), px(offset), false);
+            }
+            // The switch's commit gone, rows read again may glide.
+            next_frame().await;
+            if toggles.get() != toggle {
+                return;
+            }
+            global::<Switching>().set(Switching(false));
+            resync_start(list).await;
+            if toggles.get() != toggle {
+                return;
+            }
+            if open {
+                // Then the pane in, beside the list in its new shape.
+                global::<PaneOpen>().set(PaneOpen(true));
+            }
+        });
+    });
+}
+
+/// Sends the list's place at its start to the platform again, for the two frames after
+/// [`follow_selection`] scrolled it, as a plain offset. ⚠️ A scroll to a row that comes
+/// to rest at the list's start (clamped there, closing near the top) leaves nsh 0.7
+/// following it a frame on from a stale offset: the core sends a `ScrollBy` (-144 points,
+/// measured) that the platform, already at the start, applies past it (macOS doesn't
+/// clamp a `ScrollBy`), then puts itself back at the start without telling the platform,
+/// which stays scrolled before the first row: a blank band above it. Sent again, the
+/// start is where the platform goes too, and the plain offset ends the core's following.
+/// Nothing moves when they agree. Until longbridge/nsh#3235 is fixed.
+async fn resync_start(list: ElementRef) {
+    for _ in 0..2 {
+        if let Some(at) = list.measure_scroll_position().await
+            && at.index == 0
+        {
+            list.scroll_to_offset(px(at.offset.0.max(0.0)), false);
+        }
+        next_frame().await;
+    }
 }
 
 /// Puts the rows under the days of the user's zone again when it changes, and when a day

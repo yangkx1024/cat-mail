@@ -109,6 +109,15 @@ pub fn glide_when(on: impl Fn() -> bool + 'static) {
     });
 }
 
+/// Waits until a glide asked for now ([`glide_when`]) is over: at once with reduced motion,
+/// which glides nothing.
+pub async fn glide_over() {
+    if !reduce_motion() {
+        // A frame to spare.
+        timer(Duration::from_millis(BASE_MS as u64 + 20)).await;
+    }
+}
+
 /// With `CATMAIL_GUI_FRAMES` set: logs the display frames of the next `ms` (an
 /// animation's): how long its first frame took to come, the gaps between the frames, and
 /// how many were missed (a gap of more than one and a half of the usual one), to compare
