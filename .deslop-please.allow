@@ -1,6 +1,6 @@
-# Existing architectural debt suppressed by `deslop-please --allow`, on every OS CI
-# checks; written by scripts/update-deslop-allow.sh. Fixing an entry never fails CI;
-# new issues not listed here fail.
+# Existing architectural debt suppressed by `deslop-please --allow`, on every OS;
+# written by `scripts/deslop.sh --update`. Fixing an entry never fails CI; new
+# issues not listed here fail.
 field-leak catmail_cli::cmd::compose::Fields::from
 field-leak catmail_core::engine::Engine::blobs
 field-leak catmail_core::engine::Engine::downloading

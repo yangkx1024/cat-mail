@@ -42,25 +42,14 @@ jobs:
   # Module structure (deslop-please: module cycles, tangles, field leaks, shallow modules,
   # wide directories, long files). The debt that was there when it came in is listed in
   # `.deslop-please.allow`; anything new fails. A run indexes one configuration, and code
-  # behind another OS's `cfg` isn't in it, so each OS checks its own; the list holds what
-  # any of them finds (`scripts/update-deslop-allow.sh`). The version is pinned, as its
-  # findings, and so the list, follow it.
+  # behind another OS's `cfg` isn't in it, so `scripts/deslop.sh` checks each OS with
+  # `--target`, from this one host: the way the list is written, from any host. The
+  # version is pinned, as its findings, and so the list, follow it.
   structure:
-    name: Module structure (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    name: Module structure
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-
-      # Indexing runs the build scripts, which look for these on Linux.
-      - name: Install GUI libraries
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgtk-4-dev libwebkitgtk-6.0-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -75,7 +64,7 @@ jobs:
           tool: deslop-please@0.1.4
 
       - name: deslop-please
-        run: deslop-please --allow .deslop-please.allow
+        run: scripts/deslop.sh
 
   # The core must stay platform-neutral, so lint and test on every target OS from the
   # start, even though only Linux is shipped for now. Pull requests run the tests on Linux

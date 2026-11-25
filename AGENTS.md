@@ -34,15 +34,14 @@ must pass. Say so explicitly if any of them could not be run.
 
 Module structure is checked by [`deslop-please`](https://github.com/deterministic-machines/deslop-please)
 (`cargo install deslop-please --version 0.1.4`; it needs the `rust-analyzer` component):
-`deslop-please --allow .deslop-please.allow`. The list holds the debt that was there
-when the check came in; a new finding fails CI. Fix it from the design, not by moving
-code until the finding goes: which layer each module belongs to, why other code needs a
-type's fields or a module's functions, and what narrower interface could hide them. Don't
-add new findings to the list. CI runs it on Linux, macOS and Windows, as code behind
-another OS's `cfg` isn't indexed: check another OS from any host with
-`--target x86_64-unknown-linux-gnu` or `--target x86_64-pc-windows-msvc`. When a fix
-removes entries, regenerate the list with `scripts/update-deslop-allow.sh` (every OS's
-findings, merged), not `--update-allow`, which would keep only the host's.
+`scripts/deslop.sh` runs it for macOS, Linux and Windows from any host (`--target`: code
+behind another OS's `cfg` isn't indexed otherwise), against `.deslop-please.allow`. The
+list holds the debt that was there when the check came in; a new finding fails CI. Fix it
+from the design, not by moving code until the finding goes: which layer each module
+belongs to, why other code needs a type's fields or a module's functions, and what
+narrower interface could hide them. Don't add new findings to the list. When a fix
+removes entries, write it again with `scripts/deslop.sh --update` (every OS's findings,
+merged), not `deslop-please --update-allow`, which would keep only the host's.
 
 CI (`.github/workflows/ci.yml`) runs clippy on Linux, macOS and Windows; pull requests
 run the tests on Linux and macOS, and `main` runs them on all three. A Windows failure
