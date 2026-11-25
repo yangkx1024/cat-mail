@@ -367,7 +367,8 @@ fn made_token(made: Made) -> impl IntoElement {
         ))
 }
 
-/// Copies what `text_` gives, and shows it did: a check, for a moment.
+/// Copies what `text_` gives, and shows it did: a check, for a moment. No check when the
+/// system clipboard refused it (Linux can't tell, and gets the check).
 fn copy_button(text_: impl Fn() -> String + 'static) -> impl IntoElement {
     let copied = signal(false);
     // Each press restarts the moment: only the last press's timer ends it.
@@ -384,11 +385,15 @@ fn copy_button(text_: impl Fn() -> String + 'static) -> impl IntoElement {
         || true,
         Size::Row,
         move || {
-            set_clipboard(text_());
-            copied.set(true);
+            let written = set_clipboard(text_());
             presses.update(|n| *n += 1);
             let this = presses.get_untracked();
             spawn(async move {
+                if written.await == ClipboardWrite::Failed {
+                    copied.try_set(false);
+                    return;
+                }
+                copied.try_set(true);
                 timer(COPIED_SHOWN).await;
                 if presses.try_get() == Some(this) {
                     copied.try_set(false);

@@ -20,11 +20,10 @@ all-features = true
 # unsound only covers direct dependencies by default; unmaintained already covers all.
 unsound = "all"
 ignore = [
-    # Unmaintained, no known vulnerability, and only reachable through resvg's text
-    # (usvg's fonts and shaping: nsh-core's SVGs, the tray's badge); they go when it
-    # drops them.
-    { id = "RUSTSEC-2026-0192", reason = "ttf-parser, via resvg's text" },
-    { id = "RUSTSEC-2026-0206", reason = "rustybuzz, via resvg's text" },
+    # Unmaintained, no known vulnerability: nsh-core and nsh-macros read fonts with it
+    # (resvg moved to read-fonts and HarfRust in 0.48, and took rustybuzz with it). It
+    # goes when nsh drops it.
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser, via nsh-core" },
     # zbus_names, zvariant and zvariant_derive were merged into zbus 6; we get zbus 5
     # through ksni (the Linux tray) and keyring's Secret Service store, until both move
     # to zbus 6.

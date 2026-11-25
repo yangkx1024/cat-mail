@@ -23,7 +23,6 @@ pub fn run(started: impl FnOnce() + 'static) -> u8 {
     let started = RefCell::new(Some(started));
     app.connect_startup(move |app| {
         own_app_id(app.upcast_ref());
-        style_menus();
         if let Some(started) = started.borrow_mut().take() {
             started();
         }
@@ -64,29 +63,6 @@ fn own_app_id(app: &gtk::gio::Application) {
         gtk::gio::BusNameOwnerFlags::DO_NOT_QUEUE,
         |_, _| {},
         |_, name| tracing::info!(name, "the app id is another instance's"),
-    );
-}
-
-/// ⚠️ The check in a menu (`MenuItem::checked`) was a wide "V" rather than a check. nsh
-/// draws the indicators of its menus (`gtk::PopoverMenu`) as boxes with two borders, turned
-/// 45°; the check's is 4×8px. But they are GTK's built-in icons, which are never smaller
-/// than their `-gtk-icon-size` (16px), so the box was a square. Each box's icon size is its
-/// width here, above nsh's own menu style sheet, until nsh has it (longbridge/nsh#2383).
-const MENU_CSS: &str = "\
-popover.menu modelbutton check, popover.menu modelbutton radio { -gtk-icon-size: 14px; }
-popover.menu modelbutton arrow, popover.menu modelbutton check:checked { -gtk-icon-size: 4px; }
-popover.menu modelbutton radio:checked { -gtk-icon-size: 6px; }";
-
-fn style_menus() {
-    let Some(display) = gtk::gdk::Display::default() else {
-        return;
-    };
-    let provider = gtk::CssProvider::new();
-    provider.load_from_string(MENU_CSS);
-    gtk::style_context_add_provider_for_display(
-        &display,
-        &provider,
-        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
     );
 }
 
@@ -284,7 +260,7 @@ mod tests {
     use std::rc::Rc;
     use std::time::Duration;
 
-    use nsh_platform_linux::gtk4::{self as gtk, gio, glib, prelude::*};
+    use nsh_platform_linux::gtk4::{gio, glib, prelude::*};
 
     use super::own_app_id;
 
@@ -374,56 +350,5 @@ mod tests {
                 .unwrap();
         });
         assert_eq!(clicked.borrow().as_deref(), Some("new-mail/1/8"));
-    }
-
-    /// A menu's check is the box nsh draws it in, 4×8px, not a square of GTK's icon size.
-    /// GTK needs a display: without one (as in CI) the test does not run.
-    #[test]
-    fn a_menu_check_keeps_its_shape() {
-        if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
-            return;
-        }
-        gtk::init().expect("GTK opens the display");
-        // The check's box in nsh's menu style sheet, which only nsh's app loads.
-        let nsh = gtk::CssProvider::new();
-        nsh.load_from_string(
-            "popover.menu modelbutton check:checked { min-width: 4px; min-height: 8px; \
-             margin: 0; padding: 0; border: 0; }",
-        );
-        gtk::style_context_add_provider_for_display(
-            &gtk::gdk::Display::default().unwrap(),
-            &nsh,
-            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
-        super::style_menus();
-        let actions = gio::SimpleActionGroup::new();
-        actions.add_action(&gio::SimpleAction::new_stateful(
-            "on",
-            None,
-            &true.to_variant(),
-        ));
-        let model = gio::Menu::new();
-        model.append(Some("Read only"), Some("t.on"));
-        let menu = gtk::PopoverMenu::from_model(Some(&model));
-        menu.insert_action_group("t", Some(&actions));
-        let check = find(menu.upcast_ref(), "check").expect("the item's check");
-        assert!(check.state_flags().contains(gtk::StateFlags::CHECKED));
-        let (width, ..) = check.measure(gtk::Orientation::Horizontal, -1);
-        let (height, ..) = check.measure(gtk::Orientation::Vertical, -1);
-        assert_eq!((width, height), (4, 8));
-    }
-
-    fn find(widget: &gtk::Widget, name: &str) -> Option<gtk::Widget> {
-        if widget.css_name() == name {
-            return Some(widget.clone());
-        }
-        let mut child = widget.first_child();
-        while let Some(widget) = child {
-            if let Some(found) = find(&widget, name) {
-                return Some(found);
-            }
-            child = widget.next_sibling();
-        }
-        None
     }
 }

@@ -447,13 +447,17 @@ mod tests {
         );
         let state = rich.session.state();
         let end = state.selection().from();
-        let mut typed = None;
+        // The typed text, then the rule's change (two steps, so undo keeps what was typed).
+        let mut typed = Vec::new();
         assert!(
-            state.plugins().iter().any(|p| {
-                p.handle_text_input(&state, end, end, ")", &mut |tr| typed = Some(tr))
-            })
+            state
+                .plugins()
+                .iter()
+                .any(|p| { p.handle_text_input(&state, end, end, ")", &mut |tr| typed.push(tr)) })
         );
-        rich.session.dispatch(typed.unwrap()).unwrap();
+        for tr in typed {
+            rich.session.dispatch(tr).unwrap();
+        }
         assert_eq!(image_srcs(&rich), ["https://t.example/p.gif"]);
         assert_eq!(shown(&rich), [None]);
     }
