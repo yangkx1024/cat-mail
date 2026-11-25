@@ -14,7 +14,9 @@ mod writing;
 use std::sync::Arc;
 
 use catmail_core::test_support::{add_synced_account, local_account};
-use catmail_core::{AccountId, Config, DraftSummary, MailClient, MemorySecrets, SyncSchedule};
+use catmail_core::{
+    AccountId, Config, DraftSummary, ListQuery, MailClient, MemorySecrets, MessageId, SyncSchedule,
+};
 use catmail_testkit::{FakeImap, FakeMailbox, FakeSmtp, ServerState, SmtpState};
 use mail_parser::{Message, MessageParser};
 use nsh_testing::Headless;
@@ -54,7 +56,13 @@ pub struct TestMail {
 impl TestMail {
     /// alice@example.com (password "pw"), with [`INBOX`] and [`FOLDERS`], synced.
     pub fn start() -> Self {
-        let mut mail = Self::without_account();
+        Self::start_with_older(0)
+    }
+
+    /// [`start`](Self::start), with `older` more messages in the INBOX ([`older_subject`]),
+    /// a day before the others: a list longer than the window.
+    pub fn start_with_older(older: usize) -> Self {
+        let mut mail = Self::without_account_with_older(older);
         let mut new = local_account("alice", mail.imap.port(), mail.smtp.port());
         new.display_name = Some("Alice".into());
         let account = pollster::block_on(add_synced_account(&mail.client, new, "pw"));
@@ -64,8 +72,23 @@ impl TestMail {
 
     /// The servers of [`start`](Self::start), and a client with no account yet.
     pub fn without_account() -> Self {
+        Self::without_account_with_older(0)
+    }
+
+    fn without_account_with_older(older: usize) -> Self {
         let turn = Turn::take();
         let mut state = ServerState::new("alice", "pw");
+        for n in 0..older {
+            let raw = format!(
+                "From: Bob <bob@example.com>\r\nTo: alice@example.com\r\nSubject: {}\r\n\
+                 Date: Fri, 16 Oct 2026 {:02}:{:02}:00 +0800\r\nMessage-ID: <older{n}@example.com>\r\n\
+                 \r\nOlder.\r\n",
+                older_subject(n),
+                n / 60,
+                n % 60,
+            );
+            state.inbox().append(raw.as_bytes(), &[]);
+        }
         for (n, (subject, text)) in INBOX.iter().enumerate() {
             let raw = format!(
                 "From: Bob <bob@example.com>\r\nTo: alice@example.com\r\nSubject: {subject}\r\n\
@@ -111,6 +134,21 @@ impl TestMail {
             .collect()
     }
 
+    /// The INBOX's message with subject `subject`, as the client has it.
+    pub fn inbox_message(&self, subject: &str) -> (AccountId, MessageId) {
+        let account = self.account.expect("an account");
+        let messages = pollster::block_on(
+            self.client
+                .list_inboxes(Some(vec![account]), ListQuery::new(1000)),
+        )
+        .unwrap();
+        let message = messages
+            .iter()
+            .find(|m| m.subject.as_deref() == Some(subject))
+            .unwrap_or_else(|| panic!("no {subject:?} in the INBOX"));
+        (account, message.id)
+    }
+
     /// Whether the server has a mailbox `name`.
     pub fn has_folder(&self, name: &str) -> bool {
         self.imap.state().mailbox_names().iter().any(|n| n == name)
@@ -150,6 +188,11 @@ impl TestMail {
         let account = self.account.expect("an account");
         pollster::block_on(client.list_drafts(account)).unwrap()
     }
+}
+
+/// The subject of the `n`th of [`TestMail::start_with_older`]'s messages.
+pub fn older_subject(n: usize) -> String {
+    format!("Older note {n}")
 }
 
 fn open_client(dir: &std::path::Path) -> MailClient {

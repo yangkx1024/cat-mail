@@ -538,6 +538,7 @@ pub fn list_column() -> impl IntoElement {
             .estimated_item_size(px(48.0))
             .scrollbar(motion::indicators_shown)
             .element_ref(&list)
+            .test_id("list")
             .flex_1(),
     )
 }
@@ -561,7 +562,8 @@ const ROOM_TO_GROW: f32 = 40.0;
 ///
 /// The row's place is measured first (a view in it carries [`AnchorRef`], laid out a frame
 /// after it is made): its top stays there, or, near the viewport's bottom, its bottom, so
-/// that it grows upwards and stays in sight. A row partly out of sight comes into it.
+/// that it grows upwards and stays in sight. A row partly out of sight comes into it; one
+/// opened with no view (far down the list) comes to the middle of the viewport.
 fn follow_selection(list: ElementRef) {
     let anchor = element_ref();
     global::<AnchorRef>().set(AnchorRef(Some(anchor)));
@@ -606,26 +608,36 @@ fn follow_selection(list: ElementRef) {
             }
             let ix = global::<Listing>().with_untracked(|l| l.line_of(row));
             global::<ListOpen>().set(ListOpen(open));
-            let mut place = None;
-            if let (Some(at), Some(of), Some(ix)) = (at, of, ix) {
-                // The cell's, around the row's margins (`rows::row_box`).
-                let top = at.page.y.0 - ROW_MARGIN_Y - of.page.y.0;
-                let bottom = top + at.frame.size.height.0 + 2.0 * ROW_MARGIN_Y;
-                let viewport = of.frame.size.height.0;
-                // Its top where it was, or its bottom near the viewport's: a row there
-                // grows upwards, staying in sight (a subject on two lines adds 34 points).
-                let (position, offset) = if bottom + ROOM_TO_GROW <= viewport {
-                    (0.0, top.max(0.0))
-                } else {
-                    (1.0, (bottom - viewport).min(0.0))
+            let place = ix.and_then(|ix| {
+                let (position, offset) = match (at, of) {
+                    (Some(at), Some(of)) => {
+                        // The cell's, around the row's margins (`rows::row_box`).
+                        let top = at.page.y.0 - ROW_MARGIN_Y - of.page.y.0;
+                        let bottom = top + at.frame.size.height.0 + 2.0 * ROW_MARGIN_Y;
+                        let viewport = of.frame.size.height.0;
+                        // Its top where it was, or its bottom near the viewport's: a row
+                        // there grows upwards, staying in sight (a subject on two lines
+                        // adds 34 points).
+                        if bottom + ROOM_TO_GROW <= viewport {
+                            (0.0, top.max(0.0))
+                        } else {
+                            (1.0, (bottom - viewport).min(0.0))
+                        }
+                    }
+                    // Not made, far from the viewport (a notification's message, opened
+                    // where it is listed): into the middle of it. Closing, the list stays
+                    // where the user scrolled it.
+                    _ if open => (0.5, 0.0),
+                    _ => return None,
                 };
-                let here = Place {
+                Some(Place {
                     index: ix as u32,
                     position,
                     offset,
-                };
-                here.scroll(list);
-                place = Some(here);
+                })
+            });
+            if let Some(place) = place {
+                place.scroll(list);
             }
             // The switch's commit gone, rows read again may glide.
             next_frame().await;
