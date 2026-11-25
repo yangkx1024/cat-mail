@@ -539,7 +539,9 @@ From 是条目实际发出用的身份（`OutboxEntry::identity`），叫法和�
 
 不改设置就能截图、检查：`CATMAIL_GUI_APPEARANCE=dark|light` 强制外观，`CATMAIL_GUI_OPEN=<序号>` 打开列表里第几封，
 `CATMAIL_GUI_HTML=<文件>` 用这个文件的 HTML 替换正文（检查页面能加载什么），`CATMAIL_GUI_SETTINGS` 一打开就开设置，
-`CATMAIL_GUI_UNFOLD` 展开所有账户。
+`CATMAIL_GUI_UNFOLD` 展开所有账户。`CATMAIL_GUI_FRAMES` 让右栏每次开关后记一行动画的帧（`motion::meter_frames`）：
+第一帧等了多久、帧间隔的 p50 / p95 / 最大值、丢了几帧（间隔超过中位间隔（屏幕的刷新周期）的 1.5 倍算丢，n 倍丢 n - 1 帧），
+打到 stderr 和日志文件。改动画时拿它比数字，不凭感觉；debug 构建的数字不代表发行版。
 
 ## 测试
 
