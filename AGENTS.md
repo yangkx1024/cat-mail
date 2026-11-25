@@ -38,8 +38,11 @@ Module structure is checked by [`deslop-please`](https://github.com/deterministi
 when the check came in; a new finding fails CI. Fix it from the design, not by moving
 code until the finding goes: which layer each module belongs to, why other code needs a
 type's fields or a module's functions, and what narrower interface could hide them. Don't
-add new findings to the list. When a fix removes entries, regenerate it on macOS (where
-CI runs it) with `deslop-please --update-allow .deslop-please.allow`.
+add new findings to the list. CI runs it on Linux, macOS and Windows, as code behind
+another OS's `cfg` isn't indexed: check another OS from any host with
+`--target x86_64-unknown-linux-gnu` or `--target x86_64-pc-windows-msvc`. When a fix
+removes entries, regenerate the list with `scripts/update-deslop-allow.sh` (every OS's
+findings, merged), not `--update-allow`, which would keep only the host's.
 
 CI (`.github/workflows/ci.yml`) runs clippy on Linux, macOS and Windows; pull requests
 run the tests on Linux and macOS, and `main` runs them on all three. A Windows failure
