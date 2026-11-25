@@ -202,7 +202,7 @@ fn message_row(item: Memo<Option<Line>>) -> impl IntoElement {
                     .flex_row()
                     .items_center()
                     .gap(px(12.0))
-                    .px(px(20.0))
+                    .px(px(8.0))
                     .py(px(10.0))
                     .child(avatar())
                     .child(
@@ -423,7 +423,7 @@ fn draft_row(item: Memo<Option<Line>>) -> impl IntoElement {
                 .flex_row()
                 .items_center()
                 .gap(px(12.0))
-                .px(px(20.0))
+                .px(px(8.0))
                 .py(px(10.0))
                 .child(
                     who()
