@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use catmail_proto::mime::{Outgoing, OutgoingAttachment, build_message};
-use catmail_store::{BlobStore, DraftReply, DraftSnapshot, NewDraftAttachment};
+use catmail_store::{DraftReply, DraftSnapshot, NewDraftAttachment};
 use catmail_types::{
     AccountId, Address, Answer, Attachment, BlobHash, Draft, DraftAttachment, DraftAttachmentId,
     DraftBody, DraftChanges, DraftContent, DraftId, Event, Forwarding, IdentityId, Message,
@@ -20,6 +20,7 @@ use crate::answer::{
     Own, eml_name, forward_content, forward_subject, reply_content, reply_recipients,
 };
 use crate::engine::{Editing, Engine};
+use crate::storage::Storage;
 use crate::task::{blocking, lock, now};
 use crate::{Error, Result, body, display};
 
@@ -269,31 +270,31 @@ fn attachments_too_large(limit: u64) -> Error {
 /// `budget` bytes arrive (reading stops one byte past): refused rather than stored cut
 /// short, as a file can grow while it is read.
 fn copy_within(
-    blobs: &BlobStore,
+    storage: &Storage,
     file: impl std::io::Read,
     budget: u64,
 ) -> Result<Option<(BlobHash, u64)>> {
-    let blob = blobs.put(file.take(budget + 1))?;
+    let blob = storage.put(file.take(budget + 1))?;
     // What was stored, not what the file said when it was opened.
-    let size = std::fs::metadata(blobs.path(&blob))?.len();
+    let size = std::fs::metadata(storage.blob_path(&blob))?.len();
     Ok((size <= budget).then_some((blob, size)))
 }
 
 /// Copies the file into the blob store, to be attached to a draft whose attachments take
 /// `used` bytes of its `limit`. Blocking.
 fn copy_file(
-    blobs: &BlobStore,
+    storage: &Storage,
     file: &NewFile,
     used: u64,
     limit: u64,
 ) -> Result<NewDraftAttachment> {
     match file {
-        NewFile::Path(path) => copy_path(blobs, path, used, limit),
-        NewFile::Content { name, content } => store_content(blobs, name, content, used, limit),
+        NewFile::Path(path) => copy_path(storage, path, used, limit),
+        NewFile::Content { name, content } => store_content(storage, name, content, used, limit),
     }
 }
 
-fn copy_path(blobs: &BlobStore, path: &Path, used: u64, limit: u64) -> Result<NewDraftAttachment> {
+fn copy_path(storage: &Storage, path: &Path, used: u64, limit: u64) -> Result<NewDraftAttachment> {
     let budget = limit.saturating_sub(used);
     // Before opening: on Windows, opening a directory fails as access denied.
     if !std::fs::metadata(path)?.is_file() {
@@ -312,7 +313,7 @@ fn copy_path(blobs: &BlobStore, path: &Path, used: u64, limit: u64) -> Result<Ne
         return Err(attachments_too_large(limit));
     }
     let (blob, size) =
-        copy_within(blobs, file, budget)?.ok_or_else(|| attachments_too_large(limit))?;
+        copy_within(storage, file, budget)?.ok_or_else(|| attachments_too_large(limit))?;
     Ok(NewDraftAttachment {
         blob,
         mime_type: mime_type_of(&filename),
@@ -323,7 +324,7 @@ fn copy_path(blobs: &BlobStore, path: &Path, used: u64, limit: u64) -> Result<Ne
 }
 
 fn store_content(
-    blobs: &BlobStore,
+    storage: &Storage,
     name: &str,
     content: &[u8],
     used: u64,
@@ -335,7 +336,7 @@ fn store_content(
         return Err(attachments_too_large(limit));
     }
     Ok(NewDraftAttachment {
-        blob: blobs.put(content)?,
+        blob: storage.put(content)?,
         mime_type: mime_type_of(&filename),
         filename,
         size,
@@ -389,14 +390,13 @@ struct Copied {
 /// store: within what its attachments may add up to, with `used` taken by those it starts
 /// with. Blocking.
 fn copy_files(
-    engine: &Engine,
+    storage: &Storage,
     account: AccountId,
     from: Option<IdentityId>,
     mut used: u64,
     files: &[NewFile],
 ) -> Result<Copied> {
-    let (identity, limit) = engine
-        .store
+    let (identity, limit) = storage
         .read(|db| {
             if db.accounts().get(account)?.is_none() {
                 return Ok(None);
@@ -409,11 +409,10 @@ fn copy_files(
     let attachments = files
         .iter()
         .map(|file| {
-            let attachment =
-                copy_file(&engine.blobs, file, used, limit).map_err(|e| Error::Attach {
-                    file: file.describe(),
-                    error: Box::new(e),
-                })?;
+            let attachment = copy_file(storage, file, used, limit).map_err(|e| Error::Attach {
+                file: file.describe(),
+                error: Box::new(e),
+            })?;
             used += attachment.size;
             Ok(attachment)
         })
@@ -443,13 +442,11 @@ pub(crate) async fn attach_file(
         )));
     }
     let attachment = blocking({
-        let engine = engine.clone();
+        let (storage, editing) = (engine.storage(), engine.editing());
         move || {
-            let editing = engine.editing();
             // Before copying the file too, which can be large.
             not_open_elsewhere(&editing, draft, editor)?;
-            let (used, limits) = engine
-                .store
+            let (used, limits) = storage
                 .read(|db| {
                     // Before copying the file: a draft being sent can't change.
                     if db.drafts().editable(draft)?.is_none() {
@@ -463,13 +460,13 @@ pub(crate) async fn attach_file(
                 })?
                 .ok_or(Error::DraftNotFound(draft))?;
             let limit = attachments_limit(limits);
-            let mut new = copy_file(&engine.blobs, &file, used, limit)?;
+            let mut new = copy_file(&storage, &file, used, limit)?;
             if inline {
                 new.content_id = Some(new_content_id());
             }
             // An attachment refused here, like one whose draft is gone, leaves an unreferenced
             // blob for GC.
-            engine.store.write(|db| {
+            storage.write(|db| {
                 not_open_elsewhere(&editing, draft, editor)?;
                 // Again, for the draft: another file may have been attached meanwhile.
                 if db.drafts().attachments_size(draft)? + new.size > limit {
@@ -478,7 +475,7 @@ pub(crate) async fn attach_file(
                 let Some(attachment) = db.drafts().add_attachment(draft, &new, now())? else {
                     return Ok(Ok(None));
                 };
-                let path = engine.blobs.path(&new.blob);
+                let path = storage.blob_path(&new.blob);
                 Ok(Ok(db
                     .drafts()
                     .account_of(draft)?
@@ -719,8 +716,8 @@ async fn forward_attached(
     // what the attachments may add up to.
     let said = message.size.map_or(0, u64::from);
     let copied = blocking({
-        let engine = engine.clone();
-        move || copy_files(&engine, account, from, said, &files)
+        let storage = engine.storage();
+        move || copy_files(&storage, account, from, said, &files)
     })
     .await?;
     let room = |size: u64| {
@@ -784,8 +781,8 @@ async fn answer_attachments(
     let account = message.summary.account_id;
     let used = attachments.iter().map(|a| a.size).sum();
     let copied = blocking({
-        let engine = engine.clone();
-        move || copy_files(&engine, account, from, used, &files)
+        let storage = engine.storage();
+        move || copy_files(&storage, account, from, used, &files)
     })
     .await?;
     let used = used + copied.attachments.iter().map(|a| a.size).sum::<u64>();
@@ -912,16 +909,16 @@ async fn insert(
 ) -> Result<Draft> {
     let content = without_nul(content);
     let draft = blocking({
-        let engine = engine.clone();
+        let storage = engine.storage();
         move || {
             let mut from = from;
             if !files.is_empty() {
                 let used = attachments.iter().map(|a| a.size).sum();
-                let copied = copy_files(&engine, account, from, used, &files)?;
+                let copied = copy_files(&storage, account, from, used, &files)?;
                 from = Some(copied.identity);
                 attachments.extend(copied.attachments);
             }
-            Ok(engine.store.write(|db| {
+            storage.write(|db| {
                 if db.accounts().get(account)?.is_none() {
                     return Ok(None);
                 }
@@ -933,7 +930,7 @@ async fn insert(
                     db.drafts().add_attachment(id, attachment, now)?;
                 }
                 db.drafts().get(id)
-            })?)
+            })
         }
     })
     .await?
@@ -968,7 +965,7 @@ pub(crate) enum Destination {
 /// The draft as a message `from` its sender, dated now, its attachments read from the
 /// blob store, made for where it goes. Blocking.
 pub(crate) fn build(
-    engine: &Engine,
+    storage: &Storage,
     from: &Address,
     snapshot: &DraftSnapshot,
     message_id: &str,
@@ -977,13 +974,17 @@ pub(crate) fn build(
     let data = snapshot
         .blobs
         .iter()
-        .map(|blob| engine.blobs.read(blob))
-        .collect::<std::io::Result<Vec<_>>>()?;
+        .map(|blob| {
+            storage
+                .blob(blob)?
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound).into())
+        })
+        .collect::<Result<Vec<_>>>()?;
     let draft = &snapshot.draft;
     let (with_bcc, eight_bit) = match destination {
         Destination::Drafts => (true, true),
         Destination::Smtp => {
-            let announced = engine.store.read(|db| {
+            let announced = storage.read(|db| {
                 let sending = db.identities().sending(draft.account_id, draft.identity)?;
                 Ok(sending.and_then(|s| s.smtp))
             })?;
@@ -1068,14 +1069,20 @@ fn invalid_text(e: Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MemorySecrets;
+    use crate::client::fixtures::open_client;
 
-    #[test]
-    fn a_copy_past_its_budget_is_refused_not_cut_short() {
+    #[tokio::test]
+    async fn a_copy_past_its_budget_is_refused_not_cut_short() {
         let dir = tempfile::tempdir().unwrap();
-        let blobs = BlobStore::open(dir.path()).unwrap();
-        assert_eq!(copy_within(&blobs, &b"12345"[..], 4).unwrap(), None);
-        let (blob, size) = copy_within(&blobs, &b"1234"[..], 4).unwrap().unwrap();
-        assert_eq!((blobs.read(&blob).unwrap(), size), (b"1234".to_vec(), 4));
+        let client = open_client(dir.path(), Arc::new(MemorySecrets::default()));
+        let storage = client.engine().unwrap().storage();
+        assert_eq!(copy_within(&storage, &b"12345"[..], 4).unwrap(), None);
+        let (blob, size) = copy_within(&storage, &b"1234"[..], 4).unwrap().unwrap();
+        assert_eq!(
+            (storage.blob(&blob).unwrap(), size),
+            (Some(b"1234".to_vec()), 4)
+        );
     }
 
     #[test]

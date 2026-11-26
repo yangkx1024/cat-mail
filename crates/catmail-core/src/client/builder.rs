@@ -14,10 +14,11 @@ use tokio::runtime::Handle;
 use tokio::sync::broadcast;
 
 use super::{EVENT_CAPACITY, MailClient, Shared};
-use crate::engine::{DEFAULT_DRAFT_UPLOAD_DELAY, Engine};
+use crate::engine::Engine;
 use crate::runtime::Runtime;
 use crate::secrets::{KeyringSecrets, SecretStore};
-use crate::settings::{EngineTuning, SyncSchedule};
+use crate::settings::{EngineSettings, EngineTuning, SyncSchedule};
+use crate::storage::Storage;
 use crate::task::now;
 use crate::watch;
 use crate::{BodyPrefetch, Config, DataDirLock, Result, gc, prefetch, rebuild, send, sleep};
@@ -30,11 +31,8 @@ pub struct MailClientBuilder {
     secrets: Option<Arc<dyn SecretStore>>,
     tls: Option<TlsConfig>,
     send_in_background: bool,
-    sync_in_background: Option<SyncSchedule>,
-    prefetch_bodies: Option<BodyPrefetch>,
     collect_garbage_every: Option<Duration>,
-    draft_upload_delay: Duration,
-    tuning: EngineTuning,
+    settings: EngineSettings,
 }
 
 /// What [`MailClientBuilder::open_engine`] opened, for [`MailClient::start`]. Background
@@ -84,7 +82,7 @@ impl MailClientBuilder {
     /// [`MailClient::sync_account`] and [`MailClient::replay_pending`] instead. The
     /// [`SyncSchedule`] says how often, `SyncSchedule::default()` for the usual.
     pub fn sync_in_background(mut self, schedule: Option<SyncSchedule>) -> Self {
-        self.sync_in_background = schedule;
+        self.settings.sync_in_background = schedule;
         self
     }
 
@@ -94,7 +92,7 @@ impl MailClientBuilder {
     /// within a daily budget. For long-running frontends. The [`BodyPrefetch`] says how,
     /// `BodyPrefetch::default()` for the usual.
     pub fn prefetch_bodies(mut self, prefetch: Option<BodyPrefetch>) -> Self {
-        self.prefetch_bodies = prefetch;
+        self.settings.prefetch = prefetch;
         self
     }
 
@@ -113,7 +111,7 @@ impl MailClientBuilder {
     /// save. Uploads asked for ([`MailClient::replay_pending`],
     /// [`MailClient::sync_account`]) don't wait.
     pub fn draft_upload_delay(mut self, delay: Duration) -> Self {
-        self.draft_upload_delay = delay;
+        self.settings.draft_upload_delay = delay;
         self
     }
 
@@ -131,7 +129,7 @@ impl MailClientBuilder {
     /// [default: `EngineTuning::default()`].
     /// Batch sizes below 1 count as 1.
     pub fn tuning(mut self, tuning: EngineTuning) -> Self {
-        self.tuning = tuning.checked();
+        self.settings.tuning = tuning.checked();
         self
     }
 
@@ -188,7 +186,8 @@ impl MailClientBuilder {
             );
         }
         // Read now: no account can be added before the client exists.
-        let watched = if self.sync_in_background.is_some() || self.prefetch_bodies.is_some() {
+        let settings = self.settings;
+        let watched = if settings.sync_in_background.is_some() || settings.prefetch.is_some() {
             store.read(|db| db.accounts().list())?
         } else {
             Vec::new()
@@ -199,25 +198,14 @@ impl MailClientBuilder {
             .unwrap_or_else(|| Arc::new(KeyringSecrets::default()));
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         tracing::info!(
-            background_sync = self.sync_in_background.is_some(),
-            prefetch_bodies = self.prefetch_bodies.is_some(),
+            background_sync = settings.sync_in_background.is_some(),
+            prefetch_bodies = settings.prefetch.is_some(),
             accounts = watched.len(),
             "engine opened"
         );
 
-        let mut engine = Engine::new(
-            &self.config,
-            data_dir_lock,
-            store,
-            blobs,
-            secrets,
-            events,
-            self.tls,
-        );
-        engine.sync_in_background = self.sync_in_background;
-        engine.prefetch = self.prefetch_bodies;
-        engine.draft_upload_delay = self.draft_upload_delay;
-        engine.tuning = self.tuning;
+        let storage = Storage::new(data_dir_lock, store, blobs, secrets);
+        let engine = Engine::new(storage, events, self.tls, settings);
         Ok(Opened {
             engine,
             watched,
@@ -237,11 +225,8 @@ impl MailClient {
             secrets: None,
             tls: None,
             send_in_background: false,
-            sync_in_background: None,
-            prefetch_bodies: None,
             collect_garbage_every: None,
-            draft_upload_delay: DEFAULT_DRAFT_UPLOAD_DELAY,
-            tuning: EngineTuning::default(),
+            settings: EngineSettings::default(),
         }
     }
 
@@ -259,7 +244,7 @@ impl MailClient {
         if opened.send_in_background {
             rt.spawn(send::worker(
                 Arc::downgrade(&engine),
-                engine.outbox_kick.clone(),
+                engine.outbox_signal(),
                 engine.closing(),
             ));
         }
@@ -274,16 +259,16 @@ impl MailClient {
         }
         rt.spawn(rebuild::run(
             Arc::downgrade(&engine),
-            engine.tuning.rebuild_delay,
+            engine.settings().tuning.rebuild_delay,
             engine.closing(),
         ));
         // As `accounts::spawn_background`, from outside the runtime.
         for account in opened.watched {
-            if let Some(schedule) = engine.sync_in_background {
+            if let Some(schedule) = engine.settings().sync_in_background {
                 let task = watch::task(&engine, account.id, schedule);
                 rt.spawn(task);
             }
-            if let Some(settings) = engine.prefetch {
+            if let Some(settings) = engine.settings().prefetch {
                 let task = prefetch::task(&engine, account.id, settings);
                 rt.spawn(task);
             }
@@ -291,7 +276,7 @@ impl MailClient {
         MailClient {
             shared: Arc::new(Shared {
                 rt,
-                closing: engine.closing(),
+                released: engine.storage().released(),
                 config: opened.config,
                 engine: Mutex::new(Some(engine)),
             }),

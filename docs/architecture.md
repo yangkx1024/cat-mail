@@ -68,6 +68,9 @@ tokio reactor。`MailClient` 持有
 - 自建 runtime drop 时 `shutdown_background()`，不等待任务：状态都已落 SQLite。借用的 runtime 不会
   被关掉，所以只持 `Weak<Engine>` 的后台任务（发信、GC）还 select 引擎的关闭信号（`Engine::closing`，
   随引擎 drop），客户端一没就结束，不等下一次定时器；每账户的后台同步靠账户的取消信号，同样随引擎 drop。
+- blocking 线程上的工作只拿 `Storage`（`storage.rs`：数据库、blob、远程图片缓存、钥匙串），不拿整个引擎。
+  数据目录的锁也在 `Storage` 里，随最后一个句柄放开：引擎 drop 后还在写数据目录的工作写完才放。
+  `MailClient::closed` 等的是这一刻，之后另一个引擎才能打开这个目录。
 - `open` 在调用线程上加锁、迁移数据库、恢复中断的发送；有 UI 线程的前端用 `open_async`，把这些放到
   runtime 的 blocking pool 上，返回的 future 同样可以被任意 executor poll。
 - 后台任务 panic 转成 `Error::Task`，GUI 进程不跟着崩。
@@ -171,9 +174,9 @@ UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UI
 不增加任何保证，反而让打开邮件排在同步后面。
 
 `catmail-core` 内部分三层。最下面是不认识引擎的部分：停止信号与小工具（`task`）、构建时的设置（`settings`），
-引擎替每个账户持有的状态（空闲连接 `pool`、搜索连接 `search_slot`、正文的认领 `downloading`），以及把取到的
-邮件做成要存的正文（`content`，只用 `BlobStore`）。中间是
-`Engine`：组合这些，管每账户状态。上面是各项工作（同步、后台同步、操作队列、发信、草稿、正文……），拿
+引擎替每个账户持有的状态（空闲连接 `pool`、搜索连接 `search_slot`、正文的认领 `downloading`），
+存下的东西（`storage`），以及把取到的邮件做成要存的正文（`content`）。中间是
+`Engine`：组合这些，管每账户状态，字段都不外露。上面是各项工作（同步、后台同步、操作队列、发信、草稿、正文……），拿
 `&Arc<Engine>` 做事，最上面是门面 `MailClient`。引擎持有的类型，所在的模块不 import `engine`：否则它和用它的
 工作模块绕成一个环，改一处要读一圈。工作模块之间也只向下依赖。新出现的模块循环会让 CI 的结构检查
 （`scripts/deslop.sh`）失败。

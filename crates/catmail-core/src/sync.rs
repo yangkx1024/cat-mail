@@ -754,7 +754,7 @@ async fn fill_previews(
     if !session.supports_preview() {
         return Ok(());
     }
-    let limit = engine.tuning.fetch_batch;
+    let limit = engine.settings().tuning.fetch_batch;
     let uids = engine
         .read(move |db| db.messages().unpreviewed(id, limit))
         .await?;
@@ -807,7 +807,7 @@ async fn fetch_new(
 ) -> Result<bool> {
     let mut complete = true;
     let mut arrivals = prefetch::Arrivals::new(engine);
-    for batch in uids.rchunks(engine.tuning.fetch_batch) {
+    for batch in uids.rchunks(engine.settings().tuning.fetch_batch) {
         let fetched: Vec<NewMessage> = session
             .fetch_summaries(batch, items)
             .await?

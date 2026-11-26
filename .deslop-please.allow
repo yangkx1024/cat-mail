@@ -2,17 +2,6 @@
 # written by `scripts/deslop.sh --update`. Fixing an entry never fails CI; new
 # issues not listed here fail.
 field-leak catmail_cli::cmd::compose::Fields::from
-field-leak catmail_core::engine::Engine::blobs
-field-leak catmail_core::engine::Engine::downloading
-field-leak catmail_core::engine::Engine::draft_upload_delay
-field-leak catmail_core::engine::Engine::events
-field-leak catmail_core::engine::Engine::image_cache
-field-leak catmail_core::engine::Engine::outbox_kick
-field-leak catmail_core::engine::Engine::prefetch
-field-leak catmail_core::engine::Engine::secrets
-field-leak catmail_core::engine::Engine::store
-field-leak catmail_core::engine::Engine::sync_in_background
-field-leak catmail_core::engine::Engine::tuning
 field-leak catmail_core::search_slot::Held::session
 field-leak catmail_frontend::commands::Change::ids
 field-leak catmail_frontend::composer::Lifecycle::saved

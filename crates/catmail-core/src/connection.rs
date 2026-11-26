@@ -280,8 +280,8 @@ async fn account_credentials(
 /// The password in the keyring entry `secret_key`, for the account or identity with
 /// that address.
 async fn password(engine: &Arc<Engine>, secret_key: String, email: &str) -> Result<SecretString> {
-    let engine = engine.clone();
-    blocking(move || engine.secrets.get(&secret_key))
+    let storage = engine.storage();
+    blocking(move || storage.secret(&secret_key))
         .await?
         .ok_or_else(|| {
             Error::Secrets(format!(

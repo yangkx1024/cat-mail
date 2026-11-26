@@ -6,15 +6,8 @@
 use std::sync::Weak;
 use std::time::Duration;
 
-use catmail_types::GcReport;
-
-use crate::Result;
 use crate::engine::Engine;
 use crate::task::{Closing, blocking};
-
-/// How long an unreferenced blob survives. Far longer than the gap between storing a
-/// blob and committing the row that refers to it, which is what GC must not cut into.
-const BLOB_GRACE: Duration = Duration::from_secs(60 * 60);
 
 /// What long-running frontends pass to
 /// [`collect_garbage_every`](crate::MailClientBuilder::collect_garbage_every).
@@ -25,15 +18,8 @@ pub(crate) const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60
 /// opened only briefly is closed again.
 const FIRST_DELAY: Duration = Duration::from_secs(5 * 60);
 
-/// Blocking.
-pub(crate) fn collect(engine: &Engine) -> Result<GcReport> {
-    // References first: see BlobStore::collect_garbage.
-    let referenced = engine.store.read(|db| db.blob_references())?;
-    Ok(engine.blobs.collect_garbage(&referenced, BLOB_GRACE)?)
-}
-
-/// Collects every `every` for as long as the engine exists, holding it only while
-/// collecting.
+/// Collects every `every` for as long as the engine exists, holding its storage only
+/// while collecting.
 pub(crate) async fn run(engine: Weak<Engine>, every: Duration, mut closing: Closing) {
     let mut wait = every.min(FIRST_DELAY);
     loop {
@@ -41,10 +27,10 @@ pub(crate) async fn run(engine: Weak<Engine>, every: Duration, mut closing: Clos
             () = tokio::time::sleep(wait) => {}
             () = closing.closed() => return,
         }
-        let Some(engine) = engine.upgrade() else {
+        let Some(storage) = engine.upgrade().map(|e| e.storage()) else {
             return;
         };
-        match blocking(move || collect(&engine)).await {
+        match blocking(move || storage.collect_garbage()).await {
             Ok(report) if report.removed > 0 => {
                 tracing::info!(
                     removed = report.removed,

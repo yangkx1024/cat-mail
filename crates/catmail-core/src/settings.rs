@@ -4,6 +4,34 @@
 
 use std::time::Duration;
 
+/// What the builder set for the engine, besides its storage: what it does in the
+/// background, and how.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EngineSettings {
+    /// Set if every account is kept in sync in the background (see `watch`).
+    pub sync_in_background: Option<SyncSchedule>,
+    /// Set if bodies are fetched in the background (see `prefetch`).
+    pub prefetch: Option<BodyPrefetch>,
+    /// How long background sync leaves a draft alone after it changed before uploading
+    /// it (see [`Engine::held_drafts`](crate::engine::Engine::held_drafts)).
+    pub draft_upload_delay: Duration,
+    pub tuning: EngineTuning,
+}
+
+/// [`EngineSettings::draft_upload_delay`] unless the builder sets it.
+const DEFAULT_DRAFT_UPLOAD_DELAY: Duration = Duration::from_secs(15);
+
+impl Default for EngineSettings {
+    fn default() -> Self {
+        Self {
+            sync_in_background: None,
+            prefetch: None,
+            draft_upload_delay: DEFAULT_DRAFT_UPLOAD_DELAY,
+            tuning: EngineTuning::default(),
+        }
+    }
+}
+
 /// Sizes and intervals the engine works in, which tests and users on metered connections
 /// may want other than the defaults. Set with
 /// [`MailClientBuilder::tuning`](crate::MailClientBuilder::tuning).

@@ -126,16 +126,16 @@ pub(crate) async fn queue_draft(
     let (revision, subject) = (snapshot.revision, snapshot.draft.content.subject.clone());
     let envelope_from = sender.email.clone();
     let raw = blocking({
-        let (engine, message_id) = (engine.clone(), message_id.clone());
+        let (storage, message_id) = (engine.storage(), message_id.clone());
         move || {
             let raw = drafts::build(
-                &engine,
+                &storage,
                 &sender,
                 &snapshot,
                 &message_id,
                 drafts::Destination::Smtp,
             )?;
-            Ok(engine.blobs.put_bytes(&raw)?)
+            storage.put_bytes(&raw)
         }
     })
     .await?;
@@ -165,7 +165,7 @@ pub(crate) async fn queue_draft(
     engine.emit(Event::OutboxChanged {
         account: account_id,
     });
-    engine.outbox_kick.notify_one();
+    engine.kick_outbox();
     Ok(entry)
 }
 
@@ -727,14 +727,14 @@ pub(crate) async fn retry(engine: &Arc<Engine>, id: OutboxId) -> Result<OutboxEn
         Ok(o.retry(id, now())?.map(|e| (e, Touched::new())))
     })
     .await?;
-    engine.outbox_kick.notify_one();
+    engine.kick_outbox();
     Ok(entry)
 }
 
 /// The user confirmed that a message with an unknown outcome was delivered.
 pub(crate) async fn mark_sent(engine: &Arc<Engine>, id: OutboxId) -> Result<OutboxEntry> {
     let entry = user_decision(engine, id, move |o| o.mark_sent(id, now())).await?;
-    engine.outbox_kick.notify_one();
+    engine.kick_outbox();
     Ok(entry)
 }
 
@@ -904,7 +904,7 @@ mod tests {
         client
             .engine()
             .unwrap()
-            .store
+            .storage()
             .write(|db| {
                 db.outbox().begin_send(entries[0])?;
                 db.outbox().begin_send(entries[1])?;
@@ -940,7 +940,7 @@ mod tests {
         client
             .engine()
             .unwrap()
-            .store
+            .storage()
             .write(|db| db.outbox().begin_send(entry.id))
             .unwrap();
 

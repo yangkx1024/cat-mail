@@ -36,7 +36,7 @@ use crate::{Error, Result, connection, ops, sync};
 /// Starts keeping `account` in sync, if the engine syncs in the background. Call from
 /// inside the engine runtime.
 pub(crate) fn spawn(engine: &Arc<Engine>, account: AccountId) {
-    if let Some(schedule) = engine.sync_in_background {
+    if let Some(schedule) = engine.settings().sync_in_background {
         tokio::spawn(task(engine, account, schedule));
     }
 }

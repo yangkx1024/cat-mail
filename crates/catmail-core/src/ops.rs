@@ -337,7 +337,7 @@ async fn replay_folder(
         seen.extend(ops.iter().flat_map(ReplayOp::settled).map(|op| (id, op.id)));
         ops
     };
-    for batch in batches(&ops, engine.tuning.replay_batch) {
+    for batch in batches(&ops, engine.settings().tuning.replay_batch) {
         let uids: Vec<u32> = batch.iter().map(|op| op.uid).collect();
         let outcome = match &batch[0].kind {
             ReplayKind::Flags { add, remove } => session

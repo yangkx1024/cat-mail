@@ -8,48 +8,34 @@ use std::time::{Duration, Instant};
 use catmail_proto::TlsConfig;
 use catmail_proto::http::ImageFetcher;
 use catmail_proto::imap::Session;
-use catmail_store::{BlobStore, Db, Store};
+use catmail_store::Db;
 use catmail_types::{
-    AccountId, AccountStatus, DraftId, ErrorKind, Event, FolderId, IdentityId, ReportedError,
-    SendProblem, ServerProblem,
+    AccountId, AccountStatus, DraftId, ErrorKind, Event, FolderId, IdentityId, MessageId,
+    ReportedError, SendProblem, ServerProblem,
 };
 use tokio::sync::{Notify, OwnedMutexGuard, broadcast, watch};
 use tokio::task::unconstrained;
 
-use crate::downloading::Downloading;
-use crate::image_cache::ImageCache;
+use crate::downloading::{Claim, Downloading};
 use crate::pool::{self, Pool};
 use crate::search_slot::SearchSlot;
-use crate::secrets::SecretStore;
-use crate::settings::{BodyPrefetch, EngineTuning, SyncSchedule};
+use crate::settings::EngineSettings;
+use crate::storage::Storage;
 use crate::task::{Cancellation, Closing, Cutoff, backoff, blocking, lock, now};
-use crate::{Config, DataDirLock, Error, Result};
+use crate::{Error, Result};
 
 /// State shared by every `MailClient` clone and every engine task.
 pub(crate) struct Engine {
-    /// Exclusive lock on the data directory, held for the engine's lifetime: one engine
-    /// per data directory, so sync workers, the outbox and events are never split
-    /// across processes. Other frontends will reach the running engine over IPC.
-    _data_dir_lock: DataDirLock,
-    pub store: Store,
-    pub blobs: BlobStore,
-    pub secrets: Arc<dyn SecretStore>,
-    pub events: broadcast::Sender<Event>,
+    /// The data directory, locked, and the keyring.
+    storage: Storage,
+    events: broadcast::Sender<Event>,
     /// Set by the builder, else the platform verifier, created on first use.
     tls: OnceLock<TlsConfig>,
     /// Created on first use: most sessions never load a remote image.
     image_fetcher: OnceLock<ImageFetcher>,
-    pub image_cache: Arc<ImageCache>,
     /// Wakes the outbox worker, if one runs: something became due.
-    pub outbox_kick: Arc<Notify>,
-    /// Set if every account is kept in sync in the background (see `watch`).
-    pub sync_in_background: Option<SyncSchedule>,
-    /// Set if bodies are fetched in the background (see `prefetch`).
-    pub prefetch: Option<BodyPrefetch>,
-    /// How long background sync leaves a draft alone after it changed before uploading
-    /// it (see [`held_drafts`](Self::held_drafts)).
-    pub draft_upload_delay: Duration,
-    pub tuning: EngineTuning,
+    outbox_kick: Arc<Notify>,
+    settings: EngineSettings,
     /// Never sent to: dropped with the engine, which ends the background tasks holding
     /// it weakly at once (see [`closing`](Self::closing)).
     closing: watch::Sender<()>,
@@ -64,7 +50,7 @@ pub(crate) struct Engine {
     /// from anyone else are refused. Shared with the write transactions that check it.
     editing: Editing,
     /// Bodies being fetched for someone waiting on them: another fetch waits for that.
-    pub downloading: Downloading,
+    downloading: Downloading,
 }
 
 /// Drafts open in an editor, by how many ([`Engine::editing`]).
@@ -84,9 +70,6 @@ impl Drop for Deleting {
         }
     }
 }
-
-/// [`Engine::draft_upload_delay`] unless the builder sets it.
-pub(crate) const DEFAULT_DRAFT_UPLOAD_DELAY: Duration = Duration::from_secs(15);
 
 /// What the engine keeps per account.
 ///
@@ -294,39 +277,20 @@ impl Drop for Uncount<'_> {
     }
 }
 
-impl Drop for Engine {
-    fn drop(&mut self) {
-        // The last line of a clean exit: without it, the log ending means the process was
-        // killed or crashed.
-        tracing::info!("engine closed");
-    }
-}
-
 impl Engine {
     pub fn new(
-        config: &Config,
-        data_dir_lock: DataDirLock,
-        store: Store,
-        blobs: BlobStore,
-        secrets: Arc<dyn SecretStore>,
+        storage: Storage,
         events: broadcast::Sender<Event>,
         tls: Option<TlsConfig>,
+        settings: EngineSettings,
     ) -> Self {
-        let image_cache = Arc::new(ImageCache::new(config.image_cache_dir()));
         Self {
-            _data_dir_lock: data_dir_lock,
-            store,
-            blobs,
-            secrets,
+            storage,
             events,
             tls: tls.map(OnceLock::from).unwrap_or_default(),
             image_fetcher: OnceLock::new(),
-            image_cache,
             outbox_kick: Arc::default(),
-            sync_in_background: None,
-            prefetch: None,
-            draft_upload_delay: DEFAULT_DRAFT_UPLOAD_DELAY,
-            tuning: EngineTuning::default(),
+            settings,
             closing: watch::Sender::new(()),
             woke: Arc::default(),
             accounts: Mutex::default(),
@@ -334,6 +298,17 @@ impl Engine {
             editing: Arc::default(),
             downloading: Downloading::default(),
         }
+    }
+
+    /// For blocking work, which needs no more of the engine; it holds the data directory
+    /// locked until dropped (see [`Storage::released`]).
+    pub fn storage(&self) -> Storage {
+        self.storage.clone()
+    }
+
+    /// What the builder set, which stays as it is.
+    pub fn settings(&self) -> EngineSettings {
+        self.settings
     }
 
     /// The drafts open in an editor, to mark one or check from inside a write
@@ -370,32 +345,58 @@ impl Engine {
         let _ = self.events.send(event);
     }
 
+    /// The events emitted from now on; closed once the engine is.
+    pub fn subscribe(&self) -> broadcast::Receiver<Event> {
+        self.events.subscribe()
+    }
+
+    /// Wakes the outbox worker, if one runs: something became due.
+    pub fn kick_outbox(&self) {
+        self.outbox_kick.notify_one();
+    }
+
+    /// What [`kick_outbox`](Self::kick_outbox) notifies, for the worker to wait on
+    /// without holding the engine.
+    pub fn outbox_signal(&self) -> Arc<Notify> {
+        self.outbox_kick.clone()
+    }
+
+    /// Claims fetching the body of `id` (see [`Downloading`]).
+    pub fn claim_body(&self, id: MessageId) -> Claim {
+        self.downloading.claim(id)
+    }
+
+    /// Whether someone is fetching the body of `id` and waiting on it.
+    pub fn body_claimed(&self, id: MessageId) -> bool {
+        self.downloading.claimed(id)
+    }
+
     /// Runs a read on the blocking pool of the current (engine) runtime.
     pub async fn read<T: Send + 'static>(
-        self: &Arc<Self>,
+        &self,
         f: impl FnOnce(&Db<'_>) -> catmail_store::Result<T> + Send + 'static,
     ) -> Result<T> {
-        let engine = self.clone();
-        blocking(move || Ok(engine.store.read(f)?)).await
+        let storage = self.storage();
+        blocking(move || storage.read(f)).await
     }
 
     /// Runs a write transaction on the blocking pool. Emit events after this returns.
     pub async fn write<T: Send + 'static>(
-        self: &Arc<Self>,
+        &self,
         f: impl FnOnce(&Db<'_>) -> catmail_store::Result<T> + Send + 'static,
     ) -> Result<T> {
-        let engine = self.clone();
-        blocking(move || Ok(engine.store.write(f)?)).await
+        let storage = self.storage();
+        blocking(move || storage.write(f)).await
     }
 
     /// [`write`](Self::write), on disk even across a power cut; see
     /// [`Store::write_durable`](catmail_store::Store::write_durable).
     pub async fn write_durable<T: Send + 'static>(
-        self: &Arc<Self>,
+        &self,
         f: impl FnOnce(&Db<'_>) -> catmail_store::Result<T> + Send + 'static,
     ) -> Result<T> {
-        let engine = self.clone();
-        blocking(move || Ok(engine.store.write_durable(f)?)).await
+        let storage = self.storage();
+        blocking(move || storage.write_durable(f)).await
     }
 
     pub fn tls(&self) -> Result<TlsConfig> {
@@ -508,7 +509,7 @@ impl Engine {
         for state in lock(&self.accounts).values() {
             state.resume.notify_one();
         }
-        self.outbox_kick.notify_one();
+        self.kick_outbox();
     }
 
     /// Whether `at` is after the computer last woke from sleep. A connection made before
@@ -560,17 +561,17 @@ impl Engine {
     }
 
     /// Records that the draft was just changed (or created), so background sync leaves
-    /// it for [`draft_upload_delay`](Self::draft_upload_delay): a frontend saving as the
+    /// it for [`draft_upload_delay`](EngineSettings::draft_upload_delay): a frontend saving as the
     /// user types would otherwise replace the copy on the server with each keystroke.
     /// Returns whether it was not held back already. Only background sync (`watch`)
     /// holds drafts back and forgets these: without it, nothing is recorded.
     pub fn draft_edited(&self, account: AccountId, draft: DraftId) -> bool {
-        if self.sync_in_background.is_none() {
+        if self.settings.sync_in_background.is_none() {
             return true;
         }
         lock(&self.account(account).draft_edits)
             .insert(draft, Instant::now())
-            .is_none_or(|at| at.elapsed() >= self.draft_upload_delay)
+            .is_none_or(|at| at.elapsed() >= self.settings.draft_upload_delay)
     }
 
     /// Forgets the draft's last change, once it is deleted or being sent.
@@ -581,7 +582,7 @@ impl Engine {
     }
 
     /// The account's drafts changed within the last
-    /// [`draft_upload_delay`](Self::draft_upload_delay), which background sync doesn't
+    /// [`draft_upload_delay`](EngineSettings::draft_upload_delay), which background sync doesn't
     /// upload yet. Uploads the user asks for don't wait.
     pub fn held_drafts(&self, account: AccountId) -> HashSet<DraftId> {
         let Some(state) = self.existing(account) else {
@@ -589,7 +590,7 @@ impl Engine {
         };
         lock(&state.draft_edits)
             .iter()
-            .filter(|(_, at)| at.elapsed() < self.draft_upload_delay)
+            .filter(|(_, at)| at.elapsed() < self.settings.draft_upload_delay)
             .map(|(draft, _)| *draft)
             .collect()
     }
@@ -600,7 +601,11 @@ impl Engine {
     pub fn next_draft_due(&self, account: AccountId) -> Option<Duration> {
         lock(&self.existing(account)?.draft_edits)
             .values()
-            .map(|at| self.draft_upload_delay.saturating_sub(at.elapsed()))
+            .map(|at| {
+                self.settings
+                    .draft_upload_delay
+                    .saturating_sub(at.elapsed())
+            })
             .min()
     }
 
@@ -608,7 +613,8 @@ impl Engine {
     /// uploads them.
     pub fn forget_settled_drafts(&self, account: AccountId) {
         if let Some(state) = self.existing(account) {
-            lock(&state.draft_edits).retain(|_, at| at.elapsed() < self.draft_upload_delay);
+            lock(&state.draft_edits)
+                .retain(|_, at| at.elapsed() < self.settings.draft_upload_delay);
         }
     }
 
@@ -835,7 +841,7 @@ impl Engine {
                     removed: watch::Sender::new(false),
                     pool: Arc::new(Pool::new(
                         account,
-                        self.tuning.keepalive,
+                        self.settings.tuning.keepalive,
                         self.closing(),
                         self.woke.clone(),
                     )),

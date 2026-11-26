@@ -9,10 +9,10 @@
 use std::collections::HashMap;
 
 use catmail_proto::mime::{self, Content};
-use catmail_store::{BlobStore, NewAttachment, NewBody};
-use catmail_types::BlobHash;
+use catmail_store::{NewAttachment, NewBody};
 
 use crate::Result;
+use crate::storage::Storage;
 
 /// A body as fetched, to be parsed with [`parse`].
 pub(crate) enum Fetched {
@@ -59,17 +59,17 @@ impl Parts {
 
 /// Parses a fetched body into what is stored, putting the raw message and the parts
 /// that came with it in the blob store. Blocking.
-pub(crate) fn parse(blobs: &BlobStore, fetched: Fetched) -> Result<NewBody> {
+pub(crate) fn parse(storage: &Storage, fetched: Fetched) -> Result<NewBody> {
     let (content, raw) = match fetched {
         Fetched::Whole(raw) => (mime::parse_message(&raw), Some(raw)),
         Fetched::Parts(parts) => (parts.structure.content(&parts.text, &parts.headers), None),
     };
-    new_body(blobs, content, raw.as_deref())
+    new_body(storage, content, raw.as_deref())
 }
 
 /// Stores the raw message and every part that came with it in the blob store. Blocking.
-pub(crate) fn new_body(blobs: &BlobStore, content: Content, raw: Option<&[u8]>) -> Result<NewBody> {
-    let raw = raw.map(|raw| blobs.put_bytes(raw)).transpose()?;
+pub(crate) fn new_body(storage: &Storage, content: Content, raw: Option<&[u8]>) -> Result<NewBody> {
+    let raw = raw.map(|raw| storage.put_bytes(raw)).transpose()?;
     let attachments = content
         .parts
         .into_iter()
@@ -77,7 +77,7 @@ pub(crate) fn new_body(blobs: &BlobStore, content: Content, raw: Option<&[u8]>) 
             let blob = part
                 .data
                 .as_deref()
-                .map(|data| blobs.put_bytes(data))
+                .map(|data| storage.put_bytes(data))
                 .transpose()?;
             Ok(NewAttachment {
                 section: part.section,
@@ -99,13 +99,4 @@ pub(crate) fn new_body(blobs: &BlobStore, content: Content, raw: Option<&[u8]>) 
         attachments,
         version: mime::CONTENT_VERSION,
     })
-}
-
-/// Blocking. The blob's content, `None` if it has gone missing from disk.
-pub(crate) fn stored(blobs: &BlobStore, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
-    match blobs.read(hash) {
-        Ok(data) => Ok(Some(data)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.into()),
-    }
 }

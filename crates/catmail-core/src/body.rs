@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use catmail_proto::imap::{self, Session};
 use catmail_proto::mime;
-use catmail_store::{AttachmentSource, Db, MessageLocation};
+use catmail_store::{AttachmentSource, MessageLocation};
 use catmail_types::{AttachmentId, BlobHash, ErrorKind, Event, Message, MessageId};
 
 use crate::connection::with_session;
@@ -52,7 +52,7 @@ pub(crate) struct Limits {
 impl Limits {
     /// As for a message the user opens.
     fn opened(engine: &Engine) -> Self {
-        let limit = engine.tuning.whole_message_limit;
+        let limit = engine.settings().tuning.whole_message_limit;
         Self {
             whole: limit,
             text: limit,
@@ -96,17 +96,14 @@ pub(crate) async fn attachment_content(engine: Arc<Engine>, id: AttachmentId) ->
     .await?;
     let (account, folder) = (source.message.account, source.message.folder);
     let data = blocking({
-        let engine = engine.clone();
+        let storage = engine.storage();
         move || {
             let data = mime::decode_transfer(source.transfer_encoding.as_deref(), &encoded);
             drop(encoded);
             let size = data.len() as u32;
-            store_blob(
-                &engine,
-                &data,
-                |db, hash| db.attachments().set_blob(id, hash, size),
-                Error::AttachmentNotFound(id),
-            )?;
+            storage
+                .keep(&data, |db, hash| db.attachments().set_blob(id, hash, size))?
+                .ok_or(Error::AttachmentNotFound(id))?;
             Ok(data)
         }
     })
@@ -287,7 +284,7 @@ async fn fetch_batch(
         }
     };
     let done = blocking({
-        let engine = engine.clone();
+        let storage = engine.storage();
         move || {
             // Each decoded and put in the blob store, then recorded in one transaction.
             let mut done: Vec<(AttachmentId, Result<(BlobHash, u64)>)> = Vec::new();
@@ -303,9 +300,9 @@ async fn fetch_batch(
                 let data = mime::decode_transfer(source.transfer_encoding.as_deref(), &encoded);
                 drop(encoded);
                 let size = data.len() as u64;
-                done.push((id, Ok((engine.blobs.put_bytes(&data)?, size))));
+                done.push((id, Ok((storage.put_bytes(&data)?, size))));
             }
-            let gone = engine.store.write(|db| {
+            let gone = storage.write(|db| {
                 let mut gone = Vec::new();
                 for (i, (id, stored)) in done.iter().enumerate() {
                     if let Ok((hash, size)) = stored
@@ -341,8 +338,8 @@ async fn refreshed(
     let Some(blob) = blob else {
         return Ok(None);
     };
-    let engine = engine.clone();
-    blocking(move || Ok(engine.blobs.refresh(&blob)?.map(|size| (blob, size)))).await
+    let storage = engine.storage();
+    blocking(move || Ok(storage.refresh(&blob)?.map(|size| (blob, size)))).await
 }
 
 /// The raw message's blob and size, downloading it first if needed, without reading it.
@@ -380,14 +377,11 @@ async fn fetch_raw(engine: &Arc<Engine>, location: MessageLocation) -> Result<(B
     })
     .await?;
     let stored = blocking({
-        let engine = engine.clone();
+        let storage = engine.storage();
         move || {
-            let hash = store_blob(
-                &engine,
-                &raw,
-                |db, hash| db.messages().set_raw(id, hash),
-                Error::MessageNotFound(id),
-            )?;
+            let hash = storage
+                .keep(&raw, |db, hash| db.messages().set_raw(id, hash))?
+                .ok_or(Error::MessageNotFound(id))?;
             Ok((hash, raw))
         }
     })
@@ -513,7 +507,7 @@ async fn ensure_downloaded(engine: &Arc<Engine>, id: MessageId, whole: bool) -> 
             }
             return Ok(());
         }
-        match engine.downloading.claim(id) {
+        match engine.claim_body(id) {
             Claim::Mine(claimed) => break (location, claimed),
             // Then it is here, or that fetch failed and this one tries.
             Claim::Theirs(mut fetched) => {
@@ -537,10 +531,10 @@ async fn ensure_downloaded(engine: &Arc<Engine>, id: MessageId, whole: bool) -> 
     .await?;
 
     let stored = blocking({
-        let engine = engine.clone();
+        let storage = engine.storage();
         move || {
-            let body = content::parse(&engine.blobs, fetched)?;
-            let labels = engine.store.write(|db| {
+            let body = content::parse(&storage, fetched)?;
+            let labels = storage.write(|db| {
                 let messages = db.messages();
                 Ok(messages
                     .store_body(id, &body)?
@@ -550,7 +544,7 @@ async fn ensure_downloaded(engine: &Arc<Engine>, id: MessageId, whole: bool) -> 
                 return Ok(labels);
             }
             // Not stored: a concurrent download stored it first, or the message is gone.
-            let location = engine.store.read(|db| db.messages().location(id))?;
+            let location = storage.read(|db| db.messages().location(id))?;
             match location {
                 Some(location) if location.downloaded => Ok(None),
                 _ => Err(Error::MessageNotFound(id)),
@@ -673,22 +667,6 @@ async fn reopen(session: &mut Session, location: &MessageLocation) -> Result<Dur
     Ok(began.elapsed())
 }
 
-/// Stores `data` and records it with `record`, which returns false if the row it
-/// belongs to is gone (then `gone` is the error). Returns its hash.
-fn store_blob(
-    engine: &Engine,
-    data: &[u8],
-    record: impl FnOnce(&Db<'_>, &BlobHash) -> catmail_store::Result<bool>,
-    gone: Error,
-) -> Result<BlobHash> {
-    let hash = engine.blobs.put_bytes(data)?;
-    if engine.store.write(|db| record(db, &hash))? {
-        Ok(hash)
-    } else {
-        Err(gone)
-    }
-}
-
 async fn locate(engine: &Arc<Engine>, id: MessageId) -> Result<MessageLocation> {
     engine
         .read(move |db| db.messages().location(id))
@@ -705,9 +683,9 @@ async fn attachment_source(engine: &Arc<Engine>, id: AttachmentId) -> Result<Att
 
 /// `None` if the blob has gone missing from disk, so the caller fetches it again.
 pub(crate) async fn read_blob(engine: &Arc<Engine>, hash: BlobHash) -> Result<Option<Vec<u8>>> {
-    let engine = engine.clone();
+    let storage = engine.storage();
     blocking(move || {
-        let data = content::stored(&engine.blobs, &hash)?;
+        let data = storage.blob(&hash)?;
         if data.is_none() {
             tracing::warn!(%hash, "referenced blob is missing; fetching again");
         }

@@ -1,6 +1,6 @@
 //! Accounts and the identities they send as: adding them (logging in to their servers
 //! first, if asked), changing and removing them, with their passwords in the keyring.
-//! Adding writes the keyring entry before the row naming it ([`insert_with_secret`]);
+//! Adding writes the keyring entry before the row naming it ([`Storage::insert_with_secret`](crate::storage::Storage::insert_with_secret));
 //! removing deletes the row (`RETURNING secret_key`) before the entry.
 
 use std::sync::Arc;
@@ -12,7 +12,6 @@ use catmail_types::{
     Account, AccountId, Event, Identity, IdentityId, NewAccount, NewIdentity, ServerConfig,
 };
 use secrecy::{ExposeSecret, SecretString};
-use uuid::Uuid;
 
 use crate::connection::Announced;
 use crate::engine::Engine;
@@ -79,10 +78,10 @@ pub(crate) async fn add_account(
     };
     let announced = session.as_ref().map(Announced::of).unwrap_or_default();
     let inserted = blocking({
-        let engine = engine.clone();
+        let storage = engine.storage();
         move || {
-            insert_with_secret(&engine, "account", &new.email, &password, |key| {
-                Ok(engine.store.write(|db| {
+            storage.insert_with_secret("account", &new.email, &password, |key| {
+                storage.write(|db| {
                     let account = db.accounts().insert(&new, key)?;
                     announced.record(db, account.id)?;
                     if let Some(own) = db.identities().default_of(account.id)?
@@ -94,7 +93,7 @@ pub(crate) async fn add_account(
                         gmail_server: announced.gmail,
                         ..account
                     })
-                })?)
+                })
             })
         }
     })
@@ -143,11 +142,10 @@ pub(crate) async fn add_identity(
         Verify::Skip => None,
     };
     let identity = blocking({
-        let engine = engine.clone();
+        let storage = engine.storage();
         move || {
-            insert_with_secret(&engine, "identity", &new.email, &password, |key| {
-                engine
-                    .store
+            storage.insert_with_secret("identity", &new.email, &password, |key| {
+                storage
                     .write(|db| db.identities().insert(account, &new, key, smtp))?
                     .ok_or_else(|| Error::AccountNotFound(account.to_string()))
             })
@@ -166,7 +164,7 @@ pub(crate) fn update_identity(
     change: impl FnOnce(&Identities<'_>) -> catmail_store::Result<Option<(AccountId, usize)>>,
 ) -> Result<()> {
     let (account, drafts) = engine
-        .store
+        .storage()
         .write(|db| change(&db.identities()))?
         .ok_or(Error::IdentityNotFound(id))?;
     engine.emit(Event::AccountChanged { account });
@@ -178,12 +176,12 @@ pub(crate) fn update_identity(
 
 /// See [`MailClient::remove_identity`](crate::MailClient::remove_identity). Blocking.
 pub(crate) fn remove_identity(engine: &Engine, id: IdentityId) -> Result<()> {
-    let deleted = engine
-        .store
+    let storage = engine.storage();
+    let deleted = storage
         .write(|db| db.identities().delete(id, now()))?
         .ok_or(Error::IdentityNotFound(id))?;
     if let Some(key) = &deleted.secret_key {
-        forget_secret(engine, key);
+        storage.forget_secret(key);
     }
     let account = deleted.account;
     engine.forget_identity(account, id);
@@ -200,7 +198,8 @@ pub(crate) async fn remove_account(engine: Arc<Engine>, id: AccountId) -> Result
     let result = blocking({
         let engine = engine.clone();
         move || {
-            let deleted = engine.store.write(|db| {
+            let storage = engine.storage();
+            let deleted = storage.write(|db| {
                 // Its identities go with it.
                 let identities = db.identities().secret_keys(id)?;
                 Ok(db.accounts().delete(id)?.map(|key| (key, identities)))
@@ -209,7 +208,7 @@ pub(crate) async fn remove_account(engine: Arc<Engine>, id: AccountId) -> Result
                 return Err(Error::AccountNotFound(id.to_string()));
             };
             for key in std::iter::once(secret_key).chain(identities) {
-                forget_secret(&engine, &key);
+                storage.forget_secret(&key);
             }
             engine.emit(Event::AccountRemoved { account: id });
             Ok(())
@@ -293,37 +292,6 @@ async fn check_smtp(
     let announced = connection::announced(&session);
     session.quit().await;
     Ok(announced)
-}
-
-/// Stores `password` in the keyring under a new key for a `kind` (`account`, `identity`)
-/// with that address, then runs `insert`, which stores the row naming the key; deletes
-/// the key again if that fails. Secret first, row second: whoever can see the row can
-/// also see its secret, so a concurrent removal always finds and deletes it. The random
-/// key keeps data directories apart.
-fn insert_with_secret<T>(
-    engine: &Engine,
-    kind: &str,
-    email: &str,
-    password: &SecretString,
-    insert: impl FnOnce(&str) -> Result<T>,
-) -> Result<T> {
-    let key = format!("{kind}:{email}:{}", Uuid::new_v4().simple());
-    engine.secrets.set(&key, password)?;
-    let inserted = insert(&key);
-    if inserted.is_err()
-        && let Err(e) = engine.secrets.delete(&key)
-    {
-        tracing::warn!(error = %e, "failed to delete password after {kind} insert failed");
-    }
-    inserted
-}
-
-/// Deletes the keyring entry of a row already deleted: left behind, it would only be
-/// clutter.
-fn forget_secret(engine: &Engine, key: &str) {
-    if let Err(e) = engine.secrets.delete(key) {
-        tracing::warn!(error = %e, "failed to delete stored password");
-    }
 }
 
 fn validate_new_identity(new: &NewIdentity) -> Result<()> {
@@ -448,7 +416,7 @@ mod tests {
             client
                 .engine()
                 .unwrap()
-                .store
+                .storage()
                 .read(|db| db.identities().sending(account.id, id))
                 .unwrap()
                 .unwrap()
