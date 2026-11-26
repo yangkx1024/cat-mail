@@ -29,8 +29,9 @@ use futures_util::future::join_all;
 use tokio::sync::Notify;
 
 use crate::connection::{self, SendAs, SmtpLogin};
-use crate::engine::{Activity, Closing, Engine, Permit, blocking, now};
+use crate::engine::{Activity, Engine, Permit};
 use crate::pool::with_session;
+use crate::task::{Closing, blocking, now};
 use crate::{Error, Result, addresses, body, drafts, ops, sync};
 
 /// First retry after this long, doubling up to [`MAX_BACKOFF`].
@@ -707,7 +708,7 @@ fn next_attempt(now: i64, attempts: u32) -> Option<i64> {
 /// Seconds to wait after the `attempts`-th failed attempt.
 fn backoff(attempts: u32) -> i64 {
     let secs = |s: i64| Duration::from_secs(s as u64);
-    crate::engine::backoff(secs(FIRST_BACKOFF), attempts, secs(MAX_BACKOFF)).as_secs() as i64
+    crate::task::backoff(secs(FIRST_BACKOFF), attempts, secs(MAX_BACKOFF)).as_secs() as i64
 }
 
 /// Every address once (ignoring case), in order.
@@ -850,7 +851,7 @@ async fn work_due(engine: &Arc<Engine>) -> Result<Option<i64>> {
                 tracing::warn!(%account, error = %e, "working on the outbox failed");
                 failed = Some(e);
             }
-            Err(e) => failed = Some(crate::runtime::join_error(e)),
+            Err(e) => failed = Some(crate::task::join_error(e)),
         }
     }
     match failed {

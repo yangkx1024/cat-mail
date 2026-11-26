@@ -43,41 +43,10 @@ use tokio::sync::broadcast::{
 };
 
 use crate::body::{self, Claim, Claimed, Limits};
-use crate::engine::{Cancellation, Engine, backoff, blocking, now};
+use crate::engine::Engine;
+use crate::settings::BodyPrefetch;
+use crate::task::{Cancellation, backoff, blocking, now};
 use crate::{Error, Result, pool};
-
-/// How the background prefetch of bodies goes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BodyPrefetch {
-    /// Bytes fetched per account and day (UTC) on a Gmail server, at most [1 GiB]. Gmail
-    /// suspends IMAP for an hour up to a day past 2500 MB downloaded in one, counting
-    /// other clients and messages opened, and the day it counts needn't be UTC's.
-    pub gmail_daily_budget: u64,
-    /// The same on other servers [200 MiB]. Most don't publish a limit; NetEase's (163,
-    /// 126) is known to exist, and to be hit by syncing a few thousand messages.
-    pub daily_budget: u64,
-    /// Messages up to this size (RFC822.SIZE) are fetched whole, attachments and all;
-    /// above it, only their text [256 KiB]. Most mail is smaller, and a message fetched
-    /// whole opens offline with everything in it.
-    pub whole_limit: u32,
-    /// Bodies stored in one transaction and announced together [20].
-    pub batch: usize,
-    /// How long to wait after the connection or the login failed before trying again,
-    /// doubling with each failure in a row, up to 30 minutes [30 seconds].
-    pub retry: Duration,
-}
-
-impl Default for BodyPrefetch {
-    fn default() -> Self {
-        Self {
-            gmail_daily_budget: 1024 * 1024 * 1024,
-            daily_budget: 200 * 1024 * 1024,
-            whole_limit: 256 * 1024,
-            batch: 20,
-            retry: Duration::from_secs(30),
-        }
-    }
-}
 
 const MAX_RETRY: Duration = Duration::from_secs(30 * 60);
 
@@ -305,29 +274,32 @@ enum Allowance {
     Open { used: u64, budget: u64, gmail: bool },
 }
 
-impl BodyPrefetch {
-    /// As of `now`, with `usage` the day's so far, on a Gmail server or not.
-    fn allowance(&self, usage: &Usage, gmail: bool, now: i64) -> Allowance {
+impl Allowance {
+    /// What `settings` allow as of `now`, with `usage` the day's so far, on a Gmail server
+    /// or not.
+    fn of(settings: &BodyPrefetch, usage: &Usage, gmail: bool, now: i64) -> Self {
         if let Some(until) = usage.paused_until.filter(|&until| until > now) {
-            return Allowance::Paused(Duration::from_secs((until - now) as u64));
+            return Self::Paused(Duration::from_secs((until - now) as u64));
         }
         let budget = if gmail {
-            self.gmail_daily_budget
+            settings.gmail_daily_budget
         } else {
-            self.daily_budget
+            settings.daily_budget
         };
-        Allowance::Open {
+        Self::Open {
             used: usage.bytes,
             budget,
             gmail,
         }
     }
+}
 
-    fn limits(&self, engine: &Engine) -> Limits {
-        Limits {
-            whole: self.whole_limit,
-            text: engine.tuning.whole_message_limit,
-        }
+/// How much of a message the prefetch fetches: whole up to its own limit, and its text
+/// up to the limit for a message the user opens.
+fn limits(settings: &BodyPrefetch, engine: &Engine) -> Limits {
+    Limits {
+        whole: settings.whole_limit,
+        text: engine.tuning.whole_message_limit,
     }
 }
 
@@ -360,7 +332,7 @@ async fn batch(
     let Some(gmail) = gmail else {
         return Err(Error::AccountNotFound(account.to_string()));
     };
-    let (used, budget) = match settings.allowance(&usage, gmail, now) {
+    let (used, budget) = match Allowance::of(settings, &usage, gmail, now) {
         Allowance::Paused(wait) => {
             tracing::info!(%account, until = usage.paused_until, ?wait,
                 "prefetch paused: the server said the account went over its download limit");
@@ -380,7 +352,7 @@ async fn batch(
         tracing::debug!(%account, used, budget, "today's budget for prefetching is used up");
         return Ok(Batch::Spent);
     }
-    let limits = settings.limits(engine);
+    let limits = limits(settings, engine);
     let began = Instant::now();
     let mut fetched = Fetched::default();
     let mut result = Ok(Batch::More);
@@ -587,11 +559,11 @@ impl Arrivals {
             mut used,
             budget,
             gmail,
-        } = settings.allowance(&usage, gmail, now)
+        } = Allowance::of(&settings, &usage, gmail, now)
         else {
             return Ok(());
         };
-        let limits = settings.limits(engine);
+        let limits = limits(&settings, engine);
         for (id, _claimed) in self.claimed {
             if used >= budget {
                 tracing::debug!(%account, used, budget,

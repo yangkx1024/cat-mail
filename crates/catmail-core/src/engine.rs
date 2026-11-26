@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::{Future, poll_fn};
 use std::pin::pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use catmail_proto::TlsConfig;
@@ -18,10 +18,10 @@ use tokio::task::unconstrained;
 use crate::body::Downloading;
 use crate::image_cache::ImageCache;
 use crate::pool::Pool;
-use crate::prefetch::BodyPrefetch;
 use crate::search::SearchSlot;
 use crate::secrets::SecretStore;
-use crate::watch::SyncSchedule;
+use crate::settings::{BodyPrefetch, EngineTuning, SyncSchedule};
+use crate::task::{Cancellation, Closing, backoff, blocking, lock, now};
 use crate::{Config, DataDirLock, Error, Result};
 
 /// State shared by every `MailClient` clone and every engine task.
@@ -80,59 +80,6 @@ impl Drop for Deleting {
         let mut set = lock(&self.set);
         for folder in &self.folders {
             set.remove(folder);
-        }
-    }
-}
-
-/// Sizes and intervals the engine works in, which tests and users on metered connections
-/// may want other than the defaults. Set with
-/// [`MailClientBuilder::tuning`](crate::MailClientBuilder::tuning).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EngineTuning {
-    /// New messages fetched per UID FETCH, and stored per transaction [200].
-    pub fetch_batch: usize,
-    /// Queued changes made on the server per command: UID sets of scattered messages
-    /// get long [500].
-    pub replay_batch: usize,
-    /// Messages up to this size (RFC822.SIZE) are fetched whole when opened; above it,
-    /// attachments are left on the server until opened, and text parts above it are not
-    /// fetched at all [2 MiB].
-    pub whole_message_limit: u32,
-    /// A connection kept for on-demand fetches is sent a NOOP after this long unused, so
-    /// that servers and NAT boxes don't close it as idle, and one that died is closed
-    /// before it is needed [4 minutes].
-    pub keepalive: Duration,
-    /// How long after the client opens the bodies stored by an older version of the
-    /// parsing and sanitizing are made again, so that search finds them by their text as
-    /// parsed now [2 minutes: after the first sync has started, which it then holds up
-    /// for only a moment at a time]. A client closed before then leaves them for the
-    /// next one; opening a message rebuilds its body anyway.
-    pub rebuild_delay: Duration,
-}
-
-impl Default for EngineTuning {
-    fn default() -> Self {
-        Self {
-            fetch_batch: 200,
-            replay_batch: 500,
-            whole_message_limit: 2 * 1024 * 1024,
-            // Under five minutes: quiet connections lasted that long when the pool still
-            // dropped them at that age. Most servers wait far longer (Gmail some 30
-            // minutes); NetEase closes one quiet for a minute, which the pool leaves be
-            // (#227).
-            keepalive: Duration::from_secs(4 * 60),
-            rebuild_delay: Duration::from_secs(2 * 60),
-        }
-    }
-}
-
-impl EngineTuning {
-    /// With the batch sizes at least 1, which chunking needs.
-    pub(crate) fn checked(self) -> Self {
-        Self {
-            fetch_batch: self.fetch_batch.max(1),
-            replay_batch: self.replay_batch.max(1),
-            ..self
         }
     }
 }
@@ -378,49 +325,6 @@ impl Drop for Engine {
     }
 }
 
-/// Tells a task holding the engine weakly that the engine is gone.
-#[derive(Clone)]
-pub(crate) struct Closing(watch::Receiver<()>);
-
-impl Closing {
-    pub async fn closed(&mut self) {
-        // Nothing is ever sent: this ends when the sender, owned by the engine, is gone.
-        let _ = self.0.changed().await;
-    }
-}
-
-/// Tells work on an account that the account is being removed.
-pub(crate) struct Cancellation {
-    removed: watch::Receiver<bool>,
-    account: AccountId,
-}
-
-impl Cancellation {
-    pub fn is_cancelled(&self) -> bool {
-        *self.removed.borrow()
-    }
-
-    /// Runs `work` on the account. Fails with [`Error::AccountNotFound`] if the account
-    /// was removed before, and stops it with [`Error::Cancelled`] if it is removed
-    /// meanwhile.
-    pub async fn run<T>(mut self, work: impl Future<Output = Result<T>>) -> Result<T> {
-        if self.is_cancelled() {
-            return Err(Error::AccountNotFound(self.account.to_string()));
-        }
-        tokio::select! {
-            result = work => result,
-            () = self.cancelled() => Err(Error::Cancelled),
-        }
-    }
-
-    /// Resolves once the account is being removed (at once if it already is), or the
-    /// engine is gone: work holding the engine only weakly stops then too.
-    pub async fn cancelled(&mut self) {
-        // Err: the sender, owned by the engine, is gone.
-        let _ = self.removed.wait_for(|c| *c).await;
-    }
-}
-
 impl Engine {
     pub fn new(
         config: &Config,
@@ -479,7 +383,7 @@ impl Engine {
     /// a borrowed runtime they would otherwise outlive the client until their timer
     /// fired. Per-account tasks have [`Cancellation::cancelled`] instead.
     pub fn closing(&self) -> Closing {
-        Closing(self.closing.subscribe())
+        Closing::new(self.closing.subscribe())
     }
 
     /// Called from inside the task performing the mutation, so dropping the caller's
@@ -909,10 +813,7 @@ impl Engine {
     /// account (or the row worked on) still exists: a removal is then seen whether it
     /// started before or after.
     pub fn cancellation(&self, account: AccountId) -> Cancellation {
-        Cancellation {
-            removed: self.account(account).removed.subscribe(),
-            account,
-        }
+        Cancellation::new(self.account(account).removed.subscribe(), account)
     }
 
     pub fn pool(&self, account: AccountId) -> Arc<Pool> {
@@ -982,20 +883,6 @@ impl Engine {
     }
 }
 
-/// A panic while holding one of these locks can't leave the data inconsistent.
-pub(crate) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// Runs blocking work (SQLite, keyring) on the current runtime's blocking pool.
-pub(crate) async fn blocking<T: Send + 'static>(
-    f: impl FnOnce() -> Result<T> + Send + 'static,
-) -> Result<T> {
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(crate::runtime::join_error)?
-}
-
 /// Records an attempt's outcome (`None`: success) in what is known of a server. Returns
 /// whether that changed, whether a success follows a failure background sync waits out
 /// (a rejected login, an account over its limit), and the failures in a row.
@@ -1027,20 +914,6 @@ fn record(slot: &mut Option<ServerProblem>, e: Option<&Error>) -> (bool, bool, u
             }
         }
     }
-}
-
-/// `first`, doubled for each failure in a row after the first, up to `max`.
-pub(crate) fn backoff(first: Duration, failures: u32, max: Duration) -> Duration {
-    first
-        .saturating_mul(1 << failures.saturating_sub(1).min(16))
-        .min(max)
-}
-
-/// Now, in unix seconds.
-pub(crate) fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64)
 }
 
 #[cfg(test)]

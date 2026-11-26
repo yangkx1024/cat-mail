@@ -40,9 +40,11 @@ mod runtime;
 mod search;
 mod secrets;
 mod send;
+mod settings;
 mod sleep;
 mod sync;
 mod system;
+mod task;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 mod version;
@@ -58,16 +60,14 @@ pub use catmail_types::*;
 pub use client::{DraftEditor, MailClient, MailClientBuilder};
 pub use config::{APP_ID, Config, DataDirLock};
 pub use drafts::{EditMark, named_as_image};
-pub use engine::EngineTuning;
 pub use error::{Error, HttpError, ImapError, Result, SmtpError, StoreError};
 pub use filename::safe_filename;
 pub use images::RemoteImageStream;
-pub use prefetch::BodyPrefetch;
 pub use secrecy::{ExposeSecret, SecretString};
 pub use secrets::{MemorySecrets, SecretStore};
 pub use send::{DraftRevision, SendPreview};
+pub use settings::{BodyPrefetch, EngineTuning, SyncSchedule};
 /// What [`MailClient::subscribe`]'s receiver returns when it falls behind or the engine
 /// is gone.
 pub use tokio::sync::broadcast::error::RecvError;
 pub use version::VERSION;
-pub use watch::SyncSchedule;

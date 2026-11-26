@@ -21,7 +21,8 @@ use catmail_types::{AccountId, Event, FolderId, MessageId};
 
 use crate::Result;
 use crate::body::{new_body, stored};
-use crate::engine::{Closing, Engine, blocking};
+use crate::engine::Engine;
+use crate::task::{Closing, blocking};
 
 /// Bodies rebuilt in one transaction.
 const BATCH: usize = 20;

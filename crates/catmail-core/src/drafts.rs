@@ -19,7 +19,8 @@ use crate::addresses::{check_address, validate};
 use crate::answer::{
     Own, eml_name, forward_content, forward_subject, reply_content, reply_recipients,
 };
-use crate::engine::{Editing, Engine, blocking, lock, now};
+use crate::engine::{Editing, Engine};
+use crate::task::{blocking, lock, now};
 use crate::{Error, Result, body, display};
 
 pub(crate) async fn create(

@@ -7,9 +7,10 @@ use catmail_proto::http::{ImageFetcher, RemoteImage};
 use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinSet;
 
-use crate::engine::{Engine, blocking};
+use crate::engine::Engine;
 use crate::image_cache::MAX_CACHE_BYTES;
 use crate::runtime::Runtime;
+use crate::task::blocking;
 use crate::{Error, Result};
 
 /// Images fetched at once, as a browser does per server: a newsletter refers to dozens.

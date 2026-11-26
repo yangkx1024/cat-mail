@@ -27,57 +27,11 @@ use catmail_types::AccountId;
 use tokio::sync::Notify;
 
 use crate::draft_sync::Uploads;
-use crate::engine::{Activity, Cancellation, Engine, backoff};
+use crate::engine::{Activity, Engine};
 use crate::pool::Pinged;
+use crate::settings::SyncSchedule;
+use crate::task::{Cancellation, backoff};
 use crate::{Error, Result, ops, pool, sync};
-
-/// When background sync does what.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SyncSchedule {
-    /// Every folder is synced this often; in between only INBOX is watched
-    /// [15 minutes].
-    pub full_sync: Duration,
-    /// How often INBOX is checked on a server that can't announce changes (no IDLE)
-    /// [2 minutes].
-    pub poll: Duration,
-    /// While waiting other than in IDLE (between checks, or before trying again), the
-    /// connection is sent a NOOP this often, so that it is still open for the next step
-    /// [45 seconds: NetEase closes one quiet for a minute]. Between polls, a change to
-    /// INBOX the server reports in answer to the NOOP ends the wait early.
-    pub keepalive: Duration,
-    /// How long one IDLE lasts before it is started over, so that a connection that died
-    /// without a word (a NAT box forgetting it, say) is noticed [10 minutes].
-    pub idle: Duration,
-    /// How long to wait after a failure before trying again, doubling with each failure
-    /// in a row, up to `full_sync` [30 seconds]. Queued local changes try again at once,
-    /// except after the server rejected the login: that waits `full_sync`, whatever is
-    /// queued, or until a sync asked for gets through. An account over its download limit
-    /// waits `over_limit`.
-    pub retry: Duration,
-    /// After the computer woke, how long to wait after the first failure, doubling while
-    /// that is sooner than `retry`; failures then back off from `retry` as usual
-    /// [2 seconds]. The network is often back only a few seconds after the computer.
-    pub retry_after_wake: Duration,
-    /// How long to wait after the server said the account went over its download limit
-    /// [1 hour]: Gmail usually lifts it after an hour, and both it and NetEase within a
-    /// day; each try in between may count towards it. Queued local changes wait too,
-    /// but a sync asked for or waking from sleep tries again at once.
-    pub over_limit: Duration,
-}
-
-impl Default for SyncSchedule {
-    fn default() -> Self {
-        Self {
-            full_sync: Duration::from_secs(15 * 60),
-            poll: Duration::from_secs(2 * 60),
-            keepalive: Duration::from_secs(45),
-            idle: Duration::from_secs(10 * 60),
-            retry: Duration::from_secs(30),
-            retry_after_wake: Duration::from_secs(2),
-            over_limit: Duration::from_secs(60 * 60),
-        }
-    }
-}
 
 /// Starts keeping `account` in sync, if the engine syncs in the background. Call from
 /// inside the engine runtime.

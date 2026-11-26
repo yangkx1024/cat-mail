@@ -15,7 +15,8 @@ use secrecy::{ExposeSecret, SecretString};
 use uuid::Uuid;
 
 use crate::connection::Announced;
-use crate::engine::{Engine, blocking, now};
+use crate::engine::Engine;
+use crate::task::{blocking, now};
 use crate::{Error, Result, addresses, connection, drafts, prefetch, watch};
 
 /// Whether [`MailClient::add_account`](crate::MailClient::add_account) and

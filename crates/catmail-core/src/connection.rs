@@ -10,7 +10,8 @@ use catmail_store::{Db, DraftSnapshot, SmtpAnnounced};
 use catmail_types::{Account, AccountId, Address, DraftId, Event, IdentityId, ServerConfig};
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::engine::{Engine, blocking};
+use crate::engine::Engine;
+use crate::task::blocking;
 use crate::{Error, Result};
 
 /// Per network read or write, not per command.

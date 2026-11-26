@@ -23,7 +23,8 @@ use catmail_proto::imap::{Error as ImapError, Session};
 use catmail_store::{DraftUpload, Touched, UploadDue};
 use catmail_types::{AccountId, DraftId, Event, Flags, FolderId, FolderRole};
 
-use crate::engine::{Engine, backoff, blocking, now};
+use crate::engine::Engine;
+use crate::task::{backoff, blocking, now};
 use crate::{Result, connection, drafts, ops};
 
 /// Background sync uploads a draft the server refused again after this long, doubling

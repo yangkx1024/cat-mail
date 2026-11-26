@@ -26,9 +26,10 @@ use catmail_types::{AttachmentId, BlobHash, ErrorKind, Event, Message, MessageId
 
 use tokio::sync::watch;
 
-use crate::engine::{Engine, blocking, lock};
+use crate::engine::Engine;
 use crate::pool::with_session;
 use crate::rebuild;
+use crate::task::{blocking, lock};
 use crate::{Error, Result};
 
 const GONE: Error = Error::OutOfSync("the message is no longer on the server");
