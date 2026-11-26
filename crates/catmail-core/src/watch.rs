@@ -28,10 +28,10 @@ use tokio::sync::Notify;
 
 use crate::draft_sync::Uploads;
 use crate::engine::{Activity, Engine};
-use crate::pool::Pinged;
+use crate::pool::{self, Pinged};
 use crate::settings::SyncSchedule;
 use crate::task::{Cancellation, backoff};
-use crate::{Error, Result, ops, pool, sync};
+use crate::{Error, Result, connection, ops, sync};
 
 /// Starts keeping `account` in sync, if the engine syncs in the background. Call from
 /// inside the engine runtime.
@@ -320,7 +320,7 @@ fn went_over_limit(
 /// close it as idle before the next step: NetEase does after a minute, and offers no
 /// IDLE, so that each check of INBOX would log in again. With `poll_inbox`, also checks
 /// the answer for changes to INBOX ([`pool::poll`]). Closes one that died, or one from
-/// before a sleep (see [`pool::usable`]); reports if the server said the account went
+/// before a sleep (see [`Engine::usable`]); reports if the server said the account went
 /// over its download limit. Queued changes and waking from sleep don't cut the NOOP
 /// short, which would leave its answer half read: their signals keep a permit, so the
 /// wait after it ends at once.
@@ -335,7 +335,7 @@ async fn keep_alive(
         return KeepAlive::Closed;
     };
     // The task ends at its next look if the engine is gone.
-    let Some(usable) = engine.upgrade().map(|e| pool::usable(&e, session)) else {
+    let Some(usable) = engine.upgrade().map(|e| e.usable(session)) else {
         return KeepAlive::Closed;
     };
     if !usable {
@@ -465,7 +465,7 @@ fn full_sync_in(engine: &Engine, account: AccountId, schedule: &SyncSchedule) ->
 /// Syncs every folder if that is due, else makes queued local changes on the server
 /// (changed drafts included); then syncs INBOX, refreshing the flags `changed_flags`
 /// names. On the connection there, or a new one (see
-/// [`on_session`](pool::on_session)).
+/// [`on_session`](connection::on_session)).
 async fn step(
     engine: &Arc<Engine>,
     session: &mut Option<Session>,
@@ -475,7 +475,7 @@ async fn step(
 ) -> Result<Wait> {
     // Connected before taking the permit: waiting for an unreachable server shouldn't
     // hold up syncs the user asks for.
-    pool::on_session(engine, account, session, {
+    connection::on_session(engine, account, session, {
         let (engine, changed_flags) = (engine.clone(), changed_flags.clone());
         async move |s| work(&engine, s, account, &schedule, &changed_flags).await
     })

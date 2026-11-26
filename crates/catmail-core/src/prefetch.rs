@@ -42,11 +42,12 @@ use tokio::sync::broadcast::{
     error::{RecvError, TryRecvError},
 };
 
-use crate::body::{self, Claim, Claimed, Limits};
+use crate::body::{self, Limits};
+use crate::downloading::{Claim, Claimed};
 use crate::engine::Engine;
 use crate::settings::BodyPrefetch;
 use crate::task::{Cancellation, backoff, blocking, now};
-use crate::{Error, Result, pool};
+use crate::{Error, Result, connection};
 
 const MAX_RETRY: Duration = Duration::from_secs(30 * 60);
 
@@ -444,7 +445,7 @@ async fn one(
     }
     let folder = location.folder;
     let result = tokio::select! {
-        result = pool::on_session(engine, account, session, {
+        result = connection::on_session(engine, account, session, {
             let engine = engine.clone();
             async move |s| body::fetch_body(&engine, s, &location, limits).await
         }) => result,
@@ -497,7 +498,7 @@ async fn outcome(
 /// background task would (it logs in anew for each, as it keeps no connection while
 /// idle), so that the message opens at once from its notification.
 ///
-/// Claimed (see [`Downloading`](crate::body::Downloading)) as they are announced, before
+/// Claimed (see [`Downloading`](crate::downloading::Downloading)) as they are announced, before
 /// the background task hears of them: opening one waits for this fetch rather than make
 /// its own, and the background task leaves them out. At most a batch, the first
 /// announced first: the rest of a burst is the background task's. None unless the engine
