@@ -3,7 +3,7 @@
 
 use std::cell::RefCell;
 
-use catmail_frontend::tray::{Chosen, Pixmap, linux};
+use catmail_frontend::system::tray::{Chosen, Pixmap, linux};
 use futures_channel::mpsc::UnboundedSender;
 use nsh_platform_linux::gtk4::{gio, glib, prelude::*};
 use resvg::tiny_skia;
@@ -99,7 +99,7 @@ fn color_scheme(value: &glib::Variant) {
 
 #[cfg(test)]
 mod tests {
-    use catmail_frontend::tray::{DARK_ICON, LIGHT_ICON, badged};
+    use catmail_frontend::system::tray::{DARK_ICON, LIGHT_ICON, badged};
 
     use super::*;
 

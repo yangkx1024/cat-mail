@@ -1,10 +1,10 @@
 //! How the reading pane looks: the toolbar of commands, the message's header, the web
 //! view its body is shown in, and its attachments.
 
-use catmail_frontend::commands::MessageCommand;
 use catmail_frontend::format;
-use catmail_frontend::list as rows;
-use catmail_frontend::reader::{self, Header};
+use catmail_frontend::mailbox::commands::MessageCommand;
+use catmail_frontend::mailbox::list as rows;
+use catmail_frontend::mailbox::reader::{self, Header};
 use nsh_base::theme;
 use nsh_core::prelude::*;
 

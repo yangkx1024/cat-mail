@@ -2,7 +2,7 @@
 //! `currentColor`, so they take the text color of where they are.
 
 use catmail_core::FolderRole;
-use catmail_frontend::folders::FolderIcon;
+use catmail_frontend::mailbox::folders::FolderIcon;
 use nsh_core::element::ImageSrc;
 use nsh_core::prelude::*;
 

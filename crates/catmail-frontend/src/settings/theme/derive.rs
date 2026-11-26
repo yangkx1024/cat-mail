@@ -255,7 +255,7 @@ fn strip_nulls(value: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::builtin;
+    use crate::settings::theme::builtin;
 
     fn palettes() -> Vec<TerminalPalette> {
         builtin::palettes()

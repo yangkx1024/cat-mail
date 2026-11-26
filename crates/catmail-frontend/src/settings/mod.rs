@@ -2,6 +2,16 @@
 //! reading, serving AI agents. They belong to the frontends, not to the engine, so they live in
 //! `settings.json` in the config directory instead of the database, next to the imported
 //! themes.
+//!
+//! Beside them, what Settings shows of the app: the themes ([`theme`]), what removing an
+//! account or an address asks ([`accounts`]), the MCP server for AI agents ([`mcp`]), and
+//! the values views follow from their own threads, the settings and where the server is
+//! ([`watched`]).
+
+pub mod accounts;
+pub mod mcp;
+pub mod theme;
+pub mod watched;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,7 +20,7 @@ use std::sync::{Mutex, PoisonError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::theme::{DEFAULT_DARK, DEFAULT_LIGHT};
+use theme::{DEFAULT_DARK, DEFAULT_LIGHT};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -66,7 +76,7 @@ pub struct Settings {
     pub mcp: McpSettings,
 }
 
-/// The MCP server the app hosts ([`crate::mcp`]); `catmail serve` takes the same as its
+/// The MCP server the app hosts ([`crate::settings::mcp`]); `catmail serve` takes the same as its
 /// options instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]

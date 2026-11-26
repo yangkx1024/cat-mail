@@ -1,10 +1,10 @@
 //! Settings › Accounts: each account, the addresses it sends as and which is the default,
-//! adding and removing them. Their wording is `catmail_frontend::accounts`'.
+//! adding and removing them. Their wording is `catmail_frontend::settings::accounts`'.
 
 use std::rc::Rc;
 
 use catmail_core::{AccountId, IdentityId};
-use catmail_frontend::accounts;
+use catmail_frontend::settings::accounts;
 use nsh_base::theme;
 use nsh_core::prelude::*;
 

@@ -3,12 +3,12 @@
 
 use std::rc::Rc;
 
-use catmail_frontend::folders::FolderIcon;
-use catmail_frontend::settings::{Appearance, TEXT_SIZES};
-use catmail_frontend::theme::{
+use catmail_frontend::mailbox::folders::FolderIcon;
+use catmail_frontend::settings::theme::{
     IMPORT_HELP, IMPORTABLE_FORMATS, ImportCandidate, Rgb, Rgba, Swatch, TerminalPalette,
     ThemeEntry, file_name, import_title, read_import,
 };
+use catmail_frontend::settings::{Appearance, TEXT_SIZES};
 use nsh_base::theme;
 use nsh_core::Color;
 use nsh_core::element::desktop::{MenuItem, popup_menu};
@@ -521,7 +521,8 @@ fn import_pane(
 /// The 16 ANSI colors of a palette, two rows of eight, under its background and
 /// foreground. These are data, so they are the palette's colors, not the theme's.
 fn palette_swatches(palette: &TerminalPalette) -> impl IntoElement {
-    let rgb = |c: catmail_frontend::theme::Rgb| Hsla::from(Color::rgba(c.r, c.g, c.b, 0xff));
+    let rgb =
+        |c: catmail_frontend::settings::theme::Rgb| Hsla::from(Color::rgba(c.r, c.g, c.b, 0xff));
     let chip = move |color: Hsla, height: f32| {
         view()
             .flex_1()

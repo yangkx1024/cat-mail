@@ -18,11 +18,11 @@ pub use model::{Drawing, TrayModel};
 
 /// The app's icon, light and dark (`assets/app-icon/`, 512 × 512): Linux's tray icon, in
 /// the desktop's appearance.
-pub const LIGHT_ICON: &str = include_str!("../../assets/app-icon/catmail-light.svg");
-pub const DARK_ICON: &str = include_str!("../../assets/app-icon/catmail-dark.svg");
+pub const LIGHT_ICON: &str = include_str!("../../../assets/app-icon/catmail-light.svg");
+pub const DARK_ICON: &str = include_str!("../../../assets/app-icon/catmail-dark.svg");
 
 /// The menu bar's icon on macOS: a template, which the system tints to suit the menu bar.
-pub const MENU_BAR_ICON: &str = include_str!("../../assets/app-icon/catmail-menu-bar.svg");
+pub const MENU_BAR_ICON: &str = include_str!("../../../assets/app-icon/catmail-menu-bar.svg");
 
 /// What the icon looks like, as an SVG, and the sizes it is drawn at (square): on macOS
 /// the template, whatever the count and the appearance (the count is beside it); elsewhere

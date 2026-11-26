@@ -8,9 +8,9 @@ use std::time::Duration;
 
 use catmail_core::{AccountId, MessageId, MessageSummary};
 
-use crate::commands::one_account;
 use crate::format;
 use crate::mailbox::Destination;
+use crate::mailbox::commands::one_account;
 
 /// How long announcements are gathered before telling: a sync stores new mail in
 /// batches, and after a wake every account syncs at once, each announcing its own.

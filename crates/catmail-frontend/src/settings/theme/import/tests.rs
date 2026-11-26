@@ -310,7 +310,10 @@ fn base24_flat() {
 
 #[test]
 fn gpui_kit_theme_set() {
-    let configs: Vec<_> = crate::theme::builtin_themes().into_iter().take(2).collect();
+    let configs: Vec<_> = crate::settings::theme::builtin_themes()
+        .into_iter()
+        .take(2)
+        .collect();
     let json = derive::theme_set_json(&configs);
     let themes = import("mine.json", &json).unwrap();
     assert_eq!(themes.len(), 2);

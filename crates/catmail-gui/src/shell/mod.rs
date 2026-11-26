@@ -53,16 +53,16 @@ use std::time::Duration;
 
 use catmail_core::{DraftId, EditMark, MailClient, MailClientBuilder};
 use catmail_frontend::composer::{ComposeFrom, OpenComposers, Opening, window_title};
-use catmail_frontend::instance::{Request, Requests};
 use catmail_frontend::mailbox::{Ask, Asks, Destination, Place};
-use catmail_frontend::mcp;
-use catmail_frontend::resident::{
+use catmail_frontend::settings::mcp;
+use catmail_frontend::settings::theme::{DEFAULT_DARK, DEFAULT_LIGHT, Themes};
+use catmail_frontend::settings::watched::Watched;
+use catmail_frontend::settings::{self, McpSettings, Settings, SettingsFile};
+use catmail_frontend::system::instance::{Request, Requests};
+use catmail_frontend::system::resident::{
     AfterLastWindow, AtLaunch, QuitReason, after_last_window, at_launch,
 };
-use catmail_frontend::settings::{self, McpSettings, Settings, SettingsFile};
-use catmail_frontend::theme::{DEFAULT_DARK, DEFAULT_LIGHT, Themes};
-use catmail_frontend::tray::Command;
-use catmail_frontend::watched::Watched;
+use catmail_frontend::system::tray::Command;
 use futures_channel::{mpsc, oneshot};
 use futures_util::StreamExt as _;
 
@@ -181,7 +181,7 @@ fn restyle_views() {
 }
 
 //
-// It runs on a thread of its own (`catmail_frontend::mcp::Host`), from the engine's
+// It runs on a thread of its own (`catmail_frontend::settings::mcp::Host`), from the engine's
 // opening until the app quits, as the settings say.
 
 /// The server's host, once the engine is open.
@@ -349,7 +349,7 @@ pub fn run(
     HIDDEN.set(hidden);
     let file = FILE.get_or_init(|| file.map(Arc::new));
     if let Some(file) = file {
-        catmail_frontend::autostart::use_config_dir(file.dir().to_owned());
+        catmail_frontend::system::autostart::use_config_dir(file.dir().to_owned());
     }
     load_settings(file.as_deref());
     let code = toolkit::run(move || {
@@ -682,7 +682,7 @@ fn window_removed() {
             // Once the views' threads have let go of what they held.
             toolkit::after(Duration::from_secs(2), || {
                 if toolkit::windows().is_empty() && QUITTING.get().is_none() {
-                    std::thread::spawn(catmail_frontend::memory::release_freed);
+                    std::thread::spawn(catmail_frontend::system::memory::release_freed);
                 }
             });
         }

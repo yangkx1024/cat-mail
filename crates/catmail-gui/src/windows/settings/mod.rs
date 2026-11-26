@@ -2,9 +2,9 @@
 //! color scheme, text size), accounts and the addresses they send as, reading (with the
 //! cache of remote images), and agents (the MCP server, its tokens). The settings are
 //! `shell`'s, shared by every window; the themes and their import are
-//! `catmail_frontend::theme`'s, the wording of Accounts `catmail_frontend::accounts`'.
+//! `catmail_frontend::settings::theme`'s, the wording of Accounts `catmail_frontend::settings::accounts`'.
 //!
-//! General: opening at login (the system's, `catmail_frontend::autostart`), running in the
+//! General: opening at login (the system's, `catmail_frontend::system::autostart`), running in the
 //! background, new mail notifications.
 
 mod accounts;
@@ -12,8 +12,8 @@ mod agents;
 mod appearance;
 mod reading;
 
-use catmail_frontend::autostart::{self, State};
 use catmail_frontend::settings::{DEFAULT_TEXT_SIZE, Settings};
+use catmail_frontend::system::autostart::{self, State};
 use futures_util::StreamExt as _;
 use nsh_base::{SwitchElement, switch, theme};
 use nsh_core::element::set_color_scheme;

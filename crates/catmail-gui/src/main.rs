@@ -42,12 +42,12 @@ mod windows;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn main() -> anyhow::Result<std::process::ExitCode> {
     use catmail_core::{Config, MailClient};
-    use catmail_frontend::instance::{self, Claim, Request};
     use catmail_frontend::settings::SettingsFile;
+    use catmail_frontend::system::instance::{self, Claim, Request};
 
     catmail_core::logging::init(&format!(
         "catmail_gui=info,catmail_frontend=info,{}",
-        catmail_frontend::mcp::LOG_FILTER
+        catmail_frontend::settings::mcp::LOG_FILTER
     ));
     let config = match std::env::var_os("CATMAIL_DATA_DIR") {
         Some(dir) => Config::with_data_dir(dir),

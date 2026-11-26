@@ -1,7 +1,7 @@
 //! The tray icon on macOS: the menu bar's status item, a template the system tints to
 //! suit the menu bar, with the count beside it.
 
-use catmail_frontend::tray::{Chosen, Template, macos};
+use catmail_frontend::system::tray::{Chosen, Template, macos};
 use futures_channel::mpsc::UnboundedSender;
 use resvg::tiny_skia;
 
@@ -31,7 +31,7 @@ pub fn follow_appearance() {}
 
 #[cfg(test)]
 mod tests {
-    use catmail_frontend::tray::{MENU_BAR_ICON, MENU_BAR_SIZES};
+    use catmail_frontend::system::tray::{MENU_BAR_ICON, MENU_BAR_SIZES};
 
     /// macOS tints whatever isn't transparent.
     #[test]

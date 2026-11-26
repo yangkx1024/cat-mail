@@ -2,7 +2,7 @@
 //! INBOXes, a click to bring the main window back; on macOS a template in the menu bar with
 //! the number beside it, and on the Dock icon. Either has a menu to write a message, sync
 //! or quit, and is there with or without a window. The items, their menu, what they say,
-//! the icons and when to count and draw are `catmail_frontend::tray`'s; here the count is
+//! the icons and when to count and draw are `catmail_frontend::system::tray`'s; here the count is
 //! counted and the icon drawn (resvg, off the main thread), on the main thread. See
 //! docs/architecture/background.md.
 
@@ -17,8 +17,8 @@ use std::cell::RefCell;
 use std::sync::{Arc, LazyLock};
 
 use catmail_core::RecvError;
-use catmail_frontend::refresh::Refresh;
-use catmail_frontend::tray::{Chosen, TrayModel};
+use catmail_frontend::mailbox::refresh::Refresh;
+use catmail_frontend::system::tray::{Chosen, TrayModel};
 use futures_channel::mpsc;
 use futures_util::StreamExt as _;
 use resvg::{tiny_skia, usvg};

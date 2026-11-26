@@ -1,13 +1,13 @@
 //! The settings' themes as nsh draws them, and the app's own colors mixed from them.
 //!
-//! A theme is GPUI Kit's (`catmail_frontend::theme`: built in, or imported into the
+//! A theme is GPUI Kit's (`catmail_frontend::settings::theme`: built in, or imported into the
 //! themes folder); nsh's theme is shadcn's tokens. [`css_vars`] maps the one onto the
 //! other, the light theme for the light appearance and the dark one for the dark, as a
 //! theme file of shadcn's (`cssVars`) that every view takes over its own
 //! (`AppView::set_theme_overrides`). Colors shadcn has no token for are the app's own
 //! tokens, by the names below.
 
-use catmail_frontend::theme::ThemeConfig;
+use catmail_frontend::settings::theme::ThemeConfig;
 use nsh_base::theme;
 use nsh_core::Color;
 use nsh_core::prelude::*;
@@ -165,14 +165,14 @@ impl SelectableText for Text {
 /// sender keeps theirs.
 pub fn avatar(seed: &str) -> AdaptiveColor {
     const HUES: [&str; 6] = ["red", "green", "yellow", "blue", "magenta", "cyan"];
-    let hue = HUES[catmail_frontend::list::avatar_hue(seed)];
+    let hue = HUES[catmail_frontend::mailbox::list::avatar_hue(seed)];
     tint(token(hue, || theme().primary))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use catmail_frontend::theme::{DEFAULT_DARK, DEFAULT_LIGHT, Themes};
+    use catmail_frontend::settings::theme::{DEFAULT_DARK, DEFAULT_LIGHT, Themes};
 
     #[test]
     fn selectable_texts_show_the_themes_selection() {

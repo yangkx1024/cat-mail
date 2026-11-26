@@ -7,7 +7,7 @@ use catmail_core::{AccountId, Identity, MailClient, OutboxEntry, OutboxId, Outbo
 use crate::composer::senders;
 use crate::confirm::Confirm;
 use crate::format;
-use crate::list::outbox_status;
+use crate::mailbox::list::outbox_status;
 
 /// The lines over the entry's state, as (name, value). From is the identity it goes out
 /// as, named among `identities` (every account's) as a new message's From names it. It

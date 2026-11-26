@@ -257,7 +257,7 @@ pub fn movable(
 
 /// The folders "Move to" offers for the messages, all of one account and listed in
 /// `source`: those moving any of them to changes, by
-/// [`AccountFolders::paths`](crate::folders::AccountFolders::paths). None if the messages
+/// [`AccountFolders::paths`](crate::mailbox::folders::AccountFolders::paths). None if the messages
 /// are of more than one account, or one not among `accounts`.
 pub fn move_targets(
     messages: &[MessageSummary],

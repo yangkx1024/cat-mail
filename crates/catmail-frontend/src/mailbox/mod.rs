@@ -1,8 +1,16 @@
 //! What the mailbox window shows, apart from how: the places the sidebar selects, what
 //! the message list lists, each account as the sidebar shows it, and what the tray and
-//! the notifications ask of it ([`Asks`]).
+//! the notifications ask of it ([`Asks`]). Its panes' models are inside it: the sidebar's
+//! folders ([`folders`]) and what it reads ([`sidebar`]), the list's rows ([`list`]), the
+//! commands on messages ([`commands`]), what the reading pane says ([`reader`]), and which
+//! engine events read what again ([`refresh`]).
 
 mod asks;
+pub mod commands;
+pub mod folders;
+pub mod list;
+pub mod reader;
+pub mod refresh;
 pub mod sidebar;
 
 use std::collections::HashMap;
@@ -14,7 +22,7 @@ use catmail_core::{
 };
 
 use crate::confirm::Confirm;
-use crate::folders::{self, AccountFolders, FolderIcon};
+use folders::{AccountFolders, FolderIcon};
 
 pub use asks::{Ask, Asks};
 
@@ -212,7 +220,7 @@ pub fn list_note(
 ) -> Option<String> {
     match source? {
         Source::Inboxes | Source::Folder(_) => {
-            let unread = crate::folders::unread(place?.folders(accounts));
+            let unread = crate::mailbox::folders::unread(place?.folders(accounts));
             (unread > 0).then(|| format!("{unread} unread"))
         }
         Source::Outbox(account) => AccountEntry::find(accounts, *account)

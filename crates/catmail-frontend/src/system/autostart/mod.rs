@@ -17,15 +17,15 @@ use thiserror::Error;
     unsafe_code,
     reason = "ServiceManagement and Foundation are Objective-C"
 )]
-#[path = "autostart/macos.rs"]
+#[path = "macos.rs"]
 mod platform;
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-#[path = "autostart/linux.rs"]
+#[path = "linux.rs"]
 mod platform;
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-#[path = "autostart/portal.rs"]
+#[path = "portal.rs"]
 mod portal;
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "freebsd")))]

@@ -6,41 +6,28 @@
 //! metadata reads, what the reader says of a message, which parts of a message's HTML it
 //! shows and the page it shows a body as, the tray icon, the new-mail notifications,
 //! running with no window, opening at login, the MCP server for AI agents, and the values
-//! views follow from their own threads ([`watched`]).
+//! views follow from their own threads ([`settings::watched`]).
 //! `catmail-gui` draws it; kept apart from it so that it is tested without GTK, WebKit
 //! or nsh, and holds no type of theirs.
 //!
-//! `unsafe_code` is denied (the workspace's lint), not forbidden: [`memory`] calls glibc's
-//! `malloc_trim`, and the macOS status item ([`tray`]) and login item ([`autostart`]) call
-//! AppKit and ServiceManagement.
+//! `unsafe_code` is denied (the workspace's lint), not forbidden: [`system::memory`] calls
+//! glibc's `malloc_trim`, and the macOS status item ([`system::tray`]) and login item
+//! ([`system::autostart`]) call AppKit and ServiceManagement.
 
-pub mod accounts;
-pub mod autostart;
 pub mod coalesce;
-pub mod commands;
 pub mod composer;
 pub mod confirm;
 #[cfg(test)]
 mod fixtures;
-pub mod folders;
 pub mod format;
 mod fs;
 pub mod html;
-pub mod instance;
-pub mod list;
 pub mod login;
 pub mod mailbox;
-pub mod mcp;
-pub mod memory;
 pub mod new_mail;
 pub mod outbox;
-pub mod reader;
-pub mod refresh;
-pub mod resident;
 pub mod settings;
-pub mod theme;
-pub mod tray;
-pub mod watched;
+pub mod system;
 
 pub use catmail_core::APP_ID;
 

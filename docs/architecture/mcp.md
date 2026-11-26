@@ -33,7 +33,7 @@ MCP 不是第三个各自打开数据库的前端，而是一个库 `catmail-mcp
   有版本的公开协议，托管在引擎所在的进程里不需要私有协议。
 - 同一个数据目录只会有一个宿主，引擎的锁保证。两个宿主的引擎配置相同（后台同步、预取正文、后台发信、
   GC）：`MailClientBuilder::resident()`，GUI 和 `serve` 都用它。
-- GUI 里的服务跑在专门的线程上（`catmail_frontend::mcp::Host`），用它自己的 current-thread tokio runtime，
+- GUI 里的服务跑在专门的线程上（`catmail_frontend::settings::mcp::Host`），用它自己的 current-thread tokio runtime，
   不碰工具包的主循环；`MailClient` 的 future 不依赖 executor（见[运行时桥接](../architecture.md#运行时桥接)）。
   开关随时启停，不重启 GUI。详见下文 [GUI 托管](#gui-托管)。
 - `catmail serve` 也是 Windows 上唯一的宿主（那里还没有 GUI）。
@@ -50,7 +50,7 @@ MCP 不是第三个各自打开数据库的前端，而是一个库 `catmail-mcp
 
 Settings › Agents：开关、端口，下面是令牌。
 
-- **服务的线程**（`catmail_frontend::mcp::Host`）：引擎打开后由外壳（`shell/mod.rs`）建好，一直到应用退出；
+- **服务的线程**（`catmail_frontend::settings::mcp::Host`）：引擎打开后由外壳（`shell/mod.rs`）建好，一直到应用退出；
   服务按设置开、关、换端口。外壳像视图一样跟随设置，每变一次把**当时生效的**设置交给它（两个视图线程上的两次
   修改可能以任意顺序到达），`update_settings` 本身不认识 MCP。它只看最新的一个，与正在用的相同就不动：改别的设置不会重启服务，也不会重试刚失败的端口（关掉再
   打开才重试）。换端口时先停旧的再开新的。

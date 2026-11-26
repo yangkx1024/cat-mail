@@ -2,15 +2,15 @@
 //! heading for each day; a row on one line while nothing is open, the subject under the
 //! sender while the reading pane is; the messages checked for a command on them all. What a
 //! source lists, the days and lines, the reads and where the selection goes after them, and
-//! what a row says are `catmail_frontend::list`'s (`Listing`, `ListModel`); they are read
+//! what a row says are `catmail_frontend::mailbox::list`'s (`Listing`, `ListModel`); they are read
 //! and kept in nsh's signals by `listing.rs`, and drawn here.
 
 mod rows;
 
 use catmail_core::FlagFilter;
-use catmail_frontend::commands::MessageCommand;
 use catmail_frontend::composer::ComposeFrom;
-use catmail_frontend::list::{self, Listing, RowId};
+use catmail_frontend::mailbox::commands::MessageCommand;
+use catmail_frontend::mailbox::list::{self, Listing, RowId};
 use catmail_frontend::mailbox::{self, Source};
 use nsh_base::theme;
 use nsh_core::element::desktop::{MenuItem, popup_menu};

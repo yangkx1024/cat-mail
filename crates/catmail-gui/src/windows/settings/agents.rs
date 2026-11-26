@@ -2,15 +2,15 @@
 //! address; from other devices through a tunnel such as `tailscale serve`), the tokens
 //! they present, each with what it may do and with which accounts, and the commands that
 //! add it to Claude Code and Codex. The server
-//! is `shell`'s, what this says `catmail_frontend::mcp`'s, the commands `catmail_mcp`'s
+//! is `shell`'s, what this says `catmail_frontend::settings::mcp`'s, the commands `catmail_mcp`'s
 //! (`catmail mcp token add` prints them too).
 
 use std::time::Duration;
 
 use catmail_frontend::format;
 use catmail_frontend::login::{Submission, parse_port};
-use catmail_frontend::mcp::connect::{self, Example};
-use catmail_frontend::mcp::{self, Access, NewToken, Status, Tier, Token, Tokens};
+use catmail_frontend::settings::mcp::connect::{self, Example};
+use catmail_frontend::settings::mcp::{self, Access, NewToken, Status, Tier, Token, Tokens};
 use futures_util::StreamExt as _;
 use nsh_base::theme;
 use nsh_core::element::desktop::{MenuItem, popup_menu};

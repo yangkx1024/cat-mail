@@ -3,7 +3,7 @@
 
 use catmail_core::{Flags, MessageSummary};
 use catmail_frontend::format;
-use catmail_frontend::list::{self, Line, Listing, ROW_LABELS, Row, RowId, Severity};
+use catmail_frontend::mailbox::list::{self, Line, Listing, ROW_LABELS, Row, RowId, Severity};
 use nsh_base::theme;
 use nsh_core::prelude::*;
 

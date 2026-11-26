@@ -6,11 +6,11 @@
 use std::rc::Rc;
 
 use catmail_core::{AccountId, Security, Verify};
-use catmail_frontend::accounts;
 use catmail_frontend::login::{
     AccountValues, IdentityValues, LoginValues, NAME_HELP, PLAIN_WARNING, SECURITY, ServerValues,
     Submission,
 };
+use catmail_frontend::settings::accounts;
 use nsh_base::theme;
 use nsh_core::prelude::*;
 

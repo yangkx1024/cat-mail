@@ -46,7 +46,7 @@ Windows 用户目前只有 CLI。
 
 ```
 src/
-  main.rs          启动：交给已在运行的实例或成为它（catmail_frontend::instance），日志，引擎的选项；把主窗口的视图
+  main.rs          启动：交给已在运行的实例或成为它（catmail_frontend::system::instance），日志，引擎的选项；把主窗口的视图
                    和窗口外的部分（托盘、通知、唤醒）交给 shell::run
   engine.rs        引擎：属于应用，不属于窗口；打开中、已打开、失败、已关闭
   accounts.rs      主窗口读到的账户（文件夹、发件身份、状态）和 Sync：侧栏、列表、命令、设置、登录页共用
@@ -146,7 +146,7 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 同步之间只盯 INBOX，所以打开一个文件夹时同步它（`sync_folder`，见[同步 / 打开的文件夹](sync.md#打开的文件夹)），
 失败只记日志。
 
-哪个事件重读什么由 `catmail_frontend::refresh::Refresh::after` 一张表决定：
+哪个事件重读什么由 `catmail_frontend::mailbox::refresh::Refresh::after` 一张表决定：
 
 - **侧栏**一次读完：`MailClient::overview` 在一个读事务里取所有账户的文件夹（含计数）、草稿数和发件箱。
   连接状态不在数据库里，结果落到窗口时才取 `account_status`，不会比它的事件旧。账户增删、`FoldersChanged`、
@@ -205,7 +205,7 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 
 ## 邮件列表
 
-行的模型在 `catmail_frontend::list`（来源怎么分页读、按天分组、重读后选中去哪、按标记勾选、行上的文字）。
+行的模型在 `catmail_frontend::mailbox::list`（来源怎么分页读、按天分组、重读后选中去哪、按标记勾选、行上的文字）。
 列表显示什么是 `Listing`：行、按天的分组和排成的条目，条目只记日期标题和行的下标，翻页时只追加，不再把每行
 复制一份。怎么读是 `ListModel`：换来源时作废旧来源的读取、一次一个读取（`Coalesce`）、搜索框停顿后换成什么（`typed`、
 `paused`：期间又有按键就不搜，没输入就回到选中的地方，和正显示的一样就不动）、什么时候问服务器（`server_search`，
@@ -285,7 +285,7 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 
 ## 读与改
 
-命令的模型在 `catmail_frontend::commands`（`Applies`、命令的名字、"Move to"列出的文件夹、永久删除的确认文案、
+命令的模型在 `catmail_frontend::mailbox::commands`（`Applies`、命令的名字、"Move to"列出的文件夹、永久删除的确认文案、
 被拒改动的说明），都直接拿账户列表（`&[AccountEntry]`）。每个改动是一个 `Change`：改哪些邮件、向引擎要做什么
 （`Op`，`Change::run` 调对应的 `MailClient` 方法）、失败时怎么说（`Change::failure`，"Couldn't {what}"，和删除
 文件夹、发件箱的选项一样）、会不会让邮件离开列表（`may_remove`，改标记以外都会）、做完要不要去掉勾选
@@ -535,11 +535,11 @@ From 是条目实际发出用的身份（`OutboxEntry::identity`），叫法和�
 - 设置和主题是进程级的（`shell/`）：每个窗口的视图各在自己的线程上读，设置对话框从主窗口改。改了就写回文件，
   所有窗口（包括写信窗口）随之更新：主题和文字大小由主线程设给每个 `AppView`，外观由各视图自己
   `set_color_scheme`。
-- 设置放在 `catmail_frontend::watched::Watched` 里：视图读当前值和开始跟随在同一把锁下，改设置、排队写文件、
+- 设置放在 `catmail_frontend::settings::watched::Watched` 里：视图读当前值和开始跟随在同一把锁下，改设置、排队写文件、
   通知跟随者也在同一把锁下。两个窗口的线程同时改设置时，各视图按改的先后收到，最后停在最新的值上，文件写的
   也是最新的；读和跟随之间的修改不会漏掉。外壳里的 MCP 状态也用它。
 - **文字大小**是 nsh 的 `AppView::set_font_scale`；Ctrl + / Ctrl − / Ctrl 0 改它，Ctrl+, 打开设置。
-- **主题都从终端调色板推导**（`catmail_frontend::theme`）：背景、前景和 16 个 ANSI 色推导出全部颜色；内置主题
+- **主题都从终端调色板推导**（`catmail_frontend::settings::theme`）：背景、前景和 16 个 ANSI 色推导出全部颜色；内置主题
   也写成调色板。导入按内容识别 Alacritty、kitty、Ghostty、WezTerm、Windows Terminal、iTerm2、foot、Xresources、
   base16 / base24 和主题 JSON，结果写进主题目录（可手工修改，启动时读取）。主题文件的格式沿用 gpui-kit 的主题
   JSON（GPUI 版留下的，已有的主题目录照样能用），frontend 不依赖它。推导只写 GUI 读的键（下一条的映射表和
@@ -553,7 +553,7 @@ From 是条目实际发出用的身份（`OutboxEntry::identity`），叫法和�
 - **Agents**：给 AI agent 的 MCP 服务（开关、端口）和令牌，服务由外壳在自己的线程上托管，见
   [MCP / GUI 托管](mcp.md#gui-托管)。
 - **Accounts**：账户列表、Add account；发件身份的默认、改名、删除、"Server saves to Sent"、Add sending address。
-  确认文案在 `catmail_frontend::accounts`。
+  确认文案在 `catmail_frontend::settings::accounts`。
 
 ## 登录页
 

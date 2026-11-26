@@ -16,7 +16,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use catmail_core::MailClient;
-use catmail_frontend::resident::QuitReason;
+use catmail_frontend::system::resident::QuitReason;
 use nsh_core::platform::{Idiom, Os};
 use nsh_engine::{ColorScheme, EngineConfig, Environment, Points, Size};
 use nsh_testing::Headless;
