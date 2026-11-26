@@ -40,7 +40,7 @@ pub(crate) enum Uploads {
     /// Every one: the user asked for it.
     All,
     /// Those not changed within the engine's
-    /// [`draft_upload_delay`](Engine::draft_upload_delay), for background sync: a draft
+    /// [`draft_upload_delay`](crate::settings::EngineSettings::draft_upload_delay), for background sync: a draft
     /// being written is uploaded once the user pauses, not with every save. Nor those
     /// the server refused, until their backoff runs out.
     Settled,
@@ -199,11 +199,11 @@ async fn upload_one(
     };
     // As it will be sent.
     let message_id = drafts::new_message_id(&sender.email);
-    let (engine2, message_id2) = (engine.clone(), message_id.clone());
+    let (storage, message_id2) = (engine.storage(), message_id.clone());
     let revision = snapshot.revision;
     let built = blocking(move || {
         drafts::build(
-            &engine2,
+            &storage,
             &sender,
             &snapshot,
             &message_id2,

@@ -175,7 +175,8 @@ rowid 即 `id`，不必再列一次）：先取游标那个日期里 `id` 更小
 hash。因此只删除"没有被任何 `*_blob_hash` 列引用，**并且** mtime 早于宽限期"的文件，删除前再查一次
 mtime。宽限期要远大于任何写事务的时长；`put` 遇到已存在的 blob 会刷新 mtime，宽限期重新计时。
 
-**实现**（`BlobStore::collect_garbage`，入口 `MailClient::collect_garbage` / `catmail gc`）：先在一个
+**实现**（`BlobStore::collect_garbage`，由 `catmail-core` 的 `Storage::collect_garbage` 调用，入口
+`MailClient::collect_garbage` / `catmail gc`）：先在一个
 读事务里取出所有引用（`Db::blob_references`；有测试枚举所有 `*_blob_hash` 列，漏加会失败），再遍历
 目录找出未引用且足够旧的候选，逐个在写锁下重查 mtime 后删除。`put` 刷新或创建 blob 时持有同一把锁
 的读锁，"GC 判定为旧"与"`put` 刚刚刷新"不会交错。宽限期 1 小时；`tmp` 里中断写入留下的旧文件一并
@@ -193,7 +194,8 @@ Windows Credential Manager），service 为 `catmail`，键为 `account:{email}:
 [发信](sending.md#发件身份)）各有自己的密码，键为 `identity:{email}:{随机 uuid}`，规则相同；随账户建出的
 那个身份没有自己的条目（`secret_key` 为空），用账户的密码。
 
-- 添加：先写密钥，再插入行；插入失败则删除刚写的密钥（`catmail-core` 的 `accounts.rs`，`insert_with_secret`）。
+- 添加：先写密钥，再插入行；插入失败则删除刚写的密钥（`catmail-core` 的 `Storage::insert_with_secret`）。
+  和 blob 是同一条规则：行引用的东西先存好，再写行（`catmail-core/src/storage.rs`）。
 - 删除：`DELETE … RETURNING secret_key` 原子地删行并取得键，再删密钥。删除账户时在同一个事务里先读出
   它的身份自己的键（身份随账户级联删除），再一并删掉。
 

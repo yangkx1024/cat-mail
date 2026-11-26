@@ -76,7 +76,7 @@ pub(crate) fn secret_key(client: &MailClient, id: AccountId) -> String {
     client
         .engine()
         .unwrap()
-        .store
+        .storage()
         .read(|db| db.accounts().secret_key(id))
         .unwrap()
         .unwrap()

@@ -20,8 +20,9 @@ use catmail_store::{Messages, NewBody, StaleBody};
 use catmail_types::{AccountId, Event, FolderId, MessageId};
 
 use crate::Result;
-use crate::content::{new_body, stored};
+use crate::content::new_body;
 use crate::engine::Engine;
+use crate::storage::Storage;
 use crate::task::{Closing, blocking};
 
 /// Bodies rebuilt in one transaction.
@@ -56,16 +57,13 @@ impl Rebuilt {
 }
 
 /// Blocking. `None` if the message's body is gone or current.
-fn make(engine: &Engine, id: MessageId) -> Result<Option<Rebuilt>> {
-    let Some(stale) = engine
-        .store
-        .read(|db| db.messages().stale_body(id, CONTENT_VERSION))?
-    else {
+fn make(storage: &Storage, id: MessageId) -> Result<Option<Rebuilt>> {
+    let Some(stale) = storage.read(|db| db.messages().stale_body(id, CONTENT_VERSION))? else {
         return Ok(None);
     };
     let raw = match &stale.raw {
         Some(hash) => {
-            let raw = stored(&engine.blobs, hash)?;
+            let raw = storage.blob(hash)?;
             if raw.is_none() {
                 tracing::warn!(%hash, %id, "raw message is missing; sanitizing the HTML again");
             }
@@ -75,7 +73,7 @@ fn make(engine: &Engine, id: MessageId) -> Result<Option<Rebuilt>> {
     };
     let made = match raw {
         // Not put in the blob store again: the row keeps referring to it.
-        Some(raw) => Made::Whole(new_body(&engine.blobs, mime::parse_message(&raw), None)?),
+        Some(raw) => Made::Whole(new_body(storage, mime::parse_message(&raw), None)?),
         None => match stale.html.as_deref().map(mime::sanitized_html) {
             Some((html, images)) => Made::Html(Some(html), images),
             None => Made::Html(None, HashSet::new()),
@@ -138,12 +136,12 @@ pub(crate) async fn run(engine: Weak<Engine>, delay: Duration, mut closing: Clos
 async fn rebuild(engine: &Arc<Engine>, ids: Vec<MessageId>) -> (usize, usize) {
     let count = ids.len();
     let done = blocking({
-        let engine = engine.clone();
+        let storage = engine.storage();
         move || {
             let mut failed = 0;
             let made: Vec<Rebuilt> = ids
                 .iter()
-                .filter_map(|&id| match make(&engine, id) {
+                .filter_map(|&id| match make(&storage, id) {
                     Ok(made) => made,
                     Err(e) => {
                         tracing::warn!(%id, error = %e, "rebuilding the body failed");
@@ -152,7 +150,7 @@ async fn rebuild(engine: &Arc<Engine>, ids: Vec<MessageId>) -> (usize, usize) {
                     }
                 })
                 .collect();
-            let changed = engine.store.write(|db| {
+            let changed = storage.write(|db| {
                 let messages = db.messages();
                 let mut changed = BTreeSet::<(AccountId, FolderId)>::new();
                 let mut stored = 0;

@@ -66,7 +66,7 @@ const OVER_LIMIT: Duration = Duration::from_secs(24 * 60 * 60);
 /// Starts fetching `account`'s bodies in the background, if the engine does. Call from
 /// inside the engine runtime.
 pub(crate) fn spawn(engine: &Arc<Engine>, account: AccountId) {
-    if let Some(settings) = engine.prefetch {
+    if let Some(settings) = engine.settings().prefetch {
         tokio::spawn(task(engine, account, settings));
     }
 }
@@ -105,7 +105,7 @@ enum Batch {
 async fn run(engine: Weak<Engine>, account: AccountId, settings: BodyPrefetch) {
     let Some((mut events, synced, mut cancellation, mut closing)) = engine.upgrade().map(|e| {
         (
-            e.events.subscribe(),
+            e.subscribe(),
             e.synced_signal(account),
             e.cancellation(account),
             e.closing(),
@@ -301,7 +301,7 @@ impl Allowance {
 fn limits(settings: &BodyPrefetch, engine: &Engine) -> Limits {
     Limits {
         whole: settings.whole_limit,
-        text: engine.tuning.whole_message_limit,
+        text: engine.settings().tuning.whole_message_limit,
     }
 }
 
@@ -344,7 +344,7 @@ async fn batch(
     };
     // Being fetched for the user, or as they arrived: stored as they come, they are news
     // when they are. Else a batch of only those would be fetched again and again.
-    next.retain(|&(id, _)| !engine.downloading.claimed(id));
+    next.retain(|&(id, _)| !engine.body_claimed(id));
     if next.is_empty() {
         return Ok(Batch::Done);
     }
@@ -441,7 +441,7 @@ async fn one(
         return Ok(One::Skipped);
     };
     // Claimed since the batch was read: stored as it comes, not with this batch.
-    if location.downloaded || engine.downloading.claimed(id) {
+    if location.downloaded || engine.body_claimed(id) {
         return Ok(One::Skipped);
     }
     let folder = location.folder;
@@ -475,8 +475,8 @@ async fn outcome(
             tracing::debug!(%account, message_id = %id, %folder, bytes,
                 whole = matches!(fetched, content::Fetched::Whole(_)), examine = ?took.examine,
                 fetch = ?took.fetch, "prefetched a body");
-            let engine = engine.clone();
-            let body = blocking(move || content::parse(&engine.blobs, fetched)).await?;
+            let storage = engine.storage();
+            let body = blocking(move || content::parse(&storage, fetched)).await?;
             Ok(One::Body {
                 folder,
                 body,
@@ -513,7 +513,10 @@ impl Arrivals {
     pub fn new(engine: &Engine) -> Self {
         Self {
             claimed: Vec::new(),
-            room: engine.prefetch.map_or(0, |settings| settings.batch),
+            room: engine
+                .settings()
+                .prefetch
+                .map_or(0, |settings| settings.batch),
         }
     }
 
@@ -523,7 +526,7 @@ impl Arrivals {
             if self.claimed.len() >= self.room {
                 return;
             }
-            if let Claim::Mine(claimed) = engine.downloading.claim(id) {
+            if let Claim::Mine(claimed) = engine.claim_body(id) {
                 self.claimed.push((id, claimed));
             }
         }
@@ -541,7 +544,7 @@ impl Arrivals {
         session: &mut Session,
         account: AccountId,
     ) -> Result<()> {
-        let Some(settings) = engine.prefetch else {
+        let Some(settings) = engine.settings().prefetch else {
             return Ok(());
         };
         if self.claimed.is_empty() || engine.waits_out(account) {

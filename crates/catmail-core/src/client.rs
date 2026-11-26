@@ -22,7 +22,7 @@ use crate::runtime::Runtime;
 use crate::task::{Closing, lock};
 use crate::{
     Config, DraftRevision, EditMark, Error, Result, SendPreview, Verify, accounts, body, drafts,
-    folders, gc, images, ops, search, send, sync,
+    folders, images, ops, search, send, sync,
 };
 
 mod builder;
@@ -51,8 +51,9 @@ struct Shared {
     /// reference meanwhile.
     engine: Mutex<Option<Arc<Engine>>>,
     config: Config,
-    /// The engine's, kept here to wait on once it was let go of.
-    closing: Closing,
+    /// The engine's storage, let go of once the engine and the work under way with it
+    /// are: kept here to wait on.
+    released: Closing,
 }
 
 impl MailClient {
@@ -66,11 +67,8 @@ impl MailClient {
         &self,
         f: impl FnOnce(&Db<'_>) -> catmail_store::Result<T> + Send + 'static,
     ) -> Result<T> {
-        let engine = self.engine()?;
-        self.shared
-            .rt
-            .run_blocking(move || Ok(engine.store.read(f)?))
-            .await
+        let storage = self.engine()?.storage();
+        self.shared.rt.run_blocking(move || storage.read(f)).await
     }
 
     pub fn config(&self) -> &Config {
@@ -108,7 +106,7 @@ impl MailClient {
     /// has closed.
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         match self.engine() {
-            Ok(engine) => engine.events.subscribe(),
+            Ok(engine) => engine.subscribe(),
             // Closed already: one whose sender is gone.
             Err(_) => broadcast::channel(1).1,
         }
@@ -118,8 +116,8 @@ impl MailClient {
     /// [`shut_down`](Self::shut_down), and the work under way with it. Holds no handle
     /// itself, so a frontend can let go of its own and then wait.
     pub fn closed(&self) -> impl Future<Output = ()> + Send + use<> {
-        let mut closing = self.shared.closing.clone();
-        async move { closing.closed().await }
+        let mut released = self.shared.released.clone();
+        async move { released.closed().await }
     }
 
     /// Closes the engine for every clone of this client, as dropping them all would, for a
@@ -339,7 +337,7 @@ impl MailClient {
     /// [`sync_account`](Self::sync_account) syncs one.
     pub async fn sync_now(&self) -> Result<()> {
         let engine = self.engine()?;
-        if engine.sync_in_background.is_none() {
+        if engine.settings().sync_in_background.is_none() {
             return Err(Error::NoBackgroundSync);
         }
         self.shared
@@ -523,7 +521,12 @@ impl MailClient {
                 .run(async move { engine.image_fetcher() })
                 .await?
         };
-        Ok(images::fetch(&self.shared.rt, fetcher, engine, urls))
+        Ok(images::fetch(
+            &self.shared.rt,
+            fetcher,
+            engine.storage(),
+            urls,
+        ))
     }
 
     /// The remote images among `urls` that were shown before and are still cached, with
@@ -533,30 +536,30 @@ impl MailClient {
         &self,
         urls: Vec<String>,
     ) -> Result<Vec<(String, RemoteImage)>> {
-        let engine = self.engine()?;
+        let storage = self.engine()?.storage();
         self.shared
             .rt
-            .run_blocking(move || Ok(engine.image_cache.get_many(&urls)))
+            .run_blocking(move || Ok(storage.cached_images(&urls)))
             .await
     }
 
     /// The bytes the cache of remote images takes on disk. It keeps at most 256 MiB,
     /// dropping the images used longest ago.
     pub async fn image_cache_size(&self) -> Result<u64> {
-        let engine = self.engine()?;
+        let storage = self.engine()?.storage();
         self.shared
             .rt
-            .run_blocking(move || Ok(engine.image_cache.size()?))
+            .run_blocking(move || storage.image_cache_size())
             .await
     }
 
     /// Deletes every cached remote image; returns the bytes freed. Messages show their
     /// remote images again only when asked.
     pub async fn clear_image_cache(&self) -> Result<u64> {
-        let engine = self.engine()?;
+        let storage = self.engine()?.storage();
         self.shared
             .rt
-            .run_blocking(move || Ok(engine.image_cache.clear()?))
+            .run_blocking(move || storage.clear_images())
             .await
     }
 
@@ -1053,10 +1056,10 @@ impl MailClient {
     /// Deletes stored bodies and attachments nothing refers to any more (after messages
     /// or accounts were removed). Safe to run at any time.
     pub async fn collect_garbage(&self) -> Result<GcReport> {
-        let engine = self.engine()?;
+        let storage = self.engine()?.storage();
         self.shared
             .rt
-            .run_blocking(move || gc::collect(&engine))
+            .run_blocking(move || storage.collect_garbage())
             .await
     }
 
@@ -1158,13 +1161,13 @@ impl DraftEditor {
     /// its content is in, which stays as it is while the attachment does. Not to be
     /// changed.
     pub async fn images(&self) -> Result<Vec<(String, PathBuf)>> {
-        let (draft, engine) = (self.draft, self.client.engine()?);
+        let (draft, storage) = (self.draft, self.client.engine()?.storage());
         self.client
             .read(move |db| {
                 let images = db.drafts().images(draft)?;
                 Ok(images
                     .into_iter()
-                    .map(|(id, blob)| (id, engine.blobs.path(&blob)))
+                    .map(|(id, blob)| (id, storage.blob_path(&blob)))
                     .collect())
             })
             .await

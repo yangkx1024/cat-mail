@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::future::{Future, poll_fn};
 use std::pin::pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -8,48 +8,32 @@ use std::time::{Duration, Instant};
 use catmail_proto::TlsConfig;
 use catmail_proto::http::ImageFetcher;
 use catmail_proto::imap::Session;
-use catmail_store::{BlobStore, Db, Store};
-use catmail_types::{
-    AccountId, AccountStatus, DraftId, ErrorKind, Event, FolderId, IdentityId, ReportedError,
-    SendProblem, ServerProblem,
-};
+use catmail_store::Db;
+use catmail_types::{AccountId, AccountStatus, DraftId, Event, FolderId, IdentityId, MessageId};
 use tokio::sync::{Notify, OwnedMutexGuard, broadcast, watch};
 use tokio::task::unconstrained;
 
-use crate::downloading::Downloading;
-use crate::image_cache::ImageCache;
+use crate::downloading::{Claim, Downloading};
 use crate::pool::{self, Pool};
 use crate::search_slot::SearchSlot;
-use crate::secrets::SecretStore;
-use crate::settings::{BodyPrefetch, EngineTuning, SyncSchedule};
-use crate::task::{Cancellation, Closing, Cutoff, backoff, blocking, lock, now};
-use crate::{Config, DataDirLock, Error, Result};
+use crate::settings::EngineSettings;
+use crate::status::{Activity, Failures, Recorded, Status};
+use crate::storage::Storage;
+use crate::task::{Cancellation, Closing, Cutoff, blocking, lock};
+use crate::{Error, Result};
 
 /// State shared by every `MailClient` clone and every engine task.
 pub(crate) struct Engine {
-    /// Exclusive lock on the data directory, held for the engine's lifetime: one engine
-    /// per data directory, so sync workers, the outbox and events are never split
-    /// across processes. Other frontends will reach the running engine over IPC.
-    _data_dir_lock: DataDirLock,
-    pub store: Store,
-    pub blobs: BlobStore,
-    pub secrets: Arc<dyn SecretStore>,
-    pub events: broadcast::Sender<Event>,
+    /// The data directory, locked, and the keyring.
+    storage: Storage,
+    events: broadcast::Sender<Event>,
     /// Set by the builder, else the platform verifier, created on first use.
     tls: OnceLock<TlsConfig>,
     /// Created on first use: most sessions never load a remote image.
     image_fetcher: OnceLock<ImageFetcher>,
-    pub image_cache: Arc<ImageCache>,
     /// Wakes the outbox worker, if one runs: something became due.
-    pub outbox_kick: Arc<Notify>,
-    /// Set if every account is kept in sync in the background (see `watch`).
-    pub sync_in_background: Option<SyncSchedule>,
-    /// Set if bodies are fetched in the background (see `prefetch`).
-    pub prefetch: Option<BodyPrefetch>,
-    /// How long background sync leaves a draft alone after it changed before uploading
-    /// it (see [`held_drafts`](Self::held_drafts)).
-    pub draft_upload_delay: Duration,
-    pub tuning: EngineTuning,
+    outbox_kick: Arc<Notify>,
+    settings: EngineSettings,
     /// Never sent to: dropped with the engine, which ends the background tasks holding
     /// it weakly at once (see [`closing`](Self::closing)).
     closing: watch::Sender<()>,
@@ -64,7 +48,7 @@ pub(crate) struct Engine {
     /// from anyone else are refused. Shared with the write transactions that check it.
     editing: Editing,
     /// Bodies being fetched for someone waiting on them: another fetch waits for that.
-    pub downloading: Downloading,
+    downloading: Downloading,
 }
 
 /// Drafts open in an editor, by how many ([`Engine::editing`]).
@@ -84,9 +68,6 @@ impl Drop for Deleting {
         }
     }
 }
-
-/// [`Engine::draft_upload_delay`] unless the builder sets it.
-pub(crate) const DEFAULT_DRAFT_UPLOAD_DELAY: Duration = Duration::from_secs(15);
 
 /// What the engine keeps per account.
 ///
@@ -130,115 +111,6 @@ struct AccountState {
     /// When drafts were last changed, for holding back their upload while they are
     /// being written. Entries older than the delay are dropped as they are found.
     draft_edits: Mutex<HashMap<DraftId, Instant>>,
-}
-
-/// [`AccountStatus`], with the send problems by identity, and the failures since the
-/// computer last woke of each server.
-#[derive(Debug)]
-struct Status {
-    syncing: bool,
-    sync: Option<ServerProblem>,
-    send: BTreeMap<IdentityId, SendProblem>,
-    sync_after_wake: AfterWake,
-    send_after_wake: BTreeMap<IdentityId, AfterWake>,
-    /// When the account's state was made, as if its servers were tried then.
-    made: Instant,
-}
-
-impl Status {
-    fn new() -> Self {
-        let made = Instant::now();
-        Self {
-            syncing: false,
-            sync: None,
-            send: BTreeMap::new(),
-            sync_after_wake: AfterWake::new(made),
-            send_after_wake: BTreeMap::new(),
-            made,
-        }
-    }
-}
-
-/// Failures in a row of one server since the computer last woke (see
-/// [`Failures::after_wake`]).
-#[derive(Debug)]
-struct AfterWake {
-    /// When a wake was last looked for.
-    checked: Instant,
-    failures: Option<u32>,
-}
-
-impl AfterWake {
-    fn new(checked: Instant) -> Self {
-        Self {
-            checked,
-            failures: None,
-        }
-    }
-
-    /// Takes in how an attempt ended, whether it `reached` the server or not;
-    /// `woke_after(at)` is whether the computer woke after `at`. Returns the failures
-    /// since the wake.
-    fn saw(&mut self, reached: bool, woke_after: impl FnOnce(Instant) -> bool) -> Option<u32> {
-        // Taken before looking: a wake in between is seen again next time, not never.
-        let now = Instant::now();
-        if woke_after(self.checked) {
-            self.failures = Some(0);
-        }
-        self.checked = now;
-        self.failures = if reached {
-            None
-        } else {
-            self.failures.map(|n| n + 1)
-        };
-        self.failures
-    }
-}
-
-/// Failures in a row to get through to a server, as [`Engine::report`] counts them.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct Failures {
-    /// This one included; 0 for a success.
-    pub in_a_row: u32,
-    /// Those since the computer last woke, if none got through to the server since (a
-    /// rejected login did, as did an over-limit reply): they are tried again sooner, as
-    /// the network is often back only a few seconds after the computer. Those before the
-    /// wake say nothing about the network after.
-    pub after_wake: Option<u32>,
-}
-
-impl Failures {
-    /// How long to wait before trying again: from `first`, doubling up to `max`. After
-    /// the computer woke, from `soon` first, doubling while that is sooner than `first`
-    /// (and `max`), then from `first` as usual.
-    pub fn retry_in(self, soon: Duration, first: Duration, max: Duration) -> Duration {
-        let Some(failures) = self.after_wake else {
-            return backoff(first, self.in_a_row, max);
-        };
-        let cap = first.min(max);
-        let quick = |n| backoff(soon, n, cap);
-        // Bounded for a zero `soon`, which never reaches `cap`.
-        let quick_tries = (1..=u32::BITS).take_while(|&n| quick(n) < cap).count() as u32;
-        if failures <= quick_tries {
-            quick(failures)
-        } else {
-            backoff(first, failures - quick_tries, max)
-        }
-    }
-}
-
-/// What an attempt that [`Engine::report`] records was doing.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum Activity<'a> {
-    Sync,
-    /// A sync begun then that syncs every folder whenever that is due: a step of
-    /// background sync, or `sync_account`. Every folder is due once a sync of them all
-    /// was asked for (see [`Engine::begin_syncing`]), so one begun after that answers it:
-    /// ends [`AccountStatus::syncing`] unless asked again since. Any sync that finds the
-    /// login rejected ends it too.
-    SyncBegun(Instant),
-    /// As this identity of the account, with the address it sends as.
-    Send(IdentityId, &'a str),
 }
 
 /// Held while syncing (a folder of) an account, or while working on its outbox.
@@ -294,39 +166,20 @@ impl Drop for Uncount<'_> {
     }
 }
 
-impl Drop for Engine {
-    fn drop(&mut self) {
-        // The last line of a clean exit: without it, the log ending means the process was
-        // killed or crashed.
-        tracing::info!("engine closed");
-    }
-}
-
 impl Engine {
     pub fn new(
-        config: &Config,
-        data_dir_lock: DataDirLock,
-        store: Store,
-        blobs: BlobStore,
-        secrets: Arc<dyn SecretStore>,
+        storage: Storage,
         events: broadcast::Sender<Event>,
         tls: Option<TlsConfig>,
+        settings: EngineSettings,
     ) -> Self {
-        let image_cache = Arc::new(ImageCache::new(config.image_cache_dir()));
         Self {
-            _data_dir_lock: data_dir_lock,
-            store,
-            blobs,
-            secrets,
+            storage,
             events,
             tls: tls.map(OnceLock::from).unwrap_or_default(),
             image_fetcher: OnceLock::new(),
-            image_cache,
             outbox_kick: Arc::default(),
-            sync_in_background: None,
-            prefetch: None,
-            draft_upload_delay: DEFAULT_DRAFT_UPLOAD_DELAY,
-            tuning: EngineTuning::default(),
+            settings,
             closing: watch::Sender::new(()),
             woke: Arc::default(),
             accounts: Mutex::default(),
@@ -334,6 +187,17 @@ impl Engine {
             editing: Arc::default(),
             downloading: Downloading::default(),
         }
+    }
+
+    /// For blocking work, which needs no more of the engine; it holds the data directory
+    /// locked until dropped (see [`Storage::released`]).
+    pub fn storage(&self) -> Storage {
+        self.storage.clone()
+    }
+
+    /// What the builder set, which stays as it is.
+    pub fn settings(&self) -> EngineSettings {
+        self.settings
     }
 
     /// The drafts open in an editor, to mark one or check from inside a write
@@ -370,32 +234,58 @@ impl Engine {
         let _ = self.events.send(event);
     }
 
+    /// The events emitted from now on; closed once the engine is.
+    pub fn subscribe(&self) -> broadcast::Receiver<Event> {
+        self.events.subscribe()
+    }
+
+    /// Wakes the outbox worker, if one runs: something became due.
+    pub fn kick_outbox(&self) {
+        self.outbox_kick.notify_one();
+    }
+
+    /// What [`kick_outbox`](Self::kick_outbox) notifies, for the worker to wait on
+    /// without holding the engine.
+    pub fn outbox_signal(&self) -> Arc<Notify> {
+        self.outbox_kick.clone()
+    }
+
+    /// Claims fetching the body of `id` (see [`Downloading`]).
+    pub fn claim_body(&self, id: MessageId) -> Claim {
+        self.downloading.claim(id)
+    }
+
+    /// Whether someone is fetching the body of `id` and waiting on it.
+    pub fn body_claimed(&self, id: MessageId) -> bool {
+        self.downloading.claimed(id)
+    }
+
     /// Runs a read on the blocking pool of the current (engine) runtime.
     pub async fn read<T: Send + 'static>(
-        self: &Arc<Self>,
+        &self,
         f: impl FnOnce(&Db<'_>) -> catmail_store::Result<T> + Send + 'static,
     ) -> Result<T> {
-        let engine = self.clone();
-        blocking(move || Ok(engine.store.read(f)?)).await
+        let storage = self.storage();
+        blocking(move || storage.read(f)).await
     }
 
     /// Runs a write transaction on the blocking pool. Emit events after this returns.
     pub async fn write<T: Send + 'static>(
-        self: &Arc<Self>,
+        &self,
         f: impl FnOnce(&Db<'_>) -> catmail_store::Result<T> + Send + 'static,
     ) -> Result<T> {
-        let engine = self.clone();
-        blocking(move || Ok(engine.store.write(f)?)).await
+        let storage = self.storage();
+        blocking(move || storage.write(f)).await
     }
 
     /// [`write`](Self::write), on disk even across a power cut; see
     /// [`Store::write_durable`](catmail_store::Store::write_durable).
     pub async fn write_durable<T: Send + 'static>(
-        self: &Arc<Self>,
+        &self,
         f: impl FnOnce(&Db<'_>) -> catmail_store::Result<T> + Send + 'static,
     ) -> Result<T> {
-        let engine = self.clone();
-        blocking(move || Ok(engine.store.write_durable(f)?)).await
+        let storage = self.storage();
+        blocking(move || storage.write_durable(f)).await
     }
 
     pub fn tls(&self) -> Result<TlsConfig> {
@@ -450,7 +340,7 @@ impl Engine {
     /// also one kept from before that was known: the changes wait for a login that works,
     /// since each try is another rejected login, which servers count towards locking the
     /// account. Ignored as well while the server says the account is over its download
-    /// limit ([`ServerProblem::over_limit`]), unless a sync was asked for: the changes
+    /// limit ([`ServerProblem::over_limit`](catmail_types::ServerProblem::over_limit)), unless a sync was asked for: the changes
     /// wait for it to lift rather than add to it (see [`ignores_wakes`](Self::ignores_wakes)).
     pub fn wake(&self, account: AccountId) {
         self.account(account).wake.notify_one();
@@ -458,13 +348,15 @@ impl Engine {
 
     /// Whether the latest attempt to sync the account found the login rejected.
     pub fn login_rejected(&self, account: AccountId) -> bool {
-        self.sync_problem(account, ServerProblem::login_rejected)
+        self.existing(account)
+            .is_some_and(|state| lock(&state.status).login_rejected())
     }
 
     /// Whether the latest attempt to sync the account found a failure background sync
-    /// waits out ([`ServerProblem::waited_out`]).
+    /// waits out ([`ServerProblem::waited_out`](catmail_types::ServerProblem::waited_out)).
     pub fn waits_out(&self, account: AccountId) -> bool {
-        self.sync_problem(account, ServerProblem::waited_out)
+        self.existing(account)
+            .is_some_and(|state| lock(&state.status).waits_out())
     }
 
     /// Whether background sync ignores [`wake`](Self::wake) for now: the server says the
@@ -474,18 +366,8 @@ impl Engine {
     /// from before), which a rejected login doesn't hold up. Also when another sync found
     /// that out, not background sync itself.
     pub fn ignores_wakes(&self, account: AccountId, logged_in: bool) -> bool {
-        self.existing(account).is_some_and(|state| {
-            let status = lock(&state.status);
-            status.sync.as_ref().is_some_and(|problem| {
-                (problem.login_rejected() && !logged_in)
-                    || (problem.over_limit() && !status.syncing)
-            })
-        })
-    }
-
-    fn sync_problem(&self, account: AccountId, is: impl FnOnce(&ServerProblem) -> bool) -> bool {
         self.existing(account)
-            .is_some_and(|state| lock(&state.status).sync.as_ref().is_some_and(is))
+            .is_some_and(|state| lock(&state.status).ignores_wakes(logged_in))
     }
 
     pub fn wake_signal(&self, account: AccountId) -> Arc<Notify> {
@@ -508,7 +390,7 @@ impl Engine {
         for state in lock(&self.accounts).values() {
             state.resume.notify_one();
         }
-        self.outbox_kick.notify_one();
+        self.kick_outbox();
     }
 
     /// Whether `at` is after the computer last woke from sleep. A connection made before
@@ -545,32 +427,27 @@ impl Engine {
             // Held while asking: an attempt ending meanwhile can't take the account out
             // of syncing after this put it in.
             let mut status = lock(&state.status);
-            let rejected = status
-                .sync
-                .as_ref()
-                .is_some_and(ServerProblem::login_rejected);
-            if status.syncing || rejected {
+            if !status.begin_syncing() {
                 return false;
             }
             state.asked.set(Instant::now());
-            status.syncing = true;
         }
         self.emit(Event::AccountStatusChanged { account });
         true
     }
 
     /// Records that the draft was just changed (or created), so background sync leaves
-    /// it for [`draft_upload_delay`](Self::draft_upload_delay): a frontend saving as the
+    /// it for [`draft_upload_delay`](EngineSettings::draft_upload_delay): a frontend saving as the
     /// user types would otherwise replace the copy on the server with each keystroke.
     /// Returns whether it was not held back already. Only background sync (`watch`)
     /// holds drafts back and forgets these: without it, nothing is recorded.
     pub fn draft_edited(&self, account: AccountId, draft: DraftId) -> bool {
-        if self.sync_in_background.is_none() {
+        if self.settings.sync_in_background.is_none() {
             return true;
         }
         lock(&self.account(account).draft_edits)
             .insert(draft, Instant::now())
-            .is_none_or(|at| at.elapsed() >= self.draft_upload_delay)
+            .is_none_or(|at| at.elapsed() >= self.settings.draft_upload_delay)
     }
 
     /// Forgets the draft's last change, once it is deleted or being sent.
@@ -581,7 +458,7 @@ impl Engine {
     }
 
     /// The account's drafts changed within the last
-    /// [`draft_upload_delay`](Self::draft_upload_delay), which background sync doesn't
+    /// [`draft_upload_delay`](EngineSettings::draft_upload_delay), which background sync doesn't
     /// upload yet. Uploads the user asks for don't wait.
     pub fn held_drafts(&self, account: AccountId) -> HashSet<DraftId> {
         let Some(state) = self.existing(account) else {
@@ -589,7 +466,7 @@ impl Engine {
         };
         lock(&state.draft_edits)
             .iter()
-            .filter(|(_, at)| at.elapsed() < self.draft_upload_delay)
+            .filter(|(_, at)| at.elapsed() < self.settings.draft_upload_delay)
             .map(|(draft, _)| *draft)
             .collect()
     }
@@ -600,7 +477,11 @@ impl Engine {
     pub fn next_draft_due(&self, account: AccountId) -> Option<Duration> {
         lock(&self.existing(account)?.draft_edits)
             .values()
-            .map(|at| self.draft_upload_delay.saturating_sub(at.elapsed()))
+            .map(|at| {
+                self.settings
+                    .draft_upload_delay
+                    .saturating_sub(at.elapsed())
+            })
             .min()
     }
 
@@ -608,7 +489,8 @@ impl Engine {
     /// uploads them.
     pub fn forget_settled_drafts(&self, account: AccountId) {
         if let Some(state) = self.existing(account) {
-            lock(&state.draft_edits).retain(|_, at| at.elapsed() < self.draft_upload_delay);
+            lock(&state.draft_edits)
+                .retain(|_, at| at.elapsed() < self.settings.draft_upload_delay);
         }
     }
 
@@ -680,66 +562,18 @@ impl Engine {
             Ok(_) => None,
         };
         let state = self.account(account);
-        // Whether the status changed, and for a success, whether background sync waited it
-        // out (see `record`); whether the problem did.
-        let (changed, waited, failures, problem_changed) = {
-            let mut status = lock(&state.status);
-            let status = &mut *status;
-            let after_wake = match activity {
-                Activity::Sync | Activity::SyncBegun(_) => &mut status.sync_after_wake,
-                Activity::Send(identity, _) => status
-                    .send_after_wake
-                    .entry(identity)
-                    .or_insert_with(|| AfterWake::new(status.made)),
-            };
-            // A rejected login got through to the server: the network is back, and
-            // trying again soon would only bring on more rejections, which servers count
-            // towards locking the account. So did an over-limit reply, which retrying
-            // soon would only add to.
-            let reached =
-                e.is_none_or(|e| matches!(e.kind(), ErrorKind::Auth | ErrorKind::OverLimit));
-            let after_wake = after_wake.saw(reached, |at| !self.since_woke(at));
-            let (changed, waited, in_a_row, problem_changed) = match activity {
-                Activity::Sync | Activity::SyncBegun(_) => {
-                    let (changed, waited, failures) = record(&mut status.sync, e);
-                    let answered = match activity {
-                        Activity::SyncBegun(began) => state.asked.since(began),
-                        _ => false,
-                    };
-                    // Nor is it answered while the login is rejected, which background
-                    // sync waits out (see `wake`), whenever the rejected attempt began.
-                    let refused = status
-                        .sync
-                        .as_ref()
-                        .is_some_and(ServerProblem::login_rejected);
-                    let done = status.syncing && (answered || refused);
-                    if done {
-                        status.syncing = false;
-                    }
-                    (changed || done, waited, failures, changed)
-                }
-                Activity::Send(identity, email) => {
-                    let mut slot = status.send.remove(&identity).map(|p| p.problem);
-                    let recorded = record(&mut slot, e);
-                    if let Some(problem) = slot {
-                        let email = email.to_owned();
-                        let problem = SendProblem {
-                            identity,
-                            email,
-                            problem,
-                        };
-                        status.send.insert(identity, problem);
-                    }
-                    let (changed, waited, failures) = recorded;
-                    (changed, waited, failures, changed)
-                }
-            };
-            let failures = Failures {
-                in_a_row,
-                after_wake,
-            };
-            (changed, waited, failures, problem_changed)
-        };
+        // Answered under the lock: an ask meanwhile would otherwise be taken as answered.
+        let Recorded {
+            changed,
+            problem_changed,
+            waited,
+            failures,
+        } = lock(&state.status).record(
+            activity,
+            e,
+            |began| state.asked.since(began),
+            |at| !self.since_woke(at),
+        );
         // What frontends show, so what a report from a user is about: logged as it changes,
         // not at each attempt.
         if problem_changed {
@@ -770,10 +604,8 @@ impl Engine {
         let Some(state) = self.existing(account) else {
             return;
         };
-        let mut status = lock(&state.status);
-        status.send_after_wake.remove(&identity);
-        if status.send.remove(&identity).is_some() {
-            drop(status);
+        let changed = lock(&state.status).forget_identity(identity);
+        if changed {
             self.emit(Event::AccountStatusChanged { account });
         }
     }
@@ -783,12 +615,7 @@ impl Engine {
         let Some(state) = self.existing(account) else {
             return AccountStatus::default();
         };
-        let status = lock(&state.status);
-        AccountStatus {
-            syncing: status.syncing,
-            sync: status.sync.clone(),
-            send: status.send.values().cloned().collect(),
-        }
+        lock(&state.status).shown()
     }
 
     /// For work on `account` without a permit. Obtain it before checking that the
@@ -835,7 +662,7 @@ impl Engine {
                     removed: watch::Sender::new(false),
                     pool: Arc::new(Pool::new(
                         account,
-                        self.tuning.keepalive,
+                        self.settings.tuning.keepalive,
                         self.closing(),
                         self.woke.clone(),
                     )),
@@ -867,39 +694,6 @@ impl Engine {
     pub fn tracked_draft_edits(&self, account: AccountId) -> usize {
         self.existing(account)
             .map_or(0, |state| lock(&state.draft_edits).len())
-    }
-}
-
-/// Records an attempt's outcome (`None`: success) in what is known of a server. Returns
-/// whether that changed, whether a success follows a failure background sync waits out
-/// (a rejected login, an account over its limit), and the failures in a row.
-fn record(slot: &mut Option<ServerProblem>, e: Option<&Error>) -> (bool, bool, u32) {
-    match e {
-        None => {
-            let cleared = slot.take();
-            let waited = cleared.as_ref().is_some_and(ServerProblem::waited_out);
-            (cleared.is_some(), waited, 0)
-        }
-        Some(e) => {
-            let error = ReportedError::from(e);
-            // Not each failure: what is wrong is what frontends show.
-            match slot {
-                Some(problem) => {
-                    let changed = problem.error != error;
-                    problem.failures += 1;
-                    problem.error = error;
-                    (changed, false, problem.failures)
-                }
-                None => {
-                    *slot = Some(ServerProblem {
-                        error,
-                        since: now(),
-                        failures: 1,
-                    });
-                    (true, false, 1)
-                }
-            }
-        }
     }
 }
 
@@ -977,38 +771,5 @@ mod tests {
         );
         drop(queued.await.unwrap());
         assert_eq!(waiting(), 0);
-    }
-
-    #[test]
-    fn failures_after_a_wake_are_tried_again_soon_then_as_usual() {
-        let secs = Duration::from_secs;
-        let retry_in = |after_wake| {
-            let failures = Failures {
-                in_a_row: 9,
-                after_wake,
-            };
-            failures.retry_in(secs(2), secs(30), secs(900))
-        };
-        let mut after_wake = AfterWake::new(Instant::now());
-        // Failing since before the computer slept.
-        assert_eq!(after_wake.saw(false, |_| false), None);
-        assert_eq!(retry_in(None), secs(900));
-
-        let mut woke = true;
-        let delays: Vec<_> = (0..7)
-            .map(|_| retry_in(after_wake.saw(false, |_| std::mem::take(&mut woke))))
-            .collect();
-        assert_eq!(delays, [2, 4, 8, 16, 30, 60, 120].map(secs));
-
-        // Through again: failures later back off as usual.
-        assert_eq!(after_wake.saw(true, |_| false), None);
-        assert_eq!(after_wake.saw(false, |_| false), None);
-
-        // Never longer than `max`, even when it is shorter than `first`.
-        let failures = Failures {
-            in_a_row: 1,
-            after_wake: Some(1),
-        };
-        assert_eq!(failures.retry_in(secs(2), secs(30), secs(1)), secs(1));
     }
 }
