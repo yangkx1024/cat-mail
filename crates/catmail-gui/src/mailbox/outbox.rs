@@ -7,6 +7,7 @@ use catmail_frontend::outbox::{Choice, State, choices, facts};
 use nsh_base::theme;
 use nsh_core::prelude::*;
 
+use crate::accounts::with_accounts;
 use crate::buttons::text_button;
 use crate::chrome;
 use crate::clock::clock;
@@ -16,7 +17,6 @@ use crate::form::fact;
 use crate::icons::{Icon, icon};
 use crate::mailbox::list::back_button;
 use crate::mailbox::list::{self};
-use crate::mailbox::sidebar::with_accounts;
 use crate::tasks::in_view;
 use crate::theme::SelectableText as _;
 use crate::toast::report;

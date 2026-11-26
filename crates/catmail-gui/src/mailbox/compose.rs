@@ -6,9 +6,10 @@ use catmail_frontend::composer::{ComposeFrom, new_message_account};
 use nsh_core::element::desktop::{MenuItem, popup_menu};
 use nsh_core::prelude::*;
 
+use crate::accounts::with_accounts;
 use crate::engine::client;
 use crate::mailbox::list;
-use crate::mailbox::sidebar::{SelectedPlace, with_accounts};
+use crate::mailbox::sidebar::SelectedPlace;
 use crate::shell::{self, on_main};
 use crate::tasks::in_view;
 use crate::toast::report;

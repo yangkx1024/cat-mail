@@ -16,11 +16,11 @@ use nsh_base::theme;
 use nsh_core::element::desktop::{MenuItem, popup_menu};
 use nsh_core::prelude::*;
 
+use crate::accounts::with_accounts;
 use crate::buttons::{Size, icon_button, labelled_button};
 use crate::clock::clock;
 use crate::form::{confirm_then, error, menu_field, submit, text_input};
 use crate::icons::{Icon, icon};
-use crate::mailbox::sidebar::with_accounts;
 use crate::shell;
 use crate::tasks::{in_view, off_thread};
 use crate::theme::SelectableText as _;

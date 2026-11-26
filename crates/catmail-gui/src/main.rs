@@ -11,6 +11,8 @@ use nsh_platform_linux as nsh_platform;
 use nsh_platform_macos as nsh_platform;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod accounts;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod buttons;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod chrome;

@@ -27,6 +27,7 @@ use nsh_core::element::{ElementRef, input};
 use nsh_core::geometry::Percentage;
 use nsh_core::prelude::*;
 
+use crate::accounts::{self, Accounts};
 use crate::buttons::{Size, icon_button};
 use crate::chrome;
 use crate::clock;
@@ -34,7 +35,7 @@ use crate::engine::client;
 use crate::form;
 use crate::icons::{Icon, icon};
 use crate::mailbox::commands;
-use crate::mailbox::sidebar::{self, Accounts, SelectedPlace};
+use crate::mailbox::sidebar::SelectedPlace;
 use crate::motion;
 use crate::tasks::in_view;
 use crate::toast::report;
@@ -403,7 +404,7 @@ pub fn removal_settled(removal: u64, made: bool) {
 /// The accounts' user labels, by the name a row shows them by.
 /// Also where each account's messages are looked at ([`ShownIn`]).
 pub fn set_labels() {
-    let names: HashMap<_, _> = sidebar::with_accounts(|accounts| {
+    let names: HashMap<_, _> = accounts::with_accounts(|accounts| {
         let labels = accounts
             .iter()
             .flat_map(|entry| entry.folders.user_labels());
@@ -424,7 +425,7 @@ struct ShownIn(HashMap<AccountId, FolderId>);
 fn set_shown_in() {
     let source = source();
     let shown_in = match source {
-        Some(source) => sidebar::with_accounts(|a| source.shown_in_each(a)),
+        Some(source) => accounts::with_accounts(|a| source.shown_in_each(a)),
         None => HashMap::new(),
     };
     if global::<ShownIn>().with_untracked(|s| s.0 != shown_in) {
@@ -731,7 +732,7 @@ fn follow_the_calendar() {
 fn sync_button() -> impl IntoElement {
     // Only when it starts or stops: the accounts are read again many times meanwhile, and
     // starting the spinner again each time would jerk it back.
-    let syncing = computed(sidebar::syncing);
+    let syncing = computed(accounts::syncing);
     crate::buttons::busy_icon_button(
         || Icon::ArrowPath,
         move || {
@@ -741,10 +742,10 @@ fn sync_button() -> impl IntoElement {
                 "Sync now".to_owned()
             }
         },
-        sidebar::has_accounts,
+        accounts::has_accounts,
         move || syncing.get(),
         Size::Bar,
-        sidebar::sync,
+        accounts::sync,
     )
 }
 

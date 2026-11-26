@@ -9,13 +9,13 @@ use catmail_frontend::commands::{self, Applies, Change, Deletion, MessageCommand
 
 use nsh_core::prelude::*;
 
+use crate::accounts::{Accounts, with_account, with_accounts};
 use crate::buttons::{Size, icon_button, separator};
 use crate::engine::client;
 use crate::form::confirmed;
 use crate::icons::Icon;
 use crate::mailbox::list;
 use crate::mailbox::picker::{Picker, Picking, open_picker};
-use crate::mailbox::sidebar::{Accounts, with_account, with_accounts};
 use crate::tasks::in_view;
 use crate::toast::{Level, notify, report};
 

@@ -8,12 +8,12 @@ use catmail_frontend::accounts;
 use nsh_base::theme;
 use nsh_core::prelude::*;
 
+use crate::accounts::{Accounts, with_account};
 use crate::buttons::{Size, icon_button};
 use crate::engine::client;
 use crate::form::{NameRequest, ask_name, confirm_then};
 use crate::icons::{Icon, icon};
 use crate::login;
-use crate::mailbox::sidebar::{Accounts, with_account};
 use crate::tasks::in_view;
 use crate::toast::report;
 

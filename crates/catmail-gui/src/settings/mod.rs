@@ -19,10 +19,9 @@ use nsh_base::{SwitchElement, switch, theme};
 use nsh_core::element::set_color_scheme;
 use nsh_core::prelude::*;
 
-use crate::buttons::{Size, icon_button};
+use crate::buttons::{Size, icon_button, menu_item};
 use crate::form::{self, modal};
 use crate::icons::Icon;
-use crate::mailbox::sidebar;
 use crate::shell;
 use crate::tasks::off_thread;
 use crate::toast::report;
@@ -125,7 +124,7 @@ fn settings_dialog() -> impl IntoElement {
         .border_color(move || theme().border)
         .children(Section::ALL.map(|(which, label, glyph)| {
             let selected = move || section.get() == which;
-            sidebar::menu_item(move || glyph, label, selected)
+            menu_item(move || glyph, label, selected)
                 .label(label)
                 .on_press(move || section.set(which))
                 .into_element()

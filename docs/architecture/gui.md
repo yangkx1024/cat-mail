@@ -36,6 +36,7 @@ Windows 用户目前只有 CLI。
 src/
   main.rs          启动：交给已在运行的实例或成为它（catmail_frontend::instance），日志，引擎的选项，交给 shell::run
   engine.rs        引擎：属于应用，不属于窗口；打开中、已打开、失败、已关闭
+  accounts.rs      主窗口读到的账户（文件夹、发件身份、状态）和 Sync：侧栏、列表、命令、设置、登录页共用
   shell/           外壳：mod.rs 窗口、设置与主题、托盘和通知的请求、MCP 服务、常驻与退出；gtk.rs、appkit.rs、headless.rs
   mailbox/         主窗口
     mod.rs         引擎打开前留空、失败的原因、登录页或三栏、引擎事件的刷新
@@ -56,7 +57,8 @@ src/
   login.rs         登录页和发件身份的表单
   form.rs          对话框外框、字段、提交（含忙碌转圈）、确认对话框、只要一个名字的对话框
   tasks.rs         视图开始的工作归谁（随窗口结束），另起线程的工作
-  buttons.rs       图标按钮（工具栏、行两种尺寸）、主按钮、文字按钮、分隔、提示、折叠按钮与转圈
+  buttons.rs       图标按钮（工具栏、行两种尺寸）、主按钮、文字按钮、分隔、提示、折叠按钮与转圈、侧栏式菜单的项
+                   （主窗口的侧栏和设置对话框的分节）
   chrome.rs        窗口顶部：macOS 的一体式主窗口、写信窗口的标题栏、各栏顶部的工具栏
   motion.rs        动画参数、布局动画、减弱动态效果检查与 macOS 动画期间隐藏滚动指示器
   theme.rs         主题映射到 nsh（shadcn）的 token

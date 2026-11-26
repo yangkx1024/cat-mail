@@ -14,9 +14,9 @@ use catmail_frontend::login::{
 use nsh_base::theme;
 use nsh_core::prelude::*;
 
+use crate::accounts::with_account;
 use crate::engine::client;
 use crate::form::{self, field, modal, text_input};
-use crate::mailbox::sidebar::with_account;
 
 #[derive(Clone, Copy)]
 struct LoginFields {
