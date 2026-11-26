@@ -405,7 +405,7 @@ pub fn sanitized_html(html: &str) -> (String, HashSet<String>) {
 
 /// Whether a part is shown within the body rather than offered as a file: an image in
 /// the HTML refers to it by its Content-ID (in `images`, from
-/// [`cid_image_ids`](catmail_html::cid_image_ids)), and it can be shown as one. Every other part is an attachment, wherever it sits and whatever
+/// [`catmail_html::cid_image_ids`]), and it can be shown as one. Every other part is an attachment, wherever it sits and whatever
 /// else refers to it (a `cid:` link, the text `cid:…`), so that none is out of reach.
 pub fn is_inline(content_id: Option<&str>, mime_type: &str, images: &HashSet<String>) -> bool {
     content_id.is_some_and(|id| images.contains(id)) && may_be_image(mime_type)

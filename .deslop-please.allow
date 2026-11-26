@@ -28,7 +28,6 @@ field-leak catmail_mcp::tools::Mail::uploads
 field-leak catmail_mcp::uploads::Receiving::until
 field-leak catmail_proto::imap::connection::Connection::literals
 field-leak catmail_proto::imap::session::Session::caps
-field-leak catmail_proto::imap::session::Session::changed_flags
 field-leak catmail_store::Reader::conn
 field-leak catmail_testkit::imap::ServerState::body_fetches
 field-leak catmail_testkit::imap::ServerState::connections

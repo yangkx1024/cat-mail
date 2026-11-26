@@ -340,7 +340,7 @@ impl Messages<'_> {
         Ok(deleted)
     }
 
-    /// [`delete_uids`](Self::delete_uids), if `folder` is still at `uidvalidity`: the
+    /// `delete_uids`, if `folder` is still at `uidvalidity`: the
     /// UIDs of another generation name other messages.
     pub fn delete_uids_of(
         &self,

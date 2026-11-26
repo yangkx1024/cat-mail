@@ -45,7 +45,7 @@ pub struct BodyPages<R> {
 
 impl<R> BodyPages<R> {
     /// With at most `in_flight` bytes of images on their way to the page at once, or no
-    /// limit ([`pacer`](super::pacer)).
+    /// limit (`pacer`).
     pub fn new(in_flight: Option<usize>) -> Self {
         Self {
             inline: HashMap::new(),

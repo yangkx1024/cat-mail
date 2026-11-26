@@ -68,8 +68,8 @@ const BUSY: u32 = 10;
 const CUT_SHORT: u32 = 3;
 
 enum Idled {
-    /// The server reported a change.
-    Changed,
+    /// The server reported a change: these messages' flags changed.
+    Changed(ChangedFlags),
     /// Local changes are queued, the account is removed or the engine is gone, or the
     /// next step is due (every folder to be synced, or a held-back draft to be uploaded).
     Stopped,
@@ -99,9 +99,9 @@ impl Wait {
 }
 
 enum KeepAlive {
-    /// The connection answered and stays open; `changed` is whether the server reported a
-    /// change to INBOX (only asked when polling it).
-    Alive { changed: bool },
+    /// The connection answered and stays open; `changed`, the messages whose flags
+    /// changed, if the server reported a change to INBOX (only asked when polling it).
+    Alive { changed: Option<ChangedFlags> },
     /// The connection was closed (died, from before a sleep, or cancelled).
     Closed,
     /// The server said the account went over its download limit.
@@ -176,8 +176,8 @@ async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
                             (idle_losses, busy) = (0, 0);
                             continue;
                         }
-                        Ok(Idled::Changed) => {
-                            add_changed_flags(&mut changed_flags, s.changed_flags());
+                        Ok(Idled::Changed(reported)) => {
+                            add_changed_flags(&mut changed_flags, reported);
                             idle_losses = 0;
                             busy = if start.elapsed() < SHORT_IDLE {
                                 busy + 1
@@ -272,10 +272,10 @@ async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
             )
             .await
             {
-                KeepAlive::Alive { changed: true } => {
-                    if let Some(s) = &session {
-                        add_changed_flags(&mut changed_flags, s.changed_flags());
-                    }
+                KeepAlive::Alive {
+                    changed: Some(reported),
+                } => {
+                    add_changed_flags(&mut changed_flags, reported);
                     busy = busy.saturating_add(1);
                     if busy <= BUSY {
                         break;
@@ -284,7 +284,7 @@ async fn run(engine: Weak<Engine>, account: AccountId, schedule: SyncSchedule) {
                         tracing::debug!(%account, "INBOX keeps changing; slowing down");
                     }
                 }
-                KeepAlive::Alive { changed: false } => {
+                KeepAlive::Alive { changed: None } => {
                     if poll_inbox {
                         busy = 0;
                     }
@@ -411,8 +411,8 @@ async fn idle(
             stop = true;
         };
         let (began, max) = (Instant::now(), schedule.idle.min(left));
-        if session.idle(stopping, max).await? {
-            return Ok(Idled::Changed);
+        if let Some(reported) = session.idle(stopping, max).await? {
+            return Ok(Idled::Changed(reported));
         }
         if stop || start.elapsed() >= due {
             return Ok(Idled::Stopped);
@@ -443,8 +443,8 @@ async fn stopped(
     }
 }
 
-/// Adds flag changes IDLE `reported` to those no step has fetched yet.
-fn add_changed_flags(pending: &mut ChangedFlags, reported: &ChangedFlags) {
+/// Adds flag changes IDLE or polling `reported` to those no step has fetched yet.
+fn add_changed_flags(pending: &mut ChangedFlags, reported: ChangedFlags) {
     match (&mut *pending, reported) {
         (ChangedFlags::Uids(uids), ChangedFlags::Uids(more)) => {
             uids.extend(more);

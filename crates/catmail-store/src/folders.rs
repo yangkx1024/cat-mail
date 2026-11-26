@@ -164,7 +164,7 @@ impl<'c> Folders<'c> {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// The account's locations that can hold messages, in [`LOCATION_ORDER`]: what a sync
+    /// The account's locations that can hold messages, in `LOCATION_ORDER`: what a sync
     /// of every folder goes through, one by one.
     pub fn location_ids(&self, account: AccountId) -> Result<Vec<FolderId>> {
         let mut stmt = self.conn.prepare_cached(&format!(
@@ -176,7 +176,7 @@ impl<'c> Folders<'c> {
     }
 
     /// The locations a search on the server goes through, by account, each account's in
-    /// [`LOCATION_ORDER`]: those a search within `account` (every account with `None`) and
+    /// `LOCATION_ORDER`: those a search within `account` (every account with `None`) and
     /// `folder` covers (see `Messages::search`), leaving out those without a message
     /// whose body isn't downloaded, where the server can't find anything local search
     /// doesn't, and those never synced. Within `folder`, that location, in its account;

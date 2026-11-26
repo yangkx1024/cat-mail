@@ -186,7 +186,7 @@ flags，重复的批次不产生重复行）。HIGHESTMODSEQ 用 EXAMINE 时刻�
   超时。很多家用 NAT 五分钟左右就忘掉安静的连接，所以连接都开着 TCP keepalive（见[连接层](protocol.md#连接层)），
   几分钟内发现，不必等到这次 IDLE 到期。
 - **INBOX 的 flags。** 没有 CONDSTORE 时，两次完整同步之间的 INBOX 步骤只拉 IDLE 或轮询 NOOP 报告了 flags 变化的
-  那几封（`Session::changed_flags`，`UID FETCH <这些 UID> (UID FLAGS)`）；新邮件、删除、本地改动唤醒
+  那几封（`Session::idle` 和 `Session::poll` 返回的 `ChangedFlags`，`UID FETCH <这些 UID> (UID FLAGS)`）；新邮件、删除、本地改动唤醒
   的步骤和无变化报告的轮询都不拉，否则五万封的收件箱每来一封新邮件、每读一封邮件就是一次全量 flags 遍历。说不清
   是哪几封时（IDLE 或 `poll` 期间有无法解析的行、报告超过一千封或遇到 VANISHED，见[连接 / IDLE](protocol.md#idle)）
   才按窗口全量拉。报告记到 INBOX 真的同步成功为止，在几次失败的步骤间累积（同步时仍按窗口分批）：这一步

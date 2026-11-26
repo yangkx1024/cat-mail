@@ -57,7 +57,7 @@ pub(crate) fn new_file(path: &Path) -> io::Result<()> {
         .map(drop)
 }
 
-/// Options that create a file for the user alone (see [`new_file`] for why at creation);
+/// Options that create a file for the user alone (see `new_file` for why at creation);
 /// the caller says how to open it.
 pub fn private_file_options() -> fs::OpenOptions {
     let mut options = File::options();

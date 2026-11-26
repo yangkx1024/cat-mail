@@ -51,7 +51,7 @@ pub struct AccountFolders {
     /// The account's folders as the engine lists them, which its rules about special
     /// folders apply to.
     folders: Vec<Folder>,
-    /// Folders with a role, in [`role_order`], each with its own subfolders. On
+    /// Folders with a role, in `role_order`, each with its own subfolders. On
     /// Gmail the system labels (INBOX, Sent, Important) are among them.
     pub roles: Vec<FolderNode>,
     /// The rest of the folders, as nested on the server.

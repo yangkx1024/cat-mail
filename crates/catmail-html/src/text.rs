@@ -24,7 +24,7 @@ pub fn text(html: &str) -> String {
     parse(html).map_or_else(String::new, |dom| shown(&dom).0)
 }
 
-/// [`text`] of `html`, and the text `html` hides in front of it (see [`preheader`]),
+/// [`text`] of `html`, and the text `html` hides in front of it (see `preheader`),
 /// parsed once.
 pub fn text_and_preheader(html: &str) -> (String, Option<String>) {
     let Some(dom) = parse(html) else {

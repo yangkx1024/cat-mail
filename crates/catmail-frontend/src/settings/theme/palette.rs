@@ -116,7 +116,7 @@ fn x11_channel(s: &str) -> Option<u8> {
 }
 
 /// What every terminal color scheme provides; the rest of a UI theme is derived from it
-/// (see [`super::derive`]).
+/// (see `derive`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalPalette {
     pub name: String,

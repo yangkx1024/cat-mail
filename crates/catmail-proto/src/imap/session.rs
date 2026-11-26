@@ -38,7 +38,6 @@ pub struct Session {
     /// From a PREAUTH greeting, or after `login`.
     authenticated: bool,
     selected: Option<Opened>,
-    changed_flags: ChangedFlags,
     opened: Instant,
     /// How the greeting says to search text, unless the server turns out to be Gmail.
     greeted: TextSearch,
@@ -146,7 +145,6 @@ impl Session {
             caps: Capabilities::default(),
             authenticated,
             selected: None,
-            changed_flags: ChangedFlags::default(),
             opened,
             greeted,
             heeds_text: false,
@@ -386,15 +384,14 @@ impl Session {
     }
 
     /// Asks the server for news of the selected mailbox (NOOP, RFC 3501 §6.1.2), the
-    /// non-IDLE counterpart to [`idle`](Self::idle). Returns whether the server has
-    /// reported a change since the mailbox was opened (in this answer or an earlier one),
-    /// and resolves any flag changes it reported for [`changed_flags`](Self::changed_flags).
-    /// Fails, as `idle` does, if no mailbox is selected.
-    pub async fn poll(&mut self) -> Result<bool> {
+    /// non-IDLE counterpart to [`idle`](Self::idle). Returns, as `idle` does, the
+    /// messages whose flags changed if the server has reported a change since the mailbox
+    /// was opened (in this answer or an earlier one). Fails, as `idle` does, if no mailbox
+    /// is selected.
+    pub async fn poll(&mut self) -> Result<Option<ChangedFlags>> {
         self.selected_status()?;
         let changed = self.conn.noop().await?;
-        self.resolve_changed_flags().await?;
-        Ok(changed)
+        self.changes(changed).await
     }
 
     /// Whether [`idle`](Self::idle) is available (IDLE, RFC 2177).
@@ -404,61 +401,61 @@ impl Session {
 
     /// Waits for the selected mailbox to change on the server (IDLE; see
     /// [`can_idle`](Self::can_idle)), for `stop` to resolve, or for `max` to pass,
-    /// whichever comes first. Returns whether the server reported a change: new or
-    /// expunged messages, or changed flags. Changes it already reported in answers to
-    /// earlier commands since the mailbox was opened count too (and return at once):
-    /// a server says so only once, so they would otherwise go unnoticed until the next
-    /// one. Changes this session made count as well.
-    pub async fn idle(&mut self, stop: impl Future<Output = ()>, max: Duration) -> Result<bool> {
+    /// whichever comes first. Returns, if the server reported a change (new or expunged
+    /// messages, or changed flags), the messages whose flags changed. Changes it already
+    /// reported in answers to earlier commands since the mailbox was opened count too
+    /// (and return at once): a server says so only once, so they would otherwise go
+    /// unnoticed until the next one. Changes this session made count as well.
+    pub async fn idle(
+        &mut self,
+        stop: impl Future<Output = ()>,
+        max: Duration,
+    ) -> Result<Option<ChangedFlags>> {
         if !self.can_idle() {
             return Err(Error::Unsupported("IDLE"));
         }
         self.selected_status()?;
-        if self.conn.mailbox_changed() {
-            return Ok(true);
+        let changed = self.conn.mailbox_changed() || self.conn.idle(stop, max).await?;
+        self.changes(changed).await
+    }
+
+    /// What [`idle`](Self::idle) or [`poll`](Self::poll) returns: if the mailbox
+    /// `changed`, the messages the server reported flags changed on in them since the
+    /// last one. Only those say so: outside them, a FETCH is usually the answer to our
+    /// own. Always `Unknown` for a change with CONDSTORE, where what changed is found by
+    /// MODSEQ instead.
+    async fn changes(&mut self, changed: bool) -> Result<Option<ChangedFlags>> {
+        // Taken either way: what comes after counts from here.
+        let seqs = self.conn.take_changed_flags();
+        if !changed {
+            return Ok(None);
         }
-        let changed = self.conn.idle(stop, max).await?;
-        self.resolve_changed_flags().await?;
-        Ok(changed)
+        Ok(Some(self.changed_flags(seqs).await?))
     }
 
-    /// The messages whose flags the server reported changed in the selected mailbox in
-    /// the last [`idle`](Self::idle) or [`poll`](Self::poll) since it was opened. Only
-    /// those say so: outside them, a FETCH is usually the answer to our own. Always
-    /// `Unknown` for a change with CONDSTORE, where what changed is found by MODSEQ
-    /// instead.
-    pub fn changed_flags(&self) -> &ChangedFlags {
-        &self.changed_flags
-    }
-
-    /// Sets `changed_flags` to the messages the connection saw flags change on, by UID.
-    /// It knows them by sequence number, which the next EXPUNGE may change and the next
-    /// command may bring one: but not a FETCH by sequence number (RFC 3501 §7.4.1).
-    async fn resolve_changed_flags(&mut self) -> Result<()> {
-        self.changed_flags = ChangedFlags::Unknown;
-        let seqs = match self.conn.take_changed_flags() {
-            Some(seqs) if seqs.is_empty() => {
-                self.changed_flags = ChangedFlags::default();
-                return Ok(());
-            }
+    /// The messages by UID of those the connection saw flags change on, `seqs`, by
+    /// sequence number, which the next EXPUNGE may change and the next command may bring
+    /// one: but not a FETCH by sequence number (RFC 3501 §7.4.1).
+    async fn changed_flags(&mut self, seqs: Option<Vec<u32>>) -> Result<ChangedFlags> {
+        let seqs = match seqs {
+            Some(seqs) if seqs.is_empty() => return Ok(ChangedFlags::default()),
             Some(seqs) if !self.modseq_enabled() => seqs,
-            _ => return Ok(()),
+            _ => return Ok(ChangedFlags::Unknown),
         };
         let Some(set) = uid_set(&seqs) else {
-            return Ok(());
+            return Ok(ChangedFlags::Unknown);
         };
         let fetch = Command::new("FETCH").raw(&set).raw("(UID)");
         match self.conn.execute(fetch).await {
-            Ok(response) => {
-                let uids = group_fetches(response, |_| true).into_keys().collect();
-                self.changed_flags = ChangedFlags::Uids(uids);
-            }
+            Ok(response) => Ok(ChangedFlags::Uids(
+                group_fetches(response, |_| true).into_keys().collect(),
+            )),
             Err(e) if !e.is_fatal() => {
                 tracing::debug!(error = %e, "can't tell whose flags changed");
+                Ok(ChangedFlags::Unknown)
             }
-            Err(e) => return Err(e),
+            Err(e) => Err(e),
         }
-        Ok(())
     }
 
     /// Sets `add` and clears `remove` on messages of the selected mailbox, leaving their
@@ -1279,7 +1276,6 @@ impl Session {
     /// has none selected either.
     fn deselect(&mut self) {
         self.selected = None;
-        self.changed_flags = ChangedFlags::default();
     }
 
     fn condstore(&self) -> bool {

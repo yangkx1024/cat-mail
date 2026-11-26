@@ -64,7 +64,7 @@ pub struct InvalidHeader {
 
 /// The message in wire form: CRLF line endings, 7-bit clean (headers as RFC 2047
 /// encoded words, bodies as quoted-printable or base64 where needed), except a message
-/// attached whole, which goes as it is (see [`attached_message`]).
+/// attached whole, which goes as it is (see `attached_message`).
 pub fn build_message(message: &Outgoing<'_>) -> Result<Vec<u8>, InvalidHeader> {
     let mut builder = MessageBuilder::new()
         .message_id(bracketed("Message-ID", message.message_id)?)

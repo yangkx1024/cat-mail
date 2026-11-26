@@ -37,10 +37,10 @@ impl Default for EngineSettings {
 /// [`MailClientBuilder::tuning`](crate::MailClientBuilder::tuning).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EngineTuning {
-    /// New messages fetched per UID FETCH, and stored per transaction [200].
+    /// New messages fetched per UID FETCH, and stored per transaction \[200\].
     pub fetch_batch: usize,
     /// Queued changes made on the server per command: UID sets of scattered messages
-    /// get long [500].
+    /// get long \[500\].
     pub replay_batch: usize,
     /// Messages up to this size (RFC822.SIZE) are fetched whole when opened; above it,
     /// attachments are left on the server until opened, and text parts above it are not
@@ -147,7 +147,7 @@ pub struct BodyPrefetch {
     /// above it, only their text [256 KiB]. Most mail is smaller, and a message fetched
     /// whole opens offline with everything in it.
     pub whole_limit: u32,
-    /// Bodies stored in one transaction and announced together [20].
+    /// Bodies stored in one transaction and announced together \[20\].
     pub batch: usize,
     /// How long to wait after the connection or the login failed before trying again,
     /// doubling with each failure in a row, up to 30 minutes [30 seconds].

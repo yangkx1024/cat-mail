@@ -152,7 +152,7 @@ impl Permit {
 
 /// A fair lock on work on an account, which counts the callers waiting for it: tests
 /// hold work at the fake server and wait until a call is queued behind it. Only the
-/// sync lock's count is read ([`Engine::sync_waiting`]); the send lock counts too, so
+/// sync lock's count is read (`Engine::sync_waiting`, with `test-support`); the send lock counts too, so
 /// that both are taken the same way.
 #[derive(Default)]
 struct AccountLock {

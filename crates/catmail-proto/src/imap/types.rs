@@ -55,7 +55,7 @@ impl<S: AsRef<str>> FromIterator<S> for Capabilities {
 }
 
 /// Messages of the selected mailbox whose flags the server reported changed in IDLE or
-/// NOOP polling (see [`Session::changed_flags`](crate::imap::Session::changed_flags)).
+/// NOOP polling (see [`Session::idle`](crate::imap::Session::idle)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChangedFlags {
     /// These, by UID, ascending; none if nothing changed.

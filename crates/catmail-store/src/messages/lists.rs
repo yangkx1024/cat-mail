@@ -137,7 +137,7 @@ fn cursor_params(cursor: Option<MessageCursor>) -> (i64, i64) {
 
 impl Messages<'_> {
     /// Of the rows `ids`, the new mail to tell the user about: at UID `from_uid` or above
-    /// (the folder's UIDNEXT before they arrived), and [`UNREAD_IN_INBOX`].
+    /// (the folder's UIDNEXT before they arrived), and `UNREAD_IN_INBOX`.
     pub fn new_mail(
         &self,
         ids: &[MessageId],
@@ -157,7 +157,7 @@ impl Messages<'_> {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Of the rows `ids`, those still [`UNREAD_IN_INBOX`] of `inboxes`, newest first: of
+    /// Of the rows `ids`, those still `UNREAD_IN_INBOX` of `inboxes`, newest first: of
     /// new mail announced a moment ago, what is still worth telling the user about.
     pub fn unread_in_inbox(
         &self,

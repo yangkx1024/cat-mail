@@ -9,7 +9,7 @@
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use catmail_proto::imap::{self, Session};
+use catmail_proto::imap::{self, ChangedFlags, Session};
 use catmail_types::AccountId;
 use tokio::task::AbortHandle;
 
@@ -150,7 +150,7 @@ pub(crate) fn usable(woke: &Cutoff, session: &Session) -> bool {
 }
 
 /// Whether a connection a command failed on with `e` can be used again: a refusal leaves
-/// it in a known state, as usable as it was (what [`Error::is_refusal`] tells of IMAP).
+/// it in a known state, as usable as it was (what [`Error::is_refusal`](crate::Error::is_refusal) tells of IMAP).
 fn survives(e: &imap::Error) -> bool {
     !e.is_fatal()
 }
@@ -188,10 +188,10 @@ async fn keep_alive(pool: Weak<Pool>, account: AccountId, every: Duration, mut c
 }
 
 pub(crate) enum Pinged {
-    /// Answered (with `changed` true if polled and the server reported a change to the
-    /// selected mailbox since it was opened), or refused (`changed: false`): as usable as
-    /// it was.
-    Alive { changed: bool },
+    /// Answered (with `changed`, the messages whose flags changed, if polled and the
+    /// server reported a change to the selected mailbox since it was opened), or refused
+    /// (`changed: None`): as usable as it was.
+    Alive { changed: Option<ChangedFlags> },
     /// The connection died: closed.
     Died,
     /// The server said the account went over its download limit, refusing the NOOP or
@@ -210,7 +210,7 @@ pub(crate) async fn ping(
     stop: impl Future<Output = ()>,
 ) -> Option<Pinged> {
     let opened = session.opened();
-    let noop = async { session.noop().await.map(|()| false) };
+    let noop = async { session.noop().await.map(|()| None) };
     answered(account, whose, opened, noop, stop).await
 }
 
@@ -232,7 +232,7 @@ async fn answered(
     account: AccountId,
     whose: &'static str,
     opened: Instant,
-    noop: impl Future<Output = imap::Result<bool>>,
+    noop: impl Future<Output = imap::Result<Option<ChangedFlags>>>,
     stop: impl Future<Output = ()>,
 ) -> Option<Pinged> {
     let began = Instant::now();
@@ -243,7 +243,8 @@ async fn answered(
     let (took, age) = (began.elapsed(), opened.elapsed());
     Some(match result {
         Ok(changed) => {
-            tracing::debug!(%account, whose, changed, ?took, ?age, "kept an idle connection alive");
+            tracing::debug!(%account, whose, changed = changed.is_some(), ?took, ?age,
+                "kept an idle connection alive");
             Pinged::Alive { changed }
         }
         Err(e) if e.is_over_limit() => {
@@ -252,7 +253,7 @@ async fn answered(
         }
         Err(e) if survives(&e) => {
             tracing::debug!(%account, whose, error = %e, ?took, "keepalive NOOP refused");
-            Pinged::Alive { changed: false }
+            Pinged::Alive { changed: None }
         }
         Err(e) => {
             tracing::info!(%account, whose, error = %e, ?took, ?age,

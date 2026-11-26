@@ -2,7 +2,7 @@
 //!
 //! The format is sniffed from the content, since scheme files are passed around with
 //! any name (Ghostty's have no extension at all); the extension only breaks ties. Every
-//! format but GPUI Kit's gives a [`TerminalPalette`], which [`derive`] turns into a
+//! format but GPUI Kit's gives a [`TerminalPalette`], which [`derive`](mod@derive) turns into a
 //! theme.
 
 mod lines;
