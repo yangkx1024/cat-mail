@@ -252,13 +252,15 @@ pub fn sidebar() -> impl IntoElement {
                     compose::new_message,
                 )),
         )
-        .child(scroll().flex_1().scrollbar(motion::indicators_shown).child(
-            view().px(px(12.0)).py(px(12.0)).child(each(
-                move || groups.get(),
-                |group| group.key.clone(),
-                group,
-            )),
-        ))
+        .child(
+            scroll()
+                .flex_1()
+                .child(view().px(px(12.0)).py(px(12.0)).child(each(
+                    move || groups.get(),
+                    |group| group.key.clone(),
+                    group,
+                ))),
+        )
         .child(
             view()
                 .flex_row()
