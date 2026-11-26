@@ -71,7 +71,7 @@ impl<'c> Messages<'c> {
     /// On Gmail, the label folders whose lists the changes made through this so far
     /// changed, besides the locations changed (a label shows messages of All Mail, Starred
     /// the flagged ones), and forgets them. Covers [`upsert`](Self::upsert),
-    /// [`update_flags`](Self::update_flags), [`delete_uids`](Self::delete_uids),
+    /// [`update_flags`](Self::update_flags), `delete_uids`,
     /// [`delete_gone`](Self::delete_gone) and the
     /// bodies stored ([`store_body`](Self::store_body), [`rebuild_body`](Self::rebuild_body),
     /// [`refresh_html`](Self::refresh_html)): snippets and attachment markers show there

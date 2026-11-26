@@ -547,7 +547,7 @@ impl ListModel {
 
     /// The change behind `removal`, which may take the message out of the list, was made
     /// locally (`made`), or failed: whether to read the rows again, which say whether it
-    /// left ([`Removal::settled`]).
+    /// left (`Removal::settled`).
     pub fn removal_settled(&mut self, removal: u64, made: bool) -> bool {
         // A read running may have started before the change: the next one shows it.
         self.removal.settled(removal, made, self.reads + 1)

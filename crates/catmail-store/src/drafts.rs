@@ -261,7 +261,7 @@ impl<'c> Drafts<'c> {
 
     /// Replaces what the user wrote, and the identity it is sent as. Returns the account
     /// the draft was in, `None` if there is no such draft. An identity of another account
-    /// moves the draft there ([`move_to`](Self::move_to)), unless it is a reply; one
+    /// moves the draft there (`move_to`), unless it is a reply; one
     /// removed since leaves the draft from the identity it has.
     pub fn update(
         &self,

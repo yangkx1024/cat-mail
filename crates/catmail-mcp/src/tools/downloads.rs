@@ -1,5 +1,5 @@
 //! What reading and drafting download from the mail servers, within the token's daily
-//! budget ([`Limits`]).
+//! budget ([`Limits`](crate::limits::Limits)).
 
 use std::future::{Future, ready};
 use std::time::Instant;

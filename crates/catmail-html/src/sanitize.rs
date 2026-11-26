@@ -99,7 +99,7 @@ pub(crate) fn sanitizer(on_image: Option<ImageHook>, recolor: Option<Recolor>) -
 
 /// A table cell's `colspan` or `rowspan` above the largest a browser uses (1000 and
 /// 65534 in HTML), cut to that, so the reader lays it out the same; `None` for any other
-/// attribute or value. html2text ([`text`](crate::text)) overflows on spans near
+/// attribute or value. html2text ([`text`](crate::text())) overflows on spans near
 /// `usize::MAX` and panics.
 fn bounded_span(attribute: &str, value: &str) -> Option<String> {
     let limit: u64 = match attribute {

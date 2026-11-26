@@ -317,7 +317,7 @@ impl MailClient {
     /// one of them completed since this call began isn't synced again. Progress is
     /// committed as it goes, so a sync that fails (or whose future is dropped) leaves
     /// what it fetched, and the next one resumes. A folder the server refuses is reported
-    /// in its [`FolderSyncReport`](crate::FolderSyncReport); losing the connection fails
+    /// in its [`FolderSyncReport`]; losing the connection fails
     /// the whole call.
     pub async fn sync_account(&self, id: AccountId) -> Result<SyncReport> {
         self.shared
@@ -386,7 +386,7 @@ impl MailClient {
     /// Creates a folder named `name` (on Gmail, a label) in `parent`, or with `None` at
     /// the top of the account's folders, and returns it. Made on the server at once, so
     /// it fails without a connection; the account's folders change as after a sync, with
-    /// [`Event::FoldersChanged`](crate::Event::FoldersChanged). `name` is one level: it
+    /// [`Event::FoldersChanged`]. `name` is one level: it
     /// can't hold the server's delimiter (see [`Folder::delimiter`]).
     pub async fn create_folder(
         &self,

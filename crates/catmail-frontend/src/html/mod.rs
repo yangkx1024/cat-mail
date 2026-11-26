@@ -6,7 +6,7 @@
 //! message was read (and from where), so only images carried by the message itself are
 //! shown (inline parts, `cid:`, and `data:` URLs) until the user asks for the remote
 //! ones of a message (`catmail_core::html::serve_images`). The page the reader shows a
-//! body as is [`page`]'s, and the reader serves its images ([`BodyPages`]).
+//! body as is `page`'s, and the reader serves its images ([`BodyPages`]).
 
 mod pacer;
 mod page;

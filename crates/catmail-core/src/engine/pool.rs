@@ -150,7 +150,7 @@ pub(crate) fn usable(woke: &Cutoff, session: &Session) -> bool {
 }
 
 /// Whether a connection a command failed on with `e` can be used again: a refusal leaves
-/// it in a known state, as usable as it was (what [`Error::is_refusal`] tells of IMAP).
+/// it in a known state, as usable as it was (what [`Error::is_refusal`](crate::Error::is_refusal) tells of IMAP).
 fn survives(e: &imap::Error) -> bool {
     !e.is_fatal()
 }

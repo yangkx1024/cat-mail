@@ -61,7 +61,7 @@ const SIZE: &str = "height: auto !important; min-height: 0 !important; \
                     max-height: none !important; position: static !important;";
 
 /// What the page tells the reader, through `window.nsh.postMessage`, with the page's
-/// number ([`body_page`]: one web view shows page after page, and what an earlier one
+/// number (`body_page`: one web view shows page after page, and what an earlier one
 /// says may come late): its height (`h:<n>:<px>`), so the web
 /// view can be as tall as the page (the root's box, which holds the body's margins,
 /// rounded up: the root's overflow is hidden, so what the view

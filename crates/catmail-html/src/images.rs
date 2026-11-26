@@ -190,7 +190,7 @@ pub fn serve_images(html: &str, base: &str, dark: Option<DarkPalette>) -> Served
 /// HTML that [`sanitize_html`](crate::sanitize_html) produced, with each `cid:` image whose Content-ID is in
 /// `inline` replaced by a `data:` URL of the part, for a renderer that can't resolve
 /// `cid:` (a browser). The values ammonia's filter returns are not checked again, so the
-/// URL is built here ([`Image::data_url`]) rather than taken from the caller.
+/// URL is built here (`Image::data_url`) rather than taken from the caller.
 pub fn embed_inline_images(html: &str, inline: HashMap<String, Image>) -> String {
     let embedding = sanitizer(
         Some(Box::new(move |src| {

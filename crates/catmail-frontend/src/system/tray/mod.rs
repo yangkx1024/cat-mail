@@ -1,8 +1,8 @@
 //! The tray icon's model: its menu, what its tool tip and badge say, when the unread mail
 //! is counted and the icon drawn ([`TrayModel`]), the app's icon with the count drawn on
 //! it (as an SVG, for the frontend to draw), and the item itself: on Linux the
-//! StatusNotifierItem ([`linux`]), which is D-Bus and no toolkit's, on macOS the status
-//! item ([`macos`]), which is AppKit's. See docs/architecture/background.md.
+//! StatusNotifierItem (`linux`), which is D-Bus and no toolkit's, on macOS the status
+//! item (`macos`), which is AppKit's. See docs/architecture/background.md.
 
 pub mod badged;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]

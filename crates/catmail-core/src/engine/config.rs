@@ -69,7 +69,7 @@ impl Config {
     }
 
     /// Makes the data directory ready for an engine, before [`lock`](Self::lock): creates
-    /// it if needed (see [`create_data_dir`]), failing with [`Error::DataDirNotOwned`] if
+    /// it if needed (see `create_data_dir`), failing with [`Error::DataDirNotOwned`] if
     /// it belongs to another user, and says so if other users can list it. Opening the
     /// engine does this, unless given the lock
     /// ([`MailClient::builder_locked`](crate::MailClient::builder_locked)).
