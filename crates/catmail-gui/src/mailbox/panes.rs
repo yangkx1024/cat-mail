@@ -7,7 +7,8 @@ use nsh_base::{HandleEdge, resize_handle, theme};
 use nsh_core::prelude::*;
 
 use super::{draft, outbox, reader};
-use crate::mailbox::list::{self, Selected};
+use crate::mailbox::list;
+use crate::mailbox::listing::Selected;
 use crate::mailbox::picker::picker;
 use crate::mailbox::sidebar;
 use crate::motion;

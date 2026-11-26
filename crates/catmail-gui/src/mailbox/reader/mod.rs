@@ -24,7 +24,7 @@ use nsh_core::file_dialog::SaveDialog;
 use nsh_core::prelude::*;
 
 use crate::engine::client;
-use crate::mailbox::list;
+use crate::mailbox::listing;
 use crate::tasks::{in_view, off_thread};
 use crate::toast::{Level, notify, report};
 use crate::web;
@@ -110,7 +110,7 @@ pub fn follow_selection() {
     // Read here so the page is made again when the appearance changes.
     let dark = dark();
     global::<Retry>().with(|r| r.0);
-    let selected = list::selected_id();
+    let selected = listing::selected_id();
     let id = untracked(|| global::<Reading>().with(|r| r.id));
     if id != selected {
         global::<ShowDetails>().set(ShowDetails(false));
@@ -253,7 +253,7 @@ async fn open_message(id: MessageId, dark: bool) {
 /// their place), and its header shows as the list has it.
 fn show_loading(r: &mut Reading, id: MessageId) {
     r.hidden = true;
-    match untracked(|| list::message(id)) {
+    match untracked(|| listing::message(id)) {
         Some(summary) => {
             r.header = Header::of_summary(&summary);
             r.header_hidden = false;

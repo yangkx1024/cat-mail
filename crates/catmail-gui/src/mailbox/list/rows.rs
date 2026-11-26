@@ -12,10 +12,8 @@ use crate::clock::clock;
 use crate::icons::{Icon, icon};
 use crate::mailbox::commands;
 
-use super::{
-    AnchorRef, Anchored, Checked, LabelNames, Selected, ShownIn, edit_selected_draft, list_open,
-    open, toggle_checked,
-};
+use super::{AnchorRef, Anchored, edit_selected_draft, list_open};
+use crate::mailbox::listing::{Checked, LabelNames, Selected, ShownIn, open, toggle_checked};
 
 /// The row the pointer is on. One for the list rather than one per row: a cell that
 /// scrolls to another row doesn't take the pointer with it.

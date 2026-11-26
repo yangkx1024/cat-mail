@@ -35,7 +35,9 @@ Windows 用户目前只有 CLI。
 分层从上到下：`main.rs` 把应用拼起来；主窗口（`mailbox/`）用写信窗口、设置对话框和登录页；它们都跑在外壳
 （`shell/`）上，用 `src/` 下共用的部分。下层不引用上层：外壳不知道窗口里是什么，主窗口的视图、窗口外跟着引擎的
 部分（托盘、通知、唤醒）由 `main.rs` 交给它（`shell::Parts`），写信窗口的视图由开它的主窗口给（`shell::opened`）；
-账户的状态在 `accounts.rs`，侧栏、列表、设置、登录页都读它，不经过侧栏。
+账户的状态在 `accounts.rs`，侧栏、列表、设置、登录页都读它，不经过侧栏。主窗口里也一样：各栏（`panes.rs`、
+`sidebar.rs`、`list/`、`reader/`、`draft.rs`、`outbox.rs`）在上，命令、写信的发起、"Move to"与"Labels"在中间，
+列表显示什么、选中和勾选了什么（`listing.rs`）在下，各栏都读它、经它改邮件。
 
 ```
 src/
@@ -49,10 +51,12 @@ src/
     panes.rs       三栏和拖宽度的把手，右栏按选中的是邮件、草稿还是发件箱条目；右栏共用的返回按钮、字段行
     sidebar.rs     侧栏：All Inboxes、账户与文件夹、标签、连接说明
     folder_commands.rs  文件夹的右键菜单：新建、改名、删除
-    list/          中栏：mod.rs 发起读取并交给 frontend 的 ListModel、勾选、视图过滤、搜索；rows.rs 日期标题和三种行
+    listing.rs     列表显示什么：发起读取并交给 frontend 的 ListModel、选中、勾选、视图过滤、搜索、侧栏选中的地方；
+                   对邮件的改动（run_change），之后选中跟着移
+    list/          中栏：mod.rs 列、标题、搜索框、快捷键、开合右栏时行留在原处；rows.rs 日期标题和三种行
     commands.rs    对邮件的命令：图标按钮组、快捷键、被拒改动的通知
     compose.rs     从主窗口发起新邮件、回复、转发与对应快捷键
-    picker.rs      "Move to"与"Labels"对话框
+    picker.rs      "Move to"与"Labels"对话框，以及选了之后的移动、加去标签
     draft.rs outbox.rs  草稿、发件箱条目的右栏
     reader/        读信区（邮件的右栏）：mod.rs 打开、远程与内嵌图片、附件的保存；view.rs 工具栏、头部、正文的
                    web view、附件
@@ -200,7 +204,8 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 `paused`：期间又有按键就不搜，没输入就回到选中的地方，和正显示的一样就不动）、什么时候问服务器（`server_search`，
 用户已经离开这次搜索就不问）、搜索时带上服务器找到的、
 读完后按 `Removal`、`Reveal`、`Reselect` 定下选中哪一行、哪些勾选不在了、要不要再读一次（`loaded`），都有表驱动
-测试。`mailbox/list/` 发起读取、把结果交给模型，再把 `Listing`、选中、勾选和"正在读"放进 nsh 的 signal；
+测试。`mailbox/listing.rs` 发起读取、把结果交给模型，再把 `Listing`、选中、勾选和"正在读"放进 nsh 的 signal，
+`mailbox/list/` 只画它们；
 "正在读"单独一个 signal，同步时每次刷新不再让读行的地方重算。
 
 - **按天分组**：列表（都是新的在前）按本地日期分组，标题是 Today、Yesterday、今年的"Monday, October 12"、
@@ -279,8 +284,9 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 文件夹、发件箱的选项一样）、会不会让邮件离开列表（`may_remove`，改标记以外都会）、做完要不要去掉勾选
 （`unchecks`，归档、移动、删除）。快捷键作用于哪些邮件是 `Listing::keyed`，只等选中的那封离开是
 `ListModel::expect_removal`，一封邮件"在哪看"（Gmail 上移动会去掉的标签、行上不用再写的标签）是
-`Source::shown_in`，移动和行上的标签名都用它（行上的按账户先算好一份，`shown_in_each`）。`mailbox/commands.rs`
-只有一个 `run_change`：按 `Change` 去掉勾选、等选中的那封离开、运行、出错时通知；其余是画按钮。
+`Source::shown_in`，移动和行上的标签名都用它（行上的按账户先算好一份，`shown_in_each`）。运行改动的只有一个
+`listing::run_change`：按 `Change` 去掉勾选、等选中的那封离开、运行、出错时通知。它在列表的模型里，命令、
+"Move to"与"Labels"、打开即已读都经过它；`mailbox/commands.rs` 是画按钮和决定改什么。
 
 - **三处同一套按钮**：读信区工具栏、勾选工具栏、悬停的行都由 `commands::group` 生成，只显示图标，按用途分组：
   位置（Archive、Delete、Move to）；标记（已读 / 未读、Flag）；读信区另有内容（Show remote images、Open in

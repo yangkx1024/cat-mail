@@ -11,7 +11,7 @@ use nsh_core::prelude::*;
 use crate::accounts::{Accounts, with_account};
 use crate::engine::client;
 use crate::form::{NameRequest, ask_name, asking_name, confirmed};
-use crate::mailbox::sidebar::SelectedPlace;
+use crate::mailbox::listing::SelectedPlace;
 use crate::tasks::in_view;
 use crate::toast::report;
 

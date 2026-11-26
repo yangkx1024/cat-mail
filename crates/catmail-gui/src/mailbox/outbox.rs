@@ -16,14 +16,14 @@ use crate::form::confirmed;
 use crate::form::fact;
 use crate::icons::{Icon, icon};
 use crate::mailbox::list::back_button;
-use crate::mailbox::list::{self};
+use crate::mailbox::listing;
 use crate::tasks::in_view;
 use crate::theme::SelectableText as _;
 use crate::toast::report;
 
 /// The pane, while an outbox entry is selected.
 pub fn pane() -> impl IntoElement {
-    let entry = computed(list::selected_outbox);
+    let entry = computed(listing::selected_outbox);
     view()
         .flex_1()
         .min_w(px(0.0))

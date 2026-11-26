@@ -27,14 +27,11 @@ use crate::engine::client;
 use crate::icons::{Icon, icon};
 use crate::mailbox::compose;
 use crate::mailbox::folder_commands::{folder_menu, rename_selected};
-use crate::mailbox::list;
+use crate::mailbox::listing::{self, SelectedPlace};
 use crate::motion;
 use crate::tasks::in_view;
 use crate::toast::report;
 use crate::{chrome, form, settings};
-
-#[derive(Clone, Default)]
-pub struct SelectedPlace(pub Option<Place>);
 
 /// The reads of the sidebar. Not reactive: nothing shows it.
 #[derive(Clone, Default)]
@@ -84,14 +81,14 @@ pub fn load() {
 
 fn show(loaded: Loaded) {
     global::<Accounts>().set(Accounts(Some(loaded.accounts)));
-    crate::mailbox::list::set_labels();
+    listing::set_labels();
     match loaded.selection {
         Selection::Keep => {}
-        Selection::KeepAndRefresh => crate::mailbox::list::refresh(),
+        Selection::KeepAndRefresh => listing::refresh(),
         Selection::Go(place) => select(place),
     }
     if let Some(message) = loaded.reveal {
-        crate::mailbox::list::reveal(message);
+        listing::reveal(message);
     }
     if loaded.compose {
         compose::new_message();
@@ -107,7 +104,7 @@ pub fn go_to(to: Destination) {
     };
     select(Some(place));
     if let Some(message) = message {
-        crate::mailbox::list::reveal(message);
+        listing::reveal(message);
     }
 }
 
@@ -178,9 +175,9 @@ pub fn select(place: Option<Place>) {
     if selected.with_untracked(|p| p.0) == place && place.is_some() {
         // Back from a search to the place it was made in: nothing follows the selection,
         // which didn't change.
-        if matches!(list::source(), Some(Source::Search(_))) {
-            list::clear_search();
-            list::show(place.map(Place::source));
+        if matches!(listing::source(), Some(Source::Search(_))) {
+            listing::clear_search();
+            listing::show(place.map(Place::source));
         }
         return;
     }

@@ -16,14 +16,15 @@ use crate::form::confirmed;
 use crate::form::fact;
 use crate::icons::{Icon, icon};
 use crate::mailbox::compose;
-use crate::mailbox::list::{self, back_button};
+use crate::mailbox::list::back_button;
+use crate::mailbox::listing;
 use crate::tasks::in_view;
 use crate::theme::SelectableText as _;
 use crate::toast::report;
 
 /// The pane, while a draft is selected.
 pub fn pane() -> impl IntoElement {
-    let draft = computed(list::selected_draft);
+    let draft = computed(listing::selected_draft);
     view()
         .flex_1()
         .min_w(px(0.0))
