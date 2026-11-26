@@ -46,6 +46,7 @@ mod secrets;
 mod send;
 mod settings;
 mod sleep;
+mod status;
 mod storage;
 mod sync;
 mod system;

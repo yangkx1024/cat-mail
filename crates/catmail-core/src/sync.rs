@@ -31,7 +31,8 @@ use catmail_types::{
 
 use crate::connection::with_session;
 use crate::draft_sync::Uploads;
-use crate::engine::{Activity, Engine};
+use crate::engine::Engine;
+use crate::status::Activity;
 use crate::{Error, Result, connection, events, ops, prefetch};
 
 /// Stored messages per flags FETCH, and per transaction, on a server that can't say

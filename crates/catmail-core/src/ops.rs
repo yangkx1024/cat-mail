@@ -25,7 +25,8 @@ use catmail_types::{
 
 use crate::connection::with_session;
 use crate::draft_sync::{Uploaded, Uploads};
-use crate::engine::{Activity, Engine};
+use crate::engine::Engine;
+use crate::status::Activity;
 use crate::task::{lock, now};
 use crate::{Error, Result, draft_sync, events};
 

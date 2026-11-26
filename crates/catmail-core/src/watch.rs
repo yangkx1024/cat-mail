@@ -27,9 +27,10 @@ use catmail_types::AccountId;
 use tokio::sync::Notify;
 
 use crate::draft_sync::Uploads;
-use crate::engine::{Activity, Engine};
+use crate::engine::Engine;
 use crate::pool::{self, Pinged};
 use crate::settings::SyncSchedule;
+use crate::status::Activity;
 use crate::task::{Cancellation, backoff};
 use crate::{Error, Result, connection, ops, sync};
 

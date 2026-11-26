@@ -30,7 +30,8 @@ use tokio::sync::Notify;
 
 use crate::connection::with_session;
 use crate::connection::{self, SendAs, SmtpLogin};
-use crate::engine::{Activity, Engine, Permit};
+use crate::engine::{Engine, Permit};
+use crate::status::Activity;
 use crate::task::{Closing, blocking, now};
 use crate::{Error, Result, addresses, body, drafts, events, sync};
 
@@ -42,7 +43,7 @@ const MAX_BACKOFF: i64 = 30 * 60;
 /// a row is seldom about to work, and the user can try again once it might.
 const MAX_ATTEMPTS: u32 = 3;
 /// After the computer woke, the first retry of a server that can't be reached is this
-/// much later (see [`Failures::retry_in`](crate::engine::Failures::retry_in)).
+/// much later (see [`Failures::retry_in`](crate::status::Failures::retry_in)).
 const RETRY_AFTER_WAKE: i64 = 2;
 
 /// A draft as queueing it now would send it, for the user to confirm before someone

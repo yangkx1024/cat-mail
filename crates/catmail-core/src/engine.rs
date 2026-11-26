@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::future::{Future, poll_fn};
 use std::pin::pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -9,10 +9,7 @@ use catmail_proto::TlsConfig;
 use catmail_proto::http::ImageFetcher;
 use catmail_proto::imap::Session;
 use catmail_store::Db;
-use catmail_types::{
-    AccountId, AccountStatus, DraftId, ErrorKind, Event, FolderId, IdentityId, MessageId,
-    ReportedError, SendProblem, ServerProblem,
-};
+use catmail_types::{AccountId, AccountStatus, DraftId, Event, FolderId, IdentityId, MessageId};
 use tokio::sync::{Notify, OwnedMutexGuard, broadcast, watch};
 use tokio::task::unconstrained;
 
@@ -20,8 +17,9 @@ use crate::downloading::{Claim, Downloading};
 use crate::pool::{self, Pool};
 use crate::search_slot::SearchSlot;
 use crate::settings::EngineSettings;
+use crate::status::{Activity, Failures, Recorded, Status};
 use crate::storage::Storage;
-use crate::task::{Cancellation, Closing, Cutoff, backoff, blocking, lock, now};
+use crate::task::{Cancellation, Closing, Cutoff, blocking, lock};
 use crate::{Error, Result};
 
 /// State shared by every `MailClient` clone and every engine task.
@@ -113,115 +111,6 @@ struct AccountState {
     /// When drafts were last changed, for holding back their upload while they are
     /// being written. Entries older than the delay are dropped as they are found.
     draft_edits: Mutex<HashMap<DraftId, Instant>>,
-}
-
-/// [`AccountStatus`], with the send problems by identity, and the failures since the
-/// computer last woke of each server.
-#[derive(Debug)]
-struct Status {
-    syncing: bool,
-    sync: Option<ServerProblem>,
-    send: BTreeMap<IdentityId, SendProblem>,
-    sync_after_wake: AfterWake,
-    send_after_wake: BTreeMap<IdentityId, AfterWake>,
-    /// When the account's state was made, as if its servers were tried then.
-    made: Instant,
-}
-
-impl Status {
-    fn new() -> Self {
-        let made = Instant::now();
-        Self {
-            syncing: false,
-            sync: None,
-            send: BTreeMap::new(),
-            sync_after_wake: AfterWake::new(made),
-            send_after_wake: BTreeMap::new(),
-            made,
-        }
-    }
-}
-
-/// Failures in a row of one server since the computer last woke (see
-/// [`Failures::after_wake`]).
-#[derive(Debug)]
-struct AfterWake {
-    /// When a wake was last looked for.
-    checked: Instant,
-    failures: Option<u32>,
-}
-
-impl AfterWake {
-    fn new(checked: Instant) -> Self {
-        Self {
-            checked,
-            failures: None,
-        }
-    }
-
-    /// Takes in how an attempt ended, whether it `reached` the server or not;
-    /// `woke_after(at)` is whether the computer woke after `at`. Returns the failures
-    /// since the wake.
-    fn saw(&mut self, reached: bool, woke_after: impl FnOnce(Instant) -> bool) -> Option<u32> {
-        // Taken before looking: a wake in between is seen again next time, not never.
-        let now = Instant::now();
-        if woke_after(self.checked) {
-            self.failures = Some(0);
-        }
-        self.checked = now;
-        self.failures = if reached {
-            None
-        } else {
-            self.failures.map(|n| n + 1)
-        };
-        self.failures
-    }
-}
-
-/// Failures in a row to get through to a server, as [`Engine::report`] counts them.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct Failures {
-    /// This one included; 0 for a success.
-    pub in_a_row: u32,
-    /// Those since the computer last woke, if none got through to the server since (a
-    /// rejected login did, as did an over-limit reply): they are tried again sooner, as
-    /// the network is often back only a few seconds after the computer. Those before the
-    /// wake say nothing about the network after.
-    pub after_wake: Option<u32>,
-}
-
-impl Failures {
-    /// How long to wait before trying again: from `first`, doubling up to `max`. After
-    /// the computer woke, from `soon` first, doubling while that is sooner than `first`
-    /// (and `max`), then from `first` as usual.
-    pub fn retry_in(self, soon: Duration, first: Duration, max: Duration) -> Duration {
-        let Some(failures) = self.after_wake else {
-            return backoff(first, self.in_a_row, max);
-        };
-        let cap = first.min(max);
-        let quick = |n| backoff(soon, n, cap);
-        // Bounded for a zero `soon`, which never reaches `cap`.
-        let quick_tries = (1..=u32::BITS).take_while(|&n| quick(n) < cap).count() as u32;
-        if failures <= quick_tries {
-            quick(failures)
-        } else {
-            backoff(first, failures - quick_tries, max)
-        }
-    }
-}
-
-/// What an attempt that [`Engine::report`] records was doing.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum Activity<'a> {
-    Sync,
-    /// A sync begun then that syncs every folder whenever that is due: a step of
-    /// background sync, or `sync_account`. Every folder is due once a sync of them all
-    /// was asked for (see [`Engine::begin_syncing`]), so one begun after that answers it:
-    /// ends [`AccountStatus::syncing`] unless asked again since. Any sync that finds the
-    /// login rejected ends it too.
-    SyncBegun(Instant),
-    /// As this identity of the account, with the address it sends as.
-    Send(IdentityId, &'a str),
 }
 
 /// Held while syncing (a folder of) an account, or while working on its outbox.
@@ -451,7 +340,7 @@ impl Engine {
     /// also one kept from before that was known: the changes wait for a login that works,
     /// since each try is another rejected login, which servers count towards locking the
     /// account. Ignored as well while the server says the account is over its download
-    /// limit ([`ServerProblem::over_limit`]), unless a sync was asked for: the changes
+    /// limit ([`ServerProblem::over_limit`](catmail_types::ServerProblem::over_limit)), unless a sync was asked for: the changes
     /// wait for it to lift rather than add to it (see [`ignores_wakes`](Self::ignores_wakes)).
     pub fn wake(&self, account: AccountId) {
         self.account(account).wake.notify_one();
@@ -459,13 +348,15 @@ impl Engine {
 
     /// Whether the latest attempt to sync the account found the login rejected.
     pub fn login_rejected(&self, account: AccountId) -> bool {
-        self.sync_problem(account, ServerProblem::login_rejected)
+        self.existing(account)
+            .is_some_and(|state| lock(&state.status).login_rejected())
     }
 
     /// Whether the latest attempt to sync the account found a failure background sync
-    /// waits out ([`ServerProblem::waited_out`]).
+    /// waits out ([`ServerProblem::waited_out`](catmail_types::ServerProblem::waited_out)).
     pub fn waits_out(&self, account: AccountId) -> bool {
-        self.sync_problem(account, ServerProblem::waited_out)
+        self.existing(account)
+            .is_some_and(|state| lock(&state.status).waits_out())
     }
 
     /// Whether background sync ignores [`wake`](Self::wake) for now: the server says the
@@ -475,18 +366,8 @@ impl Engine {
     /// from before), which a rejected login doesn't hold up. Also when another sync found
     /// that out, not background sync itself.
     pub fn ignores_wakes(&self, account: AccountId, logged_in: bool) -> bool {
-        self.existing(account).is_some_and(|state| {
-            let status = lock(&state.status);
-            status.sync.as_ref().is_some_and(|problem| {
-                (problem.login_rejected() && !logged_in)
-                    || (problem.over_limit() && !status.syncing)
-            })
-        })
-    }
-
-    fn sync_problem(&self, account: AccountId, is: impl FnOnce(&ServerProblem) -> bool) -> bool {
         self.existing(account)
-            .is_some_and(|state| lock(&state.status).sync.as_ref().is_some_and(is))
+            .is_some_and(|state| lock(&state.status).ignores_wakes(logged_in))
     }
 
     pub fn wake_signal(&self, account: AccountId) -> Arc<Notify> {
@@ -546,15 +427,10 @@ impl Engine {
             // Held while asking: an attempt ending meanwhile can't take the account out
             // of syncing after this put it in.
             let mut status = lock(&state.status);
-            let rejected = status
-                .sync
-                .as_ref()
-                .is_some_and(ServerProblem::login_rejected);
-            if status.syncing || rejected {
+            if !status.begin_syncing() {
                 return false;
             }
             state.asked.set(Instant::now());
-            status.syncing = true;
         }
         self.emit(Event::AccountStatusChanged { account });
         true
@@ -686,66 +562,18 @@ impl Engine {
             Ok(_) => None,
         };
         let state = self.account(account);
-        // Whether the status changed, and for a success, whether background sync waited it
-        // out (see `record`); whether the problem did.
-        let (changed, waited, failures, problem_changed) = {
-            let mut status = lock(&state.status);
-            let status = &mut *status;
-            let after_wake = match activity {
-                Activity::Sync | Activity::SyncBegun(_) => &mut status.sync_after_wake,
-                Activity::Send(identity, _) => status
-                    .send_after_wake
-                    .entry(identity)
-                    .or_insert_with(|| AfterWake::new(status.made)),
-            };
-            // A rejected login got through to the server: the network is back, and
-            // trying again soon would only bring on more rejections, which servers count
-            // towards locking the account. So did an over-limit reply, which retrying
-            // soon would only add to.
-            let reached =
-                e.is_none_or(|e| matches!(e.kind(), ErrorKind::Auth | ErrorKind::OverLimit));
-            let after_wake = after_wake.saw(reached, |at| !self.since_woke(at));
-            let (changed, waited, in_a_row, problem_changed) = match activity {
-                Activity::Sync | Activity::SyncBegun(_) => {
-                    let (changed, waited, failures) = record(&mut status.sync, e);
-                    let answered = match activity {
-                        Activity::SyncBegun(began) => state.asked.since(began),
-                        _ => false,
-                    };
-                    // Nor is it answered while the login is rejected, which background
-                    // sync waits out (see `wake`), whenever the rejected attempt began.
-                    let refused = status
-                        .sync
-                        .as_ref()
-                        .is_some_and(ServerProblem::login_rejected);
-                    let done = status.syncing && (answered || refused);
-                    if done {
-                        status.syncing = false;
-                    }
-                    (changed || done, waited, failures, changed)
-                }
-                Activity::Send(identity, email) => {
-                    let mut slot = status.send.remove(&identity).map(|p| p.problem);
-                    let recorded = record(&mut slot, e);
-                    if let Some(problem) = slot {
-                        let email = email.to_owned();
-                        let problem = SendProblem {
-                            identity,
-                            email,
-                            problem,
-                        };
-                        status.send.insert(identity, problem);
-                    }
-                    let (changed, waited, failures) = recorded;
-                    (changed, waited, failures, changed)
-                }
-            };
-            let failures = Failures {
-                in_a_row,
-                after_wake,
-            };
-            (changed, waited, failures, problem_changed)
-        };
+        // Answered under the lock: an ask meanwhile would otherwise be taken as answered.
+        let Recorded {
+            changed,
+            problem_changed,
+            waited,
+            failures,
+        } = lock(&state.status).record(
+            activity,
+            e,
+            |began| state.asked.since(began),
+            |at| !self.since_woke(at),
+        );
         // What frontends show, so what a report from a user is about: logged as it changes,
         // not at each attempt.
         if problem_changed {
@@ -776,10 +604,8 @@ impl Engine {
         let Some(state) = self.existing(account) else {
             return;
         };
-        let mut status = lock(&state.status);
-        status.send_after_wake.remove(&identity);
-        if status.send.remove(&identity).is_some() {
-            drop(status);
+        let changed = lock(&state.status).forget_identity(identity);
+        if changed {
             self.emit(Event::AccountStatusChanged { account });
         }
     }
@@ -789,12 +615,7 @@ impl Engine {
         let Some(state) = self.existing(account) else {
             return AccountStatus::default();
         };
-        let status = lock(&state.status);
-        AccountStatus {
-            syncing: status.syncing,
-            sync: status.sync.clone(),
-            send: status.send.values().cloned().collect(),
-        }
+        lock(&state.status).shown()
     }
 
     /// For work on `account` without a permit. Obtain it before checking that the
@@ -876,39 +697,6 @@ impl Engine {
     }
 }
 
-/// Records an attempt's outcome (`None`: success) in what is known of a server. Returns
-/// whether that changed, whether a success follows a failure background sync waits out
-/// (a rejected login, an account over its limit), and the failures in a row.
-fn record(slot: &mut Option<ServerProblem>, e: Option<&Error>) -> (bool, bool, u32) {
-    match e {
-        None => {
-            let cleared = slot.take();
-            let waited = cleared.as_ref().is_some_and(ServerProblem::waited_out);
-            (cleared.is_some(), waited, 0)
-        }
-        Some(e) => {
-            let error = ReportedError::from(e);
-            // Not each failure: what is wrong is what frontends show.
-            match slot {
-                Some(problem) => {
-                    let changed = problem.error != error;
-                    problem.failures += 1;
-                    problem.error = error;
-                    (changed, false, problem.failures)
-                }
-                None => {
-                    *slot = Some(ServerProblem {
-                        error,
-                        since: now(),
-                        failures: 1,
-                    });
-                    (true, false, 1)
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::task::Poll;
@@ -983,38 +771,5 @@ mod tests {
         );
         drop(queued.await.unwrap());
         assert_eq!(waiting(), 0);
-    }
-
-    #[test]
-    fn failures_after_a_wake_are_tried_again_soon_then_as_usual() {
-        let secs = Duration::from_secs;
-        let retry_in = |after_wake| {
-            let failures = Failures {
-                in_a_row: 9,
-                after_wake,
-            };
-            failures.retry_in(secs(2), secs(30), secs(900))
-        };
-        let mut after_wake = AfterWake::new(Instant::now());
-        // Failing since before the computer slept.
-        assert_eq!(after_wake.saw(false, |_| false), None);
-        assert_eq!(retry_in(None), secs(900));
-
-        let mut woke = true;
-        let delays: Vec<_> = (0..7)
-            .map(|_| retry_in(after_wake.saw(false, |_| std::mem::take(&mut woke))))
-            .collect();
-        assert_eq!(delays, [2, 4, 8, 16, 30, 60, 120].map(secs));
-
-        // Through again: failures later back off as usual.
-        assert_eq!(after_wake.saw(true, |_| false), None);
-        assert_eq!(after_wake.saw(false, |_| false), None);
-
-        // Never longer than `max`, even when it is shorter than `first`.
-        let failures = Failures {
-            in_a_row: 1,
-            after_wake: Some(1),
-        };
-        assert_eq!(failures.retry_in(secs(2), secs(30), secs(1)), secs(1));
     }
 }
