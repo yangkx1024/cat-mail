@@ -5,7 +5,8 @@ use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
 use crate::columns::{json, parse_text, to_json};
 use crate::drafts::Drafts;
-use crate::ops::{PendingOps, Touched};
+use crate::ops::PendingOps;
+use crate::touched::Touched;
 use crate::{Error, Result};
 
 const COLUMNS: &str =

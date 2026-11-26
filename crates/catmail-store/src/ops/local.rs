@@ -8,8 +8,10 @@ use catmail_types::{
 };
 use rusqlite::{OptionalExtension, params};
 
-use super::{MOVING, PendingOps, Touched};
+use super::PendingOps;
 use crate::folders::Folders;
+use crate::messages::MOVING;
+use crate::touched::Touched;
 use crate::{Error, Result};
 
 /// The flags a user may change. `\Deleted` goes with deletion and `\Draft` with drafts.

@@ -8,7 +8,8 @@ use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 use crate::Result;
 use crate::columns::{parse_opt_text, parse_text, to_json};
 use crate::drafts::Drafts;
-use crate::ops::{PendingOps, Touched};
+use crate::ops::PendingOps;
+use crate::touched::Touched;
 
 const COLUMNS: &str = "id, account_id, name, delimiter, role, kind, listed, selectable,
     inferiors, unread_count, total_count, last_synced_at";

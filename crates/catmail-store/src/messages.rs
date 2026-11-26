@@ -3,18 +3,17 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::LazyLock;
 
 use catmail_types::{
-    AccountId, Address, Attachment, BlobHash, FlagState, Flags, FolderId, FolderKind, FolderRole,
-    GmailLabel, ListFilter, ListQuery, Message, MessageBody, MessageCursor, MessageId,
+    AccountId, Address, Attachment, AttachmentId, BlobHash, FlagState, Flags, FolderId, FolderKind,
+    FolderRole, GmailLabel, ListFilter, ListQuery, Message, MessageBody, MessageCursor, MessageId,
     MessageSummary, SearchQuery,
 };
 use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
 use crate::Result;
-use crate::attachments::{Attachments, NewAttachment};
+use crate::attachments::{Attachments, NewAttachment, Part};
 use crate::columns::{id_list, json, parse_opt_text, parse_text, to_id_list, to_json};
 use crate::folders::Folders;
 use crate::fts;
-use crate::ops::MOVING;
 
 /// Of `messages m`. Its labels are one lookup in the primary key of `message_labels`.
 const SUMMARY_COLUMNS: &str = "m.id, m.account_id, m.folder_id, m.subject, m.from_json, m.to_json,
@@ -77,6 +76,11 @@ impl Page {
         }
     }
 }
+
+/// Joins a message `m` to the pending move `o` that put it where it is, if it has no
+/// UID yet: the server still has it at the move's (folder, UIDVALIDITY, UID).
+pub(crate) const MOVING: &str = "LEFT JOIN pending_ops o ON m.uid IS NULL AND o.message_id = m.id
+     AND o.kind = 'move' AND o.status = 'pending'";
 
 /// The folders that show message `id` besides its location, as (account, folder): its
 /// labels, and Starred if it is flagged, or `flagged` (it was, or is about to be). None
@@ -218,6 +222,15 @@ pub struct StaleBody {
     /// The whole raw message, if it was kept.
     pub raw: Option<BlobHash>,
     pub html: Option<String>,
+}
+
+/// What it takes to fetch an attachment that isn't stored yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentSource {
+    pub section: String,
+    pub transfer_encoding: Option<String>,
+    pub blob: Option<BlobHash>,
+    pub message: MessageLocation,
 }
 
 /// Where a message lives on the server, and what of it is stored locally.
@@ -901,6 +914,26 @@ impl<'c> Messages<'c> {
                 },
             )
             .optional()?)
+    }
+
+    /// Where the attachment's message is, and the attachment in it; `None` if either is
+    /// gone.
+    pub fn attachment_source(&self, id: AttachmentId) -> Result<Option<AttachmentSource>> {
+        let Some(part) = Attachments::new(self.conn).part(id)? else {
+            return Ok(None);
+        };
+        let Part {
+            message,
+            section,
+            transfer_encoding,
+            blob,
+        } = part;
+        Ok(self.location(message)?.map(|message| AttachmentSource {
+            section,
+            transfer_encoding,
+            blob,
+            message,
+        }))
     }
 
     /// Those of `ids` that exist, in no particular order.
@@ -1982,7 +2015,7 @@ mod tests {
         // The inline image is fetched later.
         let png = body.attachments[1].id;
         let source = store
-            .read(|db| db.attachments().source(png))
+            .read(|db| db.messages().attachment_source(png))
             .unwrap()
             .unwrap();
         assert_eq!((source.section.as_str(), source.blob.clone()), ("3", None));
@@ -2008,7 +2041,7 @@ mod tests {
         assert!(store.read(|db| db.blob_references()).unwrap().is_empty());
         assert!(
             store
-                .read(|db| db.attachments().source(png))
+                .read(|db| db.messages().attachment_source(png))
                 .unwrap()
                 .is_none()
         );

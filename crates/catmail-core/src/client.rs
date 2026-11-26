@@ -878,7 +878,7 @@ impl MailClient {
     /// one's default first. A reply goes from the account of the message it answers, as
     /// one of its identities.
     pub async fn draft_senders(&self, id: DraftId) -> Result<Vec<Identity>> {
-        let senders = self.read(move |db| db.identities().of_draft(id)).await?;
+        let senders = self.read(move |db| db.drafts().senders(id)).await?;
         // Every account has its default identity.
         if senders.is_empty() {
             return Err(Error::DraftNotFound(id));

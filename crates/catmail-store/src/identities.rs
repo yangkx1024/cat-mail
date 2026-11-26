@@ -1,8 +1,8 @@
-use catmail_types::{AccountId, DraftId, Identity, IdentityId, NewIdentity};
+use catmail_types::{AccountId, Identity, IdentityId, NewIdentity};
 use rusqlite::{Connection, OptionalExtension, Row, named_params};
 
 use crate::columns::{server, size_limit, size_limit_column};
-use crate::drafts::{Drafts, REPLY};
+use crate::drafts::Drafts;
 use crate::error::is_unique_violation;
 use crate::{Error, Result};
 
@@ -134,18 +134,12 @@ impl<'c> Identities<'c> {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// The identities the draft may be sent as: every account's, or for a reply its own
-    /// account's only (see [`Drafts::update`]). By account, each one's default first;
-    /// none if there is no such draft.
-    pub fn of_draft(&self, draft: DraftId) -> Result<Vec<Identity>> {
-        let sql = format!(
-            "SELECT {COLUMNS} FROM identities i
-             WHERE EXISTS (SELECT 1 FROM drafts d
-                           WHERE d.id = ?1 AND (d.account_id = i.account_id OR NOT ({REPLY})))
-             ORDER BY i.account_id, i.is_default DESC, i.id"
-        );
+    /// Every account's, by account, each one's default first.
+    pub fn all(&self) -> Result<Vec<Identity>> {
+        let sql =
+            format!("SELECT {COLUMNS} FROM identities ORDER BY account_id, is_default DESC, id");
         let mut stmt = self.conn.prepare_cached(&sql)?;
-        let rows = stmt.query_map([draft.0], from_row)?;
+        let rows = stmt.query_map([], from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -354,7 +348,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Identity> {
 
 #[cfg(test)]
 mod tests {
-    use catmail_types::{BlobHash, DraftContent, Security, ServerConfig};
+    use catmail_types::{BlobHash, DraftContent, DraftId, Security, ServerConfig};
 
     use super::*;
     use crate::outbox::NewOutboxEntry;
@@ -496,7 +490,7 @@ mod tests {
         let mine = add(&store, a, "news@example.com");
         let id = draft(&store, b, None);
         let senders: Vec<IdentityId> = store
-            .read(|db| db.identities().of_draft(id))
+            .read(|db| db.drafts().senders(id))
             .unwrap()
             .into_iter()
             .map(|i| i.id)
@@ -513,7 +507,7 @@ mod tests {
         );
         assert!(
             store
-                .read(|db| db.identities().of_draft(DraftId(99)))
+                .read(|db| db.drafts().senders(DraftId(99)))
                 .unwrap()
                 .is_empty()
         );

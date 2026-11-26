@@ -19,6 +19,7 @@ mod ops;
 mod outbox;
 mod prefetch;
 mod private;
+mod touched;
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -29,17 +30,20 @@ use catmail_types::BlobHash;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 pub use accounts::Accounts;
-pub use attachments::{AttachmentSource, Attachments, NewAttachment};
+pub use attachments::{Attachments, NewAttachment};
 pub use blob::BlobStore;
 pub use drafts::{DraftReply, DraftSnapshot, DraftUpload, Drafts, NewDraftAttachment, UploadDue};
 pub use error::{Error, Result};
 pub use folders::{FolderSyncState, Folders, Reconciled, RemoteFolder};
 pub use identities::{DeletedIdentity, Identities, Sending, SmtpAnnounced};
-pub use messages::{MessageLocation, Messages, NewBody, NewMessage, StaleBody, Upserted};
-pub use ops::{CopyCheckpoint, Moved, PendingOps, ReplayFolder, ReplayKind, ReplayOp, Touched};
+pub use messages::{
+    AttachmentSource, MessageLocation, Messages, NewBody, NewMessage, StaleBody, Upserted,
+};
+pub use ops::{CopyCheckpoint, Moved, PendingOps, ReplayFolder, ReplayKind, ReplayOp};
 pub use outbox::{NewOutboxEntry, Outbox, OutboxJob};
 pub use prefetch::{Prefetch, Usage};
 pub use private::{create_private_dir, private_file_options};
+pub use touched::Touched;
 
 /// Every `*_blob_hash` column (a test checks none is missing).
 const BLOB_REFERENCES: &str = "

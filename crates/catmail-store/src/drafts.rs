@@ -1,6 +1,6 @@
 use catmail_types::{
     AccountId, BlobHash, Draft, DraftAttachment, DraftAttachmentId, DraftBody, DraftContent,
-    DraftId, DraftSummary, FolderId, FolderRole, IdentityId, MessageId, OutboxId, Quote,
+    DraftId, DraftSummary, FolderId, FolderRole, Identity, IdentityId, MessageId, OutboxId, Quote,
 };
 use std::collections::HashSet;
 
@@ -10,7 +10,8 @@ use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 use crate::columns::{id_list, json, parse_text, size_limit, to_id_list, to_json};
 use crate::folders::Folders;
 use crate::identities::Identities;
-use crate::ops::{PendingOps, Touched};
+use crate::ops::PendingOps;
+use crate::touched::Touched;
 use crate::{Error, Result};
 
 /// What a [`DraftSummary`] is read from, with the draft joined to its outbox entry `o`.
@@ -44,7 +45,7 @@ const UPLOAD_OK: &str = "upload_error = NULL, upload_failed_revision = NULL";
 
 /// Whether the draft `d` is a reply, which is sent from its account only. Its original
 /// may be gone, but not the Message-ID it answers, unless it had none.
-pub(crate) const REPLY: &str = "d.reply_to_message_id IS NOT NULL OR d.in_reply_to IS NOT NULL";
+const REPLY: &str = "d.reply_to_message_id IS NOT NULL OR d.in_reply_to IS NOT NULL";
 
 /// Forgets a draft's copy on the server: its columns are set and cleared together.
 const NO_COPY: &str = "remote_folder_id = NULL, remote_uidvalidity = NULL, remote_uid = NULL,
@@ -207,6 +208,26 @@ impl<'c> Drafts<'c> {
     }
 
     /// How many drafts [`list`](Self::list) returns, without reading them.
+    /// The identities the draft may be sent as: every account's, or for a reply its own
+    /// account's only (see [`update`](Self::update)). By account, each one's default
+    /// first; none if there is no such draft.
+    pub fn senders(&self, id: DraftId) -> Result<Vec<Identity>> {
+        let draft: Option<(i64, bool)> = self
+            .conn
+            .query_row(
+                &format!("SELECT d.account_id, {REPLY} FROM drafts d WHERE d.id = ?1"),
+                [id.0],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let identities = Identities::new(self.conn);
+        match draft {
+            None => Ok(Vec::new()),
+            Some((account, true)) => identities.list(AccountId(account)),
+            Some((_, false)) => identities.all(),
+        }
+    }
+
     pub fn count(&self, account: AccountId) -> Result<usize> {
         let n: i64 = self
             .conn
@@ -1430,7 +1451,7 @@ mod tests {
         let moved = store.write(|db| db.drafts().update(id, theirs, &content("Re: x"), 2));
         assert!(matches!(moved, Err(Error::Invalid(_))), "{moved:?}");
         assert_eq!(get(&store, id).account_id, a);
-        let senders = store.read(|db| db.identities().of_draft(id)).unwrap();
+        let senders = store.read(|db| db.drafts().senders(id)).unwrap();
         assert!(senders.iter().all(|i| i.account_id == a), "{senders:?}");
     }
 

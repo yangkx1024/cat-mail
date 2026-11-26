@@ -5,10 +5,11 @@ use std::collections::HashMap;
 use catmail_types::{AccountId, Flags, FolderId, GmailLabel, MessageId, OpKind, PendingOpId};
 use rusqlite::{OptionalExtension, Params, Row, params};
 
-use super::{PendingOps, Touched, kind};
+use super::{PendingOps, kind};
 use crate::Result;
 use crate::columns::parse_opt_text;
 use crate::messages::shown;
+use crate::touched::Touched;
 
 /// Whether op `o` waits for a move of its message (`after_op`) that is still pending.
 const WAITING: &str =

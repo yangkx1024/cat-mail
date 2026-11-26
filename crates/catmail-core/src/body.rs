@@ -676,7 +676,7 @@ async fn locate(engine: &Arc<Engine>, id: MessageId) -> Result<MessageLocation> 
 
 async fn attachment_source(engine: &Arc<Engine>, id: AttachmentId) -> Result<AttachmentSource> {
     engine
-        .read(move |db| db.attachments().source(id))
+        .read(move |db| db.messages().attachment_source(id))
         .await?
         .ok_or(Error::AttachmentNotFound(id))
 }
