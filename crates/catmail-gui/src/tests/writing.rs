@@ -81,6 +81,8 @@ fn a_closed_composer_keeps_what_was_written() {
 
     // Opened again from the drafts, it holds what was written.
     main.app.press("Ideas").unwrap();
+    // The draft's pane slides in as the selection changes, not at once.
+    main.app.wait_for_within("label:Edit", WAIT).unwrap();
     main.app.press("Edit").unwrap();
     let mut again = desktop.window("Ideas");
     again.app.wait_for_within("A few thoughts.", WAIT).unwrap();
