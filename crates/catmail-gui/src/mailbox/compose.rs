@@ -7,6 +7,7 @@ use nsh_core::element::desktop::{MenuItem, popup_menu};
 use nsh_core::prelude::*;
 
 use crate::accounts::with_accounts;
+use crate::composer;
 use crate::engine::client;
 use crate::mailbox::list;
 use crate::mailbox::sidebar::SelectedPlace;
@@ -25,7 +26,7 @@ pub fn open(from: ComposeFrom) {
         if let Err(e) = &opened {
             report("Couldn't start the message", e);
         }
-        let _ = on_main(move || shell::opened(from, opened.ok())).await;
+        let _ = on_main(move || shell::opened(from, opened.ok(), composer::root)).await;
     });
 }
 

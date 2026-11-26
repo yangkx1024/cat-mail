@@ -85,7 +85,23 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
     // own, and its futures don't need tokio, which the toolkit's loop isn't.
     let builder = builder.resident();
     let hidden = std::env::args_os().skip(1).any(|arg| arg == "--background");
-    let code = shell::run(builder, requests, config_dir.map(SettingsFile::new), hidden);
+    let parts = shell::Parts {
+        main_window: nsh_platform::Root::of::<mailbox::App>,
+        // Before the app has finished launching: a notification clicked to launch it is
+        // heard.
+        launching: || {
+            #[cfg(target_os = "macos")]
+            new_mail::install();
+        },
+        // The tray and the notifications follow the engine, and it hears of wakes.
+        engine_opened: || {
+            new_mail::start();
+            tray::start();
+            wake::follow();
+        },
+    };
+    let settings = config_dir.map(SettingsFile::new);
+    let code = shell::run(builder, requests, settings, hidden, parts);
     Ok(std::process::ExitCode::from(code))
 }
 

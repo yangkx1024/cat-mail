@@ -7,6 +7,11 @@
 //!
 //! All of this runs on the main thread, the toolkit's. Each window's view runs on a
 //! thread of its own (nsh's engine thread), and reaches what is here with [`on_main`].
+//!
+//! The shell runs what the app's windows show without knowing it: the views and the
+//! parts outside the windows (the tray, the notifications) run on it, and `main.rs` puts
+//! them together ([`Parts`]); a composer window's view comes from the mailbox that opens
+//! it ([`opened`]).
 
 // In a test build the platform's toolkit is built all the same, for its own tests and so
 // that `--all-targets` checks it, but the windows' views run headless, for the tests to
@@ -57,6 +62,18 @@ use futures_util::StreamExt as _;
 use self::toolkit::{View, Window};
 use crate::engine;
 use crate::nsh_platform::{App, AppOptions, Appearance, Root};
+
+/// What the app runs besides the shell: `main.rs`'s to say.
+#[derive(Clone, Copy)]
+pub struct Parts {
+    /// The main window's view.
+    pub main_window: fn() -> Root,
+    /// As the toolkit's application starts: before it has finished launching, and before
+    /// its first window.
+    pub launching: fn(),
+    /// Once the engine is open: what follows it outside the windows.
+    pub engine_opened: fn(),
+}
 
 pub use catmail_frontend::APP_ID;
 
@@ -282,6 +299,12 @@ thread_local! {
     static HIDDEN: Cell<bool> = const { Cell::new(false) };
     /// What later launches ask for, until the app is sure to quit ([`stop_answering`]).
     static REQUESTS: RefCell<Option<Requests>> = RefCell::default();
+    /// What the app runs besides the shell, from [`run`] on.
+    static PARTS: Cell<Option<Parts>> = const { Cell::new(None) };
+}
+
+fn parts() -> Parts {
+    PARTS.get().expect("the app runs (`run`)")
 }
 
 /// Waits `delay` on the main thread's loop.
@@ -305,15 +328,17 @@ pub fn on_main<R: Send + 'static>(
     async move { answer.await.ok() }
 }
 
-/// Runs the app until it quits, then shuts the engine down: the process's exit code.
-/// `hidden`, it opens no window at launch, as once its last is closed. On macOS it doesn't
-/// return: AppKit ends the process, after [`finish`].
+/// Runs the app made of `parts` until it quits, then shuts the engine down: the process's
+/// exit code. `hidden`, it opens no window at launch, as once its last is closed. On macOS
+/// it doesn't return: AppKit ends the process, after [`finish`].
 pub fn run(
     builder: MailClientBuilder,
     requests: Option<Requests>,
     file: Option<SettingsFile>,
     hidden: bool,
+    parts: Parts,
 ) -> u8 {
+    PARTS.set(Some(parts));
     HIDDEN.set(hidden);
     let file = FILE.get_or_init(|| file.map(Arc::new));
     if let Some(file) = file {
@@ -321,6 +346,7 @@ pub fn run(
     }
     load_settings(file.as_deref());
     let code = toolkit::run(move || {
+        (parts.launching)();
         toolkit::set_appearance(appearance(&settings()));
         started(builder, requests);
     });
@@ -393,10 +419,7 @@ fn started(builder: MailClientBuilder, requests: Option<Requests>) {
     toolkit::spawn(async move {
         engine::opened_with(builder.open_async().await);
         if let Some(client) = engine::open() {
-            // The tray and the notifications follow it, and it hears of wakes.
-            crate::new_mail::start();
-            crate::tray::start();
-            crate::wake::follow();
+            (parts().engine_opened)();
             serve_agents(client);
         } else if toolkit::windows().is_empty() {
             // Launched without one, or it was closed while the engine opened: the window
@@ -488,7 +511,7 @@ fn main_window() -> Window {
             lock(&ASKS).closed();
         }),
     };
-    let window = open_window(&spec, Root::of::<crate::mailbox::App>(), hooks);
+    let window = open_window(&spec, (parts().main_window)(), hooks);
     tracing::info!("main window opened");
     window
 }
@@ -545,8 +568,13 @@ pub fn begin_opening(from: ComposeFrom) -> bool {
 
 /// `from`'s draft was made or read (or couldn't be, `None`): opens a window on it, or
 /// brings forward the one it has (a reply or forward made it, and it was opened from the
-/// drafts before its window came up).
-pub fn opened(from: ComposeFrom, opening: Option<(Opening, EditMark)>) {
+/// drafts before its window came up). `view` is the window's view, given the opening and
+/// the window's asks to close (its close button, Ctrl+W, quitting).
+pub fn opened(
+    from: ComposeFrom,
+    opening: Option<(Opening, EditMark)>,
+    view: fn(Opening, mpsc::UnboundedReceiver<()>) -> Root,
+) {
     if let ComposeFrom::Draft(id) = from {
         COMPOSERS.with_borrow_mut(|open| open.end_opening(id));
     }
@@ -564,10 +592,6 @@ pub fn opened(from: ComposeFrom, opening: Option<(Opening, EditMark)>) {
         min_size: Some((480, 360)),
     };
     let (asks, close_requests) = mpsc::unbounded();
-    let start = Arc::new(crate::composer::Start {
-        opening,
-        close_requests: Mutex::new(Some(close_requests)),
-    });
     // The view decides: it saves first, and closes the window itself (`composer_closed`).
     // One that is gone can't, and the window just goes.
     let ask = asks.clone();
@@ -575,7 +599,7 @@ pub fn opened(from: ComposeFrom, opening: Option<(Opening, EditMark)>) {
         close_requested: Some(Box::new(move || ask.unbounded_send(()).is_ok())),
         gone: Box::new(move || COMPOSERS.with_borrow_mut(|open| open.remove(id))),
     };
-    let window = open_window(&spec, crate::composer::root(start), hooks);
+    let window = open_window(&spec, view(opening, close_requests), hooks);
     COMPOSERS.with_borrow_mut(|open| open.insert(id, (window.clone(), asks, Rc::new(mark))));
     window.present(None);
 }

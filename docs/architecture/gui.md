@@ -32,9 +32,15 @@ Windows 用户目前只有 CLI。
 按窗口和区域分目录，仿照原来 GPUI 版的划分：主窗口的各栏在 `mailbox/`（读信区也是它的一栏），写信窗口、设置
 对话框各一个目录，大的视图再把"状态和行为"与"长什么样"（`view.rs`）分开；各处共用的小部件和状态放在 `src/` 下。
 
+分层从上到下：`main.rs` 把应用拼起来；主窗口（`mailbox/`）用写信窗口、设置对话框和登录页；它们都跑在外壳
+（`shell/`）上，用 `src/` 下共用的部分。下层不引用上层：外壳不知道窗口里是什么，主窗口的视图、窗口外跟着引擎的
+部分（托盘、通知、唤醒）由 `main.rs` 交给它（`shell::Parts`），写信窗口的视图由开它的主窗口给（`shell::opened`）；
+账户的状态在 `accounts.rs`，侧栏、列表、设置、登录页都读它，不经过侧栏。
+
 ```
 src/
-  main.rs          启动：交给已在运行的实例或成为它（catmail_frontend::instance），日志，引擎的选项，交给 shell::run
+  main.rs          启动：交给已在运行的实例或成为它（catmail_frontend::instance），日志，引擎的选项；把主窗口的视图
+                   和窗口外的部分（托盘、通知、唤醒）交给 shell::run
   engine.rs        引擎：属于应用，不属于窗口；打开中、已打开、失败、已关闭
   accounts.rs      主窗口读到的账户（文件夹、发件身份、状态）和 Sync：侧栏、列表、命令、设置、登录页共用
   shell/           外壳：mod.rs 窗口、设置与主题、托盘和通知的请求、MCP 服务、常驻与退出；gtk.rs、appkit.rs、headless.rs
@@ -431,7 +437,7 @@ web view、图片的应答、远程图片的下载在 `web.rs`，写信窗口的
 
 写信的模型在 `catmail_frontend::composer`（`ComposeFrom::start`、From 的选项、字段解析、`Lifecycle` 决定何时保存 /
 发送 / 关窗、`OpenComposers` 按草稿登记窗口），`composer/` 只有界面。每个写信窗口的视图跑在它自己的 nsh 线程上；
-窗口由外壳开关（`shell::opened`、`composer_closed`）。
+窗口由外壳开关（`shell::opened`、`composer_closed`），视图（`composer::root`）由开窗的主窗口交给外壳。
 
 - **开着的草稿只由窗口改**：`ComposeFrom::start` 用 `edit_draft` 打开草稿，窗口的保存、附件、发送都经
   `Opening::editor`（`DraftEditor`）做；别处（MCP 的 agent）这时改不了、发不了它。`start` 一并返回的 `EditMark` 由外壳
