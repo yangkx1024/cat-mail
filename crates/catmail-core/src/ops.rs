@@ -27,7 +27,7 @@ use crate::draft_sync::{Uploaded, Uploads};
 use crate::engine::{Activity, Engine};
 use crate::pool::with_session;
 use crate::task::{lock, now};
-use crate::{Error, Result, draft_sync};
+use crate::{Error, Result, draft_sync, events};
 
 pub(crate) async fn set_flags(
     engine: Arc<Engine>,
@@ -110,41 +110,9 @@ async fn change(
         })
         .await?;
     Ok(ChangeReport {
-        accounts: announce(engine, &touched),
+        accounts: events::announce(engine, &touched),
         ops: touched.ops,
     })
-}
-
-/// Emits the events for `touched`, and wakes the accounts' background sync to make any
-/// ops queued on the server. Returns its accounts.
-pub(crate) fn announce(engine: &Engine, touched: &Touched) -> Vec<AccountId> {
-    emit_lists(engine, touched);
-    let accounts: BTreeSet<AccountId> = touched
-        .lists()
-        .map(|(a, _)| a)
-        .chain(touched.refused.iter().copied())
-        .collect();
-    for &account in &accounts {
-        engine.emit(Event::PendingOpsChanged { account });
-        // Sync's own conflicts come through here too; that costs a needless look at the
-        // queue, rarely.
-        engine.wake(account);
-    }
-    emit_refused(engine, touched);
-    accounts.into_iter().collect()
-}
-
-fn emit_lists(engine: &Engine, touched: &Touched) {
-    for (account, folder) in touched.lists() {
-        engine.emit(Event::MessagesChanged { account, folder });
-    }
-}
-
-/// Tells about the changes `touched` refused, after the events that show them undone.
-fn emit_refused(engine: &Engine, touched: &Touched) {
-    for &account in &touched.refused {
-        engine.emit(Event::ChangesRefused { account });
-    }
 }
 
 pub(crate) async fn list(
@@ -307,21 +275,12 @@ async fn replay(
     }
     // Whatever was committed before a failure too.
     if !folders.is_empty() {
-        replayed(engine, account, &touched);
+        events::replayed(engine, account, &touched);
         let sum = |count: fn(&ReplayReport) -> u32| reports.values().map(count).sum::<u32>();
         tracing::info!(%account, applied = sum(|r| r.applied), refused = sum(|r| r.failed),
             error = result.as_ref().err().map(tracing::field::display), "replayed local changes");
     }
     result
-}
-
-/// Emits the events for a replay's changes: to the account's queue, and to the messages
-/// of the folders in `touched`. Unlike [`announce`] it wakes nobody: the replay is what
-/// a wake would ask for.
-pub(crate) fn replayed(engine: &Engine, account: AccountId, touched: &Touched) {
-    emit_lists(engine, touched);
-    engine.emit(Event::PendingOpsChanged { account });
-    emit_refused(engine, touched);
 }
 
 /// Runs the folder's pending ops on `session`, adding them to `seen` as (folder, op),

@@ -25,7 +25,7 @@ use catmail_types::{AccountId, DraftId, Event, Flags, FolderId, FolderRole};
 
 use crate::engine::Engine;
 use crate::task::{backoff, blocking, now};
-use crate::{Result, connection, drafts, ops};
+use crate::{Result, connection, drafts, events};
 
 /// Background sync uploads a draft the server refused again after this long, doubling
 /// with each refusal of it as it is up to [`MAX_REFUSED_BACKOFF`]: it is sent in full
@@ -119,7 +119,7 @@ pub(crate) async fn upload(
     .await;
     // Whatever was committed before a failure too.
     if !touched.is_empty() {
-        ops::replayed(engine, account, &touched);
+        events::replayed(engine, account, &touched);
     }
     if changed {
         engine.emit(Event::DraftsChanged { account });

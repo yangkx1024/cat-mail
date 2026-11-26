@@ -55,8 +55,6 @@ field-leak catmail_testkit::imap::ServerState::synchronized_literals
 long-file crates/catmail-store/src/messages.rs
 long-file crates/catmail-testkit/src/imap/mod.rs
 module-cycle catmail_core::body,catmail_core::connection,catmail_core::engine,catmail_core::pool,catmail_core::rebuild,catmail_core::search
-module-cycle catmail_core::draft_sync,catmail_core::ops
-module-cycle catmail_core::folders,catmail_core::sync
 module-cycle catmail_frontend::commands,catmail_frontend::mailbox,catmail_frontend::refresh
 module-cycle catmail_gui::composer,catmail_gui::login,catmail_gui::mailbox,catmail_gui::new_mail,catmail_gui::reader,catmail_gui::settings,catmail_gui::shell,catmail_gui::tray
 module-cycle catmail_gui::mailbox::commands,catmail_gui::mailbox::compose,catmail_gui::mailbox::folder_commands,catmail_gui::mailbox::list,catmail_gui::mailbox::picker,catmail_gui::mailbox::sidebar

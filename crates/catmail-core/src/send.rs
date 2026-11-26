@@ -32,7 +32,7 @@ use crate::connection::{self, SendAs, SmtpLogin};
 use crate::engine::{Activity, Engine, Permit};
 use crate::pool::with_session;
 use crate::task::{Closing, blocking, now};
-use crate::{Error, Result, addresses, body, drafts, ops, sync};
+use crate::{Error, Result, addresses, body, drafts, events, sync};
 
 /// First retry after this long, doubling up to [`MAX_BACKOFF`].
 const FIRST_BACKOFF: i64 = 30;
@@ -464,7 +464,7 @@ async fn send_one(
                 account,
                 outbox: id,
             });
-            ops::announce(engine, &replied);
+            events::announce(engine, &replied);
             match save {
                 Some(job) => save_one(engine, job, Some(raw)).await,
                 None => engine.read(move |db| db.outbox().get(id)).await,
@@ -778,7 +778,7 @@ async fn user_decision(
     engine.emit(Event::OutboxChanged {
         account: entry.account_id,
     });
-    ops::announce(engine, &touched);
+    events::announce(engine, &touched);
     Ok(entry)
 }
 
