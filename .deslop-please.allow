@@ -41,7 +41,6 @@ field-leak catmail_testkit::imap::ServerState::subscriptions
 field-leak catmail_testkit::imap::ServerState::synchronized_literals
 long-file crates/catmail-store/src/messages.rs
 long-file crates/catmail-testkit/src/imap/mod.rs
-module-cycle catmail_frontend::commands,catmail_frontend::mailbox,catmail_frontend::refresh
 shallow-module catmail_core::client
 shallow-module catmail_frontend
 shallow-module catmail_frontend::composer

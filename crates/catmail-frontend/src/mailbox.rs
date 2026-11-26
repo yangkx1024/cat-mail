@@ -13,7 +13,7 @@ use catmail_core::{
     FolderRole, Identity, MessageId, OutboxEntry,
 };
 
-use crate::commands::Confirm;
+use crate::confirm::Confirm;
 use crate::folders::{self, AccountFolders, FolderIcon};
 
 pub use asks::{Ask, Asks};

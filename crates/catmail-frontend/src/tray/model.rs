@@ -4,7 +4,7 @@
 
 use std::borrow::Cow;
 
-use crate::refresh::Coalesce;
+use crate::coalesce::Coalesce;
 
 /// The count and the icon shown for it.
 #[derive(Debug, Default)]

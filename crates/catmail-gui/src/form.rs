@@ -4,7 +4,7 @@
 
 use std::rc::Rc;
 
-use catmail_frontend::commands::Confirm;
+use catmail_frontend::confirm::Confirm;
 use catmail_frontend::login::Submission;
 use futures_util::future::LocalBoxFuture;
 use nsh_base::{alert_dialog, button, dialog, theme};

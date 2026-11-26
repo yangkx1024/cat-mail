@@ -23,7 +23,7 @@ use catmail_core::{
 };
 use futures_channel::oneshot;
 
-use crate::commands::Confirm;
+use crate::confirm::Confirm;
 use crate::format;
 use crate::mailbox::{AccountEntry, Place};
 use rich_text::Images;
