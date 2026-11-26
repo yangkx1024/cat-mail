@@ -187,10 +187,15 @@ mod tests {
     use super::show;
 
     const ID: &str = "net.yangkx.catmail.NotifTest";
-    const CHILD: &str = "new_mail::platform::tests::sends_escaped_or_plain_body";
     const CASE_ENV: &str = "CATMAIL_TEST_NOTIF_CASE";
     const BODY: &str = "Q&A <draft> & <b>hi</b>";
     const ESCAPED: &str = "Q&amp;A &lt;draft&gt; &amp; &lt;b&gt;hi&lt;/b&gt;";
+
+    /// The test each scenario runs, as libtest names it: its path without the crate's name.
+    fn child() -> String {
+        let (_, tests) = module_path!().split_once("::").unwrap();
+        format!("{tests}::sends_escaped_or_plain_body")
+    }
 
     /// Each GLib notification backend is chosen once per process on the session bus, so
     /// each scenario runs on a bus of its own.
@@ -218,7 +223,7 @@ mod tests {
             let mut cmd = Command::new("dbus-run-session");
             cmd.arg("--")
                 .arg(std::env::current_exe().unwrap())
-                .args(["--exact", CHILD, "--ignored", "--test-threads=1"])
+                .args(["--exact", &child(), "--ignored", "--test-threads=1"])
                 .env_remove("GIO_USE_PORTALS")
                 .env_remove("GNOTIFICATION_BACKEND")
                 .env(CASE_ENV, case);

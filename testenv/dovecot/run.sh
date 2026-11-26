@@ -7,7 +7,7 @@
 #   nix develop .#testenv -c testenv/dovecot/run.sh [port]
 #
 # Then, in another shell, run the exports it prints and
-# `cargo test -p catmail-core --test dovecot --test submission`.
+# `cargo test -p catmail-core --test dovecot`.
 #
 # Ports: IMAP `port` (10143), submission with STARTTLS port+444 (10587), submission with
 # implicit TLS port+322 (10465), mailpit SMTP port+882 (11025) and HTTP API port+937

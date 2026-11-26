@@ -239,9 +239,11 @@ mod tests {
             std::fs::create_dir(&services).unwrap();
             if let Some(test) = portal {
                 let exe = std::env::current_exe().unwrap();
+                // The test's name as libtest has it: its path without the crate's name.
+                let (_, tests) = module_path!().split_once("::").unwrap();
                 let service = format!(
                     "[D-BUS Service]\nName={DESKTOP}\nExec={} --exact \
-                     autostart::portal::tests::{test} --ignored --test-threads=1\n",
+                     {tests}::{test} --ignored --test-threads=1\n",
                     exe.display()
                 );
                 std::fs::write(services.join(format!("{DESKTOP}.service")), service).unwrap();
