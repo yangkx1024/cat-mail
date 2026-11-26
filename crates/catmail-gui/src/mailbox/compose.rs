@@ -1,5 +1,5 @@
 //! Starting a message from the mailbox: a new one, a reply, a forward, a draft opened
-//! again. These run in the mailbox's view; the window they open is `crate::composer`,
+//! again. These run in the mailbox's view; the window they open is `crate::windows::composer`,
 //! whose view is on a thread of its own.
 
 use catmail_frontend::composer::{ComposeFrom, new_message_account};
@@ -7,12 +7,12 @@ use nsh_core::element::desktop::{MenuItem, popup_menu};
 use nsh_core::prelude::*;
 
 use crate::accounts::with_accounts;
-use crate::composer;
 use crate::engine::client;
 use crate::mailbox::listing::{self, SelectedPlace};
+use crate::shell::tasks::in_view;
 use crate::shell::{self, on_main};
-use crate::tasks::in_view;
 use crate::toast::report;
+use crate::windows::composer;
 
 /// Opens a composer window for `from`, from the mailbox. The draft is made (or read)
 /// first; failures are reported in the mailbox.

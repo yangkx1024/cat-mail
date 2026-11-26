@@ -14,8 +14,8 @@ use nsh_core::prelude::*;
 
 use crate::buttons::spinner;
 use crate::icons::{Icon, icon};
-use crate::tasks::in_view;
-use crate::theme::SelectableText as _;
+use crate::shell::tasks::in_view;
+use crate::shell::theme::SelectableText as _;
 
 pub const PADDING: f32 = 24.0;
 

@@ -117,7 +117,7 @@ fn draw() {
     shell::spawn(async move {
         let pixmaps = match drawing.icon.clone() {
             Some((svg, sizes)) => {
-                crate::tasks::off_thread(move || {
+                crate::shell::tasks::off_thread(move || {
                     let pixmaps = pixmaps(&svg, sizes).into_iter();
                     pixmaps.map(platform::icon_from).collect::<Vec<_>>()
                 })

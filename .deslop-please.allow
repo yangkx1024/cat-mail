@@ -54,4 +54,3 @@ tangle catmail_core::client::DraftEditor,catmail_core::client::MailClient,catmai
 wide-directory crates/catmail-core/src/
 wide-directory crates/catmail-core/tests/
 wide-directory crates/catmail-frontend/src/
-wide-directory crates/catmail-gui/src/

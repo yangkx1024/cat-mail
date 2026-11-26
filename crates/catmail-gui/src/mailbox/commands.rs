@@ -16,7 +16,7 @@ use crate::form::confirmed;
 use crate::icons::Icon;
 use crate::mailbox::listing;
 use crate::mailbox::picker::{Picker, Picking, open_picker};
-use crate::tasks::in_view;
+use crate::shell::tasks::in_view;
 use crate::toast::{Level, notify};
 
 /// What the commands do to the messages, for their buttons. Tracked: the buttons follow

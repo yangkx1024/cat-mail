@@ -15,9 +15,9 @@ use nsh_core::element::{Owner, input};
 use nsh_core::prelude::*;
 
 use crate::buttons::{Size, icon_button, primary_button, separator};
-use crate::chrome;
 use crate::form;
 use crate::icons::{Icon, icon};
+use crate::shell::chrome;
 use crate::toast;
 
 use super::{
@@ -26,7 +26,7 @@ use super::{
     dropped, ending, field_index, focus, follow_identities, format, formatted, formatting_moved,
     insert_images, link_to, pasted, remove_attachment, rich, send, text_changed,
 };
-use crate::theme::SelectableText as _;
+use crate::shell::theme::SelectableText as _;
 
 #[component]
 pub fn Composer() -> impl IntoElement {
@@ -43,9 +43,9 @@ pub fn Composer() -> impl IntoElement {
     } = &start.opening;
     let focus_body = *focus_body;
     let content = &draft.content;
-    crate::tasks::own_tasks(Owner::current());
-    crate::settings::follow();
-    crate::settings::bind_keys(false);
+    crate::shell::tasks::own_tasks(Owner::current());
+    crate::windows::settings::follow();
+    crate::windows::settings::bind_keys(false);
     global::<Shared>().set(Shared(Some(Rc::new(RefCell::new(Composing {
         editor: start.opening.editor.clone(),
         life: Lifecycle::new(&start.opening),

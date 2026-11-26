@@ -23,7 +23,7 @@ use crate::buttons::{Size, icon_button, menu_item};
 use crate::form::{self, modal};
 use crate::icons::Icon;
 use crate::shell;
-use crate::tasks::off_thread;
+use crate::shell::tasks::off_thread;
 use crate::toast::report;
 
 use accounts::accounts_section;

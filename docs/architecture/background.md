@@ -53,7 +53,7 @@ GUI 关掉主窗口后继续同步、发信、提醒新邮件，并能从托盘�
 引擎一直运行到应用退出；视图用 `engine::opened` 等它打开。外壳（`shell/`）另外记着主窗口、写信窗口、托盘和通知
 对主窗口的请求（`Ask`），以及主窗口上次的位置。
 
-不依赖窗口的事件订阅在引擎打开时启动：新邮件通知（`new_mail.rs`，见[新邮件](#新邮件)）、托盘（`tray/`，见
+不依赖窗口的事件订阅在引擎打开时启动：新邮件通知（`system/new_mail/`，见[新邮件](#新邮件)）、托盘（`system/tray/`，见
 [托盘](#托盘)）。它们不存 `MailClient`：启动时订阅一次事件，之后每次用到都从 `engine::open` 取（引擎没打开或已在
 退出时是 `None`），退出后也就不再发出注定得到 `Error::Closed` 的调用。引擎关闭时事件流结束，它们的循环随之停下。
 
@@ -132,7 +132,7 @@ data"。macOS 上 LaunchServices 把同一个 bundle 的再次打开交给已在
 ## 系统睡眠与唤醒
 
 `Engine::resume` 有两个来源：前端知道系统醒了时调 `MailClient::resume()`；引擎自己发现睡眠（见下）。nsh 0.6.0 的
-`wake_count()` 只记在 surface（视图）上，常驻时没有视图就听不到，所以 GUI 自己听（`catmail-gui` 的 `wake.rs`，引擎打开后开始，直到退出）：Linux 上是系统总线上 logind 的
+`wake_count()` 只记在 surface（视图）上，常驻时没有视图就听不到，所以 GUI 自己听（`catmail-gui` 的 `system/wake.rs`，引擎打开后开始，直到退出）：Linux 上是系统总线上 logind 的
 `PrepareForSleep(false)`（GIO 的 D-Bus，在 GTK 的主循环上；systemd 和 elogind 都有，Flatpak 里要
 `--system-talk-name=org.freedesktop.login1`），macOS 上是 `NSWorkspace` 通知中心的
 `NSWorkspaceDidWakeNotification`。两边都只是调 `resume`；听不到（没有系统总线、没有 logind）时还有引擎自己发现。
@@ -223,7 +223,7 @@ data"。macOS 上 LaunchServices 把同一个 bundle 的再次打开交给已在
 
 ### 系统通知
 
-GUI 的 `new_mail/` 在引擎打开时订阅事件，有窗口时、常驻时都在。攒、措辞、每条通知的 tag 和点击后的去处不依赖
+GUI 的 `system/new_mail/` 在引擎打开时订阅事件，有窗口时、常驻时都在。攒、措辞、每条通知的 tag 和点击后的去处不依赖
 UI 库，在 `catmail_frontend::new_mail`（`Arrivals`、`notifications`、`Target`）；攒、重读和点击后转过去两个平台共用
 （`new_mail/mod.rs`），发出通知、听点击各平台自己做（`linux.rs`、`macos.rs`）。⚠️ nsh 的通知要经过某个视图的根，
 而应用常驻时没有视图，所以两边都不用它：
@@ -273,7 +273,7 @@ delegate，在 `NSApplication` 运行之前设好（`new_mail::install`，`main.
 
 ## 托盘
 
-GUI 的 `tray/` 在引擎打开时启动，有窗口时、常驻时都在。`tray/mod.rs` 数未读、在后台把图标画成像素；
+GUI 的 `system/tray/` 在引擎打开时启动，有窗口时、常驻时都在。`tray/mod.rs` 数未读、在后台把图标画成像素；
 `linux.rs`、`macos.rs` 把画好的图标和未读数交给 frontend 里各平台的托盘项。不依赖 UI 库的部分在
 `catmail_frontend::tray`：菜单（`MENU`、`Command`）、提示文字、角标的文字和带角标的 SVG（`badged`）、按平台给出
 图标的样子和尺寸（`icon`，图标的 SVG 在 `crates/catmail-frontend/assets/app-icon/`）、什么时候数、什么时候画、

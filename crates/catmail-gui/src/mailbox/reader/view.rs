@@ -16,8 +16,8 @@ use crate::mailbox::compose;
 use crate::mailbox::list::back_button;
 use crate::mailbox::list::{self};
 use crate::mailbox::listing;
-use crate::theme::SelectableText as _;
-use crate::{chrome, web};
+use crate::shell::theme::SelectableText as _;
+use crate::{shell::chrome, web};
 
 use super::{
     BodyHeight, Reading, Retry, ShowDetails, State, open_in_browser, page_painted, page_state,

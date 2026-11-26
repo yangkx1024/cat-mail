@@ -28,10 +28,10 @@ use nsh_core::prelude::*;
 
 use crate::accounts::{self, Accounts};
 use crate::engine::client;
-use crate::login::{self, SignIn};
-use crate::tasks::{in_view, own_tasks};
-use crate::theme::SelectableText as _;
-use crate::{chrome, form, settings, shell, toast};
+use crate::shell::tasks::{in_view, own_tasks};
+use crate::shell::theme::SelectableText as _;
+use crate::windows::login::{self, SignIn};
+use crate::{form, shell, shell::chrome, toast, windows::settings};
 use catmail_frontend::list::Listing;
 use listing::{Selected, SelectedPlace};
 

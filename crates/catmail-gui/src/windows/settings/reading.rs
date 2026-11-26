@@ -7,7 +7,7 @@ use nsh_core::prelude::*;
 use crate::engine::client;
 use crate::icons::Icon;
 use crate::shell;
-use crate::tasks::in_view;
+use crate::shell::tasks::in_view;
 use crate::toast::report;
 
 use crate::buttons::labelled_button;

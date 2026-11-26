@@ -29,15 +29,20 @@ Windows 用户目前只有 CLI。
 
 ## 结构
 
-按窗口和区域分目录，仿照原来 GPUI 版的划分：主窗口的各栏在 `mailbox/`（读信区也是它的一栏），写信窗口、设置
-对话框各一个目录，大的视图再把"状态和行为"与"长什么样"（`view.rs`）分开；各处共用的小部件和状态放在 `src/` 下。
+按窗口和区域分目录，仿照原来 GPUI 版的划分：主窗口的各栏在 `mailbox/`（读信区也是它的一栏），主窗口打开的
+写信窗口、设置对话框和登录页在 `windows/`，窗口之外跟着引擎的部分在 `system/`，大的视图再把"状态和行为"与
+"长什么样"（`view.rs`）分开；各处共用的小部件和状态放在 `src/` 下。
 
-分层从上到下：`main.rs` 把应用拼起来；主窗口（`mailbox/`）用写信窗口、设置对话框和登录页；它们都跑在外壳
-（`shell/`）上，用 `src/` 下共用的部分。下层不引用上层：外壳不知道窗口里是什么，主窗口的视图、窗口外跟着引擎的
-部分（托盘、通知、唤醒）由 `main.rs` 交给它（`shell::Parts`），写信窗口的视图由开它的主窗口给（`shell::opened`）；
-账户的状态在 `accounts.rs`，侧栏、列表、设置、登录页都读它，不经过侧栏。主窗口里也一样：各栏（`panes.rs`、
-`sidebar.rs`、`list/`、`reader/`、`draft.rs`、`outbox.rs`）在上，命令、写信的发起、"Move to"与"Labels"在中间，
-列表显示什么、选中和勾选了什么（`listing.rs`）在下，各栏都读它、经它改邮件。
+分层从上到下：`main.rs` 把应用拼起来；主窗口（`mailbox/`）用写信窗口、设置对话框和登录页（`windows/`）；它们
+都跑在外壳（`shell/`）上，用 `src/` 下共用的部分。下层不引用上层：外壳不知道窗口里是什么，主窗口的视图、窗口外
+跟着引擎的部分（`system/`：托盘、通知、唤醒）由 `main.rs` 交给它（`shell::Parts`），写信窗口的视图由开它的主窗口
+给（`shell::opened`）；账户的状态在 `accounts.rs`，侧栏、列表、设置、登录页都读它，不经过侧栏。主窗口里也一样：
+各栏（`panes.rs`、`sidebar.rs`、`list/`、`reader/`、`draft.rs`、`outbox.rs`）在上，命令、写信的发起、"Move to"与
+"Labels"在中间，列表显示什么、选中和勾选了什么（`listing.rs`）在下，各栏都读它、经它改邮件。
+
+`src/` 下的共用部分（按钮、表单、图标、动效、通知）各自被许多视图用，没有按目录归拢：放在一起的模块只多出一层
+路径，藏不住什么。外壳带着每个窗口和视图都要的三样：视图的工作在哪里跑（`tasks.rs`）、主题怎样交给 nsh
+（`theme.rs`）、窗口顶部（`chrome.rs`）。
 
 ```
 src/
@@ -46,6 +51,9 @@ src/
   engine.rs        引擎：属于应用，不属于窗口；打开中、已打开、失败、已关闭
   accounts.rs      主窗口读到的账户（文件夹、发件身份、状态）和 Sync：侧栏、列表、命令、设置、登录页共用
   shell/           外壳：mod.rs 窗口、设置与主题、托盘和通知的请求、MCP 服务、常驻与退出；gtk.rs、appkit.rs、headless.rs
+    tasks.rs       视图开始的工作归谁（随窗口结束），另起线程的工作
+    theme.rs       主题映射到 nsh（shadcn）的 token
+    chrome.rs      窗口顶部：macOS 的一体式主窗口、写信窗口的标题栏、各栏顶部的工具栏
   mailbox/         主窗口
     mod.rs         引擎打开前留空、失败的原因、登录页或三栏、引擎事件的刷新
     panes.rs       三栏和拖宽度的把手，右栏按选中的是邮件、草稿还是发件箱条目；右栏共用的返回按钮、字段行
@@ -60,26 +68,25 @@ src/
     draft.rs outbox.rs  草稿、发件箱条目的右栏
     reader/        读信区（邮件的右栏）：mod.rs 打开、远程与内嵌图片、附件的保存；view.rs 工具栏、头部、正文的
                    web view、附件
-  web/             web.rs 邮件 HTML 的 web view 与图片应答（读信区和写信引文共用）；sideways.rs 自定义横向滚动条
-                   （页面：CSP、注入脚本和消息协议在 catmail_frontend::html）
-  composer/        写信窗口：mod.rs 状态、保存发送关闭、附件、发件人、格式与图片；rich.rs 正文的编辑器；
+  windows/         主窗口打开的窗口、对话框，和没有账户时代替它的登录页
+    composer/      写信窗口：mod.rs 状态、保存发送关闭、附件、发件人、格式与图片；rich.rs 正文的编辑器；
                    quote.rs 引文；view.rs 窗口
-  settings/        设置对话框：mod.rs 设置的跟随、对话框和 General；appearance.rs、accounts.rs、reading.rs、agents.rs 各一节
-  login.rs         登录页和发件身份的表单
+    settings/      设置对话框：mod.rs 设置的跟随、对话框和 General；appearance.rs、accounts.rs、reading.rs、agents.rs 各一节
+    login.rs       登录页和发件身份的表单
+  system/          窗口之外、跟着引擎的部分，有没有窗口都在
+    tray/          托盘：mod.rs 计数、把图标画成像素（何时数、何时画由 frontend 的 TrayModel 定），linux.rs、
+                   macos.rs 交给 frontend 的 StatusNotifierItem、状态栏项
+    new_mail/      新邮件的系统通知：mod.rs 攒与重读；linux.rs GNotification，macos.rs UserNotifications
+    wake.rs        系统唤醒：告诉引擎重新连接并立即同步（logind、NSWorkspace）
+  web/             mod.rs 邮件 HTML 的 web view 与图片应答（读信区和写信引文共用）；sideways.rs 自定义横向滚动条
+                   （页面：CSP、注入脚本和消息协议在 catmail_frontend::html）
   form.rs          对话框外框、字段、提交（含忙碌转圈）、确认对话框、只要一个名字的对话框
-  tasks.rs         视图开始的工作归谁（随窗口结束），另起线程的工作
   buttons.rs       图标按钮（工具栏、行两种尺寸）、主按钮、文字按钮、分隔、提示、折叠按钮与转圈、侧栏式菜单的项
                    （主窗口的侧栏和设置对话框的分节）
-  chrome.rs        窗口顶部：macOS 的一体式主窗口、写信窗口的标题栏、各栏顶部的工具栏
   motion.rs        动画参数、布局动画、减弱动态效果检查与 macOS 动画期间隐藏滚动指示器
-  theme.rs         主题映射到 nsh（shadcn）的 token
   clock.rs         系统的时区和 12 / 24 小时设置，日期分组用的今天
-  wake.rs          系统唤醒：告诉引擎重新连接并立即同步（logind、NSWorkspace）
   toast.rs         窗口里的通知；report 记日志并提示出错
   icons.rs         Heroicons
-  tray/            托盘：mod.rs 计数、把图标画成像素（何时数、何时画由 frontend 的 TrayModel 定），linux.rs、
-                   macos.rs 交给 frontend 的 StatusNotifierItem、状态栏项
-  new_mail/        新邮件的系统通知：mod.rs 攒与重读；linux.rs GNotification，macos.rs UserNotifications
   tests/           nsh-testing 无头窗口测试：mod.rs（Desktop 夹具）、reading.rs、writing.rs、settings.rs、folders.rs
 ```
 
@@ -114,7 +121,7 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 
 ### 窗口外框（macOS）
 
-`chrome.rs`。macOS 上主窗口没有系统标题栏：它只写着窗口名，占一行又不提供什么。Linux 上仍用系统的标题栏。
+`shell/chrome.rs`。macOS 上主窗口没有系统标题栏：它只写着窗口名，占一行又不提供什么。Linux 上仍用系统的标题栏。
 
 - **主窗口是一体式**（像 Mail.app，nsh 的 `TitleBarStyle::Hidden`，经 `current_window().set`）：内容一直到窗口
   顶部，红绿灯在侧栏左上角。顶部一行就是红绿灯所在的行（向 nsh 要 52 pt，AppKit unified 工具栏给按钮的那一行高，
@@ -331,7 +338,7 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 ### 正文在 web view 里
 
 有 HTML 部分就显示清洗后的 HTML，否则把纯文本转义后放进 `<pre>`（`catmail_frontend::html::BodyPages::page`），都在同一个 web view 里。
-web view、图片的应答、远程图片的下载在 `web.rs`，写信窗口的引文用同一套（见[写信窗口](#写信窗口)）；每个视图在
+web view、图片的应答、远程图片的下载在 `web/`，写信窗口的引文用同一套（见[写信窗口](#写信窗口)）；每个视图在
 自己的线程上，各有一份。
 
 - **断网**：WebKit 有自己的网络，nsh 只检查顶层导航，不管页面的子资源，所以由页面自己断网：`<head>` 最前面
@@ -495,7 +502,7 @@ web view、图片的应答、远程图片的下载在 `web.rs`，写信窗口的
     自己的 `cid:`、`data:`、`http(s):` 的留下。
 - **引文**（`composer/quote.rs`）：回复、转发的原信在编辑器下面，一条横栏：展开 / 收起、回复的署名（转发显示
   "Forwarded message"）、在引文里回复、去掉引文。默认收起；展开后和正文各占一半高度，上面是转发的头部（`QuoteHead::Forward`，名字一列、值一列），下面是
-  原信，和读信区一样显示（`web.rs` 的 web view 和页面，CSP、深色、内嵌图片从草稿的附件文件读，远程图片缓存过的
+  原信，和读信区一样显示（`web/` 的 web view 和页面，CSP、深色、内嵌图片从草稿的附件文件读，远程图片缓存过的
   直接显示、其余点按钮才下载，`html::RemoteImages` 两处共用）。web view 第一次展开时才建，之后收起只是藏起来：
   每建一个 web view WebKit 就起一个渲染进程。编辑器的单一滚动区里放不下它：编辑器只把光标滚进自己的滚动区，外面再套一层滚动
   时打字打到底下会看不见光标。
@@ -537,7 +544,7 @@ From 是条目实际发出用的身份（`OutboxEntry::identity`），叫法和�
   base16 / base24 和主题 JSON，结果写进主题目录（可手工修改，启动时读取）。主题文件的格式沿用 gpui-kit 的主题
   JSON（GPUI 版留下的，已有的主题目录照样能用），frontend 不依赖它。推导只写 GUI 读的键（下一条的映射表和
   设置里的主题卡片），gpui-kit 组件的键（`button.*`、`tab.*`、`table.*` 等）不再写；文件里有的照样加载、忽略。
-- **映射到 nsh**（`theme.rs`）：nsh 的主题是 shadcn 的 token。gpui-kit 的颜色键一张表映射到 shadcn 的 token，
+- **映射到 nsh**（`shell/theme.rs`）：nsh 的主题是 shadcn 的 token。gpui-kit 的颜色键一张表映射到 shadcn 的 token，
   再加上应用自己的（`warning`、`link`、`list-hover`、六个色相等），浅色主题给浅色外观、深色给深色，经
   `set_theme_overrides` 给每个视图。nsh 读不了的颜色值（手改坏的主题文件）跳过，那个 token 用 nsh 的默认值。
   旗标、头像、徽章、发件箱的警告都用 token，不写死颜色。

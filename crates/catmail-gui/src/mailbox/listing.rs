@@ -27,7 +27,7 @@ use crate::accounts::with_accounts;
 use crate::clock;
 use crate::engine::client;
 use crate::motion;
-use crate::tasks::in_view;
+use crate::shell::tasks::in_view;
 use crate::toast::report;
 
 /// The place selected in the sidebar: the list shows it, unless a search is typed.

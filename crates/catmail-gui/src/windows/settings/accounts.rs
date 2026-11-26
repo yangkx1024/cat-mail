@@ -13,14 +13,14 @@ use crate::buttons::{Size, icon_button};
 use crate::engine::client;
 use crate::form::{NameRequest, ask_name, confirm_then};
 use crate::icons::{Icon, icon};
-use crate::login;
-use crate::tasks::in_view;
+use crate::shell::tasks::in_view;
 use crate::toast::report;
+use crate::windows::login;
 
 use crate::buttons::labelled_button;
 
 use super::{close, help, section_title, toggle};
-use crate::theme::SelectableText as _;
+use crate::shell::theme::SelectableText as _;
 
 pub fn accounts_section() -> impl IntoElement {
     let accounts = move || global::<Accounts>().with(|a| a.0.clone().unwrap_or_default());

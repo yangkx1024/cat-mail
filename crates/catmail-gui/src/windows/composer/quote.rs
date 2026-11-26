@@ -17,7 +17,7 @@ use nsh_core::prelude::*;
 use crate::buttons::{Size, fold_button, icon_button};
 use crate::form::fact;
 use crate::icons::Icon;
-use crate::tasks::off_thread;
+use crate::shell::tasks::off_thread;
 use crate::web;
 
 use super::{changed, ending, in_window, rich, text_changed};

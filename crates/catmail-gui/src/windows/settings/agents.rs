@@ -22,8 +22,8 @@ use crate::clock::clock;
 use crate::form::{confirm_then, error, menu_field, submit, text_input};
 use crate::icons::{Icon, icon};
 use crate::shell;
-use crate::tasks::{in_view, off_thread};
-use crate::theme::SelectableText as _;
+use crate::shell::tasks::{in_view, off_thread};
+use crate::shell::theme::SelectableText as _;
 use crate::toast::report;
 
 use super::{help, prefs, section_title, toggle};

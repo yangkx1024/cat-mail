@@ -20,7 +20,6 @@ use nsh_core::prelude::*;
 
 use crate::accounts::{self, Accounts};
 use crate::buttons::{Size, icon_button};
-use crate::chrome;
 use crate::clock;
 use crate::engine::client;
 use crate::form;
@@ -31,7 +30,8 @@ use crate::mailbox::listing::{
     filter, keyed, load_more, settle, toggle_checked, typed,
 };
 use crate::motion;
-use crate::tasks::in_view;
+use crate::shell::chrome;
+use crate::shell::tasks::in_view;
 
 use rows::{ROW_MARGIN_Y, item};
 pub use rows::{avatar_color, user_label_names};

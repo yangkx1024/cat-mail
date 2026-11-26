@@ -14,7 +14,7 @@ use nsh_core::prelude::*;
 use nsh_core::time::now;
 
 use crate::icons::{Icon, icon};
-use crate::theme::SelectableText as _;
+use crate::shell::theme::SelectableText as _;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
@@ -93,7 +93,7 @@ fn tick() {
     if std::mem::replace(&mut manager().borrow_mut().ticking, true) {
         return;
     }
-    crate::tasks::in_view(async {
+    crate::shell::tasks::in_view(async {
         loop {
             timer(Duration::from_millis(50)).await;
             let paused = global::<Expanded>()

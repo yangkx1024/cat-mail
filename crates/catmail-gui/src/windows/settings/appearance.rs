@@ -20,13 +20,13 @@ use nsh_core::prelude::*;
 use crate::form;
 use crate::icons::{Icon, icon};
 use crate::shell;
-use crate::tasks::{in_view, off_thread};
+use crate::shell::tasks::{in_view, off_thread};
 use crate::toast::{Level, notify, report};
 
 use crate::buttons::labelled_button;
 
 use super::{help, prefs, section_title};
-use crate::theme::SelectableText as _;
+use crate::shell::theme::SelectableText as _;
 
 pub fn appearance() -> impl IntoElement {
     let import = signal(None::<Import>);
@@ -63,7 +63,7 @@ fn themes_pane(
                 .rounded(px(7.0))
                 .bg(move || {
                     if selected() {
-                        crate::theme::tint(theme().primary)
+                        crate::shell::theme::tint(theme().primary)
                     } else {
                         AdaptiveColor::TRANSPARENT
                     }

@@ -9,7 +9,6 @@ use nsh_core::prelude::*;
 
 use crate::accounts::with_accounts;
 use crate::buttons::text_button;
-use crate::chrome;
 use crate::clock::clock;
 use crate::engine::client;
 use crate::form::confirmed;
@@ -17,8 +16,9 @@ use crate::form::fact;
 use crate::icons::{Icon, icon};
 use crate::mailbox::list::back_button;
 use crate::mailbox::listing;
-use crate::tasks::in_view;
-use crate::theme::SelectableText as _;
+use crate::shell::chrome;
+use crate::shell::tasks::in_view;
+use crate::shell::theme::SelectableText as _;
 use crate::toast::report;
 
 /// The pane, while an outbox entry is selected.
@@ -69,7 +69,7 @@ fn state(entry: &OutboxEntry) -> impl IntoElement {
     let state = match State::of(entry) {
         State::Unknown { title, text } => alert(
             Icon::ExclamationTriangle,
-            crate::theme::warning,
+            crate::shell::theme::warning,
             title,
             text.to_owned(),
         ),

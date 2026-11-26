@@ -326,7 +326,7 @@ claude mcp add --transport http catmail https://mac.tailnet.ts.net/mcp \
   令牌、层级、账户范围、拒绝与停止；`reading.rs`、`organizing.rs`、`drafts.rs`、`sending.rs`、`limits.rs`）。
   `tests/tools.snapshot.json` 固定 agent 看到的工具列表，有意改动时 `UPDATE_SNAPSHOTS=1` 重新生成。
 CLI 一侧是 `cmd/mcp.rs`；GUI 一侧是 `catmail-frontend` 的 `mcp.rs`（服务的线程、状态的说法、文案；端口的解析与登录表单共用 `login::parse_port`）、
-`catmail-gui` 的 `settings/agents.rs` 和 `shell/mod.rs` 里托管服务的部分。
+`catmail-gui` 的 `windows/settings/agents.rs` 和 `shell/mod.rs` 里托管服务的部分。
 
 ## 步骤
 

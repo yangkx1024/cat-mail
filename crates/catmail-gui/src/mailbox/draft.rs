@@ -10,7 +10,6 @@ use nsh_base::theme;
 use nsh_core::prelude::*;
 
 use crate::buttons::{Size, icon_button, primary_button, separator};
-use crate::chrome;
 use crate::engine::client;
 use crate::form::confirmed;
 use crate::form::fact;
@@ -18,8 +17,9 @@ use crate::icons::{Icon, icon};
 use crate::mailbox::compose;
 use crate::mailbox::list::back_button;
 use crate::mailbox::listing;
-use crate::tasks::in_view;
-use crate::theme::SelectableText as _;
+use crate::shell::chrome;
+use crate::shell::tasks::in_view;
+use crate::shell::theme::SelectableText as _;
 use crate::toast::report;
 
 /// The pane, while a draft is selected.

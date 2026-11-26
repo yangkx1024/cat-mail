@@ -25,7 +25,7 @@ use nsh_core::prelude::*;
 
 use crate::engine::client;
 use crate::mailbox::listing;
-use crate::tasks::{in_view, off_thread};
+use crate::shell::tasks::{in_view, off_thread};
 use crate::toast::{Level, notify, report};
 use crate::web;
 

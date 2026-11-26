@@ -24,7 +24,7 @@ use nsh_core::web_resource::{WebResource, WebResourceRequest};
 use crate::buttons::{Size, icon_button};
 use crate::engine::client;
 use crate::icons::Icon;
-use crate::tasks::in_view;
+use crate::shell::tasks::in_view;
 use crate::toast::{Level, notify};
 
 mod sideways;
@@ -393,7 +393,7 @@ fn colors(dark: bool) -> Colors {
     Colors {
         foreground: pick(theme().foreground),
         background: pick(theme().background),
-        link: pick(crate::theme::link()),
-        selection: pick(crate::theme::selection()),
+        link: pick(crate::shell::theme::link()),
+        selection: pick(crate::shell::theme::selection()),
     }
 }

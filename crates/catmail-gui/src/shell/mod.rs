@@ -12,6 +12,10 @@
 //! parts outside the windows (the tray, the notifications) run on it, and `main.rs` puts
 //! them together ([`Parts`]); a composer window's view comes from the mailbox that opens
 //! it ([`opened`]).
+//!
+//! Beside it, what every window and view runs with: where the work a view starts runs
+//! ([`tasks`]), the settings' themes as nsh draws them ([`theme`]), and what a window has
+//! at its top ([`chrome`]).
 
 // In a test build the platform's toolkit is built all the same, for its own tests and so
 // that `--all-targets` checks it, but the windows' views run headless, for the tests to
@@ -19,11 +23,14 @@
 #[cfg(target_os = "macos")]
 #[cfg_attr(test, allow(dead_code))]
 mod appkit;
+pub(crate) mod chrome;
 #[cfg(target_os = "linux")]
 #[cfg_attr(test, allow(dead_code))]
 mod gtk;
 #[cfg(test)]
 pub mod headless;
+pub(crate) mod tasks;
+pub(crate) mod theme;
 #[cfg(all(target_os = "macos", not(test)))]
 use self::appkit as toolkit;
 #[cfg(all(target_os = "linux", not(test)))]
@@ -148,7 +155,7 @@ fn theme_overrides(settings: &Settings) -> Option<String> {
     let themes = lock(&THEMES);
     let light = themes.pick(&settings.light_theme, DEFAULT_LIGHT)?;
     let dark = themes.pick(&settings.dark_theme, DEFAULT_DARK)?;
-    Some(crate::theme::css_vars(&light.config, &dark.config))
+    Some(crate::shell::theme::css_vars(&light.config, &dark.config))
 }
 
 thread_local! {
