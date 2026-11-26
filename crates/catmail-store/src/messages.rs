@@ -1304,7 +1304,7 @@ mod tests {
             inferiors: true,
         };
         store
-            .write(|db| db.folders().reconcile(account, &[inbox]))
+            .write(|db| db.reconcile_folders(account, &[inbox]))
             .unwrap();
         store
             .read(|db| db.folders().list(account))
@@ -1689,7 +1689,7 @@ mod tests {
         ];
         store
             .write(|db| {
-                db.folders().reset_uidvalidity(folder.id, 7)?;
+                db.reset_uidvalidity(folder.id, 7)?;
                 db.messages().upsert(account, folder.id, &batch)
             })
             .unwrap();
@@ -2202,9 +2202,9 @@ mod tests {
             .collect();
         store
             .write(|db| {
-                db.folders().reconcile(account, &remote)?;
+                db.reconcile_folders(account, &remote)?;
                 for folder in db.folders().list(account)? {
-                    db.folders().reset_uidvalidity(folder.id, 1)?;
+                    db.reset_uidvalidity(folder.id, 1)?;
                 }
                 Ok(())
             })
@@ -2888,7 +2888,7 @@ mod tests {
             .collect();
         let reconcile = |remote: &[RemoteFolder]| {
             store
-                .write(|db| db.folders().reconcile(account, remote))
+                .write(|db| db.reconcile_folders(account, remote))
                 .unwrap()
         };
         reconcile(&hidden);

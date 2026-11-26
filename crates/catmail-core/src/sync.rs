@@ -233,7 +233,7 @@ fn log_report(report: &SyncReport, began: Instant) {
 }
 
 /// Lists the account's mailboxes and makes its folders match them (see
-/// [`Folders::reconcile`](catmail_store::Folders::reconcile)), and the account's mode,
+/// [`Db::reconcile_folders`](catmail_store::Db::reconcile_folders)), and the account's mode,
 /// then tells about it. `first` runs before, in the same transaction: what the account's
 /// own change to its mailboxes (a rename, say) means for its folders. Returns the mode.
 /// Call with the account's sync permit.
@@ -249,16 +249,14 @@ pub(crate) async fn store_folders(
     let (reconciled, mode_changed) = engine
         .write(move |db| {
             let done = first(db)?;
-            let mut reconciled = db.folders().reconcile(account_id, &remote)?;
+            let mut reconciled = db.reconcile_folders(account_id, &remote)?;
             reconciled.changed |= done.changed;
             reconciled.touched.merge(done.touched);
             // What a message row is changed with the mode (one per location, or one per
             // X-GM-MSGID): every location starts over.
             let mode_changed = db.accounts().set_mode(account_id, mode)?;
             if mode_changed {
-                reconciled
-                    .touched
-                    .merge(db.folders().end_generations(account_id)?);
+                reconciled.touched.merge(db.end_generations(account_id)?);
                 reconciled.changed = true;
             }
             Ok((reconciled, mode_changed))
@@ -649,7 +647,7 @@ async fn sync_folder(
                 if gmail {
                     messages.note_folder_shown(id)?;
                 }
-                let touched = db.folders().reset_uidvalidity(id, uidvalidity)?;
+                let touched = db.reset_uidvalidity(id, uidvalidity)?;
                 Ok((touched, messages.touched_labels()))
             })
             .await?;

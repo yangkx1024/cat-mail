@@ -257,7 +257,7 @@ pub(crate) async fn delete(engine: Arc<Engine>, id: FolderId) -> Result<()> {
                             ..Default::default()
                         };
                         for id in gone {
-                            done.touched.merge(db.folders().remove(id)?);
+                            done.touched.merge(db.remove_folder(id)?);
                         }
                         Ok(done)
                     })

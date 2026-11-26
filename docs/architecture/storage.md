@@ -24,6 +24,32 @@
 - 约定：时间为 unix 秒；枚举列为 TEXT 不加 CHECK（新增变体无需重建表）；地址列表为 JSON；外部可见
   的 ID（accounts / folders / messages / drafts）用 `AUTOINCREMENT`，删除后不复用。
 
+## Repository 与级联
+
+`Store::read` / `Store::write` 的闭包拿到一个 `Db`，它把各个 repository（`db.folders()`、
+`db.drafts()`……）绑在同一个事务上，跨表的改动要么全部提交，要么全不提交。repository 之间的调用只有一个
+方向：
+
+- **查询顺着外键**：一个 repository 只调用它的行引用的那些（草稿查身份和文件夹，操作查邮件和文件夹，邮件
+  查文件夹），从不调用引用它的。例外是附件：它是正文的一部分，`messages` 存正文时一并写附件，
+  `Attachments` 不认识 `messages`。SQL 照样可以 JOIN 别的表，这条规则管的是 repository 之间的调用。
+- **级联在上面一层**：一处改动要接着改到另一个 repository 管的东西时，写成 `Db` 的方法（`cascade.rs`），
+  依次调用各方，各方只做自己那部分。例如删除文件夹（`Db::remove_folder`）要带走按它的 UID 记的操作和草稿
+  副本，删除身份（`Db::delete_identity`）先把草稿交给账户的默认身份，发完的草稿随发件箱条目一起删除
+  （`Db::finish_outbox`）。要知道一处改动会波及哪些表，看 `cascade.rs` 就够了。
+- **大家都用的在下面**：`Touched`（一处改动改了哪些列表，给事件用）、`columns`、`fts`。
+
+```text
+Db 的级联方法（cascade）
+  ↓
+drafts → identities、folders
+ops → messages、folders
+messages → folders、attachments
+accounts、outbox、prefetch
+  ↓
+touched、columns、fts
+```
+
 ## 邮件行
 
 一行是服务器上的一封邮件：它的位置（`kind = 'location'` 的文件夹）和那里的 UID，见

@@ -10,8 +10,6 @@ use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 use crate::columns::{id_list, json, parse_text, size_limit, to_id_list, to_json};
 use crate::folders::Folders;
 use crate::identities::Identities;
-use crate::ops::PendingOps;
-use crate::touched::Touched;
 use crate::{Error, Result};
 
 /// What a [`DraftSummary`] is read from, with the draft joined to its outbox entry `o`.
@@ -282,7 +280,7 @@ impl<'c> Drafts<'c> {
                 Some(identity)
             }
             // Removed since it was read: the draft is from the default now, which
-            // `Identities::delete` made it. Ids aren't reused.
+            // `Db::delete_identity` made it. Ids aren't reused.
             None => None,
         };
         let quote = content.quote.as_ref();
@@ -454,18 +452,16 @@ impl<'c> Drafts<'c> {
 
     /// Settles an upload: the server has its message at `uids` under `uidvalidity`, which
     /// it just reported (searched by its Message-ID; none if the APPEND didn't go
-    /// through). The newest becomes the draft's copy, and the others are queued for
-    /// deletion; all of them if the draft is gone, or has a newer copy already. The copy
-    /// it replaces is queued for deletion too if it is of that same generation, else
-    /// looked for by its Message-ID first ([`orphan_copy`](Self::orphan_copy)). Returns
-    /// the folders whose messages or ops changed.
-    pub fn uploaded(
+    /// through). The newest becomes the draft's copy. Returns the others, as (folder,
+    /// UIDVALIDITY, UID), to delete; all of them if the draft is gone, or has a newer
+    /// copy already. The copy it replaces is among them if it is of that same generation,
+    /// else looked for by its Message-ID first ([`orphan_copy`](Self::orphan_copy)).
+    pub(crate) fn uploaded(
         &self,
         upload: &DraftUpload,
         uidvalidity: u32,
         uids: &[u32],
-        now: i64,
-    ) -> Result<Touched> {
+    ) -> Result<Vec<(FolderId, u32, u32)>> {
         let draft = self.end_upload(upload)?;
         let mut delete: Vec<(FolderId, u32, u32)> = uids
             .iter()
@@ -516,12 +512,7 @@ impl<'c> Drafts<'c> {
                     upload.revision
                 ])?;
         }
-        let ops = PendingOps::new(self.conn);
-        let mut touched = Touched::new();
-        for (folder, uidvalidity, uid) in delete {
-            touched.merge(ops.delete_on_server(upload.account, folder, uidvalidity, uid, now)?);
-        }
-        Ok(touched)
+        Ok(delete)
     }
 
     /// Forgets the copies in `folder` that aren't of generation `keep`: their UIDs are
@@ -913,6 +904,7 @@ mod tests {
     use crate::ops::ReplayKind;
     use crate::outbox::NewOutboxEntry;
     use crate::test_util::{self, TestStore};
+    use crate::touched::Touched;
     use crate::{Db, Store};
 
     fn content(subject: &str) -> DraftContent {
@@ -1131,10 +1123,7 @@ mod tests {
         assert!(locked(queue(&store, account, id)), "queued once");
 
         // Cancelling a send that never went out hands the draft back.
-        let entry = store
-            .write(|db| db.outbox().cancel(outbox))
-            .unwrap()
-            .unwrap();
+        let entry = store.write(|db| db.cancel_outbox(outbox)).unwrap().unwrap();
         assert_eq!(entry.status, OutboxStatus::Queued);
         assert_eq!(store.read(|db| db.drafts().list(account)).unwrap().len(), 1);
         assert_eq!(store.read(|db| db.drafts().count(account)).unwrap(), 1);
@@ -1228,9 +1217,9 @@ mod tests {
                     selectable: true,
                     inferiors: true,
                 };
-                db.folders().reconcile(account, &[remote])?;
+                db.reconcile_folders(account, &[remote])?;
                 let folder = db.folders().list(account)?[0].id;
-                db.folders().reset_uidvalidity(folder, 7)?;
+                db.reset_uidvalidity(folder, 7)?;
                 Ok((
                     folder,
                     db.drafts()
@@ -1254,7 +1243,7 @@ mod tests {
 
     fn settle(store: &Store, upload: &DraftUpload, uidvalidity: u32, uids: &[u32]) -> Touched {
         store
-            .write(|db| db.drafts().uploaded(upload, uidvalidity, uids, 5))
+            .write(|db| db.settle_draft_upload(upload, uidvalidity, uids, 5))
             .unwrap()
     }
 
@@ -1602,9 +1591,7 @@ mod tests {
     fn a_new_generation_looks_for_the_copy_again() {
         let (store, account, folder, draft) = with_drafts_folder();
         settle(&store, &begin(&store, draft, folder, "one@x"), 7, &[5]);
-        store
-            .write(|db| db.folders().reset_uidvalidity(folder, 9))
-            .unwrap();
+        store.write(|db| db.reset_uidvalidity(folder, 9)).unwrap();
         assert!(!get(&store, draft).on_server);
         assert_eq!(unsettled(&store, account), [(Some(draft), "one@x".into())]);
         let again = store.read(|db| db.drafts().uploads(account)).unwrap();
@@ -1624,8 +1611,8 @@ mod tests {
             store
                 .write(|db| {
                     db.outbox().begin_send(outbox)?;
-                    db.outbox().mark_accepted(outbox, 2)?;
-                    db.outbox().finish(outbox)
+                    db.mark_outbox_accepted(outbox, 2)?;
+                    db.finish_outbox(outbox)
                 })
                 .unwrap()
         );

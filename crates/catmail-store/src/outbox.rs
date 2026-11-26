@@ -1,12 +1,9 @@
 use catmail_types::{
-    AccountId, BlobHash, DraftId, Flags, IdentityId, MessageId, OutboxEntry, OutboxId, OutboxStatus,
+    AccountId, BlobHash, DraftId, IdentityId, MessageId, OutboxEntry, OutboxId, OutboxStatus,
 };
 use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
 use crate::columns::{json, parse_text, to_json};
-use crate::drafts::Drafts;
-use crate::ops::PendingOps;
-use crate::touched::Touched;
 use crate::{Error, Result};
 
 const COLUMNS: &str =
@@ -216,10 +213,14 @@ impl<'c> Outbox<'c> {
         )
     }
 
-    /// The server accepted the message; saving to Sent comes next, at once. A reply
-    /// marks the message it answers `\Answered` (locally and through the queue), if that
-    /// is still there. Returns what that touched, or `None` if the entry wasn't being sent.
-    pub fn mark_accepted(&self, id: OutboxId, now: i64) -> Result<Option<Touched>> {
+    /// The server accepted the message; saving to Sent comes next, at once. Returns the
+    /// message it answers, if it is a reply and that is still there, or `None` if the
+    /// entry wasn't being sent.
+    pub(crate) fn mark_accepted(
+        &self,
+        id: OutboxId,
+        now: i64,
+    ) -> Result<Option<Option<MessageId>>> {
         let updated = self.conn.execute(
             "UPDATE outbox SET status = 'accepted', attempts = 0, next_attempt_at = ?2,
                                last_error = NULL
@@ -240,16 +241,7 @@ impl<'c> Outbox<'c> {
                 |r| r.get(0),
             )
             .optional()?;
-        let touched = match original {
-            Some(m) => PendingOps::new(self.conn).set_flags(
-                &[MessageId(m)],
-                Flags::ANSWERED,
-                Flags::empty(),
-                now,
-            )?,
-            None => Touched::new(),
-        };
-        Ok(Some(touched))
+        Ok(Some(original.map(MessageId)))
     }
 
     /// A temporary failure before the server accepted anything: try again at `next`.
@@ -308,10 +300,9 @@ impl<'c> Outbox<'c> {
         )
     }
 
-    /// Sent and saved: deletes the entry and the draft it came from (whose copy on the
-    /// server goes with the next upload pass). Returns false if the entry is gone
-    /// (cancelled meanwhile).
-    pub fn finish(&self, id: OutboxId) -> Result<bool> {
+    /// Sent and saved: deletes the entry. Returns the draft it came from, if it did, or
+    /// `None` if the entry is gone (cancelled meanwhile).
+    pub(crate) fn finish(&self, id: OutboxId) -> Result<Option<Option<DraftId>>> {
         let draft: Option<Option<i64>> = self
             .conn
             .query_row(
@@ -321,13 +312,7 @@ impl<'c> Outbox<'c> {
                 |r| r.get(0),
             )
             .optional()?;
-        let Some(draft) = draft else {
-            return Ok(false);
-        };
-        if let Some(draft) = draft {
-            Drafts::new(self.conn).remove(DraftId(draft))?;
-        }
-        Ok(true)
+        Ok(draft.map(|draft| draft.map(DraftId)))
     }
 
     /// Entries left `sending` (of `account`, or of every account) by an attempt that
@@ -361,48 +346,47 @@ impl<'c> Outbox<'c> {
         self.get(id)
     }
 
-    /// The user confirmed a message with an unknown outcome arrived: save it to Sent.
-    pub fn mark_sent(&self, id: OutboxId, now: i64) -> Result<Option<(OutboxEntry, Touched)>> {
+    /// The user confirmed a message with an unknown outcome arrived: save it to Sent, as
+    /// [`mark_accepted`](Self::mark_accepted) does. `None` if there is no such entry.
+    pub(crate) fn mark_sent(&self, id: OutboxId, now: i64) -> Result<Option<Option<MessageId>>> {
         let Some(entry) = self.get(id)? else {
             return Ok(None);
         };
         if !entry.status.can_mark_sent() {
             return Err(conflict(id, entry.status, "marked sent"));
         }
-        let touched = self.mark_accepted(id, now)?.unwrap_or_default();
-        Ok(self.get(id)?.map(|entry| (entry, touched)))
+        Ok(Some(self.mark_accepted(id, now)?.flatten()))
     }
 
-    /// [`cancel`](Self::cancel), if no attempt can be working on the entry: it is
-    /// queued or failed. An attempt only ever starts on a queued entry, and atomically
-    /// ([`begin_send`](Self::begin_send)), so this needs no send permit. `None` if the
-    /// entry is in another state, or gone.
-    pub fn withdraw(&self, id: OutboxId) -> Result<Option<OutboxEntry>> {
-        match self.get(id)? {
-            Some(entry) if matches!(entry.status, OutboxStatus::Queued | OutboxStatus::Failed) => {
-                self.cancel(id)
-            }
-            _ => Ok(None),
-        }
+    /// Whether the user may [`cancel`](Self::cancel) the entry without waiting for its
+    /// outbox's work to pause: no attempt can be working on it, as it is queued or
+    /// failed. An attempt only ever starts on a queued entry, and atomically
+    /// ([`begin_send`](Self::begin_send)), so this needs no send permit.
+    pub(crate) fn withdrawable(&self, id: OutboxId) -> Result<bool> {
+        Ok(self.get(id)?.is_some_and(|entry| {
+            matches!(entry.status, OutboxStatus::Queued | OutboxStatus::Failed)
+        }))
     }
 
-    /// Removes the entry. One that never went out hands its draft back for editing;
-    /// for an accepted one this gives up saving it to Sent, and its draft is deleted.
-    /// A send in progress can't be cancelled (the engine waits for it to end first).
-    pub fn cancel(&self, id: OutboxId) -> Result<Option<OutboxEntry>> {
+    /// Removes the entry. One that never went out hands its draft back for editing; for
+    /// an accepted one this gives up saving it to Sent. Returns the entry, and with one
+    /// that went out the draft it came from, which goes too. A send in progress can't be
+    /// cancelled (the engine waits for it to end first).
+    pub(crate) fn cancel(&self, id: OutboxId) -> Result<Option<(OutboxEntry, Option<DraftId>)>> {
         let Some(entry) = self.get(id)? else {
             return Ok(None);
         };
         if !entry.status.can_cancel() {
             return Err(conflict(id, entry.status, "cancelled"));
         }
-        if entry.status.went_out() {
-            self.finish(id)?;
+        let draft = if entry.status.went_out() {
+            self.finish(id)?.flatten()
         } else {
             self.conn
                 .execute("DELETE FROM outbox WHERE id = ?1", [id.0])?;
-        }
-        Ok(Some(entry))
+            None
+        };
+        Ok(Some((entry, draft)))
     }
 
     fn transition(
@@ -552,7 +536,7 @@ mod tests {
             "one attempt at a time"
         );
         assert!(matches!(
-            store.write(|db| db.outbox().cancel(id)),
+            store.write(|db| db.cancel_outbox(id)),
             Err(Error::Conflict(_))
         ));
         assert_eq!(pending(OutboxStatus::Queued, None), []);
@@ -564,7 +548,7 @@ mod tests {
         );
         assert!(
             store
-                .write(|db| db.outbox().mark_accepted(id, 13))
+                .write(|db| db.mark_outbox_accepted(id, 13))
                 .unwrap()
                 .is_some()
         );
@@ -607,14 +591,14 @@ mod tests {
             .unwrap();
         assert_eq!(status(&store, id), Some((OutboxStatus::Accepted, 2)));
 
-        assert!(store.write(|db| db.outbox().finish(id)).unwrap());
+        assert!(store.write(|db| db.finish_outbox(id)).unwrap());
         assert_eq!(status(&store, id), None);
         assert!(
             store.read(|db| db.drafts().get(draft)).unwrap().is_none(),
             "sent"
         );
         assert!(store.read(|db| db.blob_references()).unwrap().is_empty());
-        assert!(!store.write(|db| db.outbox().finish(id)).unwrap());
+        assert!(!store.write(|db| db.finish_outbox(id)).unwrap());
     }
 
     #[test]
@@ -669,7 +653,7 @@ mod tests {
                 .is_none()
         );
         assert!(matches!(
-            store.write(|db| db.outbox().mark_sent(id, 41)),
+            store.write(|db| db.mark_outbox_sent(id, 41)),
             Err(Error::Conflict(_))
         ));
 
@@ -700,7 +684,7 @@ mod tests {
             .write(|db| db.outbox().mark_unknown(id, Some("connection closed")))
             .unwrap();
         let (sent, _) = store
-            .write(|db| db.outbox().mark_sent(id, 43))
+            .write(|db| db.mark_outbox_sent(id, 43))
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -723,10 +707,10 @@ mod tests {
         );
 
         // Giving up on saving: the message went out, so the draft goes too.
-        store.write(|db| db.outbox().cancel(id)).unwrap().unwrap();
+        store.write(|db| db.cancel_outbox(id)).unwrap().unwrap();
         assert_eq!(status(&store, id), None);
         assert!(store.read(|db| db.drafts().get(draft)).unwrap().is_none());
-        assert!(store.write(|db| db.outbox().cancel(id)).unwrap().is_none());
+        assert!(store.write(|db| db.cancel_outbox(id)).unwrap().is_none());
     }
 
     #[test]

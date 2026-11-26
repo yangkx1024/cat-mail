@@ -213,7 +213,7 @@ mod fixtures {
         let account = test_util::account(&store, "a@example.com");
         let folders: Vec<Folder> = store
             .write(|db| {
-                db.folders().reconcile(
+                db.reconcile_folders(
                     account,
                     &[
                         folder("INBOX", Some(FolderRole::Inbox)),
@@ -223,7 +223,7 @@ mod fixtures {
                 )?;
                 let folders = db.folders().list(account)?;
                 for f in &folders {
-                    db.folders().reset_uidvalidity(f.id, 7)?;
+                    db.reset_uidvalidity(f.id, 7)?;
                 }
                 let messages: Vec<NewMessage> = (1..=3)
                     .map(|uid| NewMessage {

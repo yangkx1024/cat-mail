@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use catmail_store::{Db, Identities};
+use catmail_store::Db;
 use catmail_types::{
     Account, AccountId, AccountOverview, AccountStatus, Answer, AttachmentId, ChangeReport,
     DeleteMode, Draft, DraftAttachment, DraftAttachmentId, DraftChanges, DraftContent, DraftId,
@@ -248,8 +248,8 @@ impl MailClient {
 
     /// Makes it the account's default: new drafts are from it.
     pub async fn set_default_identity(&self, id: IdentityId) -> Result<()> {
-        self.update_identity(id, move |identities| {
-            Ok(identities.set_default(id)?.map(|account| (account, 0)))
+        self.update_identity(id, move |db| {
+            Ok(db.identities().set_default(id)?.map(|account| (account, 0)))
         })
         .await
     }
@@ -258,8 +258,9 @@ impl MailClient {
     /// Sent itself, so that no second copy is saved; `None` to have it guessed again
     /// (see [`Identity::server_saves_sent`]).
     pub async fn set_identity_saves_sent(&self, id: IdentityId, saves: Option<bool>) -> Result<()> {
-        self.update_identity(id, move |identities| {
-            Ok(identities
+        self.update_identity(id, move |db| {
+            Ok(db
+                .identities()
                 .set_saves_sent(id, saves)?
                 .map(|account| (account, 0)))
         })
@@ -271,10 +272,8 @@ impl MailClient {
     /// from the new name; what is in the outbox already goes as it was written.
     pub async fn set_identity_name(&self, id: IdentityId, name: Option<&str>) -> Result<()> {
         let name = drafts::clean_name(name);
-        self.update_identity(id, move |identities| {
-            identities.set_display_name(id, name.as_deref())
-        })
-        .await
+        self.update_identity(id, move |db| db.set_identity_name(id, name.as_deref()))
+            .await
     }
 
     /// Makes a change to an identity that returns its account and how many drafts it
@@ -282,7 +281,7 @@ impl MailClient {
     async fn update_identity(
         &self,
         id: IdentityId,
-        change: impl FnOnce(&Identities<'_>) -> catmail_store::Result<Option<(AccountId, usize)>>
+        change: impl FnOnce(&Db<'_>) -> catmail_store::Result<Option<(AccountId, usize)>>
         + Send
         + 'static,
     ) -> Result<()> {

@@ -7,8 +7,6 @@ use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
 use crate::Result;
 use crate::columns::{parse_opt_text, parse_text, to_json};
-use crate::drafts::Drafts;
-use crate::ops::PendingOps;
 use crate::touched::Touched;
 
 const COLUMNS: &str = "id, account_id, name, delimiter, role, kind, listed, selectable,
@@ -26,12 +24,13 @@ pub struct RemoteFolder {
     pub inferiors: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Reconciled {
+/// What [`Folders::store_listing`] did, and leaves to its caller.
+pub(crate) struct Listing {
     pub changed: bool,
-    /// Other folders whose messages changed with them, and the accounts whose queued
-    /// changes did: messages moved locally into a deleted folder go back.
-    pub touched: Touched,
+    /// The folders the server no longer lists, to delete.
+    pub gone: Vec<FolderId>,
+    /// Kinds or roles changed: see [`Folders::recount`].
+    pub recount: bool,
 }
 
 /// What the sync engine needs to resume a folder.
@@ -240,13 +239,17 @@ impl<'c> Folders<'c> {
             .optional()?)
     }
 
-    /// Makes the account's folders match `remote`: inserts new ones, updates changed
-    /// attributes, and deletes folders the server no longer lists (with their messages).
-    /// A label that messages still carry stays, unlisted: Gmail leaves the labels hidden
-    /// in its settings out of LIST, not out of X-GM-LABELS.
-    pub fn reconcile(&self, account: AccountId, remote: &[RemoteFolder]) -> Result<Reconciled> {
+    /// Stores the account's folders as `remote` lists them: inserts new ones and updates
+    /// changed attributes. Returns those the server no longer lists, but for a label that
+    /// messages still carry, which stays, unlisted: Gmail leaves the labels hidden in its
+    /// settings out of LIST, not out of X-GM-LABELS.
+    pub(crate) fn store_listing(
+        &self,
+        account: AccountId,
+        remote: &[RemoteFolder],
+    ) -> Result<Listing> {
         let mut changed = false;
-        let mut touched = Touched::new();
+        let mut gone = Vec::new();
         // (id, kind, role, whether messages carry it as a label), by remote name.
         let stored: HashMap<String, (i64, FolderKind, Option<FolderRole>, bool)> = self
             .conn
@@ -330,25 +333,7 @@ impl<'c> Folders<'c> {
                 )? > 0;
                 continue;
             }
-            touched.merge(self.remove(FolderId(id))?);
-            changed = true;
-        }
-
-        // A mailbox deleted while it had children stays listed as a \Noselect node
-        // (RFC 3501 DELETE). Sync never opens such a folder, so its old messages would
-        // linger; the row stays for the hierarchy. A location that became a label holds
-        // no messages of its own either.
-        let emptied: Vec<i64> = self
-            .conn
-            .prepare(
-                "SELECT id FROM folders
-                 WHERE account_id = ?1 AND (selectable = 0 OR kind = 'label')
-                   AND uidvalidity IS NOT NULL",
-            )?
-            .query_map([account.0], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        for id in emptied {
-            touched.merge(self.end_generation(FolderId(id), None)?);
+            gone.push(FolderId(id));
             changed = true;
         }
         if relabel {
@@ -358,23 +343,33 @@ impl<'c> Folders<'c> {
                 [account.0],
             )?;
         }
-        if recount {
-            // A label that became a location is no message's label.
-            self.conn.execute(
-                "DELETE FROM message_labels WHERE folder_id IN (
-                     SELECT id FROM folders WHERE account_id = ?1 AND kind = 'location')",
-                [account.0],
-            )?;
-            self.recount(account)?;
-        }
-        Ok(Reconciled { changed, touched })
+        Ok(Listing {
+            changed,
+            gone,
+            recount,
+        })
     }
 
-    /// Deletes the folder with its messages, as when the server no longer has it. A
-    /// label comes off its messages, whose lists show it. Messages moved out of it
-    /// locally go with it; those moved into it go back. Returns the other folders whose
-    /// messages this changed, and the accounts whose queued changes it did.
-    pub fn remove(&self, folder: FolderId) -> Result<Touched> {
+    /// The account's folders that hold no messages of their own but still have a
+    /// UIDVALIDITY, whose generation is to end: a location that became a label, and a
+    /// mailbox deleted while it had children, which stays listed as a \Noselect node
+    /// (RFC 3501 DELETE) for the hierarchy. Sync never opens such a folder, so its old
+    /// messages would linger.
+    pub(crate) fn emptied(&self, account: AccountId) -> Result<Vec<FolderId>> {
+        Ok(self
+            .conn
+            .prepare(
+                "SELECT id FROM folders
+                 WHERE account_id = ?1 AND (selectable = 0 OR kind = 'label')
+                   AND uidvalidity IS NOT NULL",
+            )?
+            .query_map([account.0], |r| Ok(FolderId(r.get(0)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The folders whose lists change as the folder is deleted: where the messages it is a
+    /// label of are, and the lists that only show them (see `Touched`).
+    pub(crate) fn lists_of(&self, folder: FolderId) -> Result<Touched> {
         let folders = |sql| -> Result<BTreeSet<(AccountId, FolderId)>> {
             Ok(self
                 .conn
@@ -384,8 +379,7 @@ impl<'c> Folders<'c> {
                 })?
                 .collect::<rusqlite::Result<_>>()?)
         };
-        let mut touched = Touched {
-            // Where its messages are, and the lists that only show them (see `Touched`).
+        Ok(Touched {
             folders: folders(
                 "SELECT m.account_id, m.folder_id FROM message_labels l
                  JOIN messages m ON m.id = l.message_id
@@ -402,12 +396,14 @@ impl<'c> Folders<'c> {
                  WHERE l.folder_id = ?1 AND m.flags & 2 <> 0",
             )?,
             ..Touched::default()
-        };
-        touched.merge(PendingOps::new(self.conn).forget_folder(folder)?);
-        Drafts::new(self.conn).end_generation(folder, None)?;
+        })
+    }
+
+    /// Deletes the folder with its messages. A label comes off its messages.
+    pub(crate) fn delete(&self, folder: FolderId) -> Result<()> {
         self.conn
             .execute("DELETE FROM folders WHERE id = ?1", [folder.0])?;
-        Ok(touched)
+        Ok(())
     }
 
     /// Gives the folder its new names, after the server renamed it, and the folders
@@ -443,8 +439,15 @@ impl<'c> Folders<'c> {
     }
 
     /// Counts the account's folders anew, as the count triggers would have: needed when
-    /// what a folder counts changes (see [`reconcile`](Self::reconcile)).
-    fn recount(&self, account: AccountId) -> Result<()> {
+    /// what a folder counts changes, which follows from its kind and role (see
+    /// [`store_listing`](Self::store_listing)). A label that became a location is no
+    /// message's label first.
+    pub(crate) fn recount(&self, account: AccountId) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM message_labels WHERE folder_id IN (
+                 SELECT id FROM folders WHERE account_id = ?1 AND kind = 'location')",
+            [account.0],
+        )?;
         for (column, filter) in [("total_count", "1"), ("unread_count", "m.flags & 1 = 0")] {
             self.conn.execute(
                 &format!(
@@ -511,46 +514,21 @@ impl<'c> Folders<'c> {
         Ok(id.map(FolderId))
     }
 
-    /// Ends the UIDVALIDITY generation of every location of the account, as a new
-    /// UIDVALIDITY would: its mode changed, so what a message row is changed with it, and
-    /// sync fetches them anew. Returns what [`reset_uidvalidity`](Self::reset_uidvalidity)
-    /// does.
-    pub fn end_generations(&self, account: AccountId) -> Result<Touched> {
-        let mut touched = Touched::new();
-        for folder in self.sync_states(account)? {
-            if folder.uidvalidity.is_some() {
-                touched.merge(self.end_generation(folder.id, None)?);
-            }
-        }
-        Ok(touched)
-    }
-
-    /// Starts a new UIDVALIDITY generation (or the first one): every message row with a
-    /// UID and the cursor of the old generation are dropped, pending operations against old UIDs
-    /// become conflicts, and draft copies addressed by old UIDs are forgotten.
-    /// Returns the folders whose messages or queued changes this changed, besides
-    /// `folder`'s own messages: local moves out of it are undone.
-    pub fn reset_uidvalidity(&self, folder: FolderId, uidvalidity: u32) -> Result<Touched> {
-        self.end_generation(folder, Some(uidvalidity))
-    }
-
-    /// Drops everything tied to the folder's UIDs except what belongs to `next`, the
-    /// generation that replaces it (`None`: the folder no longer holds messages at all).
-    /// Messages moved here locally stay: they have no UID here yet, and their moves name
-    /// where the server has them now.
-    fn end_generation(&self, folder: FolderId, next: Option<u32>) -> Result<Touched> {
+    /// Starts the folder's generation `next` (`None`: the folder no longer holds messages
+    /// at all), dropping its message rows with a UID and its cursor. Messages moved here
+    /// locally stay: they have no UID here yet, and their moves name where the server has
+    /// them now. What else goes with the old generation is `Db::end_generation`'s.
+    pub(crate) fn end_generation(&self, folder: FolderId, next: Option<u32>) -> Result<()> {
         self.conn.execute(
             "DELETE FROM messages WHERE folder_id = ?1 AND uid IS NOT NULL",
             [folder.0],
         )?;
-        let touched = PendingOps::new(self.conn).end_generation(folder, next)?;
-        Drafts::new(self.conn).end_generation(folder, next)?;
         self.conn.execute(
             "UPDATE folders SET uidvalidity = ?2, uidnext = NULL, highest_modseq = NULL
              WHERE id = ?1",
             params![folder.0, next],
         )?;
-        Ok(touched)
+        Ok(())
     }
 
     /// Records the cursor of a sync that stored every message. It counts as a completed
@@ -626,7 +604,7 @@ mod tests {
     fn one_folder(store: &crate::Store, name: &str) -> (AccountId, FolderId) {
         let account = test_util::account(store, "a@example.com");
         store
-            .write(|db| db.folders().reconcile(account, &[remote(name, name, None)]))
+            .write(|db| db.reconcile_folders(account, &[remote(name, name, None)]))
             .unwrap();
         let folder = store.read(|db| db.folders().list(account)).unwrap()[0].id;
         (account, folder)
@@ -653,13 +631,13 @@ mod tests {
         ];
         assert!(
             store
-                .write(|db| db.folders().reconcile(account, &listed))
+                .write(|db| db.reconcile_folders(account, &listed))
                 .unwrap()
                 .changed
         );
         assert!(
             !store
-                .write(|db| db.folders().reconcile(account, &listed))
+                .write(|db| db.reconcile_folders(account, &listed))
                 .unwrap()
                 .changed
         );
@@ -689,7 +667,7 @@ mod tests {
         ];
         assert!(
             store
-                .write(|db| db.folders().reconcile(account, &listed))
+                .write(|db| db.reconcile_folders(account, &listed))
                 .unwrap()
                 .changed
         );
@@ -707,7 +685,7 @@ mod tests {
         let (account, folder) = one_folder(&store, "Parent");
         store
             .write(|db| {
-                db.folders().reset_uidvalidity(folder, 7)?;
+                db.reset_uidvalidity(folder, 7)?;
                 db.messages()
                     .upsert(account, folder, &[message(1), message(2)])?;
                 db.folders().set_synced(folder, Some(3), Some(10), true)?;
@@ -724,7 +702,7 @@ mod tests {
         node.selectable = false;
         assert!(
             store
-                .write(|db| db.folders().reconcile(account, &[node]))
+                .write(|db| db.reconcile_folders(account, &[node]))
                 .unwrap()
                 .changed
         );
@@ -758,10 +736,10 @@ mod tests {
             remote("&XfJT0ZAB-", "已发送", None),
         ];
         store
-            .write(|db| db.folders().reconcile(account, &listed))
+            .write(|db| db.reconcile_folders(account, &listed))
             .unwrap();
         store
-            .write(|db| db.folders().reconcile(other, &listed))
+            .write(|db| db.reconcile_folders(other, &listed))
             .unwrap();
 
         let find = |name: &str| {
@@ -851,7 +829,7 @@ mod tests {
         let (account, folder) = one_folder(&store, "INBOX");
         store
             .write(|db| {
-                db.folders().reset_uidvalidity(folder, 7)?;
+                db.reset_uidvalidity(folder, 7)?;
                 db.messages()
                     .upsert(account, folder, &[message(1), message(2)])?;
                 db.folders().set_synced(folder, Some(3), Some(10), true)
@@ -873,9 +851,7 @@ mod tests {
             })
             .unwrap();
 
-        store
-            .write(|db| db.folders().reset_uidvalidity(folder, 9))
-            .unwrap();
+        store.write(|db| db.reset_uidvalidity(folder, 9)).unwrap();
         store
             .read(|db| {
                 assert_eq!(db.messages().count(folder)?, 0);
@@ -930,7 +906,7 @@ mod tests {
         assert!(bare.is_err());
 
         store
-            .write(|db| db.folders().reconcile(account, &[]))
+            .write(|db| db.reconcile_folders(account, &[]))
             .unwrap();
         let remaining: i64 = store
             .read(|db| {
@@ -955,7 +931,7 @@ mod tests {
         let all_mail = remote("[Gmail]/All Mail", "All Mail", Some(FolderRole::All));
         let listed = [all_mail.clone(), label("Work"), label("Old")];
         store
-            .write(|db| db.folders().reconcile(account, &listed))
+            .write(|db| db.reconcile_folders(account, &listed))
             .unwrap();
         let id = |name: &str| {
             store
@@ -969,7 +945,7 @@ mod tests {
         labelled.state.labels = Some(vec![work.clone(), work]);
         store
             .write(|db| {
-                db.folders().reset_uidvalidity(all, 7)?;
+                db.reset_uidvalidity(all, 7)?;
                 db.messages().upsert(account, all, &[labelled])
             })
             .unwrap();
@@ -977,9 +953,7 @@ mod tests {
         // Hidden in Gmail's settings: Work still labels a message, Old nothing.
         assert!(
             store
-                .write(|db| db
-                    .folders()
-                    .reconcile(account, std::slice::from_ref(&all_mail)))
+                .write(|db| db.reconcile_folders(account, std::slice::from_ref(&all_mail)))
                 .unwrap()
                 .changed
         );
@@ -996,17 +970,12 @@ mod tests {
         );
         assert!(
             !store
-                .write(|db| db
-                    .folders()
-                    .reconcile(account, std::slice::from_ref(&all_mail)))
+                .write(|db| db.reconcile_folders(account, std::slice::from_ref(&all_mail)))
                 .unwrap()
                 .changed
         );
         store
-            .write(|db| {
-                db.folders()
-                    .reconcile(account, &[all_mail.clone(), label("Work")])
-            })
+            .write(|db| db.reconcile_folders(account, &[all_mail.clone(), label("Work")]))
             .unwrap();
         assert_eq!(id("Work"), Some((work_id, FolderKind::Label, true)));
 
@@ -1018,7 +987,7 @@ mod tests {
             ..all_mail
         };
         store
-            .write(|db| db.folders().reconcile(account, &[all_label, work_location]))
+            .write(|db| db.reconcile_folders(account, &[all_label, work_location]))
             .unwrap();
         store
             .read(|db| {
@@ -1045,7 +1014,7 @@ mod tests {
         };
         store
             .write(|db| {
-                db.folders().reconcile(
+                db.reconcile_folders(
                     account,
                     &[
                         label("INBOX", Some(FolderRole::Inbox)),
@@ -1108,7 +1077,7 @@ mod tests {
             remote("Projects2", "Projects2", None),
         ];
         store
-            .write(|db| db.folders().reconcile(account, &listed))
+            .write(|db| db.reconcile_folders(account, &listed))
             .unwrap();
         let id = |name: &str| {
             store
@@ -1120,7 +1089,7 @@ mod tests {
         let (projects, child) = (id("Projects"), id("Projects/日本語"));
         store
             .write(|db| {
-                db.folders().reset_uidvalidity(child, 3)?;
+                db.reset_uidvalidity(child, 3)?;
                 db.messages().upsert(account, child, &[message(1)])?;
                 db.folders().rename(projects, "&TgCI-", "一行")
             })
@@ -1142,7 +1111,7 @@ mod tests {
         ];
         assert!(
             !store
-                .write(|db| db.folders().reconcile(account, &renamed))
+                .write(|db| db.reconcile_folders(account, &renamed))
                 .unwrap()
                 .changed
         );
@@ -1164,7 +1133,7 @@ mod tests {
             label("Other", None),
         ];
         store
-            .write(|db| db.folders().reconcile(account, &listed))
+            .write(|db| db.reconcile_folders(account, &listed))
             .unwrap();
         let id = |name: &str| {
             store
@@ -1183,12 +1152,12 @@ mod tests {
         unlabelled.state.labels = Some(vec![GmailLabel::user("Other", "Other")]);
         store
             .write(|db| {
-                db.folders().reset_uidvalidity(all, 7)?;
+                db.reset_uidvalidity(all, 7)?;
                 db.messages().upsert(account, all, &[labelled, unlabelled])
             })
             .unwrap();
 
-        let touched = store.write(|db| db.folders().remove(work)).unwrap();
+        let touched = store.write(|db| db.remove_folder(work)).unwrap();
         assert_eq!(touched.folders, [(account, all)].into());
         assert_eq!(touched.shown, [(account, inbox)].into());
         store

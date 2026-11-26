@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use catmail_proto::imap::Session;
 use catmail_proto::smtp;
-use catmail_store::{DraftSnapshot, NewOutboxEntry, Outbox, OutboxJob, Touched};
+use catmail_store::{Db, DraftSnapshot, NewOutboxEntry, Outbox, OutboxJob, Touched};
 use catmail_types::{
     Account, AccountId, Address, BlobHash, Draft, DraftId, ErrorKind, Event, Flags, FlushReport,
     FolderRole, Identity, IdentityId, OutboxEntry, OutboxId, OutboxStatus, ReportedError,
@@ -456,7 +456,7 @@ async fn send_one(
             // Durable like every count of an attempt to save: see `attempt_save`.
             let (save, replied) = engine
                 .write_durable(move |db| {
-                    let replied = db.outbox().mark_accepted(id, now)?.unwrap_or_default();
+                    let replied = db.mark_outbox_accepted(id, now)?.unwrap_or_default();
                     Ok((db.outbox().begin_save(id)?, replied))
                 })
                 .await?;
@@ -556,7 +556,7 @@ async fn save_one(
     let now = now();
     match attempt_save(engine, &job, raw).await {
         Ok(()) => {
-            if !engine.write(move |db| db.outbox().finish(id)).await? {
+            if !engine.write(move |db| db.finish_outbox(id)).await? {
                 return Ok(None);
             }
             tracing::info!(%id, "saved to Sent");
@@ -724,8 +724,8 @@ fn envelope_recipients<'a>(addresses: impl IntoIterator<Item = &'a Address>) -> 
 
 /// The user asks for another attempt now.
 pub(crate) async fn retry(engine: &Arc<Engine>, id: OutboxId) -> Result<OutboxEntry> {
-    let entry = user_decision(engine, id, move |o| {
-        Ok(o.retry(id, now())?.map(|e| (e, Touched::new())))
+    let entry = user_decision(engine, id, move |db| {
+        Ok(db.outbox().retry(id, now())?.map(|e| (e, Touched::new())))
     })
     .await?;
     engine.kick_outbox();
@@ -734,7 +734,7 @@ pub(crate) async fn retry(engine: &Arc<Engine>, id: OutboxId) -> Result<OutboxEn
 
 /// The user confirmed that a message with an unknown outcome was delivered.
 pub(crate) async fn mark_sent(engine: &Arc<Engine>, id: OutboxId) -> Result<OutboxEntry> {
-    let entry = user_decision(engine, id, move |o| o.mark_sent(id, now())).await?;
+    let entry = user_decision(engine, id, move |db| db.mark_outbox_sent(id, now())).await?;
     engine.kick_outbox();
     Ok(entry)
 }
@@ -743,7 +743,7 @@ pub(crate) async fn mark_sent(engine: &Arc<Engine>, id: OutboxId) -> Result<Outb
 pub(crate) async fn cancel(engine: &Arc<Engine>, id: OutboxId) -> Result<OutboxEntry> {
     // Waiting its turn, it goes at once, not after whatever the pass sends before it:
     // by then the pass would have sent it too.
-    let entry = match engine.write(move |db| db.outbox().withdraw(id)).await? {
+    let entry = match engine.write(move |db| db.withdraw_outbox(id)).await? {
         Some(entry) => {
             engine.emit(Event::OutboxChanged {
                 account: entry.account_id,
@@ -751,8 +751,8 @@ pub(crate) async fn cancel(engine: &Arc<Engine>, id: OutboxId) -> Result<OutboxE
             entry
         }
         None => {
-            user_decision(engine, id, move |o| {
-                Ok(o.cancel(id)?.map(|e| (e, Touched::new())))
+            user_decision(engine, id, move |db| {
+                Ok(db.cancel_outbox(id)?.map(|e| (e, Touched::new())))
             })
             .await?
         }
@@ -767,13 +767,13 @@ pub(crate) async fn cancel(engine: &Arc<Engine>, id: OutboxId) -> Result<OutboxE
 async fn user_decision(
     engine: &Arc<Engine>,
     id: OutboxId,
-    decide: impl FnOnce(&Outbox<'_>) -> catmail_store::Result<Option<(OutboxEntry, Touched)>>
+    decide: impl FnOnce(&Db<'_>) -> catmail_store::Result<Option<(OutboxEntry, Touched)>>
     + Send
     + 'static,
 ) -> Result<OutboxEntry> {
     let _permit = decision_permit(engine, id).await?;
     let (entry, touched) = engine
-        .write(move |db| decide(&db.outbox()))
+        .write(decide)
         .await?
         .ok_or(Error::OutboxNotFound(id))?;
     engine.emit(Event::OutboxChanged {

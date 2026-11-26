@@ -7,6 +7,7 @@
 mod accounts;
 mod attachments;
 mod blob;
+mod cascade;
 mod columns;
 mod drafts;
 mod error;
@@ -32,10 +33,11 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 pub use accounts::Accounts;
 pub use attachments::{Attachments, NewAttachment};
 pub use blob::BlobStore;
+pub use cascade::{DeletedIdentity, Reconciled};
 pub use drafts::{DraftReply, DraftSnapshot, DraftUpload, Drafts, NewDraftAttachment, UploadDue};
 pub use error::{Error, Result};
-pub use folders::{FolderSyncState, Folders, Reconciled, RemoteFolder};
-pub use identities::{DeletedIdentity, Identities, Sending, SmtpAnnounced};
+pub use folders::{FolderSyncState, Folders, RemoteFolder};
+pub use identities::{Identities, Sending, SmtpAnnounced};
 pub use messages::{
     AttachmentSource, MessageLocation, Messages, NewBody, NewMessage, StaleBody, Upserted,
 };
@@ -150,7 +152,8 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Repositories bound to one connection and transaction.
+/// Repositories bound to one connection and transaction. Changes that run on from one
+/// repository into others are methods of its own (see `cascade`).
 pub struct Db<'c> {
     conn: &'c Connection,
 }
@@ -347,7 +350,7 @@ pub(crate) mod test_util {
             smtp: server,
         };
         store
-            .write(|db| db.accounts().insert(&new, &format!("key:{email}")))
+            .write(|db| db.insert_account(&new, &format!("key:{email}")))
             .unwrap()
             .id
     }
@@ -395,13 +398,13 @@ pub(crate) mod test_util {
             .collect();
         let ids = store
             .write(|db| {
-                db.folders().reconcile(account, &remote)?;
+                db.reconcile_folders(account, &remote)?;
                 let folders = db.folders().list(account)?;
                 let mut ids = HashMap::new();
                 for (name, _, kind) in mailboxes {
                     let id = folders.iter().find(|f| f.name == name).unwrap().id;
                     if kind == FolderKind::Location {
-                        db.folders().reset_uidvalidity(id, 1)?;
+                        db.reset_uidvalidity(id, 1)?;
                     }
                     ids.insert(name, id);
                 }
