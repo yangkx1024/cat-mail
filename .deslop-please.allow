@@ -39,7 +39,6 @@ field-leak catmail_testkit::imap::ServerState::mailboxes
 field-leak catmail_testkit::imap::ServerState::open_connections
 field-leak catmail_testkit::imap::ServerState::subscriptions
 field-leak catmail_testkit::imap::ServerState::synchronized_literals
-long-file crates/catmail-store/src/messages.rs
 long-file crates/catmail-testkit/src/imap/mod.rs
 shallow-module catmail_core::client
 shallow-module catmail_frontend
@@ -48,6 +47,7 @@ shallow-module catmail_frontend::html
 shallow-module catmail_frontend::list
 shallow-module catmail_frontend::mailbox
 shallow-module catmail_store
+shallow-module catmail_store::messages
 shallow-module catmail_store::ops
 shallow-module catmail_types
 tangle catmail_core::client::DraftEditor,catmail_core::client::MailClient,catmail_core::client::builder::MailClientBuilder
@@ -55,4 +55,3 @@ wide-directory crates/catmail-core/src/
 wide-directory crates/catmail-core/tests/
 wide-directory crates/catmail-frontend/src/
 wide-directory crates/catmail-gui/src/
-wide-directory crates/catmail-store/src/

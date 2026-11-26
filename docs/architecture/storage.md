@@ -37,7 +37,7 @@
   依次调用各方，各方只做自己那部分。例如删除文件夹（`Db::remove_folder`）要带走按它的 UID 记的操作和草稿
   副本，删除身份（`Db::delete_identity`）先把草稿交给账户的默认身份，发完的草稿随发件箱条目一起删除
   （`Db::finish_outbox`）。要知道一处改动会波及哪些表，看 `cascade.rs` 就够了。
-- **大家都用的在下面**：`Touched`（一处改动改了哪些列表，给事件用）、`columns`、`fts`。
+- **大家都用的在下面**：`Touched`（一处改动改了哪些列表，给事件用）、`columns`。
 
 ```text
 Db 的级联方法（cascade）
@@ -47,8 +47,18 @@ ops → messages、folders
 messages → folders、attachments
 accounts、outbox、prefetch
   ↓
-touched、columns、fts
+touched、columns
 ```
+
+目录：
+
+- `messages/`：邮件行，和挂在邮件行上的东西。`Messages` 分三个文件：同步存进来、改动和删除的（`sync.rs`），
+  列表、搜索、读一封邮件和新邮件（`lists.rs`），正文、预览、搜索索引和从服务器哪里取（`bodies.rs`）。同一目录里
+  还有正文的附件（`attachments.rs`）、搜索索引的分词（`fts.rs`，只有邮件用）、正文预取记下的东西（`prefetch.rs`）。
+- `ops/`：本地改动和回放的队列，见[操作队列](op-queue.md)。
+- 其余的 repository（账户、身份、文件夹、草稿、发件箱）、级联（`cascade.rs`）、`touched.rs` 和 `columns.rs`
+  在 `src/` 下，连同数据库本身（`lib.rs`、`migrate.rs`、`error.rs`）、blob 和只给用户读写的文件（`blob.rs`、
+  `private.rs`）。
 
 ## 邮件行
 
@@ -102,7 +112,7 @@ rowid 即 `id`，不必再列一次）：先取游标那个日期里 `id` 更小
 开着[后台预取](bodies.md#后台预取)的前端会在后台把正文取下来，更早的由[问服务器](#问服务器)补上。
 
 **中日韩分词。** unicode61 会把连续的 CJK 文字当成一个词，trigram 又不支持两个字的查询，所以在 Rust
-侧预先切分（`crates/catmail-store/src/fts.rs`）：一段连续的 CJK 文字写成相邻双字，后面再跟单字，
+侧预先切分（`crates/catmail-store/src/messages/fts.rs`）：一段连续的 CJK 文字写成相邻双字，后面再跟单字，
 如 `季度报告` → `季度 度报 报告 季 度 报 告`。查询时一个字匹配单字，两个字匹配双字，三个字以上变成
 相邻双字组成的短语（`"季度 度报 报告"`）；同一段的双字位置连续，所以短语恰好匹配原来的子串，不会
 跨段误配。其他文字交给 unicode61（忽略大小写和变音符号，按整词匹配）；全角 ASCII 折叠成半角；混合

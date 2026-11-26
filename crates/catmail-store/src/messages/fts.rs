@@ -18,7 +18,7 @@
 use catmail_types::{SearchField, SearchTerm};
 
 /// Rewrites `text` for indexing: CJK runs segmented, everything else unchanged.
-pub(crate) fn segment(text: &str) -> String {
+pub(super) fn segment(text: &str) -> String {
     if !text.chars().any(|c| is_cjk(c) || is_wide(c)) {
         return text.to_owned();
     }
@@ -39,7 +39,7 @@ pub(crate) fn segment(text: &str) -> String {
 /// Builds an FTS5 MATCH expression from user input (see `SearchQuery` for the syntax).
 /// Returns `None` if nothing in it is searchable. Every term is quoted, so input can
 /// never be interpreted as FTS5 syntax.
-pub(crate) fn match_expression(input: &str) -> Option<String> {
+pub(super) fn match_expression(input: &str) -> Option<String> {
     // Not empty: every term holds a letter or a digit, which some phrase keeps.
     let terms: Vec<String> = SearchTerm::parse(input)
         .into_iter()
