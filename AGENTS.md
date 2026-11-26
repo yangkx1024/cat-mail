@@ -33,7 +33,7 @@ Before reporting work as done, `cargo fmt`, `clippy -D warnings` and the full te
 must pass. Say so explicitly if any of them could not be run.
 
 Module structure is checked by [`deslop-please`](https://github.com/deterministic-machines/deslop-please)
-(in the Nix dev shell; on macOS `cargo install deslop-please --version 0.1.4`, with the
+(in the Nix dev shell; on macOS `cargo install deslop-please --version 0.1.6`, with the
 `rust-analyzer` component):
 `scripts/deslop.sh` runs it for macOS, Linux and Windows from any host (`--target`: code
 behind another OS's `cfg` isn't indexed otherwise), against `.deslop-please.allow`. The

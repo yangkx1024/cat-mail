@@ -62,7 +62,7 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: deslop-please@0.1.4
+          tool: deslop-please@0.1.6
 
       - name: deslop-please
         run: scripts/deslop.sh
