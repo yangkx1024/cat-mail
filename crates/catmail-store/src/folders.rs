@@ -112,6 +112,14 @@ impl<'c> Folders<'c> {
         Ok(self.conn.query_row(&sql, [id.0], from_row).optional()?)
     }
 
+    pub fn account_of(&self, id: FolderId) -> Result<Option<AccountId>> {
+        Ok(self
+            .conn
+            .prepare_cached("SELECT account_id FROM folders WHERE id = ?1")?
+            .query_row([id.0], |r| Ok(AccountId(r.get(0)?)))
+            .optional()?)
+    }
+
     /// Looks a folder up by its display name, its remote name, or (case-insensitively,
     /// as IMAP does) `INBOX`.
     pub fn find_by_name(&self, account: AccountId, name: &str) -> Result<Option<Folder>> {

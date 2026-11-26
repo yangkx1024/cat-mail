@@ -270,11 +270,10 @@ pub(crate) async fn delete(engine: Arc<Engine>, id: FolderId) -> Result<()> {
         .await
 }
 
-pub(crate) async fn account_of(engine: &Arc<Engine>, id: FolderId) -> Result<AccountId> {
+async fn account_of(engine: &Arc<Engine>, id: FolderId) -> Result<AccountId> {
     engine
-        .read(move |db| db.folders().get(id))
+        .read(move |db| db.folders().account_of(id))
         .await?
-        .map(|f| f.account_id)
         .ok_or(Error::FolderNotFound(id))
 }
 

@@ -18,6 +18,7 @@ mod draft_sync;
 mod drafts;
 mod engine;
 mod error;
+mod events;
 mod filename;
 mod folders;
 mod gc;

@@ -32,7 +32,7 @@ use catmail_types::{
 use crate::draft_sync::Uploads;
 use crate::engine::{Activity, Engine};
 use crate::pool::with_session;
-use crate::{Error, Result, connection, folders, ops, prefetch};
+use crate::{Error, Result, connection, events, ops, prefetch};
 
 /// Stored messages per flags FETCH, and per transaction, on a server that can't say
 /// which changed: the whole answer is held in memory.
@@ -64,7 +64,10 @@ pub(crate) async fn sync_one(
     folder: FolderId,
     max_age: Duration,
 ) -> Result<Option<FolderSyncReport>> {
-    let account = folders::account_of(&engine, folder).await?;
+    let account = engine
+        .read(move |db| db.folders().account_of(folder))
+        .await?
+        .ok_or(Error::FolderNotFound(folder))?;
     let permit = engine.sync_permit(account).await;
     permit
         .run(async {
@@ -271,7 +274,7 @@ pub(crate) async fn store_folders(
             account: account_id,
         });
     }
-    ops::announce(engine, &reconciled.touched);
+    events::announce(engine, &reconciled.touched);
     Ok(mode)
 }
 
@@ -650,7 +653,7 @@ async fn sync_folder(
             })
             .await?;
         // Messages moved out of it locally are gone from where they were moved to.
-        ops::announce(engine, &touched);
+        events::announce(engine, &touched);
         report.uidvalidity_changed = folder.uidvalidity.is_some();
         if report.uidvalidity_changed {
             changed(labels);
