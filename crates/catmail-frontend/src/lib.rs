@@ -16,6 +16,7 @@
 
 pub mod accounts;
 pub mod autostart;
+pub mod coalesce;
 pub mod commands;
 pub mod composer;
 pub mod confirm;

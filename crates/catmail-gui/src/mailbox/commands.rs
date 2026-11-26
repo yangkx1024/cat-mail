@@ -121,7 +121,7 @@ pub fn report_refused_changes() {
 }
 
 #[derive(Clone, Default)]
-struct RefusedCheck(std::rc::Rc<std::cell::RefCell<catmail_frontend::refresh::Coalesce>>);
+struct RefusedCheck(std::rc::Rc<std::cell::RefCell<catmail_frontend::coalesce::Coalesce>>);
 
 /// A command's icon, for messages that all have `flags`: a toggle shows what it does.
 fn command_icon(command: MessageCommand, flags: Flags) -> Icon {

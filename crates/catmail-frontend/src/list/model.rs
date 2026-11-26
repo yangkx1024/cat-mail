@@ -13,9 +13,9 @@ use jiff::civil::Date;
 
 use super::selection::{Removal, Reveal, Select};
 use super::{Days, PAGE, Row, RowId, fetch};
+use crate::coalesce::Coalesce;
 use crate::format::Calendar;
 use crate::mailbox::{Place, Source};
-use crate::refresh::Coalesce;
 
 /// What the list shows: a source's rows (those of its messages the filter takes), grouped
 /// by day, and the lines they are laid out as. The lines refer to the rows and the days, so
