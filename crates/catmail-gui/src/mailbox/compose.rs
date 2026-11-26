@@ -6,9 +6,10 @@ use catmail_frontend::composer::{ComposeFrom, new_message_account};
 use nsh_core::element::desktop::{MenuItem, popup_menu};
 use nsh_core::prelude::*;
 
+use crate::accounts::with_accounts;
+use crate::composer;
 use crate::engine::client;
-use crate::mailbox::list;
-use crate::mailbox::sidebar::{SelectedPlace, with_accounts};
+use crate::mailbox::listing::{self, SelectedPlace};
 use crate::shell::{self, on_main};
 use crate::tasks::in_view;
 use crate::toast::report;
@@ -24,7 +25,7 @@ pub fn open(from: ComposeFrom) {
         if let Err(e) = &opened {
             report("Couldn't start the message", e);
         }
-        let _ = on_main(move || shell::opened(from, opened.ok())).await;
+        let _ = on_main(move || shell::opened(from, opened.ok(), composer::root)).await;
     });
 }
 
@@ -39,7 +40,7 @@ pub fn new_message() {
 
 /// A reply to the message open, to its sender or to everyone it went to.
 pub fn reply(all: bool) {
-    if let Some(message) = untracked(list::selected_id) {
+    if let Some(message) = untracked(listing::selected_id) {
         open(ComposeFrom::Reply { message, all });
     }
 }
@@ -47,7 +48,7 @@ pub fn reply(all: bool) {
 /// A forward of the message open: quoting it, or with `as_attachment` attaching it
 /// whole.
 pub fn forward(as_attachment: bool) {
-    if let Some(message) = untracked(list::selected_id) {
+    if let Some(message) = untracked(listing::selected_id) {
         open(ComposeFrom::Forward {
             message,
             as_attachment,

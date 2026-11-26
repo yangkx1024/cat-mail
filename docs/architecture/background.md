@@ -264,7 +264,7 @@ startup 时自己占用 app id（`DO_NOT_QUEUE`），不改变单实例的做法
 通知点击会到那一个，它找不到邮件、只打开自己的窗口。
 
 **macOS**：UserNotifications（`UNUserNotificationCenter`，`objc2-user-notifications`）。应用自己做通知中心的
-delegate，在 `NSApplication` 运行之前设好（`new_mail::install`），点击通知启动应用时那次点击才能收到；nsh 的视图
+delegate，在 `NSApplication` 运行之前设好（`new_mail::install`，`main.rs` 交给外壳的 `Parts::launching`），点击通知启动应用时那次点击才能收到；nsh 的视图
 不抢（`AppOptions::notifications` 关着，nsh 只在它开着时才设 delegate）。通知的 identifier 就是 tag：同一个 tag
 的新通知替换前一条，点击（默认动作）带回 tag，回到主线程后与 Linux 一样交给 `shell::show_at`。应用在前台时
 `willPresentNotification` 照样显示横幅和声音。引擎打开时请求授权（提醒和声音），只在第一次弹出询问；用户在

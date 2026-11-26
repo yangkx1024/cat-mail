@@ -21,6 +21,7 @@ use catmail_testkit::{FakeImap, FakeMailbox, FakeSmtp, ServerState, SmtpState};
 use mail_parser::{Message, MessageParser};
 use nsh_testing::Headless;
 
+use crate::nsh_platform::Root;
 use crate::shell::headless::{Desktop, TestWindow, Turn, WAIT, poll_until};
 
 /// INBOX, oldest first: (subject, text), from Bob to the account.
@@ -176,7 +177,11 @@ impl TestMail {
 
     /// The app on this client, and its main window as it opens.
     pub fn open_window(&self) -> (Desktop, TestWindow) {
-        let desktop = Desktop::start(self.client.clone(), &self.turn);
+        let desktop = Desktop::start(
+            self.client.clone(),
+            Root::of::<crate::mailbox::App>,
+            &self.turn,
+        );
         let main = desktop.window(crate::shell::APP_NAME);
         (desktop, main)
     }

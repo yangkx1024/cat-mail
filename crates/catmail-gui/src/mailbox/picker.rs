@@ -1,5 +1,6 @@
 //! "Move to" and "Labels": a dialog that lists an account's folders, filtered as you
-//! type, to move messages to one or to check a message's labels.
+//! type, to move messages to one or to check a message's labels, and what picking one
+//! does: the move, or the label put on or taken off.
 
 use std::collections::HashSet;
 
@@ -11,11 +12,11 @@ use nsh_core::ModalAnimation;
 use nsh_core::element::input;
 use nsh_core::prelude::*;
 
+use crate::accounts::with_accounts;
 use crate::buttons::{Size, icon_button};
 use crate::form;
 use crate::icons::{Icon, icon};
-use crate::mailbox::commands::{move_to, toggle_label};
-use crate::mailbox::list;
+use crate::mailbox::listing;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Picking {
@@ -60,7 +61,7 @@ fn picker_dialog(picker: Picker) -> impl IntoElement {
         // Closes once the message isn't the one selected (in a label, taking it off the
         // label opens the next): it would change another.
         effect(move || {
-            if list::selected_id() != Some(id) {
+            if listing::selected_id() != Some(id) {
                 untracked(close_picker);
             }
         });
@@ -69,7 +70,7 @@ fn picker_dialog(picker: Picker) -> impl IntoElement {
     // elsewhere, shows too.
     let checked = computed(move || -> HashSet<FolderId> {
         match labels {
-            Some(id) => list::message(id)
+            Some(id) => listing::message(id)
                 .map(|m| m.labels.into_iter().collect())
                 .unwrap_or_default(),
             None => HashSet::new(),
@@ -248,4 +249,21 @@ fn picker_dialog(picker: Picker) -> impl IntoElement {
                         ),
                 ),
         )
+}
+
+/// Moves those of the messages, all of one account, that moving to `to` changes.
+fn move_to(messages: &[MessageSummary], to: FolderId) {
+    let source = listing::source();
+    listing::run_change(with_accounts(|a| {
+        commands::movable(messages, a, source.as_ref(), to)
+    }));
+}
+
+/// Adds `label` to the message, the selected one, or takes it off, as it has it now.
+/// Off the label it is listed in, it leaves the list: on to the next one.
+fn toggle_label(id: MessageId, label: FolderId) {
+    let Some(message) = listing::selected_message().filter(|m| m.id == id) else {
+        return;
+    };
+    listing::run_change(commands::label_change(&message, label));
 }

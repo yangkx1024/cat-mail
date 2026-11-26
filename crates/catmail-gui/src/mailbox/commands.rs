@@ -1,23 +1,23 @@
 //! The commands on messages: the same icon buttons over the message open, by the list's
 //! heading for the messages checked and on a row while hovered; what they do, which ones
-//! ask first, and "Move to" and "Labels" (their dialog is `picker.rs`). What they apply
-//! to, what they change and what they say are `catmail_frontend::commands`'; here they
-//! are run.
+//! ask first, and "Move to" and "Labels" (their dialog, and what picking in it does, are
+//! `picker.rs`'). What they apply to, what they change and what they say are
+//! `catmail_frontend::commands`'; here they are run (`listing::run_change`).
 
-use catmail_core::{Flags, FolderId, MessageId, MessageSummary};
-use catmail_frontend::commands::{self, Applies, Change, Deletion, MessageCommand};
+use catmail_core::{Flags, MessageSummary};
+use catmail_frontend::commands::{self, Applies, Deletion, MessageCommand};
 
 use nsh_core::prelude::*;
 
+use crate::accounts::{Accounts, with_account, with_accounts};
 use crate::buttons::{Size, icon_button, separator};
 use crate::engine::client;
 use crate::form::confirmed;
 use crate::icons::Icon;
-use crate::mailbox::list;
+use crate::mailbox::listing;
 use crate::mailbox::picker::{Picker, Picking, open_picker};
-use crate::mailbox::sidebar::{Accounts, with_account, with_accounts};
 use crate::tasks::in_view;
-use crate::toast::{Level, notify, report};
+use crate::toast::{Level, notify};
 
 /// What the commands do to the messages, for their buttons. Tracked: the buttons follow
 /// the accounts' folders.
@@ -31,46 +31,17 @@ pub fn run(command: MessageCommand, messages: Vec<MessageSummary>) {
     }
     match command {
         MessageCommand::Archive => {
-            run_change(with_accounts(|a| commands::archivable(&messages, a)));
+            listing::run_change(with_accounts(|a| commands::archivable(&messages, a)));
         }
         MessageCommand::Delete => delete(&messages),
         MessageCommand::Move => move_to_folder(messages),
-        MessageCommand::ToggleRead => run_change(commands::toggled(&messages, Flags::SEEN)),
-        MessageCommand::ToggleFlag => run_change(commands::toggled(&messages, Flags::FLAGGED)),
-    }
-}
-
-/// Makes `change`. If it may take the messages out of the list and the selected one goes,
-/// the next one is selected (`ListModel::expect_removal`); those dealt with are no longer
-/// checked.
-pub fn run_change(change: Change) {
-    if change.is_empty() {
-        return;
-    }
-    if change.unchecks() {
-        list::uncheck(&change.ids);
-    }
-    let removal = change
-        .may_remove()
-        .then(|| list::expect_removal(&change.ids))
-        .flatten();
-    in_view(async move {
-        let result = change.run(&client()).await;
-        if let Err(e) = &result {
-            report(&change.failure(), e);
+        MessageCommand::ToggleRead => {
+            listing::run_change(commands::toggled(&messages, Flags::SEEN))
         }
-        if let Some(removal) = removal {
-            list::removal_settled(removal, result.is_ok());
+        MessageCommand::ToggleFlag => {
+            listing::run_change(commands::toggled(&messages, Flags::FLAGGED))
         }
-    });
-}
-
-/// Moves those of the messages, all of one account, that moving to `to` changes.
-pub fn move_to(messages: &[MessageSummary], to: FolderId) {
-    let source = list::source();
-    run_change(with_accounts(|a| {
-        commands::movable(messages, a, source.as_ref(), to)
-    }));
+    }
 }
 
 /// Each to Trash, or for good from Trash or without one, as the engine will: one change.
@@ -79,12 +50,12 @@ fn delete(messages: &[MessageSummary]) {
     let Deletion { change, confirm } = with_accounts(|a| commands::deletion(messages, a));
     // Something goes for good: there is something to delete.
     let Some(confirm) = confirm else {
-        return run_change(change);
+        return listing::run_change(change);
     };
     let answer = confirmed(confirm);
     in_view(async move {
         if answer.await {
-            run_change(change);
+            listing::run_change(change);
         }
     });
 }
@@ -92,7 +63,7 @@ fn delete(messages: &[MessageSummary]) {
 /// Asks where to move the messages, all of one account: to the folders moving any of
 /// them to changes.
 fn move_to_folder(messages: Vec<MessageSummary>) {
-    let source = list::source();
+    let source = listing::source();
     let folders = with_accounts(|a| commands::move_targets(&messages, a, source.as_ref()));
     let Some(folders) = folders else {
         return;
@@ -116,7 +87,7 @@ pub fn can_edit_labels(message: &MessageSummary) -> bool {
 /// checks are the message's labels as the list has them, and it closes once the message
 /// is no longer the one selected.
 pub fn edit_labels() {
-    let Some(message) = list::selected_message() else {
+    let Some(message) = listing::selected_message() else {
         return;
     };
     let labels = with_account(message.account_id, |e| {
@@ -130,15 +101,6 @@ pub fn edit_labels() {
         kind: Picking::Labels(message.id),
         folders: labels,
     });
-}
-
-/// Adds `label` to the message, the selected one, or takes it off, as it has it now.
-/// Off the label it is listed in, it leaves the list: on to the next one.
-pub fn toggle_label(id: MessageId, label: FolderId) {
-    let Some(message) = list::selected_message().filter(|m| m.id == id) else {
-        return;
-    };
-    run_change(commands::label_change(&message, label));
 }
 
 /// The server refused changes, which the engine undid: says so, once per change, and

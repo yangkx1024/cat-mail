@@ -1,5 +1,6 @@
 //! The buttons the panes and windows share: icon buttons (a toolbar's or a row's), the
-//! primary one, a text one, the separator between groups of them, and their tooltip.
+//! primary one, a text one, the separator between groups of them, their tooltip, and the
+//! items of a sidebar's menu (the mailbox's, the settings dialog's).
 
 use std::rc::Rc;
 
@@ -289,4 +290,63 @@ pub fn labelled_button(
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || theme().foreground),
         )
+}
+
+/// An item of a sidebar menu, the mailbox's or the settings'. Selected, the icon fills
+/// and the icon and label take the primary color; the label keeps its weight.
+pub fn menu_item(
+    which: impl Fn() -> Icon + 'static,
+    label: impl IntoReactive<SharedString>,
+    selected: impl Fn() -> bool + Copy + 'static,
+) -> View {
+    view()
+        .h(px(28.0))
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .px(px(8.0))
+        .rounded(px(6.0))
+        .bg(menu_item_background(selected, false))
+        .hover(move |s| s.bg(menu_item_background(selected, true)))
+        // As large as the label's text.
+        .child(
+            icon(
+                move || if selected() { which().solid() } else { which() },
+                14.0,
+            )
+            .text_color(row_color(selected)),
+        )
+        .child(
+            text(label)
+                .number_of_lines(1)
+                .flex_1()
+                .text_sm()
+                .text_color(row_color(selected)),
+        )
+}
+
+/// A menu item's background: `hovered` for the hover style's.
+pub fn menu_item_background(
+    selected: impl Fn() -> bool + 'static,
+    hovered: bool,
+) -> impl Fn() -> AdaptiveColor + 'static {
+    move || {
+        if selected() {
+            theme().sidebar_accent
+        } else if hovered {
+            theme().sidebar_accent.opacity(0.8)
+        } else {
+            AdaptiveColor::TRANSPARENT
+        }
+    }
+}
+
+fn row_color(selected: impl Fn() -> bool + 'static) -> impl Fn() -> AdaptiveColor + 'static {
+    move || {
+        if selected() {
+            theme().primary
+        } else {
+            theme().sidebar_foreground
+        }
+    }
 }

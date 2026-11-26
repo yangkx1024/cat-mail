@@ -58,7 +58,6 @@ pub fn run(started: impl FnOnce() + 'static) -> u8 {
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     app.setMainMenu(Some(&main_menu(mtm)));
     quit_on_signals();
-    crate::new_mail::install();
     let _monitor = blur_on_press_outside();
     started();
     // The main window opens once the app has launched (`did_finish_launching`).

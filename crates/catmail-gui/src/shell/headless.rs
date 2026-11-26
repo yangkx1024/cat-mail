@@ -21,8 +21,8 @@ use nsh_core::platform::{Idiom, Os};
 use nsh_engine::{ColorScheme, EngineConfig, Environment, Points, Size};
 use nsh_testing::Headless;
 
-use super::{Hooks, Spec, lock};
-use crate::nsh_platform::{App, AppOptions, Appearance};
+use super::{Hooks, PARTS, Parts, Spec, lock};
+use crate::nsh_platform::{App, AppOptions, Appearance, Root};
 
 /// How long the test waits for what a step started (a window, a sync, a send) to show.
 pub const WAIT: Duration = Duration::from_secs(10);
@@ -316,13 +316,18 @@ pub struct Desktop {
 }
 
 impl Desktop {
-    /// Starts the app, on the test's turn.
-    pub fn start(client: MailClient, _turn: &Turn) -> Self {
+    /// Starts the app, with `main_window` the main window's view, on the test's turn.
+    pub fn start(client: MailClient, main_window: fn() -> Root, _turn: &Turn) -> Self {
         lock(&OPENED.0).clear();
         super::reset();
         let main = std::thread::Builder::new()
             .name("catmail-main".into())
             .spawn(move || {
+                PARTS.set(Some(Parts {
+                    main_window,
+                    launching: || {},
+                    engine_opened: || {},
+                }));
                 run(move || crate::engine::opened_with(Ok(client)));
                 super::finish();
             })

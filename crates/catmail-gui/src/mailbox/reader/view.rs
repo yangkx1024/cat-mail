@@ -15,6 +15,7 @@ use crate::mailbox::commands;
 use crate::mailbox::compose;
 use crate::mailbox::list::back_button;
 use crate::mailbox::list::{self};
+use crate::mailbox::listing;
 use crate::theme::SelectableText as _;
 use crate::{chrome, web};
 
@@ -88,7 +89,7 @@ fn failed(error: String) -> impl IntoElement {
 /// answering it.
 fn toolbar() -> impl IntoElement {
     // Looked up once for all the buttons.
-    let message = computed(list::selected_message);
+    let message = computed(listing::selected_message);
     let selected = move || message.get().into_iter().collect::<Vec<_>>();
     let applies = computed(move || commands::applies(&selected()));
     let can_edit_labels =
@@ -175,7 +176,7 @@ fn message() -> impl IntoElement {
     let header = computed(move || reading.with(|r| r.header.clone()));
     let field = move |f: fn(&Header) -> String| move || header.with(f);
     let labels = computed(move || {
-        list::selected_message()
+        listing::selected_message()
             .map(|m| list::user_label_names(&m))
             .unwrap_or_default()
     });

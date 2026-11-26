@@ -4,8 +4,8 @@
 //! what the window does with it, `view.rs` how it looks.
 //!
 //! A composer's view runs on its window's own nsh thread; the window is the shell's
-//! (`shell::opened`), and closing it asks the view, which saves first and then
-//! closes it (`shell::composer_closed`). State is nsh globals, the view's own: what
+//! (`shell::opened`, which the mailbox gives [`root`]), and closing it asks the view,
+//! which saves first and then closes it (`shell::composer_closed`). State is nsh globals, the view's own: what
 //! starts a message runs in the mailbox's view, and is `mailbox::compose`.
 
 mod quote;
@@ -41,10 +41,10 @@ use crate::toast::report;
 
 use view::Composer;
 
-pub struct Start {
-    pub opening: Opening,
+struct Start {
+    opening: Opening,
     /// The window's asks to close: its close button, Ctrl+W, quitting.
-    pub close_requests: Mutex<Option<mpsc::UnboundedReceiver<()>>>,
+    close_requests: Mutex<Option<mpsc::UnboundedReceiver<()>>>,
 }
 
 thread_local! {
@@ -53,7 +53,13 @@ thread_local! {
     static START: RefCell<Option<Arc<Start>>> = const { RefCell::new(None) };
 }
 
-pub fn root(start: Arc<Start>) -> Root {
+/// The view of a composer window: on `opening`'s draft, asked to close through
+/// `close_requests`.
+pub fn root(opening: Opening, close_requests: mpsc::UnboundedReceiver<()>) -> Root {
+    let start = Arc::new(Start {
+        opening,
+        close_requests: Mutex::new(Some(close_requests)),
+    });
     Root::new::<Composer>(move || {
         START.set(Some(start.clone()));
         Default::default()

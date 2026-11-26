@@ -8,9 +8,11 @@ pub mod compose;
 mod draft;
 mod folder_commands;
 pub mod list;
+mod listing;
 mod outbox;
 pub mod panes;
 mod picker;
+mod reader;
 pub mod sidebar;
 
 use std::cell::RefCell;
@@ -24,14 +26,14 @@ use nsh_base::theme;
 use nsh_core::element::Owner;
 use nsh_core::prelude::*;
 
+use crate::accounts::{self, Accounts};
 use crate::engine::client;
 use crate::login::{self, SignIn};
 use crate::tasks::{in_view, own_tasks};
 use crate::theme::SelectableText as _;
-use crate::{chrome, form, reader, settings, shell, toast};
+use crate::{chrome, form, settings, shell, toast};
 use catmail_frontend::list::Listing;
-use list::Selected;
-use sidebar::{Accounts, SelectedPlace};
+use listing::{Selected, SelectedPlace};
 
 /// What the engine's events ask to read again, held back between reads. Not reactive.
 #[derive(Clone, Default)]
@@ -98,8 +100,8 @@ fn mailbox() -> impl IntoElement {
         let place = global::<SelectedPlace>().with(|s| s.0);
         // Leaving a search for a place: the place's rows, not the results.
         untracked(|| {
-            list::clear_search();
-            list::show(place.map(Place::source));
+            listing::clear_search();
+            listing::show(place.map(Place::source));
         });
     });
     effect(reader::follow_selection);
@@ -122,8 +124,8 @@ fn mailbox() -> impl IntoElement {
     });
     compose::bind_keys();
     settings::bind_keys(true);
-    on_key("mod+shift+n", |_| sidebar::sync());
-    on_key("F5", |_| sidebar::sync());
+    on_key("mod+shift+n", |_| accounts::sync());
+    on_key("F5", |_| accounts::sync());
     on_key("mod+f", |_| list::focus_search());
     // Open at once, for looking at it without a mouse (screenshots).
     if std::env::var_os("CATMAIL_GUI_SETTINGS").is_some() {
@@ -198,7 +200,7 @@ fn read_again(refresh: Refresh) {
         sidebar::load();
     }
     if refresh.list {
-        list::refresh();
+        listing::refresh();
     }
     in_view(async {
         timer(REFRESH_INTERVAL).await;

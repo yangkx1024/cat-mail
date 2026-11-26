@@ -29,25 +29,37 @@ Windows 用户目前只有 CLI。
 
 ## 结构
 
-按窗口和区域分目录，仿照原来 GPUI 版的划分：主窗口的各栏在 `mailbox/`，读信区、写信窗口、设置对话框各一个目录，
-大的视图再把"状态和行为"与"长什么样"（`view.rs`）分开；各处共用的小部件放在 `src/` 下。
+按窗口和区域分目录，仿照原来 GPUI 版的划分：主窗口的各栏在 `mailbox/`（读信区也是它的一栏），写信窗口、设置
+对话框各一个目录，大的视图再把"状态和行为"与"长什么样"（`view.rs`）分开；各处共用的小部件和状态放在 `src/` 下。
+
+分层从上到下：`main.rs` 把应用拼起来；主窗口（`mailbox/`）用写信窗口、设置对话框和登录页；它们都跑在外壳
+（`shell/`）上，用 `src/` 下共用的部分。下层不引用上层：外壳不知道窗口里是什么，主窗口的视图、窗口外跟着引擎的
+部分（托盘、通知、唤醒）由 `main.rs` 交给它（`shell::Parts`），写信窗口的视图由开它的主窗口给（`shell::opened`）；
+账户的状态在 `accounts.rs`，侧栏、列表、设置、登录页都读它，不经过侧栏。主窗口里也一样：各栏（`panes.rs`、
+`sidebar.rs`、`list/`、`reader/`、`draft.rs`、`outbox.rs`）在上，命令、写信的发起、"Move to"与"Labels"在中间，
+列表显示什么、选中和勾选了什么（`listing.rs`）在下，各栏都读它、经它改邮件。
 
 ```
 src/
-  main.rs          启动：交给已在运行的实例或成为它（catmail_frontend::instance），日志，引擎的选项，交给 shell::run
+  main.rs          启动：交给已在运行的实例或成为它（catmail_frontend::instance），日志，引擎的选项；把主窗口的视图
+                   和窗口外的部分（托盘、通知、唤醒）交给 shell::run
   engine.rs        引擎：属于应用，不属于窗口；打开中、已打开、失败、已关闭
+  accounts.rs      主窗口读到的账户（文件夹、发件身份、状态）和 Sync：侧栏、列表、命令、设置、登录页共用
   shell/           外壳：mod.rs 窗口、设置与主题、托盘和通知的请求、MCP 服务、常驻与退出；gtk.rs、appkit.rs、headless.rs
   mailbox/         主窗口
     mod.rs         引擎打开前留空、失败的原因、登录页或三栏、引擎事件的刷新
     panes.rs       三栏和拖宽度的把手，右栏按选中的是邮件、草稿还是发件箱条目；右栏共用的返回按钮、字段行
     sidebar.rs     侧栏：All Inboxes、账户与文件夹、标签、连接说明
     folder_commands.rs  文件夹的右键菜单：新建、改名、删除
-    list/          中栏：mod.rs 发起读取并交给 frontend 的 ListModel、勾选、视图过滤、搜索；rows.rs 日期标题和三种行
+    listing.rs     列表显示什么：发起读取并交给 frontend 的 ListModel、选中、勾选、视图过滤、搜索、侧栏选中的地方；
+                   对邮件的改动（run_change），之后选中跟着移
+    list/          中栏：mod.rs 列、标题、搜索框、快捷键、开合右栏时行留在原处；rows.rs 日期标题和三种行
     commands.rs    对邮件的命令：图标按钮组、快捷键、被拒改动的通知
     compose.rs     从主窗口发起新邮件、回复、转发与对应快捷键
-    picker.rs      "Move to"与"Labels"对话框
+    picker.rs      "Move to"与"Labels"对话框，以及选了之后的移动、加去标签
     draft.rs outbox.rs  草稿、发件箱条目的右栏
-  reader/          读信区：mod.rs 打开、远程与内嵌图片、附件的保存；view.rs 工具栏、头部、正文的 web view、附件
+    reader/        读信区（邮件的右栏）：mod.rs 打开、远程与内嵌图片、附件的保存；view.rs 工具栏、头部、正文的
+                   web view、附件
   web/             web.rs 邮件 HTML 的 web view 与图片应答（读信区和写信引文共用）；sideways.rs 自定义横向滚动条
                    （页面：CSP、注入脚本和消息协议在 catmail_frontend::html）
   composer/        写信窗口：mod.rs 状态、保存发送关闭、附件、发件人、格式与图片；rich.rs 正文的编辑器；
@@ -56,7 +68,8 @@ src/
   login.rs         登录页和发件身份的表单
   form.rs          对话框外框、字段、提交（含忙碌转圈）、确认对话框、只要一个名字的对话框
   tasks.rs         视图开始的工作归谁（随窗口结束），另起线程的工作
-  buttons.rs       图标按钮（工具栏、行两种尺寸）、主按钮、文字按钮、分隔、提示、折叠按钮与转圈
+  buttons.rs       图标按钮（工具栏、行两种尺寸）、主按钮、文字按钮、分隔、提示、折叠按钮与转圈、侧栏式菜单的项
+                   （主窗口的侧栏和设置对话框的分节）
   chrome.rs        窗口顶部：macOS 的一体式主窗口、写信窗口的标题栏、各栏顶部的工具栏
   motion.rs        动画参数、布局动画、减弱动态效果检查与 macOS 动画期间隐藏滚动指示器
   theme.rs         主题映射到 nsh（shadcn）的 token
@@ -191,7 +204,8 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 `paused`：期间又有按键就不搜，没输入就回到选中的地方，和正显示的一样就不动）、什么时候问服务器（`server_search`，
 用户已经离开这次搜索就不问）、搜索时带上服务器找到的、
 读完后按 `Removal`、`Reveal`、`Reselect` 定下选中哪一行、哪些勾选不在了、要不要再读一次（`loaded`），都有表驱动
-测试。`mailbox/list/` 发起读取、把结果交给模型，再把 `Listing`、选中、勾选和"正在读"放进 nsh 的 signal；
+测试。`mailbox/listing.rs` 发起读取、把结果交给模型，再把 `Listing`、选中、勾选和"正在读"放进 nsh 的 signal，
+`mailbox/list/` 只画它们；
 "正在读"单独一个 signal，同步时每次刷新不再让读行的地方重算。
 
 - **按天分组**：列表（都是新的在前）按本地日期分组，标题是 Today、Yesterday、今年的"Monday, October 12"、
@@ -270,8 +284,9 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 文件夹、发件箱的选项一样）、会不会让邮件离开列表（`may_remove`，改标记以外都会）、做完要不要去掉勾选
 （`unchecks`，归档、移动、删除）。快捷键作用于哪些邮件是 `Listing::keyed`，只等选中的那封离开是
 `ListModel::expect_removal`，一封邮件"在哪看"（Gmail 上移动会去掉的标签、行上不用再写的标签）是
-`Source::shown_in`，移动和行上的标签名都用它（行上的按账户先算好一份，`shown_in_each`）。`mailbox/commands.rs`
-只有一个 `run_change`：按 `Change` 去掉勾选、等选中的那封离开、运行、出错时通知；其余是画按钮。
+`Source::shown_in`，移动和行上的标签名都用它（行上的按账户先算好一份，`shown_in_each`）。运行改动的只有一个
+`listing::run_change`：按 `Change` 去掉勾选、等选中的那封离开、运行、出错时通知。它在列表的模型里，命令、
+"Move to"与"Labels"、打开即已读都经过它；`mailbox/commands.rs` 是画按钮和决定改什么。
 
 - **三处同一套按钮**：读信区工具栏、勾选工具栏、悬停的行都由 `commands::group` 生成，只显示图标，按用途分组：
   位置（Archive、Delete、Move to）；标记（已读 / 未读、Flag）；读信区另有内容（Show remote images、Open in
@@ -301,7 +316,7 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 
 ## 读信
 
-读信区（`reader/`）：工具栏、标题、头部、正文、附件，在同一个滚动区里。头部的模型（`reader::Header`、附件的
+读信区（`mailbox/reader/`）：工具栏、标题、头部、正文、附件，在同一个滚动区里。头部的模型（`reader::Header`、附件的
 名字、保存对话框的起始目录）在 frontend。
 
 - **头部**：发件人头像；收件人一行只列名字，"Details"展开完整的 From / To / Cc / Reply-To / Date；Gmail 用户标签。
@@ -428,7 +443,7 @@ web view、图片的应答、远程图片的下载在 `web.rs`，写信窗口的
 
 写信的模型在 `catmail_frontend::composer`（`ComposeFrom::start`、From 的选项、字段解析、`Lifecycle` 决定何时保存 /
 发送 / 关窗、`OpenComposers` 按草稿登记窗口），`composer/` 只有界面。每个写信窗口的视图跑在它自己的 nsh 线程上；
-窗口由外壳开关（`shell::opened`、`composer_closed`）。
+窗口由外壳开关（`shell::opened`、`composer_closed`），视图（`composer::root`）由开窗的主窗口交给外壳。
 
 - **开着的草稿只由窗口改**：`ComposeFrom::start` 用 `edit_draft` 打开草稿，窗口的保存、附件、发送都经
   `Opening::editor`（`DraftEditor`）做；别处（MCP 的 agent）这时改不了、发不了它。`start` 一并返回的 `EditMark` 由外壳

@@ -19,44 +19,19 @@ use nsh_base::theme;
 use nsh_core::ContextMenuEvent;
 use nsh_core::prelude::*;
 
-use crate::buttons::{Size, fold_button, icon_button, primary_button, tooltip};
+use crate::accounts::{Accounts, has_accounts, with_accounts};
+use crate::buttons::{
+    Size, fold_button, icon_button, menu_item, menu_item_background, primary_button, tooltip,
+};
 use crate::engine::client;
 use crate::icons::{Icon, icon};
 use crate::mailbox::compose;
 use crate::mailbox::folder_commands::{folder_menu, rename_selected};
-use crate::mailbox::list;
+use crate::mailbox::listing::{self, SelectedPlace};
 use crate::motion;
 use crate::tasks::in_view;
 use crate::toast::report;
 use crate::{chrome, form, settings};
-
-/// The accounts as the sidebar shows them; `None` until the first read.
-#[derive(Clone, Default)]
-pub struct Accounts(pub Option<Vec<AccountEntry>>);
-
-impl Accounts {
-    /// The accounts shown: none before the first read.
-    pub fn list(&self) -> &[AccountEntry] {
-        self.0.as_deref().unwrap_or_default()
-    }
-}
-
-/// Whether there is an account to write from or sync. Tracked.
-pub fn has_accounts() -> bool {
-    global::<Accounts>().with(|a| !a.list().is_empty())
-}
-
-#[derive(Clone, Default)]
-pub struct SelectedPlace(pub Option<Place>);
-
-pub fn with_accounts<T>(f: impl FnOnce(&[AccountEntry]) -> T) -> T {
-    global::<Accounts>().with_untracked(|a| f(a.list()))
-}
-
-/// `f` with account `id` as the sidebar has it; `None` while it has no such account.
-pub fn with_account<T>(id: AccountId, f: impl FnOnce(&AccountEntry) -> T) -> Option<T> {
-    with_accounts(|a| AccountEntry::find(a, id).map(f))
-}
 
 /// The reads of the sidebar. Not reactive: nothing shows it.
 #[derive(Clone, Default)]
@@ -106,14 +81,14 @@ pub fn load() {
 
 fn show(loaded: Loaded) {
     global::<Accounts>().set(Accounts(Some(loaded.accounts)));
-    crate::mailbox::list::set_labels();
+    listing::set_labels();
     match loaded.selection {
         Selection::Keep => {}
-        Selection::KeepAndRefresh => crate::mailbox::list::refresh(),
+        Selection::KeepAndRefresh => listing::refresh(),
         Selection::Go(place) => select(place),
     }
     if let Some(message) = loaded.reveal {
-        crate::mailbox::list::reveal(message);
+        listing::reveal(message);
     }
     if loaded.compose {
         compose::new_message();
@@ -129,7 +104,7 @@ pub fn go_to(to: Destination) {
     };
     select(Some(place));
     if let Some(message) = message {
-        crate::mailbox::list::reveal(message);
+        listing::reveal(message);
     }
 }
 
@@ -138,21 +113,6 @@ pub fn compose() {
     if reads().borrow_mut().compose() {
         compose::new_message();
     }
-}
-
-/// Syncs every account now. The engine's background sync does it: progress and failures
-/// show as the accounts' status.
-pub fn sync() {
-    in_view(async {
-        if let Err(e) = client().sync_now().await {
-            report("Couldn't sync", e);
-        }
-    });
-}
-
-/// Whether an account is syncing every folder, as the engine says.
-pub fn syncing() -> bool {
-    global::<Accounts>().with(|a| a.0.iter().flatten().any(|entry| entry.status.syncing))
 }
 
 /// Every pause in typing saves a draft: only the account's draft count can have changed,
@@ -215,9 +175,9 @@ pub fn select(place: Option<Place>) {
     if selected.with_untracked(|p| p.0) == place && place.is_some() {
         // Back from a search to the place it was made in: nothing follows the selection,
         // which didn't change.
-        if matches!(list::source(), Some(Source::Search(_))) {
-            list::clear_search();
-            list::show(place.map(Place::source));
+        if matches!(listing::source(), Some(Source::Search(_))) {
+            listing::clear_search();
+            listing::show(place.map(Place::source));
         }
         return;
     }
@@ -395,7 +355,7 @@ fn heading(group: ReadSignal<Group>) -> View {
                 .gap(px(8.0))
                 .px(px(8.0))
                 .rounded(px(6.0))
-                .hover(|s| s.bg(row_background(|| false, true)))
+                .hover(|s| s.bg(menu_item_background(|| false, true)))
                 // The whole row folds the account, which has nothing else to do on a
                 // press; its chevron is a folder's, in the same lane.
                 .on_press(toggle)
@@ -533,62 +493,4 @@ fn place_row(item: ReadSignal<Item>) -> View {
             .mr(px(-4.0))
         },
     ))
-}
-
-/// An item of a sidebar menu, the mailbox's or the settings'. Selected, the icon fills
-/// and the icon and label take the primary color; the label keeps its weight.
-pub fn menu_item(
-    which: impl Fn() -> Icon + 'static,
-    label: impl IntoReactive<SharedString>,
-    selected: impl Fn() -> bool + Copy + 'static,
-) -> View {
-    view()
-        .h(px(28.0))
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .px(px(8.0))
-        .rounded(px(6.0))
-        .bg(row_background(selected, false))
-        .hover(move |s| s.bg(row_background(selected, true)))
-        // As large as the label's text.
-        .child(
-            icon(
-                move || if selected() { which().solid() } else { which() },
-                14.0,
-            )
-            .text_color(row_color(selected)),
-        )
-        .child(
-            text(label)
-                .number_of_lines(1)
-                .flex_1()
-                .text_sm()
-                .text_color(row_color(selected)),
-        )
-}
-
-fn row_background(
-    selected: impl Fn() -> bool + 'static,
-    hovered: bool,
-) -> impl Fn() -> AdaptiveColor + 'static {
-    move || {
-        if selected() {
-            theme().sidebar_accent
-        } else if hovered {
-            theme().sidebar_accent.opacity(0.8)
-        } else {
-            AdaptiveColor::TRANSPARENT
-        }
-    }
-}
-
-fn row_color(selected: impl Fn() -> bool + 'static) -> impl Fn() -> AdaptiveColor + 'static {
-    move || {
-        if selected() {
-            theme().primary
-        } else {
-            theme().sidebar_foreground
-        }
-    }
 }
