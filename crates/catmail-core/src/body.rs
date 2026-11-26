@@ -20,11 +20,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use catmail_proto::imap::{self, Session};
-use catmail_proto::mime::{self, Content};
-use catmail_store::{AttachmentSource, Db, MessageLocation, NewAttachment, NewBody};
+use catmail_proto::mime;
+use catmail_store::{AttachmentSource, Db, MessageLocation};
 use catmail_types::{AttachmentId, BlobHash, ErrorKind, Event, Message, MessageId};
 
 use crate::connection::with_session;
+use crate::content::{self, Fetched, Parts};
 use crate::downloading::Claim;
 use crate::engine::Engine;
 use crate::rebuild;
@@ -497,35 +498,6 @@ async fn forget(engine: &Arc<Engine>, location: MessageLocation) -> Result<()> {
     Ok(())
 }
 
-/// A body as fetched, to be parsed with [`parse`].
-pub(crate) enum Fetched {
-    Whole(Vec<u8>),
-    Parts(Box<Parts>),
-}
-
-impl Fetched {
-    /// The bytes that came from the server, about.
-    pub fn len(&self) -> u64 {
-        match self {
-            Self::Whole(raw) => raw.len() as u64,
-            Self::Parts(parts) => parts
-                .text
-                .values()
-                .chain(parts.headers.values())
-                .map(|data| data.len() as u64)
-                .sum(),
-        }
-    }
-}
-
-/// A message fetched in parts, by section: its text and the MIME headers of the parts
-/// whose names lost bytes in the structure.
-pub(crate) struct Parts {
-    structure: mime::MimeNode,
-    text: HashMap<String, Vec<u8>>,
-    headers: HashMap<String, Vec<u8>>,
-}
-
 /// Downloads and stores the body unless it is stored already. `whole` fetches even a
 /// large message whole, for its raw form.
 async fn ensure_downloaded(engine: &Arc<Engine>, id: MessageId, whole: bool) -> Result<()> {
@@ -567,7 +539,7 @@ async fn ensure_downloaded(engine: &Arc<Engine>, id: MessageId, whole: bool) -> 
     let stored = blocking({
         let engine = engine.clone();
         move || {
-            let body = parse(&engine, fetched)?;
+            let body = content::parse(&engine.blobs, fetched)?;
             let labels = engine.store.write(|db| {
                 let messages = db.messages();
                 Ok(messages
@@ -609,16 +581,6 @@ pub(crate) async fn fetch_body(
     in_folder(engine, session, location, &op).await
 }
 
-/// Parses a fetched body into what is stored, putting the raw message and the parts
-/// that came with it in the blob store. Blocking.
-pub(crate) fn parse(engine: &Engine, fetched: Fetched) -> Result<NewBody> {
-    let (content, raw) = match fetched {
-        Fetched::Whole(raw) => (mime::parse_message(&raw), Some(raw)),
-        Fetched::Parts(parts) => (parts.structure.content(&parts.text, &parts.headers), None),
-    };
-    new_body(engine, content, raw.as_deref())
-}
-
 /// Runs after [`examine`] (see [`in_folder`]). Fetches a message larger than
 /// `limits.whole` in parts. `None` if the message is gone.
 async fn fetch(
@@ -639,11 +601,9 @@ async fn fetch(
                     let Some(headers) = mime_headers(session, uid, &structure).await? else {
                         return Ok(None);
                     };
-                    return Ok(Some(Fetched::Parts(Box::new(Parts {
-                        structure,
-                        text: parts,
-                        headers,
-                    }))));
+                    return Ok(Some(Fetched::Parts(Box::new(Parts::new(
+                        structure, parts, headers,
+                    )))));
                 }
                 tracing::warn!(
                     uid,
@@ -713,40 +673,6 @@ async fn reopen(session: &mut Session, location: &MessageLocation) -> Result<Dur
     Ok(began.elapsed())
 }
 
-/// Stores the raw message and every part that came with it in the blob store.
-pub(crate) fn new_body(engine: &Engine, content: Content, raw: Option<&[u8]>) -> Result<NewBody> {
-    let raw = raw.map(|raw| engine.blobs.put_bytes(raw)).transpose()?;
-    let attachments = content
-        .parts
-        .into_iter()
-        .map(|part| {
-            let blob = part
-                .data
-                .as_deref()
-                .map(|data| engine.blobs.put_bytes(data))
-                .transpose()?;
-            Ok(NewAttachment {
-                section: part.section,
-                transfer_encoding: part.transfer_encoding,
-                filename: part.filename,
-                mime_type: part.mime_type,
-                size: part.size,
-                content_id: part.content_id,
-                inline: part.inline,
-                blob,
-            })
-        })
-        .collect::<Result<_>>()?;
-    Ok(NewBody {
-        text: content.text,
-        html: content.html,
-        raw,
-        snippet: content.snippet,
-        attachments,
-        version: mime::CONTENT_VERSION,
-    })
-}
-
 /// Stores `data` and records it with `record`, which returns false if the row it
 /// belongs to is gone (then `gone` is the error). Returns its hash.
 fn store_blob(
@@ -781,20 +707,11 @@ async fn attachment_source(engine: &Arc<Engine>, id: AttachmentId) -> Result<Att
 pub(crate) async fn read_blob(engine: &Arc<Engine>, hash: BlobHash) -> Result<Option<Vec<u8>>> {
     let engine = engine.clone();
     blocking(move || {
-        let data = stored(&engine, &hash)?;
+        let data = content::stored(&engine.blobs, &hash)?;
         if data.is_none() {
             tracing::warn!(%hash, "referenced blob is missing; fetching again");
         }
         Ok(data)
     })
     .await
-}
-
-/// Blocking. The blob's content, `None` if it has gone missing from disk.
-pub(crate) fn stored(engine: &Engine, hash: &BlobHash) -> Result<Option<Vec<u8>>> {
-    match engine.blobs.read(hash) {
-        Ok(data) => Ok(Some(data)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.into()),
-    }
 }

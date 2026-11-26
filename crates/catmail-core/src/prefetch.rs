@@ -43,6 +43,7 @@ use tokio::sync::broadcast::{
 };
 
 use crate::body::{self, Limits};
+use crate::content;
 use crate::downloading::{Claim, Claimed};
 use crate::engine::Engine;
 use crate::settings::BodyPrefetch;
@@ -466,16 +467,16 @@ async fn outcome(
     account: AccountId,
     id: MessageId,
     folder: FolderId,
-    fetched: Result<(body::Fetched, body::Took)>,
+    fetched: Result<(content::Fetched, body::Took)>,
 ) -> Result<One> {
     match fetched {
         Ok((fetched, took)) => {
             let bytes = fetched.len();
             tracing::debug!(%account, message_id = %id, %folder, bytes,
-                whole = matches!(fetched, body::Fetched::Whole(_)), examine = ?took.examine,
+                whole = matches!(fetched, content::Fetched::Whole(_)), examine = ?took.examine,
                 fetch = ?took.fetch, "prefetched a body");
             let engine = engine.clone();
-            let body = blocking(move || body::parse(&engine, fetched)).await?;
+            let body = blocking(move || content::parse(&engine.blobs, fetched)).await?;
             Ok(One::Body {
                 folder,
                 body,

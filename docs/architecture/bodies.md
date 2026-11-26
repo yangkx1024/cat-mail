@@ -314,6 +314,7 @@ base64 正文），交给 mail-parser 按同样方式解析。于是两条路径
 每份正文记着做出它的内容版本（`message_bodies.content_version`，即 proto 的 `mime::CONTENT_VERSION`），
 低于当前版本的重新做一遍（`catmail-core/src/rebuild.rs`）。版本管的是存下的整个 `Content`：解析（mail-parser、
 字符集转码、只有 HTML 时转出的文本、哪些部分内嵌）和 `catmail-html` 的清洗，都会改变它。
+重建和下载用同一套做法做出正文（`content.rs`：解析，原文和随信来的部分放进 BlobStore），重建不经过下载的代码。
 
 - **何时换版本。** proto 的指纹测试（`fingerprint_follows_content_version`）钉住一组邮件解析、清洗后的结果，
   输出一变就失败，改的人当场决定要不要升版本：清洗收紧一律升；输出一样的重构不会碰到它。比较用 `<`：在新旧
