@@ -1,14 +1,10 @@
-//! Logged-in IMAP connections kept between on-demand requests (bodies, attachments,
-//! saving to Sent, replays, the sync of an opened folder), so that opening messages one
-//! after another doesn't log in each time; and the rules for using a connection again,
-//! pooled or not ([`with_session`], [`on_session`], [`with_session_redone`]). Sync of every folder and background
-//! sync keep connections of their own, which follow the same rules.
-//!
-//! While a connection waits in the pool it is kept alive: every
-//! [`EngineTuning::keepalive`](crate::EngineTuning) it is sent a NOOP, so that servers
-//! and NAT boxes don't close it as idle, and one that died is closed at once rather than
-//! found dead by the next request. There is no limit on how long: while the engine runs,
-//! it is there to open mail.
+//! An account's idle connections, kept between on-demand requests: held by the engine
+//! for each account, taken and returned by the rules in [`connection`](crate::connection). While a connection waits here it is
+//! kept alive: every [`EngineTuning::keepalive`](crate::EngineTuning) it is sent a NOOP,
+//! so that servers and NAT boxes don't close it as idle, and one that died is closed at
+//! once rather than found dead by the next request. There is no limit on how long: while
+//! the engine runs, it is there to open mail. Background sync keeps its own connection
+//! alive the same way ([`ping`], [`poll`]).
 
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -17,10 +13,7 @@ use catmail_proto::imap::{self, Session};
 use catmail_types::AccountId;
 use tokio::task::AbortHandle;
 
-use crate::Result;
-use crate::connection::connect;
-use crate::engine::Engine;
-use crate::task::{Closing, lock};
+use crate::task::{Closing, Cutoff, lock};
 
 /// Enough for a message and one of its attachments at once.
 const PER_ACCOUNT: usize = 2;
@@ -28,6 +21,13 @@ const PER_ACCOUNT: usize = 2;
 /// An account's idle connections.
 pub(crate) struct Pool {
     account: AccountId,
+    /// How long a connection waits unused before its NOOP
+    /// ([`EngineTuning::keepalive`](crate::EngineTuning)).
+    every: Duration,
+    /// The engine's: ends the keepalive tasks once it is gone.
+    closing: Closing,
+    /// When the computer last woke: a connection from before is closed, not kept alive.
+    woke: Arc<Cutoff>,
     idle: Mutex<Idle>,
 }
 
@@ -49,9 +49,12 @@ struct Pooled {
 }
 
 impl Pool {
-    pub fn new(account: AccountId) -> Self {
+    pub fn new(account: AccountId, every: Duration, closing: Closing, woke: Arc<Cutoff>) -> Self {
         Self {
             account,
+            every,
+            closing,
+            woke,
             idle: Mutex::default(),
         }
     }
@@ -74,12 +77,12 @@ impl Pool {
 
     /// Keeps a connection a request is done with for the next one, unless the account is
     /// being removed or enough are kept already. Call from inside the engine runtime.
-    pub fn put(&self, engine: &Arc<Engine>, session: Session) {
-        self.keep(engine, session, Instant::now());
+    pub fn put(self: &Arc<Self>, session: Session) {
+        self.keep(session, Instant::now());
     }
 
     /// [`put`](Self::put), the connection last used at `used`.
-    fn keep(&self, engine: &Arc<Engine>, session: Session, used: Instant) {
+    fn keep(self: &Arc<Self>, session: Session, used: Instant) {
         let account = self.account;
         let mut idle = lock(&self.idle);
         if idle.closed {
@@ -92,10 +95,10 @@ impl Pool {
         }
         // Spawned under the lock: the task finds the connection here when it first looks.
         let keepalive = tokio::spawn(keep_alive(
-            Arc::downgrade(engine),
+            Arc::downgrade(self),
             account,
-            engine.tuning.keepalive,
-            engine.closing(),
+            self.every,
+            self.closing.clone(),
         ))
         .abort_handle();
         let i = idle.sessions.partition_point(|p| p.used <= used);
@@ -139,10 +142,11 @@ impl Pool {
     }
 }
 
-/// Whether a connection is worth using: not one made before the computer last slept
-/// (see [`Engine::since_woke`]), which is likely dead and only found so after a timeout.
-pub(crate) fn usable(engine: &Engine, session: &Session) -> bool {
-    engine.since_woke(session.opened())
+/// Whether a connection is worth using: not one made before the computer last slept (as
+/// `woke` says), which is likely dead and only found so after a timeout. Engine work asks
+/// through `Engine::usable`.
+pub(crate) fn usable(woke: &Cutoff, session: &Session) -> bool {
+    woke.since(session.opened())
 }
 
 /// Whether a connection a command failed on with `e` can be used again: a refusal leaves
@@ -153,21 +157,17 @@ fn survives(e: &imap::Error) -> bool {
 
 /// Waits `every`, then sends the pooled connection this task keeps alive a NOOP and
 /// returns it (with a task of its own), unless that found it dead: then it is closed.
-/// Aborted if the connection is taken meanwhile; ends if the engine is gone. One from
+/// Aborted if the connection is taken meanwhile; ends if the engine, and with it the pool,
+/// is gone. One from
 /// before a sleep is closed without a word.
-async fn keep_alive(
-    engine: Weak<Engine>,
-    account: AccountId,
-    every: Duration,
-    mut closing: Closing,
-) {
+async fn keep_alive(pool: Weak<Pool>, account: AccountId, every: Duration, mut closing: Closing) {
     tokio::select! {
         () = tokio::time::sleep(every) => {}
         () = closing.closed() => return,
     }
-    let Some((mut session, used)) = engine.upgrade().and_then(|engine| {
-        let (session, used) = engine.pool(account).take_own()?;
-        if usable(&engine, &session) {
+    let Some((mut session, used)) = pool.upgrade().and_then(|pool| {
+        let (session, used) = pool.take_own()?;
+        if usable(&pool.woke, &session) {
             return Some((session, used));
         }
         tracing::info!(%account, "idle connection from before a sleep; closed");
@@ -175,15 +175,15 @@ async fn keep_alive(
     }) else {
         return;
     };
-    // Not holding the engine meanwhile, which would keep it from closing.
+    // Not holding the pool meanwhile, which would keep it past the engine.
     if !matches!(
         ping(account, &mut session, "pooled", closing.closed()).await,
         Some(Pinged::Alive { .. })
     ) {
         return;
     }
-    if let Some(engine) = engine.upgrade() {
-        engine.pool(account).keep(&engine, session, used);
+    if let Some(pool) = pool.upgrade() {
+        pool.keep(session, used);
     }
 }
 
@@ -262,115 +262,15 @@ async fn answered(
     })
 }
 
-/// Runs `op` on one of the account's idle connections, or a new one, and keeps the
-/// connection for next time unless it failed; see [`on_session`].
-///
-/// Pass an `async move` closure that owns what it captures (a clone of the engine, not a
-/// reference to it): with a borrowed capture held across an `.await`, the closure's
-/// future can't be proven `Send` (a compiler limitation with higher-ranked lifetimes),
-/// so neither can the caller's.
-pub(crate) async fn with_session<T>(
-    engine: &Arc<Engine>,
-    account: AccountId,
-    mut op: impl AsyncFnMut(&mut Session) -> Result<T>,
-) -> Result<T> {
-    pooled(engine, account, false, async move |session, _| {
-        op(session).await
-    })
-    .await
-}
-
-/// As [`with_session`], for a change the server may have made before its answer was lost:
-/// `op` also runs once more if a new connection breaks while it runs, not only a reused
-/// one, and is told whether this is a try after the first, when it should look at what
-/// the server already did rather than do it again.
-pub(crate) async fn with_session_redone<T>(
-    engine: &Arc<Engine>,
-    account: AccountId,
-    op: impl AsyncFnMut(&mut Session, bool) -> Result<T>,
-) -> Result<T> {
-    pooled(engine, account, true, op).await
-}
-
-async fn pooled<T>(
-    engine: &Arc<Engine>,
-    account: AccountId,
-    redo_new: bool,
-    op: impl AsyncFnMut(&mut Session, bool) -> Result<T>,
-) -> Result<T> {
-    let pool = engine.pool(account);
-    let mut slot = pool.take();
-    let result = trying(engine, account, &mut slot, redo_new, op).await;
-    if let Some(session) = slot
-        && result.as_ref().err().is_none_or(|e| !e.breaks_connection())
-    {
-        pool.put(engine, session);
-    }
-    result
-}
-
-/// Runs `op` on the connection in `slot`, or on a new one put there: also in place of one
-/// that isn't [`usable`]. If the one there turns out to be dead (disconnected, not merely
-/// unusable after a refusal), `op` runs once more on a fresh one.
-pub(crate) async fn on_session<T>(
-    engine: &Arc<Engine>,
-    account: AccountId,
-    slot: &mut Option<Session>,
-    mut op: impl AsyncFnMut(&mut Session) -> Result<T>,
-) -> Result<T> {
-    trying(engine, account, slot, false, async move |session, _| {
-        op(session).await
-    })
-    .await
-}
-
-/// [`on_session`], and with `redo_new` once more on a fresh connection if the new one
-/// broke too; `op` is told whether it runs after a try that broke.
-async fn trying<T>(
-    engine: &Arc<Engine>,
-    account: AccountId,
-    slot: &mut Option<Session>,
-    redo_new: bool,
-    mut op: impl AsyncFnMut(&mut Session, bool) -> Result<T>,
-) -> Result<T> {
-    if slot.as_ref().is_some_and(|s| !usable(engine, s)) {
-        tracing::info!(%account, "connection from before a sleep; reconnecting");
-        *slot = None;
-    }
-    let mut again = false;
-    if let Some(session) = slot {
-        match op(session, again).await {
-            // A fresh connection, not another idle one: those are likely dead too.
-            Err(e) if e.is_disconnected() => {
-                tracing::info!(%account, error = %e, "reused connection was dead; reconnecting");
-                again = true;
-            }
-            result => return result,
-        }
-    }
-    *slot = None;
-    let session = slot.insert(connect(engine, account).await?);
-    match op(session, again).await {
-        Err(e) if redo_new && e.is_disconnected() => {
-            tracing::info!(%account, error = %e, "new connection broke; trying again");
-            *slot = None;
-            let session = slot.insert(connect(engine, account).await?);
-            op(session, true).await
-        }
-        result => result,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use catmail_proto::{Credentials, TlsConfig};
     use catmail_testkit::{FakeImap, FakeMailbox, ServerState};
     use catmail_types::{Security, ServerConfig};
-    use tokio::runtime::Handle;
+    use tokio::sync::watch;
 
     use super::*;
-    use crate::connection::IO_TIMEOUT;
-    use crate::{Config, MailClient, MemorySecrets};
+    use crate::EngineTuning;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_keepalive_leaves_a_connection_where_it_was() {
@@ -380,13 +280,6 @@ mod tests {
         archive.append_simple("Archived");
         state.mailboxes.push(archive);
         let fake = FakeImap::start(state).await;
-        let dir = tempfile::tempdir().unwrap();
-        let client = MailClient::builder(Config::with_data_dir(dir.path()))
-            .runtime(Handle::current())
-            .secrets(Arc::new(MemorySecrets::default()))
-            .open()
-            .unwrap();
-        let engine = &client.engine().unwrap();
         let examining = async |name: &str| {
             let server = ServerConfig {
                 host: "127.0.0.1".into(),
@@ -394,7 +287,9 @@ mod tests {
                 security: Security::Plain,
             };
             let tls = TlsConfig::with_roots_only([]).unwrap();
-            let mut session = Session::connect(&server, &tls, IO_TIMEOUT).await.unwrap();
+            let mut session = Session::connect(&server, &tls, Duration::from_secs(10))
+                .await
+                .unwrap();
             let credentials = Credentials {
                 username: "alice".into(),
                 password: "pw".into(),
@@ -404,11 +299,17 @@ mod tests {
             session
         };
 
-        let pool = Pool::new(AccountId(1));
+        let (_engine, closing) = watch::channel(());
+        let pool = Arc::new(Pool::new(
+            AccountId(1),
+            EngineTuning::default().keepalive,
+            Closing::new(closing),
+            Arc::default(),
+        ));
         let before = Instant::now();
-        pool.put(engine, examining("INBOX").await);
+        pool.put(examining("INBOX").await);
         // Used before the other, and returned after it by its keepalive.
-        pool.keep(engine, examining("Archive").await, before);
+        pool.keep(examining("Archive").await, before);
         assert!(pool.take().unwrap().examined("INBOX", 1).is_some());
         assert!(pool.take().unwrap().examined("Archive", 1).is_some());
         assert!(pool.take().is_none());

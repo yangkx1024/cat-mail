@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use catmail_proto::TlsConfig;
 use catmail_proto::http::ImageFetcher;
+use catmail_proto::imap::Session;
 use catmail_store::{BlobStore, Db, Store};
 use catmail_types::{
     AccountId, AccountStatus, DraftId, ErrorKind, Event, FolderId, IdentityId, ReportedError,
@@ -15,13 +16,13 @@ use catmail_types::{
 use tokio::sync::{Notify, OwnedMutexGuard, broadcast, watch};
 use tokio::task::unconstrained;
 
-use crate::body::Downloading;
+use crate::downloading::Downloading;
 use crate::image_cache::ImageCache;
-use crate::pool::Pool;
-use crate::search::SearchSlot;
+use crate::pool::{self, Pool};
+use crate::search_slot::SearchSlot;
 use crate::secrets::SecretStore;
 use crate::settings::{BodyPrefetch, EngineTuning, SyncSchedule};
-use crate::task::{Cancellation, Closing, backoff, blocking, lock, now};
+use crate::task::{Cancellation, Closing, Cutoff, backoff, blocking, lock, now};
 use crate::{Config, DataDirLock, Error, Result};
 
 /// State shared by every `MailClient` clone and every engine task.
@@ -53,7 +54,7 @@ pub(crate) struct Engine {
     /// it weakly at once (see [`closing`](Self::closing)).
     closing: watch::Sender<()>,
     /// When the computer last woke from sleep, as [`Engine::resume`] was told.
-    woke: Cutoff,
+    woke: Arc<Cutoff>,
     accounts: Mutex<HashMap<AccountId, Arc<AccountState>>>,
     /// Folders being deleted on the server (`folders::delete`): local changes to their
     /// messages are refused meanwhile, as the deletion would take those along. Shared
@@ -84,30 +85,6 @@ impl Drop for Deleting {
     }
 }
 
-/// A moment before which work no longer counts: when the computer last woke from
-/// sleep, or a sync of every folder of an account was last asked for.
-#[derive(Default)]
-struct Cutoff(Mutex<Option<Instant>>);
-
-impl Cutoff {
-    fn set(&self, at: Instant) {
-        *lock(&self.0) = Some(at);
-    }
-
-    fn since(&self, at: Instant) -> bool {
-        lock(&self.0).is_none_or(|cutoff| at > cutoff)
-    }
-
-    /// When work that `began` then finished, to record for [`since`](Self::since) to
-    /// check later, if it counts: not if it began before the cutoff. The time is taken
-    /// before the check, so a cutoff set after the check is later and leaves the record
-    /// out; taken after it, a cutoff set in between would let the record count.
-    fn finished(&self, began: Instant, now: impl FnOnce() -> Instant) -> Option<Instant> {
-        let finished = now();
-        self.since(began).then_some(finished)
-    }
-}
-
 /// [`Engine::draft_upload_delay`] unless the builder sets it.
 pub(crate) const DEFAULT_DRAFT_UPLOAD_DELAY: Duration = Duration::from_secs(15);
 
@@ -123,7 +100,7 @@ struct AccountState {
     send: AccountLock,
     /// Set when removal starts; cancels running syncs and on-demand fetches.
     removed: watch::Sender<bool>,
-    /// Logged-in connections for on-demand fetches (see [`pool`](crate::pool)).
+    /// Logged-in connections for on-demand fetches (see [`pool`]).
     pool: Arc<Pool>,
     /// The connection searches on the server use (see [`search`](crate::search)).
     search: Arc<SearchSlot>,
@@ -351,7 +328,7 @@ impl Engine {
             draft_upload_delay: DEFAULT_DRAFT_UPLOAD_DELAY,
             tuning: EngineTuning::default(),
             closing: watch::Sender::new(()),
-            woke: Cutoff::default(),
+            woke: Arc::default(),
             accounts: Mutex::default(),
             deleting: Arc::default(),
             editing: Arc::default(),
@@ -539,6 +516,11 @@ impl Engine {
     /// though it finished after.
     pub fn since_woke(&self, at: Instant) -> bool {
         self.woke.since(at)
+    }
+
+    /// Whether a connection is worth using (see [`pool::usable`]).
+    pub fn usable(&self, session: &Session) -> bool {
+        pool::usable(&self.woke, session)
     }
 
     /// Asks for every folder of the account to be synced at once (see
@@ -851,7 +833,12 @@ impl Engine {
                     sync: AccountLock::default(),
                     send: AccountLock::default(),
                     removed: watch::Sender::new(false),
-                    pool: Arc::new(Pool::new(account)),
+                    pool: Arc::new(Pool::new(
+                        account,
+                        self.tuning.keepalive,
+                        self.closing(),
+                        self.woke.clone(),
+                    )),
                     search: Arc::default(),
                     wake: Arc::default(),
                     resume: Arc::default(),
@@ -1023,33 +1010,5 @@ mod tests {
             after_wake: Some(1),
         };
         assert_eq!(failures.retry_in(secs(2), secs(30), secs(1)), secs(1));
-    }
-
-    /// Work begun before the computer slept, finishing as it wakes: whenever the wake
-    /// comes, the record doesn't count.
-    #[test]
-    fn work_begun_before_a_wake_never_counts() {
-        let began = Instant::now();
-        let later = |by| began + Duration::from_secs(by);
-
-        // As the time is taken.
-        let woke = Cutoff::default();
-        let finished = woke.finished(began, || {
-            woke.set(later(1));
-            later(2)
-        });
-        assert!(finished.is_none_or(|at| !woke.since(at)));
-
-        // Between the check and the record.
-        let woke = Cutoff::default();
-        let finished = woke.finished(began, || later(1));
-        woke.set(later(2));
-        assert!(finished.is_none_or(|at| !woke.since(at)));
-
-        // Work begun after a wake counts.
-        let woke = Cutoff::default();
-        woke.set(began);
-        let finished = woke.finished(later(1), || later(2));
-        assert!(finished.is_some_and(|at| woke.since(at)));
     }
 }

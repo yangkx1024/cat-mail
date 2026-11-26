@@ -13,9 +13,7 @@ field-leak catmail_core::engine::Engine::secrets
 field-leak catmail_core::engine::Engine::store
 field-leak catmail_core::engine::Engine::sync_in_background
 field-leak catmail_core::engine::Engine::tuning
-field-leak catmail_core::search::Held::session
-field-leak catmail_core::search::Held::unsearchable
-field-leak catmail_core::search::Held::uses
+field-leak catmail_core::search_slot::Held::session
 field-leak catmail_frontend::commands::Change::ids
 field-leak catmail_frontend::composer::Lifecycle::saved
 field-leak catmail_frontend::folders::AccountFolders::labels
@@ -54,7 +52,7 @@ field-leak catmail_testkit::imap::ServerState::subscriptions
 field-leak catmail_testkit::imap::ServerState::synchronized_literals
 long-file crates/catmail-store/src/messages.rs
 long-file crates/catmail-testkit/src/imap/mod.rs
-module-cycle catmail_core::body,catmail_core::connection,catmail_core::engine,catmail_core::pool,catmail_core::rebuild,catmail_core::search
+module-cycle catmail_core::body,catmail_core::rebuild
 module-cycle catmail_frontend::commands,catmail_frontend::mailbox,catmail_frontend::refresh
 module-cycle catmail_gui::composer,catmail_gui::login,catmail_gui::mailbox,catmail_gui::new_mail,catmail_gui::reader,catmail_gui::settings,catmail_gui::shell,catmail_gui::tray
 module-cycle catmail_gui::mailbox::commands,catmail_gui::mailbox::compose,catmail_gui::mailbox::folder_commands,catmail_gui::mailbox::list,catmail_gui::mailbox::picker,catmail_gui::mailbox::sidebar
@@ -69,7 +67,6 @@ shallow-module catmail_store
 shallow-module catmail_store::ops
 shallow-module catmail_types
 tangle catmail_core::client::DraftEditor,catmail_core::client::MailClient,catmail_core::client::builder::MailClientBuilder
-tangle catmail_core::engine::AccountState,catmail_core::engine::Engine,catmail_core::pool::Pool,catmail_core::pool::keep_alive,catmail_core::pool::usable,catmail_core::search::Held,catmail_core::search::SearchSlot
 tangle catmail_gui::mailbox::commands::run_change,catmail_gui::mailbox::list::open,catmail_gui::mailbox::list::read,catmail_gui::mailbox::list::refresh,catmail_gui::mailbox::list::removal_settled,catmail_gui::mailbox::list::show_loaded
 tangle catmail_store::attachments::Attachments,catmail_store::messages::Messages
 tangle catmail_store::drafts::Drafts,catmail_store::folders::Folders,catmail_store::identities::Identities,catmail_store::ops::PendingOps

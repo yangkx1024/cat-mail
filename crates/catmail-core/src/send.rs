@@ -28,9 +28,9 @@ use catmail_types::{
 use futures_util::future::join_all;
 use tokio::sync::Notify;
 
+use crate::connection::with_session;
 use crate::connection::{self, SendAs, SmtpLogin};
 use crate::engine::{Activity, Engine, Permit};
-use crate::pool::with_session;
 use crate::task::{Closing, blocking, now};
 use crate::{Error, Result, addresses, body, drafts, events, sync};
 

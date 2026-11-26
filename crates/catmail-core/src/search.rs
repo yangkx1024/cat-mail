@@ -32,7 +32,7 @@ use catmail_types::{AccountId, MessageId, SearchQuery, SearchTerm};
 use futures_util::future::join_all;
 
 use crate::engine::Engine;
-use crate::{Error, Result, pool};
+use crate::{Error, Result, connection};
 
 /// How long the search connection stays open after the last search: long enough for the
 /// next query typed, or refined, to need no login.
@@ -42,62 +42,6 @@ const IDLE: Duration = Duration::from_secs(2 * 60);
 /// aren't downloaded, the newest (highest UIDs): a word in every message would otherwise
 /// carry tens of thousands of ids into every read of the results.
 const MAX_PER_FOLDER: usize = 1000;
-
-/// The connection an account's searches use.
-#[derive(Default)]
-pub(crate) struct SearchSlot(tokio::sync::Mutex<Held>);
-
-#[derive(Default)]
-struct Held {
-    session: Option<Session>,
-    /// Searches that used `session` so far: the idle close leaves it to a later one.
-    uses: u64,
-    /// When a search found the login rejected, or the account over its limit, which sync
-    /// may not have seen yet (see [`Engine::waits_out`]): the server isn't asked again
-    /// until a sync of every folder gets through after that, as each try counts against
-    /// the account.
-    refused: Option<Instant>,
-    /// The server turned out unable to search text, or to ignore it: asking it again
-    /// would only cost the round trips. One recorded on connecting as unable to isn't
-    /// connected to at all (see `Folders::searched_on_server`): this is for one found out
-    /// on a search's own first connection, and for one ignoring the text, which is only
-    /// ever kept here.
-    unsearchable: bool,
-}
-
-impl Held {
-    /// Whether the account's server may be asked now; the log says why not. Forgets a
-    /// refusal that a sync got past since.
-    fn may_ask(&mut self, engine: &Engine, account: AccountId) -> bool {
-        if self.unsearchable {
-            tracing::debug!(%account, "not asking the server: it can't search text");
-            return false;
-        }
-        let synced_since = |at| engine.synced(account).is_some_and(|synced| synced > at);
-        if engine.waits_out(account) || self.refused.is_some_and(|at| !synced_since(at)) {
-            tracing::debug!(%account, "not asking the server: it rejects the login, or the account is over its limit");
-            return false;
-        }
-        self.refused = None;
-        true
-    }
-
-    /// Remembers a rejected login, or the account over its limit, if `e` is that.
-    fn note_refusal(&mut self, e: &Error) {
-        if matches!(e, Error::AuthFailed(_) | Error::OverLimit(_)) {
-            self.refused = Some(Instant::now());
-        }
-    }
-}
-
-impl SearchSlot {
-    /// Closes the connection unless a search is using it.
-    pub fn close_idle(&self) {
-        if let Ok(mut held) = self.0.try_lock() {
-            held.session = None;
-        }
-    }
-}
 
 /// Set once the caller of a search stopped waiting for it: the engine's task runs on
 /// regardless of the caller's future (see `Runtime::run`), so it looks.
@@ -172,27 +116,31 @@ pub(crate) async fn connect_ahead(engine: Arc<Engine>, account: Option<AccountId
 
 async fn connect_account_ahead(engine: &Arc<Engine>, account: AccountId) {
     let slot = engine.search_slot(account);
-    let Ok(mut held) = slot.0.try_lock() else {
+    let Some(mut held) = slot.try_lock() else {
         return;
     };
-    if !held.may_ask(engine, account) {
+    if !held.may_ask(account, engine.waits_out(account), engine.synced(account)) {
         return;
     }
     // Held meanwhile: a search starting now waits for this connection, not one of its own.
     // One open already is left as it is.
     let mut cancellation = engine.cancellation(account);
+    let mut session = held.take();
     let result = tokio::select! {
-        result = pool::on_session(engine, account, &mut held.session, async |_| Ok(())) => result,
-        () = cancellation.cancelled() => return,
+        result = connection::on_session(engine, account, &mut session, async |_| Ok(())) => result,
+        () = cancellation.cancelled() => Err(Error::Cancelled),
     };
-    if let Err(e) = result {
-        tracing::info!(%account, error = %e, kind = ?e.kind(),
-            "couldn't connect ahead of a search");
-        held.note_refusal(&e);
-        return;
+    held.ended(session, result.as_ref().err(), false);
+    match result {
+        Ok(()) => {}
+        Err(Error::Cancelled) => return,
+        Err(e) => {
+            tracing::info!(%account, error = %e, kind = ?e.kind(),
+                "couldn't connect ahead of a search");
+            return;
+        }
     }
-    held.uses += 1;
-    let uses = held.uses;
+    let uses = held.begin();
     drop(held);
     close_when_idle(engine, account, uses);
 }
@@ -209,36 +157,27 @@ async fn in_account(
     let mut cancellation = engine.cancellation(account);
     let slot = engine.search_slot(account);
     // An abandoned search finishes its command first.
-    let mut held = slot.0.lock().await;
-    if abandoned.is_set() || !held.may_ask(engine, account) {
+    let mut held = slot.lock().await;
+    if abandoned.is_set()
+        || !held.may_ask(account, engine.waits_out(account), engine.synced(account))
+    {
         return Vec::new();
     }
-    held.uses += 1;
-    let uses = held.uses;
+    let uses = held.begin();
+    let mut session = held.take();
     let began = Instant::now();
     let mut progress = Progress::default();
     let result = tokio::select! {
-        result = in_folders(engine, account, &mut held.session, &folders, terms, abandoned, &mut progress) => result,
+        result = in_folders(engine, account, &mut session, &folders, terms, abandoned, &mut progress) => result,
         () = cancellation.cancelled() => Err(Error::Cancelled),
     };
     // Which syntax the server got, known once connected; never the text searched.
-    let syntax = held
-        .session
+    let syntax = session
         .as_ref()
         .map(|s| tracing::field::debug(s.text_search()));
     let charset = terms.iter().any(|t| !t.text.is_ascii());
     let error = result.err();
-    if let Some(e) = &error {
-        // Left in the middle of a command, or broken.
-        if matches!(e, Error::Cancelled) || e.breaks_connection() {
-            held.session = None;
-        }
-        held.note_refusal(e);
-    }
-    if progress.unsearchable {
-        held.unsearchable = true;
-        held.session = None;
-    }
+    held.ended(session, error.as_ref(), progress.unsearchable);
     // What tells "the server found nothing" (matched) from "it found only what is here"
     // (found), and where the time went: opening folders or the server searching them.
     tracing::info!(%account, searched = progress.searched, of = folders.len(),
@@ -288,12 +227,12 @@ async fn in_folders(
         if abandoned.is_set() {
             return Ok(());
         }
-        // Owned, not borrowed: see `pool::with_session`.
+        // Owned, not borrowed: see `connection::with_session`.
         let (remote, synced, terms) =
             (state.remote_name.clone(), state.uidvalidity, terms.to_vec());
         let abandoned = abandoned.clone();
         let began = Instant::now();
-        let searched = pool::on_session(engine, account, session, async move |s| {
+        let searched = connection::on_session(engine, account, session, async move |s| {
             let began = Instant::now();
             // Its UIDVALIDITY holds while it is open; what else EXAMINE would bring
             // (EXISTS) the connection keeps up to date. Not if sync found the folder
@@ -426,10 +365,7 @@ fn close_when_idle(engine: &Arc<Engine>, account: AccountId, uses: u64) {
         let Some(slot) = weak.upgrade().map(|engine| engine.search_slot(account)) else {
             return;
         };
-        if let Ok(mut held) = slot.0.try_lock()
-            && held.uses == uses
-            && held.session.take().is_some()
-        {
+        if slot.close_unused(uses) {
             tracing::debug!(%account, "closed the idle search connection");
         }
     });

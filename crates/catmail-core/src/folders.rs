@@ -16,9 +16,9 @@ use catmail_types::{
     AccountId, Folder, FolderId, FolderRole, can_change_folder, can_create_in, special_folder,
 };
 
+use crate::connection::with_session_redone;
 use crate::draft_sync::Uploads;
 use crate::engine::Engine;
-use crate::pool::with_session_redone;
 use crate::task::lock;
 use crate::{Error, Result, ops, sync};
 

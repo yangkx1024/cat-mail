@@ -113,7 +113,7 @@ pub(crate) async fn add_account(
     });
     // For background sync to start on, or the next request.
     if let Some(session) = session {
-        engine.pool(account.id).put(&engine, session);
+        engine.pool(account.id).put(session);
     }
     spawn_background(&engine, account.id);
     Ok(account)

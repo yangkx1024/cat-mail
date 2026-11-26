@@ -133,8 +133,8 @@ VANISHED、FETCH）、`stop` 完成或过了 `max`，然后发 DONE、等 tagged
 
 按需操作（下载正文、附件、APPEND、`replay_pending`、打开文件夹时的同步）用每账户最多 2 条空闲连接的
 小连接池；同步全部文件夹和后台同步用自己的连接，打开邮件不必等同步结束。代码在
-`catmail-core/src/pool.rs`：池子本身（每账户一个 `Pool`，挂在引擎的账户状态上）、keepalive，以及复用一条
-连接的规则（`with_session`、`on_session`，后台同步自己的连接也走 `on_session`）。"睡前建立的不用"
+`catmail-core/src/pool.rs` 是池子本身（每账户一个 `Pool`，挂在引擎的账户状态上）和 keepalive，不依赖引擎；
+复用一条连接的规则（`with_session`、`on_session`，后台同步自己的连接也走 `on_session`）在 `connection.rs`。"睡前建立的不用"
 （`usable`）只写一处，`on_session` 和两种 keepalive 共用；"只有致命错误才不放回池里"（`survives`）也只写一处，
 `with_session` 和 keepalive 的 NOOP（`ping`，池里的连接和后台同步等待中的连接共用）共用。后台同步不放回池里，
 一步出任何错它的连接都换掉，是它自己的规则；等待中 NOOP 被拒绝则照常留着，和池里一样。

@@ -3,7 +3,7 @@
 
 use std::future::Future;
 use std::sync::{Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use catmail_types::AccountId;
 use tokio::sync::watch;
@@ -65,6 +65,30 @@ impl Cancellation {
     }
 }
 
+/// A moment before which work no longer counts: when the computer last woke from
+/// sleep, or a sync of every folder of an account was last asked for.
+#[derive(Default)]
+pub(crate) struct Cutoff(Mutex<Option<Instant>>);
+
+impl Cutoff {
+    pub fn set(&self, at: Instant) {
+        *lock(&self.0) = Some(at);
+    }
+
+    pub fn since(&self, at: Instant) -> bool {
+        lock(&self.0).is_none_or(|cutoff| at > cutoff)
+    }
+
+    /// When work that `began` then finished, to record for [`since`](Self::since) to
+    /// check later, if it counts: not if it began before the cutoff. The time is taken
+    /// before the check, so a cutoff set after the check is later and leaves the record
+    /// out; taken after it, a cutoff set in between would let the record count.
+    pub fn finished(&self, began: Instant, now: impl FnOnce() -> Instant) -> Option<Instant> {
+        let finished = now();
+        self.since(began).then_some(finished)
+    }
+}
+
 /// A panic while holding one of these locks can't leave the data inconsistent.
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -104,4 +128,37 @@ pub(crate) fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Work begun before the computer slept, finishing as it wakes: whenever the wake
+    /// comes, the record doesn't count.
+    #[test]
+    fn work_begun_before_a_wake_never_counts() {
+        let began = Instant::now();
+        let later = |by| began + Duration::from_secs(by);
+
+        // As the time is taken.
+        let woke = Cutoff::default();
+        let finished = woke.finished(began, || {
+            woke.set(later(1));
+            later(2)
+        });
+        assert!(finished.is_none_or(|at| !woke.since(at)));
+
+        // Between the check and the record.
+        let woke = Cutoff::default();
+        let finished = woke.finished(began, || later(1));
+        woke.set(later(2));
+        assert!(finished.is_none_or(|at| !woke.since(at)));
+
+        // Work begun after a wake counts.
+        let woke = Cutoff::default();
+        woke.set(began);
+        let finished = woke.finished(later(1), || later(2));
+        assert!(finished.is_some_and(|at| woke.since(at)));
+    }
 }

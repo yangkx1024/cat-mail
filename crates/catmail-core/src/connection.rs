@@ -1,4 +1,9 @@
-//! Logged-in IMAP (and SMTP) connections for an account.
+//! Logged-in IMAP (and SMTP) connections for an account, and the rules for using an IMAP
+//! one again, pooled or not ([`with_session`], [`on_session`], [`with_session_redone`]):
+//! on-demand requests (bodies, attachments, saving to Sent, replays, the sync of an
+//! opened folder) take one from the account's [`Pool`](crate::pool::Pool), so that
+//! opening messages one after another doesn't log in each time; sync of every folder and
+//! background sync keep connections of their own, which follow the same rules.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -293,4 +298,103 @@ pub(crate) async fn login(
     let mut session = Session::connect(server, &engine.tls()?, IO_TIMEOUT).await?;
     session.login(credentials).await?;
     Ok(session)
+}
+
+/// Runs `op` on one of the account's idle connections, or a new one, and keeps the
+/// connection for next time unless it failed; see [`on_session`].
+///
+/// Pass an `async move` closure that owns what it captures (a clone of the engine, not a
+/// reference to it): with a borrowed capture held across an `.await`, the closure's
+/// future can't be proven `Send` (a compiler limitation with higher-ranked lifetimes),
+/// so neither can the caller's.
+pub(crate) async fn with_session<T>(
+    engine: &Arc<Engine>,
+    account: AccountId,
+    mut op: impl AsyncFnMut(&mut Session) -> Result<T>,
+) -> Result<T> {
+    pooled(engine, account, false, async move |session, _| {
+        op(session).await
+    })
+    .await
+}
+
+/// As [`with_session`], for a change the server may have made before its answer was lost:
+/// `op` also runs once more if a new connection breaks while it runs, not only a reused
+/// one, and is told whether this is a try after the first, when it should look at what
+/// the server already did rather than do it again.
+pub(crate) async fn with_session_redone<T>(
+    engine: &Arc<Engine>,
+    account: AccountId,
+    op: impl AsyncFnMut(&mut Session, bool) -> Result<T>,
+) -> Result<T> {
+    pooled(engine, account, true, op).await
+}
+
+async fn pooled<T>(
+    engine: &Arc<Engine>,
+    account: AccountId,
+    redo_new: bool,
+    op: impl AsyncFnMut(&mut Session, bool) -> Result<T>,
+) -> Result<T> {
+    let pool = engine.pool(account);
+    let mut slot = pool.take();
+    let result = trying(engine, account, &mut slot, redo_new, op).await;
+    if let Some(session) = slot
+        && result.as_ref().err().is_none_or(|e| !e.breaks_connection())
+    {
+        pool.put(session);
+    }
+    result
+}
+
+/// Runs `op` on the connection in `slot`, or on a new one put there: also in place of one
+/// that isn't [`usable`](Engine::usable). If the one there turns out to be dead (disconnected, not merely
+/// unusable after a refusal), `op` runs once more on a fresh one.
+pub(crate) async fn on_session<T>(
+    engine: &Arc<Engine>,
+    account: AccountId,
+    slot: &mut Option<Session>,
+    mut op: impl AsyncFnMut(&mut Session) -> Result<T>,
+) -> Result<T> {
+    trying(engine, account, slot, false, async move |session, _| {
+        op(session).await
+    })
+    .await
+}
+
+/// [`on_session`], and with `redo_new` once more on a fresh connection if the new one
+/// broke too; `op` is told whether it runs after a try that broke.
+async fn trying<T>(
+    engine: &Arc<Engine>,
+    account: AccountId,
+    slot: &mut Option<Session>,
+    redo_new: bool,
+    mut op: impl AsyncFnMut(&mut Session, bool) -> Result<T>,
+) -> Result<T> {
+    if slot.as_ref().is_some_and(|s| !engine.usable(s)) {
+        tracing::info!(%account, "connection from before a sleep; reconnecting");
+        *slot = None;
+    }
+    let mut again = false;
+    if let Some(session) = slot {
+        match op(session, again).await {
+            // A fresh connection, not another idle one: those are likely dead too.
+            Err(e) if e.is_disconnected() => {
+                tracing::info!(%account, error = %e, "reused connection was dead; reconnecting");
+                again = true;
+            }
+            result => return result,
+        }
+    }
+    *slot = None;
+    let session = slot.insert(connect(engine, account).await?);
+    match op(session, again).await {
+        Err(e) if redo_new && e.is_disconnected() => {
+            tracing::info!(%account, error = %e, "new connection broke; trying again");
+            *slot = None;
+            let session = slot.insert(connect(engine, account).await?);
+            op(session, true).await
+        }
+        result => result,
+    }
 }
