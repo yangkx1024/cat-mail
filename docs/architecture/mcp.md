@@ -319,6 +319,10 @@ claude mcp add --transport http catmail https://mac.tailnet.ts.net/mcp \
   `mod.rs` 是共用的部分（`Mail`、`Scope`、`Failed`、各工具的层级 `tier_of`、按范围找账户/文件夹/邮件、日志的
   `logged`）和 `ServerHandler`（按层级列出、调用前限频与定范围）；`reading.rs`、`organizing.rs`、`drafts.rs` 是
   三个层级的工具，`sending.rs` 是发信（问用户的多轮请求与 `Asked`）；`downloads.rs` 是下载预算的扣与退（`with_body`、`downloading`）。
+  结构检查（`scripts/deslop.sh`）把 `#[tool_router]` 块里的方法当成 `Mail` 之外的代码，所以基线里的
+  `field-leak catmail_mcp::tools::Mail::{client, scope, asked, uploads}` 不是字段外泄：读字段的都是 `Mail`
+  自己的方法，同一文件里普通 `impl Mail` 块读同样的字段就不报（去掉 organizing 的 `#[tool_router]`，它那 5 处
+  就不报了）。为它们给每个调用包一层转发只是挪代码，不改。
 - `output.rs`（逐个写出的输出结构，文档注释就是 schema 里的描述）、`tokens.rs`、`limits.rs`（调用频率与下载
   预算）、`connect.rs`（给 agent 的命令示例）、`http.rs`（监听、令牌、交给 rmcp；读请求的超时与每个令牌同时在答的请求数；收上传；请求来的地址）、`uploads.rs`
   （上传的句柄与内容）。
