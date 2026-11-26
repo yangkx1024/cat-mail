@@ -4,11 +4,10 @@
 use catmail_types::{AccountId, Address, Attachment, AttachmentId, BlobHash, FolderId, MessageId};
 use rusqlite::{OptionalExtension, named_params, params};
 
-use super::{MOVING, Messages};
+use super::attachments::{Attachments, NewAttachment, Part};
+use super::{MOVING, Messages, fts};
 use crate::Result;
-use crate::attachments::{Attachments, NewAttachment, Part};
 use crate::columns::{json, parse_opt_text, to_json};
-use crate::fts;
 
 /// A downloaded body, stored in one go with its attachments.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -407,8 +406,7 @@ mod tests {
     use catmail_types::{Address, Flags, ListQuery, Message, MessageId};
 
     use super::*;
-    use crate::attachments::NewAttachment;
-    use crate::messages::{NewBody, NewMessage};
+    use crate::messages::{NewAttachment, NewBody, NewMessage};
 
     use crate::messages::fixtures::{body, hash, message, search, setup};
     use crate::test_util::{self};

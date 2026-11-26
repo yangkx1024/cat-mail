@@ -9,11 +9,10 @@ use catmail_types::{
 };
 use rusqlite::{OptionalExtension, Row, named_params};
 
-use super::Messages;
+use super::attachments::Attachments;
+use super::{Messages, fts};
 use crate::Result;
-use crate::attachments::Attachments;
 use crate::columns::{id_list, json, parse_opt_text, parse_text, to_json};
-use crate::fts;
 
 /// Of `messages m`. Its labels are one lookup in the primary key of `message_labels`.
 const SUMMARY_COLUMNS: &str = "m.id, m.account_id, m.folder_id, m.subject, m.from_json, m.to_json,

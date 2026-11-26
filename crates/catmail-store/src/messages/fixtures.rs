@@ -7,9 +7,8 @@ use catmail_types::{
     GmailLabel, ListQuery, SearchQuery,
 };
 
-use super::{NewBody, NewMessage};
+use super::{NewAttachment, NewBody, NewMessage};
 use crate::Store;
-use crate::attachments::NewAttachment;
 use crate::folders::RemoteFolder;
 use crate::test_util::{self, TestStore};
 

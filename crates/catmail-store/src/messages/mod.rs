@@ -1,12 +1,17 @@
 //! The messages' rows: one for each message on the server, where it is there and what of
 //! it is stored here. [`Messages`] is in three parts: what sync stores, changes and
 //! deletes ([`sync`]); the lists, searches and messages read ([`lists`]); and the
-//! bodies, with their attachments and the search index ([`bodies`]).
+//! bodies, with their attachments and the search index ([`bodies`]). Beside it, what
+//! hangs off the rows: their attachments, the text the search index is made of, and what
+//! the prefetch of bodies keeps.
 
+mod attachments;
 mod bodies;
 #[cfg(test)]
 mod fixtures;
+mod fts;
 mod lists;
+mod prefetch;
 mod sync;
 
 use std::cell::RefCell;
@@ -18,7 +23,9 @@ use rusqlite::{Connection, params};
 use crate::Result;
 use crate::columns::to_json;
 
+pub use attachments::{Attachments, NewAttachment};
 pub use bodies::{AttachmentSource, MessageLocation, NewBody, StaleBody};
+pub use prefetch::{Prefetch, Usage};
 pub use sync::{NewMessage, Upserted};
 
 /// Joins a message `m` to the pending move `o` that put it where it is, if it has no
