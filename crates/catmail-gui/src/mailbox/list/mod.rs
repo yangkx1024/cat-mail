@@ -171,7 +171,6 @@ pub fn list_column() -> impl IntoElement {
                     ),
             )
             .estimated_item_size(px(48.0))
-            .scrollbar(motion::indicators_shown)
             .element_ref(&list)
             .test_id("list")
             .flex_1(),

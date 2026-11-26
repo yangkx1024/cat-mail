@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use nsh_base::{CollapsibleElement, collapsible};
-use nsh_core::element::{LayoutAnimation, LayoutCurve, LayoutTransition, Spring};
+use nsh_core::element::{LayoutAnimation, LayoutCurve, LayoutTransition};
 use nsh_core::prelude::*;
 
 use crate::icons::{Icon, icon};
@@ -24,12 +24,6 @@ const GLIDE: LayoutAnimation = LayoutAnimation {
     delete: None,
 };
 
-/// The spring folds open and close on: nsh-base's default for `Collapsible` (a 180 ms
-/// response, critically damped), given explicitly so that its length is known here.
-fn reveal_spring() -> Spring {
-    Spring::new(180.0)
-}
-
 /// Runs `act` each time `on` changes, not for its first value.
 fn on_toggle(on: impl Fn() -> bool + 'static, act: impl Fn() + 'static) {
     let was = stored(untracked(&on));
@@ -39,43 +33,6 @@ fn on_toggle(on: impl Fn() -> bool + 'static, act: impl Fn() + 'static) {
             untracked(&act);
         }
     });
-}
-
-/// Whether the platform's scroll indicators are hidden, and which hiding the timer that
-/// shows them again belongs to.
-#[derive(Clone, Copy, Default, PartialEq)]
-struct HiddenIndicators {
-    hidden: bool,
-    generation: u64,
-}
-
-/// Hides the platform's scroll indicators for `ms`, from the commit being made: a layout
-/// animation is about to move scroll views or change their content. ⚠️ nsh's macOS
-/// indicator isn't placed again as its view's frame animates, only as the view scrolls
-/// or its content's size changes, so it would jump to where it ends, or move on a curve
-/// of its own. Every scroll shows it, so it stays hidden while a scroll that comes with
-/// the change runs too. It shows again on the next scroll or hover. Nothing with reduced
-/// motion, which moves nothing. Until longbridge/nsh#3188 is fixed.
-fn hide_indicators(ms: f32) {
-    if reduce_motion() {
-        return;
-    }
-    let hidden = global::<HiddenIndicators>();
-    let generation = hidden.get_untracked().generation.wrapping_add(1);
-    hidden.set(HiddenIndicators {
-        hidden: true,
-        generation,
-    });
-    set_timeout(Duration::from_millis(ms as u64), move || {
-        if hidden.get_untracked().generation == generation {
-            hidden.update(|h| h.hidden = false);
-        }
-    });
-}
-
-/// Whether scroll views show their indicator now ([`hide_indicators`]). Tracked.
-pub fn indicators_shown() -> bool {
-    !global::<HiddenIndicators>().with(|h| h.hidden)
 }
 
 /// Whether rows read again glide ([`glide_rows`]): not while [`still_rows`] holds them.
@@ -113,8 +70,6 @@ pub fn glide_when(on: impl Fn() -> bool + 'static) {
         if reduce_motion() {
             return;
         }
-        // The list's and the sidebar's, beside what moves.
-        hide_indicators(GLIDE_OVER_MS);
         animate_layout(GLIDE);
         meter_frames("glide", GLIDE_OVER_MS);
     });
@@ -211,12 +166,8 @@ impl FrameStats {
 
 /// A section that folds away under what heads it: `Collapsible`'s reveal, the clipped
 /// height springing open and shut.
-pub fn fold(open: impl Fn() -> bool + Copy + 'static) -> CollapsibleElement {
-    on_toggle(open, || hide_indicators(reveal_spring().settle_ms()));
-    collapsible()
-        .open(open)
-        .reveal(true)
-        .reveal_spring(Some(reveal_spring()))
+pub fn fold(open: impl Fn() -> bool + 'static) -> CollapsibleElement {
+    collapsible().open(open).reveal(true)
 }
 
 /// A chevron that points right while `open` is false and turns down as it opens.
