@@ -124,8 +124,9 @@ VANISHED、FETCH）、`stop` 完成或过了 `max`，然后发 DONE、等 tagged
 - **flags 变了的邮件。** IDLE 和 `poll` 期间的 FETCH 记下序号，随后的 EXPUNGE 让它们跟着前移（被删的那封去掉）。
   序号下一个 EXPUNGE 就可能变，而之后的下一条命令就可能带来 EXPUNGE，所以 `Session::idle` 和 `Session::poll`
   在结束时立即用 `FETCH <序号> (UID)` 换成 UID：按序号的 FETCH 期间服务器不许发 EXPUNGE
-  （RFC 3501 §7.4.1），换出来的一定对。结果是 `Session::changed_flags`（最近一次 IDLE 或 `poll` 的报告，打开文件夹时
-  清空）。说不清是哪几封时为 `ChangedFlags::Unknown`：IDLE 或 `poll` 期间有无法解析的行、超过一千封（不再逐个记）、
+  （RFC 3501 §7.4.1），换出来的一定对。结果随 `Session::idle` 和 `Session::poll`
+  一起返回：报告了变化时是 `Some(ChangedFlags)`，没有变化时是 `None`，这次之后的报告从零记起。
+  说不清是哪几封时为 `ChangedFlags::Unknown`：IDLE 或 `poll` 期间有无法解析的行、超过一千封（不再逐个记）、
   有序号对不上的 VANISHED，或换 UID 的 FETCH 被拒绝。有 CONDSTORE 时不换、也是 `Unknown`：同步按 MODSEQ
   找出变化，用不上这些 UID，省一次往返。后台同步据此只拉这几封的 flags（见[后台同步](sync.md#后台同步与-idle)）。
 

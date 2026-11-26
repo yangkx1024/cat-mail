@@ -149,7 +149,7 @@ async fn changed_since_only_returns_changed_flags() {
     fake.state().inbox().set_flags(2, &["\\Flagged"]);
 
     let all = session
-        .fetch_flags(&[1..=2], None, Items::Standard)
+        .fetch_flags(&[1..=3], None, Items::Standard)
         .await
         .unwrap();
     assert_eq!(all.len(), 2);
@@ -209,7 +209,7 @@ async fn tolerates_duplicate_reordered_and_unsolicited_responses() {
         .unwrap();
     assert_eq!(only.iter().map(|m| m.state.uid).collect::<Vec<_>>(), [1]);
     let flags = session
-        .fetch_flags(&[1..=2], None, Items::Standard)
+        .fetch_flags(&[1..=3], None, Items::Standard)
         .await
         .unwrap();
     assert_eq!(flags.iter().map(|f| f.uid).collect::<Vec<_>>(), [1, 2]);
@@ -382,7 +382,7 @@ async fn malformed_requested_items_make_answers_incomplete() {
     session.examine("INBOX").await.unwrap();
 
     let err = session
-        .fetch_flags(&[1..=2], None, Items::Standard)
+        .fetch_flags(&[1..=3], None, Items::Standard)
         .await
         .unwrap_err();
     assert!(matches!(err, Error::Incomplete("UID FETCH")), "{err:?}");
@@ -512,7 +512,7 @@ async fn unparsable_lines_make_authoritative_answers_fail() {
     session.examine("INBOX").await.unwrap();
     check(
         session
-            .fetch_flags(&[1..=2], None, Items::Standard)
+            .fetch_flags(&[1..=3], None, Items::Standard)
             .await
             .unwrap_err(),
         "UID FETCH",
@@ -1055,7 +1055,7 @@ async fn idle_while(
     session: &mut Session,
     n: usize,
     change: impl FnOnce(&mut ServerState),
-) -> catmail_proto::imap::Result<bool> {
+) -> catmail_proto::imap::Result<Option<ChangedFlags>> {
     let (result, ()) = tokio::join!(session.idle(std::future::pending(), TIMEOUT), async {
         fake.wait_until(|st| st.received("IDLE") >= n).await;
         change(&mut fake.state());
@@ -1074,30 +1074,29 @@ async fn idle_reports_changes_until_stopped() {
     let arrive = |st: &mut ServerState| {
         st.inbox().append_simple("four");
     };
-    assert!(idle_while(&fake, &mut session, 1, arrive).await.unwrap());
-    assert_eq!(session.changed_flags(), &ChangedFlags::default());
+    let changed = idle_while(&fake, &mut session, 1, arrive).await.unwrap();
+    assert_eq!(changed, Some(ChangedFlags::default()));
     assert_eq!(session.uid_search_all().await.unwrap(), [1, 2, 3, 4]);
 
     // Another client's flag change, then an expunge.
     session.examine("INBOX").await.unwrap();
     let flag = |st: &mut ServerState| st.inbox().set_flags(2, &["\\Seen"]);
-    assert!(idle_while(&fake, &mut session, 2, flag).await.unwrap());
+    let changed = idle_while(&fake, &mut session, 2, flag).await.unwrap();
     // With CONDSTORE, MODSEQs tell which.
-    assert_eq!(session.changed_flags(), &ChangedFlags::Unknown);
+    assert_eq!(changed, Some(ChangedFlags::Unknown));
     session.examine("INBOX").await.unwrap();
-    assert_eq!(session.changed_flags(), &ChangedFlags::default());
     let expunge = |st: &mut ServerState| st.inbox().expunge(1);
-    assert!(idle_while(&fake, &mut session, 3, expunge).await.unwrap());
+    let changed = idle_while(&fake, &mut session, 3, expunge).await.unwrap();
+    assert_eq!(changed, Some(ChangedFlags::default()));
 
     // Nothing happens: `stop` or `max` ends it, and the connection goes on.
     session.examine("INBOX").await.unwrap();
     let stop = tokio::time::sleep(Duration::from_millis(50));
-    assert!(!session.idle(stop, TIMEOUT).await.unwrap());
-    assert!(
-        !session
-            .idle(std::future::pending(), Duration::from_millis(50))
-            .await
-            .unwrap()
+    assert_eq!(session.idle(stop, TIMEOUT).await.unwrap(), None);
+    let max = Duration::from_millis(50);
+    assert_eq!(
+        session.idle(std::future::pending(), max).await.unwrap(),
+        None
     );
     assert_eq!(session.uid_search_all().await.unwrap(), [2, 3, 4]);
     assert_eq!(fake.state().received("DONE"), 0, "DONE is not a command");
@@ -1117,20 +1116,21 @@ async fn idle_names_messages_with_changed_flags_by_uid() {
         st.inbox().expunge(1);
         st.inbox().set_flags(3, &["\\Seen"]);
     };
-    assert!(idle_while(&fake, &mut session, 1, change).await.unwrap());
-    assert_eq!(session.changed_flags(), &ChangedFlags::Uids(vec![3]));
+    let changed = idle_while(&fake, &mut session, 1, change).await.unwrap();
+    assert_eq!(changed, Some(ChangedFlags::Uids(vec![3])));
     // The answer to our own FETCH is no change.
+    session.examine("INBOX").await.unwrap();
     session
         .fetch_flags(&[1..=3], None, Items::Standard)
         .await
         .unwrap();
-    assert_eq!(session.changed_flags(), &ChangedFlags::Uids(vec![3]));
+    assert_eq!(session.poll().await.unwrap(), None);
 
     // A line it can't parse might have been anything.
     session.examine("INBOX").await.unwrap();
     fake.state().faults.garble_idle = true;
-    assert!(session.idle(std::future::pending(), TIMEOUT).await.unwrap());
-    assert_eq!(session.changed_flags(), &ChangedFlags::Unknown);
+    let changed = session.idle(std::future::pending(), TIMEOUT).await.unwrap();
+    assert_eq!(changed, Some(ChangedFlags::Unknown));
 }
 
 #[tokio::test]
@@ -1141,13 +1141,14 @@ async fn idle_returns_at_once_for_changes_reported_earlier() {
     fake.state().inbox().append_simple("four");
     // The server mentions the new message in passing, with the answer to the SEARCH.
     assert_eq!(session.uid_search_all().await.unwrap(), [1, 2, 3, 4]);
-    assert!(session.idle(std::future::pending(), TIMEOUT).await.unwrap());
+    let changed = session.idle(std::future::pending(), TIMEOUT).await.unwrap();
+    assert_eq!(changed, Some(ChangedFlags::default()));
     assert_eq!(fake.state().received("IDLE"), 0);
 
     // Opening the mailbox again starts afresh.
     session.examine("INBOX").await.unwrap();
     let stop = tokio::time::sleep(Duration::from_millis(50));
-    assert!(!session.idle(stop, TIMEOUT).await.unwrap());
+    assert_eq!(session.idle(stop, TIMEOUT).await.unwrap(), None);
 }
 
 #[tokio::test]
@@ -1193,8 +1194,7 @@ async fn poll_reports_changes_and_changed_flags() {
     assert!(matches!(session.poll().await, Err(Error::Protocol(_))));
 
     session.examine("INBOX").await.unwrap();
-    assert!(!session.poll().await.unwrap());
-    assert_eq!(session.changed_flags(), &ChangedFlags::default());
+    assert_eq!(session.poll().await.unwrap(), None);
 
     // Plain NOOP (used by the connection pool) skips the FETCH (UID) round-trip even
     // when flags changed on a server without CONDSTORE.
@@ -1206,8 +1206,7 @@ async fn poll_reports_changes_and_changed_flags() {
     // New mail.
     session.examine("INBOX").await.unwrap();
     fake.state().inbox().append_simple("four");
-    assert!(session.poll().await.unwrap());
-    assert_eq!(session.changed_flags(), &ChangedFlags::default());
+    assert_eq!(session.poll().await.unwrap(), Some(ChangedFlags::default()));
 
     // Expunge and flag change: resolved by UID.
     session.examine("INBOX").await.unwrap();
@@ -1216,8 +1215,8 @@ async fn poll_reports_changes_and_changed_flags() {
         st.inbox().expunge(1);
         st.inbox().set_flags(3, &["\\Seen"]);
     }
-    assert!(session.poll().await.unwrap());
-    assert_eq!(session.changed_flags(), &ChangedFlags::Uids(vec![3]));
+    let changed = session.poll().await.unwrap();
+    assert_eq!(changed, Some(ChangedFlags::Uids(vec![3])));
 
     // With CONDSTORE, MODSEQs tell which flags changed, so no extra FETCH is sent.
     let fake = FakeImap::start(three_messages()).await;
@@ -1225,8 +1224,7 @@ async fn poll_reports_changes_and_changed_flags() {
     session.examine("INBOX").await.unwrap();
     fake.state().inbox().set_flags(2, &["\\Seen"]);
     let start = fake.state().log.len();
-    assert!(session.poll().await.unwrap());
-    assert_eq!(session.changed_flags(), &ChangedFlags::Unknown);
+    assert_eq!(session.poll().await.unwrap(), Some(ChangedFlags::Unknown));
     assert_eq!(fake.commands_since(start), ["NOOP"]);
 }
 
