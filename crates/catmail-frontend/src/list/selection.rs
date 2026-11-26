@@ -7,7 +7,18 @@
 
 use catmail_core::MessageId;
 
-use super::{Row, RowId, Select};
+use super::{Row, RowId};
+
+/// What becomes of the selection once rows are read ([`Loaded`](super::Loaded)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Select {
+    Keep,
+    /// As if the user opened it: the next row after one the user moved, or the message a
+    /// notification was about.
+    Open(RowId),
+    /// The row selected is gone by itself: expunged, sent, a new UIDVALIDITY.
+    Clear,
+}
 
 /// Where the selection goes when the rows are replaced.
 #[derive(Debug, PartialEq, Eq)]

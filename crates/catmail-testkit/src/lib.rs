@@ -14,7 +14,6 @@
 
 mod http;
 mod imap;
-mod mime;
 mod smtp;
 mod tls;
 

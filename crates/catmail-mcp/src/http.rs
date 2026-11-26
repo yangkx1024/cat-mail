@@ -36,7 +36,7 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 use crate::limits::TokenLimits;
 use crate::tokens::{Tier, Tokens};
 use crate::tools::Mail;
-use crate::uploads::{self, PutRefused, Uploads};
+use crate::uploads::{self, BaseUrl, PutRefused, Uploads};
 
 /// The port `catmail serve` listens on unless told otherwise.
 pub const DEFAULT_PORT: u16 = 8642;
@@ -171,12 +171,6 @@ struct Routes {
     /// Where the server listens.
     addr: SocketAddr,
 }
-
-/// Where a request came to, as its client reached it: `<scheme>://<host>`, for the URLs
-/// a tool gives out (`prepare_upload`), which the agent's shell then reaches as its
-/// client did. Among the request's extensions, as its token is.
-#[derive(Clone)]
-pub(crate) struct BaseUrl(pub String);
 
 /// How [`accept`] stops: `stop` ends listening and lets connections finish, then
 /// `handlers` (rmcp's) is cancelled, within `drain`.

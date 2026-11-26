@@ -27,7 +27,7 @@ use nsh_core::element::{ElementRef, input};
 use nsh_core::geometry::Percentage;
 use nsh_core::prelude::*;
 
-use crate::buttons::Size;
+use crate::buttons::{Size, icon_button};
 use crate::chrome;
 use crate::clock;
 use crate::engine::client;
@@ -122,6 +122,17 @@ pub fn list_open() -> bool {
 /// Whether the right pane is in ([`PaneOpen`]).
 pub fn pane_open() -> bool {
     global::<PaneOpen>().get().0
+}
+
+/// The right pane's first button, which closes it: the selection goes.
+pub fn back_button() -> View {
+    icon_button(
+        || Icon::ArrowLeft,
+        || "Back".to_owned(),
+        || true,
+        Size::Bar,
+        || global::<Selected>().set(Selected(None)),
+    )
 }
 
 /// Shows `source` from the top, or nothing.

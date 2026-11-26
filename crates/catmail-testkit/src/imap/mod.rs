@@ -1,5 +1,6 @@
+mod mime;
 mod search;
-pub(crate) mod wire;
+mod wire;
 
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
@@ -16,7 +17,6 @@ use tokio::task::JoinHandle;
 use self::search::{SearchKey, search_key};
 use self::wire::{Read, Tok, literal, quote, read_command, tokenize};
 use crate::TestCert;
-use crate::mime;
 use crate::tls::{Stream, TlsMode, lock};
 
 #[derive(Debug, Clone)]

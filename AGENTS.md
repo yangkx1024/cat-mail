@@ -32,6 +32,18 @@ The flake has no macOS shell. On macOS run cargo directly (the same commands wit
 Before reporting work as done, `cargo fmt`, `clippy -D warnings` and the full test suite
 must pass. Say so explicitly if any of them could not be run.
 
+Module structure is checked by [`deslop-please`](https://github.com/deterministic-machines/deslop-please)
+(in the Nix dev shell; on macOS `cargo install deslop-please --version 0.1.4`, with the
+`rust-analyzer` component):
+`scripts/deslop.sh` runs it for macOS, Linux and Windows from any host (`--target`: code
+behind another OS's `cfg` isn't indexed otherwise), against `.deslop-please.allow`. The
+list holds the debt that was there when the check came in; a new finding fails CI. Fix it
+from the design, not by moving code until the finding goes: which layer each module
+belongs to, why other code needs a type's fields or a module's functions, and what
+narrower interface could hide them. Don't add new findings to the list. When a fix
+removes entries, write it again with `scripts/deslop.sh --update` (every OS's findings,
+merged), not `deslop-please --update-allow`, which would keep only the host's.
+
 CI (`.github/workflows/ci.yml`) runs clippy on Linux, macOS and Windows; pull requests
 run the tests on Linux and macOS, and `main` runs them on all three. A Windows failure
 can therefore first show up after merging: when a change touches paths, files or

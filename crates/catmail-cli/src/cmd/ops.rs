@@ -13,7 +13,7 @@ use clap::{ArgGroup, Args, Subcommand};
 use crate::cmd::{account_folders, find_folder};
 use crate::exit::{Exit, Outcome};
 use crate::json::{self, JsonPendingOp, JsonReplay};
-use crate::output::{outln, print_ops};
+use crate::output::{errln, outln, print_ops, printable};
 
 #[derive(Args)]
 #[command(group(ArgGroup::new("change").required(true).multiple(true)))]
@@ -305,6 +305,28 @@ pub(crate) fn refused_drafts(count: u32) -> String {
         "the server refused to store {count} draft(s) in its Drafts folder; \
          `catmail draft show` says why"
     )
+}
+
+/// Saves the account's changed drafts to its Drafts folder, deleting what they replace
+/// there (and making its other queued changes), warning if that can't be done: the
+/// drafts are saved locally all the same.
+pub(crate) async fn save_to_server(client: &MailClient, account: AccountId) {
+    let error = match client.replay_pending(account).await {
+        Ok(report) => {
+            if report.drafts_failed > 0 {
+                errln!("warning: {}", refused_drafts(report.drafts_failed));
+            }
+            report.error.map(|e| e.to_string())
+        }
+        Err(e) => Some(e.to_string()),
+    };
+    if let Some(e) = error {
+        errln!(
+            "warning: the draft is saved here, but not in the server's Drafts folder yet \
+             ({}); {NEXT_FLUSH} puts it there",
+            printable(&e)
+        );
+    }
 }
 
 #[cfg(test)]

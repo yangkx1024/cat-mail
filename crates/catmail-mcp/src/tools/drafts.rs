@@ -18,9 +18,8 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::{Failed, Mail, not_found};
-use crate::http::BaseUrl;
 use crate::output::{DraftOut, UploadOut};
-use crate::uploads::{self, MAX_FILE_BYTES, Missing, TooMany};
+use crate::uploads::{self, BaseUrl, MAX_FILE_BYTES, Missing, TooMany};
 
 /// A file to attach: its content in base64, or put to an upload's URL. Base64 passes
 /// through the model, which has to write it out, so it suits only a small file.

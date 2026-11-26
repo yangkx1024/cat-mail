@@ -3,7 +3,7 @@
 //! WebKit has a network of its own, and nsh only checks top-level navigations, not a
 //! page's subresources. So the page shuts the network out itself: a
 //! Content-Security-Policy that allows nothing but inline styles and images that are
-//! `data:` URLs or the reader's own ([`IMAGE_SCHEME`](super::IMAGE_SCHEME)). The
+//! `data:` URLs or the reader's own ([`IMAGE_SCHEME`]). The
 //! message's inline parts and remote images are pointed at the reader's URLs, which the
 //! reader serves ([`BodyPages`](super::BodyPages)): a remote image only once it is
 //! cached or the user asked for it, so the page asks for it, but the network never sees
@@ -13,7 +13,6 @@
 
 use catmail_core::html::{DarkPalette, Served, escape, serve_images};
 
-use super::pages::image_base;
 use super::sideways::Sideways;
 
 /// Nothing may load except the message's `data:` images, those the reader serves, and
@@ -21,6 +20,16 @@ use super::sideways::Sideways;
 const CSP: &str = "default-src 'none'; img-src data: catmail-image:; \
                    style-src 'unsafe-inline'; font-src data:; form-action 'none'; \
                    base-uri 'none'";
+
+/// The scheme of the URLs the page's images have: `catmail-image:<page>/<path>`, the
+/// number of the page that refers to them, then
+/// [`ServedImage::path`](catmail_core::html::ServedImage::path). The path stays
+/// opaque (no `//`), as `serve_images` needs.
+pub const IMAGE_SCHEME: &str = "catmail-image";
+
+fn image_base(number: u64) -> String {
+    format!("{IMAGE_SCHEME}:{number}/")
+}
 
 /// Ours, under the message's own styles: the page has no margins of its own (the
 /// reader pads it). Nor has the body a sideways scroller ([`SIZE`]): here for the

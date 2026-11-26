@@ -14,10 +14,10 @@ mod pages;
 mod sideways;
 
 pub use page::{
-    Appearance, BRIDGE, Colors, DarkAppearance, FromPage, MIN_HEIGHT, WATCH_IMAGES,
+    Appearance, BRIDGE, Colors, DarkAppearance, FromPage, IMAGE_SCHEME, MIN_HEIGHT, WATCH_IMAGES,
     scroll_sideways, tall_enough,
 };
-pub use pages::{BodyPages, IMAGE_SCHEME, RemoteImages};
+pub use pages::{BodyPages, RemoteImages};
 pub use sideways::Sideways;
 
 use std::collections::HashMap;

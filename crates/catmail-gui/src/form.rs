@@ -1,6 +1,6 @@
 //! What the forms and dialogs share: the dialog's look, its buttons, a labelled field, a
-//! form's submission (`catmail_frontend::login::Submission`), and the one-field dialog that
-//! asks for a name (a folder's, or the one an address sends as).
+//! fact by its name, a form's submission (`catmail_frontend::login::Submission`), and the
+//! one-field dialog that asks for a name (a folder's, or the one an address sends as).
 
 use std::rc::Rc;
 
@@ -209,6 +209,29 @@ pub fn field(label: &'static str, help: Option<&'static str>, input: Input) -> V
                 .text_color(move || theme().muted_foreground)
                 .into_element()
         }))
+}
+
+/// A fact shown by its name, the name in a column of its own: "To", the addresses (of a
+/// draft, an outbox entry, a forwarded message).
+pub fn fact(name: &'static str, value: String) -> View {
+    view()
+        .flex_row()
+        .items_start()
+        .gap(px(12.0))
+        .child(
+            text(name)
+                .w(px(64.0))
+                .flex_shrink_0()
+                .text_sm()
+                .text_color(move || theme().muted_foreground),
+        )
+        .child(
+            text(value)
+                .flex_1()
+                .text_sm()
+                .selectable_text()
+                .text_color(move || theme().foreground),
+        )
 }
 
 pub fn error(submission: Signal<Submission>) -> impl IntoElement {
