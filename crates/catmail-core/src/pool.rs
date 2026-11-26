@@ -19,7 +19,8 @@ use tokio::task::AbortHandle;
 
 use crate::Result;
 use crate::connection::connect;
-use crate::engine::{Closing, Engine, lock};
+use crate::engine::Engine;
+use crate::task::{Closing, lock};
 
 /// Enough for a message and one of its attachments at once.
 const PER_ACCOUNT: usize = 2;

@@ -14,10 +14,12 @@ use tokio::runtime::Handle;
 use tokio::sync::broadcast;
 
 use super::{EVENT_CAPACITY, MailClient, Shared};
-use crate::engine::{DEFAULT_DRAFT_UPLOAD_DELAY, Engine, EngineTuning, now};
+use crate::engine::{DEFAULT_DRAFT_UPLOAD_DELAY, Engine};
 use crate::runtime::Runtime;
 use crate::secrets::{KeyringSecrets, SecretStore};
-use crate::watch::{self, SyncSchedule};
+use crate::settings::{EngineTuning, SyncSchedule};
+use crate::task::now;
+use crate::watch;
 use crate::{BodyPrefetch, Config, DataDirLock, Result, gc, prefetch, rebuild, send, sleep};
 
 pub struct MailClientBuilder {

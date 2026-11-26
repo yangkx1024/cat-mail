@@ -15,10 +15,11 @@ use catmail_types::{
 use secrecy::SecretString;
 use tokio::sync::broadcast;
 
-use crate::engine::{Closing, Engine, lock};
+use crate::engine::Engine;
 use crate::html::RemoteImage;
 use crate::images::RemoteImageStream;
 use crate::runtime::Runtime;
+use crate::task::{Closing, lock};
 use crate::{
     Config, DraftRevision, EditMark, Error, Result, SendPreview, Verify, accounts, body, drafts,
     folders, gc, images, ops, search, send, sync,

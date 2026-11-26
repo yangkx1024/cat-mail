@@ -9,7 +9,8 @@ use std::time::Duration;
 use catmail_types::GcReport;
 
 use crate::Result;
-use crate::engine::{Closing, Engine, blocking};
+use crate::engine::Engine;
+use crate::task::{Closing, blocking};
 
 /// How long an unreferenced blob survives. Far longer than the gap between storing a
 /// blob and committing the row that refers to it, which is what GC must not cut into.

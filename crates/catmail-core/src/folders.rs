@@ -17,8 +17,9 @@ use catmail_types::{
 };
 
 use crate::draft_sync::Uploads;
-use crate::engine::{Engine, lock};
+use crate::engine::Engine;
 use crate::pool::with_session_redone;
+use crate::task::lock;
 use crate::{Error, Result, ops, sync};
 
 /// Creates a folder named `name` under `parent`, which must allow one

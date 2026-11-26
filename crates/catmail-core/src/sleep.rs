@@ -13,7 +13,8 @@
 use std::sync::Weak;
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::engine::{Closing, Engine};
+use crate::engine::Engine;
+use crate::task::Closing;
 
 /// How often the clocks are compared: the longest it takes to notice a wake.
 pub(crate) const CHECK_EVERY: Duration = Duration::from_secs(30);
