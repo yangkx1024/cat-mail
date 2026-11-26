@@ -13,6 +13,7 @@ mod body;
 mod client;
 mod config;
 mod connection;
+mod content;
 pub mod display;
 mod downloading;
 mod draft_sync;

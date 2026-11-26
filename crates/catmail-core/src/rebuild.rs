@@ -20,7 +20,7 @@ use catmail_store::{Messages, NewBody, StaleBody};
 use catmail_types::{AccountId, Event, FolderId, MessageId};
 
 use crate::Result;
-use crate::body::{new_body, stored};
+use crate::content::{new_body, stored};
 use crate::engine::Engine;
 use crate::task::{Closing, blocking};
 
@@ -65,7 +65,7 @@ fn make(engine: &Engine, id: MessageId) -> Result<Option<Rebuilt>> {
     };
     let raw = match &stale.raw {
         Some(hash) => {
-            let raw = stored(engine, hash)?;
+            let raw = stored(&engine.blobs, hash)?;
             if raw.is_none() {
                 tracing::warn!(%hash, %id, "raw message is missing; sanitizing the HTML again");
             }
@@ -75,7 +75,7 @@ fn make(engine: &Engine, id: MessageId) -> Result<Option<Rebuilt>> {
     };
     let made = match raw {
         // Not put in the blob store again: the row keeps referring to it.
-        Some(raw) => Made::Whole(new_body(engine, mime::parse_message(&raw), None)?),
+        Some(raw) => Made::Whole(new_body(&engine.blobs, mime::parse_message(&raw), None)?),
         None => match stale.html.as_deref().map(mime::sanitized_html) {
             Some((html, images)) => Made::Html(Some(html), images),
             None => Made::Html(None, HashSet::new()),
