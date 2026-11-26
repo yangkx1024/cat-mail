@@ -96,7 +96,7 @@
   里隐藏时名为 Trash 的用户标签会顶替它。标签邮箱不 EXAMINE、不同步（`Folders::location_ids` 只列位置）；
   打开标签就是本地查询 `message_labels`。
 - **模式变化**（`Accounts::set_mode` 报告变了）时在对账的同一个事务里结束每个位置的 UIDVALIDITY 代
-  （`Folders::end_generations`）：一行代表的东西变了（每个位置一行，或每个 `X-GM-MSGID` 一行），已删除、
+  （`Db::end_generations`）：一行代表的东西变了（每个位置一行，或每个 `X-GM-MSGID` 一行），已删除、
   垃圾邮件在两种模式下都是位置，也要重拉，好带上 `X-GM-MSGID`。待回放的操作成为 `conflict`。新账户第一次
   同步时也是"变化"（从空到有），那时还什么都没有。
 - **三个位置作为一个单元同步**：另一个客户端把邮件移到已删除时，它在"所有邮件"里消失、在已删除里以新

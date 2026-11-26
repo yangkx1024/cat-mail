@@ -1,9 +1,8 @@
-use catmail_types::{Account, AccountId, AccountMode, NewAccount, NewIdentity};
+use catmail_types::{Account, AccountId, AccountMode, NewAccount};
 use rusqlite::{Connection, OptionalExtension, Row, named_params};
 
 use crate::columns::{parse_opt_text, server, size_limit, size_limit_column};
 use crate::error::is_unique_violation;
-use crate::identities::Identities;
 use crate::{Error, Result};
 
 const COLUMNS: &str = "id, email, username,
@@ -20,9 +19,8 @@ impl<'c> Accounts<'c> {
     }
 
     /// `secret_key` names the keyring entry that already holds the account's password.
-    /// Also makes its first identity, the default: its address through `new.smtp`,
-    /// logging in as the account.
-    pub fn insert(&self, new: &NewAccount, secret_key: &str) -> Result<Account> {
+    /// Without an identity: see `Db::insert_account`.
+    pub(crate) fn insert(&self, new: &NewAccount, secret_key: &str) -> Result<Account> {
         let conn = self.conn;
         let sql = format!(
             "INSERT INTO accounts (email, username,
@@ -51,13 +49,6 @@ impl<'c> Accounts<'c> {
                     Error::from(e)
                 }
             })?;
-        let identity = NewIdentity {
-            email: new.email.clone(),
-            display_name: new.display_name.clone(),
-            username: new.username.clone(),
-            smtp: new.smtp.clone(),
-        };
-        Identities::new(conn).insert_default(account.id, &identity)?;
         Ok(account)
     }
 
@@ -196,7 +187,7 @@ mod tests {
     use rusqlite::types::Type;
 
     use super::*;
-    use crate::test_util;
+    use crate::{Db, test_util};
 
     fn new_account(email: &str) -> NewAccount {
         NewAccount {
@@ -261,11 +252,10 @@ mod tests {
     fn insert_makes_the_default_identity() {
         let store = test_util::store();
         let conn = store.conn();
+        let db = Db { conn: &conn };
         let new = new_account("a@example.com");
-        let a = Accounts::new(&conn)
-            .insert(&new, &key("a@example.com"))
-            .unwrap();
-        let identities = Identities::new(&conn).list(a.id).unwrap();
+        let a = db.insert_account(&new, &key("a@example.com")).unwrap();
+        let identities = db.identities().list(a.id).unwrap();
         assert_eq!(identities.len(), 1);
         let own = &identities[0];
         assert!(own.is_default);
@@ -275,7 +265,7 @@ mod tests {
         );
         assert_eq!(own.username, new.username);
         assert_eq!(
-            Identities::new(&conn)
+            db.identities()
                 .sending(a.id, own.id)
                 .unwrap()
                 .map(|s| s.login_key)
@@ -283,7 +273,7 @@ mod tests {
             Some("key:a@example.com"),
             "the account's password"
         );
-        assert!(Identities::new(&conn).secret_keys(a.id).unwrap().is_empty());
+        assert!(db.identities().secret_keys(a.id).unwrap().is_empty());
     }
 
     #[test]

@@ -317,6 +317,6 @@ async fn settle(
     };
     let upload = upload.clone();
     engine
-        .write(move |db| db.drafts().uploaded(&upload, uidvalidity, &uids, now()))
+        .write(move |db| db.settle_draft_upload(&upload, uidvalidity, &uids, now()))
         .await
 }

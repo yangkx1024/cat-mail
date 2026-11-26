@@ -1,8 +1,7 @@
-use catmail_types::{AccountId, DraftId, Identity, IdentityId, NewIdentity};
+use catmail_types::{AccountId, Identity, IdentityId, NewIdentity};
 use rusqlite::{Connection, OptionalExtension, Row, named_params};
 
 use crate::columns::{server, size_limit, size_limit_column};
-use crate::drafts::{Drafts, REPLY};
 use crate::error::is_unique_violation;
 use crate::{Error, Result};
 
@@ -23,15 +22,6 @@ pub struct SmtpAnnounced {
     pub max_size: Option<u64>,
     /// 8BITMIME (RFC 6152): it takes bodies that aren't 7-bit clean.
     pub eight_bit_mime: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeletedIdentity {
-    pub account: AccountId,
-    /// Its own keyring entry, if it had one.
-    pub secret_key: Option<String>,
-    /// Drafts written as it, now written as the account's default.
-    pub drafts: usize,
 }
 
 const COLUMNS: &str = "id, account_id, email, display_name, username,
@@ -134,18 +124,12 @@ impl<'c> Identities<'c> {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// The identities the draft may be sent as: every account's, or for a reply its own
-    /// account's only (see [`Drafts::update`]). By account, each one's default first;
-    /// none if there is no such draft.
-    pub fn of_draft(&self, draft: DraftId) -> Result<Vec<Identity>> {
-        let sql = format!(
-            "SELECT {COLUMNS} FROM identities i
-             WHERE EXISTS (SELECT 1 FROM drafts d
-                           WHERE d.id = ?1 AND (d.account_id = i.account_id OR NOT ({REPLY})))
-             ORDER BY i.account_id, i.is_default DESC, i.id"
-        );
+    /// Every account's, by account, each one's default first.
+    pub fn all(&self) -> Result<Vec<Identity>> {
+        let sql =
+            format!("SELECT {COLUMNS} FROM identities ORDER BY account_id, is_default DESC, id");
         let mut stmt = self.conn.prepare_cached(&sql)?;
-        let rows = stmt.query_map([draft.0], from_row)?;
+        let rows = stmt.query_map([], from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -245,28 +229,25 @@ impl<'c> Identities<'c> {
             .optional()?)
     }
 
-    /// Changes the name it sends as; `None` for the address alone. Drafts written as it
-    /// are uploaded again, for their copies on the server to be from the new name.
-    /// Returns its account and how many drafts there were, or `None` if there is no such
-    /// identity.
-    pub fn set_display_name(
+    /// Changes the name it sends as; `None` for the address alone. Returns its account
+    /// and whether the name changed, or `None` if there is no such identity.
+    pub(crate) fn set_display_name(
         &self,
         id: IdentityId,
         name: Option<&str>,
-    ) -> Result<Option<(AccountId, usize)>> {
+    ) -> Result<Option<(AccountId, bool)>> {
         let Some(identity) = self.get(id)? else {
             return Ok(None);
         };
         let account = identity.account_id;
         if identity.display_name.as_deref() == name {
-            return Ok(Some((account, 0)));
+            return Ok(Some((account, false)));
         }
         self.conn.execute(
             "UPDATE identities SET display_name = ?2 WHERE id = ?1",
             (id.0, name),
         )?;
-        let drafts = Drafts::new(self.conn).reupload_identity(id)?;
-        Ok(Some((account, drafts)))
+        Ok(Some((account, true)))
     }
 
     /// Keyring entries of the account's identities that have their own, which go with
@@ -280,10 +261,10 @@ impl<'c> Identities<'c> {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Deletes the identity; drafts written as it go to the account's default. Refused
-    /// for the default, and while the outbox has messages to send through it: they would
-    /// have no server. `None` if there was no such identity.
-    pub fn delete(&self, id: IdentityId, now: i64) -> Result<Option<DeletedIdentity>> {
+    /// The identity's account, and its default, which takes over from the identity as it
+    /// is deleted. Refused for the default, and while the outbox has messages to send
+    /// through it: they would have no server. `None` if there is no such identity.
+    pub(crate) fn successor(&self, id: IdentityId) -> Result<Option<(AccountId, IdentityId)>> {
         let Some(identity) = self.get(id)? else {
             return Ok(None);
         };
@@ -307,17 +288,17 @@ impl<'c> Identities<'c> {
         let default = self
             .default_of(account)?
             .ok_or_else(|| Error::Conflict(format!("account {account} has no default identity")))?;
-        let drafts = Drafts::new(self.conn).reassign_identity(id, default, now)?;
-        let secret_key = self.conn.query_row(
+        Ok(Some((account, default)))
+    }
+
+    /// Deletes the identity, once nothing is written as it (see
+    /// [`successor`](Self::successor)). Returns its keyring entry, if it has its own.
+    pub(crate) fn delete(&self, id: IdentityId) -> Result<Option<String>> {
+        Ok(self.conn.query_row(
             "DELETE FROM identities WHERE id = ?1 RETURNING secret_key",
             [id.0],
             |r| r.get(0),
-        )?;
-        Ok(Some(DeletedIdentity {
-            account,
-            secret_key,
-            drafts,
-        }))
+        )?)
     }
 
     /// The account's identity `id` or, with `None`, its default. Fails unless the
@@ -354,9 +335,10 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Identity> {
 
 #[cfg(test)]
 mod tests {
-    use catmail_types::{BlobHash, DraftContent, Security, ServerConfig};
+    use catmail_types::{BlobHash, DraftContent, DraftId, Security, ServerConfig};
 
     use super::*;
+    use crate::DeletedIdentity;
     use crate::outbox::NewOutboxEntry;
     use crate::test_util::{self, TestStore};
 
@@ -496,7 +478,7 @@ mod tests {
         let mine = add(&store, a, "news@example.com");
         let id = draft(&store, b, None);
         let senders: Vec<IdentityId> = store
-            .read(|db| db.identities().of_draft(id))
+            .read(|db| db.drafts().senders(id))
             .unwrap()
             .into_iter()
             .map(|i| i.id)
@@ -513,7 +495,7 @@ mod tests {
         );
         assert!(
             store
-                .read(|db| db.identities().of_draft(DraftId(99)))
+                .read(|db| db.drafts().senders(DraftId(99)))
                 .unwrap()
                 .is_empty()
         );
@@ -525,7 +507,7 @@ mod tests {
         let a = test_util::account(&store, "a@example.com");
         let own = default_of(&store, a);
         let news = add(&store, a, "news@example.com");
-        let refused = store.write(|db| db.identities().delete(own, 5));
+        let refused = store.write(|db| db.delete_identity(own, 5));
         assert!(matches!(refused, Err(Error::Conflict(_))), "{refused:?}");
 
         assert_eq!(
@@ -541,7 +523,7 @@ mod tests {
         // New drafts are from it, and the first one can go now.
         let id = draft(&store, a, None);
         assert_eq!(identity_of(&store, id), news.id);
-        let deleted = store.write(|db| db.identities().delete(own, 5)).unwrap();
+        let deleted = store.write(|db| db.delete_identity(own, 5)).unwrap();
         assert_eq!(
             deleted.map(|d| d.secret_key),
             Some(None),
@@ -597,11 +579,7 @@ mod tests {
         let snapshot = |id| store.read(|db| db.drafts().snapshot(id)).unwrap().unwrap();
         let revision = |id| snapshot(id).revision;
         let (before, other_before) = (revision(mine), revision(other));
-        let rename = |id, name| {
-            store
-                .write(|db| db.identities().set_display_name(id, name))
-                .unwrap()
-        };
+        let rename = |id, name| store.write(|db| db.set_identity_name(id, name)).unwrap();
         let name = |id| {
             store
                 .read(|db| db.identities().get(id))
@@ -692,11 +670,11 @@ mod tests {
         let entry = store.read(|db| db.outbox().get(outbox)).unwrap().unwrap();
         assert_eq!(entry.identity, identity.id, "the draft's");
 
-        let refused = store.write(|db| db.identities().delete(identity.id, 5));
+        let refused = store.write(|db| db.delete_identity(identity.id, 5));
         assert!(matches!(refused, Err(Error::Conflict(_))), "{refused:?}");
-        store.write(|db| db.outbox().cancel(outbox)).unwrap();
+        store.write(|db| db.cancel_outbox(outbox)).unwrap();
         let deleted = store
-            .write(|db| db.identities().delete(identity.id, 5))
+            .write(|db| db.delete_identity(identity.id, 5))
             .unwrap();
         assert_eq!(
             deleted,
@@ -727,7 +705,7 @@ mod tests {
         assert_eq!(again.identity, default_of(&store, a));
         assert_eq!(
             store
-                .write(|db| db.identities().delete(identity.id, 5))
+                .write(|db| db.delete_identity(identity.id, 5))
                 .unwrap(),
             None
         );

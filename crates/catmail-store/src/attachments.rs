@@ -3,7 +3,6 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::Result;
 use crate::columns::{parse_opt_text, to_json};
-use crate::messages::{MessageLocation, Messages};
 
 const COLUMNS: &str = "id, message_id, filename, mime_type, size, content_id, is_inline, blob_hash";
 
@@ -24,13 +23,12 @@ pub struct NewAttachment {
     pub blob: Option<BlobHash>,
 }
 
-/// What it takes to fetch an attachment that isn't stored yet.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AttachmentSource {
+/// Where an attachment is in its message.
+pub(crate) struct Part {
+    pub message: MessageId,
     pub section: String,
     pub transfer_encoding: Option<String>,
     pub blob: Option<BlobHash>,
-    pub message: MessageLocation,
 }
 
 pub struct Attachments<'c> {
@@ -50,34 +48,23 @@ impl<'c> Attachments<'c> {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    pub fn source(&self, id: AttachmentId) -> Result<Option<AttachmentSource>> {
-        let found = self
+    pub(crate) fn part(&self, id: AttachmentId) -> Result<Option<Part>> {
+        Ok(self
             .conn
             .query_row(
                 "SELECT message_id, part_section, transfer_encoding, blob_hash
                  FROM attachments WHERE id = ?1",
                 [id.0],
                 |row| {
-                    Ok((
-                        MessageId(row.get("message_id")?),
-                        row.get("part_section")?,
-                        row.get("transfer_encoding")?,
-                        parse_opt_text(row, "blob_hash")?,
-                    ))
+                    Ok(Part {
+                        message: MessageId(row.get("message_id")?),
+                        section: row.get("part_section")?,
+                        transfer_encoding: row.get("transfer_encoding")?,
+                        blob: parse_opt_text(row, "blob_hash")?,
+                    })
                 },
             )
-            .optional()?;
-        let Some((message_id, section, transfer_encoding, blob)) = found else {
-            return Ok(None);
-        };
-        Ok(Messages::new(self.conn)
-            .location(message_id)?
-            .map(|message| AttachmentSource {
-                section,
-                transfer_encoding,
-                blob,
-                message,
-            }))
+            .optional()?)
     }
 
     /// Records downloaded content and its exact size. Returns false if the attachment

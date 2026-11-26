@@ -8,8 +8,10 @@ use catmail_types::{
 };
 use rusqlite::{OptionalExtension, params};
 
-use super::{MOVING, PendingOps, Touched};
+use super::PendingOps;
 use crate::folders::Folders;
+use crate::messages::MOVING;
+use crate::touched::Touched;
 use crate::{Error, Result};
 
 /// The flags a user may change. `\Deleted` goes with deletion and `\Draft` with drafts.
@@ -740,7 +742,7 @@ mod tests {
         assert_eq!(trashed.ops, moved);
 
         // INBOX rebuilt on the server: the move's row goes, its op stays, as a conflict.
-        f.write(|db| db.folders().reset_uidvalidity(f.inbox, 2));
+        f.write(|db| db.reset_uidvalidity(f.inbox, 2));
         assert_eq!(f.row(m2), None);
         let conflict = f
             .ops()
@@ -787,10 +789,9 @@ mod tests {
         // Another account, with no Trash folder.
         let other = test_util::account(&f.store, "b@example.com");
         let other_inbox = f.write(|db| {
-            db.folders()
-                .reconcile(other, &[folder("INBOX", Some(FolderRole::Inbox))])?;
+            db.reconcile_folders(other, &[folder("INBOX", Some(FolderRole::Inbox))])?;
             let inbox = db.folders().list(other)?[0].id;
-            db.folders().reset_uidvalidity(inbox, 7)?;
+            db.reset_uidvalidity(inbox, 7)?;
             let message = NewMessage {
                 state: FlagState {
                     uid: 1,
@@ -853,8 +854,7 @@ mod tests {
         let f = setup();
         let other = test_util::account(&f.store, "b@example.com");
         let theirs = f.write(|db| {
-            db.folders()
-                .reconcile(other, &[folder("INBOX", Some(FolderRole::Inbox))])?;
+            db.reconcile_folders(other, &[folder("INBOX", Some(FolderRole::Inbox))])?;
             Ok(db.folders().list(other)?[0].id)
         });
         let m1 = f.message(f.inbox, 1);

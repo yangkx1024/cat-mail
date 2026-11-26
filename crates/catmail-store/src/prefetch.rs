@@ -185,12 +185,12 @@ mod tests {
         ];
         let folders = store
             .write(|db| {
-                db.folders().reconcile(account, &remote)?;
+                db.reconcile_folders(account, &remote)?;
                 let listed = db.folders().list(account)?;
                 let mut ids = Vec::new();
                 for (i, name) in ["INBOX", "Archive", "Trash", "Junk"].iter().enumerate() {
                     let id = listed.iter().find(|f| f.name == *name).unwrap().id;
-                    db.folders().reset_uidvalidity(id, 1)?;
+                    db.reset_uidvalidity(id, 1)?;
                     let messages: Vec<_> = (1..=2)
                         .map(|uid| NewMessage {
                             state: FlagState {

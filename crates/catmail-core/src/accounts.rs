@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use catmail_proto::Credentials;
 use catmail_proto::imap::Session;
-use catmail_store::{Identities, SmtpAnnounced};
+use catmail_store::{Db, SmtpAnnounced};
 use catmail_types::{
     Account, AccountId, Event, Identity, IdentityId, NewAccount, NewIdentity, ServerConfig,
 };
@@ -82,7 +82,7 @@ pub(crate) async fn add_account(
         move || {
             storage.insert_with_secret("account", &new.email, &password, |key| {
                 storage.write(|db| {
-                    let account = db.accounts().insert(&new, key)?;
+                    let account = db.insert_account(&new, key)?;
                     announced.record(db, account.id)?;
                     if let Some(own) = db.identities().default_of(account.id)?
                         && let Some(smtp) = smtp
@@ -161,11 +161,11 @@ pub(crate) async fn add_identity(
 pub(crate) fn update_identity(
     engine: &Engine,
     id: IdentityId,
-    change: impl FnOnce(&Identities<'_>) -> catmail_store::Result<Option<(AccountId, usize)>>,
+    change: impl FnOnce(&Db<'_>) -> catmail_store::Result<Option<(AccountId, usize)>>,
 ) -> Result<()> {
     let (account, drafts) = engine
         .storage()
-        .write(|db| change(&db.identities()))?
+        .write(change)?
         .ok_or(Error::IdentityNotFound(id))?;
     engine.emit(Event::AccountChanged { account });
     if drafts > 0 {
@@ -178,7 +178,7 @@ pub(crate) fn update_identity(
 pub(crate) fn remove_identity(engine: &Engine, id: IdentityId) -> Result<()> {
     let storage = engine.storage();
     let deleted = storage
-        .write(|db| db.identities().delete(id, now()))?
+        .write(|db| db.delete_identity(id, now()))?
         .ok_or(Error::IdentityNotFound(id))?;
     if let Some(key) = &deleted.secret_key {
         storage.forget_secret(key);

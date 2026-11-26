@@ -5,10 +5,11 @@ use std::collections::HashMap;
 use catmail_types::{AccountId, Flags, FolderId, GmailLabel, MessageId, OpKind, PendingOpId};
 use rusqlite::{OptionalExtension, Params, Row, params};
 
-use super::{PendingOps, Touched, kind};
+use super::{PendingOps, kind};
 use crate::Result;
 use crate::columns::parse_opt_text;
 use crate::messages::shown;
+use crate::touched::Touched;
 
 /// Whether op `o` waits for a move of its message (`after_op`) that is still pending.
 const WAITING: &str =
@@ -967,7 +968,7 @@ mod tests {
                 .set_flags(&[m1], Flags::FLAGGED, Flags::empty(), 0)?;
             db.ops().move_messages(&[m2], None, f.archive, 0)
         });
-        let touched = f.write(|db| db.folders().reset_uidvalidity(f.inbox, 8));
+        let touched = f.write(|db| db.reset_uidvalidity(f.inbox, 8));
         assert_eq!(touched.refused, BTreeSet::from([f.account]));
         // The moved row named an old UID too.
         assert_eq!(f.row(m2), None);
@@ -982,7 +983,7 @@ mod tests {
         let m2 = f.message(f.inbox, 2);
         f.write(|db| db.ops().move_messages(&[m2], None, f.archive, 0));
         // The target is rebuilt: the move names INBOX's UID, which still holds.
-        let touched = f.write(|db| db.folders().reset_uidvalidity(f.archive, 8));
+        let touched = f.write(|db| db.reset_uidvalidity(f.archive, 8));
         assert!(touched.refused.is_empty());
         assert_eq!(f.row(m2), Some((f.archive, None, Flags::empty())));
         assert_eq!(f.counts(f.archive), (1, 1));
@@ -1002,7 +1003,7 @@ mod tests {
         });
         // Archive is gone from the server: m2 goes back to INBOX, where the server has it.
         f.write(|db| {
-            db.folders().reconcile(
+            db.reconcile_folders(
                 f.account,
                 &[
                     folder("INBOX", Some(FolderRole::Inbox)),
@@ -1012,10 +1013,7 @@ mod tests {
         });
         assert_eq!(f.row(m2), Some((f.inbox, Some(2), Flags::empty())));
         // INBOX is gone: so is m3, moved out of it.
-        f.write(|db| {
-            db.folders()
-                .reconcile(f.account, &[folder("Trash", Some(FolderRole::Trash))])
-        });
+        f.write(|db| db.reconcile_folders(f.account, &[folder("Trash", Some(FolderRole::Trash))]));
         assert_eq!(f.row(m3), None);
         assert!(f.ops().is_empty());
         assert_eq!(f.counts(f.trash), (0, 0));
