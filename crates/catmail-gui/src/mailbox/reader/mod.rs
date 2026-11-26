@@ -18,14 +18,14 @@ use std::time::{Duration, Instant};
 use catmail_core::html::Image;
 use catmail_core::{Attachment, MessageId, safe_filename};
 use catmail_frontend::html::{RemoteImages, browser_page};
-use catmail_frontend::reader::{self, Header};
+use catmail_frontend::mailbox::reader::{self, Header};
 use nsh_core::element::{ElementRef, Spawned, open_path, pick_save_path};
 use nsh_core::file_dialog::SaveDialog;
 use nsh_core::prelude::*;
 
 use crate::engine::client;
 use crate::mailbox::listing;
-use crate::tasks::{in_view, off_thread};
+use crate::shell::tasks::{in_view, off_thread};
 use crate::toast::{Level, notify, report};
 use crate::web;
 

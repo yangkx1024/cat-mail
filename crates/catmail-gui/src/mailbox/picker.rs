@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 
 use catmail_core::{FolderId, MessageId, MessageSummary};
-use catmail_frontend::commands;
+use catmail_frontend::mailbox::commands;
 
 use nsh_base::theme;
 use nsh_core::ModalAnimation;
@@ -154,7 +154,7 @@ fn picker_dialog(picker: Picker) -> impl IntoElement {
                         if labels.is_some() {
                             Icon::Tag
                         } else {
-                            Icon::Folder(catmail_frontend::folders::FolderIcon::Folder)
+                            Icon::Folder(catmail_frontend::mailbox::folders::FolderIcon::Folder)
                         }
                     },
                     16.0,

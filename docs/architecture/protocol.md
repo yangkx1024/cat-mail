@@ -133,7 +133,7 @@ VANISHED、FETCH）、`stop` 完成或过了 `max`，然后发 DONE、等 tagged
 
 按需操作（下载正文、附件、APPEND、`replay_pending`、打开文件夹时的同步）用每账户最多 2 条空闲连接的
 小连接池；同步全部文件夹和后台同步用自己的连接，打开邮件不必等同步结束。代码在
-`catmail-core/src/pool.rs` 是池子本身（每账户一个 `Pool`，挂在引擎的账户状态上）和 keepalive，不依赖引擎；
+`catmail-core/src/engine/pool.rs` 是池子本身（每账户一个 `Pool`，挂在引擎的账户状态上）和 keepalive，不依赖引擎；
 复用一条连接的规则（`with_session`、`on_session`，后台同步自己的连接也走 `on_session`）在 `connection.rs`。"睡前建立的不用"
 （`usable`）只写一处，`on_session` 和两种 keepalive 共用；"只有致命错误才不放回池里"（`survives`）也只写一处，
 `with_session` 和 keepalive 的 NOOP（`ping`，池里的连接和后台同步等待中的连接共用）共用。后台同步不放回池里，
@@ -192,7 +192,7 @@ IMAP 登录之后（PREAUTH 也一样）、打开任何邮箱之前，服务器�
 清零。写给 socket 的副本发出后也清零；GUI 输入框里的文本不归我们管，这只是尽力而为：目标是不让密码散落在
 日志和随手的格式化里，而不是对抗能读进程内存的人。
 
-同步和发信在 `catmail-core/src/connection.rs` 里从 keyring 读出账户的密码，组成 `Credentials`。
+同步和发信在 `catmail-core/src/engine/connection.rs` 里从 keyring 读出账户的密码，组成 `Credentials`。
 
 ## TLS
 

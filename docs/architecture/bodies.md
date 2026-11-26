@@ -4,7 +4,7 @@
 
 正文在打开时下载（`MailClient::download_message`）；开着后台预取的前端（GUI、`catmail watch`）另在后台
 把没下载的正文取下来，让没打开过的邮件也能按正文搜到（见[后台预取](#后台预取)）。所有按需操作经过同一个入口
-（`catmail-core/src/body.rs` 的 `on_server`）：从连接池取连接、EXAMINE 比对 UIDVALIDITY（连接已经
+（`catmail-core/src/body/mod.rs` 的 `on_server`）：从连接池取连接、EXAMINE 比对 UIDVALIDITY（连接已经
 只读打开着同一个文件夹、UIDVALIDITY 一致、邮件在打开之前就已到达时省掉，见[连接池](protocol.md#连接池)）、在账户的取消信号上
 select。打开文件夹、取信、判断邮件是否已不在服务器上这一段（`in_folder`）与连接无关，后台预取在自己的连接上
 用同一段。
@@ -57,7 +57,7 @@ BlobStore；已在本地的直接引用。一封有 20 张内嵌图片的 newsle
 ## 后台预取
 
 `MailClientBuilder::prefetch_bodies(Some(BodyPrefetch))` 时，引擎为每个账户起一个任务
-（`catmail-core/src/prefetch.rs`），与后台同步在同样的地方启动（引擎打开、添加账户、撤销删除）。括号里是
+（`catmail-core/src/body/prefetch.rs`），与后台同步在同样的地方启动（引擎打开、添加账户、撤销删除）。括号里是
 `BodyPrefetch` 的默认值。
 
 - **自己一条连接**，不用连接池：池里每账户只有 2 条，打开邮件不能排在预取后面。Gmail 每账户最多 15 条并发
@@ -126,11 +126,11 @@ BlobStore；已在本地的直接引用。一封有 20 张内嵌图片的 newsle
   不了，逐封试只会每封多一次 EXAMINE。记进内存里的跳过名单，下一次等待结束（多半是同步之后）清空。邮件已不在
   服务器上（`OutOfSync`）、本地行已没了的直接略过。
 - 读仍然只用 EXAMINE 和 `BODY.PEEK`，不会标为已读；不渲染 HTML，不加载远程图片，发件人得不到任何信号。
-- **日志**（`catmail_core::prefetch`）：状态的变化在 info / warn，默认就进日志文件：任务启动时的参数、每批的封数
+- **日志**（`catmail_core::body::prefetch`）：状态的变化在 info / warn，默认就进日志文件：任务启动时的参数、每批的封数
   / 失败数 / 字节数和当天已用 / 预算、预算用完、超限（服务器原话、那封邮件、当天已用、是否 Gmail）、重启后仍在
   暂停（到何时）、连续被拒而暂停、逐封的失败、账户级的失败（错误类型、退避）、全部取完。逐封的细节（大小、实际
   下载的字节、整封还是只取正文、EXAMINE 和 FETCH 各用多久）在 debug，要时用
-  `CATMAIL_LOG=catmail_core::prefetch=debug` 打开。
+  `CATMAIL_LOG=catmail_core::body::prefetch=debug` 打开。
 - **代价：正文存得更早。** 预取让大多数正文在打开之前很久就存下，之后改了解析或清洗规则，靠[重建](#按版本重建)
   跟上；只取了正文部分的大邮件没有原文，放开的规则对它们不生效。
 
@@ -312,7 +312,7 @@ base64 正文），交给 mail-parser 按同样方式解析。于是两条路径
 ## 按版本重建
 
 每份正文记着做出它的内容版本（`message_bodies.content_version`，即 proto 的 `mime::CONTENT_VERSION`），
-低于当前版本的重新做一遍（`catmail-core/src/rebuild.rs`）。版本管的是存下的整个 `Content`：解析（mail-parser、
+低于当前版本的重新做一遍（`catmail-core/src/body/rebuild.rs`）。版本管的是存下的整个 `Content`：解析（mail-parser、
 字符集转码、只有 HTML 时转出的文本、哪些部分内嵌）和 `catmail-html` 的清洗，都会改变它。
 重建和下载用同一套做法做出正文（`content.rs`：解析，原文和随信来的部分放进 BlobStore），重建不经过下载的代码。
 

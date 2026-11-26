@@ -20,7 +20,7 @@ GUI 关掉主窗口后继续同步、发信、提醒新邮件，并能从托盘�
   （StatusNotifierItem）和通知都走 D-Bus。⚠️ GTK 常驻时仍连着显示服务器（GPUI 版能断开），实测见下。
 
 守护进程真正的好处是 CLI 能与 GUI 同时使用，这留给"引擎 IPC"（见[与 CLI 的关系](#与-cli-的关系)）。
-常驻的部分集中在外壳（`catmail-gui/src/shell/`）和 `catmail_frontend::resident`，以后要拆成独立进程时整体搬出去。
+常驻的部分集中在外壳（`catmail-gui/src/shell/`）和 `catmail_frontend::system::resident`，以后要拆成独立进程时整体搬出去。
 
 ## 两个状态
 
@@ -53,7 +53,7 @@ GUI 关掉主窗口后继续同步、发信、提醒新邮件，并能从托盘�
 引擎一直运行到应用退出；视图用 `engine::opened` 等它打开。外壳（`shell/`）另外记着主窗口、写信窗口、托盘和通知
 对主窗口的请求（`Ask`），以及主窗口上次的位置。
 
-不依赖窗口的事件订阅在引擎打开时启动：新邮件通知（`new_mail.rs`，见[新邮件](#新邮件)）、托盘（`tray/`，见
+不依赖窗口的事件订阅在引擎打开时启动：新邮件通知（`system/new_mail/`，见[新邮件](#新邮件)）、托盘（`system/tray/`，见
 [托盘](#托盘)）。它们不存 `MailClient`：启动时订阅一次事件，之后每次用到都从 `engine::open` 取（引擎没打开或已在
 退出时是 `None`），退出后也就不再发出注定得到 `Error::Closed` 的调用。引擎关闭时事件流结束，它们的循环随之停下。
 
@@ -62,9 +62,9 @@ GUI 关掉主窗口后继续同步、发信、提醒新邮件，并能从托盘�
 （去某处、写信）记着，新的邮箱打开时接过去（`follow_asks`）；记着什么、交给谁是
 `catmail_frontend::mailbox::Asks` 的，外壳只持有它。
 
-最后一个窗口关闭时怎么做是一个纯函数（`catmail_frontend::resident::after_last_window`，退出原因 `QuitReason` 也在
+最后一个窗口关闭时怎么做是一个纯函数（`catmail_frontend::system::resident::after_last_window`，退出原因 `QuitReason` 也在
 那里）：正在退出、没开"保持运行"、引擎打开失败（没有东西可运行）时退出；否则常驻。常驻 2 秒后（视图线程放掉
-它们持有的东西之后）在另一个线程上调一次 glibc 的 `malloc_trim(0)`（`catmail_frontend::memory::release_freed`，只在
+它们持有的东西之后）在另一个线程上调一次 glibc 的 `malloc_trim(0)`（`catmail_frontend::system::memory::release_freed`，只在
 Linux glibc 上，其他平台什么也不做）：glibc 的堆只能从顶上缩，释放的内存夹在仍在用的块之间，留在进程里。
 `unsafe_code` 因此在 frontend 里是 `deny` 而不是 `forbid`，由 `memory` 模块单独放行（还有 macOS 的状态栏，见
 [托盘](#托盘)，以及 macOS 的登录项 `autostart/macos.rs`）。
@@ -94,7 +94,7 @@ data"。macOS 上 LaunchServices 把同一个 bundle 的再次打开交给已在
 `applicationShouldHandleReopen` 唤回主窗口；但 `cargo run`、命令行直接启动的不经过它，Linux 上 GTK 应用也是
 `NON_UNIQUE`（不经 D-Bus 判断唯一），所以自己做，三个平台一样：
 
-- **端点是数据目录里的 Unix socket `gui.sock`**（`catmail-frontend/src/instance.rs`），由持有数据目录锁的
+- **端点是数据目录里的 Unix socket `gui.sock`**（`catmail-frontend/src/system/instance.rs`），由持有数据目录锁的
   进程监听：目录只有本用户可访问，socket 本身也设成 0600。Windows 10 起也有 AF_UNIX，std 不支持，用 `uds_windows`（zbus 已经
   带进依赖树），三个平台一套代码；没有选 named pipe，那要自己设 DACL。
 - **路径太长时放进运行时目录。** socket 地址最多约 100 字节（`sun_path`：Linux、Windows 108，macOS 104），
@@ -132,7 +132,7 @@ data"。macOS 上 LaunchServices 把同一个 bundle 的再次打开交给已在
 ## 系统睡眠与唤醒
 
 `Engine::resume` 有两个来源：前端知道系统醒了时调 `MailClient::resume()`；引擎自己发现睡眠（见下）。nsh 0.6.0 的
-`wake_count()` 只记在 surface（视图）上，常驻时没有视图就听不到，所以 GUI 自己听（`catmail-gui` 的 `wake.rs`，引擎打开后开始，直到退出）：Linux 上是系统总线上 logind 的
+`wake_count()` 只记在 surface（视图）上，常驻时没有视图就听不到，所以 GUI 自己听（`catmail-gui` 的 `system/wake.rs`，引擎打开后开始，直到退出）：Linux 上是系统总线上 logind 的
 `PrepareForSleep(false)`（GIO 的 D-Bus，在 GTK 的主循环上；systemd 和 elogind 都有，Flatpak 里要
 `--system-talk-name=org.freedesktop.login1`），macOS 上是 `NSWorkspace` 通知中心的
 `NSWorkspaceDidWakeNotification`。两边都只是调 `resume`；听不到（没有系统总线、没有 logind）时还有引擎自己发现。
@@ -223,7 +223,7 @@ data"。macOS 上 LaunchServices 把同一个 bundle 的再次打开交给已在
 
 ### 系统通知
 
-GUI 的 `new_mail/` 在引擎打开时订阅事件，有窗口时、常驻时都在。攒、措辞、每条通知的 tag 和点击后的去处不依赖
+GUI 的 `system/new_mail/` 在引擎打开时订阅事件，有窗口时、常驻时都在。攒、措辞、每条通知的 tag 和点击后的去处不依赖
 UI 库，在 `catmail_frontend::new_mail`（`Arrivals`、`notifications`、`Target`）；攒、重读和点击后转过去两个平台共用
 （`new_mail/mod.rs`），发出通知、听点击各平台自己做（`linux.rs`、`macos.rs`）。⚠️ nsh 的通知要经过某个视图的根，
 而应用常驻时没有视图，所以两边都不用它：
@@ -273,9 +273,9 @@ delegate，在 `NSApplication` 运行之前设好（`new_mail::install`，`main.
 
 ## 托盘
 
-GUI 的 `tray/` 在引擎打开时启动，有窗口时、常驻时都在。`tray/mod.rs` 数未读、在后台把图标画成像素；
+GUI 的 `system/tray/` 在引擎打开时启动，有窗口时、常驻时都在。`tray/mod.rs` 数未读、在后台把图标画成像素；
 `linux.rs`、`macos.rs` 把画好的图标和未读数交给 frontend 里各平台的托盘项。不依赖 UI 库的部分在
-`catmail_frontend::tray`：菜单（`MENU`、`Command`）、提示文字、角标的文字和带角标的 SVG（`badged`）、按平台给出
+`catmail_frontend::system::tray`：菜单（`MENU`、`Command`）、提示文字、角标的文字和带角标的 SVG（`badged`）、按平台给出
 图标的样子和尺寸（`icon`，图标的 SVG 在 `crates/catmail-frontend/assets/app-icon/`）、什么时候数、什么时候画、
 画哪个（`TrayModel`）、Linux 的 StatusNotifierItem（`tray::linux`，ksni 本来就不依赖 UI 库）、macOS 的状态栏项
 （`tray::macos`，AppKit 本身）。
@@ -311,7 +311,7 @@ GUI 的 `tray/` 在引擎打开时启动，有窗口时、常驻时都在。`tra
   - 同一个数也作 Dock 图标的角标（`NSDockTile::badgeLabel`，Mail.app 的做法）。
   - 没有用 `tray-icon`：它在 macOS 上也是这些 AppKit 调用，外加 `muda` 的菜单和它自己的事件循环约定；直接写只有
     一百多行，图标、标题、角标都由我们决定。
-  - `define_class!`、位图的缓冲区要 `unsafe`，由 `catmail_frontend::tray` 对 `macos` 模块单独放行。
+  - `define_class!`、位图的缓冲区要 `unsafe`，由 `catmail_frontend::system::tray` 对 `macos` 模块单独放行。
 
 ## 退出
 
@@ -349,14 +349,14 @@ GUI 的 `tray/` 在引擎打开时启动，有窗口时、常驻时都在。`tra
 ## 开机启动
 
 启动时开不开窗口由外壳在工具包启动完时决定（`shell::launched`：GTK 的 `activate`，AppKit 的
-`applicationDidFinishLaunching:`），规则是纯函数 `catmail_frontend::resident::at_launch`：启动要求不开窗口
+`applicationDidFinishLaunching:`），规则是纯函数 `catmail_frontend::system::resident::at_launch`：启动要求不开窗口
 （`catmail-gui --background`，或者是登录时的启动），开着"关闭窗口后保持运行"，引擎也没打开失败，就不开窗口，
 直接常驻，同最后一个窗口关掉之后一样；否则照常开主窗口。关着"保持运行"时关窗就退出，从不开窗口的启动会什么也
 留不下，所以照常开窗口。引擎打开失败要有窗口说明原因：启动时已知就开窗口；失败时没有窗口（不开窗口的启动，或引擎打开期间
 窗口被关掉了）就开一个，关掉它应用就退出（`after_last_window`，记 `engine_failed`）。
 
 "开机时启动"（Settings › General 的 "Open at login"）在系统那里，不进 `settings.json`：用户也能在系统设置里改，
-所以每次打开设置时读系统的状态（`catmail_frontend::autostart`；Flatpak 里读不到，见下）。只在能用的地方显示这个开关（`available`）。
+所以每次打开设置时读系统的状态（`catmail_frontend::system::autostart`；Flatpak 里读不到，见下）。只在能用的地方显示这个开关（`available`）。
 
 - **macOS**：`SMAppService.mainApp`（macOS 13 起），出现在系统设置 › 通用 › 登录项的"登录时打开"里，带应用的
   名字和图标。打开开关时 `register`，关掉时 `unregister`，在另一个线程上调（是对系统的阻塞调用，打开时系统还会

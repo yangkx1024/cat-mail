@@ -32,7 +32,7 @@ use catmail_types::{AccountId, MessageId, SearchQuery, SearchTerm};
 use futures_util::future::join_all;
 
 use crate::engine::Engine;
-use crate::{Error, Result, connection};
+use crate::{Error, Result, engine::connection};
 
 /// How long the search connection stays open after the last search: long enough for the
 /// next query typed, or refined, to need no login.

@@ -29,9 +29,9 @@ use crate::mailbox::compose;
 use crate::mailbox::folder_commands::{folder_menu, rename_selected};
 use crate::mailbox::listing::{self, SelectedPlace};
 use crate::motion;
-use crate::tasks::in_view;
+use crate::shell::tasks::in_view;
 use crate::toast::report;
-use crate::{chrome, form, settings};
+use crate::{form, shell::chrome, windows::settings};
 
 /// The reads of the sidebar. Not reactive: nothing shows it.
 #[derive(Clone, Default)]
@@ -462,7 +462,7 @@ fn place_row(item: ReadSignal<Item>) -> View {
     })
     .child(when(
         move || item.with(|i| i.attention),
-        || icon(|| Icon::ExclamationTriangle, 12.0).text_color(crate::theme::warning),
+        || icon(|| Icon::ExclamationTriangle, 12.0).text_color(crate::shell::theme::warning),
     ))
     .child(
         text(move || match item.with(|i| i.count) {

@@ -1,0 +1,874 @@
+//! Changes to messages (flags, moves, deletions): made locally at once, queued, and
+//! replayed on the server folder by folder.
+//!
+//! Replay opens a folder with SELECT and runs its ops only if the UIDVALIDITY is still
+//! the one they were recorded under; otherwise they become conflicts, as a sync that
+//! sees the new generation would make them. A refusal (NO) fails the ops concerned and
+//! undoes them locally; a lost connection leaves them pending. Every op is safe to run
+//! twice (a UID that is gone is skipped by the server), so an answer lost to a dropped
+//! connection needs no care beyond running it again.
+//!
+//! Replay of an account is serialized with its sync by the sync permit. A sync replays
+//! everything first, so that it sees the server with the changes made, moves into
+//! folders it syncs included. Changed drafts are uploaded right before (`draft_sync`),
+//! so the copies they replace are deleted in the same replay.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+
+use catmail_proto::imap::{CopyUid, Error as ImapError, Session};
+use catmail_store::{CopyCheckpoint, Moved, ReplayFolder, ReplayKind, ReplayOp, Touched};
+use catmail_types::{
+    AccountId, ChangeReport, DeleteMode, Event, Flags, FolderId, MessageId, PendingOp, PendingOpId,
+    ReplayReport, ReportedError,
+};
+
+use crate::drafts::draft_sync::{Uploaded, Uploads};
+use crate::engine::Engine;
+use crate::engine::connection::with_session;
+use crate::engine::status::Activity;
+use crate::task::{lock, now};
+use crate::{Error, Result, drafts::draft_sync, engine::events};
+
+pub(crate) async fn set_flags(
+    engine: Arc<Engine>,
+    messages: Vec<MessageId>,
+    add: Flags,
+    remove: Flags,
+) -> Result<ChangeReport> {
+    change(&engine, move |db| {
+        db.ops().set_flags(&messages, add, remove, now())
+    })
+    .await
+}
+
+pub(crate) async fn move_messages(
+    engine: Arc<Engine>,
+    messages: Vec<MessageId>,
+    shown_in: Option<FolderId>,
+    to: FolderId,
+) -> Result<ChangeReport> {
+    change(&engine, move |db| {
+        db.ops().move_messages(&messages, shown_in, to, now())
+    })
+    .await
+}
+
+pub(crate) async fn label_messages(
+    engine: Arc<Engine>,
+    messages: Vec<MessageId>,
+    add: Vec<FolderId>,
+    remove: Vec<FolderId>,
+) -> Result<ChangeReport> {
+    change(&engine, move |db| {
+        db.ops().label_messages(&messages, &add, &remove, now())
+    })
+    .await
+}
+
+pub(crate) async fn archive_messages(
+    engine: Arc<Engine>,
+    messages: Vec<MessageId>,
+) -> Result<ChangeReport> {
+    change(&engine, move |db| {
+        db.ops().archive_messages(&messages, now())
+    })
+    .await
+}
+
+pub(crate) async fn delete_messages(
+    engine: Arc<Engine>,
+    messages: Vec<MessageId>,
+    mode: DeleteMode,
+) -> Result<ChangeReport> {
+    change(&engine, move |db| {
+        db.ops().delete_messages(&messages, mode, now())
+    })
+    .await
+}
+
+/// Makes a local change, all of it or nothing, and announces it. Returns the accounts
+/// it touched and the ops it queued. Refused if it changes messages in a folder being
+/// deleted, or adds or takes off that label: the deletion would take the change along (a
+/// message moved out of it, say), or the label would come back. One that only shows the
+/// messages (a label they carry) is no matter. Checked in the transaction, after which a
+/// deletion's own check sees the change (see `folders::delete`).
+async fn change(
+    engine: &Arc<Engine>,
+    f: impl FnOnce(&catmail_store::Db<'_>) -> catmail_store::Result<Touched> + Send + 'static,
+) -> Result<ChangeReport> {
+    let deleting = engine.being_deleted();
+    let touched = engine
+        .write(move |db| {
+            let touched = f(db)?;
+            let deleting = lock(&deleting);
+            if touched.folders.iter().any(|(_, f)| deleting.contains(f)) {
+                return Err(catmail_store::Error::Conflict(
+                    "the folder is being deleted".into(),
+                ));
+            }
+            Ok(touched)
+        })
+        .await?;
+    Ok(ChangeReport {
+        accounts: events::announce(engine, &touched),
+        ops: touched.ops,
+    })
+}
+
+pub(crate) async fn list(
+    engine: Arc<Engine>,
+    account: Option<AccountId>,
+) -> Result<Vec<PendingOp>> {
+    engine.read(move |db| db.ops().list(account)).await
+}
+
+pub(crate) async fn dismiss(engine: Arc<Engine>, id: PendingOpId) -> Result<()> {
+    let account = engine
+        .write(move |db| db.ops().dismiss(id))
+        .await?
+        .ok_or_else(|| Error::InvalidInput(format!("no operation {id}")))?;
+    engine.emit(Event::PendingOpsChanged { account });
+    Ok(())
+}
+
+pub(crate) async fn dismiss_settled(
+    engine: Arc<Engine>,
+    account: Option<AccountId>,
+) -> Result<Vec<PendingOp>> {
+    // Asked after missed events too, while a sync may be writing: only take the write
+    // connection when there is something to forget.
+    if !engine.read(move |db| db.ops().has_settled(account)).await? {
+        return Ok(Vec::new());
+    }
+    let dismissed = engine
+        .write(move |db| db.ops().dismiss_settled(account))
+        .await?;
+    let accounts: BTreeSet<_> = dismissed.iter().map(|op| op.account_id).collect();
+    for account in accounts {
+        engine.emit(Event::PendingOpsChanged { account });
+    }
+    Ok(dismissed)
+}
+
+/// Replays the account's queued changes now, without syncing, on a pooled connection,
+/// uploading changed drafts first. Waits for a running sync of the account, which does
+/// the same. A failure on the way is in the report, with what was done before it.
+pub(crate) async fn replay_account(
+    engine: Arc<Engine>,
+    account: AccountId,
+) -> Result<ReplayReport> {
+    let permit = engine.sync_permit(account).await;
+    let run = async {
+        let needed = engine
+            .read(move |db| {
+                Ok(!db.ops().pending_folders(account)?.is_empty()
+                    || db.drafts().need_upload(account, None)?)
+            })
+            .await?;
+        let mut report = ReplayReport::default();
+        if needed {
+            // Safe to run again on a new connection if a reused one turns out dead: what
+            // went through is no longer pending, and uploads left unsettled settle first.
+            // Every try adds to the same totals, the refusals of one that failed included:
+            // they are committed, and the next try doesn't see them. In a mutex, as the
+            // closure can't borrow them (see `with_session`), taken out for each try.
+            let done = Arc::new(Mutex::new(Replayed::default()));
+            let replayed = with_session(&engine, account, {
+                let (engine, done) = (engine.clone(), done.clone());
+                async move |session| {
+                    let mut replayed = std::mem::take(&mut *lock(&done));
+                    let result =
+                        replay_queued(&engine, session, account, Uploads::All, &mut replayed).await;
+                    *lock(&done) = replayed;
+                    result
+                }
+            })
+            .await;
+            engine.report(account, Activity::Sync, &replayed);
+            let done = lock(&done);
+            report.drafts_uploaded = done.drafts.saved.len() as u32;
+            report.drafts_failed = done.drafts.refused.len() as u32;
+            for r in done.folders.values() {
+                report.applied += r.applied;
+                report.failed += r.failed;
+            }
+            report.error = replayed.err().as_ref().map(ReportedError::from);
+        }
+        report.pending = engine
+            .read(move |db| db.ops().count_pending(account))
+            .await?;
+        Ok(report)
+    };
+    permit.run(run).await
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct Replayed {
+    pub drafts: Uploaded,
+    /// By folder, `applied` and `failed`.
+    pub folders: HashMap<FolderId, ReplayReport>,
+}
+
+/// Uploads the account's changed drafts (those `uploads` takes), then replays all its
+/// queued ops, deleting the copies those drafts replace among them, adding what it did
+/// to `done` (what was done before a failure too). Call with the account's sync permit.
+pub(crate) async fn replay_queued(
+    engine: &Arc<Engine>,
+    session: &mut Session,
+    account: AccountId,
+    uploads: Uploads,
+    done: &mut Replayed,
+) -> Result<()> {
+    draft_sync::upload(engine, session, account, uploads, &mut done.drafts).await?;
+    let pending = engine
+        .read(move |db| db.ops().pending_folders(account))
+        .await?;
+    replay(engine, session, account, &pending, &mut done.folders).await
+}
+
+/// Replays the ops of `folders` on `session`, one folder after the other, adding what
+/// happened in each to `reports` (`pending` is not filled in), what happened before a
+/// failure too. Call with the account's sync permit. A folder the server won't open is
+/// skipped; the sync finds out what became of it.
+async fn replay(
+    engine: &Arc<Engine>,
+    session: &mut Session,
+    account: AccountId,
+    folders: &[ReplayFolder],
+    reports: &mut HashMap<FolderId, ReplayReport>,
+) -> Result<()> {
+    let mut touched = Touched::new();
+    let mut result = Ok(());
+    let mut seen = HashSet::new();
+    let mut next = folders.to_vec();
+    // A move made sends ops on to where the message went: those made while it was in
+    // flight, the label changes waiting for it, and an op whose COPY is settled (a moved
+    // message moved back, or deleted). One more pass for folders with ops not seen there.
+    'passes: while !next.is_empty() {
+        for folder in next {
+            let report = reports.entry(folder.id).or_default();
+            match replay_folder(engine, session, &folder, &mut seen, &mut touched, report).await {
+                Ok(()) => {}
+                Err(e) if e.is_refusal() => {
+                    tracing::warn!(folder = %folder.name, error = %e,
+                        "can't replay changes in folder");
+                }
+                Err(e) => {
+                    result = Err(e);
+                    break 'passes;
+                }
+            }
+        }
+        next = match engine
+            .read(move |db| db.ops().pending_folders(account))
+            .await
+        {
+            Ok(pending) => pending
+                .into_iter()
+                .filter(|f| f.ops.iter().any(|&op| !seen.contains(&(f.id, op))))
+                .collect(),
+            Err(e) => {
+                result = Err(e);
+                break;
+            }
+        };
+    }
+    // Whatever was committed before a failure too.
+    if !folders.is_empty() {
+        events::replayed(engine, account, &touched);
+        let sum = |count: fn(&ReplayReport) -> u32| reports.values().map(count).sum::<u32>();
+        tracing::info!(%account, applied = sum(|r| r.applied), refused = sum(|r| r.failed),
+            error = result.as_ref().err().map(tracing::field::display), "replayed local changes");
+    }
+    result
+}
+
+/// Runs the folder's pending ops on `session`, adding them to `seen` as (folder, op),
+/// recording the folders whose messages changed in `touched`, and adding to `report` how
+/// many were made or refused, those settled before a failure too: a batch refused before
+/// a later one loses the connection is undone already.
+async fn replay_folder(
+    engine: &Arc<Engine>,
+    session: &mut Session,
+    folder: &ReplayFolder,
+    seen: &mut HashSet<(FolderId, PendingOpId)>,
+    touched: &mut Touched,
+    report: &mut ReplayReport,
+) -> Result<()> {
+    let id = folder.id;
+    let mut ops = engine.read(move |db| db.ops().pending(id)).await?;
+    seen.extend(ops.iter().flat_map(ReplayOp::settled).map(|op| (id, op.id)));
+    if ops.is_empty() {
+        return Ok(());
+    }
+    let status = session.select(&folder.remote_name).await?;
+    if ops.iter().any(|op| op.uidvalidity != status.uidvalidity) {
+        // The UIDs they name are gone with their generation. The sync of a location would
+        // find out too, but a label's mailbox (Gmail's Drafts) is never synced.
+        let uidvalidity = status.uidvalidity;
+        touched.merge(
+            engine
+                .write(move |db| db.ops().end_generation(id, Some(uidvalidity)))
+                .await?,
+        );
+        ops.retain(|op| op.uidvalidity == uidvalidity);
+    }
+    let mut done = Settle {
+        engine,
+        folder: id,
+        uidvalidity: status.uidvalidity,
+        touched,
+        report,
+    };
+    // An earlier COPY may have made a copy, whatever the op was turned into since (moved
+    // on, back, or deleted): settle that first, so no copy is left behind.
+    let checkpointed: Vec<(ReplayOp, CopyCheckpoint)> = ops
+        .iter()
+        .filter_map(|op| Some((op.clone(), op.copy.clone()?)))
+        .collect();
+    let ops = if checkpointed.is_empty() {
+        ops
+    } else {
+        if !settle_copies(&mut done, session, folder, checkpointed).await? {
+            // Rebuilt on the server meanwhile: the rest waits for the sync.
+            return Ok(());
+        }
+        let ops = engine.read(move |db| db.ops().pending(id)).await?;
+        seen.extend(ops.iter().flat_map(ReplayOp::settled).map(|op| (id, op.id)));
+        ops
+    };
+    for batch in batches(&ops, engine.settings().tuning.replay_batch) {
+        let uids: Vec<u32> = batch.iter().map(|op| op.uid).collect();
+        let outcome = match &batch[0].kind {
+            ReplayKind::Flags { add, remove } => session
+                .uid_store(&uids, *add, *remove)
+                .await
+                .map(|()| Outcome::Done),
+            ReplayKind::Label { name, add, .. } => {
+                let label = std::slice::from_ref(name);
+                let (add, remove) = if *add {
+                    (label, &[][..])
+                } else {
+                    (&[][..], label)
+                };
+                session
+                    .uid_store_labels(&uids, add, remove)
+                    .await
+                    .map(|()| Outcome::Done)
+            }
+            ReplayKind::Delete => session.uid_delete(&uids).await.map(|()| Outcome::Done),
+            &ReplayKind::Move {
+                to,
+                ref remote_name,
+            } => {
+                if to == id {
+                    // Moved back before it left: settled locally.
+                    Ok(Outcome::Moved(to, None))
+                } else if session.can_move() {
+                    session
+                        .uid_move(&uids, remote_name)
+                        .await
+                        .map(|copied| Outcome::Moved(to, copied.map(moved)))
+                } else {
+                    if !copy_move(&mut done, session, folder, batch, to, remote_name).await? {
+                        // Rebuilt on the server meanwhile: the rest waits for the sync.
+                        return Ok(());
+                    }
+                    continue;
+                }
+            }
+        };
+        done.outcome(batch, outcome).await?;
+    }
+    Ok(())
+}
+
+/// What became of a batch of ops on the server.
+enum Outcome {
+    Done,
+    /// Moved to the folder, at the new UIDs if the server said.
+    Moved(FolderId, Option<Moved>),
+    Refused(String),
+}
+
+/// Records what became of ops of one folder.
+struct Settle<'a> {
+    engine: &'a Arc<Engine>,
+    folder: FolderId,
+    uidvalidity: u32,
+    touched: &'a mut Touched,
+    report: &'a mut ReplayReport,
+}
+
+impl Settle<'_> {
+    /// Records the outcome, or, for a lost connection, the attempt; that error is then
+    /// returned.
+    async fn outcome(
+        &mut self,
+        ops: &[ReplayOp],
+        outcome: catmail_proto::imap::Result<Outcome>,
+    ) -> Result<()> {
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            // Refused; the connection is fine.
+            Err(e) if !e.is_fatal() => Outcome::Refused(e.to_string()),
+            Err(e) => {
+                if let Err(record) = self.attempted(ops, &e).await {
+                    tracing::warn!(error = %record, "failed to record the attempt");
+                }
+                return Err(e.into());
+            }
+        };
+        self.settle(ops, outcome).await
+    }
+
+    /// Records an attempt whose outcome isn't known: the ops stay pending, for the next
+    /// replay to find out what became of them.
+    async fn attempted(&self, ops: &[ReplayOp], error: &ImapError) -> Result<()> {
+        let (ops, error) = (settled(ops), error.to_string());
+        self.engine
+            .write(move |db| db.ops().attempted(&ops, &error))
+            .await
+    }
+
+    async fn settle(&mut self, ops: &[ReplayOp], outcome: Outcome) -> Result<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let ops = settled(ops);
+        let (id, uidvalidity, n) = (self.folder, self.uidvalidity, ops.len() as u32);
+        let changed = match outcome {
+            Outcome::Done => {
+                self.report.applied += n;
+                self.engine.write(move |db| db.ops().applied(&ops)).await?;
+                return Ok(());
+            }
+            Outcome::Moved(to, moved) => {
+                self.report.applied += n;
+                self.engine
+                    .write(move |db| db.ops().moved(id, uidvalidity, to, &ops, moved.as_ref()))
+                    .await?
+            }
+            Outcome::Refused(error) => {
+                tracing::warn!(folder = %id, %error, "server refused changes");
+                self.report.failed += n;
+                self.engine
+                    .write(move |db| db.ops().failed(id, &ops, &error))
+                    .await?
+            }
+        };
+        self.touched.merge(changed);
+        Ok(())
+    }
+}
+
+/// The ops a batch settles: each with the label changes it supersedes, oldest first.
+fn settled(ops: &[ReplayOp]) -> Vec<ReplayOp> {
+    ops.iter().flat_map(ReplayOp::settled).cloned().collect()
+}
+
+fn moved(copied: CopyUid) -> Moved {
+    Moved {
+        uidvalidity: copied.uidvalidity,
+        uids: copied.uids.into_iter().collect(),
+    }
+}
+
+/// A move on a server without MOVE: COPY, then delete the original. A COPY repeated after
+/// its answer was lost would make a second copy, so the target's UIDNEXT is committed
+/// before each COPY (see [`CopyCheckpoint`]); [`settle_copies`] looks for the copy from
+/// it before anything else is done with the op. Returns false if `folder` was rebuilt on
+/// the server meanwhile.
+async fn copy_move(
+    done: &mut Settle<'_>,
+    session: &mut Session,
+    folder: &ReplayFolder,
+    ops: &[ReplayOp],
+    to: FolderId,
+    target: &str,
+) -> Result<bool> {
+    let status = match session.status(target).await {
+        Ok(status) => status,
+        Err(e) => return done.outcome(ops, Err(e)).await.map(|()| true),
+    };
+    let (uidvalidity, uidnext) = match (status.uidvalidity, status.uidnext) {
+        (Some(uidvalidity), Some(uidnext)) => (uidvalidity, uidnext),
+        _ => match copy_boundary(session, target, folder, done.uidvalidity).await {
+            Ok(Some(boundary)) => boundary,
+            Ok(None) => return Ok(false),
+            Err(e) => return done.outcome(ops, Err(e)).await.map(|()| true),
+        },
+    };
+    let checkpoint = CopyCheckpoint {
+        folder: to,
+        remote_name: Some(target.to_owned()),
+        uidvalidity,
+        uidnext,
+    };
+    let (checkpointed, copy_uidvalidity) = (ops.to_vec(), checkpoint.uidvalidity);
+    done.engine
+        .write_durable(move |db| db.ops().before_copy(&checkpointed, &checkpoint))
+        .await?;
+    let uids: Vec<u32> = ops.iter().map(|op| op.uid).collect();
+    // A refused COPY copied nothing (RFC 3501), so failing the ops leaves no copy behind.
+    let copied = match session.uid_copy(&uids, target).await {
+        Ok(copied) => copied,
+        // Sent in parts (a server's limit on messages in one command), and only some of
+        // them copied: which, the next try finds from the checkpoint, as after a lost
+        // answer.
+        Err(e @ ImapError::Truncated(_)) => return done.attempted(ops, &e).await.map(|()| true),
+        Err(e) => return done.outcome(ops, Err(e)).await.map(|()| true),
+    };
+    // Which message is the copy, for when the answer to the delete is lost: the original
+    // is gone then, and nothing else tells the copy apart.
+    if let Some(copied) = copied
+        .as_ref()
+        .filter(|c| c.uidvalidity == copy_uidvalidity)
+    {
+        let by_uid: HashMap<u32, u32> = copied.uids.iter().copied().collect();
+        let recorded: Vec<(PendingOpId, u32)> = ops
+            .iter()
+            .filter_map(|op| Some((op.id, *by_uid.get(&op.uid)?)))
+            .collect();
+        done.engine
+            .write_durable(move |db| db.ops().copied(&recorded))
+            .await?;
+    }
+    let outcome = match session.uid_delete(&uids).await {
+        Ok(()) => Ok(Outcome::Moved(to, copied.map(moved))),
+        // Copied, but the original stays: the op fails and the message shows in both.
+        Err(e) if !e.is_fatal() => Ok(Outcome::Refused(format!(
+            "copied, but the original couldn't be deleted: {e}"
+        ))),
+        // The copy is there; the next try finds it from the checkpoint.
+        Err(e) => Err(e),
+    };
+    done.outcome(ops, outcome).await.map(|()| true)
+}
+
+/// The UIDVALIDITY and UIDNEXT of `target` when STATUS leaves them out (NetEase): from
+/// opening it, past its highest UID if it doesn't say its UIDNEXT either. A copy is looked
+/// for from there, so it is taken right before the COPY: from an older point, such as the
+/// last sync, a message that arrived since (the same message, copied there by another
+/// client) would be taken for the copy. Leaves `folder` selected again; `None` if it was
+/// rebuilt on the server meanwhile.
+async fn copy_boundary(
+    session: &mut Session,
+    target: &str,
+    folder: &ReplayFolder,
+    uidvalidity: u32,
+) -> catmail_proto::imap::Result<Option<(u32, u32)>> {
+    let found = async {
+        let opened = session.examine(target).await?;
+        let uidnext = match opened.uidnext {
+            Some(uidnext) => uidnext,
+            None => session
+                .last_uid()
+                .await?
+                .map_or(1, |uid| uid.saturating_add(1)),
+        };
+        Ok::<_, catmail_proto::imap::Error>((opened.uidvalidity, uidnext))
+    }
+    .await;
+    if let Err(e) = &found
+        && e.is_fatal()
+    {
+        return found.map(Some);
+    }
+    // Refused or not, the ops that follow need `folder` selected.
+    let reopened = session.select(&folder.remote_name).await?;
+    if !reopened.same_generation(Some(uidvalidity)) {
+        return Ok(None);
+    }
+    found.map(Some)
+}
+
+/// Finds out what earlier COPYs (see [`copy_move`]) did for these ops, whatever they
+/// were changed into since. A copy found means the message is in its target now: the
+/// original is deleted, and the op follows the message there, as for a move in flight
+/// (a move back or a delete then undoes the copy). No copy: the op goes on as it is now.
+/// If that can't be told, the op fails, leaving the original where it is: never a lost
+/// message, never a second copy made on its own. Returns false if the folder was rebuilt
+/// on the server meanwhile.
+async fn settle_copies(
+    done: &mut Settle<'_>,
+    session: &mut Session,
+    folder: &ReplayFolder,
+    ops: Vec<(ReplayOp, CopyCheckpoint)>,
+) -> Result<bool> {
+    let all: Vec<ReplayOp> = ops.iter().map(|(op, _)| op.clone()).collect();
+    let found = match find_copies(session, folder, done.uidvalidity, ops).await {
+        Ok(Some(found)) => found,
+        Ok(None) => return Ok(false),
+        Err(e) => return done.outcome(&all, Err(e)).await.map(|()| true),
+    };
+    let absent = found.absent;
+    done.engine
+        .write(move |db| db.ops().forget_checkpoints(&absent))
+        .await?;
+    let unknown = "can't tell whether an earlier copy was made: the target folder was rebuilt \
+                   or deleted on the server since. The message was left where it was; move it \
+                   again if it isn't in the target";
+    done.settle(&found.unknown, Outcome::Refused(unknown.into()))
+        .await?;
+    let lost = "the message was being moved when the connection dropped, and its copy in the \
+                target folder can't be told apart from other messages there: check that folder";
+    done.settle(&found.lost, Outcome::Refused(lost.into()))
+        .await?;
+    // Copied, or deleted after the copy was made: what is left is deleting it.
+    let settled: Vec<ReplayOp> = found
+        .copied
+        .iter()
+        .flat_map(|c| c.ops.iter().cloned())
+        .chain(found.gone.values().flatten().cloned())
+        .collect();
+    let originals: Vec<u32> = settled.iter().map(|op| op.uid).collect();
+    if let Err(e) = session.uid_delete(&originals).await {
+        return done.outcome(&settled, Err(e)).await.map(|()| true);
+    }
+    for copied in found.copied {
+        done.settle(&copied.ops, Outcome::Moved(copied.into, Some(copied.moved)))
+            .await?;
+    }
+    for (into, ops) in found.gone {
+        done.settle(&ops, Outcome::Moved(into, None)).await?;
+    }
+    Ok(true)
+}
+
+/// Copies found in one target.
+struct Copied {
+    into: FolderId,
+    /// Where each op's message is there.
+    moved: Moved,
+    ops: Vec<ReplayOp>,
+}
+
+/// Where earlier COPYs left the messages of ops with a checkpoint.
+#[derive(Default)]
+struct Copies {
+    copied: Vec<Copied>,
+    /// Not in the target: no copy was made (or it was removed since).
+    absent: Vec<ReplayOp>,
+    /// By the target of the copy: the original is gone, and so is the copy (or the op is
+    /// still the move that made it, which the next sync of the target catches up with).
+    gone: BTreeMap<FolderId, Vec<ReplayOp>>,
+    /// The original is gone, and the op was changed since (moved back or on, deleted),
+    /// but which message is the copy isn't known: it may be in the target still.
+    lost: Vec<ReplayOp>,
+    /// The target was rebuilt or deleted since: no telling.
+    unknown: Vec<ReplayOp>,
+}
+
+/// The originals of ops with one checkpoint.
+#[derive(Default)]
+struct Target {
+    /// Whose COPY was answered with the copy's UID: that UID, and whether the original is
+    /// still there.
+    recorded: Vec<(ReplayOp, u32, bool)>,
+    /// Still there, the answer to their COPY (if one was sent) lost: with their sizes.
+    present: Vec<(ReplayOp, u32)>,
+}
+
+/// A target that [`find_copies`] searched, before the originals left to compare are
+/// downloaded.
+struct Searched {
+    checkpoint: CopyCheckpoint,
+    /// Originals whose copy is to be told by its bytes, with their sizes.
+    present: Vec<(ReplayOp, u32)>,
+    /// Messages that arrived in the target and might be such a copy: UID, size, bytes.
+    candidates: Vec<(u32, u32, Vec<u8>)>,
+    /// Ops whose copies were found already, by COPYUID.
+    found: Vec<ReplayOp>,
+    /// Where each found op's message is: original UID to the copy's.
+    uids: HashMap<u32, u32>,
+}
+
+/// Looks for each message's copy among the target's messages from the checkpoint on.
+/// One the COPY's answer named (COPYUID) is that one, if it is still there. Otherwise a
+/// copy has the original's raw bytes; sizes are compared first, so only messages that
+/// might be one are downloaded, and each copy is claimed once. An original that is gone
+/// without such an answer can't be matched safely: nothing else tells its copy apart
+/// from another message (with the same Message-ID, say). Leaves `folder` selected again;
+/// `None` if it was rebuilt on the server meanwhile.
+async fn find_copies(
+    session: &mut Session,
+    folder: &ReplayFolder,
+    uidvalidity: u32,
+    ops: Vec<(ReplayOp, CopyCheckpoint)>,
+) -> catmail_proto::imap::Result<Option<Copies>> {
+    let mut copies = Copies::default();
+    let uids: Vec<u32> = ops.iter().map(|(op, _)| op.uid).collect();
+    let sizes = session.fetch_sizes(&uids).await?;
+    let mut by_target: BTreeMap<CopyCheckpoint, Target> = BTreeMap::new();
+    for (op, checkpoint) in ops {
+        let size = sizes.get(&op.uid).copied();
+        match (op.copy_uid, size) {
+            (Some(copy), _) => {
+                let target = by_target.entry(checkpoint).or_default();
+                target.recorded.push((op, copy, size.is_some()));
+            }
+            (None, Some(size)) => by_target
+                .entry(checkpoint)
+                .or_default()
+                .present
+                .push((op, size)),
+            (None, None) => gone_unseen(&mut copies, &checkpoint, op),
+        }
+    }
+    let mut searched = Vec::new();
+    for (checkpoint, target) in by_target {
+        let unknown = match &checkpoint.remote_name {
+            Some(name) => match session.examine(name).await {
+                Ok(status) => !status.same_generation(Some(checkpoint.uidvalidity)),
+                Err(e) if !e.is_fatal() => true,
+                Err(e) => return Err(e),
+            },
+            None => true,
+        };
+        if unknown {
+            for (op, _, present) in target.recorded {
+                if present {
+                    copies.unknown.push(op);
+                } else {
+                    gone_unseen(&mut copies, &checkpoint, op);
+                }
+            }
+            copies
+                .unknown
+                .extend(target.present.into_iter().map(|(op, _)| op));
+            continue;
+        }
+        let arrived: HashSet<u32> = session
+            .uid_search_from(checkpoint.uidnext)
+            .await?
+            .into_iter()
+            .collect();
+        let (mut found, mut uids) = (Vec::new(), HashMap::new());
+        for (op, copy, present) in target.recorded {
+            if arrived.contains(&copy) {
+                uids.insert(op.uid, copy);
+                found.push(op);
+            } else if present {
+                // Removed since: as if it had never been made.
+                copies.absent.push(op);
+            } else {
+                copies.gone.entry(checkpoint.folder).or_default().push(op);
+            }
+        }
+        let wanted: HashSet<u32> = target.present.iter().map(|(_, size)| *size).collect();
+        let mut candidates = Vec::new();
+        if !wanted.is_empty() {
+            let claimed: HashSet<u32> = uids.values().copied().collect();
+            let unclaimed: Vec<u32> = arrived.difference(&claimed).copied().collect();
+            for (uid, size) in session.fetch_sizes(&unclaimed).await? {
+                if wanted.contains(&size)
+                    && let Some(raw) = session.fetch_raw(uid).await?
+                {
+                    candidates.push((uid, size, raw));
+                }
+            }
+        }
+        searched.push(Searched {
+            checkpoint,
+            present: target.present,
+            candidates,
+            found,
+            uids,
+        });
+    }
+    let reopened = session.select(&folder.remote_name).await?;
+    if !reopened.same_generation(Some(uidvalidity)) {
+        return Ok(None);
+    }
+    for Searched {
+        checkpoint,
+        present,
+        mut candidates,
+        mut found,
+        mut uids,
+    } in searched
+    {
+        for (op, size) in present {
+            // Nothing of its size arrived: no copy, and no need to download it.
+            if !candidates.iter().any(|(_, s, _)| *s == size) {
+                copies.absent.push(op);
+                continue;
+            }
+            let Some(raw) = session.fetch_raw(op.uid).await? else {
+                gone_unseen(&mut copies, &checkpoint, op);
+                continue;
+            };
+            match candidates.iter().position(|(_, _, c)| *c == raw) {
+                Some(i) => {
+                    uids.insert(op.uid, candidates.swap_remove(i).0);
+                    found.push(op);
+                }
+                None => copies.absent.push(op),
+            }
+        }
+        if !found.is_empty() {
+            copies.copied.push(Copied {
+                into: checkpoint.folder,
+                moved: Moved {
+                    uidvalidity: checkpoint.uidvalidity,
+                    uids,
+                },
+                ops: found,
+            });
+        }
+    }
+    Ok(Some(copies))
+}
+
+/// Files an op whose original is gone, when its copy can't be looked for. If the op is
+/// still the move that made the copy, the next sync of the target finds it there; if it
+/// was changed since, the copy may be left behind.
+fn gone_unseen(copies: &mut Copies, checkpoint: &CopyCheckpoint, op: ReplayOp) {
+    match op.kind {
+        ReplayKind::Move { to, .. } if to == checkpoint.folder => {
+            copies.gone.entry(checkpoint.folder).or_default().push(op);
+        }
+        _ => copies.lost.push(op),
+    }
+}
+
+/// Runs of consecutive ops that one command can make: the same change, at most `size`
+/// long.
+fn batches(ops: &[ReplayOp], size: usize) -> impl Iterator<Item = &[ReplayOp]> {
+    ops.chunk_by(|a, b| a.kind == b.kind)
+        .flat_map(move |run| run.chunks(size))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batches_follow_the_change_and_size() {
+        let op = |id: i64, kind: &ReplayKind| ReplayOp {
+            id: PendingOpId(id),
+            uidvalidity: 1,
+            uid: id as u32,
+            kind: kind.clone(),
+            copy: None,
+            copy_uid: None,
+            superseded: Vec::new(),
+        };
+        let read = ReplayKind::Flags {
+            add: Flags::SEEN,
+            remove: Flags::empty(),
+        };
+        let to = |id: i64| ReplayKind::Move {
+            to: FolderId(id),
+            remote_name: format!("F{id}"),
+        };
+        let mut ops: Vec<ReplayOp> = (1..=3).map(|id| op(id, &read)).collect();
+        ops.push(op(1000, &ReplayKind::Delete));
+        ops.push(op(1001, &to(1)));
+        ops.push(op(1002, &to(2)));
+        let sizes: Vec<usize> = batches(&ops, 2).map(<[ReplayOp]>::len).collect();
+        assert_eq!(sizes, [2, 1, 1, 1, 1]);
+    }
+}

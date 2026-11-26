@@ -2,10 +2,10 @@
 //! heading for the messages checked and on a row while hovered; what they do, which ones
 //! ask first, and "Move to" and "Labels" (their dialog, and what picking in it does, are
 //! `picker.rs`'). What they apply to, what they change and what they say are
-//! `catmail_frontend::commands`'; here they are run (`listing::run_change`).
+//! `catmail_frontend::mailbox::commands`'; here they are run (`listing::run_change`).
 
 use catmail_core::{Flags, MessageSummary};
-use catmail_frontend::commands::{self, Applies, Deletion, MessageCommand};
+use catmail_frontend::mailbox::commands::{self, Applies, Deletion, MessageCommand};
 
 use nsh_core::prelude::*;
 
@@ -16,7 +16,7 @@ use crate::form::confirmed;
 use crate::icons::Icon;
 use crate::mailbox::listing;
 use crate::mailbox::picker::{Picker, Picking, open_picker};
-use crate::tasks::in_view;
+use crate::shell::tasks::in_view;
 use crate::toast::{Level, notify};
 
 /// What the commands do to the messages, for their buttons. Tracked: the buttons follow

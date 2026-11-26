@@ -5,7 +5,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
-use catmail_frontend::resident::QuitReason;
+use catmail_frontend::system::resident::QuitReason;
 use nsh_platform_linux::gtk4::{self as gtk, glib, prelude::*};
 use nsh_platform_linux::{AppOptions, AppView, Appearance};
 
@@ -15,7 +15,7 @@ use super::{APP_ID, Hooks, Spec};
 pub fn run(started: impl FnOnce() + 'static) -> u8 {
     glib::set_prgname(Some(APP_ID));
     // Not unique through D-Bus: one app per data directory is the instance socket's job
-    // (`catmail_frontend::instance`).
+    // (`catmail_frontend::system::instance`).
     let app = gtk::Application::builder()
         .application_id(APP_ID)
         .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)

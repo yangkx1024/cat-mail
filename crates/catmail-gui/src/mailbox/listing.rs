@@ -3,7 +3,7 @@
 //! the engine's events; the row selected, which the right pane shows, and the messages
 //! checked; and the changes to messages, after which the selection moves on when the
 //! selected one leaves ([`run_change`]). What a source lists, the reads and where the
-//! selection goes after them are `catmail_frontend::list`'s (`Listing`, `ListModel`);
+//! selection goes after them are `catmail_frontend::mailbox::list`'s (`Listing`, `ListModel`);
 //! here they are run and kept in nsh's signals, which the list (`list/`) draws.
 
 use std::cell::RefCell;
@@ -13,8 +13,8 @@ use std::rc::Rc;
 use catmail_core::{
     AccountId, DraftSummary, FlagFilter, Flags, FolderId, MessageId, MessageSummary, OutboxEntry,
 };
-use catmail_frontend::commands::Change;
-use catmail_frontend::list::{
+use catmail_frontend::mailbox::commands::Change;
+use catmail_frontend::mailbox::list::{
     Fetch, ListModel, Listing, Loaded, Row, RowId, Rows, SEARCH_DELAY, SERVER_SEARCH_DELAY, Select,
     ServerSearch, Typed,
 };
@@ -27,7 +27,7 @@ use crate::accounts::with_accounts;
 use crate::clock;
 use crate::engine::client;
 use crate::motion;
-use crate::tasks::in_view;
+use crate::shell::tasks::in_view;
 use crate::toast::report;
 
 /// The place selected in the sidebar: the list shows it, unless a search is typed.
@@ -252,7 +252,7 @@ pub fn open(row: RowId) {
     if crate::shell::settings().mark_read_on_open
         && message(id).is_some_and(|m| !m.flags.contains(Flags::SEEN))
     {
-        run_change(catmail_frontend::commands::mark_read(id));
+        run_change(catmail_frontend::mailbox::commands::mark_read(id));
     }
 }
 

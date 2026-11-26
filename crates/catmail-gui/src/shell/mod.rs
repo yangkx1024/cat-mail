@@ -12,6 +12,10 @@
 //! parts outside the windows (the tray, the notifications) run on it, and `main.rs` puts
 //! them together ([`Parts`]); a composer window's view comes from the mailbox that opens
 //! it ([`opened`]).
+//!
+//! Beside it, what every window and view runs with: where the work a view starts runs
+//! ([`tasks`]), the settings' themes as nsh draws them ([`theme`]), and what a window has
+//! at its top ([`chrome`]).
 
 // In a test build the platform's toolkit is built all the same, for its own tests and so
 // that `--all-targets` checks it, but the windows' views run headless, for the tests to
@@ -19,11 +23,14 @@
 #[cfg(target_os = "macos")]
 #[cfg_attr(test, allow(dead_code))]
 mod appkit;
+pub(crate) mod chrome;
 #[cfg(target_os = "linux")]
 #[cfg_attr(test, allow(dead_code))]
 mod gtk;
 #[cfg(test)]
 pub mod headless;
+pub(crate) mod tasks;
+pub(crate) mod theme;
 #[cfg(all(target_os = "macos", not(test)))]
 use self::appkit as toolkit;
 #[cfg(all(target_os = "linux", not(test)))]
@@ -46,16 +53,16 @@ use std::time::Duration;
 
 use catmail_core::{DraftId, EditMark, MailClient, MailClientBuilder};
 use catmail_frontend::composer::{ComposeFrom, OpenComposers, Opening, window_title};
-use catmail_frontend::instance::{Request, Requests};
 use catmail_frontend::mailbox::{Ask, Asks, Destination, Place};
-use catmail_frontend::mcp;
-use catmail_frontend::resident::{
+use catmail_frontend::settings::mcp;
+use catmail_frontend::settings::theme::{DEFAULT_DARK, DEFAULT_LIGHT, Themes};
+use catmail_frontend::settings::watched::Watched;
+use catmail_frontend::settings::{self, McpSettings, Settings, SettingsFile};
+use catmail_frontend::system::instance::{Request, Requests};
+use catmail_frontend::system::resident::{
     AfterLastWindow, AtLaunch, QuitReason, after_last_window, at_launch,
 };
-use catmail_frontend::settings::{self, McpSettings, Settings, SettingsFile};
-use catmail_frontend::theme::{DEFAULT_DARK, DEFAULT_LIGHT, Themes};
-use catmail_frontend::tray::Command;
-use catmail_frontend::watched::Watched;
+use catmail_frontend::system::tray::Command;
 use futures_channel::{mpsc, oneshot};
 use futures_util::StreamExt as _;
 
@@ -148,7 +155,7 @@ fn theme_overrides(settings: &Settings) -> Option<String> {
     let themes = lock(&THEMES);
     let light = themes.pick(&settings.light_theme, DEFAULT_LIGHT)?;
     let dark = themes.pick(&settings.dark_theme, DEFAULT_DARK)?;
-    Some(crate::theme::css_vars(&light.config, &dark.config))
+    Some(crate::shell::theme::css_vars(&light.config, &dark.config))
 }
 
 thread_local! {
@@ -174,7 +181,7 @@ fn restyle_views() {
 }
 
 //
-// It runs on a thread of its own (`catmail_frontend::mcp::Host`), from the engine's
+// It runs on a thread of its own (`catmail_frontend::settings::mcp::Host`), from the engine's
 // opening until the app quits, as the settings say.
 
 /// The server's host, once the engine is open.
@@ -342,7 +349,7 @@ pub fn run(
     HIDDEN.set(hidden);
     let file = FILE.get_or_init(|| file.map(Arc::new));
     if let Some(file) = file {
-        catmail_frontend::autostart::use_config_dir(file.dir().to_owned());
+        catmail_frontend::system::autostart::use_config_dir(file.dir().to_owned());
     }
     load_settings(file.as_deref());
     let code = toolkit::run(move || {
@@ -675,7 +682,7 @@ fn window_removed() {
             // Once the views' threads have let go of what they held.
             toolkit::after(Duration::from_secs(2), || {
                 if toolkit::windows().is_empty() && QUITTING.get().is_none() {
-                    std::thread::spawn(catmail_frontend::memory::release_freed);
+                    std::thread::spawn(catmail_frontend::system::memory::release_freed);
                 }
             });
         }

@@ -8,7 +8,7 @@ use catmail_frontend::mailbox::AccountEntry;
 use nsh_core::prelude::*;
 
 use crate::engine::client;
-use crate::tasks::in_view;
+use crate::shell::tasks::in_view;
 use crate::toast::report;
 
 /// The accounts as the sidebar shows them; `None` until the first read.

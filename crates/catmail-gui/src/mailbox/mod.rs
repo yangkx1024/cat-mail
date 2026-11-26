@@ -19,8 +19,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use catmail_core::{Event, RecvError};
+use catmail_frontend::mailbox::refresh::{Refresh, Throttle};
 use catmail_frontend::mailbox::{Ask, Place, REFRESH_INTERVAL};
-use catmail_frontend::refresh::{Refresh, Throttle};
 use futures_util::StreamExt as _;
 use nsh_base::theme;
 use nsh_core::element::Owner;
@@ -28,11 +28,11 @@ use nsh_core::prelude::*;
 
 use crate::accounts::{self, Accounts};
 use crate::engine::client;
-use crate::login::{self, SignIn};
-use crate::tasks::{in_view, own_tasks};
-use crate::theme::SelectableText as _;
-use crate::{chrome, form, settings, shell, toast};
-use catmail_frontend::list::Listing;
+use crate::shell::tasks::{in_view, own_tasks};
+use crate::shell::theme::SelectableText as _;
+use crate::windows::login::{self, SignIn};
+use crate::{form, shell, shell::chrome, toast, windows::settings};
+use catmail_frontend::mailbox::list::Listing;
 use listing::{Selected, SelectedPlace};
 
 /// What the engine's events ask to read again, held back between reads. Not reactive.

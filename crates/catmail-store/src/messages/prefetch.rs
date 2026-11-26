@@ -1,4 +1,4 @@
-//! What the background prefetch of bodies keeps (`catmail_core::prefetch`): which
+//! What the background prefetch of bodies keeps (`catmail_core::body::prefetch`): which
 //! messages to fetch next, the ones that failed, and how much of the daily budget is used.
 
 use std::time::Duration;

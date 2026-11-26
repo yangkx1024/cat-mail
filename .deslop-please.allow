@@ -2,17 +2,17 @@
 # written by `scripts/deslop.sh --update`. Fixing an entry never fails CI; new
 # issues not listed here fail.
 field-leak catmail_cli::cmd::compose::Fields::from
-field-leak catmail_core::search_slot::Held::session
-field-leak catmail_frontend::commands::Change::ids
+field-leak catmail_core::engine::search_slot::Held::session
 field-leak catmail_frontend::composer::Lifecycle::saved
-field-leak catmail_frontend::folders::AccountFolders::labels
-field-leak catmail_frontend::folders::AccountFolders::others
-field-leak catmail_frontend::folders::AccountFolders::roles
 field-leak catmail_frontend::format::Clock::hours
 field-leak catmail_frontend::html::pages::RemoteImages::blocked
-field-leak catmail_frontend::list::model::Listing::rows
-field-leak catmail_frontend::list::model::Listing::source
 field-leak catmail_frontend::mailbox::asks::Asks::left_at
+field-leak catmail_frontend::mailbox::commands::Change::ids
+field-leak catmail_frontend::mailbox::folders::AccountFolders::labels
+field-leak catmail_frontend::mailbox::folders::AccountFolders::others
+field-leak catmail_frontend::mailbox::folders::AccountFolders::roles
+field-leak catmail_frontend::mailbox::list::model::Listing::rows
+field-leak catmail_frontend::mailbox::list::model::Listing::source
 field-leak catmail_frontend::mailbox::sidebar::Folds::folders
 field-leak catmail_frontend::mailbox::sidebar::Folds::unfold_all
 field-leak catmail_gui::web::sideways::Sideways::web
@@ -41,17 +41,14 @@ field-leak catmail_testkit::imap::ServerState::subscriptions
 field-leak catmail_testkit::imap::ServerState::synchronized_literals
 long-file crates/catmail-testkit/src/imap/mod.rs
 shallow-module catmail_core::client
+shallow-module catmail_core::engine
 shallow-module catmail_frontend
 shallow-module catmail_frontend::composer
 shallow-module catmail_frontend::html
-shallow-module catmail_frontend::list
 shallow-module catmail_frontend::mailbox
+shallow-module catmail_frontend::mailbox::list
 shallow-module catmail_store
 shallow-module catmail_store::messages
 shallow-module catmail_store::ops
 shallow-module catmail_types
 tangle catmail_core::client::DraftEditor,catmail_core::client::MailClient,catmail_core::client::builder::MailClientBuilder
-wide-directory crates/catmail-core/src/
-wide-directory crates/catmail-core/tests/
-wide-directory crates/catmail-frontend/src/
-wide-directory crates/catmail-gui/src/

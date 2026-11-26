@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Starts throwaway servers for the real-server tests: Dovecot with the fixtures in
-# testenv/fixtures for IMAP (crates/catmail-core/tests/dovecot.rs), and Dovecot's
-# submission service relaying to a mailpit sink for SMTP (tests/submission.rs).
+# testenv/fixtures for IMAP (crates/catmail-core/tests/dovecot/imap.rs), and Dovecot's
+# submission service relaying to a mailpit sink for SMTP (tests/dovecot/submission.rs).
 # Everything lives in a temp directory that is removed on exit.
 #
 #   nix develop .#testenv -c testenv/dovecot/run.sh [port]
 #
 # Then, in another shell, run the exports it prints and
-# `cargo test -p catmail-core --test dovecot --test submission`.
+# `cargo test -p catmail-core --test dovecot`.
 #
 # Ports: IMAP `port` (10143), submission with STARTTLS port+444 (10587), submission with
 # implicit TLS port+322 (10465), mailpit SMTP port+882 (11025) and HTTP API port+937

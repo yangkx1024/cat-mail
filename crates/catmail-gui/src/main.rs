@@ -15,11 +15,7 @@ mod accounts;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod buttons;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-mod chrome;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod clock;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-mod composer;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod engine;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -27,41 +23,31 @@ mod form;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod icons;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-mod login;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod mailbox;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod motion;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-mod new_mail;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-mod settings;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod shell;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-mod tasks;
+mod system;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-mod theme;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod toast;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-mod tray;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-mod wake;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod web;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod windows;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn main() -> anyhow::Result<std::process::ExitCode> {
     use catmail_core::{Config, MailClient};
-    use catmail_frontend::instance::{self, Claim, Request};
     use catmail_frontend::settings::SettingsFile;
+    use catmail_frontend::system::instance::{self, Claim, Request};
 
     catmail_core::logging::init(&format!(
         "catmail_gui=info,catmail_frontend=info,{}",
-        catmail_frontend::mcp::LOG_FILTER
+        catmail_frontend::settings::mcp::LOG_FILTER
     ));
     let config = match std::env::var_os("CATMAIL_DATA_DIR") {
         Some(dir) => Config::with_data_dir(dir),
@@ -91,13 +77,13 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
         // heard.
         launching: || {
             #[cfg(target_os = "macos")]
-            new_mail::install();
+            system::new_mail::install();
         },
         // The tray and the notifications follow the engine, and it hears of wakes.
         engine_opened: || {
-            new_mail::start();
-            tray::start();
-            wake::follow();
+            system::new_mail::start();
+            system::tray::start();
+            system::wake::follow();
         },
     };
     let settings = config_dir.map(SettingsFile::new);

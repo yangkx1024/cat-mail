@@ -1,0 +1,707 @@
+//! On-demand download of message bodies and attachments.
+//!
+//! A message up to the whole-message limit (see
+//! [`EngineTuning`](crate::EngineTuning)) is fetched whole (`BODY.PEEK[]`), kept as a
+//! raw blob, and its attachments stored at once. A larger one is fetched as its
+//! BODYSTRUCTURE plus the text parts; each attachment is fetched by section when it is
+//! first opened. Either way the mailbox is opened with EXAMINE (unless the connection has
+//! it open so already) and bodies are fetched with `.PEEK`, so nothing changes on the
+//! server, and the stored UIDVALIDITY is checked before any UID is used.
+//!
+//! The background prefetch (`prefetch`) fetches bodies the same way ([`fetch_body`]), on a
+//! connection of its own.
+//!
+//! Results are written only if the message row still exists. Message ids are never
+//! reused and a UIDVALIDITY change deletes the rows of the old generation, so an
+//! existing row is still the same (folder, UID) as when the download started.
+//!
+//! What else is done with bodies is inside: what a fetched message is stored as
+//! ([`content`]), file names for its attachments ([`filename`]), fetching bodies in the
+//! background ([`prefetch`]), storing them again once parsing changes ([`rebuild`]), the
+//! remote images of its HTML ([`images`]), and deleting what nothing refers to any more
+//! ([`gc`]).
+
+pub(crate) mod content;
+pub(crate) mod filename;
+pub(crate) mod gc;
+pub(crate) mod images;
+pub(crate) mod prefetch;
+pub(crate) mod rebuild;
+
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use catmail_proto::imap::{self, Session};
+use catmail_proto::mime;
+use catmail_store::{AttachmentSource, MessageLocation};
+use catmail_types::{AttachmentId, BlobHash, ErrorKind, Event, Message, MessageId};
+
+use crate::engine::Engine;
+use crate::engine::connection::with_session;
+use crate::engine::downloading::Claim;
+use crate::task::blocking;
+use crate::{Error, Result};
+use content::{Fetched, Parts};
+
+const GONE: Error = Error::OutOfSync("the message is no longer on the server");
+const REBUILT: &str = "the folder was rebuilt on the server (UIDVALIDITY changed)";
+
+/// Whether `e` says the message's folder has a new UIDVALIDITY on the server: none of its
+/// messages can be fetched until a sync of it starts over.
+pub(crate) fn folder_rebuilt(e: &Error) -> bool {
+    matches!(e, Error::OutOfSync(text) if *text == REBUILT)
+}
+
+/// How large a message may be (RFC822.SIZE) to be fetched whole, and a text part of a
+/// larger one to be fetched at all (a larger part is listed among the attachments).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Limits {
+    pub whole: u32,
+    pub text: u32,
+}
+
+impl Limits {
+    /// As for a message the user opens.
+    fn opened(engine: &Engine) -> Self {
+        let limit = engine.settings().tuning.whole_message_limit;
+        Self {
+            whole: limit,
+            text: limit,
+        }
+    }
+
+    /// Whole, however large: for the raw message.
+    const RAW: Self = Self {
+        whole: u32::MAX,
+        text: u32::MAX,
+    };
+}
+
+pub(crate) async fn download_message(engine: Arc<Engine>, id: MessageId) -> Result<Message> {
+    ensure_downloaded(&engine, id, false).await?;
+    engine
+        .read(move |db| db.messages().get(id))
+        .await?
+        .ok_or(Error::MessageNotFound(id))
+}
+
+/// The decoded content, downloading it first if needed.
+pub(crate) async fn attachment_content(engine: Arc<Engine>, id: AttachmentId) -> Result<Vec<u8>> {
+    let source = attachment_source(&engine, id).await?;
+    if let Some(blob) = &source.blob
+        && let Some(data) = read_blob(&engine, blob.clone()).await?
+    {
+        return Ok(data);
+    }
+    let section = source.section.clone();
+    let encoded = on_server(
+        &engine,
+        source.message.clone(),
+        async move |session, location| {
+            Ok(session
+                .fetch_sections(location.uid, std::slice::from_ref(&section))
+                .await?
+                .and_then(|mut parts| parts.remove(&section)))
+        },
+    )
+    .await?;
+    let (account, folder) = (source.message.account, source.message.folder);
+    let data = blocking({
+        let storage = engine.storage();
+        move || {
+            let data = mime::decode_transfer(source.transfer_encoding.as_deref(), &encoded);
+            drop(encoded);
+            let size = data.len() as u32;
+            storage
+                .keep(&data, |db, hash| db.attachments().set_blob(id, hash, size))?
+                .ok_or(Error::AttachmentNotFound(id))?;
+            Ok(data)
+        }
+    })
+    .await?;
+    // Stored now, with its size as decoded.
+    engine.emit(Event::MessagesChanged { account, folder });
+    Ok(data)
+}
+
+/// The attachment's blob and size, downloading it first if needed. Its GC grace period
+/// restarts, as with `put`, so a row referring to it may follow.
+pub(crate) async fn attachment_blob(
+    engine: Arc<Engine>,
+    id: AttachmentId,
+) -> Result<(BlobHash, u64)> {
+    if let Some(stored) = stored_blob(&engine, id).await? {
+        return Ok(stored);
+    }
+    attachment_content(engine.clone(), id).await?;
+    stored_blob(&engine, id)
+        .await?
+        .ok_or(Error::AttachmentNotFound(id))
+}
+
+/// What one FETCH of [`attachment_blobs`] brings back at most, by the sizes the server
+/// gave: the parts are held in memory together until stored. A larger part comes alone.
+const BATCH_BYTES: u64 = 16 * 1024 * 1024;
+
+/// A part to fetch with others: the attachment, the size the server gave, and where it
+/// is.
+struct Missing {
+    id: AttachmentId,
+    size: u64,
+    source: AttachmentSource,
+}
+
+pub(crate) struct Blobs {
+    /// The parts it had or fetched, and those that failed alone, with why.
+    pub parts: HashMap<AttachmentId, Result<(BlobHash, u64)>>,
+    /// Why the parts in neither weren't fetched: something about the server or the
+    /// account as a whole ([`account_wide`]), which stopped the fetching there.
+    pub stopped: Option<Error>,
+}
+
+impl Blobs {
+    /// The part's blob and size, or why it can't be had.
+    pub fn take(&mut self, id: AttachmentId) -> Result<(BlobHash, u64)> {
+        match self.parts.remove(&id) {
+            Some(found) => found,
+            None => Err(self.stopped.take().unwrap_or(Error::AttachmentNotFound(id))),
+        }
+    }
+}
+
+/// The blobs and sizes of `parts`, attachments each with the size the server gave,
+/// downloading those not stored yet with as few FETCHes as [`BATCH_BYTES`] allows, not
+/// one each: a reply or forward of a large message that wasn't read needs its images
+/// and attachments, which came without it. Their GC grace periods restart, as with
+/// [`attachment_blob`].
+///
+/// Each part has an outcome of its own: one the server sends nothing for, or refuses,
+/// fails alone, and a FETCH of several refused, or answered so that it can't be read, as
+/// a whole is tried again a part at a time, so one bad part doesn't take the others with
+/// it. A failure of the server or the account as a whole stops the fetching
+/// ([`Blobs::stopped`]); what was here or came before it is kept.
+pub(crate) async fn attachment_blobs(
+    engine: &Arc<Engine>,
+    parts: &[(AttachmentId, u64)],
+) -> Result<Blobs> {
+    let mut found = HashMap::new();
+    let mut missing = Vec::new();
+    for &(id, size) in parts {
+        if found.contains_key(&id) || missing.iter().any(|m: &Missing| m.id == id) {
+            continue;
+        }
+        let source = match attachment_source(engine, id).await {
+            Ok(source) => source,
+            Err(e) => {
+                found.insert(id, Err(e));
+                continue;
+            }
+        };
+        match refreshed(engine, source.blob.clone()).await? {
+            Some(stored) => {
+                found.insert(id, Ok(stored));
+            }
+            // Missing from disk too: fetched again.
+            None => missing.push(Missing { id, size, source }),
+        }
+    }
+    let mut blobs = Blobs {
+        parts: found,
+        stopped: None,
+    };
+    for batch in batches(missing) {
+        if let Err(e) = fetch_batch(engine, batch, &mut blobs.parts).await {
+            blobs.stopped = Some(e);
+            break;
+        }
+    }
+    Ok(blobs)
+}
+
+/// Whether `e` is about the server or the account as a whole rather than one part:
+/// another FETCH would fare no better, and one to an account over its download limit
+/// only adds to it.
+fn account_wide(e: &Error) -> bool {
+    matches!(
+        e.kind(),
+        ErrorKind::Network | ErrorKind::Auth | ErrorKind::OverLimit
+    ) || matches!(e, Error::Cancelled)
+}
+
+/// `missing` in batches to fetch together: of one message, within [`BATCH_BYTES`], in
+/// order.
+fn batches(missing: Vec<Missing>) -> Vec<Vec<Missing>> {
+    let mut batches: Vec<Vec<Missing>> = Vec::new();
+    let mut bytes = 0;
+    for part in missing {
+        let joins = batches.last().is_some_and(|batch| {
+            batch[0].source.message.id == part.source.message.id && bytes + part.size <= BATCH_BYTES
+        });
+        if joins {
+            bytes += part.size;
+            batches.last_mut().expect("joins one").push(part);
+        } else {
+            bytes = part.size;
+            batches.push(vec![part]);
+        }
+    }
+    batches
+}
+
+/// Fetches the parts of `batch`, all of one message, with one FETCH, stores them, and
+/// puts each one's outcome in `found`. Fails, for the parts not in `found`, with what
+/// is wrong with the server or the account as a whole ([`account_wide`]).
+async fn fetch_batch(
+    engine: &Arc<Engine>,
+    batch: Vec<Missing>,
+    found: &mut HashMap<AttachmentId, Result<(BlobHash, u64)>>,
+) -> Result<()> {
+    let location = batch[0].source.message.clone();
+    let (account, folder, uid) = (location.account, location.folder, location.uid);
+    let sections: Vec<String> = batch.iter().map(|p| p.source.section.clone()).collect();
+    let answer = on_server(engine, location, async move |session, location| {
+        match session.fetch_sections(location.uid, &sections).await {
+            Ok(Some(parts)) => Ok(Some(Ok(parts))),
+            Ok(None) => Ok(None),
+            // Refused, or couldn't be read: about these parts, unless the account went
+            // over its limit, which every FETCH would be refused for.
+            Err(e @ (imap::Error::Command { .. } | imap::Error::Incomplete(_)))
+                if !e.is_over_limit() =>
+            {
+                Ok(Some(Err(e)))
+            }
+            Err(e) => Err(e.into()),
+        }
+    })
+    .await?;
+    let mut parts = match answer {
+        Ok(parts) => parts,
+        Err(e) if batch.len() == 1 => {
+            found.insert(batch[0].id, Err(e.into()));
+            return Ok(());
+        }
+        Err(_) => {
+            tracing::warn!(%account, uid, parts = batch.len(),
+                "couldn't fetch the parts together; fetching them one at a time");
+            for part in batch {
+                match attachment_blob(engine.clone(), part.id).await {
+                    Err(e) if account_wide(&e) => return Err(e),
+                    blob => {
+                        found.insert(part.id, blob);
+                    }
+                }
+            }
+            return Ok(());
+        }
+    };
+    let done = blocking({
+        let storage = engine.storage();
+        move || {
+            // Each decoded and put in the blob store, then recorded in one transaction.
+            let mut done: Vec<(AttachmentId, Result<(BlobHash, u64)>)> = Vec::new();
+            for Missing { id, source, .. } in batch {
+                let Some(encoded) = parts.remove(&source.section) else {
+                    let left_out = imap::Error::Protocol(format!(
+                        "the server sent nothing for part {} of UID {uid}",
+                        source.section
+                    ));
+                    done.push((id, Err(left_out.into())));
+                    continue;
+                };
+                let data = mime::decode_transfer(source.transfer_encoding.as_deref(), &encoded);
+                drop(encoded);
+                let size = data.len() as u64;
+                done.push((id, Ok((storage.put_bytes(&data)?, size))));
+            }
+            let gone = storage.write(|db| {
+                let mut gone = Vec::new();
+                for (i, (id, stored)) in done.iter().enumerate() {
+                    if let Ok((hash, size)) = stored
+                        && !db.attachments().set_blob(*id, hash, *size as u32)?
+                    {
+                        gone.push(i);
+                    }
+                }
+                Ok(gone)
+            })?;
+            for i in gone {
+                done[i].1 = Err(Error::AttachmentNotFound(done[i].0));
+            }
+            Ok(done)
+        }
+    })
+    .await?;
+    found.extend(done);
+    // Stored now, with their sizes as decoded.
+    engine.emit(Event::MessagesChanged { account, folder });
+    Ok(())
+}
+
+async fn stored_blob(engine: &Arc<Engine>, id: AttachmentId) -> Result<Option<(BlobHash, u64)>> {
+    refreshed(engine, attachment_source(engine, id).await?.blob).await
+}
+
+/// `blob` and its size, its GC grace period restarted, if it is on disk.
+async fn refreshed(
+    engine: &Arc<Engine>,
+    blob: Option<BlobHash>,
+) -> Result<Option<(BlobHash, u64)>> {
+    let Some(blob) = blob else {
+        return Ok(None);
+    };
+    let storage = engine.storage();
+    blocking(move || Ok(storage.refresh(&blob)?.map(|size| (blob, size)))).await
+}
+
+/// The raw message's blob and size, downloading it first if needed, without reading it.
+/// Its GC grace period restarts, as with [`attachment_blob`].
+pub(crate) async fn raw_blob(engine: Arc<Engine>, id: MessageId) -> Result<(BlobHash, u64)> {
+    // Not downloaded yet: fetch it whole, which stores the raw message too.
+    ensure_downloaded(&engine, id, true).await?;
+    let location = locate(&engine, id).await?;
+    if let Some(stored) = refreshed(&engine, location.raw.clone()).await? {
+        return Ok(stored);
+    }
+    let (hash, raw) = fetch_raw(&engine, location).await?;
+    Ok((hash, raw.len() as u64))
+}
+
+/// The raw message, fetching it if only its parts were downloaded.
+pub(crate) async fn raw_message(engine: Arc<Engine>, id: MessageId) -> Result<Vec<u8>> {
+    // Not downloaded yet: fetch it whole, which stores the raw message too.
+    ensure_downloaded(&engine, id, true).await?;
+    let location = locate(&engine, id).await?;
+    if let Some(raw) = &location.raw
+        && let Some(data) = read_blob(&engine, raw.clone()).await?
+    {
+        return Ok(data);
+    }
+    Ok(fetch_raw(&engine, location).await?.1)
+}
+
+/// Fetches the raw message of a message downloaded without it (or whose blob went
+/// missing), and stores it.
+async fn fetch_raw(engine: &Arc<Engine>, location: MessageLocation) -> Result<(BlobHash, Vec<u8>)> {
+    let (id, account, folder) = (location.id, location.account, location.folder);
+    let raw = on_server(engine, location, async move |session, location| {
+        Ok(session.fetch_raw(location.uid).await?)
+    })
+    .await?;
+    let stored = blocking({
+        let storage = engine.storage();
+        move || {
+            let hash = storage
+                .keep(&raw, |db, hash| db.messages().set_raw(id, hash))?
+                .ok_or(Error::MessageNotFound(id))?;
+            Ok((hash, raw))
+        }
+    })
+    .await?;
+    engine.emit(Event::MessagesChanged { account, folder });
+    Ok(stored)
+}
+
+/// Runs `op` against the message's folder on the server (see [`in_folder`]), on one of
+/// the account's pooled connections, cancelled if the account is removed meanwhile. Every
+/// on-demand fetch goes through here.
+///
+/// The caller looked up `location` before calling, and the cancellation is obtained
+/// after that: a removal that started earlier left the account marked removed, which
+/// cancels at once, and one that starts later is noticed.
+async fn on_server<T>(
+    engine: &Arc<Engine>,
+    location: MessageLocation,
+    op: impl AsyncFn(&mut Session, &MessageLocation) -> Result<Option<T>>,
+) -> Result<T> {
+    let mut cancellation = engine.cancellation(location.account);
+    let account = location.account;
+    let owned = engine.clone();
+    let began = Instant::now();
+    tokio::select! {
+        result = with_session(engine, account, async move |session| {
+            // What the user waits for when a message opens: a connection (a new one
+            // logs in, which is logged too), opening the folder unless it is open, then
+            // the fetch.
+            let connected = began.elapsed();
+            let (done, took) = in_folder(&owned, session, &location, &op).await?;
+            tracing::info!(%account, folder = %location.remote_name, uid = location.uid,
+                ?connected, examine = ?took.examine, fetch = ?took.fetch,
+                "fetched from the server");
+            Ok(done)
+        }) => result,
+        () = cancellation.cancelled() => Err(Error::Cancelled),
+    }
+}
+
+/// How long [`in_folder`] took to open the folder, if it did, and to fetch.
+pub(crate) struct Took {
+    pub examine: Option<Duration>,
+    pub fetch: Duration,
+}
+
+/// Runs `op` on `session` once the message's folder is open with the UIDVALIDITY
+/// confirmed (see [`examine`]).
+///
+/// `op` returns `None` if the server sent nothing of what it asked for. A folder that was
+/// open already is opened again and `op` tried once more: this connection's view of it
+/// may be older than the message, whatever [`examine`] made of it. If a UID SEARCH
+/// then finds no such UID, the message is gone and the local copy is deleted, as the
+/// next sync of the folder would: until then it would stay in the list (and in search,
+/// from another Gmail label), failing to open. Otherwise the server left it out: a
+/// protocol error, which drops the connection and its view of the folder.
+async fn in_folder<T>(
+    engine: &Arc<Engine>,
+    session: &mut Session,
+    location: &MessageLocation,
+    op: &impl AsyncFn(&mut Session, &MessageLocation) -> Result<Option<T>>,
+) -> Result<(T, Took)> {
+    let account = location.account;
+    let mut opened = examine(session, location).await?;
+    let mut fetched = Instant::now();
+    let mut done = op(session, location).await?;
+    if done.is_none() && opened.is_none() {
+        tracing::info!(%account, folder = %location.remote_name, uid = location.uid,
+            "nothing from the folder as it was open; opening it again");
+        opened = Some(reopen(session, location).await?);
+        fetched = Instant::now();
+        done = op(session, location).await?;
+    }
+    if let Some(done) = done {
+        let took = Took {
+            examine: opened,
+            fetch: fetched.elapsed(),
+        };
+        return Ok((done, took));
+    }
+    // Gone, or only left out of the answer?
+    if session.uid_search_uids(&[location.uid]).await?.is_empty() {
+        forget(engine, location.clone()).await?;
+        return Err(GONE);
+    }
+    Err(imap::Error::Protocol(format!(
+        "the server has the message (UID {}) but left it out of its answer",
+        location.uid
+    ))
+    .into())
+}
+
+/// Deletes the local copy of a message the server no longer has at `location`.
+async fn forget(engine: &Arc<Engine>, location: MessageLocation) -> Result<()> {
+    let (account, folder) = (location.account, location.folder);
+    let (deleted, labels) = engine
+        .write(move |db| {
+            let messages = db.messages();
+            Ok((messages.delete_gone(&location)?, messages.touched_labels()))
+        })
+        .await?;
+    if deleted {
+        // On Gmail the labels that listed it too.
+        for folder in BTreeSet::from_iter(labels.into_iter().chain([folder])) {
+            engine.emit(Event::MessagesChanged { account, folder });
+        }
+    }
+    Ok(())
+}
+
+/// Downloads and stores the body unless it is stored already. `whole` fetches even a
+/// large message whole, for its raw form.
+async fn ensure_downloaded(engine: &Arc<Engine>, id: MessageId, whole: bool) -> Result<()> {
+    // Held until the body is stored: another fetch of it waits for this one.
+    let (location, _claim) = loop {
+        let location = locate(engine, id).await?;
+        if location.downloaded {
+            if location
+                .body_version
+                .is_some_and(|v| v < mime::CONTENT_VERSION)
+            {
+                rebuild::on_open(engine, id).await;
+            }
+            return Ok(());
+        }
+        match engine.claim_body(id) {
+            Claim::Mine(claimed) => break (location, claimed),
+            // Then it is here, or that fetch failed and this one tries.
+            Claim::Theirs(mut fetched) => {
+                let began = Instant::now();
+                // Never sent to: it ends when that claim is released.
+                let _ = fetched.changed().await;
+                tracing::debug!(account = %location.account, message_id = %id,
+                    waited = ?began.elapsed(), "waited for the body fetched already");
+            }
+        }
+    };
+    let (account, folder) = (location.account, location.folder);
+    let limits = if whole {
+        Limits::RAW
+    } else {
+        Limits::opened(engine)
+    };
+    let fetched = on_server(engine, location, async move |session, location| {
+        fetch(session, location, limits).await
+    })
+    .await?;
+
+    let stored = blocking({
+        let storage = engine.storage();
+        move || {
+            let body = content::parse(&storage, fetched)?;
+            let labels = storage.write(|db| {
+                let messages = db.messages();
+                Ok(messages
+                    .store_body(id, &body)?
+                    .then(|| messages.touched_labels()))
+            })?;
+            if labels.is_some() {
+                return Ok(labels);
+            }
+            // Not stored: a concurrent download stored it first, or the message is gone.
+            let location = storage.read(|db| db.messages().location(id))?;
+            match location {
+                Some(location) if location.downloaded => Ok(None),
+                _ => Err(Error::MessageNotFound(id)),
+            }
+        }
+    })
+    .await?;
+    if let Some(labels) = stored {
+        // Snippet and attachment marker changed, where it is and on Gmail where it shows.
+        for folder in labels.into_iter().chain([folder]) {
+            engine.emit(Event::MessagesChanged { account, folder });
+        }
+    }
+    Ok(())
+}
+
+/// Fetches the message's body on `session` (see [`in_folder`]), for the background
+/// prefetch, which has a connection of its own, and for new mail as sync finds it.
+pub(crate) async fn fetch_body(
+    engine: &Arc<Engine>,
+    session: &mut Session,
+    location: &MessageLocation,
+    limits: Limits,
+) -> Result<(Fetched, Took)> {
+    let op = async move |session: &mut Session, location: &MessageLocation| {
+        fetch(session, location, limits).await
+    };
+    in_folder(engine, session, location, &op).await
+}
+
+/// Runs after [`examine`] (see [`in_folder`]). Fetches a message larger than
+/// `limits.whole` in parts. `None` if the message is gone.
+async fn fetch(
+    session: &mut Session,
+    location: &MessageLocation,
+    limits: Limits,
+) -> Result<Option<Fetched>> {
+    let uid = location.uid;
+    if location.size.is_some_and(|size| size > limits.whole) {
+        match session.fetch_structure(uid).await {
+            Ok(Some(structure)) => {
+                let sections = structure.text_sections(limits.text);
+                let Some(parts) = session.fetch_sections(uid, &sections).await? else {
+                    return Ok(None);
+                };
+                // A body stored without some of its text would never be fetched again.
+                if sections.iter().all(|s| parts.contains_key(s)) {
+                    let Some(headers) = mime_headers(session, uid, &structure).await? else {
+                        return Ok(None);
+                    };
+                    return Ok(Some(Fetched::Parts(Box::new(Parts::new(
+                        structure, parts, headers,
+                    )))));
+                }
+                tracing::warn!(
+                    uid,
+                    "server left out text parts; fetching the whole message"
+                );
+            }
+            Ok(None) => return Ok(None),
+            // Some servers send BODYSTRUCTUREs that can't be parsed; the raw message
+            // can always be.
+            Err(imap::Error::Incomplete(_)) => {
+                tracing::warn!(uid, "unparsable BODYSTRUCTURE; fetching the whole message");
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(session.fetch_raw(uid).await?.map(Fetched::Whole))
+}
+
+/// The MIME headers of the parts whose file names lost bytes in the BODYSTRUCTURE (see
+/// [`garbled_sections`](mime::MimeNode::garbled_sections)), so they can be read as in a
+/// whole message. `None` if the message is gone.
+async fn mime_headers(
+    session: &mut Session,
+    uid: u32,
+    structure: &mime::MimeNode,
+) -> Result<Option<HashMap<String, Vec<u8>>>> {
+    match session
+        .fetch_mime_headers(uid, &structure.garbled_sections())
+        .await
+    {
+        Ok(headers) => Ok(headers),
+        // Only the names stay garbled.
+        Err(imap::Error::Incomplete(_)) => {
+            tracing::warn!(
+                uid,
+                "unparsable MIME headers; keeping the names from BODYSTRUCTURE"
+            );
+            Ok(Some(HashMap::new()))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Opens the message's folder read-only and makes sure its UIDs still mean what they
+/// meant when the message was stored. A connection that has it open read-only already,
+/// with that UIDVALIDITY and since before the message arrived, is used as it is (see
+/// [`Session::examined`]): on Gmail nearly every message is in All Mail. Returns how
+/// long opening it took, if it was opened.
+async fn examine(session: &mut Session, location: &MessageLocation) -> Result<Option<Duration>> {
+    if session
+        .examined(&location.remote_name, location.uid)
+        .is_some_and(|open| location.uidvalidity == Some(open))
+    {
+        return Ok(None);
+    }
+    Ok(Some(reopen(session, location).await?))
+}
+
+/// Opens the message's folder read-only, open or not, and checks its UIDVALIDITY as
+/// [`examine`] does. Returns how long that took.
+async fn reopen(session: &mut Session, location: &MessageLocation) -> Result<Duration> {
+    let began = Instant::now();
+    let status = session.examine(&location.remote_name).await?;
+    if !status.same_generation(location.uidvalidity) {
+        return Err(Error::OutOfSync(REBUILT));
+    }
+    Ok(began.elapsed())
+}
+
+async fn locate(engine: &Arc<Engine>, id: MessageId) -> Result<MessageLocation> {
+    engine
+        .read(move |db| db.messages().location(id))
+        .await?
+        .ok_or(Error::MessageNotFound(id))
+}
+
+async fn attachment_source(engine: &Arc<Engine>, id: AttachmentId) -> Result<AttachmentSource> {
+    engine
+        .read(move |db| db.messages().attachment_source(id))
+        .await?
+        .ok_or(Error::AttachmentNotFound(id))
+}
+
+/// `None` if the blob has gone missing from disk, so the caller fetches it again.
+pub(crate) async fn read_blob(engine: &Arc<Engine>, hash: BlobHash) -> Result<Option<Vec<u8>>> {
+    let storage = engine.storage();
+    blocking(move || {
+        let data = storage.blob(&hash)?;
+        if data.is_none() {
+            tracing::warn!(%hash, "referenced blob is missing; fetching again");
+        }
+        Ok(data)
+    })
+    .await
+}

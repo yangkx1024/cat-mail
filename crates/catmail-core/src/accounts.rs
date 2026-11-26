@@ -1,6 +1,6 @@
 //! Accounts and the identities they send as: adding them (logging in to their servers
 //! first, if asked), changing and removing them, with their passwords in the keyring.
-//! Adding writes the keyring entry before the row naming it ([`Storage::insert_with_secret`](crate::storage::Storage::insert_with_secret));
+//! Adding writes the keyring entry before the row naming it ([`Storage::insert_with_secret`](crate::engine::storage::Storage::insert_with_secret));
 //! removing deletes the row (`RETURNING secret_key`) before the entry.
 
 use std::sync::Arc;
@@ -13,10 +13,12 @@ use catmail_types::{
 };
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::connection::Announced;
 use crate::engine::Engine;
+use crate::engine::connection::Announced;
 use crate::task::{blocking, now};
-use crate::{Error, Result, addresses, connection, drafts, prefetch, watch};
+use crate::{
+    Error, Result, body::prefetch, drafts, drafts::addresses, engine::connection, sync::watch,
+};
 
 /// Whether [`MailClient::add_account`](crate::MailClient::add_account) and
 /// [`MailClient::add_identity`](crate::MailClient::add_identity) log in to the servers

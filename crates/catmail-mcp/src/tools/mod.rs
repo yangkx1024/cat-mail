@@ -120,6 +120,11 @@ impl Scope {
 }
 
 /// Cheap to clone, as rmcp makes one for every request: the router is built once.
+///
+/// The structure check's `field-leak` entries for `client`, `scope`, `asked` and `uploads`
+/// are its reading of the tools' `#[tool_router]` blocks, whose methods it doesn't count
+/// as `Mail`'s own; the plain `impl Mail` blocks read the same fields unreported. See
+/// docs/architecture/mcp.md.
 #[derive(Clone)]
 pub(crate) struct Mail {
     client: MailClient,

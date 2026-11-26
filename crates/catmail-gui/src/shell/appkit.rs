@@ -15,7 +15,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use block2::RcBlock;
-use catmail_frontend::resident::QuitReason;
+use catmail_frontend::system::resident::QuitReason;
 use dispatch2::{DispatchQueue, DispatchTime};
 use nsh_platform_macos::{AppOptions, AppView, Appearance};
 use objc2::rc::Retained;
@@ -105,7 +105,7 @@ define_class!(
         /// the login's.
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _notification: &NSNotification) {
-            super::launched(catmail_frontend::autostart::launched_at_login());
+            super::launched(catmail_frontend::system::autostart::launched_at_login());
         }
 
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]

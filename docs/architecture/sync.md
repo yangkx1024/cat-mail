@@ -3,7 +3,7 @@
 [← 架构](../architecture.md)
 
 `MailClient::sync_account`：一条连接，逐个文件夹 EXAMINE（只读，不改 `\Recent`）。同一账户的
-同步与操作回放由每账户的同步锁串行化（见[锁](#锁)）。代码在 `crates/catmail-core/src/sync.rs`、`engine.rs`。
+同步与操作回放由每账户的同步锁串行化（见[锁](#锁)）。代码在 `crates/catmail-core/src/sync/mod.rs`、`engine.rs`。
 
 同步的是**位置**（`folders.kind = 'location'`）：普通账户上是所有可选中的邮箱。Gmail 账户上只有"所有邮件"、
 已删除、垃圾邮件三个，作为一个单元同步，其余邮箱是标签，随邮件的 `X-GM-LABELS` 存下、不 EXAMINE，见
@@ -130,7 +130,7 @@ flags，重复的批次不产生重复行）。HIGHESTMODSEQ 用 EXAMINE 时刻�
 ## 后台同步与 IDLE
 
 `MailClientBuilder::sync_in_background(Some(SyncSchedule))` 时（GUI、`catmail watch`），引擎为每个
-账户起一个后台任务（`crates/catmail-core/src/watch.rs`），它只有一条连接。间隔都在 `SyncSchedule`
+账户起一个后台任务（`crates/catmail-core/src/sync/watch.rs`），它只有一条连接。间隔都在 `SyncSchedule`
 里，括号里是默认值。
 
 - **同步什么。** 每隔 `full_sync`（15 分钟）同步全部文件夹（`sync::run`，与 `sync_account` 相同；

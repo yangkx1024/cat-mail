@@ -31,7 +31,7 @@
 - [x] 自建 `gtk::Application` / `NSApplication`，每个窗口放一个 `AppView`，替换 `run_app`（`shell/`）。引擎由应用
       持有（`engine.rs`），主循环结束后 `shut_down` 并等它关好；Ctrl+Q、Ctrl+W、SIGINT / SIGTERM 都走这个退出流程
 - [x] 引擎异步打开（`open_async`）：先显示窗口，打不开时显示原因
-- [x] 单实例（`catmail_frontend::instance`）：再次启动时唤起已有窗口；Wayland 下用启动方的 activation token 获得焦点
+- [x] 单实例（`catmail_frontend::system::instance`）：再次启动时唤起已有窗口；Wayland 下用启动方的 activation token 获得焦点
 - [x] 日志写进数据目录（`logging::write_file`）
 - [x] 读 `settings.json`，应用外观和文字大小（`AppView::set_font_scale`）
 - [x] 图标：Heroicons SVG，`include_str!` 后用 nsh 的 `svg` 画，`currentColor` 跟随文字色（`icons.rs`）
@@ -101,7 +101,7 @@
 - [ ] 正文里拖进图片：现在拖进窗口的文件都当附件（窗口的 file-drop）
 - [x] 链接：输入、粘贴的网址自动变链接（nsh 的 `link` 插件），底栏按钮和 Ctrl+K 的对话框插入、修改、去掉链接
 - [x] 删掉正文里的图片后，它的内嵌附件在关窗时删掉（编辑中、发送失败后都留着，撤销还能带回来）
-- [x] 回复、转发的引文在编辑器下面：收起的横栏，展开后和读信区一样显示（共用 `web.rs`）；去掉引文、在引文里回复
+- [x] 回复、转发的引文在编辑器下面：收起的横栏，展开后和读信区一样显示（共用 `web/`）；去掉引文、在引文里回复
 
 ## P6 发件箱（gui.md「发件箱」）
 
@@ -116,7 +116,7 @@
       导入各种终端配色格式
 - [x] 跟随系统外观（nsh 自带，经 XDG portal）
 - [x] Agents：MCP 服务的开关、端口，令牌的增删（新令牌只在这里显示一次，可复制；加时选层级和账户）；服务由
-      frontend 的 `mcp::Host` 在自己的线程上运行，引擎打开后启动，退出时先于引擎停下
+      frontend 的 `settings::mcp::Host` 在自己的线程上运行，引擎打开后启动，退出时先于引擎停下
 
 ## P8 登录页（gui.md「登录页」）
 
@@ -125,7 +125,7 @@
 
 ## P9 常驻与系统集成（docs/architecture/background.md）
 
-- [x] 托盘：Linux 是 ksni（frontend 的 `tray::linux`），菜单 Open catmail、New message、Sync now、Quit。图标用 resvg
+- [x] 托盘：Linux 是 ksni（frontend 的 `system::tray::linux`），菜单 Open catmail、New message、Sync now、Quit。图标用 resvg
       在另一个线程上画（nsh-core 已经带了 resvg，这里另外打开 `text` 画角标数字）。亮暗跟随 portal 的
       `color-scheme`，即桌面的外观而不是应用的，常驻时也跟随
 - [x] 关窗后常驻，重开时回到上次的位置（`shell::left_at`）。Quit（Ctrl+Q、托盘、SIGHUP / SIGINT / SIGTERM）先关写信
@@ -138,11 +138,11 @@
       `PrepareForSleep(false)`（Linux，GIO 的 D-Bus，Flatpak 里要 `--system-talk-name=org.freedesktop.login1`）和
       `NSWorkspaceDidWakeNotification`（macOS），调 `MailClient::resume()`（`wake.rs`）。听不到时靠引擎自己发现睡眠（`sleep.rs`，最多晚 30 秒）。⚠️ 还没在真机的
       睡眠上确认过（看日志的 `the frontend says the computer woke`）
-- [x] 开机启动（macOS）：Settings › General 的 "Open at login" 是 `SMAppService.mainApp`（frontend 的 `autostart`），
+- [x] 开机启动（macOS）：Settings › General 的 "Open at login" 是 `SMAppService.mainApp`（frontend 的 `system::autostart`），
       只在 bundle 里、macOS 13 起显示。`--background` 和登录时的启动不开窗口（`shell::launched`）；登录时的启动按
       启动的 Apple Event 判断，⚠️ 还没在真的登录上确认过（看日志的 `launched opened=…`）
 - [x] 开机启动（Linux）：XDG autostart 文件，Flatpak 里经 Background portal 的 `RequestBackground`，都带
-      `--background`（frontend 的 `autostart::platform`）。Flatpak 里的状态是 portal 上次的答复。Flatpak 里对真
+      `--background`（frontend 的 `system::autostart::platform`）。Flatpak 里的状态是 portal 上次的答复。Flatpak 里对真
       portal 的请求试过，写出、删掉都对。⚠️ 还没在真的登录上确认过；portal 配置里没有 Background 的桌面
       （wlroots 系常见）按开关会报错
 - [x] macOS 常驻时切到 Accessory 激活策略：只留状态栏图标，Dock 图标和应用切换器里都没有，开窗时切回 Regular
@@ -197,7 +197,7 @@
       dispatch queue 上跑；输入框失焦自己用事件 monitor 做（同 Linux）。菜单栏、外观映射抄了 nsh `run_app` 的私有
       实现（停主循环原来也抄了，现在退出都经过 AppKit 的 `terminate:`，用不着了，#366），失焦两个后端各一份，宜由 nsh 提供（#248）。菜单栏有应用菜单（⌘Q 走退出流程）、Edit、Window（⌘W
       走窗口的关闭询问），点 Dock 图标唤回主窗口；信号用 `ctrlc`。快捷键提示用 nsh 的 `key_label`
-- [x] macOS 状态栏图标（frontend 的 `tray::macos`）：计数、绘制与 Linux 共用（`tray/mod.rs`），模板图用 resvg 画一次，
+- [x] macOS 状态栏图标（frontend 的 `system::tray::macos`）：计数、绘制与 Linux 共用（`system/tray/mod.rs`），模板图用 resvg 画一次，
       未读数写在图标旁和 Dock 角标上
 - [x] macOS 窗口外框（`chrome.rs`，nsh 的 `TitleBarStyle::Hidden` 和 `window_drag`）：主窗口一体式，红绿灯在侧栏
       左上角、各栏顶部那一行里（52 pt，AppKit unified 工具栏给按钮的那一行高；主窗口通过 `controls_offset` 居中并
@@ -210,5 +210,5 @@
 - [x] macOS：注销时不取消。`applicationShouldTerminate` 答 `TerminateLater`，写信窗口存完再答可以退出，AppKit 自己
       结束进程，引擎在 `applicationWillTerminate:` 里关；有写信窗口关不了时答不退出，注销随之取消
 - [ ] **Windows**：接上 nsh 的 Windows 后端（`nsh-platform-windows`：Win32、Direct2D、DirectWrite、正文在 WebView2）。
-      要做的是外壳的第三个工具包（窗口与主循环、信号与退出）、托盘（frontend 的 `tray` 里加 Windows 的实现，#109）、
-      新邮件通知；单实例已在 `catmail_frontend::instance`，三个平台一套。再加 Windows 的打包。之前 Windows 上只有 CLI
+      要做的是外壳的第三个工具包（窗口与主循环、信号与退出）、托盘（frontend 的 `system::tray` 里加 Windows 的实现，#109）、
+      新邮件通知；单实例已在 `catmail_frontend::system::instance`，三个平台一套。再加 Windows 的打包。之前 Windows 上只有 CLI

@@ -2,7 +2,7 @@
 //! list has selected (a message, a draft or an outbox entry), with handles between them
 //! to drag their widths.
 
-use catmail_frontend::list::RowId;
+use catmail_frontend::mailbox::list::RowId;
 use nsh_base::{HandleEdge, resize_handle, theme};
 use nsh_core::prelude::*;
 

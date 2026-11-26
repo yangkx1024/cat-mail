@@ -1,0 +1,400 @@
+//! Logged-in IMAP (and SMTP) connections for an account, and the rules for using an IMAP
+//! one again, pooled or not ([`with_session`], [`on_session`], [`with_session_redone`]):
+//! on-demand requests (bodies, attachments, saving to Sent, replays, the sync of an
+//! opened folder) take one from the account's [`Pool`](crate::engine::pool::Pool), so that
+//! opening messages one after another doesn't log in each time; sync of every folder and
+//! background sync keep connections of their own, which follow the same rules.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use catmail_proto::imap::{Session, TextSearch};
+use catmail_proto::{Credentials, smtp};
+use catmail_store::{Db, DraftSnapshot, SmtpAnnounced};
+use catmail_types::{Account, AccountId, Address, DraftId, Event, IdentityId, ServerConfig};
+use secrecy::{ExposeSecret, SecretString};
+
+use crate::engine::Engine;
+use crate::task::blocking;
+use crate::{Error, Result};
+
+/// Per network read or write, not per command.
+pub(crate) const IO_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Opens a new connection to the account's IMAP server and logs in. What the server
+/// tells of itself is recorded if it changed: servers change their APPENDLIMIT, and
+/// whether it is Gmail's is known from the first login, not only once synced (identities
+/// guess by it whether the server saves what they send to Sent), and whether it searches
+/// text, so that searches on the server needn't log in to find out. Failing to only
+/// leaves what was recorded before, which sending checks anyway, and a search finds out
+/// again.
+pub(crate) async fn connect(engine: &Arc<Engine>, account_id: AccountId) -> Result<Session> {
+    let (account, credentials, recorded) = account_credentials(engine, account_id).await?;
+    let began = Instant::now();
+    let session = login(engine, &account.imap, &credentials).await?;
+    tracing::info!(account = %account_id, host = %account.imap.host, took = ?began.elapsed(),
+        "logged in to IMAP");
+    let announced = Announced::of(&session);
+    if recorded != announced {
+        match engine
+            .write(move |db| announced.record(db, account_id))
+            .await
+        {
+            Ok(true) => engine.emit(Event::AccountChanged {
+                account: account_id,
+            }),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(error = %e, "couldn't record what the server announced"),
+        }
+    }
+    Ok(session)
+}
+
+/// What the IMAP server tells of itself, as recorded on connecting (see [`connect`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Announced {
+    /// The largest message it takes in APPEND. `APPENDLIMIT=0` is no APPEND at all
+    /// (RFC 7889): no size, nor anything for attachments to fit, since no copy of any
+    /// size is kept.
+    pub append_limit: Option<u64>,
+    /// It is Gmail's (X-GM-EXT-1): [`Account::gmail_server`].
+    pub gmail: bool,
+    /// Its greeting doesn't say it can't search text (see `Session::text_search`).
+    pub searches_text: bool,
+}
+
+/// As for a server not connected to yet.
+impl Default for Announced {
+    fn default() -> Self {
+        Self {
+            append_limit: None,
+            gmail: false,
+            searches_text: true,
+        }
+    }
+}
+
+impl Announced {
+    pub fn of(session: &Session) -> Self {
+        Self {
+            append_limit: session.capabilities().append_limit().filter(|&l| l > 0),
+            gmail: session.is_gmail(),
+            searches_text: session.text_search() != TextSearch::Unsupported,
+        }
+    }
+
+    /// Returns whether the [`Account`] changed: whether it is Gmail's.
+    pub fn record(self, db: &Db<'_>, account: AccountId) -> catmail_store::Result<bool> {
+        let accounts = db.accounts();
+        accounts.set_append_limit(account, self.append_limit)?;
+        accounts.set_searches_text(account, self.searches_text)?;
+        accounts.set_gmail_server(account, self.gmail)
+    }
+}
+
+/// Writes a size limit with `record`, which only logs failing to: see [`connect`].
+async fn record_limit(
+    engine: &Arc<Engine>,
+    record: impl FnOnce(&Db<'_>) -> catmail_store::Result<()> + Send + 'static,
+) {
+    if let Err(e) = engine.write(record).await {
+        tracing::warn!(error = %e, "couldn't record the server's size limit");
+    }
+}
+
+/// The draft as it is now, and who it is from; `None` if it is gone.
+pub(crate) fn draft_sender(
+    db: &Db<'_>,
+    draft: DraftId,
+) -> catmail_store::Result<Option<(DraftSnapshot, Address)>> {
+    let Some(snapshot) = db.drafts().snapshot(draft)? else {
+        return Ok(None);
+    };
+    let d = &snapshot.draft;
+    // The composite key keeps the identity the draft's account's.
+    let identity = db.identities().get(d.identity)?;
+    Ok(identity.map(|identity| (snapshot, identity.address())))
+}
+
+/// Identities of an account that send over the same SMTP login: the same server,
+/// username and password, as aliases set up at one provider are.
+pub(crate) struct SmtpLogin {
+    /// With what was recorded of the server's announcements for each.
+    identities: Vec<(SendAs, Option<SmtpAnnounced>)>,
+    server: ServerConfig,
+    credentials: Credentials,
+}
+
+impl SmtpLogin {
+    pub fn identities(&self) -> impl Iterator<Item = &SendAs> {
+        self.identities.iter().map(|(identity, _)| identity)
+    }
+
+    /// Opens a new connection and logs in. What the server announces (SIZE, 8BITMIME) is
+    /// recorded for every identity sending over it, as [`connect`] does the APPENDLIMIT.
+    pub async fn connect(&mut self, engine: &Arc<Engine>) -> Result<smtp::Session> {
+        let session = smtp_login(engine, &self.server, &self.credentials).await?;
+        let announced = announced(&session);
+        let changed: Vec<_> = self
+            .identities
+            .iter_mut()
+            .filter(|(_, recorded)| *recorded != Some(announced))
+            .map(|(identity, recorded)| {
+                *recorded = Some(announced);
+                identity.id
+            })
+            .collect();
+        if !changed.is_empty() {
+            record_limit(engine, move |db| {
+                changed.into_iter().try_for_each(|identity| {
+                    db.identities().set_smtp_announced(identity, announced)
+                })
+            })
+            .await;
+        }
+        Ok(session)
+    }
+}
+
+/// What the SMTP server announced that sending depends on.
+pub(crate) fn announced(session: &smtp::Session) -> SmtpAnnounced {
+    SmtpAnnounced {
+        max_size: session.max_size(),
+        eight_bit_mime: session.eight_bit_mime(),
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct SendAs {
+    pub id: IdentityId,
+    pub email: String,
+}
+
+/// The logins that send as the account's `identities`, each identity in exactly one, in
+/// the order of the first identity of each. One that is gone, or whose password can't be
+/// read, comes back with why.
+///
+/// Identities with the same server and username but different passwords stay apart: one
+/// of the passwords is out of date, and logging in with it mustn't hold back the other.
+pub(crate) async fn smtp_logins(
+    engine: &Arc<Engine>,
+    account: AccountId,
+    identities: Vec<IdentityId>,
+) -> Result<Vec<std::result::Result<SmtpLogin, (SendAs, Error)>>> {
+    let found = engine
+        .read(move |db| {
+            identities
+                .into_iter()
+                .map(|identity| Ok((identity, db.identities().sending(account, identity)?)))
+                .collect::<catmail_store::Result<Vec<_>>>()
+        })
+        .await?;
+    let mut logins: Vec<std::result::Result<SmtpLogin, _>> = Vec::new();
+    // Each keyring entry read once: the account's serves every identity without its own.
+    let mut passwords: HashMap<String, SecretString> = HashMap::new();
+    for (identity, sending) in found {
+        // One gone has no address, nor needs one: nothing is recorded about sending as it.
+        let email = sending.as_ref().map(|s| s.identity.email.clone());
+        let send_as = SendAs {
+            id: identity,
+            email: email.unwrap_or_default(),
+        };
+        let Some(sending) = sending else {
+            logins.push(Err((send_as, Error::IdentityNotFound(identity))));
+            continue;
+        };
+        let key = sending.login_key;
+        let password = match passwords.get(&key) {
+            Some(password) => password.clone(),
+            None => match password(engine, key.clone(), &sending.identity.email).await {
+                Ok(password) => passwords.entry(key).or_insert(password).clone(),
+                Err(e) => {
+                    logins.push(Err((send_as, e)));
+                    continue;
+                }
+            },
+        };
+        let (server, username) = (sending.identity.smtp, sending.identity.username);
+        let shared = logins.iter_mut().flatten().find(|login| {
+            login.server == server
+                && login.credentials.username == username
+                && login.credentials.password.expose_secret() == password.expose_secret()
+        });
+        match shared {
+            Some(login) => login.identities.push((send_as, sending.smtp)),
+            None => logins.push(Ok(SmtpLogin {
+                identities: vec![(send_as, sending.smtp)],
+                server,
+                credentials: Credentials { username, password },
+            })),
+        }
+    }
+    Ok(logins)
+}
+
+pub(crate) async fn smtp_login(
+    engine: &Engine,
+    server: &ServerConfig,
+    credentials: &Credentials,
+) -> Result<smtp::Session> {
+    let mut session = smtp::Session::connect(server, &engine.tls()?, IO_TIMEOUT).await?;
+    session.login(credentials).await?;
+    Ok(session)
+}
+
+/// Also the APPENDLIMIT the server announced when last connected to.
+async fn account_credentials(
+    engine: &Arc<Engine>,
+    account_id: AccountId,
+) -> Result<(Account, Credentials, Announced)> {
+    let ((account, secret_key), recorded) = engine
+        .read(move |db| {
+            let accounts = db.accounts();
+            let found = accounts
+                .get(account_id)?
+                .zip(accounts.secret_key(account_id)?);
+            let (append_limit, searches_text) = (
+                accounts.append_limit(account_id)?,
+                accounts.searches_text(account_id)?,
+            );
+            Ok(found.map(|(account, key)| {
+                let recorded = Announced {
+                    append_limit,
+                    gmail: account.gmail_server,
+                    searches_text,
+                };
+                ((account, key), recorded)
+            }))
+        })
+        .await?
+        .ok_or_else(|| Error::AccountNotFound(account_id.to_string()))?;
+    let password = password(engine, secret_key, &account.email).await?;
+    let credentials = Credentials {
+        username: account.username.clone(),
+        password,
+    };
+    Ok((account, credentials, recorded))
+}
+
+/// The password in the keyring entry `secret_key`, for the account or identity with
+/// that address.
+async fn password(engine: &Arc<Engine>, secret_key: String, email: &str) -> Result<SecretString> {
+    let storage = engine.storage();
+    blocking(move || storage.secret(&secret_key))
+        .await?
+        .ok_or_else(|| {
+            Error::Secrets(format!(
+                "no stored password for {email}; remove it and add it again"
+            ))
+        })
+}
+
+pub(crate) async fn login(
+    engine: &Engine,
+    server: &ServerConfig,
+    credentials: &Credentials,
+) -> Result<Session> {
+    let mut session = Session::connect(server, &engine.tls()?, IO_TIMEOUT).await?;
+    session.login(credentials).await?;
+    Ok(session)
+}
+
+/// Runs `op` on one of the account's idle connections, or a new one, and keeps the
+/// connection for next time unless it failed; see [`on_session`].
+///
+/// Pass an `async move` closure that owns what it captures (a clone of the engine, not a
+/// reference to it): with a borrowed capture held across an `.await`, the closure's
+/// future can't be proven `Send` (a compiler limitation with higher-ranked lifetimes),
+/// so neither can the caller's.
+pub(crate) async fn with_session<T>(
+    engine: &Arc<Engine>,
+    account: AccountId,
+    mut op: impl AsyncFnMut(&mut Session) -> Result<T>,
+) -> Result<T> {
+    pooled(engine, account, false, async move |session, _| {
+        op(session).await
+    })
+    .await
+}
+
+/// As [`with_session`], for a change the server may have made before its answer was lost:
+/// `op` also runs once more if a new connection breaks while it runs, not only a reused
+/// one, and is told whether this is a try after the first, when it should look at what
+/// the server already did rather than do it again.
+pub(crate) async fn with_session_redone<T>(
+    engine: &Arc<Engine>,
+    account: AccountId,
+    op: impl AsyncFnMut(&mut Session, bool) -> Result<T>,
+) -> Result<T> {
+    pooled(engine, account, true, op).await
+}
+
+async fn pooled<T>(
+    engine: &Arc<Engine>,
+    account: AccountId,
+    redo_new: bool,
+    op: impl AsyncFnMut(&mut Session, bool) -> Result<T>,
+) -> Result<T> {
+    let pool = engine.pool(account);
+    let mut slot = pool.take();
+    let result = trying(engine, account, &mut slot, redo_new, op).await;
+    if let Some(session) = slot
+        && result.as_ref().err().is_none_or(|e| !e.breaks_connection())
+    {
+        pool.put(session);
+    }
+    result
+}
+
+/// Runs `op` on the connection in `slot`, or on a new one put there: also in place of one
+/// that isn't [`usable`](Engine::usable). If the one there turns out to be dead (disconnected, not merely
+/// unusable after a refusal), `op` runs once more on a fresh one.
+pub(crate) async fn on_session<T>(
+    engine: &Arc<Engine>,
+    account: AccountId,
+    slot: &mut Option<Session>,
+    mut op: impl AsyncFnMut(&mut Session) -> Result<T>,
+) -> Result<T> {
+    trying(engine, account, slot, false, async move |session, _| {
+        op(session).await
+    })
+    .await
+}
+
+/// [`on_session`], and with `redo_new` once more on a fresh connection if the new one
+/// broke too; `op` is told whether it runs after a try that broke.
+async fn trying<T>(
+    engine: &Arc<Engine>,
+    account: AccountId,
+    slot: &mut Option<Session>,
+    redo_new: bool,
+    mut op: impl AsyncFnMut(&mut Session, bool) -> Result<T>,
+) -> Result<T> {
+    if slot.as_ref().is_some_and(|s| !engine.usable(s)) {
+        tracing::info!(%account, "connection from before a sleep; reconnecting");
+        *slot = None;
+    }
+    let mut again = false;
+    if let Some(session) = slot {
+        match op(session, again).await {
+            // A fresh connection, not another idle one: those are likely dead too.
+            Err(e) if e.is_disconnected() => {
+                tracing::info!(%account, error = %e, "reused connection was dead; reconnecting");
+                again = true;
+            }
+            result => return result,
+        }
+    }
+    *slot = None;
+    let session = slot.insert(connect(engine, account).await?);
+    match op(session, again).await {
+        Err(e) if redo_new && e.is_disconnected() => {
+            tracing::info!(%account, error = %e, "new connection broke; trying again");
+            *slot = None;
+            let session = slot.insert(connect(engine, account).await?);
+            op(session, true).await
+        }
+        result => result,
+    }
+}

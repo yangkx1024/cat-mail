@@ -1,10 +1,10 @@
 //! How the reading pane looks: the toolbar of commands, the message's header, the web
 //! view its body is shown in, and its attachments.
 
-use catmail_frontend::commands::MessageCommand;
 use catmail_frontend::format;
-use catmail_frontend::list as rows;
-use catmail_frontend::reader::{self, Header};
+use catmail_frontend::mailbox::commands::MessageCommand;
+use catmail_frontend::mailbox::list as rows;
+use catmail_frontend::mailbox::reader::{self, Header};
 use nsh_base::theme;
 use nsh_core::prelude::*;
 
@@ -16,8 +16,8 @@ use crate::mailbox::compose;
 use crate::mailbox::list::back_button;
 use crate::mailbox::list::{self};
 use crate::mailbox::listing;
-use crate::theme::SelectableText as _;
-use crate::{chrome, web};
+use crate::shell::theme::SelectableText as _;
+use crate::{shell::chrome, web};
 
 use super::{
     BodyHeight, Reading, Retry, ShowDetails, State, open_in_browser, page_painted, page_state,

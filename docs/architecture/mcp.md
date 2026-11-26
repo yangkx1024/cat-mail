@@ -33,7 +33,7 @@ MCP 不是第三个各自打开数据库的前端，而是一个库 `catmail-mcp
   有版本的公开协议，托管在引擎所在的进程里不需要私有协议。
 - 同一个数据目录只会有一个宿主，引擎的锁保证。两个宿主的引擎配置相同（后台同步、预取正文、后台发信、
   GC）：`MailClientBuilder::resident()`，GUI 和 `serve` 都用它。
-- GUI 里的服务跑在专门的线程上（`catmail_frontend::mcp::Host`），用它自己的 current-thread tokio runtime，
+- GUI 里的服务跑在专门的线程上（`catmail_frontend::settings::mcp::Host`），用它自己的 current-thread tokio runtime，
   不碰工具包的主循环；`MailClient` 的 future 不依赖 executor（见[运行时桥接](../architecture.md#运行时桥接)）。
   开关随时启停，不重启 GUI。详见下文 [GUI 托管](#gui-托管)。
 - `catmail serve` 也是 Windows 上唯一的宿主（那里还没有 GUI）。
@@ -50,7 +50,7 @@ MCP 不是第三个各自打开数据库的前端，而是一个库 `catmail-mcp
 
 Settings › Agents：开关、端口，下面是令牌。
 
-- **服务的线程**（`catmail_frontend::mcp::Host`）：引擎打开后由外壳（`shell/mod.rs`）建好，一直到应用退出；
+- **服务的线程**（`catmail_frontend::settings::mcp::Host`）：引擎打开后由外壳（`shell/mod.rs`）建好，一直到应用退出；
   服务按设置开、关、换端口。外壳像视图一样跟随设置，每变一次把**当时生效的**设置交给它（两个视图线程上的两次
   修改可能以任意顺序到达），`update_settings` 本身不认识 MCP。它只看最新的一个，与正在用的相同就不动：改别的设置不会重启服务，也不会重试刚失败的端口（关掉再
   打开才重试）。换端口时先停旧的再开新的。
@@ -319,6 +319,10 @@ claude mcp add --transport http catmail https://mac.tailnet.ts.net/mcp \
   `mod.rs` 是共用的部分（`Mail`、`Scope`、`Failed`、各工具的层级 `tier_of`、按范围找账户/文件夹/邮件、日志的
   `logged`）和 `ServerHandler`（按层级列出、调用前限频与定范围）；`reading.rs`、`organizing.rs`、`drafts.rs` 是
   三个层级的工具，`sending.rs` 是发信（问用户的多轮请求与 `Asked`）；`downloads.rs` 是下载预算的扣与退（`with_body`、`downloading`）。
+  结构检查（`scripts/deslop.sh`）把 `#[tool_router]` 块里的方法当成 `Mail` 之外的代码，所以基线里的
+  `field-leak catmail_mcp::tools::Mail::{client, scope, asked, uploads}` 不是字段外泄：读字段的都是 `Mail`
+  自己的方法，同一文件里普通 `impl Mail` 块读同样的字段就不报（去掉 organizing 的 `#[tool_router]`，它那 5 处
+  就不报了）。为它们给每个调用包一层转发只是挪代码，不改。
 - `output.rs`（逐个写出的输出结构，文档注释就是 schema 里的描述）、`tokens.rs`、`limits.rs`（调用频率与下载
   预算）、`connect.rs`（给 agent 的命令示例）、`http.rs`（监听、令牌、交给 rmcp；读请求的超时与每个令牌同时在答的请求数；收上传；请求来的地址）、`uploads.rs`
   （上传的句柄与内容）。
@@ -326,7 +330,7 @@ claude mcp add --transport http catmail https://mac.tailnet.ts.net/mcp \
   令牌、层级、账户范围、拒绝与停止；`reading.rs`、`organizing.rs`、`drafts.rs`、`sending.rs`、`limits.rs`）。
   `tests/tools.snapshot.json` 固定 agent 看到的工具列表，有意改动时 `UPDATE_SNAPSHOTS=1` 重新生成。
 CLI 一侧是 `cmd/mcp.rs`；GUI 一侧是 `catmail-frontend` 的 `mcp.rs`（服务的线程、状态的说法、文案；端口的解析与登录表单共用 `login::parse_port`）、
-`catmail-gui` 的 `settings/agents.rs` 和 `shell/mod.rs` 里托管服务的部分。
+`catmail-gui` 的 `windows/settings/agents.rs` 和 `shell/mod.rs` 里托管服务的部分。
 
 ## 步骤
 

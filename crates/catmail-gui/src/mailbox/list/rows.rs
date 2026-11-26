@@ -3,7 +3,7 @@
 
 use catmail_core::{Flags, MessageSummary};
 use catmail_frontend::format;
-use catmail_frontend::list::{self, Line, Listing, ROW_LABELS, Row, RowId, Severity};
+use catmail_frontend::mailbox::list::{self, Line, Listing, ROW_LABELS, Row, RowId, Severity};
 use nsh_base::theme;
 use nsh_core::prelude::*;
 
@@ -88,9 +88,9 @@ fn row_box(item: Memo<Option<Line>>) -> View {
         .my(px(ROW_MARGIN_Y))
         .bg(move || {
             if selected() {
-                crate::theme::list_active()
+                crate::shell::theme::list_active()
             } else if hovered() {
-                crate::theme::list_hover()
+                crate::shell::theme::list_hover()
             } else {
                 AdaptiveColor::TRANSPARENT
             }
@@ -306,12 +306,12 @@ fn marks(message: Memo<Option<MessageSummary>>) -> View {
             icon(|| Icon::PaperClip, 12.0).text_color(move || theme().muted_foreground)
         }))
         .child(when(has(|m| m.flags.contains(Flags::FLAGGED)), || {
-            icon(|| Icon::FlagSolid, 12.0).text_color(crate::theme::flag)
+            icon(|| Icon::FlagSolid, 12.0).text_color(crate::shell::theme::flag)
         }))
 }
 
 pub fn avatar_color(seed: &str) -> AdaptiveColor {
-    crate::theme::avatar(seed)
+    crate::shell::theme::avatar(seed)
 }
 
 /// The sender's initial on their hue, or a check while the message is checked; pressing
@@ -497,8 +497,8 @@ fn outbox_row(item: Memo<Option<Line>>) -> impl IntoElement {
                     .rounded(px(4.0))
                     .text_xs()
                     .bg(move || match severity() {
-                        Some(Severity::Warning) => crate::theme::warning_badge(),
-                        Some(Severity::Danger) => crate::theme::danger_badge(),
+                        Some(Severity::Warning) => crate::shell::theme::warning_badge(),
+                        Some(Severity::Danger) => crate::shell::theme::danger_badge(),
                         None => theme().muted,
                     })
                     .text_color(move || theme().foreground),

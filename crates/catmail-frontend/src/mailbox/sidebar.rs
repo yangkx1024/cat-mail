@@ -10,7 +10,7 @@ use catmail_core::{AccountId, AccountOverview, AccountStatus, FolderId, FolderRo
 
 use super::{ALL_MAIL_HIDDEN, AccountEntry, Destination, Place};
 use crate::coalesce::Coalesce;
-use crate::folders::{self, FolderIcon, FolderNode};
+use crate::mailbox::folders::{self, FolderIcon, FolderNode};
 
 /// Which accounts and folders are open.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
