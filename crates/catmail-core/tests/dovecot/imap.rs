@@ -1,22 +1,20 @@
-//! Sync against a real Dovecot started by `testenv/dovecot/run.sh` (see `testenv`).
+//! Sync against a real Dovecot started by `testenv/dovecot/run.sh` (see [`testenv`](crate::testenv)).
 //!
 //! The fixture folders are only read; changes happen in a fresh folder per run, written
 //! straight into the maildir, and in Sent and Drafts, where the tests find their
 //! messages by subject, so they can be rerun against the same server.
 
-mod testenv;
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::testenv::{add_account, open_client, run_tag, sent_copies};
 use catmail_core::{
     AccountId, Address, DeleteMode, DraftBody, DraftChanges, DraftContent, Flags, FolderRole,
     ListQuery, MailClient, MessageSummary, OutboxStatus, SearchQuery, Security, ServerConfig,
     SyncReport,
 };
 use catmail_testkit::{FakeSmtp, SmtpState};
-use testenv::{add_account, open_client, run_tag, sent_copies};
 
 fn message(subject: &str) -> String {
     format!(
@@ -77,7 +75,7 @@ fn added(report: &SyncReport, name: &str) -> (u32, u32, u32) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn syncs_against_dovecot() {
-    let Some(env) = testenv::testenv() else {
+    let Some(env) = crate::testenv::testenv() else {
         return;
     };
     let (server, maildir) = (env.imap, env.maildir);
@@ -310,7 +308,7 @@ async fn check_changes(client: &MailClient, account: AccountId, maildir: &Path, 
 }
 
 /// Sends through the fake SMTP server and saves to Dovecot's Sent folder (sending through
-/// Dovecot is `submission.rs`; here saving is what matters, sent exactly once). The first
+/// Dovecot is `submission`'s; here saving is what matters, sent exactly once). The first
 /// APPEND fails, so the second one first searches Sent for the message, against a real
 /// server too. The failure comes from a read-only directory, so this can't run as root.
 async fn check_saving_to_sent(
@@ -494,7 +492,7 @@ async fn check_bodies(client: &MailClient, inbox: &[MessageSummary]) {
 /// a sync. In the `push` user's mailbox, so it doesn't disturb the fixtures.
 #[tokio::test(flavor = "multi_thread")]
 async fn new_mail_is_pushed_by_dovecot() {
-    let Some(env) = testenv::testenv() else {
+    let Some(env) = crate::testenv::testenv() else {
         return;
     };
     let maildir = user_maildir(&env.maildir, "push");
@@ -558,7 +556,7 @@ async fn new_mail_is_pushed_by_dovecot() {
 /// see nothing change.
 #[tokio::test(flavor = "multi_thread")]
 async fn drafts_are_kept_in_dovecots_drafts_folder() {
-    let Some(env) = testenv::testenv() else {
+    let Some(env) = crate::testenv::testenv() else {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
@@ -620,7 +618,7 @@ async fn drafts_are_kept_in_dovecots_drafts_folder() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn folders_are_created_renamed_and_deleted_on_dovecot() {
-    let Some(env) = testenv::testenv() else {
+    let Some(env) = crate::testenv::testenv() else {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
@@ -692,7 +690,7 @@ async fn folders_are_created_renamed_and_deleted_on_dovecot() {
 /// a large one only the text, and neither marked read. In the `prefetch` user's mailbox.
 #[tokio::test(flavor = "multi_thread")]
 async fn bodies_are_prefetched_from_dovecot() {
-    let Some(env) = testenv::testenv() else {
+    let Some(env) = crate::testenv::testenv() else {
         return;
     };
     let maildir = user_maildir(&env.maildir, "prefetch");
@@ -772,7 +770,7 @@ async fn bodies_are_prefetched_from_dovecot() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn bodies_not_downloaded_are_searched_on_dovecot() {
-    let Some(env) = testenv::testenv() else {
+    let Some(env) = crate::testenv::testenv() else {
         return;
     };
     let dir = tempfile::tempdir().unwrap();

@@ -1,19 +1,17 @@
 //! Sending through a real SMTP submission server: Dovecot's, started by
-//! `testenv/dovecot/run.sh` (see `testenv`), relaying to a mailpit sink whose HTTP API
+//! `testenv/dovecot/run.sh` (see [`testenv`](crate::testenv)), relaying to a mailpit sink whose HTTP API
 //! shows what arrived. Saving to Sent goes to the same Dovecot over IMAP.
 //!
 //! Messages are found again by Message-ID, or by a subject with the run's tag in Sent, so
 //! the tests can be rerun against the same servers.
 
-mod testenv;
-
+use crate::testenv::{TestEnv, add_account, open_client, run_tag, sent_copies};
 use catmail_core::{
     AccountId, Address, DraftBody, DraftContent, ErrorKind, MailClient, OutboxEntry, OutboxStatus,
     ServerConfig, TlsConfig,
 };
 use mail_parser::MessageParser;
 use serde_json::Value;
-use testenv::{TestEnv, add_account, open_client, run_tag, sent_copies};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -126,7 +124,7 @@ fn emails(summary: &Value, field: &str) -> Vec<String> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sends_with_starttls_and_saves_to_sent() {
-    let Some(env) = testenv::testenv() else {
+    let Some(env) = crate::testenv::testenv() else {
         return;
     };
     let (client, account, _dir) = client(&env, &env.starttls, "sender").await;
@@ -179,7 +177,7 @@ async fn sends_with_starttls_and_saves_to_sent() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sends_with_implicit_tls() {
-    let Some(env) = testenv::testenv() else {
+    let Some(env) = crate::testenv::testenv() else {
         return;
     };
     let (client, account, _dir) = client(&env, &env.tls, "sender").await;
@@ -190,7 +188,7 @@ async fn sends_with_implicit_tls() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn refused_recipient_stops_the_whole_message() {
-    let Some(env) = testenv::testenv() else {
+    let Some(env) = crate::testenv::testenv() else {
         return;
     };
     let (client, account, _dir) = client(&env, &env.starttls, "sender").await;
@@ -209,7 +207,7 @@ async fn refused_recipient_stops_the_whole_message() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn message_over_the_size_limit_is_not_sent() {
-    let Some(env) = testenv::testenv() else {
+    let Some(env) = crate::testenv::testenv() else {
         return;
     };
     let (client, account, _dir) = client(&env, &env.starttls, "sender").await;
@@ -224,7 +222,7 @@ async fn message_over_the_size_limit_is_not_sent() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn wrong_password_holds_the_message_and_is_reported() {
-    let Some(env) = testenv::testenv() else {
+    let Some(env) = crate::testenv::testenv() else {
         return;
     };
     let (client, account, _dir) = client(&env, &env.starttls, "wrong").await;

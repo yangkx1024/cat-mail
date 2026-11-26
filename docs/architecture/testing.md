@@ -49,10 +49,10 @@
 
 `testenv/dovecot/run.sh` 以当前用户在临时目录里启动 Dovecot 和 mailpit（来自 flake 的 `testenv`
 开发环境，版本随 `flake.lock` 固定）。测试读 `run.sh` 打印的变量，没有就跳过，
-`CATMAIL_TESTENV_REQUIRED=1` 时失败；两个测试文件共用 `tests/testenv/`（建客户端和账户、在 Sent 里找
-邮件）。
+`CATMAIL_TESTENV_REQUIRED=1` 时失败。它们是一个测试 crate（`tests/dovecot/`），IMAP 和 SMTP 各一个模块，共用
+`testenv.rs`（建客户端和账户、在 Sent 里找邮件）。
 
-- **IMAP**（`crates/catmail-core/tests/dovecot.rs`）：预置 `testenv/fixtures/` 里的邮件，包括中文
+- **IMAP**（`crates/catmail-core/tests/dovecot/imap.rs`）：预置 `testenv/fixtures/` 里的邮件，包括中文
   文件夹、层级文件夹、各种编码、HTML 加内嵌图片与 RFC 2231 文件名；另投递一封超过 2 MiB 的邮件走按
   部分下载。保存到 Sent 时先把 Sent 的 `tmp/` 设为只读让第一次 APPEND 失败，第二次就会先按 Message-ID
   搜索，所以 APPEND 和 `SEARCH HEADER` 都在真实服务器上验证过（因此不能以 root 运行）。操作队列也走
@@ -63,13 +63,13 @@
   投递一封小邮件和一封大邮件，同步后等它们的正文出现，小的能按中文正文搜到，大的只取了正文、附件留在
   服务器上，两封都仍是未读。问服务器的搜索在预置用户的一个新文件夹里投递 UTF-8 和 GBK（base64）正文的
   中文邮件，确认没有全文搜索插件的 Dovecot 能按子串搜到两封，并搜过包括 UTF-7 名字在内的全部文件夹。
-- **SMTP**（`tests/submission.rs`）：Dovecot 的 submission 服务（STARTTLS 与隐式 TLS 各一个端口，
+- **SMTP**（`tests/dovecot/submission.rs`）：Dovecot 的 submission 服务（STARTTLS 与隐式 TLS 各一个端口，
   `run.sh` 用 openssl 生成 127.0.0.1 的自签名证书，测试只信任它；`submission_max_mail_size` 为 1 MiB）
   转发给 mailpit，测试从 mailpit 的 HTTP API 读回：信封收件人（密送只在信封里）、原文与 Sent 里的副本
   逐字节一致（服务器只在前面加 trace 头）、收件人被拒（mailpit 只收 `@example.com`）、超过 SIZE、密码
   错误。mailpit 存信时会给只在信封里的收件人加一行 `Bcc:`，所以"邮件里没有 Bcc"看的是 Sent 的副本。
   每次运行的邮件按 Message-ID 或带时间戳的主题区分，可以对同一组服务器重复运行；它以单独的 `sender`
-  用户登录，和 `dovecot.rs` 互不影响，可以同时跑。
+  用户登录，和 IMAP 的测试互不影响，可以同时跑。
 
 ## GUI
 

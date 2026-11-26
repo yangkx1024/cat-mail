@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Starts throwaway servers for the real-server tests: Dovecot with the fixtures in
-# testenv/fixtures for IMAP (crates/catmail-core/tests/dovecot.rs), and Dovecot's
-# submission service relaying to a mailpit sink for SMTP (tests/submission.rs).
+# testenv/fixtures for IMAP (crates/catmail-core/tests/dovecot/imap.rs), and Dovecot's
+# submission service relaying to a mailpit sink for SMTP (tests/dovecot/submission.rs).
 # Everything lives in a temp directory that is removed on exit.
 #
 #   nix develop .#testenv -c testenv/dovecot/run.sh [port]

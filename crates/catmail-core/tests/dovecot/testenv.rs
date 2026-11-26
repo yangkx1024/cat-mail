@@ -1,5 +1,5 @@
 //! The real servers `testenv/dovecot/run.sh` starts, from the variables it prints, and
-//! what the tests against them (`dovecot.rs`, `submission.rs`) share.
+//! what the tests against them (`imap`, `submission`) share.
 //!
 //! Without those variables the tests skip; `CATMAIL_TESTENV_REQUIRED=1` turns the skip
 //! into a failure (CI).
@@ -14,12 +14,12 @@ use catmail_core::{
 };
 use tokio::runtime::Handle;
 
-// Each test file reads its own part.
+// Each module of tests reads its own part.
 #[allow(dead_code)]
 pub struct TestEnv {
     /// Plaintext logins.
     pub imap: ServerConfig,
-    /// The `catmail` user's, which `dovecot.rs` works in. `submission.rs` logs in as
+    /// The `catmail` user's, which `imap` works in. `submission` logs in as
     /// `sender`, so the two can run at the same time.
     pub maildir: PathBuf,
     /// Dovecot's submission service, with STARTTLS and with implicit TLS.
