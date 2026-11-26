@@ -13,7 +13,7 @@ use catmail_core::MailClient;
 use catmail_mcp::{McpServer, ServeOptions};
 use tokio::sync::mpsc;
 
-use crate::commands::Confirm;
+use crate::confirm::Confirm;
 use crate::settings::McpSettings;
 
 pub use catmail_mcp::{Access, LOG_FILTER, NewToken, Tier, Token, Tokens, connect};

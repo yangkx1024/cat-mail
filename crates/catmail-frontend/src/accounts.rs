@@ -3,7 +3,7 @@
 
 use catmail_core::{Identity, IdentityId};
 
-use crate::commands::Confirm;
+use crate::confirm::Confirm;
 use crate::mailbox::AccountEntry;
 
 pub fn remove_account(entry: &AccountEntry) -> Confirm {

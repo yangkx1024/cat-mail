@@ -4,8 +4,8 @@
 
 use catmail_core::{AccountId, Identity, MailClient, OutboxEntry, OutboxId, OutboxStatus};
 
-use crate::commands::Confirm;
 use crate::composer::senders;
+use crate::confirm::Confirm;
 use crate::format;
 use crate::list::outbox_status;
 

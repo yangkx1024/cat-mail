@@ -10,6 +10,7 @@ use catmail_core::{
     OpKind, OpStatus, PendingOp,
 };
 
+use crate::confirm::Confirm;
 use crate::format;
 use crate::mailbox::{AccountEntry, Source};
 
@@ -315,15 +316,6 @@ pub struct Deletion {
     /// Some go for good and can't be brought back: the user is asked first, once for them
     /// all.
     pub confirm: Option<Confirm>,
-}
-
-/// What asking about a change that can't be undone says.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Confirm {
-    pub title: String,
-    pub description: String,
-    /// The button that goes on: "Delete", "Remove".
-    pub action: &'static str,
 }
 
 /// How deleting the messages goes. Messages of an account not among `accounts` are left

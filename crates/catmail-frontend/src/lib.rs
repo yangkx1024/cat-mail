@@ -18,6 +18,7 @@ pub mod accounts;
 pub mod autostart;
 pub mod commands;
 pub mod composer;
+pub mod confirm;
 #[cfg(test)]
 mod fixtures;
 pub mod folders;
