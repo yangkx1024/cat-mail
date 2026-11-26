@@ -29,8 +29,8 @@ Windows 用户目前只有 CLI。
 
 ## 结构
 
-按窗口和区域分目录，仿照原来 GPUI 版的划分：主窗口的各栏在 `mailbox/`，读信区、写信窗口、设置对话框各一个目录，
-大的视图再把"状态和行为"与"长什么样"（`view.rs`）分开；各处共用的小部件放在 `src/` 下。
+按窗口和区域分目录，仿照原来 GPUI 版的划分：主窗口的各栏在 `mailbox/`（读信区也是它的一栏），写信窗口、设置
+对话框各一个目录，大的视图再把"状态和行为"与"长什么样"（`view.rs`）分开；各处共用的小部件和状态放在 `src/` 下。
 
 ```
 src/
@@ -48,7 +48,8 @@ src/
     compose.rs     从主窗口发起新邮件、回复、转发与对应快捷键
     picker.rs      "Move to"与"Labels"对话框
     draft.rs outbox.rs  草稿、发件箱条目的右栏
-  reader/          读信区：mod.rs 打开、远程与内嵌图片、附件的保存；view.rs 工具栏、头部、正文的 web view、附件
+    reader/        读信区（邮件的右栏）：mod.rs 打开、远程与内嵌图片、附件的保存；view.rs 工具栏、头部、正文的
+                   web view、附件
   web/             web.rs 邮件 HTML 的 web view 与图片应答（读信区和写信引文共用）；sideways.rs 自定义横向滚动条
                    （页面：CSP、注入脚本和消息协议在 catmail_frontend::html）
   composer/        写信窗口：mod.rs 状态、保存发送关闭、附件、发件人、格式与图片；rich.rs 正文的编辑器；
@@ -303,7 +304,7 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
 
 ## 读信
 
-读信区（`reader/`）：工具栏、标题、头部、正文、附件，在同一个滚动区里。头部的模型（`reader::Header`、附件的
+读信区（`mailbox/reader/`）：工具栏、标题、头部、正文、附件，在同一个滚动区里。头部的模型（`reader::Header`、附件的
 名字、保存对话框的起始目录）在 frontend。
 
 - **头部**：发件人头像；收件人一行只列名字，"Details"展开完整的 From / To / Cc / Reply-To / Date；Gmail 用户标签。

@@ -35,8 +35,6 @@ mod motion;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod new_mail;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-mod reader;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod settings;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod shell;

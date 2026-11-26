@@ -11,6 +11,7 @@ pub mod list;
 mod outbox;
 pub mod panes;
 mod picker;
+mod reader;
 pub mod sidebar;
 
 use std::cell::RefCell;
@@ -29,7 +30,7 @@ use crate::engine::client;
 use crate::login::{self, SignIn};
 use crate::tasks::{in_view, own_tasks};
 use crate::theme::SelectableText as _;
-use crate::{chrome, form, reader, settings, shell, toast};
+use crate::{chrome, form, settings, shell, toast};
 use catmail_frontend::list::Listing;
 use list::Selected;
 use sidebar::SelectedPlace;
