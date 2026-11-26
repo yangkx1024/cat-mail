@@ -33,12 +33,12 @@
           # installs (`structure` in ci.yml): the list of findings follows it.
           deslop-please = pkgs.rustPlatform.buildRustPackage rec {
             pname = "deslop-please";
-            version = "0.1.4";
+            version = "0.1.6";
             src = pkgs.fetchCrate {
               inherit pname version;
-              hash = "sha256-H0amaSCPuDRHjYh9SX5qgQGXWHT32Ft0hfT5rF0uwco=";
+              hash = "sha256-qrjrcBggGceZyEpyvIoiJdPayYQuk1gJCnaDQGE9N28=";
             };
-            cargoHash = "sha256-f2fNM2ZklAofTsizFPzKeWVjzbdN3xN62HDiRKYzNRE=";
+            cargoHash = "sha256-59Wz17juYJk3drM+qi7xuvtL4pbmSnmPnyDXO6sv9XM=";
           };
           default = pkgs.mkShell {
             packages =
