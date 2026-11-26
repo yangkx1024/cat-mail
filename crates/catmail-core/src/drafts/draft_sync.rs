@@ -13,7 +13,7 @@
 //! the copy's UID on servers without UIDPLUS.
 //!
 //! Runs with the account's sync permit, right before its ops are replayed
-//! ([`ops::replay_queued`](crate::ops::replay_queued)).
+//! ([`ops::replay_queued`](crate::sync::ops::replay_queued)).
 
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
@@ -25,7 +25,7 @@ use catmail_types::{AccountId, DraftId, Event, Flags, FolderId, FolderRole};
 
 use crate::engine::Engine;
 use crate::task::{backoff, blocking, now};
-use crate::{Result, connection, drafts, events};
+use crate::{Result, drafts, engine::connection, engine::events};
 
 /// Background sync uploads a draft the server refused again after this long, doubling
 /// with each refusal of it as it is up to [`MAX_REFUSED_BACKOFF`]: it is sent in full
@@ -40,7 +40,7 @@ pub(crate) enum Uploads {
     /// Every one: the user asked for it.
     All,
     /// Those not changed within the engine's
-    /// [`draft_upload_delay`](crate::settings::EngineSettings::draft_upload_delay), for background sync: a draft
+    /// [`draft_upload_delay`](crate::engine::settings::EngineSettings::draft_upload_delay), for background sync: a draft
     /// being written is uploaded once the user pauses, not with every save. Nor those
     /// the server refused, until their backoff runs out.
     Settled,

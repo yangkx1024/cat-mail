@@ -1,6 +1,11 @@
 //! Drafts: written and kept locally, copied to the server's Drafts folder
-//! (`draft_sync.rs`), sent through the outbox (`send.rs`). Their addresses are read and
-//! checked in `addresses.rs`; what a reply or forward starts with is in `answer.rs`.
+//! ([`draft_sync`]), sent through the outbox ([`send`](crate::send)). Their addresses are
+//! read and checked in [`addresses`]; what a reply or forward starts with is in
+//! [`answer`].
+
+pub(crate) mod addresses;
+pub(crate) mod answer;
+pub(crate) mod draft_sync;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -15,14 +20,12 @@ use catmail_types::{
 };
 use uuid::Uuid;
 
-use crate::addresses::{check_address, validate};
-use crate::answer::{
-    Own, eml_name, forward_content, forward_subject, reply_content, reply_recipients,
-};
+use crate::engine::storage::Storage;
 use crate::engine::{Editing, Engine};
-use crate::storage::Storage;
 use crate::task::{blocking, lock, now};
 use crate::{Error, Result, body, display};
+use addresses::{check_address, validate};
+use answer::{Own, eml_name, forward_content, forward_subject, reply_content, reply_recipients};
 
 pub(crate) async fn create(
     engine: &Arc<Engine>,

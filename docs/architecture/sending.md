@@ -201,7 +201,7 @@ From、Date、Subject、To、Cc，有的才有）。措辞只在 `catmail-types`
 
 ## 同步到服务器
 
-`catmail-core/src/draft_sync.rs`。草稿的 `revision` 与副本的版本（`remote_revision`）不同、又不在
+`catmail-core/src/drafts/draft_sync.rs`。草稿的 `revision` 与副本的版本（`remote_revision`）不同、又不在
 outbox 里时，上传一份新的，再删除旧的：
 
 - **时机**：与操作队列的回放相同（`ops::replay_queued`，持有同步锁）：同步对账完文件夹之后、回放之前；

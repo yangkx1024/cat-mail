@@ -15,13 +15,16 @@ use tokio::sync::broadcast;
 
 use super::{EVENT_CAPACITY, MailClient, Shared};
 use crate::engine::Engine;
-use crate::runtime::Runtime;
-use crate::secrets::{KeyringSecrets, SecretStore};
-use crate::settings::{EngineSettings, EngineTuning, SyncSchedule};
-use crate::storage::Storage;
+use crate::engine::runtime::Runtime;
+use crate::engine::secrets::{KeyringSecrets, SecretStore};
+use crate::engine::settings::{EngineSettings, EngineTuning, SyncSchedule};
+use crate::engine::storage::Storage;
+use crate::sync::watch;
 use crate::task::now;
-use crate::watch;
-use crate::{BodyPrefetch, Config, DataDirLock, Result, gc, prefetch, rebuild, send, sleep};
+use crate::{
+    BodyPrefetch, Config, DataDirLock, Result, body::gc, body::prefetch, body::rebuild,
+    engine::sleep, send,
+};
 
 pub struct MailClientBuilder {
     config: Config,
@@ -122,7 +125,7 @@ impl MailClientBuilder {
         self.sync_in_background(Some(SyncSchedule::default()))
             .prefetch_bodies(Some(BodyPrefetch::default()))
             .send_in_background(true)
-            .collect_garbage_every(Some(crate::gc::DEFAULT_GC_INTERVAL))
+            .collect_garbage_every(Some(crate::body::gc::DEFAULT_GC_INTERVAL))
     }
 
     /// Batch sizes, the whole-message limit and the keepalive of idle connections
@@ -340,7 +343,7 @@ mod tests {
             .runtime(Handle::current())
             .secrets(Arc::new(MemorySecrets::default()))
             .send_in_background(true)
-            .collect_garbage_every(Some(crate::gc::DEFAULT_GC_INTERVAL))
+            .collect_garbage_every(Some(crate::body::gc::DEFAULT_GC_INTERVAL))
             .open()
             .unwrap();
         assert_eq!(metrics.num_alive_tasks(), before + 4);

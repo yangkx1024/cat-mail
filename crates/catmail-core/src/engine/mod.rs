@@ -1,3 +1,27 @@
+//! The engine: the state every `MailClient` clone and every engine task share
+//! ([`Engine`]), and what it holds and hands out. The data directory and the keyring
+//! ([`storage`]: where they are, [`config`]; the passwords, [`secrets`]; remote images
+//! shown, [`image_cache`]); each account's idle connections ([`pool`]) and the rules for
+//! taking one ([`connection`]), what its servers last said ([`status`]), its searches'
+//! connection ([`search_slot`]) and the bodies being fetched for someone waiting
+//! ([`downloading`]); what it is set to do ([`settings`]); the events it announces after
+//! a commit ([`events`]); the runtime its work runs on ([`runtime`]); and noticing that
+//! the computer slept ([`sleep`]).
+
+pub(crate) mod config;
+pub(crate) mod connection;
+pub(crate) mod downloading;
+pub(crate) mod events;
+pub(crate) mod image_cache;
+pub(crate) mod pool;
+pub(crate) mod runtime;
+pub(crate) mod search_slot;
+pub(crate) mod secrets;
+pub(crate) mod settings;
+pub(crate) mod sleep;
+pub(crate) mod status;
+pub(crate) mod storage;
+
 use std::collections::{HashMap, HashSet};
 use std::future::{Future, poll_fn};
 use std::pin::pin;
@@ -13,14 +37,14 @@ use catmail_types::{AccountId, AccountStatus, DraftId, Event, FolderId, Identity
 use tokio::sync::{Notify, OwnedMutexGuard, broadcast, watch};
 use tokio::task::unconstrained;
 
-use crate::downloading::{Claim, Downloading};
-use crate::pool::{self, Pool};
-use crate::search_slot::SearchSlot;
-use crate::settings::EngineSettings;
-use crate::status::{Activity, Failures, Recorded, Status};
-use crate::storage::Storage;
 use crate::task::{Cancellation, Closing, Cutoff, blocking, lock};
 use crate::{Error, Result};
+use downloading::{Claim, Downloading};
+use pool::Pool;
+use search_slot::SearchSlot;
+use settings::EngineSettings;
+use status::{Activity, Failures, Recorded, Status};
+use storage::Storage;
 
 /// State shared by every `MailClient` clone and every engine task.
 pub(crate) struct Engine {

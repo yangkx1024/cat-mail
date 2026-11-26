@@ -1,7 +1,7 @@
 //! Logged-in IMAP (and SMTP) connections for an account, and the rules for using an IMAP
 //! one again, pooled or not ([`with_session`], [`on_session`], [`with_session_redone`]):
 //! on-demand requests (bodies, attachments, saving to Sent, replays, the sync of an
-//! opened folder) take one from the account's [`Pool`](crate::pool::Pool), so that
+//! opened folder) take one from the account's [`Pool`](crate::engine::pool::Pool), so that
 //! opening messages one after another doesn't log in each time; sync of every folder and
 //! background sync keep connections of their own, which follow the same rules.
 

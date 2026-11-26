@@ -26,13 +26,13 @@ use catmail_proto::imap::{ChangedFlags, Session};
 use catmail_types::AccountId;
 use tokio::sync::Notify;
 
-use crate::draft_sync::Uploads;
+use crate::drafts::draft_sync::Uploads;
 use crate::engine::Engine;
-use crate::pool::{self, Pinged};
-use crate::settings::SyncSchedule;
-use crate::status::Activity;
+use crate::engine::pool::{self, Pinged};
+use crate::engine::settings::SyncSchedule;
+use crate::engine::status::Activity;
 use crate::task::{Cancellation, backoff};
-use crate::{Error, Result, connection, ops, sync};
+use crate::{Error, Result, engine::connection, sync, sync::ops};
 
 /// Starts keeping `account` in sync, if the engine syncs in the background. Call from
 /// inside the engine runtime.

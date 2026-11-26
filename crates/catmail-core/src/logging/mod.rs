@@ -3,6 +3,12 @@
 //! for finding out later what happened (the GUI runs on with no window, `catmail watch`
 //! for as long as it is left). One process at a time writes it, holding the lock next to
 //! it. See docs/architecture/logging.md.
+//!
+//! The log starts with what the computer is (`system`) and what this build is
+//! (`version`).
+
+pub(crate) mod system;
+pub(crate) mod version;
 
 use std::fs::{self, File, TryLockError};
 use std::io::{self, Write as _};
@@ -15,7 +21,7 @@ use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 use tracing_subscriber::{EnvFilter, Layer as _};
 
-use crate::{Config, system, version};
+use crate::Config;
 
 /// What the file gets of the engine unless `CATMAIL_LOG` says otherwise; a frontend
 /// adds its own.
@@ -91,7 +97,7 @@ pub fn write_file(config: &Config, frontend: &str) {
 /// have a link planted in it. `None` if another process writes the file, or the data
 /// directory can't be had (opening the engine then says why).
 fn open_in(config: &Config, max_len: u64) -> Option<LogFile> {
-    crate::config::create_data_dir(config.data_dir()).ok()?;
+    crate::engine::config::create_data_dir(config.data_dir()).ok()?;
     let dir = config.log_dir();
     LogFile::open(&dir, max_len, home())
         .inspect_err(|e| tracing::warn!(error = %e, dir = %dir.display(), "can't keep a log file"))

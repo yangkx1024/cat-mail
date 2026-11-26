@@ -14,6 +14,15 @@
 //! missed in the old one, so its row moves (with its body) instead of being deleted, and
 //! only what vanished from one location without turning up in another is deleted, once
 //! all three are synced.
+//!
+//! The other ways the engine keeps an account and its servers in step are inside: the
+//! queued local changes and their replay ([`ops`]), keeping accounts up to date in the
+//! background ([`watch`]), and folders made, renamed and deleted on the server at once
+//! ([`folders`]).
+
+pub(crate) mod folders;
+pub(crate) mod ops;
+pub(crate) mod watch;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::RangeInclusive;
@@ -29,11 +38,11 @@ use catmail_types::{
     ReplayReport, SyncReport,
 };
 
-use crate::connection::with_session;
-use crate::draft_sync::Uploads;
+use crate::drafts::draft_sync::Uploads;
 use crate::engine::Engine;
-use crate::status::Activity;
-use crate::{Error, Result, connection, events, ops, prefetch};
+use crate::engine::connection::with_session;
+use crate::engine::status::Activity;
+use crate::{Error, Result, body::prefetch, engine::connection, engine::events};
 
 /// Stored messages per flags FETCH, and per transaction, on a server that can't say
 /// which changed: the whole answer is held in memory.

@@ -7,7 +7,7 @@
 事务**里修改本地数据（乐观更新）并为每封邮件插入一条 `pending_ops`，提交后发
 `MessagesChanged`、`PendingOpsChanged`。不会出现"界面已改，服务器永远收不到"。本地效果与
 入队在 `catmail-store/src/ops/local.rs`，回放的簿记在 `ops/replay.rs`（两边共用的部分，以及列出、清除
-操作，在 `ops/mod.rs`），回放在 `catmail-core/src/ops.rs`。
+操作，在 `ops/mod.rs`），回放在 `catmail-core/src/sync/ops.rs`。
 
 ## 本地效果
 

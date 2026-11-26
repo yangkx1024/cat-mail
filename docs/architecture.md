@@ -56,7 +56,7 @@ GUI 的主循环（GTK 的 GLib 循环、AppKit 的）和 nsh 每个窗口的视
 tokio reactor。`MailClient` 持有
 （GUI：`MailClient::builder(cfg).open_async()` 自建）或借用（CLI：`.runtime(Handle::current())`）
 一个 tokio runtime，每个公开方法把工作 `spawn` / `spawn_blocking` 到该 runtime 上再 await
-`JoinHandle`，返回的 future 因此可以被任意 executor poll（`catmail-core/src/runtime.rs`）。
+`JoinHandle`，返回的 future 因此可以被任意 executor poll（`catmail-core/src/engine/runtime.rs`）。
 
 - `Runtime` 与 `Engine` 分放在两个 `Arc` 里，后台任务只持有 `Engine`，不会在 runtime 自己的
   线程上 drop 最后一个 runtime 引用。
@@ -173,13 +173,18 @@ UID 只在一个 UIDVALIDITY 内有意义。凡是持久化的、指向远端 UI
 全部连接、经 mpsc 接收命令的 actor：门面的方法已经按锁串行，按需下载有连接池，都经一个 actor 转发
 不增加任何保证，反而让打开邮件排在同步后面。
 
-`catmail-core` 内部分三层。最下面是不认识引擎的部分：停止信号与小工具（`task`）、构建时的设置（`settings`），
-引擎替每个账户持有的状态（空闲连接 `pool`、搜索连接 `search_slot`、正文的认领 `downloading`、连接服务器的
-结果 `status`），存下的东西（`storage`），以及把取到的邮件做成要存的正文（`content`）。中间是
-`Engine`：组合这些，管每账户状态，字段都不外露。上面是各项工作（同步、后台同步、操作队列、发信、草稿、正文……），拿
-`&Arc<Engine>` 做事，最上面是门面 `MailClient`。引擎持有的类型，所在的模块不 import `engine`：否则它和用它的
-工作模块绕成一个环，改一处要读一圈。工作模块之间也只向下依赖。新出现的模块循环会让 CI 的结构检查
-（`scripts/deslop.sh`）失败。
+`catmail-core` 内部分三层。最下面是不认识引擎的部分：停止信号与小工具（`task`），以及引擎持有的东西，都在
+`engine/` 里：构建时的设置（`settings`），替每个账户持有的状态（空闲连接 `pool`、搜索连接 `search_slot`、正文的
+认领 `downloading`、连接服务器的结果 `status`），存下的东西（`storage`，和数据目录在哪 `config`、密码
+`secrets`、远程图片的缓存 `image_cache`）。中间是 `Engine`（`engine/mod.rs`）：组合这些，管每账户状态，字段都
+不外露；同在 `engine/` 里、用着它的是借出连接的规则（`connection`）、提交后发的事件（`events`）、工作跑在哪个
+runtime 上（`runtime`）和自己发现睡眠（`sleep`）。上面是各项工作，拿 `&Arc<Engine>` 做事，按领域分目录：正文
+（`body/`：存成什么 `content`、后台预取 `prefetch`、重建 `rebuild`、远程图片 `images`、回收 `gc`、附件的文件名
+`filename`）、草稿（`drafts/`：服务器上的副本 `draft_sync`、地址 `addresses`、回复与转发的开头 `answer`）、同步
+（`sync/`：操作队列 `ops`、后台同步 `watch`、文件夹的增删改 `folders`），以及发信（`send`）、问服务器的搜索
+（`search`）、账户（`accounts`）；最上面是门面 `MailClient`（`client/`）。引擎持有的类型，所在的模块不 import
+`engine` 的 `Engine`：否则它和用它的工作模块绕成一个环，改一处要读一圈。工作模块之间也只向下依赖。新出现的
+模块循环会让 CI 的结构检查（`scripts/deslop.sh`）失败。
 
 ### 安全边界
 

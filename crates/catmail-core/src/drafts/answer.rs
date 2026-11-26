@@ -8,8 +8,8 @@ use catmail_types::{
     QuoteHead,
 };
 
+use crate::body::filename::safe_filename;
 use crate::display;
-use crate::filename::safe_filename;
 
 /// An address of the account: an identity's, or its own (`None`, written as the default).
 pub(crate) type Own = (Option<IdentityId>, String);

@@ -3,7 +3,7 @@
 //! reading a stored blob back.
 //!
 //! Downloading ([`body`](crate::body), the prefetch) and rebuilding bodies made by an
-//! older content version ([`rebuild`](crate::rebuild)) both make bodies this way. It
+//! older content version ([`rebuild`](crate::body::rebuild)) both make bodies this way. It
 //! needs only the blob store, not the engine.
 
 use std::collections::HashMap;
@@ -12,7 +12,7 @@ use catmail_proto::mime::{self, Content};
 use catmail_store::{NewAttachment, NewBody};
 
 use crate::Result;
-use crate::storage::Storage;
+use crate::engine::storage::Storage;
 
 /// A body as fetched, to be parsed with [`parse`].
 pub(crate) enum Fetched {

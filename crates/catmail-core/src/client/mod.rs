@@ -15,14 +15,14 @@ use catmail_types::{
 use secrecy::SecretString;
 use tokio::sync::broadcast;
 
+use crate::body::images::RemoteImageStream;
 use crate::engine::Engine;
+use crate::engine::runtime::Runtime;
 use crate::html::RemoteImage;
-use crate::images::RemoteImageStream;
-use crate::runtime::Runtime;
 use crate::task::{Closing, lock};
 use crate::{
-    Config, DraftRevision, EditMark, Error, Result, SendPreview, Verify, accounts, body, drafts,
-    folders, images, ops, search, send, sync,
+    Config, DraftRevision, EditMark, Error, Result, SendPreview, Verify, accounts, body,
+    body::images, drafts, search, send, sync, sync::folders, sync::ops,
 };
 
 mod builder;
@@ -1205,7 +1205,7 @@ mod tests {
         GatedSecrets, client_with_account, draft_to_b, new_account, open_client,
     };
     use super::*;
-    use crate::{MemorySecrets, SyncSchedule, sleep};
+    use crate::{MemorySecrets, SyncSchedule, engine::sleep};
 
     #[test]
     fn closed_resolves_once_the_last_handle_is_gone() {

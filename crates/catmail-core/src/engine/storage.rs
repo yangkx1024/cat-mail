@@ -24,8 +24,8 @@ use secrecy::SecretString;
 use tokio::sync::watch;
 use uuid::Uuid;
 
-use crate::image_cache::{ImageCache, MAX_CACHE_BYTES};
-use crate::secrets::SecretStore;
+use crate::engine::image_cache::{ImageCache, MAX_CACHE_BYTES};
+use crate::engine::secrets::SecretStore;
 use crate::task::Closing;
 use crate::{DataDirLock, Result};
 

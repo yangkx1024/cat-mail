@@ -23,12 +23,12 @@ use catmail_types::{
     ReplayReport, ReportedError,
 };
 
-use crate::connection::with_session;
-use crate::draft_sync::{Uploaded, Uploads};
+use crate::drafts::draft_sync::{Uploaded, Uploads};
 use crate::engine::Engine;
-use crate::status::Activity;
+use crate::engine::connection::with_session;
+use crate::engine::status::Activity;
 use crate::task::{lock, now};
-use crate::{Error, Result, draft_sync, events};
+use crate::{Error, Result, drafts::draft_sync, engine::events};
 
 pub(crate) async fn set_flags(
     engine: Arc<Engine>,

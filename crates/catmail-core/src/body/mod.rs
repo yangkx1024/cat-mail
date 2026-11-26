@@ -14,6 +14,19 @@
 //! Results are written only if the message row still exists. Message ids are never
 //! reused and a UIDVALIDITY change deletes the rows of the old generation, so an
 //! existing row is still the same (folder, UID) as when the download started.
+//!
+//! What else is done with bodies is inside: what a fetched message is stored as
+//! ([`content`]), file names for its attachments ([`filename`]), fetching bodies in the
+//! background ([`prefetch`]), storing them again once parsing changes ([`rebuild`]), the
+//! remote images of its HTML ([`images`]), and deleting what nothing refers to any more
+//! ([`gc`]).
+
+pub(crate) mod content;
+pub(crate) mod filename;
+pub(crate) mod gc;
+pub(crate) mod images;
+pub(crate) mod prefetch;
+pub(crate) mod rebuild;
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -24,13 +37,12 @@ use catmail_proto::mime;
 use catmail_store::{AttachmentSource, MessageLocation};
 use catmail_types::{AttachmentId, BlobHash, ErrorKind, Event, Message, MessageId};
 
-use crate::connection::with_session;
-use crate::content::{self, Fetched, Parts};
-use crate::downloading::Claim;
 use crate::engine::Engine;
-use crate::rebuild;
+use crate::engine::connection::with_session;
+use crate::engine::downloading::Claim;
 use crate::task::blocking;
 use crate::{Error, Result};
+use content::{Fetched, Parts};
 
 const GONE: Error = Error::OutOfSync("the message is no longer on the server");
 const REBUILT: &str = "the folder was rebuilt on the server (UIDVALIDITY changed)";

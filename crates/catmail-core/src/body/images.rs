@@ -7,8 +7,8 @@ use catmail_proto::http::{ImageFetcher, RemoteImage};
 use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinSet;
 
-use crate::runtime::Runtime;
-use crate::storage::Storage;
+use crate::engine::runtime::Runtime;
+use crate::engine::storage::Storage;
 use crate::task::blocking;
 use crate::{Error, Result};
 

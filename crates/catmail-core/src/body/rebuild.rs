@@ -20,9 +20,9 @@ use catmail_store::{Messages, NewBody, StaleBody};
 use catmail_types::{AccountId, Event, FolderId, MessageId};
 
 use crate::Result;
-use crate::content::new_body;
+use crate::body::content::new_body;
 use crate::engine::Engine;
-use crate::storage::Storage;
+use crate::engine::storage::Storage;
 use crate::task::{Closing, blocking};
 
 /// Bodies rebuilt in one transaction.

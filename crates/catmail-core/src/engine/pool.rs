@@ -1,5 +1,5 @@
 //! An account's idle connections, kept between on-demand requests: held by the engine
-//! for each account, taken and returned by the rules in [`connection`](crate::connection). While a connection waits here it is
+//! for each account, taken and returned by the rules in [`connection`](crate::engine::connection). While a connection waits here it is
 //! kept alive: every [`EngineTuning::keepalive`](crate::EngineTuning) it is sent a NOOP,
 //! so that servers and NAT boxes don't close it as idle, and one that died is closed at
 //! once rather than found dead by the next request. There is no limit on how long: while

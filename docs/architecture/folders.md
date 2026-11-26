@@ -2,7 +2,7 @@
 
 [← 架构](../architecture.md)
 
-新建、重命名、删除账户的文件夹（Gmail 上是标签）。代码在 `crates/catmail-core/src/folders.rs`，
+新建、重命名、删除账户的文件夹（Gmail 上是标签）。代码在 `crates/catmail-core/src/sync/folders.rs`，
 门面是 `MailClient::create_folder` / `rename_folder` / `delete_folder`。
 
 ## 当场在服务器上做，不进操作队列
