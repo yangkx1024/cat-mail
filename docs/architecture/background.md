@@ -269,7 +269,8 @@ delegate，在 `NSApplication` 运行之前设好（`new_mail::install`，`main.
 的新通知替换前一条，点击（默认动作）带回 tag，回到主线程后与 Linux 一样交给 `shell::show_at`。应用在前台时
 `willPresentNotification` 照样显示横幅和声音。引擎打开时请求授权（提醒和声音），只在第一次弹出询问；用户在
 系统设置里关掉了就什么也不显示，日志记一行。正文是纯文本，不转义。通知中心只能在 bundle 里用，在 bundle 外
-（`cargo run`）碰它会让进程崩溃，所以没有 bundle identifier 时不订阅、不发。
+（`cargo run`）碰它会让进程崩溃，所以没有 bundle identifier 时不订阅、不发。这个 delegate 也收常驻时
+更新的提醒（identifier 是 `update`，见[打包](packaging.md#macos磁盘映像)的"自动更新"），点它交给更新器显示更新。
 
 ## 托盘
 

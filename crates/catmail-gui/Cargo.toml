@@ -62,6 +62,7 @@ objc2-app-kit = { workspace = true, features = [
 ] }
 objc2-foundation = { workspace = true, features = [
     "block2",
+    "NSArray",
     "NSBundle",
     "NSError",
     "NSNotification",

@@ -1,7 +1,9 @@
 //! New mail's notifications on macOS: UserNotifications (`UNUserNotificationCenter`),
 //! the app's own delegate of the center (nsh's views don't take it: their
 //! `AppOptions::notifications` is off). A notification's identifier is its tag, so one
-//! for several messages replaces the one before, and a click brings the tag back.
+//! for several messages replaces the one before, and a click brings the tag back. The
+//! center's one delegate also hears clicks on the update's reminder
+//! ([`shell::UPDATE_REMINDER`]), which the updater posts.
 //!
 //! The framework ends a process without a bundle identifier that touches the center
 //! (`cargo run`): there are none outside the app's bundle.
@@ -59,7 +61,11 @@ define_class!(
             if response.actionIdentifier().isEqualToString(default) {
                 let tag = response.notification().request().identifier().to_string();
                 // The center may answer off the main thread.
-                shell::invoke(move || super::clicked(&tag));
+                if tag == shell::UPDATE_REMINDER {
+                    shell::invoke(shell::show_update);
+                } else {
+                    shell::invoke(move || super::clicked(&tag));
+                }
             }
             done.call(());
         }

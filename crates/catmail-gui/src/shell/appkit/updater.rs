@@ -7,24 +7,38 @@
 //! in the app menu checks now. Installing quits the app as the Dock's Quit does (a quit
 //! Apple Event, then `applicationShouldTerminate:`), so the composers save first, and a
 //! quit called off leaves the update to be installed once the app quits.
-//! `CATMAIL_UPDATE_FEED` names another feed, for trying an update out. See
-//! docs/architecture/packaging.md.
+//! `CATMAIL_UPDATE_FEED` names another feed, for trying an update out. While the app runs
+//! without a window, an update a scheduled check finds is a notification first
+//! ([`reminders`]). See docs/architecture/packaging.md.
+
+mod reminders;
+
+use std::cell::Cell;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, NSObjectProtocol};
 use objc2::{DefinedClass as _, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_foundation::{NSBundle, NSObject, NSString, ns_string};
 
+use self::reminders::Reminders;
+pub use self::reminders::{REMINDER, came_back};
+
 /// The feed to read instead of the bundle's, for trying an update out.
 const FEED_VAR: &str = "CATMAIL_UPDATE_FEED";
+
+thread_local! {
+    /// The updater, once started.
+    static STARTED: Cell<Option<&'static Updater>> = const { Cell::new(None) };
+}
 
 /// Sparkle's updater, running: the target of "Check for Updates…". Kept for the whole
 /// process, as Sparkle expects of it.
 pub struct Updater {
     /// An `SPUStandardUpdaterController`.
     controller: Retained<AnyObject>,
-    /// Kept here: Sparkle holds its delegate weakly.
+    /// Kept here, as the one below: Sparkle holds its delegates weakly.
     _delegate: Option<Retained<FeedOverride>>,
+    _reminders: Retained<Reminders>,
 }
 
 impl Updater {
@@ -32,6 +46,15 @@ impl Updater {
     /// `validateMenuItem:`: the item is off while a check is under way.
     pub fn controller(&self) -> &AnyObject {
         &self.controller
+    }
+}
+
+/// Shows the update found, in front, or checks for one if there is none: what clicking
+/// the reminder does. On the main thread.
+pub fn show() {
+    if let Some(updater) = STARTED.get() {
+        // SAFETY: the controller's action, which takes a sender, here none.
+        let () = unsafe { msg_send![updater.controller(), checkForUpdates: None::<&AnyObject>] };
     }
 }
 
@@ -70,15 +93,16 @@ pub fn start(mtm: MainThreadMarker) -> Option<&'static Updater> {
     };
     let delegate = feed.as_deref().map(|feed| FeedOverride::new(mtm, feed));
     let delegate_object: Option<&AnyObject> = delegate.as_deref().map(AsRef::as_ref);
+    let reminders = Reminders::new(mtm);
     // SAFETY: Sparkle's initializer, with the types it declares (a BOOL, the updater's
-    // delegate and the user driver's, either nil), on the main thread. The delegate
-    // lives as long as the controller: both are kept in `Updater`, which is leaked.
+    // delegate, nil or not, and the user driver's), on the main thread. The delegates
+    // live as long as the controller: all are kept in `Updater`, which is leaked.
     let controller: Option<Retained<AnyObject>> = unsafe {
         msg_send![
             msg_send![class, alloc],
             initWithStartingUpdater: true,
             updaterDelegate: delegate_object,
-            userDriverDelegate: None::<&AnyObject>,
+            userDriverDelegate: &*reminders,
         ]
     };
     let Some(controller) = controller else {
@@ -90,10 +114,13 @@ pub fn start(mtm: MainThreadMarker) -> Option<&'static Updater> {
         Some(feed) => tracing::info!(feed, "updater started, on {FEED_VAR}'s feed"),
         None => tracing::info!("updater started"),
     }
-    Some(Box::leak(Box::new(Updater {
+    let updater: &'static Updater = Box::leak(Box::new(Updater {
         controller,
         _delegate: delegate,
-    })))
+        _reminders: reminders,
+    }));
+    STARTED.set(Some(updater));
+    Some(updater)
 }
 
 define_class!(

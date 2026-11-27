@@ -38,6 +38,10 @@ use self::gtk as toolkit;
 #[cfg(test)]
 use self::headless as toolkit;
 
+/// The update reminder's notification (its identifier), and showing the update it is
+/// about: AppKit's alone, whatever the windows' views run on.
+#[cfg(target_os = "macos")]
+pub use self::appkit::{UPDATE_REMINDER, show_update};
 /// Runs a function on the main thread, from any.
 #[cfg(target_os = "macos")]
 pub use self::toolkit::invoke;

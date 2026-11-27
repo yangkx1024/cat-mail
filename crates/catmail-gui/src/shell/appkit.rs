@@ -11,6 +11,9 @@
 
 mod updater;
 
+/// The update reminder's notification, and what clicking it does.
+pub use self::updater::{REMINDER as UPDATE_REMINDER, show as show_update};
+
 use std::cell::{Cell, RefCell};
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -439,7 +442,8 @@ impl Window {
     /// others, and so does becoming regular. Activation tokens are Wayland's.
     pub fn present(&self, _activation_token: Option<&str>) {
         let app = NSApplication::sharedApplication(main_thread());
-        if app.activationPolicy() != NSApplicationActivationPolicy::Regular {
+        let came_back = app.activationPolicy() != NSApplicationActivationPolicy::Regular;
+        if came_back {
             app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
         }
         let window = &self.0.window;
@@ -450,6 +454,10 @@ impl Window {
         // `activate` is macOS 14's.
         #[allow(deprecated)]
         app.activateIgnoringOtherApps(true);
+        // Over the window: an update the app reminded of while it had none.
+        if came_back {
+            updater::came_back();
+        }
     }
 
     /// Closes the window as the user would: [`Hooks::close_requested`] may keep it.
