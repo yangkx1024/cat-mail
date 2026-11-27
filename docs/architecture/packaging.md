@@ -115,8 +115,19 @@ catmail.app/Contents/
   app 离线也能打开；单个可执行文件钉不了票据，CLI 由 Gatekeeper 联网查。第二轮提交签好名的磁盘映像，
   钉上票据，最后用 `spctl` 按 Gatekeeper 对下载文件的规则检查磁盘映像和 app。
 - 没有签名身份时一律 ad hoc 签名、不公证：只能在构建的那台 Mac 上运行，PR 用它检查打包能跑通。
-- **自动更新**用 Sparkle 2（[#402](https://github.com/yangkx1024/cat-mail/issues/402)，进行中：framework
-  和 `Info.plist` 的键已经在包里，GUI 还没接上，发布还不出 appcast）。
+- **自动更新**用 Sparkle 2（[#402](https://github.com/yangkx1024/cat-mail/issues/402)，进行中：发布还不出
+  appcast，所以还收不到更新）。
+  - GUI 启动时（`shell/appkit/updater.rs`，在建菜单之前）加载 bundle 里的 framework，起一个
+    `SPUStandardUpdaterController`。不在 bundle 里（`cargo run`）时不起；bundle 没有 Sparkle 或没写更新源时也不起，记一行警告。应用
+    照常运行。ad hoc 签名的包（PR、本地没有签名身份）也加载不了：hardened runtime 的库校验只让
+    加载 Apple 或同一团队签名的库，ad hoc 签名没有团队。这样的包没有更新器，要试更新得用 `build_only` 的包；
+    不为它关掉库校验（`disable-library-validation`）。应用菜单在 About 下面多一项"Check for Updates…"，目标是这个 controller（检查进行中时它把菜单项变灰）。
+  - 何时检查、是否自动下载用 Sparkle 的默认：第二次启动时问一次要不要自动检查，找到更新时弹出 Sparkle 自己的窗口，
+    不静默安装。设置都在 Sparkle 自己的 user defaults 里，不进 `settings.json`。
+  - 安装时 Sparkle 用 `NSRunningApplication terminate` 让应用退出，和 Dock 的 Quit 一样走
+    `applicationShouldTerminate:`（[退出](background.md#退出)）：写信窗口先存好；有一个关不了时退出取消，
+    Sparkle 的安装程序继续等，应用之后退出时再装。
+  - `CATMAIL_UPDATE_FEED` 换一个更新源（Sparkle 的 `feedURLStringForUpdater:`），用来在发布前试升级。
   - 脚本从 Sparkle 的 GitHub release 下载固定版本，校验 sha256（Sparkle 不发布校验和，用的是固定版本时
     下载到的那份），解压在 `target/macos/tools/` 下，下次直接用。
   - 放进 bundle 时删掉 XPC 服务（只有进沙盒的 app 用），三个可执行文件用 `lipo` 只留 arm64，和 app 一样。

@@ -9,6 +9,8 @@
 // AppKit is Objective-C: its classes are defined and its messages sent with `unsafe`.
 #![allow(unsafe_code)]
 
+mod updater;
+
 use std::cell::{Cell, RefCell};
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -56,7 +58,10 @@ pub fn run(started: impl FnOnce() + 'static) -> u8 {
     app.setActivationPolicy(policy);
     let delegate = AppDelegate::new(mtm);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
-    app.setMainMenu(Some(&main_menu(mtm)));
+    // Before the menu, whose "Check for Updates…" it answers. Held while the app runs:
+    // the menu item doesn't retain its target.
+    let updater = updater::start(mtm);
+    app.setMainMenu(Some(&main_menu(mtm, updater.as_ref())));
     quit_on_signals();
     let _monitor = blur_on_press_outside();
     started();
@@ -64,6 +69,8 @@ pub fn run(started: impl FnOnce() + 'static) -> u8 {
     app.run();
     // Only if something else stops the loop: quitting ends the process in `terminate:`
     // ([`end`]).
+    app.setMainMenu(None);
+    drop(updater);
     app.setDelegate(None);
     0
 }
@@ -207,10 +214,10 @@ fn quit_on_signals() {
     }
 }
 
-/// The app menu (About, Hide, Quit), Edit (the text commands fields answer: undo, cut,
+/// The app menu (About, Check for Updates… when there is an updater, Hide, Quit), Edit (the text commands fields answer: undo, cut,
 /// copy, paste, select all) and Window (minimize, zoom, full screen, close), as nsh's
 /// `run_app` has them.
-fn main_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
+fn main_menu(mtm: MainThreadMarker, updater: Option<&updater::Updater>) -> Retained<NSMenu> {
     let bar = NSMenu::new(mtm);
     let item = |menu: &NSMenu, title: &str, action: Option<Sel>, key: &str| {
         // SAFETY: the actions are AppKit's standard ones, sent down the responder chain.
@@ -238,6 +245,17 @@ fn main_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
         Some(sel!(orderFrontStandardAboutPanel:)),
         "",
     );
+    if let Some(updater) = updater {
+        let check = item(
+            &app_menu,
+            "Check for Updates…",
+            Some(sel!(checkForUpdates:)),
+            "",
+        );
+        // SAFETY: the controller answers `checkForUpdates:`; the item doesn't retain it,
+        // and `run` holds it for as long as the menu is up.
+        unsafe { check.setTarget(Some(updater.controller())) };
+    }
     app_menu.addItem(&NSMenuItem::separatorItem(mtm));
     item(
         &app_menu,

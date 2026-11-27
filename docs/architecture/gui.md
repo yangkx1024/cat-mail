@@ -103,7 +103,7 @@ nsh 的 `run_app` 一个视图一个窗口，窗口关了应用就结束。我�
   等它；打不开时窗口显示原因。主循环结束后 `shut_down` 并等 `closed()`，这时主线程上已经没有别的事。
   门面的 future 在 nsh 的任务里（UI 线程上的本地 executor）await，工作在引擎自己的 runtime 上做。
 - **macOS** 没有 GLib 那样的主循环 future 执行器：主线程的 future 用 `async-task` 跑在主 dispatch queue 上。
-  菜单栏有应用菜单（⌘Q 走退出流程）、Edit、Window（⌘W 走窗口的关闭询问），点 Dock 图标唤回主窗口
+  菜单栏有应用菜单（⌘Q 走退出流程；打包的 app 还有"Check for Updates…"，见[打包 / 自动更新](packaging.md#macos磁盘映像)）、Edit、Window（⌘W 走窗口的关闭询问），点 Dock 图标唤回主窗口
   （`applicationShouldHandleReopen`）。应用菜单、Dock 和系统注销触发的 `applicationShouldTerminate` 答
   `TerminateLater`，等写信窗口存完再答可以退出（有一个关不了就取消退出）；每次退出都以 AppKit 的
   `terminate:` 结束，收尾在 `applicationWillTerminate:` 里统一做（见[后台运行 / 退出](background.md#退出)）。
