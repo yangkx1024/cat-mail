@@ -115,8 +115,7 @@ catmail.app/Contents/
   app 离线也能打开；单个可执行文件钉不了票据，CLI 由 Gatekeeper 联网查。第二轮提交签好名的磁盘映像，
   钉上票据，最后用 `spctl` 按 Gatekeeper 对下载文件的规则检查磁盘映像和 app。
 - 没有签名身份时一律 ad hoc 签名、不公证：只能在构建的那台 Mac 上运行，PR 用它检查打包能跑通。
-- **自动更新**用 Sparkle 2（[#402](https://github.com/yangkx1024/cat-mail/issues/402)，进行中：发布还不出
-  appcast，所以还收不到更新）。
+- **自动更新**用 Sparkle 2（[#402](https://github.com/yangkx1024/cat-mail/issues/402)），支持增量更新。
   - GUI 启动时（`shell/appkit/updater.rs`，在建菜单之前）加载 bundle 里的 framework，起一个
     `SPUStandardUpdaterController`。不在 bundle 里（`cargo run`）时不起；bundle 没有 Sparkle 或没写更新源时也不起，记一行警告。应用
     照常运行。ad hoc 签名的包（PR、本地没有签名身份）也加载不了：hardened runtime 的库校验只让
@@ -138,6 +137,25 @@ catmail.app/Contents/
     `releases/latest/download/appcast.xml`，安装包放在 GitHub release；要换托管时只改转发和 appcast。
   - `SUPublicEDKey` 是更新包 EdDSA 签名的公钥；私钥在 `release` environment 的 `SPARKLE_ED_PRIVATE_KEY`，
     另有离线备份。私钥丢了，已经装好的版本就再也收不到更新。
+  - **更新包和 appcast**：设了 `CATMAIL_UPDATE_KEY`（放私钥的文件）且公证时，脚本在钉好票据之后
+    把 app 打成 `catmail-<版本>-aarch64.app.zip`（`ditto -c -k --sequesterRsrc --keepParent`，Sparkle 文档的
+    做法），再用 Sparkle 自带的 `generate_appcast` 生成 `appcast.xml` 和增量包，都放在 `target/macos/updates/`。
+    不公证的包不出更新：Sparkle 装更新时不经过 Gatekeeper。
+    - `generate_appcast` 给完整包和增量包签名，从 app 里读出最低 macOS（`LSMinimumSystemVersion`）和架构写进
+      appcast。只留这个版本的一条（`--maximum-versions 1`）：appcast 每次从头生成，旧版本的条目会用这次
+      release 的下载地址（`CATMAIL_UPDATE_URL`，CI 里是这个标签的 `releases/download/v<版本>/`），是错的；
+      Sparkle 也只看最新的那条。
+    - 增量包从 `CATMAIL_DELTA_FROM` 目录里每个旧版本的 `.app.zip` 各算一个（`catmail<新>-<旧>.delta`），
+      没设时只有完整包。旧版本必须是 release 里发布的那个钉了票据的 zip，不能在本地重新构建：这样增量包
+      打出来的 app 和完整包里的每个字节都一样，离线也能打开。和这次版本相同的 zip 跳过。
+    - `CATMAIL_RELEASE_NOTES` 是一个 Markdown 文件，嵌进 appcast（`sparkle:format="markdown"`），Sparkle 的更新
+      窗口里显示。
+    - `generate_appcast` 在私钥和 app 的 `SUPublicEDKey` 对不上时只警告、把签名留空。脚本检查每个 enclosure
+      都有签名、appcast 里只有这个版本的一条（旧版本里混进一个更新的 zip 时，留下的会是它），不对就失败：
+      不然发出去的 appcast 装不上。
+    - 少了某个旧版本的增量包只警告，不失败：增量包超过完整包的 7/8 时 Sparkle 故意不出（不打印任何东西），
+      算不出来时它也只警告。那个版本就下载完整包，照样能更新，不该因此发不了版。
+    - 它把解开的旧版本缓存在 `~/Library/Caches/Sparkle_generate_appcast`，CI 的机器用完就丢，本地可以删。
 
 ### CI 里的签名
 
@@ -148,11 +166,13 @@ catmail.app/Contents/
 | `MACOS_CERTIFICATE`、`MACOS_CERTIFICATE_PASSWORD` | Developer ID Application 证书和私钥导出的 `.p12`（base64）及其密码 |
 | `APPLE_TEAM_ID` | 团队 ID，用来挑出身份、核对签名 |
 | `APPLE_API_KEY`、`APPLE_API_KEY_ID`、`APPLE_API_ISSUER_ID` | App Store Connect 的 API key（`.p8` 的内容）、key ID、issuer ID，角色 Developer |
+| `SPARKLE_ED_PRIVATE_KEY` | Sparkle 的 EdDSA 私钥（`generate_keys -x` 导出的内容），给更新包和增量包签名 |
 
 workflow 建一个临时钥匙串，导入 `.p12` 和它链到的中间证书 Developer ID Certification Authority G2
 （从 Apple 下载，校验 sha256），再把身份的 SHA-1、团队 ID 和 key 的路径交给脚本
 （`CATMAIL_SIGN_IDENTITY`、`CATMAIL_TEAM_ID`、`CATMAIL_NOTARY_KEY`、`CATMAIL_NOTARY_KEY_ID`、
-`CATMAIL_NOTARY_ISSUER`）。本地签名、公证也是设这几个变量。
+`CATMAIL_NOTARY_ISSUER`）。本地签名、公证也是设这几个变量。Sparkle 的私钥同样写进临时文件，交给
+`CATMAIL_UPDATE_KEY`。
 
 ## 发布
 
@@ -167,8 +187,19 @@ workflow 建一个临时钥匙串，导入 `.p12` 和它链到的中间证书 De
 - 然后从这个标签构建：`ubuntu-22.04` 和 `ubuntu-22.04-arm` 上各一份 CLI tar.gz，`ubuntu-24.04` 和
   `ubuntu-24.04-arm` 上各一份 Flatpak bundle（先关掉 AppArmor 对非特权 user namespace 的限制，flatpak-builder
   的 bwrap 要用），
-  `macos-26` 上一份签名、公证过的磁盘映像和 CLI tar.gz（要用 macOS 26 以上的 SDK 链接，窗口才是新系统的样式），最后创建 GitHub release（附 `SHA256SUMS`）。
+  `macos-26` 上一份签名、公证过的磁盘映像和 CLI tar.gz（要用 macOS 26 以上的 SDK 链接，窗口才是新系统的样式），
+  以及 Sparkle 的更新包、增量包和 `appcast.xml`，最后创建 GitHub release（附 `SHA256SUMS`）。
   任何一个平台失败都不发布。
+- **增量包的旧版本**：`macos` job 构建前，从最近 100 个 release 里按版本号（不按发布时间）从高到低挑出
+  三个比这次旧、带 `*-aarch64.app.zip` 的，下载给 `CATMAIL_DELTA_FROM`。还没接 Sparkle 的旧版本没有 zip，
+  跳过：它们本来也不会自己更新。`build_only` 也这样挑，构建的版本已经发布过时跳过它自己。
+- **release notes** 在 `version` job 推完标签后用 GitHub 的 generate-notes 生成一次，同一份既是 release
+  页面的说明，也嵌进 appcast，在 Sparkle 的更新窗口里显示。`macos` job 生成 appcast
+  时就要用，`publish` 在它之后才跑，所以放在 `version` job；generate-notes 要写权限，而 `macos` job 拿着签名的
+  secrets，不给它写权限。
+- release 不是 draft 也不是 prerelease，并标成 latest：装好的 app 读的 `catmail.yangkx.net/appcast.xml`
+  转发到 `releases/latest/download/appcast.xml`，draft 和 prerelease 都不算 latest。发布后 `publish` job
+  读一遍自己域名的更新源，确认里面是这次的版本，不是就失败（release 已经发出去了，失败是提醒去查转发）。
 - 全在一次运行里：用 GITHUB_TOKEN 推的标签不会触发别的 workflow，所以不能靠"推标签触发构建"。也就没有
   按标签触发的入口，手动推的标签不会发布。
 - 先打标签再构建，包是从发布的那个提交构建的，日志里的 commit 就是它，不带 `-dirty`。代价是构建失败时
@@ -179,4 +210,5 @@ workflow 建一个临时钥匙串，导入 `.p12` 和它链到的中间证书 De
 - 手动运行时勾上 `build_only`（`gh workflow run release.yml --ref <分支> -f build_only=true`）只构建：
   任何分支都行，用当前版本，不改版本、不打标签、不发布，包作为 artifact 上传。和 PR 走同一条路径；
   同时填了 `version` 会报错。它有自己的 concurrency 组，不会排在发布后面，也不会顶掉排队中的发布。
-  macOS 的包照样签名、公证。本地没有签名身份时，要一个能分发的包就用它。
+  macOS 的包照样签名、公证，也出更新包、增量包和 appcast（下载地址是这个版本的标签，没发布时不存在），
+  用来在发布前看 appcast 对不对、配合 `CATMAIL_UPDATE_FEED` 试升级。本地没有签名身份时，要一个能分发的包就用它。
