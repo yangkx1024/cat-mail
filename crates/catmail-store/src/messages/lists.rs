@@ -4,7 +4,7 @@
 use std::sync::LazyLock;
 
 use catmail_types::{
-    AccountId, Flags, FolderId, FolderKind, FolderRole, ListFilter, ListQuery, Message,
+    AccountId, FlagFilter, Flags, FolderId, FolderKind, FolderRole, ListFilter, ListQuery, Message,
     MessageBody, MessageCursor, MessageId, MessageSummary, SearchQuery,
 };
 use rusqlite::{OptionalExtension, Row, named_params};
@@ -74,6 +74,39 @@ impl Page {
             ),
         }
     }
+
+    /// The rows of a list that a filter taking few of them takes, as [`new`](Self::new)
+    /// would page them: those of `messages m` that `taken` finds, seeking in an index of
+    /// only such rows, and those of `:also` among the rows of `messages m` that `listed`
+    /// takes. Paging the list's own index instead reads it to the end whenever fewer
+    /// than a page match, which a filter to the few unread does on every look.
+    ///
+    /// `taken` must spell out the filter as the index's `WHERE` does, not bound to
+    /// `:mask`, or SQLite can't tell the index holds every row it needs. `:also` is read
+    /// first (`CROSS JOIN`), each a lookup by id: else SQLite may read the list's index
+    /// for them.
+    fn sparse(taken: &str, listed: &str) -> Self {
+        let page = |cursor: &str| {
+            format!(
+                "SELECT {SUMMARY_COLUMNS}, m.list_date FROM messages m
+                 WHERE {taken} AND {cursor}
+                 UNION ALL
+                 SELECT {SUMMARY_COLUMNS}, m.list_date
+                 FROM json_each(:also) a CROSS JOIN messages m ON m.id = a.value
+                 WHERE m.flags & :mask <> :want AND {listed} AND {cursor}"
+            )
+        };
+        Self {
+            same_date: format!(
+                "{} ORDER BY id DESC LIMIT :limit",
+                page("m.list_date = :after_date AND m.id < :after_id")
+            ),
+            older: format!(
+                "{} ORDER BY list_date DESC, id DESC LIMIT :limit",
+                page("m.list_date < :after_date")
+            ),
+        }
+    }
 }
 
 /// See [`Messages::new_mail`].
@@ -99,6 +132,54 @@ static LIST_LABEL: LazyLock<Page> = LazyLock::new(|| {
         "l.folder_id = :key AND m.folder_id IN all_mail",
         "l.list_date",
         "l.message_id",
+    )
+});
+
+/// Of `messages m`, those with the Gmail label `:key`, in All Mail (`+`: not by reading
+/// All Mail's index).
+const LABELLED: &str = "+m.folder_id IN all_mail
+    AND EXISTS (SELECT 1 FROM message_labels WHERE message_id = m.id AND folder_id = :key)";
+
+/// The account of the folder `:key`.
+const KEY_ACCOUNT: &str = "(SELECT account_id FROM folders WHERE id = :key)";
+
+/// A location's unread messages, in `messages_unread`.
+static UNREAD_IN_FOLDER: LazyLock<Page> = LazyLock::new(|| {
+    Page::sparse(
+        "m.folder_id = :key AND m.flags & 1 = 0",
+        "m.folder_id = :key",
+    )
+});
+
+/// A label's unread messages, as those of its account's All Mail in `messages_unread`
+/// that have the label.
+static UNREAD_IN_LABEL: LazyLock<Page> = LazyLock::new(|| {
+    Page::sparse(
+        &format!(
+            "m.folder_id = (SELECT id FROM folders
+                            WHERE account_id = {KEY_ACCOUNT} AND kind = 'location'
+                              AND role = 'all')
+             AND m.flags & 1 = 0 AND {LABELLED}"
+        ),
+        LABELLED,
+    )
+});
+
+/// A location's flagged messages, as those of its account in `messages_flagged` (`+`: not
+/// by reading the folder's index).
+static FLAGGED_IN_FOLDER: LazyLock<Page> = LazyLock::new(|| {
+    Page::sparse(
+        &format!("m.account_id = {KEY_ACCOUNT} AND m.flags & 2 <> 0 AND +m.folder_id = :key"),
+        "m.folder_id = :key",
+    )
+});
+
+/// A label's flagged messages, as those of its account in `messages_flagged` that have
+/// the label.
+static FLAGGED_IN_LABEL: LazyLock<Page> = LazyLock::new(|| {
+    Page::sparse(
+        &format!("m.account_id = {KEY_ACCOUNT} AND m.flags & 2 <> 0 AND {LABELLED}"),
+        LABELLED,
     )
 });
 
@@ -193,10 +274,15 @@ impl Messages<'_> {
         else {
             return Ok(Vec::new());
         };
-        let (sql, key) = match (kind, role) {
-            (FolderKind::Location, _) => (&*LIST_FOLDER, folder.0),
-            (FolderKind::Label, Some(FolderRole::Flagged)) => (&*LIST_STARRED, account),
-            (FolderKind::Label, _) => (&*LIST_LABEL, folder.0),
+        // Starred already reads an index of only the flagged: filtered, it reads no more.
+        let (sql, key) = match (kind, role, query.filter.flags) {
+            (FolderKind::Location, _, FlagFilter::Unread) => (&*UNREAD_IN_FOLDER, folder.0),
+            (FolderKind::Location, _, FlagFilter::Flagged) => (&*FLAGGED_IN_FOLDER, folder.0),
+            (FolderKind::Location, _, _) => (&*LIST_FOLDER, folder.0),
+            (FolderKind::Label, Some(FolderRole::Flagged), _) => (&*LIST_STARRED, account),
+            (FolderKind::Label, _, FlagFilter::Unread) => (&*UNREAD_IN_LABEL, folder.0),
+            (FolderKind::Label, _, FlagFilter::Flagged) => (&*FLAGGED_IN_LABEL, folder.0),
+            (FolderKind::Label, _, _) => (&*LIST_LABEL, folder.0),
         };
         let (after_date, after_id) = cursor_params(query.after);
         let (mask, want, also) = filter_params(&query.filter);
@@ -260,16 +346,22 @@ impl Messages<'_> {
         let Some(expr) = fts::match_expression(&query.text) else {
             return Ok(Vec::new());
         };
+        // The page's ids first, the summaries only for those: sorting every match with its
+        // summary (its labels looked up, its addresses read) takes 1.6 times as long when
+        // most messages match a common word.
         let sql = format!(
-            "SELECT {SUMMARY_COLUMNS} FROM messages m
-             WHERE (m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH :expr)
-                    OR m.id IN (SELECT value FROM json_each(:found)))
-               AND (:accounts IS NULL
-                    OR m.account_id IN (SELECT value FROM json_each(:accounts)))
-               AND ({SEARCHED})
-               AND {FILTERED}
-               AND {AFTER}
-             ORDER BY {NEWEST_FIRST} LIMIT :limit"
+            "WITH page AS MATERIALIZED (
+                 SELECT m.id, m.list_date FROM messages m
+                 WHERE (m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH :expr)
+                        OR m.id IN (SELECT value FROM json_each(:found)))
+                   AND (:accounts IS NULL
+                        OR m.account_id IN (SELECT value FROM json_each(:accounts)))
+                   AND ({SEARCHED})
+                   AND {FILTERED}
+                   AND {AFTER}
+                 ORDER BY {NEWEST_FIRST} LIMIT :limit)
+             SELECT {SUMMARY_COLUMNS} FROM page JOIN messages m ON m.id = page.id
+             ORDER BY page.list_date DESC, page.id DESC"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
         let (after_date, after_id) = cursor_params(query.page.after);
@@ -661,6 +753,127 @@ mod tests {
         assert_eq!(subjects(found), ["subject 3"]);
     }
 
+    /// Unread and Flagged read other indexes than the list's own: page by page, each
+    /// still lists what the whole list holds that the filter takes, and the rows kept
+    /// in view, only if the list has them.
+    #[test]
+    fn unread_and_flagged_page_like_the_whole_list() {
+        let store = test_util::store();
+        let standard = test_util::account(&store, "b@example.com");
+        let o = folders(&store, standard, &[("INBOX", None), ("Archive", None)]);
+        let (unread, read) = (Flags::empty(), Flags::SEEN);
+        let flagged = Flags::FLAGGED;
+        let put = |account, folder: FolderId, messages: &[NewMessage]| {
+            store
+                .write(|db| db.messages().upsert(account, folder, messages))
+                .unwrap()
+                .added
+        };
+        let undated = |uid, flags| NewMessage {
+            internal_date: None,
+            ..message(uid, None, flags)
+        };
+        // Equal dates, and none, so pages also end within a date.
+        let mut ids = put(
+            standard,
+            o["INBOX"],
+            &[
+                message(1, Some(100), unread),
+                message(2, Some(100), read),
+                message(3, Some(100), unread | flagged),
+                undated(4, unread),
+                undated(5, read | flagged),
+                message(6, Some(200), read),
+            ],
+        );
+        ids.extend(put(
+            standard,
+            o["Archive"],
+            &[message(7, Some(100), unread | flagged)],
+        ));
+        let (gmail, g) = gmail(&store);
+        let work = || vec![user("Work")];
+        ids.extend(put(
+            gmail,
+            g["[Gmail]/All Mail"],
+            &[
+                labelled(20, unread, work()),
+                labelled(21, read | flagged, work()),
+                labelled(22, unread | flagged, vec![]),
+                labelled(23, read, work()),
+                labelled(24, unread | flagged, work()),
+            ],
+        ));
+        ids.extend(put(
+            gmail,
+            g["[Gmail]/Trash"],
+            &[labelled(40, unread | flagged, work())],
+        ));
+
+        let page = |folder, filter: &ListFilter, limit, after| {
+            let query = ListQuery {
+                limit,
+                after,
+                filter: filter.clone(),
+            };
+            store.read(|db| db.messages().list(folder, &query)).unwrap()
+        };
+        for folder in [o["INBOX"], g["Work"], g["[Gmail]/Starred"]] {
+            let whole = page(folder, &ListFilter::default(), 50, None);
+            for flags in [FlagFilter::Unread, FlagFilter::Flagged] {
+                // Every row of both accounts kept in view: only the list's own are listed.
+                for also in [vec![], ids.clone()] {
+                    let filter = ListFilter {
+                        flags,
+                        also: also.clone(),
+                    };
+                    let (mask, want) = flags.mask();
+                    let expected: Vec<_> = whole
+                        .iter()
+                        .filter(|m| m.flags.intersection(mask) == want || also.contains(&m.id))
+                        .map(|m| m.id)
+                        .collect();
+                    let mut listed = Vec::new();
+                    let mut after = None;
+                    while let [last] = &page(folder, &filter, 1, after)[..] {
+                        after = Some(last.cursor());
+                        listed.push(last.id);
+                    }
+                    assert_eq!(listed, expected, "{folder:?} {flags:?} also {also:?}");
+                    assert_eq!(
+                        page(folder, &filter, 50, None)
+                            .iter()
+                            .map(|m| m.id)
+                            .collect::<Vec<_>>(),
+                        expected,
+                    );
+                }
+            }
+        }
+        let subjects = |folder, flags| {
+            page(folder, &ListFilter::new(flags), 50, None)
+                .into_iter()
+                .map(|m| m.subject.unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            subjects(o["INBOX"], FlagFilter::Unread),
+            ["subject 3", "subject 1", "subject 4"]
+        );
+        assert_eq!(
+            subjects(o["INBOX"], FlagFilter::Flagged),
+            ["subject 3", "subject 5"]
+        );
+        assert_eq!(
+            subjects(g["Work"], FlagFilter::Unread),
+            ["subject 24", "subject 20"]
+        );
+        assert_eq!(
+            subjects(g["Work"], FlagFilter::Flagged),
+            ["subject 24", "subject 21"]
+        );
+    }
+
     #[test]
     fn search_filters_by_account_and_folder() {
         let (store, account, folder) = setup();
@@ -958,16 +1171,22 @@ mod tests {
             .added
     }
 
-    /// A page of a label or of Starred seeks in its index, as one of a folder does.
+    /// A page of a label or of Starred seeks in its index, as one of a folder does; one
+    /// filtered to the unread or the flagged in an index of only those. Only the rows
+    /// kept in view of a filtered page are sorted, each looked up by its id.
     #[test]
-    fn label_pages_seek_in_their_index() {
+    fn pages_seek_in_their_index() {
         let store = test_util::store();
         store
             .read(|db| {
-                for (page, index) in [
-                    (&*LIST_LABEL, "message_labels_list"),
-                    (&*LIST_STARRED, "messages_flagged"),
-                    (&*LIST_FOLDER, "messages_folder_date"),
+                for (page, index, sparse) in [
+                    (&*LIST_LABEL, "message_labels_list", false),
+                    (&*LIST_STARRED, "messages_flagged", false),
+                    (&*LIST_FOLDER, "messages_folder_date", false),
+                    (&*UNREAD_IN_FOLDER, "messages_unread", true),
+                    (&*UNREAD_IN_LABEL, "messages_unread", true),
+                    (&*FLAGGED_IN_FOLDER, "messages_flagged", true),
+                    (&*FLAGGED_IN_LABEL, "messages_flagged", true),
                 ] {
                     for sql in [&page.same_date, &page.older] {
                         let mut stmt = db.conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
@@ -975,13 +1194,39 @@ mod tests {
                             stmt.raw_bind_parameter(i, 1)?;
                         }
                         let mut rows = stmt.raw_query();
-                        let mut plan = Vec::new();
+                        // (id, parent, detail): the rows kept in view are the `RIGHT` of
+                        // the `UNION ALL`.
+                        let mut plan: Vec<(i64, i64, String)> = Vec::new();
                         while let Some(row) = rows.next()? {
-                            plan.push(row.get::<_, String>(3)?);
+                            plan.push((row.get(0)?, row.get(1)?, row.get(3)?));
                         }
-                        let plan = plan.join("\n");
-                        assert!(plan.contains(index), "{sql}\n{plan}");
-                        assert!(!plan.contains("TEMP B-TREE"), "{sql}\n{plan}");
+                        let also = plan.iter().find(|(_, _, d)| d == "RIGHT").map(|r| r.0);
+                        let text: Vec<&str> = plan.iter().map(|(_, _, d)| d.as_str()).collect();
+                        let text = text.join("\n");
+                        assert_eq!(also.is_some(), sparse, "{sql}\n{text}");
+                        // Rows of `messages` are read in the index, or by id from another.
+                        assert!(
+                            plan.iter()
+                                .any(|(_, parent, d)| Some(*parent) != also && d.contains(index)),
+                            "{sql}\n{text}"
+                        );
+                        for (_, parent, detail) in &plan {
+                            assert!(!detail.starts_with("SCAN m "), "{sql}\n{text}");
+                            if Some(*parent) != also && detail.starts_with("SEARCH m ") {
+                                assert!(
+                                    detail.contains(index) || detail.contains("(rowid=?)"),
+                                    "{sql}\n{text}"
+                                );
+                            }
+                        }
+                        for (_, parent, detail) in &plan {
+                            if detail.contains("TEMP B-TREE") {
+                                assert_eq!(Some(*parent), also, "{sql}\n{text}");
+                            }
+                            if Some(*parent) == also && detail.starts_with("SEARCH m ") {
+                                assert!(detail.contains("(rowid=?)"), "{sql}\n{text}");
+                            }
+                        }
                     }
                 }
                 Ok(())

@@ -59,6 +59,9 @@ const READERS: usize = 4;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// What the WAL file is cut back to once checkpointed: 64 MiB.
+const JOURNAL_SIZE_LIMIT: i64 = 64 << 20;
+
 /// Free pages [`Store::release_free_pages`] gives back between letting other writes in:
 /// 16 MiB of them.
 const RELEASED_AT_ONCE: u64 = 4096;
@@ -235,6 +238,10 @@ impl Store {
         // doesn't linger in the file. Costs writing the freed pages (through the WAL),
         // also those FTS merges free.
         conn.pragma_update(None, "secure_delete", true)?;
+        // The WAL file keeps the size the largest transaction since the last checkpoint
+        // gave it (a removed account's zeroed pages: several hundred MB), for as long as
+        // the app runs. With a limit, the first commit after a checkpoint cuts it back.
+        conn.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT)?;
         conn.pragma_update(None, "foreign_keys", true)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
         migrate::to_latest(&mut conn, MIGRATIONS)?;
@@ -504,6 +511,16 @@ mod tests {
             .pragma_query_value(None, "secure_delete", |r| r.get(0))
             .unwrap();
         assert_eq!(secure_delete, 1);
+    }
+
+    #[test]
+    fn the_wal_has_a_size_limit() {
+        let store = test_util::store();
+        let limit: i64 = store
+            .conn()
+            .pragma_query_value(None, "journal_size_limit", |r| r.get(0))
+            .unwrap();
+        assert_eq!(limit, JOURNAL_SIZE_LIMIT);
     }
 
     #[test]

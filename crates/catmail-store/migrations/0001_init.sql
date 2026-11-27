@@ -183,6 +183,11 @@ CREATE UNIQUE INDEX messages_gm_msgid ON messages (account_id, gm_msgid)
 -- Gmail's Starred, which is \Flagged rather than a label row; read like
 -- messages_folder_date.
 CREATE INDEX messages_flagged ON messages (account_id, list_date) WHERE flags & 2 <> 0;
+-- A list filtered to its unread messages (Messages::list), read like messages_folder_date:
+-- that one would be read to its end whenever fewer than a page are unread. A Gmail label
+-- finds its own among those of All Mail; a list filtered to the flagged reads
+-- messages_flagged.
+CREATE INDEX messages_unread ON messages (folder_id, list_date) WHERE flags & 1 = 0;
 -- What the background prefetch of bodies fetches next, newest first (Prefetch::next):
 -- without it each look reads every row of the account and sorts them. Shrinks as bodies
 -- arrive.
