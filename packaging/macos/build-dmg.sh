@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds catmail-gui and the catmail CLI in release for Apple silicon, bundles the GUI as
-# catmail.app in a disk image and packs the CLI as a tarball:
+# catmail.app (with the Sparkle updater) in a disk image and packs the CLI as a tarball:
 #
 #   target/macos/catmail-<version>-aarch64.dmg
 #   target/macos/catmail-<version>-aarch64-macos.tar.gz
@@ -10,7 +10,7 @@
 # when CATMAIL_NOTARY_KEY (an App Store Connect API key file), CATMAIL_NOTARY_KEY_ID and
 # CATMAIL_NOTARY_ISSUER are set too. Without an identity it signs ad hoc: a package that
 # runs on this Mac only, enough to check the packaging. Needs Xcode (codesign,
-# notarytool).
+# notarytool) and the network (resvg from crates.io, Sparkle from its GitHub release).
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
@@ -28,6 +28,10 @@ min_macos=12.0
 export MACOSX_DEPLOYMENT_TARGET=$min_macos
 # Renders the icon. From crates.io, pinned.
 resvg_version=0.49.0
+# The updater the app embeds. Sparkle publishes no checksums: the hash is of the archive
+# its GitHub release served when this version was pinned.
+sparkle_version=2.10.1
+sparkle_sha256=1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27
 
 identity=${CATMAIL_SIGN_IDENTITY:-}
 team=${CATMAIL_TEAM_ID:-}
@@ -104,6 +108,21 @@ if [[ ! -x $resvg || $("$resvg" --version) != "$resvg_version" ]]; then
     --version "$resvg_version" resvg
 fi
 
+sparkle=$tools/sparkle-$sparkle_version
+if [[ ! -d $sparkle ]]; then
+  archive=$tools/Sparkle-$sparkle_version.tar.xz
+  mkdir -p "$tools"
+  curl -fsSL --retry 3 -o "$archive" \
+    "https://github.com/sparkle-project/Sparkle/releases/download/$sparkle_version/Sparkle-$sparkle_version.tar.xz"
+  echo "$sparkle_sha256  $archive" | shasum -a 256 -c --quiet - ||
+    die "Sparkle-$sparkle_version.tar.xz doesn't match its hash"
+  rm -rf "$sparkle.partial"
+  mkdir -p "$sparkle.partial"
+  tar -xJf "$archive" -C "$sparkle.partial"
+  rm "$archive"
+  mv "$sparkle.partial" "$sparkle"
+fi
+
 # One build for both: built one at a time, each resolves its own features, and the CLI's
 # build compiles every dependency they share again.
 cargo build --release --locked -p catmail-gui -p catmail-cli --manifest-path "$repo/Cargo.toml"
@@ -124,6 +143,24 @@ plutil -lint -s "$app/Contents/Info.plist"
 cp "$gui" "$app/Contents/MacOS/catmail-gui"
 cp "$repo/LICENSE-MIT" "$repo/LICENSE-APACHE" "$app/Contents/Resources/licenses/"
 
+# Sparkle, loaded at run time (the GUI doesn't link it). Without its XPC services, which
+# only a sandboxed app uses, and for arm64 alone, as the app is.
+framework=$app/Contents/Frameworks/Sparkle.framework
+mkdir -p "$app/Contents/Frameworks"
+ditto "$sparkle/Sparkle.framework" "$framework"
+rm -rf "$framework/XPCServices" "$framework/Versions/B/XPCServices"
+sparkle_binaries=(
+  "$framework/Versions/B/Sparkle"
+  "$framework/Versions/B/Autoupdate"
+  "$framework/Versions/B/Updater.app/Contents/MacOS/Updater"
+)
+for binary in "${sparkle_binaries[@]}"; do
+  [[ -f $binary ]] || die "Sparkle $sparkle_version has no $(basename "$binary") where expected"
+  lipo "$binary" -thin arm64 -output "$binary.arm64"
+  mv "$binary.arm64" "$binary"
+done
+cp "$sparkle/LICENSE" "$app/Contents/Resources/licenses/LICENSE-Sparkle"
+
 # The fixed light icon, on Apple's icon grid: the tile (16 to 496 of 512 in the source)
 # takes 824 of 1024 pixels, centred, leaving the margin the system's icons have.
 iconset=$out/catmail.iconset
@@ -141,6 +178,11 @@ for size in 16 32 128 256 512; do
 done
 iconutil --convert icns --output "$app/Contents/Resources/catmail.icns" "$iconset"
 
+# Inside out, without --deep, in the order Sparkle documents: its installer, its app, the
+# framework, then the app that holds them.
+sign "$framework/Versions/B/Autoupdate"
+sign "$framework/Versions/B/Updater.app"
+sign "$framework"
 sign "$app"
 check_signature "$app"
 cli_dir=$out/cli/catmail-$version-$arch-macos

@@ -82,14 +82,15 @@ Intel Mac 越来越少，universal 二进制要把包撑大一倍。
 `packaging/macos/build-dmg.sh` 做全部工作，本地和 CI 都调用它：一次 `cargo build` 构建两个二进制（分两次时
 各自合并 feature，CLI 那次会把共用的依赖重编一遍），检查，组装
 bundle，签名、公证，打成磁盘映像和 tarball，输出到 `target/macos/`。要 Apple 芯片的 Mac 和 Xcode。
-GUI 是 nsh 的 AppKit 后端，正文用系统的 WKWebView，bundle 里不带别的库和字体。
+GUI 是 nsh 的 AppKit 后端，正文用系统的 WKWebView；bundle 里除了更新器 Sparkle，不带别的库和字体。
 
 ```
 catmail.app/Contents/
   Info.plist                      由 packaging/macos/Info.plist 填入版本号
   MacOS/catmail-gui
+  Frameworks/Sparkle.framework    更新器，见下面的"自动更新"
   Resources/catmail.icns
-  Resources/licenses/             本项目的许可证
+  Resources/licenses/             本项目和 Sparkle 的许可证
 ```
 
 - **最低 macOS 12**（沿用 GPUI 版定下的）：脚本按它设 `MACOSX_DEPLOYMENT_TARGET` 链接，`LSMinimumSystemVersion`
@@ -104,7 +105,8 @@ catmail.app/Contents/
   缓存只有它自己的分支读得到，发布用的只会是 main 上的运行装的）。源文件的底板占 512 中的 480，
   直接用会比系统的图标大一圈：脚本改它的 `viewBox`，让底板落在 Apple 图标网格的 824/1024 上，四周留出
   系统图标都有的边距，再用 `iconutil` 生成 16 到 1024 的 `.icns`。
-- **签名**：Developer ID Application 证书，开 hardened runtime（公证的要求），带安全时间戳。不需要任何
+- **签名**：Developer ID Application 证书，开 hardened runtime（公证的要求），带安全时间戳。由里往外签，
+  不用 `--deep`（Sparkle 文档的顺序）：Sparkle 的 `Autoupdate`、`Updater.app`、framework，最后是 app。不需要任何
   entitlement：没有 JIT、不进沙盒，钥匙串用的是不要 entitlement 的 generic password（`keyring`）。钥匙串
   条目只信任创建它的程序的签名要求（团队 ID 加 bundle id），之后同一张证书签的新版本直接能读；未签名的
   开发构建、CLI 读 GUI 存的密码时，系统会问一次是否允许。CLI 的签名标识是 bundle id 加 `.cli`。
@@ -113,7 +115,18 @@ catmail.app/Contents/
   app 离线也能打开；单个可执行文件钉不了票据，CLI 由 Gatekeeper 联网查。第二轮提交签好名的磁盘映像，
   钉上票据，最后用 `spctl` 按 Gatekeeper 对下载文件的规则检查磁盘映像和 app。
 - 没有签名身份时一律 ad hoc 签名、不公证：只能在构建的那台 Mac 上运行，PR 用它检查打包能跑通。
-- 不自动更新。Sparkle 要另外维护 appcast 和签名密钥，以后再做。
+- **自动更新**用 Sparkle 2（[#402](https://github.com/yangkx1024/cat-mail/issues/402)，进行中：framework
+  和 `Info.plist` 的键已经在包里，GUI 还没接上，发布还不出 appcast）。
+  - 脚本从 Sparkle 的 GitHub release 下载固定版本，校验 sha256（Sparkle 不发布校验和，用的是固定版本时
+    下载到的那份），解压在 `target/macos/tools/` 下，下次直接用。
+  - 放进 bundle 时删掉 XPC 服务（只有进沙盒的 app 用），三个可执行文件用 `lipo` 只留 arm64，和 app 一样。
+  - GUI 不链接它，运行时用 `NSBundle` 加载：开发构建和不在 bundle 里的运行没有它也照常运行，上面"只链接
+    系统库"的检查也不用改。
+  - 更新源 `SUFeedURL` 是 `https://catmail.yangkx.net/appcast.xml`，不是 GitHub 的地址：只有它写死在发出去的
+    app 里，appcast 里的下载地址每次发布都能换。现在这个地址由 Cloudflare 302 转发到
+    `releases/latest/download/appcast.xml`，安装包放在 GitHub release；要换托管时只改转发和 appcast。
+  - `SUPublicEDKey` 是更新包 EdDSA 签名的公钥；私钥在 `release` environment 的 `SPARKLE_ED_PRIVATE_KEY`，
+    另有离线备份。私钥丢了，已经装好的版本就再也收不到更新。
 
 ### CI 里的签名
 

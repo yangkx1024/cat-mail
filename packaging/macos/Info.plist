@@ -28,5 +28,9 @@
 	<true/>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
+	<key>SUFeedURL</key>
+	<string>https://catmail.yangkx.net/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>8HogwVdHMR6xV2d2HK5AFMvaMk7psBMO232U6CeOB7Y=</string>
 </dict>
 </plist>
