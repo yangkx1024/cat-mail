@@ -59,6 +59,10 @@ const READERS: usize = 4;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Free pages [`Store::release_free_pages`] gives back between letting other writes in:
+/// 16 MiB of them.
+const RELEASED_AT_ONCE: u64 = 4096;
+
 /// Handle to the SQLite database. Cheap to clone.
 ///
 /// All access goes through [`Store::read`] or [`Store::write`], which hand the closure a
@@ -219,6 +223,11 @@ impl Store {
             private::make_private(Path::new(&file))?;
         }
         let mut conn = Connection::open(path)?;
+        // Before anything is written to a new file: a database made without it only takes
+        // it on with a VACUUM of the whole file. It keeps track of where each page
+        // belongs, which is what lets `release_free_pages` shrink the file; nothing is
+        // moved until that is called.
+        conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         // Commits survive the app crashing, not a power cut; see `write_durable`.
         conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -277,6 +286,35 @@ impl Store {
         let out = f(&Db { conn: &tx })?;
         tx.commit()?;
         Ok(out)
+    }
+
+    /// Gives the pages that deletions left free back to the file system, so that the file
+    /// shrinks: SQLite on its own keeps them for later writes, and a removed account's
+    /// space would stay taken for good. Returns how many bytes that was. A few pages at
+    /// a time, each in a transaction of its own, with other writes in between.
+    pub fn release_free_pages(&self) -> Result<u64> {
+        let free = |conn: &Connection| -> Result<u64> {
+            Ok(conn.pragma_query_value(None, "freelist_count", |r| r.get::<_, u32>(0))? as u64)
+        };
+        let mut released = 0;
+        loop {
+            let conn = self.conn();
+            let before = free(&conn)?;
+            if before == 0 {
+                break;
+            }
+            conn.execute_batch(&format!("PRAGMA incremental_vacuum({RELEASED_AT_ONCE})"))?;
+            let after = free(&conn)?;
+            // None released: a database made before `auto_vacuum` was set can't.
+            if after >= before {
+                break;
+            }
+            released += before - after;
+        }
+        let page_size: u32 = self
+            .conn()
+            .pragma_query_value(None, "page_size", |r| r.get(0))?;
+        Ok(released * page_size as u64)
     }
 
     /// The write connection.
@@ -469,6 +507,59 @@ mod tests {
     }
 
     #[test]
+    fn free_pages_are_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catmail.db");
+        let store = Store::open(&path).unwrap();
+        // A hundred of them are more pages than are released at once.
+        let text = "x".repeat(200_000);
+        assert!(100 * text.len() as u64 > RELEASED_AT_ONCE * 4096);
+        store
+            .write(|db| {
+                seed(db.conn);
+                for id in 1..=100 {
+                    db.conn.execute(
+                        "INSERT INTO messages (id, account_id, folder_id, uid) VALUES (?1, 1, 20, ?1)",
+                        [id],
+                    )?;
+                    db.conn.execute(
+                        "INSERT INTO message_bodies (message_id, text_plain) VALUES (?1, ?2)",
+                        rusqlite::params![id, text],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let size = || {
+            // The file follows at a checkpoint.
+            store
+                .conn()
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                .unwrap();
+            std::fs::metadata(&path).unwrap().len()
+        };
+        let full = size();
+        assert_eq!(store.release_free_pages().unwrap(), 0, "none free yet");
+
+        store
+            .write(|db| Ok(db.conn.execute("DELETE FROM accounts WHERE id = 1", [])?))
+            .unwrap();
+        assert_eq!(size(), full, "SQLite keeps the pages");
+        let released = store.release_free_pages().unwrap();
+        assert!(released > 100 * text.len() as u64, "{released} of {full}");
+        // The pages that kept track of them go too.
+        assert!(size() <= full - released);
+        assert_eq!(store.release_free_pages().unwrap(), 0);
+        // What is left is intact.
+        let check: String = store
+            .conn()
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(check, "ok");
+        assert_eq!(store.read(|db| db.accounts().list()).unwrap().len(), 1);
+    }
+
+    #[test]
     fn durable_writes_are_synced() {
         let store = test_util::store();
         let synchronous = |conn: &Connection| -> i64 {
@@ -487,6 +578,25 @@ mod tests {
             2
         );
         assert_eq!(synchronous(&store.conn()), 1, "only for that commit");
+    }
+
+    /// The collection lists the bodies' blobs from their index, not by reading every body.
+    #[test]
+    fn blob_references_of_bodies_come_from_their_index() {
+        let store = test_util::store();
+        let conn = store.conn();
+        let plan: Vec<String> = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {BLOB_REFERENCES}"))
+            .unwrap()
+            .query_map([], |r| r.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("COVERING INDEX message_bodies_raw")),
+            "{plan:#?}"
+        );
     }
 
     #[test]

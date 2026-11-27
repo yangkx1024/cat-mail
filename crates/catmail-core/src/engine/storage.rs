@@ -142,11 +142,17 @@ impl Storage {
         self.0.blobs.path(hash)
     }
 
-    /// Deletes the blobs no row refers to that are older than [`BLOB_GRACE`].
+    /// Deletes the blobs no row refers to that are older than [`BLOB_GRACE`], and gives
+    /// the space deleted rows left in the database back to the file system.
     pub fn collect_garbage(&self) -> Result<GcReport> {
         // References first: see BlobStore::collect_garbage.
         let referenced = self.read(|db| db.blob_references())?;
-        Ok(self.0.blobs.collect_garbage(&referenced, BLOB_GRACE)?)
+        let report = self.0.blobs.collect_garbage(&referenced, BLOB_GRACE)?;
+        let released = self.0.store.release_free_pages()?;
+        if released > 0 {
+            tracing::info!(bytes = released, "released free space in the database");
+        }
+        Ok(report)
     }
 
     /// Stores `password` in the keyring under a new key for a `kind` (`account`,
