@@ -143,7 +143,7 @@ workflow 建一个临时钥匙串，导入 `.p12` 和它链到的中间证书 De
 - 然后从这个标签构建：`ubuntu-22.04` 和 `ubuntu-22.04-arm` 上各一份 CLI tar.gz，`ubuntu-24.04` 和
   `ubuntu-24.04-arm` 上各一份 Flatpak bundle（先关掉 AppArmor 对非特权 user namespace 的限制，flatpak-builder
   的 bwrap 要用），
-  `macos-15` 上一份签名、公证过的磁盘映像和 CLI tar.gz，最后创建 GitHub release（附 `SHA256SUMS`）。
+  `macos-26` 上一份签名、公证过的磁盘映像和 CLI tar.gz（要用 macOS 26 以上的 SDK 链接，窗口才是新系统的样式），最后创建 GitHub release（附 `SHA256SUMS`）。
   任何一个平台失败都不发布。
 - 全在一次运行里：用 GITHUB_TOKEN 推的标签不会触发别的 workflow，所以不能靠"推标签触发构建"。也就没有
   按标签触发的入口，手动推的标签不会发布。

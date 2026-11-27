@@ -196,7 +196,10 @@ jobs:
   macos:
     name: macOS (aarch64)
     needs: version
-    runs-on: macos-15
+    # AppKit draws a window in the current system's style (Liquid Glass window buttons and
+    # toolbars) only for an app linked against the macOS 26 SDK or later; macos-15's
+    # default Xcode links against 15.5, which gets the old style on new systems.
+    runs-on: macos-26
     # Two rounds with the notary, which now and then takes a while.
     timeout-minutes: 90
     # The signing identity and the notary's key, for manual runs only.
