@@ -11,6 +11,18 @@
 # CATMAIL_NOTARY_ISSUER are set too. Without an identity it signs ad hoc: a package that
 # runs on this Mac only, enough to check the packaging. Needs Xcode (codesign,
 # notarytool) and the network (resvg from crates.io, Sparkle from its GitHub release).
+#
+# With CATMAIL_UPDATE_KEY too (a file holding Sparkle's private EdDSA key), a notarized
+# build also makes what Sparkle updates from, for the release to publish:
+#
+#   target/macos/updates/catmail-<version>-aarch64.app.zip
+#   target/macos/updates/catmail<version>-<older version>.delta
+#   target/macos/updates/appcast.xml
+#
+# CATMAIL_UPDATE_URL is where the release serves these files from (a URL ending in /).
+# CATMAIL_DELTA_FROM, if set, is a directory of older versions' published
+# catmail-<version>-aarch64.app.zip, one delta from each; CATMAIL_RELEASE_NOTES, a
+# Markdown file the feed shows as this version's notes.
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
@@ -36,6 +48,10 @@ sparkle_sha256=1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27
 identity=${CATMAIL_SIGN_IDENTITY:-}
 team=${CATMAIL_TEAM_ID:-}
 notary_key=${CATMAIL_NOTARY_KEY:-}
+update_key=${CATMAIL_UPDATE_KEY:-}
+update_url=${CATMAIL_UPDATE_URL:-}
+delta_from=${CATMAIL_DELTA_FROM:-}
+release_notes=${CATMAIL_RELEASE_NOTES:-}
 
 die() {
   echo "error: $*" >&2
@@ -48,6 +64,12 @@ if [[ -n $notary_key ]]; then
   [[ -n $identity ]] || die "only a Developer ID signature can be notarized"
   [[ -n ${CATMAIL_NOTARY_KEY_ID:-} && -n ${CATMAIL_NOTARY_ISSUER:-} ]] ||
     die "CATMAIL_NOTARY_KEY needs CATMAIL_NOTARY_KEY_ID and CATMAIL_NOTARY_ISSUER"
+fi
+if [[ -n $update_key ]]; then
+  # Sparkle installs an update without Gatekeeper's check: only a notarized app goes out.
+  [[ -n $notary_key ]] || die "only a notarized build can be an update"
+  [[ $update_url == https://*/ ]] ||
+    die "CATMAIL_UPDATE_KEY needs CATMAIL_UPDATE_URL, an https URL ending in /"
 fi
 
 # check_binary <file>: built for this architecture and macOS, and linked only against
@@ -81,6 +103,11 @@ check_signature() {
     codesign --display --verbose=2 "$1" 2>&1 | grep -qx "TeamIdentifier=$team" ||
       die "$(basename "$1") isn't signed by the team $team"
   fi
+}
+
+# count <regex> <file>: how many times the file has it (0 is no failure).
+count() {
+  { grep -oE "$1" "$2" || true; } | wc -l | tr -d ' '
 }
 
 # notarize <file>: submits a zip or disk image and waits for Apple's verdict, printing
@@ -225,8 +252,49 @@ if [[ -n $notary_key ]]; then
   spctl --assess --verbose --type execute "$app"
 fi
 
+# The update: the app as stapled, zipped as Sparkle's docs say, and the feed, with a delta
+# from each older version. Each is worked out from the published, stapled app of both
+# versions, so the app a delta makes is the full update's, byte for byte, and opens
+# offline. generate_appcast signs the archives and takes the minimum macOS and the
+# architecture from the app; only this version's entry is kept (older ones would point
+# at this release's URL).
+if [[ -n $update_key ]]; then
+  updates=$out/updates
+  rm -rf "$updates"
+  mkdir -p "$updates"
+  update=catmail-$version-$arch.app
+  ditto -c -k --sequesterRsrc --keepParent "$app" "$updates/$update.zip"
+  older=()
+  if [[ -n $delta_from ]]; then
+    for zip in "$delta_from"/catmail-*-"$arch".app.zip; do
+      [[ -e $zip && $(basename "$zip") != "$update.zip" ]] || continue
+      cp "$zip" "$updates/"
+      older+=("$updates/$(basename "$zip")")
+    done
+  fi
+  if [[ -n $release_notes ]]; then
+    cp "$release_notes" "$updates/$update.md"
+  fi
+  "$sparkle/bin/generate_appcast" --ed-key-file "$update_key" \
+    --download-url-prefix "$update_url" --embed-release-notes --maximum-versions 1 --maximum-deltas "${#older[@]}" \
+    --disable-signing-warning "$updates"
+  appcast=$updates/appcast.xml
+  # It only warns, and leaves the signatures out, when the key isn't the app's
+  # SUPublicEDKey; and only warns when a delta fails.
+  enclosures=$(count '<enclosure ' "$appcast")
+  signed=$(count '<enclosure [^>]*sparkle:edSignature="[^"]+"' "$appcast")
+  [[ $enclosures -eq $signed ]] ||
+    die "the appcast has unsigned archives: is CATMAIL_UPDATE_KEY the key of SUPublicEDKey?"
+  deltas=$(count 'sparkle:deltaFrom=' "$appcast")
+  [[ $deltas -eq ${#older[@]} ]] || die "the appcast has $deltas deltas, not ${#older[@]}"
+  rm -rf ${older[@]+"${older[@]}"} "$updates/$update.md" "$updates/old_updates"
+fi
+
 tarball=$out/catmail-$version-$arch-macos.tar.gz
 # Without AppleDouble `._` files for extended attributes.
 COPYFILE_DISABLE=1 tar -C "$out/cli" -czf "$tarball" "$(basename "$cli_dir")"
 echo "$dmg"
 echo "$tarball"
+if [[ -n $update_key ]]; then
+  find "$updates" -type f | sort
+fi
