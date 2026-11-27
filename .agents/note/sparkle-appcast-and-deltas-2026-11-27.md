@@ -23,13 +23,14 @@
 - **只有公证的构建出更新**（`CATMAIL_UPDATE_KEY` 要求 `CATMAIL_NOTARY_KEY`）：Sparkle 装更新时不经过
   Gatekeeper，没公证的 app 不能发出去。PR 和 ad hoc 的包不出。
 - **脚本自己检查 `generate_appcast` 的结果**：私钥和 app 的 `SUPublicEDKey` 对不上时它只警告、把签名
-  留空，某个增量包失败时也只警告。脚本数 enclosure 和签名、数增量包，不对就失败。本地用对不上的密钥试过，
+  留空，某个增量包失败时也只警告。脚本数 enclosure 和签名、数增量包，再确认 appcast 里只有这个版本的一条（旧 zip 里混进更新的版本时，`--maximum-versions 1` 留下的会是它），不对就失败。本地用对不上的密钥试过，
   确实只警告。
 - **下载地址前缀由 CI 给**（`CATMAIL_UPDATE_URL`），不写死在脚本里：脚本不用知道仓库在哪，本地试升级时
   也能指向别处。
 - **release notes 生成一次，两处都用**：`version` job 推完标签后调 generate-notes，`macos` job 嵌进 appcast
   （Markdown，Sparkle 的更新窗口显示），`publish` job 用作 release 的说明，原来的 `--generate-notes` 去掉。
-  放在 `version` job 是因为 generate-notes 要写权限，只有它有；`macos` job 拿着签名的 secrets，不给它写权限。
+  放在 `version` job：`macos` job 生成 appcast 时就要用，`publish` 在它之后才跑；generate-notes 要写权限，
+  而 `macos` job 拿着签名的 secrets，不给它写权限。
   没用 `releaseNotesLink` 指向 release 页面：Sparkle 会把整个 GitHub 页面塞进更新窗口。
 - **release 标成 latest**（`--latest`）：更新源经 `releases/latest/download/appcast.xml` 转发，draft、
   prerelease 不算 latest。发布后读一遍 `catmail.yangkx.net/appcast.xml`，确认里面是这次的版本。

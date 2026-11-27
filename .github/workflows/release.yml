@@ -311,7 +311,8 @@ jobs:
           SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
           VERSION: ${{ needs.version.outputs.version }}
         run: |
-          [[ -n $SPARKLE_ED_PRIVATE_KEY ]] || { echo "error: no SPARKLE_ED_PRIVATE_KEY" >&2; exit 1; }
+          die() { echo "error: $*" >&2; exit 1; }
+          [[ -n $SPARKLE_ED_PRIVATE_KEY ]] || die "no SPARKLE_ED_PRIVATE_KEY"
           key=$RUNNER_TEMP/sparkle-key
           printf '%s\n' "$SPARKLE_ED_PRIVATE_KEY" > "$key"
           {
@@ -398,11 +399,10 @@ jobs:
           TAG: ${{ needs.version.outputs.ref }}
           NOTES: ${{ needs.version.outputs.notes }}
         run: |
-          printf '%s\n' "$NOTES" > "$RUNNER_TEMP/release-notes.md"
           cd dist
           sha256sum ./* > SHA256SUMS
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --latest \
-            --title "$TAG" --notes-file "$RUNNER_TEMP/release-notes.md" ./*
+            --title "$TAG" --notes "$NOTES" ./*
 
       # What installed apps read: the feed their Info.plist names (SUFeedURL in
       # packaging/macos/Info.plist), redirected to the latest release's appcast.xml.
@@ -410,15 +410,15 @@ jobs:
         env:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
+          die() { echo "error: $*" >&2; exit 1; }
           feed=https://catmail.yangkx.net/appcast.xml
           for attempt in 1 2 3 4 5 6; do
             if curl -fsSL --retry 3 "$feed" |
               grep -qF "<sparkle:version>$VERSION</sparkle:version>"; then
               echo "$feed offers $VERSION"
-              exit 0
+              break
             fi
+            [[ $attempt -lt 6 ]] || die "$feed doesn't offer $VERSION"
             echo "$feed doesn't offer $VERSION yet (attempt $attempt)"
             sleep 20
           done
-          echo "error: $feed doesn't offer $VERSION" >&2
-          exit 1

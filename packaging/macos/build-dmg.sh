@@ -268,7 +268,7 @@ if [[ -n $update_key ]]; then
   if [[ -n $delta_from ]]; then
     for zip in "$delta_from"/catmail-*-"$arch".app.zip; do
       [[ -e $zip && $(basename "$zip") != "$update.zip" ]] || continue
-      cp "$zip" "$updates/"
+      cp -c "$zip" "$updates/"
       older+=("$updates/$(basename "$zip")")
     done
   fi
@@ -287,6 +287,10 @@ if [[ -n $update_key ]]; then
     die "the appcast has unsigned archives: is CATMAIL_UPDATE_KEY the key of SUPublicEDKey?"
   deltas=$(count 'sparkle:deltaFrom=' "$appcast")
   [[ $deltas -eq ${#older[@]} ]] || die "the appcast has $deltas deltas, not ${#older[@]}"
+  # One entry, this version's: a newer zip among the older ones would have taken its place.
+  [[ $(count '<item>' "$appcast") -eq 1 &&
+    $(count "<sparkle:version>${version//./\\.}</sparkle:version>" "$appcast") -eq 1 ]] ||
+    die "the appcast doesn't offer $version alone: is a newer zip in CATMAIL_DELTA_FROM?"
   rm -rf ${older[@]+"${older[@]}"} "$updates/$update.md" "$updates/old_updates"
 fi
 

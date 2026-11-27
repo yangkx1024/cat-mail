@@ -151,7 +151,7 @@ catmail.app/Contents/
     - `CATMAIL_RELEASE_NOTES` 是一个 Markdown 文件，嵌进 appcast（`sparkle:format="markdown"`），Sparkle 的更新
       窗口里显示。
     - `generate_appcast` 在私钥和 app 的 `SUPublicEDKey` 对不上、或某个增量包没算出来时只警告，脚本检查
-      每个 enclosure 都有签名、增量包的个数对得上，不对就失败：不然发出去的 appcast 装不上。
+      每个 enclosure 都有签名、增量包的个数对得上、appcast 里只有这个版本的一条（旧版本里混进一个更新的 zip 时，留下的会是它），不对就失败：不然发出去的 appcast 装不上。
     - 它把解开的旧版本缓存在 `~/Library/Caches/Sparkle_generate_appcast`，CI 的机器用完就丢，本地可以删。
 
 ### CI 里的签名
@@ -191,8 +191,9 @@ workflow 建一个临时钥匙串，导入 `.p12` 和它链到的中间证书 De
   三个比这次旧、带 `*-aarch64.app.zip` 的，下载给 `CATMAIL_DELTA_FROM`。还没接 Sparkle 的旧版本没有 zip，
   跳过：它们本来也不会自己更新。`build_only` 也这样挑，构建的版本已经发布过时跳过它自己。
 - **release notes** 在 `version` job 推完标签后用 GitHub 的 generate-notes 生成一次，同一份既是 release
-  页面的说明，也嵌进 appcast，在 Sparkle 的更新窗口里显示。放在 `version` job 是因为只有它有写权限
-  （generate-notes 要），`macos` job 的 token 只读。
+  页面的说明，也嵌进 appcast，在 Sparkle 的更新窗口里显示。`macos` job 生成 appcast
+  时就要用，`publish` 在它之后才跑，所以放在 `version` job；generate-notes 要写权限，而 `macos` job 拿着签名的
+  secrets，不给它写权限。
 - release 不是 draft 也不是 prerelease，并标成 latest：装好的 app 读的 `catmail.yangkx.net/appcast.xml`
   转发到 `releases/latest/download/appcast.xml`，draft 和 prerelease 都不算 latest。发布后 `publish` job
   读一遍自己域名的更新源，确认里面是这次的版本，不是就失败（release 已经发出去了，失败是提醒去查转发）。
