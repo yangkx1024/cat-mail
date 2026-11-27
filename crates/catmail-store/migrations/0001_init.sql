@@ -14,6 +14,10 @@
 --     composite foreign key over (id, account_id), so they cannot cross accounts.
 --     Where that is impossible (ON DELETE SET NULL would also null account_id), the
 --     repository checks it.
+--   * Columns that can be large (bodies, a draft's HTML and quote) come last in their
+--     table. A row larger than a page continues on overflow pages, a chain SQLite walks
+--     page by page to reach a column stored after them: the small columns before the
+--     text are read without it.
 
 CREATE TABLE accounts (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -138,9 +142,14 @@ CREATE TABLE messages (
     -- Gmail's X-GM-MSGID (unsigned 64-bit, stored as its bits); NULL on a standard
     -- account. It stays the same in every location.
     gm_msgid        INTEGER,
+    -- Gmail's X-GM-THRID, stored like gm_msgid. Nothing reads it yet, nor in_reply_to_hdr
+    -- and internal_date below: sync fetches them anyway, and filling them in later would
+    -- take fetching the headers of every stored message again.
+    gm_thrid        INTEGER,
     -- Immutable for the lifetime of the (folder, uid) pair.
     size            INTEGER,
     message_id_hdr  TEXT,
+    in_reply_to_hdr TEXT, -- space-separated, as references_hdr
     references_hdr  TEXT,
     subject         TEXT,
     from_json       TEXT    NOT NULL DEFAULT '[]',
@@ -148,6 +157,7 @@ CREATE TABLE messages (
     cc_json         TEXT    NOT NULL DEFAULT '[]',
     reply_to_json   TEXT    NOT NULL DEFAULT '[]',
     date            INTEGER, -- the Date header, else INTERNALDATE; the list sort key
+    internal_date   INTEGER, -- INTERNALDATE: when the server received it
     snippet         TEXT,
     -- The server's preview (RFC 8970 PREVIEW) came: in `snippet` until the body is
     -- stored, or there was none to be had. Until then, one is asked for while the body
@@ -311,16 +321,20 @@ END;
 -- one transaction with the message's attachments rows, its snippet and its FTS entry.
 CREATE TABLE message_bodies (
     message_id      INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
-    text_plain      TEXT,
-    text_html       TEXT, -- already sanitized
     raw_blob_hash   TEXT, -- the whole raw message; only kept for messages fetched whole
     -- The catmail_proto::mime::CONTENT_VERSION that parsed and sanitized the body: one
     -- below the current is rebuilt (catmail_core::rebuild).
-    content_version INTEGER NOT NULL DEFAULT 0
+    content_version INTEGER NOT NULL DEFAULT 0,
+    -- The text last (see the conventions): reading the columns above doesn't go through it.
+    text_plain      TEXT,
+    text_html       TEXT -- already sanitized
 ) STRICT;
--- The bodies to rebuild: without it, finding none reads every body (its last column is
--- behind the text, often on overflow pages).
+-- The bodies to rebuild: without it, finding none reads the row of every body.
 CREATE INDEX message_bodies_version ON message_bodies (content_version);
+-- The blobs bodies refer to, which every garbage collection lists (Db::blob_references):
+-- read from here alone, not from the row of every body.
+CREATE INDEX message_bodies_raw ON message_bodies (raw_blob_hash)
+    WHERE raw_blob_hash IS NOT NULL;
 
 -- Background prefetch of bodies (catmail_core::prefetch). A message whose body failed to
 -- fetch, so that the prefetch goes on with the others and tries this one again only
@@ -380,20 +394,6 @@ CREATE TABLE drafts (
     to_json             TEXT    NOT NULL DEFAULT '[]',
     cc_json             TEXT    NOT NULL DEFAULT '[]',
     bcc_json            TEXT    NOT NULL DEFAULT '[]',
-    body_text           TEXT    NOT NULL DEFAULT '',
-    -- The message formatted, or NULL for plain text (body_text is then all of it). Its
-    -- images are the draft's attachments with a content_id, by cid: URL.
-    body_html           TEXT,
-    -- What a reply or forward carries of the message it answers (catmail_types::Quote),
-    -- sent below the body: its head and text, all NULL for none. quote_head is
-    -- catmail_types::QuoteHead as JSON, what introduces the quote as data and whether it
-    -- is a reply's or a forward's: {"reply": {"from": …, "date": …}} or
-    -- {"forward": [[field, value], …]}. quote_html is NULL for a message of text only;
-    -- its images are attachments with a content_id too. Columns of their own, so a list
-    -- of drafts reads the text without the HTML.
-    quote_head          TEXT CHECK (json_valid(quote_head)),
-    quote_text          TEXT,
-    quote_html          TEXT,
     -- Bumped by every change, attachments included. Sending builds the message outside
     -- the transaction that queues it, and queues only if this hasn't moved meanwhile.
     revision            INTEGER NOT NULL DEFAULT 0,
@@ -419,6 +419,22 @@ CREATE TABLE drafts (
     upload_failures     INTEGER NOT NULL DEFAULT 0,
     upload_retry_at     INTEGER,
     updated_at          INTEGER NOT NULL DEFAULT (unixepoch()),
+    -- The text last (see the conventions), and the HTML after all of it: what a list of
+    -- drafts and the upload pass read of a draft doesn't go through its HTML.
+    body_text           TEXT    NOT NULL DEFAULT '',
+    -- What a reply or forward carries of the message it answers (catmail_types::Quote),
+    -- sent below the body: its head and text, all NULL for none. quote_head is
+    -- catmail_types::QuoteHead as JSON, what introduces the quote as data and whether it
+    -- is a reply's or a forward's: {"reply": {"from": …, "date": …}} or
+    -- {"forward": [[field, value], …]}.
+    quote_head          TEXT CHECK (json_valid(quote_head)),
+    quote_text          TEXT,
+    -- The message formatted, or NULL for plain text (body_text is then all of it). Its
+    -- images are the draft's attachments with a content_id, by cid: URL.
+    body_html           TEXT,
+    -- The quote formatted, or NULL for a message of text only; its images are
+    -- attachments with a content_id too.
+    quote_html          TEXT,
     CHECK ((remote_folder_id IS NULL) = (remote_uidvalidity IS NULL)
        AND (remote_folder_id IS NULL) = (remote_uid IS NULL)
        AND (remote_folder_id IS NULL) = (remote_message_id IS NULL)

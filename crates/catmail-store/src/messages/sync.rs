@@ -15,9 +15,12 @@ use crate::folders::Folders;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NewMessage {
     pub state: FlagState,
+    /// INTERNALDATE. Stored as it is too, like `in_reply_to` and `gm_thrid`: nothing
+    /// reads them yet, but a message's headers are fetched once.
     pub internal_date: Option<i64>,
     pub size: Option<u32>,
     pub message_id: Option<String>,
+    pub in_reply_to: Vec<String>,
     pub references: Vec<String>,
     pub subject: Option<String>,
     pub from: Vec<Address>,
@@ -27,8 +30,9 @@ pub struct NewMessage {
     /// The Date header; INTERNALDATE is used when it is missing.
     pub date: Option<i64>,
     pub has_attachments: bool,
-    /// X-GM-MSGID, on Gmail.
+    /// X-GM-MSGID and X-GM-THRID, on Gmail.
     pub gm_msgid: Option<u64>,
+    pub gm_thrid: Option<u64>,
     /// The server's preview came with it (see [`Messages::store_previews`]), as this
     /// snippet.
     pub previewed: bool,
@@ -88,12 +92,15 @@ impl Messages<'_> {
     ) -> Result<Upserted> {
         let mut insert = self.conn.prepare_cached(
             "INSERT INTO messages (account_id, folder_id, uid, flags, keywords_json, modseq,
-                                   gm_msgid, size, message_id_hdr, references_hdr, subject,
-                                   from_json, to_json, cc_json, reply_to_json, date,
-                                   has_attachments, previewed, snippet)
+                                   gm_msgid, gm_thrid, size, message_id_hdr, in_reply_to_hdr,
+                                   references_hdr, subject, from_json, to_json, cc_json,
+                                   reply_to_json, date, internal_date, has_attachments,
+                                   previewed, snippet)
              SELECT :account, :folder, :uid, :flags, :keywords, :modseq,
-                    :gm_msgid, :size, :message_id, :references, :subject,
-                    :from, :to, :cc, :reply_to, :date, :has_attachments, :previewed, :snippet
+                    :gm_msgid, :gm_thrid, :size, :message_id, :in_reply_to,
+                    :references, :subject, :from, :to, :cc,
+                    :reply_to, :date, :internal_date, :has_attachments,
+                    :previewed, :snippet
              WHERE NOT EXISTS (
                  SELECT 1 FROM pending_ops
                  WHERE folder_id = :folder AND status = 'pending' AND uid = :uid
@@ -158,8 +165,10 @@ impl Messages<'_> {
                 ":keywords": to_json(&m.state.keywords),
                 ":modseq": m.state.modseq.map(|v| v as i64),
                 ":gm_msgid": m.gm_msgid.map(|v| v as i64),
+                ":gm_thrid": m.gm_thrid.map(|v| v as i64),
                 ":size": m.size,
                 ":message_id": m.message_id,
+                ":in_reply_to": to_id_list(&m.in_reply_to),
                 ":references": to_id_list(&m.references),
                 ":subject": m.subject,
                 ":from": to_json(&m.from),
@@ -167,6 +176,7 @@ impl Messages<'_> {
                 ":cc": to_json(&m.cc),
                 ":reply_to": to_json(&m.reply_to),
                 ":date": m.date.or(m.internal_date),
+                ":internal_date": m.internal_date,
                 ":has_attachments": m.has_attachments,
                 ":previewed": m.previewed,
                 ":snippet": m.snippet,
@@ -446,6 +456,50 @@ mod tests {
     };
     use crate::messages::{MessageLocation, NewBody};
     use crate::test_util::{self, gmail};
+
+    #[test]
+    fn keeps_what_sync_fetched_and_nothing_reads_yet() {
+        let (store, account, folder) = setup();
+        let batch = [
+            NewMessage {
+                in_reply_to: vec!["parent@x".into(), "other@x".into()],
+                gm_thrid: Some(u64::MAX),
+                ..message(1, Some(500), Flags::empty())
+            },
+            NewMessage {
+                internal_date: Some(900),
+                ..message(2, None, Flags::empty())
+            },
+        ];
+        store
+            .write(|db| db.messages().upsert(account, folder.id, &batch))
+            .unwrap();
+        type Kept = (Option<i64>, Option<i64>, Option<String>, Option<i64>);
+        let kept: Vec<Kept> = store
+            .read(|db| {
+                let mut stmt = db.conn.prepare(
+                    "SELECT date, internal_date, in_reply_to_hdr, gm_thrid FROM messages
+                     ORDER BY uid",
+                )?;
+                let rows =
+                    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+                Ok(rows.collect::<rusqlite::Result<_>>()?)
+            })
+            .unwrap();
+        assert_eq!(
+            kept,
+            [
+                // INTERNALDATE beside the Date header, not only in its place.
+                (
+                    Some(500),
+                    Some(1_001),
+                    Some("parent@x other@x".into()),
+                    Some(u64::MAX as i64)
+                ),
+                (Some(900), Some(900), None, None),
+            ]
+        );
+    }
 
     #[test]
     fn upsert_is_idempotent_and_refreshes_flags() {

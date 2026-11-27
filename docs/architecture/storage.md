@@ -14,6 +14,17 @@
   读里套读可能把池耗尽。
 - `secure_delete=ON`：删除账户、UIDVALIDITY 重建、GC 之后，正文不会留在空闲页里等着被覆盖。代价是
   被释放的页都要（经 WAL）写一遍零，包括 FTS 合并释放的。没有用 `FAST`：它不清零进入空闲列表的溢出页，而大段正文正在溢出页里。
+  - 它管的是被释放的页，管不到搜索索引里还在用的页：`contentless_delete` 删除一封邮件只记一个墓碑，
+    它的词（连同位置）留在所在的索引段里，搜不到，但字节还在文件中，等这个段被合并时才消失。删掉的
+    多了（删除账户、UIDVALIDITY 重建）FTS5 会很快合并这些段；零星删掉的一封要等后面的写入带来合并，
+    没有期限（实测：删一封后词仍在文件里，再存入一万封后消失）。目前接受：要立刻清掉只能
+    `'optimize'` 重写整个索引。正文、主题这些存在表里的原文不受影响，随删除清零。
+- `auto_vacuum=INCREMENTAL`：SQLite 默认把删除腾出的页留在文件里等以后的写入用，文件只增不减，删掉一个
+  账户，它占的空间永远不还给磁盘。这个模式多记一份每页归谁的指针表，平时不搬动任何页；
+  `Store::release_free_pages` 把空闲页交还文件系统（每次 16 MiB、各自一个事务，中间让别的写入先走），
+  随 [GC](#blobstore) 一起运行。
+  - 必须在新库写入任何内容之前设置（`Store::open` 里先于 WAL），已有内容的库要整库 `VACUUM` 才能换上：
+    这是发布前定下来的，不要挪到迁移里或建表之后。没有设置它的旧库上 `release_free_pages` 什么也不做。
 - 迁移在 `crates/catmail-store/migrations/`，由 store 自己的 `migrate::to_latest` 执行：
   `user_version` 记库已经跑过几个迁移，没跑过的按顺序在一个事务里跑完，提交前 `foreign_key_check`，
   失败就整个回滚；库的版本比程序认识的新（较新的 catmail 迁移过）就拒绝打开。
@@ -23,6 +34,13 @@
     检查拦下。
 - 约定：时间为 unix 秒；枚举列为 TEXT 不加 CHECK（新增变体无需重建表）；地址列表为 JSON；外部可见
   的 ID（accounts / folders / messages / drafts）用 `AUTOINCREMENT`，删除后不复用。
+- **大文本列放在表的最后**（`message_bodies` 的正文，`drafts` 的正文、引文，HTML 又排在纯文本之后）。
+  一行超过一页时后半截存在溢出页里，SQLite 要读排在它后面的列，得顺着溢出页链一页页走过去：小列排在
+  前面，读它们就不碰正文。排在后面时，草稿列表和上传检查每次都要走过每篇草稿的 HTML，GC 列出正文引用的
+  blob 要把整张正文表读一遍（4 万封、各 38 KB HTML 的库：读 1.8 GB；换序后 164 MB，加上
+  `message_bodies_raw` 索引只读索引本身）。列的顺序发布后只能重建表才能改，新表照此排列；以后
+  `ADD COLUMN` 加的列只能排在最后，会被经常读的小列若落在大文本后面，给它建索引（如
+  `message_bodies_version`）。`messages` 的行很少超过一页，不讲究。
 
 ## Repository 与级联
 
@@ -69,8 +87,12 @@ touched、columns
 - 移动得到新的 UID：服务器给出 COPYUID 时同一行改为新的（文件夹, UID），否则旧行删除、同步时成为
   新的一行。本地移动过来、服务器还没移动的行 `uid` 为空。
 - 普通账户上不同文件夹里的副本不关联：`EMAILID`（RFC 8474）相同的副本 flags 仍各自独立，只能用于分组。
-  会话分组（`X-GM-THRID` / `THREADID`，协议层已能取到）等决定怎么做时再加列，现在不预留；
-  In-Reply-To 也一样，只有草稿存它。
+- **先存下、还没有用到的列**：`gm_thrid`（`X-GM-THRID`）、`in_reply_to_hdr`、`internal_date`
+  （INTERNALDATE 本身；`date` 仍是 Date 头，没有时才用它）。同步本来就取到了它们，存下只多几十个字节；
+  不存的话，以后要用就得让每个用户把所有邮件的头重新拉一遍，加列本身反而便宜。会话分组怎么做还没定
+  （Gmail 之外要靠 In-Reply-To / References，或 `THREADID`，后者协议层能取到、还没存）；列表现在按 Date
+  头排序，它由发件人填写，日期写在未来的邮件会一直排在最前，要改成按收信时间或拿它修正，靠的是
+  `internal_date`。现在没有查询读这三列，也没有为它们建索引。
 - 索引只为现有查询而建：每条索引都让同步的每次插入、删除多一棵 B 树要改。按账户整体列出邮件的索引已
   删除，多账户合并收件箱（All Inboxes，`list_inboxes`）复用各收件箱的文件夹 / 标签索引分页。
 
@@ -213,10 +235,13 @@ mtime。宽限期要远大于任何写事务的时长；`put` 遇到已存在的
 
 **实现**（`BlobStore::collect_garbage`，由 `catmail-core` 的 `Storage::collect_garbage` 调用，入口
 `MailClient::collect_garbage` / `catmail gc`）：先在一个
-读事务里取出所有引用（`Db::blob_references`；有测试枚举所有 `*_blob_hash` 列，漏加会失败），再遍历
+读事务里取出所有引用（`Db::blob_references`；有测试枚举所有 `*_blob_hash` 列，漏加会失败；正文的引用从
+部分索引 `message_bodies_raw` 里读，不碰正文的行，也有测试看查询计划），再遍历
 目录找出未引用且足够旧的候选，逐个在写锁下重查 mtime 后删除。`put` 刷新或创建 blob 时持有同一把锁
 的读锁，"GC 判定为旧"与"`put` 刚刚刷新"不会交错。宽限期 1 小时；`tmp` 里中断写入留下的旧文件一并
-清理。删除账户、UIDVALIDITY 变化等删除邮件之后，它们的 blob 由下一次 GC 回收。
+清理。删除账户、UIDVALIDITY 变化等删除邮件之后，它们的 blob 由下一次 GC 回收，数据库文件里腾出的页也在
+这时交还（`Store::release_free_pages`，见 [SQLite](#sqlite) 的 `auto_vacuum`；交还了多少只记日志，不进
+`GcReport`）。
 
 **谁来运行。** `catmail gc` 打不开别的前端正占着的数据目录，所以长期运行的前端让引擎定期运行
 （`MailClientBuilder::collect_garbage_every`，`gc.rs`）：打开后最多 5 分钟第一次（不与启动时的同步

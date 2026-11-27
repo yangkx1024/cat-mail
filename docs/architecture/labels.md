@@ -50,8 +50,8 @@
 相关表结构定义在 `0001_init.sql` 中：
 
 - `folders.kind`：`location` / `label`，对账文件夹时按上面的规则写入。`folders.listed`：LIST 里有没有它。
-- `messages.gm_msgid`：可空，Gmail 账户上 `UNIQUE (account_id, gm_msgid)`。`X-GM-THRID` 协议层照常取到，
-  不存（会话分组见[存储](storage.md)）。
+- `messages.gm_msgid`：可空，Gmail 账户上 `UNIQUE (account_id, gm_msgid)`。`X-GM-THRID` 存在
+  `messages.gm_thrid`，还没有用到（会话分组见[存储](storage.md#邮件行)）。
 - `message_labels (message_id, folder_id, account_id, list_date)`：主键 (message_id, folder_id)，到
   `messages`、`folders` 都用 `(id, account_id)` 复合外键。`list_date` 冗余一份邮件的排序键（日期不变），
   索引 `(folder_id, list_date, message_id)`：标签的翻页与文件夹一样是两次定位（见

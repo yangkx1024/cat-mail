@@ -984,6 +984,7 @@ fn new_message(m: FetchedMessage) -> NewMessage {
         internal_date: m.internal_date,
         size: m.size,
         message_id: h.message_id,
+        in_reply_to: h.in_reply_to,
         references: h.references,
         subject: h.subject,
         from: h.from,
@@ -993,6 +994,7 @@ fn new_message(m: FetchedMessage) -> NewMessage {
         date: h.date,
         has_attachments: m.has_attachments,
         gm_msgid: m.gm_msgid,
+        gm_thrid: m.gm_thrid,
         previewed: m.preview.is_some(),
         snippet: m.preview.flatten(),
     }
@@ -1001,6 +1003,30 @@ fn new_message(m: FetchedMessage) -> NewMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What nothing reads yet is stored all the same: fetching it later would take every
+    /// message's headers again.
+    #[test]
+    fn a_new_message_keeps_its_thread_and_when_it_was_received() {
+        let fetched = FetchedMessage {
+            state: Default::default(),
+            internal_date: Some(900),
+            size: None,
+            headers: catmail_proto::mime::Headers {
+                date: Some(500),
+                in_reply_to: vec!["parent@x".into()],
+                ..Default::default()
+            },
+            has_attachments: false,
+            gm_msgid: Some(1),
+            gm_thrid: Some(2),
+            preview: None,
+        };
+        let new = new_message(fetched);
+        assert_eq!((new.date, new.internal_date), (Some(500), Some(900)));
+        assert_eq!(new.in_reply_to, ["parent@x"]);
+        assert_eq!((new.gm_msgid, new.gm_thrid), (Some(1), Some(2)));
+    }
 
     fn listed(name: &str, special_use: Option<FolderRole>) -> ListedMailbox {
         ListedMailbox {
