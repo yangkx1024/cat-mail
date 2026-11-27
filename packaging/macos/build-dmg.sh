@@ -111,7 +111,6 @@ fi
 sparkle=$tools/sparkle-$sparkle_version
 if [[ ! -d $sparkle ]]; then
   archive=$tools/Sparkle-$sparkle_version.tar.xz
-  mkdir -p "$tools"
   curl -fsSL --retry 3 -o "$archive" \
     "https://github.com/sparkle-project/Sparkle/releases/download/$sparkle_version/Sparkle-$sparkle_version.tar.xz"
   echo "$sparkle_sha256  $archive" | shasum -a 256 -c --quiet - ||
@@ -144,21 +143,12 @@ cp "$gui" "$app/Contents/MacOS/catmail-gui"
 cp "$repo/LICENSE-MIT" "$repo/LICENSE-APACHE" "$app/Contents/Resources/licenses/"
 
 # Sparkle, loaded at run time (the GUI doesn't link it). Without its XPC services, which
-# only a sandboxed app uses, and for arm64 alone, as the app is.
+# only a sandboxed app uses, and for arm64 alone, as the app is (ditto thins every
+# universal binary it copies).
 framework=$app/Contents/Frameworks/Sparkle.framework
 mkdir -p "$app/Contents/Frameworks"
-ditto "$sparkle/Sparkle.framework" "$framework"
+ditto --arch arm64 "$sparkle/Sparkle.framework" "$framework"
 rm -rf "$framework/XPCServices" "$framework/Versions/B/XPCServices"
-sparkle_binaries=(
-  "$framework/Versions/B/Sparkle"
-  "$framework/Versions/B/Autoupdate"
-  "$framework/Versions/B/Updater.app/Contents/MacOS/Updater"
-)
-for binary in "${sparkle_binaries[@]}"; do
-  [[ -f $binary ]] || die "Sparkle $sparkle_version has no $(basename "$binary") where expected"
-  lipo "$binary" -thin arm64 -output "$binary.arm64"
-  mv "$binary.arm64" "$binary"
-done
 cp "$sparkle/LICENSE" "$app/Contents/Resources/licenses/LICENSE-Sparkle"
 
 # The fixed light icon, on Apple's icon grid: the tile (16 to 496 of 512 in the source)

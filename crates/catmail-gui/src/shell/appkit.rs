@@ -58,10 +58,9 @@ pub fn run(started: impl FnOnce() + 'static) -> u8 {
     app.setActivationPolicy(policy);
     let delegate = AppDelegate::new(mtm);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
-    // Before the menu, whose "Check for Updates…" it answers. Held while the app runs:
-    // the menu item doesn't retain its target.
+    // Before the menu, whose "Check for Updates…" it answers.
     let updater = updater::start(mtm);
-    app.setMainMenu(Some(&main_menu(mtm, updater.as_ref())));
+    app.setMainMenu(Some(&main_menu(mtm, updater)));
     quit_on_signals();
     let _monitor = blur_on_press_outside();
     started();
@@ -69,8 +68,6 @@ pub fn run(started: impl FnOnce() + 'static) -> u8 {
     app.run();
     // Only if something else stops the loop: quitting ends the process in `terminate:`
     // ([`end`]).
-    app.setMainMenu(None);
-    drop(updater);
     app.setDelegate(None);
     0
 }
@@ -214,13 +211,17 @@ fn quit_on_signals() {
     }
 }
 
-/// The app menu (About, Check for Updates… when there is an updater, Hide, Quit), Edit (the text commands fields answer: undo, cut,
-/// copy, paste, select all) and Window (minimize, zoom, full screen, close), as nsh's
-/// `run_app` has them.
-fn main_menu(mtm: MainThreadMarker, updater: Option<&updater::Updater>) -> Retained<NSMenu> {
+/// The app menu (About, Check for Updates… when there is an updater, Hide, Quit), Edit
+/// (the text commands fields answer: undo, cut, copy, paste, select all) and Window
+/// (minimize, zoom, full screen, close), as nsh's `run_app` has them.
+fn main_menu(
+    mtm: MainThreadMarker,
+    updater: Option<&'static updater::Updater>,
+) -> Retained<NSMenu> {
     let bar = NSMenu::new(mtm);
     let item = |menu: &NSMenu, title: &str, action: Option<Sel>, key: &str| {
-        // SAFETY: the actions are AppKit's standard ones, sent down the responder chain.
+        // SAFETY: the actions are AppKit's standard ones, sent down the responder chain
+        // (or, for "Check for Updates…", to the target set below).
         let item = unsafe {
             NSMenuItem::initWithTitle_action_keyEquivalent(
                 NSMenuItem::alloc(mtm),
@@ -253,7 +254,7 @@ fn main_menu(mtm: MainThreadMarker, updater: Option<&updater::Updater>) -> Retai
             "",
         );
         // SAFETY: the controller answers `checkForUpdates:`; the item doesn't retain it,
-        // and `run` holds it for as long as the menu is up.
+        // and it lives as long as the process.
         unsafe { check.setTarget(Some(updater.controller())) };
     }
     app_menu.addItem(&NSMenuItem::separatorItem(mtm));

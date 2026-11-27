@@ -30,10 +30,10 @@ macOS 版的发布流程已经能签名、公证，但没有自动更新，用�
 
 - `packaging/macos/build-dmg.sh`：
   - 下载 Sparkle 2.10.1，校验 sha256，解压到 `target/macos/tools/sparkle-<版本>`，下次直接用。
-  - 用 `ditto` 拷进 `Contents/Frameworks/`（保留符号链接），删掉 XPC 服务，三个可执行文件用 `lipo -thin arm64` 只留 arm64，Sparkle 的许可证拷进 `Resources/licenses/`。
+  - 用 `ditto --arch arm64` 拷进 `Contents/Frameworks/`（保留符号链接，拷的时候就只留 arm64），删掉 XPC 服务，Sparkle 的许可证拷进 `Resources/licenses/`。
   - 按上面的顺序签名。
 - `packaging/macos/Info.plist`：加上 `SUFeedURL` 和 `SUPublicEDKey`。
 - `crates/catmail-gui/src/shell/appkit/updater.rs`：bundle 里有 Sparkle、有更新源时，用 `NSBundle` 加载 framework，起 `SPUStandardUpdaterController`；否则记一行日志，不起。`CATMAIL_UPDATE_FEED` 设了时带一个只回答 `feedURLStringForUpdater:` 的 delegate。
-- `shell/appkit.rs`：建菜单之前起更新器，在 `run` 里一直持有（菜单项不持有它的目标）；应用菜单在 About 下面加"Check for Updates…"。
+- `shell/appkit.rs`：建菜单之前起更新器，更新器一直留到进程结束（菜单项不持有它的目标，Sparkle 也是这样用它的）；应用菜单在 About 下面加"Check for Updates…"。
 - `docs/architecture/packaging.md`：bundle 结构、签名顺序，"自动更新"一条替换原来的"不自动更新"。`background.md` 的退出、`gui.md` 的菜单栏提到 Sparkle。
 - 还没做：常驻（没有窗口）时，定时检查找到更新会直接弹出 Sparkle 的窗口，以后用通知或托盘提示（Sparkle 的 gentle reminders）。

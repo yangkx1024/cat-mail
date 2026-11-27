@@ -130,7 +130,7 @@ catmail.app/Contents/
   - `CATMAIL_UPDATE_FEED` 换一个更新源（Sparkle 的 `feedURLStringForUpdater:`），用来在发布前试升级。
   - 脚本从 Sparkle 的 GitHub release 下载固定版本，校验 sha256（Sparkle 不发布校验和，用的是固定版本时
     下载到的那份），解压在 `target/macos/tools/` 下，下次直接用。
-  - 放进 bundle 时删掉 XPC 服务（只有进沙盒的 app 用），三个可执行文件用 `lipo` 只留 arm64，和 app 一样。
+  - 放进 bundle 时删掉 XPC 服务（只有进沙盒的 app 用），用 `ditto --arch arm64` 拷，可执行文件只留 arm64，和 app 一样。
   - GUI 不链接它，运行时用 `NSBundle` 加载：开发构建和不在 bundle 里的运行没有它也照常运行，上面"只链接
     系统库"的检查也不用改。
   - 更新源 `SUFeedURL` 是 `https://catmail.yangkx.net/appcast.xml`，不是 GitHub 的地址：只有它写死在发出去的

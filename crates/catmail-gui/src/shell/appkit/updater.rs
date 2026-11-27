@@ -18,7 +18,8 @@ use objc2_foundation::{NSBundle, NSObject, NSString, ns_string};
 /// The feed to read instead of the bundle's, for trying an update out.
 const FEED_VAR: &str = "CATMAIL_UPDATE_FEED";
 
-/// Sparkle's updater, running: the target of "Check for Updates…".
+/// Sparkle's updater, running: the target of "Check for Updates…". Kept for the whole
+/// process, as Sparkle expects of it.
 pub struct Updater {
     /// An `SPUStandardUpdaterController`.
     controller: Retained<AnyObject>,
@@ -35,8 +36,9 @@ impl Updater {
 }
 
 /// Starts Sparkle's updater, if the app is bundled with Sparkle and a feed: else there is
-/// nothing to update, and no menu item to show.
-pub fn start(mtm: MainThreadMarker) -> Option<Updater> {
+/// nothing to update, and no menu item to show. Never dropped: the menu item doesn't
+/// retain its target.
+pub fn start(mtm: MainThreadMarker) -> Option<&'static Updater> {
     let main = NSBundle::mainBundle();
     main.bundleIdentifier()?;
     let feed = std::env::var(FEED_VAR).ok().filter(|feed| !feed.is_empty());
@@ -70,7 +72,7 @@ pub fn start(mtm: MainThreadMarker) -> Option<Updater> {
     let delegate_object: Option<&AnyObject> = delegate.as_deref().map(AsRef::as_ref);
     // SAFETY: Sparkle's initializer, with the types it declares (a BOOL, the updater's
     // delegate and the user driver's, either nil), on the main thread. The delegate
-    // lives as long as the controller: both are kept in `Updater`.
+    // lives as long as the controller: both are kept in `Updater`, which is leaked.
     let controller: Option<Retained<AnyObject>> = unsafe {
         msg_send![
             msg_send![class, alloc],
@@ -88,10 +90,10 @@ pub fn start(mtm: MainThreadMarker) -> Option<Updater> {
         Some(feed) => tracing::info!(feed, "updater started, on {FEED_VAR}'s feed"),
         None => tracing::info!("updater started"),
     }
-    Some(Updater {
+    Some(Box::leak(Box::new(Updater {
         controller,
         _delegate: delegate,
-    })
+    })))
 }
 
 define_class!(
