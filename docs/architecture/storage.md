@@ -104,7 +104,8 @@ touched、columns
 **跨账户约束。** 引用其他账户内数据的行用 `(id, account_id)` 复合外键（`messages`、`pending_ops`
 → `folders`），数据库层面就不可能把账户 A 的邮件挂到账户 B 的文件夹下。`ON DELETE SET NULL` 的关联
 （如 `drafts.reply_to_message_id`）没法用复合外键，因为 SET NULL 会连 `account_id` 一起置空，这类
-关联由 repository 校验。
+关联由 repository 校验。`message_labels` 到 `messages` 只用 `id`，它的 `account_id` 从邮件行抄来，由到
+`folders` 的复合外键保证不跨账户，见[位置与标签 / 存储](labels.md#存储)。
 
 ## 列表顺序与分页
 

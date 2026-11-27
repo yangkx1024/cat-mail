@@ -171,7 +171,6 @@ CREATE TABLE messages (
     list_date       INTEGER NOT NULL
                     GENERATED ALWAYS AS (ifnull(date, -9223372036854775808)) VIRTUAL,
     UNIQUE (folder_id, uid),
-    UNIQUE (id, account_id),
     FOREIGN KEY (folder_id, account_id) REFERENCES folders(id, account_id) ON DELETE CASCADE
 ) STRICT;
 
@@ -230,14 +229,17 @@ END;
 -- The labels of a message on Gmail, besides its location: one row per label mailbox it
 -- is in. Starred is \Flagged, never a row here.
 CREATE TABLE message_labels (
-    message_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
     folder_id  INTEGER NOT NULL,
+    -- The message's, always copied from its row when a label is added: the label's
+    -- foreign key then checks that the label is of the message's account. A composite
+    -- key to messages instead would cost every message a unique index on (id,
+    -- account_id), slowing a sync's inserts by about a tenth.
     account_id INTEGER NOT NULL,
     -- The message's list_date (which never changes), so that a page of a label is two
     -- seeks in message_labels_list as one of a folder is in messages_folder_date.
     list_date  INTEGER NOT NULL,
     PRIMARY KEY (message_id, folder_id),
-    FOREIGN KEY (message_id, account_id) REFERENCES messages(id, account_id) ON DELETE CASCADE,
     FOREIGN KEY (folder_id, account_id) REFERENCES folders(id, account_id) ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
 
