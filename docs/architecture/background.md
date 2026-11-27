@@ -315,7 +315,7 @@ GUI 的 `system/tray/` 在引擎打开时启动，有窗口时、常驻时都在
 
 ## 退出
 
-退出由外壳一处决定（`shell::quit`；Ctrl Q、托盘的 Quit、macOS 应用菜单和 Dock 的 Quit、信号都调用它）：
+退出由外壳一处决定（`shell::quit`；Ctrl Q、托盘的 Quit、macOS 应用菜单和 Dock 的 Quit、Sparkle 安装更新、信号都调用它）：
 
 - 记下退出原因，让每个写信窗口走关闭流程、存下最后的输入（`OpenComposers::close_all`）。全部关掉了就关掉所有窗口，
   应用随最后一个窗口结束（没有窗口时立即结束）；有一个关不了（地址要改、保存或附件失败）就取消退出，那个窗口
@@ -328,7 +328,7 @@ GUI 的 `system/tray/` 在引擎打开时启动，有窗口时、常驻时都在
   进程被杀、崩溃。
 - macOS 上每次退出都以 AppKit 的 `terminate:` 结束：AppKit 发 `applicationWillTerminate:` 后自己结束进程，`run`
   不返回，所以收尾都在那里（`shell::finish`），只有这一处。
-  - 应用菜单和 Dock 的 Quit、注销是 AppKit 先问 `applicationShouldTerminate`。它答 `TerminateLater`，走同样的流程，
+  - 应用菜单和 Dock 的 Quit、注销、Sparkle 安装更新（它发退出的 Apple Event）是 AppKit 先问 `applicationShouldTerminate`。它答 `TerminateLater`，走同样的流程，
     AppKit 这期间照样跑主循环；写信窗口都存完时（`toolkit::end`）答可以退出。有一个关不了时答不退出，注销也就
     取消了，那个窗口要用户处理。以前先答取消、存完再停主循环，注销时会被系统当成应用拒绝退出，过一会儿再问一次。
   - 应用自己的退出（Ctrl Q、托盘、信号、最后一个窗口）由 `toolkit::end` 调 `terminate:`，AppKit 来问时直接答
