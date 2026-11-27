@@ -20,8 +20,8 @@ use objc2::runtime::{AnyClass, AnyObject, NSObjectProtocol};
 use objc2::{DefinedClass as _, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_foundation::{NSBundle, NSObject, NSString, ns_string};
 
-use self::reminders::Reminders;
-pub use self::reminders::{REMINDER, came_back};
+pub use self::reminders::came_back;
+use self::reminders::{REMINDER, Reminders};
 
 /// The feed to read instead of the bundle's, for trying an update out.
 const FEED_VAR: &str = "CATMAIL_UPDATE_FEED";
@@ -120,6 +120,7 @@ pub fn start(mtm: MainThreadMarker) -> Option<&'static Updater> {
         _reminders: reminders,
     }));
     STARTED.set(Some(updater));
+    super::notifications::on_click(REMINDER, show);
     Some(updater)
 }
 

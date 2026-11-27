@@ -9,10 +9,8 @@
 // AppKit is Objective-C: its classes are defined and its messages sent with `unsafe`.
 #![allow(unsafe_code)]
 
+pub(crate) mod notifications;
 mod updater;
-
-/// The update reminder's notification, and what clicking it does.
-pub use self::updater::{REMINDER as UPDATE_REMINDER, show as show_update};
 
 use std::cell::{Cell, RefCell};
 use std::ptr::NonNull;

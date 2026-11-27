@@ -130,7 +130,7 @@ catmail.app/Contents/
       之后从托盘打开窗口（`Window::present` 从 accessory 切回 regular）也会显示。用户看过、装了、跳过或
       出错时撤掉通知（`standardUserDriverDidReceiveUserAttentionForUpdate:`、`standardUserDriverWillFinishUpdateSession`）。
     - 不让发通知（没授权，或者引擎没打开过、还没问过）时，直接显示 Sparkle 的窗口，和以前一样：不然更新就没人看得到了。
-    - 通知和新邮件的共用一个通知中心代理（`system/new_mail/macos.rs`），按 identifier（`update`）把点击交给更新器。
+    - 和新邮件的通知走同一个通知中心（`shell/appkit/notifications.rs`）：更新器启动时认领 identifier `update` 的点击。
     - 手动"Check for Updates…"总由 Sparkle 自己显示。
   - 安装时 Sparkle 用 `NSRunningApplication terminate` 让应用退出，和 Dock 的 Quit 一样走
     `applicationShouldTerminate:`（[退出](background.md#退出)）：写信窗口先存好；有一个关不了时退出取消，
