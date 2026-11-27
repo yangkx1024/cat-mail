@@ -264,12 +264,14 @@ startup 时自己占用 app id（`DO_NOT_QUEUE`），不改变单实例的做法
 通知点击会到那一个，它找不到邮件、只打开自己的窗口。
 
 **macOS**：UserNotifications（`UNUserNotificationCenter`，`objc2-user-notifications`）。应用自己做通知中心的
-delegate，在 `NSApplication` 运行之前设好（`new_mail::install`，`main.rs` 交给外壳的 `Parts::launching`），点击通知启动应用时那次点击才能收到；nsh 的视图
+delegate（外壳的 `shell/appkit/notifications.rs`，新邮件和更新的提醒共用），在 `NSApplication` 运行之前设好（`new_mail::install`，`main.rs` 交给外壳的 `Parts::launching`），点击通知启动应用时那次点击才能收到；nsh 的视图
 不抢（`AppOptions::notifications` 关着，nsh 只在它开着时才设 delegate）。通知的 identifier 就是 tag：同一个 tag
 的新通知替换前一条，点击（默认动作）带回 tag，回到主线程后与 Linux 一样交给 `shell::show_at`。应用在前台时
 `willPresentNotification` 照样显示横幅和声音。引擎打开时请求授权（提醒和声音），只在第一次弹出询问；用户在
 系统设置里关掉了就什么也不显示，日志记一行。正文是纯文本，不转义。通知中心只能在 bundle 里用，在 bundle 外
-（`cargo run`）碰它会让进程崩溃，所以没有 bundle identifier 时不订阅、不发。
+（`cargo run`）碰它会让进程崩溃，所以没有 bundle identifier 时不订阅、不发。点击按 identifier 分派：
+更新器启动时用 `notifications::on_click` 认领常驻时更新的提醒（`update`，见[打包](packaging.md#macos磁盘映像)的
+"自动更新"），其余的交给 `install` 时新邮件给的处理函数。
 
 ## 托盘
 

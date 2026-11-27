@@ -38,9 +38,9 @@ use self::gtk as toolkit;
 #[cfg(test)]
 use self::headless as toolkit;
 
-/// Runs a function on the main thread, from any.
+/// The app's notifications on macOS: AppKit's side, whatever the windows' views run on.
 #[cfg(target_os = "macos")]
-pub use self::toolkit::invoke;
+pub(crate) use self::appkit::notifications;
 /// Runs a future on the main thread's loop, from the main thread.
 pub use self::toolkit::spawn;
 

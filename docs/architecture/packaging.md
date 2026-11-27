@@ -121,8 +121,17 @@ catmail.app/Contents/
     照常运行。ad hoc 签名的包（PR、本地没有签名身份）也加载不了：hardened runtime 的库校验只让
     加载 Apple 或同一团队签名的库，ad hoc 签名没有团队。这样的包没有更新器，要试更新得用 `build_only` 的包；
     不为它关掉库校验（`disable-library-validation`）。应用菜单在 About 下面多一项"Check for Updates…"，目标是这个 controller（检查进行中时它把菜单项变灰）。
-  - 何时检查、是否自动下载用 Sparkle 的默认：第二次启动时问一次要不要自动检查，找到更新时弹出 Sparkle 自己的窗口，
+  - 何时检查、是否自动下载用 Sparkle 的默认：第二次启动时问一次要不要自动检查，找到更新时用 Sparkle 自己的窗口，
     不静默安装。设置都在 Sparkle 自己的 user defaults 里，不进 `settings.json`。
+  - **定时检查找到更新时怎么提示**（Sparkle 的 gentle reminders，`shell/appkit/updater/reminders.rs`）：
+    - 有窗口时应用是 regular 的，用 Sparkle 自己的做法，本来就不打扰：应用在前台、刚启动时直接显示，否则等用户回到应用再显示。
+    - 常驻（accessory，没有窗口）时，Sparkle 会马上把窗口放在别的应用后面，刚启动（登录时）还会把它
+      提到最前。这时改由应用处理：发一条系统通知"Update available"，点它才显示 Sparkle 的窗口（`checkForUpdates:`）；
+      之后从托盘打开窗口（`Window::present` 从 accessory 切回 regular）也会显示。用户看过、装了、跳过或
+      出错时撤掉通知（`standardUserDriverDidReceiveUserAttentionForUpdate:`、`standardUserDriverWillFinishUpdateSession`）。
+    - 不让发通知（没授权，或者引擎没打开过、还没问过）时，直接显示 Sparkle 的窗口，和以前一样：不然更新就没人看得到了。
+    - 和新邮件的通知走同一个通知中心（`shell/appkit/notifications.rs`）：更新器启动时认领 identifier `update` 的点击。
+    - 手动"Check for Updates…"总由 Sparkle 自己显示。
   - 安装时 Sparkle 用 `NSRunningApplication terminate` 让应用退出，和 Dock 的 Quit 一样走
     `applicationShouldTerminate:`（[退出](background.md#退出)）：写信窗口先存好；有一个关不了时退出取消，
     Sparkle 的安装程序继续等，应用之后退出时再装。
