@@ -23,8 +23,13 @@
 - **只有公证的构建出更新**（`CATMAIL_UPDATE_KEY` 要求 `CATMAIL_NOTARY_KEY`）：Sparkle 装更新时不经过
   Gatekeeper，没公证的 app 不能发出去。PR 和 ad hoc 的包不出。
 - **脚本自己检查 `generate_appcast` 的结果**：私钥和 app 的 `SUPublicEDKey` 对不上时它只警告、把签名
-  留空，某个增量包失败时也只警告。脚本数 enclosure 和签名、数增量包，再确认 appcast 里只有这个版本的一条（旧 zip 里混进更新的版本时，`--maximum-versions 1` 留下的会是它），不对就失败。本地用对不上的密钥试过，
-  确实只警告。
+  留空。脚本数 enclosure 和签名，再确认 appcast 里只有这个版本的一条（旧 zip 里混进更新的版本时，
+  `--maximum-versions 1` 留下的会是它），不对就失败。本地用对不上的密钥试过，确实只警告。
+- **少了增量包只警告，不失败**：最初要求每个旧版本都有一个增量包，codex 在 #404 的 review 里指出，
+  增量包超过完整包的 7/8 时 Sparkle 2.10.1 故意删掉它（`Appcast.swift` 的 `markDeltaAsIgnored`，不打印
+  任何东西），这样要求会让一次正常的发布失败，重跑也一样。我们的包几乎全是一个开了 thin LTO 的 Rust
+  可执行文件，增量包大到这个程度并不意外。本地用加了 200 MB 随机数据的测试版本复现过。少了增量包的版本
+  下载完整包，照样能更新，所以改成逐个旧版本检查、缺的打一行警告。
 - **下载地址前缀由 CI 给**（`CATMAIL_UPDATE_URL`），不写死在脚本里：脚本不用知道仓库在哪，本地试升级时
   也能指向别处。
 - **release notes 生成一次，两处都用**：`version` job 推完标签后调 generate-notes，`macos` job 嵌进 appcast

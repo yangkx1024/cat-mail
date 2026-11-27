@@ -150,8 +150,11 @@ catmail.app/Contents/
       打出来的 app 和完整包里的每个字节都一样，离线也能打开。和这次版本相同的 zip 跳过。
     - `CATMAIL_RELEASE_NOTES` 是一个 Markdown 文件，嵌进 appcast（`sparkle:format="markdown"`），Sparkle 的更新
       窗口里显示。
-    - `generate_appcast` 在私钥和 app 的 `SUPublicEDKey` 对不上、或某个增量包没算出来时只警告，脚本检查
-      每个 enclosure 都有签名、增量包的个数对得上、appcast 里只有这个版本的一条（旧版本里混进一个更新的 zip 时，留下的会是它），不对就失败：不然发出去的 appcast 装不上。
+    - `generate_appcast` 在私钥和 app 的 `SUPublicEDKey` 对不上时只警告、把签名留空。脚本检查每个 enclosure
+      都有签名、appcast 里只有这个版本的一条（旧版本里混进一个更新的 zip 时，留下的会是它），不对就失败：
+      不然发出去的 appcast 装不上。
+    - 少了某个旧版本的增量包只警告，不失败：增量包超过完整包的 7/8 时 Sparkle 故意不出（不打印任何东西），
+      算不出来时它也只警告。那个版本就下载完整包，照样能更新，不该因此发不了版。
     - 它把解开的旧版本缓存在 `~/Library/Caches/Sparkle_generate_appcast`，CI 的机器用完就丢，本地可以删。
 
 ### CI 里的签名

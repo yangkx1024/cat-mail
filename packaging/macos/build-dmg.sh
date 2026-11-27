@@ -21,8 +21,8 @@
 #
 # CATMAIL_UPDATE_URL is where the release serves these files from (a URL ending in /).
 # CATMAIL_DELTA_FROM, if set, is a directory of older versions' published
-# catmail-<version>-aarch64.app.zip, one delta from each; CATMAIL_RELEASE_NOTES, a
-# Markdown file the feed shows as this version's notes.
+# catmail-<version>-aarch64.app.zip, a delta from each where it saves enough;
+# CATMAIL_RELEASE_NOTES, a Markdown file the feed shows as this version's notes.
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
@@ -252,8 +252,8 @@ if [[ -n $notary_key ]]; then
   spctl --assess --verbose --type execute "$app"
 fi
 
-# The update: the app as stapled, zipped as Sparkle's docs say, and the feed, with a delta
-# from each older version. Each is worked out from the published, stapled app of both
+# The update: the app as stapled, zipped as Sparkle's docs say, and the feed, with deltas
+# from the older versions. Each is worked out from the published, stapled app of both
 # versions, so the app a delta makes is the full update's, byte for byte, and opens
 # offline. generate_appcast signs the archives and takes the minimum macOS and the
 # architecture from the app; only this version's entry is kept (older ones would point
@@ -280,13 +280,20 @@ if [[ -n $update_key ]]; then
     --disable-signing-warning "$updates"
   appcast=$updates/appcast.xml
   # It only warns, and leaves the signatures out, when the key isn't the app's
-  # SUPublicEDKey; and only warns when a delta fails.
+  # SUPublicEDKey.
   enclosures=$(count '<enclosure ' "$appcast")
   signed=$(count '<enclosure [^>]*sparkle:edSignature="[^"]+"' "$appcast")
   [[ $enclosures -eq $signed ]] ||
     die "the appcast has unsigned archives: is CATMAIL_UPDATE_KEY the key of SUPublicEDKey?"
-  deltas=$(count 'sparkle:deltaFrom=' "$appcast")
-  [[ $deltas -eq ${#older[@]} ]] || die "the appcast has $deltas deltas, not ${#older[@]}"
+  # A delta is left out when it wouldn't save much (over 7/8 of the full update, silently)
+  # or couldn't be made (a warning above). That version then takes the full update: no
+  # reason to hold the release back, but worth seeing.
+  for zip in ${older[@]+"${older[@]}"}; do
+    from=$(basename "$zip" "-$arch.app.zip")
+    from=${from#catmail-}
+    [[ $(count "sparkle:deltaFrom=\"${from//./\\.}\"" "$appcast") -eq 1 ]] ||
+      echo "warning: no delta from $from, which takes the full update" >&2
+  done
   # One entry, this version's: a newer zip among the older ones would have taken its place.
   [[ $(count '<item>' "$appcast") -eq 1 &&
     $(count "<sparkle:version>${version//./\\.}</sparkle:version>" "$appcast") -eq 1 ]] ||
