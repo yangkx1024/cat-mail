@@ -1,7 +1,7 @@
 # Vendored nsh skills
 
-Copied unmodified from <https://github.com/longbridge/nsh/tree/v0.7.1/skills> at the
-`v0.7.1` tag (`f78eace7af23a9c1c72605c7ee46204f57f3e8e6`, 2026-11-25), the release the
+Copied unmodified from <https://github.com/longbridge/nsh/tree/v0.7.2/skills> at the
+`v0.7.2` tag (`0c29b5e3351128f489fe53bfb167160801707191`, 2026-11-27), the release the
 workspace `Cargo.toml` uses:
 
 - `nsh-design-guides`: the Design Guides, for any change to a screen, layout, spacing,
