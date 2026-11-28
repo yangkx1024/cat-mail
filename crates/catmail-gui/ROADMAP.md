@@ -9,7 +9,7 @@
 **当前剩余未完成项**（完整上下文见下文各节）：
 - P4：正文的页内查找（需注入脚本实现）
 - P5：正文里直接拖入图片作为内嵌图
-- P10：内存、滚动帧率与冷启动时间基准；Flatpak 上架 Flathub；Windows 后端与打包
+- P10：内存、滚动帧率与冷启动时间基准；Flatpak 的应用内更新提示（#406）；Windows 后端与打包
 
 **做法**
 
@@ -190,7 +190,8 @@
 - [ ] 内存、滚动帧率、冷启动时间的基准
 - [x] **Linux 的安装包**：图形界面打成 Flatpak（`packaging/linux/`），用 GNOME runtime 带上 GTK 4 和 WebKitGTK，
       发布时随 CLI 一起发 `.flatpak` 包（docs/architecture/packaging.md）
-- [ ] 上 Flathub
+- [x] Flatpak 自动更新：不上 Flathub（它的 AI 政策），发布在自己的仓库 `https://catmail.yangkx.net/flatpak/`，签名、带增量（#406）
+- [ ] Flatpak 的应用内更新提示：Flatpak portal 的 `UpdateMonitor`（#406 第 4 步）
 - [x] macOS 后端（AppKit，正文在 WKWebView）：`shell/` 分成共用的部分和两个工具包（`gtk.rs`、`appkit.rs`），窗口、
       退出流程、常驻、设置和主题两边共用。⚠️ AppKit 没有 GLib 那样的主循环 future 执行器，用 `async-task` 在主
       dispatch queue 上跑；输入框失焦自己用事件 monitor 做（同 Linux）。菜单栏、外观映射抄了 nsh `run_app` 的私有

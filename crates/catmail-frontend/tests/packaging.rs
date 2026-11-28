@@ -5,21 +5,37 @@
 use std::fs;
 use std::path::PathBuf;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use catmail_frontend::APP_ID;
 
-fn says(path: &str, needles: &[String]) {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+fn repo_file(path: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join(path);
-    // `\n` line ends, whichever the checkout gave it.
-    let text = fs::read_to_string(&path)
+        .join(path)
+}
+
+/// `\n` line ends, whichever the checkout gave it.
+fn text(path: &str) -> String {
+    let path = repo_file(path);
+    fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
-        .replace("\r\n", "\n");
+        .replace("\r\n", "\n")
+}
+
+/// The value of a `key: value` or `key=value` line.
+fn value<'a>(text: &'a str, key: &str) -> &'a str {
+    text.lines()
+        .find_map(|line| line.strip_prefix(key))
+        .unwrap_or_else(|| panic!("no {key:?} line"))
+}
+
+fn says(path: &str, needles: &[String]) {
+    let text = text(path);
     for needle in needles {
         assert!(
             text.contains(needle.as_str()),
-            "{} doesn't say {needle:?}",
-            path.display()
+            "{path} doesn't say {needle:?}"
         );
     }
 }
@@ -70,4 +86,23 @@ fn the_macos_bundle_id_is_the_id() {
             "<key>CFBundleIdentifier</key>\n\t<string>{APP_ID}</string>"
         )],
     );
+}
+
+/// The files that add catmail's Flatpak repository (`.flatpakrepo`) or install the app
+/// from it (`.flatpakref`), and the bundles, which update from it: one address, one key
+/// (the one update-flatpak-repo.sh signs with), the manifest's branch.
+#[test]
+fn the_flatpak_repository_files_agree_with_the_manifest_and_the_key() {
+    let manifest = text(&format!("packaging/linux/{APP_ID}.yml"));
+    let branch = value(&manifest, "branch: ");
+    let key = STANDARD.encode(fs::read(repo_file("packaging/linux/catmail-flatpak.gpg")).unwrap());
+    let repo = text(&format!("packaging/linux/{APP_ID}.flatpakrepo"));
+    let reference = text(&format!("packaging/linux/{APP_ID}.flatpakref"));
+
+    assert_eq!(value(&reference, "Name="), APP_ID);
+    assert_eq!(value(&reference, "Branch="), branch);
+    assert_eq!(value(&repo, "DefaultBranch="), branch);
+    assert_eq!(value(&reference, "Url="), value(&repo, "Url="));
+    assert_eq!(value(&repo, "GPGKey="), key);
+    assert_eq!(value(&reference, "GPGKey="), key);
 }

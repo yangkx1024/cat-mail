@@ -45,5 +45,8 @@ libc.workspace = true
 [target.'cfg(windows)'.dependencies]
 uds_windows.workspace = true
 
+[dev-dependencies]
+base64.workspace = true
+
 [lints]
 workspace = true

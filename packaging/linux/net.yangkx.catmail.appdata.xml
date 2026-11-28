@@ -25,5 +25,8 @@
     <category>Network</category>
     <category>Email</category>
   </categories>
+  <!-- Each release adds itself, newest first (the release workflow's version job). -->
+  <releases>
+  </releases>
   <content_rating type="oars-1.1"/>
 </component>

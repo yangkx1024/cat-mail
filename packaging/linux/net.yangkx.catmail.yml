@@ -1,4 +1,7 @@
 id: net.yangkx.catmail
+# The update channel installs follow (the ref's last part), not a git branch: `stable`
+# as Flathub names releases, where `master` reads as built from git each day.
+branch: stable
 # The GNOME runtime brings GTK 4, WebKitGTK 6.0 and GStreamer, and their security
 # updates: the package carries only our two binaries.
 runtime: org.gnome.Platform
