@@ -229,7 +229,6 @@ jobs:
     environment: ${{ needs.version.outputs.ref != '' && 'release' || '' }}
     env:
       RELEASE: ${{ needs.version.outputs.ref != '' }}
-      VERSION: ${{ needs.version.outputs.version }}
       # The bucket R2_* reach, and the repository in it: the path of the .flatpakrepo's Url.
       REMOTE: s3://catmail/flatpak/
       AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -290,10 +289,10 @@ jobs:
           "${sync[@]}"
           "${sync[@]}" --delete
 
-      # Through the CDN, as an installed app sees it: every arch offers this version.
+      # Through the CDN, as an installed app sees it: it offers what was just uploaded.
       - name: Check the repository
         if: env.RELEASE == 'true'
-        run: packaging/linux/update-flatpak-repo.sh --check "$VERSION"
+        run: packaging/linux/update-flatpak-repo.sh --check "$RUNNER_TEMP/repo"
 
       - uses: actions/upload-artifact@v7
         if: env.RELEASE == 'true'

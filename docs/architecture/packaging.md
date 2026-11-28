@@ -99,8 +99,9 @@ bundle（`--no-install` 只打 bundle，它不会更新，发布用的见下面�
 `packaging/linux/update-flatpak-repo.sh <仓库目录> <bundle>...` 做上面这些，本地和 CI 都用它。每个 bundle 的提交
 用 `build-commit-from` 接到仓库里同一个 ref 上：新提交的父提交是上一个版本，增量和修剪都沿着这条链；内容和上一个
 提交一样时不加提交，重跑是安全的。发布的 bundle 输出到 `target/flatpak/signed/`。最后它像装好的 app 那样加一个
-remote，检查签名、每个架构的 ref 和版本号（AppStream 里最新的那条）。`--check <版本>` 对发布出去的仓库做同样的
-检查。`--test-key` 用一把临时生成的密钥签名，`CATMAIL_FLATPAK_URL` 换 bundle 里的仓库地址（`file://` 的本地
+remote，检查签名，以及每个架构的 ref 都指向本地仓库里的那个提交；版本号来自各架构的 AppStream 数据，flatpak
+只加载本机架构的那份，所以只检查本机架构显示的是 metainfo 里最新的那条。`--check <仓库目录>` 对发布出去的仓库
+做同样的检查：它提供的必须正是刚传上去的。`--test-key` 用一把临时生成的密钥签名，`CATMAIL_FLATPAK_URL` 换 bundle 里的仓库地址（`file://` 的本地
 目录），这样在本地就能试整个更新流程。
 
 留下的约定：

@@ -2,7 +2,7 @@
 # catmail's Flatpak repository (docs/architecture/packaging.md, "仓库与更新"):
 #
 #   packaging/linux/update-flatpak-repo.sh [--test-key] <repo> <bundle>...
-#   packaging/linux/update-flatpak-repo.sh --check <version>
+#   packaging/linux/update-flatpak-repo.sh --check <repo>
 #
 # The first adds the bundles build-flatpak.sh made to <repo>, a local copy of the
 # repository (a missing or empty directory starts one): each bundle's commit goes on top
@@ -12,7 +12,7 @@
 # Then it checks <repo> as an installed app would.
 #
 # --check checks the published repository the same way, through the .flatpakrepo it
-# serves: every arch's ref must offer <version>.
+# serves: it must offer what <repo> holds.
 #
 # Needs flatpak, ostree and gpg, with the repository key's private half in GNUPGHOME, or
 # --test-key to sign with a key made for the run.
@@ -33,36 +33,53 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 # Adds the repository from a .flatpakrepo (whose key checks the summary's signature) to
-# an installation of its own, and checks that each arch's ref offers <version> (any, when
-# empty). remote-ls takes the version from the arch's AppStream data: that comes first.
+# an installation of its own, and checks that it offers each of <repo>'s refs at <repo>'s
+# commit (remote-ls shows 12 digits of it). Also that this machine's arch offers the
+# metainfo's newest release, if any, the version software centers show: it comes from the
+# arch's AppStream data, which flatpak only loads for the machine's own arch.
 check() {
-  local from=$1 version=$2 installation ref arch offered
+  local from=$1 local_repo=$2 installation ref commit shown version arch
   installation=$(mktemp -d -p "$work")
   FLATPAK_USER_DIR=$installation flatpak remote-add --user --from catmail "$from"
+  local -A offered=()
+  while read -r ref commit; do
+    offered[$ref]=$commit
+  done < <(FLATPAK_USER_DIR=$installation flatpak remote-ls --user --arch='*' \
+    --columns=ref,commit catmail)
   local refs
-  mapfile -t refs < <(FLATPAK_USER_DIR=$installation flatpak remote-ls --user --arch='*' \
-    --columns=ref catmail | grep -x "app/$app_id/[^/]*/$branch")
-  [[ ${#refs[@]} -gt 0 ]] || die "$from offers no $app_id $branch"
+  mapfile -t refs < <(ostree refs --repo="$local_repo" | grep -x "app/$app_id/[^/]*/$branch")
+  [[ ${#refs[@]} -gt 0 ]] || die "$local_repo holds no $app_id $branch"
   for ref in "${refs[@]}"; do
-    arch=$(cut -d/ -f3 <<< "$ref")
-    FLATPAK_USER_DIR=$installation flatpak update --user --noninteractive --appstream \
-      --arch="$arch" catmail > /dev/null
-    offered=$(FLATPAK_USER_DIR=$installation flatpak remote-ls --user --arch="$arch" \
-      --columns=ref,version catmail | awk -v ref="$ref" '$1 == ref { print $2 }')
-    echo "$ref ${offered:-(no version)}"
-    [[ -z $version || $offered == "$version" ]] || die "$ref offers ${offered:-no version}, not $version"
+    commit=$(ostree rev-parse --repo="$local_repo" "$ref")
+    [[ ${offered[$ref]:-} == "${commit:0:12}" ]] ||
+      die "$from offers ${offered[$ref]:-no} $ref, not ${commit:0:12}"
+    echo "$ref ${commit:0:12}"
   done
+
+  version=$(sed -n 's/^ *<release version="\([^"]*\)".*/\1/p' \
+    "$root/packaging/linux/$app_id.appdata.xml" | head -n 1)
+  arch=$(flatpak --default-arch)
+  ref=app/$app_id/$arch/$branch
+  [[ -n $version && -n ${offered[$ref]:-} ]] || return 0
+  FLATPAK_USER_DIR=$installation flatpak update --user --noninteractive --appstream catmail \
+    > /dev/null
+  shown=$(FLATPAK_USER_DIR=$installation flatpak remote-ls --user --columns=ref,version catmail |
+    awk -v ref="$ref" '$1 == ref { print $2 }')
+  [[ $shown == "$version" ]] || die "$ref shows version ${shown:-none}, not $version"
+  echo "$ref shows $version"
 }
 
 if [[ ${1:-} == --check ]]; then
-  [[ $# -eq 2 && -n $2 ]] || die "usage: $0 --check <version>"
+  [[ $# -eq 2 ]] || die "usage: $0 --check <repo>"
   check "$(sed -n 's/^Url=//p' "$repo_file")$app_id.flatpakrepo" "$2"
   exit
 fi
 
 key=${CATMAIL_FLATPAK_KEY:-$root/packaging/linux/catmail-flatpak.gpg}
+test_key=false
 if [[ ${1:-} == --test-key ]]; then
   shift
+  test_key=true
   export GNUPGHOME=$work/gnupg
   mkdir -m 700 "$GNUPGHOME"
   trap 'gpgconf --kill gpg-agent; rm -rf "$work"' EXIT
@@ -74,6 +91,8 @@ fi
 [[ $# -ge 2 ]] || die "usage: $0 [--test-key] <repo> <bundle>..."
 repo=$1
 shift
+# What's there was signed with another key, which a new one can't vouch for.
+[[ $test_key == false || ! -e $repo/config ]] || die "--test-key needs a new repository"
 url=${CATMAIL_FLATPAK_URL:-$(sed -n 's/^Url=//p' "$repo_file")}
 [[ -n $url ]] || die "no repository URL"
 
@@ -138,6 +157,5 @@ cp "$repo_file" "$ref_file" "$repo/"
 local_repo_file=$work/local.flatpakrepo
 sed -e "s|^Url=.*|Url=file://$(cd "$repo" && pwd)/|" \
   -e "s|^GPGKey=.*|GPGKey=$(base64 -w 0 "$key")|" "$repo_file" > "$local_repo_file"
-metainfo=$root/packaging/linux/$app_id.appdata.xml
-check "$local_repo_file" "$(sed -n 's/^ *<release version="\([^"]*\)".*/\1/p' "$metainfo" | head -n 1)"
+check "$local_repo_file" "$repo"
 ls -l "$out"
