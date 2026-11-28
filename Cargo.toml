@@ -76,14 +76,14 @@ mime_guess = "2.0.5"
 # views (WebKitGTK, WKWebView).
 # Without default features: no JS runtime, sounds (GStreamer on Linux), WebSocket, HTTP or
 # updater; `svg` draws the icons.
-nsh-core = "0.7.1"
-nsh-base = { version = "0.7.1", default-features = false }
-nsh-platform-linux = { version = "0.7.1", default-features = false, features = ["webview", "svg"] }
-nsh-platform-macos = { version = "0.7.1", default-features = false, features = ["svg"] }
+nsh-core = "0.7.2"
+nsh-base = { version = "0.7.2", default-features = false }
+nsh-platform-linux = { version = "0.7.2", default-features = false, features = ["webview", "svg"] }
+nsh-platform-macos = { version = "0.7.2", default-features = false, features = ["svg"] }
 # catmail-gui's window tests: its views on an engine without a window, driven as a user
 # would (`nsh_testing::Headless`). Without the JS runtime.
-nsh-engine = { version = "0.7.1", default-features = false }
-nsh-testing = { version = "0.7.1", default-features = false }
+nsh-engine = { version = "0.7.2", default-features = false }
+nsh-testing = { version = "0.7.2", default-features = false }
 # catmail-gui's AppKit shell: the main thread's futures on the main dispatch queue
 # (async-task), and the event monitor's block (the versions nsh's macOS platform uses).
 async-task = "4.7.1"
