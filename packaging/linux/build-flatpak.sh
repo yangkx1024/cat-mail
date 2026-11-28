@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Builds catmail as a Flatpak (GNOME runtime) into target/flatpak/:
 # catmail-<version>-<arch>.flatpak, a single-file bundle, and the repo it was exported to.
+# The bundle is unsigned and names no repository; the one to publish comes from
+# update-flatpak-repo.sh.
 #
 # Needs flatpak, flatpak-builder (or the org.flatpak.Builder app), cargo, and the
 # runtime, SDK and Rust extension the manifest names (installed from Flathub with
@@ -18,9 +20,8 @@ install=--install
 
 die() { echo "error: $*" >&2; exit 1; }
 
-# The app's manifest, the one with an id (APP_ID in catmail-core), not a module's.
-manifest=$(grep -l '^id: ' packaging/linux/*.yml) || die "no manifest in packaging/linux"
-app_id=$(sed -n 's/^id: *//p' "$manifest")
+# shellcheck source=packaging/linux/manifest.sh
+. packaging/linux/manifest.sh
 
 if command -v flatpak-builder > /dev/null; then
   builder=(flatpak-builder)
@@ -48,6 +49,6 @@ grep -q '^directory = "/run/build/catmail/vendor"$' "$out/cargo-config.toml" ||
   "$out/build" "$manifest"
 
 bundle=$out/catmail-$version-$arch.flatpak
-flatpak build-bundle --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
-  "$out/repo" "$bundle" "$app_id"
+flatpak build-bundle --runtime-repo="$runtime_repo" \
+  "$out/repo" "$bundle" "$app_id" "$branch"
 echo "$bundle"

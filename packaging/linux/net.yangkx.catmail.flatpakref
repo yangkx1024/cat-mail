@@ -1,0 +1,10 @@
+[Flatpak Ref]
+Title=catmail
+Name=net.yangkx.catmail
+Branch=stable
+Url=https://catmail.yangkx.net/flatpak/
+SuggestRemoteName=catmail
+Homepage=https://github.com/yangkx1024/cat-mail
+IsRuntime=false
+GPGKey=mDMEawqlZxYJKwYBBAHaRw8BAQdAHuCOoO7AF0tvhSSOSejwph1Pd7yrLiE+r3BvFCek78O0GmNhdG1haWwgRmxhdHBhayByZXBvc2l0b3J5iJAEExYKADgWIQS4/pfV1R0F2oS+QnOUbWTM1haNMwUCawqlZwIbAwULCQgHAgYVCgkICwIEFgIDAQIeAQIXgAAKCRCUbWTM1haNM+UPAQD88e3fBfXH6ZB1XbIqs35gFO+EFTvSkJEii8mEM6AR4AEAtEqoC2TRDfYN3nyW+cVQaXol4q3l7ybsvtTDKEi94wg=
+RuntimeRepo=https://dl.flathub.org/repo/flathub.flatpakrepo

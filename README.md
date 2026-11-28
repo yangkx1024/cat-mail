@@ -41,7 +41,7 @@
 从 [GitHub Releases](https://github.com/yangkx1024/cat-mail/releases/latest) 下载：
 
 - **Linux（x86_64、aarch64）**
-  - 图形界面：`catmail-<版本>-<架构>.flatpak`，运行 `flatpak install --user catmail-<版本>-<架构>.flatpak` 安装（缺的 GNOME runtime 会从 Flathub 自动安装）。命令行一并打在包里：`flatpak run --command=catmail net.yangkx.catmail`。
+  - 图形界面：运行 `flatpak install --user https://catmail.yangkx.net/flatpak/net.yangkx.catmail.flatpakref` 安装，之后随 `flatpak update` 和软件中心自动更新（缺的 GNOME runtime 会从 Flathub 自动安装）。也可以下载 `catmail-<版本>-<架构>.flatpak`，用 `flatpak install --user` 安装，同样会自动更新。命令行一并打在包里：`flatpak run --command=catmail net.yangkx.catmail`。
   - 命令行：`catmail-<版本>-<架构>-linux.tar.gz`（需 glibc 2.35 及以上，即 Ubuntu 22.04 及之后的发行版）。
   - 密码存储需要 Secret Service 提供者（如 `gnome-keyring`、KeePassXC）。
 - **macOS（Apple 芯片，macOS 12 及以上，已签名并公证）**
@@ -172,7 +172,7 @@ cargo test -p catmail-core --test dovecot --test submission
 | M3 | 草稿、SMTP 发信与 outbox、保存到已发送 | ✅ |
 | M4 | 离线操作队列、IDLE 推送与后台同步、草稿同步到服务器 | ✅ |
 | M5 | 图形界面（起初基于 GPUI，后迁至 Native Shell） | ✅ |
-| M6 | 打包：macOS `.dmg` 与 CLI ✅；Linux Flatpak 与 CLI ✅（上 Flathub 待做）；Windows 图形界面（接入 Native Shell Windows 后端）与打包 | 进行中 |
+| M6 | 打包：macOS `.dmg` 与 CLI ✅；Linux Flatpak（自己的仓库，自动更新）与 CLI ✅；Windows 图形界面（接入 Native Shell Windows 后端）与打包 | 进行中 |
 | M7 | MCP（[设计](docs/architecture/mcp.md)）：只读、整理、草稿与附件、令牌层级/账户范围/限额、经确认发信、`catmail serve` 与 GUI 托管 ✅；无界面服务器密码（systemd credentials）与 systemd / launchd 服务示例 | 进行中 |
 
 之后：前端通过 IPC 连接正在运行的引擎（让图形界面与命令行可同时访问同一数据目录）。

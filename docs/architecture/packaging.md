@@ -2,8 +2,9 @@
 
 [← 架构](../architecture.md)
 
-> 状态：macOS 的磁盘映像（Apple 芯片）、Linux 的 Flatpak 包和 Linux、macOS 的 CLI tar.gz 已实现（Flatpak 还没上
-> Flathub）；Windows 的打包是 M6 余下的部分。
+> 状态：macOS 的磁盘映像（Apple 芯片）、Linux 的 Flatpak（自己的仓库，能自动更新）和 Linux、macOS 的 CLI tar.gz
+> 已实现；Flatpak 的应用内更新提示（[#406](https://github.com/yangkx1024/cat-mail/issues/406) 第 4 步）和 Windows
+> 的打包是 M6 余下的部分。
 
 ## Linux
 
@@ -15,8 +16,10 @@ CLI 不链接图形库：SQLite 编进程序，TLS 是 rustls 加系统信任库
 
 ### 图形界面：Flatpak
 
-GUI 发布为 `catmail-<版本>-<架构>.flatpak`（x86_64、aarch64），一个单文件 bundle，用 `flatpak install --user`
-安装；它记着 Flathub 的地址，缺的 runtime 从那里装。运行时是 GNOME runtime（`org.gnome.Platform` 51），GTK 4
+GUI 发布在我们自己的 Flatpak 仓库里（`https://catmail.yangkx.net/flatpak/`，见下面的"仓库与更新"），
+x86_64、aarch64 两个架构。用 `flatpak install --user https://catmail.yangkx.net/flatpak/net.yangkx.catmail.flatpakref`
+安装；release 上另有单文件 bundle `catmail-<版本>-<架构>.flatpak`，装上后同样从仓库更新。两种都记着 Flathub 的
+地址，缺的 runtime 从那里装。运行时是 GNOME runtime（`org.gnome.Platform` 51），GTK 4
 和 WebKitGTK 6.0（及其运行依赖）都来自它（`catmail-gui` 本身未开启 nsh 的 GStreamer 声音 feature），包里只有
 `catmail-gui` 和 `catmail` 两个程序（bundle 约 17 MB）。
 
@@ -56,10 +59,51 @@ WebKit 的沙箱照常工作：网页进程由 `flatpak-spawn --sandbox` 起在�
 
 **构建**：`packaging/linux/build-flatpak.sh`，本地和 CI 都用它。构建没有网络：脚本先 `cargo vendor`
 （crates.io 和 git 依赖）到 `target/flatpak/vendor`，生成指向它的 cargo 配置，manifest 把两者作为 source 带进去，
-用 SDK 扩展 `rust-stable` 的工具链编译。上 Flathub 时要换成 `flatpak-cargo-generator` 生成的、逐个带校验和的
-sources，Flathub 不收本地目录。本地运行 `packaging/linux/build-flatpak.sh` 构建、为当前用户安装并打出 bundle
-（`--no-install` 只打 bundle）；要 flatpak-builder（或 Flathub 的 `org.flatpak.Builder`）和 cargo。和 AppImage
+用 SDK 扩展 `rust-stable` 的工具链编译。本地运行 `packaging/linux/build-flatpak.sh` 构建、为当前用户安装并打出
+bundle（`--no-install` 只打 bundle，它不会更新，发布用的见下面的"仓库与更新"）；要 flatpak-builder（或 Flathub 的 `org.flatpak.Builder`）和 cargo。和 AppImage
 不同，NixOS 上也能打出能分发的包：编译在 SDK 里进行，不碰 Nix 的工具链。
+
+#### 仓库与更新
+
+**不上 Flathub。** 它的生成式 AI 政策要求 manifest 里没有 AI 生成或辅助的内容（声明了也不行），投递 PR 也不能
+由 AI 来开或回复，这个项目做不到。Flatpak 本来就支持任何人托管仓库：Flathub 本身也只是一个签了名的 OSTree
+仓库。
+
+- **托管**：Cloudflare R2 的 bucket `catmail`，绑在 `catmail.yangkx.net` 上，仓库在 `flatpak/` 下（appcast 的
+  转发规则照旧，见下面的"自动更新"）。和 appcast 一样，只有地址写死在装好的 app 里（remote 的配置），所以用自己
+  的域名。OSTree 仓库是一个目录，里面是按内容寻址的大量小文件，GitHub release 放不下。
+- **缓存**（Cloudflare 的 Cache Rules，按顺序）：`/flatpak/` 下一律不缓存，`summary`、`summary.idx`、`config`、
+  `refs/`、`delta-indexes/` 每次发布都会变；之后一条让 `objects/`、`summaries/` 在边缘缓存一年，它们按内容命名，
+  生成后不变。但 400–599 的响应不缓存：一个对象在上传完之前被请求过一次，它的 404 就会留一年，文件已经在 R2
+  里，客户端却拿不到。`deltas/` 不缓存：路径只由两端的提交决定，同一个增量再生成一次（重跑同一个版本时，补的
+  那两个会重新生成）字节不同，缓存着的旧 superblock 就和新的对不上。
+- **分支** `stable`（manifest 的 `branch:`，ref 的最后一段，不是 git 分支）：Flathub 给正式版的名字；`master`
+  一般表示从 git 每天构建的版本。
+- **签名**：一把只给仓库用的 Ed25519 密钥，永不过期（过期的密钥签的东西 ostree 不认），指纹
+  `B8FE97D5D51D05DA84BE4273946D64CCD6168D33`。公钥 `packaging/linux/catmail-flatpak.gpg`，私钥在 `release`
+  environment 的 `FLATPAK_GPG_PRIVATE_KEY`，另有离线备份和吊销证书。不用个人密钥：私钥要放进 CI，公钥又写死在
+  每个装好的 app 里，flatpak 没有自动换密钥的机制，它的生命周期要和个人密钥分开。没有密码：密码只能存在同一个
+  environment 里，不多一层保护。提交和 summary 都签名。
+- **增量**：仓库留每个 ref 的最新版本和它之前的三个（`--prune-depth=3`），从这三个各有一个静态增量；更早的版本
+  逐个下载变了的对象，照样能更新。`build-update-repo --generate-static-deltas` 只出从父提交（和从零）的增量，
+  还会删掉别的增量，所以另外两个由 `ostree static-delta generate` 在它之后补上，再跑一次不带它的
+  `build-update-repo` 重建增量索引和 summary。
+- **bundle**：`build-flatpak.sh` 打的 bundle 没有签名、不带仓库地址。发布的 bundle 带 `--repo-url` 和
+  `--gpg-keys`，装上后 flatpak 加一个 `catmail-origin` remote，从仓库更新；带了密钥，flatpak 就要求 bundle 里的
+  提交有它的签名，所以它只能从签好名的仓库里打。
+- `packaging/linux/net.yangkx.catmail.flatpakrepo`（加 remote）和 `.flatpakref`（装应用）放在仓库旁边。仓库的
+  地址、标题和 runtime 的来源，脚本都从这两个文件读（`packaging/linux/manifest.sh` 读它们和 manifest 的 id、
+  分支，两个脚本共用）；`tests/packaging.rs` 核对它们和 manifest 的分支、彼此的地址、公钥文件一致。
+- AppStream 元数据的 `<releases>` 由发布流程写入（见下面的"发布"），GNOME Software 和
+  `flatpak remote-ls --columns=version` 显示的版本号来自它。
+
+`packaging/linux/update-flatpak-repo.sh <仓库目录> <bundle>...` 做上面这些，本地和 CI 都用它。每个 bundle 的提交
+用 `build-commit-from` 接到仓库里同一个 ref 上：新提交的父提交是上一个版本，增量和修剪都沿着这条链；内容和上一个
+提交一样时不加提交，重跑是安全的。发布的 bundle 输出到 `target/flatpak/signed/`。最后它像装好的 app 那样加一个
+remote，检查签名，以及每个架构的 ref 都指向本地仓库里的那个提交；版本号来自各架构的 AppStream 数据，flatpak
+只加载本机架构的那份，所以只检查本机架构显示的是 metainfo 里最新的那条。`--check <仓库目录>` 对发布出去的仓库
+做同样的检查：它提供的必须正是刚传上去的。`--test-key` 用一把临时生成的密钥签名，`CATMAIL_FLATPAK_URL` 换 bundle 里的仓库地址（`file://` 的本地
+目录），这样在本地就能试整个更新流程。
 
 留下的约定：
 
@@ -190,15 +234,27 @@ workflow 建一个临时钥匙串，导入 `.p12` 和它链到的中间证书 De
 - 在 main 上手动运行（`gh workflow run release.yml`，可加 `-f version=0.2.0`）就是发布。`version` job
   定版本：不填就是当前版本的下一个 patch；填了就用它（`X.Y.Z`，可带 `v`），不能比当前旧，标签不能已存在；
   填当前版本则不改版本，直接发布（第一次发布 0.1.0 用这个）。它改 `[workspace.package]` 的 `version`
-  （所有 crate 都继承它），`cargo update --workspace` 只更新 `Cargo.lock` 里的工作区 crate，提交
+  （所有 crate 都继承它），`cargo update --workspace` 只更新 `Cargo.lock` 里的工作区 crate，在 AppStream
+  元数据的 `<releases>` 最前面加一条这个版本和当天的日期（已有这个版本时不加），提交
   "Release v<版本>"，打附注标签，用 `git push --atomic` 把提交和标签一起推上去：运行期间 main 有新提交
   时两者都不推，重新运行即可。
 - 然后从这个标签构建：`ubuntu-22.04` 和 `ubuntu-22.04-arm` 上各一份 CLI tar.gz，`ubuntu-24.04` 和
-  `ubuntu-24.04-arm` 上各一份 Flatpak bundle（先关掉 AppArmor 对非特权 user namespace 的限制，flatpak-builder
+  `ubuntu-24.04-arm` 上各一份未签名的 Flatpak bundle（先关掉 AppArmor 对非特权 user namespace 的限制，flatpak-builder
   的 bwrap 要用），
   `macos-26` 上一份签名、公证过的磁盘映像和 CLI tar.gz（要用 macOS 26 以上的 SDK 链接，窗口才是新系统的样式），
-  以及 Sparkle 的更新包、增量包和 `appcast.xml`，最后创建 GitHub release（附 `SHA256SUMS`）。
-  任何一个平台失败都不发布。
+  以及 Sparkle 的更新包、增量包和 `appcast.xml`。所有平台都构建成功后，`flatpak-repo` job 更新 Flatpak 仓库，
+  最后创建 GitHub release（附 `SHA256SUMS`）。任何一个平台失败都不发布。
+- **Flatpak 仓库**（`flatpak-repo` job，`release` environment）：
+  - 用 `aws s3 sync` 把 R2 上的仓库整个拉下来（`R2_ACCESS_KEY_ID`、`R2_SECRET_ACCESS_KEY`、`R2_ENDPOINT`，
+    一个只能读写 `catmail` bucket 对象的 Account API token），导入 `FLATPAK_GPG_PRIVATE_KEY`，对两个架构的
+    bundle 跑 `update-flatpak-repo.sh`，再用 `--check` 经 CDN 检查。
+  - 分几遍传回去，客户端任何时候读到的 summary 指向的东西都在，中途失败后重跑也能接上：先传 `config`（没有它，
+    重跑拉下来的就不是仓库），再传组成新提交的对象、增量和索引，再传 `refs/`、`summary*`，最后才删修剪掉的。
+    R2 不存空目录，拉下来的仓库缺 ostree 要打开的那几个，脚本会补上。
+  - 它在创建 release 之前：创建失败时，仓库已经比 release 页面新，重跑失败的 job 就行；反过来仓库没更新、
+    release 却发了，才是要避免的。
+  - PR 和 `build_only` 也跑它（`--test-key`，空的本地仓库），不碰 R2。
+- `publish` 只取名字以 `dist-` 开头的 artifact：构建 job 的未签名 bundle（`flatpak-build-*`）不会混进 release。
 - **增量包的旧版本**：`macos` job 构建前，从最近 100 个 release 里按版本号（不按发布时间）从高到低挑出
   三个比这次旧、带 `*-aarch64.app.zip` 的，下载给 `CATMAIL_DELTA_FROM`。还没接 Sparkle 的旧版本没有 zip，
   跳过：它们本来也不会自己更新。`build_only` 也这样挑，构建的版本已经发布过时跳过它自己。

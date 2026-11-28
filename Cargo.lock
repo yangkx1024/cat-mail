@@ -622,6 +622,7 @@ dependencies = [
 name = "catmail-frontend"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "catmail-core",
  "catmail-mcp",
  "directories",

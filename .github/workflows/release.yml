@@ -92,6 +92,16 @@ jobs:
           pkgid=$(cargo pkgid -p catmail-gui)
           [[ ${pkgid##*[#@]} == "$version" ]] || die "Cargo.toml still says ${pkgid##*[#@]}"
 
+          # The AppStream release, newest first: the version GNOME Software and
+          # `flatpak remote-ls` show for the Flatpak.
+          metainfo=packaging/linux/net.yangkx.catmail.appdata.xml
+          if ! grep -qF "<release version=\"$version\"" "$metainfo"; then
+            sed -i "/^  <releases>$/a\\    <release version=\"$version\" date=\"$(date -u +%F)\"/>" \
+              "$metainfo"
+          fi
+          newest=$(sed -n 's/^ *<release version="\([^"]*\)".*/\1/p' "$metainfo" | head -n 1)
+          [[ $newest == "$version" ]] || die "$metainfo's newest release is ${newest:-none}"
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if ! git diff --quiet; then
@@ -162,7 +172,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: linux-${{ matrix.arch }}
+          name: dist-linux-${{ matrix.arch }}
           path: target/dist/
           if-no-files-found: error
 
@@ -199,18 +209,108 @@ jobs:
           flatpak remote-add --user --if-not-exists flathub \
             https://dl.flathub.org/repo/flathub.flatpakrepo
 
+      # Not for the release (no `dist-` prefix): `flatpak-repo` makes the bundle to publish.
       - name: Flatpak bundle
         run: packaging/linux/build-flatpak.sh --no-install
 
-      - name: Collect the packages
-        run: |
-          mkdir -p target/dist
-          cp target/flatpak/*.flatpak target/dist/
-
       - uses: actions/upload-artifact@v7
         with:
-          name: flatpak-${{ matrix.arch }}
-          path: target/dist/
+          name: flatpak-build-${{ matrix.arch }}
+          path: target/flatpak/*.flatpak
+          if-no-files-found: error
+
+  # The Flatpak repository installs update from (on R2): only once every package built,
+  # and before the release is created, as it is what users get. Pull requests and
+  # build-only runs try it on an empty local repository, signed with a key made for the run.
+  flatpak-repo:
+    name: Linux Flatpak repository
+    needs: [version, linux, flatpak, macos]
+    runs-on: ubuntu-24.04
+    environment: ${{ needs.version.outputs.ref != '' && 'release' || '' }}
+    env:
+      RELEASE: ${{ needs.version.outputs.ref != '' }}
+      # The bucket R2_* reach, and the repository in it: the path of the .flatpakrepo's Url.
+      # The keys themselves only go to the two steps that use them.
+      REMOTE: s3://catmail/flatpak/
+      AWS_DEFAULT_REGION: auto
+      # R2 doesn't take every checksum newer AWS CLIs send by default.
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.version.outputs.ref }}
+
+      - name: Flatpak tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak ostree
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: flatpak-build-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/bundles
+
+      - name: Signing key
+        if: env.RELEASE == 'true'
+        env:
+          FLATPAK_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+        run: |
+          [[ -n $FLATPAK_GPG_PRIVATE_KEY ]] || { echo "error: no FLATPAK_GPG_PRIVATE_KEY" >&2; exit 1; }
+          export GNUPGHOME=$RUNNER_TEMP/gnupg
+          mkdir -m 700 "$GNUPGHOME"
+          printf '%s\n' "$FLATPAK_GPG_PRIVATE_KEY" | gpg --batch --import
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+
+      # The whole repository: a few versions of each arch, and their deltas.
+      - name: Download the repository
+        if: env.RELEASE == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT }}
+        run: aws s3 sync --no-progress "$REMOTE" "$RUNNER_TEMP/repo"
+
+      - name: Update the repository
+        run: |
+          test_key=()
+          [[ $RELEASE == true ]] || test_key=(--test-key)
+          packaging/linux/update-flatpak-repo.sh "${test_key[@]}" "$RUNNER_TEMP/repo" \
+            "$RUNNER_TEMP"/bundles/*.flatpak
+
+      # In passes, so a client never reads a summary that points at something not there
+      # yet or already deleted, and a re-run after a failed pass can take up what's there:
+      # the config first (without it a re-run finds no repository), then what the new
+      # commits are made of, then what names them (refs, summary), then the deletions.
+      # A client checks summary.idx against a signature named by its digest, under
+      # summaries/ and so already there; only flatpak before 1.9, which reads summary and
+      # summary.sig, can get the two from either side of the upload for a moment.
+      - name: Upload the repository
+        if: env.RELEASE == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT }}
+        run: |
+          repo=$RUNNER_TEMP/repo
+          aws s3 cp --no-progress "$repo/config" "${REMOTE}config"
+          # tmp/ is ostree's scratch space, not part of what it serves.
+          sync=(aws s3 sync --no-progress --exclude 'tmp/*' "$repo" "$REMOTE")
+          "${sync[@]}" --exclude 'refs/*' --exclude 'summary*'
+          "${sync[@]}"
+          "${sync[@]}" --delete
+
+      # Through the CDN, as an installed app sees it: it offers what was just uploaded.
+      - name: Check the repository
+        if: env.RELEASE == 'true'
+        run: packaging/linux/update-flatpak-repo.sh --check "$RUNNER_TEMP/repo"
+
+      - uses: actions/upload-artifact@v7
+        if: env.RELEASE == 'true'
+        with:
+          name: dist-flatpak
+          path: target/flatpak/signed/*.flatpak
           if-no-files-found: error
 
   macos:
@@ -374,20 +474,22 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: macos-aarch64
+          name: dist-macos-aarch64
           path: target/dist/
           if-no-files-found: error
 
   publish:
     name: Publish
     if: needs.version.outputs.ref != ''
-    needs: [version, linux, flatpak, macos]
+    needs: [version, linux, flatpak-repo, macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      # What a job made for the release: `dist-*`, not intermediate artifacts.
       - uses: actions/download-artifact@v8
         with:
+          pattern: dist-*
           merge-multiple: true
           path: dist
 
