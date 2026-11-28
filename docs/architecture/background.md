@@ -317,7 +317,8 @@ GUI 的 `system/tray/` 在引擎打开时启动，有窗口时、常驻时都在
 
 ## 退出
 
-退出由外壳一处决定（`shell::quit`；Ctrl Q、托盘的 Quit、macOS 应用菜单和 Dock 的 Quit、Sparkle 安装更新、信号都调用它）：
+退出由外壳一处决定（`shell::quit`；Ctrl Q、托盘的 Quit、macOS 应用菜单和 Dock 的 Quit、Sparkle 安装更新、Flatpak
+更新后的重启、信号都调用它）：
 
 - 记下退出原因，让每个写信窗口走关闭流程、存下最后的输入（`OpenComposers::close_all`）。全部关掉了就关掉所有窗口，
   应用随最后一个窗口结束（没有窗口时立即结束）；有一个关不了（地址要改、保存或附件失败）就取消退出，那个窗口
@@ -326,7 +327,7 @@ GUI 的 `system/tray/` 在引擎打开时启动，有窗口时、常驻时都在
 - 写信窗口只回答"关不关得了"，不知道退出：起初退出状态放在写信窗口模块里，由最后一个关掉的写信窗口让应用退出，
   退出的决定分在两处，以后加入口（托盘）或退出前的确认都得改两边。
 - 收尾时记一行 `quitting reason=…`（`QuitReason`：`shortcut`、`tray`、`signal`、`last_window_closed`、
-  `engine_failed`、`no_window`；没记原因的是平台自己的退出，记 `platform`），以前日志只是停住，分不清正常退出和
+  `engine_failed`、`no_window`、`update`；没记原因的是平台自己的退出，记 `platform`），以前日志只是停住，分不清正常退出和
   进程被杀、崩溃。
 - macOS 上每次退出都以 AppKit 的 `terminate:` 结束：AppKit 发 `applicationWillTerminate:` 后自己结束进程，`run`
   不返回，所以收尾都在那里（`shell::finish`），只有这一处。
@@ -347,6 +348,46 @@ GUI 的 `system/tray/` 在引擎打开时启动，有窗口时、常驻时都在
   没有别的事。最多等 2 秒（`ENGINE_CLOSING`；平时不到 1 ms），到时间记 `the engine didn't close in time` 直接退出：
   引擎里一次卡住的写入不能让进程退不出去，会话结束时系统等的就是它。数据库留下的样子同进程被杀一样，下次打开时
   SQLite 自己恢复。GPUI 版同样有上限，是 GPUI 给退出回调的 `SHUTDOWN_TIMEOUT`。
+
+## 更新（Flatpak）
+
+macOS 由 Sparkle 更新（见[打包](packaging.md)）。Linux 的 Flatpak 从 catmail 自己的仓库更新，应用里经 Flatpak
+portal（`org.freedesktop.portal.Flatpak`，flatpak 1.5 起，每个 Flatpak 应用都能调，不用加权限）：
+
+- **监视器**（frontend 的 `system::update`）：启动时就起，引擎没打开也起，只在 Flatpak 里。一个线程上用 zbus 建
+  `UpdateMonitor`，一直留到进程结束；portal 离开总线（崩溃、重启）时，过一分钟再建一个（调用会把它重新拉起来）。
+  建不起来（太老的 flatpak、不在 Flatpak 的进程）就不再试，记一行日志。
+  - portal 自己定检查时间：每半小时查一次 remote（`--poll-timeout`），第一次在第一个监视器建好半小时后，计量网络
+    上跳过。没有"立即检查"：新建一个监视器也不会提前查，所以应用不提供"检查更新"的入口。
+  - `UpdateAvailable` 带三个提交：正在跑的、装着的（重启后跑的）、仓库里的。仓库的和装着的不同就是有新版本；只有装着的
+    和正在跑的不同，就是已经在后台装好了（软件中心自动更新的），只差重启。
+  - `Update()` 立即返回，之后由 `Progress` 信号说进展：进行中（第几个操作、百分比）、没有要装的、装好、失败。
+    第一次 portal 会弹自己的对话框问用户让不让应用更新自己，记住答复；不让，以后都失败于 `AccessDenied`。新版本要
+    更多权限时失败于 `NotSupported`。弹不出对话框时也失败：flatpak-portal 不读 `portals.conf`，只在自己安装前缀下的
+    `share/xdg-desktop-portal/portals` 里按 `XDG_CURRENT_DESKTOP` 找 Access 的实现，找不到就随便用一个；一个都没有是
+    `NotSupported`，用到的那个依赖别的桌面（比如 GNOME 的要 GNOME Shell）是 `ServiceUnknown`。这几种都只能用
+    软件中心或 `flatpak update`，不再给"更新"按钮；其余的失败可以再点，提示里是 portal 的话（去掉 GLib 加在前面的
+    D-Bus 错误名）。
+  - 系统级安装也不用输密码：flatpak 的 polkit 规则 `org.freedesktop.Flatpak.app-update` 对当前活动会话直接放行
+    （提交签了名）。
+  - 状态是 `Update`：有新版本、更新中（百分比）、已装好、失败（软件中心才行、不被允许、其他）。`Tracker` 把 portal
+    的信号变成它；有没有按钮、按钮上写什么（`Update::button`）、通知说什么（`Update::notice`）也在 frontend。这些
+    和平台无关，单测覆盖；portal 的那一层用测试自己的总线上的假 portal 测（发现、安装、失败、portal
+    重启后重建监视器、`Spawn` 的参数）。
+- **提示**（`catmail-gui`）：
+  - 主窗口侧栏底部那一行的最后：有新版本时一个"Install update"按钮；更新中换成转圈和"Updating 40%"，点不了；装好后是
+    "Restart to update"。失败时弹一个 toast 说为什么。不另开对话框或横幅：更新不急，侧栏底部本来就是放全局状态的
+    地方（连接问题也在那里）。
+  - 主窗口没开（常驻、只开着写信窗口）时，有新版本或已装好各发一条系统通知（GLib 的，和新邮件的一样），点了打开主
+    窗口。开始安装、失败或没有更新时撤掉。
+  - 通知和按钮都不写版本号：portal 只给提交，沙箱里读不到 AppStream 数据。
+- **重启**：按"Restart to update"走正常的退出路径（`shell::quit_then`，原因 `update`）：写信窗口先存好，有一个关不了
+  就和别的退出一样取消，更新留着，按钮还在。能退出时，应用停止应答后来的启动，等引擎关闭之后（`shell::finish` 最后
+  跑 `quit_then` 给的那一步；退出取消或第二个信号时丢掉它）才调 portal 的 `Spawn`，带 `FLATPAK_SPAWN_FLAGS_LATEST_VERSION`，起 `catmail-gui`，带上应用读的环境变量（`CATMAIL_*`、
+  `RUST_LOG`），这样数据目录、设置和日志都和原来一样。新进程是 portal 的子进程，不随旧的结束；它连上实例套接字时
+  旧进程答"正在退出"，就等旧进程放开数据目录再接手（[单实例与唤起](#单实例与唤起)）。`Spawn` 失败时应用照样退出，
+  记一行 error：这时已经停止应答，没法再回到运行状态。
+  - 重启总是从主窗口按的，所以新实例打开窗口，不带 `--background`。
 
 ## 开机启动
 

@@ -14,6 +14,7 @@ pub mod panes;
 mod picker;
 mod reader;
 pub mod sidebar;
+mod update;
 
 use std::cell::RefCell;
 use std::rc::Rc;

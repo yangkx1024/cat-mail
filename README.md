@@ -41,7 +41,7 @@
 从 [GitHub Releases](https://github.com/yangkx1024/cat-mail/releases/latest) 下载：
 
 - **Linux（x86_64、aarch64）**
-  - 图形界面：运行 `flatpak install --user https://catmail.yangkx.net/flatpak/net.yangkx.catmail.flatpakref` 安装，之后随 `flatpak update` 和软件中心自动更新（缺的 GNOME runtime 会从 Flathub 自动安装）。也可以下载 `catmail-<版本>-<架构>.flatpak`，用 `flatpak install --user` 安装，同样会自动更新。命令行一并打在包里：`flatpak run --command=catmail net.yangkx.catmail`。
+  - 图形界面：运行 `flatpak install --user https://catmail.yangkx.net/flatpak/net.yangkx.catmail.flatpakref` 安装，之后随 `flatpak update` 和软件中心自动更新，应用里也会提示新版本、一键更新并重启（缺的 GNOME runtime 会从 Flathub 自动安装）。也可以下载 `catmail-<版本>-<架构>.flatpak`，用 `flatpak install --user` 安装，同样会自动更新。命令行一并打在包里：`flatpak run --command=catmail net.yangkx.catmail`。
   - 命令行：`catmail-<版本>-<架构>-linux.tar.gz`（需 glibc 2.35 及以上，即 Ubuntu 22.04 及之后的发行版）。
   - 密码存储需要 Secret Service 提供者（如 `gnome-keyring`、KeePassXC）。
 - **macOS（Apple 芯片，macOS 12 及以上，已签名并公证）**

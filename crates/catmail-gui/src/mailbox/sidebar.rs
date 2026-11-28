@@ -28,6 +28,7 @@ use crate::icons::{Icon, icon};
 use crate::mailbox::compose;
 use crate::mailbox::folder_commands::{folder_menu, rename_selected};
 use crate::mailbox::listing::{self, SelectedPlace};
+use crate::mailbox::update::update_button;
 use crate::motion;
 use crate::shell::tasks::in_view;
 use crate::toast::report;
@@ -284,7 +285,8 @@ pub fn sidebar() -> impl IntoElement {
                         // All of it, when the line is cut short: every address that can't
                         // send, say.
                         .tooltip(tooltip(move || note.get().unwrap_or_default())),
-                ),
+                )
+                .child(update_button()),
         )
 }
 

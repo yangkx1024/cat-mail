@@ -17,6 +17,8 @@ pub enum QuitReason {
     EngineFailed,
     /// The main window couldn't be opened at launch.
     NoWindow,
+    /// To start the update installed (the Flatpak's).
+    Update,
     /// Not by the app: the platform's own Quit (macOS's app menu or Dock).
     Platform,
 }
@@ -30,6 +32,7 @@ impl fmt::Display for QuitReason {
             Self::LastWindowClosed => "last_window_closed",
             Self::EngineFailed => "engine_failed",
             Self::NoWindow => "no_window",
+            Self::Update => "update",
             Self::Platform => "platform",
         })
     }

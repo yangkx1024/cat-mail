@@ -74,10 +74,12 @@ fn main() -> anyhow::Result<std::process::ExitCode> {
     let parts = shell::Parts {
         main_window: nsh_platform::Root::of::<mailbox::App>,
         // Before the app has finished launching: a notification clicked to launch it is
-        // heard.
+        // heard. Updates are watched with the engine open or not.
         launching: || {
             #[cfg(target_os = "macos")]
             system::new_mail::install();
+            #[cfg(target_os = "linux")]
+            system::update::start();
         },
         // The tray and the notifications follow the engine, and it hears of wakes.
         engine_opened: || {

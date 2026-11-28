@@ -77,17 +77,29 @@ pub fn busy_icon_button(
     press: impl Fn() + 'static,
 ) -> View {
     let active = move || enabled() && !busy();
-    button_box(name, active, enabled, size, press).child(dynamic(move || {
-        if busy() {
-            spinner(size.icon_size() - 2.0)
+    button_box(name, active, enabled, size, press).child(busy_glyph(which, busy, size.icon_size()))
+}
+
+/// `which`, `size` points, or the spinner a little smaller in its place while `busy`.
+/// Made again only when `busy` turns, not when what it reads otherwise changes.
+fn busy_glyph(
+    which: impl Fn() -> Icon + Copy + 'static,
+    busy: impl Fn() -> bool + Copy + 'static,
+    size: f32,
+) -> AnyElement {
+    let busy = computed(busy);
+    dynamic(move || {
+        if busy.get() {
+            spinner(size - 2.0)
                 .text_color(move || theme().muted_foreground)
                 .into_element()
         } else {
-            icon(which, size.icon_size())
+            icon(which, size)
                 .text_color(move || theme().foreground)
                 .into_element()
         }
-    }))
+    })
+    .into_element()
 }
 
 /// An icon button's box, without the icon: it does `press` while `active`, and is dimmed
@@ -252,6 +264,40 @@ pub fn labelled_button(
     enabled: impl Fn() -> bool + Copy + 'static,
     press: impl Fn() + 'static,
 ) -> impl IntoElement {
+    labelled_box(
+        move || SharedString::from(label),
+        outlined,
+        enabled,
+        enabled,
+        press,
+    )
+    .child(icon(move || glyph, 15.0).text_color(move || theme().foreground))
+    .child(label_text(move || SharedString::from(label)))
+}
+
+/// A [`labelled_button`] whose icon and label change, which shows the spinner in place of
+/// its icon while `busy`: it does nothing then, but isn't dimmed, the spinner saying why.
+pub fn busy_labelled_button(
+    glyph: impl Fn() -> Icon + Copy + 'static,
+    label: impl Fn() -> String + Copy + 'static,
+    busy: impl Fn() -> bool + Copy + 'static,
+    press: impl Fn() + 'static,
+) -> View {
+    let label = move || SharedString::from(label());
+    labelled_box(label, true, move || !busy(), || true, press)
+        .child(busy_glyph(glyph, busy, 15.0))
+        .child(label_text(label))
+}
+
+/// A labelled button's box, without its icon and label: it does `press` while `active`,
+/// and is dimmed unless `lit`.
+fn labelled_box(
+    label: impl Fn() -> SharedString + 'static,
+    outlined: bool,
+    active: impl Fn() -> bool + Copy + 'static,
+    lit: impl Fn() -> bool + 'static,
+    press: impl Fn() + 'static,
+) -> View {
     view()
         .flex_row()
         .items_center()
@@ -269,27 +315,27 @@ pub fn labelled_button(
         })
         .hover(move |s| {
             s.bg(move || {
-                if enabled() {
+                if active() {
                     theme().accent
                 } else {
                     AdaptiveColor::TRANSPARENT
                 }
             })
         })
-        .opacity(move || if enabled() { 1.0_f32 } else { 0.5 })
+        .opacity(move || if lit() { 1.0_f32 } else { 0.5 })
         .label(label)
         .on_press(move || {
-            if untracked(enabled) {
+            if untracked(active) {
                 press();
             }
         })
-        .child(icon(move || glyph, 15.0).text_color(move || theme().foreground))
-        .child(
-            text(label)
-                .text_sm()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(move || theme().foreground),
-        )
+}
+
+fn label_text(label: impl Fn() -> SharedString + 'static) -> Text {
+    text(label)
+        .text_sm()
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(move || theme().foreground)
 }
 
 /// An item of a sidebar menu, the mailbox's or the settings'. Selected, the icon fills
