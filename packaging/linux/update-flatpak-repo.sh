@@ -106,6 +106,8 @@ if [[ ! -e $repo/config ]]; then
   [[ -z $(ls -A "$repo") ]] || die "$repo is neither a repository nor empty"
   ostree init --repo="$repo" --mode=archive-z2
 fi
+# The empty directories ostree opens, which a copy through object storage (R2) lacks.
+mkdir -p "$repo"/refs/{heads,remotes,mirrors} "$repo"/{tmp,state,extensions}
 out=$root/target/flatpak/signed
 rm -rf "$out"
 mkdir -p "$out"

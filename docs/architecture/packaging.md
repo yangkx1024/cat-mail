@@ -73,9 +73,10 @@ bundle（`--no-install` 只打 bundle，它不会更新，发布用的见下面�
   转发规则照旧，见下面的"自动更新"）。和 appcast 一样，只有地址写死在装好的 app 里（remote 的配置），所以用自己
   的域名。OSTree 仓库是一个目录，里面是按内容寻址的大量小文件，GitHub release 放不下。
 - **缓存**（Cloudflare 的 Cache Rules，按顺序）：`/flatpak/` 下一律不缓存，`summary`、`summary.idx`、`config`、
-  `refs/`、`delta-indexes/` 每次发布都会变；之后一条让 `objects/`、`deltas/`、`summaries/` 在边缘缓存一年，它们
-  按内容命名，生成后不变。但 400–599 的响应不缓存：一个对象在上传完之前被请求过一次，它的 404 就会留一年，
-  文件已经在 R2 里，客户端却拿不到。
+  `refs/`、`delta-indexes/` 每次发布都会变；之后一条让 `objects/`、`summaries/` 在边缘缓存一年，它们按内容命名，
+  生成后不变。但 400–599 的响应不缓存：一个对象在上传完之前被请求过一次，它的 404 就会留一年，文件已经在 R2
+  里，客户端却拿不到。`deltas/` 不缓存：路径只由两端的提交决定，同一个增量再生成一次（重跑同一个版本时，补的
+  那两个会重新生成）字节不同，缓存着的旧 superblock 就和新的对不上。
 - **分支** `stable`（manifest 的 `branch:`，ref 的最后一段，不是 git 分支）：Flathub 给正式版的名字；`master`
   一般表示从 git 每天构建的版本。
 - **签名**：一把只给仓库用的 Ed25519 密钥，永不过期（过期的密钥签的东西 ostree 不认），指纹
@@ -247,8 +248,9 @@ workflow 建一个临时钥匙串，导入 `.p12` 和它链到的中间证书 De
   - 用 `aws s3 sync` 把 R2 上的仓库整个拉下来（`R2_ACCESS_KEY_ID`、`R2_SECRET_ACCESS_KEY`、`R2_ENDPOINT`，
     一个只能读写 `catmail` bucket 对象的 Account API token），导入 `FLATPAK_GPG_PRIVATE_KEY`，对两个架构的
     bundle 跑 `update-flatpak-repo.sh`，再用 `--check` 经 CDN 检查。
-  - 分三遍传回去，客户端任何时候读到的 summary 指向的东西都在：先传组成新提交的对象、增量和索引，再传
-    `refs/`、`summary*`、`config`，最后才删修剪掉的。
+  - 分几遍传回去，客户端任何时候读到的 summary 指向的东西都在，中途失败后重跑也能接上：先传 `config`（没有它，
+    重跑拉下来的就不是仓库），再传组成新提交的对象、增量和索引，再传 `refs/`、`summary*`，最后才删修剪掉的。
+    R2 不存空目录，拉下来的仓库缺 ostree 要打开的那几个，脚本会补上。
   - 它在创建 release 之前：创建失败时，仓库已经比 release 页面新，重跑失败的 job 就行；反过来仓库没更新、
     release 却发了，才是要避免的。
   - PR 和 `build_only` 也跑它（`--test-key`，空的本地仓库），不碰 R2。
