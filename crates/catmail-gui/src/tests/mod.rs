@@ -9,6 +9,7 @@
 mod folders;
 mod reading;
 mod settings;
+mod updates;
 mod writing;
 
 use std::sync::Arc;

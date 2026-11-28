@@ -14,12 +14,11 @@ use std::path::{Path, PathBuf};
 
 use futures_util::StreamExt as _;
 use futures_util::future::{Either, select};
-use zbus::Proxy;
 use zbus::blocking::Connection;
-use zbus::proxy::{Builder, CacheProperties};
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
 use super::{CONFIG_DIR, Error, State};
+use crate::system::portal_bus;
 
 const DESKTOP: &str = "org.freedesktop.portal.Desktop";
 const DESKTOP_PATH: &str = "/org/freedesktop/portal/desktop";
@@ -106,8 +105,7 @@ fn keep(record: &Path, entry: bool) -> std::io::Result<()> {
 
 /// The request object the portal answers the caller `sender` (its unique name) on.
 fn request_path(sender: &str, token: &str) -> String {
-    let sender = sender.trim_start_matches(':').replace('.', "_");
-    format!("{DESKTOP_PATH}/request/{sender}/{token}")
+    portal_bus::handle_path(&format!("{DESKTOP_PATH}/request"), sender, token)
 }
 
 /// Asks the portal for the entry (`on`) or for its removal: whether the entry is there
@@ -118,17 +116,20 @@ fn request(bus: &Connection, on: bool) -> zbus::Result<Option<bool>> {
 }
 
 async fn request_on(bus: &zbus::Connection, on: bool) -> zbus::Result<Option<bool>> {
-    let sender = bus
-        .unique_name()
-        .ok_or_else(|| zbus::Error::Failure("no name on the session bus".into()))?;
     // The answer comes as a signal from a request object named after the caller and the
     // token: listened to before asking, lest it come before the call returns.
-    let path = request_path(sender, TOKEN);
-    let mut answers = proxy(bus, &path, "org.freedesktop.portal.Request")
+    let path = request_path(&portal_bus::unique_name(bus)?, TOKEN);
+    let mut answers = portal_bus::proxy(bus, DESKTOP, &path, "org.freedesktop.portal.Request")
         .await?
         .receive_signal("Response")
         .await?;
-    let portal = proxy(bus, DESKTOP_PATH, "org.freedesktop.portal.Background").await?;
+    let portal = portal_bus::proxy(
+        bus,
+        DESKTOP,
+        DESKTOP_PATH,
+        "org.freedesktop.portal.Background",
+    )
+    .await?;
     let options = HashMap::from([
         ("handle_token", Value::from(TOKEN)),
         ("reason", Value::from(REASON)),
@@ -151,29 +152,8 @@ async fn request_on(bus: &zbus::Connection, on: bool) -> zbus::Result<Option<boo
             handle.as_str()
         )));
     }
-    // A portal that leaves the bus (crashed, restarted) knows nothing of the request any
-    // more, and the answer would never come. Watched by the unique name of the one that
-    // took it: the well-known name also changes hands when the bus starts the portal for
-    // the call, which is no leaving.
-    let taker = reply
-        .header()
-        .sender()
-        .ok_or_else(|| zbus::Error::Failure("the portal's reply has no sender".into()))?
-        .to_owned();
-    let names = zbus::fdo::DBusProxy::builder(bus)
-        .cache_properties(CacheProperties::No)
-        .build()
-        .await?;
-    let mut gone = names
-        .receive_name_owner_changed_with_args(&[(0, taker.as_str())])
-        .await?;
-    // It may have left before that listened.
-    if !names.name_has_owner(taker.clone().into()).await? {
-        return Err(zbus::Error::Failure(
-            "the portal left without answering".into(),
-        ));
-    }
-    let answer = match select(answers.next(), gone.next()).await {
+    let gone = portal_bus::left(bus, &reply).await?;
+    let answer = match select(answers.next(), gone).await {
         Either::Left((Some(answer), _)) => answer,
         _ => {
             return Err(zbus::Error::Failure(
@@ -196,102 +176,13 @@ async fn request_on(bus: &zbus::Connection, on: bool) -> zbus::Result<Option<boo
     }
 }
 
-async fn proxy<'a>(
-    bus: &zbus::Connection,
-    path: &'a str,
-    interface: &'a str,
-) -> zbus::Result<Proxy<'a>> {
-    Builder::new(bus)
-        .destination(DESKTOP)?
-        .path(path)?
-        .interface(interface)?
-        .cache_properties(CacheProperties::No)
-        .build()
-        .await
-}
-
 #[cfg(test)]
 mod tests {
-    use std::io::{BufRead as _, BufReader};
-    use std::process::{Child, Command, Stdio};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use super::*;
-
-    /// A session bus of the test's own, which starts nothing but `portal`: this test
-    /// binary running that test (ignored, so only the bus runs it), as the bus starts
-    /// xdg-desktop-portal when nobody runs it yet.
-    struct Bus {
-        daemon: Child,
-        address: String,
-        _dir: tempfile::TempDir,
-    }
-
-    impl Bus {
-        fn start() -> Self {
-            Self::starting(None)
-        }
-
-        fn starting(portal: Option<&str>) -> Self {
-            let dir = tempfile::tempdir().unwrap();
-            let services = dir.path().join("services");
-            std::fs::create_dir(&services).unwrap();
-            if let Some(test) = portal {
-                let exe = std::env::current_exe().unwrap();
-                // The test's name as libtest has it: its path without the crate's name.
-                let (_, tests) = module_path!().split_once("::").unwrap();
-                let service = format!(
-                    "[D-BUS Service]\nName={DESKTOP}\nExec={} --exact \
-                     {tests}::{test} --ignored --test-threads=1\n",
-                    exe.display()
-                );
-                std::fs::write(services.join(format!("{DESKTOP}.service")), service).unwrap();
-            }
-            let config = dir.path().join("bus.conf");
-            std::fs::write(
-                &config,
-                format!(
-                    "<busconfig><type>session</type><listen>unix:dir={}</listen>\
-                     <auth>EXTERNAL</auth><servicedir>{}</servicedir>\
-                     <policy context=\"default\">\
-                     <allow send_destination=\"*\" eavesdrop=\"true\"/>\
-                     <allow eavesdrop=\"true\"/><allow own=\"*\"/></policy></busconfig>",
-                    dir.path().display(),
-                    services.display()
-                ),
-            )
-            .unwrap();
-            let mut daemon = Command::new("dbus-daemon")
-                .arg(format!("--config-file={}", config.display()))
-                .args(["--nofork", "--print-address=1"])
-                .stdout(Stdio::piped())
-                .spawn()
-                .expect("dbus-daemon");
-            let mut output = BufReader::new(daemon.stdout.take().unwrap());
-            let mut address = String::new();
-            output.read_line(&mut address).unwrap();
-            let address = address.trim().to_owned();
-            // The portal it starts prints there too, also after the test: read to its end.
-            std::thread::spawn(move || std::io::copy(&mut output, &mut std::io::sink()));
-            Self {
-                daemon,
-                address,
-                _dir: dir,
-            }
-        }
-
-        fn connection(&self) -> zbus::blocking::connection::Builder<'_> {
-            zbus::blocking::connection::Builder::address(self.address.as_str()).unwrap()
-        }
-    }
-
-    impl Drop for Bus {
-        fn drop(&mut self) {
-            let _ = self.daemon.kill();
-            let _ = self.daemon.wait();
-        }
-    }
+    use crate::system::test_bus::Bus;
 
     /// What the portal does with every request.
     #[derive(Clone, Copy)]
@@ -473,7 +364,7 @@ mod tests {
 
     /// Turns it on against the portal the bus starts for it, `portal`.
     fn ask_started(portal: &str, record: &Path) -> (State, Result<(), Error>) {
-        let bus = Bus::starting(Some(portal));
+        let bus = Bus::serving(DESKTOP, module_path!(), portal);
         settle(
             record,
             true,

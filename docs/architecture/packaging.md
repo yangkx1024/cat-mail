@@ -2,9 +2,8 @@
 
 [← 架构](../architecture.md)
 
-> 状态：macOS 的磁盘映像（Apple 芯片）、Linux 的 Flatpak（自己的仓库，能自动更新）和 Linux、macOS 的 CLI tar.gz
-> 已实现；Flatpak 的应用内更新提示（[#406](https://github.com/yangkx1024/cat-mail/issues/406) 第 4 步）和 Windows
-> 的打包是 M6 余下的部分。
+> 状态：macOS 的磁盘映像（Apple 芯片）、Linux 的 Flatpak（自己的仓库，能自动更新，应用里提示更新）和 Linux、macOS
+> 的 CLI tar.gz 已实现；Windows 的打包是 M6 余下的部分。
 
 ## Linux
 
@@ -96,6 +95,7 @@ bundle（`--no-install` 只打 bundle，它不会更新，发布用的见下面�
   分支，两个脚本共用）；`tests/packaging.rs` 核对它们和 manifest 的分支、彼此的地址、公钥文件一致。
 - AppStream 元数据的 `<releases>` 由发布流程写入（见下面的"发布"），GNOME Software 和
   `flatpak remote-ls --columns=version` 显示的版本号来自它。
+- 应用自己经 Flatpak portal 发现和安装更新，再重启到新版本：见[后台运行](background.md#更新flatpak)。
 
 `packaging/linux/update-flatpak-repo.sh <仓库目录> <bundle>...` 做上面这些，本地和 CI 都用它。每个 bundle 的提交
 用 `build-commit-from` 接到仓库里同一个 ref 上：新提交的父提交是上一个版本，增量和修剪都沿着这条链；内容和上一个

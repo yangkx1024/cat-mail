@@ -302,6 +302,9 @@ thread_local! {
     static COMPOSERS: RefCell<OpenComposers<ComposerWindow>> = RefCell::default();
     /// Quit was asked for, and why: the composers are closing, or the app is quitting.
     static QUITTING: Cell<Option<QuitReason>> = const { Cell::new(None) };
+    /// What runs once the engine has closed, if the quit that asked for it goes through
+    /// ([`quit_then`]).
+    static THEN: Cell<Option<fn()>> = const { Cell::new(None) };
     /// The launch asked for no window (`--background`).
     static HIDDEN: Cell<bool> = const { Cell::new(false) };
     /// What later launches ask for, until the app is sure to quit ([`stop_answering`]).
@@ -399,6 +402,10 @@ fn finish() {
             // which it recovers from on opening.
             tracing::warn!(waited = ?ENGINE_CLOSING, "the engine didn't close in time, quitting without it");
         }
+    }
+    // Nothing is left to save, and later launches are told the app is quitting.
+    if let Some(then) = THEN.take() {
+        then();
     }
 }
 
@@ -501,6 +508,13 @@ fn show(activation_token: Option<&str>) {
         }
     };
     window.present(activation_token);
+}
+
+/// Whether the main window is open (shown or not), whose sidebar shows what the app
+/// has to say.
+#[cfg(target_os = "linux")]
+pub fn main_window_open() -> bool {
+    MAIN.with_borrow(Option::is_some)
 }
 
 fn main_window() -> Window {
@@ -703,9 +717,20 @@ pub fn quit(reason: QuitReason) {
         } else {
             tracing::info!(%reason, "quit called off: a composer stayed open");
             QUITTING.set(None);
+            THEN.set(None);
             toolkit::quit_called_off();
         }
     });
+}
+
+/// [`quit`]s, and once the engine has closed, `then` (on the main thread, the loop
+/// over): unless the quit is called off, or another signal cuts it short. Nothing if the
+/// app is quitting already.
+pub fn quit_then(reason: QuitReason, then: fn()) {
+    if QUITTING.get().is_none() {
+        THEN.set(Some(then));
+        quit(reason);
+    }
 }
 
 /// Quits now, for `reason`: every window closes, and the app ends with the last (at once
@@ -731,6 +756,7 @@ fn signalled(signal: &str) {
     } else {
         tracing::info!(signal, "quitting at once, on another signal");
         quitting(QuitReason::Signal);
+        THEN.set(None);
         // The views stop with their windows, while the thread's locals they use are there.
         for window in toolkit::windows() {
             window.destroy();
